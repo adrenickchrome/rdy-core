@@ -1278,6 +1278,55 @@ fn sdc5_evidence_and_briefing_bounds_are_independent() {
     assert_eq!(small.items.len() + small.omitted.values().sum::<usize>(), 2);
 }
 
+/// A dependent whose only matching literal lies past the evidence cut keeps `states` empty and
+/// asks for an update; `confirm` needs an empty `states` after a complete read (D-TKY89).
+#[test]
+fn plc6_a_literal_only_after_the_briefing_cut_keeps_states_empty() {
+    let (_d, mut r) = project();
+    let body = format!("{} 30 days.", "x".repeat(16_385));
+    let cut_at = 16_384;
+    let literal_at = body.find("30 days").unwrap();
+    assert_eq!(
+        literal_at, 16_386,
+        "the literal starts beyond the first 16384 bytes"
+    );
+    assert!(literal_at >= cut_at);
+    assert!(
+        !body[..cut_at].contains("30 days"),
+        "the checked prefix has no target literal"
+    );
+    let w = write(&mut r, "base", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "plc6", "title": "Cut", "doc_type": "page"}},
+        {"op": "create", "type": "claim", "id": "$t", "parent": "$d", "body": "Keep events for 30 days."},
+        {"op": "create", "type": "claim", "id": "$cut", "parent": "$d", "body": body,
+            "links": {"depends_on": [{"target": "$t"}]}},
+        {"op": "create", "type": "claim", "id": "$short", "parent": "$d", "body": "No duration is stated here.",
+            "links": {"depends_on": [{"target": "$t"}]}}
+    ]))
+    .unwrap();
+    land(&mut r, "base").unwrap();
+    let id = |n: &str| created(&w, n);
+    let e = Local::new(r);
+    let b = brief_in(&e, &view("w"), &[&id("$t")], None);
+    let rows = |block: &BlockId| -> Vec<Value> {
+        b["will_go_stale"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|w| w["block"] == block.to_string())
+            .cloned()
+            .collect()
+    };
+    let cut = rows(&id("$cut"));
+    assert_eq!(cut.len(), 1, "one row for the cut dependent: {b:#}");
+    assert_eq!(cut[0]["follow_up"], "update", "{}", cut[0]);
+    assert_eq!(cut[0]["states"], json!([]), "{}", cut[0]);
+    let short = rows(&id("$short"));
+    assert_eq!(short.len(), 1, "one row for the short dependent: {b:#}");
+    assert_eq!(short[0]["follow_up"], "confirm", "{}", short[0]);
+    assert_eq!(short[0]["states"], json!([]), "{}", short[0]);
+}
+
 #[test]
 fn sdc5_evidence_changes_invalidate_a_briefing_page() {
     let (_d, r, t) = tally();
