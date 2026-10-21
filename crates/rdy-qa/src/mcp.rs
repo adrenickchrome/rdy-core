@@ -434,44 +434,65 @@ impl McpClient {
         // the command holds no pipe end of the child's, but it is not needed any more
         drop(cmd);
         let pid = child.id();
+        // a worker that cannot start: the server is stopped and reaped, and the error returned
+        let abandon = |child: &mut Child, e: std::io::Error| {
+            if bound.is_some() {
+                let _ = platform::kill_process_group(pid);
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            e
+        };
+        let (Some(out), Some(mut stdin)) = (child.stdout.take(), child.stdin.take()) else {
+            let e = std::io::Error::other("the server's stdin and stdout are not piped");
+            return Err(abandon(&mut child, e));
+        };
         let (tx, rx) = channel();
         let stderr = Arc::new(Mutex::new(String::new()));
         let stderr_drain = child.stderr.take().map(|err| {
             // drained so a full pipe never blocks the child
             let sink = stderr.clone();
             let counted = bound.clone().map(|b| (b, tx.clone()));
-            std::thread::spawn(move || {
-                read_stderr(err, &sink, counted.as_ref().map(|(b, tx)| (&**b, tx)));
-            })
+            std::thread::Builder::new()
+                .name("rdy-qa-mcp-stderr".into())
+                .spawn(move || {
+                    read_stderr(err, &sink, counted.as_ref().map(|(b, tx)| (&**b, tx)));
+                })
         });
-        let Some(out) = child.stdout.take() else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(std::io::Error::other("the server's stdout is not piped"));
+        let stderr_drain = match stderr_drain.transpose() {
+            Ok(h) => h,
+            Err(e) => return Err(abandon(&mut child, e)),
         };
         let stdout = keep.then(|| Arc::new(Mutex::new(String::new())));
         let stdout_drain = {
             let (raw, bound) = (stdout.clone(), bound.clone());
-            std::thread::spawn(move || read_lines(out, &tx, raw.as_ref(), bound.as_deref()))
+            std::thread::Builder::new()
+                .name("rdy-qa-mcp-stdout".into())
+                .spawn(move || read_lines(out, &tx, raw.as_ref(), bound.as_deref()))
+        };
+        let stdout_drain = match stdout_drain {
+            Ok(h) => h,
+            Err(e) => return Err(abandon(&mut child, e)),
         };
         // stdin writes happen on their own thread so a server that stops reading cannot block us
-        let Some(mut stdin) = child.stdin.take() else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(std::io::Error::other("the server's stdin is not piped"));
-        };
         let (wtx, wrx) = channel::<String>();
         let (dtx, drx) = channel::<bool>();
-        let writer_thread = std::thread::spawn(move || {
-            for line in wrx {
-                let ok = writeln!(stdin, "{line}")
-                    .and_then(|_| stdin.flush())
-                    .is_ok();
-                if dtx.send(ok).is_err() || !ok {
-                    break;
+        let writer_thread = std::thread::Builder::new()
+            .name("rdy-qa-mcp-stdin".into())
+            .spawn(move || {
+                for line in wrx {
+                    let ok = writeln!(stdin, "{line}")
+                        .and_then(|_| stdin.flush())
+                        .is_ok();
+                    if dtx.send(ok).is_err() || !ok {
+                        break;
+                    }
                 }
-            }
-        });
+            });
+        let writer_thread = match writer_thread {
+            Ok(h) => h,
+            Err(e) => return Err(abandon(&mut child, e)),
+        };
         Ok(McpClient {
             child,
             writer: wtx,
@@ -511,7 +532,7 @@ impl McpClient {
     fn try_launch_inner(
         mut command: Command,
         max_output: usize,
-    ) -> Result<McpClient, (McpFailure, Option<McpClient>)> {
+    ) -> Result<McpClient, (McpFailure, Option<Box<McpClient>>)> {
         platform::own_process_group(&mut command);
         command.stderr(Stdio::piped());
         let bound = Arc::new(Bound {
@@ -534,7 +555,7 @@ impl McpClient {
             Ok(()) => Ok(c),
             Err(failure) => {
                 let failure = c.fail(failure);
-                Err((failure, Some(c)))
+                Err((failure, Some(Box::new(c))))
             }
         }
     }

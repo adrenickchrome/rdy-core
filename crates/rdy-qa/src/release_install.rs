@@ -1350,7 +1350,6 @@ fn install_stages(
         .write_all(&printed.stdout)
         .and_then(|()| signers.sync_all())
         .map_err(|_| Signature)?;
-    read_from_start(&mut download.manifest, MANIFEST_MAX).map_err(|_| Signature)?;
     let manifest = {
         use std::io::Seek;
         download
@@ -2720,15 +2719,34 @@ esac
             fs::write(root.join(MIT_FILE), MIT).expect("mit");
             fs::write(root.join(APACHE_FILE), APACHE).expect("apache");
             fs::write(root.join(NOTE_FILE), PREVIEW_NOTE).expect("note");
+            self.retar(target);
+        }
+
+        /// The archive's source directory for `target` (`<stem>` holds its files).
+        fn source(&self, target: &str) -> PathBuf {
+            self.dir
+                .path()
+                .join(format!("src-{target}"))
+                .join(archive_stem(IV, target))
+        }
+
+        /// Writes the archive for `target` again from its source directory, and the manifest
+        /// for it.
+        fn retar(&self, target: &str) {
+            let src = self.dir.path().join(format!("src-{target}"));
+            let _ = fs::remove_file(self.archive(target));
             let mut cmd = Command::new("tar");
             cmd.arg("-czf")
                 .arg(self.archive(target))
                 .arg("-C")
                 .arg(&src)
-                .arg(&stem)
+                .arg(archive_stem(IV, target))
                 .env("COPYFILE_DISABLE", "1");
             let out = run_bounded(cmd, None, 1 << 20, GUARD).expect("tar");
             assert!(out.status.success(), "tar");
+            if self.download.join(MANIFEST_FILE).exists() {
+                self.write_manifest(self.lines().concat().as_bytes());
+            }
         }
 
         /// The two manifest lines: each present archive's hash, else a stand-in hash.
@@ -2890,7 +2908,8 @@ esac
 
         // Each other key, principal, namespace or manifest byte fails at the signature, before
         // any line of the manifest is read.
-        let cases: [(&str, fn(&Kit, &mut InstallInput)); 5] = [
+        type Spoil = fn(&Kit, &mut InstallInput);
+        let cases: [(&str, Spoil); 5] = [
             ("another key", |kit, input| {
                 input.signer_line = test_key(&kit.dir.path().join("other-key"));
             }),
@@ -3361,21 +3380,21 @@ esac
             &format!("### Release signing key\n\n```text\n{signer}\n```\n\n{section}"),
         );
         assert_eq!(readme_install_problem(&ready), Ok(()));
-        for block in [render_commands(
-            &commands(&InstallInput {
+        // the section holds the three blocks for the example paths, in order
+        let mut from = 0;
+        for (target, browser) in [(TARGETS[0], false), (TARGETS[1], false), (TARGETS[0], true)] {
+            let example = InstallInput {
                 download: "/path/to/download".into(),
                 unpack: "/path/to/unpack".into(),
                 prefix: "/path/to/rdy-0.14.0".into(),
-                ..input(TARGETS[0], false)
-            })
-            .expect("commands"),
-        )
-        .expect("render")]
-        {
-            assert!(
-                section.contains(&format!("```sh\n{block}\n```\n")),
-                "{section}"
-            );
+                ..input(target, browser)
+            };
+            let block = render_commands(&commands(&example).expect("commands")).expect("render");
+            let fenced = format!("```sh\n{block}\n```\n");
+            let at = section[from..]
+                .find(&fenced)
+                .unwrap_or_else(|| panic!("{target} browser={browser}: {section}"));
+            from += at + fenced.len();
         }
         assert!(section.contains("Add the version's bin directory to PATH in this shell.\n"));
         let edited = ready.replacen("'--version'", "'-V'", 1);
@@ -3787,6 +3806,33 @@ esac
                 before,
                 "{what}: the download is unchanged"
             );
+        }
+
+        // An extracted rdy that is missing, a link, a directory or empty is never installed.
+        type Spoil = fn(&Path);
+        let extracted: [(&str, Spoil); 4] = [
+            ("missing", |rdy| fs::remove_file(rdy).expect("rm")),
+            ("a symlink", |rdy| {
+                fs::remove_file(rdy).expect("rm");
+                platform::symlink(Path::new("/bin/sh"), rdy).expect("symlink");
+            }),
+            ("a directory", |rdy| {
+                fs::remove_file(rdy).expect("rm");
+                fs::create_dir(rdy).expect("mkdir");
+            }),
+            ("empty", |rdy| fs::write(rdy, b"").expect("write")),
+        ];
+        for (what, spoil) in extracted {
+            let kit = Kit::new(target);
+            spoil(&kit.source(target).join("rdy"));
+            kit.retar(target);
+            let input = kit.input();
+            assert_eq!(
+                check_plain(&kit, &input).map(|_| ()),
+                Err(Install),
+                "an extracted rdy that is {what}"
+            );
+            kit.assert_untouched(&input, what);
         }
 
         // A failure after the install removes what this run made, and nothing else.
