@@ -141,13 +141,18 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         "E_SITE",
-        "rdy_site or rdy site cannot give the live site's link: this session runs without a daemon (--no-daemon), or the daemon could not bind a loopback port for the site",
-        "drop --no-daemon; for a static site, run rdy render --out <dir>; or set serve.site_port to a free port from 1024 to 65535 in .rdy/local.yaml, then run rdy serve --stop",
+        "the live site has no daemon, cannot bind its port, has reached its profile-site limit, or is stopping",
+        "follow the error's fix",
     ),
     (
         "W_SITE_LAN",
         "the live site is open to the network (serve.site_lan is on): anyone who can reach the address can read the docs; or the LAN address could not be bound, and the site stays on this machine; rdy_site and rdy site carry it with the link",
         "set serve.site_lan to false to keep the site on this machine; when the site already stays on it, follow the warning's own fix",
+    ),
+    (
+        "W_SITE_PROFILE",
+        "a profile-only site is open, or its profile is no longer in canon",
+        "relay the warning; use rdy site for the full source link, or restore the profile",
     ),
     (
         "E_DUMP",
@@ -382,7 +387,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         W_PUBLICATION_REFERENCE,
-        "an org profile refers to blocks outside its selection",
-        "Review these references before you share the output.",
+        "an org profile has references outside its selection, or a live public profile has blocked references",
+        "follow the warning's own fix",
     ),
 ];

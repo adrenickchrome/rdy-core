@@ -19,7 +19,9 @@ fn dia1_a_diagram_page_bundles_mermaid_and_a_plain_page_does_not_load_it() {
             && app.contains("rdy:theme")
             && app.contains("prefers-color-scheme: dark")
     );
-    assert!(!app.contains("http"));
+    // app.js loads nothing from a remote URL (menu.js names the "http:" and "https:" protocols
+    // in its same-origin check, which is not a URL)
+    assert!(!app.contains("http://") && !app.contains("https://"));
 }
 
 /// Review Focus 4.

@@ -22,6 +22,7 @@ mod probe {
     pub(crate) fn hit() {}
 }
 pub mod process;
+mod profile_live;
 mod publication;
 pub mod publish;
 pub mod render_input;
@@ -35,6 +36,7 @@ mod version;
 pub use html::{Link, escape, text_html};
 pub use one_page::{RenderedPage, render_publication_page};
 
+use prepare::{Presentation, ProfilePresentation};
 use rdy_engine::publication::PublicationSource;
 use rdy_engine::publication_manifest::{
     MANIFEST_RECIPE, MAX_ARTIFACT_BYTES, MAX_FILE_BYTES, MAX_FILES, Manifest, ManifestEntry,
@@ -1019,6 +1021,23 @@ impl Budget {
             });
     }
 
+    /// Checks that blobs of `lens` bytes fit, before any of their bytes is read (a live profile's
+    /// old and new figures together, D-CWC91): each within the per-file limit, all of them within
+    /// the aggregate one. Nothing is admitted: each file is admitted again as it is put.
+    fn holds_blobs(&self, lens: impl IntoIterator<Item = u64>) -> Result<(), RdyError> {
+        let mut total = 0u64;
+        for len in lens {
+            if len > self.max_file {
+                return Err(self.over(format!("{} file bytes", self.max_file)));
+            }
+            total = match total.checked_add(len).filter(|t| *t <= self.max_total) {
+                Some(t) => t,
+                None => return Err(self.over(format!("{} artifact bytes", self.max_total))),
+            };
+        }
+        Ok(())
+    }
+
     /// Checks that the artifact may hold `files` files.
     fn count(&self, files: usize) -> Result<(), RdyError> {
         if files > self.max_files {
@@ -1353,6 +1372,7 @@ fn with_shared<R>(
         disagreements,
         history,
         profile,
+        menu_url,
         ..
     } = prepared;
     let m: &Materialized = &m;
@@ -1383,10 +1403,19 @@ fn with_shared<R>(
         changes: changes_summary,
         since: since_summary,
         warnings,
+        old,
     } = history;
+    // a named profile's review base: the words only it holds read through its selected state
+    let old_site = old
+        .as_deref()
+        .map(|o| Site::with_unavailable(o, &pack, &site_name, Some(inline::UNAVAILABLE)));
     // the review marks on the pages read only a base a scope names (the task-8 ruling)
     let review = listed.as_ref().filter(|_| review_marks);
     let header = match &profile {
+        Some(ProfilePresentation {
+            presentation: Presentation::LiveRoute { header, .. },
+            ..
+        }) => header.clone(),
         Some(p) => version::chosen_header(p.tag_name.as_deref(), position.frozen),
         None => version::header(&position, reviewed.as_ref()),
     };
@@ -1420,6 +1449,8 @@ fn with_shared<R>(
         profile: profile.as_ref(),
         local: local.as_ref(),
         unavailable,
+        menu_url: menu_url.as_deref(),
+        old_site: old_site.as_ref(),
     };
     let extras = Extras {
         changes: changes_summary,

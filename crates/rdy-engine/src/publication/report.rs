@@ -2,11 +2,12 @@
 //! its reference check and, against a baseline of the same profile, its disclosure comparison,
 //! projected to one bounded JSON report. The MCP tool, the ctl op and the command line all call
 //! [`check`]. It is a source inspection: it writes nothing, authorizes nothing and finds no
-//! previous publication; which baseline was published is the hub's record (D-WDKWQ).
+//! previous publication; which baseline was published is the hub's record (D-WDKWQ). Its
+//! candidate may be a view or a proposal version (D-CWC91); its baseline stays stable.
 
 use super::diff::{DisclosureDiff, disclosure_diff};
 use super::references::ReferenceReport;
-use super::select::{Resolved, resolve};
+use super::select::{Resolved, bad_inspection_scope, resolve, resolve_inspection};
 use crate::error::*;
 use crate::{ReadState, Scope};
 use rdy_model::{Hash, tree};
@@ -21,15 +22,28 @@ pub const REPORT_BYTES: usize = 8_388_608;
 /// One side of the comparison: the scope as the read state resolves it.
 struct Side {
     scope: Scope,
-    /// `canon` or `landing` (a tag resolves to a landing).
-    kind: &'static str,
-    /// The resolved landing, or `None` for an empty canon.
-    landing: Option<Hash>,
+    /// What the report names the scope by.
+    shown: Shown,
+}
+
+/// How the report names one side: canon or a landing (a tag resolves to one) with that landing,
+/// or, for a candidate only, a view by name or a proposal version by `P-x@n` (D-CWC91).
+enum Shown {
+    /// `canon`, or `landing` for a tag or a landing; the landing is `None` for an empty canon.
+    Landing(&'static str, Option<Hash>),
+    View(String),
+    Proposal(String),
 }
 
 impl Side {
     fn json(&self) -> Value {
-        json!({"kind": self.kind, "landing": self.landing.map(|h| h.to_string())})
+        match &self.shown {
+            Shown::Landing(kind, landing) => {
+                json!({"kind": kind, "landing": landing.map(|h| h.to_string())})
+            }
+            Shown::View(name) => json!({"kind": "view", "landing": null, "view": name}),
+            Shown::Proposal(r) => json!({"kind": "proposal", "landing": null, "proposal": r}),
+        }
     }
 }
 
@@ -41,24 +55,54 @@ fn bad_scope(which: &str) -> RdyError {
     )
 }
 
-/// `text` as one of the three scopes a check reads, resolved through `read`. Absent is canon,
-/// whatever view the caller's session holds.
-fn side(read: &ReadState, text: Option<&str>, which: &str) -> Result<Side, RdyError> {
-    match text.unwrap_or("canon") {
-        "canon" => Ok(Side {
-            scope: Scope::Canon,
-            kind: "canon",
-            landing: read.canon_head(),
-        }),
+/// `text` as one of the three stable scopes a baseline reads, resolved through `read`.
+fn baseline(read: &ReadState, text: &str) -> Result<Side, RdyError> {
+    match text {
+        "canon" => Ok(canon(read)),
         t if t.starts_with("tag:") || t.starts_with("landing:") => match read.resolve_scope(t)? {
-            Scope::At(h) => Ok(Side {
-                scope: Scope::At(h),
-                kind: "landing",
-                landing: Some(h),
-            }),
-            _ => Err(bad_scope(which)),
+            Scope::At(h) => Ok(landing(h)),
+            _ => Err(bad_scope("against")),
         },
-        _ => Err(bad_scope(which)),
+        _ => Err(bad_scope("against")),
+    }
+}
+
+fn canon(read: &ReadState) -> Side {
+    Side {
+        scope: Scope::Canon,
+        shown: Shown::Landing("canon", read.canon_head()),
+    }
+}
+
+fn landing(h: Hash) -> Side {
+    Side {
+        scope: Scope::At(h),
+        shown: Shown::Landing("landing", Some(h)),
+    }
+}
+
+/// `text` as the candidate scope, resolved through `read` (D-CWC91): canon, a tag, a landing,
+/// an existing view (bare or `view:<name>`) or a proposal version (`proposal:P-x` for the latest,
+/// or `proposal:P-x@n`). Absent is canon, whatever view the caller's session holds. A view name
+/// is case-sensitive, so `Canon` is a view and must exist. The in-flight scope, an empty text and
+/// an empty view name are refused; the tag, landing and proposal parsers keep their own errors.
+fn candidate(read: &ReadState, text: Option<&str>) -> Result<Side, RdyError> {
+    let text = text.unwrap_or("canon");
+    if text.is_empty() || text == "view:" {
+        return Err(bad_inspection_scope());
+    }
+    match read.resolve_read_scope(text, None)? {
+        Scope::Canon => Ok(canon(read)),
+        Scope::At(h) => Ok(landing(h)),
+        Scope::View(name) => Ok(Side {
+            scope: Scope::View(name.clone()),
+            shown: Shown::View(name),
+        }),
+        Scope::Proposal(v) => Ok(Side {
+            scope: Scope::Proposal(v),
+            shown: Shown::Proposal(crate::gate::resolve_in(read, &v.to_string())?.to_string()),
+        }),
+        Scope::Inflight => Err(bad_inspection_scope()),
     }
 }
 
@@ -258,23 +302,24 @@ fn fit(report: Value, max: usize) -> Result<Value, RdyError> {
 }
 
 /// The check of `profile` (a full profile id or a key) in `scope`, with the disclosure
-/// comparison against `against` when given. Scopes are `canon`, `tag:<name>` and
-/// `landing:<hash>` only; an absent scope is canon. Every scope string resolves through `read`.
-/// The profile resolves in the candidate scope first; the baseline then resolves that profile's
-/// stable id, with no fallback to another profile or to current canon. A blocked reference check
-/// is a result, not an error: the caller reads `references.status`.
+/// comparison against `against` when given. The candidate scope is canon, `tag:<name>`,
+/// `landing:<hash>`, an existing view or a proposal version (D-CWC91); an absent scope is canon.
+/// The baseline is canon, `tag:<name>` or `landing:<hash>` only. Every scope string resolves
+/// through `read`. The profile resolves in the candidate scope first; the baseline then resolves
+/// that profile's stable id, with no fallback to another profile or to current canon. A blocked
+/// reference check is a result, not an error: the caller reads `references.status`.
 pub fn check(
     read: &ReadState,
     profile: &str,
     scope: Option<&str>,
     against: Option<&str>,
 ) -> Result<Value, RdyError> {
-    let candidate = side(read, scope, "scope")?;
-    let after = resolve(read, &candidate.scope, profile)?;
+    let candidate = candidate(read, scope)?;
+    let after = resolve_inspection(read, &candidate.scope, profile)?;
     let Some(text) = against else {
         return fit(report_json(&after, &candidate, None), REPORT_BYTES);
     };
-    let baseline = side(read, Some(text), "against")?;
+    let baseline = baseline(read, text)?;
     let stable = after
         .profile
         .id

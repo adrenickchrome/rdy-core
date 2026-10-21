@@ -1,7 +1,7 @@
 //! The context of every page, and the one place that calls every module that fills a part of it.
 use crate::html::{self, BlockCtx, Link};
 use crate::inline::{self, Ctx, LocalLink};
-use crate::prepare::ProfilePresentation;
+use crate::prepare::{Presentation, ProfilePresentation};
 use crate::publication::LocalTargets;
 use crate::site::{Site, Url, rel};
 use crate::trail::Trail;
@@ -69,6 +69,13 @@ pub struct Shared<'a> {
     /// What a reference that leads nowhere reads as: the source's unresolved marker words, or a
     /// named profile's [`inline::UNAVAILABLE`].
     pub unavailable: &'a str,
+    /// Where a live page's pill opens the menu (`SiteTarget::menu_url`); none for the source's
+    /// `/~versions/`. A static page never reads it.
+    pub menu_url: Option<&'a str>,
+    /// A named profile's review base, its selected site (D-CWC91): a removed line and a removed
+    /// page's row read their words through it ([`Shared::removed_link`]). None for the source,
+    /// whose removed text reads against `site`.
+    pub old_site: Option<&'a Site<'a>>,
 }
 
 /// What the navigation and the home page know about the render beyond the tree: the reference
@@ -83,6 +90,9 @@ pub struct SiteFacts<'a> {
     pub review: Option<&'a review::Review>,
     /// The rows of the home page's list of changes read it ([`Shared::listed`], O12).
     pub listed: Option<&'a review::Review>,
+    /// A named profile's review base, its selected site: a removed page's row and drawer entry
+    /// read their words through it ([`Shared::old_site`]).
+    pub old: Option<&'a Site<'a>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -368,10 +378,17 @@ impl Shared<'_> {
     /// to `/~versions/`, whose menu the pill opens, and to the change pages under the scope's
     /// path, the same on every page. Each distinct markup is rendered once.
     pub fn header_html(&self, root: &str) -> String {
-        // a named profile's pill leads nowhere: the same on every page (RULING F3)
-        if let Some(p) = self.profile {
-            return version::chosen_header_html(&self.header, p.tag_redacted);
-        }
+        // a named profile's output pill leads nowhere, and the profile-only site has none: the
+        // same on every page (RULING F3, D-DK03K); a live profile route keeps the live header
+        let route_redacted = match self.profile {
+            Some(p) => match p.presentation {
+                Presentation::Output | Presentation::LiveOnly { .. } => {
+                    return version::chosen_header_html(&self.header, p.tag_redacted);
+                }
+                Presentation::LiveRoute { .. } => p.tag_redacted,
+            },
+            None => false,
+        };
         let key = match self.mode {
             Mode::Static => root,
             Mode::Live { .. } => "",
@@ -387,16 +404,19 @@ impl Shared<'_> {
             ),
             Mode::Live { root } => (
                 root.to_string(),
-                format!(
-                    "/{}",
-                    rdy_engine::site_scope::ScopeRef::Versions.path_prefix()
-                ),
+                match self.menu_url {
+                    Some(url) => url.to_string(),
+                    None => format!(
+                        "/{}",
+                        rdy_engine::site_scope::ScopeRef::Versions.path_prefix()
+                    ),
+                },
                 true,
             ),
         };
         let since = format!("{base}{}", rdy_engine::site_scope::SINCE_PAGE);
         let changes = format!("{base}{}", rdy_engine::site_scope::CHANGES_PAGE);
-        let html = version::header_html(
+        let mut html = version::header_html(
             &self.header,
             &version::HeaderLinks {
                 versions: &versions,
@@ -405,6 +425,10 @@ impl Shared<'_> {
                 menu,
             },
         );
+        // a profile route's tag keeps the profile's `redacted` badge (RULING F3)
+        if route_redacted {
+            html.push_str(" <span class=\"badge badge-redacted\">redacted</span>");
+        }
         self.headers
             .borrow_mut()
             .insert(key.to_string(), html.clone());
@@ -414,10 +438,32 @@ impl Shared<'_> {
     /// The colophon's and the llms files' label: a named profile's chosen tag name, or empty
     /// (RULING F3); else the source's label.
     pub fn label(&self) -> version::Label {
-        match self.profile {
-            Some(p) => version::chosen_label(p.tag_name.as_deref(), self.position.frozen),
+        match self.profile.map(|p| (p, &p.presentation)) {
+            Some((p, Presentation::Output)) => {
+                version::chosen_label(p.tag_name.as_deref(), self.position.frozen)
+            }
+            // a live profile's label is its whole colophon sentence (p-750KT)
+            Some((_, Presentation::LiveRoute { colophon, .. }))
+            | Some((_, Presentation::LiveOnly { colophon })) => {
+                version::profile_label(colophon, self.position.frozen)
+            }
             None => version::text_label(self.position, self.reviewed.as_ref()),
         }
+    }
+
+    /// The review bar's words: the source's (`version::review_bar`), and on a live profile route
+    /// ` · as {profile title}` after them (D-CWC91). None on canon and tags.
+    fn review_bar(&self) -> Option<String> {
+        let r = self.reviewed.as_ref()?;
+        let mut text = version::review_bar(r);
+        if let Some(ProfilePresentation {
+            presentation: Presentation::LiveRoute { .. },
+            ..
+        }) = self.profile
+        {
+            text.push_str(&format!(" · as {}", self.site_name));
+        }
+        Some(text)
     }
 
     /// Whether blocks show their decision trail: a source output does; a named profile only
@@ -465,6 +511,38 @@ impl Shared<'_> {
             label: self.site.label(b),
             // the hover describes where the link leads: for a decision, the block it governs
             title: self.hover(self.site.destination(id).unwrap_or(b), &url),
+            key: crate::site::typed_key(b).map(String::from),
+            removed: target.is_redacted(),
+        })
+    }
+
+    /// A link from `from` to the block `id` as a removed line reads it. A named profile's review
+    /// reads it through its old selected side (D-CWC91): the words that side holds, and an href
+    /// only to a page of this site (a target this site lacks reads as its words, unlinked; one
+    /// the old side lacks leads nowhere). Else as [`Shared::link`].
+    fn removed_link(&self, from: &str, id: &BlockId) -> Option<Link> {
+        let Some(old) = self.old_site else {
+            return self.link(from, id);
+        };
+        let target = old.m.get(id)?;
+        let (id, b) = match crate::site::is_profile(target) {
+            true => {
+                let doc = old.doc_of(id)?;
+                (&doc.id, doc)
+            }
+            false => (id, target),
+        };
+        let (href, title) = match (self.site.url_of(id), self.m.get(id)) {
+            (Some(url), Some(now)) => (
+                Some(url.href_from(from)),
+                self.hover(self.site.destination(id).unwrap_or(now), &url),
+            ),
+            _ => (None, String::new()),
+        };
+        Some(Link {
+            href,
+            label: old.label(b),
+            title,
             key: crate::site::typed_key(b).map(String::from),
             removed: target.is_redacted(),
         })
@@ -559,6 +637,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         has_disagreements: !site.disagreements.is_empty(),
         review: sh.review,
         listed: sh.listed,
+        old: sh.old_site,
     };
     let (page_url, kind_name, title, current, chain, tail): (
         String,
@@ -771,7 +850,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         has_terms,
         has_questions,
         reviewing: sh.review.is_some(),
-        review_bar: sh.reviewed.as_ref().map(version::review_bar),
+        review_bar: sh.review_bar(),
         review_heading: sh
             .reviewed
             .as_ref()
@@ -990,7 +1069,7 @@ fn edited_diff(sh: &Shared, id: &BlockId) -> Option<String> {
 /// The old text of removed blocks as HTML, written outside the block pipeline: each heading text
 /// is a plain paragraph (the page's outline stays the draft's), and no element has an id.
 fn removed_html(sh: &Shared, blocks: &[Block], page: &str) -> String {
-    let link = |id: &BlockId| sh.link(page, id);
+    let link = |id: &BlockId| sh.removed_link(page, id);
     let local = |h: &str| sh.local_href(page, h);
     let ictx = Ctx {
         link: &link,
@@ -1038,6 +1117,12 @@ fn removed_html(sh: &Shared, blocks: &[Block], page: &str) -> String {
             ));
         }
         match b.block_type.as_str() {
+            // a named profile's diagram source reads its id-shaped references as words, as its
+            // page does: never an id (D-CWC91)
+            "diagram" if sh.profile.is_some() => out.push_str(&format!(
+                "<pre><code>{}</code></pre>",
+                html::readable_source(&b.body, &link, sh.unavailable)
+            )),
             "code" | "diagram" => out.push_str(&format!(
                 "<pre><code>{}</code></pre>",
                 html::escape(&b.body)

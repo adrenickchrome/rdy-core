@@ -3,6 +3,8 @@
 //! proposal changes; the colophon and the llms files keep the text label; the live site patches
 //! the header in place.
 use rdy_engine::Scope;
+use rdy_engine::site_scope::ScopeRef;
+use rdy_engine::site_target::SiteTarget;
 use rdy_qa::golden::*;
 use rdy_render::live::{build_live, diff, page};
 use rdy_render::{Mode, SlotKind, build_site, escape};
@@ -192,7 +194,8 @@ fn sr5_the_colophon_and_llms_keep_the_text_label() {
 #[test]
 fn sr5_a_live_header_is_one_fragment_for_every_page() {
     let (_d, r, _ids) = project();
-    let b = build_live(&r.read(), &Scope::View("editing".into()), "/~view/editing/").unwrap();
+    let editing = SiteTarget::Source(ScopeRef::View("editing".into()));
+    let b = build_live(&r.read(), &Scope::View("editing".into()), &editing).unwrap();
     let mut seen = 0;
     for (path, slots) in &b.label_at {
         let headers: Vec<_> = slots
@@ -214,7 +217,7 @@ fn sr5_a_live_header_is_one_fragment_for_every_page() {
     assert!(seen > 10, "guard: the pages hold the header ({seen})");
     assert!(
         b.header
-            .starts_with("<a class=\"pill\" href=\"/~versions/\" data-menu aria-haspopup=\"dialog\" aria-expanded=\"false\">"),
+            .starts_with("<a class=\"pill\" href=\"/~versions/?scope=view%3Aediting\" data-menu aria-haspopup=\"dialog\" aria-expanded=\"false\">"),
         "{}",
         b.header
     );
@@ -238,7 +241,12 @@ fn sr5_a_live_header_is_one_fragment_for_every_page() {
 #[test]
 fn sr5_a_landing_patches_the_header_and_reloads_only_changed_pages() {
     let (_d, mut r, ids) = project();
-    let before = build_live(&r.read(), &Scope::Canon, "/").unwrap();
+    let before = build_live(
+        &r.read(),
+        &Scope::Canon,
+        &SiteTarget::Source(ScopeRef::Canon),
+    )
+    .unwrap();
     assert!(
         before.header.contains(">+2</a>"),
         "guard: {}",
@@ -252,7 +260,12 @@ fn sr5_a_landing_patches_the_header_and_reloads_only_changed_pages() {
     )
     .unwrap();
     land(&mut r, "later").unwrap();
-    let after = build_live(&r.read(), &Scope::Canon, "/").unwrap();
+    let after = build_live(
+        &r.read(),
+        &Scope::Canon,
+        &SiteTarget::Source(ScopeRef::Canon),
+    )
+    .unwrap();
     let edited: Vec<&String> = after
         .files
         .iter()
@@ -305,15 +318,24 @@ fn sr5_the_header_slot_goes_only_into_its_ranges() {
     )
     .unwrap();
     land(&mut r, "work").unwrap();
-    let mut b = build_live(&r.read(), &Scope::Canon, "/").unwrap();
+    let mut b = build_live(
+        &r.read(),
+        &Scope::Canon,
+        &SiteTarget::Source(ScopeRef::Canon),
+    )
+    .unwrap();
     let old = b.header.clone();
-    let base = String::from_utf8(page(&b, "alpha.html", "canon").unwrap()).unwrap();
+    let base =
+        String::from_utf8(page(&b, "alpha.html", &SiteTarget::Source(ScopeRef::Canon)).unwrap())
+            .unwrap();
     assert!(
         base.contains(&escape(lookalike)),
         "guard: the doc holds the text"
     );
     b.header = "<a class=\"pill\" href=\"/~versions/\">v9 &lt;&gt;</a>".into();
-    let html = String::from_utf8(page(&b, "alpha.html", "canon").unwrap()).unwrap();
+    let html =
+        String::from_utf8(page(&b, "alpha.html", &SiteTarget::Source(ScopeRef::Canon)).unwrap())
+            .unwrap();
     assert_eq!(html.matches(&b.header).count(), 1, "{html}");
     assert!(!html.contains(&old), "the old header is gone");
     assert!(

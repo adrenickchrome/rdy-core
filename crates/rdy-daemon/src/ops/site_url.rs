@@ -9,8 +9,11 @@ use serde_json::Value;
 #[serde(deny_unknown_fields)]
 pub(super) struct SiteUrlArgs {
     scope: Option<String>,
+    profile: Option<String>,
+    #[serde(default)]
+    only: bool,
 }
 
 pub(super) fn site_url(cx: &OpContext, a: SiteUrlArgs) -> Result<Value, RdyError> {
-    site_reply(cx.engine, a.scope.as_deref())
+    site_reply(cx.engine, a.scope.as_deref(), a.profile.as_deref(), a.only)
 }

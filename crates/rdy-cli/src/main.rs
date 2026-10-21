@@ -337,7 +337,14 @@ fn main() -> ExitCode {
             return project_cmd::run_check(&env, a.path.as_deref(), a.pack.as_deref(), as_json);
         }
         Cmd::Serve(a) => {
-            return serve_cmd::run_serve(&env, a.detach, a.stop, a.spawned, as_json);
+            return serve_cmd::run_serve(
+                &env,
+                a.detach,
+                a.stop,
+                a.spawned,
+                a.profile.as_deref(),
+                as_json,
+            );
         }
         _ => {}
     }

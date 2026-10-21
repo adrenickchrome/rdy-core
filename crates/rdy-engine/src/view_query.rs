@@ -197,6 +197,48 @@ fn entry(block: &Block, path_in: &Materialized) -> CompareEntry {
     }
 }
 
+/// What differs from state `b` to state `a`, block by block, sorted by id: the state rows of
+/// [`ReadState::compare`] for two supplied states (spv2, D-CWC91). A review of a profile
+/// compares the selected state of each side; an empty side is [`Materialized::default`]. The
+/// labels are empty and `conflicted` is empty: a supplied state names no scope, so it holds no
+/// merge conflict.
+pub fn compare_states(a: &Materialized, b: &Materialized) -> Compare {
+    let ids: BTreeSet<&BlockId> = a.ids().chain(b.ids()).collect();
+    let mut out = Compare {
+        a: String::new(),
+        b: String::new(),
+        added: vec![],
+        deleted: vec![],
+        changed: vec![],
+        moved: vec![],
+        conflicted: vec![],
+    };
+    for id in ids {
+        match (a.get(id), b.get(id)) {
+            (Some(x), None) => out.added.push(entry(x, a)),
+            (None, Some(y)) => out.deleted.push(entry(y, b)),
+            (Some(x), Some(y)) if x.version_hash() != y.version_hash() => {
+                let mut e = entry(x, a);
+                e.fields = differing(x, y);
+                if x.parent != y.parent {
+                    let mut mv = e.clone();
+                    mv.fields = vec![];
+                    mv.from_parent = y.parent.as_ref().map(|p| p.to_string());
+                    mv.to_parent = x.parent.as_ref().map(|p| p.to_string());
+                    out.moved.push(mv);
+                    if !e.fields.is_empty() {
+                        out.changed.push(e);
+                    }
+                } else {
+                    out.changed.push(e);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 impl ReadState {
     /// Every view (open ones only unless `all`), sorted by name. A view is idle when it is open
     /// and its last write is more than `idle_days` days before `now_ms`.
@@ -539,44 +581,15 @@ impl ReadState {
         })
     }
 
-    /// What differs from `b` to `a`, block by block, sorted by id. `conflicted` lists the blocks
+    /// What differs from `b` to `a`, block by block, sorted by id: [`compare_states`] of the two
+    /// scopes' states, with the scopes' labels. `conflicted` lists the blocks
     /// `a`'s merge (and `b`'s, when `b` is a view or `inflight`) records a conflict on. Canon
     /// and an as-of scope have no conflicts.
     pub fn compare(&self, a: &Scope, b: &Scope) -> Result<Compare, RdyError> {
         let (ma, mb) = (self.materialized(a)?, self.materialized(b)?);
-        let ids: BTreeSet<&BlockId> = ma.ids().chain(mb.ids()).collect();
-        let mut out = Compare {
-            a: scope_text(a),
-            b: scope_text(b),
-            added: vec![],
-            deleted: vec![],
-            changed: vec![],
-            moved: vec![],
-            conflicted: vec![],
-        };
-        for id in ids {
-            match (ma.get(id), mb.get(id)) {
-                (Some(x), None) => out.added.push(entry(x, &ma)),
-                (None, Some(y)) => out.deleted.push(entry(y, &mb)),
-                (Some(x), Some(y)) if x.version_hash() != y.version_hash() => {
-                    let mut e = entry(x, &ma);
-                    e.fields = differing(x, y);
-                    if x.parent != y.parent {
-                        let mut mv = e.clone();
-                        mv.fields = vec![];
-                        mv.from_parent = y.parent.as_ref().map(|p| p.to_string());
-                        mv.to_parent = x.parent.as_ref().map(|p| p.to_string());
-                        out.moved.push(mv);
-                        if !e.fields.is_empty() {
-                            out.changed.push(e);
-                        }
-                    } else {
-                        out.changed.push(e);
-                    }
-                }
-                _ => {}
-            }
-        }
+        let mut out = compare_states(&ma, &mb);
+        out.a = scope_text(a);
+        out.b = scope_text(b);
         let mut conflicts = (*self.conflicts(a)?).clone();
         if !matches!(b, Scope::Canon | Scope::At(_)) {
             conflicts.extend(self.conflicts(b)?.iter().cloned());

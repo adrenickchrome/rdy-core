@@ -86,7 +86,9 @@ fn start_error_citing(run: &RunDir, mut message: String, since: Option<u64>) -> 
     e
 }
 
-fn not_ready(run: &RunDir, start_timeout: Duration, since: Option<u64>) -> ErrorReply {
+/// `E_DAEMON_START` for a daemon that did not become ready within `start_timeout`: the
+/// configured seconds, the log lines of this start (from `since`) and the fix.
+pub fn not_ready(run: &RunDir, start_timeout: Duration, since: Option<u64>) -> ErrorReply {
     start_error_citing(
         run,
         format!(

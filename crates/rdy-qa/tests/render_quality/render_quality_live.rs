@@ -3,6 +3,8 @@
 //! JavaScript, the generated pages (glossary, disagreements), a small script, and nothing on a
 //! served page that acts (D-N5NSN). These tests are guards of the live layer and the server.
 use rdy_daemon::Shared;
+use rdy_daemon::site::guard::{Guard, Route, SiteTarget};
+use rdy_daemon::site::http::parse_head;
 use rdy_engine::{Rdy, ReadState, Scope};
 use rdy_qa::daemon::Hosted;
 use rdy_qa::fixtures::writer;
@@ -55,7 +57,7 @@ impl LiveHost {
     /// new directory at the same paths: only the `.html` pages when `html_only`.
     pub fn fetch(&self, scope: &Scope, prefix: &str, html_only: bool) -> tempfile::TempDir {
         let st: Arc<ReadState> = self.shared().state.load_full();
-        let build = build_live(&st, scope, &format!("/{prefix}")).expect("the live build");
+        let build = build_live(&st, scope, &source_target(prefix)).expect("the live build");
         let out = tempfile::tempdir().unwrap();
         for path in build.files.keys() {
             if html_only && !path.ends_with(".html") {
@@ -72,6 +74,17 @@ impl LiveHost {
             std::fs::write(to, &r.body).unwrap();
         }
         out
+    }
+}
+
+/// The source target the site serves under `prefix` (`""`, `~view/<enc>/`, ...), as the site's
+/// guard routes it.
+fn source_target(prefix: &str) -> SiteTarget {
+    let guard = Guard::full(1, None);
+    let head = format!("GET /{prefix}index.html HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n");
+    match guard.check(&parse_head(head.as_bytes()).unwrap()) {
+        Ok(Route::Page { target, .. }) => target,
+        other => panic!("/{prefix} routes to {other:?}"),
     }
 }
 
@@ -903,7 +916,7 @@ fn sr10_no_review_chrome_says_draft() {
     for h in hovers(&page) {
         says_draft("the versions page label", &h);
     }
-    assert_eq!(titles[0].1, "Versions, proposals and views");
+    assert_eq!(titles[0].1, "Versions, proposals, views and profiles");
 }
 
 #[test]

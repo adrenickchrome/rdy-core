@@ -34,6 +34,7 @@ fn erow1_every_view_brief_and_daemon_code_has_a_row() {
         "E_DAEMON_GONE",
         E_SITE,
         W_SITE_LAN,
+        W_SITE_PROFILE,
         E_DUMP,
         E_EXCEPTION_OPEN,
         E_ITEM_MOVED,

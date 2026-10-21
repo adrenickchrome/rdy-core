@@ -99,7 +99,11 @@ pub fn build(site: &Site, current: Option<&BlockId>, from: &str, facts: SiteFact
         });
     }
     let removed = review
-        .map(|r| r.removed_pages().iter().map(|b| site.label(b)).collect())
+        .map(|r| {
+            // a named profile's removed page reads as its old selected side titles it
+            let old = facts.old.unwrap_or(site);
+            r.removed_pages().iter().map(|b| old.label(b)).collect()
+        })
         .unwrap_or_default();
     Nav { groups, removed }
 }

@@ -5,6 +5,7 @@
 //! word (`Edited`, `New`, a count like `2 edited · 1 new · 1 removed`), never an id, a hash or a
 //! type name.
 use crate::site::RATIONALE;
+use rdy_engine::view_query::compare_states;
 use rdy_engine::{Compare, CompareEntry, Materialized, RdyError, ReadState, Scope};
 use rdy_model::{Block, BlockId, decision, tree};
 use serde::Serialize;
@@ -239,17 +240,24 @@ pub fn build(rdy: &ReadState, scope: &Scope) -> Result<Option<Review>, RdyError>
     let Some(base) = base_of(rdy, scope) else {
         return Ok(None);
     };
-    let cmp = rdy.compare(scope, &base)?;
-    let (dm, bm) = (rdy.materialized(scope)?, rdy.materialized(&base)?);
-    Ok(Some(review(&cmp, &dm, &bm)))
+    between(rdy, &base, scope).map(Some)
 }
 
 /// The changes from scope `from` to scope `to`, read as a review reads a view against its base:
 /// the change summary of the landings since a tag reads it (sr6), so it counts by the same rule.
 pub fn between(rdy: &ReadState, from: &Scope, to: &Scope) -> Result<Review, RdyError> {
-    let cmp = rdy.compare(to, from)?;
     let (dm, bm) = (rdy.materialized(to)?, rdy.materialized(from)?);
-    Ok(review(&cmp, &dm, &bm))
+    Ok(between_states(&bm, &dm))
+}
+
+/// The changes from state `from` to state `to`, by the rules of [`between`] (spv2, D-CWC91): a
+/// review of a profile reads each side's selected state, and an empty side is
+/// [`Materialized::default`]. A doc or folder that enters the selection is New and one that
+/// leaves it is removed, even when its authored version is the same on both sides. The review
+/// reads only the compare's state rows, never its conflicts, so no scope is needed.
+pub(crate) fn between_states(from: &Materialized, to: &Materialized) -> Review {
+    let cmp = compare_states(to, from);
+    review(&cmp, to, from)
 }
 
 /// What a scope changes, as its change rows read it: the review against its base, else, for a
@@ -629,5 +637,258 @@ mod tests {
             .map(|b| b.to_string())
             .collect();
         assert_eq!(seen, vec!["p-BBBBB".to_string()]);
+    }
+
+    // spv2 (D-CWC91): a review of two supplied selected states
+
+    fn id(s: &str) -> BlockId {
+        BlockId::parse(s).unwrap()
+    }
+
+    fn blk(i: &str, ty: &str, parent: Option<&str>, order: &str, body: &str) -> Block {
+        let mut fields = std::collections::BTreeMap::new();
+        if tree::is_tree_type(ty) {
+            fields.insert("name".into(), rdy_model::FieldValue::Str(i.to_lowercase()));
+            fields.insert("title".into(), rdy_model::FieldValue::Str(i.to_string()));
+        }
+        Block {
+            id: id(i),
+            block_type: ty.to_string(),
+            parent: parent.map(id),
+            order: order.to_string(),
+            fields,
+            body: body.to_string(),
+            links: Default::default(),
+            pins: Default::default(),
+            read_identity: None,
+        }
+    }
+
+    fn state(blocks: &[&Block]) -> Materialized {
+        let ops: Vec<rdy_model::Op> = blocks
+            .iter()
+            .map(|b| rdy_model::Op::Create {
+                block: (*b).clone(),
+            })
+            .collect();
+        Materialized::default().with(&ops)
+    }
+
+    fn changed(rv: &Review) -> Vec<String> {
+        rv.changed_set().iter().map(|b| b.to_string()).collect()
+    }
+
+    fn sorted(ids: &[&str]) -> Vec<String> {
+        let mut v: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
+        v.sort();
+        v
+    }
+
+    /// The same authored blocks on both sides: only the selection differs. A doc or folder that
+    /// enters is New with its content counted once; one that leaves is a removed page, top-most
+    /// only, with its content counted once.
+    #[test]
+    fn spv2_selection_only_changes_are_new_and_removed() {
+        let f = blk("f-AAAAA", tree::FOLDER, None, "a", "");
+        let d1 = blk("d-AAAAA", tree::DOC, Some("f-AAAAA"), "a", "");
+        let p1 = blk("p-AAAAA", "prose", Some("d-AAAAA"), "a", "One.");
+        let p2 = blk("p-BBBBB", "prose", Some("d-AAAAA"), "b", "Two.");
+        let d2 = blk("d-BBBBB", tree::DOC, Some("f-AAAAA"), "b", "");
+        let q1 = blk("p-CCCCC", "prose", Some("d-BBBBB"), "a", "Three.");
+        let g = blk("f-BBBBB", tree::FOLDER, None, "c", "");
+        let d3 = blk("d-CCCCC", tree::DOC, Some("f-BBBBB"), "a", "");
+        let r1 = blk("p-DDDDD", "prose", Some("d-CCCCC"), "a", "Four.");
+        let h = blk("f-CCCCC", tree::FOLDER, None, "b", "");
+        let d4 = blk("d-DDDDD", tree::DOC, Some("f-CCCCC"), "a", "");
+        let s1 = blk("p-EEEEE", "prose", Some("d-DDDDD"), "a", "Five.");
+        let from = state(&[&f, &d1, &p1, &p2, &h, &d4, &s1]);
+        let to = state(&[&f, &d2, &q1, &g, &d3, &r1]);
+        let rv = between_states(&from, &to);
+        // entering: the docs and the folder are New; their content carries no mark of its own
+        for page in [&d2.id, &g.id, &d3.id] {
+            assert_eq!(rv.page_mark(page), Some(Mark::New), "{page}");
+        }
+        assert_eq!(rv.doc(&d2.id).map(|d| d.mark), Some(Mark::New));
+        assert_eq!(rv.doc(&d2.id).and_then(|d| d.counts()), None);
+        assert_eq!(rv.mark(&q1.id), None);
+        assert_eq!(rv.mark(&r1.id), None);
+        assert_eq!(rv.mark(&f.id), None, "the shared folder is unchanged");
+        // leaving: the removed pages, top-most only, in the base's reading order
+        let removed: Vec<&BlockId> = rv.removed_pages().iter().map(|b| &b.id).collect();
+        assert_eq!(removed, vec![&d1.id, &h.id]);
+        assert!(
+            rv.removed_in(&d1.id).is_empty(),
+            "a removed page has no removed lines"
+        );
+        // each page and its content once, never twice through its folder
+        assert_eq!(
+            changed(&rv),
+            sorted(&[
+                "d-BBBBB", "p-CCCCC", "f-BBBBB", "d-CCCCC", "p-DDDDD", "d-AAAAA", "p-AAAAA",
+                "p-BBBBB", "f-CCCCC", "d-DDDDD", "p-EEEEE"
+            ])
+        );
+        assert_eq!(rv.changed_blocks(), 11);
+        // the other way round the roles swap
+        let back = between_states(&to, &from);
+        assert_eq!(back.page_mark(&d1.id), Some(Mark::New));
+        assert_eq!(back.page_mark(&h.id), Some(Mark::New));
+        let removed: Vec<&BlockId> = back.removed_pages().iter().map(|b| &b.id).collect();
+        assert_eq!(removed, vec![&d2.id, &g.id]);
+        assert_eq!(back.changed_blocks(), 11);
+        // equal selections change nothing
+        let same = between_states(&to, &to);
+        assert_eq!(same.changed_blocks(), 0);
+        assert!(same.removed_pages().is_empty());
+    }
+
+    /// Against an empty side every selected block a reader sees is New and counted once, as the
+    /// existing count gives it; decisions, rationale and profiles count nothing, and a change to
+    /// a block's pins alone is no change.
+    #[test]
+    fn spv2_empty_side_and_hidden_blocks_use_existing_counts() {
+        let f = blk("f-AAAAA", tree::FOLDER, None, "a", "");
+        let d = blk("d-AAAAA", tree::DOC, Some("f-AAAAA"), "a", "");
+        let p1 = blk("p-AAAAA", "prose", Some("d-AAAAA"), "a", "One.");
+        let p2 = blk("p-BBBBB", "prose", Some("d-AAAAA"), "b", "Two.");
+        let dec = blk(
+            "dc-AAAAA",
+            decision::DECISION,
+            Some("d-AAAAA"),
+            "c",
+            "Use one.",
+        );
+        let why = blk("r-AAAAA", RATIONALE, Some("dc-AAAAA"), "a", "Because.");
+        let pf = blk(
+            "pf-AAAAA",
+            crate::site::PUBLICATION_PROFILE,
+            Some("d-AAAAA"),
+            "d",
+            "",
+        );
+        let all = [&f, &d, &p1, &p2, &dec, &why, &pf];
+        let rv = between_states(&Materialized::default(), &state(&all));
+        assert_eq!(rv.page_mark(&f.id), Some(Mark::New));
+        assert_eq!(rv.page_mark(&d.id), Some(Mark::New));
+        for hidden in [&dec.id, &why.id, &pf.id] {
+            assert_eq!(rv.mark(hidden), None, "{hidden}");
+        }
+        assert_eq!(
+            changed(&rv),
+            sorted(&["f-AAAAA", "d-AAAAA", "p-AAAAA", "p-BBBBB"])
+        );
+        // the same count the existing review gives that state against the empty project
+        let none = Materialized::default();
+        let to = state(&all);
+        let cmp = compare_states(&to, &none);
+        assert_eq!(changed(&review(&cmp, &to, &none)), changed(&rv));
+        // everything leaves: one removed page, its visible content counted
+        let gone = between_states(&state(&all), &Materialized::default());
+        assert_eq!(gone.removed_pages().len(), 1);
+        assert_eq!(gone.changed_blocks(), 4);
+
+        // hidden blocks edited, added and removed, and a pins-only change: nothing counts
+        let mut pinned = p1.clone();
+        pinned.pins.insert(p2.id.clone(), p2.version_hash());
+        let mut dec2 = dec.clone();
+        dec2.body = "Use two.".into();
+        let mut pf2 = pf.clone();
+        pf2.body = "changed".into();
+        let why2 = blk("r-BBBBB", RATIONALE, Some("dc-AAAAA"), "b", "Also.");
+        let from = state(&[&f, &d, &p1, &p2, &dec, &why, &pf]);
+        let to = state(&[&f, &d, &pinned, &p2, &dec2, &why2, &pf2]);
+        let rv = between_states(&from, &to);
+        assert_eq!(rv.changed_blocks(), 0, "{:?}", changed(&rv));
+        assert_eq!(rv.mark(&p1.id), None);
+        assert!(rv.doc(&d.id).is_none());
+        assert!(rv.removed_in(&d.id).is_empty());
+    }
+
+    /// The review of supplied states keeps the existing semantics: a type change, a custom
+    /// `type` or `order` field, a move to another doc, a new place among siblings and removed
+    /// code; a new order key at the same place is no change.
+    #[test]
+    fn spv2_review_keeps_moves_fields_and_reading_order() {
+        let a = blk("d-AAAAA", tree::DOC, None, "a", "");
+        let b = blk("d-BBBBB", tree::DOC, None, "b", "");
+        let retyped = blk("p-AAAAA", "prose", Some("d-AAAAA"), "a", "Retyped.");
+        let typed = blk("p-BBBBB", "prose", Some("d-AAAAA"), "b", "Custom type.");
+        let ordered = blk("p-CCCCC", "prose", Some("d-AAAAA"), "c", "Custom order.");
+        let rekeyed = blk("p-DDDDD", "prose", Some("d-AAAAA"), "d", "Same place.");
+        let mover = blk("p-EEEEE", "prose", Some("d-AAAAA"), "e", "Moves to b.");
+        let code = blk("p-FFFFF", "code", Some("d-AAAAA"), "f", "fn main() {}");
+        let last = blk("p-GGGGG", "prose", Some("d-AAAAA"), "g", "Stays last.");
+        let s1 = blk("p-HHHHH", "prose", Some("d-BBBBB"), "a", "First.");
+        let s2 = blk("p-JJJJJ", "prose", Some("d-BBBBB"), "b", "Second.");
+        let s3 = blk("p-KKKKK", "prose", Some("d-BBBBB"), "c", "Third.");
+        let from = state(&[
+            &a, &b, &retyped, &typed, &ordered, &rekeyed, &mover, &code, &last, &s1, &s2, &s3,
+        ]);
+        let mut retyped2 = retyped.clone();
+        retyped2.block_type = "quote".into();
+        let mut typed2 = typed.clone();
+        typed2
+            .fields
+            .insert("type".into(), rdy_model::FieldValue::Str("note".into()));
+        let mut ordered2 = ordered.clone();
+        ordered2
+            .fields
+            .insert("order".into(), rdy_model::FieldValue::Str("2".into()));
+        let mut rekeyed2 = rekeyed.clone();
+        rekeyed2.order = "dd".into();
+        let mut mover2 = mover.clone();
+        mover2.parent = Some(b.id.clone());
+        mover2.order = "z".into();
+        let mut s3moved = s3.clone();
+        s3moved.order = "0".into();
+        let to = state(&[
+            &a, &b, &retyped2, &typed2, &ordered2, &rekeyed2, &mover2, &last, &s1, &s2, &s3moved,
+        ]);
+        let rv = between_states(&from, &to);
+        for edited in [&retyped.id, &typed.id, &ordered.id, &mover.id, &s3.id] {
+            assert_eq!(rv.mark(edited), Some(Mark::Edited), "{edited}");
+        }
+        assert_eq!(rv.mark(&rekeyed.id), None, "a new key at the same place");
+        assert_eq!(rv.mark(&s1.id), None, "moved around, it kept its key");
+        assert_eq!(rv.mark(&a.id), None);
+        // removed in a's reading order: the moved block, then the code, each before the next
+        // block that stays
+        let lines: Vec<(Option<&BlockId>, Vec<&BlockId>)> = rv
+            .removed_in(&a.id)
+            .iter()
+            .map(|l| (l.before.as_ref(), l.blocks.iter().map(|b| &b.id).collect()))
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                (Some(&last.id), vec![&mover.id]),
+                (Some(&last.id), vec![&code.id]),
+            ]
+        );
+        assert_eq!(rv.removed_in(&a.id)[1].blocks[0].body, "fn main() {}");
+        let da = rv.doc(&a.id).unwrap();
+        assert_eq!(
+            (da.mark, da.edited, da.new, da.removed),
+            (Mark::Edited, 3, 0, 2)
+        );
+        assert_eq!(da.counts().as_deref(), Some("3 edited \u{b7} 2 removed"));
+        let db = rv.doc(&b.id).unwrap();
+        assert_eq!(
+            (db.mark, db.edited, db.new, db.removed),
+            (Mark::Edited, 2, 0, 0)
+        );
+        assert_eq!(
+            changed(&rv),
+            sorted(&[
+                "p-AAAAA", "p-BBBBB", "p-CCCCC", "p-EEEEE", "p-FFFFF", "p-KKKKK"
+            ])
+        );
+        // a doc moved under another parent is a page move: Edited and counted
+        let f = blk("f-AAAAA", tree::FOLDER, None, "c", "");
+        let mut a_moved = a.clone();
+        a_moved.parent = Some(f.id.clone());
+        let rv = between_states(&state(&[&a, &f]), &state(&[&a_moved, &f]));
+        assert_eq!(rv.page_mark(&a.id), Some(Mark::Edited));
+        assert_eq!(changed(&rv), vec!["d-AAAAA".to_string()]);
     }
 }

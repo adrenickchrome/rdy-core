@@ -523,7 +523,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             check_max_tokens(req.max_tokens)?;
             run_inbox(cx.engine, cx.session, req)
         }
-        "site_url" => site_url(cx, parse(op, args, "{scope?}")?),
+        "site_url" => site_url(cx, parse(op, args, "{scope?, profile?, only?}")?),
         "pending" => pending(cx, parse(op, args, "{max_tokens?, session_ref?}")?),
         "answer" => answer(
             cx,

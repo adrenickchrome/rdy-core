@@ -1,14 +1,19 @@
 //! ls2: the live layer: revisions, the input key, the diff, and the bytes a page is served as.
+use rdy_engine::site_scope::ScopeRef;
+use rdy_engine::site_target::SiteTarget;
 use rdy_engine::{Rdy, Scope};
 use rdy_render::live::*;
 use rdy_render::{SlotKind, escape};
 use serde_json::json;
 
+/// The source target of canon: its pages start at `/`.
+const CANON: SiteTarget = SiteTarget::Source(ScopeRef::Canon);
+
 #[test]
 fn ls2_a_page_is_served_filled_with_the_script() {
     let (_dir, r, _ids) = rdy_qa::golden::project();
-    let b = build_live(&r.read(), &Scope::Canon, "/").unwrap();
-    let html = String::from_utf8(page(&b, "index.html", "canon").unwrap()).unwrap();
+    let b = build_live(&r.read(), &Scope::Canon, &CANON).unwrap();
+    let html = String::from_utf8(page(&b, "index.html", &CANON).unwrap()).unwrap();
     // the header and the label sit in exactly the recorded ranges, moved on by the script tag put
     // in the head
     let base = &b.files["index.html"];
@@ -28,15 +33,16 @@ fn ls2_a_page_is_served_filled_with_the_script() {
         b.revs["index.html"], b.label_rev
     );
     assert!(html.contains(&tag), "{html}");
-    let llms = String::from_utf8(page(&b, "llms.txt", "canon").unwrap()).unwrap();
+    let llms = String::from_utf8(page(&b, "llms.txt", &CANON).unwrap()).unwrap();
     assert!(llms.contains(&b.label));
     assert_eq!(
-        page(&b, "assets/site.css", "canon").unwrap(),
+        page(&b, "assets/site.css", &CANON).unwrap(),
         b.files["assets/site.css"]
     );
-    assert!(page(&b, "no/such.html", "canon").is_none());
-    let v = build_live(&r.read(), &Scope::View("editing".into()), "/~view/editing/").unwrap();
-    let vhtml = String::from_utf8(page(&v, "index.html", "view:editing").unwrap()).unwrap();
+    assert!(page(&b, "no/such.html", &CANON).is_none());
+    let editing = SiteTarget::Source(ScopeRef::View("editing".into()));
+    let v = build_live(&r.read(), &Scope::View("editing".into()), &editing).unwrap();
+    let vhtml = String::from_utf8(page(&v, "index.html", &editing).unwrap()).unwrap();
     assert!(
         vhtml.contains("scope=view:editing&amp;page=index.html"),
         "{vhtml}"
@@ -64,7 +70,8 @@ fn ls2_a_proposal_version_renders_in_review_mode() {
         .unwrap();
     let pref = r.resolve_proposal(&p.id).unwrap().to_string();
     let scope = r.read().resolve_scope(&format!("proposal:{pref}")).unwrap();
-    let b = build_live(&r.read(), &scope, &format!("/~proposal/{pref}/")).unwrap();
+    let target = SiteTarget::Source(ScopeRef::Proposal(pref.clone()));
+    let b = build_live(&r.read(), &scope, &target).unwrap();
     // the new doc is the one changed block (O2, the task-5 ruling); "draft" is only the
     // lifecycle state (D-BMX8P, O9)
     assert!(
@@ -83,8 +90,7 @@ fn ls2_a_proposal_version_renders_in_review_mode() {
         "{}",
         b.header
     );
-    let home =
-        String::from_utf8(page(&b, "index.html", &format!("proposal:{pref}")).unwrap()).unwrap();
+    let home = String::from_utf8(page(&b, "index.html", &target).unwrap()).unwrap();
     assert!(
         home.contains("Show changes") && home.contains("New"),
         "review mode"
@@ -95,9 +101,9 @@ fn ls2_a_proposal_version_renders_in_review_mode() {
 fn ls2_a_body_edit_changes_only_its_page() {
     let _clock = rdy_qa::golden::fixture_clock();
     let (_dir, mut r) = two_docs();
-    let before = build_live(&r.read(), &Scope::Canon, "/").unwrap();
+    let before = build_live(&r.read(), &Scope::Canon, &CANON).unwrap();
     edit_second_prose(&mut r, "work", "Alpha", "A new second paragraph.", true);
-    let after = build_live(&r.read(), &Scope::Canon, "/").unwrap();
+    let after = build_live(&r.read(), &Scope::Canon, &CANON).unwrap();
     let d = diff(&before, &after);
     assert_eq!(
         d.reload.into_iter().collect::<Vec<_>>(),
@@ -110,10 +116,10 @@ fn ls2_a_body_edit_changes_only_its_page() {
 fn ls2_a_tag_changes_the_label_and_the_home_page() {
     let _clock = rdy_qa::golden::fixture_clock();
     let (_dir, mut r) = two_docs();
-    let before = build_live(&r.read(), &Scope::Canon, "/").unwrap();
+    let before = build_live(&r.read(), &Scope::Canon, &CANON).unwrap();
     r.tag(&rdy_qa::golden::approver(), "v1.0.0", None, None)
         .unwrap();
-    let after = build_live(&r.read(), &Scope::Canon, "/").unwrap();
+    let after = build_live(&r.read(), &Scope::Canon, &CANON).unwrap();
     let d = diff(&before, &after);
     assert_eq!(d.label.as_deref(), Some("v1.0.0"));
     assert!(d.reload.contains("index.html"), "home lists the versions");
@@ -144,7 +150,7 @@ fn ls2_an_unchanged_key_means_unchanged_pages() {
         .collect();
     let mut sites: Vec<_> = scopes
         .iter()
-        .map(|s| build_live(&r.read(), s, "/").unwrap())
+        .map(|s| build_live(&r.read(), s, &CANON).unwrap())
         .collect();
     let steps: Vec<(&str, Step)> = vec![
         (
@@ -180,7 +186,7 @@ fn ls2_an_unchanged_key_means_unchanged_pages() {
         step(&mut r);
         for (i, s) in scopes.iter().enumerate() {
             let k = inputs_key(&r.read(), s, 0).unwrap();
-            let site = build_live(&r.read(), s, "/").unwrap();
+            let site = build_live(&r.read(), s, &CANON).unwrap();
             if k == keys[i] {
                 assert!(
                     site.files == sites[i].files,
@@ -237,7 +243,7 @@ fn ls2_a_dismissal_moves_canons_key_and_its_pages() {
     use rdy_engine::tensions::{TensionKind, tension_label};
     let (_d, mut r, _s) = rdy_qa::golden::retired_reference();
     let key = inputs_key(&r.read(), &Scope::Canon, 0).unwrap();
-    let before = build_live(&r.read(), &Scope::Canon, "/").unwrap();
+    let before = build_live(&r.read(), &Scope::Canon, &CANON).unwrap();
     assert!(
         before.files.contains_key("disagreements.html"),
         "guard: canon disagrees"
@@ -261,7 +267,7 @@ fn ls2_a_dismissal_moves_canons_key_and_its_pages() {
         key,
         "a dismissal moves the key"
     );
-    let after = build_live(&r.read(), &Scope::Canon, "/").unwrap();
+    let after = build_live(&r.read(), &Scope::Canon, &CANON).unwrap();
     let d = diff(&before, &after);
     assert!(
         d.reload.contains("disagreements.html") && d.reload.contains("index.html"),
@@ -315,12 +321,12 @@ fn edit_second_prose(r: &mut Rdy, view: &str, title: &str, body: &str, land: boo
 fn ls2_a_permalink_page_has_no_revision_and_no_script() {
     let _clock = rdy_qa::golden::fixture_clock();
     let (_dir, r) = two_docs();
-    let b = build_live(&r.read(), &Scope::Canon, "/").unwrap();
+    let b = build_live(&r.read(), &Scope::Canon, &CANON).unwrap();
     let links: Vec<_> = b.files.keys().filter(|p| p.starts_with("go/")).collect();
     assert!(!links.is_empty(), "guard: the site has permalink pages");
     for p in links {
         assert!(!b.revs.contains_key(p), "{p}");
-        assert_eq!(page(&b, p, "canon").unwrap(), b.files[p], "{p}");
+        assert_eq!(page(&b, p, &CANON).unwrap(), b.files[p], "{p}");
     }
     assert!(b.files.keys().filter(|p| p.ends_with(".html")).count() > b.revs.len());
 }
@@ -331,11 +337,11 @@ fn ls2_a_new_label_goes_only_into_the_recorded_ranges() {
     let _clock = rdy_qa::golden::fixture_clock();
     let (_dir, mut r) = two_docs();
     edit_second_prose(&mut r, "work", "Alpha", "It reads unversioned, here.", true);
-    let mut b = build_live(&r.read(), &Scope::Canon, "/").unwrap();
+    let mut b = build_live(&r.read(), &Scope::Canon, &CANON).unwrap();
     assert!(b.label.contains("unversioned"), "guard: {}", b.label);
     let old = b.label.clone();
     b.label = "v9 <&>, 3 updates since".into();
-    let html = String::from_utf8(page(&b, "alpha.html", "canon").unwrap()).unwrap();
+    let html = String::from_utf8(page(&b, "alpha.html", &CANON).unwrap()).unwrap();
     // the colophon holds the label; the header holds the pill and its chips (sr5)
     assert_eq!(html.matches(&escape(&b.label)).count(), 1, "{html}");
     assert!(
@@ -343,15 +349,15 @@ fn ls2_a_new_label_goes_only_into_the_recorded_ranges() {
         "the text in content is kept"
     );
     assert!(!html.contains(&format!("<span data-rdy-label>{old}</span>")));
-    let llms = String::from_utf8(page(&b, "llms.txt", "canon").unwrap()).unwrap();
+    let llms = String::from_utf8(page(&b, "llms.txt", &CANON).unwrap()).unwrap();
     assert!(llms.contains(&b.label), "the llms files take the label raw");
     // final review M4: the llms files take the label on one line, as the static build writes it
     // (a proposal title or a view name can hold a run of spaces or a line break)
     b.label = "Two  spaces\nand a newline".into();
-    let html = String::from_utf8(page(&b, "alpha.html", "canon").unwrap()).unwrap();
+    let html = String::from_utf8(page(&b, "alpha.html", &CANON).unwrap()).unwrap();
     assert_eq!(html.matches(&escape(&b.label)).count(), 1, "{html}");
     for f in ["llms.txt", "llms-full.txt"] {
-        let text = String::from_utf8(page(&b, f, "canon").unwrap()).unwrap();
+        let text = String::from_utf8(page(&b, f, &CANON).unwrap()).unwrap();
         assert!(text.contains("Two spaces and a newline"), "{f}: {text}");
         assert!(!text.contains("Two  spaces"), "{f}: {text}");
         assert!(!text.contains("\nand a newline"), "{f}: {text}");

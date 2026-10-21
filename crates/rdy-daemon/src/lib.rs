@@ -35,7 +35,7 @@ pub mod spawn;
 pub use client::{
     Attempt, Client, DEFAULT_START_TIMEOUT, HELD_GRACE, LOCK_RETRY, LOG_TAIL_LINES, Pending,
     SpawnFn, StartOptions, StopRequest, connect, connect_backoff, connect_or_start, live_daemon,
-    log_tail, log_tail_since, request_stop, stop_socket,
+    log_tail, log_tail_since, not_ready, request_stop, stop_socket,
 };
 pub use spawn::{Spawned, detach, process_alive, serve_command, spawn_serve, terminate};
 mod notify;
@@ -49,7 +49,10 @@ pub mod ops;
 pub use ops::{Cleaned, OPS, OpContext, clean_quarantine, dispatch, quarantine, wc_in_flight};
 pub mod serve;
 
-pub use serve::{CtlSession, ServeError, ServeHandler, ServeOptions, ServeRun, serve, start};
+pub use serve::{
+    CtlSession, ProfileSiteReady, ServeError, ServeHandler, ServeOptions, ServeRun, serve,
+    serve_with_profile, start,
+};
 pub mod proxy;
 
 pub use proxy::run_stdio;

@@ -289,6 +289,17 @@ fn pub9_check_is_read_only_and_works_without_a_daemon() {
             "--scope",
             "tag:v1.0.0",
         ],
+        // the seed's view `work` exists: a view is a candidate (D-CWC91)
+        vec![
+            "--no-daemon",
+            "--json",
+            "publication",
+            "check",
+            "--profile",
+            "site",
+            "--scope",
+            "work",
+        ],
     ] {
         let (ok, v) = s.json(&args);
         assert!(ok, "{v}");
@@ -301,15 +312,6 @@ fn pub9_check_is_read_only_and_works_without_a_daemon() {
             "check",
             "--profile",
             "missing",
-        ],
-        vec![
-            "--no-daemon",
-            "publication",
-            "check",
-            "--profile",
-            "site",
-            "--scope",
-            "work",
         ],
         vec![
             "--no-daemon",

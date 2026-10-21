@@ -13,6 +13,8 @@ mod daemon_serve;
 mod daemon_short_socket;
 mod daemon_site_http;
 mod daemon_site_live;
+mod daemon_site_profile_listeners;
+mod daemon_site_profile_routes;
 mod daemon_site_routes;
 mod daemon_site_versions;
 mod daemon_stop_version;

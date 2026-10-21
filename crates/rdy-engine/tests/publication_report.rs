@@ -1,7 +1,7 @@
 //! pub9 (D-0VCQ5, D-KDFZ3, D-KQ4CA): `publication::check` is the one report behind the MCP tool,
-//! the ctl op and the command. It reads one snapshot, takes only canon, tags and landings, caps
-//! every listed array at 200 rows while its counts cover every row, and returns success for a
-//! blocked policy result.
+//! the ctl op and the command. It reads one snapshot, takes canon, tags and landings (and, for the
+//! candidate, a view or a proposal version: D-CWC91), caps every listed array at 200 rows while
+//! its counts cover every row, and returns success for a blocked policy result.
 mod common;
 
 use rdy_engine::publication;
@@ -421,23 +421,43 @@ fn pub9_check_returns_a_closed_report_and_blocked_is_a_result() {
     assert_eq!(v["disclosure"]["new_reference_count"], 0);
     assert_eq!(v["disclosure"]["profile_changed"], false);
 
-    // only canon, tag:<name> and landing:<hash> are scopes
+    // the candidate is canon, a tag, a landing, an existing view or a proposal version
+    // (D-CWC91): a bare and an explicit view name are one candidate
     let bad = |s: &str| publication::check(&r.read(), "open", Some(s), None).unwrap_err();
-    for s in [
-        "work",
-        "view:work",
-        "inflight",
-        "proposal:P-ABCDE@1",
-        "",
-        "Canon",
-    ] {
+    let in_view = publication::check(&r.read(), "open", Some("work"), None).unwrap();
+    assert_eq!(
+        in_view["scope"],
+        json!({"kind": "view", "landing": null, "view": "work"})
+    );
+    assert_eq!(in_view["references"]["status"], "blocked");
+    assert_eq!(
+        publication::check(&r.read(), "open", Some("view:work"), None).unwrap(),
+        in_view
+    );
+    // a missing view or proposal is its own lookup's refusal
+    assert_err(
+        &bad("view:nosuch"),
+        E_NOT_FOUND,
+        "no view \"nosuch\"",
+        "list views with rdy status (MCP: rdy_overview), or read canon",
+    );
+    assert_eq!(bad("proposal:P-ABCDE@1").code, E_NOT_FOUND);
+    // the in-flight scope and an empty text are no candidate
+    for s in ["inflight", "", "view:"] {
         assert_err(
             &bad(s),
             E_BAD_INPUT,
-            "Publication check scope must be canon, tag:<name>, or landing:<hash>.",
-            "Use canon, tag:<name>, or landing:<hash>.",
+            "Publication check scope must be canon, tag:<name>, landing:<hash>, a view, or proposal:P-x@n.",
+            "Use canon, tag:<name>, landing:<hash>, view:<name>, or proposal:P-x@n.",
         );
     }
+    // a view name is case-sensitive: `Canon` names a view, and none exists
+    assert_err(
+        &bad("Canon"),
+        E_NOT_FOUND,
+        "no view \"Canon\"",
+        "list views with rdy status (MCP: rdy_overview), or read canon",
+    );
     assert_eq!(bad("tag:9.9.9").code, E_NOT_FOUND);
     // the candidate resolves first: a missing profile wins over a bad baseline
     let e = publication::check(&r.read(), "nope", None, Some("work")).unwrap_err();
