@@ -270,31 +270,66 @@ fn read_lines(
     }
 }
 
-/// Reads the server's stderr into `sink`. Bounded: each chunk is counted before it is kept, and
-/// passing the cap is sent to the client as [`Incoming::Overflow`].
+/// Reads the server's stderr into `sink`. Unlimited, as before: bytes that are not UTF-8 become
+/// U+FFFD. Bounded: each chunk is counted before it is kept, and passing the cap is sent to the
+/// client as [`Incoming::Overflow`]. The stream must be UTF-8: a character may be split across
+/// reads, but bytes that can never be UTF-8, or a character cut off at the end, are sent as
+/// [`Incoming::Invalid`] (the rest is still read and counted, but not kept).
 fn read_stderr(
     mut err: impl Read,
     sink: &Mutex<String>,
     bound: Option<(&Bound, &Sender<Incoming>)>,
 ) {
+    let keep = |text: &str| {
+        sink.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_str(text)
+    };
     let mut buf = [0u8; 4096];
+    // the start of a character that the last read cut off: at most three bytes
+    let mut carry: Vec<u8> = Vec::new();
+    let mut invalid = false;
     loop {
-        match err.read(&mut buf) {
+        let n = match err.read(&mut buf) {
             Ok(0) => break,
-            Ok(n) => {
-                if let Some((b, tx)) = bound
-                    && !b.admit(n)
-                {
-                    let _ = tx.send(Incoming::Overflow);
-                    break;
-                }
-                sink.lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push_str(&String::from_utf8_lossy(&buf[..n]));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => break,
+        };
+        let Some((b, tx)) = bound else {
+            keep(&String::from_utf8_lossy(&buf[..n]));
+            continue;
+        };
+        if !b.admit(n) {
+            let _ = tx.send(Incoming::Overflow);
+            return;
         }
+        if invalid {
+            continue;
+        }
+        carry.extend_from_slice(&buf[..n]);
+        let (valid, rest) = match std::str::from_utf8(&carry) {
+            Ok(text) => (text.len(), false),
+            // a character that the next read may complete
+            Err(e) if e.error_len().is_none() => (e.valid_up_to(), false),
+            Err(_) => (0, true),
+        };
+        if rest {
+            invalid = true;
+            carry.clear();
+            let _ = tx.send(Incoming::Invalid);
+            continue;
+        }
+        if let Ok(text) = std::str::from_utf8(&carry[..valid]) {
+            keep(text);
+        }
+        carry.drain(..valid);
+    }
+    if let Some((_, tx)) = bound
+        && !invalid
+        && !carry.is_empty()
+    {
+        let _ = tx.send(Incoming::Invalid);
     }
 }
 
@@ -312,37 +347,119 @@ fn join_within(h: JoinHandle<()>, guard: Duration) -> bool {
 }
 
 /// The [`Reply`] in a `tools/call` response `v`. Lenient (the unlimited clients): a missing
-/// text reads as `null`. Strict (a bounded session): the response must hold an `error` object
-/// or a `result` object whose `content[0].text` is a string and whose `isError`, when given, is
-/// a boolean; `None` otherwise.
+/// text reads as `null`. Strict (a bounded session, whose `v` already passed [`message`]): an
+/// `error` is a JSON-RPC error object, and a `result` is a tool result whose content blocks
+/// each have their type's required fields, whose first block is text, whose `isError` (when
+/// given) is a boolean and whose `structuredContent` (when given) is an object; `None`
+/// otherwise.
 fn decode_reply(v: &Value, strict: bool) -> Option<Reply> {
     if let Some(error) = v.get("error") {
-        if strict && !error.is_object() {
+        if strict && !rpc_error(error) {
             return None;
         }
         return Some(Reply::RpcError(error.clone()));
     }
     let result = &v["result"];
-    let text = match result["content"][0]["text"].as_str() {
-        Some(t) => t,
-        None if strict => return None,
-        None => "null",
-    };
+    if strict && !tool_result(result) {
+        return None;
+    }
+    let text = result["content"][0]["text"].as_str().unwrap_or("null");
     let is_error = match result.get("isError") {
         None => false,
         Some(Value::Bool(b)) => *b,
-        Some(_) if strict => return None,
         Some(other) => other == &json!(true),
     };
-    if strict && !result.is_object() {
-        return None;
-    }
     let body: Value = serde_json::from_str(text).unwrap_or(Value::String(text.to_string()));
     Some(if is_error {
         Reply::ToolError(body)
     } else {
         Reply::Ok(body)
     })
+}
+
+/// Whether `v` holds the string field `key`.
+fn has_str(v: &Value, key: &str) -> bool {
+    v.get(key).is_some_and(Value::is_string)
+}
+
+/// Whether `v` holds the object field `key`.
+fn has_object(v: &Value, key: &str) -> bool {
+    v.get(key).is_some_and(Value::is_object)
+}
+
+/// Whether `e` is a JSON-RPC error object: an integer `code` and a string `message`.
+fn rpc_error(e: &Value) -> bool {
+    e.is_object() && (e["code"].is_i64() || e["code"].is_u64()) && has_str(e, "message")
+}
+
+/// Whether `r` is a `tools/call` result: a non-empty `content` array of well-formed blocks, the
+/// first of them text, with an optional boolean `isError` and an optional object
+/// `structuredContent`.
+fn tool_result(r: &Value) -> bool {
+    let Some(content) = r.get("content").and_then(Value::as_array) else {
+        return false;
+    };
+    r.is_object()
+        && content.first().is_some_and(|c| c["type"] == "text")
+        && content.iter().all(content_block)
+        && r.get("isError").is_none_or(Value::is_boolean)
+        && r.get("structuredContent").is_none_or(Value::is_object)
+}
+
+/// Whether `c` is an MCP content block with its type's required fields: `text`, `image` and
+/// `audio` (base64 `data` and `mimeType`), `resource_link` (`uri` and `name`) or `resource`
+/// (a `resource` with a `uri` and its `text` or `blob`).
+fn content_block(c: &Value) -> bool {
+    match c.get("type").and_then(Value::as_str) {
+        Some("text") => has_str(c, "text"),
+        Some("image" | "audio") => has_str(c, "data") && has_str(c, "mimeType"),
+        Some("resource_link") => has_str(c, "uri") && has_str(c, "name"),
+        Some("resource") => {
+            let r = &c["resource"];
+            has_object(c, "resource")
+                && has_str(r, "uri")
+                && (has_str(r, "text") || has_str(r, "blob"))
+        }
+        _ => false,
+    }
+}
+
+/// Whether `r` is an `initialize` result: a `protocolVersion`, a `capabilities` object and a
+/// `serverInfo` with its `name` and `version`.
+fn initialize_result(r: &Value) -> bool {
+    let info = &r["serverInfo"];
+    has_str(r, "protocolVersion")
+        && has_object(r, "capabilities")
+        && has_str(info, "name")
+        && has_str(info, "version")
+}
+
+/// One line of a bounded session's stdout as a JSON-RPC 2.0 message the client accepts: a
+/// response (a number or string `id` and exactly one of `result` and `error`) or a
+/// notification (a string `method` and no `id`). A request from the server is refused: the
+/// client answers none. Anything else is [`McpFailure::Protocol`].
+fn message(line: &str) -> Result<Value, McpFailure> {
+    let v: Value = serde_json::from_str(line).map_err(|_| McpFailure::Protocol)?;
+    if !v.is_object() || v["jsonrpc"] != "2.0" {
+        return Err(McpFailure::Protocol);
+    }
+    let response = match (v.get("id"), v.get("method")) {
+        (Some(id), None) => {
+            (id.is_number() || id.is_string())
+                && v.get("result").is_some() != v.get("error").is_some()
+        }
+        (None, Some(method)) => {
+            method.is_string()
+                && v.get("params")
+                    .is_none_or(|p| p.is_object() || p.is_array())
+        }
+        _ => false,
+    };
+    if response {
+        Ok(v)
+    } else {
+        Err(McpFailure::Protocol)
+    }
 }
 
 impl McpClient {
@@ -545,7 +662,7 @@ impl McpClient {
         let initialized = (|| {
             let id = c.next_id();
             let v = c.try_request(&McpClient::initialize_request(id), id)?;
-            if v.get("error").is_some() || !v["result"].is_object() {
+            if v.get("error").is_some() || !initialize_result(&v["result"]) {
                 return Err(McpFailure::Protocol);
             }
             c.init = v;
@@ -603,6 +720,18 @@ impl McpClient {
         }
         if self.bound.as_ref().is_some_and(|b| b.passed()) {
             return Err(McpFailure::OutputLimit);
+        }
+        // Both drains are joined, so everything the server wrote up to the end of its stdout
+        // is queued: each line must be a JSON-RPC message, and stdout and stderr valid.
+        for incoming in self.lines.try_iter() {
+            match incoming {
+                Incoming::Line(line) => {
+                    message(&line)?;
+                }
+                Incoming::Invalid => return Err(McpFailure::Protocol),
+                Incoming::Overflow => return Err(McpFailure::OutputLimit),
+                Incoming::Closed => {}
+            }
         }
         let take = |m: &Arc<Mutex<String>>| m.lock().unwrap_or_else(|e| e.into_inner()).clone();
         Ok(Transcript {
@@ -695,19 +824,14 @@ impl McpClient {
                 }
                 Err(RecvTimeoutError::Timeout) => return Err(McpFailure::Deadline),
             };
-            let v: Value = serde_json::from_str(&line).map_err(|_| McpFailure::Protocol)?;
-            if !v.is_object() || v["jsonrpc"] != "2.0" {
-                return Err(McpFailure::Protocol);
-            }
+            let v = message(&line)?;
             if let Some(got) = v.get("id") {
                 if got == &json!(id) {
                     return Ok(v);
                 }
                 self.pending.push(v);
-            } else if v["method"].is_string() {
-                self.notifications.push(v);
             } else {
-                return Err(McpFailure::Protocol);
+                self.notifications.push(v);
             }
         }
     }
@@ -1039,7 +1163,286 @@ sleep 20"#;
     /// The bounded session's cap in these tests: the release checker's.
     const CAP: usize = platform::RELEASE_CHILD_OUTPUT_MAX;
     /// A peer's reply to `initialize`.
-    const INIT: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}"#;
+    const INIT: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"peer","version":"0"}}}"#;
+
+    /// A peer script that answers `initialize`, reads the `initialized` notification, then runs
+    /// `then`.
+    fn after_init(then: &str) -> String {
+        format!("read -r l; echo '{INIT}'; read -r n; {then}")
+    }
+
+    /// A started bounded session of the peer `script`.
+    fn bounded(script: &str) -> McpClient {
+        McpClient::try_launch_bounded(peer(script, &[]), CAP)
+            .unwrap_or_else(|f| panic!("launch: {f:?}: {script}"))
+    }
+
+    #[test]
+    fn pre3_bounded_mcp_finish_checks_the_rest_of_the_output() {
+        use McpFailure::*;
+        // Everything the server writes after the last reply, up to the end of its stdout, is
+        // checked before a finish succeeds. The peer waits for its input to close first.
+        let cases: [(&str, String, Result<Option<i32>, McpFailure>); 8] = [
+            (
+                "a line that is not JSON",
+                "cat > /dev/null; echo 'not json'".into(),
+                Err(Protocol),
+            ),
+            (
+                "a line that is not UTF-8",
+                r"cat > /dev/null; printf '\377\n'".into(),
+                Err(Protocol),
+            ),
+            (
+                "a last line with no LF",
+                r#"cat > /dev/null; printf '{"jsonrpc":"2.0","method":"notifications/message"}'"#
+                    .into(),
+                Err(Protocol),
+            ),
+            (
+                "a JSON line that is not JSON-RPC",
+                r#"cat > /dev/null; echo '{"id":9,"result":{}}'"#.into(),
+                Err(Protocol),
+            ),
+            (
+                "a response with neither a result nor an error",
+                r#"cat > /dev/null; echo '{"jsonrpc":"2.0","id":9}'"#.into(),
+                Err(Protocol),
+            ),
+            (
+                "a notification",
+                r#"cat > /dev/null; echo '{"jsonrpc":"2.0","method":"notifications/message","params":{}}'"#
+                    .into(),
+                Ok(Some(0)),
+            ),
+            ("nothing more", "cat > /dev/null".into(), Ok(Some(0))),
+            (
+                "a nonzero exit, for the caller to judge",
+                "cat > /dev/null; exit 17".into(),
+                Ok(Some(17)),
+            ),
+        ];
+        for (what, then, want) in cases {
+            let c = bounded(&after_init(&then));
+            let pid = c.pid;
+            assert_eq!(c.try_finish(DEADLINE).map(|t| t.code), want, "{what}");
+            assert!(platform::process_exited(pid), "{what}: the server reaped");
+        }
+        // Output past the cap still wins over a malformed line.
+        let c = bounded(&after_init(&format!(
+            "cat > /dev/null; echo 'not json'; head -c {CAP} /dev/zero >&2"
+        )));
+        assert_eq!(c.try_finish(DEADLINE).map(|_| ()), Err(OutputLimit));
+    }
+
+    #[test]
+    fn pre3_bounded_mcp_checks_reply_shapes() {
+        use McpFailure::*;
+        // One tools/call reply line (id 2) from a peer; the session stops after a failure.
+        let call = |reply: &str| -> Result<Reply, McpFailure> {
+            let mut c = bounded(&after_init(&format!(
+                "read -r c; echo '{reply}'; cat > /dev/null"
+            )));
+            let got = c.try_call("rdy_overview", json!({}));
+            if got.is_err() {
+                assert_stopped(&c, reply);
+            }
+            got
+        };
+        let result = |r: &str| format!(r#"{{"jsonrpc":"2.0","id":2,"result":{r}}}"#);
+        let content = |items: &str| result(&format!(r#"{{"content":[{items}]}}"#));
+        let text = r#"{"type":"text","text":"{\"ok\":true}"}"#;
+        let refused: Vec<(&str, String)> = vec![
+            (
+                "an image in place of the text, with a text string",
+                content(r#"{"type":"image","text":"{}"}"#),
+            ),
+            (
+                "an image in place of the text, with a text object",
+                content(r#"{"type":"image","text":{}}"#),
+            ),
+            (
+                "a text that is not a string",
+                content(r#"{"type":"text","text":{}}"#),
+            ),
+            ("a text with no type", content(r#"{"text":"{}"}"#)),
+            ("a content item that is not an object", content(r#""x""#)),
+            (
+                "an unknown content type",
+                content(r#"{"type":"video","text":"{}"}"#),
+            ),
+            (
+                "an image without its data",
+                content(&format!(
+                    r#"{text},{{"type":"image","mimeType":"image/png"}}"#
+                )),
+            ),
+            (
+                "an audio without its mime type",
+                content(&format!(r#"{text},{{"type":"audio","data":"AA=="}}"#)),
+            ),
+            (
+                "a resource link without its uri",
+                content(&format!(r#"{text},{{"type":"resource_link","name":"n"}}"#)),
+            ),
+            (
+                "an embedded resource with neither text nor blob",
+                content(&format!(
+                    r#"{text},{{"type":"resource","resource":{{"uri":"rdy://x"}}}}"#
+                )),
+            ),
+            ("no content", result(r#"{"content":[]}"#)),
+            ("content that is not an array", result(r#"{"content":"x"}"#)),
+            ("a result with no content", result("{}")),
+            (
+                "isError that is not a boolean",
+                result(&format!(r#"{{"content":[{text}],"isError":"yes"}}"#)),
+            ),
+            (
+                "structuredContent that is not an object",
+                result(&format!(r#"{{"content":[{text}],"structuredContent":5}}"#)),
+            ),
+            ("a result that is not an object", result("[1]")),
+            (
+                "a result and an error together",
+                format!(
+                    r#"{{"jsonrpc":"2.0","id":2,"result":{{"content":[{text}]}},"error":{{"code":1,"message":"m"}}}}"#
+                ),
+            ),
+            (
+                "an error without a message",
+                r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32602}}"#.into(),
+            ),
+            (
+                "an error code that is not an integer",
+                r#"{"jsonrpc":"2.0","id":2,"error":{"code":"x","message":"m"}}"#.into(),
+            ),
+            (
+                "an error that is not an object",
+                r#"{"jsonrpc":"2.0","id":2,"error":"x"}"#.into(),
+            ),
+            (
+                "neither a result nor an error",
+                r#"{"jsonrpc":"2.0","id":2}"#.into(),
+            ),
+            (
+                "another JSON-RPC version",
+                format!(r#"{{"jsonrpc":"1.0","id":2,"result":{{"content":[{text}]}}}}"#),
+            ),
+            (
+                "an id that is neither a number nor a string",
+                format!(r#"{{"jsonrpc":"2.0","id":{{}},"result":{{"content":[{text}]}}}}"#),
+            ),
+            (
+                "a request from the server",
+                r#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#.into(),
+            ),
+            (
+                "a notification whose method is not a string",
+                r#"{"jsonrpc":"2.0","method":5}"#.into(),
+            ),
+        ];
+        for (what, reply) in refused {
+            assert_eq!(call(&reply).map(|_| ()), Err(Protocol), "{what}: {reply}");
+        }
+
+        // Well-formed replies: a text result (with the optional blocks), a tool error and a
+        // JSON-RPC error.
+        let full = content(&format!(
+            r#"{text},{{"type":"image","data":"AA==","mimeType":"image/png"}},{{"type":"audio","data":"AA==","mimeType":"audio/wav"}},{{"type":"resource_link","uri":"rdy://x","name":"x"}},{{"type":"resource","resource":{{"uri":"rdy://x","text":"t"}}}},{{"type":"resource","resource":{{"uri":"rdy://y","blob":"AA=="}}}}"#
+        ));
+        match call(&full) {
+            Ok(Reply::Ok(v)) => assert_eq!(v, json!({"ok": true})),
+            other => panic!("a full result: {other:?}"),
+        }
+        match call(&result(&format!(
+            r#"{{"content":[{text}],"isError":true,"structuredContent":{{}}}}"#
+        ))) {
+            Ok(Reply::ToolError(v)) => assert_eq!(v, json!({"ok": true})),
+            other => panic!("a tool error: {other:?}"),
+        }
+        match call(r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32602,"message":"bad","data":1}}"#) {
+            Ok(Reply::RpcError(v)) => assert_eq!(v["code"], -32602),
+            other => panic!("a JSON-RPC error: {other:?}"),
+        }
+
+        // The initialize result has its required fields.
+        for (what, init) in [
+            (
+                "no protocol version",
+                r#"{"jsonrpc":"2.0","id":1,"result":{"capabilities":{},"serverInfo":{"name":"p","version":"0"}}}"#,
+            ),
+            (
+                "no capabilities",
+                r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"p","version":"0"}}}"#,
+            ),
+            (
+                "no server info",
+                r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{}}}"#,
+            ),
+        ] {
+            let script = format!("read -r l; echo '{init}'; exec sleep 1000");
+            match McpClient::try_launch_inner(peer(&script, &[]), CAP) {
+                Ok(_) => panic!("{what}: the session started"),
+                Err((got, c)) => {
+                    assert_eq!(got, Protocol, "{what}");
+                    assert_stopped(&c.expect("a started session"), what);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pre3_bounded_mcp_stderr_must_be_utf8() {
+        use McpFailure::*;
+        // A character split across two reads of the stderr drain (each reads at most 4096
+        // bytes): the first 4096 bytes end inside it.
+        for (what, ch) in [
+            ("two bytes", "é"),
+            ("three bytes", "€"),
+            ("four bytes", "𝄞"),
+        ] {
+            let lead = 4096 - (ch.len() - 1);
+            let c = bounded(&after_init(&format!(
+                "cat > /dev/null; {{ head -c {lead} /dev/zero | tr '\\0' a; printf '{ch}'; }} >&2"
+            )));
+            let t = c
+                .try_finish(DEADLINE)
+                .unwrap_or_else(|f| panic!("{what}: {f:?}"));
+            assert_eq!(t.stderr, format!("{}{ch}", "a".repeat(lead)), "{what}");
+        }
+        for (what, bytes) in [
+            ("a byte that is never UTF-8", r"\377"),
+            ("a character cut off at the end", r"a\303"),
+            ("an unpaired continuation byte", r"\200"),
+        ] {
+            let c = bounded(&after_init(&format!(
+                "cat > /dev/null; printf '{bytes}' >&2"
+            )));
+            let pid = c.pid;
+            assert_eq!(c.try_finish(DEADLINE).map(|_| ()), Err(Protocol), "{what}");
+            assert!(platform::process_exited(pid), "{what}: the server reaped");
+        }
+        // During a call, too.
+        let mut c = bounded(&after_init(
+            r"read -r c; printf '\377' >&2; exec sleep 1000",
+        ));
+        assert_eq!(
+            c.try_call("rdy_overview", json!({})).map(|_| ()),
+            Err(Protocol)
+        );
+        assert_stopped(&c, "invalid stderr during a call");
+        drop(c);
+
+        // An unlimited client keeps its lossy stderr.
+        let mut cmd = peer(
+            &format!(r"read -r l; printf '\377' >&2; echo '{INIT}'; read -r n; cat > /dev/null"),
+            &[],
+        );
+        cmd.stderr(Stdio::piped());
+        let t = McpClient::launch(cmd).finish(DEADLINE);
+        assert_eq!(t.stderr, "\u{fffd}");
+    }
 
     /// A peer: `sh -c script`, with `args` as `$0`, `$1`, ...
     fn peer(script: &str, args: &[&Path]) -> Command {
@@ -1120,8 +1523,6 @@ sleep 20"#;
         let dir = tempfile::tempdir().expect("tempdir");
         let ready = dir.path().join("ready");
         fifo(&ready);
-        let after_init = |then: &str| format!("read -r l; echo '{INIT}'; read -r n; {then}");
-
         // The server closes its input: the call cannot be written.
         let mut c = McpClient::try_launch_bounded(
             peer(

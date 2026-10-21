@@ -1011,11 +1011,11 @@ impl InstallSetup<'static> {
     }
 }
 
-/// The process of a guide command: its program and arguments, started in its directory. The
-/// redirections are the check's to give.
+/// The process of a guide command: its program and arguments. Where it starts and its
+/// redirections are the check's to give ([`run_in`]).
 fn guide_process(c: &GuideCommand) -> Command {
     let mut cmd = Command::new(&c.program);
-    cmd.args(&c.args).current_dir(&c.cwd);
+    cmd.args(&c.args);
     cmd
 }
 
@@ -1045,67 +1045,107 @@ fn run_ok(
     }
 }
 
-/// Runs the guide command `c` (see [`run_ok`]).
-fn run_guide(
+/// Runs the guide command `c`, with `env` set, started in the open directory `dir` and with
+/// `stdin` (see [`run_ok`]). `c` is the command as the check runs it: each path it names is an
+/// entry of `dir`, or arrives as `stdin`, so a change to the paths that led to `dir` changes
+/// nothing the command reads or writes.
+fn run_in(
     setup: &InstallSetup,
     c: &GuideCommand,
+    dir: &File,
     stdin: Option<File>,
+    env: &[(&str, &str)],
     stage: InstallFailure,
 ) -> Result<Output, InstallFailure> {
-    run_ok(setup, (setup.process)(c), stdin, stage)
+    let mut cmd = (setup.process)(c);
+    cmd.envs(env.iter().copied());
+    platform::start_in_dir(&mut cmd, dir).map_err(|_| stage)?;
+    run_ok(setup, cmd, stdin, stage)
 }
 
-/// The checked download directory.
+/// `c` with each argument that names `path` replaced by `name`, an entry of the directory the
+/// command starts in.
+fn naming(c: &GuideCommand, path: &Path, name: &str) -> GuideCommand {
+    let mut c = c.clone();
+    for a in &mut c.args {
+        if Path::new(a) == path {
+            *a = name.into();
+        }
+    }
+    c
+}
+
+/// A file in DOWNLOAD, open, and the bytes read through that handle when it was checked.
+struct Checked {
+    file: File,
+    bytes: Vec<u8>,
+}
+
+/// The checked download directory and the parents of the outputs, each open. Every later step
+/// reaches these files and directories through the handles, never through the paths given.
 struct Download {
-    /// `SHA256SUMS`, open, and the bytes read through that handle.
-    manifest: File,
-    manifest_bytes: Vec<u8>,
-    /// The expected archive names present in DOWNLOAD, in manifest order.
-    present: Vec<String>,
+    /// DOWNLOAD itself.
+    dir: File,
+    manifest: Checked,
+    signature: Checked,
+    /// The expected archives present in DOWNLOAD, in manifest order: each name and its handle.
+    archives: Vec<(String, File)>,
+    /// The selected archive's place in `archives`.
+    selected: usize,
+    /// The directories UNPACK and PREFIX are made in.
+    unpack_parent: File,
+    prefix_parent: File,
 }
 
-/// A directory this check made, and where.
+/// A directory this check made, exclusively, in an open parent: its parent's handle, its name
+/// there and its own handle. Only such a directory is ever removed, and only through these
+/// handles; no path is resolved again to choose what to delete.
 struct MadeDir {
-    path: PathBuf,
     parent: File,
     name: OsString,
     dir: File,
-    /// Made by a `mkdir` that failed: removed only while empty.
-    empty_only: bool,
 }
 
 impl MadeDir {
-    /// The directory at `path` when one stands there now.
-    fn find(path: &Path, empty_only: bool) -> Option<MadeDir> {
-        let (parent, name) = (path.parent()?, path.file_name()?);
-        let parent = platform::open_dir(parent).ok()?;
-        let dir = rdy_store::pio::open_dir_at(&parent, name).ok()?;
-        Some(MadeDir {
-            path: path.to_path_buf(),
+    /// Makes the new directory `name` in `parent` (private to this user). A directory already
+    /// at `name`, which another process may have made, fails with `AlreadyExists` and is never
+    /// this check's.
+    fn make(parent: &File, name: &OsStr) -> io::Result<MadeDir> {
+        let parent = parent.try_clone()?;
+        let dir = platform::create_private_dir_at(&parent, name)?;
+        Ok(MadeDir {
             parent,
             name: name.to_os_string(),
             dir,
-            empty_only,
         })
     }
 
-    /// Removes the directory and what is in it, only while its path still names it; false
-    /// when that fails or the path names another file now.
+    /// Whether the parent's entry is still this directory.
+    fn in_place(&self) -> bool {
+        platform::holds_file(&self.parent, &self.name, &self.dir).unwrap_or(false)
+    }
+
+    /// Removes what is in the directory, through its own handle (`find . -mindepth 1 -delete`
+    /// started in it, which never follows a link), then the directory from its parent, only
+    /// while the parent's entry is still this directory. False when a step fails or the entry
+    /// names another file now: the directory is then kept.
     fn remove(self) -> bool {
-        if !platform::holds_file(&self.parent, &self.name, &self.dir).unwrap_or(false) {
+        if !self.in_place() {
             return false;
         }
-        if self.empty_only {
-            platform::remove_dir_at(&self.parent, &self.name).is_ok()
-        } else {
-            fs::remove_dir_all(&self.path).is_ok()
-        }
+        let mut find = Command::new("find");
+        find.args([".", "-mindepth", "1", "-delete"]);
+        let emptied = platform::start_in_dir(&mut find, &self.dir).is_ok()
+            && platform::run_bounded(find, None, RELEASE_CHILD_OUTPUT_MAX, RELEASE_CHILD_DEADLINE)
+                .is_ok_and(|o| o.status.success());
+        // rmdir removes only an empty directory: a directory swapped in since is not removed
+        emptied && self.in_place() && platform::remove_dir_at(&self.parent, &self.name).is_ok()
     }
 }
 
 /// The installed check's scratch directory.
 struct Smoke {
-    dir: tempfile::TempDir,
+    dir: MadeDir,
     /// False while a daemon may run for its project: it is kept then.
     stopped: bool,
 }
@@ -1141,11 +1181,10 @@ impl Owned {
         }
         if let Some(smoke) = self.smoke {
             if live {
-                // never removed on drop: the project's daemon may still run
-                let _ = smoke.dir.keep();
+                // kept: the project's daemon may still run (handles never remove on drop)
                 clean = false;
             } else {
-                clean &= smoke.dir.close().is_ok();
+                clean &= smoke.dir.remove();
             }
         }
         if let Some(prefix) = self.prefix
@@ -1162,14 +1201,24 @@ impl Owned {
     }
 }
 
-/// Opens `path` (an input in DOWNLOAD) and checks through the handle that it is a regular file
-/// of 1..=`max` bytes.
-fn open_download_file(path: &Path, max: u64) -> Result<File, InstallFailure> {
-    let file = platform::open_input(path).map_err(|_| InstallFailure::Input)?;
-    match file.metadata() {
-        Ok(meta) if meta.is_file() && (1..=max).contains(&meta.len()) => Ok(file),
-        _ => Err(InstallFailure::Input),
+/// Opens the entry `name` of the open directory `dir`, never through a link, as a regular file
+/// of 1..=`max` bytes; `None` for anything else.
+fn open_regular_at(dir: &File, name: &str, max: u64) -> Option<File> {
+    let file = rdy_store::pio::open_read_at(dir, name.as_ref()).ok()?;
+    let meta = file.metadata().ok()?;
+    (meta.is_file() && (1..=max).contains(&meta.len())).then_some(file)
+}
+
+/// Opens and reads the entry `name` of DOWNLOAD (see [`open_regular_at`]): all of its bytes,
+/// read through the handle.
+fn checked_at(dir: &File, name: &str, max: u64) -> Result<Checked, InstallFailure> {
+    let mut file = open_regular_at(dir, name, max).ok_or(InstallFailure::Input)?;
+    let len = file.metadata().map_err(|_| InstallFailure::Input)?.len();
+    let bytes = read_from_start(&mut file, max).map_err(|_| InstallFailure::Input)?;
+    if bytes.len() as u64 != len {
+        return Err(InstallFailure::Input);
     }
+    Ok(Checked { file, bytes })
 }
 
 /// Reads `file` from its start, at most `max + 1` bytes.
@@ -1183,9 +1232,28 @@ fn read_from_start(file: &mut File, max: u64) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// A handle to `file` that reads from its start (it shares the file's offset).
+fn rewound(file: &mut File) -> io::Result<File> {
+    use std::io::Seek;
+    file.seek(io::SeekFrom::Start(0))?;
+    file.try_clone()
+}
+
+/// Whether the entry `name` of the open directory `dir` is still `file` and holds exactly
+/// `bytes`, read through the handle.
+fn unchanged(dir: &File, name: &str, file: &mut File, bytes: &[u8]) -> bool {
+    platform::holds_file(dir, name.as_ref(), file).unwrap_or(false)
+        && read_from_start(file, bytes.len() as u64).is_ok_and(|now| now == bytes)
+}
+
 /// Whether nothing stands at `path`, not even a dangling link.
 fn absent(path: &Path) -> bool {
     matches!(fs::symlink_metadata(path), Err(e) if e.kind() == io::ErrorKind::NotFound)
+}
+
+/// Whether nothing stands at the entry `name` of the open directory `dir`, not even a link.
+fn absent_at(dir: &File, name: &OsStr) -> bool {
+    matches!(rdy_store::pio::open_read_at(dir, name), Err(e) if e.kind() == io::ErrorKind::NotFound)
 }
 
 /// `path` with its existing parent resolved; `None` when the parent is not a directory.
@@ -1197,14 +1265,16 @@ fn canonical_entry(path: &Path) -> Option<PathBuf> {
         .then(|| parent.join(name))
 }
 
-/// The filesystem checks, in order: DOWNLOAD is a directory of this user's that no one else
-/// may write; UNPACK and PREFIX are absent with directories as parents; the three do not
-/// overlap once resolved; the signer file is absent; the manifest, the signature and the
-/// selected archive (and the other archive, when present) are regular files within their
-/// caps. Then it creates the signer file. Every failure is [`InstallFailure::Input`].
+/// The filesystem checks, in order: DOWNLOAD (opened once) is a directory of this user's that
+/// no one else may write; UNPACK and PREFIX are absent with directories as parents; the three
+/// do not overlap once resolved; the signer file is absent; the manifest, the signature and the
+/// selected archive (and the other archive, when present) are regular files within their caps,
+/// each opened through DOWNLOAD's handle. Then it creates the signer file there. Every failure
+/// is [`InstallFailure::Input`].
 fn inspect(input: &InstallInput) -> Result<(Download, Owned), InstallFailure> {
     use InstallFailure::Input;
-    let meta = fs::metadata(&input.download).map_err(|_| Input)?;
+    let dir = platform::open_dir(&input.download).map_err(|_| Input)?;
+    let meta = dir.metadata().map_err(|_| Input)?;
     if !meta.is_dir()
         || rdy_store::pio::owner(&meta) != rdy_store::pio::own_uid()
         || rdy_store::pio::is_shared_writable(&meta)
@@ -1222,31 +1292,39 @@ fn inspect(input: &InstallInput) -> Result<(Download, Owned), InstallFailure> {
     if overlapping(&resolved) {
         return Err(Input);
     }
-    let dir = platform::open_dir(&input.download).map_err(|_| Input)?;
-    if !absent(&input.download.join(SIGNERS_FILE)) {
+    let open_parent = |p: &Path| -> Result<(File, OsString), InstallFailure> {
+        let (parent, name) = (p.parent().ok_or(Input)?, p.file_name().ok_or(Input)?);
+        let parent = platform::open_dir(parent).map_err(|_| Input)?;
+        if absent_at(&parent, name) {
+            Ok((parent, name.to_os_string()))
+        } else {
+            Err(Input)
+        }
+    };
+    let (unpack_parent, _) = open_parent(&resolved[1])?;
+    let (prefix_parent, _) = open_parent(&resolved[2])?;
+    if !absent_at(&dir, OsStr::new(SIGNERS_FILE)) {
         return Err(Input);
     }
-    let mut manifest = open_download_file(&input.download.join(MANIFEST_FILE), MANIFEST_MAX)?;
-    let manifest_bytes = read_from_start(&mut manifest, MANIFEST_MAX).map_err(|_| Input)?;
-    let read_all = manifest
-        .metadata()
-        .is_ok_and(|m| m.len() == manifest_bytes.len() as u64);
-    if !read_all || manifest_bytes.len() as u64 > MANIFEST_MAX {
-        return Err(Input);
-    }
-    open_download_file(&input.download.join(SIGNATURE_FILE), SIGNATURE_MAX)?;
-    let mut present = Vec::new();
+    let manifest = checked_at(&dir, MANIFEST_FILE, MANIFEST_MAX)?;
+    let signature = checked_at(&dir, SIGNATURE_FILE, SIGNATURE_MAX)?;
+    let mut archives = Vec::new();
+    let mut selected = None;
     for target in TARGETS {
         let name = archive_name(&input.version, target);
-        let path = input.download.join(&name);
-        if target == input.target || !absent(&path) {
-            open_download_file(&path, ARCHIVE_MAX)?;
-            present.push(name);
+        if target != input.target && absent_at(&dir, name.as_ref()) {
+            continue;
         }
+        let file = open_regular_at(&dir, &name, ARCHIVE_MAX).ok_or(Input)?;
+        if target == input.target {
+            selected = Some(archives.len());
+        }
+        archives.push((name, file));
     }
+    let selected = selected.ok_or(Input)?;
     let signers = platform::create_new_at(&dir, OsStr::new(SIGNERS_FILE)).map_err(|_| Input)?;
     let owned = Owned {
-        download: dir,
+        download: dir.try_clone().map_err(|_| Input)?,
         signers: Some(signers),
         unpack: None,
         prefix: None,
@@ -1254,9 +1332,13 @@ fn inspect(input: &InstallInput) -> Result<(Download, Owned), InstallFailure> {
     };
     Ok((
         Download {
+            dir,
             manifest,
-            manifest_bytes,
-            present,
+            signature,
+            archives,
+            selected,
+            unpack_parent,
+            prefix_parent,
         },
         owned,
     ))
@@ -1330,10 +1412,18 @@ fn check_with(
 }
 
 /// The stages after the input checks, in order.
+///
+/// Each command runs as [`run_in`] says: started in an open directory, naming entries of it.
+/// The guide's commands that read DOWNLOAD start in DOWNLOAD's handle. tar reads the checked
+/// archive's handle on stdin and extracts into UNPACK's handle (`tar -xzf -`), and install
+/// reads the checked extracted binary's handle and writes into `bin`'s handle (`install -m
+/// 755 /dev/stdin rdy`). The version check runs that file as `./rdy` in `bin`. The guide's two
+/// `mkdir` commands are made here instead, exclusively, through the parents' handles: a
+/// directory another process made is never this run's (see [`MadeDir`]).
 fn install_stages(
     input: &InstallInput,
     guide: &Guide,
-    download: &mut Download,
+    dl: &mut Download,
     setup: &InstallSetup,
     owned: &mut Owned,
 ) -> Result<(), InstallFailure> {
@@ -1341,7 +1431,7 @@ fn install_stages(
     use std::io::Write;
 
     // Signature: the signer file holds printf's bytes; OpenSSH verifies the raw manifest.
-    let printed = run_guide(setup, &guide.signers, None, Signature)?;
+    let printed = run_in(setup, &guide.signers, &dl.dir, None, &[], Signature)?;
     if printed.stdout != format!("{}\n", input.signer_line).as_bytes() {
         return Err(Signature);
     }
@@ -1350,66 +1440,137 @@ fn install_stages(
         .write_all(&printed.stdout)
         .and_then(|()| signers.sync_all())
         .map_err(|_| Signature)?;
-    let manifest = {
-        use std::io::Seek;
-        download
-            .manifest
-            .seek(io::SeekFrom::Start(0))
-            .and_then(|_| download.manifest.try_clone())
-            .map_err(|_| Signature)?
-    };
-    run_guide(setup, &guide.verify, Some(manifest), Signature)?;
-    // the bytes OpenSSH verified are the bytes read before
-    if read_from_start(&mut download.manifest, MANIFEST_MAX).map_err(|_| Signature)?
-        != download.manifest_bytes
-    {
+    let manifest = rewound(&mut dl.manifest.file).map_err(|_| Signature)?;
+    run_in(
+        setup,
+        &guide.verify,
+        &dl.dir,
+        Some(manifest),
+        &[],
+        Signature,
+    )?;
+    // what OpenSSH read is what was checked: the same entries, with the same bytes
+    let verified = unchanged(&dl.dir, SIGNERS_FILE, signers, &printed.stdout)
+        && unchanged(
+            &dl.dir,
+            MANIFEST_FILE,
+            &mut dl.manifest.file,
+            &dl.manifest.bytes,
+        )
+        && unchanged(
+            &dl.dir,
+            SIGNATURE_FILE,
+            &mut dl.signature.file,
+            &dl.signature.bytes,
+        );
+    if !verified {
         return Err(Signature);
     }
 
     // Checksums: the manifest's grammar, then the native tool, one OK line per present archive.
-    check_manifest(&download.manifest_bytes, &input.version)?;
-    let mut sums = (setup.process)(&guide.checksums);
-    sums.env("LC_ALL", "C");
-    let out = run_ok(setup, sums, None, Checksums)?;
-    let checked = download.present.iter().all(|name| {
+    check_manifest(&dl.manifest.bytes, &input.version)?;
+    let out = run_in(
+        setup,
+        &guide.checksums,
+        &dl.dir,
+        None,
+        &[("LC_ALL", "C")],
+        Checksums,
+    )?;
+    let checked = dl.archives.iter().all(|(name, _)| {
         out.stdout
             .split(|&b| b == b'\n')
             .any(|line| line == format!("{name}: OK").as_bytes())
     });
-    if download.present.is_empty() || !checked {
+    if dl.archives.is_empty() || !checked {
+        return Err(Checksums);
+    }
+    // the hashed entries are the checked files
+    let hashed = unchanged(
+        &dl.dir,
+        MANIFEST_FILE,
+        &mut dl.manifest.file,
+        &dl.manifest.bytes,
+    ) && dl
+        .archives
+        .iter()
+        .all(|(name, file)| platform::holds_file(&dl.dir, name.as_ref(), file).unwrap_or(false));
+    if !hashed {
         return Err(Checksums);
     }
 
-    // Install: the quarantine attribute (browser only), then extract, check and install.
+    // Install: the quarantine attribute (browser only), then the directories, extraction,
+    // the extracted binary's check and the install.
+    let (archive_name, archive) = &mut dl.archives[dl.selected];
     if let Some(remove) = &guide.unquarantine {
-        let probe = GuideCommand::new("xattr", &[guide.archive.as_os_str()], &input.download);
-        let names = run_guide(setup, &probe, None, Install)?;
+        let probe = GuideCommand::new("xattr", &[archive_name.as_ref()], &input.download);
+        let names = run_in(setup, &probe, &dl.dir, None, &[], Install)?;
         if names_quarantine(&names.stdout) {
-            run_guide(setup, remove, None, Install)?;
+            let remove = naming(remove, &guide.archive, archive_name);
+            run_in(setup, &remove, &dl.dir, None, &[], Install)?;
         }
     }
-    let made = run_guide(setup, &guide.make_dirs, None, Install);
-    let empty_only = made.is_err();
-    owned.unpack = MadeDir::find(&input.unpack, empty_only);
-    owned.prefix = MadeDir::find(&input.prefix, empty_only);
-    made?;
-    if owned.unpack.is_none() || owned.prefix.is_none() {
-        return Err(Install);
-    }
-    run_guide(setup, &guide.extract, None, Install)?;
-    let extracted = input.unpack.join(&guide.stem).join("rdy");
-    open_download_file(&extracted, BINARY_MAX).map_err(|_| Install)?;
-    run_guide(setup, &guide.make_bin, None, Install)?;
-    run_guide(setup, &guide.install, None, Install)?;
+    let name_of = |p: &Path| p.file_name().map(OsStr::to_os_string).ok_or(Install);
+    let unpack = MadeDir::make(&dl.unpack_parent, &name_of(&input.unpack)?).map_err(|_| Install)?;
+    let unpack = owned.unpack.insert(unpack);
+    let prefix = MadeDir::make(&dl.prefix_parent, &name_of(&input.prefix)?).map_err(|_| Install)?;
+    let prefix = owned.prefix.insert(prefix);
+    platform::set_file_mode(&prefix.dir, 0o755).map_err(|_| Install)?;
+
+    let extract = GuideCommand {
+        program: "tar".into(),
+        args: vec!["-xzf".into(), "-".into()],
+        cwd: input.unpack.clone(),
+        stdin: Some(guide.archive.clone()),
+        stdout: None,
+    };
+    let from = rewound(archive).map_err(|_| Install)?;
+    run_in(setup, &extract, &unpack.dir, Some(from), &[], Install)?;
+    let stem =
+        rdy_store::pio::open_dir_at(&unpack.dir, guide.stem.as_ref()).map_err(|_| Install)?;
+    let extracted = open_regular_at(&stem, "rdy", BINARY_MAX).ok_or(Install)?;
+    let len = extracted.metadata().map_err(|_| Install)?.len();
+
+    let bin = platform::create_private_dir_at(&prefix.dir, "bin".as_ref()).map_err(|_| Install)?;
+    platform::set_file_mode(&bin, 0o755).map_err(|_| Install)?;
+    let bin_path = input.prefix.join("bin");
+    let install = GuideCommand {
+        program: "install".into(),
+        args: ["-m", "755", "/dev/stdin", "rdy"]
+            .map(OsString::from)
+            .to_vec(),
+        cwd: bin_path.clone(),
+        stdin: Some(input.unpack.join(&guide.stem).join("rdy")),
+        stdout: None,
+    };
+    run_in(setup, &install, &bin, Some(extracted), &[], Install)?;
+    let installed = open_regular_at(&bin, "rdy", BINARY_MAX)
+        .filter(|f| f.metadata().is_ok_and(|m| m.len() == len))
+        .ok_or(Install)?;
 
     // Version: the exact text the archive's stem calls for.
     let want = version_text_of(&guide.stem, &input.version, &input.target).ok_or(Version)?;
-    let out = run_guide(setup, &guide.version, None, Version)?;
+    let version = GuideCommand {
+        program: "./rdy".into(),
+        args: vec!["--version".into()],
+        cwd: bin_path.clone(),
+        stdin: None,
+        stdout: None,
+    };
+    let out = run_in(setup, &version, &bin, None, &[], Version)?;
     if out.stdout != want.as_bytes() || !out.stderr.is_empty() {
         return Err(Version);
     }
 
-    smoke(&input.prefix.join("bin").join("rdy"), setup, owned)
+    // Every product command runs the installed path: it must name the installed file.
+    let rdy = bin_path.join("rdy");
+    let at_path = platform::open_dir(&bin_path)
+        .and_then(|d| platform::holds_file(&d, "rdy".as_ref(), &installed))
+        .unwrap_or(false);
+    if !at_path {
+        return Err(Daemon);
+    }
+    smoke(&rdy, setup, owned)
 }
 
 /// The class of a failed bounded MCP session.
@@ -1423,58 +1584,85 @@ fn mcp_failure(f: crate::mcp::McpFailure) -> InstallFailure {
     }
 }
 
+/// Makes the installed check's new scratch directory in the open directory `parent`, under a
+/// name of this process's that nothing else holds: the name and the directory.
+fn scratch_dir(parent: &File) -> io::Result<(String, MadeDir)> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let name = format!("rdy-release-check-{}-{n}", std::process::id());
+        match MadeDir::make(parent, name.as_ref()) {
+            Ok(dir) => return Ok((name, dir)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && n < u64::from(u16::MAX) => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Writes the isolated config `config/rdy/config.yaml` in the open directory `root`, through
+/// handles.
+fn write_config(root: &File) -> io::Result<()> {
+    use std::io::Write;
+    let config = platform::create_private_dir_at(root, "config".as_ref())?;
+    let rdy = platform::create_private_dir_at(&config, "rdy".as_ref())?;
+    let mut file = platform::create_new_at(&rdy, "config.yaml".as_ref())?;
+    file.write_all(SMOKE_CONFIG.as_bytes())?;
+    file.sync_all()
+}
+
 /// The installed CLI and MCP paths: a new project in a scratch directory, its daemon-backed
 /// status, then an MCP session through the same daemon, then the daemon stop. Every product
-/// command is the installed binary `rdy`, as a human with an isolated config.
+/// command is the installed binary `rdy`, as a human with an isolated config, started in the
+/// scratch directory's handle. The MCP server must exit 0 once its input closes.
 fn smoke(rdy: &Path, setup: &InstallSetup, owned: &mut Owned) -> Result<(), InstallFailure> {
     use crate::mcp::{McpClient, Reply};
     use InstallFailure::*;
-    let dir = tempfile::Builder::new()
-        .prefix("rdy-release-check-")
-        .tempdir_in(&setup.scratch)
-        .map_err(|_| Daemon)?;
-    let root = dir.path().to_path_buf();
+    let scratch = platform::open_dir(&setup.scratch).map_err(|_| Daemon)?;
+    let (name, dir) = scratch_dir(&scratch).map_err(|_| Daemon)?;
     let smoke = owned.smoke.insert(Smoke { dir, stopped: true });
+    write_config(&smoke.dir.dir).map_err(|_| Daemon)?;
+    let root = setup.scratch.join(name);
     let config = root.join("config");
-    fs::create_dir(&config)
-        .and_then(|()| fs::create_dir(config.join("rdy")))
-        .and_then(|()| fs::write(config.join("rdy").join("config.yaml"), SMOKE_CONFIG))
-        .map_err(|_| Daemon)?;
     let project = root.join("project");
     let bin = rdy.parent().ok_or(Daemon)?;
     let mut path = bin.as_os_str().to_os_string();
     path.push(":");
     path.push(SMOKE_PATH);
-    let product = |args: &[&OsStr]| {
+    let start = smoke.dir.dir.try_clone().map_err(|_| Daemon)?;
+    let product = |args: &[&OsStr], stage: InstallFailure| -> Result<Command, InstallFailure> {
         let mut cmd = Command::new(rdy);
         cmd.args(args)
-            .current_dir(&root)
             .env_remove("RDY_ACTOR")
             .env_remove("RDY_RUN")
             .env_remove("RDY_NO_DAEMON")
             .env("PATH", &path)
             .env("XDG_CONFIG_HOME", &config);
-        cmd
+        platform::start_in_dir(&mut cmd, &start).map_err(|_| stage)?;
+        Ok(cmd)
     };
     let p = project.as_os_str();
-    run_ok(setup, product(&["init".as_ref(), p]), None, Daemon)?;
+    run_ok(setup, product(&["init".as_ref(), p], Daemon)?, None, Daemon)?;
     smoke.stopped = false;
 
     let checked = (|| {
         let status = run_ok(
             setup,
-            product(&[
-                "--project".as_ref(),
-                p,
-                "--json".as_ref(),
-                "status".as_ref(),
-            ]),
+            product(
+                &[
+                    "--project".as_ref(),
+                    p,
+                    "--json".as_ref(),
+                    "status".as_ref(),
+                ],
+                Daemon,
+            )?,
             None,
             Daemon,
         )?;
         serde_json::from_slice::<serde_json::Value>(&status.stdout).map_err(|_| Daemon)?;
         let mut client = McpClient::try_launch_bounded(
-            product(&["mcp".as_ref(), "--project".as_ref(), p]),
+            product(&["mcp".as_ref(), "--project".as_ref(), p], Mcp)?,
             setup.max_output,
         )
         .map_err(mcp_failure)?;
@@ -1491,18 +1679,22 @@ fn smoke(rdy: &Path, setup: &InstallSetup, owned: &mut Owned) -> Result<(), Inst
             other => other,
         };
         let answered = matches!(&overview, Reply::Ok(v) if v.is_object());
-        client
+        let finished = client
             .try_finish(crate::mcp::DEADLINE)
             .map_err(mcp_failure)?;
-        if answered { Ok(()) } else { Err(Mcp) }
+        // a server that answered but then exited nonzero, or by a signal, failed
+        if answered && finished.code == Some(0) {
+            Ok(())
+        } else {
+            Err(Mcp)
+        }
     })();
 
-    let stop = run_ok(
-        setup,
-        product(&["--project".as_ref(), p, "serve".as_ref(), "--stop".as_ref()]),
-        None,
+    let stop = product(
+        &["--project".as_ref(), p, "serve".as_ref(), "--stop".as_ref()],
         Cleanup,
-    );
+    )
+    .and_then(|cmd| run_ok(setup, cmd, None, Cleanup));
     if stop.is_err() {
         return Err(Cleanup);
     }
@@ -2547,8 +2739,7 @@ mod tests {
     const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
     /// The hang guard of a test helper's own tool runs.
     const GUARD: std::time::Duration = std::time::Duration::from_secs(600);
-    const MCP_INIT: &str =
-        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{}}}"#;
+    const MCP_INIT: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"rdy","version":"0.14.0"}}}"#;
     const MCP_SESSION: &str = r#"{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\"actor\":\"agent:release-check\"}"}]}}"#;
     const MCP_OVERVIEW: &str =
         r#"{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"{\"docs\":[]}"}]}}"#;
@@ -2632,6 +2823,11 @@ mod tests {
     /// `version` for `--version`, answers the smoke commands and the MCP session, and stops its
     /// "daemon" with exit `stop`.
     fn fake_rdy(marker: &Path, version: &str, stop: i32) -> String {
+        fake_rdy_with(marker, version, stop, "")
+    }
+
+    /// [`fake_rdy`] whose MCP server runs `mcp_end` once its input closes.
+    fn fake_rdy_with(marker: &Path, version: &str, stop: i32, mcp_end: &str) -> String {
         format!(
             r#"#!/bin/sh
 printf '%s\n' "$*" >> '{marker}'
@@ -2646,7 +2842,8 @@ mcp)
   printf '%s\n' '{session}'
   read -r l
   printf '%s\n' '{overview}'
-  cat > /dev/null ;;
+  cat > /dev/null
+  {mcp_end} ;;
 --project)
   case "$3" in
   --json) printf '%s\n' '{{"views":[]}}' ;;
@@ -2679,6 +2876,11 @@ esac
         }
 
         fn with_rdy(target: &'static str, version: &str, stop: i32) -> Kit {
+            Kit::with_fake(target, &|marker| fake_rdy(marker, version, stop))
+        }
+
+        /// A kit whose archive's `rdy` is `fake(marker)`.
+        fn with_fake(target: &'static str, fake: &dyn Fn(&Path) -> String) -> Kit {
             let dir = tempfile::tempdir().expect("tempdir");
             let download = dir.path().join("down load");
             let scratch = dir.path().join("scratch");
@@ -2699,7 +2901,7 @@ esac
                 scratch,
                 dir,
             };
-            kit.build_archive(target, &fake_rdy(&kit.marker, version, stop));
+            kit.build_archive(target, &fake(&kit.marker));
             kit.write_manifest(kit.lines().concat().as_bytes());
             kit
         }
@@ -2828,8 +3030,7 @@ esac
     fn stand_in(c: &GuideCommand, attributes: &str) -> Command {
         if c.program == "shasum" && host_target() != MAC_TARGET {
             let mut cmd = Command::new("sha256sum");
-            cmd.args(["-c", "--ignore-missing", MANIFEST_FILE])
-                .current_dir(&c.cwd);
+            cmd.args(["-c", "--ignore-missing", MANIFEST_FILE]);
             return cmd;
         }
         if c.program == "xattr" {
@@ -2890,6 +3091,134 @@ esac
         check_kit(kit, input, &|c| stand_in(c, ""), |_| {})
     }
 
+    /// The argv of every guide command the check ran, in order: a log kept outside every
+    /// directory the check owns, so its cleanup cannot remove the evidence.
+    struct Log(Mutex<Vec<Vec<String>>>);
+
+    impl Log {
+        fn new() -> Log {
+            Log(Mutex::new(Vec::new()))
+        }
+
+        fn push(&self, c: &GuideCommand) {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(argv(c));
+        }
+
+        fn all(&self) -> Vec<Vec<String>> {
+            self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+
+        /// Whether a command whose program is `program` ran.
+        fn ran(&self, program: &str) -> bool {
+            self.all().iter().any(|a| a[0] == program)
+        }
+
+        /// Whether anything was extracted, installed or executed from the archive: tar,
+        /// install, or a run of an installed `rdy`.
+        fn touched_the_archive(&self) -> bool {
+            self.all()
+                .iter()
+                .any(|a| a[0] == "tar" || a[0] == "install" || a[0].ends_with("rdy"))
+        }
+    }
+
+    /// [`check_kit`] with the plain stand-ins, each command logged to `log`.
+    fn check_logged(
+        kit: &Kit,
+        input: &InstallInput,
+        log: &Log,
+    ) -> Result<InstalledRelease, InstallFailure> {
+        check_kit(
+            kit,
+            input,
+            &|c| {
+                log.push(c);
+                stand_in(c, "")
+            },
+            |_| {},
+        )
+    }
+
+    /// Points the symbolic link `link` at `target` in one step: a new link renamed over it.
+    fn relink(link: &Path, target: &Path) {
+        let tmp = link.with_extension("relink");
+        platform::symlink(target, &tmp).expect("symlink");
+        fs::rename(&tmp, link).expect("rename the link");
+    }
+
+    #[test]
+    fn pre3_retargeted_download_cannot_substitute_checked_files() {
+        if !install_tools_or_skip(&crate::test_name!(
+            "pre3_retargeted_download_cannot_substitute_checked_files"
+        )) {
+            return;
+        }
+        let target = host_target();
+        // The kit's key A signs the manifest, but the trusted key is B. DOWNLOAD is reached
+        // through a link, which is pointed, right before OpenSSH runs, at a directory with the
+        // same manifest, archive and signature and an allowed-signers file that names A.
+        let kit = Kit::new(target);
+        let impostor = kit.dir.path().join("impostor");
+        fs::create_dir(&impostor).expect("mkdir");
+        platform::set_mode(&impostor, 0o700).expect("private");
+        for name in [
+            MANIFEST_FILE.to_string(),
+            SIGNATURE_FILE.to_string(),
+            archive_name(IV, target),
+        ] {
+            fs::copy(kit.download.join(&name), impostor.join(&name)).expect("copy");
+        }
+        fs::write(impostor.join(SIGNERS_FILE), format!("{}\n", kit.signer)).expect("signers");
+        let link = kit.dir.path().join("download link");
+        platform::symlink(&kit.download, &link).expect("symlink");
+        let mut input = kit.input();
+        input.download = link.clone();
+        input.signer_line = test_key(&kit.dir.path().join("trusted-key"));
+        let log = Log::new();
+        let process = |c: &GuideCommand| {
+            log.push(c);
+            if c.program == "ssh-keygen" {
+                relink(&link, &impostor);
+            }
+            stand_in(c, "")
+        };
+        assert_eq!(
+            check_kit(&kit, &input, &process, |_| {}).map(|_| ()),
+            Err(InstallFailure::Signature),
+            "the trusted key B did not sign the manifest"
+        );
+        assert!(!log.touched_the_archive(), "{:?}", log.all());
+        kit.assert_untouched(&input, "a retargeted download");
+
+        // Right before extraction, the link is pointed at a directory whose archive (of the
+        // same name) holds another binary: the checked archive is the one installed.
+        let kit = Kit::new(target);
+        let other = Kit::new(target);
+        let link = kit.dir.path().join("download link");
+        platform::symlink(&kit.download, &link).expect("symlink");
+        let mut input = kit.input();
+        input.download = link.clone();
+        let process = |c: &GuideCommand| {
+            if c.program == "tar" {
+                relink(&link, &other.download);
+            }
+            stand_in(c, "")
+        };
+        check_kit(&kit, &input, &process, |_| {}).unwrap_or_else(|f| panic!("{}", f.message()));
+        assert_eq!(
+            fs::read(input.prefix.join("bin").join("rdy")).expect("installed"),
+            fake_rdy(&kit.marker, "rdy 0.14.0 (preview)", 0).into_bytes(),
+            "the checked archive's binary is installed"
+        );
+        assert!(
+            other.ran().is_empty(),
+            "the other archive's binary never ran"
+        );
+    }
+
     #[test]
     fn pre3_openssh_accepts_only_the_trusted_manifest() {
         if !install_tools_or_skip(&crate::test_name!(
@@ -2945,11 +3274,13 @@ esac
             let mut input = kit.input();
             spoil(&kit, &mut input);
             let before = kit.download_state();
+            let log = Log::new();
             assert_eq!(
-                check_plain(&kit, &input).map(|_| ()),
+                check_logged(&kit, &input, &log).map(|_| ()),
                 Err(InstallFailure::Signature),
                 "{what}"
             );
+            assert!(!log.touched_the_archive(), "{what}: {:?}", log.all());
             kit.assert_untouched(&input, what);
             assert_eq!(
                 kit.download_state(),
@@ -3112,7 +3443,15 @@ esac
             let input = kit.input();
             spoil(&kit, selected);
             let before = kit.download_state();
-            assert_eq!(check_plain(&kit, &input).map(|_| ()), Err(want), "{what}");
+            // the command log is kept outside what the cleanup removes: neither tar nor
+            // install nor the binary ever ran
+            let log = Log::new();
+            assert_eq!(
+                check_logged(&kit, &input, &log).map(|_| ()),
+                Err(want),
+                "{what}"
+            );
+            assert!(!log.touched_the_archive(), "{what}: {:?}", log.all());
             kit.assert_untouched(&input, what);
             assert_eq!(
                 kit.download_state(),
@@ -3129,9 +3468,15 @@ esac
                 kit.write_manifest(kit.lines().concat().as_bytes());
             }
             let input = kit.input();
-            let report = check_plain(&kit, &input)
+            let log = Log::new();
+            let report = check_logged(&kit, &input, &log)
                 .unwrap_or_else(|f| panic!("present={present}: {}", f.message()));
             assert_eq!(report.skipped, 0);
+            assert!(
+                log.ran("tar"),
+                "the log sees an extraction: {:?}",
+                log.all()
+            );
             assert_eq!(kit.ran().first().map(String::as_str), Some("--version"));
         }
     }
@@ -3435,12 +3780,14 @@ esac
             check_kit(&kit, &input, &process, |_| {}).unwrap_or_else(|f| panic!("{}", f.message()));
             let ran: Vec<Vec<String>> = log.into_inner().unwrap_or_else(|e| e.into_inner());
             let programs: Vec<&str> = ran.iter().map(|a| a[0].as_str()).collect();
-            let archive = kit.archive(MAC_TARGET).to_string_lossy().into_owned();
+            // the commands as the check runs them: each names the archive as an entry of
+            // DOWNLOAD's handle, where it starts
+            let archive = archive_name(IV, MAC_TARGET);
             let mut want = vec!["printf", "ssh-keygen", "shasum", "xattr"];
             if removes {
                 want.push("xattr");
             }
-            want.extend(["mkdir", "tar", "mkdir", "install"]);
+            want.extend(["tar", "install"]);
             assert_eq!(&programs[..want.len()], &want[..], "{ran:?}");
             assert_eq!(
                 ran[3],
@@ -3459,8 +3806,8 @@ esac
                 );
             }
             assert_eq!(
-                programs.len(),
-                want.len() + 1,
+                ran[want.len()..],
+                [vec!["./rdy".to_string(), "--version".into()]],
                 "then the version: {programs:?}"
             );
         }
@@ -3600,6 +3947,47 @@ esac
                 before,
                 "{what}: the download is unchanged"
             );
+        }
+
+        // A valid signer line at the cap. Its length is fixed by the key type, so the FIDO key's
+        // application string sets it: an sk-ssh-ed25519 line is 3 mod 4 bytes long, and 8191
+        // and 8195 are the valid lengths on each side of the 8192-byte cap. At the cap the line
+        // passes the grammar (and fails the signature: it is not the kit's key); past it, the
+        // line is still a well-formed key that only the length refuses.
+        let sk_line = |len: usize| -> String {
+            let fixed = SIGNER_PREFIX.len() + "sk-ssh-ed25519@openssh.com ".len();
+            let base64 = len - fixed;
+            assert_eq!(base64 % 4, 0, "{len}");
+            // the blob: the type (4 + 26), the key (4 + 32) and the application (4 + its bytes)
+            let application = base64 / 4 * 3 - (4 + 26) - (4 + 32) - 4;
+            let key = ssh_key::public::SkEd25519::new(
+                ssh_key::public::Ed25519PublicKey([9u8; 32]),
+                format!("ssh:{}", "a".repeat(application - 4)),
+            );
+            let key = ssh_key::PublicKey::new(ssh_key::public::KeyData::SkEd25519(key), "");
+            let line = format!("{SIGNER_PREFIX}{}", key.to_openssh().expect("openssh"));
+            assert_eq!(line.len(), len);
+            line
+        };
+        let (at_cap, past_cap) = (sk_line(SIGNER_LINE_MAX - 1), sk_line(SIGNER_LINE_MAX + 3));
+        assert!(valid_signer_line(&at_cap));
+        let past_key = past_cap.strip_prefix(SIGNER_PREFIX).expect("prefix");
+        assert!(
+            ssh_key::PublicKey::from_openssh(past_key)
+                .is_ok_and(|k| k.to_openssh().is_ok_and(|again| again == past_key)),
+            "past the cap, the key itself is well formed"
+        );
+        for (line, want) in [(at_cap, Signature), (past_cap, Input)] {
+            let kit = Kit::new(target);
+            let mut input = kit.input();
+            let len = line.len();
+            input.signer_line = line;
+            assert_eq!(
+                check_plain(&kit, &input).map(|_| ()),
+                Err(want),
+                "a signer line of {len} bytes"
+            );
+            kit.assert_untouched(&input, "a long signer line");
         }
 
         // Files in DOWNLOAD: N passes the input checks (and fails the signature), N+1 does not.
@@ -3835,6 +4223,126 @@ esac
             kit.assert_untouched(&input, what);
         }
 
+        // An extracted rdy of exactly the cap is installed and runs (its version is wrong); one
+        // byte more is refused before it is installed. Each is the fake `rdy`, ended by `exit
+        // 0` and padded with zeros (a sparse file) to its length.
+        for (len, want) in [(BINARY_MAX, Version), (BINARY_MAX + 1, Install)] {
+            let kit = Kit::new(target);
+            let rdy = kit.source(target).join("rdy");
+            let script = format!(
+                "{}exit 0\n",
+                fake_rdy(&kit.marker, "rdy 0.15.0 (preview)", 0)
+            );
+            fs::write(&rdy, script).expect("rdy");
+            File::options()
+                .write(true)
+                .open(&rdy)
+                .and_then(|f| f.set_len(len))
+                .expect("pad rdy");
+            kit.retar(target);
+            let input = kit.input();
+            let log = Log::new();
+            assert_eq!(
+                check_logged(&kit, &input, &log).map(|_| ()),
+                Err(want),
+                "an extracted rdy of {len} bytes"
+            );
+            if want == Version {
+                assert!(log.ran("install"), "the binary at the cap is installed");
+                assert_eq!(kit.ran(), ["--version"], "the binary at the cap ran");
+            } else {
+                assert!(log.ran("tar"), "{:?}", log.all());
+                assert!(
+                    !log.ran("install"),
+                    "the binary past the cap is refused before install: {:?}",
+                    log.all()
+                );
+                assert!(!kit.marker.exists(), "the binary past the cap never ran");
+            }
+            assert!(absent(&input.unpack) && absent(&input.prefix), "{len}");
+            assert!(absent(&kit.download.join(SIGNERS_FILE)));
+            assert!(names(&kit.scratch).is_empty());
+            fs::remove_file(&rdy).expect("rm the padded source");
+        }
+
+        // UNPACK and PREFIX are reached through links that are pointed elsewhere, right before
+        // the version check fails. The cleanup removes this run's directories through their
+        // handles and nothing at the links' new targets.
+        let kit = Kit::with_rdy(target, "rdy 0.15.0 (preview)", 0);
+        let mut input = kit.input();
+        let unpack_parent = kit.dir.path().join("unpack parent");
+        let prefix_parent = kit.dir.path().join("pre fix");
+        fs::create_dir(&unpack_parent).expect("mkdir");
+        let elsewhere = kit.dir.path().join("elsewhere");
+        for d in ["un pack", "rdy-0.14.0"] {
+            fs::create_dir_all(elsewhere.join(d)).expect("mkdir");
+            fs::write(elsewhere.join(d).join("user-content"), b"sentinel\n").expect("sentinel");
+        }
+        let unpack_alias = kit.dir.path().join("unpack alias");
+        let prefix_alias = kit.dir.path().join("prefix alias");
+        platform::symlink(&unpack_parent, &unpack_alias).expect("symlink");
+        platform::symlink(&prefix_parent, &prefix_alias).expect("symlink");
+        input.unpack = unpack_alias.join("un pack");
+        input.prefix = prefix_alias.join("rdy-0.14.0");
+        let process = |c: &GuideCommand| {
+            if c.args.first().is_some_and(|a| a == "--version") {
+                relink(&unpack_alias, &elsewhere);
+                relink(&prefix_alias, &elsewhere);
+            }
+            stand_in(c, "")
+        };
+        assert_eq!(
+            check_kit(&kit, &input, &process, |_| {}).map(|_| ()),
+            Err(Version)
+        );
+        for d in ["un pack", "rdy-0.14.0"] {
+            assert_eq!(
+                fs::read(elsewhere.join(d).join("user-content")).ok(),
+                Some(b"sentinel\n".to_vec()),
+                "{d} at the link's new target is kept"
+            );
+        }
+        assert!(
+            absent(&unpack_parent.join("un pack")) && absent(&prefix_parent.join("rdy-0.14.0")),
+            "this run's UNPACK and PREFIX are removed"
+        );
+        assert_eq!(kit.ran(), ["--version"], "the installed binary ran");
+
+        // Another process makes UNPACK or PREFIX after the input checks found them absent:
+        // this run's mkdir of it fails, and that directory is never treated as this run's.
+        type Pick = fn(&InstallInput) -> PathBuf;
+        let competitors: [(&str, Pick); 2] = [
+            ("UNPACK", |i| i.unpack.clone()),
+            ("PREFIX", |i| i.prefix.clone()),
+        ];
+        for (what, pick) in competitors {
+            let kit = Kit::new(target);
+            let input = kit.input();
+            let theirs = pick(&input);
+            let process = |c: &GuideCommand| {
+                if c.program == "shasum" || c.program == "sha256sum" {
+                    fs::create_dir(&theirs).expect("the other process's mkdir");
+                }
+                stand_in(c, "")
+            };
+            assert_eq!(
+                check_kit(&kit, &input, &process, |_| {}).map(|_| ()),
+                Err(Install),
+                "{what} made by another process"
+            );
+            assert!(
+                theirs.is_dir() && names(&theirs).is_empty(),
+                "{what}: the other process's directory stays"
+            );
+            for ours in [&input.unpack, &input.prefix] {
+                if *ours != theirs {
+                    assert!(absent(ours), "{what}: {} is removed", ours.display());
+                }
+            }
+            assert!(!kit.marker.exists(), "{what}: nothing ran");
+            assert!(absent(&kit.download.join(SIGNERS_FILE)));
+        }
+
         // A failure after the install removes what this run made, and nothing else.
         let kit = Kit::with_rdy(target, "rdy 0.15.0 (preview)", 0);
         let input = kit.input();
@@ -3974,5 +4482,26 @@ esac
         assert_eq!(ran[2], format!("--project {project} --json status"));
         assert_eq!(ran[3], format!("mcp --project {project}"));
         assert_eq!(ran[4], format!("--project {project} serve --stop"));
+
+        // An MCP server that answers every call but then exits nonzero, or by a signal, fails
+        // the mcp stage once the daemon is stopped.
+        for (what, end) in [("exit 17", "exit 17"), ("a signal", "kill -9 $$")] {
+            let kit = Kit::with_fake(host_target(), &|marker| {
+                fake_rdy_with(marker, "rdy 0.14.0 (preview)", 0, end)
+            });
+            let input = kit.input();
+            assert_eq!(
+                check_plain(&kit, &input).map(|_| ()),
+                Err(InstallFailure::Mcp),
+                "{what}"
+            );
+            let ran = kit.ran();
+            assert!(
+                ran.last().is_some_and(|l| l.ends_with("serve --stop")),
+                "{what}: the daemon is stopped: {ran:?}"
+            );
+            assert!(absent(&input.unpack) && absent(&input.prefix), "{what}");
+            assert!(names(&kit.scratch).is_empty(), "{what}: no scratch project");
+        }
     }
 }

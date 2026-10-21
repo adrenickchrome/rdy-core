@@ -68,7 +68,11 @@ fn run(args: &[&str]) -> (Option<i32>, String, String) {
 /// The trust state of a README: `Ok` when it holds exactly one well-formed state.
 ///
 /// A signer candidate is any line that looks like a release signer, whether or not its key is
-/// valid, so a placeholder or malformed line cannot hide from the pin.
+/// valid, so a placeholder or malformed line cannot hide from the pin. A candidate outside every
+/// `sh` fence declares a signer: the ready state has exactly one, in its trust section. A
+/// candidate inside an `sh` fence uses one: the generated install blocks pass the signer line to
+/// printf. Every use must be the declared line, byte for byte, as one quoted token, so the
+/// README names one key in all. The pending state has neither.
 fn trust_state_error(readme: &str) -> Result<(), String> {
     const HEADING: &str = "### Release signing key";
     let lines: Vec<&str> = readme.lines().collect();
@@ -79,7 +83,20 @@ fn trust_state_error(readme: &str) -> Result<(), String> {
             || t.contains("ssh-ed25519")
             || t.contains("sk-ssh-ed25519")
     };
-    let signers: Vec<&str> = lines.iter().copied().filter(|l| candidate(l)).collect();
+    let (mut signers, mut uses): (Vec<&str>, Vec<&str>) = (Vec::new(), Vec::new());
+    let (mut fenced, mut in_sh) = (false, false);
+    for l in lines.iter().copied() {
+        if let Some(label) = l.trim().strip_prefix("```") {
+            in_sh = !fenced && label == "sh";
+            fenced = !fenced;
+        } else if candidate(l) {
+            if in_sh {
+                uses.push(l);
+            } else {
+                signers.push(l);
+            }
+        }
+    }
     let fp_lines: Vec<&str> = lines
         .iter()
         .copied()
@@ -87,7 +104,7 @@ fn trust_state_error(readme: &str) -> Result<(), String> {
         .collect();
     let headings = lines.iter().filter(|l| l.trim() == HEADING).count();
     let pending = readme.contains("Release signing key: pending");
-    let ready = headings > 0 || !signers.is_empty() || !fp_lines.is_empty();
+    let ready = headings > 0 || !signers.is_empty() || !uses.is_empty() || !fp_lines.is_empty();
     if pending == ready {
         return Err(format!(
             "exactly one trust state: pending={pending} ready={ready}"
@@ -104,13 +121,14 @@ fn trust_state_error(readme: &str) -> Result<(), String> {
         {
             return Err("the pending block is not exact".into());
         }
-        // `ready` is false here: no signer candidate, fingerprint line or heading exists.
+        // `ready` is false here: no signer candidate (declared or used), fingerprint line or
+        // heading exists.
         return Ok(());
     }
 
     if headings != 1 || signers.len() != 1 || fp_lines.len() != 1 {
         return Err(format!(
-            "ready state needs one heading, one signer candidate and one fingerprint: \
+            "ready state needs one heading, one declared signer line and one fingerprint: \
              {headings} / {} / {}",
             signers.len(),
             fp_lines.len()
@@ -159,6 +177,13 @@ fn trust_state_error(readme: &str) -> Result<(), String> {
     let fp = parsed.fingerprint(ssh_key::HashAlg::Sha256).to_string();
     if &f[1] != fp.as_str() {
         return Err(format!("the fingerprint does not match the key: {fp}"));
+    }
+    // each use is the declared line as one quoted token, and nothing else that looks like one
+    let quoted = format!("'{}'", body[1]);
+    for u in &uses {
+        if !u.contains(&quoted) || candidate(&u.replace(&quoted, "")) {
+            return Err(format!("an install block uses another signer line: {u}"));
+        }
     }
     // the words, with the link markup removed
     let link = Regex::new(r"\[([^\]]+)\]\([^)]*\)").unwrap();
@@ -285,6 +310,30 @@ fn readme_with(state: &str) -> String {
     pending_fixture().replacen(PENDING, state, 1)
 }
 
+/// The README's generated install section (PRE task 3) for `signer`: its `sh` fences use the
+/// signer line in their printf commands.
+fn install_section(signer: &str) -> String {
+    rdy_qa::release_install::readme_install_section("0.14.0", signer).expect("install section")
+}
+
+/// The synthetic ready README with `trust` as its trust section, then the generated install
+/// section for `signer`.
+fn ready_with_install(trust: &str, signer: &str) -> String {
+    format!("{}\n{}", readme_with(trust), install_section(signer))
+}
+
+/// A second disposable key's signer line, from other fixed bytes.
+fn other_signer() -> String {
+    let pk = ssh_key::PublicKey::new(
+        ssh_key::public::KeyData::Ed25519(ssh_key::public::Ed25519PublicKey([8u8; 32])),
+        "",
+    );
+    format!(
+        "rdy-release namespaces=\"rdy-release-v1\" {}",
+        pk.to_openssh().unwrap()
+    )
+}
+
 /// The real README must pass in the pending state and in the ready state the orchestrator
 /// writes later. The other state is built from the real text, so a change in either state
 /// cannot fail the pin tests for the wrong reason.
@@ -300,6 +349,13 @@ fn pre2_trust_state_pin_accepts_the_real_readme_in_either_state() {
             trust_state_error(&ready),
             Ok(()),
             "the real README in the ready state"
+        );
+        let signer = format!("rdy-release namespaces=\"rdy-release-v1\" {key}");
+        let with_install = format!("{ready}\n{}", install_section(&signer));
+        assert_eq!(
+            trust_state_error(&with_install),
+            Ok(()),
+            "the real README in the ready state with its install blocks"
         );
     }
 }
@@ -320,6 +376,19 @@ fn pre2_trust_state_pin_rejects_every_bad_shape() {
         trust_state_error(&readme_with(&ready_block(&fenced, &fp))),
         Ok(()),
         "the well-formed ready state passes"
+    );
+    // The README declares the signer line once, in its trust section. The generated install
+    // blocks use it in their printf commands, byte for byte: those uses are not declarations.
+    let combined = ready_with_install(&ready_block(&fenced, &fp), &signer);
+    assert_eq!(
+        combined.matches(signer.as_str()).count(),
+        4,
+        "one declaration and three uses"
+    );
+    assert_eq!(
+        trust_state_error(&combined),
+        Ok(()),
+        "the ready state with its generated install blocks passes"
     );
 
     let placeholder = "rdy-release namespaces=\"rdy-release-v1\" <public-key>";
@@ -423,6 +492,52 @@ fn pre2_trust_state_pin_rejects_every_bad_shape() {
             readme_with(&format!("{PENDING}\n{}", ready_block(&fenced, &fp))),
         ),
         ("neither state", pending_readme.replacen(PENDING, "", 1)),
+        // the generated install blocks: every use is the declared line
+        ("ready with one install block using a second key", {
+            let at = combined
+                .match_indices(signer.as_str())
+                .nth(2)
+                .expect("a use")
+                .0;
+            format!(
+                "{}{}{}",
+                &combined[..at],
+                other_signer(),
+                &combined[at + signer.len()..]
+            )
+        }),
+        (
+            "ready with install blocks and a second declaration",
+            ready_with_install(&ready_block(&format!("{fenced}\n\n{fenced}"), &fp), &signer),
+        ),
+        (
+            "ready with install blocks and a second declared key",
+            ready_with_install(
+                &ready_block(
+                    &format!("{fenced}\n\n```text\n{}\n```", other_signer()),
+                    &fp,
+                ),
+                &signer,
+            ),
+        ),
+        (
+            "ready with install blocks for a second key only",
+            ready_with_install(&ready_block(&fenced, &fp), &other_signer()),
+        ),
+        (
+            "ready with install blocks and a wrong fingerprint",
+            ready_with_install(
+                &ready_block(
+                    &fenced,
+                    "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                ),
+                &signer,
+            ),
+        ),
+        (
+            "pending with install blocks",
+            format!("{pending_readme}\n{}", install_section(&signer)),
+        ),
     ];
     for (name, readme) in cases {
         assert!(
