@@ -1059,14 +1059,14 @@ fn cp3_holder_keeps_plans_without_project_refs() {
     h.reindex().unwrap();
     assert_eq!(h.index_dump_for_tests().unwrap(), dump);
     h.check_holder().unwrap();
-    // a holder never writes a plan ref
-    match h.set_refs_unchecked_for_tests(vec![("plan/work".into(), b.seal.0.to_vec())]) {
-        Ok(()) => assert!(
-            h.check_holder().is_err(),
-            "a plan ref in a holder is damage"
-        ),
-        Err(_) => {}
-    }
+    // a holder never writes a plan ref: a write of one is refused, and a forged one is damage
+    let named = vec![("plan/work".to_string(), b.seal.0.to_vec())];
+    assert!(h.set_refs(named.clone()).is_err());
+    h.set_refs_unchecked_for_tests(named).unwrap();
+    assert!(
+        h.check_holder().is_err(),
+        "a plan ref in a holder is damage"
+    );
 }
 
 #[test]
