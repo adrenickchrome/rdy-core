@@ -250,3 +250,145 @@ fn mbrf1_rdy_brief_needs_a_session_and_honours_max_tokens() {
         Some("E_LIMIT")
     );
 }
+
+// ---- plb1: the parent a create needs briefed, over MCP (PL 58) ----
+
+/// The token of a briefing of `id`, made over MCP.
+fn brief_token(c: &mut McpClient, id: &str) -> String {
+    c.call("rdy_brief", json!({"ids": [id]})).ok()["base"]["token"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Checks a refused create under `parent` (a new `ty`) whose top message ends in `tail`, and
+/// returns the token of the fresh briefing the error carries.
+fn refused_create(e: &Value, parent: &str, ty: &str, tail: &str) -> String {
+    assert_eq!(e["code"], "E_BRIEF_REQUIRED", "{e}");
+    assert_eq!(
+        e["message"],
+        format!(
+            "the cited briefing does not cover {parent} (the parent of the new {ty}), which this write touches on stable content{tail}"
+        ),
+        "{e}"
+    );
+    assert_eq!(
+        e["issues"],
+        json!([{"severity": "error", "code": "E_BRIEF_REQUIRED", "block": parent,
+            "message": format!("not covered by the cited briefing: the write creates a {ty} under it"),
+            "fix": "brief this parent; a briefing of a parent covers its new children"}]),
+        "{e}"
+    );
+    let t = e["briefing"]["base"]["token"].as_str().unwrap().to_string();
+    assert_eq!(
+        e["fix"],
+        format!(
+            "retry with brief: \"{t}\"; this error's briefing covers exactly the blocks the write touches"
+        ),
+        "{e}"
+    );
+    assert_eq!(e["briefing"]["covers"], 1, "only the parent: {e}");
+    t
+}
+
+#[test]
+fn plb1_parent_diagnostics_cross_the_mcp_boundary() {
+    let (dir, mut r) = project();
+    let sp = stable_spec(&mut r);
+    r.close().unwrap();
+    let mut c = McpClient::start(dir.path());
+    session(&mut c, "agent:p");
+    let (sec, old) = (sp.section.to_string(), sp.decision.to_string());
+    let hint =
+        format!(". The briefing covers {old}, but a new decision needs a briefing of its parent.");
+    let ta = brief_token(&mut c, &sp.a.to_string());
+    let td = brief_token(&mut c, &old);
+
+    let ops = json!([{"op": "create", "type": "prose", "parent": sec, "body": "New prose."}]);
+    let e = tool_error(c.call("rdy_write", json!({"view": "pw", "brief": ta, "ops": ops})));
+    let t = refused_create(&e, &sec, "prose", "");
+    c.call("rdy_write", json!({"view": "pw", "brief": t, "ops": ops}))
+        .ok();
+
+    let decide =
+        |brief: &str| json!({"view": "pd", "parent": sec, "statement": "Prefer C", "brief": brief});
+    let e = tool_error(c.call("rdy_decide", decide(&td)));
+    let t = refused_create(&e, &sec, "decision", "");
+    c.call("rdy_decide", decide(&t)).ok();
+
+    let supersede = |view: &str, brief: &str| {
+        json!({"old": old, "decision": {"view": view, "parent": sec,
+            "statement": "Keep A, firmly", "brief": brief}})
+    };
+    let e = tool_error(c.call("rdy_supersede", supersede("ps", &td)));
+    let t = refused_create(&e, &sec, "decision", &hint);
+    c.call("rdy_supersede", supersede("ps", &t)).ok();
+
+    let revoke = |view: &str, brief: &str| {
+        json!({"target": old, "reason": "no longer true", "parent": sec,
+            "brief": brief, "view": view})
+    };
+    let e = tool_error(c.call("rdy_revoke", revoke("pr", &td)));
+    let t = refused_create(&e, &sec, "decision", &hint);
+    c.call("rdy_revoke", revoke("pr", &t)).ok();
+
+    // a briefing of A shows the decision that governs A as context, but does not cover it
+    let b = c.call("rdy_brief", json!({"ids": [sp.a.to_string()]})).ok();
+    assert_eq!(b["base"]["token"], ta.as_str(), "nothing moved in canon");
+    assert!(
+        b["governs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["decision"] == old),
+        "{b}"
+    );
+    let e = tool_error(c.call("rdy_supersede", supersede("pc", &ta)));
+    let t = refused_create(&e, &sec, "decision", "");
+    c.call("rdy_supersede", supersede("pc", &t)).ok();
+    let e = tool_error(c.call("rdy_revoke", revoke("pc2", &ta)));
+    let t = refused_create(&e, &sec, "decision", "");
+    c.call("rdy_revoke", revoke("pc2", &t)).ok();
+}
+
+#[test]
+fn plb1_schema_explains_the_decision_parent() {
+    let (dir, r) = project();
+    r.close().unwrap();
+    let mut c = McpClient::start(dir.path());
+    session(&mut c, "agent:s");
+    let sch = c.call("rdy_schema", json!({})).ok();
+    let tools = c.tools();
+    // the four tools' parameter schemas, as digests of their JSON
+    let digests: Vec<(String, String)> = ["rdy_write", "rdy_decide", "rdy_supersede", "rdy_revoke"]
+        .iter()
+        .map(|name| {
+            let t = tools.iter().find(|t| t["name"] == *name).unwrap();
+            let bytes = serde_json::to_vec(&t["inputSchema"]).unwrap();
+            (name.to_string(), rdy_model::Hash::of(&bytes).to_string())
+        })
+        .collect();
+    eprintln!("tool schema digests: {digests:?}");
+    let edit_loop = sch["edit_loop"].as_str().unwrap();
+    assert!(
+        edit_loop.contains(
+            "brief the block, or its parent to create under it. rdy_decide, rdy_supersede and rdy_revoke create a decision under a parent. Brief that parent; a briefing of the old decision does not cover it. A briefing is current"
+        ),
+        "{edit_loop}"
+    );
+    assert_eq!(
+        sch["errors"]["E_BRIEF_REQUIRED"],
+        json!({"when": "a write touches stable content and cites no briefing, or one that does not cover the block",
+            "fix": "retry with the token of the briefing the error carries"})
+    );
+    let base: Vec<(String, String)> = [
+        ("rdy_write", "TBD"),
+        ("rdy_decide", "TBD"),
+        ("rdy_supersede", "TBD"),
+        ("rdy_revoke", "TBD"),
+    ]
+    .iter()
+    .map(|(n, d)| (n.to_string(), d.to_string()))
+    .collect();
+    assert_eq!(digests, base, "the parameter schemas are unchanged");
+}

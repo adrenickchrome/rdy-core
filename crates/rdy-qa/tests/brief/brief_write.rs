@@ -416,3 +416,277 @@ fn bwr1_a_briefing_refusal_comes_before_a_stale_base() {
     .unwrap_err();
     assert_eq!(e.code, E_BRIEF_REQUIRED, "{e}");
 }
+
+// ---- plb1: a refusal names the parent a create needs briefed (PL 58) ----
+
+/// The fix of a refused create's parent issue.
+const PARENT_FIX: &str = "brief this parent; a briefing of a parent covers its new children";
+
+/// The fix of a refusal before the tools expand it.
+const ENGINE_FIX: &str = "brief these blocks (rdy_brief) and retry with the token";
+
+/// The fix of a refusal the tools expanded into a fresh briefing whose token is `t`.
+fn fresh_fix(t: &str) -> String {
+    format!(
+        "retry with brief: \"{t}\"; this error's briefing covers exactly the blocks the write touches"
+    )
+}
+
+/// A briefing issue on `id`, as the error serializes it.
+fn brief_issue(id: &BlockId, message: &str, fix: &str) -> Value {
+    json!({"severity": "error", "code": E_BRIEF_REQUIRED, "block": id.to_string(),
+        "message": message, "fix": fix})
+}
+
+/// The issue on a parent the write creates a `ty` under.
+fn parent_issue(id: &BlockId, ty: &str) -> Value {
+    brief_issue(
+        id,
+        &format!("not covered by the cited briefing: the write creates a {ty} under it"),
+        PARENT_FIX,
+    )
+}
+
+/// The issue on a block the write touches in any other way.
+fn plain_issue(id: &BlockId) -> Value {
+    brief_issue(
+        id,
+        "not covered by the cited briefing",
+        "brief it (or, to create under it, its parent)",
+    )
+}
+
+/// The refusal's top message for these `entries`.
+fn not_covered(entries: &[String]) -> String {
+    format!(
+        "the cited briefing does not cover {}, which this write touches on stable content",
+        entries.join(", ")
+    )
+}
+
+fn issues_of(e: &RdyError) -> Value {
+    serde_json::to_value(&e.issues).unwrap()
+}
+
+#[test]
+fn plb1_create_refusal_names_its_parent_and_type() {
+    let (_d, mut r) = project();
+    let s = stable_spec(&mut r);
+    let ta = brief_of(&r, &Scope::Canon, &[&s.a]).base.token;
+    let create = json!([{"op": "create", "type": "prose", "id": "$p",
+        "parent": s.section.to_string(), "body": "New prose."}]);
+    let e = write_cited(&mut r, "w", create.clone(), Some(&ta)).unwrap_err();
+    assert_eq!(e.code, E_BRIEF_REQUIRED, "{e}");
+    let message = not_covered(&[format!("{} (the parent of the new prose)", s.section)]);
+    assert_eq!(e.message, message);
+    assert_eq!(e.fix, ENGINE_FIX);
+    assert_eq!(issues_of(&e), json!([parent_issue(&s.section, "prose")]));
+    assert_eq!(
+        e.briefing,
+        Some(json!({"ids": [s.section.to_string()]})),
+        "only the parent"
+    );
+    assert!(
+        r.read().included("w").is_empty(),
+        "a failed write changes nothing"
+    );
+    let (e, t) = token_in(&r, e, "w");
+    assert_eq!(e.message, message, "the expansion keeps the message");
+    assert_eq!(e.fix, fresh_fix(&t));
+    let ok = write_cited(&mut r, "w", create, Some(&t)).expect("the retry lands");
+    assert_eq!(ok.created.len(), 1, "{:?}", ok.created);
+}
+
+#[test]
+fn plb1_mixed_creates_keep_one_sorted_issue_per_target() {
+    let (_d, mut r) = project();
+    let s = stable_spec(&mut r);
+    let sec = s.section.to_string();
+    // a second stable parent: a subsection of the stable section, landed
+    let ts = brief_of(&r, &Scope::Canon, &[&s.section]).base.token;
+    let w = write_cited(
+        &mut r,
+        "sub",
+        json!([{"op": "create", "type": "section", "id": "$sub", "parent": sec,
+            "fields": {"title": "More rules"}}]),
+        Some(&ts),
+    )
+    .unwrap();
+    let sub = BlockId::parse(&w.created["$sub"]).unwrap();
+    land(&mut r, "sub").unwrap();
+    let tc = brief_of(&r, &Scope::Canon, &[&s.c]).base.token;
+    let ops = json!([
+        {"op": "update", "id": sec, "fields": {"title": "Rules, revised"}},
+        {"op": "create", "type": "prose", "parent": sec, "body": "P."},
+        {"op": "create", "type": "claim", "parent": sec, "body": "Q."},
+        {"op": "create", "type": "section", "id": "$n", "parent": sub.to_string(),
+            "fields": {"title": "Nested"}},
+        {"op": "create", "type": "claim", "parent": "$n", "body": "Under the new section."},
+        {"op": "update", "id": s.a.to_string(), "body": "A, revised."}
+    ]);
+    let e = write_cited(&mut r, "w", ops, Some(&tc)).unwrap_err();
+    assert_eq!(e.code, E_BRIEF_REQUIRED, "{e}");
+    let order: std::collections::BTreeSet<BlockId> =
+        [s.section.clone(), sub.clone(), s.a.clone()].into();
+    let (mut entries, mut issues) = (vec![], vec![]);
+    for id in &order {
+        if *id == s.section {
+            // the first create's type: an update of the same target does not count
+            entries.push(format!("{id} (the parent of the new prose)"));
+            issues.push(parent_issue(id, "prose"));
+        } else if *id == sub {
+            // the create under $n hangs from $n's own anchor, sub, after $n's create
+            entries.push(format!("{id} (the parent of the new section)"));
+            issues.push(parent_issue(id, "section"));
+        } else {
+            entries.push(id.to_string());
+            issues.push(plain_issue(id));
+        }
+    }
+    assert_eq!(e.message, not_covered(&entries));
+    assert_eq!(issues_of(&e), Value::Array(issues));
+    assert_eq!(
+        e.briefing,
+        Some(json!({"ids": order.iter().map(ToString::to_string).collect::<Vec<_>>()})),
+        "no id for the block the batch creates"
+    );
+    assert!(r.read().included("w").is_empty(), "not even the draft op");
+}
+
+#[test]
+fn plb1_decision_refusal_explains_covered_old_decision() {
+    // supersede and revoke, each on a fresh fixture; the token covers the old decision only
+    for revoke in [false, true] {
+        let (_d, mut r) = project();
+        let s = stable_spec(&mut r);
+        let (sec, old) = (s.section.to_string(), s.decision.to_string());
+        let run = |r: &mut Rdy, brief: Option<String>| {
+            if revoke {
+                r.revoke(&writer(), "w", &old, "no longer true", &sec, brief)
+            } else {
+                let d = DecisionInput {
+                    parent: sec.clone(),
+                    statement: "Keep A, firmly".into(),
+                    brief,
+                    ..Default::default()
+                };
+                r.supersede(&writer(), "w", &old, None, d)
+            }
+        };
+        let td = brief_of(&r, &Scope::Canon, &[&s.decision]).base.token;
+        let e = run(&mut r, Some(td)).unwrap_err();
+        assert_eq!(e.code, E_BRIEF_REQUIRED, "{e}");
+        let message = format!(
+            "{}. The briefing covers {old}, but a new decision needs a briefing of its parent.",
+            not_covered(&[format!("{sec} (the parent of the new decision)")])
+        );
+        assert_eq!(e.message, message, "revoke: {revoke}");
+        assert_eq!(issues_of(&e), json!([parent_issue(&s.section, "decision")]));
+        assert_eq!(e.fix, ENGINE_FIX, "a direct engine error is not expanded");
+        assert_eq!(e.briefing, Some(json!({"ids": [sec]})));
+        assert!(
+            r.read().included("w").is_empty(),
+            "a failed write changes nothing"
+        );
+        let (e, t) = token_in(&r, e, "w");
+        assert_eq!(e.message, message);
+        assert_eq!(e.fix, fresh_fix(&t));
+        let rec = r
+            .briefs()
+            .get(&t)
+            .expect("the fresh briefing is registered");
+        assert!(rec.covers(&s.section) && !rec.covers(&s.decision));
+        run(&mut r, Some(t)).expect("the retry lands");
+    }
+
+    // none of these gets the sentence
+    let (_d, mut r) = project();
+    let s = stable_spec(&mut r);
+    let (sec, old) = (s.section.to_string(), s.decision.to_string());
+    let input = |brief: Option<&str>| DecisionInput {
+        parent: sec.clone(),
+        statement: "Prefer C".into(),
+        brief: brief.map(str::to_string),
+        ..Default::default()
+    };
+    let plain = not_covered(&[format!("{sec} (the parent of the new decision)")]);
+    let td = brief_of(&r, &Scope::Canon, &[&s.decision]).base.token;
+    let e = r.decide(&writer(), "w", input(Some(&td))).unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        (E_BRIEF_REQUIRED, plain.as_str()),
+        "decide"
+    );
+    let no_token = format!("this write touches stable content ({sec}) and cites no briefing");
+    let e = r
+        .supersede(&writer(), "w", &old, None, input(None))
+        .unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        (E_BRIEF_REQUIRED, no_token.as_str())
+    );
+    let e = r
+        .revoke(&writer(), "w", &old, "no longer true", &sec, None)
+        .unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        (E_BRIEF_REQUIRED, no_token.as_str())
+    );
+    let unknown = Hash::of(b"never").to_string();
+    for e in [
+        r.supersede(&writer(), "w", &old, None, input(Some(&unknown)))
+            .unwrap_err(),
+        r.revoke(
+            &writer(),
+            "w",
+            &old,
+            "no longer true",
+            &sec,
+            Some(unknown.clone()),
+        )
+        .unwrap_err(),
+    ] {
+        assert_eq!(e.code, E_BRIEF_STALE, "{e}");
+        assert!(e.message.contains("unknown"), "{e}");
+        assert!(!e.message.contains("The briefing covers"), "{e}");
+    }
+    // a briefing of A records the decision that governs A, but does not cover it
+    let ta = brief_of(&r, &Scope::Canon, &[&s.a]).base.token;
+    let rec = r.briefs().get(&ta).unwrap();
+    assert!(rec.recorded.contains_key(&s.decision) && !rec.covers(&s.decision));
+    for e in [
+        r.supersede(&writer(), "w", &old, None, input(Some(&ta)))
+            .unwrap_err(),
+        r.revoke(
+            &writer(),
+            "w",
+            &old,
+            "no longer true",
+            &sec,
+            Some(ta.clone()),
+        )
+        .unwrap_err(),
+    ] {
+        assert_eq!(
+            (e.code, e.message.as_str()),
+            (E_BRIEF_REQUIRED, plain.as_str()),
+            "context only"
+        );
+    }
+    // a covering token gone stale is E_BRIEF_STALE, with no sentence
+    let tsd = brief_of(&r, &Scope::Canon, &[&s.section, &s.decision])
+        .base
+        .token;
+    write_cited(
+        &mut r,
+        "w",
+        json!([{"op": "update", "id": sec, "fields": {"title": "Rules, moved"}}]),
+        Some(&tsd),
+    )
+    .unwrap();
+    let e = r
+        .supersede(&writer(), "w", &old, None, input(Some(&tsd)))
+        .unwrap_err();
+    assert_eq!(e.code, E_BRIEF_STALE, "{e}");
+    assert!(!e.message.contains("The briefing covers"), "{e}");
+}
