@@ -1055,7 +1055,7 @@ mod tests {
         let dir = tmp.path();
         git_init(dir);
         let first = commit(dir, "f.rs", "start\n\nImplements: c-AAAAA");
-        let sides = sides(&st, &[a.clone()], &[a2.clone()]);
+        let sides = sides(&st, std::slice::from_ref(&a), std::slice::from_ref(&a2));
         let open = compute_in(
             &st,
             &sides,
