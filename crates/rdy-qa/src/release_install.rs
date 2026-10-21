@@ -513,7 +513,7 @@ fn preview_from_version(stdout: &[u8], version: &str) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::test_support::{fifo, fifo_line};
+    use crate::platform::test_support::{fifo, fifo_line, unix_socket};
     use crate::platform::{Expiry, mode_of, run_bounded, run_bounded_inner, shell_script};
     use crate::skip::{self, Why};
 
@@ -965,6 +965,53 @@ mod tests {
         let mut to = File::create_new(f.dir.path().join("copy.b")).expect("create");
         let from = open_input(&f.binary, BINARY_MAX).expect("open the binary");
         assert_eq!(copy_from(&from, &mut to, BINARY.len() as u64), Ok(()));
+    }
+
+    #[test]
+    fn pre1_package_calls_unopenable_nonregular_inputs_invalid() {
+        let probe = printing("rdy 0.14.0\n");
+        // /dev/tty opens only with a controlling terminal; missing or opened, it is not regular
+        let f = Fixture::new();
+        let before = f.state();
+        assert_eq!(
+            package_with(
+                Path::new("/dev/tty"),
+                V,
+                TARGET,
+                &f.out(),
+                &setup(&f, &probe)
+            ),
+            Err(Failure::InputFile),
+            "/dev/tty"
+        );
+        assert_eq!(f.state(), before, "/dev/tty: nothing changed");
+        assert!(!f.out().exists(), "/dev/tty: no OUT");
+        // a socket never opens; a FIFO without read access does not open for this user
+        let socket: Spoil = |p| {
+            fs::remove_file(p).expect("rm");
+            drop(unix_socket(p));
+        };
+        let locked_fifo: Spoil = |p| {
+            fs::remove_file(p).expect("rm");
+            fifo(p);
+            platform::set_mode(p, 0o000).expect("chmod");
+        };
+        for (what, spoil) in [("a socket", socket), ("a locked fifo", locked_fifo)] {
+            for input in ["binary", MIT_FILE, APACHE_FILE] {
+                let f = Fixture::new();
+                let path = if input == "binary" {
+                    f.binary.clone()
+                } else {
+                    f.licenses.join(input)
+                };
+                spoil(&path);
+                let before = f.state();
+                let got = package_with(&f.binary, V, TARGET, &f.out(), &setup(&f, &probe));
+                assert_eq!(got, Err(Failure::InputFile), "{input} as {what}");
+                assert_eq!(f.state(), before, "{input} as {what}: nothing changed");
+                assert!(!f.out().exists(), "{input} as {what}: no OUT");
+            }
+        }
     }
 
     #[test]

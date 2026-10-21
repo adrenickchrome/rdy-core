@@ -107,17 +107,44 @@ pub fn open_dir(path: &Path) -> io::Result<File> {
 /// umask can only narrow; it is then set to exactly 0o700 through a handle that never follows
 /// a link, and checked to be a directory this user owns. An existing `name` is
 /// `ErrorKind::AlreadyExists`. If a step after mkdir fails, the directory is removed again
-/// while it is still empty, and only while `name` still holds the directory this user made.
+/// while it is still empty: by name when it could not be opened (rmdir refuses a link and a
+/// directory that is not empty), else only while `name` still holds the directory this user
+/// made.
 pub fn create_private_dir_at(parent: &File, name: &std::ffi::OsStr) -> io::Result<File> {
+    create_private_dir_with(parent, name, &open_made_dir)
+}
+
+/// How [`create_private_dir_at`] opens the directory it just made; tests make it fail.
+type OpenMadeDir = dyn Fn(&File, &std::ffi::OsStr) -> io::Result<File>;
+
+/// Opens the directory `name` that mkdir just made in `parent`, never through a link.
+fn open_made_dir(parent: &File, name: &std::ffi::OsStr) -> io::Result<File> {
     use rdy_store::pio;
-    pio::create_private_dir_at(parent, name)?;
-    let dir = match pio::open_dir_at(parent, name) {
+    match pio::open_dir_at(parent, name) {
         // a umask that took the owner's bits: give them back, then open
         Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
             pio::set_mode_at(parent, name, 0o700).and_then(|()| pio::open_dir_at(parent, name))
         }
         opened => opened,
-    }?;
+    }
+}
+
+/// [`create_private_dir_at`], opening the new directory with `open`.
+fn create_private_dir_with(
+    parent: &File,
+    name: &std::ffi::OsStr,
+    open: &OpenMadeDir,
+) -> io::Result<File> {
+    use rdy_store::pio;
+    pio::create_private_dir_at(parent, name)?;
+    let dir = match open(parent, name) {
+        Ok(dir) => dir,
+        Err(e) => {
+            // no handle yet: rmdir by name removes only an empty directory, never a link
+            let _ = pio::remove_dir_at(parent, name);
+            return Err(e);
+        }
+    };
     let checked = (|| {
         dir.set_permissions(pio::permissions(0o700))?;
         let meta = dir.metadata()?;
@@ -146,19 +173,27 @@ pub fn create_private_dir_at(parent: &File, name: &std::ffi::OsStr) -> io::Resul
 
 /// Opens the file `path` for reading, never through a link at its last entry (the directories
 /// above it are trusted) and without waiting on a FIFO. A link there is
-/// `ErrorKind::InvalidInput`. The caller judges the file's kind and size from the handle and
-/// reads that same handle, so a path changed after the open changes nothing.
+/// `ErrorKind::InvalidInput`, and so is a file that is not regular and cannot be opened (a
+/// socket, a FIFO or device without access): which kind of failure the open had depends on
+/// the kind of file. The caller judges the file's kind and size from the handle and reads that
+/// same handle, so a path changed after the open changes nothing.
 pub fn open_input(path: &Path) -> io::Result<File> {
     let (parent, name) = entry_of(path)?;
     let dir = rdy_store::pio::open_dir(parent)?;
     rdy_store::pio::open_read_at(&dir, name).map_err(|e| {
         if rdy_store::pio::is_link_refusal(&e) {
-            io::Error::new(
+            return io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("{} is a symbolic link", path.display()),
-            )
-        } else {
-            e
+            );
+        }
+        // the open failed, so only the error is at stake: the entry's own type, unfollowed
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if !meta.file_type().is_file() => io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is not a regular file", path.display()),
+            ),
+            _ => e,
         }
     })
 }
@@ -906,6 +941,12 @@ pub(crate) mod test_support {
         rx
     }
 
+    /// Binds a Unix socket at `path`: a file that is not regular and that no `open` can open.
+    /// The socket file stays at `path` after the listener is dropped.
+    pub(crate) fn unix_socket(path: &Path) -> std::os::unix::net::UnixListener {
+        std::os::unix::net::UnixListener::bind(path).expect("bind a unix socket")
+    }
+
     /// A hang guard: `f` on a thread, which must end within a minute (not a speed check).
     pub(crate) fn within_a_minute<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1013,6 +1054,75 @@ mod tests {
         use std::io::Read;
         assert_eq!(held.read(&mut buf).expect("read"), 0);
         assert_eq!(agent.connections(), 2);
+    }
+
+    #[test]
+    fn pre1_private_dir_is_removed_when_it_cannot_be_opened() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("keep"), b"sentinel\n").expect("sentinel");
+        let parent = open_dir(tmp.path()).expect("open the parent");
+        let out = tmp.path().join("out");
+        let refused: &OpenMadeDir = &|_, _| Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        // the umask path: the mode is given back, then the reopen fails
+        let reopen_fails: &OpenMadeDir = &|p, n| {
+            rdy_store::pio::set_mode_at(p, n, 0o700)?;
+            Err(io::Error::other("the reopen failed"))
+        };
+        for (what, open) in [("open", refused), ("set mode, then reopen", reopen_fails)] {
+            let got = create_private_dir_with(&parent, "out".as_ref(), open);
+            assert!(got.is_err(), "{what}: the failure is the result");
+            assert_eq!(
+                std::fs::symlink_metadata(&out).map_err(|e| e.kind()).err(),
+                Some(io::ErrorKind::NotFound),
+                "{what}: the new OUT is gone"
+            );
+            assert_eq!(
+                std::fs::read(tmp.path().join("keep")).expect("keep"),
+                b"sentinel\n"
+            );
+            // and the next run can make OUT again
+            create_private_dir_at(&parent, "out".as_ref()).expect("make OUT again");
+            std::fs::remove_dir(&out).expect("rmdir OUT");
+        }
+        // a directory that was already there is AlreadyExists and stays
+        std::fs::create_dir(&out).expect("occupy OUT");
+        let got = create_private_dir_with(&parent, "out".as_ref(), refused);
+        assert_eq!(
+            got.err().map(|e| e.kind()),
+            Some(io::ErrorKind::AlreadyExists)
+        );
+        assert!(out.is_dir(), "an existing OUT is never removed");
+    }
+
+    #[test]
+    fn pre1_open_input_calls_an_unopenable_nonregular_file_invalid_input() {
+        let tmp = tempfile::tempdir_in(short_tmp_root()).expect("tempdir");
+        let sock = tmp.path().join("sock");
+        let _listener = unix_socket(&sock);
+        let fifo_path = tmp.path().join("fifo");
+        fifo(&fifo_path);
+        set_mode(&fifo_path, 0o000).expect("chmod the fifo");
+        for (what, path) in [
+            ("a socket", &sock),
+            ("a fifo without read access", &fifo_path),
+        ] {
+            let got = open_input(path);
+            assert_eq!(
+                got.as_ref().err().map(io::Error::kind),
+                Some(io::ErrorKind::InvalidInput),
+                "{what}: {got:?}"
+            );
+        }
+        // an unreadable regular file is a file operation failure, not an invalid input
+        if rdy_store::pio::own_uid() != 0 {
+            let locked = tmp.path().join("locked");
+            std::fs::write(&locked, b"x").expect("write");
+            set_mode(&locked, 0o000).expect("chmod");
+            assert_eq!(
+                open_input(&locked).err().map(|e| e.kind()),
+                Some(io::ErrorKind::PermissionDenied)
+            );
+        }
     }
 
     /// Whether process group `pgid` still has a member that is not a zombie.
