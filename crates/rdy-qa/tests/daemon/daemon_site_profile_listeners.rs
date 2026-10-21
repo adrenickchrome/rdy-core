@@ -23,6 +23,7 @@ use rdy_qa::daemon::Hosted;
 use rdy_qa::fixtures::{approver, land, write};
 use rdy_qa::golden::tiny;
 use rdy_qa::http::{self, Sse};
+use rdy_qa::platform;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -218,12 +219,14 @@ impl Recorder {
 
     /// [`Recorder::on`]; at each stop stage it also records whether this process (the daemon)
     /// holds no listening socket on any port of `ports` by then, as `<stage>: ports closed
-    /// <bool>` ([`holds_listener`]). Every port must have a listener of the daemon now.
+    /// <bool>` ([`platform::tcp_listen_ports`]). Every port must have a listener of the
+    /// daemon now.
     fn probing(dir: &Path, ports: &[u16]) -> Recorder {
         let root = root_of(dir);
         let ports = ports.to_vec();
+        let open = platform::tcp_listen_ports();
         for p in &ports {
-            assert!(holds_listener(*p), "no listener of this process on port {p}");
+            assert!(open.contains(p), "no listener of this process on port {p}");
         }
         let all = Arc::new(Mutex::new(Vec::new()));
         let (tx, rx) = channel();
@@ -240,7 +243,8 @@ impl Recorder {
                 if let Ev::Stage(stage) = &ev
                     && !ports.is_empty()
                 {
-                    let shut = !ports.iter().any(|p| holds_listener(*p));
+                    let open = platform::tcp_listen_ports();
+                    let shut = !ports.iter().any(|p| open.contains(p));
                     keep.lock()
                         .unwrap()
                         .push(Ev::Stage(format!("{stage}: ports closed {shut}")));
@@ -1393,45 +1397,15 @@ fn opts(dir: &Path) -> ServeOptions {
     }
 }
 
-/// Whether a descriptor of this process is a listening TCP socket on `port` (`127.0.0.1` or
-/// `[::1]`). A connect probe cannot tell this: a child that another test's thread spawns holds
-/// a copy of every descriptor from its fork to its exec, so a listener the daemon has closed
-/// can still accept while that child waits (seen under gate load). Linux reads the descriptor
-/// table; elsewhere a connect probe stands in.
-#[cfg(target_os = "linux")]
-fn holds_listener(port: u16) -> bool {
-    let mut inodes = Vec::new();
-    for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
-        let Ok(text) = std::fs::read_to_string(table) else {
-            continue;
-        };
-        for line in text.lines().skip(1) {
-            let f: Vec<&str> = line.split_whitespace().collect();
-            let local = f[1].rsplit(':').next().unwrap();
-            // st 0A: LISTEN
-            if f[3] == "0A" && u16::from_str_radix(local, 16).unwrap() == port {
-                inodes.push(format!("socket:[{}]", f[9]));
-            }
-        }
-    }
-    std::fs::read_dir("/proc/self/fd")
-        .unwrap()
-        .flatten()
-        .filter_map(|fd| std::fs::read_link(fd.path()).ok())
-        .any(|link| inodes.iter().any(|i| link.as_os_str() == i.as_str()))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn holds_listener(port: u16) -> bool {
-    TcpStream::connect(sock(port)).is_ok()
-}
-
-/// Asserts no listener answers on `port` any more.
+/// Asserts this process (the daemon) holds no listening socket on `port` any more. A connect
+/// cannot tell this: a child that another test's thread spawns holds a copy of every
+/// descriptor from its fork to its exec, so a listener the daemon has closed can still accept
+/// while that child waits (seen under gate load).
 #[track_caller]
 fn closed(port: u16) {
     assert!(
-        TcpStream::connect(sock(port)).is_err(),
-        "port {port} still accepts"
+        !platform::tcp_listen_ports().contains(&port),
+        "this process still listens on port {port}"
     );
 }
 
@@ -1621,6 +1595,10 @@ fn spv7_stop_and_foreground_failure_release_every_listener() {
             let port = port_of(&url_of(&ready.info));
             let body = page(port, "manual/intro.html");
             assert!(body.contains("INTRO-ONLY-1"));
+            assert!(
+                platform::tcp_listen_ports().contains(&port),
+                "the daemon listens"
+            );
             *keep.lock().unwrap() = Some((ready.key.clone(), ready.profile.title.clone(), port));
             Err(RdyError::new(
                 "E_TEST",
@@ -1706,6 +1684,10 @@ fn spv7_stop_and_foreground_failure_release_every_listener() {
         assert!(ready.warnings.is_empty(), "{:?}", ready.warnings);
         let port = port_of(&url_of(&ready.info));
         assert!(page(port, "manual/intro.html").contains("INTRO-ONLY-1"));
+        assert!(
+            platform::tcp_listen_ports().contains(&port),
+            "the daemon listens"
+        );
         let rt = Hosted::rt();
         rt.block_on(request_stop(
             &RunDir::of_project(dir.path()),
@@ -1718,6 +1700,63 @@ fn spv7_stop_and_foreground_failure_release_every_listener() {
         closed(port);
         assert!(rx.try_recv().is_err(), "one callback");
     }
+}
+
+/// The test name of [`plb4_a_child_held_before_exec_keeps_no_listener_of_a_stopped_daemon`].
+const HELD_FORK: &str = "plb4_a_child_held_before_exec_keeps_no_listener_of_a_stopped_daemon";
+
+/// A held child copies every descriptor of this process, and the area binary runs other tests
+/// beside this one: their sockets would stay open too. So the test re-runs itself as a child
+/// that runs it alone (`--exact`, one thread) and holds the fork there.
+#[test]
+fn plb4_a_child_held_before_exec_keeps_no_listener_of_a_stopped_daemon() {
+    if std::env::var_os("RDY_QA_PLB4_CHILD").is_none() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &rdy_qa::test_name!(HELD_FORK),
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("RDY_QA_PLB4_CHILD", "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "stdout: {stdout}\nstderr: {stderr}");
+        assert!(
+            stdout.contains("test result: ok. 1 passed"),
+            "the child ran no test: {stdout}\n{stderr}"
+        );
+        return;
+    }
+    let mut w = world();
+    let sh = shared(&w.h);
+    let guide = port_of(&url_of(
+        &ensure_profile_site(Arc::clone(&sh), "guide").unwrap(),
+    ));
+    let rec = Recorder::probing(w.h.dir.path(), &[guide]);
+    // a child forked now holds a copy of the listener until the test lets it exec
+    let child = platform::fork_held_before_exec();
+    assert_eq!(w.h.stop(), ExitReason::Stopped);
+    // the child's copy still accepts, yet the stopped daemon holds no listener of its own
+    assert!(
+        TcpStream::connect(sock(guide)).is_ok(),
+        "the held child keeps the listener open"
+    );
+    closed(guide);
+    let stages = rec.stages();
+    assert!(
+        at(&stages, "profiles-joined: ports closed true") < at(&stages, "store-closed"),
+        "{stages:?}"
+    );
+    assert!(sh.profile_sites.keys().is_empty());
+    assert!(child.release().success());
+    // the child has exited: nothing accepts any more
+    assert!(
+        TcpStream::connect(sock(guide)).is_err(),
+        "port {guide} still accepts"
+    );
 }
 
 /// What a hello to the daemon of `dir` finds.

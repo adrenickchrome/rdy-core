@@ -1,4 +1,5 @@
 //! The harness's Unix-only helpers, in one place (FW-XP1 D-1RXEA).
+use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::fs::OpenOptionsExt;
@@ -716,6 +717,149 @@ pub fn shell_script(script: &str) -> Command {
 /// A command that does nothing and succeeds (`true`).
 pub fn no_op_command() -> Command {
     Command::new("true")
+}
+
+/// The TCP ports that a listening socket of this process is bound to, on any address. Only
+/// this process's own descriptors count: a connect cannot tell them apart from a copy that a
+/// child holds between its fork and its exec ([`HeldFork`]). Linux reads `/proc/self/fd` and
+/// the LISTEN rows of `/proc/net/tcp` and `/proc/net/tcp6`; elsewhere `lsof` lists them.
+/// Panics if the listing fails.
+#[cfg(target_os = "linux")]
+pub fn tcp_listen_ports() -> BTreeSet<u16> {
+    let mine: BTreeSet<String> = std::fs::read_dir("/proc/self/fd")
+        .expect("list /proc/self/fd")
+        .flatten()
+        .filter_map(|fd| std::fs::read_link(fd.path()).ok())
+        .filter_map(|link| link.to_str().map(str::to_string))
+        .filter(|link| link.starts_with("socket:["))
+        .collect();
+    let mut ports = BTreeSet::new();
+    for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        let text = match std::fs::read_to_string(table) {
+            Ok(text) => text,
+            // no tcp6 table: IPv6 is off
+            Err(e) if table.ends_with('6') && e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => panic!("read {table}: {e}"),
+        };
+        for line in text.lines().skip(1) {
+            // local address `ADDR:PORT` in hex, state (0A: LISTEN), inode
+            let f: Vec<&str> = line.split_whitespace().collect();
+            let (Some(local), Some(state), Some(inode)) = (f.get(1), f.get(3), f.get(9)) else {
+                panic!("a short row in {table}: {line:?}");
+            };
+            if *state == "0A" && mine.contains(&format!("socket:[{inode}]")) {
+                let port = local
+                    .rsplit(':')
+                    .next()
+                    .and_then(|p| u16::from_str_radix(p, 16).ok())
+                    .unwrap_or_else(|| panic!("no port in {table}: {line:?}"));
+                ports.insert(port);
+            }
+        }
+    }
+    ports
+}
+
+/// The TCP ports that a listening socket of this process is bound to (see the Linux version).
+#[cfg(not(target_os = "linux"))]
+pub fn tcp_listen_ports() -> BTreeSet<u16> {
+    let pid = std::process::id().to_string();
+    let out = Command::new("lsof")
+        .args([
+            "-w",
+            "-nP",
+            "-a",
+            "-p",
+            &pid,
+            "-iTCP",
+            "-sTCP:LISTEN",
+            "-Fn",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap_or_else(|e| panic!("cannot run lsof: {e}"));
+    let text = String::from_utf8_lossy(&out.stdout);
+    let ports: BTreeSet<u16> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix('n'))
+        .map(|name| {
+            name.rsplit(':')
+                .next()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or_else(|| panic!("no port in lsof name {name:?}"))
+        })
+        .collect();
+    // lsof exits 1 when it lists nothing
+    assert!(
+        out.status.success() || (ports.is_empty() && out.status.code() == Some(1)),
+        "lsof failed ({}): {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    ports
+}
+
+/// A child of this process held between its fork and its exec. Until then it holds a copy of
+/// every descriptor this process had open at the fork, close-on-exec ones too: a listener
+/// this process closes in that time still accepts. [`HeldFork::release`] lets it exec `true`
+/// and waits for it; a drop does the same.
+pub struct HeldFork {
+    /// This process's end of the socket pair the child waits on.
+    ctl: UnixStream,
+    /// The thread that spawns and waits for the child: a spawn returns only after the exec.
+    waiter: Option<std::thread::JoinHandle<io::Result<ExitStatus>>>,
+}
+
+/// Forks a [`HeldFork`] and returns once the child is held; panics if it does not report
+/// within 10 seconds.
+pub fn fork_held_before_exec() -> HeldFork {
+    let (ctl, held) = UnixStream::pair().expect("a socket pair");
+    let mut cmd = no_op_command();
+    #[allow(unsafe_code)]
+    // SAFETY: the hook runs in the forked child before its exec. It only writes one byte and
+    // reads one byte on a socket the child inherited: plain system calls, with no allocation
+    // and no lock.
+    unsafe {
+        cmd.pre_exec(move || {
+            io::Write::write_all(&mut &held, b"f")?;
+            let mut go = [0u8; 1];
+            (&held).read_exact(&mut go)
+        });
+    }
+    let waiter = std::thread::spawn(move || cmd.status());
+    ctl.set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("a read timeout");
+    let mut forked = [0u8; 1];
+    (&ctl)
+        .read_exact(&mut forked)
+        .expect("the child reports that it is held");
+    HeldFork {
+        ctl,
+        waiter: Some(waiter),
+    }
+}
+
+impl HeldFork {
+    /// Lets the child exec and exit; its exit status.
+    pub fn release(mut self) -> ExitStatus {
+        self.finish().expect("the held child ran")
+    }
+
+    fn finish(&mut self) -> io::Result<ExitStatus> {
+        let waiter = self.waiter.take().expect("not released yet");
+        io::Write::write_all(&mut &self.ctl, b"g")?;
+        waiter
+            .join()
+            .map_err(|_| io::Error::other("the waiter panicked"))?
+    }
+}
+
+impl Drop for HeldFork {
+    fn drop(&mut self) {
+        if self.waiter.is_some() {
+            let _ = self.finish();
+        }
+    }
 }
 
 /// A fake SSH agent that records connections: a Unix socket listener (set its path as
