@@ -10,7 +10,8 @@
 //! plan (an unsealed PLAN, [`PLAN_VIEW`]); increment 1 holds that proposal's landing and its
 //! seal, which names the earlier file's plan. The holder chain's last increment takes the
 //! history of a sealed plan landing of the holder's first source ([`PLAN_TAG`]) through an
-//! export, a batch check and a take: the seal, its chain and its acceptance.
+//! export, a batch check and a take: the seal, its chain and its acceptance. The standalone
+//! holder takes that history again after its other takes.
 //!
 //! - The project chain starts from [`every_kind::rolling_project`]. Before the full dump it adds a
 //!   removable prose block (its version and the change that embeds it, with [`EARLY_CANARY`]) and
@@ -420,7 +421,7 @@ pub fn holder_chain() -> (Chain, HolderUploads) {
         &["v2-0.rdysync", "v2-1.rdysync"],
         &["v3-0.rdysync"],
     ];
-    let ups: Vec<Upload> = names
+    let mut ups: Vec<Upload> = names
         .iter()
         .zip(targets)
         .map(|(files, target)| Upload {
@@ -439,7 +440,8 @@ pub fn holder_chain() -> (Chain, HolderUploads) {
     let s1 = h.read().dump_after(&s0.chain_end(), &inc1).unwrap();
     take(&mut h, &ups[2]);
     // store format 17: the first source's sealed plan landing, through an export and a take
-    take(&mut h, &plan_upload(&built, repo));
+    ups.push(plan_upload(&built, repo));
+    take(&mut h, &ups[3]);
     // the earlier uploads again: every key is held, so nothing is appended
     let end = h.store().log_end();
     take(&mut h, &ups[1]);
@@ -511,6 +513,8 @@ pub fn holder_standalone(c: &Chain, ups: &HolderUploads) -> Standalone {
     h.store_mut().set_segment_max(SEGMENT_MAX);
     take(&mut h, &ups.0[1]);
     take(&mut h, &ups.0[2]);
+    // store format 17: the sealed plan landing's history again, after the removal
+    take(&mut h, &ups.0[3]);
     let dump = dir.path().join("standalone-holder.rdydump");
     h.read().dump(&dump).unwrap();
     h.close().unwrap();
