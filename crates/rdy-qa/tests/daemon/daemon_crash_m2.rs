@@ -349,6 +349,22 @@ fn killed_hit(v: &Value) -> Hit {
 }
 
 #[test]
+fn sg6_a_narrowed_window_that_misses_resets_to_the_timed_window() {
+    let mut w = Window::new(20, 1);
+    w.narrow(12, &Hit::Early);
+    w.narrow(16, &Hit::Answered);
+    assert_eq!((w.lo, w.hi), (12, 16), "narrowed to MIN_WIDTH");
+    // the op drifted later under load: a kill before it reached the daemon resets the window
+    w.narrow(15, &Hit::Early);
+    assert_eq!((w.lo, w.hi), (0, 20));
+    w.narrow(4, &Hit::Answered);
+    w.narrow(5, &Hit::InFlight);
+    assert_eq!((w.lo, w.hi), (0, 4), "an in-flight kill keeps the window");
+    w.narrow(3, &Hit::Answered);
+    assert_eq!((w.lo, w.hi), (0, 20));
+}
+
+#[test]
 fn sg6_only_a_kill_during_the_approve_op_counts_as_in_flight() {
     // the CLI sends `session` before `approve`: a kill during `session` is before the landing
     let gone = |op: &str| {
