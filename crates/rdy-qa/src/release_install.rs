@@ -989,6 +989,8 @@ struct InstallSetup<'a> {
     os: &'a dyn Fn() -> io::Result<String>,
     /// The process that runs one guide command (tests stand in for a tool here).
     process: &'a dyn Fn(&GuideCommand) -> Command,
+    /// Told each guide command the runner runs, right before it starts (a test hook).
+    ran: &'a dyn Fn(&GuideCommand),
     /// Where the installed check's scratch directory is made.
     scratch: PathBuf,
     /// Each child's output cap, and the MCP session's.
@@ -1004,6 +1006,7 @@ impl InstallSetup<'static> {
             native_target: &platform::release_target,
             os: &platform::release_os,
             process: &guide_process,
+            ran: &nothing_ran,
             scratch: std::env::temp_dir(),
             max_output: RELEASE_CHILD_OUTPUT_MAX,
             deadline: RELEASE_CHILD_DEADLINE,
@@ -1011,8 +1014,11 @@ impl InstallSetup<'static> {
     }
 }
 
+/// The release check's [`InstallSetup::ran`]: nothing is told.
+fn nothing_ran(_: &GuideCommand) {}
+
 /// The process of a guide command: its program and arguments. Where it starts and its
-/// redirections are the check's to give ([`run_in`]).
+/// redirections are the runner's to give ([`run_guide`]).
 fn guide_process(c: &GuideCommand) -> Command {
     let mut cmd = Command::new(&c.program);
     cmd.args(&c.args);
@@ -1045,34 +1051,106 @@ fn run_ok(
     }
 }
 
-/// Runs the guide command `c`, with `env` set, started in the open directory `dir` and with
-/// `stdin` (see [`run_ok`]). `c` is the command as the check runs it: each path it names is an
-/// entry of `dir`, or arrives as `stdin`, so a change to the paths that led to `dir` changes
-/// nothing the command reads or writes.
-fn run_in(
+/// Whether `path`, its links followed, names the open directory `dir` now (the same device
+/// and inode).
+fn names_dir(path: &Path, dir: &File) -> bool {
+    let Ok(now) = fs::canonicalize(path) else {
+        return false;
+    };
+    match (now.parent(), now.file_name()) {
+        (Some(parent), Some(name)) => platform::open_dir(parent)
+            .and_then(|parent| platform::holds_file(&parent, name, dir))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// The directory and file the install made in PREFIX, open once the check has found them.
+#[derive(Default)]
+struct Installed {
+    /// `PREFIX/bin`.
+    bin: Option<File>,
+    /// `PREFIX/bin/rdy`.
+    rdy: Option<File>,
+}
+
+/// Whether the paths the guide's commands name still name what the check checked and made:
+/// DOWNLOAD the checked directory, with the manifest, the signature, every present archive and
+/// the signer file the same entries; UNPACK and PREFIX, once made, this run's directories; and
+/// `PREFIX/bin` and `PREFIX/bin/rdy`, once found, the install's.
+fn intact(input: &InstallInput, dl: &Download, owned: &Owned, installed: &Installed) -> bool {
+    let holds = |name: &str, file: &File| {
+        platform::holds_file(&dl.dir, name.as_ref(), file).unwrap_or(false)
+    };
+    names_dir(&input.download, &dl.dir)
+        && holds(MANIFEST_FILE, &dl.manifest.file)
+        && holds(SIGNATURE_FILE, &dl.signature.file)
+        && dl.archives.iter().all(|(name, file)| holds(name, file))
+        && owned
+            .signers
+            .as_ref()
+            .is_none_or(|f| holds(SIGNERS_FILE, f))
+        && owned
+            .unpack
+            .as_ref()
+            .is_none_or(|u| names_dir(&input.unpack, &u.dir))
+        && owned
+            .prefix
+            .as_ref()
+            .is_none_or(|p| names_dir(&input.prefix, &p.dir))
+        && installed
+            .bin
+            .as_ref()
+            .is_none_or(|bin| names_dir(&input.prefix.join("bin"), bin))
+        && installed.rdy.as_ref().is_none_or(|rdy| {
+            installed.bin.as_ref().is_some_and(|bin| {
+                platform::holds_file(bin, OsStr::new("rdy"), rdy).unwrap_or(false)
+            })
+        })
+}
+
+/// Runs the guide command `c` as it is, with `env` set: its program and arguments, started in
+/// its working directory, DOWNLOAD, through DOWNLOAD's checked handle. Its stdin, the manifest,
+/// is the checked manifest's handle; its stdout, the signer file, is captured for the caller to
+/// write to the signer file this check created. Right before it starts, and again after it
+/// ends, every path the guide names must still name what was checked ([`intact`]); otherwise
+/// it fails as `stage`, like a nonzero exit (see [`run_ok`]). [`InstallSetup::ran`] is told
+/// `c` right before it starts.
+#[allow(clippy::too_many_arguments)]
+fn run_guide(
     setup: &InstallSetup,
+    input: &InstallInput,
     c: &GuideCommand,
-    dir: &File,
-    stdin: Option<File>,
+    dl: &mut Download,
+    owned: &Owned,
+    installed: &Installed,
     env: &[(&str, &str)],
     stage: InstallFailure,
 ) -> Result<Output, InstallFailure> {
+    let stdin = match &c.stdin {
+        None => None,
+        Some(from) if *from == input.download.join(MANIFEST_FILE) => {
+            Some(rewound(&mut dl.manifest.file).map_err(|_| stage)?)
+        }
+        Some(_) => return Err(stage),
+    };
+    let stdout_ok = c
+        .stdout
+        .as_ref()
+        .is_none_or(|to| *to == input.download.join(SIGNERS_FILE));
+    if c.cwd != input.download || !stdout_ok || !intact(input, dl, owned, installed) {
+        return Err(stage);
+    }
     let mut cmd = (setup.process)(c);
     cmd.envs(env.iter().copied());
-    platform::start_in_dir(&mut cmd, dir).map_err(|_| stage)?;
-    run_ok(setup, cmd, stdin, stage)
-}
-
-/// `c` with each argument that names `path` replaced by `name`, an entry of the directory the
-/// command starts in.
-fn naming(c: &GuideCommand, path: &Path, name: &str) -> GuideCommand {
-    let mut c = c.clone();
-    for a in &mut c.args {
-        if Path::new(a) == path {
-            *a = name.into();
-        }
+    platform::start_in_dir(&mut cmd, &dl.dir).map_err(|_| stage)?;
+    (setup.ran)(c);
+    let out = run_ok(setup, cmd, stdin, stage)?;
+    if intact(input, dl, owned, installed) {
+        Ok(out)
+    } else {
+        Err(stage)
     }
-    c
 }
 
 /// A file in DOWNLOAD, open, and the bytes read through that handle when it was checked.
@@ -1081,8 +1159,10 @@ struct Checked {
     bytes: Vec<u8>,
 }
 
-/// The checked download directory and the parents of the outputs, each open. Every later step
-/// reaches these files and directories through the handles, never through the paths given.
+/// The checked download directory and the parents of the outputs, each open. The guide's
+/// commands name these files by their paths; before and after each of them the check confirms
+/// that the paths still name these handles ([`intact`]), and it reads, validates and cleans up
+/// through the handles.
 struct Download {
     /// DOWNLOAD itself.
     dir: File,
@@ -1090,16 +1170,16 @@ struct Download {
     signature: Checked,
     /// The expected archives present in DOWNLOAD, in manifest order: each name and its handle.
     archives: Vec<(String, File)>,
-    /// The selected archive's place in `archives`.
-    selected: usize,
     /// The directories UNPACK and PREFIX are made in.
     unpack_parent: File,
     prefix_parent: File,
 }
 
-/// A directory this check made, exclusively, in an open parent: its parent's handle, its name
-/// there and its own handle. Only such a directory is ever removed, and only through these
-/// handles; no path is resolved again to choose what to delete.
+/// A directory this check made in an open parent: the scratch directory, made exclusively, or
+/// UNPACK or PREFIX, which the guide's `mkdir` made after the check found both absent, claimed
+/// only when that mkdir succeeded. It holds its parent's handle, its name there and its own
+/// handle. Only such a directory is ever removed, and only through these handles; no path is
+/// resolved again to choose what to delete.
 struct MadeDir {
     parent: File,
     name: OsString,
@@ -1115,6 +1195,20 @@ impl MadeDir {
         let dir = platform::create_private_dir_at(&parent, name)?;
         Ok(MadeDir {
             parent,
+            name: name.to_os_string(),
+            dir,
+        })
+    }
+
+    /// The directory `name` in `parent`, which a guide command has just made: a directory (not
+    /// a link) that this user owns. `None` for anything else.
+    fn claim(parent: &File, name: &OsStr) -> Option<MadeDir> {
+        let dir = rdy_store::pio::open_dir_at(parent, name).ok()?;
+        let meta = dir.metadata().ok()?;
+        (meta.is_dir() && rdy_store::pio::owner(&meta) == rdy_store::pio::own_uid())
+            .then_some(())?;
+        Some(MadeDir {
+            parent: parent.try_clone().ok()?,
             name: name.to_os_string(),
             dir,
         })
@@ -1309,20 +1403,16 @@ fn inspect(input: &InstallInput) -> Result<(Download, Owned), InstallFailure> {
     }
     let manifest = checked_at(&dir, MANIFEST_FILE, MANIFEST_MAX)?;
     let signature = checked_at(&dir, SIGNATURE_FILE, SIGNATURE_MAX)?;
+    // the selected archive is never skipped: its absence fails here
     let mut archives = Vec::new();
-    let mut selected = None;
     for target in TARGETS {
         let name = archive_name(&input.version, target);
         if target != input.target && absent_at(&dir, name.as_ref()) {
             continue;
         }
         let file = open_regular_at(&dir, &name, ARCHIVE_MAX).ok_or(Input)?;
-        if target == input.target {
-            selected = Some(archives.len());
-        }
         archives.push((name, file));
     }
-    let selected = selected.ok_or(Input)?;
     let signers = platform::create_new_at(&dir, OsStr::new(SIGNERS_FILE)).map_err(|_| Input)?;
     let owned = Owned {
         download: dir.try_clone().map_err(|_| Input)?,
@@ -1337,7 +1427,6 @@ fn inspect(input: &InstallInput) -> Result<(Download, Owned), InstallFailure> {
             manifest,
             signature,
             archives,
-            selected,
             unpack_parent,
             prefix_parent,
         },
@@ -1414,13 +1503,13 @@ fn check_with(
 
 /// The stages after the input checks, in order.
 ///
-/// Each command runs as [`run_in`] says: started in an open directory, naming entries of it.
-/// The guide's commands that read DOWNLOAD start in DOWNLOAD's handle. tar reads the checked
-/// archive's handle on stdin and extracts into UNPACK's handle (`tar -xzf -`), and install
-/// reads the checked extracted binary's handle and writes into `bin`'s handle (`install -m
-/// 755 /dev/stdin rdy`). The version check runs that file as `./rdy` in `bin`. The guide's two
-/// `mkdir` commands are made here instead, exclusively, through the parents' handles: a
-/// directory another process made is never this run's (see [`MadeDir`]).
+/// The guide's steps are the guide's commands, run in order by [`run_guide`], each as it is:
+/// the same argv, DOWNLOAD as the working directory and the product by its absolute installed
+/// path. Between them the check validates what each command left: the signer file's bytes,
+/// the manifest's grammar, the checksum report, the extracted binary and the version text.
+/// The browser path probes the verified archive for the quarantine attribute right before the
+/// guide's removal command, and skips that command when the attribute is absent. After the
+/// guide's last command come the installed check's own steps ([`smoke`]), then the cleanup.
 fn install_stages(
     input: &InstallInput,
     guide: &Guide,
@@ -1430,9 +1519,19 @@ fn install_stages(
 ) -> Result<(), InstallFailure> {
     use InstallFailure::*;
     use std::io::Write;
+    let mut installed = Installed::default();
 
     // Signature: the signer file holds printf's bytes; OpenSSH verifies the raw manifest.
-    let printed = run_in(setup, &guide.signers, &dl.dir, None, &[], Signature)?;
+    let printed = run_guide(
+        setup,
+        input,
+        &guide.signers,
+        dl,
+        owned,
+        &installed,
+        &[],
+        Signature,
+    )?;
     if printed.stdout != format!("{}\n", input.signer_line).as_bytes() {
         return Err(Signature);
     }
@@ -1441,16 +1540,18 @@ fn install_stages(
         .write_all(&printed.stdout)
         .and_then(|()| signers.sync_all())
         .map_err(|_| Signature)?;
-    let manifest = rewound(&mut dl.manifest.file).map_err(|_| Signature)?;
-    run_in(
+    run_guide(
         setup,
+        input,
         &guide.verify,
-        &dl.dir,
-        Some(manifest),
+        dl,
+        owned,
+        &installed,
         &[],
         Signature,
     )?;
-    // what OpenSSH read is what was checked: the same entries, with the same bytes
+    // what OpenSSH read is what was checked: the same bytes
+    let signers = owned.signers.as_mut().ok_or(Signature)?;
     let verified = unchanged(&dl.dir, SIGNERS_FILE, signers, &printed.stdout)
         && unchanged(
             &dl.dir,
@@ -1470,11 +1571,13 @@ fn install_stages(
 
     // Checksums: the manifest's grammar, then the native tool, one OK line per present archive.
     check_manifest(&dl.manifest.bytes, &input.version)?;
-    let out = run_in(
+    let out = run_guide(
         setup,
+        input,
         &guide.checksums,
-        &dl.dir,
-        None,
+        dl,
+        owned,
+        &installed,
         &[("LC_ALL", "C")],
         Checksums,
     )?;
@@ -1483,95 +1586,115 @@ fn install_stages(
             .split(|&b| b == b'\n')
             .any(|line| line == format!("{name}: OK").as_bytes())
     });
-    if dl.archives.is_empty() || !checked {
-        return Err(Checksums);
-    }
-    // the hashed entries are the checked files
     let hashed = unchanged(
         &dl.dir,
         MANIFEST_FILE,
         &mut dl.manifest.file,
         &dl.manifest.bytes,
-    ) && dl
-        .archives
-        .iter()
-        .all(|(name, file)| platform::holds_file(&dl.dir, name.as_ref(), file).unwrap_or(false));
-    if !hashed {
+    );
+    if dl.archives.is_empty() || !checked || !hashed {
         return Err(Checksums);
     }
 
-    // Install: the quarantine attribute (browser only), then the directories, extraction,
-    // the extracted binary's check and the install.
-    let (archive_name, archive) = &mut dl.archives[dl.selected];
+    // Install: the quarantine attribute (browser only), then the guide's directories,
+    // extraction, the extracted binary's check and the install.
     if let Some(remove) = &guide.unquarantine {
-        let probe = GuideCommand::new("xattr", &[archive_name.as_ref()], &input.download);
-        let names = run_in(setup, &probe, &dl.dir, None, &[], Install)?;
+        let probe = GuideCommand::new("xattr", &[guide.archive.as_os_str()], &input.download);
+        let names = run_guide(setup, input, &probe, dl, owned, &installed, &[], Install)?;
         if names_quarantine(&names.stdout) {
-            let remove = naming(remove, &guide.archive, archive_name);
-            run_in(setup, &remove, &dl.dir, None, &[], Install)?;
+            run_guide(setup, input, remove, dl, owned, &installed, &[], Install)?;
         }
     }
     let name_of = |p: &Path| p.file_name().map(OsStr::to_os_string).ok_or(Install);
-    let unpack = MadeDir::make(&dl.unpack_parent, &name_of(&input.unpack)?).map_err(|_| Install)?;
-    let unpack = owned.unpack.insert(unpack);
-    let prefix = MadeDir::make(&dl.prefix_parent, &name_of(&input.prefix)?).map_err(|_| Install)?;
-    let prefix = owned.prefix.insert(prefix);
-    platform::set_file_mode(&prefix.dir, 0o755).map_err(|_| Install)?;
-
-    let extract = GuideCommand {
-        program: "tar".into(),
-        args: vec!["-xzf".into(), "-".into()],
-        cwd: input.unpack.clone(),
-        stdin: Some(guide.archive.clone()),
-        stdout: None,
-    };
-    let from = rewound(archive).map_err(|_| Install)?;
-    run_in(setup, &extract, &unpack.dir, Some(from), &[], Install)?;
+    let (unpack_name, prefix_name) = (name_of(&input.unpack)?, name_of(&input.prefix)?);
+    // a directory that stands there now was made by another process: the guide's mkdir would
+    // fail, and it is never this run's
+    if !(absent_at(&dl.unpack_parent, &unpack_name) && absent_at(&dl.prefix_parent, &prefix_name)) {
+        return Err(Install);
+    }
+    // a failed mkdir does not say which directory it made: neither is claimed then
+    run_guide(
+        setup,
+        input,
+        &guide.make_dirs,
+        dl,
+        owned,
+        &installed,
+        &[],
+        Install,
+    )?;
+    owned.unpack = Some(MadeDir::claim(&dl.unpack_parent, &unpack_name).ok_or(Install)?);
+    owned.prefix = Some(MadeDir::claim(&dl.prefix_parent, &prefix_name).ok_or(Install)?);
+    if !intact(input, dl, owned, &installed) {
+        return Err(Install);
+    }
+    run_guide(
+        setup,
+        input,
+        &guide.extract,
+        dl,
+        owned,
+        &installed,
+        &[],
+        Install,
+    )?;
+    run_guide(
+        setup,
+        input,
+        &guide.make_bin,
+        dl,
+        owned,
+        &installed,
+        &[],
+        Install,
+    )?;
+    let prefix = owned.prefix.as_ref().ok_or(Install)?;
+    installed.bin =
+        Some(rdy_store::pio::open_dir_at(&prefix.dir, OsStr::new("bin")).map_err(|_| Install)?);
+    // the extracted binary: a regular file, not a link, within its bound, before install
+    let unpack = owned.unpack.as_ref().ok_or(Install)?;
     let stem =
         rdy_store::pio::open_dir_at(&unpack.dir, guide.stem.as_ref()).map_err(|_| Install)?;
     let extracted = open_regular_at(&stem, "rdy", BINARY_MAX).ok_or(Install)?;
     let len = extracted.metadata().map_err(|_| Install)?.len();
+    if !intact(input, dl, owned, &installed) {
+        return Err(Install);
+    }
+    run_guide(
+        setup,
+        input,
+        &guide.install,
+        dl,
+        owned,
+        &installed,
+        &[],
+        Install,
+    )?;
+    let bin = installed.bin.as_ref().ok_or(Install)?;
+    installed.rdy = Some(
+        open_regular_at(bin, "rdy", BINARY_MAX)
+            .filter(|f| f.metadata().is_ok_and(|m| m.len() == len))
+            .ok_or(Install)?,
+    );
 
-    let bin = platform::create_private_dir_at(&prefix.dir, "bin".as_ref()).map_err(|_| Install)?;
-    platform::set_file_mode(&bin, 0o755).map_err(|_| Install)?;
-    let bin_path = input.prefix.join("bin");
-    let install = GuideCommand {
-        program: "install".into(),
-        args: ["-m", "755", "/dev/stdin", "rdy"]
-            .map(OsString::from)
-            .to_vec(),
-        cwd: bin_path.clone(),
-        stdin: Some(input.unpack.join(&guide.stem).join("rdy")),
-        stdout: None,
-    };
-    run_in(setup, &install, &bin, Some(extracted), &[], Install)?;
-    let installed = open_regular_at(&bin, "rdy", BINARY_MAX)
-        .filter(|f| f.metadata().is_ok_and(|m| m.len() == len))
-        .ok_or(Install)?;
-
-    // Version: the exact text the archive's stem calls for.
+    // Version: the exact text the archive's stem calls for, from the absolute installed path.
     let want = version_text_of(&guide.stem, &input.version, &input.target).ok_or(Version)?;
-    let version = GuideCommand {
-        program: "./rdy".into(),
-        args: vec!["--version".into()],
-        cwd: bin_path.clone(),
-        stdin: None,
-        stdout: None,
-    };
-    let out = run_in(setup, &version, &bin, None, &[], Version)?;
+    let out = run_guide(
+        setup,
+        input,
+        &guide.version,
+        dl,
+        owned,
+        &installed,
+        &[],
+        Version,
+    )?;
     if out.stdout != want.as_bytes() || !out.stderr.is_empty() {
         return Err(Version);
     }
 
-    // Every product command runs the installed path: it must name the installed file.
-    let rdy = bin_path.join("rdy");
-    let at_path = platform::open_dir(&bin_path)
-        .and_then(|d| platform::holds_file(&d, "rdy".as_ref(), &installed))
-        .unwrap_or(false);
-    if !at_path {
-        return Err(Daemon);
-    }
-    smoke(&rdy, setup, owned)
+    // The installed check's own steps, after the guide's last command.
+    smoke(Path::new(&guide.version.program), setup, owned)
 }
 
 /// The class of a failed bounded MCP session.
@@ -3027,13 +3150,18 @@ esac
         }
     }
 
-    /// The test's stand-in for each guide command: the real tool, except the macOS checksum
-    /// command on another host (the native tool instead) and `xattr`, which reports
+    /// The test's stand-in for each guide command: the real tool, except the checksum command
+    /// of the other target (the host's native tool instead) and `xattr`, which reports
     /// `attributes` (a printf text) and removes nothing.
     fn stand_in(c: &GuideCommand, attributes: &str) -> Command {
         if c.program == "shasum" && host_target() != MAC_TARGET {
             let mut cmd = Command::new("sha256sum");
             cmd.args(["-c", "--ignore-missing", MANIFEST_FILE]);
+            return cmd;
+        }
+        if c.program == "sha256sum" && host_target() == MAC_TARGET {
+            let mut cmd = Command::new("shasum");
+            cmd.args(["-a", "256", "-c", "--ignore-missing", MANIFEST_FILE]);
             return cmd;
         }
         if c.program == "xattr" {
@@ -3071,6 +3199,7 @@ esac
             native_target: native,
             os: &platform::release_os,
             process,
+            ran: &nothing_ran,
             scratch: kit.scratch.clone(),
             max_output: RELEASE_CHILD_OUTPUT_MAX,
             deadline: RELEASE_CHILD_DEADLINE,
@@ -3092,6 +3221,23 @@ esac
     /// [`check_kit`] with the plain stand-ins and the setup unchanged.
     fn check_plain(kit: &Kit, input: &InstallInput) -> Result<InstalledRelease, InstallFailure> {
         check_kit(kit, input, &|c| stand_in(c, ""), |_| {})
+    }
+
+    /// Runs the check of `input` against `kit` with the plain stand-ins (`attributes` for
+    /// `xattr`): its result and every guide command its runner ran, as the runner's hook saw
+    /// it.
+    fn check_recorded(
+        kit: &Kit,
+        input: &InstallInput,
+        attributes: &str,
+    ) -> (Result<InstalledRelease, InstallFailure>, Vec<Shown>) {
+        let ran = Mutex::new(Vec::new());
+        let record = |c: &GuideCommand| {
+            ran.lock().unwrap_or_else(|e| e.into_inner()).push(shown(c));
+        };
+        let process = |c: &GuideCommand| stand_in(c, attributes);
+        let got = check_kit(kit, input, &process, |s| s.ran = &record);
+        (got, ran.into_inner().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// The argv of every guide command the check ran, in order: a log kept outside every
@@ -3196,30 +3342,51 @@ esac
         assert!(!log.touched_the_archive(), "{:?}", log.all());
         kit.assert_untouched(&input, "a retargeted download");
 
-        // Right before extraction, the link is pointed at a directory whose archive (of the
-        // same name) holds another binary: the checked archive is the one installed.
-        let kit = Kit::new(target);
-        let other = Kit::new(target);
-        let link = kit.dir.path().join("download link");
-        platform::symlink(&kit.download, &link).expect("symlink");
-        let mut input = kit.input();
-        input.download = link.clone();
-        let process = |c: &GuideCommand| {
-            if c.program == "tar" {
-                relink(&link, &other.download);
-            }
-            stand_in(c, "")
-        };
-        check_kit(&kit, &input, &process, |_| {}).unwrap_or_else(|f| panic!("{}", f.message()));
-        assert_eq!(
-            fs::read(input.prefix.join("bin").join("rdy")).expect("installed"),
-            fake_rdy(&kit.marker, "rdy 0.14.0 (preview)", 0).into_bytes(),
-            "the checked archive's binary is installed"
-        );
-        assert!(
-            other.ran().is_empty(),
-            "the other archive's binary never ran"
-        );
+        // The link is pointed at another kit's download, whose archive of the same name holds
+        // another binary: while the checksum tool runs, or right before tar runs. tar reads
+        // the archive through DOWNLOAD's path, as the guide says, so the check confirms after
+        // each command that DOWNLOAD's path still names the checked directory and its checked
+        // files. A moved link fails the stage that was running, and neither binary runs or is
+        // installed.
+        for (when, want) in [
+            ("sha256sum", InstallFailure::Checksums),
+            ("tar", InstallFailure::Install),
+        ] {
+            let kit = Kit::new(target);
+            let other = Kit::new(target);
+            let link = kit.dir.path().join("download link");
+            platform::symlink(&kit.download, &link).expect("symlink");
+            let mut input = kit.input();
+            input.download = link.clone();
+            let log = Log::new();
+            let process = |c: &GuideCommand| {
+                log.push(c);
+                let checksum = c.program == "shasum" || c.program == "sha256sum";
+                if (when == "sha256sum" && checksum) || c.program == when {
+                    relink(&link, &other.download);
+                }
+                stand_in(c, "")
+            };
+            assert_eq!(
+                check_kit(&kit, &input, &process, |_| {}).map(|_| ()),
+                Err(want),
+                "the link moved at {when}"
+            );
+            assert!(
+                !log.ran("install") && !log.all().iter().any(|a| a[0].ends_with("/rdy")),
+                "{when}: nothing installed or run: {:?}",
+                log.all()
+            );
+            assert_eq!(log.ran("tar"), when == "tar", "{when}: {:?}", log.all());
+            assert!(other.ran().is_empty(), "{when}: the other binary never ran");
+            assert!(kit.ran().is_empty(), "{when}: the checked binary never ran");
+            assert!(absent(&input.unpack) && absent(&input.prefix), "{when}");
+            assert!(
+                absent(&kit.download.join(SIGNERS_FILE))
+                    && absent(&other.download.join(SIGNERS_FILE)),
+                "{when}: the signer file is removed, and none is left in the other download"
+            );
+        }
     }
 
     #[test]
@@ -3750,6 +3917,43 @@ esac
             readme_install_problem(&edited).is_err(),
             "a hand edit is caught"
         );
+
+        // The check runs these same command objects: the argv, cwd and redirections that its
+        // runner starts, recorded by the runner's hook, are the guide's, element for element,
+        // on macOS and on Linux. Its other steps (the version receipt, the daemon and MCP
+        // checks and the cleanup) come after the guide's last command and are not guide
+        // commands.
+        if !install_tools_or_skip(&crate::test_name!("pre3_guide_commands_match_execution")) {
+            return;
+        }
+        for target in TARGETS {
+            let kit = Kit::new(target);
+            let input = kit.input();
+            let (got, ran) = check_recorded(&kit, &input, "");
+            got.unwrap_or_else(|f| panic!("{target}: {}", f.message()));
+            let guide: Vec<Shown> = commands(&input)
+                .expect("commands")
+                .iter()
+                .map(shown)
+                .collect();
+            assert_eq!(ran, guide, "{target}: the check runs the guide's commands");
+            assert!(
+                ran.iter().all(|c| c.2 == input.download.to_string_lossy()),
+                "{target}: every command starts in DOWNLOAD"
+            );
+            assert_eq!(
+                ran.last().map(|c| c.0.clone()),
+                Some(
+                    input
+                        .prefix
+                        .join("bin")
+                        .join("rdy")
+                        .to_string_lossy()
+                        .into_owned()
+                ),
+                "{target}: the product runs by its absolute installed path"
+            );
+        }
     }
 
     /// The position of the first of `lines` that starts with `word`, else past the end.
@@ -3775,44 +3979,24 @@ esac
             let kit = Kit::new(MAC_TARGET);
             let mut input = kit.input();
             input.browser = true;
-            let log = Mutex::new(Vec::new());
-            let process = |c: &GuideCommand| {
-                log.lock().unwrap_or_else(|e| e.into_inner()).push(argv(c));
-                stand_in(c, attributes)
-            };
-            check_kit(&kit, &input, &process, |_| {}).unwrap_or_else(|f| panic!("{}", f.message()));
-            let ran: Vec<Vec<String>> = log.into_inner().unwrap_or_else(|e| e.into_inner());
-            let programs: Vec<&str> = ran.iter().map(|a| a[0].as_str()).collect();
-            // the commands as the check runs them: each names the archive as an entry of
-            // DOWNLOAD's handle, where it starts
-            let archive = archive_name(IV, MAC_TARGET);
-            let mut want = vec!["printf", "ssh-keygen", "shasum", "xattr"];
-            if removes {
-                want.push("xattr");
-            }
-            want.extend(["tar", "install"]);
-            assert_eq!(&programs[..want.len()], &want[..], "{ran:?}");
+            let (got, ran) = check_recorded(&kit, &input, attributes);
+            got.unwrap_or_else(|f| panic!("{}", f.message()));
+            // the guide's commands, with the probe of the verified archive right after the
+            // checksum command, and the removal only when the probe names the attribute
+            let guide = commands(&input).expect("commands");
+            let archive = input.download.join(archive_name(IV, MAC_TARGET));
+            let probe = GuideCommand::new("xattr", &[archive.as_os_str()], &input.download);
+            let mut want: Vec<Shown> = guide.iter().map(shown).collect();
+            assert_eq!(want[3].0, "xattr", "the guide's removal");
             assert_eq!(
-                ran[3],
-                vec!["xattr".to_string(), archive.clone()],
-                "the probe"
+                want[3].1,
+                ["-d", QUARANTINE_ATTRIBUTE, &archive.to_string_lossy()]
             );
-            if removes {
-                assert_eq!(
-                    ran[4],
-                    vec![
-                        "xattr".into(),
-                        "-d".into(),
-                        QUARANTINE_ATTRIBUTE.into(),
-                        archive
-                    ]
-                );
+            if !removes {
+                want.remove(3);
             }
-            assert_eq!(
-                ran[want.len()..],
-                [vec!["./rdy".to_string(), "--version".into()]],
-                "then the version: {programs:?}"
-            );
+            want.insert(3, shown(&probe));
+            assert_eq!(ran, want, "attributes {attributes}");
         }
         // No xattr call before both checks pass.
         for spoil in [
@@ -4268,10 +4452,27 @@ esac
             fs::remove_file(&rdy).expect("rm the padded source");
         }
 
-        // UNPACK and PREFIX are reached through links that are pointed elsewhere, right before
-        // the version check fails. The cleanup removes this run's directories through their
-        // handles and nothing at the links' new targets.
-        let kit = Kit::with_rdy(target, "rdy 0.15.0 (preview)", 0);
+        // UNPACK and PREFIX are reached through links, which the installed binary points
+        // elsewhere while its version check runs (and fails). The cleanup removes this run's
+        // directories through their handles and nothing at the links' new targets.
+        let kit = Kit::with_fake(target, &|marker| {
+            let dir = marker.parent().expect("the kit's directory");
+            let (elsewhere, unpack_alias, prefix_alias) = (
+                dir.join("elsewhere"),
+                dir.join("unpack alias"),
+                dir.join("prefix alias"),
+            );
+            fake_rdy(marker, "rdy 0.15.0 (preview)", 0).replacen(
+                "#!/bin/sh\n",
+                &format!(
+                    "#!/bin/sh\nif [ \"$1\" = --version ]; then ln -sfn '{e}' '{u}'; ln -sfn '{e}' '{p}'; fi\n",
+                    e = elsewhere.display(),
+                    u = unpack_alias.display(),
+                    p = prefix_alias.display(),
+                ),
+                1,
+            )
+        });
         let mut input = kit.input();
         let unpack_parent = kit.dir.path().join("unpack parent");
         let prefix_parent = kit.dir.path().join("pre fix");
@@ -4287,16 +4488,11 @@ esac
         platform::symlink(&prefix_parent, &prefix_alias).expect("symlink");
         input.unpack = unpack_alias.join("un pack");
         input.prefix = prefix_alias.join("rdy-0.14.0");
-        let process = |c: &GuideCommand| {
-            if c.args.first().is_some_and(|a| a == "--version") {
-                relink(&unpack_alias, &elsewhere);
-                relink(&prefix_alias, &elsewhere);
-            }
-            stand_in(c, "")
-        };
+        assert_eq!(check_plain(&kit, &input).map(|_| ()), Err(Version));
         assert_eq!(
-            check_kit(&kit, &input, &process, |_| {}).map(|_| ()),
-            Err(Version)
+            fs::read_link(&prefix_alias).ok(),
+            Some(elsewhere.clone()),
+            "the links were moved"
         );
         for d in ["un pack", "rdy-0.14.0"] {
             assert_eq!(
@@ -4322,7 +4518,9 @@ esac
             let kit = Kit::new(target);
             let input = kit.input();
             let theirs = pick(&input);
+            let log = Log::new();
             let process = |c: &GuideCommand| {
+                log.push(c);
                 if c.program == "shasum" || c.program == "sha256sum" {
                     fs::create_dir(&theirs).expect("the other process's mkdir");
                 }
@@ -4340,6 +4538,47 @@ esac
             for ours in [&input.unpack, &input.prefix] {
                 if *ours != theirs {
                     assert!(absent(ours), "{what}: {} is removed", ours.display());
+                }
+            }
+            assert!(!kit.marker.exists(), "{what}: nothing ran");
+            assert!(
+                !log.ran("mkdir"),
+                "{what}: the guide's mkdir does not run: {:?}",
+                log.all()
+            );
+            assert!(absent(&kit.download.join(SIGNERS_FILE)));
+        }
+        // ... or right as the guide's `mkdir UNPACK PREFIX` starts. That mkdir fails, so this
+        // run claims neither directory: the other process's stays, and so does the one this
+        // mkdir may have made (empty), since a failed mkdir does not say which it made.
+        for (what, pick) in competitors {
+            let kit = Kit::new(target);
+            let input = kit.input();
+            let theirs = pick(&input);
+            let process = |c: &GuideCommand| {
+                if c.program == "mkdir" && c.args.first().is_some_and(|a| a != "-p") {
+                    fs::create_dir(&theirs).expect("the other process's mkdir");
+                    fs::write(theirs.join("theirs"), b"sentinel\n").expect("their file");
+                }
+                stand_in(c, "")
+            };
+            assert_eq!(
+                check_kit(&kit, &input, &process, |_| {}).map(|_| ()),
+                Err(Install),
+                "{what} made as mkdir starts"
+            );
+            assert_eq!(
+                fs::read(theirs.join("theirs")).ok(),
+                Some(b"sentinel\n".to_vec()),
+                "{what}: the other process's directory stays"
+            );
+            for ours in [&input.unpack, &input.prefix] {
+                if *ours != theirs {
+                    assert!(
+                        absent(ours) || (ours.is_dir() && names(ours).is_empty()),
+                        "{what}: {} is absent or empty",
+                        ours.display()
+                    );
                 }
             }
             assert!(!kit.marker.exists(), "{what}: nothing ran");

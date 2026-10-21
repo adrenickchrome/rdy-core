@@ -462,6 +462,14 @@ fn message(line: &str) -> Result<Value, McpFailure> {
     }
 }
 
+/// Whether `v`, a message still queued when a bounded session finishes, may be left there: a
+/// notification only. The session sends one request at a time and takes its response before
+/// the next, so a response left over answers no request. It fails whatever its body: a
+/// malformed error or result, and a well-formed one, alike.
+fn leftover_ok(v: &Value) -> bool {
+    v.get("id").is_none()
+}
+
 impl McpClient {
     pub fn start(project: &Path) -> McpClient {
         McpClient::start_with_env(project, &[])
@@ -722,16 +730,23 @@ impl McpClient {
             return Err(McpFailure::OutputLimit);
         }
         // Both drains are joined, so everything the server wrote up to the end of its stdout
-        // is queued: each line must be a JSON-RPC message, and stdout and stderr valid.
+        // is queued. Each line must be a JSON-RPC message, and stdout and stderr valid. Every
+        // request of the session has had its response, so any response left over, set aside
+        // during a call or written after the last one, answers no request: a protocol failure,
+        // whether its body is well formed or not. Output past the cap still wins.
+        let mut protocol = !self.pending.iter().all(leftover_ok);
         for incoming in self.lines.try_iter() {
             match incoming {
                 Incoming::Line(line) => {
-                    message(&line)?;
+                    protocol |= !message(&line).is_ok_and(|v| leftover_ok(&v));
                 }
-                Incoming::Invalid => return Err(McpFailure::Protocol),
+                Incoming::Invalid => protocol = true,
                 Incoming::Overflow => return Err(McpFailure::OutputLimit),
                 Incoming::Closed => {}
             }
+        }
+        if protocol {
+            return Err(McpFailure::Protocol);
         }
         let take = |m: &Arc<Mutex<String>>| m.lock().unwrap_or_else(|e| e.into_inner()).clone();
         Ok(Transcript {
@@ -1184,7 +1199,7 @@ sleep 20"#;
         // checked before a finish succeeds. The peer waits for its input to close first.
         // what, the peer's end, and the finish's exit code or failure
         type Case = (&'static str, String, Result<Option<i32>, McpFailure>);
-        let cases: [Case; 8] = [
+        let cases: [Case; 14] = [
             (
                 "a line that is not JSON",
                 "cat > /dev/null; echo 'not json'".into(),
@@ -1212,6 +1227,37 @@ sleep 20"#;
                 Err(Protocol),
             ),
             (
+                "a trailing error that is a string",
+                r#"cat > /dev/null; echo '{"jsonrpc":"2.0","id":9,"error":"bad"}'"#.into(),
+                Err(Protocol),
+            ),
+            (
+                "a trailing error with no message",
+                r#"cat > /dev/null; echo '{"jsonrpc":"2.0","id":9,"error":{"code":1}}'"#.into(),
+                Err(Protocol),
+            ),
+            (
+                "a trailing result that is a number",
+                r#"cat > /dev/null; echo '{"jsonrpc":"2.0","id":9,"result":5}'"#.into(),
+                Err(Protocol),
+            ),
+            (
+                "a trailing result that is null",
+                r#"cat > /dev/null; echo '{"jsonrpc":"2.0","id":9,"result":null}'"#.into(),
+                Err(Protocol),
+            ),
+            (
+                "a well-formed trailing error that answers no request",
+                r#"cat > /dev/null; echo '{"jsonrpc":"2.0","id":9,"error":{"code":1,"message":"m"}}'"#
+                    .into(),
+                Err(Protocol),
+            ),
+            (
+                "a well-formed trailing result that answers no request",
+                r#"cat > /dev/null; echo '{"jsonrpc":"2.0","id":1,"result":{}}'"#.into(),
+                Err(Protocol),
+            ),
+            (
                 "a notification",
                 r#"cat > /dev/null; echo '{"jsonrpc":"2.0","method":"notifications/message","params":{}}'"#
                     .into(),
@@ -1230,11 +1276,38 @@ sleep 20"#;
             assert_eq!(c.try_finish(DEADLINE).map(|t| t.code), want, "{what}");
             assert!(platform::process_exited(pid), "{what}: the server reaped");
         }
-        // Output past the cap still wins over a malformed line.
-        let c = bounded(&after_init(&format!(
-            "cat > /dev/null; echo 'not json'; head -c {CAP} /dev/zero >&2"
-        )));
-        assert_eq!(c.try_finish(DEADLINE).map(|_| ()), Err(OutputLimit));
+        // Output past the cap still wins over a malformed line, and over an unmatched response.
+        for bad in [
+            "echo 'not json'",
+            r#"echo '{"jsonrpc":"2.0","id":9,"error":"bad"}'"#,
+        ] {
+            let c = bounded(&after_init(&format!(
+                "cat > /dev/null; {bad}; head -c {CAP} /dev/zero >&2"
+            )));
+            assert_eq!(
+                c.try_finish(DEADLINE).map(|_| ()),
+                Err(OutputLimit),
+                "{bad}"
+            );
+        }
+        // A response set aside during a call (its id answers no request) fails the finish,
+        // malformed or well formed; the call itself got its own reply.
+        for stray in [
+            r#"{"jsonrpc":"2.0","id":9,"error":"bad"}"#,
+            r#"{"jsonrpc":"2.0","id":9,"result":5}"#,
+            r#"{"jsonrpc":"2.0","id":9,"result":{"content":[{"type":"text","text":"{}"}]}}"#,
+        ] {
+            let mut c = bounded(&after_init(&format!(
+                r#"read -r c; echo '{stray}'; echo '{{"jsonrpc":"2.0","id":2,"result":{{"content":[{{"type":"text","text":"{{}}"}}]}}}}'; cat > /dev/null"#
+            )));
+            assert!(
+                matches!(c.try_call("rdy_overview", json!({})), Ok(Reply::Ok(_))),
+                "{stray}: the call's own reply"
+            );
+            let pid = c.pid;
+            assert_eq!(c.try_finish(DEADLINE).map(|_| ()), Err(Protocol), "{stray}");
+            assert!(platform::process_exited(pid), "{stray}: the server reaped");
+        }
     }
 
     #[test]
