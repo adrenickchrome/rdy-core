@@ -514,7 +514,7 @@ fn cp8_all_four_selectors_have_closed_shapes() {
         json!({"scope": format!("decision:{}", s.c), "plan": null, "items": [],
                "counts": counts(0, 0, 0, &[]), "code": {"files": 0}, "notes": []})
     );
-    // the landing with no plan of the second seal still reads its own
+    // a seal recorded with no linked checkout reads its code as unavailable
     assert_eq!(
         plan(
             &r,
