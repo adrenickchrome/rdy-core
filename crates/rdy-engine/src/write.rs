@@ -217,6 +217,10 @@ pub enum OpInput {
         /// The targets to re-pin; empty: every block it references or links to.
         #[serde(default)]
         targets: Vec<String>,
+        /// D-01QX5 (p-6XMAK): also records the code state the block's `reflects` globs match
+        /// now, clearing its code suspect. The block must declare reflects.
+        #[serde(default)]
+        code: bool,
     },
     /// D-EJBPD (p-0H3JT): re-affirms a suspect live or partly superseded decision (`id`), or
     /// every such decision in the view that is suspect on one block (`because`), with a reason.
@@ -1371,7 +1375,8 @@ fn check_not_frozen(
 }
 
 /// What `build_ops` makes: the ops, created placeholders → ids, the blocks touched, the names
-/// rdy assigned and the keys rdy assigned (both by block id), and the decisions re-affirmed.
+/// rdy assigned and the keys rdy assigned (both by block id), the decisions re-affirmed, and the
+/// blocks a repin with `code: true` names.
 type Built = (
     Vec<Op>,
     BTreeMap<String, String>,
@@ -1379,6 +1384,7 @@ type Built = (
     BTreeMap<String, String>,
     BTreeMap<String, String>,
     Vec<crate::reaffirm::Reaffirmed>,
+    BTreeSet<BlockId>,
 );
 
 /// The path of `id` in the overlay: each tree ancestor's name, itself included, joined with `/`.
@@ -1797,6 +1803,8 @@ fn build_ops(
     let mut tracking_edits: BTreeSet<BlockId> = BTreeSet::new();
     // D-EJBPD: decisions this write re-affirms (metadata and pins only), with their causes
     let mut reaffirmed: BTreeMap<BlockId, Vec<String>> = BTreeMap::new();
+    // D-01QX5: the blocks a repin with `code: true` names
+    let mut code_repins: BTreeSet<BlockId> = BTreeSet::new();
 
     for (i, input) in inputs.into_iter().enumerate() {
         match input {
@@ -2263,56 +2271,33 @@ fn build_ops(
                 id,
                 base: b,
                 targets,
+                code,
             } => {
                 let id = res.id(&id)?;
                 let (base_hash, cur) =
                     current_for_edit(&ov, &id, &b, &touched, &rekey_only, conflicts, store, false)?;
                 let cur: &Block = &cur;
-                let cited: BTreeSet<BlockId> = cur
-                    .ref_tokens()
-                    .iter()
-                    .filter_map(|t| BlockId::parse(t).ok())
-                    .chain(cur.links.values().flatten().map(|l| l.target.clone()))
-                    .collect();
-                let targets_given = !targets.is_empty();
-                // a block is never pinned to itself, so a repin of everything skips its own id
-                let wanted: Vec<BlockId> = if targets.is_empty() {
-                    cited.iter().filter(|t| **t != id).cloned().collect()
-                } else {
-                    targets
-                        .iter()
-                        .map(|t| res.id(t))
-                        .collect::<Result<_, _>>()?
-                };
-                let mut block = cur.clone();
-                for t in &wanted {
-                    if *t == id {
-                        return Err(bad(
-                            format!("{id} is never pinned to itself"),
-                            "a block's own edits never make it a suspect; repin the other targets it cites",
-                        ));
-                    }
-                    if !cited.contains(t) {
-                        return Err(bad(
-                            format!("{id} does not reference or link to {t}"),
-                            "repin only targets the block cites; rdy_context lists its suspects",
-                        ));
-                    }
-                    let target = ov.get(t).ok_or_else(|| {
-                        RdyError::new(
-                            E_UNKNOWN_REF,
-                            format!("{id} cites {t}, which does not exist in this view"),
-                            format!(
-                                "remove the reference or link to {t} from {id} instead of re-pinning it"
-                            ),
-                        )
-                    })?;
-                    block
-                        .pins
-                        .insert(t.clone(), target.content_hash_with(store.tracking()));
+                if code && crate::reflects::glob_set(cur).is_empty() {
+                    return Err(bad(
+                        format!("{id} has no reflects globs"),
+                        "set reflects before repinning code",
+                    ));
                 }
-                // like a no-op rebalance, a repin that changes no pin is refused, per op
-                if block.pins == cur.pins {
+                let targets_given = !targets.is_empty();
+                let tracking = store.tracking();
+                let selected = repin_targets(
+                    cur,
+                    &id,
+                    targets_given.then_some(targets.as_slice()),
+                    &|t| res.id(t),
+                    &|t| ov.get(t).map(|x| x.content_hash_with(tracking)),
+                )?;
+                let wanted: Vec<BlockId> = selected.iter().map(|(t, _)| t.clone()).collect();
+                let mut block = cur.clone();
+                block.pins.extend(selected);
+                // like a no-op rebalance, a repin that changes no pin is refused, per op; a code
+                // repin records the code state, which is a change of its own (p-6XMAK)
+                if block.pins == cur.pins && !code {
                     let what = if targets_given {
                         wanted
                             .iter()
@@ -2339,13 +2324,15 @@ fn build_ops(
                 // `content_touched` (p-WYFR3). But a repin of a conflicted block from a side's
                 // version starts from the side's block, while the view reads the conflict's base:
                 // it writes the side's content, so that block's content changes (sus3)
-                let tracking = store.tracking();
                 if was.is_none_or(|w| {
                     w.content_hash_with(tracking) != cur.content_hash_with(tracking)
                 }) {
                     content_touched.insert(id.clone());
                 }
                 repinned.extend(wanted);
+                if code {
+                    code_repins.insert(id.clone());
+                }
                 drop_rekey_op(&id, &mut rekey_only, &mut ops, &mut prior);
                 prior.push((true, block.pins.clone())); // pins set here; the second pass keeps them
                 touched.insert(id.clone());
@@ -2612,7 +2599,15 @@ fn build_ops(
             causes,
         })
         .collect();
-    Ok((ops, created, touched, names, assigned, reaffirmed))
+    Ok((
+        ops,
+        created,
+        touched,
+        names,
+        assigned,
+        reaffirmed,
+        code_repins,
+    ))
 }
 
 /// The ruling on D-YQCY9's task: `implements` names the decision a change carries out, which
@@ -2958,7 +2953,7 @@ impl Rdy {
         let brief_warnings =
             crate::brief::check(&self.pack, &self.briefs, &m, &req.ops, &selection, brief)?;
         let reaffirmable = |id: &BlockId| crate::reaffirm::reaffirmable(&st, &scope, id);
-        let (ops, created, touched, names, keys, reaffirmed) = build_ops(
+        let (mut ops, created, touched, names, keys, reaffirmed, code_repins) = build_ops(
             &self.pack,
             &self.store,
             &m,
@@ -2974,6 +2969,9 @@ impl Rdy {
             rdy_keys,
             &selection,
         )?;
+        // D-01QX5: the code state of each reflects block this write creates, re-globs or
+        // repins with `code: true`, read from the linked checkouts' committed trees
+        let code_warnings = crate::reflects::stamp(&self.root, &m, &mut ops, &code_repins)?;
         refuse_removed_content(&self.store, &ops)?;
         let change = Change {
             view: req.view.clone(),
@@ -3017,6 +3015,7 @@ impl Rdy {
             warnings.extend(skeleton_gaps(&self.pack, doc, &titles));
         }
         warnings.extend(brief_warnings);
+        warnings.extend(code_warnings);
         // FW-I1: the authored words of each decision or question this write touched
         for t in &touched {
             if let Some(b) = m.get(t) {
@@ -3252,5 +3251,86 @@ pub fn parse_justification(
             reason,
         })),
         (None, None) => Ok(None),
+    }
+}
+
+/// sus3: the design pins a repin of `cur` (the block `id`) selects, each with the content hash it
+/// pins: the `targets` given (`resolve` reads each id or key), or with none every block `cur`
+/// references or links to except itself. A target `cur` does not cite, `cur` itself, and one
+/// that `content` (a target's current content hash) cannot find are refused, in target order.
+/// The pins already current are selected too. The write and [`Rdy::repin_selection`] share it.
+fn repin_targets(
+    cur: &Block,
+    id: &BlockId,
+    targets: Option<&[String]>,
+    resolve: &dyn Fn(&str) -> Result<BlockId, RdyError>,
+    content: &dyn Fn(&BlockId) -> Option<Hash>,
+) -> Result<Vec<(BlockId, Hash)>, RdyError> {
+    let cited: BTreeSet<BlockId> = cur
+        .ref_tokens()
+        .iter()
+        .filter_map(|t| BlockId::parse(t).ok())
+        .chain(cur.links.values().flatten().map(|l| l.target.clone()))
+        .collect();
+    // a block is never pinned to itself, so a repin of everything skips its own id
+    let wanted: Vec<BlockId> = match targets {
+        None | Some([]) => cited.iter().filter(|t| *t != id).cloned().collect(),
+        Some(given) => given.iter().map(|t| resolve(t)).collect::<Result<_, _>>()?,
+    };
+    let mut out = Vec::with_capacity(wanted.len());
+    for t in wanted {
+        if t == *id {
+            return Err(bad(
+                format!("{id} is never pinned to itself"),
+                "a block's own edits never make it a suspect; repin the other targets it cites",
+            ));
+        }
+        if !cited.contains(&t) {
+            return Err(bad(
+                format!("{id} does not reference or link to {t}"),
+                "repin only targets the block cites; rdy_context lists its suspects",
+            ));
+        }
+        let h = content(&t).ok_or_else(|| {
+            RdyError::new(
+                E_UNKNOWN_REF,
+                format!("{id} cites {t}, which does not exist in this view"),
+                format!("remove the reference or link to {t} from {id} instead of re-pinning it"),
+            )
+        })?;
+        out.push((t, h));
+    }
+    Ok(out)
+}
+
+impl Rdy {
+    /// What a repin of `id` in `view` would select (sus3), read-only: the block's id and how many
+    /// design pins the repin selects, already-current pins included. `targets` as the repin op
+    /// takes them (`None` or empty: every block it cites). The id and targets are checked as the
+    /// write checks them; nothing is written.
+    pub fn repin_selection(
+        &self,
+        session: &Session,
+        view: &str,
+        id: &str,
+        targets: Option<&[String]>,
+    ) -> Result<(BlockId, usize), RdyError> {
+        let st = self.read();
+        check_view_access(&st, view, session, views::Action::Commit)?;
+        let m = st.materialized(&Scope::View(view.to_string()))?;
+        let res = Resolver::new(&m);
+        let id = res.id(id)?;
+        let cur = m.get(&id).ok_or_else(|| {
+            RdyError::new(
+                E_UNKNOWN_BLOCK,
+                format!("no block {id} in this view"),
+                "check the id with rdy_read",
+            )
+        })?;
+        let tracking = self.store.tracking();
+        let selected = repin_targets(cur, &id, targets, &|t| res.id(t), &|t| {
+            m.get(t).map(|x| x.content_hash_with(tracking))
+        })?;
+        Ok((id, selected.len()))
     }
 }

@@ -134,6 +134,53 @@ pub struct Consequences {
     pub tensions_error: Option<String>,
 }
 
+/// D-01QX5 (p-EC3VW): a write's reply row for a block it rewrote with its glob set unchanged
+/// while its reflected code still differs from the recorded snapshot. A read projection made at
+/// report time: never in a TRANSITION, the store's suspect table or a change plan. It has no
+/// target, so it is its own row shape beside [`Consequence`].
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CodeKept {
+    pub id: String,
+    pub block: String,
+    pub kind: ConsequenceKind,
+    pub because: CodeBecause,
+    pub follow_up: FollowUp,
+    pub reason: &'static str,
+    /// Always `None`: the cause is the code, not a block.
+    pub target: Option<String>,
+    /// The changed matched files, as `<repo>:<path>`, sorted.
+    pub paths: Vec<String>,
+    pub already_written: bool,
+    pub fix: &'static str,
+}
+
+/// The cause of a [`CodeKept`] row: the `reflects` edge, with no changed block.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CodeBecause {
+    pub edge: &'static str,
+    pub changed: Option<String>,
+}
+
+/// The fix of a [`CodeKept`] row.
+pub const CODE_KEPT_FIX: &str = "check the block against its code, then repin it with code: true";
+
+/// One row of a write's `consequences`: a structural entry, or a code-kept row after them all.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ReplyRow {
+    Consequence(Consequence),
+    CodeKept(CodeKept),
+}
+
+impl ReplyRow {
+    fn kind(&self) -> &'static str {
+        match self {
+            ReplyRow::Consequence(c) => c.kind.as_str(),
+            ReplyRow::CodeKept(c) => c.kind.as_str(),
+        }
+    }
+}
+
 /// The hint on a `reaffirm` entry.
 pub const REAFFIRM_FIX: &str =
     "if it still holds, re-affirm it with a reaffirm op; otherwise supersede it";
@@ -1769,25 +1816,83 @@ impl ReadState {
 /// `items` cut from the end to `max_tokens` (default `BRIEF_DEFAULT_TOKENS`; four bytes a
 /// token), counting what it drops in `omitted`, by kind.
 fn cut(items: Vec<Consequence>, max_tokens: Option<usize>) -> Consequences {
-    let mut out = Consequences {
+    let (items, omitted) = cut_rows(items, |c| c.kind.as_str(), max_tokens);
+    Consequences {
         items,
+        omitted,
         ..Consequences::default()
-    };
+    }
+}
+
+/// The report cutter over any row shape: `items` cut from the end until `{"items", "omitted"}`
+/// fits `max_tokens` (see [`cut`]), with the dropped rows counted by `kind`.
+fn cut_rows<R: Serialize>(
+    mut items: Vec<R>,
+    kind: fn(&R) -> &'static str,
+    max_tokens: Option<usize>,
+) -> (Vec<R>, BTreeMap<String, usize>) {
+    #[derive(Serialize)]
+    struct Sized<'a, R> {
+        items: &'a [R],
+        #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+        omitted: &'a BTreeMap<String, usize>,
+    }
+    let mut omitted = BTreeMap::new();
     let budget = max_tokens.unwrap_or(BRIEF_DEFAULT_TOKENS).saturating_mul(4);
-    let size = |c: &Consequences| {
-        serde_json::to_string(c)
+    let size = |items: &[R], omitted: &BTreeMap<String, usize>| {
+        serde_json::to_string(&Sized { items, omitted })
             .expect("consequences serialize: strings and string-keyed maps only")
             .len()
     };
-    while !out.items.is_empty() && size(&out) > budget {
-        let drop = out.items.len().div_ceil(2);
-        for dropped in out.items.split_off(out.items.len() - drop) {
-            *out.omitted
-                .entry(dropped.kind.as_str().to_string())
-                .or_default() += 1;
+    while !items.is_empty() && size(&items, &omitted) > budget {
+        let drop = items.len().div_ceil(2);
+        for dropped in items.split_off(items.len() - drop) {
+            *omitted.entry(kind(&dropped).to_string()).or_default() += 1;
         }
     }
-    out
+    (items, omitted)
+}
+
+/// A reply's rows, the counts a cut dropped by kind, and the tension error.
+type Rows<R> = (Vec<R>, BTreeMap<String, usize>, Option<String>);
+
+/// The rows of a write's reply: its structural consequences (`c`, read uncut) in their order,
+/// then a [`CodeKept`] row for each block the write rewrote whose code differs from the recorded
+/// snapshot, by block id; the combined list goes through the report cutter.
+fn with_code_rows(
+    st: &ReadState,
+    scope: &Scope,
+    changes: &[Hash],
+    c: Consequences,
+    max_tokens: Option<usize>,
+) -> Result<Rows<ReplyRow>, RdyError> {
+    let mut rows: Vec<ReplyRow> = c.items.into_iter().map(ReplyRow::Consequence).collect();
+    if let Some(batch) = changes.last() {
+        let mut rewritten = BTreeSet::new();
+        for h in changes {
+            rewritten.extend(rewritten_by(&st.reader().change(h)?.ops));
+        }
+        let ids: Vec<BlockId> = rewritten.into_iter().collect();
+        for s in crate::reflects::code_suspects(st, scope, Some(&ids))? {
+            rows.push(ReplyRow::CodeKept(CodeKept {
+                id: consequence_id(batch, "suspect code_changed", &s.block),
+                block: s.block.to_string(),
+                kind: ConsequenceKind::Suspect,
+                because: CodeBecause {
+                    edge: rdy_schema::REFLECTS_FIELD,
+                    changed: None,
+                },
+                follow_up: FollowUp::Confirm,
+                reason: "code_changed",
+                target: None,
+                paths: s.paths,
+                already_written: true,
+                fix: CODE_KEPT_FIX,
+            }));
+        }
+    }
+    let (rows, omitted) = cut_rows(rows, ReplyRow::kind, max_tokens);
+    Ok((rows, omitted, c.tensions_error))
 }
 
 /// The entry for tension `t`: its `block` is the first involved block of an item whose side is
@@ -1825,15 +1930,20 @@ fn tension_entry(batch: &Hash, t: &Tension, mine: &dyn Fn(&SideRef) -> bool) -> 
 /// `consequences_omitted` when a cut dropped some, or `consequences: []` and
 /// `consequences_error` when they could not be read (the write stands).
 pub(crate) fn attach(v: &mut serde_json::Value, c: Result<Consequences, RdyError>) {
+    attach_rows(v, c.map(|c| (c.items, c.omitted, c.tensions_error)));
+}
+
+/// [`attach`] over any row shape.
+fn attach_rows<R: Serialize>(v: &mut serde_json::Value, c: Result<Rows<R>, RdyError>) {
     match c {
-        Ok(c) => {
-            v["consequences"] = serde_json::to_value(&c.items)
+        Ok((items, omitted, tensions_error)) => {
+            v["consequences"] = serde_json::to_value(&items)
                 .expect("consequences serialize: strings and string-keyed maps only");
-            if !c.omitted.is_empty() {
+            if !omitted.is_empty() {
                 v["consequences_omitted"] =
-                    serde_json::to_value(&c.omitted).expect("a map of counts serializes");
+                    serde_json::to_value(&omitted).expect("a map of counts serializes");
             }
-            if let Some(e) = c.tensions_error {
+            if let Some(e) = tensions_error {
                 v["consequences_tension_error"] = e.into();
             }
         }
@@ -1952,8 +2062,11 @@ fn report<T: Serialize + 'static>(
     // the state the write published, not a later one: a write that lands before this read
     // changes nothing in this reply (O8); the view base is that state's too
     let published = states.as_ref().map_or(&st, |s| &s.1);
-    let c = published.consequences_of(&scope, &changes, max_tokens);
-    attach(&mut v, c);
+    // read uncut, then cut once with the code-kept rows appended (D-01QX5)
+    let c = published
+        .consequences_of(&scope, &changes, Some(usize::MAX))
+        .and_then(|c| with_code_rows(published, &scope, &changes, c, max_tokens));
+    attach_rows(&mut v, c);
     if let Some(notes) = intent_notes_of(&st, before, view, &changes, reader)
         && !notes.is_empty()
     {
