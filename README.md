@@ -97,7 +97,7 @@ The commands you use most, in one place:
 rdy init                      # creates .rdy/ and .rdy.yaml (pack rdy-standard)
 rdy mcp                       # MCP server over stdio for your agent harness
 rdy status
-rdy propose --view run-1 --title "first pass"
+rdy propose --view run-1 --title "first pass" --summary "The first draft of the docs."
 rdy approve <proposal-id>     # lands it in canon; proposed decisions become accepted
 rdy render --out site/
 rdy new folder wallets            # folders group docs; paths work wherever ids do
