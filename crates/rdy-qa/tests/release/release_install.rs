@@ -298,13 +298,13 @@ fn pre3_installed_binary_runs_cli_and_mcp_outside_the_build_tree() {
 fn pre3_preview_note_matches_readme_and_archive() {
     let readme = fs::read_to_string(root().join("README.md")).expect("README");
     let section = readme
-        .split("\n## Preview archives\n")
+        .split("<summary><b>About this preview</b></summary>\n")
         .nth(1)
-        .expect("the Preview archives section");
-    let section = section.split("\n## ").next().expect("section");
+        .expect("the About this preview block");
+    let section = section.split("</details>").next().expect("block");
     assert!(
         section.contains(PREVIEW_NOTE),
-        "the README's section holds the note's exact bytes"
+        "the README's block holds the note's exact bytes"
     );
     assert!(
         PREVIEW_NOTE

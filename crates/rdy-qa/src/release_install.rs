@@ -12,8 +12,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-/// The preview note: `PREVIEW.txt` in a preview archive, and the start of the README section
-/// and of each preview's release notes.
+/// The preview note: `PREVIEW.txt` in a preview archive, the README's "About this preview"
+/// block, and each preview's release notes.
 pub const PREVIEW_NOTE: &str = "This is a preview of rdy.
 It comes before Release 1, the first release with a compatibility promise.
 

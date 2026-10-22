@@ -550,12 +550,16 @@ fn pre2_trust_state_pin_rejects_every_bad_shape() {
 #[test]
 fn pre2_preview_readme_preserves_the_dump_route() {
     let readme = read("README.md");
+    // The note is the whole of the collapsed "About this preview" block at the bottom; a
+    // pointer to it comes before the install steps.
     assert!(
-        readme.contains(&format!("## Preview archives\n\n{PREVIEW_NOTE}\n")),
+        readme.contains(&format!(
+            "<details>\n<summary><b>About this preview</b></summary>\n\n{PREVIEW_NOTE}\n</details>\n"
+        )),
         "the preview note is not exact"
     );
     let at = |s: &str| readme.find(s).unwrap_or_else(|| panic!("missing {s}"));
-    assert!(at("## Preview archives") < at("## Quick start"));
+    assert!(at("See \"About this preview\"") < at("## Install"));
     assert!(readme.contains(
         "The preview has two archives: macOS arm64 and Linux amd64. The Linux archive is qualified on Ubuntu 26."
     ));
