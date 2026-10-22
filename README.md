@@ -13,9 +13,9 @@ This is a **preview**: things will change before Release 1. See "About this prev
 - **Docs and decisions as one project.** Write docs, requirements, terms and decisions as linked blocks, not loose files.
 - **Agents work through MCP.** Claude Code, or any MCP client, reads and writes through rdy's tools. Each agent gets a briefing before it edits.
 - **Proposals and approvals.** Agent work lands in a view. You see the impact, then approve it or not.
-- **It catches drift.** When a decision changes, rdy marks every page that rests on it, and it flags pages that disagree.
+- **It catches drift.** When a decision changes, rdy marks every page that rests on it. It also flags a page that states a different number for a recorded value.
 - **A live docs site.** `rdy site` gives you a local site that refreshes as changes land.
-- **Local and private.** Everything runs on your machine: no account, no server, no model inside rdy.
+- **Local and private.** Everything runs on your machine: no account, no hosted service, no model inside rdy.
 
 ## Install (about a minute)
 
