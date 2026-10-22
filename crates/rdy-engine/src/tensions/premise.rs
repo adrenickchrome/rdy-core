@@ -231,12 +231,15 @@ fn changers(writes: &Writes, canon_m: &Materialized, x: &BlockId) -> Vec<(Arc<Wr
     out
 }
 
-/// p-QMGB4 (task-5 R1): whether citer `w` keeps its citation of `x`, which `w`'s view does not
-/// hold: its block records `deleted` for `x` ([`rdy_graph::keeps_deleted_citation`]), `x` is
-/// absent there (canon no longer holds it, or a write that `w` can see deletes it, as when the
-/// view deletes a premise that changed in canon after the pin), and no in-flight write that `w`
-/// can see brings `x` back. An unacknowledged deletion and a visible restoration keep the check.
-/// The graph's suspects rule the same.
+/// p-QMGB4 (task-5 R1): whether citer `w` keeps its citation of `x`, which `w`'s views do not
+/// hold: its block records `deleted` for `x` ([`rdy_graph::keeps_deleted_citation`]), and `x`
+/// is absent in every open view in which `w` is current, by that view's effective state: the
+/// writes of `x` current there ([`Writes::current_on`]) all delete it, or there are none and
+/// canon no longer holds `x`. A write that a later change in the view overwrote restores
+/// nothing (an edit the view then deletes); a current write with content is a restoration and
+/// ends the exception. An unacknowledged deletion, a restoration, and a view that still holds
+/// `x` (canon's, or a delete only in a view `w` is not in) keep the check. The graph's suspects
+/// rule the same.
 fn kept_deleted_citation(writes: &Writes, canon_m: &Materialized, w: &Write, x: &BlockId) -> bool {
     if !w
         .new
@@ -245,13 +248,23 @@ fn kept_deleted_citation(writes: &Writes, canon_m: &Materialized, w: &Write, x: 
     {
         return false;
     }
-    let seen: Vec<Arc<Write>> = writes
-        .all_on(x)
-        .into_iter()
-        .filter(|w2| w2.change == w.change || writes.common_view(&w2.change, &w.change))
-        .collect();
-    let deleted_here = seen.iter().any(|w2| w2.new.is_none());
-    (canon_m.get(x).is_none() || deleted_here) && !seen.iter().any(|w2| w2.new.is_some())
+    let Some(facts) = writes.change(&w.change) else {
+        return false;
+    };
+    let mut views = facts
+        .views
+        .iter()
+        .filter(|v| writes.current_in(w, v))
+        .peekable();
+    views.peek().is_some()
+        && views.all(|v| {
+            let here = writes.current_on(x, v);
+            if here.is_empty() {
+                canon_m.get(x).is_none()
+            } else {
+                here.iter().all(|w2| w2.new.is_none())
+            }
+        })
 }
 
 /// Whether an in-flight write of `x` (live or not) that citer `w` can see has content `pin`: a

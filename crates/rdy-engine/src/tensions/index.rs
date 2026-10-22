@@ -622,6 +622,36 @@ impl Writes {
         })
     }
 
+    /// Whether write `w` is current in open view `v`: `v` holds its change, and no other change
+    /// that `v` holds writes the same block and lists `w`'s change in its deps (the rule
+    /// [`Writes::build`] reads for liveness, here in one view).
+    pub fn current_in(&self, w: &Write, v: &str) -> bool {
+        let in_v = |c: &Hash| {
+            self.changes
+                .get(c)
+                .is_some_and(|f| f.views.iter().any(|x| x == v))
+        };
+        in_v(&w.change)
+            && !self.on(&w.block).iter().any(|o| {
+                o.change != w.change
+                    && in_v(&o.change)
+                    && self
+                        .changes
+                        .get(&o.change)
+                        .is_some_and(|f| f.deps.contains(&w.change))
+            })
+    }
+
+    /// The writes on `b` current in open view `v` ([`Writes::current_in`]), by change: none when
+    /// no change that `v` holds writes `b`.
+    pub fn current_on(&self, b: &BlockId, v: &str) -> Vec<Arc<Write>> {
+        self.on(b)
+            .iter()
+            .filter(|w| self.current_in(w, v))
+            .cloned()
+            .collect()
+    }
+
     /// Whether changes `a` and `b` share an open view.
     pub fn common_view(&self, a: &Hash, b: &Hash) -> bool {
         match (self.changes.get(a), self.changes.get(b)) {

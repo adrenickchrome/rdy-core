@@ -1138,3 +1138,68 @@ fn cp5_changed_then_deleted_premise_reaffirmation_lands() {
     );
     r.fsck().unwrap();
 }
+
+/// task-5 R1, fix round 3: the view's effective state of the premise decides its absence, not
+/// every write the view ever held. Canon has `c` at a second version after `d` pinned the
+/// first. View `w` edits `c` to a third version in one change, deletes it in a later change and
+/// re-affirms `d` against the deletion. The edit is overwritten in `w`, so it restores nothing:
+/// in `w`, `c` is absent, and no premise shift is raised. The view lands with no suspect and no
+/// tension on `d`.
+#[test]
+fn cp5_edited_then_deleted_premise_in_one_view_reaffirmation_lands() {
+    let (_d, mut r) = project();
+    let (c, _e, d) = citing_pair(&mut r);
+    let landed = block(&r, &Scope::Canon, &d);
+    write(
+        &mut r,
+        "x",
+        json!([{"op": "update", "id": c, "body": "Claims are kept, revised."}]),
+    )
+    .unwrap();
+    land(&mut r, "x").unwrap();
+
+    write(
+        &mut r,
+        "w",
+        json!([{"op": "update", "id": c, "body": "Claims are kept, revised again."}]),
+    )
+    .unwrap();
+    write(&mut r, "w", json!([{"op": "delete", "id": c}])).unwrap();
+    reaffirm(
+        &mut r,
+        json!({"op": "reaffirm", "because": c, "reason": "The claim is folded in."}),
+    )
+    .unwrap();
+    assert_eq!(
+        changes(&r, "w"),
+        3,
+        "the edit and the delete are separate changes"
+    );
+    assert!(r.read().block(&w(), &id(&c)).is_err(), "c is absent in w");
+    assert!(suspects(&r, &w(), &d).is_empty());
+    let premise: Vec<_> =
+        rdy_qa::tensions::of_kind(&r, rdy_engine::tensions::TensionKind::PremiseShift);
+    assert!(premise.is_empty(), "{premise:#?}");
+    land(&mut r, "w").unwrap();
+
+    let after = block(&r, &Scope::Canon, &d);
+    assert!(r.read().block(&Scope::Canon, &id(&c)).is_err(), "c is gone");
+    assert_eq!(after.body, landed.body, "d keeps its citation of c");
+    assert_eq!(after.links, landed.links);
+    assert_eq!(
+        after.pins, landed.pins,
+        "d keeps its pin of c's first version"
+    );
+    assert_eq!(
+        record(&after),
+        BTreeMap::from([(id(&c), (Against::Deleted, "The claim is folded in.".into()))])
+    );
+    assert!(suspects(&r, &Scope::Canon, &d).is_empty());
+    assert!(
+        rdy_qa::tensions::open(&r)
+            .iter()
+            .all(|t| !t.blocks().contains(&id(&d))),
+        "no tension on d"
+    );
+    r.fsck().unwrap();
+}
