@@ -236,7 +236,7 @@ fn cp10_next_propose_binds_first_plan_version() {
         (2, 0, 0)
     );
     let listed: Vec<&str> = next.plan.items.iter().map(|i| i.id.as_str()).collect();
-    let mut full = vec![
+    let mut full = [
         item_hash(&id(&a), &b, PlanKind::Confirm),
         item_hash(&id(&a), &p, PlanKind::Update),
     ];
