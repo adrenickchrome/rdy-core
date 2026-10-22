@@ -515,6 +515,79 @@ fn live_matrix_text() -> Vec<&'static str> {
     ]
 }
 
+/// What the change-plan guidance says of the two queue kinds a plan adds (decision-intake
+/// p-T69HT, p-WQB0V; reference/mcp-tools p-VVBVR, p-D3P76).
+fn queue_guidance() -> [&'static str; 6] {
+    [
+        "A defer card (ref defer:P-x@n) asks the person to accept or refuse the deferrals of a proposal.",
+        "A reaffirm card (ref reaffirm:<cause>@<version>) asks the person whether the decisions that a changed block made suspect still hold.",
+        "Each needs the person's own choice and carries no recommended option.",
+        "Show its options word for word and relay the choice with rdy_answer.",
+        "all_recommended refuses both kinds with <ref> has no recommended option; answer each on its own.",
+        "Keep them suspect needs a note of 1 to 2000 characters.",
+    ]
+}
+
+#[test]
+fn cp14_instructions_publish_the_change_plan_rule_at_initialization() {
+    let prose = "Before proposing, read rdy_plan and close or defer each item. Give every deferral a reason. Re-affirm a suspect decision that still holds with a reaffirm op, and supersede one that does not.";
+    // the compiled sentences, with the proposing guidance
+    let at = rdy_mcp::server::INSTRUCTION_SENTENCES
+        .iter()
+        .position(|s| s.contains(prose))
+        .expect("an instruction element carries the change-plan rule");
+    assert!(
+        rdy_mcp::server::INSTRUCTION_SENTENCES[at].contains("propose with rdy_propose."),
+        "the rule sits with the proposing guidance"
+    );
+    // the stdio server's initialize reply publishes it
+    let (dir, r) = project();
+    drop(r);
+    let mut c = McpClient::start(dir.path());
+    let i = c.initialize_result()["result"]["instructions"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(i.contains(prose), "{i}");
+}
+
+#[test]
+fn cp14_queue_cards_need_the_persons_choice_in_every_published_text() {
+    let (dir, r) = project();
+    drop(r);
+    let mut c = McpClient::start(dir.path());
+    let tools = c.tools();
+    let desc = |n: &str| {
+        tools
+            .iter()
+            .find(|t| t["name"] == n)
+            .unwrap_or_else(|| panic!("{n} is listed"))["description"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    // rdy_pending lists all six kinds and says the two new ones carry no recommendation
+    let pending = desc("rdy_pending");
+    assert!(
+        pending.contains("kind (approve, confirm, answer, resolve, defer, reaffirm)"),
+        "{pending}"
+    );
+    assert!(
+        pending.contains("A defer card and a reaffirm card need the person's own choice and carry no recommended option; show both options and wait for the person."),
+        "{pending}"
+    );
+    // rdy_answer says all_recommended never answers them
+    let answer = desc("rdy_answer");
+    assert!(
+        answer.contains("all_recommended refuses a defer or a reaffirm card with E_BAD_INPUT (<ref> has no recommended option); answer each of them on its own."),
+        "{answer}"
+    );
+    // rdy_plan points at the same cards
+    for part in queue_guidance() {
+        assert!(CHANGE_PLAN_DOC.contains(part), "{part}");
+    }
+}
+
 #[test]
 fn cp14_guidance_and_error_rows_match_the_live_contract() {
     // the exact prose, and the four samples, word for word
@@ -523,10 +596,10 @@ fn cp14_guidance_and_error_rows_match_the_live_contract() {
     for part in live_matrix_text() {
         assert!(CHANGE_PLAN_DOC.contains(part), "{part}");
     }
-    assert!(
-        !CHANGE_PLAN_DOC.contains("recommend"),
-        "the queue kinds carry no recommendation"
-    );
+    // the queue kinds: named, a personal choice, no recommended option, all_recommended refuses
+    for part in queue_guidance() {
+        assert!(CHANGE_PLAN_DOC.contains(part), "{part}");
+    }
     assert_eq!(
         CHANGE_PLAN_EXAMPLES,
         [
