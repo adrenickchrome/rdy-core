@@ -165,7 +165,7 @@ fn land_deferring_many(
         )
         .collect();
     // a plan keeps its answers sorted by item
-    answers.sort_by(|a, b| a.item.cmp(&b.item));
+    answers.sort_by_key(|a| a.item);
     let v2 = Plan {
         stable: Some(bound),
         prev: Some(bound),
@@ -200,7 +200,7 @@ fn land_deferring_many(
             answer: Some(accept),
         })
         .collect();
-    sealed_items.sort_by(|a, b| a.id.cmp(&b.id));
+    sealed_items.sort_by_key(|i| i.id);
     let v3 = Plan {
         stable: Some(bound),
         prev: Some(answered),
