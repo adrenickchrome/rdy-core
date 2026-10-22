@@ -509,6 +509,7 @@ fn ls7_no_daemon_has_no_site() {
 
 #[test]
 fn ls7_lan_mode_gives_the_lan_link_and_the_warning() {
+    let log = rdy_qa::daemon::site_log();
     let dir = short_tempdir();
     drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
     std::fs::write(
@@ -567,4 +568,6 @@ fn ls7_lan_mode_gives_the_lan_link_and_the_warning() {
             && !canon["lan_url"].as_str().unwrap().contains('~'),
         "{canon}"
     );
+    // the daemon warns once, where the person running it sees it
+    assert_eq!(log.lines(), [rdy_qa::daemon::LAN_DOCS_LINE]);
 }
