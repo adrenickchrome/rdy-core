@@ -688,6 +688,12 @@ pub struct ReadState {
     pub(crate) inflight_cell: Arc<InflightCell>,
     /// The coordination refs as this state was published.
     pub(crate) coord_heads: Arc<CoordHeads>,
+    /// The `plan/` refs as this state was published: each view's latest plan version. A
+    /// structurally shared map: a plan write's publish replaces only its own views' entries.
+    pub(crate) plan_heads: imbl::OrdMap<String, Hash>,
+    /// Where the retirements that re-affirmation cards name began, as far as read (final review
+    /// F4): shared by every state the publishes carry to; a full publish starts afresh.
+    pub(crate) retirement_origins: Arc<crate::pending::reaffirm::RetirementOrigins>,
     /// cgr1: the coordination graph, built on first read; never carried to the next state.
     pub(crate) coord: OnceLock<Result<Arc<crate::coord_graph::CoordIndex>, RdyError>>,
     /// The event-derived tension set, built on first read; a publish that changes nothing it
@@ -908,6 +914,11 @@ impl ReadState {
     /// this state was published.
     pub fn coord_heads(&self) -> &CoordHeads {
         &self.coord_heads
+    }
+
+    /// The latest plan version of `view` as this state was published (its `plan/<view>` ref).
+    pub(crate) fn plan_head(&self, view: &str) -> Option<Hash> {
+        self.plan_heads.get(view).copied()
     }
 
     /// The in-flight entry, made from the set on first use.

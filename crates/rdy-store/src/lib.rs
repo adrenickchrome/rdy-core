@@ -22,6 +22,7 @@ pub mod merge;
 pub mod meta;
 pub mod object_refs;
 pub mod pio;
+pub mod plan;
 pub mod redaction;
 pub mod redaction_carried;
 pub mod redaction_import;
@@ -39,7 +40,10 @@ pub mod transition;
 pub mod view;
 
 pub use answer::{ANSWER_REF, PENDING_REF, answer_ref, snooze_ref};
-pub use check::{StoreCheck, landing_field_rules};
+pub use check::{
+    REAFFIRM_HOLD_LABEL, REAFFIRM_VIEW_PREFIX, StoreCheck, landing_field_rules,
+    landing_reads_proposal_view, local_card_evidence_allowed, reaffirm_view,
+};
 pub use error::StoreError;
 #[doc(hidden)]
 pub use index::IndexDump;
@@ -50,7 +54,8 @@ pub use merge::{
 pub use segment::SegmentReader;
 pub use store::{
     CATCH_UP_CHUNK, CHECKPOINT_FRAMES, CHECKPOINT_IDLE, INDEX_OPEN_SENTINEL, MAX_BLOB_BYTES,
-    OpenReport, Store, StoreLock, StoreReader, check_chunk_len, lock_error,
+    NoticeCapture, OpenReport, Store, StoreLock, StoreReader, capture_notices_for_tests,
+    check_chunk_len, drop_unclean_for_tests, lock_error, notice, unclean_closes_for_tests,
 };
 mod state;
 pub use state::{PreparedTag, ViewRecord, apply_op};

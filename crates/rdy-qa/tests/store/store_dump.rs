@@ -584,10 +584,10 @@ fn dl1_an_unassigned_kind_is_refused() {
         frame_kinds(DUMP_FORMAT, STORE_FORMAT),
         Some(
             &[
-                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 16, 17, 18, 19, 20, 21, 22, 23
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24
             ][..]
         ),
-        "exactly the kinds store format 16 assigns"
+        "exactly the kinds store format 17 assigns"
     );
     for (d, sf) in READS {
         assert!(frame_kinds(*d, *sf).is_some(), "({d}, {sf}) has its kinds");
@@ -602,8 +602,8 @@ fn dl1_an_unassigned_kind_is_refused() {
     let good = stream(&s, &batches, &[]);
     let recs = records(&good);
     let first = recs.iter().position(|(k, _)| *k < rec::HEADER).unwrap();
-    // 23 (the carried removal) is assigned now; 12 stays unassigned, and 24 is the next
-    for k in [12u8, 14, 24] {
+    // 24 (the change plan) is assigned now; 12 stays unassigned, and 25 is the next
+    for k in [12u8, 14, 25] {
         // the reader
         let mut r = recs.clone();
         r[first].0 = k;

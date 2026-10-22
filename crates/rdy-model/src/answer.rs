@@ -31,6 +31,14 @@ pub enum AnswerAct {
     CloseStale,
     /// The person proposes a view.
     Propose,
+    /// The person answers a suspect with keep.
+    KeepSuspect,
+    /// The person accepts a change plan's deferrals.
+    AcceptDeferrals,
+    /// The person refuses a change plan's deferrals.
+    RefuseDeferrals,
+    /// The person rejects a re-affirmation.
+    RejectReaffirm,
 }
 
 impl AnswerAct {
@@ -47,6 +55,10 @@ impl AnswerAct {
             AnswerAct::ViewOwn => "view_own",
             AnswerAct::CloseStale => "close_stale",
             AnswerAct::Propose => "propose",
+            AnswerAct::KeepSuspect => "keep_suspect",
+            AnswerAct::AcceptDeferrals => "accept_deferrals",
+            AnswerAct::RefuseDeferrals => "refuse_deferrals",
+            AnswerAct::RejectReaffirm => "reject_reaffirm",
         }
     }
 }

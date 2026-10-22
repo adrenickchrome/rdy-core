@@ -721,7 +721,11 @@ fn ha11_pending_erasure_recovers_after_seal() {
         Err(StoreError::RedactionPending)
     ));
     assert!(holds_canary(&b.holder));
-    drop(h);
+    let notice = rdy_store::drop_unclean_for_tests(h);
+    assert!(
+        notice.contains("(Content removal was authorized but has not finished.)"),
+        "{notice}"
+    );
     // the next open finishes the exact authorized removal
     let mut h = Store::open(&b.holder).unwrap();
     assert_eq!(h.log_end(), end);

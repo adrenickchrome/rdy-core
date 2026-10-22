@@ -19,8 +19,9 @@ use crate::{Materialized, Rdy, ReadState, Scope, now_ms};
 use rdy_graph::{
     DerivedStatus, Edge, EdgeKind, Graph, IMPACT_LINKS, SUSPECT_LINKS, Suspect, edges_of,
 };
+use rdy_model::Tracking;
 use rdy_model::decision::{DECISION, REFINES, REVOKES, SUPERSEDES};
-use rdy_model::{Block, BlockId, Hash, Op};
+use rdy_model::{Block, BlockId, Hash, Link, Op};
 use rdy_store::StoreError;
 use serde::Serialize;
 use std::cell::{OnceCell, RefCell};
@@ -133,9 +134,56 @@ pub struct Consequences {
     pub tensions_error: Option<String>,
 }
 
+/// D-01QX5 (p-EC3VW): a write's reply row for a block it rewrote with its glob set unchanged
+/// while its reflected code still differs from the recorded snapshot. A read projection made at
+/// report time: never in a TRANSITION, the store's suspect table or a change plan. It has no
+/// target, so it is its own row shape beside [`Consequence`].
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CodeKept {
+    pub id: String,
+    pub block: String,
+    pub kind: ConsequenceKind,
+    pub because: CodeBecause,
+    pub follow_up: FollowUp,
+    pub reason: &'static str,
+    /// Always `None`: the cause is the code, not a block.
+    pub target: Option<String>,
+    /// The changed matched files, as `<repo>:<path>`, sorted.
+    pub paths: Vec<String>,
+    pub already_written: bool,
+    pub fix: &'static str,
+}
+
+/// The cause of a [`CodeKept`] row: the `reflects` edge, with no changed block.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CodeBecause {
+    pub edge: &'static str,
+    pub changed: Option<String>,
+}
+
+/// The fix of a [`CodeKept`] row.
+pub const CODE_KEPT_FIX: &str = "check the block against its code, then repin it with code: true";
+
+/// One row of a write's `consequences`: a structural entry, or a code-kept row after them all.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ReplyRow {
+    Consequence(Consequence),
+    CodeKept(CodeKept),
+}
+
+impl ReplyRow {
+    fn kind(&self) -> &'static str {
+        match self {
+            ReplyRow::Consequence(c) => c.kind.as_str(),
+            ReplyRow::CodeKept(c) => c.kind.as_str(),
+        }
+    }
+}
+
 /// The hint on a `reaffirm` entry.
 pub const REAFFIRM_FIX: &str =
-    "supersede it, or leave it suspect; re-affirmation arrives with FW-R6";
+    "if it still holds, re-affirm it with a reaffirm op; otherwise supersede it";
 
 /// The hint on a kept `suspect` entry (D-W7KAK) whose target changed, for a block that is not a
 /// live decision: the write kept the old pin.
@@ -336,7 +384,7 @@ fn kept_follow_up(reason: &str, live_decision: bool) -> Option<(FollowUp, String
 
 /// The words after the code of a version's `consequences_error` while `ids` are in conflict
 /// (sorted, each once).
-fn conflict_message(ids: &[String]) -> String {
+pub(crate) fn conflict_message(ids: &[String]) -> String {
     let mut ids = ids.to_vec();
     ids.sort();
     ids.dedup();
@@ -413,11 +461,22 @@ impl Events {
     /// The events of the decisions `ops` create; the refines and part supersedes as `reach`
     /// lists them (copied refines already dropped).
     fn of_ops(ops: &[Op], reach: &[(BlockId, BlockId, &'static str)]) -> Events {
+        let created = ops.iter().filter_map(|op| match op {
+            Op::Create { block } => Some(block),
+            _ => None,
+        });
+        Events::of_blocks(created, reach)
+    }
+
+    /// The events of the decisions among `blocks`; the refines and part supersedes as `reach`
+    /// lists them (copied refines already dropped).
+    fn of_blocks<'b>(
+        blocks: impl IntoIterator<Item = &'b Block>,
+        reach: &[(BlockId, BlockId, &'static str)],
+    ) -> Events {
         let mut ev = Events::default();
-        for op in ops {
-            if let Op::Create { block } = op {
-                ev.add_decision(block);
-            }
+        for block in blocks {
+            ev.add_decision(block);
         }
         ev.partial.clear();
         for (decision, target, _) in reach {
@@ -439,6 +498,11 @@ enum Baseline<'a> {
         read: OnceCell<(Arc<Materialized>, Arc<Lexicon>)>,
     },
     Empty,
+    /// A state already read: its blocks and their names (a change plan's canon baseline).
+    Ready {
+        m: Arc<Materialized>,
+        names: Arc<Lexicon>,
+    },
     /// Each block the changes write and the version its first update or delete replaced (`None`
     /// for one they create); read on first use into those versions and their lexicon.
     Start {
@@ -570,6 +634,9 @@ impl<'a> Compare<'a> {
     ) -> Result<Option<(Block, Arc<Lexicon>)>, RdyError> {
         match b {
             Baseline::Empty => Ok(None),
+            Baseline::Ready { m, names } => {
+                Ok(m.get(x).map(|blk| (blk.clone(), Arc::clone(names))))
+            }
             Baseline::Scope { st, scope, read } => {
                 if read.get().is_none() {
                     let _ = read.set((st.materialized(scope)?, st.lexicon(scope)?));
@@ -759,7 +826,286 @@ fn edge_set<'e>(rep: &str, edges: impl IntoIterator<Item = &'e Edge>) -> Vec<Str
     out
 }
 
+/// One subject/cause pair the candidate visitor found: block `from` points at the changed block
+/// `changed` through `edges` (by name; never `contains`), and `edge` is the representative.
+struct Pair<'e> {
+    from: BlockId,
+    changed: BlockId,
+    suspect: bool,
+    edge: &'e Edge,
+    edges: Vec<&'e Edge>,
+}
+
+/// The candidate visitor the report and the change plan share: for each block of `changed`, in
+/// order, each block that `incoming` lists with an edge to it and `keep` admits, in id order. The
+/// representative edge of a block `suspect_on` calls suspect on the changed block is its least
+/// premise edge by name (else its least edge); of any other block, its least impact edge. A block
+/// with no such edge is no pair.
+fn visit_pairs<'e>(
+    changed: &BTreeSet<BlockId>,
+    incoming: impl Fn(&BlockId) -> Vec<&'e Edge>,
+    keep: impl Fn(&BlockId) -> bool,
+    mut suspect_on: impl FnMut(&BlockId, &BlockId) -> bool,
+    mut visit: impl FnMut(Pair<'e>) -> Result<(), RdyError>,
+) -> Result<(), RdyError> {
+    for x in changed {
+        let mut by_from: BTreeMap<&BlockId, Vec<&'e Edge>> = BTreeMap::new();
+        for e in incoming(x) {
+            if e.kind != EdgeKind::Contains {
+                by_from.entry(&e.from).or_default().push(e);
+            }
+        }
+        for (from, mut edges) in by_from {
+            if !keep(from) {
+                continue;
+            }
+            edges.sort_by_key(|e| e.kind.name());
+            let suspect = suspect_on(from, x);
+            let pick = if suspect {
+                edges.iter().find(|e| premise(e)).or_else(|| edges.first())
+            } else {
+                edges.iter().find(|e| impact(e))
+            };
+            let Some(&edge) = pick else { continue };
+            visit(Pair {
+                from: from.clone(),
+                changed: x.clone(),
+                suspect,
+                edge,
+                edges,
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test counter: the subject/cause pairs `plan_pairs` has judged on this thread, so a test
+    /// can see where a plan stops.
+    pub(crate) static PLAN_PAIRS_JUDGED: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Counts one judged plan pair (tests only).
+fn count_plan_pair() {
+    #[cfg(test)]
+    PLAN_PAIRS_JUDGED.with(|c| c.set(c.get() + 1));
+}
+
+/// One state a change plan reads (D-4JMPH): its blocks, its graph and its names.
+pub(crate) struct NetState {
+    pub(crate) m: Arc<Materialized>,
+    pub(crate) g: Arc<Graph>,
+    pub(crate) names: Arc<Lexicon>,
+}
+
+/// One subject/cause pair of the change plan, judged as the consequence path judges it (O3).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PlanPair {
+    pub(crate) subject: BlockId,
+    pub(crate) cause: BlockId,
+    /// The representative edge (for a reach, the reaching link's name).
+    pub(crate) edge: String,
+    pub(crate) follow: FollowUp,
+    /// The version fully supersedes or revokes the cause.
+    pub(crate) retired: bool,
+    /// A refine or part supersede reached the subject (FW-LP6); it has no edge to a changed
+    /// block.
+    pub(crate) reach: bool,
+    /// The baseline subject had an edge (or, for a reach, a governing link) to the cause.
+    pub(crate) in_base: bool,
+    /// The subject is suspect on the cause in the final state.
+    pub(crate) suspect: bool,
+    /// The baseline subject held a pinned premise edge to the cause that the final cause no
+    /// longer matches: the suspect a repin clears.
+    pub(crate) prior_suspect: bool,
+}
+
+/// Whether `before`, a subject's baseline version, holds a premise edge to `x` with a pin that
+/// the final `x` (`after`, read under `t`) no longer matches; a deleted `x` matches no pin. A
+/// removed (redacted) `x` has no content to compare, so it gives none.
+fn prior_suspect(before: Option<&Block>, after: Option<&Block>, x: &BlockId, t: &Tracking) -> bool {
+    let Some(before) = before else {
+        return false;
+    };
+    edges_of(before).iter().any(|e| {
+        e.to == *x
+            && premise(e)
+            && match (e.pin, after) {
+                (Some(pin), Some(a)) => !a.is_redacted() && pin != a.content_hash_with(t),
+                (Some(_), None) => true,
+                (None, _) => false,
+            }
+    })
+}
+
 impl ReadState {
+    /// The change plan's projection of the candidate visitor (O3): every subject/cause pair of
+    /// the version's net state `fin` against its canon baseline `base`, with `touched` the
+    /// blocks whose content the version changes or deletes and `reach` its refine and part
+    /// supersede links (decision, target, name). The changed blocks are `touched` and the
+    /// `supersedes` / `revokes` targets of its decisions, in either state; their dependents are
+    /// read through the edges of both states, the version's own written blocks included, by
+    /// `Compare::judge` with the baseline as the one ordinary baseline. A subject is judged as
+    /// its baseline version under the baseline's statuses (work the version did), or, when it is
+    /// new, as its final version. No pair for a dead decision subject or a block and itself. A
+    /// `supersedes`, `revokes` or `refines` link the version writes or removes is the change, not
+    /// a dependency, so it gives no pair; the subject's other edges, and a lineage link it
+    /// already held, still do. Then each reached target's governed blocks, judged as the reach
+    /// entries are. Each pair goes to `visit` in visit order as it is judged, and the first
+    /// error `visit` returns stops the walk: nothing is cut, and nothing is judged past a
+    /// refusal.
+    pub(crate) fn plan_pairs(
+        &self,
+        base: &NetState,
+        fin: &NetState,
+        touched: &BTreeSet<BlockId>,
+        reach: &[(BlockId, BlockId, &'static str)],
+        mut visit: impl FnMut(PlanPair) -> Result<(), RdyError>,
+    ) -> Result<(), RdyError> {
+        let mut changed = touched.clone();
+        for id in touched {
+            for b in [base.m.get(id), fin.m.get(id)].into_iter().flatten() {
+                if b.block_type != DECISION {
+                    continue;
+                }
+                for name in [SUPERSEDES, REVOKES] {
+                    for l in b.links.get(name).into_iter().flatten() {
+                        changed.insert(l.target.clone());
+                    }
+                }
+            }
+        }
+        let events = Events::of_blocks(touched.iter().filter_map(|id| fin.m.get(id)), reach);
+        let cmp = Compare::new(
+            self,
+            &fin.m,
+            Names::Ready(Arc::clone(&fin.names)),
+            vec![Baseline::Ready {
+                m: Arc::clone(&base.m),
+                names: Arc::clone(&base.names),
+            }],
+            events,
+        );
+        let t = Arc::clone(fin.g.tracking());
+        let suspect = |s: &BlockId, x: &BlockId| {
+            fin.g
+                .suspects_of(s)
+                .iter()
+                .any(|v| v.target == *x && !self.is_presentational_source(&fin.m, v))
+        };
+        let prior = |s: &BlockId, x: &BlockId| prior_suspect(base.m.get(s), fin.m.get(x), x, &t);
+        // a lineage link the version itself writes or removes is the change, never a
+        // dependency; a lineage link the subject already held, and every other edge, stay
+        let own_lineage = |e: &Edge| {
+            let EdgeKind::Link(n) = &e.kind else {
+                return false;
+            };
+            if ![SUPERSEDES, REVOKES, REFINES].contains(&n.as_str()) {
+                return false;
+            }
+            fn links<'b>(b: Option<&'b Block>, name: &str, to: &BlockId) -> Vec<&'b Link> {
+                b.filter(|b| b.block_type == DECISION)
+                    .and_then(|b| b.links.get(name))
+                    .into_iter()
+                    .flatten()
+                    .filter(|l| l.target == *to)
+                    .collect()
+            }
+            links(base.m.get(&e.from), n, &e.to) != links(fin.m.get(&e.from), n, &e.to)
+        };
+        // the version's own work is classified as it stood before (the baseline subject under
+        // the baseline's statuses); a new subject as it stands after
+        let judged_as = |s: &BlockId| -> Option<(&Graph, &Block)> {
+            match base.m.get(s) {
+                Some(b) => Some((&*base.g, b)),
+                None => fin.m.get(s).map(|b| (&*fin.g, b)),
+            }
+        };
+        visit_pairs(
+            &changed,
+            |x| {
+                base.g
+                    .incoming(x)
+                    .iter()
+                    .chain(fin.g.incoming(x))
+                    .filter(|e| !own_lineage(e))
+                    .collect()
+            },
+            |s| base.m.get(s).is_some() || fin.m.get(s).is_some(),
+            |s, x| suspect(s, x) || prior(s, x),
+            |p| {
+                if p.from == p.changed {
+                    return Ok(());
+                }
+                let Some((g, src)) = judged_as(&p.from) else {
+                    return Ok(());
+                };
+                let lineage = cmp.lineage_of(&p.changed);
+                count_plan_pair();
+                let Some(j) = cmp.judge(g, &p.from, src, &p.changed, lineage)? else {
+                    return Ok(());
+                };
+                let in_base = base
+                    .g
+                    .outgoing(&p.from)
+                    .iter()
+                    .any(|e| e.to == p.changed && e.kind != EdgeKind::Contains);
+                visit(PlanPair {
+                    suspect: suspect(&p.from, &p.changed),
+                    prior_suspect: prior(&p.from, &p.changed),
+                    subject: p.from,
+                    cause: p.changed,
+                    edge: p.edge.kind.name(),
+                    follow: j.follow,
+                    retired: matches!(lineage, Lineage::Retired(_)),
+                    reach: false,
+                    in_base,
+                })
+            },
+        )?;
+        for (decision, target, via) in reach {
+            if matches!(
+                fin.g.status(target),
+                Some(
+                    DerivedStatus::Rejected
+                        | DerivedStatus::Superseded { .. }
+                        | DerivedStatus::Revoked { .. }
+                )
+            ) {
+                continue;
+            }
+            let before: BTreeSet<BlockId> = base.g.governed_by(target).into_iter().collect();
+            let mut governed = before.clone();
+            governed.extend(fin.g.governed_by(target));
+            for block in governed {
+                if block == *decision || block == *target {
+                    continue;
+                }
+                let Some((g, src)) = judged_as(&block) else {
+                    continue;
+                };
+                count_plan_pair();
+                let Some(j) = cmp.judge(g, &block, src, target, Lineage::Partial)? else {
+                    continue;
+                };
+                visit(PlanPair {
+                    suspect: suspect(&block, target),
+                    prior_suspect: false,
+                    in_base: before.contains(&block),
+                    subject: block,
+                    cause: target.clone(),
+                    edge: (*via).to_string(),
+                    follow: j.follow,
+                    retired: false,
+                    reach: true,
+                })?;
+            }
+        }
+        Ok(())
+    }
+
     /// The consequences of `change` in this state (the one the write published): for each block
     /// the change touched, each block outside the change that points at it. See
     /// `consequences_in` for the order and the cut.
@@ -1150,45 +1496,45 @@ impl ReadState {
         let m = cmp.m;
         let mut suspects_of: BTreeMap<BlockId, Vec<Suspect>> = BTreeMap::new();
         let mut causes: BTreeMap<BlockId, Cause> = BTreeMap::new();
-        for x in changed {
-            let mut by_from: BTreeMap<&BlockId, Vec<&Edge>> = BTreeMap::new();
-            for e in g.incoming(x) {
-                if e.kind != EdgeKind::Contains && !touched.contains(&e.from) {
-                    by_from.entry(&e.from).or_default().push(e);
-                }
-            }
-            for (from, mut edges) in by_from {
-                if m.get(from).is_none() {
-                    continue;
-                }
-                edges.sort_by_key(|e| e.kind.name());
-                let found = suspects_of.entry(from.clone()).or_insert_with(|| {
-                    let mut s = g.suspects_of(from);
-                    s.retain(|s| !self.is_presentational_source(m, s));
-                    s
-                });
-                let suspect = found.iter().any(|s| s.target == *x);
-                let pick = if suspect {
-                    edges.iter().find(|e| premise(e)).or_else(|| edges.first())
-                } else {
-                    edges.iter().find(|e| impact(e))
-                };
-                let Some(e) = pick else { continue };
-                let better = causes.get(from).is_none_or(|c| suspect && !c.suspect);
+        // the report keeps one cause per block outside the change: the first, or the first it
+        // is suspect on
+        visit_pairs(
+            changed,
+            |x| {
+                g.incoming(x)
+                    .iter()
+                    .filter(|e| !touched.contains(&e.from))
+                    .collect()
+            },
+            |from| m.get(from).is_some(),
+            |from, x| {
+                suspects_of
+                    .entry(from.clone())
+                    .or_insert_with(|| {
+                        let mut s = g.suspects_of(from);
+                        s.retain(|s| !self.is_presentational_source(m, s));
+                        s
+                    })
+                    .iter()
+                    .any(|s| s.target == *x)
+            },
+            |p| {
+                let better = causes.get(&p.from).is_none_or(|c| p.suspect && !c.suspect);
                 if better {
-                    let edge = e.kind.name();
+                    let edge = p.edge.kind.name();
                     causes.insert(
-                        from.clone(),
+                        p.from,
                         Cause {
-                            suspect,
-                            edges: edge_set(&edge, edges.iter().copied()),
+                            suspect: p.suspect,
+                            edges: edge_set(&edge, p.edges.iter().copied()),
                             edge,
-                            changed: x.clone(),
+                            changed: p.changed,
                         },
                     );
                 }
-            }
-        }
+                Ok(())
+            },
+        )?;
 
         let mut suspect_items = vec![];
         let mut dependent_items = vec![];
@@ -1470,25 +1816,107 @@ impl ReadState {
 /// `items` cut from the end to `max_tokens` (default `BRIEF_DEFAULT_TOKENS`; four bytes a
 /// token), counting what it drops in `omitted`, by kind.
 fn cut(items: Vec<Consequence>, max_tokens: Option<usize>) -> Consequences {
-    let mut out = Consequences {
+    let (items, omitted) = cut_rows(items, |c| c.kind.as_str(), max_tokens);
+    Consequences {
         items,
+        omitted,
         ..Consequences::default()
-    };
+    }
+}
+
+/// The report cutter over any row shape: `items` cut from the end until `{"items", "omitted"}`
+/// fits `max_tokens` (see [`cut`]), with the dropped rows counted by `kind`.
+fn cut_rows<R: Serialize>(
+    mut items: Vec<R>,
+    kind: fn(&R) -> &'static str,
+    max_tokens: Option<usize>,
+) -> (Vec<R>, BTreeMap<String, usize>) {
+    #[derive(Serialize)]
+    struct Sized<'a, R> {
+        items: &'a [R],
+        #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+        omitted: &'a BTreeMap<String, usize>,
+    }
+    let mut omitted = BTreeMap::new();
     let budget = max_tokens.unwrap_or(BRIEF_DEFAULT_TOKENS).saturating_mul(4);
-    let size = |c: &Consequences| {
-        serde_json::to_string(c)
+    let size = |items: &[R], omitted: &BTreeMap<String, usize>| {
+        serde_json::to_string(&Sized { items, omitted })
             .expect("consequences serialize: strings and string-keyed maps only")
             .len()
     };
-    while !out.items.is_empty() && size(&out) > budget {
-        let drop = out.items.len().div_ceil(2);
-        for dropped in out.items.split_off(out.items.len() - drop) {
-            *out.omitted
-                .entry(dropped.kind.as_str().to_string())
-                .or_default() += 1;
+    while !items.is_empty() && size(&items, &omitted) > budget {
+        let drop = items.len().div_ceil(2);
+        for dropped in items.split_off(items.len() - drop) {
+            *omitted.entry(kind(&dropped).to_string()).or_default() += 1;
         }
     }
-    out
+    (items, omitted)
+}
+
+/// A reply's rows, the counts a cut dropped by kind, the tension error, and the code error.
+type Rows<R> = (
+    Vec<R>,
+    BTreeMap<String, usize>,
+    Option<String>,
+    Option<String>,
+);
+
+/// The rows of a write's reply: its structural consequences (`c`, read uncut) in their order,
+/// then a [`CodeKept`] row for each block the write rewrote whose code differs from the recorded
+/// snapshot, by block id; the combined list goes through the report cutter. When the code rows
+/// cannot be read, the structural rows stand alone and the code error is reported beside them.
+fn with_code_rows(
+    st: &ReadState,
+    scope: &Scope,
+    changes: &[Hash],
+    c: Consequences,
+    max_tokens: Option<usize>,
+) -> Rows<ReplyRow> {
+    let mut rows: Vec<ReplyRow> = c.items.into_iter().map(ReplyRow::Consequence).collect();
+    let code_error = match code_kept_rows(st, scope, changes) {
+        Ok(code) => {
+            rows.extend(code.into_iter().map(ReplyRow::CodeKept));
+            None
+        }
+        Err(e) => Some(format!("{}: {}", e.code, e.message)),
+    };
+    let (rows, omitted) = cut_rows(rows, ReplyRow::kind, max_tokens);
+    (rows, omitted, c.tensions_error, code_error)
+}
+
+/// The [`CodeKept`] rows of the write `changes` made (its last change names the batch): one for
+/// each block it rewrote whose code differs from the recorded snapshot, by block id.
+fn code_kept_rows(
+    st: &ReadState,
+    scope: &Scope,
+    changes: &[Hash],
+) -> Result<Vec<CodeKept>, RdyError> {
+    let Some(batch) = changes.last() else {
+        return Ok(vec![]);
+    };
+    let mut rewritten = BTreeSet::new();
+    for h in changes {
+        rewritten.extend(rewritten_by(&st.reader().change(h)?.ops));
+    }
+    let ids: Vec<BlockId> = rewritten.into_iter().collect();
+    Ok(crate::reflects::code_suspects(st, scope, Some(&ids))?
+        .into_iter()
+        .map(|s| CodeKept {
+            id: consequence_id(batch, "suspect code_changed", &s.block),
+            block: s.block.to_string(),
+            kind: ConsequenceKind::Suspect,
+            because: CodeBecause {
+                edge: rdy_schema::REFLECTS_FIELD,
+                changed: None,
+            },
+            follow_up: FollowUp::Confirm,
+            reason: "code_changed",
+            target: None,
+            paths: s.paths,
+            already_written: true,
+            fix: CODE_KEPT_FIX,
+        })
+        .collect())
 }
 
 /// The entry for tension `t`: its `block` is the first involved block of an item whose side is
@@ -1526,16 +1954,26 @@ fn tension_entry(batch: &Hash, t: &Tension, mine: &dyn Fn(&SideRef) -> bool) -> 
 /// `consequences_omitted` when a cut dropped some, or `consequences: []` and
 /// `consequences_error` when they could not be read (the write stands).
 pub(crate) fn attach(v: &mut serde_json::Value, c: Result<Consequences, RdyError>) {
+    attach_rows(v, c.map(|c| (c.items, c.omitted, c.tensions_error, None)));
+}
+
+/// [`attach`] over any row shape. A write's reply also carries `consequences_code_error` when
+/// its code-kept rows could not be read (its structural rows stand).
+fn attach_rows<R: Serialize>(v: &mut serde_json::Value, c: Result<Rows<R>, RdyError>) {
     match c {
-        Ok(c) => {
-            v["consequences"] = serde_json::to_value(&c.items)
+        Ok((items, omitted, tensions_error, code_error)) => {
+            v["consequences"] = serde_json::to_value(&items)
                 .expect("consequences serialize: strings and string-keyed maps only");
-            if !c.omitted.is_empty() {
+            if !omitted.is_empty() {
                 v["consequences_omitted"] =
-                    serde_json::to_value(&c.omitted).expect("a map of counts serializes");
+                    serde_json::to_value(&omitted).expect("a map of counts serializes");
             }
-            if let Some(e) = c.tensions_error {
+            if let Some(e) = tensions_error {
                 v["consequences_tension_error"] = e.into();
+            }
+            // D-01QX5: the checkout could not be read; the structural rows still stand
+            if let Some(e) = code_error {
+                v["consequences_code_error"] = e.into();
             }
         }
         Err(e) => {
@@ -1653,8 +2091,11 @@ fn report<T: Serialize + 'static>(
     // the state the write published, not a later one: a write that lands before this read
     // changes nothing in this reply (O8); the view base is that state's too
     let published = states.as_ref().map_or(&st, |s| &s.1);
-    let c = published.consequences_of(&scope, &changes, max_tokens);
-    attach(&mut v, c);
+    // read uncut, then cut once with the code-kept rows appended (D-01QX5)
+    let c = published
+        .consequences_of(&scope, &changes, Some(usize::MAX))
+        .map(|c| with_code_rows(published, &scope, &changes, c, max_tokens));
+    attach_rows(&mut v, c);
     if let Some(notes) = intent_notes_of(&st, before, view, &changes, reader)
         && !notes.is_empty()
     {
@@ -1911,7 +2352,9 @@ pub fn view_op_and_report<T: Serialize + 'static>(
 /// landing it on canon (see `ReadState::landing_consequences`): `consequences` is always present
 /// in the reply, with `consequences_omitted` when a cut dropped some, or `consequences: []` and
 /// `consequences_error` when the version has a blocking conflict (`E_CONFLICT_UNRESOLVED`, no
-/// merge tried) or does not merge onto canon (the proposal stands).
+/// merge tried) or does not merge onto canon (the proposal stands). The reply's `plan` is the
+/// summary the propose built with the plan it bound in the version's batch (D-4JMPH): it is not
+/// read or computed again after the write.
 pub fn propose_and_report(
     engine: &dyn Engine,
     max_tokens: Option<usize>,

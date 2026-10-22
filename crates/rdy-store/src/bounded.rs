@@ -96,12 +96,28 @@ pub enum TryDecodeError {
     Allocation,
 }
 
+/// The first bound of every typed record: at most [`MAX_RECORD_BYTES`] encoded bytes, else the
+/// [`RECORD_BYTES`] limit. [`decode`], [`try_decode`], [`check`] and [`fits`] share it.
+fn record_len(len: usize) -> Result<(), RecordError> {
+    if len > MAX_RECORD_BYTES {
+        return Err(RecordError::limit(RECORD_BYTES, MAX_RECORD_BYTES));
+    }
+    Ok(())
+}
+
+/// Checks, before a writer appends it, that `value`'s encoding fits one record: the same
+/// [`MAX_RECORD_BYTES`] bound a reader of the record ([`decode`]) and a stream of it check
+/// first, so no record is written that a later read or export refuses. The length is counted
+/// without building the encoding.
+pub fn fits<T: serde::Serialize + ?Sized>(value: &T) -> Result<(), RecordError> {
+    let len = postcard::experimental::serialized_size(value).map_err(|_| RecordError::Decode)?;
+    record_len(len)
+}
+
 /// Decodes `bytes` as exactly one `T`, within the limits above. Any input left after the value
 /// is `Decode`.
 pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, RecordError> {
-    if bytes.len() > MAX_RECORD_BYTES {
-        return Err(RecordError::limit(RECORD_BYTES, MAX_RECORD_BYTES));
-    }
+    record_len(bytes.len())?;
     let gate = Gate::default();
     run(&gate, bytes)
 }
@@ -127,9 +143,7 @@ fn refuse_growth<E: de::Error>() -> E {
 /// every growth of the value is a fallible reservation: a refused one is
 /// [`TryDecodeError::Allocation`], never an abort.
 pub fn try_decode<T: Fallible>(bytes: &[u8]) -> Result<T, TryDecodeError> {
-    if bytes.len() > MAX_RECORD_BYTES {
-        return Err(RecordError::limit(RECORD_BYTES, MAX_RECORD_BYTES).into());
-    }
+    record_len(bytes.len())?;
     GROWTH_REFUSED.with(|r| r.set(false));
     let gate = Gate::default();
     let out = run(&gate, bytes);
@@ -233,9 +247,7 @@ pub trait InPlace {
 /// and returns the refusal [`decode`] gives the record `T` is the shape of. The check
 /// allocates nothing, so a hostile record cannot make it abort on a failed allocation.
 pub fn check<T: InPlace>(bytes: &[u8]) -> Result<(), RecordError> {
-    if bytes.len() > MAX_RECORD_BYTES {
-        return Err(RecordError::limit(RECORD_BYTES, MAX_RECORD_BYTES));
-    }
+    record_len(bytes.len())?;
     let gate = Gate::default();
     let mut postcard = postcard::Deserializer::from_flavor(Source {
         rest: bytes,

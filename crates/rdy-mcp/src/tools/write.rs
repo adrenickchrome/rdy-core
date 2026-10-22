@@ -33,7 +33,8 @@ pub struct WriteParams {
     /// {"op":"move","id":<id or path>,"base":<version>?,"parent":<id or path>?,"after":<sibling>?,"before":<sibling>?}
     /// {"op":"delete","id":<id or path>,"base":<version>?}
     /// {"op":"rebalance","parent":<id or path>?}
-    /// {"op":"repin","id":<id or path>,"base":<version>?,"targets":[<id or path>]?}
+    /// {"op":"repin","id":<id or path>,"base":<version>?,"targets":[<id or path>]?,"code":<true>?} code: true also records the code state the block's reflects globs match now, and clears its code suspect; the block must declare reflects.
+    /// {"op":"reaffirm","id":<decision id>?,"because":<id or path>?,"base":<version>?,"targets":[<id or path>]?,"reason":<1 to 2000 characters>} Give id or because, not both: id re-affirms one suspect accepted decision, and because re-affirms every decision in the view that is suspect on that block. reason is required. targets limits the op to the suspects on those blocks (default: every current suspect). base goes with id only: it is the version of the decision you read, and the op is refused if the decision has moved. The decision keeps its ruling, body and links.
     /// links: {"<kind>": <target> | [<target>, …] | [{"target": "<id, key or path>", "part": "<optional words>"}]}, e.g. {"decided_by": [{"target": "D-W2HXR"}]}. An update replaces only the link kinds it names; "<kind>": [] removes that kind.
     /// after puts a block behind a sibling and before ahead of one (before the first child makes it first); give one, or neither to append.
     /// repin re-pins a block's references and links (all, or the targets named) to their current versions, after you've checked them: it clears "changed" suspects.

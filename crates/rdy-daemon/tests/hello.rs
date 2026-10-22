@@ -305,6 +305,7 @@ async fn reload1_a_slow_session_start_answers_one_starting_then_ready() {
 /// keeps serving its own project. A hello with no project is not a hello.
 #[tokio::test]
 async fn df3_a_hello_from_another_project_is_refused_with_its_fix() {
+    let log = rdy_daemon::daemon::capture_log_for_tests(&["refused a client of another project"]);
     let d = daemon("1", true, |_| {}).await;
     let other = short_tempdir();
     RunDir::of_project(other.path()).ensure().unwrap();
@@ -344,4 +345,10 @@ async fn df3_a_hello_from_another_project_is_refused_with_its_fix() {
     let (_, first) = connect_with(&d.run, &hello("1", "ctl", d.dir.path())).await;
     assert_eq!(parsed(&first)["status"], "ready");
     d.handle.stop();
+    // the daemon logs each refusal, with the other project's identity
+    let line = format!(
+        "refused a client of another project ({})",
+        RunDir::of_project(other.path()).project_id().unwrap()
+    );
+    assert_eq!(log.lines(), [line.clone(), line]);
 }

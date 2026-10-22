@@ -1,6 +1,7 @@
 //! The landing ops: propose, approve and tag.
 use super::*;
 use rdy_engine::consequence::propose_and_report;
+use rdy_engine::plan::{PlanAnswerInput, PlanQuery, ProposePlanRequest, check_plan_request};
 use rdy_engine::signing_act::{SigningAct, run_signed_act};
 use rdy_engine::{LandOptions, RdyError, Relay, alt};
 use rdy_model::RelayEvidence;
@@ -19,6 +20,7 @@ pub(super) struct ProposeArgs {
     evidence: Option<String>,
     question: Option<String>,
     session_ref: Option<String>,
+    plan_answers: Option<Vec<rdy_mcp::tools::PlanAnswerParams>>,
 }
 
 #[derive(Deserialize)]
@@ -68,26 +70,26 @@ pub(super) fn propose(cx: &OpContext, a: ProposeArgs) -> Result<Value, RdyError>
     let view = view_of(&s, a.view);
     let relay = relay_of(a.relayed_by, a.evidence, a.question, a.session_ref);
     let person = cx.human.to_string();
-    propose_and_report(cx.engine, a.max_tokens, move |r| match relay {
-        None => r.propose_with(
-            &s,
-            &view,
-            &a.title,
-            None,
-            a.summary.as_deref(),
-            a.alternatives.as_ref(),
-        ),
-        Some(relay) => r.propose_as(
-            &s,
-            &person,
-            &relay,
-            false,
-            &view,
-            &a.title,
-            None,
-            a.summary.as_deref(),
-            a.alternatives.as_ref(),
-        ),
+    let answers: Vec<PlanAnswerInput> = a
+        .plan_answers
+        .unwrap_or_default()
+        .into_iter()
+        .map(PlanAnswerInput::from)
+        .collect();
+    check_plan_request(&PlanQuery::default(), &answers)?;
+    propose_and_report(cx.engine, a.max_tokens, move |r| {
+        let req = ProposePlanRequest {
+            view: &view,
+            title: &a.title,
+            changes: None,
+            summary: a.summary.as_deref(),
+            alternatives: a.alternatives.as_ref(),
+            plan_answers: &answers,
+        };
+        match relay {
+            None => r.propose_plan(&s, req),
+            Some(relay) => r.propose_plan_as(&s, &person, &relay, false, req),
+        }
     })
 }
 

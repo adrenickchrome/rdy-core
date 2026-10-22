@@ -76,6 +76,7 @@ fn sr2_rdy_site_prints_the_changes_line() {
 
 #[test]
 fn ls7_rdy_site_in_lan_mode_prints_the_lan_link_and_warns() {
+    let log = rdy_qa::daemon::site_log();
     let dir = short_tempdir();
     drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
     std::fs::write(
@@ -110,11 +111,14 @@ fn ls7_rdy_site_in_lan_mode_prints_the_lan_link_and_warns() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["lan_url"], lines[1], "{v}");
     assert_eq!(v["warning"]["code"], "W_SITE_LAN", "{v}");
+    // the daemon warns once, where the person running it sees it
+    assert_eq!(log.lines(), [rdy_qa::daemon::LAN_DOCS_LINE]);
 }
 
 /// Fix round 1: `changes:` is the second line, before the LAN URL.
 #[test]
 fn sr2_rdy_site_prints_changes_before_the_lan_link() {
+    let log = rdy_qa::daemon::site_log();
     let dir = short_tempdir();
     drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
     std::fs::write(
@@ -152,4 +156,5 @@ fn sr2_rdy_site_prints_changes_before_the_lan_link() {
         lines[2], lines[0],
         "the LAN stand-in is 127.0.0.1: {text:?}"
     );
+    assert_eq!(log.lines(), [rdy_qa::daemon::LAN_DOCS_LINE]);
 }

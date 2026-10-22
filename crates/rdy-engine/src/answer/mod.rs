@@ -21,7 +21,9 @@
 //!   text of an approval of a moved version.
 //! - Any other ref that is not in the queue (its version moved, it was answered, it landed, or
 //!   its batch is not ready): `E_ITEM_MOVED`, `<ref> changed since it was shown`. A batch that is
-//!   not ready lists its issues.
+//!   not ready lists its issues. One exception: a `defer:P-x@n` ref of an open proposal's latest
+//!   version binds its deferral card whether or not the version is ready or the card answered
+//!   (D-AAQ9Z), so a refused card takes a later acceptance; every other check below applies.
 //! - A relayed answer passes `card_hash`. A local answer may omit it, and then binds to the
 //!   version only. A decision version proposed in two views stands beside each batch with the
 //!   same ref and its own card, so a `card_hash` picks the card of that ref with that hash. When
@@ -39,9 +41,13 @@
 //! own. The answer to a question is in [`question`]: a proposed decision, then its `ANSWER`;
 //! only it reads `brief`, which its write cites under stable content (bwr1). The
 //! answers to tensions are in [`resolve`]: an acceptance writes semantic tension versions and no
-//! `ANSWER`; a dismissal writes its reviews and its `ANSWER` in one batch.
+//! `ANSWER`; a dismissal writes its reviews and its `ANSWER` in one batch. The answers to a
+//! re-affirmation card are in [`reaffirm`]: `Keep them suspect` writes one `ANSWER`; `They still
+//! hold` lands the card's members alone, in an isolated landing that records the answer
+//! (D-CQMA4).
 pub mod batch;
 pub mod question;
+pub mod reaffirm;
 pub mod relay;
 pub mod resolve;
 
@@ -50,7 +56,8 @@ use crate::gate::{
     LandInfo, landed_as, latest_version, moved, resolve_in, withdrawn, withdrawn_error,
 };
 use crate::pending::PendingQuery;
-use crate::pending::queue::Eligible;
+use crate::pending::queue::{Eligible, deferral_card};
+use crate::pending::reaffirm::REAFFIRM_REF_PREFIX;
 use crate::pending::{CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, Item, ItemKind, ItemOption};
 use crate::proposal_show::is_proposal_ref;
 use crate::tensions::set::tension_hex;
@@ -175,7 +182,12 @@ impl Rdy {
             brief: req.brief,
             ..answerer(s, person, &req.relay)?
         };
-        let note = note_of(req.note)?;
+        // a re-affirmation card checks its own note: a reason for each option (D-CQMA4)
+        let note = if req.r#ref.starts_with(REAFFIRM_REF_PREFIX) {
+            req.note
+        } else {
+            note_of(req.note)?
+        };
         let step = self.answer_one(
             &by,
             person,
@@ -258,8 +270,10 @@ impl Rdy {
     }
 
     /// The checks `answer_all_recommended` makes before it answers anything: one card hash for
-    /// each ref (or none), the relay table, and the removal pre-scan (D-CC90E): a list that holds
-    /// a removal is `E_REDACTION_HUMAN` as a whole. Returns the answerer of every item.
+    /// each ref (or none), the relay table, the removal pre-scan (D-CC90E: a list that holds a
+    /// removal is `E_REDACTION_HUMAN` as a whole) and the deferral pre-scan (D-AAQ9Z: a deferral
+    /// card has no recommended option, so a list that names one is `E_BAD_INPUT` as a whole).
+    /// Returns the answerer of every item.
     pub(crate) fn recommended_answerer(
         &self,
         s: &Session,
@@ -288,6 +302,17 @@ impl Rdy {
                 None => e,
             });
         }
+        // D-AAQ9Z, D-CQMA4: a deferral card and a re-affirmation card have no recommended
+        // option, so a list that names one is refused as a whole, before anything is answered
+        if let Some(r) = refs.iter().find(|r| {
+            (r.starts_with("defer:") || r.starts_with(REAFFIRM_REF_PREFIX)) && is_item_ref(r)
+        }) {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("{r} has no recommended option"),
+                "answer it on its own",
+            ));
+        }
         Ok(by)
     }
 
@@ -314,7 +339,7 @@ impl Rdy {
     ) -> Result<AnswerStep, RdyError> {
         let bound = bind(&self.read(), person, r, shown, by.relay.is_some(), pick)?;
         match (bound.item.kind, bound.option.id.as_str()) {
-            (_, "later") | (ItemKind::Approve | ItemKind::Confirm, _) => {
+            (_, "later") | (ItemKind::Approve | ItemKind::Confirm | ItemKind::Defer, _) => {
                 batch::act(self, &by.who, by.relay.clone(), by.kind, bound, note)
             }
             (ItemKind::Answer, _) => {
@@ -323,6 +348,7 @@ impl Rdy {
             (ItemKind::Resolve, _) => {
                 resolve::act(self, by, bound, note).map(|i| AnswerStep::Done(Box::new(i)))
             }
+            (ItemKind::Reaffirm, _) => reaffirm::act(self, by, bound, note),
         }
     }
 }
@@ -427,7 +453,14 @@ fn bind(
         session_ref: None,
         max_tokens: CARD_MAX_TOKENS,
     })?;
-    let cards = q.items_of(r)?;
+    let mut cards = q.items_of(r)?;
+    // D-AAQ9Z: an explicit deferral ref of the current version binds its card outside the ready
+    // queue too, so a refused card takes a later answer (the latest answer wins)
+    if cards.is_empty()
+        && let Some(card) = deferral_card(st, r)?
+    {
+        cards.push(card);
+    }
     let Some(first) = cards.first() else {
         return Err(gone(st, &q, r)?);
     };
@@ -501,9 +534,11 @@ fn bind(
 
 /// Whether `r` is an item ref (O3, closed): `P-<id>@<n>` (an approval), `<block id>@<version
 /// short>` (a decision's confirm or a question's answer: the 12 lowercase hex digits of the
-/// block's version), `advice:P-<id>@<n>` (a version's advised tensions) or a tension id (`tn-`
-/// and 6 to 64 hex digits, or the hex alone). The refs of relayed acts that are not items
-/// (`tag:`, `own:`, `stale:`, `propose:`) are not item refs.
+/// block's version), `advice:P-<id>@<n>` (a version's advised tensions), `defer:P-<id>@<n>` (a
+/// version's deferral card, an explicit version only), `reaffirm:<block id>@<version short>` (a
+/// re-affirmation card: its cause and the first 12 lowercase hex digits of the cause's version)
+/// or a tension id (`tn-` and 6 to 64 hex digits, or the hex alone). The refs of relayed acts
+/// that are not items (`tag:`, `own:`, `stale:`, `propose:`) are not item refs.
 pub fn is_item_ref(r: &str) -> bool {
     let proposal_version = |p: &str| p.contains('@') && is_proposal_ref(p);
     let block_version = |p: &str| {
@@ -513,6 +548,12 @@ pub fn is_item_ref(r: &str) -> bool {
                 && v.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
         })
     };
+    if let Some(p) = r.strip_prefix("defer:") {
+        return proposal_version(p);
+    }
+    if let Some(p) = r.strip_prefix(REAFFIRM_REF_PREFIX) {
+        return block_version(p);
+    }
     match r.strip_prefix("advice:") {
         Some(p) => proposal_version(p),
         None => proposal_version(r) || block_version(r) || tension_hex(r).is_some(),

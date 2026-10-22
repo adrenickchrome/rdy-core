@@ -3,8 +3,9 @@ use crate::answer::card_of;
 use crate::answer::relay::{RelayInput, relayed};
 use crate::coord_graph::AltRef;
 use crate::error::*;
-use crate::pending::Item;
 use crate::pending::queue::approval_holds;
+use crate::pending::{Item, PlanCardBinding};
+use crate::plan::lifecycle::{PlanSummary, ProposePlanRequest};
 use crate::session::rfc3339;
 use crate::tensions::{SideRef, Tension, TensionInfo, TensionSeverity, TensionStatus};
 use crate::views::{
@@ -98,6 +99,9 @@ pub struct ProposalInfo {
     /// The hash of the `ANSWER` that holds that relay, written with the version (O14).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
+    /// The change plan the version bound, written in its batch (D-4JMPH): the counts over
+    /// every item, the code files and the open items.
+    pub plan: PlanSummary,
 }
 
 /// One view a landing rebased: how many of its changes dropped out (they landed) and how many
@@ -991,6 +995,17 @@ fn exceptions_open(pref: &ProposalRef, p: &Proposal, open: &[Item]) -> RdyError 
     .with_corrected(serde_json::json!({ "exceptions": cards }))
 }
 
+/// D-AAQ9Z: the refusal of an approval while the deferral card of `pref` (`card`, listing `n`
+/// deferrals) has no answer that accepts it. It carries the card in `corrected.deferral`.
+fn deferrals_open(pref: &ProposalRef, card: &Item, n: usize) -> RdyError {
+    RdyError::new(
+        E_DEFERRAL_OPEN,
+        format!("{n} deferrals of {pref} have no answer"),
+        format!("answer the deferral card first: {}", card.r#ref),
+    )
+    .with_corrected(serde_json::json!({ "deferral": card_of(card) }))
+}
+
 /// `E_BLOCKING_TENSION` for the refusing tensions of version `pref`: one issue per tension. The
 /// fix names what resolves each refusing kind ([`crate::tensions::resolve_hint`]), each distinct
 /// hint once, in the order the tensions come.
@@ -1432,7 +1447,7 @@ fn decisions_written(
 /// position in `changes`, in applied order. The merge surfaces E_STALE_BASE, E_ALREADY_EXISTS and
 /// E_FROZEN early; on the approve path (`approving`, the version's view) they are worded for the
 /// approver.
-fn prospective(
+pub(crate) fn prospective(
     st: &ReadState,
     changes: &[Change],
     approving: Option<&str>,
@@ -1624,9 +1639,13 @@ impl Rdy {
                     }
                 }
             }
-            // canon may have moved since the view was written: every target must still exist
+            // canon may have moved since the view was written: every target must still exist,
+            // unless it is a kept citation of a deleted target (p-QMGB4, task-5 R1)
             for target in targets(b) {
-                if next.get(&target).is_none() && !deleted.contains(&target) {
+                if next.get(&target).is_none()
+                    && !deleted.contains(&target)
+                    && !rdy_graph::keeps_deleted_citation(b, &target)
+                {
                     issues.push(Issue {
                         severity: Severity::Error,
                         code: "E_DANGLING_REF",
@@ -1654,7 +1673,10 @@ impl Rdy {
                         ),
                     });
                 }
-                for gone in targets(b).intersection(&deleted) {
+                for gone in targets(b)
+                    .intersection(&deleted)
+                    .filter(|t| !rdy_graph::keeps_deleted_citation(b, t))
+                {
                     issues.push(Issue {
                         severity: Severity::Error,
                         code: "E_DANGLING_REF",
@@ -1848,7 +1870,29 @@ impl Rdy {
         summary: Option<&str>,
         alternative: Option<&AltPick>,
     ) -> Result<ProposalInfo, RdyError> {
-        self.propose_relayed(s, view, title, changes, summary, alternative, None)
+        self.propose_plan(
+            s,
+            ProposePlanRequest {
+                view,
+                title,
+                changes,
+                summary,
+                alternatives: alternative,
+                plan_answers: &[],
+            },
+        )
+    }
+
+    /// Proposes `req` as `propose_with` does, and records its plan answers in the same batch
+    /// (D-4JMPH): every propose writes one plan version bound to the version it writes, its
+    /// answers validated against the version's candidate before anything is appended (a refused
+    /// answer writes nothing). The reply's `plan` summarizes that plan.
+    pub fn propose_plan(
+        &mut self,
+        s: &Session,
+        req: ProposePlanRequest<'_>,
+    ) -> Result<ProposalInfo, RdyError> {
+        self.propose_relayed(s, req, None)
     }
 
     /// `propose_with` on the person's word (O32, C3, D-KQ4CA), under the relay table
@@ -1876,10 +1920,37 @@ impl Rdy {
         summary: Option<&str>,
         alternative: Option<&AltPick>,
     ) -> Result<ProposalInfo, RdyError> {
-        let (who, relay) = relayed(s, person, relay, implicit).map_err(|e| e.error())?;
+        self.propose_plan_as(
+            s,
+            person,
+            relay,
+            implicit,
+            ProposePlanRequest {
+                view,
+                title,
+                changes,
+                summary,
+                alternatives: alternative,
+                plan_answers: &[],
+            },
+        )
+    }
+
+    /// `propose_as` with `req`'s plan answers recorded in the same batch (`propose_plan`): the
+    /// answers are the person's when the relay proposes as the person.
+    pub fn propose_plan_as(
+        &mut self,
+        s: &Session,
+        person: &str,
+        relay: &RelayInput,
+        mcp: bool,
+        req: ProposePlanRequest<'_>,
+    ) -> Result<ProposalInfo, RdyError> {
+        let (who, relay) = relayed(s, person, relay, mcp).map_err(|e| e.error())?;
         let Some(relay) = relay else {
-            return self.propose_with(s, view, title, changes, summary, alternative);
+            return self.propose_relayed(s, req, None);
         };
+        let view = req.view;
         let st = self.read();
         let persons = view == "work"
             || st
@@ -1895,29 +1966,27 @@ impl Rdy {
             ));
         }
         drop(st);
-        self.propose_relayed(
-            &who,
+        self.propose_relayed(&who, req, Some(relay))
+    }
+
+    /// The one propose writer (`propose_plan`), as `s`, with the person's relay when `s` is the
+    /// person (`propose_plan_as`): every check, the version's candidate, its plan and its
+    /// answers are prepared first; then the key change rdy adds (if any), the version, the
+    /// relay's answer and the bound plan are written in one batch, and published once.
+    fn propose_relayed(
+        &mut self,
+        s: &Session,
+        req: ProposePlanRequest<'_>,
+        relay: Option<Relay>,
+    ) -> Result<ProposalInfo, RdyError> {
+        let ProposePlanRequest {
             view,
             title,
             changes,
             summary,
-            alternative,
-            Some(relay),
-        )
-    }
-
-    /// `propose_with` as `s`, with the person's relay when `s` is the person (`propose_as`).
-    #[allow(clippy::too_many_arguments)]
-    fn propose_relayed(
-        &mut self,
-        s: &Session,
-        view: &str,
-        title: &str,
-        changes: Option<&[String]>,
-        summary: Option<&str>,
-        alternative: Option<&AltPick>,
-        relay: Option<Relay>,
-    ) -> Result<ProposalInfo, RdyError> {
+            alternatives: alternative,
+            plan_answers,
+        } = req;
         if !s.role.can_write() {
             return Err(RdyError::new(
                 E_PERMISSION,
@@ -2113,23 +2182,20 @@ impl Rdy {
                 Err(e) => coverage_error = Some(crate::coverage::coverage_error_text(&e)),
             }
         }
-        let mut ids = ids;
-        let mut keys = BTreeMap::new();
-        if let Some((mut change, re)) = rekey {
-            // the store gives the change its deps again as it commits it
-            change.deps.clear();
-            let ops = change.ops.clone();
-            let vm = st.materialized(&Scope::View(view.to_string()))?;
-            let h = self
-                .store
-                .commit_to_view_with(view, change, &|id| vm.version_of(id))?;
-            self.publish(Delta::Commit {
-                view: view.to_string(),
-                change: h,
-                ops,
-            })?;
-            ids.push(h);
-            keys = re.into_iter().map(|(id, k)| (id.to_string(), k)).collect();
+        // the candidate: the version's changes with the key change rdy adds, which are what it
+        // lands (D-4JMPH). A blocking conflict leaves it without one until it is resolved.
+        let candidate: Option<Vec<Change>> = blocking.is_empty().then(|| {
+            let mut all = changes.clone();
+            all.extend(rekey.as_ref().map(|(c, _)| c.clone()));
+            all
+        });
+        if candidate.is_none() && !plan_answers.is_empty() {
+            let ids: Vec<String> = blocking.iter().map(|c| c.block.to_string()).collect();
+            return Err(RdyError::new(
+                E_CONFLICT_UNRESOLVED,
+                crate::consequence::conflict_message(&ids),
+                crate::consequence::CONFLICT_FIX,
+            ));
         }
         // pver1: a view with an open proposal (its latest version has not landed) gets the next
         // version of it; otherwise a new proposal starts
@@ -2143,12 +2209,22 @@ impl Rdy {
                 open = Some((stable, latest));
             }
         }
-        let count = ids.len();
+        // the version's provenance, its plan's and its new answers' (one clock read)
+        let by = s.provenance();
+        let plan = crate::plan::lifecycle::prepare_proposal_plan(
+            &st,
+            &by,
+            view,
+            open.as_ref().map(|(_, latest)| latest),
+            candidate.as_deref(),
+            plan_answers,
+        )?;
+        issues.extend(plan.warnings.iter().cloned());
+        let count = ids.len() + usize::from(rekey.is_some());
         let chosen = alternative.as_ref().map(|a| AltRef {
             set: alt_label(&a.set),
             member: a.member.clone(),
         });
-        let by = s.provenance();
         // the relay's ANSWER: the person proposes, the agent relays (O32); the store sets targets
         let answer = relay.as_ref().map(|r| Answer {
             item: format!("propose:{view}"),
@@ -2164,37 +2240,65 @@ impl Rdy {
             evidence_kind: Some(EvidenceKind::Text),
             note: None,
         });
-        let (id, stable, n, answer) = match (open, answer) {
-            (Some((stable, latest)), None) => {
-                let id = self
-                    .store
-                    .propose_next(&latest, ids, title, summary, by, alternative)?;
-                (id, stable, version_number(&st, &latest)? + 1, None)
+        let answered = answer.is_some();
+        let n = match &open {
+            Some((_, latest)) => version_number(&st, latest)? + 1,
+            None => 1,
+        };
+        // the key change: the store gives it its deps again as it prepares its commit, checked
+        // against the view as it reads now
+        let vm = st.materialized(&Scope::View(view.to_string()))?;
+        let current = |id: &BlockId| vm.version_of(id);
+        let (rekey_change, keys) = match rekey {
+            Some((mut change, re)) => {
+                change.deps.clear();
+                let keys: BTreeMap<String, String> =
+                    re.into_iter().map(|(id, k)| (id.to_string(), k)).collect();
+                (Some(change), keys)
             }
-            (Some((stable, latest)), Some(a)) => {
-                let (id, a) = self
-                    .store
-                    .propose_next_answered(&latest, ids, title, summary, by, alternative, a)
-                    .map_err(crate::version::answer_write_error)?;
-                (id, stable, version_number(&st, &latest)? + 1, Some(a))
-            }
-            (None, None) => {
-                let id = self
-                    .store
-                    .propose_changes(view, title, summary, by, ids, alternative)?;
-                (id, id, 1, None)
-            }
-            (None, Some(a)) => {
-                let (id, a) = self
-                    .store
-                    .propose_changes_answered(view, title, summary, by, ids, alternative, a)
-                    .map_err(crate::version::answer_write_error)?;
-                (id, id, 1, Some(a))
+            None => (None, BTreeMap::new()),
+        };
+        let rekey_ops = rekey_change.as_ref().map(|c| c.ops.clone());
+        let to_rdy = |e: rdy_store::StoreError| {
+            if answered {
+                crate::version::answer_write_error(e)
+            } else {
+                e.into()
             }
         };
+        let mut prepared = self
+            .store
+            .prepare_propose(rdy_store::plan::ProposeRequest {
+                view,
+                title,
+                summary,
+                by: by.clone(),
+                changes: ids,
+                alternative,
+                prev: open.map(|(_, latest)| latest),
+                rekey: rekey_change.map(|c| (c, &current as rdy_store::plan::ViewReads<'_>)),
+                answer,
+            })
+            .map_err(to_rdy)?;
+        let id = prepared.version();
+        let stable = prepared.stable();
+        self.store
+            .bind_plan(&mut prepared, &plan.plan(view, id, by))?;
+        let rekeyed = prepared.rekey();
+        drop(vm);
+        let written = self.store.commit_propose(prepared)?;
+        let answer = written.answer;
+        // one batch, published once: a key change moves the view, so its publish re-reads it
+        match (rekeyed, rekey_ops) {
+            (Some(change), Some(ops)) => self.publish(Delta::Commit {
+                view: view.to_string(),
+                change,
+                ops,
+            })?,
+            _ => self.publish(Delta::Seq)?,
+        }
         let stored = self.store.proposal(&id)?;
         let canon_at = stored.canon_at;
-        self.publish(Delta::Seq)?;
         // tgat1: the version's tensions, read after a re-key change (if any) was committed. The
         // proposal is stored and published by now: a read error leaves the tensions out and is
         // reported, as a briefing's `tensions_error` is, and the reply keeps the proposal.
@@ -2262,6 +2366,7 @@ impl Rdy {
             coverage_error,
             relayed_by: relay.map(|r| r.by),
             answer: answer.map(|a| a.to_string()),
+            plan: plan.summary,
         })
     }
 
@@ -2489,25 +2594,28 @@ impl Rdy {
         if !refusing.is_empty() {
             return Err(blocking_tensions(&pref, &refusing));
         }
-        // F2 (D-DKJS5, D-T5S9A): every approval path waits until each exception of the version
-        // has a confirm answer. F1: a decision whose current version the person rejected never
-        // lands, exception or not (final review fix round 1, R1), with the issue readiness gives.
-        // Only a proposed decision can be an exception or rejected, so a version that writes no
-        // decision skips the read.
+        // F2 (D-DKJS5, D-T5S9A, D-GV465): every approval path waits until each exception of the
+        // version has a confirm answer. F1: a decision whose current version the person
+        // rejected never lands, exception or not (final review fix round 1, R1), with the issue
+        // readiness gives; nor does a rejected re-affirmation or a refused deferral card. Then
+        // D-AAQ9Z: an unanswered deferral card, on a version with no decision op too. Only a
+        // version that writes a decision can carry an exception or a rejection of one, so only
+        // it reads the version whole.
         let decides = changes.iter().flat_map(|c| &c.ops).any(|op| {
             matches!(op, Op::Create { block } | Op::Update { block, .. }
                 if block.block_type == decision::DECISION)
         });
-        if decides {
-            let holds = approval_holds(&st, &pref)?;
-            if !holds.open.is_empty() {
-                return Err(exceptions_open(&pref, &p, &holds.open));
-            }
-            if let Some(first) = holds.rejected.first() {
-                let mut e = RdyError::new(E_VALIDATION, first.message.clone(), first.fix.clone());
-                e.issues = holds.rejected;
-                return Err(e);
-            }
+        let holds = approval_holds(&st, &pref, decides)?;
+        if !holds.open.is_empty() {
+            return Err(exceptions_open(&pref, &p, &holds.open));
+        }
+        if let Some(first) = holds.rejected.first() {
+            let mut e = RdyError::new(E_VALIDATION, first.message.clone(), first.fix.clone());
+            e.issues = holds.rejected;
+            return Err(e);
+        }
+        if let Some((card, n)) = &holds.deferral {
+            return Err(deferrals_open(&pref, card, *n));
         }
 
         // 1. prospective canon: canon + the proposal's own changes
@@ -2616,6 +2724,13 @@ impl Rdy {
                 read_identity: None,
             };
             change.deps = self.store.change_deps(&change, Some(&p.view))?;
+            // the acceptance change holds every decision it accepts: it must fit one record, deps
+            // included, or a later read or export of the history would refuse it (FW-UP1a)
+            crate::reaffirm::change_fits(
+                &change,
+                crate::reaffirm::ACCEPT_CHANGE,
+                crate::reaffirm::ACCEPT_FIX,
+            )?;
             Some(change)
         };
         let mut all = changes;
@@ -2642,12 +2757,18 @@ impl Rdy {
             fresh_removal(&st, r, accept.as_slice(), &pref)?;
         }
 
+        // D-4JMPH: the version's complete outcome, from its recorded canon and HEADs (or, for
+        // a version with no bound plan, the HEADs captured once, O19), before anything is written
+        let approver = s.provenance();
+        let sealing =
+            crate::plan::lifecycle::prepare_landing_plan(&st, &pid, &p, &approver, holds.accepted)?;
+
         // 4. prepare the one write (atom1): the acceptance change, the final proposal version,
         // the snapshot, the landing, the view's rebase and the refs. Nothing is written yet.
-        let store = match self.store.prepare_land(LandRequest {
+        let mut store = match self.store.prepare_land(LandRequest {
             proposal: pid,
             accept: accept.clone(),
-            approver: s.provenance(),
+            approver,
             alt,
             relay: opts.relay,
             evidence,
@@ -2658,6 +2779,15 @@ impl Rdy {
             }
             Err(e) => return Err(approver_stale(e, &p.view)),
         };
+        // p-8D6ES: then the plan the landed final version binds (a bound version's acceptance
+        // version) and the seal, in the same batch, after the landing and before its signatures
+        let (bound, seal) = sealing.plans(
+            store.hash(),
+            store.landed_version(),
+            store.writes_final_version(),
+        );
+        self.store
+            .plan_landing(&mut store, bound.as_ref(), seal.as_ref())?;
         Ok(PreparedApproval {
             store,
             pref,
@@ -2671,6 +2801,139 @@ impl Rdy {
             accept,
             chosen,
             keys: re.into_iter().map(|(id, k)| (id.to_string(), k)).collect(),
+            reaffirm: None,
+        })
+    }
+
+    /// The private request of a re-affirmation card's isolated landing (D-CQMA4, D-EJBPD; see
+    /// [`ReaffirmLanding`]), prepared under the writer and written by [`Rdy::commit_landing`]
+    /// like every approval, so the signing coordinator owns the writer's release and return. The
+    /// card's complete binding stands in for the briefing on this path only. On the canon the
+    /// card was read on, it builds the members' metadata-only change (the shared
+    /// transformation), then, in memory and in one batch: the fresh internal view
+    /// `reaffirm-<card hash, first 12 digits>`, its `Create` op, the change and its `Commit` op,
+    /// the proposal (the card's title and summary), its bound plan, the landing with the person
+    /// as approver and the card as evidence, the seal, and the view's `Close` op. Nothing is
+    /// appended here; a refusal leaves no view, ref, proposal or landing. An existing view of
+    /// that name is `E_BAD_INPUT`: an old internal view is never reused.
+    pub(crate) fn prepare_reaffirm_landing(
+        &mut self,
+        req: ReaffirmLanding<'_>,
+    ) -> Result<PreparedApproval, RdyError> {
+        let ReaffirmLanding {
+            card,
+            approver,
+            relay,
+            evidence,
+            reason,
+        } = req;
+        let bug = |what: &str| {
+            RdyError::new(
+                E_INTERNAL,
+                format!("{}: {what}", card.r#ref),
+                "report this as a bug in rdy",
+            )
+        };
+        let Some(PlanCardBinding::Reaffirm { cause, members, .. }) = &card.plan_binding else {
+            return Err(bug("the card binds no re-affirmation"));
+        };
+        let card_hash: Hash = card
+            .card_hash
+            .parse()
+            .map_err(|_| bug("the card has no hash"))?;
+        let st = self.read();
+        let canon_at = st.canon_head();
+        let view = rdy_store::reaffirm_view(&card_hash);
+        if st.has_view(&view) {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("reserved re-affirmation view already exists: {view}"),
+                "read the fresh re-affirmation card and answer it",
+            ));
+        }
+        let pairs: Vec<(BlockId, Hash)> =
+            members.iter().map(|m| (m.id.clone(), m.version)).collect();
+        let ops = crate::reaffirm::card_updates(&st, cause, &pairs, &reason)?;
+        let by = approver.provenance();
+        let summary = card.summary.clone().unwrap_or_default();
+        let change = Change {
+            view: view.clone(),
+            ops,
+            deps: vec![],
+            provenance: by.clone(),
+            justification: None,
+            message: card.title.clone(),
+            links: ChangeLinks::default(),
+            read_identity: None,
+        };
+        let mut prepared =
+            self.store
+                .prepare_reaffirm_propose(rdy_store::plan::ReaffirmProposeRequest {
+                    view: &view,
+                    canon_at,
+                    change,
+                    title: &card.title,
+                    summary: &summary,
+                    by: by.clone(),
+                })?;
+        let version = prepared.version();
+        let committed = prepared
+            .fresh_change()
+            .cloned()
+            .ok_or_else(|| bug("the proposal has no change"))?;
+        // the one change this answer writes (D-CQMA4) must fit one record, or a later read or
+        // export of the history would refuse it; nothing is written yet
+        crate::reaffirm::change_fits(
+            &committed,
+            crate::reaffirm::REAFFIRM_CHANGE,
+            crate::reaffirm::CARD_CHANGE_FIX,
+        )?;
+        // the bound plan: the candidate's complete plan on canon, with no answer
+        let pp = crate::plan::lifecycle::prepare_proposal_plan(
+            &st,
+            &by,
+            &view,
+            None,
+            Some(std::slice::from_ref(&committed)),
+            &[],
+        )?;
+        let bound = pp.plan(&view, version, by.clone());
+        let bound_id = self.store.bind_plan(&mut prepared, &bound)?;
+        let mut store =
+            self.store
+                .prepare_reaffirm_land(prepared, by.clone(), relay, Some(evidence))?;
+        let ids: Vec<BlockId> = members.iter().map(|m| m.id.clone()).collect();
+        let seal = crate::reaffirm::card_seal(
+            &st,
+            &view,
+            version,
+            store.hash(),
+            bound_id,
+            &bound,
+            cause,
+            &ids,
+            &by,
+        )?;
+        self.store.plan_landing(&mut store, None, Some(&seal))?;
+        self.store.close_reaffirm_view(&mut store, &by)?;
+        Ok(PreparedApproval {
+            store,
+            pref: ProposalRef {
+                version,
+                stable: version,
+                n: 1,
+            },
+            title: card.title.clone(),
+            summary: Some(summary),
+            changes: 1,
+            view,
+            issues: vec![],
+            landed_ops: committed.ops,
+            requests: vec![],
+            accept: None,
+            chosen: None,
+            keys: BTreeMap::new(),
+            reaffirm: Some((card.r#ref.clone(), canon_at, card.card_hash.clone())),
         })
     }
 
@@ -2708,8 +2971,20 @@ impl Rdy {
             requests,
             chosen,
             keys,
+            reaffirm,
             ..
         } = prepared;
+        // D-CQMA4: a re-affirmation card's landing was built on the canon its card was read on;
+        // canon must stand there still
+        if let Some((card, canon_at, _)) = &reaffirm
+            && self.store.canon_head()? != *canon_at
+        {
+            return Err(RdyError::new(
+                E_ITEM_MOVED,
+                format!("{card} changed since it was shown"),
+                "show the person the fresh card and ask again",
+            ));
+        }
         let pid = pref.version;
         let out = match self.store.commit_land(store, signatures) {
             Ok(out) => out,
@@ -2763,6 +3038,19 @@ impl Rdy {
     }
 }
 
+/// The private request of a re-affirmation card's isolated landing (D-CQMA4): the bound card
+/// the person answered with `They still hold`, the person (the approver of the landing), the
+/// relay that carried the answer if any, the card evidence (both option labels, the chosen one
+/// and the card's hash), and the validated reason. Only the card's answer builds it; there is no
+/// public way to it.
+pub(crate) struct ReaffirmLanding<'a> {
+    pub(crate) card: &'a Item,
+    pub(crate) approver: Session,
+    pub(crate) relay: Option<Relay>,
+    pub(crate) evidence: ApprovalEvidence,
+    pub(crate) reason: crate::reaffirm::Reason,
+}
+
 /// A landing prepared under the writer by [`Rdy::prepare_landing`] and not yet written: the
 /// store's prepared batch, and what the commit publishes and reports. It holds no writer guard
 /// and no reference into the project.
@@ -2779,12 +3067,30 @@ pub(crate) struct PreparedApproval {
     accept: Option<Change>,
     chosen: Option<AltRef>,
     keys: BTreeMap<String, String>,
+    /// A re-affirmation card's isolated landing (D-CQMA4): the card's ref and the canon head it
+    /// was read on, checked again before the commit, and the card's hash, which binds every
+    /// retry of the answer. None for every other landing.
+    reaffirm: Option<(String, Option<Hash>, String)>,
 }
 
 impl PreparedApproval {
     /// The proposal version this landing approves.
     pub(crate) fn pref(&self) -> ProposalRef {
         self.pref
+    }
+
+    /// The proposal version a retry of this approval must approve again (pver1): this one's,
+    /// except for a re-affirmation card's landing, whose version is new in each preparation (the
+    /// card binds the retry instead).
+    pub(crate) fn pin(&self) -> Option<ProposalRef> {
+        self.reaffirm.is_none().then_some(self.pref)
+    }
+
+    /// The hash of the re-affirmation card this landing answers: a retry of the answer binds
+    /// that card, also when the first request named no hash, so a card whose members or binding
+    /// moved meanwhile is `E_ITEM_MOVED` with the fresh card. None for every other landing.
+    pub(crate) fn card_pin(&self) -> Option<&str> {
+        self.reaffirm.as_ref().map(|(_, _, h)| h.as_str())
     }
 
     /// The refusal of this landing when it was prepared again for an approval first bound to

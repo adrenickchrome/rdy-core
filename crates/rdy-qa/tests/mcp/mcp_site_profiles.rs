@@ -32,8 +32,9 @@ const PROFILE_HELP: &str =
 const ONLY_HELP: &str = "Serve canon through this profile on a separate port. Requires profile and scope canon. This changes presentation, not source access.";
 const CHECK_SCOPE_HELP: &str =
     "canon (default), tag:<name>, landing:<hash>, a view name, view:<name>, or proposal:P-x@n.";
-/// The number of tools the server lists, which this task leaves as it found it.
-const TOOL_COUNT: usize = 47;
+/// The number of tools the server lists, which the profile task left as it found it: 47. cp11
+/// adds `rdy_plan`, and the count is 48.
+const TOOL_COUNT: usize = 48;
 
 /// A running project: the host, the proxy environment and what the pins need.
 struct World {
@@ -265,6 +266,7 @@ fn spv9_mcp_profile_route_can_review_an_unlanded_profile() {
 
 #[test]
 fn spv9_mcp_only_starts_reuses_and_warns() {
+    let log = rdy_qa::daemon::site_log();
     let w = world();
     let source = w.client("writer").call("rdy_site", json!({})).ok();
     let mut first_url = None;
@@ -306,6 +308,8 @@ fn spv9_mcp_only_starts_reuses_and_warns() {
         .call("rdy_site", json!({"profile": "guide", "only": false}))
         .ok();
     assert!(plain.get("profile_only").is_none() && plain.get("warnings").is_none());
+    // the daemon gives the caveat once, when the one listener starts
+    assert_eq!(log.lines(), [rdy_qa::daemon::GUIDE_CAVEAT_LINE]);
 }
 
 #[test]
@@ -546,6 +550,7 @@ fn spv9_mcp_schema_and_error_rows_describe_the_same_contract() {
 /// a tag route and a profile-only site give none.
 #[test]
 fn spv9_canon_profile_replies_link_the_summary_since_the_tag() {
+    let log = rdy_qa::daemon::site_log();
     let (dir, mut r) = tiny();
     let ids = put(
         &mut r,
@@ -642,5 +647,11 @@ fn spv9_canon_profile_replies_link_the_summary_since_the_tag() {
     assert!(
         only.get("changes").is_none() && only.get("lan_changes").is_none(),
         "{only}"
+    );
+    // the daemon warns of the LAN sites and the profile-only site
+    use rdy_qa::daemon::{GUIDE_CAVEAT_LINE, GUIDE_LAN_LINE, LAN_DOCS_LINE, sorted_lines};
+    assert_eq!(
+        sorted_lines(&log.lines()),
+        sorted_lines(&[LAN_DOCS_LINE, GUIDE_LAN_LINE, GUIDE_CAVEAT_LINE])
     );
 }

@@ -281,3 +281,52 @@ fn cidx1_a_copy_status_parses_as_a_touch_of_the_copy() {
         vec![t("src/b.rs"), t("src/a.rs")]
     );
 }
+
+/// Final review F2: Git puts a newline before the first status token of a record and nowhere
+/// else. Only status tokens lose it: a path is kept byte for byte, so a path that starts with
+/// a newline, or is one newline, is read as written and the tokens after it stay aligned.
+#[test]
+fn cp2_fix1_newline_paths_are_kept_byte_for_byte() {
+    let out = rec(
+        A,
+        "c-AAAAA",
+        &["A", "\nodd.rs", "M", "plain.rs", "A", "\n", "D", "gone.rs"],
+    );
+    assert_eq!(
+        parse_log(&out, N)[0].changes,
+        vec![
+            t("\nodd.rs"),
+            t("plain.rs"),
+            t("\n"),
+            FileChange::Delete("gone.rs".into()),
+        ]
+    );
+    // renames and copies: both paths are kept as written
+    let mut out = rec(
+        B,
+        "",
+        &[
+            "R100", "\n", "\nnew.rs", "C050", "plain.rs", "\n\n", "M", "x.rs",
+        ],
+    );
+    out.extend(rec(C, "c-AAAAA", &["R100", "a.rs", "\n"]));
+    let c = parse_log(&out, N);
+    assert_eq!(
+        c[0].changes,
+        vec![
+            FileChange::Rename {
+                from: "\n".into(),
+                to: "\nnew.rs".into()
+            },
+            t("\n\n"),
+            t("x.rs"),
+        ]
+    );
+    assert_eq!(
+        c[1].changes,
+        vec![FileChange::Rename {
+            from: "a.rs".into(),
+            to: "\n".into()
+        }]
+    );
+}

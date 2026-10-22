@@ -114,7 +114,7 @@ const PRELUDE: u64 = MAGIC.len() as u64 + 4;
 /// The store kinds an object frame may have: the portable kinds less TRANSITION, a batch's own
 /// local record (no FILE, REF_UPDATE, BATCH_COMMIT or TRANSITION is portable). Ascending. A
 /// kind-None link resolves among these.
-pub const SYNC_KINDS: [u8; 18] = [
+pub const SYNC_KINDS: [u8; 19] = [
     kinds::BLOCK,
     kinds::CHANGE,
     kinds::PROPOSAL,
@@ -133,6 +133,7 @@ pub const SYNC_KINDS: [u8; 18] = [
     kinds::REDACTION,
     kinds::REDACTION_RESIDUE,
     kinds::REDACTION_APPLY,
+    kinds::PLAN,
 ];
 
 /// Whether an object frame of `kind` may stand in a sync batch.
@@ -865,13 +866,32 @@ pub(crate) fn depth_of(
 /// The rules the store keeps for every record of a kind, whatever the log around it, that a
 /// batch check applies to each present record before it is counted: an ANSWER keeps the answer
 /// record rules (`crate::answer`: relay and evidence together, an evidence kind only with a
-/// relay, card evidence with its card hash), with fsck's own text. Its targets rule is the
-/// batch's edge rule. A take checks every file of an upload this way, so no take keeps an answer
+/// relay, card evidence with its card hash, the plan acts' items, notes and targets), and a PLAN
+/// its own record rules (`crate::plan`), with fsck's own text. Its targets rule is the
+/// batch's edge rule; the typed rules that need other records (a plan's chain and seal, a
+/// KeepSuspect's BLOCK targets) are the whole upload's (`crate::stream_source`). A take checks
+/// every file of an upload this way, and the upload whole, so no take keeps an answer or a plan
 /// that the holder's fsck would refuse.
 fn record_rules(n: u64, offset: u64, r: &StreamRecord) -> Result<(), StreamError> {
     let StreamRecord::Present { key, payload } = r else {
         return Ok(());
     };
+    if key.kind == crate::kinds::PLAN {
+        // the plan record rules (`crate::plan`), with fsck's own text; its chain, bound
+        // proposal and seal need the records around it, which the whole-upload check
+        // (`crate::stream_source::check_typed_context`) checks before a take appends
+        let p = crate::plan::decode_plan(payload)
+            .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(*key)))?;
+        return match crate::plan::invalid_record(&p) {
+            Some(rule) => {
+                Err(
+                    StreamError::broken_rule(n, offset, &crate::plan::damage(&key.hash, rule))
+                        .with_object(Some(*key)),
+                )
+            }
+            None => Ok(()),
+        };
+    }
     if key.kind != crate::kinds::ANSWER {
         return Ok(());
     }

@@ -9,11 +9,12 @@
 use crate::bounded::{self, CHUNK_BYTES, MAX_CHUNK_BYTES, RecordError};
 use crate::kinds::{
     self, ALT_SET, ANSWER, BLOB_CHUNK, BLOB_MANIFEST, BLOCK, BlobManifest, CHANGE, INTENT, LANDING,
-    PROPOSAL, REDACTION, REDACTION_APPLY, REDACTION_RESIDUE, REVIEW, SIGNATURE, SNAPSHOT, TAG,
-    TENSION, TRANSITION, VIEW_OP,
+    PLAN, PROPOSAL, REDACTION, REDACTION_APPLY, REDACTION_RESIDUE, REVIEW, SIGNATURE, SNAPSHOT,
+    TAG, TENSION, TRANSITION, VIEW_OP,
 };
 use crate::transition::{Cause, Side, Transitions, Why};
 use crate::view::{ViewOp, ViewOpKind};
+use rdy_model::plan::Plan;
 use rdy_model::redaction::{RedactTarget, Redaction, RedactionApply, RedactionResidue, ResidualOp};
 use rdy_model::signature::Signature;
 use rdy_model::{
@@ -26,7 +27,7 @@ use std::fmt;
 /// Every assigned portable object kind, ascending: what [`refs_of`] accepts and what a kind-None
 /// edge may resolve to. Kind 12 is unassigned; REF_UPDATE (8), BATCH_COMMIT (14) and
 /// REDACTION_CARRIED (23) are local.
-pub const PORTABLE_KINDS: [u8; 19] = [
+pub const PORTABLE_KINDS: [u8; 20] = [
     kinds::BLOCK,
     kinds::CHANGE,
     kinds::PROPOSAL,
@@ -46,6 +47,7 @@ pub const PORTABLE_KINDS: [u8; 19] = [
     kinds::REDACTION,
     kinds::REDACTION_RESIDUE,
     kinds::REDACTION_APPLY,
+    kinds::PLAN,
 ];
 
 /// Whether `kind` is an assigned portable object kind.
@@ -133,6 +135,7 @@ pub fn refs_of(kind: u8, payload: &[u8]) -> Result<Vec<ObjectRef>, RecordError> 
             e.one(REDACTION, a.request);
             e.one(LANDING, a.landing);
         }
+        PLAN => e.plan(&crate::plan::decode_plan(payload)?),
         _ => return Err(RecordError::Kind),
     }
     let mut out = e.0;
@@ -273,6 +276,22 @@ impl Edges {
             }
             ViewOpKind::Undo { target } => self.one(VIEW_OP, *target),
             ViewOpKind::Close { .. } | ViewOpKind::Own { .. } => {}
+        }
+    }
+
+    /// A plan's chain links name plans; its bound proposal and its seal's landed version name
+    /// proposal versions, and its seal's landing a landing; each sealed item's accepting answer
+    /// names an ANSWER. Item hashes, content hashes, block ids and git hashes are identities.
+    fn plan(&mut self, p: &Plan) {
+        self.opt(PLAN, p.stable);
+        self.opt(PLAN, p.prev);
+        self.opt(PROPOSAL, p.proposal);
+        if let Some(seal) = &p.seal {
+            self.one(PROPOSAL, seal.version);
+            self.one(LANDING, seal.landing);
+            for i in &seal.items {
+                self.opt(ANSWER, i.answer);
+            }
         }
     }
 

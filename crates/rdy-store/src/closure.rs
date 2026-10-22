@@ -13,6 +13,9 @@
 //! - every ANSWER that targets a closure landing or tag;
 //! - every SIGNATURE whose subject is a closure landing or the root tag (D-1Z951), read with
 //!   `signatures_before`; its subject link then orders it after its subject;
+//! - the sealed PLAN of every closure landing (`plan_of_landing`; D-4JMPH): its own links bring
+//!   its chain (`stable`, `prev`), its proposal versions and the answers its seal names. No
+//!   unsealed plan of a view is an attachment;
 //! - the ANSWER that the source ref `answer/tag:<root name>` names, when it has act Tag and item
 //!   `tag:<root name>` (O11): a relayed tag's answer targets the tag (`put_tag_answered`), and a
 //!   holder requires it with the tag;
@@ -546,6 +549,16 @@ impl Walk<'_> {
                             hash: g,
                         });
                     }
+                }
+                // a landing's sealed plan, which shares its batch: its chain and the answers it
+                // names follow through its own links
+                if k.kind == kinds::LANDING
+                    && let Some(seal) = reader.plan_of_landing(&k.hash, end).map_err(err)?
+                {
+                    out.push(ObjectKey {
+                        kind: kinds::PLAN,
+                        hash: seal,
+                    });
                 }
                 if k == self.root {
                     out.extend(self.relay_answer()?);

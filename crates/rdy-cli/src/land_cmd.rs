@@ -1,6 +1,7 @@
 use crate::brief_text;
 use crate::conn::{Conn, Env, call, human_session, io_error};
 use crate::output::{hash_short, new_keys_text, num, text};
+use crate::plan_cmd::item_text;
 use rdy_daemon::ErrorReply;
 use rdy_engine::proposal_show::canonical_proposal_ref;
 use rdy_engine::{E_BAD_INPUT, E_INTERNAL};
@@ -193,6 +194,7 @@ fn propose_text(v: &Value) -> String {
         }
     }
     t.push_str(&brief_text::consequences_text(v));
+    t.push_str(&plan_text(v));
     t.push_str(&new_keys_text(v));
     // D-2YCVK: the propose report warns (W_UNAPPLIED_DECISION), as approve prints its warnings
     for w in v["warnings"].as_array().into_iter().flatten() {
@@ -203,6 +205,27 @@ fn propose_text(v: &Value) -> String {
         ));
     }
     t.push_str(&format!("\napprove with: rdy approve {pref}"));
+    t
+}
+
+/// The change plan part of a propose reply, as lines after a line break each: `change plan:
+/// <open> open, <closed> closed, <deferred> deferred`, then each open item the reply supplies in
+/// the plan read's item format. A reply with no `plan` field gives none.
+fn plan_text(v: &Value) -> String {
+    let plan = &v["plan"];
+    if !plan.is_object() {
+        return String::new();
+    }
+    let mut t = format!(
+        "\nchange plan: {} open, {} closed, {} deferred",
+        num(&plan["open"]),
+        num(&plan["closed"]),
+        num(&plan["deferred"])
+    );
+    for item in plan["items"].as_array().into_iter().flatten() {
+        t.push('\n');
+        t.push_str(&item_text(item));
+    }
     t
 }
 
@@ -470,6 +493,44 @@ mod tests {
     use rdy_model::redaction::ReasonClass;
     use std::collections::BTreeMap;
 
+    /// O17: the propose renderer's plan section is `change plan: <open> open, <closed> closed,
+    /// <deferred> deferred`, then each supplied item in the plan read's line format; a reply with
+    /// no `plan` field has no section at all.
+    #[test]
+    fn cp11_propose_plan_formatter_has_exact_lines() {
+        assert_eq!(plan_text(&json!({"ref": "P-1@1", "changes": 1})), "");
+        assert_eq!(plan_text(&json!({"plan": null})), "");
+        let v = json!({"plan": {
+            "open": 2, "closed": 1, "deferred": 3, "by_kind": {}, "code": 0,
+            "items": [
+                {"id": "pi-00000000000000aa", "kind": "update", "subject": "c-BBBBB",
+                    "cause": "c-AAAAA", "edge": "references", "state": "open"},
+                {"id": "pi-00000000000000bb", "kind": "confirm", "subject": "c-CCCCC",
+                    "cause": "c-AAAAA", "edge": "references", "state": "open"}],
+        }});
+        assert_eq!(
+            plan_text(&v),
+            "\nchange plan: 2 open, 1 closed, 3 deferred\n\
+pi-00000000000000aa update c-BBBBB: open (c-AAAAA)\n\
+pi-00000000000000bb confirm c-CCCCC: open (c-AAAAA)"
+        );
+        let none = json!({"plan": {"open": 0, "closed": 4, "deferred": 0, "items": []}});
+        assert_eq!(
+            plan_text(&none),
+            "\nchange plan: 0 open, 4 closed, 0 deferred"
+        );
+        // it sits after the consequences and before the approve line
+        let mut reply = json!({"ref": "P-1@1", "changes": 1, "consequences": []});
+        reply["plan"] = none["plan"].clone();
+        let t = propose_text(&reply);
+        assert!(
+            t.ends_with(
+                "\nchange plan: 0 open, 4 closed, 0 deferred\napprove with: rdy approve P-1@1"
+            ),
+            "{t}"
+        );
+    }
+
     /// What a person reads on stdout for reply `v`: the removal card shown before the approval, when
     /// there is one, then the landing lines ([`approve_text`]).
     fn approve_text_with(v: &Value, card: Option<&Value>) -> String {
@@ -522,6 +583,7 @@ mod tests {
                 reason: "a leaked code".into(),
             }]),
             removal_reports: BTreeMap::from([(report, vec![])]),
+            plan_binding: None,
         };
         item.card = render_checked(&item, CARD_MAX_TOKENS).unwrap();
         item.card_hash = card_hash(&item).to_string();

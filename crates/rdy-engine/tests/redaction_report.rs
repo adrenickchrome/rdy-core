@@ -911,8 +911,8 @@ impl RowsOf for RedactionReport {
 #[test]
 fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
     let _clock = pin_clock(1_000_000);
-    // the registry equals the closed inventory: 1 to 11 and 13 to 23; 12 is unassigned
-    let expected: Vec<u8> = (1..=11).chain(13..=23).collect();
+    // the registry equals the closed inventory: 1 to 11 and 13 to 24; 12 is unassigned
+    let expected: Vec<u8> = (1..=11).chain(13..=24).collect();
     assert_eq!(ASSIGNED_KINDS.to_vec(), expected);
     assert_eq!(
         [
@@ -938,6 +938,7 @@ fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
             kinds::REDACTION_RESIDUE,
             kinds::REDACTION_APPLY,
             kinds::REDACTION_CARRIED,
+            kinds::PLAN,
         ],
         ASSIGNED_KINDS
     );
@@ -958,7 +959,10 @@ fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
     // the carried removal: its approver's and selectors' text (it holds no reason text)
     assert_eq!(kinds::REDACTION_CARRIED, 23);
     assert_eq!(text_policy(23), Some(TextPolicy::Strings));
-    for k in [0, 12, 24, 255] {
+    // the change plan: every string of the decoded version
+    assert_eq!(kinds::PLAN, 24);
+    assert_eq!(text_policy(24), Some(TextPolicy::Strings));
+    for k in [0, 12, 25, 255] {
         assert_eq!(text_policy(k), None, "kind {k}");
     }
     // a literal quote case for each retained text type
@@ -1803,10 +1807,10 @@ fn rdx5_assessment_support_is_explicitly_not_implemented() {
     // the base registry holds no assessment kind: every assigned kind has a policy, and a new
     // content-bearing kind without a visitor is refused, never read as absent
     require_text_policies(&ASSIGNED_KINDS).unwrap();
-    let e = require_text_policies(&[kinds::REDACTION_CARRIED + 1]).unwrap_err();
-    assert!(
-        e.message.contains("no text policy for object kind 24"),
-        "{e}"
+    let e = require_text_policies(&[kinds::PLAN + 1]).unwrap_err();
+    assert_eq!(
+        e.message,
+        "the redaction report has no text policy for object kind 25"
     );
     assert!(require_text_policies(&[12]).is_err());
 }
@@ -2945,5 +2949,145 @@ fn hc1_the_report_decodes_carried_records_within_bounds() {
     for p in [vec![], full[..full.len() - 1].to_vec()] {
         let e = report(p).unwrap_err();
         assert!(e.message.contains("record does not decode"), "{e}");
+    }
+}
+
+/// A plan version that quotes `SECRET` in the one string field `field` names.
+fn quoting_plan(field: &str) -> rdy_model::plan::Plan {
+    use rdy_model::plan::{
+        Plan, PlanAct, PlanAnswer, PlanHead, PlanKind, PlanOutcome, PlanSeal, SealedItem,
+    };
+    let text = |f: &str, plain: &str| {
+        if f == field {
+            SECRET.to_string()
+        } else {
+            plain.to_string()
+        }
+    };
+    let by = Provenance {
+        actor: text("by", "agent:a"),
+        run: None,
+        role: Role::Writer,
+        at_ms: 1,
+    };
+    let sealed = matches!(field, "subject" | "edge");
+    Plan {
+        stable: None,
+        prev: None,
+        view: text("view", "work"),
+        proposal: sealed.then_some(Hash([4; 32])),
+        answers: vec![PlanAnswer {
+            item: Hash([1; 32]),
+            act: PlanAct::Defer,
+            reason: Some(text("reason", "later")),
+            subject: None,
+            cause: Hash([2; 32]),
+            by,
+        }],
+        heads: vec![PlanHead {
+            repo: text("repo", "app"),
+            head: None,
+        }],
+        provenance: Provenance {
+            actor: "agent:a".into(),
+            run: Some(text("run", "r1")),
+            role: Role::Writer,
+            at_ms: 1,
+        },
+        seal: sealed.then(|| PlanSeal {
+            landing: Hash([3; 32]),
+            version: Hash([4; 32]),
+            decisions: vec![],
+            items: vec![SealedItem {
+                id: Hash([5; 32]),
+                kind: PlanKind::Update,
+                subject: text("subject", "b-00001"),
+                cause: id("D-00002"),
+                edge: text("edge", "reflects"),
+                outcome: PlanOutcome::Open,
+                answer: None,
+            }],
+        }),
+    }
+}
+
+#[test]
+fn cp3_plan_quotes_use_the_existing_report_only_policy() {
+    let _clock = pin_clock(1_000_000);
+    let mut p = base();
+    let vp = version(&p.r, "work", &p.prose);
+    let before = dry(&p.r, &[format!("{}@{vp}", p.prose)]);
+    // one version per string field: the view, an answer's reason and person, a head's repo, the
+    // provenance, and a sealed item's subject and edge
+    let fields = ["view", "reason", "by", "repo", "run", "subject", "edge"];
+    let mut plans: Vec<(Hash, Vec<u8>)> = vec![];
+    for f in fields {
+        let mut buf = vec![0u8; 1 << 16];
+        let bytes = encode_into(&quoting_plan(f), &mut buf).unwrap().to_vec();
+        let h =
+            p.r.store_mut()
+                .write_guarded_for_tests(vec![(kinds::PLAN, bytes.clone())])
+                .unwrap()[0];
+        plans.push((h, bytes));
+    }
+    p.r.invalidate();
+    // the dry run succeeds; each quoting plan is one audit text row that names its full hash and
+    // is not erasable, and one transient quote row with the complete source string
+    let d = dry(&p.r, &[format!("{}@{vp}", p.prose)]);
+    for (h, _) in &plans {
+        let record = h.to_string();
+        assert!(
+            d.inside.contains(&row(
+                ImpactKind::AuditText,
+                &record,
+                ImpactRelation::Quotes,
+                false
+            )),
+            "{record}: {:?}",
+            d.inside
+        );
+        assert!(
+            d.quotes
+                .contains(&quote(ImpactKind::AuditText, &record, SECRET, false)),
+            "{record}: {:?}",
+            d.quotes
+        );
+        assert!(
+            !d.inside.iter().any(|r| r.record == record && r.erasable),
+            "{record} is never erasable"
+        );
+    }
+    // the warnings keep their base texts: no plan warning, and the quote warning unchanged
+    let texts = |r: &RedactionReport| -> Vec<(String, String)> {
+        r.warnings
+            .iter()
+            .map(|w| (w.code.clone(), w.message.clone()))
+            .collect()
+    };
+    assert_eq!(texts(&d), texts(&before));
+    let q = d
+        .warnings
+        .iter()
+        .find(|w| w.code == rdy_engine::W_REDACTION_QUOTES)
+        .expect("the quote warning");
+    assert_eq!(q.message, rdy_engine::W_REDACTION_QUOTES_MESSAGE);
+    // a completed removal keeps every plan frame, byte for byte, under its own hash
+    let target = RedactTarget::Version {
+        id: p.prose.clone(),
+        version: vp,
+    };
+    let p = apply_fixture(p, vec![target]);
+    let present: BTreeMap<Hash, Vec<u8>> = frames_from(&p.r, ORIGIN)
+        .into_iter()
+        .filter(|(k, _, _)| *k == kinds::PLAN)
+        .map(|(_, h, payload)| (h, payload.expect("a plan is never removed")))
+        .collect();
+    for (h, bytes) in &plans {
+        assert_eq!(present.get(h), Some(bytes), "{h}");
+        assert_eq!(Hash::of(bytes), *h);
+        assert_eq!(p.r.read().reader().plan(h).unwrap(), {
+            let f = fields[plans.iter().position(|(x, _)| x == h).unwrap()];
+            quoting_plan(f)
+        });
     }
 }

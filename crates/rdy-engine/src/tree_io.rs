@@ -636,6 +636,23 @@ impl Reader<'_> {
                 return None;
             }
         };
+        // p-8YP1G: an import tree never sets the engine metadata; name it on the raw entry, so a
+        // value of any shape gets the same fault (a working copy has its own store-only lint)
+        if self.wc.is_none() {
+            let supplied = crate::io::supplied_engine_fields(&y);
+            if !supplied.is_empty() {
+                for f in supplied {
+                    self.diags.push(Diagnostic::error(
+                        shown,
+                        keys.get(&format!("fields.{f}")).copied().unwrap_or(here),
+                        "E_FIELD_UNKNOWN",
+                        crate::io::engine_field_message(&y.id, f),
+                        crate::io::engine_field_fix(f),
+                    ));
+                }
+                return None;
+            }
+        }
         match from_yaml_struct(y) {
             Ok((block, keyed)) => {
                 if self.wc.is_some() && !new {

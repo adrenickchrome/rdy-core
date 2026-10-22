@@ -287,6 +287,52 @@ fn mparm1_valid_parameters_still_parse() {
     assert!(parse_params::<TagsParams>("rdy_tags", serde_json::Map::new()).is_ok());
 }
 
+/// cp14: the one new `ProposeParams` key is published and read, and a wrong shape for it names
+/// its path. No existing key is renamed.
+#[test]
+fn cp14_propose_params_publish_and_read_plan_answers() {
+    let schema = rmcp::handler::server::common::schema_for_input::<ProposeParams>().unwrap();
+    let mut keys: Vec<&str> = schema["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "alternatives",
+            "changes",
+            "max_tokens",
+            "plan_answers",
+            "relay",
+            "summary",
+            "title",
+            "view"
+        ]
+    );
+    let p = parse_params::<ProposeParams>(
+        "rdy_propose",
+        json!({"title": "t", "plan_answers": [{"item": "pi-1", "act": "defer", "reason": "later"}]})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
+    assert_eq!(p.plan_answers.map(|a| a.len()), Some(1));
+    let none = parse_params::<ProposeParams>(
+        "rdy_propose",
+        json!({"title": "t"}).as_object().unwrap().clone(),
+    )
+    .unwrap();
+    assert!(none.plan_answers.is_none(), "omitted means empty");
+    assert_eq!(
+        refusal::<ProposeParams>("rdy_propose", json!({"title": "t", "plan_answers": "pi-1"})).0,
+        "E_BAD_INPUT"
+    );
+}
+
 /// Every key of `P`'s published input schema that serde refuses as an unknown field. serde reads
 /// a field identifier before its value, so `{key: null}` names an unknown field first whatever
 /// the type of the value is. Any other error text (a wrong type, a missing field) is fine here.
@@ -327,9 +373,9 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
             checked.push(stringify!($t));
         )* };
     }
-    // The 54 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
+    // The 56 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
     // `AltPickParams`, `DismissParams`, `DecideParams`, `MentionParams`, `AcceptAdviceParams`,
-    // `RelayParams`, `RecommendedParams`).
+    // `RelayParams`, `RecommendedParams`, `PlanAnswerParams`).
     check!(
         AcceptAdviceParams,
         AcceptParams,
@@ -359,6 +405,8 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         LogParams,
         MentionParams,
         PendingParams,
+        PlanAnswerParams,
+        PlanParams,
         ProposeParams,
         PublicationCheckParams,
         PublishParams,

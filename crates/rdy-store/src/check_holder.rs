@@ -11,7 +11,8 @@
 //! stub); every blob keeps the rules a blob read keeps (canonical manifest, chunk count, chunk
 //! lengths). Then it checks each chain: each change landed once in the chain, and each landed
 //! change's dependencies landed at or before its landing in that chain. The dependency DAG has no
-//! cycle, the answers keep the answer rules, the signature table holds exactly its records, and
+//! cycle, the answers keep the answer rules, the change plans keep their chain and seal rules
+//! (`crate::plan`, with no `plan/` ref), the signature table holds exactly its records, and
 //! (O11, ruling task-13) each `answer/tag-object:<hash>` names a stored TAG and the stored answer
 //! that relays it: act `tag`, item `tag:<its name>`, targets exactly that TAG. Each such TAG is
 //! read with the tags' objects too: a twin's tag kept beside the version that names the same
@@ -496,6 +497,8 @@ impl StoreReader {
             .collect();
         self.check_acyclic(&roots, &mut changes)?;
         let answers = self.check_answers()?;
+        // the chains and seals a holder took, with no `plan/` ref (`check_meta` refuses one)
+        self.check_plans()?;
         self.check_signatures()?;
         Ok(StoreCheck {
             views: 0,

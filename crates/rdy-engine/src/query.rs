@@ -1,4 +1,5 @@
 use crate::error::*;
+use crate::suspect_reply::SuspectReply;
 use crate::{Materialized, ReadState, Scope};
 use rdy_graph::{DerivedStatus, Edge, Suspect};
 use rdy_model::entity::render_refs;
@@ -20,7 +21,7 @@ pub struct Context {
     pub incoming: Vec<Edge>,
     pub status: Option<DerivedStatus>,
     pub governing: Vec<String>,
-    pub suspects: Vec<Suspect>,
+    pub suspects: Vec<SuspectReply>,
     /// When a decision takes effect: its `effective_from`, else when it was recorded. Absent for
     /// every other block.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -300,6 +301,7 @@ impl ReadState {
         let m = self.materialized(scope)?;
         let mut suspects = g.suspects_of(id);
         suspects.retain(|s| !self.is_presentational_source(&m, s));
+        let suspects = self.suspect_rows(scope, suspects, Some(std::slice::from_ref(id)))?;
         Ok(Context {
             id: block.id.to_string(),
             block_type: block.block_type.clone(),

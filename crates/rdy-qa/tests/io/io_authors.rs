@@ -638,6 +638,7 @@ fn mfb3_a_failed_import_leaves_no_change() {
     r.read().export(&Scope::Canon, &out).unwrap();
     let imp = sess("human:imp", None, Role::Approver);
     let mut failed = 0;
+    let mut unclean = 0;
     for k in 0..3 {
         let b_dir = tempfile::tempdir().unwrap();
         let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
@@ -648,8 +649,15 @@ fn mfb3_a_failed_import_leaves_no_change() {
                 b.read().view_head("import").is_none(),
                 "write {k} failed: the import left a view behind"
             );
-            // plan M2e2: a failed seal of a held batch poisons the store until reopen
-            drop(b);
+            // plan M2e2: a failed seal of a held batch poisons the store until reopen; a
+            // poisoned store's close says so
+            for n in rdy_store::unclean_closes_for_tests(b_dir.path(), || drop(b)) {
+                assert!(
+                    n.contains("an earlier failed write could not be rolled back"),
+                    "{n}"
+                );
+                unclean += 1;
+            }
             b = Rdy::open(b_dir.path()).unwrap();
             assert!(
                 b.read().view_head("import").is_none(),
@@ -661,6 +669,7 @@ fn mfb3_a_failed_import_leaves_no_change() {
         }
     }
     assert!(failed > 0, "no write of the import failed");
+    assert!(unclean > 0, "no failed seal poisoned the store");
 }
 
 /// Project A (rdy-qa pack): agent:a writes `ops` in canon, then decides twice on what `$e`

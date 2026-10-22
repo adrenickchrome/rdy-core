@@ -75,8 +75,13 @@ pub const STORE_ONLY_LINK_KINDS: &[&str] = &["decided_by", "implements"];
 pub const STORE_ONLY_TARGET_TYPES: &[&str] = &["decision", "question"];
 
 /// Fields rdy sets and keeps in the store: a working-copy file never shows them, and a file that
-/// sets one is refused. Must equal `rdy_model::key::AUTO_FIELD` once AE2 merges.
-pub const STORE_ONLY_FIELDS: &[&str] = &["key_auto"];
+/// sets one is refused. They are `rdy_model::key::AUTO_FIELD` and the engine metadata fields
+/// (`rdy_model::engine_fields::ENGINE_FIELDS`, p-8YP1G).
+pub const STORE_ONLY_FIELDS: &[&str] = &[
+    rdy_model::key::AUTO_FIELD,
+    rdy_model::engine_fields::REAFFIRMED,
+    rdy_model::engine_fields::REFLECTS_AT,
+];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

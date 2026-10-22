@@ -112,7 +112,7 @@ pub(super) fn status(cx: &OpContext) -> Result<Value, RdyError> {
     for w in &carried {
         warnings.push(format!("{}: {}; {}", w.code, w.message, w.fix));
     }
-    let suspects = st.suspects(&Scope::Canon)?.len();
+    let suspects = st.suspect_details(&Scope::Canon)?.len();
     // cc15 (FW-CH3a): the current score, its dimensions, the issue count and the kinds, from
     // the memoised summary; the pages, areas and issues are `rdy coverage`'s. A coverage read
     // error never fails the status: `coverage_error` says why the coverage is left out.
@@ -232,7 +232,7 @@ pub(super) fn impact(cx: &OpContext, a: ImpactArgs) -> Result<Value, RdyError> {
 pub(super) fn suspects(cx: &OpContext, a: ScopeArgs) -> Result<Value, RdyError> {
     let st = cx.engine.read();
     let scope = scope_of(&st, cx, a.scope.as_deref())?;
-    Ok(json!({"items": st.suspects(&scope)?}))
+    Ok(json!({"items": st.suspect_details(&scope)?}))
 }
 
 /// The coverage report of a scope (default canon) or a path, cut to `max_tokens` as the MCP

@@ -204,7 +204,7 @@ fn normalise(
 
 /// The three ways a cited text reaches a block, as `resolve_id` reads them: its id (exactly), its
 /// key (ignoring case), its path (a doc or folder's; ignoring case and empty segments).
-struct Names<'a> {
+pub(crate) struct Names<'a> {
     m: &'a crate::Materialized,
     id: BlockId,
     key: Option<String>,
@@ -222,7 +222,7 @@ fn fold_path(text: &str) -> String {
 }
 
 impl<'a> Names<'a> {
-    fn of(m: &'a crate::Materialized, id: &BlockId) -> Names<'a> {
+    pub(crate) fn of(m: &'a crate::Materialized, id: &BlockId) -> Names<'a> {
         Names {
             m,
             id: id.clone(),
@@ -237,7 +237,7 @@ impl<'a> Names<'a> {
         }
     }
 
-    fn names(&self, text: &str) -> bool {
+    pub(crate) fn names(&self, text: &str) -> bool {
         if let Ok(id) = BlockId::parse(text) {
             return id == self.id;
         }
@@ -247,6 +247,27 @@ impl<'a> Names<'a> {
                 // resolve to the exact one, as `child_named` picks it
                 && self.m.resolve_path(text).ok().as_ref() == Some(&self.id)
     }
+}
+
+/// The names that reach `id` the way the code briefing reads a citation: the block's own, and
+/// those of every section above it, since a citation of a section covers each block under it
+/// (`with_descendants`). A block that is not in `m` has none.
+pub(crate) fn covering_names<'a>(m: &'a crate::Materialized, id: &BlockId) -> Vec<Names<'a>> {
+    let mut chain = Vec::new();
+    let mut cur = m.get(id);
+    // the bound stops a damaged store that loops
+    while let Some(b) = cur
+        && chain.len() <= m.len()
+    {
+        chain.push(Names::of(m, &b.id));
+        cur = b.parent.as_ref().and_then(|p| m.get(p));
+    }
+    chain
+}
+
+/// Whether the cited `text` reaches a block through one of its [`covering_names`].
+pub(crate) fn cites(covering: &[Names<'_>], text: &str) -> bool {
+    covering.iter().any(|n| n.names(text))
 }
 
 /// The distinct commits in `indexes` citing a text that names the block.

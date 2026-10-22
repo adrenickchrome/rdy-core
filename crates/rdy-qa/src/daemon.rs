@@ -607,3 +607,77 @@ impl Drop for Served {
         self.stop();
     }
 }
+
+/// The site warnings the hosted daemons of a test log (an exposed LAN site, a LAN address that
+/// cannot be bound, a profile-only caveat, a profile's references outside its selection), which
+/// the test expects ([`site_log`]). Its lines are taken while no other test of the binary that
+/// expects site warnings runs, so each such test asserts its own; every other line stays
+/// visible.
+pub struct SiteLog {
+    capture: rdy_daemon::daemon::LogCapture,
+    _serial: std::sync::MutexGuard<'static, ()>,
+}
+
+impl SiteLog {
+    /// The lines taken so far, in order, each `127.0.0.1:<port>` written so.
+    pub fn lines(&self) -> Vec<String> {
+        self.capture
+            .lines()
+            .into_iter()
+            .map(|l| {
+                let mut out = String::new();
+                let mut rest = l.as_str();
+                while let Some(i) = rest.find("127.0.0.1:") {
+                    let (head, tail) = rest.split_at(i + "127.0.0.1:".len());
+                    out.push_str(head);
+                    out.push_str("<port>");
+                    rest = tail.trim_start_matches(|c: char| c.is_ascii_digit());
+                }
+                out.push_str(rest);
+                out
+            })
+            .collect()
+    }
+}
+
+/// Starts taking the site warnings of this test's hosted daemons ([`SiteLog`]); call it before
+/// the host starts. The site's address lines (`site: http://…`) are not warnings and stay
+/// visible.
+pub fn site_log() -> SiteLog {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    SiteLog {
+        capture: rdy_daemon::daemon::capture_log_for_tests(&[
+            "site: warning: ",
+            "site: /",
+            "site: could not listen ",
+            "site: profile \"",
+        ]),
+        _serial: serial,
+    }
+}
+
+/// The daemon's warning (as [`SiteLog::lines`] gives it) that its full site is on the LAN.
+pub const LAN_DOCS_LINE: &str = "site: warning: anyone on your network can read these docs at http://127.0.0.1:<port>/; fix: set serve.site_lan to false to keep the site on this machine";
+
+/// The daemon's warning that the profile-only site of `Guide book` is on the LAN.
+pub const GUIDE_LAN_LINE: &str = "site: warning: anyone on your network can read the profile \"Guide book\" at http://127.0.0.1:<port>/; fix: set serve.site_lan to false to keep the site on this machine";
+
+/// The daemon's caveat of the profile-only site of `Guide book`.
+pub const GUIDE_CAVEAT_LINE: &str = "site: warning: this site shows only the profile \"Guide book\"; anyone with the project still reads everything; fix: give the full site's link from rdy site when the person needs everything";
+
+/// The daemon's render warning of the build at `route` of an org profile with one reference
+/// outside its selection.
+pub fn org_refs_line(route: &str) -> String {
+    format!(
+        "site: {route}: warning: Org profile has 1 references outside its selection. Review these references before you share the output."
+    )
+}
+
+/// `lines`, sorted: the warnings of builds and listeners that run concurrently come in no
+/// fixed order.
+pub fn sorted_lines<S: AsRef<str>>(lines: &[S]) -> Vec<String> {
+    let mut v: Vec<String> = lines.iter().map(|l| l.as_ref().to_string()).collect();
+    v.sort();
+    v
+}

@@ -124,6 +124,7 @@ async fn life1_the_stop_op_drains_like_the_handle() {
 
 #[test]
 fn life1_a_stuck_connection_is_dropped_after_the_grace() {
+    let log = rdy_daemon::daemon::capture_log_for_tests(&["still open after"]);
     // its own runtime, shut down in the background: the 60 s sleep runs on a blocking thread,
     // and a #[tokio::test] runtime's drop would wait for it
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -149,6 +150,10 @@ fn life1_a_stuck_connection_is_dropped_after_the_grace() {
         assert!(t0.elapsed() >= Duration::from_secs(5), "{:?}", t0.elapsed());
     });
     rt.shutdown_background();
+    assert_eq!(
+        log.lines(),
+        ["1 connections still open after 5 s; abandoning them"]
+    );
 }
 
 #[tokio::test]

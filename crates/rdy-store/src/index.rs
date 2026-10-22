@@ -73,6 +73,18 @@ const REDACTION_CARRIED_AT: TableDefinition<&[u8], &[u8]> =
 /// A signature's subject (32 bytes), then the signature's hash (32 bytes) -> empty: every
 /// signature of every subject (kind SIGNATURE, D-1Z951), derived from the frames alone.
 const SIGNATURES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("signatures");
+/// A landing's hash (32 bytes) -> its seal's hash (32 bytes) and the seal's location (`loc_key`):
+/// the first sealed PLAN that names the landing (kind PLAN, p-CST21).
+const PLAN_SEALS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("plan_seals");
+/// A decision id's string bytes, a 0x00 byte, then its landing's location (`loc_key`) -> the
+/// seal's hash and the seal's location: every seal that names the decision, in landing order.
+const PLAN_DECISIONS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("plan_decisions");
+/// A block id's string bytes, a 0x00 byte, then a cause id's string bytes -> the latest accepted
+/// deferral of the pair (`plan::DeferralRow`, postcard): its source and its first clear.
+const PLAN_DEFERRALS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("plan_deferrals");
+/// A proposal version's hash (32 bytes) -> the hash of its bound (unsealed) plan version and that
+/// version's location: the first such version.
+const PLAN_PROPOSALS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("plan_proposals");
 /// The prefix of the refs [`OPEN_PROPOSALS`] mirrors.
 const OPEN_PREFIX: &str = "open/";
 
@@ -142,6 +154,38 @@ pub enum IndexEntry {
     Signature {
         subject: Hash,
         signature: Hash,
+    },
+    /// Sealed PLAN `seal`, at `at`, seals landing `landing`; the first seal of a landing is kept.
+    PlanSeal {
+        landing: Hash,
+        seal: Hash,
+        at: Location,
+    },
+    /// Sealed PLAN `seal`, at `at`, names `decision`; its landing is at `landing_at`.
+    PlanDecision {
+        decision: BlockId,
+        landing_at: Location,
+        seal: Hash,
+        at: Location,
+    },
+    /// Unsealed PLAN `plan`, at `at`, is bound to proposal version `proposal`; the first is kept.
+    PlanProposal {
+        proposal: Hash,
+        plan: Hash,
+        at: Location,
+    },
+    /// `source` accepts deferring `block`'s work owed to `cause`: it replaces the pair's row.
+    DeferralAccept {
+        block: BlockId,
+        cause: BlockId,
+        source: crate::plan::AcceptedDeferral,
+    },
+    /// A TRANSITION at `at` made the suspect pair (`block`, `cause`) gone: the pair's row, if
+    /// any, keeps its first clear.
+    DeferralClear {
+        block: BlockId,
+        cause: BlockId,
+        at: Location,
     },
     /// Carried record `carried` (kind REDACTION_CARRIED), at `loc`, of source request `request`:
     /// each span it names, with its `held` flag. Every span gets a `redaction_spans` row with
@@ -223,6 +267,10 @@ pub struct IndexDump {
     pub redaction_spans: BTreeMap<Vec<u8>, Vec<u8>>,
     pub redaction_carried_at: BTreeMap<Vec<u8>, Vec<u8>>,
     pub signatures: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub plan_seals: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub plan_decisions: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub plan_deferrals: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub plan_proposals: BTreeMap<Vec<u8>, Vec<u8>>,
 }
 
 fn dump_table(
@@ -298,6 +346,63 @@ fn signature_from(key: &[u8]) -> Result<(Hash, Hash), StoreError> {
         hash_from(&key[..32], "signature entry")?,
         hash_from(&key[32..], "signature entry")?,
     ))
+}
+
+/// The four plan tables of a write: seals, decisions, deferrals, proposals.
+type PlanTables<'t> = [redb::Table<'t, &'static [u8], &'static [u8]>; 4];
+
+fn plan_tables(w: &redb::WriteTransaction) -> Result<PlanTables<'_>, StoreError> {
+    Ok([
+        w.open_table(PLAN_SEALS).map_err(db)?,
+        w.open_table(PLAN_DECISIONS).map_err(db)?,
+        w.open_table(PLAN_DEFERRALS).map_err(db)?,
+        w.open_table(PLAN_PROPOSALS).map_err(db)?,
+    ])
+}
+
+/// A plan table value: a hash, then a location (`loc_key`).
+fn hash_at_value(h: &Hash, at: &Location) -> [u8; 44] {
+    let mut v = [0u8; 44];
+    v[..32].copy_from_slice(&h.0);
+    v[32..].copy_from_slice(&loc_key(at));
+    v
+}
+
+/// The hash and location of a plan table value; any other length is damage.
+fn hash_at_from(v: &[u8], what: &str) -> Result<(Hash, Location), StoreError> {
+    if v.len() != 44 {
+        return Err(StoreError::Decode(format!(
+            "{what} is {} bytes, expected 44",
+            v.len()
+        )));
+    }
+    Ok((hash_from(&v[..32], what)?, loc_from(&v[32..], what)?))
+}
+
+/// The `plan_deferrals` key of (`block`, `cause`): the block id, a 0x00 byte, the cause id.
+fn pair_key(block: &BlockId, cause: &BlockId) -> Vec<u8> {
+    let mut key = name_prefix(block.as_str());
+    key.extend_from_slice(cause.as_str().as_bytes());
+    key
+}
+
+/// The pair of a `plan_deferrals` key.
+fn pair_from(key: &[u8]) -> Result<(BlockId, BlockId), StoreError> {
+    let bad = || StoreError::Decode("plan deferral entry holds a damaged pair".into());
+    let at = key.iter().position(|b| *b == 0).ok_or_else(bad)?;
+    let id = |b: &[u8]| {
+        std::str::from_utf8(b)
+            .ok()
+            .and_then(|s| BlockId::from_string(s.to_string()))
+            .ok_or_else(bad)
+    };
+    Ok((id(&key[..at])?, id(&key[at + 1..])?))
+}
+
+/// A deferral row as stored.
+fn deferral_from(v: &[u8]) -> Result<crate::plan::DeferralRow, StoreError> {
+    postcard::from_bytes(v)
+        .map_err(|_| StoreError::Decode("plan deferral entry does not decode".into()))
 }
 
 /// A frame location as a key: the segment (u32) then the offset (u64), big-endian, so keys sort
@@ -741,6 +846,21 @@ impl Index {
                 "the index has no signatures table; it is rebuilt from the log".into(),
             ));
         }
+        // likewise for the plan tables: no seal or deferral is ever read as absent
+        if has(OBJECTS.name())
+            && [
+                &PLAN_SEALS,
+                &PLAN_DECISIONS,
+                &PLAN_DEFERRALS,
+                &PLAN_PROPOSALS,
+            ]
+            .iter()
+            .any(|t| !has(t.name()))
+        {
+            return Err(StoreError::Db(
+                "the index has no plan tables; it is rebuilt from the log".into(),
+            ));
+        }
         // an index written before the open-proposal table existed gets it filled from its refs,
         // once, in this commit
         let had_open = has(OPEN_PROPOSALS.name());
@@ -763,6 +883,10 @@ impl Index {
             w.open_table(REDACTION_SPANS).map_err(db)?;
             w.open_table(REDACTION_CARRIED_AT).map_err(db)?;
             w.open_table(SIGNATURES).map_err(db)?;
+            w.open_table(PLAN_SEALS).map_err(db)?;
+            w.open_table(PLAN_DECISIONS).map_err(db)?;
+            w.open_table(PLAN_DEFERRALS).map_err(db)?;
+            w.open_table(PLAN_PROPOSALS).map_err(db)?;
             let mut open = w.open_table(OPEN_PROPOSALS).map_err(db)?;
             if !had_open {
                 let refs = w.open_table(REFS).map_err(db)?;
@@ -846,6 +970,8 @@ impl Index {
             // signature table only for a batch with a signature
             let mut redaction: Option<RedactionTables<'_>> = None;
             let mut signatures: Option<redb::Table<'_, &'static [u8], &'static [u8]>> = None;
+            // the plan tables only for a batch with a plan entry
+            let mut plans: Option<PlanTables<'_>> = None;
             for e in entries {
                 match e {
                     IndexEntry::Object { kind, hash, loc } => {
@@ -948,6 +1074,66 @@ impl Index {
                         };
                         t.insert(&signature_key(subject, signature)[..], &[][..])
                             .map_err(db)?;
+                    }
+                    IndexEntry::PlanSeal { landing, seal, at } => {
+                        if plans.is_none() {
+                            plans = Some(plan_tables(&w)?);
+                        }
+                        let t = &mut plans.as_mut().expect("opened")[0];
+                        if t.get(&landing.0[..]).map_err(db)?.is_none() {
+                            t.insert(&landing.0[..], &hash_at_value(seal, at)[..])
+                                .map_err(db)?;
+                        }
+                    }
+                    IndexEntry::PlanDecision {
+                        decision,
+                        landing_at,
+                        seal,
+                        at,
+                    } => {
+                        if plans.is_none() {
+                            plans = Some(plan_tables(&w)?);
+                        }
+                        let t = &mut plans.as_mut().expect("opened")[1];
+                        let mut key = name_prefix(decision.as_str());
+                        key.extend_from_slice(&loc_key(landing_at));
+                        if t.get(&key[..]).map_err(db)?.is_none() {
+                            t.insert(&key[..], &hash_at_value(seal, at)[..])
+                                .map_err(db)?;
+                        }
+                    }
+                    IndexEntry::PlanProposal { proposal, plan, at } => {
+                        if plans.is_none() {
+                            plans = Some(plan_tables(&w)?);
+                        }
+                        let t = &mut plans.as_mut().expect("opened")[3];
+                        if t.get(&proposal.0[..]).map_err(db)?.is_none() {
+                            t.insert(&proposal.0[..], &hash_at_value(plan, at)[..])
+                                .map_err(db)?;
+                        }
+                    }
+                    IndexEntry::DeferralAccept { block, cause, .. }
+                    | IndexEntry::DeferralClear { block, cause, .. } => {
+                        if plans.is_none() {
+                            plans = Some(plan_tables(&w)?);
+                        }
+                        let t = &mut plans.as_mut().expect("opened")[2];
+                        let key = pair_key(block, cause);
+                        let row = match t.get(&key[..]).map_err(db)? {
+                            Some(v) => Some(deferral_from(v.value())?),
+                            None => None,
+                        };
+                        if let Some(next) = crate::plan::reduce(row, e)
+                            && Some(next) != row
+                        {
+                            t.insert(
+                                &key[..],
+                                &postcard::to_allocvec(&next).map_err(|e| {
+                                    StoreError::Db(format!("a deferral row does not encode: {e}"))
+                                })?[..],
+                            )
+                            .map_err(db)?;
+                        }
                     }
                 }
             }
@@ -1139,7 +1325,128 @@ impl Index {
             redaction_spans: dump_table(&r, REDACTION_SPANS)?,
             redaction_carried_at: dump_table(&r, REDACTION_CARRIED_AT)?,
             signatures: dump_table(&r, SIGNATURES)?,
+            plan_seals: dump_table(&r, PLAN_SEALS)?,
+            plan_decisions: dump_table(&r, PLAN_DECISIONS)?,
+            plan_deferrals: dump_table(&r, PLAN_DEFERRALS)?,
+            plan_proposals: dump_table(&r, PLAN_PROPOSALS)?,
         })
+    }
+
+    /// The seal of `landing` and its location, if one is indexed.
+    pub(crate) fn plan_seal(&self, landing: &Hash) -> Result<Option<(Hash, Location)>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(PLAN_SEALS).map_err(db)?;
+        match t.get(&landing.0[..]).map_err(db)? {
+            Some(v) => Ok(Some(hash_at_from(v.value(), "plan seal entry")?)),
+            None => Ok(None),
+        }
+    }
+
+    /// The bound plan of proposal version `proposal` and its location, if one is indexed.
+    pub(crate) fn plan_proposal(
+        &self,
+        proposal: &Hash,
+    ) -> Result<Option<(Hash, Location)>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(PLAN_PROPOSALS).map_err(db)?;
+        match t.get(&proposal.0[..]).map_err(db)? {
+            Some(v) => Ok(Some(hash_at_from(v.value(), "plan proposal entry")?)),
+            None => Ok(None),
+        }
+    }
+
+    /// The seals that name `decision`, each with its own location, in landing order.
+    pub(crate) fn plan_decision_rows(
+        &self,
+        decision: &BlockId,
+    ) -> Result<Vec<(Hash, Location)>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(PLAN_DECISIONS).map_err(db)?;
+        let prefix = name_prefix(decision.as_str());
+        let mut out = vec![];
+        for item in t.range(&prefix[..]..).map_err(db)? {
+            let (k, v) = item.map_err(db)?;
+            if !k.value().starts_with(&prefix) {
+                break;
+            }
+            // a longer id that starts with this one and a 0x00 byte sorts among these keys
+            if k.value().len() == prefix.len() + 12 {
+                out.push(hash_at_from(v.value(), "plan decision entry")?);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The deferral row of (`block`, `cause`), if one is indexed.
+    pub(crate) fn deferral_row(
+        &self,
+        block: &BlockId,
+        cause: &BlockId,
+    ) -> Result<Option<crate::plan::DeferralRow>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(PLAN_DEFERRALS).map_err(db)?;
+        match t.get(&pair_key(block, cause)[..]).map_err(db)? {
+            Some(v) => Ok(Some(deferral_from(v.value())?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Every row of the four plan tables, decoded, from one read transaction.
+    pub(crate) fn plan_rows(&self) -> Result<crate::plan::PlanRows, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let mut out = crate::plan::PlanRows::default();
+        for item in r.open_table(PLAN_SEALS).map_err(db)?.iter().map_err(db)? {
+            let (k, v) = item.map_err(db)?;
+            out.seals.insert(
+                hash_from(k.value(), "plan seal entry")?,
+                hash_at_from(v.value(), "plan seal entry")?,
+            );
+        }
+        for item in r
+            .open_table(PLAN_DECISIONS)
+            .map_err(db)?
+            .iter()
+            .map_err(db)?
+        {
+            let (k, v) = item.map_err(db)?;
+            let key = k.value();
+            let bad = || StoreError::Decode("plan decision entry holds a damaged key".into());
+            let split = key.len().checked_sub(13).ok_or_else(bad)?;
+            if key[split] != 0 {
+                return Err(bad());
+            }
+            let id = std::str::from_utf8(&key[..split])
+                .ok()
+                .and_then(|s| BlockId::from_string(s.to_string()))
+                .ok_or_else(bad)?;
+            out.decisions.insert(
+                (id, loc_from(&key[split + 1..], "plan decision entry")?),
+                hash_at_from(v.value(), "plan decision entry")?,
+            );
+        }
+        for item in r
+            .open_table(PLAN_DEFERRALS)
+            .map_err(db)?
+            .iter()
+            .map_err(db)?
+        {
+            let (k, v) = item.map_err(db)?;
+            out.deferrals
+                .insert(pair_from(k.value())?, deferral_from(v.value())?);
+        }
+        for item in r
+            .open_table(PLAN_PROPOSALS)
+            .map_err(db)?
+            .iter()
+            .map_err(db)?
+        {
+            let (k, v) = item.map_err(db)?;
+            out.proposals.insert(
+                hash_from(k.value(), "plan proposal entry")?,
+                hash_at_from(v.value(), "plan proposal entry")?,
+            );
+        }
+        Ok(out)
     }
 
     /// The signatures of `subject`, in ascending hash order: at most `cap`. Reading one more

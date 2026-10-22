@@ -432,6 +432,7 @@ fn run_single(
     // the proposal version the first preparation resolved: a retry approves that version or
     // is refused as moved, never a newer one a versionless name now resolves to
     let mut pin: Option<ProposalRef> = None;
+    let mut act = act;
     for _ in 0..ATTEMPTS {
         let (s, p, a) = (session.clone(), person.to_string(), act.clone());
         let step = with_writer_result(engine, move |r| prepare(r, &s, &p, a, pin))?;
@@ -440,7 +441,16 @@ fn run_single(
             Step::Prepared(attempt) => attempt,
         };
         if pin.is_none() {
-            pin = attempt.act.landing().map(PreparedApproval::pref);
+            pin = attempt.act.landing().and_then(PreparedApproval::pin);
+        }
+        // a re-affirmation card's answer: every retry binds the card the first preparation
+        // answered, also when the request named no hash (D-CQMA4)
+        if let (Single::Answer(req), Some(h)) = (
+            &mut act,
+            attempt.act.landing().and_then(PreparedApproval::card_pin),
+        ) && req.card_hash.is_none()
+        {
+            req.card_hash = Some(h.to_string());
         }
         let signed = match sign_act(agent, &attempt) {
             Ok(signed) => Signed {

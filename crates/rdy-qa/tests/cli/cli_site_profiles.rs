@@ -336,6 +336,7 @@ impl Proc {
 /// only an open proposal holds. `rdy serve --profile --json` gives the profile-only reply.
 #[test]
 fn spv10_cli_profile_links_match_ctl() {
+    let log = rdy_qa::daemon::site_log();
     let (dir, ids, prop) = seeded_dir(Some("serve:\n  site_lan: true\n"));
     let (_cfg, env) = human_env("human:qa");
     let h = Hosted::start_for_binary(dir, Some(LanOverride::Addr(Ipv4Addr::LOCALHOST)));
@@ -404,6 +405,25 @@ fn spv10_cli_profile_links_match_ctl() {
         assert_eq!(stdout(&out).lines().count(), 1);
         assert_eq!(stderr(&out), lan_lines(&v), "{name}");
     }
+    // the daemon warns of its LAN sites, the profile-only site, and each build's references
+    // outside its profile's selection
+    use rdy_qa::daemon::{
+        GUIDE_CAVEAT_LINE, GUIDE_LAN_LINE, LAN_DOCS_LINE, org_refs_line, sorted_lines,
+    };
+    assert_eq!(
+        sorted_lines(&log.lines()),
+        sorted_lines(&[
+            LAN_DOCS_LINE.to_string(),
+            org_refs_line("/~profile/guide/"),
+            format!(
+                "site: /~proposal/{prop}/~profile/preview/: warning: Public profile has 1 references outside its selection. Include the target docs or remove these references. Run the publication check again."
+            ),
+            org_refs_line("/~view/draft/~profile/guide/"),
+            GUIDE_LAN_LINE.to_string(),
+            GUIDE_CAVEAT_LINE.to_string(),
+            org_refs_line("/"),
+        ])
+    );
 }
 
 /// A running daemon is reused: the same process and store owner, the same URL on every call,
@@ -708,6 +728,7 @@ fn spv10_starting_peer_teardown_never_waits_on_its_release() {
 /// exiting to be replaced. Configured timeouts give the existing `E_DAEMON_START` texts.
 #[test]
 fn spv10_serve_profile_handles_start_and_exit_races() {
+    let log = rdy_qa::daemon::site_log();
     let (_cfg, env) = human_env("human:qa");
 
     // 1. Exiting, then no daemon: a daemon of another version exits to be replaced, and the
@@ -912,6 +933,12 @@ fn spv10_serve_profile_handles_start_and_exit_races() {
     assert_eq!(stdout(&stop), "stopped\n");
     let (status, _, err) = winner.finish();
     assert_eq!(status.code(), Some(0), "{err}");
+    // the profile start in this process (3b) gave its caveat and its build's warning
+    use rdy_qa::daemon::{GUIDE_CAVEAT_LINE, org_refs_line, sorted_lines};
+    assert_eq!(
+        sorted_lines(&log.lines()),
+        sorted_lines(&[GUIDE_CAVEAT_LINE.to_string(), org_refs_line("/")])
+    );
 }
 
 /// An unknown key: exit 1 with `E_NOT_FOUND` and no profile port. A start of its own is undone
@@ -994,6 +1021,7 @@ fn with_closed_stderr(mut cmd: Command) -> (ExitStatus, String) {
 /// reuse and `rdy site` exit 1 the same way and leave the running daemon serving.
 #[test]
 fn spv10_serve_profile_closed_stderr_fails_and_cleans_up() {
+    let log = rdy_qa::daemon::site_log();
     // an address this machine does not hold: the LAN bind fails, so every listener has its
     // structured warning
     let lan = "serve:\n  site_lan: true\n  site_lan_address: 10.255.255.254\n";
@@ -1059,12 +1087,42 @@ fn spv10_serve_profile_closed_stderr_fails_and_cleans_up() {
         want,
         "the daemon still serves its profile site"
     );
+    // the daemon in this process warns of both LAN binds it could not make (the OS words its
+    // reason), the profile-only site, and its builds' references outside the selection
+    use rdy_qa::daemon::{GUIDE_CAVEAT_LINE, org_refs_line, sorted_lines};
+    let fix = "; the site stays on this machine; fix: set serve.site_lan_address to a private address of this machine, then run rdy serve --stop";
+    let (binds, rest): (Vec<String>, Vec<String>) = log
+        .lines()
+        .into_iter()
+        .partition(|l| l.contains("could not listen on 10.255.255.254 ("));
+    let mut binds = binds;
+    binds.sort();
+    assert_eq!(binds.len(), 2, "{binds:?}");
+    assert!(
+        binds[0].starts_with("site: could not listen on 10.255.255.254 (")
+            && binds[0].ends_with(fix),
+        "{binds:?}"
+    );
+    assert!(
+        binds[1].starts_with("site: profile \"Guide book\": could not listen on 10.255.255.254 (")
+            && binds[1].ends_with(fix),
+        "{binds:?}"
+    );
+    assert_eq!(
+        sorted_lines(&rest),
+        sorted_lines(&[
+            GUIDE_CAVEAT_LINE.to_string(),
+            org_refs_line("/"),
+            org_refs_line("/~profile/guide/"),
+        ])
+    );
 }
 
 /// Line discipline: text and JSON, the warnings' channels, one result per call, and the clap
 /// conflicts, refused before any connection.
 #[test]
 fn spv10_profile_cli_json_and_conflicts_are_closed() {
+    let log = rdy_qa::daemon::site_log();
     // the foreground start in JSON: one JSON line, the same object a reuse prints
     let (s, _, _) = served();
     let mut cmd = human_command(
@@ -1128,6 +1186,19 @@ fn spv10_profile_cli_json_and_conflicts_are_closed() {
     assert_eq!(stdout(&out), format!("{want}\n"));
     assert_eq!(stderr(&out), lan_lines(&want));
     drop(h);
+    // the LAN host in this process warns of its LAN sites, the caveat and its build's warning
+    use rdy_qa::daemon::{
+        GUIDE_CAVEAT_LINE, GUIDE_LAN_LINE, LAN_DOCS_LINE, org_refs_line, sorted_lines,
+    };
+    assert_eq!(
+        sorted_lines(&log.lines()),
+        sorted_lines(&[
+            LAN_DOCS_LINE.to_string(),
+            GUIDE_LAN_LINE.to_string(),
+            GUIDE_CAVEAT_LINE.to_string(),
+            org_refs_line("/"),
+        ])
+    );
 
     // the conflicts are clap's own refusal, before any connection or start
     let fresh = short_tempdir();

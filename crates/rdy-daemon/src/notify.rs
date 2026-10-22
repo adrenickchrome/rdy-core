@@ -609,6 +609,14 @@ mod tests {
             sorted(uris_for(&st, &t, &x, &subs)),
             vec![INBOX.to_string()]
         );
+        // the failed seal poisoned the store: its close says so
+        drop(st);
+        let closes = rdy_store::unclean_closes_for_tests(_d.path(), || drop(e));
+        assert_eq!(closes.len(), 1, "{closes:?}");
+        assert!(
+            closes[0].contains("an earlier failed write could not be rolled back"),
+            "{closes:?}"
+        );
     }
 
     /// Founder decision C (D-Z0EMP; ledger: Task 11 notifies `rdy://inbox` exactly when the

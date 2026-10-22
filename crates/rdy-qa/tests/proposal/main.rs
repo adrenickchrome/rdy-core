@@ -3,4 +3,5 @@
 //! (`tlay1_` checks). Keep the list sorted.
 mod proposal_coverage;
 mod proposal_pending;
+mod proposal_plan;
 mod proposal_summary_show;

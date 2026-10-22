@@ -22,6 +22,7 @@ mod intake_cmd;
 mod intent_cmd;
 mod land_cmd;
 mod output;
+mod plan_cmd;
 mod project_cmd;
 mod publication_cmd;
 mod publish_cmd;
@@ -85,6 +86,12 @@ enum Cmd {
     Search(search_cmd::SearchArgs),
     /// List the suspects in a scope (default canon), as rdy_suspects does.
     Suspects(read_cmd::SuspectsArgs),
+    /// Read a change plan, or answer its items: rdy plan [--view <view> | --proposal <P-x@n> | --landing <hash> | --decision <id>], or rdy plan confirm|defer|done <item>... [--reason <text>]. The answers are recorded together or not at all. The chat path is rdy_plan.
+    Plan(plan_cmd::PlanArgs),
+    /// Re-affirm suspect decisions that still hold, with a reason: rdy reaffirm <id>... or --because <id>. The decisions are briefed whole. The chat path is rdy_write with a reaffirm op.
+    Reaffirm(plan_cmd::ReaffirmArgs),
+    /// Repin a block's references and links to their current versions, or with --code record the code its reflects globs match. The block is briefed first. The chat path is rdy_write with a repin op.
+    Repin(plan_cmd::RepinArgs),
     Propose(land_cmd::ProposeArgs),
     /// Request content removal: report what removing the targets would erase (--dry-run), or
     /// record the request in a view. Recording erases nothing: propose the view, and a person
@@ -238,6 +245,9 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Brief(a) => brief_cmd::brief(env, a),
         Cmd::Search(a) => search_cmd::search(env, a),
         Cmd::Suspects(a) => read_cmd::suspects(env, a),
+        Cmd::Plan(a) => plan_cmd::plan(env, a),
+        Cmd::Reaffirm(a) => plan_cmd::reaffirm(env, a),
+        Cmd::Repin(a) => plan_cmd::repin(env, a),
         Cmd::Propose(a) => land_cmd::propose(env, a),
         Cmd::Redact(a) => redact_cmd::redact(env, a),
         Cmd::Approve(a) => land_cmd::approve(env, a, as_json),
