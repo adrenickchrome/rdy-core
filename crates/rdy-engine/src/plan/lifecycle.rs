@@ -139,7 +139,7 @@ impl ProposalPlan {
 /// item is not a code item.
 fn assess(computed: &ComputedPlan, answers: &[PlanAnswer]) -> (PlanSummary, Vec<Issue>) {
     let (rows, counts, mut notes) = live_rows(computed, answers);
-    notes.sort_by(|(a, _), (b, _)| a.cmp(b));
+    notes.sort_by_key(|(item, _)| *item);
     let mut open_items = vec![];
     let mut open_docs = 0usize;
     for row in rows {
