@@ -32,8 +32,9 @@ const PROFILE_HELP: &str =
 const ONLY_HELP: &str = "Serve canon through this profile on a separate port. Requires profile and scope canon. This changes presentation, not source access.";
 const CHECK_SCOPE_HELP: &str =
     "canon (default), tag:<name>, landing:<hash>, a view name, view:<name>, or proposal:P-x@n.";
-/// The number of tools the server lists, which this task leaves as it found it.
-const TOOL_COUNT: usize = 47;
+/// The number of tools the server lists, which the profile task left as it found it: 47. cp11
+/// adds `rdy_plan`, and the count is 48.
+const TOOL_COUNT: usize = 48;
 
 /// A running project: the host, the proxy environment and what the pins need.
 struct World {
