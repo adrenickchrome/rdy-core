@@ -84,17 +84,16 @@ jobs:
       # Each CodeQL false positive is checked and then dismissed on its alert, with its reason.
       # There are no rule, query or path exclusions. So the SARIF step does not block on results:
       # it fails on analyzer errors and malformed SARIF, and it lists every high or critical result.
-      # The alert step blocks: any open high or critical alert of this tool and category on the
-      # analysed ref fails the job. Dismissed and fixed alerts do not block. If the alerts cannot
-      # be read, the step fails.
+      # The alert step blocks: any open high or critical CodeQL alert on the analysed ref fails the
+      # job, whatever its category, so each language job also sees the other language's alerts.
+      # Dismissed and fixed alerts do not block. If the alerts cannot be read, the step fails.
       - name: Analysis is complete; list high and critical results
         run: python3 scripts/ci/check_sarif.py sarif sarif
       - name: Open high and critical alerts block
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          ALERT_CATEGORY: /language:${{ matrix.language }}
           ALERT_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.ref }}
-        run: python3 scripts/ci/check_sarif.py alerts --tool CodeQL --category "$ALERT_CATEGORY" --ref "$ALERT_REF"
+        run: python3 scripts/ci/check_sarif.py alerts --tool CodeQL --ref "$ALERT_REF"
   required:
     # One result for both jobs. It is not a required check.
     name: Core security

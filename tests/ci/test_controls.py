@@ -324,7 +324,7 @@ ENV = {'GITHUB_REPOSITORY': 'owner/repo', 'GITHUB_TOKEN': 'x', 'GITHUB_API_URL':
 
 class AlertGate(unittest.TestCase):
     def decide(self, *alerts):
-        return SARIF.blocking_alerts(list(alerts), 'CodeQL', '/language:rust')
+        return SARIF.blocking_alerts(list(alerts), 'CodeQL')
 
     def test_open_high_and_critical_block(self):
         self.assertEqual([a['number'] for a in self.decide(alert(1), alert(2, level='critical'))], [1, 2])
@@ -336,10 +336,13 @@ class AlertGate(unittest.TestCase):
     def test_open_medium_low_or_unscored_does_not_block(self):
         self.assertEqual(self.decide(alert(level='medium'), alert(level='low'), alert(level=None)), [])
 
-    def test_other_tool_or_category_does_not_block(self):
-        self.assertEqual(self.decide(alert(tool='Other'), alert(category='/language:actions/'),
-                                     alert(category='/language:rust-extra')), [])
-        self.assertEqual(len(self.decide(alert(category='/language:rust'))), 1)
+    def test_other_tool_does_not_block(self):
+        self.assertEqual(self.decide(alert(tool='Other'), alert(tool='Other', level='critical')), [])
+
+    def test_any_category_blocks(self):
+        found = self.decide(alert(1, category='/language:actions/'), alert(2, category='/language:rust'),
+                            alert(3, category='other'), alert(4, category=None))
+        self.assertEqual([a['number'] for a in found], [1, 2, 3, 4])
 
     def test_malformed_alerts_refuse(self):
         for broken in ({}, None, dict(alert(), number='1'), dict(alert(), state=None),
@@ -348,13 +351,13 @@ class AlertGate(unittest.TestCase):
             with self.subTest(broken=broken), self.assertRaises(ValueError):
                 self.decide(broken)
         with self.assertRaises(ValueError):
-            SARIF.blocking_alerts({}, 'CodeQL', '/language:rust')
+            SARIF.blocking_alerts({}, 'CodeQL')
 
     def run_gate(self, urlopen, ref='refs/pull/7/merge', env=ENV):
         output = io.StringIO()
         with mock.patch.object(SARIF.urllib.request, 'urlopen', urlopen), \
              mock.patch.dict(SARIF.os.environ, env, clear=True), redirect_stdout(output):
-            code = SARIF.main(['alerts', '--tool', 'CodeQL', '--category', '/language:rust', '--ref', ref])
+            code = SARIF.main(['alerts', '--tool', 'CodeQL', '--ref', ref])
         return code, output.getvalue()
 
     def test_gate_pages_through_alerts_and_prints_each_blocking_one(self):

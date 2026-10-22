@@ -4,8 +4,8 @@
 sarif DIR: fail on analyzer errors and on unreadable or malformed SARIF; list every high or
 critical result (rule id, severity, path:line). Results alone do not fail this step.
 
-alerts: fail on any open high or critical code-scanning alert of one tool and analysis
-category on one ref. A false positive is checked and then dismissed on its alert with its
+alerts: fail on any open high or critical code-scanning alert of one tool on one ref, in any
+analysis category. A false positive is checked and then dismissed on its alert with its
 reason, so a dismissed or fixed alert does not block. If the alerts cannot be read, this fails.
 """
 import argparse
@@ -258,13 +258,8 @@ def clean(value, limit=200):
     return ''.join(c if c.isprintable() else '?' for c in text)[:limit]
 
 
-def same_category(left, right):
-    # The analysis upload may add a trailing slash to the category.
-    return isinstance(left, str) and left.rstrip('/') == right.rstrip('/')
-
-
-def blocking_alerts(alerts, tool, category):
-    """Open alerts of this tool and category at security severity high or critical."""
+def blocking_alerts(alerts, tool):
+    """Open alerts of this tool at security severity high or critical, in any category."""
     if not isinstance(alerts, list):
         raise ValueError('invalid alert list')
     blocking = []
@@ -277,8 +272,6 @@ def blocking_alerts(alerts, tool, category):
                 or not isinstance(tool_info, dict) or not isinstance(instance, dict)):
             raise ValueError('invalid alert')
         if state != 'open' or tool_info.get('name') != tool:
-            continue
-        if not same_category(instance.get('category'), category):
             continue
         if rule.get('security_severity_level') in BLOCKING_LEVELS:
             blocking.append(alert)
@@ -330,22 +323,21 @@ def fetch_alerts(api, repository, token, tool, ref):
     raise AlertQueryError('more than ' + str(MAX_PAGES * PAGE_SIZE) + ' alerts')
 
 
-def alerts_main(tool, category, ref):
+def alerts_main(tool, ref):
     if not re.fullmatch(r'refs/(heads|tags|pull)/[A-Za-z0-9_./-]+', ref or ''):
         raise AlertQueryError('the ref to check is missing or invalid')
     alerts = fetch_alerts(os.environ.get('GITHUB_API_URL', 'https://api.github.com'),
                           os.environ.get('GITHUB_REPOSITORY'), os.environ.get('GITHUB_TOKEN'), tool, ref)
     try:
-        blocking = blocking_alerts(alerts, tool, category)
+        blocking = blocking_alerts(alerts, tool)
     except ValueError as error:
         raise AlertQueryError(str(error)) from None
     lines = [alert_line(alert) for alert in blocking]
-    print(tool + ' ' + category + ' on ' + ref + ': ' + str(len(alerts)) + ' open alert(s), '
+    print(tool + ' on ' + ref + ': ' + str(len(alerts)) + ' open alert(s), '
           + str(len(blocking)) + ' high or critical.')
     for line in lines:
         print(line)
-    write_summary('Open high and critical ' + tool + ' alerts, ' + category + ' (' + str(len(blocking)) + ')',
-                  lines)
+    write_summary('Open high and critical ' + tool + ' alerts (' + str(len(blocking)) + ')', lines)
     return int(bool(blocking))
 
 
@@ -356,12 +348,11 @@ def main(argv=None):
     sarif.add_argument('directory')
     alerts = commands.add_parser('alerts')
     alerts.add_argument('--tool', required=True)
-    alerts.add_argument('--category', required=True)
     alerts.add_argument('--ref', required=True)
     args = parser.parse_args(argv)
     if args.command == 'sarif':
         return sarif_main(args.directory)
-    return alerts_main(args.tool, args.category, args.ref)
+    return alerts_main(args.tool, args.ref)
 
 
 if __name__ == '__main__':
