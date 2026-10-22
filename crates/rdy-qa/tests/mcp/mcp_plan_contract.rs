@@ -543,7 +543,7 @@ fn cp14_instructions_publish_the_change_plan_rule_at_initialization() {
     // the stdio server's initialize reply publishes it
     let (dir, r) = project();
     drop(r);
-    let mut c = McpClient::start(dir.path());
+    let c = McpClient::start(dir.path());
     let i = c.initialize_result()["result"]["instructions"]
         .as_str()
         .unwrap()
