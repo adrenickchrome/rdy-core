@@ -1224,7 +1224,7 @@ fn cp16_card_bounds_and_note_errors_are_exact() {
         .answer_all_recommended(
             &approver(),
             PERSON,
-            &[c.r#ref.clone()],
+            std::slice::from_ref(&c.r#ref),
             &[],
             RelayInput::default(),
         )
