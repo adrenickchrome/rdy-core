@@ -1,0 +1,11 @@
+# Nick is the initial human reviewer; agent identities are not independent human review.
+* @adrenickchrome
+/.github/ @adrenickchrome
+/.cargo/ @adrenickchrome
+/rust-toolchain.toml @adrenickchrome
+/Cargo.toml @adrenickchrome
+/Cargo.lock @adrenickchrome
+/deny.toml @adrenickchrome
+/scripts/ @adrenickchrome
+/tests/ci/ @adrenickchrome
+/tests/installer/ @adrenickchrome

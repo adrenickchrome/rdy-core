@@ -1054,6 +1054,8 @@ mod tests {
     fn hd12_ci_runs_the_fast_gate_as_a_user_with_node() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let text = std::fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("ci.yml");
+        let wrapper = std::fs::read_to_string(root.join("scripts/ci/run_fast.py"))
+            .expect("the fast-gate wrapper");
         let toolchain = std::fs::read_to_string(root.join("rust-toolchain.toml")).unwrap();
         let ci: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text).unwrap();
         let steps = ci["jobs"]["fast"]["steps"]
@@ -1071,8 +1073,14 @@ mod tests {
         );
         assert!(
             runs.iter()
-                .any(|r| r.contains("cargo qa --skip-perf --require-all")),
+                .any(|r| r.trim() == "python3 scripts/ci/run_fast.py"),
             "{runs:?}"
+        );
+        assert!(
+            wrapper.contains(
+                "subprocess.run(['cargo', 'qa', '--skip-perf', '--require-all'], env=env)"
+            ) && wrapper.contains("RDY_QA_REQUIRE_ALL='1'"),
+            "the wrapper must retain the required fast gate"
         );
         let channel = toolchain
             .lines()
@@ -1085,7 +1093,10 @@ mod tests {
             "{runs:?}"
         );
         assert!(
-            !text.contains("--deep") && !text.contains("--only perf"),
+            !text.contains("--deep")
+                && !text.contains("--only perf")
+                && !wrapper.contains("--deep")
+                && !wrapper.contains("--only"),
             "deep and perf stay off CI"
         );
     }

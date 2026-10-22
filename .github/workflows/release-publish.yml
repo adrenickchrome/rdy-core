@@ -1,0 +1,176 @@
+name: Core signed preview publication
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Successful first-attempt candidate run at the same main control revision
+        type: string
+        required: true
+      manifest_sha256:
+        description: Exact SHA-256 of reviewed SHA256SUMS
+        type: string
+        required: true
+      public_sshsig_base64:
+        description: One-line base64 of PUBLIC SHA256SUMS.sig; never a private key
+        type: string
+        required: true
+permissions: {}
+concurrency:
+  group: core-release-publisher
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+  CANDIDATE_RUN: ${{ inputs.candidate_run_id }}
+  MANIFEST_SHA: ${{ inputs.manifest_sha256 }}
+jobs:
+  verify:
+    if: github.repository == 'adrenickchrome/rdy-core' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      version: ${{ steps.seal.outputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.13'
+      - name: Resolve exact successful candidate and artifact identities
+        id: lookup
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release/control.py lookup --run-id "$CANDIDATE_RUN"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ steps.lookup.outputs.artifact_id }},${{ steps.lookup.outputs.provenance_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/packet
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify all asset bindings, GitHub provenance and offline founder signature
+        id: seal
+        env:
+          PUBLIC_SSHSIG_BASE64: ${{ inputs.public_sshsig_base64 }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release/control.py seal --directory "$RUNNER_TEMP/packet" --run-id "$CANDIDATE_RUN" --manifest-sha "$MANIFEST_SHA"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed-candidate
+          path: ${{ runner.temp }}/packet/*
+          if-no-files-found: error
+          retention-days: 7
+  native-install:
+    name: Signed native install (${{ matrix.target }})
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: signed-candidate
+          path: ${{ runner.temp }}/packet
+      - name: Fetch locked acceptance-tool prerequisites
+        run: cargo fetch --locked
+      - name: Real signed native CLI, daemon, MCP and managed install acceptance
+        env:
+          TARGET: ${{ matrix.target }}
+          CARGO_NET_OFFLINE: 'true'
+        run: python3 scripts/release/control.py accept --directory "$RUNNER_TEMP/packet" --run-id "$CANDIDATE_RUN" --manifest-sha "$MANIFEST_SHA" --target "$TARGET"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed-install-${{ matrix.target }}
+          path: ${{ runner.temp }}/acceptance-${{ matrix.target }}.json
+          if-no-files-found: error
+          retention-days: 7
+  publish:
+    needs: [verify, native-install]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: core-preview-release
+    permissions:
+      contents: write
+      actions: read
+    env:
+      # C08 enables this environment variable after exact settings readback.
+      CORE_RELEASE_CONTROLS_READY: ${{ vars.CORE_RELEASE_CONTROLS_READY }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: signed-candidate
+          path: ${{ runner.temp }}/packet
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: signed-install-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/acceptance
+      - name: Publish only accepted fixed assets; never execute candidate code here
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release/control.py publish --directory "$RUNNER_TEMP/packet" --run-id "$CANDIDATE_RUN" --manifest-sha "$MANIFEST_SHA" --acceptance-directory "$RUNNER_TEMP/acceptance"
+  public-install:
+    needs: [verify, publish]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.13'
+      - run: cargo fetch --locked
+      - name: Fresh public-download native install (explicit same DAG, no release-event recursion)
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          TARGET: ${{ matrix.target }}
+          CARGO_NET_OFFLINE: 'true'
+        run: python3 scripts/release/control.py public --version "$VERSION" --directory "$RUNNER_TEMP/public" --run-id "$CANDIDATE_RUN" --manifest-sha "$MANIFEST_SHA" --target "$TARGET"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: public-install-${{ matrix.target }}
+          path: ${{ runner.temp }}/acceptance-${{ matrix.target }}.json
+          if-no-files-found: error
+          retention-days: 7

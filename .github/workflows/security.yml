@@ -1,0 +1,89 @@
+name: security
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '23 8 * * 1'
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: security-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  policy:
+    name: Dependency, secret and workflow policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Verified tools
+        run: |
+          python3 scripts/ci/install_tools.py --out "$RUNNER_TEMP/security-tools" actionlint gitleaks cargo-deny
+          echo "$RUNNER_TEMP/security-tools" >> "$GITHUB_PATH"
+      - name: Workflow syntax
+        run: actionlint -config-file scripts/ci/actionlint.yaml -shellcheck= -pyflakes=
+      - name: Secret scan with no inline or user ignore policy
+        run: python3 scripts/ci/security_scan.py "$RUNNER_TEMP/security-tools/gitleaks"
+      - name: Toolchain and locked dependencies
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal
+          cargo +1.99.0 fetch --locked
+      - name: Full dependency policy with fresh advisory data
+        run: cargo +1.99.0 deny --locked check advisories licenses bans sources
+      - name: Pull request dependency delta
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: never
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [rust, actions]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+      - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
+        with:
+          category: /language:${{ matrix.language }}
+          output: sarif
+          upload: true
+      - name: Enforce reported result severity after successful analysis
+        run: python3 scripts/ci/check_sarif.py sarif
+  required:
+    name: Core security
+    if: always()
+    needs: [policy, codeql]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Security execution and result policy must pass
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          results = json.loads(os.environ['RESULTS'])
+          assert set(results) == {'policy', 'codeql'}
+          assert all(value['result'] == 'success' for value in results.values()), results
+          PY

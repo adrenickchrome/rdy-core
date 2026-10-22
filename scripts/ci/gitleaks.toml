@@ -1,0 +1,3 @@
+# No repository/user ignore list or inline gitleaks:allow is accepted by the CI caller.
+[extend]
+useDefault = true
