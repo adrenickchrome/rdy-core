@@ -6,7 +6,7 @@
 //! rules with a seal that names no earlier chain version. A failure at any frame, or a writer
 //! that moves during signing, leaves no half.
 use rdy_engine::engine::{Local, with_writer_result};
-use rdy_engine::plan::{PlanAnswerInput, PlanQuery, ProposePlanRequest, W_PLAN_OPEN};
+use rdy_engine::plan::{PlanAnswerInput, PlanQuery, ProposePlanRequest};
 use rdy_engine::signing_act::{SigningAct, run_signed_act};
 use rdy_engine::signing_crypto::{AgentIdentity, SigningAgent};
 use rdy_engine::{DecisionInput, E_STALE_BASE, LandOptions, ProposalInfo, Rdy, RdyError};
@@ -708,7 +708,6 @@ fn cp10_landing_seals_all_outcomes_and_named_decisions() {
         .collect();
     assert_eq!(plans.len(), 2, "{kinds_of:?}");
     assert!(at(kinds::PROPOSAL) < at(kinds::LANDING) && at(kinds::LANDING) < plans[0]);
-    let _ = (&s.c, W_PLAN_OPEN);
     r.fsck().unwrap();
 }
 
