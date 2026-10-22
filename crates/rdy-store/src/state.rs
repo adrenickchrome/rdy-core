@@ -1093,6 +1093,9 @@ impl PreparedTag {
     }
 }
 
+/// The version of a block id in a view as the view reads now (`Store::commit_to_view_with`).
+pub type ViewReads<'a> = &'a dyn Fn(&BlockId) -> Option<Hash>;
+
 /// A proposal version to prepare ([`Store::prepare_propose`]).
 pub struct ProposeRequest<'a> {
     pub view: &'a str,
@@ -1108,7 +1111,7 @@ pub struct ProposeRequest<'a> {
     pub prev: Option<Hash>,
     /// A change rdy adds to the view before the version (the key change, K1), with the view's
     /// present state as `commit_to_view_with` reads it; it joins the version's changes.
-    pub rekey: Option<(Change, &'a dyn Fn(&BlockId) -> Option<Hash>)>,
+    pub rekey: Option<(Change, ViewReads<'a>)>,
     /// The answer that holds the person's relay (O14); its `targets` become the version.
     pub answer: Option<Answer>,
 }

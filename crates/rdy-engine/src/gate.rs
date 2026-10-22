@@ -2264,7 +2264,7 @@ impl Rdy {
                 changes: ids,
                 alternative,
                 prev: open.map(|(_, latest)| latest),
-                rekey: rekey_change.map(|c| (c, &current as &dyn Fn(&BlockId) -> Option<Hash>)),
+                rekey: rekey_change.map(|c| (c, &current as rdy_store::plan::ViewReads<'_>)),
                 answer,
             })
             .map_err(to_rdy)?;
