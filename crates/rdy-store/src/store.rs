@@ -2570,6 +2570,36 @@ impl StoreReader {
         Ok(first.map(|(_, c)| c))
     }
 
+    /// Of `changes` (producers of one version), the one that last wrote it before `change` did:
+    /// of those landed before `change`'s landing, or in that landing and written before
+    /// `change`, the one whose landing and then itself was written last. Unlike
+    /// [`Self::producer_at`] it names one occurrence of a version that a block took more than
+    /// once: the one `change` read as its base. None when `change` has not landed or none of
+    /// `changes` landed before it.
+    pub fn producer_before(
+        &self,
+        changes: &[Hash],
+        change: &Hash,
+    ) -> Result<Option<Hash>, StoreError> {
+        let at = |kind: u8, h: &Hash| -> Result<Location, StoreError> {
+            self.index().typed(kind, h)?.ok_or(StoreError::NotFound(*h))
+        };
+        let Some(own) = self.index().landing_of(change)? else {
+            return Ok(None);
+        };
+        let bound = (at(kinds::LANDING, &own)?, at(kinds::CHANGE, change)?);
+        let mut last: Option<(Location, Location, Hash)> = None;
+        for c in changes {
+            if let Some(l) = self.index().landing_of(c)? {
+                let key = (at(kinds::LANDING, &l)?, at(kinds::CHANGE, c)?, *c);
+                if (key.0, key.1) < bound {
+                    last = Some(last.map_or(key, |k| k.max(key)));
+                }
+            }
+        }
+        Ok(last.map(|(_, _, c)| c))
+    }
+
     /// Of `changes`, the one written last.
     pub fn written_last(&self, changes: &[Hash]) -> Result<Option<Hash>, StoreError> {
         if changes.len() <= 1 {

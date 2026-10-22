@@ -1558,6 +1558,132 @@ fn cp16_fix1_retirement_origin_reads_stay_bounded_as_metadata_versions_accumulat
     }
 }
 
+/// The queue of a captured read state.
+fn queue_of(st: &rdy_engine::ReadState) -> Pending {
+    st.pending(&PendingQuery {
+        person: PERSON.into(),
+        session_ref: None,
+        max_tokens: CARD_MAX_TOKENS,
+    })
+    .expect("pending")
+}
+
+/// The re-affirmation card of `cause` in a captured read state's queue.
+fn card_of(st: &rdy_engine::ReadState, cause: &str) -> Item {
+    queue_of(st)
+        .items
+        .into_iter()
+        .find(|i| {
+            matches!(&i.plan_binding, Some(PlanCardBinding::Reaffirm { cause: c, .. }) if c.as_str() == cause)
+        })
+        .unwrap_or_else(|| panic!("no card of {cause}"))
+}
+
+/// Final review fix round 2 (N1): a retiring decision that returns to an earlier version (its
+/// premise changes to A, to B and to A again, and each time it is re-affirmed for the same
+/// reason) keeps the retirement's origin: the landing that retired the cause. A reader with a
+/// warm origin cache, one after a full invalidation, a captured state and a reopened project all
+/// name that landing, with the same binding and hash.
+#[test]
+fn cp16_fix2_a_repeated_retirer_version_keeps_the_retirement_origin_for_every_reader() {
+    let (dir, mut r) = project();
+    let w = world(&mut r);
+    let x = decide(&mut r, &w.s, "X rule", Some("X"), &[&w.a]);
+    let dep = decide(&mut r, &w.s, "Dep rule", Some("Dep"), &[&x]);
+    let y = r
+        .supersede(
+            &writer(),
+            "sx",
+            &x,
+            None,
+            DecisionInput {
+                parent: w.s.clone(),
+                statement: "Y rule".into(),
+                title: Some("Y".into()),
+                depends_on: vec![w.c.clone()],
+                reversibility: Some("two_way".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .created["$decision"]
+        .clone();
+    let retired = land(&mut r, "sx").unwrap();
+    let rec = r.store().landing(&retired.parse().unwrap()).unwrap();
+    let origin = (
+        rec.approved_by.actor.clone(),
+        rdy_engine::rfc3339(rec.approved_by.at_ms),
+    );
+    assert_eq!(members(&the_card(&r, &x)), vec![dep.clone()]);
+    // y's premise c goes to A, to B and to A again; each time another person re-affirms y for
+    // the same reason, and the queue is read (the warm reader learns each origin)
+    let mut versions = vec![];
+    for (n, (body, by)) in [
+        ("C is A.", "human:review1"),
+        ("C is B.", "human:review2"),
+        ("C is A.", "human:review3"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        change(&mut r, &format!("xc{n}"), &w.c, body);
+        write(
+            &mut r,
+            &format!("ry{n}"),
+            json!([{"op": "reaffirm", "id": y, "targets": [w.c], "reason": "Y still fits C."}]),
+        )
+        .unwrap();
+        land_as(
+            &mut r,
+            &format!("ry{n}"),
+            &Session::human(by.into(), Role::Approver),
+        );
+        versions.push(version(&r, &y));
+        if n < 2 {
+            let warm = the_card(&r, &x);
+            assert_eq!(
+                (warm.raised_by.clone(), warm.raised_at.clone()),
+                origin,
+                "after re-affirmation {}",
+                n + 1
+            );
+        }
+    }
+    assert_eq!(
+        versions[2], versions[0],
+        "y is back at its first re-affirmed version"
+    );
+    assert_ne!(versions[1], versions[0]);
+    let captured = r.read();
+    let warm = the_card(&r, &x);
+    let end = log_end(&r);
+    let seen = |i: &Item| {
+        (
+            i.raised_by.clone(),
+            i.raised_at.clone(),
+            i.plan_binding.clone(),
+            i.card_hash.clone(),
+        )
+    };
+    assert_eq!(
+        (warm.raised_by.clone(), warm.raised_at.clone()),
+        origin,
+        "warm"
+    );
+    r.invalidate();
+    let cold = the_card(&r, &x);
+    assert_eq!(seen(&cold), seen(&warm), "after a full invalidation");
+    assert_eq!(seen(&card_of(&captured, &x)), seen(&warm), "captured");
+    drop(captured);
+    drop(r);
+    let r = Rdy::open(dir.path()).expect("reopen");
+    assert_eq!(log_end(&r), end, "reopening writes nothing");
+    assert_eq!(seen(&the_card(&r, &x)), seen(&warm), "reopened");
+    // a state captured cold names the same origin
+    let captured = r.read();
+    assert_eq!(seen(&card_of(&captured, &x)), seen(&warm), "captured cold");
+}
+
 /// Each numeric bound of a card is checked where the queue builds the card. A group one past a
 /// bound, with the other two bounds at the product's, is refused with the exact `E_LIMIT` by the
 /// queue read and by both answers, which write nothing; the same group at the bound is a card.

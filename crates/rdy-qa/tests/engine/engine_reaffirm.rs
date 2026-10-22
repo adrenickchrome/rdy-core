@@ -1030,6 +1030,81 @@ fn cp5_deleted_premise_reaffirmation_proposes_and_lands() {
     r.fsck().unwrap();
 }
 
+/// The Connected issues coverage reports on `block` in `scope`.
+fn connected_issues(r: &Rdy, scope: &Scope, block: &str) -> Vec<coverage::CoverageIssue> {
+    r.read().coverage_issues(scope).unwrap().blocks[&id(block)]
+        .issues
+        .iter()
+        .filter(|x| x.dimension == coverage::Dimension::Connected)
+        .cloned()
+        .collect()
+}
+
+/// final-round1 (coverage uses the task-5 R1 predicate): a citation that the accepted decision
+/// keeps after its target's deletion (`reaffirmed` records `deleted` for it) is no dangling
+/// reference for coverage either: `rdy_coverage` and the engine's coverage report no
+/// `dangling_ref` on it, with no repair advice, and its Connected check stands. Without the
+/// re-affirmation, the view that deletes the target still shows the issue and its advice.
+#[test]
+fn cp5_final1_a_kept_deleted_citation_is_no_dangling_ref_for_coverage() {
+    let (_d, mut r) = project();
+    let (c, e, d) = citing_pair(&mut r);
+
+    // no re-affirmation: the view that deletes c shows d's dangling reference and its advice
+    write(&mut r, "n", json!([{"op": "delete", "id": c}])).unwrap();
+    let issues = connected_issues(&r, &Scope::View("n".into()), &d);
+    assert_eq!(
+        issues
+            .iter()
+            .map(|x| (x.code, x.subject.clone(), x.fix.clone()))
+            .collect::<Vec<_>>(),
+        vec![(
+            coverage::IssueCode::DanglingRef,
+            Some(c.clone()),
+            format!("fix the reference to {c}, which does not exist")
+        )]
+    );
+
+    // the re-affirmed deletion, in the view and landed: no Connected issue on d
+    land_deleted_premise(&mut r, &c);
+    assert!(r.read().block(&Scope::Canon, &id(&c)).is_err(), "c is gone");
+    assert_eq!(connected_issues(&r, &Scope::Canon, &d), vec![]);
+    // a second deleted target without its own acknowledgement is still dangling
+    write(&mut r, "n2", json!([{"op": "delete", "id": e}])).unwrap();
+    let issues = connected_issues(&r, &Scope::View("n2".into()), &d);
+    assert_eq!(
+        issues
+            .iter()
+            .map(|x| (x.code, x.subject.clone()))
+            .collect::<Vec<_>>(),
+        vec![(coverage::IssueCode::DanglingRef, Some(e.clone()))]
+    );
+
+    // the MCP door reads the same report
+    let mut st = rdy_mcp::tools::McpState::new(std::sync::Arc::new(engine::Local::new(r)));
+    rdy_mcp::tools::rdy_session(
+        &mut st,
+        serde_json::from_value(json!({"actor": "agent:cov", "run": "r1", "role": "writer"}))
+            .unwrap(),
+    )
+    .unwrap();
+    let v = rdy_mcp::tools::rdy_coverage(
+        &mut st,
+        serde_json::from_value(json!({"scope": "canon", "max_tokens": 100000})).unwrap(),
+    )
+    .unwrap();
+    let on_d: Vec<&Value> = v["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["block"] == d.as_str())
+        .collect();
+    assert!(
+        on_d.iter().all(|i| i["code"] != "dangling_ref"),
+        "{on_d:#?}"
+    );
+}
+
 /// task-5 R1, canon moved: a later write of a decision that keeps a deleted citation (here a
 /// re-affirmation against a changed `e`) passes the write's and the landing's reference checks
 /// and raises no premise shift for the deleted target, and keeps the `deleted` record. A record

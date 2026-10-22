@@ -283,26 +283,31 @@ fn retires(b: &Block, cause: &BlockId) -> bool {
 /// The most retirement origins one [`RetirementOrigins`] keeps; past it, it starts again.
 const MAX_RETIREMENT_ORIGINS: usize = 100_000;
 
-/// What the card builds have learnt about where retirements began (final review F4): for a
-/// retiring decision's version, the change that wrote it as canon reads it, and the retired
-/// cause, the earliest version of its unbroken run of retiring versions. Every state a publish
-/// carries to (all but a full publish's) shares it, so a metadata-only version of a retiring
-/// decision costs one step past the version whose origin is known, however long its history.
-/// The key holds the producing change: an entry stands for the history that change's landing
-/// gives the version, which a later landing does not change unless it writes the version again
-/// (another producer, another key).
+/// What the card builds have learnt about where retirements began (final review F4): for one
+/// occurrence of a retiring decision's version (the version and the change that wrote it there)
+/// and the retired cause, the change that wrote the earliest version of its unbroken run of
+/// retiring versions (None when that version has no producer). Every state a publish carries to
+/// (all but a full publish's) shares it, so a metadata-only version of a retiring decision
+/// costs one step past the occurrence whose origin is known, however long its history.
+///
+/// An entry is a fact of the log, the same for every reader: the walk steps from each change to
+/// the change that wrote its base before it ([`rdy_store::StoreReader::producer_before`]), so a
+/// version the decision took twice is two occurrences with their own histories (fix round 2,
+/// N1), and no later landing changes what came before a change.
 #[derive(Default)]
-pub(crate) struct RetirementOrigins(std::sync::Mutex<std::collections::HashMap<OriginKey, Hash>>);
+pub(crate) struct RetirementOrigins(
+    std::sync::Mutex<std::collections::HashMap<OriginKey, Option<Hash>>>,
+);
 
 /// A retiring decision's version, the change that wrote it, and the retired cause.
 type OriginKey = (Hash, Hash, BlockId);
 
 impl RetirementOrigins {
-    fn get(&self, k: &OriginKey) -> Option<Hash> {
+    fn get(&self, k: &OriginKey) -> Option<Option<Hash>> {
         self.0.lock().ok()?.get(k).copied()
     }
 
-    fn put(&self, keys: Vec<OriginKey>, origin: Hash) {
+    fn put(&self, keys: Vec<OriginKey>, origin: Option<Hash>) {
         let Ok(mut m) = self.0.lock() else { return };
         if m.len().saturating_add(keys.len()) > MAX_RETIREMENT_ORIGINS {
             m.clear();
@@ -329,29 +334,31 @@ pub fn retirement_steps_for_tests() -> u64 {
 }
 
 /// The landing that introduced the retirement of `cause` by `retirer` (its canon version): the
-/// landing of the earliest version of the retirer's unbroken run of versions back from canon
-/// that each retire `cause`. A later version that changes only the retirer's metadata (a
-/// re-affirmation, say) keeps the retirement and is not its origin. The walk stops at the
-/// first version whose origin the state's [`RetirementOrigins`] knows, and records the origin
-/// of every version it stepped through, unless the run repeats a version.
+/// landing of the change that wrote the earliest version of the retirer's unbroken run of
+/// versions back from canon that each retire `cause`. A later version that changes only the
+/// retirer's metadata (a re-affirmation, say) keeps the retirement and is not its origin.
+///
+/// The walk follows the log, one occurrence at a time: canon's version as the change that last
+/// wrote it at the state's head, then each base as the change that wrote it before the change
+/// that read it ([`rdy_store::StoreReader::producer_before`]). So a retirer that returns to an
+/// earlier version walks that version's later history, not its first one, and the walk ends:
+/// each step goes back in the log. It stops at the first occurrence whose origin the state's
+/// [`RetirementOrigins`] knows, and records the origin of every occurrence it stepped through.
 fn retirement_landing(
     st: &ReadState,
     retirer: &Block,
     cause: &BlockId,
 ) -> Result<Option<Hash>, RdyError> {
     let reader = st.reader();
-    let head = st.canon_head();
     let known = &st.retirement_origins;
     let mut v = retirer.version_hash();
-    let mut seen = BTreeSet::from([v]);
+    RETIREMENT_STEPS.with(|c| c.set(c.get() + 1));
+    let Some(mut change) = reader.producer_at(&reader.producers(&v)?, st.canon_head().as_ref())?
+    else {
+        return Ok(None);
+    };
     let mut walked: Vec<OriginKey> = vec![];
-    let mut repeats = false;
     let origin = loop {
-        RETIREMENT_STEPS.with(|c| c.set(c.get() + 1));
-        let producers = reader.producers(&v)?;
-        let Some(change) = reader.producer_at(&producers, head.as_ref())? else {
-            break v;
-        };
         let key = (v, change, cause.clone());
         if let Some(origin) = known.get(&key) {
             break origin;
@@ -366,22 +373,25 @@ fn retirement_landing(
                 _ => None,
             });
         let Some(base) = base else {
-            break v;
+            break Some(change);
         };
-        if seen.contains(&base) {
-            repeats = true;
-            break v;
-        }
         if !retires(&reader.get_block(&base)?, cause) {
-            break v;
+            break Some(change);
         }
-        seen.insert(base);
+        RETIREMENT_STEPS.with(|c| c.set(c.get() + 1));
+        let Some(before) = reader.producer_before(&reader.producers(&base)?, &change)? else {
+            // the base came into canon with no landed change: the old walk's origin, a version
+            // with no landing
+            break None;
+        };
         v = base;
+        change = before;
     };
-    if !repeats {
-        known.put(walked, origin);
+    known.put(walked, origin);
+    match origin {
+        Some(c) => Ok(reader.landing_of(&c)?),
+        None => Ok(None),
     }
-    landing_of_version(st, &origin)
 }
 
 /// Who raised the card of a cause and when: the approver of the last landing that changed the
