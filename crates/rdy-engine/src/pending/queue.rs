@@ -11,8 +11,9 @@
 //! <closed> closed, <deferred> deferred`, code items included), Tensions (D-45RG6, C7),
 //! Coverage (D-C6HHV), Confidence (D-XZXCE), Base and Exceptions. Consequences, Coverage and
 //! Confidence are worked out on the canon the version's landing would give, never on its view,
-//! which may have moved on. No fact reads an answer, so an answer beside the batch never moves
-//! the batch card.
+//! which may have moved on. No fact reads an answer. The approve option's reason reads one
+//! answer only: while the deferral card has no acceptance, it says the landing waits for each
+//! card beside it (p-T69HT); an acceptance gives the reason of the holds that remain.
 //!
 //! # Exceptions (p-FN596, F3; closed)
 //!
@@ -358,16 +359,9 @@ pub(crate) fn approval_holds(
         }
         (v.deferral_item(now), v.rejected(st)?)
     } else {
-        match st.reader().plan_of_proposal(&pref.version, st.seq())? {
+        match bound_deferral_item(st, pref, &p, now)? {
             None => (None, vec![]),
-            Some(bound) => {
-                let plan = version_plan(st, &p, Some(bound))?;
-                let card = deferral_item(pref, &plan).map(|mut it| {
-                    raised_from(&p, &mut it, now);
-                    it
-                });
-                (card, deferrals_refused(st, pref)?.into_iter().collect())
-            }
+            Some(card) => (card, deferrals_refused(st, pref)?.into_iter().collect()),
         }
     };
     let (mut deferral, mut accepted_by) = (None, None);
@@ -386,6 +380,52 @@ pub(crate) fn approval_holds(
         deferral,
         accepted: accepted_by,
     })
+}
+
+/// The deferral card of version `pref` (whose record is `p`), answered or not, read from its
+/// bound plan alone: `None` for a version with no bound plan (O19), `Some(None)` for a bound
+/// version with no deferred non-code item. A bound version whose plan cannot be read is that
+/// error (fail closed). The card is the one the queue builds ([`Version::deferral_item`]).
+fn bound_deferral_item(
+    st: &ReadState,
+    pref: &ProposalRef,
+    p: &Proposal,
+    now: i64,
+) -> Result<Option<Option<Item>>, RdyError> {
+    let Some(bound) = st.reader().plan_of_proposal(&pref.version, st.seq())? else {
+        return Ok(None);
+    };
+    let plan = version_plan(st, p, Some(bound))?;
+    Ok(Some(deferral_item(pref, &plan).map(|mut it| {
+        raised_from(p, &mut it, now);
+        it
+    })))
+}
+
+/// The deferral card the explicit ref `r` (`defer:P-x@n`) names, its card whole, whether or not
+/// its version is ready and whether or not the card has an answer (D-AAQ9Z). A
+/// refusal makes the version not ready, so its group leaves the queue, yet the person's later
+/// answer to the same card replaces it: the latest answer wins. The ref must name, as the queue
+/// writes it, an open proposal's latest version that no `reject_proposal` answer took out; any
+/// other ref, or a version with no deferral card, gives `None`. The answer that binds it makes
+/// every check it makes on a queue card: the card hash, the person and the relay.
+pub(crate) fn deferral_card(st: &ReadState, r: &str) -> Result<Option<Item>, RdyError> {
+    let Some(want) = r.strip_prefix("defer:") else {
+        return Ok(None);
+    };
+    let Some((pref, p)) = open_proposals(st)?
+        .into_iter()
+        .find(|(pref, _)| pref.to_string() == want)
+    else {
+        return Ok(None);
+    };
+    if answered(st, want, AnswerAct::RejectProposal)? {
+        return Ok(None);
+    }
+    bound_deferral_item(st, &pref, &p, now_ms())?
+        .flatten()
+        .map(|i| finish(i, CARD_MAX_TOKENS))
+        .transpose()
 }
 
 /// The issue of a deferral card of `pref` the person refused (D-AAQ9Z), if its latest answer
@@ -601,8 +641,11 @@ impl Reaffirmed {
     }
 }
 
-/// The causes whose re-affirmation `after` records and `before` (the block in canon, if any)
-/// does not record the same way: each with the reason `after` records, in cause-id order. A
+/// The causes this version re-affirms, read from the block delta between `before` (the block in
+/// canon, if any) and `after`: each cause whose re-affirmation `after` records and `before` does
+/// not record the same way, or whose pin `after` moved (a second re-affirmation of a cause with
+/// the same reason writes the same entry, and only its pin moves; a frozen decision's pins move
+/// only by a re-affirmation). Each comes with the reason `after` records, in cause-id order. A
 /// field that does not read as a re-affirmation map counts as none.
 fn reaffirmed_causes(before: Option<&Block>, after: &Block) -> Vec<(BlockId, String)> {
     let read = |b: Option<&Block>| {
@@ -611,9 +654,10 @@ fn reaffirmed_causes(before: Option<&Block>, after: &Block) -> Vec<(BlockId, Str
             .unwrap_or_default()
     };
     let old = read(before);
+    let pin = |b: Option<&Block>, t: &BlockId| b.and_then(|b| b.pins.get(t).copied());
     read(Some(after))
         .into_iter()
-        .filter(|(t, r)| old.get(t) != Some(r))
+        .filter(|(t, r)| old.get(t) != Some(r) || pin(before, t) != pin(Some(after), t))
         .map(|(t, r)| (t, r.reason))
         .collect()
 }
@@ -818,6 +862,14 @@ impl Version {
         Some(it)
     }
 
+    /// Whether the version's deferral card stands with no valid acceptance (D-AAQ9Z, p-T69HT):
+    /// it has a card, and the latest answer to it is not an `accept_deferrals` bound to its
+    /// current card. An answer that cannot be read counts as none, so the card stays open.
+    fn deferral_open(&self, st: &ReadState, now: i64) -> bool {
+        self.deferral_item(now)
+            .is_some_and(|it| !matches!(accepted(st, &it), Ok(Some(_))))
+    }
+
     /// Who raised the version's items, when, and how long ago.
     fn raised(&self, it: &mut Item, now: i64) {
         raised_from(&self.p, it, now);
@@ -859,7 +911,7 @@ impl Version {
             "Lands the proposal in canon.",
             Some(approve_reason(
                 self.exception_count(),
-                self.deferral_item(now).is_some(),
+                self.deferral_open(st, now),
             )),
         );
         if self.removal.is_some() {
@@ -1288,8 +1340,8 @@ pub const APPROVE_REASON: &str = "its checks pass and nothing blocks it";
 pub const APPROVE_REASON_BESIDE: &str =
     "its checks pass, and it lands after you confirm each decision beside it";
 
-/// The approve option's reason when a deferral card stands beside the batch, with or without
-/// exceptions (D-AAQ9Z): the landing waits for an answer to each card.
+/// The approve option's reason while a deferral card with no acceptance stands beside the
+/// batch, with or without exceptions (D-AAQ9Z): the landing waits for an answer to each card.
 pub const APPROVE_REASON_CARDS: &str =
     "its checks pass, and it lands after you answer each card beside it";
 
@@ -1300,9 +1352,11 @@ pub const REAFFIRMS_FACT: &str = "Re-affirms";
 pub const REAFFIRMS_SEPARATOR: &str = "; ";
 
 /// The approve option's reason: computed from the batch card's own state, never the summary
-/// (D-D8FAB). The set is closed: [`APPROVE_REASON`], [`APPROVE_REASON_BESIDE`] or, when the
-/// version has a deferral card, [`APPROVE_REASON_CARDS`]. It reads no answer, so an answer
-/// beside the batch never moves the batch card.
+/// (D-D8FAB). The set is closed: [`APPROVE_REASON`], [`APPROVE_REASON_BESIDE`] or, while the
+/// version's deferral card has no acceptance (`deferral`), [`APPROVE_REASON_CARDS`]. Only the
+/// deferral acceptance moves it: an acceptance gives the batch card the reason of the holds
+/// that remain, so an approval bound to the card shown before it is `E_PROPOSAL_MOVED`, with
+/// the fresh card. A confirm of an exception never moves it.
 fn approve_reason(exceptions: usize, deferral: bool) -> &'static str {
     match (exceptions, deferral) {
         (_, true) => APPROVE_REASON_CARDS,

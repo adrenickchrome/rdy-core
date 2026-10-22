@@ -21,7 +21,9 @@
 //!   text of an approval of a moved version.
 //! - Any other ref that is not in the queue (its version moved, it was answered, it landed, or
 //!   its batch is not ready): `E_ITEM_MOVED`, `<ref> changed since it was shown`. A batch that is
-//!   not ready lists its issues.
+//!   not ready lists its issues. One exception: a `defer:P-x@n` ref of an open proposal's latest
+//!   version binds its deferral card whether or not the version is ready or the card answered
+//!   (D-AAQ9Z), so a refused card takes a later acceptance; every other check below applies.
 //! - A relayed answer passes `card_hash`. A local answer may omit it, and then binds to the
 //!   version only. A decision version proposed in two views stands beside each batch with the
 //!   same ref and its own card, so a `card_hash` picks the card of that ref with that hash. When
@@ -50,7 +52,7 @@ use crate::gate::{
     LandInfo, landed_as, latest_version, moved, resolve_in, withdrawn, withdrawn_error,
 };
 use crate::pending::PendingQuery;
-use crate::pending::queue::Eligible;
+use crate::pending::queue::{Eligible, deferral_card};
 use crate::pending::{CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, Item, ItemKind, ItemOption};
 use crate::proposal_show::is_proposal_ref;
 use crate::tensions::set::tension_hex;
@@ -441,7 +443,14 @@ fn bind(
         session_ref: None,
         max_tokens: CARD_MAX_TOKENS,
     })?;
-    let cards = q.items_of(r)?;
+    let mut cards = q.items_of(r)?;
+    // D-AAQ9Z: an explicit deferral ref of the current version binds its card outside the ready
+    // queue too, so a refused card takes a later answer (the latest answer wins)
+    if cards.is_empty()
+        && let Some(card) = deferral_card(st, r)?
+    {
+        cards.push(card);
+    }
     let Some(first) = cards.first() else {
         return Err(gone(st, &q, r)?);
     };

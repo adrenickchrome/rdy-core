@@ -1356,3 +1356,221 @@ fn cp12_all_recommended_refuses_before_any_answer() {
     assert_eq!(log_end(&r), before, "zero new frames");
     assert!(r.read().reader().answer_of(&ex[0]).unwrap().is_none());
 }
+
+/// Fix round 1 (finding 1), D-GV465: a re-affirmation is read from the complete block delta. A
+/// second change of the same cause, re-affirmed with the same reason, writes the same
+/// `reaffirmed` entry but moves the cause's pin: it is a new re-affirmation of the `one_way`
+/// decision, so it stands beside its batch and the landing waits for its confirm.
+#[test]
+fn cp12_repeated_reaffirm_reason_still_needs_confirmation() {
+    let (_d, mut r) = project();
+    let s = spec(&mut r);
+    let one = decision(&mut r, "d1", &s.s, "Never drop A", &[&s.a], "one_way");
+    let reaffirm = |r: &mut Rdy, view: &str| -> ProposalInfo {
+        write(
+            r,
+            view,
+            json!([{"op": "reaffirm", "id": one, "targets": [s.a], "reason": "A still fits."}]),
+        )
+        .unwrap_or_else(|e| panic!("reaffirm in {view}: {e}"));
+        propose(r, view, &[])
+    };
+    let exceptions = |r: &Rdy, pref: &str| -> Vec<Item> {
+        queue(r)
+            .items
+            .into_iter()
+            .filter(|i| i.kind == ItemKind::Confirm && i.batch.as_deref() == Some(pref))
+            .collect()
+    };
+    // the first change of a, re-affirmed, confirmed and landed
+    edit(&mut r, "x1", &s.a, "A holds 60 days.");
+    rdy_qa::fixtures::land(&mut r, "x1").unwrap();
+    let p1 = reaffirm(&mut r, "w1");
+    let ex1 = exceptions(&r, &p1.r#ref);
+    assert_eq!(ex1.len(), 1, "{ex1:#?}");
+    assert_eq!(ex1[0].exception, Some(ExceptionKind::ReaffirmOneWay));
+    confirm_exceptions(&mut r, &approver(), &p1.r#ref);
+    r.land_with(&approver(), &p1.r#ref, LandOptions::default())
+        .expect("the first re-affirmation lands");
+    // the second change of a, re-affirmed with the same reason
+    edit(&mut r, "x2", &s.a, "A holds 90 days.");
+    rdy_qa::fixtures::land(&mut r, "x2").unwrap();
+    let p2 = reaffirm(&mut r, "w2");
+    let ex2 = exceptions(&r, &p2.r#ref);
+    assert_eq!(ex2.len(), 1, "a new re-affirmation: {ex2:#?}");
+    assert_eq!(ex2[0].exception, Some(ExceptionKind::ReaffirmOneWay));
+    assert_ne!(ex2[0].r#ref, ex1[0].r#ref);
+    assert_eq!(fact(&ex2[0], "Re-affirms"), s.a);
+    assert_eq!(
+        ex2[0].options[0].recommended.as_ref().map(|r| r.reason()),
+        Some("A still fits.")
+    );
+    let batch = item_of(&r, &p2.r#ref).unwrap();
+    assert_eq!(fact(&batch, "Exceptions"), "1");
+    let e = land_err(&mut r, &p2.r#ref);
+    assert_eq!(e.code, E_EXCEPTION_OPEN, "{e}");
+    assert_eq!(
+        e.fix,
+        format!("answer each exception card first: {}", ex2[0].r#ref)
+    );
+    confirm_exceptions(&mut r, &approver(), &p2.r#ref);
+    r.land_with(&approver(), &p2.r#ref, LandOptions::default())
+        .expect("the confirmed re-affirmation lands");
+}
+
+/// Fix round 1 (finding 2), D-AAQ9Z: a refused deferral card still takes a later answer. The
+/// refusal makes the version not ready, but an explicit `defer:P-x@n` of the current version
+/// binds its frozen card outside the ready queue, with the card's full hash; the latest valid
+/// answer wins, so an acceptance replaces the refusal and the version lands. A refusal can
+/// replace an acceptance the same way.
+#[test]
+fn cp12_refused_deferral_takes_a_later_acceptance() {
+    let (_d, mut r) = project();
+    let s = spec(&mut r);
+    let p = deferred(&mut r, &s);
+    let dr = defer_ref(&p.r#ref);
+    let card = item_of(&r, &dr).expect("the deferral card");
+    let answer = |r: &mut Rdy, option: &str| {
+        r.answer(
+            &approver(),
+            PERSON,
+            AnswerRequest {
+                r#ref: dr.clone(),
+                option: option.into(),
+                card_hash: Some(card.card_hash.clone()),
+                ..AnswerRequest::default()
+            },
+        )
+    };
+    let v = answer(&mut r, "o2").unwrap();
+    assert_eq!(v.act, "refuse_deferrals");
+    let q = queue(&r);
+    assert!(q.not_ready.iter().any(|n| n.r#ref == p.r#ref), "{q:#?}");
+    // the same unchanged card, accepted: the acceptance replaces the refusal
+    let v = answer(&mut r, "o1").unwrap();
+    assert_eq!(v.act, "accept_deferrals");
+    let (h1, a) = answer_record(&r, &dr);
+    assert_eq!(v.answer, Some(h1.to_string()));
+    assert_eq!(a.act, AnswerAct::AcceptDeferrals);
+    assert_eq!(a.card_hash, Some(h(&card.card_hash)));
+    let q = queue(&r);
+    assert!(q.not_ready.iter().all(|n| n.r#ref != p.r#ref), "{q:#?}");
+    assert!(q.items.iter().any(|i| i.r#ref == p.r#ref), "ready again");
+    assert!(q.items.iter().all(|i| i.r#ref != dr), "accepted: no card");
+    // an accepted card still binds an explicit answer: a refusal replaces the acceptance
+    let v = answer(&mut r, "o2").unwrap();
+    assert_eq!(v.act, "refuse_deferrals");
+    assert!(
+        queue(&r).not_ready.iter().any(|n| n.r#ref == p.r#ref),
+        "refused again"
+    );
+    let e = land_err(&mut r, &p.r#ref);
+    assert_eq!(e.code, E_VALIDATION, "{e}");
+    // a card hash that is not the card's is still E_ITEM_MOVED, with the fresh card
+    let before = log_end(&r);
+    let e = r
+        .answer(
+            &approver(),
+            PERSON,
+            AnswerRequest {
+                r#ref: dr.clone(),
+                option: "o1".into(),
+                card_hash: Some(h1.to_string()),
+                ..AnswerRequest::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(e.code, E_ITEM_MOVED, "{e}");
+    assert_eq!(e.corrected, Some(card_json(&card)));
+    assert_eq!(log_end(&r), before);
+    // accepted once more, it lands, and the seal names that acceptance
+    let v = answer(&mut r, "o1").unwrap();
+    let accepted = h(v.answer.as_deref().unwrap());
+    let l = h(&r
+        .land_with(&approver(), &p.r#ref, LandOptions::default())
+        .expect("lands")
+        .landing);
+    let st = r.read();
+    let sh = st
+        .reader()
+        .plan_of_landing(&l, log_end(&r))
+        .unwrap()
+        .unwrap();
+    let sealed = st.reader().plan(&sh).unwrap();
+    let deferred: Vec<_> = sealed
+        .seal
+        .as_ref()
+        .unwrap()
+        .items
+        .iter()
+        .filter(|i| i.outcome == PlanOutcome::Deferred)
+        .collect();
+    assert_eq!(deferred.len(), 2);
+    assert!(deferred.iter().all(|i| i.answer == Some(accepted)));
+    drop(st);
+    // a landed version's card no longer binds
+    let before = log_end(&r);
+    let e = answer(&mut r, "o1").unwrap_err();
+    assert_eq!(e.code, E_ITEM_MOVED, "{e}");
+    assert_eq!(log_end(&r), before);
+}
+
+/// Fix round 1 (finding 3), p-T69HT: the deferral reason holds only while the deferral card has
+/// no valid acceptance. Once it is accepted, the approve reason is the one of the holds that
+/// remain: none, or the exceptions.
+#[test]
+fn cp12_approve_reason_after_deferral_acceptance() {
+    let (_d, mut r) = project();
+    let s = spec(&mut r);
+    let reason = |r: &Rdy, pref: &str| {
+        item_of(r, pref).unwrap().options[0]
+            .recommended
+            .as_ref()
+            .unwrap()
+            .reason()
+            .to_string()
+    };
+    let deferral = "its checks pass, and it lands after you answer each card beside it";
+    // no exception: nothing blocks it once the card is accepted
+    let p = deferred(&mut r, &s);
+    assert_eq!(reason(&r, &p.r#ref), deferral);
+    let shown = item_of(&r, &p.r#ref).unwrap();
+    answer_local(&mut r, &defer_ref(&p.r#ref), "o1").unwrap();
+    assert_eq!(reason(&r, &p.r#ref), APPROVE_REASON);
+    // the acceptance moved the approve card: an approval bound to the card shown before it is
+    // E_PROPOSAL_MOVED, with the fresh card, and writes nothing
+    let fresh = item_of(&r, &p.r#ref).unwrap();
+    assert_ne!(fresh.card_hash, shown.card_hash);
+    let before = log_end(&r);
+    let e = r
+        .answer(
+            &approver(),
+            PERSON,
+            AnswerRequest {
+                r#ref: p.r#ref.clone(),
+                option: "approve".into(),
+                card_hash: Some(shown.card_hash.clone()),
+                ..AnswerRequest::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(e.code, rdy_engine::E_PROPOSAL_MOVED, "{e}");
+    assert_eq!(e.corrected, Some(card_json(&fresh)));
+    assert_eq!(log_end(&r), before);
+    // with an exception: the exception reason once the card is accepted
+    r.decide(
+        &writer(),
+        "w",
+        DecisionInput {
+            parent: s.s.clone(),
+            statement: "Hold sixty".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let p2 = propose(&mut r, "w", &[]);
+    assert_eq!(reason(&r, &p2.r#ref), deferral);
+    answer_local(&mut r, &defer_ref(&p2.r#ref), "o1").unwrap();
+    assert_eq!(reason(&r, &p2.r#ref), APPROVE_REASON_BESIDE);
+    assert_eq!(fact(&item_of(&r, &p2.r#ref).unwrap(), "Exceptions"), "1");
+}
