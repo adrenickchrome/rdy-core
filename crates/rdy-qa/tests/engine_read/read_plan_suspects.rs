@@ -767,12 +767,15 @@ fn cp13_historical_reads_do_not_consult_current_code() {
     );
 }
 
+/// The log end, the bytes of each segment file and the refs.
+type Snapshot = (Location, Vec<(String, Vec<u8>)>, Vec<(String, Vec<u8>)>);
+
 #[test]
 fn cp13_reading_suspects_changes_no_log_or_ref() {
     let (dir, mut r, _app, ids) = with_code();
     drift(&mut r, "v1", &ids, "moved");
     land_deferring(&mut r, "v1", &ids.b, &ids.a, "later", agent_w(), alice());
-    let snapshot = |r: &Rdy| -> (Location, Vec<(String, Vec<u8>)>, Vec<(String, Vec<u8>)>) {
+    let snapshot = |r: &Rdy| -> Snapshot {
         let mut files = vec![];
         let segments = dir.path().join(".rdy/store/segments");
         for e in std::fs::read_dir(segments).unwrap() {
