@@ -709,6 +709,7 @@ mod tests {
     use super::*;
     #[test]
     fn msw9_a_warm_up_that_panics_still_answers_ready() {
+        let log = crate::daemon::capture_log_for_tests(&["warm-up test panic"]);
         let r = Readiness::new();
         assert!(warm_then_ready(
             &r,
@@ -716,5 +717,9 @@ mod tests {
             || true
         ));
         assert!(r.is_ready());
+        assert_eq!(
+            log.lines(),
+            ["warm-up panicked (warm-up test panic); serving with a cold cache"]
+        );
     }
 }

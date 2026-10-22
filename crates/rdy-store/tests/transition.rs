@@ -238,7 +238,11 @@ fn ib14_a_failed_seal_poisons_and_the_reopen_loses_the_whole_batch() {
         st.set_refs(vec![("t/b".into(), vec![2])]).is_err(),
         "poisoned"
     );
-    drop(st);
+    let notice = rdy_store::drop_unclean_for_tests(st);
+    assert!(
+        notice.contains("an earlier failed write could not be rolled back"),
+        "{notice}"
+    );
     let st = reopen(&dir);
     assert_eq!(st.reader().get_ref("t/a").unwrap(), None);
     st.verify().unwrap();

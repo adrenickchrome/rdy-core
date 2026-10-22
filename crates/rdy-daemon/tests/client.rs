@@ -687,6 +687,7 @@ async fn df3_a_store_locked_by_a_daemon_that_does_not_answer_is_named() {
 /// the client takes the refusal as it is: no retry, no spawn.
 #[tokio::test]
 async fn df3_a_recorded_socket_is_followed_only_when_it_names_this_project() {
+    let log = rdy_daemon::daemon::capture_log_for_tests(&["refused a client of another project"]);
     let d = daemon("1", true, |_| {}).await;
     let copy = short_tempdir();
     let run = RunDir::of_project(copy.path());
@@ -739,4 +740,10 @@ async fn df3_a_recorded_socket_is_followed_only_when_it_names_this_project() {
     assert_eq!(spawns.load(Ordering::SeqCst), 0, "a refusal is not retried");
     assert_eq!(d.handle.sessions().len(), 0);
     d.handle.stop();
+    // the daemon logs each refusal, with the copy's identity
+    let line = format!(
+        "refused a client of another project ({})",
+        run.project_id().unwrap()
+    );
+    assert_eq!(log.lines(), [line.clone(), line]);
 }

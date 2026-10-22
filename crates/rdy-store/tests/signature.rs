@@ -375,7 +375,11 @@ fn sig4_failed_write_leaves_no_subject_or_signature() {
     s.write(items[1..].to_vec()).unwrap();
     s.fail_next_index_apply();
     assert!(s.seal(vec![]).is_err());
-    drop(s);
+    let notice = rdy_store::drop_unclean_for_tests(s);
+    assert!(
+        notice.contains("an earlier failed write could not be rolled back"),
+        "{notice}"
+    );
     let s = Store::open(&path).unwrap();
     assert_eq!(snapshot(&s), before, "a held batch");
     assert!(!s.has(&t.id()).unwrap());

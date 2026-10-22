@@ -605,8 +605,29 @@ mod tests {
     const PACK_BAD: &str = "name: proj\nversion: '1'\nextends: no-such-pack-at-all\n";
     const PACK_FIXED: &str = "# fixed\nname: proj\nversion: '2'\nextends: rdy-standard\n";
 
+    /// The daemon lines a fault test expects ([`crate::daemon::capture_log_for_tests`]), taken
+    /// while no other such test of this module runs: their lines overlap ("the retried clean
+    /// republish succeeded"), and each test asserts its own.
+    struct FaultLog {
+        capture: crate::daemon::LogCapture,
+        _serial: std::sync::MutexGuard<'static, ()>,
+    }
+
+    fn fault_log(expected: &[&str]) -> FaultLog {
+        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        FaultLog {
+            capture: crate::daemon::capture_log_for_tests(expected),
+            _serial: serial,
+        }
+    }
+
+    /// The text every test hook's full-publish panic gives.
+    const HOOK: &str = "test hook: a full publish panics";
+
     #[test]
     fn reload1_an_invalid_reload_never_records_bytes_newer_than_it_evaluated() {
+        let log = fault_log(&["pack invalid: "]);
         let dir = tempfile::tempdir().unwrap();
         let sh = Shared::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
         let pack = dir.path().join(".rdy/packs/proj.yaml");
@@ -632,10 +653,18 @@ mod tests {
         assert_eq!(sh.pack_status().1, None, "the fix clears the pack error");
         assert_eq!(sh.state.load().pack().version, "2");
         sh.shutdown().unwrap();
+        let lines = log.capture.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0]
+                .starts_with("pack invalid: E_CONFIG: unknown pack \"no-such-pack-at-all\" (fix: "),
+            "{lines:?}"
+        );
     }
 
     #[test]
     fn msw9_a_panic_in_the_pack_reload_before_a_write_does_not_kill_the_writer() {
+        let log = fault_log(&["pack reload panicked", "clean republish"]);
         let dir = tempfile::tempdir().unwrap();
         let sh = Shared::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
         std::fs::write(dir.path().join(".rdy/packs/proj.yaml"), PACK_A).unwrap();
@@ -647,10 +676,15 @@ mod tests {
         assert!(out.is_ok(), "{out:?}");
         assert!(sh.writer.is_alive(), "the writer survives a reload panic");
         sh.shutdown().unwrap();
+        assert_eq!(
+            log.capture.lines(),
+            ["pack reload panicked: reload test panic; the previous pack stays loaded"]
+        );
     }
 
     #[test]
     fn msw9_a_panic_inside_the_pack_reloads_publish_does_not_kill_the_writer() {
+        let log = fault_log(&["pack reload panicked", "clean republish"]);
         let dir = tempfile::tempdir().unwrap();
         let sh = Shared::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
         // reload_pack's own publish panics, then the panic arm's clean republish panics too
@@ -689,6 +723,16 @@ mod tests {
         );
         assert_eq!(sh.state.load().pack().name, "proj");
         sh.shutdown().unwrap();
+        assert_eq!(
+            log.capture.lines(),
+            [
+                format!(
+                    "the clean republish after a panic in the pack reload panicked too ({HOOK}); the last published state stays until a retry succeeds"
+                ),
+                format!("pack reload panicked: {HOOK}; the previous pack stays loaded"),
+                "the retried clean republish succeeded".to_string(),
+            ]
+        );
     }
 
     /// Final review M4: a clean republish that keeps failing logs once, not on every message,
@@ -696,6 +740,7 @@ mod tests {
     #[test]
     fn msw9_a_republish_that_keeps_failing_logs_once() {
         use std::sync::atomic::Ordering;
+        let log = fault_log(&["pack reload panicked", "clean republish"]);
         let dir = tempfile::tempdir().unwrap();
         let sh = Shared::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
         // the write panics; its clean republish and the next three retries panic too
@@ -712,10 +757,20 @@ mod tests {
         }
         assert_eq!(sh.republish_failure_logs.load(Ordering::SeqCst), 1);
         sh.shutdown().unwrap();
+        assert_eq!(
+            log.capture.lines(),
+            [
+                format!(
+                    "the clean republish after a panic in a write panicked too ({HOOK}); the last published state stays until a retry succeeds"
+                ),
+                "the retried clean republish succeeded".to_string(),
+            ]
+        );
     }
 
     #[test]
     fn msw9_a_panic_in_a_writes_clean_republish_does_not_kill_the_writer() {
+        let log = fault_log(&["pack reload panicked", "clean republish"]);
         let dir = tempfile::tempdir().unwrap();
         let sh = Shared::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
         // the write panics, then the f arm's clean republish panics too
@@ -734,6 +789,15 @@ mod tests {
             .run(Box::new(|_: &mut Rdy| Ok(serde_json::Value::Null)));
         assert!(out.is_ok(), "{out:?}");
         sh.shutdown().unwrap();
+        assert_eq!(
+            log.capture.lines(),
+            [
+                format!(
+                    "the clean republish after a panic in a write panicked too ({HOOK}); the last published state stays until a retry succeeds"
+                ),
+                "the retried clean republish succeeded".to_string(),
+            ]
+        );
     }
 
     /// Fix round 2 of task 11 (ruling task-11.1): in one write message, a pack reload seals and

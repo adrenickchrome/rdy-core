@@ -54,7 +54,8 @@ pub use merge::{
 pub use segment::SegmentReader;
 pub use store::{
     CATCH_UP_CHUNK, CHECKPOINT_FRAMES, CHECKPOINT_IDLE, INDEX_OPEN_SENTINEL, MAX_BLOB_BYTES,
-    OpenReport, Store, StoreLock, StoreReader, check_chunk_len, lock_error,
+    NoticeCapture, OpenReport, Store, StoreLock, StoreReader, capture_notices_for_tests,
+    check_chunk_len, drop_unclean_for_tests, lock_error,
 };
 mod state;
 pub use state::{PreparedTag, ViewRecord, apply_op};

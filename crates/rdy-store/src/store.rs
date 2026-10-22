@@ -553,19 +553,113 @@ impl Held for ReplayHeld<'_> {
     }
 }
 
+/// The live [`NoticeCapture`]s: each one's id, expected texts and the notices it took.
+type NoticeCaptures = Vec<(u64, Vec<String>, Vec<String>)>;
+
+static NOTICE_CAPTURES: Mutex<NoticeCaptures> = Mutex::new(Vec::new());
+/// How many [`NoticeCapture`]s are live, so a store with none never takes the lock.
+static NOTICE_CAPTURING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Writes one notice the store cannot return (a failed close in `Drop`) to stderr, unless a
+/// live [`NoticeCapture`] expects it. A write whose error is dropped, not the print macro: that
+/// panics when stderr is closed, and a panic in Drop during an unwind aborts the process.
+fn notice(text: &str) {
+    use std::io::Write as _;
+    if NOTICE_CAPTURING.load(Ordering::SeqCst) > 0
+        && let Ok(mut all) = NOTICE_CAPTURES.lock()
+    {
+        for (_, expected, taken) in all.iter_mut() {
+            if expected.iter().any(|e| text.contains(e.as_str())) {
+                taken.push(text.to_string());
+                return;
+            }
+        }
+    }
+    let _ = writeln!(std::io::stderr(), "{text}");
+}
+
+/// Test hook: while the returned capture lives, a store notice (any thread) that holds one of
+/// `expected` (a fault test's store directory, say) goes to it instead of stderr, so the test
+/// asserts the notice it provokes and every unexpected notice stays visible.
+#[doc(hidden)]
+pub fn capture_notices_for_tests(expected: &[&str]) -> NoticeCapture {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let id = NEXT.fetch_add(1, Ordering::SeqCst);
+    NOTICE_CAPTURES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((id, expected.iter().map(|e| e.to_string()).collect(), vec![]));
+    NOTICE_CAPTURING.fetch_add(1, Ordering::SeqCst);
+    NoticeCapture { id }
+}
+
+/// The store notices a test expects ([`capture_notices_for_tests`]); dropping it ends the
+/// capture.
+#[doc(hidden)]
+pub struct NoticeCapture {
+    id: u64,
+}
+
+impl NoticeCapture {
+    /// The notices taken so far, in order.
+    pub fn notices(&self) -> Vec<String> {
+        NOTICE_CAPTURES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|(id, _, _)| *id == self.id)
+            .map(|(_, _, taken)| taken.clone())
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for NoticeCapture {
+    fn drop(&mut self) {
+        NOTICE_CAPTURES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(id, _, _)| *id != self.id);
+        NOTICE_CAPTURING.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Test hook: drops `store`, whose close a fault test expects to fail (a poisoned store, say),
+/// and returns the one notice that failure gives, which goes to the test instead of stderr.
+/// Panics unless the drop gives exactly one notice, the unclean close of `store`'s directory.
+#[doc(hidden)]
+pub fn drop_unclean_for_tests(store: Store) -> String {
+    let dir = store.dir.display().to_string();
+    let capture = capture_notices_for_tests(&[&dir]);
+    drop(store);
+    let mut taken = capture.notices();
+    assert_eq!(
+        taken.len(),
+        1,
+        "one unclean-close notice of {dir} was expected: {taken:?}"
+    );
+    let notice = taken.remove(0);
+    assert!(
+        notice.starts_with(&format!("rdy: the store at {dir} did not close cleanly ("))
+            && notice.ends_with("); the next open catches its index up from the log"),
+        "{notice}"
+    );
+    notice
+}
+
+/// The notice of a store at `dir` whose close failed with `e`.
+fn unclean_close_notice(dir: &Path, e: &StoreError) -> String {
+    format!(
+        "rdy: the store at {} did not close cleanly ({e}); the next open catches its index up from the log",
+        dir.display()
+    )
+}
+
 impl Drop for Store {
     /// Closes the store as `close` does. A failure leaves the sentinel, so the next open catches
-    /// up; it cannot be returned from here, so it is written to stderr.
+    /// up; it cannot be returned from here, so it is a [`notice`] on stderr.
     fn drop(&mut self) {
-        use std::io::Write as _;
         if let Err(e) = self.close_once() {
-            // a write whose error is dropped, not the print macro: that panics when stderr is
-            // closed, and a panic in Drop during an unwind aborts the process
-            let _ = writeln!(
-                std::io::stderr(),
-                "rdy: the store at {} did not close cleanly ({e}); the next open catches its index up from the log",
-                self.dir.display()
-            );
+            notice(&unclean_close_notice(&self.dir, &e));
         }
     }
 }
