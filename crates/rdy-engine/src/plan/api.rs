@@ -472,7 +472,7 @@ fn author(p: &Provenance) -> Author {
 /// warnings, keyed by item for their order. A computed close wins before any answer is
 /// consulted; a valid answer sets the state; a lapsed one is left out and warned of, naming the
 /// subject when it changed, else the cause.
-fn live_rows(
+pub(crate) fn live_rows(
     computed: &ComputedPlan,
     answers: &[PlanAnswer],
 ) -> (Vec<PlanRow>, PlanCounts, Vec<(Hash, PlanNote)>) {

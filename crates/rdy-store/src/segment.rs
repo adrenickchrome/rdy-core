@@ -127,6 +127,8 @@ pub struct SegmentLog {
     /// Test fault injection (see `fail_next_roll` / `fail_next_append_after`).
     fail_roll: bool,
     fail_partial: Option<usize>,
+    /// The frames the next appends write whole before `fail_partial` fires.
+    fail_skip: usize,
     /// Test hook: the armed crash point (see `crash_at`).
     crash: Option<CrashPoint>,
     /// What the log's validated redaction applies authorize: the holes every scan and walk of
@@ -1049,6 +1051,7 @@ impl SegmentLog {
             max_len,
             fail_roll: false,
             fail_partial: None,
+            fail_skip: 0,
             crash: None,
             auth: Arc::default(),
         };
@@ -1154,6 +1157,7 @@ impl SegmentLog {
             max_len,
             fail_roll: false,
             fail_partial: None,
+            fail_skip: 0,
             crash: None,
             auth,
         };
@@ -1215,6 +1219,15 @@ impl SegmentLog {
     #[doc(hidden)]
     pub fn fail_next_append_after(&mut self, bytes: usize) {
         self.fail_partial = Some(bytes);
+        self.fail_skip = 0;
+    }
+
+    /// Test hook: the appends write `frames` frames whole, then only the first `bytes` bytes
+    /// of the next one, and fail; `None` disarms it.
+    #[doc(hidden)]
+    pub fn fail_append_at_frame(&mut self, at: Option<(usize, usize)>) {
+        self.fail_partial = at.map(|(_, bytes)| bytes);
+        self.fail_skip = at.map_or(0, |(frames, _)| frames);
     }
 
     /// Starts segment `current + 1`. The new writer, reader and length are committed together,
@@ -1278,7 +1291,9 @@ impl SegmentLog {
         buf.push(kind);
         buf.extend_from_slice(&hash.0);
         buf.extend_from_slice(payload);
-        if let Some(n) = self.fail_partial.take() {
+        if self.fail_partial.is_some() && self.fail_skip > 0 {
+            self.fail_skip -= 1;
+        } else if let Some(n) = self.fail_partial.take() {
             write_observed(&self.writer, &buf[..n.min(buf.len())], self.len)?;
             return Err(io::Error::other("injected partial append"));
         }

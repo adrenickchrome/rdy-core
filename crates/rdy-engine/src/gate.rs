@@ -5,6 +5,7 @@ use crate::coord_graph::AltRef;
 use crate::error::*;
 use crate::pending::Item;
 use crate::pending::queue::approval_holds;
+use crate::plan::lifecycle::{PlanSummary, ProposePlanRequest};
 use crate::session::rfc3339;
 use crate::tensions::{SideRef, Tension, TensionInfo, TensionSeverity, TensionStatus};
 use crate::views::{
@@ -98,6 +99,9 @@ pub struct ProposalInfo {
     /// The hash of the `ANSWER` that holds that relay, written with the version (O14).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
+    /// The change plan the version bound, written in its batch (D-4JMPH): the counts over
+    /// every item, the code files and the open items.
+    pub plan: PlanSummary,
 }
 
 /// One view a landing rebased: how many of its changes dropped out (they landed) and how many
@@ -1855,7 +1859,29 @@ impl Rdy {
         summary: Option<&str>,
         alternative: Option<&AltPick>,
     ) -> Result<ProposalInfo, RdyError> {
-        self.propose_relayed(s, view, title, changes, summary, alternative, None)
+        self.propose_plan(
+            s,
+            ProposePlanRequest {
+                view,
+                title,
+                changes,
+                summary,
+                alternatives: alternative,
+                plan_answers: &[],
+            },
+        )
+    }
+
+    /// Proposes `req` as `propose_with` does, and records its plan answers in the same batch
+    /// (D-4JMPH): every propose writes one plan version bound to the version it writes, its
+    /// answers validated against the version's candidate before anything is appended (a refused
+    /// answer writes nothing). The reply's `plan` summarizes that plan.
+    pub fn propose_plan(
+        &mut self,
+        s: &Session,
+        req: ProposePlanRequest<'_>,
+    ) -> Result<ProposalInfo, RdyError> {
+        self.propose_relayed(s, req, None)
     }
 
     /// `propose_with` on the person's word (O32, C3, D-KQ4CA), under the relay table
@@ -1883,10 +1909,37 @@ impl Rdy {
         summary: Option<&str>,
         alternative: Option<&AltPick>,
     ) -> Result<ProposalInfo, RdyError> {
-        let (who, relay) = relayed(s, person, relay, implicit).map_err(|e| e.error())?;
+        self.propose_plan_as(
+            s,
+            person,
+            relay,
+            implicit,
+            ProposePlanRequest {
+                view,
+                title,
+                changes,
+                summary,
+                alternatives: alternative,
+                plan_answers: &[],
+            },
+        )
+    }
+
+    /// `propose_as` with `req`'s plan answers recorded in the same batch (`propose_plan`): the
+    /// answers are the person's when the relay proposes as the person.
+    pub fn propose_plan_as(
+        &mut self,
+        s: &Session,
+        person: &str,
+        relay: &RelayInput,
+        mcp: bool,
+        req: ProposePlanRequest<'_>,
+    ) -> Result<ProposalInfo, RdyError> {
+        let (who, relay) = relayed(s, person, relay, mcp).map_err(|e| e.error())?;
         let Some(relay) = relay else {
-            return self.propose_with(s, view, title, changes, summary, alternative);
+            return self.propose_relayed(s, req, None);
         };
+        let view = req.view;
         let st = self.read();
         let persons = view == "work"
             || st
@@ -1902,29 +1955,27 @@ impl Rdy {
             ));
         }
         drop(st);
-        self.propose_relayed(
-            &who,
+        self.propose_relayed(&who, req, Some(relay))
+    }
+
+    /// The one propose writer (`propose_plan`), as `s`, with the person's relay when `s` is the
+    /// person (`propose_plan_as`): every check, the version's candidate, its plan and its
+    /// answers are prepared first; then the key change rdy adds (if any), the version, the
+    /// relay's answer and the bound plan are written in one batch, and published once.
+    fn propose_relayed(
+        &mut self,
+        s: &Session,
+        req: ProposePlanRequest<'_>,
+        relay: Option<Relay>,
+    ) -> Result<ProposalInfo, RdyError> {
+        let ProposePlanRequest {
             view,
             title,
             changes,
             summary,
-            alternative,
-            Some(relay),
-        )
-    }
-
-    /// `propose_with` as `s`, with the person's relay when `s` is the person (`propose_as`).
-    #[allow(clippy::too_many_arguments)]
-    fn propose_relayed(
-        &mut self,
-        s: &Session,
-        view: &str,
-        title: &str,
-        changes: Option<&[String]>,
-        summary: Option<&str>,
-        alternative: Option<&AltPick>,
-        relay: Option<Relay>,
-    ) -> Result<ProposalInfo, RdyError> {
+            alternatives: alternative,
+            plan_answers,
+        } = req;
         if !s.role.can_write() {
             return Err(RdyError::new(
                 E_PERMISSION,
@@ -2120,24 +2171,29 @@ impl Rdy {
                 Err(e) => coverage_error = Some(crate::coverage::coverage_error_text(&e)),
             }
         }
-        let mut ids = ids;
-        let mut keys = BTreeMap::new();
-        if let Some((mut change, re)) = rekey {
-            // the store gives the change its deps again as it commits it
-            change.deps.clear();
-            let ops = change.ops.clone();
-            let vm = st.materialized(&Scope::View(view.to_string()))?;
-            let h = self
-                .store
-                .commit_to_view_with(view, change, &|id| vm.version_of(id))?;
-            self.publish(Delta::Commit {
-                view: view.to_string(),
-                change: h,
-                ops,
-            })?;
-            ids.push(h);
-            keys = re.into_iter().map(|(id, k)| (id.to_string(), k)).collect();
+        // the candidate: the version's changes with the key change rdy adds, which are what it
+        // lands (D-4JMPH). A blocking conflict leaves it without one until it is resolved.
+        let candidate: Option<Vec<Change>> = blocking.is_empty().then(|| {
+            let mut all = changes.clone();
+            all.extend(rekey.as_ref().map(|(c, _)| c.clone()));
+            all
+        });
+        if candidate.is_none() && !plan_answers.is_empty() {
+            let ids: Vec<String> = blocking.iter().map(|c| c.block.to_string()).collect();
+            return Err(RdyError::new(
+                E_CONFLICT_UNRESOLVED,
+                crate::consequence::conflict_message(&ids),
+                crate::consequence::CONFLICT_FIX,
+            ));
         }
+        let plan = crate::plan::lifecycle::prepare_proposal_plan(
+            &st,
+            s,
+            view,
+            candidate.as_deref(),
+            plan_answers,
+        )?;
+        issues.extend(plan.warnings.iter().cloned());
         // pver1: a view with an open proposal (its latest version has not landed) gets the next
         // version of it; otherwise a new proposal starts
         let mut open = None;
@@ -2150,7 +2206,7 @@ impl Rdy {
                 open = Some((stable, latest));
             }
         }
-        let count = ids.len();
+        let count = ids.len() + usize::from(rekey.is_some());
         let chosen = alternative.as_ref().map(|a| AltRef {
             set: alt_label(&a.set),
             member: a.member.clone(),
@@ -2171,37 +2227,65 @@ impl Rdy {
             evidence_kind: Some(EvidenceKind::Text),
             note: None,
         });
-        let (id, stable, n, answer) = match (open, answer) {
-            (Some((stable, latest)), None) => {
-                let id = self
-                    .store
-                    .propose_next(&latest, ids, title, summary, by, alternative)?;
-                (id, stable, version_number(&st, &latest)? + 1, None)
+        let answered = answer.is_some();
+        let n = match &open {
+            Some((_, latest)) => version_number(&st, latest)? + 1,
+            None => 1,
+        };
+        // the key change: the store gives it its deps again as it prepares its commit, checked
+        // against the view as it reads now
+        let vm = st.materialized(&Scope::View(view.to_string()))?;
+        let current = |id: &BlockId| vm.version_of(id);
+        let (rekey_change, keys) = match rekey {
+            Some((mut change, re)) => {
+                change.deps.clear();
+                let keys: BTreeMap<String, String> =
+                    re.into_iter().map(|(id, k)| (id.to_string(), k)).collect();
+                (Some(change), keys)
             }
-            (Some((stable, latest)), Some(a)) => {
-                let (id, a) = self
-                    .store
-                    .propose_next_answered(&latest, ids, title, summary, by, alternative, a)
-                    .map_err(crate::version::answer_write_error)?;
-                (id, stable, version_number(&st, &latest)? + 1, Some(a))
-            }
-            (None, None) => {
-                let id = self
-                    .store
-                    .propose_changes(view, title, summary, by, ids, alternative)?;
-                (id, id, 1, None)
-            }
-            (None, Some(a)) => {
-                let (id, a) = self
-                    .store
-                    .propose_changes_answered(view, title, summary, by, ids, alternative, a)
-                    .map_err(crate::version::answer_write_error)?;
-                (id, id, 1, Some(a))
+            None => (None, BTreeMap::new()),
+        };
+        let rekey_ops = rekey_change.as_ref().map(|c| c.ops.clone());
+        let to_rdy = |e: rdy_store::StoreError| {
+            if answered {
+                crate::version::answer_write_error(e)
+            } else {
+                e.into()
             }
         };
+        let mut prepared = self
+            .store
+            .prepare_propose(rdy_store::plan::ProposeRequest {
+                view,
+                title,
+                summary,
+                by: by.clone(),
+                changes: ids,
+                alternative,
+                prev: open.map(|(_, latest)| latest),
+                rekey: rekey_change.map(|c| (c, &current as &dyn Fn(&BlockId) -> Option<Hash>)),
+                answer,
+            })
+            .map_err(to_rdy)?;
+        let id = prepared.version();
+        let stable = prepared.stable();
+        self.store
+            .bind_plan(&mut prepared, &plan.plan(view, id, by))?;
+        let rekeyed = prepared.rekey();
+        drop(vm);
+        let written = self.store.commit_propose(prepared)?;
+        let answer = written.answer;
+        // one batch, published once: a key change moves the view, so its publish re-reads it
+        match (rekeyed, rekey_ops) {
+            (Some(change), Some(ops)) => self.publish(Delta::Commit {
+                view: view.to_string(),
+                change,
+                ops,
+            })?,
+            _ => self.publish(Delta::Seq)?,
+        }
         let stored = self.store.proposal(&id)?;
         let canon_at = stored.canon_at;
-        self.publish(Delta::Seq)?;
         // tgat1: the version's tensions, read after a re-key change (if any) was committed. The
         // proposal is stored and published by now: a read error leaves the tensions out and is
         // reported, as a briefing's `tensions_error` is, and the reply keeps the proposal.
@@ -2269,6 +2353,7 @@ impl Rdy {
             coverage_error,
             relayed_by: relay.map(|r| r.by),
             answer: answer.map(|a| a.to_string()),
+            plan: plan.summary,
         })
     }
 
@@ -2649,12 +2734,17 @@ impl Rdy {
             fresh_removal(&st, r, accept.as_slice(), &pref)?;
         }
 
+        // D-4JMPH: the version's complete outcome, from its recorded canon and HEADs (or, for
+        // a version with no bound plan, the HEADs captured once, O19), before anything is written
+        let approver = s.provenance();
+        let sealing = crate::plan::lifecycle::prepare_landing_plan(&st, &pid, &p, &approver)?;
+
         // 4. prepare the one write (atom1): the acceptance change, the final proposal version,
         // the snapshot, the landing, the view's rebase and the refs. Nothing is written yet.
-        let store = match self.store.prepare_land(LandRequest {
+        let mut store = match self.store.prepare_land(LandRequest {
             proposal: pid,
             accept: accept.clone(),
-            approver: s.provenance(),
+            approver,
             alt,
             relay: opts.relay,
             evidence,
@@ -2665,6 +2755,15 @@ impl Rdy {
             }
             Err(e) => return Err(approver_stale(e, &p.view)),
         };
+        // p-8D6ES: then the plan the landed final version binds (a bound version's acceptance
+        // version) and the seal, in the same batch, after the landing and before its signatures
+        let (bound, seal) = sealing.plans(
+            store.hash(),
+            store.landed_version(),
+            store.writes_final_version(),
+        );
+        self.store
+            .plan_landing(&mut store, bound.as_ref(), seal.as_ref())?;
         Ok(PreparedApproval {
             store,
             pref,

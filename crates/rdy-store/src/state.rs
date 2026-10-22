@@ -5,6 +5,7 @@ use crate::merge::{Conflict, MergeChange, Merged, merge_indexed};
 use crate::store::{Frames, encode};
 use crate::view::{Owner, ViewHead, ViewOp, ViewOpKind};
 use crate::{Store, StoreReader};
+use rdy_model::plan::Plan;
 use rdy_model::signature::Signature;
 use rdy_model::{
     AltChoice, Answer, Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Provenance,
@@ -741,6 +742,132 @@ impl Store {
         self.write_version_answered(&next, stable, a)
     }
 
+    /// Prepares the proposal version `req` names, writing nothing (D-4JMPH): a key change rdy
+    /// adds to the view first (its frames, view ops and head ref, as `commit_to_view_with`
+    /// writes them), then the version and its refs (`propose_changes` or `propose_next`), then
+    /// the answer that holds the person's relay (its `targets` the version). Every check of those
+    /// writers runs here. [`Store::bind_plan`] adds the version's bound plan;
+    /// [`Store::commit_propose`] writes it all in one batch.
+    pub fn prepare_propose(&self, req: ProposeRequest<'_>) -> Result<PreparedProposal, StoreError> {
+        let ProposeRequest {
+            view,
+            title,
+            summary,
+            by,
+            mut changes,
+            alternative,
+            prev,
+            rekey,
+            answer,
+        } = req;
+        let mut items: Frames = vec![];
+        let mut rekeyed = None;
+        if let Some((change, current)) = rekey {
+            let committer = change.provenance.clone();
+            let parts = self.commit_parts(view, vec![change], current, &[], None, &committer)?;
+            let (cid, pos) = parts.placed[0];
+            items.extend(parts.changes);
+            items.extend(parts.views);
+            changes.push(cid);
+            rekeyed = Some((cid, pos));
+        }
+        let (p, stable) = match prev {
+            Some(prev) => {
+                let p = self.next_of(&prev, changes, title, summary, by, alternative)?;
+                self.linked_next(&prev, p)?
+            }
+            None => {
+                let p = self.first_of(view, title, summary, by, changes, alternative)?;
+                let id = Hash::of(&encode(&p));
+                (p, id)
+            }
+        };
+        let (version, frames) = self.version_items(&p, stable)?;
+        items.extend(frames);
+        let answer = match answer {
+            None => None,
+            Some(a) => {
+                let a = Answer {
+                    targets: vec![version],
+                    ..a
+                };
+                let (aid, all) = self.answer_items(&a, items)?;
+                items = all;
+                Some(aid)
+            }
+        };
+        Ok(PreparedProposal {
+            items,
+            version,
+            stable,
+            proposal: p,
+            rekey: rekeyed,
+            answer,
+            plan: None,
+        })
+    }
+
+    /// Adds `plan`, the plan version bound to the prepared version, to `prepared`'s batch, after
+    /// its frames: the PLAN and `plan/<view>` naming it. The plan must name that version and
+    /// carry no seal (`plan <hash>: invalid proposal` or `invalid seal`), and keeps every plan
+    /// rule against the store and the batch (`Store::check_plan`). Writes nothing; a version
+    /// binds one plan. Returns the plan's id.
+    pub fn bind_plan(
+        &self,
+        prepared: &mut PreparedProposal,
+        plan: &Plan,
+    ) -> Result<Hash, StoreError> {
+        let id = plan.id();
+        if plan.seal.is_some() {
+            return Err(StoreError::Refused(crate::plan::damage(
+                &id,
+                crate::plan::INVALID_SEAL,
+            )));
+        }
+        if plan.proposal != Some(prepared.version) || prepared.plan.is_some() {
+            return Err(StoreError::Refused(crate::plan::damage(
+                &id,
+                crate::plan::INVALID_PROPOSAL,
+            )));
+        }
+        let (id, frames) = self.plan_frames(plan, &prepared.items)?;
+        prepared.items.extend(frames);
+        prepared.plan = Some(id);
+        Ok(id)
+    }
+
+    /// Writes the proposal `prepared` holds in one batch (one write, so one marker): its key
+    /// change, the version, the relay's answer and the bound plan. A failed write writes nothing.
+    /// Returns what it wrote.
+    pub fn commit_propose(&mut self, prepared: PreparedProposal) -> Result<Proposed, StoreError> {
+        let PreparedProposal {
+            items,
+            version,
+            stable,
+            rekey,
+            answer,
+            plan,
+            ..
+        } = prepared;
+        crate::redaction::refuse_redaction_kinds(&items)?;
+        let written = self.write_guarded(items)?;
+        if let Some((cid, pos)) = rekey
+            && written[pos] != cid
+        {
+            return Err(StoreError::Decode(format!(
+                "change id mismatch: view names {cid}, written {}",
+                written[pos]
+            )));
+        }
+        Ok(Proposed {
+            version,
+            stable,
+            rekey: rekey.map(|(c, _)| c),
+            answer,
+            plan,
+        })
+    }
+
     /// A new proposal's first version, as `propose_changes` builds it.
     fn first_of(
         &self,
@@ -964,6 +1091,72 @@ impl PreparedTag {
     pub fn answer(&self) -> Option<(Hash, &Answer)> {
         self.answer.as_ref().map(|(h, a)| (*h, a))
     }
+}
+
+/// A proposal version to prepare ([`Store::prepare_propose`]).
+pub struct ProposeRequest<'a> {
+    pub view: &'a str,
+    pub title: &'a str,
+    /// A non-blank summary replaces the previous version's; a blank or `None` one keeps it.
+    pub summary: Option<&'a str>,
+    pub by: Provenance,
+    /// The proposed changes, which the caller checks (a closed subset of the view's).
+    pub changes: Vec<Hash>,
+    pub alternative: Option<AltChoice>,
+    /// The latest version of the view's open proposal, which this version follows; `None` for
+    /// a new proposal.
+    pub prev: Option<Hash>,
+    /// A change rdy adds to the view before the version (the key change, K1), with the view's
+    /// present state as `commit_to_view_with` reads it; it joins the version's changes.
+    pub rekey: Option<(Change, &'a dyn Fn(&BlockId) -> Option<Hash>)>,
+    /// The answer that holds the person's relay (O14); its `targets` become the version.
+    pub answer: Option<Answer>,
+}
+
+/// A proposal built by [`Store::prepare_propose`] and not yet written. Its frames are private:
+/// only [`Store::bind_plan`] adds to them and only [`Store::commit_propose`] writes them.
+#[derive(Debug)]
+pub struct PreparedProposal {
+    items: Frames,
+    version: Hash,
+    stable: Hash,
+    proposal: Proposal,
+    /// The key change's id and the position of its CHANGE frame.
+    rekey: Option<(Hash, usize)>,
+    answer: Option<Hash>,
+    plan: Option<Hash>,
+}
+
+impl PreparedProposal {
+    /// The version's hash.
+    pub fn version(&self) -> Hash {
+        self.version
+    }
+
+    /// The proposal's stable id.
+    pub fn stable(&self) -> Hash {
+        self.stable
+    }
+
+    /// The version the commit writes.
+    pub fn proposal(&self) -> &Proposal {
+        &self.proposal
+    }
+
+    /// The id of the key change rdy adds, if any.
+    pub fn rekey(&self) -> Option<Hash> {
+        self.rekey.map(|(c, _)| c)
+    }
+}
+
+/// What [`Store::commit_propose`] wrote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Proposed {
+    pub version: Hash,
+    pub stable: Hash,
+    pub rekey: Option<Hash>,
+    pub answer: Option<Hash>,
+    pub plan: Option<Hash>,
 }
 
 /// A proposal summary as stored: trimmed, and `None` when blank.

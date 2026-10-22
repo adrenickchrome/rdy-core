@@ -58,6 +58,8 @@ use rdy_model::{Answer, AnswerAct, BlockId, Hash, LandingRecord, Proposal};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+pub use crate::state::{PreparedProposal, ProposeRequest, Proposed};
+
 /// The ref prefix of change plans: `plan/<view>` names the view's latest plan version.
 pub const PLAN_REF: &str = "plan/";
 

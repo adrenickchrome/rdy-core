@@ -1318,14 +1318,17 @@ fn cp8_proposal_read_uses_recorded_canon_and_heads() {
         (&json!("closed"), &json!("committed"))
     );
 
-    // a version with no bound plan: no plan, no answer, the captured HEADs as both ends
-    let info2 = r
-        .propose(&writer(), "w", "edit a and p", Some(common::TEST_SUMMARY))
+    // a version with no bound plan (the raw store writer: every engine propose binds one): no
+    // plan, no answer, the captured HEADs as both ends
+    let included = r.store().included("w").unwrap().as_ref().clone();
+    r.store_mut()
+        .propose_next(&version, included, "edit a and p", None, prov(), None)
         .unwrap();
+    r.invalidate();
     let unbound = plan(
         &r,
         &PlanQuery {
-            proposal: Some(info2.r#ref.clone()),
+            proposal: Some(format!("P-{}@2", version.short())),
             ..Default::default()
         },
     );
@@ -1367,7 +1370,11 @@ fn cp8_empty_landing_ends_an_unsealed_chain() {
     r.invalidate();
     r.fsck().unwrap();
     assert_eq!(whole(&r, "w")["plan"], bh.to_string());
-    r.land(&approver(), &version.to_string()).unwrap();
+    // a landing with no seal (the raw store landing: the engine seals a version with items)
+    r.store_mut()
+        .land(&version, approver().provenance())
+        .unwrap();
+    r.invalidate();
     assert_eq!(plan_ref(&r, "w"), Some(bh), "no seal was written");
     // the chain ended with the landing: the view reads no plan and no answer
     edit(&mut r, "w", &s.c, "C stands firm.");

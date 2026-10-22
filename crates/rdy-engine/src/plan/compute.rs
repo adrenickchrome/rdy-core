@@ -60,6 +60,13 @@ pub struct ComputedPlan {
     pub code_files: usize,
     /// No linked code repo was captured: the plan has no code item.
     pub code_unavailable: bool,
+    /// The decisions a landing of the version names in its seal (D-4JMPH), sorted: the ones it
+    /// creates, the targets it supersedes (whole or in part), revokes or refines, and the ones
+    /// it re-affirms. Not every governing decision.
+    pub decisions: Vec<BlockId>,
+    /// The version re-affirms a decision: its `reaffirmed` metadata changes, or it closes a
+    /// re-affirm item as re-affirmed. A landing that does seals, also with no item.
+    pub reaffirms: bool,
 }
 
 /// The acts that may answer an item of `kind` (tb-2ZED7); a computed close needs none.
@@ -110,7 +117,6 @@ pub(crate) struct CodeSide {
 /// pure read: no plan write and no clock; the caller captures the HEADs first. A version that
 /// does not apply on its baseline is the merge's refusal; past [`MAX_PLAN_ITEMS`] items,
 /// [`limit_error`].
-#[allow(dead_code)] // first called by the plan reads and the propose binding (later tasks)
 pub(crate) fn compute(
     st: &ReadState,
     _view: &str,
@@ -120,7 +126,19 @@ pub(crate) fn compute(
     first_heads: &[PlanHead],
 ) -> Result<ComputedPlan, RdyError> {
     let changes = changes_of(st, changes)?;
-    let sides = sides_of(st, &changes, canon_at)?;
+    compute_changes(st, &changes, canon_at, heads, first_heads)
+}
+
+/// [`compute`] of change values, read or not yet written: the propose binding computes the
+/// candidate with the key change rdy adds before anything is appended.
+pub(crate) fn compute_changes(
+    st: &ReadState,
+    changes: &[Change],
+    canon_at: Option<Hash>,
+    heads: &[PlanHead],
+    first_heads: &[PlanHead],
+) -> Result<ComputedPlan, RdyError> {
+    let sides = sides_of(st, changes, canon_at)?;
     let code = code_sides(st, heads, first_heads)?;
     compute_in(st, &sides, code.as_deref(), MAX_PLAN_ITEMS)
 }
@@ -501,11 +519,49 @@ pub(crate) fn compute_in(
             false,
         ),
     };
+    let acknowledged = acknowledged(sides);
+    let decisions: BTreeSet<BlockId> = created_decisions(sides)
+        .chain(lineage.retired.iter().cloned())
+        .chain(lineage.partial.iter().cloned())
+        .chain(lineage.refined.iter().cloned())
+        .chain(acknowledged.iter().cloned())
+        .chain(reaffirmed.iter().cloned())
+        .collect();
     Ok(ComputedPlan {
         items: items.into_values().collect(),
         code_files,
         code_unavailable,
+        decisions: decisions.into_iter().collect(),
+        reaffirms: !acknowledged.is_empty() || !reaffirmed.is_empty(),
     })
+}
+
+/// The decisions the version creates: written, absent from the baseline, a decision after.
+fn created_decisions(sides: &Sides) -> impl Iterator<Item = BlockId> + '_ {
+    let (base, fin) = (&sides.base, &sides.fin);
+    sides
+        .written
+        .iter()
+        .filter(|id| {
+            base.m.get(id).is_none() && fin.m.get(id).is_some_and(|b| b.block_type == DECISION)
+        })
+        .cloned()
+}
+
+/// The decisions whose `reaffirmed` metadata the version changes.
+fn acknowledged(sides: &Sides) -> BTreeSet<BlockId> {
+    let (base, fin) = (&sides.base, &sides.fin);
+    sides
+        .written
+        .iter()
+        .filter(|id| match (base.m.get(id), fin.m.get(id)) {
+            (Some(a), Some(b)) => {
+                b.block_type == DECISION && a.fields.get(REAFFIRMED) != b.fields.get(REAFFIRMED)
+            }
+            _ => false,
+        })
+        .cloned()
+        .collect()
 }
 
 /// D-ERKCP: one `update_implementation` item per stale-code cause and file anchored to it at
@@ -545,23 +601,10 @@ fn code_items(
             .filter(|id| base.m.get(id).is_some())
             .cloned(),
     );
-    let created = sides.written.iter().filter(|id| {
-        base.m.get(id).is_none() && fin.m.get(id).is_some_and(|b| b.block_type == DECISION)
-    });
-    let acknowledged = sides
-        .written
-        .iter()
-        .filter(|id| match (base.m.get(id), fin.m.get(id)) {
-            (Some(a), Some(b)) => {
-                b.block_type == DECISION && a.fields.get(REAFFIRMED) != b.fields.get(REAFFIRMED)
-            }
-            _ => false,
-        });
-    let version_decisions: BTreeSet<BlockId> = created
-        .cloned()
+    let version_decisions: BTreeSet<BlockId> = created_decisions(sides)
         .chain(lineage.refined.iter().cloned())
         .chain(lineage.deciders.iter().cloned())
-        .chain(acknowledged.cloned())
+        .chain(acknowledged(sides))
         .chain(reaffirmed.iter().cloned())
         .collect();
     let cause_hash = |id: &BlockId| {

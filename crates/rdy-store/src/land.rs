@@ -14,6 +14,7 @@ use crate::redaction::PreparedRedactionApply;
 use crate::state::{open_ref, proposal_ref, view_ref};
 use crate::store::encode;
 use crate::view::{ViewHead, ViewOp, ViewOpKind, decode_head};
+use rdy_model::plan::Plan;
 use rdy_model::signature::Signature;
 use rdy_model::{
     ActorRun, AltChoice, AltSet, AltStatus, ApprovalEvidence, Assurance, BlockId, Change,
@@ -71,6 +72,8 @@ pub struct PreparedLanding {
     landing: LandingRecord,
     hash: Hash,
     outcome: LandOutcome,
+    /// Whether [`Store::plan_landing`] added the landing's plans.
+    planned: bool,
 }
 
 impl PreparedLanding {
@@ -82,6 +85,17 @@ impl PreparedLanding {
     /// The hash of that landing record.
     pub fn hash(&self) -> Hash {
         self.hash
+    }
+
+    /// The proposal version the landing lands: the request's, or the final version an
+    /// acceptance change gives it.
+    pub fn landed_version(&self) -> Hash {
+        self.outcome.proposal
+    }
+
+    /// Whether the landing writes a final version of its own (an acceptance change).
+    pub fn writes_final_version(&self) -> bool {
+        self.outcome.accept.is_some()
     }
 }
 
@@ -472,6 +486,7 @@ impl Store {
         }
         items.extend(self.ref_items_pub(refs));
         Ok(PreparedLanding {
+            planned: false,
             items,
             applies,
             landing: landing_record,
@@ -487,9 +502,57 @@ impl Store {
         })
     }
 
+    /// Adds the landing's change plans to `prepared`'s batch (D-4JMPH, p-8D6ES), after its
+    /// landing and refs and before its signatures: `bound`, the plan version bound to the final
+    /// version an acceptance change gives the landing, then `seal`, the sealed version naming
+    /// this landing, each with `plan/<view>` naming it. Each keeps every plan rule against the
+    /// store and the batch before it (`Store::check_plan`): `bound` names the landed final
+    /// version and has no seal (`plan <hash>: invalid proposal` or `invalid seal`); `seal` seals
+    /// this landing (`invalid seal`). Writes nothing; a landing takes its plans once.
+    pub fn plan_landing(
+        &self,
+        prepared: &mut PreparedLanding,
+        bound: Option<&Plan>,
+        seal: Option<&Plan>,
+    ) -> Result<(), StoreError> {
+        let refuse =
+            |p: &Plan, reason: &str| Err(StoreError::Refused(crate::plan::damage(&p.id(), reason)));
+        if let Some(b) = bound {
+            if b.seal.is_some() {
+                return refuse(b, crate::plan::INVALID_SEAL);
+            }
+            if prepared.planned
+                || b.proposal != Some(prepared.outcome.proposal)
+                || prepared.outcome.accept.is_none()
+            {
+                return refuse(b, crate::plan::INVALID_PROPOSAL);
+            }
+        }
+        if let Some(sealed) = seal
+            && (prepared.planned
+                || sealed
+                    .seal
+                    .as_ref()
+                    .is_none_or(|x| x.landing != prepared.hash))
+        {
+            return refuse(sealed, crate::plan::INVALID_SEAL);
+        }
+        let mut items = std::mem::take(&mut prepared.items);
+        let mut add = |p: &Plan| -> Result<(), StoreError> {
+            let (_, frames) = self.plan_frames(p, &items)?;
+            items.extend(frames);
+            Ok(())
+        };
+        let added = bound.into_iter().chain(seal).try_for_each(&mut add);
+        prepared.items = items;
+        added?;
+        prepared.planned = bound.is_some() || seal.is_some();
+        Ok(())
+    }
+
     /// Writes the landing `prepared` holds, with `signatures` (each of its landing, D-1Z951) in
-    /// the same batch: after the landing and the refs, before any REDACTION_APPLY. A failed write
-    /// writes nothing. With no signatures this is the write `land_atomic` makes.
+    /// the same batch: after the landing, the refs and its plans, before any REDACTION_APPLY. A
+    /// failed write writes nothing. With no signatures this is the write `land_atomic` makes.
     pub fn commit_land(
         &mut self,
         prepared: PreparedLanding,
@@ -518,7 +581,9 @@ impl Store {
                 }
             }
             None => {
-                self.write(items)?;
+                // the prepared frames hold only typed records: its plans are the plan writer's
+                crate::redaction::refuse_redaction_kinds(&items)?;
+                self.write_guarded(items)?;
             }
         }
         Ok(outcome)

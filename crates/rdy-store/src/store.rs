@@ -1806,6 +1806,13 @@ impl Store {
         self.log.fail_next_append_after(bytes);
     }
 
+    /// Test hook: the appends write `frames` frames whole, then the next one only in part
+    /// (`bytes` bytes), and that write fails; `None` disarms it.
+    #[doc(hidden)]
+    pub fn fail_append_at_frame_for_tests(&mut self, at: Option<(usize, usize)>) {
+        self.log.fail_append_at_frame(at);
+    }
+
     /// Writes `value` as one object of `kind` (see `write`). A block or change that is a read
     /// projection is refused before it is serialized: `Redacted` when its marker names a request
     /// that removed it, `ProjectedWrite` for a forged or unmatched marker.
