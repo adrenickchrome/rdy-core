@@ -350,10 +350,13 @@ pub(crate) fn approval_holds(
     decides: bool,
 ) -> Result<Holds, RdyError> {
     let p = st.reader().proposal(&pref.version)?;
-    let now = now_ms();
     let mut open = vec![];
+    // the clock is read only where a card is built: a version that writes no decision and has
+    // no deferral card reads it never, as before D-AAQ9Z, so a landing's stamps (and with them
+    // every later id and hash of a pinned clock) do not move
     let (card, rejected) = if decides {
         let v = Version::read(st, *pref, p)?;
+        let now = now_ms();
         if v.plan_bound.is_some()
             && let Err(e) = &v.plan
         {
@@ -374,7 +377,7 @@ pub(crate) fn approval_holds(
         }
         (v.deferral_item(now), v.rejected(st)?)
     } else {
-        match bound_deferral_item(st, pref, &p, now)? {
+        match bound_deferral_item(st, pref, &p, now_ms)? {
             None => (None, vec![]),
             Some(card) => (card, deferrals_refused(st, pref)?.into_iter().collect()),
         }
@@ -400,19 +403,20 @@ pub(crate) fn approval_holds(
 /// The deferral card of version `pref` (whose record is `p`), answered or not, read from its
 /// bound plan alone: `None` for a version with no bound plan (O19), `Some(None)` for a bound
 /// version with no deferred non-code item. A bound version whose plan cannot be read is that
-/// error (fail closed). The card is the one the queue builds ([`Version::deferral_item`]).
+/// error (fail closed). The card is the one the queue builds ([`Version::deferral_item`]). `now`
+/// reads the clock for the card's age, only when there is a card.
 fn bound_deferral_item(
     st: &ReadState,
     pref: &ProposalRef,
     p: &Proposal,
-    now: i64,
+    now: impl FnOnce() -> i64,
 ) -> Result<Option<Option<Item>>, RdyError> {
     let Some(bound) = st.reader().plan_of_proposal(&pref.version, st.seq())? else {
         return Ok(None);
     };
     let plan = version_plan(st, p, Some(bound))?;
     Ok(Some(deferral_item(pref, &plan).map(|mut it| {
-        raised_from(p, &mut it, now);
+        raised_from(p, &mut it, now());
         it
     })))
 }
@@ -437,7 +441,7 @@ pub(crate) fn deferral_card(st: &ReadState, r: &str) -> Result<Option<Item>, Rdy
     if answered(st, want, AnswerAct::RejectProposal)? {
         return Ok(None);
     }
-    bound_deferral_item(st, &pref, &p, now_ms())?
+    bound_deferral_item(st, &pref, &p, now_ms)?
         .flatten()
         .map(|i| finish(i, CARD_MAX_TOKENS))
         .transpose()
