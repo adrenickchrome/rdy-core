@@ -1,6 +1,7 @@
 """Failure-path checks for the CI scripts and policies, with no network or product store."""
 from contextlib import redirect_stdout
 import hashlib
+import http.client
 import importlib.util
 import io
 import json
@@ -340,9 +341,12 @@ def alert(number=1, state='open', level='high', tool='CodeQL', category='/langua
 
 
 class FakeResponse(io.BytesIO):
-    def __init__(self, body, link=None):
+    """A response whose headers are a real HTTPMessage, so repeated Link fields stay separate."""
+    def __init__(self, body, links=()):
         super().__init__(body)
-        self.headers = {} if link is None else {'Link': link}
+        self.headers = http.client.HTTPMessage()
+        for value in links:
+            self.headers['Link'] = value
 
     def __enter__(self):
         return self
@@ -353,14 +357,17 @@ class FakeResponse(io.BytesIO):
 
 ALERTS_URL = 'https://api.github.com/repos/owner/repo/code-scanning/alerts'
 QUERY = 'tool_name=CodeQL&ref=refs%2Fpull%2F7%2Fmerge&state=open&per_page=100'
+SERVER_URL = 'https://example.invalid/repositories/987/code-scanning/alerts?severity=low&page='
+NEXT = '<' + SERVER_URL + '2>; rel="next"'
+PREV = '<' + SERVER_URL + '1>; rel="prev"'
 
 
-def next_page(page, base=ALERTS_URL, query=QUERY):
-    return '<' + base + '?' + query + '&page=' + str(page) + '>; rel="next", <' + base + '?' + query + '&page=9>; rel="last"'
+def built(page):
+    return ALERTS_URL + '?' + QUERY + '&page=' + str(page)
 
 
 def respond(*pages):
-    """Each page is a body, or (body, Link header)."""
+    """Each page is a body, or (body, [Link field values])."""
     responses = iter([FakeResponse(json.dumps(page[0]).encode(), page[1]) if isinstance(page, tuple)
                       else FakeResponse(json.dumps(page).encode()) for page in pages])
     requests = []
@@ -439,49 +446,51 @@ class AlertGate(unittest.TestCase):
         return code, output.getvalue()
 
     def test_gate_pages_through_alerts_and_prints_each_blocking_one(self):
-        first = [alert(number, state='open', level='medium') for number in range(1, 101)]
-        urlopen, requests = respond((first, next_page(2)), [alert(101), alert(102, state='dismissed')])
+        urlopen, requests = respond(([alert(n, level='medium') for n in range(1, 101)], [NEXT]), [alert(101), alert(102, state='dismissed')])
         code, output = self.run_gate(urlopen)
         self.assertEqual(code, 1)
         self.assertIn('#101  rust/test-rule  high  crates/example.rs:12', output)
         self.assertNotIn('#102', output)
-        self.assertEqual([r.full_url for r in requests], [ALERTS_URL + '?' + QUERY, ALERTS_URL + '?' + QUERY + '&page=2'])
+        self.assertEqual([r.full_url for r in requests], [built(1), built(2)])
 
-    def test_short_or_empty_page_with_a_next_link_goes_on(self):
+    def test_separate_link_fields_are_all_read(self):
+        urlopen, requests = respond(([], [PREV, NEXT]), [alert(1)])
+        self.assertEqual(self.run_gate(urlopen)[0], 1)
+        self.assertEqual([r.full_url for r in requests], [built(1), built(2)])
+
+    def test_short_or_empty_page_with_next_goes_on(self):
         for first in ([alert(1, level='medium')], []):
-            urlopen, requests = respond((first, next_page(2)), ([], next_page(3)), [alert(3)])
+            urlopen, requests = respond((first, [NEXT]), ([], [PREV, NEXT]), [alert(3)])
             with self.subTest(first=first):
                 code, output = self.run_gate(urlopen)
-                self.assertEqual((code, len(requests)), (1, 3))
+                self.assertEqual(code, 1)
                 self.assertIn('#3  rust/test-rule', output)
+                self.assertEqual([r.full_url for r in requests], [built(1), built(2), built(3)])
 
-    def test_no_next_link_ends_the_list_even_after_a_full_page(self):
-        urlopen, requests = respond(([alert(n, level='medium') for n in range(1, 101)], '<' + ALERTS_URL + '?'
-                                     + QUERY + '&page=1>; rel="first"'))
+    def test_full_page_without_next_goes_on_until_an_empty_page(self):
+        urlopen, requests = respond([alert(n, level='medium') for n in range(1, 101)], [])
         self.assertEqual(self.run_gate(urlopen)[0], 0)
-        self.assertEqual(len(requests), 1)
+        self.assertEqual([r.full_url for r in requests], [built(1), built(2)])
 
-    def test_repository_id_form_of_the_next_link_is_accepted(self):
-        urlopen, requests = respond(([], next_page(2, base='https://api.github.com/repositories/42/code-scanning/alerts')),
-                                    [alert(1)])
-        self.assertEqual(self.run_gate(urlopen)[0], 1)
-        self.assertEqual(len(requests), 2)
+    def test_short_page_without_next_ends_the_list(self):
+        urlopen, requests = respond(([alert(1, level='medium')], [PREV]), [alert(2)])
+        self.assertEqual(self.run_gate(urlopen)[0], 0)
+        self.assertEqual([r.full_url for r in requests], [built(1)])
 
-    def test_next_links_elsewhere_or_malformed_fail_the_gate(self):
-        for link in (next_page(2, base='http://api.github.com/repos/owner/repo/code-scanning/alerts'),
-                     next_page(2, base='https://evil.example/repos/owner/repo/code-scanning/alerts'),
-                     next_page(2, base='https://api.github.com/repos/other/repo/code-scanning/alerts'),
-                     next_page(2, base='https://api.github.com/repos/owner/repo/secret-scanning/alerts'),
-                     next_page(2, query=QUERY.replace('state=open', 'state=dismissed')),
-                     next_page(2, query=QUERY.replace('merge', 'head')),
-                     next_page(2) + ', <' + ALERTS_URL + '?' + QUERY + '&page=3>; rel="next"',
-                     'not a link header'):
-            urlopen, _ = respond(([], link), [alert(1, level='medium')])
-            with self.subTest(link=link), self.assertRaises(SARIF.AlertQueryError):
+    def test_server_urls_are_never_requested(self):
+        urlopen, requests = respond(([], [NEXT]), ([], [NEXT]), [])
+        self.run_gate(urlopen)
+        self.assertEqual([r.full_url for r in requests], [built(1), built(2), built(3)])
+        self.assertFalse(any('example.invalid' in r.full_url for r in requests))
+
+    def test_malformed_link_fails_the_gate(self):
+        for links in (['not a link header'], [NEXT, 'garbage'], ['<x>; rel=next'], ['<a b>; rel="next"']):
+            urlopen, _ = respond(([], links), [alert(1, level='medium')])
+            with self.subTest(links=links), self.assertRaisesRegex(SARIF.AlertQueryError, 'Link'):
                 self.run_gate(urlopen)
 
     def test_page_cap_is_a_failure(self):
-        urlopen, _ = respond(*[([], next_page(n + 2)) for n in range(4)])
+        urlopen, _ = respond(*[([], [NEXT]) for _ in range(4)])
         with mock.patch.object(SARIF, 'MAX_PAGES', 3), self.assertRaisesRegex(SARIF.AlertQueryError, 'pages'):
             self.run_gate(urlopen)
 

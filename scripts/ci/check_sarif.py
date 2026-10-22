@@ -315,41 +315,36 @@ def alert_line(alert):
             + clean(rule.get('security_severity_level')) + '  ' + where)
 
 
-def next_link(header, api, repository, query):
-    """The rel="next" URL of a Link header, checked, or None when there is no next page."""
-    if header is None:
-        return None
-    if not isinstance(header, str):
-        raise AlertQueryError('invalid Link header')
-    found = []
-    for part in header.split(','):
-        if not part.strip():
-            continue
-        match = re.fullmatch(r'\s*<([^<>\s]+)>((?:\s*;\s*[A-Za-z]+="[^"]*")*)\s*', part)
-        if not match:
+def has_next(values):
+    """Whether any Link field value names a rel="next" page. A malformed value raises.
+
+    Only the presence of the relation is read; the gate never requests a URL the server sent.
+    """
+    found = False
+    for value in values or []:
+        if not isinstance(value, str):
             raise AlertQueryError('invalid Link header')
-        if any('next' in rel.split() for rel in re.findall(r'rel="([^"]*)"', match.group(2))):
-            found.append(match.group(1))
-    if not found:
-        return None
-    if len(found) > 1:
-        raise AlertQueryError('more than one next link')
-    url, base = urllib.parse.urlsplit(found[0]), urllib.parse.urlsplit(api.rstrip('/'))
-    params = urllib.parse.parse_qs(url.query)
-    # GitHub may name the repository by id (/repositories/<id>/...) in pagination links.
-    paths = (base.path + '/repos/' + repository + '/code-scanning/alerts').lower()
-    if (url.scheme != 'https' or url.netloc != base.netloc or url.fragment
-            or not (url.path.lower() == paths or re.fullmatch(
-                re.escape(base.path) + r'/repositories/[0-9]+/code-scanning/alerts', url.path))
-            or any(params.get(key) != [value] for key, value in query.items() if key != 'page')):
-        raise AlertQueryError('the next link is not this repository\'s alert list')
-    return found[0]
+        for part in value.split(','):
+            if not part.strip():
+                continue
+            match = re.fullmatch(r'\s*<[^<>\s]+>((?:\s*;\s*[A-Za-z]+="[^"]*")*)\s*', part)
+            if not match:
+                raise AlertQueryError('invalid Link header')
+            if any('next' in rel.split() for rel in re.findall(r'rel="([^"]*)"', match.group(1))):
+                found = True
+    return found
+
+
+def page_url(api, repository, tool, ref, page):
+    query = {'tool_name': tool, 'ref': ref, 'state': 'open', 'per_page': PAGE_SIZE, 'page': page}
+    return api.rstrip('/') + '/repos/' + repository + '/code-scanning/alerts?' + urllib.parse.urlencode(query)
 
 
 def fetch_alerts(api, repository, token, tool, ref):
-    """All open alerts of the tool on the ref, following the Link header to the last page.
+    """All open alerts of the tool on the ref. Any failure raises AlertQueryError.
 
-    Any failure raises AlertQueryError.
+    Every page URL is built here (page=1, 2, 3, ...). The next page is read while the Link header
+    names a next page or the page is full; only a short page with no next page ends the list.
     """
     if not api.startswith('https://'):
         raise AlertQueryError('the API URL is not HTTPS')
@@ -357,17 +352,17 @@ def fetch_alerts(api, repository, token, tool, ref):
         raise AlertQueryError('GITHUB_REPOSITORY is missing or invalid')
     if not token:
         raise AlertQueryError('GITHUB_TOKEN is missing')
-    query = {'tool_name': tool, 'ref': ref, 'state': 'open', 'per_page': str(PAGE_SIZE)}
-    url = api.rstrip('/') + '/repos/' + repository + '/code-scanning/alerts?' + urllib.parse.urlencode(query)
     alerts = []
-    for _ in range(MAX_PAGES):
+    for page in range(1, MAX_PAGES + 1):
         request = urllib.request.Request(
-            url, headers={'Accept': 'application/vnd.github+json', 'Authorization': 'Bearer ' + token,
-                          'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'rdy-core-ci'})
+            page_url(api, repository, tool, ref, page),
+            headers={'Accept': 'application/vnd.github+json', 'Authorization': 'Bearer ' + token,
+                     'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'rdy-core-ci'})
         try:
             with urllib.request.urlopen(request, timeout=60) as response:
                 batch = json.loads(response.read().decode('utf-8'))
-                link = response.headers.get('Link')
+                # All Link fields: a response may carry more than one.
+                links = response.headers.get_all('Link')
         except urllib.error.HTTPError as error:
             try:
                 message = json.loads(error.read().decode('utf-8')).get('message', '')
@@ -376,14 +371,12 @@ def fetch_alerts(api, repository, token, tool, ref):
             finally:
                 error.close()
             raise AlertQueryError('HTTP ' + str(error.code) + ' ' + clean(message)) from None
-        except (urllib.error.URLError, OSError, ValueError) as error:
+        except (urllib.error.URLError, OSError, ValueError, AttributeError) as error:
             raise AlertQueryError(clean(error)) from None
         if not isinstance(batch, list):
             raise AlertQueryError('the response is not an alert list')
         alerts.extend(batch)
-        # Only the Link header ends the list: a short or empty page with a next link goes on.
-        url = next_link(link, api, repository, query)
-        if url is None:
+        if not has_next(links) and len(batch) < PAGE_SIZE:
             return alerts
     raise AlertQueryError('more than ' + str(MAX_PAGES) + ' pages of alerts')
 
