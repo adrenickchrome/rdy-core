@@ -380,11 +380,14 @@ fn plb1_schema_explains_the_decision_parent() {
         json!({"when": "a write touches stable content and cites no briefing, or one that does not cover the block",
             "fix": "retry with the token of the briefing the error carries"})
     );
-    // the digests at the base of this change (b97ad25)
+    // the digests at the base of this change (b97ad25). rdy_write's is re-taken for DR1a Task 14
+    // (plan 2026-10-21-rdy-design-rebase-1a, line 1118: "The schema's op list now includes
+    // reaffirm and repin's code key"): only the description of its `ops` parameter changed, by
+    // the reaffirm op line and repin's `code` key (351830b6). The other three are the base's.
     let base: Vec<(String, String)> = [
         (
             "rdy_write",
-            "ec9d49224a18d21dc90d448e982186376eca76d0923cd0396b759980fc6ffae3",
+            "8742f7161257943419f2a9e2a01e97c90709361c4fbb1a31da03d452791bbef7",
         ),
         (
             "rdy_decide",
