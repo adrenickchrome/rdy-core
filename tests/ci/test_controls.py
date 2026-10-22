@@ -80,6 +80,79 @@ class SarifPolicy(unittest.TestCase):
         self.assertEqual(SARIF.inspect_sarif(item)['blocking_results'], 1)
 
 
+class SarifComponents(unittest.TestCase):
+    def document(self):
+        # Reduced shape of successful hosted CodeQL2.27.3 Actions analysis:
+        # empty driver, query-pack extension and empty supporting extensions.
+        return {'version': '2.1.0', 'runs': [{'tool': {
+            'driver': {'name': 'CodeQL', 'semanticVersion': '2.27.3'},
+            'extensions': [{'name': 'codeql-action/pr-diff-range', 'rules': []},
+                           {'name': 'codeql/actions-queries', 'guid': 'dbfe174b-1af3-4d67-8c42-520a794df84b',
+                            'rules': [{'id': 'actions/test', 'properties': {'security-severity': '9'}}]},
+                           {'name': 'codeql/actions-all', 'rules': []}]}, 'results': []}]}
+
+    def result(self):
+        return {'ruleId': 'actions/test', 'ruleIndex': 0,
+                'rule': {'id': 'actions/test', 'index': 0, 'toolComponent': {'index': 1}}}
+
+    def test_hosted_extension_shape_accepts_empty_results(self):
+        self.assertEqual(SARIF.inspect_sarif(self.document()), {'results': 0, 'blocking_results': 0})
+
+    def test_extension_result_uses_its_own_namespace(self):
+        doc = self.document(); run = doc['runs'][0]
+        run['tool']['driver']['rules'] = [{'id': 'actions/test', 'properties': {'security-severity': '0'}}]
+        run['results'] = [self.result()]
+        self.assertEqual(SARIF.inspect_sarif(doc)['blocking_results'], 1)
+        run['results'][0]['suppressions'] = [{'kind': 'external'}]
+        self.assertEqual(SARIF.inspect_sarif(doc)['blocking_results'], 1)
+
+    def test_component_identity_and_index_must_agree(self):
+        for ref in ({'index': 1, 'name': 'codeql/actions-queries'},
+                    {'name': 'codeql/actions-queries'},
+                    {'guid': 'dbfe174b-1af3-4d67-8c42-520a794df84b'}):
+            doc = self.document(); result = self.result(); result['rule']['toolComponent'] = ref
+            doc['runs'][0]['results'] = [result]
+            self.assertEqual(SARIF.inspect_sarif(doc)['blocking_results'], 1)
+        for ref in ({'index': 1, 'name': 'wrong'}, {'index': 0}, {'index': True},
+                    {'index': -2}, {'index': 9}, {'index': '1'}, {'name': 'wrong'}, {'bogus': 'x'}, None):
+            doc = self.document(); result = self.result(); result['rule']['toolComponent'] = ref
+            doc['runs'][0]['results'] = [result]
+            with self.subTest(ref=ref), self.assertRaises(ValueError): SARIF.inspect_sarif(doc)
+
+    def test_mismatched_rule_ids_or_indexes_refuse(self):
+        for key, value in (('ruleId', 'different'), ('ruleIndex', 1), ('ruleIndex', True)):
+            doc = self.document(); result = self.result(); result[key] = value
+            doc['runs'][0]['results'] = [result]
+            with self.subTest(key=key), self.assertRaises(ValueError): SARIF.inspect_sarif(doc)
+
+    def test_unqualified_extension_result_is_not_guessed(self):
+        doc = self.document(); doc['runs'][0]['results'] = [{'ruleId': 'actions/test'}]
+        with self.assertRaises(ValueError): SARIF.inspect_sarif(doc)
+
+    def test_ambiguous_component_names_refuse(self):
+        doc = self.document(); tool = doc['runs'][0]['tool']
+        tool['extensions'].append({'name': 'codeql/actions-queries', 'rules': []})
+        result = self.result(); result['rule']['toolComponent'] = {'name': 'codeql/actions-queries'}
+        doc['runs'][0]['results'] = [result]
+        with self.assertRaises(ValueError): SARIF.inspect_sarif(doc)
+
+    def test_missing_malformed_or_empty_all_component_rules_refuse(self):
+        for mutation in ('empty', 'missing-results', 'bad-extension', 'bad-rules', 'duplicate-rule'):
+            doc = self.document(); run = doc['runs'][0]; component = run['tool']['extensions'][1]
+            if mutation == 'empty': component['rules'] = []
+            elif mutation == 'missing-results': del run['results']
+            elif mutation == 'bad-extension': run['tool']['extensions'] = {}
+            elif mutation == 'bad-rules': component['rules'] = None
+            else: component['rules'] *= 2
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError): SARIF.inspect_sarif(doc)
+
+    def test_legacy_driver_rule_index_still_enforces_policy(self):
+        doc = report(); doc['runs'][0]['results'][0]['ruleIndex'] = 0
+        self.assertEqual(SARIF.inspect_sarif(doc)['blocking_results'], 1)
+        doc['runs'][0]['results'][0]['ruleIndex'] = 1
+        with self.assertRaises(ValueError): SARIF.inspect_sarif(doc)
+
+
 
 class SecretDispositions(unittest.TestCase):
     def setUp(self):

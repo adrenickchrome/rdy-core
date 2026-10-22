@@ -6,6 +6,62 @@ from pathlib import Path
 import sys
 
 
+def reference_index(value):
+    if type(value) is not int or value < -1:
+        raise ValueError('invalid reference index')
+    return value
+
+
+def select_reference(reference, values, fields):
+    """Resolve one component/descriptor without flattening distinct rule namespaces."""
+    if not isinstance(reference, dict) or set(reference) - {'index', 'properties', *fields}:
+        raise ValueError('invalid reference')
+    candidates = list(values)
+    if 'index' in reference:
+        index = reference_index(reference['index'])
+        if index >= 0:
+            if index >= len(values):
+                raise ValueError('reference index outside inventory')
+            candidates = [values[index]]
+    for field in fields:
+        if field in reference:
+            value = reference[field]
+            if not isinstance(value, str) or not value:
+                raise ValueError('invalid reference identity')
+            candidates = [item for item in candidates if item.get(field) == value]
+    if len(candidates) != 1:
+        raise ValueError('unknown or ambiguous reference')
+    return candidates[0]
+
+
+def result_rule(result, driver, extensions):
+    if not isinstance(result, dict):
+        raise ValueError('invalid result')
+    reference = result.get('rule', {})
+    if not isinstance(reference, dict) or set(reference) - {'id', 'index', 'guid', 'toolComponent', 'properties'}:
+        raise ValueError('invalid rule reference')
+    component_ref = reference.get('toolComponent', {})
+    if not isinstance(component_ref, dict) or set(component_ref) - {'name', 'index', 'guid', 'properties'}:
+        raise ValueError('invalid component reference')
+    if 'index' in component_ref and reference_index(component_ref['index']) >= 0:
+        component = select_reference(component_ref, extensions, ('name', 'guid'))
+    elif any(key in component_ref for key in ('name', 'guid')):
+        component = select_reference(component_ref, [driver] + extensions, ('name', 'guid'))
+    else:
+        component = driver
+    # A component index refers to tool.extensions; -1/omitted leaves identity lookup
+    # or the driver default. Rule index refers to this component's own rules.
+    rule_ref = {key: reference[key] for key in ('id', 'index', 'guid') if key in reference}
+    for outer, inner in (('ruleId', 'id'), ('ruleIndex', 'index')):
+        if outer in result:
+            if inner in rule_ref and rule_ref[inner] != result[outer]:
+                raise ValueError('inconsistent rule reference')
+            rule_ref[inner] = result[outer]
+    if not rule_ref or (set(rule_ref) == {'index'} and reference_index(rule_ref['index']) == -1):
+        raise ValueError('missing rule identity')
+    return select_reference(rule_ref, component.get('rules', []), ('id', 'guid'))
+
+
 def inspect_sarif(document):
     if not isinstance(document, dict) or document.get('version') != '2.1.0':
         raise ValueError('unsupported SARIF')
@@ -17,12 +73,26 @@ def inspect_sarif(document):
         driver = run['tool']['driver']
         if driver.get('name') != 'CodeQL':
             raise ValueError('unexpected analyzer')
-        rules = driver.get('rules', [])
-        if not isinstance(rules, list) or not rules:
-            raise ValueError('invalid rules')
-        by_id = {r['id']: r for r in rules}
-        if len(by_id) != len(rules):
-            raise ValueError('duplicate rule IDs')
+        extensions = run['tool'].get('extensions', [])
+        if not isinstance(extensions, list):
+            raise ValueError('invalid extensions')
+        rule_count = 0
+        for component in [driver] + extensions:
+            if not isinstance(component, dict) or not isinstance(component.get('name'), str):
+                raise ValueError('invalid tool component')
+            rules = component.get('rules', [])
+            if not isinstance(rules, list):
+                raise ValueError('invalid rules')
+            ids = []
+            for rule in rules:
+                if not isinstance(rule, dict) or not isinstance(rule.get('id'), str) or not rule['id']:
+                    raise ValueError('invalid rule identity')
+                ids.append(rule['id'])
+            if len(set(ids)) != len(ids):
+                raise ValueError('duplicate component rule IDs')
+            rule_count += len(rules)
+        if not rule_count:
+            raise ValueError('empty rule inventory')
         for invocation in run.get('invocations', []):
             if invocation.get('executionSuccessful') is False:
                 raise ValueError('analyzer execution failed')
@@ -35,10 +105,8 @@ def inspect_sarif(document):
         if not isinstance(results, list):
             raise ValueError('missing results')
         for result in results:
-            if not isinstance(result, dict) or result.get('ruleId') not in by_id:
-                raise ValueError('unknown result rule')
             # Suppressed results remain visible and are evaluated. No implicit waiver.
-            rule = by_id[result['ruleId']]
+            rule = result_rule(result, driver, extensions)
             severity = rule.get('properties', {}).get('security-severity')
             level = result.get('level', rule.get('defaultConfiguration', {}).get('level', 'warning'))
             if severity is not None:
