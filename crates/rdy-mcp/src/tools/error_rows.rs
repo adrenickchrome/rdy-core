@@ -402,7 +402,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         E_FROZEN,
-        "a write edits, moves or deletes an accepted or rejected decision, or a conflict on one cannot be resolved by an edit",
+        "a write changes an accepted or rejected decision beyond its tracking fields, or beyond its pins and reaffirmed field through a reaffirm op, or a conflict on one cannot be resolved by an edit",
         "take the landed side of a conflict (rdy view resolve <view> <id> --landed; rdy_view {op: \"resolve\", block, landed: true}), or write a new decision that supersedes or revokes it. For a suspect accepted decision that still holds, re-affirm it with a reaffirm op instead.",
     ),
     (
