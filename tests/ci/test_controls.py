@@ -10,6 +10,7 @@ import unittest
 from unittest import mock
 import os
 import subprocess
+from contextlib import redirect_stdout
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -153,6 +154,118 @@ class SarifComponents(unittest.TestCase):
         with self.assertRaises(ValueError): SARIF.inspect_sarif(doc)
 
 
+class SarifDiagnostics(unittest.TestCase):
+    def document(self):
+        doc = report()
+        result = doc['runs'][0]['results'][0]
+        result['message'] = {'text': 'SENSITIVE_FREE_TEXT'}
+        result['locations'] = [{'physicalLocation': {
+            'artifactLocation': {'uri': 'crates/example.rs', 'uriBaseId': '%SRCROOT%'},
+            'region': {'startLine': 23, 'snippet': {'text': 'SENSITIVE_SOURCE'}}}}]
+        return doc
+
+    def inspect(self, doc):
+        return SARIF.inspect_sarif(doc, {'crates/example.rs'})
+
+    def test_only_bounded_identifiers_severity_and_tracked_location_emitted(self):
+        summary = self.inspect(self.document())
+        self.assertEqual(summary, {'results': 1, 'blocking_results': 1,
+            'blocking_diagnostics': [{'rule_id': 'test/rule', 'severity': 8.1,
+                                      'location': {'path': 'crates/example.rs', 'line': 23}}]})
+        self.assertNotIn('SENSITIVE', json.dumps(summary))
+
+    def test_arbitrary_uri_traversal_untracked_and_controls_withheld(self):
+        for uri in ('/crates/example.rs', '../crates/example.rs', 'crates/../example.rs',
+                    'crates//example.rs', './crates/example.rs', 'https://host/private',
+                    'file:///private/example.rs', 'C:/private/example.rs', 'crates\\example.rs',
+                    'crates/example.rs?key=PRIVATE', 'crates/example.rs#PRIVATE',
+                    'crates/%2e%2e/private', 'crates/example\nPRIVATE.rs', 'untracked.rs',
+                    'a' * 1025):
+            doc = self.document()
+            doc['runs'][0]['results'][0]['locations'][0]['physicalLocation']['artifactLocation']['uri'] = uri
+            with self.subTest(uri=uri):
+                summary = self.inspect(doc)
+                self.assertEqual(summary['blocking_results'], 1)
+                self.assertIsNone(summary['blocking_diagnostics'][0]['location'])
+
+    def test_invalid_or_non_source_bases_and_lines_withheld(self):
+        for base in ('PRIVATE', 'file:///private', 1):
+            doc = self.document()
+            doc['runs'][0]['results'][0]['locations'][0]['physicalLocation']['artifactLocation']['uriBaseId'] = base
+            self.assertIsNone(self.inspect(doc)['blocking_diagnostics'][0]['location'])
+        for line in (True, '23', 0, -1, 2147483648, None):
+            doc = self.document()
+            doc['runs'][0]['results'][0]['locations'][0]['physicalLocation']['region']['startLine'] = line
+            self.assertIsNone(self.inspect(doc)['blocking_diagnostics'][0]['location'])
+
+    def test_indexed_artifact_must_resolve_without_conflict(self):
+        doc = self.document(); run = doc['runs'][0]
+        physical = run['results'][0]['locations'][0]['physicalLocation']
+        run['artifacts'] = [{'location': physical['artifactLocation']}]
+        physical['artifactLocation'] = {'index': 0}
+        self.assertEqual(self.inspect(doc)['blocking_diagnostics'][0]['location']['line'], 23)
+        for artifact in ({'index': 0, 'uri': 'different.rs'}, {'index': True},
+                         {'index': -1}, {'index': 99}, {'index': '0'}):
+            physical['artifactLocation'] = artifact
+            self.assertIsNone(self.inspect(doc)['blocking_diagnostics'][0]['location'])
+
+    def test_unusable_location_shapes_do_not_hide_blocking_result(self):
+        for locations in (None, {}, [None], [{}], [{'physicalLocation': None}],
+                          [{'physicalLocation': {'artifactLocation': None}}]):
+            doc = self.document(); doc['runs'][0]['results'][0]['locations'] = locations
+            summary = self.inspect(doc)
+            self.assertEqual(summary['blocking_results'], 1)
+            self.assertIsNone(summary['blocking_diagnostics'][0]['location'])
+
+    def test_invalid_identifier_is_withheld_without_waiver(self):
+        for identifier in ('test/PRIVATE\nINJECTION', 'x' * 161):
+            doc = self.document(); run = doc['runs'][0]
+            run['tool']['driver']['rules'][0]['id'] = identifier
+            run['results'][0]['ruleId'] = identifier
+            summary = self.inspect(doc)
+            self.assertEqual(summary['blocking_results'], 1)
+            self.assertEqual(summary['blocking_diagnostics'][0]['rule_id'], '[withheld-invalid-identifier]')
+
+    def test_diagnostics_preserve_scores_suppression_and_unscored_errors(self):
+        for score, expected in (('6.9', 0), ('7.0', 1), ('9.8', 1)):
+            doc = self.document(); run = doc['runs'][0]
+            run['tool']['driver']['rules'][0]['properties']['security-severity'] = score
+            run['results'][0]['suppressions'] = [{'kind': 'external'}]
+            summary = self.inspect(doc)
+            self.assertEqual(summary['blocking_results'], expected)
+            self.assertEqual(len(summary['blocking_diagnostics']), expected)
+        doc = self.document(); run = doc['runs'][0]
+        run['tool']['driver']['rules'][0]['properties'] = {}
+        run['results'][0]['level'] = 'error'
+        self.assertEqual(self.inspect(doc)['blocking_diagnostics'][0]['severity'], 'unscored-error')
+
+    def test_main_globally_bounds_diagnostics_without_losing_counts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            doc = self.document(); doc['runs'][0]['results'] *= 101
+            for filename in ('one.sarif', 'two.sarif'):
+                (Path(directory) / filename).write_text(json.dumps(doc))
+            output = io.StringIO()
+            with mock.patch.object(SARIF.sys, 'argv', ['check_sarif.py', directory]), \
+                 mock.patch.object(SARIF.subprocess, 'check_output', return_value=b'crates/example.rs\0'), \
+                 redirect_stdout(output):
+                self.assertEqual(SARIF.main(), 1)
+            summary = json.loads(output.getvalue())
+            self.assertEqual(summary['results'], 202)
+            self.assertEqual(summary['blocking_results'], 202)
+            self.assertEqual(len(summary['blocking_diagnostics']), 100)
+            self.assertEqual(summary['diagnostics_omitted'], 102)
+            self.assertNotIn('SENSITIVE', output.getvalue())
+
+    def test_missing_repository_inventory_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / 'report.sarif').write_text(json.dumps(self.document()))
+            with mock.patch.object(SARIF.sys, 'argv', ['check_sarif.py', directory]), \
+                 mock.patch.object(SARIF.subprocess, 'check_output',
+                                   side_effect=subprocess.CalledProcessError(1, 'git')):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    SARIF.main()
+
+
 
 class SecretDispositions(unittest.TestCase):
     def setUp(self):
@@ -237,11 +350,21 @@ class FastGate(unittest.TestCase):
             calls = []
             def run(args, **kwargs):
                 calls.append((args, kwargs))
-                if args[1] == 'qa' and change:
-                    (root / change).write_text('changed')
+                if args[1] == 'qa':
+                    report = {'revision': 'a' * 8, 'dirty': False, 'mode': 'standard',
+                              'duration_secs': 1.0, 'pass': status == 0,
+                              'gates': [{'name': name, 'pass': status == 0,
+                                         'detail': '1 passed, 0 failed, 0 ignored, 0 skipped'}
+                                        for name in FAST.GATES],
+                              'areas': [{'name': name, 'ok': status == 0, 'passed': 1,
+                                         'failed': 0, 'ignored': 0, 'skipped': 0}
+                                        for name in sorted(FAST.AREAS)]}
+                    (root / 'target/qa/report.json').write_text(json.dumps(report))
+                    if change:
+                        (root / change).write_text('changed')
                 return subprocess.CompletedProcess(args, status if args[1] == 'qa' else 0)
             try:
-                with mock.patch.object(FAST, 'ROOT', root), mock.patch.object(FAST.os, 'geteuid', return_value=501), mock.patch.object(FAST, 'tracked_snapshot', return_value={'file': (420, 'hash')}), mock.patch.object(FAST.subprocess, 'run', side_effect=run):
+                with mock.patch.object(FAST, 'ROOT', root), mock.patch.object(FAST, 'identity', return_value={'commit': 'a' * 40}), mock.patch.object(FAST.os, 'geteuid', return_value=501), mock.patch.object(FAST, 'tracked_snapshot', return_value={'file': (420, 'hash')}), mock.patch.object(FAST.subprocess, 'run', side_effect=run):
                     result = FAST.main()
             finally:
                 os.chdir(saved)

@@ -39,7 +39,16 @@ jobs:
       - name: Not root
         run: test "$(id -u)" -ne 0
       - name: Fast gate (fmt, clippy, tests; no perf)
+        id: fast-gate
         run: python3 scripts/ci/run_fast.py
+      - name: Retain sanitized fast-gate evidence
+        if: always() && steps.fast-gate.outputs.report_ready == 'true'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: fast-gate-linux-x86_64-${{ github.run_attempt }}
+          path: target/qa/ci-fast-report.json
+          if-no-files-found: error
+          retention-days: 7
   coverage:
     permissions:
       contents: read

@@ -38,7 +38,16 @@ jobs:
       - name: Toolchain
         run: rustup toolchain install 1.99.0 --profile minimal --component clippy,rustfmt
       - name: Native fast gate, without performance or rebaseline
+        id: fast-gate
         run: python3 scripts/ci/run_fast.py
+      - name: Retain sanitized fast-gate evidence
+        if: always() && steps.fast-gate.outputs.report_ready == 'true'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: fast-gate-${{ matrix.runner }}-${{ github.run_attempt }}
+          path: target/qa/ci-fast-report.json
+          if-no-files-found: error
+          retention-days: 7
   windows-portable:
     name: Windows Server portable crates only
     runs-on: windows-2025

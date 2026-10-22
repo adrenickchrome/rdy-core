@@ -3,7 +3,62 @@
 import json
 import math
 from pathlib import Path
+import re
+import subprocess
 import sys
+
+
+MAX_DIAGNOSTICS = 100
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def blocking_diagnostic(result, rule, score, run, repository_paths):
+    """Only emit identifiers and tracked relative locations, never SARIF prose/URIs."""
+    identifier = rule['id']
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_./-]{0,159}', identifier):
+        identifier = '[withheld-invalid-identifier]'
+    diagnostic = {'rule_id': identifier,
+                  'severity': score if score is not None else 'unscored-error',
+                  'location': None}
+    locations = result.get('locations', [])
+    if not isinstance(locations, list):
+        return diagnostic
+    for location in locations[:10]:
+        if not isinstance(location, dict):
+            continue
+        physical = location.get('physicalLocation', {})
+        if not isinstance(physical, dict):
+            continue
+        artifact = physical.get('artifactLocation', {})
+        region = physical.get('region', {})
+        if not isinstance(artifact, dict) or not isinstance(region, dict):
+            continue
+        # Some SARIF writers reference run.artifacts instead of repeating the URI.
+        if 'index' in artifact:
+            index = artifact['index']
+            inventory = run.get('artifacts', [])
+            if type(index) is not int or not isinstance(inventory, list) or not 0 <= index < len(inventory):
+                continue
+            entry = inventory[index]
+            indexed = entry.get('location', {}) if isinstance(entry, dict) else {}
+            if not isinstance(indexed, dict):
+                continue
+            if any(key in artifact and key in indexed and artifact[key] != indexed[key]
+                   for key in ('uri', 'uriBaseId')):
+                continue
+            artifact = dict(indexed, **artifact)
+        uri = artifact.get('uri')
+        line = region.get('startLine')
+        if (not isinstance(uri, str) or len(uri) > 1024
+                or not re.fullmatch(r'[A-Za-z0-9_. /-]+', uri)
+                or any(part in ('', '.', '..') for part in uri.split('/'))
+                or artifact.get('uriBaseId') not in (None, '%SRCROOT%')
+                or uri not in repository_paths
+                or type(line) is not int or not 1 <= line <= 2147483647):
+            continue
+        diagnostic['location'] = {'path': uri, 'line': line}
+        break
+    return diagnostic
 
 
 def reference_index(value):
@@ -62,13 +117,14 @@ def result_rule(result, driver, extensions):
     return select_reference(rule_ref, component.get('rules', []), ('id', 'guid'))
 
 
-def inspect_sarif(document):
+def inspect_sarif(document, repository_paths=None):
     if not isinstance(document, dict) or document.get('version') != '2.1.0':
         raise ValueError('unsupported SARIF')
     runs = document.get('runs')
     if not isinstance(runs, list) or not runs:
         raise ValueError('missing analysis runs')
     count = blocked = 0
+    diagnostics = []
     for run in runs:
         driver = run['tool']['driver']
         if driver.get('name') != 'CodeQL':
@@ -115,25 +171,37 @@ def inspect_sarif(document):
                 score = float(severity)
                 if not math.isfinite(score) or not 0 <= score <= 10:
                     raise ValueError('invalid security severity')
-                blocked += int(score >= 7)
+                blocking = score >= 7
             else:
-                blocked += int(level == 'error')
+                score = None
+                blocking = level == 'error'
+            blocked += int(blocking)
+            if blocking and repository_paths is not None and len(diagnostics) < MAX_DIAGNOSTICS:
+                diagnostics.append(blocking_diagnostic(result, rule, score, run, repository_paths))
             count += 1
-    return {'results': count, 'blocking_results': blocked}
+    summary = {'results': count, 'blocking_results': blocked}
+    if repository_paths is not None:
+        summary['blocking_diagnostics'] = diagnostics
+    return summary
 
 
 def main():
     paths = sorted(Path(sys.argv[1]).rglob('*.sarif'))
     if not paths:
         raise ValueError('no SARIF output')
-    summaries = [inspect_sarif(json.loads(p.read_text())) for p in paths]
+    repository_paths = set(subprocess.check_output(
+        ['git', 'ls-files', '-z'], cwd=ROOT).decode('utf-8').split('\0')) - {''}
+    summaries = [inspect_sarif(json.loads(p.read_text()), repository_paths) for p in paths]
+    diagnostics = [item for summary in summaries for item in summary['blocking_diagnostics']][:MAX_DIAGNOSTICS]
+    blocked = sum(s['blocking_results'] for s in summaries)
     print(json.dumps({'files': len(paths), 'results': sum(s['results'] for s in summaries),
-                      'blocking_results': sum(s['blocking_results'] for s in summaries)}))
+                      'blocking_results': blocked, 'blocking_diagnostics': diagnostics,
+                      'diagnostics_omitted': blocked - len(diagnostics)}))
     return int(any(s['blocking_results'] for s in summaries))
 
 
 if __name__ == '__main__':
     try:
         sys.exit(main())
-    except (ValueError, KeyError, TypeError, OSError, IndexError):
+    except (ValueError, KeyError, TypeError, OSError, IndexError, subprocess.CalledProcessError):
         raise SystemExit('CodeQL result policy refused incomplete or invalid analysis')
