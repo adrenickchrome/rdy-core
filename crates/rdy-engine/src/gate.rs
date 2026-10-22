@@ -2874,6 +2874,9 @@ impl Rdy {
             .fresh_change()
             .cloned()
             .ok_or_else(|| bug("the proposal has no change"))?;
+        // the one change this answer writes (D-CQMA4) must fit one record, or a later read or
+        // export of the history would refuse it; nothing is written yet
+        crate::reaffirm::change_fits(&committed, crate::reaffirm::CARD_CHANGE_FIX)?;
         // the bound plan: the candidate's complete plan on canon, with no answer
         let pp = crate::plan::lifecycle::prepare_proposal_plan(
             &st,
@@ -2919,7 +2922,7 @@ impl Rdy {
             accept: None,
             chosen: None,
             keys: BTreeMap::new(),
-            reaffirm: Some((card.r#ref.clone(), canon_at)),
+            reaffirm: Some((card.r#ref.clone(), canon_at, card.card_hash.clone())),
         })
     }
 
@@ -2962,7 +2965,7 @@ impl Rdy {
         } = prepared;
         // D-CQMA4: a re-affirmation card's landing was built on the canon its card was read on;
         // canon must stand there still
-        if let Some((card, canon_at)) = &reaffirm
+        if let Some((card, canon_at, _)) = &reaffirm
             && self.store.canon_head()? != *canon_at
         {
             return Err(RdyError::new(
@@ -3054,8 +3057,9 @@ pub(crate) struct PreparedApproval {
     chosen: Option<AltRef>,
     keys: BTreeMap<String, String>,
     /// A re-affirmation card's isolated landing (D-CQMA4): the card's ref and the canon head it
-    /// was read on, checked again before the commit. None for every other landing.
-    reaffirm: Option<(String, Option<Hash>)>,
+    /// was read on, checked again before the commit, and the card's hash, which binds every
+    /// retry of the answer. None for every other landing.
+    reaffirm: Option<(String, Option<Hash>, String)>,
 }
 
 impl PreparedApproval {
@@ -3069,6 +3073,13 @@ impl PreparedApproval {
     /// card binds the retry instead).
     pub(crate) fn pin(&self) -> Option<ProposalRef> {
         self.reaffirm.is_none().then_some(self.pref)
+    }
+
+    /// The hash of the re-affirmation card this landing answers: a retry of the answer binds
+    /// that card, also when the first request named no hash, so a card whose members or binding
+    /// moved meanwhile is `E_ITEM_MOVED` with the fresh card. None for every other landing.
+    pub(crate) fn card_pin(&self) -> Option<&str> {
+        self.reaffirm.as_ref().map(|(_, _, h)| h.as_str())
     }
 
     /// The refusal of this landing when it was prepared again for an approval first bound to

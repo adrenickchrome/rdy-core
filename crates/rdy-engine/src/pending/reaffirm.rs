@@ -26,7 +26,8 @@
 //! when a decision has no title), one fact `Cause`, and two options with no recommendation:
 //! `o1` [`HOLD_LABEL`] and `o2` [`KEEP_LABEL`]. It stands alone (no batch, no exception), never
 //! blocks, and was raised by the approver of the last landing that changed, deleted or retired
-//! the cause, at that landing's time.
+//! the cause, at that landing's time. A retirement's landing is the one that introduced it: a
+//! later metadata-only version of the retiring decision does not move it.
 //!
 //! # The binding (O10)
 //!
@@ -42,7 +43,7 @@ use crate::error::{E_LIMIT, RdyError};
 use crate::session::rfc3339;
 use crate::{ReadState, Scope};
 use rdy_graph::DerivedStatus;
-use rdy_model::decision::DECISION;
+use rdy_model::decision::{self, DECISION, DecisionStatus};
 use rdy_model::{Block, BlockId, Hash, Op};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -104,14 +105,75 @@ pub fn card_limit_error() -> RdyError {
     )
 }
 
+/// The bounds of one card: its members, its member/suspect pairs and its encoded binding's
+/// bytes. The queue checks each once, where it builds the card: the members before any member
+/// is read, the pairs as each member's suspects join, the bytes once the binding is complete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CardLimits {
+    pub members: usize,
+    pub pairs: usize,
+    pub bytes: usize,
+}
+
+impl CardLimits {
+    /// The product's bounds: [`MAX_CARD_MEMBERS`], [`MAX_CARD_PAIRS`] and [`MAX_CARD_BYTES`].
+    pub const PRODUCT: CardLimits = CardLimits {
+        members: MAX_CARD_MEMBERS,
+        pairs: MAX_CARD_PAIRS,
+        bytes: MAX_CARD_BYTES,
+    };
+
+    fn members(&self, n: usize) -> Result<(), RdyError> {
+        if n > self.members {
+            return Err(card_limit_error());
+        }
+        Ok(())
+    }
+
+    fn pairs(&self, n: usize) -> Result<(), RdyError> {
+        if n > self.pairs {
+            return Err(card_limit_error());
+        }
+        Ok(())
+    }
+
+    fn bytes(&self, n: usize) -> Result<(), RdyError> {
+        if n > self.bytes {
+            return Err(card_limit_error());
+        }
+        Ok(())
+    }
+}
+
+thread_local! {
+    /// This thread's card bounds: the product's, except inside
+    /// [`with_card_limits_for_tests`].
+    static LIMITS: std::cell::Cell<CardLimits> = const { std::cell::Cell::new(CardLimits::PRODUCT) };
+}
+
+/// Runs `f` with this thread's card bounds set to `limits`, then restores the product's: the
+/// fault hook that lets a test reach each bound of the queue's own card construction with a
+/// small project. The product never calls it.
+pub fn with_card_limits_for_tests<T>(limits: CardLimits, f: impl FnOnce() -> T) -> T {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            LIMITS.with(|l| l.set(CardLimits::PRODUCT));
+        }
+    }
+    LIMITS.with(|l| l.set(limits));
+    let _restore = Restore;
+    f()
+}
+
 /// Checks one card's bounds: at most [`MAX_CARD_MEMBERS`] members, [`MAX_CARD_PAIRS`]
 /// member/suspect pairs and [`MAX_CARD_BYTES`] bytes of encoded binding; else
-/// [`card_limit_error`].
+/// [`card_limit_error`]. The queue applies the same three checks of [`CardLimits`].
 pub fn check_card_bounds(members: usize, pairs: usize, bytes: usize) -> Result<(), RdyError> {
-    if members > MAX_CARD_MEMBERS || pairs > MAX_CARD_PAIRS || bytes > MAX_CARD_BYTES {
-        return Err(card_limit_error());
-    }
-    Ok(())
+    let l = CardLimits::PRODUCT;
+    l.members(members)?;
+    l.pairs(pairs)?;
+    l.bytes(bytes)
 }
 
 /// The ref of the card of `cause` at its version `version`.
@@ -207,12 +269,63 @@ fn landing_of_version(st: &ReadState, v: &Hash) -> Result<Option<Hash>, RdyError
     Ok(reader.landing_of(&change)?)
 }
 
+/// Whether `b` is an accepted decision that supersedes or revokes `cause`: the retirement
+/// relation [`rdy_graph::Graph::retiring_decisions`] reads.
+fn retires(b: &Block, cause: &BlockId) -> bool {
+    decision::status(b) == Some(DecisionStatus::Accepted)
+        && [decision::SUPERSEDES, decision::REVOKES]
+            .iter()
+            .filter_map(|k| b.links.get(*k))
+            .flatten()
+            .any(|l| l.target == *cause)
+}
+
+/// The landing that introduced the retirement of `cause` by `retirer` (its canon version): the
+/// landing of the earliest version of the retirer's unbroken run of versions back from canon
+/// that each retire `cause`. A later version that changes only the retirer's metadata (a
+/// re-affirmation, say) keeps the retirement and is not its origin.
+fn retirement_landing(
+    st: &ReadState,
+    retirer: &Block,
+    cause: &BlockId,
+) -> Result<Option<Hash>, RdyError> {
+    let reader = st.reader();
+    let head = st.canon_head();
+    let mut v = retirer.version_hash();
+    let mut seen = BTreeSet::from([v]);
+    loop {
+        let producers = reader.producers(&v)?;
+        let Some(change) = reader.producer_at(&producers, head.as_ref())? else {
+            break;
+        };
+        let base = reader
+            .change(&change)?
+            .ops
+            .into_iter()
+            .find_map(|op| match op {
+                Op::Update { base, block } if block.version_hash() == v => Some(base),
+                _ => None,
+            });
+        let Some(base) = base.filter(|b| !seen.contains(b)) else {
+            break;
+        };
+        if !retires(&reader.get_block(&base)?, cause) {
+            break;
+        }
+        seen.insert(base);
+        v = base;
+    }
+    landing_of_version(st, &v)
+}
+
 /// Who raised the card of a cause and when: the approver of the last landing that changed the
-/// cause (wrote its canon version), deleted it (`deleter`) or retired it (wrote a retiring
-/// decision's canon version), by log order; else canon's head landing.
+/// cause (wrote its canon version), deleted it (`deleter`) or retired it (introduced a retiring
+/// decision's retirement of it, [`retirement_landing`]), by log order; else canon's head
+/// landing.
 fn raised_by(
     st: &ReadState,
     m: &crate::Materialized,
+    cause: &BlockId,
     cause_in_canon: Option<Hash>,
     deleter: Option<Hash>,
     retirements: &[BlockId],
@@ -227,7 +340,7 @@ fn raised_by(
     }
     for r in retirements {
         if let Some(b) = m.get(r) {
-            landings.extend(landing_of_version(st, &b.version_hash())?);
+            landings.extend(retirement_landing(st, b, cause)?);
         }
     }
     let mut last: Option<(rdy_store::segment::Location, Hash)> = None;
@@ -276,14 +389,13 @@ pub(crate) fn reaffirm_items(
         }
         groups.entry(target).or_default().insert(&row.block);
     }
+    let limits = LIMITS.with(std::cell::Cell::get);
     let mut out = vec![];
     for (cause, ids) in groups {
         let Some((version, block, deleter)) = cause_block(st, &m, cause)? else {
             continue;
         };
-        if ids.len() > MAX_CARD_MEMBERS {
-            return Err(card_limit_error());
-        }
+        limits.members(ids.len())?;
         let mut pairs = 0usize;
         let mut members = Vec::with_capacity(ids.len());
         for id in &ids {
@@ -291,9 +403,7 @@ pub(crate) fn reaffirm_items(
             own.sort();
             own.dedup();
             pairs = pairs.saturating_add(own.len());
-            if pairs > MAX_CARD_PAIRS {
-                return Err(card_limit_error());
-            }
+            limits.pairs(pairs)?;
             let version = m
                 .get(id)
                 .map(|b| b.version_hash())
@@ -305,11 +415,7 @@ pub(crate) fn reaffirm_items(
             });
         }
         let retirements: Vec<BlockId> = g.retiring_decisions(cause).into_iter().collect();
-        check_card_bounds(
-            members.len(),
-            pairs,
-            reaffirm_binding_len(cause, &retirements, &members),
-        )?;
+        limits.bytes(reaffirm_binding_len(cause, &retirements, &members))?;
         let title = match text(&block, "title") {
             Some(t) => format!("Re-affirm after {t}"),
             None => format!("Re-affirm after {cause}"),
@@ -346,7 +452,7 @@ pub(crate) fn reaffirm_items(
             ),
         ];
         let in_canon = m.get(cause).map(|b| b.version_hash());
-        if let Some((by, at)) = raised_by(st, &m, in_canon, deleter, &retirements)? {
+        if let Some((by, at)) = raised_by(st, &m, cause, in_canon, deleter, &retirements)? {
             it.raised_by = by;
             it.raised_at = rfc3339(at);
             it.age = age(at, now);

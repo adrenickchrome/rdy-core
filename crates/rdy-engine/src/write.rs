@@ -2984,6 +2984,11 @@ impl Rdy {
             links,
             read_identity: None,
         };
+        // a write that re-affirms decisions grows with their count: its one change must fit
+        // one record (D-EJBPD), checked before anything is written
+        if !reaffirmed.is_empty() {
+            crate::reaffirm::change_fits(&change, crate::reaffirm::WRITE_CHANGE_FIX)?;
+        }
         let id = self.store.commit_to_view_resolving(
             &req.view,
             change,

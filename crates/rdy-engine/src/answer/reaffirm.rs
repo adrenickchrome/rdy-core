@@ -20,8 +20,9 @@
 //! The note is the reason, or `They still hold` when none is given; a note that is given must
 //! hold 1 to 2000 characters, as the public reaffirm op's reason. The landing writes only the
 //! members' pins and re-affirmation metadata for the card's cause, records the answering person
-//! as its approver with the card as its evidence (both labels, and the chosen one), and asks for
-//! no second approval and no one-way exception: the person answered this exact card.
+//! as its approver with the card as its evidence (both labels, and the chosen one; a relay with
+//! text evidence is refused), and asks for no second approval and no one-way exception: the
+//! person answered this exact card.
 use super::{
     AnswerInfo, AnswerStep, Answerer, Bound, PreparedAnswer, assurance, labels, put_alone,
 };
@@ -135,9 +136,18 @@ fn hold(
             "ask an approver to land it",
         ));
     }
+    // the landing's evidence is the card the person answered, local or relayed (D-CQMA4): a
+    // relay that calls its evidence the person's own words is refused before anything is written
+    if by.kind.is_some_and(|k| k != EvidenceKind::Card) {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "a re-affirmation card's landing records card evidence, not text",
+            "relay the answer with kind card, or leave kind out",
+        ));
+    }
     let reason = Reason::parse(note.as_deref().unwrap_or(HOLD_LABEL))?;
     let evidence = ApprovalEvidence {
-        kind: by.kind.unwrap_or(EvidenceKind::Card),
+        kind: EvidenceKind::Card,
         options: labels(&b.item),
         choice: Some(HOLD_LABEL.to_string()),
         card_hash: Some(card_hash(&b)?),

@@ -62,6 +62,32 @@ pub fn check_shared_inputs(
     Ok(reason.as_str().to_string())
 }
 
+/// The fix of a re-affirmation card's answer whose one change would exceed one record.
+pub const CARD_CHANGE_FIX: &str = "Re-affirm these decisions in smaller groups with the reaffirm write op, then answer the card again.";
+
+/// The fix of a write with reaffirm ops whose change would exceed one record.
+pub const WRITE_CHANGE_FIX: &str =
+    "Re-affirm these decisions in smaller groups, one write for each group.";
+
+/// Refuses a change that re-affirms decisions when its encoding would exceed one record
+/// ([`rdy_store::bounded::fits`], the store's own record bound): `E_LIMIT`
+/// `re-affirmation change exceeds 16777216 record bytes`, with `fix`. A change of one write or
+/// one card answer is one record, so a re-affirmation of many decisions is refused before
+/// anything is written, never split, and never written past the bound a later read or export of
+/// the history checks.
+pub(crate) fn change_fits(change: &rdy_model::Change, fix: &str) -> Result<(), RdyError> {
+    rdy_store::bounded::fits(change).map_err(|e| match e {
+        rdy_store::bounded::RecordError::Limit { .. } => {
+            RdyError::new(E_LIMIT, format!("re-affirmation change exceeds {e}"), fix)
+        }
+        _ => RdyError::new(
+            E_INTERNAL,
+            format!("re-affirmation change does not encode: {e}"),
+            "report this as a bug in rdy",
+        ),
+    })
+}
+
 /// The sentence an `E_FROZEN` fix ends with when the frozen decision is a suspect one that a
 /// `reaffirm` op could re-affirm.
 pub(crate) const FROZEN_REAFFIRM_HINT: &str =

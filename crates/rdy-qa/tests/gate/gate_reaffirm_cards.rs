@@ -9,7 +9,8 @@ use rdy_engine::answer::AnswerRequest;
 use rdy_engine::answer::relay::RelayInput;
 use rdy_engine::engine::{Engine, Local, with_writer_result};
 use rdy_engine::pending::reaffirm::{
-    MAX_CARD_BYTES, MAX_CARD_MEMBERS, MAX_CARD_PAIRS, check_card_bounds, reaffirm_binding_len,
+    CardLimits, MAX_CARD_BYTES, MAX_CARD_MEMBERS, MAX_CARD_PAIRS, check_card_bounds,
+    reaffirm_binding_len, with_card_limits_for_tests,
 };
 use rdy_engine::pending::{
     CARD_MAX_TOKENS, HOLD_LABEL, Item, ItemKind, KEEP_LABEL, Pending, PendingQuery,
@@ -1304,4 +1305,429 @@ fn cp16_end_to_end_mcp_and_cli_answer_seal_the_same_work() {
     check(&r, &p, &landing);
     r.fsck().unwrap();
     r.close().unwrap();
+}
+
+// ---- fix round 1 ----
+
+/// The signing race of a local answer that names no card hash: every retry binds the card the
+/// first preparation answered. A card that gains a member (the open proposal that re-affirmed it
+/// closes) or loses one (a new open proposal re-affirms it) while the agent signs is
+/// `E_ITEM_MOVED` with the fresh card, and no internal view, landing or seal is written.
+#[test]
+fn cp16_signing_retry_without_a_hash_binds_the_first_card() {
+    for gains in [true, false] {
+        let (d, mut r) = project();
+        let p = pair(&mut r);
+        let reaffirm_d2 = |r: &mut Rdy, d2: &str, a: &str| {
+            write(
+                r,
+                "h2",
+                json!([{"op": "reaffirm", "id": d2, "targets": [a], "reason": "Checked."}]),
+            )
+            .unwrap();
+            r.propose(&writer(), "h2", "h2", Some(TEST_SUMMARY))
+                .unwrap();
+        };
+        if gains {
+            reaffirm_d2(&mut r, &p.d2, &p.w.a);
+        }
+        let c = the_card(&r, &p.w.a);
+        let first = if gains {
+            vec![p.d1.clone()]
+        } else {
+            sorted(vec![p.d1.clone(), p.d2.clone()])
+        };
+        assert_eq!(members(&c), first);
+        sign_always(d.path());
+        let e = Arc::new(Local::new(r));
+        let racer = Arc::clone(&e);
+        let (d2, a) = (p.d2.clone(), p.w.a.clone());
+        let agent = Racing {
+            inner: QaAgent::new(),
+            hook: Mutex::new(Some(Box::new(move || {
+                on_engine(&*racer, move |r| {
+                    if gains {
+                        r.view_close(&writer(), &["h2".into()], "withdrawn")
+                            .unwrap();
+                    } else {
+                        reaffirm_d2(r, &d2, &a);
+                    }
+                });
+            }))),
+        };
+        let req = SigningAct::Answer(AnswerRequest {
+            r#ref: c.r#ref.clone(),
+            option: "o1".into(),
+            ..AnswerRequest::default()
+        });
+        let err = run_signed_act(&*e, &agent, &approver(), PERSON, req).unwrap_err();
+        assert_eq!(err.code, E_ITEM_MOVED, "gains {gains}: {err}");
+        let corrected = err.corrected.clone();
+        on_engine(&*e, move |r| {
+            let fresh = the_card(r, &p.w.a);
+            let now = if gains {
+                sorted(vec![p.d1.clone(), p.d2.clone()])
+            } else {
+                vec![p.d1.clone()]
+            };
+            assert_eq!(members(&fresh), now, "gains {gains}");
+            assert_eq!(corrected, Some(card_json(&fresh)), "the fresh card");
+            assert!(internal_views(r).is_empty(), "gains {gains}");
+            assert_eq!(suspects_of(r, &p.d1).len(), 1, "d1 stays suspect");
+            assert_eq!(suspects_of(r, &p.d2).len(), 1, "d2 stays suspect");
+            r.fsck().unwrap();
+        });
+    }
+}
+
+/// Every landing of `They still hold` records card evidence: a relay that names text evidence
+/// is refused before anything is written; one that names card lands with card evidence.
+#[test]
+fn cp16_relayed_text_evidence_is_refused_for_the_landing() {
+    let (_d, mut r) = project();
+    let p = pair(&mut r);
+    let ra = the_card(&r, &p.w.a).r#ref;
+    let mut st = agent_state(r);
+    let card = mcp_card(&mut st, &ra);
+    let relay = |st: &mut McpState, kind: &str| {
+        rdy_answer(
+            st,
+            serde_json::from_value(json!({
+                "ref": card["ref"], "option": "o1", "card_hash": card["card_hash"], "kind": kind,
+                "evidence": "Yes, they hold.", "question": "Do they still hold?", "session_ref": "chat-7",
+            }))
+            .unwrap(),
+        )
+    };
+    let e = st.engine.clone();
+    let end = on_engine(&*e, |r| log_end(r));
+    let err = relay(&mut st, "text").unwrap_err();
+    assert_eq!(
+        (err.code, err.message.as_str(), err.fix.as_str()),
+        (
+            E_BAD_INPUT,
+            "a re-affirmation card's landing records card evidence, not text",
+            "relay the answer with kind card, or leave kind out"
+        )
+    );
+    on_engine(&*e, move |r| {
+        assert_eq!(log_end(r), end, "a refusal writes nothing");
+        assert!(internal_views(r).is_empty());
+    });
+    let v = relay(&mut st, "card").unwrap();
+    let landing: Hash = v["landing"]["landing"].as_str().unwrap().parse().unwrap();
+    on_engine(&*e, move |r| {
+        let rec = r.store().landing(&landing).unwrap();
+        assert_eq!(rec.assurance, Assurance::Relayed);
+        assert_eq!(rec.evidence.unwrap().kind, EvidenceKind::Card);
+    });
+}
+
+/// `view` proposed by the writer and landed by `by`; returns the landing.
+fn land_as(r: &mut Rdy, view: &str, by: &Session) -> String {
+    let summary = rdy_qa::intake::summary_for(r, view);
+    let p = r.propose(&writer(), view, view, summary).unwrap();
+    rdy_qa::intake::confirm_before_landing(r, by, &p);
+    r.land(by, &p.id).unwrap()
+}
+
+/// A retired cause's card was raised by the landing that retired it. A later metadata-only
+/// version of the retiring decision (another person re-affirms it on a premise of its own) does
+/// not move the card's origin, time or binding.
+#[test]
+fn cp16_retirement_card_keeps_the_landing_that_retired_its_cause() {
+    let (_d, mut r) = project();
+    let w = world(&mut r);
+    let x = decide(&mut r, &w.s, "X rule", Some("X"), &[&w.a]);
+    let dep = decide(&mut r, &w.s, "Dep rule", Some("Dep"), &[&x]);
+    // y supersedes x whole and rests on c; the person lands it
+    let y = r
+        .supersede(
+            &writer(),
+            "sx",
+            &x,
+            None,
+            DecisionInput {
+                parent: w.s.clone(),
+                statement: "Y rule".into(),
+                title: Some("Y".into()),
+                depends_on: vec![w.c.clone()],
+                reversibility: Some("two_way".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .created["$decision"]
+        .clone();
+    let retired = land(&mut r, "sx").unwrap();
+    let before = the_card(&r, &x);
+    assert_eq!(members(&before), vec![dep.clone()]);
+    let rec = r.store().landing(&retired.parse().unwrap()).unwrap();
+    assert_eq!(
+        (before.raised_by.as_str(), before.raised_at.clone()),
+        (
+            rec.approved_by.actor.as_str(),
+            rdy_engine::rfc3339(rec.approved_by.at_ms)
+        )
+    );
+    // c changes; another person re-affirms y against it
+    change(&mut r, "xc", &w.c, "C stands firm.");
+    write(
+        &mut r,
+        "ry",
+        json!([{"op": "reaffirm", "id": y, "targets": [w.c], "reason": "Y still fits C."}]),
+    )
+    .unwrap();
+    let other = Session::human("human:other".into(), Role::Approver);
+    let again = land_as(&mut r, "ry", &other);
+    let rec2 = r.store().landing(&again.parse().unwrap()).unwrap();
+    assert_eq!(rec2.approved_by.actor, "human:other");
+    assert_ne!(rec2.approved_by.actor, rec.approved_by.actor);
+    let after = the_card(&r, &x);
+    assert_eq!(
+        after.plan_binding, before.plan_binding,
+        "the binding stands"
+    );
+    assert_eq!(
+        (after.raised_by.as_str(), after.raised_at.as_str()),
+        (before.raised_by.as_str(), before.raised_at.as_str()),
+        "the card was raised by the landing that retired x"
+    );
+}
+
+/// Each numeric bound of a card is checked where the queue builds the card. A group one past a
+/// bound, with the other two bounds at the product's, is refused with the exact `E_LIMIT` by the
+/// queue read and by both answers, which write nothing; the same group at the bound is a card.
+#[test]
+fn cp16_card_limits_refuse_through_the_queue() {
+    let limit = |e: RdyError, what: &str| {
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (
+                E_LIMIT,
+                "re-affirmation card exceeds its record limit",
+                "re-affirm smaller groups with rdy_write / rdy reaffirm"
+            ),
+            "{what}"
+        );
+    };
+    let (_d, mut r) = project();
+    let p = pair(&mut r);
+    let c = the_card(&r, &p.w.a);
+    let Some(PlanCardBinding::Reaffirm {
+        cause,
+        retirements,
+        members: m,
+        ..
+    }) = &c.plan_binding
+    else {
+        panic!("{c:?}")
+    };
+    // two members, one suspect each: two pairs
+    assert_eq!(m.len(), 2);
+    assert_eq!(m.iter().map(|x| x.suspects.len()).sum::<usize>(), 2);
+    let bytes = reaffirm_binding_len(cause, retirements, m);
+    let product = CardLimits::PRODUCT;
+    let end = log_end(&r);
+    for (name, at, over) in [
+        (
+            "members",
+            CardLimits {
+                members: 2,
+                ..product
+            },
+            CardLimits {
+                members: 1,
+                ..product
+            },
+        ),
+        (
+            "pairs",
+            CardLimits {
+                pairs: 2,
+                ..product
+            },
+            CardLimits {
+                pairs: 1,
+                ..product
+            },
+        ),
+        (
+            "bytes",
+            CardLimits { bytes, ..product },
+            CardLimits {
+                bytes: bytes - 1,
+                ..product
+            },
+        ),
+    ] {
+        with_card_limits_for_tests(at, || {
+            assert_eq!(the_card(&r, &p.w.a), c, "{name} at its bound");
+        });
+        with_card_limits_for_tests(over, || {
+            let q = r.read().pending(&PendingQuery {
+                person: PERSON.into(),
+                session_ref: None,
+                max_tokens: CARD_MAX_TOKENS,
+            });
+            limit(q.unwrap_err(), name);
+            let hold = answer(&mut r, &c.r#ref, "o1", None, Some(&c.card_hash));
+            limit(hold.unwrap_err(), name);
+            let keep = answer(&mut r, &c.r#ref, "o2", Some("Wait."), Some(&c.card_hash));
+            limit(keep.unwrap_err(), name);
+        });
+        assert_eq!(log_end(&r), end, "{name}: a refusal writes nothing");
+    }
+    // the hook ends with its closure
+    assert_eq!(the_card(&r, &p.w.a), c);
+}
+
+/// A tag at canon's head, and the stream export of its history.
+fn tag_and_export(r: &mut Rdy, name: &str) -> Result<(), RdyError> {
+    r.tag(&approver(), name, None, None).unwrap();
+    let tag = r
+        .store()
+        .tags()
+        .unwrap()
+        .into_iter()
+        .find(|(n, _, _)| n == name)
+        .unwrap()
+        .1;
+    rdy_engine::stream_export::write(
+        &r.read(),
+        tag,
+        &std::collections::BTreeSet::new(),
+        std::io::sink(),
+    )
+    .map(|_| ())
+}
+
+/// The encoded bytes of the change `landing` landed.
+fn landed_change_bytes(r: &Rdy, landing: &Hash) -> usize {
+    let rec = r.store().landing(landing).unwrap();
+    assert_eq!(rec.changes.len(), 1);
+    let ch: Change = r.store().change(&rec.changes[0]).unwrap();
+    postcard::to_allocvec(&ch).unwrap().len()
+}
+
+/// D-CQMA4, FW-UP1a: one card answer is one change in one landing. `They still hold` on a card
+/// of 9002 members with a 2000-character note would write a change past one record, so it is
+/// refused before anything is written: no view, change, landing or ANSWER, the card and its hash
+/// stand, and the history still exports. Once the person re-affirms some members with the write
+/// op, the same answer lands a change just under the bound, and its tag exports.
+#[test]
+fn cp16_oversized_card_answer_refuses_before_append() {
+    let (_d, mut r) = project();
+    let w = world(&mut r);
+    let n = 9002;
+    let ops: Vec<Value> = (0..n)
+        .map(|i| {
+            json!({"op": "create", "type": "decision", "parent": w.s,
+                "fields": {"statement": format!("Rule {i} holds."), "status": "proposed", "reversibility": "two_way"},
+                "links": {"depends_on": [{"target": w.a}]}})
+        })
+        .collect();
+    write(&mut r, "many", json!(ops)).unwrap();
+    land(&mut r, "many").unwrap();
+    change(&mut r, "x", &w.a, "A holds 60 days.");
+    let c = the_card(&r, &w.a);
+    let all = members(&c);
+    assert_eq!(all.len(), n);
+    tag_and_export(&mut r, "before").unwrap();
+
+    // the reviewer's case: refused, nothing written
+    let note = "r".repeat(2000);
+    let end = log_end(&r);
+    let e = answer(&mut r, &c.r#ref, "o1", Some(&note), Some(&c.card_hash)).unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            E_LIMIT,
+            "re-affirmation change exceeds 16777216 record bytes",
+            "Re-affirm these decisions in smaller groups with the reaffirm write op, then answer the card again."
+        )
+    );
+    assert_eq!(log_end(&r), end, "nothing is written");
+    assert!(internal_views(&r).is_empty());
+    assert!(r.read().reader().answer_of(&c.r#ref).unwrap().is_none());
+    assert_eq!(the_card(&r, &w.a).card_hash, c.card_hash, "the card stands");
+    tag_and_export(&mut r, "after-refusal").unwrap();
+
+    // the person re-affirms 1802 members with the write op; the card keeps the other 7200
+    let ops: Vec<Value> = all[..1802]
+        .iter()
+        .map(|d| json!({"op": "reaffirm", "id": d, "targets": [w.a], "reason": "Checked by hand."}))
+        .collect();
+    write(&mut r, "some", json!(ops)).unwrap();
+    land(&mut r, "some").unwrap();
+    let rest = the_card(&r, &w.a);
+    assert_eq!(members(&rest), all[1802..].to_vec());
+    let v = answer(
+        &mut r,
+        &rest.r#ref,
+        "o1",
+        Some(&note),
+        Some(&rest.card_hash),
+    )
+    .unwrap();
+    assert_eq!(v["act"], "reaffirm", "{v}");
+    let landing: Hash = v["landing"]["landing"].as_str().unwrap().parse().unwrap();
+    let bytes = landed_change_bytes(&r, &landing);
+    eprintln!("cp16 landed change bytes: {bytes}");
+    assert!(
+        bytes <= rdy_store::bounded::MAX_RECORD_BYTES
+            && bytes > rdy_store::bounded::MAX_RECORD_BYTES / 100 * 95,
+        "just under the bound: {bytes}"
+    );
+    assert!(card(&r, &w.a).is_none());
+    tag_and_export(&mut r, "after").unwrap();
+}
+
+/// The bulk reaffirm write op grows with its decisions too: a write whose one change would pass
+/// one record is refused before anything is written, and a smaller group lands.
+#[test]
+fn cp16_oversized_reaffirm_write_refuses_before_append() {
+    let (_d, mut r) = project();
+    let w = world(&mut r);
+    // 168 decisions of 110000 bytes each, landed 42 at a time so no change of the fixture passes
+    // one record
+    let text = "t".repeat(110_000);
+    let mut ids = vec![];
+    for g in 0..4 {
+        let view = format!("big{g}");
+        let ops: Vec<Value> = (0..42)
+            .map(|i| {
+                json!({"op": "create", "type": "decision", "parent": w.s, "body": text,
+                    "fields": {"statement": format!("Rule {g}-{i} holds."), "status": "proposed", "reversibility": "two_way"},
+                    "links": {"depends_on": [{"target": w.a}]}})
+            })
+            .collect();
+        let made = write(&mut r, &view, json!(ops)).unwrap();
+        ids.extend(made.created.into_values());
+        land(&mut r, &view).unwrap();
+    }
+    ids.sort();
+    change(&mut r, "x", &w.a, "A holds 60 days.");
+    let end = log_end(&r);
+    let e = write(
+        &mut r,
+        "all",
+        json!([{"op": "reaffirm", "because": w.a, "reason": "They all still hold."}]),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            E_LIMIT,
+            "re-affirmation change exceeds 16777216 record bytes",
+            "Re-affirm these decisions in smaller groups, one write for each group."
+        )
+    );
+    assert_eq!(log_end(&r), end, "nothing is written");
+    let ops: Vec<Value> = ids[..84]
+        .iter()
+        .map(|d| json!({"op": "reaffirm", "id": d, "targets": [w.a], "reason": "Still holds."}))
+        .collect();
+    let done = write(&mut r, "half", json!(ops)).unwrap();
+    assert_eq!(done.reaffirmed.len(), 84);
 }
