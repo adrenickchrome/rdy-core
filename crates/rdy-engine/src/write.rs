@@ -2481,10 +2481,16 @@ fn build_ops(
             Op::Delete { .. } => continue,
         };
         let mut targets = vec![];
-        // a re-affirmation keeps the content, so the references the decision holds, a deleted
-        // target's included (`against: deleted`); its op set its pins
-        let keeps_refs = reaffirmed.contains_key(&block.id);
-        for tok in block.ref_tokens().into_iter().filter(|_| !keeps_refs) {
+        // p-QMGB4 (task-5 R1): an accepted decision's citation of a deleted target it records as
+        // `deleted` is kept, not dangling; it keeps the pin it holds
+        let kept = |target: &BlockId, targets: &mut Vec<(BlockId, Hash)>| {
+            let keep = ov.get(target).is_none() && rdy_graph::keeps_deleted_citation(block, target);
+            if let Some(pin) = old_pins.get(target).filter(|_| keep) {
+                targets.push((target.clone(), *pin));
+            }
+            keep
+        };
+        for tok in block.ref_tokens() {
             if let Some(name) = tok.strip_prefix('$') {
                 return Err(bad(
                     format!("placeholder ${name} is used before it is created"),
@@ -2504,6 +2510,9 @@ fn build_ops(
                     ),
                 )
             })?;
+            if kept(&target, &mut targets) {
+                continue;
+            }
             let t = ov.get(&target).ok_or_else(|| {
                 RdyError::new(
                     E_UNKNOWN_REF,
@@ -2519,7 +2528,10 @@ fn build_ops(
             })?;
             targets.push((target, t.content_hash_with(store.tracking())));
         }
-        for link in block.links.values().flatten().filter(|_| !keeps_refs) {
+        for link in block.links.values().flatten() {
+            if kept(&link.target, &mut targets) {
+                continue;
+            }
             let t = ov.get(&link.target).ok_or_else(|| {
                 RdyError::new(
                     E_UNKNOWN_REF,

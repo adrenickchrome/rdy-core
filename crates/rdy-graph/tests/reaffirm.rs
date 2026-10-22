@@ -695,3 +695,50 @@ fn cp4_dead_or_proposed_source_cannot_use_reaffirmed() {
         Some("superseded")
     );
 }
+
+/// task-5 R1 (p-QMGB4): the one predicate write, proposal and landing share. A reference to a
+/// deleted target is a kept citation only from an accepted decision whose `reaffirmed` record
+/// holds `deleted` for exactly that target.
+#[test]
+fn cp5_only_an_accepted_decisions_deleted_record_keeps_a_citation() {
+    let (t, other) = (id("c-TTTTT"), "c-ZZZZZ");
+    let accepted = dec("D-AAAAA", "accepted");
+    assert!(keeps_deleted_citation(
+        &ack(&accepted, &[("c-TTTTT", Against::Deleted)]),
+        &t
+    ));
+    assert!(keeps_deleted_citation(
+        &ack(
+            &accepted,
+            &[("c-TTTTT", Against::Deleted), (other, retiring(&[]))]
+        ),
+        &t
+    ));
+    // no record, a record for another target, or one that is not `deleted`
+    assert!(!keeps_deleted_citation(&accepted, &t));
+    assert!(!keeps_deleted_citation(
+        &ack(&accepted, &[(other, Against::Deleted)]),
+        &t
+    ));
+    assert!(!keeps_deleted_citation(
+        &ack(&accepted, &[("c-TTTTT", retiring(&[]))]),
+        &t
+    ));
+    assert!(!keeps_deleted_citation(
+        &ack(&accepted, &[("c-TTTTT", retiring(&["D-RRRRR"]))]),
+        &t
+    ));
+    // a block that is no accepted decision
+    for status in ["proposed", "rejected"] {
+        let d = dec("D-PPPPP", status);
+        assert!(
+            !keeps_deleted_citation(&ack(&d, &[("c-TTTTT", Against::Deleted)]), &t),
+            "{status}"
+        );
+    }
+    let claim = b("c-KKKKK", "claim");
+    assert!(!keeps_deleted_citation(
+        &ack(&claim, &[("c-TTTTT", Against::Deleted)]),
+        &t
+    ));
+}

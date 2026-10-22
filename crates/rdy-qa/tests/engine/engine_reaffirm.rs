@@ -897,3 +897,188 @@ fn cp5_bulk_output_is_one_change_not_one_change_per_decision() {
             .is_none()
     );
 }
+
+/// The dangling-reference issues of a refusal: (code, block, message, fix).
+fn dangling(e: &RdyError) -> Vec<(String, String, String, String)> {
+    e.issues
+        .iter()
+        .filter(|i| i.code == "E_DANGLING_REF")
+        .map(|i| {
+            (
+                i.code.to_string(),
+                i.block
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
+                i.message.clone(),
+                i.fix.clone(),
+            )
+        })
+        .collect()
+}
+
+/// The E_DANGLING_REF issue for `d` still citing `gone`, which the proposal deletes: today's
+/// code and text.
+fn still_cites(d: &str, gone: &str) -> (String, String, String, String) {
+    (
+        "E_DANGLING_REF".to_string(),
+        d.to_string(),
+        format!("{d} still references {gone}, which this proposal deletes"),
+        format!("remove the reference to {gone} from {d} in the same view, or don't delete it"),
+    )
+}
+
+/// In canon: claims `c` and `e` under section `s`, and accepted decision `d` ("Per {{c}} and
+/// {{e}}."). Returns (c, e, d).
+fn citing_pair(r: &mut Rdy) -> (String, String, String) {
+    let seed = write(r, "seed", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "led", "title": "Ledger", "doc_type": "page"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "Claims are kept."},
+        {"op": "create", "type": "claim", "id": "$e", "parent": "$s", "body": "Entries are kept."}
+    ]))
+    .unwrap();
+    let (s, c, e) = (
+        seed.created["$s"].clone(),
+        seed.created["$c"].clone(),
+        seed.created["$e"].clone(),
+    );
+    land(r, "seed").unwrap();
+    let d = decide(
+        r,
+        "dv",
+        &s,
+        "Claims hold",
+        &format!("Per {{{{{c}}}}} and {{{{{e}}}}}."),
+    );
+    land(r, "dv").unwrap();
+    (c, e, d)
+}
+
+/// View `w` deletes `c` and re-affirms `d` against that deletion; the view proposes, is
+/// approved and lands.
+fn land_deleted_premise(r: &mut Rdy, c: &str) {
+    write(r, "w", json!([{"op": "delete", "id": c}])).unwrap();
+    reaffirm(
+        r,
+        json!({"op": "reaffirm", "because": c, "reason": "The claim is folded in."}),
+    )
+    .unwrap();
+    land(r, "w").unwrap();
+}
+
+/// task-5 R1 (p-QMGB4): an accepted decision that records `deleted` for a target keeps its
+/// frozen citation of that target, in the write, at the proposal and at the landing. Without a
+/// re-affirmation the proposal still refuses, and a re-affirmation against one deleted target
+/// still refuses the write for another, with today's code and text.
+#[test]
+fn cp5_deleted_premise_reaffirmation_proposes_and_lands() {
+    let (_d, mut r) = project();
+    let (c, e, d) = citing_pair(&mut r);
+    let landed = block(&r, &Scope::Canon, &d);
+
+    // no re-affirmation: the proposal that deletes c still refuses
+    write(&mut r, "n", json!([{"op": "delete", "id": c}])).unwrap();
+    let err = r.propose(&writer(), "n", "n", None).unwrap_err();
+    assert_eq!(err.code, "E_VALIDATION", "{err}");
+    assert_eq!(dangling(&err), vec![still_cites(&d, &c)]);
+
+    // the write: a re-affirmation against c alone, while e is gone too, still refuses e
+    write(
+        &mut r,
+        "n2",
+        json!([{"op": "delete", "id": c}, {"op": "delete", "id": e}]),
+    )
+    .unwrap();
+    let err = write(
+        &mut r,
+        "n2",
+        json!([{"op": "reaffirm", "id": d, "targets": [c], "reason": "Holds."}]),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "E_UNKNOWN_REF", "{err}");
+    assert_eq!(
+        err.message,
+        format!("{d} references {{{{{e}}}}}, which does not exist in this view")
+    );
+
+    // delete c, re-affirm d against its deletion, propose, approve and land
+    write(&mut r, "w", json!([{"op": "delete", "id": c}])).unwrap();
+    reaffirm(
+        &mut r,
+        json!({"op": "reaffirm", "because": c, "reason": "The claim is folded in."}),
+    )
+    .unwrap();
+    assert!(suspects(&r, &w(), &d).is_empty());
+    land(&mut r, "w").unwrap();
+    let after = block(&r, &Scope::Canon, &d);
+    assert!(r.read().block(&Scope::Canon, &id(&c)).is_err(), "c is gone");
+    assert_eq!(after.body, landed.body, "d keeps its citation of c");
+    assert_eq!(after.links, landed.links);
+    assert_eq!(after.pins, landed.pins, "a deleted target's pin is kept");
+    assert_eq!(
+        record(&after),
+        BTreeMap::from([(id(&c), (Against::Deleted, "The claim is folded in.".into()))])
+    );
+    assert!(suspects(&r, &Scope::Canon, &d).is_empty());
+    assert!(
+        rdy_qa::tensions::open(&r)
+            .iter()
+            .all(|t| !t.blocks().contains(&id(&d))),
+        "no tension on d"
+    );
+    r.fsck().unwrap();
+}
+
+/// task-5 R1, canon moved: a later write of a decision that keeps a deleted citation (here a
+/// re-affirmation against a changed `e`) passes the write's and the landing's reference checks
+/// and raises no premise shift for the deleted target, and keeps the `deleted` record. A record
+/// for another target, or one that is not `deleted`, keeps no citation: deleting `e` refuses.
+#[test]
+fn cp5_kept_deleted_citation_survives_a_later_rewrite_of_its_decision() {
+    let (_d, mut r) = project();
+    let (c, e, d) = citing_pair(&mut r);
+    let landed = block(&r, &Scope::Canon, &d);
+    land_deleted_premise(&mut r, &c);
+    write(
+        &mut r,
+        "x",
+        json!([{"op": "update", "id": e, "body": "Entries are kept, revised."}]),
+    )
+    .unwrap();
+    land(&mut r, "x").unwrap();
+    assert_eq!(
+        suspects(&r, &Scope::Canon, &d),
+        vec![(e.clone(), "changed".into())]
+    );
+    write(
+        &mut r,
+        "y",
+        json!([{"op": "reaffirm", "id": d, "reason": "Entries still hold."}]),
+    )
+    .unwrap();
+    let premise: Vec<_> =
+        rdy_qa::tensions::of_kind(&r, rdy_engine::tensions::TensionKind::PremiseShift);
+    assert!(premise.is_empty(), "{premise:#?}");
+    land(&mut r, "y").unwrap();
+    let again = block(&r, &Scope::Canon, &d);
+    assert_eq!(again.body, landed.body);
+    assert_eq!(again.pins[&id(&c)], landed.pins[&id(&c)]);
+    assert_eq!(
+        record(&again),
+        BTreeMap::from([
+            (id(&c), (Against::Deleted, "The claim is folded in.".into())),
+            (
+                id(&e),
+                (Against::Retiring(vec![]), "Entries still hold.".into())
+            ),
+        ])
+    );
+    assert!(suspects(&r, &Scope::Canon, &d).is_empty());
+    r.fsck().unwrap();
+
+    write(&mut r, "z", json!([{"op": "delete", "id": e}])).unwrap();
+    let err = r.propose(&writer(), "z", "z", None).unwrap_err();
+    assert_eq!(err.code, "E_VALIDATION", "{err}");
+    assert_eq!(dangling(&err), vec![still_cites(&d, &e)]);
+}

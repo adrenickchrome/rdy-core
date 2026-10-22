@@ -265,6 +265,16 @@ fn reaffirmed_of(b: &Block) -> Option<BTreeMap<BlockId, Against>> {
     (!acks.is_empty()).then_some(acks)
 }
 
+/// p-QMGB4 (task-5 R1): whether `b`'s reference to the absent `target` is a kept citation, not a
+/// dangling one: `b` is an accepted decision whose `reaffirmed` record holds `deleted` for
+/// exactly `target`. The write, the proposal check and the landing check all ask this one
+/// question of the version they check. A restored target is not absent, so the acknowledgement
+/// ends with its return, as the graph's suspects already treat it.
+pub fn keeps_deleted_citation(b: &Block, target: &BlockId) -> bool {
+    decision::status(b) == Some(DecisionStatus::Accepted)
+        && reaffirmed_of(b).is_some_and(|acks| matches!(acks.get(target), Some(Against::Deleted)))
+}
+
 impl Graph {
     /// The graph of `blocks`, which are visited in the order given (id order, for a state), with
     /// no tracking fields.

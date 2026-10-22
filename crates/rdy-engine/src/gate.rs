@@ -1624,9 +1624,13 @@ impl Rdy {
                     }
                 }
             }
-            // canon may have moved since the view was written: every target must still exist
+            // canon may have moved since the view was written: every target must still exist,
+            // unless it is a kept citation of a deleted target (p-QMGB4, task-5 R1)
             for target in targets(b) {
-                if next.get(&target).is_none() && !deleted.contains(&target) {
+                if next.get(&target).is_none()
+                    && !deleted.contains(&target)
+                    && !rdy_graph::keeps_deleted_citation(b, &target)
+                {
                     issues.push(Issue {
                         severity: Severity::Error,
                         code: "E_DANGLING_REF",
@@ -1654,7 +1658,10 @@ impl Rdy {
                         ),
                     });
                 }
-                for gone in targets(b).intersection(&deleted) {
+                for gone in targets(b)
+                    .intersection(&deleted)
+                    .filter(|t| !rdy_graph::keeps_deleted_citation(b, t))
+                {
                     issues.push(Issue {
                         severity: Severity::Error,
                         code: "E_DANGLING_REF",
