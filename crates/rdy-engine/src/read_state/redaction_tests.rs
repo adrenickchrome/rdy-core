@@ -35,14 +35,25 @@ fn write(r: &mut Rdy, view: &str, ops: serde_json::Value) -> crate::WriteResult 
 
 /// A project with landed content (tagged v1.0.0), an open view `edit` with its own change, and
 /// a recorded request for the prose block, proposed from view `redact`.
+/// The project goes before its directory: fields drop in order, and a store whose directory
+/// is gone cannot close cleanly.
 struct World {
-    _dir: tempfile::TempDir,
     r: Rdy,
     prose: BlockId,
     term: String,
     landing: Hash,
     request: Hash,
     prop: ProposalInfo,
+    _dir: tempfile::TempDir,
+}
+
+/// Closes `w`'s project, whose close a fault leaves unclean, and returns the one notice that
+/// gives (it goes to the test, not stderr).
+fn close_unclean(w: World) -> String {
+    let World { r, _dir, .. } = w;
+    let mut taken = rdy_store::unclean_closes_for_tests(_dir.path(), || drop(r));
+    assert_eq!(taken.len(), 1, "{taken:?}");
+    taken.remove(0)
 }
 
 fn world() -> World {
@@ -352,6 +363,12 @@ fn rdx10_a_preview_is_private_and_failure_publishes_nothing() {
         "nothing of the batch stays in the log"
     );
     assert_eq!(public.redaction_epoch(), 0, "the epoch never moved");
+    // the abandoned batch could not be rolled back in place: the close says so
+    let notice = close_unclean(w);
+    assert!(
+        notice.contains("an earlier failed write could not be rolled back"),
+        "{notice}"
+    );
 }
 
 #[test]
@@ -392,4 +409,10 @@ fn rdx10_a_failed_finish_publishes_no_cache_of_the_old_epoch() {
             "{s:?}"
         );
     }
+    // the close cannot finish the removal either: it says so, and the next open finishes it
+    let notice = close_unclean(w);
+    assert!(
+        notice.contains("(Content removal was authorized but has not finished.)"),
+        "{notice}"
+    );
 }

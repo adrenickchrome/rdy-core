@@ -46,6 +46,9 @@ pub const REDACTION_APPLY: u8 = 22;
 /// A removal carried into a store that does not hold its proof (`rdy_model::RedactionCarried`):
 /// it accounts for exact already-zero bytes and never grants erasure authority.
 pub const REDACTION_CARRIED: u8 = 23;
+/// One version of a change plan (`rdy_model::plan::Plan`, D-4JMPH): ref `plan/<view>` names the
+/// latest; a landing's sealed version shares its batch (`crate::plan`).
+pub const PLAN: u8 = 24;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefUpdate {

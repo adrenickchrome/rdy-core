@@ -933,7 +933,13 @@ fn rdx15_snapshots_are_references_and_assessment_support_is_absent() {
         "the canon state still references the original version"
     );
     assert_eq!(count_kind(&p.r, kinds::SNAPSHOT), snapshots_before);
-    let known: BTreeSet<u8> = (1..=22).filter(|k| *k != 11 && *k != 12).collect();
+    // DR1a Task 10 (plan 2026-10-21-rdy-design-rebase-1a, line 838, D-4JMPH: "Every propose
+    // batch writes a plan version", and an item-ful landing writes a sealed one): the removal's
+    // propose and landing write PLAN (kind 24), a registry kind; still no assessment record
+    let known: BTreeSet<u8> = (1..=22)
+        .filter(|k| *k != 11 && *k != 12)
+        .chain([kinds::PLAN])
+        .collect();
     let mut seen: BTreeSet<u8> = BTreeSet::new();
     let st = p.r.read();
     st.reader()

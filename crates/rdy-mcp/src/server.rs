@@ -45,7 +45,6 @@ use rmcp::{
     service::{RequestContext, SubscriptionContext},
     tool_handler,
 };
-use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -293,12 +292,10 @@ impl RdyServer {
                         .unwrap_or_else(|| "unknown panic".into());
                     let mut message = format!("internal error in {tool}: {msg}");
                     if let Err(e) = republished {
-                        let _ = writeln!(
-                            std::io::stderr(),
+                        rdy_engine::notice(&format!(
                             "rdy mcp: after a panic in {tool} the state was not republished ({}: {})",
-                            e.code,
-                            e.message
-                        );
+                            e.code, e.message
+                        ));
                         message.push_str(&format!(
                             "; the state was not republished ({}: {})",
                             e.code, e.message
@@ -1040,6 +1037,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn msw9_a_failed_republish_after_a_tool_panic_is_reported() {
+        let notes = rdy_engine::capture_notices_for_tests(&["after a panic in rdy_session "]);
         let dir = tempfile::tempdir().unwrap();
         let rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
         let server = RdyServer::new(
@@ -1063,10 +1061,18 @@ mod tests {
                 && out.contains("E_DAEMON_GONE"),
             "{out}"
         );
+        // the server notes it too, where the person running it sees it
+        assert_eq!(
+            notes.notices(),
+            [
+                "rdy mcp: after a panic in rdy_session the state was not republished (E_DAEMON_GONE: the daemon's writer has stopped)"
+            ]
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn ib10_a_panic_in_a_blocking_body_republishes_or_says_it_did_not() {
+        let notes = rdy_engine::capture_notices_for_tests(&["after a panic in a_read "]);
         let dir = tempfile::tempdir().unwrap();
         let rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
         let server = RdyServer::new(
@@ -1091,6 +1097,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ok, serde_json::json!({"a": 1}));
+        assert_eq!(
+            notes.notices(),
+            [
+                "rdy mcp: after a panic in a_read the state was not republished (E_DAEMON_GONE: the daemon's writer has stopped)"
+            ]
+        );
     }
 
     /// An agent that counts its calls, records the requests it serves, and can cancel a call

@@ -1,8 +1,20 @@
-//! The dump chains of the dump format 3 fixtures (store format 16, D-2FMRR, D-QF2HQ, D-69AY3):
-//! a full dump and two increments of the every-kind project, and of a holder filled from the
-//! every-kind holder's uploads, each with a person's approved removal in its last increment. The
-//! fixture writer (`hc9_write_format_three_fixtures_once`) builds them once; the tests read only
-//! the frozen files.
+//! The dump chains of the dump format 3 fixtures (D-2FMRR, D-QF2HQ, D-69AY3): a full dump and two
+//! increments of the every-kind project, and of a holder filled from the every-kind holder's
+//! uploads, each with a person's approved removal in its last increment. The fixture writers
+//! (`hc9_write_format_three_fixtures_once` wrote the store format 16 members, and
+//! `cp3_write_format17_fixtures_once` writes the store format 17 members) build them once; the
+//! tests read only the frozen files. These builders write this rdy's store format: the members
+//! of an earlier format are the frozen files alone.
+//!
+//! Store format 17 (D-4JMPH): the project chain's full dump holds a proposal with its bound
+//! plan (an unsealed PLAN, [`PLAN_VIEW`]); increment 1 holds that proposal's landing and its
+//! seal, which names the earlier file's plan. The holder's second source (`b`) writes a proposal
+//! with its bound plan, and a clone of it (`c`) is made; each lands that proposal with its own
+//! approver and seal, and tags it ([`PLAN_TAG`] in `b`, [`PLAN_FORK_TAG`] in `c`). Each history
+//! reaches the holder through an export, a batch check and a take: increment 1 takes `b`'s seal,
+//! its chain and its acceptance; increment 2 takes `c`'s seal, whose chain names the bound plan
+//! that increment 1 holds. The standalone holder takes both histories again after its other
+//! takes.
 //!
 //! - The project chain starts from [`every_kind::rolling_project`]. Before the full dump it adds a
 //!   removable prose block (its version and the change that embeds it, with [`EARLY_CANARY`]) and
@@ -24,12 +36,16 @@
 //! engine call.
 use crate::every_kind;
 use crate::fixtures::{approver, land, write};
+use crate::intake::PERSON;
 use crate::tensions::{ag, created};
 use rdy_engine::dump_stop::DumpStop;
 use rdy_engine::load::load_chain;
 use rdy_engine::redaction::RedactInput;
 use rdy_engine::{Rdy, pin_clock};
-use rdy_model::RepoId;
+use rdy_model::plan::{
+    Plan, PlanAct, PlanAnswer, PlanHead, PlanKind, PlanOutcome, PlanSeal, SealedItem, item_hash,
+};
+use rdy_model::{Answer, AnswerAct, BlockId, Hash, Provenance, RepoId, Role};
 use rdy_store::kinds;
 use rdy_store::segment::Location;
 use rdy_store::take_batch::UploadTarget;
@@ -60,6 +76,16 @@ pub const ORDINARY_TAG: &str = "v0.3.0";
 pub const LATE_TAG: &str = "v0.5.0";
 /// The tag of the standalone project fixture's ordinary landing, before its removal.
 pub const STANDALONE_TAG: &str = "v0.6.0";
+/// The view of the project chain's plan: bound in the full dump, sealed in increment 1.
+pub const PLAN_VIEW: &str = "harrier-plan";
+/// The tag of the holder's second source's sealed plan landing, taken in the holder chain's
+/// first increment.
+pub const PLAN_TAG: &str = "v4.0.0";
+/// The tag of the other seal of that plan, in a clone of the second source, taken in the holder
+/// chain's last increment.
+pub const PLAN_FORK_TAG: &str = "v4.1.0";
+/// The approver of the clone's landing of the plan's proposal: another landing of one version.
+pub const PLAN_FORK_PERSON: &str = "human:qa-fork";
 
 /// The removable blob: a full first chunk (1 MiB of one byte) and a short second chunk.
 pub fn blob_bytes() -> Vec<u8> {
@@ -157,6 +183,114 @@ fn position(l: Location) -> String {
     format!("pos:{}.{}", l.segment, l.offset)
 }
 
+fn plan_prov(actor: &str, role: Role) -> Provenance {
+    Provenance {
+        actor: actor.into(),
+        run: None,
+        role,
+        at_ms: CLOCK_MS,
+    }
+}
+
+/// A proposal of view `view` (a prose block in a new doc) with its bound plan, in one batch, as
+/// the plan writers compose them. Returns the proposal and the bound version.
+fn bound_plan(r: &mut Rdy, view: &str, body: &str) -> (Hash, Plan) {
+    write(
+        r,
+        view,
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": view, "title": view, "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$p", "parent": "$d", "body": body}
+        ]),
+    )
+    .unwrap();
+    seal(r);
+    let proposal = r
+        .store_mut()
+        .propose(view, view, plan_prov("agent:plan", Role::Writer))
+        .unwrap();
+    let bound = Plan {
+        stable: None,
+        prev: None,
+        view: view.into(),
+        proposal: Some(proposal),
+        answers: vec![],
+        heads: vec![PlanHead {
+            repo: "app".into(),
+            head: Some("c".repeat(40)),
+        }],
+        provenance: plan_prov("agent:plan", Role::Writer),
+        seal: None,
+    };
+    r.store_mut()
+        .write_guarded_for_tests(every_kind::plan_frames(&bound))
+        .unwrap();
+    r.invalidate();
+    (proposal, bound)
+}
+
+/// The landing of `proposal` by `approver` and its seal, which ends `bound`'s chain, in one
+/// batch; the seal's deferred item names an AcceptDeferrals answer of an earlier batch. Returns
+/// the landing and the seal.
+fn sealed_landing(r: &mut Rdy, proposal: Hash, bound: &Plan, approver: &str) -> (Hash, Hash) {
+    let person = plan_prov(approver, Role::Approver);
+    let accept = Answer {
+        item: format!("defer:P-{}@1", &proposal.to_string()[..8]),
+        act: AnswerAct::AcceptDeferrals,
+        option: None,
+        label: None,
+        options: vec![],
+        card_hash: None,
+        targets: vec![],
+        person: person.clone(),
+        relayed_by: None,
+        relay_evidence: None,
+        evidence_kind: None,
+        note: None,
+    };
+    let accept = r.store_mut().put_answer(&accept).unwrap();
+    r.invalidate();
+    let landing = r.store_mut().land(&proposal, person.clone()).unwrap();
+    let version = r.store().landing(&landing).unwrap().proposal;
+    let cause = BlockId::parse("D-00002").unwrap();
+    let subject = "b-00001";
+    let item = item_hash(&cause, subject, PlanKind::Rejustify);
+    let seal = Plan {
+        stable: Some(bound.id()),
+        prev: Some(bound.id()),
+        proposal: Some(version),
+        answers: vec![PlanAnswer {
+            item,
+            act: PlanAct::Defer,
+            reason: Some("the next release owns it".into()),
+            subject: Some(Hash([0x61; 32])),
+            cause: Hash([0x62; 32]),
+            by: plan_prov("agent:plan", Role::Writer),
+        }],
+        provenance: person,
+        seal: Some(PlanSeal {
+            landing,
+            version,
+            decisions: vec![cause.clone()],
+            items: vec![SealedItem {
+                id: item,
+                kind: PlanKind::Rejustify,
+                subject: subject.into(),
+                cause,
+                edge: "reflects".into(),
+                outcome: PlanOutcome::Deferred,
+                answer: Some(accept),
+            }],
+        }),
+        ..bound.clone()
+    };
+    r.store_mut()
+        .write_guarded_for_tests(every_kind::plan_frames(&seal))
+        .unwrap();
+    r.invalidate();
+    (landing, seal.id())
+}
+
 /// The project chain (see the module).
 pub fn project_chain() -> Chain {
     let _clock = pin_clock(CLOCK_MS);
@@ -170,9 +304,12 @@ pub fn project_chain() -> Chain {
     let (early, _) = landed_block(&mut r, "harrier-early", EARLY_CANARY);
     let blob = r.store_mut().put_blob(&blob_bytes()).unwrap();
     seal(&mut r);
+    // store format 17: a proposal with its bound plan, sealed in increment 1
+    let (proposal, bound) = bound_plan(&mut r, PLAN_VIEW, "A planned block.");
     let full = dir.path().join("chain-full.rdydump");
     let s0 = r.read().dump(&full).unwrap();
-    // increment 1: an ordinary landing and its tag
+    // increment 1: the plan's landing and seal, then an ordinary landing and its tag
+    sealed_landing(&mut r, proposal, &bound, PERSON);
     landed_block(&mut r, "harrier-ordinary", "An ordinary block.");
     tag(&mut r, ORDINARY_TAG);
     let inc1 = dir.path().join("chain-1.rdydump");
@@ -292,7 +429,7 @@ pub fn holder_chain() -> (Chain, HolderUploads) {
         &["v2-0.rdysync", "v2-1.rdysync"],
         &["v3-0.rdysync"],
     ];
-    let ups: Vec<Upload> = names
+    let mut ups: Vec<Upload> = names
         .iter()
         .zip(targets)
         .map(|(files, target)| Upload {
@@ -303,13 +440,21 @@ pub fn holder_chain() -> (Chain, HolderUploads) {
     let root = built.dir.path().join("chain-holder");
     let mut h = Rdy::create_holder(&root, repo).unwrap();
     h.store_mut().set_segment_max(SEGMENT_MAX);
+    // store format 17: the second source's plan, sealed in it and in its clone
+    let [plan, fork] = plan_uploads(&built, repo);
+    ups.push(plan);
+    ups.push(fork);
     take(&mut h, &ups[0]);
     let full = built.dir.path().join("holder-chain-full.rdydump");
     let s0 = h.read().dump(&full).unwrap();
     take(&mut h, &ups[1]);
+    // the second source's seal, its chain (the bound plan) and its acceptance
+    take(&mut h, &ups[3]);
     let inc1 = built.dir.path().join("holder-chain-1.rdydump");
     let s1 = h.read().dump_after(&s0.chain_end(), &inc1).unwrap();
     take(&mut h, &ups[2]);
+    // the clone's seal: its chain's bound plan is the one increment 1 holds
+    take(&mut h, &ups[4]);
     // the earlier uploads again: every key is held, so nothing is appended
     let end = h.store().log_end();
     take(&mut h, &ups[1]);
@@ -335,6 +480,48 @@ pub fn holder_chain() -> (Chain, HolderUploads) {
     (chain, HolderUploads(ups))
 }
 
+/// The uploads of [`PLAN_TAG`] and [`PLAN_FORK_TAG`]: the every-kind holder's second source
+/// (`b`) gets a proposal with its bound plan; a clone of it (`c`) is made; each of the two lands
+/// the proposal with its own approver and seal and tags the landing. Each history is exported,
+/// checked and written as one batch file.
+fn plan_uploads(built: &every_kind::HolderBuild, repo: RepoId) -> [Upload; 2] {
+    let (b_root, c_root) = (built.dir.path().join("b"), built.dir.path().join("c"));
+    let mut b = Rdy::open(&b_root).unwrap();
+    let (proposal, bound) = bound_plan(&mut b, "plan", "A planned prose.");
+    b.close().unwrap();
+    every_kind::copy_tree(&b_root, &c_root);
+    [
+        (&b_root, PERSON, PLAN_TAG, "v4-0.rdysync"),
+        (&c_root, PLAN_FORK_PERSON, PLAN_FORK_TAG, "v4-1-0.rdysync"),
+    ]
+    .map(|(root, person, name, file)| {
+        let mut r = Rdy::open(root).unwrap();
+        let (landing, _) = sealed_landing(&mut r, proposal, &bound, person);
+        r.tag(&approver(), name, None, None).unwrap();
+        seal(&mut r);
+        let tag = r
+            .store()
+            .tags()
+            .unwrap()
+            .into_iter()
+            .find(|(n, ..)| n == name)
+            .unwrap()
+            .1;
+        let bytes = every_kind::export_tag(&r, tag);
+        r.close().unwrap();
+        rdy_engine::stream_check::check_batch(bytes.as_slice(), Some(repo)).unwrap();
+        let path = built.dir.path().join("uploads").join(file);
+        std::fs::write(&path, &bytes).unwrap();
+        Upload {
+            files: vec![path],
+            target: UploadTarget {
+                tag: name.into(),
+                landing,
+            },
+        }
+    })
+}
+
 /// The every-kind holder's uploads, which the holder chain took.
 pub struct HolderUploads(Vec<Upload>);
 
@@ -350,6 +537,9 @@ pub fn holder_standalone(c: &Chain, ups: &HolderUploads) -> Standalone {
     h.store_mut().set_segment_max(SEGMENT_MAX);
     take(&mut h, &ups.0[1]);
     take(&mut h, &ups.0[2]);
+    // store format 17: both sealed plan landings' histories again, after the removal
+    take(&mut h, &ups.0[3]);
+    take(&mut h, &ups.0[4]);
     let dump = dir.path().join("standalone-holder.rdydump");
     h.read().dump(&dump).unwrap();
     h.close().unwrap();
@@ -385,4 +575,31 @@ pub const V16_KINDS: [u8; 21] = [
     kinds::REDACTION_RESIDUE,
     kinds::REDACTION_APPLY,
     kinds::REDACTION_CARRIED,
+];
+
+/// The record kinds a frozen store format 17 project may hold: every kind of store format 16
+/// and the change plan (kind 24).
+pub const V17_KINDS: [u8; 22] = [
+    kinds::BLOCK,
+    kinds::CHANGE,
+    kinds::PROPOSAL,
+    kinds::LANDING,
+    kinds::SNAPSHOT,
+    kinds::BLOB_CHUNK,
+    kinds::BLOB_MANIFEST,
+    kinds::REF_UPDATE,
+    kinds::TAG,
+    kinds::ANSWER,
+    kinds::SIGNATURE,
+    kinds::VIEW_OP,
+    kinds::INTENT,
+    kinds::ALT_SET,
+    kinds::REVIEW,
+    kinds::TENSION,
+    kinds::TRANSITION,
+    kinds::REDACTION,
+    kinds::REDACTION_RESIDUE,
+    kinds::REDACTION_APPLY,
+    kinds::REDACTION_CARRIED,
+    kinds::PLAN,
 ];

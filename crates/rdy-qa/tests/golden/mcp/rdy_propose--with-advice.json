@@ -33,6 +33,52 @@
     ]
   },
   "id": "fcd39a375b6ed575b7f71fc87e8676c73f007da97141e788d767a26c1c2ca18e",
+  "plan": {
+    "by_kind": {
+      "confirm": {
+        "closed": 0,
+        "deferred": 0,
+        "open": 1
+      },
+      "reaffirm": {
+        "closed": 0,
+        "deferred": 0,
+        "open": 0
+      },
+      "rejustify": {
+        "closed": 0,
+        "deferred": 0,
+        "open": 0
+      },
+      "update": {
+        "closed": 0,
+        "deferred": 0,
+        "open": 0
+      },
+      "update_implementation": {
+        "closed": 0,
+        "deferred": 0,
+        "open": 0
+      }
+    },
+    "closed": 0,
+    "code": {
+      "files": 0,
+      "unavailable": true
+    },
+    "deferred": 0,
+    "items": [
+      {
+        "cause": "c-CFPE0",
+        "edge": "references",
+        "id": "pi-b1ac05f4f210a8a5",
+        "kind": "confirm",
+        "state": "open",
+        "subject": "c-WKHEZ"
+      }
+    ],
+    "open": 1
+  },
   "ref": "P-00faa4143b86@2",
   "stable": "00faa4143b8653b05d20297aba2c4899d0cc9465e02631dfc8bfc0cfd4a808c8",
   "summary": "Rewords A and C.",
@@ -216,5 +262,13 @@
   ],
   "title": "Fix A and C",
   "version": 2,
-  "warnings": []
+  "warnings": [
+    {
+      "block": null,
+      "code": "W_PLAN_OPEN",
+      "fix": "close or defer each item: rdy_plan / rdy plan",
+      "message": "1 change-plan items are open",
+      "severity": "warning"
+    }
+  ]
 }

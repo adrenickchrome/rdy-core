@@ -7,10 +7,12 @@
 //! checkout's HEAD moves (cached per process while it stays). Core only reads git: it runs
 //! `git rev-parse`, `git log` and `git ls-tree`, always through [`git_command`] (FW-C2). Counts
 //! are reported as they are; nothing here ranks or cuts (FW-C6).
-use crate::{E_CONFIG, E_IO, RdyError};
+use crate::{E_CONFIG, E_IO, E_LIMIT, RdyError};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 /// The `.rdy.yaml` key naming the linked code repos; each one's checkout path is under
@@ -138,11 +140,29 @@ pub struct Commit {
 /// The commits in `git log -z --name-status --format=<log_format(nonce)>` output. Records
 /// split on the separators followed by `nonce`. A hash that is not 40 or 64 lowercase hex
 /// characters skips its record, as do malformed records; non-UTF-8 paths are skipped; it never
-/// panics.
+/// panics. The only bound is the size of `out`; evidence reads use `parse_log_bounded`.
 pub fn parse_log(out: &[u8], nonce: &str) -> Vec<Commit> {
+    parse_log_bounded(out, nonce, usize::MAX, usize::MAX).unwrap_or_default()
+}
+
+/// `parse_log` for output from a repository the person does not control. Every path token
+/// counts (a rename holds two), whatever its encoding: more than `max_paths` in all is
+/// `E_LIMIT` `paths`, and one over `max_path` bytes is `E_LIMIT` `path bytes`. Both checks run
+/// on the raw token before a path is copied.
+pub(crate) fn parse_log_bounded(
+    out: &[u8],
+    nonce: &str,
+    max_paths: usize,
+    max_path: usize,
+) -> Result<Vec<Commit>, RdyError> {
     let record = [&[0x1e], nonce.as_bytes()].concat();
     let unit = [&[0x1f], nonce.as_bytes()].concat();
     let mut commits = Vec::new();
+    let mut bounds = PathBounds {
+        left: max_paths,
+        max_paths,
+        max_path,
+    };
     // the bytes before the first record marker are no record
     for chunk in split_on(out, &record).skip(1) {
         let Some(i) = find(chunk, &unit) else {
@@ -159,10 +179,31 @@ pub fn parse_log(out: &[u8], nonce: &str) -> Vec<Commit> {
         commits.push(Commit {
             hash: String::from_utf8_lossy(hash).into_owned(),
             implements: implements_of(&String::from_utf8_lossy(trailers)),
-            changes: changes_of(tail),
+            changes: changes_of(tail, &mut bounds)?,
         });
     }
-    commits
+    Ok(commits)
+}
+
+/// What is left of the path budget of one log.
+struct PathBounds {
+    left: usize,
+    max_paths: usize,
+    max_path: usize,
+}
+
+impl PathBounds {
+    /// Counts one path token and returns it, or the `E_LIMIT` it passes.
+    fn take<'a>(&mut self, token: &'a [u8]) -> Result<&'a [u8], RdyError> {
+        if self.left == 0 {
+            return Err(limit_error(self.max_paths, "paths"));
+        }
+        self.left -= 1;
+        if token.len() > self.max_path {
+            return Err(limit_error(self.max_path, "path bytes"));
+        }
+        Ok(token)
+    }
 }
 
 /// The first position of `needle` (not empty) in `hay`.
@@ -205,23 +246,32 @@ fn implements_of(trailers: &str) -> Vec<String> {
     out
 }
 
-/// The `--name-status -z` list: a status token, then one path (two for `R` and `C`).
-fn changes_of(tail: &[u8]) -> Vec<FileChange> {
-    let mut tokens = tail
-        .split(|b| *b == 0)
-        .map(|t| {
-            let lead = t.iter().take_while(|b| **b == b'\n').count();
-            &t[lead..]
-        })
-        .filter(|t| !t.is_empty());
+/// The `--name-status -z` list: a status token, then one path (two for `R` and `C`). Git ends
+/// the format with a NUL and puts a newline before the first status token, so only a status
+/// token loses its leading newlines, and a token left empty there is no status. A path token is
+/// kept byte for byte: a name may start with a newline, or be one. An empty path token is a
+/// malformed record and ends the list. Each path token is counted against `bounds` before it is
+/// decoded.
+fn changes_of(tail: &[u8], bounds: &mut PathBounds) -> Result<Vec<FileChange>, RdyError> {
+    let mut raw = tail.split(|b| *b == 0);
+    // a path token as written; none when the list ends or the token is empty
+    fn path(t: Option<&[u8]>) -> Option<&[u8]> {
+        t.filter(|t| !t.is_empty())
+    }
     let utf8 = |t: &[u8]| std::str::from_utf8(t).ok().map(str::to_string);
     let mut changes = Vec::new();
-    while let Some(status) = tokens.next() {
-        match status[0] {
-            kind @ (b'R' | b'C') => {
-                let (Some(from), Some(to)) = (tokens.next(), tokens.next()) else {
+    while let Some(t) = raw.next() {
+        let lead = t.iter().take_while(|b| **b == b'\n').count();
+        // an empty or newline-only token in a status's place separates; it names nothing
+        let Some(&kind) = t.get(lead) else {
+            continue;
+        };
+        match kind {
+            b'R' | b'C' => {
+                let (Some(from), Some(to)) = (path(raw.next()), path(raw.next())) else {
                     break;
                 };
+                let (from, to) = (bounds.take(from)?, bounds.take(to)?);
                 if let (Some(from), Some(to)) = (utf8(from), utf8(to)) {
                     changes.push(if kind == b'R' {
                         FileChange::Rename { from, to }
@@ -230,21 +280,22 @@ fn changes_of(tail: &[u8]) -> Vec<FileChange> {
                     });
                 }
             }
-            kind => {
-                let Some(path) = tokens.next() else {
+            _ => {
+                let Some(p) = path(raw.next()) else {
                     break;
                 };
-                if let Some(path) = utf8(path) {
+                let p = bounds.take(p)?;
+                if let Some(p) = utf8(p) {
                     changes.push(if kind == b'D' {
-                        FileChange::Delete(path)
+                        FileChange::Delete(p)
                     } else {
-                        FileChange::Touch(path)
+                        FileChange::Touch(p)
                     });
                 }
             }
         }
     }
-    changes
+    Ok(changes)
 }
 
 /// One linked repository's citations at one HEAD.
@@ -330,9 +381,88 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Runs a git command to completion; a spawn failure is `E_IO`.
-fn run(mut c: Command) -> Result<Output, RdyError> {
-    c.output().map_err(|e| {
+/// The most bytes one git command may print to stdout.
+pub const MAX_GIT_OUTPUT: usize = 268_435_456;
+/// The most bytes one git command may print to stderr.
+pub const MAX_GIT_ERROR: usize = 65_536;
+/// The most paths one commit's tree may hold.
+pub const MAX_TREE_PATHS: usize = 1_000_000;
+/// The longest path, in bytes, a commit's tree may hold.
+pub const MAX_TREE_PATH: usize = 4096;
+
+/// How much of a git command's output is kept.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Limits {
+    pub(crate) stdout: usize,
+    pub(crate) stderr: usize,
+}
+
+impl Limits {
+    pub(crate) const GIT: Limits = Limits {
+        stdout: MAX_GIT_OUTPUT,
+        stderr: MAX_GIT_ERROR,
+    };
+}
+
+/// The refusal for a read past a bound; `unit` is `output bytes`, `error bytes`, `paths` or
+/// `path bytes`.
+pub(crate) fn limit_error(n: usize, unit: &str) -> RdyError {
+    RdyError::new(
+        E_LIMIT,
+        format!("code evidence exceeds {n} {unit}"),
+        "use a smaller linked checkout",
+    )
+}
+
+/// What reading one pipe gave.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Drained {
+    Done(Vec<u8>),
+    /// More than the limit: nothing more is kept.
+    Over,
+}
+
+/// Reads `r` to its end, keeping at most `limit` bytes. Memory is reserved before it is used, so
+/// a refused reservation counts as passing the limit instead of aborting.
+pub(crate) fn drain<R: Read>(mut r: R, limit: usize) -> std::io::Result<Drained> {
+    let mut kept: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 16384];
+    loop {
+        let n = match r.read(&mut chunk) {
+            Ok(0) => return Ok(Drained::Done(kept)),
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if n > limit - kept.len() || kept.try_reserve(n).is_err() {
+            return Ok(Drained::Over);
+        }
+        kept.extend_from_slice(&chunk[..n]);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many git children this thread's bounded runs have waited for.
+    pub(crate) static REAPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn io_failed(what: &str, e: &std::io::Error) -> RdyError {
+    RdyError::new(E_IO, format!("{what}: {e}"), "check that git runs")
+}
+
+/// Runs a git command to completion; a spawn failure is `E_IO`. Its output is bounded
+/// ([`Limits::GIT`]).
+fn run(c: Command) -> Result<Output, RdyError> {
+    run_with(c, Limits::GIT)
+}
+
+/// [`run`] with the output kept to `lim`. Both pipes are read while the child runs, each by its
+/// own thread. When either passes its bound the child is killed, and the threads and the child
+/// are joined before the `E_LIMIT` returns.
+pub(crate) fn run_with(mut c: Command, lim: Limits) -> Result<Output, RdyError> {
+    c.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = c.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             RdyError::new(
                 E_IO,
@@ -342,7 +472,58 @@ fn run(mut c: Command) -> Result<Output, RdyError> {
         } else {
             RdyError::new(E_IO, format!("running git: {e}"), "check that git runs")
         }
-    })
+    })?;
+    let (Some(out), Some(err)) = (child.stdout.take(), child.stderr.take()) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(RdyError::new(
+            E_IO,
+            "running git: no output pipe",
+            "check that git runs",
+        ));
+    };
+    let (tx, rx) = mpsc::channel::<bool>();
+    let spawn = |r: Box<dyn Read + Send>, limit: usize| {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let got = drain(r, limit);
+            let over = !matches!(got, Ok(Drained::Done(_)));
+            let _ = tx.send(over);
+            got
+        })
+    };
+    let out_thread = spawn(Box::new(out), lim.stdout);
+    let err_thread = spawn(Box::new(err), lim.stderr);
+    drop(tx);
+    for _ in 0..2 {
+        match rx.recv() {
+            Ok(false) => {}
+            Ok(true) => {
+                // The child may be blocked writing to a pipe nobody reads any more.
+                let _ = child.kill();
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+    let out = out_thread.join();
+    let err = err_thread.join();
+    let status = child.wait();
+    #[cfg(test)]
+    REAPED.with(|n| n.set(n.get() + 1));
+    let joined = |r: std::thread::Result<std::io::Result<Drained>>| {
+        r.unwrap_or_else(|_| Err(std::io::Error::other("reader panicked")))
+    };
+    match (joined(out), joined(err)) {
+        (Ok(Drained::Over), _) => Err(limit_error(lim.stdout, "output bytes")),
+        (_, Ok(Drained::Over)) => Err(limit_error(lim.stderr, "error bytes")),
+        (Err(e), _) | (_, Err(e)) => Err(io_failed("reading git output", &e)),
+        (Ok(Drained::Done(stdout)), Ok(Drained::Done(stderr))) => Ok(Output {
+            status: status.map_err(|e| io_failed("waiting for git", &e))?,
+            stdout,
+            stderr,
+        }),
+    }
 }
 
 /// A failed read of a repository: `E_IO` carrying the start of git's stderr.
@@ -361,7 +542,7 @@ fn git_failed(repo: &CodeRepo, what: &str, out: &Output, fix: &str) -> RdyError 
 
 /// `repo.root` is a git checkout's top folder and not a partial clone (checked once per process
 /// per root, and again after a read of HEAD fails). The shallow check is in `build_at`.
-fn check_top(repo: &CodeRepo) -> Result<(), RdyError> {
+pub(crate) fn check_top(repo: &CodeRepo) -> Result<(), RdyError> {
     if lock(&TOPS).contains(&repo.root) {
         return Ok(());
     }
@@ -445,7 +626,7 @@ fn is_partial_clone(repo: &CodeRepo) -> Result<bool, RdyError> {
 
 /// The commit HEAD names; `None` while HEAD is unborn. Any other failure is an error, and the
 /// root's top-level check runs again on the next read (the repository may have gone).
-fn head_of(repo: &CodeRepo) -> Result<Option<String>, RdyError> {
+pub(crate) fn head_of(repo: &CodeRepo) -> Result<Option<String>, RdyError> {
     let head = read_head(repo);
     if head.is_err() {
         lock(&TOPS).remove(&repo.root);
@@ -516,9 +697,78 @@ fn check_not_shallow(repo: &CodeRepo) -> Result<(), RdyError> {
     Ok(())
 }
 
-/// The index of `head` (which HEAD named when it was read), read at that hash rather than at
-/// `HEAD`, so HEAD moving meanwhile cannot give an index labelled with another commit.
-fn build_at(repo: &CodeRepo, head: String) -> Result<CodeIndex, RdyError> {
+/// The regular, executable and symlink files of the commit `head`, as path → blob id, read
+/// from `git ls-tree -rz --full-tree`. Directories and submodule entries are left out, and so is
+/// a path that is not UTF-8. Worktree and index changes play no part.
+pub(crate) fn read_tree(repo: &CodeRepo, head: &str) -> Result<BTreeMap<String, String>, RdyError> {
+    let mut c = git_command(&repo.root);
+    c.args(["ls-tree", "-rz", "--full-tree"]).arg(head);
+    let tree = run(c)?;
+    if !tree.status.success() {
+        return Err(git_failed(
+            repo,
+            "ls-tree",
+            &tree,
+            "check the repository with git ls-tree",
+        ));
+    }
+    parse_tree(&tree.stdout, MAX_TREE_PATHS, MAX_TREE_PATH)
+}
+
+/// The files in `git ls-tree -rz` output (`<mode> <type> <blob>\t<path>` and a NUL each). More
+/// than `max_paths` entries or a path over `max_path` bytes is `E_LIMIT`. A malformed entry is
+/// skipped.
+pub(crate) fn parse_tree(
+    out: &[u8],
+    max_paths: usize,
+    max_path: usize,
+) -> Result<BTreeMap<String, String>, RdyError> {
+    let mut files = BTreeMap::new();
+    for (seen, entry) in out.split(|b| *b == 0).filter(|e| !e.is_empty()).enumerate() {
+        if seen >= max_paths {
+            return Err(limit_error(max_paths, "paths"));
+        }
+        let Some(tab) = entry.iter().position(|b| *b == b'\t') else {
+            continue;
+        };
+        let (meta, path) = (&entry[..tab], &entry[tab + 1..]);
+        if path.len() > max_path {
+            return Err(limit_error(max_path, "path bytes"));
+        }
+        let mut parts = meta.split(|b| *b == b' ');
+        let (Some(mode), Some(kind), Some(blob), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        // A submodule is a `commit` entry (mode 160000); a tree only shows without `-r`.
+        if kind != b"blob" || !matches!(mode, b"100644" | b"100755" | b"120000") || !is_hash(blob) {
+            continue;
+        }
+        if let (Ok(path), Ok(blob)) = (std::str::from_utf8(path), std::str::from_utf8(blob)) {
+            files.insert(path.to_string(), blob.to_string());
+        }
+    }
+    Ok(files)
+}
+
+/// The commits of `head` as an index limited to the paths in `at_head`; `head` is a commit.
+fn build_from(
+    repo: &CodeRepo,
+    head: String,
+    at_head: &BTreeSet<String>,
+) -> Result<CodeIndex, RdyError> {
+    build_from_bounded(repo, head, at_head, MAX_TREE_PATHS, MAX_TREE_PATH)
+}
+
+/// `build_from` with the history path bounds named, so a test can use small ones.
+pub(crate) fn build_from_bounded(
+    repo: &CodeRepo,
+    head: String,
+    at_head: &BTreeSet<String>,
+    max_paths: usize,
+    max_path: usize,
+) -> Result<CodeIndex, RdyError> {
     check_not_shallow(repo)?;
     let nonce = crate::wc::state::new_nonce();
     let mut c = git_command(&repo.root);
@@ -542,29 +792,89 @@ fn build_at(repo: &CodeRepo, head: String) -> Result<CodeIndex, RdyError> {
             "check the repository with git log; link a full clone: rdy does not fetch",
         ));
     }
-    let mut c = git_command(&repo.root);
-    c.args(["ls-tree", "-r", "-z", "--name-only", "--full-tree"])
-        .arg(&head);
-    let tree = run(c)?;
-    if !tree.status.success() {
-        return Err(git_failed(
-            repo,
-            "ls-tree",
-            &tree,
-            "check the repository with git ls-tree",
-        ));
-    }
-    let at_head: BTreeSet<String> = tree
-        .stdout
-        .split(|b| *b == 0)
-        .filter(|p| !p.is_empty())
-        .filter_map(|p| std::str::from_utf8(p).ok().map(str::to_string))
-        .collect();
     Ok(CodeIndex::from_commits(
-        &parse_log(&log.stdout, &nonce),
-        Some(&at_head),
+        &parse_log_bounded(&log.stdout, &nonce, max_paths, max_path)?,
+        Some(at_head),
         Some(head),
     ))
+}
+
+/// The index of `head` (which HEAD named when it was read), read at that hash rather than at
+/// `HEAD`, so HEAD moving meanwhile cannot give an index labelled with another commit.
+fn build_at(repo: &CodeRepo, head: String) -> Result<CodeIndex, RdyError> {
+    check_not_shallow(repo)?;
+    let tree = read_tree(repo, &head)?;
+    build_from(repo, head, &tree.keys().cloned().collect())
+}
+
+/// The index of the commit `head` whose files are `at_head`, from the cache while it holds that
+/// commit's index.
+pub(crate) fn index_at(
+    repo: &CodeRepo,
+    head: &str,
+    at_head: &BTreeSet<String>,
+) -> Result<Arc<CodeIndex>, RdyError> {
+    if let Some(idx) = lock(&CACHE).get(&repo.root)
+        && idx.head.as_deref() == Some(head)
+    {
+        return Ok(Arc::clone(idx));
+    }
+    let idx = Arc::new(build_from(repo, head.to_string(), at_head)?);
+    lock(&CACHE).insert(repo.root.clone(), Arc::clone(&idx));
+    Ok(idx)
+}
+
+/// Whether `hash` names a commit in the repository. No fetch is tried for a missing one.
+pub(crate) fn commit_exists(repo: &CodeRepo, hash: &str) -> Result<bool, RdyError> {
+    if !is_hash(hash.as_bytes()) {
+        return Ok(false);
+    }
+    let mut c = git_command(&repo.root);
+    c.args(["rev-parse", "-q", "--verify"])
+        .arg(format!("{hash}^{{commit}}"));
+    let out = run(c)?;
+    if out.status.success() {
+        return Ok(true);
+    }
+    if out.status.code() == Some(1) && out.stderr.is_empty() {
+        return Ok(false);
+    }
+    Err(git_failed(
+        repo,
+        "rev-parse",
+        &out,
+        "check the repository with git fsck",
+    ))
+}
+
+/// The non-merge commits reachable from `head` and not from `first`: the hashes only. With no
+/// `first`, every commit `head` reaches. Both are commits that exist.
+pub(crate) fn commits_since(
+    repo: &CodeRepo,
+    head: &str,
+    first: Option<&str>,
+) -> Result<HashSet<String>, RdyError> {
+    let mut c = git_command(&repo.root);
+    c.args(["rev-list", "--no-merges", head]);
+    if let Some(first) = first {
+        c.arg(format!("^{first}"));
+    }
+    c.arg("--");
+    let out = run(c)?;
+    if !out.status.success() {
+        return Err(git_failed(
+            repo,
+            "rev-list",
+            &out,
+            "check the repository with git log",
+        ));
+    }
+    Ok(out
+        .stdout
+        .split(|b| *b == b'\n')
+        .filter(|h| is_hash(h))
+        .filter_map(|h| std::str::from_utf8(h).ok().map(str::to_string))
+        .collect())
 }
 
 /// The index of the checkout's current HEAD, built afresh (no cache).

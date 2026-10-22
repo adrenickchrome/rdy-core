@@ -25,9 +25,16 @@ fn one_line(text: &str) -> String {
 
 /// One section: its title line, then its entry lines (or `(none)`), each on one line.
 fn section(out: &mut Vec<String>, title: &str, entries: impl Iterator<Item = String>) {
+    section_lines(out, title, entries.map(|e| vec![e]));
+}
+
+/// Like [`section`], for entries of several lines: each line is one comment line.
+fn section_lines(out: &mut Vec<String>, title: &str, entries: impl Iterator<Item = Vec<String>>) {
     out.push(format!("# {title}:"));
     let before = out.len();
-    out.extend(entries.map(|e| format!("#   {}", one_line(&e))));
+    for lines in entries {
+        out.extend(lines.iter().map(|l| format!("#   {}", one_line(l))));
+    }
     if out.len() == before {
         out.push("#   (none)".into());
     }
@@ -207,16 +214,18 @@ pub fn header(briefing: &Value) -> String {
             line
         }),
     );
-    section(
+    section_lines(
         &mut out,
         "open suspects",
         list("suspects").map(|x| {
-            format!(
-                "{} -> {} ({})",
-                s(x, "block"),
-                s(x, "target"),
-                s(x, "reason")
-            )
+            crate::read_cmd::suspect_lines(x, |x| {
+                format!(
+                    "{} -> {} ({})",
+                    s(x, "block"),
+                    s(x, "target"),
+                    s(x, "reason")
+                )
+            })
         }),
     );
     let inflight = &briefing["inflight"];
@@ -501,9 +510,11 @@ fn coverage_part(reply: &Value) -> String {
 
 /// The parts of the reply rdy could not work out, each with its error.
 fn errors_part(reply: &Value) -> String {
-    const PARTS: [(&str, &str); 7] = [
+    const PARTS: [(&str, &str); 8] = [
         ("consequences_error", "consequences"),
         ("consequences_tension_error", "the tension consequences"),
+        // D-01QX5: the checkout could not be read (the structural rows stand)
+        ("consequences_code_error", "the code consequences"),
         ("on_change_error", "the tension changes"),
         // a propose reply's tensions (gate `ProposalInfo`)
         ("tensions_error", "the tensions"),
@@ -707,6 +718,42 @@ mod tests {
             "#",
         ];
         assert_eq!(h.lines().collect::<Vec<_>>(), want);
+    }
+
+    /// cp13: a briefing's open suspects keep the structural line, follow it with the deferral
+    /// line, and print a code row with its paths.
+    #[test]
+    fn cp13_the_header_shows_deferrals_and_code_rows() {
+        let b = json!({
+            "governs": [], "dependents": [], "will_go_stale": [],
+            "suspects": [
+                {"block": "c-B", "target": "c-A", "reason": "changed",
+                 "deferred": {"by": {"actor": "agent:w", "run": null, "role": "Writer", "at_ms": 1},
+                              "reason": "the release owns it", "landing": "ab", "accepted_by": "human:alice"}},
+                {"block": "c-B", "target": "c-X", "reason": "changed"},
+                {"block": "c-B", "target": null, "reason": "code_changed",
+                 "paths": ["app:src/a.rs", "app:src/c.rs"]},
+                {"block": "c-C", "target": null, "reason": "code_changed", "paths": []}
+            ],
+            "base": {"token": "0123456789abcdef0123", "blocks": [{"id": "c-B", "version": "ff"}], "depends": 0}
+        });
+        let h = header(&b);
+        let want = [
+            "# open suspects:",
+            "#   c-B -> c-A (changed)",
+            "#     deferred by agent:w: the release owns it",
+            "#   c-B -> c-X (changed)",
+            "#   c-B: code_changed",
+            "#     app:src/a.rs",
+            "#     app:src/c.rs",
+            "#   c-C: code_changed",
+        ];
+        let lines: Vec<&str> = h.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| *l == want[0])
+            .expect("the section");
+        assert_eq!(lines[at..at + want.len()], want, "{h}");
     }
 
     #[test]
@@ -1213,6 +1260,21 @@ mod tests {
         assert_eq!(
             consequences_text(&v),
             "\nintents on these blocks:\n  intent in-2 by agent:b in v: x (until t) on 1 block(s)"
+        );
+    }
+
+    #[test]
+    fn cp9_code_read_failure_text_keeps_rows_and_names_the_code_error() {
+        // D-01QX5: the checkout could not be read; the structural rows stand and the text says
+        // the code consequences were not worked out
+        let v = json!({
+            "consequences": [{"id": "cq-1", "block": "c-R", "kind": "suspect",
+                "because": {"edge": "references", "changed": "c-T"}, "follow_up": "confirm"}],
+            "consequences_code_error": "E_IO: git rev-parse failed in code repo app"
+        });
+        assert_eq!(
+            consequences_text(&v),
+            "\nconsequences:\n  suspect c-R: confirm (references c-T)\nnot worked out: the code consequences (E_IO: git rev-parse failed in code repo app)"
         );
     }
 }

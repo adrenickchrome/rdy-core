@@ -195,14 +195,20 @@ pub(crate) fn new(env: &Env, what: NewCmd) -> Result<(Value, String), ErrorReply
 pub(crate) fn run_edit(env: &Env, a: EditArgs) -> Result<(Value, String), ErrorReply> {
     let EditArgs { id, view, reason } = a;
     let v = edit(env, &id, view.as_deref(), reason.as_deref())?;
-    // F4 (FW-PR3b): a rename or a top-level name re-derives keys rdy assigned
+    let t = write_text(&v);
+    Ok((v, t))
+}
+
+/// A write's report as text: its change, the keys rdy assigned (F4, FW-PR3b: a rename or a
+/// top-level name re-derives them), the consequences and the warnings. A person sees the
+/// write's warnings, W_BRIEF_STALE among them (msw8, #874).
+pub(crate) fn write_text(v: &Value) -> String {
     let mut t = format!(
         "change {}{}{}",
         hash_short(text(&v["change"])),
-        keys_lines(&v, ""),
-        brief_text::consequences_text(&v)
+        keys_lines(v, ""),
+        brief_text::consequences_text(v)
     );
-    // msw8 (#874): a person sees the write's warnings, W_BRIEF_STALE among them
     for w in v["warnings"].as_array().into_iter().flatten() {
         t.push_str(&format!(
             "\nwarning {}: {}",
@@ -210,7 +216,7 @@ pub(crate) fn run_edit(env: &Env, a: EditArgs) -> Result<(Value, String), ErrorR
             text(&w["message"])
         ));
     }
-    Ok((v, t))
+    t
 }
 
 /// `rdy edit`: the block as YAML from the `block` op, its briefing from the `brief` op shown as

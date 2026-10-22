@@ -8,6 +8,7 @@ pub mod card_words;
 pub mod carried_warning;
 pub mod clone;
 pub mod code_brief;
+pub mod code_evidence;
 pub mod code_index;
 mod config;
 pub mod config_edit;
@@ -57,6 +58,7 @@ pub mod mention_review;
 mod pack_load;
 mod paths;
 pub mod pending;
+pub mod plan;
 pub mod proposal_show;
 pub mod publication;
 pub mod publication_manifest;
@@ -65,7 +67,9 @@ mod publish;
 pub mod quarantine;
 mod query;
 mod read_state;
+pub mod reaffirm;
 pub mod redaction;
+pub mod reflects;
 pub mod related;
 pub mod render_inputs;
 pub mod render_source;
@@ -86,6 +90,7 @@ pub mod stream_error;
 pub mod stream_export;
 pub mod stream_take;
 pub mod suggest;
+pub mod suspect_reply;
 pub mod tensions;
 pub mod testkit;
 pub mod transitions;
@@ -142,6 +147,7 @@ pub use session::{
     HUMAN_RUN, INFLIGHT_SCOPE, PinnedClock, Scope, Session, SessionKind, classify, human_actor,
     human_actor_for, human_actor_for_env, now_ms, pin_clock, rfc3339, rfc3339_now,
 };
+pub use suspect_reply::{DeferredReply, SuspectReply};
 pub use tree_io::Diagnostic;
 pub use version::{
     AS_OF_CACHE_ENTRIES, MAX_VERSION_BYTES, TagInfo, VersionInfo, VersionPosition, VersionRef,
@@ -154,7 +160,8 @@ pub use views::{ConflictInfo, ConflictSide, OwnerInfo, ResolveResult, ViewHeadIn
 pub use wc::project::Projection;
 pub use write::{
     JsonFieldError, LINK_KEY_TAIL, LinkInput, OP_FIX, OpInput, WriteRequest, WriteResult,
-    editorial_class, json_to_field, parse_justification, parse_op, parse_ops,
+    editorial_class, is_reserved_view, json_to_field, parse_justification, parse_op, parse_ops,
+    reserved_view_error,
 };
 
 pub use config::{
@@ -168,6 +175,9 @@ pub use pack_load::{
 };
 pub use rdy_store::OpenReport;
 pub use rdy_store::fsutil::{sync_dir, write_durable};
+/// The notice channel of the library crates: stderr, unless a test captures the notice it
+/// provokes ([`capture_notices_for_tests`]).
+pub use rdy_store::{NoticeCapture, capture_notices_for_tests, notice};
 pub use wc_check::{check_wc, lexical_path};
 
 use arc_swap::ArcSwap;

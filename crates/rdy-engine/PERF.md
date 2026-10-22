@@ -1606,3 +1606,71 @@ What each cost grows with:
 No laptop figures are judged here, and `qa-baseline.json` is not changed (O33).
 
 Deep gate (bench): <orchestrator fills in>
+
+## Change plans and re-affirmation (2026-10-22)
+
+Five ops, recorded with no spec target and no ceiling (D-4JMPH, D-EJBPD, D-01QX5; system/quality-gate
+tb-A4DAV puts timing in perf, so no correctness test asserts a duration). They run on both tiers
+(`_50k` on the large one), after the signature ops. No baseline changes here: `qa-baseline.json`
+holds none of the ten names, and a rebaseline is the bench's.
+
+Each tier works on one copy of its closed project, made and removed outside every timer. Outside
+the timers, the copy gets four things:
+
+- 300 claims that reference one claim A, so a view that changes A owes 300 confirm items;
+- 300 accepted decisions that use one term T, so a view that changes T makes all 300 suspect;
+- a small local Git checkout (one file, `src/m.rs`), linked from the copy only. Its first commit
+  cites A, so a plan that changes A has one code item. No Git command reaches a network;
+- 300 claims that reflect `src/*.rs`, landed after that commit, then one more commit that changes
+  `src/m.rs`. All 300 reflects blocks are now suspect against the checkout, and they name one
+  matched file.
+
+Each writing sample starts from a view of its own, made and pinned outside the timer (a pinned
+view is not rebased by the landings that follow). Setup, the answers that a seal needs, the
+propose, the exception answers, cleanup and process startup are all outside the sample.
+
+| op | what it times | runs | target |
+|---|---|---|---|
+| `plan_read` | `ReadState::change_plan` of a view that changes A, with the largest page: the candidates of the net change, the code evidence at the checkout's HEAD, the counts and the rows. The state is warm; one read is outside the timer | 5 (3 at 50k) | recorded, no spec target |
+| `plan_answer_300` | `Rdy::answer_plan` with 300 confirm answers on a fresh view: the plan computed again, the request checked as a whole, one plan record, one ref update, one durable flush | `runs.write` | recorded, no spec target |
+| `plan_seal` | `Rdy::land` of an approved version whose plan is bound and fully answered (no deferred item): the landing, and the seal of every item | `runs.write` | recorded, no spec target |
+| `reaffirm_300` | one ordinary `write` with one bulk `reaffirm` op (`because` T) on a fresh view that changes T: the selection, the 300 metadata updates in one change, the durable flush | `runs.write` | recorded, no spec target |
+| `reflects_suspects` | `ReadState::suspect_details` of canon: the structural rows, the deferral lookup and the 300 code rows against the linked checkout. The state is warm; one read is outside the timer | 5 (3 at 50k) | recorded, no spec target |
+
+`plan_seal` does not use a deferred item, so it does not depend on the deferral card. `reaffirm_300`
+uses the ordinary op, not the later queue card. `reflects_suspects` runs before the seal's landings
+move canon, so canon's only suspects are the 300 code rows.
+
+Beside the timings, the run prints one line to stderr for each tier (`plan ops` and `plan ops_50k`):
+
+`plan ops: plan items N (code files N), answers N, sealed items N, re-affirmed decisions N, changed reflects blocks N (N matched file)`
+
+At the typical size it reads 301 plan items (300 confirm and one code item), 1 code file, 300
+answers, 300 or more sealed items, 300 re-affirmed decisions and 300 changed reflects blocks that
+name 1 matched file.
+
+What each cost grows with:
+
+- Changed blocks. A plan compares the version's final state with its canon baseline and works
+  on the net change, so intermediate edits cost nothing. `plan_read`, `plan_answer_300` and
+  `plan_seal` all compute the whole plan first.
+- Reached edges. Each changed block asks the consequence visitor for the blocks that reference
+  it; a document item is one per reached (cause, subject) pair. 300 referrers of A give 300 items,
+  and a block with more referrers gives more. `reaffirm_300` grows with the edges that make the
+  decisions suspect, and with the decisions it writes (one update each, in one change).
+- Plan answers. An answer request is checked in full before it is written. A cumulative plan
+  keeps every earlier answer, so a view that answers in many calls pays for all of them in each
+  call. `plan_seal` seals every item of the version, so it grows with the item count.
+- Matched files. `reflects_suspects` compares the committed files that each glob matches with the
+  snapshot a block recorded. It grows with the reflects blocks, their globs and the files in the
+  committed tree at each linked HEAD. It does not read the worktree.
+- Git history. The code evidence of `plan_read` reads the citations of the checkout's commits
+  and, for each code item, the commits after the chain's first HEAD, so it grows with the history
+  the checkout holds. The small fixture has two commits and does not show this; the code ops of
+  an earlier section measure the history cost on their own checkout. `reflects_suspects` compares
+  tree identities and does not walk history.
+
+No correctness test asserts a duration. No laptop figures are judged here: the first timing of
+these ops is the Linux bench's. The ops are PASS-NEW until the baseline holds them.
+
+Deep gate (bench): <orchestrator fills in>

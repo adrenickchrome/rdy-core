@@ -1057,6 +1057,13 @@ pub(crate) fn compute_excluding(
                 let r: RefUpdate = reader.get_typed(kinds::REF_UPDATE, &h)?;
                 quotes.scan(audit, &rec, false, &r.name)?;
             }
+            kinds::PLAN => {
+                // the whole decoded version, as for an answer: the view, each answer's reason,
+                // each sealed item's subject and edge and every other stored text. A plan is an
+                // audit record core reports and cannot erase (D-EPK1Z, p-SAG01)
+                let p = reader.plan(&h)?;
+                quotes.scan(audit, &rec, false, &p)?;
+            }
             kinds::SIGNATURE => {
                 // the statement is stored as bytes, which the string visitor skips: it is read
                 // as bounded UTF-8 text here. The SSHSIG blob stays opaque, and the signer's

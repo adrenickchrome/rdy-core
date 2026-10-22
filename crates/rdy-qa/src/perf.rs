@@ -233,6 +233,21 @@ fn spec_target(op: &str) -> Option<String> {
         "export_profile_md" => "no spec target: print selected docs as Markdown (reported)",
         "export_profile_html" => "no spec target: print selected docs as HTML (reported)",
         "export_profile_pdf" => "no spec target: print selected docs as PDF (reported)",
+        "plan_read" => {
+            "recorded, no spec target: a complete view change plan, with its candidates and code evidence"
+        }
+        "plan_answer_300" => {
+            "recorded, no spec target: one durable call recording 300 confirm answers"
+        }
+        "plan_seal" => {
+            "recorded, no spec target: one approved landing with its bound plan and seal"
+        }
+        "reaffirm_300" => {
+            "recorded, no spec target: one bulk write of 300 re-affirmations, durable flush included"
+        }
+        "reflects_suspects" => {
+            "recorded, no spec target: suspect details for 300 reflects blocks against the linked checkout"
+        }
         "publication_manifest" => "no spec target: hash a publication manifest (reported)",
         "render_stream_site" => "no spec target: render a site from a tag stream (reported)",
         "render_stream_markdown" => "no spec target: render Markdown from a tag stream (reported)",
@@ -469,6 +484,9 @@ fn fsync_bound(op: &str) -> bool {
         || op.starts_with("exclude_")
         || op.starts_with("land_rebase")
         || op.starts_with("mcp_write")
+        || op.starts_with("plan_answer")
+        || op.starts_with("plan_seal")
+        || op.starts_with("reaffirm_")
 }
 
 /// The verdicts of one run. The spec ceiling is checked first in every mode. In `Record` mode
@@ -4017,6 +4035,294 @@ fn publication_costs(
     (measures, costs)
 }
 
+/// Items of each kind in the change-plan tier: 300 confirm items, 300 suspect accepted
+/// decisions and 300 reflects blocks (D-4JMPH, D-EJBPD, D-01QX5).
+const PLAN_N: usize = 300;
+
+/// The change-plan ops, in the order the report lists them.
+const PLAN_OPS: [&str; 5] = [
+    "plan_read",
+    "plan_answer_300",
+    "plan_seal",
+    "reaffirm_300",
+    "reflects_suspects",
+];
+
+/// What the change-plan tier printed beside its timings, for the first run of each op.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PlanFacts {
+    /// Items in the read plan (all five kinds, every state).
+    items: usize,
+    /// Distinct code files the plan's code items name.
+    code_files: usize,
+    /// Answers the answer call recorded.
+    answers: usize,
+    /// Items the landing sealed.
+    sealed: usize,
+    /// Decisions the bulk write re-affirmed.
+    members: usize,
+    /// Reflects blocks the read found changed in the checkout.
+    reflects: usize,
+    /// Matched files the changed reflects blocks name.
+    matched_files: usize,
+}
+
+/// A view of its own, pinned so no landing rebases it, holding `ops`.
+fn plan_view(r: &mut Rdy, name: &str, ops: serde_json::Value) {
+    r.view_create(&writer(), name, None, true)
+        .expect("create the view");
+    write(r, name, ops).expect("write the view");
+}
+
+/// The ids of the open confirm items in the plan of `view`.
+fn open_confirm_items(r: &Rdy, view: &str) -> Vec<String> {
+    use rdy_engine::plan::{ItemState, PlanRow};
+    r.read()
+        .view_plan(view)
+        .expect("read the plan")
+        .items
+        .into_iter()
+        .filter_map(|row| match row {
+            PlanRow::Live(i)
+                if i.kind == rdy_model::plan::PlanKind::Confirm && i.state == ItemState::Open =>
+            {
+                Some(i.id)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The answers that confirm each of `items`.
+fn confirm_answers(items: &[String]) -> Vec<rdy_engine::plan::PlanAnswerInput> {
+    items
+        .iter()
+        .map(|i| rdy_engine::plan::PlanAnswerInput {
+            item: i.clone(),
+            act: rdy_model::plan::PlanAct::Confirm,
+            reason: Some("it still holds".into()),
+        })
+        .collect()
+}
+
+/// The change-plan and re-affirmation ops (D-4JMPH, D-EJBPD, D-01QX5; tb-A4DAV puts timing in
+/// perf): `plan_read`, `plan_answer_300`, `plan_seal`, `reaffirm_300` and `reflects_suspects`.
+/// Reported with no spec target. All five run on a copy of the closed project at `proj`, made
+/// and removed outside every timer. Outside the timers the copy gets: `n` claims that reference
+/// one claim (so changing it owes `n` confirm items); `n` accepted decisions that use one term;
+/// `n` claims that reflect `src/*.rs` of a small local Git checkout; and one commit in that
+/// checkout after the reflects blocks recorded it. Another commit, before them, cites the
+/// changed claim, so its plan has one code item. The checkout is linked from the copy only; no
+/// Git command reaches a network. Each writing sample starts from a view of its own, prepared
+/// outside the timer. `sfx` is empty for the typical tier and [`LARGE_SUFFIX`] for the large one;
+/// `read_runs` is the run count of the two reads.
+fn tier_change_plan(
+    out: &mut Vec<Measure>,
+    proj: &std::path::Path,
+    parent: &std::path::Path,
+    sfx: &str,
+    runs: &Runs,
+    read_runs: usize,
+    n: usize,
+) -> PlanFacts {
+    use rdy_engine::DecisionInput;
+    use rdy_engine::plan::{PLAN_MAX_TOKENS, PlanQuery, PlanRow};
+    let copy = parent.join(format!("p-plan{sfx}"));
+    copy_project(proj, &copy);
+    let mut r = Rdy::open(&copy).expect("open the copy");
+    // as the daemon does after `ready`, outside every timer (plan M2e2)
+    r.reconcile_transitions().expect("reconcile");
+
+    // the claims: A, the term T and n claims that reference A
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": "plan-perf", "title": "Plan perf", "doc_type": "constraints"}}),
+        json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}}),
+        json!({"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "PlanLedger"}, "body": "Balances."}),
+        json!({"op": "create", "type": "claim", "id": "$a", "parent": "$s", "body": "A holds."}),
+    ];
+    for i in 0..n {
+        ops.push(json!({"op": "create", "type": "claim", "parent": "$s", "body": format!("N{i} builds on {{{{$a}}}}.")}));
+    }
+    let w = write(&mut r, "pfix", json!(ops)).expect("write the plan claims");
+    land(&mut r, "pfix").expect("land the plan claims");
+    let (section, term, a) = (
+        w.created["$s"].clone(),
+        w.created["$t"].clone(),
+        w.created["$a"].clone(),
+    );
+    // the n accepted decisions that use the term
+    for i in 0..n {
+        r.decide(
+            &writer(),
+            "pdec",
+            DecisionInput {
+                parent: section.clone(),
+                statement: format!("Plan perf decision {i}"),
+                body: format!("Uses the {{{{{term}}}}}."),
+                ..Default::default()
+            },
+        )
+        .expect("decide");
+    }
+    land(&mut r, "pdec").expect("land the decisions");
+    // the checkout: a commit that cites A, then the reflects blocks, then one matched-file change
+    let g = crate::git_repo::GitRepo::new();
+    g.write("src/m.rs", "one\n");
+    g.commit(&format!("start\n\nImplements: {a}"));
+    g.link(&copy);
+    let ops: Vec<_> = (0..n)
+        .map(|i| json!({"op": "create", "type": "claim", "parent": section, "body": format!("R{i} follows the module."), "fields": {"reflects": ["src/*.rs"]}}))
+        .collect();
+    write(&mut r, "prefl", json!(ops)).expect("write the reflects blocks");
+    land(&mut r, "prefl").expect("land the reflects blocks");
+    g.write("src/m.rs", "two\n");
+    g.commit("change the module");
+
+    let edit_a =
+        |i: usize| json!([{"op": "update", "id": a, "body": format!("A holds, take {i}.")}]);
+    let mut facts = PlanFacts::default();
+    let mut found: BTreeMap<&'static str, Measure> = BTreeMap::new();
+
+    // plan_read: one complete plan of a view that changes A
+    plan_view(&mut r, "pread", edit_a(0));
+    let q = PlanQuery {
+        view: Some("pread".into()),
+        max_tokens: Some(PLAN_MAX_TOKENS),
+        ..Default::default()
+    };
+    r.read().change_plan(&q, "pread").expect("warm the read");
+    found.insert(
+        "plan_read",
+        measure_timed(&format!("plan_read{sfx}"), read_runs, |_| {
+            let s = Instant::now();
+            let p = r.read().change_plan(&q, "pread").expect("the plan");
+            let took = s.elapsed();
+            assert_eq!(p.counts.by_kind["confirm"].open, n, "the confirm items");
+            assert_eq!(p.counts.by_kind["update_implementation"].open, 1);
+            assert!(!p.code.unavailable, "the checkout is linked");
+            facts.items = p.counts.open + p.counts.closed + p.counts.deferred;
+            facts.code_files = p.code.files;
+            assert!(p.items.iter().all(|row| matches!(row, PlanRow::Live(_))));
+            took
+        }),
+    );
+
+    // plan_answer_300: one durable call that confirms every confirm item of a fresh view
+    found.insert(
+        "plan_answer_300",
+        measure_timed(&format!("plan_answer_300{sfx}"), runs.write, |i| {
+            let view = format!("pans{i}");
+            plan_view(&mut r, &view, edit_a(i + 1));
+            let items = open_confirm_items(&r, &view);
+            assert_eq!(items.len(), n, "the confirm items of {view}");
+            let answers = confirm_answers(&items);
+            let s = Instant::now();
+            r.answer_plan(&writer(), &view, &answers)
+                .expect("answer the plan");
+            let took = s.elapsed();
+            facts.answers = answers.len();
+            assert!(open_confirm_items(&r, &view).is_empty(), "all are answered");
+            took
+        }),
+    );
+
+    // reaffirm_300: one bulk write of re-affirmations for the decisions that use the term
+    found.insert(
+        "reaffirm_300",
+        measure_timed(&format!("reaffirm_300{sfx}"), runs.write, |i| {
+            let view = format!("praf{i}");
+            plan_view(
+                &mut r,
+                &view,
+                json!([{"op": "update", "id": term, "body": format!("Balances, take {i}.")}]),
+            );
+            let ops =
+                json!([{"op": "reaffirm", "because": term, "reason": "The decision still holds."}]);
+            let s = Instant::now();
+            let res = write(&mut r, &view, ops).expect("re-affirm");
+            let took = s.elapsed();
+            assert_eq!(res.reaffirmed.len(), n, "the re-affirmed decisions");
+            facts.members = res.reaffirmed.len();
+            took
+        }),
+    );
+
+    // reflects_suspects: before any landing moves canon's structural suspects
+    r.read()
+        .suspect_details(&Scope::Canon)
+        .expect("warm the read");
+    found.insert(
+        "reflects_suspects",
+        measure_timed(&format!("reflects_suspects{sfx}"), read_runs, |_| {
+            let s = Instant::now();
+            let rows = r.read().suspect_details(&Scope::Canon).expect("suspects");
+            let took = s.elapsed();
+            let code: Vec<_> = rows.iter().filter(|x| x.reason == "code_changed").collect();
+            assert_eq!(code.len(), n, "the changed reflects blocks");
+            facts.reflects = code.len();
+            facts.matched_files = code
+                .first()
+                .map_or(0, |x| x.paths.as_ref().map_or(0, Vec::len));
+            took
+        }),
+    );
+
+    // plan_seal: one approved landing of a version with its answered, bound plan (no deferral)
+    found.insert(
+        "plan_seal",
+        measure_timed(&format!("plan_seal{sfx}"), runs.write, |i| {
+            let view = format!("pseal{i}");
+            plan_view(&mut r, &view, edit_a(1000 + i));
+            let items = open_confirm_items(&r, &view);
+            assert_eq!(items.len(), n, "the confirm items of {view}");
+            r.answer_plan(&writer(), &view, &confirm_answers(&items))
+                .expect("answer the plan");
+            let summary = crate::intake::summary_for(&r, &view);
+            let p = r
+                .propose(&writer(), &view, &view, summary)
+                .expect("propose");
+            crate::intake::confirm_before_landing(&mut r, &approver(), &p);
+            let s = Instant::now();
+            let landing = r.land(&approver(), &p.id).expect("land");
+            let took = s.elapsed();
+            if i == 0 {
+                let q = PlanQuery {
+                    landing: Some(landing),
+                    max_tokens: Some(PLAN_MAX_TOKENS),
+                    ..Default::default()
+                };
+                let sealed = r.read().change_plan(&q, &view).expect("the sealed plan");
+                facts.sealed = sealed
+                    .items
+                    .iter()
+                    .filter(|row| matches!(row, PlanRow::Sealed(_)))
+                    .count();
+                assert!(facts.sealed >= n, "the landing sealed its items");
+            }
+            took
+        }),
+    );
+
+    eprintln!(
+        "plan ops{sfx}: plan items {} (code files {}), answers {}, sealed items {}, \
+         re-affirmed decisions {}, changed reflects blocks {} ({} matched file)",
+        facts.items,
+        facts.code_files,
+        facts.answers,
+        facts.sealed,
+        facts.members,
+        facts.reflects,
+        facts.matched_files
+    );
+    drop(r);
+    drop(g);
+    std::fs::remove_dir_all(&copy).expect("remove the copy");
+    for op in PLAN_OPS {
+        out.push(found.remove(op).expect("every op ran"));
+    }
+    facts
+}
+
 /// [`publication_costs`] into `out`, with each op's output facts on standard error for the
 /// ledger. `sfx` names the tier (`""` or `_50k`).
 fn tier_publication_costs(
@@ -4905,6 +5211,7 @@ pub fn run_workload() -> Vec<Measure> {
     tier_publication(&mut out, &proj, dir.path(), 5);
     tier_publication_costs(&mut out, &proj, dir.path(), "", 5);
     tier_signatures(&mut out, &proj, dir.path(), "", SIGNATURE_RUNS);
+    tier_change_plan(&mut out, &proj, dir.path(), "", &TYPICAL_RUNS, 5, PLAN_N);
     // Cold open with a lagging index: the project is closed, so put the old index back over the
     // current one (outside the timer); open then catches it up from the log.
     let mut lag = None;
@@ -5664,6 +5971,7 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     tier_clone(&mut out, &proj, parent, sfx, 3);
     tier_publication_costs(&mut out, &proj, parent, sfx, 3);
     tier_signatures(&mut out, &proj, parent, sfx, SIGNATURE_RUNS);
+    tier_change_plan(&mut out, &proj, parent, sfx, &LARGE_RUNS, 3, PLAN_N);
     out.extend(daemon_ops(&proj, sfx));
     out.extend(site_ops(&proj, parent, &docs, &fx, sfx, &LARGE_RUNS));
     tier_site_profiles(&mut out, &proj, parent, &fx, sfx, 3, &LARGE_RUNS);
@@ -6924,6 +7232,96 @@ mod tests {
         );
     }
 
+    /// Task 15: the five change-plan ops reach every plan operation on a small tree. The checks
+    /// are on names, run counts, fixture counts and semantic outcomes: no duration is asserted.
+    #[test]
+    fn cp15_small_tree_reaches_every_plan_operation() {
+        assert_eq!(PLAN_N, 300);
+        rdy_model::seed_ids_for_tests(0x6370_3135);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        drop(r);
+        for sfx in ["", LARGE_SUFFIX] {
+            let mut out = vec![];
+            let n = 4;
+            let facts = tier_change_plan(&mut out, &proj, dir.path(), sfx, &spv11_runs(), 2, n);
+            let names: Vec<String> = out.iter().map(|m| m.op.clone()).collect();
+            let want: Vec<String> = PLAN_OPS.iter().map(|o| format!("{o}{sfx}")).collect();
+            assert_eq!(names, want);
+            for m in &out {
+                assert_eq!(m.runs, 2, "{m:?}");
+            }
+            // n confirm items and one code item, n answers, n + 1 sealed items, n re-affirmed
+            // decisions, n changed reflects blocks that name the one matched file
+            assert_eq!(
+                facts,
+                PlanFacts {
+                    items: n + 1,
+                    code_files: 1,
+                    answers: n,
+                    sealed: n + 1,
+                    members: n,
+                    reflects: n,
+                    matched_files: 1,
+                }
+            );
+        }
+        rdy_model::unseed_ids_for_tests();
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(left, [std::ffi::OsString::from("p")]);
+    }
+
+    /// Task 15: all ten names are recorded with no spec target and no ceiling (the baseline is not asserted: it may be updated later).
+    #[test]
+    fn cp15_plan_operations_are_recorded_without_a_target() {
+        for op in PLAN_OPS {
+            let large = format!("{op}{LARGE_SUFFIX}");
+            let text = spec_target(op).unwrap_or_else(|| panic!("{op}"));
+            assert!(
+                text.starts_with("recorded, no spec target: "),
+                "{op}: {text}"
+            );
+            assert_eq!(
+                spec_target(&large),
+                Some(format!("{text}{LARGE_TIER_NOTE}")),
+                "{large}"
+            );
+            for name in [op.to_string(), large] {
+                assert_eq!(spec_ceiling_ms(&name), None, "{name} has a ceiling");
+            }
+        }
+    }
+
+    /// Task 15: both workloads call the tier with their own suffix and run counts.
+    #[test]
+    fn cp15_both_workloads_call_the_plan_tier() {
+        let src = include_str!("perf.rs");
+        let body = |name: &str| {
+            let from = src.find(name).unwrap_or_else(|| panic!("{name}"));
+            &src[from..from + src[from..].find("\n}\n").expect("its end")]
+        };
+        let typical = body("pub fn run_workload(")
+            .replace(['\n', ' '], "")
+            .replace(",)", ")");
+        assert!(
+            typical.contains(
+                "tier_change_plan(&mutout,&proj,dir.path(),\"\",&TYPICAL_RUNS,5,PLAN_N);"
+            )
+        );
+        assert!(
+            body("fn run_large_tier(").contains(
+                "tier_change_plan(&mut out, &proj, parent, sfx, &LARGE_RUNS, 3, PLAN_N);"
+            )
+        );
+    }
+
     /// The runs of a tiny profile fixture: two samples everywhere.
     fn spv11_runs() -> Runs {
         Runs {
@@ -7115,12 +7513,23 @@ mod tests {
         at("tier_clone(&mut out, &proj, dir.path(), \"\", 5);");
         at("tier_publication(&mut out, &proj, dir.path(), 5);");
         at("tier_signatures(&mut out, &proj, dir.path(), \"\", SIGNATURE_RUNS);");
+        let typical = body.replace(['\n', ' '], "").replace(",)", ")");
+        assert!(
+            typical.contains(
+                "tier_change_plan(&mutout,&proj,dir.path(),\"\",&TYPICAL_RUNS,5,PLAN_N);"
+            )
+        );
         let large = src.find("fn run_large_tier(").expect("run_large_tier");
         let large = &src[large..large + src[large..].find("\n}\n").expect("its end")];
         assert!(large.contains("tier_render_cold(&mut out, &proj, parent, sfx, 3);"));
         assert!(large.contains("tier_dump(&mut out, &proj, parent, sfx, 3);"));
         assert!(large.contains("tier_clone(&mut out, &proj, parent, sfx, 3);"));
         assert!(large.contains("tier_signatures(&mut out, &proj, parent, sfx, SIGNATURE_RUNS);"));
+        assert!(
+            large.contains(
+                "tier_change_plan(&mut out, &proj, parent, sfx, &LARGE_RUNS, 3, PLAN_N);"
+            )
+        );
         assert!(large.contains("tier_intake(&mut out, &mut r, sfx, LARGE_RUNS.view_ops);"));
     }
 

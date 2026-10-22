@@ -15,11 +15,12 @@ use crate::lexicon::Lexicon;
 use crate::query::summary_in;
 use crate::related::{RELATED_CAP, RelatedDecision};
 use crate::suggest::MentionedBy;
+use crate::suspect_reply::SuspectReply;
 use crate::tensions::info::{InfoCache, SideInfo, TensionInfo, row_bytes, rows_bytes};
 use crate::tensions::{Tension, TensionSeverity};
 use crate::write::OpInput;
 use crate::{Materialized, ReadState, Scope};
-use rdy_graph::{DerivedStatus, EdgeKind, IMPACT_LINKS, IMPACT_SHOWN, SUSPECT_LINKS, Suspect};
+use rdy_graph::{DerivedStatus, EdgeKind, IMPACT_LINKS, IMPACT_SHOWN, SUSPECT_LINKS};
 use rdy_model::{Block, BlockId, FieldValue, Hash, decision};
 use rdy_schema::{Issue, Pack, Severity};
 use serde::{Deserialize, Serialize};
@@ -420,7 +421,7 @@ pub struct Briefing {
     /// The refines, supersedes and revokes edges of the covered blocks, in both directions.
     pub lineage: Vec<Lineage>,
     pub will_go_stale: Vec<WillGoStale>,
-    pub suspects: Vec<Suspect>,
+    pub suspects: Vec<SuspectReply>,
     /// Other views and open proposals that change a covered block (not part of the token).
     pub inflight: Inflight,
     /// The coverage of the covered blocks and the confidence of this briefing (FW-CV1, FW-CV2).
@@ -495,7 +496,7 @@ fn is_zero(n: &usize) -> bool {
 
 /// The most bytes a briefing of `max` tokens (4 bytes each, rounded down) can take. It
 /// saturates: an engine caller may pass any `usize`, and a budget past the byte range is no cut.
-fn budget_bytes(max: usize) -> usize {
+pub(crate) fn budget_bytes(max: usize) -> usize {
     max.saturating_mul(4).saturating_add(3)
 }
 
@@ -922,8 +923,9 @@ pub(crate) fn refuse_inflight(scope: &Scope) -> Result<(), RdyError> {
     Ok(())
 }
 
-/// How many hex digits of a briefing's digest a cursor carries (64 bits).
-const DIGEST_HEX: usize = 16;
+/// How many hex digits of a briefing's digest a cursor carries (64 bits). A change plan's cursor
+/// carries as many.
+pub(crate) const DIGEST_HEX: usize = 16;
 
 /// A cursor `<token>:<o1>,…,<o9>:<digest>:<scope>` split at its first colon: the token (64
 /// lowercase hex) and the rest. The rest is read by `parse_tail` once the token is known.
@@ -935,24 +937,35 @@ fn parse_cursor(cursor: &str) -> Result<(&str, &str), RdyError> {
     Ok((token, rest))
 }
 
-fn is_lower_hex(b: u8) -> bool {
+pub(crate) fn is_lower_hex(b: u8) -> bool {
     matches!(b, b'0'..=b'9' | b'a'..=b'f')
 }
 
 /// The offsets, the digest and the scope of a cursor's rest. The scope is last: everything
 /// after the digest's colon (a view name may hold a colon).
 fn parse_tail(rest: &str) -> Result<([usize; PAGE_SECTIONS.len()], &str, &str), RdyError> {
-    let (offsets, tail) = rest.split_once(':').ok_or_else(bad_cursor)?;
-    let (digest, scope) = tail.split_once(':').ok_or_else(bad_cursor)?;
+    parse_page_tail::<{ PAGE_SECTIONS.len() }>(rest).ok_or_else(bad_cursor)
+}
+
+/// A cursor tail `<o1>,…,<oN>:<digest>:<scope>`: exactly `N` decimal offsets, a digest of
+/// [`DIGEST_HEX`] lowercase hex digits and a non-empty scope, which is last (everything after
+/// the digest's colon, so it may hold colons). `None` when the tail is not one. The offsets are
+/// read into the array as they are split: nothing is allocated from their count.
+pub(crate) fn parse_page_tail<const N: usize>(rest: &str) -> Option<([usize; N], &str, &str)> {
+    let (offsets, tail) = rest.split_once(':')?;
+    let (digest, scope) = tail.split_once(':')?;
     if digest.len() != DIGEST_HEX || !digest.bytes().all(is_lower_hex) || scope.is_empty() {
-        return Err(bad_cursor());
+        return None;
     }
-    let offsets: Vec<usize> = offsets
-        .split(',')
-        .map(|n| n.parse().map_err(|_| bad_cursor()))
-        .collect::<Result<_, _>>()?;
-    let offsets: [usize; PAGE_SECTIONS.len()] = offsets.try_into().map_err(|_| bad_cursor())?;
-    Ok((offsets, digest, scope))
+    let mut out = [0usize; N];
+    let mut parts = offsets.split(',');
+    for slot in &mut out {
+        *slot = parts.next()?.parse().ok()?;
+    }
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((out, digest, scope))
 }
 
 /// How a scope is named in a briefing's errors.
@@ -1441,13 +1454,14 @@ impl ReadState {
             })
             .collect();
 
-        let mut suspects = vec![];
+        let mut structural = vec![];
         for id in ids {
             let mut found = g.suspects_of(id);
             found.retain(|s| !self.is_presentational_source(&m, s));
-            suspects.extend(found);
+            structural.extend(found);
         }
-        suspects.sort_by(|a, b| (&a.block, &a.target).cmp(&(&b.block, &b.target)));
+        let covered: Vec<BlockId> = ids.iter().cloned().collect();
+        let suspects = self.suspect_rows(scope, structural, Some(&covered))?;
         let (inflight, rows) = self.inflight_unsided(scope, ids)?;
         // a coverage read error never fails a briefing (a briefing gates writes): it is reported
         let (coverage, coverage_error) = if self.coverage_left_out(scope) {
@@ -1649,8 +1663,14 @@ pub(crate) fn effective_lifecycle(m: &Materialized, id: Option<&BlockId>) -> Opt
 
 /// The subjects of `ops` against `m` (the target view before the write), in op order. Ops whose
 /// block does not resolve are skipped; a subject of a presentational type is exempt (Q6d), and
-/// for `create` and `rebalance` the subject is the parent.
-fn subjects<'a>(pack: &Pack, m: &Materialized, ops: &'a [OpInput]) -> Vec<Subject<'a>> {
+/// for `create` and `rebalance` the subject is the parent. A `reaffirm` op's subjects are the
+/// decisions `reaffirmed` says it selected (p-0SH30), each once, never a parent.
+fn subjects<'a>(
+    pack: &Pack,
+    m: &Materialized,
+    ops: &'a [OpInput],
+    reaffirmed: &crate::reaffirm::Selection,
+) -> Vec<Subject<'a>> {
     // the anchor each create of this batch hangs from, by the id it was given ($name or an id)
     let mut created: HashMap<&str, Anchor> = HashMap::new();
     let existing = |text: &str| -> Option<BlockId> {
@@ -1669,8 +1689,23 @@ fn subjects<'a>(pack: &Pack, m: &Materialized, ops: &'a [OpInput]) -> Vec<Subjec
     };
     let exempt = |b: &Block| pack.is_presentational(&b.block_type);
     let mut out = vec![];
-    for op in ops {
+    for (i, op) in ops.iter().enumerate() {
         match op {
+            OpInput::Reaffirm { .. } => {
+                for s in reaffirmed.of(i) {
+                    let Some(b) = m.get(&s.id) else {
+                        continue;
+                    };
+                    if exempt(b) {
+                        continue;
+                    }
+                    out.push(Subject {
+                        target: b.id.clone(),
+                        stable: effective_stable(m, Some(&b.id)),
+                        created_type: None,
+                    });
+                }
+            }
             OpInput::Create {
                 id,
                 parent,
@@ -1813,14 +1848,16 @@ fn short_token(t: &str) -> String {
 /// briefing where they touch stable content. Writes that touch only drafts are never refused;
 /// an unknown or stale cited briefing is a `W_BRIEF_STALE` warning on them. A refusal names, in
 /// `briefing.ids`, every block a fresh briefing must cover (`expand_error` computes it).
+/// `reaffirmed` is what the write's reaffirm ops selected on `m` (`reaffirm::select`).
 pub(crate) fn check(
     pack: &Pack,
     reg: &BriefRegistry,
     m: &Materialized,
     ops: &[OpInput],
+    reaffirmed: &crate::reaffirm::Selection,
     brief: Option<&str>,
 ) -> Result<Vec<Issue>, RdyError> {
-    let subjects = subjects(pack, m, ops);
+    let subjects = subjects(pack, m, ops, reaffirmed);
     let stable: BTreeSet<BlockId> = subjects
         .iter()
         .filter(|s| s.stable)

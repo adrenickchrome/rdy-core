@@ -95,6 +95,10 @@ pub const E_ALT_MEMBER: &str = "E_ALT_MEMBER";
 pub const E_ALT_CHOSEN: &str = "E_ALT_CHOSEN";
 /// The intent has expired: it takes no renewal and no withdrawal (plan M2d1).
 pub const E_INTENT_EXPIRED: &str = "E_INTENT_EXPIRED";
+/// An answer names an item that the change plan in scope does not hold (D-4JMPH, p-EVM5J).
+pub const E_PLAN_ITEM: &str = "E_PLAN_ITEM";
+/// An approval of a version whose deferral card has no answer yet (D-AAQ9Z).
+pub const E_DEFERRAL_OPEN: &str = "E_DEFERRAL_OPEN";
 /// The fix of every `E_PAGE_STALE`, for a briefing, read and search cursor alike.
 pub const PAGE_STALE_FIX: &str = "the read, briefing or search moved; start again without a cursor";
 
@@ -993,7 +997,7 @@ pub fn upstream_signout_local() -> Issue {
 
 /// Every error code the engine defines: each `E_*` constant of this module and the briefing's
 /// two. It is the engine's whole static error set, not one feature's subset.
-const CORE_ERROR_CODES: [&str; 99] = [
+const CORE_ERROR_CODES: [&str; 101] = [
     E_LOCKED,
     E_HELD_BY_READER,
     E_NO_PROJECT,
@@ -1048,6 +1052,8 @@ const CORE_ERROR_CODES: [&str; 99] = [
     E_ALT_MEMBER,
     E_ALT_CHOSEN,
     E_INTENT_EXPIRED,
+    E_PLAN_ITEM,
+    E_DEFERRAL_OPEN,
     E_REDACTION_TARGET,
     E_REDACTION_LIMIT,
     E_REDACTION_REASON,

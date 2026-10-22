@@ -1058,7 +1058,13 @@ fn ha13_uncertain_reply_is_repaired_by_tags_and_keys() {
             )
             .is_err()
     );
-    drop(h);
+    // the close cannot finish the removal either, and says so
+    let closes = rdy_store::unclean_closes_for_tests(&root, || drop(h));
+    assert_eq!(closes.len(), 1, "{closes:?}");
+    assert!(
+        closes[0].contains("(Content removal was authorized but has not finished.)"),
+        "{closes:?}"
+    );
     // a new snapshot repairs what the reply did not say: the tag and every key are there, and
     // the reopen finished the removal
     let mut h = Rdy::open_holder(&root).unwrap();

@@ -1,6 +1,9 @@
 //! Object references (plan HA1 Task 1; D-D2NPN `refs_of`): every assigned portable kind and every
 //! enum arm, identity hashes that are not dependencies, sorted unique output, the ObjectKey JSON
 //! form, refused kinds, and the text bound on every stored text field.
+use rdy_model::plan::{
+    Plan, PlanAct, PlanAnswer, PlanHead, PlanKind, PlanOutcome, PlanSeal, SealedItem,
+};
 use rdy_model::redaction::{
     AssessmentSupport, BlockResidue, ChangeResidue, CopyKind, CopyRow, CopyStatus, DropSpan,
     FramePlace, ImpactKind, ImpactRelation, ImpactRow, ReasonClass, RedactTarget, Redaction,
@@ -897,7 +900,101 @@ fn samples() -> Vec<Sample> {
         std::mem::swap(&mut record.gone, &mut record.new);
         out.push(s("transition new suspect", TRANSITION, &record, edges));
     }
+    out.extend(plan_samples());
     out
+}
+
+/// A plan version's sealed item: its identity, subject and cause are no edges; its accepting
+/// answer is.
+fn sealed_item(id: u8, answer: Option<u8>) -> SealedItem {
+    SealedItem {
+        id: h(id),
+        kind: PlanKind::Reaffirm,
+        subject: "b-00001".into(),
+        cause: id_of("D-00002"),
+        edge: "reflects".into(),
+        outcome: if answer.is_some() {
+            PlanOutcome::Deferred
+        } else {
+            PlanOutcome::Open
+        },
+        answer: answer.map(h),
+    }
+}
+
+fn id_of(s: &str) -> BlockId {
+    BlockId::parse(s).unwrap()
+}
+
+/// A plan version with the chain links, bound proposal and seal given.
+fn plan(
+    stable: Option<u8>,
+    prev: Option<u8>,
+    proposal: Option<u8>,
+    seal: Option<PlanSeal>,
+) -> Plan {
+    Plan {
+        stable: stable.map(h),
+        prev: prev.map(h),
+        view: "work".into(),
+        proposal: proposal.map(h),
+        answers: vec![PlanAnswer {
+            item: h(120),
+            act: PlanAct::Defer,
+            reason: Some("later".into()),
+            subject: Some(h(121)),
+            cause: h(122),
+            by: Provenance {
+                actor: "agent:w".into(),
+                run: None,
+                role: Role::Writer,
+                at_ms: 5,
+            },
+        }],
+        heads: vec![PlanHead {
+            repo: "app".into(),
+            head: Some("c".repeat(40)),
+        }],
+        provenance: Provenance {
+            actor: "agent:w".into(),
+            run: None,
+            role: Role::Writer,
+            at_ms: 5,
+        },
+        seal,
+    }
+}
+
+/// The PLAN samples: a first version, a bound later version, and a seal whose items name an
+/// accepting answer and none. No text marker: a plan's text is bounded by the decoder alone.
+fn plan_samples() -> Vec<Sample> {
+    let seal = PlanSeal {
+        landing: h(114),
+        version: h(113),
+        decisions: vec![id_of("D-00002")],
+        items: vec![sealed_item(123, None), sealed_item(124, Some(115))],
+    };
+    vec![
+        s("plan first", PLAN, &plan(None, None, None, None), vec![]),
+        s(
+            "plan bound",
+            PLAN,
+            &plan(Some(110), Some(111), Some(112), None),
+            vec![some(PLAN, 110), some(PLAN, 111), some(PROPOSAL, 112)],
+        ),
+        s(
+            "plan seal",
+            PLAN,
+            &plan(Some(110), Some(111), Some(113), Some(seal)),
+            vec![
+                some(PLAN, 110),
+                some(PLAN, 111),
+                some(PROPOSAL, 113),
+                some(LANDING, 114),
+                some(ANSWER, 115),
+            ],
+        ),
+    ]
 }
 
 fn sorted(mut v: Vec<ObjectRef>) -> Vec<ObjectRef> {
@@ -918,7 +1015,11 @@ fn ha1_refs_cover_every_assigned_object_kind() {
         );
     }
     let covered: BTreeSet<u8> = all.iter().map(|s| s.kind).collect();
-    let assigned: BTreeSet<u8> = (1..=7).chain([9, 10, 11, 13]).chain(15..=22).collect();
+    let assigned: BTreeSet<u8> = (1..=7)
+        .chain([9, 10, 11, 13])
+        .chain(15..=22)
+        .chain([24])
+        .collect();
     assert_eq!(covered, assigned);
     assert_eq!(
         PORTABLE_KINDS.iter().copied().collect::<BTreeSet<u8>>(),
@@ -1050,10 +1151,11 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
     };
     let answer_edges = vec![any(36), any(37)];
     let acts = every!(AnswerAct: RejectProposal, Later, Confirm, RejectDecision, AnswerQuestion,
-        Dismiss, Tag, ViewOwn, CloseStale, Propose);
+        Dismiss, Tag, ViewOwn, CloseStale, Propose, KeepSuspect, AcceptDeferrals, RefuseDeferrals,
+        RejectReaffirm);
     let roles = every!(Role: Reader, Writer, Reviewer, Approver);
     let evidence = every!(EvidenceKind: Elicited, Card, Text);
-    assert_eq!((acts.len(), roles.len(), evidence.len()), (10, 4, 3));
+    assert_eq!((acts.len(), roles.len(), evidence.len()), (14, 4, 3));
     for act in &acts {
         let a = answer(*act, Role::Approver, Some(EvidenceKind::Text));
         assert_eq!(
@@ -1529,4 +1631,63 @@ fn ha1_every_stored_text_field_is_bounded() {
         .map(String::from),
     );
     assert_eq!(seen, expected);
+}
+
+#[test]
+fn cp3_plan_refs_are_typed_and_identity_hashes_are_not_edges() {
+    // the complete edge set of a sealed version: its chain as PLAN, its bound proposal and the
+    // seal's landed version as PROPOSAL, the seal's landing as LANDING, each accepting answer as
+    // ANSWER, sorted and once each
+    let seal = PlanSeal {
+        landing: h(114),
+        version: h(113),
+        decisions: vec![id_of("D-00002"), id_of("D-00003")],
+        items: vec![
+            sealed_item(123, None),
+            sealed_item(124, Some(115)),
+            sealed_item(125, Some(116)),
+            sealed_item(126, Some(115)),
+        ],
+    };
+    let sealed = plan(Some(110), Some(111), Some(113), Some(seal));
+    assert_eq!(
+        refs_of(PLAN, &enc(&sealed)),
+        Ok(vec![
+            some(PROPOSAL, 113),
+            some(LANDING, 114),
+            some(ANSWER, 115),
+            some(ANSWER, 116),
+            some(PLAN, 110),
+            some(PLAN, 111),
+        ])
+    );
+    // the identities a version holds: item hashes, subject and cause content hashes, sealed
+    // item ids, decision and cause block ids, git heads; none is an edge
+    let identities: BTreeSet<Hash> = [120, 121, 122, 123, 124, 125, 126]
+        .into_iter()
+        .map(h)
+        .chain([Hash::of(b"c".repeat(40).as_slice())])
+        .collect();
+    for sample in plan_samples() {
+        for r in refs_of(sample.kind, &sample.bytes).unwrap() {
+            assert!(!identities.contains(&r.hash), "{}: {r:?}", sample.arm);
+            assert!(r.kind.is_some(), "{}: every plan edge is typed", sample.arm);
+        }
+    }
+    // a first version names nothing; the same link twice is one edge
+    assert_eq!(
+        refs_of(PLAN, &enc(&plan(None, None, None, None))),
+        Ok(vec![])
+    );
+    assert_eq!(
+        refs_of(PLAN, &enc(&plan(Some(110), Some(110), None, None))),
+        Ok(vec![some(PLAN, 110)])
+    );
+    // a version that is not its own canonical encoding, or holds a byte past it, is refused
+    let mut trailing = enc(&sealed);
+    trailing.push(0);
+    assert_eq!(refs_of(PLAN, &trailing), Err(RecordError::Decode));
+    // PLAN is a portable kind; kind 25 is not
+    assert!(PORTABLE_KINDS.contains(&PLAN));
+    assert_eq!(refs_of(25, &enc(&sealed)), Err(RecordError::Kind));
 }

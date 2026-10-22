@@ -218,7 +218,7 @@ fn brf1_a_briefing_lists_governs_dependents_will_go_stale_and_suspects() {
     assert!(
         b.suspects
             .iter()
-            .any(|x| x.block == s.b && x.target == s.a && x.reason == "changed"),
+            .any(|x| x.block == s.b && x.target.as_ref() == Some(&s.a) && x.reason == "changed"),
         "{:?}",
         b.suspects
     );

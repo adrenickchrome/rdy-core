@@ -5,6 +5,7 @@ use crate::merge::{Conflict, MergeChange, Merged, merge_indexed};
 use crate::store::{Frames, encode};
 use crate::view::{Owner, ViewHead, ViewOp, ViewOpKind};
 use crate::{Store, StoreReader};
+use rdy_model::plan::Plan;
 use rdy_model::signature::Signature;
 use rdy_model::{
     AltChoice, Answer, Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Provenance,
@@ -92,12 +93,15 @@ fn check_base(
 }
 
 /// Whether an op on `base` (an update to `new`, or a delete when `None`) is refused because
-/// `base` is a frozen decision: an update that changes only `store`'s tracking fields passes, and
-/// so does one that leaves the block as it is (cf1: the landed side of a conflict, taken).
+/// `base` is a frozen decision: an update that changes only `store`'s tracking fields passes, so
+/// does a re-affirmation (only `reaffirmed` and pin hashes, D-EJBPD), and so does one that leaves
+/// the block as it is (cf1: the landed side of a conflict, taken).
 fn frozen_for(store: &StoreReader, base: &Block, new: Option<&Block>) -> bool {
     decision::is_frozen(base)
         && !new.is_some_and(|n| {
-            n == base || decision::only_tracking_changed(base, n, store.tracking())
+            n == base
+                || decision::only_tracking_changed(base, n, store.tracking())
+                || decision::only_reaffirmation_changed(base, n)
         })
 }
 
@@ -738,6 +742,229 @@ impl Store {
         self.write_version_answered(&next, stable, a)
     }
 
+    /// Prepares the proposal version `req` names, writing nothing (D-4JMPH): a key change rdy
+    /// adds to the view first (its frames, view ops and head ref, as `commit_to_view_with`
+    /// writes them), then the version and its refs (`propose_changes` or `propose_next`), then
+    /// the answer that holds the person's relay (its `targets` the version). Every check of those
+    /// writers runs here. [`Store::bind_plan`] adds the version's bound plan;
+    /// [`Store::commit_propose`] writes it all in one batch.
+    pub fn prepare_propose(&self, req: ProposeRequest<'_>) -> Result<PreparedProposal, StoreError> {
+        let ProposeRequest {
+            view,
+            title,
+            summary,
+            by,
+            mut changes,
+            alternative,
+            prev,
+            rekey,
+            answer,
+        } = req;
+        let mut items: Frames = vec![];
+        let mut rekeyed = None;
+        if let Some((change, current)) = rekey {
+            let committer = change.provenance.clone();
+            let parts = self.commit_parts(view, vec![change], current, &[], None, &committer)?;
+            let (cid, pos) = parts.placed[0];
+            items.extend(parts.changes);
+            items.extend(parts.views);
+            changes.push(cid);
+            rekeyed = Some((cid, pos));
+        }
+        let (p, stable) = match prev {
+            Some(prev) => {
+                let p = self.next_of(&prev, changes, title, summary, by, alternative)?;
+                self.linked_next(&prev, p)?
+            }
+            None => {
+                let p = self.first_of(view, title, summary, by, changes, alternative)?;
+                let id = Hash::of(&encode(&p));
+                (p, id)
+            }
+        };
+        let (version, frames) = self.version_items(&p, stable)?;
+        items.extend(frames);
+        let answer = match answer {
+            None => None,
+            Some(a) => {
+                let a = Answer {
+                    targets: vec![version],
+                    ..a
+                };
+                let (aid, all) = self.answer_items(&a, items)?;
+                items = all;
+                Some(aid)
+            }
+        };
+        Ok(PreparedProposal {
+            items,
+            version,
+            stable,
+            proposal: p,
+            rekey: rekeyed,
+            answer,
+            plan: None,
+            fresh: None,
+        })
+    }
+
+    /// Prepares the proposal of a re-affirmation card's isolated landing (D-CQMA4), writing
+    /// nothing: the internal view's `Create` op, the members' change, its `Commit` op, then the
+    /// proposal's first version and its refs (`proposal/<id>`, `open/<view>`), as the existing
+    /// commit and proposal writers build them (`commit_parts`, `version_items`). The view's head
+    /// ref is left to the landing's close ([`Store::close_reaffirm_view`]), so the batch moves it
+    /// once. Refused, with nothing built: a view outside [`crate::REAFFIRM_VIEW_PREFIX`]
+    /// (`Refused`), a view that exists (`ViewExists`: an old internal view is never reused), a
+    /// canon that moved since the card was read (`Refused`), a change of another view or with an
+    /// op other than an update (`Refused`), and each check of the commit writer (a stale base
+    /// is `StaleBase`). [`Store::bind_plan`] adds its bound plan; only
+    /// [`Store::prepare_reaffirm_land`] takes it on.
+    pub fn prepare_reaffirm_propose(
+        &self,
+        req: ReaffirmProposeRequest<'_>,
+    ) -> Result<PreparedProposal, StoreError> {
+        let ReaffirmProposeRequest {
+            view,
+            canon_at,
+            change,
+            title,
+            summary,
+            by,
+        } = req;
+        if !view.starts_with(crate::REAFFIRM_VIEW_PREFIX) {
+            return Err(StoreError::Refused(format!(
+                "a re-affirmation view starts with {}",
+                crate::REAFFIRM_VIEW_PREFIX
+            )));
+        }
+        if self.view_head(view)?.is_some() {
+            return Err(StoreError::ViewExists(view.to_string()));
+        }
+        if self.canon_head()? != canon_at {
+            return Err(StoreError::Refused(
+                "canon moved since the re-affirmation card was read".into(),
+            ));
+        }
+        if change.view != view
+            || change.ops.is_empty()
+            || !change.ops.iter().all(|op| matches!(op, Op::Update { .. }))
+        {
+            return Err(StoreError::Refused(
+                "a re-affirmation change holds only updates of its own view".into(),
+            ));
+        }
+        let canon = self.canon_state()?;
+        let current = |id: &BlockId| canon.blocks.get(id).copied();
+        let parts = self.commit_parts(view, vec![change], &current, &[], None, &by)?;
+        let (cid, pos) = parts.placed[0];
+        let committed: Change = crate::store::decode(&parts.changes[pos].1)?;
+        // the view's Create op first, then the change, then its Commit op; the head ref is the
+        // close's to write
+        let mut ops = parts.views.into_iter();
+        let mut items: Frames = vec![];
+        let mut head = None;
+        if let Some(create) = ops.next() {
+            items.push(create);
+        }
+        items.extend(parts.changes);
+        for (kind, payload) in ops {
+            if kind == kinds::REF_UPDATE {
+                head = crate::holder::decode_ref(&payload)
+                    .and_then(|u| crate::view::decode_head(view, &u.value).ok());
+                continue;
+            }
+            items.push((kind, payload));
+        }
+        let head = head.ok_or_else(|| {
+            StoreError::Refused("the re-affirmation commit gave no view head".into())
+        })?;
+        let p = self.first_of(view, title, Some(summary), by, vec![cid], None)?;
+        let stable = Hash::of(&encode(&p));
+        let (version, frames) = self.version_items(&p, stable)?;
+        items.extend(frames);
+        Ok(PreparedProposal {
+            items,
+            version,
+            stable,
+            proposal: p,
+            rekey: None,
+            answer: None,
+            plan: None,
+            fresh: Some(FreshView {
+                head,
+                change: committed,
+            }),
+        })
+    }
+
+    /// Adds `plan`, the plan version bound to the prepared version, to `prepared`'s batch, after
+    /// its frames: the PLAN and `plan/<view>` naming it. The plan must name that version and
+    /// carry no seal (`plan <hash>: invalid proposal` or `invalid seal`), and keeps every plan
+    /// rule against the store and the batch (`Store::check_plan`). Writes nothing; a version
+    /// binds one plan. Returns the plan's id.
+    pub fn bind_plan(
+        &self,
+        prepared: &mut PreparedProposal,
+        plan: &Plan,
+    ) -> Result<Hash, StoreError> {
+        let id = plan.id();
+        if plan.seal.is_some() {
+            return Err(StoreError::Refused(crate::plan::damage(
+                &id,
+                crate::plan::INVALID_SEAL,
+            )));
+        }
+        if plan.proposal != Some(prepared.version) || prepared.plan.is_some() {
+            return Err(StoreError::Refused(crate::plan::damage(
+                &id,
+                crate::plan::INVALID_PROPOSAL,
+            )));
+        }
+        let (id, frames) = self.plan_frames(plan, &prepared.items)?;
+        prepared.items.extend(frames);
+        prepared.plan = Some(id);
+        Ok(id)
+    }
+
+    /// Writes the proposal `prepared` holds in one batch (one write, so one marker): its key
+    /// change, the version, the relay's answer and the bound plan. A failed write writes nothing.
+    /// Returns what it wrote.
+    pub fn commit_propose(&mut self, prepared: PreparedProposal) -> Result<Proposed, StoreError> {
+        let PreparedProposal {
+            items,
+            version,
+            stable,
+            rekey,
+            answer,
+            plan,
+            fresh,
+            ..
+        } = prepared;
+        // a re-affirmation card's proposal is written only with its landing
+        if fresh.is_some() {
+            return Err(StoreError::Refused(
+                "a re-affirmation proposal is written only with its landing".into(),
+            ));
+        }
+        crate::redaction::refuse_redaction_kinds(&items)?;
+        let written = self.write_guarded(items)?;
+        if let Some((cid, pos)) = rekey
+            && written[pos] != cid
+        {
+            return Err(StoreError::Decode(format!(
+                "change id mismatch: view names {cid}, written {}",
+                written[pos]
+            )));
+        }
+        Ok(Proposed {
+            version,
+            stable,
+            rekey: rekey.map(|(c, _)| c),
+            answer,
+            plan,
+        })
+    }
+
     /// A new proposal's first version, as `propose_changes` builds it.
     fn first_of(
         &self,
@@ -961,6 +1188,110 @@ impl PreparedTag {
     pub fn answer(&self) -> Option<(Hash, &Answer)> {
         self.answer.as_ref().map(|(h, a)| (*h, a))
     }
+}
+
+/// The version of a block id in a view as the view reads now (`Store::commit_to_view_with`).
+pub type ViewReads<'a> = &'a dyn Fn(&BlockId) -> Option<Hash>;
+
+/// A proposal version to prepare ([`Store::prepare_propose`]).
+pub struct ProposeRequest<'a> {
+    pub view: &'a str,
+    pub title: &'a str,
+    /// A non-blank summary replaces the previous version's; a blank or `None` one keeps it.
+    pub summary: Option<&'a str>,
+    pub by: Provenance,
+    /// The proposed changes, which the caller checks (a closed subset of the view's).
+    pub changes: Vec<Hash>,
+    pub alternative: Option<AltChoice>,
+    /// The latest version of the view's open proposal, which this version follows; `None` for
+    /// a new proposal.
+    pub prev: Option<Hash>,
+    /// A change rdy adds to the view before the version (the key change, K1), with the view's
+    /// present state as `commit_to_view_with` reads it; it joins the version's changes.
+    pub rekey: Option<(Change, ViewReads<'a>)>,
+    /// The answer that holds the person's relay (O14); its `targets` become the version.
+    pub answer: Option<Answer>,
+}
+
+/// The proposal of a re-affirmation card's isolated landing (D-CQMA4, D-EJBPD), to prepare with
+/// [`Store::prepare_reaffirm_propose`]: the card's fresh internal view, the canon head the card
+/// was read on, the one change of the members' metadata-only updates, the card's title and
+/// summary, and the person who answered the card. Only the engine's re-affirmation card writer
+/// builds it; no public create, write or propose path reaches it.
+pub struct ReaffirmProposeRequest<'a> {
+    /// The internal view: [`crate::REAFFIRM_VIEW_PREFIX`] and the card hash's first 12 digits.
+    pub view: &'a str,
+    /// The canon head the card was read on; canon must still stand there.
+    pub canon_at: Option<Hash>,
+    /// The members' updates, each on its block's version in canon.
+    pub change: Change,
+    pub title: &'a str,
+    pub summary: &'a str,
+    pub by: Provenance,
+}
+
+/// The fresh internal view of a prepared re-affirmation proposal: its head after its `Create`
+/// and `Commit` ops, and its one change as committed (its deps set).
+#[derive(Clone, Debug)]
+pub(crate) struct FreshView {
+    pub(crate) head: ViewHead,
+    pub(crate) change: Change,
+}
+
+/// A proposal built by [`Store::prepare_propose`] and not yet written. Its frames are private:
+/// only [`Store::bind_plan`] adds to them and only [`Store::commit_propose`] writes them. One
+/// built by [`Store::prepare_reaffirm_propose`] is written only as the start of its landing's
+/// batch ([`Store::prepare_reaffirm_land`]).
+#[derive(Debug)]
+pub struct PreparedProposal {
+    pub(crate) items: Frames,
+    version: Hash,
+    stable: Hash,
+    pub(crate) proposal: Proposal,
+    /// The key change's id and the position of its CHANGE frame.
+    rekey: Option<(Hash, usize)>,
+    answer: Option<Hash>,
+    pub(crate) plan: Option<Hash>,
+    /// The fresh internal view of a re-affirmation card's proposal; none for every other.
+    pub(crate) fresh: Option<FreshView>,
+}
+
+impl PreparedProposal {
+    /// The version's hash.
+    pub fn version(&self) -> Hash {
+        self.version
+    }
+
+    /// The proposal's stable id.
+    pub fn stable(&self) -> Hash {
+        self.stable
+    }
+
+    /// The version the commit writes.
+    pub fn proposal(&self) -> &Proposal {
+        &self.proposal
+    }
+
+    /// The id of the key change rdy adds, if any.
+    pub fn rekey(&self) -> Option<Hash> {
+        self.rekey.map(|(c, _)| c)
+    }
+
+    /// The change of a re-affirmation card's proposal as committed to its internal view (its
+    /// deps set); none for every other proposal.
+    pub fn fresh_change(&self) -> Option<&Change> {
+        self.fresh.as_ref().map(|f| &f.change)
+    }
+}
+
+/// What [`Store::commit_propose`] wrote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Proposed {
+    pub version: Hash,
+    pub stable: Hash,
+    pub rekey: Option<Hash>,
+    pub answer: Option<Hash>,
+    pub plan: Option<Hash>,
 }
 
 /// A proposal summary as stored: trimmed, and `None` when blank.

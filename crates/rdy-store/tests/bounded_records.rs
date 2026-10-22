@@ -688,3 +688,161 @@ fn ha1_field_nesting_bound_fits_the_deepest_embedding_record() {
         );
     }
 }
+
+/// The plan prefix of a version of view `work` with no chain and no proposal, up to its answers'
+/// length.
+fn plan_prefix() -> Vec<u8> {
+    let mut out = vec![0u8, 0u8];
+    out.extend(varint(4));
+    out.extend(b"work");
+    out.push(0);
+    out
+}
+
+fn plan_answer(n: u32) -> rdy_model::plan::PlanAnswer {
+    let mut item = [0u8; 32];
+    item[..4].copy_from_slice(&n.to_be_bytes());
+    rdy_model::plan::PlanAnswer {
+        item: Hash(item),
+        act: rdy_model::plan::PlanAct::Done,
+        reason: None,
+        subject: None,
+        cause: Hash([3; 32]),
+        by: Provenance {
+            actor: "a".into(),
+            run: None,
+            role: Role::Writer,
+            at_ms: 0,
+        },
+    }
+}
+
+fn plan_of(answers: Vec<rdy_model::plan::PlanAnswer>) -> rdy_model::plan::Plan {
+    rdy_model::plan::Plan {
+        stable: None,
+        prev: None,
+        view: "work".into(),
+        proposal: None,
+        answers,
+        heads: vec![],
+        provenance: Provenance {
+            actor: "a".into(),
+            run: None,
+            role: Role::Writer,
+            at_ms: 0,
+        },
+        seal: None,
+    }
+}
+
+#[test]
+fn cp3_hostile_plan_hints_do_not_allocate_from_the_hint() {
+    use rdy_store::kinds::PLAN;
+    use rdy_store::plan::decode_plan;
+    let decode = |b: &[u8]| unit(decode_plan(b));
+    // truncated huge sequences: a hint over the bound is refused before any visitor sees it, and
+    // one within it over the bytes left never preallocates for it
+    for (what, hint) in [("answers", 1u64 << 40), ("answers", u64::from(u32::MAX))] {
+        let mut b = plan_prefix();
+        b.extend(varint(hint));
+        let (r, bytes) = measured(|| decode(&b));
+        assert_eq!(r, limit(COLLECTION_ELEMENTS, 100_000), "{what}");
+        assert!(
+            bytes < 4096,
+            "{what}: a refused hint allocated {bytes} bytes"
+        );
+        let (r, bytes) = measured(|| unit(refs_of(PLAN, &b)));
+        assert_eq!(
+            r,
+            limit(COLLECTION_ELEMENTS, 100_000),
+            "{what} through refs_of"
+        );
+        assert!(bytes < 4096, "{what}: refs_of allocated {bytes} bytes");
+    }
+    let mut short = plan_prefix();
+    short.extend(varint(100_000));
+    short.extend([7u8; 40]);
+    let (r, bytes) = measured(|| decode(&short));
+    assert_eq!(r, Err(RecordError::Decode));
+    assert!(bytes < 64 * 1024, "a short hint allocated {bytes} bytes");
+    // heads after no answers, and a seal's items, take the same bound
+    let mut heads = plan_prefix();
+    heads.push(0);
+    heads.extend(varint(1 << 35));
+    assert_eq!(decode(&heads), limit(COLLECTION_ELEMENTS, 100_000));
+    // deep values: within the element bound, more decoded values than a record holds
+    let many = plan_of((0..100_000).map(plan_answer).collect());
+    let bytes = postcard::to_allocvec(&many).unwrap();
+    assert_eq!(decode(&bytes), limit(DECODED_VALUES, 1_000_000));
+    let fits = plan_of((0..1000).map(plan_answer).collect());
+    assert!(decode_plan(&postcard::to_allocvec(&fits).unwrap()).is_ok());
+    // overlong text: the view, with or without its bytes behind it
+    let mut text = vec![0u8, 0u8];
+    text.extend(varint(1_048_577));
+    let (r, bytes) = measured(|| decode(&text));
+    assert_eq!(r, limit(TEXT_BYTES, 1_048_576));
+    assert!(bytes < 4096, "a refused text allocated {bytes} bytes");
+    text.extend(vec![b'v'; 1_048_577]);
+    assert_eq!(decode(&text), limit(TEXT_BYTES, 1_048_576));
+    // invalid enum arms: a plan act, a plan kind and an outcome past their last variants
+    let one = plan_of(vec![plan_answer(1)]);
+    let good = postcard::to_allocvec(&one).unwrap();
+    let act = plan_prefix().len() + 1 + 32;
+    assert_eq!(good[act], 2, "the act byte of Done");
+    let mut bad = good.clone();
+    bad[act] = 3;
+    assert_eq!(decode(&bad), Err(RecordError::Decode));
+    let item = rdy_model::plan::SealedItem {
+        id: Hash([9; 32]),
+        kind: rdy_model::plan::PlanKind::UpdateImplementation,
+        subject: "s".into(),
+        cause: rdy_model::BlockId::parse("D-00002").unwrap(),
+        edge: "e".into(),
+        outcome: rdy_model::plan::PlanOutcome::Open,
+        answer: None,
+    };
+    let sealed = rdy_model::plan::Plan {
+        proposal: Some(Hash([5; 32])),
+        seal: Some(rdy_model::plan::PlanSeal {
+            landing: Hash([6; 32]),
+            version: Hash([5; 32]),
+            decisions: vec![],
+            items: vec![item.clone()],
+        }),
+        ..plan_of(vec![])
+    };
+    let good = postcard::to_allocvec(&sealed).unwrap();
+    assert!(decode_plan(&good).is_ok());
+    let sub = postcard::to_allocvec(&item).unwrap();
+    let at = good
+        .windows(sub.len())
+        .position(|w| w == &sub[..])
+        .expect("the item's bytes");
+    let kind = at + 32;
+    assert_eq!(good[kind], 4, "the kind byte of update_implementation");
+    let outcome = at + sub.len() - 2;
+    assert_eq!(good[outcome], 9, "the outcome byte of open");
+    for (i, v) in [(kind, 5u8), (outcome, 10u8)] {
+        let mut bad = good.clone();
+        bad[i] = v;
+        assert_eq!(decode(&bad), Err(RecordError::Decode), "byte {i} = {v}");
+    }
+    // trailing bytes, and a varint that is not its canonical form
+    let mut trailing = good.clone();
+    trailing.push(0);
+    assert_eq!(decode(&trailing), Err(RecordError::Decode));
+    let mut wide = good.clone();
+    let len_at = 2;
+    assert_eq!(wide[len_at], 4, "the view length");
+    wide[len_at] = 0x84;
+    wide.insert(len_at + 1, 0);
+    assert_eq!(decode(&wide), Err(RecordError::Decode));
+    // through the store: a hostile PLAN never reaches the log
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = rdy_store::Store::create(&dir.path().join("s")).unwrap();
+    let end = s.log_end();
+    for b in [&short, &bad, &trailing] {
+        assert!(s.write_guarded_for_tests(vec![(PLAN, b.to_vec())]).is_err());
+        assert_eq!(s.log_end(), end);
+    }
+}

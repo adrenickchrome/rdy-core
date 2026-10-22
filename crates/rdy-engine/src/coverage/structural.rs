@@ -301,10 +301,16 @@ pub(crate) fn entry_of(cx: &EntryCx<'_>, id: &BlockId) -> Option<(BlockEntry, Ve
             fix_unlinked_doc(&path),
         ));
     }
+    // a citation an accepted decision keeps after its target's deletion is not dangling: the one
+    // predicate write, proposal and landing ask (p-QMGB4; task-5 R1, final-round1)
     let dangling: BTreeSet<&BlockId> =
         cx.g.outgoing(id)
             .iter()
-            .filter(|x| x.kind != EdgeKind::Contains && cx.m.get(&x.to).is_none())
+            .filter(|x| {
+                x.kind != EdgeKind::Contains
+                    && cx.m.get(&x.to).is_none()
+                    && !rdy_graph::keeps_deleted_citation(b, &x.to)
+            })
             .map(|x| &x.to)
             .collect();
     for target in dangling {

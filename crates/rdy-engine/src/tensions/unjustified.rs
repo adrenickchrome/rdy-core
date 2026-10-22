@@ -30,12 +30,49 @@ use super::index::Write;
 use super::{DetectCx, DetectScope, Detector, Found, TensionKind};
 use crate::RdyError;
 use rdy_model::decision::{self, DecisionStatus};
-use rdy_model::{BlockId, Hash};
+use rdy_model::engine_fields;
+use rdy_model::{Block, BlockId, FieldValue, Hash};
+use rdy_schema::STORE_ONLY_FIELDS;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// This kind's detector.
 pub struct UnjustifiedChange;
+
+/// task-5 R2 (p-0SH30, p-8FKZM): whether `new` differs from `old` only in the store-only fields
+/// ([`STORE_ONLY_FIELDS`]) and in the pins its `reaffirmed` record names: the same id, type,
+/// parent, order, body, links, pinned targets and every other field. A re-affirmation refreshes
+/// the pin of each target it records beside the record (O18), so such a version changes no
+/// content. A bare repin, whose moved pin no record names, is not one. A redacted version's
+/// removed fields are unknown, so it is never one.
+fn store_only_change(old: &Block, new: &Block) -> bool {
+    if old.is_redacted() || new.is_redacted() {
+        return false;
+    }
+    fn rest(b: &Block) -> impl Iterator<Item = (&String, &FieldValue)> {
+        b.fields
+            .iter()
+            .filter(|(k, _)| !STORE_ONLY_FIELDS.contains(&k.as_str()))
+    }
+    let recorded: BTreeSet<BlockId> = new
+        .fields
+        .get(engine_fields::REAFFIRMED)
+        .and_then(|v| engine_fields::decode_reaffirmed(v).ok())
+        .map(|m| m.into_keys().collect())
+        .unwrap_or_default();
+    old.id == new.id
+        && old.block_type == new.block_type
+        && old.parent == new.parent
+        && old.order == new.order
+        && old.body == new.body
+        && old.links == new.links
+        && old.pins.keys().eq(new.pins.keys())
+        && old
+            .pins
+            .iter()
+            .all(|(t, h)| new.pins.get(t) == Some(h) || recorded.contains(t))
+        && rest(old).eq(rest(new))
+}
 
 impl UnjustifiedChange {
     /// Whether write `w` writes a normative block, or deletes one (the type of its base block).
@@ -95,10 +132,17 @@ impl UnjustifiedChange {
                 })
             };
             // FW-JU1 Q3: a live write that gives canon's version back (the view wrote canon's
-            // text again) is no change of the block
+            // text again) is no change of the block, and neither is one that differs from it
+            // only in store-only fields (task-5 R2)
             let live: Vec<&Arc<Write>> = in_v
                 .iter()
-                .filter(|w| !overwritten(w) && w.version != canon_version)
+                .filter(|w| {
+                    let store_only = match (canon.get(b), &w.new) {
+                        (Some(old), Some(new)) => store_only_change(old, new),
+                        _ => false,
+                    };
+                    !overwritten(w) && w.version != canon_version && !store_only
+                })
                 .copied()
                 .collect();
             if live.is_empty() {

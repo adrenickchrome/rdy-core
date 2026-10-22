@@ -7,9 +7,11 @@ use crate::write::{LinkInput, OpInput, TRACKING_NEEDS_REASON, WriteRequest, Writ
 use crate::{Rdy, ReadState, Scope, Session};
 use rdy_model::{
     ActorRun, Block, BlockId, Change, ChangeLinks, EditorialClass, FieldValue, Hash, Justification,
-    Link, Op, Provenance, Role, tree,
+    Link, Op, Provenance, Role, engine_fields, tree,
 };
-use rdy_schema::{Pack, has_errors, skeleton_gaps, validate_block, validate_prefix};
+use rdy_schema::{
+    Issue, Pack, Severity, has_errors, skeleton_gaps, validate_block, validate_prefix,
+};
 use rdy_store::segment::Location;
 use serde::{Deserialize, Serialize};
 use std::cell::OnceCell;
@@ -548,6 +550,60 @@ fn import_skeleton_gaps(pack: &rdy_schema::Pack, blocks: &[Block]) -> Vec<rdy_sc
         .collect()
 }
 
+/// p-8YP1G: a file or an edit buffer never sets the engine metadata fields; rdy sets them, and
+/// `fields` holds what the input set. One `E_FIELD_UNKNOWN` issue for each such field of each
+/// block, checked on the decoded input before any field is dropped.
+fn engine_field_issues<'a>(blocks: impl IntoIterator<Item = &'a Block>) -> Vec<Issue> {
+    let mut out = vec![];
+    for b in blocks {
+        for f in engine_fields::ENGINE_FIELDS {
+            if b.fields.contains_key(f) {
+                out.push(engine_field_issue(&b.id, f));
+            }
+        }
+    }
+    out
+}
+
+fn engine_field_issue(id: &BlockId, field: &str) -> Issue {
+    Issue {
+        severity: Severity::Error,
+        code: "E_FIELD_UNKNOWN",
+        block: Some(id.clone()),
+        message: engine_field_message(id, field),
+        fix: engine_field_fix(field),
+    }
+}
+
+pub(crate) fn engine_field_message(id: &BlockId, field: &str) -> String {
+    format!("{id} sets \"{field}\", and rdy sets it")
+}
+
+pub(crate) fn engine_field_fix(field: &str) -> String {
+    format!("remove {field}; use reaffirm or repin with code: true")
+}
+
+/// The engine metadata fields a decoded entry names, by key and whatever the value is: the check
+/// on raw input, before any value is converted (a float or a mapping with a non-string key would
+/// otherwise fail the conversion first and hide the real fault).
+pub(crate) fn supplied_engine_fields(y: &BlockYaml) -> Vec<&'static str> {
+    engine_fields::ENGINE_FIELDS
+        .into_iter()
+        .filter(|f| y.fields.contains_key(*f))
+        .collect()
+}
+
+/// The refusal for a non-empty [`engine_field_issues`] list.
+fn engine_field_refusal(what: &str, issues: Vec<Issue>) -> RdyError {
+    let mut e = RdyError::new(
+        E_VALIDATION,
+        format!("the {what} sets fields that only rdy sets"),
+        "remove the listed fields",
+    );
+    e.issues = issues;
+    e
+}
+
 fn io_err(e: std::io::Error) -> RdyError {
     RdyError::new(E_IO, e.to_string(), "check the path and permissions")
 }
@@ -558,9 +614,12 @@ pub(crate) fn to_yaml_struct(b: &Block) -> BlockYaml {
         block_type: b.block_type.clone(),
         parent: b.parent.clone(),
         order: b.order.clone(),
+        // p-8YP1G: the engine metadata fields live only in the store, so no export, buffer or
+        // read shows them; `key_auto` is shown, as it always was
         fields: b
             .fields
             .iter()
+            .filter(|(k, _)| !engine_fields::is_engine_field(k))
             .map(|(k, v)| (k.clone(), v.to_yaml()))
             .collect(),
         body: b.body.clone(),
@@ -694,7 +753,7 @@ pub fn block_from_yaml(text: &str) -> Result<Block, RdyError> {
 
 /// A YAML syntax error is `E_BAD_INPUT`; a key the block does not take is `E_FILE_FORMAT` with a
 /// did-you-mean, as import and commit report it (hd8, ruling Q14).
-fn parse_yaml(text: &str) -> Result<(Block, Vec<KeyedLink>), RdyError> {
+fn parse_yaml_struct(text: &str) -> Result<BlockYaml, RdyError> {
     let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(text)
         .map_err(|e| RdyError::new(E_BAD_INPUT, e.to_string(), "fix the YAML and retry"))?;
     if let Some(f) = tree_io::key_faults(&value).into_iter().next() {
@@ -712,9 +771,12 @@ fn parse_yaml(text: &str) -> Result<(Block, Vec<KeyedLink>), RdyError> {
             f.fix(),
         ));
     }
-    let y: BlockYaml = serde_yaml_ng::from_str(text)
-        .map_err(|e| RdyError::new(E_BAD_INPUT, e.to_string(), "fix the YAML and retry"))?;
-    from_yaml_struct(y)
+    serde_yaml_ng::from_str(text)
+        .map_err(|e| RdyError::new(E_BAD_INPUT, e.to_string(), "fix the YAML and retry"))
+}
+
+fn parse_yaml(text: &str) -> Result<(Block, Vec<KeyedLink>), RdyError> {
+    from_yaml_struct(parse_yaml_struct(text)?)
 }
 
 /// insc1: an export (or a rendered site) is a state someone can read back, so never `inflight`.
@@ -979,6 +1041,26 @@ impl Rdy {
         let (mut blocks, keyed): (Vec<Block>, Vec<Vec<KeyedLink>>) = {
             let ignore = crate::wc::ignore::Ignore::load(dir)?;
             let (loaded, diags) = tree_io::read_tree_with(&dir.join("docs"), "docs", Some(&ignore));
+            // p-8YP1G: a tree that sets engine metadata is refused before anything is stored or
+            // changed, on the input as decoded (the reader names it before converting a value)
+            let supplied: Vec<Issue> = diags
+                .iter()
+                .filter(|d| d.code == "E_FIELD_UNKNOWN")
+                .map(|d| Issue {
+                    severity: Severity::Error,
+                    code: "E_FIELD_UNKNOWN",
+                    block: d
+                        .message
+                        .split(' ')
+                        .next()
+                        .and_then(|t| BlockId::parse(t).ok()),
+                    message: d.message.clone(),
+                    fix: d.fix.clone(),
+                })
+                .collect();
+            if !supplied.is_empty() {
+                return Err(engine_field_refusal("import", supplied));
+            }
             if let Some(d) = diags
                 .iter()
                 .find(|d| d.severity == rdy_schema::Severity::Error)
@@ -1320,6 +1402,7 @@ impl Rdy {
             names: BTreeMap::new(),
             keys,
             inherited: BTreeMap::new(),
+            reaffirmed: vec![],
             warnings,
         })
     }
@@ -1349,7 +1432,16 @@ impl Rdy {
         brief: Option<String>,
         reason: Option<&str>,
     ) -> Result<WriteResult, RdyError> {
-        let (mut edited, keyed) = parse_yaml(yaml)?;
+        let y = parse_yaml_struct(yaml)?;
+        // p-8YP1G: on the decoded buffer, before any value is converted
+        let supplied: Vec<Issue> = supplied_engine_fields(&y)
+            .into_iter()
+            .map(|f| engine_field_issue(&y.id, f))
+            .collect();
+        if !supplied.is_empty() {
+            return Err(engine_field_refusal("edit", supplied));
+        }
+        let (mut edited, keyed) = from_yaml_struct(y)?;
         if !keyed.is_empty() {
             let m = self.read().materialized(&Scope::View(view.to_string()))?;
             let keys = Keys::of(m.iter());
@@ -1395,7 +1487,7 @@ impl Rdy {
         &mut self,
         s: &Session,
         view: &str,
-        edited: Block,
+        mut edited: Block,
         base: Option<EditBase<'_>>,
         brief: Option<String>,
         reason: Option<&str>,
@@ -1459,6 +1551,21 @@ impl Rdy {
                 Err(_) => cur,
             }
         };
+        // p-8YP1G: the buffer an editor reads leaves out the engine metadata, and leaving it out
+        // is no request to unset it: the edit keeps what the version it was taken against held
+        for f in engine_fields::ENGINE_FIELDS {
+            if let (None, Some(v)) = (edited.fields.get(f), cur.fields.get(f)) {
+                edited.fields.insert(f.to_string(), v.clone());
+            }
+        }
+        let forged = engine_field_issues(std::iter::once(&edited).filter(|e| {
+            engine_fields::ENGINE_FIELDS
+                .iter()
+                .any(|f| e.fields.get(*f) != cur.fields.get(*f))
+        }));
+        if !forged.is_empty() {
+            return Err(engine_field_refusal("edit", forged));
+        }
         if current && cur == edited {
             return Err(RdyError::new(
                 E_BAD_INPUT,

@@ -817,6 +817,7 @@ fn fixed_item() -> Item {
         card_hash: String::new(),
         removal: Some(vec![fixed_card()]),
         removal_reports: BTreeMap::from([(Hash([2; 32]), vec![])]),
+        plan_binding: None,
     }
 }
 

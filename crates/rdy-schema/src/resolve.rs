@@ -473,6 +473,14 @@ fn check(pack: &Pack) -> Result<(), SchemaError> {
                 "type {name}: field reflects is reserved for the engine on content types"
             )));
         }
+        if let Some(f) = rdy_model::engine_fields::ENGINE_FIELDS
+            .iter()
+            .find(|f| t.fields.contains_key(**f))
+        {
+            return Err(SchemaError::Invalid(format!(
+                "type {name}: field {f} is reserved for the engine"
+            )));
+        }
         check_tracking(name, t)?;
         for (fname, fd) in &t.fields {
             if fd.kind == FieldKind::Enum && fd.values.is_empty() {
@@ -532,9 +540,15 @@ fn check_coverage(pack: &Pack) -> Result<(), SchemaError> {
 }
 
 /// trk1: each tracking field of `t` is a field of the type, and neither part of a decision's
-/// ruling nor derived or reserved by the engine.
+/// ruling nor derived or reserved by the engine. An engine metadata field (`reaffirmed`,
+/// `reflects_at`) gets the same diagnostic as a pack field of that name.
 fn check_tracking(name: &str, t: &BlockTypeDef) -> Result<(), SchemaError> {
     for f in &t.tracking {
+        if rdy_model::engine_fields::is_engine_field(f) {
+            return Err(SchemaError::Invalid(format!(
+                "type {name}: field {f} is reserved for the engine"
+            )));
+        }
         let why = if name == d::DECISION && d::RULING_FIELDS.contains(&f.as_str()) {
             "is part of the ruling"
         } else if rdy_model::block::DERIVED_FIELDS.contains(&f.as_str())

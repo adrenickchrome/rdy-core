@@ -1361,7 +1361,13 @@ fn sig8_always_failure_and_seal_failure_leave_no_partial_act() {
     assert!(p.approve_relayed(&agent, &id).is_err());
     assert_eq!(agent.signs(), 2, "it failed at the seal, after signing");
     let Proj { dir, e, .. } = p;
-    drop(e);
+    // the failed seal poisoned the store: its close says so, and the reopen catches up
+    let closes = rdy_store::unclean_closes_for_tests(dir.path(), || drop(e));
+    assert_eq!(closes.len(), 1, "{closes:?}");
+    assert!(
+        closes[0].contains("an earlier failed write could not be rolled back"),
+        "{closes:?}"
+    );
     let r = Rdy::open(dir.path()).expect("reopen");
     assert_eq!(r.read().canon_head(), canon, "no landing");
     let mut n = 0;

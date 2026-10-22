@@ -339,6 +339,23 @@ fn show_text(v: &Value) -> String {
         out.push('\n');
         out.push_str(&view_cmd::conflict_text(v));
     }
+    // a block's suspects: structural rows, their accepted deferrals, and code rows
+    if let Some(rows) = v["suspects"].as_array().filter(|a| !a.is_empty()) {
+        out.push_str("\nsuspects:");
+        for row in rows {
+            let lines = suspect_lines(row, |i| {
+                format!(
+                    "{} -> {}  {}",
+                    text(&i["block"]),
+                    text(&i["target"]),
+                    text(&i["reason"])
+                )
+            });
+            for line in lines {
+                out.push_str(&format!("\n  {line}"));
+            }
+        }
+    }
     // cgr1: in the inflight scope, the in-flight changes that write the block
     if let Some(rows) = v["inflight"].as_array().filter(|a| !a.is_empty()) {
         out.push_str("\nin flight:");
@@ -472,16 +489,46 @@ fn suspects_text(v: &Value) -> String {
     }
     items
         .iter()
-        .map(|i| {
-            format!(
-                "{} -> {}  {}",
-                text(&i["block"]),
-                text(&i["target"]),
-                text(&i["reason"])
-            )
+        .flat_map(|i| {
+            suspect_lines(i, |i| {
+                format!(
+                    "{} -> {}  {}",
+                    text(&i["block"]),
+                    text(&i["target"]),
+                    text(&i["reason"])
+                )
+            })
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The lines of one suspect row (`rdy_suspects`, a context's `suspects`, a briefing's). A
+/// structural row prints the line `head` gives, then `  deferred by <actor>: <reason>` when a
+/// person accepted its deferral (the actor is who deferred it, not who accepted it). A code row
+/// (null target) prints `<block>: code_changed`, then `  <repo>:<path>` for each path.
+pub(crate) fn suspect_lines(row: &Value, head: impl FnOnce(&Value) -> String) -> Vec<String> {
+    if row["target"].is_null() {
+        let mut lines = vec![format!("{}: {}", text(&row["block"]), text(&row["reason"]))];
+        lines.extend(
+            row["paths"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(|p| format!("  {p}")),
+        );
+        return lines;
+    }
+    let mut lines = vec![head(row)];
+    if row["deferred"].is_object() {
+        lines.push(format!(
+            "  deferred by {}: {}",
+            text(&row["deferred"]["by"]["actor"]),
+            text(&row["deferred"]["reason"])
+        ));
+    }
+    lines
 }
 
 fn tags_text(v: &Value) -> String {
@@ -518,7 +565,7 @@ fn tags_text(v: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{log_text, show_text, status_text, tags_text};
+    use super::{log_text, show_text, status_text, suspects_text, tags_text};
     use serde_json::json;
 
     /// rdx13 (Task 6): a source read of a stub names the request that removed its content, as
@@ -550,6 +597,39 @@ mod tests {
                 "ab".repeat(32),
                 "cd".repeat(32)
             )
+        );
+    }
+
+    /// cp13: the suspects text keeps the structural line, follows it with the deferring author's
+    /// line, and prints a code row with one line per path.
+    #[test]
+    fn cp13_suspects_text_shows_deferrals_and_code_rows() {
+        let v = json!({"items": [
+            {"block": "c-B", "target": "c-A", "reason": "changed",
+             "deferred": {"by": {"actor": "agent:w", "run": null, "role": "Writer", "at_ms": 1},
+                          "reason": "the release owns it", "accepted_by": "human:alice"}},
+            {"block": "c-B", "target": "c-X", "reason": "changed"},
+            {"block": "c-B", "target": null, "reason": "code_changed",
+             "paths": ["app:src/a.rs", "app:src/c.rs"]},
+            {"block": "c-C", "target": null, "reason": "code_changed", "paths": []}
+        ]});
+        assert_eq!(
+            suspects_text(&v),
+            "c-B -> c-A  changed\n  deferred by agent:w: the release owns it\nc-B -> c-X  changed\nc-B: code_changed\n  app:src/a.rs\n  app:src/c.rs\nc-C: code_changed"
+        );
+        assert_eq!(suspects_text(&json!({"items": []})), "no suspects");
+        // the block text prints the same rows, indented under a heading
+        let shown = json!({"id": "c-B", "block_type": "claim", "version": "ab".repeat(32),
+            "fields": {}, "body": "B.", "suspects": [
+            {"block": "c-B", "target": "c-A", "reason": "changed",
+             "deferred": {"by": {"actor": "agent:w"}, "reason": "later", "accepted_by": "h"}},
+            {"block": "c-B", "target": null, "reason": "code_changed", "paths": ["app:src/a.rs"]}]});
+        assert!(
+            show_text(&shown).ends_with(
+                "\nsuspects:\n  c-B -> c-A  changed\n    deferred by agent:w: later\n  c-B: code_changed\n    app:src/a.rs"
+            ),
+            "{}",
+            show_text(&shown)
         );
     }
 

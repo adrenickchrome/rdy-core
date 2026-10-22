@@ -111,15 +111,17 @@ fn di5_a_ready_proposal_is_one_batch_card() {
     assert_eq!((i.batch.as_deref(), i.exception), (None, None));
     assert!(!i.blocking);
     assert_eq!(i.raised_by, "agent:batch");
-    let names: Vec<&str> = i.facts.iter().map(|f| f.name).collect();
+    let names: Vec<&str> = i.facts.iter().map(|f| f.name.as_ref()).collect();
     assert_eq!(
         names,
         vec![
             "Changes",
             "Decisions",
             "Supersedes",
+            "Re-affirms",
             "Reversibility",
             "Consequences",
+            "Change plan",
             "Tensions",
             "Coverage",
             "Confidence",

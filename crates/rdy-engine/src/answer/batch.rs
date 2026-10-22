@@ -7,6 +7,9 @@
 //! | any       | `later`   | `ANSWER` `later` under `pending/`; needs a relay (F4)   |
 //! | `confirm` | `confirm` | `ANSWER` `confirm`                                      |
 //! | `confirm` | `reject`  | `ANSWER` `reject_decision`: the batch is not ready (F1) |
+//! | `confirm` (`reaffirm_one_way`) | `reject` | `ANSWER` `reject_reaffirm`: not ready |
+//! | `defer`   | `o1`      | `ANSWER` `accept_deferrals`, with the card's full hash  |
+//! | `defer`   | `o2`      | `ANSWER` `refuse_deferrals`: the batch is not ready     |
 //!
 //! Any other pair is refused with `E_BAD_INPUT`. An `ANSWER` is written alone in one batch with
 //! `Store::put_answer`, and its publish is `Delta::Seq` (O14). Canon never changes but by a
@@ -30,7 +33,7 @@
 use super::{AnswerInfo, AnswerStep, Bound, PreparedAnswer};
 use crate::error::{E_BAD_INPUT, E_INTERNAL, RdyError};
 use crate::gate::LandOptions;
-use crate::pending::{Item, ItemKind};
+use crate::pending::{ExceptionKind, Item, ItemKind};
 use crate::{Delta, Rdy, Session};
 use rdy_model::{Answer, AnswerAct, ApprovalEvidence, EvidenceKind};
 use rdy_store::{Relay, StoreError};
@@ -63,7 +66,15 @@ pub(crate) fn act(
         }
         (ItemKind::Approve, "reject") => AnswerAct::RejectProposal,
         (ItemKind::Confirm, "confirm") => AnswerAct::Confirm,
+        // D-GV465: a rejected re-affirmation, never a rejected decision
+        (ItemKind::Confirm, "reject")
+            if b.item.exception == Some(ExceptionKind::ReaffirmOneWay) =>
+        {
+            AnswerAct::RejectReaffirm
+        }
         (ItemKind::Confirm, "reject") => AnswerAct::RejectDecision,
+        (ItemKind::Defer, "o1") => AnswerAct::AcceptDeferrals,
+        (ItemKind::Defer, "o2") => AnswerAct::RefuseDeferrals,
         (k, option) => {
             return Err(RdyError::new(
                 E_BAD_INPUT,
@@ -147,13 +158,25 @@ fn record(
     note: Option<String>,
     act: AnswerAct,
 ) -> Result<AnswerInfo, RdyError> {
+    // D-AAQ9Z: a deferral answer binds the card's complete hash, local or relayed, so the
+    // landing can check it names the card the version has now
+    let card_hash = match b.item.kind {
+        ItemKind::Defer => Some(b.item.card_hash.parse().map_err(|_| {
+            RdyError::new(
+                E_INTERNAL,
+                format!("{} has no card hash", b.item.r#ref),
+                "report this as a bug in rdy",
+            )
+        })?),
+        _ => b.card_hash,
+    };
     let a = Answer {
         item: b.item.r#ref.clone(),
         act,
         option: Some(b.option.id.clone()),
         label: Some(b.option.label.clone()),
         options: labels(&b.item),
-        card_hash: b.card_hash,
+        card_hash,
         targets: vec![],
         person: who.provenance(),
         relayed_by: relay.as_ref().map(|r| r.by.clone()),

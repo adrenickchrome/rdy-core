@@ -48,7 +48,7 @@ pub fn rdy_suspects(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     let st_ = st.engine.read();
     let scope = scope_of(&st.view, &st_, &p.scope)?;
     Ok(budget(
-        json!({"items": st_.suspects(&scope)?}),
+        json!({"items": st_.suspect_details(&scope)?}),
         p.max_tokens,
     ))
 }

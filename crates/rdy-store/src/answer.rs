@@ -39,6 +39,11 @@
 //! - `evidence_kind` is `card` or `text`, and only with a relay.
 //! - `card` evidence needs `card_hash`.
 //! - Each `targets` hash is an object in the log before the answer.
+//! - The plan acts (store format 17): KeepSuspect answers `reaffirm:<id>@<version12>` with a
+//!   note of 1 to 2000 trimmed characters and a nonempty, sorted, distinct list of BLOCK
+//!   versions; AcceptDeferrals and RefuseDeferrals answer `defer:P-x@n`, and RejectReaffirm a
+//!   block version item (`<id>@<version12>`), each with no target. A break is `invalid plan
+//!   answer item`, `invalid plan answer targets` or `invalid plan answer note`.
 //! - A ref `answer/<item>` or `pending/<person>/<item>` names an `ANSWER` whose `item` is
 //!   `<item>` (and, for `pending/`, whose `person.actor` is `<person>`).
 //! - A `pending/` ref names act `later`; an `answer/` ref never does.
@@ -91,8 +96,92 @@ pub(crate) fn invalid(a: &Answer) -> Option<String> {
         Some(EvidenceKind::Card) if a.card_hash.is_none() => {
             Some("card evidence needs card_hash".into())
         }
+        _ => plan_act_invalid(a).map(str::to_string),
+    }
+}
+
+/// The damage reason of a plan act's item.
+pub(crate) const PLAN_ITEM: &str = "invalid plan answer item";
+/// The damage reason of a plan act's targets.
+pub(crate) const PLAN_TARGETS: &str = "invalid plan answer targets";
+/// The damage reason of a plan act's note.
+pub(crate) const PLAN_NOTE: &str = "invalid plan answer note";
+
+/// Whether `item` is `<block id>@<12 lowercase hex digits>`: a block version item.
+fn block_version_item(item: &str) -> bool {
+    item.split_once('@').is_some_and(|(id, v)| {
+        rdy_model::BlockId::is_valid(id)
+            && v.len() == 12
+            && v.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+/// Whether `item` is `defer:P-<4 to 64 hex digits>@<n>`: an explicit proposal version.
+fn defer_item(item: &str) -> bool {
+    let Some(rest) = item.strip_prefix("defer:P-") else {
+        return false;
+    };
+    rest.split_once('@').is_some_and(|(id, n)| {
+        (4..=64).contains(&id.len())
+            && id.bytes().all(|b| b.is_ascii_hexdigit())
+            && !n.is_empty()
+            && n.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
+/// The rule of the four plan acts that `a` breaks, if any: KeepSuspect answers a re-affirmation
+/// item (`reaffirm:<id>@<version12>`) with a note and its member BLOCK versions (sorted and
+/// distinct) as targets; AcceptDeferrals and RefuseDeferrals answer a deferral card
+/// (`defer:P-x@n`) and RejectReaffirm a block version item, each with no target. The typed
+/// rule of KeepSuspect's targets (each a BLOCK) is the target check's.
+fn plan_act_invalid(a: &Answer) -> Option<&'static str> {
+    let ascending = |t: &[Hash]| t.windows(2).all(|w| w[0] < w[1]);
+    match a.act {
+        AnswerAct::KeepSuspect => {
+            if crate::plan::reaffirm_cause(&a.item).is_none() {
+                return Some(PLAN_ITEM);
+            }
+            if !a.note.as_deref().is_some_and(crate::plan::valid_reason) {
+                return Some(PLAN_NOTE);
+            }
+            if a.targets.is_empty() || !ascending(&a.targets) {
+                return Some(PLAN_TARGETS);
+            }
+            None
+        }
+        AnswerAct::AcceptDeferrals | AnswerAct::RefuseDeferrals => {
+            if !defer_item(&a.item) {
+                return Some(PLAN_ITEM);
+            }
+            (!a.targets.is_empty()).then_some(PLAN_TARGETS)
+        }
+        AnswerAct::RejectReaffirm => {
+            if !block_version_item(&a.item) {
+                return Some(PLAN_ITEM);
+            }
+            (!a.targets.is_empty()).then_some(PLAN_TARGETS)
+        }
         _ => None,
     }
+}
+
+/// The typed target rule of `a` (store format 17), if it breaks it: a KeepSuspect's targets are
+/// member BLOCK versions. `is_block` says whether a hash names a BLOCK version that `a` may name
+/// (written before it). The one rule that `put_answer`, fsck and the receive checks
+/// (`crate::stream_source`) apply; the generic reference edges of the targets stay kind-None.
+pub(crate) fn invalid_targets<E>(
+    a: &Answer,
+    mut is_block: impl FnMut(&Hash) -> Result<bool, E>,
+) -> Result<Option<&'static str>, E> {
+    if a.act != AnswerAct::KeepSuspect {
+        return Ok(None);
+    }
+    for t in &a.targets {
+        if !is_block(t)? {
+            return Ok(Some(PLAN_TARGETS));
+        }
+    }
+    Ok(None)
 }
 
 /// The text of the rule `rule` that answer `h` breaks: `answer <h>: <rule>`.
@@ -142,6 +231,15 @@ impl Store {
                     format!("target {t} is not an object in the log"),
                 )));
             }
+        }
+        let is_block = |t: &Hash| -> Result<bool, StoreError> {
+            Ok(extra
+                .iter()
+                .any(|(k, p)| *k == kinds::BLOCK && Hash::of(p) == *t)
+                || self.has_kind(kinds::BLOCK, t)?)
+        };
+        if let Some(rule) = invalid_targets(a, is_block)? {
+            return Err(StoreError::Refused(damage(&id, rule)));
         }
         let mut items = extra;
         items.push((kinds::ANSWER, bytes));
@@ -232,6 +330,12 @@ impl StoreReader {
                         format!("target {t} is not an object in the log before it"),
                     )));
                 }
+            }
+            let is_block = |t: &Hash| -> Result<bool, StoreError> {
+                Ok(self.index().typed(kinds::BLOCK, t)?.is_some_and(|l| l < at))
+            };
+            if let Some(rule) = invalid_targets(&a, is_block)? {
+                return Err(StoreError::Decode(damage(&h, rule)));
             }
             n += 1;
             Ok(())

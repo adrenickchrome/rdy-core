@@ -35,11 +35,80 @@ pub(crate) const DRAIN_AFTER_REPLY_BYTES: usize = 64 * 1024;
 /// One daemon log line on stderr: `<unix ms> rdy serve: <text>`. A failed write (a full disk
 /// under `daemon.log`, a closed stderr) loses the line, never the daemon.
 pub(crate) fn log(text: &str) {
+    if captured(text) {
+        return;
+    }
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let _ = writeln!(io::stderr().lock(), "{ms} rdy serve: {text}");
+}
+
+/// The live [`LogCapture`]s: each one's expected texts and the lines it took.
+type Captures = Vec<(u64, Vec<String>, Vec<String>)>;
+
+static CAPTURES: Mutex<Captures> = Mutex::new(Vec::new());
+/// How many [`LogCapture`]s are live, so a daemon with none never takes the lock.
+static CAPTURING: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether a live capture expects `text` (it holds one of the capture's expected texts); it
+/// then takes the line instead of stderr.
+fn captured(text: &str) -> bool {
+    if CAPTURING.load(Ordering::SeqCst) == 0 {
+        return false;
+    }
+    let Ok(mut all) = CAPTURES.lock() else {
+        return false;
+    };
+    for (_, expected, lines) in all.iter_mut() {
+        if expected.iter().any(|e| text.contains(e.as_str())) {
+            lines.push(text.to_string());
+            return true;
+        }
+    }
+    false
+}
+
+/// Test hook: while the returned capture lives, a daemon log line (any thread) that holds one
+/// of `expected` goes to it instead of stderr, so a test asserts the diagnostics it provokes
+/// and every unexpected line stays visible.
+#[doc(hidden)]
+pub fn capture_log_for_tests(expected: &[&str]) -> LogCapture {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = NEXT.fetch_add(1, Ordering::SeqCst);
+    let expected = expected.iter().map(|e| e.to_string()).collect();
+    CAPTURES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((id, expected, vec![]));
+    CAPTURING.fetch_add(1, Ordering::SeqCst);
+    LogCapture { id }
+}
+
+/// The daemon log lines a test expects ([`capture_log_for_tests`]); dropping it ends the capture.
+#[doc(hidden)]
+pub struct LogCapture {
+    id: u64,
+}
+
+impl LogCapture {
+    /// The lines taken so far, in order, without their time prefix.
+    pub fn lines(&self) -> Vec<String> {
+        let all = CAPTURES.lock().unwrap_or_else(|e| e.into_inner());
+        all.iter()
+            .find(|(id, _, _)| *id == self.id)
+            .map(|(_, _, lines)| lines.clone())
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for LogCapture {
+    fn drop(&mut self) {
+        let mut all = CAPTURES.lock().unwrap_or_else(|e| e.into_inner());
+        all.retain(|(id, _, _)| *id != self.id);
+        CAPTURING.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// The peer went away mid-exchange (a client that closed or was killed before its reply): a

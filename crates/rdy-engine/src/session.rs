@@ -109,6 +109,9 @@ impl Session {
         // The default view is the run, else work-<actor>; it must be a writable name: not too
         // long, and not a reserved view (`:` becomes `-`, and work-<actor> is never reserved)
         let view = session.default_view();
+        if crate::write::is_reserved_view(&view) {
+            return Err(crate::write::reserved_view_error());
+        }
         if view == "canon" || view == INFLIGHT_SCOPE {
             return Err(RdyError::new(
                 E_BAD_INPUT,
