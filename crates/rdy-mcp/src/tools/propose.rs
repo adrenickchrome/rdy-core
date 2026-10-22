@@ -3,6 +3,7 @@
 use super::*;
 use rdy_engine::answer::relay::RelayInput;
 use rdy_engine::consequence::propose_and_report;
+use rdy_engine::plan::{PlanAnswerInput, PlanQuery, ProposePlanRequest, check_plan_request};
 use rdy_engine::*;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -23,6 +24,8 @@ pub struct ProposeParams {
     pub alternatives: Option<crate::alt_tools::AltPickParams>,
     /// Propose the person's own view (one they own, or "work") on their word: {evidence, question?, session_ref?}. The proposal records the person, and an answer records your relay.
     pub relay: Option<RelayParams>,
+    /// Answers to the items of the change plan, recorded in the same batch as the proposal: [{item, act, reason?}], as rdy_plan takes them. All of them are checked against the version first, and either the proposal and every answer are recorded or nothing is. The reply carries the plan's counts and items.
+    pub plan_answers: Option<Vec<PlanAnswerParams>>,
 }
 
 /// The person's words that ask for a proposal of their view.
@@ -58,25 +61,25 @@ pub fn rdy_propose(st: &mut McpState, p: ProposeParams) -> Result<Value, RdyErro
         };
         (input, human_actor_for_env(&root))
     });
-    propose_and_report(&*st.engine, p.max_tokens, move |r| match relay {
-        Some((relay, person)) => r.propose_as(
-            &s,
-            &person,
-            &relay,
-            true,
-            &view,
-            &p.title,
-            changes.as_deref(),
-            p.summary.as_deref(),
-            alternatives.as_ref(),
-        ),
-        None => r.propose_with(
-            &s,
-            &view,
-            &p.title,
-            changes.as_deref(),
-            p.summary.as_deref(),
-            alternatives.as_ref(),
-        ),
+    let answers: Vec<PlanAnswerInput> = p
+        .plan_answers
+        .unwrap_or_default()
+        .into_iter()
+        .map(PlanAnswerInput::from)
+        .collect();
+    check_plan_request(&PlanQuery::default(), &answers)?;
+    propose_and_report(&*st.engine, p.max_tokens, move |r| {
+        let req = ProposePlanRequest {
+            view: &view,
+            title: &p.title,
+            changes: changes.as_deref(),
+            summary: p.summary.as_deref(),
+            alternatives: alternatives.as_ref(),
+            plan_answers: &answers,
+        };
+        match relay {
+            Some((relay, person)) => r.propose_plan_as(&s, &person, &relay, true, req),
+            None => r.propose_plan(&s, req),
+        }
     })
 }

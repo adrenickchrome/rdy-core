@@ -25,6 +25,7 @@ mod cli_log;
 mod cli_name_case;
 mod cli_output;
 mod cli_plan;
+mod cli_plan_propose;
 mod cli_preview_docs;
 mod cli_proposal;
 mod cli_publication_check;

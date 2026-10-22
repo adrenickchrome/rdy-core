@@ -435,7 +435,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             parse(
                 op,
                 args,
-                "{title, view?, summary?, max_tokens?, alternatives?, relayed_by?, evidence?, question?, session_ref?}",
+                "{title, view?, summary?, max_tokens?, alternatives?, relayed_by?, evidence?, question?, session_ref?, plan_answers?}",
             )?,
         ),
         "approve" => approve(

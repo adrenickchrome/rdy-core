@@ -376,6 +376,36 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "Propose the redaction of the listed targets again, and have a person approve it.",
     ),
     (
+        E_PLAN_ITEM,
+        "<id> is not an item of the change plan for <scope>",
+        "read the plan with rdy_plan / rdy plan and pass an item id it lists",
+    ),
+    (
+        E_DEFERRAL_OPEN,
+        "<n> deferrals of P-x@n have no answer",
+        "answer the deferral card first: defer:P-x@n",
+    ),
+    (
+        rdy_engine::plan::W_PLAN_OPEN,
+        "<n> change-plan items are open",
+        "close or defer each item: rdy_plan / rdy plan",
+    ),
+    (
+        rdy_engine::plan::W_PLAN_ANSWER_LAPSED,
+        "the answer to <id> lapsed: <block> changed",
+        "answer the item again",
+    ),
+    (
+        rdy_engine::reflects::W_REFLECTS_NO_CODE,
+        "no linked checkout; rdy records no code state for <id>",
+        "set code_paths, then repin it with code: true",
+    ),
+    (
+        E_FROZEN,
+        "a write edits, moves or deletes an accepted or rejected decision, or a conflict on one cannot be resolved by an edit",
+        "take the landed side of a conflict (rdy view resolve <view> <id> --landed; rdy_view {op: \"resolve\", block, landed: true}), or write a new decision that supersedes or revokes it. For a suspect accepted decision that still holds, re-affirm it with a reaffirm op instead.",
+    ),
+    (
         E_HELD_BY_READER,
         "the project store is still open in this process through a read state of an earlier open",
         HELD_BY_READER_FIX,

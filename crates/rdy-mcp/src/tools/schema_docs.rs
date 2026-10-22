@@ -26,9 +26,34 @@ pub const WRITE_OPS: &[(&str, &str)] = &[
     ("rebalance", r#"{"op":"rebalance","parent":<id or path>?}"#),
     (
         "repin",
-        r#"{"op":"repin","id":<id or path>,"base":<version>?,"targets":[<id or path>]?}"#,
+        r#"{"op":"repin","id":<id or path>,"base":<version>?,"targets":[<id or path>]?,"code":<true>?} code: true also records the code state the block's reflects globs match now, and clears its code suspect; the block must declare reflects."#,
+    ),
+    (
+        "reaffirm",
+        r#"{"op":"reaffirm","id":<decision id>?,"because":<id or path>?,"base":<version>?,"targets":[<id or path>]?,"reason":<1 to 2000 characters>} Give id or because, not both: id re-affirms one suspect accepted decision, and because re-affirms every decision in the view that is suspect on that block. reason is required. targets limits the op to the suspects on those blocks (default: every current suspect). base goes with id only: it is the version of the decision you read, and the op is refused if the decision has moved. The decision keeps its ruling, body and links."#,
     ),
 ];
+
+/// The change plan section of `rdy_schema` (D-4JMPH; reference/mcp-tools p-RW856, p-6YBR7;
+/// agents/working-with-agents n-EVMGG). Its first paragraph is the write guidance, word for word.
+pub const CHANGE_PLAN_DOC: &str = "Before proposing, read rdy_plan and close or defer each item. Give every deferral a reason. Re-affirm a suspect decision that still holds with a reaffirm op, and supersede one that does not.\n\nItem kinds: update (change the subject to follow the decision), rejustify (give the subject a new justification), reaffirm (re-affirm the subject against the decision), confirm (confirm the subject as it is) and update_implementation (change the code that implements the decision). Each item has an id (pi- and 16 hex digits), a kind, a subject, a cause, an edge and a state: open, closed or deferred.\n\nActs: confirm, defer and done. update, rejustify and reaffirm take defer. confirm takes confirm or defer. update_implementation takes done or defer. confirm and defer need a reason (1 to 2000 characters); done keeps none. rdy_plan {answers: [{item, act, reason?}]} records answers in the session's view, and rdy_propose {plan_answers: [...]} records them in the same batch as the proposal. item is a pi- id (a unique prefix is enough) or a cq- consequence id from the last write or proposal. All the answers are checked first, and either all are recorded or none.\n\nrdy_plan takes one selector or none (the session's view). Every reply is {scope, plan, items, counts, code, notes, next?}. view: scope view:<name>, items with state. proposal (P-<id>@<n>): scope proposal:P-<id>@<n>, items with state. landing (the full hash): scope landing:<hash>, the items the landing sealed, each with an outcome. decision (an id): scope decision:<id>, one row per seal that names it: {landing, version, items, outcomes}. counts cover every item, not only the page. A cut reply carries next: pass page: <next> alone to continue it.\n\nThe reaffirm op records the reaffirmed field and a code repin records reflects_at; rdy sets both, and a write that sets or unsets either is refused. reaffirmed maps each target block id to {against, reason}: against lists the decisions that retire the target (empty when the target only changed) or is \"deleted\" when the target is gone, and reason is the re-affirmation reason. reflects_at is {files, commits}: files is a hash of the committed files the block's reflects globs match, and commits maps each linked repository to its HEAD commit (null when it has none). Neither changes the block's content hash or adds a reference.";
+
+/// Examples of the change plan inputs, as JSON (`rdy_schema` change_plan.examples).
+pub const CHANGE_PLAN_EXAMPLES: [&str; 4] = [
+    r#"{"op":"reaffirm","id":"D-12345","reason":"The decision still holds after the premise changed."}"#,
+    r#"{"op":"reaffirm","because":"p-12345","reason":"These decisions still hold after the premise changed."}"#,
+    r#"{"op":"repin","id":"p-12345","code":true}"#,
+    r#"{"view":"edit","answers":[{"item":"pi-0123456789abcdef","act":"defer","reason":"The follow-up needs a separate proposal."}]}"#,
+];
+
+pub(super) fn change_plan_examples() -> Value {
+    Value::Array(
+        CHANGE_PLAN_EXAMPLES
+            .iter()
+            .map(|e| serde_json::from_str(e).expect("CHANGE_PLAN_EXAMPLES are JSON"))
+            .collect(),
+    )
+}
 
 /// doc1: the shape of a block's `links`.
 pub const LINK_SHAPE: &str = r#"links: {"<kind>": "<id, key or path>" | ["<target>", …] | [{"target": "<id, key or path>", "part": "<optional: the words of the target this link is about>"}]}"#;
