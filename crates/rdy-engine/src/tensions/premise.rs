@@ -231,17 +231,27 @@ fn changers(writes: &Writes, canon_m: &Materialized, x: &BlockId) -> Vec<(Arc<Wr
     out
 }
 
-/// p-QMGB4 (task-5 R1): whether citer `w` keeps its citation of `x`, which canon no longer
-/// holds: its block records `deleted` for `x` ([`rdy_graph::keeps_deleted_citation`]) and no
-/// in-flight write that `w` can see brings `x` back. The graph's suspects rule the same.
+/// p-QMGB4 (task-5 R1): whether citer `w` keeps its citation of `x`, which `w`'s view does not
+/// hold: its block records `deleted` for `x` ([`rdy_graph::keeps_deleted_citation`]), `x` is
+/// absent there (canon no longer holds it, or a write that `w` can see deletes it, as when the
+/// view deletes a premise that changed in canon after the pin), and no in-flight write that `w`
+/// can see brings `x` back. An unacknowledged deletion and a visible restoration keep the check.
+/// The graph's suspects rule the same.
 fn kept_deleted_citation(writes: &Writes, canon_m: &Materialized, w: &Write, x: &BlockId) -> bool {
-    canon_m.get(x).is_none()
-        && w.new
-            .as_deref()
-            .is_some_and(|b| rdy_graph::keeps_deleted_citation(b, x))
-        && !writes.all_on(x).iter().any(|w2| {
-            (w2.change == w.change || writes.common_view(&w2.change, &w.change)) && w2.new.is_some()
-        })
+    if !w
+        .new
+        .as_deref()
+        .is_some_and(|b| rdy_graph::keeps_deleted_citation(b, x))
+    {
+        return false;
+    }
+    let seen: Vec<Arc<Write>> = writes
+        .all_on(x)
+        .into_iter()
+        .filter(|w2| w2.change == w.change || writes.common_view(&w2.change, &w.change))
+        .collect();
+    let deleted_here = seen.iter().any(|w2| w2.new.is_none());
+    (canon_m.get(x).is_none() || deleted_here) && !seen.iter().any(|w2| w2.new.is_some())
 }
 
 /// Whether an in-flight write of `x` (live or not) that citer `w` can see has content `pin`: a
