@@ -623,6 +623,13 @@ fn cp10_open_noncode_items_warn_and_code_items_never_block() {
         &b,
         &format!("B builds on {{{{{a}}}}} and {{{{{c}}}}}, again."),
     );
+    // b still cites c as it stood before k landed: its pin follows, so no premise shift blocks
+    write(
+        &mut r,
+        "w",
+        json!([{"op": "repin", "id": b, "targets": [c]}]),
+    )
+    .unwrap();
     let pw2 = propose(&mut r, "w", &[]).unwrap();
     let lapsed: Vec<_> = pw2
         .warnings
