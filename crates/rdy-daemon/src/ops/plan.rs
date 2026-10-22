@@ -153,6 +153,15 @@ mod tests {
         }
     }
 
+    /// The refusal of `a`'s ops. A built request is a failure, reported without printing the ops
+    /// (a regression's ops would be hundreds of megabytes).
+    fn refused(a: &ReaffirmArgs) -> RdyError {
+        match reaffirm_ops(a) {
+            Ok(ops) => panic!("{} ops were built, not refused", ops.len()),
+            Err(e) => e,
+        }
+    }
+
     /// A bulk request is refused on its shared inputs before one op is built: with a reason the
     /// engine refuses, or targets past the pair bound, no per-id copy of them is made. The
     /// reason here is 100 KB, so a regression that copies it per id (4096 times) would copy
@@ -160,27 +169,17 @@ mod tests {
     /// would copy 32 GiB.)
     #[test]
     fn cp11_fix1_reaffirm_ops_refuse_shared_inputs_before_copying_them() {
-        let e = reaffirm_ops(&args(4096, "x".repeat(100_000), None))
-            .err()
-            .expect("refused");
+        let e = refused(&args(4096, "x".repeat(100_000), None));
         assert_eq!(e.code, E_BAD_INPUT, "{e}");
-        let e = reaffirm_ops(&args(4096, " ".repeat(100_000), None))
-            .err()
-            .expect("refused");
+        let e = refused(&args(4096, " ".repeat(100_000), None));
         assert_eq!(e.code, E_BAD_INPUT, "{e}");
         let ts: Vec<String> = (0..30).map(|i| format!("B-{i:05}")).collect();
-        let e = reaffirm_ops(&args(4096, "Holds.".into(), Some(ts)))
-            .err()
-            .expect("refused");
+        let e = refused(&args(4096, "Holds.".into(), Some(ts)));
         assert_eq!(e.code, E_BAD_INPUT, "{e}");
         let big = vec!["p".repeat(1_000_000)];
-        let e = reaffirm_ops(&args(4096, "Holds.".into(), Some(big)))
-            .err()
-            .expect("refused");
+        let e = refused(&args(4096, "Holds.".into(), Some(big)));
         assert_eq!(e.code, E_BAD_INPUT, "{e}");
-        let e = reaffirm_ops(&args(5001, "Holds.".into(), None))
-            .err()
-            .expect("refused");
+        let e = refused(&args(5001, "Holds.".into(), None));
         assert_eq!(e.code, E_BAD_INPUT, "{e}");
     }
 
