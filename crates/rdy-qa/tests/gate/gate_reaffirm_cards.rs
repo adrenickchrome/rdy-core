@@ -1610,6 +1610,22 @@ fn landed_change_bytes(r: &Rdy, landing: &Hash) -> usize {
     postcard::to_allocvec(&ch).unwrap().len()
 }
 
+/// The ops of `n` proposed decisions with `body` that depend on claim a (`$d0`, `$d1`, ...),
+/// each with a claim it decides (`$c0`, ...), so no decision lands as an exception.
+fn applied_decisions(w: &World, tag: &str, n: usize, body: &str) -> Vec<Value> {
+    (0..n)
+        .flat_map(|i| {
+            [
+                json!({"op": "create", "type": "decision", "id": format!("$d{i}"), "parent": w.s, "body": body,
+                    "fields": {"statement": format!("Rule {tag}{i} holds."), "status": "proposed", "reversibility": "two_way"},
+                    "links": {"depends_on": [{"target": w.a}]}}),
+                json!({"op": "create", "type": "claim", "id": format!("$c{i}"), "parent": w.s,
+                    "body": format!("Rule {tag}{i} applies."), "links": {"decided_by": [{"target": format!("$d{i}")}]}}),
+            ]
+        })
+        .collect()
+}
+
 /// D-CQMA4, FW-UP1a: one card answer is one change in one landing. `They still hold` on a card
 /// of 9002 members with a 2000-character note would write a change past one record, so it is
 /// refused before anything is written: no view, change, landing or ANSWER, the card and its hash
@@ -1620,20 +1636,13 @@ fn cp16_oversized_card_answer_refuses_before_append() {
     let (_d, mut r) = project();
     let w = world(&mut r);
     let n = 9002;
-    let ops: Vec<Value> = (0..n)
-        .map(|i| {
-            json!({"op": "create", "type": "decision", "parent": w.s,
-                "fields": {"statement": format!("Rule {i} holds."), "status": "proposed", "reversibility": "two_way"},
-                "links": {"depends_on": [{"target": w.a}]}})
-        })
-        .collect();
-    write(&mut r, "many", json!(ops)).unwrap();
+    write(&mut r, "many", json!(applied_decisions(&w, "", n, ""))).unwrap();
     land(&mut r, "many").unwrap();
     change(&mut r, "x", &w.a, "A holds 60 days.");
     let c = the_card(&r, &w.a);
     let all = members(&c);
     assert_eq!(all.len(), n);
-    tag_and_export(&mut r, "before").unwrap();
+    tag_and_export(&mut r, "v1.0.0").unwrap();
 
     // the reviewer's case: refused, nothing written
     let note = "r".repeat(2000);
@@ -1651,17 +1660,17 @@ fn cp16_oversized_card_answer_refuses_before_append() {
     assert!(internal_views(&r).is_empty());
     assert!(r.read().reader().answer_of(&c.r#ref).unwrap().is_none());
     assert_eq!(the_card(&r, &w.a).card_hash, c.card_hash, "the card stands");
-    tag_and_export(&mut r, "after-refusal").unwrap();
+    tag_and_export(&mut r, "v1.1.0").unwrap();
 
-    // the person re-affirms 1802 members with the write op; the card keeps the other 7200
-    let ops: Vec<Value> = all[..1802]
+    // the person re-affirms 1702 members with the write op; the card keeps the other 7300
+    let ops: Vec<Value> = all[..1702]
         .iter()
         .map(|d| json!({"op": "reaffirm", "id": d, "targets": [w.a], "reason": "Checked by hand."}))
         .collect();
     write(&mut r, "some", json!(ops)).unwrap();
     land(&mut r, "some").unwrap();
     let rest = the_card(&r, &w.a);
-    assert_eq!(members(&rest), all[1802..].to_vec());
+    assert_eq!(members(&rest), all[1702..].to_vec());
     let v = answer(
         &mut r,
         &rest.r#ref,
@@ -1673,14 +1682,13 @@ fn cp16_oversized_card_answer_refuses_before_append() {
     assert_eq!(v["act"], "reaffirm", "{v}");
     let landing: Hash = v["landing"]["landing"].as_str().unwrap().parse().unwrap();
     let bytes = landed_change_bytes(&r, &landing);
-    eprintln!("cp16 landed change bytes: {bytes}");
     assert!(
         bytes <= rdy_store::bounded::MAX_RECORD_BYTES
-            && bytes > rdy_store::bounded::MAX_RECORD_BYTES / 100 * 95,
+            && bytes > rdy_store::bounded::MAX_RECORD_BYTES / 100 * 98,
         "just under the bound: {bytes}"
     );
     assert!(card(&r, &w.a).is_none());
-    tag_and_export(&mut r, "after").unwrap();
+    tag_and_export(&mut r, "v2.0.0").unwrap();
 }
 
 /// The bulk reaffirm write op grows with its decisions too: a write whose one change would pass
@@ -1695,15 +1703,18 @@ fn cp16_oversized_reaffirm_write_refuses_before_append() {
     let mut ids = vec![];
     for g in 0..4 {
         let view = format!("big{g}");
-        let ops: Vec<Value> = (0..42)
-            .map(|i| {
-                json!({"op": "create", "type": "decision", "parent": w.s, "body": text,
-                    "fields": {"statement": format!("Rule {g}-{i} holds."), "status": "proposed", "reversibility": "two_way"},
-                    "links": {"depends_on": [{"target": w.a}]}})
-            })
-            .collect();
-        let made = write(&mut r, &view, json!(ops)).unwrap();
-        ids.extend(made.created.into_values());
+        let made = write(
+            &mut r,
+            &view,
+            json!(applied_decisions(&w, &format!("{g}-"), 42, &text)),
+        )
+        .unwrap();
+        ids.extend(
+            made.created
+                .into_iter()
+                .filter(|(k, _)| k.starts_with("$d"))
+                .map(|(_, v)| v),
+        );
         land(&mut r, &view).unwrap();
     }
     ids.sort();
