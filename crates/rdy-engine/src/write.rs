@@ -2974,7 +2974,7 @@ impl Rdy {
         let code_warnings =
             crate::reflects::stamp(&self.root, &self.store, &m, &mut ops, &code_repins)?;
         refuse_removed_content(&self.store, &ops)?;
-        let change = Change {
+        let mut change = Change {
             view: req.view.clone(),
             ops: ops.clone(),
             deps: vec![],
@@ -2985,8 +2985,13 @@ impl Rdy {
             read_identity: None,
         };
         // a write that re-affirms decisions grows with their count: its one change must fit
-        // one record (D-EJBPD), checked before anything is written
+        // one record (D-EJBPD), checked before anything is written. The record the store
+        // writes holds the change's deps, so the check measures the change with the deps the
+        // commit below gives it (the same call on the same state; the commit sets them again)
         if !reaffirmed.is_empty() {
+            change.deps = self
+                .store
+                .change_deps_resolving(&change, Some(&req.view), &conflicts)?;
             crate::reaffirm::change_fits(&change, crate::reaffirm::WRITE_CHANGE_FIX)?;
         }
         let id = self.store.commit_to_view_resolving(

@@ -1742,3 +1742,97 @@ fn cp16_oversized_reaffirm_write_refuses_before_append() {
     let done = write(&mut r, "half", json!(ops)).unwrap();
     assert_eq!(done.reaffirmed.len(), 84);
 }
+
+/// The reaffirm ops of `ids`, one each against `target`, the i-th with a reason of `reasons[i]`
+/// characters.
+fn reaffirm_ops(ids: &[String], target: &str, reasons: &[usize]) -> Value {
+    json!(
+        ids.iter()
+            .zip(reasons)
+            .map(|(d, n)| json!({"op": "reaffirm", "id": d, "targets": [target], "reason": "r".repeat(*n)}))
+            .collect::<Vec<_>>()
+    )
+}
+
+/// `base` reason lengths grown by `extra` characters in all, spread over them, each at most
+/// 2000.
+fn grown(base: usize, n: usize, extra: i64) -> Vec<usize> {
+    let room = (2000 - base) as i64;
+    assert!(
+        (0..=room * n as i64).contains(&extra),
+        "the fixture's reasons cannot reach the boundary: {extra} more characters needed"
+    );
+    let (each, rest) = (extra / n as i64, extra % n as i64);
+    (0..n as i64)
+        .map(|i| base + (each + i64::from(i < rest)) as usize)
+        .collect()
+}
+
+/// FW-UP1a, D-EJBPD: the record bound applies to the change the store writes, which holds its
+/// deps. A bulk reaffirm write whose change fits one record without its deps, and passes it
+/// with them, is refused before anything is written, and the history still exports. The same
+/// write a few bytes smaller lands, and its tag exports.
+#[test]
+fn cp16_reaffirm_write_bound_counts_the_change_deps() {
+    let max = rdy_store::bounded::MAX_RECORD_BYTES;
+    let (_d, mut r) = project();
+    let w = world(&mut r);
+    // 16 decisions of 1047000 bytes each, accepted by two landings, so the re-affirmation of
+    // all of them depends on two changes
+    let text = "t".repeat(1_047_000);
+    let mut ids = vec![];
+    for g in 0..2 {
+        let view = format!("big{g}");
+        let made = write(
+            &mut r,
+            &view,
+            json!(applied_decisions(&w, &format!("{g}-"), 8, &text)),
+        )
+        .unwrap();
+        ids.extend(
+            made.created
+                .into_iter()
+                .filter(|(k, _)| k.starts_with("$d"))
+                .map(|(_, v)| v),
+        );
+        land(&mut r, &view).unwrap();
+    }
+    ids.sort();
+    change(&mut r, "x", &w.a, "A holds 60 days.");
+    let n = ids.len();
+
+    // a probe in a view of its own (a name as long as the measured writes' view) measures the
+    // change: its bytes without and with its deps
+    let probe = write(&mut r, "probe", reaffirm_ops(&ids, &w.a, &vec![200; n])).unwrap();
+    let mut ch: Change = r.store().change(&probe.change.parse().unwrap()).unwrap();
+    let with = postcard::to_allocvec(&ch).unwrap().len();
+    ch.deps.clear();
+    let without = postcard::to_allocvec(&ch).unwrap().len();
+    let deps = with - without;
+    assert!(deps >= 64, "the change has deps: {deps} bytes");
+
+    // without its deps the change is `deps / 2` bytes under the bound; with them, over it
+    let over = grown(200, n, (max - deps / 2) as i64 - without as i64);
+    tag_and_export(&mut r, "v1.0.0").unwrap();
+    let end = log_end(&r);
+    let e = write(&mut r, "whole", reaffirm_ops(&ids, &w.a, &over)).unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            E_LIMIT,
+            "re-affirmation change exceeds 16777216 record bytes",
+            "Re-affirm these decisions in smaller groups, one write for each group."
+        )
+    );
+    assert_eq!(log_end(&r), end, "nothing is written");
+    tag_and_export(&mut r, "v1.1.0").unwrap();
+
+    // `deps` bytes fewer: with its deps the change is `deps / 2` bytes under the bound
+    let fit = grown(200, n, (max - deps - deps / 2) as i64 - without as i64);
+    let done = write(&mut r, "whole", reaffirm_ops(&ids, &w.a, &fit)).unwrap();
+    assert_eq!(done.reaffirmed.len(), n);
+    let ch: Change = r.store().change(&done.change.parse().unwrap()).unwrap();
+    assert_eq!(postcard::to_allocvec(&ch).unwrap().len(), max - deps / 2);
+    land(&mut r, "whole").unwrap();
+    tag_and_export(&mut r, "v2.0.0").unwrap();
+}
