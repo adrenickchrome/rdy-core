@@ -6,10 +6,13 @@
 //! Each open proposal's latest version that is ready is one `approve` item, ref `P-x@n`. Its
 //! card leads with the author's summary (D-4PG9Y), lists the decisions it confirms (`members`),
 //! and gives the computed facts in the closed order of O6: Changes, Decisions, Supersedes,
-//! Reversibility, Consequences (D-NJ2SP), Tensions (D-45RG6, C7), Coverage (D-C6HHV),
-//! Confidence (D-XZXCE), Base and Exceptions. Consequences, Coverage and Confidence are worked
-//! out on the canon the version's landing would give, never on its view, which may have moved
-//! on. No fact reads an answer, so an answer beside the batch never moves the batch card.
+//! Re-affirms (D-GV465: each decision it re-affirms that is not `one_way`, `<id> (after <cause
+//! list>)`), Reversibility, Consequences (D-NJ2SP), Change plan (D-4JMPH: `<open> open,
+//! <closed> closed, <deferred> deferred`, code items included), Tensions (D-45RG6, C7),
+//! Coverage (D-C6HHV), Confidence (D-XZXCE), Base and Exceptions. Consequences, Coverage and
+//! Confidence are worked out on the canon the version's landing would give, never on its view,
+//! which may have moved on. No fact reads an answer, so an answer beside the batch never moves
+//! the batch card.
 //!
 //! # Exceptions (p-FN596, F3; closed)
 //!
@@ -25,6 +28,22 @@
 //! 3. `unapplied`: no content applies it once it lands (`lands_unapplied`, D-T5S9A).
 //! 4. `not_recommended`: its `recommend` is `reject`.
 //! 5. `blocking_tension`: an open blocking tension of the version involves it.
+//!
+//! A decision the version re-affirms (D-GV465; its `reaffirmed` metadata differs from canon's,
+//! read from the block delta, never a message) whose `reversibility` is `one_way` stands beside
+//! the batch too, as a `confirm` item of kind `reaffirm_one_way`, ref `<D-id>@<version short>`.
+//! Its confirm (`It still holds`) is recommended with the reason this version wrote, or each
+//! cause with its reason when they differ; its reject (`Drop the re-affirmation`) records
+//! `reject_reaffirm` and makes the version not ready.
+//!
+//! # Deferrals (D-AAQ9Z)
+//!
+//! A version whose bound plan defers non-code items stands beside its batch with one `defer`
+//! item, ref `defer:P-x@n` ([`super::plan`]), after its exceptions. An `accept_deferrals` answer
+//! bound to its current card takes it out of the queue and lets the version land; a
+//! `refuse_deferrals` answer makes the version not ready. Every approval waits for it
+//! ([`approval_holds`]), after the exception holds. A version with no bound plan (O19) has no
+//! such card.
 //!
 //! The version's advised tensions that no one accepted stand beside the batch as one `resolve`
 //! item, ref `advice:P-x@n` (D-WMCFW). [`super::tensions`] builds it, with the `resolve` item of
@@ -66,13 +85,15 @@
 //! # Order (O5)
 //!
 //! Blocking items first; then batches, each with its items directly after it (the `approve`
-//! item, its exceptions by ref, then its advice); then the items that stand alone (questions);
+//! item, its exceptions by ref, its deferral card, then its advice); then the items that stand
+//! alone (questions);
 //! each kind by `raised_at`, oldest first; then by ref. At most [`PENDING_ITEMS_MAX`] items are
 //! listed, whole batches only; `omitted` counts the rest.
 use super::card::{
     CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, REMOVAL_IRREVERSIBLE, card_hash, render_checked,
 };
 use super::item::{ExceptionKind, Fact, Item, ItemKind, ItemOption, Recommended, RemovalCard, age};
+use super::plan::{VersionPlan, defer_ref, deferral_item, version_plan};
 use super::questions::question_items;
 use super::snooze::hide_snoozed;
 use super::tensions::tension_items;
@@ -86,6 +107,7 @@ use crate::tensions::{Tension, TensionKind, TensionSeverity, TensionStatus, tens
 use crate::{Materialized, ReadState, Scope};
 use rdy_graph::{DerivedStatus, Graph};
 use rdy_model::decision::{self, DecisionStatus, REVOKES, SUPERSEDES};
+use rdy_model::engine_fields::{REAFFIRMED, decode_reaffirmed};
 use rdy_model::redaction::record_buffer;
 use rdy_model::{AnswerAct, Block, BlockId, Change, Hash, Op, Proposal};
 use rdy_schema::{Issue, Severity};
@@ -251,6 +273,12 @@ impl ReadState {
                     items.push(item);
                 }
             }
+            // D-AAQ9Z: the deferral card follows the exceptions; an accepted one is no item
+            if let Some(item) = v.deferral_item(now)
+                && accepted(self, &item)?.is_none()
+            {
+                items.push(item);
+            }
             groups.push(Group { items });
         }
         // the items that stand beside a batch go into its group, after its exceptions; the
@@ -277,32 +305,113 @@ impl ReadState {
 /// What holds version `pref` back from landing (F1, F2), read once for the landing.
 pub(crate) struct Holds {
     /// The exception items that have no `confirm` answer bound to the decision's current
-    /// version (F2): a rejected decision's item is among them while it is an exception. Each card
-    /// is cut to [`CARD_DEFAULT_TOKENS`].
+    /// version (F2): a rejected decision's item is among them while it is an exception; a
+    /// rejected re-affirmation's is not (its rejection is in `rejected`). Each card is cut to
+    /// [`CARD_DEFAULT_TOKENS`].
     pub open: Vec<Item>,
     /// One issue for each proposed decision of the version whose current version the person
     /// rejected (F1), whether it is an exception now or not: the issue readiness gives (final
     /// review fix round 1, R1: a rejected decision that stops being an exception, say once
-    /// content applies it, still never lands).
+    /// content applies it, still never lands). A rejected re-affirmation and refused deferrals
+    /// are among them.
     pub rejected: Vec<Issue>,
+    /// The version's deferral card while no acceptance is bound to it (D-AAQ9Z), cut to
+    /// [`CARD_DEFAULT_TOKENS`], and how many deferrals it lists.
+    pub deferral: Option<(Item, usize)>,
+    /// The `AcceptDeferrals` ANSWER bound to the version's current deferral card, if any.
+    pub accepted: Option<Hash>,
 }
 
 /// What holds version `pref` back from landing ([`Holds`]). It does not ask whether the version
 /// is ready otherwise; the landing asks that itself. `land_with` calls it (Task 17), so every
-/// approval path waits.
-pub(crate) fn approval_holds(st: &ReadState, pref: &ProposalRef) -> Result<Holds, RdyError> {
+/// approval path waits. Only a version that writes a decision (`decides`) can carry an exception
+/// or a rejected decision or re-affirmation, so only it reads the version whole; any bound
+/// version reads its change plan for the deferral card. A bound version whose change plan cannot
+/// be read is that error: its deferrals cannot be known (fail closed).
+pub(crate) fn approval_holds(
+    st: &ReadState,
+    pref: &ProposalRef,
+    decides: bool,
+) -> Result<Holds, RdyError> {
     let p = st.reader().proposal(&pref.version)?;
-    let v = Version::read(st, *pref, p)?;
+    let now = now_ms();
     let mut open = vec![];
-    for item in v.exception_items(now_ms()) {
-        if !answered(st, &item.r#ref, AnswerAct::Confirm)? {
+    let (card, rejected) = if decides {
+        let v = Version::read(st, *pref, p)?;
+        if v.plan_bound.is_some()
+            && let Err(e) = &v.plan
+        {
+            return Err(e.clone());
+        }
+        for item in v.exception_items(now) {
+            if answered(st, &item.r#ref, AnswerAct::Confirm)? {
+                continue;
+            }
+            // a rejected re-affirmation has its answer: the landing refuses it with the issue
+            // readiness gives (`rejected`), not as an open card
+            if item.exception == Some(ExceptionKind::ReaffirmOneWay)
+                && answered(st, &item.r#ref, AnswerAct::RejectReaffirm)?
+            {
+                continue;
+            }
             open.push(finish(item, CARD_DEFAULT_TOKENS)?);
+        }
+        (v.deferral_item(now), v.rejected(st)?)
+    } else {
+        match st.reader().plan_of_proposal(&pref.version, st.seq())? {
+            None => (None, vec![]),
+            Some(bound) => {
+                let plan = version_plan(st, &p, Some(bound))?;
+                let card = deferral_item(pref, &plan).map(|mut it| {
+                    raised_from(&p, &mut it, now);
+                    it
+                });
+                (card, deferrals_refused(st, pref)?.into_iter().collect())
+            }
+        }
+    };
+    let (mut deferral, mut accepted_by) = (None, None);
+    if let Some(item) = card {
+        match accepted(st, &item)? {
+            Some(h) => accepted_by = Some(h),
+            None => {
+                let n = item.facts.len();
+                deferral = Some((finish(item, CARD_DEFAULT_TOKENS)?, n));
+            }
         }
     }
     Ok(Holds {
         open,
-        rejected: v.rejected(st)?,
+        rejected,
+        deferral,
+        accepted: accepted_by,
     })
+}
+
+/// The issue of a deferral card of `pref` the person refused (D-AAQ9Z), if its latest answer
+/// refuses it: the version is not ready, and a refusal is never an acceptance.
+fn deferrals_refused(st: &ReadState, pref: &ProposalRef) -> Result<Option<Issue>, RdyError> {
+    if !answered(st, &defer_ref(pref), AnswerAct::RefuseDeferrals)? {
+        return Ok(None);
+    }
+    Ok(Some(Issue {
+        severity: Severity::Error,
+        code: E_VALIDATION,
+        block: None,
+        message: format!("the deferrals of {pref} were refused"),
+        fix: "close the items and propose again".into(),
+    }))
+}
+
+/// The `AcceptDeferrals` ANSWER bound to deferral card `item`: the latest answer to its ref,
+/// when its act accepts and it names the card's current complete hash. Any other latest answer
+/// (none, a refusal, a stale card) binds none.
+fn accepted(st: &ReadState, item: &Item) -> Result<Option<Hash>, RdyError> {
+    let Some((h, a)) = st.reader().answer_of(&item.r#ref)? else {
+        return Ok(None);
+    };
+    let bound = a.act == AnswerAct::AcceptDeferrals && a.card_hash == Some(card_hash(item));
+    Ok(bound.then_some(h))
 }
 
 /// The `approve` item of version `pref` (whose record is `p`) with its card whole at
@@ -414,6 +523,14 @@ fn removal_cards(st: &ReadState, changes: &[Hash]) -> Result<RemovalFacts, RdyEr
     Ok(((!cards.is_empty()).then_some(cards), reports))
 }
 
+/// Who raised the items of version `p`, when, and how long ago.
+fn raised_from(p: &Proposal, it: &mut Item, now: i64) {
+    let at = p.provenance.at_ms;
+    it.raised_by = p.provenance.actor.clone();
+    it.raised_at = rfc3339(at);
+    it.age = age(at, now);
+}
+
 /// One batch and the items beside it, or one item on its own.
 struct Group {
     items: Vec<Item>,
@@ -450,6 +567,57 @@ impl Decision {
     }
 }
 
+/// A decision the version re-affirms (D-GV465): its block in the prospective canon, its item
+/// ref, whether it is `one_way`, and each cause whose re-affirmation the version writes, with
+/// the reason it wrote, in cause-id order. Read from the block delta, never from a message.
+struct Reaffirmed {
+    block: Block,
+    r#ref: String,
+    one_way: bool,
+    causes: Vec<(BlockId, String)>,
+}
+
+impl Reaffirmed {
+    /// The causes, joined.
+    fn cause_list(&self) -> String {
+        let ids: Vec<String> = self.causes.iter().map(|(c, _)| c.to_string()).collect();
+        ids.join(", ")
+    }
+
+    /// The reason its confirm is recommended with: the newly written reason, or, when the
+    /// version writes different reasons for its causes, `<cause>: <reason>` each, in cause-id
+    /// order, joined with `; ` ([`Recommended::new`] cuts it).
+    fn reason(&self) -> String {
+        let first = self.causes.first().map(|(_, r)| r.as_str()).unwrap_or("");
+        if self.causes.iter().all(|(_, r)| r == first) {
+            return first.to_string();
+        }
+        let each: Vec<String> = self
+            .causes
+            .iter()
+            .map(|(c, r)| format!("{c}: {r}"))
+            .collect();
+        each.join("; ")
+    }
+}
+
+/// The causes whose re-affirmation `after` records and `before` (the block in canon, if any)
+/// does not record the same way: each with the reason `after` records, in cause-id order. A
+/// field that does not read as a re-affirmation map counts as none.
+fn reaffirmed_causes(before: Option<&Block>, after: &Block) -> Vec<(BlockId, String)> {
+    let read = |b: Option<&Block>| {
+        b.and_then(|b| b.fields.get(REAFFIRMED))
+            .and_then(|v| decode_reaffirmed(v).ok())
+            .unwrap_or_default()
+    };
+    let old = read(before);
+    read(Some(after))
+        .into_iter()
+        .filter(|(t, r)| old.get(t) != Some(r))
+        .map(|(t, r)| (t, r.reason))
+        .collect()
+}
+
 /// A non-blank text field of `b`.
 pub(super) fn text<'a>(b: &'a Block, name: &str) -> Option<&'a str> {
     b.field_str(name).filter(|s| !s.trim().is_empty())
@@ -474,6 +642,12 @@ struct Version {
     removal: Option<Vec<RemovalCard>>,
     /// The quarantine names of each report `removal` names, by report hash.
     removal_reports: BTreeMap<Hash, Vec<String>>,
+    /// The decisions the version re-affirms, by id.
+    reaffirms: Vec<Reaffirmed>,
+    /// The change plan the version's record binds (none before store 17, O19).
+    plan_bound: Option<Hash>,
+    /// The version's change plan, as its cards read it.
+    plan: Result<VersionPlan, RdyError>,
 }
 
 impl Version {
@@ -515,9 +689,20 @@ impl Version {
             )
         };
         let mut decisions = vec![];
+        let mut reaffirms = vec![];
+        let canon = st.materialized(&Scope::Canon)?;
         for id in ids {
             let Some(b) = next.get(&id) else { continue };
             if decision::status(b) != Some(DecisionStatus::Proposed) {
+                let causes = reaffirmed_causes(canon.get(&id), b);
+                if !causes.is_empty() {
+                    reaffirms.push(Reaffirmed {
+                        r#ref: format!("{id}@{}", b.version_hash().short()),
+                        one_way: b.field_str("reversibility") == Some("one_way"),
+                        block: b.clone(),
+                        causes,
+                    });
+                }
                 continue;
             }
             let kinds = exception_kinds(b, &live, &tensions, || {
@@ -529,6 +714,8 @@ impl Version {
                 kinds,
             });
         }
+        let plan_bound = st.reader().plan_of_proposal(&pref.version, st.seq())?;
+        let plan = version_plan(st, &p, plan_bound);
         Ok(Version {
             pref,
             p,
@@ -540,6 +727,9 @@ impl Version {
             tensions,
             removal,
             removal_reports,
+            reaffirms,
+            plan_bound,
+            plan,
         })
     }
 
@@ -560,6 +750,20 @@ impl Version {
                 fix:
                     "propose it again with a summary in plain words for the person who approves it"
                         .into(),
+            });
+        }
+        // a bound version whose change plan cannot be read cannot show its deferrals; a version
+        // that fails another check (a conflict, say) says that first
+        if issues.is_empty()
+            && self.plan_bound.is_some()
+            && let Err(e) = &self.plan
+        {
+            issues.push(Issue {
+                severity: Severity::Error,
+                code: e.code,
+                block: None,
+                message: e.message.clone(),
+                fix: e.fix.clone(),
             });
         }
         issues.extend(self.rejected(st)?);
@@ -585,15 +789,38 @@ impl Version {
                 });
             }
         }
+        // D-GV465: a re-affirmation of a one_way decision the person rejected
+        for d in self.reaffirms.iter().filter(|d| d.one_way) {
+            if answered(st, &d.r#ref, AnswerAct::RejectReaffirm)? {
+                let id = &d.block.id;
+                issues.push(Issue {
+                    severity: Severity::Error,
+                    code: E_VALIDATION,
+                    block: Some(id.clone()),
+                    message: format!("{id}'s re-affirmation was rejected"),
+                    fix: "drop the re-affirmation and propose again".into(),
+                });
+            }
+        }
+        // D-AAQ9Z: deferrals the person refused; never an acceptance
+        if self.plan_bound.is_some() {
+            issues.extend(deferrals_refused(st, &self.pref)?);
+        }
         Ok(issues)
+    }
+
+    /// The version's deferral card (D-AAQ9Z), answered or not, with who raised it; none for a
+    /// version with no bound plan, no deferred non-code item, or a plan that cannot be read.
+    fn deferral_item(&self, now: i64) -> Option<Item> {
+        let plan = self.plan.as_ref().ok()?;
+        let mut it = deferral_item(&self.pref, plan)?;
+        self.raised(&mut it, now);
+        Some(it)
     }
 
     /// Who raised the version's items, when, and how long ago.
     fn raised(&self, it: &mut Item, now: i64) {
-        let at = self.p.provenance.at_ms;
-        it.raised_by = self.p.provenance.actor.clone();
-        it.raised_at = rfc3339(at);
-        it.age = age(at, now);
+        raised_from(&self.p, it, now);
     }
 
     /// The version's `approve` item.
@@ -630,7 +857,10 @@ impl Version {
             "approve",
             &approve,
             "Lands the proposal in canon.",
-            Some(approve_reason(self.exception_count())),
+            Some(approve_reason(
+                self.exception_count(),
+                self.deferral_item(now).is_some(),
+            )),
         );
         if self.removal.is_some() {
             approve.consequences.push(REMOVAL_IRREVERSIBLE.to_string());
@@ -685,6 +915,25 @@ impl Version {
         } else {
             supersedes.into_iter().collect::<Vec<_>>().join(", ")
         };
+        // D-GV465: the decisions it re-affirms that need no card of their own
+        let reaffirms: Vec<String> = self
+            .reaffirms
+            .iter()
+            .filter(|d| !d.one_way)
+            .map(|d| format!("{} (after {})", d.block.id, d.cause_list()))
+            .collect();
+        let reaffirms = if reaffirms.is_empty() {
+            "none".to_string()
+        } else {
+            reaffirms.join(REAFFIRMS_SEPARATOR)
+        };
+        let plan = match &self.plan {
+            Ok(p) => Ok(format!(
+                "{} open, {} closed, {} deferred",
+                p.counts.open, p.counts.closed, p.counts.deferred
+            )),
+            Err(e) => Err(e.clone()),
+        };
         let (blocking, advisory) =
             self.tensions
                 .iter()
@@ -707,7 +956,10 @@ impl Version {
             "moved"
         };
         let candidate = st.candidate_coverage(&self.built, &self.p.changes);
-        let fact = |name: &'static str, value: String| Fact { name, value };
+        let fact = |name: &'static str, value: String| Fact {
+            name: name.into(),
+            value,
+        };
         vec![
             fact(
                 "Changes",
@@ -719,8 +971,10 @@ impl Version {
             ),
             fact("Decisions", decisions),
             fact("Supersedes", supersedes),
+            fact(REAFFIRMS_FACT, reaffirms),
             fact("Reversibility", self.reversibility()),
             fact("Consequences", worked_out(self.consequences(st))),
+            fact("Change plan", worked_out(plan)),
             fact("Tensions", tensions),
             fact(
                 "Coverage",
@@ -743,10 +997,12 @@ impl Version {
 
     /// How many decisions of the version stand beside its batch as exceptions.
     fn exception_count(&self) -> usize {
-        self.decisions
+        let decisions = self
+            .decisions
             .iter()
             .filter(|d| !d.kinds.is_empty())
-            .count()
+            .count();
+        decisions + self.reaffirms.iter().filter(|d| d.one_way).count()
     }
 
     /// The reversibility each decision declares: one value for all, or `mixed` with each.
@@ -838,7 +1094,7 @@ impl Version {
                     .kinds
                     .iter()
                     .map(|(k, detail)| Fact {
-                        name: fact_name(*k),
+                        name: fact_name(*k).into(),
                         value: detail.clone(),
                     })
                     .collect();
@@ -865,6 +1121,37 @@ impl Version {
                 it
             })
             .collect();
+        // D-GV465: a one_way decision the version re-affirms stands beside the batch too
+        for d in self.reaffirms.iter().filter(|d| d.one_way) {
+            let title = text(&d.block, "title")
+                .or_else(|| text(&d.block, "statement"))
+                .unwrap_or_default();
+            let mut it = item(ItemKind::Confirm, &d.r#ref, title);
+            it.why = text(&d.block, "why").unwrap_or_default().to_string();
+            it.batch = Some(r.clone());
+            it.exception = Some(ExceptionKind::ReaffirmOneWay);
+            it.facts = vec![Fact {
+                name: fact_name(ExceptionKind::ReaffirmOneWay).into(),
+                value: d.cause_list(),
+            }];
+            it.options = vec![
+                option(
+                    "confirm",
+                    "It still holds",
+                    "Lets the batch land with this re-affirmation.",
+                    Some(&d.reason()),
+                ),
+                option(
+                    "reject",
+                    "Drop the re-affirmation",
+                    "The batch waits until its author drops the re-affirmation.",
+                    None,
+                ),
+                later(),
+            ];
+            self.raised(&mut it, now);
+            out.push(it);
+        }
         out.sort_by(|a, b| a.r#ref.cmp(&b.r#ref));
         out
     }
@@ -953,6 +1240,7 @@ fn fact_name(k: ExceptionKind) -> &'static str {
         ExceptionKind::Unapplied => "Applied by",
         ExceptionKind::NotRecommended => "Recommendation",
         ExceptionKind::BlockingTension => "Blocking",
+        ExceptionKind::ReaffirmOneWay => "Re-affirms",
     }
 }
 
@@ -978,6 +1266,7 @@ pub(super) fn item(kind: ItemKind, r#ref: &str, title: &str) -> Item {
         card_hash: String::new(),
         removal: None,
         removal_reports: BTreeMap::new(),
+        plan_binding: None,
     }
 }
 
@@ -999,14 +1288,26 @@ pub const APPROVE_REASON: &str = "its checks pass and nothing blocks it";
 pub const APPROVE_REASON_BESIDE: &str =
     "its checks pass, and it lands after you confirm each decision beside it";
 
+/// The approve option's reason when a deferral card stands beside the batch, with or without
+/// exceptions (D-AAQ9Z): the landing waits for an answer to each card.
+pub const APPROVE_REASON_CARDS: &str =
+    "its checks pass, and it lands after you answer each card beside it";
+
+/// The name of the batch fact that lists the decisions a version re-affirms with no card of
+/// their own (D-GV465).
+pub const REAFFIRMS_FACT: &str = "Re-affirms";
+/// What joins the decisions of [`REAFFIRMS_FACT`]: each is `<id> (after <cause list>)`.
+pub const REAFFIRMS_SEPARATOR: &str = "; ";
+
 /// The approve option's reason: computed from the batch card's own state, never the summary
-/// (D-D8FAB). The set is closed: [`APPROVE_REASON`] or [`APPROVE_REASON_BESIDE`]. It reads no
-/// answer, so an answer beside the batch never moves the batch card.
-fn approve_reason(exceptions: usize) -> &'static str {
-    if exceptions == 0 {
-        APPROVE_REASON
-    } else {
-        APPROVE_REASON_BESIDE
+/// (D-D8FAB). The set is closed: [`APPROVE_REASON`], [`APPROVE_REASON_BESIDE`] or, when the
+/// version has a deferral card, [`APPROVE_REASON_CARDS`]. It reads no answer, so an answer
+/// beside the batch never moves the batch card.
+fn approve_reason(exceptions: usize, deferral: bool) -> &'static str {
+    match (exceptions, deferral) {
+        (_, true) => APPROVE_REASON_CARDS,
+        (0, false) => APPROVE_REASON,
+        (_, false) => APPROVE_REASON_BESIDE,
     }
 }
 
@@ -1114,7 +1415,7 @@ mod tests {
             .propose_subset(&writer(), "work", "work", None, Some("Adds C."))
             .unwrap();
         let pref = r.resolve_proposal(&p.r#ref).unwrap();
-        let open = approval_holds(&r.read(), &pref).unwrap().open;
+        let open = approval_holds(&r.read(), &pref, true).unwrap().open;
         assert_eq!(open.len(), 1, "{open:#?}");
         let ex = &open[0];
         assert!(ex.r#ref.starts_with(&format!("{one_way}@")), "{}", ex.r#ref);
@@ -1131,10 +1432,15 @@ mod tests {
         };
         // a confirm of the decision's current version closes it
         let r = reopened(r, &answer(&ex.r#ref, AnswerAct::Confirm));
-        assert!(approval_holds(&r.read(), &pref).unwrap().open.is_empty());
+        assert!(
+            approval_holds(&r.read(), &pref, true)
+                .unwrap()
+                .open
+                .is_empty()
+        );
         // a later reject opens it again: a rejected decision has no confirm (F1, F2)
         let r = reopened(r, &answer(&ex.r#ref, AnswerAct::RejectDecision));
-        let holds = approval_holds(&r.read(), &pref).unwrap();
+        let holds = approval_holds(&r.read(), &pref, true).unwrap();
         let open = holds.open;
         assert_eq!(holds.rejected.len(), 1, "{:#?}", holds.rejected);
         assert_eq!(

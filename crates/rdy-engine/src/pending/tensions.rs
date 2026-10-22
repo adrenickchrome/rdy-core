@@ -90,7 +90,7 @@ fn advice_item(st: &ReadState, batch: &Item, p: &Proposal) -> Result<Option<Item
         })
         .collect();
     it.facts = vec![Fact {
-        name: "Advised digest",
+        name: "Advised digest".into(),
         value: crate::semantic::accept_advice::advised_digest(&advised).unwrap_or_default(),
     }];
     it.options = vec![
@@ -167,15 +167,15 @@ fn blocking_item(b: &Blocking, now: i64) -> Item {
     );
     it.facts = vec![
         Fact {
-            name: "Kind",
+            name: "Kind".into(),
             value: t.kind.name().to_string(),
         },
         Fact {
-            name: "Involves",
+            name: "Involves".into(),
             value: versions,
         },
         Fact {
-            name: "Blocks",
+            name: "Blocks".into(),
             value: t
                 .blocks()
                 .iter()

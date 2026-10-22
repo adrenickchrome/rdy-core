@@ -13,7 +13,10 @@
 //! 4. **In this batch.** One line for each decision of the batch (`members`).
 //! 5. **Facts.** `Facts (computed)` and one named line for each fact, in the order the item holds
 //!    them. The queue fills them in the closed order of the plan: Changes, Decisions, Supersedes,
-//!    Reversibility, Consequences, Tensions, Coverage, Confidence, Base, Exceptions.
+//!    Re-affirms, Reversibility, Consequences, Change plan, Tensions, Coverage, Confidence, Base,
+//!    Exceptions. A name as wide as the name column keeps two spaces before its value. The
+//!    Re-affirms line shows its first [`REAFFIRMS_SHOWN`] decisions, then `and <k> more`; the
+//!    item's JSON carries every one.
 //! 6. **Options.** `Options`, then each option numbered, its label, `recommended` at the right
 //!    of the recommended one, and what choosing it does. Below the recommended one stands
 //!    `Why recommended: <reason>`, unless the reason is empty (D-D8FAB).
@@ -46,9 +49,13 @@
 //! depend on the budget an agent passed. A card with removal requests hashes
 //! [`REMOVAL_CARD_DOMAIN`], that card's UTF-8 bytes, then the postcard bytes of its removal cards,
 //! so the digest binds each request, the hash of its complete report and every count even where
-//! the shown text is cut. Any other card's hash is the hash of its text alone, as before.
+//! the shown text is cut. A card with a plan binding (`Item::plan_binding`, O10) hashes
+//! [`PLAN_CARD_DOMAIN`], the hash of that card's UTF-8 bytes, then the hash of the binding's
+//! postcard bytes, so every member and reason is bound where the text leaves one out. Any other
+//! card's hash is the hash of its text alone, as before.
 
 use super::item::{ExceptionKind, Item, RemovalCard};
+use super::queue::{REAFFIRMS_FACT, REAFFIRMS_SEPARATOR};
 use crate::error::{
     RdyError, W_REDACTION_COPIES_MESSAGE, W_REDACTION_QUARANTINE_MESSAGE,
     W_REDACTION_QUOTES_MESSAGE, W_REDACTION_REUSE_MESSAGE, W_REDACTION_SECRET_MESSAGE,
@@ -65,6 +72,10 @@ pub const CARD_MAX_TOKENS: usize = 20_000;
 pub const CARD_DEFAULT_TOKENS: usize = 2_000;
 /// The domain prefix of the hash of a card with removal requests.
 pub const REMOVAL_CARD_DOMAIN: &[u8] = b"rdy-redaction-card-v1\0";
+/// The domain prefix of the hash of a card with a plan binding (O10).
+pub const PLAN_CARD_DOMAIN: &[u8] = b"rdy-plan-card-v1\0";
+/// The most decisions the text of the Re-affirms fact shows; JSON carries every one.
+pub const REAFFIRMS_SHOWN: usize = 20;
 /// The first line of each removal request's section.
 pub const REMOVAL_HEADING: &str = "Content removal";
 /// The line an approval of content removal adds to the approve option's consequences.
@@ -132,6 +143,18 @@ pub fn render_checked(item: &Item, max_tokens: usize) -> Result<String, RdyError
 /// the module docs).
 pub fn card_hash(item: &Item) -> Hash {
     let card = render(item, CARD_MAX_TOKENS);
+    if let Some(binding) = &item.plan_binding {
+        // O10: the rendered card's digest, then the digest of the complete binding, so every
+        // member and reason is bound where the text leaves one out
+        let mut bytes = Vec::with_capacity(PLAN_CARD_DOMAIN.len() + 64);
+        bytes.extend_from_slice(PLAN_CARD_DOMAIN);
+        bytes.extend_from_slice(&Hash::of(card.as_bytes()).0);
+        bytes.extend_from_slice(&rdy_model::hash_of(binding).0);
+        if let Some(removal) = &item.removal {
+            bytes.extend_from_slice(&encoded(removal));
+        }
+        return Hash::of(&bytes);
+    }
     let Some(removal) = &item.removal else {
         return Hash::of(card.as_bytes());
     };
@@ -200,7 +223,14 @@ fn build(item: &Item, keep_facts: usize, keep_members: usize) -> String {
     if !item.facts.is_empty() {
         let mut lines = vec!["Facts (computed)".to_string()];
         for f in item.facts.iter().take(keep_facts) {
-            lines.push(format!("  {:<NAME_WIDTH$}{}", f.name, one_line(&f.value)));
+            // a name as wide as the column keeps two spaces before its value
+            let pad = NAME_WIDTH.saturating_sub(f.name.chars().count()).max(2);
+            lines.push(format!(
+                "  {}{}{}",
+                f.name,
+                " ".repeat(pad),
+                one_line(&fact_text(&f.name, &f.value))
+            ));
         }
         if keep_facts < item.facts.len() {
             lines.push(cut_line(item.facts.len() - keep_facts, "facts"));
@@ -292,6 +322,7 @@ fn exception_words(kind: ExceptionKind) -> &'static str {
         ExceptionKind::Unapplied => "no content applies it",
         ExceptionKind::NotRecommended => "it is not recommended",
         ExceptionKind::BlockingTension => "a blocking tension involves it",
+        ExceptionKind::ReaffirmOneWay => "it re-affirms a one_way decision",
     }
 }
 
@@ -322,6 +353,23 @@ fn options(item: &Item) -> Vec<String> {
         }
     }
     lines
+}
+
+/// The text a fact shows: its value, but the Re-affirms fact shows its first
+/// [`REAFFIRMS_SHOWN`] decisions, then `and <k> more`.
+fn fact_text(name: &str, value: &str) -> String {
+    if name != REAFFIRMS_FACT {
+        return value.to_string();
+    }
+    let each: Vec<&str> = value.split(REAFFIRMS_SEPARATOR).collect();
+    if each.len() <= REAFFIRMS_SHOWN {
+        return value.to_string();
+    }
+    let more = each.len() - REAFFIRMS_SHOWN;
+    format!(
+        "{}{REAFFIRMS_SEPARATOR}and {more} more",
+        each[..REAFFIRMS_SHOWN].join(REAFFIRMS_SEPARATOR)
+    )
 }
 
 fn cut_line(n: usize, what: &str) -> String {
@@ -376,7 +424,7 @@ mod tests {
 
     fn fact(name: &'static str, value: &str) -> Fact {
         Fact {
-            name,
+            name: name.into(),
             value: value.to_string(),
         }
     }
@@ -402,6 +450,7 @@ mod tests {
             card_hash: String::new(),
             removal: None,
             removal_reports: BTreeMap::new(),
+            plan_binding: None,
         }
     }
 
@@ -419,8 +468,10 @@ mod tests {
                 "1 new: D-0931 \"Guest readers need no account\"",
             ),
             fact("Supersedes", "none"),
+            fact("Re-affirms", "none"),
             fact("Reversibility", "two_way, declared by the proposer"),
             fact("Consequences", "4 returned"),
+            fact("Change plan", "2 open, 1 closed, 0 deferred"),
             fact(
                 "Tensions",
                 "0 blocking, 1 advisory, answers not recorded yet",
@@ -507,8 +558,10 @@ Facts (computed)
   Changes         2 docs, 3 blocks
   Decisions       1 new: D-0931 \"Guest readers need no account\"
   Supersedes      none
+  Re-affirms      none
   Reversibility   two_way, declared by the proposer
   Consequences    4 returned
+  Change plan     2 open, 1 closed, 0 deferred
   Tensions        0 blocking, 1 advisory, answers not recorded yet
   Coverage        81% \u{2192} 84%
   Confidence      high
@@ -616,8 +669,10 @@ Options
                         "Changes",
                         "Decisions",
                         "Supersedes",
+                        "Re-affirms",
                         "Reversibility",
                         "Consequences",
+                        "Change plan",
                         "Tensions",
                         "Coverage",
                         "Confidence",
@@ -628,7 +683,7 @@ Options
                     .any(|n| l.trim_start().starts_with(n))
             })
             .count();
-        assert_eq!(shown + cut, 10, "{card}");
+        assert_eq!(shown + cut, 12, "{card}");
         // The decision lines stay while facts are enough to cut.
         assert!(
             card.contains("  D-0933  Guest links expire after 30 days"),
@@ -651,7 +706,7 @@ Options
             assert!(card.contains("  3. Later"), "{card}");
             assert!(card.contains("Lands the proposal in canon."), "{card}");
             assert!(
-                card.contains("(10 facts cut; rdy_pending with a larger max_tokens shows them)"),
+                card.contains("(12 facts cut; rdy_pending with a larger max_tokens shows them)"),
                 "{card}"
             );
             assert!(
@@ -697,7 +752,7 @@ Options
 
     #[test]
     fn di4_every_exception_kind_has_card_text() {
-        assert_eq!(ExceptionKind::ALL.len(), 5);
+        assert_eq!(ExceptionKind::ALL.len(), 6);
         for kind in ExceptionKind::ALL {
             let mut i = exception();
             i.exception = Some(kind);
@@ -723,7 +778,8 @@ Options
                 "one_way",
                 "unapplied",
                 "not_recommended",
-                "blocking_tension"
+                "blocking_tension",
+                "reaffirm_one_way"
             ]
         );
     }
@@ -735,7 +791,7 @@ Options
         assert_eq!(e.message, "unknown exception kind sideways");
         assert_eq!(
             e.fix,
-            "use one of: against, one_way, unapplied, not_recommended, blocking_tension"
+            "use one of: against, one_way, unapplied, not_recommended, blocking_tension, reaffirm_one_way"
         );
         // The wire (serde) refuses it too, and never makes a kind of it.
         assert!(serde_json::from_str::<ExceptionKind>("\"sideways\"").is_err());

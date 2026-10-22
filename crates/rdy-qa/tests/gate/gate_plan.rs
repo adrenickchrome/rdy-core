@@ -118,6 +118,23 @@ fn land(r: &mut Rdy, p: &ProposalInfo) -> Hash {
     land_version(r, &p.r#ref, &p.id)
 }
 
+/// The person accepts the deferral card of `pref` (D-AAQ9Z, Task 12); returns the ANSWER.
+fn accept_deferrals(r: &mut Rdy, pref: &str) -> Hash {
+    let info = r
+        .answer(
+            &approver(),
+            PERSON,
+            rdy_engine::answer::AnswerRequest {
+                r#ref: format!("defer:{pref}"),
+                option: "o1".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("accept the deferrals of {pref}: {e}"));
+    assert_eq!(info.act, "accept_deferrals");
+    h(info.answer.as_deref().unwrap())
+}
+
 /// A version of `view` as a store-16 engine wrote it: the raw proposal writer, no plan.
 fn unbound(r: &mut Rdy, view: &str) -> (Hash, String) {
     let by = writer().provenance();
@@ -461,8 +478,8 @@ fn cp10_pre17_proposal_lands_under_store16_rules() {
 }
 
 /// D-4JMPH: the seal records every computed item with its outcome (all ten) and names exactly
-/// the decisions the landing creates, supersedes, revokes, refines and re-affirms; deferred
-/// items have no answer pointer before Task 12. It carries the chain's cumulative answers and
+/// the decisions the landing creates, supersedes, revokes, refines and re-affirms; the deferred
+/// item points to the version's acceptance of its deferral card (Task 12). It carries the chain's cumulative answers and
 /// the version's recorded HEADs, after the final version's own bound plan.
 #[test]
 fn cp10_landing_seals_all_outcomes_and_named_decisions() {
@@ -621,6 +638,7 @@ fn cp10_landing_seals_all_outcomes_and_named_decisions() {
     assert_eq!(bplan.heads, heads_at(&h2));
     let before = read_plan(&r, proposal_q(&p.r#ref));
     confirm_exceptions(&mut r, &approver(), &p.r#ref);
+    let accepted = accept_deferrals(&mut r, &p.r#ref);
     let start = r.store().log_end();
     let l = land_now(&mut r, &p.id);
     let landing = r.read().reader().landing(&l).unwrap();
@@ -669,10 +687,11 @@ fn cp10_landing_seals_all_outcomes_and_named_decisions() {
             kind.as_str()
         );
     }
-    assert!(
-        x.items.iter().all(|i| i.answer.is_none()),
-        "no acceptance before Task 12"
-    );
+    // Task 12: the deferred document item points to the version's acceptance; no other does
+    for i in &x.items {
+        let want = (i.outcome == PlanOutcome::Deferred).then_some(accepted);
+        assert_eq!(i.answer, want, "{i:#?}");
+    }
     // the seal holds exactly the version's items, as its read listed them
     let listed: BTreeSet<String> = before["items"]
         .as_array()
@@ -828,6 +847,7 @@ fn cp10_landing_seals_the_approved_versions_bound_answers() {
         assert_eq!(state(&confirm), "deferred", "{acceptance}: {read:#}");
         assert_eq!(state(&update), "open", "{acceptance}: {read:#}");
 
+        let accepted = accept_deferrals(&mut r, &p.r#ref);
         let l = land(&mut r, &p);
         let landing = r.read().reader().landing(&l).unwrap();
         let fin = landing.proposal;
@@ -846,6 +866,10 @@ fn cp10_landing_seals_the_approved_versions_bound_answers() {
             PlanOutcome::Deferred,
             "{acceptance}: the bound defer"
         );
+        let deferred = item_hash(&id(&s.a), &s.b, PlanKind::Confirm);
+        let x = sealed.seal.as_ref().unwrap();
+        let item = x.items.iter().find(|i| i.id == deferred).unwrap();
+        assert_eq!(item.answer, Some(accepted), "{acceptance}: the acceptance");
         assert_eq!(
             outcome(&sealed, &s.a, &s.p, PlanKind::Update),
             PlanOutcome::Open,

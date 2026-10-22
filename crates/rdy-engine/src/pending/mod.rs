@@ -13,6 +13,7 @@
 
 pub mod card;
 pub mod item;
+pub mod plan;
 mod questions;
 pub mod queue;
 mod snooze;
@@ -20,6 +21,8 @@ mod tensions;
 
 pub use card::{CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, card_hash, render, render_checked};
 pub use item::{ExceptionKind, Fact, Item, ItemKind, ItemOption, Recommended, RemovalCard, age};
+pub use plan::{DeferralBinding, PlanCardBinding};
 pub use queue::{
-    APPROVE_REASON, APPROVE_REASON_BESIDE, NotReady, Pending, PendingCounts, PendingQuery,
+    APPROVE_REASON, APPROVE_REASON_BESIDE, APPROVE_REASON_CARDS, NotReady, Pending, PendingCounts,
+    PendingQuery, REAFFIRMS_FACT,
 };

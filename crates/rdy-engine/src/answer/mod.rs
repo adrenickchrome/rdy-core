@@ -258,8 +258,10 @@ impl Rdy {
     }
 
     /// The checks `answer_all_recommended` makes before it answers anything: one card hash for
-    /// each ref (or none), the relay table, and the removal pre-scan (D-CC90E): a list that holds
-    /// a removal is `E_REDACTION_HUMAN` as a whole. Returns the answerer of every item.
+    /// each ref (or none), the relay table, the removal pre-scan (D-CC90E: a list that holds a
+    /// removal is `E_REDACTION_HUMAN` as a whole) and the deferral pre-scan (D-AAQ9Z: a deferral
+    /// card has no recommended option, so a list that names one is `E_BAD_INPUT` as a whole).
+    /// Returns the answerer of every item.
     pub(crate) fn recommended_answerer(
         &self,
         s: &Session,
@@ -288,6 +290,18 @@ impl Rdy {
                 None => e,
             });
         }
+        // D-AAQ9Z: a deferral card has no recommended option, so a list that names one is
+        // refused as a whole, before anything is answered
+        if let Some(r) = refs
+            .iter()
+            .find(|r| r.starts_with("defer:") && is_item_ref(r))
+        {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("{r} has no recommended option"),
+                "answer it on its own",
+            ));
+        }
         Ok(by)
     }
 
@@ -314,7 +328,7 @@ impl Rdy {
     ) -> Result<AnswerStep, RdyError> {
         let bound = bind(&self.read(), person, r, shown, by.relay.is_some(), pick)?;
         match (bound.item.kind, bound.option.id.as_str()) {
-            (_, "later") | (ItemKind::Approve | ItemKind::Confirm, _) => {
+            (_, "later") | (ItemKind::Approve | ItemKind::Confirm | ItemKind::Defer, _) => {
                 batch::act(self, &by.who, by.relay.clone(), by.kind, bound, note)
             }
             (ItemKind::Answer, _) => {
@@ -501,8 +515,9 @@ fn bind(
 
 /// Whether `r` is an item ref (O3, closed): `P-<id>@<n>` (an approval), `<block id>@<version
 /// short>` (a decision's confirm or a question's answer: the 12 lowercase hex digits of the
-/// block's version), `advice:P-<id>@<n>` (a version's advised tensions) or a tension id (`tn-`
-/// and 6 to 64 hex digits, or the hex alone). The refs of relayed acts that are not items
+/// block's version), `advice:P-<id>@<n>` (a version's advised tensions), `defer:P-<id>@<n>` (a
+/// version's deferral card, an explicit version only) or a tension id (`tn-` and 6 to 64 hex
+/// digits, or the hex alone). The refs of relayed acts that are not items
 /// (`tag:`, `own:`, `stale:`, `propose:`) are not item refs.
 pub fn is_item_ref(r: &str) -> bool {
     let proposal_version = |p: &str| p.contains('@') && is_proposal_ref(p);
@@ -513,6 +528,9 @@ pub fn is_item_ref(r: &str) -> bool {
                 && v.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
         })
     };
+    if let Some(p) = r.strip_prefix("defer:") {
+        return proposal_version(p);
+    }
     match r.strip_prefix("advice:") {
         Some(p) => proposal_version(p),
         None => proposal_version(r) || block_version(r) || tension_hex(r).is_some(),

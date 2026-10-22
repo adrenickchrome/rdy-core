@@ -6,6 +6,7 @@ mod gate_answer;
 mod gate_exceptions;
 mod gate_intake_e2e;
 mod gate_plan;
+mod gate_plan_cards;
 mod gate_semantic;
 mod gate_signing;
 mod gate_tensions;

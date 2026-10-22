@@ -273,7 +273,9 @@ fn outcome_of(c: &compute::PlanCandidate, answers: &[PlanAnswer]) -> PlanOutcome
 }
 
 /// Prepares what the landing of proposal version `version` (`p`) seals, written by `by`
-/// (the approval's provenance), writing nothing. A bound version uses its bound plan's answers
+/// (the approval's provenance), writing nothing. `accepted` is the `AcceptDeferrals` ANSWER
+/// bound to the approved version's deferral card (D-AAQ9Z): each deferred non-code item points
+/// to it; a code item never does. A bound version uses its bound plan's answers
 /// (cumulative to its propose: an answer the view recorded after it is not the version's),
 /// its recorded HEADs and its chain's first HEADs, and its landing's plans follow the view's
 /// chain; an unbound one the HEADs captured once, as both ends, and no answers (O19).
@@ -282,6 +284,7 @@ pub(crate) fn prepare_landing_plan(
     version: &Hash,
     p: &Proposal,
     by: &Provenance,
+    accepted: Option<Hash>,
 ) -> Result<LandingPlan, RdyError> {
     let reader = st.reader();
     let (chain, answers, heads, first) = match reader.plan_of_proposal(version, st.seq())? {
@@ -311,15 +314,20 @@ pub(crate) fn prepare_landing_plan(
     let items: Vec<SealedItem> = computed
         .items
         .iter()
-        .map(|c| SealedItem {
-            id: c.id,
-            kind: c.kind,
-            subject: c.subject.clone(),
-            cause: c.cause.clone(),
-            edge: c.edge.clone(),
-            outcome: outcome_of(c, &answers),
-            // the acceptance of a deferral is attached with the deferral card (Task 12)
-            answer: None,
+        .map(|c| {
+            let outcome = outcome_of(c, &answers);
+            let deferred =
+                outcome == PlanOutcome::Deferred && c.kind != PlanKind::UpdateImplementation;
+            SealedItem {
+                id: c.id,
+                kind: c.kind,
+                subject: c.subject.clone(),
+                cause: c.cause.clone(),
+                edge: c.edge.clone(),
+                outcome,
+                // the acceptance of this version's deferral card (D-AAQ9Z)
+                answer: if deferred { accepted } else { None },
+            }
         })
         .collect();
     Ok(LandingPlan {

@@ -995,6 +995,17 @@ fn exceptions_open(pref: &ProposalRef, p: &Proposal, open: &[Item]) -> RdyError 
     .with_corrected(serde_json::json!({ "exceptions": cards }))
 }
 
+/// D-AAQ9Z: the refusal of an approval while the deferral card of `pref` (`card`, listing `n`
+/// deferrals) has no answer that accepts it. It carries the card in `corrected.deferral`.
+fn deferrals_open(pref: &ProposalRef, card: &Item, n: usize) -> RdyError {
+    RdyError::new(
+        E_DEFERRAL_OPEN,
+        format!("{n} deferrals of {pref} have no answer"),
+        format!("answer the deferral card first: {}", card.r#ref),
+    )
+    .with_corrected(serde_json::json!({ "deferral": card_of(card) }))
+}
+
 /// `E_BLOCKING_TENSION` for the refusing tensions of version `pref`: one issue per tension. The
 /// fix names what resolves each refusing kind ([`crate::tensions::resolve_hint`]), each distinct
 /// hint once, in the order the tensions come.
@@ -2583,25 +2594,28 @@ impl Rdy {
         if !refusing.is_empty() {
             return Err(blocking_tensions(&pref, &refusing));
         }
-        // F2 (D-DKJS5, D-T5S9A): every approval path waits until each exception of the version
-        // has a confirm answer. F1: a decision whose current version the person rejected never
-        // lands, exception or not (final review fix round 1, R1), with the issue readiness gives.
-        // Only a proposed decision can be an exception or rejected, so a version that writes no
-        // decision skips the read.
+        // F2 (D-DKJS5, D-T5S9A, D-GV465): every approval path waits until each exception of the
+        // version has a confirm answer. F1: a decision whose current version the person
+        // rejected never lands, exception or not (final review fix round 1, R1), with the issue
+        // readiness gives; nor does a rejected re-affirmation or a refused deferral card. Then
+        // D-AAQ9Z: an unanswered deferral card, on a version with no decision op too. Only a
+        // version that writes a decision can carry an exception or a rejection of one, so only
+        // it reads the version whole.
         let decides = changes.iter().flat_map(|c| &c.ops).any(|op| {
             matches!(op, Op::Create { block } | Op::Update { block, .. }
                 if block.block_type == decision::DECISION)
         });
-        if decides {
-            let holds = approval_holds(&st, &pref)?;
-            if !holds.open.is_empty() {
-                return Err(exceptions_open(&pref, &p, &holds.open));
-            }
-            if let Some(first) = holds.rejected.first() {
-                let mut e = RdyError::new(E_VALIDATION, first.message.clone(), first.fix.clone());
-                e.issues = holds.rejected;
-                return Err(e);
-            }
+        let holds = approval_holds(&st, &pref, decides)?;
+        if !holds.open.is_empty() {
+            return Err(exceptions_open(&pref, &p, &holds.open));
+        }
+        if let Some(first) = holds.rejected.first() {
+            let mut e = RdyError::new(E_VALIDATION, first.message.clone(), first.fix.clone());
+            e.issues = holds.rejected;
+            return Err(e);
+        }
+        if let Some((card, n)) = &holds.deferral {
+            return Err(deferrals_open(&pref, card, *n));
         }
 
         // 1. prospective canon: canon + the proposal's own changes
@@ -2739,7 +2753,8 @@ impl Rdy {
         // D-4JMPH: the version's complete outcome, from its recorded canon and HEADs (or, for
         // a version with no bound plan, the HEADs captured once, O19), before anything is written
         let approver = s.provenance();
-        let sealing = crate::plan::lifecycle::prepare_landing_plan(&st, &pid, &p, &approver)?;
+        let sealing =
+            crate::plan::lifecycle::prepare_landing_plan(&st, &pid, &p, &approver, holds.accepted)?;
 
         // 4. prepare the one write (atom1): the acceptance change, the final proposal version,
         // the snapshot, the landing, the view's rebase and the refs. Nothing is written yet.

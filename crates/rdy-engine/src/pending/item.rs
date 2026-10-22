@@ -1,10 +1,12 @@
 //! The queue item (D-JV6Z8): one shape on every surface.
 
+use super::plan::PlanCardBinding;
 use crate::card_words::REASON_MAX;
 use crate::error::{E_BAD_INPUT, RdyError};
 use rdy_model::Hash;
 use rdy_model::redaction::ReasonClass;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
@@ -20,6 +22,8 @@ pub enum ItemKind {
     Answer,
     /// Resolve tensions.
     Resolve,
+    /// Accept or refuse the deferrals a proposal version carries (D-AAQ9Z).
+    Defer,
 }
 
 impl ItemKind {
@@ -30,6 +34,7 @@ impl ItemKind {
             ItemKind::Confirm => "confirm",
             ItemKind::Answer => "answer",
             ItemKind::Resolve => "resolve",
+            ItemKind::Defer => "defer",
         }
     }
 }
@@ -51,16 +56,19 @@ pub enum ExceptionKind {
     NotRecommended,
     /// A blocking tension involves it.
     BlockingTension,
+    /// The version re-affirms a `one_way` decision (D-GV465).
+    ReaffirmOneWay,
 }
 
 impl ExceptionKind {
     /// Every kind, in the order the docs list them.
-    pub const ALL: [ExceptionKind; 5] = [
+    pub const ALL: [ExceptionKind; 6] = [
         ExceptionKind::Against,
         ExceptionKind::OneWay,
         ExceptionKind::Unapplied,
         ExceptionKind::NotRecommended,
         ExceptionKind::BlockingTension,
+        ExceptionKind::ReaffirmOneWay,
     ];
 
     /// The name on the wire.
@@ -71,6 +79,7 @@ impl ExceptionKind {
             ExceptionKind::Unapplied => "unapplied",
             ExceptionKind::NotRecommended => "not_recommended",
             ExceptionKind::BlockingTension => "blocking_tension",
+            ExceptionKind::ReaffirmOneWay => "reaffirm_one_way",
         }
     }
 }
@@ -146,10 +155,11 @@ impl Serialize for Recommended {
     }
 }
 
-/// One computed fact, shown as a named line on the card.
+/// One computed fact, shown as a named line on the card. Most names are fixed words; a deferral
+/// card names each item it lists (`<subject> (after <cause>)`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Fact {
-    pub name: &'static str,
+    pub name: Cow<'static, str>,
     pub value: String,
 }
 
@@ -187,6 +197,10 @@ pub struct Item {
     /// never serialized and not in a card's encoding; the card text it decides is bound.
     #[serde(skip)]
     pub removal_reports: BTreeMap<Hash, Vec<String>>,
+    /// What a plan card binds beyond its text (O10): every member and reason, also those the
+    /// text leaves out. None for every other item; omitted from JSON then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_binding: Option<PlanCardBinding>,
 }
 
 /// The facts of one removal request a version carries, as its approval card shows and binds
