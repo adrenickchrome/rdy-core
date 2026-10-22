@@ -832,10 +832,10 @@ fn reason_of(act: PlanAct, reason: Option<&str>) -> Result<String, RdyError> {
 /// item. Nothing is written. Each item resolves to one full item; an item answered twice, an
 /// act its kind does not take, or a confirm or defer without a reason of 1 to 2000 characters
 /// is refused before any answer is kept. Done keeps no reason. Each answer keeps the item's
-/// subject and cause content hashes and `session` as its author.
+/// subject and cause content hashes and `by` as its author (the writer reads its clock once).
 pub(crate) fn prepare_plan_answers(
     st: &ReadState,
-    session: &Session,
+    by: &Provenance,
     view: &str,
     computed: &ComputedPlan,
     prior: &[PlanAnswer],
@@ -852,7 +852,6 @@ pub(crate) fn prepare_plan_answers(
         }
     };
     let held = OnceCell::new();
-    let by = session.provenance();
     let mut fresh: BTreeMap<Hash, PlanAnswer> = BTreeMap::new();
     for input in inputs {
         let c = resolve_item(computed, &input.item, &scope, &report, &held)?;
@@ -923,8 +922,14 @@ impl Rdy {
             return Err(answers_limit());
         }
         let vp = ViewPlan::read(&st, view)?;
-        let cumulative =
-            prepare_plan_answers(&st, session, view, &vp.computed, vp.prior(), answers)?;
+        let cumulative = prepare_plan_answers(
+            &st,
+            &session.provenance(),
+            view,
+            &vp.computed,
+            vp.prior(),
+            answers,
+        )?;
         let (stable, prev) = vp.chain.as_ref().map_or((None, None), Chain::next_links);
         let plan = Plan {
             stable,
@@ -1025,7 +1030,8 @@ mod tests {
             act: PlanAct::Defer,
             reason: Some("later".into()),
         }];
-        let e = prepare_plan_answers(&st, &s, "w", &plan, &prior, &input).unwrap_err();
+        let by = s.provenance();
+        let e = prepare_plan_answers(&st, &by, "w", &plan, &prior, &input).unwrap_err();
         assert_eq!(e.code, E_LIMIT);
         assert_eq!(e.message, "change plan exceeds 100000 plan answers");
         assert_eq!(e.fix, "split the answers into smaller plans");
@@ -1036,7 +1042,7 @@ mod tests {
             ..prior[0].clone()
         });
         prior.sort_by_key(|a| a.item);
-        let out = prepare_plan_answers(&st, &s, "w", &plan, &prior, &input).unwrap();
+        let out = prepare_plan_answers(&st, &by, "w", &plan, &prior, &input).unwrap();
         assert_eq!(out.len(), MAX_PLAN_ANSWERS);
         let mine = out.iter().find(|a| a.item == target).unwrap();
         assert_eq!(

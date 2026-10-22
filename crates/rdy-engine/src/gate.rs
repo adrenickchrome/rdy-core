@@ -2186,9 +2186,11 @@ impl Rdy {
                 crate::consequence::CONFLICT_FIX,
             ));
         }
+        // the version's provenance, its plan's and its new answers' (one clock read)
+        let by = s.provenance();
         let plan = crate::plan::lifecycle::prepare_proposal_plan(
             &st,
-            s,
+            &by,
             view,
             candidate.as_deref(),
             plan_answers,
@@ -2211,7 +2213,6 @@ impl Rdy {
             set: alt_label(&a.set),
             member: a.member.clone(),
         });
-        let by = s.provenance();
         // the relay's ANSWER: the person proposes, the agent relays (O32); the store sets targets
         let answer = relay.as_ref().map(|r| Answer {
             item: format!("propose:{view}"),

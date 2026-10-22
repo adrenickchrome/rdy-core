@@ -30,7 +30,7 @@ use super::api::{
 };
 use super::compute::{self, ComputedPlan};
 use crate::alt::AltPick;
-use crate::{RdyError, ReadState, Session};
+use crate::{RdyError, ReadState};
 use rdy_model::plan::{
     Plan, PlanAct, PlanAnswer, PlanHead, PlanKind, PlanOutcome, PlanSeal, SealedItem,
 };
@@ -188,15 +188,15 @@ fn assess(computed: &ComputedPlan, answers: &[PlanAnswer]) -> (PlanSummary, Vec<
     (summary, warnings)
 }
 
-/// Prepares the plan a propose of `view` binds (see the module docs), writing nothing: the
-/// HEADs captured now, the view's live chain, the candidate `candidate` (the version's changes
+/// Prepares the plan a propose of `view` binds (see the module docs), writing nothing; its new
+/// answers are `by`'s, the version's provenance: the HEADs captured now, the view's live chain, the candidate `candidate` (the version's changes
 /// with rdy's key change, on canon's head) and `inputs` validated against it, all before any
 /// frame is appended. `None` is a version with a blocking conflict, which has no candidate
 /// until it is resolved: it binds the chain's answers as they are, with an empty summary (the
 /// caller refuses its answers).
 pub(crate) fn prepare_proposal_plan(
     st: &ReadState,
-    session: &Session,
+    by: &Provenance,
     view: &str,
     candidate: Option<&[Change]>,
     inputs: &[PlanAnswerInput],
@@ -209,7 +209,7 @@ pub(crate) fn prepare_proposal_plan(
     let (answers, summary, warnings) = match candidate {
         Some(changes) => {
             let computed = compute::compute_changes(st, changes, st.canon_head(), &heads, first)?;
-            let answers = prepare_plan_answers(st, session, view, &computed, prior, inputs)?;
+            let answers = prepare_plan_answers(st, by, view, &computed, prior, inputs)?;
             let (summary, warnings) = assess(&computed, &answers);
             (answers, summary, warnings)
         }
