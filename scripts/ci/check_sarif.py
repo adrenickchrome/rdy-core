@@ -21,7 +21,7 @@ import urllib.parse
 import urllib.request
 
 
-MAX_DIAGNOSTICS = 100
+SUMMARY_LINES = 100
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -162,12 +162,24 @@ def inspect_sarif(document, repository_paths=None):
             rule_count += len(rules)
         if not rule_count:
             raise ValueError('empty rule inventory')
-        for invocation in run.get('invocations', []):
-            if invocation.get('executionSuccessful') is False:
+        invocations = run.get('invocations')
+        if not isinstance(invocations, list) or not invocations:
+            raise ValueError('missing analyzer invocations')
+        for invocation in invocations:
+            # The execution status must be stated, as a JSON boolean.
+            if not isinstance(invocation, dict) or type(invocation.get('executionSuccessful')) is not bool:
+                raise ValueError('invalid analyzer invocation')
+            if not invocation['executionSuccessful']:
                 raise ValueError('analyzer execution failed')
-            notifications = (invocation.get('toolExecutionNotifications', [])
-                             + invocation.get('toolConfigurationNotifications', []))
+            notifications = []
+            for key in ('toolExecutionNotifications', 'toolConfigurationNotifications'):
+                value = invocation.get(key, [])
+                if not isinstance(value, list):
+                    raise ValueError('invalid analyzer notifications')
+                notifications += value
             for notification in notifications:
+                if not isinstance(notification, dict):
+                    raise ValueError('invalid analyzer notification')
                 if notification.get('level') == 'error':
                     raise ValueError('analysis reported an error')
         results = run.get('results')
@@ -189,7 +201,7 @@ def inspect_sarif(document, repository_paths=None):
                 score = None
                 blocking = level == 'error'
             blocked += int(blocking)
-            if blocking and repository_paths is not None and len(diagnostics) < MAX_DIAGNOSTICS:
+            if blocking and repository_paths is not None:
                 diagnostics.append(blocking_diagnostic(result, rule, score, run, repository_paths))
             count += 1
     summary = {'results': count, 'blocking_results': blocked}
@@ -204,24 +216,27 @@ def severity_label(score):
     return ('critical' if score >= 9 else 'high') + ' ' + format(score, 'g')
 
 
-def result_lines(diagnostics, omitted):
+def result_lines(diagnostics):
     lines = []
     for item in diagnostics:
         location = item['location']
         where = location['path'] + ':' + str(location['line']) if location else '(location withheld)'
         lines.append(item['rule_id'] + '  ' + severity_label(item['severity']) + '  ' + where)
-    if omitted:
-        lines.append('... ' + str(omitted) + ' more not listed')
     return lines
 
 
 def write_summary(title, lines):
+    """The step summary shows at most SUMMARY_LINES lines; the log always has the full list."""
     path = os.environ.get('GITHUB_STEP_SUMMARY')
     if not path:
         return
     with open(path, 'a', encoding='utf-8') as summary:
         summary.write('## ' + title + '\n\n')
-        summary.write(''.join('- `' + line + '`\n' for line in lines) if lines else 'None.\n')
+        shown = lines[:SUMMARY_LINES]
+        summary.write(''.join('- `' + line + '`\n' for line in shown) if shown else 'None.\n')
+        if len(lines) > len(shown):
+            summary.write('\n' + str(len(lines) - len(shown)) + ' more not shown here. The full list is in the '
+                          'job log and in the codeql-sarif artifact.\n')
         summary.write('\n')
 
 
@@ -232,10 +247,10 @@ def sarif_main(directory):
     repository_paths = set(subprocess.check_output(
         ['git', 'ls-files', '-z'], cwd=ROOT).decode('utf-8').split('\0')) - {''}
     summaries = [inspect_sarif(json.loads(p.read_text()), repository_paths) for p in paths]
-    diagnostics = [item for summary in summaries for item in summary['blocking_diagnostics']][:MAX_DIAGNOSTICS]
+    diagnostics = [item for summary in summaries for item in summary['blocking_diagnostics']]
     high = sum(s['blocking_results'] for s in summaries)
     results = sum(s['results'] for s in summaries)
-    lines = result_lines(diagnostics, high - len(diagnostics))
+    lines = result_lines(diagnostics)
     print('CodeQL SARIF: ' + str(len(paths)) + ' file(s), ' + str(results) + ' result(s), '
           + str(high) + ' high or critical. Open alerts decide whether they block.')
     for line in lines:
@@ -244,6 +259,9 @@ def sarif_main(directory):
     return 0
 
 
+# The code-scanning alert fields this gate reads, with every value the REST API documents.
+ALERT_STATES = ('open', 'dismissed', 'fixed')
+SEVERITY_LEVELS = ('low', 'medium', 'high', 'critical')
 BLOCKING_LEVELS = ('high', 'critical')
 PAGE_SIZE = 100
 MAX_PAGES = 100
@@ -259,7 +277,11 @@ def clean(value, limit=200):
 
 
 def blocking_alerts(alerts, tool):
-    """Open alerts of this tool at security severity high or critical, in any category."""
+    """Open alerts of this tool at security severity high or critical, in any category.
+
+    Every record is checked first: an alert this gate cannot read fails it, never passes it.
+    A security severity of null (an unscored rule) is valid and does not block.
+    """
     if not isinstance(alerts, list):
         raise ValueError('invalid alert list')
     blocking = []
@@ -268,12 +290,19 @@ def blocking_alerts(alerts, tool):
             raise ValueError('invalid alert')
         state, rule = alert.get('state'), alert.get('rule')
         tool_info, instance = alert.get('tool'), alert.get('most_recent_instance')
-        if (not isinstance(state, str) or not isinstance(rule, dict)
-                or not isinstance(tool_info, dict) or not isinstance(instance, dict)):
+        if not isinstance(rule, dict) or not isinstance(tool_info, dict) or not isinstance(instance, dict):
             raise ValueError('invalid alert')
-        if state != 'open' or tool_info.get('name') != tool:
-            continue
-        if rule.get('security_severity_level') in BLOCKING_LEVELS:
+        if not isinstance(state, str) or state not in ALERT_STATES:
+            raise ValueError('unknown alert state')
+        name = tool_info.get('name')
+        if not isinstance(name, str) or not name:
+            raise ValueError('alert without a tool name')
+        if 'security_severity_level' not in rule:
+            raise ValueError('alert without a security severity field')
+        level = rule['security_severity_level']
+        if level is not None and (not isinstance(level, str) or level not in SEVERITY_LEVELS):
+            raise ValueError('unknown alert security severity')
+        if state == 'open' and name == tool and level in BLOCKING_LEVELS:
             blocking.append(alert)
     return blocking
 
@@ -286,25 +315,59 @@ def alert_line(alert):
             + clean(rule.get('security_severity_level')) + '  ' + where)
 
 
+def next_link(header, api, repository, query):
+    """The rel="next" URL of a Link header, checked, or None when there is no next page."""
+    if header is None:
+        return None
+    if not isinstance(header, str):
+        raise AlertQueryError('invalid Link header')
+    found = []
+    for part in header.split(','):
+        if not part.strip():
+            continue
+        match = re.fullmatch(r'\s*<([^<>\s]+)>((?:\s*;\s*[A-Za-z]+="[^"]*")*)\s*', part)
+        if not match:
+            raise AlertQueryError('invalid Link header')
+        if any('next' in rel.split() for rel in re.findall(r'rel="([^"]*)"', match.group(2))):
+            found.append(match.group(1))
+    if not found:
+        return None
+    if len(found) > 1:
+        raise AlertQueryError('more than one next link')
+    url, base = urllib.parse.urlsplit(found[0]), urllib.parse.urlsplit(api.rstrip('/'))
+    params = urllib.parse.parse_qs(url.query)
+    # GitHub may name the repository by id (/repositories/<id>/...) in pagination links.
+    paths = (base.path + '/repos/' + repository + '/code-scanning/alerts').lower()
+    if (url.scheme != 'https' or url.netloc != base.netloc or url.fragment
+            or not (url.path.lower() == paths or re.fullmatch(
+                re.escape(base.path) + r'/repositories/[0-9]+/code-scanning/alerts', url.path))
+            or any(params.get(key) != [value] for key, value in query.items() if key != 'page')):
+        raise AlertQueryError('the next link is not this repository\'s alert list')
+    return found[0]
+
+
 def fetch_alerts(api, repository, token, tool, ref):
-    """All open alerts of the tool on the ref, page by page. Any failure raises AlertQueryError."""
+    """All open alerts of the tool on the ref, following the Link header to the last page.
+
+    Any failure raises AlertQueryError.
+    """
     if not api.startswith('https://'):
         raise AlertQueryError('the API URL is not HTTPS')
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository or ''):
         raise AlertQueryError('GITHUB_REPOSITORY is missing or invalid')
     if not token:
         raise AlertQueryError('GITHUB_TOKEN is missing')
+    query = {'tool_name': tool, 'ref': ref, 'state': 'open', 'per_page': str(PAGE_SIZE)}
+    url = api.rstrip('/') + '/repos/' + repository + '/code-scanning/alerts?' + urllib.parse.urlencode(query)
     alerts = []
-    for page in range(1, MAX_PAGES + 1):
-        query = urllib.parse.urlencode({'tool_name': tool, 'ref': ref, 'state': 'open',
-                                        'per_page': PAGE_SIZE, 'page': page})
+    for _ in range(MAX_PAGES):
         request = urllib.request.Request(
-            api.rstrip('/') + '/repos/' + repository + '/code-scanning/alerts?' + query,
-            headers={'Accept': 'application/vnd.github+json', 'Authorization': 'Bearer ' + token,
-                     'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'rdy-core-ci'})
+            url, headers={'Accept': 'application/vnd.github+json', 'Authorization': 'Bearer ' + token,
+                          'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'rdy-core-ci'})
         try:
             with urllib.request.urlopen(request, timeout=60) as response:
                 batch = json.loads(response.read().decode('utf-8'))
+                link = response.headers.get('Link')
         except urllib.error.HTTPError as error:
             try:
                 message = json.loads(error.read().decode('utf-8')).get('message', '')
@@ -318,9 +381,11 @@ def fetch_alerts(api, repository, token, tool, ref):
         if not isinstance(batch, list):
             raise AlertQueryError('the response is not an alert list')
         alerts.extend(batch)
-        if len(batch) < PAGE_SIZE:
+        # Only the Link header ends the list: a short or empty page with a next link goes on.
+        url = next_link(link, api, repository, query)
+        if url is None:
             return alerts
-    raise AlertQueryError('more than ' + str(MAX_PAGES * PAGE_SIZE) + ' alerts')
+    raise AlertQueryError('more than ' + str(MAX_PAGES) + ' pages of alerts')
 
 
 def alerts_main(tool, ref):

@@ -35,6 +35,7 @@ SARIF = load('check_sarif')
 def report(score='8.1', results=True):
     return {'version': '2.1.0', 'runs': [{'tool': {'driver': {'name': 'CodeQL', 'rules': [
         {'id': 'test/rule', 'properties': {'security-severity': score}}]}},
+        'invocations': [{'executionSuccessful': True}],
         'results': [{'ruleId': 'test/rule'}] if results else []}]}
 
 
@@ -71,8 +72,9 @@ class SarifPolicy(unittest.TestCase):
                 SARIF.inspect_sarif(report(score))
 
     def test_analyzer_errors_are_not_clean(self):
-        for invocation in [{'executionSuccessful': False}, {'toolExecutionNotifications': [{'level': 'error'}]},
-                           {'toolConfigurationNotifications': [{'level': 'error'}]}]:
+        for invocation in [{'executionSuccessful': False},
+                           {'executionSuccessful': True, 'toolExecutionNotifications': [{'level': 'error'}]},
+                           {'executionSuccessful': True, 'toolConfigurationNotifications': [{'level': 'error'}]}]:
             item = report(results=False)
             item['runs'][0]['invocations'] = [invocation]
             with self.assertRaises(ValueError):
@@ -94,7 +96,8 @@ class SarifComponents(unittest.TestCase):
             'extensions': [{'name': 'codeql-action/pr-diff-range', 'rules': []},
                            {'name': 'codeql/actions-queries', 'guid': 'dbfe174b-1af3-4d67-8c42-520a794df84b',
                             'rules': [{'id': 'actions/test', 'properties': {'security-severity': '9'}}]},
-                           {'name': 'codeql/actions-all', 'rules': []}]}, 'results': []}]}
+                           {'name': 'codeql/actions-all', 'rules': []}]},
+            'invocations': [{'executionSuccessful': True, 'toolExecutionNotifications': []}], 'results': []}]}
 
     def result(self):
         return {'ruleId': 'actions/test', 'ruleIndex': 0,
@@ -243,7 +246,7 @@ class SarifDiagnostics(unittest.TestCase):
         run['results'][0]['level'] = 'error'
         self.assertEqual(self.inspect(doc)['blocking_diagnostics'][0]['severity'], 'unscored-error')
 
-    def test_sarif_step_lists_results_bounded_and_does_not_block_on_them(self):
+    def test_sarif_step_logs_every_result_and_does_not_block_on_them(self):
         with tempfile.TemporaryDirectory() as directory:
             doc = self.document(); doc['runs'][0]['results'] *= 101
             for filename in ('one.sarif', 'two.sarif'):
@@ -257,16 +260,27 @@ class SarifDiagnostics(unittest.TestCase):
             lines = output.getvalue().splitlines()
             self.assertIn('2 file(s), 202 result(s), 202 high or critical', lines[0])
             self.assertEqual(lines[1], 'test/rule  high 8.1  crates/example.rs:23')
-            self.assertEqual(len([line for line in lines if line.startswith('test/rule')]), 100)
-            self.assertEqual(lines[-1], '... 102 more not listed')
+            self.assertEqual(len([line for line in lines if line.startswith('test/rule')]), 202)
+            self.assertEqual(len(lines), 203)
             self.assertNotIn('SENSITIVE', output.getvalue())
-            self.assertIn('`test/rule  high 8.1  crates/example.rs:23`', summary_file.read_text())
+            summary = summary_file.read_text()
+            self.assertEqual(summary.count('`test/rule  high 8.1  crates/example.rs:23`'), 100)
+            self.assertIn('102 more not shown here. The full list is in the job log and in the codeql-sarif '
+                          'artifact.', summary)
+
+    def test_short_summary_lists_everything_without_a_note(self):
+        with tempfile.TemporaryDirectory() as directory:
+            summary_file = Path(directory) / 'summary.md'
+            with mock.patch.dict(SARIF.os.environ, {'GITHUB_STEP_SUMMARY': str(summary_file)}):
+                SARIF.write_summary('Title', ['line'] * 100)
+            self.assertEqual(summary_file.read_text().count('- `line`'), 100)
+            self.assertNotIn('more not shown', summary_file.read_text())
 
     def test_sarif_step_labels_critical_and_unscored_errors(self):
         self.assertEqual(SARIF.severity_label(9.8), 'critical 9.8')
         self.assertEqual(SARIF.severity_label(7.0), 'high 7')
         self.assertEqual(SARIF.severity_label('unscored-error'), 'error (no security severity)')
-        self.assertEqual(SARIF.result_lines([{'rule_id': 'r', 'severity': 7.5, 'location': None}], 0),
+        self.assertEqual(SARIF.result_lines([{'rule_id': 'r', 'severity': 7.5, 'location': None}]),
                          ['r  high 7.5  (location withheld)'])
 
     def test_sarif_step_still_fails_on_analyzer_errors_and_bad_sarif(self):
@@ -282,6 +296,30 @@ class SarifDiagnostics(unittest.TestCase):
         with tempfile.TemporaryDirectory() as empty:
             with self.assertRaises(ValueError):
                 SARIF.main(['sarif', empty])
+
+    def test_invocations_must_state_execution_as_a_boolean(self):
+        def run(invocations, delete=False):
+            doc = self.document()
+            if delete:
+                del doc['runs'][0]['invocations']
+            else:
+                doc['runs'][0]['invocations'] = invocations
+            with tempfile.TemporaryDirectory() as directory:
+                (Path(directory) / 'report.sarif').write_text(json.dumps(doc))
+                with mock.patch.object(SARIF.subprocess, 'check_output', return_value=b'crates/example.rs\0'), \
+                     redirect_stdout(io.StringIO()):
+                    return SARIF.main(['sarif', directory])
+        with self.assertRaises(ValueError):
+            run(None, delete=True)
+        for invocations in ([], None, {}, [None], [{}], [{'executionSuccessful': 'false'}],
+                            [{'executionSuccessful': 'true'}], [{'executionSuccessful': 0}],
+                            [{'executionSuccessful': 1}], [{'executionSuccessful': None}],
+                            [{'executionSuccessful': True}, {}],
+                            [{'executionSuccessful': True, 'toolExecutionNotifications': {}}],
+                            [{'executionSuccessful': True, 'toolConfigurationNotifications': [None]}]):
+            with self.subTest(invocations=invocations), self.assertRaises(ValueError):
+                run(invocations)
+        self.assertEqual(run([{'executionSuccessful': True, 'toolExecutionNotifications': [{'level': 'note'}]}]), 0)
 
     def test_missing_repository_inventory_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -302,6 +340,10 @@ def alert(number=1, state='open', level='high', tool='CodeQL', category='/langua
 
 
 class FakeResponse(io.BytesIO):
+    def __init__(self, body, link=None):
+        super().__init__(body)
+        self.headers = {} if link is None else {'Link': link}
+
     def __enter__(self):
         return self
 
@@ -309,8 +351,18 @@ class FakeResponse(io.BytesIO):
         self.close()
 
 
+ALERTS_URL = 'https://api.github.com/repos/owner/repo/code-scanning/alerts'
+QUERY = 'tool_name=CodeQL&ref=refs%2Fpull%2F7%2Fmerge&state=open&per_page=100'
+
+
+def next_page(page, base=ALERTS_URL, query=QUERY):
+    return '<' + base + '?' + query + '&page=' + str(page) + '>; rel="next", <' + base + '?' + query + '&page=9>; rel="last"'
+
+
 def respond(*pages):
-    responses = iter([FakeResponse(json.dumps(page).encode()) for page in pages])
+    """Each page is a body, or (body, Link header)."""
+    responses = iter([FakeResponse(json.dumps(page[0]).encode(), page[1]) if isinstance(page, tuple)
+                      else FakeResponse(json.dumps(page).encode()) for page in pages])
     requests = []
 
     def urlopen(request, timeout):
@@ -353,6 +405,32 @@ class AlertGate(unittest.TestCase):
         with self.assertRaises(ValueError):
             SARIF.blocking_alerts({}, 'CodeQL')
 
+    def test_unknown_states_refuse(self):
+        for state in ('unexpected', 'OPEN', 'closed', 'auto_dismissed', '', 1, None):
+            with self.subTest(state=state), self.assertRaises(ValueError):
+                self.decide(alert(state=state))
+
+    def test_tool_without_a_name_refuses(self):
+        for tool in ({}, {'name': ''}, {'name': None}, {'name': 5}):
+            with self.subTest(tool=tool), self.assertRaises(ValueError):
+                self.decide(dict(alert(), tool=tool))
+
+    def test_unknown_or_missing_security_severity_refuses(self):
+        for level in ('HIGH', 'Critical', 'severe', '', 8, True, ['high']):
+            with self.subTest(level=level), self.assertRaises(ValueError):
+                self.decide(alert(level=level))
+        missing = alert()
+        del missing['rule']['security_severity_level']
+        with self.assertRaises(ValueError):
+            self.decide(missing)
+        self.assertEqual(self.decide(alert(level=None)), [])
+
+    def test_unreadable_alert_fails_the_gate(self):
+        for broken in (alert(state='unexpected'), dict(alert(), tool={}), alert(level='HIGH')):
+            urlopen, _ = respond([broken])
+            with self.subTest(broken=broken), self.assertRaises(SARIF.AlertQueryError):
+                self.run_gate(urlopen)
+
     def run_gate(self, urlopen, ref='refs/pull/7/merge', env=ENV):
         output = io.StringIO()
         with mock.patch.object(SARIF.urllib.request, 'urlopen', urlopen), \
@@ -362,17 +440,50 @@ class AlertGate(unittest.TestCase):
 
     def test_gate_pages_through_alerts_and_prints_each_blocking_one(self):
         first = [alert(number, state='open', level='medium') for number in range(1, 101)]
-        urlopen, requests = respond(first, [alert(101), alert(102, state='dismissed')])
+        urlopen, requests = respond((first, next_page(2)), [alert(101), alert(102, state='dismissed')])
         code, output = self.run_gate(urlopen)
         self.assertEqual(code, 1)
         self.assertIn('#101  rust/test-rule  high  crates/example.rs:12', output)
         self.assertNotIn('#102', output)
+        self.assertEqual([r.full_url for r in requests], [ALERTS_URL + '?' + QUERY, ALERTS_URL + '?' + QUERY + '&page=2'])
+
+    def test_short_or_empty_page_with_a_next_link_goes_on(self):
+        for first in ([alert(1, level='medium')], []):
+            urlopen, requests = respond((first, next_page(2)), ([], next_page(3)), [alert(3)])
+            with self.subTest(first=first):
+                code, output = self.run_gate(urlopen)
+                self.assertEqual((code, len(requests)), (1, 3))
+                self.assertIn('#3  rust/test-rule', output)
+
+    def test_no_next_link_ends_the_list_even_after_a_full_page(self):
+        urlopen, requests = respond(([alert(n, level='medium') for n in range(1, 101)], '<' + ALERTS_URL + '?'
+                                     + QUERY + '&page=1>; rel="first"'))
+        self.assertEqual(self.run_gate(urlopen)[0], 0)
+        self.assertEqual(len(requests), 1)
+
+    def test_repository_id_form_of_the_next_link_is_accepted(self):
+        urlopen, requests = respond(([], next_page(2, base='https://api.github.com/repositories/42/code-scanning/alerts')),
+                                    [alert(1)])
+        self.assertEqual(self.run_gate(urlopen)[0], 1)
         self.assertEqual(len(requests), 2)
-        for page, request in enumerate(requests, 1):
-            self.assertIn('tool_name=CodeQL', request.full_url)
-            self.assertIn('ref=refs%2Fpull%2F7%2Fmerge', request.full_url)
-            self.assertIn('page=' + str(page), request.full_url)
-            self.assertTrue(request.full_url.startswith('https://api.github.com/repos/owner/repo/code-scanning/alerts?'))
+
+    def test_next_links_elsewhere_or_malformed_fail_the_gate(self):
+        for link in (next_page(2, base='http://api.github.com/repos/owner/repo/code-scanning/alerts'),
+                     next_page(2, base='https://evil.example/repos/owner/repo/code-scanning/alerts'),
+                     next_page(2, base='https://api.github.com/repos/other/repo/code-scanning/alerts'),
+                     next_page(2, base='https://api.github.com/repos/owner/repo/secret-scanning/alerts'),
+                     next_page(2, query=QUERY.replace('state=open', 'state=dismissed')),
+                     next_page(2, query=QUERY.replace('merge', 'head')),
+                     next_page(2) + ', <' + ALERTS_URL + '?' + QUERY + '&page=3>; rel="next"',
+                     'not a link header'):
+            urlopen, _ = respond(([], link), [alert(1, level='medium')])
+            with self.subTest(link=link), self.assertRaises(SARIF.AlertQueryError):
+                self.run_gate(urlopen)
+
+    def test_page_cap_is_a_failure(self):
+        urlopen, _ = respond(*[([], next_page(n + 2)) for n in range(4)])
+        with mock.patch.object(SARIF, 'MAX_PAGES', 3), self.assertRaisesRegex(SARIF.AlertQueryError, 'pages'):
+            self.run_gate(urlopen)
 
     def test_gate_passes_when_only_dismissed_or_lower_alerts_are_open(self):
         urlopen, _ = respond([alert(1, state='dismissed'), alert(2, level='medium')])
@@ -420,6 +531,8 @@ def allowlisted(config, path, secret, line, rule='generic-api-key'):
         if entry.get('targetRules') and rule not in entry['targetRules']:
             continue
         target = {'secret': secret, 'line': line}[entry.get('regexTarget', 'secret')]
+        if entry.get('condition', 'OR') not in ('OR', 'AND'):
+            raise ValueError('unknown condition')
         checks = []
         if 'paths' in entry:
             checks.append(any(re.search(pattern, path) for pattern in entry['paths']))
@@ -475,9 +588,9 @@ class SecretAllowlists(unittest.TestCase):
         self.assertNotIn('allowlist', self.config)
         self.assertGreater(len(self.config['allowlists']), 0)
         for entry in self.config['allowlists']:
-            self.assertLessEqual(set(entry), {'description', 'paths', 'regexes', 'regexTarget', 'targetRules'})
+            self.assertLessEqual(set(entry), {'description', 'condition', 'paths', 'regexes', 'targetRules'})
             self.assertTrue(entry['description'].strip())
-            self.assertIn(entry.get('regexTarget', 'secret'), ('secret', 'line'))
+            self.assertIn(entry.get('condition', 'OR'), ('OR', 'AND'))
             for pattern in entry.get('paths', []) + entry.get('regexes', []):
                 # The scanner uses RE2: no lookaround or backreference, so Python agrees with it.
                 self.assertIsNone(re.search(r'\(\?[=!<]|\\[1-9]', pattern), pattern)
@@ -508,14 +621,25 @@ class SecretAllowlists(unittest.TestCase):
                     line = next(line for line in text.splitlines() if value in line)
                     self.assertTrue(allowlisted(self.config, path, value, line))
 
-    def test_public_key_fingerprints_are_allowlisted_on_their_line(self):
+    def test_public_key_fingerprints_are_allowlisted_in_their_file_only(self):
         for path in FINGERPRINT_FILES:
             lines = [line for line in (ROOT / path).read_text().splitlines() if 'key SHA256:' in line]
-            self.assertGreaterEqual(len(lines), 2)
+            self.assertEqual(len(lines), 2)
             for line in lines:
                 value = re.search(r'key SHA256:([A-Za-z0-9+/]{43})', line).group(1)
                 with self.subTest(line=line):
                     self.assertTrue(allowlisted(self.config, path, value, line))
+                    self.assertFalse(allowlisted(self.config, 'crates/rdy-engine/src/hub.rs', value, line))
+                    self.assertFalse(allowlisted(self.config, 'crates/rdy-engine/tests/other.rs', value, line))
+
+    def test_a_secret_beside_a_fingerprint_comment_is_not_allowlisted(self):
+        fingerprint = re.search(r'key SHA256:([A-Za-z0-9+/]{43})',
+                                (ROOT / FINGERPRINT_FILES[0]).read_text()).group(0)
+        line = 'let auth = "' + REALISTIC_HUB + '"; // ' + fingerprint
+        for path in ('crates/rdy-engine/src/hub.rs', FINGERPRINT_FILES[0]):
+            for secret in (REALISTIC_HUB, REALISTIC_B64):
+                with self.subTest(path=path, secret=secret):
+                    self.assertFalse(allowlisted(self.config, path, secret, line))
 
     def test_realistic_values_outside_the_shapes_and_paths_are_not_allowlisted(self):
         cases = [

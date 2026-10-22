@@ -12,11 +12,14 @@ paths = [
 ]
 
 [[allowlists]]
-description = "Public SSH key fingerprints written as key SHA256 followed by 43 base64 characters, in test vectors and expected messages. They are hashes of public keys."
+description = "The two public SSH key fingerprints in the signing test vector notes. They are hashes of public keys. Both the file and the exact value must match."
 targetRules = ["generic-api-key"]
-regexTarget = "line"
+condition = "AND"
+paths = [
+  '''(?:^|/)crates/rdy-engine/tests/signing_crypto\.rs$''',
+]
 regexes = [
-  '''\bkey SHA256:[A-Za-z0-9+/]{43}(?:[^A-Za-z0-9+/=]|$)''',
+  '''^(?:UCUiLr7Pjs9wFFJMDByLgc3NrtdU344OgUM45wZPcIQ|6gcI7q24Uf/4jZEyRdzDIZ2x5pW2AxPAQt/lgHoHae0)$''',
 ]
 
 [[allowlists]]
