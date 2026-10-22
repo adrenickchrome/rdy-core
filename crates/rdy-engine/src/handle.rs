@@ -220,6 +220,7 @@ impl Rdy {
             canon_step_cache: Arc::clone(&canon_step_cache),
             inflight_cell: Arc::default(),
             coord_heads: Arc::default(),
+            plan_heads: Arc::default(),
             coord: OnceLock::new(),
             tensions: Arc::default(),
             dismissals: Arc::default(),

@@ -6,11 +6,13 @@
 //!
 //! # The chain a view reads
 //!
-//! `plan/<view>` names the view's latest plan version. Its chain is live unless that version is
-//! sealed, or the proposal version it is bound to has landed without a seal (O6): then the view's
-//! next answer starts a new chain. A live chain's answers are the view's answers, and its first
-//! version's HEADs are the baseline of its code items. With no live chain, the HEADs captured
-//! for the read are both ends; a read alone never fixes a baseline.
+//! `plan/<view>` names the view's latest plan version; a published state captures every such
+//! ref. Its chain is live unless that version is sealed, or the proposal version the chain last
+//! bound (also behind answer-only versions) has landed without a seal (O6): then the view's next
+//! answer starts a new chain. A read counts only a landing before its state's sequence. A live
+//! chain's answers are the view's answers, and its first version's HEADs are the baseline of its
+//! code items. With no live chain, the HEADs captured for the read are both ends; a read alone
+//! never fixes a baseline.
 use super::compute::{self, ComputedPlan, PlanCandidate, allowed_acts};
 use super::page;
 use crate::brief::is_lower_hex;
@@ -24,8 +26,9 @@ use rdy_model::plan::{
     ITEM_DISPLAY_PREFIX, MAX_PLAN_ANSWERS, Plan, PlanAct, PlanAnswer, PlanHead, PlanKind,
     PlanOutcome, SealedItem, item_display,
 };
-use rdy_model::{BlockId, Hash, Provenance};
-use rdy_store::plan::plan_ref;
+use rdy_model::{BlockId, Hash, Proposal, Provenance};
+use rdy_store::plan::PLAN_REF;
+use rdy_store::{StoreReader, kinds};
 use serde::{Deserialize, Serialize};
 use std::cell::OnceCell;
 use std::collections::BTreeMap;
@@ -369,26 +372,51 @@ impl Chain {
     }
 }
 
-/// `view`'s live chain (see the module docs), or `None`.
+/// Every `plan/<view>` ref `reader` holds now, by view: what a published state captures.
+pub(crate) fn plan_heads_in(reader: &StoreReader) -> Result<BTreeMap<String, Hash>, RdyError> {
+    let mut heads = BTreeMap::new();
+    for (name, v) in reader.refs_with_prefix(PLAN_REF)? {
+        let view = name[PLAN_REF.len()..].to_string();
+        let head = Hash(v.as_slice().try_into().map_err(|_| {
+            RdyError::from(rdy_store::StoreError::Decode(format!(
+                "plan ref of view {view:?} does not name a plan"
+            )))
+        })?);
+        heads.insert(view, head);
+    }
+    Ok(heads)
+}
+
+/// Whether a change of proposal version `p` landed in the log `st` was published at: a landing
+/// whose frame lies before the state's sequence.
+fn landed_in(st: &ReadState, p: &Proposal) -> Result<bool, RdyError> {
+    let reader = st.reader();
+    for c in &p.changes {
+        if let Some(l) = reader.landing_of(c)?
+            && reader.has_kind_before(kinds::LANDING, &l, st.seq())?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// `view`'s live chain (see the module docs) as `st` was published, or `None`: its plan ref
+/// captured with the state, and a landing only when it lies before the state's sequence.
 pub(crate) fn live_chain(st: &ReadState, view: &str) -> Result<Option<Chain>, RdyError> {
     let reader = st.reader();
-    let Some(v) = reader.get_ref(&plan_ref(view))? else {
+    let Some(head) = st.plan_head(view) else {
         return Ok(None);
     };
-    let head = Hash(v.as_slice().try_into().map_err(|_| {
-        RdyError::from(rdy_store::StoreError::Decode(format!(
-            "plan ref of view {view:?} does not name a plan"
-        )))
-    })?);
     let plan = reader.plan(&head)?;
     if plan.seal.is_some() {
         return Ok(None);
     }
-    if let Some(bound) = plan.proposal {
-        let p = reader.proposal(&bound)?;
-        if crate::gate::landed_as(st, &p)?.is_some() {
-            return Ok(None);
-        }
+    // the proposal the chain last bound, also behind answer-only versions (O6)
+    if let Some(bound) = reader.last_bound_proposal(&plan)?
+        && landed_in(st, &reader.proposal(&bound)?)?
+    {
+        return Ok(None);
     }
     let first_heads = match plan.stable {
         Some(first) => reader.plan(&first)?.heads,
@@ -872,8 +900,8 @@ impl Rdy {
     /// Records `answers` in `view`'s change plan (p-JJNYH, D-4JMPH): one cumulative,
     /// answer-only plan version and its `plan/<view>` ref, with the HEADs captured now, in one
     /// batch; no block, change, proposal or canon ref moves. The view's live chain continues;
-    /// with none (no plan yet, a sealed one, or one bound to a proposal that landed with no seal,
-    /// O6) the version starts a chain, and its HEADs become the chain's baseline. A reader is
+    /// with none (no plan yet, a sealed one, or one whose last bound proposal landed with no
+    /// seal, O6) the version starts a chain, and its HEADs become the chain's baseline. A reader is
     /// `E_PERMISSION`; an agent answers only a view it owns (`E_VIEW_OWNER`). The whole request is
     /// validated before anything is written. Returns the version's id.
     pub fn answer_plan(

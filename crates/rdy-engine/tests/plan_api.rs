@@ -1751,3 +1751,203 @@ fn cp8_input_limits_have_exact_text() {
         Some(2000)
     );
 }
+
+/// Fix round 1: a retained state reads the plan as it was published. A later answer and a later
+/// landing move neither its plan ref nor its chain's landing status: the plan ref is captured
+/// with the state, and a landing counts only when its frame lies before the state's sequence.
+#[test]
+fn cp8_retained_reads_keep_their_plan_across_answers_and_landings() {
+    let (_d, mut r) = project();
+    let s = spec(&mut r);
+    edit(&mut r, "w", &s.a, "A holds 60 days.");
+    let confirm = pi(&s.a, &s.b, PlanKind::Confirm);
+    let q = PlanQuery {
+        max_tokens: Some(100_000),
+        ..view_q("w")
+    };
+    let read_at = |st: &rdy_engine::ReadState| {
+        serde_json::to_value(st.change_plan(&q, "work").unwrap()).unwrap()
+    };
+    // an answer after the state was published
+    let captured = r.read();
+    let before = read_at(&captured);
+    assert_eq!(before["plan"], Value::Null);
+    assert_eq!(row(&before, &confirm)["state"], "open");
+    let first = answer(
+        &mut r,
+        "w",
+        &[ans(&confirm, PlanAct::Confirm, Some("holds"))],
+    );
+    assert_eq!(
+        read_at(&captured),
+        before,
+        "the retained state reads no later answer"
+    );
+    let now = whole(&r, "w");
+    assert_eq!(now["plan"], first.to_string());
+    assert_eq!(row(&now, &confirm)["state"], "closed");
+
+    // a landing after the state was published: the bound proposal had not landed at its
+    // sequence, so its chain stays live there
+    let version = r.store_mut().propose("w", "edit a", prov()).unwrap();
+    let answered = r.read().reader().plan(&first).unwrap();
+    let bound = Plan {
+        stable: Some(first),
+        prev: Some(first),
+        proposal: Some(version),
+        ..answered
+    };
+    let bh = r.store_mut().put_plan_frames_for_tests(&bound).unwrap();
+    r.invalidate();
+    let captured = r.read();
+    let before = read_at(&captured);
+    assert_eq!(before["plan"], bh.to_string());
+    assert_eq!(row(&before, &confirm)["state"], "closed");
+    r.land(&approver(), &version.to_string()).unwrap();
+    assert_eq!(
+        read_at(&captured),
+        before,
+        "the retained state reads no later landing"
+    );
+    assert_eq!(
+        whole(&r, "w")["plan"],
+        Value::Null,
+        "the landing ended the chain"
+    );
+    r.fsck().unwrap();
+}
+
+/// O6 with answer-only versions after the bound one: the chain ends when its last bound
+/// proposal lands without a seal, even when later versions bind none. The next answer starts a
+/// new chain (`stable = prev = None`), drops the old chain's answers and takes the HEADs
+/// captured then as its baseline, so a commit made before the landing closes nothing. The store
+/// refuses a version that continues the ended chain, and fsck reads the new chain as the writer
+/// does.
+#[test]
+fn cp8_answer_only_successors_keep_the_last_bound_proposal() {
+    let (d, mut r) = project();
+    let repo = linked_repo(d.path());
+    let s = spec(&mut r);
+    commit(
+        repo.path(),
+        "f.rs",
+        &format!("start\n\nImplements: {}", s.a),
+    );
+    // a version with no item: b's edit is the cause of nothing
+    edit(
+        &mut r,
+        "w",
+        &s.b,
+        &format!("B builds firmly on {{{{{}}}}} and {{{{{}}}}}.", s.a, s.c),
+    );
+    let version = r.store_mut().propose("w", "edit b", prov()).unwrap();
+    let pref = format!("P-{}@1", version.short());
+    let bound = Plan {
+        stable: None,
+        prev: None,
+        view: "w".into(),
+        proposal: Some(version),
+        answers: vec![],
+        heads: vec![PlanHead {
+            repo: "app".into(),
+            head: Some(git(repo.path(), &["rev-parse", "HEAD"])),
+        }],
+        provenance: prov(),
+        seal: None,
+    };
+    let bh = r.store_mut().put_plan_frames_for_tests(&bound).unwrap();
+    r.invalidate();
+    r.fsck().unwrap();
+    let pv = plan(
+        &r,
+        &PlanQuery {
+            proposal: Some(pref),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        pv["items"],
+        json!([]),
+        "the bound version has no item: {pv}"
+    );
+
+    // another change in the view, and an answer: an answer-only successor of the bound version
+    edit(&mut r, "w", &s.a, "A holds 60 days.");
+    let confirm = pi(&s.a, &s.b, PlanKind::Confirm);
+    let code = pi(&s.a, "app:f.rs", PlanKind::UpdateImplementation);
+    let a1 = answer(&mut r, "w", &[ans(&confirm, PlanAct::Defer, Some("later"))]);
+    let p1 = r.read().reader().plan(&a1).unwrap();
+    assert_eq!(
+        (p1.stable, p1.prev, p1.proposal),
+        (Some(bh), Some(bh), None)
+    );
+    // a commit before the landing
+    commit(
+        repo.path(),
+        "f.rs",
+        &format!("follow\n\nImplements: {}", s.a),
+    );
+    assert_eq!(
+        row(&whole(&r, "w"), &code)["how"],
+        "committed",
+        "on the old baseline"
+    );
+
+    // the bound version lands with no seal: the chain is over though its head binds nothing
+    r.land(&approver(), &version.to_string()).unwrap();
+    assert_eq!(plan_ref(&r, "w"), Some(a1), "no seal was written");
+    let v = whole(&r, "w");
+    assert_eq!(v["plan"], Value::Null, "{v}");
+    assert_eq!(row(&v, &confirm)["state"], "open", "the old answer is gone");
+    assert!(row(&v, &confirm).get("answer").is_none());
+    assert_eq!(
+        row(&v, &code)["state"],
+        "open",
+        "the pre-landing commit closes nothing"
+    );
+
+    // the store refuses a version that continues the ended chain
+    let mut cont = p1.clone();
+    cont.prev = Some(a1);
+    cont.heads = vec![];
+    let e = r.store_mut().put_plan(&cont).unwrap_err();
+    assert!(
+        e.to_string().ends_with(": invalid chain"),
+        "a version after an ended chain: {e}"
+    );
+
+    // the next answer starts a new chain, with the HEAD captured now as its baseline
+    let head_now = git(repo.path(), &["rev-parse", "HEAD"]);
+    let next = answer(&mut r, "w", &[ans(&code, PlanAct::Defer, Some("soon"))]);
+    let p = r.read().reader().plan(&next).unwrap();
+    assert_eq!((p.stable, p.prev), (None, None), "a new chain");
+    assert_eq!(
+        p.heads,
+        vec![PlanHead {
+            repo: "app".into(),
+            head: Some(head_now),
+        }]
+    );
+    assert_eq!(
+        p.answers.iter().map(|a| a.item).collect::<Vec<_>>(),
+        vec![item_hash(
+            &id(&s.a),
+            "app:f.rs",
+            PlanKind::UpdateImplementation
+        )],
+        "the old chain's answers stay in its own versions"
+    );
+    let v = whole(&r, "w");
+    assert_eq!(v["plan"], next.to_string());
+    assert_eq!(row(&v, &confirm)["state"], "open");
+    assert_eq!(row(&v, &code)["state"], "deferred");
+    // a commit after the new baseline closes the code item
+    commit(
+        repo.path(),
+        "f.rs",
+        &format!("again\n\nImplements: {}", s.a),
+    );
+    assert_eq!(row(&whole(&r, "w"), &code)["how"], "committed");
+    // fsck reads the new chain as the plan writer does (O6)
+    r.fsck().unwrap();
+}

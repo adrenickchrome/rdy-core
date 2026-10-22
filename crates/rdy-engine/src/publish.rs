@@ -87,6 +87,7 @@ impl Rdy {
                     canon_step_cache: Arc::clone(&self.canon_step_cache),
                     inflight_cell: Arc::clone(&prev.inflight_cell),
                     coord_heads: Arc::clone(&prev.coord_heads),
+                    plan_heads: Arc::clone(&prev.plan_heads),
                     coord: OnceLock::new(),
                     tensions: Arc::default(),
                     dismissals: Arc::clone(&prev.dismissals),
@@ -314,6 +315,17 @@ impl Rdy {
             Arc::new(self.coord_heads(&prev.coord_heads)?)
         } else {
             Arc::clone(&prev.coord_heads)
+        };
+        // the plan refs: only the plan writers move them, each beside its PLAN frame, so a
+        // publish whose batch holds no PLAN carries them
+        let batch = match self.store.open_batch() {
+            Some(frames) => frames,
+            None => self.store.last_batch(),
+        };
+        let plan_heads = if batch.iter().any(|(k, _)| *k == rdy_store::kinds::PLAN) {
+            Arc::new(crate::plan::api::plan_heads_in(&self.store.reader())?)
+        } else {
+            Arc::clone(&prev.plan_heads)
         };
         // the tension set reads canon, the in-flight changes and the open alternative sets
         // (edit collision skips members of one set): a publish that moves none keeps it
@@ -559,6 +571,7 @@ impl Rdy {
             canon_step_cache: Arc::clone(&self.canon_step_cache),
             inflight_cell,
             coord_heads,
+            plan_heads,
             coord: OnceLock::new(),
             tensions,
             dismissals,
@@ -819,6 +832,7 @@ impl Rdy {
             reader.intent_heads()?.into_iter().collect(),
             reader.alt_heads()?.into_iter().collect(),
         )?);
+        let plan_heads = Arc::new(crate::plan::api::plan_heads_in(&reader)?);
         let semantic = Arc::new(SemanticState::read(&reader)?);
         let dismissals = Arc::new(reader.dismissals()?.into_iter().collect());
         // only the pairs whose latest review dismisses
@@ -861,6 +875,7 @@ impl Rdy {
             canon_step_cache: caches.canon_step_cache,
             inflight_cell: Arc::default(),
             coord_heads,
+            plan_heads,
             coord: OnceLock::new(),
             tensions: Arc::default(),
             dismissals,
@@ -1001,6 +1016,7 @@ impl Rdy {
             canon_step_cache: caches.canon_step_cache,
             inflight_cell: Arc::default(),
             coord_heads: Arc::default(),
+            plan_heads: Arc::default(),
             coord: OnceLock::new(),
             tensions: Arc::default(),
             dismissals: Arc::default(),

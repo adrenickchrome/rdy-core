@@ -688,6 +688,8 @@ pub struct ReadState {
     pub(crate) inflight_cell: Arc<InflightCell>,
     /// The coordination refs as this state was published.
     pub(crate) coord_heads: Arc<CoordHeads>,
+    /// The `plan/` refs as this state was published: each view's latest plan version.
+    pub(crate) plan_heads: Arc<BTreeMap<String, Hash>>,
     /// cgr1: the coordination graph, built on first read; never carried to the next state.
     pub(crate) coord: OnceLock<Result<Arc<crate::coord_graph::CoordIndex>, RdyError>>,
     /// The event-derived tension set, built on first read; a publish that changes nothing it
@@ -908,6 +910,11 @@ impl ReadState {
     /// this state was published.
     pub fn coord_heads(&self) -> &CoordHeads {
         &self.coord_heads
+    }
+
+    /// The latest plan version of `view` as this state was published (its `plan/<view>` ref).
+    pub(crate) fn plan_head(&self, view: &str) -> Option<Hash> {
+        self.plan_heads.get(view).copied()
     }
 
     /// The in-flight entry, made from the set on first use.

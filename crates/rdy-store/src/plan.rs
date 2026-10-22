@@ -6,15 +6,16 @@
 //!
 //! A chain's first version has neither `stable` nor `prev`; each later one names the chain's
 //! first version and its immediate predecessor, of the same view. A sealed version ends the
-//! chain: nothing follows it. A version bound to a proposal version that landed with no seal
-//! ends it too (O6): the view's next version may start a new chain. Answers are cumulative,
-//! sorted by full item hash, one (the latest) per item: a later version keeps every item its
-//! predecessor answers, and may replace an item's answer or add items. Heads are sorted and
-//! distinct by repo. An answer-only version has no `proposal`; a bound version names the
-//! proposal version it was written with, in the same batch, and every bound proposal has one
-//! unsealed version. A seal names its landing, in the same batch before
-//! it, and that landing's landed proposal version (`seal.version`, which `proposal` repeats). An
-//! unbound proposal's seal has no earlier chain version (`stable` and `prev` absent).
+//! chain: nothing follows it. The proposal version a chain last bound ends it too when that
+//! version lands with no seal (O6), also when answer-only versions follow the bound one: the
+//! view's next unsealed version starts a new chain, and none continues the ended one. Answers
+//! are cumulative, sorted by full item hash, one (the latest) per item: a later version keeps
+//! every item its predecessor answers, and may replace an item's answer or add items. Heads are
+//! sorted and distinct by repo. An answer-only version has no `proposal`; a bound version names
+//! the proposal version it was written with, in the same batch, and every bound proposal has one
+//! unsealed version. A seal names its landing, in the same batch before it, and that landing's
+//! landed proposal version (`seal.version`, which `proposal` repeats). An unbound proposal's
+//! seal has no earlier chain version (`stable` and `prev` absent).
 //!
 //! # Writers
 //!
@@ -261,6 +262,44 @@ fn typed<T: serde::de::DeserializeOwned>(
     }
 }
 
+/// The proposal version that the chain with the latest version `plan` last bound: the
+/// `proposal` of the newest version from `plan` back through `prev` that names one (a seal names
+/// its landed version), or `None` when no version of the chain does. `read` gives the version of
+/// a hash (`None`: none that decodes, which ends the walk). The walk reads each answer-only
+/// version after the last bound one, and no more.
+fn last_bound(
+    plan: &Plan,
+    read: &dyn Fn(&Hash) -> Result<Option<Plan>, StoreError>,
+) -> Result<Option<Hash>, StoreError> {
+    let (mut proposal, mut prev) = (plan.proposal, plan.prev);
+    while proposal.is_none() {
+        let Some(at) = prev else {
+            return Ok(None);
+        };
+        let Some(p) = read(&at)? else {
+            return Ok(None);
+        };
+        (proposal, prev) = (p.proposal, p.prev);
+    }
+    Ok(proposal)
+}
+
+/// Whether the chain whose latest version is `head` has ended (O6): it is sealed, or the
+/// proposal version its chain last bound landed (before the plan being checked) without a seal,
+/// also when answer-only versions follow the bound one.
+fn chain_ended(look: &dyn PlanLookup, head: &Plan) -> Result<bool, StoreError> {
+    if head.seal.is_some() {
+        return Ok(true);
+    }
+    let read = |h: &Hash| -> Result<Option<Plan>, StoreError> {
+        look.read(kinds::PLAN, h).map(|b| decode_plan(&b).ok())
+    };
+    match last_bound(head, &read)? {
+        Some(v) => look.landed(&v),
+        None => Ok(false),
+    }
+}
+
 /// The rule plan `h` (the record `p`) breaks against what `look` reads, if any: its chain, its
 /// bound proposal and its seal. A project needs a bound proposal and a seal's landing in the
 /// plan's own batch, and its chain to continue the view's latest version; a holder needs them
@@ -298,19 +337,21 @@ pub(crate) fn invalid_context(
             {
                 return Ok(Some(INVALID_CHAIN));
             }
+            // an unsealed version never continues a chain whose last bound proposal landed
+            // without a seal (O6): the view's next version starts a chain
+            if !holder && p.seal.is_none() && chain_ended(look, &q)? {
+                return Ok(Some(INVALID_CHAIN));
+            }
         }
         // a new chain: an unsealed version starts one only where no live chain stands (the
-        // latest version is sealed, or its bound proposal landed without a seal, O6); an
-        // unbound proposal's seal names no chain at all
+        // latest version is sealed, or the proposal its chain last bound landed without a
+        // seal, O6); an unbound proposal's seal names no chain at all
         None if p.seal.is_none() && !holder => {
             if let Some(l) = look.latest(&p.view)? {
                 let q = look.read(kinds::PLAN, &l).map(|b| decode_plan(&b).ok())?;
                 let ended = match q {
-                    Some(q) if q.seal.is_some() => true,
-                    Some(Plan {
-                        proposal: Some(v), ..
-                    }) => look.landed(&v)?,
-                    _ => false,
+                    Some(q) => chain_ended(look, &q)?,
+                    None => false,
                 };
                 if !ended {
                     return Ok(Some(INVALID_CHAIN));
@@ -849,6 +890,13 @@ impl StoreReader {
             r => r?,
         };
         decode_plan(&payload).map_err(|_| StoreError::Decode(damage(h, INVALID_FIELDS)))
+    }
+
+    /// The proposal version that the chain with the latest version `plan` last bound: the
+    /// `proposal` of the newest version from `plan` back through `prev` that names one, or
+    /// `None` when none does (O6). It reads each answer-only version after the last bound one.
+    pub fn last_bound_proposal(&self, plan: &Plan) -> Result<Option<Hash>, StoreError> {
+        last_bound(plan, &|h| self.plan(h).map(Some))
     }
 
     /// The unsealed version bound to proposal version `proposal` whose frame lies before `end`
