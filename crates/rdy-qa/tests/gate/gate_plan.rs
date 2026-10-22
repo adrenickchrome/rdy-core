@@ -775,6 +775,96 @@ fn cp10_acceptance_version_has_its_own_plan_binding() {
     r.fsck().unwrap();
 }
 
+/// D-4JMPH, p-8D6ES: a landing seals the answers the approved version bound, not answers the
+/// view recorded after that propose. An answer-only version after the propose replaces one
+/// bound answer and adds another: the approved version's read and its seal still hold the bound
+/// ones, on both landing paths (the approved version lands as is, or an acceptance writes a
+/// final version whose own binding carries the approved answers). The landing's plans still
+/// follow the view's chain, after the answer-only version.
+#[test]
+fn cp10_landing_seals_the_approved_versions_bound_answers() {
+    for acceptance in [false, true] {
+        let (_d, mut r) = project();
+        let s = spec(&mut r);
+        edit(&mut r, "w", &s.a, "A holds 60 days.");
+        if acceptance {
+            r.decide(
+                &writer(),
+                "w",
+                DecisionInput {
+                    parent: s.s.clone(),
+                    statement: "Hold sixty".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let confirm = pi(&s.a, &s.b, PlanKind::Confirm);
+        let update = pi(&s.a, &s.p, PlanKind::Update);
+        let p = propose(&mut r, "w", &[ans(&confirm, PlanAct::Defer, Some("later"))]);
+        let (bh, bplan) = bound(&r, &h(&p.id)).unwrap();
+        assert_eq!(bplan.answers.len(), 1, "{acceptance}");
+        // after the propose: the confirm is replaced and the update deferred, in the view only
+        let after = r
+            .answer_plan(
+                &writer(),
+                "w",
+                &[
+                    ans(&confirm, PlanAct::Confirm, Some("B holds after all")),
+                    ans(&update, PlanAct::Defer, Some("p follows later")),
+                ],
+            )
+            .unwrap();
+        let read = read_plan(&r, proposal_q(&p.r#ref));
+        let state = |item: &str| {
+            read["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|i| i["id"] == item)
+                .unwrap_or_else(|| panic!("{item}: {read:#}"))["state"]
+                .clone()
+        };
+        assert_eq!(state(&confirm), "deferred", "{acceptance}: {read:#}");
+        assert_eq!(state(&update), "open", "{acceptance}: {read:#}");
+
+        let l = land(&mut r, &p);
+        let landing = r.read().reader().landing(&l).unwrap();
+        let fin = landing.proposal;
+        assert_eq!(
+            fin != h(&p.id),
+            acceptance,
+            "the acceptance writes a final version"
+        );
+        let (sh, sealed) = seal(&r, &l).expect("two items: a seal");
+        assert_eq!(
+            sealed.answers, bplan.answers,
+            "{acceptance}: the bound answers"
+        );
+        assert_eq!(
+            outcome(&sealed, &s.a, &s.b, PlanKind::Confirm),
+            PlanOutcome::Deferred,
+            "{acceptance}: the bound defer"
+        );
+        assert_eq!(
+            outcome(&sealed, &s.a, &s.p, PlanKind::Update),
+            PlanOutcome::Open,
+            "{acceptance}: the later defer is no answer of the version"
+        );
+        if acceptance {
+            let (fh, fplan) = bound(&r, &fin).expect("the final version binds its plan");
+            assert_eq!(fplan.answers, bplan.answers, "the final binding's answers");
+            assert_eq!(fplan.heads, bplan.heads);
+            assert_eq!((fplan.stable, fplan.prev), (Some(bh), Some(after)));
+            assert_eq!((sealed.stable, sealed.prev), (Some(bh), Some(fh)));
+        } else {
+            assert_eq!((sealed.stable, sealed.prev), (Some(bh), Some(after)));
+        }
+        assert_eq!(plan_ref(&r, "w"), Some(sh));
+        r.fsck().unwrap();
+    }
+}
+
 /// p-1FHVQ: a landing with no item that re-affirms nothing writes no seal (its propose-time
 /// plan stays readable, and the view's next answer starts a chain); a re-affirmation-only
 /// landing seals, naming the decision, also with no item left.

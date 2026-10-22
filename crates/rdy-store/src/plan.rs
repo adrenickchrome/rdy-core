@@ -8,9 +8,13 @@
 //! first version and its immediate predecessor, of the same view. A sealed version ends the
 //! chain: nothing follows it. The proposal version a chain last bound ends it too when that
 //! version lands with no seal (O6), also when answer-only versions follow the bound one: the
-//! view's next unsealed version starts a new chain, and none continues the ended one. Answers
-//! are cumulative, sorted by full item hash, one (the latest) per item: a later version keeps
-//! every item its predecessor answers, and may replace an item's answer or add items. Heads are
+//! view's next unsealed version starts a new chain, and none continues the ended one. The
+//! binding of a proposal version that follows a version with no bound plan (O19) starts a new
+//! chain too, whatever chain the view holds. Answers are cumulative, sorted by full item hash,
+//! one (the latest) per item: a later version keeps every item its predecessor answers, and may
+//! replace an item's answer or add items. A landing's plans (its seal, and the binding of the
+//! final version it lands) keep every item the approved version's binding answers instead: they
+//! carry that binding's answers, not the answer-only versions' after it. Heads are
 //! sorted and distinct by repo. An answer-only version has no `proposal`; a bound version names
 //! the proposal version it was written with, in the same batch, and every bound proposal has one
 //! unsealed version. A seal names its landing, in the same batch before it, and that landing's
@@ -247,6 +251,9 @@ pub(crate) trait PlanLookup {
     fn landed(&self, _p: &Hash) -> Result<bool, StoreError> {
         Ok(false)
     }
+    /// The landing of proposal version `p` before this plan: in its own batch, or (a holder)
+    /// before it in the log. Only a landing's plans ask (the binding of its final version).
+    fn landing_here(&self, p: &Hash) -> Result<Option<Hash>, StoreError>;
     /// Whether the store is a holder: its chains and seals arrive by take, with no view.
     fn holder(&self) -> bool;
 }
@@ -302,6 +309,66 @@ fn chain_ended(look: &dyn PlanLookup, head: &Plan) -> Result<bool, StoreError> {
     }
 }
 
+/// The binding of the version a landing approved, when `p` is one of that landing's plans (its
+/// seal, or the binding of the final version it lands) and the chain before `p` holds it: the
+/// newest version from `q` (`p`'s predecessor) back through `prev` that names a proposal other
+/// than the final version, when it binds the approved version. A landing's plans carry that
+/// binding's answers, not answers the view recorded after it (D-4JMPH, p-8D6ES). `None`: `p` is
+/// no landing's plan, or no such binding precedes it. The walk reads the answer-only versions
+/// after the binding, as `last_bound` does.
+fn approved_binding(look: &dyn PlanLookup, p: &Plan, q: &Plan) -> Result<Option<Plan>, StoreError> {
+    let landing = match (&p.seal, p.proposal) {
+        (Some(seal), _) => Some(seal.landing),
+        (None, Some(v)) => look.landing_here(&v)?,
+        (None, None) => None,
+    };
+    let Some(l) = landing else {
+        return Ok(None);
+    };
+    let Some(landed) = typed::<LandingRecord>(look, kinds::LANDING, &l)? else {
+        return Ok(None);
+    };
+    let approved = landed.approved_version.unwrap_or(landed.proposal);
+    let mut at = q.clone();
+    loop {
+        match at.proposal {
+            Some(v) if v == approved => return Ok(at.seal.is_none().then_some(at)),
+            // the binding of the final version, earlier in the landing's batch
+            Some(v) if v == landed.proposal => {}
+            Some(_) => return Ok(None),
+            None => {}
+        }
+        let Some(prev) = at.prev else {
+            return Ok(None);
+        };
+        let Some(next) = look
+            .read(kinds::PLAN, &prev)
+            .map(|b| decode_plan(&b).ok())?
+        else {
+            return Ok(None);
+        };
+        at = next;
+    }
+}
+
+/// Whether `p` binds a proposal version that follows a version with no bound plan (O19,
+/// p-AEYTC): its binding is the first of a chain, whatever chain the view holds.
+fn binds_after_unbound(look: &dyn PlanLookup, p: &Plan) -> Result<bool, StoreError> {
+    let (None, Some(v)) = (&p.seal, p.proposal) else {
+        return Ok(false);
+    };
+    let Some(version) = typed::<Proposal>(look, kinds::PROPOSAL, &v)? else {
+        return Ok(false);
+    };
+    let Some(prev) = version.prev else {
+        return Ok(false);
+    };
+    if look.place(kinds::PROPOSAL, &prev)? == Place::Missing {
+        return Ok(false);
+    }
+    Ok(look.bound(&prev)?.is_none())
+}
+
 /// The rule plan `h` (the record `p`) breaks against what `look` reads, if any: its chain, its
 /// bound proposal and its seal. A project needs a bound proposal and a seal's landing in the
 /// plan's own batch, and its chain to continue the view's latest version; a holder needs them
@@ -329,14 +396,22 @@ pub(crate) fn invalid_context(
                 return Ok(Some(INVALID_CHAIN));
             };
             // answers are cumulative: each of the predecessor's items keeps an answer (its act
-            // and reason may be replaced); `p.answers` is sorted by item (`invalid_record`)
+            // and reason may be replaced); `p.answers` is sorted by item (`invalid_record`). A
+            // landing's plans keep each item of the approved version's binding instead: an
+            // answer the view recorded after that propose is not the version's
             let keeps = |item: &Hash| p.answers.binary_search_by(|a| a.item.cmp(item)).is_ok();
+            let anchor = approved_binding(look, p, &q)?;
+            let kept = &anchor.as_ref().unwrap_or(&q).answers;
             if q.view != p.view
                 || q.seal.is_some()
                 || p.stable != Some(q.stable.unwrap_or(prev))
-                || !q.answers.iter().all(|a| keeps(&a.item))
+                || !kept.iter().all(|a| keeps(&a.item))
                 || (!holder && look.latest(&p.view)? != Some(prev))
             {
+                return Ok(Some(INVALID_CHAIN));
+            }
+            // the binding of a version that follows an unbound one starts a chain (O19)
+            if !holder && binds_after_unbound(look, p)? {
                 return Ok(Some(INVALID_CHAIN));
             }
             // an unsealed version never continues a chain whose last bound proposal landed
@@ -347,8 +422,9 @@ pub(crate) fn invalid_context(
         }
         // a new chain: an unsealed version starts one only where no live chain stands (the
         // latest version is sealed, or the proposal its chain last bound landed without a
-        // seal, O6); an unbound proposal's seal names no chain at all
-        None if p.seal.is_none() && !holder => {
+        // seal, O6), or when it binds a version that follows an unbound one (O19); an unbound
+        // proposal's seal names no chain at all
+        None if p.seal.is_none() && !holder && !binds_after_unbound(look, p)? => {
             if let Some(l) = look.latest(&p.view)? {
                 let q = look.read(kinds::PLAN, &l).map(|b| decode_plan(&b).ok())?;
                 let ended = match q {
@@ -800,6 +876,15 @@ impl PlanLookup for WriteLookup<'_> {
         Ok(false)
     }
 
+    fn landing_here(&self, p: &Hash) -> Result<Option<Hash>, StoreError> {
+        Ok(self
+            .items
+            .iter()
+            .filter(|(k, _)| *k == kinds::LANDING)
+            .find(|(_, b)| bounded::decode::<LandingRecord>(b).is_ok_and(|l| l.proposal == *p))
+            .map(|(_, b)| Hash::of(b)))
+    }
+
     fn holder(&self) -> bool {
         matches!(self.store.mode(), Ok(StoreMode::Holder))
     }
@@ -1102,6 +1187,32 @@ impl PlanLookup for CheckLookup<'_> {
             }
         }
         Ok(false)
+    }
+
+    fn landing_here(&self, p: &Hash) -> Result<Option<Hash>, StoreError> {
+        let lands = |l: &Hash| -> Result<bool, StoreError> {
+            Ok(typed::<LandingRecord>(self, kinds::LANDING, l)?.is_some_and(|x| x.proposal == *p))
+        };
+        for (_, l) in self.batch.iter().filter(|(k, _)| *k == kinds::LANDING) {
+            if lands(l)? {
+                return Ok(Some(*l));
+            }
+        }
+        if !self.holder {
+            return Ok(None);
+        }
+        let Some(version) = typed::<Proposal>(self, kinds::PROPOSAL, p)? else {
+            return Ok(None);
+        };
+        for c in &version.changes {
+            if let Some(l) = self.reader.index().landing_of(c)?
+                && self.place(kinds::LANDING, &l)? == Place::Log
+                && lands(&l)?
+            {
+                return Ok(Some(l));
+            }
+        }
+        Ok(None)
     }
 
     fn holder(&self) -> bool {

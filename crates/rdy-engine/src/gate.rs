@@ -2186,16 +2186,6 @@ impl Rdy {
                 crate::consequence::CONFLICT_FIX,
             ));
         }
-        // the version's provenance, its plan's and its new answers' (one clock read)
-        let by = s.provenance();
-        let plan = crate::plan::lifecycle::prepare_proposal_plan(
-            &st,
-            &by,
-            view,
-            candidate.as_deref(),
-            plan_answers,
-        )?;
-        issues.extend(plan.warnings.iter().cloned());
         // pver1: a view with an open proposal (its latest version has not landed) gets the next
         // version of it; otherwise a new proposal starts
         let mut open = None;
@@ -2208,6 +2198,17 @@ impl Rdy {
                 open = Some((stable, latest));
             }
         }
+        // the version's provenance, its plan's and its new answers' (one clock read)
+        let by = s.provenance();
+        let plan = crate::plan::lifecycle::prepare_proposal_plan(
+            &st,
+            &by,
+            view,
+            open.as_ref().map(|(_, latest)| latest),
+            candidate.as_deref(),
+            plan_answers,
+        )?;
+        issues.extend(plan.warnings.iter().cloned());
         let count = ids.len() + usize::from(rekey.is_some());
         let chosen = alternative.as_ref().map(|a| AltRef {
             set: alt_label(&a.set),

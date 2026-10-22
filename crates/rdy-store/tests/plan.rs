@@ -1575,16 +1575,8 @@ fn cp3_holder_take_refuses_conflicting_or_broken_seals() {
     });
     let rule = format!("plan {}: invalid chain", unchained.id());
     refused_upload(&mut h, &b, &path, &rule, true);
-    // a seal that drops its predecessor's answer
-    let forgetful = Plan {
-        answers: vec![],
-        ..seal.clone()
-    };
-    let path = edited_upload(&b, tag, "forgetful.rdysync", |r, o| {
-        replace_seal(r, o, b.seal, &forgetful)
-    });
-    let rule = format!("plan {}: invalid chain", forgetful.id());
-    refused_upload(&mut h, &b, &path, &rule, true);
+    // (a seal that drops an answer of the approved version's binding: cp10's landing test; this
+    // chain's binding has none, and a seal may leave out the answer-only version's, D-4JMPH)
     // the valid upload is taken, and taken again
     let valid = b.dir.path().join("valid.rdysync");
     export(&b.s, tag, END_OF_LOG, &valid);
@@ -1630,4 +1622,316 @@ fn cp3_holder_take_refuses_a_keep_suspect_of_no_block() {
         s.put_answer(&keep),
         Err(StoreError::Refused(m)) if m == rule
     ));
+}
+
+// ---- cp10: the landing's plans and the first binding after an unbound version ----
+
+/// A store whose view `work` holds one created block (`b-00001`) and its proposal `P`, bound in
+/// its own batch to `B`, which defers item 1; then an answer-only version `A` that replaces the
+/// defer and defers item 2: (store, P, B, A).
+fn answered_after_propose() -> (tempfile::TempDir, Store, Hash, Plan, Hash) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
+    s.commit_to_view(
+        "work",
+        change(
+            "work",
+            vec![Op::Create {
+                block: block("b-00001", "x"),
+            }],
+        ),
+    )
+    .unwrap();
+    let (one, two) = (Hash([1; 32]), Hash([2; 32]));
+    s.set_held(true).unwrap();
+    let p = s.propose("work", "first", writer()).unwrap();
+    let b = Plan {
+        proposal: Some(p),
+        answers: vec![defer_answer(one)],
+        ..fresh("work")
+    };
+    s.write_guarded_for_tests(plan_frames(&b)).unwrap();
+    s.seal(vec![]).unwrap();
+    s.set_held(false).unwrap();
+    let replaced = PlanAnswer {
+        act: PlanAct::Confirm,
+        reason: Some("it holds after all".into()),
+        ..defer_answer(one)
+    };
+    let a = s
+        .put_plan(&Plan {
+            stable: Some(b.id()),
+            prev: Some(b.id()),
+            answers: vec![replaced, defer_answer(two)],
+            ..fresh("work")
+        })
+        .unwrap();
+    (dir, s, p, b, a)
+}
+
+/// The seal of `landing`, which lands `version`, after `prev` in the chain first `stable`, with
+/// `answers`.
+fn seal_after(
+    stable: Hash,
+    prev: Hash,
+    landing: Hash,
+    version: Hash,
+    answers: Vec<PlanAnswer>,
+) -> Plan {
+    Plan {
+        stable: Some(stable),
+        prev: Some(prev),
+        proposal: Some(version),
+        answers,
+        provenance: human(),
+        seal: Some(PlanSeal {
+            landing,
+            version,
+            decisions: vec![],
+            items: vec![],
+        }),
+        ..fresh("work")
+    }
+}
+
+fn land_request(p: Hash, accept: Option<Change>) -> rdy_store::LandRequest {
+    rdy_store::LandRequest {
+        proposal: p,
+        accept,
+        approver: human(),
+        alt: None,
+        relay: None,
+        evidence: None,
+    }
+}
+
+/// D-4JMPH, p-8D6ES: a landing's plans follow the view's chain (after an answer-only version
+/// written since the propose) and carry the approved version's bound answers, which may leave
+/// out answers given after it: the seal of a version that lands as is, and the final version's
+/// binding and seal of an acceptance. A landing plan that drops an answer of the approved
+/// binding is still refused, and fsck and a holder's take accept what the writer wrote.
+#[test]
+fn cp10_landing_plans_carry_the_approved_binding_after_later_answers() {
+    // the approved version lands as is
+    let (_d, mut s, p, b, a) = answered_after_propose();
+    let mut prepared = s.prepare_land(land_request(p, None)).unwrap();
+    let (l, v) = (prepared.hash(), prepared.landed_version());
+    assert_eq!(v, p);
+    let dropped = seal_after(b.id(), a, l, v, vec![]);
+    match s.plan_landing(&mut prepared, None, Some(&dropped)) {
+        Err(StoreError::Refused(m)) => {
+            assert_eq!(m, format!("plan {}: invalid chain", dropped.id()))
+        }
+        other => panic!("a seal that drops a bound answer: {other:?}"),
+    }
+    let mut prepared = s.prepare_land(land_request(p, None)).unwrap();
+    let sealed = seal_after(b.id(), a, l, v, b.answers.clone());
+    s.plan_landing(&mut prepared, None, Some(&sealed)).unwrap();
+    s.commit_land(prepared, &[]).unwrap();
+    assert_eq!(plan_ref_of(&s, "work"), Some(sealed.id()));
+    s.check_objects().unwrap();
+    // an unsealed answer-only version still keeps every answer of its predecessor
+    let other = Plan {
+        stable: None,
+        prev: None,
+        answers: vec![defer_answer(Hash([3; 32]))],
+        ..fresh("other")
+    };
+    let first = s.put_plan(&other).unwrap();
+    let forged = Plan {
+        stable: Some(first),
+        prev: Some(first),
+        answers: vec![],
+        ..fresh("other")
+    };
+    assert!(matches!(
+        s.put_plan(&forged),
+        Err(StoreError::Refused(m)) if m == format!("plan {}: invalid chain", forged.id())
+    ));
+
+    // an acceptance: the final version binds the approved answers, after the answer-only one
+    let (_d, mut s, p, b, a) = answered_after_propose();
+    let accept = || {
+        change(
+            "work",
+            vec![Op::Create {
+                block: block("b-00002", "accepted"),
+            }],
+        )
+    };
+    let mut prepared = s.prepare_land(land_request(p, Some(accept()))).unwrap();
+    let (l, fin) = (prepared.hash(), prepared.landed_version());
+    assert!(prepared.writes_final_version());
+    assert_ne!(fin, p);
+    let bound_final = |answers: Vec<PlanAnswer>| Plan {
+        stable: Some(b.id()),
+        prev: Some(a),
+        proposal: Some(fin),
+        answers,
+        provenance: human(),
+        ..fresh("work")
+    };
+    let dropped = bound_final(vec![]);
+    match s.plan_landing(&mut prepared, Some(&dropped), None) {
+        Err(StoreError::Refused(m)) => {
+            assert_eq!(m, format!("plan {}: invalid chain", dropped.id()))
+        }
+        other => panic!("a final binding that drops a bound answer: {other:?}"),
+    }
+    let mut prepared = s.prepare_land(land_request(p, Some(accept()))).unwrap();
+    assert_eq!(prepared.hash(), l);
+    let fplan = bound_final(b.answers.clone());
+    let sealed = seal_after(b.id(), fplan.id(), l, fin, b.answers.clone());
+    s.plan_landing(&mut prepared, Some(&fplan), Some(&sealed))
+        .unwrap();
+    s.commit_land(prepared, &[]).unwrap();
+    assert_eq!(plan_ref_of(&s, "work"), Some(sealed.id()));
+    let end = s.log_end();
+    assert_eq!(s.plan_of_proposal(&fin, end).unwrap(), Some(fplan.id()));
+    assert_eq!(s.plan_of_landing(&l, end).unwrap(), Some(sealed.id()));
+    s.check_objects().unwrap();
+    // a holder takes the landing's closure, its chain and both plans
+    let tag = s
+        .put_tag(&Tag {
+            name: "v1".into(),
+            landing: l,
+            message: None,
+            tagged_by: human(),
+        })
+        .unwrap();
+    let path = _d.path().join("v1.rdysync");
+    let records = export(&s, tag, END_OF_LOG, &path);
+    for h in [a, fplan.id(), sealed.id()] {
+        assert!(records.contains(&key(kinds::PLAN, h)), "{h} in the closure");
+    }
+    let mut h = Store::create_holder(&_d.path().join("h"), s.repo_id().unwrap().unwrap()).unwrap();
+    let target = UploadTarget {
+        tag: "v1".into(),
+        landing: l,
+    };
+    // an upload whose seal drops the approved binding's answer is refused, before anything is
+    // written, by the take and by a checked stream
+    let forgetful = seal_after(b.id(), fplan.id(), l, fin, vec![]);
+    let (mut records, mut order) = closure_records(&s, tag);
+    replace_seal(&mut records, &mut order, sealed.id(), &forgetful);
+    let bad = _d.path().join("forgetful.rdysync");
+    let header = StreamHeader::tag_history(s.repo_id().unwrap().unwrap(), tag, vec![]);
+    write_batch(&mut records, &header, &order, File::create(&bad).unwrap()).unwrap();
+    let rule = format!("plan {}: invalid chain", forgetful.id());
+    let before = holder_state(&h);
+    match h.take_batches(&[File::open(&bad).unwrap()], &target, incoming) {
+        Err(rdy_store::take_batch::TakeError::Stream(e)) => {
+            assert_eq!(e.code, "E_BAD_RECORD", "{}", e.message);
+            assert!(e.message.ends_with(&rule), "{}: {rule}", e.message);
+        }
+        Err(e) => panic!("{rule}: {e}"),
+        Ok(_) => panic!("{rule}: the take wrote the upload"),
+    }
+    assert_eq!(holder_state(&h), before);
+    match rdy_store::stream_source::CheckedStream::open(File::open(&bad).unwrap()) {
+        Err(e) => assert!(e.message.ends_with(&rule), "{}: {rule}", e.message),
+        Ok(_) => panic!("{rule}: the checked stream passed"),
+    }
+    // the written upload is taken
+    h.take_batches(&[File::open(&path).unwrap()], &target, incoming)
+        .unwrap();
+    let end = h.log_end();
+    assert_eq!(h.plan_of_landing(&l, end).unwrap(), Some(sealed.id()));
+    assert_eq!(h.plan_of_proposal(&fin, end).unwrap(), Some(fplan.id()));
+    h.check_holder().unwrap();
+}
+
+/// O19, p-AEYTC: the binding of a version that follows an unbound one starts a chain, also
+/// where an answer-only chain stands in the view; a binding that continues that chain is
+/// refused, and fsck agrees.
+#[test]
+fn cp10_binding_after_an_unbound_version_starts_a_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
+    s.commit_to_view(
+        "work",
+        change(
+            "work",
+            vec![Op::Create {
+                block: block("b-00001", "x"),
+            }],
+        ),
+    )
+    .unwrap();
+    // the store-16 version, then an answer-only chain in the view
+    let old = s.propose("work", "first", writer()).unwrap();
+    let chain = s
+        .put_plan(&Plan {
+            answers: vec![defer_answer(Hash([1; 32]))],
+            ..fresh("work")
+        })
+        .unwrap();
+    let changes = s.included("work").unwrap().as_ref().clone();
+    let request = || rdy_store::plan::ProposeRequest {
+        view: "work",
+        title: "first",
+        summary: None,
+        by: writer(),
+        changes: changes.clone(),
+        alternative: None,
+        prev: Some(old),
+        rekey: None,
+        answer: None,
+    };
+    // continuing the answer-only chain is refused, with nothing written
+    let end = s.log_end();
+    let mut prepared = s.prepare_propose(request()).unwrap();
+    let v = prepared.version();
+    let continued = Plan {
+        stable: Some(chain),
+        prev: Some(chain),
+        proposal: Some(v),
+        answers: vec![defer_answer(Hash([1; 32]))],
+        ..fresh("work")
+    };
+    match s.bind_plan(&mut prepared, &continued) {
+        Err(StoreError::Refused(m)) => {
+            assert_eq!(m, format!("plan {}: invalid chain", continued.id()))
+        }
+        other => panic!("a binding that continues the chain: {other:?}"),
+    }
+    assert_eq!(s.log_end(), end);
+    // the first binding: no earlier chain version, no inherited answer
+    let mut prepared = s.prepare_propose(request()).unwrap();
+    let first = Plan {
+        proposal: Some(v),
+        ..fresh("work")
+    };
+    s.bind_plan(&mut prepared, &first).unwrap();
+    s.commit_propose(prepared).unwrap();
+    assert_eq!(plan_ref_of(&s, "work"), Some(first.id()));
+    assert_eq!(s.plan_of_proposal(&old, s.log_end()).unwrap(), None);
+    s.check_objects().unwrap();
+    // fsck reads a continuing binding as damage
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
+    s.commit_to_view(
+        "work",
+        change(
+            "work",
+            vec![Op::Create {
+                block: block("b-00001", "x"),
+            }],
+        ),
+    )
+    .unwrap();
+    let old = s.propose("work", "first", writer()).unwrap();
+    let chain = s.put_plan(&fresh("work")).unwrap();
+    s.set_held(true).unwrap();
+    let v = s.propose_version(&old, &[]).unwrap();
+    let forged = Plan {
+        stable: Some(chain),
+        prev: Some(chain),
+        proposal: Some(v),
+        ..fresh("work")
+    };
+    s.write_guarded_for_tests(plan_frames(&forged)).unwrap();
+    s.seal(vec![]).unwrap();
+    s.set_held(false).unwrap();
+    assert_damage(&s, &forged.id(), "invalid chain");
 }

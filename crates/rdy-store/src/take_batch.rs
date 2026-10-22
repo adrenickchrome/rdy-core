@@ -772,10 +772,11 @@ pub(crate) fn prepare<E>(
     // 5. the closure
     stream_source::check_closure(&mut source, root_key, &root, &objects)?;
     // 5. and the typed context of the new plans and plan answers, over the union and the holder
+    // (with the new landings, which a landing's plans look up by the version they land)
     let mut new_keys: Vec<ObjectKey> = Vec::new();
     for k in union
         .keys()
-        .filter(|k| matches!(k.kind, kinds::PLAN | kinds::ANSWER))
+        .filter(|k| matches!(k.kind, kinds::PLAN | kinds::ANSWER | kinds::LANDING))
     {
         if !rx.holds(k)? {
             new_keys.push(*k);

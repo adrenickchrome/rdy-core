@@ -375,6 +375,9 @@ struct ContextLookup<'a> {
     incoming: &'a [ObjectKey],
     bound: HashMap<Hash, Hash>,
     sealed: HashMap<Hash, Hash>,
+    /// The incoming landings by the proposal version each lands, read once when a plan first
+    /// asks.
+    landings: RefCell<Option<HashMap<Hash, Hash>>>,
     failed: RefCell<Option<StreamError>>,
 }
 
@@ -458,6 +461,50 @@ impl crate::plan::PlanLookup for ContextLookup<'_> {
         }
     }
 
+    fn landing_here(&self, p: &Hash) -> Result<Option<Hash>, StoreError> {
+        let landing = |h: &Hash| -> Result<Option<LandingRecord>, StoreError> {
+            match self.read(kinds::LANDING, h) {
+                Ok(b) => Ok(bounded::decode::<LandingRecord>(&b).ok()),
+                Err(StoreError::Redacted { .. } | StoreError::NotFound(_)) => Ok(None),
+                Err(e) => Err(e),
+            }
+        };
+        if self.landings.borrow().is_none() {
+            let from = self.incoming.partition_point(|k| k.kind < kinds::LANDING);
+            let to = self.incoming.partition_point(|k| k.kind <= kinds::LANDING);
+            let mut by = HashMap::new();
+            self.keep(
+                by.try_reserve(to - from)
+                    .map_err(|_| StreamError::allocation(None, 0)),
+            )?;
+            for k in &self.incoming[from..to] {
+                if let Some(l) = landing(&k.hash)? {
+                    by.entry(l.proposal).or_insert(k.hash);
+                }
+            }
+            *self.landings.borrow_mut() = Some(by);
+        }
+        if let Some(l) = self.landings.borrow().as_ref().and_then(|m| m.get(p)) {
+            return Ok(Some(*l));
+        }
+        let Some(r) = self.holder else {
+            return Ok(None);
+        };
+        let version = match self.read(kinds::PROPOSAL, p) {
+            Ok(b) => bounded::decode::<rdy_model::Proposal>(&b).ok(),
+            Err(StoreError::Redacted { .. } | StoreError::NotFound(_)) => None,
+            Err(e) => return Err(e),
+        };
+        for c in version.iter().flat_map(|v| &v.changes) {
+            if let Some(l) = r.index().landing_of(c)?
+                && landing(&l)?.is_some_and(|x| x.proposal == *p)
+            {
+                return Ok(Some(l));
+            }
+        }
+        Ok(None)
+    }
+
     fn holder(&self) -> bool {
         true
     }
@@ -466,7 +513,8 @@ impl crate::plan::PlanLookup for ContextLookup<'_> {
 /// Checks the typed context of the incoming plans and plan answers before anything is written,
 /// as fsck checks a holder's: each new PLAN keeps its chain, bound proposal and seal
 /// (`crate::plan::invalid_context`) against the incoming records, the records `rec` holds and
-/// the `holder`'s seal and proposal tables, and each new ANSWER keeps its typed target rule
+/// the `holder`'s seal and proposal tables (a landing's plans find their landing among the
+/// incoming landings or the holder's), and each new ANSWER keeps its typed target rule
 /// (`crate::answer::invalid_targets`: a KeepSuspect names BLOCK versions only). Two different
 /// seals of one landing, in the upload or against the holder, are `duplicate landing seal`; a
 /// record the holder holds already is not incoming, so a repeated hash is accepted. `incoming`
@@ -483,6 +531,7 @@ pub(crate) fn check_typed_context(
         incoming,
         bound: HashMap::new(),
         sealed: HashMap::new(),
+        landings: RefCell::new(None),
         failed: RefCell::new(None),
     };
     let grow = || StreamError::allocation(None, 0);

@@ -8,18 +8,21 @@
 //! computed and the request's plan answers are validated against it before anything is
 //! appended. The version continues the view's live chain, keeping its first HEADs as the
 //! baseline of the code items, or starts a chain; its HEADs are the ones this propose captured.
+//! The version that follows one with no bound plan (O19) always starts a chain.
 //! Its answers are cumulative and keep their own authors and content identities. The reply's
 //! [`PlanSummary`] and warnings come from that same assessment.
 //!
 //! # Land
 //!
 //! A landing computes the selected version's complete outcome before anything is appended,
-//! from its recorded canon and its recorded HEADs: each item's computed close, else its valid
+//! from its recorded canon, its recorded HEADs and its bound plan's answers (an answer the view
+//! recorded after the propose is not the version's): each item's computed close, else its valid
 //! answer (confirm is confirmed, done is done, defer is deferred), else open. An acceptance
 //! change gives the landing a final version: an already-bound version's final version binds a
-//! plan of its own in the landing's batch, with the approved candidate's assessment and HEADs.
-//! The seal names the landing and the version that landed, and carries the cumulative answers.
-//! A version with no item that re-affirms no decision writes no seal.
+//! plan of its own in the landing's batch, with the approved candidate's answers, assessment
+//! and HEADs. The seal names the landing and the version that landed, and carries the approved
+//! version's cumulative answers. The landing's plans follow the view's chain, after any
+//! answer-only version. A version with no item that re-affirms no decision writes no seal.
 //!
 //! A version proposed before store 17 has no bound plan (O19, p-AEYTC): its landing captures
 //! the HEADs once as both ends, and its seal has no earlier chain version, no answers and no
@@ -189,20 +192,28 @@ fn assess(computed: &ComputedPlan, answers: &[PlanAnswer]) -> (PlanSummary, Vec<
 }
 
 /// Prepares the plan a propose of `view` binds (see the module docs), writing nothing; its new
-/// answers are `by`'s, the version's provenance: the HEADs captured now, the view's live chain, the candidate `candidate` (the version's changes
-/// with rdy's key change, on canon's head) and `inputs` validated against it, all before any
-/// frame is appended. `None` is a version with a blocking conflict, which has no candidate
-/// until it is resolved: it binds the chain's answers as they are, with an empty summary (the
-/// caller refuses its answers).
+/// answers are `by`'s, the version's provenance: the HEADs captured now, the view's live chain,
+/// the candidate `candidate` (the version's changes with rdy's key change, on canon's head) and
+/// `inputs` validated against it, all before any frame is appended. `None` is a version with a
+/// blocking conflict, which has no candidate until it is resolved: it binds the chain's answers
+/// as they are, with an empty summary (the caller refuses its answers). `follows` is the
+/// version the new one follows: when it has no bound plan (O19, p-AEYTC), the new plan is the
+/// first of a chain, whatever chain the view holds, with no earlier answer and its own HEADs as
+/// the baseline.
 pub(crate) fn prepare_proposal_plan(
     st: &ReadState,
     by: &Provenance,
     view: &str,
+    follows: Option<&Hash>,
     candidate: Option<&[Change]>,
     inputs: &[PlanAnswerInput],
 ) -> Result<ProposalPlan, RdyError> {
     let heads = capture_heads(st)?;
-    let chain = live_chain(st, view)?;
+    let unbound = match follows {
+        Some(v) => st.reader().plan_of_proposal(v, st.seq())?.is_none(),
+        None => false,
+    };
+    let chain = if unbound { None } else { live_chain(st, view)? };
     let (stable, prev) = chain.as_ref().map_or((None, None), |c| c.next_links());
     let prior: &[PlanAnswer] = chain.as_ref().map_or(&[], |c| &c.plan.answers);
     let first = chain.as_ref().map_or(&heads, |c| &c.first_heads);
@@ -262,9 +273,10 @@ fn outcome_of(c: &compute::PlanCandidate, answers: &[PlanAnswer]) -> PlanOutcome
 }
 
 /// Prepares what the landing of proposal version `version` (`p`) seals, written by `by`
-/// (the approval's provenance), writing nothing. A bound version uses its recorded HEADs, its
-/// chain's first HEADs and the view's cumulative answers; an unbound one the HEADs captured
-/// once, as both ends, and no answers (O19).
+/// (the approval's provenance), writing nothing. A bound version uses its bound plan's answers
+/// (cumulative to its propose: an answer the view recorded after it is not the version's),
+/// its recorded HEADs and its chain's first HEADs, and its landing's plans follow the view's
+/// chain; an unbound one the HEADs captured once, as both ends, and no answers (O19).
 pub(crate) fn prepare_landing_plan(
     st: &ReadState,
     version: &Hash,
@@ -279,16 +291,16 @@ pub(crate) fn prepare_landing_plan(
                 Some(s) => reader.plan(&s)?.heads,
                 None => b.heads.clone(),
             };
-            // the view's chain holds the version's plan and any answer-only version after it
-            let (links, answers) = match live_chain(st, &p.view)? {
+            // the links follow the view's chain: the version's plan and any answer-only version
+            // after it; the answers are the version's own
+            let links = match live_chain(st, &p.view)? {
                 Some(c) => {
                     let (stable, prev) = c.next_links();
-                    let links = stable.zip(prev);
-                    (links, c.plan.answers)
+                    stable.zip(prev)
                 }
-                None => (Some((b.stable.unwrap_or(bound), bound)), b.answers.clone()),
+                None => Some((b.stable.unwrap_or(bound), bound)),
             };
-            (links, answers, b.heads, first)
+            (links, b.answers, b.heads, first)
         }
         None => {
             let heads = capture_heads(st)?;

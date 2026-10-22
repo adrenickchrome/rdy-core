@@ -190,11 +190,15 @@ fn head(repo: &Path) -> Vec<PlanHead> {
 
 /// O19, p-AEYTC: a still-open version proposed before store 17 binds no plan; the view's next
 /// propose writes a new version whose plan starts a chain with no inherited answer, and the
-/// plan warnings apply to it; the old version stays unbound.
+/// plan warnings apply to it; the old version stays unbound. An answer-only chain the view
+/// recorded after the old version is not continued: the new plan names no earlier version,
+/// takes none of its answers, and its own HEADs are its code baseline, not the chain's first.
 #[test]
 fn cp10_next_propose_binds_first_plan_version() {
-    let (_d, mut r) = project();
+    let (d, mut r) = project();
+    let repo = linked_repo(d.path());
     let (_s, a, b, _c, p) = spec(&mut r);
+    commit(repo.path(), "f.rs", &format!("start\n\nImplements: {a}"));
     edit(&mut r, "w", &a, "A holds 60 days.");
     // the version a store-16 engine wrote: the raw proposal writer, no plan
     let by = writer().provenance();
@@ -206,6 +210,17 @@ fn cp10_next_propose_binds_first_plan_version() {
     r.invalidate();
     assert!(bound(&r, &old.to_string()).is_none());
     assert_eq!(plan_ref(&r, "w"), None);
+    // an answer-only chain after it, with its first HEADs; then a commit touches f.rs
+    let confirm = pi(&a, &b, PlanKind::Confirm);
+    let chain = r
+        .answer_plan(
+            &writer(),
+            "w",
+            &[ans(&confirm, PlanAct::Defer, Some("later"))],
+        )
+        .unwrap();
+    assert_eq!(plan_ref(&r, "w"), Some(chain));
+    commit(repo.path(), "f.rs", &format!("follow\n\nImplements: {a}"));
 
     let next = propose(&mut r, "w", &[]).unwrap();
     assert_eq!(next.version, 2, "a new version of the open proposal");
@@ -213,17 +228,19 @@ fn cp10_next_propose_binds_first_plan_version() {
     assert_eq!(
         (plan.stable, plan.prev),
         (None, None),
-        "a first chain version"
+        "a first chain version, not the answer-only chain's next"
     );
     assert_eq!(plan.proposal, Some(h(&next.id)));
     assert!(plan.answers.is_empty(), "no inherited answer");
+    assert_eq!(plan.heads, head(repo.path()), "this propose's HEADs");
     assert_eq!(plan.view, "w");
     assert_eq!(plan_ref(&r, "w"), Some(bh));
     assert!(
         bound(&r, &old.to_string()).is_none(),
         "the old version stays unbound"
     );
-    // the normal plan warnings: b's confirm and p's update are open
+    // the normal plan warnings: b's confirm and p's update are open (the chain's defer is not
+    // inherited); the code item counts and does not warn
     let open = next
         .warnings
         .iter()
@@ -233,12 +250,15 @@ fn cp10_next_propose_binds_first_plan_version() {
     assert_eq!(open.fix, PLAN_OPEN_FIX);
     assert_eq!(
         (next.plan.open, next.plan.closed, next.plan.deferred),
-        (2, 0, 0)
+        (3, 0, 0)
     );
+    // the baseline is this propose's HEAD: the later commit is not after it
+    assert_eq!(next.plan.by_kind["update_implementation"].open, 1);
     let listed: Vec<&str> = next.plan.items.iter().map(|i| i.id.as_str()).collect();
     let mut full = [
         item_hash(&id(&a), &b, PlanKind::Confirm),
         item_hash(&id(&a), &p, PlanKind::Update),
+        item_hash(&id(&a), "app:f.rs", PlanKind::UpdateImplementation),
     ];
     full.sort();
     let want: Vec<String> = full.iter().map(item_display).collect();
