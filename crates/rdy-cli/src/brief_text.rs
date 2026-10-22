@@ -501,9 +501,11 @@ fn coverage_part(reply: &Value) -> String {
 
 /// The parts of the reply rdy could not work out, each with its error.
 fn errors_part(reply: &Value) -> String {
-    const PARTS: [(&str, &str); 7] = [
+    const PARTS: [(&str, &str); 8] = [
         ("consequences_error", "consequences"),
         ("consequences_tension_error", "the tension consequences"),
+        // D-01QX5: the checkout could not be read (the structural rows stand)
+        ("consequences_code_error", "the code consequences"),
         ("on_change_error", "the tension changes"),
         // a propose reply's tensions (gate `ProposalInfo`)
         ("tensions_error", "the tensions"),
@@ -1213,6 +1215,21 @@ mod tests {
         assert_eq!(
             consequences_text(&v),
             "\nintents on these blocks:\n  intent in-2 by agent:b in v: x (until t) on 1 block(s)"
+        );
+    }
+
+    #[test]
+    fn cp9_code_read_failure_text_keeps_rows_and_names_the_code_error() {
+        // D-01QX5: the checkout could not be read; the structural rows stand and the text says
+        // the code consequences were not worked out
+        let v = json!({
+            "consequences": [{"id": "cq-1", "block": "c-R", "kind": "suspect",
+                "because": {"edge": "references", "changed": "c-T"}, "follow_up": "confirm"}],
+            "consequences_code_error": "E_IO: git rev-parse failed in code repo app"
+        });
+        assert_eq!(
+            consequences_text(&v),
+            "\nconsequences:\n  suspect c-R: confirm (references c-T)\nnot worked out: the code consequences (E_IO: git rev-parse failed in code repo app)"
         );
     }
 }
