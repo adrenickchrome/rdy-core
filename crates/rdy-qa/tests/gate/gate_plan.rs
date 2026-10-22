@@ -953,6 +953,40 @@ fn cp10_empty_landing_has_no_seal_but_reaffirm_only_does() {
     r.fsck().unwrap();
 }
 
+/// Final review F1: a second re-affirmation of the same cause with the same reason writes the
+/// same `reaffirmed` entry and moves only the pin. It is still a re-affirmation: its landing
+/// seals, naming the decision, as the first one's did.
+#[test]
+fn cp10_fix1_repeated_same_reason_reaffirmation_seals() {
+    let (_d, mut r) = project();
+    let s = spec(&mut r);
+    let sdep = decision(&mut r, "dc", &s.s, "Build on C", &[&s.c]);
+    for (n, body) in ["C stands firm.", "C stands firmer."].iter().enumerate() {
+        let (cv, rv) = (format!("c{n}"), format!("r{n}"));
+        edit(&mut r, &cv, &s.c, body);
+        let pc = propose(&mut r, &cv, &[]);
+        land(&mut r, &pc);
+        write(
+            &mut r,
+            &rv,
+            json!([{"op": "reaffirm", "id": sdep, "reason": "It still builds on C."}]),
+        )
+        .unwrap();
+        let pr = propose(&mut r, &rv, &[]);
+        let rl = land(&mut r, &pr);
+        let (_, sealed) =
+            seal(&r, &rl).unwrap_or_else(|| panic!("re-affirmation {n} writes no seal"));
+        let x = sealed.seal.as_ref().unwrap();
+        assert_eq!(x.decisions, vec![id(&sdep)], "re-affirmation {n}");
+        assert_ne!(
+            read_plan(&r, landing_q(&rl))["plan"],
+            Value::Null,
+            "re-affirmation {n}"
+        );
+    }
+    r.fsck().unwrap();
+}
+
 /// A failed append at any frame of a propose batch or a landing batch leaves no half: every ref
 /// and the log end as they were, no proposal without its plan and no landing without its seal,
 /// and fsck agrees.

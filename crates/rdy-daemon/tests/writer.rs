@@ -127,6 +127,8 @@ impl Detector for Boom {
 
 #[test]
 fn wrt1_a_panic_while_logging_tension_moves_leaves_the_writer_serving() {
+    // the daemon's two notices are expected: the test takes and checks them (final review F9)
+    let log = rdy_daemon::daemon::capture_log_for_tests(&["logging tension moves"]);
     let (_d, mut r) = project();
     r.set_detectors_for_tests(&BOOM_DETECTORS);
     let shared = Shared::new(r);
@@ -142,6 +144,16 @@ fn wrt1_a_panic_while_logging_tension_moves_leaves_the_writer_serving() {
     assert_eq!(e.read().included("work").len(), 3);
     assert!(e.read().tensions().unwrap().is_empty());
     shared.shutdown().unwrap();
+    // logged once while it stood, and once when it cleared
+    assert_eq!(
+        log.lines(),
+        vec![
+            "logging tension moves failed (E_INTERNAL: internal error: moves boom (fix: report \
+             this as a bug in rdy)); the next write logs them"
+                .to_string(),
+            "logging tension moves works again".to_string(),
+        ]
+    );
 }
 
 #[test]

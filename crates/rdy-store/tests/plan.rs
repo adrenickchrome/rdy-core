@@ -1935,3 +1935,167 @@ fn cp10_binding_after_an_unbound_version_starts_a_chain() {
     s.set_held(false).unwrap();
     assert_damage(&s, &forged.id(), "invalid chain");
 }
+
+/// One sealed item of `kind` closed as `outcome`, its cause the fixture's: a code item names a
+/// `repo:path` subject, a document item a block.
+fn outcome_item(kind: PlanKind, outcome: PlanOutcome) -> SealedItem {
+    let subject = if kind == PlanKind::UpdateImplementation {
+        "app:src/lib.rs"
+    } else {
+        "b-00001"
+    };
+    SealedItem {
+        id: item_hash(&cause(), subject, kind),
+        kind,
+        subject: subject.into(),
+        cause: cause(),
+        edge: "reflects".into(),
+        outcome,
+        answer: None,
+    }
+}
+
+/// Final review F5 (Task 3: enum combinations): an item kind closes only with its own outcomes.
+/// A document subject the version deletes closes as `updated`, whatever its kind (task-6 R1).
+const IMPOSSIBLE_OUTCOMES: [(PlanKind, PlanOutcome); 12] = [
+    (PlanKind::Update, PlanOutcome::Done),
+    (PlanKind::Update, PlanOutcome::Confirmed),
+    (PlanKind::Update, PlanOutcome::Reaffirmed),
+    (PlanKind::Rejustify, PlanOutcome::Retired),
+    (PlanKind::Rejustify, PlanOutcome::Reaffirmed),
+    (PlanKind::Reaffirm, PlanOutcome::Confirmed),
+    (PlanKind::Reaffirm, PlanOutcome::Repinned),
+    (PlanKind::Confirm, PlanOutcome::Done),
+    (PlanKind::Confirm, PlanOutcome::Relinked),
+    (PlanKind::UpdateImplementation, PlanOutcome::Reaffirmed),
+    (PlanKind::UpdateImplementation, PlanOutcome::Updated),
+    (PlanKind::UpdateImplementation, PlanOutcome::Confirmed),
+];
+
+/// Every pair an engine landing can seal.
+const POSSIBLE_OUTCOMES: [(PlanKind, PlanOutcome); 20] = [
+    (PlanKind::Update, PlanOutcome::Updated),
+    (PlanKind::Update, PlanOutcome::Deferred),
+    (PlanKind::Update, PlanOutcome::Open),
+    (PlanKind::Rejustify, PlanOutcome::Relinked),
+    (PlanKind::Rejustify, PlanOutcome::Updated),
+    (PlanKind::Rejustify, PlanOutcome::Deferred),
+    (PlanKind::Rejustify, PlanOutcome::Open),
+    (PlanKind::Reaffirm, PlanOutcome::Reaffirmed),
+    (PlanKind::Reaffirm, PlanOutcome::Retired),
+    (PlanKind::Reaffirm, PlanOutcome::Updated),
+    (PlanKind::Reaffirm, PlanOutcome::Deferred),
+    (PlanKind::Reaffirm, PlanOutcome::Open),
+    (PlanKind::Confirm, PlanOutcome::Repinned),
+    (PlanKind::Confirm, PlanOutcome::Updated),
+    (PlanKind::Confirm, PlanOutcome::Confirmed),
+    (PlanKind::Confirm, PlanOutcome::Deferred),
+    (PlanKind::Confirm, PlanOutcome::Open),
+    (PlanKind::UpdateImplementation, PlanOutcome::Committed),
+    (PlanKind::UpdateImplementation, PlanOutcome::Done),
+    (PlanKind::UpdateImplementation, PlanOutcome::Deferred),
+];
+
+/// Final review F5: a seal whose item claims an outcome its kind cannot have is refused by the
+/// typed landing composition before append, is damage to fsck, and is refused by a holder's
+/// take before anything is written; every possible pair passes all three.
+#[test]
+fn cp3_fix1_impossible_kind_outcome_pairs_are_refused() {
+    // the typed landing composition
+    let (_d, s, p, b, a) = answered_after_propose();
+    let end = s.log_end();
+    let sealed = |prepared: &rdy_store::PreparedLanding, item: SealedItem| {
+        let mut x = seal_after(
+            b.id(),
+            a,
+            prepared.hash(),
+            prepared.landed_version(),
+            b.answers.clone(),
+        );
+        x.seal.as_mut().unwrap().items = vec![item];
+        x
+    };
+    for (kind, outcome) in IMPOSSIBLE_OUTCOMES {
+        let mut prepared = s.prepare_land(land_request(p, None)).unwrap();
+        let x = sealed(&prepared, outcome_item(kind, outcome));
+        match s.plan_landing(&mut prepared, None, Some(&x)) {
+            Err(StoreError::Refused(m)) => {
+                assert_eq!(
+                    m,
+                    format!("plan {}: invalid seal", x.id()),
+                    "{kind:?}/{outcome:?}"
+                )
+            }
+            other => panic!("{kind:?}/{outcome:?} composed: {other:?}"),
+        }
+        assert_eq!(s.log_end(), end);
+    }
+    for (kind, outcome) in POSSIBLE_OUTCOMES {
+        let mut prepared = s.prepare_land(land_request(p, None)).unwrap();
+        let x = sealed(&prepared, outcome_item(kind, outcome));
+        s.plan_landing(&mut prepared, None, Some(&x))
+            .unwrap_or_else(|e| panic!("{kind:?}/{outcome:?}: {e}"));
+    }
+    assert_eq!(s.log_end(), end);
+
+    // fsck: the seal and its ref written raw after its landing
+    let side_seal = |b: &mut Built, item: SealedItem| -> Hash {
+        b.s.commit_to_view(
+            "side",
+            change(
+                "side",
+                vec![Op::Create {
+                    block: block("b-00004", "side"),
+                }],
+            ),
+        )
+        .unwrap();
+        let p = b.s.propose("side", "side", writer()).unwrap();
+        b.s.set_held(true).unwrap();
+        let l = b.s.land(&p, human()).unwrap();
+        let v = b.s.landing(&l).unwrap().proposal;
+        let mut x = unbound_seal("side", l, v, vec![]);
+        x.seal.as_mut().unwrap().items = vec![item];
+        b.s.write_guarded_for_tests(plan_frames(&x)).unwrap();
+        b.s.seal(vec![]).unwrap();
+        b.s.set_held(false).unwrap();
+        x.id()
+    };
+    for (kind, outcome) in IMPOSSIBLE_OUTCOMES {
+        damaged(
+            |b| side_seal(b, outcome_item(kind, outcome)),
+            "invalid seal",
+        );
+    }
+    for (kind, outcome) in POSSIBLE_OUTCOMES {
+        let mut b = build();
+        side_seal(&mut b, outcome_item(kind, outcome));
+        b.s.check_objects()
+            .unwrap_or_else(|e| panic!("{kind:?}/{outcome:?}: {e}"));
+    }
+
+    // a holder's take: the upload's seal replaced by one with the item
+    let (b, tag) = tagged();
+    let seal = b.s.plan(&b.seal).unwrap();
+    let mut h = new_holder(&b, "h-outcomes");
+    for (n, (kind, outcome)) in IMPOSSIBLE_OUTCOMES.into_iter().enumerate() {
+        let mut x = seal.clone();
+        x.seal.as_mut().unwrap().items = vec![outcome_item(kind, outcome)];
+        // written past the batch check (which refuses it too), as a hostile sender would
+        let (mut records, mut order) = closure_records(&b.s, tag);
+        replace_seal(&mut records, &mut order, b.seal, &x);
+        let path = b.dir.path().join(format!("outcome-{n}.rdysync"));
+        let header = StreamHeader::tag_history(b.s.repo_id().unwrap().unwrap(), tag, vec![]);
+        write_batch(&mut records, &header, &order, File::create(&path).unwrap()).unwrap();
+        let rule = format!("plan {}: invalid seal", x.id());
+        refused_upload(&mut h, &b, &path, &rule, true);
+    }
+    for (n, (kind, outcome)) in POSSIBLE_OUTCOMES.into_iter().enumerate() {
+        let mut x = seal.clone();
+        x.seal.as_mut().unwrap().items = vec![outcome_item(kind, outcome)];
+        // the batch check of the upload passes
+        edited_upload(&b, tag, &format!("possible-{n}.rdysync"), |r, o| {
+            replace_seal(r, o, b.seal, &x)
+        });
+    }
+}

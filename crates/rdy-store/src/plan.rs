@@ -56,7 +56,7 @@ use crate::transition::Transitions;
 use rdy_model::engine_fields::MAX_REASON_CHARS;
 use rdy_model::plan::{
     MAX_PLAN_ANSWERS, MAX_PLAN_BYTES, MAX_SEALED_ITEMS, Plan, PlanAct, PlanKind, PlanOutcome,
-    item_hash, valid_git_hash,
+    item_hash, outcome_allowed, valid_git_hash,
 };
 use rdy_model::{Answer, AnswerAct, BlockId, Hash, LandingRecord, Proposal};
 use serde::{Deserialize, Serialize};
@@ -86,7 +86,8 @@ pub const INVALID_FIELDS: &str = "invalid fields";
 pub const INVALID_CHAIN: &str = "invalid chain";
 /// The bound proposal is not a proposal of this view in this batch, or another version binds it.
 pub const INVALID_PROPOSAL: &str = "invalid proposal";
-/// The seal does not name its landing, its landed version or its accepting answers.
+/// The seal does not name its landing, its landed version or its accepting answers, or an item
+/// has an outcome its kind cannot have (`rdy_model::plan::allowed_outcomes`).
 pub const INVALID_SEAL: &str = "invalid seal";
 pub const UNSORTED_ANSWERS: &str = "unsorted answers";
 pub const UNSORTED_HEADS: &str = "unsorted heads";
@@ -205,7 +206,7 @@ pub(crate) fn invalid_record(p: &Plan) -> Option<&'static str> {
         let item_ok = |i: &rdy_model::plan::SealedItem| {
             i.id == item_hash(&i.cause, &i.subject, i.kind)
                 && (code(i.kind) || BlockId::is_valid(&i.subject))
-                && (i.outcome != PlanOutcome::Committed || code(i.kind))
+                && outcome_allowed(i.kind, i.outcome)
                 && (i.answer.is_none() || (i.outcome == PlanOutcome::Deferred && !code(i.kind)))
         };
         if p.proposal != Some(seal.version) || !seal.items.iter().all(item_ok) {
@@ -906,18 +907,6 @@ impl Store {
             return Err(refused(&id, INVALID_PROPOSAL));
         }
         let (id, items) = self.plan_frames(plan, &[])?;
-        self.write_guarded(items)?;
-        Ok(id)
-    }
-
-    /// Test hook: writes `plan`'s PLAN frame and its `plan/<view>` ref in one batch, with none of
-    /// the plan writers' checks, so a test can place a version that no engine path writes yet (a
-    /// bound or a sealed one). Returns its id.
-    #[doc(hidden)]
-    pub fn put_plan_frames_for_tests(&mut self, plan: &Plan) -> Result<Hash, StoreError> {
-        let id = plan.id();
-        let mut items = vec![(kinds::PLAN, encode(plan))];
-        items.extend(self.ref_items_pub(vec![(plan_ref(&plan.view), id.0.to_vec())]));
         self.write_guarded(items)?;
         Ok(id)
     }

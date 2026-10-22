@@ -87,7 +87,8 @@ impl Rdy {
                     canon_step_cache: Arc::clone(&self.canon_step_cache),
                     inflight_cell: Arc::clone(&prev.inflight_cell),
                     coord_heads: Arc::clone(&prev.coord_heads),
-                    plan_heads: Arc::clone(&prev.plan_heads),
+                    plan_heads: prev.plan_heads.clone(),
+                    retirement_origins: Arc::clone(&prev.retirement_origins),
                     coord: OnceLock::new(),
                     tensions: Arc::default(),
                     dismissals: Arc::clone(&prev.dismissals),
@@ -317,15 +318,21 @@ impl Rdy {
             Arc::clone(&prev.coord_heads)
         };
         // the plan refs: only the plan writers move them, each beside its PLAN frame, so a
-        // publish whose batch holds no PLAN carries them
+        // publish whose batch holds no PLAN carries them, and one that does re-reads only the
+        // refs of the views its PLAN frames name (final review F3)
         let batch = match self.store.open_batch() {
             Some(frames) => frames,
             None => self.store.last_batch(),
         };
-        let plan_heads = if batch.iter().any(|(k, _)| *k == rdy_store::kinds::PLAN) {
-            Arc::new(crate::plan::api::plan_heads_in(&self.store.reader())?)
+        let plans: Vec<Hash> = batch
+            .iter()
+            .filter(|(k, _)| *k == rdy_store::kinds::PLAN)
+            .map(|(_, h)| *h)
+            .collect();
+        let plan_heads = if plans.is_empty() {
+            prev.plan_heads.clone()
         } else {
-            Arc::clone(&prev.plan_heads)
+            crate::plan::api::plan_heads_after(&self.store.reader(), &prev.plan_heads, &plans)?
         };
         // the tension set reads canon, the in-flight changes and the open alternative sets
         // (edit collision skips members of one set): a publish that moves none keeps it
@@ -572,6 +579,7 @@ impl Rdy {
             inflight_cell,
             coord_heads,
             plan_heads,
+            retirement_origins: Arc::clone(&prev.retirement_origins),
             coord: OnceLock::new(),
             tensions,
             dismissals,
@@ -832,7 +840,7 @@ impl Rdy {
             reader.intent_heads()?.into_iter().collect(),
             reader.alt_heads()?.into_iter().collect(),
         )?);
-        let plan_heads = Arc::new(crate::plan::api::plan_heads_in(&reader)?);
+        let plan_heads = crate::plan::api::plan_heads_in(&reader)?;
         let semantic = Arc::new(SemanticState::read(&reader)?);
         let dismissals = Arc::new(reader.dismissals()?.into_iter().collect());
         // only the pairs whose latest review dismisses
@@ -876,6 +884,7 @@ impl Rdy {
             inflight_cell: Arc::default(),
             coord_heads,
             plan_heads,
+            retirement_origins: Arc::default(),
             coord: OnceLock::new(),
             tensions: Arc::default(),
             dismissals,
@@ -1016,7 +1025,8 @@ impl Rdy {
             canon_step_cache: caches.canon_step_cache,
             inflight_cell: Arc::default(),
             coord_heads: Arc::default(),
-            plan_heads: Arc::default(),
+            plan_heads: Default::default(),
+            retirement_origins: Arc::default(),
             coord: OnceLock::new(),
             tensions: Arc::default(),
             dismissals: Arc::default(),

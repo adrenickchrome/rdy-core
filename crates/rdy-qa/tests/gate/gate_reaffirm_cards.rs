@@ -1495,6 +1495,69 @@ fn cp16_retirement_card_keeps_the_landing_that_retired_its_cause() {
     );
 }
 
+/// Final review F4: a retired cause's card finds the landing that retired it without walking
+/// the retiring decision's whole history again: as metadata-only versions of that decision
+/// accumulate, each queue read steps through at most two of its versions (the new one and the
+/// one whose origin is known), and the card keeps its origin.
+#[test]
+fn cp16_fix1_retirement_origin_reads_stay_bounded_as_metadata_versions_accumulate() {
+    use rdy_engine::pending::reaffirm::retirement_steps_for_tests as steps;
+    let (_d, mut r) = project();
+    let w = world(&mut r);
+    let x = decide(&mut r, &w.s, "X rule", Some("X"), &[&w.a]);
+    let dep = decide(&mut r, &w.s, "Dep rule", Some("Dep"), &[&x]);
+    let y = r
+        .supersede(
+            &writer(),
+            "sx",
+            &x,
+            None,
+            DecisionInput {
+                parent: w.s.clone(),
+                statement: "Y rule".into(),
+                title: Some("Y".into()),
+                depends_on: vec![w.c.clone()],
+                reversibility: Some("two_way".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .created["$decision"]
+        .clone();
+    land(&mut r, "sx").unwrap();
+    let before = the_card(&r, &x);
+    assert_eq!(members(&before), vec![dep.clone()]);
+    let other = Session::human("human:other".into(), Role::Approver);
+    for n in 0..6 {
+        // c changes; another person re-affirms y against it: one more metadata-only version
+        change(&mut r, &format!("xc{n}"), &w.c, &format!("C stands {n}."));
+        write(
+            &mut r,
+            &format!("ry{n}"),
+            json!([{"op": "reaffirm", "id": y, "targets": [w.c], "reason": format!("Y fits C {n}.")}]),
+        )
+        .unwrap();
+        land_as(&mut r, &format!("ry{n}"), &other);
+        let at = steps();
+        let after = the_card(&r, &x);
+        let first = steps() - at;
+        let at = steps();
+        the_card(&r, &x);
+        let again = steps() - at;
+        assert!(
+            first <= 2 && again <= 1,
+            "after {} metadata versions: {first} steps, then {again}",
+            n + 1
+        );
+        assert_eq!(
+            (after.raised_by.as_str(), after.raised_at.as_str()),
+            (before.raised_by.as_str(), before.raised_at.as_str()),
+            "the card was raised by the landing that retired x"
+        );
+        assert_eq!(after.plan_binding, before.plan_binding);
+    }
+}
+
 /// Each numeric bound of a card is checked where the queue builds the card. A group one past a
 /// bound, with the other two bounds at the product's, is refused with the exact `E_LIMIT` by the
 /// queue read and by both answers, which write nothing; the same group at the bound is a card.

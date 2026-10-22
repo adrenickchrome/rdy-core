@@ -103,6 +103,26 @@ impl PlanOutcome {
     }
 }
 
+/// The outcomes a sealed item of `kind` may have (Task 3: enum combinations; D-4JMPH): its
+/// computed closes, the outcomes of the acts that may answer it, `deferred` and `open`. A
+/// document subject the version deletes closes as `updated`, whatever its kind (task-6 R1, O4).
+/// The writers, fsck and a holder's take check every sealed item against it.
+pub fn allowed_outcomes(kind: PlanKind) -> &'static [PlanOutcome] {
+    use PlanOutcome::*;
+    match kind {
+        PlanKind::Update => &[Updated, Deferred, Open],
+        PlanKind::Rejustify => &[Relinked, Updated, Deferred, Open],
+        PlanKind::Reaffirm => &[Reaffirmed, Retired, Updated, Deferred, Open],
+        PlanKind::Confirm => &[Repinned, Updated, Confirmed, Deferred, Open],
+        PlanKind::UpdateImplementation => &[Committed, Done, Deferred, Open],
+    }
+}
+
+/// Whether a sealed item of `kind` may have `outcome` ([`allowed_outcomes`]).
+pub fn outcome_allowed(kind: PlanKind, outcome: PlanOutcome) -> bool {
+    allowed_outcomes(kind).contains(&outcome)
+}
+
 /// A code repository's HEAD when the plan was computed. `head` is 40 or 64 lowercase hex digits
 /// (see [`valid_git_hash`]), or `None` for a repository with no commit yet (O1).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

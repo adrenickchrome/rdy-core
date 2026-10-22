@@ -280,10 +280,60 @@ fn retires(b: &Block, cause: &BlockId) -> bool {
             .any(|l| l.target == *cause)
 }
 
+/// The most retirement origins one [`RetirementOrigins`] keeps; past it, it starts again.
+const MAX_RETIREMENT_ORIGINS: usize = 100_000;
+
+/// What the card builds have learnt about where retirements began (final review F4): for a
+/// retiring decision's version, the change that wrote it as canon reads it, and the retired
+/// cause, the earliest version of its unbroken run of retiring versions. Every state a publish
+/// carries to (all but a full publish's) shares it, so a metadata-only version of a retiring
+/// decision costs one step past the version whose origin is known, however long its history.
+/// The key holds the producing change: an entry stands for the history that change's landing
+/// gives the version, which a later landing does not change unless it writes the version again
+/// (another producer, another key).
+#[derive(Default)]
+pub(crate) struct RetirementOrigins(std::sync::Mutex<std::collections::HashMap<OriginKey, Hash>>);
+
+/// A retiring decision's version, the change that wrote it, and the retired cause.
+type OriginKey = (Hash, Hash, BlockId);
+
+impl RetirementOrigins {
+    fn get(&self, k: &OriginKey) -> Option<Hash> {
+        self.0.lock().ok()?.get(k).copied()
+    }
+
+    fn put(&self, keys: Vec<OriginKey>, origin: Hash) {
+        let Ok(mut m) = self.0.lock() else { return };
+        if m.len().saturating_add(keys.len()) > MAX_RETIREMENT_ORIGINS {
+            m.clear();
+        }
+        for k in keys {
+            m.insert(k, origin);
+        }
+    }
+}
+
+thread_local! {
+    /// The retiring-decision versions this thread's card builds have stepped through (see
+    /// `retirement_steps_for_tests`).
+    static RETIREMENT_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Tests only: how many versions of retiring decisions the card builds on this thread have
+/// stepped through to find where a retirement began (each step reads a version's producers,
+/// and on a miss its change and base block), so a test can check the count stays bounded as
+/// metadata-only versions accumulate.
+#[doc(hidden)]
+pub fn retirement_steps_for_tests() -> u64 {
+    RETIREMENT_STEPS.with(std::cell::Cell::get)
+}
+
 /// The landing that introduced the retirement of `cause` by `retirer` (its canon version): the
 /// landing of the earliest version of the retirer's unbroken run of versions back from canon
 /// that each retire `cause`. A later version that changes only the retirer's metadata (a
-/// re-affirmation, say) keeps the retirement and is not its origin.
+/// re-affirmation, say) keeps the retirement and is not its origin. The walk stops at the
+/// first version whose origin the state's [`RetirementOrigins`] knows, and records the origin
+/// of every version it stepped through, unless the run repeats a version.
 fn retirement_landing(
     st: &ReadState,
     retirer: &Block,
@@ -291,13 +341,22 @@ fn retirement_landing(
 ) -> Result<Option<Hash>, RdyError> {
     let reader = st.reader();
     let head = st.canon_head();
+    let known = &st.retirement_origins;
     let mut v = retirer.version_hash();
     let mut seen = BTreeSet::from([v]);
-    loop {
+    let mut walked: Vec<OriginKey> = vec![];
+    let mut repeats = false;
+    let origin = loop {
+        RETIREMENT_STEPS.with(|c| c.set(c.get() + 1));
         let producers = reader.producers(&v)?;
         let Some(change) = reader.producer_at(&producers, head.as_ref())? else {
-            break;
+            break v;
         };
+        let key = (v, change, cause.clone());
+        if let Some(origin) = known.get(&key) {
+            break origin;
+        }
+        walked.push(key);
         let base = reader
             .change(&change)?
             .ops
@@ -306,16 +365,23 @@ fn retirement_landing(
                 Op::Update { base, block } if block.version_hash() == v => Some(base),
                 _ => None,
             });
-        let Some(base) = base.filter(|b| !seen.contains(b)) else {
-            break;
+        let Some(base) = base else {
+            break v;
         };
+        if seen.contains(&base) {
+            repeats = true;
+            break v;
+        }
         if !retires(&reader.get_block(&base)?, cause) {
-            break;
+            break v;
         }
         seen.insert(base);
         v = base;
+    };
+    if !repeats {
+        known.put(walked, origin);
     }
-    landing_of_version(st, &v)
+    landing_of_version(st, &origin)
 }
 
 /// Who raised the card of a cause and when: the approver of the last landing that changed the

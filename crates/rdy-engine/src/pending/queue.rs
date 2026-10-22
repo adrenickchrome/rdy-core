@@ -117,7 +117,7 @@ use crate::tensions::{Tension, TensionKind, TensionSeverity, TensionStatus, tens
 use crate::{Materialized, ReadState, Scope};
 use rdy_graph::{DerivedStatus, Graph};
 use rdy_model::decision::{self, DecisionStatus, REVOKES, SUPERSEDES};
-use rdy_model::engine_fields::{REAFFIRMED, decode_reaffirmed};
+use rdy_model::engine_fields::reaffirmed_causes;
 use rdy_model::redaction::record_buffer;
 use rdy_model::{AnswerAct, Block, BlockId, Change, Hash, Op, Proposal};
 use rdy_schema::{Issue, Severity};
@@ -664,27 +664,6 @@ impl Reaffirmed {
             .collect();
         each.join("; ")
     }
-}
-
-/// The causes this version re-affirms, read from the block delta between `before` (the block in
-/// canon, if any) and `after`: each cause whose re-affirmation `after` records and `before` does
-/// not record the same way, or whose pin `after` moved (a second re-affirmation of a cause with
-/// the same reason writes the same entry, and only its pin moves; a frozen decision's pins move
-/// only by a re-affirmation). Each comes with the reason `after` records, in cause-id order. A
-/// field that does not read as a re-affirmation map counts as none.
-fn reaffirmed_causes(before: Option<&Block>, after: &Block) -> Vec<(BlockId, String)> {
-    let read = |b: Option<&Block>| {
-        b.and_then(|b| b.fields.get(REAFFIRMED))
-            .and_then(|v| decode_reaffirmed(v).ok())
-            .unwrap_or_default()
-    };
-    let old = read(before);
-    let pin = |b: Option<&Block>, t: &BlockId| b.and_then(|b| b.pins.get(t).copied());
-    read(Some(after))
-        .into_iter()
-        .filter(|(t, r)| old.get(t) != Some(r) || pin(before, t) != pin(Some(after), t))
-        .map(|(t, r)| (t, r.reason))
-        .collect()
 }
 
 /// A non-blank text field of `b`.

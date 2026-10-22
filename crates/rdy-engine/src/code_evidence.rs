@@ -778,6 +778,36 @@ mod tests {
         assert_eq!(idx.commits, 2);
     }
 
+    /// Final review F2: a committed file whose name starts with a newline, or is one newline,
+    /// keeps its evidence beside an ordinary file: the history reaches it and its citing
+    /// commit closes it.
+    #[test]
+    fn cp2_fix1_newline_named_files_keep_their_evidence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        init(dir);
+        plumbing_commit(
+            dir,
+            None,
+            &["\nodd.rs", "plain.rs", "\n"],
+            &[],
+            "add\n\nImplements: c-AAAAA",
+        );
+        let (m, ev) = (flat(), evidence(dir));
+        for path in ["\nodd.rs", "plain.rs", "\n"] {
+            assert!(ev.blobs.contains_key(path), "{path:?} at HEAD");
+            assert!(
+                ev.index.files.contains_key(path),
+                "{path:?} in the history: {:?}",
+                ev.index.files.keys().collect::<Vec<_>>()
+            );
+            assert!(
+                later_touch(&ev, None, path, &allowed(&[X]), &m).unwrap(),
+                "{path:?} closes"
+            );
+        }
+    }
+
     #[test]
     fn cp2_log_decoder_counts_every_path_token_before_decoding() {
         let n = "0123456789abcdef0123456789abcdef";

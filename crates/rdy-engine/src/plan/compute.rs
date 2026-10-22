@@ -16,7 +16,7 @@ use crate::lexicon::Lexicon;
 use crate::{Materialized, RdyError, ReadState, Scope};
 use rdy_graph::{DerivedStatus, Graph, edges_of};
 use rdy_model::decision::{DECISION, REFINES, REVOKES, SUPERSEDES};
-use rdy_model::engine_fields::REAFFIRMED;
+use rdy_model::engine_fields::{REAFFIRMED, reaffirmed_causes};
 use rdy_model::plan::{MAX_SEALED_ITEMS, PlanAct, PlanHead, PlanKind, PlanOutcome, item_hash};
 use rdy_model::{Block, BlockId, Change, FieldValue, Hash, Tracking};
 use std::cell::OnceCell;
@@ -548,7 +548,9 @@ fn created_decisions(sides: &Sides) -> impl Iterator<Item = BlockId> + '_ {
         .cloned()
 }
 
-/// The decisions whose `reaffirmed` metadata the version changes.
+/// The decisions the version re-affirms by metadata: their `reaffirmed` field changes, or the
+/// pin of a cause it records moves (a repeated re-affirmation with the same reason writes the
+/// same entry and moves only the pin; [`reaffirmed_causes`], the queue's rule too).
 fn acknowledged(sides: &Sides) -> BTreeSet<BlockId> {
     let (base, fin) = (&sides.base, &sides.fin);
     sides
@@ -556,7 +558,9 @@ fn acknowledged(sides: &Sides) -> BTreeSet<BlockId> {
         .iter()
         .filter(|id| match (base.m.get(id), fin.m.get(id)) {
             (Some(a), Some(b)) => {
-                b.block_type == DECISION && a.fields.get(REAFFIRMED) != b.fields.get(REAFFIRMED)
+                b.block_type == DECISION
+                    && (a.fields.get(REAFFIRMED) != b.fields.get(REAFFIRMED)
+                        || !reaffirmed_causes(Some(a), b).is_empty())
             }
             _ => false,
         })
@@ -1819,6 +1823,30 @@ mod tests {
             vec![(D1.to_string(), G.to_string(), PlanKind::Confirm, None)]
         );
         assert_eq!(find(&p, D1, G, PlanKind::Confirm).edge, "refines");
+    }
+
+    /// Final review F5: every outcome an answer gives an item of a kind is one the store's
+    /// shared matrix lets that kind seal.
+    #[test]
+    fn cp6_fix1_answer_outcomes_are_in_the_stores_matrix() {
+        use rdy_model::plan::outcome_allowed;
+        for kind in [
+            PlanKind::Update,
+            PlanKind::Rejustify,
+            PlanKind::Reaffirm,
+            PlanKind::Confirm,
+            PlanKind::UpdateImplementation,
+        ] {
+            for act in allowed_acts(kind) {
+                let outcome = match act {
+                    PlanAct::Confirm => PlanOutcome::Confirmed,
+                    PlanAct::Done => PlanOutcome::Done,
+                    PlanAct::Defer => PlanOutcome::Deferred,
+                };
+                assert!(outcome_allowed(kind, outcome), "{kind:?}/{outcome:?}");
+            }
+            assert!(outcome_allowed(kind, PlanOutcome::Open), "{kind:?}");
+        }
     }
 
     /// A repeated re-affirmation (the same reason and `against`, only the pin moves) is a

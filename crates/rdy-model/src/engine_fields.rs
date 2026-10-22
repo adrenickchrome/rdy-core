@@ -8,7 +8,7 @@
 //! Both are left out of the content hash, so writing one makes no pin stale, and neither is ever
 //! scanned for references, so a reason that names `{{D-x}}` adds no graph edge.
 use crate::plan::valid_git_hash;
-use crate::{BlockId, FieldValue, Hash};
+use crate::{Block, BlockId, FieldValue, Hash};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -216,6 +216,28 @@ pub fn decode_reaffirmed(
         );
     }
     Ok(out)
+}
+
+/// The causes a version re-affirms, read from the block delta between `before` (the block as
+/// it stood, if any) and `after`: each cause whose re-affirmation `after` records and `before`
+/// does not record the same way, or whose pin `after` moved (a second re-affirmation of a cause
+/// with the same reason writes the same entry, and only its pin moves; a frozen decision's pins
+/// move only by a re-affirmation). Each comes with the reason `after` records, in cause-id
+/// order. A field that does not read as a re-affirmation map counts as none. Plan computation,
+/// its code-evidence closes and the pending queue all read re-affirmation through this one rule.
+pub fn reaffirmed_causes(before: Option<&Block>, after: &Block) -> Vec<(BlockId, String)> {
+    let read = |b: Option<&Block>| {
+        b.and_then(|b| b.fields.get(REAFFIRMED))
+            .and_then(|v| decode_reaffirmed(v).ok())
+            .unwrap_or_default()
+    };
+    let old = read(before);
+    let pin = |b: Option<&Block>, t: &BlockId| b.and_then(|b| b.pins.get(t).copied());
+    read(Some(after))
+        .into_iter()
+        .filter(|(t, r)| old.get(t) != Some(r) || pin(before, t) != pin(Some(after), t))
+        .map(|(t, r)| (t, r.reason))
+        .collect()
 }
 
 /// Reads `reflects_at` back, checking its whole shape.

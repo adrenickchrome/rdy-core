@@ -372,19 +372,72 @@ impl Chain {
     }
 }
 
-/// Every `plan/<view>` ref `reader` holds now, by view: what a published state captures.
-pub(crate) fn plan_heads_in(reader: &StoreReader) -> Result<BTreeMap<String, Hash>, RdyError> {
-    let mut heads = BTreeMap::new();
-    for (name, v) in reader.refs_with_prefix(PLAN_REF)? {
+thread_local! {
+    /// The `plan/<view>` refs this thread's publishes have read (see `plan_ref_reads_for_tests`).
+    static PLAN_REF_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Tests only: how many `plan/<view>` refs the publishes on this thread have read to capture
+/// the plan heads, so a test can check that a plan write re-reads only its own views' refs.
+#[doc(hidden)]
+pub fn plan_ref_reads_for_tests() -> u64 {
+    PLAN_REF_READS.with(std::cell::Cell::get)
+}
+
+fn count_plan_ref_reads(n: usize) {
+    PLAN_REF_READS.with(|c| c.set(c.get() + n as u64));
+}
+
+/// Every `plan/<view>` ref `reader` holds now, by view: what a published state captures. The
+/// full scan of an open, a reindex or another full publish.
+pub(crate) fn plan_heads_in(reader: &StoreReader) -> Result<imbl::OrdMap<String, Hash>, RdyError> {
+    let mut heads = imbl::OrdMap::new();
+    let refs = reader.refs_with_prefix(PLAN_REF)?;
+    count_plan_ref_reads(refs.len());
+    for (name, v) in refs {
         let view = name[PLAN_REF.len()..].to_string();
-        let head = Hash(v.as_slice().try_into().map_err(|_| {
-            RdyError::from(rdy_store::StoreError::Decode(format!(
-                "plan ref of view {view:?} does not name a plan"
-            )))
-        })?);
+        let head = plan_ref_head(&view, &v)?;
         heads.insert(view, head);
     }
     Ok(heads)
+}
+
+/// `prev` (the heads the state before captured) after a batch whose PLAN frames are `plans`:
+/// only the plan writers move a `plan/<view>` ref, each beside a PLAN frame of that view, so
+/// only those views' refs are read again. The map is shared with `prev` but for them. A holder
+/// holds no plan ref: its views read none.
+pub(crate) fn plan_heads_after(
+    reader: &StoreReader,
+    prev: &imbl::OrdMap<String, Hash>,
+    plans: &[Hash],
+) -> Result<imbl::OrdMap<String, Hash>, RdyError> {
+    let mut views = std::collections::BTreeSet::new();
+    for h in plans {
+        views.insert(reader.plan(h)?.view);
+    }
+    let mut heads = prev.clone();
+    count_plan_ref_reads(views.len());
+    for view in views {
+        match reader.get_ref(&rdy_store::plan::plan_ref(&view))? {
+            Some(v) => {
+                let head = plan_ref_head(&view, &v)?;
+                heads.insert(view, head);
+            }
+            None => {
+                heads.remove(&view);
+            }
+        }
+    }
+    Ok(heads)
+}
+
+/// The plan a `plan/<view>` ref value names.
+fn plan_ref_head(view: &str, v: &[u8]) -> Result<Hash, RdyError> {
+    Ok(Hash(v.try_into().map_err(|_| {
+        RdyError::from(rdy_store::StoreError::Decode(format!(
+            "plan ref of view {view:?} does not name a plan"
+        )))
+    })?))
 }
 
 /// Whether a change of proposal version `p` landed in the log `st` was published at: a landing

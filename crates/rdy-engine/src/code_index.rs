@@ -246,22 +246,29 @@ fn implements_of(trailers: &str) -> Vec<String> {
     out
 }
 
-/// The `--name-status -z` list: a status token, then one path (two for `R` and `C`). Each path
-/// token is counted against `bounds` before it is decoded.
+/// The `--name-status -z` list: a status token, then one path (two for `R` and `C`). Git ends
+/// the format with a NUL and puts a newline before the first status token, so only a status
+/// token loses its leading newlines, and a token left empty there is no status. A path token is
+/// kept byte for byte: a name may start with a newline, or be one. An empty path token is a
+/// malformed record and ends the list. Each path token is counted against `bounds` before it is
+/// decoded.
 fn changes_of(tail: &[u8], bounds: &mut PathBounds) -> Result<Vec<FileChange>, RdyError> {
-    let mut tokens = tail
-        .split(|b| *b == 0)
-        .map(|t| {
-            let lead = t.iter().take_while(|b| **b == b'\n').count();
-            &t[lead..]
-        })
-        .filter(|t| !t.is_empty());
+    let mut raw = tail.split(|b| *b == 0);
+    // a path token as written; none when the list ends or the token is empty
+    fn path(t: Option<&[u8]>) -> Option<&[u8]> {
+        t.filter(|t| !t.is_empty())
+    }
     let utf8 = |t: &[u8]| std::str::from_utf8(t).ok().map(str::to_string);
     let mut changes = Vec::new();
-    while let Some(status) = tokens.next() {
-        match status[0] {
-            kind @ (b'R' | b'C') => {
-                let (Some(from), Some(to)) = (tokens.next(), tokens.next()) else {
+    while let Some(t) = raw.next() {
+        let lead = t.iter().take_while(|b| **b == b'\n').count();
+        // an empty or newline-only token in a status's place separates; it names nothing
+        let Some(&kind) = t.get(lead) else {
+            continue;
+        };
+        match kind {
+            b'R' | b'C' => {
+                let (Some(from), Some(to)) = (path(raw.next()), path(raw.next())) else {
                     break;
                 };
                 let (from, to) = (bounds.take(from)?, bounds.take(to)?);
@@ -273,16 +280,16 @@ fn changes_of(tail: &[u8], bounds: &mut PathBounds) -> Result<Vec<FileChange>, R
                     });
                 }
             }
-            kind => {
-                let Some(path) = tokens.next() else {
+            _ => {
+                let Some(p) = path(raw.next()) else {
                     break;
                 };
-                let path = bounds.take(path)?;
-                if let Some(path) = utf8(path) {
+                let p = bounds.take(p)?;
+                if let Some(p) = utf8(p) {
                     changes.push(if kind == b'D' {
-                        FileChange::Delete(path)
+                        FileChange::Delete(p)
                     } else {
-                        FileChange::Touch(path)
+                        FileChange::Touch(p)
                     });
                 }
             }

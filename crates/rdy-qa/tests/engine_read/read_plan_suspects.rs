@@ -930,3 +930,98 @@ fn cp13_reading_suspects_changes_no_log_or_ref() {
         "the log, its bytes and the refs are unchanged"
     );
 }
+
+/// Adds twelve claims that cite B, landed in view `cites`: B's briefing then has more
+/// dependents than a one-token page holds.
+fn cite_b(r: &mut Rdy, ids: &Ids) {
+    let section = r
+        .read()
+        .materialized(&Scope::Canon)
+        .unwrap()
+        .get(&ids.b)
+        .unwrap()
+        .parent
+        .clone()
+        .unwrap();
+    let ops: Vec<Value> = (0..12)
+        .map(|i| {
+            json!({"op": "create", "type": "claim", "parent": section.to_string(),
+                "body": format!("C{i} cites {{{{{}}}}}.", ids.b)})
+        })
+        .collect();
+    write(r, "cites", Value::Array(ops)).unwrap();
+    land(r, "cites").unwrap();
+}
+
+/// A truncated canon briefing of B, registered: its cursor.
+fn cut_briefing_of_b(r: &Rdy, ids: &Ids) -> String {
+    let cov = rdy_engine::brief::Coverage {
+        ids: vec![ids.b.to_string()],
+        path: None,
+    };
+    let b = r.read().brief(&Scope::Canon, &cov, Some(1)).unwrap();
+    assert!(b.truncated, "a one-token page is cut");
+    b.register(&r.briefs());
+    b.next.clone().expect("a cursor")
+}
+
+fn continue_briefing(
+    r: &Rdy,
+    cursor: &str,
+) -> Result<rdy_engine::brief::Briefing, rdy_engine::RdyError> {
+    r.read()
+        .brief_page(&Scope::Canon, &r.briefs(), cursor, Some(1))
+}
+
+/// Final review F8: a truncated briefing goes stale when only the accepted-deferral projection
+/// of a covered block's suspect row changes (a person keeps it suspect), though no covered block
+/// version moved.
+#[test]
+fn cp13_fix1_a_new_acceptance_alone_makes_a_cut_briefing_stale() {
+    let (_dir, mut r) = project();
+    let ids = built(&mut r, None);
+    cite_b(&mut r, &ids);
+    drift(&mut r, "v1", &ids, "moved");
+    land_with_a_tie(&mut r, "v1");
+    assert_eq!(row(&canon(&r), &ids.b, &ids.a).deferred, None);
+    let cursor = cut_briefing_of_b(&r, &ids);
+    // the cursor continues while nothing moved
+    continue_briefing(&r, &cursor).unwrap();
+    let versions = |r: &Rdy| (version(r, &ids.a), version(r, &ids.b), version(r, &ids.x));
+    let before = versions(&r);
+    keep_suspect(&mut r, &ids.b, &ids.a, alice(), "hold it");
+    assert_eq!(versions(&r), before, "no covered block version moved");
+    assert!(row(&canon(&r), &ids.b, &ids.a).deferred.is_some());
+    let e = continue_briefing(&r, &cursor).unwrap_err();
+    assert_eq!(e.code, rdy_engine::E_PAGE_STALE, "{e}");
+}
+
+/// Final review F8: a truncated briefing goes stale when only the committed reflected paths of a
+/// covered block's code row change, though no covered block version moved.
+#[test]
+fn cp13_fix1_new_reflected_paths_alone_make_a_cut_briefing_stale() {
+    let (_dir, mut r, app, ids) = with_code();
+    cite_b(&mut r, &ids);
+    let paths = |r: &Rdy| {
+        canon(r)
+            .into_iter()
+            .find(|s| s.block == ids.b && s.target.is_none())
+            .and_then(|s| s.paths)
+    };
+    assert_eq!(paths(&r), Some(vec!["app:src/a.rs".to_string()]));
+    let cursor = cut_briefing_of_b(&r, &ids);
+    continue_briefing(&r, &cursor).unwrap();
+    let before = version(&r, &ids.b);
+    commit(app.path(), &[("src/c.rs", "c\n")]);
+    assert_eq!(
+        version(&r, &ids.b),
+        before,
+        "no covered block version moved"
+    );
+    assert_eq!(
+        paths(&r),
+        Some(vec!["app:src/a.rs".to_string(), "app:src/c.rs".to_string()])
+    );
+    let e = continue_briefing(&r, &cursor).unwrap_err();
+    assert_eq!(e.code, rdy_engine::E_PAGE_STALE, "{e}");
+}

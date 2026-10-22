@@ -3,7 +3,10 @@
 //! that change no block, content-only lapses, computed closes before answers, the act matrix,
 //! the write guards, stable pages, recorded proposal state and the O6 chain end.
 mod common;
+#[path = "support/plan_frames.rs"]
+mod plan_frames;
 
+use plan_frames::put_plan_frames;
 use rdy_engine::plan::{PlanAnswerInput, PlanQuery, W_PLAN_ANSWER_LAPSED, check_plan_request};
 use rdy_engine::{
     Coverage, E_BAD_INPUT, E_LIMIT, E_PAGE_STALE, E_PERMISSION, E_PLAN_ITEM, E_VIEW_OWNER,
@@ -453,7 +456,7 @@ fn cp8_all_four_selectors_have_closed_shapes() {
             items: items.clone(),
         }),
     };
-    let h = r.store_mut().put_plan_frames_for_tests(&seal).unwrap();
+    let h = put_plan_frames(r.store_mut(), &seal);
     r.invalidate();
     let rows: Vec<Value> = items
         .iter()
@@ -499,7 +502,7 @@ fn cp8_all_four_selectors_have_closed_shapes() {
         }),
         ..seal.clone()
     };
-    r.store_mut().put_plan_frames_for_tests(&seal2).unwrap();
+    put_plan_frames(r.store_mut(), &seal2);
     r.invalidate();
     let outcomes = |deferred: usize, updated: usize, open: usize| {
         json!({"committed": 0, "confirmed": 0, "deferred": deferred, "done": 0, "open": open,
@@ -1297,7 +1300,7 @@ fn cp8_proposal_read_uses_recorded_canon_and_heads() {
         provenance: prov(),
         seal: None,
     };
-    let bh = r.store_mut().put_plan_frames_for_tests(&bound).unwrap();
+    let bh = put_plan_frames(r.store_mut(), &bound);
     r.invalidate();
     r.fsck().unwrap();
     let pq = PlanQuery {
@@ -1381,7 +1384,7 @@ fn cp8_empty_landing_ends_an_unsealed_chain() {
         proposal: Some(version),
         ..answered
     };
-    let bh = r.store_mut().put_plan_frames_for_tests(&bound).unwrap();
+    let bh = put_plan_frames(r.store_mut(), &bound);
     r.invalidate();
     r.fsck().unwrap();
     assert_eq!(whole(&r, "w")["plan"], bh.to_string());
@@ -1822,7 +1825,7 @@ fn cp8_retained_reads_keep_their_plan_across_answers_and_landings() {
         proposal: Some(version),
         ..answered
     };
-    let bh = r.store_mut().put_plan_frames_for_tests(&bound).unwrap();
+    let bh = put_plan_frames(r.store_mut(), &bound);
     r.invalidate();
     let captured = r.read();
     let before = read_at(&captured);
@@ -1880,7 +1883,7 @@ fn cp8_answer_only_successors_keep_the_last_bound_proposal() {
         provenance: prov(),
         seal: None,
     };
-    let bh = r.store_mut().put_plan_frames_for_tests(&bound).unwrap();
+    let bh = put_plan_frames(r.store_mut(), &bound);
     r.invalidate();
     r.fsck().unwrap();
     let pv = plan(
@@ -1975,4 +1978,53 @@ fn cp8_answer_only_successors_keep_the_last_bound_proposal() {
     assert_eq!(row(&whole(&r, "w"), &code)["how"], "committed");
     // fsck reads the new chain as the plan writer does (O6)
     r.fsck().unwrap();
+}
+
+/// Final review F3: a publish whose batch holds a PLAN re-reads only the `plan/<view>` refs of
+/// the views its PLAN frames name, and shares the rest of the captured heads; the other views'
+/// chains (live, sealed or ended) add no ref read. A full publish reads every plan ref.
+#[test]
+fn cp8_fix1_a_plan_write_reads_only_its_own_views_refs() {
+    use rdy_engine::plan::api::plan_ref_reads_for_tests as reads;
+    let (_d, mut r) = project();
+    let s = spec(&mut r);
+    let confirm = pi(&s.a, &s.b, PlanKind::Confirm);
+    for n in 0..8 {
+        let v = format!("w{n}");
+        edit(&mut r, &v, &s.a, &format!("A holds {} days.", 40 + n));
+        answer(&mut r, &v, &[ans(&confirm, PlanAct::Defer, Some("later"))]);
+    }
+    let all = r.read().reader().refs_with_prefix("plan/").unwrap().len();
+    assert!(all >= 8, "{all} plan refs");
+    let captured = r.read();
+    let at = reads();
+    let h = answer(
+        &mut r,
+        "w3",
+        &[ans(&confirm, PlanAct::Confirm, Some("holds"))],
+    );
+    assert_eq!(reads() - at, 1, "one ref read for the one view written");
+    assert_eq!(whole(&r, "w3")["plan"], h.to_string());
+    assert_eq!(plan_ref(&r, "w3"), Some(h));
+    // the other views keep their heads, and the captured state its own
+    for n in [0, 7] {
+        let v = format!("w{n}");
+        assert_eq!(whole(&r, &v)["plan"], plan_ref(&r, &v).unwrap().to_string());
+    }
+    let q = PlanQuery {
+        max_tokens: Some(100_000),
+        ..view_q("w3")
+    };
+    let old = serde_json::to_value(captured.change_plan(&q, "work").unwrap()).unwrap();
+    assert_ne!(
+        old["plan"],
+        h.to_string(),
+        "the captured state reads no later answer"
+    );
+    // a full publish reads them all
+    let at = reads();
+    r.invalidate();
+    let _ = r.read();
+    assert_eq!(reads() - at, all as u64);
+    assert_eq!(whole(&r, "w3")["plan"], h.to_string());
 }
