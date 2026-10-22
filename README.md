@@ -2,60 +2,102 @@
 
 A system for keeping decisions and documentation consistent while agents change them.
 
-Agents should never change the accepted design blind. rdy computes. Agents write. People decide.
+**rdy keeps your product decisions and docs consistent while AI agents change them.** Before an agent writes, rdy shows it what governs the change and what depends on it. After the write, rdy shows what the change affected. Nothing joins the accepted design until a person approves it.
 
-Documentation and the decisions behind it are stored as typed blocks in an append-only, content-addressed store. Agents read and write through MCP tools, with a briefing before they edit accepted content; people read the rendered site and approve proposals into canon. Local-first, deterministic, model-free, and built in Rust.
+rdy computes. Agents write. People decide.
 
-## Platforms
+This is a **preview**: things will change before Release 1. See "About this preview" at the bottom.
 
-| Platform | Status |
-|---|---|
-| macOS (arm64) | Supported. The fast gate (`cargo qa --skip-perf --require-all`) passes. |
-| Linux (x86_64, aarch64) | Supported. The fast gate passes on x86_64; aarch64 builds and runs its tests (one timing-bound test is being fixed). Perf baselines are Linux only. |
-| Windows | Not supported yet: `rdy-store` and the daemon use Unix-only APIs, so the workspace does not compile. `rdy-model`, `rdy-schema` and `rdy-graph` build. Windows support is planned after M3. |
-| Other Unix (the BSDs, illumos) | Untested. |
+## What you get
 
-## Preview archives
+- **Docs and decisions as one project.** Write docs, requirements, terms and decisions as linked blocks, not loose files.
+- **Agents work through MCP.** Claude Code, or any MCP client, reads and writes through rdy's tools. Each agent gets a briefing before it edits.
+- **Proposals and approvals.** Agent work lands in a view. You see the impact, then approve it or not.
+- **It catches drift.** When a decision changes, rdy marks every page that rests on it. It also flags a page that states a different number for a recorded value.
+- **A live docs site.** `rdy site` gives you a local site that refreshes as changes land.
+- **Local and private.** Everything runs on your machine: no account, no hosted service, no model inside rdy.
 
-This is a preview of rdy.
-It comes before Release 1, the first release with a compatibility promise.
+## Install (about a minute)
 
-Until Release 1, any command, flag, tool, code or file format may change in the next preview, with no deprecation period.
-One thing stays: every later rdy, Release 1 included, reads every dump that this rdy writes.
+**macOS (Apple silicon):**
 
-To move a project to a newer preview, run `rdy dump --out <file>` with this rdy.
-Then run `rdy load <file> <dir>` with the new rdy, into a directory with no store.
-A project made with a preview moves to Release 1 the same way.
+```sh
+curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.17.0/rdy-0.17.0-preview-aarch64-apple-darwin.tar.gz
+tar -xzf rdy-0.17.0-preview-aarch64-apple-darwin.tar.gz
+mkdir -p ~/.local/bin && mv rdy-0.17.0-preview-aarch64-apple-darwin/rdy ~/.local/bin/
+```
 
-Report problems at https://github.com/adrenickchrome/rdy-core/issues.
+**Linux (x86_64):**
 
-The preview has two archives: macOS arm64 and Linux amd64. The Linux archive is qualified on Ubuntu 26.
+```sh
+curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.17.0/rdy-0.17.0-preview-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf rdy-0.17.0-preview-x86_64-unknown-linux-gnu.tar.gz
+mkdir -p ~/.local/bin && mv rdy-0.17.0-preview-x86_64-unknown-linux-gnu/rdy ~/.local/bin/
+```
 
-| Platform | Target | Archive |
-|---|---|---|
-| macOS arm64 | `aarch64-apple-darwin` | [rdy-0.15.0-preview-aarch64-apple-darwin.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.15.0/rdy-0.15.0-preview-aarch64-apple-darwin.tar.gz) |
-| Linux amd64 | `x86_64-unknown-linux-gnu` | [rdy-0.15.0-preview-x86_64-unknown-linux-gnu.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.15.0/rdy-0.15.0-preview-x86_64-unknown-linux-gnu.tar.gz) |
+If `~/.local/bin` is not on your PATH, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile. Then check:
 
-The release is [v0.15.0](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.15.0). It also holds [SHA256SUMS](https://github.com/adrenickchrome/rdy-core/releases/download/v0.15.0/SHA256SUMS) and [SHA256SUMS.sig](https://github.com/adrenickchrome/rdy-core/releases/download/v0.15.0/SHA256SUMS.sig).
+```sh
+rdy --version
+```
 
-Download the archive for your platform, SHA256SUMS and SHA256SUMS.sig into one new directory.
-Check the signature with OpenSSH, then check the archive hash, before extraction or execution. The signed file is SHA256SUMS.
-This signature is not Apple notarization.
+It prints `rdy 0.17.0 (preview)`.
 
-Release signing key: pending founder confirmation.
-Preview downloads are not ready.
-Do not install a preview until this README and its GitHub release notes show the same key and fingerprint.
+On macOS, if you downloaded the archive in a browser instead of with curl, macOS may block the binary. Run `xattr -d com.apple.quarantine ~/.local/bin/rdy` once.
+
+To check the signature of the download first, see "Verify the download" at the bottom. You do not need it to use rdy.
+
+## Try it: your first project
+
+1. **Make a project.**
+
+   ```sh
+   rdy init ~/my-project && cd ~/my-project
+   ```
+
+2. **Connect your agent.** For Claude Code:
+
+   ```sh
+   claude mcp add rdy -- rdy mcp --project ~/my-project
+   ```
+
+   For another MCP client, add this server to its config (write the full path; most clients do not expand `~`):
+
+   ```json
+   { "mcpServers": { "rdy": { "command": "rdy", "args": ["mcp", "--project", "/home/you/my-project"] } } }
+   ```
+
+3. **Give your agent the guide.** Download `AGENTS.md` (or `CLAUDE.md`, the same text) from the [release page](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.17.0) into the project folder. It tells the agent how to work with rdy. The `AGENTS.md` in this repository is a different file, for people who work on rdy itself.
+
+4. **Ask your agent for something real.** For example:
+
+   > Start an rdy session as a writer. Create a doc "Payments" with a requirement "Refunds settle within 5 business days" and a decision explaining why. Then propose it.
+
+5. **Review and approve it yourself.**
+
+   ```sh
+   rdy pending
+   ```
+
+   This shows what waits for you, with the impact of each proposal. Approve with `rdy approve P-<id>`, or tell your agent your answer.
+
+6. **Read the result.**
+
+   ```sh
+   rdy site
+   ```
+
+   Open the link. Now ask your agent to change the decision, and watch rdy flag what the change affects before you approve it.
 
 ## Quick start
 
+The commands you use most, in one place:
+
 ```bash
-git clone https://github.com/adrenickchrome/rdy-core.git
-cd rdy-core
-cargo install --path crates/rdy-cli
 rdy init                      # creates .rdy/ and .rdy.yaml (pack rdy-standard)
 rdy mcp                       # MCP server over stdio for your agent harness
 rdy status
-rdy propose --view run-1 --title "first pass"
+rdy propose --view run-1 --title "first pass" --summary "The first draft of the docs."
 rdy approve <proposal-id>     # lands it in canon; proposed decisions become accepted
 rdy render --out site/
 rdy new folder wallets            # folders group docs; paths work wherever ids do
@@ -69,6 +111,14 @@ rdy show <id> --scope tag:v0.1.0   # read as of a version (also landing:<id>)
 
 Agent sessions (`rdy mcp`) and the human commands share the project's daemon (see Daemon below), so `rdy status`, `rdy propose`, `rdy approve` and the rest work while an agent session runs.
 
+To build rdy from source instead (you need Rust):
+
+```bash
+git clone https://github.com/adrenickchrome/rdy-core.git
+cd rdy-core
+cargo install --path crates/rdy-cli
+```
+
 rdy refuses a store from a different store format with E_STORE_FORMAT.
 Before you replace the old binary, close its sessions and dump each project with that binary.
 Stop the old project's daemon. Keep the original project and the old binary.
@@ -81,18 +131,6 @@ rdy load <dump-file> <new-directory>   # new binary
 ```
 
 Run the dump command in the old project. Run the load command with the new binary. Existing `rdy_dump` and `rdy_load` are the chat route.
-
-Claude Code MCP config:
-
-```json
-{ "mcpServers": { "rdy": { "command": "rdy", "args": ["mcp", "--project", "/path/to/project"] } } }
-```
-
-or:
-
-```bash
-claude mcp add rdy -- rdy mcp --project /path/to/project
-```
 
 ## Concepts
 
@@ -222,7 +260,9 @@ rdy worktree add ../review work-review   # a second folder, bound to its own vie
 - **Where it lives.** The state is local, in `.rdy/wc/` (a worktree has its own). It is never
   part of the project's history.
 
-## QA gate
+## For contributors
+
+### QA gate
 
 `cargo qa` runs rdy's full regression and hardening gate: fmt, clippy, the workspace tests, the
 `rdy-qa` hardening suite (model, store, schema, engine, io, mcp, cli, render) and a perf-regression
@@ -240,3 +280,115 @@ rdy is available under either [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE)
 ## Report problems
 
 Report problems at https://github.com/adrenickchrome/rdy-core/issues.
+
+<details>
+<summary><b>About this preview</b></summary>
+
+This is a preview of rdy.
+It comes before Release 1, the first release with a compatibility promise.
+
+Until Release 1, any command, flag, tool, code or file format may change in the next preview, with no deprecation period.
+One thing stays: every later rdy, Release 1 included, reads every dump that this rdy writes.
+
+To move a project to a newer preview, run `rdy dump --out <file>` with this rdy.
+Then run `rdy load <file> <dir>` with the new rdy, into a directory with no store.
+A project made with a preview moves to Release 1 the same way.
+
+Report problems at https://github.com/adrenickchrome/rdy-core/issues.
+
+</details>
+
+<details>
+<summary><b>Verify the download (optional)</b></summary>
+
+You do not need this to use rdy. It shows how to check that an archive is the one we signed, before you install it.
+
+### Platforms
+
+| Platform | Status |
+|---|---|
+| macOS (arm64) | Supported. The fast gate (`cargo qa --skip-perf --require-all`) passes. |
+| Linux (x86_64, aarch64) | Supported. The fast gate passes on x86_64; aarch64 builds and runs its tests (one timing-bound test is being fixed). Perf baselines are Linux only. |
+| Windows | Not supported yet: `rdy-store` and the daemon use Unix-only APIs, so the workspace does not compile. `rdy-model`, `rdy-schema` and `rdy-graph` build. Windows support is planned after M3. |
+| Other Unix (the BSDs, illumos) | Untested. |
+
+### Archives
+
+The preview has two archives: macOS arm64 and Linux amd64. The Linux archive is qualified on Ubuntu 26.
+
+| Platform | Target | Archive |
+|---|---|---|
+| macOS arm64 | `aarch64-apple-darwin` | [rdy-0.17.0-preview-aarch64-apple-darwin.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.17.0/rdy-0.17.0-preview-aarch64-apple-darwin.tar.gz) |
+| Linux amd64 | `x86_64-unknown-linux-gnu` | [rdy-0.17.0-preview-x86_64-unknown-linux-gnu.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.17.0/rdy-0.17.0-preview-x86_64-unknown-linux-gnu.tar.gz) |
+
+The release is [v0.17.0](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.17.0). It also holds [SHA256SUMS](https://github.com/adrenickchrome/rdy-core/releases/download/v0.17.0/SHA256SUMS) and [SHA256SUMS.sig](https://github.com/adrenickchrome/rdy-core/releases/download/v0.17.0/SHA256SUMS.sig).
+
+Download the archive for your platform, SHA256SUMS and SHA256SUMS.sig into one new directory.
+Check the signature with OpenSSH, then check the archive hash, before extraction or execution. The signed file is SHA256SUMS.
+This signature is not Apple notarization.
+
+### Release signing key
+
+```text
+rdy-release namespaces="rdy-release-v1" sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIDiiQ0vO3dvG2AtbJYDwsshJl75kvbbnRDOCUdsjfrDRAAAAD3NzaDpyZHktcmVsZWFzZQ==
+```
+
+Fingerprint: SHA256:Baa52ZPJSzazbmd2KDEkzUM6OYTnl8mznJXsmnwvvJc.
+
+Compare this line and fingerprint with the ones in the [GitHub release notes](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.17.0). Use the key only when both match.
+
+### Install
+
+On macOS arm64, for an archive downloaded with curl:
+
+```sh
+cd '/path/to/download' &&
+'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIDiiQ0vO3dvG2AtbJYDwsshJl75kvbbnRDOCUdsjfrDRAAAAD3NzaDpyZHktcmVsZWFzZQ==' > '/path/to/download/release-allowed-signers' &&
+'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
+'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.17.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.17.0-preview-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.17.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.17.0-preview-aarch64-apple-darwin/rdy' '/path/to/rdy-0.17.0/bin/rdy' &&
+'/path/to/rdy-0.17.0/bin/rdy' '--version'
+```
+
+On Linux amd64:
+
+```sh
+cd '/path/to/download' &&
+'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIDiiQ0vO3dvG2AtbJYDwsshJl75kvbbnRDOCUdsjfrDRAAAAD3NzaDpyZHktcmVsZWFzZQ==' > '/path/to/download/release-allowed-signers' &&
+'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
+'sha256sum' '-c' '--ignore-missing' 'SHA256SUMS' &&
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.17.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.17.0-preview-x86_64-unknown-linux-gnu.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.17.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.17.0-preview-x86_64-unknown-linux-gnu/rdy' '/path/to/rdy-0.17.0/bin/rdy' &&
+'/path/to/rdy-0.17.0/bin/rdy' '--version'
+```
+
+On macOS arm64, for an archive downloaded with a web browser:
+
+```sh
+# In Safari, turn off “Open safe files after downloading” before downloading. Keep the original .tar.gz file.
+# After both checks pass, remove com.apple.quarantine from the archive before extraction. Skip this command if the archive has no com.apple.quarantine attribute.
+cd '/path/to/download' &&
+'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIDiiQ0vO3dvG2AtbJYDwsshJl75kvbbnRDOCUdsjfrDRAAAAD3NzaDpyZHktcmVsZWFzZQ==' > '/path/to/download/release-allowed-signers' &&
+'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
+'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&
+'xattr' '-d' 'com.apple.quarantine' '/path/to/download/rdy-0.17.0-preview-aarch64-apple-darwin.tar.gz' &&
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.17.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.17.0-preview-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.17.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.17.0-preview-aarch64-apple-darwin/rdy' '/path/to/rdy-0.17.0/bin/rdy' &&
+'/path/to/rdy-0.17.0/bin/rdy' '--version'
+```
+
+Add the version's bin directory to PATH in this shell.
+Replace `<version-prefix>` with the version prefix, such as `/path/to/rdy-0.17.0`:
+
+```sh
+export PATH="<version-prefix>/bin:$PATH"
+```
+
+</details>
