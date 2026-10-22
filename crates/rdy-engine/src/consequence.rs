@@ -2352,7 +2352,9 @@ pub fn view_op_and_report<T: Serialize + 'static>(
 /// landing it on canon (see `ReadState::landing_consequences`): `consequences` is always present
 /// in the reply, with `consequences_omitted` when a cut dropped some, or `consequences: []` and
 /// `consequences_error` when the version has a blocking conflict (`E_CONFLICT_UNRESOLVED`, no
-/// merge tried) or does not merge onto canon (the proposal stands).
+/// merge tried) or does not merge onto canon (the proposal stands). The reply's `plan` is the
+/// summary the propose built with the plan it bound in the version's batch (D-4JMPH): it is not
+/// read or computed again after the write.
 pub fn propose_and_report(
     engine: &dyn Engine,
     max_tokens: Option<usize>,

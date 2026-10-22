@@ -139,6 +139,24 @@ fn spec(r: &mut Rdy) -> Spec {
     }
 }
 
+/// A version of `view` as a store-16 engine proposed it (the raw store writer: every engine
+/// propose binds a plan): its hash and `P-x@1`.
+fn raw_propose(r: &mut Rdy, view: &str) -> (Hash, String) {
+    let v = r.store_mut().propose(view, view, prov()).unwrap();
+    r.invalidate();
+    (v, format!("P-{}@1", v.short()))
+}
+
+/// Lands `version` through the raw store writer, which seals no plan; returns the landing.
+fn raw_land(r: &mut Rdy, version: &Hash) -> String {
+    let l = r
+        .store_mut()
+        .land(version, approver().provenance())
+        .unwrap();
+    r.invalidate();
+    l.to_string()
+}
+
 // ---- plan reads ----
 
 fn view_q(v: &str) -> PlanQuery {
@@ -353,26 +371,24 @@ fn cp8_all_four_selectors_have_closed_shapes() {
                "code": {"files": 0, "unavailable": true}, "notes": []})
     );
 
-    // a proposal version: its own scope, the same items, no plan bound (O19)
-    let info = r
-        .propose(&writer(), "w", "edit a", Some(common::TEST_SUMMARY))
-        .unwrap();
+    // a proposal version: its own scope, the same items, no plan bound (O19): the raw store
+    // writer, as a store-16 engine proposed (every engine propose binds a plan)
+    let (version, pref) = raw_propose(&mut r, "w");
     let pv = plan(
         &r,
         &PlanQuery {
-            proposal: Some(info.r#ref.clone()),
+            proposal: Some(pref.clone()),
             ..Default::default()
         },
     );
     assert_eq!(
         pv,
-        json!({"scope": format!("proposal:{}", info.r#ref), "plan": null, "items": v["items"],
+        json!({"scope": format!("proposal:{pref}"), "plan": null, "items": v["items"],
                "counts": v["counts"], "code": v["code"], "notes": []})
     );
 
-    // a landing with no seal: no items and no plan
-    common::confirm_exceptions(&mut r, &approver(), &info);
-    let l = r.land(&approver(), &info.id).unwrap();
+    // a landing with no seal: no items and no plan (the raw store landing, which seals nothing)
+    let l = raw_land(&mut r, &version);
     let lq = PlanQuery {
         landing: Some(l.clone()),
         ..Default::default()
@@ -383,8 +399,7 @@ fn cp8_all_four_selectors_have_closed_shapes() {
                "counts": counts(0, 0, 0, &[]), "code": {"files": 0}, "notes": []})
     );
 
-    // a sealed plan, as the landing composition records it (no engine path writes one yet)
-    let version: Hash = info.id.parse().unwrap();
+    // a sealed plan, as the landing composition records it
     let landing: Hash = l.parse().unwrap();
     let accepted = Hash([7; 32]);
     let sealed = |subject: &str, kind: PlanKind, edge: &str, outcome, answer| SealedItem {
@@ -469,8 +484,8 @@ fn cp8_all_four_selectors_have_closed_shapes() {
 
     // a decision: its seals newest first, each with all ten outcomes counted
     edit(&mut r, "w2", &s.c, "C stands firm.");
-    let (info2, l2) = land(&mut r, "w2");
-    let version2: Hash = info2.id.parse().unwrap();
+    let (version2, _) = raw_propose(&mut r, "w2");
+    let l2 = raw_land(&mut r, &version2);
     let landing2: Hash = l2.parse().unwrap();
     let seal2 = Plan {
         view: "w2".into(),
@@ -497,8 +512,8 @@ fn cp8_all_four_selectors_have_closed_shapes() {
     assert_eq!(
         plan(&r, &dq),
         json!({"scope": format!("decision:{}", s.a), "plan": null, "items": [
-                   {"landing": l2, "version": info2.id, "items": 0, "outcomes": outcomes(0, 0, 0)},
-                   {"landing": l, "version": info.id, "items": 3, "outcomes": outcomes(1, 1, 1)}
+                   {"landing": l2, "version": version2.to_string(), "items": 0, "outcomes": outcomes(0, 0, 0)},
+                   {"landing": l, "version": version.to_string(), "items": 3, "outcomes": outcomes(1, 1, 1)}
                ],
                "counts": sealed_counts, "code": {"files": 0}, "notes": []})
     );
@@ -1652,6 +1667,9 @@ fn cp8_input_limits_have_exact_text() {
     let info = r
         .propose(&writer(), "w", "edit a", Some(common::TEST_SUMMARY))
         .unwrap();
+    // the propose binds its plan (D-4JMPH): the refused answers below write nothing after it
+    let bound = plan_ref(&r, "w");
+    assert!(bound.is_some());
     for text in [
         format!("P-{}", &info.stable[..12]),
         info.id.clone(),
@@ -1743,7 +1761,7 @@ fn cp8_input_limits_have_exact_text() {
         "confirm does not answer a update item",
         "read the plan and use an act the item accepts",
     );
-    assert_eq!(plan_ref(&r, "w"), None, "nothing refused was written");
+    assert_eq!(plan_ref(&r, "w"), bound, "nothing refused was written");
     // the bounds hold exactly: 2000 characters (not bytes) are a reason
     let h = answer(
         &mut r,

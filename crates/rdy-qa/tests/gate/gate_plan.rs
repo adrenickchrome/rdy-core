@@ -9,7 +9,7 @@ use rdy_engine::engine::{Local, with_writer_result};
 use rdy_engine::plan::{PlanAnswerInput, PlanQuery, ProposePlanRequest, W_PLAN_OPEN};
 use rdy_engine::signing_act::{SigningAct, run_signed_act};
 use rdy_engine::signing_crypto::{AgentIdentity, SigningAgent};
-use rdy_engine::{DecisionInput, E_STALE_BASE, LandOptions, ProposalInfo, Rdy, RdyError, Session};
+use rdy_engine::{DecisionInput, E_STALE_BASE, LandOptions, ProposalInfo, Rdy, RdyError};
 use rdy_model::plan::{Plan, PlanAct, PlanHead, PlanKind, PlanOutcome, item_display, item_hash};
 use rdy_model::{BlockId, Hash};
 use rdy_qa::fixtures::{approver, project, write, writer};
@@ -105,8 +105,13 @@ fn propose(r: &mut Rdy, view: &str, answers: &[PlanAnswerInput]) -> ProposalInfo
 /// Confirms the exceptions beside `pref` and lands version `version`; returns the landing.
 fn land_version(r: &mut Rdy, pref: &str, version: &str) -> Hash {
     confirm_exceptions(r, &approver(), pref);
+    land_now(r, version)
+}
+
+/// Lands version `version` as the approver, its exceptions already confirmed.
+fn land_now(r: &mut Rdy, version: &str) -> Hash {
     h(&r.land(&approver(), version)
-        .unwrap_or_else(|e| panic!("land {pref}: {e}")))
+        .unwrap_or_else(|e| panic!("land {version}: {e}")))
 }
 
 fn land(r: &mut Rdy, p: &ProposalInfo) -> Hash {
@@ -368,8 +373,9 @@ fn cp10_pre17_proposal_lands_under_store16_rules() {
         "the chain's defer is no answer of the version"
     );
 
+    confirm_exceptions(&mut r, &approver(), &pref);
     let start = r.store().log_end();
-    let l = land_version(&mut r, &pref, &old.to_string());
+    let l = land_now(&mut r, &old.to_string());
     let (sh, sealed) = seal(&r, &l).expect("an item: the landing seals");
     assert_eq!(
         (sealed.stable, sealed.prev),
@@ -614,8 +620,9 @@ fn cp10_landing_seals_all_outcomes_and_named_decisions() {
     let (bh, bplan) = bound(&r, &h(&p.id)).unwrap();
     assert_eq!(bplan.heads, heads_at(&h2));
     let before = read_plan(&r, proposal_q(&p.r#ref));
+    confirm_exceptions(&mut r, &approver(), &p.r#ref);
     let start = r.store().log_end();
-    let l = land(&mut r, &p);
+    let l = land_now(&mut r, &p.id);
     let landing = r.read().reader().landing(&l).unwrap();
     let fin = landing.proposal;
     assert_ne!(fin, h(&p.id), "the proposed decisions' acceptance");
@@ -891,8 +898,9 @@ fn cp10_append_failure_leaves_no_proposal_or_seal_half() {
         assert!(bound(&r, &h(&p.id)).is_some(), "frame {k}");
     }
     // the landing batch: the acceptance version, the landing, its bound plan and the seal
+    confirm_exceptions(&mut r0, &approver(), &p0.r#ref);
     let start = r0.store().log_end();
-    let l0 = land(&mut r0, &p0);
+    let l0 = land_now(&mut r0, &p0.id);
     assert!(seal(&r0, &l0).is_some());
     let n = data_frames(&r0, start);
     for k in 0..n {
@@ -938,14 +946,8 @@ fn cp10_sealed_reads_ignore_later_canon_and_code() {
     let (sh, _) = seal(&r, &l).unwrap();
     let raw = r.read().reader().get_raw(&sh).unwrap();
     let read = read_plan(&r, landing_q(&l));
-    // canon moves on a and b, and the checkout closes the code item
+    // canon moves on a again, and the checkout closes the code item
     edit(&mut r, "v", &s.a, "A holds 90 days.");
-    edit(
-        &mut r,
-        "v",
-        &s.b,
-        &format!("B builds on {{{{{}}}}} only.", s.a),
-    );
     let pv = propose(&mut r, "v", &[]);
     land(&mut r, &pv);
     commit(

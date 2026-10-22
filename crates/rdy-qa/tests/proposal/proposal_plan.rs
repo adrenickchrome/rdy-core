@@ -380,7 +380,7 @@ fn cp10_every_proposal_version_binds_one_plan() {
 #[test]
 fn cp10_invalid_plan_answer_does_not_commit_rekeys() {
     let (_d, mut r) = project();
-    let a = r
+    let _a = r
         .new_doc(
             &writer(),
             "a",
@@ -397,7 +397,6 @@ fn cp10_invalid_plan_answer_does_not_commit_rekeys() {
         Some("O"),
     )
     .unwrap();
-    assert!(!a.created.is_empty());
     let pa = r.propose(&writer(), "a", "a", None).unwrap();
     r.land(&approver(), &pa.id).unwrap();
     let before = log_state(&r);
@@ -457,23 +456,22 @@ fn cp10_invalid_plan_answer_does_not_commit_rekeys() {
 #[test]
 fn cp10_subset_answers_use_the_subset_candidate() {
     let (_d, mut r) = project();
-    let (_s, a, b, _c, p) = spec(&mut r);
+    let (_s, a, b, c, p) = spec(&mut r);
     let edit_a = edit(&mut r, "w", &a, "A holds 60 days.");
-    // the excluded change updates p, which closes p's update item in the whole view
-    edit(&mut r, "w", &p, &format!("Wait 60 days per {{{{{a}}}}}."));
+    // the excluded change updates p, which closes p's update item in the whole view, and
+    // changes c, which makes b's confirm on c an item of the whole view only
+    write(
+        &mut r,
+        "w",
+        json!([
+            {"op": "update", "id": p, "body": format!("Wait 60 days per {{{{{a}}}}}.")},
+            {"op": "update", "id": c, "body": "C stands firm."}
+        ]),
+    )
+    .unwrap();
     let update = pi(&a, &p, PlanKind::Update);
-    let whole = r
-        .read()
-        .change_plan(
-            &rdy_engine::plan::PlanQuery {
-                view: Some("w".into()),
-                max_tokens: Some(100_000),
-                ..Default::default()
-            },
-            "work",
-        )
-        .unwrap();
-    let whole = serde_json::to_value(whole).unwrap();
+    let confirm = pi(&a, &b, PlanKind::Confirm);
+    let only_whole = pi(&c, &b, PlanKind::Confirm);
     let row = |v: &Value, item: &str| {
         v["items"]
             .as_array()
@@ -483,31 +481,57 @@ fn cp10_subset_answers_use_the_subset_candidate() {
             .cloned()
             .unwrap_or_else(|| panic!("no item {item}: {v:#}"))
     };
+    let read = |r: &Rdy, q: rdy_engine::plan::PlanQuery| {
+        let q = rdy_engine::plan::PlanQuery {
+            max_tokens: Some(100_000),
+            ..q
+        };
+        serde_json::to_value(r.read().change_plan(&q, "work").unwrap()).unwrap()
+    };
+    let whole = read(
+        &r,
+        rdy_engine::plan::PlanQuery {
+            view: Some("w".into()),
+            ..Default::default()
+        },
+    );
     assert_eq!(
         row(&whole, &update)["state"],
         "closed",
         "the whole view closes it"
     );
+    assert_eq!(row(&whole, &only_whole)["state"], "open");
     let subset = [edit_a.clone()];
-    let pick = |answers: &[PlanAnswerInput]| ProposePlanRequest {
-        changes: Some(&subset),
-        plan_answers: answers,
-        ..ProposePlanRequest::new("w", "only a")
-    };
-    // a defer of p's update is valid on the subset (it is open there)
-    let confirm = pi(&a, &b, PlanKind::Confirm);
+    // an item of the whole view only is no item of the subset: refused, nothing written
     let before = log_state(&r);
-    // the excluded change's own work is no item of the subset: b's confirm is, and is answered
+    let refused = [ans(&only_whole, PlanAct::Confirm, Some("B still holds"))];
+    let e = r
+        .propose_plan(
+            &writer(),
+            ProposePlanRequest {
+                changes: Some(&subset),
+                plan_answers: &refused,
+                ..ProposePlanRequest::new("w", "only a")
+            },
+        )
+        .unwrap_err();
+    assert_eq!(e.code, E_PLAN_ITEM, "{e}");
+    assert_eq!(log_state(&r), before);
+    // p's update is open on the subset, so a defer answers it
+    let answers = [
+        ans(&update, PlanAct::Defer, Some("p follows later")),
+        ans(&confirm, PlanAct::Confirm, Some("B still holds")),
+    ];
     let info = r
         .propose_plan(
             &writer(),
-            pick(&[
-                ans(&update, PlanAct::Defer, Some("p follows later")),
-                ans(&confirm, PlanAct::Confirm, Some("B still holds")),
-            ]),
+            ProposePlanRequest {
+                changes: Some(&subset),
+                plan_answers: &answers,
+                ..ProposePlanRequest::new("w", "only a")
+            },
         )
         .unwrap();
-    assert_ne!(log_state(&r), before);
     assert_eq!(info.changes, 1);
     assert_eq!(
         (info.plan.open, info.plan.closed, info.plan.deferred),
@@ -522,19 +546,22 @@ fn cp10_subset_answers_use_the_subset_candidate() {
         .expect("the defer is recorded");
     assert_eq!(deferred.act, PlanAct::Defer);
     // the version read agrees: p's update is deferred, not closed
-    let read = r
-        .read()
-        .change_plan(
-            &rdy_engine::plan::PlanQuery {
-                proposal: Some(info.r#ref.clone()),
-                max_tokens: Some(100_000),
-                ..Default::default()
-            },
-            "work",
-        )
-        .unwrap();
-    let read = serde_json::to_value(read).unwrap();
-    assert_eq!(row(&read, &update)["state"], "deferred");
+    let version = read(
+        &r,
+        rdy_engine::plan::PlanQuery {
+            proposal: Some(info.r#ref.clone()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(row(&version, &update)["state"], "deferred");
+    assert!(
+        version["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|i| i["id"] != only_whole),
+        "{version:#}"
+    );
     r.fsck().unwrap();
 }
 
