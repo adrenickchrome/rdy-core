@@ -241,7 +241,11 @@ fn sig8_a_failed_seal_of_a_held_signed_landing_loses_the_whole_batch() {
     s.commit_land(prepared, std::slice::from_ref(&g)).unwrap();
     s.fail_next_index_apply();
     assert!(s.seal(vec![]).is_err(), "the seal fails");
-    drop(s);
+    let notice = rdy_store::drop_unclean_for_tests(s);
+    assert!(
+        notice.contains("an earlier failed write could not be rolled back"),
+        "{notice}"
+    );
     let s = Store::create(&dir).unwrap();
     assert_eq!(s.canon_head().unwrap(), canon, "no landing");
     assert!(

@@ -318,6 +318,7 @@ mod tests {
         use rdy_engine::engine::site_reply;
         use rdy_engine::{Session, WriteRequest};
         use rdy_model::Role;
+        let log = site_log();
         let dir = tempfile::tempdir().unwrap();
         let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
         let writer = Session::human("human:qa".into(), Role::Writer);
@@ -358,6 +359,13 @@ mod tests {
         assert_eq!(sh.site.builds(), 1, "the scope was built for its warnings");
         let canon = site_reply(&*e, None, None, false).unwrap();
         assert!(canon.get("warnings").is_none(), "{canon}");
+        // the site logs the warning of the scope it built
+        assert_eq!(
+            log.lines(),
+            [
+                "site: view:g1: warning: the top-level doc named glossary has no page: glossary.html is the site's generated glossary. Rename the doc to publish it."
+            ]
+        );
         sh.shutdown().unwrap();
     }
 
@@ -465,6 +473,53 @@ mod tests {
     }
 
     // --- spv8: profile link replies --------------------------------------------------------------
+
+    /// The site lines these tests' daemons log (the profile listener, its LAN and caveat
+    /// warnings, render warnings), taken while no other such test runs, so each test asserts
+    /// its own; every other line stays visible.
+    struct SiteLog {
+        capture: crate::daemon::LogCapture,
+        _serial: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl SiteLog {
+        /// The lines taken, with each listener's port as `<port>`.
+        fn lines(&self) -> Vec<String> {
+            self.capture
+                .lines()
+                .into_iter()
+                .map(|l| match l.split_once("http://127.0.0.1:") {
+                    Some((head, _)) => format!("{head}http://127.0.0.1:<port>/"),
+                    None => l,
+                })
+                .collect()
+        }
+    }
+
+    fn site_log() -> SiteLog {
+        static SERIAL: Mutex<()> = Mutex::new(());
+        let serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        SiteLog {
+            capture: crate::daemon::capture_log_for_tests(&[
+                "site: profile guide: ",
+                "site: profile \"Guide book\": ",
+                "site: warning: this site shows only the profile ",
+                "site: warning: canon no longer holds the profile ",
+                ": warning: the top-level doc named glossary has no page",
+            ]),
+            _serial: serial,
+        }
+    }
+
+    /// The lines the profile-only listener of `guide` logs when it binds: its address, the LAN
+    /// setup that found no private address, and the caveat.
+    fn guide_listener_lines() -> Vec<String> {
+        vec![
+            "site: profile guide: http://127.0.0.1:<port>/".to_string(),
+            "site: profile \"Guide book\": serve.site_lan is on, but this machine has no private network address; the site stays on this machine; fix: connect this machine to a private network, then run rdy serve --stop; or set serve.site_lan to false".to_string(),
+            "site: warning: this site shows only the profile \"Guide book\"; anyone with the project still reads everything; fix: give the full site's link from rdy site when the person needs everything".to_string(),
+        ]
+    }
 
     use rdy_engine::engine::{SiteFacts, site_reply, with_writer_result};
     use rdy_engine::{E_BAD_INPUT, E_NOT_FOUND, WriteRequest};
@@ -623,6 +678,7 @@ mod tests {
     /// build is the build's failure.
     #[test]
     fn spv8_reply_facts_match_the_captured_selected_build() {
+        let log = site_log();
         let w = world();
         let guide = w.ids["$guide"].clone();
         let rt = open_listeners(&w.sh, w.dir.path());
@@ -781,11 +837,21 @@ mod tests {
         assert_eq!(err.code, E_NOT_FOUND, "{err:?}");
         w.sh.shutdown().unwrap();
         drop(rt);
+        // the listener's lines, the render warnings of the builds that held the glossary doc,
+        // and the profile canon no longer holds
+        let mut expected = guide_listener_lines();
+        expected.extend([
+            format!("site: /: warning: {GLOSSARY}"),
+            format!("site: /~profile/guide/: warning: {GLOSSARY}"),
+            "site: warning: canon no longer holds the profile \"guide\"; its profile-only site serves no page; fix: land the profile again, or run rdy serve --stop to end the site".to_string(),
+        ]);
+        assert_eq!(log.lines(), expected);
     }
 
     /// spv8: a refused `only` or an unknown profile registers no listener.
     #[test]
     fn spv8_only_validation_precedes_binding() {
+        let log = site_log();
         let w = world();
         let rt = open_listeners(&w.sh, w.dir.path());
         let e = w.sh.engine();
@@ -812,6 +878,7 @@ mod tests {
         assert_eq!(w.sh.profile_sites.keys(), vec!["guide".to_string()]);
         w.sh.shutdown().unwrap();
         drop(rt);
+        assert_eq!(log.lines(), guide_listener_lines());
     }
 
     /// spv8: the `site_url` op reads `{scope?, profile?, only?}` with the strict parser's hints,
@@ -819,6 +886,7 @@ mod tests {
     #[test]
     fn spv8_ctl_site_url_is_strict_and_shares_the_reply() {
         use crate::ops::{OpContext, dispatch};
+        let log = site_log();
         let w = world();
         let rt = open_listeners(&w.sh, w.dir.path());
         let e = w.sh.engine();
@@ -880,6 +948,7 @@ mod tests {
         assert_eq!(err.code, E_BAD_INPUT, "{err:?}");
         w.sh.shutdown().unwrap();
         drop(rt);
+        assert_eq!(log.lines(), guide_listener_lines());
     }
 
     /// ec11 fix round 1 (finding 3): `rdy_export` reads a scope as the `export` op does. The

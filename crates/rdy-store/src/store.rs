@@ -560,10 +560,11 @@ static NOTICE_CAPTURES: Mutex<NoticeCaptures> = Mutex::new(Vec::new());
 /// How many [`NoticeCapture`]s are live, so a store with none never takes the lock.
 static NOTICE_CAPTURING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// Writes one notice the store cannot return (a failed close in `Drop`) to stderr, unless a
-/// live [`NoticeCapture`] expects it. A write whose error is dropped, not the print macro: that
-/// panics when stderr is closed, and a panic in Drop during an unwind aborts the process.
-fn notice(text: &str) {
+/// Writes one notice a library cannot return (the store's failed close in `Drop`, the MCP
+/// server's failed republish after a panic) to stderr, unless a live [`NoticeCapture`] expects
+/// it. A write whose error is dropped, not the print macro: that panics when stderr is closed,
+/// and a panic in Drop during an unwind aborts the process.
+pub fn notice(text: &str) {
     use std::io::Write as _;
     if NOTICE_CAPTURING.load(Ordering::SeqCst) > 0
         && let Ok(mut all) = NOTICE_CAPTURES.lock()
@@ -578,7 +579,7 @@ fn notice(text: &str) {
     let _ = writeln!(std::io::stderr(), "{text}");
 }
 
-/// Test hook: while the returned capture lives, a store notice (any thread) that holds one of
+/// Test hook: while the returned capture lives, a [`notice`] (any thread) that holds one of
 /// `expected` (a fault test's store directory, say) goes to it instead of stderr, so the test
 /// asserts the notice it provokes and every unexpected notice stays visible.
 #[doc(hidden)]
@@ -623,27 +624,40 @@ impl Drop for NoticeCapture {
     }
 }
 
+/// Test hook: runs `f` (a drop, say) while the unclean-close notices of the stores at or under
+/// `dir` go to the test instead of stderr, and returns them in order. Panics if one of them is
+/// not an unclean-close notice of such a store. Every other notice stays visible.
+#[doc(hidden)]
+pub fn unclean_closes_for_tests(dir: &Path, f: impl FnOnce()) -> Vec<String> {
+    let at = format!("rdy: the store at {}", dir.display());
+    let capture = capture_notices_for_tests(&[&at]);
+    f();
+    let taken = capture.notices();
+    for n in &taken {
+        assert!(
+            n.starts_with(&at)
+                && n.contains(" did not close cleanly (")
+                && n.ends_with("); the next open catches its index up from the log"),
+            "{n}"
+        );
+    }
+    taken
+}
+
 /// Test hook: drops `store`, whose close a fault test expects to fail (a poisoned store, say),
-/// and returns the one notice that failure gives, which goes to the test instead of stderr.
-/// Panics unless the drop gives exactly one notice, the unclean close of `store`'s directory.
+/// and returns the one notice that failure gives, which goes to the test instead of stderr
+/// ([`unclean_closes_for_tests`]). Panics unless the drop gives exactly one.
 #[doc(hidden)]
 pub fn drop_unclean_for_tests(store: Store) -> String {
-    let dir = store.dir.display().to_string();
-    let capture = capture_notices_for_tests(&[&dir]);
-    drop(store);
-    let mut taken = capture.notices();
+    let dir = store.dir.clone();
+    let mut taken = unclean_closes_for_tests(&dir, || drop(store));
     assert_eq!(
         taken.len(),
         1,
-        "one unclean-close notice of {dir} was expected: {taken:?}"
+        "one unclean-close notice of {} was expected: {taken:?}",
+        dir.display()
     );
-    let notice = taken.remove(0);
-    assert!(
-        notice.starts_with(&format!("rdy: the store at {dir} did not close cleanly ("))
-            && notice.ends_with("); the next open catches its index up from the log"),
-        "{notice}"
-    );
-    notice
+    taken.remove(0)
 }
 
 /// The notice of a store at `dir` whose close failed with `e`.

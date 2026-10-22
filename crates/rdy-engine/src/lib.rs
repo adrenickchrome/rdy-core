@@ -175,6 +175,9 @@ pub use pack_load::{
 };
 pub use rdy_store::OpenReport;
 pub use rdy_store::fsutil::{sync_dir, write_durable};
+/// The notice channel of the library crates: stderr, unless a test captures the notice it
+/// provokes ([`capture_notices_for_tests`]).
+pub use rdy_store::{NoticeCapture, capture_notices_for_tests, notice};
 pub use wc_check::{check_wc, lexical_path};
 
 use arc_swap::ArcSwap;

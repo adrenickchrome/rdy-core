@@ -845,7 +845,12 @@ fn rdx4_post_authorization_io_failure_preserves_the_apply() {
             zeroed(&sp.full, &spans),
             "{stage:?}: the apply batch is kept"
         );
-        drop(s);
+        // the close cannot finish the removal either: it says so, and the reopen finishes it
+        let notice = rdy_store::drop_unclean_for_tests(s);
+        assert!(
+            notice.contains("(Content removal was authorized but has not finished.)"),
+            "{stage:?}: {notice}"
+        );
         // reopen finishes the exact authorized operation
         let s = Store::open(&sp.prep).unwrap();
         assert_removed(&s, &setup, &sp.fixture);

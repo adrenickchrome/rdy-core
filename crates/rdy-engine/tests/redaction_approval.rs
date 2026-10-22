@@ -704,7 +704,13 @@ fn rdx10_redaction_moves_are_logged_in_the_authorizing_batch() {
     );
     drop(before);
     let P { dir, r, .. } = p;
-    drop(r);
+    // the abandoned batch could not be rolled back in place: the close says so
+    let closes = rdy_store::unclean_closes_for_tests(dir.path(), || drop(r));
+    assert_eq!(closes.len(), 1, "{closes:?}");
+    assert!(
+        closes[0].contains("an earlier failed write could not be rolled back"),
+        "{closes:?}"
+    );
     let mut r = Rdy::open(dir.path()).unwrap();
     assert_eq!(
         r.store().log_end(),
@@ -789,9 +795,15 @@ fn rdx10_a_failed_finish_never_publishes_old_content() {
     assert_eq!(e.code, E_REDACTION_PENDING, "{e}");
     assert!(old.ensure_current_epoch().is_err());
     drop((old, st));
-    // the authorized landing stays: the reopen finishes the removal
+    // the authorized landing stays: the close cannot finish the removal and says so, and the
+    // reopen finishes it
     let P { dir, r, prose, .. } = p;
-    drop(r);
+    let closes = rdy_store::unclean_closes_for_tests(dir.path(), || drop(r));
+    assert_eq!(closes.len(), 1, "{closes:?}");
+    assert!(
+        closes[0].contains("(Content removal was authorized but has not finished.)"),
+        "{closes:?}"
+    );
     let r = Rdy::open(dir.path()).unwrap();
     let st = r.read();
     st.ensure_current_epoch().unwrap();

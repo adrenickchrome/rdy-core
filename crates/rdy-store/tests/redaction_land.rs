@@ -1089,7 +1089,11 @@ fn rdx7_held_apply_masks_nothing_before_seal() {
         assert_eq!(s.redaction_epoch(), epoch);
         assert!(on_disk(&w.path, SECRET));
         drop(retained);
-        drop(s);
+        let notice = rdy_store::drop_unclean_for_tests(s);
+        assert!(
+            notice.contains("an earlier failed write could not be rolled back"),
+            "{notice}"
+        );
         let s = Store::open(&w.path).unwrap();
         assert!(no_apply(&s));
         assert_eq!(s.get_block(&w.a.version_hash()).unwrap(), w.a);
