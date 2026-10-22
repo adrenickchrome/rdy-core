@@ -495,7 +495,7 @@ fn is_zero(n: &usize) -> bool {
 
 /// The most bytes a briefing of `max` tokens (4 bytes each, rounded down) can take. It
 /// saturates: an engine caller may pass any `usize`, and a budget past the byte range is no cut.
-fn budget_bytes(max: usize) -> usize {
+pub(crate) fn budget_bytes(max: usize) -> usize {
     max.saturating_mul(4).saturating_add(3)
 }
 
@@ -922,8 +922,9 @@ pub(crate) fn refuse_inflight(scope: &Scope) -> Result<(), RdyError> {
     Ok(())
 }
 
-/// How many hex digits of a briefing's digest a cursor carries (64 bits).
-const DIGEST_HEX: usize = 16;
+/// How many hex digits of a briefing's digest a cursor carries (64 bits). A change plan's cursor
+/// carries as many.
+pub(crate) const DIGEST_HEX: usize = 16;
 
 /// A cursor `<token>:<o1>,…,<o9>:<digest>:<scope>` split at its first colon: the token (64
 /// lowercase hex) and the rest. The rest is read by `parse_tail` once the token is known.
@@ -935,24 +936,35 @@ fn parse_cursor(cursor: &str) -> Result<(&str, &str), RdyError> {
     Ok((token, rest))
 }
 
-fn is_lower_hex(b: u8) -> bool {
+pub(crate) fn is_lower_hex(b: u8) -> bool {
     matches!(b, b'0'..=b'9' | b'a'..=b'f')
 }
 
 /// The offsets, the digest and the scope of a cursor's rest. The scope is last: everything
 /// after the digest's colon (a view name may hold a colon).
 fn parse_tail(rest: &str) -> Result<([usize; PAGE_SECTIONS.len()], &str, &str), RdyError> {
-    let (offsets, tail) = rest.split_once(':').ok_or_else(bad_cursor)?;
-    let (digest, scope) = tail.split_once(':').ok_or_else(bad_cursor)?;
+    parse_page_tail::<{ PAGE_SECTIONS.len() }>(rest).ok_or_else(bad_cursor)
+}
+
+/// A cursor tail `<o1>,…,<oN>:<digest>:<scope>`: exactly `N` decimal offsets, a digest of
+/// [`DIGEST_HEX`] lowercase hex digits and a non-empty scope, which is last (everything after
+/// the digest's colon, so it may hold colons). `None` when the tail is not one. The offsets are
+/// read into the array as they are split: nothing is allocated from their count.
+pub(crate) fn parse_page_tail<const N: usize>(rest: &str) -> Option<([usize; N], &str, &str)> {
+    let (offsets, tail) = rest.split_once(':')?;
+    let (digest, scope) = tail.split_once(':')?;
     if digest.len() != DIGEST_HEX || !digest.bytes().all(is_lower_hex) || scope.is_empty() {
-        return Err(bad_cursor());
+        return None;
     }
-    let offsets: Vec<usize> = offsets
-        .split(',')
-        .map(|n| n.parse().map_err(|_| bad_cursor()))
-        .collect::<Result<_, _>>()?;
-    let offsets: [usize; PAGE_SECTIONS.len()] = offsets.try_into().map_err(|_| bad_cursor())?;
-    Ok((offsets, digest, scope))
+    let mut out = [0usize; N];
+    let mut parts = offsets.split(',');
+    for slot in &mut out {
+        *slot = parts.next()?.parse().ok()?;
+    }
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((out, digest, scope))
 }
 
 /// How a scope is named in a briefing's errors.

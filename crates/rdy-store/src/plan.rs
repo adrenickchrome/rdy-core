@@ -6,7 +6,8 @@
 //!
 //! A chain's first version has neither `stable` nor `prev`; each later one names the chain's
 //! first version and its immediate predecessor, of the same view. A sealed version ends the
-//! chain: nothing follows it. Answers are cumulative, sorted by full item hash, one (the latest)
+//! chain: nothing follows it. A version bound to a proposal version that landed with no seal
+//! ends it too (O6): the view's next version may start a new chain. Answers are cumulative, sorted by full item hash, one (the latest)
 //! per item: a later version keeps every item its predecessor answers, and may replace an
 //! item's answer or add items. Heads are sorted and distinct by repo. An answer-only version
 //! has no `proposal`; a bound version names the proposal version it was written with, in the
@@ -238,6 +239,11 @@ pub(crate) trait PlanLookup {
     fn bound(&self, p: &Hash) -> Result<Option<Hash>, StoreError>;
     /// The seal of landing `l` before this one, if any.
     fn sealed(&self, l: &Hash) -> Result<Option<Hash>, StoreError>;
+    /// Whether a change of proposal version `p` landed before this plan (O6). Only a project's
+    /// new-chain rule asks, so a holder's lookups answer `false`.
+    fn landed(&self, _p: &Hash) -> Result<bool, StoreError> {
+        Ok(false)
+    }
     /// Whether the store is a holder: its chains and seals arrive by take, with no view.
     fn holder(&self) -> bool;
 }
@@ -293,14 +299,20 @@ pub(crate) fn invalid_context(
                 return Ok(Some(INVALID_CHAIN));
             }
         }
-        // a new chain: an unsealed version starts one only where no unsealed chain stands; an
+        // a new chain: an unsealed version starts one only where no live chain stands (the
+        // latest version is sealed, or its bound proposal landed without a seal, O6); an
         // unbound proposal's seal names no chain at all
         None if p.seal.is_none() && !holder => {
             if let Some(l) = look.latest(&p.view)? {
-                let sealed = look
-                    .read(kinds::PLAN, &l)
-                    .map(|b| decode_plan(&b).ok().is_some_and(|q| q.seal.is_some()))?;
-                if !sealed {
+                let q = look.read(kinds::PLAN, &l).map(|b| decode_plan(&b).ok())?;
+                let ended = match q {
+                    Some(q) if q.seal.is_some() => true,
+                    Some(Plan {
+                        proposal: Some(v), ..
+                    }) => look.landed(&v)?,
+                    _ => false,
+                };
+                if !ended {
                     return Ok(Some(INVALID_CHAIN));
                 }
             }
@@ -733,6 +745,18 @@ impl PlanLookup for WriteLookup<'_> {
         Ok(self.store.index().plan_seal(l)?.map(|(h, _)| h))
     }
 
+    fn landed(&self, p: &Hash) -> Result<bool, StoreError> {
+        let Some(version) = typed::<Proposal>(self, kinds::PROPOSAL, p)? else {
+            return Ok(false);
+        };
+        for c in &version.changes {
+            if self.store.index().landing_of(c)?.is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn holder(&self) -> bool {
         matches!(self.store.mode(), Ok(StoreMode::Holder))
     }
@@ -752,6 +776,18 @@ impl Store {
             return Err(refused(&id, INVALID_PROPOSAL));
         }
         let (id, items) = self.plan_frames(plan, &[])?;
+        self.write_guarded(items)?;
+        Ok(id)
+    }
+
+    /// Test hook: writes `plan`'s PLAN frame and its `plan/<view>` ref in one batch, with none of
+    /// the plan writers' checks, so a test can place a version that no engine path writes yet (a
+    /// bound or a sealed one). Returns its id.
+    #[doc(hidden)]
+    pub fn put_plan_frames_for_tests(&mut self, plan: &Plan) -> Result<Hash, StoreError> {
+        let id = plan.id();
+        let mut items = vec![(kinds::PLAN, encode(plan))];
+        items.extend(self.ref_items_pub(vec![(plan_ref(&plan.view), id.0.to_vec())]));
         self.write_guarded(items)?;
         Ok(id)
     }
@@ -996,6 +1032,26 @@ impl PlanLookup for CheckLookup<'_> {
 
     fn sealed(&self, l: &Hash) -> Result<Option<Hash>, StoreError> {
         Ok(self.sealed.get(l).copied())
+    }
+
+    fn landed(&self, p: &Hash) -> Result<bool, StoreError> {
+        let Some(version) = typed::<Proposal>(self, kinds::PROPOSAL, p)? else {
+            return Ok(false);
+        };
+        for c in &version.changes {
+            let Some(l) = self.reader.index().landing_of(c)? else {
+                continue;
+            };
+            if self
+                .reader
+                .index()
+                .typed(kinds::LANDING, &l)?
+                .is_some_and(|at| at < self.batch_start)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn holder(&self) -> bool {
