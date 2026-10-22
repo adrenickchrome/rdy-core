@@ -192,9 +192,10 @@ impl Lazy<'_> {
 /// D-01QX5 on a write: sets or drops `reflects_at` on the blocks of `ops`, against the block
 /// each op starts from: an earlier op of the batch, else the version an update names as its
 /// base (a conflict side's version is in `store`, while `base`, the view before the write, reads
-/// the conflict's base), else nothing for a create. A block whose reflects is absent or empty
-/// loses it. A created block, one whose glob set changes, and one in `code` (a repin with
-/// `code: true`) get the current snapshot; any other rewrite keeps the one it has. With no linked
+/// the conflict's base), else nothing for a create. A block whose reflects becomes absent or
+/// empty loses it; one that had none and still has none keeps what it holds. A created block,
+/// one whose glob set changes, and one in `code` (a repin with `code: true`) get the current
+/// snapshot; any other rewrite keeps the one it has. With no linked
 /// checkout nothing is made up: a block whose set changed loses its snapshot, a code repin is
 /// `E_CONFIG`, and each reflects block written gets [`W_REFLECTS_NO_CODE`] once.
 pub(crate) fn stamp(
@@ -225,18 +226,25 @@ pub(crate) fn stamp(
             }
         };
         let now = owned(glob_set(block));
-        // the set the op starts from: a created block has none
+        // the set the op starts from: a created block has none. A block with no reflects now
+        // and no snapshot to drop needs no lookup.
         let was = match (prior.remove(&block.id), from) {
             (Some(was), _) => was,
             (None, None) => BTreeSet::new(),
-            (None, Some(_)) if now.is_empty() => BTreeSet::new(),
+            (None, Some(_)) if now.is_empty() && !block.fields.contains_key(REFLECTS_AT) => {
+                BTreeSet::new()
+            }
             (None, Some(v)) => match base.get(&block.id).filter(|b| b.version_hash() == v) {
                 Some(b) => owned(glob_set(b)),
                 None => owned(glob_set(&store.get_block(&v)?)),
             },
         };
         if now.is_empty() {
-            block.fields.remove(REFLECTS_AT);
+            // removing reflects removes the snapshot; a rewrite that leaves the set empty, as
+            // it was, keeps whatever the block holds
+            if !was.is_empty() {
+                block.fields.remove(REFLECTS_AT);
+            }
         } else {
             let changed = was != now;
             let repin = code.contains(&block.id);
