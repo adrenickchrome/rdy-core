@@ -62,7 +62,7 @@ pub(crate) fn digest_hex(full: &PlanReply) -> String {
 }
 
 /// The first page of `full` within `max` tokens.
-pub(crate) fn first(full: PlanReply, max: usize) -> PlanReply {
+pub fn first(full: PlanReply, max: usize) -> PlanReply {
     let digest = digest_hex(&full);
     cut(full, 0, &digest, max)
 }

@@ -617,6 +617,13 @@ impl ReadState {
         Ok(page::first(full, max))
     }
 
+    /// The whole reply of view `view`'s plan, with every item and no cursor. A caller that holds
+    /// it cuts it with [`page::first`](super::page::first), so one state gives both the answers'
+    /// effect and the pages that follow. Writes nothing.
+    pub fn view_plan(&self, view: &str) -> Result<PlanReply, RdyError> {
+        self.full_plan(&Selector::View(view.to_string()), view)
+    }
+
     /// The whole reply of `selector`, uncut.
     pub(crate) fn full_plan(
         &self,

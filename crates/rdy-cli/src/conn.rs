@@ -87,6 +87,8 @@ const BOUND_VIEW_OPS: &[&str] = &[
     "edit_block",
     "propose",
     "keys_assign",
+    "reaffirm",
+    "repin",
 ];
 
 /// The view the working copy is bound to, read from `bound.yaml` without the lock; `None` when
@@ -106,11 +108,17 @@ pub(crate) fn human_session(env: &Env) -> bool {
     }
 }
 
-/// `args` with the bound view as `view` for an op in `BOUND_VIEW_OPS` that names none, and for
-/// `brief` naming neither `view` nor `scope`; only in a human session.
+/// `args` with the bound view as `view` for an op in `BOUND_VIEW_OPS` that names none, for
+/// `brief` naming neither `view` nor `scope`, and for `plan` naming no view, proposal, landing,
+/// decision or page (a read of the plan of another thing keeps its selector, O21); only in a
+/// human session.
 fn with_bound_view(env: &Env, op: &str, mut args: Value) -> Result<Value, ErrorReply> {
     let wants = if op == "brief" {
         args["view"].is_null() && args["scope"].is_null()
+    } else if op == "plan" {
+        ["view", "proposal", "landing", "decision", "page"]
+            .iter()
+            .all(|k| args[*k].is_null())
     } else {
         BOUND_VIEW_OPS.contains(&op) && args["view"].is_null()
     };

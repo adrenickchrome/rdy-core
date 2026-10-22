@@ -24,6 +24,7 @@ mod dump;
 mod edit;
 mod intake;
 mod land;
+mod plan;
 mod project;
 mod publication;
 pub(crate) mod publish;
@@ -42,6 +43,7 @@ use dump::dump;
 use edit::{edit_block, keys_assign, new_doc, new_folder, new_profile};
 use intake::{answer, pending};
 use land::{approve, propose, tag};
+use plan::{plan, reaffirm, repin};
 pub use project::{Cleaned, clean_quarantine, quarantine};
 use project::{check, fsck, reindex};
 use publication::publication_check;
@@ -134,6 +136,9 @@ pub const OPS: &[&str] = &[
     "inbox",
     "site_url",
     "pending",
+    "plan",
+    "reaffirm",
+    "repin",
     "answer",
     "sign",
     "key_show",
@@ -525,6 +530,19 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         }
         "site_url" => site_url(cx, parse(op, args, "{scope?, profile?, only?}")?),
         "pending" => pending(cx, parse(op, args, "{max_tokens?, session_ref?}")?),
+        "plan" => plan(
+            cx,
+            parse(
+                op,
+                args,
+                "{view?, proposal?, landing?, decision?, answers?, max_tokens?, page?}",
+            )?,
+        ),
+        "reaffirm" => reaffirm(
+            cx,
+            parse(op, args, "{ids?, because?, targets?, reason, view?}")?,
+        ),
+        "repin" => repin(cx, parse(op, args, "{id, targets?, code?, view?}")?),
         "answer" => answer(
             cx,
             parse(

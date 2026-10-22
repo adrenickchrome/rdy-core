@@ -26,6 +26,7 @@ mod mcp_log;
 mod mcp_mentions;
 mod mcp_params;
 mod mcp_people;
+mod mcp_plan;
 mod mcp_pool;
 mod mcp_proposal;
 mod mcp_proxy;
