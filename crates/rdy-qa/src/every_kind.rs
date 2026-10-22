@@ -812,9 +812,9 @@ pub fn plan_frames(p: &Plan) -> Vec<(u8, Vec<u8>)> {
     out
 }
 
-/// The fixture-only typed builder of store format 17's records (D-4JMPH): while no engine path
-/// writes a plan, it composes them as the plan writers will, through the store's own writers and
-/// the doc-hidden `write_guarded_for_tests` hook, each in one held batch that `invalidate` seals.
+/// The fixture-only typed builder of store format 17's records (D-4JMPH): it composes them as
+/// the plan writers do, through the store's own writers and the doc-hidden
+/// `write_guarded_for_tests` hook, each in one held batch that `invalidate` seals.
 ///
 /// - View [`PLAN_VIEW`] gets a claim under `parent`, then a version of it whose fields hold both
 ///   engine metadata shapes (`reaffirmed` against `cause`, and `reflects_at`).
@@ -825,7 +825,8 @@ pub fn plan_frames(p: &Plan) -> Vec<(u8, Vec<u8>)> {
 ///   RefuseDeferrals and RejectReaffirm.
 /// - The landing and its seal, in one batch: the confirmed, deferred (with the acceptance) and
 ///   done items, and `cause` among its decisions.
-/// - An unsealed answer-only version of view `sa`, which stays open.
+/// - An unsealed answer-only version of view `sa`, which stays open (it continues the chain
+///   the view's propose bound).
 ///
 /// Production callers compose plans through the typed proposal and landing paths, never this.
 pub fn add_plan_fixture_records(r: &mut Rdy, parent: &BlockId, cause: &BlockId) -> PlanFixture {
@@ -1064,15 +1065,29 @@ pub fn add_plan_fixture_records(r: &mut Rdy, parent: &BlockId, cause: &BlockId) 
         .write_guarded_for_tests(plan_frames(&seal))
         .unwrap();
     r.invalidate();
-    // an unsealed version of another view, which stays open
+    // an unsealed version of another view, which stays open: it continues the view's live
+    // chain, whose first version the view's propose bound (D-4JMPH)
+    let sa_head = r
+        .read()
+        .reader()
+        .get_ref(&rdy_store::plan::plan_ref("sa"))
+        .unwrap()
+        .map(|v| Hash(v.as_slice().try_into().unwrap()));
+    let (stable, prev, answers) = match sa_head {
+        Some(h) => {
+            let p = r.read().reader().plan(&h).unwrap();
+            (Some(p.stable.unwrap_or(h)), Some(h), p.answers)
+        }
+        None => (None, None, vec![]),
+    };
     let unsealed = r
         .store_mut()
         .put_plan(&Plan {
-            stable: None,
-            prev: None,
+            stable,
+            prev,
             view: "sa".into(),
             proposal: None,
-            answers: vec![],
+            answers,
             heads,
             provenance: agent,
             seal: None,
