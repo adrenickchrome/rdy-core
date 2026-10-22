@@ -1836,3 +1836,139 @@ fn cp16_reaffirm_write_bound_counts_the_change_deps() {
     land(&mut r, "whole").unwrap();
     tag_and_export(&mut r, "v2.0.0").unwrap();
 }
+
+/// `n` claims under `parent` (`$k0`, ...) with bodies of `body` bytes and `extra` bytes more in
+/// all, spread over them. Each body stays within one record's text bound, so only the change's
+/// size is measured.
+fn big_claims(parent: &str, n: usize, body: usize, extra: usize) -> Value {
+    let (each, rest) = (extra / n, extra % n);
+    json!(
+        (0..n)
+            .map(|i| {
+                let len = body + each + usize::from(i < rest);
+                assert!(
+                    len <= rdy_store::bounded::MAX_TEXT_BYTES,
+                    "body of {len} bytes"
+                );
+                json!({"op": "create", "type": "claim", "id": format!("$k{i}"), "parent": parent,
+                    "body": "b".repeat(len)})
+            })
+            .collect::<Vec<_>>()
+    )
+}
+
+/// FW-UP1a (D-69AY3): every change a write makes is one record, so an ordinary write grows
+/// with its blocks too. A write whose change would pass one record by one byte is refused
+/// before anything is written, and the history still exports. The same write one byte smaller,
+/// exactly at the bound, lands, and its tag exports.
+#[test]
+fn cp16_oversized_write_refuses_before_append() {
+    let max = rdy_store::bounded::MAX_RECORD_BYTES;
+    let (_d, mut r) = project();
+    let w = world(&mut r);
+    let (n, body) = (17, 960_000);
+    // a probe in a view as long as the measured one: creates have no deps
+    let probe = write(&mut r, "probe", big_claims(&w.s, n, body, 0)).unwrap();
+    let ch: Change = r.store().change(&probe.change.parse().unwrap()).unwrap();
+    assert!(ch.deps.is_empty());
+    let base = postcard::to_allocvec(&ch).unwrap().len();
+
+    tag_and_export(&mut r, "v1.0.0").unwrap();
+    let end = log_end(&r);
+    let e = write(&mut r, "whole", big_claims(&w.s, n, body, max + 1 - base)).unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            E_LIMIT,
+            "change exceeds 16777216 record bytes",
+            "Write these blocks in smaller groups, one write for each group."
+        )
+    );
+    assert_eq!(log_end(&r), end, "nothing is written");
+    assert!(!r.read().has_view("whole"), "no view is made");
+    tag_and_export(&mut r, "v1.1.0").unwrap();
+
+    let done = write(&mut r, "whole", big_claims(&w.s, n, body, max - base)).unwrap();
+    let ch: Change = r.store().change(&done.change.parse().unwrap()).unwrap();
+    assert_eq!(
+        postcard::to_allocvec(&ch).unwrap().len(),
+        max,
+        "exactly at the bound"
+    );
+    land(&mut r, "whole").unwrap();
+    tag_and_export(&mut r, "v2.0.0").unwrap();
+}
+
+/// The open proposals, as their refs.
+fn open_refs(r: &Rdy) -> Vec<String> {
+    r.read()
+        .open_proposals()
+        .unwrap()
+        .into_iter()
+        .map(|(p, _)| p.to_string())
+        .collect()
+}
+
+/// FW-UP1a (D-69AY3): a landing's acceptance change holds every decision it accepts, so it can
+/// pass one record although each write of the view fits one. Such a landing is refused before
+/// anything is written: the proposal stays open and the history still exports. A landing whose
+/// acceptance change is just under the bound lands, and its tag exports.
+#[test]
+fn cp16_oversized_acceptance_change_refuses_before_append() {
+    let max = rdy_store::bounded::MAX_RECORD_BYTES;
+    let (_d, mut r) = project();
+    let w = world(&mut r);
+    // 18 proposed decisions of 1000000 bytes, written 6 at a time in one view
+    let text = "t".repeat(1_000_000);
+    for g in 0..3 {
+        write(
+            &mut r,
+            "over",
+            json!(applied_decisions(&w, &format!("o{g}-"), 6, &text)),
+        )
+        .unwrap();
+    }
+    let summary = rdy_qa::intake::summary_for(&r, "over");
+    let p = r.propose(&writer(), "over", "over", summary).unwrap();
+    rdy_qa::intake::confirm_before_landing(&mut r, &approver(), &p);
+    tag_and_export(&mut r, "v1.0.0").unwrap();
+    let open = open_refs(&r);
+    let end = log_end(&r);
+    let e = r.land(&approver(), &p.id).unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            E_LIMIT,
+            "acceptance change exceeds 16777216 record bytes",
+            "Land these decisions in smaller groups: propose each group from a view of its own, then land it."
+        )
+    );
+    assert_eq!(log_end(&r), end, "nothing is written");
+    assert_eq!(open_refs(&r), open, "the proposal stays open");
+    tag_and_export(&mut r, "v1.1.0").unwrap();
+
+    // 16 decisions of 1040000 bytes, written 8 at a time: the acceptance change fits
+    let text = "t".repeat(1_040_000);
+    for g in 0..2 {
+        write(
+            &mut r,
+            "under",
+            json!(applied_decisions(&w, &format!("u{g}-"), 8, &text)),
+        )
+        .unwrap();
+    }
+    let landing: Hash = land(&mut r, "under").unwrap().parse().unwrap();
+    let rec = r.store().landing(&landing).unwrap();
+    let accept: Change = r.store().change(rec.changes.last().unwrap()).unwrap();
+    assert!(
+        accept.message.starts_with("accept decisions"),
+        "{}",
+        accept.message
+    );
+    let bytes = postcard::to_allocvec(&accept).unwrap().len();
+    assert!(
+        bytes <= max && bytes > max / 100 * 98,
+        "just under the bound: {bytes}"
+    );
+    tag_and_export(&mut r, "v2.0.0").unwrap();
+}

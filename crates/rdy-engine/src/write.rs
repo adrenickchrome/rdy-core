@@ -2984,16 +2984,24 @@ impl Rdy {
             links,
             read_identity: None,
         };
-        // a write that re-affirms decisions grows with their count: its one change must fit
-        // one record (D-EJBPD), checked before anything is written. The record the store
-        // writes holds the change's deps, so the check measures the change with the deps the
-        // commit below gives it (the same call on the same state; the commit sets them again)
-        if !reaffirmed.is_empty() {
-            change.deps = self
-                .store
-                .change_deps_resolving(&change, Some(&req.view), &conflicts)?;
-            crate::reaffirm::change_fits(&change, crate::reaffirm::WRITE_CHANGE_FIX)?;
-        }
+        // every change is one record, and a write grows with its blocks (a re-affirmation with
+        // its decisions, D-EJBPD): the change must fit one record, or a later read or export of
+        // the history would refuse it (FW-UP1a), checked before anything is written. The record
+        // the store writes holds the change's deps, so the check measures the change with the
+        // deps the commit below gives it (the same call on the same state; the commit sets them
+        // again)
+        change.deps = self
+            .store
+            .change_deps_resolving(&change, Some(&req.view), &conflicts)?;
+        let (what, fix) = if reaffirmed.is_empty() {
+            (crate::reaffirm::WRITE_CHANGE, crate::reaffirm::WRITE_FIX)
+        } else {
+            (
+                crate::reaffirm::REAFFIRM_CHANGE,
+                crate::reaffirm::WRITE_CHANGE_FIX,
+            )
+        };
+        crate::reaffirm::change_fits(&change, what, fix)?;
         let id = self.store.commit_to_view_resolving(
             &req.view,
             change,

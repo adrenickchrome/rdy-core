@@ -62,6 +62,15 @@ pub fn check_shared_inputs(
     Ok(reason.as_str().to_string())
 }
 
+/// What [`change_fits`] calls a change that re-affirms decisions (a write's or a card answer's).
+pub const REAFFIRM_CHANGE: &str = "re-affirmation change";
+
+/// What [`change_fits`] calls the change of an ordinary write.
+pub const WRITE_CHANGE: &str = "change";
+
+/// What [`change_fits`] calls a landing's acceptance change.
+pub const ACCEPT_CHANGE: &str = "acceptance change";
+
 /// The fix of a re-affirmation card's answer whose one change would exceed one record.
 pub const CARD_CHANGE_FIX: &str = "Re-affirm these decisions in smaller groups with the reaffirm write op, then answer the card again.";
 
@@ -69,20 +78,30 @@ pub const CARD_CHANGE_FIX: &str = "Re-affirm these decisions in smaller groups w
 pub const WRITE_CHANGE_FIX: &str =
     "Re-affirm these decisions in smaller groups, one write for each group.";
 
-/// Refuses a change that re-affirms decisions when its encoding would exceed one record
-/// ([`rdy_store::bounded::fits`], the store's own record bound): `E_LIMIT`
-/// `re-affirmation change exceeds 16777216 record bytes`, with `fix`. A change of one write or
-/// one card answer is one record, so a re-affirmation of many decisions is refused before
-/// anything is written, never split, and never written past the bound a later read or export of
-/// the history checks.
-pub(crate) fn change_fits(change: &rdy_model::Change, fix: &str) -> Result<(), RdyError> {
+/// The fix of an ordinary write whose change would exceed one record.
+pub const WRITE_FIX: &str = "Write these blocks in smaller groups, one write for each group.";
+
+/// The fix of a landing whose acceptance change would exceed one record.
+pub const ACCEPT_FIX: &str = "Land these decisions in smaller groups: propose each group from a view of its own, then land it.";
+
+/// Refuses a change whose encoding would exceed one record ([`rdy_store::bounded::fits`], the
+/// store's own record bound): `E_LIMIT` `<what> exceeds 16777216 record bytes`, with `fix`.
+/// `change` is the final change, its deps included, exactly as the store writes it. A change is
+/// one record, so a write, a landing's acceptance or a card answer that grows past it is refused
+/// before anything is written, never split, and never written past the bound a later read or
+/// export of the history checks (FW-UP1a, D-69AY3).
+pub(crate) fn change_fits(
+    change: &rdy_model::Change,
+    what: &str,
+    fix: &str,
+) -> Result<(), RdyError> {
     rdy_store::bounded::fits(change).map_err(|e| match e {
         rdy_store::bounded::RecordError::Limit { .. } => {
-            RdyError::new(E_LIMIT, format!("re-affirmation change exceeds {e}"), fix)
+            RdyError::new(E_LIMIT, format!("{what} exceeds {e}"), fix)
         }
         _ => RdyError::new(
             E_INTERNAL,
-            format!("re-affirmation change does not encode: {e}"),
+            format!("{what} does not encode: {e}"),
             "report this as a bug in rdy",
         ),
     })

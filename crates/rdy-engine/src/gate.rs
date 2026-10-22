@@ -2724,6 +2724,13 @@ impl Rdy {
                 read_identity: None,
             };
             change.deps = self.store.change_deps(&change, Some(&p.view))?;
+            // the acceptance change holds every decision it accepts: it must fit one record, deps
+            // included, or a later read or export of the history would refuse it (FW-UP1a)
+            crate::reaffirm::change_fits(
+                &change,
+                crate::reaffirm::ACCEPT_CHANGE,
+                crate::reaffirm::ACCEPT_FIX,
+            )?;
             Some(change)
         };
         let mut all = changes;
@@ -2876,7 +2883,11 @@ impl Rdy {
             .ok_or_else(|| bug("the proposal has no change"))?;
         // the one change this answer writes (D-CQMA4) must fit one record, or a later read or
         // export of the history would refuse it; nothing is written yet
-        crate::reaffirm::change_fits(&committed, crate::reaffirm::CARD_CHANGE_FIX)?;
+        crate::reaffirm::change_fits(
+            &committed,
+            crate::reaffirm::REAFFIRM_CHANGE,
+            crate::reaffirm::CARD_CHANGE_FIX,
+        )?;
         // the bound plan: the candidate's complete plan on canon, with no answer
         let pp = crate::plan::lifecycle::prepare_proposal_plan(
             &st,
