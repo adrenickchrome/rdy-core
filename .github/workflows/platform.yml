@@ -1,5 +1,5 @@
 # Hosted platform runs. Advisory only: every job may fail without failing the workflow, and none is a
-# required check. The per-merge platform gate runs elsewhere and stays the authority.
+# required check.
 name: platforms
 on:
   pull_request:

@@ -44,9 +44,16 @@ jobs:
           cargo +1.99.0 fetch --locked
       - name: Full dependency policy with fresh advisory data
         run: cargo +1.99.0 deny --locked check advisories licenses bans sources
-      - name: Pull request dependency delta
-        if: github.event_name == 'pull_request'
-        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
+  dependency-review:
+    # Its own job, so it runs on every pull request even when the dependency policy above fails.
+    name: Pull request dependency delta
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
         with:
           fail-on-severity: high
           comment-summary-in-pr: never
@@ -95,10 +102,11 @@ jobs:
           ALERT_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.ref }}
         run: python3 scripts/ci/check_sarif.py alerts --tool CodeQL --ref "$ALERT_REF"
   required:
-    # One result for both jobs. It is not a required check.
+    # One result for all jobs. It is not a required check. The dependency delta runs only on pull
+    # requests; on other events it is skipped, and that counts as a pass.
     name: Core security
     if: always()
-    needs: [policy, codeql]
+    needs: [policy, dependency-review, codeql]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
@@ -106,10 +114,13 @@ jobs:
       - name: All results must succeed
         env:
           RESULTS: ${{ toJSON(needs) }}
+          EVENT: ${{ github.event_name }}
         run: |
           python3 - <<'PY'
           import json, os
-          results = json.loads(os.environ['RESULTS'])
-          assert set(results) == {'policy', 'codeql'}
-          assert all(value['result'] == 'success' for value in results.values()), results
+          results = {name: value['result'] for name, value in json.loads(os.environ['RESULTS']).items()}
+          assert set(results) == {'policy', 'dependency-review', 'codeql'}, results
+          if os.environ['EVENT'] != 'pull_request' and results['dependency-review'] == 'skipped':
+              del results['dependency-review']
+          assert all(result == 'success' for result in results.values()), results
           PY
