@@ -327,12 +327,26 @@ def has_next(values):
         for part in value.split(','):
             if not part.strip():
                 continue
-            match = re.fullmatch(r'\s*<[^<>\s]+>((?:\s*;\s*[A-Za-z]+="[^"]*")*)\s*', part)
+            match = re.fullmatch(r'\s*<[^<>\s]+>((?:\s*;\s*[A-Za-z*]+\s*=\s*"[^"]*")*)\s*', part)
             if not match:
                 raise AlertQueryError('invalid Link header')
-            if any('next' in rel.split() for rel in re.findall(r'rel="([^"]*)"', match.group(1))):
-                found = True
+            # Parameter names and relation types compare case-insensitively; rel may list several.
+            for name, relations in re.findall(r';\s*([A-Za-z*]+)\s*=\s*"([^"]*)"', match.group(1)):
+                if name.lower() == 'rel' and 'next' in relations.lower().split():
+                    found = True
     return found
+
+
+class RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: the token goes only to the URL built here."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        fp.close()
+        raise AlertQueryError('the API answered with a redirect (HTTP ' + str(code) + '), which is not followed')
+
+
+def urlopen(request, timeout):
+    return urllib.request.build_opener(RefuseRedirect).open(request, timeout=timeout)
 
 
 def page_url(api, repository, tool, ref, page):
@@ -359,7 +373,7 @@ def fetch_alerts(api, repository, token, tool, ref):
             headers={'Accept': 'application/vnd.github+json', 'Authorization': 'Bearer ' + token,
                      'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'rdy-core-ci'})
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
+            with urlopen(request, timeout=60) as response:
                 batch = json.loads(response.read().decode('utf-8'))
                 # All Link fields: a response may carry more than one.
                 links = response.headers.get_all('Link')
@@ -370,6 +384,9 @@ def fetch_alerts(api, repository, token, tool, ref):
                 message = ''
             finally:
                 error.close()
+            if 300 <= error.code < 400:
+                raise AlertQueryError('the API answered with a redirect (HTTP ' + str(error.code)
+                                      + '), which is not followed') from None
             raise AlertQueryError('HTTP ' + str(error.code) + ' ' + clean(message)) from None
         except (urllib.error.URLError, OSError, ValueError, AttributeError) as error:
             raise AlertQueryError(clean(error)) from None

@@ -13,6 +13,8 @@ import tempfile
 import unittest
 from unittest import mock
 import urllib.error
+import urllib.request
+import urllib.response
 
 try:
     import tomllib
@@ -440,7 +442,7 @@ class AlertGate(unittest.TestCase):
 
     def run_gate(self, urlopen, ref='refs/pull/7/merge', env=ENV):
         output = io.StringIO()
-        with mock.patch.object(SARIF.urllib.request, 'urlopen', urlopen), \
+        with mock.patch.object(SARIF, 'urlopen', urlopen), \
              mock.patch.dict(SARIF.os.environ, env, clear=True), redirect_stdout(output):
             code = SARIF.main(['alerts', '--tool', 'CodeQL', '--ref', ref])
         return code, output.getvalue()
@@ -483,6 +485,20 @@ class AlertGate(unittest.TestCase):
         self.assertEqual([r.full_url for r in requests], [built(1), built(2), built(3)])
         self.assertFalse(any('example.invalid' in r.full_url for r in requests))
 
+    def test_relations_compare_case_insensitively_and_may_be_listed(self):
+        for link in ('<' + SERVER_URL + '2>; rel="Next"', '<' + SERVER_URL + '2>; REL="next"',
+                     '<' + SERVER_URL + '2>; Rel = "NEXT"', '<' + SERVER_URL + '2>; rel="prev next"',
+                     '<' + SERVER_URL + '2>; title="x"; rel="last Next"'):
+            urlopen, requests = respond(([], [link]), [alert(2)])
+            with self.subTest(link=link):
+                self.assertEqual(self.run_gate(urlopen)[0], 1)
+                self.assertEqual([r.full_url for r in requests], [built(1), built(2)])
+        for link in ('<' + SERVER_URL + '2>; rel="nextpage"', '<' + SERVER_URL + '2>; title="next"'):
+            urlopen, requests = respond(([], [link]), [alert(2)])
+            with self.subTest(link=link):
+                self.assertEqual(self.run_gate(urlopen)[0], 0)
+                self.assertEqual(len(requests), 1)
+
     def test_malformed_link_fails_the_gate(self):
         for links in (['not a link header'], [NEXT, 'garbage'], ['<x>; rel=next'], ['<a b>; rel="next"']):
             urlopen, _ = respond(([], links), [alert(1, level='medium')])
@@ -493,6 +509,44 @@ class AlertGate(unittest.TestCase):
         urlopen, _ = respond(*[([], [NEXT]) for _ in range(4)])
         with mock.patch.object(SARIF, 'MAX_PAGES', 3), self.assertRaisesRegex(SARIF.AlertQueryError, 'pages'):
             self.run_gate(urlopen)
+
+    def test_redirects_are_refused_by_the_real_handler(self):
+        """urllib's own redirect processing runs; only the HTTPS transport is replaced."""
+        targets = ('https://api.github.com/repos/other/repo/code-scanning/alerts?severity=low',
+                   'https://example.invalid/repos/owner/repo/code-scanning/alerts')
+        for code in (301, 302, 303, 307, 308, 300):
+            for target in targets:
+                sent = []
+
+                def https_open(handler, request):
+                    sent.append((request.full_url, request.get_header('Authorization')))
+                    headers = http.client.HTTPMessage()
+                    headers['Location'] = target
+                    headers['Content-Type'] = 'application/json'
+                    response = urllib.response.addinfourl(io.BytesIO(b'[]'), headers, request.full_url, code)
+                    response.msg = 'Redirect'
+                    return response
+                with self.subTest(code=code, target=target), \
+                     mock.patch.object(urllib.request.HTTPSHandler, 'https_open', https_open), \
+                     mock.patch.dict(SARIF.os.environ, ENV, clear=True), redirect_stdout(io.StringIO()):
+                    with self.assertRaisesRegex(SARIF.AlertQueryError, 'redirect'):
+                        SARIF.main(['alerts', '--tool', 'CodeQL', '--ref', 'refs/pull/7/merge'])
+                    self.assertEqual(sent, [(built(1), 'Bearer x')])
+
+    def test_real_handler_reads_a_plain_answer(self):
+        sent = []
+
+        def https_open(handler, request):
+            sent.append(request.full_url)
+            headers = http.client.HTTPMessage()
+            response = urllib.response.addinfourl(io.BytesIO(json.dumps([alert(1)]).encode()), headers,
+                                                  request.full_url, 200)
+            response.msg = 'OK'
+            return response
+        with mock.patch.object(urllib.request.HTTPSHandler, 'https_open', https_open), \
+             mock.patch.dict(SARIF.os.environ, ENV, clear=True), redirect_stdout(io.StringIO()):
+            self.assertEqual(SARIF.main(['alerts', '--tool', 'CodeQL', '--ref', 'refs/pull/7/merge']), 1)
+        self.assertEqual(sent, [built(1)])
 
     def test_gate_passes_when_only_dismissed_or_lower_alerts_are_open(self):
         urlopen, _ = respond([alert(1, state='dismissed'), alert(2, level='medium')])
