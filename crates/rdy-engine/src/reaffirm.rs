@@ -30,6 +30,38 @@ pub const MAX_REAFFIRM_DECISIONS: usize = crate::brief::MAX_BRIEF_BLOCKS;
 /// The most (decision, target) pairs one write re-affirms.
 pub const MAX_REAFFIRM_PAIRS: usize = 100_000;
 
+/// The most bytes of target text a bulk reaffirm may repeat across its ops: the bytes of the
+/// shared targets, times the number of decisions.
+pub const MAX_REAFFIRM_SHARED_BYTES: usize = 16 * 1024 * 1024;
+
+/// Checks the inputs that `count` reaffirm ops would share (one reason and one target list)
+/// before any op is built, so a bulk request cannot multiply them past the bounds. Returns the
+/// reason, trimmed. The reason check is the engine's own; the pair and byte totals are checked
+/// products, never wrapped.
+pub fn check_shared_inputs(
+    count: usize,
+    reason: &str,
+    targets: Option<&[String]>,
+) -> Result<String, RdyError> {
+    let reason = Reason::parse(reason)?;
+    if count > MAX_REAFFIRM_DECISIONS {
+        return Err(bound_error());
+    }
+    if let Some(ts) = targets {
+        let pairs = count.checked_mul(ts.len());
+        let bytes = ts
+            .iter()
+            .try_fold(0usize, |n, t| n.checked_add(t.len()))
+            .and_then(|n| n.checked_mul(count));
+        if pairs.is_none_or(|n| n > MAX_REAFFIRM_PAIRS)
+            || bytes.is_none_or(|n| n > MAX_REAFFIRM_SHARED_BYTES)
+        {
+            return Err(bound_error());
+        }
+    }
+    Ok(reason.as_str().to_string())
+}
+
 /// The sentence an `E_FROZEN` fix ends with when the frozen decision is a suspect one that a
 /// `reaffirm` op could re-affirm.
 pub(crate) const FROZEN_REAFFIRM_HINT: &str =

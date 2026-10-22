@@ -760,6 +760,11 @@ fn cp11_cli_writes_use_the_bound_view() {
     let proposal = r
         .propose(&writer(), "w", "change", None)
         .unwrap_or_else(|e| panic!("propose: {e}"));
+    // a second view, so a read can name a view other than the bound one
+    write(&mut r, "other", json!([
+        {"op": "create", "type": "doc", "id": "$o", "fields": {"name": "oth", "title": "Other", "doc_type": "page"}}
+    ]))
+    .unwrap();
     r.close().unwrap();
     // the working copy is bound to `w`
     let out = s.rdy(&["checkout", "w"]);
@@ -781,9 +786,11 @@ fn cp11_cli_writes_use_the_bound_view() {
         "{keep}"
     );
     let (ok, keep) = s.json(&["--json", "plan", "--decision", &f.d[0]]);
-    assert!(ok || keep["code"].is_string(), "{keep}");
-    let (_, named) = s.json(&["--json", "plan", "--view", "seed"]);
-    assert_ne!(named["scope"], "view:w", "{named}");
+    assert!(ok, "{keep}");
+    assert_eq!(keep["scope"], format!("decision:{}", f.d[0]), "{keep}");
+    let (ok, named) = s.json(&["--json", "plan", "--view", "other"]);
+    assert!(ok, "{named}");
+    assert_eq!(named["scope"], "view:other", "{named}");
 
     // answers go to the bound view
     let reaffirm = ids(&items_of(&bound, "reaffirm"));

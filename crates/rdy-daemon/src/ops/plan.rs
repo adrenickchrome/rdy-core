@@ -5,6 +5,7 @@
 //! frozen and every other write guard are the write path's own.
 use super::*;
 use rdy_engine::consequence::write_and_report;
+use rdy_engine::reaffirm::check_shared_inputs;
 use rdy_engine::{OpInput, RdyError, WriteRequest};
 use rdy_mcp::tools::{PlanParams, run_plan};
 use serde::Deserialize;
@@ -37,31 +38,41 @@ pub(super) fn plan(cx: &OpContext, a: PlanParams) -> Result<Value, RdyError> {
     run_plan(cx.engine, cx.session, &cx.session.default_view(), a)
 }
 
-/// The reaffirm ops `a` names: one per id, or the one `because` op. Exactly one of the two.
+/// The reaffirm ops `a` names: one per id, or the one `because` op. Exactly one of the two. The
+/// reason and targets every op repeats are checked once, by the engine, before any op is built.
 fn reaffirm_ops(a: &ReaffirmArgs) -> Result<Vec<OpInput>, RdyError> {
+    let none_or_both = || {
+        RdyError::new(
+            E_BAD_INPUT,
+            "reaffirm needs ids or because",
+            "pass the decisions to re-affirm, or the block they are suspect on",
+        )
+    };
+    let count = match (&a.ids, &a.because) {
+        (Some(_), Some(_)) => {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                "reaffirm takes ids or because, not both",
+                "pass the decisions to re-affirm, or the block they are suspect on",
+            ));
+        }
+        (Some(ids), None) if !ids.is_empty() => ids.len(),
+        (None, Some(_)) => 1,
+        _ => return Err(none_or_both()),
+    };
+    let reason = check_shared_inputs(count, &a.reason, a.targets.as_deref())?;
     let op = |id: Option<String>, because: Option<String>| OpInput::Reaffirm {
         id,
         because,
         base: None,
         targets: a.targets.clone(),
-        reason: a.reason.clone(),
+        reason: reason.clone(),
     };
-    match (&a.ids, &a.because) {
-        (Some(_), Some(_)) => Err(RdyError::new(
-            E_BAD_INPUT,
-            "reaffirm takes ids or because, not both",
-            "pass the decisions to re-affirm, or the block they are suspect on",
-        )),
-        (Some(ids), None) if !ids.is_empty() => {
-            Ok(ids.iter().map(|id| op(Some(id.clone()), None)).collect())
-        }
-        (None, Some(b)) => Ok(vec![op(None, Some(b.clone()))]),
-        _ => Err(RdyError::new(
-            E_BAD_INPUT,
-            "reaffirm needs ids or because",
-            "pass the decisions to re-affirm, or the block they are suspect on",
-        )),
-    }
+    Ok(match (&a.ids, &a.because) {
+        (Some(ids), None) => ids.iter().map(|id| op(Some(id.clone()), None)).collect(),
+        (None, Some(b)) => vec![op(None, Some(b.clone()))],
+        _ => unreachable!("checked above"),
+    })
 }
 
 /// Re-affirms the decisions `a` selects, briefed whole, as one write.
@@ -126,4 +137,70 @@ pub(super) fn repin(cx: &OpContext, a: RepinArgs) -> Result<Value, RdyError> {
         )
     })?;
     Ok(json!({"pins": pins.load(Ordering::SeqCst), "result": result}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(n: usize, reason: String, targets: Option<Vec<String>>) -> ReaffirmArgs {
+        ReaffirmArgs {
+            ids: Some((0..n).map(|i| format!("D-{i:05}")).collect()),
+            because: None,
+            targets,
+            reason,
+            view: None,
+        }
+    }
+
+    /// A bulk request is refused on its shared inputs before one op is built: with a reason the
+    /// engine refuses, or targets past the pair bound, no per-id copy of them is made. The
+    /// reason here is 100 KB, so a regression that copies it per id (4096 times) would copy
+    /// 400 MB and return ops instead of the refusal. (An 8 MiB reason, as an attacker sends,
+    /// would copy 32 GiB.)
+    #[test]
+    fn cp11_fix1_reaffirm_ops_refuse_shared_inputs_before_copying_them() {
+        let e = reaffirm_ops(&args(4096, "x".repeat(100_000), None))
+            .err()
+            .expect("refused");
+        assert_eq!(e.code, E_BAD_INPUT, "{e}");
+        let e = reaffirm_ops(&args(4096, " ".repeat(100_000), None))
+            .err()
+            .expect("refused");
+        assert_eq!(e.code, E_BAD_INPUT, "{e}");
+        let ts: Vec<String> = (0..30).map(|i| format!("B-{i:05}")).collect();
+        let e = reaffirm_ops(&args(4096, "Holds.".into(), Some(ts)))
+            .err()
+            .expect("refused");
+        assert_eq!(e.code, E_BAD_INPUT, "{e}");
+        let big = vec!["p".repeat(1_000_000)];
+        let e = reaffirm_ops(&args(4096, "Holds.".into(), Some(big)))
+            .err()
+            .expect("refused");
+        assert_eq!(e.code, E_BAD_INPUT, "{e}");
+        let e = reaffirm_ops(&args(5001, "Holds.".into(), None))
+            .err()
+            .expect("refused");
+        assert_eq!(e.code, E_BAD_INPUT, "{e}");
+    }
+
+    #[test]
+    fn cp11_fix1_reaffirm_ops_still_build_a_normal_request() {
+        let ops = reaffirm_ops(&args(
+            300,
+            "  Holds.  ".into(),
+            Some(vec!["T-AAAAA".into()]),
+        ))
+        .unwrap();
+        assert_eq!(ops.len(), 300);
+        match &ops[0] {
+            OpInput::Reaffirm {
+                reason, targets, ..
+            } => {
+                assert_eq!(reason, "Holds.");
+                assert_eq!(targets.as_deref(), Some(&["T-AAAAA".to_string()][..]));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 }
