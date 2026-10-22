@@ -189,14 +189,17 @@ impl Lazy<'_> {
     }
 }
 
-/// D-01QX5 on a write: sets or drops `reflects_at` on the blocks of `ops`, against `base` (the
-/// view before the write) and the earlier ops of the batch. A block whose reflects is absent or
-/// empty loses it. A created block, one whose glob set changes, and one in `code` (a repin with
+/// D-01QX5 on a write: sets or drops `reflects_at` on the blocks of `ops`, against the block
+/// each op starts from: an earlier op of the batch, else the version an update names as its
+/// base (a conflict side's version is in `store`, while `base`, the view before the write, reads
+/// the conflict's base), else nothing for a create. A block whose reflects is absent or empty
+/// loses it. A created block, one whose glob set changes, and one in `code` (a repin with
 /// `code: true`) get the current snapshot; any other rewrite keeps the one it has. With no linked
 /// checkout nothing is made up: a block whose set changed loses its snapshot, a code repin is
 /// `E_CONFIG`, and each reflects block written gets [`W_REFLECTS_NO_CODE`] once.
 pub(crate) fn stamp(
     root: &Path,
+    store: &rdy_store::Store,
     base: &Materialized,
     ops: &mut [Op],
     code: &BTreeSet<BlockId>,
@@ -210,21 +213,28 @@ pub(crate) fn stamp(
     let mut prior: HashMap<BlockId, BTreeSet<String>> = HashMap::new();
     let mut warned: BTreeSet<BlockId> = BTreeSet::new();
     let mut out = vec![];
+    let owned =
+        |set: BTreeSet<&str>| -> BTreeSet<String> { set.into_iter().map(str::to_string).collect() };
     for op in ops.iter_mut() {
-        let block = match op {
-            Op::Create { block } | Op::Update { block, .. } => block,
+        let (block, from) = match op {
+            Op::Create { block } => (block, None),
+            Op::Update { block, base: from } => (block, Some(*from)),
             Op::Delete { id, .. } => {
                 prior.insert(id.clone(), BTreeSet::new());
                 continue;
             }
         };
-        let now: BTreeSet<String> = glob_set(block).into_iter().map(str::to_string).collect();
-        // a created block has no set before (nor does one the view lacks)
-        let was = prior.remove(&block.id).unwrap_or_else(|| {
-            base.get(&block.id)
-                .map(|b| glob_set(b).into_iter().map(str::to_string).collect())
-                .unwrap_or_default()
-        });
+        let now = owned(glob_set(block));
+        // the set the op starts from: a created block has none
+        let was = match (prior.remove(&block.id), from) {
+            (Some(was), _) => was,
+            (None, None) => BTreeSet::new(),
+            (None, Some(_)) if now.is_empty() => BTreeSet::new(),
+            (None, Some(v)) => match base.get(&block.id).filter(|b| b.version_hash() == v) {
+                Some(b) => owned(glob_set(b)),
+                None => owned(glob_set(&store.get_block(&v)?)),
+            },
+        };
         if now.is_empty() {
             block.fields.remove(REFLECTS_AT);
         } else {
@@ -505,6 +515,10 @@ mod tests {
     }
 
     fn write(r: &mut Rdy, ops: Value) -> Result<WriteResult, RdyError> {
+        write_in(r, VIEW, ops)
+    }
+
+    fn write_in(r: &mut Rdy, view: &str, ops: Value) -> Result<WriteResult, RdyError> {
         let ops = match ops {
             Value::Array(ops) => ops,
             _ => panic!("ops are a list"),
@@ -513,7 +527,7 @@ mod tests {
         r.write(
             &session(),
             WriteRequest {
-                view: VIEW.into(),
+                view: view.into(),
                 ops,
                 justification: None,
                 message: "cp9".into(),
@@ -1192,5 +1206,179 @@ mod tests {
         )
         .unwrap();
         assert!(suspects(&r.read()).is_empty());
+    }
+
+    /// R reflects src/a.rs in view `work`; `w2` forks it. Side A (`work`) changes R's globs to
+    /// src/b.rs, side B (`w2`) changes its body, and `work` includes B's change, so R is
+    /// conflicted in `work` with the original version as its base. Then src/b.rs changes in a
+    /// commit. Returns the repo, the project, R, and side A's version.
+    fn conflicted_on_globs() -> (tempfile::TempDir, tempfile::TempDir, Rdy, BlockId, Hash) {
+        let app = repo(&[("src/a.rs", "a\n"), ("src/b.rs", "b\n")]);
+        let (dir, mut r) = project(&[("app", app.path())]);
+        let w = claims(&mut r, &[("$r", "R.", Some(json!(["src/a.rs"])))]);
+        let rb = id(&w, "$r");
+        let s = session();
+        r.view_fork(&s, VIEW, "w2").unwrap();
+        write(
+            &mut r,
+            json!([{"op": "update", "id": rb.to_string(), "fields": {"reflects": ["src/b.rs"]}}]),
+        )
+        .unwrap();
+        let va = block_of(&r.read(), &rb).version_hash();
+        assert_eq!(
+            stored(&r.read(), &rb).unwrap().files,
+            files_of(&[("app", "src/b.rs", &blob(app.path(), "src/b.rs"))]),
+            "side A records src/b.rs"
+        );
+        let cb = write_in(
+            &mut r,
+            "w2",
+            json!([{"op": "update", "id": rb.to_string(), "body": "R, side B."}]),
+        )
+        .unwrap()
+        .change;
+        r.view_include(&s, VIEW, &[cb]).unwrap();
+        assert!(
+            r.read().conflict_info(&view(), &rb).unwrap().is_some(),
+            "R is conflicted in work"
+        );
+        commit(
+            app.path(),
+            &[("src/b.rs", "b2\n")],
+            "drift on side A's file",
+        );
+        (app, dir, r, rb, va)
+    }
+
+    #[test]
+    fn cp9_conflict_side_body_update_keeps_the_side_snapshot() {
+        let (app, _dir, mut r, rb, va) = conflicted_on_globs();
+        let first = git(app.path(), &["rev-parse", "HEAD~1"]);
+        let old_b = git(app.path(), &["rev-parse", "HEAD~1:src/b.rs"]);
+        // resolve from side A with a body-only update: its globs (src/b.rs) do not change
+        write(
+            &mut r,
+            json!([{"op": "update", "id": rb.to_string(), "base": va.to_string(),
+                "body": "R, resolved from side A."}]),
+        )
+        .unwrap();
+        let st = r.read();
+        assert!(st.conflict_info(&view(), &rb).unwrap().is_none());
+        let at = stored(&st, &rb).unwrap();
+        assert_eq!(
+            at.files,
+            files_of(&[("app", "src/b.rs", &old_b)]),
+            "side A's snapshot is kept"
+        );
+        assert_eq!(at.commits["app"].as_deref(), Some(first.as_str()));
+        assert_eq!(
+            suspects(&st),
+            vec![CodeSuspect {
+                block: rb,
+                paths: paths(&["app:src/b.rs"])
+            }],
+            "the unchecked code drift stays suspect"
+        );
+    }
+
+    #[test]
+    fn cp9_conflict_side_glob_change_records_a_new_snapshot() {
+        let (app, _dir, mut r, rb, va) = conflicted_on_globs();
+        let head = git(app.path(), &["rev-parse", "HEAD"]);
+        // from side A, back to the conflict base's globs: a change of side A's set
+        write(
+            &mut r,
+            json!([{"op": "update", "id": rb.to_string(), "base": va.to_string(),
+                "fields": {"reflects": ["src/a.rs"]}}]),
+        )
+        .unwrap();
+        let st = r.read();
+        let at = stored(&st, &rb).unwrap();
+        assert_eq!(
+            at.files,
+            files_of(&[("app", "src/a.rs", &blob(app.path(), "src/a.rs"))]),
+            "the snapshot follows the new globs"
+        );
+        assert_eq!(at.commits["app"].as_deref(), Some(head.as_str()));
+        assert!(suspects(&st).is_empty(), "{:?}", suspects(&st));
+    }
+
+    #[test]
+    fn cp9_code_read_failure_keeps_structural_rows() {
+        let app = repo(&[("src/a.rs", "a\n")]);
+        let (_dir, mut r) = project(&[("app", app.path())]);
+        let w = claims(
+            &mut r,
+            &[
+                ("$t", "T holds.", None),
+                ("$r", "R follows {{$t}}.", Some(json!(["src/*.rs"]))),
+            ],
+        );
+        let (tb, rb) = (id(&w, "$t"), id(&w, "$r"));
+        write(
+            &mut r,
+            json!([{"op": "update", "id": tb.to_string(), "body": "T holds, changed."}]),
+        )
+        .unwrap();
+        // the branch HEAD names now points at a blob: the code read fails
+        let b = blob(app.path(), "src/a.rs");
+        let branch = git(app.path(), &["symbolic-ref", "HEAD"]);
+        std::fs::write(app.path().join(".git").join(&branch), format!("{b}\n")).unwrap();
+        let e = Local::new(r);
+        let body = format!("R still follows {{{{{tb}}}}}.");
+        let req = request(json!([{"op": "update", "id": rb.to_string(), "body": body}]));
+        let s = session();
+        let v = write_and_report(&e, VIEW, None, move |r| r.write(&s, req)).unwrap();
+        assert!(v.get("consequences_error").is_none(), "{v:#}");
+        let rows = v["consequences"].as_array().unwrap();
+        let mine: Vec<&Value> = rows
+            .iter()
+            .filter(|c| c["block"] == rb.to_string())
+            .collect();
+        assert_eq!(mine.len(), 1, "{v:#}");
+        assert_eq!(mine[0]["kind"], "suspect");
+        assert_eq!(mine[0]["because"]["changed"], tb.to_string());
+        assert!(
+            v["consequences_code_error"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("E_IO: ")),
+            "{v:#}"
+        );
+    }
+
+    #[test]
+    fn cp9_repin_selection_counts_distinct_targets() {
+        let app = repo(&[("src/a.rs", "a\n")]);
+        let (_dir, mut r) = project(&[("app", app.path())]);
+        let w = write(
+            &mut r,
+            json!([
+                {"op": "create", "type": "doc", "id": "$d",
+                    "fields": {"name": "spec", "title": "Spec", "doc_type": "overview"}},
+                {"op": "create", "type": "section", "id": "$s", "parent": "$d",
+                    "fields": {"title": "Rules"}},
+                {"op": "create", "type": "claim", "id": "$t", "parent": "$s",
+                    "fields": {"key": "tee"}, "body": "T holds."},
+                {"op": "create", "type": "claim", "id": "$r", "parent": "$s",
+                    "body": "R follows {{$t}}."}
+            ]),
+        )
+        .unwrap();
+        let (tb, rb) = (id(&w, "$t"), id(&w, "$r"));
+        let s = session();
+        let count = |targets: &[String]| r.repin_selection(&s, VIEW, rb.as_str(), Some(targets));
+        assert_eq!(
+            count(&[tb.to_string(), tb.to_string()]).unwrap(),
+            (rb.clone(), 1),
+            "a repeated target is one pin"
+        );
+        assert_eq!(
+            count(&[tb.to_string(), "tee".to_string()]).unwrap(),
+            (rb.clone(), 1),
+            "an id and a key of the same target are one pin"
+        );
+        // the target checks still run on every argument
+        let e = count(&[tb.to_string(), rb.to_string()]).unwrap_err();
+        assert_eq!(e.message, format!("{rb} is never pinned to itself"));
     }
 }

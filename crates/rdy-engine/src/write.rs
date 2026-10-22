@@ -2971,7 +2971,8 @@ impl Rdy {
         )?;
         // D-01QX5: the code state of each reflects block this write creates, re-globs or
         // repins with `code: true`, read from the linked checkouts' committed trees
-        let code_warnings = crate::reflects::stamp(&self.root, &m, &mut ops, &code_repins)?;
+        let code_warnings =
+            crate::reflects::stamp(&self.root, &self.store, &m, &mut ops, &code_repins)?;
         refuse_removed_content(&self.store, &ops)?;
         let change = Change {
             view: req.view.clone(),
@@ -3305,9 +3306,10 @@ fn repin_targets(
 
 impl Rdy {
     /// What a repin of `id` in `view` would select (sus3), read-only: the block's id and how many
-    /// design pins the repin selects, already-current pins included. `targets` as the repin op
-    /// takes them (`None` or empty: every block it cites). The id and targets are checked as the
-    /// write checks them; nothing is written.
+    /// design pins the repin selects, already-current pins included: each distinct target once,
+    /// however many arguments name it (by id or key), as the block holds one pin per target.
+    /// `targets` as the repin op takes them (`None` or empty: every block it cites). The id and
+    /// targets are checked as the write checks them; nothing is written.
     pub fn repin_selection(
         &self,
         session: &Session,
@@ -3331,6 +3333,7 @@ impl Rdy {
         let selected = repin_targets(cur, &id, targets, &|t| res.id(t), &|t| {
             m.get(t).map(|x| x.content_hash_with(tracking))
         })?;
-        Ok((id, selected.len()))
+        let pins: BTreeSet<&BlockId> = selected.iter().map(|(t, _)| t).collect();
+        Ok((id, pins.len()))
     }
 }

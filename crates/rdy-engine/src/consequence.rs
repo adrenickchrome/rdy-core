@@ -1853,46 +1853,70 @@ fn cut_rows<R: Serialize>(
     (items, omitted)
 }
 
-/// A reply's rows, the counts a cut dropped by kind, and the tension error.
-type Rows<R> = (Vec<R>, BTreeMap<String, usize>, Option<String>);
+/// A reply's rows, the counts a cut dropped by kind, the tension error, and the code error.
+type Rows<R> = (
+    Vec<R>,
+    BTreeMap<String, usize>,
+    Option<String>,
+    Option<String>,
+);
 
 /// The rows of a write's reply: its structural consequences (`c`, read uncut) in their order,
 /// then a [`CodeKept`] row for each block the write rewrote whose code differs from the recorded
-/// snapshot, by block id; the combined list goes through the report cutter.
+/// snapshot, by block id; the combined list goes through the report cutter. When the code rows
+/// cannot be read, the structural rows stand alone and the code error is reported beside them.
 fn with_code_rows(
     st: &ReadState,
     scope: &Scope,
     changes: &[Hash],
     c: Consequences,
     max_tokens: Option<usize>,
-) -> Result<Rows<ReplyRow>, RdyError> {
+) -> Rows<ReplyRow> {
     let mut rows: Vec<ReplyRow> = c.items.into_iter().map(ReplyRow::Consequence).collect();
-    if let Some(batch) = changes.last() {
-        let mut rewritten = BTreeSet::new();
-        for h in changes {
-            rewritten.extend(rewritten_by(&st.reader().change(h)?.ops));
+    let code_error = match code_kept_rows(st, scope, changes) {
+        Ok(code) => {
+            rows.extend(code.into_iter().map(ReplyRow::CodeKept));
+            None
         }
-        let ids: Vec<BlockId> = rewritten.into_iter().collect();
-        for s in crate::reflects::code_suspects(st, scope, Some(&ids))? {
-            rows.push(ReplyRow::CodeKept(CodeKept {
-                id: consequence_id(batch, "suspect code_changed", &s.block),
-                block: s.block.to_string(),
-                kind: ConsequenceKind::Suspect,
-                because: CodeBecause {
-                    edge: rdy_schema::REFLECTS_FIELD,
-                    changed: None,
-                },
-                follow_up: FollowUp::Confirm,
-                reason: "code_changed",
-                target: None,
-                paths: s.paths,
-                already_written: true,
-                fix: CODE_KEPT_FIX,
-            }));
-        }
-    }
+        Err(e) => Some(format!("{}: {}", e.code, e.message)),
+    };
     let (rows, omitted) = cut_rows(rows, ReplyRow::kind, max_tokens);
-    Ok((rows, omitted, c.tensions_error))
+    (rows, omitted, c.tensions_error, code_error)
+}
+
+/// The [`CodeKept`] rows of the write `changes` made (its last change names the batch): one for
+/// each block it rewrote whose code differs from the recorded snapshot, by block id.
+fn code_kept_rows(
+    st: &ReadState,
+    scope: &Scope,
+    changes: &[Hash],
+) -> Result<Vec<CodeKept>, RdyError> {
+    let Some(batch) = changes.last() else {
+        return Ok(vec![]);
+    };
+    let mut rewritten = BTreeSet::new();
+    for h in changes {
+        rewritten.extend(rewritten_by(&st.reader().change(h)?.ops));
+    }
+    let ids: Vec<BlockId> = rewritten.into_iter().collect();
+    Ok(crate::reflects::code_suspects(st, scope, Some(&ids))?
+        .into_iter()
+        .map(|s| CodeKept {
+            id: consequence_id(batch, "suspect code_changed", &s.block),
+            block: s.block.to_string(),
+            kind: ConsequenceKind::Suspect,
+            because: CodeBecause {
+                edge: rdy_schema::REFLECTS_FIELD,
+                changed: None,
+            },
+            follow_up: FollowUp::Confirm,
+            reason: "code_changed",
+            target: None,
+            paths: s.paths,
+            already_written: true,
+            fix: CODE_KEPT_FIX,
+        })
+        .collect())
 }
 
 /// The entry for tension `t`: its `block` is the first involved block of an item whose side is
@@ -1930,13 +1954,14 @@ fn tension_entry(batch: &Hash, t: &Tension, mine: &dyn Fn(&SideRef) -> bool) -> 
 /// `consequences_omitted` when a cut dropped some, or `consequences: []` and
 /// `consequences_error` when they could not be read (the write stands).
 pub(crate) fn attach(v: &mut serde_json::Value, c: Result<Consequences, RdyError>) {
-    attach_rows(v, c.map(|c| (c.items, c.omitted, c.tensions_error)));
+    attach_rows(v, c.map(|c| (c.items, c.omitted, c.tensions_error, None)));
 }
 
-/// [`attach`] over any row shape.
+/// [`attach`] over any row shape. A write's reply also carries `consequences_code_error` when
+/// its code-kept rows could not be read (its structural rows stand).
 fn attach_rows<R: Serialize>(v: &mut serde_json::Value, c: Result<Rows<R>, RdyError>) {
     match c {
-        Ok((items, omitted, tensions_error)) => {
+        Ok((items, omitted, tensions_error, code_error)) => {
             v["consequences"] = serde_json::to_value(&items)
                 .expect("consequences serialize: strings and string-keyed maps only");
             if !omitted.is_empty() {
@@ -1945,6 +1970,10 @@ fn attach_rows<R: Serialize>(v: &mut serde_json::Value, c: Result<Rows<R>, RdyEr
             }
             if let Some(e) = tensions_error {
                 v["consequences_tension_error"] = e.into();
+            }
+            // D-01QX5: the checkout could not be read; the structural rows still stand
+            if let Some(e) = code_error {
+                v["consequences_code_error"] = e.into();
             }
         }
         Err(e) => {
@@ -2065,7 +2094,7 @@ fn report<T: Serialize + 'static>(
     // read uncut, then cut once with the code-kept rows appended (D-01QX5)
     let c = published
         .consequences_of(&scope, &changes, Some(usize::MAX))
-        .and_then(|c| with_code_rows(published, &scope, &changes, c, max_tokens));
+        .map(|c| with_code_rows(published, &scope, &changes, c, max_tokens));
     attach_rows(&mut v, c);
     if let Some(notes) = intent_notes_of(&st, before, view, &changes, reader)
         && !notes.is_empty()
