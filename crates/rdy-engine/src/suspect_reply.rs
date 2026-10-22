@@ -4,12 +4,14 @@
 //! block, and no deferral text is copied into a stored record.
 use crate::{RdyError, ReadState, Scope};
 use rdy_graph::Suspect;
+use rdy_model::plan::PlanAnswer;
 use rdy_model::{Answer, BlockId, Hash, Provenance};
-use rdy_store::StoreError;
 use rdy_store::kinds;
 use rdy_store::plan::{AcceptedDeferral, MAX_DEFERRAL_PAIRS};
+use rdy_store::{StoreError, StoreReader};
 use serde::{Serialize, Serializer};
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 /// The reason of a code row.
 pub const CODE_CHANGED: &str = "code_changed";
@@ -82,8 +84,7 @@ impl ReadState {
         let mut rows = Vec::with_capacity(structural.len());
         let end = self.seq();
         let reader = self.reader();
-        let mut seals: HashMap<Hash, rdy_model::plan::Plan> = HashMap::new();
-        let mut answers: HashMap<Hash, Answer> = HashMap::new();
+        let mut cache = Decoded::default();
         for chunk in structural.chunks(MAX_DEFERRAL_PAIRS) {
             let pairs: Vec<(BlockId, BlockId)> = chunk
                 .iter()
@@ -92,11 +93,7 @@ impl ReadState {
             let found = reader.accepted_deferrals(&pairs, end)?;
             for (s, accepted) in chunk.iter().zip(found) {
                 let deferred = match accepted {
-                    Some(a) => Some(deferred_of(
-                        &a,
-                        &mut |h| plan_of(reader, &mut seals, h),
-                        &mut |h| answer_of(reader, &mut answers, h),
-                    )?),
+                    Some(a) => Some(deferred_of(&a, reader, &mut cache)?),
                     None => None,
                 };
                 rows.push(SuspectReply {
@@ -124,30 +121,42 @@ impl ReadState {
     }
 }
 
-fn plan_of(
-    reader: &rdy_store::StoreReader,
-    cache: &mut HashMap<Hash, rdy_model::plan::Plan>,
-    h: &Hash,
-) -> Result<rdy_model::plan::Plan, StoreError> {
-    if let Some(p) = cache.get(h) {
-        return Ok(p.clone());
-    }
-    let p = reader.plan(h)?;
-    cache.insert(*h, p.clone());
-    Ok(p)
+/// A sealed plan decoded once: its seal's landing and its answers by item hash.
+struct SealIndex {
+    landing: Option<Hash>,
+    answers: HashMap<Hash, PlanAnswer>,
 }
 
-fn answer_of(
-    reader: &rdy_store::StoreReader,
-    cache: &mut HashMap<Hash, Answer>,
-    h: &Hash,
-) -> Result<Answer, StoreError> {
-    if let Some(a) = cache.get(h) {
-        return Ok(a.clone());
+/// The seals and answers a projection has decoded, each read from the store once however many
+/// rows it explains.
+#[derive(Default)]
+struct Decoded {
+    seals: HashMap<Hash, SealIndex>,
+    answers: HashMap<Hash, Answer>,
+}
+
+impl Decoded {
+    fn seal(&mut self, reader: &StoreReader, h: &Hash) -> Result<&SealIndex, StoreError> {
+        match self.seals.entry(*h) {
+            Entry::Occupied(e) => Ok(e.into_mut()),
+            Entry::Vacant(e) => {
+                let p = reader.plan(h)?;
+                let landing = p.seal.as_ref().map(|s| s.landing);
+                let mut answers = HashMap::with_capacity(p.answers.len());
+                for a in p.answers {
+                    answers.entry(a.item).or_insert(a);
+                }
+                Ok(e.insert(SealIndex { landing, answers }))
+            }
+        }
     }
-    let a: Answer = reader.get_typed(kinds::ANSWER, h)?;
-    cache.insert(*h, a.clone());
-    Ok(a)
+
+    fn answer(&mut self, reader: &StoreReader, h: &Hash) -> Result<&Answer, StoreError> {
+        match self.answers.entry(*h) {
+            Entry::Occupied(e) => Ok(e.into_mut()),
+            Entry::Vacant(e) => Ok(e.insert(reader.get_typed(kinds::ANSWER, h)?)),
+        }
+    }
 }
 
 /// The reply for an acceptance: a seal contributes the plan answer's author and reason, the
@@ -155,8 +164,8 @@ fn answer_of(
 /// person, note and that person as the accepter.
 fn deferred_of(
     a: &AcceptedDeferral,
-    plan: &mut dyn FnMut(&Hash) -> Result<rdy_model::plan::Plan, StoreError>,
-    answer: &mut dyn FnMut(&Hash) -> Result<Answer, StoreError>,
+    reader: &StoreReader,
+    cache: &mut Decoded,
 ) -> Result<DeferredReply, StoreError> {
     match a {
         AcceptedDeferral::Plan {
@@ -165,27 +174,28 @@ fn deferred_of(
             answer: accepting,
             ..
         } => {
-            let p = plan(seal)?;
-            let given = p.answers.iter().find(|x| x.item == *item).ok_or_else(|| {
+            let index = cache.seal(reader, seal)?;
+            let given = index.answers.get(item).ok_or_else(|| {
                 StoreError::Decode(format!("plan {seal}: no answer for a deferred item"))
             })?;
-            let landing = p.seal.as_ref().map(|s| s.landing).ok_or_else(|| {
+            let landing = index.landing.ok_or_else(|| {
                 StoreError::Decode(format!("plan {seal}: a deferral names a plan with no seal"))
             })?;
-            let accepted = answer(accepting)?;
+            let (by, reason) = (given.by.clone(), given.reason.clone().unwrap_or_default());
+            let accepted_by = cache.answer(reader, accepting)?.person.actor.clone();
             Ok(DeferredReply {
-                by: given.by.clone(),
-                reason: given.reason.clone().unwrap_or_default(),
+                by,
+                reason,
                 landing: Some(landing),
-                accepted_by: accepted.person.actor,
+                accepted_by,
             })
         }
         AcceptedDeferral::KeepSuspect { answer: kept, .. } => {
-            let a = answer(kept)?;
+            let a = cache.answer(reader, kept)?;
             Ok(DeferredReply {
                 accepted_by: a.person.actor.clone(),
-                reason: a.note.unwrap_or_default(),
-                by: a.person,
+                reason: a.note.clone().unwrap_or_default(),
+                by: a.person.clone(),
                 landing: None,
             })
         }

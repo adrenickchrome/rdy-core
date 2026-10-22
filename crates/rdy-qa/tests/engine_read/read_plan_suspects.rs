@@ -108,7 +108,27 @@ fn land_deferring(
     by: Provenance,
     accepted: Provenance,
 ) -> Sealed {
-    let (subject_v, cause_v) = (version(r, subject), version(r, cause));
+    land_deferring_many(
+        r,
+        view,
+        &[(subject.clone(), cause.clone(), reason.to_string())],
+        by,
+        accepted,
+    )
+}
+
+/// `land_deferring` for several (subject, cause, reason) items sealed in one plan.
+fn land_deferring_many(
+    r: &mut Rdy,
+    view: &str,
+    items: &[(BlockId, BlockId, String)],
+    by: Provenance,
+    accepted: Provenance,
+) -> Sealed {
+    let versions: Vec<(Hash, Hash)> = items
+        .iter()
+        .map(|(subject, cause, _)| (version(r, subject), version(r, cause)))
+        .collect();
     // the engine keeps its store held, so each write joins the open batch until a seal
     let s = r.store_mut();
     let proposal = s.propose(view, "first", agent_w()).unwrap();
@@ -125,19 +145,32 @@ fn land_deferring(
     s.write_guarded_for_tests(plan_frames(&v1)).unwrap();
     s.seal(vec![]).unwrap();
     let bound = v1.id();
-    let item = item_hash(cause, subject.as_str(), PlanKind::Confirm);
+    let ids: Vec<Hash> = items
+        .iter()
+        .map(|(subject, cause, _)| item_hash(cause, subject.as_str(), PlanKind::Confirm))
+        .collect();
+    let mut answers: Vec<PlanAnswer> = items
+        .iter()
+        .zip(&ids)
+        .zip(&versions)
+        .map(
+            |(((_, _, reason), item), (subject_v, cause_v))| PlanAnswer {
+                item: *item,
+                act: PlanAct::Defer,
+                reason: Some(reason.clone()),
+                subject: Some(*subject_v),
+                cause: *cause_v,
+                by: by.clone(),
+            },
+        )
+        .collect();
+    // a plan keeps its answers sorted by item
+    answers.sort_by(|a, b| a.item.cmp(&b.item));
     let v2 = Plan {
         stable: Some(bound),
         prev: Some(bound),
         proposal: None,
-        answers: vec![PlanAnswer {
-            item,
-            act: PlanAct::Defer,
-            reason: Some(reason.into()),
-            subject: Some(subject_v),
-            cause: cause_v,
-            by,
-        }],
+        answers,
         ..v1.clone()
     };
     let answered = s.put_plan(&v2).unwrap();
@@ -153,6 +186,21 @@ fn land_deferring(
     s.seal(vec![]).unwrap();
     let landing = s.land(&proposal, alice()).unwrap();
     let landed = s.landing(&landing).unwrap().proposal;
+    // a seal keeps its items sorted by id, as the answers are
+    let mut sealed_items: Vec<SealedItem> = items
+        .iter()
+        .zip(&ids)
+        .map(|((subject, cause, _), id)| SealedItem {
+            id: *id,
+            kind: PlanKind::Confirm,
+            subject: subject.to_string(),
+            cause: cause.clone(),
+            edge: "references".into(),
+            outcome: PlanOutcome::Deferred,
+            answer: Some(accept),
+        })
+        .collect();
+    sealed_items.sort_by(|a, b| a.id.cmp(&b.id));
     let v3 = Plan {
         stable: Some(bound),
         prev: Some(answered),
@@ -161,15 +209,7 @@ fn land_deferring(
             landing,
             version: landed,
             decisions: vec![],
-            items: vec![SealedItem {
-                id: item,
-                kind: PlanKind::Confirm,
-                subject: subject.to_string(),
-                cause: cause.clone(),
-                edge: "references".into(),
-                outcome: PlanOutcome::Deferred,
-                answer: Some(accept),
-            }],
+            items: sealed_items,
         }),
         ..v2.clone()
     };
@@ -637,6 +677,86 @@ fn cp13_code_suspect_has_null_target_and_sorted_paths() {
 }
 
 #[test]
+fn cp13_one_seal_explains_many_deferred_rows() {
+    // 30 members reference A; one seal defers all of them, each with its own reason
+    let (_dir, mut r) = project();
+    let members: Vec<Value> = (0..30)
+        .map(|i| {
+            json!({"op": "create", "type": "claim", "id": format!("$m{i}"), "parent": "$s",
+                "body": format!("M{i} uses {{{{$a}}}}.")})
+        })
+        .collect();
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$d",
+            "fields": {"name": "spec", "title": "Spec", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "section", "id": "$s", "parent": "$d",
+            "fields": {"title": "Rules"}}),
+        json!({"op": "create", "type": "claim", "id": "$a", "parent": "$s", "body": "A holds."}),
+    ];
+    ops.extend(members);
+    let w = write(&mut r, "base", Value::Array(ops)).unwrap();
+    land(&mut r, "base").unwrap();
+    let id = |k: &str| BlockId::parse(&w.created[k]).unwrap();
+    let a = id("$a");
+    write(
+        &mut r,
+        "v1",
+        json!([{"op": "update", "id": a.to_string(), "body": "A moved."}]),
+    )
+    .unwrap();
+    let items: Vec<(BlockId, BlockId, String)> = (0..30)
+        .map(|i| (id(&format!("$m{i}")), a.clone(), format!("reason {i}")))
+        .collect();
+    let sealed = land_deferring_many(&mut r, "v1", &items, agent_w(), alice());
+    fsck_clean(&r);
+    let rows = canon(&r);
+    assert_eq!(rows.len(), 30, "{rows:?}");
+    for (member, _, reason) in &items {
+        let d = row(&rows, member, &a).deferred.as_ref().expect("deferred");
+        assert_eq!(&d.reason, reason, "{member}");
+        assert_eq!(d.by, agent_w());
+        assert_eq!(d.landing, Some(sealed.landing));
+        assert_eq!(d.accepted_by, "human:alice");
+    }
+}
+
+#[test]
+fn cp13_read_marker_follows_code_drift_alone() {
+    use rdy_mcp::tools::{McpState, rdy_read, rdy_session};
+    use serde_json::from_value;
+    // B reflects src/*.rs and the checkout moved after B recorded it: a code row, and no
+    // structural row anywhere
+    let (_dir, r, app, ids) = with_code();
+    assert!(
+        canon(&r).iter().all(|s| s.target.is_none()),
+        "{:?}",
+        canon(&r)
+    );
+    assert_eq!(canon(&r).len(), 1);
+    let mut st = McpState::new(std::sync::Arc::new(Local::new(r)));
+    rdy_session(
+        &mut st,
+        from_value(json!({"actor": "agent:qa", "role": "writer", "view": "work"})).unwrap(),
+    )
+    .unwrap();
+    let marked = |st: &mut McpState| -> bool {
+        let v = rdy_read(
+            st,
+            from_value(json!({"id": ids.b.to_string(), "scope": "canon"})).unwrap(),
+        )
+        .unwrap();
+        v["text"].as_str().unwrap().contains("[suspect]")
+    };
+    assert!(marked(&mut st), "the code row marks the block");
+    // restoring the file clears the drift, and the marker goes with it
+    commit(app.path(), &[("src/a.rs", "a\n")]);
+    assert!(!marked(&mut st), "no drift, no marker");
+    // drifting again brings it back
+    commit(app.path(), &[("src/a.rs", "a3\n")]);
+    assert!(marked(&mut st), "drift again marks the block");
+}
+
+#[test]
 fn cp13_all_public_reads_share_the_same_suspect_fields() {
     use rdy_mcp::tools::{McpState, rdy_brief, rdy_context, rdy_read, rdy_session, rdy_suspects};
     use serde_json::from_value;
@@ -686,7 +806,8 @@ fn cp13_all_public_reads_share_the_same_suspect_fields() {
     )
     .unwrap();
     assert_eq!(v["suspects"], json!(b_rows));
-    // the read list marks the block
+    // the read list marks the block (structural and code rows; the code-only case is
+    // `cp13_read_marker_follows_code_drift_alone`)
     let v = rdy_read(
         &mut st,
         from_value(json!({"id": ids.b.to_string(), "scope": "canon"})).unwrap(),
