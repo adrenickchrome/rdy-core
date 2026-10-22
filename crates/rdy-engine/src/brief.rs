@@ -15,11 +15,12 @@ use crate::lexicon::Lexicon;
 use crate::query::summary_in;
 use crate::related::{RELATED_CAP, RelatedDecision};
 use crate::suggest::MentionedBy;
+use crate::suspect_reply::SuspectReply;
 use crate::tensions::info::{InfoCache, SideInfo, TensionInfo, row_bytes, rows_bytes};
 use crate::tensions::{Tension, TensionSeverity};
 use crate::write::OpInput;
 use crate::{Materialized, ReadState, Scope};
-use rdy_graph::{DerivedStatus, EdgeKind, IMPACT_LINKS, IMPACT_SHOWN, SUSPECT_LINKS, Suspect};
+use rdy_graph::{DerivedStatus, EdgeKind, IMPACT_LINKS, IMPACT_SHOWN, SUSPECT_LINKS};
 use rdy_model::{Block, BlockId, FieldValue, Hash, decision};
 use rdy_schema::{Issue, Pack, Severity};
 use serde::{Deserialize, Serialize};
@@ -420,7 +421,7 @@ pub struct Briefing {
     /// The refines, supersedes and revokes edges of the covered blocks, in both directions.
     pub lineage: Vec<Lineage>,
     pub will_go_stale: Vec<WillGoStale>,
-    pub suspects: Vec<Suspect>,
+    pub suspects: Vec<SuspectReply>,
     /// Other views and open proposals that change a covered block (not part of the token).
     pub inflight: Inflight,
     /// The coverage of the covered blocks and the confidence of this briefing (FW-CV1, FW-CV2).
@@ -1453,13 +1454,14 @@ impl ReadState {
             })
             .collect();
 
-        let mut suspects = vec![];
+        let mut structural = vec![];
         for id in ids {
             let mut found = g.suspects_of(id);
             found.retain(|s| !self.is_presentational_source(&m, s));
-            suspects.extend(found);
+            structural.extend(found);
         }
-        suspects.sort_by(|a, b| (&a.block, &a.target).cmp(&(&b.block, &b.target)));
+        let covered: Vec<BlockId> = ids.iter().cloned().collect();
+        let suspects = self.suspect_rows(scope, structural, Some(&covered))?;
         let (inflight, rows) = self.inflight_unsided(scope, ids)?;
         // a coverage read error never fails a briefing (a briefing gates writes): it is reported
         let (coverage, coverage_error) = if self.coverage_left_out(scope) {

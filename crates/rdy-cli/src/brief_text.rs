@@ -25,9 +25,16 @@ fn one_line(text: &str) -> String {
 
 /// One section: its title line, then its entry lines (or `(none)`), each on one line.
 fn section(out: &mut Vec<String>, title: &str, entries: impl Iterator<Item = String>) {
+    section_lines(out, title, entries.map(|e| vec![e]));
+}
+
+/// Like [`section`], for entries of several lines: each line is one comment line.
+fn section_lines(out: &mut Vec<String>, title: &str, entries: impl Iterator<Item = Vec<String>>) {
     out.push(format!("# {title}:"));
     let before = out.len();
-    out.extend(entries.map(|e| format!("#   {}", one_line(&e))));
+    for lines in entries {
+        out.extend(lines.iter().map(|l| format!("#   {}", one_line(l))));
+    }
     if out.len() == before {
         out.push("#   (none)".into());
     }
@@ -207,16 +214,18 @@ pub fn header(briefing: &Value) -> String {
             line
         }),
     );
-    section(
+    section_lines(
         &mut out,
         "open suspects",
         list("suspects").map(|x| {
-            format!(
-                "{} -> {} ({})",
-                s(x, "block"),
-                s(x, "target"),
-                s(x, "reason")
-            )
+            crate::read_cmd::suspect_lines(x, |x| {
+                format!(
+                    "{} -> {} ({})",
+                    s(x, "block"),
+                    s(x, "target"),
+                    s(x, "reason")
+                )
+            })
         }),
     );
     let inflight = &briefing["inflight"];
@@ -709,6 +718,42 @@ mod tests {
             "#",
         ];
         assert_eq!(h.lines().collect::<Vec<_>>(), want);
+    }
+
+    /// cp13: a briefing's open suspects keep the structural line, follow it with the deferral
+    /// line, and print a code row with its paths.
+    #[test]
+    fn cp13_the_header_shows_deferrals_and_code_rows() {
+        let b = json!({
+            "governs": [], "dependents": [], "will_go_stale": [],
+            "suspects": [
+                {"block": "c-B", "target": "c-A", "reason": "changed",
+                 "deferred": {"by": {"actor": "agent:w", "run": null, "role": "Writer", "at_ms": 1},
+                              "reason": "the release owns it", "landing": "ab", "accepted_by": "human:alice"}},
+                {"block": "c-B", "target": "c-X", "reason": "changed"},
+                {"block": "c-B", "target": null, "reason": "code_changed",
+                 "paths": ["app:src/a.rs", "app:src/c.rs"]},
+                {"block": "c-C", "target": null, "reason": "code_changed", "paths": []}
+            ],
+            "base": {"token": "0123456789abcdef0123", "blocks": [{"id": "c-B", "version": "ff"}], "depends": 0}
+        });
+        let h = header(&b);
+        let want = [
+            "# open suspects:",
+            "#   c-B -> c-A (changed)",
+            "#     deferred by agent:w: the release owns it",
+            "#   c-B -> c-X (changed)",
+            "#   c-B: code_changed",
+            "#     app:src/a.rs",
+            "#     app:src/c.rs",
+            "#   c-C: code_changed",
+        ];
+        let lines: Vec<&str> = h.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| *l == want[0])
+            .expect("the section");
+        assert_eq!(lines[at..at + want.len()], want, "{h}");
     }
 
     #[test]

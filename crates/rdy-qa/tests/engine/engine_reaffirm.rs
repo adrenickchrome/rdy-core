@@ -136,7 +136,7 @@ fn suspects(r: &Rdy, scope: &Scope, s: &str) -> Vec<(String, String)> {
         .unwrap()
         .suspects
         .into_iter()
-        .map(|x| (x.target.to_string(), x.reason))
+        .map(|x| (x.target.expect("a structural row").to_string(), x.reason))
         .collect();
     v.sort();
     v

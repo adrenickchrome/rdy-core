@@ -637,7 +637,7 @@ fn same_write_references_are_pinned_in_dependency_order_and_later_edits_make_sus
     assert_eq!(sus.len(), 1);
     assert_eq!(
         (sus[0].target.clone(), sus[0].reason.as_str()),
-        (t.id.clone(), "changed")
+        (Some(t.id.clone()), "changed")
     );
 }
 

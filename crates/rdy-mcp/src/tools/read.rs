@@ -211,8 +211,11 @@ fn read_entries(st: &McpState, q: &read_page::ReadQuery) -> Result<ReadEntries, 
     let (target, slug) = rdy_engine::section::split_address(&q.id)?;
     let st_ = st.engine.read();
     let (scope, id) = read_target(&q.view, &st_, target, &q.scope)?;
-    let suspects: std::collections::BTreeSet<BlockId> =
-        st_.suspects(&scope)?.into_iter().map(|s| s.block).collect();
+    let suspects: std::collections::BTreeSet<BlockId> = st_
+        .suspect_details(&scope)?
+        .into_iter()
+        .map(|s| s.block)
+        .collect();
     // the scope's recorded conflicts by block, for the marker on each conflicted block's line
     let conflicts: std::collections::BTreeMap<BlockId, String> = st_
         .conflicts(&scope)?

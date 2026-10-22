@@ -90,6 +90,7 @@ pub mod stream_error;
 pub mod stream_export;
 pub mod stream_take;
 pub mod suggest;
+pub mod suspect_reply;
 pub mod tensions;
 pub mod testkit;
 pub mod transitions;
@@ -146,6 +147,7 @@ pub use session::{
     HUMAN_RUN, INFLIGHT_SCOPE, PinnedClock, Scope, Session, SessionKind, classify, human_actor,
     human_actor_for, human_actor_for_env, now_ms, pin_clock, rfc3339, rfc3339_now,
 };
+pub use suspect_reply::{DeferredReply, SuspectReply};
 pub use tree_io::Diagnostic;
 pub use version::{
     AS_OF_CACHE_ENTRIES, MAX_VERSION_BYTES, TagInfo, VersionInfo, VersionPosition, VersionRef,
