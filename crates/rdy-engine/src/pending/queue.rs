@@ -86,16 +86,25 @@
 //! # Order (O5)
 //!
 //! Blocking items first; then batches, each with its items directly after it (the `approve`
-//! item, its exceptions by ref, its deferral card, then its advice); then the items that stand
+//! item, its exceptions by ref, its deferral card, then its advice); then the re-affirmation
+//! cards ([`super::reaffirm`], D-CQMA4), each a group of its own; then the other items that stand
 //! alone (questions);
 //! each kind by `raised_at`, oldest first; then by ref. At most [`PENDING_ITEMS_MAX`] items are
-//! listed, whole batches only; `omitted` counts the rest.
+//! listed, whole groups only; `omitted` counts the rest.
+//!
+//! # Re-affirmation cards (D-CQMA4)
+//!
+//! Each cause that made accepted decisions of canon suspect is one `reaffirm` item
+//! ([`super::reaffirm`]). The latest open versions read here (a version a `reject_proposal`
+//! answer took out aside) name the decisions they re-affirm or fully retire, which no card
+//! lists.
 use super::card::{
     CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, REMOVAL_IRREVERSIBLE, card_hash, render_checked,
 };
 use super::item::{ExceptionKind, Fact, Item, ItemKind, ItemOption, Recommended, RemovalCard, age};
 use super::plan::{VersionPlan, defer_ref, deferral_item, version_plan};
 use super::questions::question_items;
+use super::reaffirm::{OpenWork, reaffirm_items};
 use super::snooze::hide_snoozed;
 use super::tensions::tension_items;
 use crate::coverage::change::{candidate_build, candidate_change};
@@ -250,6 +259,7 @@ impl ReadState {
         let now = now_ms();
         let mut groups: Vec<Group> = vec![];
         let mut not_ready = vec![];
+        let mut work = OpenWork::default();
         let open = open_proposals(self)?;
         if !open.is_empty() {
             // canon's coverage and lexicon first: each version's build carries its structural
@@ -263,6 +273,7 @@ impl ReadState {
                 continue;
             }
             let v = Version::read(self, *pref, p.clone())?;
+            v.open_work(&mut work);
             let issues = v.readiness(self)?;
             if !issues.is_empty() {
                 not_ready.push(NotReady { r#ref: r, issues });
@@ -281,6 +292,10 @@ impl ReadState {
                 items.push(item);
             }
             groups.push(Group { items });
+        }
+        // D-CQMA4: each re-affirmation card is a group of its own
+        for item in reaffirm_items(self, &work, now)? {
+            groups.push(Group { items: vec![item] });
         }
         // the items that stand beside a batch go into its group, after its exceptions; the
         // others are groups of one
@@ -577,12 +592,18 @@ struct Group {
 }
 
 impl Group {
-    /// O5: blocking first, then batches, then by `raised_at`, then by ref (of the first item).
-    fn key(&self) -> (bool, bool, String, String) {
+    /// O5: blocking first, then batches, then re-affirmation cards (D-CQMA4), then the other
+    /// items, each by `raised_at`, then by ref (of the first item).
+    fn key(&self) -> (bool, u8, String, String) {
         let head = &self.items[0];
+        let rank = match head.kind {
+            ItemKind::Approve => 0,
+            ItemKind::Reaffirm => 1,
+            _ => 2,
+        };
         (
             !head.blocking,
-            head.kind != ItemKind::Approve,
+            rank,
             head.raised_at.clone(),
             head.r#ref.clone(),
         )
@@ -779,6 +800,23 @@ impl Version {
 
     fn r#ref(&self) -> String {
         self.pref.to_string()
+    }
+
+    /// Adds to `work` the decisions this version re-affirms (from its block delta) and the ones
+    /// its proposed decisions fully retire (a whole supersede, or a revoke).
+    fn open_work(&self, work: &mut OpenWork) {
+        work.reaffirms
+            .extend(self.reaffirms.iter().map(|d| d.block.id.clone()));
+        for d in &self.decisions {
+            for l in d.block.links.get(SUPERSEDES).into_iter().flatten() {
+                if l.part.is_none() {
+                    work.retires.insert(l.target.clone());
+                }
+            }
+            for l in d.block.links.get(REVOKES).into_iter().flatten() {
+                work.retires.insert(l.target.clone());
+            }
+        }
     }
 
     /// Every failed readiness check, one issue each (see the module docs).

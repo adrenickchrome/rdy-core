@@ -5,8 +5,9 @@
 //! shape ([`item`]) and the card that renders it ([`card`]). It is pure: it formats what the
 //! queue computes and reads no store.
 //!
-//! The queue ([`queue`]) is built from four parts: batches and their exceptions (`queue`), open
-//! questions (`questions`), tensions that need a person (`tensions`) and snoozes (`snooze`).
+//! The queue ([`queue`]) is built from five parts: batches and their exceptions (`queue`),
+//! re-affirmation cards ([`reaffirm`]), open questions (`questions`), tensions that need a person
+//! (`tensions`) and snoozes (`snooze`).
 //!
 //! The card layout follows cd-W4XVS (one item) and cd-2J1WR (a batch and its exceptions). The
 //! module docs of [`card`] give the layout and the cut rule.
@@ -16,6 +17,7 @@ pub mod item;
 pub mod plan;
 mod questions;
 pub mod queue;
+pub mod reaffirm;
 mod snooze;
 mod tensions;
 
@@ -26,3 +28,4 @@ pub use queue::{
     APPROVE_REASON, APPROVE_REASON_BESIDE, APPROVE_REASON_CARDS, NotReady, Pending, PendingCounts,
     PendingQuery, REAFFIRMS_FACT,
 };
+pub use reaffirm::{HOLD_LABEL, KEEP_LABEL, REAFFIRM_WHY, ReaffirmMember, ReaffirmSuspect};

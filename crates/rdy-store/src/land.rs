@@ -11,7 +11,7 @@ use crate::error::StoreError;
 use crate::kinds;
 use crate::merge::{Conflict, MergeChange, merge_on_blocks};
 use crate::redaction::PreparedRedactionApply;
-use crate::state::{open_ref, proposal_ref, view_ref};
+use crate::state::{PreparedProposal, open_ref, proposal_ref, view_ref};
 use crate::store::encode;
 use crate::view::{ViewHead, ViewOp, ViewOpKind, decode_head};
 use rdy_model::plan::Plan;
@@ -21,6 +21,7 @@ use rdy_model::{
     EvidenceKind, Hash, LandingRecord, Op, Proposal, Provenance, RelayEvidence,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 /// Who relayed a human's approval, and what the human said (FW-B9).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,6 +75,25 @@ pub struct PreparedLanding {
     outcome: LandOutcome,
     /// Whether [`Store::plan_landing`] added the landing's plans.
     planned: bool,
+    /// A re-affirmation card's landing (D-CQMA4): its internal view's name and head after the
+    /// landing's rebase, and whether [`Store::close_reaffirm_view`] closed it. None for every
+    /// other landing.
+    fresh: Option<FreshLanding>,
+}
+
+/// The internal view of a prepared re-affirmation landing.
+#[derive(Debug)]
+struct FreshLanding {
+    view: String,
+    head: ViewHead,
+    closed: bool,
+}
+
+/// What a landing is built on: a proposal version the store holds, or the in-memory proposal of a
+/// re-affirmation card ([`Store::prepare_reaffirm_propose`]), whose frames start the batch.
+enum LandBase {
+    Stored,
+    Fresh(Box<PreparedProposal>),
 }
 
 impl PreparedLanding {
@@ -168,32 +188,126 @@ impl Store {
         req: LandRequest,
         alter: &dyn Fn(&mut LandingRecord),
     ) -> Result<PreparedLanding, StoreError> {
-        // 1. the proposal, and the version check: the request names its stable's latest version
-        let p = self.proposal(&req.proposal)?;
-        let stable = p.stable.unwrap_or(req.proposal);
-        let latest = match self.get_ref(&proposal_ref(&stable))? {
-            Some(b) => crate::index::hash_from(&b, "proposal ref")?,
-            None => {
-                return Err(StoreError::Decode(format!(
-                    "proposal {stable} has no ref; run rdy reindex"
-                )));
+        self.land_frames(LandBase::Stored, req, alter)
+    }
+
+    /// The landing of a re-affirmation card (D-CQMA4, D-EJBPD), prepared without writing
+    /// anything: the batch starts with `prepared`'s frames (the internal view's `Create` op, the
+    /// members' change, its `Commit` op, the proposal and its bound plan), then the landing of
+    /// that version as [`Store::prepare_land`] builds it, with every one of its checks (the
+    /// evidence through the shared field rule), by `approver` with `relay` and `evidence`. The
+    /// landing clears the proposal's `open/` ref in the same batch. [`Store::plan_landing`] then
+    /// adds its seal and [`Store::close_reaffirm_view`] closes the view; [`Store::commit_land`]
+    /// writes the batch only after both. `prepared` must come from
+    /// [`Store::prepare_reaffirm_propose`] with its plan bound (`Refused` otherwise).
+    pub fn prepare_reaffirm_land(
+        &self,
+        prepared: PreparedProposal,
+        approver: Provenance,
+        relay: Option<Relay>,
+        evidence: Option<ApprovalEvidence>,
+    ) -> Result<PreparedLanding, StoreError> {
+        if prepared.fresh.is_none() || prepared.plan.is_none() {
+            return Err(StoreError::Refused(
+                "a re-affirmation landing takes a re-affirmation proposal with its bound plan"
+                    .into(),
+            ));
+        }
+        let req = LandRequest {
+            proposal: prepared.version(),
+            accept: None,
+            approver,
+            alt: None,
+            relay,
+            evidence,
+        };
+        self.land_frames(LandBase::Fresh(Box::new(prepared)), req, &|_| {})
+    }
+
+    /// Closes the internal view of the re-affirmation landing `prepared` after its seal
+    /// (D-CQMA4): a `Close` op after the landing's rebase of the view, by `by`, and the view's
+    /// head ref, the batch's only write of it. Refused for any other landing, before the seal, or
+    /// twice. Writes nothing.
+    pub fn close_reaffirm_view(
+        &self,
+        prepared: &mut PreparedLanding,
+        by: &Provenance,
+    ) -> Result<(), StoreError> {
+        let planned = prepared.planned;
+        let Some(fresh) = prepared.fresh.as_mut().filter(|f| !f.closed && planned) else {
+            return Err(StoreError::Refused(
+                "only a sealed re-affirmation landing closes its view, once".into(),
+            ));
+        };
+        let (op, _, head) = self.close_part(&fresh.view, &fresh.head, REAFFIRM_CLOSE_REASON, by);
+        prepared.items.push((kinds::VIEW_OP, op));
+        prepared
+            .items
+            .extend(self.ref_items_pub(vec![(view_ref(&fresh.view), encode(&head))]));
+        fresh.head = head;
+        fresh.closed = true;
+        Ok(())
+    }
+
+    /// The landing of `base` that `req` names: [`Store::prepare_land`]'s checks and frames.
+    fn land_frames(
+        &self,
+        base: LandBase,
+        req: LandRequest,
+        alter: &dyn Fn(&mut LandingRecord),
+    ) -> Result<PreparedLanding, StoreError> {
+        // 1. the proposal, and the version check: the request names its stable's latest version.
+        // A re-affirmation card's version is new: its batch writes its first ref
+        let (p, stable, fresh) = match base {
+            LandBase::Stored => {
+                let p = self.proposal(&req.proposal)?;
+                let stable = p.stable.unwrap_or(req.proposal);
+                let latest = match self.get_ref(&proposal_ref(&stable))? {
+                    Some(b) => crate::index::hash_from(&b, "proposal ref")?,
+                    None => {
+                        return Err(StoreError::Decode(format!(
+                            "proposal {stable} has no ref; run rdy reindex"
+                        )));
+                    }
+                };
+                if latest != req.proposal {
+                    return Err(StoreError::ProposalMoved { stable, latest });
+                }
+                (p, stable, None)
+            }
+            LandBase::Fresh(prepared) => {
+                let prepared = *prepared;
+                (prepared.proposal.clone(), prepared.stable(), Some(prepared))
             }
         };
-        if latest != req.proposal {
-            return Err(StoreError::ProposalMoved { stable, latest });
-        }
-        // 1b. the relay and the evidence kind agree (FW-B9)
-        check_evidence(req.relay.as_ref(), req.evidence.as_ref())?;
+        // 1b. the relay and the evidence kind agree (FW-B9; D-CQMA4's local card evidence)
+        check_evidence(req.relay.as_ref(), req.evidence.as_ref(), &p.view)?;
         // 1c. the alternative set: the version the approver saw is still its latest, and open
         let alt_prev = match &req.alt {
             Some(alt) => Some(self.alt_landing_check(alt)?),
             None => None,
         };
         // 2. the proposing view's head and included set
-        let head = self
-            .view_head(&p.view)?
-            .ok_or_else(|| StoreError::UnknownView(p.view.clone()))?;
-        let included = self.included(&p.view)?;
+        let (head, included, mut items, fresh_change) = match fresh {
+            None => (
+                self.view_head(&p.view)?
+                    .ok_or_else(|| StoreError::UnknownView(p.view.clone()))?,
+                self.included(&p.view)?,
+                vec![],
+                None,
+            ),
+            Some(prepared) => {
+                let f = prepared
+                    .fresh
+                    .expect("a re-affirmation landing's proposal has its view");
+                (
+                    f.head,
+                    Arc::new(p.changes.clone()),
+                    prepared.items,
+                    Some(f.change),
+                )
+            }
+        };
         // 3. a change lands once
         for c in &p.changes {
             if let Some(l) = self.landing_of(c)? {
@@ -203,7 +317,6 @@ impl Store {
             }
         }
         // 4. the acceptance change, its commit op and the final proposal version
-        let mut items = vec![];
         let mut latest_ref = None;
         let mut final_changes = p.changes.clone();
         let mut accept_change = None;
@@ -244,11 +357,14 @@ impl Store {
             None => (head.head, req.proposal, None),
         };
         // 5. canon after the landing
-        let mut changes = p
-            .changes
-            .iter()
-            .map(|c| self.change(c))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut changes = match &fresh_change {
+            Some(c) => vec![c.clone()],
+            None => p
+                .changes
+                .iter()
+                .map(|c| self.change(c))
+                .collect::<Result<Vec<_>, _>>()?,
+        };
         changes.extend(accept_change.iter().cloned());
         let (prev_head, prev_state) = (self.canon_head()?, self.canon_state()?);
         let state = self.merge_checked(&prev_state, &changes)?.0.state;
@@ -325,9 +441,15 @@ impl Store {
             .iter()
             .flat_map(|c| c.ops.iter().map(|op| op.block_id()))
             .collect();
-        // the versions the acceptance change writes have no producer in the index until the write
-        let accepted: HashMap<Hash, Hash> = match (&accept_change, aid) {
-            (Some(a), Some(aid)) => a
+        // the versions the acceptance change (or a re-affirmation card's change) writes have no
+        // producer in the index until the write
+        let unwritten = match (&accept_change, aid, &fresh_change) {
+            (Some(a), Some(aid), _) => Some((a, aid)),
+            (_, _, Some(c)) => p.changes.first().map(|cid| (c, *cid)),
+            _ => None,
+        };
+        let accepted: HashMap<Hash, Hash> = match unwritten {
+            Some((a, aid)) => a
                 .ops
                 .iter()
                 .filter_map(|op| match op {
@@ -337,7 +459,7 @@ impl Store {
                     Op::Delete { .. } => None,
                 })
                 .collect(),
-            _ => HashMap::new(),
+            None => HashMap::new(),
         };
         // A version's producer as the index will answer after this write: when none of the
         // version's producers has landed yet, the ones this landing lands (the acceptance change
@@ -401,7 +523,16 @@ impl Store {
         let mut rebased = vec![];
         let mut closed = vec![];
         let mut view_refs = vec![];
-        for (rname, value) in self.refs_with_prefix("view/")? {
+        // a re-affirmation card's internal view has no ref before this batch: it takes its place
+        // in `view/` ref order, and its head ref is the close's to write
+        let mut views = self.refs_with_prefix("view/")?;
+        if fresh_change.is_some() {
+            let name = view_ref(&p.view);
+            let at = views.partition_point(|(n, _)| *n < name);
+            views.insert(at, (name, vec![]));
+        }
+        let mut fresh_head = None;
+        for (rname, value) in views {
             let name = rname.strip_prefix("view/").unwrap_or(&rname).to_string();
             let proposing = name == p.view;
             let (vhead, vincluded) = if proposing {
@@ -466,7 +597,11 @@ impl Store {
                 last_write_ms,
             };
             items.push((kinds::VIEW_OP, rebase));
-            view_refs.push((view_ref(&name), encode(&new_head)));
+            if proposing && fresh_change.is_some() {
+                fresh_head = Some(new_head);
+            } else {
+                view_refs.push((view_ref(&name), encode(&new_head)));
+            }
             rebased.push(RebasedView {
                 view: name,
                 dropped,
@@ -481,11 +616,25 @@ impl Store {
         refs.extend(view_refs);
         refs.extend(alt_ref);
         let open = open_ref(&p.view);
-        if self.get_ref(&open)?.as_deref() == Some(&stable.0[..]) {
+        if fresh_change.is_some() || self.get_ref(&open)?.as_deref() == Some(&stable.0[..]) {
             refs.push((open, vec![]));
         }
         items.extend(self.ref_items_pub(refs));
+        let fresh = match (fresh_change, fresh_head) {
+            (Some(_), Some(head)) => Some(FreshLanding {
+                view: p.view.clone(),
+                head,
+                closed: false,
+            }),
+            (Some(_), None) => {
+                return Err(StoreError::Refused(
+                    "the re-affirmation landing did not rebase its view".into(),
+                ));
+            }
+            (None, _) => None,
+        };
         Ok(PreparedLanding {
+            fresh,
             planned: false,
             items,
             applies,
@@ -563,8 +712,15 @@ impl Store {
             applies,
             hash: lid,
             outcome,
+            fresh,
             ..
         } = prepared;
+        // a re-affirmation card's landing is written only whole: sealed, its view closed
+        if fresh.is_some_and(|f| !f.closed) {
+            return Err(StoreError::Refused(
+                "a re-affirmation landing is written only with its view closed".into(),
+            ));
+        }
         items.extend(crate::signature::frames(signatures)?);
         // 9. one write. With applies, one REDACTION_APPLY per request (in request-hash order)
         // ends the data frames. Unheld, the checked apply writer validates the batch with the log,
@@ -662,13 +818,20 @@ impl Store {
     }
 }
 
+/// The reason of the `Close` op of a re-affirmation card's internal view.
+pub const REAFFIRM_CLOSE_REASON: &str = "the re-affirmation card landed";
+
 /// A relayed landing carries a relay kind of evidence (card or text); an elicited approval is the
-/// human's own answer and has no relay (FW-B9, D4).
+/// human's own answer and has no relay (FW-B9, D4). A landing with no relay records card evidence
+/// only as a re-affirmation card's landing of the proposal of view `view`
+/// ([`crate::local_card_evidence_allowed`], the field rule fsck shares).
 fn check_evidence(
     relay: Option<&Relay>,
     evidence: Option<&ApprovalEvidence>,
+    view: &str,
 ) -> Result<(), StoreError> {
     match (relay, evidence) {
+        (None, Some(e)) if crate::local_card_evidence_allowed(e, Some(view)) => Ok(()),
         (Some(_), None) => Err(StoreError::Decode(
             "a relayed landing needs its evidence kind (card or text)".into(),
         )),

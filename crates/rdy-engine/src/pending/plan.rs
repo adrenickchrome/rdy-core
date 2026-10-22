@@ -21,6 +21,7 @@
 //! card ([`super::card::PLAN_CARD_DOMAIN`]).
 use super::item::{Fact, Item, ItemKind};
 use super::queue::{item, later, option};
+use super::reaffirm::ReaffirmMember;
 use crate::gate::ProposalRef;
 use crate::plan::api::{PlanCounts, capture_heads, live_rows};
 use crate::plan::compute::{self, ComputedPlan};
@@ -49,6 +50,16 @@ pub enum PlanCardBinding {
         #[serde(with = "rdy_store::transition::hex::one")]
         plan: Hash,
         items: Vec<DeferralBinding>,
+    },
+    /// The re-affirmation card of `cause` at its full block version `version` (D-CQMA4): the
+    /// cause's current retirement set (partial superseders included) and every member, with its
+    /// full version and all its structural suspects ([`super::reaffirm`]).
+    Reaffirm {
+        cause: BlockId,
+        #[serde(with = "rdy_store::transition::hex::one")]
+        version: Hash,
+        retirements: Vec<BlockId>,
+        members: Vec<ReaffirmMember>,
     },
 }
 

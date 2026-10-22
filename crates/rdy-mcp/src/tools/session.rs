@@ -88,6 +88,10 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
             ));
         }
     };
+    // D-CQMA4: the views of re-affirmation cards' landings are private
+    if p.view.as_deref().is_some_and(rdy_engine::is_reserved_view) {
+        return Err(rdy_engine::reserved_view_error());
+    }
     if let Some(v) = p.view.as_deref().filter(|v| v.contains(':')) {
         return Err(RdyError::new(
             E_RESERVED_VIEW,

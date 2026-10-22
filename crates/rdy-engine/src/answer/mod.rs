@@ -41,9 +41,13 @@
 //! own. The answer to a question is in [`question`]: a proposed decision, then its `ANSWER`;
 //! only it reads `brief`, which its write cites under stable content (bwr1). The
 //! answers to tensions are in [`resolve`]: an acceptance writes semantic tension versions and no
-//! `ANSWER`; a dismissal writes its reviews and its `ANSWER` in one batch.
+//! `ANSWER`; a dismissal writes its reviews and its `ANSWER` in one batch. The answers to a
+//! re-affirmation card are in [`reaffirm`]: `Keep them suspect` writes one `ANSWER`; `They still
+//! hold` lands the card's members alone, in an isolated landing that records the answer
+//! (D-CQMA4).
 pub mod batch;
 pub mod question;
+pub mod reaffirm;
 pub mod relay;
 pub mod resolve;
 
@@ -53,6 +57,7 @@ use crate::gate::{
 };
 use crate::pending::PendingQuery;
 use crate::pending::queue::{Eligible, deferral_card};
+use crate::pending::reaffirm::REAFFIRM_REF_PREFIX;
 use crate::pending::{CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, Item, ItemKind, ItemOption};
 use crate::proposal_show::is_proposal_ref;
 use crate::tensions::set::tension_hex;
@@ -177,7 +182,12 @@ impl Rdy {
             brief: req.brief,
             ..answerer(s, person, &req.relay)?
         };
-        let note = note_of(req.note)?;
+        // a re-affirmation card checks its own note: a reason for each option (D-CQMA4)
+        let note = if req.r#ref.starts_with(REAFFIRM_REF_PREFIX) {
+            req.note
+        } else {
+            note_of(req.note)?
+        };
         let step = self.answer_one(
             &by,
             person,
@@ -292,12 +302,11 @@ impl Rdy {
                 None => e,
             });
         }
-        // D-AAQ9Z: a deferral card has no recommended option, so a list that names one is
-        // refused as a whole, before anything is answered
-        if let Some(r) = refs
-            .iter()
-            .find(|r| r.starts_with("defer:") && is_item_ref(r))
-        {
+        // D-AAQ9Z, D-CQMA4: a deferral card and a re-affirmation card have no recommended
+        // option, so a list that names one is refused as a whole, before anything is answered
+        if let Some(r) = refs.iter().find(|r| {
+            (r.starts_with("defer:") || r.starts_with(REAFFIRM_REF_PREFIX)) && is_item_ref(r)
+        }) {
             return Err(RdyError::new(
                 E_BAD_INPUT,
                 format!("{r} has no recommended option"),
@@ -339,6 +348,7 @@ impl Rdy {
             (ItemKind::Resolve, _) => {
                 resolve::act(self, by, bound, note).map(|i| AnswerStep::Done(Box::new(i)))
             }
+            (ItemKind::Reaffirm, _) => reaffirm::act(self, by, bound, note),
         }
     }
 }
@@ -525,9 +535,10 @@ fn bind(
 /// Whether `r` is an item ref (O3, closed): `P-<id>@<n>` (an approval), `<block id>@<version
 /// short>` (a decision's confirm or a question's answer: the 12 lowercase hex digits of the
 /// block's version), `advice:P-<id>@<n>` (a version's advised tensions), `defer:P-<id>@<n>` (a
-/// version's deferral card, an explicit version only) or a tension id (`tn-` and 6 to 64 hex
-/// digits, or the hex alone). The refs of relayed acts that are not items
-/// (`tag:`, `own:`, `stale:`, `propose:`) are not item refs.
+/// version's deferral card, an explicit version only), `reaffirm:<block id>@<version short>` (a
+/// re-affirmation card: its cause and the first 12 lowercase hex digits of the cause's version)
+/// or a tension id (`tn-` and 6 to 64 hex digits, or the hex alone). The refs of relayed acts
+/// that are not items (`tag:`, `own:`, `stale:`, `propose:`) are not item refs.
 pub fn is_item_ref(r: &str) -> bool {
     let proposal_version = |p: &str| p.contains('@') && is_proposal_ref(p);
     let block_version = |p: &str| {
@@ -539,6 +550,9 @@ pub fn is_item_ref(r: &str) -> bool {
     };
     if let Some(p) = r.strip_prefix("defer:") {
         return proposal_version(p);
+    }
+    if let Some(p) = r.strip_prefix(REAFFIRM_REF_PREFIX) {
+        return block_version(p);
     }
     match r.strip_prefix("advice:") {
         Some(p) => proposal_version(p),

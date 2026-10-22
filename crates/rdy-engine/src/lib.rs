@@ -160,7 +160,8 @@ pub use views::{ConflictInfo, ConflictSide, OwnerInfo, ResolveResult, ViewHeadIn
 pub use wc::project::Projection;
 pub use write::{
     JsonFieldError, LINK_KEY_TAIL, LinkInput, OP_FIX, OpInput, WriteRequest, WriteResult,
-    editorial_class, json_to_field, parse_justification, parse_op, parse_ops,
+    editorial_class, is_reserved_view, json_to_field, parse_justification, parse_op, parse_ops,
+    reserved_view_error,
 };
 
 pub use config::{

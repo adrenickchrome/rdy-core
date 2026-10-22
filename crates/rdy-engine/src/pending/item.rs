@@ -24,6 +24,8 @@ pub enum ItemKind {
     Resolve,
     /// Accept or refuse the deferrals a proposal version carries (D-AAQ9Z).
     Defer,
+    /// Re-affirm the decisions a changed block made suspect, or keep them suspect (D-CQMA4).
+    Reaffirm,
 }
 
 impl ItemKind {
@@ -35,6 +37,7 @@ impl ItemKind {
             ItemKind::Answer => "answer",
             ItemKind::Resolve => "resolve",
             ItemKind::Defer => "defer",
+            ItemKind::Reaffirm => "reaffirm",
         }
     }
 }

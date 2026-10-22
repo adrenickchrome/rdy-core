@@ -440,7 +440,7 @@ fn run_single(
             Step::Prepared(attempt) => attempt,
         };
         if pin.is_none() {
-            pin = attempt.act.landing().map(PreparedApproval::pref);
+            pin = attempt.act.landing().and_then(PreparedApproval::pin);
         }
         let signed = match sign_act(agent, &attempt) {
             Ok(signed) => Signed {

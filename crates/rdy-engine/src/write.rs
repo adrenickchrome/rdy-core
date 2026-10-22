@@ -3144,10 +3144,30 @@ fn own_view_fix(view: &str, s: &Session) -> String {
     }
 }
 
-/// Views that can receive writes: not `canon`, and no `:` (reserved for scope kinds such as
-/// `tag:` and `landing:`; legacy M1 views with `:` stay readable and proposable via `view:<name>`).
+/// Whether `name` is reserved for the isolated landings of re-affirmation cards (D-CQMA4): it
+/// starts with `reaffirm-` ([`rdy_store::REAFFIRM_VIEW_PREFIX`]). No public write, view op,
+/// create, fork or session takes such a view; only the card's private writer creates one.
+pub fn is_reserved_view(name: &str) -> bool {
+    name.starts_with(rdy_store::REAFFIRM_VIEW_PREFIX)
+}
+
+/// The refusal of a view name [`is_reserved_view`] reserves.
+pub fn reserved_view_error() -> RdyError {
+    RdyError::new(
+        E_RESERVED_VIEW,
+        "view names that start with reaffirm- are reserved for re-affirmation cards",
+        "pick a view name that does not start with reaffirm-",
+    )
+}
+
+/// Views that can receive writes: not `canon`, not reserved for re-affirmation cards
+/// ([`is_reserved_view`]), and no `:` (reserved for scope kinds such as `tag:` and `landing:`;
+/// legacy M1 views with `:` stay readable and proposable via `view:<name>`).
 pub(crate) fn writable_view(name: &str) -> Result<(), RdyError> {
     non_empty_view(name)?;
+    if is_reserved_view(name) {
+        return Err(reserved_view_error());
+    }
     if name == "canon" {
         return Err(RdyError::new(
             E_RESERVED_VIEW,

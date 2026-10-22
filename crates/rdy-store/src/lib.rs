@@ -40,7 +40,10 @@ pub mod transition;
 pub mod view;
 
 pub use answer::{ANSWER_REF, PENDING_REF, answer_ref, snooze_ref};
-pub use check::{StoreCheck, landing_field_rules};
+pub use check::{
+    REAFFIRM_HOLD_LABEL, REAFFIRM_VIEW_PREFIX, StoreCheck, landing_field_rules,
+    landing_reads_proposal_view, local_card_evidence_allowed, reaffirm_view,
+};
 pub use error::StoreError;
 #[doc(hidden)]
 pub use index::IndexDump;

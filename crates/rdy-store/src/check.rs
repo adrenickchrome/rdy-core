@@ -17,8 +17,8 @@ use crate::segment::Location;
 use crate::transition::Transitions;
 use crate::view::{ViewHead, ViewOpKind, resolve};
 use rdy_model::{
-    AltChoice, AltSet, AltStatus, Assurance, Change, EvidenceKind, Hash, Intent, LandingRecord,
-    Review, ReviewSubject, SemanticTension, Verdict, pair_key,
+    AltChoice, AltSet, AltStatus, ApprovalEvidence, Assurance, Change, EvidenceKind, Hash, Intent,
+    LandingRecord, Review, ReviewSubject, SemanticTension, Verdict, pair_key,
 };
 use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -585,13 +585,23 @@ impl StoreReader {
     }
 
     /// The relay and evidence rules of one landing, and its references to other objects
-    /// ([`landing_field_rules`] over this store).
+    /// ([`landing_field_rules`] over this store). The view of the landed proposal is read only
+    /// for a local landing with card evidence ([`landing_reads_proposal_view`]); a proposal the
+    /// store does not hold gives none, and its reference is the typed checks' to report.
     pub(crate) fn check_landing_fields(
         &self,
         l: &Hash,
         rec: &LandingRecord,
     ) -> Result<(), StoreError> {
-        landing_field_rules(l, rec, &mut |kind, h| self.has_kind(kind, h))
+        let view =
+            if landing_reads_proposal_view(rec) && self.has_kind(kinds::PROPOSAL, &rec.proposal)? {
+                Some(self.proposal(&rec.proposal)?.view)
+            } else {
+                None
+            };
+        landing_field_rules(l, rec, view.as_deref(), &mut |kind, h| {
+            self.has_kind(kind, h)
+        })
     }
 
     /// A change that the check follows, or None when it is not stored (its absence is reported
@@ -847,14 +857,51 @@ impl StoreReader {
     }
 }
 
+/// The prefix of the internal view of a re-affirmation card's isolated landing (D-CQMA4): the
+/// view is `reaffirm-` and the first 12 hex digits of the card's hash ([`reaffirm_view`]).
+pub const REAFFIRM_VIEW_PREFIX: &str = "reaffirm-";
+
+/// The label of a re-affirmation card's option that lands its members (`o1`).
+pub const REAFFIRM_HOLD_LABEL: &str = "They still hold";
+
+/// The internal view of the isolated landing of the re-affirmation card whose hash is `card`.
+pub fn reaffirm_view(card: &Hash) -> String {
+    format!("{REAFFIRM_VIEW_PREFIX}{}", card.short())
+}
+
+/// Whether the field rules of landing `rec` read the view of its landed proposal: a local
+/// landing with card evidence, which only a re-affirmation card's landing may record.
+pub fn landing_reads_proposal_view(rec: &LandingRecord) -> bool {
+    rec.assurance == Assurance::Local
+        && rec
+            .evidence
+            .as_ref()
+            .is_some_and(|e| e.kind == EvidenceKind::Card)
+}
+
+/// The one field rule of local card evidence (D-CQMA4), which the landing writer's evidence check
+/// and [`landing_field_rules`] share: a landing with no relay may record card evidence exactly
+/// when it names a card hash, its choice is [`REAFFIRM_HOLD_LABEL`], and the landed proposal's
+/// view (`proposal_view`) is [`reaffirm_view`] of that hash. Any other local card evidence, and
+/// all local text evidence, keeps its refusal.
+pub fn local_card_evidence_allowed(e: &ApprovalEvidence, proposal_view: Option<&str>) -> bool {
+    e.kind == EvidenceKind::Card
+        && e.choice.as_deref() == Some(REAFFIRM_HOLD_LABEL)
+        && e.card_hash
+            .is_some_and(|h| proposal_view == Some(reaffirm_view(&h).as_str()))
+}
+
 /// The relay and evidence rules of landing `l` (record `rec`), and its references to other
 /// objects: each `rebased_from` names a landing and `approved_version` a proposal, as
-/// `has_kind(kind, hash)` reads the objects. The one list of landing rules: the project's fsck,
-/// the holder's fsck and a holder's take (over the upload and the holder) apply it.
+/// `has_kind(kind, hash)` reads the objects. `proposal_view` is the view of the landed proposal
+/// (`rec.proposal`) when the caller read it: local card evidence passes only through
+/// [`local_card_evidence_allowed`]. The one list of landing rules: the project's fsck, the
+/// holder's fsck and a holder's take (over the upload and the holder) apply it.
 /// `StoreError::Decode` names the broken rule.
 pub fn landing_field_rules<E: From<StoreError>>(
     l: &Hash,
     rec: &LandingRecord,
+    proposal_view: Option<&str>,
     has_kind: &mut dyn FnMut(u8, &Hash) -> Result<bool, E>,
 ) -> Result<(), E> {
     if rec.relayed_by.is_some() != rec.relay_evidence.is_some() {
@@ -882,6 +929,11 @@ pub fn landing_field_rules<E: From<StoreError>>(
                         "landing {l}: evidence kind {kind} needs assurance local"
                     ))));
                 }
+                // D-CQMA4: a re-affirmation card's isolated landing records the person's local
+                // answer on the card
+                EvidenceKind::Card
+                    if rec.assurance == Assurance::Local
+                        && local_card_evidence_allowed(e, proposal_view) => {}
                 EvidenceKind::Card | EvidenceKind::Text if rec.assurance != Assurance::Relayed => {
                     return Err(E::from(bad(format!(
                         "landing {l}: evidence kind {kind} needs assurance relayed"

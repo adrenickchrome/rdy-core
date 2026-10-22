@@ -466,3 +466,105 @@ impl Rdy {
         Ok(select(&st, &Scope::View(view.to_string()), ops)?.ids())
     }
 }
+
+/// The member updates of a re-affirmation card (D-CQMA4, D-EJBPD): the shared transformation
+/// ([`reaffirmed_block`]) of each of `members` (its id and the full version the card binds)
+/// against `cause` alone, on canon as `st` holds it. Each member must still be that version of an
+/// accepted, live or partly superseded decision of canon that is suspect on `cause`: the card's
+/// own selection, checked again. Only the `reaffirmed` field and the cause's pin change; no other
+/// block, pin or record is written.
+pub(crate) fn card_updates(
+    st: &ReadState,
+    cause: &BlockId,
+    members: &[(BlockId, Hash)],
+    reason: &Reason,
+) -> Result<Vec<rdy_model::Op>, RdyError> {
+    let m = st.materialized(&Scope::Canon)?;
+    let g = st.graph(&Scope::Canon)?;
+    let tracking = Arc::clone(st.reader().tracking());
+    let causes = BTreeSet::from([cause.clone()]);
+    let mut ops = Vec::with_capacity(members.len());
+    for (id, version) in members {
+        let Some(cur) = m.get(id).filter(|b| b.version_hash() == *version) else {
+            return Err(RdyError::new(
+                E_ITEM_MOVED,
+                format!("{id} changed since its re-affirmation card was shown"),
+                "show the person the fresh card and ask again",
+            ));
+        };
+        if cur.block_type != decision::DECISION
+            || !is_live(g.status(id).as_ref())
+            || !suspects_of(st, &m, &g, id).contains_key(cause)
+        {
+            return Err(not_a_selected_suspect(cause, id));
+        }
+        let block = reaffirmed_block(&g, cur, &causes, reason, &|t| {
+            m.get(t).map(|x| x.content_hash_with(&tracking))
+        })?;
+        ops.push(rdy_model::Op::Update {
+            base: cur.version_hash(),
+            block,
+        });
+    }
+    Ok(ops)
+}
+
+/// The seal of a re-affirmation card's landing (D-CQMA4, D-4JMPH): it follows the plan `bound`
+/// (`bound_id`) bound to the landed `version` of `view` in the same batch, names landing
+/// `landing`, carries `bound`'s answers and HEADs, names every member as a decision, and seals
+/// each cause/member item as re-affirmed. The item's edge is the member's least edge to the cause
+/// in canon (`references` when canon holds none). Written by `by`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn card_seal(
+    st: &ReadState,
+    view: &str,
+    version: Hash,
+    landing: Hash,
+    bound_id: Hash,
+    bound: &rdy_model::plan::Plan,
+    cause: &BlockId,
+    members: &[BlockId],
+    by: &rdy_model::Provenance,
+) -> Result<rdy_model::plan::Plan, RdyError> {
+    use rdy_model::plan::{Plan, PlanKind, PlanOutcome, PlanSeal, SealedItem, item_hash};
+    let g = st.graph(&Scope::Canon)?;
+    let mut items: Vec<SealedItem> = members
+        .iter()
+        .map(|id| {
+            let subject = id.to_string();
+            let edge = g
+                .outgoing(id)
+                .iter()
+                .filter(|e| e.to == *cause)
+                .map(|e| e.kind.name())
+                .min()
+                .unwrap_or_else(|| "references".to_string());
+            SealedItem {
+                id: item_hash(cause, &subject, PlanKind::Reaffirm),
+                kind: PlanKind::Reaffirm,
+                subject,
+                cause: cause.clone(),
+                edge,
+                outcome: PlanOutcome::Reaffirmed,
+                answer: None,
+            }
+        })
+        .collect();
+    items.sort_by_key(|i| i.id);
+    let decisions: BTreeSet<BlockId> = members.iter().cloned().collect();
+    Ok(Plan {
+        stable: Some(bound.stable.unwrap_or(bound_id)),
+        prev: Some(bound_id),
+        view: view.to_string(),
+        proposal: Some(version),
+        answers: bound.answers.clone(),
+        heads: bound.heads.clone(),
+        provenance: by.clone(),
+        seal: Some(PlanSeal {
+            landing,
+            version,
+            decisions: decisions.into_iter().collect(),
+            items,
+        }),
+    })
+}

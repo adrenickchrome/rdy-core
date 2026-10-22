@@ -92,29 +92,37 @@ const LABEL_WIDTH: usize = 47;
 /// The width of a fact name, so the values line up.
 const NAME_WIDTH: usize = 16;
 
-/// The card of `item`, cut to `max_tokens` by the rule in the module docs.
+/// The card of `item`, cut to `max_tokens` by the rule in the module docs: the most facts that
+/// fit with every decision line, else no fact and the most decision lines that fit. Once a cut
+/// line stands, each line cut makes the card shorter (a line is longer than the digit a count
+/// can gain), so the most that fit is found by bisection: a card of 100000 members is built a
+/// few dozen times, not once per member.
 pub fn render(item: &Item, max_tokens: usize) -> String {
-    let mut facts = item.facts.len();
-    let mut members = item.members.len();
-    let mut card = build(item, facts, members);
+    let (facts, members) = (item.facts.len(), item.members.len());
+    let card = build(item, facts, members);
     if fits(&card, max_tokens) {
         return card;
     }
-    while facts > 0 {
-        facts -= 1;
-        card = build(item, facts, members);
-        if fits(&card, max_tokens) {
-            return card;
-        }
+    if facts > 0 && fits(&build(item, 0, members), max_tokens) {
+        let keep = most(facts - 1, |k| fits(&build(item, k, members), max_tokens));
+        return build(item, keep, members);
     }
-    while members > 0 {
-        members -= 1;
-        card = build(item, facts, members);
-        if fits(&card, max_tokens) {
-            return card;
-        }
+    if members > 0 && fits(&build(item, 0, 0), max_tokens) {
+        let keep = most(members - 1, |k| fits(&build(item, 0, k), max_tokens));
+        return build(item, 0, keep);
     }
-    card
+    build(item, 0, 0)
+}
+
+/// The largest `k` in `0..=hi` for which `ok(k)` holds, where `ok(0)` holds and `ok` holds for
+/// every count below one for which it holds.
+fn most(hi: usize, ok: impl Fn(usize) -> bool) -> usize {
+    let (mut lo, mut hi) = (0, hi);
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if ok(mid) { lo = mid } else { hi = mid - 1 }
+    }
+    lo
 }
 
 /// The card of `item` within `max_tokens`. A card with removal requests whose report the item
@@ -817,5 +825,74 @@ Options
         assert_eq!(age(now - 29 * DAY, now), "4 weeks");
         // A time ahead of now is today.
         assert_eq!(age(now + 5 * DAY, now), "today");
+    }
+
+    /// The cut by one line at a time that `render` gave before Task 16 bisected it.
+    fn render_line_by_line(item: &Item, max_tokens: usize) -> String {
+        let mut facts = item.facts.len();
+        let mut members = item.members.len();
+        let mut card = build(item, facts, members);
+        if fits(&card, max_tokens) {
+            return card;
+        }
+        while facts > 0 {
+            facts -= 1;
+            card = build(item, facts, members);
+            if fits(&card, max_tokens) {
+                return card;
+            }
+        }
+        while members > 0 {
+            members -= 1;
+            card = build(item, facts, members);
+            if fits(&card, max_tokens) {
+                return card;
+            }
+        }
+        card
+    }
+
+    #[test]
+    fn cp16_the_bisected_cut_is_the_line_by_line_cut() {
+        let mut i = item(
+            ItemKind::Reaffirm,
+            "reaffirm:c-00001@0123456789ab",
+            "Re-affirm after A",
+        );
+        i.summary = Some("Re-affirm the listed decisions after c-00001.".into());
+        i.facts = (0..12)
+            .map(|n| fact("Cause", &format!("value {n} {}", "x".repeat(n * 7))))
+            .collect();
+        i.members = (0..700)
+            .map(|n| format!("D-{n:05}  {}", "t".repeat(n % 40)))
+            .collect();
+        i.options = vec![
+            option("o1", "They still hold", &["Lands them."], None),
+            option("o2", "Keep them suspect", &["Keeps them."], None),
+        ];
+        for max in [0, 1, 50, 120, 300, 600, 1_000, 2_000, 5_000, 9_000, 20_000] {
+            assert_eq!(
+                render(&i, max),
+                render_line_by_line(&i, max),
+                "budget {max}"
+            );
+        }
+        let mut few = i.clone();
+        few.members.truncate(3);
+        for max in [0, 60, 100, 140, 200, 2_000] {
+            assert_eq!(
+                render(&few, max),
+                render_line_by_line(&few, max),
+                "budget {max}"
+            );
+        }
+        few.facts.clear();
+        for max in [0, 60, 100, 2_000] {
+            assert_eq!(
+                render(&few, max),
+                render_line_by_line(&few, max),
+                "budget {max}"
+            );
+        }
     }
 }

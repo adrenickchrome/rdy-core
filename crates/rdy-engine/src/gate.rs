@@ -3,8 +3,8 @@ use crate::answer::card_of;
 use crate::answer::relay::{RelayInput, relayed};
 use crate::coord_graph::AltRef;
 use crate::error::*;
-use crate::pending::Item;
 use crate::pending::queue::approval_holds;
+use crate::pending::{Item, PlanCardBinding};
 use crate::plan::lifecycle::{PlanSummary, ProposePlanRequest};
 use crate::session::rfc3339;
 use crate::tensions::{SideRef, Tension, TensionInfo, TensionSeverity, TensionStatus};
@@ -2794,6 +2794,132 @@ impl Rdy {
             accept,
             chosen,
             keys: re.into_iter().map(|(id, k)| (id.to_string(), k)).collect(),
+            reaffirm: None,
+        })
+    }
+
+    /// The private request of a re-affirmation card's isolated landing (D-CQMA4, D-EJBPD; see
+    /// [`ReaffirmLanding`]), prepared under the writer and written by [`Rdy::commit_landing`]
+    /// like every approval, so the signing coordinator owns the writer's release and return. The
+    /// card's complete binding stands in for the briefing on this path only. On the canon the
+    /// card was read on, it builds the members' metadata-only change (the shared
+    /// transformation), then, in memory and in one batch: the fresh internal view
+    /// `reaffirm-<card hash, first 12 digits>`, its `Create` op, the change and its `Commit` op,
+    /// the proposal (the card's title and summary), its bound plan, the landing with the person
+    /// as approver and the card as evidence, the seal, and the view's `Close` op. Nothing is
+    /// appended here; a refusal leaves no view, ref, proposal or landing. An existing view of
+    /// that name is `E_BAD_INPUT`: an old internal view is never reused.
+    pub(crate) fn prepare_reaffirm_landing(
+        &mut self,
+        req: ReaffirmLanding<'_>,
+    ) -> Result<PreparedApproval, RdyError> {
+        let ReaffirmLanding {
+            card,
+            approver,
+            relay,
+            evidence,
+            reason,
+        } = req;
+        let bug = |what: &str| {
+            RdyError::new(
+                E_INTERNAL,
+                format!("{}: {what}", card.r#ref),
+                "report this as a bug in rdy",
+            )
+        };
+        let Some(PlanCardBinding::Reaffirm { cause, members, .. }) = &card.plan_binding else {
+            return Err(bug("the card binds no re-affirmation"));
+        };
+        let card_hash: Hash = card
+            .card_hash
+            .parse()
+            .map_err(|_| bug("the card has no hash"))?;
+        let st = self.read();
+        let canon_at = st.canon_head();
+        let view = rdy_store::reaffirm_view(&card_hash);
+        if st.has_view(&view) {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("reserved re-affirmation view already exists: {view}"),
+                "read the fresh re-affirmation card and answer it",
+            ));
+        }
+        let pairs: Vec<(BlockId, Hash)> =
+            members.iter().map(|m| (m.id.clone(), m.version)).collect();
+        let ops = crate::reaffirm::card_updates(&st, cause, &pairs, &reason)?;
+        let by = approver.provenance();
+        let summary = card.summary.clone().unwrap_or_default();
+        let change = Change {
+            view: view.clone(),
+            ops,
+            deps: vec![],
+            provenance: by.clone(),
+            justification: None,
+            message: card.title.clone(),
+            links: ChangeLinks::default(),
+            read_identity: None,
+        };
+        let mut prepared =
+            self.store
+                .prepare_reaffirm_propose(rdy_store::plan::ReaffirmProposeRequest {
+                    view: &view,
+                    canon_at,
+                    change,
+                    title: &card.title,
+                    summary: &summary,
+                    by: by.clone(),
+                })?;
+        let version = prepared.version();
+        let committed = prepared
+            .fresh_change()
+            .cloned()
+            .ok_or_else(|| bug("the proposal has no change"))?;
+        // the bound plan: the candidate's complete plan on canon, with no answer
+        let pp = crate::plan::lifecycle::prepare_proposal_plan(
+            &st,
+            &by,
+            &view,
+            None,
+            Some(std::slice::from_ref(&committed)),
+            &[],
+        )?;
+        let bound = pp.plan(&view, version, by.clone());
+        let bound_id = self.store.bind_plan(&mut prepared, &bound)?;
+        let mut store =
+            self.store
+                .prepare_reaffirm_land(prepared, by.clone(), relay, Some(evidence))?;
+        let ids: Vec<BlockId> = members.iter().map(|m| m.id.clone()).collect();
+        let seal = crate::reaffirm::card_seal(
+            &st,
+            &view,
+            version,
+            store.hash(),
+            bound_id,
+            &bound,
+            cause,
+            &ids,
+            &by,
+        )?;
+        self.store.plan_landing(&mut store, None, Some(&seal))?;
+        self.store.close_reaffirm_view(&mut store, &by)?;
+        Ok(PreparedApproval {
+            store,
+            pref: ProposalRef {
+                version,
+                stable: version,
+                n: 1,
+            },
+            title: card.title.clone(),
+            summary: Some(summary),
+            changes: 1,
+            view,
+            issues: vec![],
+            landed_ops: committed.ops,
+            requests: vec![],
+            accept: None,
+            chosen: None,
+            keys: BTreeMap::new(),
+            reaffirm: Some((card.r#ref.clone(), canon_at)),
         })
     }
 
@@ -2831,8 +2957,20 @@ impl Rdy {
             requests,
             chosen,
             keys,
+            reaffirm,
             ..
         } = prepared;
+        // D-CQMA4: a re-affirmation card's landing was built on the canon its card was read on;
+        // canon must stand there still
+        if let Some((card, canon_at)) = &reaffirm
+            && self.store.canon_head()? != *canon_at
+        {
+            return Err(RdyError::new(
+                E_ITEM_MOVED,
+                format!("{card} changed since it was shown"),
+                "show the person the fresh card and ask again",
+            ));
+        }
         let pid = pref.version;
         let out = match self.store.commit_land(store, signatures) {
             Ok(out) => out,
@@ -2886,6 +3024,19 @@ impl Rdy {
     }
 }
 
+/// The private request of a re-affirmation card's isolated landing (D-CQMA4): the bound card
+/// the person answered with `They still hold`, the person (the approver of the landing), the
+/// relay that carried the answer if any, the card evidence (both option labels, the chosen one
+/// and the card's hash), and the validated reason. Only the card's answer builds it; there is no
+/// public way to it.
+pub(crate) struct ReaffirmLanding<'a> {
+    pub(crate) card: &'a Item,
+    pub(crate) approver: Session,
+    pub(crate) relay: Option<Relay>,
+    pub(crate) evidence: ApprovalEvidence,
+    pub(crate) reason: crate::reaffirm::Reason,
+}
+
 /// A landing prepared under the writer by [`Rdy::prepare_landing`] and not yet written: the
 /// store's prepared batch, and what the commit publishes and reports. It holds no writer guard
 /// and no reference into the project.
@@ -2902,12 +3053,22 @@ pub(crate) struct PreparedApproval {
     accept: Option<Change>,
     chosen: Option<AltRef>,
     keys: BTreeMap<String, String>,
+    /// A re-affirmation card's isolated landing (D-CQMA4): the card's ref and the canon head it
+    /// was read on, checked again before the commit. None for every other landing.
+    reaffirm: Option<(String, Option<Hash>)>,
 }
 
 impl PreparedApproval {
     /// The proposal version this landing approves.
     pub(crate) fn pref(&self) -> ProposalRef {
         self.pref
+    }
+
+    /// The proposal version a retry of this approval must approve again (pver1): this one's,
+    /// except for a re-affirmation card's landing, whose version is new in each preparation (the
+    /// card binds the retry instead).
+    pub(crate) fn pin(&self) -> Option<ProposalRef> {
+        self.reaffirm.is_none().then_some(self.pref)
     }
 
     /// The refusal of this landing when it was prepared again for an approval first bound to

@@ -42,7 +42,7 @@ use crate::stream_error::{Reason, StreamError, to_rdy};
 use crate::version::parse_version;
 use rdy_model::redaction::{RedactionApply, RedactionResidue};
 use rdy_model::signature::Signature;
-use rdy_model::{Answer, Block, BlockId, Change, Hash, LandingRecord, Op, StateSnapshot};
+use rdy_model::{Answer, Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, StateSnapshot};
 use rdy_schema::Pack;
 use rdy_store::check_holder;
 use rdy_store::kinds::{self, BlobManifest};
@@ -517,6 +517,8 @@ pub(crate) trait Held {
     /// The approved removal request of the receiver that removes or names the object `key`
     /// (`StoreReader::redaction_of`), if any.
     fn redaction_of(&self, key: &ObjectKey) -> Result<Option<Hash>, StoreError>;
+    /// The view of the receiver's proposal version `h`, if it holds one.
+    fn proposal_view(&self, h: &Hash) -> Result<Option<String>, StoreError>;
 }
 
 impl Held for StoreReader {
@@ -530,6 +532,13 @@ impl Held for StoreReader {
 
     fn redaction_of(&self, key: &ObjectKey) -> Result<Option<Hash>, StoreError> {
         StoreReader::redaction_of(self, key.kind, &key.hash)
+    }
+
+    fn proposal_view(&self, h: &Hash) -> Result<Option<String>, StoreError> {
+        if !self.has_kind(kinds::PROPOSAL, h)? {
+            return Ok(None);
+        }
+        Ok(Some(self.proposal(h)?.view))
     }
 }
 
@@ -546,6 +555,10 @@ impl Held for NothingHeld {
     }
 
     fn redaction_of(&self, _: &ObjectKey) -> Result<Option<Hash>, StoreError> {
+        Ok(None)
+    }
+
+    fn proposal_view(&self, _: &Hash) -> Result<Option<String>, StoreError> {
         Ok(None)
     }
 }
@@ -760,10 +773,29 @@ fn check_landing_rules(
         let Some(landing) = typed::<LandingRecord>(source, *key)? else {
             continue;
         };
-        rdy_store::landing_field_rules(&key.hash, &landing, &mut |kind, h| {
-            let k = ObjectKey { kind, hash: *h };
-            Ok::<_, Rule>(in_union(&k) || held.holds(&k)?)
-        })
+        // D-CQMA4: local card evidence reads the landed proposal's view, from the upload or the
+        // receiver; a proposal neither holds gives none (the typed checks report it)
+        let view = if rdy_store::landing_reads_proposal_view(&landing) {
+            let pk = ObjectKey {
+                kind: kinds::PROPOSAL,
+                hash: landing.proposal,
+            };
+            match in_union(&pk) {
+                true => typed::<Proposal>(source, pk)?.map(|p| p.view),
+                false => held.proposal_view(&landing.proposal)?,
+            }
+        } else {
+            None
+        };
+        rdy_store::landing_field_rules(
+            &key.hash,
+            &landing,
+            view.as_deref(),
+            &mut |kind, h: &Hash| {
+                let k = ObjectKey { kind, hash: *h };
+                Ok::<_, Rule>(in_union(&k) || held.holds(&k)?)
+            },
+        )
         .map_err(|e| e.into_rdy(*key))?;
     }
     let root = &facts.root;
