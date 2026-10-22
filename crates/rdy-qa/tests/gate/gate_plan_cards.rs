@@ -418,7 +418,7 @@ fn cp12_deferral_card_lists_only_valid_noncode_deferrals() {
     assert!(card.members.is_empty() && !card.blocking);
     assert_eq!(card.raised_by, "agent:w");
     // full item hash order
-    let mut want = vec![
+    let mut want = [
         (
             item_hash(&id(&s.a), &s.b, PlanKind::Confirm),
             format!("{} (after {})", s.b, s.a),
