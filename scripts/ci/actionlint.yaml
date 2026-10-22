@@ -1,0 +1,7 @@
+# actionlint 1.7.12 predates these two standard GitHub-hosted image labels.
+# Verified in https://github.com/actions/runner-images/blob/main/README.md on 2026-10-22.
+# This is a linter-only compatibility list; workflows do not use self-hosted runners.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
+    - ubuntu-26.04-arm
