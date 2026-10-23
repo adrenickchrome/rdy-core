@@ -54,8 +54,8 @@ pub(crate) struct SignInArgs {
     /// The person's answer to the card: confirm or cancel. Needs --card-hash.
     #[arg(long, value_enum)]
     answer: Option<AnswerArg>,
-    /// You, the relaying agent, as actor[/run]; run this under your own RDY_ACTOR.
-    #[arg(long)]
+    /// The agent that relays the person's words: your own actor. The run comes from your session.
+    #[arg(long, value_name = "ACTOR")]
     relayed_by: Option<String>,
     /// The person's words, quoted.
     #[arg(long)]

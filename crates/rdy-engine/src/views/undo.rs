@@ -369,10 +369,7 @@ impl Rdy {
                     return Err(StoreError::ViewClosed(view.into()).into());
                 }
                 pick.ok_or_else(|| {
-                    let by = match &s.run {
-                        Some(run) => format!("{}/{run}", s.actor),
-                        None => s.actor.clone(),
-                    };
+                    let by = crate::identity::actor_run_text(&s.actor, s.run.as_deref());
                     RdyError::new(
                         E_NOTHING_TO_UNDO,
                         format!("no undoable op by {by} on view {view:?}"),

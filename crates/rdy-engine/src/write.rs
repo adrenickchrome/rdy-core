@@ -3630,9 +3630,8 @@ pub(crate) fn check_view_access(
         Some(o) => Err(RdyError::new(
             E_VIEW_OWNER,
             format!(
-                "view {view:?} is owned by {}{}",
-                o.actor,
-                o.run.as_ref().map(|r| format!("/{r}")).unwrap_or_default()
+                "view {view:?} is owned by {}",
+                crate::identity::actor_run_text(&o.actor, o.run.as_deref())
             ),
             if propose && view != s.default_view() {
                 format!(

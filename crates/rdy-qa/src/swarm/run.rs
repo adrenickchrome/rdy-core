@@ -67,8 +67,9 @@ const PACE_WAIT: Duration = Duration::from_secs(1800);
 const CLI_BUDGET: Duration = Duration::from_secs(120);
 /// How long the run waits for a stopped daemon to exit (a hang guard).
 const STOP_WAIT: Duration = Duration::from_secs(60);
-/// The relay as `rdy approve --relayed-by` names it: the relaying agent's own actor and run.
-const RELAY: &str = "agent:relay/chat";
+/// The relay as `rdy approve --relayed-by` names it: the relaying agent's own actor alone; the
+/// relay records the session's run (D-PWB82).
+const RELAY: &str = RELAY_ACTOR;
 /// The relaying agent's actor and run: the relay runs as this session (D-HA7YZ).
 const RELAY_ACTOR: &str = "agent:relay";
 const RELAY_RUN: &str = "chat";

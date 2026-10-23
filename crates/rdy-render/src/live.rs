@@ -359,7 +359,11 @@ mod sr5 {
         );
         let a = Scope::View("a".into());
         let before = key(&r, &a);
-        r.view_own(&session(Role::Writer), "a", Some("agent:claude"))
+        let owner = rdy_engine::view_api::OwnerInput {
+            actor: "agent:claude".into(),
+            run: None,
+        };
+        r.view_own(&session(Role::Writer), "a", Some(&owner))
             .expect("own");
         assert_ne!(key(&r, &a), before, "a change of owner moves view a's key");
     }

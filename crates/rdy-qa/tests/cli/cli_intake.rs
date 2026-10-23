@@ -321,7 +321,7 @@ fn di12_rdy_answer_relays_from_an_agent_session() {
             &ready[0],
             "approve",
             "--relayed-by",
-            "agent:relay/r1",
+            "agent:relay",
         ],
     ));
     assert!(!ok && out.contains("--evidence"), "{out}");
@@ -354,7 +354,7 @@ fn di12_rdy_answer_relays_from_an_agent_session() {
             &ready[0],
             "approve",
             "--relayed-by",
-            "agent:relay/r1",
+            "agent:relay",
             "--evidence",
             "yes",
         ],
@@ -373,7 +373,7 @@ fn di12_rdy_answer_relays_from_an_agent_session() {
             "--card",
             &hash_of(&ready[0]),
             "--relayed-by",
-            "agent:relay/r1",
+            "agent:relay",
             "--evidence",
             "yes, land it",
             "--question",
@@ -387,7 +387,7 @@ fn di12_rdy_answer_relays_from_an_agent_session() {
         out.starts_with(&format!("answered {}: ", ready[0])),
         "{out}"
     );
-    assert!(out.contains(", relayed by agent:relay/r1"), "{out}");
+    assert!(out.contains(", relayed by agent:relay (run r1)"), "{out}");
     // Later is a chat act: the CLI refuses it whoever asks, relayed or not (F4); nothing is
     // hidden and no record is written (MCP covers the session-scoped Later)
     let before = landings(&s);
@@ -395,7 +395,7 @@ fn di12_rdy_answer_relays_from_an_agent_session() {
         &[][..],
         &[
             "--relayed-by",
-            "agent:relay/r1",
+            "agent:relay",
             "--evidence",
             "not now",
             "--session",
@@ -460,7 +460,7 @@ fn di12_rdy_answer_relays_from_an_agent_session() {
             "--card",
             &hd,
             "--relayed-by",
-            "agent:relay/r1",
+            "agent:relay",
             "--evidence",
             "do what you recommend",
         ],
@@ -541,7 +541,7 @@ fn di12_rdy_answer_carries_the_brief_of_a_question_under_stable_content() {
             "--card",
             &card,
             "--relayed-by",
-            "agent:relay/r1",
+            "agent:relay",
             "--evidence",
             "Finance, please",
         ];

@@ -176,12 +176,13 @@ fn di7_the_relay_table_holds_for_every_act() {
                 "ask the person, then pass their words as evidence and your question"
             );
         }
-        // 4. a relayed_by that is not the session's own actor or actor/run
+        // 4. a relayed_by that is not the session's own actor: the flag names the actor alone
+        // (D-PWB82), so the actor joined to the session's run is another actor
         for by in [
             "agent:other",
+            "agent:relay/r1",
             "agent:relay/r2",
             "agent:rel",
-            "agent:relay/r1/x",
         ] {
             let relay = RelayInput {
                 relayed_by: Some(by.into()),
@@ -191,9 +192,20 @@ fn di7_the_relay_table_holds_for_every_act() {
             refused(
                 &e,
                 E_PERMISSION,
-                &format!("agent:relay relays only as itself, not as {by}"),
+                &format!("agent:relay (run r1) relays only as itself, not as {by}"),
             );
         }
+        // 4. a relayed_by outside the actor form: the grammar's refusal, never split
+        let relay = RelayInput {
+            relayed_by: Some("agent:relay/r1/x".into()),
+            ..words("yes")
+        };
+        let e = r.answer(&agent(), PERSON, ask(relay)).unwrap_err();
+        refused(
+            &e,
+            E_BAD_INPUT,
+            "the actor \"agent:relay/r1/x\" is not in rdy's actor form",
+        );
         // 5. question or session_ref with no evidence
         for (field, relay) in [
             (
@@ -235,7 +247,8 @@ fn di7_the_relay_table_holds_for_every_act() {
     assert!(answers(&r).is_empty(), "{:#?}", answers(&r));
     assert_eq!(r.read().canon_head(), head);
 
-    // 4, at the CLI: relayed_by is the actor or actor/run; session_ref defaults to cli
+    // 4, at the CLI: relayed_by is the actor; the run is the session's; session_ref defaults
+    // to cli
     let snooze = r
         .answer(
             &agent(),
@@ -245,7 +258,7 @@ fn di7_the_relay_table_holds_for_every_act() {
                 "later",
                 Some(&batch.card_hash),
                 RelayInput {
-                    relayed_by: Some("agent:relay/r1".into()),
+                    relayed_by: Some(ME.into()),
                     session_ref: None,
                     ..words("later, please")
                 },
@@ -956,7 +969,7 @@ fn di7_the_daemon_relay_texts_do_not_change() {
     check(
         approve(&a, json!({"relayed_by": "agent:other", "evidence": "yes"})),
         E_PERMISSION,
-        "agent:relay/r1 relays only as itself, not as agent:other",
+        "agent:relay (run r1) relays only as itself, not as agent:other",
         "pass --relayed-by agent:relay with the person's words in --evidence",
     );
     check(
@@ -991,7 +1004,7 @@ fn di7_the_daemon_relay_texts_do_not_change() {
     );
     let v = approve(
         &a,
-        json!({"relayed_by": "agent:relay/r1", "evidence": "yes", "session_ref": "chat-7"}),
+        json!({"relayed_by": ME, "evidence": "yes", "session_ref": "chat-7"}),
     )
     .unwrap();
     assert_eq!(v["assurance"], "relayed", "{v}");

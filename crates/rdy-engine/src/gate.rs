@@ -400,19 +400,11 @@ fn relay_evidence_kind(
             "quote the human's words with --evidence",
         ));
     }
-    if relay.by.actor.trim().is_empty() {
-        return Err(RdyError::new(
-            E_BAD_INPUT,
-            "relayed_by needs an actor",
-            "name the relaying agent, e.g. --relayed-by agent:name",
-        ));
-    }
-    if relay.by.run.as_deref().is_some_and(|r| r.trim().is_empty()) {
-        return Err(RdyError::new(
-            E_BAD_INPUT,
-            "relayed_by has an empty run",
-            "name the run after '/', e.g. --relayed-by agent:name/run-7, or drop the '/'",
-        ));
+    // a new relay's agent: the actor, then a run, each in its form (D-ME2C0, D-PWB82); a stored
+    // landing is never checked here
+    crate::identity::validate_actor(&relay.by.actor)?;
+    if let Some(run) = &relay.by.run {
+        crate::identity::validate_run(run)?;
     }
     if relay.evidence.session_ref.trim().is_empty() {
         return Err(RdyError::new(

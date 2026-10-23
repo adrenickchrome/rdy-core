@@ -25,8 +25,8 @@ pub(crate) struct ProposeArgs {
     /// The view's own member of that set (its label); goes with --alt.
     #[arg(long)]
     chosen: Option<String>,
-    /// You, the relaying agent, as actor[/run]; run this under your own RDY_ACTOR. Proposes the person's own view (one they own, or work) on their word.
-    #[arg(long, requires = "evidence")]
+    /// The agent that relays the person's words: your own actor. The run comes from your session. Proposes the person's own view (one they own, or work) on their word.
+    #[arg(long, value_name = "ACTOR", requires = "evidence")]
     relayed_by: Option<String>,
     /// The person's words, quoted. Requires --relayed-by.
     #[arg(long, requires = "relayed_by")]
@@ -42,8 +42,8 @@ pub(crate) struct ProposeArgs {
 #[derive(clap::Args)]
 pub(crate) struct ApproveArgs {
     proposal: String,
-    /// You, the relaying agent, as actor[/run]; run this under your own RDY_ACTOR. Records a relayed approval.
-    #[arg(long, requires = "evidence")]
+    /// The agent that relays the person's words: your own actor. The run comes from your session. Records a relayed approval.
+    #[arg(long, value_name = "ACTOR", requires = "evidence")]
     relayed_by: Option<String>,
     /// The human's words, quoted. Requires --relayed-by and the exact version.
     #[arg(long, requires = "relayed_by")]
@@ -66,8 +66,8 @@ pub(crate) struct TagArgs {
     landing: Option<String>,
     #[arg(short = 'm', long)]
     message: Option<String>,
-    /// You, the relaying agent, as actor[/run]; run this under your own RDY_ACTOR. Records the person's tag, relayed.
-    #[arg(long, requires = "evidence")]
+    /// The agent that relays the person's words: your own actor. The run comes from your session. Records the person's tag, relayed.
+    #[arg(long, value_name = "ACTOR", requires = "evidence")]
     relayed_by: Option<String>,
     /// The person's words, quoted. Requires --relayed-by.
     #[arg(long, requires = "relayed_by")]
@@ -436,16 +436,16 @@ pub(crate) fn approve_text(v: &Value) -> String {
     t
 }
 
-/// `, relayed by <actor>[/<run>]`: the relayer as recorded (the session's actor and run, which
-/// may differ from the flag); empty when the reply names none.
+/// `, relayed by <actor> (run <run>)`, or without the run clause when there is none: the
+/// relayer as recorded (the session's actor and run; the flag names the actor alone); empty when
+/// the reply names none.
 fn relayed_by_text(v: &Value) -> String {
-    match (
-        v["relayed_by"]["actor"].as_str(),
-        v["relayed_by"]["run"].as_str(),
-    ) {
-        (Some(by), Some(run)) => format!(", relayed by {by}/{run}"),
-        (Some(by), None) => format!(", relayed by {by}"),
-        (None, _) => String::new(),
+    match v["relayed_by"]["actor"].as_str() {
+        Some(by) => format!(
+            ", relayed by {}",
+            rdy_engine::identity::actor_run_text(by, v["relayed_by"]["run"].as_str())
+        ),
+        None => String::new(),
     }
 }
 

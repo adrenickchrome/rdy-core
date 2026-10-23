@@ -107,12 +107,9 @@ fn one_line(i: &Value) -> String {
     )
 }
 
-/// `<id>  <status>  <actor>[/<run>]  <view>  <area or -> <n> block(s)  until <expires_at>  <angle>`.
+/// `<id>  <status>  <actor>[ (run <run>)]  <view>  <area or -> <n> block(s)  until <expires_at>  <angle>`.
 fn list_line(i: &Value) -> String {
-    let who = match i["run"].as_str() {
-        Some(run) => format!("{}/{run}", text(&i["actor"])),
-        None => text(&i["actor"]).to_string(),
-    };
+    let who = rdy_engine::identity::actor_run_text(text(&i["actor"]), i["run"].as_str());
     format!(
         "{}  {}  {}  {}  {} {} block(s)  until {}  {}",
         text(&i["id"]),

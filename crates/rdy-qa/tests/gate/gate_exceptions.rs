@@ -217,7 +217,7 @@ fn di17_every_approval_path_waits_for_the_exceptions() {
             "approve",
             &pref,
             "--relayed-by",
-            "agent:relay/r1",
+            "agent:relay",
             "--evidence",
             "Yes, land it.",
         ],

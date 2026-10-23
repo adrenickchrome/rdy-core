@@ -16,7 +16,7 @@ struct Seed {
 }
 
 /// Seeded in this process with the clock pinned: a claim created and landed (tagged v0.1.0), then
-/// updated by agent:a/ra implementing a decision, and landed.
+/// updated by agent:a (run ra) implementing a decision, and landed.
 fn seeded() -> (Served, Seed) {
     let s = Served::new();
     let _clock = pin_clock(1_791_190_800_000);
@@ -88,7 +88,7 @@ fn blame1_show_prints_the_last_change_with_its_justification() {
     assert_eq!(
         lines[1],
         format!(
-            "last change: {} by agent:a/ra at {AT}, implements {}, landed {}",
+            "last change: {} by agent:a (run ra) at {AT}, implements {}, landed {}",
             &x.change[..12],
             x.dec,
             &x.landing[..12]
@@ -134,7 +134,7 @@ fn blame1_show_blame_lists_every_version_newest_first() {
         .unwrap_or_else(|| panic!("{out}"));
     let want = [
         format!(
-            "  {}  update  {}  agent:a/ra  {AT}  implements {}",
+            "  {}  update  {}  agent:a (run ra)  {AT}  implements {}",
             &v2[..12],
             &x.change[..12],
             x.dec
@@ -271,7 +271,7 @@ fn df7_blame_omits_relay() {
             "approve",
             &pref,
             "--relayed-by",
-            "agent:writer-a/r1",
+            "agent:writer-a",
             "--evidence",
             "yes, land it",
         ],
@@ -283,12 +283,15 @@ fn df7_blame_omits_relay() {
         .find(|l| l.trim_start().starts_with("landed "))
         .unwrap_or_else(|| panic!("{out}"));
     assert!(
-        landed.ends_with(", relayed by agent:writer-a/r1"),
+        landed.ends_with(", relayed by agent:writer-a (run r1)"),
         "{landed}"
     );
     let log = text(&s, &["log"]);
     let first = log.lines().next().unwrap();
-    assert!(first.contains("relayed by agent:writer-a/r1"), "{log}");
+    assert!(
+        first.contains("relayed by agent:writer-a (run r1)"),
+        "{log}"
+    );
     let (ok, v) = s.json(&["--json", "show", &claim, "--blame"]);
     assert!(ok, "{v}");
     assert_eq!(

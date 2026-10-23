@@ -88,7 +88,8 @@ pub struct DismissRequest {
     pub question: Option<String>,
     /// Where the person said it (default: `mcp` over MCP, `cli` at the command line).
     pub session_ref: Option<String>,
-    /// The agent that relays the dismissal at the command line, as `actor[/run]`.
+    /// The agent that relays the dismissal at the command line: its actor alone (the relay
+    /// records the session's run).
     pub relayed_by: Option<String>,
 }
 
@@ -124,7 +125,8 @@ pub struct AcceptRequest {
     pub question: Option<String>,
     /// Where the person said it (default: `mcp` for an agent session, `cli` for a human one).
     pub session_ref: Option<String>,
-    /// The agent that relays the answer at the command line, as `actor[/run]`.
+    /// The agent that relays the answer at the command line: its actor alone (the relay records
+    /// the session's run).
     pub relayed_by: Option<String>,
 }
 

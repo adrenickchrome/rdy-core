@@ -111,7 +111,7 @@ fn se8_an_agent_accepts_only_by_relaying_a_persons_words() {
         r.accept_advice(&ag("w"), "human:qa", by)
             .unwrap_err()
             .message,
-        "agent:w relays only as itself, not as agent:other"
+        "agent:w (run w) relays only as itself, not as agent:other"
     );
     assert_eq!(
         one(&r, TensionKind::Semantic).severity,
@@ -138,8 +138,14 @@ fn se8_an_agent_accepts_only_by_relaying_a_persons_words() {
     // di8 (D-67ZN7): the person accepted; the agent relayed as itself
     let acc = j.accepted.unwrap();
     assert_eq!(
-        (acc.actor.as_str(), acc.relayed_by.as_deref()),
-        ("human:qa", Some("agent:w/w"))
+        (acc.actor.as_str(), acc.relayed_by),
+        (
+            "human:qa",
+            Some(ActorRun {
+                actor: "agent:w".into(),
+                run: Some("w".into())
+            })
+        )
     );
     assert_eq!(
         (acc.evidence.as_deref(), acc.session_ref.as_deref()),
@@ -374,7 +380,10 @@ fn se8_rdy_resolve_relays_an_acceptance_from_chat() {
             Some("yes, block it"),
             Some("Block on it?"),
             Some("mcp"),
-            Some("agent:w/w".to_string())
+            Some(ActorRun {
+                actor: "agent:w".into(),
+                run: Some("w".into())
+            })
         ),
         "di8 (D-67ZN7): the person accepted; the agent relayed as itself"
     );
@@ -516,8 +525,9 @@ fn se8_an_acceptance_binds_to_the_two_texts_in_every_view() {
 }
 
 /// FR1 (finding 4): session_ref takes at most 256 characters, as a view name does. di8
-/// (D-67ZN7): relayed_by is the relaying agent itself, so no length rule is left for it: any
-/// other text is refused, and a person names no relayer.
+/// (D-67ZN7): relayed_by is the relaying agent's own actor: an overlong one is outside the
+/// actor form (a bounded refusal, D-ME2C0), another actor is refused, and a person names no
+/// relayer.
 #[test]
 fn se8_session_ref_takes_at_most_256_characters_and_relayed_by_is_the_agent() {
     let (_d, mut r, _s, _tn, p) = judged(true);
@@ -539,9 +549,23 @@ fn se8_session_ref_takes_at_most_256_characters_and_relayed_by_is_the_agent() {
     assert_eq!(
         (e.code, e.message),
         (
-            E_PERMISSION,
-            format!("agent:w relays only as itself, not as {long_by}")
+            E_BAD_INPUT,
+            format!(
+                "the actor {:?} is not in rdy's actor form",
+                format!("{}\u{2026}", &long_by[..80])
+            )
         )
+    );
+    let mut by = chat(&p);
+    by.relayed_by = Some("agent:w/w".into());
+    let e = r.accept_advice(&ag("w"), "human:qa", by).unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        (
+            E_PERMISSION,
+            "agent:w (run w) relays only as itself, not as agent:w/w"
+        ),
+        "the actor joined to its run is another actor"
     );
     let mut by = direct(&p);
     by.evidence = Some("yes".into());
@@ -553,7 +577,7 @@ fn se8_session_ref_takes_at_most_256_characters_and_relayed_by_is_the_agent() {
     r.accept_advice(&ag("w"), "human:qa", ok).unwrap();
     let (_d2, mut r2, _s2, _tn2, p2) = judged(true);
     let mut by = chat(&p2);
-    by.relayed_by = Some("agent:w/w".into());
+    by.relayed_by = Some("agent:w".into());
     r2.accept_advice(&ag("w"), "human:qa", by).unwrap();
 }
 

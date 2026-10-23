@@ -1077,7 +1077,7 @@ fn cp8_reader_and_view_owner_guards_precede_write() {
         assert_eq!(log_state(&r), before);
         let e = r.answer_plan(&agent("r2"), "r1", answers).unwrap_err();
         assert_eq!(e.code, E_VIEW_OWNER, "{e}");
-        assert_eq!(e.message, "view \"r1\" is owned by agent:qa/r1");
+        assert_eq!(e.message, "view \"r1\" is owned by agent:qa (run r1)");
         assert_eq!(log_state(&r), before);
         let e = r.answer_plan(&owner, "work", answers).unwrap_err();
         assert_eq!(e.code, E_VIEW_OWNER, "{e}");

@@ -393,10 +393,7 @@ fn show_text(v: &Value) -> String {
     if let Some(rows) = v["inflight"].as_array().filter(|a| !a.is_empty()) {
         out.push_str("\nin flight:");
         for c in rows {
-            let who = match c["run"].as_str() {
-                Some(run) => format!("{}/{run}", text(&c["actor"])),
-                None => text(&c["actor"]).to_string(),
-            };
+            let who = rdy_engine::identity::actor_run_text(text(&c["actor"]), c["run"].as_str());
             let views: Vec<&str> = c["views"]
                 .as_array()
                 .into_iter()
@@ -707,7 +704,7 @@ mod tests {
         ]});
         let t = show_text(&v);
         assert!(
-            t.ends_with("\nin flight:\n  abababababab agent:a/ra in a, b; intent in-0123456789ab; alternative x of as-0123456789ab; proposed in P-0123456789ab@1\n  efefefefefef human:qa in c"),
+            t.ends_with("\nin flight:\n  abababababab agent:a (run ra) in a, b; intent in-0123456789ab; alternative x of as-0123456789ab; proposed in P-0123456789ab@1\n  efefefefefef human:qa in c"),
             "{t}"
         );
         // absent (another scope, or no in-flight change writes the block): no block

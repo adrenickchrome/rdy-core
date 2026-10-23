@@ -120,8 +120,11 @@ fn cview1_new_fork_include_exclude_show_ls_compare_close_own_undo() {
     );
     let (ok, out) = text(&s, &["undo", "--view", "a"]);
     assert!(ok && out.starts_with("undid exclude"), "{out}");
-    let (ok, out) = text(&s, &["view", "own", "a", "agent:z/r9"]);
-    assert!(ok && out.trim_end().ends_with("owner agent:z/r9"), "{out}");
+    let (ok, out) = text(&s, &["view", "own", "a", "agent:z", "--run", "r9"]);
+    assert!(
+        ok && out.trim_end().ends_with("owner agent:z (run r9)"),
+        "{out}"
+    );
     let (ok, v) = s.json_as("agent:a", Some("r1"), &["--json", "undo", "--view", "a"]);
     assert!(
         !ok && v["code"] == "E_VIEW_OWNER",

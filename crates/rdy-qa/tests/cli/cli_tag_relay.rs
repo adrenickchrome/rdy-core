@@ -69,7 +69,7 @@ fn di9_rdy_tag_relays_from_an_agent_session() {
     let (ok, out) = text(&s.rdy_as(
         "agent:relay",
         Some("r1"),
-        &["tag", "v0.1.0", "--relayed-by", "agent:relay/r1"],
+        &["tag", "v0.1.0", "--relayed-by", "agent:relay"],
     ));
     assert!(!ok && out.contains("--evidence"), "{out}");
     let (ok, out) = text(&s.rdy_as(
@@ -104,7 +104,7 @@ fn di9_rdy_tag_relays_from_an_agent_session() {
             "-m",
             "first",
             "--relayed-by",
-            "agent:relay/r1",
+            "agent:relay",
             "--evidence",
             "yes, tag it",
             "--question",
@@ -116,7 +116,9 @@ fn di9_rdy_tag_relays_from_an_agent_session() {
     assert!(ok, "{out}");
     assert!(
         out.starts_with("version v0.1.0 → landing ")
-            && out.trim_end().ends_with(", relayed by agent:relay/r1"),
+            && out
+                .trim_end()
+                .ends_with(", relayed by agent:relay (run r1)"),
         "{out}"
     );
     let (ok, v) = s.json(&["--json", "fsck"]);

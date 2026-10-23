@@ -11,12 +11,13 @@ fn short(h: &str) -> &str {
     &h[..h.len().min(12)]
 }
 
-/// `actor`, or `actor/run` when the run is set and is not the human's `cli`.
+/// `<actor> (run <run>)` when the run is set and is not the human's `cli`, else the actor
+/// alone (D-PWB82: the actor and the run are never joined into one string).
 pub(crate) fn who(author: &Value) -> String {
-    match author["run"].as_str() {
-        Some(run) if run != rdy_engine::HUMAN_RUN => format!("{}/{run}", s(author, "actor")),
-        _ => s(author, "actor").to_string(),
-    }
+    let run = author["run"]
+        .as_str()
+        .filter(|run| *run != rdy_engine::HUMAN_RUN);
+    rdy_engine::identity::actor_run_text(s(author, "actor"), run)
 }
 
 /// `ms` as RFC 3339 UTC to the second; `?` when the reply has no integer time.
@@ -185,7 +186,7 @@ mod tests {
             "proposed_by": {"actor": "agent:a", "run": "ra"}});
         assert_eq!(
             log_head_line(&row),
-            "abcdef012345  ?  T  proposed by agent:a/ra  approved by human:qa"
+            "abcdef012345  ?  T  proposed by agent:a (run ra)  approved by human:qa"
         );
     }
 
@@ -210,7 +211,9 @@ mod tests {
             last_change_line(&entry(Some(json!({"actor": "human:imp", "run": "r9"})))).unwrap();
         assert!(
             run.contains("at 2026-10-09T10:00:00Z")
-                && run.contains(", imported by human:imp/r9, implements d-1, landed fedcba987654"),
+                && run.contains(
+                    ", imported by human:imp (run r9), implements d-1, landed fedcba987654"
+                ),
             "{run}"
         );
         let human =
@@ -239,7 +242,7 @@ mod tests {
         let text = blame_text(&reply);
         let first = text.lines().nth(2).unwrap();
         assert!(
-            first.ends_with("implements d-1  imported by human:imp/r9"),
+            first.ends_with("implements d-1  imported by human:imp (run r9)"),
             "{first}"
         );
         let reply = json!({"history": [entry(Some(json!({"actor": "human:imp", "run": null})))]});
@@ -291,7 +294,7 @@ mod tests {
             assert_eq!(
                 last_change_line(&e).unwrap(),
                 format!(
-                    "last change: 0123456789ab by agent:a/r1 at 2026-10-09T10:00:00Z, {text}, \
+                    "last change: 0123456789ab by agent:a (run r1) at 2026-10-09T10:00:00Z, {text}, \
                      landed fedcba987654"
                 )
             );
@@ -300,7 +303,7 @@ mod tests {
             assert_eq!(
                 first,
                 format!(
-                    "  aaaaaaaaaaaa  update  0123456789ab  agent:a/r1  2026-10-09T10:00:00Z  {text}"
+                    "  aaaaaaaaaaaa  update  0123456789ab  agent:a (run r1)  2026-10-09T10:00:00Z  {text}"
                 )
             );
         }
@@ -317,8 +320,9 @@ mod tests {
         e["landing"]["relayed_by"] = json!({"actor": "agent:w", "run": "r1"});
         let relayed = blame_text(&json!({"history": [e.clone()]}));
         assert!(
-            relayed
-                .ends_with("approved by human:qa at 2026-10-09T10:00:00Z, relayed by agent:w/r1"),
+            relayed.ends_with(
+                "approved by human:qa at 2026-10-09T10:00:00Z, relayed by agent:w (run r1)"
+            ),
             "{relayed}"
         );
         // final review M3: the object keeps a `cli` run; the text names the actor alone, as

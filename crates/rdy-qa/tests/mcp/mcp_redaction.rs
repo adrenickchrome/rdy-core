@@ -39,7 +39,7 @@ fn secret_project() -> (tempfile::TempDir, String) {
     (dir, id)
 }
 
-/// The daemon `redact` op's reply to `args`, for the agent session `agent:a/r1`, in process.
+/// The daemon `redact` op's reply to `args`, for the agent session `agent:a` (run `r1`), in process.
 fn daemon_reply(dir: &Path, args: Value) -> Value {
     let local = Local::new(Rdy::open(dir).unwrap());
     let s = Session::agent("agent:a".into(), Some("r1".into()), rdy_model::Role::Writer).unwrap();
@@ -269,7 +269,10 @@ fn rdx12_reader_dry_run_and_owned_view_rules_are_preserved() {
         w["view"] = json!(view);
         let (code, message, _) = refused(c.call("rdy_redact", w));
         assert_eq!(code, "E_VIEW_OWNER", "{view}");
-        assert_eq!(message, "view \"r1\" is owned by agent:a/r1", "{view}");
+        assert_eq!(
+            message, "view \"r1\" is owned by agent:a (run r1)",
+            "{view}"
+        );
     }
     // a dry run names a view only for the record: its report scans the whole store
     let mut d = dry.clone();

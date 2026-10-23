@@ -33,7 +33,7 @@ fn mint1_cli_post_list_withdraw() {
     let o = s.rdy(&["intent", "list"]);
     let text = String::from_utf8_lossy(&o.stdout).to_string();
     assert!(
-        text.contains(&id) && text.contains("agent:a/ra") && text.contains("fees"),
+        text.contains(&id) && text.contains("agent:a (run ra)") && text.contains("fees"),
         "{text}"
     );
     let (ok, v) = s.json(&["--json", "intent", "withdraw", &id]);

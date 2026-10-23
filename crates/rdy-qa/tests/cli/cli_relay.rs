@@ -57,7 +57,7 @@ fn relay1_a_relayed_approval_round_trips_in_json_and_log_and_fsck_accepts_it() {
             "approve",
             &pref,
             "--relayed-by",
-            "agent:relay/run-7",
+            "agent:relay",
             "--evidence",
             "yes, land it",
             "--question",
@@ -284,7 +284,7 @@ fn logj1_log_text_shows_the_version_and_the_relay_and_tags_json_carries_the_tag_
             "approve",
             &pref,
             "--relayed-by",
-            "agent:relay/run-7",
+            "agent:relay",
             "--evidence",
             "yes",
             "--question",
@@ -297,7 +297,7 @@ fn logj1_log_text_shows_the_version_and_the_relay_and_tags_json_carries_the_tag_
     let lines: Vec<&str> = text.lines().collect();
     assert!(
         lines[0].contains(&format!("approved {pref}"))
-            && lines[0].contains("relayed by agent:relay/run-7"),
+            && lines[0].contains("relayed by agent:relay (run run-7)"),
         "{text}"
     );
     assert_eq!(
@@ -444,12 +444,14 @@ fn msw2_the_approve_op_refuses_an_empty_relay_actor_run_or_session_ref() {
         cwd: d.path(),
         agent: &rdy_engine::signing_crypto::UnavailableAgent,
     };
-    // an empty actor or run is never the session's own (D-HA7YZ)
+    // a relay flag outside the actor form is the grammar's refusal, another actor is not the
+    // session's own (D-HA7YZ, D-PWB82), and an empty session reference is refused
     for (by, sref, code) in [
-        ("agent:r/", None, E_PERMISSION),
-        ("  ", None, E_PERMISSION),
-        ("agent:r/x", Some(""), E_BAD_INPUT),
-        ("agent:r/x", Some("  "), E_BAD_INPUT),
+        ("agent:r/", None, E_BAD_INPUT),
+        ("  ", None, E_BAD_INPUT),
+        ("agent:r/x", None, E_PERMISSION),
+        ("agent:r", Some(""), E_BAD_INPUT),
+        ("agent:r", Some("  "), E_BAD_INPUT),
     ] {
         let mut args = json!({"proposal": pref, "relayed_by": by, "evidence": "yes"});
         if let Some(sr) = sref {
@@ -461,7 +463,7 @@ fn msw2_the_approve_op_refuses_an_empty_relay_actor_run_or_session_ref() {
     let v = dispatch(
         &cx,
         "approve",
-        json!({"proposal": pref, "relayed_by": "agent:r/x", "evidence": "yes"}),
+        json!({"proposal": pref, "relayed_by": "agent:r", "evidence": "yes"}),
     )
     .unwrap();
     assert_eq!(v["assurance"], "relayed");
@@ -545,13 +547,13 @@ fn df2_an_agent_relays_only_as_itself_and_never_alone() {
     assert!(!ok);
     refused(
         &v,
-        "agent:writer-a/r1 relays only as itself, not as agent:other",
+        "agent:writer-a (run r1) relays only as itself, not as agent:other",
     );
     assert_eq!(
         v["fix"], "pass --relayed-by agent:writer-a with the person's words in --evidence",
         "{v}"
     );
-    // (c) its own actor, another run
+    // (c) its own actor joined to another run: another actor, never split
     let (ok, v) = s.json_as(
         "agent:writer-a",
         Some("r1"),
@@ -560,7 +562,18 @@ fn df2_an_agent_relays_only_as_itself_and_never_alone() {
     assert!(!ok);
     refused(
         &v,
-        "agent:writer-a/r1 relays only as itself, not as agent:writer-a/r2",
+        "agent:writer-a (run r1) relays only as itself, not as agent:writer-a/r2",
+    );
+    // (c') its own actor joined to its own run: refused too, the flag names the actor alone
+    let (ok, v) = s.json_as(
+        "agent:writer-a",
+        Some("r1"),
+        &relay_args(&pref, "agent:writer-a/r1"),
+    );
+    assert!(!ok);
+    refused(
+        &v,
+        "agent:writer-a (run r1) relays only as itself, not as agent:writer-a/r1",
     );
     // (d) no evidence: clap pairs the flags, as today
     let o = s.rdy_as(
@@ -643,11 +656,7 @@ fn fix_flag(v: &Value) -> String {
 #[test]
 fn df2_an_actor_with_a_slash_relays_as_itself() {
     // an agent actor may contain '/' (Session::agent refuses it only in a run)
-    for (by, no_daemon) in [
-        ("agent:a/b", false),
-        ("agent:a/b/r1", false),
-        ("agent:a/b", true),
-    ] {
+    for (by, no_daemon) in [("agent:a/b", false), ("agent:a/b", true)] {
         let (s, pref) = proposed();
         let mut args = if no_daemon {
             vec!["--no-daemon"]
@@ -673,15 +682,20 @@ fn df2_an_actor_with_a_slash_relays_as_itself() {
             "{by}: the record is the session's actor and run"
         );
     }
-    // with no run, only the bare actor is its own spelling
+    // the actor joined to a run is outside the actor form, with a run or without one
     let (s, pref) = proposed();
-    let (ok, v) = s.json_as("agent:a/b", None, &relay_args(&pref, "agent:a/b/r1"));
-    assert!(!ok);
-    assert_eq!(v["code"], "E_PERMISSION", "{v}");
-    assert_eq!(
-        v["message"], "agent:a/b relays only as itself, not as agent:a/b/r1",
-        "{v}"
-    );
+    for run in [Some("r1"), None] {
+        let (ok, v) = s.json_as("agent:a/b", run, &relay_args(&pref, "agent:a/b/r1"));
+        assert!(!ok);
+        assert_eq!(
+            (v["code"].as_str(), v["message"].as_str()),
+            (
+                Some("E_BAD_INPUT"),
+                Some("the actor \"agent:a/b/r1\" is not in rdy's actor form")
+            ),
+            "{v}"
+        );
+    }
     let (ok, v) = s.json_as("agent:a/b", None, &relay_args(&pref, "agent:a/b"));
     assert!(ok, "{v}");
     let (_, rows) = s.json(&["--json", "log"]);
@@ -691,12 +705,12 @@ fn df2_an_actor_with_a_slash_relays_as_itself() {
     );
     // a prefix of the actor is another actor
     let (s, pref) = proposed();
-    for by in ["agent:a", "agent:a/b/r2", "agent:a/r1"] {
+    for by in ["agent:a", "agent:a/r1"] {
         let (ok, v) = s.json_as("agent:a/b", Some("r1"), &relay_args(&pref, by));
         assert!(!ok, "{by}: {v}");
         assert_eq!(
             v["message"],
-            format!("agent:a/b/r1 relays only as itself, not as {by}"),
+            format!("agent:a/b (run r1) relays only as itself, not as {by}"),
             "{v}"
         );
     }
@@ -709,8 +723,8 @@ fn df2_a_refused_relay_s_fix_when_followed_lands() {
         ("agent:writer-a", Some("r1"), "agent:writer-a/r2"),
         ("agent:writer-b", None, "agent:writer-b/r9"),
         ("agent:a/b", Some("r1"), "agent:a"),
-        ("agent:a/b", Some("r1"), "agent:a/b/r2"),
-        ("agent:a/b", None, "agent:a/b/r1"),
+        ("agent:a/b", Some("r1"), "agent:a/c"),
+        ("agent:a/b", None, "agent:b"),
     ] {
         let (s, pref) = proposed();
         let (ok, v) = s.json_as(actor, run, &relay_args(&pref, wrong));
@@ -743,7 +757,7 @@ fn df2_the_approve_reply_names_the_recorded_relayer() {
         ],
     ));
     assert!(ok, "{text}{err}");
-    assert!(text.contains(", relayed by agent:w/rb"), "{text}");
+    assert!(text.contains(", relayed by agent:w (run rb)"), "{text}");
     let (_, rows) = s.json(&["--json", "log"]);
     assert_eq!(
         rows[0]["relayed_by"],

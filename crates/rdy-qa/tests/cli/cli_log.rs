@@ -7,7 +7,7 @@ use serde_json::{Value, from_value, json};
 const AT: &str = "2026-10-05T09:00:00Z";
 
 /// Seeded with the clock pinned: landing 1 proposed and approved by the human; landing 2 proposed
-/// by agent:a/ra, approved by the human, tagged v1.0.0. Returns (landing 1, landing 2), full hashes.
+/// by agent:a (run ra), approved by the human, tagged v1.0.0. Returns (landing 1, landing 2), full hashes.
 fn seeded() -> (Served, String, String) {
     let s = Served::new();
     let _clock = pin_clock(1_791_190_800_000);
@@ -67,7 +67,7 @@ fn logt1_log_text_shows_the_time_the_proposer_and_the_approver() {
     assert_eq!(
         heads[0],
         format!(
-            "{}  {AT}  Agent work  proposed by agent:a/ra  {}  [v1.0.0]",
+            "{}  {AT}  Agent work  proposed by agent:a (run ra)  {}  [v1.0.0]",
             &l2[..12],
             approved(&rows[0])
         )

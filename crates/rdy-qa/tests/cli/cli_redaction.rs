@@ -432,7 +432,7 @@ fn rdx13_reader_dry_run_and_owned_view_rules_are_preserved() {
     );
     let e = error_of(&o);
     assert_eq!(e["code"], "E_VIEW_OWNER", "{e}");
-    assert_eq!(e["message"], "view \"r1\" is owned by agent:a/r1");
+    assert_eq!(e["message"], "view \"r1\" is owned by agent:a (run r1)");
     assert_eq!(seq(&s), before);
 }
 

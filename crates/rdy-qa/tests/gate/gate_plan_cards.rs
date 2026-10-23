@@ -600,7 +600,7 @@ fn cp12_every_approval_path_waits_for_deferral_answer() {
             "approve",
             &pref,
             "--relayed-by",
-            "agent:relay/r1",
+            "agent:relay",
             "--evidence",
             "Yes, land it.",
         ],

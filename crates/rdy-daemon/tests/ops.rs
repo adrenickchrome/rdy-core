@@ -1139,7 +1139,7 @@ fn rdx5_daemon_redact_preserves_roles_and_errors() {
     w["view"] = json!("r1");
     let err = dispatch(&cx(&e, &other, d.path()), "redact", w).unwrap_err();
     assert_eq!(err.code, "E_VIEW_OWNER", "{err}");
-    assert_eq!(err.message, "view \"r1\" is owned by agent:a/r1");
+    assert_eq!(err.message, "view \"r1\" is owned by agent:a (run r1)");
     // the strict args: a near key names the field, in the args' order
     let s = human();
     let c = cx(&e, &s, d.path());

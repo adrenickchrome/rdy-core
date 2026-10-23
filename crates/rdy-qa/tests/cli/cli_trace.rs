@@ -261,7 +261,7 @@ fn rf12_trace_text_has_the_decided_lines() {
     };
     let (d1, d2) = (dec(&f.d1), dec(&f.d2));
     let who = |a: &Value| match a["run"].as_str() {
-        Some(r) if r != "cli" => format!("{}/{r}", a["actor"].as_str().unwrap()),
+        Some(r) if r != "cli" => format!("{} (run {r})", a["actor"].as_str().unwrap()),
         _ => a["actor"].as_str().unwrap().to_string(),
     };
     let introduced = &v["introduced"];
@@ -312,7 +312,7 @@ fn rf12_trace_text_has_the_decided_lines() {
             short(&d2["accepted_in"]["id"]),
             d2["accepted_in"]["proposal"].as_str().unwrap()
         ),
-        "  relayed by agent:relay/r-9".to_string(),
+        "  relayed by agent:relay (run r-9)".to_string(),
         format!(
             "premise {} finding: {}",
             f.finding,

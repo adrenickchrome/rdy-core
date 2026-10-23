@@ -257,7 +257,7 @@ fn di8_answering_a_question_writes_a_decision_that_answers_it() {
     assert_eq!(str_field(&d, "authority_basis"), Some("direct_ruling"));
     assert_eq!(
         str_field(&d, "attested_by"),
-        Some("human:qa (relayed by agent:relay/r1: \"Finance, please\")")
+        Some("human:qa (relayed by agent:relay (run r1): \"Finance, please\")")
     );
     assert_eq!(answers(&d), vec![q.to_string()]);
     let change = r.store().reader().change(&a.targets[0]).unwrap();
@@ -472,13 +472,13 @@ fn di8_accepting_the_advice_once_blocks_every_advised_tension() {
         assert_eq!(
             (
                 acc.actor.as_str(),
-                acc.relayed_by.as_deref(),
+                acc.relayed_by.clone(),
                 acc.evidence.as_deref(),
                 acc.session_ref.as_deref()
             ),
             (
                 FOUNDER,
-                Some("agent:relay/r1"),
+                Some(relayer()),
                 Some("Yes, they block"),
                 Some("chat-8")
             ),
@@ -923,7 +923,7 @@ fn di8_an_agent_relays_an_acceptance_as_itself_at_the_cli() {
         (v["code"].as_str(), v["message"].as_str()),
         (
             Some("E_PERMISSION"),
-            Some("agent:w relays only as itself, not as agent:other")
+            Some("agent:w (run r7) relays only as itself, not as agent:other")
         ),
         "{v}"
     );
@@ -948,7 +948,7 @@ fn di8_an_agent_relays_an_acceptance_as_itself_at_the_cli() {
     // the agent relays as itself, with the person's words
     let a = accept(&[
         "--relayed-by",
-        "agent:w/r7",
+        "agent:w",
         "--evidence",
         "Yes, block on it",
         "--question",
@@ -966,13 +966,13 @@ fn di8_an_agent_relays_an_acceptance_as_itself_at_the_cli() {
     assert_eq!(
         (
             acc["actor"].as_str(),
-            acc["relayed_by"].as_str(),
+            &acc["relayed_by"],
             acc["evidence"].as_str(),
             acc["session_ref"].as_str()
         ),
         (
             Some("human:qa"),
-            Some("agent:w/r7"),
+            &json!({"actor": "agent:w", "run": "r7"}),
             Some("Yes, block on it"),
             Some("chat-9")
         ),

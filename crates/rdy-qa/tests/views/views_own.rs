@@ -1,7 +1,7 @@
 //! own1: non-human sessions include, exclude, undo and close only in views they own; a human
 //! does all of these anywhere; `own` and `close --stale` are the human's.
 use rdy_engine::engine::{Engine, Local};
-use rdy_engine::view_api::{ViewRequest, run_view};
+use rdy_engine::view_api::{OwnerInput, ViewRequest, run_view};
 use rdy_engine::*;
 use rdy_qa::fixtures::*;
 use rdy_qa::invariants::check;
@@ -11,6 +11,13 @@ use serde_json::json;
 
 fn claim(parent: &str, body: &str) -> serde_json::Value {
     json!([{"op": "create", "type": "claim", "parent": parent, "body": body}])
+}
+/// A new owner: its actor and run apart (D-PWB82).
+fn owner(actor: &str, run: Option<&str>) -> OwnerInput {
+    OwnerInput {
+        actor: actor.into(),
+        run: run.map(str::to_string),
+    }
 }
 fn head(r: &Rdy, v: &str) -> String {
     r.read().view_head(v).unwrap().head.to_string()
@@ -47,7 +54,7 @@ fn own1_an_agent_cannot_include_exclude_undo_or_close_in_another_sessions_view()
         .unwrap_err();
     assert_eq!(e.code, E_VIEW_OWNER, "{e}");
     assert!(
-        e.message.contains("agent:a/r1") && e.fix.contains("fork"),
+        e.message == "view \"a\" is owned by agent:a (run r1)" && e.fix.contains("fork"),
         "{e}"
     );
     let e = r
@@ -129,10 +136,12 @@ fn own1_an_unowned_view_refuses_agents_ops_until_a_commit_claims_it() {
 #[test]
 fn own1_own_is_human_only_and_reassigns_or_clears_and_undo_restores() {
     let (_d, mut r, section, a, _b, _ca, _cb) = two_agents();
-    let e = r.view_own(&a, "a", Some("agent:b/r2")).unwrap_err();
+    let e = r
+        .view_own(&a, "a", Some(&owner("agent:b", Some("r2"))))
+        .unwrap_err();
     assert_eq!(e.code, E_PERMISSION, "{e}");
     let h = r
-        .view_own(&human_writer(), "a", Some("agent:b/r2"))
+        .view_own(&human_writer(), "a", Some(&owner("agent:b", Some("r2"))))
         .unwrap();
     assert_eq!(
         h.owner,
@@ -170,7 +179,9 @@ fn own1_own_is_human_only_and_reassigns_or_clears_and_undo_restores() {
             run: Some("r1".into())
         })
     );
-    let e = r.view_own(&human_writer(), "a", Some("/r1")).unwrap_err();
+    let e = r
+        .view_own(&human_writer(), "a", Some(&owner("", Some("r1"))))
+        .unwrap_err();
     assert_eq!(e.code, E_BAD_INPUT, "{e}");
     let e = r.view_own(&human_writer(), "nope", None).unwrap_err();
     assert_eq!(e.code, E_NOT_FOUND, "{e}");
@@ -238,7 +249,8 @@ fn own1_an_agent_proposes_only_a_view_it_owns() {
         e.code, E_VIEW_OWNER,
         "a commit claims an unowned view, a proposal does not: {e}"
     );
-    r.view_own(&writer(), "a", Some("agent:a/r1")).unwrap();
+    r.view_own(&writer(), "a", Some(&owner("agent:a", Some("r1"))))
+        .unwrap();
     assert_eq!(r.propose(&a, "a", "t", None).unwrap().version, 1);
     assert_eq!(
         r.propose(&writer(), "a", "t", None).unwrap().version,
@@ -311,7 +323,8 @@ fn own1_work_is_the_humans_view() {
     let e = r.propose(&a, "work", "t", None).unwrap_err();
     assert_eq!(e.code, E_VIEW_OWNER, "{e}");
     // Even an agent-owned (legacy) or unowned `work` stays the human's.
-    r.view_own(&writer(), "work", Some("agent:a/r1")).unwrap();
+    r.view_own(&writer(), "work", Some(&owner("agent:a", Some("r1"))))
+        .unwrap();
     let e = write_as(&mut r, &a, "work", new_doc("w4")).unwrap_err();
     assert_eq!(e.code, E_VIEW_OWNER, "{e}");
     r.view_own(&writer(), "work", None).unwrap();

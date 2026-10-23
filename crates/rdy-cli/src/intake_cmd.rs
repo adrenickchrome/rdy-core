@@ -37,8 +37,8 @@ pub(crate) struct AnswerArgs {
     /// A briefing token, for a question whose decision goes under stable content.
     #[arg(long)]
     brief: Option<String>,
-    /// You, the relaying agent, as actor[/run]; run this under your own RDY_ACTOR. Records the person's answer, relayed.
-    #[arg(long, requires = "evidence")]
+    /// The agent that relays the person's words: your own actor. The run comes from your session. Records the person's answer, relayed.
+    #[arg(long, value_name = "ACTOR", requires = "evidence")]
     relayed_by: Option<String>,
     /// The person's words, quoted. Requires --relayed-by.
     #[arg(long, requires = "relayed_by")]

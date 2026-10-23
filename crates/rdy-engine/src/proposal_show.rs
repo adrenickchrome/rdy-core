@@ -363,14 +363,13 @@ pub fn proposal_text(v: &Value) -> String {
     if let Some(summary) = v["summary"].as_str().filter(|t| !t.is_empty()) {
         out.push_str(&format!("summary: {summary}\n"));
     }
-    let run = v["proposed_by"]["run"]
-        .as_str()
-        .map(|r| format!("/{r}"))
-        .unwrap_or_default();
+    let by = crate::identity::actor_run_text(
+        &s(&v["proposed_by"]["actor"]),
+        v["proposed_by"]["run"].as_str(),
+    );
     out.push_str(&format!(
-        "view {}, proposed by {}{run} at {}\n",
+        "view {}, proposed by {by} at {}\n",
         s(&v["view"]),
-        s(&v["proposed_by"]["actor"]),
         s(&v["proposed_at"])
     ));
     match v["state"].as_str().unwrap_or("") {
@@ -508,7 +507,7 @@ mod tests {
             proposal_text(&v),
             "proposal P-111111111111@2 (version 222222222222): Pins\n\
              summary: Pins record content.\n\
-             view work, proposed by agent:a/r1 at 2026-10-06T10:00:00Z\n\
+             view work, proposed by agent:a (run r1) at 2026-10-06T10:00:00Z\n\
              state: open\n\
              changes: 2 (3 blocks)\n\
              \x20 333333333333 2 block(s): pin content\n\

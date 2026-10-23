@@ -139,6 +139,42 @@ pub fn validate_run(value: &str) -> Result<(), RdyError> {
     Err(run_refusal(value))
 }
 
+/// The fix of an owner actor that is `agent:` and three names: the third is a run, which the
+/// owner names in its own field.
+const OWNER_RUN_FIX: &str = "pass the run with --run";
+
+/// Whether `value` is exactly `agent:` followed by three nonempty slash-separated parts.
+fn is_three_part_agent(value: &str) -> bool {
+    value.strip_prefix("agent:").is_some_and(|rest| {
+        let parts: Vec<&str> = rest.splitn(4, '/').collect();
+        parts.len() == 3 && parts.iter().all(|p| !p.is_empty())
+    })
+}
+
+/// `E_BAD_INPUT` unless `value` is in the actor form, for a new owner's actor (D-PWB82): as
+/// [`validate_actor`], except that a three-part agent (`agent:a/b/c`) is told to pass its run
+/// in the run field. The actor is never split: a run is never parsed out of it.
+pub fn validate_owner_actor(value: &str) -> Result<(), RdyError> {
+    if is_actor(value) {
+        return Ok(());
+    }
+    let e = actor_refusal(value);
+    if is_three_part_agent(value) {
+        return Err(RdyError::new(e.code, e.message, OWNER_RUN_FIX));
+    }
+    Err(e)
+}
+
+/// An actor and its optional run as rdy prints them (D-PWB82): `<actor> (run <run>)`, or the
+/// actor alone when there is no run. Formatting only: it never checks the values, so a stored
+/// identity from before the grammar prints as it was recorded.
+pub fn actor_run_text(actor: &str, run: Option<&str>) -> String {
+    match run {
+        Some(run) => format!("{actor} (run {run})"),
+        None => actor.to_string(),
+    }
+}
+
 /// The most bytes of a value that is not Unicode that its refusal decodes: enough for the
 /// 80-scalar echo and its ellipsis, since each decoded scalar takes at most four bytes.
 const ENV_ECHO_BYTES: usize = 4 * 81;

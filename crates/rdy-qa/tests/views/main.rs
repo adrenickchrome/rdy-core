@@ -9,6 +9,7 @@ mod views_cycles;
 mod views_demo_consequences;
 mod views_gate;
 mod views_gate_consequences;
+mod views_identity;
 mod views_include;
 mod views_invariants;
 mod views_model;
