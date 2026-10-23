@@ -27,7 +27,7 @@ use rdy_schema::supporting::{REFLECTS_LINK, SOURCE};
 use rdy_schema::{Glob, REFLECTS_FIELD, TypeClass};
 use serde::{Serialize, Serializer};
 use std::borrow::Borrow;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 /// The lineage depth a trace walks when none is given.
 pub const TRACE_DEFAULT_DEPTH: u8 = 3;
@@ -260,11 +260,20 @@ pub enum ReaffirmedTrace<S = String, F = FieldValue> {
 
 /// One seal of the scope's chain that names a decision (detail only), as `rdy_plan` lists one.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct SealedPlanTrace {
-    pub landing: String,
-    pub version: String,
+pub struct SealedPlanTrace<H = String> {
+    pub landing: H,
+    pub version: H,
     pub items: usize,
     pub outcomes: BTreeMap<&'static str, usize>,
+}
+
+/// A hash serialized as its hex text, written straight to the serializer (no copy).
+struct HashText<'a>(&'a Hash);
+
+impl Serialize for HashText<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self.0)
+    }
 }
 
 /// One decision of a trace. Authored scalars appear only when the decision holds them.
@@ -526,7 +535,8 @@ fn lineage_of<'g>(g: &'g Graph, id: &BlockId) -> impl Iterator<Item = (&'g Block
     out.chain(inc).filter(move |(n, _)| is_decision(g, n))
 }
 
-/// What the graph walk found: every decision shown at its least depth, the non-decision premises and questions with their least depth and owners, the edges,
+/// What the graph walk found: every decision shown at its least depth over lineage and premise
+/// routes, the non-decision premises and questions with their least depth and owners, the edges,
 /// and the frontier the depth boundary and the unexpanded premises give.
 struct Walk<'g> {
     decisions: BTreeMap<BlockId, u8>,
@@ -581,23 +591,42 @@ fn walk<'g>(
             }
         }
     }
-    // one-step premises of every lineage decision, in (depth, id) order
-    let mut by_depth: Vec<(u8, &BlockId)> = lineage.iter().map(|(i, d)| (*d, i)).collect();
-    by_depth.sort();
-    let mut decisions = lineage.clone();
+    // every decision shown at its least depth: a breadth-first walk over lineage steps between
+    // lineage decisions and one-step premises (depends_on, conditional_on) of lineage decisions.
+    // Only `lineage` (above) decides what expands; a shorter premise route lowers a lineage
+    // decision's shown depth, and its lineage neighbours follow, but expands nothing new.
+    let mut decisions: BTreeMap<BlockId, u8> = BTreeMap::new();
     let mut premises: BTreeMap<BlockId, (u8, BTreeSet<BlockId>)> = BTreeMap::new();
-    for (d, id) in &by_depth {
-        for e in g.outgoing(id).iter().filter(|e| link_is(e, &PREMISES)) {
-            if m.get(&e.to).is_none() || e.to == **id {
+    let mut queue: VecDeque<BlockId> = VecDeque::new();
+    for s in starts {
+        if decisions.insert(s.clone(), 0).is_none() {
+            queue.push_back(s.clone());
+        }
+    }
+    while let Some(id) = queue.pop_front() {
+        if !lineage.contains_key(&id) {
+            continue;
+        }
+        let d = decisions[&id];
+        for (n, _) in lineage_of(g, &id) {
+            if lineage.contains_key(n) && !decisions.contains_key(n) {
+                decisions.insert(n.clone(), d + 1);
+                queue.push_back(n.clone());
+            }
+        }
+        for e in g.outgoing(&id).iter().filter(|e| link_is(e, &PREMISES)) {
+            if m.get(&e.to).is_none() || e.to == id {
                 continue;
             }
             if is_decision(g, &e.to) {
                 if !lineage.contains_key(&e.to) {
                     visited.add(&e.to)?;
-                    let at = decisions.entry(e.to.clone()).or_insert(d + 1);
-                    *at = (*at).min(d + 1);
                     // TASK-507 (2c): an unexpanded decision premise
                     frontier.insert(e.to.clone());
+                }
+                if !decisions.contains_key(&e.to) {
+                    decisions.insert(e.to.clone(), d + 1);
+                    queue.push_back(e.to.clone());
                 }
             } else {
                 visited.add(&e.to)?;
@@ -605,7 +634,7 @@ fn walk<'g>(
                     .entry(e.to.clone())
                     .or_insert((d + 1, BTreeSet::new()));
                 row.0 = row.0.min(d + 1);
-                row.1.insert((*id).clone());
+                row.1.insert(id.clone());
             }
             edges.add(e)?;
         }
@@ -760,19 +789,60 @@ fn zero_outcomes() -> BTreeMap<&'static str, usize> {
     OUTCOMES.iter().map(|o| (o.as_str(), 0)).collect()
 }
 
+/// The bytes `,"sealed_plans":[]` adds to a decision row.
+const SEALS_KEY_BYTES: usize = ",\"sealed_plans\":[]".len();
+
+/// One detail seal row, measured into `bytes` (an array of `before` rows) before its strings are
+/// copied: the row that would pass the cap is refused unbuilt.
+fn seal_row(
+    bytes: &mut ByteBudget,
+    before: usize,
+    landing: &Hash,
+    version: &Hash,
+    items: usize,
+    outcomes: BTreeMap<&'static str, usize>,
+) -> Result<SealedPlanTrace, RdyError> {
+    let measured = SealedPlanTrace {
+        landing: HashText(landing),
+        version: HashText(version),
+        items,
+        outcomes,
+    };
+    bytes.element(before, json_len(&measured))?;
+    Ok(SealedPlanTrace {
+        landing: landing.to_string(),
+        version: version.to_string(),
+        items,
+        outcomes: measured.outcomes,
+    })
+}
+
+/// A decision's seals in the chain: the per-outcome counts, and with detail the rows, oldest
+/// landing first, with the JSON bytes they add to the decision row (already in the budget).
+struct Seals {
+    counts: BTreeMap<&'static str, usize>,
+    rows: Option<Vec<SealedPlanTrace>>,
+    bytes: usize,
+}
+
 /// The seals of `id` whose landing lies in the chain, counted per outcome present (each seal
 /// once per outcome), and with `detail` one row per seal, oldest landing first (log position),
-/// ties by plan hash.
-#[allow(clippy::type_complexity)]
+/// ties by plan hash. Each detail row is counted into `bytes` before it is built, with the
+/// `sealed_plans` key and brackets before the first.
 fn plans_of(
     st: &ReadState,
     id: &BlockId,
     chain: &ChainWrites,
     detail: bool,
-) -> Result<(BTreeMap<&'static str, usize>, Option<Vec<SealedPlanTrace>>), RdyError> {
+    bytes: &mut ByteBudget,
+) -> Result<Seals, RdyError> {
     let reader = st.reader();
     let mut counts = zero_outcomes();
     let mut rows = Vec::new();
+    let start = bytes.0;
+    if detail {
+        bytes.add(SEALS_KEY_BYTES)?;
+    }
     for h in reader.plans_of_decision(id, st.seq())? {
         let plan: Plan = reader.plan(&h)?;
         let Some(seal) = plan.seal else {
@@ -794,33 +864,40 @@ fn plans_of(
             }
         }
         if detail {
+            let row = seal_row(
+                bytes,
+                rows.len(),
+                &seal.landing,
+                &seal.version,
+                seal.items.len(),
+                outcomes,
+            )?;
             let at = reader.landing_location(&seal.landing)?;
-            rows.push((
-                (at, h),
-                SealedPlanTrace {
-                    landing: seal.landing.to_string(),
-                    version: seal.version.to_string(),
-                    items: seal.items.len(),
-                    outcomes,
-                },
-            ));
+            rows.push(((at, h), row));
         }
     }
     if !detail {
-        return Ok((counts, None));
+        return Ok(Seals {
+            counts,
+            rows: None,
+            bytes: 0,
+        });
     }
     rows.sort_by_key(|r| r.0);
-    Ok((counts, Some(rows.into_iter().map(|(_, r)| r).collect())))
+    Ok(Seals {
+        counts,
+        rows: Some(rows.into_iter().map(|(_, r)| r).collect()),
+        bytes: bytes.0 - start,
+    })
 }
 
-/// The borrowed row of decision `b` at `depth`, ready to measure.
+/// The borrowed row of decision `b` at `depth`, ready to measure, without its detail seals.
 fn decision_row<'b>(
     b: &'b Block,
     g: &Graph,
     depth: u8,
     accepted_in: Option<LandingTrace>,
     plans: BTreeMap<&'static str, usize>,
-    sealed_plans: Option<Vec<SealedPlanTrace>>,
     detail: bool,
 ) -> DecisionTrace<&'b str, &'b FieldValue> {
     let f = |k: &str| b.field_str(k);
@@ -851,7 +928,7 @@ fn decision_row<'b>(
         } else {
             None
         },
-        sealed_plans,
+        sealed_plans: None,
     }
 }
 
@@ -1048,10 +1125,15 @@ impl ReadState {
                 Some(c) => Some(landing_trace(self, c, options.detail)?),
                 None => None,
             };
-            let (plans, sealed) = plans_of(self, did, &chain, options.detail)?;
-            let row = decision_row(b, &g, *depth, accepted_in, plans, sealed, options.detail);
-            let len = json_len(&row);
-            bytes.element(decisions.len(), len)?;
+            // the detail seals are counted row by row as they are read; the rest of the row is
+            // measured without them
+            let seals = plans_of(self, did, &chain, options.detail, &mut bytes)?;
+            let mut row = decision_row(b, &g, *depth, accepted_in, seals.counts, options.detail);
+            let base = json_len(&row);
+            bytes.element(decisions.len(), base)?;
+            row.sealed_plans = seals.rows;
+            let len = base + seals.bytes;
+            debug_assert_eq!(len, json_len(&row), "a decision row's measure");
             decisions.push(row.owned(), len);
             decision_ids.push((*depth, (*did).clone()));
         }
@@ -1151,6 +1233,11 @@ impl ReadState {
             question_owners,
         };
         let done = cut.run(&mut frontier);
+        // the hard cap holds for the reply as returned: the frontier the cut grew and the cut
+        // flags count, and a protected reply past the cap is refused
+        if done.total > MAX_TRACE_BYTES {
+            return Err(bytes_limit());
+        }
         reply.decisions = done.decisions;
         reply.premises = done.premises;
         reply.questions = done.questions;
@@ -1164,11 +1251,12 @@ impl ReadState {
     }
 }
 
-/// The token cut (TASK-507 (2a)): over budget, decision rows deeper than zero go first,
-/// greatest (depth, id) first, each with the premise and question rows only removed decisions
-/// owned and the edges no kept row still needs; each removed decision joins the frontier. Past
-/// them the remaining premise and question rows go, greatest (depth, id) first, then the
-/// remaining edges, last first. The depth-zero decisions and the envelope always stay.
+/// The token cut (TASK-507 (2a)): over budget, decision rows deeper than zero go, greatest
+/// (depth, id) first, each with the premise and question rows only removed decisions owned and
+/// the edges no kept row still needs; each removed decision joins the frontier. The depth-zero
+/// decisions, the rows they still own, the edges that join a kept decision to a frontier one and
+/// the envelope always stay: when they alone are over the budget, they are the reply, marked
+/// truncated.
 struct Cut {
     budget: usize,
     /// The reply's exact JSON length so far, without `truncated` and `omitted`.
@@ -1187,6 +1275,8 @@ struct Cut {
 }
 
 struct CutRows {
+    /// The cut reply's exact JSON length, `truncated` and `omitted` included.
+    total: usize,
     decisions: Vec<DecisionTrace>,
     premises: Vec<PremiseTrace>,
     questions: Vec<QuestionTrace>,
@@ -1216,6 +1306,7 @@ impl Cut {
             omitted = self.shorten(frontier);
         }
         CutRows {
+            total: self.total + if truncated { flag_bytes(omitted) } else { 0 },
             decisions: self.decisions.into_kept(),
             premises: self.premises.into_kept(),
             questions: self.questions.into_kept(),
@@ -1316,57 +1407,6 @@ impl Cut {
                 }
             }
         }
-        // then the remaining premise and question rows, greatest (depth, id) first
-        let mut rest: Vec<(u8, &BlockId, u8, usize)> = Vec::new();
-        for (i, p) in self
-            .premises
-            .rows
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| p.kept)
-        {
-            rest.push((p.row.depth, &self.premise_ids[i], 0, i));
-        }
-        for (i, q) in self
-            .questions
-            .rows
-            .iter()
-            .enumerate()
-            .filter(|(_, q)| q.kept)
-        {
-            rest.push((q.row.depth, &self.question_ids[i], 1, i));
-        }
-        rest.sort();
-        let rest: Vec<(BlockId, u8, usize)> = rest
-            .into_iter()
-            .rev()
-            .map(|(_, id, k, i)| (id.clone(), k, i))
-            .collect();
-        for (rid, kind, i) in rest {
-            if self.fits(omitted) {
-                break;
-            }
-            let dropped = if kind == 0 {
-                self.premises.drop_row(i, &mut self.total)
-            } else {
-                self.questions.drop_row(i, &mut self.total)
-            };
-            if dropped && let Some(n) = nodes.get_mut(&rid) {
-                n.kept_rows -= 1;
-            }
-            for &e in edges_of.get(&rid).into_iter().flatten() {
-                if !self.edge_needed(e, &nodes) {
-                    self.edges.drop_row(e, &mut self.total);
-                }
-            }
-        }
-        // then the remaining edges, last first
-        for e in (0..self.edges.len()).rev() {
-            if self.fits(omitted) {
-                break;
-            }
-            self.edges.drop_row(e, &mut self.total);
-        }
         omitted
     }
 
@@ -1382,5 +1422,41 @@ impl Cut {
         let (ka, da, ra) = state(a);
         let (kb, db, rb) = state(b);
         (ka && kb) || (da && rb) || (db && ra)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A detail seal row is measured into the reply's byte budget before its strings are copied
+    /// or it is kept: past the cap nothing is built, and under it the budget grows by exactly
+    /// the row's JSON and its comma.
+    #[test]
+    fn rf11_seal_rows_are_counted_before_they_are_copied() {
+        let (l, v) = (Hash::of(b"landing"), Hash::of(b"version"));
+        let outcomes = || {
+            let mut o = zero_outcomes();
+            o.insert(PlanOutcome::Confirmed.as_str(), 2);
+            o
+        };
+        let mut bytes = ByteBudget(0);
+        let row = seal_row(&mut bytes, 0, &l, &v, 2, outcomes()).unwrap();
+        assert_eq!(bytes.0, json_len(&row));
+        assert_eq!(row.landing, l.to_string());
+        assert_eq!(row.version, v.to_string());
+        let one = bytes.0;
+        let row2 = seal_row(&mut bytes, 1, &l, &v, 2, outcomes()).unwrap();
+        assert_eq!(bytes.0, 2 * one + 1, "the second row adds its comma");
+        assert_eq!(row2, row);
+        let mut full = ByteBudget(MAX_TRACE_BYTES - one);
+        let e = seal_row(&mut full, 1, &l, &v, 2, outcomes()).unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str()),
+            (E_LIMIT, "trace exceeds 16777216 bytes")
+        );
+        let mut exact = ByteBudget(MAX_TRACE_BYTES - one);
+        seal_row(&mut exact, 0, &l, &v, 2, outcomes()).unwrap();
+        assert_eq!(exact.0, MAX_TRACE_BYTES);
     }
 }

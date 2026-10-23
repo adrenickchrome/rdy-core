@@ -322,6 +322,57 @@ impl Lineage {
     }
 }
 
+/// View `o`: R refines A, A refines B, B refines C; R also depends on B (a shorter route to B)
+/// and on prose P, and answers question Q. X, apart, depends on P and answers Q.
+fn overlap() -> (tempfile::TempDir, Rdy, BTreeMap<String, String>) {
+    let (dir, mut r) = project();
+    let w = put(
+        &mut r,
+        "o",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "o", "title": "O", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}},
+            {"op": "create", "type": "prose", "id": "$p", "parent": "$s", "body": "Only on weekdays."},
+            {"op": "create", "type": "question", "id": "$q", "parent": "$s", "fields": {"prompt": "Who signs?"}},
+            dec("$c", "Refunds are signed", json!({})),
+            dec("$b", "Approvers sign refunds", json!({"refines": [{"target": "$c"}]})),
+            dec("$a", "Approvers sign refunds over 100", json!({"refines": [{"target": "$b"}]})),
+            dec("$r", "Two approvers sign refunds over 500", json!({
+                "refines": [{"target": "$a"}],
+                "depends_on": [{"target": "$b"}, {"target": "$p"}],
+                "answers": [{"target": "$q"}]})),
+            dec("$x", "Refunds are logged", json!({
+                "depends_on": [{"target": "$p"}],
+                "answers": [{"target": "$q"}]}))
+        ]),
+    );
+    (dir, r, w)
+}
+
+/// (least endpoint depth, from, to, kind) of each edge of `v`, as the reply orders them.
+fn edge_rows(v: &Value) -> Vec<(u64, String, String, String)> {
+    let depth: BTreeMap<String, u64> = rows(v, "decisions")
+        .into_iter()
+        .chain(rows(v, "premises"))
+        .chain(rows(v, "questions"))
+        .map(|(d, id)| (id, d))
+        .collect();
+    v["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            let (f, t) = (e["from"].as_str().unwrap(), e["to"].as_str().unwrap());
+            (
+                depth[f].min(depth[t]),
+                f.to_string(),
+                t.to_string(),
+                e["kind"]["Link"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
 #[test]
 fn rf11_trace_walks_lineage_premises_and_answers_once() {
     let l = lineage();
@@ -430,6 +481,28 @@ fn rf11_trace_walks_lineage_premises_and_answers_once() {
         rows(&a, "decisions"),
         l.at(&[(0, "A"), (1, "B"), (1, "C"), (2, "E")])
     );
+
+    // overlapping routes: lineage reaches B at 2 (R, A, B), but R's premise reaches it at 1, and
+    // B's lineage neighbour C follows at 2, not 3; a shorter route changes no lineage expansion
+    let (_dir, r, o) = overlap();
+    let i = |k: &str| o[k].clone();
+    let v = trace(&r, &Scope::View("o".into()), &i("$r"), wide(3));
+    let want = sorted(vec![(0, i("$r")), (1, i("$a")), (1, i("$b")), (2, i("$c"))]);
+    assert_eq!(rows(&v, "decisions"), want);
+    assert_eq!(rows(&v, "premises"), vec![(1, i("$p"))]);
+    assert_eq!(rows(&v, "questions"), vec![(1, i("$q"))]);
+    // B was reached by lineage, so it is no unexpanded premise; C has no unvisited neighbour
+    assert_eq!(v["frontier"], json!([]));
+    let mut want = vec![
+        (0, i("$r"), i("$a"), "refines".to_string()),
+        (0, i("$r"), i("$b"), "depends_on".to_string()),
+        (0, i("$r"), i("$p"), "depends_on".to_string()),
+        (0, i("$r"), i("$q"), "answers".to_string()),
+        (1, i("$a"), i("$b"), "refines".to_string()),
+        (1, i("$b"), i("$c"), "refines".to_string()),
+    ];
+    want.sort();
+    assert_eq!(edge_rows(&v), want);
 }
 
 #[test]
@@ -649,24 +722,63 @@ fn rf11_introduction_and_acceptance_are_older_than_history_page() {
         json!([{"op": "update", "id": d2.to_string(), "fields": {"statement": "Plans are reviewed weekly"}}]),
     );
     let (_, l3) = land(&mut r, "w2", "Third");
-    // a later accepted version of D1, landed through the raw writer
-    let mut later = r.read().block(&Scope::Canon, &bid(&d1)).unwrap();
-    let base = later.version_hash();
-    // a re-affirmation is the one change a frozen decision takes
-    later.fields.insert(
-        "reaffirmed".into(),
-        encode_reaffirmed(&BTreeMap::from([(
-            nid("c", 5),
-            Reaffirmation {
-                against: Against::Deleted,
-                reason: "Still holds.".into(),
-            },
-        )])),
+    // more than a history page of later accepted versions of D1 (a re-affirmation is the one
+    // change a frozen decision takes), carried by two later raw landings: 500, then 501
+    let mut lands = Vec::new();
+    for (view, count) in [("w3", 500), ("w4", 501)] {
+        let mut later = r.read().block(&Scope::Canon, &bid(&d1)).unwrap();
+        let mut deps = r.read().included(view).to_vec();
+        for n in 0..count {
+            let base = later.version_hash();
+            later.fields.insert(
+                "reaffirmed".into(),
+                encode_reaffirmed(&BTreeMap::from([(
+                    nid("c", 5),
+                    Reaffirmation {
+                        against: Against::Deleted,
+                        reason: format!("Still holds ({view} {n})."),
+                    },
+                )])),
+            );
+            let c = r
+                .store_mut()
+                .commit_to_view(
+                    view,
+                    Change {
+                        view: view.into(),
+                        ops: vec![Op::Update {
+                            base,
+                            block: later.clone(),
+                        }],
+                        deps: deps.clone(),
+                        provenance: prov(),
+                        justification: None,
+                        message: String::new(),
+                        links: Default::default(),
+                        read_identity: None,
+                    },
+                )
+                .unwrap();
+            deps = vec![c];
+        }
+        r.invalidate();
+        let v = raw_propose(&mut r, view);
+        lands.push(raw_land(&mut r, &v));
+    }
+    assert_ne!(l3, lands[0]);
+    assert_ne!(lands[0], lands[1]);
+    let d1_versions = r
+        .read()
+        .history(&Scope::Canon, &bid(&d1), HISTORY_MAX)
+        .unwrap();
+    assert!(d1_versions.more, "D1 has more than a history page");
+    assert!(
+        d1_versions
+            .entries
+            .iter()
+            .all(|e| e.landing.as_ref().is_none_or(|l| l.id != l1.to_string())),
+        "the page does not reach D1's acceptance"
     );
-    commit(&mut r, "w3", vec![Op::Update { base, block: later }]);
-    let v4 = raw_propose(&mut r, "w3");
-    let l4 = raw_land(&mut r, &v4);
-    assert_ne!(l3, l4);
 
     // the history page cannot reach the create; the trace can
     let st = r.read();
@@ -1126,8 +1238,10 @@ fn rf11_depth_budget_and_frontier_are_deterministic() {
         "the boundary edge stays: {v}"
     );
 
-    // a zero budget keeps the envelope and the depth-zero decision; every removed decision is in
-    // the frontier once, and omitted counts the removed rows
+    // a zero budget keeps the envelope and the depth-zero decision with the rows it still owns
+    // (F, Q) and the edges that join it to a frontier decision; every removed decision is in the
+    // frontier once, and omitted counts the removed rows
+    let i = |k: &str| l.id[k].clone();
     for max in [0, 1, 10] {
         let v = trace(&l.r, &Scope::Canon, &k, opts(3, false, max));
         assert_eq!(v["truncated"], true, "{max}");
@@ -1138,9 +1252,38 @@ fn rf11_depth_budget_and_frontier_are_deterministic() {
             "Approvers sign refunds over 100"
         );
         assert_eq!(v["governing"], full["governing"]);
-        assert_eq!(v["premises"], json!([]));
-        assert_eq!(v["questions"], json!([]));
-        assert_eq!(v["edges"], json!([]));
+        assert_eq!(rows(&v, "premises"), l.at(&[(1, "F")]), "{max}");
+        assert_eq!(rows(&v, "questions"), l.at(&[(1, "Q")]), "{max}");
+        let mut want = vec![
+            (0, i("B"), i("A"), "refines".to_string()),
+            (0, i("C"), i("B"), "refines".to_string()),
+            (0, i("B"), i("E"), "depends_on".to_string()),
+            (0, i("B"), i("F"), "depends_on".to_string()),
+            (0, i("B"), i("Q"), "answers".to_string()),
+        ];
+        want.sort();
+        // the frontier rows are gone, so their depths come from the full reply
+        let depth: BTreeMap<String, u64> = rows(&full, "decisions")
+            .into_iter()
+            .chain(rows(&full, "premises"))
+            .chain(rows(&full, "questions"))
+            .map(|(d, id)| (id, d))
+            .collect();
+        let got: Vec<_> = v["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                let (f, t) = (e["from"].as_str().unwrap(), e["to"].as_str().unwrap());
+                (
+                    depth[f].min(depth[t]),
+                    f.to_string(),
+                    t.to_string(),
+                    e["kind"]["Link"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(got, want, "{max}");
         let want: Vec<String> = l
             .at(&[(1, "A"), (1, "C"), (1, "E"), (2, "D"), (3, "G")])
             .into_iter()
@@ -1148,6 +1291,51 @@ fn rf11_depth_budget_and_frontier_are_deterministic() {
             .collect();
         assert_eq!(ids(&v["frontier"]), want, "{max}");
     }
+    // overlapping routes under a zero budget: R stays with its own premise, question and the
+    // edges to its frontier decisions A and B; the edges among removed decisions go
+    let (_dir, r, o) = overlap();
+    let oi = |k: &str| o[k].clone();
+    let view = Scope::View("o".into());
+    let v = trace(&r, &view, &oi("$r"), opts(3, false, 0));
+    assert_eq!(v["truncated"], true);
+    assert_eq!(v["omitted"], 3);
+    assert_eq!(rows(&v, "decisions"), vec![(0, oi("$r"))]);
+    assert_eq!(rows(&v, "premises"), vec![(1, oi("$p"))]);
+    assert_eq!(rows(&v, "questions"), vec![(1, oi("$q"))]);
+    let mut want = vec![oi("$a"), oi("$b")];
+    want.sort();
+    want.push(oi("$c"));
+    assert_eq!(ids(&v["frontier"]), want);
+    let mut want = vec![
+        (oi("$r"), oi("$a"), "refines"),
+        (oi("$r"), oi("$b"), "depends_on"),
+        (oi("$r"), oi("$p"), "depends_on"),
+        (oi("$r"), oi("$q"), "answers"),
+    ];
+    want.sort();
+    let got: Vec<_> = v["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["from"].as_str().unwrap().to_string(),
+                e["to"].as_str().unwrap().to_string(),
+                e["kind"]["Link"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(got, want);
+    // a lone depth-zero decision over the budget: nothing is removed, so omitted is 0, and the
+    // rows it owns stay
+    let v = trace(&r, &view, &oi("$x"), opts(3, false, 0));
+    assert_eq!(v["truncated"], true);
+    assert_eq!(v["omitted"], 0);
+    assert_eq!(rows(&v, "decisions"), vec![(0, oi("$x"))]);
+    assert_eq!(rows(&v, "premises"), vec![(1, oi("$p"))]);
+    assert_eq!(rows(&v, "questions"), vec![(1, oi("$q"))]);
+    assert_eq!(v["frontier"], json!([]));
+    assert_eq!(v["edges"].as_array().unwrap().len(), 2, "{v}");
     // the refusals, checked by the engine as at every boundary
     let st = l.r.read();
     for depth in [0, 9] {
@@ -1325,6 +1513,58 @@ fn rf11_hostile_trace_is_bounded_and_redaction_safe() {
         assert_eq!(
             ids(&v["frontier"]),
             want.into_iter().map(|p| p.1).collect::<Vec<_>>()
+        );
+    }
+    // the cut's flags count against the byte cap: 17 held sources (the envelope, never cut) make
+    // a reply of exactly 16777216 bytes, flags included, which passes; one byte more is refused,
+    // though both are under the cap before the cut adds `truncated` and `omitted`
+    {
+        let (_dir, mut r, sec, _) = hostile();
+        let k = nid("c", 1);
+        let srcs: Vec<BlockId> = (0..17).map(|n| nid("S", 100 + n)).collect();
+        for (n, s) in srcs.iter().enumerate() {
+            let len = if n == 16 { 700_000 } else { 1_000_000 };
+            let b = block(
+                s,
+                "source",
+                &sec,
+                json!({"title": "a".repeat(len), "kind": "release", "locator": "v1"}),
+                "",
+            );
+            commit(&mut r, "h", vec![Op::Create { block: b }]);
+        }
+        let mut claim = block(&k, "claim", &sec, json!({}), "Reflects seventeen releases.");
+        claim.links.insert(
+            "reflects".into(),
+            srcs.iter().map(|s| link(s, None)).collect(),
+        );
+        commit(&mut r, "h", vec![Op::Create { block: claim }]);
+        let len_of = |r: &Rdy| {
+            r.read()
+                .trace(&h, &k, TraceOptions::default())
+                .map(|t| serde_json::to_vec(&t).unwrap().len())
+        };
+        let retitle = |r: &mut Rdy, len: usize| {
+            let mut b = r.read().block(&h, &srcs[16]).unwrap();
+            let base = b.version_hash();
+            b.fields
+                .insert("title".into(), FieldValue::Str("a".repeat(len)));
+            commit(r, "h", vec![Op::Update { base, block: b }]);
+        };
+        let base = len_of(&r).unwrap();
+        assert!(base < 16_777_216, "{base}");
+        let fit = 700_000 + (16_777_216 - base);
+        retitle(&mut r, fit);
+        let reply = r.read().trace(&h, &k, TraceOptions::default()).unwrap();
+        assert!(reply.truncated);
+        assert_eq!(reply.omitted, Some(0));
+        assert_eq!(serde_json::to_vec(&reply).unwrap().len(), 16_777_216);
+        retitle(&mut r, fit + 1);
+        refused(
+            len_of(&r).unwrap_err(),
+            E_LIMIT,
+            "trace exceeds 16777216 bytes",
+            walk_fix,
         );
     }
     // the redaction barrier: an old state refuses, a fresh one never shows the removed text
