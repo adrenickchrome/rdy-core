@@ -2575,10 +2575,10 @@ fn build_ops(
         let parent = block.parent.as_ref().and_then(|p| ov.get(p));
         let mut found = validate_block(pack, block, parent);
         name_unknown_evidence_key(block, &mut found);
-        issues.extend(found);
         if let Some(names) = supplied.get(&block.id) {
-            issues.extend(crate::decision_fields::validate_set(block, names));
+            crate::decision_fields::merge_set(block, names, &mut found);
         }
+        issues.extend(found);
         if !is_move {
             check_asset_blob(pack, store, block)?;
             // a pin the block already holds is kept; every other cited target is pinned now.

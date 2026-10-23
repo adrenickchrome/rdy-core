@@ -49,6 +49,16 @@ pub const RATIONALE: &str = "rationale";
 /// doc's page and reads as that doc.
 pub const PUBLICATION_PROFILE: &str = "publication_profile";
 
+/// Whether `b` is supporting content off the site and every print: a rationale (FW-D10), or a
+/// finding or a source, which live only in the store (D-Z8P09). None has an anchor or a place in
+/// the text; a link to one leads to its doc's page.
+pub fn is_off_site(b: &Block) -> bool {
+    matches!(
+        b.block_type.as_str(),
+        RATIONALE | rdy_schema::supporting::FINDING | rdy_schema::supporting::SOURCE
+    )
+}
+
 /// Whether `b` is a publication profile ([`PUBLICATION_PROFILE`]).
 pub fn is_profile(b: &Block) -> bool {
     b.block_type == PUBLICATION_PROFILE
@@ -489,9 +499,8 @@ impl<'a> Site<'a> {
             let mut taken = reserved_ids();
             for b in self.blocks_of(doc) {
                 // a decision has no place in the text: it is linked through what it governs; a
-                // rationale and a publication profile are off the page
-                if b.block_type == decision::DECISION || b.block_type == RATIONALE || is_profile(b)
-                {
+                // rationale, a finding, a source and a publication profile are off the page
+                if b.block_type == decision::DECISION || is_off_site(b) || is_profile(b) {
                     continue;
                 }
                 anchors.insert(b.id.clone(), unique(self.anchor_text(b), &mut taken));
@@ -844,7 +853,7 @@ impl<'a> Site<'a> {
             });
         }
         let doc = self.doc_of(id)?;
-        if b.block_type == RATIONALE || is_profile(b) {
+        if is_off_site(b) || is_profile(b) {
             return Some(Url {
                 page: self.page(&doc.id)?,
                 anchor: None,

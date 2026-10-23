@@ -922,9 +922,9 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
         if b.block_type == decision::DECISION || lede_block.is_some_and(|l| l.id == b.id) {
             continue;
         }
-        // a rationale is supporting text: off the site (FW-D10); a publication profile,
-        // removed or not, is administrative and off every output
-        if b.block_type == crate::site::RATIONALE || crate::site::is_profile(b) {
+        // a rationale, a finding and a source are supporting: off the site (FW-D10, D-Z8P09); a
+        // publication profile, removed or not, is administrative and off every output
+        if crate::site::is_off_site(b) || crate::site::is_profile(b) {
             continue;
         }
         if b.block_type == "diagram" && b.field_str("lang") == Some("mermaid") {

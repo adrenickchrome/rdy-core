@@ -1230,11 +1230,11 @@ impl Rdy {
             issues.extend(validate_prefix(&self.pack, b));
             let mut found = validate_block(&self.pack, b, parent);
             crate::write::name_unknown_evidence_key(b, &mut found);
-            issues.extend(found);
             // D-2WR0G: an import supplies every field it writes, so each decision's basis and
             // times are checked here, before any blob or change is stored
             let names: BTreeSet<String> = b.fields.keys().cloned().collect();
-            issues.extend(crate::decision_fields::validate_set(b, &names));
+            crate::decision_fields::merge_set(b, &names, &mut found);
+            issues.extend(found);
         }
         if let Some(e) = crate::error::nesting_refusal(&issues) {
             return Err(e);

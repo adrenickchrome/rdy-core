@@ -1456,3 +1456,87 @@ fn rf5_new_finding_and_new_source_use_the_write_path() {
     // no file is written beside the project
     assert!(!d.path().join("register.yaml").exists());
 }
+
+/// rf5 fix round 1 (D-Z8P09): under a stable parent, new_finding and new_source brief the
+/// effective parent themselves (the decision home for a missing parent, else the parent given),
+/// as reaffirm and repin do, so the write's briefing check passes without a token from the
+/// caller. The check itself stays the engine's: a plain write of the same op is still refused.
+#[test]
+fn rf5_new_finding_and_new_source_brief_a_stable_parent() {
+    let (d, e) = project();
+    let s = human();
+    let made = write_typed(&e, move |r| {
+        let ops = serde_json::from_value(json!([
+            {"op": "create", "type": "doc", "id": "$reg", "fields": {"name": "register", "title": "Register", "doc_type": "decisions-log", "lifecycle": "stable"}},
+            {"op": "create", "type": "doc", "id": "$log", "fields": {"name": "log", "title": "Log", "doc_type": "decisions-log", "lifecycle": "stable"}}
+        ]))
+        .unwrap();
+        r.write(&human(), WriteRequest { view: "work".into(), ops, justification: None, message: String::new() })
+    })
+    .unwrap();
+    let reg = made["created"]["$reg"].as_str().unwrap().to_string();
+    let log = made["created"]["$log"].as_str().unwrap().to_string();
+    // the engine's check holds: an unbriefed create under the stable parent is refused
+    let unbriefed = write_typed(&e, {
+        let reg = reg.clone();
+        move |r| {
+            let ops = rdy_engine::parse_ops(vec![json!({"op": "create", "type": "source", "id": "$s", "parent": reg, "fields": {"title": "T", "kind": "release", "locator": "v1"}})])?;
+            r.write(&human(), WriteRequest { view: "work".into(), ops, justification: None, message: String::new() })
+        }
+    })
+    .unwrap_err();
+    assert_eq!(unbriefed.code, "E_BRIEF_REQUIRED", "{unbriefed}");
+    let c = cx(&e, &s, d.path());
+
+    // an explicit stable parent
+    let v = dispatch(
+        &c,
+        "new_source",
+        json!({"title": "Release 2", "kind": "release", "locator": "v2", "parent": log}),
+    )
+    .unwrap();
+    let src = v["created"]["$source"].as_str().unwrap().to_string();
+    let v = dispatch(
+        &c,
+        "new_finding",
+        json!({"statement": "The release changed retention.", "parent": log,
+            "evidence": [{"quote": "Retention is now seven days."}, {"source": src}]}),
+    )
+    .unwrap();
+    let f = v["created"]["$finding"].as_str().unwrap().to_string();
+    for id in [&src, &f] {
+        let b = e
+            .read()
+            .block(&Scope::View("work".into()), &id.parse().unwrap())
+            .unwrap();
+        assert_eq!(b.parent.as_ref().map(|p| p.to_string()), Some(log.clone()));
+    }
+
+    // the stable decision home, for a missing parent
+    let cfg = d.path().join(".rdy.yaml");
+    let text = std::fs::read_to_string(&cfg).unwrap() + "decisions:\n  home: register\n";
+    std::fs::write(&cfg, text).unwrap();
+    write_typed(&e, |r| r.reload_pack().map(|_| ())).unwrap();
+    let v = dispatch(
+        &c,
+        "new_source",
+        json!({"title": "Release 3", "kind": "release", "locator": "v3"}),
+    )
+    .unwrap();
+    let src = v["created"]["$source"].as_str().unwrap().to_string();
+    let v = dispatch(
+        &c,
+        "new_finding",
+        json!({"statement": "The release changed retention again.",
+            "evidence": [{"quote": "Retention is now one day."}]}),
+    )
+    .unwrap();
+    let f = v["created"]["$finding"].as_str().unwrap().to_string();
+    for id in [&src, &f] {
+        let b = e
+            .read()
+            .block(&Scope::View("work".into()), &id.parse().unwrap())
+            .unwrap();
+        assert_eq!(b.parent.as_ref().map(|p| p.to_string()), Some(reg.clone()));
+    }
+}

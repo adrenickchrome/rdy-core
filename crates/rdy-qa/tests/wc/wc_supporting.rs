@@ -2,9 +2,10 @@
 // Unix only: it runs the working-copy CLI against a served project. FW-XP1 Phase 4 ports it.
 //! rf5 (D-Z8P09, n-QJ36D): findings and sources live only in the store. A checkout and a refresh
 //! write neither, nor a link to one; an entry of either type put in a file by hand is refused
-//! with the supporting diagnostic; a normal commit, deletions included, keeps both.
+//! with the supporting diagnostic; a normal commit, deletions included, keeps both. The
+//! Markdown print of the view shows neither, nor the store-only link to one.
 use rdy_engine::E_WC_INVALID;
-use rdy_qa::daemon::Served;
+use rdy_qa::daemon::{Served, short_tempdir};
 use rdy_qa::wc::*;
 use serde_json::{Value, json};
 
@@ -50,6 +51,67 @@ fn files_clean(s: &Served, p: &Planted) {
     }
 }
 
+/// Every `.md` file under `dir`, with its path relative to `dir`.
+fn md_files(dir: &std::path::Path) -> Vec<(String, String)> {
+    let mut out = vec![];
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).expect("read dir") {
+            let path = e.expect("entry").path();
+            if path.is_dir() {
+                todo.push(path);
+            } else if path.extension().is_some_and(|x| x == "md") {
+                let rel = path.strip_prefix(dir).unwrap().display().to_string();
+                out.push((rel, std::fs::read_to_string(&path).expect("UTF-8")));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The view's Markdown print (`rdy export --format md`) shows the claim the source and the
+/// finding sit beside, and neither block, nor the claim's store-only link to the source: no id,
+/// no statement, title, kind, locator, version or quote of either.
+fn markdown_clean(s: &Served, p: &Planted, claim_body: &str) {
+    let scratch = short_tempdir();
+    let out = scratch.path().join("md");
+    ok(
+        s,
+        &[
+            "export",
+            "--out",
+            out.to_str().unwrap(),
+            "--format",
+            "md",
+            "--scope",
+            "view:work",
+        ],
+    );
+    let files = md_files(&out);
+    assert!(
+        files.iter().any(|(_, t)| t.contains(claim_body)),
+        "the print shows the claim: {files:?}"
+    );
+    for (rel, text) in &files {
+        for word in [
+            p.finding.as_str(),
+            p.source.as_str(),
+            "Release 2",
+            "release changed retention",
+            "release cut retention",
+            "2.0.1",
+            "v2",
+            "depends_on",
+            "Depends on",
+            "finding",
+            "Finding",
+        ] {
+            assert!(!text.contains(word), "{rel} shows {word:?}:\n{text}");
+        }
+    }
+}
+
 fn kept(s: &Served, p: &Planted, seed: &Seed) {
     let f = store_block(s, "work", &p.finding);
     assert_eq!(f.block_type, "finding");
@@ -71,6 +133,7 @@ fn rf5_working_copy_never_carries_or_deletes_supporting() {
     let (s, seed, p) = planted();
     ok(&s, &["checkout"]);
     files_clean(&s, &p);
+    markdown_clean(&s, &p, "Claims hold.");
 
     // an entry of either type put in a file by hand is the supporting diagnostic, nested in the
     // commit's E_WC_INVALID; nothing is recorded
@@ -131,6 +194,7 @@ fn rf5_working_copy_never_carries_or_deletes_supporting() {
         "Claims still hold."
     );
     files_clean(&s, &p);
+    markdown_clean(&s, &p, "Claims still hold.");
 
     // a change to both made elsewhere comes in by a refresh, which writes neither
     store_write(
@@ -145,4 +209,5 @@ fn rf5_working_copy_never_carries_or_deletes_supporting() {
     assert!(good, "{v}");
     files_clean(&s, &p);
     kept(&s, &p, &seed);
+    markdown_clean(&s, &p, "Claims still hold.");
 }

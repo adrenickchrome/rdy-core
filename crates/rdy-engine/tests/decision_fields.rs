@@ -420,3 +420,88 @@ fn rf5_delegated_requires_attestation_and_keeps_freeze() {
     assert_eq!(issues(&e), vec![attest_issue()]);
     assert_eq!(dst.read().seq(), seq, "a refused import writes nothing");
 }
+
+/// rf5 fix round 1 (D-2WR0G): a supplied time field that is not a string gets the one time
+/// diagnostic, not the schema's generic kind issue before it: the write's primary message and
+/// fix are the time field's, and the refusal carries exactly one issue for it. An import of the
+/// same value is refused with that one issue too, before anything is stored. Other schema checks
+/// on the same block still stand beside it.
+#[test]
+fn rf5_a_non_string_time_gets_the_time_diagnostic() {
+    let (_d, mut r, s) = setup();
+    let non_strings = [json!(20261005), json!(true), json!(["2026-10-05"])];
+    for name in TIME_FIELDS {
+        for value in &non_strings {
+            let seq = r.read().seq();
+            let e = write_as(
+                &mut r,
+                &founder(),
+                json!([{"op": "create", "type": "decision", "parent": s,
+                    "fields": {"statement": "S", "status": "proposed", name: value}}]),
+            )
+            .unwrap_err();
+            assert_eq!(e.code, E_VALIDATION, "{name} {value}: {e}");
+            assert_eq!(e.message, time_issue(name).1, "{name} {value}");
+            assert_eq!(e.fix, TIME_FIX, "{name} {value}");
+            assert_eq!(issues(&e), vec![time_issue(name)], "{name} {value}");
+            assert_eq!(r.read().seq(), seq, "{name}: nothing written");
+        }
+    }
+    // an update that sets a non-string time: the same single diagnostic
+    let w = write_as(
+        &mut r,
+        &founder(),
+        json!([{"op": "create", "type": "decision", "parent": s,
+            "fields": {"statement": "S", "status": "proposed"}}]),
+    )
+    .unwrap();
+    let id = w.created["op0"].clone();
+    let e = write_as(
+        &mut r,
+        &founder(),
+        json!([{"op": "update", "id": id, "fields": {"review_by": 20261005}}]),
+    )
+    .unwrap_err();
+    assert_eq!(e.message, time_issue("review_by").1, "{e}");
+    assert_eq!(e.fix, TIME_FIX, "{e}");
+    assert_eq!(issues(&e), vec![time_issue("review_by")]);
+    // another schema issue on the block stays beside the time issue
+    let e = write_as(
+        &mut r,
+        &founder(),
+        json!([{"op": "create", "type": "decision", "parent": s,
+            "fields": {"statement": 7, "status": "proposed", "review_by": 20261005}}]),
+    )
+    .unwrap_err();
+    let got = issues(&e);
+    assert!(got.contains(&time_issue("review_by")), "{got:?}");
+    assert!(
+        got.iter()
+            .any(|(_, m, _)| m.starts_with("field \"statement\"")),
+        "{got:?}"
+    );
+    assert!(
+        !got.iter().any(
+            |(_, m, _)| m.starts_with("field \"review_by\"") && *m != time_issue("review_by").1
+        ),
+        "{got:?}"
+    );
+
+    // import: a non-string time is one time issue, and nothing is stored
+    let (_d2, mut src, s2) = setup();
+    let mut bad = decision_block(&[("review_by", FieldValue::Int(20261005))]);
+    bad.id = BlockId::parse("D-TME23").unwrap();
+    bad.parent = Some(BlockId::parse(&s2).unwrap());
+    raw_commit(&mut src, bad);
+    let out = tempfile::tempdir().unwrap();
+    src.read()
+        .export(&Scope::View("work".into()), out.path())
+        .unwrap();
+    let dst_dir = tempfile::tempdir().unwrap();
+    let mut dst = Rdy::init(dst_dir.path(), "rdy-standard").unwrap();
+    let seq = dst.read().seq();
+    let e = dst.import(&founder(), "work", out.path()).unwrap_err();
+    assert_eq!(e.code, E_VALIDATION, "{e}");
+    assert_eq!(issues(&e), vec![time_issue("review_by")]);
+    assert_eq!(dst.read().seq(), seq, "a refused import writes nothing");
+}

@@ -77,6 +77,29 @@ pub fn validate_set(block: &Block, supplied: &BTreeSet<String>) -> Vec<Issue> {
     out
 }
 
+/// [`validate_set`], merged into `issues`, the schema's issues of the same `block`: a time issue
+/// takes the place of the schema's generic kind issue for that field (`field "<name>" must be
+/// Str`, when the value is not a string), so the one time diagnostic is reported where the generic
+/// one stood and is never preceded by it. Every other issue is appended; every other schema issue
+/// is kept.
+pub fn merge_set(block: &Block, supplied: &BTreeSet<String>, issues: &mut Vec<Issue>) {
+    for found in validate_set(block, supplied) {
+        let generic = TIME_FIELDS
+            .iter()
+            .find(|n| found.message == time_message(n))
+            .map(|n| format!("field {n:?} must be "))
+            .and_then(|prefix| {
+                issues.iter().position(|i| {
+                    i.code == found.code && i.block == found.block && i.message.starts_with(&prefix)
+                })
+            });
+        match generic {
+            Some(at) => issues[at] = found,
+            None => issues.push(found),
+        }
+    }
+}
+
 /// Whether `s` is `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS[.digits]Z` (`+00:00` for the `Z`), a real
 /// Gregorian date in years 0001 to 9999 with hours 0 to 23 and minutes and seconds 0 to 59, of at
 /// most [`MAX_TIME_CHARS`] characters (counted before anything is parsed). Upper-case `T` and `Z`
