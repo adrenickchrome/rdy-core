@@ -1010,7 +1010,6 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
                 trail::for_block(
                     b,
                     sh.g,
-                    m,
                     sh.pack,
                     site,
                     page,

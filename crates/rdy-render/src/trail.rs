@@ -386,19 +386,20 @@ fn link_in<'a>(
 }
 
 /// The trail of `b`: its governing decisions, what became of each, and the open questions that
-/// mention it, read from `g`, `m` and `pack` alone (a named profile's selected graph and state). A block
-/// with nothing to tell has no events. `unavailable` and `local_link` read references and
+/// mention it, read from `g`, the site's state and `pack` alone (a named profile's selected graph
+/// and state). A block with nothing to tell has no events. `unavailable` and `local_link` read references and
 /// authored links as [`inline::Ctx`] does.
 pub fn for_block(
     b: &Block,
     g: &Graph,
-    m: &Materialized,
     pack: &Pack,
     site: &Site,
     from: &str,
     unavailable: &str,
     local_link: Option<inline::LocalLink>,
 ) -> Trail {
+    // the site holds the state it was built from
+    let m = site.m;
     let link = link_in(m, site, from);
     let doc_page = |id: &BlockId| match m.doc_of(id).and_then(|d| site.page(&d.id)) {
         Some(p) if p != from => rel(from, &p),
