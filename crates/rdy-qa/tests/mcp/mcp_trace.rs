@@ -6,13 +6,16 @@ use rdy_daemon::{OPS, OpContext, dispatch};
 use rdy_engine::engine::{Engine, Local};
 use rdy_engine::signing_crypto::UnavailableAgent;
 use rdy_engine::{Rdy, Session};
+use rdy_mcp::tools::{McpState, rdy_session, rdy_trace};
 use rdy_model::Role;
 use rdy_qa::daemon::Served;
 use rdy_qa::edit_loop::spec_doc;
 use rdy_qa::fixtures::*;
+use rdy_qa::git_repo::GitRepo;
 use rdy_qa::mcp::{McpClient, Reply};
 use rdy_qa::tensions::{put, upd};
-use serde_json::{Value, json};
+use serde_json::{Value, from_value, json};
+use std::sync::Arc;
 
 /// The tool's description, word for word (TASK-507 (4)).
 const TRACE_DESCRIPTION: &str = "Why a block says what it says: governing decisions, sources, lineage, one-step premises, questions, introduction and acceptance landings, and sealed plans. depth is 1 to 8, default 3. detail adds recorded evidence. max_tokens defaults to 1000. Continue at an id in frontier.";
@@ -43,9 +46,8 @@ fn triple(e: &Value) -> (String, String, String) {
 
 /// Canon: doc `refunds` with section `Rules`, a decision D and a claim K decided by it; tag
 /// v1.0.0 names that landing.
-fn small(s: &Served) -> (String, String) {
-    let mut r = Rdy::open(s.dir.path()).unwrap();
-    let w = write(&mut r, "w", json!([
+fn seed_small(r: &mut Rdy) -> (String, String) {
+    let w = write(r, "w", json!([
         {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "refunds", "title": "Refunds", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}},
         {"op": "create", "type": "decision", "id": "$dd", "parent": "$s",
@@ -54,10 +56,17 @@ fn small(s: &Served) -> (String, String) {
             "links": {"decided_by": [{"target": "$dd"}]}}
     ]))
     .unwrap();
-    land(&mut r, "w").unwrap();
+    land(r, "w").unwrap();
     r.tag(&approver(), "v1.0.0", None, None).unwrap();
-    r.close().unwrap();
     (w.created["$k"].clone(), w.created["$dd"].clone())
+}
+
+/// `seed_small` in the project a served daemon will open.
+fn small(s: &Served) -> (String, String) {
+    let mut r = Rdy::open(s.dir.path()).unwrap();
+    let ids = seed_small(&mut r);
+    r.close().unwrap();
+    ids
 }
 
 /// The MCP arguments, the CLI arguments and the refusal both give: its code, its message (empty
@@ -291,13 +300,60 @@ fn rf12_trace_is_registered_as_an_epoch_guarded_read() {
     let _ = dispatch(&cx, "trace", json!({"id": "c-0A1B2"}));
     let _ = dispatch(&cx, "trace", json!({}));
     assert_eq!(log_end(&e2), before);
-    // and through the server: a reader can call it, and it changes no state
+    // and through the server: a reader can call it, and its two replies agree
     session(&mut c, "reader");
     let v = c.call("rdy_trace", json!({"id": k, "scope": "canon"})).ok();
     assert_eq!(v["id"], k.as_str());
     let again = c.call("rdy_trace", json!({"id": k, "scope": "canon"})).ok();
     assert_eq!(v, again);
     c.alive();
+
+    // the invariant itself: on one served project, after the session is set up, successful MCP
+    // and daemon trace reads leave the log position and every ref where they were
+    let (dir3, mut r3) = project();
+    let (k3, _d3) = seed_small(&mut r3);
+    let served = Arc::new(Local::new(r3));
+    let mut st = McpState::new(served.clone());
+    rdy_session(
+        &mut st,
+        from_value(json!({"actor": "agent:qa", "run": "qa", "role": "reader"})).unwrap(),
+    )
+    .unwrap();
+    let human = Session::human("human:qa".into(), Role::Reader);
+    let cx3 = OpContext {
+        engine: &*served,
+        session: &human,
+        human: "human:qa",
+        cwd: dir3.path(),
+        agent: &UnavailableAgent,
+    };
+    let state = |e: &Local| -> (String, Vec<(String, Vec<u8>)>) {
+        e.inspect(|r| {
+            Ok((
+                format!("{:?}", r.store().log_end()),
+                r.store().refs_with_prefix("").unwrap(),
+            ))
+        })
+        .unwrap()
+    };
+    let before = state(&served);
+    assert!(!before.1.is_empty(), "the project has refs to compare");
+    for args in [
+        json!({"id": k3, "scope": "canon"}),
+        json!({"id": k3, "scope": "canon", "depth": 8, "detail": true}),
+        json!({"id": k3, "scope": "tag:v1.0.0", "max_tokens": 1}),
+    ] {
+        let mcp = rdy_trace(&mut st, from_value(args.clone()).unwrap()).unwrap();
+        let daemon = dispatch(&cx3, "trace", args.clone()).unwrap();
+        assert_eq!(mcp["id"], k3.as_str(), "{mcp}");
+        assert_eq!(daemon, mcp, "{args}");
+        assert_eq!(
+            state(&served),
+            before,
+            "a trace read changed the store: {args}"
+        );
+    }
+    drop(dir3);
 }
 
 #[test]
@@ -406,6 +462,11 @@ fn rf12_all_dr1b_user_paths_are_chat_reachable() {
         put(&mut r, "a", upd(&spec.c, "C contradicts B."));
         r.close().unwrap();
     }
+    // a linked code checkout, so a code reflects has a tree to record
+    let g = GitRepo::new();
+    g.write("src/retention.rs", "pub const DAYS: u32 = 7;\n");
+    g.commit("feat: retention");
+    g.link(s.dir.path());
     let mut c = McpClient::start_proxy(&s);
     session(&mut c, "writer");
     let created = |v: &Value, k: &str| v["created"][k].as_str().unwrap().to_string();
@@ -418,7 +479,8 @@ fn rf12_all_dr1b_user_paths_are_chat_reachable() {
             {"op": "create", "type": "source", "id": "$src", "parent": "$s",
                 "fields": {"title": "Release 2", "kind": "release", "locator": "v2"}},
             {"op": "create", "type": "claim", "id": "$k", "parent": "$s", "body": "Retention is seven days."},
-            {"op": "create", "type": "claim", "id": "$c2", "parent": "$s", "body": "Backups follow retention."}
+            {"op": "create", "type": "claim", "id": "$c2", "parent": "$s", "body": "Backups follow retention.",
+                "fields": {"reflects": ["src/*.rs"]}}
         ]}))
         .ok();
     let (sec, src, k, c2) = (
@@ -479,6 +541,20 @@ fn rf12_all_dr1b_user_paths_are_chat_reachable() {
         )
         .ok();
     assert!(w["justification"].is_object(), "{w}");
+    // and C2, which declares reflects globs, written as following the code
+    let w = c
+        .call(
+            "rdy_write",
+            json!({"ops": [{"op": "update", "id": c2, "body": "Backups follow retention in code."}],
+            "reflects": {"code": true}}),
+        )
+        .ok();
+    assert_eq!(
+        w["justification"],
+        json!({"reflects": {"sources": [], "code": true}}),
+        "{w}"
+    );
+    assert_eq!(w["code_recorded"], json!([c2]), "{w}");
     // changing the finding gives consequences
     let w = c
         .call(
@@ -494,6 +570,11 @@ fn rf12_all_dr1b_user_paths_are_chat_reachable() {
     assert!(b["sources"].is_array() || b["sources"].is_object(), "{b}");
     let b = c.call("rdy_brief", json!({"ids": [decision]})).ok();
     assert!(b["findings"].is_array() || b["findings"].is_object(), "{b}");
+    let b = c
+        .call("rdy_brief", json!({"code_path": "src/retention.rs"}))
+        .ok();
+    assert_eq!(b["code"]["path"], "src/retention.rs", "{b}");
+    assert_eq!(b["code"]["reflects"][0]["block"], c2.as_str(), "{b}");
 
     // review citations on a recorded tension
     let mut r = McpClient::start_proxy(&s);
@@ -526,6 +607,8 @@ fn rf12_all_dr1b_user_paths_are_chat_reachable() {
         "{t}"
     );
     assert_eq!(t["ungrounded"], false);
+    let t2 = c.call("rdy_trace", json!({"id": c2})).ok();
+    assert_eq!(t2["ungrounded"], false, "reflects globs ground it: {t2}");
     let e = tool_error(c.call("rdy_trace", json!({"id": k, "depth": 0})));
     assert_eq!(e["code"], "E_BAD_INPUT", "{e}");
     c.alive();
