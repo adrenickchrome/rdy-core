@@ -15,53 +15,128 @@ pub struct TestRun {
     /// One entry per skip line (`skip::SKIP_MARK`), `<test>: <reason>`.
     pub skipped: Vec<String>,
     pub failures: Vec<String>,
-    /// Each failing test's first panic, `<location>: <message>`, cut to `PANIC_CHARS`.
+    /// Each failing test's first panic: its `thread '...' panicked at ...:` header line and the
+    /// lines after it, cut to `PANIC_LINES` lines and `PANIC_BYTES` bytes.
     pub panics: BTreeMap<String, String>,
 }
 
-/// The most characters of a panic message the report keeps.
-const PANIC_CHARS: usize = 300;
+/// The most lines of a panic the report keeps, the truncation marker included.
+const PANIC_LINES: usize = 40;
+/// The most bytes of a panic the report keeps, the truncation marker included.
+const PANIC_BYTES: usize = 16384;
+/// The last line of a panic cut to the two limits above.
+const PANIC_CUT: &str = "[panic text truncated]";
+
+/// One panic being read, bounded as it grows: no line is copied whole before it is checked.
+#[derive(Default)]
+struct Excerpt {
+    text: String,
+    lines: usize,
+    cut: bool,
+}
+
+impl Excerpt {
+    /// Appends `line`. The first line that would pass either limit cuts the excerpt: it keeps
+    /// room for one marker line, drops what does not fit before it, and ignores all later lines.
+    fn push(&mut self, line: &str) {
+        if self.cut {
+            return;
+        }
+        let sep = usize::from(self.lines > 0);
+        if self.lines < PANIC_LINES && self.text.len() + sep + line.len() <= PANIC_BYTES {
+            self.text.push_str(&"\n"[..sep]);
+            self.text.push_str(line);
+            self.lines += 1;
+            return;
+        }
+        self.cut = true;
+        let keep_lines = PANIC_LINES - 1;
+        let keep_bytes = PANIC_BYTES - 1 - PANIC_CUT.len();
+        // the part of this line that still fits before the marker
+        if self.lines < keep_lines {
+            let room = keep_bytes.saturating_sub(self.text.len() + sep);
+            let end = line.floor_char_boundary(room.min(line.len()));
+            if end > 0 {
+                self.text.push_str(&"\n"[..sep]);
+                self.text.push_str(&line[..end]);
+            }
+        }
+        self.text
+            .truncate(self.text.floor_char_boundary(keep_bytes));
+        let mut lines = self.text.matches('\n').count() + usize::from(!self.text.is_empty());
+        while lines > keep_lines {
+            self.text.truncate(self.text.rfind('\n').unwrap_or(0));
+            lines -= 1;
+        }
+        if !self.text.is_empty() {
+            self.text.push('\n');
+        }
+        self.text.push_str(PANIC_CUT);
+    }
+}
+
+/// Where the current `---- <name> stdout ----` block stands in reading its first panic.
+enum Panic {
+    /// No panic header yet.
+    Waiting,
+    /// Reading the first panic's lines.
+    Reading(Excerpt),
+    /// The first panic is read, or the test already has one: the rest of the block is ignored.
+    Done,
+}
 
 /// Sums every `test result:` line, collects the skip lines (`skip::SKIP_MARK`), collects the names of `test <name> ... FAILED` lines, and
-/// keeps each failing test's first panic: in a `---- <name> stdout ----` block, the line after
-/// `thread '<thread>' panicked at <location>:` is the message (`panic_location`).
+/// keeps each failing test's first panic: in a `---- <name> stdout ----` block, the lines from the
+/// first `thread '<thread>' panicked at <location>:` header (`panic_location`), the header
+/// included, up to the next output header, panic header, `failures:` or `test result:` line. A
+/// panic is kept only for a test named as failing. Counters, skips and failed names are read from
+/// every line, whether or not a panic is being read.
 pub fn parse_cargo_test(output: &str) -> TestRun {
     let mut run = TestRun::default();
-    // the test whose captured output is being read, and the location of its panic once seen
+    // the test whose captured output is being read, and how far its first panic is read
     let mut block: Option<String> = None;
-    let mut panic_at: Option<String> = None;
+    let mut panic = Panic::Done;
+    let mut found: BTreeMap<String, String> = BTreeMap::new();
+    // stores the panic being read, once the block or the input ends
+    fn flush(found: &mut BTreeMap<String, String>, block: &Option<String>, panic: &mut Panic) {
+        if let (Some(name), Panic::Reading(e)) = (block, &*panic) {
+            found.entry(name.clone()).or_insert_with(|| e.text.clone());
+        }
+        *panic = Panic::Done;
+    }
     for line in output.lines() {
         if let Some(i) = line.find(crate::skip::SKIP_MARK) {
             let rest = &line[i + crate::skip::SKIP_MARK.len()..];
             run.skipped.push(rest.trim().to_string());
         }
-        if let Some(at) = panic_at.take() {
-            if let Some(name) = &block
-                && !run.panics.contains_key(name)
-            {
-                let text = format!("{at}: {}", line.trim());
-                run.panics
-                    .insert(name.clone(), text.chars().take(PANIC_CHARS).collect());
-            }
-            continue;
-        }
-        if let Some(name) = line
+        let header = line
             .strip_prefix("---- ")
-            .and_then(|r| r.strip_suffix(" stdout ----"))
-        {
+            .and_then(|r| r.strip_suffix(" stdout ----"));
+        let stop = line == "failures:" || line.starts_with("test result:");
+        if let Some(name) = header {
+            flush(&mut found, &block, &mut panic);
+            panic = if found.contains_key(name) {
+                Panic::Done
+            } else {
+                Panic::Waiting
+            };
             block = Some(name.to_string());
-            continue;
+        } else if let Panic::Reading(e) = &mut panic {
+            if stop || panic_location(line).is_some() {
+                flush(&mut found, &block, &mut panic);
+            } else {
+                e.push(line);
+            }
+        } else if matches!(panic, Panic::Waiting) && panic_location(line).is_some() {
+            let mut e = Excerpt::default();
+            e.push(line);
+            panic = Panic::Reading(e);
         }
-        if block.is_some()
-            && let Some(at) = panic_location(line)
-        {
-            panic_at = Some(at.to_string());
-            continue;
-        }
-        let line = line.trim();
-        if line == "failures:" || line.starts_with("test result:") {
+        if stop {
+            flush(&mut found, &block, &mut panic);
             block = None;
         }
+        let line = line.trim();
         if let Some(rest) = line.strip_prefix("test result:") {
             for part in rest.split([';', '.']) {
                 let mut words = part.split_whitespace();
@@ -82,7 +157,56 @@ pub fn parse_cargo_test(output: &str) -> TestRun {
             run.failures.push(name.to_string());
         }
     }
+    flush(&mut found, &block, &mut panic);
+    found.retain(|name, _| run.failures.contains(name));
+    run.panics = found;
     run
+}
+
+/// The failing tests of one report area, in the given order, as a Markdown list. A test with
+/// a panic excerpt is followed by a blank line and the excerpt, every line indented eight
+/// spaces (an indented code block under the item, so a fence inside the excerpt ends nothing),
+/// and a blank line. Empty for no names.
+pub fn failure_lines(failures: &[String], panics: &BTreeMap<String, String>) -> String {
+    let mut s = String::new();
+    for f in failures {
+        let _ = writeln!(s, "- `{f}`");
+        if let Some(p) = panics.get(f) {
+            s.push('\n');
+            for l in p.split('\n') {
+                let _ = writeln!(s, "        {l}");
+            }
+            s.push('\n');
+        }
+    }
+    s
+}
+
+/// The detail of the workspace-tests gate step: the counts, then (when tests failed) the failing
+/// names with their panic excerpts, then (when the step failed) the last 20 lines of `output`,
+/// then a note when no test ran.
+pub fn workspace_test_detail(ok: bool, run: &TestRun, output: &str) -> String {
+    let mut detail = format!(
+        "{} passed, {} failed, {} ignored, {} skipped",
+        run.passed,
+        run.failed,
+        run.ignored,
+        run.skipped.len()
+    );
+    if !run.failures.is_empty() {
+        detail += "\n\n";
+        detail += &failure_lines(&run.failures, &run.panics);
+    }
+    if !ok {
+        if !detail.ends_with('\n') {
+            detail.push('\n');
+        }
+        detail += &tail(output, 20);
+    }
+    if ran_nothing(run) {
+        detail += " (no tests ran)";
+    }
+    detail
 }
 
 /// `<location>` of a `thread '<thread>' panicked at <location>:` line. Newer toolchains print the
@@ -459,16 +583,7 @@ pub fn markdown(r: &Report) -> String {
                 "- (the test binary failed without naming a test; see its output)"
             );
         }
-        for f in &a.failures {
-            match a.panics.get(f) {
-                Some(p) => {
-                    let _ = writeln!(s, "- `{f}`: {p}");
-                }
-                None => {
-                    let _ = writeln!(s, "- `{f}`");
-                }
-            }
-        }
+        s += &failure_lines(&a.failures, &a.panics);
     }
 
     let _ = writeln!(s, "\n## Perf\n\n{}\n", r.perf_note);
@@ -904,7 +1019,9 @@ mod tests {
         assert_eq!(run.failures, vec!["a::b".to_string()]);
         assert_eq!(
             run.panics.get("a::b").map(String::as_str),
-            Some("crates/x.rs:3:5: assertion failed: boom")
+            Some(
+                "thread 'a::b' panicked at crates/x.rs:3:5:\nassertion failed: boom\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
+            )
         );
     }
 
@@ -915,13 +1032,17 @@ mod tests {
         let run = parse_cargo_test(out);
         assert_eq!(
             run.panics.get("kill2_x").map(String::as_str),
-            Some("crates/w.rs:9:1: worker failed")
+            Some("thread '<unnamed>' (4242) panicked at crates/w.rs:9:1:\nworker failed")
         );
         let long = format!(
-            "---- a stdout ----\nthread 'a' panicked at x.rs:1:1:\n{}\n",
+            "test a ... FAILED\n---- a stdout ----\nthread 'a' panicked at x.rs:1:1:\n{}\n",
             "y".repeat(400)
         );
-        assert_eq!(parse_cargo_test(&long).panics["a"].chars().count(), 300);
+        assert_eq!(
+            parse_cargo_test(&long).panics["a"],
+            format!("thread 'a' panicked at x.rs:1:1:\n{}", "y".repeat(400)),
+            "the old 300-character cut is gone"
+        );
         let mut areas = vec![];
         add_run(&mut areas, "daemon", false, run);
         let r = Report {
@@ -940,10 +1061,262 @@ mod tests {
             guarded: BTreeMap::new(),
         };
         assert!(
-            markdown(&r).contains("- `kill2_x`: crates/w.rs:9:1: worker failed\n"),
+            markdown(&r).contains(
+                "- `kill2_x`\n\n        thread '<unnamed>' (4242) panicked at crates/w.rs:9:1:\n        worker failed\n\n"
+            ),
             "{}",
             markdown(&r)
         );
+    }
+
+    /// A `Report` holding one area, for the rendering pins.
+    fn report_of(areas: Vec<Area>) -> Report {
+        Report {
+            revision: "r".into(),
+            dirty: false,
+            machine: "m".into(),
+            mode: "full".into(),
+            duration_secs: 0.0,
+            pass: false,
+            gates: vec![],
+            areas,
+            perf: vec![],
+            perf_note: String::new(),
+            failing_seeds: vec![],
+            notes: vec![],
+            guarded: BTreeMap::new(),
+        }
+    }
+
+    /// Cargo output of one failing test `t` whose panic body is `body`, with 4 passed and
+    /// 2 ignored tests besides.
+    fn one_failure(body: &str) -> String {
+        format!(
+            "test t ... FAILED\n\nfailures:\n\n---- t stdout ----\nthread 't' panicked at x.rs:1:1:\n{body}\nfailures:\n    t\n\ntest result: FAILED. 4 passed; 1 failed; 2 ignored; 0 measured; 0 filtered out\n"
+        )
+    }
+
+    const PANIC_HEAD: &str = "thread 't' panicked at x.rs:1:1:";
+    const TRUNCATED: &str = "[panic text truncated]";
+
+    #[test]
+    fn plx3_report_keeps_multiline_assertions_per_failed_test() {
+        let skip = crate::skip::skip_line("s::skipped", "no tool");
+        let out = [
+            "running 3 tests".to_string(),
+            "test a::first ... FAILED".to_string(),
+            "test b::ok ... ok".to_string(),
+            skip,
+            "test c::second ... FAILED".to_string(),
+            String::new(),
+            "failures:".to_string(),
+            String::new(),
+            "---- a::first stdout ----".to_string(),
+            // a worker thread panics first, with numeric thread ids
+            "thread '<unnamed>' (11) panicked at crates/w.rs:9:1:".to_string(),
+            "assertion `left == right` failed: worker".to_string(),
+            "  left: 1".to_string(),
+            " right: 2".to_string(),
+            "thread 'a::first' (10) panicked at crates/t.rs:2:2:".to_string(),
+            "called `Result::unwrap()` on an `Err` value".to_string(),
+            "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace"
+                .to_string(),
+            String::new(),
+            "---- c::second stdout ----".to_string(),
+            // the older header without a thread id
+            "thread 'c::second' panicked at crates/u.rs:5:5:".to_string(),
+            "assertion `left == right` failed: second".to_string(),
+            "  left: \"x\"".to_string(),
+            " right: \"y\"".to_string(),
+            String::new(),
+            "failures:".to_string(),
+            "    a::first".to_string(),
+            "    c::second".to_string(),
+            String::new(),
+            "test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out"
+                .to_string(),
+        ];
+        let first = "thread '<unnamed>' (11) panicked at crates/w.rs:9:1:\nassertion `left == right` failed: worker\n  left: 1\n right: 2";
+        let second = "thread 'c::second' panicked at crates/u.rs:5:5:\nassertion `left == right` failed: second\n  left: \"x\"\n right: \"y\"\n";
+        // CRLF line ends, the last line without any end
+        let crlf = out.join("\r\n");
+        for text in [out.join("\n"), crlf] {
+            let run = parse_cargo_test(&text);
+            assert_eq!((run.passed, run.failed, run.ignored), (1, 2, 0));
+            assert_eq!(run.skipped, vec!["s::skipped: no tool".to_string()]);
+            assert_eq!(
+                run.failures,
+                vec!["a::first".to_string(), "c::second".to_string()]
+            );
+            assert_eq!(run.panics.len(), 2, "{:?}", run.panics);
+            assert_eq!(run.panics["a::first"], first);
+            assert_eq!(run.panics["c::second"], second);
+        }
+        // the input ends inside the panic: flushed at the end of input, no line end
+        let cut = "test c ... FAILED\n---- c stdout ----\nthread 'c' panicked at x.rs:1:1:\nassertion failed: eof";
+        let run = parse_cargo_test(cut);
+        assert_eq!(
+            run.panics["c"],
+            "thread 'c' panicked at x.rs:1:1:\nassertion failed: eof"
+        );
+        // a panic of a test that did not fail is not kept
+        let passing = "test p ... ok\n---- p stdout ----\nthread 'p' panicked at x.rs:1:1:\nexpected\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n";
+        let run = parse_cargo_test(passing);
+        assert!(run.panics.is_empty(), "{:?}", run.panics);
+        assert_eq!((run.passed, run.failed), (1, 0));
+    }
+
+    #[test]
+    fn plx3_report_bounds_panic_text_without_losing_counts() {
+        let counts = |run: &TestRun| (run.passed, run.failed, run.ignored, run.failures.len());
+        let want_counts = (4, 1, 2, 1);
+        let lines = |n: usize| {
+            (1..n)
+                .map(|i| format!("line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        // 39 and 40 lines (header included) are kept whole
+        for n in [39, 40] {
+            let run = parse_cargo_test(&one_failure(&lines(n)));
+            let p = &run.panics["t"];
+            assert_eq!(p.split('\n').count(), n);
+            assert_eq!(*p, format!("{PANIC_HEAD}\n{}", lines(n)));
+            assert_eq!(counts(&run), want_counts);
+        }
+        // 41 lines: 39 kept, then the marker as the 40th line; nothing after the marker
+        let run = parse_cargo_test(&one_failure(&format!(
+            "{}\nthread 't' panicked at y.rs:2:2:\nSECOND PANIC",
+            lines(60)
+        )));
+        let p = &run.panics["t"];
+        assert_eq!(p.split('\n').count(), PANIC_LINES, "{p}");
+        let want = format!("{PANIC_HEAD}\n{}\n{TRUNCATED}", lines(39));
+        assert_eq!(*p, want);
+        assert!(!p.contains("SECOND PANIC"), "{p}");
+        assert_eq!(counts(&run), want_counts);
+        let run = parse_cargo_test(&one_failure(&lines(41)));
+        assert_eq!(run.panics["t"], want);
+
+        // bytes: the header line, a separator and one long body line
+        let room = PANIC_BYTES - PANIC_HEAD.len() - 1;
+        for (extra, cut) in [(room - 1, false), (room, false), (room + 1, true)] {
+            let run = parse_cargo_test(&one_failure(&"y".repeat(extra)));
+            let p = &run.panics["t"];
+            assert_eq!(p.ends_with(TRUNCATED), cut, "{extra}");
+            assert!(p.len() <= PANIC_BYTES && p.split('\n').count() <= PANIC_LINES);
+            if !cut {
+                assert_eq!(p.len(), PANIC_HEAD.len() + 1 + extra);
+            } else {
+                assert!(p.starts_with(&format!("{PANIC_HEAD}\nyyy")), "{extra}");
+                assert_eq!(p.len(), PANIC_BYTES, "all the room is used");
+            }
+            assert_eq!(counts(&run), want_counts);
+        }
+
+        // a multibyte character on the cut: the text stays valid and inside the bound
+        for pad in ["", "a"] {
+            let body = format!("{pad}{}", "é".repeat(PANIC_BYTES));
+            let run = parse_cargo_test(&one_failure(&body));
+            let p = &run.panics["t"];
+            assert!(p.len() <= PANIC_BYTES, "{}", p.len());
+            let kept = p
+                .strip_suffix(&format!("\n{TRUNCATED}"))
+                .expect("the marker closes the excerpt");
+            let body = kept.strip_prefix(&format!("{PANIC_HEAD}\n")).unwrap();
+            assert!(body.starts_with(pad) && body[pad.len()..].chars().all(|c| c == 'é'));
+            assert!(std::str::from_utf8(p.as_bytes()).is_ok());
+            assert_eq!(counts(&run), want_counts);
+        }
+
+        // one line of 1 MiB: bounded, with the marker, and the next panic is not read
+        let huge = format!(
+            "{}\nthread 't' panicked at y.rs:2:2:\nSECOND",
+            "z".repeat(1 << 20)
+        );
+        let run = parse_cargo_test(&one_failure(&huge));
+        let p = &run.panics["t"];
+        assert!(p.len() <= PANIC_BYTES, "{}", p.len());
+        assert!(p.ends_with(&format!("\n{TRUNCATED}")) && !p.contains("SECOND"));
+        assert_eq!(p.matches("panicked at").count(), 1);
+        assert_eq!(counts(&run), want_counts);
+    }
+
+    #[test]
+    fn plx3_workspace_failures_keep_their_panic_excerpt() {
+        let mut out = String::from(
+            "running 2 tests\ntest w::ok ... ok\ntest w::bad ... FAILED\n\nfailures:\n\n---- w::bad stdout ----\nthread 'w::bad' (7) panicked at crates/w.rs:4:9:\nassertion `left == right` failed\n  left: 1\n right: 2\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\nfailures:\n    w::bad\n\ntest result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n",
+        );
+        for i in 0..25 {
+            out += &format!("filler {i}\n");
+        }
+        let run = parse_cargo_test(&out);
+        assert_eq!(run.failures, vec!["w::bad".to_string()]);
+        let detail = workspace_test_detail(false, &run, &out);
+        let tail_text = tail(&out, 20);
+        let want_excerpt = "- `w::bad`\n\n        thread 'w::bad' (7) panicked at crates/w.rs:4:9:\n        assertion `left == right` failed\n          left: 1\n         right: 2\n        note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n        \n\n";
+        assert_eq!(
+            detail,
+            format!("1 passed, 1 failed, 0 ignored, 0 skipped\n\n{want_excerpt}{tail_text}")
+        );
+        assert!(!tail_text.contains("panicked at"));
+        assert_eq!(detail.matches("panicked at").count(), 1);
+        assert!(detail.find("panicked at").unwrap() < detail.find("filler 5").unwrap());
+        // a passing step keeps its count line alone; an empty run keeps its note after the tail
+        let ok = workspace_test_detail(true, &TestRun::default(), "");
+        assert_eq!(
+            ok,
+            "0 passed, 0 failed, 0 ignored, 0 skipped (no tests ran)"
+        );
+        let none = workspace_test_detail(false, &TestRun::default(), "boom\n");
+        assert_eq!(
+            none,
+            "0 passed, 0 failed, 0 ignored, 0 skipped\nboom (no tests ran)"
+        );
+    }
+
+    #[test]
+    fn plx3_markdown_and_json_keep_the_same_panic_excerpt() {
+        // 44 body lines, one of them a Markdown fence: bounded and still under its name
+        let mut body: Vec<String> = (1..45).map(|i| format!("  detail {i}")).collect();
+        body[1] = "```".into();
+        body[2] = "~~~ not a fence either".into();
+        let out = one_failure(&body.join("\n"));
+        let run = parse_cargo_test(&out);
+        let excerpt = run.panics["t"].clone();
+        assert_eq!(excerpt.split('\n').count(), PANIC_LINES);
+        assert!(excerpt.ends_with(TRUNCATED) && excerpt.contains("\n```\n"));
+        let mut areas = vec![];
+        add_run(&mut areas, "daemon", false, run);
+        let r = report_of(areas);
+        let md = markdown(&r);
+        let mut want = String::from("- `t`\n\n");
+        for l in excerpt.split('\n') {
+            want += &format!("        {l}\n");
+        }
+        want.push('\n');
+        assert!(md.contains(&want), "{md}");
+        // inside the excerpt every line is indented: a fence cannot close anything
+        let start = md.find("- `t`\n").unwrap();
+        let block = &md[start..start + want.len()];
+        for l in block.lines().skip(1).filter(|l| !l.is_empty()) {
+            assert!(l.starts_with("        "), "{l:?}");
+        }
+        assert!(
+            md.lines().all(|l| l != "```" && !l.starts_with("```")),
+            "{md}"
+        );
+        // the JSON holds the same bounded text under the same name
+        let v: serde_json::Value = serde_json::from_str(&json(&r)).unwrap();
+        assert_eq!(
+            v["areas"][0]["panics"]["t"].as_str(),
+            Some(excerpt.as_str())
+        );
+        assert!(excerpt.len() <= PANIC_BYTES);
+        // a name with no excerpt stays alone; an unknown name draws nothing
+        let none = failure_lines(&["x".to_string()], &BTreeMap::new());
+        assert_eq!(none, "- `x`\n");
+        assert_eq!(failure_lines(&[], &r.areas[0].panics), "");
     }
 
     #[test]

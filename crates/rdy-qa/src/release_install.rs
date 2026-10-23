@@ -1,11 +1,13 @@
 //! Release archives: one native `.tar.gz` per platform, holding the `rdy`
-//! binary, both license files and, for a preview build, the preview note as `PREVIEW.txt`. The
+//! binary, both license files, the third-party notices (`THIRD-PARTY-NOTICES.txt`) and, for a
+//! preview build, the preview note as `PREVIEW.txt`. The
 //! binary's own `--version` output decides whether it is a preview, so the archive's name and
 //! note follow the build, with no second switch. Packaging stops at the unsigned archive: the
 //! signed `SHA256SUMS` is made later, offline.
 //!
 //! `qa-release-package` is the command; [`package`] does the work.
 use crate::platform::{self, RELEASE_CHILD_DEADLINE, RELEASE_CHILD_OUTPUT_MAX};
+use crate::release_notices;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io;
@@ -35,12 +37,16 @@ pub const MIT_FILE: &str = "LICENSE-MIT";
 pub const APACHE_FILE: &str = "LICENSE-APACHE";
 /// The preview note's file name in a preview archive.
 pub const NOTE_FILE: &str = "PREVIEW.txt";
+/// The third-party notices' file name in each archive.
+pub const NOTICES_FILE: &str = "THIRD-PARTY-NOTICES.txt";
 /// The largest binary packaged: 256 MiB.
 pub const BINARY_MAX: u64 = 268_435_456;
 /// The largest license file packaged: 64 KiB.
 pub const LICENSE_MAX: u64 = 65_536;
-/// The largest archive accepted: the binary cap plus 1 MiB.
-pub const ARCHIVE_MAX: u64 = 269_484_032;
+/// The largest third-party notices file packaged: 16 MiB.
+pub const NOTICES_MAX: u64 = 16_777_216;
+/// The largest archive accepted: the binary cap plus the notices cap plus 1 MiB.
+pub const ARCHIVE_MAX: u64 = BINARY_MAX + NOTICES_MAX + 1_048_576;
 /// The longest path argument, in bytes.
 pub const PATH_MAX: usize = 4096;
 
@@ -52,6 +58,7 @@ pub const MSG_OUTPUT_EXISTS: &str = "release package: output exists";
 pub const MSG_BINARY_VERSION: &str = "release package: invalid binary version";
 pub const MSG_SIZE_LIMIT: &str = "release package: size limit exceeded";
 pub const MSG_FILE_OPERATION: &str = "release package: file operation failed";
+pub const MSG_NOTICES: &str = "release package: third-party notices are incomplete";
 
 /// Why a release archive test skips when `tar` does not run.
 pub const TAR_SKIP_REASON: &str = "tar is required for release archive tests";
@@ -71,6 +78,8 @@ enum Failure {
     SizeLimit,
     /// Any other I/O failure: a timeout, tar, or the cleanup.
     FileOperation,
+    /// The third-party notices could not be made, or are over their cap.
+    Notices,
 }
 
 impl Failure {
@@ -82,6 +91,7 @@ impl Failure {
             Failure::BinaryVersion => MSG_BINARY_VERSION,
             Failure::SizeLimit => MSG_SIZE_LIMIT,
             Failure::FileOperation => MSG_FILE_OPERATION,
+            Failure::Notices => MSG_NOTICES,
         }
     }
 }
@@ -104,6 +114,8 @@ struct Setup<'a> {
     /// probe runs the binary here, so a binary it accepts is native. `None` (stand-ins only)
     /// accepts either target.
     native_target: Option<&'a dyn Fn() -> io::Result<&'static str>>,
+    /// The notices of a target, called once the inputs are open and before the OUT check.
+    notices: &'a dyn Fn(&str) -> Result<release_notices::Notices, String>,
 }
 
 /// The real release's `checked`: nothing.
@@ -119,12 +131,13 @@ impl Setup<'static> {
             probe: &version_command,
             checked: &nothing,
             native_target: Some(&platform::release_target),
+            notices: &release_notices::for_target,
         }
     }
 }
 
 /// The repository root, from this crate's manifest directory (`crates/rdy-qa`).
-fn repository_root() -> PathBuf {
+pub(crate) fn repository_root() -> PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     manifest
         .ancestors()
@@ -186,13 +199,15 @@ pub fn tar_available() -> bool {
 /// `rdy-<version>-preview-<target>` when the binary's `--version` prints `rdy <version>
 /// (preview)`, and `rdy-<version>-<target>` when it prints `rdy <version>`. The archive holds
 /// `<stem>/` with `rdy` (0755), `LICENSE-MIT` and `LICENSE-APACHE` (0644) from the repository
-/// root and, for a preview, `PREVIEW.txt` (0644) with [`PREVIEW_NOTE`].
+/// root, `THIRD-PARTY-NOTICES.txt` (0644) with the target's notices
+/// ([`release_notices::for_target`]) and, for a preview, `PREVIEW.txt` (0644) with
+/// [`PREVIEW_NOTE`]. Packaging never opens a `.crate` file.
 ///
 /// The error is one of the `MSG_` texts. Checks run in order: the grammar of the arguments and
 /// that `target` is this machine's release target (the version probe runs the binary here, so
-/// the binary is native), the binary, `LICENSE-MIT`, `LICENSE-APACHE`, then that `out` does not
-/// exist. On failure every path this call created is removed again, and nothing that was there
-/// before is touched.
+/// the binary is native), the binary, `LICENSE-MIT`, `LICENSE-APACHE`, the notices (at most
+/// [`NOTICES_MAX`] bytes), then that `out` does not exist. On failure every path this call
+/// created is removed again, and nothing that was there before is touched.
 ///
 /// `out` is made private to this user (mode 0700, whatever the umask), and the stage inside it
 /// too, so no other user can change a staged file between its probe and the archive. Every
@@ -224,10 +239,18 @@ fn package_with(
     {
         return Err(Failure::Arguments);
     }
+    let binary = open_input(binary, BINARY_MAX)?;
+    let mit = open_input(&setup.licenses.join(MIT_FILE), LICENSE_MAX)?;
+    let apache = open_input(&setup.licenses.join(APACHE_FILE), LICENSE_MAX)?;
+    let notices = (setup.notices)(target).map_err(|_| Failure::Notices)?.bytes;
+    if notices.len() as u64 > NOTICES_MAX {
+        return Err(Failure::Notices);
+    }
     let inputs = Inputs {
-        binary: open_input(binary, BINARY_MAX)?,
-        mit: open_input(&setup.licenses.join(MIT_FILE), LICENSE_MAX)?,
-        apache: open_input(&setup.licenses.join(APACHE_FILE), LICENSE_MAX)?,
+        binary,
+        mit,
+        apache,
+        notices,
     };
     match fs::symlink_metadata(out) {
         Ok(_) => return Err(Failure::OutputExists),
@@ -256,11 +279,13 @@ fn package_with(
     work.finish(made)
 }
 
-/// The three inputs, open: the handles their checks read, which the copies read too.
+/// The three input files, open: the handles their checks read, which the copies read too.
+/// And the notices this run owns, already within their cap.
 struct Inputs {
     binary: File,
     mit: File,
     apache: File,
+    notices: Vec<u8>,
 }
 
 /// What one packaging run made in OUT, which only it may remove. Every step reaches OUT and
@@ -326,6 +351,11 @@ impl Work<'_> {
         })?;
         stage.add(APACHE_FILE, 0o644, |to| {
             copy_from(&inputs.apache, to, LICENSE_MAX)
+        })?;
+        stage.add(NOTICES_FILE, 0o644, |to| {
+            use std::io::Write;
+            to.write_all(&inputs.notices)
+                .map_err(|_| Failure::FileOperation)
         })?;
         let preview = probe_version(&stage.dir, version, setup)?;
         let stem = if preview {
@@ -1891,6 +1921,16 @@ mod tests {
     const BINARY: &[u8] = b"\x7fELF a small binary fixture\n";
     const MIT: &[u8] = b"the MIT license fixture\n";
     const APACHE: &[u8] = b"the Apache license fixture\n";
+    /// The stand-ins' notices: fixed synthetic bytes, from no Cargo run.
+    const NOTICES: &[u8] = b"Third-party notices for rdy\n\nsynthetic 1.0.0\nLicense: MIT\n\n--- LICENSE ---\nthe synthetic license\n\n";
+
+    /// The stand-ins' notices provider.
+    fn synthetic_notices(_: &str) -> Result<crate::release_notices::Notices, String> {
+        Ok(crate::release_notices::Notices {
+            bytes: NOTICES.to_vec(),
+            mpl: Vec::new(),
+        })
+    }
 
     /// A binary, a license root and an empty parent for OUT, plus a sentinel beside each.
     struct Fixture {
@@ -1961,6 +2001,7 @@ mod tests {
             licenses: f.licenses.clone(),
             probe,
             native_target: None,
+            notices: &synthetic_notices,
             ..Setup::release()
         }
     }
@@ -2016,6 +2057,7 @@ mod tests {
             format!("{stem}/"),
             format!("{stem}/{APACHE_FILE}"),
             format!("{stem}/{MIT_FILE}"),
+            format!("{stem}/{NOTICES_FILE}"),
             format!("{stem}/rdy"),
         ];
         if preview {
@@ -2081,6 +2123,8 @@ mod tests {
             assert_eq!(mode_of(&root.join("rdy")).expect("mode"), 0o755);
             assert_eq!(mode_of(&root.join(MIT_FILE)).expect("mode"), 0o644);
             assert_eq!(mode_of(&root.join(APACHE_FILE)).expect("mode"), 0o644);
+            assert_eq!(fs::read(root.join(NOTICES_FILE)).expect("notices"), NOTICES);
+            assert_eq!(mode_of(&root.join(NOTICES_FILE)).expect("mode"), 0o644);
             let note = root.join("PREVIEW.txt");
             if preview {
                 assert_eq!(fs::read_to_string(&note).expect("note"), PREVIEW_NOTE);
@@ -2088,11 +2132,92 @@ mod tests {
             } else {
                 assert!(!note.exists(), "a plain build has no preview note");
             }
-            assert_eq!(names(&root).len(), if preview { 4 } else { 3 });
+            assert_eq!(names(&root).len(), if preview { 5 } else { 4 });
             let mut after = f.state();
             after[2].1.retain(|n| n != "out");
             assert_eq!(after, before, "the inputs are unchanged");
         }
+
+        // The notices provider: building a setup calls it never (and runs no process);
+        // packaging calls it once the three inputs are open and before the OUT check. A
+        // failed or oversized notice is the notices refusal, before OUT is made.
+        let starts = crate::platform::runner_starts();
+        let release = Setup::release();
+        assert_eq!(
+            crate::platform::runner_starts(),
+            starts,
+            "Setup::release runs nothing"
+        );
+        drop(release);
+        let calls = std::cell::Cell::new(0);
+        let counting = |target: &str| {
+            calls.set(calls.get() + 1);
+            synthetic_notices(target)
+        };
+        let failing = |_: &str| -> Result<crate::release_notices::Notices, String> {
+            Err("release sources: third-party notices are incomplete".into())
+        };
+        let oversized = |_: &str| {
+            Ok(crate::release_notices::Notices {
+                bytes: vec![b'n'; NOTICES_MAX as usize + 1],
+                mpl: Vec::new(),
+            })
+        };
+        let probe = printing("rdy 0.14.0\\n");
+        let f = Fixture::new();
+        let counted = Setup {
+            notices: &counting,
+            ..setup(&f, &probe)
+        };
+        assert_eq!(calls.get(), 0, "construction calls no provider");
+        fs::rename(f.licenses.join(APACHE_FILE), f.dir.path().join("apache")).expect("mv");
+        assert_eq!(
+            package_with(&f.binary, V, TARGET, &f.out(), &counted),
+            Err(Failure::InputFile)
+        );
+        assert_eq!(calls.get(), 0, "the inputs open first");
+        fs::rename(f.dir.path().join("apache"), f.licenses.join(APACHE_FILE)).expect("mv");
+        fs::create_dir(f.out()).expect("occupy OUT");
+        assert_eq!(
+            package_with(&f.binary, V, TARGET, &f.out(), &counted),
+            Err(Failure::OutputExists)
+        );
+        assert_eq!(calls.get(), 1, "then the notices, before the OUT check");
+        type Provider<'a> = &'a dyn Fn(&str) -> Result<crate::release_notices::Notices, String>;
+        let refusing: [(&str, Provider); 2] =
+            [("a failed", &failing), ("an oversized", &oversized)];
+        for (what, provider) in refusing {
+            let s = Setup {
+                notices: provider,
+                ..setup(&f, &probe)
+            };
+            assert_eq!(
+                package_with(&f.binary, V, TARGET, &f.out(), &s).map_err(Failure::message),
+                Err(MSG_NOTICES),
+                "{what} notice, before an occupied OUT"
+            );
+            let g = Fixture::new();
+            let before = g.state();
+            let s = Setup {
+                notices: provider,
+                ..setup(&g, &probe)
+            };
+            assert_eq!(
+                package_with(&g.binary, V, TARGET, &g.out(), &s).map_err(Failure::message),
+                Err(MSG_NOTICES),
+                "{what} notice"
+            );
+            assert_eq!(g.state(), before, "{what} notice: nothing created");
+            assert!(!g.out().exists(), "{what} notice: no OUT");
+        }
+        assert_eq!(
+            MSG_NOTICES,
+            "release package: third-party notices are incomplete"
+        );
+        assert_eq!(NOTICES_FILE, "THIRD-PARTY-NOTICES.txt");
+        assert_eq!(NOTICES_MAX, 16_777_216);
+        assert_eq!(ARCHIVE_MAX, BINARY_MAX + NOTICES_MAX + 1_048_576);
+        assert_eq!(ARCHIVE_MAX, 286_261_248);
 
         // The built CLI: its own `--version` output picks the archive family.
         let rdy = crate::fixtures::rdy_bin();
@@ -2154,6 +2279,18 @@ mod tests {
                 "PREVIEW.txt is the note"
             );
         }
+        let notices = into.join(&stem).join(NOTICES_FILE);
+        let want = crate::release_notices::for_target(target).expect("the target's notices");
+        assert!(
+            fs::read(&notices).expect("THIRD-PARTY-NOTICES.txt") == want.bytes,
+            "THIRD-PARTY-NOTICES.txt is the target's notices"
+        );
+        assert_eq!(mode_of(&notices).expect("mode"), 0o644);
+        assert_eq!(
+            names(&into.join(&stem)).len(),
+            if preview { 5 } else { 4 },
+            "five files in a preview, four in a plain build"
+        );
     }
 
     #[test]

@@ -694,13 +694,15 @@ mod tests {
         let fix =
             "Keep the dump chain and the holder it came from. This rdy cannot load this chain.";
         assert_eq!(crate::error::HOLDER_LOAD_REDACTION_LIMIT_FIX, fix);
-        for (lim, message) in [
+        for (lim, holder_message, dry_run_message) in [
             (
                 limit::FRAMES,
+                "The dump chain exceeds 1000000 scanned frames.",
                 "The redaction exceeds 1000000 scanned frames.",
             ),
             (
                 limit::BYTES,
+                "The dump chain exceeds 2147483648 scanned bytes.",
                 "The redaction exceeds 2147483648 scanned bytes.",
             ),
         ] {
@@ -715,7 +717,7 @@ mod tests {
                 );
                 assert_eq!(
                     triple(&e),
-                    ("E_REDACTION_LIMIT", message, fix),
+                    ("E_REDACTION_LIMIT", holder_message, fix),
                     "{lim} at input {file}"
                 );
             }
@@ -725,7 +727,7 @@ mod tests {
             for e in [direct, converted] {
                 assert_eq!(
                     triple(&e),
-                    ("E_REDACTION_LIMIT", message, DRY_RUN_FIX),
+                    ("E_REDACTION_LIMIT", dry_run_message, DRY_RUN_FIX),
                     "{lim}"
                 );
             }
@@ -740,6 +742,68 @@ mod tests {
                 },
             );
             assert_eq!(e.fix, LOAD_FIX, "{lim}");
+        }
+    }
+
+    #[test]
+    fn plx5_holder_message_does_not_change_redaction_or_stopped_load() {
+        let files = vec![PathBuf::from("full.rdydump"), PathBuf::from("inc.rdydump")];
+        let holder_fix =
+            "Keep the dump chain and the holder it came from. This rdy cannot load this chain.";
+        let scan = |lim: &'static str| {
+            scan_error(
+                &files,
+                ScanError::Input {
+                    file: 1,
+                    source: StoreError::RedactionLimit { limit: lim },
+                },
+            )
+        };
+        // the holder's scan bounds name the dump chain
+        for (lim, holder_message, dry_run_message) in [
+            (
+                limit::FRAMES,
+                "The dump chain exceeds 1000000 scanned frames.",
+                "The redaction exceeds 1000000 scanned frames.",
+            ),
+            (
+                limit::BYTES,
+                "The dump chain exceeds 2147483648 scanned bytes.",
+                "The redaction exceeds 2147483648 scanned bytes.",
+            ),
+        ] {
+            assert_eq!(
+                triple(&scan(lim)),
+                ("E_REDACTION_LIMIT", holder_message, holder_fix),
+                "holder {lim}"
+            );
+            // a redaction keeps its subject, directly and through the conversion
+            let direct = crate::error::redaction_limit(lim);
+            let converted: RdyError = StoreError::RedactionLimit { limit: lim }.into();
+            for e in [direct, converted] {
+                assert_eq!(
+                    triple(&e),
+                    ("E_REDACTION_LIMIT", dry_run_message, DRY_RUN_FIX),
+                    "redaction {lim}"
+                );
+            }
+        }
+        // a stopped load's carried limits keep the redaction subject and the stop advice
+        for (lim, message) in [
+            (
+                limit::CARRIED_SPANS,
+                "The redaction exceeds 100000 carried spans.",
+            ),
+            (
+                limit::RECORD,
+                "The redaction exceeds 16777216 bytes per record.",
+            ),
+        ] {
+            assert_eq!(
+                triple(&scan(lim)),
+                ("E_REDACTION_LIMIT", message, LOAD_FIX),
+                "stopped load {lim}"
+            );
         }
     }
 

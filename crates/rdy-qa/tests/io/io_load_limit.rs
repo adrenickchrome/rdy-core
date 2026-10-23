@@ -232,7 +232,7 @@ fn plc1_schema_has_one_limit_row_with_both_fixes() {
     let schema = m.call("rdy_schema", json!({})).ok();
     assert_eq!(
         schema["errors"]["E_REDACTION_LIMIT"],
-        json!({"when": "The redaction exceeds {limit}.", "fix": LIMIT_ROW_FIX}),
+        json!({"when": "A redaction or dump-chain load exceeds {limit}.", "fix": LIMIT_ROW_FIX}),
         "{}",
         schema["errors"]["E_REDACTION_LIMIT"]
     );
@@ -246,7 +246,7 @@ fn plc1_schema_has_one_limit_row_with_both_fixes() {
         rows,
         vec![&(
             "E_REDACTION_LIMIT",
-            "The redaction exceeds {limit}.",
+            "A redaction or dump-chain load exceeds {limit}.",
             LIMIT_ROW_FIX
         )]
     );

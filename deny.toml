@@ -1,4 +1,4 @@
-# Reviewed dependency policy. No advisory ignores or per-crate license exceptions.
+# Reviewed dependency policy. No advisory ignores. MPL exceptions name exact crate versions.
 [advisories]
 version = 2
 unmaintained = "workspace"
@@ -11,6 +11,14 @@ allow = [
   "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "MIT", "BSD-2-Clause",
   "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "CC0-1.0", "CDLA-Permissive-2.0"
 ]
+
+[[licenses.exceptions]]
+crate = "imbl@7.0.2"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "imbl-sized-chunks@0.2.0"
+allow = ["MPL-2.0"]
 
 [bans]
 multiple-versions = "warn"

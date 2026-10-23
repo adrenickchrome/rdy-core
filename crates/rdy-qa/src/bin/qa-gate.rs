@@ -273,23 +273,8 @@ fn main() {
         );
         let run = report::parse_cargo_test(&out);
         seeds.extend(report::failing_seeds(&out));
-        let mut detail = format!(
-            "{} passed, {} failed, {} ignored, {} skipped",
-            run.passed,
-            run.failed,
-            run.ignored,
-            run.skipped.len()
-        );
-        if !run.failures.is_empty() {
-            detail += &format!("; failing: {}", run.failures.join(", "));
-        }
-        if !ok {
-            detail += &format!("\n{}", report::tail(&out, 20));
-        }
+        let detail = report::workspace_test_detail(ok, &run, &out);
         let empty = report::ran_nothing(&run);
-        if empty {
-            detail += " (no tests ran)";
-        }
         gate(
             "cargo test --workspace --exclude rdy-qa",
             ok && !empty,
