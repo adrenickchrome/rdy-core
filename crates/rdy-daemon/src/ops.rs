@@ -40,7 +40,7 @@ mod wc;
 use brief::brief;
 use clone::clone;
 use dump::dump;
-use edit::{edit_block, keys_assign, new_doc, new_folder, new_profile};
+use edit::{edit_block, keys_assign, new_doc, new_finding, new_folder, new_profile, new_source};
 use intake::{answer, pending};
 use land::{approve, propose, tag};
 use plan::{plan, reaffirm, repin};
@@ -115,6 +115,8 @@ pub const OPS: &[&str] = &[
     "new_folder",
     "new_doc",
     "new_profile",
+    "new_finding",
+    "new_source",
     "keys_assign",
     "edit_block",
     "propose",
@@ -420,6 +422,14 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
                 args,
                 "{key, parent, title, audience, select, description?, trail?, view?}",
             )?,
+        ),
+        "new_finding" => new_finding(
+            cx,
+            parse(op, args, "{statement, evidence, parent?, view?}")?,
+        ),
+        "new_source" => new_source(
+            cx,
+            parse(op, args, "{title, kind, locator, version?, parent?, view?}")?,
         ),
         "keys_assign" => keys_assign(cx, parse(op, args, "{view?}")?),
         "edit_block" => edit_block(

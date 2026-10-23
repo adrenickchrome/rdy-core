@@ -292,7 +292,15 @@ fn main() -> ExitCode {
     if let Some(extra) = render_stream_cmd::invocation(&args) {
         return render_stream_cmd::render_stream(extra);
     }
-    let cli = Cli::parse_from(args);
+    // the matches are kept: `rdy new finding` reads its options' order from them
+    let matches = <Cli as clap::CommandFactory>::command().get_matches_from(args);
+    let mut cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|e| {
+        e.format(&mut <Cli as clap::CommandFactory>::command())
+            .exit()
+    });
+    if let Cmd::New { what } = &mut cli.cmd {
+        edit_cmd::fill_evidence_at(what, &matches);
+    }
     // the scan above finds every render-stream clap parses; this keeps the refusal if not
     if let Cmd::RenderStream = cli.cmd {
         return render_stream_cmd::render_stream(

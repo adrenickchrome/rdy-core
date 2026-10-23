@@ -16,6 +16,7 @@ use rdy_model::{
     AltChoice, Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Justification, Link, Op,
     RefMode, decision, order_between, ref_spans,
 };
+use rdy_schema::supporting;
 use rdy_schema::{Issue, Pack, TypeClass, has_errors, skeleton_gaps, validate_block};
 use rdy_store::Conflict;
 use serde::{Deserialize, Serialize};
@@ -1805,6 +1806,9 @@ fn build_ops(
     let mut reaffirmed: BTreeMap<BlockId, Vec<String>> = BTreeMap::new();
     // D-01QX5: the blocks a repin with `code: true` names
     let mut code_repins: BTreeSet<BlockId> = BTreeSet::new();
+    // D-2WR0G: the field names each create or editing update supplies, for the decision basis
+    // and time check (`decision_fields::validate_set`)
+    let mut supplied: BTreeMap<BlockId, BTreeSet<String>> = BTreeMap::new();
 
     for (i, input) in inputs.into_iter().enumerate() {
         match input {
@@ -1922,6 +1926,7 @@ fn build_ops(
                 let body = res.text(&body, RefMode::for_body(&block_type))?;
                 refuse_engine_input(&fields, &[], &format!("op {i}"))?;
                 let sets_key = fields.contains_key("key");
+                supplied.insert(new_id.clone(), fields.keys().cloned().collect());
                 let mut block = Block {
                     id: new_id.clone(),
                     block_type,
@@ -1994,6 +1999,12 @@ fn build_ops(
                 let names_implements = links
                     .as_ref()
                     .is_some_and(|l| l.contains_key(decision::IMPLEMENTS));
+                // D-2WR0G: the names this update sets, even to the value held; a type change to
+                // decision checks every time field it holds
+                let mut names: BTreeSet<String> = fields.keys().cloned().collect();
+                if retyped.as_deref() == Some(decision::DECISION) {
+                    names.extend(crate::decision_fields::TIME_FIELDS.map(String::from));
+                }
                 if let Some(t) = retyped {
                     retype(pack, &ov, &mut block, t)?;
                 }
@@ -2087,6 +2098,9 @@ fn build_ops(
                 if edits && !names_implements {
                     rewritten.insert(id.clone());
                 }
+                if edits {
+                    supplied.insert(id.clone(), names);
+                }
                 ov.set(id, Some(block.clone()));
                 ops.push(Op::Update {
                     base: base_hash,
@@ -2144,6 +2158,15 @@ fn build_ops(
                             "{id} is a question: questions are closed by a decision's answers link, never deleted"
                         ),
                         format!("record a decision that links answers: {id}"),
+                    ));
+                }
+                // D-Z8P09 (TASK-507 (4)): a finding keeps its evidence; a source may go
+                if cur.block_type == supporting::FINDING {
+                    return Err(bad(
+                        format!(
+                            "{id} is a finding: findings keep their evidence and are never deleted"
+                        ),
+                        "update the finding, or record a new finding",
                     ));
                 }
                 if ov.with_sibs(Some(&id), |s| !s.order.is_empty()) {
@@ -2550,7 +2573,12 @@ fn build_ops(
             ));
         }
         let parent = block.parent.as_ref().and_then(|p| ov.get(p));
-        issues.extend(validate_block(pack, block, parent));
+        let mut found = validate_block(pack, block, parent);
+        name_unknown_evidence_key(block, &mut found);
+        issues.extend(found);
+        if let Some(names) = supplied.get(&block.id) {
+            issues.extend(crate::decision_fields::validate_set(block, names));
+        }
         if !is_move {
             check_asset_blob(pack, store, block)?;
             // a pin the block already holds is kept; every other cited target is pinned now.
@@ -2608,6 +2636,56 @@ fn build_ops(
         reaffirmed,
         code_repins,
     ))
+}
+
+/// D-Z8P09: gives each create of a finding or a source in `ops` that names no parent the
+/// decision home of `view` (`Rdy::decision_parent`), with its refusals; an explicit parent is
+/// kept. The home is looked up once, and only when such a create exists.
+fn home_supporting_parents(r: &Rdy, view: &str, ops: &mut [OpInput]) -> Result<(), RdyError> {
+    let mut home: Option<String> = None;
+    for op in ops {
+        if let OpInput::Create {
+            block_type, parent, ..
+        } = op
+            && parent.is_none()
+            && (block_type == supporting::FINDING || block_type == supporting::SOURCE)
+        {
+            if home.is_none() {
+                home = Some(r.decision_parent(view, None)?);
+            }
+            *parent = home.clone();
+        }
+    }
+    Ok(())
+}
+
+/// The keys an unknown evidence key is matched against for a did-you-mean, in order.
+const EVIDENCE_HINT_KEYS: [&str; 4] = ["quote", "session_ref", "question", "source"];
+
+/// TASK-507 (4): when `block` is a finding whose evidence has an unknown key, the schema's one
+/// evidence issue in `issues` names it instead: `evidence entry <n>: unknown key "<key>"` (`n`
+/// from 0, as ops are numbered), and `; did you mean "<known>"?` when one is near. The fix stays
+/// the evidence fix. The shape is checked once, by the schema.
+pub(crate) fn name_unknown_evidence_key(block: &Block, issues: &mut [Issue]) {
+    if block.block_type != supporting::FINDING {
+        return;
+    }
+    let Some((n, key)) = block
+        .fields
+        .get(supporting::EVIDENCE_FIELD)
+        .and_then(supporting::first_unknown_evidence_key)
+    else {
+        return;
+    };
+    let mut message = format!("evidence entry {n}: unknown key \"{key}\"");
+    if let Some(known) = crate::did_you_mean::nearest(key, &EVIDENCE_HINT_KEYS) {
+        message.push_str(&format!("; did you mean \"{known}\"?"));
+    }
+    for i in issues.iter_mut() {
+        if i.code == "E_FIELD_KIND" && i.message == supporting::EVIDENCE_MESSAGE {
+            i.message = message.clone();
+        }
+    }
 }
 
 /// The ruling on D-YQCY9's task: `implements` names the decision a change carries out, which
@@ -2915,7 +2993,7 @@ impl Rdy {
     pub(crate) fn write_marked(
         &mut self,
         session: &Session,
-        req: WriteRequest,
+        mut req: WriteRequest,
         mut links: ChangeLinks,
         brief: Option<&str>,
         rdy_keys: &BTreeSet<BlockId>,
@@ -2947,6 +3025,9 @@ impl Rdy {
         let included = st.included(&req.view);
         let m = st.materialized(&scope)?;
         check_implements(&st, &scope, &m, req.justification.as_ref())?;
+        // D-Z8P09: a finding or a source created with no parent goes to the decision home, as a
+        // decision does; done before the briefing check, so the home is one of its subjects
+        home_supporting_parents(self, &req.view, &mut req.ops)?;
         // D-EJBPD: what each reaffirm op selects, once, on the starting view, before the
         // briefing check (which must cover exactly those decisions) and before any op applies
         let selection = crate::reaffirm::select(&st, &scope, &req.ops)?;

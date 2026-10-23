@@ -50,6 +50,184 @@ pub(crate) enum NewCmd {
         #[arg(long)]
         view: Option<String>,
     },
+    /// A finding: what surfaced, with its evidence. Each --question and --session belongs to
+    /// the latest --quote before it; each --source (an id, key or path) is an entry of its own.
+    /// It lives only in the store, in the decision home unless --parent names a place. The chat
+    /// path is rdy_write.
+    Finding {
+        #[arg(long)]
+        statement: String,
+        /// Words quoted as evidence; repeat it for more entries.
+        #[arg(long)]
+        quote: Vec<String>,
+        /// The question the latest --quote answers.
+        #[arg(long)]
+        question: Vec<String>,
+        /// The session the latest --quote comes from.
+        #[arg(long)]
+        session: Vec<String>,
+        /// A source the finding cites: its id, key or path; repeat it for more.
+        #[arg(long)]
+        source: Vec<String>,
+        /// The doc or section to record it in (default: the decision home).
+        #[arg(long)]
+        parent: Option<String>,
+        /// The view to write (default: the session's, `work` for the human).
+        #[arg(long)]
+        view: Option<String>,
+        /// Where each evidence option stood on the command line (`main` fills it).
+        #[arg(skip)]
+        at: EvidenceAt,
+    },
+    /// A source: a release, commit or spec that a finding cites. It lives only in the store, in
+    /// the decision home unless --parent names a place. The chat path is rdy_write.
+    Source {
+        #[arg(long)]
+        title: String,
+        /// release, commit or spec.
+        #[arg(long)]
+        kind: String,
+        /// Where it is: a tag, a commit hash, a URL or a path.
+        #[arg(long)]
+        locator: String,
+        #[arg(long)]
+        version: Option<String>,
+        /// The doc or section to record it in (default: the decision home).
+        #[arg(long)]
+        parent: Option<String>,
+        /// The view to write (default: the session's, `work` for the human).
+        #[arg(long)]
+        view: Option<String>,
+    },
+}
+
+/// The argument indices of `rdy new finding`'s evidence options, in clap's numbering: their
+/// order on the command line, which the derived lists lose.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct EvidenceAt {
+    quote: Vec<usize>,
+    question: Vec<usize>,
+    session: Vec<usize>,
+    source: Vec<usize>,
+}
+
+impl EvidenceAt {
+    /// The indices of the `finding` subcommand's matches.
+    pub(crate) fn of(m: &clap::ArgMatches) -> EvidenceAt {
+        let at =
+            |id: &str| -> Vec<usize> { m.indices_of(id).map(|i| i.collect()).unwrap_or_default() };
+        EvidenceAt {
+            quote: at("quote"),
+            question: at("question"),
+            session: at("session"),
+            source: at("source"),
+        }
+    }
+}
+
+/// Fills the evidence indices of `rdy new finding` from the parsed command line.
+pub(crate) fn fill_evidence_at(what: &mut NewCmd, matches: &clap::ArgMatches) {
+    if let NewCmd::Finding { at, .. } = what
+        && let Some(m) = matches
+            .subcommand_matches("new")
+            .and_then(|m| m.subcommand_matches("finding"))
+    {
+        *at = EvidenceAt::of(m);
+    }
+}
+
+/// One evidence option of `rdy new finding`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Flag {
+    Quote,
+    Question,
+    Session,
+    Source,
+}
+
+/// The evidence entries of `rdy new finding`, in command-line order: a --quote starts an entry
+/// and each --question and --session joins the latest one; a --source is an entry of its own
+/// and leaves the latest quote's entry open. `E_BAD_INPUT` for a --question or --session with no
+/// --quote before it, or a second one for one quote.
+fn evidence_entries(
+    quote: Vec<String>,
+    question: Vec<String>,
+    session: Vec<String>,
+    source: Vec<String>,
+    at: &EvidenceAt,
+) -> Result<Vec<Value>, ErrorReply> {
+    let mut events: Vec<(usize, Flag, String)> = vec![];
+    for (flag, values, idx) in [
+        (Flag::Quote, quote, &at.quote),
+        (Flag::Question, question, &at.question),
+        (Flag::Session, session, &at.session),
+        (Flag::Source, source, &at.source),
+    ] {
+        for (i, v) in values.into_iter().enumerate() {
+            events.push((idx.get(i).copied().unwrap_or(i), flag, v));
+        }
+    }
+    events.sort_by_key(|(i, _, _)| *i);
+    let mut out: Vec<Value> = vec![];
+    let mut open: Option<usize> = None;
+    for (_, flag, v) in events {
+        let (name, key) = match flag {
+            Flag::Quote => {
+                out.push(json!({"quote": v}));
+                open = Some(out.len() - 1);
+                continue;
+            }
+            Flag::Source => {
+                out.push(json!({"source": v}));
+                continue;
+            }
+            Flag::Question => ("question", "question"),
+            Flag::Session => ("session", "session_ref"),
+        };
+        let Some(entry) = open.map(|i| &mut out[i]) else {
+            return Err(ErrorReply::new(
+                E_BAD_INPUT,
+                format!("--{name} needs a preceding --quote"),
+                format!("pass --quote before --{name}"),
+            ));
+        };
+        if entry.get(key).is_some() {
+            return Err(ErrorReply::new(
+                E_BAD_INPUT,
+                format!("--{name} is repeated for one --quote"),
+                "give each quote at most one --question and one --session",
+            ));
+        }
+        entry[key] = json!(v);
+    }
+    Ok(out)
+}
+
+/// `rdy new finding` and `rdy new source`: the `new_finding` and `new_source` ops. Both types
+/// live only in the store, so the wrapper writes no working-copy file; like a profile, they go
+/// to the view a human's working copy is bound to.
+fn new_supporting(
+    env: &Env,
+    kind: &str,
+    mut args: Value,
+    view: Option<String>,
+) -> Result<(Value, String), ErrorReply> {
+    let view = match view {
+        None if crate::conn::human_session(env) => crate::conn::bound_view(env)?,
+        named => named,
+    };
+    args["view"] = json!(view);
+    let v = call(env, &format!("new_{kind}"), args)?;
+    let id = text(&v["created"][format!("${kind}")]);
+    let mut t = format!("created {kind} {id}{}", brief_text::consequences_text(&v));
+    for w in v["warnings"].as_array().into_iter().flatten() {
+        t.push_str(&format!(
+            "\nwarning {}: {}",
+            text(&w["code"]),
+            text(&w["message"])
+        ));
+    }
+    Ok((v, t))
 }
 
 #[derive(clap::Args)]
@@ -121,11 +299,47 @@ pub(crate) fn new(env: &Env, what: NewCmd) -> Result<(Value, String), ErrorReply
             }
             return new_profile(env, args, view);
         }
+        NewCmd::Finding {
+            statement,
+            quote,
+            question,
+            session,
+            source,
+            parent,
+            view,
+            at,
+        } => {
+            let evidence = evidence_entries(quote, question, session, source, &at)?;
+            let mut args = json!({"statement": statement, "evidence": evidence});
+            if let Some(p) = parent {
+                args["parent"] = json!(p);
+            }
+            return new_supporting(env, "finding", args, view);
+        }
+        NewCmd::Source {
+            title,
+            kind,
+            locator,
+            version,
+            parent,
+            view,
+        } => {
+            let mut args = json!({"title": title, "kind": kind, "locator": locator});
+            if let Some(v) = version {
+                args["version"] = json!(v);
+            }
+            if let Some(p) = parent {
+                args["parent"] = json!(p);
+            }
+            return new_supporting(env, "source", args, view);
+        }
         other => other,
     };
     let named = match &what {
         NewCmd::Folder { view, .. } | NewCmd::Doc { view, .. } => view.clone(),
-        NewCmd::Profile { .. } => unreachable!("handled above"),
+        NewCmd::Profile { .. } | NewCmd::Finding { .. } | NewCmd::Source { .. } => {
+            unreachable!("handled above")
+        }
     };
     wc::new_files::refuse_in_copy(env, named.as_deref())?;
     let (kind, path, v) = match what {
@@ -146,7 +360,9 @@ pub(crate) fn new(env: &Env, what: NewCmd) -> Result<(Value, String), ErrorReply
             )?;
             ("doc", path, v)
         }
-        NewCmd::Profile { .. } => unreachable!("handled above"),
+        NewCmd::Profile { .. } | NewCmd::Finding { .. } | NewCmd::Source { .. } => {
+            unreachable!("handled above")
+        }
     };
     let prefix = if kind == "doc" { "d-" } else { "fd-" };
     let created: Vec<String> = v["created"]

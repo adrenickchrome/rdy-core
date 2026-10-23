@@ -10,6 +10,7 @@ use crate::tree_io::Diagnostic;
 use crate::wc::layout::{WcBlock, WcTree};
 use crate::wc::plan::resolve_figures;
 use rdy_model::BlockId;
+use rdy_schema::supporting;
 use rdy_schema::{
     Pack, STORE_ONLY_FIELDS, STORE_ONLY_LINK_KINDS, STORE_ONLY_TARGET_TYPES, TypeClass,
 };
@@ -119,15 +120,19 @@ fn split_rules(
     let block = &b.block;
     let key = |k: &str| b.keys.get(k).copied().unwrap_or(b.at);
     if pack.class_of(&block.block_type) == TypeClass::Supporting {
+        let ty = block.block_type.as_str();
+        // D-Z8P09 (TASK-507 (4)): a finding or a source has its own command
+        let fix = if ty == supporting::FINDING || ty == supporting::SOURCE {
+            format!("record it with rdy_write or rdy new {ty}, then remove the entry from the file")
+        } else {
+            "record it with rdy_decide (decisions and questions) or rdy_write, then remove the entry from the file".to_string()
+        };
         out.push(Diagnostic::error(
             &b.file,
             b.at,
             E_WC_SUPPORTING,
-            format!(
-                "{} is a {}, which lives only in the store",
-                block.id, block.block_type
-            ),
-            "record it with rdy_decide (decisions and questions) or rdy_write, then remove the entry from the file",
+            format!("{} is a {ty}, which lives only in the store", block.id),
+            fix,
         ));
     }
     let mut kinds: BTreeSet<&str> = block.links.keys().map(String::as_str).collect();

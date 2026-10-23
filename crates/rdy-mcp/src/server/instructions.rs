@@ -26,7 +26,9 @@ pub const INSTRUCTION_SENTENCES: &[&str] = &[
     "Relay the person's answer with rdy_answer: pass the card_hash you showed, their words as evidence and your question; interrupt the person only for a blocking item.",
     "While coding, a change within the design is just code; a gap is a proposed decision plus the doc update; a contradiction is a finding plus a superseding decision, and you stop when it is blocking or one_way.",
     "When you start a project or a new area, plan the tree first: folders by area, a doc type for each doc, decisions in the decision home, open questions as question blocks and terms in the glossary; show the person the plan before the first content write.",
-    "Record decisions in the project's decision home (rdy_decide without parent records there; rdy_schema names it) and link content to them with decided_by; don't put decisions inside content docs.",
+    // rf5 (TASK-507 (4)): the Finding line sits in this element, so that the existing sentence
+    // guards (their count and their positions) hold
+    "Record decisions in the project's decision home (rdy_decide without parent records there; rdy_schema names it) and link content to them with decided_by; don't put decisions inside content docs. Finding: record what surfaced with rdy_write, type finding, statement and 1 to 20 evidence entries; cite it from a decision with depends_on.",
     "Search a thing's name, key or alias with rdy_search to get its fact sheet.",
     "Write responses carry suggestions (links to the entities your text names, new entities for literals that recur): accept the right ones with one rdy_accept call; they never block.",
     "Fact sheets, search hits and briefings carry a confidence level: act on high; on medium or low, widen the search, fix the coverage issues you can, or ask the person before you act.",

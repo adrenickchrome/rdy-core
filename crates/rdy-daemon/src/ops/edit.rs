@@ -1,4 +1,5 @@
-//! The edit ops: new_folder, new_doc, new_profile, keys_assign and edit_block.
+//! The edit ops: new_folder, new_doc, new_profile, new_finding, new_source, keys_assign and
+//! edit_block.
 use super::*;
 use rdy_engine::consequence::write_and_report;
 use rdy_engine::{EditBase, RdyError};
@@ -31,6 +32,29 @@ pub(super) struct NewProfileArgs {
     select: Vec<String>,
     description: Option<String>,
     trail: Option<bool>,
+    view: Option<String>,
+}
+
+/// `rdy new finding` (D-Z8P09): a statement and its evidence entries, each `{quote,
+/// session_ref?, question?}` or `{source}` with the source as an id, key or path.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NewFindingArgs {
+    statement: String,
+    evidence: Vec<Value>,
+    parent: Option<String>,
+    view: Option<String>,
+}
+
+/// `rdy new source` (D-Z8P09): a release, commit or spec.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NewSourceArgs {
+    title: String,
+    kind: String,
+    locator: String,
+    version: Option<String>,
+    parent: Option<String>,
     view: Option<String>,
 }
 
@@ -127,6 +151,89 @@ pub(super) fn new_profile(cx: &OpContext, a: NewProfileArgs) -> Result<Value, Rd
     })?;
     out["view"] = json!(name);
     Ok(out)
+}
+
+/// One ordinary `create` of `ty` with `fields` (and `parent` when given) through the calling
+/// session's write, as `rdy_write` takes it: every rule (the schema and the evidence check, the
+/// decision home for a missing parent, briefing, consequences, role, view ownership) is the write
+/// path's own. No working-copy file is written: both types live only in the store.
+fn create_supporting(
+    cx: &OpContext,
+    ty: &str,
+    placeholder: &str,
+    fields: serde_json::Map<String, Value>,
+    parent: Option<String>,
+    view: Option<String>,
+    message: String,
+) -> Result<Value, RdyError> {
+    let mut op = json!({"op": "create", "type": ty, "id": placeholder, "fields": fields});
+    if let Some(p) = parent {
+        op["parent"] = json!(p);
+    }
+    let ops = rdy_engine::parse_ops(vec![op])?;
+    let s = cx.session.clone();
+    let view = view_of(&s, view);
+    let (v, name) = (view.clone(), view.clone());
+    let mut out = write_and_report(cx.engine, &v, None, move |r| {
+        r.write(
+            &s,
+            rdy_engine::WriteRequest {
+                view,
+                ops,
+                justification: None,
+                message,
+            },
+        )
+    })?;
+    out["view"] = json!(name);
+    Ok(out)
+}
+
+/// `rdy new finding`: each evidence `source` given as an id, key or path is resolved in the view
+/// with the reader's resolver and written as the full reference `{{S-…}}`; everything else is
+/// the write's to check.
+pub(super) fn new_finding(cx: &OpContext, a: NewFindingArgs) -> Result<Value, RdyError> {
+    let view = view_of(cx.session, a.view.clone());
+    let mut evidence = a.evidence;
+    {
+        let st = cx.engine.read();
+        let scope = Scope::View(view.clone());
+        for entry in &mut evidence {
+            let Some(text) = entry.get("source").and_then(Value::as_str) else {
+                continue;
+            };
+            if text.starts_with("{{") {
+                continue;
+            }
+            let id = st.resolve_id(&scope, text)?;
+            entry["source"] = json!(format!("{{{{{id}}}}}"));
+        }
+    }
+    let mut fields = serde_json::Map::new();
+    fields.insert("statement".into(), json!(a.statement));
+    fields.insert("evidence".into(), Value::Array(evidence));
+    create_supporting(
+        cx,
+        "finding",
+        "$finding",
+        fields,
+        a.parent,
+        Some(view),
+        "new finding".into(),
+    )
+}
+
+/// `rdy new source`.
+pub(super) fn new_source(cx: &OpContext, a: NewSourceArgs) -> Result<Value, RdyError> {
+    let mut fields = serde_json::Map::new();
+    fields.insert("title".into(), json!(a.title));
+    fields.insert("kind".into(), json!(a.kind));
+    fields.insert("locator".into(), json!(a.locator));
+    if let Some(v) = a.version {
+        fields.insert("version".into(), json!(v));
+    }
+    let message = format!("new source {}", a.title);
+    create_supporting(cx, "source", "$source", fields, a.parent, a.view, message)
 }
 
 pub(super) fn keys_assign(cx: &OpContext, a: KeysAssignArgs) -> Result<Value, RdyError> {

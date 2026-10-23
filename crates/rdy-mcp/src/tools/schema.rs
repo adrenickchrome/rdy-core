@@ -48,6 +48,11 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             if def.body == BodyRule::Required {
                 example["body"] = json!("…");
             }
+            // rf5: a finding's and a source's example is a valid write, with no parent (the text
+            // guide says they go to the decision home)
+            if let Some(fields) = supporting_example(&t) {
+                example = json!({"op": "create", "type": t, "fields": fields});
+            }
             let mut out = json!({"type": t, "prefix": def.prefix, "class": pack.class_of(&t).as_str(), "traits": traits(&def.traits), "body": format!("{:?}", def.body).to_lowercase(), "fields": fields, "children": def.children, "example": example});
             out["links"] = json!({"shape": LINK_SHAPE, "example": link_example(), "update": LINK_UPDATE, "kinds": pack.link_types});
             if rdy_model::tree::is_tree_type(&t) {
