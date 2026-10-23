@@ -31,13 +31,14 @@ use crate::error::{
 use crate::hub_types::{
     BindResult, CLIENT_ID, DEVICE_CODE_GRANT, DEVICE_SCOPE, DevicePollReply, DeviceStartReply,
     HubCall, HubFailure, HubKey, HubMetadata, HubOperation, HubReply, HubTransport,
-    KEYBIND_NAMESPACE, KeyChallenge, KeyKind, KeyState, LimitUnit, MAX_ACTOR_BYTES, MAX_CA_BYTES,
-    MAX_CA_CERTS, MAX_DEPTH, MAX_DEVICE_CODE_BYTES, MAX_HEADER_BYTES, MAX_HEADERS, MAX_ID_BYTES,
-    MAX_JSON_BYTES, MAX_MEMBERS, MAX_SCALAR_BYTES, MAX_SIG_KEY_BYTES, MAX_SIG_PROOF_BYTES,
-    MAX_TIMESTAMP_BYTES, MAX_URL_BYTES, MeReply, Origin, OriginFence, REFRESH_GRANT, RefreshReply,
-    RequestClaim, Secret, TokenPair, check_count, check_label, check_machine_name, hub_limit,
-    is_device_page, parse_compromised_since, token_form,
+    KEYBIND_NAMESPACE, KeyChallenge, KeyKind, KeyState, LimitUnit, MAX_CA_BYTES, MAX_CA_CERTS,
+    MAX_DEPTH, MAX_DEVICE_CODE_BYTES, MAX_HEADER_BYTES, MAX_HEADERS, MAX_ID_BYTES, MAX_JSON_BYTES,
+    MAX_MEMBERS, MAX_SCALAR_BYTES, MAX_SIG_KEY_BYTES, MAX_SIG_PROOF_BYTES, MAX_TIMESTAMP_BYTES,
+    MAX_URL_BYTES, MeReply, Origin, OriginFence, REFRESH_GRANT, RefreshReply, RequestClaim, Secret,
+    TokenPair, check_count, check_label, check_machine_name, hub_limit, is_device_page,
+    parse_compromised_since, token_form,
 };
+use crate::identity;
 use serde::de::{self, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use ssh_encoding::base64::{Base64, Encoding};
@@ -1380,9 +1381,7 @@ fn time_ok(s: &str) -> bool {
 
 /// A handle that can form a `human:` claim (the rule of [`RequestClaim::bind_human`]).
 fn handle_ok(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= MAX_ACTOR_BYTES - "human:".len()
-        && s.bytes().all(|b| (0x21..=0x7e).contains(&b))
+    identity::is_name(s)
 }
 
 /// 32 bytes in unpadded base64url.

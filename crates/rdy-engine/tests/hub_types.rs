@@ -405,15 +405,12 @@ fn hsa1_claims_keep_agent_actor_and_run() {
     // Agents and CI keep actor and run byte for byte, bound or not, with no human handle.
     for (actor, run) in [
         ("agent:claude", Some("r7")),
-        ("agent:Claude Code", Some("run:2026-10-18.1")),
-        ("ci:build-42", None),
+        ("agent:claude", Some("run.2026-10-18_1")),
+        ("agent:claude", Some("Run-7")),
         ("agent:x", Some("r")),
-        // UTF-8 is header-valid: it reaches the hub byte for byte.
-        ("agent:é", Some("r7")),
-        ("agent:Клод", Some("прогон-1")),
-        ("ci:ビルド", None),
-        ("agent:claude", Some("ré")),
-        ("agent:x\u{a0}", Some("\u{a0}r")),
+        ("agent:acme/claude-code", Some("r7")),
+        ("ci:0123456789abcdef0123456789abcdef/nightly", None),
+        ("ci:0123456789abcdef0123456789abcdef/build-42", Some("r7")),
     ] {
         let session = agent_session(actor, run);
         let before = session.clone();
@@ -474,6 +471,15 @@ fn hsa1_claims_keep_agent_actor_and_run() {
         "human:",
         "bot:x",
         "Agent:x",
+        // Upper case, spaces, Unicode, non-breaking spaces and bare CI names are outside the form.
+        "agent:Claude",
+        "agent:Claude Code",
+        "agent:é",
+        "agent:Клод",
+        "ci:ビルド",
+        "ci:build-42",
+        "ci:nightly",
+        "agent:x\u{a0}",
         "agent:a\nb",
         "agent:a\rb",
         "agent:a\tb",
@@ -490,12 +496,190 @@ fn hsa1_claims_keep_agent_actor_and_run() {
         )));
     }
     unbound(RequestClaim::from_session(&raw_human_session("nick")));
-    for run in ["", "r\n7", "r\t7", "r7\u{7f}", "r7\u{85}", " r7", "r7 "] {
+    for run in [
+        "",
+        "r\n7",
+        "r\t7",
+        "r7\u{7f}",
+        "r7\u{85}",
+        " r7",
+        "r7 ",
+        "run:2026-10-18.1",
+        "ré",
+        "прогон-1",
+        "\u{a0}r",
+        "none",
+        "reaffirm-1",
+    ] {
         unbound(RequestClaim::from_session(&agent_session(
             "agent:claude",
             Some(run),
         )));
     }
+}
+
+#[test]
+fn id5_hub_claims_use_the_full_actor_and_run_forms() {
+    let repo = "0123456789abcdef0123456789abcdef";
+    let name = |n: usize| "a".repeat(n);
+    let ok = |actor: &str, run: Option<&str>| {
+        let session = agent_session(actor, run);
+        let before = session.clone();
+        let claim = RequestClaim::from_session(&session)
+            .unwrap_or_else(|e| panic!("{actor:?} {run:?} should pass: {e}"));
+        assert_eq!(claim.actor.as_bytes(), actor.as_bytes());
+        assert_eq!(claim.run.as_deref(), run);
+        claim.validate_for_send().unwrap();
+        assert_eq!(session, before, "the local session is unchanged");
+    };
+    let bad = |actor: &str, run: Option<&str>| {
+        unbound(RequestClaim::from_session(&agent_session(actor, run)));
+    };
+
+    // The valid actor forms; an agent session claims no `human:` actor.
+    ok("agent:a", None);
+    ok("agent:a/b", Some("r"));
+    ok(&format!("ci:{repo}/a"), None);
+    ok(&format!("agent:{}", name(1)), None);
+    ok(&format!("agent:{}", name(64)), None);
+    ok(&format!("agent:{}/{}", name(64), name(64)), None);
+    assert_eq!(format!("agent:{}/{}", name(64), name(64)).len(), 135);
+    ok(&format!("ci:{repo}/{}", name(64)), None);
+    ok("agent:a.b_c-d/e.f_g-h", Some("run.1"));
+    bad("human:a", Some("r7"));
+
+    // A genuine human session with a valid handle-form actor passes and binds.
+    let human = human_session("human:a");
+    let claim = RequestClaim::from_session(&human).unwrap();
+    assert_eq!(claim.actor, "human:a");
+    let bound = claim.bind_human("b").unwrap();
+    assert_eq!(bound.actor, "human:b");
+    bound.validate_for_send().unwrap();
+    assert_eq!(human.actor, "human:a", "the local session is unchanged");
+
+    // Names bound: 1, 64 and 65 bytes.
+    bad(&format!("agent:{}", name(65)), None);
+    bad(&format!("agent:{}/{}", name(65), name(1)), None);
+    bad(&format!("agent:{}/{}", name(1), name(65)), None);
+    bad(&format!("ci:{repo}/{}", name(65)), None);
+    bad(&format!("human:{}", name(65)), None);
+    // The 136-byte actor.
+    let long = format!("agent:{}/{}", name(64), "a".repeat(65));
+    assert_eq!(long.len(), 136);
+    bad(&long, None);
+    assert_eq!(
+        RequestClaim::from_session(&agent_session(&"a".repeat(136), None))
+            .unwrap_err()
+            .code,
+        E_ACTOR_UNBOUND
+    );
+
+    // Invalid actors.
+    for actor in [
+        "",
+        "nick",
+        "agent:",
+        "ci:",
+        "human:",
+        "bot:x",
+        "Agent:x",
+        "agent:A",
+        "agent:a/B",
+        "agent:Claude Code",
+        "agent:a b",
+        "agent:é",
+        "agent:Клод",
+        "agent:x\u{a0}",
+        "agent:a\nb",
+        "agent:a\rb",
+        "agent:a\tb",
+        "agent:a\u{0}",
+        "agent:a\u{7f}",
+        "agent:a\u{85}",
+        "agent:-a",
+        "agent:a-",
+        "agent:.a",
+        "agent:a_",
+        "agent:a/-b",
+        "agent:a/b-",
+        "agent:a!",
+        "agent:a:b",
+        "agent:x ",
+        " agent:x",
+        "agent:/b",
+        "agent:a/",
+        "agent:a/b/c",
+        "ci:build-42",
+        "ci:nightly",
+        "ci:ビルド",
+        "ci:0123456789abcdef0123456789abcde/a",
+        "ci:0123456789abcdef0123456789abcdef0/a",
+        "ci:0123456789ABCDEF0123456789abcdef/a",
+        "ci:0123456789abcdef0123456789abcdef",
+        "ci:0123456789abcdef0123456789abcdef/",
+        "ci:0123456789abcdef0123456789abcdef/a/b",
+        "ci:0123456789abcdef0123456789abcdeg/a",
+        "ci:0123456789abcdef0123456789abcdef/A",
+        "human:a/b",
+        "human:Nick",
+    ] {
+        bad(actor, Some("r7"));
+    }
+    unbound(RequestClaim::from_session(&raw_human_session("nick")));
+    unbound(RequestClaim::from_session(&raw_human_session("human:Nick")));
+
+    // Runs: letters of either case, 1 to 64 bytes.
+    for run in [
+        "r",
+        "R7",
+        "Run.1_2-x",
+        &"r".repeat(64),
+        &"R".repeat(64),
+        "reaffirm",
+        "workshop",
+        "nonesuch",
+    ] {
+        ok("agent:a", Some(run));
+    }
+    for run in [
+        "",
+        &"r".repeat(65),
+        "/",
+        "a/b",
+        "a:b",
+        "-a",
+        "a-",
+        ".a",
+        "a.",
+        "_a",
+        "a_",
+        "none",
+        "work",
+        "canon",
+        "inflight",
+        "reaffirm-1",
+        "reaffirm-",
+        "r 7",
+        " r7",
+        "r7 ",
+        "r\n7",
+        "r\t7",
+        "r7\u{7f}",
+        "r7\u{85}",
+        "ré",
+        "прогон-1",
+        "\u{a0}r",
+    ] {
+        bad("agent:a", Some(run));
+        // A bound human claim refuses the same run at send.
+        let mut claim = bound.clone();
+        claim.run = Some(run.to_string());
+        unbound(claim.validate_for_send());
+    }
+
+    // The public byte bounds stay as the stored-handle decoders use them.
+    assert_eq!(MAX_ACTOR_BYTES, 512);
+    assert_eq!(MAX_RUN_BYTES, 256);
 }
 
 #[test]
@@ -525,7 +709,19 @@ fn hsa1_a_wrong_bound_human_handle_is_refused_before_send() {
 
     // A handle that cannot form a header-safe human actor is a contract mismatch.
     let claim = RequestClaim::from_session(&human_session("human:nick")).unwrap();
-    for handle in ["", "a b", "a\nb", "é", &"h".repeat(MAX_ACTOR_BYTES)] {
+    for handle in [
+        "",
+        "a b",
+        "a\nb",
+        "é",
+        &"h".repeat(MAX_ACTOR_BYTES),
+        "Test-Person",
+        "a/b",
+        "-a",
+        "a-",
+        "a!",
+        &"h".repeat(65),
+    ] {
         protocol(claim.bind_human(handle));
     }
 }
@@ -603,25 +799,37 @@ fn hsa1_bounds_fail_before_unbounded_growth() {
         E_UPSTREAM_TOKEN
     );
 
-    // Actor 512 bytes, run 256 bytes.
-    let actor = |n: usize| format!("agent:{}", "a".repeat(n - "agent:".len()));
-    RequestClaim::from_session(&agent_session(&actor(MAX_ACTOR_BYTES), None)).unwrap();
-    limit(
-        RequestClaim::from_session(&agent_session(&actor(MAX_ACTOR_BYTES + 1), None)),
-        "512 bytes",
-    );
-    let run = "r".repeat(MAX_RUN_BYTES);
+    // Claim bounds are the grammar's: an actor of 135 bytes, a run of 64. The public byte
+    // constants stay for stored handles.
+    assert_eq!((MAX_ACTOR_BYTES, MAX_RUN_BYTES), (512, 256));
+    let actor = format!("agent:{0}/{0}", "a".repeat(64));
+    assert_eq!(actor.len(), 135);
+    RequestClaim::from_session(&agent_session(&actor, None)).unwrap();
+    unbound(RequestClaim::from_session(&agent_session(
+        &format!("{actor}a"),
+        None,
+    )));
+    unbound(RequestClaim::from_session(&agent_session(
+        &format!("agent:{}", "a".repeat(MAX_ACTOR_BYTES)),
+        None,
+    )));
+    let run = "r".repeat(64);
     RequestClaim::from_session(&agent_session("agent:x", Some(&run))).unwrap();
-    limit(
-        RequestClaim::from_session(&agent_session("agent:x", Some(&format!("{run}r")))),
-        "256 bytes",
-    );
+    unbound(RequestClaim::from_session(&agent_session(
+        "agent:x",
+        Some(&format!("{run}r")),
+    )));
+    unbound(RequestClaim::from_session(&agent_session(
+        "agent:x",
+        Some(&"r".repeat(MAX_RUN_BYTES + 1)),
+    )));
     let claim = RequestClaim::from_session(&human_session("human:nick")).unwrap();
     claim
-        .bind_human(&"h".repeat(MAX_ACTOR_BYTES - "human:".len()))
+        .bind_human(&"h".repeat(64))
         .unwrap()
         .validate_for_send()
         .unwrap();
+    protocol(claim.bind_human(&"h".repeat(65)));
 
     // Label and machine name: 1-64 code points, at most 256 bytes, no Cc, no edge white space.
     for (check, refused) in [

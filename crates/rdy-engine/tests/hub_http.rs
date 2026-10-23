@@ -1108,14 +1108,18 @@ fn hsa4_every_request_keeps_its_caller_claim() {
             None,
         ),
         (
-            RequestClaim::from_session(&agent_session("agent:Клод", Some("прогон-1"))).unwrap(),
-            "agent:Клод",
-            Some("прогон-1"),
+            RequestClaim::from_session(&agent_session("agent:ab/cd", Some("Run.7"))).unwrap(),
+            "agent:ab/cd",
+            Some("Run.7"),
         ),
         (
-            RequestClaim::from_session(&agent_session("ci:nightly", Some("build 7"))).unwrap(),
-            "ci:nightly",
-            Some("build 7"),
+            RequestClaim::from_session(&agent_session(
+                "ci:0123456789abcdef0123456789abcdef/nightly",
+                Some("build-7"),
+            ))
+            .unwrap(),
+            "ci:0123456789abcdef0123456789abcdef/nightly",
+            Some("build-7"),
         ),
         (
             RequestClaim::from_session(&Session::human("human:nick".into(), Role::Writer).unwrap())
@@ -1167,13 +1171,112 @@ fn hsa4_every_request_keeps_its_caller_claim() {
             (Some(unbound_human.clone()), local(E_ACTOR_UNBOUND)),
             (Some(forged.clone()), local(E_ACTOR_UNBOUND)),
             (Some(bad_run.clone()), local(E_ACTOR_UNBOUND)),
-            (Some(long_actor.clone()), local(E_LIMIT)),
+            (Some(long_actor.clone()), local(E_ACTOR_UNBOUND)),
         ] {
             let mut call = hub.call(op.clone());
             call.claim = claim;
             assert_eq!(hub.refuse(call), want, "{op:?}");
         }
     }
+    hub.finish();
+}
+
+#[test]
+fn id5_invalid_claims_never_reach_transport() {
+    let mut hub = Hub::start();
+    let o = hub.origin();
+    let key_ops: Vec<HubOperation> = all_operations().into_iter().filter(is_key_route).collect();
+    let repo = "0123456789abcdef0123456789abcdef";
+
+    // Valid two-name agent and CI claims arrive byte for byte.
+    let valid = [
+        ("agent:a/b".to_string(), Some("Run.1")),
+        ("agent:a/b".to_string(), None),
+        (format!("ci:{repo}/nightly"), Some("w-7")),
+        (format!("ci:{repo}/a"), None),
+    ];
+    for (actor, run) in &valid {
+        let claim = RequestClaim::from_session(&agent_session(actor, *run)).unwrap();
+        for op in &key_ops {
+            let mut call = hub.call(op.clone());
+            call.claim = Some(claim.clone());
+            let (r, req) = hub.send(success(op, &o), call);
+            assert!(r.is_ok(), "{op:?}: {r:?}");
+            assert_eq!(req.header("rdy-actor"), Some(actor.as_str()), "{op:?}");
+            assert_eq!(req.header("rdy-run"), *run, "{op:?}");
+        }
+    }
+    let sent = hub.server.requests().len();
+    assert_eq!(sent, valid.len() * key_ops.len());
+
+    // Invalid actors and runs, set on a valid claim as a caller with the public fields could,
+    // fail with the existing text and are never sent.
+    let base = RequestClaim::from_session(&agent_session("agent:a/b", Some("r"))).unwrap();
+    let bad_actors = [
+        "agent:A",
+        "agent:a b",
+        "agent:é",
+        "agent:x\u{a0}",
+        "agent:a/b/c",
+        "agent:-a",
+        "agent:a-",
+        "ci:nightly",
+        "ci:ビルド",
+        "ci:0123456789abcdef0123456789abcde/a",
+        "ci:0123456789ABCDEF0123456789abcdef/a",
+        "Agent:a",
+        "bot:a",
+        "agent:",
+        "agent:a\nb",
+    ];
+    let long_actor = format!("agent:{}", "a".repeat(MAX_ACTOR_BYTES));
+    let bad_runs = [
+        "",
+        "r 7",
+        "ré",
+        "-a",
+        "a-",
+        "a/b",
+        "a:b",
+        "none",
+        "work",
+        "canon",
+        "inflight",
+        "reaffirm-1",
+        "r\n7",
+    ];
+    let long_run = "r".repeat(MAX_RUN_BYTES);
+    for op in &key_ops {
+        for actor in bad_actors.iter().copied().chain([long_actor.as_str()]) {
+            let mut claim = base.clone();
+            claim.actor = actor.to_string();
+            let mut call = hub.call(op.clone());
+            call.claim = Some(claim);
+            assert_eq!(hub.refuse(call), local(E_ACTOR_UNBOUND), "{op:?} {actor:?}");
+        }
+        for run in bad_runs.iter().copied().chain([long_run.as_str()]) {
+            let mut claim = base.clone();
+            claim.run = Some(run.to_string());
+            let mut call = hub.call(op.clone());
+            call.claim = Some(claim);
+            assert_eq!(hub.refuse(call), local(E_ACTOR_UNBOUND), "{op:?} {run:?}");
+        }
+    }
+    assert_eq!(
+        hub.server.requests().len(),
+        sent,
+        "no invalid claim was sent"
+    );
+    // The refusal keeps its existing text.
+    let mut claim = base.clone();
+    claim.actor = "agent:A".to_string();
+    let e = claim.validate_for_send().unwrap_err();
+    assert_eq!(e.code, E_ACTOR_UNBOUND);
+    assert_eq!(e.message, "the session actor is not a hub actor");
+    assert_eq!(
+        e.fix,
+        "set an actor in the hub's human, agent or ci form, then try again"
+    );
     hub.finish();
 }
 

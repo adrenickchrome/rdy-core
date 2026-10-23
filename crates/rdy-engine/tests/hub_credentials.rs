@@ -2191,6 +2191,136 @@ fn hsa5_handle_change_is_reported_once_without_rewriting_actors() {
     assert_eq!(bot, agent());
 }
 
+#[test]
+fn id5_invalid_handle_cannot_form_a_human_claim() {
+    let e = env();
+    let clock = Clock::at(T0);
+    let install = origin(INSTALL);
+    let (person, bot) = (human(), agent());
+    let (ch, ca) = (claim(&person), claim(&bot));
+    let long = "a".repeat(65);
+    let invalid: Vec<&str> = vec![
+        "Test-Person",
+        "NICK",
+        "two words",
+        "a b",
+        "a/b",
+        "/",
+        "é",
+        "Клод",
+        "-a",
+        "a-",
+        ".a",
+        "a_",
+        "a!",
+        "a:b",
+        "a\u{a0}",
+        "a\nb",
+        "",
+        &long,
+    ];
+    let longest = "a".repeat(64);
+    let valid: Vec<&str> = vec!["a", "7", "a.b_c-d", &longest];
+
+    // Sign-in: an invalid `/me` handle never becomes a ready record (the existing mapping).
+    for handle in &invalid {
+        seed(&e, &[(INSTALL, pending(T0 + 600_000, T0, 5))]);
+        let fake = Fake::default();
+        fake.reply("Metadata", meta(INSTALL))
+            .reply("DevicePoll", polled(&new_access(), &new_refresh()))
+            .reply("Me", me(handle));
+        assert_code(svc(&e, &fake, &clock).state(&install, &ca), E_UPSTREAM_AUTH);
+        assert_eq!(
+            state_on_disk(&e.creds, INSTALL),
+            Some("reauth_required"),
+            "{handle:?}"
+        );
+        assert!(!disk_text(&e.creds).contains(&new_access()), "{handle:?}");
+        fake.done();
+    }
+    for handle in &valid {
+        seed(&e, &[(INSTALL, pending(T0 + 600_000, T0, 5))]);
+        let fake = Fake::default();
+        fake.reply("Metadata", meta(INSTALL))
+            .reply("DevicePoll", polled(&new_access(), &new_refresh()))
+            .reply("Me", me(handle));
+        let st = svc(&e, &fake, &clock).state(&install, &ca).unwrap();
+        assert_eq!(st.state, AuthPhase::SignedIn);
+        assert_eq!(st.human_actor, Some(format!("human:{handle}")));
+        assert_eq!(
+            on_disk(&e.creds, INSTALL),
+            Some(ready(&new_access(), &new_refresh(), T0 + HOUR_MS, handle))
+        );
+        fake.done();
+    }
+
+    // The `/me` repair: an invalid handle is a contract mismatch and nothing is saved.
+    let saved = ready(&old_access(), &old_refresh(), T0 + HOUR_MS, HANDLE);
+    for who in [&ch, &ca] {
+        for handle in &invalid {
+            seed(&e, &[(INSTALL, saved.clone())]);
+            let before = fs::read(&e.creds).unwrap();
+            let fake = Fake::default();
+            fake.reply("Me", me(handle));
+            let r = svc(&e, &fake, &clock).refresh_handle(&install, who);
+            assert_code(r, E_UPSTREAM_PROTOCOL);
+            assert_eq!(fs::read(&e.creds).unwrap(), before, "{handle:?}");
+            fake.done();
+        }
+        for handle in &valid {
+            seed(&e, &[(INSTALL, saved.clone())]);
+            let fake = Fake::default();
+            fake.reply("Me", me(handle));
+            let u = svc(&e, &fake, &clock)
+                .refresh_handle(&install, who)
+                .unwrap();
+            assert_eq!(u.human_actor, format!("human:{handle}"));
+            assert_eq!(
+                on_disk(&e.creds, INSTALL),
+                Some(ready(&old_access(), &old_refresh(), T0 + HOUR_MS, handle))
+            );
+            fake.done();
+        }
+    }
+
+    // A cached handle forms a human claim only when it is a name; no request is made. A record
+    // holds only a nonempty handle without control characters, so those cases are skipped here.
+    let storable = |h: &&&str| !h.is_empty() && !h.chars().any(char::is_control);
+    for handle in invalid.iter().filter(storable) {
+        seed(
+            &e,
+            &[(
+                INSTALL,
+                ready(&old_access(), &old_refresh(), T0 + HOUR_MS, handle),
+            )],
+        );
+        let fake = Fake::default();
+        let s = svc(&e, &fake, &clock);
+        assert_code(s.access(&install, &ch), E_UPSTREAM_PROTOCOL);
+        assert_code(s.refresh_handle(&install, &ch), E_UPSTREAM_PROTOCOL);
+        assert!(fake.seen().is_empty(), "{handle:?}");
+        // An agent claim keeps its bytes and never takes the handle.
+        let g = s.access(&install, &ca).unwrap();
+        assert_eq!(g.claim.actor, "agent:claude");
+        assert_eq!(g.claim.run.as_deref(), Some("r7"));
+    }
+    for handle in &valid {
+        seed(
+            &e,
+            &[(
+                INSTALL,
+                ready(&old_access(), &old_refresh(), T0 + HOUR_MS, handle),
+            )],
+        );
+        let fake = Fake::default();
+        let g = svc(&e, &fake, &clock).access(&install, &ch).unwrap();
+        assert_eq!(g.claim.actor, format!("human:{handle}"));
+        assert!(fake.seen().is_empty());
+    }
+    assert_eq!(person, human());
+    assert_eq!(bot, agent());
+}
+
 // ---------------------------------------------------------------------------------------------
 // Sign-out
 // ---------------------------------------------------------------------------------------------

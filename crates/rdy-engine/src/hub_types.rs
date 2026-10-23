@@ -9,6 +9,7 @@ use crate::error::{
     upstream_protocol, upstream_publish_origin, upstream_refused, upstream_token,
     upstream_transport, upstream_uncertain,
 };
+use crate::identity;
 use crate::session::Session;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeSet;
@@ -538,39 +539,22 @@ impl<'de> Deserialize<'de> for Secret {
 // ---------------------------------------------------------------------------------------------
 
 const HUMAN_PREFIX: &str = "human:";
-const ACTOR_PREFIXES: [&str; 3] = [HUMAN_PREFIX, "agent:", "ci:"];
-
-/// Header-safe claim text, which reaches the hub byte for byte: a value the transport's header
-/// type accepts unchanged (UTF-8 included), no control character (tab, DEL and C1 included) and
-/// no space at either end, which HTTP would strip.
-fn header_safe(text: &str) -> bool {
-    !text.is_empty()
-        && !text.chars().any(char::is_control)
-        && !text.starts_with(' ')
-        && !text.ends_with(' ')
-        && ureq::http::HeaderValue::from_str(text).is_ok_and(|h| h.as_bytes() == text.as_bytes())
-}
-
+/// A claim's actor in rdy's actor form (`identity::is_actor`, 135 bytes at most), else the hub
+/// request error `E_ACTOR_UNBOUND`. That form is ASCII, so it reaches the hub byte for byte.
 fn check_actor(actor: &str) -> Result<(), RdyError> {
-    check_count(actor.len(), MAX_ACTOR_BYTES, LimitUnit::Bytes)?;
-    let suffix = ACTOR_PREFIXES
-        .iter()
-        .find_map(|p| actor.strip_prefix(p))
-        .ok_or_else(actor_unbound)?;
-    if suffix.is_empty() || !header_safe(actor) {
-        return Err(actor_unbound());
+    if identity::is_actor(actor) {
+        Ok(())
+    } else {
+        Err(actor_unbound())
     }
-    Ok(())
 }
 
+/// A claim's run, when present, in rdy's run form (`identity::is_run`, 64 bytes at most).
 fn check_run(run: Option<&str>) -> Result<(), RdyError> {
-    if let Some(run) = run {
-        check_count(run.len(), MAX_RUN_BYTES, LimitUnit::Bytes)?;
-        if !header_safe(run) {
-            return Err(actor_unbound());
-        }
+    match run {
+        Some(run) if !identity::is_run(run) => Err(actor_unbound()),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// The actor and run a hub request claims (`Rdy-Actor`, `Rdy-Run`). Agents and CI keep their
@@ -588,9 +572,9 @@ pub struct RequestClaim {
 }
 
 impl RequestClaim {
-    /// The claim of `session`: its actor and run, checked against the hub grammar (`human:`,
-    /// `agent:` or `ci:` with a nonempty suffix, header-safe bytes). An agent session claiming
-    /// `human:` is `E_ACTOR_UNBOUND`.
+    /// The claim of `session`: its actor and run, checked against rdy's full actor and run
+    /// forms (`identity::is_actor`, `identity::is_run`). An actor or run outside them, or an
+    /// agent session claiming `human:`, is `E_ACTOR_UNBOUND`.
     pub fn from_session(session: &Session) -> Result<RequestClaim, RdyError> {
         check_actor(&session.actor)?;
         check_run(session.run.as_deref())?;
@@ -608,17 +592,12 @@ impl RequestClaim {
 
     /// The install-bound claim for the account handle `handle`: a genuine human session's
     /// `human:` actor becomes `human:<handle>`; any agent or CI actor stays byte for byte. A
-    /// handle that is not 1 or more visible ASCII characters within the actor bound is
-    /// `E_UPSTREAM_PROTOCOL`.
+    /// handle that is not a name (`identity::is_name`) is `E_UPSTREAM_PROTOCOL`.
     pub fn bind_human(&self, handle: &str) -> Result<RequestClaim, RdyError> {
         if !(self.human_session && self.actor.starts_with(HUMAN_PREFIX)) {
             return Ok(self.clone());
         }
-        let fits = HUMAN_PREFIX
-            .len()
-            .checked_add(handle.len())
-            .is_some_and(|n| n <= MAX_ACTOR_BYTES);
-        if !fits || handle.is_empty() || !handle.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
+        if !identity::is_name(handle) {
             return Err(upstream_protocol());
         }
         Ok(RequestClaim {
@@ -629,7 +608,7 @@ impl RequestClaim {
         })
     }
 
-    /// Checks the claim just before it is sent: the hub grammar again, and a `human:` actor only
+    /// Checks the claim just before it is sent: the actor and run forms again, and a `human:` actor only
     /// from a genuine human session bound to exactly that handle. Else `E_ACTOR_UNBOUND`.
     pub fn validate_for_send(&self) -> Result<(), RdyError> {
         check_actor(&self.actor)?;
