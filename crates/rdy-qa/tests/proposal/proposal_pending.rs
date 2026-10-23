@@ -116,6 +116,7 @@ fn di5_a_ready_proposal_is_one_batch_card() {
         names,
         vec![
             "Changes",
+            "Justification",
             "Decisions",
             "Supersedes",
             "Re-affirms",

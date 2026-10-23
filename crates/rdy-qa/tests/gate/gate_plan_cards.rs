@@ -1057,6 +1057,7 @@ fn cp12_batch_facts_and_recommendation_reasons_are_exact() {
         names,
         [
             "Changes",
+            "Justification",
             "Decisions",
             "Supersedes",
             "Re-affirms",

@@ -25,7 +25,7 @@ use rdy_graph::{
     SUSPECT_LINKS,
 };
 use rdy_model::{Block, BlockId, FieldValue, Hash, decision};
-use rdy_schema::{Issue, Pack, Severity};
+use rdy_schema::{Issue, Pack, Severity, supporting};
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -342,12 +342,13 @@ impl BriefRegistry {
 
 /// The paged sections of a briefing, in cursor order: a cursor holds one offset per section, how
 /// many of its entries earlier pages showed.
-pub const PAGE_SECTIONS: [&str; 10] = [
+pub const PAGE_SECTIONS: [&str; 11] = [
     "governs",
     "dependents",
     "lineage",
     "will_go_stale",
     "suspects",
+    "sources",
     "inflight.views",
     "inflight.proposals",
     "inflight.intents",
@@ -370,6 +371,12 @@ pub struct DocCounts {
     pub will_go_stale: usize,
     /// By the doc of `block`.
     pub suspects: usize,
+    /// rf9: once for each source that a covered block of the doc reflects.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub sources: usize,
+    /// rf9: once for each finding row of a covered decision of the doc.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub findings: usize,
 }
 
 /// What a dependent should do when the block it depends on changes.
@@ -485,6 +492,29 @@ pub struct Reach {
 /// The most blocks `reaches` lists in all; `reaches_omitted` counts the rest.
 pub const REACH_CAP: usize = 50;
 
+/// rf9 (D-4WC6R): a source that covered blocks reflect: the source, its kind and title, and the
+/// covered blocks whose `reflects` link names it, in id order. One level: the source's own links
+/// are not followed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct BriefSource {
+    pub source: String,
+    pub kind: String,
+    pub title: String,
+    pub blocks: Vec<String>,
+}
+
+/// rf9 (D-Z8P09): a finding that a covered decision (`for`) depends on directly, with its
+/// statement. A `conditional_on` link and a premise of a premise add no row.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct BriefFinding {
+    pub r#for: String,
+    pub finding: String,
+    pub statement: String,
+}
+
+/// The most finding rows a briefing lists in all; `findings_omitted` counts the rest.
+pub const FINDINGS_CAP: usize = 20;
+
 /// An uncovered block that pins a covered one (`on`) and goes suspect when it changes.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct WillGoStale {
@@ -552,6 +582,9 @@ pub struct Briefing {
     pub lineage: Vec<Lineage>,
     pub will_go_stale: Vec<WillGoStale>,
     pub suspects: Vec<SuspectReply>,
+    /// rf9: the sources the covered blocks reflect (a paged section), by source id.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<BriefSource>,
     /// Other views and open proposals that change a covered block (not part of the token).
     pub inflight: Inflight,
     /// The coverage of the covered blocks and the confidence of this briefing (FW-CV1, FW-CV2).
@@ -574,6 +607,12 @@ pub struct Briefing {
     pub related_decisions: Vec<RelatedDecision>,
     #[serde(skip_serializing_if = "is_zero")]
     pub related_decisions_omitted: usize,
+    /// rf9: the findings the covered decisions depend on directly, by (for, finding), at most
+    /// `FINDINGS_CAP` in all. Not paged or cut: every page repeats them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<BriefFinding>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub findings_omitted: usize,
     /// What the covered decisions reach (FW-LP6), at most `REACH_CAP` blocks in all. Not paged
     /// or cut, and not in the digest.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -719,6 +758,7 @@ impl Briefing {
             self.lineage.len(),
             self.will_go_stale.len(),
             self.suspects.len(),
+            self.sources.len(),
             self.inflight.views.len(),
             self.inflight.proposals.len(),
             self.inflight.intents.len(),
@@ -737,13 +777,14 @@ impl Briefing {
         drop(&mut self.lineage, skip[2]);
         drop(&mut self.will_go_stale, skip[3]);
         drop(&mut self.suspects, skip[4]);
-        drop(&mut self.inflight.views, skip[5]);
-        drop(&mut self.inflight.proposals, skip[6]);
-        drop(&mut self.inflight.intents, skip[7]);
-        drop(&mut self.rows, skip[8]);
-        drop(&mut self.inflight.tensions, skip[8]);
-        drop(&mut self.row_sizes, skip[8]);
-        drop(&mut self.base.blocks, skip[9]);
+        drop(&mut self.sources, skip[5]);
+        drop(&mut self.inflight.views, skip[6]);
+        drop(&mut self.inflight.proposals, skip[7]);
+        drop(&mut self.inflight.intents, skip[8]);
+        drop(&mut self.rows, skip[9]);
+        drop(&mut self.inflight.tensions, skip[9]);
+        drop(&mut self.row_sizes, skip[9]);
+        drop(&mut self.base.blocks, skip[10]);
     }
 
     /// Shows the entries after the first `skip[i]` of each section, cut to `max` tokens, and
@@ -968,10 +1009,11 @@ impl Briefing {
             2 => self.lineage.truncate(keep),
             3 => self.will_go_stale.truncate(keep),
             4 => self.suspects.truncate(keep),
-            5 => self.inflight.views.truncate(keep),
-            6 => self.inflight.proposals.truncate(keep),
-            7 => self.inflight.intents.truncate(keep),
-            8 => {
+            5 => self.sources.truncate(keep),
+            6 => self.inflight.views.truncate(keep),
+            7 => self.inflight.proposals.truncate(keep),
+            8 => self.inflight.intents.truncate(keep),
+            9 => {
                 self.rows.truncate(keep);
                 self.inflight.tensions.truncate(keep);
                 self.row_sizes.truncate(keep);
@@ -1057,7 +1099,7 @@ pub(crate) fn refuse_inflight(scope: &Scope) -> Result<(), RdyError> {
 /// carries as many.
 pub(crate) const DIGEST_HEX: usize = 16;
 
-/// A cursor `<token>:<o1>,…,<o9>:<digest>:<scope>` split at its first colon: the token (64
+/// A cursor `<token>:<o1>,…,<o11>:<digest>:<scope>` split at its first colon: the token (64
 /// lowercase hex) and the rest. The rest is read by `parse_tail` once the token is known.
 fn parse_cursor(cursor: &str) -> Result<(&str, &str), RdyError> {
     let (token, rest) = cursor.split_once(':').ok_or_else(bad_cursor)?;
@@ -1385,6 +1427,9 @@ impl ReadState {
         let pack = self.pack();
         let summary_of = |id: &BlockId| m.get(id).map(|b| summary_in(b, &m)).unwrap_or_default();
 
+        // rf9: every source a covered block reflects and every finding a covered decision depends
+        // on is a suspect-link target (`reflects` and `depends_on`), so it is recorded here:
+        // however many finding rows the cap leaves out, an edit of any of them moves the token
         let mut recorded = BTreeMap::new();
         for id in ids {
             recorded.insert(id.clone(), m.version_of(id));
@@ -1614,6 +1659,17 @@ impl ReadState {
         }
         let covered: Vec<BlockId> = ids.iter().cloned().collect();
         let suspects = self.suspect_rows(scope, structural, Some(&covered))?;
+        let (sources, mut findings) = supporting_rows(&g, &m, ids);
+        debug_assert!(
+            sources
+                .iter()
+                .map(|s| &s.source)
+                .chain(findings.iter().map(|f| &f.finding))
+                .all(|t| BlockId::parse(t).is_ok_and(|t| recorded.contains_key(&t))),
+            "every listed source and finding is a recorded dependency"
+        );
+        let findings_omitted = findings.len().saturating_sub(FINDINGS_CAP);
+        findings.truncate(FINDINGS_CAP);
         let (inflight, rows) = self.inflight_unsided(scope, ids)?;
         // a coverage read error never fails a briefing (a briefing gates writes): it is reported
         let (coverage, coverage_error) = if self.coverage_left_out(scope) {
@@ -1650,17 +1706,24 @@ impl ReadState {
         };
         // inflight is advice and not vouched for: a listed view's next write moves its
         // last_write, and a page must not go stale over that
-        let digest = Hash::of(
-            &serde_json::to_vec(&(
-                &governs,
-                &dependents,
-                &lineage,
-                &will_go_stale,
-                &suspects,
-                &base.blocks,
-            ))
-            .expect("a briefing's sections serialize: strings, numbers and string-keyed maps only"),
-        );
+        let mut digested = serde_json::to_vec(&(
+            &governs,
+            &dependents,
+            &lineage,
+            &will_go_stale,
+            &suspects,
+            &sources,
+            &base.blocks,
+        ))
+        .expect("a briefing's sections serialize: strings, numbers and string-keyed maps only");
+        // rf9: the finding rows every page repeats are vouched for too, when there are any
+        if !findings.is_empty() || findings_omitted > 0 {
+            digested.extend(
+                serde_json::to_vec(&(&findings, findings_omitted))
+                    .expect("finding rows serialize: strings and numbers only"),
+            );
+        }
+        let digest = Hash::of(&digested);
         Ok(Briefing {
             covers: ids.len(),
             governs,
@@ -1668,6 +1731,7 @@ impl ReadState {
             lineage,
             will_go_stale,
             suspects,
+            sources,
             inflight,
             coverage,
             coverage_error,
@@ -1675,6 +1739,8 @@ impl ReadState {
             mentioned_by_omitted,
             related_decisions,
             related_decisions_omitted,
+            findings,
+            findings_omitted,
             reaches,
             reaches_omitted,
             base,
@@ -1698,6 +1764,66 @@ impl ReadState {
     }
 }
 
+/// rf9: the source and finding parts of a briefing of `ids` in `m` (graph `g`), one level deep.
+/// A source is a held `source` block that a covered block names with a `reflects` link, listed
+/// once with the covered blocks that name it; a finding row is a held `finding` that a covered
+/// decision names with a `depends_on` link. Sources are in source-id order, finding rows in
+/// (decision, finding) order, none cut. A `conditional_on` link and a premise of a premise add
+/// nothing.
+fn supporting_rows(
+    g: &Graph,
+    m: &Materialized,
+    ids: &BTreeSet<BlockId>,
+) -> (Vec<BriefSource>, Vec<BriefFinding>) {
+    let mut by_source: BTreeMap<BlockId, BTreeSet<BlockId>> = BTreeMap::new();
+    let mut rows: BTreeSet<(BlockId, BlockId)> = BTreeSet::new();
+    for id in ids {
+        let Some(from) = m.get(id) else { continue };
+        for e in g.outgoing(id) {
+            let EdgeKind::Link(kind) = &e.kind else {
+                continue;
+            };
+            let Some(to) = m.get(&e.to) else { continue };
+            if kind == supporting::REFLECTS_LINK && to.block_type == supporting::SOURCE {
+                by_source
+                    .entry(e.to.clone())
+                    .or_default()
+                    .insert(id.clone());
+            } else if kind == decision::DEPENDS_ON
+                && from.block_type == decision::DECISION
+                && to.block_type == supporting::FINDING
+            {
+                rows.insert((id.clone(), e.to.clone()));
+            }
+        }
+    }
+    let text = |b: &Block, field: &str| b.field_str(field).unwrap_or_default().to_string();
+    let sources = by_source
+        .into_iter()
+        .filter_map(|(source, blocks)| {
+            let b = m.get(&source)?;
+            Some(BriefSource {
+                kind: text(b, "kind"),
+                title: text(b, "title"),
+                source: source.to_string(),
+                blocks: blocks.iter().map(ToString::to_string).collect(),
+            })
+        })
+        .collect();
+    let findings = rows
+        .into_iter()
+        .filter_map(|(decision, finding)| {
+            let b = m.get(&finding)?;
+            Some(BriefFinding {
+                r#for: decision.to_string(),
+                statement: text(b, "statement"),
+                finding: finding.to_string(),
+            })
+        })
+        .collect();
+    (sources, findings)
+}
+
 /// The per-doc counts of a whole briefing `b` (before any entry is dropped), by doc id. A
 /// covered block outside any doc (a folder) counts nowhere.
 fn doc_counts(m: &Materialized, b: &Briefing) -> Vec<DocCounts> {
@@ -1708,6 +1834,7 @@ fn doc_counts(m: &Materialized, b: &Briefing) -> Vec<DocCounts> {
         &b.will_go_stale,
         &b.suspects,
     );
+    let (sources, findings) = (&b.sources, &b.findings);
     let mut by_doc: BTreeMap<BlockId, DocCounts> = BTreeMap::new();
     let mut bump = |id: &BlockId, add: fn(&mut DocCounts)| {
         if let Some(d) = m.doc_of(id) {
@@ -1723,6 +1850,8 @@ fn doc_counts(m: &Materialized, b: &Briefing) -> Vec<DocCounts> {
                 dependents: 0,
                 will_go_stale: 0,
                 suspects: 0,
+                sources: 0,
+                findings: 0,
             }));
         }
     };
@@ -1753,6 +1882,24 @@ fn doc_counts(m: &Materialized, b: &Briefing) -> Vec<DocCounts> {
     }
     for s in suspects {
         bump(&s.block, |c| c.suspects += 1);
+    }
+    // rf9: a source counts once for each doc of the covered blocks that reflect it; a finding
+    // row counts in the doc of its decision
+    for s in sources {
+        let docs: BTreeSet<BlockId> = s
+            .blocks
+            .iter()
+            .filter_map(|b| of(b))
+            .filter_map(|b| m.doc_of(&b).map(|d| d.id.clone()))
+            .collect();
+        for d in docs {
+            bump(&d, |c| c.sources += 1);
+        }
+    }
+    for f in findings {
+        if let Some(d) = of(&f.r#for) {
+            bump(&d, |c| c.findings += 1);
+        }
     }
     by_doc.into_values().collect()
 }

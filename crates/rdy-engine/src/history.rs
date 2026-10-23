@@ -143,7 +143,7 @@ pub(crate) fn role_str(r: Role) -> &'static str {
     }
 }
 
-fn class_str(c: EditorialClass) -> &'static str {
+pub(crate) fn class_str(c: EditorialClass) -> &'static str {
     match c {
         EditorialClass::Typo => "typo",
         EditorialClass::Restructure => "restructure",

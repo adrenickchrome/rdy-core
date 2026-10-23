@@ -151,7 +151,7 @@ mod tests {
             format!("plan1:1:{d}:landing:abc"),
             format!("plan1:1:{d}:decision:nope"),
             format!("plan2:1:{d}:view:a"),
-            format!("{}:1,0,0,0,0,0,0,0,0,0:{d}:view:a", "a".repeat(64)),
+            format!("{}:1,0,0,0,0,0,0,0,0,0,0:{d}:view:a", "a".repeat(64)),
             format!("plan1:1:{d}:view:{}", "a".repeat(MAX_CURSOR_BYTES)),
         ] {
             let e = parse(&bad).unwrap_err();

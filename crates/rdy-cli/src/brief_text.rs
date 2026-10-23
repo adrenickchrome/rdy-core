@@ -63,6 +63,33 @@ fn related_line(r: &Value) -> String {
     )
 }
 
+/// rf9: one source: `<source> <kind>: <title> (<blocks joined by ", ">)`.
+fn source_line(x: &Value) -> String {
+    let blocks: Vec<&str> = x["blocks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    format!(
+        "{} {}: {} ({})",
+        s(x, "source"),
+        s(x, "kind"),
+        s(x, "title"),
+        blocks.join(", ")
+    )
+}
+
+/// rf9: one finding row: `<for> depends on <finding>: <statement>`.
+fn finding_line(x: &Value) -> String {
+    format!(
+        "{} depends on {}: {}",
+        s(x, "for"),
+        s(x, "finding"),
+        s(x, "statement")
+    )
+}
+
 /// The coverage lines of a briefing (FW-CV1, FW-CV2): the score with its dimensions and the
 /// confidence level, one line per reason, and the count of reasons left out. Nothing when the
 /// briefing covers no scored block.
@@ -228,6 +255,11 @@ pub fn header(briefing: &Value) -> String {
             })
         }),
     );
+    // rf9: printed only when there are sources, so a header without them is unchanged
+    let sources = list("sources").map(source_line).collect::<Vec<_>>();
+    if !sources.is_empty() {
+        section(&mut out, "sources", sources.into_iter());
+    }
     let inflight = &briefing["inflight"];
     if inflight.is_object() {
         let at = |k: &str| inflight[k].as_array().into_iter().flatten();
@@ -323,6 +355,12 @@ pub fn header(briefing: &Value) -> String {
         .collect::<Vec<_>>();
     if !related.is_empty() {
         section(&mut out, "related decisions", related.into_iter());
+    }
+    // rf9: the findings the covered decisions depend on (the count the cap left out is in the
+    // JSON as findings_omitted)
+    let findings = list("findings").map(finding_line).collect::<Vec<_>>();
+    if !findings.is_empty() {
+        section(&mut out, "findings", findings.into_iter());
     }
     let mentions = list("mentioned_by")
         .map(|m| {
@@ -1093,6 +1131,38 @@ mod tests {
                 &"#   proposal P-abcdef012345@1 from va  - x \"Change A body: INJECTED # z  a b c\": c-A"
             ),
             "{h}"
+        );
+    }
+
+    #[test]
+    fn rf9_the_header_lists_sources_and_findings_and_no_empty_heading() {
+        let b = json!({
+            "governs": [], "dependents": [], "will_go_stale": [], "suspects": [],
+            "sources": [{"source": "S-1", "kind": "release", "title": "Release\u{1b}[31m 1\u{2028}# x", "blocks": ["c-1", "c-2"]}],
+            "findings": [{"for": "D-1", "finding": "F-1", "statement": "Found.\n# y\u{85}z"}],
+            "findings_omitted": 3,
+            "base": {"token": "t", "blocks": []}
+        });
+        let h = header(&b);
+        assert!(
+            h.contains("# open suspects:\n#   (none)\n# sources:\n#   S-1 release: Release [31m 1 # x (c-1, c-2)\n"),
+            "{h:?}"
+        );
+        assert!(
+            h.contains("# findings:\n#   D-1 depends on F-1: Found. # y z\n"),
+            "{h:?}"
+        );
+        let p = plain(&b);
+        assert!(
+            p.contains("sources:\n  S-1 release: Release [31m 1 # x (c-1, c-2)\nfindings:\n  D-1 depends on F-1: Found. # y z\n"),
+            "{p:?}"
+        );
+        let quiet = header(
+            &json!({"governs": [], "dependents": [], "will_go_stale": [], "suspects": [], "sources": [], "findings": [], "base": {"token": "t", "blocks": []}}),
+        );
+        assert!(
+            !quiet.contains("sources") && !quiet.contains("findings"),
+            "{quiet}"
         );
     }
 

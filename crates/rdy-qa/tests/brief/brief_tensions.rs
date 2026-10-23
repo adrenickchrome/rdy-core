@@ -40,9 +40,9 @@ fn tbrf1_a_briefing_lists_the_tensions_on_its_blocks_and_they_are_not_in_the_tok
 
 #[test]
 fn tbrf1_paging_has_a_tensions_section_before_the_base() {
-    assert_eq!(PAGE_SECTIONS.len(), 10);
-    assert_eq!(PAGE_SECTIONS[8], "inflight.tensions");
-    assert_eq!(PAGE_SECTIONS[9], "base.blocks");
+    assert_eq!(PAGE_SECTIONS.len(), 11);
+    assert_eq!(PAGE_SECTIONS[9], "inflight.tensions");
+    assert_eq!(PAGE_SECTIONS[10], "base.blocks");
 }
 
 fn cov(b: &BlockId) -> Coverage {
