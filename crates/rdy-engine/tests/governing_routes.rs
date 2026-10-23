@@ -420,3 +420,59 @@ fn rf6_supporting_targets_never_apply_a_decision() {
     }
     assert!(!unapplied("D-SSSS4"), "guard: affecting a claim applies it");
 }
+
+/// An entity that implements live D-CCCC3 and describes entity t-TERME, which live D-CCCC1 and
+/// partly superseded D-CCCC2 affect: its fact sheet lists all three through the four routes,
+/// as context does.
+#[test]
+fn rf6_a_fact_sheet_reads_its_own_entity_through_the_four_routes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let mut doc = block("d-D0C00", "doc", None, "B", "");
+    field(&mut doc, "name", "spec");
+    field(&mut doc, "title", "Spec");
+    field(&mut doc, "doc_type", "page");
+    let mut sec = block("s-SEC00", "section", Some("d-D0C00"), "B", "");
+    field(&mut sec, "title", "Rules");
+    let mut t = entity("t-TERMT", "C", "Hub");
+    link(&mut t, "implements", "D-CCCC3", None);
+    link(&mut t, "describes", "t-TERME", None);
+    let e = entity("t-TERME", "D", "Spoke");
+    let mut d1 = decision("D-CCCC1", "E", "accepted");
+    link(&mut d1, "affects", "t-TERME", None);
+    let mut d2 = decision("D-CCCC2", "F", "accepted");
+    link(&mut d2, "affects", "t-TERME", None);
+    let d3 = decision("D-CCCC3", "G", "accepted");
+    let mut d4 = decision("D-CCCC4", "H", "accepted");
+    link(&mut d4, "supersedes", "D-CCCC2", Some("the second half"));
+    commit(&mut r, vec![doc, sec, t, e, d1, d2, d3, d4]);
+    let st = r.read();
+    let ctx = st.context(&w(), &id("t-TERMT")).unwrap();
+    assert_eq!(ctx.governing, ids(["D-CCCC1", "D-CCCC2", "D-CCCC3"]));
+    let sheet = st.fact_sheet(&w(), &id("t-TERMT"), NameKind::Name).unwrap();
+    let decisions: Vec<SheetRow> = sheet
+        .decisions
+        .iter()
+        .map(|d| (d.id.clone(), d.via.clone(), d.status.clone(), d.on.clone()))
+        .collect();
+    assert_eq!(
+        decisions,
+        vec![
+            (
+                "D-CCCC1".into(),
+                "describes/affects".into(),
+                "live".into(),
+                vec![]
+            ),
+            (
+                "D-CCCC2".into(),
+                "describes/affects".into(),
+                "partially_superseded".into(),
+                vec![]
+            ),
+            ("D-CCCC3".into(), "implements".into(), "live".into(), vec![]),
+        ]
+    );
+    // the relationship lists stay apart: t-TERMT is no fact or content of itself
+    assert!(sheet.facts.is_empty() && sheet.also_described_in.is_empty());
+}

@@ -316,6 +316,7 @@ fn brf1_the_registry_keeps_the_most_recently_used_briefings() {
             token: Hash::of(&[n]),
             covers: BTreeSet::new(),
             recorded: BTreeMap::new(),
+            governance: Governance::default(),
         })
     };
     let hex = |n: u8| rec(n).token.to_string();
@@ -439,6 +440,7 @@ fn brf1_the_registry_is_bounded_by_recorded_entries_as_well_as_by_count() {
             token: Hash::of(&[n]),
             covers,
             recorded,
+            governance: Governance::default(),
         })
     };
     let hex = |n: u8| Hash::of(&[n]).to_string();

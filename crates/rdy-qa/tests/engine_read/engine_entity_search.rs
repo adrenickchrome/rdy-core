@@ -786,5 +786,10 @@ fn msw18_a_long_on_list_is_cut_and_counted() {
     let s = &sheets(&r, "ledger service")[0];
     let d2 = s.decisions.iter().find(|d| d.id == o.d2).unwrap();
     assert_eq!(d2.on.len(), SHEET_LIST_CAP, "{:?}", d2.on);
-    assert_eq!(s.omitted.get("on"), Some(&6), "{:?}", s.omitted);
+    // rf6 (D-VPATZ, re-anchored in fix round 1): D1 affects the entity, so by the
+    // describes/affects route it also governs the 25 claims and c1 (26 blocks); both lists are
+    // cut to the cap and one count holds both cuts: 6 + 6
+    let d1 = s.decisions.iter().find(|d| d.id == o.d1).unwrap();
+    assert_eq!(d1.on.len(), SHEET_LIST_CAP, "{:?}", d1.on);
+    assert_eq!(s.omitted.get("on"), Some(&12), "{:?}", s.omitted);
 }

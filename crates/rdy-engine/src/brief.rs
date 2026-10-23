@@ -21,7 +21,7 @@ use crate::tensions::{Tension, TensionSeverity};
 use crate::write::OpInput;
 use crate::{Materialized, ReadState, Scope};
 use rdy_graph::{
-    DerivedStatus, EdgeKind, GoverningCache, GoverningStatuses, IMPACT_LINKS, IMPACT_SHOWN,
+    DerivedStatus, EdgeKind, GoverningCache, GoverningStatuses, Graph, IMPACT_LINKS, IMPACT_SHOWN,
     SUSPECT_LINKS,
 };
 use rdy_model::{Block, BlockId, FieldValue, Hash, decision};
@@ -72,13 +72,86 @@ pub struct Coverage {
     pub path: Option<String>,
 }
 
-/// What a registered briefing vouches for: the blocks it covers and the version of every
-/// recorded block (covered blocks and their dependencies; `None` for a block that is missing).
+/// What a registered briefing vouches for: the blocks it covers, the version of every
+/// recorded block (covered blocks and their dependencies; `None` for a block that is missing),
+/// and the governing state it showed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BriefRecord {
     pub token: Hash,
     pub covers: BTreeSet<BlockId>,
     pub recorded: BTreeMap<BlockId, Option<Hash>>,
+    pub governance: Governance,
+}
+
+/// rf6 (D-VPATZ): one live or proposed governing route of a covered block, as a briefing showed
+/// it: the decision, the route (`via`) and its entity, and the decision's derived status tag.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RouteLine {
+    pub block: BlockId,
+    pub decision: BlockId,
+    pub via: &'static str,
+    pub entity: Option<BlockId>,
+    pub status: &'static str,
+}
+
+/// rf6: the governing state a briefing vouches for beyond block versions. A decision's derived
+/// status, a route that another block adds or removes, and an entity's `defines` trait can all
+/// change while every recorded version stays: [`BriefRecord::stale`] compares this capture.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Governance {
+    /// Each covered block's governing routes, in (block, decision) order.
+    pub routes: Vec<RouteLine>,
+    /// Each recorded decision that a later decision retires (wholly or in part) or revokes,
+    /// with its derived status tag.
+    pub retired: BTreeMap<BlockId, &'static str>,
+}
+
+/// rf6: the live and proposed governing routes of each block of `ids` by the graph's four
+/// routes, in (block, decision) order. `cache` belongs to `g` and this read.
+fn route_lines(
+    g: &Graph,
+    pack: &Pack,
+    m: &Materialized,
+    ids: &BTreeSet<BlockId>,
+    cache: &mut GoverningCache,
+) -> Vec<RouteLine> {
+    let mut out = vec![];
+    for id in ids {
+        for r in g.governing_routes(
+            id,
+            GoverningStatuses::LiveOrProposed,
+            |e| is_entity_in(pack, m, e),
+            cache,
+        ) {
+            let status = g
+                .status(&r.decision)
+                .as_ref()
+                .map_or("", DerivedStatus::tag);
+            out.push(RouteLine {
+                block: id.clone(),
+                decision: r.decision,
+                via: r.via,
+                entity: r.entity,
+                status,
+            });
+        }
+    }
+    out
+}
+
+/// rf6: the blocks of `ids` that are decisions a later decision retires or revokes, with their
+/// derived status tag.
+fn retired_of<'a>(
+    g: &Graph,
+    ids: impl IntoIterator<Item = &'a BlockId>,
+) -> BTreeMap<BlockId, &'static str> {
+    ids.into_iter()
+        .filter_map(|id| {
+            let tag = g.status(id)?.tag();
+            matches!(tag, "partially_superseded" | "superseded" | "revoked")
+                .then(|| (id.clone(), tag))
+        })
+        .collect()
 }
 
 impl BriefRecord {
@@ -95,24 +168,65 @@ impl BriefRecord {
             .collect()
     }
 
+    /// rf6: what moved since the briefing in `m` and its graph `g` under `pack`, in id order:
+    /// each recorded block whose version changed ([`BriefRecord::moved`]), each decision whose
+    /// governing route of a covered block appeared, went or changed its route, entity or status
+    /// (a new superseder, another decision on an entity, an entity that no longer defines), and
+    /// each recorded decision whose retired status changed.
+    pub fn stale(&self, pack: &Pack, m: &Materialized, g: &Graph) -> Vec<BlockId> {
+        let mut out: BTreeSet<BlockId> = self.moved(m).into_iter().collect();
+        let now = route_lines(g, pack, m, &self.covers, &mut GoverningCache::default());
+        let then: BTreeSet<&RouteLine> = self.governance.routes.iter().collect();
+        let now: BTreeSet<&RouteLine> = now.iter().collect();
+        out.extend(then.symmetric_difference(&now).map(|r| r.decision.clone()));
+        let retired = retired_of(g, self.recorded.keys());
+        out.extend(
+            self.recorded
+                .keys()
+                .filter(|id| retired.get(*id) != self.governance.retired.get(*id))
+                .cloned(),
+        );
+        out.into_iter().collect()
+    }
+
     pub fn token_hex(&self) -> String {
         self.token.to_string()
     }
 
     /// What this record weighs against a registry's entry budget.
     fn entries(&self) -> usize {
-        self.covers.len() + self.recorded.len()
+        self.covers.len()
+            + self.recorded.len()
+            + self.governance.routes.len()
+            + self.governance.retired.len()
     }
 }
 
-/// The briefing token (exact): BLAKE3 of `rdy-brief-1\n` and, for each recorded block in id
-/// order, `<id>\t<version hex or "-">\t<c|d>\n` (`c` covered, `d` dependency only).
-pub fn token_of(covers: &BTreeSet<BlockId>, recorded: &BTreeMap<BlockId, Option<Hash>>) -> Hash {
+/// The briefing token (exact): BLAKE3 of `rdy-brief-1\n`; for each recorded block in id order,
+/// `<id>\t<version hex or "-">\t<c|d>\n` (`c` covered, `d` dependency only); rf6: then for each
+/// governing route through an entity in (block, decision) order, `<block>\t<decision>\t<entity>\tr\n`;
+/// then for each retired recorded decision in id order, `<id>\t<status tag>\ts\n`. A briefing
+/// with no entity route and no retired decision keeps the token of its recorded blocks alone.
+pub fn token_of(
+    covers: &BTreeSet<BlockId>,
+    recorded: &BTreeMap<BlockId, Option<Hash>>,
+    governance: &Governance,
+) -> Hash {
     let mut bytes = b"rdy-brief-1\n".to_vec();
     for (id, version) in recorded {
         let version = version.map_or_else(|| "-".to_string(), |h| h.to_string());
         let role = if covers.contains(id) { 'c' } else { 'd' };
         bytes.extend_from_slice(format!("{id}\t{version}\t{role}\n").as_bytes());
+    }
+    for r in &governance.routes {
+        if let Some(entity) = &r.entity {
+            bytes.extend_from_slice(
+                format!("{}\t{}\t{entity}\tr\n", r.block, r.decision).as_bytes(),
+            );
+        }
+    }
+    for (id, tag) in &governance.retired {
+        bytes.extend_from_slice(format!("{id}\t{tag}\ts\n").as_bytes());
     }
     Hash::of(&bytes)
 }
@@ -1282,32 +1396,30 @@ impl ReadState {
         }
 
         // rf6 (D-VPATZ): live and proposed decisions by the graph's four routes, one cache for
-        // the briefing. Each entity route is a recorded dependency: its decision (status and
-        // affects list) and the entity (whether it defines), so a change to either moves the
-        // briefing.
-        let mut cache = GoverningCache::default();
+        // the briefing. Every governing decision is a recorded dependency (its status and
+        // affects list), and so is each entity a route runs through. The routes and the retired
+        // statuses of the recorded decisions are captured too, so a change no recorded version
+        // shows (a new superseder or decision on an entity, an entity that stops defining)
+        // moves the briefing as well (`BriefRecord::stale`).
+        let routes = route_lines(&g, pack, &m, ids, &mut GoverningCache::default());
         let mut governed: BTreeMap<BlockId, (Vec<String>, Vec<Through>)> = BTreeMap::new();
-        for id in ids {
-            let routes = g.governing_routes(
-                id,
-                GoverningStatuses::LiveOrProposed,
-                |e| is_entity_in(pack, &m, e),
-                &mut cache,
-            );
-            for r in routes {
-                let row = governed.entry(r.decision.clone()).or_default();
-                row.0.push(id.to_string());
-                if let Some(entity) = r.entity {
-                    recorded.insert(r.decision.clone(), m.version_of(&r.decision));
-                    recorded.insert(entity.clone(), m.version_of(&entity));
-                    row.1.push(Through {
-                        block: id.to_string(),
-                        entity: entity.to_string(),
-                    });
-                }
+        for r in &routes {
+            recorded.insert(r.decision.clone(), m.version_of(&r.decision));
+            let row = governed.entry(r.decision.clone()).or_default();
+            row.0.push(r.block.to_string());
+            if let Some(entity) = &r.entity {
+                recorded.insert(entity.clone(), m.version_of(entity));
+                row.1.push(Through {
+                    block: r.block.to_string(),
+                    entity: entity.to_string(),
+                });
             }
         }
-        let token = token_of(ids, &recorded);
+        let governance = Governance {
+            retired: retired_of(&g, recorded.keys()),
+            routes,
+        };
+        let token = token_of(ids, &recorded, &governance);
         let governs: Vec<Governs> = governed
             .into_iter()
             .map(|(d, (blocks, mut through))| {
@@ -1577,6 +1689,7 @@ impl ReadState {
                 token,
                 covers: ids.clone(),
                 recorded,
+                governance,
             }),
             rows,
             row_sizes: vec![],
@@ -1888,11 +2001,14 @@ fn short_token(t: &str) -> String {
 /// briefing where they touch stable content. Writes that touch only drafts are never refused;
 /// an unknown or stale cited briefing is a `W_BRIEF_STALE` warning on them. A refusal names, in
 /// `briefing.ids`, every block a fresh briefing must cover (`expand_error` computes it).
-/// `reaffirmed` is what the write's reaffirm ops selected on `m` (`reaffirm::select`).
+/// `reaffirmed` is what the write's reaffirm ops selected on `m` (`reaffirm::select`). `graph`
+/// gives `m`'s graph, read only when a cited briefing is held: its governing state is checked
+/// against it (rf6).
 pub(crate) fn check(
     pack: &Pack,
     reg: &BriefRegistry,
     m: &Materialized,
+    graph: impl FnOnce() -> Result<Arc<Graph>, RdyError>,
     ops: &[OpInput],
     reaffirmed: &crate::reaffirm::Selection,
     brief: Option<&str>,
@@ -1913,7 +2029,7 @@ pub(crate) fn check(
                 short_token(t)
             )),
             Some(rec) => {
-                let moved: BTreeSet<BlockId> = rec.moved(m).into_iter().collect();
+                let moved: BTreeSet<BlockId> = rec.stale(pack, m, &*graph()?).into_iter().collect();
                 (!moved.is_empty()).then(|| {
                     format!(
                         "the cited briefing is stale: {} moved since it was made; this write touches only drafts, so it went ahead",
@@ -2009,7 +2125,7 @@ pub(crate) fn check(
             issues,
         ));
     }
-    let moved: BTreeSet<BlockId> = rec.moved(m).into_iter().collect();
+    let moved: BTreeSet<BlockId> = rec.stale(pack, m, &*graph()?).into_iter().collect();
     if !moved.is_empty() {
         let issues = moved
             .iter()

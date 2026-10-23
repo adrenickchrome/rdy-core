@@ -3031,8 +3031,15 @@ impl Rdy {
         // D-EJBPD: what each reaffirm op selects, once, on the starting view, before the
         // briefing check (which must cover exactly those decisions) and before any op applies
         let selection = crate::reaffirm::select(&st, &scope, &req.ops)?;
-        let brief_warnings =
-            crate::brief::check(&self.pack, &self.briefs, &m, &req.ops, &selection, brief)?;
+        let brief_warnings = crate::brief::check(
+            &self.pack,
+            &self.briefs,
+            &m,
+            || st.graph(&scope),
+            &req.ops,
+            &selection,
+            brief,
+        )?;
         let reaffirmable = |id: &BlockId| crate::reaffirm::reaffirmable(&st, &scope, id);
         let (mut ops, created, touched, names, keys, reaffirmed, code_repins) = build_ops(
             &self.pack,
