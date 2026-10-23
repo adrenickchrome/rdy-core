@@ -45,6 +45,7 @@ pub mod hub_publish_stream;
 pub mod hub_publish_wire;
 pub mod hub_remotes;
 pub mod hub_types;
+pub mod identity;
 pub mod inbox;
 pub mod inflight;
 pub mod intent;
