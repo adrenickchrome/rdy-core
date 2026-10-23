@@ -977,7 +977,14 @@ fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
     );
     let k = id(&w.created["$k"]);
     // a proposal title, a landing by an approver whose actor holds the token, and a tag message
-    let token_approver = Session::human(format!("human:{TOKEN}"), Role::Approver).unwrap();
+    // the token's capitals are outside today's actor form (D-ME2C0): the approver stands for a
+    // landing an older rdy recorded, so it is built raw, not by the constructor
+    let token_approver = Session {
+        actor: format!("human:{TOKEN}"),
+        run: Some("cli".into()),
+        role: Role::Approver,
+        kind: rdy_engine::SessionKind::Human,
+    };
     let pi =
         p.r.propose(&writer(), "work", &format!("{TOKEN} proposal"), None)
             .unwrap();
