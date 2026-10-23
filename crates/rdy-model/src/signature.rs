@@ -334,7 +334,7 @@ pub fn parse_statement(bytes: &[u8]) -> Result<ParsedStatement<'_>, StatementErr
         (StatementKind::Relay, Some(&("act", "approve"))) => relay_approve_layout(version),
         (StatementKind::Relay, Some(&("act", "tag"))) => relay_tag_layout(version),
         (StatementKind::Relay, _) => None,
-        (other, _) => (version == 1).then(|| match other {
+        (other, _) => (version == 1).then_some(match other {
             StatementKind::Approval => APPROVAL,
             StatementKind::Tag => TAG,
             _ => KEYBIND,
