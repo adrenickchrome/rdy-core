@@ -60,6 +60,10 @@ fn small(s: &Served) -> (String, String) {
     (w.created["$k"].clone(), w.created["$dd"].clone())
 }
 
+/// The MCP arguments, the CLI arguments and the refusal both give: its code, its message (empty
+/// when only the code is pinned) and its fix.
+type Case = (Value, Vec<String>, (&'static str, String, &'static str));
+
 fn cli_refusal(s: &Served, args: &[&str]) -> Value {
     let mut full = vec!["--json", "trace"];
     full.extend_from_slice(args);
@@ -88,7 +92,7 @@ fn rf12_trace_refusals_cross_both_boundaries() {
     let missing = "c-0A1B2";
     let ref_clash = format!("{k}@v1.0.0");
     // (MCP arguments, CLI arguments, what the refusal is)
-    let cases: Vec<(Value, Vec<String>, (&str, String, &str))> = vec![
+    let cases: Vec<Case> = vec![
         (
             json!({"id": missing, "scope": "canon"}),
             vec![missing.into(), "--scope".into(), "canon".into()],
