@@ -175,7 +175,10 @@ fn rf4_history_reads_both_reflects_forms() {
         json!({"reflects": {"sources": ["S-0000B", "S-0000A"], "code": false}})
     );
     // the last change of each block, as the compact reader reads it
-    let last = r.read().last_changes(&scope, &[claim.clone()]).unwrap();
+    let last = r
+        .read()
+        .last_changes(&scope, std::slice::from_ref(&claim))
+        .unwrap();
     assert_eq!(
         last[&claim].justification.as_ref().map(|j| j.label()),
         Some("reflects code".into())
