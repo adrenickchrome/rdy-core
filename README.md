@@ -277,6 +277,8 @@ keeps fmt, clippy, the workspace tests, the `rdy-qa` unit tests and the perf tie
 
 rdy is available under either [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your choice.
 
+rdy's binaries also contain open-source libraries under their own licenses. Two of them, `imbl` and `imbl-sized-chunks`, use the [Mozilla Public License 2.0](https://www.mozilla.org/MPL/2.0/). Each release archive holds `THIRD-PARTY-NOTICES.txt` with every library's license. Each release also attaches the exact source code of the MPL-2.0 libraries.
+
 ## Report problems
 
 Report problems at https://github.com/adrenickchrome/rdy-core/issues.
