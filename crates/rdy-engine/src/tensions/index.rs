@@ -1306,10 +1306,12 @@ pub fn normalize_text(s: &str, min_words: usize) -> Option<Hash> {
     Some(Hash::of(n.as_bytes()))
 }
 
-/// A premise edge: a reference, or a link in `SUSPECT_LINKS`.
+/// A premise edge: a reference, or a link in `SUSPECT_LINKS` other than `reflects`. A reflected
+/// source is a suspect and impact edge, not a premise the tension detectors compare (rf3).
 pub fn premise_edge(e: &Edge) -> bool {
     match &e.kind {
         EdgeKind::References => true,
+        EdgeKind::Link(n) if n == "reflects" => false,
         EdgeKind::Link(n) => SUSPECT_LINKS.contains(&n.as_str()),
         EdgeKind::Contains => false,
     }
@@ -1333,4 +1335,33 @@ pub(crate) fn is_deprecated(m: &Materialized, g: &Graph, b: &BlockId) -> bool {
             g.status(b),
             Some(DerivedStatus::Superseded { .. } | DerivedStatus::Revoked { .. })
         )
+}
+
+#[cfg(test)]
+mod rf3_tests {
+    use super::*;
+    use rdy_model::BlockId;
+
+    fn edge(kind: EdgeKind) -> Edge {
+        Edge {
+            from: BlockId::parse("n-AAAAA").unwrap(),
+            to: BlockId::parse("n-BBBBB").unwrap(),
+            kind,
+            part: None,
+            pin: None,
+        }
+    }
+
+    #[test]
+    fn rf3_reflects_is_not_a_premise_edge() {
+        assert!(!premise_edge(&edge(EdgeKind::Link("reflects".into()))));
+        assert!(premise_edge(&edge(EdgeKind::References)));
+        for n in ["depends_on", "conditional_on", "implements", "decided_by"] {
+            assert!(premise_edge(&edge(EdgeKind::Link(n.into()))), "{n}");
+        }
+        assert!(!premise_edge(&edge(EdgeKind::Contains)));
+        for n in ["describes", "affects", "supersedes"] {
+            assert!(!premise_edge(&edge(EdgeKind::Link(n.into()))), "{n}");
+        }
+    }
 }
