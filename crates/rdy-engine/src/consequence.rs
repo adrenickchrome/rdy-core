@@ -994,7 +994,8 @@ fn suspect_on(
 
 /// Whether `before`, a subject's baseline version, holds a premise edge to `x` with a pin that
 /// the final `x` (`after`, read under `t`) no longer matches; a deleted `x` matches no pin. A
-/// removed (redacted) `x` has no content to compare, so it gives none.
+/// removed (redacted) `x` has no content to compare, so it gives none. The caller applies the
+/// suspects detector's presentational exclusion (D-ATBP6: no reaffirm item without a suspect).
 fn prior_suspect(before: Option<&Block>, after: Option<&Block>, x: &BlockId, t: &Tracking) -> bool {
     let Some(before) = before else {
         return false;
@@ -1065,7 +1066,12 @@ impl ReadState {
                 .iter()
                 .any(|v| v.target == *x && !self.is_presentational_source(&fin.m, v))
         };
-        let prior = |s: &BlockId, x: &BlockId| prior_suspect(base.m.get(s), fin.m.get(x), x, &t);
+        // the suspect a repin or reaffirm cleared, judged as the suspects detector judges it: a
+        // presentational cause is never a suspect, so it gives no reaffirm item (D-ATBP6)
+        let prior = |s: &BlockId, x: &BlockId| {
+            prior_suspect(base.m.get(s), fin.m.get(x), x, &t)
+                && !self.is_presentational_target(&fin.m, x)
+        };
         // a lineage link the version itself writes or removes is the change, never a
         // dependency; a lineage link the subject already held, and every other edge, stay
         let own_lineage = |e: &Edge| {

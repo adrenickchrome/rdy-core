@@ -312,13 +312,20 @@ impl ReadState {
     /// moved) makes nothing suspect. A target that is gone is typed by its id's prefix, since a
     /// pin records content, not a stored version (lpin1).
     pub(crate) fn is_presentational_source(&self, m: &Materialized, s: &Suspect) -> bool {
+        self.is_presentational_target(m, &s.target)
+    }
+
+    /// Whether `target`, read in `m`, is presentational: the one test behind
+    /// [`Self::is_presentational_source`], for a caller that has no [`Suspect`] to hand (the
+    /// change plan's baseline suspect, D-ATBP6).
+    pub(crate) fn is_presentational_target(&self, m: &Materialized, target: &BlockId) -> bool {
         let pack = self.pack();
-        match m.get(&s.target) {
+        match m.get(target) {
             Some(b) => pack.is_presentational(&b.block_type),
             None => pack
                 .block_types
                 .iter()
-                .any(|(name, d)| d.prefix == s.target.prefix() && pack.is_presentational(name)),
+                .any(|(name, d)| d.prefix == target.prefix() && pack.is_presentational(name)),
         }
     }
 

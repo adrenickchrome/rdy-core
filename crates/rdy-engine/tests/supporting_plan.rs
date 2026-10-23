@@ -794,6 +794,78 @@ fn rf10_every_reaffirm_item_has_a_suspect() {
     }
 }
 
+/// A pack whose `aside` type is presentational (a section may hold one).
+const PRESENTATIONAL_PACK: &str = "name: p\nversion: '1'\nextends: rdy-standard\nblock_types:\n  aside: { prefix: as, traits: [presentational], body: required }\n  section:\n    prefix: s\n    traits: [structural]\n    children: [section, prose, claim, requirement, constraint, term, component, actor, interface, flow, example, note, rationale, table, diagram, figure, code, decision, question, aside]\n";
+
+/// Fix round 1 (D-ATBP6): a pinned `depends_on` to a presentational block is no suspect, so its
+/// change gives an accepted decision a confirm item that agrees with the consequences, never a
+/// reaffirm item the reaffirm op refuses.
+#[test]
+fn rf10_presentational_cause_gives_a_confirm_item_not_reaffirm() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
+    std::fs::write(dir.path().join(".rdy/packs/p.yaml"), PRESENTATIONAL_PACK).unwrap();
+    std::fs::write(dir.path().join(".rdy.yaml"), "pack: p\n").unwrap();
+    let mut r = Rdy::open(dir.path()).unwrap();
+    let w = put(
+        &mut r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "t", "title": "T", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
+            {"op": "create", "type": "aside", "id": "$n", "parent": "$s", "body": "Decorative."}
+        ]),
+    );
+    land(&mut r, "seed");
+    let (sec, n) = (id(&w.created["$s"]), id(&w.created["$n"]));
+    let d = decide(
+        &mut r,
+        "k",
+        DecisionInput {
+            depends_on: vec![n.to_string()],
+            ..statement("Asides stay", &sec)
+        },
+    );
+    land(&mut r, "k");
+    let c = change_of(&put(
+        &mut r,
+        "w",
+        json!([{"op": "update", "id": n.to_string(), "body": "Still decorative."}]),
+    ));
+    // the live suspect list holds no suspect for d
+    assert!(
+        r.read()
+            .suspects(&view("w"))
+            .unwrap()
+            .iter()
+            .all(|s| s.block != d),
+        "{:?}",
+        r.read().suspects(&view("w")).unwrap()
+    );
+    // the consequences: confirm
+    let cq = consequences(&r, "w", &c);
+    let e = entry(&cq, &d).expect("d");
+    assert_eq!(e.follow_up, FollowUp::Confirm, "{cq:?}");
+    assert_eq!(e.fix.as_deref(), Some(REACH_CONFIRM_FIX));
+    // the plan agrees: a confirm item, and no reaffirm item
+    let p = whole(&r, "w");
+    no_reaffirm(&p);
+    let item = pi(&n, &d.to_string(), PlanKind::Confirm);
+    assert_eq!(row(&p, &item)["state"], "open", "{p:#}");
+    // a confirm answer closes it
+    r.answer_plan(
+        &writer(),
+        "w",
+        &[PlanAnswerInput {
+            item: item.clone(),
+            act: PlanAct::Confirm,
+            reason: Some("Asides stay; the edit is decorative.".into()),
+        }],
+    )
+    .unwrap();
+    assert_eq!(row(&whole(&r, "w"), &item)["state"], "closed");
+}
+
 // ---- code ----
 
 fn git(dir: &Path, args: &[&str]) -> String {
