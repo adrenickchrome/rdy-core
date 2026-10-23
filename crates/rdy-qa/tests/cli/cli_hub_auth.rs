@@ -1611,7 +1611,9 @@ fn id3_cli_auth_refuses_a_non_unicode_actor_or_run() {
         not_unicode("human:qa"),
         not_unicode("r"),
     );
-    let cases: [(&OsStr, Option<&OsStr>, &(String, String, String)); 4] = [
+    // an environment actor, its run, and the refusal they get
+    type Case<'a> = (&'a OsStr, Option<&'a OsStr>, &'a (String, String, String));
+    let cases: [Case<'_>; 4] = [
         (&agent_actor, None, &bad_actor),
         (&human_actor, None, &bad_human),
         (OsStr::new("agent:x"), Some(&run), &bad_run),

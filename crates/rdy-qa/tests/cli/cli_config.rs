@@ -410,7 +410,9 @@ fn id3_a_non_unicode_actor_or_run_is_refused_on_every_cli_path() {
     let agent_actor = not_unicode("agent:");
     let human_actor = not_unicode("human:qa");
     let run = not_unicode("r");
-    let cases: [(&OsStr, Option<&OsStr>, &(String, String, String)); 5] = [
+    // an environment actor, its run, and the refusal they get
+    type Case<'a> = (&'a OsStr, Option<&'a OsStr>, &'a (String, String, String));
+    let cases: [Case<'_>; 5] = [
         (&agent_actor, None, &bad_actor),
         (&human_actor, None, &bad_human),
         (&agent_actor, Some(OsStr::new("r1")), &bad_actor),
