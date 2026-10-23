@@ -573,6 +573,73 @@ fn rf9_the_counts_of_a_cut_briefing_carry_sources_and_findings() {
 }
 
 #[test]
+fn rf9_doc_finding_counts_cover_every_premise_past_the_cap() {
+    // 21 premises of one decision: the list keeps 20 rows, the document counts all 21
+    let (_d, mut r) = project();
+    let (doc, _dec, _f, _c, _s) = many(&mut r, 1, 21);
+    let b = r
+        .read()
+        .brief(&view("k"), &cover_doc(&doc), Some(1))
+        .unwrap();
+    assert!(b.truncated);
+    assert_eq!((b.findings.len(), b.findings_omitted), (FINDINGS_CAP, 1));
+    let d = &b.docs[0];
+    assert_eq!(d.findings, 21, "{:?}", b.docs);
+}
+
+#[test]
+fn rf9_doc_finding_counts_span_a_global_cap_over_several_docs() {
+    // two docs, one decision each, 15 distinct premises each: 30 rows, the list keeps 20 and
+    // omits 10, and each doc still counts its own 15
+    let (_d, mut r) = project();
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$a", "fields": {"name": "alpha", "title": "Alpha", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "section", "id": "$as", "parent": "$a", "fields": {"title": "A"}}),
+        json!({"op": "create", "type": "doc", "id": "$b", "fields": {"name": "beta", "title": "Beta", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "section", "id": "$bs", "parent": "$b", "fields": {"title": "B"}}),
+        json!({"op": "create", "type": "doc", "id": "$r", "fields": {"name": "refs", "title": "Refs", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "section", "id": "$rs", "parent": "$r", "fields": {"title": "Sources"}}),
+    ];
+    for i in 0..30 {
+        ops.push(json!({"op": "create", "type": "finding", "id": format!("$f{i}"), "parent": "$rs",
+            "fields": {"statement": format!("Finding {i}."), "evidence": [{"quote": format!("q{i}")}]}}));
+    }
+    let c = write(&mut r, "seed", Value::Array(ops)).unwrap();
+    land(&mut r, "seed").unwrap();
+    let g = |k: String| id(&c.created[&k]);
+    let fs: Vec<BlockId> = (0..30).map(|i| g(format!("$f{i}"))).collect();
+    let (a, b) = (g("$a".into()), g("$b".into()));
+    let da = decide(
+        &mut r,
+        "k",
+        &g("$as".into()),
+        "A keeps its findings",
+        &fs[..15].iter().collect::<Vec<_>>(),
+    );
+    let db = decide(
+        &mut r,
+        "k",
+        &g("$bs".into()),
+        "B keeps its findings",
+        &fs[15..].iter().collect::<Vec<_>>(),
+    );
+    let out = brief(&r, &view("k"), &[&da, &db], Some(1));
+    assert!(out.truncated);
+    assert_eq!(
+        (out.findings.len(), out.findings_omitted),
+        (FINDINGS_CAP, 10)
+    );
+    let count = |doc: &BlockId| {
+        out.docs
+            .iter()
+            .find(|d| d.doc == doc.to_string())
+            .map(|d| d.findings)
+    };
+    assert_eq!(count(&a), Some(15), "{:?}", out.docs);
+    assert_eq!(count(&b), Some(15), "{:?}", out.docs);
+}
+
+#[test]
 fn rf9_cli_brief_uses_the_same_rows() {
     let s = Served::new();
     let (claim, src, dec, finding) = {

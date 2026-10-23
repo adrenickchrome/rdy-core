@@ -613,6 +613,10 @@ pub struct Briefing {
     pub findings: Vec<BriefFinding>,
     #[serde(skip_serializing_if = "is_zero")]
     pub findings_omitted: usize,
+    /// How many finding rows each covered decision has in all, before the cap (the per-doc
+    /// counts of a cut briefing are over these, not over the retained rows).
+    #[serde(skip)]
+    finding_counts: BTreeMap<BlockId, usize>,
     /// What the covered decisions reach (FW-LP6), at most `REACH_CAP` blocks in all. Not paged
     /// or cut, and not in the digest.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1659,7 +1663,7 @@ impl ReadState {
         }
         let covered: Vec<BlockId> = ids.iter().cloned().collect();
         let suspects = self.suspect_rows(scope, structural, Some(&covered))?;
-        let (sources, mut findings) = supporting_rows(&g, &m, ids);
+        let (sources, findings, findings_omitted, finding_counts) = supporting_rows(&g, &m, ids);
         debug_assert!(
             sources
                 .iter()
@@ -1668,8 +1672,6 @@ impl ReadState {
                 .all(|t| BlockId::parse(t).is_ok_and(|t| recorded.contains_key(&t))),
             "every listed source and finding is a recorded dependency"
         );
-        let findings_omitted = findings.len().saturating_sub(FINDINGS_CAP);
-        findings.truncate(FINDINGS_CAP);
         let (inflight, rows) = self.inflight_unsided(scope, ids)?;
         // a coverage read error never fails a briefing (a briefing gates writes): it is reported
         let (coverage, coverage_error) = if self.coverage_left_out(scope) {
@@ -1741,6 +1743,7 @@ impl ReadState {
             related_decisions_omitted,
             findings,
             findings_omitted,
+            finding_counts,
             reaches,
             reaches_omitted,
             base,
@@ -1768,15 +1771,24 @@ impl ReadState {
 /// A source is a held `source` block that a covered block names with a `reflects` link, listed
 /// once with the covered blocks that name it; a finding row is a held `finding` that a covered
 /// decision names with a `depends_on` link. Sources are in source-id order, finding rows in
-/// (decision, finding) order, none cut. A `conditional_on` link and a premise of a premise add
-/// nothing.
+/// (decision, finding) order. A `conditional_on` link and a premise of a premise add nothing.
+///
+/// Findings use the cap-and-count pattern: every distinct (decision, finding) pair is counted
+/// (in all, and for each decision, for the per-doc counts), but statement-bearing rows are built
+/// only for the first `FINDINGS_CAP` pairs. Returns the sources, those rows, the count of pairs
+/// the cap leaves out, and each decision's complete pair count.
 fn supporting_rows(
     g: &Graph,
     m: &Materialized,
     ids: &BTreeSet<BlockId>,
-) -> (Vec<BriefSource>, Vec<BriefFinding>) {
+) -> (
+    Vec<BriefSource>,
+    Vec<BriefFinding>,
+    usize,
+    BTreeMap<BlockId, usize>,
+) {
     let mut by_source: BTreeMap<BlockId, BTreeSet<BlockId>> = BTreeMap::new();
-    let mut rows: BTreeSet<(BlockId, BlockId)> = BTreeSet::new();
+    let mut pairs: BTreeSet<(BlockId, BlockId)> = BTreeSet::new();
     for id in ids {
         let Some(from) = m.get(id) else { continue };
         for e in g.outgoing(id) {
@@ -1793,7 +1805,7 @@ fn supporting_rows(
                 && from.block_type == decision::DECISION
                 && to.block_type == supporting::FINDING
             {
-                rows.insert((id.clone(), e.to.clone()));
+                pairs.insert((id.clone(), e.to.clone()));
             }
         }
     }
@@ -1810,8 +1822,14 @@ fn supporting_rows(
             })
         })
         .collect();
-    let findings = rows
+    let mut counts: BTreeMap<BlockId, usize> = BTreeMap::new();
+    for (decision, _) in &pairs {
+        *counts.entry(decision.clone()).or_default() += 1;
+    }
+    let omitted = pairs.len().saturating_sub(FINDINGS_CAP);
+    let findings = pairs
         .into_iter()
+        .take(FINDINGS_CAP)
         .filter_map(|(decision, finding)| {
             let b = m.get(&finding)?;
             Some(BriefFinding {
@@ -1821,7 +1839,7 @@ fn supporting_rows(
             })
         })
         .collect();
-    (sources, findings)
+    (sources, findings, omitted, counts)
 }
 
 /// The per-doc counts of a whole briefing `b` (before any entry is dropped), by doc id. A
@@ -1834,7 +1852,7 @@ fn doc_counts(m: &Materialized, b: &Briefing) -> Vec<DocCounts> {
         &b.will_go_stale,
         &b.suspects,
     );
-    let (sources, findings) = (&b.sources, &b.findings);
+    let sources = &b.sources;
     let mut by_doc: BTreeMap<BlockId, DocCounts> = BTreeMap::new();
     let mut bump = |id: &BlockId, add: fn(&mut DocCounts)| {
         if let Some(d) = m.doc_of(id) {
@@ -1896,9 +1914,10 @@ fn doc_counts(m: &Materialized, b: &Briefing) -> Vec<DocCounts> {
             bump(&d, |c| c.sources += 1);
         }
     }
-    for f in findings {
-        if let Some(d) = of(&f.r#for) {
-            bump(&d, |c| c.findings += 1);
+    // every pair counts, also those the cap leaves out of the list
+    for (decision, n) in &b.finding_counts {
+        for _ in 0..*n {
+            bump(decision, |c| c.findings += 1);
         }
     }
     by_doc.into_values().collect()

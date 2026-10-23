@@ -287,6 +287,90 @@ fn rf9_superseding_card_carries_findings() {
     assert_eq!(twice.card_hash, again.card_hash);
 }
 
+/// Only the displayed Findings value differs: the item identity, batch reference and every other
+/// fact are held fixed, and both the rendered card and its hash follow that one value.
+#[test]
+fn rf9_card_hash_follows_the_findings_value_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let w = put(
+        &mut r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "spec", "title": "Spec", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}},
+            {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "C holds."},
+            {"op": "create", "type": "finding", "id": "$f", "parent": "$s", "fields": {"statement": "Alpha holds.", "evidence": [{"quote": "qa"}]}}
+        ]),
+        None,
+    );
+    let (s, c, f) = (
+        id(&w.created["$s"]),
+        id(&w.created["$c"]),
+        id(&w.created["$f"]),
+    );
+    let d0 = decide(
+        &mut r,
+        "seed",
+        DecisionInput {
+            parent: s.to_string(),
+            statement: "Old".into(),
+            affects: vec![c.to_string()],
+            ..Default::default()
+        },
+    );
+    land(&mut r, "seed");
+    let d1 = supersede(
+        &mut r,
+        "w",
+        &d0,
+        DecisionInput {
+            parent: s.to_string(),
+            statement: "New".into(),
+            affects: vec![c.to_string()],
+            depends_on: vec![f.to_string()],
+            ..Default::default()
+        },
+    );
+    let p = r
+        .propose(&writer(), "w", "w", Some(common::TEST_SUMMARY))
+        .unwrap();
+    let base = exception(&r, &p, &d1);
+    let shown = fact(&base, "Findings").unwrap().to_string();
+    assert!(shown.contains("Alpha holds."), "{shown}");
+    // the same item with one changed Findings value
+    let mut changed = base.clone();
+    for fa in changed.facts.iter_mut().filter(|fa| fa.name == "Findings") {
+        fa.value = shown.replace("Alpha holds.", "Alpha holds, newly.");
+    }
+    assert_ne!(fact(&changed, "Findings"), fact(&base, "Findings"));
+    assert_eq!(changed.batch, base.batch);
+    assert_eq!(changed.r#ref, base.r#ref);
+    let (before, after) = (
+        rdy_engine::pending::render(&base, rdy_engine::pending::CARD_MAX_TOKENS),
+        rdy_engine::pending::render(&changed, rdy_engine::pending::CARD_MAX_TOKENS),
+    );
+    assert_ne!(
+        before, after,
+        "the rendered text follows the Findings value"
+    );
+    assert!(after.contains("Alpha holds, newly."), "{after}");
+    assert_ne!(
+        rdy_engine::pending::card_hash(&base),
+        rdy_engine::pending::card_hash(&changed),
+        "the hash follows the Findings value"
+    );
+    // restoring the value restores both
+    let mut same = changed.clone();
+    for fa in same.facts.iter_mut().filter(|fa| fa.name == "Findings") {
+        fa.value = shown.clone();
+    }
+    assert_eq!(
+        rdy_engine::pending::card_hash(&same),
+        rdy_engine::pending::card_hash(&base)
+    );
+}
+
 /// Canon: claims a to f, sources s1 "Release 1" and s2 "Spec 2", and a live decision dx.
 struct Fx {
     claims: Vec<BlockId>,
