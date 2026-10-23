@@ -103,6 +103,19 @@ fn rf3_reflects_pins_drive_suspects_and_impact() {
             ("n-DCCCC".into(), "n-SRC22".into(), "deleted".into())
         ]
     );
+    // the deleted source still reaches its reflecting block at depth one, through reflects
+    assert_eq!(g.impact(&id("n-SRC22"), 1), vec![(1, id("n-DCCCC"))]);
+    assert_eq!(
+        g.impact_via(&id("n-SRC22"), 1),
+        vec![ImpactHit {
+            depth: 1,
+            id: id("n-DCCCC"),
+            via: Via {
+                from: id("n-SRC22"),
+                kind: "reflects".into()
+            }
+        }]
+    );
 
     // a repin clears only the changed-target suspect
     let mut repinned = doc.clone();

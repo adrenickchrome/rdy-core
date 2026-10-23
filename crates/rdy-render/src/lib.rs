@@ -1442,6 +1442,7 @@ fn with_shared<R>(
         header,
         headers: Default::default(),
         used_blobs: Default::default(),
+        governing: Default::default(),
         mode,
         inline_diffs,
         changes_page: changes_summary.is_some(),

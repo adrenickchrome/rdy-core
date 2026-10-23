@@ -196,8 +196,9 @@ impl Cx<'_> {
     /// Every decision that governs `b`, by the graph's one route query: `decided_by`,
     /// `implements`, `affects`, and `affects` an entity `b` describes. Every status is kept
     /// (the trail tells what became of a ruling). A decision or an entity that the selection
-    /// holds back is not in `m`, so it adds no route.
-    fn governing(&self, b: &Block) -> BTreeSet<BlockId> {
+    /// holds back is not in `m`, so it adds no route. `cache` is the one every trail read from
+    /// `g` shares.
+    fn governing(&self, b: &Block, cache: &mut GoverningCache) -> BTreeSet<BlockId> {
         let is_entity = |id: &BlockId| {
             self.m.get(id).is_some_and(|e| {
                 self.pack
@@ -206,9 +207,8 @@ impl Cx<'_> {
                     .is_some_and(|t| t.traits.contains(&Trait::Defines))
             })
         };
-        let mut cache = GoverningCache::default();
         self.g
-            .governing_routes(&b.id, GoverningStatuses::All, is_entity, &mut cache)
+            .governing_routes(&b.id, GoverningStatuses::All, is_entity, cache)
             .into_iter()
             .map(|r| r.decision)
             .filter(|d| self.decision(d).is_some())
@@ -388,7 +388,9 @@ fn link_in<'a>(
 /// The trail of `b`: its governing decisions, what became of each, and the open questions that
 /// mention it, read from `g`, the site's state and `pack` alone (a named profile's selected graph
 /// and state). A block with nothing to tell has no events. `unavailable` and `local_link` read references and
-/// authored links as [`inline::Ctx`] does.
+/// authored links as [`inline::Ctx`] does. `cache` holds the governing route query's entity
+/// scans: share one across every trail read from `g`, and start a new one for another graph.
+#[allow(clippy::too_many_arguments)]
 pub fn for_block(
     b: &Block,
     g: &Graph,
@@ -397,6 +399,7 @@ pub fn for_block(
     from: &str,
     unavailable: &str,
     local_link: Option<inline::LocalLink>,
+    cache: &mut GoverningCache,
 ) -> Trail {
     // the site holds the state it was built from
     let m = site.m;
@@ -415,7 +418,7 @@ pub fn for_block(
         local_link,
     };
     let mut events: BTreeMap<Key, Event> = BTreeMap::new();
-    for id in cx.chain(cx.governing(b)) {
+    for id in cx.chain(cx.governing(b, cache)) {
         cx.events_of(&id, &mut events);
     }
     for e in g.incoming(&b.id) {
@@ -492,4 +495,91 @@ pub fn ref_attrs(b: &Block, site: &Site, pin: Option<&str>, m: &Materialized) ->
     let head = head(&b.id.to_string(), pin, &path);
     let line = format_ref(&head, &snippet(&primary_text(b, site), 80));
     (head, line)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rdy_model::{Link as ModelLink, Op};
+
+    fn id(s: &str) -> BlockId {
+        BlockId::parse(s).unwrap()
+    }
+
+    fn blk(i: &str, ty: &str, parent: Option<&str>, order: &str) -> Block {
+        Block {
+            id: id(i),
+            block_type: ty.to_string(),
+            parent: parent.map(id),
+            order: order.to_string(),
+            fields: BTreeMap::new(),
+            body: String::new(),
+            links: BTreeMap::new(),
+            pins: BTreeMap::new(),
+            read_identity: None,
+        }
+    }
+
+    fn field(b: &mut Block, k: &str, v: &str) {
+        b.fields.insert(k.into(), FieldValue::Str(v.into()));
+    }
+
+    fn link(b: &mut Block, name: &str, target: &str) {
+        b.links.entry(name.into()).or_default().push(ModelLink {
+            target: id(target),
+            part: None,
+        });
+    }
+
+    /// F2 (DR1b final review): the trails of a site's blocks share one governing cache, so an
+    /// entity that many rendered blocks describe is scanned once across them, not once a block.
+    #[test]
+    fn rf7_trails_share_one_governing_cache() {
+        let mut doc = blk("d-AAAAA", rdy_model::tree::DOC, None, "a");
+        field(&mut doc, "name", "doc");
+        field(&mut doc, "title", "Doc");
+        field(&mut doc, "doc_type", "page");
+        let mut entity = blk("m-AAAAA", "component", Some("d-AAAAA"), "a");
+        field(&mut entity, "name", "Widget");
+        let mut d = blk("D-AAAAA", decision::DECISION, Some("d-AAAAA"), "b");
+        field(&mut d, "status", "accepted");
+        field(&mut d, "statement", "Widgets are blue");
+        field(&mut d, "decided_at", "2021-02-08T10:00:00Z");
+        link(&mut d, "affects", "m-AAAAA");
+        let n = 5;
+        let mut blocks = vec![doc, entity, d];
+        for i in 0..n {
+            let mut p = blk(
+                &format!("p-A{i:04}"),
+                "prose",
+                Some("d-AAAAA"),
+                &format!("c{i}"),
+            );
+            p.body = format!("Paragraph {i}.");
+            link(&mut p, "describes", "m-AAAAA");
+            blocks.push(p);
+        }
+        let ops: Vec<Op> = blocks
+            .iter()
+            .map(|b| Op::Create { block: b.clone() })
+            .collect();
+        let m = Materialized::default().with(&ops);
+        let pack = rdy_schema::PackSet::with_builtin()
+            .resolve("rdy-standard")
+            .expect("the pack");
+        let g = Graph::build_from(m.iter());
+        let site = Site::new(&m, &pack, "Project");
+        let mut cache = GoverningCache::default();
+        for i in 0..n {
+            let b = m.get(&id(&format!("p-A{i:04}"))).expect("the block");
+            let t = for_block(b, &g, &pack, &site, "doc.html", "", None, &mut cache);
+            assert_eq!(t.events.len(), 1, "the decision governs p-A{i:04}");
+            assert!(
+                t.events[0].text.contains("Widgets are blue"),
+                "{:?}",
+                t.events
+            );
+        }
+        assert_eq!(cache.entity_scans(), 1, "one scan for the shared entity");
+    }
 }

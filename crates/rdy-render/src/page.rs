@@ -7,7 +7,7 @@ use crate::site::{Site, Url, rel};
 use crate::trail::Trail;
 use crate::{Mode, assets, changes, home, nav, review, search, toc, trail, version};
 use rdy_engine::{Materialized, VersionInfo, VersionPosition};
-use rdy_graph::{EdgeKind, Graph};
+use rdy_graph::{EdgeKind, GoverningCache, Graph};
 use rdy_model::redaction::CONTENT_REMOVED;
 use rdy_model::{Block, BlockId, Hash, decision, tree};
 use rdy_schema::Pack;
@@ -51,6 +51,9 @@ pub struct Shared<'a> {
     /// The blobs some page links to, by the site-relative path of their file, with the media
     /// type of the first block that named that file, filled as pages are built.
     pub used_blobs: RefCell<BTreeMap<String, (Hash, String)>>,
+    /// The governing route query's entity scans, shared by every trail read from `g`: an entity
+    /// that many blocks describe is scanned once per render. It belongs to `g` alone.
+    pub governing: RefCell<GoverningCache>,
     /// A static site, or a live one whose pages carry the label and header slots.
     pub mode: Mode<'a>,
     /// The word diff of each changed block of a review render, by id: an edited block on its
@@ -1015,6 +1018,7 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
                     page,
                     sh.unavailable,
                     sh.local_link(&local),
+                    &mut sh.governing.borrow_mut(),
                 )
             },
             ref_head,
