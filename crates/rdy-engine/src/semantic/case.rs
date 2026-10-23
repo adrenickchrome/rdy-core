@@ -129,21 +129,29 @@ impl ReadState {
             block_of_item(&cx, ib, &label)?,
         );
         let mut blocks = vec![];
+        // rf6: live decisions by the four routes, one cache for both blocks
+        let mut cache = rdy_graph::GoverningCache::default();
         for (item, block) in [(ia, &a), (ib, &b)] {
             let (doc, headings) = headings_of(&m, block);
-            let governing = g
-                .governing(&block.id)
-                .into_iter()
-                .take(MAX_GOVERNING)
-                .map(|d| CaseDecision {
-                    statement: m
-                        .get(&d)
-                        .and_then(|x| x.field_str("statement"))
-                        .unwrap_or_default()
-                        .to_string(),
-                    id: d.to_string(),
-                })
-                .collect();
+            let governing = crate::query::governing_ids(
+                self.pack(),
+                &m,
+                &g,
+                &block.id,
+                rdy_graph::GoverningStatuses::Live,
+                &mut cache,
+            )
+            .into_iter()
+            .take(MAX_GOVERNING)
+            .map(|d| CaseDecision {
+                statement: m
+                    .get(&d)
+                    .and_then(|x| x.field_str("statement"))
+                    .unwrap_or_default()
+                    .to_string(),
+                id: d.to_string(),
+            })
+            .collect();
             blocks.push(CaseBlock {
                 id: block.id.to_string(),
                 block_type: block.block_type.clone(),

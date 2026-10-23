@@ -17,6 +17,20 @@ use redaction_fixture::{FixtureOptions, Proof, RequestSpec, authorized_batch_fix
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// rf6: the live decisions that govern `i` by the graph's four routes ([`rdy_graph::Graph::governing_routes`]),
+/// by id, with every `describes` target taken as an entity (the widest route set).
+fn governing(g: &rdy_graph::Graph, i: &BlockId) -> Vec<BlockId> {
+    g.governing_routes(
+        i,
+        rdy_graph::GoverningStatuses::Live,
+        |_| true,
+        &mut rdy_graph::GoverningCache::default(),
+    )
+    .into_iter()
+    .map(|r| r.decision)
+    .collect()
+}
+
 // ---------------------------------------------------------------------------------------------
 // helpers
 
@@ -580,7 +594,7 @@ fn pub4_selected_graph_has_no_excluded_endpoint() {
         for (_, hit) in res.graph.impact(id, 10) {
             assert!(keep.contains(&hit), "{id}: impact reaches {hit}");
         }
-        for g in res.graph.governing(id) {
+        for g in governing(&res.graph, id) {
             assert!(keep.contains(&g), "{id}: governed by {g}");
         }
     }

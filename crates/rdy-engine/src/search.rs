@@ -9,8 +9,8 @@ use crate::materialize::Materialized;
 use crate::suggest::{Suggestion, suggestion_id};
 use crate::tensions::index::is_deprecated;
 use crate::{ReadState, Scope, now_ms};
-use rdy_graph::EdgeKind;
-use rdy_model::decision::{AFFECTS, DECIDED_BY, DECISION, DESCRIBES, IMPLEMENTS};
+use rdy_graph::{EdgeKind, GoverningCache, GoverningStatuses};
+use rdy_model::decision::{DECISION, DESCRIBES};
 use rdy_model::{Block, BlockId, FieldValue, Hash};
 use rdy_schema::Trait;
 use regex::{Regex, RegexBuilder};
@@ -814,20 +814,17 @@ impl ReadState {
                     "pass a decision's id or key",
                 ));
             }
-            let mut set: BTreeSet<BlockId> = g
-                .incoming(&id)
-                .iter()
-                .filter(
-                    |e| matches!(&e.kind, EdgeKind::Link(n) if n == DECIDED_BY || n == IMPLEMENTS),
+            // rf6 (D-VPATZ): the blocks it governs by the four routes, whatever its status
+            let pack = self.pack();
+            let set: BTreeSet<BlockId> = g
+                .governed_through(
+                    &id,
+                    GoverningStatuses::All,
+                    |e| crate::query::is_entity_in(pack, m, e),
+                    &mut GoverningCache::default(),
                 )
-                .map(|e| e.from.clone())
+                .into_iter()
                 .collect();
-            set.extend(
-                g.outgoing(&id)
-                    .iter()
-                    .filter(|e| matches!(&e.kind, EdgeKind::Link(n) if n == AFFECTS))
-                    .map(|e| e.to.clone()),
-            );
             allowed.push(set);
         }
         if let Some(text) = &f.describes {

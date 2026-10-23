@@ -162,6 +162,9 @@ fn fsh1_a_name_returns_the_entity_with_its_facts_decisions_and_dependents() {
         (d2.on.clone(), d2.status.as_str(), d2.statement.as_str()),
         (vec![o.r1.clone()], "live", "Writes are synchronous")
     );
+    // rf6 (D-VPATZ): D1 affects the entity c1 describes, so it governs c1 too (the four routes)
+    let d1 = s.decisions.iter().find(|d| d.id == o.d1).unwrap();
+    assert_eq!(d1.on, vec![o.c1.clone()]);
     assert_eq!(
         s.dependents
             .iter()
@@ -421,12 +424,19 @@ fn fsh1_proposed_decisions_are_listed_and_labelled_proposed() {
             .clone()
     };
     let (a, b) = (got(&p1), got(&p2));
-    assert_eq!((a.status.as_str(), a.via.as_str()), ("proposed", "affects"));
+    // rf6 (D-VPATZ): a decision that affects the entity governs each fact that describes it
+    let mut describers = vec![o.c1.clone(), c3.clone()];
+    describers.sort();
+    assert_eq!(
+        (a.status.as_str(), a.via.as_str(), a.on.clone()),
+        ("proposed", "affects", describers.clone())
+    );
     assert_eq!(
         (b.status.as_str(), b.via.as_str(), b.on.clone()),
         ("proposed", "governs", vec![c3])
     );
     assert_eq!(got(&o.d1).status, "live", "guard: live decisions stay");
+    assert_eq!(got(&o.d1).on, describers);
     let canon = sheets(&r, "Ledger service");
     assert!(
         canon[0].decisions.iter().all(|d| d.id != p1 && d.id != p2),

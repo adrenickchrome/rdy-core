@@ -1,11 +1,38 @@
 use crate::error::*;
 use crate::suspect_reply::SuspectReply;
 use crate::{Materialized, ReadState, Scope};
-use rdy_graph::{DerivedStatus, Edge, Suspect};
+use rdy_graph::{DerivedStatus, Edge, GoverningCache, GoverningStatuses, Graph, Suspect};
 use rdy_model::entity::render_refs;
 use rdy_model::redaction::CONTENT_REMOVED;
 use rdy_model::{Block, BlockId, FieldValue, RefMode, RefSpan};
+use rdy_schema::{Pack, Trait};
 use serde::Serialize;
+
+/// rf6: whether `id` is an entity in `m`: a block it holds whose type has the `defines` trait in
+/// `pack`. The one entity test every governing read passes to the graph (D-VPATZ).
+pub(crate) fn is_entity_in(pack: &Pack, m: &Materialized, id: &BlockId) -> bool {
+    m.get(id).is_some_and(|b| {
+        pack.block_types
+            .get(&b.block_type)
+            .is_some_and(|t| t.traits.contains(&Trait::Defines))
+    })
+}
+
+/// rf6: the ids of the decisions that govern `id` by the graph's four routes, filtered by
+/// `statuses`, in id order. `cache` belongs to `g` and this read.
+pub(crate) fn governing_ids(
+    pack: &Pack,
+    m: &Materialized,
+    g: &Graph,
+    id: &BlockId,
+    statuses: GoverningStatuses,
+    cache: &mut GoverningCache,
+) -> Vec<BlockId> {
+    g.governing_routes(id, statuses, |e| is_entity_in(pack, m, e), cache)
+        .into_iter()
+        .map(|r| r.decision)
+        .collect()
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Context {
@@ -324,7 +351,17 @@ impl ReadState {
             outgoing: g.outgoing(id).to_vec(),
             incoming: g.incoming(id).to_vec(),
             status: g.status(id),
-            governing: g.governing(id).iter().map(|d| d.to_string()).collect(),
+            governing: governing_ids(
+                self.pack(),
+                &m,
+                &g,
+                id,
+                GoverningStatuses::Live,
+                &mut GoverningCache::default(),
+            )
+            .iter()
+            .map(|d| d.to_string())
+            .collect(),
             suspects,
             effective_from: rdy_model::decision::effective_from(&block).map(str::to_string),
             areas: self.areas_of(scope, id)?,

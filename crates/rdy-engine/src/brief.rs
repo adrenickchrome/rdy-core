@@ -12,7 +12,7 @@ use crate::error::*;
 use crate::inflight::Inflight;
 use crate::keys;
 use crate::lexicon::Lexicon;
-use crate::query::summary_in;
+use crate::query::{is_entity_in, summary_in};
 use crate::related::{RELATED_CAP, RelatedDecision};
 use crate::suggest::MentionedBy;
 use crate::suspect_reply::SuspectReply;
@@ -20,7 +20,10 @@ use crate::tensions::info::{InfoCache, SideInfo, TensionInfo, row_bytes, rows_by
 use crate::tensions::{Tension, TensionSeverity};
 use crate::write::OpInput;
 use crate::{Materialized, ReadState, Scope};
-use rdy_graph::{DerivedStatus, EdgeKind, IMPACT_LINKS, IMPACT_SHOWN, SUSPECT_LINKS};
+use rdy_graph::{
+    DerivedStatus, EdgeKind, GoverningCache, GoverningStatuses, IMPACT_LINKS, IMPACT_SHOWN,
+    SUSPECT_LINKS,
+};
 use rdy_model::{Block, BlockId, FieldValue, Hash, decision};
 use rdy_schema::{Issue, Pack, Severity};
 use serde::{Deserialize, Serialize};
@@ -308,7 +311,8 @@ pub fn follow_up(
     )
 }
 
-/// A live decision governing covered blocks.
+/// A live or proposed decision governing covered blocks (rf6, D-VPATZ: by the graph's four
+/// routes).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Governs {
     pub decision: String,
@@ -316,6 +320,18 @@ pub struct Governs {
     pub statement: String,
     /// The covered blocks it governs, in id order.
     pub blocks: Vec<String>,
+    /// rf6: each covered block the decision governs through an entity it affects and the block
+    /// describes (its selected route), with that entity; by block, then entity. Omitted when
+    /// every route is direct.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub through: Vec<Through>,
+}
+
+/// rf6: a covered block and the entity through which a decision governs it.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct Through {
+    pub block: String,
+    pub entity: String,
 }
 
 /// An uncovered block that depends on a covered one (`on`) through `kind`.
@@ -1264,17 +1280,40 @@ impl ReadState {
                 }
             }
         }
-        let token = token_of(ids, &recorded);
 
-        let mut governed: BTreeMap<BlockId, Vec<String>> = BTreeMap::new();
+        // rf6 (D-VPATZ): live and proposed decisions by the graph's four routes, one cache for
+        // the briefing. Each entity route is a recorded dependency: its decision (status and
+        // affects list) and the entity (whether it defines), so a change to either moves the
+        // briefing.
+        let mut cache = GoverningCache::default();
+        let mut governed: BTreeMap<BlockId, (Vec<String>, Vec<Through>)> = BTreeMap::new();
         for id in ids {
-            for d in g.governing(id) {
-                governed.entry(d).or_default().push(id.to_string());
+            let routes = g.governing_routes(
+                id,
+                GoverningStatuses::LiveOrProposed,
+                |e| is_entity_in(pack, &m, e),
+                &mut cache,
+            );
+            for r in routes {
+                let row = governed.entry(r.decision.clone()).or_default();
+                row.0.push(id.to_string());
+                if let Some(entity) = r.entity {
+                    recorded.insert(r.decision.clone(), m.version_of(&r.decision));
+                    recorded.insert(entity.clone(), m.version_of(&entity));
+                    row.1.push(Through {
+                        block: id.to_string(),
+                        entity: entity.to_string(),
+                    });
+                }
             }
         }
+        let token = token_of(ids, &recorded);
         let governs: Vec<Governs> = governed
             .into_iter()
-            .map(|(d, blocks)| {
+            .map(|(d, (blocks, mut through))| {
+                // one route per (block, decision): already by block; sorted and once each
+                through.sort();
+                through.dedup();
                 let statement = m
                     .get(&d)
                     .map(
@@ -1294,6 +1333,7 @@ impl ReadState {
                         .into(),
                     statement,
                     blocks,
+                    through,
                 }
             })
             .collect();

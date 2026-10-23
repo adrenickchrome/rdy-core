@@ -2,10 +2,10 @@
 use crate::coverage::{Confidence, confidence_of, coverage_error_text};
 use crate::error::{E_BAD_INPUT, E_UNKNOWN_BLOCK, RdyError};
 use crate::lexicon::{NameKind, is_content, is_fact};
-use crate::query::body_in;
+use crate::query::{body_in, governing_ids};
 use crate::{Materialized, ReadState, Scope, summary_in};
-use rdy_graph::{EdgeKind, Graph};
-use rdy_model::decision::{AFFECTS, DECIDED_BY, DECISION, DESCRIBES, IMPLEMENTS};
+use rdy_graph::{EdgeKind, GoverningCache, GoverningStatuses, Graph};
+use rdy_model::decision::{AFFECTS, DECIDED_BY, DECISION, DESCRIBES};
 use rdy_model::entity::{KIND, aliases, value_text};
 use rdy_model::{Block, BlockId};
 use rdy_schema::Trait;
@@ -237,23 +237,19 @@ impl ReadState {
             }
         }
 
-        // the decisions that govern each fact and content block: the edges `Graph::governing`
-        // reads, with proposed decisions kept too
+        // the decisions that govern each fact and content block: the graph's four routes, with
+        // proposed decisions kept too (rf6, D-VPATZ); one cache for the sheet
+        let mut cache = GoverningCache::default();
         for b in facts.keys().chain(content.keys()) {
-            let governing = g
-                .outgoing(b)
-                .iter()
-                .filter(
-                    |e| matches!(&e.kind, EdgeKind::Link(n) if n == DECIDED_BY || n == IMPLEMENTS),
-                )
-                .map(|e| &e.to)
-                .chain(
-                    g.incoming(b)
-                        .iter()
-                        .filter(|e| matches!(&e.kind, EdgeKind::Link(n) if n == AFFECTS))
-                        .map(|e| &e.from),
-                );
-            for d in governing {
+            let governing = governing_ids(
+                pack,
+                &m,
+                &g,
+                b,
+                GoverningStatuses::LiveOrProposed,
+                &mut cache,
+            );
+            for d in &governing {
                 if let Some(status) = listed_status(&g, d) {
                     decide(d, "governs".into(), status, Some(b));
                 }

@@ -684,25 +684,6 @@ impl Graph {
         }
     }
 
-    pub fn governing(&self, id: &BlockId) -> Vec<BlockId> {
-        let mut out = BTreeSet::new();
-        for e in self.outgoing(id) {
-            if matches!(&e.kind, EdgeKind::Link(n) if n == decision::DECIDED_BY || n == decision::IMPLEMENTS)
-                && self.is_live(&e.to)
-            {
-                out.insert(e.to.clone());
-            }
-        }
-        for e in self.incoming(id) {
-            if matches!(&e.kind, EdgeKind::Link(n) if n == decision::AFFECTS)
-                && self.is_live(&e.from)
-            {
-                out.insert(e.from.clone());
-            }
-        }
-        out.into_iter().collect()
-    }
-
     /// FW-LP6: the blocks decision `d` governs, whatever its status: each block with a
     /// `decided_by` or `implements` link to `d`, and each block `d` affects. By id, once each.
     pub fn governed_by(&self, d: &BlockId) -> Vec<BlockId> {

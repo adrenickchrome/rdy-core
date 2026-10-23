@@ -7,6 +7,20 @@ use rdy_model::engine_fields::{self, Against, Reaffirmation};
 use rdy_model::*;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// rf6: the live decisions that govern `i` by the graph's four routes ([`Graph::governing_routes`]),
+/// by id, with every `describes` target taken as an entity (the widest route set).
+fn governing(g: &Graph, i: &BlockId) -> Vec<BlockId> {
+    g.governing_routes(
+        i,
+        GoverningStatuses::Live,
+        |_| true,
+        &mut GoverningCache::default(),
+    )
+    .into_iter()
+    .map(|r| r.decision)
+    .collect()
+}
+
 fn id(s: &str) -> BlockId {
     BlockId::parse(s).unwrap()
 }
@@ -183,7 +197,7 @@ fn cp4_same_retiring_set_clears_only_the_acknowledged_edge() {
         );
         assert_eq!(after.status(&i), before.status(&i), "{i}: no ruling moves");
         assert_eq!(after.impact_via(&i, 5), before.impact_via(&i, 5), "{i}");
-        assert_eq!(after.governing(&i), before.governing(&i), "{i}");
+        assert_eq!(governing(&after, &i), governing(&before, &i), "{i}");
         assert_eq!(after.retiring_decisions(&i), before.retiring_decisions(&i));
     }
     assert!(matches!(
@@ -462,7 +476,7 @@ fn cp4_acknowledgement_carry_matches_full_rebuild() {
             assert_eq!(next.outgoing(i), full.outgoing(i), "{what}: {i}");
             assert_eq!(next.incoming(i), full.incoming(i), "{what}: {i}");
             assert_eq!(next.impact_via(i, 4), full.impact_via(i, 4), "{what}: {i}");
-            assert_eq!(next.governing(i), full.governing(i), "{what}: {i}");
+            assert_eq!(governing(&next, i), governing(&full, i), "{what}: {i}");
             assert_eq!(next.governed_by(i), full.governed_by(i), "{what}: {i}");
             assert_eq!(next.redacted_pins_of(i), full.redacted_pins_of(i));
         }
