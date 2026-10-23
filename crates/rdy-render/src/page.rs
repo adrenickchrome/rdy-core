@@ -868,7 +868,19 @@ pub fn redirect_target(sh: &Shared, id: &BlockId, url: &Url) -> (String, String,
     let b = sh.m.get(id).expect("a permalink's block exists");
     let page = sh.site.go_page(id);
     let href = url.href_from(&page);
-    (page, sh.site.label(b), href)
+    // a finding or a source is supporting: its permalink leads to its doc's page and reads as
+    // that doc, never as the supporting words
+    let label = match matches!(
+        b.block_type.as_str(),
+        rdy_schema::supporting::FINDING | rdy_schema::supporting::SOURCE
+    )
+    .then(|| sh.site.doc_of(id))
+    .flatten()
+    {
+        Some(doc) => sh.site.label(doc),
+        None => sh.site.label(b),
+    };
+    (page, label, href)
 }
 
 /// Collects a finished page's search entries. A permalink page has none.
@@ -999,6 +1011,7 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
                     b,
                     sh.g,
                     m,
+                    sh.pack,
                     site,
                     page,
                     sh.unavailable,

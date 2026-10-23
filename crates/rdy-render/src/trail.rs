@@ -3,11 +3,12 @@ use crate::html::{self, Link};
 use crate::inline;
 use crate::site::{Site, rel};
 use rdy_engine::Materialized;
-use rdy_graph::{DerivedStatus, EdgeKind, Graph};
-use rdy_model::decision::{self, AFFECTS, ANSWERS, DECIDED_BY, IMPLEMENTS, REVOKES, SUPERSEDES};
+use rdy_graph::{DerivedStatus, EdgeKind, GoverningCache, GoverningStatuses, Graph};
+use rdy_model::decision::{self, ANSWERS, REVOKES, SUPERSEDES};
 use rdy_model::redaction::CONTENT_REMOVED;
 use rdy_model::reference::{format_ref, head, snippet};
 use rdy_model::{Block, BlockId, FieldValue};
+use rdy_schema::{Pack, Trait};
 use regex::Regex;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -112,6 +113,8 @@ type Key = (u8, String, u8, String, String);
 struct Cx<'a> {
     g: &'a Graph,
     m: &'a Materialized,
+    /// The pack that says which block types define entities.
+    pack: &'a Pack,
     link: &'a dyn Fn(&BlockId) -> Option<Link>,
     /// The href of the page of the doc that holds a block, from the page being written (`""` for
     /// that page itself): a statement's relative links are read from there.
@@ -190,25 +193,26 @@ impl Cx<'_> {
         }
     }
 
-    /// Every decision that governs `b`: reached by `decided_by` or `implements` from it, or by
-    /// `affects` to it.
+    /// Every decision that governs `b`, by the graph's one route query: `decided_by`,
+    /// `implements`, `affects`, and `affects` an entity `b` describes. Every status is kept
+    /// (the trail tells what became of a ruling). A decision or an entity that the selection
+    /// holds back is not in `m`, so it adds no route.
     fn governing(&self, b: &Block) -> BTreeSet<BlockId> {
-        let mut out = BTreeSet::new();
-        for e in self.g.outgoing(&b.id) {
-            if matches!(&e.kind, EdgeKind::Link(n) if n == DECIDED_BY || n == IMPLEMENTS)
-                && self.decision(&e.to).is_some()
-            {
-                out.insert(e.to.clone());
-            }
-        }
-        for e in self.g.incoming(&b.id) {
-            if matches!(&e.kind, EdgeKind::Link(n) if n == AFFECTS)
-                && self.decision(&e.from).is_some()
-            {
-                out.insert(e.from.clone());
-            }
-        }
-        out
+        let is_entity = |id: &BlockId| {
+            self.m.get(id).is_some_and(|e| {
+                self.pack
+                    .block_types
+                    .get(&e.block_type)
+                    .is_some_and(|t| t.traits.contains(&Trait::Defines))
+            })
+        };
+        let mut cache = GoverningCache::default();
+        self.g
+            .governing_routes(&b.id, GoverningStatuses::All, is_entity, &mut cache)
+            .into_iter()
+            .map(|r| r.decision)
+            .filter(|d| self.decision(d).is_some())
+            .collect()
     }
 
     /// `start` and every decision reached from it through `supersedes` and `revokes` edges, in
@@ -382,13 +386,14 @@ fn link_in<'a>(
 }
 
 /// The trail of `b`: its governing decisions, what became of each, and the open questions that
-/// mention it, read from `g` and `m` alone (a named profile's selected graph and state). A block
+/// mention it, read from `g`, `m` and `pack` alone (a named profile's selected graph and state). A block
 /// with nothing to tell has no events. `unavailable` and `local_link` read references and
 /// authored links as [`inline::Ctx`] does.
 pub fn for_block(
     b: &Block,
     g: &Graph,
     m: &Materialized,
+    pack: &Pack,
     site: &Site,
     from: &str,
     unavailable: &str,
@@ -402,6 +407,7 @@ pub fn for_block(
     let cx = Cx {
         g,
         m,
+        pack,
         link: &link,
         doc_page: &doc_page,
         unavailable,
