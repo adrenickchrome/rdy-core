@@ -809,7 +809,7 @@ fn plans_of(
     if !detail {
         return Ok((counts, None));
     }
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows.sort_by_key(|r| r.0);
     Ok((counts, Some(rows.into_iter().map(|(_, r)| r).collect())))
 }
 
