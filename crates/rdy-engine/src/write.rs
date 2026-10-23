@@ -632,6 +632,13 @@ impl Resolver<'_> {
     }
 
     fn id(&self, s: &str) -> Result<BlockId, RdyError> {
+        self.id_in(self.base, s)
+    }
+
+    /// `s` as [`Resolver::id`] reads it, with a path read in `paths` rather than the view before
+    /// this write. rf8 (O10) passes the view as the write leaves it, so a raw `reflects` selector
+    /// reads keys and paths in one state.
+    fn id_in(&self, paths: &Materialized, s: &str) -> Result<BlockId, RdyError> {
         if let Some(name) = s.strip_prefix('$') {
             return self.placeholders.get(s).cloned().ok_or_else(|| {
                 bad(
@@ -640,9 +647,9 @@ impl Resolver<'_> {
                 )
             });
         }
-        // not an id: a key (as this write has left them), else a folder or doc path, read in the
-        // view as it was before this write
-        keys::resolve_with(self.base, s, &|t| self.key_target(t))
+        // not an id: a key (as this write has left them), else a folder or doc path, read in
+        // `paths` (for an op, the view as it was before this write)
+        keys::resolve_with(paths, s, &|t| self.key_target(t))
     }
 
     /// The one block holding key `text` (ignoring case) after the earlier ops of this write, for a
@@ -2610,23 +2617,26 @@ fn build_ops(
 
     // D-YQCY9: a write-level `implements` links the content blocks it creates or edits
     implements_links(pack, &mut ov, &mut ops, &rewritten, justification);
-    // rf8 (O10): a `reflects` input resolves in the final overlay, before the second pass
-    let reflects = reflects
-        .map(|raw| {
-            reflects_links(
-                pack,
-                &mut ov,
-                &res,
-                &mut ops,
-                raw,
-                &ReflectsSets {
-                    written: &written,
-                    recipients: &reflects_recipients,
-                    explicit: &explicit_reflects,
-                },
-            )
-        })
-        .transpose()?;
+    // rf8 (O10): a `reflects` input resolves in the final overlay, before the second pass. An
+    // explicit `reflects` link names a held source on every write, whatever its justification.
+    let reflects = match reflects {
+        Some(raw) => Some(reflects_links(
+            pack,
+            &mut ov,
+            &res,
+            &mut ops,
+            raw,
+            &ReflectsSets {
+                written: &written,
+                recipients: &reflects_recipients,
+                explicit: &explicit_reflects,
+            },
+        )?),
+        None => {
+            explicit_reflects_held(&ov, &ops, &explicit_reflects)?;
+            None
+        }
+    };
 
     // second pass: references, decision permissions, schema validation, pins. `ov` holds every
     // block of this write at its final content (content does not depend on pins), so a target
@@ -2993,11 +3003,40 @@ fn held_source(ov: &Overlay, id: &BlockId) -> Result<(), RdyError> {
     }
 }
 
+/// rf8 (D-4WC6R): each target of an explicit `reflects` link (the ops of `explicit`, which name
+/// the kind) is a source the final overlay holds. Every write checks them, justified or not.
+fn explicit_reflects_held(
+    ov: &Overlay,
+    ops: &[Op],
+    explicit: &BTreeSet<BlockId>,
+) -> Result<(), RdyError> {
+    if explicit.is_empty() {
+        return Ok(());
+    }
+    for op in ops {
+        let (Op::Create { block } | Op::Update { block, .. }) = op else {
+            continue;
+        };
+        if !explicit.contains(&block.id) {
+            continue;
+        }
+        for link in block
+            .links
+            .get(supporting::REFLECTS_LINK)
+            .into_iter()
+            .flatten()
+        {
+            held_source(ov, &link.target)?;
+        }
+    }
+    Ok(())
+}
+
 /// rf8 (D-4WC6R, D-XC9B9; O10): resolves `raw` in the write's final overlay, once every op has
 /// applied and before the second pass validates and pins. Each selector resolves as an op's id
-/// does (a `$name` placeholder, an id, a key as this write leaves them, a path); a source created
-/// anywhere in the write counts, one it deletes does not. The sources are kept in first
-/// occurrence. Explicit `reflects` links of the write must name held sources too. With `code`, at
+/// does (a `$name` placeholder, an id, a key or a path), with keys and paths read as this write
+/// leaves them; a source created anywhere in the write counts, one it deletes does not. The
+/// sources are kept in first occurrence. Explicit `reflects` links of the write must name held sources too. With `code`, at
 /// least one written content block must declare reflects globs; those are the blocks to stamp.
 /// Then each recipient (`link_recipient`, not naming the kind itself) gets every source as a
 /// `reflects` link it does not hold yet, after its existing ones, in the pending op and the
@@ -3012,8 +3051,16 @@ fn reflects_links(
 ) -> Result<ReflectsBuilt, RdyError> {
     let mut sources: Vec<BlockId> = vec![];
     let mut seen: BTreeSet<BlockId> = BTreeSet::new();
+    // the view as the write leaves it, built only for a selector that may be a path
+    let mut fin: Option<Materialized> = None;
     for text in &raw.sources {
-        let id = match res.id(text) {
+        let resolved = if text.starts_with('$') || BlockId::parse(text).is_ok() {
+            res.id(text)
+        } else {
+            let m = fin.get_or_insert_with(|| res.base.with(ops));
+            res.id_in(m, text)
+        };
+        let id = match resolved {
             Ok(id) => id,
             // a key or path that names nothing: the text as given
             Err(e) if e.code == E_UNKNOWN_BLOCK && e.message.starts_with("no folder or doc at") => {
@@ -3026,22 +3073,7 @@ fn reflects_links(
             sources.push(id);
         }
     }
-    for op in ops.iter() {
-        let (Op::Create { block } | Op::Update { block, .. }) = op else {
-            continue;
-        };
-        if !sets.explicit.contains(&block.id) {
-            continue;
-        }
-        for link in block
-            .links
-            .get(supporting::REFLECTS_LINK)
-            .into_iter()
-            .flatten()
-        {
-            held_source(ov, &link.target)?;
-        }
-    }
+    explicit_reflects_held(ov, ops, sets.explicit)?;
     let mut code = BTreeSet::new();
     if raw.code {
         for op in ops.iter() {

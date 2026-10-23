@@ -182,3 +182,53 @@ fn rf8_mcp_cli_and_recovered_commit_record_one_justification() {
     assert_eq!(stored, Some(want));
     r.close().unwrap();
 }
+
+/// Fix round 1: an ordinary rdy_write (no justification) that sets explicit `reflects` links has
+/// each target checked as a held source, with the same refusal as a reflects write.
+#[test]
+fn rf8_an_ordinary_rdy_write_checks_explicit_reflects_targets() {
+    let (dir, ids) = seeded();
+    let id = |k: &str| ids[k].as_str().unwrap().to_string();
+    let (c, c2, src) = (id("$c"), id("$c2"), id("$src"));
+    let mut cl = McpClient::start(dir.path());
+    let ok = cl.call(
+        "rdy_session",
+        json!({"actor": "agent:qa", "run": "qa", "role": "writer"}),
+    );
+    assert!(ok.code().is_none(), "{ok:?}");
+    let e = tool_error(cl.call(
+        "rdy_write",
+        json!({"ops": [{"op": "update", "id": c, "links": {"reflects": [c2]}}]}),
+    ));
+    assert_eq!(
+        (e["code"].as_str(), e["message"].as_str(), e["fix"].as_str()),
+        (
+            Some("E_BAD_INPUT"),
+            Some(format!("reflects names {c2}, a claim; reflects names a source").as_str()),
+            Some("name a source (S-…), or create one with a source op"),
+        ),
+        "{e}"
+    );
+    let v = cl
+        .call(
+            "rdy_write",
+            json!({"ops": [{"op": "update", "id": c, "links": {"reflects": [src]}}]}),
+        )
+        .ok();
+    assert!(v.get("justification").is_none(), "{v}");
+    let change = v["change"].as_str().unwrap().to_string();
+    cl.alive();
+    drop(cl);
+    let view = change_of(dir.path(), &change).view;
+    let r = rdy_engine::Rdy::open(dir.path()).unwrap();
+    let b = r
+        .read()
+        .block(&Scope::View(view), &BlockId::parse(&c).unwrap())
+        .unwrap();
+    let targets: Vec<String> = b.links["reflects"]
+        .iter()
+        .map(|l| l.target.to_string())
+        .collect();
+    assert_eq!(targets, vec![src]);
+    r.close().unwrap();
+}

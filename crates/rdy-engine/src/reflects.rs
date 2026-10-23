@@ -198,8 +198,9 @@ impl Lazy<'_> {
 /// snapshot, and so does one in `justified` (rf8, D-XC9B9: a block a `reflects` with
 /// `code: true` justifies); any other rewrite keeps the one it has. With no linked
 /// checkout nothing is made up: a block whose set changed loses its snapshot, a code repin is
-/// `E_CONFIG`, a justified block keeps what it holds, and each reflects block written gets
-/// [`W_REFLECTS_NO_CODE`] once. Returns the warnings and the blocks of `justified` stamped.
+/// `E_CONFIG`, a justified block keeps what it holds (its set changed or not), and each
+/// reflects block written gets [`W_REFLECTS_NO_CODE`] once. Returns the warnings and the blocks
+/// of `justified` stamped.
 pub(crate) fn stamp(
     root: &Path,
     store: &rdy_store::Store,
@@ -260,7 +261,9 @@ pub(crate) fn stamp(
                         "set code_paths to a linked checkout, then repin with code: true",
                     ));
                 }
-                if changed {
+                // a justified block keeps what it holds even when its glob set changes: with
+                // no code state to record, dropping the old one would clear its code suspect
+                if changed && !justified.contains(&block.id) {
                     block.fields.remove(REFLECTS_AT);
                 }
                 if warned.insert(block.id.clone()) {

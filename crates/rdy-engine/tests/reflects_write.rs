@@ -801,3 +801,160 @@ fn rf8_no_checkout_warns_without_clearing_code() {
         v
     });
 }
+
+/// Fix round 1: a `code: true` write with no linked checkout keeps the snapshot of a block whose
+/// glob list it changes, so the drift is still a code suspect once a checkout is linked again. An
+/// ordinary re-glob with no checkout still drops it, as before.
+#[test]
+fn rf8_no_checkout_reglob_keeps_the_code_suspect() {
+    let (dir, app, mut r, _w, g) = code_project();
+    let (rb, qb) = (g.created["$r"].clone(), g.created["$q"].clone());
+    let r_before = at(&r, &rb).unwrap();
+    commit(app.path(), &[("src/a.rs", "a2\n")]);
+    link(dir.path(), None);
+    let got = reflecting(
+        &mut r,
+        json!([{"op": "update", "id": rb, "fields": {"reflects": ["src/a.rs"]}}]),
+        &[],
+        true,
+    )
+    .unwrap();
+    assert_eq!(got.code_recorded, Some(vec![]));
+    assert!(
+        got.warnings
+            .iter()
+            .any(|w| w.code == W_REFLECTS_NO_CODE && w.block == Some(bid(&rb))),
+        "{:?}",
+        got.warnings
+    );
+    assert_eq!(
+        at(&r, &rb).unwrap(),
+        r_before,
+        "no snapshot is stored, and none is cleared"
+    );
+    // an unqualified re-glob with no checkout keeps its old behaviour: the snapshot goes
+    write(
+        &mut r,
+        json!([{"op": "update", "id": qb, "fields": {"reflects": ["src/a.rs"]}}]),
+    )
+    .unwrap();
+    assert_eq!(at(&r, &qb), None);
+    // linked again, r's drift is still a code suspect
+    link(dir.path(), Some(app.path()));
+    assert_eq!(suspect_ids(&r), vec![rb]);
+}
+
+/// Fix round 1: explicit `reflects` link targets are checked as held sources on every write, not
+/// only on one justified by `reflects`.
+#[test]
+fn rf8_an_ordinary_write_checks_explicit_reflects_targets() {
+    let (_d, mut r, w) = project();
+    let (c, c2, s, src, src2) = (
+        w.created["$c"].clone(),
+        w.created["$c2"].clone(),
+        w.created["$s"].clone(),
+        w.created["$src"].clone(),
+        w.created["$src2"].clone(),
+    );
+    let before = mark(&r);
+    let wrong = |e: RdyError| {
+        refused(
+            &e,
+            E_BAD_INPUT,
+            &format!("reflects names {c2}, a claim; reflects names a source"),
+            "name a source (S-…), or create one with a source op",
+        )
+    };
+    wrong(
+        write(
+            &mut r,
+            json!([{"op": "update", "id": c, "links": {"reflects": [c2]}}]),
+        )
+        .unwrap_err(),
+    );
+    assert_eq!(mark(&r), before);
+    wrong(
+        write(
+            &mut r,
+            json!([{"op": "create", "type": "claim", "id": "$k", "parent": s, "body": "K.",
+                "links": {"reflects": [c2]}}]),
+        )
+        .unwrap_err(),
+    );
+    assert_eq!(mark(&r), before);
+    // an editorial write is checked the same way
+    let mut editorial = req(json!([{"op": "update", "id": c, "links": {"reflects": [c2]}}]));
+    editorial.justification = Some(Justification::Editorial {
+        class: EditorialClass::Clarify,
+        reason: "link the release".into(),
+    });
+    wrong(r.write(&writer(), editorial).unwrap_err());
+    assert_eq!(mark(&r), before);
+    // a source the same write deletes is not held
+    let e = write(
+        &mut r,
+        json!([
+            {"op": "update", "id": c, "links": {"reflects": [src2]}},
+            {"op": "delete", "id": src2}
+        ]),
+    )
+    .unwrap_err();
+    refused(
+        &e,
+        E_BAD_INPUT,
+        &format!("reflects names {src2}, which this view does not hold"),
+        &format!("include the change that records {src2}, or create the source in this write"),
+    );
+    assert_eq!(mark(&r), before);
+    // a held source passes
+    write(
+        &mut r,
+        json!([{"op": "update", "id": c, "links": {"reflects": [src]}}]),
+    )
+    .unwrap();
+    assert_eq!(reflects_links(&r, &c), vec![src]);
+}
+
+/// Fix round 1: a raw selector reads paths as the write leaves them, as it reads keys. A renamed
+/// doc's former path can be a source's key in the same write, and a doc's new path names it.
+#[test]
+fn rf8_raw_selectors_read_the_final_paths() {
+    let (_d, mut r, w) = project();
+    let (c, notes, src2) = (
+        w.created["$c"].clone(),
+        w.created["$notes"].clone(),
+        w.created["$src2"].clone(),
+    );
+    reflecting(
+        &mut r,
+        json!([
+            {"op": "update", "id": notes, "fields": {"name": "archive", "key": "ARCHIVE"}},
+            {"op": "update", "id": src2, "fields": {"key": "notes"}},
+            {"op": "update", "id": c, "body": "Retention follows release 3."}
+        ]),
+        &["notes"],
+        false,
+    )
+    .unwrap();
+    assert_eq!(reflects_links(&r, &c), vec![src2.clone()]);
+    assert_eq!(r.read().resolve_id(&work(), "notes").unwrap(), bid(&src2));
+    // a path only the write makes resolves too: here to the renamed doc, a wrong type
+    let before = mark(&r);
+    let e = reflecting(
+        &mut r,
+        json!([
+            {"op": "update", "id": notes, "fields": {"name": "kept"}},
+            {"op": "update", "id": c, "body": "Again."}
+        ]),
+        &["kept"],
+        false,
+    )
+    .unwrap_err();
+    refused(
+        &e,
+        E_BAD_INPUT,
+        &format!("reflects names {notes}, a doc; reflects names a source"),
+        "name a source (S-…), or create one with a source op",
+    );
+    assert_eq!(mark(&r), before);
+}
