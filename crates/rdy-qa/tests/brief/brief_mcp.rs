@@ -408,11 +408,14 @@ fn plb1_schema_explains_the_decision_parent() {
     // the digests at the base of this change (b97ad25). rdy_write's is re-taken for DR1a Task 14
     // (plan 2026-10-21-rdy-design-rebase-1a, line 1118: "The schema's op list now includes
     // reaffirm and repin's code key"): only the description of its `ops` parameter changed, by
-    // the reaffirm op line and repin's `code` key (351830b6). The other three are the base's.
+    // the reaffirm op line and repin's `code` key (351830b6). It is re-taken again for DR1b
+    // Task 8 (plan 2026-10-23-rdy-design-rebase-1b, line 706: "MCP WriteParams gains strict
+    // `reflects: {sources?: [string], code?: true}`"; line 722 gives its guidance text): only the
+    // new `reflects` parameter changed (28ea7eb0). The other three are the base's.
     let base: Vec<(String, String)> = [
         (
             "rdy_write",
-            "8742f7161257943419f2a9e2a01e97c90709361c4fbb1a31da03d452791bbef7",
+            "939ca40092529a835b5aa57d1a89e568305d731a78a103906320531aae83c9e0",
         ),
         (
             "rdy_decide",
