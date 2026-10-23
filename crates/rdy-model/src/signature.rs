@@ -5,10 +5,16 @@
 //! field (D-F0904). A statement is UTF-8 text in one closed grammar:
 //!
 //! ```text
-//! rdy-statement: 1
+//! rdy-statement: <1 | 2>
 //! kind: <approval | relay | tag | keybind>
-//! <name>: <value>          one line per field, in the fixed order of its kind
+//! <name>: <value>          one line per field, in the fixed order of its kind and version
 //! ```
+//!
+//! Version 1 is every kind's first form. Version 2 is the relay form only (D-PWB82): the
+//! relayer's actor and run are two lines, `relayed_by` and `relayed_run` (`none` for no run),
+//! where version 1 joined them into one value. New relays are version 2, approvals, tags and key
+//! bindings stay version 1, and a check rebuilds a statement in the version its signed bytes
+//! name. Both relay versions are signed in one namespace, `rdy-relay-v1`.
 //!
 //! Every line ends in LF, including the last. The parser borrows its input and never allocates;
 //! the decoder checks each length against its limit and the remaining bytes before it
@@ -30,8 +36,8 @@ pub const MAX_SIGNATURE: usize = 65536;
 /// The longest `signed_by` actor or run, in bytes.
 pub const MAX_SIGNER_TEXT: usize = 4096;
 
-/// The first line of every version-1 statement.
-const HEADER: &str = "rdy-statement: 1\n";
+/// The first line of a statement, up to its version.
+const HEADER_PREFIX: &str = "rdy-statement: ";
 
 /// One signature (kind `SIGNATURE`). The field order is the wire format (postcard): never add,
 /// remove or reorder a field (D-F0904). Its id is [`crate::hash_of`] over the record.
@@ -182,6 +188,17 @@ const TAG: Layout = &[
     ("actor", Ty::Text),
     ("key", Ty::Key),
 ];
+const RELAY_APPROVE_V2: Layout = &[
+    ("repo", Ty::Repo),
+    ("act", Ty::Act),
+    ("proposal_version", Ty::Hash),
+    ("base", Ty::Base),
+    ("actor", Ty::Text),
+    ("relayed_by", Ty::Text),
+    ("relayed_run", Ty::Text),
+    ("evidence", Ty::Hash),
+    ("key", Ty::Key),
+];
 const RELAY_TAG: Layout = &[
     ("repo", Ty::Repo),
     ("act", Ty::Act),
@@ -193,6 +210,18 @@ const RELAY_TAG: Layout = &[
     ("answer", Ty::Hash),
     ("key", Ty::Key),
 ];
+const RELAY_TAG_V2: Layout = &[
+    ("repo", Ty::Repo),
+    ("act", Ty::Act),
+    ("tag", Ty::Hash),
+    ("name", Ty::Text),
+    ("landing", Ty::Hash),
+    ("actor", Ty::Text),
+    ("relayed_by", Ty::Text),
+    ("relayed_run", Ty::Text),
+    ("answer", Ty::Hash),
+    ("key", Ty::Key),
+];
 const KEYBIND: Layout = &[
     ("account", Ty::Text),
     ("challenge", Ty::Text),
@@ -200,12 +229,16 @@ const KEYBIND: Layout = &[
 ];
 
 /// The most fields after `kind` in any layout.
-const MAX_FIELDS: usize = 9;
+const MAX_FIELDS: usize = 10;
+
+/// The `relayed_run` value of a version 2 relay with no run.
+const NO_RUN: &str = "none";
 
 /// A parsed statement. It borrows the text it was parsed from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ParsedStatement<'a> {
     text: &'a str,
+    version: u8,
     kind: StatementKind,
     fields: [(&'a str, &'a str); MAX_FIELDS],
     len: usize,
@@ -243,19 +276,39 @@ impl<'a> ParsedStatement<'a> {
     pub fn text(&self) -> &'a str {
         self.text
     }
+
+    /// The statement version its first line names: 1, or 2 for a relay.
+    pub fn version(&self) -> u8 {
+        self.version
+    }
+
+    /// The relayer's run a version 2 relay names; `None` for `relayed_run: none`, and for any
+    /// statement without that line (version 1, or a kind other than relay).
+    pub fn relayed_run(&self) -> Option<&'a str> {
+        self.field("relayed_run").filter(|run| *run != NO_RUN)
+    }
 }
 
-/// Parses a version-1 statement. Only the canonical text is valid: no CR, blank line, comment,
-/// extra, repeated or reordered field, and a final LF.
+/// Parses a statement of version 1, or a relay of version 2. Only the canonical text of the
+/// version its first line names is valid: no CR, blank line, comment, extra, repeated or
+/// reordered field, and a final LF. A version 2 relay that fails its layout is refused, never
+/// read as version 1.
 pub fn parse_statement(bytes: &[u8]) -> Result<ParsedStatement<'_>, StatementError> {
     if bytes.len() > MAX_STATEMENT {
         return Err(StatementError::Limit(MAX_STATEMENT));
     }
     let text = std::str::from_utf8(bytes).map_err(|_| StatementError::Syntax)?;
-    let body = text
-        .strip_prefix(HEADER)
-        .and_then(|rest| rest.strip_suffix('\n'))
+    let rest = text
+        .strip_prefix(HEADER_PREFIX)
         .ok_or(StatementError::Syntax)?;
+    let (version, rest) = if let Some(rest) = rest.strip_prefix("1\n") {
+        (1, rest)
+    } else if let Some(rest) = rest.strip_prefix("2\n") {
+        (2, rest)
+    } else {
+        return Err(StatementError::Syntax);
+    };
+    let body = rest.strip_suffix('\n').ok_or(StatementError::Syntax)?;
     let mut lines = body.split('\n').map(|line| {
         line.split_once(": ")
             .ok_or(StatementError::Syntax)
@@ -277,16 +330,17 @@ pub fn parse_statement(bytes: &[u8]) -> Result<ParsedStatement<'_>, StatementErr
         *slot = line?;
         len += 1;
     }
-    let layout = match kind {
-        StatementKind::Approval => APPROVAL,
-        StatementKind::Tag => TAG,
-        StatementKind::Keybind => KEYBIND,
-        StatementKind::Relay => match fields.get(1) {
-            Some(&("act", "approve")) => RELAY_APPROVE,
-            Some(&("act", "tag")) => RELAY_TAG,
-            _ => return Err(StatementError::Syntax),
-        },
-    };
+    let layout = match (kind, fields.get(1)) {
+        (StatementKind::Relay, Some(&("act", "approve"))) => relay_approve_layout(version),
+        (StatementKind::Relay, Some(&("act", "tag"))) => relay_tag_layout(version),
+        (StatementKind::Relay, _) => None,
+        (other, _) => (version == 1).then(|| match other {
+            StatementKind::Approval => APPROVAL,
+            StatementKind::Tag => TAG,
+            _ => KEYBIND,
+        }),
+    }
+    .ok_or(StatementError::Syntax)?;
     if len != layout.len() {
         return Err(StatementError::Syntax);
     }
@@ -298,19 +352,68 @@ pub fn parse_statement(bytes: &[u8]) -> Result<ParsedStatement<'_>, StatementErr
     }
     Ok(ParsedStatement {
         text,
+        version,
         kind,
         fields,
         len,
     })
 }
 
-/// The statement for `source`, in `repo`, signed by the key with fingerprint `key`. A key
-/// binding takes no repo; every other source requires one.
+/// The relay-of-an-approval layout of `version`.
+fn relay_approve_layout(version: u8) -> Option<Layout> {
+    match version {
+        1 => Some(RELAY_APPROVE),
+        2 => Some(RELAY_APPROVE_V2),
+        _ => None,
+    }
+}
+
+/// The relay-of-a-tag layout of `version`.
+fn relay_tag_layout(version: u8) -> Option<Layout> {
+    match version {
+        1 => Some(RELAY_TAG),
+        2 => Some(RELAY_TAG_V2),
+        _ => None,
+    }
+}
+
+/// The statement version new output of `source` takes: 2 for a relay, 1 for every other source.
+fn current_version(source: StatementSource<'_>) -> u8 {
+    match source {
+        StatementSource::RelayApproval(_) | StatementSource::RelayTag { .. } => 2,
+        StatementSource::Approval(_)
+        | StatementSource::Tag { .. }
+        | StatementSource::Keybind { .. } => 1,
+    }
+}
+
+/// The statement for `source`, in `repo`, signed by the key with fingerprint `key`, in the
+/// version new output takes: 2 for a relay, 1 for every other source. A key binding takes no
+/// repo; every other source requires one.
 pub fn statement(
     source: StatementSource<'_>,
     repo: Option<RepoId>,
     key: &str,
 ) -> Result<Vec<u8>, StatementError> {
+    statement_for_version(source, repo, key, current_version(source))
+}
+
+/// The statement for `source` in statement version `version`, as [`statement`] builds it. Every
+/// source has version 1; the two relays also have version 2. Any other version is
+/// [`StatementError::Syntax`]. A check passes the version its signed bytes name.
+pub fn statement_for_version(
+    source: StatementSource<'_>,
+    repo: Option<RepoId>,
+    key: &str,
+    version: u8,
+) -> Result<Vec<u8>, StatementError> {
+    let relay = matches!(
+        source,
+        StatementSource::RelayApproval(_) | StatementSource::RelayTag { .. }
+    );
+    if !(version == 1 || (version == 2 && relay)) {
+        return Err(StatementError::Syntax);
+    }
     let repo = match (source, repo) {
         (StatementSource::Keybind { .. }, None) => String::new(),
         (StatementSource::Keybind { .. }, Some(_)) | (_, None) => {
@@ -324,12 +427,13 @@ pub fn statement(
                 Assurance::Local | Assurance::Relayed => landing.assurance.as_str(),
                 Assurance::Policy => return Err(StatementError::Source),
             };
-            let (version, base) = approval_fields(landing);
+            let (proposal_version, base) = approval_fields(landing);
             let actor = &landing.approved_by.actor;
             emit(
+                1,
                 StatementKind::Approval,
                 APPROVAL,
-                &[&repo, &version, &base, actor, assurance, key],
+                &[&repo, &proposal_version, &base, actor, assurance, key],
             )
         }
         StatementSource::RelayApproval(landing) => {
@@ -337,26 +441,48 @@ pub fn statement(
                 return Err(StatementError::Source);
             }
             let relayer = landing.relayed_by.as_ref().ok_or(StatementError::Source)?;
-            let relayed_by = join_relayer(&relayer.actor, relayer.run.as_deref())?;
             let evidence = relay_evidence_hash(landing)?.to_string();
-            let (version, base) = approval_fields(landing);
+            let (proposal_version, base) = approval_fields(landing);
             let actor = &landing.approved_by.actor;
-            emit(
-                StatementKind::Relay,
-                RELAY_APPROVE,
-                &[
-                    &repo,
-                    "approve",
-                    &version,
-                    &base,
-                    actor,
-                    &relayed_by,
-                    &evidence,
-                    key,
-                ],
-            )
+            if version == 1 {
+                let relayed_by = join_relayer(&relayer.actor, relayer.run.as_deref())?;
+                emit(
+                    1,
+                    StatementKind::Relay,
+                    RELAY_APPROVE,
+                    &[
+                        &repo,
+                        "approve",
+                        &proposal_version,
+                        &base,
+                        actor,
+                        &relayed_by,
+                        &evidence,
+                        key,
+                    ],
+                )
+            } else {
+                let relayed_run = run_value(relayer.run.as_deref())?;
+                emit(
+                    2,
+                    StatementKind::Relay,
+                    RELAY_APPROVE_V2,
+                    &[
+                        &repo,
+                        "approve",
+                        &proposal_version,
+                        &base,
+                        actor,
+                        &relayer.actor,
+                        relayed_run,
+                        &evidence,
+                        key,
+                    ],
+                )
+            }
         }
         StatementSource::Tag { hash, tag } => emit(
+            1,
             StatementKind::Tag,
             TAG,
             &[
@@ -382,26 +508,56 @@ pub fn statement(
                 return Err(StatementError::Source);
             }
             let relayer = answer.relayed_by.as_ref().ok_or(StatementError::Source)?;
-            let relayed_by = join_relayer(&relayer.actor, relayer.run.as_deref())?;
-            emit(
-                StatementKind::Relay,
-                RELAY_TAG,
-                &[
-                    &repo,
-                    "tag",
-                    &hash.to_string(),
-                    &tag.name,
-                    &tag.landing.to_string(),
-                    &tag.tagged_by.actor,
-                    &relayed_by,
-                    &answer_hash.to_string(),
-                    key,
-                ],
-            )
+            let (hash, landing, answer_hash) = (
+                hash.to_string(),
+                tag.landing.to_string(),
+                answer_hash.to_string(),
+            );
+            if version == 1 {
+                let relayed_by = join_relayer(&relayer.actor, relayer.run.as_deref())?;
+                emit(
+                    1,
+                    StatementKind::Relay,
+                    RELAY_TAG,
+                    &[
+                        &repo,
+                        "tag",
+                        &hash,
+                        &tag.name,
+                        &landing,
+                        &tag.tagged_by.actor,
+                        &relayed_by,
+                        &answer_hash,
+                        key,
+                    ],
+                )
+            } else {
+                let relayed_run = run_value(relayer.run.as_deref())?;
+                emit(
+                    2,
+                    StatementKind::Relay,
+                    RELAY_TAG_V2,
+                    &[
+                        &repo,
+                        "tag",
+                        &hash,
+                        &tag.name,
+                        &landing,
+                        &tag.tagged_by.actor,
+                        &relayer.actor,
+                        relayed_run,
+                        &answer_hash,
+                        key,
+                    ],
+                )
+            }
         }
-        StatementSource::Keybind { account, challenge } => {
-            emit(StatementKind::Keybind, KEYBIND, &[account, challenge, key])
-        }
+        StatementSource::Keybind { account, challenge } => emit(
+            1,
+            StatementKind::Keybind,
+            KEYBIND,
+            &[account, challenge, key],
+        ),
     }
 }
 
@@ -550,9 +706,21 @@ fn approval_fields(landing: &LandingRecord) -> (String, String) {
     (version.to_string(), base)
 }
 
-/// The relayer's actor, then `/` and the run when one is present. An actor that already holds
-/// `/` is kept as it is. The length is checked before anything is copied: an actor alone is
-/// borrowed, and a joined value is built with fallible growth bounded by the value limit.
+/// The `relayed_run` value of a version 2 relay: the stored run, or `none` for no run. A stored
+/// run that is exactly `none` is refused: its bytes would equal a relay with no run (D-PWB82).
+/// The value is borrowed; [`emit`] checks it as stored text.
+fn run_value(run: Option<&str>) -> Result<&str, StatementError> {
+    match run {
+        None => Ok(NO_RUN),
+        Some(NO_RUN) => Err(StatementError::Source),
+        Some(run) => Ok(run),
+    }
+}
+
+/// Version 1 only: the relayer's actor, then `/` and the run when one is present. An actor that
+/// already holds `/` is kept as it is. The length is checked before anything is copied: an
+/// actor alone is borrowed, and a joined value is built with fallible growth bounded by the
+/// value limit.
 fn join_relayer<'a>(actor: &'a str, run: Option<&str>) -> Result<Cow<'a, str>, StatementError> {
     let len = match run {
         None => actor.len(),
@@ -577,9 +745,14 @@ fn join_relayer<'a>(actor: &'a str, run: Option<&str>) -> Result<Cow<'a, str>, S
     Ok(Cow::Owned(out))
 }
 
-/// Writes the header, the kind and each `layout` field with its value, checking every value
-/// and the total length.
-fn emit(kind: StatementKind, layout: Layout, values: &[&str]) -> Result<Vec<u8>, StatementError> {
+/// Writes the header of `version`, the kind and each `layout` field with its value, checking
+/// every value and the total length.
+fn emit(
+    version: u8,
+    kind: StatementKind,
+    layout: Layout,
+    values: &[&str],
+) -> Result<Vec<u8>, StatementError> {
     debug_assert_eq!(layout.len(), values.len());
     for ((_, ty), value) in layout.iter().zip(values) {
         check_value(*ty, value)?;
@@ -595,7 +768,12 @@ fn emit(kind: StatementKind, layout: Layout, values: &[&str]) -> Result<Vec<u8>,
         }
         Ok(())
     };
-    push(&[HEADER, "kind: ", kind.as_str(), "\n"])?;
+    let version = match version {
+        1 => "1",
+        2 => "2",
+        _ => return Err(StatementError::Syntax),
+    };
+    push(&[HEADER_PREFIX, version, "\n", "kind: ", kind.as_str(), "\n"])?;
     for ((name, _), value) in layout.iter().zip(values) {
         push(&[name, ": ", value, "\n"])?;
     }

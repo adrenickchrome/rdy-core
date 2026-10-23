@@ -1861,3 +1861,64 @@ fn sig8_blank_selectors_are_the_shared_input_error() {
         assert_eq!(agent.calls(), 0, "a malformed selector asks no agent");
     }
 }
+
+/// id2 (D-PWB82, D-17AA8): a live act signs relays in statement version 2, with the relayer's
+/// actor and run on two lines, and the person's approval or tag in version 1. The act and its
+/// signatures stay one sealed batch, and every signature is covered.
+#[test]
+fn id2_live_approval_and_tag_emit_version_two_relays() {
+    let p = project();
+    let (person, machine) = (person_ed(), agent_sk());
+    p.config("always", Some(person), Some(machine));
+    let agent = FakeAgent::new(&[person, machine]);
+    // (statement kind, its header line) of each signature of the act, and the relay's lines
+    let check = |v: &Value| -> Vec<(String, String)> {
+        let subject = subject(v);
+        let batch: Vec<Hash> = on(&p.e, |r| {
+            r.store().last_batch().iter().map(|(_, h)| *h).collect()
+        });
+        assert!(batch.contains(&subject), "the subject is in the batch");
+        let sigs = stored(&p.e, &subject);
+        let checks = signature_checks(&p.e.read(), &subject, None).unwrap();
+        assert_eq!(checks.len(), sigs.len());
+        assert!(
+            checks
+                .iter()
+                .all(|c| c.signed == SIGNED_VALID && c.statement == STATEMENT_MATCH),
+            "{checks:#?}"
+        );
+        let mut out: Vec<(String, String)> = sigs
+            .iter()
+            .map(|g| {
+                assert!(batch.contains(&g.id()), "the signature is in the batch");
+                let text = String::from_utf8(g.statement.clone()).unwrap();
+                let st = parse_statement(&g.statement).unwrap();
+                let header = text.lines().next().unwrap().to_string();
+                if st.kind() == StatementKind::Relay {
+                    assert!(
+                        text.contains("\nrelayed_by: agent:relay\nrelayed_run: r1\n"),
+                        "{text}"
+                    );
+                }
+                (st.kind().as_str().to_string(), header)
+            })
+            .collect();
+        out.sort();
+        out
+    };
+    let v1 = |k: &str| (k.to_string(), "rdy-statement: 1".to_string());
+    let v2 = |k: &str| (k.to_string(), "rdy-statement: 2".to_string());
+
+    let v = p.approve_local(&agent, &p.proposal().0).unwrap();
+    assert_eq!(check(&v), vec![v1("approval")]);
+    let v = p.approve_relayed(&agent, &p.proposal().0).unwrap();
+    assert_eq!(check(&v), vec![v1("approval"), v2("relay")]);
+    let (_, r#ref) = p.proposal();
+    let v = p.approve_by_card(&agent, &r#ref).unwrap();
+    assert_eq!(check(&v), vec![v1("approval"), v2("relay")]);
+    let v = p.tag_local(&agent, &p.version()).unwrap();
+    assert_eq!(check(&v), vec![v1("tag")]);
+    let v = p.tag_relayed(&agent, &p.version()).unwrap();
+    assert_eq!(check(&v), vec![v2("relay"), v1("tag")]);
+    on(&p.e, |r| r.fsck().expect("fsck"));
+}

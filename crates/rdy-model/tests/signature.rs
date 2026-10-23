@@ -3,7 +3,7 @@
 //! derived with the code under test.
 use rdy_model::signature::{
     ParsedStatement, Signature, StatementError, StatementKind, StatementSource, decode_signature,
-    parse_statement, relay_evidence_hash, statement,
+    parse_statement, relay_evidence_hash, statement, statement_for_version,
 };
 use rdy_model::*;
 
@@ -278,7 +278,7 @@ fn sig1_each_statement_has_one_exact_byte_vector() {
         (
             StatementSource::RelayApproval(&relay),
             Some(REPO),
-            RELAY_APPROVE,
+            RELAY_APPROVE_V2,
             StatementKind::Relay,
             "rdy-relay-v1",
         ),
@@ -300,7 +300,7 @@ fn sig1_each_statement_has_one_exact_byte_vector() {
                 answer: &a,
             },
             Some(REPO),
-            RELAY_TAG,
+            RELAY_TAG_V2,
             StatementKind::Relay,
             "rdy-relay-v1",
         ),
@@ -316,6 +316,13 @@ fn sig1_each_statement_has_one_exact_byte_vector() {
         ),
     ];
     for (source, repo, want, kind, namespace) in cases {
+        // the version 1 vectors of the two relays stay exact for explicit version 1
+        let v1 = match want {
+            RELAY_APPROVE_V2 => RELAY_APPROVE,
+            RELAY_TAG_V2 => RELAY_TAG,
+            other => other,
+        };
+        assert_eq!(text(statement_for_version(source, repo, KEY, 1)), v1);
         let got = statement(source, repo, KEY).unwrap_or_else(|e| panic!("{e:?}: {want}"));
         assert_eq!(String::from_utf8(got.clone()).unwrap(), want);
         assert_eq!(got, want.as_bytes(), "the exact bytes");
@@ -459,6 +466,10 @@ fn sig1_parser_refuses_noncanonical_text() {
         TAG_STATEMENT,
         RELAY_TAG,
         KEYBIND,
+        RELAY_APPROVE_V2,
+        RELAY_TAG_V2,
+        RELAY_APPROVE_V2_NO_RUN,
+        RELAY_TAG_V2_NO_RUN,
     ] {
         parse(ok);
     }
@@ -532,8 +543,16 @@ fn sig1_parser_refuses_noncanonical_text() {
             APPROVAL_LOCAL.replace("actor: ", "Actor: "),
         ),
         (
-            "unknown version",
+            "version 2 of a kind with no version 2",
             APPROVAL_LOCAL.replace("rdy-statement: 1\n", "rdy-statement: 2\n"),
+        ),
+        (
+            "unknown version",
+            APPROVAL_LOCAL.replace("rdy-statement: 1\n", "rdy-statement: 3\n"),
+        ),
+        (
+            "version 2 relay of the version 1 layout",
+            RELAY_APPROVE.replace("rdy-statement: 1\n", "rdy-statement: 2\n"),
         ),
         (
             "no header",
@@ -649,17 +668,19 @@ assurance: local\n\
 key: SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s\n"
     );
 
-    // A relayer whose actor holds `/` is joined, never split; an absent run adds nothing.
+    // Version 1: a relayer whose actor holds `/` is joined, never split; an absent run adds
+    // nothing.
     let slash = LandingRecord {
         relayed_by: Some(relayer("agent:x/y", None)),
         approved_by: prov("human:a/b", None),
         ..relay_landing()
     };
     assert_eq!(
-        text(statement(
+        text(statement_for_version(
             StatementSource::RelayApproval(&slash),
             Some(REPO),
-            KEY
+            KEY,
+            1
         )),
         "rdy-statement: 1\n\
 kind: relay\n\
@@ -672,30 +693,79 @@ relayed_by: agent:x/y\n\
 evidence: 9b37d84342a6ae69a57c6080cca1080c7f5574fc1947ac83aa7346b3a087afe4\n\
 key: SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s\n"
     );
+    // Version 2 (the current output): the whole stored actor and run on two lines.
+    assert_eq!(
+        text(statement(
+            StatementSource::RelayApproval(&slash),
+            Some(REPO),
+            KEY
+        )),
+        "rdy-statement: 2\n\
+kind: relay\n\
+repo: abababababababababababababababab\n\
+act: approve\n\
+proposal_version: 0202020202020202020202020202020202020202020202020202020202020202\n\
+base: 0303030303030303030303030303030303030303030303030303030303030303\n\
+actor: human:a/b\n\
+relayed_by: agent:x/y\n\
+relayed_run: none\n\
+evidence: 9b37d84342a6ae69a57c6080cca1080c7f5574fc1947ac83aa7346b3a087afe4\n\
+key: SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s\n"
+    );
     let slash_run = LandingRecord {
         relayed_by: Some(relayer("agent:x/y", Some("run-7"))),
         ..relay_landing()
     };
+    assert!(
+        text(statement_for_version(
+            StatementSource::RelayApproval(&slash_run),
+            Some(REPO),
+            KEY,
+            1
+        ))
+        .contains("\nrelayed_by: agent:x/y/run-7\n")
+    );
     assert!(
         text(statement(
             StatementSource::RelayApproval(&slash_run),
             Some(REPO),
             KEY
         ))
-        .contains("\nrelayed_by: agent:x/y/run-7\n")
+        .contains("\nrelayed_by: agent:x/y\nrelayed_run: run-7\n")
     );
     let no_run = LandingRecord {
         relayed_by: Some(relayer("agent:claude", None)),
         ..relay_landing()
     };
     assert!(
+        text(statement_for_version(
+            StatementSource::RelayApproval(&no_run),
+            Some(REPO),
+            KEY,
+            1
+        ))
+        .contains("\nrelayed_by: agent:claude\nevidence: ")
+    );
+    assert!(
         text(statement(
             StatementSource::RelayApproval(&no_run),
             Some(REPO),
             KEY
         ))
-        .contains("\nrelayed_by: agent:claude\nevidence: ")
+        .contains("\nrelayed_by: agent:claude\nrelayed_run: none\nevidence: ")
     );
+    // A stored relay run is stored text: an empty run or one with an edge space is refused.
+    for run in ["", " run-7", "run-7 "] {
+        let bad = LandingRecord {
+            relayed_by: Some(relayer("agent:claude", Some(run))),
+            ..relay_landing()
+        };
+        assert_eq!(
+            statement(StatementSource::RelayApproval(&bad), Some(REPO), KEY),
+            Err(StatementError::Syntax),
+            "{run:?}"
+        );
+    }
     // A stored actor is never trimmed or normalized; the text `none` is an actor like any other.
     let spaced = LandingRecord {
         approved_by: prov(" human:nick", None),
@@ -792,7 +862,12 @@ key: SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s\n"
         answer: &no_run_answer,
     };
     assert!(
-        text(statement(source, Some(REPO), KEY)).contains("\nrelayed_by: agent:claude\nanswer: ")
+        text(statement_for_version(source, Some(REPO), KEY, 1))
+            .contains("\nrelayed_by: agent:claude\nanswer: ")
+    );
+    assert!(
+        text(statement(source, Some(REPO), KEY))
+            .contains("\nrelayed_by: agent:claude\nrelayed_run: none\nanswer: ")
     );
 
     // The repo is required except for a key binding, which never takes one.
@@ -1024,6 +1099,31 @@ fn sig1_hostile_lengths_are_checked_before_allocation() {
     assert!(built.len() <= 16384);
     let parsed = parse_statement(&built).expect("parses");
     assert_eq!(parsed.field("name"), Some(&big[..]));
+    assert_eq!(parsed.version(), 2);
+    let tag_relay = |a: &Answer, version: u8| {
+        statement_for_version(
+            StatementSource::RelayTag {
+                hash: h(5),
+                tag: &t,
+                answer_hash: h(6),
+                answer: a,
+            },
+            Some(REPO),
+            KEY,
+            version,
+        )
+    };
+    let v1 = tag_relay(&a, 1).expect("a maximal version 1 tag relay");
+    assert_eq!(parse_statement(&v1).expect("parses").version(), 1);
+    // version 2: a maximal run as well puts four maximal values in one statement, over the
+    // statement limit
+    let mut four = a.clone();
+    four.relayed_by = Some(relayer(&"r".repeat(4096), Some(&"x".repeat(4096))));
+    assert_eq!(
+        tag_relay(&four, 2),
+        Err(StatementError::Limit(16384)),
+        "the whole statement keeps its limit"
+    );
     let over = Tag {
         name: "n".repeat(4097),
         ..tag()
@@ -1043,16 +1143,42 @@ fn sig1_hostile_lengths_are_checked_before_allocation() {
         relayed_by: Some(relayer(&"r".repeat(4000), Some(&"x".repeat(96)))),
         ..relay_landing()
     };
+    let approve = |l: &LandingRecord, version: u8| {
+        statement_for_version(StatementSource::RelayApproval(l), Some(REPO), KEY, version)
+    };
     assert_eq!(
-        statement(StatementSource::RelayApproval(&long_run), Some(REPO), KEY),
+        approve(&long_run, 1),
         Err(StatementError::Limit(4096)),
-        "the joined relayer counts as one value"
+        "version 1: the joined relayer counts as one value"
     );
     let at_limit = LandingRecord {
         relayed_by: Some(relayer(&"r".repeat(4000), Some(&"x".repeat(95)))),
         ..relay_landing()
     };
-    assert!(statement(StatementSource::RelayApproval(&at_limit), Some(REPO), KEY).is_ok());
+    assert!(approve(&at_limit, 1).is_ok());
+    // version 2: the actor and the run each have their own value limit
+    assert!(
+        approve(&long_run, 2).is_ok(),
+        "two values, each in its limit"
+    );
+    assert!(statement(StatementSource::RelayApproval(&long_run), Some(REPO), KEY).is_ok());
+    let both_max = LandingRecord {
+        relayed_by: Some(relayer(&"r".repeat(4096), Some(&"x".repeat(4096)))),
+        ..relay_landing()
+    };
+    assert!(approve(&both_max, 2).is_ok());
+    assert_eq!(approve(&both_max, 1), Err(StatementError::Limit(4096)));
+    for (actor, run) in [(4097, 1), (1, 4097)] {
+        let over = LandingRecord {
+            relayed_by: Some(relayer(&"r".repeat(actor), Some(&"x".repeat(run)))),
+            ..relay_landing()
+        };
+        assert_eq!(
+            approve(&over, 2),
+            Err(StatementError::Limit(4096)),
+            "actor {actor}, run {run}"
+        );
+    }
     let long_value = KEYBIND.replace("account: nick", &format!("account: {}", "a".repeat(4097)));
     assert_eq!(
         parse_statement(long_value.as_bytes()).err(),
@@ -1143,17 +1269,24 @@ fn varint(mut n: u64) -> Vec<u8> {
 
 #[test]
 fn sig1_oversized_relayer_is_refused_before_copy() {
-    // A relayer actor over the value limit, with or without a run, is refused before it is
-    // copied: the refusal allocates nothing in proportion to the actor, in both relay forms.
+    // A relayer actor or run over the value limit, with or without a run, is refused before it
+    // is copied: the refusal allocates nothing in proportion to it, in both relay forms and both
+    // statement versions. Version 2 checks the actor and the run as two values; version 1 checks
+    // the joined value.
     for len in [4097, 8 << 20] {
-        let actor = "r".repeat(len);
-        for run in [None, Some("run-7")] {
+        let long = "r".repeat(len);
+        let pairs: [(&str, Option<&str>); 3] = [
+            (&long, None),
+            (&long, Some("run-7")),
+            ("agent:claude", Some(&long)),
+        ];
+        for (actor, run) in pairs {
             let landing = LandingRecord {
-                relayed_by: Some(relayer(&actor, run)),
+                relayed_by: Some(relayer(actor, run)),
                 ..relay_landing()
             };
             let mut a = answer();
-            a.relayed_by = Some(relayer(&actor, run));
+            a.relayed_by = Some(relayer(actor, run));
             let t = tag();
             let sources = [
                 ("relay approval", StatementSource::RelayApproval(&landing)),
@@ -1168,19 +1301,412 @@ fn sig1_oversized_relayer_is_refused_before_copy() {
                 ),
             ];
             for (what, source) in sources {
-                let (got, seen) = alloc_probe::observe(|| statement(source, Some(REPO), KEY));
+                for version in [1, 2] {
+                    let (got, seen) = alloc_probe::observe(|| {
+                        statement_for_version(source, Some(REPO), KEY, version)
+                    });
+                    let run_len = run.map(str::len);
+                    assert_eq!(
+                        got,
+                        Err(StatementError::Limit(4096)),
+                        "{what} v{version}, actor {}, run {run_len:?}",
+                        actor.len()
+                    );
+                    assert!(
+                        seen.largest <= 4096 && seen.total <= 4096,
+                        "{what} v{version}, actor {} bytes, run {run_len:?}: largest request {}, \
+                         total {}",
+                        actor.len(),
+                        seen.largest,
+                        seen.total
+                    );
+                }
                 assert_eq!(
-                    got,
+                    statement(source, Some(REPO), KEY),
                     Err(StatementError::Limit(4096)),
-                    "{what}, {len}, {run:?}"
-                );
-                assert!(
-                    seen.largest <= 4096 && seen.total <= 4096,
-                    "{what}, actor of {len} bytes, run {run:?}: largest request {}, total {}",
-                    seen.largest,
-                    seen.total
+                    "{what}: the current output"
                 );
             }
         }
+    }
+}
+
+// ---- id2: versioned relay statements (D-PWB82, D-17AA8) ----
+
+/// The current relay of an approval (statement version 2): the relayer's actor and run on two
+/// lines.
+const RELAY_APPROVE_V2: &str = "rdy-statement: 2\n\
+kind: relay\n\
+repo: abababababababababababababababab\n\
+act: approve\n\
+proposal_version: 0202020202020202020202020202020202020202020202020202020202020202\n\
+base: 0303030303030303030303030303030303030303030303030303030303030303\n\
+actor: human:nick\n\
+relayed_by: agent:claude\n\
+relayed_run: run-7\n\
+evidence: 9b37d84342a6ae69a57c6080cca1080c7f5574fc1947ac83aa7346b3a087afe4\n\
+key: SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s\n";
+
+/// The current relay of a tag (statement version 2).
+const RELAY_TAG_V2: &str = "rdy-statement: 2\n\
+kind: relay\n\
+repo: abababababababababababababababab\n\
+act: tag\n\
+tag: 0505050505050505050505050505050505050505050505050505050505050505\n\
+name: v1.0\n\
+landing: 0404040404040404040404040404040404040404040404040404040404040404\n\
+actor: human:nick\n\
+relayed_by: agent:claude\n\
+relayed_run: run-7\n\
+answer: 0606060606060606060606060606060606060606060606060606060606060606\n\
+key: SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s\n";
+
+/// A relay with no run: version 2 writes `relayed_run: none`.
+const RELAY_APPROVE_V2_NO_RUN: &str = "rdy-statement: 2\n\
+kind: relay\n\
+repo: abababababababababababababababab\n\
+act: approve\n\
+proposal_version: 0202020202020202020202020202020202020202020202020202020202020202\n\
+base: 0303030303030303030303030303030303030303030303030303030303030303\n\
+actor: human:nick\n\
+relayed_by: agent:claude\n\
+relayed_run: none\n\
+evidence: 9b37d84342a6ae69a57c6080cca1080c7f5574fc1947ac83aa7346b3a087afe4\n\
+key: SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s\n";
+
+const RELAY_TAG_V2_NO_RUN: &str = "rdy-statement: 2\n\
+kind: relay\n\
+repo: abababababababababababababababab\n\
+act: tag\n\
+tag: 0505050505050505050505050505050505050505050505050505050505050505\n\
+name: v1.0\n\
+landing: 0404040404040404040404040404040404040404040404040404040404040404\n\
+actor: human:nick\n\
+relayed_by: agent:claude\n\
+relayed_run: none\n\
+answer: 0606060606060606060606060606060606060606060606060606060606060606\n\
+key: SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s\n";
+
+#[test]
+fn id2_relay_versions_have_exact_vectors() {
+    let (relay, local, t, a) = (relay_landing(), local_landing(), tag(), answer());
+    let relay_tag = |a: &Answer| -> Result<Vec<u8>, StatementError> {
+        statement_for_version(
+            StatementSource::RelayTag {
+                hash: h(5),
+                tag: &t,
+                answer_hash: h(6),
+                answer: a,
+            },
+            Some(REPO),
+            KEY,
+            2,
+        )
+    };
+    let relay_tag_v1 = |a: &Answer| -> Result<Vec<u8>, StatementError> {
+        statement_for_version(
+            StatementSource::RelayTag {
+                hash: h(5),
+                tag: &t,
+                answer_hash: h(6),
+                answer: a,
+            },
+            Some(REPO),
+            KEY,
+            1,
+        )
+    };
+    let relay_approve = |l: &LandingRecord, v: u8| {
+        statement_for_version(StatementSource::RelayApproval(l), Some(REPO), KEY, v)
+    };
+
+    // both versions of both relays, exactly
+    assert_eq!(text(relay_approve(&relay, 1)), RELAY_APPROVE);
+    assert_eq!(text(relay_approve(&relay, 2)), RELAY_APPROVE_V2);
+    assert_eq!(text(relay_tag_v1(&a)), RELAY_TAG);
+    assert_eq!(text(relay_tag(&a)), RELAY_TAG_V2);
+    // the current output of a relay is version 2
+    assert_eq!(
+        text(statement(
+            StatementSource::RelayApproval(&relay),
+            Some(REPO),
+            KEY
+        )),
+        RELAY_APPROVE_V2
+    );
+    assert_eq!(
+        text(statement(
+            StatementSource::RelayTag {
+                hash: h(5),
+                tag: &t,
+                answer_hash: h(6),
+                answer: &a,
+            },
+            Some(REPO),
+            KEY
+        )),
+        RELAY_TAG_V2
+    );
+    for (want, version) in [
+        (RELAY_APPROVE, 1),
+        (RELAY_TAG, 1),
+        (RELAY_APPROVE_V2, 2),
+        (RELAY_TAG_V2, 2),
+    ] {
+        let p = parse(want);
+        assert_eq!((p.kind(), p.version()), (StatementKind::Relay, version));
+        assert_eq!(p.namespace(), "rdy-relay-v1", "one namespace for both");
+    }
+    let p = parse(RELAY_APPROVE_V2);
+    assert_eq!(p.field("relayed_by"), Some("agent:claude"));
+    assert_eq!(p.field("relayed_run"), Some("run-7"));
+    assert_eq!(
+        p.fields().map(|(n, _)| n).collect::<Vec<_>>(),
+        [
+            "repo",
+            "act",
+            "proposal_version",
+            "base",
+            "actor",
+            "relayed_by",
+            "relayed_run",
+            "evidence",
+            "key"
+        ]
+    );
+
+    // no run: version 2 writes `relayed_run: none`; version 1 adds nothing
+    let no_run = LandingRecord {
+        relayed_by: Some(relayer("agent:claude", None)),
+        ..relay_landing()
+    };
+    assert_eq!(text(relay_approve(&no_run, 2)), RELAY_APPROVE_V2_NO_RUN);
+    assert!(text(relay_approve(&no_run, 1)).contains("\nrelayed_by: agent:claude\nevidence: "));
+    let mut no_run_answer = answer();
+    no_run_answer.relayed_by = Some(relayer("agent:claude", None));
+    assert_eq!(text(relay_tag(&no_run_answer)), RELAY_TAG_V2_NO_RUN);
+    assert!(text(relay_tag_v1(&no_run_answer)).contains("\nrelayed_by: agent:claude\nanswer: "));
+
+    // a stored run that is exactly `none` cannot be told from no run in version 2: refused;
+    // version 1 still rebuilds its old bytes
+    let run_none = LandingRecord {
+        relayed_by: Some(relayer("agent:claude", Some("none"))),
+        ..relay_landing()
+    };
+    assert_eq!(relay_approve(&run_none, 2), Err(StatementError::Source));
+    assert_eq!(
+        statement(StatementSource::RelayApproval(&run_none), Some(REPO), KEY),
+        Err(StatementError::Source)
+    );
+    assert_eq!(
+        text(relay_approve(&run_none, 1)),
+        RELAY_APPROVE.replace("agent:claude/run-7", "agent:claude/none")
+    );
+    let mut run_none_answer = answer();
+    run_none_answer.relayed_by = Some(relayer("agent:claude", Some("none")));
+    assert_eq!(relay_tag(&run_none_answer), Err(StatementError::Source));
+    assert_eq!(
+        text(relay_tag_v1(&run_none_answer)),
+        RELAY_TAG.replace("agent:claude/run-7", "agent:claude/none")
+    );
+    // a run that only holds `none` is an ordinary run
+    let none_ish = LandingRecord {
+        relayed_by: Some(relayer("agent:claude", Some("none-1"))),
+        ..relay_landing()
+    };
+    assert!(text(relay_approve(&none_ish, 2)).contains("\nrelayed_run: none-1\n"));
+
+    // approval, tag and keybind: version 1, now and explicitly; no version 2 form
+    let nonrelay: [(StatementSource<'_>, Option<RepoId>, &str); 4] = [
+        (
+            StatementSource::Approval(&local),
+            Some(REPO),
+            APPROVAL_LOCAL,
+        ),
+        (
+            StatementSource::Approval(&relay),
+            Some(REPO),
+            APPROVAL_RELAYED,
+        ),
+        (
+            StatementSource::Tag {
+                hash: h(5),
+                tag: &t,
+            },
+            Some(REPO),
+            TAG_STATEMENT,
+        ),
+        (
+            StatementSource::Keybind {
+                account: "nick",
+                challenge: "c-123",
+            },
+            None,
+            KEYBIND,
+        ),
+    ];
+    for (source, repo, want) in nonrelay {
+        assert_eq!(text(statement(source, repo, KEY)), want);
+        assert_eq!(text(statement_for_version(source, repo, KEY, 1)), want);
+        assert_eq!(parse(want).version(), 1);
+        assert_eq!(
+            statement_for_version(source, repo, KEY, 2),
+            Err(StatementError::Syntax),
+            "{want}"
+        );
+    }
+    // no other version, for any source
+    for version in [0, 3, 255] {
+        for source in [
+            StatementSource::RelayApproval(&relay),
+            StatementSource::Approval(&local),
+        ] {
+            assert_eq!(
+                statement_for_version(source, Some(REPO), KEY, version),
+                Err(StatementError::Syntax),
+                "{version}"
+            );
+        }
+        assert_eq!(
+            statement_for_version(
+                StatementSource::RelayTag {
+                    hash: h(5),
+                    tag: &t,
+                    answer_hash: h(6),
+                    answer: &a,
+                },
+                Some(REPO),
+                KEY,
+                version
+            ),
+            Err(StatementError::Syntax),
+            "tag relay {version}"
+        );
+    }
+}
+
+#[test]
+fn id2_parser_accepts_only_the_versioned_layouts() {
+    // the ten-field relay tag and the nine-field relay approval of version 2
+    let p = parse(RELAY_TAG_V2);
+    assert_eq!(p.fields().count(), 10);
+    assert_eq!(p.version(), 2);
+    assert_eq!(p.act(), Some("tag"));
+    assert_eq!(p.relayed_run(), Some("run-7"));
+    assert_eq!(parse(RELAY_APPROVE_V2).relayed_run(), Some("run-7"));
+    // `relayed_run: none` is a relay with no run
+    for no_run in [RELAY_APPROVE_V2_NO_RUN, RELAY_TAG_V2_NO_RUN] {
+        let p = parse(no_run);
+        assert_eq!((p.version(), p.field("relayed_run")), (2, Some("none")));
+        assert_eq!(p.relayed_run(), None);
+    }
+    // version 1 relays parse as version 1, with no run line
+    for v1 in [RELAY_APPROVE, RELAY_TAG] {
+        let p = parse(v1);
+        assert_eq!((p.version(), p.field("relayed_run")), (1, None));
+    }
+
+    let run_line = "relayed_run: run-7\n";
+    let by_line = "relayed_by: agent:claude\n";
+    let bad: Vec<(&str, String)> = vec![
+        (
+            "version 0",
+            RELAY_TAG_V2.replace("rdy-statement: 2\n", "rdy-statement: 0\n"),
+        ),
+        (
+            "version 3",
+            RELAY_TAG_V2.replace("rdy-statement: 2\n", "rdy-statement: 3\n"),
+        ),
+        (
+            "version 02",
+            RELAY_TAG_V2.replace("rdy-statement: 2\n", "rdy-statement: 02\n"),
+        ),
+        (
+            "version 03",
+            RELAY_TAG_V2.replace("rdy-statement: 2\n", "rdy-statement: 03\n"),
+        ),
+        (
+            "unknown version",
+            RELAY_TAG_V2.replace("rdy-statement: 2\n", "rdy-statement: x\n"),
+        ),
+        (
+            "empty version",
+            RELAY_TAG_V2.replace("rdy-statement: 2\n", "rdy-statement: \n"),
+        ),
+        (
+            "version 2 approval",
+            APPROVAL_LOCAL.replace("rdy-statement: 1\n", "rdy-statement: 2\n"),
+        ),
+        (
+            "version 2 tag",
+            TAG_STATEMENT.replace("rdy-statement: 1\n", "rdy-statement: 2\n"),
+        ),
+        (
+            "version 2 keybind",
+            KEYBIND.replace("rdy-statement: 1\n", "rdy-statement: 2\n"),
+        ),
+        (
+            "version 2 of the version 1 layout",
+            RELAY_TAG.replace("rdy-statement: 1\n", "rdy-statement: 2\n"),
+        ),
+        (
+            "version 1 with a run line",
+            RELAY_TAG_V2.replace("rdy-statement: 2\n", "rdy-statement: 1\n"),
+        ),
+        (
+            "empty run",
+            RELAY_TAG_V2.replace(run_line, "relayed_run: \n"),
+        ),
+        ("missing run line", RELAY_TAG_V2.replace(run_line, "")),
+        (
+            "missing run line, approve",
+            RELAY_APPROVE_V2.replace(run_line, ""),
+        ),
+        (
+            "extra field",
+            RELAY_APPROVE_V2.replace(run_line, &format!("{run_line}extra: x\n")),
+        ),
+        (
+            "reordered run",
+            RELAY_TAG_V2.replace(
+                &format!("{by_line}{run_line}"),
+                &format!("{run_line}{by_line}"),
+            ),
+        ),
+        (
+            "duplicate run",
+            RELAY_APPROVE_V2.replace(run_line, &format!("{run_line}{run_line}")),
+        ),
+        (
+            "duplicate run, tag",
+            RELAY_TAG_V2.replace(run_line, &format!("{run_line}relayed_run: none\n")),
+        ),
+        (
+            "run with a space",
+            RELAY_TAG_V2.replace(run_line, "relayed_run: run-7 \n"),
+        ),
+        (
+            "CR",
+            RELAY_TAG_V2.replace(run_line, "relayed_run: run-7\r\n"),
+        ),
+        ("CRLF", RELAY_TAG_V2.replace('\n', "\r\n")),
+        (
+            "missing final LF",
+            RELAY_TAG_V2[..RELAY_TAG_V2.len() - 1].to_string(),
+        ),
+        ("eleven fields", format!("{RELAY_TAG_V2}extra: x\n")),
+        (
+            "eleven fields, version 1",
+            format!("{RELAY_TAG}a: b\nc: d\n"),
+        ),
+        ("empty", String::new()),
+        ("header only", "rdy-statement: 2\n".to_string()),
+    ];
+    for (what, s) in bad {
+        assert_eq!(
+            parse_statement(s.as_bytes()).err(),
+            Some(StatementError::Syntax),
+            "{what}: {s:?}"
+        );
     }
 }
