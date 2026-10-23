@@ -6,8 +6,9 @@
 //!   canon's version of `b`. A write `(c, b)` is live in `v` when `v` holds `c` and no other
 //!   change of `v` that writes `b` lists `c` in its deps.
 //! - `b` is justified in `v` when any change of `v` that writes `b`, live or not, carries a
-//!   justification (implements or editorial). A justification names decisions, never blocks, so
-//!   it covers only the blocks its change writes.
+//!   justification valid in `v` ([`DetectCx::justifies`]): implements or editorial, or a
+//!   reflects whose every cited source `v` holds (rf10, D-4WC6R; one with no source needs
+//!   `code`). A justification covers only the blocks its change writes.
 //! - `b` counts when it is stable now or in canon, and a live write of `v` writes a normative
 //!   block or deletes one. A delete's type comes from its base block.
 //! - A decision that canon does not hold yet, or holds as proposed, never counts. So creating a
@@ -19,9 +20,12 @@
 //! same live writes on `b` give one tension. A new unjustified rewrite of `b` replaces the live
 //! write and gives a new id. A justified write on `b` removes the tension.
 //!
-//! The carry: the tension on `b` reads only the writes on `b`, the facts of their changes, canon
-//! and `b`'s stability. A justifying write writes `b`, so `b` is a seed of its commit. The
-//! detector needs no reach.
+//! The carry: the tension on `b` reads the writes on `b`, the facts of their changes, canon,
+//! `b`'s stability and, for a reflects, whether each view holds the sources it cites. A
+//! justifying write writes `b`, so `b` is a seed of its commit. A source can come or go with no
+//! write on `b` (a delete, a retype, an include, an exclude, an undo, a landing), and a reflects
+//! link to it can be gone too, so links are no index of the recipients: when a seed is a source
+//! before or after the step, the reach is every block an in-flight change writes (rf10).
 //!
 //! The landing form judges the landing set's net change: the landing builds its writes with
 //! every change in one view. There is no canon form (FW-CH6a): an unjustified change must never
@@ -32,7 +36,7 @@ use crate::RdyError;
 use rdy_model::decision::{self, DecisionStatus};
 use rdy_model::engine_fields;
 use rdy_model::{Block, BlockId, FieldValue, Hash};
-use rdy_schema::STORE_ONLY_FIELDS;
+use rdy_schema::{STORE_ONLY_FIELDS, supporting};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -84,6 +88,30 @@ impl UnjustifiedChange {
         })
     }
 
+    /// Whether a block of `seeds` is a source in canon or in an in-flight write of it (as written,
+    /// or as its base was). Every in-flight version of a block is one of its writes, so no
+    /// materialization is read.
+    fn any_source(cx: &DetectCx<'_>, seeds: &BTreeSet<BlockId>) -> Result<bool, RdyError> {
+        let is_source = |b: &Block| b.block_type == supporting::SOURCE;
+        let canon = cx.canon_m()?;
+        for b in seeds {
+            if canon.get(b).is_some_and(is_source) {
+                return Ok(true);
+            }
+            for w in cx.writes.on(b) {
+                if w.new.as_deref().is_some_and(is_source) {
+                    return Ok(true);
+                }
+                if let Some(base) = w.base
+                    && is_source(&cx.st.reader().get_block(&base)?)
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     /// The tensions on block `b`: one per view that changes it without a justification, each set
     /// of sides once.
     fn on_block(cx: &DetectCx<'_>, b: &BlockId, out: &mut Vec<Found>) -> Result<(), RdyError> {
@@ -116,10 +144,19 @@ impl UnjustifiedChange {
         let mut seen: BTreeSet<Vec<Hash>> = BTreeSet::new();
         for v in views {
             let in_v: Vec<&Arc<Write>> = all.iter().filter(|w| holds(&w.change, v)).collect();
-            if in_v
-                .iter()
-                .any(|w| cx.writes.change(&w.change).is_some_and(|f| f.justified))
-            {
+            // the net rule: one justification valid in this view, on any write of `b` it holds
+            let mut justified = false;
+            for w in &in_v {
+                let j = cx
+                    .writes
+                    .change(&w.change)
+                    .and_then(|f| f.justification.as_ref());
+                if cx.justifies(j, v)? {
+                    justified = true;
+                    break;
+                }
+            }
+            if justified {
                 continue;
             }
             let overwritten = |w: &Write| {
@@ -196,6 +233,20 @@ impl UnjustifiedChange {
 impl Detector for UnjustifiedChange {
     fn kind(&self) -> TensionKind {
         TensionKind::UnjustifiedChange
+    }
+
+    /// rf10: every block an in-flight change writes when a seed is a source before or after the
+    /// step (in canon, or in a write of it, as written or as its base); else none. A carry reads
+    /// it before and after a view op, so a source that left with an excluded change counts.
+    fn reach(
+        &self,
+        cx: &DetectCx<'_>,
+        seeds: &BTreeSet<BlockId>,
+    ) -> Result<BTreeSet<BlockId>, RdyError> {
+        if cx.scope() == DetectScope::Canon || !Self::any_source(cx, seeds)? {
+            return Ok(BTreeSet::new());
+        }
+        Ok(cx.writes.blocks().cloned().collect())
     }
 
     /// FW-JU1 at propose: a proposal lists only its landing form.

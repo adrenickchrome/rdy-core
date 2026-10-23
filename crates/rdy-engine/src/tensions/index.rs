@@ -8,8 +8,9 @@ use crate::lexicon::Lexicon;
 use crate::{InflightSet, Materialized, RdyError, ReadState, Scope};
 use imbl::OrdMap;
 use rdy_graph::{DerivedStatus, Edge, EdgeKind, Graph, IMPACT_LINKS, SUSPECT_LINKS, edges_of};
-use rdy_model::{Block, BlockId, Change, FieldValue, Hash, Op, decision};
-use rdy_schema::{Pack, Trait};
+use rdy_model::{Block, BlockId, Change, FieldValue, Hash, Justification, Op, decision};
+use rdy_schema::{Pack, Trait, supporting};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, OnceLock};
 
@@ -34,7 +35,9 @@ pub struct ChangeFacts {
     pub deps: Vec<Hash>,
     pub actor: String,
     pub run: Option<String>,
-    pub justified: bool,
+    /// The change's justification, as stored. Whether it justifies a block is judged per view
+    /// ([`DetectCx::justifies`]): a `Reflects` needs each source it cites in the judged view.
+    pub justification: Option<Justification>,
     /// The open views whose set holds the change, sorted.
     pub views: Vec<String>,
     /// The blocks the change writes, sorted.
@@ -145,7 +148,7 @@ impl Writes {
                     deps: change.deps.clone(),
                     actor: change.provenance.actor.clone(),
                     run: change.provenance.run.clone(),
-                    justified: change.justification.is_some(),
+                    justification: change.justification.clone(),
                     views: views.clone(),
                     blocks,
                     at_ms: change.provenance.at_ms,
@@ -198,7 +201,7 @@ impl Writes {
                 deps: read.deps.clone(),
                 actor: read.provenance.actor.clone(),
                 run: read.provenance.run.clone(),
-                justified: read.justification.is_some(),
+                justification: read.justification.clone(),
                 views,
                 blocks: mine.keys().cloned().collect(),
                 at_ms: read.provenance.at_ms,
@@ -347,7 +350,7 @@ impl Writes {
                             deps: read.deps.clone(),
                             actor: read.provenance.actor.clone(),
                             run: read.provenance.run.clone(),
-                            justified: read.justification.is_some(),
+                            justification: read.justification.clone(),
                             views: views.clone(),
                             blocks: own.keys().cloned().collect(),
                             at_ms: read.provenance.at_ms,
@@ -733,6 +736,18 @@ pub fn step_change_reads() -> u64 {
     STEP_READS.with(std::cell::Cell::get)
 }
 
+thread_local! {
+    /// This thread's count of held-source sets a detection run built (one per judged view).
+    static HELD_SOURCE_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// This thread's count of held-source sets detection runs built: one per judged view and run
+/// ([`DetectCx::held_sources`]). A test reads the difference over a call.
+#[doc(hidden)]
+pub fn held_source_builds() -> u64 {
+    HELD_SOURCE_BUILDS.with(std::cell::Cell::get)
+}
+
 /// This thread's count of index keys the writes of a carry walked to unfile an old write. A
 /// test reads the difference over a write to check that the cost follows the blocks written.
 #[doc(hidden)]
@@ -931,6 +946,9 @@ pub struct DetectCx<'a> {
     /// The blocks this run's scope moved away from canon that may take part in restatement
     /// drift (see [`DetectCx::moved_blocks`]); lazy.
     moved: OnceLock<Arc<Vec<(BlockId, Hash)>>>,
+    /// By judged view, the sources its changes cite that the view holds (see
+    /// [`DetectCx::held_sources`]): built on first use, once per view, for this run only.
+    held: RefCell<BTreeMap<String, Arc<BTreeSet<BlockId>>>>,
 }
 
 impl<'a> DetectCx<'a> {
@@ -948,6 +966,7 @@ impl<'a> DetectCx<'a> {
             landing: None,
             lexicon: OnceLock::new(),
             moved: OnceLock::new(),
+            held: RefCell::default(),
         }
     }
 
@@ -1058,6 +1077,64 @@ impl<'a> DetectCx<'a> {
             }
         }
         Ok(Arc::clone(self.moved.get_or_init(|| Arc::new(moved))))
+    }
+
+    /// rf10 (D-4WC6R): the sources the changes of `view` cite in a `Reflects` that `view` holds,
+    /// as a block of type `source`. The judged state is the view's materialization, or, in a
+    /// landing's run, the canon the landing would give (its changes are one view). Built once
+    /// per view on first use and kept for this run only, so a later run reads a later state.
+    pub fn held_sources(&self, view: &str) -> Result<Arc<BTreeSet<BlockId>>, RdyError> {
+        if let Some(h) = self.held.borrow().get(view) {
+            return Ok(Arc::clone(h));
+        }
+        let m = match (&self.landing, self.scope) {
+            (Some(l), DetectScope::Inflight) => Arc::clone(&l.m),
+            (None, DetectScope::Inflight) => {
+                self.st.materialized(&Scope::View(view.to_string()))?
+            }
+            (_, DetectScope::Canon) => self.canon_m()?,
+        };
+        let held: BTreeSet<BlockId> = self
+            .writes
+            .changes()
+            .filter(|f| f.views.iter().any(|v| v == view))
+            .filter_map(|f| match &f.justification {
+                Some(Justification::Reflects { sources, .. }) => Some(sources),
+                _ => None,
+            })
+            .flatten()
+            .filter(|id| {
+                m.get(id)
+                    .is_some_and(|b| b.block_type == supporting::SOURCE)
+            })
+            .cloned()
+            .collect();
+        HELD_SOURCE_BUILDS.with(|n| n.set(n.get() + 1));
+        let held = Arc::new(held);
+        self.held
+            .borrow_mut()
+            .insert(view.to_string(), Arc::clone(&held));
+        Ok(held)
+    }
+
+    /// rf10 (D-4WC6R, D-ZWT4H): whether justification `j` justifies the blocks its change writes
+    /// in `view`. None never does; implements and editorial do by their presence; reflects does
+    /// when it cites a source or sets `code`, and `view` holds every source it cites
+    /// ([`DetectCx::held_sources`]). A missing source makes the whole of it fail, `code`
+    /// included. Only presence and type are judged, never what the source says.
+    pub fn justifies(&self, j: Option<&Justification>, view: &str) -> Result<bool, RdyError> {
+        Ok(match j {
+            None => false,
+            Some(Justification::Implements(_) | Justification::Editorial { .. }) => true,
+            Some(Justification::Reflects { sources, code }) => {
+                if sources.is_empty() {
+                    *code
+                } else {
+                    let held = self.held_sources(view)?;
+                    sources.iter().all(|s| held.contains(s))
+                }
+            }
+        })
     }
 
     /// The scope this run detects in.

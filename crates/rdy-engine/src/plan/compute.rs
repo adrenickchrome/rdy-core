@@ -422,12 +422,15 @@ impl Closes<'_> {
     }
 }
 
-/// The kind of a judged pair: its follow-up, and a confirm on a retired cause is a rejustify.
+/// The kind of a judged pair: its follow-up, and a confirm on a retired cause is a rejustify. An
+/// accepted decision's confirm (D-ATBP6: reached with no suspect on the cause) is a confirm item,
+/// as a frozen decision cannot relink; a `reaffirm` comes only from a suspect, so the reaffirm
+/// op closes every reaffirm item.
 fn kind_of(p: &PlanPair) -> Option<PlanKind> {
     Some(match p.follow {
         FollowUp::Update => PlanKind::Update,
         FollowUp::Reaffirm => PlanKind::Reaffirm,
-        FollowUp::Confirm if p.retired => PlanKind::Rejustify,
+        FollowUp::Confirm if p.retired && !p.reached_decision => PlanKind::Rejustify,
         FollowUp::Confirm => PlanKind::Confirm,
         FollowUp::Resolve => return None,
     })
@@ -1768,7 +1771,9 @@ mod tests {
 
     /// An existing refiner that also depends on its target keeps that dependency: only the
     /// version's own lineage links are the change. Accepted S refines and depends on D1; the
-    /// version supersedes D1 with D2, so S owes a re-affirmation on D1.
+    /// version supersedes D1 with D2, so S owes an answer on D1. D2 is only proposed, so S is not
+    /// suspect on D1 and the item is a confirm, not a reaffirm the reaffirm op would refuse
+    /// (D-ATBP6).
     #[test]
     fn cp6_an_existing_refiner_keeps_its_own_dependency() {
         let (_d, r) = project();
@@ -1797,9 +1802,9 @@ mod tests {
         let p = plan(&st, &[d1.clone(), s.clone()], &[d1, s, d2]);
         assert_eq!(
             doc_items(&p),
-            vec![(D1.to_string(), S.to_string(), PlanKind::Reaffirm, None)]
+            vec![(D1.to_string(), S.to_string(), PlanKind::Confirm, None)]
         );
-        assert_eq!(find(&p, D1, S, PlanKind::Reaffirm).edge, "depends_on");
+        assert_eq!(find(&p, D1, S, PlanKind::Confirm).edge, "depends_on");
     }
 
     /// p-0HXT0: a reach on a link the version itself writes still needs a reasoned confirm.
