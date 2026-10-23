@@ -38,20 +38,55 @@ pub struct Author {
     pub at_ms: i64,
 }
 
-/// Why a change was made: the decision it implements, or an editorial class and reason.
+/// Why a change was made: the decision it implements, an editorial class and reason, or the
+/// sources (and code) it reflects.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JustificationInfo {
     Implements(Vec<String>),
-    Editorial { class: String, reason: String },
+    Editorial {
+        class: String,
+        reason: String,
+    },
+    /// D-4WC6R: `{"reflects": {"sources": [...], "code": true|false}}`, sources in stored order.
+    Reflects {
+        sources: Vec<String>,
+        code: bool,
+    },
 }
 
 impl JustificationInfo {
-    /// `implements <id>, <id>` or `editorial <class>`.
+    /// `implements <id>, <id>`, `editorial <class>`, or `reflects <id>, <id>` with `, code`
+    /// appended when code is set (`reflects code` alone for code only).
     pub fn label(&self) -> String {
         match self {
             JustificationInfo::Implements(ids) => format!("implements {}", ids.join(", ")),
             JustificationInfo::Editorial { class, .. } => format!("editorial {class}"),
+            JustificationInfo::Reflects { sources, code } => {
+                let mut parts: Vec<&str> = sources.iter().map(String::as_str).collect();
+                if *code {
+                    parts.push("code");
+                }
+                format!("reflects {}", parts.join(", "))
+            }
+        }
+    }
+}
+
+impl From<&Justification> for JustificationInfo {
+    fn from(j: &Justification) -> Self {
+        match j {
+            Justification::Implements(ids) => {
+                JustificationInfo::Implements(ids.iter().map(ToString::to_string).collect())
+            }
+            Justification::Editorial { class, reason } => JustificationInfo::Editorial {
+                class: class_str(*class).into(),
+                reason: reason.clone(),
+            },
+            Justification::Reflects { sources, code } => JustificationInfo::Reflects {
+                sources: sources.iter().map(ToString::to_string).collect(),
+                code: *code,
+            },
         }
     }
 }
@@ -122,18 +157,6 @@ fn author(p: &Provenance) -> Author {
         run: p.run.clone(),
         role: role_str(p.role).into(),
         at_ms: p.at_ms,
-    }
-}
-
-fn justification(j: &Justification) -> JustificationInfo {
-    match j {
-        Justification::Implements(ids) => {
-            JustificationInfo::Implements(ids.iter().map(ToString::to_string).collect())
-        }
-        Justification::Editorial { class, reason } => JustificationInfo::Editorial {
-            class: class_str(*class).into(),
-            reason: reason.clone(),
-        },
     }
 }
 
@@ -308,7 +331,7 @@ impl<'a> Memo<'a> {
             author: author(&change.provenance),
             imported_by: change.links.imported_by.clone(),
             message: change.message.clone(),
-            justification: change.justification.as_ref().map(justification),
+            justification: change.justification.as_ref().map(JustificationInfo::from),
             landing,
             redaction: redaction.map(|h| h.to_string()),
         };

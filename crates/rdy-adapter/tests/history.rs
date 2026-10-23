@@ -297,3 +297,99 @@ fn sdc2_batch_equals_per_hash_results() {
     assert!(snap.landings(&[]).unwrap().is_empty());
     handle.close().unwrap();
 }
+
+/// A closed project whose claim is rewritten by a source-only and then a code-only Reflects
+/// change (typed commits), landed as one landing and tagged `v1.0.0`. Returns its directory, the
+/// landing and the two changes.
+fn reflects_fixture() -> (tempfile::TempDir, Hash, [Hash; 2]) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let w = write(
+        &mut r,
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "a", "title": "A", "doc_type": "page"}},
+            {"op": "create", "type": "source", "id": "$s", "parent": "$d", "fields": {"title": "The spec", "kind": "spec", "locator": "spec/v1.md"}},
+            {"op": "create", "type": "claim", "id": "$c", "parent": "$d", "body": "One."}
+        ]),
+    );
+    let p = r
+        .propose(&session(Role::Writer), "work", "first", None)
+        .unwrap();
+    r.land(&session(Role::Approver), &p.id).unwrap();
+    let claim = BlockId::parse(&w.created["$c"]).unwrap();
+    let source = BlockId::parse(&w.created["$s"]).unwrap();
+    let forms = [
+        rdy_model::Justification::Reflects {
+            sources: vec![source],
+            code: false,
+        },
+        rdy_model::Justification::Reflects {
+            sources: vec![],
+            code: true,
+        },
+    ];
+    let mut changes = [Hash([0; 32]); 2];
+    for (i, j) in forms.into_iter().enumerate() {
+        let scope = rdy_engine::Scope::View("work".into());
+        let mut next = r.read().block(&scope, &claim).unwrap();
+        let base = next.version_hash();
+        next.body = format!("Version {i}.");
+        let deps = r.read().included("work").to_vec();
+        changes[i] = r
+            .store_mut()
+            .commit_to_view(
+                "work",
+                rdy_model::Change {
+                    view: "work".into(),
+                    ops: vec![rdy_model::Op::Update { base, block: next }],
+                    deps,
+                    provenance: rdy_model::Provenance {
+                        actor: "agent:a".into(),
+                        run: None,
+                        role: Role::Writer,
+                        at_ms: 7,
+                    },
+                    justification: Some(j),
+                    message: "rf4".into(),
+                    links: Default::default(),
+                    read_identity: None,
+                },
+            )
+            .unwrap();
+        r.invalidate();
+    }
+    let p = r
+        .propose(&session(Role::Writer), "work", "reflects", None)
+        .unwrap();
+    let landing: Hash = r
+        .land(&session(Role::Approver), &p.id)
+        .unwrap()
+        .parse()
+        .unwrap();
+    r.tag(&session(Role::Approver), "v1.0.0", None, None)
+        .unwrap();
+    r.close().unwrap();
+    (dir, landing, changes)
+}
+
+#[test]
+fn rf4_snapshot_history_names_both_reflects_changes() {
+    let (dir, landing, changes) = reflects_fixture();
+    let h = StoreHandle::open(dir.path()).unwrap();
+    let snap = h.snapshot().unwrap();
+    let facts = snap.landing_facts(landing).unwrap();
+    // the landing's block writes name both changes, in change order, as updates of the claim
+    let written: Vec<Hash> = facts.blocks.iter().map(|b| b.change).collect();
+    assert_eq!(written, changes.to_vec());
+    assert!(facts.blocks.iter().all(|b| b.op == BlockOp::Update));
+    assert_eq!(snap.tag_history("v1.0.0").unwrap()[0], facts);
+    let keys: Vec<ObjectKey> = changes.iter().map(|c| key(kinds::CHANGE, *c)).collect();
+    assert!(
+        snap.has_objects(&keys)
+            .unwrap()
+            .iter()
+            .all(|p| p.present && !p.redacted)
+    );
+    drop(snap);
+    h.close().unwrap();
+}

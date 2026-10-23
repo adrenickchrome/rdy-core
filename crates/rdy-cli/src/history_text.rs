@@ -53,11 +53,26 @@ pub(crate) fn log_head_line(row: &Value) -> String {
     line
 }
 
-/// `implements <id>, <id>` or `editorial <class>: <reason>`; `None` for no justification.
+/// `implements <id>, <id>`, `editorial <class>: <reason>`, or `reflects <id>, <id>` with
+/// `, code` appended when code is set (`reflects code` alone for code only); `None` for no
+/// justification.
 pub(crate) fn justification_text(j: &Value) -> Option<String> {
     if let Some(ids) = j["implements"].as_array() {
         let ids: Vec<&str> = ids.iter().filter_map(Value::as_str).collect();
         return Some(format!("implements {}", ids.join(", ")));
+    }
+    let r = &j["reflects"];
+    if r.is_object() {
+        let mut parts: Vec<&str> = r["sources"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        if r["code"].as_bool() == Some(true) {
+            parts.push("code");
+        }
+        return Some(format!("reflects {}", parts.join(", ")));
     }
     let e = &j["editorial"];
     e.is_object()
@@ -249,6 +264,46 @@ mod tests {
         let line = format!("    content removed by redaction {h}");
         lines.insert(3, &line);
         assert_eq!(blame, lines.join("\n"));
+    }
+
+    /// rf4 (D-4WC6R): a change justified by reflects prints as its label does, from the wire
+    /// form the engine writes: its sources in stored order, then `code` when it is set.
+    #[test]
+    fn rf4_cli_last_change_and_blame_show_reflects() {
+        let wire = |sources: &[&str], code: bool| {
+            serde_json::to_value(rdy_engine::JustificationInfo::Reflects {
+                sources: sources.iter().map(|s| s.to_string()).collect(),
+                code,
+            })
+            .unwrap()
+        };
+        for (j, text) in [
+            (
+                wire(&["S-0000B", "S-0000A"], true),
+                "reflects S-0000B, S-0000A, code",
+            ),
+            (wire(&[], true), "reflects code"),
+            (wire(&["S-0000A"], false), "reflects S-0000A"),
+        ] {
+            assert_eq!(justification_text(&j).as_deref(), Some(text));
+            let mut e = entry(None);
+            e["justification"] = j;
+            assert_eq!(
+                last_change_line(&e).unwrap(),
+                format!(
+                    "last change: 0123456789ab by agent:a/r1 at 2026-10-09T10:00:00Z, {text}, \
+                     landed fedcba987654"
+                )
+            );
+            let blame = blame_text(&json!({"history": [e]}));
+            let first = blame.lines().nth(2).unwrap();
+            assert_eq!(
+                first,
+                format!(
+                    "  aaaaaaaaaaaa  update  0123456789ab  agent:a/r1  2026-10-09T10:00:00Z  {text}"
+                )
+            );
+        }
     }
 
     #[test]

@@ -407,7 +407,7 @@ fn hc4_predecessor_checks_use_exact_errors() {
     };
     check(
         expect_err(st.dump_after(&bad, &out)),
-        "previous dump is of store format 15, but this store is of store format 17".into(),
+        "previous dump is of store format 15, but this store is of store format 18".into(),
     );
     // then an end past this state
     for past in [

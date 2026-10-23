@@ -215,3 +215,80 @@ fn ha12_format_calls_need_no_store() {
     assert_eq!(e.code, "E_ALREADY_EXISTS");
     StoreHandle::open_holder(&target).unwrap().close().unwrap();
 }
+
+/// A frozen fixture of `crates/rdy-qa/fixtures/dump`.
+fn frozen(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../rdy-qa/fixtures/dump")
+        .join(name)
+}
+
+#[test]
+fn rf4_adapter_formats_and_old_stream_refusal() {
+    // store format 18, dump format 3, stream format 1, and every released pair: no store opened
+    let facts = maintenance::formats();
+    assert_eq!((facts.store, facts.dump, facts.stream), (18, 3, 1));
+    let pairs: Vec<(u32, u32)> = facts.reads.iter().map(|p| (p.dump, p.store)).collect();
+    assert_eq!(
+        pairs,
+        [
+            (1, 10),
+            (1, 11),
+            (1, 12),
+            (2, 13),
+            (2, 14),
+            (2, 15),
+            (3, 16),
+            (3, 17),
+            (3, 18)
+        ]
+    );
+    assert_eq!(facts, rdy_engine::formats::formats());
+    // a batch of store format 17 is refused by the check, before its records
+    let root = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(&root.path().join("p"), "rdy-standard").unwrap();
+    land_tag(&mut r, None, "base", "v1.0.0");
+    let tag = r.store().tags().unwrap()[0].1;
+    let repo = r.store().repo_id().unwrap().unwrap();
+    let mut bytes = Vec::new();
+    rdy_engine::stream_export::write(&r.read(), tag, &Default::default(), &mut bytes).unwrap();
+    r.close().unwrap();
+    rdy_adapter::stream::check_batch(bytes.as_slice(), Some(repo)).unwrap();
+    // the header frame follows the 12-byte prelude: 4 length bytes, the kind and the hash, then
+    // its payload, whose first 4 bytes are the store format
+    let len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let mut payload = bytes[49..49 + len].to_vec();
+    assert_eq!(payload[..4], 18u32.to_le_bytes());
+    payload[..4].copy_from_slice(&17u32.to_le_bytes());
+    let mut old = bytes.clone();
+    old[17..49].copy_from_slice(&rdy_model::Hash::of(&payload).0);
+    old[49..49 + len].copy_from_slice(&payload);
+    let e = rdy_adapter::stream::check_batch(old.as_slice(), Some(repo)).unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            "E_STORE_FORMAT",
+            "stream store format 17 does not match 18",
+            "write the stream with the pinned rdy build"
+        )
+    );
+    // a native store of format 17 is refused with the dump-and-load fix
+    let p = root.path().join("p");
+    std::fs::write(
+        p.join(".rdy/store/FORMAT"),
+        "rdy store format\nstore_format 17\n",
+    )
+    .unwrap();
+    let e = expect_err(StoreHandle::open(&p));
+    assert_eq!(e.code, "E_STORE_FORMAT");
+    assert_eq!(e.fix, rdy_store::format::move_with_dump("17"));
+    // a released dump of the pair (3, 17) still loads, as a holder, and checks clean
+    let seen = maintenance::inspect_dump(&frozen("v3-s17-holder.rdydump")).unwrap();
+    assert_eq!((seen.dump, seen.store), (3, 17));
+    let to = root.path().join("old");
+    let loaded = maintenance::load(&frozen("v3-s17-holder.rdydump"), &to).unwrap();
+    assert_eq!((loaded.dump_format, loaded.store_format), (3, 17));
+    let h = StoreHandle::open_holder(&to).unwrap();
+    assert_eq!(fsck_json(&h), serde_json::to_value(&loaded.fsck).unwrap());
+    h.close().unwrap();
+}

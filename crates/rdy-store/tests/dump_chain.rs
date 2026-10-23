@@ -143,7 +143,7 @@ fn hc1_header_and_trailer_match_literal_bytes() {
     assert_eq!(bytes[16], rec::HEADER);
     assert_eq!(&bytes[17..49], &Hash::of(p).0);
     let mut want = vec![0u8]; // kind: full
-    want.extend_from_slice(&17u32.to_le_bytes()); // the current store format
+    want.extend_from_slice(&18u32.to_le_bytes()); // the current store format
     want.extend_from_slice(&[0xA5; 16]);
     want.extend_from_slice(&[0u8; 12]); // base 0.0
     want.extend_from_slice(&[0u8; 48]); // base marker zero
@@ -204,7 +204,7 @@ fn hc1_header_and_trailer_match_literal_bytes() {
         .0;
     let p = &bytes[12 + HEAD..12 + HEAD + 179];
     let mut want = vec![1u8];
-    want.extend_from_slice(&17u32.to_le_bytes()); // the current store format
+    want.extend_from_slice(&18u32.to_le_bytes()); // the current store format
     want.extend_from_slice(&[0xA5; 16]);
     want.extend_from_slice(&1u32.to_le_bytes());
     want.extend_from_slice(&0x0A0Bu64.to_le_bytes());
@@ -250,7 +250,7 @@ fn hc1_header_and_trailer_match_literal_bytes() {
 
 #[test]
 fn hc1_released_pairs_keep_frozen_kind_sets() {
-    assert_eq!((DUMP_FORMAT, STORE_FORMAT), (3, 17));
+    assert_eq!((DUMP_FORMAT, STORE_FORMAT), (3, 18));
     assert_eq!(kinds::REDACTION_CARRIED, 23);
     assert_eq!(
         READS,
@@ -262,7 +262,8 @@ fn hc1_released_pairs_keep_frozen_kind_sets() {
             (2, 14),
             (2, 15),
             (3, 16),
-            (3, 17)
+            (3, 17),
+            (3, 18)
         ]
     );
     let f10: Vec<u8> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 15, 16, 17, 18, 19];
@@ -275,7 +276,9 @@ fn hc1_released_pairs_keep_frozen_kind_sets() {
     ];
     let f16: Vec<u8> = (1..=11).chain([13]).chain(15..=23).collect();
     let f17: Vec<u8> = (1..=11).chain([13]).chain(15..=24).collect();
-    let want: [((u32, u32), &[u8]); 8] = [
+    // store format 18 appends a justification variant and keeps the kinds of 17
+    let f18: Vec<u8> = f17.clone();
+    let want: [((u32, u32), &[u8]); 9] = [
         ((1, 10), &f10),
         ((1, 11), &f11),
         ((1, 12), &f11),
@@ -284,6 +287,7 @@ fn hc1_released_pairs_keep_frozen_kind_sets() {
         ((2, 15), &f14),
         ((3, 16), &f16),
         ((3, 17), &f17),
+        ((3, 18), &f18),
     ];
     for ((d, s), kinds) in want {
         assert_eq!(frame_kinds(d, s), Some(kinds), "pair ({d}, {s})");

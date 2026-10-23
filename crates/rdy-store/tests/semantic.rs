@@ -85,7 +85,7 @@ fn put_tension(s: &mut Store, at_ms: i64) -> (Hash, Hash) {
 #[test]
 fn se1_kind_18_and_format_10() {
     assert_eq!(kinds::TENSION, 18);
-    assert_eq!(rdy_store::format::STORE_FORMAT, 17);
+    assert_eq!(rdy_store::format::STORE_FORMAT, 18);
 }
 
 #[test]

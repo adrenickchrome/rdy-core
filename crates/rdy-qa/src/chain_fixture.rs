@@ -28,6 +28,15 @@
 //!   repo: `v1.0.0` before the full dump, `v2.0.0` in increment 1, and `v3.0.0` (the source's
 //!   approved removal) in increment 2, then the earlier uploads again, which append nothing.
 //!
+//! Store format 18 (D-4WC6R): [`project_chain_v18`] and [`holder_chain_v18`] run the same
+//! sequence with the three stages of the reflects fixture (`every_kind::add_reflects_fixture_records`,
+//! `rewrite_reflects_fixture` and `finish_reflects_fixture`): before the full dump, in increment 1
+//! and in increment 2 (before its late block). The project writes them under a doc of its own;
+//! the holder takes three uploads of a copy of the second source (`r`, copied before the plan
+//! uploads change `b`), each tagged ([`REFLECTS_TAGS`]) and exported, checked and taken at the
+//! same boundaries. [`project_chain`] and [`holder_chain`] select no stage, so their output is
+//! the format-17 sequence's, unchanged.
+//!
 //! Each standalone full fixture is a dump of a stopped load: the full dump written after the
 //! removals, loaded at the missing stop (every carried span is zero), then written to again. The
 //! project gets a new block, an ordinary tagged landing and a person's approved removal of that
@@ -86,6 +95,19 @@ pub const PLAN_TAG: &str = "v4.0.0";
 pub const PLAN_FORK_TAG: &str = "v4.1.0";
 /// The approver of the clone's landing of the plan's proposal: another landing of one version.
 pub const PLAN_FORK_PERSON: &str = "human:qa-fork";
+/// The doc the project chain's reflects fixture writes under (store format 18).
+pub const REFLECTS_DOC: &str = "harrier-reflects";
+/// The tags of the holder's reflects source after each of the three stages (store format 18).
+pub const REFLECTS_TAGS: [&str; 3] = ["v5.0.0", "v5.1.0", "v5.2.0"];
+
+/// The store format 18 stages a chain builder adds: none for the store format 17 builders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stages {
+    /// The store format 17 sequence alone.
+    None,
+    /// The reflects fixture's three stages (D-4WC6R).
+    Reflects,
+}
 
 /// The removable blob: a full first chunk (1 MiB of one byte) and a short second chunk.
 pub fn blob_bytes() -> Vec<u8> {
@@ -177,6 +199,19 @@ fn landed_block(r: &mut Rdy, name: &str, body: &str) -> (String, String) {
 fn tag(r: &mut Rdy, name: &str) {
     r.tag(&approver(), name, None, None).unwrap();
     seal(r);
+}
+
+/// A new doc `name`, landed through view `name`. Returns its id.
+fn landed_doc(r: &mut Rdy, name: &str) -> BlockId {
+    let w = write(
+        r,
+        name,
+        json!([{"op": "create", "type": "doc", "id": "$d", "fields": {"name": name, "title": name, "doc_type": "page"}}]),
+    )
+    .unwrap();
+    land(r, name).unwrap();
+    seal(r);
+    created(&w, "$d")
 }
 
 fn position(l: Location) -> String {
@@ -293,6 +328,15 @@ fn sealed_landing(r: &mut Rdy, proposal: Hash, bound: &Plan, approver: &str) -> 
 
 /// The project chain (see the module).
 pub fn project_chain() -> Chain {
+    project_chain_with(Stages::None)
+}
+
+/// The project chain with the store format 18 stages (see the module).
+pub fn project_chain_v18() -> Chain {
+    project_chain_with(Stages::Reflects)
+}
+
+fn project_chain_with(stages: Stages) -> Chain {
     let _clock = pin_clock(CLOCK_MS);
     rdy_model::seed_ids_for_tests(PROJECT_SEED);
     let dir = tempfile::tempdir().unwrap();
@@ -304,6 +348,13 @@ pub fn project_chain() -> Chain {
     let (early, _) = landed_block(&mut r, "harrier-early", EARLY_CANARY);
     let blob = r.store_mut().put_blob(&blob_bytes()).unwrap();
     seal(&mut r);
+    // store format 18: the reflects fixture's records, under a doc of their own
+    let reflects = (stages == Stages::Reflects).then(|| {
+        let doc = landed_doc(&mut r, REFLECTS_DOC);
+        let fx = every_kind::add_reflects_fixture_records(&mut r, &doc);
+        seal(&mut r);
+        fx
+    });
     // store format 17: a proposal with its bound plan, sealed in increment 1
     let (proposal, bound) = bound_plan(&mut r, PLAN_VIEW, "A planned block.");
     let full = dir.path().join("chain-full.rdydump");
@@ -312,8 +363,18 @@ pub fn project_chain() -> Chain {
     sealed_landing(&mut r, proposal, &bound, PERSON);
     landed_block(&mut r, "harrier-ordinary", "An ordinary block.");
     tag(&mut r, ORDINARY_TAG);
+    // store format 18: the two Reflects changes, landed
+    if let Some(fx) = &reflects {
+        every_kind::rewrite_reflects_fixture(&mut r, fx);
+        seal(&mut r);
+    }
     let inc1 = dir.path().join("chain-1.rdydump");
     let s1 = r.read().dump_after(&s0.chain_end(), &inc1).unwrap();
+    // store format 18: the source's change and its sealed plan, first in increment 2
+    if let Some(fx) = &reflects {
+        every_kind::finish_reflects_fixture(&mut r, fx);
+        seal(&mut r);
+    }
     // increment 2: the late block, then both removals and a last tagged landing
     let (late, late_landing) = landed_block(&mut r, "harrier-late", LATE_CANARY);
     let missing = remove(
@@ -398,6 +459,15 @@ fn take(h: &mut Rdy, u: &Upload) {
 
 /// The holder chain (see the module). Its store's repo is the every-kind holder's.
 pub fn holder_chain() -> (Chain, HolderUploads) {
+    holder_chain_with(Stages::None)
+}
+
+/// The holder chain with the store format 18 stages (see the module).
+pub fn holder_chain_v18() -> (Chain, HolderUploads) {
+    holder_chain_with(Stages::Reflects)
+}
+
+fn holder_chain_with(stages: Stages) -> (Chain, HolderUploads) {
     let _clock = pin_clock(CLOCK_MS);
     rdy_model::seed_ids_for_tests(HOLDER_SEED);
     let built = every_kind::holder(SEGMENT_MAX);
@@ -440,21 +510,33 @@ pub fn holder_chain() -> (Chain, HolderUploads) {
     let root = built.dir.path().join("chain-holder");
     let mut h = Rdy::create_holder(&root, repo).unwrap();
     h.store_mut().set_segment_max(SEGMENT_MAX);
+    // store format 18: the reflects source's three uploads, from a copy of the second source
+    // made before the plan uploads change it
+    let reflects = (stages == Stages::Reflects).then(|| reflects_uploads(&built, repo));
     // store format 17: the second source's plan, sealed in it and in its clone
     let [plan, fork] = plan_uploads(&built, repo);
     ups.push(plan);
     ups.push(fork);
     take(&mut h, &ups[0]);
+    if let Some(rf) = &reflects {
+        take(&mut h, &rf[0]);
+    }
     let full = built.dir.path().join("holder-chain-full.rdydump");
     let s0 = h.read().dump(&full).unwrap();
     take(&mut h, &ups[1]);
     // the second source's seal, its chain (the bound plan) and its acceptance
     take(&mut h, &ups[3]);
+    if let Some(rf) = &reflects {
+        take(&mut h, &rf[1]);
+    }
     let inc1 = built.dir.path().join("holder-chain-1.rdydump");
     let s1 = h.read().dump_after(&s0.chain_end(), &inc1).unwrap();
     take(&mut h, &ups[2]);
     // the clone's seal: its chain's bound plan is the one increment 1 holds
     take(&mut h, &ups[4]);
+    if let Some(rf) = &reflects {
+        take(&mut h, &rf[2]);
+    }
     // the earlier uploads again: every key is held, so nothing is appended
     let end = h.store().log_end();
     take(&mut h, &ups[1]);
@@ -466,6 +548,7 @@ pub fn holder_chain() -> (Chain, HolderUploads) {
     h.read().dump(&post).unwrap();
     h.close().unwrap();
     rdy_model::unseed_ids_for_tests();
+    ups.extend(reflects.into_iter().flatten());
     let chain = Chain {
         source: None,
         root,
@@ -522,6 +605,59 @@ fn plan_uploads(built: &every_kind::HolderBuild, repo: RepoId) -> [Upload; 2] {
     })
 }
 
+/// The uploads of [`REFLECTS_TAGS`] (store format 18): a copy (`r`) of the every-kind holder's
+/// second source gets the reflects fixture's three stages under a doc of its own, and is tagged
+/// after each; each tag's history is exported, checked and written as one batch file.
+fn reflects_uploads(built: &every_kind::HolderBuild, repo: RepoId) -> [Upload; 3] {
+    let (b_root, r_root) = (built.dir.path().join("b"), built.dir.path().join("r"));
+    every_kind::copy_tree(&b_root, &r_root);
+    let mut r = Rdy::open(&r_root).unwrap();
+    let doc = landed_doc(&mut r, REFLECTS_DOC);
+    let fx = every_kind::add_reflects_fixture_records(&mut r, &doc);
+    seal(&mut r);
+    let first = tagged_upload(&mut r, built, repo, REFLECTS_TAGS[0], "v5-0-0.rdysync");
+    every_kind::rewrite_reflects_fixture(&mut r, &fx);
+    seal(&mut r);
+    let second = tagged_upload(&mut r, built, repo, REFLECTS_TAGS[1], "v5-1-0.rdysync");
+    every_kind::finish_reflects_fixture(&mut r, &fx);
+    seal(&mut r);
+    let third = tagged_upload(&mut r, built, repo, REFLECTS_TAGS[2], "v5-2-0.rdysync");
+    r.close().unwrap();
+    [first, second, third]
+}
+
+/// Tags canon's head of `r` `name`, then exports, checks and writes the tag's history as the
+/// upload file `file`.
+fn tagged_upload(
+    r: &mut Rdy,
+    built: &every_kind::HolderBuild,
+    repo: RepoId,
+    name: &str,
+    file: &str,
+) -> Upload {
+    tag(r, name);
+    let t = r
+        .store()
+        .tags()
+        .unwrap()
+        .into_iter()
+        .find(|(n, ..)| n == name)
+        .unwrap()
+        .1;
+    let landing = r.store().read_tag(&t).unwrap().landing;
+    let bytes = every_kind::export_tag(r, t);
+    rdy_engine::stream_check::check_batch(bytes.as_slice(), Some(repo)).unwrap();
+    let path = built.dir.path().join("uploads").join(file);
+    std::fs::write(&path, &bytes).unwrap();
+    Upload {
+        files: vec![path],
+        target: UploadTarget {
+            tag: name.into(),
+            landing,
+        },
+    }
+}
+
 /// The every-kind holder's uploads, which the holder chain took.
 pub struct HolderUploads(Vec<Upload>);
 
@@ -540,6 +676,10 @@ pub fn holder_standalone(c: &Chain, ups: &HolderUploads) -> Standalone {
     // store format 17: both sealed plan landings' histories again, after the removal
     take(&mut h, &ups.0[3]);
     take(&mut h, &ups.0[4]);
+    // store format 18: the reflects source's histories again, when the chain took them
+    for u in &ups.0[5..] {
+        take(&mut h, u);
+    }
     let dump = dir.path().join("standalone-holder.rdydump");
     h.read().dump(&dump).unwrap();
     h.close().unwrap();
@@ -576,6 +716,10 @@ pub const V16_KINDS: [u8; 21] = [
     kinds::REDACTION_APPLY,
     kinds::REDACTION_CARRIED,
 ];
+
+/// The record kinds a store format 18 project may hold: those of store format 17, since 18 only
+/// appends a justification variant (D-4WC6R).
+pub const V18_KINDS: [u8; 22] = V17_KINDS;
 
 /// The record kinds a frozen store format 17 project may hold: every kind of store format 16
 /// and the change plan (kind 24).
