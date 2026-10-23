@@ -14,6 +14,7 @@ use crate::release_install::{self, TARGETS, valid_path, valid_target, valid_vers
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -668,6 +669,9 @@ fn gather(target: &str, src: &Sources) -> Result<Vec<Crate>, Refused> {
     if !valid_target(target) {
         return Err(refused(Kind::Arguments, target));
     }
+    // The lock is read, bounded and parsed before Cargo runs, so a bad lock is always the
+    // lockfile refusal; its entries are kept for the graph's checksums below.
+    let lock = parse_lock(&read_lock(&src.root.join("Cargo.lock"))?)?;
     let tree = run_cargo(
         src,
         &[
@@ -703,7 +707,6 @@ fn gather(target: &str, src: &Sources) -> Result<Vec<Crate>, Refused> {
     )?;
     let meta = parse_metadata(&meta)?;
     let selected = select(&tree, &meta)?;
-    let lock = parse_lock(&read_lock(&src.root.join("Cargo.lock"))?)?;
     crates_of(&selected, &lock)
 }
 
@@ -866,6 +869,10 @@ struct SourceRun {
     out_name: std::ffi::OsString,
     out_dir: File,
     made: Vec<(String, File)>,
+    /// A descriptor held from before OUT was made, given back when the run finishes: the
+    /// ownership checks of its cleanup open one entry at a time, so they still run when every
+    /// other descriptor of this process is taken.
+    spare: File,
 }
 
 impl SourceRun {
@@ -880,8 +887,12 @@ impl SourceRun {
         let at = |kind: Kind| refused(kind, source.filename.clone());
         let file = platform::create_new_at(&self.out_dir, source.filename.as_ref())
             .map_err(|_| at(Kind::FileOperation))?;
-        let mut to = file.try_clone().map_err(|_| at(Kind::FileOperation))?;
+        // owned from here on, before anything else can fail; copied through this one handle
         self.made.push((source.filename.clone(), file));
+        let Some((_, made)) = self.made.last() else {
+            return Err(at(Kind::FileOperation));
+        };
+        let mut to: &File = made;
         let mut hash = Sha256::new();
         let mut buf = vec![0u8; COPY_CHUNK];
         let mut total = 0u64;
@@ -903,7 +914,7 @@ impl SourceRun {
             during(&source.filename, total);
         }
         to.sync_all().map_err(|_| at(Kind::FileOperation))?;
-        platform::set_file_mode(&to, 0o644).map_err(|_| at(Kind::FileOperation))?;
+        platform::set_file_mode(to, 0o644).map_err(|_| at(Kind::FileOperation))?;
         if format!("{:x}", hash.finalize()) != source.sha256 {
             return Err(at(Kind::Source));
         }
@@ -914,10 +925,17 @@ impl SourceRun {
     /// in it. On failure it removes each copy (only while its name still holds it) and OUT
     /// (only while OUT's path still names it). A failed removal is the result.
     fn finish(self, made: Result<(), Refused>) -> Result<(), Refused> {
-        let in_place =
-            platform::holds_file(&self.parent, &self.out_name, &self.out_dir).unwrap_or(false);
-        let kept = self.made.iter().all(|(name, file)| {
-            platform::holds_file(&self.out_dir, name.as_ref(), file).unwrap_or(false)
+        let SourceRun {
+            parent,
+            out_name,
+            out_dir,
+            made: files,
+            spare,
+        } = self;
+        drop(spare);
+        let in_place = platform::holds_file(&parent, &out_name, &out_dir).unwrap_or(false);
+        let kept = files.iter().all(|(name, file)| {
+            platform::holds_file(&out_dir, name.as_ref(), file).unwrap_or(false)
         });
         let made = match made {
             Ok(()) if in_place && kept => return Ok(()),
@@ -925,16 +943,16 @@ impl SourceRun {
             failed => failed,
         };
         let mut cleaned = true;
-        for (name, file) in &self.made {
-            cleaned &= match platform::holds_file(&self.out_dir, name.as_ref(), file) {
-                Ok(true) => platform::remove_file_at(&self.out_dir, name.as_ref()).is_ok(),
+        for (name, file) in &files {
+            cleaned &= match platform::holds_file(&out_dir, name.as_ref(), file) {
+                Ok(true) => platform::remove_file_at(&out_dir, name.as_ref()).is_ok(),
                 // gone, or another's: never removed
                 Ok(false) => true,
                 Err(_) => false,
             };
         }
         if in_place {
-            cleaned &= platform::remove_dir_at(&self.parent, &self.out_name).is_ok();
+            cleaned &= platform::remove_dir_at(&parent, &out_name).is_ok();
         }
         if cleaned {
             made
@@ -946,7 +964,8 @@ impl SourceRun {
 
 /// Copies each of `sources` into the new directory `out`. Every source is checked first (a
 /// regular file, not a link, of at most [`CRATE_MAX`] bytes) and kept open; only then is OUT
-/// made, and each copy is read from its checked handle. `during` runs after each chunk.
+/// made, and each copy is read from its checked handle. Each output is owned from the moment it
+/// is made, and one descriptor is held back for the cleanup. `during` runs after each chunk.
 fn stage_sources(
     sources: &[Source],
     out: &Path,
@@ -980,6 +999,9 @@ fn stage_sources(
         return Err(refused(Kind::FileOperation, "OUT"));
     };
     let parent = platform::open_dir(parent).map_err(|_| refused(Kind::FileOperation, "OUT"))?;
+    let spare = parent
+        .try_clone()
+        .map_err(|_| refused(Kind::FileOperation, "OUT"))?;
     let out_dir = match platform::create_private_dir_at(&parent, out_name) {
         Ok(dir) => dir,
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
@@ -992,6 +1014,7 @@ fn stage_sources(
         out_name: out_name.to_os_string(),
         out_dir,
         made: Vec::new(),
+        spare,
     };
     let copied = held
         .iter()
@@ -1040,6 +1063,10 @@ fn check_with(version: &str, text: &str, src: &Sources) -> Result<(), Refused> {
 /// [`check_release_text`] of the release notes file `notes`: a regular file (not a link) of at
 /// most [`NOTES_MAX`] bytes of UTF-8.
 pub fn check_release_file(version: &str, notes: &Path) -> Result<(), String> {
+    check_file_with(version, notes, &Sources::release())
+}
+
+fn check_file_with(version: &str, notes: &Path, src: &Sources) -> Result<(), String> {
     if !(valid_version(version) && valid_path(notes)) {
         return Err(MSG_INVALID_ARGUMENTS.to_string());
     }
@@ -1049,7 +1076,83 @@ pub fn check_release_file(version: &str, notes: &Path) -> Result<(), String> {
         kind => kind.message().to_string(),
     })?;
     let text = String::from_utf8(bytes).map_err(|_| MSG_NOTES.to_string())?;
-    check_release_text(version, &text)
+    check_with(version, &text, src).map_err(Refused::text)
+}
+
+// ---------------------------------------------------------------------------------------------
+// The source tool.
+// ---------------------------------------------------------------------------------------------
+
+#[derive(clap::Parser)]
+#[command(
+    name = "qa-release-sources",
+    about = "Stage the MPL-2.0 crate files of a release and print its third-party notes part"
+)]
+struct ToolArgs {
+    /// The plain release version, `0.<minor>.0`.
+    #[arg(long, value_name = "V")]
+    version: String,
+    /// The output directory (an absolute path that does not exist yet).
+    #[arg(long, value_name = "DIR")]
+    out: String,
+    /// A release notes file (an absolute path) to check before anything is staged.
+    #[arg(long = "check-notes", value_name = "FILE")]
+    check_notes: Option<String>,
+}
+
+/// `qa-release-sources` with `args` (the program name first): with `--check-notes`, checks
+/// that release notes file first; then [`release_sources`], whose notes part goes to `stdout`.
+/// A refusal is one line on `stderr` and nothing on `stdout`. The exit status: 0 on success,
+/// 2 for invalid arguments, 1 for every other failure.
+pub fn sources_tool(args: &[OsString], stdout: &mut dyn Write, stderr: &mut dyn Write) -> u8 {
+    tool_with(args, &Sources::release(), stdout, stderr)
+}
+
+fn tool_with(
+    args: &[OsString],
+    src: &Sources,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> u8 {
+    use clap::Parser;
+    let refuse = |stderr: &mut dyn Write, message: &str| {
+        let _ = writeln!(stderr, "{message}");
+        if message == MSG_INVALID_ARGUMENTS {
+            2
+        } else {
+            1
+        }
+    };
+    let args = match ToolArgs::try_parse_from(args) {
+        Ok(args) => args,
+        Err(e) if e.kind() == clap::error::ErrorKind::DisplayHelp => {
+            return match write!(stdout, "{}", e.render()).and_then(|()| stdout.flush()) {
+                Ok(()) => 0,
+                Err(_) => 1,
+            };
+        }
+        Err(_) => return refuse(stderr, MSG_INVALID_ARGUMENTS),
+    };
+    let out = Path::new(&args.out);
+    let notes = args.check_notes.as_deref().map(Path::new);
+    if !(valid_version(&args.version) && valid_path(out) && notes.is_none_or(valid_path)) {
+        return refuse(stderr, MSG_INVALID_ARGUMENTS);
+    }
+    if let Some(notes) = notes
+        && let Err(e) = check_file_with(&args.version, notes, src)
+    {
+        return refuse(stderr, &e);
+    }
+    match sources_with(&args.version, out, src, &|_, _| {}) {
+        Ok(part) => match stdout
+            .write_all(part.as_bytes())
+            .and_then(|()| stdout.flush())
+        {
+            Ok(()) => 0,
+            Err(_) => 1,
+        },
+        Err(e) => refuse(stderr, &e.text()),
+    }
 }
 
 #[cfg(test)]
@@ -1715,6 +1818,8 @@ mod tests {
             run_cargo(&with_cargo(dir.path(), &fails), &["tree"]),
             Err(refused(Kind::Graph, "tree"))
         );
+        // a well-formed (empty) lock, which is read before Cargo runs
+        fs::write(dir.path().join("Cargo.lock"), b"version = 4\n").expect("write");
         assert_eq!(
             gather(TARGETS[0], &with_cargo(dir.path(), &not_utf8)),
             Err(refused(Kind::Graph, "tree output"))
@@ -2065,6 +2170,144 @@ mod tests {
             fs::read(out.join("alpha-1.0.0.crate")).expect("replacement"),
             b"someone else's\n"
         );
+    }
+
+    /// Set in the child that [`plx7_source_staging_owns_its_outputs_when_descriptors_run_out`]
+    /// re-executes under a 128-descriptor limit.
+    const DESCRIPTOR_CHILD: &str = "RDY_PLX7_DESCRIPTOR_CHILD";
+
+    /// Source staging owns each output from the moment it exists, and its cleanup still has
+    /// the descriptor it needs. The staging runs in a re-executed child under a 128-descriptor
+    /// limit, where filling every free descriptor touches no other test; after the first
+    /// source's first chunk, `during` takes every free descriptor (or all but one).
+    #[test]
+    fn plx7_source_staging_owns_its_outputs_when_descriptors_run_out() {
+        let name =
+            crate::test_name!("plx7_source_staging_owns_its_outputs_when_descriptors_run_out");
+        if std::env::var_os(DESCRIPTOR_CHILD).is_none() {
+            let mut child = shell_script("ulimit -n 128 && exec \"$0\" \"$@\"");
+            child
+                .arg(std::env::current_exe().expect("current exe"))
+                .args([name.as_str(), "--exact", "--nocapture", "--test-threads=1"])
+                .env(DESCRIPTOR_CHILD, "1");
+            let out =
+                crate::fixtures::output_within(&mut child, std::time::Duration::from_secs(600))
+                    .expect("run the child");
+            let text = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success() && text.contains("test result: ok. 1 passed"),
+                "the child ran this one test and it passed: {out:?}"
+            );
+            return;
+        }
+        let base = tempfile::tempfile().expect("a handle to copy");
+        let held: std::cell::RefCell<Vec<File>> = std::cell::RefCell::new(Vec::new());
+        // Copies `base` until no descriptor is free, then gives `free` of them back.
+        let exhaust = |free: usize| {
+            let mut held = held.borrow_mut();
+            while held.len() < 4096 {
+                match base.try_clone() {
+                    Ok(f) => held.push(f),
+                    Err(_) => break,
+                }
+            }
+            assert!(held.len() < 4096, "the 128-descriptor limit holds");
+            for _ in 0..free {
+                held.pop();
+            }
+        };
+
+        // No descriptor free: the second output cannot be made. The run fails, and its
+        // cleanup still removes the first copy and OUT.
+        let d = tempfile::tempdir().expect("tempdir");
+        let (sources, bytes) = cached(d.path());
+        let out = d.path().join("out");
+        let filled = Cell::new(false);
+        let during = |name: &str, _: u64| {
+            if name == "alpha-1.0.0.crate" && !filled.replace(true) {
+                exhaust(0);
+            }
+        };
+        let got = stage_sources(&sources, &out, &during);
+        held.borrow_mut().clear();
+        assert!(filled.get(), "the descriptors ran out mid-run");
+        assert_eq!(got, Err(refused(Kind::FileOperation, "beta-2.0.0.crate")));
+        assert!(
+            fs::symlink_metadata(&out).is_err(),
+            "no owned output remains"
+        );
+        for (s, b) in sources.iter().zip(&bytes) {
+            assert_eq!(
+                &fs::read(&s.cache).expect("cache"),
+                b,
+                "the cache is unchanged"
+            );
+        }
+        // A retry with descriptors to spare finds no OUT in its way.
+        stage_sources(&sources, &out, &|_, _| {}).expect("the retry stages");
+        assert_eq!(listed(&out), ["alpha-1.0.0.crate", "beta-2.0.0.crate"]);
+
+        // One descriptor free: the second output takes it and is copied through that one
+        // handle; the run succeeds with both exact copies.
+        let d = tempfile::tempdir().expect("tempdir");
+        let (sources, bytes) = cached(d.path());
+        let out = d.path().join("out");
+        let filled = Cell::new(false);
+        let during = |name: &str, _: u64| {
+            if name == "alpha-1.0.0.crate" && !filled.replace(true) {
+                exhaust(1);
+            }
+        };
+        let got = stage_sources(&sources, &out, &during);
+        held.borrow_mut().clear();
+        assert!(filled.get(), "the descriptors ran out mid-run");
+        assert_eq!(got, Ok(()));
+        assert_eq!(listed(&out), ["alpha-1.0.0.crate", "beta-2.0.0.crate"]);
+        for (s, b) in sources.iter().zip(&bytes) {
+            let copy = out.join(&s.filename);
+            assert_eq!(&fs::read(&copy).expect("copy"), b);
+            assert_eq!(platform::mode_of(&copy).expect("mode"), 0o644);
+        }
+    }
+
+    /// The tool reads, bounds and parses `Cargo.lock` before Cargo runs: a malformed lock is the
+    /// lockfile refusal (one line on stderr, no stdout, no OUT), with or without `--check-notes`,
+    /// and Cargo never runs.
+    #[test]
+    fn plx7_source_tool_refuses_a_malformed_lock_before_cargo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("Cargo.lock"), b"[[package]\n").expect("write");
+        let notes = dir.path().join("notes.md");
+        fs::write(&notes, notes_with("")).expect("write");
+        let runs = Cell::new(0);
+        let cargo = || {
+            runs.set(runs.get() + 1);
+            cargo_command()
+        };
+        let src = with_cargo(dir.path(), &cargo);
+        let out = dir.path().join("out");
+        let plain: Vec<OsString> = vec![
+            "qa-release-sources".into(),
+            "--version".into(),
+            "0.19.0".into(),
+            "--out".into(),
+            out.clone().into(),
+        ];
+        let mut checked = plain.clone();
+        checked.extend(["--check-notes".into(), notes.clone().into()]);
+        for args in [plain, checked] {
+            let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+            let code = tool_with(&args, &src, &mut stdout, &mut stderr);
+            assert_eq!(code, 1, "{args:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&stderr),
+                format!("{MSG_LOCKFILE}\n"),
+                "{args:?}"
+            );
+            assert!(stdout.is_empty(), "{args:?}: no stdout");
+            assert!(fs::symlink_metadata(&out).is_err(), "{args:?}: no OUT");
+        }
+        assert_eq!(runs.get(), 0, "Cargo never runs");
     }
 
     /// Release notes with `part` after Feedback and before the two collapsed sections.
