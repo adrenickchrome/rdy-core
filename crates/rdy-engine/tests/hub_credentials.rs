@@ -1334,7 +1334,6 @@ fn hsa5_signin_reads_me_before_ready_save() {
         Err(HubFailure::AuthRequired),
         Err(lost()),
         Err(HubFailure::Protocol),
-        me("two words"),
         Ok(HubReply::SignOut),
     ];
     for r in failed {
@@ -1349,6 +1348,22 @@ fn hsa5_signin_reads_me_before_ready_save() {
         assert!(!text.contains(DEVICE_CODE) && !text.contains(&new_access()));
         fake.done();
     }
+
+    // A `/me` handle outside the actor form is the hub's malformed reply: E_UPSTREAM_PROTOCOL,
+    // the same record and no ready credential (also pinned in id5).
+    seed(&e, &[(INSTALL, pending(T0 + 600_000, T0, 5))]);
+    let fake = Fake::default();
+    fake.reply("Metadata", meta(INSTALL))
+        .reply("DevicePoll", polled(&new_access(), &new_refresh()))
+        .reply("Me", me("two words"));
+    assert_code(
+        svc(&e, &fake, &clock).state(&install, &c),
+        E_UPSTREAM_PROTOCOL,
+    );
+    assert_eq!(state_on_disk(&e.creds, INSTALL), Some("reauth_required"));
+    let text = disk_text(&e.creds);
+    assert!(!text.contains(DEVICE_CODE) && !text.contains(&new_access()));
+    fake.done();
 
     // An issued pair that does not have its form is not used: no /me.
     seed(&e, &[(INSTALL, pending(T0 + 600_000, T0, 5))]);
@@ -2222,14 +2237,18 @@ fn id5_invalid_handle_cannot_form_a_human_claim() {
     let longest = "a".repeat(64);
     let valid: Vec<&str> = vec!["a", "7", "a.b_c-d", &longest];
 
-    // Sign-in: an invalid `/me` handle never becomes a ready record (the existing mapping).
+    // Sign-in: an invalid `/me` handle is the hub's malformed reply (`E_UPSTREAM_PROTOCOL`), and
+    // it never becomes a ready record.
     for handle in &invalid {
         seed(&e, &[(INSTALL, pending(T0 + 600_000, T0, 5))]);
         let fake = Fake::default();
         fake.reply("Metadata", meta(INSTALL))
             .reply("DevicePoll", polled(&new_access(), &new_refresh()))
             .reply("Me", me(handle));
-        assert_code(svc(&e, &fake, &clock).state(&install, &ca), E_UPSTREAM_AUTH);
+        assert_code(
+            svc(&e, &fake, &clock).state(&install, &ca),
+            E_UPSTREAM_PROTOCOL,
+        );
         assert_eq!(
             state_on_disk(&e.creds, INSTALL),
             Some("reauth_required"),
@@ -2238,6 +2257,16 @@ fn id5_invalid_handle_cannot_form_a_human_claim() {
         assert!(!disk_text(&e.creds).contains(&new_access()), "{handle:?}");
         fake.done();
     }
+    // A transport failure of the same `/me` step keeps `E_UPSTREAM_AUTH`.
+    seed(&e, &[(INSTALL, pending(T0 + 600_000, T0, 5))]);
+    let fake = Fake::default();
+    fake.reply("Metadata", meta(INSTALL))
+        .reply("DevicePoll", polled(&new_access(), &new_refresh()))
+        .reply("Me", Err(unsent()));
+    assert_code(svc(&e, &fake, &clock).state(&install, &ca), E_UPSTREAM_AUTH);
+    assert_eq!(state_on_disk(&e.creds, INSTALL), Some("reauth_required"));
+    assert!(!disk_text(&e.creds).contains(&new_access()));
+    fake.done();
     for handle in &valid {
         seed(&e, &[(INSTALL, pending(T0 + 600_000, T0, 5))]);
         let fake = Fake::default();
