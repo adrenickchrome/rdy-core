@@ -48,6 +48,12 @@ jobs:
         env:
           CARGO_NET_OFFLINE: "true"
         run: cargo qa --skip-perf --require-all
+      - name: Failing tests
+        if: failure()
+        run: |
+          # print the qa report's failing tests and their panic excerpts, so the log names the cause
+          test -f target/qa/report.md || exit 0
+          sed -n '/^Failing in/,/^## Perf/p' target/qa/report.md
       - name: No tracked file changed
         run: git diff --exit-code
   windows-portable:
