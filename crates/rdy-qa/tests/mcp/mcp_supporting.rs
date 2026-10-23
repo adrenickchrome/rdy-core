@@ -105,7 +105,7 @@ fn rf5_home_and_explicit_parent_match_decide() {
         let id = w["created"].as_object().unwrap().values().next().unwrap();
         let ctx = c.call("rdy_context", json!({"id": id})).ok();
         assert_eq!(ctx["parent"], reg, "{ty}: {ctx}");
-        assert_eq!(ctx["type"], ty, "{ctx}");
+        assert_eq!(ctx["block_type"], ty, "{ctx}");
     }
     let b = c.call("rdy_brief", json!({"ids": [reg]})).ok();
     let token = b["base"]["token"].as_str().unwrap().to_string();
