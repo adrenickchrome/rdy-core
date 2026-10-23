@@ -93,7 +93,7 @@ fn evt1_a_landing_batch_gives_commit_proposed_landed_and_rebased() {
         "{pe:?}"
     );
     let approver = Session {
-        actor: "h".into(),
+        actor: "human:h".into(),
         run: None,
         role: Role::Approver,
         kind: rdy_engine::SessionKind::Human,
