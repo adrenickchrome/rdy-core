@@ -165,6 +165,11 @@ fn world(r: &mut Rdy) {
     commit(r, blocks);
 }
 
+/// A governs row: decision, status, and its (block, entity) route pairs.
+type Row = (String, String, Vec<(String, String)>);
+/// A fact sheet decision: id, via, status and the blocks it governs.
+type SheetRow = (String, String, String, Vec<String>);
+
 fn ids<'a>(v: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     v.into_iter().map(str::to_string).collect()
 }
@@ -213,7 +218,7 @@ fn rf6_every_engine_consumer_uses_the_four_routes() {
             None,
         )
         .unwrap();
-    let governs: Vec<(String, String, Vec<(String, String)>)> = b
+    let governs: Vec<Row> = b
         .governs
         .iter()
         .map(|g| {
@@ -247,7 +252,7 @@ fn rf6_every_engine_consumer_uses_the_four_routes() {
     // fact sheet of t-TERM1: its own proposed decision lists what it governs through it; the
     // facts' live and proposed governors are listed with the fact
     let sheet = st.fact_sheet(&w(), &id("t-TERM1"), NameKind::Name).unwrap();
-    let decisions: Vec<(String, String, String, Vec<String>)> = sheet
+    let decisions: Vec<SheetRow> = sheet
         .decisions
         .iter()
         .map(|d| (d.id.clone(), d.via.clone(), d.status.clone(), d.on.clone()))

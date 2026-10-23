@@ -46,6 +46,9 @@ fn decide_in(
     bid(&w.created["$decision"])
 }
 
+/// A governs row by decision: status, blocks, and its (block, entity) route pairs.
+type Row = (String, Vec<String>, Vec<(String, String)>);
+
 /// The exact `ungrounded` fix (D-X4RYX).
 fn ungrounded_fix(b: &BlockId) -> String {
     format!(
@@ -93,7 +96,7 @@ fn rf6_brief_governs_keeps_proposed_and_through() {
     // P, proposed in view w, affects the spoke only
     let p = decide_in(&mut r, "w", &s, "Spokes stay short", &[&u]);
     let got = brief_of(&r, &view("w"), &[&a, &b]);
-    let rows: BTreeMap<String, (String, Vec<String>, Vec<(String, String)>)> = got
+    let rows: BTreeMap<String, Row> = got
         .governs
         .iter()
         .map(|g| {
