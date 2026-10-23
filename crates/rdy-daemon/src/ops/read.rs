@@ -1,4 +1,4 @@
-//! The read ops: status, show, ls, log, impact, suspects, tags and block.
+//! The read ops: status, show, ls, log, impact, trace, suspects, tags and block.
 use super::*;
 use rdy_engine::engine::open_report_json;
 use rdy_engine::{E_BAD_INPUT, HISTORY_MAX, RdyError, Scope, block_to_yaml};
@@ -46,6 +46,17 @@ pub(super) struct ImpactArgs {
     id: String,
     depth: Option<u32>,
     scope: Option<String>,
+}
+
+/// `trace`'s arguments: the same closed keys as `rdy_trace` (D-1876T).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct TraceArgs {
+    id: String,
+    scope: Option<String>,
+    depth: Option<i64>,
+    detail: Option<bool>,
+    max_tokens: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -227,6 +238,25 @@ pub(super) fn impact(cx: &OpContext, a: ImpactArgs) -> Result<Value, RdyError> {
         v["by_area"] = json!(by_area);
     }
     Ok(v)
+}
+
+/// Why a block says what it says (D-1876T): the reply `rdy_trace` returns, over the canon scope
+/// by default as every read op reads. The token limit, the depth range, the pinned version and
+/// the root's refusal are the tool's.
+pub(super) fn trace(cx: &OpContext, a: TraceArgs) -> Result<Value, RdyError> {
+    let options = rdy_mcp::tools::trace_options(a.depth, a.detail, a.max_tokens)?;
+    let st = cx.engine.read();
+    // refv1: `id@version` or a ref line reads under that version; a clashing scope is refused
+    let target = rdy_model::reference::parse_target(&a.id)
+        .map_err(|m| RdyError::new(E_BAD_INPUT, m, rdy_model::reference::BAD_REF_FIX))?;
+    let text = target
+        .scope_text(a.scope.as_deref())
+        .map_err(|m| RdyError::new(E_BAD_INPUT, m, rdy_model::reference::PIN_CLASH_FIX))?;
+    let scope = scope_of(&st, cx, text.as_deref())?;
+    let bid = st
+        .resolve_id(&scope, &target.id)
+        .map_err(rdy_mcp::tools::trace_root_error)?;
+    Ok(to_json(&st.trace(&scope, &bid, options)?))
 }
 
 pub(super) fn suspects(cx: &OpContext, a: ScopeArgs) -> Result<Value, RdyError> {

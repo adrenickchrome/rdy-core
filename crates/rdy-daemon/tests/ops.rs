@@ -39,8 +39,14 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
 
 #[test]
 fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
-    assert_eq!(OPS.len(), 55);
+    assert_eq!(OPS.len(), 56);
     assert_eq!(OPS[0], "session");
+    let impact = OPS.iter().position(|o| *o == "impact").unwrap();
+    assert_eq!(
+        &OPS[impact + 1..impact + 3],
+        ["trace", "suspects"],
+        "rf12: trace follows impact"
+    );
     let new_doc = OPS.iter().position(|o| *o == "new_doc").unwrap();
     assert_eq!(
         OPS[new_doc + 1],
@@ -1539,4 +1545,123 @@ fn rf5_new_finding_and_new_source_brief_a_stable_parent() {
             .unwrap();
         assert_eq!(b.parent.as_ref().map(|p| p.to_string()), Some(reg.clone()));
     }
+}
+
+/// rf12 (D-1876T): the `trace` op takes `{id, scope?, depth?, detail?, max_tokens?}` and nothing
+/// else, reads like `rdy_trace` (the same refusals, the same reply), and writes nothing.
+#[test]
+fn rf12_the_trace_op_is_strict_and_reads_the_engine() {
+    let (d, e) = project();
+    let s = human();
+    let w = doc(&e, "a");
+    let id = w["created"]["$d"].as_str().unwrap().to_string();
+    let c = cx(&e, &s, d.path());
+    let log_end = || {
+        e.write(Box::new(|r| {
+            Ok(json!(format!("{:?}", r.store().log_end())))
+        }))
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string()
+    };
+    let before = log_end();
+    // canon is the default scope, and the doc is only in the work view
+    let err = dispatch(&c, "trace", json!({"id": id})).unwrap_err();
+    assert_eq!(err.code, "E_UNKNOWN_BLOCK", "{err}");
+    assert_eq!(err.fix, "check the id with rdy_search", "{err}");
+    let v = dispatch(&c, "trace", json!({"id": id, "scope": "work"})).unwrap();
+    assert_eq!(v["id"], id);
+    assert_eq!(v["block_type"], "doc");
+    for k in [
+        "governing",
+        "sources",
+        "decisions",
+        "premises",
+        "edges",
+        "questions",
+        "frontier",
+    ] {
+        assert_eq!(v[k], json!([]), "{k}: {v}");
+    }
+    assert_eq!(v["ungrounded"], false, "{v}");
+    assert_eq!(
+        v["introduced"],
+        Value::Null,
+        "an unlanded block has no introduction"
+    );
+    for k in ["truncated", "omitted"] {
+        assert!(v.get(k).is_none(), "{k}: {v}");
+    }
+    // every parameter parses
+    dispatch(
+        &c,
+        "trace",
+        json!({"id": id, "scope": "work", "depth": 8, "detail": true, "max_tokens": 100_000}),
+    )
+    .unwrap();
+    // strict: an unknown key names the nearest known one, a wrong shape names the args
+    let err = dispatch(
+        &c,
+        "trace",
+        json!({"id": id, "scope": "work", "detial": true}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT);
+    assert_eq!(err.message, "trace: unknown field \"detial\"");
+    assert!(err.fix.starts_with("did you mean \"detail\"?"), "{err}");
+    for args in [
+        json!({}),
+        json!({"id": id, "depth": "3"}),
+        json!({"id": id, "detail": "yes"}),
+        json!({"id": id, "max_tokens": -1}),
+    ] {
+        let err = dispatch(&c, "trace", args.clone()).unwrap_err();
+        assert_eq!(err.code, E_BAD_INPUT, "{args}");
+        assert!(err.message.starts_with("trace: "), "{args}: {err}");
+        assert_eq!(
+            err.fix, "args for trace: {id, scope?, depth?, detail?, max_tokens?}",
+            "{args}"
+        );
+    }
+    // the closed depth range, signed
+    for depth in [-1i64, 0, 9] {
+        let err = dispatch(
+            &c,
+            "trace",
+            json!({"id": id, "scope": "work", "depth": depth}),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, E_BAD_INPUT);
+        assert_eq!(err.message, format!("depth {depth} is outside 1 to 8"));
+        assert_eq!(err.fix, "pass a depth from 1 to 8");
+    }
+    // the token limit, with the read boundaries' text
+    let err = dispatch(
+        &c,
+        "trace",
+        json!({"id": id, "scope": "work", "max_tokens": 100_001}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "E_LIMIT");
+    assert_eq!(err.message, "max_tokens 100001 is over the limit of 100000");
+    assert_eq!(
+        err.fix,
+        "ask for at most 100000 tokens and page through the rest"
+    );
+    // a pinned version and a different scope clash; an unknown scope is not found
+    let err = dispatch(
+        &c,
+        "trace",
+        json!({"id": format!("{id}@v1"), "scope": "work"}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT);
+    assert_eq!(
+        err.fix,
+        "use the pinned version, or read the bare id with a scope"
+    );
+    let err = dispatch(&c, "trace", json!({"id": id, "scope": "nope"})).unwrap_err();
+    assert_eq!(err.code, "E_NOT_FOUND", "{err}");
+    assert_eq!(log_end(), before, "a trace writes nothing");
 }

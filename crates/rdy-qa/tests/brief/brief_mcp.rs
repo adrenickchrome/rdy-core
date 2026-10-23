@@ -233,6 +233,17 @@ fn mbrf1_the_overview_names_the_project_and_the_schema_and_tools_document_the_ed
         i.contains("Brief before editing") && i.contains("must cite a briefing"),
         "{i}"
     );
+    // rf12 (D-1876T): the Why sentence follows the Finding sentence, and the briefing guide
+    // places the new sections and says where trace differs
+    assert!(
+        i.contains("cite it from a decision with depends_on. Why: to learn why a block says what it says, call rdy_trace."),
+        "{i}"
+    );
+    let brief = sch["brief"].as_str().unwrap();
+    assert!(
+        brief.ends_with("Governs includes proposed decisions and decisions that affect a described entity; through names that entity. Sources follow suspects. Findings follow related_decisions. Trace explains why. A briefing guards a write and stays one level deep."),
+        "{brief}"
+    );
 }
 
 #[test]

@@ -47,7 +47,7 @@ use plan::{plan, reaffirm, repin};
 pub use project::{Cleaned, clean_quarantine, quarantine};
 use project::{check, fsck, reindex};
 use publication::publication_check;
-use read::{block, coverage, impact, log, ls, show, status, suspects, tags};
+use read::{block, coverage, impact, log, ls, show, status, suspects, tags, trace};
 use redaction::redact;
 use remote::remote;
 use search::search;
@@ -100,6 +100,7 @@ pub const OPS: &[&str] = &[
     "ls",
     "log",
     "impact",
+    "trace",
     "suspects",
     "tags",
     "block",
@@ -375,6 +376,10 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         "ls" => ls(cx, parse(op, args, "{path?, scope?, depth?}")?),
         "log" => log(cx, parse(op, args, "{limit?, since?, verify?}")?),
         "impact" => impact(cx, parse(op, args, "{id, depth?, scope?}")?),
+        "trace" => trace(
+            cx,
+            parse(op, args, "{id, scope?, depth?, detail?, max_tokens?}")?,
+        ),
         "suspects" => suspects(cx, parse(op, args, "{scope?}")?),
         "tags" => {
             parse::<NoArgs>(op, args, "{}")?;
