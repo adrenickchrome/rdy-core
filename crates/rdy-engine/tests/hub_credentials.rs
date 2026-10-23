@@ -2257,6 +2257,19 @@ fn id5_invalid_handle_cannot_form_a_human_claim() {
         assert!(!disk_text(&e.creds).contains(&new_access()), "{handle:?}");
         fake.done();
     }
+    // The transport's own invalid-handle failure (the real decoder's) is the same error.
+    seed(&e, &[(INSTALL, pending(T0 + 600_000, T0, 5))]);
+    let fake = Fake::default();
+    fake.reply("Metadata", meta(INSTALL))
+        .reply("DevicePoll", polled(&new_access(), &new_refresh()))
+        .reply("Me", Err(HubFailure::InvalidHandle));
+    assert_code(
+        svc(&e, &fake, &clock).state(&install, &ca),
+        E_UPSTREAM_PROTOCOL,
+    );
+    assert_eq!(state_on_disk(&e.creds, INSTALL), Some("reauth_required"));
+    assert!(!disk_text(&e.creds).contains(&new_access()));
+    fake.done();
     // A transport failure of the same `/me` step keeps `E_UPSTREAM_AUTH`.
     seed(&e, &[(INSTALL, pending(T0 + 600_000, T0, 5))]);
     let fake = Fake::default();

@@ -4,6 +4,10 @@
 mod hub_tls;
 
 use hub_tls::{Ca, Recorded, Reply, Server};
+use rdy_engine::hub_config::{
+    Credential, CredentialFile, PendingSignIn, encode_credentials, parse_credentials,
+};
+use rdy_engine::hub_credentials::{AuthPhase, HubCredentials};
 use rdy_engine::hub_http::{HttpHubTransport, route};
 use rdy_engine::hub_types::*;
 use rdy_engine::{
@@ -84,6 +88,7 @@ fn kind(f: &HubFailure) -> String {
         HubFailure::Refused => "Refused".into(),
         HubFailure::Transport { may_have_sent } => format!("Transport({may_have_sent})"),
         HubFailure::Protocol => "Protocol".into(),
+        HubFailure::InvalidHandle => "InvalidHandle".into(),
         HubFailure::Local(e) => format!("Local({})", e.code),
     }
 }
@@ -2312,11 +2317,6 @@ fn hsa4_hub_fixtures_round_trip() {
         (
             HubOperation::Me,
             200,
-            ME_REPLY.replace(r#""handle":"test-person""#, r#""handle":"test person""#),
-        ),
-        (
-            HubOperation::Me,
-            200,
             ME_REPLY.replace(r#""kind":"person""#, r#""kind":"robot""#),
         ),
         (
@@ -2429,6 +2429,27 @@ fn hsa4_hub_fixtures_round_trip() {
         let (r, _) = hub.send(Reply::json(status, &body), hub.call(op));
         assert_eq!(failure(r), "Protocol", "{body}");
     }
+    // A whole `/me` reply with a handle outside the actor form is its own failure, so sign-in
+    // can tell it from a reply that asks for another sign-in. Anything else wrong with the reply
+    // stays a plain protocol failure.
+    let (r, _) = hub.send(
+        Reply::json(
+            200,
+            &ME_REPLY.replace(r#""handle":"test-person""#, r#""handle":"test person""#),
+        ),
+        hub.call(HubOperation::Me),
+    );
+    assert_eq!(failure(r), "InvalidHandle");
+    let (r, _) = hub.send(
+        Reply::json(
+            200,
+            &ME_REPLY
+                .replace(r#""handle":"test-person""#, r#""handle":"test person""#)
+                .replace(ACCOUNT, "acc_"),
+        ),
+        hub.call(HubOperation::Me),
+    );
+    assert_eq!(failure(r), "Protocol");
 
     // A reply time is RFC3339 within 64 bytes. The compromise-input rules (nine fractional
     // digits, no leap second) bind only what rdy sends, so a hub time beyond them is kept as
@@ -2582,4 +2603,121 @@ fn hsa4_each_exchange_builds_and_drops_its_own_client() {
     server.wait_closed(2);
     drop(transport);
     assert_eq!(server.finish(), 0);
+}
+
+/// Sign-in over the real transport and decoder: a `/me` reply whose handle is outside the actor
+/// form is the hub's malformed reply (`E_UPSTREAM_PROTOCOL`), not a sign-in to repeat, and
+/// nothing ready is saved. Every other `/me` failure keeps `E_UPSTREAM_AUTH`.
+#[test]
+fn id5_invalid_handle_in_a_real_me_reply_fails_sign_in_as_protocol() {
+    let long = "a".repeat(65);
+    let bad_handles = [
+        "test person",
+        "Test-Person",
+        "a/b",
+        "é",
+        "-a",
+        "a-",
+        "",
+        long.as_str(),
+    ];
+    let me_with = |handle: &str| {
+        ME_REPLY.replace(
+            r#""handle":"test-person""#,
+            &format!(r#""handle":"{handle}""#),
+        )
+    };
+    let other_failures = [
+        ME_REPLY.replace(r#""kind":"person""#, r#""kind":"robot""#),
+        ME_REPLY.replace(r#","created_at":"2026-08-01T08:00:00Z""#, ""),
+        ME_REPLY.replace("acc_00000000000000000000000001", "bad"),
+        // An invalid handle with another fault is not the handle's failure alone.
+        me_with("test person").replace("acc_00000000000000000000000001", "bad"),
+    ];
+    let good = me_with("test-person");
+
+    let run = |me_body: &str| -> (
+        Result<rdy_engine::hub_credentials::AuthState, rdy_engine::RdyError>,
+        String,
+        String,
+    ) {
+        let mut server = Server::start();
+        let o = server.origin().to_string();
+        let install = Origin::parse(&o).unwrap();
+        let dir = tempfile::Builder::new()
+            .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let cfg = dir.path().join("cfg/rdy");
+        std::fs::create_dir_all(&cfg).unwrap();
+        let ca = dir.path().join("ca.pem");
+        std::fs::write(&ca, server.ca_pem()).unwrap();
+        let user_file = cfg.join("config.yaml");
+        std::fs::write(
+            &user_file,
+            format!(
+                "hub:\n  installs:\n    {o}:\n      ca_file: {}\n",
+                ca.display()
+            ),
+        )
+        .unwrap();
+        let creds = cfg.join("credentials.yaml");
+        let mut file = CredentialFile::default();
+        file.set(
+            install.clone(),
+            Some(Credential::Pending(PendingSignIn {
+                machine_name: MACHINE.into(),
+                device_code: Secret::new(DEVICE_CODE),
+                user_code: USER_CODE.into(),
+                verification_uri: format!("{o}/app/device"),
+                expires_at_ms: i64::MAX / 2,
+                next_poll_at_ms: 0,
+                interval_seconds: 5,
+            })),
+        );
+        std::fs::write(&creds, encode_credentials(&file).unwrap()).unwrap();
+        std::fs::set_permissions(&creds, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+
+        server.reply(Reply::json(200, &sub(METADATA_REPLY, &o)));
+        server.reply(Reply::json(200, TOKEN_REPLY));
+        server.reply(Reply::json(200, me_body));
+        server.accept_n(3);
+        let transport = HttpHubTransport::new(OriginFence::new(install.clone(), []).unwrap())
+            .expect("transport");
+        let service = HubCredentials::new(None, &user_file, &transport, &SystemHubClock);
+        let r = service.state(&install, &agent_claim());
+        let text = std::fs::read_to_string(&creds).unwrap_or_default();
+        let on_disk = parse_credentials(text.as_bytes())
+            .unwrap()
+            .get(&install)
+            .map(|c| c.state().to_string())
+            .unwrap_or_default();
+        assert_eq!(
+            server.requests().len(),
+            3,
+            "metadata, token and `/me` were all sent"
+        );
+        assert_eq!(server.finish(), 0);
+        (r, on_disk, text)
+    };
+
+    for handle in bad_handles {
+        let (r, saved, text) = run(&me_with(handle));
+        assert!(!text.contains(ACCESS), "no token is saved: {handle:?}");
+        let e = r.expect_err(handle);
+        assert_eq!(e.code, E_UPSTREAM_PROTOCOL, "{handle:?}");
+        assert_eq!(saved, "reauth_required", "{handle:?}");
+    }
+    for body in &other_failures {
+        let (r, saved, text) = run(body);
+        assert!(!text.contains(ACCESS), "no token is saved: {body}");
+        assert_eq!(r.expect_err(body).code, E_UPSTREAM_AUTH, "{body}");
+        assert_eq!(saved, "reauth_required", "{body}");
+    }
+    // The settled reply signs in.
+    let (r, saved, _) = run(&good);
+    let ok = r.unwrap();
+    assert_eq!(ok.state, AuthPhase::SignedIn);
+    assert_eq!(saved, "ready");
 }

@@ -1062,6 +1062,10 @@ pub enum HubFailure {
         may_have_sent: bool,
     },
     Protocol,
+    /// A `/me` reply that is whole but names a handle outside the actor form. It is a contract
+    /// mismatch like [`HubFailure::Protocol`] (the same error) and kept apart only so that
+    /// sign-in can tell it from the failures that ask for another sign-in.
+    InvalidHandle,
     Local(RdyError),
 }
 
@@ -1078,7 +1082,7 @@ impl HubFailure {
             HubFailure::Transport {
                 may_have_sent: true,
             } => upstream_uncertain(),
-            HubFailure::Protocol => upstream_protocol(),
+            HubFailure::Protocol | HubFailure::InvalidHandle => upstream_protocol(),
             HubFailure::Local(e) => e,
         }
     }

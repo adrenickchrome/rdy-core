@@ -1680,7 +1680,10 @@ fn decode_api(
             let times_ok = time_ok(&dto.created_at)
                 && dto.away_until.as_deref().is_none_or(time_ok)
                 && dto.earlier_handles.iter().all(|h| time_ok(&h.until));
-            protocol_if(!id_of(ACCOUNT_PREFIX, &dto.id) || !handle_ok(&dto.handle) || !times_ok)?;
+            protocol_if(!id_of(ACCOUNT_PREFIX, &dto.id) || !times_ok)?;
+            if !handle_ok(&dto.handle) {
+                return Err(HubFailure::InvalidHandle);
+            }
             Ok(HubReply::Me(MeReply {
                 account: dto.id,
                 handle: dto.handle,

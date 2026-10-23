@@ -635,7 +635,7 @@ impl<'a> HubCredentials<'a> {
             Ok(HubReply::Me(me)) if handle_ok(&me.handle) => me,
             // A handle outside the actor form is the hub's malformed reply, not a sign-in to
             // repeat. Nothing is saved.
-            Ok(HubReply::Me(_)) => return Err(upstream_protocol()),
+            Ok(HubReply::Me(_)) | Err(HubFailure::InvalidHandle) => return Err(upstream_protocol()),
             _ => return Err(auth()),
         };
         let ready = ReadyCredential {
