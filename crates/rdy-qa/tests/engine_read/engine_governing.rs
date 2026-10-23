@@ -9,7 +9,7 @@ use rdy_engine::coverage::{
     CoverageIssues, IssueCode, issues_rebuilt_for_tests, rebuilt_for_tests, structural_for_tests,
 };
 use rdy_engine::*;
-use rdy_model::{BlockId, Hash};
+use rdy_model::{BlockId, Change, Hash, Link, Op};
 use rdy_qa::edit_loop::*;
 use rdy_qa::fixtures::*;
 use rdy_qa::tensions::{ag, j_typo, try_put_j};
@@ -166,9 +166,41 @@ fn rf6_brief_governs_keeps_proposed_and_through() {
     assert_eq!(moved, BTreeSet::from([p.clone(), u.clone()]));
 }
 
+/// Commits, to view `v`, an update of block `b` that links it by `reflects` to `target`, as a
+/// typed store write. A write refuses a reflects link to a block that is no source (rf8), so a
+/// store that holds one is made this way.
+fn raw_reflects_link(r: &mut Rdy, v: &str, b: &BlockId, target: &BlockId) {
+    let mut next = r.read().block(&view(v), b).unwrap();
+    let base = next.version_hash();
+    next.links.insert(
+        "reflects".into(),
+        vec![Link {
+            target: target.clone(),
+            part: None,
+        }],
+    );
+    let deps = r.read().included(v).to_vec();
+    r.store_mut()
+        .commit_to_view(
+            v,
+            Change {
+                view: v.into(),
+                ops: vec![Op::Update { base, block: next }],
+                deps,
+                provenance: writer().provenance(),
+                justification: None,
+                message: "raw".into(),
+                links: Default::default(),
+                read_identity: None,
+            },
+        )
+        .unwrap();
+    r.invalidate();
+}
+
 /// Doc `spec` with stable section Summary, in view `w`: source S, source G (deleted by a later
 /// write), claim c1 reflecting S, claim c2 with reflects globs, claim c3 reflecting G, claim c4
-/// reflecting claim c1 (no source), claim c5 with an empty glob list.
+/// reflecting claim c1 (no source; a typed store write), claim c5 with an empty glob list.
 #[test]
 fn rf6_sources_and_globs_govern_without_decisions() {
     let (_d, mut r) = project();
@@ -180,11 +212,17 @@ fn rf6_sources_and_globs_govern_without_decisions() {
         {"op": "create", "type": "claim", "id": "$c1", "parent": "$s", "body": "One holds.", "links": {"reflects": [{"target": "$src"}]}},
         {"op": "create", "type": "claim", "id": "$c2", "parent": "$s", "body": "Two holds.", "fields": {"reflects": ["src/*.rs"]}},
         {"op": "create", "type": "claim", "id": "$c3", "parent": "$s", "body": "Three holds.", "links": {"reflects": [{"target": "$gone"}]}},
-        {"op": "create", "type": "claim", "id": "$c4", "parent": "$s", "body": "Four holds.", "links": {"reflects": [{"target": "$c1"}]}},
+        {"op": "create", "type": "claim", "id": "$c4", "parent": "$s", "body": "Four holds."},
         {"op": "create", "type": "claim", "id": "$c5", "parent": "$s", "body": "Five holds.", "fields": {"reflects": []}}
     ]), j_typo())
     .unwrap();
     let c = |k: &str| bid(&w.created[k]);
+    raw_reflects_link(&mut r, "w", &c("$c4"), &c("$c1"));
+    assert_eq!(
+        r.read().block(&view("w"), &c("$c4")).unwrap().links["reflects"][0].target,
+        c("$c1"),
+        "c4 reflects a claim"
+    );
     try_put_j(
         &mut r,
         "w",
