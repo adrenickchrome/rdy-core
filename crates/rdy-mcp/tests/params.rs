@@ -1602,14 +1602,65 @@ fn hpb15_publish_params_are_closed_and_keep_latest_is_optional() {
     }
 }
 
-/// rf2: `findings` is no key of rdy_review_submit any more; the refusal is the normal strict-input
-/// text, and its fix names citations through the whole key list. A close misspelling gets the
-/// nearest-key hint. No alias or special parser exists.
+fn dir_bytes(dir: &std::path::Path) -> u64 {
+    let mut total = 0;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let m = e.metadata().unwrap();
+            if m.is_dir() {
+                stack.push(e.path());
+            } else {
+                total += m.len();
+            }
+        }
+    }
+    total
+}
+
+/// rf2: `findings` is no key of rdy_review_submit any more. The refusal is the normal
+/// strict-input text, and its fix names citations through the whole key list; nothing is
+/// written; a close misspelling gets the nearest-key hint; then a valid citations request
+/// succeeds. No alias or special parser exists.
 #[test]
 fn rf2_old_findings_is_refused_before_write() {
-    let base = json!({"request": "rq-000000000000", "case_hash": "x", "verdict": "tension"});
+    let dir = tempfile::tempdir().unwrap();
+    let rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let mut w = McpState::new(std::sync::Arc::new(rdy_engine::engine::Local::new(rdy)));
+    rdy_session(
+        &mut w,
+        serde_json::from_value(json!({"actor": "agent:a", "run": "a", "role": "writer"})).unwrap(),
+    )
+    .unwrap();
+    rdy_write(
+        &mut w,
+        serde_json::from_value(json!({"ops": [
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "spec", "title": "Spec", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}},
+            {"op": "create", "type": "claim", "id": "$x", "parent": "$s", "body": "A holds."},
+            {"op": "create", "type": "claim", "id": "$y", "parent": "$s", "body": "A does not hold."}
+        ]}))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut r = McpState::new(std::sync::Arc::clone(&w.engine));
+    rdy_session(
+        &mut r,
+        serde_json::from_value(json!({"actor": "agent:r", "run": "r", "role": "reviewer"}))
+            .unwrap(),
+    )
+    .unwrap();
+    let n = rdy_review_next(
+        &mut r,
+        serde_json::from_value(json!({"kind": "tension"})).unwrap(),
+    )
+    .unwrap();
+    let block = n["case"]["blocks"][0]["id"].clone();
+    let base = json!({"request": n["request"], "case_hash": n["case_hash"], "verdict": "tension"});
+    let before = dir_bytes(dir.path());
+
     let mut args = base.clone();
-    args["findings"] = json!([{"block": "c-AAAAA", "note": "n"}]);
+    args["findings"] = json!([{"block": block, "note": "n"}]);
     assert_eq!(
         refusal::<ReviewSubmitParams>("rdy_review_submit", args),
         bad(
@@ -1625,10 +1676,18 @@ fn rf2_old_findings_is_refused_before_write() {
         message.contains("citatons") && fix.contains("citations"),
         "{message} {fix}"
     );
+    assert_eq!(
+        dir_bytes(dir.path()),
+        before,
+        "a refused request writes nothing"
+    );
+
     let mut ok = base;
-    ok["citations"] = json!([{"block": "c-AAAAA", "note": "n"}]);
+    ok["citations"] = json!([{"block": block, "note": "these two cannot both hold"}]);
     let p =
         parse_params::<ReviewSubmitParams>("rdy_review_submit", ok.as_object().unwrap().clone())
             .unwrap();
-    assert_eq!(p.citations.unwrap().len(), 1);
+    let sub = rdy_review_submit(&mut r, p).unwrap();
+    assert_eq!(sub["severity"], "advisory");
+    assert!(dir_bytes(dir.path()) > before);
 }
