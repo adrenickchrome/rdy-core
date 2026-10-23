@@ -278,10 +278,19 @@ fn check_landing(st: &mut McpState, fx: &Fixture, i: usize) {
                 m.id,
                 i + 1
             );
-            if format != "compact" {
+            assert!(
+                text.contains(&m.text),
+                "{format} read of {} at L{} lacks {:?}: {text}",
+                m.id,
+                i + 1,
+                m.text
+            );
+            if format == "compact" {
+                // the requested block's own line carries its recorded title or name
+                let first = text.lines().next().unwrap();
                 assert!(
-                    text.contains(&m.text),
-                    "{format} read of {} at L{} lacks {:?}: {text}",
+                    first.starts_with(&format!("{} ", m.id)) && first.contains(&m.text),
+                    "compact read of {} at L{} has first line {first:?}, not one with {:?}",
                     m.id,
                     i + 1,
                     m.text
