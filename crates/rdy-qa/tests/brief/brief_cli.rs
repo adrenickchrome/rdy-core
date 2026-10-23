@@ -508,7 +508,15 @@ mod msw8_conflicts {
             version: base,
             conflict,
         };
-        r.edit_block_at(&as_agent("agent:a", "r1"), "a", b, Some(base), None, None)
+        r.edit_block_at(
+            &as_agent("agent:a", "r1"),
+            "a",
+            b,
+            Some(base),
+            None,
+            None,
+            None,
+        )
     }
 
     /// The claim lands "one" (vc); view a updates it to "alpha" (v0); view b updates it to

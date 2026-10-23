@@ -286,6 +286,98 @@ pub struct WriteRequest {
     pub message: String,
 }
 
+/// rf8 (D-4WC6R, D-XC9B9): a write's raw `reflects` justification. `sources` are selectors (an
+/// id, a key, a path or a `$name` placeholder of a block the write creates), resolved in the
+/// write's own overlay once every op has applied (`build_ops`); `code` records the code state of
+/// each block the write creates or rewrites that declares reflects globs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReflectsInput {
+    pub sources: Vec<String>,
+    pub code: bool,
+}
+
+/// The most source arguments one `reflects` takes, counted before deduplication.
+pub const MAX_REFLECTS_SOURCES: usize = 5000;
+/// The most characters one `reflects` source selector has.
+pub const MAX_REFLECTS_SELECTOR_CHARS: usize = 2000;
+
+impl ReflectsInput {
+    /// The raw checks, before the write reads anything: the source count, each selector's
+    /// length, and that it names something.
+    pub fn check(&self) -> Result<(), RdyError> {
+        if self.sources.len() > MAX_REFLECTS_SOURCES {
+            return Err(RdyError::new(
+                E_LIMIT,
+                format!("reflects takes at most {MAX_REFLECTS_SOURCES} sources"),
+                "split the write into smaller changes",
+            ));
+        }
+        if self
+            .sources
+            .iter()
+            .any(|s| s.chars().count() > MAX_REFLECTS_SELECTOR_CHARS)
+        {
+            return Err(RdyError::new(
+                E_LIMIT,
+                format!(
+                    "a reflects source selector takes at most {MAX_REFLECTS_SELECTOR_CHARS} characters"
+                ),
+                "use the source's id",
+            ));
+        }
+        if self.sources.is_empty() && !self.code {
+            return Err(bad(
+                "reflects names no source and no code",
+                "name a source (S-…), or pass code: true for a block with reflects globs",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The raw `reflects` object as a boundary receives it: `{sources?, code?}`, with no other key.
+/// Missing sources are none, missing code is false; an explicit false is refused ([`Self::input`]).
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReflectsArg {
+    #[serde(default)]
+    pub sources: Option<Vec<String>>,
+    #[serde(default)]
+    pub code: Option<bool>,
+}
+
+impl ReflectsArg {
+    /// The input the writer takes; `code: false` is `E_BAD_INPUT`.
+    pub fn input(self) -> Result<ReflectsInput, RdyError> {
+        if self.code == Some(false) {
+            return Err(bad(
+                "reflects code must be true when given",
+                "pass code: true, or omit code",
+            ));
+        }
+        Ok(ReflectsInput {
+            sources: self.sources.unwrap_or_default(),
+            code: self.code.unwrap_or(false),
+        })
+    }
+}
+
+/// The refusal of a write given more than one justification.
+pub fn one_justification_error() -> RdyError {
+    bad(
+        "give one of implements, editorial or reflects",
+        "implements for decision-backed changes, editorial for typo, restructure or clarify, reflects for changes that follow a source",
+    )
+}
+
+/// What [`parse_justification`] makes: the justification stored as given (`implements`,
+/// `editorial`), or the raw `reflects` input the writer resolves in its overlay.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ParsedJustification {
+    pub stored: Option<Justification>,
+    pub reflects: Option<ReflectsInput>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct WriteResult {
     pub change: String,
@@ -308,6 +400,14 @@ pub struct WriteResult {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub reaffirmed: Vec<crate::reaffirm::Reaffirmed>,
     pub warnings: Vec<Issue>,
+    /// rf8 (D-XC9B9): on a `reflects` write with `code: true`, the blocks whose code state it
+    /// recorded, sorted; empty when no checkout is linked. Absent on every other write.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_recorded: Option<Vec<String>>,
+    /// rf8 (D-4WC6R): the normalized `reflects` justification the change stores; absent for
+    /// every other justification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub justification: Option<crate::JustificationInfo>,
 }
 
 /// Why a JSON value is no field value.
@@ -1376,8 +1476,8 @@ fn check_not_frozen(
 }
 
 /// What `build_ops` makes: the ops, created placeholders → ids, the blocks touched, the names
-/// rdy assigned and the keys rdy assigned (both by block id), the decisions re-affirmed, and the
-/// blocks a repin with `code: true` names.
+/// rdy assigned and the keys rdy assigned (both by block id), the decisions re-affirmed, the
+/// blocks a repin with `code: true` names, and what a `reflects` input resolved to.
 type Built = (
     Vec<Op>,
     BTreeMap<String, String>,
@@ -1386,7 +1486,15 @@ type Built = (
     BTreeMap<String, String>,
     Vec<crate::reaffirm::Reaffirmed>,
     BTreeSet<BlockId>,
+    Option<ReflectsBuilt>,
 );
+
+/// rf8: what a `reflects` write resolved in its overlay: the normalized justification the change
+/// stores, and with `code: true` the blocks whose code state it records.
+struct ReflectsBuilt {
+    justification: Justification,
+    code: BTreeSet<BlockId>,
+}
 
 /// The path of `id` in the overlay: each tree ancestor's name, itself included, joined with `/`.
 /// `None` when a doc or folder on the chain has no name, a parent is missing, or the chain is
@@ -1784,6 +1892,7 @@ fn build_ops(
     justification: Option<&Justification>,
     rdy_keys: &BTreeSet<BlockId>,
     selection: &crate::reaffirm::Selection,
+    reflects: Option<&ReflectsInput>,
 ) -> Result<Built, RdyError> {
     let mut ov = Overlay::new(base);
     ov.conflicted = conflicts.list.iter().map(|c| c.block.clone()).collect();
@@ -1809,6 +1918,12 @@ fn build_ops(
     // D-2WR0G: the field names each create or editing update supplies, for the decision basis
     // and time check (`decision_fields::validate_set`)
     let mut supplied: BTreeMap<BlockId, BTreeSet<String>> = BTreeMap::new();
+    // rf8: the blocks this write creates or edits (code: true stamps those with globs), those a
+    // `reflects` justification links (less the updates naming the `reflects` kind), and those
+    // whose op names the `reflects` kind
+    let mut written: BTreeSet<BlockId> = BTreeSet::new();
+    let mut reflects_recipients: BTreeSet<BlockId> = BTreeSet::new();
+    let mut explicit_reflects: BTreeSet<BlockId> = BTreeSet::new();
 
     for (i, input) in inputs.into_iter().enumerate() {
         match input {
@@ -1927,6 +2042,9 @@ fn build_ops(
                 refuse_engine_input(&fields, &[], &format!("op {i}"))?;
                 let sets_key = fields.contains_key("key");
                 supplied.insert(new_id.clone(), fields.keys().cloned().collect());
+                if links.contains_key(supporting::REFLECTS_LINK) {
+                    explicit_reflects.insert(new_id.clone());
+                }
                 let mut block = Block {
                     id: new_id.clone(),
                     block_type,
@@ -1959,6 +2077,8 @@ fn build_ops(
                 touched.insert(new_id.clone());
                 content_touched.insert(new_id.clone());
                 rewritten.insert(new_id.clone());
+                written.insert(new_id.clone());
+                reflects_recipients.insert(new_id.clone());
                 ov.set(new_id, Some(block.clone()));
                 ops.push(Op::Create { block });
                 prior.push((false, BTreeMap::new()));
@@ -1999,6 +2119,10 @@ fn build_ops(
                 let names_implements = links
                     .as_ref()
                     .is_some_and(|l| l.contains_key(decision::IMPLEMENTS));
+                // rf8: and one naming `reflects` sets that list exactly
+                let names_reflects = links
+                    .as_ref()
+                    .is_some_and(|l| l.contains_key(supporting::REFLECTS_LINK));
                 // D-2WR0G: the names this update sets, even to the value held; a type change to
                 // decision checks every time field it holds
                 let mut names: BTreeSet<String> = fields.keys().cloned().collect();
@@ -2100,6 +2224,12 @@ fn build_ops(
                 }
                 if edits {
                     supplied.insert(id.clone(), names);
+                    written.insert(id.clone());
+                    if names_reflects {
+                        explicit_reflects.insert(id.clone());
+                    } else {
+                        reflects_recipients.insert(id.clone());
+                    }
                 }
                 ov.set(id, Some(block.clone()));
                 ops.push(Op::Update {
@@ -2480,6 +2610,23 @@ fn build_ops(
 
     // D-YQCY9: a write-level `implements` links the content blocks it creates or edits
     implements_links(pack, &mut ov, &mut ops, &rewritten, justification);
+    // rf8 (O10): a `reflects` input resolves in the final overlay, before the second pass
+    let reflects = reflects
+        .map(|raw| {
+            reflects_links(
+                pack,
+                &mut ov,
+                &res,
+                &mut ops,
+                raw,
+                &ReflectsSets {
+                    written: &written,
+                    recipients: &reflects_recipients,
+                    explicit: &explicit_reflects,
+                },
+            )
+        })
+        .transpose()?;
 
     // second pass: references, decision permissions, schema validation, pins. `ov` holds every
     // block of this write at its final content (content does not depend on pins), so a target
@@ -2635,6 +2782,7 @@ fn build_ops(
         assigned,
         reaffirmed,
         code_repins,
+        reflects,
     ))
 }
 
@@ -2773,14 +2921,7 @@ fn implements_links(
             Op::Create { block } | Op::Update { block, .. } => block,
             Op::Delete { .. } => continue,
         };
-        if !rewritten.contains(&block.id)
-            || block.block_type == decision::DECISION
-            || pack.class_of(&block.block_type) == TypeClass::Supporting
-            || pack
-                .block_types
-                .get(&block.block_type)
-                .is_some_and(|t| t.traits.contains(&rdy_schema::Trait::Structural))
-        {
+        if !rewritten.contains(&block.id) || !link_recipient(pack, block) {
             continue;
         }
         let mut added = false;
@@ -2806,6 +2947,195 @@ fn implements_links(
             ov.set(block.id.clone(), Some(block.clone()));
         }
     }
+}
+
+/// Whether a write-level justification links `block` (D-YQCY9, rf8): not a decision, and of a
+/// type that is neither supporting nor structural (doc, folder, section).
+fn link_recipient(pack: &Pack, block: &Block) -> bool {
+    block.block_type != decision::DECISION
+        && pack.class_of(&block.block_type) != TypeClass::Supporting
+        && !pack
+            .block_types
+            .get(&block.block_type)
+            .is_some_and(|t| t.traits.contains(&rdy_schema::Trait::Structural))
+}
+
+/// The blocks of a write that a `reflects` input reads (`build_ops` gathers them in its op walk).
+struct ReflectsSets<'s> {
+    /// Created, or updated with an edit: `code: true` stamps those with reflects globs.
+    written: &'s BTreeSet<BlockId>,
+    /// `written` less the updates that name the `reflects` link kind: each gets the sources.
+    recipients: &'s BTreeSet<BlockId>,
+    /// Those whose op names the `reflects` link kind: each target must be a held source.
+    explicit: &'s BTreeSet<BlockId>,
+}
+
+/// `E_BAD_INPUT`: `what` (an id, or the text of a selector that resolved to nothing) is not held.
+fn reflects_not_held(what: &str) -> RdyError {
+    bad(
+        format!("reflects names {what}, which this view does not hold"),
+        format!("include the change that records {what}, or create the source in this write"),
+    )
+}
+
+/// `id` as a `reflects` target: a source the overlay holds once every op has applied.
+fn held_source(ov: &Overlay, id: &BlockId) -> Result<(), RdyError> {
+    match ov.get(id) {
+        None => Err(reflects_not_held(id.as_str())),
+        Some(b) if b.block_type != supporting::SOURCE => Err(bad(
+            format!(
+                "reflects names {id}, a {}; reflects names a source",
+                b.block_type
+            ),
+            "name a source (S-…), or create one with a source op",
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
+/// rf8 (D-4WC6R, D-XC9B9; O10): resolves `raw` in the write's final overlay, once every op has
+/// applied and before the second pass validates and pins. Each selector resolves as an op's id
+/// does (a `$name` placeholder, an id, a key as this write leaves them, a path); a source created
+/// anywhere in the write counts, one it deletes does not. The sources are kept in first
+/// occurrence. Explicit `reflects` links of the write must name held sources too. With `code`, at
+/// least one written content block must declare reflects globs; those are the blocks to stamp.
+/// Then each recipient (`link_recipient`, not naming the kind itself) gets every source as a
+/// `reflects` link it does not hold yet, after its existing ones, in the pending op and the
+/// overlay; the second pass pins them.
+fn reflects_links(
+    pack: &Pack,
+    ov: &mut Overlay,
+    res: &Resolver,
+    ops: &mut [Op],
+    raw: &ReflectsInput,
+    sets: &ReflectsSets,
+) -> Result<ReflectsBuilt, RdyError> {
+    let mut sources: Vec<BlockId> = vec![];
+    let mut seen: BTreeSet<BlockId> = BTreeSet::new();
+    for text in &raw.sources {
+        let id = match res.id(text) {
+            Ok(id) => id,
+            // a key or path that names nothing: the text as given
+            Err(e) if e.code == E_UNKNOWN_BLOCK && e.message.starts_with("no folder or doc at") => {
+                return Err(reflects_not_held(text));
+            }
+            Err(e) => return Err(e),
+        };
+        held_source(ov, &id)?;
+        if seen.insert(id.clone()) {
+            sources.push(id);
+        }
+    }
+    for op in ops.iter() {
+        let (Op::Create { block } | Op::Update { block, .. }) = op else {
+            continue;
+        };
+        if !sets.explicit.contains(&block.id) {
+            continue;
+        }
+        for link in block
+            .links
+            .get(supporting::REFLECTS_LINK)
+            .into_iter()
+            .flatten()
+        {
+            held_source(ov, &link.target)?;
+        }
+    }
+    let mut code = BTreeSet::new();
+    if raw.code {
+        for op in ops.iter() {
+            let (Op::Create { block } | Op::Update { block, .. }) = op else {
+                continue;
+            };
+            if sets.written.contains(&block.id)
+                && link_recipient(pack, block)
+                && !crate::reflects::glob_set(block).is_empty()
+            {
+                code.insert(block.id.clone());
+            }
+        }
+        if code.is_empty() {
+            return Err(bad(
+                "reflects code: no block this write changes declares reflects globs",
+                "set reflects on the block, or name a source",
+            ));
+        }
+    }
+    if sources.is_empty() {
+        return Ok(ReflectsBuilt {
+            justification: Justification::Reflects {
+                sources,
+                code: raw.code,
+            },
+            code,
+        });
+    }
+    // each recipient's missing sources, counted before any link is built: the change is one
+    // record, so links whose ids alone pass its bound are refused as the record check would
+    // refuse them (5000 sources on 5000 blocks would otherwise build millions of links)
+    let mut adds: Vec<(usize, Vec<&BlockId>)> = vec![];
+    let mut bytes = 0usize;
+    for (i, op) in ops.iter().enumerate() {
+        let (Op::Create { block } | Op::Update { block, .. }) = op else {
+            continue;
+        };
+        if !sets.recipients.contains(&block.id) || !link_recipient(pack, block) {
+            continue;
+        }
+        let held: BTreeSet<&BlockId> = block
+            .links
+            .get(supporting::REFLECTS_LINK)
+            .into_iter()
+            .flatten()
+            .map(|l| &l.target)
+            .collect();
+        let missing: Vec<&BlockId> = sources.iter().filter(|s| !held.contains(s)).collect();
+        bytes = missing
+            .iter()
+            .fold(bytes, |n, s| n.saturating_add(s.as_str().len()));
+        if bytes > rdy_store::bounded::MAX_RECORD_BYTES {
+            return Err(RdyError::new(
+                E_LIMIT,
+                format!(
+                    "{} exceeds {} {}",
+                    crate::reaffirm::WRITE_CHANGE,
+                    rdy_store::bounded::MAX_RECORD_BYTES,
+                    rdy_store::bounded::RECORD_BYTES
+                ),
+                crate::reaffirm::WRITE_FIX,
+            ));
+        }
+        if !missing.is_empty() {
+            adds.push((i, missing));
+        }
+    }
+    let adds: Vec<(usize, Vec<BlockId>)> = adds
+        .into_iter()
+        .map(|(i, m)| (i, m.into_iter().cloned().collect()))
+        .collect();
+    for (i, missing) in adds {
+        let (Op::Create { block } | Op::Update { block, .. }) = &mut ops[i] else {
+            continue;
+        };
+        block
+            .links
+            .entry(supporting::REFLECTS_LINK.to_string())
+            .or_default()
+            .extend(
+                missing
+                    .into_iter()
+                    .map(|target| Link { target, part: None }),
+            );
+        ov.set(block.id.clone(), Some(block.clone()));
+    }
+    Ok(ReflectsBuilt {
+        justification: Justification::Reflects {
+            sources,
+            code: raw.code,
+        },
+        code,
+    })
 }
 
 /// kfol1 (FW-PR3a, FW-PR3b): on a move or rename, a key rdy assigned (`key_auto`) follows the
@@ -2985,11 +3315,33 @@ impl Rdy {
         links: ChangeLinks,
         brief: Option<&str>,
     ) -> Result<WriteResult, RdyError> {
-        self.write_marked(session, req, links, brief, &BTreeSet::new())
+        self.write_marked(session, req, links, brief, &BTreeSet::new(), None)
+    }
+
+    /// rf8 (D-4WC6R, D-XC9B9): `write_linked`, justified by `reflects`: its sources resolve in
+    /// the write's own overlay (a source created in the same write counts if the final state
+    /// holds it), each content block the write creates or rewrites links them, and with
+    /// `code: true` each such block that declares reflects globs records its code state
+    /// (`WriteResult::code_recorded`). The change stores the normalized `Reflects`. A request
+    /// that carries a justification of its own is refused: a write takes one.
+    pub fn write_reflecting(
+        &mut self,
+        session: &Session,
+        req: WriteRequest,
+        reflects: ReflectsInput,
+        links: ChangeLinks,
+        brief: Option<&str>,
+    ) -> Result<WriteResult, RdyError> {
+        if req.justification.is_some() {
+            return Err(one_justification_error());
+        }
+        self.write_marked(session, req, links, brief, &BTreeSet::new(), Some(reflects))
     }
 
     /// `write_linked`, where the keys that updates set on the blocks in `rdy_keys` are rdy's
     /// (`key_auto`): the engine's own route for `rdy keys assign`, which agent input never takes.
+    /// `reflects` is a raw `reflects` justification ([`Rdy::write_reflecting`]); a request whose
+    /// own justification is `Reflects` goes through the same checks, its ids read as selectors.
     pub(crate) fn write_marked(
         &mut self,
         session: &Session,
@@ -2997,7 +3349,22 @@ impl Rdy {
         mut links: ChangeLinks,
         brief: Option<&str>,
         rdy_keys: &BTreeSet<BlockId>,
+        reflects: Option<ReflectsInput>,
     ) -> Result<WriteResult, RdyError> {
+        let reflects = match (reflects, req.justification.take()) {
+            (Some(_), Some(_)) => return Err(one_justification_error()),
+            (None, Some(Justification::Reflects { sources, code })) => Some(ReflectsInput {
+                sources: sources.iter().map(ToString::to_string).collect(),
+                code,
+            }),
+            (raw, j) => {
+                req.justification = j;
+                raw
+            }
+        };
+        if let Some(r) = &reflects {
+            r.check()?;
+        }
         if !session.role.can_write() {
             return Err(RdyError::new(
                 E_PERMISSION,
@@ -3041,33 +3408,56 @@ impl Rdy {
             brief,
         )?;
         let reaffirmable = |id: &BlockId| crate::reaffirm::reaffirmable(&st, &scope, id);
-        let (mut ops, created, touched, names, keys, reaffirmed, code_repins) = build_ops(
-            &self.pack,
+        let (mut ops, created, touched, names, keys, reaffirmed, code_repins, reflected) =
+            build_ops(
+                &self.pack,
+                &self.store,
+                &m,
+                session,
+                req.ops,
+                &ViewConflicts {
+                    view: &req.view,
+                    list: &conflicts,
+                    included: &included,
+                    reaffirmable: &reaffirmable,
+                },
+                req.justification.as_ref(),
+                rdy_keys,
+                &selection,
+                reflects.as_ref(),
+            )?;
+        let no_code = BTreeSet::new();
+        // D-01QX5: the code state of each reflects block this write creates, re-globs or
+        // repins with `code: true`, read from the linked checkouts' committed trees; rf8: and
+        // of each written block with globs that a `reflects` with `code: true` justifies
+        let (code_warnings, stamped) = crate::reflects::stamp(
+            &self.root,
             &self.store,
             &m,
-            session,
-            req.ops,
-            &ViewConflicts {
-                view: &req.view,
-                list: &conflicts,
-                included: &included,
-                reaffirmable: &reaffirmable,
-            },
-            req.justification.as_ref(),
-            rdy_keys,
-            &selection,
+            &mut ops,
+            &code_repins,
+            reflected.as_ref().map_or(&no_code, |r| &r.code),
         )?;
-        // D-01QX5: the code state of each reflects block this write creates, re-globs or
-        // repins with `code: true`, read from the linked checkouts' committed trees
-        let code_warnings =
-            crate::reflects::stamp(&self.root, &self.store, &m, &mut ops, &code_repins)?;
         refuse_removed_content(&self.store, &ops)?;
+        let code_recorded = reflects.as_ref().filter(|r| r.code).map(|_| {
+            let mut ids: Vec<String> = stamped.iter().map(ToString::to_string).collect();
+            ids.sort();
+            ids
+        });
+        let justification = match reflected {
+            Some(r) => Some(r.justification),
+            None => req.justification,
+        };
+        let justification_info = match &justification {
+            Some(j @ Justification::Reflects { .. }) => Some(crate::JustificationInfo::from(j)),
+            _ => None,
+        };
         let mut change = Change {
             view: req.view.clone(),
             ops: ops.clone(),
             deps: vec![],
             provenance: session.provenance(),
-            justification: req.justification,
+            justification,
             message: req.message,
             links,
             read_identity: None,
@@ -3142,6 +3532,8 @@ impl Rdy {
             changes: vec![],
             reaffirmed,
             warnings,
+            code_recorded,
+            justification: justification_info,
         })
     }
 }
@@ -3342,20 +3734,31 @@ pub fn editorial_class(name: &str) -> Result<rdy_model::EditorialClass, RdyError
 }
 
 /// A write's justification from its caller's `implements` (decision ids, keys or paths, each
-/// resolved in `scope`, deduplicated in order) or `editorial` (class and reason); both given, or
-/// `implements` empty, is `E_BAD_INPUT`. The one rule `rdy_write` and the ctl `wc_commit` share.
+/// resolved in `scope`, deduplicated in order), `editorial` (class and reason) or `reflects` (the
+/// raw object, kept raw: its sources resolve in the write's overlay). More than one given,
+/// `implements` empty, or `reflects` with `code: false` is `E_BAD_INPUT`. The one rule
+/// `rdy_write` and the ctl `wc_commit` share.
 pub fn parse_justification(
     read: &ReadState,
     scope: &Scope,
     implements: Option<Vec<String>>,
     editorial: Option<(String, String)>,
-) -> Result<Option<Justification>, RdyError> {
-    match (implements, editorial) {
-        (Some(_), Some(_)) => Err(RdyError::new(
-            E_BAD_INPUT,
-            "give either implements or editorial, not both",
-            "implements for decision-backed changes, editorial for typo/restructure/clarify",
-        )),
+    reflects: Option<ReflectsArg>,
+) -> Result<ParsedJustification, RdyError> {
+    let given = usize::from(implements.is_some())
+        + usize::from(editorial.is_some())
+        + usize::from(reflects.is_some());
+    if given > 1 {
+        return Err(one_justification_error());
+    }
+    if let Some(raw) = reflects {
+        return Ok(ParsedJustification {
+            stored: None,
+            reflects: Some(raw.input()?),
+        });
+    }
+    let stored = match (implements, editorial) {
+        (Some(_), Some(_)) => return Err(one_justification_error()),
         (Some(texts), None) => {
             if texts.is_empty() {
                 return Err(RdyError::new(
@@ -3371,14 +3774,18 @@ pub fn parse_justification(
                     ids.push(id);
                 }
             }
-            Ok(Some(Justification::Implements(ids)))
+            Some(Justification::Implements(ids))
         }
-        (None, Some((class, reason))) => Ok(Some(Justification::Editorial {
+        (None, Some((class, reason))) => Some(Justification::Editorial {
             class: editorial_class(&class)?,
             reason,
-        })),
-        (None, None) => Ok(None),
-    }
+        }),
+        (None, None) => None,
+    };
+    Ok(ParsedJustification {
+        stored,
+        reflects: None,
+    })
 }
 
 /// sus3: the design pins a repin of `cur` (the block `id`) selects, each with the content hash it

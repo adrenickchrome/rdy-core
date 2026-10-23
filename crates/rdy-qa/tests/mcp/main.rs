@@ -40,6 +40,7 @@ mod mcp_read;
 mod mcp_read_paging;
 mod mcp_redaction;
 mod mcp_ref;
+mod mcp_reflects;
 mod mcp_reflects_history;
 mod mcp_repo_id;
 mod mcp_resources;

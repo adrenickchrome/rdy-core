@@ -253,7 +253,7 @@ fn trk1_an_edit_with_a_reason_moves_a_tracking_field() {
         rdy_model::FieldValue::Str("M2d2".into()),
     );
     let e = r
-        .edit_block_with(&writer(), "reg", edited.clone(), None, None)
+        .edit_block_with(&writer(), "reg", edited.clone(), None, None, None)
         .unwrap_err();
     assert_eq!(e.code, E_BAD_INPUT);
     assert!(e.message.contains("editorial reason"), "{}", e.message);
@@ -264,13 +264,20 @@ fn trk1_an_edit_with_a_reason_moves_a_tracking_field() {
     );
     // a blank reason is no reason
     assert_eq!(
-        r.edit_block_with(&writer(), "reg", edited.clone(), None, Some("  "))
+        r.edit_block_with(&writer(), "reg", edited.clone(), None, Some("  "), None)
             .unwrap_err()
             .code,
         E_BAD_INPUT
     );
-    r.edit_block_with(&writer(), "reg", edited, None, Some("re-sliced into M2d2"))
-        .unwrap();
+    r.edit_block_with(
+        &writer(),
+        "reg",
+        edited,
+        None,
+        Some("re-sliced into M2d2"),
+        None,
+    )
+    .unwrap();
     land(&mut r, "reg").unwrap();
     let b = r.read().block(&Scope::Canon, &id(&dec)).unwrap();
     assert_eq!(b.field_str("disposition"), Some("M2d2"));

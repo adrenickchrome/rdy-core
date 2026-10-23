@@ -3,7 +3,9 @@ use crate::error::*;
 use crate::keys::Keys;
 use crate::query::field_json;
 use crate::tree_io::{self, FOLDER_FILE};
-use crate::write::{LinkInput, OpInput, TRACKING_NEEDS_REASON, WriteRequest, WriteResult};
+use crate::write::{
+    LinkInput, OpInput, ReflectsInput, TRACKING_NEEDS_REASON, WriteRequest, WriteResult,
+};
 use crate::{Rdy, ReadState, Scope, Session};
 use rdy_model::{
     ActorRun, Block, BlockId, Change, ChangeLinks, EditorialClass, FieldValue, Hash, Justification,
@@ -1410,6 +1412,8 @@ impl Rdy {
             inherited: BTreeMap::new(),
             reaffirmed: vec![],
             warnings,
+            code_recorded: None,
+            justification: None,
         })
     }
 
@@ -1423,12 +1427,14 @@ impl Rdy {
         brief: Option<String>,
         reason: Option<&str>,
     ) -> Result<WriteResult, RdyError> {
-        self.edit_yaml_at(s, view, yaml, None, brief, reason)
+        self.edit_yaml_at(s, view, yaml, None, brief, reason, None)
     }
 
     /// msw8 (#1064): [`Rdy::edit_yaml`] against `base`, the version the editor read (the
     /// `block` op's `version`). A block that changed since then is refused (`E_STALE_BASE`, or
     /// `E_BRIEF_STALE` for a stable block), so a stale buffer never reverts a concurrent change.
+    /// `reflects` justifies the edit as [`Rdy::edit_block_at`] says.
+    #[allow(clippy::too_many_arguments)]
     pub fn edit_yaml_at(
         &mut self,
         s: &Session,
@@ -1437,7 +1443,9 @@ impl Rdy {
         base: Option<EditBase<'_>>,
         brief: Option<String>,
         reason: Option<&str>,
+        reflects: Option<ReflectsInput>,
     ) -> Result<WriteResult, RdyError> {
+        one_edit_justification(reason, reflects.as_ref())?;
         let y = parse_yaml_struct(yaml)?;
         // p-8YP1G: on the decoded buffer, before any value is converted
         let supplied: Vec<Issue> = supplied_engine_fields(&y)
@@ -1456,7 +1464,7 @@ impl Rdy {
                 crate::keys::sole_holder(t, keys.holders(t).iter().map(|(_, id)| id))
             })?;
         }
-        self.edit_block_at(s, view, edited, base, brief, reason)
+        self.edit_block_at(s, view, edited, base, brief, reason, reflects)
     }
 
     /// [`Rdy::edit_block_with`] with no reason.
@@ -1467,13 +1475,14 @@ impl Rdy {
         edited: Block,
         brief: Option<String>,
     ) -> Result<WriteResult, RdyError> {
-        self.edit_block_with(s, view, edited, brief, None)
+        self.edit_block_with(s, view, edited, brief, None, None)
     }
 
     /// Writes `edited` over its current version in `view`: fields, body and links. A non-blank
     /// `reason` goes with the write as an editorial `clarify` justification, which a tracking
     /// edit of an accepted or rejected decision needs (trk1); refused without one, the fix names
-    /// `rdy edit --reason`.
+    /// `rdy edit --reason`. `reflects` justifies the edit instead (rf8, [`Rdy::write_reflecting`]);
+    /// a non-blank `reason` with it is refused: an edit takes one justification.
     pub fn edit_block_with(
         &mut self,
         s: &Session,
@@ -1481,14 +1490,17 @@ impl Rdy {
         edited: Block,
         brief: Option<String>,
         reason: Option<&str>,
+        reflects: Option<ReflectsInput>,
     ) -> Result<WriteResult, RdyError> {
-        self.edit_block_at(s, view, edited, None, brief, reason)
+        self.edit_block_at(s, view, edited, None, brief, reason, reflects)
     }
 
     /// msw8 (#1064): [`Rdy::edit_block_with`] against `base`, the version hash the editor read;
     /// `None` is the current version. When `base` is not the current version, the local checks
     /// are skipped (they compare against a version the editor never saw) and the write decides:
-    /// `E_BRIEF_STALE` for a stable block, else `E_STALE_BASE`.
+    /// `E_BRIEF_STALE` for a stable block, else `E_STALE_BASE`. `reflects` reaches the writer
+    /// raw, as `rdy_write`'s does ([`Rdy::write_reflecting`]).
+    #[allow(clippy::too_many_arguments)]
     pub fn edit_block_at(
         &mut self,
         s: &Session,
@@ -1497,7 +1509,9 @@ impl Rdy {
         base: Option<EditBase<'_>>,
         brief: Option<String>,
         reason: Option<&str>,
+        reflects: Option<ReflectsInput>,
     ) -> Result<WriteResult, RdyError> {
+        one_edit_justification(reason, reflects.as_ref())?;
         let scope = Scope::View(view.to_string());
         let cur = self.read().block(&scope, &edited.id)?;
         let cur_hash = cur.version_hash().to_string();
@@ -1648,16 +1662,16 @@ impl Rdy {
             class: EditorialClass::Clarify,
             reason: r.to_string(),
         });
-        self.write_briefed(
-            s,
-            WriteRequest {
-                view: view.into(),
-                ops: vec![op],
-                justification,
-                message: format!("edit {}", edited.id),
-            },
-            brief,
-        )
+        let req = WriteRequest {
+            view: view.into(),
+            ops: vec![op],
+            justification,
+            message: format!("edit {}", edited.id),
+        };
+        match reflects {
+            Some(r) => self.write_reflecting(s, req, r, ChangeLinks::default(), brief.as_deref()),
+            None => self.write_briefed(s, req, brief),
+        }
         .map_err(|mut e| {
             if e.code == E_BAD_INPUT && e.message == TRACKING_NEEDS_REASON {
                 e.fix = format!(
@@ -1668,6 +1682,17 @@ impl Rdy {
             e
         })
     }
+}
+
+/// An edit takes one justification: a non-blank `reason` (editorial) or `reflects`.
+fn one_edit_justification(
+    reason: Option<&str>,
+    reflects: Option<&ReflectsInput>,
+) -> Result<(), RdyError> {
+    if reflects.is_some() && reason.is_some_and(|r| !r.trim().is_empty()) {
+        return Err(crate::write::one_justification_error());
+    }
+    Ok(())
 }
 
 /// msw8: what an editor read of a block, sent back with its edit: the block's version (the `block`

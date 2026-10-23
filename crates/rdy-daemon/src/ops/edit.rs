@@ -2,7 +2,7 @@
 //! edit_block.
 use super::*;
 use rdy_engine::consequence::write_and_report;
-use rdy_engine::{EditBase, RdyError};
+use rdy_engine::{EditBase, RdyError, ReflectsArg, one_justification_error};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -78,6 +78,8 @@ pub(super) struct EditBlockArgs {
     max_tokens: Option<usize>,
     /// The edit's editorial reason (`rdy edit --reason`).
     reason: Option<String>,
+    /// rf8: the edit's `reflects` justification (`rdy edit --reflects`), `{sources?, code?}`.
+    reflects: Option<ReflectsArg>,
 }
 
 pub(super) fn new_folder(cx: &OpContext, a: NewFolderArgs) -> Result<Value, RdyError> {
@@ -268,11 +270,16 @@ pub(super) fn edit_block(cx: &OpContext, a: EditBlockArgs) -> Result<Value, RdyE
     let view = view_of(&s, a.view);
     let (yaml, brief, max_tokens, v) = (a.yaml, a.brief, a.max_tokens, view.clone());
     let (base, conflict, reason) = (a.base, a.conflict, a.reason);
+    // one justification, then the raw object's own shape
+    if a.reflects.is_some() && reason.as_deref().is_some_and(|r| !r.trim().is_empty()) {
+        return Err(one_justification_error());
+    }
+    let reflects = a.reflects.map(ReflectsArg::input).transpose()?;
     write_and_report(cx.engine, &v, max_tokens, move |r| {
         let base = base.as_deref().map(|version| EditBase {
             version,
             conflict: conflict.as_deref(),
         });
-        r.edit_yaml_at(&s, &view, &yaml, base, brief, reason.as_deref())
+        r.edit_yaml_at(&s, &view, &yaml, base, brief, reason.as_deref(), reflects)
     })
 }

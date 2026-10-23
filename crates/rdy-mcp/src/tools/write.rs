@@ -15,6 +15,18 @@ pub struct EditorialParams {
     pub reason: String,
 }
 
+/// rf8 (D-4WC6R, D-XC9B9): a write's `reflects` justification.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReflectsParams {
+    /// The sources (S-…) the change follows: an id, key or path each, or the $name of a source
+    /// created in this write. Missing: none.
+    pub sources: Option<Vec<String>>,
+    /// true records the code state of each written block with reflects globs. Missing: false;
+    /// false is refused.
+    pub code: Option<bool>,
+}
+
 /// llst1: one text, or a list of them.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(untagged)]
@@ -43,6 +55,8 @@ pub struct WriteParams {
     /// The decisions this change carries out: an id, key or path, or a list of them.
     pub implements: Option<OneOrMany>,
     pub editorial: Option<EditorialParams>,
+    /// Pass one of implements, editorial or reflects. reflects is {sources?: [source id, key or path], code?: true}. A source created in this write counts if the final state holds it. code: true records the code state of each written block with reflects globs.
+    pub reflects: Option<ReflectsParams>,
     pub message: Option<String>,
     /// The briefing token from rdy_brief. Required when the write touches stable content.
     pub brief: Option<String>,
@@ -98,7 +112,7 @@ pub fn rdy_write(st: &mut McpState, p: WriteParams) -> Result<Value, RdyError> {
         })
         .collect::<Result<_, _>>()?;
     let scope = Scope::View(p.view.clone().unwrap_or_else(|| st.view.clone()));
-    let justification = parse_justification(
+    let parsed = parse_justification(
         &st.engine.read(),
         &scope,
         p.implements.map(|d| match d {
@@ -106,17 +120,22 @@ pub fn rdy_write(st: &mut McpState, p: WriteParams) -> Result<Value, RdyError> {
             OneOrMany::Many(v) => v,
         }),
         p.editorial.map(|e| (e.class, e.reason)),
+        p.reflects.map(|r| ReflectsArg {
+            sources: r.sources,
+            code: r.code,
+        }),
     )?;
     let view = p.view.unwrap_or_else(|| st.view.clone());
     let req = WriteRequest {
         view,
         ops,
-        justification,
+        justification: parsed.stored,
         message: p.message.unwrap_or_default(),
     };
     let (brief, max_tokens, view, intent) = (p.brief, p.max_tokens, req.view.clone(), p.intent);
+    let reflects = parsed.reflects;
     write_and_report(&*st.engine, &view, max_tokens, move |r| {
-        r.write_with_intent(&s, req, brief, intent.as_deref())
+        r.write_with_intent(&s, req, brief, intent.as_deref(), reflects)
     })
     .map(|v| report_once(st, v))
 }

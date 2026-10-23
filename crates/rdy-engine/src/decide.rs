@@ -233,6 +233,7 @@ impl Rdy {
             },
             brief,
             intent.as_deref(),
+            None,
         )
         .map_err(|mut e| {
             if let Some(o) = covers_old

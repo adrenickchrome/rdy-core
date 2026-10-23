@@ -1042,7 +1042,7 @@ fn rdx10_a_fresh_edit_of_a_removed_block_writes_a_normal_version() {
     let mut edited = stub.clone();
     edited.read_identity = None;
     edited.body = "Edited by a person.".into();
-    p.r.edit_block_with(&writer(), "edit", edited, None, None)
+    p.r.edit_block_with(&writer(), "edit", edited, None, None, None)
         .unwrap();
     fresh(&p.r, "edit", "Edited by a person.");
 
@@ -1083,7 +1083,7 @@ fn rdx10_a_fresh_edit_of_a_removed_block_writes_a_normal_version() {
     let mut same = stub.clone();
     same.read_identity = None;
     let e =
-        p.r.edit_block_with(&writer(), "same", same, None, None)
+        p.r.edit_block_with(&writer(), "same", same, None, None, None)
             .unwrap_err();
     assert_eq!(e.code, E_REDACTED, "{e}");
     // and so is a move that keeps the notice

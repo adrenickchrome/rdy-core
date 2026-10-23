@@ -241,6 +241,12 @@ pub(crate) struct EditArgs {
     /// rejected decision changes only with one.
     #[arg(long)]
     reason: Option<String>,
+    /// A source this edit follows (id, key or path); repeat for more.
+    #[arg(long, value_name = "SOURCE", conflicts_with = "reason")]
+    reflects: Vec<String>,
+    /// Record the code state of the block, when it declares reflects globs.
+    #[arg(long, conflicts_with = "reason")]
+    reflects_code: bool,
 }
 
 /// `rdy new profile`: the `new_profile` op. A profile is supporting content, so the wrapper
@@ -409,8 +415,25 @@ pub(crate) fn new(env: &Env, what: NewCmd) -> Result<(Value, String), ErrorReply
 }
 
 pub(crate) fn run_edit(env: &Env, a: EditArgs) -> Result<(Value, String), ErrorReply> {
-    let EditArgs { id, view, reason } = a;
-    let v = edit(env, &id, view.as_deref(), reason.as_deref())?;
+    let EditArgs {
+        id,
+        view,
+        reason,
+        reflects,
+        reflects_code,
+    } = a;
+    // rf8: the raw object rdy_write takes, as `rdy commit --reflects` sends it
+    let reflects = (!reflects.is_empty() || reflects_code).then(|| {
+        let mut o = serde_json::Map::new();
+        if !reflects.is_empty() {
+            o.insert("sources".into(), json!(reflects));
+        }
+        if reflects_code {
+            o.insert("code".into(), json!(true));
+        }
+        Value::Object(o)
+    });
+    let v = edit(env, &id, view.as_deref(), reason.as_deref(), reflects)?;
     let t = write_text(&v);
     Ok((v, t))
 }
@@ -438,7 +461,8 @@ pub(crate) fn write_text(v: &Value) -> String {
 /// `rdy edit`: the block as YAML from the `block` op, its briefing from the `brief` op shown as
 /// `#` lines above the YAML, `$EDITOR` on a temp file, then the `edit_block` op citing the
 /// briefing's token, the block's `version` as the base and its `conflict`, with `reason` as the
-/// edit's editorial reason (a block or conflict changed while the editor was open is
+/// edit's editorial reason or `reflects` (rf8) as its raw reflects justification (a block or
+/// conflict changed while the editor was open is
 /// `E_STALE_BASE`, a briefing that moved is `E_BRIEF_STALE`, and the edit is kept). Each op runs
 /// on a session of its own: the editor may stay open for long, and the daemon may stop meanwhile
 /// (`rdy serve --stop` after a rebuild), so the write connects afresh (starting a daemon again if
@@ -449,6 +473,7 @@ fn edit(
     id: &str,
     view: Option<&str>,
     reason: Option<&str>,
+    reflects: Option<Value>,
 ) -> Result<Value, ErrorReply> {
     let block = call(env, "block", json!({"id": id, "view": view}))?;
     // cbrf1 (Q6c): brief the block, show the briefing as `#` lines above the YAML and cite its
@@ -500,6 +525,7 @@ fn edit(
             "conflict": block["conflict"],
             "brief": brief,
             "reason": reason,
+            "reflects": reflects,
         }),
     )
     .map_err(|mut e| {

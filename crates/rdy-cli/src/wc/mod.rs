@@ -49,6 +49,12 @@ pub enum WcCmd {
         /// once.
         #[arg(long, num_args = 2, value_names = ["CLASS", "REASON"], conflicts_with = "implements")]
         editorial: Vec<String>,
+        /// A source this change follows (id, key or path); repeat for more.
+        #[arg(long, value_name = "SOURCE", conflicts_with_all = ["implements", "editorial"])]
+        reflects: Vec<String>,
+        /// Record the code state of each written block with reflects globs.
+        #[arg(long, conflicts_with_all = ["implements", "editorial"])]
+        reflects_code: bool,
     },
     /// Bring the bound view's changes made elsewhere into the files, keeping local edits; what
     /// changed on both sides is written beside the file as .theirs.yaml.
@@ -68,12 +74,16 @@ pub fn run(cmd: WcCmd, env: &Env) -> Result<(Value, String), ErrorReply> {
             message,
             implements,
             editorial,
+            reflects,
+            reflects_code,
         } => commit::run(
             env,
             message,
             commit::Justify {
                 implements,
                 editorial,
+                reflects,
+                reflects_code,
             },
         ),
         WcCmd::Update => update::run(env),

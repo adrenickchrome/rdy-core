@@ -557,13 +557,15 @@ impl Rdy {
     }
 
     /// `write_briefed`, recording intent `intent` (any form `resolve_intent` takes) on the change.
-    /// An unknown intent is `E_NOT_FOUND` and nothing is written.
+    /// An unknown intent is `E_NOT_FOUND` and nothing is written. With `reflects` the write is
+    /// justified by it ([`Rdy::write_reflecting`]).
     pub fn write_with_intent(
         &mut self,
         s: &Session,
         req: WriteRequest,
         brief: Option<String>,
         intent: Option<&str>,
+        reflects: Option<crate::write::ReflectsInput>,
     ) -> Result<WriteResult, RdyError> {
         let links = match intent {
             Some(text) => ChangeLinks {
@@ -572,7 +574,10 @@ impl Rdy {
             },
             None => ChangeLinks::default(),
         };
-        self.write_linked(s, req, links, brief.as_deref())
+        match reflects {
+            Some(r) => self.write_reflecting(s, req, r, links, brief.as_deref()),
+            None => self.write_linked(s, req, links, brief.as_deref()),
+        }
     }
 }
 

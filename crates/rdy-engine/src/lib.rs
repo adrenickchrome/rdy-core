@@ -160,9 +160,10 @@ pub use view_query::{
 pub use views::{ConflictInfo, ConflictSide, OwnerInfo, ResolveResult, ViewHeadInfo, ViewOpResult};
 pub use wc::project::Projection;
 pub use write::{
-    JsonFieldError, LINK_KEY_TAIL, LinkInput, OP_FIX, OpInput, WriteRequest, WriteResult,
-    editorial_class, is_reserved_view, json_to_field, parse_justification, parse_op, parse_ops,
-    reserved_view_error,
+    JsonFieldError, LINK_KEY_TAIL, LinkInput, MAX_REFLECTS_SELECTOR_CHARS, MAX_REFLECTS_SOURCES,
+    OP_FIX, OpInput, ParsedJustification, ReflectsArg, ReflectsInput, WriteRequest, WriteResult,
+    editorial_class, is_reserved_view, json_to_field, one_justification_error, parse_justification,
+    parse_op, parse_ops, reserved_view_error,
 };
 
 pub use config::{

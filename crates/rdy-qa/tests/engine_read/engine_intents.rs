@@ -241,7 +241,9 @@ fn iwr1_a_write_records_its_intent_and_hears_of_other_sessions_intents() {
         justification: None,
         message: String::new(),
     };
-    let w = r.write_with_intent(&b, req, None, Some(&ib.id)).unwrap();
+    let w = r
+        .write_with_intent(&b, req, None, Some(&ib.id), None)
+        .unwrap();
     let ch = r
         .read()
         .reader()
@@ -274,7 +276,7 @@ fn iwr1_a_write_records_its_intent_and_hears_of_other_sessions_intents() {
         message: String::new(),
     };
     assert_eq!(
-        r.write_with_intent(&b, req, None, Some("in-ffffffffffff"))
+        r.write_with_intent(&b, req, None, Some("in-ffffffffffff"), None)
             .unwrap_err()
             .code,
         E_NOT_FOUND
