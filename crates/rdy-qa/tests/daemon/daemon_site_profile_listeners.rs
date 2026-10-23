@@ -798,8 +798,62 @@ fn plb4_recorder_clears_on_unwind() {
     );
 }
 
+/// The marker a wrapped fixture's child prints once every assertion and its cleanup passed.
+const PLX2_DONE: &str = "PLX2 retry fixture completed";
+
+/// Runs the named test again as a child that runs it alone (`--exact`, one thread), and judges
+/// the child: it must exit with success, report one passed test and print [`PLX2_DONE`]. It
+/// returns true in the parent, which then has nothing left to do, and false in the child (the
+/// variable is set on the child's command only), which runs the fixture itself.
+///
+/// The fixtures of the wrapped tests hold sockets (sixteen occupied candidates, the profile
+/// listeners of a stopped daemon) while they prove that a failed start or a stop leaves none
+/// behind. An ordinary concurrent spawn of another test copies every listener of the shared test
+/// process until it execs, so a descriptor check in the fixture cannot tell its own listener
+/// from that copy. In a child of its own the fixture owns every socket of its process. The
+/// deadline only stops a hang; it never decides success.
+fn run_plx2_child(test_name: &str) -> bool {
+    if std::env::var_os("RDY_QA_PLX2_CHILD").is_some() {
+        return false;
+    }
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+    child
+        .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+        .env("RDY_QA_PLX2_CHILD", "1");
+    let out = platform::run_bounded(
+        child,
+        None,
+        platform::RELEASE_CHILD_OUTPUT_MAX,
+        platform::RELEASE_CHILD_DEADLINE,
+    )
+    .unwrap_or_else(|e| panic!("the child of {test_name} did not finish: {e}"));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let shown = format!("stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        out.status.success(),
+        "{test_name} failed in its child: {shown}"
+    );
+    assert_eq!(
+        stdout.matches("test result: ok. 1 passed").count(),
+        1,
+        "the child of {test_name} did not pass exactly one test: {shown}"
+    );
+    assert_eq!(
+        stdout.matches(PLX2_DONE).count(),
+        1,
+        "the child of {test_name} did not finish its fixture: {shown}"
+    );
+    true
+}
+
 #[test]
 fn spv7_failed_open_allocates_no_profile_site() {
+    if run_plx2_child(&rdy_qa::test_name!(
+        "spv7_failed_open_allocates_no_profile_site"
+    )) {
+        return;
+    }
     let w = world();
     let sh = shared(&w.h);
     let rec = Recorder::on(w.h.dir.path());
@@ -884,6 +938,7 @@ fn spv7_failed_open_allocates_no_profile_site() {
     assert_eq!(run.wait().unwrap(), ExitReason::Stopped);
     stopping(&ensure_profile_site(Arc::clone(&sh), "guide").unwrap_err());
     assert!(sh.profile_sites.keys().is_empty(), "stop released the slot");
+    println!("{PLX2_DONE}");
 }
 
 #[test]
@@ -1430,6 +1485,11 @@ fn at(stages: &[String], stage: &str) -> usize {
 
 #[test]
 fn spv7_stop_and_foreground_failure_release_every_listener() {
+    if run_plx2_child(&rdy_qa::test_name!(
+        "spv7_stop_and_foreground_failure_release_every_listener"
+    )) {
+        return;
+    }
     // a stop joins every profile listener before the store closes
     {
         let mut w = world();
@@ -1700,6 +1760,7 @@ fn spv7_stop_and_foreground_failure_release_every_listener() {
         closed(port);
         assert!(rx.try_recv().is_err(), "one callback");
     }
+    println!("{PLX2_DONE}");
 }
 
 /// The test name of [`plb4_a_child_held_before_exec_keeps_no_listener_of_a_stopped_daemon`].
