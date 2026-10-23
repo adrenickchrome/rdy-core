@@ -103,7 +103,7 @@ jobs:
           cargo llvm-cov report --html --output-dir coverage-html
           cargo llvm-cov report --json --summary-only --output-path coverage-summary.json
           { echo '## Coverage'; echo '```'; cat coverage-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: coverage
