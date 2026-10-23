@@ -315,6 +315,35 @@ fn rf7_supporting_types_get_no_site_or_working_page() {
     let h = read(out.path(), "ops.html");
     let t = trail_of(&h, &id("$c")).expect("a trail");
     assert!(t.contains("Ruled: Entries stay as written."), "{t}");
+
+    // the working copy (the projection `rdy checkout` writes) gives neither type a page or a
+    // file, a projected block, or a word, id or link in any file it does write
+    let wc = r.read().wc_project(&Scope::Canon, None).unwrap();
+    assert!(!wc.files.is_empty());
+    for k in ["$f", "$x"] {
+        let bid = id(k);
+        assert!(!wc.blocks.contains_key(&bid), "a projected block for {k}");
+        for f in &wc.files {
+            assert!(f.id != bid, "a working-copy file for {k}: {}", f.path);
+            assert!(!f.path.contains(&bid), "{} is named for {k}", f.path);
+            assert!(!f.text.contains(&bid), "{} names {k}:\n{}", f.path, f.text);
+        }
+    }
+    for f in &wc.files {
+        for word in ["FINDINGCANARY", "SOURCECANARY"] {
+            assert!(!f.text.contains(word), "{} holds {word}", f.path);
+        }
+    }
+    // the claim, the entity and the decision are projected
+    for k in ["$c", "$e"] {
+        assert!(wc.blocks.contains_key(&id(k)), "{k} is not projected");
+    }
+    assert!(
+        wc.files
+            .iter()
+            .any(|f| f.text.contains("Entries are append-only.")),
+        "the working copy lost the claim"
+    );
 }
 
 /// New defect, found by the pin above: a finding's or a source's permalink page read as the
