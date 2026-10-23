@@ -37,8 +37,9 @@ use rdy_model::plan::{
 use rdy_model::redaction::{Redaction, RedactionApply};
 use rdy_model::signature::{Signature, StatementSource};
 use rdy_model::{
-    ActorRun, Answer, AnswerAct, Assurance, BlockId, Finding, Hash, PairItem, Provenance,
-    RelayEvidence, RepoId, Review, ReviewSubject, Role, SemanticTension, Verdict, pair_key,
+    ActorRun, Answer, AnswerAct, Assurance, BlockId, Citation, Hash, Justification, PairItem,
+    Provenance, RelayEvidence, RepoId, Review, ReviewSubject, Role, SemanticTension, Verdict,
+    pair_key,
 };
 use rdy_store::Relay;
 use rdy_store::holder::StoreMode;
@@ -210,7 +211,7 @@ pub const V15_KINDS: [u8; 20] = [
 pub const CANARY_BODY: &str = "Kestrel body canary.";
 /// The removed term's name field: a selected canary, held only by the removed payloads.
 pub const CANARY_FIELD: &str = "Kestrel field canary";
-/// The removed term's alias: a source string that a review finding, a tension's advice and an
+/// The removed term's alias: a source string that a review citation, a tension's advice and an
 /// answer's note and relayed words quote whole. Those records are kept (D-EPK1Z, RULING F3 (a)).
 pub const QUOTED_ALIAS: &str = "Osprey quoted alias";
 /// The body of the claim the term's change creates beside it, which no request selects.
@@ -281,7 +282,7 @@ fn advise_blocking(r: &mut Rdy, x: &BlockId, y: &BlockId) {
 }
 
 /// Records agent:r's `tension` verdict on `x` and `y` at their contents in flight, for case
-/// `case`: one finding on `y` with `note`, and a semantic tension with `advice` that does not
+/// `case`: one citation on `y` with `note`, and a semantic tension with `advice` that does not
 /// block (a REVIEW and a TENSION whose text a removal report can find as quotes).
 pub fn verdict(r: &mut Rdy, x: &BlockId, y: &BlockId, case: Hash, note: &str, advice: &str) {
     verdict_with_reason(r, x, y, case, note, advice, "");
@@ -320,7 +321,7 @@ pub fn verdict_with_reason(
         case_hash: Some(case),
         verdict: Verdict::Tension,
         reason: reason.into(),
-        findings: vec![Finding {
+        citations: vec![Citation {
             block: y.clone(),
             note: note.into(),
         }],
@@ -392,7 +393,7 @@ fn foreign_export(out: &Path) {
 /// `pending/`), a `.rdyignore` with the line `*.draft.yaml`, and a `.rdy/local.yaml` with
 /// `actor: human:qa` (a dump leaves it out). Its last landing is a person's approval of one
 /// content removal: a term version (its body and name the canaries, its alias quoted whole by a
-/// kept review finding, tension advice and answer), the change that embeds it beside an
+/// kept review citation, tension advice and answer), the change that embeds it beside an
 /// unaffected sibling op, a duplicate frame of the version, and a blob whose first chunk another
 /// blob shares. The built project then holds three valid signatures (store format 14): the
 /// person's approval of the seed landing, the agent's relay of the relayed landing and the
@@ -556,7 +557,7 @@ fn build(segment_max: Option<u64>) -> tempfile::TempDir {
     // canaries a person removes at the end, its alias the text audit records quote) and an
     // unaffected sibling claim. The person snoozes its approve item through a relay whose note
     // and words quote the alias (an ANSWER quote candidate), then lands it; a reviewer's verdict
-    // on the pair quotes the alias in its finding and its advice (REVIEW and TENSION quote
+    // on the pair quotes the alias in its citation and its advice (REVIEW and TENSION quote
     // candidates, RULING F3 (a)). The v0.2.0 tag below names a landing that holds the term.
     let sec = s.section.clone();
     let (term, sibling, cv) = on(&e, move |r| {
@@ -1103,6 +1104,257 @@ pub fn add_plan_fixture_records(r: &mut Rdy, parent: &BlockId, cause: &BlockId) 
         unsealed,
         answers: acts,
     }
+}
+
+/// What [`add_reflects_fixture_records`] wrote (store format 18, D-4WC6R, D-Z8P09, D-2WR0G): a
+/// source, a finding that cites it, a delegated decision that depends on the finding, and a
+/// content block that reflects the source and is decided by the decision.
+#[derive(Clone, Debug)]
+pub struct ReflectsFixture {
+    pub source: BlockId,
+    pub finding: BlockId,
+    pub decision: BlockId,
+    pub content: BlockId,
+}
+
+/// The view of the reflects fixture's writes and of its two Reflects changes.
+pub const REFLECTS_VIEW: &str = "reflects";
+/// The view of the reflects fixture's last stage: the source's change and its sealed plan.
+pub const REFLECTS_FINISH_VIEW: &str = "reflects-finish";
+/// The code globs the content declares in its code-justified change.
+pub const REFLECTS_GLOBS: [&str; 1] = ["src/ledger/**/*.rs"];
+/// The quote of the finding's evidence.
+pub const REFLECTS_QUOTE: &str = "one balance per wallet, never two";
+/// The attestation of the delegated decision.
+pub const REFLECTS_ATTESTED_BY: &str = "human:qa, under the founder's ledger mandate";
+
+/// The typed provenance of the reflects fixture's agent.
+fn reflects_agent(at_ms: i64) -> Provenance {
+    Provenance {
+        actor: "agent:reflects".into(),
+        run: Some("reflects".into()),
+        role: Role::Writer,
+        at_ms,
+    }
+}
+
+/// Commits one update of `next` (read from view `view`, version `base`) to `view`, justified by
+/// `j`, as a typed store write, and seals it.
+fn commit_reflects(r: &mut Rdy, view: &str, base: Hash, next: rdy_model::Block, j: Justification) {
+    let deps = r.read().included(view).to_vec();
+    r.store_mut()
+        .commit_to_view(
+            view,
+            rdy_model::Change {
+                view: view.into(),
+                ops: vec![rdy_model::Op::Update { base, block: next }],
+                deps,
+                provenance: reflects_agent(4),
+                justification: Some(j),
+                message: "reflects its sources".into(),
+                links: Default::default(),
+                read_identity: None,
+            },
+        )
+        .unwrap();
+    r.invalidate();
+}
+
+/// The first stage of the store format 18 fixture: under `parent` (a doc or section in canon),
+/// view [`REFLECTS_VIEW`] creates a source, then a finding whose evidence is a quote and the
+/// source (`{{S-…}}`), a decision of authority basis `delegated` with its attestation that
+/// depends on the finding, and a claim that reflects the source and is decided by the decision;
+/// the writes pin each target. The view then lands. Every write is an existing engine write.
+pub fn add_reflects_fixture_records(r: &mut Rdy, parent: &BlockId) -> ReflectsFixture {
+    let view = REFLECTS_VIEW;
+    let w = put(
+        r,
+        view,
+        json!([{"op": "create", "type": "source", "id": "$s", "parent": parent.to_string(),
+            "fields": {"title": "The harrier ledger spec", "kind": "spec", "locator": "spec/ledger.md", "version": "1"}}]),
+    );
+    let source = created(&w, "$s");
+    let w = put(
+        r,
+        view,
+        json!([
+            {"op": "create", "type": "finding", "id": "$f", "parent": parent.to_string(),
+                "fields": {"statement": "The ledger keeps one balance per wallet.",
+                    "evidence": [
+                        {"quote": REFLECTS_QUOTE, "session_ref": "chat-18", "question": "How many balances may a wallet hold?"},
+                        {"source": format!("{{{{{source}}}}}")}
+                    ]}},
+            {"op": "create", "type": "decision", "id": "$x", "parent": parent.to_string(),
+                "fields": {"statement": "A wallet holds one balance.", "status": "proposed",
+                    "authority_basis": "delegated", "attested_by": REFLECTS_ATTESTED_BY,
+                    "title": "One balance per wallet",
+                    "why": "the ledger design follows the finding"},
+                "links": {"depends_on": ["$f"]}},
+            {"op": "create", "type": "claim", "id": "$c", "parent": parent.to_string(),
+                "body": "Each wallet holds one balance.",
+                "links": {"reflects": [source.to_string()], "decided_by": ["$x"]}}
+        ]),
+    );
+    let fx = ReflectsFixture {
+        source,
+        finding: created(&w, "$f"),
+        decision: created(&w, "$x"),
+        content: created(&w, "$c"),
+    };
+    land(r, view).unwrap();
+    // the evidence and link pins the writes recorded
+    let st = r.read();
+    let pins = |b: &BlockId| st.block(&Scope::Canon, b).unwrap().pins;
+    assert!(
+        pins(&fx.finding).contains_key(&fx.source),
+        "the evidence pins its source"
+    );
+    assert!(
+        pins(&fx.decision).contains_key(&fx.finding),
+        "depends_on pins the finding"
+    );
+    assert!(
+        pins(&fx.content).contains_key(&fx.source),
+        "reflects pins the source"
+    );
+    drop(st);
+    fx
+}
+
+/// The second stage: two typed changes of the content in view [`REFLECTS_VIEW`], each justified
+/// by a Reflects: the first names the source alone (a new body); the second is code only, and
+/// sets the content's `reflects` globs ([`REFLECTS_GLOBS`]) and a fixed `reflects_at` record
+/// (the typed metadata builder of `add_plan_fixture_records`). The view then lands.
+pub fn rewrite_reflects_fixture(r: &mut Rdy, fx: &ReflectsFixture) {
+    use rdy_model::engine_fields::{REFLECTS_AT, ReflectsAt, encode_reflects_at};
+    let view = REFLECTS_VIEW;
+    let scope = Scope::View(view.into());
+    let mut next = r.read().block(&scope, &fx.content).unwrap();
+    let base = next.version_hash();
+    next.body = "Each wallet holds exactly one balance.".into();
+    commit_reflects(
+        r,
+        view,
+        base,
+        next,
+        Justification::Reflects {
+            sources: vec![fx.source.clone()],
+            code: false,
+        },
+    );
+    let mut next = r.read().block(&scope, &fx.content).unwrap();
+    let base = next.version_hash();
+    next.fields.insert(
+        rdy_schema::REFLECTS_FIELD.into(),
+        rdy_model::FieldValue::List(
+            REFLECTS_GLOBS
+                .iter()
+                .map(|g| rdy_model::FieldValue::Str(g.to_string()))
+                .collect(),
+        ),
+    );
+    next.fields.insert(
+        REFLECTS_AT.into(),
+        encode_reflects_at(&ReflectsAt {
+            files: Hash([0x5d; 32]),
+            commits: BTreeMap::from([("app".to_string(), Some("d".repeat(40)))]),
+        }),
+    );
+    commit_reflects(
+        r,
+        view,
+        base,
+        next,
+        Justification::Reflects {
+            sources: vec![],
+            code: true,
+        },
+    );
+    land(r, view).unwrap();
+}
+
+/// The last stage: view [`REFLECTS_FINISH_VIEW`] changes the source (its version and locator);
+/// its proposal and bound plan are written in one batch, then its landing and the seal, which
+/// names the decision as the cause and the content as the subject of a confirmed item, as
+/// `add_plan_fixture_records` composes them. Returns the seal's hash.
+pub fn finish_reflects_fixture(r: &mut Rdy, fx: &ReflectsFixture) -> Hash {
+    let view = REFLECTS_FINISH_VIEW;
+    put(
+        r,
+        view,
+        json!([{"op": "update", "id": fx.source.to_string(),
+            "fields": {"version": "2", "locator": "spec/ledger-2.md"}}]),
+    );
+    let agent = reflects_agent(5);
+    let person = Provenance {
+        actor: PERSON.into(),
+        run: None,
+        role: Role::Approver,
+        at_ms: 6,
+    };
+    let (cause, subject) = {
+        let st = r.read();
+        let v = |b: &BlockId| st.block(&Scope::Canon, b).unwrap().version_hash();
+        (v(&fx.decision), v(&fx.content))
+    };
+    let proposal = r
+        .store_mut()
+        .propose(view, "Moves the ledger spec", agent.clone())
+        .unwrap();
+    let bound = Plan {
+        stable: None,
+        prev: None,
+        view: view.into(),
+        proposal: Some(proposal),
+        answers: vec![],
+        heads: vec![PlanHead {
+            repo: "app".into(),
+            head: Some("d".repeat(40)),
+        }],
+        provenance: agent.clone(),
+        seal: None,
+    };
+    r.store_mut()
+        .write_guarded_for_tests(plan_frames(&bound))
+        .unwrap();
+    r.invalidate();
+    let item = item_hash(&fx.decision, fx.content.as_str(), PlanKind::Confirm);
+    let landing = r.store_mut().land(&proposal, person.clone()).unwrap();
+    let version = r.store().landing(&landing).unwrap().proposal;
+    let seal = Plan {
+        stable: Some(bound.id()),
+        prev: Some(bound.id()),
+        proposal: Some(version),
+        answers: vec![PlanAnswer {
+            item,
+            act: PlanAct::Confirm,
+            reason: Some("the claim still reflects the spec".into()),
+            subject: Some(subject),
+            cause,
+            by: agent,
+        }],
+        provenance: person,
+        seal: Some(PlanSeal {
+            landing,
+            version,
+            decisions: vec![fx.decision.clone()],
+            items: vec![SealedItem {
+                id: item,
+                kind: PlanKind::Confirm,
+                subject: fx.content.to_string(),
+                cause: fx.decision.clone(),
+                edge: "reflects".into(),
+                outcome: PlanOutcome::Confirmed,
+                answer: None,
+            }],
+        }),
+        ..bound.clone()
+    };
+    r.store_mut()
+        .write_guarded_for_tests(plan_frames(&seal))
+        .unwrap();
+    r.invalidate();
+    seal.id()
 }
 
 /// Appends three valid signatures to the project at `dir`, each in its own batch, with the

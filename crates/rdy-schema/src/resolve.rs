@@ -1,6 +1,7 @@
 use crate::glob::Glob;
 use crate::pack::*;
 use crate::publication;
+use crate::supporting;
 use rdy_model::decision as d;
 use rdy_model::tree;
 use std::collections::{BTreeMap, BTreeSet};
@@ -133,11 +134,20 @@ impl PackSet {
                 pack.name
             )));
         }
-        check_folder_extension(&pack)?;
+        for ext in extensions() {
+            check_extension(&pack, &ext)?;
+        }
         if pack.block_types.contains_key(publication::PROFILE_TYPE) {
             return Err(SchemaError::Invalid(format!(
                 "{} is an engine type and cannot be declared by a pack",
                 publication::PROFILE_TYPE
+            )));
+        }
+        // D-4WC6R: the engine adds the reflects link kind to every pack
+        if pack.link_types.contains(supporting::REFLECTS_LINK) {
+            return Err(SchemaError::Invalid(format!(
+                "{} is an engine link kind and cannot be declared by a pack",
+                supporting::REFLECTS_LINK
             )));
         }
         inject_engine_types(&mut pack);
@@ -240,21 +250,24 @@ fn inject_engine_types(pack: &mut Pack) {
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
     .collect();
-    let folder_core: BTreeMap<String, FieldDef> = [
-        ("name", f(FieldKind::Str, true, &[])),
-        ("title", f(FieldKind::Str, false, &[])),
-        ("description", f(FieldKind::Str, false, &[])),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_string(), v))
-    .collect();
+    // rf1: every children list that holds decision may hold a finding and a source too; done
+    // before the doc's publication profile is placed, which closes the doc's list
+    for def in pack.block_types.values_mut() {
+        if def.children.iter().any(|c| c == d::DECISION) {
+            for ty in [supporting::FINDING, supporting::SOURCE] {
+                if !def.children.iter().any(|c| c == ty) {
+                    def.children.push(ty.to_string());
+                }
+            }
+        }
+    }
     force(pack, tree::DOC, "d", Trait::Structural, doc_core, None);
     force(
         pack,
         tree::FOLDER,
         "fd",
         Trait::Structural,
-        folder_core,
+        folder_core(),
         None,
     );
     for t in [tree::DOC, tree::FOLDER] {
@@ -293,6 +306,7 @@ fn inject_engine_types(pack: &mut Pack) {
                 &[
                     "direct_ruling",
                     "recorded_ruling",
+                    "delegated",
                     "precedent",
                     "elimination",
                     "none",
@@ -352,6 +366,30 @@ fn inject_engine_types(pack: &mut Pack) {
         question_core,
         Some(TypeClass::Supporting),
     );
+    // rf1 (D-Z8P09): a finding and a source, informative supporting types with an optional body
+    // and no children; `check_extension` has already refused any other pack definition.
+    for (name, prefix, core) in [
+        (
+            supporting::FINDING,
+            supporting::FINDING_PREFIX,
+            supporting::finding_core(),
+        ),
+        (
+            supporting::SOURCE,
+            supporting::SOURCE_PREFIX,
+            supporting::source_core(),
+        ),
+    ] {
+        force(
+            pack,
+            name,
+            prefix,
+            Trait::Informative,
+            core,
+            Some(TypeClass::Supporting),
+        );
+        pack.block_types.get_mut(name).expect("forced above").body = BodyRule::Optional;
+    }
     // A rationale explains a decision, so it may sit under one.
     if pack.block_types.contains_key("rationale") {
         let decision = pack.block_types.get_mut(d::DECISION).expect("forced above");
@@ -370,23 +408,73 @@ fn inject_engine_types(pack: &mut Pack) {
         d::IMPLEMENTS,
         d::DESCRIBES,
         d::AFFECTS,
+        supporting::REFLECTS_LINK,
     ] {
         pack.link_types.insert(l.to_string());
     }
 }
 
-/// A pack may add optional fields to `folder`, nothing else.
-fn check_folder_extension(pack: &Pack) -> Result<(), SchemaError> {
-    let Some(def) = pack.block_types.get(tree::FOLDER) else {
+fn folder_core() -> BTreeMap<String, FieldDef> {
+    [
+        ("name", f(FieldKind::Str, true, &[])),
+        ("title", f(FieldKind::Str, false, &[])),
+        ("description", f(FieldKind::Str, false, &[])),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect()
+}
+
+/// An engine type a pack may declare only to add optional fields.
+struct Extension {
+    ty: &'static str,
+    prefix: &'static str,
+    trait_ok: fn(Trait) -> bool,
+    core: BTreeMap<String, FieldDef>,
+    /// Whether a pack may repeat a core field exactly; a folder's may not be named at all.
+    repeat_core: bool,
+}
+
+fn extensions() -> [Extension; 3] {
+    [
+        Extension {
+            ty: tree::FOLDER,
+            prefix: "fd",
+            trait_ok: |t| t == Trait::Structural,
+            core: folder_core(),
+            repeat_core: false,
+        },
+        Extension {
+            ty: supporting::FINDING,
+            prefix: supporting::FINDING_PREFIX,
+            trait_ok: supporting::trait_allowed,
+            core: supporting::finding_core(),
+            repeat_core: true,
+        },
+        Extension {
+            ty: supporting::SOURCE,
+            prefix: supporting::SOURCE_PREFIX,
+            trait_ok: supporting::trait_allowed,
+            core: supporting::source_core(),
+            repeat_core: true,
+        },
+    ]
+}
+
+/// A pack may add optional fields to `folder`, `finding` and `source`, nothing else: checked in
+/// the order prefix, children, body, traits, then fields in key order. Its class is forced, so it
+/// is not checked.
+fn check_extension(pack: &Pack, ext: &Extension) -> Result<(), SchemaError> {
+    let Some(def) = pack.block_types.get(ext.ty) else {
         return Ok(());
     };
     let refuse = |what: &str| {
         Err(SchemaError::Invalid(format!(
-            "pack {} cannot redefine folder ({what}); it may only add optional fields",
-            pack.name
+            "pack {} cannot redefine {} ({what}); it may only add optional fields",
+            pack.name, ext.ty
         )))
     };
-    if def.prefix != "fd" {
+    if def.prefix != ext.prefix {
         return refuse("prefix");
     }
     if !def.children.is_empty() {
@@ -395,11 +483,15 @@ fn check_folder_extension(pack: &Pack) -> Result<(), SchemaError> {
     if def.body == BodyRule::Required {
         return refuse("body");
     }
-    if def.traits.iter().any(|t| *t != Trait::Structural) {
+    if !def.traits.iter().all(|t| (ext.trait_ok)(*t)) {
         return refuse("traits");
     }
     for (name, fd) in &def.fields {
-        if fd.required || ["name", "title", "description"].contains(&name.as_str()) {
+        let bad = match ext.core.get(name) {
+            Some(core) => !ext.repeat_core || core != fd,
+            None => fd.required,
+        };
+        if bad {
             return refuse(&format!("field {name}"));
         }
     }

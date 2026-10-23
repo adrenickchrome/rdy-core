@@ -1,7 +1,7 @@
 //! bpag1: a cut briefing carries per-doc counts and a cursor; paging through it shows every entry
 //! once; a page over a briefing that moved is stale (FW-LP4).
 use rdy_engine::*;
-use rdy_model::BlockId;
+use rdy_model::{BlockId, Change, Link, Op, Provenance, Role};
 use rdy_qa::daemon::Served;
 use rdy_qa::fixtures::*;
 use rdy_qa::mcp::McpClient;
@@ -34,6 +34,70 @@ fn hub(r: &mut Rdy, n: usize) -> (BlockId, BlockId) {
         BlockId::parse(&h).unwrap(),
     )
 }
+
+/// rf9: `n` sources, in doc `refs`, that H reflects: the sources are written in view `work`, H gets
+/// its `reflects` link in a typed store commit, and the view lands. Returns the sources.
+fn reflect_sources(r: &mut Rdy, h: &BlockId, n: usize) -> Vec<BlockId> {
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$r", "fields": {"name": "refs", "title": "Refs", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "section", "id": "$rs", "parent": "$r", "fields": {"title": "Sources"}}),
+    ];
+    for i in 0..n {
+        ops.push(json!({"op": "create", "type": "source", "id": format!("$s{i}"), "parent": "$rs",
+            "fields": {"title": format!("Source {i}"), "kind": "spec", "locator": format!("loc-{i}")}, "body": format!("Source {i}.")}));
+    }
+    let w = write(r, "work", Value::Array(ops)).unwrap();
+    let sources: Vec<BlockId> = (0..n)
+        .map(|i| BlockId::parse(&w.created[&format!("$s{i}")]).unwrap())
+        .collect();
+    let scope = Scope::View("work".into());
+    let mut next = r.read().block(&scope, h).unwrap();
+    let base = next.version_hash();
+    let tracking = std::sync::Arc::clone(r.read().reader().tracking());
+    for s in &sources {
+        let pin = r
+            .read()
+            .block(&scope, s)
+            .unwrap()
+            .content_hash_with(&tracking);
+        next.pins.insert(s.clone(), pin);
+    }
+    next.links.insert(
+        "reflects".into(),
+        sources
+            .iter()
+            .map(|s| Link {
+                target: s.clone(),
+                part: None,
+            })
+            .collect(),
+    );
+    let deps = r.read().included("work").to_vec();
+    r.store_mut()
+        .commit_to_view(
+            "work",
+            Change {
+                view: "work".into(),
+                ops: vec![Op::Update { base, block: next }],
+                deps,
+                provenance: Provenance {
+                    actor: "human:qa".into(),
+                    run: None,
+                    role: Role::Writer,
+                    at_ms: 5,
+                },
+                justification: None,
+                message: String::new(),
+                links: Default::default(),
+                read_identity: None,
+            },
+        )
+        .unwrap();
+    r.invalidate();
+    land(r, "work").unwrap();
+    sources
+}
+
 fn cov(h: &BlockId) -> Coverage {
     Coverage {
         ids: vec![h.to_string()],
@@ -68,6 +132,7 @@ fn bpag1_a_cut_briefing_carries_a_cursor_and_per_doc_counts() {
 fn bpag1_paging_through_shows_every_entry_once() {
     let (_d, mut r) = project();
     let (_hub_doc, h) = hub(&mut r, 60);
+    reflect_sources(&mut r, &h, 3);
     let full = r
         .read()
         .brief(&Scope::Canon, &cov(&h), Some(100_000))
@@ -78,6 +143,7 @@ fn bpag1_paging_through_shows_every_entry_once() {
         .unwrap();
     first.register(&r.briefs());
     let (mut deps, mut stale) = (first.dependents.clone(), first.will_go_stale.clone());
+    let mut sources = first.sources.clone();
     let mut next = first.next.clone();
     let mut pages = 1;
     while let Some(cursor) = next {
@@ -88,6 +154,7 @@ fn bpag1_paging_through_shows_every_entry_once() {
         assert_eq!(p.base.token, first.base.token);
         deps.extend(p.dependents.clone());
         stale.extend(p.will_go_stale.clone());
+        sources.extend(p.sources.clone());
         next = p.next.clone();
         pages += 1;
         assert!(pages < 100, "paging does not end");
@@ -95,6 +162,9 @@ fn bpag1_paging_through_shows_every_entry_once() {
     assert!(pages > 1);
     assert_eq!(deps, full.dependents);
     assert_eq!(stale, full.will_go_stale);
+    // rf9: the sources H reflects are a paged section too, each shown once
+    assert_eq!(full.sources.len(), 3);
+    assert_eq!(sources, full.sources);
 }
 
 #[test]
@@ -143,7 +213,7 @@ fn bpag1_a_page_of_a_briefing_that_moved_is_stale() {
         .brief_page(&Scope::Canon, &r.briefs(), &cursor, Some(BUDGET))
         .unwrap_err();
     assert_eq!(e.code, E_PAGE_STALE, "{e}");
-    let unknown = format!("{}:0,0,0,0,0,0,0", "0".repeat(64));
+    let unknown = format!("{}:0,0,0,0,0,0,0,0,0,0,0", "0".repeat(64));
     let e = r
         .read()
         .brief_page(&Scope::Canon, &r.briefs(), &unknown, None)
@@ -245,14 +315,19 @@ fn bpag1_an_offset_past_the_end_of_its_section_is_stale_not_malformed() {
     // the same cursor, digest kept, with the dependents offset far past the 60 entries there are
     let (token, rest) = cursor.split_once(':').unwrap();
     let (offsets, digest) = rest.split_once(':').unwrap();
-    let mut parts: Vec<String> = offsets.split(',').map(str::to_string).collect();
-    parts[1] = "100000".to_string();
-    let forged = format!("{token}:{}:{digest}", parts.join(","));
-    let e = r
-        .read()
-        .brief_page(&Scope::Canon, &r.briefs(), &forged, Some(BUDGET))
-        .unwrap_err();
-    assert_eq!(e.code, E_PAGE_STALE, "{e}");
+    let parts: Vec<String> = offsets.split(',').map(str::to_string).collect();
+    assert_eq!(parts.len(), rdy_engine::brief::PAGE_SECTIONS.len());
+    // the dependents offset, then the sources offset (a section of its own)
+    for at in [1, 5] {
+        let mut forged_parts = parts.clone();
+        forged_parts[at] = "100000".to_string();
+        let forged = format!("{token}:{}:{digest}", forged_parts.join(","));
+        let e = r
+            .read()
+            .brief_page(&Scope::Canon, &r.briefs(), &forged, Some(BUDGET))
+            .unwrap_err();
+        assert_eq!(e.code, E_PAGE_STALE, "offset {at}: {e}");
+    }
     // a cursor without its digest is malformed, not stale
     let e = r
         .read()
@@ -273,6 +348,7 @@ fn shown(b: &Briefing) -> usize {
         + b.lineage.len()
         + b.will_go_stale.len()
         + b.suspects.len()
+        + b.sources.len()
         + b.inflight.views.len()
         + b.inflight.proposals.len()
         + b.inflight.intents.len()
@@ -288,6 +364,7 @@ fn json_tokens(b: &Briefing) -> usize {
 fn bfit1_a_cut_briefing_with_its_cursor_fits_every_budget() {
     let (_d, mut r) = project();
     let (_hub_doc, h) = hub(&mut r, 60);
+    reflect_sources(&mut r, &h, 3);
     let wide = r
         .read()
         .brief(&Scope::Canon, &cov(&h), Some(BUDGET))
@@ -424,7 +501,7 @@ fn bpag1_an_inflight_list_that_shrank_is_clamped_not_stale() {
     // the first page showed the one inflight view: its cursor's inflight.views offset is 1
     let (_token, rest) = first.next.as_deref().unwrap().split_once(':').unwrap();
     let offsets: Vec<&str> = rest.split(':').next().unwrap().split(',').collect();
-    assert_eq!(offsets[5], "1", "{rest}");
+    assert_eq!(offsets[6], "1", "{rest}");
     r.view_close(&writer(), &["other".to_string()], "done")
         .unwrap();
     assert!(page_to_end(&r, &Scope::Canon, first.next.clone().unwrap()) > 1);

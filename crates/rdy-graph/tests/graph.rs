@@ -2,6 +2,20 @@ use rdy_graph::*;
 use rdy_model::*;
 use std::collections::BTreeMap;
 
+/// rf6: the live decisions that govern `i` by the graph's four routes ([`Graph::governing_routes`]),
+/// by id. Terms (`t-`) are the entities.
+fn governing(g: &Graph, i: &BlockId) -> Vec<BlockId> {
+    g.governing_routes(
+        i,
+        GoverningStatuses::Live,
+        |e| e.as_str().starts_with("t-"),
+        &mut GoverningCache::default(),
+    )
+    .into_iter()
+    .map(|r| r.decision)
+    .collect()
+}
+
 fn b(id: &str, ty: &str, parent: Option<&str>) -> Block {
     Block {
         id: BlockId::parse(id).unwrap(),
@@ -115,11 +129,11 @@ fn edges_impact_and_governing() {
         ]
     );
     assert_eq!(
-        g.governing(&BlockId::parse("c-CHAMP").unwrap()),
+        governing(&g, &BlockId::parse("c-CHAMP").unwrap()),
         vec![BlockId::parse("D-AAAAA").unwrap()]
     );
     assert_eq!(
-        g.governing(&ledger),
+        governing(&g, &ledger),
         vec![BlockId::parse("D-AAAAA").unwrap()]
     );
 }

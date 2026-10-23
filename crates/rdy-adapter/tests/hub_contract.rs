@@ -171,6 +171,69 @@ mod fixture {
         r.close().unwrap();
     }
 
+    /// rf4 (D-4WC6R): a project of its own at `dir` whose claim is rewritten by a source-only
+    /// and then a code-only Reflects change (typed commits), landed and tagged `v1.0.0`. Returns
+    /// the two changes.
+    pub fn reflects_source(dir: &Path) -> [Hash; 2] {
+        std::fs::create_dir_all(dir).unwrap();
+        let mut r = Rdy::init(dir, "rdy-standard").unwrap();
+        let w = write(
+            &mut r,
+            json!([
+                {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "guide", "title": "Guide", "doc_type": "page"}},
+                {"op": "create", "type": "source", "id": "$s", "parent": "$d", "fields": {"title": "The spec", "kind": "spec", "locator": "spec/v1.md"}},
+                {"op": "create", "type": "claim", "id": "$c", "parent": "$d", "body": "One."}
+            ]),
+        );
+        land(&mut r, "first");
+        let claim = rdy_model::BlockId::parse(&w.created["$c"]).unwrap();
+        let source = rdy_model::BlockId::parse(&w.created["$s"]).unwrap();
+        let forms = [
+            rdy_model::Justification::Reflects {
+                sources: vec![source],
+                code: false,
+            },
+            rdy_model::Justification::Reflects {
+                sources: vec![],
+                code: true,
+            },
+        ];
+        let mut changes = [Hash([0; 32]); 2];
+        for (i, j) in forms.into_iter().enumerate() {
+            let scope = rdy_engine::Scope::View("work".into());
+            let mut next = r.read().block(&scope, &claim).unwrap();
+            let base = next.version_hash();
+            next.body = format!("Version {i}.");
+            let deps = r.read().included("work").to_vec();
+            changes[i] = r
+                .store_mut()
+                .commit_to_view(
+                    "work",
+                    rdy_model::Change {
+                        view: "work".into(),
+                        ops: vec![rdy_model::Op::Update { base, block: next }],
+                        deps,
+                        provenance: Provenance {
+                            actor: "agent:a".into(),
+                            run: None,
+                            role: Role::Writer,
+                            at_ms: 7,
+                        },
+                        justification: Some(j),
+                        message: "rf4".into(),
+                        links: Default::default(),
+                        read_identity: None,
+                    },
+                )
+                .unwrap();
+            r.invalidate();
+        }
+        land(&mut r, "reflects");
+        tag(&mut r, "v1.0.0");
+        r.close().unwrap();
+        changes
+    }
+
     /// The number of batch commit markers in the closed holder at `root`.
     pub fn markers(root: &Path) -> usize {
         let h = Rdy::open_holder(root).unwrap();
@@ -627,4 +690,56 @@ fn ha16_hub_contract_resumes_with_persistent_batch_files() {
     loaded.fsck().unwrap();
     loaded.close().unwrap();
     assert!(!fixture::holds_canary(&copy));
+}
+
+#[test]
+fn rf4_hub_contract_takes_a_reflects_history() {
+    let _clock = rdy_engine::pin_clock(1_000_000);
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("reflects");
+    let changes = fixture::reflects_source(&src);
+    let quarantine = dir.path().join("quarantine");
+    let root = dir.path().join("holder");
+    let up = hub::prepare(&src, "v1.0.0", &BTreeSet::new(), &quarantine).unwrap();
+    let all: Vec<ObjectKey> = up.keys.concat();
+    for c in changes {
+        assert!(
+            all.iter().any(|k| k.hash == c),
+            "each Reflects change is a checked key"
+        );
+    }
+    StoreHandle::create_holder(&root, up.repo)
+        .unwrap()
+        .close()
+        .unwrap();
+    let got = hub::take(&root, &up).unwrap();
+    assert_eq!(got.records_taken, all.len() as u64);
+    assert!(
+        hub::presence(&root, &all)
+            .unwrap()
+            .iter()
+            .all(|p| p.present)
+    );
+    assert_eq!(
+        hub::history(&root, true, "v1.0.0").unwrap(),
+        hub::history(&src, false, "v1.0.0").unwrap()
+    );
+    // the holder's dump is of the pair this rdy writes, and loads to a holder that checks clean
+    let holder = StoreHandle::open_holder(&root).unwrap();
+    let out = dir.path().join("reflects.rdydump");
+    holder.dump(&out).unwrap();
+    holder.close().unwrap();
+    let seen = maintenance::inspect_dump(&out).unwrap();
+    assert_eq!((seen.dump, seen.store), (3, 18));
+    let copy = dir.path().join("reflects-copy");
+    maintenance::load(&out, &copy).unwrap();
+    assert!(
+        hub::presence(&copy, &all)
+            .unwrap()
+            .iter()
+            .all(|p| p.present)
+    );
+    let loaded = StoreHandle::open_holder(&copy).unwrap();
+    loaded.fsck().unwrap();
+    loaded.close().unwrap();
 }

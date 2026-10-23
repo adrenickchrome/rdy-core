@@ -1,7 +1,8 @@
-//! The edit ops: new_folder, new_doc, new_profile, keys_assign and edit_block.
+//! The edit ops: new_folder, new_doc, new_profile, new_finding, new_source, keys_assign and
+//! edit_block.
 use super::*;
 use rdy_engine::consequence::write_and_report;
-use rdy_engine::{EditBase, RdyError};
+use rdy_engine::{EditBase, RdyError, ReflectsArg, one_justification_error};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -34,6 +35,29 @@ pub(super) struct NewProfileArgs {
     view: Option<String>,
 }
 
+/// `rdy new finding` (D-Z8P09): a statement and its evidence entries, each `{quote,
+/// session_ref?, question?}` or `{source}` with the source as an id, key or path.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NewFindingArgs {
+    statement: String,
+    evidence: Vec<Value>,
+    parent: Option<String>,
+    view: Option<String>,
+}
+
+/// `rdy new source` (D-Z8P09): a release, commit or spec.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NewSourceArgs {
+    title: String,
+    kind: String,
+    locator: String,
+    version: Option<String>,
+    parent: Option<String>,
+    view: Option<String>,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct KeysAssignArgs {
@@ -54,6 +78,8 @@ pub(super) struct EditBlockArgs {
     max_tokens: Option<usize>,
     /// The edit's editorial reason (`rdy edit --reason`).
     reason: Option<String>,
+    /// rf8: the edit's `reflects` justification (`rdy edit --reflects`), `{sources?, code?}`.
+    reflects: Option<ReflectsArg>,
 }
 
 pub(super) fn new_folder(cx: &OpContext, a: NewFolderArgs) -> Result<Value, RdyError> {
@@ -129,6 +155,106 @@ pub(super) fn new_profile(cx: &OpContext, a: NewProfileArgs) -> Result<Value, Rd
     Ok(out)
 }
 
+/// One ordinary `create` of `ty` with `fields` under the effective parent through the calling
+/// session's write, as `rdy_write` takes it, briefed as `reaffirm` and `repin` are: in one writer
+/// closure the parent is resolved (`parent`, else the decision home, with its refusals), its
+/// briefing fetched and registered, and the write run with that token, so the write's own
+/// briefing check passes under a stable parent and nothing moves between the three. Every other
+/// rule (the schema and the evidence check, consequences, role, view ownership) is the write
+/// path's own. A parent that names no block is not briefed, so the write gives its own refusal.
+/// No working-copy file is written: both types live only in the store.
+fn create_supporting(
+    cx: &OpContext,
+    ty: &str,
+    placeholder: &str,
+    fields: serde_json::Map<String, Value>,
+    parent: Option<String>,
+    view: Option<String>,
+    message: String,
+) -> Result<Value, RdyError> {
+    let op = json!({"op": "create", "type": ty, "id": placeholder, "fields": fields});
+    let s = cx.session.clone();
+    let view = view_of(&s, view);
+    let briefs = cx.engine.briefs();
+    let (v, name) = (view.clone(), view.clone());
+    let mut out = write_and_report(cx.engine, &v, None, move |r| {
+        let parent = r.decision_parent(&view, parent.as_deref())?;
+        let mut op = op;
+        op["parent"] = json!(parent);
+        let ops = rdy_engine::parse_ops(vec![op])?;
+        let scope = Scope::View(view.clone());
+        let token = match r.read().resolve_id(&scope, &parent) {
+            Ok(id) => {
+                let briefing =
+                    r.read()
+                        .brief_ids(&scope, &std::collections::BTreeSet::from([id]), None)?;
+                briefing.register(&briefs);
+                Some(briefing.base.token.clone())
+            }
+            Err(_) => None,
+        };
+        r.write_briefed(
+            &s,
+            rdy_engine::WriteRequest {
+                view,
+                ops,
+                justification: None,
+                message,
+            },
+            token,
+        )
+    })?;
+    out["view"] = json!(name);
+    Ok(out)
+}
+
+/// `rdy new finding`: each evidence `source` given as an id, key or path is resolved in the view
+/// with the reader's resolver and written as the full reference `{{S-…}}`; everything else is
+/// the write's to check.
+pub(super) fn new_finding(cx: &OpContext, a: NewFindingArgs) -> Result<Value, RdyError> {
+    let view = view_of(cx.session, a.view.clone());
+    let mut evidence = a.evidence;
+    {
+        let st = cx.engine.read();
+        let scope = Scope::View(view.clone());
+        for entry in &mut evidence {
+            let Some(text) = entry.get("source").and_then(Value::as_str) else {
+                continue;
+            };
+            if text.starts_with("{{") {
+                continue;
+            }
+            let id = st.resolve_id(&scope, text)?;
+            entry["source"] = json!(format!("{{{{{id}}}}}"));
+        }
+    }
+    let mut fields = serde_json::Map::new();
+    fields.insert("statement".into(), json!(a.statement));
+    fields.insert("evidence".into(), Value::Array(evidence));
+    create_supporting(
+        cx,
+        "finding",
+        "$finding",
+        fields,
+        a.parent,
+        Some(view),
+        "new finding".into(),
+    )
+}
+
+/// `rdy new source`.
+pub(super) fn new_source(cx: &OpContext, a: NewSourceArgs) -> Result<Value, RdyError> {
+    let mut fields = serde_json::Map::new();
+    fields.insert("title".into(), json!(a.title));
+    fields.insert("kind".into(), json!(a.kind));
+    fields.insert("locator".into(), json!(a.locator));
+    if let Some(v) = a.version {
+        fields.insert("version".into(), json!(v));
+    }
+    let message = format!("new source {}", a.title);
+    create_supporting(cx, "source", "$source", fields, a.parent, a.view, message)
+}
+
 pub(super) fn keys_assign(cx: &OpContext, a: KeysAssignArgs) -> Result<Value, RdyError> {
     let s = cx.session.clone();
     let view = view_of(&s, a.view);
@@ -144,11 +270,16 @@ pub(super) fn edit_block(cx: &OpContext, a: EditBlockArgs) -> Result<Value, RdyE
     let view = view_of(&s, a.view);
     let (yaml, brief, max_tokens, v) = (a.yaml, a.brief, a.max_tokens, view.clone());
     let (base, conflict, reason) = (a.base, a.conflict, a.reason);
+    // one justification, then the raw object's own shape
+    if a.reflects.is_some() && reason.as_deref().is_some_and(|r| !r.trim().is_empty()) {
+        return Err(one_justification_error());
+    }
+    let reflects = a.reflects.map(ReflectsArg::input).transpose()?;
     write_and_report(cx.engine, &v, max_tokens, move |r| {
         let base = base.as_deref().map(|version| EditBase {
             version,
             conflict: conflict.as_deref(),
         });
-        r.edit_yaml_at(&s, &view, &yaml, base, brief, reason.as_deref())
+        r.edit_yaml_at(&s, &view, &yaml, base, brief, reason.as_deref(), reflects)
     })
 }

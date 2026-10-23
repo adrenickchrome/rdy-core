@@ -70,7 +70,7 @@ fn owner(a: &str) -> Owner {
 
 #[test]
 fn vop1_the_store_format_is_current() {
-    assert_eq!(rdy_store::format::STORE_FORMAT, 17);
+    assert_eq!(rdy_store::format::STORE_FORMAT, 18);
 }
 
 #[test]

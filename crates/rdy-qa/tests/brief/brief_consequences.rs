@@ -137,8 +137,9 @@ fn csq1_a_premise_link_is_update_and_an_accepted_decision_is_reaffirm_with_the_f
     assert_eq!(d.because.edge, "depends_on");
 }
 
+/// D-4XTRC: a change does not reach a decision through that decision's own affects link.
 #[test]
-fn csq1_a_dependent_that_cannot_turn_suspect_is_dependent() {
+fn csq1_a_decisions_own_affects_link_gives_no_entry() {
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);
     let d3 = r
@@ -156,13 +157,7 @@ fn csq1_a_dependent_that_cannot_turn_suspect_is_dependent() {
     let d3 = BlockId::parse(&d3.created["$decision"]).unwrap();
     let res = update_a(&mut r, &s);
     let c = after(&r, &res.change);
-    let d = entry(&c, &d3);
-    // D3 is proposed: mutable and normative (decisions are forced normative)
-    assert_eq!(
-        (d.kind, d.follow_up),
-        (ConsequenceKind::Dependent, FollowUp::Update)
-    );
-    assert_eq!(d.because.edge, "affects");
+    assert!(!has(&c, &d3), "{c:?}");
 }
 
 #[test]
@@ -363,16 +358,19 @@ fn csq1_a_proposed_decision_dependent_is_asked_to_update() {
     assert_eq!(e.fix, None);
 }
 
+/// D-ATBP6: the superseding decision is only proposed in the view, so X is not suspect on D
+/// there: an accepted decision reached without a suspect gets confirm, never a reaffirm that the
+/// reaffirm op would refuse.
 #[test]
-fn csq1_a_decision_depending_on_a_superseded_decision_is_reaffirm() {
+fn csq1_a_decision_depending_on_a_superseded_decision_is_confirm() {
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);
     let x = accepted_depending_on(&mut r, &s, &[&s.decision]);
     let res = supersede_in_w(&mut r, &s, &s.decision);
     let c = after(&r, &res.change);
     let e = entry(&c, &x);
-    assert_eq!(e.follow_up, FollowUp::Reaffirm);
-    assert_eq!(e.fix.as_deref(), Some(REAFFIRM_FIX));
+    assert_eq!(e.follow_up, FollowUp::Confirm);
+    assert_eq!(e.fix.as_deref(), Some(REACH_CONFIRM_FIX));
 }
 
 #[test]

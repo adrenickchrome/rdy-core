@@ -4,7 +4,6 @@
 //! rationale give no mark, no count and no removed line. Every word the review gives is a reader
 //! word (`Edited`, `New`, a count like `2 edited · 1 new · 1 removed`), never an id, a hash or a
 //! type name.
-use crate::site::RATIONALE;
 use rdy_engine::view_query::compare_states;
 use rdy_engine::{Compare, CompareEntry, Materialized, RdyError, ReadState, Scope};
 use rdy_model::{Block, BlockId, decision, tree};
@@ -313,9 +312,11 @@ pub(crate) fn unreviewed(rdy: &ReadState, scope: &Scope) -> Result<Option<Review
     Ok(Some(review(&cmp, &dm, &empty)))
 }
 
-/// On the page: neither a decision, its rationale nor a publication profile.
+/// On the page: neither a decision, its rationale, a finding, a source nor a publication profile.
 fn visible(b: &Block) -> bool {
-    b.block_type != decision::DECISION && b.block_type != RATIONALE && !crate::site::is_profile(b)
+    b.block_type != decision::DECISION
+        && !crate::site::is_off_site(b)
+        && !crate::site::is_profile(b)
 }
 
 fn ids(entries: &[CompareEntry]) -> impl Iterator<Item = BlockId> + '_ {
@@ -603,6 +604,7 @@ fn removed_pages(cmp: &Compare, bm: &Materialized) -> Vec<Block> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::site::RATIONALE;
 
     fn entry(id: &str, fields: &[&str]) -> CompareEntry {
         CompareEntry {

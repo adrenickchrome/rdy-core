@@ -18,7 +18,7 @@ const CLASSES: [&str; 4] = ["secret", "personal", "legal", "retraction"];
 
 const COPIES: &str = "This removes bytes from this store. It cannot erase exports, renders, dumps, clones, published files, working copies, backups, or filesystem snapshots.";
 const INVENTORY: &str = "Dumps, clones, exports, renders, and published versions may hold copies. Their locations are unknown to rdy.";
-const QUOTES: &str = "Quote matches use complete source strings. Partial quotes may still hold content. Snapshot issue lists and summaries, review findings, tension advice, and answer notes are not erased.";
+const QUOTES: &str = "Quote matches use complete source strings. Partial quotes may still hold content. Snapshot issue lists and summaries, review citations, tension advice, answer notes and change-plan versions are not erased.";
 const REUSE: &str = "This store will refuse these object and chunk hashes on later writes. This can block an identical restore or a file that shares a removed chunk.";
 const ROTATE: &str = "Rotate or revoke the secret. Redaction does not undo its exposure.";
 const IRREVERSIBLE: &str = "Approved content removal cannot be undone.";

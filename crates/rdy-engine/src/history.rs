@@ -4,6 +4,7 @@
 //! provenance and message (read through the change's residue), and the request that removed it.
 use crate::error::*;
 use crate::{Materialized, ReadState, Scope};
+use rdy_model::decision::{self, DecisionStatus};
 use rdy_model::{
     ActorRun, BlockId, Change, EditorialClass, Hash, Justification, LandingRecord, Op, Provenance,
     Role,
@@ -11,7 +12,7 @@ use rdy_model::{
 use rdy_store::StoreReader;
 use rdy_store::segment::Location;
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 /// The most versions one history call returns.
@@ -38,20 +39,55 @@ pub struct Author {
     pub at_ms: i64,
 }
 
-/// Why a change was made: the decision it implements, or an editorial class and reason.
+/// Why a change was made: the decision it implements, an editorial class and reason, or the
+/// sources (and code) it reflects.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JustificationInfo {
     Implements(Vec<String>),
-    Editorial { class: String, reason: String },
+    Editorial {
+        class: String,
+        reason: String,
+    },
+    /// D-4WC6R: `{"reflects": {"sources": [...], "code": true|false}}`, sources in stored order.
+    Reflects {
+        sources: Vec<String>,
+        code: bool,
+    },
 }
 
 impl JustificationInfo {
-    /// `implements <id>, <id>` or `editorial <class>`.
+    /// `implements <id>, <id>`, `editorial <class>`, or `reflects <id>, <id>` with `, code`
+    /// appended when code is set (`reflects code` alone for code only).
     pub fn label(&self) -> String {
         match self {
             JustificationInfo::Implements(ids) => format!("implements {}", ids.join(", ")),
             JustificationInfo::Editorial { class, .. } => format!("editorial {class}"),
+            JustificationInfo::Reflects { sources, code } => {
+                let mut parts: Vec<&str> = sources.iter().map(String::as_str).collect();
+                if *code {
+                    parts.push("code");
+                }
+                format!("reflects {}", parts.join(", "))
+            }
+        }
+    }
+}
+
+impl From<&Justification> for JustificationInfo {
+    fn from(j: &Justification) -> Self {
+        match j {
+            Justification::Implements(ids) => {
+                JustificationInfo::Implements(ids.iter().map(ToString::to_string).collect())
+            }
+            Justification::Editorial { class, reason } => JustificationInfo::Editorial {
+                class: class_str(*class).into(),
+                reason: reason.clone(),
+            },
+            Justification::Reflects { sources, code } => JustificationInfo::Reflects {
+                sources: sources.iter().map(ToString::to_string).collect(),
+                code: *code,
+            },
         }
     }
 }
@@ -108,7 +144,7 @@ pub(crate) fn role_str(r: Role) -> &'static str {
     }
 }
 
-fn class_str(c: EditorialClass) -> &'static str {
+pub(crate) fn class_str(c: EditorialClass) -> &'static str {
     match c {
         EditorialClass::Typo => "typo",
         EditorialClass::Restructure => "restructure",
@@ -116,24 +152,12 @@ fn class_str(c: EditorialClass) -> &'static str {
     }
 }
 
-fn author(p: &Provenance) -> Author {
+pub(crate) fn author(p: &Provenance) -> Author {
     Author {
         actor: p.actor.clone(),
         run: p.run.clone(),
         role: role_str(p.role).into(),
         at_ms: p.at_ms,
-    }
-}
-
-fn justification(j: &Justification) -> JustificationInfo {
-    match j {
-        Justification::Implements(ids) => {
-            JustificationInfo::Implements(ids.iter().map(ToString::to_string).collect())
-        }
-        Justification::Editorial { class, reason } => JustificationInfo::Editorial {
-            class: class_str(*class).into(),
-            reason: reason.clone(),
-        },
     }
 }
 
@@ -308,7 +332,7 @@ impl<'a> Memo<'a> {
             author: author(&change.provenance),
             imported_by: change.links.imported_by.clone(),
             message: change.message.clone(),
-            justification: change.justification.as_ref().map(justification),
+            justification: change.justification.as_ref().map(JustificationInfo::from),
             landing,
             redaction: redaction.map(|h| h.to_string()),
         };
@@ -675,4 +699,97 @@ impl CanonSteps<'_> {
     pub(crate) fn body(&self, v: &Hash) -> Result<String, RdyError> {
         Ok(self.memo.reader.get_block(v)?.body)
     }
+}
+
+/// trace (D-1876T): one block write a landing carried: the landing, the version written, and the
+/// provenance and importer of the change that wrote it, read through the reader's redacted
+/// projection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Carried {
+    pub landing: Hash,
+    pub version: Hash,
+    pub author: Author,
+    pub imported_by: Option<ActorRun>,
+}
+
+/// trace: what one landing chain carried for a set of blocks. `landings` holds every landing of
+/// the chain; `created` the first (oldest) create of each block; `accepted` the oldest version of
+/// each decision whose status is accepted. Within one landing the recorded change order, then op
+/// order, decides.
+#[derive(Debug, Default)]
+pub(crate) struct ChainWrites {
+    pub landings: HashSet<Hash>,
+    pub created: HashMap<BlockId, Carried>,
+    pub accepted: HashMap<BlockId, Carried>,
+}
+
+/// trace: streams the landing chain that starts at `head` (newest first, by `prev`, through
+/// [`crate::history_facts::walk_heads`] and its [`crate::history_facts::MAX_LANDINGS`] bound and
+/// cycle error), reading each landing's changes once and keeping only the writes of `blocks`
+/// (creates) and `decisions` (accepted versions). Nothing else of a landing is kept, and no
+/// payload is fetched past the reader's projection: a removed version is its stub, which holds
+/// no status. Acceptance is the stored status, never `decided_at`.
+pub(crate) fn chain_writes(
+    reader: &StoreReader,
+    head: Option<Hash>,
+    blocks: &BTreeSet<BlockId>,
+    decisions: &BTreeSet<BlockId>,
+) -> Result<ChainWrites, RdyError> {
+    let mut out = ChainWrites::default();
+    let Some(head) = head else {
+        return Ok(out);
+    };
+    let mut seen: Vec<Hash> = Vec::new();
+    let created = &mut out.created;
+    let accepted = &mut out.accepted;
+    crate::history_facts::walk_heads(
+        &[head],
+        |h| {
+            let rec: LandingRecord = reader.landing(h)?;
+            // this landing's first writes; an older landing's replace a newer one's
+            let mut here_created: HashMap<BlockId, Carried> = HashMap::new();
+            let mut here_accepted: HashMap<BlockId, Carried> = HashMap::new();
+            for c in &rec.changes {
+                let change = reader.change(c)?;
+                for op in &change.ops {
+                    let (block, create) = match op {
+                        Op::Create { block } => (block, true),
+                        Op::Update { block, .. } => (block, false),
+                        Op::Delete { .. } => continue,
+                    };
+                    let wanted_create = create
+                        && blocks.contains(&block.id)
+                        && !here_created.contains_key(&block.id);
+                    let wanted_accept = decisions.contains(&block.id)
+                        && !here_accepted.contains_key(&block.id)
+                        && block.block_type == decision::DECISION
+                        && decision::status(block) == Some(DecisionStatus::Accepted);
+                    if !wanted_create && !wanted_accept {
+                        continue;
+                    }
+                    let carried = Carried {
+                        landing: *h,
+                        version: block.version_hash(),
+                        author: author(&change.provenance),
+                        imported_by: change.links.imported_by.clone(),
+                    };
+                    if wanted_create {
+                        here_created.insert(block.id.clone(), carried.clone());
+                    }
+                    if wanted_accept {
+                        here_accepted.insert(block.id.clone(), carried);
+                    }
+                }
+            }
+            created.extend(here_created);
+            accepted.extend(here_accepted);
+            Ok(rec.prev)
+        },
+        |h| {
+            seen.push(h);
+            false
+        },
+    )?;
+    out.landings = seen.into_iter().collect();
+    Ok(out)
 }

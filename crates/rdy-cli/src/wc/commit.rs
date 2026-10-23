@@ -16,8 +16,8 @@ use rdy_engine::wc::state::{ConflictKind, Pending, Place, WcState, new_nonce, st
 use rdy_engine::{
     Diagnostic, E_BAD_INPUT, E_BAD_NAME, E_HAS_CHILDREN, E_IO, E_KEY_CLASH, E_PATH_CLASH,
     E_STALE_BASE, E_UNKNOWN_REF, E_VALIDATION, E_WC_CONFLICT, E_WC_DIRTY, E_WC_INVALID,
-    E_WC_LOCKED, E_WC_OCCUPIED, E_WC_STALE, Projection, RdyError, W_WC_UNSTAGED_MOVE,
-    editorial_class, now_ms, project_pack,
+    E_WC_LOCKED, E_WC_OCCUPIED, E_WC_STALE, Projection, RdyError, ReflectsInput,
+    W_WC_UNSTAGED_MOVE, editorial_class, now_ms, project_pack,
 };
 use rdy_model::BlockId;
 use rdy_schema::Severity;
@@ -39,10 +39,31 @@ const FILE_CODES: &[&str] = &[
     "E_CHILD_TYPE",
 ];
 
-/// How the commit is justified: the decisions it carries out, or an editorial class and reason.
+/// How the commit is justified: the decisions it carries out, an editorial class and reason, or
+/// the sources it reflects and whether it records the code state (rf8).
 pub(super) struct Justify {
     pub implements: Vec<String>,
     pub editorial: Vec<String>,
+    pub reflects: Vec<String>,
+    pub reflects_code: bool,
+}
+
+impl Justify {
+    /// The raw `reflects` object the daemon's writer resolves, when either flag is given:
+    /// `sources` when a source is named, `code: true` when `--reflects-code` is.
+    fn reflects_arg(&self) -> Option<Value> {
+        if self.reflects.is_empty() && !self.reflects_code {
+            return None;
+        }
+        let mut o = Map::new();
+        if !self.reflects.is_empty() {
+            o.insert("sources".into(), json!(self.reflects));
+        }
+        if self.reflects_code {
+            o.insert("code".into(), json!(true));
+        }
+        Some(Value::Object(o))
+    }
 }
 
 pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, String), ErrorReply> {
@@ -90,6 +111,14 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
     if let [class, _] = j.editorial.as_slice() {
         // checked before the journal: the daemon's refusal would read as a problem in a file
         editorial_class(class)?;
+    }
+    if j.reflects_arg().is_some() {
+        // the raw bounds, before the journal, as the writer checks them
+        ReflectsInput {
+            sources: j.reflects.clone(),
+            code: j.reflects_code,
+        }
+        .check()?;
     }
     let view = state.require_bound()?.view.clone();
     // the view head this copy saw: a probe after an error reply searches the changes after it
@@ -206,6 +235,9 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
     }
     if let [class, reason] = j.editorial.as_slice() {
         args["editorial"] = json!({"class": class, "reason": reason});
+    }
+    if let Some(reflects) = j.reflects_arg() {
+        args["reflects"] = reflects;
     }
     if let Some(token) = &cited.token {
         args["brief"] = json!(token);
@@ -596,7 +628,8 @@ fn map_error(e: ErrorReply, plan: &CommitPlan, st: &WcState, view: &str) -> Erro
             severity: Severity::Error,
         }]);
     }
-    if !FILE_CODES.contains(&code) {
+    // rf8: a refused `reflects` justification names its sources, not a problem in a file
+    if !FILE_CODES.contains(&code) || e.message.starts_with("reflects ") {
         return e;
     }
     let at = |block: Option<BlockId>, message: &str| {

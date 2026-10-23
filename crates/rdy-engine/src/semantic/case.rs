@@ -87,7 +87,7 @@ pub struct CaseEntity {
 pub fn verdict_schema() -> Value {
     json!({
         "verdict": ["tension", "no_tension"],
-        "findings": "a list of {block, note}: block is one of the two block ids; note is 1 to 2000 characters; a tension verdict needs 1 to 20 findings, a no_tension verdict 0 to 20",
+        "citations": "a list of {block, note}: block is one of the two block ids; note is 1 to 2000 characters; a tension verdict needs 1 to 20 citations, a no_tension verdict 0 to 20",
         "severity": "advisory (default) or blocking, on a tension verdict only: blocking advises a person to make the tension block; it gates nothing until a person accepts it",
         "reason": "with severity blocking only: why the tension should block, 1 to 2000 characters",
     })
@@ -129,21 +129,29 @@ impl ReadState {
             block_of_item(&cx, ib, &label)?,
         );
         let mut blocks = vec![];
+        // rf6: live decisions by the four routes, one cache for both blocks
+        let mut cache = rdy_graph::GoverningCache::default();
         for (item, block) in [(ia, &a), (ib, &b)] {
             let (doc, headings) = headings_of(&m, block);
-            let governing = g
-                .governing(&block.id)
-                .into_iter()
-                .take(MAX_GOVERNING)
-                .map(|d| CaseDecision {
-                    statement: m
-                        .get(&d)
-                        .and_then(|x| x.field_str("statement"))
-                        .unwrap_or_default()
-                        .to_string(),
-                    id: d.to_string(),
-                })
-                .collect();
+            let governing = crate::query::governing_ids(
+                self.pack(),
+                &m,
+                &g,
+                &block.id,
+                rdy_graph::GoverningStatuses::Live,
+                &mut cache,
+            )
+            .into_iter()
+            .take(MAX_GOVERNING)
+            .map(|d| CaseDecision {
+                statement: m
+                    .get(&d)
+                    .and_then(|x| x.field_str("statement"))
+                    .unwrap_or_default()
+                    .to_string(),
+                id: d.to_string(),
+            })
+            .collect();
             blocks.push(CaseBlock {
                 id: block.id.to_string(),
                 block_type: block.block_type.clone(),
@@ -263,11 +271,11 @@ fn shared_entities(m: &Materialized, lex: &Lexicon, a: &Block, b: &Block) -> Vec
 mod tests {
     use super::*;
 
-    /// guard: the schema names the verdict, the findings and the advice.
+    /// guard: the schema names the verdict, the citations and the advice.
     #[test]
     fn se6_the_verdict_schema_names_the_advice() {
         let s = verdict_schema();
-        for k in ["verdict", "findings", "severity", "reason"] {
+        for k in ["verdict", "citations", "severity", "reason"] {
             assert!(!s[k].is_null(), "{k}");
         }
         assert_eq!(s["verdict"], json!(["tension", "no_tension"]));

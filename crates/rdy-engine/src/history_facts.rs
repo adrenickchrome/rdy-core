@@ -235,8 +235,8 @@ pub fn chain(read: &ReadState, start: Hash) -> Result<Vec<LandingFacts>, RdyErro
 /// it once. One budget of [`MAX_LANDINGS`] covers the distinct landings met across all heads, the
 /// one `visit` stops at included; the landing that would pass it is `E_LIMIT`, before it is
 /// visited. A landing met twice in one walk is the dependency-cycle error. Returns whether
-/// `visit` stopped the walk.
-fn walk_heads(
+/// `visit` stopped the walk. A trace streams its selected chain through it (D-1876T).
+pub(crate) fn walk_heads(
     heads: &[Hash],
     mut prev_of: impl FnMut(&Hash) -> Result<Option<Hash>, RdyError>,
     mut visit: impl FnMut(Hash) -> bool,

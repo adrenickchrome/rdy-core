@@ -373,9 +373,9 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
             checked.push(stringify!($t));
         )* };
     }
-    // The 56 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
-    // `AltPickParams`, `DismissParams`, `DecideParams`, `MentionParams`, `AcceptAdviceParams`,
-    // `RelayParams`, `RecommendedParams`, `PlanAnswerParams`).
+    // The 58 `*Params` types, nested ones included (`EditorialParams`, `ReflectsParams`,
+    // `AltMemberParams`, `AltPickParams`, `DismissParams`, `DecideParams`, `MentionParams`,
+    // `AcceptAdviceParams`, `RelayParams`, `RecommendedParams`, `PlanAnswerParams`).
     check!(
         AcceptAdviceParams,
         AcceptParams,
@@ -393,7 +393,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         DumpParams,
         EditorialParams,
         ExportParams,
-        FindingParams,
+        CitationParams,
         IdParams,
         InboxParams,
         IntentParams,
@@ -413,6 +413,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         ReadParams,
         RecommendedParams,
         RedactParams,
+        ReflectsParams,
         RelayParams,
         RemoteParams,
         RenderParams,
@@ -431,6 +432,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         TagParams,
         TagsParams,
         TensionsParams,
+        TraceParams,
         ViewParams,
         WriteParams,
     );
@@ -1600,4 +1602,165 @@ fn hpb15_publish_params_are_closed_and_keep_latest_is_optional() {
             "{key}"
         );
     }
+}
+
+/// One MCP session over an in-memory stream, served by the real `serve` loop, so a call passes
+/// the transport, the router and the parameter extractor like a client's call.
+struct Wire {
+    client: tokio::io::BufReader<tokio::io::DuplexStream>,
+    next: u64,
+}
+
+impl Wire {
+    async fn open(engine: std::sync::Arc<dyn rdy_engine::engine::Engine>) -> Wire {
+        use tokio::io::AsyncWriteExt;
+        let (client, end) = tokio::io::duplex(1 << 16);
+        let (r, w) = tokio::io::split(end);
+        let server =
+            rdy_mcp::server::RdyServer::new(engine, None, rdy_mcp::notify::NotifyHub::new());
+        tokio::spawn(rdy_mcp::server::serve(server, r, w));
+        let mut wire = Wire {
+            client: tokio::io::BufReader::new(client),
+            next: 1,
+        };
+        let init = json!({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                "clientInfo": {"name": "rf2", "version": "0"}}});
+        wire.client
+            .write_all(format!("{init}\n").as_bytes())
+            .await
+            .unwrap();
+        wire.reply(0).await;
+        let ready = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+        wire.client
+            .write_all(format!("{ready}\n").as_bytes())
+            .await
+            .unwrap();
+        wire
+    }
+
+    async fn reply(&mut self, id: u64) -> Value {
+        use tokio::io::AsyncBufReadExt;
+        loop {
+            let mut line = String::new();
+            assert!(
+                self.client.read_line(&mut line).await.unwrap() > 0,
+                "the session ended"
+            );
+            let v: Value = serde_json::from_str(&line).unwrap();
+            if v["id"] == json!(id) {
+                return v;
+            }
+        }
+    }
+
+    /// Calls `tool`; returns (is_error, the reply object).
+    async fn call(&mut self, tool: &str, args: Value) -> (bool, Value) {
+        use tokio::io::AsyncWriteExt;
+        let id = self.next;
+        self.next += 1;
+        let req = json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": tool, "arguments": args}});
+        self.client
+            .write_all(format!("{req}\n").as_bytes())
+            .await
+            .unwrap();
+        let v = self.reply(id).await;
+        let result = &v["result"];
+        let text = result["content"][0]["text"].as_str().expect("a text reply");
+        (
+            result["isError"] == json!(true),
+            serde_json::from_str(text).unwrap(),
+        )
+    }
+}
+
+/// The durable end of the log, as the store reports it.
+fn log_end(engine: &std::sync::Arc<dyn rdy_engine::engine::Engine>) -> String {
+    engine
+        .write(Box::new(|r| {
+            Ok(json!(format!("{:?}", r.store().log_end())))
+        }))
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// rf2: `findings` is no key of rdy_review_submit any more. Sent through the real MCP session
+/// loop, the refusal is the normal strict-input text, and its fix names citations through the
+/// whole key list; the durable log position does not move; a close misspelling gets the
+/// nearest-key hint; then a valid citations request succeeds through the same session and the
+/// log moves. No alias or special parser exists.
+#[tokio::test(flavor = "multi_thread")]
+async fn rf2_old_findings_is_refused_before_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let engine: std::sync::Arc<dyn rdy_engine::engine::Engine> =
+        std::sync::Arc::new(rdy_engine::engine::Local::new(rdy));
+    let mut w = McpState::new(std::sync::Arc::clone(&engine));
+    rdy_session(
+        &mut w,
+        serde_json::from_value(json!({"actor": "agent:a", "run": "a", "role": "writer"})).unwrap(),
+    )
+    .unwrap();
+    rdy_write(
+        &mut w,
+        serde_json::from_value(json!({"ops": [
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "spec", "title": "Spec", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}},
+            {"op": "create", "type": "claim", "id": "$x", "parent": "$s", "body": "A holds."},
+            {"op": "create", "type": "claim", "id": "$y", "parent": "$s", "body": "A does not hold."}
+        ]}))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut r = Wire::open(std::sync::Arc::clone(&engine)).await;
+    let (err, _) = r
+        .call(
+            "rdy_session",
+            json!({"actor": "agent:r", "run": "r", "role": "reviewer"}),
+        )
+        .await;
+    assert!(!err);
+    let (err, n) = r.call("rdy_review_next", json!({"kind": "tension"})).await;
+    assert!(!err, "{n}");
+    let block = n["case"]["blocks"][0]["id"].clone();
+    let base = json!({"request": n["request"], "case_hash": n["case_hash"], "verdict": "tension"});
+    let before = log_end(&engine);
+
+    let mut args = base.clone();
+    args["findings"] = json!([{"block": block, "note": "n"}]);
+    let (err, e) = r.call("rdy_review_submit", args).await;
+    assert!(err);
+    assert_eq!(e["code"], "E_BAD_INPUT");
+    assert_eq!(
+        e["message"],
+        "rdy_review_submit: unknown parameter \"findings\""
+    );
+    assert_eq!(
+        e["fix"],
+        "remove \"findings\"; the parameters here are case_hash, citations, reason, request, severity, verdict"
+    );
+    assert_eq!(log_end(&engine), before, "a refused request writes nothing");
+
+    let mut args = base.clone();
+    args["citatons"] = json!([]);
+    let (err, e) = r.call("rdy_review_submit", args).await;
+    assert!(err);
+    assert_eq!(e["code"], "E_BAD_INPUT");
+    let (message, fix) = (e["message"].as_str().unwrap(), e["fix"].as_str().unwrap());
+    assert!(
+        message.contains("citatons") && fix.contains("citations"),
+        "{message} {fix}"
+    );
+    assert_eq!(log_end(&engine), before, "a refused request writes nothing");
+
+    let mut ok = base;
+    ok["citations"] = json!([{"block": block, "note": "these two cannot both hold"}]);
+    let (err, sub) = r.call("rdy_review_submit", ok).await;
+    assert!(!err, "{sub}");
+    assert_eq!(sub["severity"], "advisory");
+    assert_ne!(log_end(&engine), before, "the valid request is recorded");
 }

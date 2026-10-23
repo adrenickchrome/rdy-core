@@ -1364,7 +1364,7 @@ fn set_in(text: &str) -> Option<String> {
 }
 
 /// The arguments of `rdy_review_submit` for a leased case (ledger O4). When both blocks of the
-/// case hold the same `CONTRA-<k>` marker the verdict is `tension`, with one finding per block.
+/// case hold the same `CONTRA-<k>` marker the verdict is `tension`, with one citation per block.
 /// For an even `k` it advises blocking: `severity: "blocking"` and a `reason`. For an odd `k` it
 /// advises nothing: no `severity` and no `reason` are sent. Any other case is `no_tension`.
 pub(crate) fn verdict_args(request: &Value, case_hash: &Value, blocks: &[Value]) -> Value {
@@ -1386,7 +1386,7 @@ pub(crate) fn verdict_args(request: &Value, case_hash: &Value, blocks: &[Value])
         [Some(a), Some(b)] if a == b => {
             let k = *a;
             args["verdict"] = json!("tension");
-            args["findings"] = json!(
+            args["citations"] = json!(
                 blocks
                     .iter()
                     .map(|b| json!({"block": b["id"],
@@ -1851,7 +1851,7 @@ mod tests {
         assert_eq!(args["verdict"], "tension");
         assert_eq!(args["severity"], "blocking");
         assert_eq!(args["reason"], "scripted advice CONTRA-2");
-        assert_eq!(args["findings"].as_array().map(Vec::len), Some(2));
+        assert_eq!(args["citations"].as_array().map(Vec::len), Some(2));
         assert_eq!(
             (&args["request"], &args["case_hash"]),
             (&json!("rq-1"), &json!("h"))
@@ -1863,7 +1863,7 @@ mod tests {
         let blocks = [block("b-1", "x CONTRA-3"), block("b-2", "y CONTRA-3")];
         let args = verdict_args(&json!("rq-1"), &json!("h"), &blocks);
         assert_eq!(args["verdict"], "tension");
-        assert_eq!(args["findings"].as_array().map(Vec::len), Some(2));
+        assert_eq!(args["citations"].as_array().map(Vec::len), Some(2));
         let sent = args.as_object().expect("an object");
         assert!(!sent.contains_key("severity"), "{args}");
         assert!(!sent.contains_key("reason"), "{args}");
@@ -1879,7 +1879,7 @@ mod tests {
             let args = verdict_args(&json!("rq-1"), &json!("h"), &blocks);
             assert_eq!(args["verdict"], "no_tension", "{args}");
             let sent = args.as_object().expect("an object");
-            assert!(!sent.contains_key("severity") && !sent.contains_key("findings"));
+            assert!(!sent.contains_key("severity") && !sent.contains_key("citations"));
         }
     }
 

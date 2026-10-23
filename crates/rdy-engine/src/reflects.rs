@@ -195,16 +195,20 @@ impl Lazy<'_> {
 /// the conflict's base), else nothing for a create. A block whose reflects becomes absent or
 /// empty loses it; one that had none and still has none keeps what it holds. A created block,
 /// one whose glob set changes, and one in `code` (a repin with `code: true`) get the current
-/// snapshot; any other rewrite keeps the one it has. With no linked
+/// snapshot, and so does one in `justified` (rf8, D-XC9B9: a block a `reflects` with
+/// `code: true` justifies); any other rewrite keeps the one it has. With no linked
 /// checkout nothing is made up: a block whose set changed loses its snapshot, a code repin is
-/// `E_CONFIG`, and each reflects block written gets [`W_REFLECTS_NO_CODE`] once.
+/// `E_CONFIG`, a justified block keeps what it holds (its set changed or not), and each
+/// reflects block written gets [`W_REFLECTS_NO_CODE`] once. Returns the warnings and the blocks
+/// of `justified` stamped.
 pub(crate) fn stamp(
     root: &Path,
     store: &rdy_store::Store,
     base: &Materialized,
     ops: &mut [Op],
     code: &BTreeSet<BlockId>,
-) -> Result<Vec<Issue>, RdyError> {
+    justified: &BTreeSet<BlockId>,
+) -> Result<(Vec<Issue>, Vec<BlockId>), RdyError> {
     let mut lazy = Lazy {
         root,
         repos: None,
@@ -214,6 +218,7 @@ pub(crate) fn stamp(
     let mut prior: HashMap<BlockId, BTreeSet<String>> = HashMap::new();
     let mut warned: BTreeSet<BlockId> = BTreeSet::new();
     let mut out = vec![];
+    let mut stamped = vec![];
     let owned =
         |set: BTreeSet<&str>| -> BTreeSet<String> { set.into_iter().map(str::to_string).collect() };
     for op in ops.iter_mut() {
@@ -256,7 +261,9 @@ pub(crate) fn stamp(
                         "set code_paths to a linked checkout, then repin with code: true",
                     ));
                 }
-                if changed {
+                // a justified block keeps what it holds even when its glob set changes: with
+                // no code state to record, dropping the old one would clear its code suspect
+                if changed && !justified.contains(&block.id) {
                     block.fields.remove(REFLECTS_AT);
                 }
                 if warned.insert(block.id.clone()) {
@@ -271,16 +278,19 @@ pub(crate) fn stamp(
                         fix: NO_CODE_FIX.to_string(),
                     });
                 }
-            } else if changed || repin {
+            } else if changed || repin || justified.contains(&block.id) {
                 let snap = snapshot_of(lazy.trees()?, &compiled(now.iter().map(String::as_str)));
                 block
                     .fields
                     .insert(REFLECTS_AT.to_string(), snap.to_field());
+                if justified.contains(&block.id) {
+                    stamped.push(block.id.clone());
+                }
             }
         }
         prior.insert(block.id.clone(), now);
     }
-    Ok(out)
+    Ok((out, stamped))
 }
 
 /// The blocks among `ids` (every block of the scope with `None`) whose reflected files differ

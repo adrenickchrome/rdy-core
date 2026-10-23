@@ -33,12 +33,21 @@ pub enum EditorialClass {
     Clarify,
 }
 
+/// Why a change was made. The variants are encoded by position, so a new one is appended and an
+/// existing one is never moved (D-F0904): Implements is 0, Editorial 1, Reflects 2.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Justification {
     Implements(Vec<BlockId>),
     Editorial {
         class: EditorialClass,
         reason: String,
+    },
+    /// Store format 18 (D-4WC6R): the change makes its blocks reflect the cited sources, in
+    /// first-occurrence order, and, when `code` is set, the code state their `reflects` globs
+    /// match.
+    Reflects {
+        sources: Vec<BlockId>,
+        code: bool,
     },
 }
 

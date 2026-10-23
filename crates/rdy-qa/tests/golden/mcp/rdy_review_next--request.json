@@ -44,7 +44,7 @@
     "request": "rq-fba4a3d01c77",
     "rule": "section",
     "schema": {
-      "findings": "a list of {block, note}: block is one of the two block ids; note is 1 to 2000 characters; a tension verdict needs 1 to 20 findings, a no_tension verdict 0 to 20",
+      "citations": "a list of {block, note}: block is one of the two block ids; note is 1 to 2000 characters; a tension verdict needs 1 to 20 citations, a no_tension verdict 0 to 20",
       "reason": "with severity blocking only: why the tension should block, 1 to 2000 characters",
       "severity": "advisory (default) or blocking, on a tension verdict only: blocking advises a person to make the tension block; it gates nothing until a person accepts it",
       "verdict": [
@@ -53,7 +53,7 @@
       ]
     }
   },
-  "case_hash": "95ad75287f9c1b0986750c2985862e1e4a23f11b69019dc65ddce06da704d820",
+  "case_hash": "97da42686dbcba05b7dd8a1f0b9a5ab2c7217369f1f0392d86ce2d14d54e0358",
   "kind": "tension",
   "lease_expires_at": "2025-10-09T09:03:20Z",
   "request": "rq-fba4a3d01c77"

@@ -3,7 +3,7 @@
 //! daemon's review ops share; `rdy_schema`'s paragraph is `REVIEWS_DOC`.
 use super::*;
 use rdy_engine::semantic::api::{ReviewNextRequest, run_review_next, run_review_submit};
-use rdy_engine::semantic::submit::{FindingRequest, ReviewSubmitRequest};
+use rdy_engine::semantic::submit::{CitationRequest, ReviewSubmitRequest};
 use rdy_engine::*;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -26,7 +26,7 @@ pub struct ReviewSubmitParams {
     /// tension or no_tension.
     pub verdict: String,
     /// What disagrees: {block, note} per block that takes part; a tension needs 1 to 20.
-    pub findings: Option<Vec<FindingParams>>,
+    pub citations: Option<Vec<CitationParams>>,
     /// advisory (default) or blocking: on a tension, advise a person to make it block. Advice gates nothing until a person accepts it.
     pub severity: Option<String>,
     /// With severity blocking: why the tension should block, 1 to 2000 characters.
@@ -35,7 +35,7 @@ pub struct ReviewSubmitParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct FindingParams {
+pub struct CitationParams {
     /// One of the two block ids of the case.
     pub block: String,
     /// What in the block disagrees, 1 to 2000 characters.
@@ -63,11 +63,11 @@ pub fn rdy_review_submit(st: &mut McpState, p: ReviewSubmitParams) -> Result<Val
             request: p.request,
             case_hash: p.case_hash,
             verdict: p.verdict,
-            findings: p
-                .findings
+            citations: p
+                .citations
                 .unwrap_or_default()
                 .into_iter()
-                .map(|f| FindingRequest {
+                .map(|f| CitationRequest {
                     block: f.block,
                     note: f.note,
                 })

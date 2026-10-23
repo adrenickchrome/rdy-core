@@ -377,3 +377,176 @@ fn ha14_public_signatures_need_no_transitive_crate_import() {
 fn _error_type_is_named(e: StreamError) -> StreamError {
     e
 }
+
+// ---------------------------------------------------------------------------------------------
+// rf4: a hostile Reflects record (D-4WC6R, tb-A4DAV)
+
+/// postcard's varint of `n`.
+fn varint(mut n: u64) -> Vec<u8> {
+    let mut out = vec![];
+    loop {
+        let b = (n & 0x7f) as u8;
+        n >>= 7;
+        if n == 0 {
+            out.push(b);
+            return out;
+        }
+        out.push(b | 0x80);
+    }
+}
+
+/// A closed project whose claim is rewritten once by a typed change justified by a Reflects
+/// with one source and code, landed and tagged `v1.0.0`. Returns its directory, repo, the tag's
+/// landing, core's export of the tag and the change as stored.
+fn reflects_project() -> (tempfile::TempDir, RepoId, Hash, Vec<u8>, rdy_model::Change) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let w = write(
+        &mut r,
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "a", "title": "A", "doc_type": "page"}},
+            {"op": "create", "type": "source", "id": "$s", "parent": "$d", "fields": {"title": "The spec", "kind": "spec", "locator": "spec/v1.md"}},
+            {"op": "create", "type": "claim", "id": "$c", "parent": "$d", "body": "One."}
+        ]),
+    );
+    land(&mut r, "first");
+    let claim = rdy_model::BlockId::parse(&w.created["$c"]).unwrap();
+    let scope = rdy_engine::Scope::View("work".into());
+    let mut next = r.read().block(&scope, &claim).unwrap();
+    let base = next.version_hash();
+    next.body = "Two.".into();
+    let change = rdy_model::Change {
+        view: "work".into(),
+        ops: vec![rdy_model::Op::Update { base, block: next }],
+        deps: r.read().included("work").to_vec(),
+        provenance: rdy_model::Provenance {
+            actor: "agent:a".into(),
+            run: None,
+            role: Role::Writer,
+            at_ms: 7,
+        },
+        justification: Some(rdy_model::Justification::Reflects {
+            sources: vec![rdy_model::BlockId::parse(&w.created["$s"]).unwrap()],
+            code: true,
+        }),
+        message: "rf4".into(),
+        links: Default::default(),
+        read_identity: None,
+    };
+    let id = r.store_mut().commit_to_view("work", change).unwrap();
+    r.invalidate();
+    // the change as stored (the store fills in its deps)
+    let change = r.store().change(&id).unwrap();
+    land(&mut r, "reflects");
+    r.tag(&session(Role::Approver), "v1.0.0", None, None)
+        .unwrap();
+    let tag = r.store().tags().unwrap()[0].1;
+    let landing = r.store().read_tag(&tag).unwrap().landing;
+    let repo = r.store().repo_id().unwrap().unwrap();
+    let mut bytes = Vec::new();
+    stream_export::write(&r.read(), tag, &BTreeSet::new(), &mut bytes).unwrap();
+    r.close().unwrap();
+    (dir, repo, landing, bytes, change)
+}
+
+/// `bytes` with the record of `change` replaced by one holding `payload`, every other record and
+/// the header kept, and a trailer of its own.
+fn with_payload(bytes: &[u8], change: Hash, payload: &[u8]) -> Vec<u8> {
+    let (mut rd, header) = StreamReader::open(bytes).unwrap();
+    let mut w = StreamWriter::new(Vec::new(), &header).unwrap();
+    let mut found = false;
+    while let Some(r) = rd.next().unwrap() {
+        if r.key().hash == change {
+            found = true;
+            w.record(&StreamRecord::Present {
+                key: ObjectKey {
+                    kind: r.key().kind,
+                    hash: Hash::of(payload),
+                },
+                payload: payload.to_vec(),
+            })
+            .unwrap();
+        } else {
+            w.record(&r).unwrap();
+        }
+    }
+    assert!(found, "the change is a record of the export");
+    w.finish().unwrap().0
+}
+
+/// Every segment file of the store at `root`, by name.
+fn segments(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(root.join(".rdy/store/segments"))
+        .unwrap()
+        .map(|e| {
+            let e = e.unwrap();
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                std::fs::read(e.path()).unwrap(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn rf4_hostile_reflects_stream_leaves_holder_unchanged() {
+    let _clock = rdy_engine::pin_clock(1_000_000);
+    let (dir, repo, landing, bytes, change) = reflects_project();
+    let good = check_batch(bytes.as_slice(), Some(repo)).unwrap();
+    let id = change.id();
+    let encoded = postcard::to_allocvec(&change).unwrap();
+    assert_eq!(Hash::of(&encoded), id);
+    // the justification's bytes: 01 (Some), 02 (Reflects), 01 (one source), ...
+    let at = encoded
+        .windows(3)
+        .rposition(|w| w == [1, 2, 1])
+        .expect("the justification");
+    let mut oversized = encoded[..at + 2].to_vec();
+    oversized.extend(varint(1 << 40));
+    let truncated = encoded[..encoded.len() - 1].to_vec();
+    let root = dir.path().join("holder");
+    StoreHandle::create_holder(&root, repo)
+        .unwrap()
+        .close()
+        .unwrap();
+    let before = segments(&root);
+    for (name, payload, message) in [
+        ("oversized", &oversized, "100000 collection elements"),
+        ("truncated", &truncated, "record does not decode"),
+    ] {
+        let hostile = with_payload(&bytes, id, payload);
+        // the check refuses it at the record, through the one bounded decoder
+        let e = check_batch(hostile.as_slice(), Some(repo)).unwrap_err();
+        assert!(e.message.ends_with(message), "{name}: {e:?}");
+        let core = stream_check::check_batch(hostile.as_slice(), Some(repo)).unwrap_err();
+        same_error(&e, &core);
+        // the take refuses it the same way and appends nothing
+        let path = dir.path().join(format!("{name}.rdysync"));
+        std::fs::write(&path, &hostile).unwrap();
+        let mut h = StoreHandle::open_holder(&root).unwrap();
+        let t = h
+            .take(
+                &[std::fs::File::open(&path).unwrap()],
+                rdy_adapter::UploadTarget {
+                    tag: "v1.0.0".into(),
+                    landing,
+                },
+            )
+            .unwrap_err();
+        assert!(t.message.ends_with(message), "{name}: {t:?}");
+        let snap = h.snapshot().unwrap();
+        assert!(snap.tags().unwrap().is_empty(), "{name}");
+        assert!(
+            snap.has_objects(&good.keys)
+                .unwrap()
+                .iter()
+                .all(|p| !p.present),
+            "{name}: no object of the batch is held"
+        );
+        drop(snap);
+        h.close().unwrap();
+        assert_eq!(segments(&root), before, "{name}: the log is unchanged");
+    }
+}

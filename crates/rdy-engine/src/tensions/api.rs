@@ -411,7 +411,7 @@ fn review_rows(st: &ReadState, live: &BTreeSet<Hash>) -> Result<Vec<Value>, RdyE
                 "sides": sides,
                 "blocks": blocks.iter().map(ToString::to_string).collect::<Vec<_>>(),
                 "reason": r.reason,
-                "findings": r.findings.iter().map(|f| json!({"block": f.block.to_string(), "note": f.note})).collect::<Vec<_>>(),
+                "citations": r.citations.iter().map(|f| json!({"block": f.block.to_string(), "note": f.note})).collect::<Vec<_>>(),
                 "actor": p.actor,
                 "run": p.run,
                 "role": role_str(p.role),

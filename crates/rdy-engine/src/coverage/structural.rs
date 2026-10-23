@@ -5,11 +5,13 @@
 use super::model::*;
 use crate::brief::effective_stable;
 use crate::lexicon::{Lexicon, is_content, is_tie, link_kind_for, linked_from_outside, tied};
+use crate::query::is_entity_in;
 use crate::tensions::index::{is_deprecated, is_normative};
 use crate::{Materialized, RdyError, ReadState, Scope};
-use rdy_graph::{DerivedStatus, EdgeKind, Graph};
+use rdy_graph::{DerivedStatus, EdgeKind, GoverningCache, GoverningStatuses, Graph};
 use rdy_model::{Block, BlockId, FieldValue, decision, tree};
-use rdy_schema::{Pack, TypeClass};
+use rdy_schema::supporting::{REFLECTS_LINK, SOURCE};
+use rdy_schema::{Glob, Pack, REFLECTS_FIELD, TypeClass};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -24,8 +26,9 @@ pub fn structural_builds() -> u64 {
     STRUCTURAL_BUILDS.with(Cell::get)
 }
 
-/// Test hook: this thread's count of scans of an entity's incoming edges for a live `affects`
-/// (the Governed check through the entities a block describes).
+/// Test hook: this thread's count of scans of an entity's incoming edges for the decisions that
+/// affect it (the Governed check through the entities a block describes): the scans each
+/// check's [`GoverningCache`] makes, summed.
 #[doc(hidden)]
 pub fn governed_scans() -> u64 {
     GOVERNED_SCANS.with(Cell::get)
@@ -40,9 +43,9 @@ pub(crate) struct EntryCx<'a> {
     pub pack: &'a Pack,
     /// Whether each entity read so far is deprecated in the scope.
     deprecated: RefCell<HashMap<BlockId, bool>>,
-    /// Whether each block read so far has a live decision that affects it: read once per
-    /// context, not once per block that describes it (final review I1).
-    affected: RefCell<HashMap<BlockId, bool>>,
+    /// rf6: the decisions that affect each entity read so far, for the graph's governing
+    /// routes: scanned once per context, not once per block that describes it (final review I1).
+    governing: RefCell<GoverningCache>,
 }
 
 /// What an [`EntryCx`] memoised, kept between contexts on the same scope of the same state
@@ -50,7 +53,7 @@ pub(crate) struct EntryCx<'a> {
 #[derive(Default)]
 pub(crate) struct CxMemo {
     deprecated: HashMap<BlockId, bool>,
-    affected: HashMap<BlockId, bool>,
+    governing: GoverningCache,
 }
 
 impl<'a> EntryCx<'a> {
@@ -78,7 +81,7 @@ impl<'a> EntryCx<'a> {
             lex,
             pack,
             deprecated: RefCell::new(memo.deprecated),
-            affected: RefCell::new(memo.affected),
+            governing: RefCell::new(memo.governing),
         }
     }
 
@@ -86,23 +89,27 @@ impl<'a> EntryCx<'a> {
     pub(crate) fn into_memo(self) -> CxMemo {
         CxMemo {
             deprecated: self.deprecated.into_inner(),
-            affected: self.affected.into_inner(),
+            governing: self.governing.into_inner(),
         }
     }
 
-    /// Whether a live decision affects `target` (an incoming `affects` edge).
-    fn affected_live(&self, target: &BlockId) -> bool {
-        if let Some(a) = self.affected.borrow().get(target) {
-            return *a;
-        }
-        GOVERNED_SCANS.with(|c| c.set(c.get() + 1));
-        let a = self
+    /// rf6: whether a live decision governs `id` by one of the graph's four routes. Counts the
+    /// entity scans this query adds to [`governed_scans`].
+    fn live_route(&self, id: &BlockId) -> bool {
+        let mut cache = self.governing.borrow_mut();
+        let before = cache.entity_scans();
+        let found = !self
             .g
-            .incoming(target)
-            .iter()
-            .any(|a| is_link(a, decision::AFFECTS) && is_live(self.g, &a.from));
-        self.affected.borrow_mut().insert(target.clone(), a);
-        a
+            .governing_routes(
+                id,
+                GoverningStatuses::Live,
+                |e| is_entity_in(self.pack, self.m, e),
+                &mut cache,
+            )
+            .is_empty();
+        let scans = (cache.entity_scans() - before) as u64;
+        GOVERNED_SCANS.with(|c| c.set(c.get() + scans));
+        found
     }
 
     /// Whether `entity` is deprecated in the scope, by the deprecated reference rule
@@ -142,22 +149,39 @@ fn tied_to_entity(cx: &EntryCx<'_>, id: &BlockId) -> bool {
     })
 }
 
-/// Whether `id` has a governing decision: a live decision by `decided_by` or `implements`, or a
-/// direct `affects` (`Graph::governing`), or a live decision that affects an entity `id`
-/// describes (D-TQD4D).
-fn is_governed(cx: &EntryCx<'_>, id: &BlockId) -> bool {
-    if !cx.g.governing(id).is_empty() {
-        return true;
+/// Whether block `b` is governed (rf6, D-X4RYX): a live decision governs it by one of the
+/// graph's four routes (D-VPATZ, D-TQD4D), it has a `reflects` link to a source the scope holds,
+/// or its `reflects` field is a nonempty list of valid path globs (counted without a linked
+/// checkout and without `reflects_at`). A source is no governing decision: it only grounds.
+fn is_governed(cx: &EntryCx<'_>, b: &Block) -> bool {
+    cx.live_route(&b.id) || reflects_held_source(cx, &b.id) || reflects_globs(b)
+}
+
+/// rf6: whether `id` has a `reflects` link to a block the scope holds that is a source. A
+/// dangling target or one of another type does not count.
+fn reflects_held_source(cx: &EntryCx<'_>, id: &BlockId) -> bool {
+    cx.g.outgoing(id).iter().any(|e| {
+        is_link(e, REFLECTS_LINK) && cx.m.get(&e.to).is_some_and(|t| t.block_type == SOURCE)
+    })
+}
+
+/// rf6: whether `b`'s `reflects` field is a nonempty list whose every entry is a path glob that
+/// compiles. An empty list, or one with an entry that is no valid glob, does not count.
+fn reflects_globs(b: &Block) -> bool {
+    match b.fields.get(REFLECTS_FIELD) {
+        Some(FieldValue::List(items)) => {
+            !items.is_empty()
+                && items
+                    .iter()
+                    .all(|i| i.as_str().is_some_and(|g| Glob::compile(g).is_ok()))
+        }
+        _ => false,
     }
-    cx.g.outgoing(id)
-        .iter()
-        .filter(|e| is_link(e, decision::DESCRIBES))
-        .any(|e| cx.affected_live(&e.to))
 }
 
 /// Whether decision `d` is applied (D-ET9RX): a block that is neither a decision nor of the
 /// supporting class links to it by `decided_by`, `implements` or a reference, or `d` affects a
-/// block that is not a decision.
+/// block that is neither a decision nor of the supporting class (rf6, D-Z8P09).
 fn is_applied(m: &Materialized, g: &Graph, pack: &Pack, d: &BlockId) -> bool {
     let carries = g.incoming(d).iter().any(|e| {
         (e.kind == EdgeKind::References
@@ -171,8 +195,10 @@ fn is_applied(m: &Materialized, g: &Graph, pack: &Pack, d: &BlockId) -> bool {
     carries
         || g.outgoing(d).iter().any(|e| {
             is_link(e, decision::AFFECTS)
-                && m.get(&e.to)
-                    .is_some_and(|t| t.block_type != decision::DECISION)
+                && m.get(&e.to).is_some_and(|t| {
+                    t.block_type != decision::DECISION
+                        && pack.class_of(&t.block_type) != TypeClass::Supporting
+                })
         })
 }
 
@@ -231,8 +257,8 @@ pub(crate) fn named_in(pack: &Pack, lex: &Lexicon, b: &Block) -> Vec<BlockId> {
 
 /// One block's structural entry and the entities its text names, by the closed table (ledger
 /// Q2): `None` for a block that is absent or presentational (not scored). Reads only local
-/// queries: the block's own edges, its children, its doc's subtree for `unlinked_doc`, and the
-/// incoming edges of the entities it describes.
+/// queries: the block's own edges, its children, its doc's subtree for `unlinked_doc`, the
+/// incoming edges of the entities it describes, and the blocks its `reflects` links name.
 pub(crate) fn entry_of(cx: &EntryCx<'_>, id: &BlockId) -> Option<(BlockEntry, Vec<BlockId>)> {
     let b = cx.m.get(id)?;
     if cx.pack.is_presentational(&b.block_type) {
@@ -381,7 +407,7 @@ pub(crate) fn entry_of(cx: &EntryCx<'_>, id: &BlockId) -> Option<(BlockEntry, Ve
         }
     } else if is_normative(cx.pack, b) && effective_stable(cx.m, Some(id)) {
         e.check(Dimension::Governed);
-        if !is_governed(cx, id) {
+        if !is_governed(cx, b) {
             e.issues.push(CoverageIssue::new(
                 id,
                 IssueCode::Ungrounded,

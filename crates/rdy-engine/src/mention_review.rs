@@ -169,7 +169,7 @@ impl Rdy {
                 MentionVerdict::Restore => Verdict::Restore,
             },
             reason: reason.to_string(),
-            findings: vec![],
+            citations: vec![],
             provenance: s.provenance(),
         };
         drop(st);

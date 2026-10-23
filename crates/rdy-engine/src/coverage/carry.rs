@@ -79,7 +79,8 @@ pub(crate) fn carry(
             }
         }
         // 3. a block that appears, goes, changes type or (a decision) changes status: each
-        // source of an incoming edge in the new graph
+        // source of an incoming edge in the new graph (rf6: a source's reflecting blocks, whose
+        // Governed check reads whether it is held; a supporting target a decision affects)
         if reshaped {
             for e in g.incoming(id) {
                 dirty.insert(e.from.clone());
@@ -247,7 +248,9 @@ fn governing_edges(b: Option<&Block>) -> Vec<rdy_graph::Edge> {
 }
 
 /// Adds `target` and the sources of its incoming `describes` edges: the blocks governed
-/// through it when a decision affects it.
+/// through it when a decision affects it (rf6: the graph's `describes/affects` route, which a
+/// target that is no entity does not give; this set is a superset of it, and an entity that
+/// stops or starts being one gives up the carry).
 fn affected(g: &Graph, target: &BlockId, dirty: &mut BTreeSet<BlockId>) {
     dirty.insert(target.clone());
     for e in g.incoming(target) {

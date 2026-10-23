@@ -12,8 +12,8 @@ use rdy_model::redaction::{
 use rdy_model::signature::Signature;
 use rdy_model::{
     ActorRun, AltChoice, AltMember, AltSet, AltStatus, Answer, AnswerAct, ApprovalEvidence,
-    Assurance, Block, BlockId, Change, ChangeLinks, EditorialClass, EvidenceKind, FieldValue,
-    Finding, Hash, Intent, IntentStatus, Justification, LandingRecord, Link, Op, PairItem,
+    Assurance, Block, BlockId, Change, ChangeLinks, Citation, EditorialClass, EvidenceKind,
+    FieldValue, Hash, Intent, IntentStatus, Justification, LandingRecord, Link, Op, PairItem,
     Proposal, Provenance, RelayEvidence, Review, ReviewSubject, Role, SemanticTension,
     StateSnapshot, Tag, Verdict,
 };
@@ -200,7 +200,7 @@ fn review(subject: ReviewSubject, verdict: Verdict) -> Review {
         case_hash: Some(h(65)),
         verdict,
         reason: t("review.reason"),
-        findings: vec![Finding {
+        citations: vec![Citation {
             block: id("c-00001"),
             note: t("review.finding.note"),
         }],
@@ -1240,6 +1240,33 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
             "residue {class:?}"
         );
     }
+    // a change's reflects justification (store format 18, D-4WC6R): its sources are block
+    // references, not object hashes, and its code flag holds none, so it adds no edge. The
+    // match keeps the list of justification arms closed.
+    let reflects = Justification::Reflects {
+        sources: vec![id("S-00001"), id("S-00002")],
+        code: true,
+    };
+    match &reflects {
+        Justification::Implements(_)
+        | Justification::Editorial { .. }
+        | Justification::Reflects { .. } => {}
+    }
+    let c = change("change", vec![], ChangeLinks::default(), reflects.clone());
+    assert_eq!(
+        refs_of(CHANGE, &enc(&c)),
+        Ok(vec![some(CHANGE, 5)]),
+        "reflects"
+    );
+    let mut residue = change_residue();
+    residue.ops.clear();
+    residue.links = ChangeLinks::default();
+    residue.justification = Some(reflects);
+    assert_eq!(
+        refs_of(REDACTION_RESIDUE, &enc(&RedactionResidue::Change(residue))),
+        Ok(vec![some(CHANGE, 97)]),
+        "residue reflects"
+    );
 
     // a request's reason class and its report rows
     let reasons = every!(ReasonClass: Secret, Personal, Legal, Retraction);

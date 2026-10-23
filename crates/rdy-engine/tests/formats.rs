@@ -32,7 +32,8 @@ fn ha8_formats_match_current_constants_and_released_pairs() {
             (2, 14),
             (2, 15),
             (3, 16),
-            (3, 17)
+            (3, 17),
+            (3, 18)
         ]
     );
     assert_eq!(pairs, rdy_store::dump::READS);

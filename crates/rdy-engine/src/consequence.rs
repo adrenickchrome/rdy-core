@@ -20,7 +20,7 @@ use rdy_graph::{
     DerivedStatus, Edge, EdgeKind, Graph, IMPACT_LINKS, SUSPECT_LINKS, Suspect, edges_of,
 };
 use rdy_model::Tracking;
-use rdy_model::decision::{DECISION, REFINES, REVOKES, SUPERSEDES};
+use rdy_model::decision::{AFFECTS, DECISION, REFINES, REVOKES, SUPERSEDES};
 use rdy_model::{Block, BlockId, Hash, Link, Op};
 use rdy_store::StoreError;
 use serde::Serialize;
@@ -227,6 +227,16 @@ pub const EDIT_CUT_FIX: &str =
 /// The governing decision did not change, so the block already pins it: a repin is refused, and
 /// the hint never asks for one (D-M19GV).
 pub const LINEAGE_FIX: &str = "a decision that governs it was refined or partly superseded: check that it still holds, and update it if not; no repin is needed";
+
+/// D-ATBP6 (design thread, TASK-515): the hint on a `confirm` entry for an accepted decision in
+/// a refine's or part supersede's reach. An accepted decision is frozen, so it is never asked to
+/// be updated, and the reach moved no pin, so it is never asked to repin.
+pub const LINEAGE_DECISION_FIX: &str = "a decision that governs it was refined or partly superseded: check that it still holds, and supersede it if not; no repin is needed";
+
+/// D-ATBP6 (design thread, TASK-515): the hint on a `confirm` entry for an accepted decision that
+/// any other route reaches without a suspect on the cause (a `describes` link, a premise edge
+/// with no pin): a `reaffirm` op would be refused, as there is no suspect to re-affirm.
+pub const REACH_CONFIRM_FIX: &str = "a block it relies on changed: check that it still holds, and supersede it if not; no repin is needed";
 
 /// FW-LP6: for each decision `ops` create, each `refines` link and each `supersedes` link with a
 /// part: (the new decision, the target, the link's name). In op order, then link order. The
@@ -592,6 +602,9 @@ enum LiteralsKey {
 /// The follow-up of one entry, its fix and its evidence.
 struct Judged {
     follow: FollowUp,
+    /// An accepted decision reached with no suspect on the cause (D-ATBP6): its `confirm` is a
+    /// confirm item, whatever the cause's lineage.
+    reached_decision: bool,
     fix: Option<String>,
     values: Option<Vec<String>>,
     values_omitted: usize,
@@ -734,9 +747,10 @@ impl<'a> Compare<'a> {
         Ok(set)
     }
 
-    /// The follow-up of `block` (as `src`) on target `x` (D-CFC6V): a decision's by its status,
-    /// update for a deleted target, else from the literals it states. `None` for a decision
-    /// that asserts nothing live.
+    /// The follow-up of `block` (as `src`) on target `x` (D-CFC6V): a decision's by its status
+    /// and, for an accepted one, whether it is `suspect` on `x` ([`reached_follow_up`]), update
+    /// for a deleted target, else from the literals it states. `None` for a decision that
+    /// asserts nothing live.
     fn judge(
         &self,
         g: &Graph,
@@ -744,6 +758,7 @@ impl<'a> Compare<'a> {
         src: &Block,
         x: &BlockId,
         lineage: Lineage<'_>,
+        suspect: bool,
     ) -> Result<Option<Judged>, RdyError> {
         let status = g.status(block);
         let deleted = self.m.get(x).is_none();
@@ -751,9 +766,11 @@ impl<'a> Compare<'a> {
             let Some(follow) = follow_up(status.as_ref(), deleted, false, false) else {
                 return Ok(None);
             };
+            let (follow, fix, reached_decision) = reached_follow_up(follow, suspect, lineage);
             return Ok(Some(Judged {
                 follow,
-                fix: (follow == FollowUp::Reaffirm).then(|| REAFFIRM_FIX.to_string()),
+                reached_decision,
+                fix: fix.map(str::to_string),
                 values: None,
                 values_omitted: 0,
                 matched: vec![],
@@ -801,12 +818,38 @@ impl<'a> Compare<'a> {
         };
         Ok(Some(Judged {
             follow,
+            reached_decision: false,
             fix: fix.map(str::to_string),
             values: Some(ev.values),
             values_omitted: ev.values_omitted,
             matched,
             matched_omitted,
         }))
+    }
+}
+
+/// D-ATBP6 (refines D-4XTRC and D-7M06Q): the follow-up `follow_up` gave a decision subject,
+/// with its fix, and whether it is an accepted decision's `confirm`. An accepted decision keeps
+/// `reaffirm` only when it is `suspect` on the cause (the suspects detector's own test of the
+/// pair, so a `reaffirm` op accepts it); any other reach gives `confirm`: in a refine's or part
+/// supersede's reach ([`Lineage::Partial`]) with [`LINEAGE_DECISION_FIX`], else with
+/// [`REACH_CONFIRM_FIX`]. Its own `affects` link gives nothing: [`visit_pairs`] skips it. Every
+/// other follow-up is kept, with no fix.
+fn reached_follow_up(
+    follow: FollowUp,
+    suspect: bool,
+    lineage: Lineage<'_>,
+) -> (FollowUp, Option<&'static str>, bool) {
+    match follow {
+        FollowUp::Reaffirm if suspect => (FollowUp::Reaffirm, Some(REAFFIRM_FIX), false),
+        FollowUp::Reaffirm => {
+            let fix = match lineage {
+                Lineage::Partial => LINEAGE_DECISION_FIX,
+                Lineage::Ordinary | Lineage::Retired(_) => REACH_CONFIRM_FIX,
+            };
+            (FollowUp::Confirm, Some(fix), true)
+        }
+        other => (other, None, false),
     }
 }
 
@@ -840,11 +883,15 @@ struct Pair<'e> {
 /// order, each block that `incoming` lists with an edge to it and `keep` admits, in id order. The
 /// representative edge of a block `suspect_on` calls suspect on the changed block is its least
 /// premise edge by name (else its least edge); of any other block, its least impact edge. A block
-/// with no such edge is no pair.
+/// with no such edge is no pair. D-4XTRC: a change does not reach a decision (`is_decision`)
+/// through that decision's own `affects` link, so a decision whose every edge to the changed
+/// block is an `affects` link is no pair; one with another edge to it keeps its pair and every
+/// edge.
 fn visit_pairs<'e>(
     changed: &BTreeSet<BlockId>,
     incoming: impl Fn(&BlockId) -> Vec<&'e Edge>,
     keep: impl Fn(&BlockId) -> bool,
+    is_decision: impl Fn(&BlockId) -> bool,
     mut suspect_on: impl FnMut(&BlockId, &BlockId) -> bool,
     mut visit: impl FnMut(Pair<'e>) -> Result<(), RdyError>,
 ) -> Result<(), RdyError> {
@@ -857,6 +904,12 @@ fn visit_pairs<'e>(
         }
         for (from, mut edges) in by_from {
             if !keep(from) {
+                continue;
+            }
+            let own_affects = edges
+                .iter()
+                .all(|e| matches!(&e.kind, EdgeKind::Link(n) if n == AFFECTS));
+            if own_affects && is_decision(from) {
                 continue;
             }
             edges.sort_by_key(|e| e.kind.name());
@@ -908,6 +961,9 @@ pub(crate) struct PlanPair {
     /// The representative edge (for a reach, the reaching link's name).
     pub(crate) edge: String,
     pub(crate) follow: FollowUp,
+    /// An accepted decision reached with no suspect on the cause: its `confirm` is a confirm
+    /// item, never a rejustify (D-ATBP6).
+    pub(crate) reached_decision: bool,
     /// The version fully supersedes or revokes the cause.
     pub(crate) retired: bool,
     /// A refine or part supersede reached the subject (FW-LP6); it has no edge to a changed
@@ -922,9 +978,24 @@ pub(crate) struct PlanPair {
     pub(crate) prior_suspect: bool,
 }
 
+/// Whether `block` is suspect on `target` in `g` (over `m`), as the suspects detector reads the
+/// pair: a presentational source is no suspect.
+fn suspect_on(
+    st: &ReadState,
+    g: &Graph,
+    m: &Materialized,
+    block: &BlockId,
+    target: &BlockId,
+) -> bool {
+    g.suspects_of(block)
+        .iter()
+        .any(|s| s.target == *target && !st.is_presentational_source(m, s))
+}
+
 /// Whether `before`, a subject's baseline version, holds a premise edge to `x` with a pin that
 /// the final `x` (`after`, read under `t`) no longer matches; a deleted `x` matches no pin. A
-/// removed (redacted) `x` has no content to compare, so it gives none.
+/// removed (redacted) `x` has no content to compare, so it gives none. The caller applies the
+/// suspects detector's presentational exclusion (D-ATBP6: no reaffirm item without a suspect).
 fn prior_suspect(before: Option<&Block>, after: Option<&Block>, x: &BlockId, t: &Tracking) -> bool {
     let Some(before) = before else {
         return false;
@@ -995,7 +1066,12 @@ impl ReadState {
                 .iter()
                 .any(|v| v.target == *x && !self.is_presentational_source(&fin.m, v))
         };
-        let prior = |s: &BlockId, x: &BlockId| prior_suspect(base.m.get(s), fin.m.get(x), x, &t);
+        // the suspect a repin or reaffirm cleared, judged as the suspects detector judges it: a
+        // presentational cause is never a suspect, so it gives no reaffirm item (D-ATBP6)
+        let prior = |s: &BlockId, x: &BlockId| {
+            prior_suspect(base.m.get(s), fin.m.get(x), x, &t)
+                && !self.is_presentational_target(&fin.m, x)
+        };
         // a lineage link the version itself writes or removes is the change, never a
         // dependency; a lineage link the subject already held, and every other edge, stay
         let own_lineage = |e: &Edge| {
@@ -1034,6 +1110,12 @@ impl ReadState {
                     .collect()
             },
             |s| base.m.get(s).is_some() || fin.m.get(s).is_some(),
+            |s| {
+                base.m
+                    .get(s)
+                    .or_else(|| fin.m.get(s))
+                    .is_some_and(|b| b.block_type == DECISION)
+            },
             |s, x| suspect(s, x) || prior(s, x),
             |p| {
                 if p.from == p.changed {
@@ -1044,7 +1126,7 @@ impl ReadState {
                 };
                 let lineage = cmp.lineage_of(&p.changed);
                 count_plan_pair();
-                let Some(j) = cmp.judge(g, &p.from, src, &p.changed, lineage)? else {
+                let Some(j) = cmp.judge(g, &p.from, src, &p.changed, lineage, p.suspect)? else {
                     return Ok(());
                 };
                 let in_base = base
@@ -1059,6 +1141,7 @@ impl ReadState {
                     cause: p.changed,
                     edge: p.edge.kind.name(),
                     follow: j.follow,
+                    reached_decision: j.reached_decision,
                     retired: matches!(lineage, Lineage::Retired(_)),
                     reach: false,
                     in_base,
@@ -1087,17 +1170,21 @@ impl ReadState {
                     continue;
                 };
                 count_plan_pair();
-                let Some(j) = cmp.judge(g, &block, src, target, Lineage::Partial)? else {
+                // D-ATBP6: an accepted decision is confirm here (LINEAGE_DECISION_FIX), unless it
+                // is suspect on the target; a proposed one update; a dead one nothing
+                let on = suspect(&block, target);
+                let Some(j) = cmp.judge(g, &block, src, target, Lineage::Partial, on)? else {
                     continue;
                 };
                 visit(PlanPair {
-                    suspect: suspect(&block, target),
+                    suspect: on,
                     prior_suspect: false,
                     in_base: before.contains(&block),
                     subject: block,
                     cause: target.clone(),
                     edge: (*via).to_string(),
                     follow: j.follow,
+                    reached_decision: j.reached_decision,
                     retired: false,
                     reach: true,
                 })?;
@@ -1474,8 +1561,10 @@ impl ReadState {
     /// for each block a reached target governs, in the order of `reach`, never a block
     /// `touched` holds, the new decision itself, or a block the list already holds; none for a
     /// target that is rejected, superseded or revoked; follow-up `confirm` for a block that is
-    /// not a decision, and for a decision what `follow_up` gives it, none for one that asserts
-    /// nothing live); `written` marks `already_written`. Each entry's follow-up, fix and
+    /// not a decision, and for a decision what `follow_up` gives it with D-ATBP6's rule
+    /// ([`reached_follow_up`]): none for one that asserts nothing live); `written` marks
+    /// `already_written`. No entry for a decision whose only edges to the changed block are its
+    /// own `affects` links (D-4XTRC, [`visit_pairs`]). Each entry's follow-up, fix and
     /// evidence are `Compare::judge`'s, worked out before the cut. The list is cut from the end
     /// to `max_tokens` (default `BRIEF_DEFAULT_TOKENS`), counting what it drops in `omitted`.
     #[allow(clippy::too_many_arguments)]
@@ -1507,6 +1596,7 @@ impl ReadState {
                     .collect()
             },
             |from| m.get(from).is_some(),
+            |from| m.get(from).is_some_and(|b| b.block_type == DECISION),
             |from, x| {
                 suspects_of
                     .entry(from.clone())
@@ -1542,7 +1632,7 @@ impl ReadState {
             let Some(src) = m.get(&block) else { continue };
             // no entry for a decision that asserts nothing live
             let lineage = cmp.lineage_of(&cause.changed);
-            let Some(j) = cmp.judge(g, &block, src, &cause.changed, lineage)? else {
+            let Some(j) = cmp.judge(g, &block, src, &cause.changed, lineage, cause.suspect)? else {
                 continue;
             };
             let kind = if cause.suspect {
@@ -1610,10 +1700,13 @@ impl ReadState {
                     continue;
                 }
                 // the walk's rule for a governed decision: none for one that asserts nothing
-                // live, reaffirm for an accepted one, update for a proposed one; a block that is
-                // not a decision gets confirm, with what it states of the change as evidence
+                // live, update for a proposed one, and for an accepted one confirm with
+                // LINEAGE_DECISION_FIX (D-7M06Q, D-ATBP6), or reaffirm only when it is suspect on
+                // the target; a block that is not a decision gets confirm, with what it states of
+                // the change as evidence
                 let Some(src) = m.get(&block) else { continue };
-                let Some(j) = cmp.judge(g, &block, src, target, Lineage::Partial)? else {
+                let on = suspect_on(self, g, m, &block, target);
+                let Some(j) = cmp.judge(g, &block, src, target, Lineage::Partial, on)? else {
                     continue;
                 };
                 listed.insert(block.to_string());
@@ -1785,7 +1878,9 @@ impl ReadState {
                     .expect("a target has an edge")
                     .kind
                     .name();
-                let Some(j) = cmp.judge(g, block, src, target, Lineage::Retired(&retired))? else {
+                let on = suspect_on(self, g, cmp.m, block, target);
+                let Some(j) = cmp.judge(g, block, src, target, Lineage::Retired(&retired), on)?
+                else {
                     continue;
                 };
                 out.push(Consequence {

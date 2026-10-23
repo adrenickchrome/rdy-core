@@ -208,22 +208,36 @@ fn landed(r: &mut Rdy, view: &str, d: DecisionInput) -> BlockId {
     id
 }
 
-/// P2: a governed decision that is accepted keeps what the walk gives it (reaffirm), never a
-/// confirm that a repin of a frozen decision refuses.
+/// P2, D-7M06Q and D-ATBP6: a governed decision that is accepted, and not suspect on the refined
+/// one, gets confirm with the frozen decision's lineage fix (no update, no repin); a block that
+/// is not a decision, in the same reach, keeps LINEAGE_FIX.
 #[test]
-fn mfb2_a_governed_accepted_decision_gets_reaffirm() {
+fn mfb2_a_governed_accepted_decision_gets_confirm() {
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);
-    let d2 = landed_affecting(&mut r, &s, &s.decision);
+    let d2 = landed(
+        &mut r,
+        "d",
+        DecisionInput {
+            parent: s.section.to_string(),
+            statement: "C stays short".into(),
+            affects: vec![s.decision.to_string(), s.c.to_string()],
+            ..Default::default()
+        },
+    );
     let res = refine(&mut r, &s, &d2);
     let c = after(&r, &res.change);
     let e = entries(&c, &s.decision);
     assert_eq!(e.len(), 1, "{c:?}");
     assert_eq!(e[0].kind, ConsequenceKind::Dependent);
-    assert_eq!(e[0].follow_up, FollowUp::Reaffirm);
-    assert_eq!(e[0].fix.as_deref(), Some(REAFFIRM_FIX));
+    assert_eq!(e[0].follow_up, FollowUp::Confirm);
+    assert_eq!(e[0].fix.as_deref(), Some(LINEAGE_DECISION_FIX));
     assert_eq!(e[0].because.edge, "refines");
     assert_eq!(e[0].because.changed, d2.to_string());
+    let n = entries(&c, &s.c);
+    assert_eq!(n.len(), 1, "{c:?}");
+    assert_eq!(n[0].follow_up, FollowUp::Confirm);
+    assert_eq!(n[0].fix.as_deref(), Some(LINEAGE_FIX));
 }
 
 /// P5: a governed decision that asserts nothing live (fully superseded) gets no entry, and the
@@ -431,7 +445,7 @@ fn mfb2_the_edit_loop_doc_says_what_a_refine_reaches() {
     let doc = rdy_mcp::tools::EDIT_LOOP_DOC;
     assert!(
         doc.contains(
-            "A write that records a decision with refines, or a supersedes with a part, also lists each block the refined or partly superseded decision governs (decided_by, implements, its affects): kind dependent, follow_up confirm (a governed decision gets reaffirm, or update while proposed, and no entry when it asserts nothing live), because.edge refines or supersedes. A full supersede reaches only through the refines passed to rdy_supersede, not through the ones it copies (a refines list equal to the old decision's counts as copied)."
+            "A write that records a decision with refines, or a supersedes with a part, also lists each block the refined or partly superseded decision governs (decided_by, implements, its affects): kind dependent, follow_up confirm (a governed decision gets confirm too, or update while proposed, and no entry when it asserts nothing live), because.edge refines or supersedes. A full supersede reaches only through the refines passed to rdy_supersede, not through the ones it copies (a refines list equal to the old decision's counts as copied)."
         ),
         "{doc}"
     );

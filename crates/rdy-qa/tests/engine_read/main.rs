@@ -14,6 +14,7 @@ mod engine_demo_summary;
 mod engine_diff;
 mod engine_entity_search;
 mod engine_events;
+mod engine_governing;
 mod engine_graph;
 mod engine_history;
 mod engine_impact;

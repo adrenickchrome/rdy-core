@@ -42,6 +42,21 @@ pub(crate) struct ImpactArgs {
 }
 
 #[derive(clap::Args)]
+pub(crate) struct TraceArgs {
+    /// An id or a path such as wallets/transactions; `id@version` or a ref line `[id@version] …` reads under that version.
+    id: String,
+    /// canon (the default), an existing view's name, tag:<version>, landing:<id>, proposal:P-<id>@<n> or view:<name>.
+    #[arg(long)]
+    scope: Option<String>,
+    /// How many steps of lineage to walk, 1 to 8 (default 3).
+    #[arg(long, allow_negative_numbers = true)]
+    depth: Option<i64>,
+    /// Add the recorded evidence: authored options, sealed plans, landing evidence and the whole re-affirmation record.
+    #[arg(long)]
+    detail: bool,
+}
+
+#[derive(clap::Args)]
 pub(crate) struct LsArgs {
     path: Option<String>,
     /// canon, an existing view's name, tag:<version>, landing:<id>, proposal:P-<id>@<n> or view:<name>.
@@ -103,6 +118,24 @@ pub(crate) fn impact(env: &Env, a: ImpactArgs) -> Result<(Value, String), ErrorR
         json!({"id": id, "depth": depth, "scope": scope}),
     )?;
     let t = impact_text(&v);
+    Ok((v, t))
+}
+
+/// `rdy trace` (D-1876T): the reply of the `trace` op, printed as `trace_text` reads it. The
+/// JSON is the `rdy_trace` result. The budget is the tool's 1000 tokens.
+pub(crate) fn trace(env: &Env, a: TraceArgs) -> Result<(Value, String), ErrorReply> {
+    let TraceArgs {
+        id,
+        scope,
+        depth,
+        detail,
+    } = a;
+    let mut args = json!({"id": id, "scope": scope, "depth": depth});
+    if detail {
+        args["detail"] = json!(true);
+    }
+    let v = call(env, "trace", args)?;
+    let t = crate::trace_text::trace_text(&v, detail);
     Ok((v, t))
 }
 

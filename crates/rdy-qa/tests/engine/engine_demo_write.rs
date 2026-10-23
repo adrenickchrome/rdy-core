@@ -477,7 +477,9 @@ fn df1_implements_a_non_decision_is_refused() {
     let scope = Scope::View("x".into());
     // a doc named by its path resolves to the doc's id, as any implements text does
     let Some(Justification::Implements(by_path)) =
-        parse_justification(&r.read(), &scope, Some(vec!["wallets".into()]), None).unwrap()
+        parse_justification(&r.read(), &scope, Some(vec!["wallets".into()]), None, None)
+            .unwrap()
+            .stored
     else {
         panic!("implements")
     };

@@ -236,9 +236,11 @@ pub(crate) fn fix_open_question(block: &BlockId) -> String {
     format!("answer {block} with a decision (answers), or remove the question")
 }
 
-/// The fix of `ungrounded`.
+/// The fix of `ungrounded` (D-X4RYX).
 pub(crate) fn fix_ungrounded(block: &BlockId) -> String {
-    format!("link {block} to the decision that governs it, with decided_by or implements")
+    format!(
+        "link {block} to the decision that governs it, with decided_by or implements, or justify its next change with reflects; rdy_trace shows the landing that introduced it"
+    )
 }
 
 /// The fix of `unapplied_decision`.

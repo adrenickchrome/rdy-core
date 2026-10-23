@@ -290,6 +290,14 @@ fn cc6_fix_texts_are_exact() {
         fix(&c["$o"], IssueCode::MissingSection),
         "add the required section Goals"
     );
+    // rf6 (D-X4RYX): reflects grounds a block too, and rdy_trace finds where it came from
+    assert_eq!(
+        fix(&c["$c1"], IssueCode::Ungrounded),
+        format!(
+            "link {} to the decision that governs it, with decided_by or implements, or justify its next change with reflects; rdy_trace shows the landing that introduced it",
+            c["$c1"]
+        )
+    );
 }
 
 #[test]

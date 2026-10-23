@@ -648,3 +648,160 @@ fn ha16_failed_take_repair_reads_match_the_sealed_log() {
     }
     handle.close().unwrap();
 }
+
+// ---------------------------------------------------------------------------------------------
+// rf4: store format 18 (D-4WC6R): a history with both Reflects forms
+
+/// Rewrites block `b` in view `work` with `body`, justified by `j`, as one typed commit; returns
+/// the change.
+fn reflects_rewrite(r: &mut Rdy, b: &str, body: &str, j: rdy_model::Justification) -> Hash {
+    let scope = rdy_engine::Scope::View("work".into());
+    let mut next = r
+        .read()
+        .block(&scope, &rdy_model::BlockId::parse(b).unwrap())
+        .unwrap();
+    let base = next.version_hash();
+    next.body = body.into();
+    let deps = r.read().included("work").to_vec();
+    let h = r
+        .store_mut()
+        .commit_to_view(
+            "work",
+            rdy_model::Change {
+                view: "work".into(),
+                ops: vec![rdy_model::Op::Update { base, block: next }],
+                deps,
+                provenance: Provenance {
+                    actor: "agent:a".into(),
+                    run: None,
+                    role: Role::Writer,
+                    at_ms: 7,
+                },
+                justification: Some(j),
+                message: "rf4".into(),
+                links: Default::default(),
+                read_identity: None,
+            },
+        )
+        .unwrap();
+    r.invalidate();
+    h
+}
+
+/// A source project with a doc, a source block and a claim, landed; then a source-only and a
+/// code-only Reflects rewrite of the claim, landed and tagged `v1.0.0`. Returns the source, its
+/// tag, the two changes and their justifications.
+fn reflects_source(dir: &Path) -> (Rdy, Hash, Vec<(Hash, rdy_model::Justification)>) {
+    std::fs::create_dir_all(dir).unwrap();
+    let mut r = Rdy::init(dir, "rdy-standard").unwrap();
+    let w = write(
+        &mut r,
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "guide", "title": "Guide", "doc_type": "page"}},
+            {"op": "create", "type": "source", "id": "$s", "parent": "$d", "fields": {"title": "The spec", "kind": "spec", "locator": "spec/v1.md"}},
+            {"op": "create", "type": "claim", "id": "$c", "parent": "$d", "body": "One."}
+        ]),
+    );
+    land(&mut r, "first");
+    let source = rdy_model::BlockId::parse(&w.created["$s"]).unwrap();
+    let claim = w.created["$c"].clone();
+    let forms = [
+        rdy_model::Justification::Reflects {
+            sources: vec![source],
+            code: false,
+        },
+        rdy_model::Justification::Reflects {
+            sources: vec![],
+            code: true,
+        },
+    ];
+    let changes = forms
+        .into_iter()
+        .zip(["Two.", "Three."])
+        .map(|(j, body)| (reflects_rewrite(&mut r, &claim, body, j.clone()), j))
+        .collect();
+    land(&mut r, "reflects");
+    let t = tag(&mut r, "v1.0.0");
+    (r, t, changes)
+}
+
+#[test]
+fn rf4_adapter_check_take_and_history_decode_reflects() {
+    let _clock = rdy_engine::pin_clock(1_000_000);
+    let dir = tempfile::tempdir().unwrap();
+    let (r, t, changes) = reflects_source(&dir.path().join("src"));
+    let bytes = export(&r, t);
+    let repo = repo(&r);
+    let landing = landing_of(&r, t);
+    let history: Vec<Hash> = rdy_engine::history_facts::chain(&r.read(), landing)
+        .unwrap()
+        .into_iter()
+        .map(|f| f.hash)
+        .collect();
+    r.close().unwrap();
+    // the check: both Reflects changes are keys of the batch
+    let report = rdy_adapter::stream::check_batch(bytes.as_slice(), Some(repo)).unwrap();
+    for (c, _) in &changes {
+        assert!(report.keys.contains(&ObjectKey {
+            kind: kinds::CHANGE,
+            hash: *c
+        }));
+    }
+    // the take into a new holder
+    let root = dir.path().join("holder");
+    let mut h = StoreHandle::create_holder(&root, repo).unwrap();
+    let got = h
+        .take(
+            &files(dir.path(), "rf4", &[&bytes]),
+            target("v1.0.0", landing),
+        )
+        .unwrap();
+    assert_eq!(got.records_taken, report.keys.len() as u64);
+    // the history through the snapshot names both changes, and each is present
+    let snap = h.snapshot().unwrap();
+    let facts = snap.tag_history("v1.0.0").unwrap();
+    assert_eq!(facts.iter().map(|f| f.hash).collect::<Vec<_>>(), history);
+    let written: BTreeSet<Hash> = facts
+        .iter()
+        .flat_map(|f| f.blocks.iter().map(|b| b.change))
+        .collect();
+    let keys: Vec<ObjectKey> = changes
+        .iter()
+        .map(|(c, _)| ObjectKey {
+            kind: kinds::CHANGE,
+            hash: *c,
+        })
+        .collect();
+    for k in &keys {
+        assert!(written.contains(&k.hash));
+    }
+    assert!(
+        snap.has_objects(&keys)
+            .unwrap()
+            .iter()
+            .all(|p| p.present && !p.redacted)
+    );
+    drop(snap);
+    let fsck = serde_json::to_value(h.fsck().unwrap()).unwrap();
+    // a dump through the handle loads to the same holder
+    let out = dir.path().join("holder.rdydump");
+    h.dump(&out).unwrap();
+    h.close().unwrap();
+    let copy = dir.path().join("copy");
+    let loaded = rdy_adapter::maintenance::load(&out, &copy).unwrap();
+    assert_eq!(serde_json::to_value(&loaded.fsck).unwrap(), fsck);
+    // each holder decodes both justifications under their hashes, and a reindex and fsck agree
+    for at in [&root, &copy] {
+        let mut hr = Rdy::open_holder(at).unwrap();
+        for (c, j) in &changes {
+            let got = hr.store().change(c).unwrap();
+            assert_eq!(got.justification.as_ref(), Some(j));
+            assert_eq!(got.id(), *c);
+        }
+        let before = hr.store().index_dump_for_tests().unwrap();
+        hr.reindex().unwrap();
+        assert_eq!(hr.store().index_dump_for_tests().unwrap(), before);
+        assert_eq!(serde_json::to_value(hr.fsck().unwrap()).unwrap(), fsck);
+        hr.close().unwrap();
+    }
+}

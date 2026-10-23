@@ -67,7 +67,7 @@ fn se9_a_tension_verdict_shows_in_rdy_tensions_as_advisory_semantic() {
             "rdy_review_submit",
             json!({
                 "request": n["request"], "case_hash": n["case_hash"], "verdict": "tension",
-                "findings": [{"block": block, "note": "these two cannot both hold"}]
+                "citations": [{"block": block, "note": "these two cannot both hold"}]
             }),
         )
         .ok();
@@ -112,7 +112,7 @@ fn se9_advice_then_a_relayed_acceptance_over_mcp() {
             "rdy_review_submit",
             json!({
                 "request": n["request"], "case_hash": n["case_hash"], "verdict": "tension",
-                "findings": [{"block": n["case"]["blocks"][0]["id"], "note": "these two cannot both hold"}],
+                "citations": [{"block": n["case"]["blocks"][0]["id"], "note": "these two cannot both hold"}],
                 "severity": "blocking", "reason": "it contradicts the gate rule"
             }),
         )
@@ -196,7 +196,7 @@ fn se9_the_author_of_a_judged_text_cannot_dismiss_the_advice_over_mcp() {
             "rdy_review_submit",
             json!({
                 "request": n["request"], "case_hash": n["case_hash"], "verdict": "tension",
-                "findings": [{"block": n["case"]["blocks"][0]["id"], "note": "these two cannot both hold"}],
+                "citations": [{"block": n["case"]["blocks"][0]["id"], "note": "these two cannot both hold"}],
                 "severity": "blocking", "reason": "it contradicts the gate rule"
             }),
         )

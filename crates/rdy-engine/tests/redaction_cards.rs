@@ -26,7 +26,7 @@ const PERSON: &str = "human:t";
 
 const COPIES: &str = "This removes bytes from this store. It cannot erase exports, renders, dumps, clones, published files, working copies, backups, or filesystem snapshots.";
 const INVENTORY: &str = "Dumps, clones, exports, renders, and published versions may hold copies. Their locations are unknown to rdy.";
-const QUOTES: &str = "Quote matches use complete source strings. Partial quotes may still hold content. Snapshot issue lists and summaries, review findings, tension advice, and answer notes are not erased.";
+const QUOTES: &str = "Quote matches use complete source strings. Partial quotes may still hold content. Snapshot issue lists and summaries, review citations, tension advice, answer notes and change-plan versions are not erased.";
 const REUSE: &str = "This store will refuse these object and chunk hashes on later writes. This can block an identical restore or a file that shares a removed chunk.";
 const QUARANTINE: &str = "Quarantine files may hold the content. Redaction does not remove them. A person can run rdy fsck --clean-quarantine.";
 const ROTATE: &str = "Rotate or revoke the secret. Redaction does not undo its exposure.";
@@ -842,7 +842,7 @@ fn rdx8_the_card_encoding_is_fixed() {
     // D-D8FAB: the card now prints the approve option's computed reason, so the pinned hash moved
     assert_eq!(
         card_hash(&item).to_string(),
-        "6452ea46e005311191d38febe4dba15a6677d057fd87c50bf62246c840e10061"
+        "3d8c8240c84896841b04f784c63746b8bd1aca7407f412b382f09cd7824231ff"
     );
     // a card with exactly the nine fields deserializes; a tenth field is refused
     let nine = json!({

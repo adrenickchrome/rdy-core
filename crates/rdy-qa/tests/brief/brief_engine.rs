@@ -222,6 +222,36 @@ fn brf1_a_briefing_lists_governs_dependents_will_go_stale_and_suspects() {
         "{:?}",
         b.suspects
     );
+    // rf6 (D-VPATZ): a proposed decision that affects A governs it too, labelled proposed
+    let p = r
+        .decide(
+            &writer(),
+            "w",
+            DecisionInput {
+                parent: s.section.to_string(),
+                statement: "A stays short".into(),
+                affects: vec![sa.clone()],
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .created["$decision"]
+        .clone();
+    let a = brief_of(&r, &w(), &[&s.a]);
+    assert!(
+        a.governs
+            .iter()
+            .any(|g| g.decision == p && g.status == "proposed" && g.blocks == vec![sa.clone()]),
+        "{:?}",
+        a.governs
+    );
+    assert!(
+        a.governs
+            .iter()
+            .any(|g| g.decision == sd && g.status == "live"),
+        "{:?}",
+        a.governs
+    );
 }
 
 #[test]
@@ -286,6 +316,7 @@ fn brf1_the_registry_keeps_the_most_recently_used_briefings() {
             token: Hash::of(&[n]),
             covers: BTreeSet::new(),
             recorded: BTreeMap::new(),
+            governance: Governance::default(),
         })
     };
     let hex = |n: u8| rec(n).token.to_string();
@@ -409,6 +440,7 @@ fn brf1_the_registry_is_bounded_by_recorded_entries_as_well_as_by_count() {
             token: Hash::of(&[n]),
             covers,
             recorded,
+            governance: Governance::default(),
         })
     };
     let hex = |n: u8| Hash::of(&[n]).to_string();

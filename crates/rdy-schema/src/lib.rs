@@ -2,6 +2,7 @@ mod glob;
 mod pack;
 pub mod publication;
 mod resolve;
+pub mod supporting;
 mod validate;
 
 pub use glob::{Glob, GlobError, MAX_GLOB_LEN, MAX_PATH_SEGMENTS};

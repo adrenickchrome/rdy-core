@@ -10,7 +10,7 @@ use crate::pending::queue::removal_item;
 use crate::pending::{Item, RemovalCard};
 use crate::semantic::accept_advice::advised_digest;
 use crate::session::rfc3339;
-use crate::tensions::info::FindingInfo;
+use crate::tensions::info::CitationInfo;
 use crate::tensions::tension_label;
 use crate::views::{ConflictInfo, conflict_infos};
 use crate::{RdyError, ReadState};
@@ -116,7 +116,7 @@ pub struct ErrorRow {
     pub fix: String,
 }
 
-/// An advised semantic tension of a proposal version: the reviewer, the advice and findings,
+/// An advised semantic tension of a proposal version: the reviewer, the advice and citations,
 /// and whether a person accepted the advice.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct AdvisedRow {
@@ -124,7 +124,7 @@ pub struct AdvisedRow {
     pub tension: String,
     pub reviewer: String,
     pub advice: String,
-    pub findings: Vec<FindingInfo>,
+    pub citations: Vec<CitationInfo>,
     pub accepted: bool,
 }
 
@@ -304,7 +304,7 @@ impl ReadState {
     }
 
     /// The advised semantic tensions of `changes` as `rdy show P-x@n` lists them, every one: the
-    /// reviewer and findings from each verdict's review; and the digest of the set.
+    /// reviewer and citations from each verdict's review; and the digest of the set.
     fn advised_rows(
         &self,
         view: &str,
@@ -321,10 +321,10 @@ impl ReadState {
                     tension: tension_label(&a.tension.id),
                     reviewer: r.provenance.actor,
                     advice: rec.advice.clone().unwrap_or_default(),
-                    findings: r
-                        .findings
+                    citations: r
+                        .citations
                         .into_iter()
-                        .map(|f| FindingInfo {
+                        .map(|f| CitationInfo {
                             block: f.block.to_string(),
                             note: f.note,
                         })
@@ -578,8 +578,8 @@ mod tests {
             "conflicts": [], "blocking": [],
             "versions": [{"ref": "P-111111111111@1", "id": h('1'), "latest": true, "landed": false}],
             "advised": [
-                {"tension": "tn-aaaaaaaaaaaa", "reviewer": "agent:r", "advice": "no", "findings": [], "accepted": false},
-                {"tension": "tn-bbbbbbbbbbbb", "reviewer": "agent:s", "advice": "yes", "findings": [], "accepted": true}
+                {"tension": "tn-aaaaaaaaaaaa", "reviewer": "agent:r", "advice": "no", "citations": [], "accepted": false},
+                {"tension": "tn-bbbbbbbbbbbb", "reviewer": "agent:s", "advice": "yes", "citations": [], "accepted": true}
             ],
             "advised_digest": "0123456789ab"
         });
@@ -743,7 +743,7 @@ mod tests {
                 tension: "tn-000000000001".into(),
                 reviewer: "agent:r".into(),
                 advice: "block".into(),
-                findings: vec![],
+                citations: vec![],
                 accepted: false,
             }],
             advised_error: Some("E_IO: busy".into()),

@@ -47,6 +47,6 @@ pub use repo_id::RepoId;
 pub use value::{FieldValue, MAX_FIELD_NESTING, field_nesting_fix, field_nesting_message};
 pub mod reference;
 pub mod review;
-pub use review::{Finding, Review, ReviewSubject, Verdict};
+pub use review::{Citation, Review, ReviewSubject, Verdict};
 pub mod semantic;
 pub use semantic::{PairItem, SemanticTension, pair_key};

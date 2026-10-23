@@ -242,6 +242,16 @@ fn mfb3_import_writes_one_change_per_author_with_their_times() {
         first.message,
         "import from x: 1 block(s) by agent:a, imported by human:imp"
     );
+    // rf5: each change records the importer beside its author
+    for c in [&first, &second] {
+        assert_eq!(
+            c.links.imported_by,
+            Some(ActorRun {
+                actor: "human:imp".into(),
+                run: None
+            })
+        );
+    }
     let json = serde_json::to_value(&res).unwrap();
     assert_eq!(json["changes"].as_array().map(Vec::len), Some(2));
 }
@@ -420,6 +430,16 @@ fn mfb3_interleaved_authors_import_to_the_exported_tree() {
         );
         assert_eq!(two.provenance.actor, "agent:a");
         assert_eq!(two.provenance.at_ms, 300);
+        // rf5: each change records the importer beside its author
+        for c in [&one, &two] {
+            assert_eq!(
+                c.links.imported_by,
+                Some(ActorRun {
+                    actor: "human:imp".into(),
+                    run: None
+                })
+            );
+        }
     }
     let pr = b.propose(&imp, "import", "migrate", None).unwrap();
     b.land(&imp, &pr.id).unwrap();

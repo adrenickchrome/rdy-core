@@ -36,7 +36,7 @@ fn verdict_on(r: &mut Rdy, scope: &Scope, x: &BlockId, y: &BlockId, actor: &str,
         case_hash: Some(Hash([9; 32])),
         verdict: Verdict::Tension,
         reason: String::new(),
-        findings: vec![Finding {
+        citations: vec![Citation {
             block: x.clone(),
             note: "B and C cannot both hold".into(),
         }],
@@ -134,7 +134,7 @@ fn se8_an_agent_accepts_only_by_relaying_a_persons_words() {
         (j.actor.as_str(), j.advice.as_deref()),
         ("agent:r", Some("it contradicts the gate rule"))
     );
-    assert_eq!(j.findings[0].note, "B and C cannot both hold");
+    assert_eq!(j.citations[0].note, "B and C cannot both hold");
     // di8 (D-67ZN7): the person accepted; the agent relayed as itself
     let acc = j.accepted.unwrap();
     assert_eq!(
@@ -283,7 +283,7 @@ fn se8_propose_and_show_carry_the_advice() {
         (row.tension.as_str(), row.reviewer.as_str(), row.accepted),
         (tn.as_str(), "agent:r", false)
     );
-    assert_eq!(row.findings[0].note, "B and C cannot both hold");
+    assert_eq!(row.citations[0].note, "B and C cannot both hold");
     let text = proposal_text(&serde_json::to_value(&show).unwrap());
     assert!(
         text.contains(&format!(

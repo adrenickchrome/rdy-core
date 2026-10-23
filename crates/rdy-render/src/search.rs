@@ -327,15 +327,13 @@ fn own_text_in(b: &Block, r: Read) -> String {
     }
 }
 
-/// A section's own words: what its direct children that are not sections say. A rationale is
-/// off the page (FW-D10), so it is off the index too; a doc's direct words are read the same way.
+/// A section's own words: what its direct children that are not sections say. A rationale, a
+/// finding and a source are off the page (FW-D10, D-Z8P09), so they are off the index too; a
+/// doc's direct words are read the same way.
 fn section_text(sec: &Block, m: &Materialized, site: &Site) -> String {
     let mut out = plain(&sec.body, RefMode::Strict, Form::Body, site);
     for c in m.children(Some(&sec.id)) {
-        if c.block_type == "section"
-            || c.block_type == crate::site::RATIONALE
-            || crate::site::is_profile(c)
-        {
+        if c.block_type == "section" || crate::site::is_off_site(c) || crate::site::is_profile(c) {
             continue;
         }
         out.push(' ');

@@ -379,7 +379,7 @@ fn run_session() -> Vec<(String, String)> {
             p(
                 json!({"request": next["request"], "case_hash": next["case_hash"],
             "verdict": "tension",
-            "findings": [{"block": block, "note": "these two cannot both hold"}],
+            "citations": [{"block": block, "note": "these two cannot both hold"}],
             "severity": "blocking", "reason": "it contradicts the gate rule"}),
             ),
         ),

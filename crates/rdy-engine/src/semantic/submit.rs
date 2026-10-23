@@ -11,14 +11,14 @@ use crate::{
     RdyError, ReadState, Session, now_ms,
 };
 use rdy_model::{
-    BlockId, Finding, Hash, PairItem, Review, ReviewSubject, Role, SemanticTension, Verdict,
+    BlockId, Citation, Hash, PairItem, Review, ReviewSubject, Role, SemanticTension, Verdict,
     hash_of,
 };
 use serde::{Deserialize, Serialize};
 
-/// The most findings one verdict takes.
-pub const MAX_FINDINGS: usize = 20;
-/// The most characters a finding's note, or the advice's reason, takes after trimming.
+/// The most citations one verdict takes.
+pub const MAX_CITATIONS: usize = 20;
+/// The most characters a citation's note, or the advice's reason, takes after trimming.
 pub const MAX_NOTE: usize = 2000;
 
 /// `rdy_review_submit`'s input.
@@ -32,7 +32,7 @@ pub struct ReviewSubmitRequest {
     /// `tension` or `no_tension`.
     pub verdict: String,
     #[serde(default)]
-    pub findings: Vec<FindingRequest>,
+    pub citations: Vec<CitationRequest>,
     /// `advisory` (the default) or `blocking`: advice to a person; it gates nothing.
     #[serde(default)]
     pub severity: Option<String>,
@@ -41,10 +41,10 @@ pub struct ReviewSubmitRequest {
     pub reason: Option<String>,
 }
 
-/// One finding of a verdict: a block of the case and what in it disagrees.
+/// One citation of a verdict: a block of the case and what in it disagrees.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FindingRequest {
+pub struct CitationRequest {
     pub block: String,
     pub note: String,
 }
@@ -263,21 +263,21 @@ impl Rdy {
                 "request {label} ended: both blocks are in canon now"
             )));
         }
-        // 7. findings
-        if req.findings.len() > MAX_FINDINGS {
+        // 7. citations
+        if req.citations.len() > MAX_CITATIONS {
             return Err(invalid(
-                "a verdict takes at most 20 findings",
-                "keep the 20 findings that matter most",
+                "a verdict takes at most 20 citations",
+                "keep the 20 citations that matter most",
             ));
         }
-        if verdict == Verdict::Tension && req.findings.is_empty() {
+        if verdict == Verdict::Tension && req.citations.is_empty() {
             return Err(invalid(
-                "a tension verdict needs at least one finding",
-                "add a finding that says what in a block disagrees",
+                "a tension verdict needs at least one citation",
+                "add a citation that says what in a block disagrees",
             ));
         }
-        let mut findings = vec![];
-        for (n, f) in req.findings.iter().enumerate() {
+        let mut citations = vec![];
+        for (n, f) in req.citations.iter().enumerate() {
             let i = n + 1;
             let block = BlockId::parse(&f.block)
                 .ok()
@@ -286,7 +286,7 @@ impl Rdy {
                 let names: Vec<String> = items.iter().map(|it| it.block.to_string()).collect();
                 return Err(invalid(
                     format!(
-                        "finding {i}: block {} is not one of {}",
+                        "citation {i}: block {} is not one of {}",
                         f.block,
                         names.join(" and ")
                     ),
@@ -295,11 +295,11 @@ impl Rdy {
             };
             let Some(note) = bounded(&f.note) else {
                 return Err(invalid(
-                    format!("finding {i}: a note needs 1 to 2000 characters"),
+                    format!("citation {i}: a note needs 1 to 2000 characters"),
                     "say in a few words what disagrees",
                 ));
             };
-            findings.push(Finding {
+            citations.push(Citation {
                 block,
                 note: note.to_string(),
             });
@@ -389,7 +389,7 @@ impl Rdy {
             case_hash: Some(sent_hash),
             verdict,
             reason: String::new(),
-            findings,
+            citations,
             provenance: provenance.clone(),
         };
         let first = (verdict == Verdict::Tension).then(|| SemanticTension {

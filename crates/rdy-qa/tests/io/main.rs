@@ -4,6 +4,7 @@
 mod io;
 mod io_authors;
 mod io_clone;
+mod io_decision_basis;
 mod io_dump;
 mod io_dump_chain_surfaces;
 mod io_dump_fixture;
@@ -14,6 +15,7 @@ mod io_dump_fixture_s14;
 mod io_dump_fixture_s15;
 mod io_dump_fixture_s16;
 mod io_dump_fixture_s17;
+mod io_dump_fixture_s18;
 mod io_dump_names;
 mod io_imported_by;
 mod io_keys;

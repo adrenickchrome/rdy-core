@@ -125,6 +125,63 @@ pub struct Graph {
 
 const EMPTY: &[Edge] = &[];
 
+/// The `via` of a route through an entity the decision affects and the block describes.
+const DESCRIBES_AFFECTS: &str = "describes/affects";
+
+/// rf3: which decision statuses a governing query admits. `Live` includes a partly superseded
+/// decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GoverningStatuses {
+    Live,
+    LiveOrProposed,
+    All,
+}
+
+/// rf3: one decision that governs a block and the route that reaches it. `via` is exactly
+/// `decided_by`, `implements`, `affects` or `describes/affects`; `entity` is the entity of the
+/// last route.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GoverningRoute {
+    pub decision: BlockId,
+    pub via: &'static str,
+    pub entity: Option<BlockId>,
+}
+
+/// rf3: the decisions with an incoming `affects` edge, by entity, so a read scans each entity
+/// once however many blocks describe it. The candidates are unfiltered, so one cache serves
+/// every status filter. A cache belongs to one [`Graph`] and one read: never reuse it after the
+/// graph changes.
+#[derive(Debug, Default)]
+pub struct GoverningCache {
+    entities: BTreeMap<BlockId, Vec<BlockId>>,
+    scans: usize,
+}
+
+impl GoverningCache {
+    /// How many entities this cache has scanned. Test support only.
+    #[doc(hidden)]
+    pub fn entity_scans(&self) -> usize {
+        self.scans
+    }
+
+    /// The sorted ids of the decisions that affect `entity`, scanned once.
+    fn entity_decisions(&mut self, g: &Graph, entity: &BlockId) -> &[BlockId] {
+        if !self.entities.contains_key(entity) {
+            self.scans += 1;
+            let ids: BTreeSet<BlockId> = g
+                .incoming(entity)
+                .iter()
+                .filter(|e| matches!(&e.kind, EdgeKind::Link(n) if n == decision::AFFECTS))
+                .filter(|e| g.status(&e.from).is_some())
+                .map(|e| e.from.clone())
+                .collect();
+            self.entities
+                .insert(entity.clone(), ids.into_iter().collect());
+        }
+        &self.entities[entity]
+    }
+}
+
 /// The key of one difference between two maps.
 fn key_of<'a, V>(item: imbl::ordmap::DiffItem<'a, 'a, BlockId, V>) -> &'a BlockId {
     match item {
@@ -172,22 +229,31 @@ fn unique(found: impl Iterator<Item = Suspect>) -> Vec<Suspect> {
 /// sus2: link kinds through which a changed or deleted target makes a block suspect: premises,
 /// and what the block implements or is decided by (spec §6.2: "references and premises").
 /// A superseded or revoked target is suspect through any link.
-pub const SUSPECT_LINKS: [&str; 4] = [
+///
+/// rf3 (D-4WC6R): `reflects` joins them. A block that reflects a source is suspect when that
+/// source changes or is deleted, with the pin the link already carries.
+pub const SUSPECT_LINKS: [&str; 5] = [
     decision::DEPENDS_ON,
     decision::CONDITIONAL_ON,
     decision::IMPLEMENTS,
     decision::DECIDED_BY,
+    REFLECTS,
 ];
 
 /// imp2: link kinds impact follows: the dependency edges (with references).
-pub const IMPACT_LINKS: [&str; 6] = [
+pub const IMPACT_LINKS: [&str; 7] = [
     decision::DEPENDS_ON,
     decision::CONDITIONAL_ON,
     decision::IMPLEMENTS,
     decision::DECIDED_BY,
     decision::DESCRIBES,
     decision::AFFECTS,
+    REFLECTS,
 ];
+
+/// The engine link kind from a block to a source it reflects. Only the graph's suspect and impact
+/// sets name it; lineage and answer links do not.
+const REFLECTS: &str = "reflects";
 /// imp2: link kinds impact lists at depth 1 (decisions that refine or supersede the queried
 /// block) without following them.
 pub const IMPACT_SHOWN: [&str; 2] = [decision::REFINES, decision::SUPERSEDES];
@@ -519,23 +585,103 @@ impl Graph {
         )
     }
 
-    pub fn governing(&self, id: &BlockId) -> Vec<BlockId> {
-        let mut out = BTreeSet::new();
+    /// rf3 (D-VPATZ): the decisions that govern `id`, each once, by decision id, with the one
+    /// route that reaches it. The routes in priority order are `decided_by`, `implements`,
+    /// `affects` (the decision affects `id`) and `describes/affects` (`id` describes an entity,
+    /// per `is_entity`, that the decision affects; the lowest entity id wins a tie). References,
+    /// text mentions, an entity's home and a describes target that is no entity add no route;
+    /// a target without a status is no decision. `statuses` filters the decisions. `cache`
+    /// belongs to this graph and this read.
+    pub fn governing_routes(
+        &self,
+        id: &BlockId,
+        statuses: GoverningStatuses,
+        is_entity: impl Fn(&BlockId) -> bool,
+        cache: &mut GoverningCache,
+    ) -> Vec<GoverningRoute> {
+        let mut found: BTreeMap<BlockId, (u8, GoverningRoute)> = BTreeMap::new();
+        let mut offer = |rank: u8, d: &BlockId, via: &'static str, entity: Option<&BlockId>| {
+            let route = GoverningRoute {
+                decision: d.clone(),
+                via,
+                entity: entity.cloned(),
+            };
+            match found.get(d) {
+                // a lower rank wins; within describes/affects the lower entity id wins
+                Some((r, old)) if (*r, &old.entity) <= (rank, &route.entity) => {}
+                _ => {
+                    found.insert(d.clone(), (rank, route));
+                }
+            }
+        };
         for e in self.outgoing(id) {
-            if matches!(&e.kind, EdgeKind::Link(n) if n == decision::DECIDED_BY || n == decision::IMPLEMENTS)
-                && self.is_live(&e.to)
-            {
-                out.insert(e.to.clone());
+            let EdgeKind::Link(n) = &e.kind else { continue };
+            match n.as_str() {
+                decision::DECIDED_BY if self.governs_in(&e.to, statuses) => {
+                    offer(0, &e.to, decision::DECIDED_BY, None);
+                }
+                decision::IMPLEMENTS if self.governs_in(&e.to, statuses) => {
+                    offer(1, &e.to, decision::IMPLEMENTS, None);
+                }
+                decision::DESCRIBES if is_entity(&e.to) => {
+                    for d in cache.entity_decisions(self, &e.to) {
+                        if self.governs_in(d, statuses) {
+                            offer(3, d, DESCRIBES_AFFECTS, Some(&e.to));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         for e in self.incoming(id) {
             if matches!(&e.kind, EdgeKind::Link(n) if n == decision::AFFECTS)
-                && self.is_live(&e.from)
+                && self.governs_in(&e.from, statuses)
             {
-                out.insert(e.from.clone());
+                offer(2, &e.from, decision::AFFECTS, None);
+            }
+        }
+        found.into_values().map(|(_, r)| r).collect()
+    }
+
+    /// rf3: the inverse of [`Graph::governing_routes`]: the blocks decision `d` governs, by id,
+    /// once each. The direct set ([`Graph::governed_by`]) plus each block that describes an
+    /// entity `d` affects. A missing `d`, a block that is no decision, or a status `statuses`
+    /// excludes gives none. It follows the same route rule and cache as `governing_routes`.
+    pub fn governed_through(
+        &self,
+        d: &BlockId,
+        statuses: GoverningStatuses,
+        is_entity: impl Fn(&BlockId) -> bool,
+        cache: &mut GoverningCache,
+    ) -> Vec<BlockId> {
+        if !self.governs_in(d, statuses) {
+            return vec![];
+        }
+        let mut out: BTreeSet<BlockId> = self.governed_by(d).into_iter().collect();
+        for e in self.outgoing(d) {
+            if !matches!(&e.kind, EdgeKind::Link(n) if n == decision::AFFECTS)
+                || !is_entity(&e.to)
+                || !cache.entity_decisions(self, &e.to).contains(d)
+            {
+                continue;
+            }
+            for r in self.incoming(&e.to) {
+                if matches!(&r.kind, EdgeKind::Link(n) if n == decision::DESCRIBES) {
+                    out.insert(r.from.clone());
+                }
             }
         }
         out.into_iter().collect()
+    }
+
+    /// Whether `id` is a decision whose derived status `statuses` admits.
+    fn governs_in(&self, id: &BlockId, statuses: GoverningStatuses) -> bool {
+        match self.status(id) {
+            None => false,
+            Some(DerivedStatus::Live | DerivedStatus::PartiallySuperseded { .. }) => true,
+            Some(DerivedStatus::Proposed) => statuses != GoverningStatuses::Live,
+            Some(_) => statuses == GoverningStatuses::All,
+        }
     }
 
     /// FW-LP6: the blocks decision `d` governs, whatever its status: each block with a

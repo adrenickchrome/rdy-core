@@ -95,7 +95,12 @@ fn refl1_reflects_is_refused_on_a_decision_and_accepted_on_a_table() {
 
 #[test]
 fn refl1_reflects_is_refused_on_every_supporting_type() {
-    for (ty, prefix) in [("question", "q"), ("rationale", "ra")] {
+    for (ty, prefix) in [
+        ("question", "q"),
+        ("rationale", "ra"),
+        ("finding", "F"),
+        ("source", "S"),
+    ] {
         let issues = validate_block(&pack(), &with_reflects(ty, prefix), Some(&section()));
         assert!(
             issues
@@ -104,7 +109,7 @@ fn refl1_reflects_is_refused_on_every_supporting_type() {
             "{ty}: {issues:?}"
         );
     }
-    for ty in ["decision", "question", "rationale"] {
+    for ty in ["decision", "question", "rationale", "finding", "source"] {
         assert_eq!(pack().class_of(ty), TypeClass::Supporting, "{ty}");
     }
 }

@@ -28,7 +28,7 @@ use rdy_model::redaction::{
 };
 use rdy_model::signature::Signature;
 use rdy_model::{
-    ActorRun, AltSet, AltStatus, Answer, AnswerAct, BlockId, Finding, Hash, Intent, IntentStatus,
+    ActorRun, AltSet, AltStatus, Answer, AnswerAct, BlockId, Citation, Hash, Intent, IntentStatus,
     PairItem, Provenance, RelayEvidence, Review, ReviewSubject, Role, SemanticTension, Verdict,
 };
 use rdy_store::kinds;
@@ -433,7 +433,7 @@ fn issue_records(p: &mut P) -> (Hash, Hash, Hash) {
         case_hash: None,
         verdict: Verdict::Dismiss,
         reason: "fine".into(),
-        findings: vec![Finding {
+        citations: vec![Citation {
             block: p.prose.clone(),
             note: format!("Quoted: {SECRET}"),
         }],
@@ -550,7 +550,7 @@ fn rdx5_quotes_are_reported_but_never_persisted() {
     )));
     // the issue records themselves stay readable
     let r: Review = p.r.read().reader().get_typed(kinds::REVIEW, &rh).unwrap();
-    assert!(r.findings[0].note.contains(SECRET));
+    assert!(r.citations[0].note.contains(SECRET));
 }
 
 fn sample_result(dry_run: bool, recorded: bool, class: ReasonClass, rows: usize) -> RedactResult {
@@ -644,7 +644,7 @@ fn rdx5_report_presentation_has_one_exact_contract() {
         "Reason (secret): \"line one\\nline two\"".into(),
         "W_REDACTION_COPIES: This removes bytes from this store. It cannot erase exports, renders, dumps, clones, published files, working copies, backups, or filesystem snapshots.".into(),
         "W_REDACTION_INVENTORY: Dumps, clones, exports, renders, and published versions may hold copies. Their locations are unknown to rdy.".into(),
-        "W_REDACTION_QUOTES: Quote matches use complete source strings. Partial quotes may still hold content. Snapshot issue lists and summaries, review findings, tension advice, and answer notes are not erased.".into(),
+        "W_REDACTION_QUOTES: Quote matches use complete source strings. Partial quotes may still hold content. Snapshot issue lists and summaries, review citations, tension advice, answer notes and change-plan versions are not erased.".into(),
         "W_REDACTION_REUSE: This store will refuse these object and chunk hashes on later writes. This can block an identical restore or a file that shares a removed chunk.".into(),
         "W_REDACTION_QUARANTINE: Quarantine files may hold the content. Redaction does not remove them. A person can run rdy fsck --clean-quarantine.".into(),
         "W_REDACTION_SECRET: Rotate or revoke the secret. Redaction does not undo its exposure.".into(),
@@ -751,7 +751,7 @@ fn rdx5_existing_issue_records_are_in_the_blast_radius() {
         case_hash: None,
         verdict: Verdict::Dismiss,
         reason: SECRET.into(),
-        findings: vec![],
+        citations: vec![],
         provenance: prov("agent:r1"),
     };
     let r2 = Review {
@@ -762,7 +762,7 @@ fn rdx5_existing_issue_records_are_in_the_blast_radius() {
         case_hash: None,
         verdict: Verdict::Restore,
         reason: "ok".into(),
-        findings: vec![Finding {
+        citations: vec![Citation {
             block: p.prose.clone(),
             note: SECRET.into(),
         }],
@@ -780,7 +780,7 @@ fn rdx5_existing_issue_records_are_in_the_blast_radius() {
         case_hash: None,
         verdict: Verdict::Dismiss,
         reason: "ok".into(),
-        findings: vec![],
+        citations: vec![],
         provenance: prov("agent:r3"),
     };
     let r1h = p.r.store_mut().put(kinds::REVIEW, &r1).unwrap();
@@ -1197,7 +1197,7 @@ fn rdx5_an_answer_target_reaches_a_block_through_a_review() {
         case_hash: None,
         verdict: Verdict::Dismiss,
         reason: "ok".into(),
-        findings: vec![Finding {
+        citations: vec![Citation {
             block: p.prose.clone(),
             note: "about the code".into(),
         }],
@@ -2334,7 +2334,7 @@ fn rdx5_id_shaped_strings_are_quoted_like_any_text() {
         case_hash: None,
         verdict: Verdict::Dismiss,
         reason: PIN.into(),
-        findings: vec![Finding {
+        citations: vec![Citation {
             block: q.clone(),
             note: PIN.into(),
         }],
@@ -2388,7 +2388,7 @@ fn rdx5_a_pair_review_and_a_tension_through_it_are_affected() {
         case_hash: None,
         verdict: Verdict::Tension,
         reason: "they disagree".into(),
-        findings: vec![],
+        citations: vec![],
         provenance: prov("agent:r"),
     };
     let rh = p.r.store_mut().put(kinds::REVIEW, &review).unwrap();

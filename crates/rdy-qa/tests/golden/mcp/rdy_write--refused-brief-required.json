@@ -31,7 +31,7 @@
           "block": "c-ZCQ17",
           "code": "ungrounded",
           "dimension": "governed",
-          "fix": "link c-ZCQ17 to the decision that governs it, with decided_by or implements",
+          "fix": "link c-ZCQ17 to the decision that governs it, with decided_by or implements, or justify its next change with reflects; rdy_trace shows the landing that introduced it",
           "subject": null
         }
       ],
@@ -54,7 +54,7 @@
           "block": "c-ZCQ17",
           "code": "ungrounded",
           "dimension": "governed",
-          "fix": "link c-ZCQ17 to the decision that governs it, with decided_by or implements",
+          "fix": "link c-ZCQ17 to the decision that governs it, with decided_by or implements, or justify its next change with reflects; rdy_trace shows the landing that introduced it",
           "subject": null
         }
       ],

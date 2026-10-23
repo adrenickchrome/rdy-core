@@ -36,6 +36,7 @@ mod signing_cmd;
 mod site_cmd;
 mod stream_cmd;
 mod tension_cmd;
+mod trace_text;
 mod view_cmd;
 mod wc;
 
@@ -79,6 +80,8 @@ enum Cmd {
     Show(read_cmd::ShowArgs),
     Log(read_cmd::LogArgs),
     Impact(read_cmd::ImpactArgs),
+    /// Explain why a block says what it says: the decisions that govern it, the sources it reflects, their lineage and premises, the landing that introduced it and the landings that accepted them. The chat path is rdy_trace.
+    Trace(read_cmd::TraceArgs),
     /// Brief on a file, a directory or a block of the working copy (and record the briefing for the next commit), or on a file in a linked code repo with --code.
     #[command(group(ArgGroup::new("what").required(true).multiple(false).args(["target", "code"])))]
     Brief(brief_cmd::BriefArgs),
@@ -242,6 +245,7 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Ls(a) => read_cmd::ls(env, a),
         Cmd::Log(a) => read_cmd::log(env, a),
         Cmd::Impact(a) => read_cmd::impact(env, a),
+        Cmd::Trace(a) => read_cmd::trace(env, a),
         Cmd::Brief(a) => brief_cmd::brief(env, a),
         Cmd::Search(a) => search_cmd::search(env, a),
         Cmd::Suspects(a) => read_cmd::suspects(env, a),
@@ -292,7 +296,15 @@ fn main() -> ExitCode {
     if let Some(extra) = render_stream_cmd::invocation(&args) {
         return render_stream_cmd::render_stream(extra);
     }
-    let cli = Cli::parse_from(args);
+    // the matches are kept: `rdy new finding` reads its options' order from them
+    let matches = <Cli as clap::CommandFactory>::command().get_matches_from(args);
+    let mut cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|e| {
+        e.format(&mut <Cli as clap::CommandFactory>::command())
+            .exit()
+    });
+    if let Cmd::New { what } = &mut cli.cmd {
+        edit_cmd::fill_evidence_at(what, &matches);
+    }
     // the scan above finds every render-stream clap parses; this keeps the refusal if not
     if let Cmd::RenderStream = cli.cmd {
         return render_stream_cmd::render_stream(

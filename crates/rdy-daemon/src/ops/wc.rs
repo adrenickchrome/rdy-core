@@ -3,7 +3,7 @@ use super::*;
 use rdy_engine::consequence::write_and_report;
 use rdy_engine::{
     E_BAD_INPUT, E_IO, E_LIMIT, E_NOT_FOUND, E_PERMISSION, E_WC_OCCUPIED, RdyError, ReadState,
-    Scope, WriteRequest, parse_justification,
+    ReflectsArg, Scope, WriteRequest, parse_justification,
 };
 use rdy_mcp::tools::MAX_ASSET_BYTES;
 use rdy_model::ChangeLinks;
@@ -31,6 +31,8 @@ pub(super) struct WcCommitArgs {
     message: Option<String>,
     implements: Option<Vec<String>>,
     editorial: Option<EditorialArg>,
+    /// rf8: `{sources?, code?}`, as rdy_write takes it.
+    reflects: Option<ReflectsArg>,
     brief: Option<String>,
     max_tokens: Option<usize>,
 }
@@ -328,7 +330,7 @@ pub(super) fn wc_commit(cx: &OpContext, a: WcCommitArgs) -> Result<Value, RdyErr
         ));
     }
     let view = view_of(cx.session, Some(a.view));
-    let justification = {
+    let parsed = {
         let st = cx.engine.read();
         // the client's lint sees no view: a link target written as a key is checked here
         let m = st.materialized(&wc_scope(&st, &view))?;
@@ -338,27 +340,27 @@ pub(super) fn wc_commit(cx: &OpContext, a: WcCommitArgs) -> Result<Value, RdyErr
             &Scope::View(view.clone()),
             a.implements,
             a.editorial.map(|e| (e.class, e.reason)),
+            a.reflects,
         )?
     };
     let ops = rdy_engine::parse_ops(a.ops)?;
     let req = WriteRequest {
         view: view.clone(),
         ops,
-        justification,
+        justification: parsed.stored,
         message: a.message.unwrap_or_default(),
     };
     let s = cx.session.clone();
-    let (nonce, brief) = (a.nonce, a.brief);
+    let (nonce, brief, reflects) = (a.nonce, a.brief, parsed.reflects);
     let mut out = write_and_report(cx.engine, &view, a.max_tokens, move |r| {
-        r.write_linked(
-            &s,
-            req,
-            ChangeLinks {
-                client_nonce: Some(nonce),
-                ..Default::default()
-            },
-            brief.as_deref(),
-        )
+        let links = ChangeLinks {
+            client_nonce: Some(nonce),
+            ..Default::default()
+        };
+        match reflects {
+            Some(rf) => r.write_reflecting(&s, req, rf, links, brief.as_deref()),
+            None => r.write_linked(&s, req, links, brief.as_deref()),
+        }
     })?;
     let proj = wc_rewrite(&cx.engine.read(), &view, &a.rewrite)?;
     merge_into(&mut out, proj);

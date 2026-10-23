@@ -16,5 +16,6 @@ mod brief_reaffirm;
 mod brief_rebase;
 mod brief_section;
 mod brief_supersede_literals;
+mod brief_supporting;
 mod brief_tensions;
 mod brief_write;

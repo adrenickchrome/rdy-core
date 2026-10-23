@@ -92,6 +92,7 @@ impl Rdy {
             rdy_model::ChangeLinks::default(),
             Some(&token),
             &ours,
+            None,
         )?;
         w.keys = assigned
             .into_iter()

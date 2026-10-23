@@ -220,9 +220,29 @@ fn mbrf1_the_overview_names_the_project_and_the_schema_and_tools_document_the_ed
         i.contains("Read and write through rdy's tools, not the working-copy files"),
         "{i}"
     );
+    // rf5: the supporting types, in the instructions and the text guide
+    assert!(
+        i.contains("Finding: record what surfaced with rdy_write, type finding, statement and 1 to 20 evidence entries; cite it from a decision with depends_on"),
+        "{i}"
+    );
+    assert!(
+        sch["text"].as_str().unwrap().contains("A finding records a statement and evidence. Each evidence entry is {quote, session_ref?, question?} or {source: \"{{S-…}}\"}. Each string has 1 to 2000 characters. A source names a release, commit or spec with title, kind and locator. Both types live only in the store. With no parent, they use the decision home."),
+        "{sch}"
+    );
     assert!(
         i.contains("Brief before editing") && i.contains("must cite a briefing"),
         "{i}"
+    );
+    // rf12 (D-1876T): the Why sentence follows the Finding sentence, and the briefing guide
+    // places the new sections and says where trace differs
+    assert!(
+        i.contains("cite it from a decision with depends_on. Why: to learn why a block says what it says, call rdy_trace."),
+        "{i}"
+    );
+    let brief = sch["brief"].as_str().unwrap();
+    assert!(
+        brief.ends_with("Governs includes proposed decisions and decisions that affect a described entity; through names that entity. Sources follow suspects. Findings follow related_decisions. Trace explains why. A briefing guards a write and stays one level deep."),
+        "{brief}"
     );
 }
 
@@ -380,14 +400,33 @@ fn plb1_schema_explains_the_decision_parent() {
         json!({"when": "a write touches stable content and cites no briefing, or one that does not cover the block",
             "fix": "retry with the token of the briefing the error carries"})
     );
+    // rf5: a finding or a source with no parent uses the decision home too, and the decision
+    // guidance carries the delegated and time fixes
+    assert!(
+        sch["text"]
+            .as_str()
+            .unwrap()
+            .contains("With no parent, they use the decision home."),
+        "{sch}"
+    );
+    let rule = sch["decisions"]["rule"].as_str().unwrap();
+    for fix in [
+        "name who ruled and under whose mandate in attested_by",
+        "write an RFC 3339 UTC time, such as 2026-10-21T15:10:58Z, or a date, such as 2026-10-05",
+    ] {
+        assert!(rule.contains(fix), "{rule}");
+    }
     // the digests at the base of this change (b97ad25). rdy_write's is re-taken for DR1a Task 14
     // (plan 2026-10-21-rdy-design-rebase-1a, line 1118: "The schema's op list now includes
     // reaffirm and repin's code key"): only the description of its `ops` parameter changed, by
-    // the reaffirm op line and repin's `code` key (351830b6). The other three are the base's.
+    // the reaffirm op line and repin's `code` key (351830b6). It is re-taken again for DR1b
+    // Task 8 (plan 2026-10-23-rdy-design-rebase-1b, line 706: "MCP WriteParams gains strict
+    // `reflects: {sources?: [string], code?: true}`"; line 722 gives its guidance text): only the
+    // new `reflects` parameter changed (28ea7eb0). The other three are the base's.
     let base: Vec<(String, String)> = [
         (
             "rdy_write",
-            "8742f7161257943419f2a9e2a01e97c90709361c4fbb1a31da03d452791bbef7",
+            "939ca40092529a835b5aa57d1a89e568305d731a78a103906320531aae83c9e0",
         ),
         (
             "rdy_decide",

@@ -39,13 +39,24 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
 
 #[test]
 fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
-    assert_eq!(OPS.len(), 53);
+    assert_eq!(OPS.len(), 56);
     assert_eq!(OPS[0], "session");
+    let impact = OPS.iter().position(|o| *o == "impact").unwrap();
+    assert_eq!(
+        &OPS[impact + 1..impact + 3],
+        ["trace", "suspects"],
+        "rf12: trace follows impact"
+    );
     let new_doc = OPS.iter().position(|o| *o == "new_doc").unwrap();
     assert_eq!(
         OPS[new_doc + 1],
         "new_profile",
         "pub5: new_profile follows new_doc"
+    );
+    assert_eq!(
+        &OPS[new_doc + 2..new_doc + 4],
+        ["new_finding", "new_source"],
+        "rf5: new_finding then new_source follow new_profile"
     );
     let render = OPS.iter().position(|o| *o == "render").unwrap();
     assert_eq!(
@@ -1361,4 +1372,296 @@ fn pub9_publication_check_op_is_strict_read_only_and_open_to_every_role() {
         "Publication check against must be canon, tag:<name>, or landing:<hash>."
     );
     assert_eq!(e.read().seq(), end, "no check wrote anything");
+}
+
+/// rf5 (D-Z8P09): new_finding and new_source are strict, create one block through the ordinary
+/// write in the bound view, and resolve each evidence source (an id, key or path) to a full
+/// reference. With no parent and no decision home, the write's own refusal stands.
+#[test]
+fn rf5_new_finding_and_new_source_use_the_write_path() {
+    let (d, e) = project();
+    let s = human();
+    let reg = doc(&e, "register")["created"]["$d"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let c = cx(&e, &s, d.path());
+    let end = e.read().seq();
+    let err = dispatch(
+        &c,
+        "new_finding",
+        json!({"statment": "S", "evidence": [{"quote": "Q"}]}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
+    assert_eq!(err.message, "new_finding: unknown field \"statment\"");
+    assert_eq!(
+        err.fix,
+        "did you mean \"statement\"? the fields are statement, evidence, parent, view"
+    );
+    let err = dispatch(
+        &c,
+        "new_source",
+        json!({"title": "T", "kind": "release", "locater": "v2"}),
+    )
+    .unwrap_err();
+    assert_eq!(err.message, "new_source: unknown field \"locater\"");
+    assert_eq!(
+        err.fix,
+        "did you mean \"locator\"? the fields are title, kind, locator, version, parent, view"
+    );
+    // no parent and no home: the decision home's refusal
+    let err = dispatch(
+        &c,
+        "new_source",
+        json!({"title": "T", "kind": "release", "locator": "v2"}),
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.message,
+        "no parent given, and the project names no decision home"
+    );
+    // an evidence source that names nothing is refused before the write
+    let err = dispatch(
+        &c,
+        "new_finding",
+        json!({"statement": "S", "evidence": [{"source": "S-ZZZZZ"}], "parent": reg}),
+    )
+    .unwrap_err();
+    assert_ne!(err.code, "E_INTERNAL", "{err}");
+    assert_eq!(e.read().seq(), end, "every refusal wrote nothing");
+
+    let v = dispatch(
+        &c,
+        "new_source",
+        json!({"title": "Release 2", "kind": "release", "locator": "v2", "version": "2.0", "parent": reg}),
+    )
+    .unwrap();
+    assert_eq!(v["view"], "work");
+    let src = v["created"]["$source"].as_str().unwrap().to_string();
+    assert!(src.starts_with("S-"), "{v}");
+    let v = dispatch(
+        &c,
+        "new_finding",
+        json!({"statement": "The release changed retention.", "parent": reg,
+            "evidence": [{"quote": "A", "question": "Q?"}, {"source": src}]}),
+    )
+    .unwrap();
+    let f = v["created"]["$finding"].as_str().unwrap().to_string();
+    let st = e.read();
+    let scope = Scope::View("work".into());
+    let b = st.block(&scope, &f.parse().unwrap()).unwrap();
+    assert_eq!(b.block_type, "finding");
+    assert_eq!(b.parent.as_ref().map(|p| p.to_string()), Some(reg.clone()));
+    assert_eq!(
+        rdy_engine::field_json(&b.fields["evidence"]),
+        json!([{"quote": "A", "question": "Q?"}, {"source": format!("{{{{{src}}}}}")}])
+    );
+    let sb = st.block(&scope, &src.parse().unwrap()).unwrap();
+    assert_eq!(sb.field_str("version"), Some("2.0"));
+    // no file is written beside the project
+    assert!(!d.path().join("register.yaml").exists());
+}
+
+/// rf5 fix round 1 (D-Z8P09): under a stable parent, new_finding and new_source brief the
+/// effective parent themselves (the decision home for a missing parent, else the parent given),
+/// as reaffirm and repin do, so the write's briefing check passes without a token from the
+/// caller. The check itself stays the engine's: a plain write of the same op is still refused.
+#[test]
+fn rf5_new_finding_and_new_source_brief_a_stable_parent() {
+    let (d, e) = project();
+    let s = human();
+    let made = write_typed(&e, move |r| {
+        let ops = serde_json::from_value(json!([
+            {"op": "create", "type": "doc", "id": "$reg", "fields": {"name": "register", "title": "Register", "doc_type": "decisions-log", "lifecycle": "stable"}},
+            {"op": "create", "type": "doc", "id": "$log", "fields": {"name": "log", "title": "Log", "doc_type": "decisions-log", "lifecycle": "stable"}}
+        ]))
+        .unwrap();
+        r.write(&human(), WriteRequest { view: "work".into(), ops, justification: None, message: String::new() })
+    })
+    .unwrap();
+    let reg = made["created"]["$reg"].as_str().unwrap().to_string();
+    let log = made["created"]["$log"].as_str().unwrap().to_string();
+    // the engine's check holds: an unbriefed create under the stable parent is refused
+    let unbriefed = write_typed(&e, {
+        let reg = reg.clone();
+        move |r| {
+            let ops = rdy_engine::parse_ops(vec![json!({"op": "create", "type": "source", "id": "$s", "parent": reg, "fields": {"title": "T", "kind": "release", "locator": "v1"}})])?;
+            r.write(&human(), WriteRequest { view: "work".into(), ops, justification: None, message: String::new() })
+        }
+    })
+    .unwrap_err();
+    assert_eq!(unbriefed.code, "E_BRIEF_REQUIRED", "{unbriefed}");
+    let c = cx(&e, &s, d.path());
+
+    // an explicit stable parent
+    let v = dispatch(
+        &c,
+        "new_source",
+        json!({"title": "Release 2", "kind": "release", "locator": "v2", "parent": log}),
+    )
+    .unwrap();
+    let src = v["created"]["$source"].as_str().unwrap().to_string();
+    let v = dispatch(
+        &c,
+        "new_finding",
+        json!({"statement": "The release changed retention.", "parent": log,
+            "evidence": [{"quote": "Retention is now seven days."}, {"source": src}]}),
+    )
+    .unwrap();
+    let f = v["created"]["$finding"].as_str().unwrap().to_string();
+    for id in [&src, &f] {
+        let b = e
+            .read()
+            .block(&Scope::View("work".into()), &id.parse().unwrap())
+            .unwrap();
+        assert_eq!(b.parent.as_ref().map(|p| p.to_string()), Some(log.clone()));
+    }
+
+    // the stable decision home, for a missing parent
+    let cfg = d.path().join(".rdy.yaml");
+    let text = std::fs::read_to_string(&cfg).unwrap() + "decisions:\n  home: register\n";
+    std::fs::write(&cfg, text).unwrap();
+    write_typed(&e, |r| r.reload_pack().map(|_| ())).unwrap();
+    let v = dispatch(
+        &c,
+        "new_source",
+        json!({"title": "Release 3", "kind": "release", "locator": "v3"}),
+    )
+    .unwrap();
+    let src = v["created"]["$source"].as_str().unwrap().to_string();
+    let v = dispatch(
+        &c,
+        "new_finding",
+        json!({"statement": "The release changed retention again.",
+            "evidence": [{"quote": "Retention is now one day."}]}),
+    )
+    .unwrap();
+    let f = v["created"]["$finding"].as_str().unwrap().to_string();
+    for id in [&src, &f] {
+        let b = e
+            .read()
+            .block(&Scope::View("work".into()), &id.parse().unwrap())
+            .unwrap();
+        assert_eq!(b.parent.as_ref().map(|p| p.to_string()), Some(reg.clone()));
+    }
+}
+
+/// rf12 (D-1876T): the `trace` op takes `{id, scope?, depth?, detail?, max_tokens?}` and nothing
+/// else, reads like `rdy_trace` (the same refusals, the same reply), and writes nothing.
+#[test]
+fn rf12_the_trace_op_is_strict_and_reads_the_engine() {
+    let (d, e) = project();
+    let s = human();
+    let w = doc(&e, "a");
+    let id = w["created"]["$d"].as_str().unwrap().to_string();
+    let c = cx(&e, &s, d.path());
+    let log_end = || {
+        e.write(Box::new(|r| {
+            Ok(json!(format!("{:?}", r.store().log_end())))
+        }))
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string()
+    };
+    let before = log_end();
+    // canon is the default scope, and the doc is only in the work view
+    let err = dispatch(&c, "trace", json!({"id": id})).unwrap_err();
+    assert_eq!(err.code, "E_UNKNOWN_BLOCK", "{err}");
+    assert_eq!(err.fix, "check the id with rdy_search", "{err}");
+    let v = dispatch(&c, "trace", json!({"id": id, "scope": "work"})).unwrap();
+    assert_eq!(v["id"], id);
+    assert_eq!(v["block_type"], "doc");
+    for k in [
+        "governing",
+        "sources",
+        "decisions",
+        "premises",
+        "edges",
+        "questions",
+        "frontier",
+    ] {
+        assert_eq!(v[k], json!([]), "{k}: {v}");
+    }
+    assert_eq!(v["ungrounded"], false, "{v}");
+    assert_eq!(
+        v["introduced"],
+        Value::Null,
+        "an unlanded block has no introduction"
+    );
+    for k in ["truncated", "omitted"] {
+        assert!(v.get(k).is_none(), "{k}: {v}");
+    }
+    // every parameter parses
+    dispatch(
+        &c,
+        "trace",
+        json!({"id": id, "scope": "work", "depth": 8, "detail": true, "max_tokens": 100_000}),
+    )
+    .unwrap();
+    // strict: an unknown key names the nearest known one, a wrong shape names the args
+    let err = dispatch(
+        &c,
+        "trace",
+        json!({"id": id, "scope": "work", "detial": true}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT);
+    assert_eq!(err.message, "trace: unknown field \"detial\"");
+    assert!(err.fix.starts_with("did you mean \"detail\"?"), "{err}");
+    for args in [
+        json!({}),
+        json!({"id": id, "depth": "3"}),
+        json!({"id": id, "detail": "yes"}),
+        json!({"id": id, "max_tokens": -1}),
+    ] {
+        let err = dispatch(&c, "trace", args.clone()).unwrap_err();
+        assert_eq!(err.code, E_BAD_INPUT, "{args}");
+        assert!(err.message.starts_with("trace: "), "{args}: {err}");
+        assert_eq!(
+            err.fix, "args for trace: {id, scope?, depth?, detail?, max_tokens?}",
+            "{args}"
+        );
+    }
+    // the closed depth range, signed
+    for depth in [-1i64, 0, 9] {
+        let err = dispatch(
+            &c,
+            "trace",
+            json!({"id": id, "scope": "work", "depth": depth}),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, E_BAD_INPUT);
+        assert_eq!(err.message, format!("depth {depth} is outside 1 to 8"));
+        assert_eq!(err.fix, "pass a depth from 1 to 8");
+    }
+    // the token limit, with the read boundaries' text
+    let err = dispatch(
+        &c,
+        "trace",
+        json!({"id": id, "scope": "work", "max_tokens": 100_001}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "E_LIMIT");
+    assert_eq!(err.message, "max_tokens 100001 is over the limit of 100000");
+    assert_eq!(
+        err.fix,
+        "ask for at most 100000 tokens and page through the rest"
+    );
+    // a pinned version and a different scope clash; an unknown scope is not found
+    let err = dispatch(
+        &c,
+        "trace",
+        json!({"id": format!("{id}@v1"), "scope": "work"}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT);
+    assert_eq!(
+        err.fix,
+        "use the pinned version, or read the bare id with a scope"
+    );
+    let err = dispatch(&c, "trace", json!({"id": id, "scope": "nope"})).unwrap_err();
+    assert_eq!(err.code, "E_NOT_FOUND", "{err}");
+    assert_eq!(log_end(), before, "a trace writes nothing");
 }

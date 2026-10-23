@@ -5,7 +5,8 @@
 //!
 //! Each open proposal's latest version that is ready is one `approve` item, ref `P-x@n`. Its
 //! card leads with the author's summary (D-4PG9Y), lists the decisions it confirms (`members`),
-//! and gives the computed facts in the closed order of O6: Changes, Decisions, Supersedes,
+//! and gives the computed facts in the closed order of O6: Changes, Justification (rf9, TASK-507
+//! (3): the claims of the changes' justifications), Decisions, Supersedes,
 //! Re-affirms (D-GV465: each decision it re-affirms that is not `one_way`, `<id> (after <cause
 //! list>)`), Reversibility, Consequences (D-NJ2SP), Change plan (D-4JMPH: `<open> open,
 //! <closed> closed, <deferred> deferred`, code items included), Tensions (D-45RG6, C7),
@@ -116,11 +117,11 @@ use crate::session::{now_ms, rfc3339};
 use crate::tensions::{Tension, TensionKind, TensionSeverity, TensionStatus, tension_label};
 use crate::{Materialized, ReadState, Scope};
 use rdy_graph::{DerivedStatus, Graph};
-use rdy_model::decision::{self, DecisionStatus, REVOKES, SUPERSEDES};
+use rdy_model::decision::{self, DEPENDS_ON, DecisionStatus, REVOKES, SUPERSEDES};
 use rdy_model::engine_fields::reaffirmed_causes;
 use rdy_model::redaction::record_buffer;
-use rdy_model::{AnswerAct, Block, BlockId, Change, Hash, Op, Proposal};
-use rdy_schema::{Issue, Severity};
+use rdy_model::{AnswerAct, Block, BlockId, Change, Hash, Justification, Op, Proposal};
+use rdy_schema::{Issue, Severity, supporting};
 use rdy_store::redaction::limit;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1042,6 +1043,7 @@ impl Version {
                     count(self.touched.len(), "block")
                 ),
             ),
+            fact(JUSTIFICATION_FACT, self.justification()),
             fact("Decisions", decisions),
             fact("Supersedes", supersedes),
             fact(REAFFIRMS_FACT, reaffirms),
@@ -1066,6 +1068,81 @@ impl Version {
                 },
             ),
         ]
+    }
+
+    /// rf9 (TASK-507 (3)): the claim of each justification of the version's changes, in the
+    /// changes' stored order, a repeated claim kept at its first place, joined with `; `; `none`
+    /// when no change makes one. Implements is `implements <ids>` in stored order; Editorial is
+    /// `editorial <class>: <reason>`; Reflects is `reflects <titles>[, code]` with the sources
+    /// in id order (a source with no title in the prospective canon by its id) and `code` for
+    /// the code state; code alone is `reflects code`.
+    fn justification(&self) -> String {
+        let title = |id: &BlockId| {
+            self.next
+                .get(id)
+                .and_then(|b| text(b, "title"))
+                .map_or_else(|| id.to_string(), str::to_string)
+        };
+        let mut claims: Vec<String> = vec![];
+        for c in &self.changes {
+            let claim = match &c.justification {
+                Some(Justification::Implements(ids)) if !ids.is_empty() => {
+                    let ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
+                    format!("implements {}", ids.join(", "))
+                }
+                Some(Justification::Editorial { class, reason }) => {
+                    format!("editorial {}: {reason}", crate::history::class_str(*class))
+                }
+                Some(Justification::Reflects { sources, code }) => {
+                    let mut ids: Vec<&BlockId> = sources.iter().collect();
+                    ids.sort();
+                    let mut parts: Vec<String> = ids.into_iter().map(title).collect();
+                    if *code {
+                        parts.push("code".to_string());
+                    }
+                    if parts.is_empty() {
+                        continue;
+                    }
+                    format!("reflects {}", parts.join(", "))
+                }
+                _ => continue,
+            };
+            if !claims.contains(&claim) {
+                claims.push(claim);
+            }
+        }
+        if claims.is_empty() {
+            "none".to_string()
+        } else {
+            claims.join("; ")
+        }
+    }
+
+    /// rf9 (TASK-507 (3)): the value of the Findings fact of a superseding decision's card: the
+    /// held finding targets of its direct `depends_on` links, as `<id>: <statement>` in id
+    /// order joined with `; `, or `none`. A `conditional_on` link and a target that is not a
+    /// finding add nothing.
+    fn findings(&self, d: &Block) -> String {
+        let targets: BTreeSet<&BlockId> = d
+            .links
+            .get(DEPENDS_ON)
+            .into_iter()
+            .flatten()
+            .map(|l| &l.target)
+            .collect();
+        let each: Vec<String> = targets
+            .into_iter()
+            .filter_map(|t| {
+                let b = self.next.get(t)?;
+                (b.block_type == supporting::FINDING)
+                    .then(|| format!("{t}: {}", text(b, "statement").unwrap_or_default()))
+            })
+            .collect();
+        if each.is_empty() {
+            "none".to_string()
+        } else {
+            each.join("; ")
+        }
     }
 
     /// How many decisions of the version stand beside its batch as exceptions.
@@ -1171,6 +1248,13 @@ impl Version {
                         value: detail.clone(),
                     })
                     .collect();
+                // rf9: a superseding decision also names the findings it rests on
+                if d.block.links.get(SUPERSEDES).is_some_and(|l| !l.is_empty()) {
+                    it.facts.push(Fact {
+                        name: FINDINGS_FACT.into(),
+                        value: self.findings(&d.block),
+                    });
+                }
                 let reason = text(&d.block, "recommend_reason")
                     .unwrap_or_default()
                     .to_string();
@@ -1365,6 +1449,13 @@ pub const APPROVE_REASON_BESIDE: &str =
 /// batch, with or without exceptions (D-AAQ9Z): the landing waits for an answer to each card.
 pub const APPROVE_REASON_CARDS: &str =
     "its checks pass, and it lands after you answer each card beside it";
+
+/// The name of the batch fact that gives the claim of the version's justifications (rf9,
+/// TASK-507 (3)); it follows Changes.
+pub const JUSTIFICATION_FACT: &str = "Justification";
+/// The name of the exception fact of a superseding decision that lists the findings it depends
+/// on (rf9, TASK-507 (3)); it follows the exception-kind facts.
+pub const FINDINGS_FACT: &str = "Findings";
 
 /// The name of the batch fact that lists the decisions a version re-affirms with no card of
 /// their own (D-GV465).

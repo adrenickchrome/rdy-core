@@ -8,6 +8,20 @@ use rdy_model::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+/// rf6: the live decisions that govern `i` by the graph's four routes ([`Graph::governing_routes`]),
+/// by id. Terms (`t-`) are the entities.
+fn governing(g: &Graph, i: &BlockId) -> Vec<BlockId> {
+    g.governing_routes(
+        i,
+        GoverningStatuses::Live,
+        |e| e.as_str().starts_with("t-"),
+        &mut GoverningCache::default(),
+    )
+    .into_iter()
+    .map(|r| r.decision)
+    .collect()
+}
+
 fn id(s: &str) -> BlockId {
     BlockId::parse(s).unwrap()
 }
@@ -274,10 +288,10 @@ fn pub2_induced_graph_has_only_selected_endpoints() {
 
     // the graph queries see only selected blocks
     assert_eq!(
-        g.governing(&id("c-KEEP1")),
+        governing(&g, &id("c-KEEP1")),
         vec![id("D-KEEP1"), id("D-KEEP2")]
     );
-    assert!(source.governing(&id("c-KEEP1")).contains(&id("D-DR0P1")));
+    assert!(governing(&source, &id("c-KEEP1")).contains(&id("D-DR0P1")));
     assert_eq!(g.governed_by(&id("D-KEEP2")), vec![id("c-KEEP1")]);
     assert!(source.governed_by(&id("D-KEEP2")).contains(&id("c-DR0P1")));
     let reached: BTreeSet<BlockId> = g
