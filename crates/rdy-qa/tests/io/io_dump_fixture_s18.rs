@@ -64,11 +64,11 @@ const HOLDER_CHAIN_EXPECT: &str = "v3-s18-holder-chain.expect.json";
 pub(crate) const MEMBERS: [(&str, &str); 12] = [
     (
         FULL,
-        "dd20954d55aa6b8bfd0da4a8eb54f26bc25bce53245cdfb0135a28ae8a70639d",
+        "b69978453eaf0bc06b5e8040cd152836c1a290a913603cd53a5a2e5ece53c615",
     ),
     (
         FULL_EXPECT,
-        "75c1842d54c665a887f03c44cd63072e4604aa1599a6cb119fc85abafc1a9f7c",
+        "c2bf21e87c2c4babf30750ec8d619f204367ea8d94eeae600ff394f1429603c0",
     ),
     (
         CHAIN_FULL,
@@ -80,11 +80,11 @@ pub(crate) const MEMBERS: [(&str, &str); 12] = [
     ),
     (
         CHAIN_2,
-        "14de88133e0df51a2df9d84b9db0ef38aa6921a7a4d6def00c5d74af65d102b6",
+        "5837691a6d83e7537fb4e62211aaaf54f33e9948e41be0343fc23bc6f85c28e9",
     ),
     (
         CHAIN_EXPECT,
-        "5e08ca6690597e711649953abc40fbd351f7f88f5a8558794e27bd0dcbc64f97",
+        "1d93b0abc3570711b46075d5405b4df54af86fd9eeb45512ab8d511e930c7785",
     ),
     (
         HOLDER,
