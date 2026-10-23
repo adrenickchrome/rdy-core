@@ -76,7 +76,9 @@ fn rf2_citations_reach_every_review_reply() {
     let reply = serde_json::to_string(&info).unwrap();
     assert!(!reply.contains("findings"), "{reply}");
     // proposal show
-    let p = r.propose(&w, "a", "a", None).unwrap();
+    let p = r
+        .propose(&w, "a", "a", Some("Two claims that disagree."))
+        .unwrap();
     let shown = serde_json::to_value(r.read().proposal_show(&p.r#ref).unwrap()).unwrap();
     let advised = shown["advised"][0].clone();
     assert_eq!(advised["citations"][0]["note"], NOTE, "{advised}");
