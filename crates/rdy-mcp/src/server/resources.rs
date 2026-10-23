@@ -433,7 +433,7 @@ mod tests {
     fn ib11_a_doc_uri_follows_the_block_it_names() {
         let dir = tempfile::tempdir().unwrap();
         let mut rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
-        let human = rdy_engine::Session::human("human:qa".into(), rdy_model::Role::Writer);
+        let human = rdy_engine::Session::human("human:qa".into(), rdy_model::Role::Writer).unwrap();
         let w = rdy
             .write(
                 &human,

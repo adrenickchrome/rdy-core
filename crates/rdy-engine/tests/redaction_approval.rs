@@ -25,15 +25,15 @@ const PERSON: &str = "human:t";
 const QUARANTINE: &str = "Quarantine files may hold the content. Redaction does not remove them. A person can run rdy fsck --clean-quarantine.";
 
 fn writer() -> Session {
-    Session::human(PERSON.into(), Role::Writer)
+    Session::human(PERSON.into(), Role::Writer).unwrap()
 }
 
 fn reviewer() -> Session {
-    Session::human(PERSON.into(), Role::Reviewer)
+    Session::human(PERSON.into(), Role::Reviewer).unwrap()
 }
 
 fn approver() -> Session {
-    Session::human(PERSON.into(), Role::Approver)
+    Session::human(PERSON.into(), Role::Approver).unwrap()
 }
 
 fn agent() -> Session {

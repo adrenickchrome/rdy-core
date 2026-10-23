@@ -228,7 +228,7 @@ pub(super) fn for_commit(
     if t.is_empty() {
         return Ok(Cited::default());
     }
-    if human_session(env) {
+    if human_session(env)? {
         let ids: Vec<String> = t.iter().map(ToString::to_string).collect();
         let briefing = conn.op("brief", json!({"ids": ids, "view": view}))?;
         let covers = briefing["base"]["blocks"]

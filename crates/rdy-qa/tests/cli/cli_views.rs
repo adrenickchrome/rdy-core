@@ -306,11 +306,20 @@ fn msw13_a_proposal_to_an_over_long_view_name_is_e_limit() {
 /// reserved view is refused when the session starts, not at its first write.
 #[test]
 fn msw13_an_agent_session_whose_run_names_a_reserved_view_is_refused() {
-    for run in ["canon", "inflight"] {
+    // id3 (D-ME2C0): a reserved run is outside the run form: the shared grammar refusal
+    for run in ["canon", "inflight", "work", "none", "reaffirm-1"] {
         let e = Session::agent("agent:a".into(), Some(run.into()), rdy_model::Role::Writer)
             .unwrap_err();
         assert_eq!(e.code, E_BAD_INPUT, "{run}: {e}");
-        assert!(e.message.contains(run), "{e}");
+        assert_eq!(
+            e.message,
+            format!("the run {run:?} is not in rdy's run form"),
+            "{run}"
+        );
+        assert_eq!(
+            e.fix,
+            "use 1 to 64 letters, digits, -, _ or ., with a letter or digit at each end; not none, work, canon, inflight or reaffirm-\u{2026}"
+        );
     }
     assert!(
         Session::agent(

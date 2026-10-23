@@ -386,7 +386,7 @@ fn di6_a_blocking_tension_on_a_proposal_is_a_resolve_item() {
     assert!(q.items[..2].iter().all(|i| i.blocking));
     assert!(q.items[2..].iter().all(|i| !i.blocking));
     // a person dismisses one: it leaves the queue, the other stays
-    let person = Session::human("human:founder".into(), Role::Approver);
+    let person = Session::human("human:founder".into(), Role::Approver).unwrap();
     r.dismiss_tension(&person, &label, "A is stable").unwrap();
     let q = queue(&r, None);
     assert!(find(&q, &label).is_none(), "{:?}", refs(&q));
@@ -463,7 +463,7 @@ fn di6_an_accepted_advice_leaves_its_blocking_tension_as_an_item() {
     assert_eq!((i.kind, i.batch.as_deref()), (ItemKind::Resolve, None));
     assert!(i.why.contains(&b.r#ref), "{}", i.why);
     // a person dismisses it: it leaves the queue
-    let person = Session::human("human:founder".into(), Role::Approver);
+    let person = Session::human("human:founder".into(), Role::Approver).unwrap();
     r.dismiss_tension(&person, &i.r#ref.clone(), "judged fine")
         .unwrap();
     let q = queue(&r, None);

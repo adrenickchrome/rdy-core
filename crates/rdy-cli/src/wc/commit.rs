@@ -76,7 +76,7 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
         )
         .into());
     }
-    if env.no_daemon && !human_session(env) {
+    if env.no_daemon && !human_session(env)? {
         // R-I7: the briefing registry lives in one process, so no recorded token would be known
         // to the next command
         return Err(RdyError::new(

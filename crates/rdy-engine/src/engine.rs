@@ -549,11 +549,11 @@ mod tests {
     const CAVEAT: &str = "this site shows only the profile \"Guide book\"; anyone with the project still reads everything give the full site's link from rdy site when the person needs everything";
 
     fn writer() -> Session {
-        Session::human("human:qa".into(), Role::Writer)
+        Session::human("human:qa".into(), Role::Writer).unwrap()
     }
 
     fn approver() -> Session {
-        Session::human("human:qa".into(), Role::Approver)
+        Session::human("human:qa".into(), Role::Approver).unwrap()
     }
 
     fn put(r: &mut Rdy, view: &str, ops: Value) -> BTreeMap<String, String> {

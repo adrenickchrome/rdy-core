@@ -814,7 +814,7 @@ mod spv4 {
     use std::collections::{BTreeMap, HashMap};
 
     fn session(role: Role) -> Session {
-        Session::human("human:qa".into(), role)
+        Session::human("human:qa".into(), role).unwrap()
     }
 
     fn write(r: &mut Rdy, view: &str, ops: Value) -> BTreeMap<String, String> {

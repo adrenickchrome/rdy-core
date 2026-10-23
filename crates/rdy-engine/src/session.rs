@@ -1,4 +1,4 @@
-use crate::error::{E_BAD_INPUT, E_PERMISSION, RdyError};
+use crate::error::{E_PERMISSION, RdyError};
 use rdy_model::{Provenance, Role};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -8,6 +8,8 @@ pub const HUMAN_RUN: &str = "cli";
 /// The scope text of the in-flight state (insc1): canon plus every open view's changes. A
 /// reserved name: no view can take it.
 pub const INFLIGHT_SCOPE: &str = "inflight";
+/// The prefix of a human actor: an agent session never claims one.
+const HUMAN_PREFIX: &str = "human:";
 
 /// Who is on the other end: the configured human, or anything else (an agent).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize)]
@@ -62,18 +64,33 @@ impl Drop for PinnedClock {
 }
 
 impl Session {
-    /// The human's session: its run is `cli`.
-    pub fn human(actor: String, role: Role) -> Session {
-        Session {
+    /// The human's session: its run is `cli`. The actor must be in the actor form (D-ME2C0):
+    /// else `E_BAD_INPUT`.
+    pub fn human(actor: String, role: Role) -> Result<Session, RdyError> {
+        crate::identity::validate_actor(&actor)?;
+        Ok(Session {
             actor,
             run: Some(HUMAN_RUN.to_string()),
             role,
             kind: SessionKind::Human,
-        }
+        })
     }
 
-    /// An agent's session. Agents never hold the approver role: approvals are the human's.
+    /// An agent's session (D-ME2C0): the actor in the actor form, then the run (if any) in the
+    /// run form (`E_BAD_INPUT`), then no `human:` actor and never the approver role
+    /// (`E_PERMISSION`): approvals are the human's.
     pub fn agent(actor: String, run: Option<String>, role: Role) -> Result<Session, RdyError> {
+        crate::identity::validate_actor(&actor)?;
+        if let Some(r) = &run {
+            crate::identity::validate_run(r)?;
+        }
+        if actor.starts_with(HUMAN_PREFIX) {
+            return Err(RdyError::new(
+                E_PERMISSION,
+                Self::HUMAN_CLAIM,
+                "unset RDY_ACTOR to act as the person, or relay their words",
+            ));
+        }
         if role == Role::Approver {
             return Err(RdyError::new(
                 E_PERMISSION,
@@ -81,56 +98,21 @@ impl Session {
                 "approvals are made by the human actor: unset RDY_ACTOR, or set actor: in the user's rdy config",
             ));
         }
-        if actor.trim().is_empty() {
-            return Err(RdyError::new(
-                E_BAD_INPUT,
-                "an agent session needs an actor",
-                "pass an actor, e.g. agent:claude",
-            ));
-        }
-        if let Some(r) = &run
-            && (r.trim().is_empty()
-                || r.contains('/')
-                || r.starts_with('.')
-                || r.chars().count() > crate::write::MAX_VIEW_NAME)
-        {
-            return Err(RdyError::new(
-                E_BAD_INPUT,
-                format!("the run {:?} is not a plain name", crate::views::clip(r)),
-                "pass a run name such as r7 (no '/', not starting with '.', at most 256 characters), or none (the view is then work-<actor>)",
-            ));
-        }
-        let session = Session {
+        Ok(Session {
             actor,
             run,
             role,
             kind: SessionKind::Agent,
-        };
-        // The default view is the run, else work-<actor>; it must be a writable name: not too
-        // long, and not a reserved view (`:` becomes `-`, and work-<actor> is never reserved)
-        let view = session.default_view();
-        if crate::write::is_reserved_view(&view) {
-            return Err(crate::write::reserved_view_error());
-        }
-        if view == "canon" || view == INFLIGHT_SCOPE {
-            return Err(RdyError::new(
-                E_BAD_INPUT,
-                format!("the run {view:?} names a reserved view, which an agent cannot write"),
-                "pass another run name: canon and inflight are reserved",
-            ));
-        }
-        if view.chars().count() > crate::write::MAX_VIEW_NAME {
-            return Err(RdyError::new(
-                E_BAD_INPUT,
-                format!(
-                    "the actor or run makes a view name longer than {} characters ({})",
-                    crate::write::MAX_VIEW_NAME,
-                    crate::views::clip(&session.default_view())
-                ),
-                "pass a shorter actor or run (the view is the run, or work-<actor>)",
-            ));
-        }
-        Ok(session)
+        })
+    }
+
+    /// The message of an agent session that claims a human actor (D-ME2C0).
+    pub const HUMAN_CLAIM: &'static str = "an agent session cannot claim a human actor";
+
+    /// Whether `e` is the constructor's refusal of an agent session claiming a human actor (and
+    /// not the approver-role refusal, which shares its code): MCP gives it its own fix.
+    pub fn is_human_claim(e: &RdyError) -> bool {
+        e.code == E_PERMISSION && e.message == Self::HUMAN_CLAIM
     }
 
     pub fn is_human(&self) -> bool {
@@ -159,36 +141,44 @@ impl Session {
     }
 }
 
-/// The human actor: `actor` in `<xdg>/rdy/config.yaml` (else `<home>/.config/rdy/config.yaml`)
-/// when that file parses and names a non-empty string, else `human:<user>`. Never an error.
+/// The human actor of the user config alone: `actor` in `<xdg>/rdy/config.yaml` (else
+/// `<home>/.config/rdy/config.yaml`), read within the config bounds, else the bounded fallback
+/// of `user` (D-Q8NFG). A file that does not read, a wrong type or an actor outside the form is
+/// its error, never the fallback.
 pub fn human_actor(
     xdg_config_home: Option<&Path>,
     home: Option<&Path>,
     user: Option<&str>,
-) -> String {
-    let file = crate::config_levels::user_file_of(xdg_config_home, home);
-    let named = file
-        .and_then(|f| std::fs::read_to_string(f).ok())
-        .and_then(|t| serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&t).ok())
-        .and_then(|v| v.get("actor").and_then(|a| a.as_str()).map(str::to_string))
-        .filter(|a| !a.is_empty());
-    named.unwrap_or_else(|| format!("human:{}", user.unwrap_or("unknown")))
+) -> Result<String, RdyError> {
+    crate::config_levels::user_actor(
+        crate::config_levels::user_file_of(xdg_config_home, home).as_deref(),
+        user,
+    )
 }
 
 /// The human of a project: its `.rdy/local.yaml` actor first, then the user config's.
 pub use crate::config_levels::{human_actor_for, human_actor_for_env};
 
 /// The session for a client that sent `actor` and `run`: the human if it sent no actor or the
-/// human's own (its run is `cli`, whatever it sent), else an agent.
+/// human's own (its run is `cli`, whatever it sent), else an agent. The configured `human`, then
+/// each supplied actor and run, are checked against their forms first (D-ME2C0); another
+/// `human:` actor is an agent claiming a human, refused.
 pub fn classify(
     human: &str,
     actor: Option<&str>,
     run: Option<&str>,
     role: Role,
 ) -> Result<Session, RdyError> {
+    crate::identity::validate_actor(human)?;
+    if let Some(a) = actor {
+        crate::identity::validate_actor(a)?;
+    }
+    if let Some(r) = run {
+        crate::identity::validate_run(r)?;
+    }
     match actor {
-        None => Ok(Session::human(human.to_string(), role)),
-        Some(a) if a == human => Ok(Session::human(human.to_string(), role)),
+        None => Session::human(human.to_string(), role),
+        Some(a) if a == human => Session::human(human.to_string(), role),
         Some(a) => Session::agent(a.to_string(), run.map(str::to_string), role),
     }
 }

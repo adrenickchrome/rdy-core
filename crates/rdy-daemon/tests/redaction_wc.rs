@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use std::path::Path;
 
 fn human(role: Role) -> Session {
-    Session::human("human:t".into(), role)
+    Session::human("human:t".into(), role).unwrap()
 }
 
 fn write(r: &mut Rdy, view: &str, ops: Value) -> rdy_engine::WriteResult {

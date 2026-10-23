@@ -123,11 +123,11 @@ fn candidate_url() -> String {
 // ---------------------------------------------------------------------------------------------
 
 fn writer() -> Session {
-    Session::human("human:founder".into(), Role::Writer)
+    Session::human("human:founder".into(), Role::Writer).unwrap()
 }
 
 fn founder() -> Session {
-    Session::human("human:founder".into(), Role::Approver)
+    Session::human("human:founder".into(), Role::Approver).unwrap()
 }
 
 /// The publishing session: an agent run, whose claim the hub binds byte for byte.
@@ -1198,7 +1198,7 @@ fn hpb14_each_request_uses_current_access_and_the_same_claim() {
         }
     });
     // a person's session: the claim is bound to the account's handle
-    let person = Session::human("human:founder".into(), Role::Writer);
+    let person = Session::human("human:founder".into(), Role::Writer).unwrap();
     let r = run_with(
         &e,
         &api,
@@ -1605,7 +1605,7 @@ fn hpb14_warnings_survive_success_and_failure() {
     assert_eq!(&err.issues[1..], once.as_slice());
 
     // a refused actor claim: /me once, the handle warning, the original refusal, no resend
-    let person = Session::human("human:founder".into(), Role::Writer);
+    let person = Session::human("human:founder".into(), Role::Writer).unwrap();
     let refusal = RdyError::new("E_HUB_ACTOR_CLAIM", "the hub's message", "the hub's fix");
     let wire = Wire::new().failing("objects", refusal.clone());
     let api = Api::default();

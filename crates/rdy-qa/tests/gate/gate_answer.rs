@@ -312,7 +312,7 @@ fn di7_the_relay_table_holds_for_every_act() {
     assert!(a.relayed_by.is_none() && a.relay_evidence.is_none() && a.evidence_kind.is_none());
 
     // the table itself: the sessions it gives and its closed refusals
-    let person = Session::human(PERSON.into(), Role::Approver);
+    let person = Session::human(PERSON.into(), Role::Approver).unwrap();
     let (s, relay) = relayed(&approver(), PERSON, &RelayInput::default(), false).unwrap();
     assert_eq!((s, relay.is_none()), (person.clone(), true));
     let (s, relay) = relayed(&agent(), PERSON, &words("yes"), true).unwrap();
@@ -911,7 +911,7 @@ fn ctx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<
 fn di7_the_daemon_relay_texts_do_not_change() {
     let dir = tempfile::tempdir().unwrap();
     let e = Local::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
-    let human = Session::human(PERSON.into(), Role::Writer);
+    let human = Session::human(PERSON.into(), Role::Writer).unwrap();
     let a = agent();
     let cwd = dir.path().to_path_buf();
     dispatch(&ctx(&e, &human, &cwd), "new_doc", json!({"path": "a"})).unwrap();
@@ -1115,7 +1115,7 @@ fn di7_a_malformed_item_ref_is_bad_input() {
 fn di7_the_daemon_approval_checks_the_whole_relay() {
     let dir = tempfile::tempdir().unwrap();
     let e = Local::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
-    let human = Session::human(PERSON.into(), Role::Writer);
+    let human = Session::human(PERSON.into(), Role::Writer).unwrap();
     let a = agent();
     let cwd = dir.path().to_path_buf();
     dispatch(&ctx(&e, &human, &cwd), "new_doc", json!({"path": "a"})).unwrap();

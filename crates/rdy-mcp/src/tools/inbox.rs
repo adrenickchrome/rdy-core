@@ -36,8 +36,8 @@ pub fn rdy_inbox(st: &mut McpState, p: InboxParams) -> Result<Value, RdyError> {
         max_tokens: p.max_tokens,
     };
     if p.person == Some(true) {
-        let person = human_actor_for_env(&st.engine.root());
-        let target = Session::human(person.clone(), Role::Writer);
+        let person = human_actor_for_env(&st.engine.root())?;
+        let target = Session::human(person.clone(), Role::Writer)?;
         let mut v = run_inbox(&*st.engine, &target, req)?;
         v["person"] = json!(person);
         Ok(v)

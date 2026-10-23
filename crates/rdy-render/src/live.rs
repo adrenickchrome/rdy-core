@@ -313,7 +313,7 @@ mod sr5 {
     use serde_json::json;
 
     fn session(role: Role) -> Session {
-        Session::human("human:qa".into(), role)
+        Session::human("human:qa".into(), role).unwrap()
     }
 
     fn write(r: &mut Rdy, view: &str, ops: serde_json::Value) {

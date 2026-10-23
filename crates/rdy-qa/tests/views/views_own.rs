@@ -274,10 +274,15 @@ fn own1_work_is_the_humans_view() {
     assert_eq!(e.code, E_VIEW_OWNER, "{e}");
     assert!(e.message.contains("the human's default view"), "{e}");
     assert!(r.read().view_head("work").is_none(), "nothing was created");
-    // An agent whose run is literally `work` gets the loop-breaking fix, not "write to work".
-    let e = write_as(&mut r, &as_agent("agent:w", "work"), "work", new_doc("w2")).unwrap_err();
-    assert_eq!(e.code, E_VIEW_OWNER, "{e}");
-    assert!(e.fix.contains("another run name"), "{e}");
+    // id3 (D-ME2C0): a run cannot be literally `work`: the session is refused when it is made.
+    let e = rdy_engine::Session::agent(
+        "agent:w".into(),
+        Some("work".into()),
+        rdy_model::Role::Writer,
+    )
+    .unwrap_err();
+    assert_eq!(e.code, rdy_engine::E_BAD_INPUT, "{e}");
+    assert_eq!(e.message, "the run \"work\" is not in rdy's run form");
     // The human's first write creates and owns it.
     let c = write(&mut r, "work", new_doc("w3")).unwrap().change;
     assert_eq!(

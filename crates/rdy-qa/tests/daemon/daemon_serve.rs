@@ -9,6 +9,10 @@ use rdy_qa::daemon::{Hosted, short_tempdir};
 use serde_json::json;
 use std::time::Duration;
 
+const ACTOR_FIX: &str =
+    "use human:<name>, agent:<name>, agent:<handle>/<name> or ci:<repo_id>/<name>";
+const RUN_FIX: &str = "use 1 to 64 letters, digits, -, _ or ., with a letter or digit at each end; not none, work, canon, inflight or reaffirm-\u{2026}";
+
 #[test]
 fn serve1_start_binds_after_the_store_is_open_and_a_second_start_is_already_running() {
     let mut h = Hosted::new();
@@ -83,14 +87,18 @@ fn serve1_the_daemon_classifies_the_human_against_the_configured_actor() {
             ),
             (Some("agent"), Some("r1"), Some("r1"))
         );
-        let mut o = h.client(Some("human:other"), None).await;
-        let v = o
+        // id3 (D-ME2C0): a human actor that is not the configured one is an agent claiming a
+        // human, and refused
+        let mut o = h.connect(Proto::Ctl).await;
+        let e = o
             .ctl("session", json!({"actor": "human:other", "run": null}))
             .await
-            .unwrap();
+            .unwrap_err();
+        assert_eq!(e.code, E_PERMISSION, "{e}");
+        assert_eq!(e.message, "an agent session cannot claim a human actor");
         assert_eq!(
-            v["kind"], "agent",
-            "a human-looking actor that is not the configured one"
+            e.fix,
+            "unset RDY_ACTOR to act as the person, or relay their words"
         );
     });
 }
@@ -369,18 +377,39 @@ fn msw13_the_session_op_refuses_an_empty_actor_or_run() {
     let rt = Hosted::rt();
     rt.block_on(async {
         let mut c = h.client(None, None).await;
-        for args in [
-            json!({"actor": "", "run": ""}),
-            json!({"actor": "", "run": null}),
-            json!({"actor": "  ", "run": null}),
-            json!({"actor": "agent:w", "run": ""}),
-            json!({"actor": "agent:w", "run": "../x"}),
-            json!({"actor": "agent:w", "run": ".x"}),
-            json!({"actor": "agent:w", "run": "r".repeat(257)}),
-            json!({"actor": "a".repeat(300), "run": null}),
+        // id3 (D-ME2C0): the actor is checked first, then the run, each with the shared text
+        let a300 = "a".repeat(300);
+        let actor = |shown: &str| {
+            (
+                format!("the actor {shown:?} is not in rdy's actor form"),
+                ACTOR_FIX.to_string(),
+            )
+        };
+        let run = |shown: &str| {
+            (
+                format!("the run {shown:?} is not in rdy's run form"),
+                RUN_FIX.to_string(),
+            )
+        };
+        for (args, want) in [
+            (json!({"actor": "", "run": ""}), actor("")),
+            (json!({"actor": "", "run": null}), actor("")),
+            (json!({"actor": "  ", "run": null}), actor("  ")),
+            (json!({"actor": "agent:w", "run": ""}), run("")),
+            (json!({"actor": "agent:w", "run": "../x"}), run("../x")),
+            (json!({"actor": "agent:w", "run": ".x"}), run(".x")),
+            (
+                json!({"actor": "agent:w", "run": "r".repeat(257)}),
+                run(&format!("{}\u{2026}", "r".repeat(80))),
+            ),
+            (
+                json!({"actor": a300, "run": null}),
+                actor(&format!("{}\u{2026}", "a".repeat(80))),
+            ),
         ] {
             let e = c.ctl("session", args.clone()).await.unwrap_err();
             assert_eq!(e.code, E_BAD_INPUT, "{args}: {}", e.message);
+            assert_eq!((e.message, e.fix), want, "{args}");
         }
     });
 }
@@ -438,5 +467,171 @@ fn hd4_an_oversized_line_on_the_mcp_socket_is_refused_and_the_session_lives() {
         line.clear();
         r.read_line(&mut line).await.unwrap();
         assert!(line.contains("\"id\":4"), "{line}");
+    });
+}
+
+/// Every file under the project's store and its length: what a refused session must not change.
+fn store_bytes(project: &std::path::Path) -> Vec<(std::path::PathBuf, u64)> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, u64)>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let e = e.unwrap();
+            let m = e.metadata().unwrap();
+            if m.is_dir() {
+                walk(&e.path(), out);
+            } else {
+                out.push((e.path(), m.len()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&project.join(".rdy/store"), &mut out);
+    out.sort();
+    out
+}
+
+/// id3 (D-ME2C0): the session op checks the actor and run before it records a session: a
+/// refused handshake adds no session (a fresh connection still has none, an open one keeps its
+/// own) and writes nothing to the log.
+#[test]
+fn id3_new_sessions_validate_before_state_changes() {
+    let h = Hosted::new_with_human("human:qa");
+    let rt = Hosted::rt();
+    rt.block_on(async {
+        // an open session that a later refusal on its connection must keep
+        let mut kept = h.connect(Proto::Ctl).await;
+        let v = kept
+            .ctl("session", json!({"actor": "agent:keep", "run": "k1"}))
+            .await
+            .unwrap();
+        assert_eq!(v["default_view"], "k1");
+        let before = store_bytes(h.dir.path());
+        let long_name = "n".repeat(65);
+        let refused = [
+            (json!({"actor": "Agent:W", "run": null}), E_BAD_INPUT),
+            (json!({"actor": "agent:w", "run": "run:7"}), E_BAD_INPUT),
+            (json!({"actor": null, "run": "work"}), E_BAD_INPUT),
+            (json!({"actor": "human:qa", "run": "bad run"}), E_BAD_INPUT),
+            (
+                json!({"actor": format!("agent:{long_name}"), "run": null}),
+                E_BAD_INPUT,
+            ),
+            (
+                json!({"actor": "agent:w", "run": "r".repeat(65)}),
+                E_BAD_INPUT,
+            ),
+            (json!({"actor": "human:other", "run": null}), E_PERMISSION),
+            (json!({"actor": "human:other", "run": "r1"}), E_PERMISSION),
+        ];
+        for (args, code) in &refused {
+            let e = kept.ctl("session", args.clone()).await.unwrap_err();
+            assert_eq!(e.code, *code, "{args}: {e}");
+            let mut fresh = h.connect(Proto::Ctl).await;
+            let e = fresh.ctl("session", args.clone()).await.unwrap_err();
+            assert_eq!(e.code, *code, "{args}: {e}");
+            let e = fresh.ctl("status", json!({})).await.unwrap_err();
+            assert_eq!(e.code, E_NO_SESSION, "{args}: no session was recorded");
+        }
+        // the open session is still the one it opened: its default view takes the write
+        let w = kept
+            .ctl("new_doc", json!({"path": "kept", "view": null}))
+            .await
+            .unwrap();
+        assert!(w["change"].is_string(), "{w}");
+        let st = kept.ctl("status", json!({})).await.unwrap();
+        assert!(
+            st["views"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["name"] == "k1"),
+            "{st}"
+        );
+        assert_ne!(
+            store_bytes(h.dir.path()),
+            before,
+            "the write after them did"
+        );
+        let after_write = store_bytes(h.dir.path());
+        for (args, _) in &refused {
+            let mut fresh = h.connect(Proto::Ctl).await;
+            assert!(fresh.ctl("session", args.clone()).await.is_err());
+        }
+        assert_eq!(
+            store_bytes(h.dir.path()),
+            after_write,
+            "refused sessions write nothing"
+        );
+        // the longest names are accepted; a two-name agent with no run keeps its slash
+        let max_actor = format!("agent:{}/{}", "a".repeat(64), "b".repeat(64));
+        assert_eq!(max_actor.len(), 135);
+        let max_run = "r".repeat(64);
+        let mut c = h.connect(Proto::Ctl).await;
+        let v = c
+            .ctl("session", json!({"actor": max_actor, "run": max_run}))
+            .await
+            .unwrap();
+        assert_eq!(
+            (v["kind"].as_str(), v["actor"].as_str(), v["run"].as_str()),
+            (
+                Some("agent"),
+                Some(max_actor.as_str()),
+                Some(max_run.as_str())
+            )
+        );
+        assert_eq!(v["default_view"], max_run.as_str());
+        let mut c = h.connect(Proto::Ctl).await;
+        let v = c
+            .ctl("session", json!({"actor": "agent:a/b", "run": null}))
+            .await
+            .unwrap();
+        assert_eq!(
+            (v["run"].is_null(), v["default_view"].as_str()),
+            (true, Some("work-agent-a/b"))
+        );
+        let mut c = h.connect(Proto::Ctl).await;
+        let v = c
+            .ctl("session", json!({"actor": "agent:a-b", "run": null}))
+            .await
+            .unwrap();
+        assert_eq!(v["default_view"], "work-agent-a-b", "a distinct default");
+        // the configured human, with a valid run it ignores
+        let mut c = h.connect(Proto::Ctl).await;
+        let v = c
+            .ctl("session", json!({"actor": "human:qa", "run": "r9"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            (v["kind"].as_str(), v["run"].as_str()),
+            (Some("human"), Some("cli"))
+        );
+    });
+}
+
+/// id3: a host whose configured (test-hook) human is outside the form opens no session.
+#[test]
+fn id3_a_configured_human_outside_the_form_opens_no_session() {
+    let h = Hosted::new_with_human("Nick");
+    let rt = Hosted::rt();
+    rt.block_on(async {
+        for args in [
+            json!({"actor": null, "run": null}),
+            json!({"actor": "agent:w", "run": "r1"}),
+        ] {
+            let mut c = h.connect(Proto::Ctl).await;
+            let e = c.ctl("session", args.clone()).await.unwrap_err();
+            assert_eq!(
+                (e.code.as_str(), e.message.as_str(), e.fix.as_str()),
+                (
+                    E_BAD_INPUT,
+                    "the actor \"Nick\" is not in rdy's actor form",
+                    ACTOR_FIX
+                ),
+                "{args}"
+            );
+            assert_eq!(
+                c.ctl("status", json!({})).await.unwrap_err().code,
+                E_NO_SESSION
+            );
+        }
     });
 }

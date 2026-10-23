@@ -409,7 +409,7 @@ mod tests {
     }
 
     fn human(role: Role) -> Session {
-        Session::human("human:qa".into(), role)
+        Session::human("human:qa".into(), role).unwrap()
     }
 
     fn target(name: &str, uris: &[&str]) -> Target {

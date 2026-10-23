@@ -245,17 +245,16 @@ pub fn with_warnings(mut e: RdyError, warnings: &[Issue]) -> RdyError {
 }
 
 /// The bounded configured human actor: `actor` in `.rdy/local.yaml`, else in the user config,
-/// as `settings` read them, else `human:$USER`, else `human:unknown`. With no settings (they do
-/// not load, and the caller only signs out), the user config at `user_file` is read again for
+/// as `settings` read them, else the bounded fallback of USER (D-Q8NFG). With no settings (they
+/// do not load, and the caller only signs out), the user config at `user_file` is read again for
 /// its actor alone, within the same bounds and without the remote and install checks, so
-/// settings that fail only those keep their person. A user config that does not read names no
-/// actor: `human:$USER`.
-pub fn auth_person(settings: Option<&HubConfig>, user_file: &Path) -> String {
+/// settings that fail only those keep their person. A user config that does not read, or an
+/// actor outside the actor form, is its error: never a fallback identity.
+pub fn auth_person(settings: Option<&HubConfig>, user_file: &Path) -> Result<String, RdyError> {
     let user = std::env::var("USER").ok();
     match settings {
         Some(s) => s.human_actor(user.as_deref()),
-        None => configured_human_actor(None, Some(user_file), user.as_deref())
-            .unwrap_or_else(|_| format!("human:{}", user.as_deref().unwrap_or("unknown"))),
+        None => configured_human_actor(None, Some(user_file), user.as_deref()),
     }
 }
 
@@ -471,7 +470,7 @@ pub fn rdy_auth(st: &mut McpState, p: AuthParams) -> Result<Value, RdyError> {
             AuthReply::state(sign_out(&s, Some(&root), &user_file, install)?)
         } else {
             let settings = HubConfig::load(Some(&root), Some(&user_file))?;
-            let person = auth_person(Some(&settings), &user_file);
+            let person = auth_person(Some(&settings), &user_file)?;
             let surface = AuthSurface {
                 session: &s,
                 person: &person,

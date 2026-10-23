@@ -239,7 +239,7 @@ fn se8_accepted_and_dismissed_tensions_are_not_accepted_again() {
     // an advised tension a person dismissed is out of the set (final ruling 1: a writer agent
     // may not dismiss advice to block)
     let (_d2, mut r2, _s2, tn2, p2) = judged(true);
-    let pat = Session::human("human:pat".into(), Role::Writer);
+    let pat = Session::human("human:pat".into(), Role::Writer).unwrap();
     r2.dismiss_tension(&pat, &tn2, "they agree after all")
         .unwrap();
     let e = r2
@@ -623,7 +623,7 @@ fn se8_an_advised_tension_is_dismissed_only_as_a_blocking_one_is() {
         still.advised_digest, p.advised_digest,
         "the advice is still on the card"
     );
-    let pat = Session::human("human:pat".into(), Role::Writer);
+    let pat = Session::human("human:pat".into(), Role::Writer).unwrap();
     r.dismiss_tension(&pat, &tn, "they agree after all")
         .unwrap();
     // a reviewer of another actor may dismiss it too

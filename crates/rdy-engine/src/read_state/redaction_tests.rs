@@ -13,11 +13,11 @@ use std::sync::Arc;
 const SECRET: &str = "The launch code is ZEBRA-7731.";
 
 fn writer() -> Session {
-    Session::human("human:t".into(), Role::Writer)
+    Session::human("human:t".into(), Role::Writer).unwrap()
 }
 
 fn approver() -> Session {
-    Session::human("human:t".into(), Role::Approver)
+    Session::human("human:t".into(), Role::Approver).unwrap()
 }
 
 fn write(r: &mut Rdy, view: &str, ops: serde_json::Value) -> crate::WriteResult {

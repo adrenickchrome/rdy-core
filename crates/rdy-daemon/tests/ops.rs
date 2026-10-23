@@ -15,7 +15,7 @@ fn project() -> (tempfile::TempDir, Local) {
 }
 
 fn human() -> Session {
-    Session::human("human:t".into(), Role::Writer)
+    Session::human("human:t".into(), Role::Writer).unwrap()
 }
 
 fn doc(e: &Local, name: &str) -> Value {
@@ -229,8 +229,12 @@ fn ctl2_render_export_and_check_resolve_relative_paths_against_the_session_cwd()
     let s = human();
     doc(&e, "a");
     write_typed(&e, |r| {
-        r.propose(&human(), "work", "p", None)
-            .and_then(|p| r.land_report(&Session::human("human:t".into(), Role::Approver), &p.id))
+        r.propose(&human(), "work", "p", None).and_then(|p| {
+            r.land_report(
+                &Session::human("human:t".into(), Role::Approver).unwrap(),
+                &p.id,
+            )
+        })
     })
     .unwrap();
     let cwd = tempfile::tempdir().unwrap();
@@ -646,7 +650,7 @@ fn wcfg1_wc_put_blob_stores_a_file_and_refuses_a_reader_a_directory_and_a_missin
     )
     .unwrap();
     assert_eq!(again["hash"], hash.as_str(), "content addressed");
-    let reader = Session::human("human:r".into(), Role::Reader);
+    let reader = Session::human("human:r".into(), Role::Reader).unwrap();
     let err = dispatch(
         &cx(&e, &reader, d.path()),
         "wc_put_blob",
@@ -1105,7 +1109,7 @@ fn rdx5_daemon_redact_preserves_roles_and_errors() {
     let args = |dry: bool| json!({"targets": [id], "reason_class": "secret", "reason": "leak", "dry_run": dry});
     let end = e.read().seq();
     // a reader may run the dry run, never record
-    let reader = Session::human("human:t".into(), Role::Reader);
+    let reader = Session::human("human:t".into(), Role::Reader).unwrap();
     let c = cx(&e, &reader, d.path());
     dispatch(&c, "redact", args(true)).unwrap();
     let err = dispatch(&c, "redact", args(false)).unwrap_err();
@@ -1313,7 +1317,7 @@ fn pub9_publication_check_op_is_strict_read_only_and_open_to_every_role() {
                 message: String::new(),
             },
         )?;
-        let approver = Session::human("human:t".into(), Role::Approver);
+        let approver = Session::human("human:t".into(), Role::Approver).unwrap();
         let p = r.propose(&human(), "work", "pub", Some("summary"))?;
         r.land(&approver, &p.id)
     })
@@ -1323,7 +1327,7 @@ fn pub9_publication_check_op_is_strict_read_only_and_open_to_every_role() {
 
     // every role inspects; a blocked policy is a result
     for role in [Role::Reader, Role::Writer, Role::Reviewer, Role::Approver] {
-        let who = Session::human("human:t".into(), role);
+        let who = Session::human("human:t".into(), role).unwrap();
         let v = dispatch(
             &cx(&e, &who, d.path()),
             "publication_check",

@@ -25,7 +25,8 @@
 //!    ([`RelayRefusal::SessionRefTooLong`]) and defaults to `mcp` (implicit) or `cli`.
 //!
 //! In cases 1 and 4 the act runs as `Session::human(person, Role::Approver)`: the person is the
-//! actor of the act, and the agent is `relayed_by`.
+//! actor of the act, and the agent is `relayed_by`. A person whose actor is outside the actor
+//! form makes no session: [`RelayRefusal::BadIdentity`] carries the constructor's refusal.
 //!
 //! # Wording
 //!
@@ -77,6 +78,9 @@ pub enum RelayRefusal {
     TooLong,
     /// 6: `session_ref` is longer than a view name.
     SessionRefTooLong,
+    /// The person's actor is outside the actor form, so no session can act as them: the
+    /// constructor's bounded `E_BAD_INPUT` message and fix (D-ME2C0).
+    BadIdentity { message: String, fix: String },
 }
 
 impl RelayRefusal {
@@ -123,6 +127,9 @@ impl RelayRefusal {
                 format!("session_ref takes at most {MAX_SESSION_REF} characters"),
                 "use a short session id, not the conversation",
             ),
+            RelayRefusal::BadIdentity { message, fix } => {
+                RdyError::new(E_BAD_INPUT, message.clone(), fix.clone())
+            }
         }
     }
 }
@@ -136,7 +143,12 @@ pub fn relayed(
     r: &RelayInput,
     implicit: bool,
 ) -> Result<(Session, Option<Relay>), RelayRefusal> {
-    let as_person = || Session::human(person.to_string(), Role::Approver);
+    let as_person = || {
+        Session::human(person.to_string(), Role::Approver).map_err(|e| RelayRefusal::BadIdentity {
+            message: e.message,
+            fix: e.fix,
+        })
+    };
     if s.is_human() {
         // 2
         if r.relayed_by.is_some() || r.evidence.is_some() {
@@ -145,7 +157,7 @@ pub fn relayed(
         // 5
         needs_evidence(r)?;
         // 1
-        return Ok((as_person(), None));
+        return Ok((as_person()?, None));
     }
     // 3
     let quote = r
@@ -195,7 +207,7 @@ pub fn relayed(
     }
     let session_ref = session_ref.unwrap_or(if implicit { "mcp" } else { "cli" });
     Ok((
-        as_person(),
+        as_person()?,
         Some(Relay {
             by: ActorRun {
                 actor: s.actor.clone(),

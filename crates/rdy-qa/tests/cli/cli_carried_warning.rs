@@ -149,14 +149,17 @@ fn carrying() -> (Served, Hash, Hash, Hash, String) {
         .unwrap();
         let p = r
             .propose(
-                &Session::human("human:qa".into(), Role::Writer),
+                &Session::human("human:qa".into(), Role::Writer).unwrap(),
                 "work",
                 "Base",
                 None,
             )
             .unwrap();
-        r.land(&Session::human("human:qa".into(), Role::Approver), &p.id)
-            .unwrap();
+        r.land(
+            &Session::human("human:qa".into(), Role::Approver).unwrap(),
+            &p.id,
+        )
+        .unwrap();
         r.close().unwrap();
     }
     let (carried, apply, landing, selector) = carry(s.dir.path());

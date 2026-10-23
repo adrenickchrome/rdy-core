@@ -410,7 +410,7 @@ impl HubClock for Clock {
 // ---------------------------------------------------------------------------------------------
 
 fn human() -> Session {
-    Session::human("human:nick".to_string(), Role::Writer)
+    Session::human("human:nick".to_string(), Role::Writer).unwrap()
 }
 
 fn agent() -> Session {
@@ -662,7 +662,7 @@ fn hsa5_host_card_binds_install_and_machine_with_relay_evidence() {
 
     // The relay table decides who relays the answer, with its own refusals.
     let cli = RelayInput {
-        relayed_by: Some("agent:claude/r7".to_string()),
+        relayed_by: Some("agent:claude".to_string()),
         ..words()
     };
     let refused: Vec<(&Session, RelayInput, bool, &str)> = vec![

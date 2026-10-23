@@ -829,7 +829,7 @@ mod tests {
                         },
                     )?;
                     if land {
-                        let h = Session::human("human:qa".into(), Role::Approver);
+                        let h = Session::human("human:qa".into(), Role::Approver).unwrap();
                         let p = r.propose(&s, &view, "t", None)?;
                         r.land(&h, &p.id)?;
                     }
@@ -841,7 +841,7 @@ mod tests {
             |n: &str| Session::agent(format!("agent:{n}"), Some(n.into()), Role::Writer).unwrap();
         // claim A, landed; then agents a and b each update it in their own views: a collision
         let w = write(
-            Session::human("human:qa".into(), Role::Writer),
+            Session::human("human:qa".into(), Role::Writer).unwrap(),
             "work",
             json!([
                 {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "spec", "title": "Spec", "doc_type": "overview"}},

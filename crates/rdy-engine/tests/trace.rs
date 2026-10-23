@@ -1587,7 +1587,7 @@ fn rf11_hostile_trace_is_bounded_and_redaction_safe() {
         assert!(before.to_string().contains("ZEBRA-7731"), "{before}");
         let req = r
             .redact_in(
-                &Session::human(FOUNDER.into(), Role::Writer),
+                &Session::human(FOUNDER.into(), Role::Writer).unwrap(),
                 "redact",
                 RedactInput {
                     targets: vec![w["$p"].clone()],
@@ -1600,14 +1600,17 @@ fn rf11_hostile_trace_is_bounded_and_redaction_safe() {
         assert!(req.redaction.is_some());
         let p = r
             .propose(
-                &Session::human(FOUNDER.into(), Role::Writer),
+                &Session::human(FOUNDER.into(), Role::Writer).unwrap(),
                 "redact",
                 "Remove the code",
                 Some("Removes the leaked code."),
             )
             .unwrap();
-        r.land(&Session::human(FOUNDER.into(), Role::Approver), &p.id)
-            .unwrap();
+        r.land(
+            &Session::human(FOUNDER.into(), Role::Approver).unwrap(),
+            &p.id,
+        )
+        .unwrap();
         let e = old
             .trace(&Scope::Canon, &bid(&w["$dd"]), TraceOptions::default())
             .unwrap_err();

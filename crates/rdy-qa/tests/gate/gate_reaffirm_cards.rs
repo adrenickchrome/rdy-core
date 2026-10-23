@@ -827,7 +827,7 @@ fn cp16_relayed_answer_records_person_and_card() {
     let other = decide(&mut r, &p.w.s, "Three rule", None, &[&p.w.c]);
     change(&mut r, "xc", &p.w.c, "C stands firm.");
     let (ra, rc) = (the_card(&r, &p.w.a).r#ref, the_card(&r, &p.w.c).r#ref);
-    let person = rdy_engine::human_actor_for_env(d.path());
+    let person = rdy_engine::human_actor_for_env(d.path()).unwrap();
     let mut st = agent_state(r);
     let card = mcp_card(&mut st, &ra);
     let v = mcp_answer(&mut st, &card, "o1", None).unwrap();
@@ -965,8 +965,17 @@ fn cp16_reserved_views_are_private_on_every_entry() {
         .unwrap_err(),
     );
     reserved(r.view_include(&writer(), "reaffirm-x", &[]).unwrap_err());
-    reserved(
+    // id3 (D-ME2C0): a reserved run is outside the run form, refused before any view is named
+    let run_form = |e: RdyError, run: &str| {
+        assert_eq!(e.code, E_BAD_INPUT, "{e}");
+        assert_eq!(
+            e.message,
+            format!("the run {run:?} is not in rdy's run form")
+        );
+    };
+    run_form(
         Session::agent("agent:a".into(), Some("reaffirm-x".into()), Role::Writer).unwrap_err(),
+        "reaffirm-x",
     );
     assert_eq!(log_end(&r), end);
     // the MCP session
@@ -982,7 +991,7 @@ fn cp16_reserved_views_are_private_on_every_entry() {
         )
         .unwrap_err(),
     );
-    reserved(
+    run_form(
         rdy_session(
             &mut st,
             serde_json::from_value(
@@ -991,6 +1000,7 @@ fn cp16_reserved_views_are_private_on_every_entry() {
             .unwrap(),
         )
         .unwrap_err(),
+        "reaffirm-y",
     );
     // an internal view of the card's name that exists already is never reused
     let e = st.engine.clone();
@@ -1478,7 +1488,7 @@ fn cp16_retirement_card_keeps_the_landing_that_retired_its_cause() {
         json!([{"op": "reaffirm", "id": y, "targets": [w.c], "reason": "Y still fits C."}]),
     )
     .unwrap();
-    let other = Session::human("human:other".into(), Role::Approver);
+    let other = Session::human("human:other".into(), Role::Approver).unwrap();
     let again = land_as(&mut r, "ry", &other);
     let rec2 = r.store().landing(&again.parse().unwrap()).unwrap();
     assert_eq!(rec2.approved_by.actor, "human:other");
@@ -1527,7 +1537,7 @@ fn cp16_fix1_retirement_origin_reads_stay_bounded_as_metadata_versions_accumulat
     land(&mut r, "sx").unwrap();
     let before = the_card(&r, &x);
     assert_eq!(members(&before), vec![dep.clone()]);
-    let other = Session::human("human:other".into(), Role::Approver);
+    let other = Session::human("human:other".into(), Role::Approver).unwrap();
     for n in 0..6 {
         // c changes; another person re-affirms y against it: one more metadata-only version
         change(&mut r, &format!("xc{n}"), &w.c, &format!("C stands {n}."));
@@ -1636,7 +1646,7 @@ fn cp16_fix2_a_repeated_retirer_version_keeps_the_retirement_origin_for_every_re
         land_as(
             &mut r,
             &format!("ry{n}"),
-            &Session::human(by.into(), Role::Approver),
+            &Session::human(by.into(), Role::Approver).unwrap(),
         );
         versions.push(version(&r, &y));
         if n < 2 {

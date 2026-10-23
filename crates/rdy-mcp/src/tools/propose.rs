@@ -51,16 +51,19 @@ pub fn rdy_propose(st: &mut McpState, p: ProposeParams) -> Result<Value, RdyErro
     let alternatives = p.alternatives.map(rdy_engine::alt::AltPick::from);
     // with a relay, the person's proposal of their own view (O32); the session is the relay
     let root = st.engine.root();
-    let relay = p.relay.map(|r| {
-        let input = RelayInput {
-            relayed_by: None,
-            evidence: Some(r.evidence),
-            question: r.question,
-            session_ref: r.session_ref,
-            kind: None,
-        };
-        (input, human_actor_for_env(&root))
-    });
+    let relay = p
+        .relay
+        .map(|r| {
+            let input = RelayInput {
+                relayed_by: None,
+                evidence: Some(r.evidence),
+                question: r.question,
+                session_ref: r.session_ref,
+                kind: None,
+            };
+            human_actor_for_env(&root).map(|person| (input, person))
+        })
+        .transpose()?;
     let answers: Vec<PlanAnswerInput> = p
         .plan_answers
         .unwrap_or_default()

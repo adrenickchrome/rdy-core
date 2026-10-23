@@ -323,7 +323,7 @@ pub const KEY_LEVELS: &[KeyRule] = &[
         ty: Ty::Count,
         default: Some("10"),
     },
-    // the default is `human:$USER`, taken from the environment in `effective`
+    // the default is the bounded fallback of `$USER`, taken from the environment in `effective`
     KeyRule {
         key: "actor",
         levels: PERSON,
@@ -1253,10 +1253,10 @@ fn build(
             continue;
         }
         let default = match rule.key {
-            "actor" => std::env::var("USER")
-                .ok()
-                .filter(|u| !u.is_empty())
-                .map(|u| Value::from(format!("human:{u}"))),
+            // the bounded fallback the person resolves to (D-Q8NFG): human:unknown with no USER
+            "actor" => Some(Value::from(crate::identity::fallback_actor(
+                std::env::var("USER").ok().as_deref(),
+            ))),
             _ => rule.default.and_then(|d| serde_yaml_ng::from_str(d).ok()),
         };
         if let Some(value) = default {
@@ -1525,28 +1525,85 @@ fn linked_core(
     Ok((linked, warnings))
 }
 
-/// The `actor` a file names: a non-empty string, else nothing (a file that does not read or
-/// parse names none).
-fn actor_in(path: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let v: Value = serde_yaml_ng::from_str(&text).ok()?;
-    v.get("actor")
-        .and_then(Value::as_str)
-        .filter(|a| !a.is_empty())
-        .map(str::to_string)
+/// The actor forms a configured actor may take, as a fix names them.
+const ACTOR_FORMS: &str =
+    "human:<name>, agent:<name>, agent:<handle>/<name> or ci:<repo_id>/<name>";
+
+/// The configured person (D-Q8NFG, O5, O9): of the raw `actor` values of `.rdy/local.yaml` and
+/// the user config, each with the name of its file, the local one if present, else the user's.
+/// `None` only when neither file has the key; a present key is never skipped, so an empty
+/// string or a null is refused like any value outside the form. A value that is not a string is
+/// `E_CONFIG` in the words of the effective read; a string outside the actor form is the
+/// grammar's `E_BAD_INPUT` with a fix naming the file. The value is never rewritten.
+pub(crate) fn configured_actor(
+    local: Option<(&Value, &str)>,
+    user: Option<(&Value, &str)>,
+) -> Result<Option<String>, RdyError> {
+    let Some((value, shown)) = local.or(user) else {
+        return Ok(None);
+    };
+    let rule = KEY_LEVELS
+        .iter()
+        .find(|r| r.key == "actor")
+        .expect("actor is a settable key");
+    if let Err(why) = rule.ty.check(value) {
+        return Err(RdyError::new(
+            E_CONFIG,
+            format!("{} in {shown}: {why}", rule.key),
+            format!("fix {} in {shown}", rule.key),
+        ));
+    }
+    let actor = value.as_str().unwrap_or_default();
+    crate::identity::validate_actor(actor).map_err(|mut e| {
+        e.fix = format!("set actor in {shown} to {ACTOR_FORMS}");
+        e
+    })?;
+    Ok(Some(actor.to_string()))
+}
+
+/// The raw `actor` value of a file read as a mapping, with the file's name.
+fn actor_value<'a>(map: Option<&'a Mapping>, shown: &'a str) -> Option<(&'a Value, &'a str)> {
+    map.and_then(|m| m.get("actor")).map(|v| (v, shown))
+}
+
+/// The human actor of the user config at `user_file` alone: its `actor`, read within the config
+/// bounds, else the bounded fallback of `user`.
+pub(crate) fn user_actor(user_file: Option<&Path>, user: Option<&str>) -> Result<String, RdyError> {
+    let shown = file_name(Level::User, user_file);
+    let map = match user_file {
+        Some(f) => read_file(f, &shown)?,
+        None => None,
+    };
+    Ok(configured_actor(None, actor_value(map.as_ref(), &shown))?
+        .unwrap_or_else(|| crate::identity::fallback_actor(user)))
 }
 
 /// The human actor of the project: `actor` in `.rdy/local.yaml`, else in the user config, else
-/// `human:<user>`. Never an error.
-pub fn human_actor_for(project: &Path, user_file: Option<&Path>, user: Option<&str>) -> String {
-    actor_in(&project.join(LOCAL_FILE))
-        .or_else(|| user_file.and_then(actor_in))
-        .unwrap_or_else(|| format!("human:{}", user.unwrap_or("unknown")))
+/// the bounded fallback of `user` (D-Q8NFG). Both files are read within the config bounds, and a
+/// file that does not read is its error even when the other names a valid actor; the selected
+/// value is checked by [`configured_actor`].
+pub fn human_actor_for(
+    project: &Path,
+    user_file: Option<&Path>,
+    user: Option<&str>,
+) -> Result<String, RdyError> {
+    let local_shown = file_name(Level::Local, user_file);
+    let local = read_file(&project.join(LOCAL_FILE), &local_shown)?;
+    let user_shown = file_name(Level::User, user_file);
+    let user_map = match user_file {
+        Some(f) => read_file(f, &user_shown)?,
+        None => None,
+    };
+    Ok(configured_actor(
+        actor_value(local.as_ref(), &local_shown),
+        actor_value(user_map.as_ref(), &user_shown),
+    )?
+    .unwrap_or_else(|| crate::identity::fallback_actor(user)))
 }
 
 /// `human_actor_for` over `XDG_CONFIG_HOME`, `HOME` and `USER`: the one place product code reads
 /// them.
-pub fn human_actor_for_env(project: &Path) -> String {
+pub fn human_actor_for_env(project: &Path) -> Result<String, RdyError> {
     let user = std::env::var("USER").ok();
     human_actor_for(project, user_file_from_env().as_deref(), user.as_deref())
 }

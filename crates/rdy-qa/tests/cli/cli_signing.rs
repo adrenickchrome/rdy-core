@@ -416,7 +416,7 @@ fn sig9_all_new_inputs_refuse_unknown_keys() {
     // the daemon ops' arguments
     let (d, r, _) = proj();
     let e = Local::new(r);
-    let s = Session::human("human:qa".into(), Role::Writer);
+    let s = Session::human("human:qa".into(), Role::Writer).unwrap();
     let cx = OpContext {
         engine: &e,
         session: &s,
@@ -886,7 +886,7 @@ fn sig9_a_verified_read_never_shows_a_signature_of_an_unsealed_batch() {
     held_rx.recv().unwrap();
 
     // while the batch is held, the daemon's verified log reads the published state only
-    let s = Session::human("human:qa".into(), Role::Writer);
+    let s = Session::human("human:qa".into(), Role::Writer).unwrap();
     let cx = OpContext {
         engine: &*e,
         session: &s,
@@ -972,7 +972,7 @@ fn sig9_a_verbose_fsck_reports_the_state_it_checked() {
             Ok(Value::Null)
         }))),
     };
-    let s = Session::human("human:qa".into(), Role::Writer);
+    let s = Session::human("human:qa".into(), Role::Writer).unwrap();
     let cx = OpContext {
         engine: &e,
         session: &s,

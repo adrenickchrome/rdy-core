@@ -79,7 +79,7 @@ pub const SCHEMA_DOC: &str = "rdy_view {op, ...} works on views. Ops: create {na
 pub fn rdy_view(st: &mut McpState, p: ViewParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     let s = session(st)?;
-    let person = human_actor_for_env(&st.engine.root());
+    let person = human_actor_for_env(&st.engine.root())?;
     let max_tokens = p.max_tokens;
     let req = ViewRequest {
         op: p.op,

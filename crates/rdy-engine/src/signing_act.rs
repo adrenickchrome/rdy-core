@@ -123,7 +123,7 @@ pub fn run_signed_act(
     match request {
         SigningAct::Approve { proposal, options } => {
             let approver = if options.relay.is_some() {
-                Session::human(person.to_string(), Role::Approver)
+                Session::human(person.to_string(), Role::Approver)?
             } else {
                 session.clone()
             };

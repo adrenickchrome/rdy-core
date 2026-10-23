@@ -35,11 +35,11 @@ const HEAD: usize = 37;
 const DAMAGED_FIX: &str = "dump the project again; rdy never repairs a dump";
 
 fn writer() -> Session {
-    Session::human("human:t".into(), Role::Writer)
+    Session::human("human:t".into(), Role::Writer).unwrap()
 }
 
 fn approver() -> Session {
-    Session::human("human:t".into(), Role::Approver)
+    Session::human("human:t".into(), Role::Approver).unwrap()
 }
 
 /// Writes one doc with a prose block to view `work`; returns the block's id.

@@ -267,7 +267,9 @@ fn approval_refusal(s: &Session, input: &RelayInput, refusal: RelayRefusal) -> R
             )
         }
         RelayRefusal::NeedsEvidence { .. } => pair(),
-        r @ (RelayRefusal::TooLong | RelayRefusal::SessionRefTooLong) => r.error(),
+        r @ (RelayRefusal::TooLong
+        | RelayRefusal::SessionRefTooLong
+        | RelayRefusal::BadIdentity { .. }) => r.error(),
     }
 }
 

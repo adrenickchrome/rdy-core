@@ -1398,7 +1398,7 @@ fn sig8_later_signing_checks_person_kind_relay_and_duplicates() {
     let relayed_t = relayed.to_string();
 
     // a human signs only their own act; another human is refused
-    let other = Session::human("human:other".into(), Role::Approver);
+    let other = Session::human("human:other".into(), Role::Approver).unwrap();
     let agent = FakeAgent::new(&keys);
     let e = run_sign(&*p.e, &agent, &other, &local_t, None).unwrap_err();
     assert_err(

@@ -247,7 +247,7 @@ pub(crate) fn approve(
     a: ApproveArgs,
     as_json: bool,
 ) -> Result<(Value, String), ErrorReply> {
-    let reads_card = human_session(env) || a.relayed_by.is_some();
+    let reads_card = human_session(env)? || a.relayed_by.is_some();
     let mut c = Conn::open(env)?;
     let out = approve_on(
         &mut |op, args| c.op(op, args),
@@ -908,7 +908,7 @@ pi-00000000000000bb confirm c-CCCCC: open (c-AAAAA)"
         .unwrap();
         let w = r
             .write(
-                &rdy_engine::Session::human("human:qa".into(), rdy_model::Role::Writer),
+                &rdy_engine::Session::human("human:qa".into(), rdy_model::Role::Writer).unwrap(),
                 rdy_engine::WriteRequest {
                     view: "work".into(),
                     ops,
@@ -930,7 +930,8 @@ pi-00000000000000bb confirm c-CCCCC: open (c-AAAAA)"
         let dir = tempfile::tempdir().unwrap();
         let id = project_with_prose(dir.path());
         let local = rdy_engine::engine::Local::open(dir.path()).unwrap();
-        let session = rdy_engine::Session::human("human:qa".into(), rdy_model::Role::Writer);
+        let session =
+            rdy_engine::Session::human("human:qa".into(), rdy_model::Role::Writer).unwrap();
         let cwd = dir.path().to_path_buf();
         let cx = rdy_daemon::OpContext {
             engine: &local,
@@ -1015,7 +1016,8 @@ pi-00000000000000bb confirm c-CCCCC: open (c-AAAAA)"
         let dir = tempfile::tempdir().unwrap();
         let id = project_with_prose(dir.path());
         let local = rdy_engine::engine::Local::open(dir.path()).unwrap();
-        let session = rdy_engine::Session::human("human:qa".into(), rdy_model::Role::Writer);
+        let session =
+            rdy_engine::Session::human("human:qa".into(), rdy_model::Role::Writer).unwrap();
         let cwd = dir.path().to_path_buf();
         let cx = rdy_daemon::OpContext {
             engine: &local,

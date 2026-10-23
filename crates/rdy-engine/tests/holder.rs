@@ -29,11 +29,11 @@ const DAMAGED_TAG_FIX: &str =
 // helpers
 
 fn writer() -> Session {
-    Session::human("human:founder".into(), Role::Writer)
+    Session::human("human:founder".into(), Role::Writer).unwrap()
 }
 
 fn founder() -> Session {
-    Session::human("human:founder".into(), Role::Approver)
+    Session::human("human:founder".into(), Role::Approver).unwrap()
 }
 
 fn write(r: &mut Rdy, ops: Value) -> WriteResult {

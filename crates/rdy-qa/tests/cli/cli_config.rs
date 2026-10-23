@@ -58,7 +58,10 @@ fn cfgl1_the_most_specific_level_wins() {
         serve_config(&p).idle_timeout,
         std::time::Duration::from_secs(300)
     );
-    assert_eq!(human_actor_for(&p, Some(&uf), Some("u")), "human:here");
+    assert_eq!(
+        human_actor_for(&p, Some(&uf), Some("u")).unwrap(),
+        "human:here"
+    );
     let fp = pack_fingerprint(&p).unwrap();
     assert!(
         fp.files.iter().any(|(f, _)| f.ends_with(LOCAL_FILE)),
@@ -286,4 +289,98 @@ fn msw19_a_dotted_review_key_warns_in_rdy_config_and_rdy_status() {
         );
         assert!(!out.contains("E_CONFIG"), "{args:?}: {out}");
     }
+}
+
+/// id3 (D-ME2C0, D-KQ4CA): the CLI through its daemon, the CLI with `--no-daemon` and MCP refuse
+/// an actor or run outside the form with the same error; a human claim has the same code and
+/// message in each, with the CLI's fix at the command line and the MCP fix over MCP.
+#[test]
+fn id3_cli_and_mcp_share_identity_errors() {
+    use rdy_qa::mcp::{McpClient, Reply};
+    use serde_json::{Value, json};
+    let s = Served::new();
+    let triple = |v: &Value| {
+        (
+            v["code"].as_str().unwrap_or_default().to_string(),
+            v["message"].as_str().unwrap_or_default().to_string(),
+            v["fix"].as_str().unwrap_or_default().to_string(),
+        )
+    };
+    let cli = |actor: &str, run: Option<&str>, no_daemon: bool| {
+        let mut args = vec![];
+        if no_daemon {
+            args.push("--no-daemon");
+        }
+        args.extend(["--json", "status"]);
+        let (ok, v) = s.json_as(actor, run, &args);
+        assert!(!ok, "{actor:?} {run:?} (no daemon: {no_daemon}): {v}");
+        triple(&v)
+    };
+    let mut mcp = McpClient::start_proxy(&s);
+    let mut over_mcp = |actor: &str, run: Option<&str>| {
+        let mut args = json!({"actor": actor, "role": "writer"});
+        if let Some(r) = run {
+            args["run"] = json!(r);
+        }
+        match mcp.call("rdy_session", args) {
+            Reply::ToolError(v) => triple(&v),
+            other => panic!("{actor:?} {run:?}: expected a tool error, got {other:?}"),
+        }
+    };
+    let long_actor = format!("agent:{}", "x".repeat(200));
+    for (actor, run) in [
+        ("Agent:X", None),
+        ("agent:x ", Some("r1")),
+        (long_actor.as_str(), None),
+        ("agent:x", Some("run:7")),
+        ("agent:x", Some("work")),
+        ("agent:x", Some(".hidden")),
+    ] {
+        let daemon = cli(actor, run, false);
+        assert_eq!(daemon.0, "E_BAD_INPUT", "{actor:?} {run:?}: {daemon:?}");
+        assert!(
+            daemon.1.ends_with(" is not in rdy's actor form")
+                || daemon.1.ends_with(" is not in rdy's run form"),
+            "{daemon:?}"
+        );
+        assert_eq!(
+            cli(actor, run, true),
+            daemon,
+            "{actor:?} {run:?}: --no-daemon"
+        );
+        assert_eq!(over_mcp(actor, run), daemon, "{actor:?} {run:?}: MCP");
+    }
+    // a human claim: one code and message; each transport gives its own fix
+    for (actor, run) in [("human:other", None), ("human:other", Some("r1"))] {
+        let message = "an agent session cannot claim a human actor".to_string();
+        let cli_fix = "unset RDY_ACTOR to act as the person, or relay their words".to_string();
+        let want = ("E_PERMISSION".to_string(), message.clone(), cli_fix);
+        assert_eq!(cli(actor, run, false), want, "{actor:?} {run:?}");
+        assert_eq!(
+            cli(actor, run, true),
+            want,
+            "{actor:?} {run:?}: --no-daemon"
+        );
+        assert_eq!(
+            over_mcp(actor, run),
+            (
+                "E_PERMISSION".to_string(),
+                message,
+                "claim your own agent: actor, and relay the person's words with rdy_answer"
+                    .to_string()
+            ),
+            "{actor:?} {run:?}: MCP"
+        );
+    }
+    // MCP is an agent surface: even the configured human's own actor is a claim there
+    assert_eq!(over_mcp("human:qa", None).0, "E_PERMISSION");
+    // the refusals above came while the daemon held the store: `--no-daemon` checked the
+    // identity before it opened the store. The configured human at the command line is the
+    // human, both ways (the store is free once the daemon stops).
+    let (ok, v) = s.json_as("human:qa", Some("r1"), &["--json", "status"]);
+    assert!(ok, "{v}");
+    drop(mcp);
+    s.stop();
+    let (ok, v) = s.json_as("human:qa", Some("r1"), &["--no-daemon", "--json", "status"]);
+    assert!(ok, "{v}");
 }

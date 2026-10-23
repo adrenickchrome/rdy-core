@@ -925,11 +925,11 @@ mod tests {
     // ---- real projects ----
 
     fn writer() -> Session {
-        Session::human("human:qa".into(), Role::Writer)
+        Session::human("human:qa".into(), Role::Writer).unwrap()
     }
 
     fn approver() -> Session {
-        Session::human("human:qa".into(), Role::Approver)
+        Session::human("human:qa".into(), Role::Approver).unwrap()
     }
 
     fn put(r: &mut Rdy, view: &str, ops: Value) -> WriteResult {

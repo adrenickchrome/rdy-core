@@ -16,11 +16,11 @@ const LOAD_CHAIN_FIX: &str = "pass the full dump, then each increment in chain o
 const STOP_FIX: &str = "name a landing, a tag or a batch end that the dump chain holds";
 
 fn writer() -> Session {
-    Session::human("human:t".into(), Role::Writer)
+    Session::human("human:t".into(), Role::Writer).unwrap()
 }
 
 fn approver() -> Session {
-    Session::human("human:t".into(), Role::Approver)
+    Session::human("human:t".into(), Role::Approver).unwrap()
 }
 
 /// Writes one doc with a prose block to view `work`; returns the block's id.

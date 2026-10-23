@@ -1118,7 +1118,7 @@ fn hsa4_every_request_keeps_its_caller_claim() {
             Some("build 7"),
         ),
         (
-            RequestClaim::from_session(&Session::human("human:nick".into(), Role::Writer))
+            RequestClaim::from_session(&Session::human("human:nick".into(), Role::Writer).unwrap())
                 .unwrap()
                 .bind_human("test-person")
                 .unwrap(),
@@ -1153,7 +1153,8 @@ fn hsa4_every_request_keeps_its_caller_claim() {
     }
     // A key route needs a claim that is valid to send; nothing is sent otherwise.
     let unbound_human =
-        RequestClaim::from_session(&Session::human("human:nick".into(), Role::Writer)).unwrap();
+        RequestClaim::from_session(&Session::human("human:nick".into(), Role::Writer).unwrap())
+            .unwrap();
     let mut forged = claims[0].0.clone();
     forged.actor = "human:test-person".into();
     let mut bad_run = claims[0].0.clone();

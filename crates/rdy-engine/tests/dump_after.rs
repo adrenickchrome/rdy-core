@@ -27,11 +27,11 @@ const EXPORT_FIX: &str =
     "follow the newest file of this store's chain, or start a new chain with rdy dump";
 
 fn writer() -> Session {
-    Session::human("human:t".into(), Role::Writer)
+    Session::human("human:t".into(), Role::Writer).unwrap()
 }
 
 fn approver() -> Session {
-    Session::human("human:t".into(), Role::Approver)
+    Session::human("human:t".into(), Role::Approver).unwrap()
 }
 
 /// Writes one doc with a prose block to view `work`: one ordinary batch (or more).

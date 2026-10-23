@@ -46,15 +46,15 @@ const ORIGIN: Location = Location {
 };
 
 fn writer() -> Session {
-    Session::human("human:t".into(), Role::Writer)
+    Session::human("human:t".into(), Role::Writer).unwrap()
 }
 
 fn approver() -> Session {
-    Session::human("human:t".into(), Role::Approver)
+    Session::human("human:t".into(), Role::Approver).unwrap()
 }
 
 fn reader() -> Session {
-    Session::human("human:t".into(), Role::Reader)
+    Session::human("human:t".into(), Role::Reader).unwrap()
 }
 
 fn agent(run: &str) -> Session {
@@ -977,7 +977,7 @@ fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
     );
     let k = id(&w.created["$k"]);
     // a proposal title, a landing by an approver whose actor holds the token, and a tag message
-    let token_approver = Session::human(format!("human:{TOKEN}"), Role::Approver);
+    let token_approver = Session::human(format!("human:{TOKEN}"), Role::Approver).unwrap();
     let pi =
         p.r.propose(&writer(), "work", &format!("{TOKEN} proposal"), None)
             .unwrap();

@@ -126,7 +126,17 @@ fn agent_session(actor: &str, run: Option<&str>) -> Session {
 }
 
 fn human_session(actor: &str) -> Session {
-    Session::human(actor.to_string(), Role::Writer)
+    Session::human(actor.to_string(), Role::Writer).unwrap()
+}
+
+/// A malformed human session, as no constructor makes one: the hub claim refuses it itself.
+fn raw_human_session(actor: &str) -> Session {
+    Session {
+        actor: actor.to_string(),
+        run: Some("cli".to_string()),
+        role: Role::Writer,
+        kind: SessionKind::Human,
+    }
 }
 
 #[test]
@@ -438,12 +448,12 @@ fn hsa1_claims_keep_agent_actor_and_run() {
     assert_eq!(human.actor, "human:nick", "the local session is unchanged");
 
     // A human session whose actor is a CI or agent actor keeps it.
-    let ci_box = human_session("ci:nightly");
+    let ci_box = human_session("ci:00000000000000000000000000000000/nightly");
     let bound = RequestClaim::from_session(&ci_box)
         .unwrap()
         .bind_human("test-person")
         .unwrap();
-    assert_eq!(bound.actor, "ci:nightly");
+    assert_eq!(bound.actor, "ci:00000000000000000000000000000000/nightly");
     bound.validate_for_send().unwrap();
 
     // An agent session never claims human:.
@@ -479,7 +489,7 @@ fn hsa1_claims_keep_agent_actor_and_run() {
             Some("r7"),
         )));
     }
-    unbound(RequestClaim::from_session(&human_session("nick")));
+    unbound(RequestClaim::from_session(&raw_human_session("nick")));
     for run in ["", "r\n7", "r\t7", "r7\u{7f}", "r7\u{85}", " r7", "r7 "] {
         unbound(RequestClaim::from_session(&agent_session(
             "agent:claude",

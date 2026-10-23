@@ -17,11 +17,11 @@ use std::path::Path;
 const SECRET: &str = "The launch code is ZEBRA-7731.";
 
 fn writer() -> Session {
-    Session::human("human:t".into(), Role::Writer)
+    Session::human("human:t".into(), Role::Writer).unwrap()
 }
 
 fn approver() -> Session {
-    Session::human("human:t".into(), Role::Approver)
+    Session::human("human:t".into(), Role::Approver).unwrap()
 }
 
 /// A project with a landed prose block that holds the secret, tagged `v1.0.0`, and a proposal

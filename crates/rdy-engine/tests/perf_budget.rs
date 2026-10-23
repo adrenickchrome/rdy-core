@@ -367,8 +367,8 @@ fn m2c_landing_with_50_views_at_100k() {
     let dir = tempfile::tempdir().unwrap();
     let ids = testkit::generate(dir.path(), 100_000);
     let mut r = Rdy::open(dir.path()).unwrap();
-    let writer = Session::human("human:perf".into(), Role::Writer);
-    let approver = Session::human("human:perf".into(), Role::Approver);
+    let writer = Session::human("human:perf".into(), Role::Writer).unwrap();
+    let approver = Session::human("human:perf".into(), Role::Approver).unwrap();
     let put = |r: &mut Rdy, view: &str, ops: serde_json::Value| {
         r.write(
             &writer,

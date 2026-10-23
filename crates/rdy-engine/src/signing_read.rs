@@ -339,7 +339,7 @@ mod tests {
 
     /// Writes one doc to view `work`, proposes and lands it; the landing.
     fn land_one(r: &mut Rdy, title: &str) -> Hash {
-        let s = Session::human("human:t".into(), Role::Writer);
+        let s = Session::human("human:t".into(), Role::Writer).unwrap();
         r.write(
             &s,
             WriteRequest {
@@ -354,7 +354,7 @@ mod tests {
         )
         .unwrap();
         let p = r.propose(&s, "work", title, None).unwrap();
-        let a = Session::human("human:t".into(), Role::Approver);
+        let a = Session::human("human:t".into(), Role::Approver).unwrap();
         r.land(&a, &p.id).unwrap().parse().unwrap()
     }
 

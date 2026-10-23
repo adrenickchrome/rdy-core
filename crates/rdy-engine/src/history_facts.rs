@@ -457,11 +457,11 @@ mod tests {
     use std::rc::Rc;
 
     fn writer() -> Session {
-        Session::human("human:t".into(), Role::Writer)
+        Session::human("human:t".into(), Role::Writer).unwrap()
     }
 
     fn approver() -> Session {
-        Session::human("human:t".into(), Role::Approver)
+        Session::human("human:t".into(), Role::Approver).unwrap()
     }
 
     /// An error as its code, message and fix.

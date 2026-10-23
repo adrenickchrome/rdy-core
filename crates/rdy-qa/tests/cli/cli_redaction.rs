@@ -57,7 +57,7 @@ fn op_as(
 
 /// The CLI's human session: `human:qa`, a writer (`Conn::open` classifies it so).
 fn human() -> Session {
-    Session::human("human:qa".into(), Role::Writer)
+    Session::human("human:qa".into(), Role::Writer).unwrap()
 }
 
 /// The project's log position, read with the daemon stopped (as text, to compare).
@@ -341,7 +341,7 @@ fn rdx13_reader_dry_run_and_owned_view_rules_are_preserved() {
     let before = seq(&s);
     // a reader's report works; its request is refused (a CLI session is a writer, so the reader
     // takes the CLI's Direct route, `dispatch`)
-    let reader = Session::human("human:qa".into(), Role::Reader);
+    let reader = Session::human("human:qa".into(), Role::Reader).unwrap();
     let report = op_as(&s, &reader, "redact", args(true)).unwrap();
     let err = op_as(&s, &reader, "redact", args(false)).unwrap_err();
     assert_eq!(err.code, "E_PERMISSION", "{err:?}");

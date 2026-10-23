@@ -21,11 +21,11 @@ const NOT_FOUND: (&str, &str, &str) = (
 // --- fixtures -----------------------------------------------------------------------------------
 
 fn writer() -> Session {
-    Session::human("human:founder".into(), Role::Writer)
+    Session::human("human:founder".into(), Role::Writer).unwrap()
 }
 
 fn founder() -> Session {
-    Session::human("human:founder".into(), Role::Approver)
+    Session::human("human:founder".into(), Role::Approver).unwrap()
 }
 
 /// F2 (D-DKJS5): the person confirms each exception beside version `p` before it lands.

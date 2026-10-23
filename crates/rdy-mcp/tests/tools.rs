@@ -346,14 +346,20 @@ fn land_and_tag(st: &mut McpState) -> String {
 #[test]
 fn run_ids_with_colons_become_view_names_without() {
     let (_d, mut st) = state();
-    let r = rdy_session(
+    // id3 (D-ME2C0): a run holds no ':', so the session is refused with the run's form
+    let e = rdy_session(
         &mut st,
         serde_json::from_value(json!({"actor": "agent:x", "run": "batch:7:a", "role": "writer"}))
             .unwrap(),
     )
-    .unwrap();
-    assert_eq!(r["view"], "batch-7-a");
-    assert_eq!(st.view, "batch-7-a");
+    .unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT");
+    assert_eq!(e.message, "the run \"batch:7:a\" is not in rdy's run form");
+    assert_eq!(
+        e.fix,
+        "use 1 to 64 letters, digits, -, _ or ., with a letter or digit at each end; not none, work, canon, inflight or reaffirm-\u{2026}"
+    );
+    assert!(st.session.is_none(), "no session was set");
     let e = rdy_session(
         &mut st,
         serde_json::from_value(json!({"actor": "agent:x", "role": "writer", "view": "a:b"}))

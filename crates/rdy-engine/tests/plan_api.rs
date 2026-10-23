@@ -25,15 +25,15 @@ use std::process::Command;
 // ---- sessions and writes ----
 
 fn writer() -> Session {
-    Session::human("human:qa".into(), Role::Writer)
+    Session::human("human:qa".into(), Role::Writer).unwrap()
 }
 
 fn approver() -> Session {
-    Session::human("human:qa".into(), Role::Approver)
+    Session::human("human:qa".into(), Role::Approver).unwrap()
 }
 
 fn reader() -> Session {
-    Session::human("human:qa".into(), Role::Reader)
+    Session::human("human:qa".into(), Role::Reader).unwrap()
 }
 
 fn agent(run: &str) -> Session {

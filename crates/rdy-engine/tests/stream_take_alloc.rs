@@ -76,11 +76,11 @@ mod live_alloc {
 static ALLOC: live_alloc::Live = live_alloc::Live;
 
 fn writer() -> Session {
-    Session::human("human:founder".into(), Role::Writer)
+    Session::human("human:founder".into(), Role::Writer).unwrap()
 }
 
 fn founder() -> Session {
-    Session::human("human:founder".into(), Role::Approver)
+    Session::human("human:founder".into(), Role::Approver).unwrap()
 }
 
 #[test]

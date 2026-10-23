@@ -1518,7 +1518,7 @@ mod tests {
     use serde_json::json;
 
     fn writer() -> Session {
-        Session::human("human:qa".into(), Role::Writer)
+        Session::human("human:qa".into(), Role::Writer).unwrap()
     }
 
     /// A local confirm or reject of `item` by the person.

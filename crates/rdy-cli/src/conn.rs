@@ -100,11 +100,12 @@ pub(crate) fn bound_view(env: &Env) -> Result<Option<String>, ErrorReply> {
     Ok(WcState::load_bound(place)?.map(|b| b.view))
 }
 
-/// Whether the command runs as the human: `RDY_ACTOR` unset or naming the human actor.
-pub(crate) fn human_session(env: &Env) -> bool {
+/// Whether the command runs as the human: `RDY_ACTOR` unset or naming the human actor. Naming
+/// one needs the configured person, whose refusal is the error.
+pub(crate) fn human_session(env: &Env) -> Result<bool, ErrorReply> {
     match std::env::var("RDY_ACTOR") {
-        Ok(a) => a == human_actor_for_env(&env.project),
-        Err(_) => true,
+        Ok(a) => Ok(a == human_actor_for_env(&env.project)?),
+        Err(_) => Ok(true),
     }
 }
 
@@ -124,7 +125,7 @@ fn with_bound_view(env: &Env, op: &str, mut args: Value) -> Result<Value, ErrorR
     };
     if wants
         && (args.is_object() || args.is_null())
-        && human_session(env)
+        && human_session(env)?
         && let Some(view) = bound_view(env)?
     {
         args["view"] = Value::String(view);
@@ -190,20 +191,16 @@ impl Conn {
         // daemon (a missing custom pack is the clone's state, not a wrong pack line)
         require_project(&env.project)?;
         if env.no_daemon {
+            // D-ME2C0: the identity is resolved and checked before the store is opened
+            let human = human_actor_for_env(&env.project)?;
+            let session = classify(&human, actor.as_deref(), run.as_deref(), Role::Writer)?;
             let local = Local::open(&env.project)?;
-            let human = human_actor_for_env(&env.project);
-            match classify(&human, actor.as_deref(), run.as_deref(), Role::Writer) {
-                Ok(session) => Ok(Conn::Direct {
-                    local: Box::new(local),
-                    session,
-                    human,
-                    cwd: env.cwd.clone(),
-                }),
-                Err(e) => {
-                    close_local(local);
-                    Err(e.into())
-                }
-            }
+            Ok(Conn::Direct {
+                local: Box::new(local),
+                session,
+                human,
+                cwd: env.cwd.clone(),
+            })
         } else {
             let rt = runtime()?;
             let run_dir = RunDir::of_project(&env.project);

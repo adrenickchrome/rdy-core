@@ -7,13 +7,13 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 pub fn writer() -> Session {
-    Session::human("human:qa".into(), Role::Writer)
+    Session::human("human:qa".into(), Role::Writer).unwrap()
 }
 pub fn approver() -> Session {
-    Session::human("human:qa".into(), Role::Approver)
+    Session::human("human:qa".into(), Role::Approver).unwrap()
 }
 pub fn reader() -> Session {
-    Session::human("human:qa".into(), Role::Reader)
+    Session::human("human:qa".into(), Role::Reader).unwrap()
 }
 /// An agent session (writer) for ownership tests.
 pub fn agent(actor: &str, run: Option<&str>) -> Session {
