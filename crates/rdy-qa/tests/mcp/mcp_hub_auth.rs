@@ -390,11 +390,22 @@ fn hsa8_auth_claims_belong_to_each_session() {
         "E_PERMISSION".to_string(),
         "an agent answers only by relaying a person's words".to_string(),
     );
-    // each call is checked as the session that makes it; a session named after the person is
-    // still an agent session and still relays
+    // a human actor cannot open an MCP session (D-ME2C0): MCP is an agent surface, so a
+    // session named after the person is refused, and the person's words come only by relay
+    let r = c.call(
+        "rdy_session",
+        json!({"actor": "human:qa", "run": null, "role": "writer"}),
+    );
+    assert_eq!(
+        refused(r),
+        (
+            "E_PERMISSION".into(),
+            "an agent session cannot claim a human actor".into()
+        )
+    );
+    // each call is checked as the session that makes it
     for (actor, run) in [
         ("agent:one", Some("r1")),
-        ("human:qa", None),
         ("agent:two", Some("r2")),
         ("agent:one", None),
     ] {
@@ -405,25 +416,21 @@ fn hsa8_auth_claims_belong_to_each_session() {
             "cancelled",
             "{actor}"
         );
-        // state claims the caller's own actor: a human actor from an agent session is not
-        // a hub claim
+        // state claims the caller's own actor
         let r = auth(&mut c, json!({"op": "state", "install": o}));
-        if actor.starts_with("human:") {
-            assert_eq!(
-                refused(r),
-                (
-                    "E_ACTOR_UNBOUND".into(),
-                    "the session actor is not a hub actor".into()
-                )
-            );
-        } else {
-            assert_eq!(ok(r)["state"], "signed_out", "{actor}");
-        }
+        assert_eq!(ok(r)["state"], "signed_out", "{actor}");
     }
-    session(&mut c, "qa-bot", Some("r3"));
+    // an actor outside rdy's actor form cannot open a session, so it never reaches a hub claim
+    let r = c.call(
+        "rdy_session",
+        json!({"actor": "qa-bot", "run": "r3", "role": "writer"}),
+    );
     assert_eq!(
-        refused(auth(&mut c, json!({"op": "sign_out", "install": o}))).0,
-        "E_ACTOR_UNBOUND"
+        refused(r),
+        (
+            "E_BAD_INPUT".into(),
+            "the actor \"qa-bot\" is not in rdy's actor form".into()
+        )
     );
     // a confirmed start by one agent leaves the session that agent: the next answer without
     // words is still refused, and the relay's person never becomes the caller
