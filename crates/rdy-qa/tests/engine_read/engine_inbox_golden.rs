@@ -1,9 +1,9 @@
 //! ib12: golden inbox pages. Ids are seeded and the clock pinned, so every id, hash and cursor in
 //! a page is fixed. Bless with RDY_QA_BLESS=1 cargo test -p rdy-qa --release --test engine_read ib12_.
-//! Both pages' `cursor` (a log offset) was re-taken for DR1a Task 10 (plan
-//! 2026-10-21-rdy-design-rebase-1a, line 838, D-4JMPH: every propose batch writes a plan version,
-//! an item-ful landing a sealed one): the fixtures' proposes and landings write PLAN frames, so the
-//! log ends later. Every entry kept its bytes, as in Task 10's two MCP inbox goldens.
+//! Both pages' `cursor` (a log offset) was re-taken when change plans arrived (D-4JMPH: every
+//! propose batch writes a plan version, an item-ful landing a sealed one): the fixtures' proposes
+//! and landings write PLAN frames, so the log ends later. Every entry kept its bytes, as in the
+//! two MCP inbox goldens.
 use rdy_engine::inbox::api::{InboxRequest, run_inbox};
 use rdy_engine::inbox::sub::subscribe;
 use rdy_engine::{Local, Session, pin_clock};

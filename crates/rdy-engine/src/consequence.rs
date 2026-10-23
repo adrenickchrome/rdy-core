@@ -228,12 +228,12 @@ pub const EDIT_CUT_FIX: &str =
 /// the hint never asks for one (D-M19GV).
 pub const LINEAGE_FIX: &str = "a decision that governs it was refined or partly superseded: check that it still holds, and update it if not; no repin is needed";
 
-/// D-ATBP6 (design thread, TASK-515): the hint on a `confirm` entry for an accepted decision in
+/// D-ATBP6: the hint on a `confirm` entry for an accepted decision in
 /// a refine's or part supersede's reach. An accepted decision is frozen, so it is never asked to
 /// be updated, and the reach moved no pin, so it is never asked to repin.
 pub const LINEAGE_DECISION_FIX: &str = "a decision that governs it was refined or partly superseded: check that it still holds, and supersede it if not; no repin is needed";
 
-/// D-ATBP6 (design thread, TASK-515): the hint on a `confirm` entry for an accepted decision that
+/// D-ATBP6: the hint on a `confirm` entry for an accepted decision that
 /// any other route reaches without a suspect on the cause (a `describes` link, a premise edge
 /// with no pin): a `reaffirm` op would be refused, as there is no suspect to re-affirm.
 pub const REACH_CONFIRM_FIX: &str = "a block it relies on changed: check that it still holds, and supersede it if not; no repin is needed";

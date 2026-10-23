@@ -8,7 +8,9 @@
 //!
 //! [`release_sources`] (`qa-release-sources`) copies those crate files from Cargo's registry
 //! cache into a new directory, checks each copy against `Cargo.lock`, and returns the release
-//! notes part that names them. [`check_release_text`] checks a release's notes against that part.
+//! notes part that names them. [`check_release_text`] checks a release's notes against that part,
+//! and checks their changes part: in place, and naming any store or dump format move since the
+//! previous release with its dump-and-load step (D-7PQEF).
 use crate::platform;
 use crate::release_install::{self, TARGETS, valid_path, valid_target, valid_version};
 use serde::Deserialize;
@@ -67,6 +69,21 @@ pub const MSG_SOURCE: &str = "release sources: source archive does not match Car
 pub const MSG_OUTPUT_EXISTS: &str = "release sources: output exists";
 pub const MSG_FILE_OPERATION: &str = "release sources: file operation failed";
 pub const MSG_NOTES: &str = "release sources: release notes do not match Cargo.lock";
+pub const MSG_CHANGES: &str = "release sources: release notes lack the changes part";
+pub const MSG_FORMAT_MOVE: &str = "release sources: release notes do not name the format move";
+
+/// The published releases, oldest first: each version with the dump format and store format it
+/// writes. The changes part of a release's notes covers everything since the newest row before
+/// it (D-7PQEF). A release adds its row once it is published.
+pub const RELEASED: &[(&str, u32, u32)] = &[("0.17.0", 3, 16)];
+/// The groups of the changes part, in order; each is left out when empty (D-7PQEF).
+pub const CHANGES_GROUPS: [&str; 5] = [
+    "### New features",
+    "### Changes",
+    "### Fixes",
+    "### Security",
+    "### Project and build",
+];
 
 /// The notices of one release target: `THIRD-PARTY-NOTICES.txt`'s bytes and the MPL-2.0-only
 /// packages whose crate files the release attaches.
@@ -97,6 +114,8 @@ enum Kind {
     OutputExists,
     FileOperation,
     Notes,
+    Changes,
+    FormatMove,
 }
 
 impl Kind {
@@ -111,6 +130,8 @@ impl Kind {
             Kind::OutputExists => MSG_OUTPUT_EXISTS,
             Kind::FileOperation => MSG_FILE_OPERATION,
             Kind::Notes => MSG_NOTES,
+            Kind::Changes => MSG_CHANGES,
+            Kind::FormatMove => MSG_FORMAT_MOVE,
         }
     }
 }
@@ -863,6 +884,122 @@ fn check_notes(part: &str, text: &str) -> Result<(), Refused> {
     Ok(())
 }
 
+/// The `(major, minor, patch)` of a plain version.
+fn version_key(version: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = version.split('.').map(|p| p.parse::<u64>().ok());
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(Some(a)), Some(Some(b)), Some(Some(c)), None) => Some((a, b, c)),
+        _ => None,
+    }
+}
+
+/// The release before `version` in `released`: the newest row with a lower version.
+fn previous_release<'a>(
+    version: &str,
+    released: &[(&'a str, u32, u32)],
+) -> Option<(&'a str, u32, u32)> {
+    let key = version_key(version)?;
+    released
+        .iter()
+        .copied()
+        .filter(|(v, _, _)| version_key(v).is_some_and(|k| k < key))
+        .max_by_key(|(v, _, _)| version_key(v))
+}
+
+/// The heading of the changes part, after the previous release `previous`.
+pub fn changes_heading(previous: &str) -> String {
+    format!("## What changed since {previous}")
+}
+
+/// The line that the changes part's Changes group must hold when the formats move from the
+/// previous release `previous` (dump format `pd`, store format `ps`) to `version` (`cd`, `cs`),
+/// or `None` when neither moves.
+fn format_move_line(
+    version: &str,
+    (previous, pd, ps): (&str, u32, u32),
+    (cd, cs): (u32, u32),
+) -> Option<String> {
+    if (pd, ps) == (cd, cs) {
+        return None;
+    }
+    let what = if ps != cs {
+        format!("the store format moves from {ps} to {cs}")
+    } else {
+        format!("the dump format moves from {pd} to {cd}")
+    };
+    let refuses = if ps != cs {
+        format!(" rdy {version} refuses a store made by rdy {previous} with `E_STORE_FORMAT`.")
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "- **Breaking: {what} (dump pair ({pd}, {ps}) to ({cd}, {cs})).**{refuses} To move a project, run `rdy dump --out <file>` with rdy {previous}, then `rdy load <file> <dir>` with rdy {version}, into a directory with no store."
+    ))
+}
+
+/// The format move line of `version` against [`RELEASED`] and this rdy's dump and store
+/// formats, or `None` when neither moves. `Err` when no published release comes before
+/// `version`.
+pub fn release_format_move_line(version: &str) -> Result<Option<String>, String> {
+    let previous = previous_release(version, RELEASED).ok_or(MSG_INVALID_ARGUMENTS)?;
+    Ok(format_move_line(
+        version,
+        previous,
+        (
+            rdy_store::dump::DUMP_FORMAT,
+            rdy_store::format::STORE_FORMAT,
+        ),
+    ))
+}
+
+/// Checks the changes part of release notes `text` (D-7PQEF): exactly one `heading` line; the
+/// level-two heading before it starts `## Try it` and the one after it is `## Feedback`; its
+/// level-three headings are [`CHANGES_GROUPS`], at least one, in order, none twice; and when
+/// `move_line` is given, its Changes group holds that line exactly.
+fn check_changes(heading: &str, move_line: Option<&str>, text: &str) -> Result<(), Refused> {
+    let lines: Vec<&str> = text.lines().collect();
+    let at: Vec<usize> = (0..lines.len()).filter(|&i| lines[i] == heading).collect();
+    let [at] = at[..] else {
+        return Err(refused(Kind::Changes, format!("{} headings", at.len())));
+    };
+    let before = lines[..at].iter().rfind(|l| l.starts_with("## "));
+    if !before.is_some_and(|l| l.starts_with("## Try it")) {
+        return Err(refused(Kind::Changes, "not after ## Try it"));
+    }
+    let end = (at + 1..lines.len())
+        .find(|&i| lines[i].starts_with("## "))
+        .unwrap_or(lines.len());
+    if lines.get(end) != Some(&"## Feedback") {
+        return Err(refused(Kind::Changes, "not before ## Feedback"));
+    }
+    let body = &lines[at + 1..end];
+    let groups: Vec<usize> = (0..body.len())
+        .filter(|&i| body[i].starts_with("### "))
+        .collect();
+    let mut next = 0usize;
+    for &g in &groups {
+        let Some(k) = CHANGES_GROUPS[next..].iter().position(|h| *h == body[g]) else {
+            return Err(refused(Kind::Changes, body[g]));
+        };
+        next += k + 1;
+    }
+    if groups.is_empty() {
+        return Err(refused(Kind::Changes, "no group"));
+    }
+    if let Some(line) = move_line {
+        let changes = groups.iter().position(|&g| body[g] == CHANGES_GROUPS[1]);
+        let held = changes.is_some_and(|i| {
+            let from = groups[i] + 1;
+            let to = groups.get(i + 1).copied().unwrap_or(body.len());
+            body[from..to].contains(&line)
+        });
+        if !held {
+            return Err(refused(Kind::FormatMove, line));
+        }
+    }
+    Ok(())
+}
+
 /// One run of source staging: OUT, open, and the files it made there.
 struct SourceRun {
     parent: File,
@@ -1056,8 +1193,19 @@ fn check_with(version: &str, text: &str, src: &Sources) -> Result<(), Refused> {
     if !valid_version(version) {
         return Err(refused(Kind::Arguments, version));
     }
+    let previous = previous_release(version, RELEASED)
+        .ok_or_else(|| refused(Kind::Arguments, "no earlier release"))?;
     let (mpl, _) = union_sources(src)?;
-    check_notes(&notes_part(version, &mpl)?, text)
+    check_notes(&notes_part(version, &mpl)?, text)?;
+    let line = format_move_line(
+        version,
+        previous,
+        (
+            rdy_store::dump::DUMP_FORMAT,
+            rdy_store::format::STORE_FORMAT,
+        ),
+    );
+    check_changes(&changes_heading(previous.0), line.as_deref(), text)
 }
 
 /// [`check_release_text`] of the release notes file `notes`: a regular file (not a link) of at
@@ -2310,11 +2458,174 @@ mod tests {
         assert_eq!(runs.get(), 0, "Cargo never runs");
     }
 
-    /// Release notes with `part` after Feedback and before the two collapsed sections.
+    /// The changes part of 0.19.0's test notes: after 0.17.0, with the format move line.
+    fn changes_part() -> String {
+        let line = release_format_move_line("0.19.0")
+            .expect("a release before 0.19.0")
+            .expect("the formats moved since 0.17.0");
+        format!(
+            "## What changed since 0.17.0\n\n### New features\n\n- A feature.\n\n### Changes\n\n{line}\n- Another change.\n\n### Fixes\n\n- A fix.\n\n"
+        )
+    }
+
+    /// Release notes with the changes part after Try it, then `part` after Feedback and before
+    /// the two collapsed sections.
     fn notes_with(part: &str) -> String {
         format!(
-            "## What changed\n\nThings.\n\n## Feedback\n\nTell us.\n\n{part}\n<details>\n<summary><b>About this preview</b></summary>\n\nText.\n\n</details>\n\n<details>\n<summary><b>Verify the download (optional)</b></summary>\n\nMore.\n\n</details>\n"
+            "## Try it\n\nSteps.\n\n{}## Feedback\n\nTell us.\n\n{part}\n<details>\n<summary><b>About this preview</b></summary>\n\nText.\n\n</details>\n\n<details>\n<summary><b>Verify the download (optional)</b></summary>\n\nMore.\n\n</details>\n",
+            changes_part()
         )
+    }
+
+    /// The changes part (D-7PQEF): in place after Try it and before Feedback, with known groups
+    /// in order, and the format move line in its Changes group when the formats moved since the
+    /// previous release.
+    #[test]
+    fn plx7_notes_changes_part_names_the_format_move() {
+        assert_eq!(
+            MSG_CHANGES,
+            "release sources: release notes lack the changes part"
+        );
+        assert_eq!(
+            MSG_FORMAT_MOVE,
+            "release sources: release notes do not name the format move"
+        );
+
+        // The move line, for each kind of move, and none without one.
+        assert_eq!(
+            format_move_line("0.20.0", ("0.17.0", 3, 16), (3, 18)).as_deref(),
+            Some(
+                "- **Breaking: the store format moves from 16 to 18 (dump pair (3, 16) to (3, 18)).** rdy 0.20.0 refuses a store made by rdy 0.17.0 with `E_STORE_FORMAT`. To move a project, run `rdy dump --out <file>` with rdy 0.17.0, then `rdy load <file> <dir>` with rdy 0.20.0, into a directory with no store."
+            )
+        );
+        assert_eq!(
+            format_move_line("0.21.0", ("0.20.0", 3, 18), (4, 18)).as_deref(),
+            Some(
+                "- **Breaking: the dump format moves from 3 to 4 (dump pair (3, 18) to (4, 18)).** To move a project, run `rdy dump --out <file>` with rdy 0.20.0, then `rdy load <file> <dir>` with rdy 0.21.0, into a directory with no store."
+            )
+        );
+        assert_eq!(format_move_line("0.21.0", ("0.20.0", 3, 18), (3, 18)), None);
+
+        // The previous release: the newest published row before the version.
+        let table = [("0.17.0", 3, 16), ("0.20.0", 3, 18)];
+        assert_eq!(previous_release("0.21.0", &table), Some(("0.20.0", 3, 18)));
+        assert_eq!(previous_release("0.20.0", &table), Some(("0.17.0", 3, 16)));
+        assert_eq!(previous_release("0.19.0", &table), Some(("0.17.0", 3, 16)));
+        assert_eq!(previous_release("0.17.0", &table), None);
+        assert_eq!(previous_release("0.100.0", &table), Some(("0.20.0", 3, 18)));
+        assert_eq!(
+            release_format_move_line("0.17.0"),
+            Err(MSG_INVALID_ARGUMENTS.to_string())
+        );
+
+        // Good notes pass.
+        let v = "0.19.0";
+        let good = notes_with(&notes_part(v, &locked_mpl()).expect("part"));
+        assert_eq!(check_release_text(v, &good), Ok(()));
+        let line = release_format_move_line(v).expect("ok").expect("a move");
+        let heading = changes_heading("0.17.0");
+        assert_eq!(check_changes(&heading, Some(&line), &good), Ok(()));
+        let only_changes = good.replacen("### New features\n\n- A feature.\n\n", "", 1);
+        assert_eq!(
+            check_release_text(v, &only_changes),
+            Ok(()),
+            "groups may be left out"
+        );
+        assert_eq!(
+            check_changes(&heading, None, &good.replacen(&format!("{line}\n"), "", 1)),
+            Ok(()),
+            "no move, no line"
+        );
+
+        // Notes without the part, or with it out of place or out of shape, refuse.
+        let part = changes_part();
+        let without = good.replacen(&part, "", 1);
+        let wrong_release = good.replacen(&heading, "## What changed since 0.16.0", 1);
+        let twice = good.replacen(&part, &format!("{part}{part}"), 1);
+        let before_try =
+            good.replacen(&part, "", 1)
+                .replacen("## Try it\n", &format!("{part}## Try it\n"), 1);
+        let after_feedback =
+            good.replacen(&part, "", 1)
+                .replacen("Tell us.\n\n", &format!("Tell us.\n\n{part}"), 1);
+        let between = good.replacen("### Fixes", "## Other\n\n### Fixes", 1);
+        let unknown_group = good.replacen("### Fixes", "### Improvements", 1);
+        let out_of_order = good.replacen("### New features", "### Security", 1);
+        let repeated = good.replacen("### Fixes", "### Changes", 1);
+        let no_group = good
+            .replacen("### New features\n\n", "", 1)
+            .replacen("### Changes\n\n", "", 1)
+            .replacen("### Fixes\n\n", "", 1);
+        for (what, text) in [
+            ("no part", &without),
+            ("the wrong previous release", &wrong_release),
+            ("two parts", &twice),
+            ("before Try it", &before_try),
+            ("another heading before Feedback", &between),
+            ("an unknown group", &unknown_group),
+            ("groups out of order", &out_of_order),
+            ("a group twice", &repeated),
+            ("no group", &no_group),
+        ] {
+            assert_eq!(
+                check_changes(&heading, Some(&line), text).map_err(|r| r.kind),
+                Err(Kind::Changes),
+                "{what}"
+            );
+            assert_eq!(
+                check_release_text(v, text),
+                Err(MSG_CHANGES.to_string()),
+                "{what}"
+            );
+        }
+
+        // After Feedback, the part also moves the MPL part off Feedback: the notes refuse on that
+        // first.
+        assert_eq!(
+            check_changes(&heading, Some(&line), &after_feedback).map_err(|r| r.kind),
+            Err(Kind::Changes)
+        );
+        assert_eq!(
+            check_release_text(v, &after_feedback),
+            Err(MSG_NOTES.to_string())
+        );
+
+        // Notes without the format move line, or with it outside the Changes group, refuse.
+        let no_line = good.replacen(&format!("{line}\n"), "", 1);
+        let edited = good.replacen(&line, &line.replace("16 to 18", "17 to 18"), 1);
+        let in_fixes = good.replacen(&format!("{line}\n"), "", 1).replacen(
+            "- A fix.\n",
+            &format!("- A fix.\n{line}\n"),
+            1,
+        );
+        let no_changes_group = good
+            .replacen(&format!("{line}\n"), "", 1)
+            .replacen("### Changes", "### Fixes", 1)
+            .replacen("### Fixes\n\n- A fix.", "### Security\n\n- A fix.", 1)
+            .replacen("- A feature.\n", &format!("- A feature.\n{line}\n"), 1);
+        for (what, text) in [
+            ("no line", &no_line),
+            ("an edited line", &edited),
+            ("the line under Fixes", &in_fixes),
+            ("no Changes group", &no_changes_group),
+        ] {
+            assert_eq!(
+                check_changes(&heading, Some(&line), text).map_err(|r| r.kind),
+                Err(Kind::FormatMove),
+                "{what}"
+            );
+            assert_eq!(
+                check_release_text(v, text),
+                Err(MSG_FORMAT_MOVE.to_string()),
+                "{what}"
+            );
+        }
+
+        // A version with no published release before it is an argument error.
+        assert_eq!(
+            check_release_text("0.17.0", &good),
+            Err(MSG_INVALID_ARGUMENTS.to_string())
+        );
     }
 
     #[test]
