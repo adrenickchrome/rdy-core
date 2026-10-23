@@ -384,3 +384,62 @@ fn id3_cli_and_mcp_share_identity_errors() {
     let (ok, v) = s.json_as("human:qa", Some("r1"), &["--no-daemon", "--json", "status"]);
     assert!(ok, "{v}");
 }
+
+/// id3 (D-ME2C0): an `RDY_ACTOR` or `RDY_RUN` that is not Unicode is a value outside the form,
+/// never an unset variable. Through the daemon, with `--no-daemon`, and in the session of a
+/// reused profile site, the CLI refuses it with the grammar's bounded `E_BAD_INPUT` before it
+/// classifies the session: it neither becomes the configured human nor loses its run. The
+/// refused commands start no daemon.
+#[test]
+fn id3_a_non_unicode_actor_or_run_is_refused_on_every_cli_path() {
+    use rdy_qa::platform::not_unicode;
+    use serde_json::Value;
+    use std::ffi::OsStr;
+    let s = Served::new();
+    let triple = |v: &Value| {
+        (
+            v["code"].as_str().unwrap_or_default().to_string(),
+            v["message"].as_str().unwrap_or_default().to_string(),
+            v["fix"].as_str().unwrap_or_default().to_string(),
+        )
+    };
+    let want = |e: rdy_engine::RdyError| (e.code.to_string(), e.message, e.fix);
+    let bad_actor = want(rdy_engine::identity::validate_actor("agent:\u{fffd}").unwrap_err());
+    let bad_human = want(rdy_engine::identity::validate_actor("human:qa\u{fffd}").unwrap_err());
+    let bad_run = want(rdy_engine::identity::validate_run("r\u{fffd}").unwrap_err());
+    let agent_actor = not_unicode("agent:");
+    let human_actor = not_unicode("human:qa");
+    let run = not_unicode("r");
+    let cases: [(&OsStr, Option<&OsStr>, &(String, String, String)); 5] = [
+        (&agent_actor, None, &bad_actor),
+        (&human_actor, None, &bad_human),
+        (&agent_actor, Some(OsStr::new("r1")), &bad_actor),
+        (OsStr::new("agent:x"), Some(&run), &bad_run),
+        (OsStr::new("human:qa"), Some(&run), &bad_run),
+    ];
+    for (actor, run, want) in cases {
+        for args in [
+            &["--no-daemon", "--json", "status"][..],
+            &["--json", "status"][..],
+        ] {
+            let (ok, v) = s.json_as_os(actor, run, args);
+            assert!(!ok, "{actor:?} {run:?} {args:?}: {v}");
+            assert_eq!(&triple(&v), want, "{actor:?} {run:?} {args:?}");
+        }
+    }
+    assert!(
+        s.daemon_pid().is_none(),
+        "a refused command starts no daemon"
+    );
+    // a running daemon's profile site: the session handshake of `serve --profile`
+    let (ok, v) = s.json(&["--json", "status"]);
+    assert!(ok, "{v}");
+    let pid = s.daemon_pid().expect("the daemon runs");
+    for (actor, run, want) in cases {
+        let (ok, v) = s.json_as_os(actor, run, &["--json", "serve", "--profile", "guide"]);
+        assert!(!ok, "{actor:?} {run:?}: {v}");
+        assert_eq!(&triple(&v), want, "{actor:?} {run:?}: serve --profile");
+    }
+    assert_eq!(s.daemon_pid(), Some(pid), "the same daemon runs");
+    s.stop();
+}

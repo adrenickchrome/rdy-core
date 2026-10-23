@@ -325,9 +325,9 @@ pub const KEY_LEVELS: &[KeyRule] = &[
     },
     // the default is the bounded fallback of `$USER`, taken from the environment in `effective`
     KeyRule {
-        key: "actor",
+        key: ACTOR_KEY,
         levels: PERSON,
-        ty: Ty::OptStr,
+        ty: Ty::Str,
         default: None,
     },
     // signing (D-QVH4N): local and user levels only; `signing_config` reads them
@@ -601,10 +601,19 @@ fn parse_file(text: &str, shown: &str) -> Result<Mapping, RdyError> {
 }
 
 /// The settings of the project at `project` with the user config at `user_file`; refuses a wrong
-/// value type, a file that is not a mapping and a project that has no config. A key in a file of a
-/// level that does not allow it is a warning, and rdy ignores it.
+/// value type, a file that is not a mapping and a project that has no config. Of the `actor`
+/// keys only the selected one is checked, as identity resolution checks it
+/// ([`configured_actor`]): an invalid actor that a valid local one overrides is no error. A key
+/// in a file of a level that does not allow it is a warning, and rdy ignores it.
 pub fn effective(project: &Path, user_file: Option<&Path>) -> Result<Effective, RdyError> {
-    build(Some(project), user_file, false, None)
+    build(Some(project), user_file, Read::Strict, None)
+}
+
+/// The settings as `rdy config` shows them: `effective`, except that the selected actor is only
+/// type-checked. An actor outside the form is shown as written; resolving the person, and every
+/// strict read, refuses it. It never creates a session.
+pub fn inspect(project: &Path, user_file: Option<&Path>) -> Result<Effective, RdyError> {
+    build(Some(project), user_file, Read::Inspect, None)
 }
 
 /// The bytes of the project config and of `.rdy/local.yaml` (`None` when it does not exist),
@@ -622,13 +631,13 @@ pub fn effective_from(
     user_file: Option<&Path>,
     given: GivenFiles<'_>,
 ) -> Result<Effective, RdyError> {
-    build(Some(project), user_file, false, Some(given))
+    build(Some(project), user_file, Read::Strict, Some(given))
 }
 
 /// `effective` that never fails: a wrong value type, or a file that does not read, is left out,
 /// so a client can still start a daemon that then reports the error.
 pub fn effective_lenient(project: &Path, user_file: Option<&Path>) -> Effective {
-    build(Some(project), user_file, true, None).unwrap_or_else(|_| Effective {
+    build(Some(project), user_file, Read::Lenient, None).unwrap_or_else(|_| Effective {
         origins: Vec::new(),
         merged: Mapping::new(),
         warnings: Vec::new(),
@@ -651,7 +660,7 @@ pub fn config_warnings_for_env(project: &Path) -> Vec<Issue> {
 /// read and passes, and none that needs a project (its files and its code repos). Never fails:
 /// a file that does not read adds none.
 pub fn user_config_warnings(user_file: &Path) -> Vec<Issue> {
-    build(None, Some(user_file), true, None)
+    build(None, Some(user_file), Read::Lenient, None)
         .map(|e| e.warnings)
         .unwrap_or_default()
 }
@@ -1106,13 +1115,26 @@ fn wrong_type(map: &Mapping, rule: &KeyRule) -> Option<String> {
     None
 }
 
+/// How a read of the levels treats what it cannot use.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Read {
+    /// Every error refuses; the selected actor is checked as identity resolution checks it.
+    Strict,
+    /// `Strict`, except that the selected actor is only type-checked (the config display).
+    Inspect,
+    /// Nothing refuses: a file that does not read, or a wrong type, is left out (warnings only;
+    /// never a session).
+    Lenient,
+}
+
 /// The settings of the levels: with no `project`, the user config alone (lenient only).
 fn build(
     project: Option<&Path>,
     user_file: Option<&Path>,
-    lenient: bool,
+    read: Read,
     given: Option<GivenFiles<'_>>,
 ) -> Result<Effective, RdyError> {
+    let lenient = read == Read::Lenient;
     if let Some(p) = project
         && !lenient
         && given.is_none()
@@ -1160,6 +1182,10 @@ fn build(
     warnings.extend(hub.warnings.iter().cloned());
     for (level, map) in &mut files {
         for rule in KEY_LEVELS {
+            // a refusing read checks only the selected actor, below, as resolution does
+            if rule.key == ACTOR_KEY && !lenient {
+                continue;
+            }
             let Some(why) = wrong_type(map, rule) else {
                 continue;
             };
@@ -1178,6 +1204,9 @@ fn build(
                 map.remove(head);
             }
         }
+    }
+    if !lenient {
+        select_actor(&mut files, user_file, read)?;
     }
     for (level, map) in &mut files {
         warnings.extend(range_warnings(map));
@@ -1254,7 +1283,7 @@ fn build(
         }
         let default = match rule.key {
             // the bounded fallback the person resolves to (D-Q8NFG): human:unknown with no USER
-            "actor" => Some(Value::from(crate::identity::fallback_actor(
+            ACTOR_KEY => Some(Value::from(crate::identity::fallback_actor(
                 std::env::var("USER").ok().as_deref(),
             ))),
             _ => rule.default.and_then(|d| serde_yaml_ng::from_str(d).ok()),
@@ -1529,31 +1558,53 @@ fn linked_core(
 const ACTOR_FORMS: &str =
     "human:<name>, agent:<name>, agent:<handle>/<name> or ci:<repo_id>/<name>";
 
-/// The configured person (D-Q8NFG, O5, O9): of the raw `actor` values of `.rdy/local.yaml` and
-/// the user config, each with the name of its file, the local one if present, else the user's.
-/// `None` only when neither file has the key; a present key is never skipped, so an empty
-/// string or a null is refused like any value outside the form. A value that is not a string is
-/// `E_CONFIG` in the words of the effective read; a string outside the actor form is the
-/// grammar's `E_BAD_INPUT` with a fix naming the file. The value is never rewritten.
-pub(crate) fn configured_actor(
-    local: Option<(&Value, &str)>,
-    user: Option<(&Value, &str)>,
-) -> Result<Option<String>, RdyError> {
+/// The key of the configured person.
+const ACTOR_KEY: &str = "actor";
+
+/// The actor the shared selector picks (D-Q8NFG, O5, O9): of the raw `actor` values of
+/// `.rdy/local.yaml` and the user config, each with the name of its file, the local one if
+/// present, else the user's, with that name. `None` only when neither file has the key; a
+/// present key is never skipped. The selected value must be a string: any other value, a YAML
+/// null among them, is `E_CONFIG` in the words of the effective read's type check, never absent
+/// and never an empty actor.
+fn selected_actor<'a>(
+    local: Option<(&'a Value, &'a str)>,
+    user: Option<(&'a Value, &'a str)>,
+) -> Result<Option<(&'a str, &'a str)>, RdyError> {
     let Some((value, shown)) = local.or(user) else {
         return Ok(None);
     };
     let rule = KEY_LEVELS
         .iter()
-        .find(|r| r.key == "actor")
+        .find(|r| r.key == ACTOR_KEY)
         .expect("actor is a settable key");
-    if let Err(why) = rule.ty.check(value) {
-        return Err(RdyError::new(
+    let type_error = |why: String| {
+        RdyError::new(
             E_CONFIG,
             format!("{} in {shown}: {why}", rule.key),
             format!("fix {} in {shown}", rule.key),
-        ));
+        )
+    };
+    rule.ty.check(value).map_err(type_error)?;
+    match value.as_str() {
+        Some(actor) => Ok(Some((actor, shown))),
+        None => Err(type_error(format!(
+            "invalid type: {}, expected a string",
+            flow(value)
+        ))),
     }
-    let actor = value.as_str().unwrap_or_default();
+}
+
+/// The configured person (D-Q8NFG, O5, O9): the actor [`selected_actor`] picks, `None` only when
+/// neither file has the key. A string outside the actor form (an empty one among them) is the
+/// grammar's `E_BAD_INPUT` with a fix naming the file. The value is never rewritten.
+pub(crate) fn configured_actor(
+    local: Option<(&Value, &str)>,
+    user: Option<(&Value, &str)>,
+) -> Result<Option<String>, RdyError> {
+    let Some((actor, shown)) = selected_actor(local, user)? else {
+        return Ok(None);
+    };
     crate::identity::validate_actor(actor).map_err(|mut e| {
         e.fix = format!("set actor in {shown} to {ACTOR_FORMS}");
         e
@@ -1561,9 +1612,39 @@ pub(crate) fn configured_actor(
     Ok(Some(actor.to_string()))
 }
 
+/// The selected actor of the read files, checked as `read` checks it (`Strict`: as identity
+/// resolution, [`configured_actor`]; `Inspect`: its type alone); the user config's actor, when a
+/// local one overrides it, is dropped unchecked, so no value the selector ignores reaches the
+/// settings.
+fn select_actor(
+    files: &mut [(Level, Mapping)],
+    user_file: Option<&Path>,
+    read: Read,
+) -> Result<(), RdyError> {
+    let local_shown = file_name(Level::Local, user_file);
+    let user_shown = file_name(Level::User, user_file);
+    let map_of = |level: Level| files.iter().find(|(l, _)| *l == level).map(|(_, m)| m);
+    let local = actor_value(map_of(Level::Local), &local_shown);
+    let user = actor_value(map_of(Level::User), &user_shown);
+    let overridden = local.is_some() && user.is_some();
+    match read {
+        Read::Strict => {
+            configured_actor(local, user)?;
+        }
+        Read::Inspect => {
+            selected_actor(local, user)?;
+        }
+        Read::Lenient => {}
+    }
+    if overridden && let Some((_, map)) = files.iter_mut().find(|(l, _)| *l == Level::User) {
+        map.remove(ACTOR_KEY);
+    }
+    Ok(())
+}
+
 /// The raw `actor` value of a file read as a mapping, with the file's name.
 fn actor_value<'a>(map: Option<&'a Mapping>, shown: &'a str) -> Option<(&'a Value, &'a str)> {
-    map.and_then(|m| m.get("actor")).map(|v| (v, shown))
+    map.and_then(|m| m.get(ACTOR_KEY)).map(|v| (v, shown))
 }
 
 /// The human actor of the user config at `user_file` alone: its `actor`, read within the config

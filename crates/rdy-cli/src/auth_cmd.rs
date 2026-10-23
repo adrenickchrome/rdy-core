@@ -133,14 +133,13 @@ fn token_line(g: &AccessGrant) -> String {
 
 /// The standalone caller: the bounded configured person (for a sign-out whose settings do not
 /// load, the user config's actor read on its own), classified with
-/// `RDY_ACTOR` and `RDY_RUN` as a writer.
+/// `RDY_ACTOR` and `RDY_RUN` as a writer (an identity that is not Unicode is refused).
 fn caller(
     settings: Option<&HubConfig>,
     user_file: &std::path::Path,
 ) -> Result<(Session, String), RdyError> {
     let person = auth_person(settings, user_file)?;
-    let actor = std::env::var("RDY_ACTOR").ok();
-    let run = std::env::var("RDY_RUN").ok();
+    let (actor, run) = crate::conn::session_env()?;
     let session = classify(&person, actor.as_deref(), run.as_deref(), Role::Writer)?;
     Ok((session, person))
 }

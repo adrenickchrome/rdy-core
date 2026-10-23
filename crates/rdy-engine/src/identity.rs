@@ -99,19 +99,36 @@ pub fn is_run(value: &str) -> bool {
         && !value.starts_with(RESERVED_RUN_PREFIX)
 }
 
-/// `E_BAD_INPUT` unless `value` is in the actor form.
-pub fn validate_actor(value: &str) -> Result<(), RdyError> {
-    if is_actor(value) {
-        return Ok(());
-    }
-    Err(RdyError::new(
+/// The refusal of `value` as an actor: its bounded echo, and the form as the fix.
+fn actor_refusal(value: &str) -> RdyError {
+    RdyError::new(
         E_BAD_INPUT,
         format!(
             "the actor {:?} is not in rdy's actor form",
             crate::views::clip(value)
         ),
         ACTOR_FIX,
-    ))
+    )
+}
+
+/// The refusal of `value` as a run: its bounded echo, and the form as the fix.
+fn run_refusal(value: &str) -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        format!(
+            "the run {:?} is not in rdy's run form",
+            crate::views::clip(value)
+        ),
+        RUN_FIX,
+    )
+}
+
+/// `E_BAD_INPUT` unless `value` is in the actor form.
+pub fn validate_actor(value: &str) -> Result<(), RdyError> {
+    if is_actor(value) {
+        return Ok(());
+    }
+    Err(actor_refusal(value))
 }
 
 /// `E_BAD_INPUT` unless `value` is in the run form.
@@ -119,14 +136,44 @@ pub fn validate_run(value: &str) -> Result<(), RdyError> {
     if is_run(value) {
         return Ok(());
     }
-    Err(RdyError::new(
-        E_BAD_INPUT,
-        format!(
-            "the run {:?} is not in rdy's run form",
-            crate::views::clip(value)
-        ),
-        RUN_FIX,
-    ))
+    Err(run_refusal(value))
+}
+
+/// The most bytes of a value that is not Unicode that its refusal decodes: enough for the
+/// 80-scalar echo and its ellipsis, since each decoded scalar takes at most four bytes.
+const ENV_ECHO_BYTES: usize = 4 * 81;
+
+/// A session identity read from the environment, as `refusal` refuses it: `None` when the
+/// variable is unset, the text when it is Unicode (checked later, with every supplied value),
+/// and the refusal of its lossy, bounded decoding when it is not. Such a value is outside the
+/// form (the replacement character is in no form), never an unset variable.
+fn env_value(
+    value: Option<&std::ffi::OsStr>,
+    refusal: fn(&str) -> RdyError,
+) -> Result<Option<String>, RdyError> {
+    let Some(v) = value else {
+        return Ok(None);
+    };
+    match v.to_str() {
+        Some(text) => Ok(Some(text.to_string())),
+        None => {
+            let bytes = v.as_encoded_bytes();
+            let head = &bytes[..bytes.len().min(ENV_ECHO_BYTES)];
+            Err(refusal(&String::from_utf8_lossy(head)))
+        }
+    }
+}
+
+/// `RDY_ACTOR` as a session reads it (`std::env::var_os`): unset is `None`; a value that is not
+/// Unicode is the actor refusal, never unset.
+pub fn env_actor(value: Option<&std::ffi::OsStr>) -> Result<Option<String>, RdyError> {
+    env_value(value, actor_refusal)
+}
+
+/// `RDY_RUN` as a session reads it (`std::env::var_os`): unset is `None`; a value that is not
+/// Unicode is the run refusal, never unset.
+pub fn env_run(value: Option<&std::ffi::OsStr>) -> Result<Option<String>, RdyError> {
+    env_value(value, run_refusal)
 }
 
 /// The human actor made from USER when no actor is configured (D-Q8NFG): each scalar of USER

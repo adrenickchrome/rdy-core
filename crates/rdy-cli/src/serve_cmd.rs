@@ -257,8 +257,15 @@ async fn winner(run: &RunDir, hello: &Hello, start_timeout: Duration) -> Option<
 /// one, then `site_url` with the profile and `only`. Closing the connection leaves the daemon
 /// running.
 fn reuse(rt: &tokio::runtime::Runtime, client: Client, profile: &str, as_json: bool) -> ExitCode {
-    let actor = std::env::var("RDY_ACTOR").ok();
-    let run = std::env::var("RDY_RUN").ok();
+    // D-ME2C0: an identity that is not Unicode is refused before the session handshake
+    let (actor, run) = match crate::conn::session_env() {
+        Ok(pair) => pair,
+        Err(e) => {
+            client.close();
+            print_error(&e.into(), as_json);
+            return ExitCode::FAILURE;
+        }
+    };
     let mut client = client.with_agent(Arc::new(CallerAgent::from_env()));
     let out = rt.block_on(async {
         client

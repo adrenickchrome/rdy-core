@@ -3,7 +3,8 @@
 //! install fields merge user then local; the hub subtree never comes from `.rdy.yaml`. The
 //! credential file is the user config's sibling, and only its own codec reads it.
 use rdy_engine::config_levels::{
-    Level, effective, effective_lenient, human_actor_for, user_config_warnings,
+    GivenFiles, Level, effective, effective_from, effective_lenient, human_actor_for, inspect,
+    user_config_warnings,
 };
 use rdy_engine::hub_config::*;
 use rdy_engine::hub_types::{Origin, RemoteUrl, Secret};
@@ -1367,7 +1368,7 @@ fn id3_config_actor_failure_is_bounded_and_names_its_file() {
     let hub = fx.load().unwrap();
     assert_eq!(hub.remotes().len(), 1);
     assert_eq!(hub.select_remote(None).unwrap().name, "a");
-    let shown_cfg = effective(fx.project(), Some(&fx.user_file())).unwrap();
+    let shown_cfg = inspect(fx.project(), Some(&fx.user_file())).unwrap();
     let row = shown_cfg.origins.iter().find(|o| o.key == "actor").unwrap();
     assert_eq!(
         (row.value.as_str(), row.level),
@@ -1440,4 +1441,170 @@ fn id3_config_actor_failure_is_bounded_and_names_its_file() {
         (e.0.as_str(), e.1.as_str()),
         (E_LIMIT, "config input exceeds 1048576 bytes")
     );
+}
+
+/// Every refusal or success of the configured actor in `fx`, as each reader gives it: the three
+/// identity resolutions, then the strict effective reads (`effective`, `effective_from`) as
+/// `Ok("")` when they succeed.
+fn actor_readers(fx: &Fx) -> Vec<Result<String, (String, String, String)>> {
+    let uf = fx.user_file();
+    let err = |e: rdy_engine::RdyError| (e.code.to_string(), e.message, e.fix);
+    let project = std::fs::read(fx.project().join(".rdy.yaml")).unwrap();
+    let local = std::fs::read(fx.project().join(".rdy/local.yaml")).ok();
+    vec![
+        human_actor_for(fx.project(), Some(&uf), Some("qa")).map_err(err),
+        fx.load()
+            .map_err(err)
+            .and_then(|h| h.human_actor(Some("qa")).map_err(err)),
+        configured_human_actor(Some(fx.project()), Some(&uf), Some("qa")).map_err(err),
+        effective(fx.project(), Some(&uf))
+            .map(|_| String::new())
+            .map_err(err),
+        effective_from(
+            fx.project(),
+            Some(&uf),
+            GivenFiles {
+                project: &project,
+                local: local.as_deref(),
+            },
+        )
+        .map(|_| String::new())
+        .map_err(err),
+    ]
+}
+
+/// The `actor` row `rdy config` shows for `fx`: its value and level.
+fn shown_actor(fx: &Fx) -> (Value, Level) {
+    let e = inspect(fx.project(), Some(&fx.user_file())).unwrap();
+    let row = e.origins.iter().find(|o| o.key == "actor").unwrap();
+    (row.value.clone(), row.level)
+}
+
+/// id3 (D-Q8NFG, O5, O9): a strict effective read checks the actor the shared selector picks
+/// (local, else user) and nothing else: an invalid selected actor is refused as identity
+/// resolution refuses it, and an invalid actor that a valid local one overrides is no error
+/// there either. The config display (`inspect`) is separate: it shows an actor outside the form
+/// as written.
+#[test]
+fn id3_strict_config_reads_check_only_the_selected_actor() {
+    const FORM: &str = "human:<name>, agent:<name>, agent:<handle>/<name> or ci:<repo_id>/<name>";
+    let refused = |fx: &Fx, what: &str| {
+        let all = actor_readers(fx);
+        assert!(all.windows(2).all(|w| w[0] == w[1]), "{what}: {all:?}");
+        all.into_iter().next().unwrap().unwrap_err()
+    };
+    let resolved = |fx: &Fx, what: &str| {
+        let all = actor_readers(fx);
+        assert!(all[..3].windows(2).all(|w| w[0] == w[1]), "{what}: {all:?}");
+        assert_eq!(all[3..], [Ok(String::new()), Ok(String::new())], "{what}");
+        all[0].clone().unwrap()
+    };
+    // an invalid local actor: every strict read refuses it, naming the local file
+    let fx = Fx::new("", Some("actor: Nick\n"), Some("actor: human:u\n"));
+    assert_eq!(
+        refused(&fx, "invalid local"),
+        (
+            E_BAD_INPUT.to_string(),
+            "the actor \"Nick\" is not in rdy's actor form".to_string(),
+            format!("set actor in .rdy/local.yaml to {FORM}")
+        )
+    );
+    assert_eq!(shown_actor(&fx), (Value::from("Nick"), Level::Local));
+    // a valid local actor overrides a user actor of the wrong type, or outside the form
+    for user in ["actor: 5\n", "actor: Nick\n", "actor: [a, b]\n", "actor:\n"] {
+        let fx = Fx::new("", Some("actor: human:l\n"), Some(user));
+        assert_eq!(resolved(&fx, user), "human:l", "{user}");
+        assert_eq!(shown_actor(&fx), (Value::from("human:l"), Level::Local));
+    }
+    // a selected actor of the wrong type: E_CONFIG naming the file, in every read
+    let fx = Fx::new("", None, Some("actor: 5\n"));
+    let e = refused(&fx, "wrong type");
+    let shown = fx.user_file().display().to_string();
+    assert_eq!(e.0, E_CONFIG, "{e:?}");
+    assert!(e.1.starts_with(&format!("actor in {shown}: ")), "{e:?}");
+    assert_eq!(e.2, format!("fix actor in {shown}"));
+    let shown_err = inspect(fx.project(), Some(&fx.user_file())).unwrap_err();
+    assert_eq!(
+        (shown_err.code.to_string(), shown_err.message, shown_err.fix),
+        e,
+        "the display refuses a wrong type as before"
+    );
+    // a valid actor of each kind passes every strict read, unchanged
+    for actor in [
+        "human:nick",
+        "agent:claude/r7",
+        "ci:0123456789abcdef0123456789abcdef/nightly",
+    ] {
+        let fx = Fx::new("", None, Some(&format!("actor: {actor}\n")));
+        assert_eq!(resolved(&fx, actor), actor);
+        assert_eq!(shown_actor(&fx), (Value::from(actor), Level::User));
+    }
+    // a file that does not read is still its own error, before any actor check
+    let fx = Fx::new("", Some("actor: [human:l\n"), Some("actor: human:u\n"));
+    assert_eq!(refused(&fx, "malformed local").0, E_CONFIG);
+    // a wrong-level project actor stays an ignored key with its warning
+    let fx = Fx::new("actor: Nick\n", None, Some("actor: human:u\n"));
+    assert_eq!(resolved(&fx, "project actor"), "human:u");
+    let warnings = effective(fx.project(), Some(&fx.user_file()))
+        .unwrap()
+        .warnings;
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.code == "W_CONFIG_UNKNOWN" && w.message.contains("actor")),
+        "{warnings:?}"
+    );
+}
+
+/// id3 (D-Q8NFG, O5): the selected `actor` must be a string. A YAML null (`actor:` or
+/// `actor: null`) is present and of the wrong type: `E_CONFIG` naming the file and the key, as
+/// the effective read gives a wrong type, never an empty actor and never absent. An empty
+/// string is present and outside the form; only an absent key falls through to the next level
+/// and then to the bounded fallback.
+#[test]
+fn id3_a_null_actor_is_a_type_error_and_differs_from_empty_and_absent() {
+    const FORM: &str = "human:<name>, agent:<name>, agent:<handle>/<name> or ci:<repo_id>/<name>";
+    let all = |fx: &Fx| {
+        let r = actor_readers(fx);
+        assert!(r[..3].windows(2).all(|w| w[0] == w[1]), "{r:?}");
+        r
+    };
+    for null in ["actor: null\n", "actor:\n", "actor: ~\n"] {
+        let fx = Fx::new("", Some(null), Some("actor: human:u\n"));
+        let r = all(&fx);
+        assert!(r.windows(2).all(|w| w[0] == w[1]), "{null}: {r:?}");
+        let e = r[0].clone().unwrap_err();
+        assert_eq!(e.0, E_CONFIG, "{null}: {e:?}");
+        assert!(
+            e.1.starts_with("actor in .rdy/local.yaml: invalid type: "),
+            "{null}: {e:?}"
+        );
+        assert_eq!(e.2, "fix actor in .rdy/local.yaml", "{null}");
+        // the user config's null, selected when no local actor is set
+        let fx = Fx::new("", None, Some(null));
+        let e = all(&fx)[0].clone().unwrap_err();
+        let shown = fx.user_file().display().to_string();
+        assert_eq!(
+            (e.0.as_str(), e.2.as_str()),
+            (E_CONFIG, format!("fix actor in {shown}").as_str()),
+            "{null}: {e:?}"
+        );
+    }
+    // an empty string: present and outside the form
+    let fx = Fx::new("", Some("actor: \"\"\n"), Some("actor: human:u\n"));
+    let r = all(&fx);
+    assert!(r.windows(2).all(|w| w[0] == w[1]), "{r:?}");
+    assert_eq!(
+        r[0].clone().unwrap_err(),
+        (
+            E_BAD_INPUT.to_string(),
+            "the actor \"\" is not in rdy's actor form".to_string(),
+            format!("set actor in .rdy/local.yaml to {FORM}")
+        )
+    );
+    // absent: the user's actor, then the bounded fallback
+    let fx = Fx::new("", Some("pack: x\n"), Some("actor: human:u\n"));
+    assert_eq!(all(&fx)[0], Ok("human:u".to_string()));
+    let fx = Fx::new("", None, Some(""));
+    assert_eq!(all(&fx)[0], Ok("human:qa".to_string()));
 }
