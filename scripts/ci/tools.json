@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "verified_at": "2026-10-22",
+  "source": "GitHub official upstream release metadata; review updates before changing these digests.",
+  "tools": {
+    "actionlint": {
+      "version": "1.7.12",
+      "platforms": {
+        "Linux-x86_64": {
+          "url": "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz",
+          "sha256": "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
+          "binary": "actionlint"
+        },
+        "Darwin-arm64": {
+          "url": "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_darwin_arm64.tar.gz",
+          "sha256": "aba9ced2dee8d27fecca3dc7feb1a7f9a52caefa1eb46f3271ea66b6e0e6953f",
+          "binary": "actionlint"
+        }
+      }
+    },
+    "gitleaks": {
+      "version": "8.30.1",
+      "platforms": {
+        "Linux-x86_64": {
+          "url": "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz",
+          "sha256": "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb",
+          "binary": "gitleaks"
+        },
+        "Darwin-arm64": {
+          "url": "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_darwin_arm64.tar.gz",
+          "sha256": "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+          "binary": "gitleaks"
+        }
+      }
+    },
+    "cargo-deny": {
+      "version": "0.20.2",
+      "platforms": {
+        "Linux-x86_64": {
+          "url": "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz",
+          "sha256": "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f",
+          "binary": "cargo-deny"
+        },
+        "Darwin-arm64": {
+          "url": "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-aarch64-apple-darwin.tar.gz",
+          "sha256": "fe67d82a10d8597a3549364cb733a3f9cc1bfff9031b7ae46384a9f2a72090c3",
+          "binary": "cargo-deny"
+        }
+      }
+    },
+    "cargo-llvm-cov": {
+      "version": "0.9.1",
+      "platforms": {
+        "Linux-x86_64": {
+          "url": "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.9.1/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz",
+          "sha256": "b3f68e625481fed9b16444174f3fa5ebcdbde4a1878803a35eabe2dcefcdc41a",
+          "binary": "cargo-llvm-cov"
+        },
+        "Darwin-arm64": {
+          "url": "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.9.1/cargo-llvm-cov-aarch64-apple-darwin.tar.gz",
+          "sha256": "7e821a6c90c0884f79f759f5d9be50799ade67bb82515186d922f26032ef43b8",
+          "binary": "cargo-llvm-cov"
+        }
+      }
+    }
+  }
+}

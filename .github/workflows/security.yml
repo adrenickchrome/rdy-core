@@ -1,0 +1,126 @@
+# Security checks: workflow lint, secret scan, dependency policy and CodeQL. Advisory for now: this is
+# not a required check, and it stays red while known dependency findings are open. No ignores or waivers.
+name: security
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 8 * * 1"
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: security-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  policy:
+    name: Dependency, secret and workflow policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Verified tools
+        # The archive digests are checked before any tool runs (scripts/ci/tools.json).
+        run: |
+          python3 scripts/ci/install_tools.py --out "$RUNNER_TEMP/security-tools" actionlint gitleaks cargo-deny
+          echo "$RUNNER_TEMP/security-tools" >> "$GITHUB_PATH"
+      - name: Workflow syntax
+        run: actionlint -config-file scripts/ci/actionlint.yaml -shellcheck= -pyflakes=
+      - name: Secret scan (values redacted)
+        # Exceptions live only in scripts/ci/gitleaks.toml. Inline gitleaks:allow comments are
+        # ignored, and the ignore file is read from an empty directory, so none applies.
+        run: |
+          mkdir -p "$RUNNER_TEMP/no-ignore-file"
+          gitleaks dir . --config scripts/ci/gitleaks.toml --ignore-gitleaks-allow \
+            --gitleaks-ignore-path "$RUNNER_TEMP/no-ignore-file" --redact=100 --no-banner
+      - name: Toolchain and locked dependencies
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal
+          cargo +1.99.0 fetch --locked
+      - name: Full dependency policy with fresh advisory data
+        run: cargo +1.99.0 deny --locked check advisories licenses bans sources
+  dependency-review:
+    # Its own job, so it runs on every pull request even when the dependency policy above fails.
+    name: Pull request dependency delta
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: never
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [rust, actions]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+      - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
+        with:
+          category: /language:${{ matrix.language }}
+          output: sarif
+          upload: true
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: codeql-sarif-${{ matrix.language }}
+          path: sarif
+          retention-days: 7
+      # Each CodeQL false positive is checked and then dismissed on its alert, with its reason.
+      # There are no rule, query or path exclusions. So the SARIF step does not block on results:
+      # it fails on analyzer errors and malformed SARIF, and it lists every high or critical result.
+      # The alert step blocks: any open high or critical CodeQL alert on the analysed ref fails the
+      # job, whatever its category, so each language job also sees the other language's alerts.
+      # Dismissed and fixed alerts do not block. If the alerts cannot be read, the step fails.
+      - name: Analysis is complete; list high and critical results
+        run: python3 scripts/ci/check_sarif.py sarif sarif
+      - name: Open high and critical alerts block
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ALERT_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.ref }}
+        run: python3 scripts/ci/check_sarif.py alerts --tool CodeQL --ref "$ALERT_REF"
+  required:
+    # One result for all jobs. It is not a required check. The dependency delta runs only on pull
+    # requests; on other events it is skipped, and that counts as a pass.
+    name: Core security
+    if: always()
+    needs: [policy, dependency-review, codeql]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: All results must succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          results = {name: value['result'] for name, value in json.loads(os.environ['RESULTS']).items()}
+          assert set(results) == {'policy', 'dependency-review', 'codeql'}, results
+          if os.environ['EVENT'] != 'pull_request' and results['dependency-review'] == 'skipped':
+              del results['dependency-review']
+          assert all(result == 'success' for result in results.values()), results
+          PY

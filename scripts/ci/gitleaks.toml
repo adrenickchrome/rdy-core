@@ -1,0 +1,37 @@
+# Secret scan policy: the gitleaks default rules, plus the exceptions below for committed test data.
+# Each exception has a description. Inline gitleaks:allow comments and .gitleaksignore files are not
+# used. Never add a whole src/ tree here.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Golden and expected-output files of the QA crate (dump, sync and MCP responses). Generated test data with no live credentials."
+paths = [
+  '''(?:^|/)crates/rdy-qa/fixtures/''',
+  '''(?:^|/)crates/rdy-qa/tests/golden/''',
+]
+
+[[allowlists]]
+description = "The two public SSH key fingerprints in the signing test vector notes. They are hashes of public keys. Both the file and the exact value must match."
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = [
+  '''(?:^|/)crates/rdy-engine/tests/signing_crypto\.rs$''',
+]
+regexes = [
+  '''^(?:UCUiLr7Pjs9wFFJMDByLgc3NrtdU344OgUM45wZPcIQ|6gcI7q24Uf/4jZEyRdzDIZ2x5pW2AxPAQt/lgHoHae0)$''',
+]
+
+[[allowlists]]
+description = "Synthetic hub tokens in authentication tests. The body after the rdyh_ or rdyx_ prefix is a fixed alphabet run, TESTVECTOR four times or 40 zeros, then a 6-character check."
+targetRules = ["generic-api-key"]
+regexes = [
+  '''^rdy[hx]_[a-z]_(?:0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd|efghijklmnopqrstuvwxyz0123456789ABCDEFGH|(?:TESTVECTOR){4}|0{40})[A-Za-z0-9]{6}$''',
+]
+
+[[allowlists]]
+description = "Synthetic brief base tokens in the brief renderer unit tests. The hex digits in order."
+targetRules = ["generic-api-key"]
+regexes = [
+  '''^(?:0123456789abcdef(?:0123)?|abcdef0123456789)$''',
+]
