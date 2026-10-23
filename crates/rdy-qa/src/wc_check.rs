@@ -30,17 +30,27 @@ use std::path::Path;
 /// engine metadata fields, in that order.
 pub const STORE_ONLY_FIELDS: &[&str] = &["key_auto", "reaffirmed", "reflects_at"];
 
-/// Link kinds that live only in the store (justification links).
-pub const STORE_ONLY_LINK_KINDS: &[&str] = &["decided_by", "implements"];
+/// Link kinds that live only in the store (justification links): D-4WC6R adds `reflects`, the
+/// engine link kind from a block to the source it reflects.
+pub const STORE_ONLY_LINK_KINDS: &[&str] = &["decided_by", "implements", "reflects"];
 
-/// A link of any other kind whose target has one of these types is store-only too.
-pub const STORE_ONLY_TARGET_TYPES: &[&str] = &["decision", "question"];
+/// A link of any other kind whose target has one of these types is store-only too. D-Z8P09 makes
+/// findings and sources supporting types, so a link to one stays in the store.
+pub const STORE_ONLY_TARGET_TYPES: &[&str] = &["decision", "question", "finding", "source"];
 
 /// The supporting block types of the standard pack: never written into the tree, with their
 /// subtrees. The spec also lists reviews, tensions and intents as supporting; those are store
 /// records and not block types, so no export entry has them. The list is the oracle's own and
-/// names `rdy-standard`'s types: a pack that adds a supporting type needs it added here.
-pub const SUPPORTING_TYPES: &[&str] = &["decision", "publication_profile", "question", "rationale"];
+/// names `rdy-standard`'s types: a pack that adds a supporting type needs it added here. D-Z8P09
+/// adds the engine's finding and source to every pack.
+pub const SUPPORTING_TYPES: &[&str] = &[
+    "decision",
+    "publication_profile",
+    "question",
+    "rationale",
+    "finding",
+    "source",
+];
 
 fn violation(rule: &'static str, detail: impl Into<String>) -> Violation {
     Violation {

@@ -1,6 +1,7 @@
 use crate::glob::Glob;
 use crate::pack::{BodyRule, FieldKind, Pack, TypeClass};
 use crate::publication;
+use crate::supporting;
 use rdy_model::{Block, BlockId, FieldValue, RefMode, ref_spans};
 use rdy_model::{decision, engine_fields, tree};
 use serde::Serialize;
@@ -33,7 +34,7 @@ pub const MAX_REFLECTS_GLOBS: usize = 32;
 /// The fix of a publication profile placed anywhere but directly under a doc.
 const PROFILE_PARENT_FIX: &str = "set parent to a doc id";
 
-fn err(block: &Block, code: &'static str, message: String, fix: String) -> Issue {
+pub(crate) fn err(block: &Block, code: &'static str, message: String, fix: String) -> Issue {
     Issue {
         severity: Severity::Error,
         code,
@@ -250,6 +251,11 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
                 continue;
             }
             check_reflects(block, v, &mut out);
+            continue;
+        }
+        if block.block_type == supporting::FINDING && name == supporting::EVIDENCE_FIELD {
+            // rf1: a finding's evidence has its own closed shape (D-Z8P09)
+            out.extend(supporting::validate_evidence(block));
             continue;
         }
         match def.fields.get(name) {

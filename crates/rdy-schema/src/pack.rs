@@ -68,11 +68,13 @@ impl TypeClass {
     }
 }
 
-/// Link kinds that live only in the store: a working-copy file never shows them.
-pub const STORE_ONLY_LINK_KINDS: &[&str] = &["decided_by", "implements"];
+/// Link kinds that live only in the store: a working-copy file never shows them. `reflects`
+/// links a block to the source it reflects (D-4WC6R).
+pub const STORE_ONLY_LINK_KINDS: &[&str] = &["decided_by", "implements", "reflects"];
 
-/// A link of any other kind whose target has one of these types is store-only too.
-pub const STORE_ONLY_TARGET_TYPES: &[&str] = &["decision", "question"];
+/// A link of any other kind whose target has one of these types is store-only too. Findings and
+/// sources are supporting types (D-Z8P09).
+pub const STORE_ONLY_TARGET_TYPES: &[&str] = &["decision", "question", "finding", "source"];
 
 /// Fields rdy sets and keeps in the store: a working-copy file never shows them, and a file that
 /// sets one is refused. They are `rdy_model::key::AUTO_FIELD` and the engine metadata fields

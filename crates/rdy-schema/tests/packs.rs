@@ -12,6 +12,8 @@ fn standard_pack_resolves_with_engine_types() {
         vec!["proposed", "accepted", "rejected"]
     );
     assert!(pack.block_types.contains_key("question"));
+    assert_eq!(pack.block_types["finding"].prefix, "F");
+    assert_eq!(pack.block_types["source"].prefix, "S");
     for l in [
         "supersedes",
         "refines",
@@ -20,6 +22,7 @@ fn standard_pack_resolves_with_engine_types() {
         "revokes",
         "answers",
         "describes",
+        "reflects",
     ] {
         assert!(pack.link_types.contains(l), "{l}");
     }
