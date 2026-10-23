@@ -213,6 +213,11 @@ impl Conn {
                 cwd: env.cwd.clone(),
             })
         } else {
+            // D-Q8NFG: the configured person is resolved before a daemon is started, so an
+            // actor outside the form is its own E_BAD_INPUT naming its file, never the
+            // E_DAEMON_START of a daemon whose store open refused it. The daemon resolves it
+            // again for the session it classifies.
+            human_actor_for_env(&env.project)?;
             let rt = runtime()?;
             let run_dir = RunDir::of_project(&env.project);
             let opts = start_options(&env.project, &env.cwd, Proto::Ctl);

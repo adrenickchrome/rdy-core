@@ -445,3 +445,77 @@ fn id3_a_non_unicode_actor_or_run_is_refused_on_every_cli_path() {
     assert_eq!(s.daemon_pid(), Some(pid), "the same daemon runs");
     s.stop();
 }
+
+/// id3 (D-Q8NFG, fix round 2): a configured actor outside the form is the plain `E_BAD_INPUT`
+/// naming its file on every CLI path, also when no daemon runs. The CLI resolves the configured
+/// person before it starts a daemon, so the refusal is never the generic `E_DAEMON_START`, and
+/// the refused command starts none. A local actor and a user actor are each named by their
+/// own file; a running daemon gives the same refusal once the configured actor goes bad.
+#[test]
+fn id3_an_invalid_configured_actor_is_refused_before_a_daemon_starts() {
+    use serde_json::Value;
+    let s = Served::new();
+    let triple = |v: &Value| {
+        (
+            v["code"].as_str().unwrap_or_default().to_string(),
+            v["message"].as_str().unwrap_or_default().to_string(),
+            v["fix"].as_str().unwrap_or_default().to_string(),
+        )
+    };
+    let forms = "human:<name>, agent:<name>, agent:<handle>/<name> or ci:<repo_id>/<name>";
+    let want = |file: &str| {
+        (
+            "E_BAD_INPUT".to_string(),
+            "the actor \"Nick\" is not in rdy's actor form".to_string(),
+            format!("set actor in {file} to {forms}"),
+        )
+    };
+    let refused_everywhere = |want: &(String, String, String), what: &str| {
+        for args in [
+            &["--json", "status"][..],
+            &["--no-daemon", "--json", "status"][..],
+        ] {
+            let (ok, v) = s.json(args);
+            assert!(!ok, "{what} {args:?}: {v}");
+            assert_eq!(&triple(&v), want, "{what} {args:?} as the person");
+            let (ok, v) = s.json_as("agent:w", Some("r1"), args);
+            assert!(!ok, "{what} {args:?}: {v}");
+            assert_eq!(&triple(&v), want, "{what} {args:?} as an agent");
+        }
+    };
+    let local = s.dir.path().join(LOCAL_FILE);
+    let local_valid = std::fs::read_to_string(&local).ok();
+    let restore_local = || match &local_valid {
+        Some(t) => std::fs::write(&local, t).unwrap(),
+        None => std::fs::remove_file(&local).unwrap(),
+    };
+    let user_file = s.user_config();
+    let user_valid = std::fs::read_to_string(&user_file).unwrap();
+    // a user actor outside the form, no daemon running
+    std::fs::write(&user_file, "actor: Nick\n").unwrap();
+    refused_everywhere(&want(&user_file.display().to_string()), "user");
+    assert!(
+        s.daemon_pid().is_none(),
+        "a refused command starts no daemon"
+    );
+    // a local actor outside the form, no daemon running
+    std::fs::write(&user_file, &user_valid).unwrap();
+    append(s.dir.path(), LOCAL_FILE, "actor: Nick\n");
+    refused_everywhere(&want(LOCAL_FILE), "local");
+    assert!(
+        s.daemon_pid().is_none(),
+        "a refused command starts no daemon"
+    );
+    // a running daemon: the same refusal once the local actor goes bad
+    restore_local();
+    let (ok, v) = s.json(&["--json", "status"]);
+    assert!(ok, "{v}");
+    let pid = s.daemon_pid().expect("the daemon runs");
+    append(s.dir.path(), LOCAL_FILE, "actor: Nick\n");
+    let (ok, v) = s.json(&["--json", "status"]);
+    assert!(!ok, "{v}");
+    assert_eq!(triple(&v), want(LOCAL_FILE), "a running daemon");
+    assert_eq!(s.daemon_pid(), Some(pid), "the same daemon runs");
+    restore_local();
+    s.stop();
+}
