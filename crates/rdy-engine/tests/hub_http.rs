@@ -15,6 +15,7 @@ use rdy_engine::{
     E_UPSTREAM_ORIGIN, E_UPSTREAM_PROTOCOL, E_UPSTREAM_TOKEN, Session, SessionKind,
 };
 use rdy_model::Role;
+use rdy_store::pio;
 use std::path::PathBuf;
 
 const ACCESS: &str = "rdyh_a_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd2F6gYf";
@@ -2645,11 +2646,13 @@ fn id5_invalid_handle_in_a_real_me_reply_fails_sign_in_as_protocol() {
         let o = server.origin().to_string();
         let install = Origin::parse(&o).unwrap();
         let dir = tempfile::Builder::new()
-            .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .permissions(pio::permissions(0o700))
             .tempdir()
             .unwrap();
         let cfg = dir.path().join("cfg/rdy");
-        std::fs::create_dir_all(&cfg).unwrap();
+        pio::dir_mode(std::fs::DirBuilder::new().recursive(true), 0o700)
+            .create(&cfg)
+            .unwrap();
         let ca = dir.path().join("ca.pem");
         std::fs::write(&ca, server.ca_pem()).unwrap();
         let user_file = cfg.join("config.yaml");
@@ -2676,8 +2679,7 @@ fn id5_invalid_handle_in_a_real_me_reply_fails_sign_in_as_protocol() {
             })),
         );
         std::fs::write(&creds, encode_credentials(&file).unwrap()).unwrap();
-        std::fs::set_permissions(&creds, std::os::unix::fs::PermissionsExt::from_mode(0o600))
-            .unwrap();
+        std::fs::set_permissions(&creds, pio::permissions(0o600)).unwrap();
 
         server.reply(Reply::json(200, &sub(METADATA_REPLY, &o)));
         server.reply(Reply::json(200, TOKEN_REPLY));
