@@ -829,22 +829,146 @@ fn run_plx2_child(test_name: &str) -> bool {
     .unwrap_or_else(|e| panic!("the child of {test_name} did not finish: {e}"));
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    let shown = format!("stdout: {stdout}\nstderr: {stderr}");
+    let shown = plx2_child_output(&stdout, &stderr);
     assert!(
         out.status.success(),
-        "{test_name} failed in its child: {shown}"
+        "{test_name} failed in its child ({}):{shown}",
+        out.status
     );
     assert_eq!(
         stdout.matches("test result: ok. 1 passed").count(),
         1,
-        "the child of {test_name} did not pass exactly one test: {shown}"
+        "the child of {test_name} did not pass exactly one test:{shown}"
     );
     assert_eq!(
         stdout.matches(PLX2_DONE).count(),
         1,
-        "the child of {test_name} did not finish its fixture: {shown}"
+        "the child of {test_name} did not finish its fixture:{shown}"
     );
     true
+}
+
+/// A child's output as the parent's failed assertion shows it: stderr first, where the child's
+/// panic is, so the cause comes before the gate report's excerpt bounds cut the text; then
+/// stdout. Each line starts on a line of its own with a stream label, so no child line reads as
+/// the parent's libtest structure (a test status, a `failures:` line, an output header, a panic
+/// header or a `test result:` line), even after the report trims whitespace.
+fn plx2_child_output(stdout: &str, stderr: &str) -> String {
+    let mut s = String::new();
+    for (label, text) in [("child stderr| ", stderr), ("child stdout| ", stdout)] {
+        for line in text.lines() {
+            s.push('\n');
+            s.push_str(label);
+            s.push_str(line);
+        }
+    }
+    s
+}
+
+/// Set on the report pin's command only: the child of [`plx2_wrapped_probe`] then fails.
+const PLX2_PROBE_FAIL: &str = "RDY_QA_PLX2_PROBE_FAIL";
+/// The cause the failing child of [`plx2_wrapped_probe`] panics with.
+const PLX2_PROBE_CAUSE: &str = "plx2 probe child cause: could not bind the socket";
+
+/// A wrapped test with no fixture: its child completes, unless [`PLX2_PROBE_FAIL`] is set. Then
+/// the child writes to both streams and panics with [`PLX2_PROBE_CAUSE`], as a failed wrapped
+/// fixture does.
+#[test]
+fn plx2_wrapped_probe() {
+    if run_plx2_child(&rdy_qa::test_name!("plx2_wrapped_probe")) {
+        return;
+    }
+    if std::env::var_os(PLX2_PROBE_FAIL).is_some() {
+        for i in 0..3 {
+            println!("plx2 probe stdout {i}");
+            eprintln!("plx2 probe stderr {i}");
+        }
+        panic!("{PLX2_PROBE_CAUSE}");
+    }
+    println!("{PLX2_DONE}");
+}
+
+/// A wrapped test whose child fails reaches the gate report as one failed test, under its one
+/// name, with the child's cause inside the panic excerpt and the excerpt inside its bounds. The
+/// outer run is captured the way the gate captures a test binary: stdout, then stderr.
+#[test]
+fn plx2_a_failed_child_reaches_the_report_once_with_its_cause() {
+    use rdy_qa::report::{self, Report};
+    let probe = rdy_qa::test_name!("plx2_wrapped_probe");
+    let mut outer = std::process::Command::new(std::env::current_exe().unwrap());
+    outer
+        .args(["--exact", probe.as_str(), "--test-threads=1"])
+        .env(PLX2_PROBE_FAIL, "1")
+        .env_remove("RDY_QA_PLX2_CHILD");
+    let out = platform::run_bounded(
+        outer,
+        None,
+        platform::RELEASE_CHILD_OUTPUT_MAX,
+        platform::RELEASE_CHILD_DEADLINE,
+    )
+    .expect("the outer run of the probe finished");
+    assert!(!out.status.success(), "the probe failed");
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+
+    let run = report::parse_cargo_test(&text);
+    assert_eq!((run.passed, run.failed, run.ignored), (0, 1, 0), "{text}");
+    assert_eq!(run.failures, vec![probe.clone()], "{text}");
+    assert!(run.skipped.is_empty(), "{text}");
+    assert_eq!(run.panics.len(), 1, "{:?}", run.panics);
+    let excerpt = run.panics[&probe].clone();
+    // the parent's own panic leads, the child's cause is inside, and the bounds hold
+    let first = excerpt.lines().next().unwrap();
+    assert!(
+        first.starts_with(&format!("thread '{probe}'")) && first.contains("panicked at"),
+        "{excerpt}"
+    );
+    assert!(excerpt.contains(PLX2_PROBE_CAUSE), "{excerpt}\n---\n{text}");
+    assert!(excerpt.split('\n').count() <= 40, "{excerpt}");
+    assert!(excerpt.len() <= 16384, "{}", excerpt.len());
+    // every child line carries its stream label, the child's cause before its stdout
+    for l in excerpt.lines().filter(|l| l.contains("plx2 probe")) {
+        assert!(
+            l.starts_with("child stderr| ") || l.starts_with("child stdout| "),
+            "{l:?}"
+        );
+    }
+    let cause = excerpt.find(PLX2_PROBE_CAUSE).unwrap();
+    assert!(cause < excerpt.find("child stdout| ").unwrap(), "{excerpt}");
+
+    // both renderers carry one failure under the one name, with the same excerpt
+    let mut areas = vec![];
+    report::add_run(&mut areas, "daemon", false, run);
+    let r = Report {
+        revision: "r".into(),
+        dirty: false,
+        machine: "m".into(),
+        mode: "only daemon".into(),
+        duration_secs: 0.0,
+        pass: false,
+        gates: vec![],
+        areas,
+        perf: vec![],
+        perf_note: String::new(),
+        failing_seeds: vec![],
+        notes: vec![],
+        guarded: Default::default(),
+    };
+    let md = report::markdown(&r);
+    assert_eq!(md.matches(&format!("- `{probe}`")).count(), 1, "{md}");
+    let mut block = format!("- `{probe}`\n\n");
+    for l in excerpt.split('\n') {
+        block += &format!("        {l}\n");
+    }
+    assert!(md.contains(&block), "{md}");
+    let v: Value = serde_json::from_str(&report::json(&r)).unwrap();
+    let area = &v["areas"][0];
+    assert_eq!(
+        (area["failed"].as_u64(), area["passed"].as_u64()),
+        (Some(1), Some(0))
+    );
+    assert_eq!(area["failures"], json!([probe]));
+    assert_eq!(area["panics"][&probe].as_str(), Some(excerpt.as_str()));
 }
 
 #[test]
