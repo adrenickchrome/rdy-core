@@ -13,6 +13,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
+/// A tree row: id, type, name, path.
+type Row = (String, String, String, String);
+
 /// One folder or doc a landing holds.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Member {
@@ -200,7 +203,7 @@ fn open_state(dir: &Path) -> McpState {
     st
 }
 
-fn flatten(nodes: &[Value], out: &mut Vec<(String, String, String, String)>) {
+fn flatten(nodes: &[Value], out: &mut Vec<Row>) {
     for n in nodes {
         assert!(n.get("collapsed").is_none(), "a node was collapsed: {n}");
         out.push((
@@ -213,7 +216,7 @@ fn flatten(nodes: &[Value], out: &mut Vec<(String, String, String, String)>) {
     }
 }
 
-fn expected_rows(want: &[Member]) -> Vec<(String, String, String, String)> {
+fn expected_rows(want: &[Member]) -> Vec<Row> {
     let mut rows: Vec<_> = want
         .iter()
         .map(|m| {
@@ -330,14 +333,10 @@ fn run(st: &mut McpState, fx: &Fixture, order: &[usize]) {
 }
 
 /// The engine's own answer for landing `i`: its tree rows and its folder and doc ids.
-fn engine_rows(
-    rs: &ReadState,
-    fx: &Fixture,
-    i: usize,
-) -> (Vec<(String, String, String, String)>, Vec<String>) {
+fn engine_rows(rs: &ReadState, fx: &Fixture, i: usize) -> (Vec<Row>, Vec<String>) {
     let scope = rs.resolve_scope(&fx.scope(i)).unwrap();
     assert!(matches!(scope, Scope::At(_)));
-    fn walk(ns: &[TreeNode], out: &mut Vec<(String, String, String, String)>) {
+    fn walk(ns: &[TreeNode], out: &mut Vec<Row>) {
         for n in ns {
             assert_eq!(n.collapsed, 0);
             out.push((
