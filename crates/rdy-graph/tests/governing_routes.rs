@@ -78,15 +78,18 @@ fn ids(v: Vec<BlockId>) -> Vec<String> {
 fn rf3_four_routes_have_one_priority() {
     let mut x = b("n-XXXXX", "paragraph");
     link(&mut x, "decided_by", "D-AAAAA");
+    link(&mut x, "implements", "D-AAAAA");
     link(&mut x, "implements", "D-BBBBB");
     link(&mut x, "describes", "e-EEEE2");
     link(&mut x, "describes", "e-EEEE1");
-    // D-AAAAA is also reached by affects and an entity; decided_by wins
+    // D-AAAAA is reached by all four routes (decided_by, implements, affects, an entity);
+    // decided_by wins and the decision appears once
     let mut a = dec("D-AAAAA", "accepted");
     link(&mut a, "affects", "n-XXXXX");
     link(&mut a, "affects", "e-EEEE1");
-    // D-BBBBB: implements wins over an entity route
+    // D-BBBBB is reached by implements, a direct affects and an entity; implements wins
     let mut bb = dec("D-BBBBB", "accepted");
+    link(&mut bb, "affects", "n-XXXXX");
     link(&mut bb, "affects", "e-EEEE1");
     // D-CCCCC affects the block directly and through an entity; affects wins
     let mut c = dec("D-CCCCC", "accepted");
@@ -166,10 +169,14 @@ fn rf3_status_filters_and_nonroutes_are_closed() {
     mention.body = "see {{n-XXXXX}}".into();
     x.body = "uses {{D-ST008}}".into();
     let refd = dec("D-ST008", "accepted");
+    // D-ST009 governs only the entity's home block; the entity sits under that home and the
+    // queried block describes the entity, so only an (illegitimate) home route could reach it
     let mut home = dec("D-ST009", "accepted");
-    link(&mut home, "affects", "n-ZZZZZ");
+    link(&mut home, "affects", "n-HHHHH");
+    let home_block = b("n-HHHHH", "paragraph");
     let mut entity = b("e-EEEE1", "entity");
-    entity.parent = Some(id("n-XXXXX"));
+    entity.parent = Some(id("n-HHHHH"));
+    link(&mut x, "describes", "e-EEEE1");
     let mut plain = b("n-PPPPP", "paragraph");
     let mut notent = dec("D-NNNNN", "accepted");
     link(&mut notent, "affects", "n-PPPPP");
@@ -186,6 +193,7 @@ fn rf3_status_filters_and_nonroutes_are_closed() {
         &mention,
         &refd,
         &home,
+        &home_block,
         &entity,
         &plain,
         &notent,
@@ -233,12 +241,17 @@ fn rf3_status_filters_and_nonroutes_are_closed() {
             assert_ne!(r.0, "n-NSTAT");
         }
     }
-    // an entity with a home but no describing block adds nothing for the home's block either
-    assert!(
-        routes(&g, "n-ZZZZZ", GoverningStatuses::All, &mut cache)
-            .iter()
-            .all(|r| r.1 == "affects")
+    // the home's own block is reached by D-ST009's direct affects alone, never through the entity
+    let home_routes = routes(&g, "n-HHHHH", GoverningStatuses::All, &mut cache);
+    assert_eq!(home_routes, vec![("D-ST009".to_string(), "affects", None)]);
+    // the inverse agrees: D-ST009 reaches its home and not the entity's describer
+    let through = g.governed_through(
+        &id("D-ST009"),
+        GoverningStatuses::All,
+        is_entity,
+        &mut cache,
     );
+    assert_eq!(ids(through), vec!["n-HHHHH"]);
     // a describes target that is no entity gives no route for `plain`'s describer
     assert!(
         routes(&g, "n-XXXXX", GoverningStatuses::All, &mut cache)
