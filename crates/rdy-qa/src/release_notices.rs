@@ -844,7 +844,7 @@ fn check_notes(part: &str, text: &str) -> Result<(), Refused> {
     let [at] = starts[..] else {
         return Err(refused(Kind::Notes, format!("{} headings", starts.len())));
     };
-    let previous = text[..at].lines().filter(|l| l.starts_with("## ")).last();
+    let previous = text[..at].lines().rfind(|l| l.starts_with("## "));
     if previous != Some("## Feedback") {
         return Err(refused(Kind::Notes, "not after ## Feedback"));
     }
