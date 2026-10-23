@@ -237,8 +237,8 @@ fn plb5_whole_holder_limit_matches_engine_before_target_writes() {
     let files = chains(d.path()).holder;
     let inputs: Vec<Vec<u8>> = files.iter().map(|f| std::fs::read(f).unwrap()).collect();
     let fix = "Keep the dump chain and the holder it came from. This rdy cannot load this chain.";
-    let frames = "The redaction exceeds 1000000 scanned frames.";
-    let bytes = "The redaction exceeds 2147483648 scanned bytes.";
+    let frames = "The dump chain exceeds 1000000 scanned frames.";
+    let bytes = "The dump chain exceeds 2147483648 scanned bytes.";
     // each case lowers one cap; the other two keep the values the guard captured
     let cases = [("spans", frames), ("frames", frames), ("bytes", bytes)];
     let kept = ReceiverCaps::current();
