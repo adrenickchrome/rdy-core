@@ -2696,7 +2696,7 @@ fn id5_invalid_handle_in_a_real_me_reply_fails_sign_in_as_protocol() {
         assert_eq!(
             server.requests().len(),
             3,
-            "metadata, token and `/me` were all sent"
+            "metadata, token and `/me` were all sent: {r:?}"
         );
         assert_eq!(server.finish(), 0);
         (r, on_disk, text)
