@@ -562,7 +562,10 @@ fn relayers() -> (Session, Session, Session) {
 
 /// The refusals of a joined relay flag, each before a write: an unequal actor for the session
 /// with run `chat`, the grammar for the two-name session with run `R7`.
-fn joined_refusals(act: &mut dyn FnMut(&Session, &str) -> Result<Option<ActorRun>, RdyError>) {
+/// A relayed act tried as `session` with the relay flag `by`: the relayer it recorded.
+type RelayedAct<'a> = dyn FnMut(&Session, &str) -> Result<Option<ActorRun>, RdyError> + 'a;
+
+fn joined_refusals(act: &mut RelayedAct<'_>) {
     let (one, _two, two_r7) = relayers();
     let e = act(&one, "agent:relay/chat").unwrap_err();
     refused(
