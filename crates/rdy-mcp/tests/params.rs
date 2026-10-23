@@ -789,7 +789,7 @@ fn rdx12_tool_schema_and_error_rows_cover_redaction() {
         (p.dry_run, p.view, p.max_tokens, p.reason_class.as_str()),
         (None, None, None, "legal")
     );
-    // the error rows: the shared message as when, the shared fix; warnings have empty fixes
+    // Redaction and load texts; E_REDACTION_LIMIT describes both messages. Warnings have empty fixes.
     let row = |code: &str| {
         ERROR_ROWS
             .iter()
@@ -805,7 +805,7 @@ fn rdx12_tool_schema_and_error_rows_cover_redaction() {
         ),
         (
             "E_REDACTION_LIMIT",
-            "The redaction exceeds {limit}.",
+            "A redaction or dump-chain load exceeds {limit}.",
             "For a redaction, select fewer targets and run the dry run again. For a stopped load, stop at another place, or load the whole chain with no stop. For a holder load, keep the dump chain and the holder it came from; this rdy cannot load it.",
         ),
         (

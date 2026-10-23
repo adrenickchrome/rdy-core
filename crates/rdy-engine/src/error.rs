@@ -224,11 +224,14 @@ pub(crate) fn stopped_load_redaction_limit(limit: &str) -> RdyError {
 }
 
 /// `E_REDACTION_LIMIT` for `limit` when a holder load's removal scan is over its work bounds
-/// (scanned frames or bytes): the message of [`redaction_limit`], with the holder load's fix.
+/// (scanned frames or bytes): the message names the dump chain, not a redaction, and carries the
+/// holder load's fix.
 pub(crate) fn holder_load_redaction_limit(limit: &str) -> RdyError {
-    let mut e = redaction_limit(limit);
-    e.fix = HOLDER_LOAD_REDACTION_LIMIT_FIX.to_string();
-    e
+    RdyError::new(
+        E_REDACTION_LIMIT,
+        format!("The dump chain exceeds {limit}."),
+        HOLDER_LOAD_REDACTION_LIMIT_FIX,
+    )
 }
 
 /// `E_REDACTION_REASON`.

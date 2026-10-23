@@ -724,7 +724,7 @@ fn plb2_listed_dependencies_still_pass_the_stateless_check() {
 
 #[test]
 fn plb2_schema_names_batch_dependency_faults() {
-    const WHEN: &str = "a sync batch has an invalid object, frame or header, an unlisted dependency, an unneeded prerequisite, a dependency cycle or a repeated object";
+    const WHEN: &str = "a sync batch has an invalid object, frame or header, an unlisted dependency, an unneeded prerequisite, a root tag that is not in the batch or its prerequisites, a dependency cycle or a repeated object";
     const FIX: &str = "request this stream again; run rdy fsck at its source";
     let rows: Vec<_> = ERROR_ROWS
         .iter()

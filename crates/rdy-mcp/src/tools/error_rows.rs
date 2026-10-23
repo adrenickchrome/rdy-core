@@ -179,7 +179,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "a decision or question lacks its card words, or they are too long",
         "add a short title, a one-line why and, for a question, two to four options",
     ),
-    // plan Redaction: the shared texts, the message as when; the warnings have empty fixes
+    // Redaction and load texts; E_REDACTION_LIMIT describes both messages. Warnings have empty fixes.
     (
         E_REDACTION_TARGET,
         "Cannot redact {target}: {cause}.",
@@ -187,7 +187,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         E_REDACTION_LIMIT,
-        "The redaction exceeds {limit}.",
+        "A redaction or dump-chain load exceeds {limit}.",
         REDACTION_LIMIT_ROW_FIX,
     ),
     (
@@ -337,7 +337,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         E_BAD_RECORD,
-        "a sync batch has an invalid object, frame or header, an unlisted dependency, an unneeded prerequisite, a dependency cycle or a repeated object",
+        "a sync batch has an invalid object, frame or header, an unlisted dependency, an unneeded prerequisite, a root tag that is not in the batch or its prerequisites, a dependency cycle or a repeated object",
         "request this stream again; run rdy fsck at its source",
     ),
     (

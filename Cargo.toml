@@ -5,7 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 edition = "2024"
 rust-version = "1.99"
-version = "0.18.0"
+version = "0.19.0"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
@@ -40,7 +40,7 @@ libc = "0.2.190"
 regex = "1.13.1"
 imbl = "7"
 arc-swap = "1"
-ttf-parser = "0.25"
+skrifa = { version = "=0.48.0", default-features = false, features = ["std"] }
 pdf-writer = "0.15"
 subsetter = { version = "0.2", default-features = false }
 miniz_oxide = "0.9"
@@ -62,6 +62,12 @@ crc32fast = "=1.5.0"
 time = { version = "=0.3.55", features = ["parsing", "formatting"] }
 # Dependency logging facade; the engine caps it at compile time so no record is ever written.
 log = "=0.4.34"
+# QA release notices: Cargo.lock parsing.
+toml = { version = "=0.9.8", default-features = false, features = ["parse", "serde", "std"] }
+# QA release notices: SPDX license expressions.
+spdx = { version = "=0.13.6", default-features = false }
+# QA release notices: the SHA-256 of retained source archives.
+sha2 = "=0.10.9"
 # Test-only: the local TLS fixture.
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 # Test-only: the local TLS fixture's generated certificates.

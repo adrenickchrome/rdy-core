@@ -22,6 +22,7 @@ mod mcp_inbox_session;
 mod mcp_instructions;
 mod mcp_intake;
 mod mcp_intents;
+mod mcp_landing_tree;
 mod mcp_log;
 mod mcp_mentions;
 mod mcp_params;
