@@ -13,5 +13,6 @@ mod wc_plan_metadata;
 mod wc_reply;
 mod wc_state;
 mod wc_status;
+mod wc_supporting;
 mod wc_update;
 mod wc_worktree;

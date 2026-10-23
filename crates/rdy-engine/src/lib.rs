@@ -18,6 +18,7 @@ pub mod consequence_literals;
 pub mod coord_graph;
 pub mod coverage;
 mod decide;
+pub mod decision_fields;
 pub mod did_you_mean;
 pub mod diff;
 pub mod dump;

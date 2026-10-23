@@ -52,6 +52,7 @@ mod cli_site_profiles;
 mod cli_state;
 mod cli_status_views;
 mod cli_stream;
+mod cli_supporting;
 mod cli_suspects;
 mod cli_tag_relay;
 mod cli_techdocs;

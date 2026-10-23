@@ -39,13 +39,18 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
 
 #[test]
 fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
-    assert_eq!(OPS.len(), 53);
+    assert_eq!(OPS.len(), 55);
     assert_eq!(OPS[0], "session");
     let new_doc = OPS.iter().position(|o| *o == "new_doc").unwrap();
     assert_eq!(
         OPS[new_doc + 1],
         "new_profile",
         "pub5: new_profile follows new_doc"
+    );
+    assert_eq!(
+        &OPS[new_doc + 2..new_doc + 4],
+        ["new_finding", "new_source"],
+        "rf5: new_finding then new_source follow new_profile"
     );
     let render = OPS.iter().position(|o| *o == "render").unwrap();
     assert_eq!(
@@ -1361,4 +1366,93 @@ fn pub9_publication_check_op_is_strict_read_only_and_open_to_every_role() {
         "Publication check against must be canon, tag:<name>, or landing:<hash>."
     );
     assert_eq!(e.read().seq(), end, "no check wrote anything");
+}
+
+/// rf5 (D-Z8P09): new_finding and new_source are strict, create one block through the ordinary
+/// write in the bound view, and resolve each evidence source (an id, key or path) to a full
+/// reference. With no parent and no decision home, the write's own refusal stands.
+#[test]
+fn rf5_new_finding_and_new_source_use_the_write_path() {
+    let (d, e) = project();
+    let s = human();
+    let reg = doc(&e, "register")["created"]["$d"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let c = cx(&e, &s, d.path());
+    let end = e.read().seq();
+    let err = dispatch(
+        &c,
+        "new_finding",
+        json!({"statment": "S", "evidence": [{"quote": "Q"}]}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
+    assert_eq!(err.message, "new_finding: unknown field \"statment\"");
+    assert_eq!(
+        err.fix,
+        "did you mean \"statement\"? the fields are statement, evidence, parent, view"
+    );
+    let err = dispatch(
+        &c,
+        "new_source",
+        json!({"title": "T", "kind": "release", "locater": "v2"}),
+    )
+    .unwrap_err();
+    assert_eq!(err.message, "new_source: unknown field \"locater\"");
+    assert_eq!(
+        err.fix,
+        "did you mean \"locator\"? the fields are title, kind, locator, version, parent, view"
+    );
+    // no parent and no home: the decision home's refusal
+    let err = dispatch(
+        &c,
+        "new_source",
+        json!({"title": "T", "kind": "release", "locator": "v2"}),
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.message,
+        "no parent given, and the project names no decision home"
+    );
+    // an evidence source that names nothing is refused before the write
+    let err = dispatch(
+        &c,
+        "new_finding",
+        json!({"statement": "S", "evidence": [{"source": "S-ZZZZZ"}], "parent": reg}),
+    )
+    .unwrap_err();
+    assert_ne!(err.code, "E_INTERNAL", "{err}");
+    assert_eq!(e.read().seq(), end, "every refusal wrote nothing");
+
+    let v = dispatch(
+        &c,
+        "new_source",
+        json!({"title": "Release 2", "kind": "release", "locator": "v2", "version": "2.0", "parent": reg}),
+    )
+    .unwrap();
+    assert_eq!(v["view"], "work");
+    let src = v["created"]["$source"].as_str().unwrap().to_string();
+    assert!(src.starts_with("S-"), "{v}");
+    let v = dispatch(
+        &c,
+        "new_finding",
+        json!({"statement": "The release changed retention.", "parent": reg,
+            "evidence": [{"quote": "A", "question": "Q?"}, {"source": src}]}),
+    )
+    .unwrap();
+    let f = v["created"]["$finding"].as_str().unwrap().to_string();
+    let st = e.read();
+    let scope = Scope::View("work".into());
+    let b = st.block(&scope, &f.parse().unwrap()).unwrap();
+    assert_eq!(b.block_type, "finding");
+    assert_eq!(b.parent.as_ref().map(|p| p.to_string()), Some(reg.clone()));
+    assert_eq!(
+        rdy_engine::field_json(&b.fields["evidence"]),
+        json!([{"quote": "A", "question": "Q?"}, {"source": format!("{{{{{src}}}}}")}])
+    );
+    let sb = st.block(&scope, &src.parse().unwrap()).unwrap();
+    assert_eq!(sb.field_str("version"), Some("2.0"));
+    // no file is written beside the project
+    assert!(!d.path().join("register.yaml").exists());
 }

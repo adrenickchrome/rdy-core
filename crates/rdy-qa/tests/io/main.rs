@@ -4,6 +4,7 @@
 mod io;
 mod io_authors;
 mod io_clone;
+mod io_decision_basis;
 mod io_dump;
 mod io_dump_chain_surfaces;
 mod io_dump_fixture;

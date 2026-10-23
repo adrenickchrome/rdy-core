@@ -431,7 +431,7 @@ fn mfb2_the_edit_loop_doc_says_what_a_refine_reaches() {
     let doc = rdy_mcp::tools::EDIT_LOOP_DOC;
     assert!(
         doc.contains(
-            "A write that records a decision with refines, or a supersedes with a part, also lists each block the refined or partly superseded decision governs (decided_by, implements, its affects): kind dependent, follow_up confirm (a governed decision gets reaffirm, or update while proposed, and no entry when it asserts nothing live), because.edge refines or supersedes. A full supersede reaches only through the refines passed to rdy_supersede, not through the ones it copies (a refines list equal to the old decision's counts as copied)."
+            "A write that records a decision with refines, or a supersedes with a part, also lists each block the refined or partly superseded decision governs (decided_by, implements, its affects): kind dependent, follow_up confirm (a governed decision gets confirm too, or update while proposed, and no entry when it asserts nothing live), because.edge refines or supersedes. A full supersede reaches only through the refines passed to rdy_supersede, not through the ones it copies (a refines list equal to the old decision's counts as copied)."
         ),
         "{doc}"
     );

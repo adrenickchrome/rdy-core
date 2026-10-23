@@ -53,6 +53,7 @@ mod mcp_site;
 mod mcp_site_profiles;
 mod mcp_state;
 mod mcp_stream;
+mod mcp_supporting;
 mod mcp_tag_relay;
 mod mcp_tensions;
 mod mcp_view_brief;
