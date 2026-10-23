@@ -237,6 +237,7 @@ impl<'a> EmbeddedFont<'a> {
         // skrifa follows FreeType and moves a glyph sideways by its first phantom point (its
         // glyf x_min less its hmtx side bearing), which it reports as the adjusted side bearing;
         // the ink is measured where the glyf table places the points, so the move is undone
+        // (O5 ruling, task-1, 2026-10-23)
         sink.bounds(drawn.lsb.unwrap_or(0.0))
     }
 }
@@ -683,6 +684,22 @@ mod tests {
             }
         }
         h.iter().map(|x| format!("{x:08x}")).collect()
+    }
+
+    #[test]
+    fn plx1_ink_bounds_stay_where_the_glyf_table_puts_the_points() {
+        // O5 ruling (task-1, 2026-10-23): skrifa moves these outlines 1 unit along x by their
+        // first phantom point; the old reader did not, and the bounds keep its frame. The values
+        // are the base reader's, from the first differential run.
+        let fonts = Fonts::load();
+        assert_eq!(
+            fonts.ink_bounds(Face::Sans, 1600),
+            Some([-1185, 1308, -88, 1803])
+        );
+        assert_eq!(
+            fonts.ink_bounds(Face::Bold, 710),
+            Some([-182, 1262, 182, 1638])
+        );
     }
 
     #[test]
