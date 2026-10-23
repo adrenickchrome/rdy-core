@@ -257,18 +257,20 @@ fn write_font(
     }
     cid.finish();
 
-    let ttf = ttf_parser::Face::parse(data, 0).expect("the compiled-in DejaVu font parses");
-    let unit = 1000.0 / f32::from(ttf.units_per_em());
-    let bb = ttf.global_bounding_box();
-    let cap = ttf.capital_height().unwrap_or(ttf.ascender());
+    let d = fonts
+        .descriptor(face)
+        .expect("a DejaVu face has a descriptor");
+    let unit = 1000.0 / f32::from(d.units_per_em);
+    let [x_min, y_min, x_max, y_max] = d.bounds;
+    let cap = d.cap_height;
     pdf.font_descriptor(desc_ref)
         .name(Name(name.as_bytes()))
         .flags(FontFlags::NON_SYMBOLIC)
         .bbox(Rect::new(
-            f32::from(bb.x_min) * unit,
-            f32::from(bb.y_min) * unit,
-            f32::from(bb.x_max) * unit,
-            f32::from(bb.y_max) * unit,
+            f32::from(x_min) * unit,
+            f32::from(y_min) * unit,
+            f32::from(x_max) * unit,
+            f32::from(y_max) * unit,
         ))
         .italic_angle(0.0)
         .ascent(fonts.ascent(face, 1000.0))

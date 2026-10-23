@@ -1592,21 +1592,17 @@ mod tests {
     /// The ink of `text` set at `x` in `face` and `size`: (left, right), from the glyphs'
     /// outlines, not their advances.
     fn ink(fonts: &Fonts, face: Face, size: f32, x: f32, text: &str) -> (f32, f32) {
-        use crate::print::fonts::{SANS, SANS_BOLD};
-        let bytes = match face {
-            Face::Sans | Face::Italic => SANS,
-            Face::Bold | Face::BoldItalic => SANS_BOLD,
-            Face::Mono => panic!("ink is measured in the DejaVu faces only"),
+        let Some(d) = fonts.descriptor(face) else {
+            panic!("ink is measured in the DejaVu faces only")
         };
-        let f = ttf_parser::Face::parse(bytes, 0).unwrap();
-        let scale = size / f32::from(f.units_per_em());
+        let scale = size / f32::from(d.units_per_em);
         let (mut left, mut right) = (f32::MAX, f32::MIN);
         let mut pen = x;
         for c in text.chars() {
-            let g = ttf_parser::GlyphId(fonts.glyph(face, c).unwrap());
-            if let Some(b) = f.glyph_bounding_box(g) {
-                left = left.min(pen + f32::from(b.x_min) * scale);
-                right = right.max(pen + f32::from(b.x_max) * scale);
+            let g = fonts.glyph(face, c).unwrap();
+            if let Some([x_min, _, x_max, _]) = fonts.ink_bounds(face, g) {
+                left = left.min(pen + f32::from(x_min) * scale);
+                right = right.max(pen + f32::from(x_max) * scale);
             }
             pen += fonts.advance(face, c, size);
         }

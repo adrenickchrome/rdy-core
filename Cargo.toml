@@ -40,7 +40,7 @@ libc = "0.2.190"
 regex = "1.13.1"
 imbl = "7"
 arc-swap = "1"
-ttf-parser = "0.25"
+skrifa = { version = "=0.48.0", default-features = false, features = ["std"] }
 pdf-writer = "0.15"
 subsetter = { version = "0.2", default-features = false }
 miniz_oxide = "0.9"

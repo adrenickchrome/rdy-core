@@ -8,6 +8,7 @@ mod render_diagrams;
 mod render_disagree;
 mod render_disagree_group;
 mod render_dx2;
+mod render_font_parity;
 mod render_glossary;
 mod render_header;
 mod render_live;
