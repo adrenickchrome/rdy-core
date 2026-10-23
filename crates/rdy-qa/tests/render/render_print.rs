@@ -558,7 +558,7 @@ fn reserved(r: &mut Rdy) -> Scope {
 /// from `build_site` at BASE, twice, before this commit's code existed; they are the oracle. A
 /// change to the site's pages moves them: take them again from the build before that change.
 /// site.css gained the HA2b Task 6 rules; CSS-only (ruling task-6).
-/// PRS Task 5 (plan 2026-10-20-rdy-site-profiles, Task 5) changed `js/menu.js`, bundled in
+/// The live profiles change (D-CWC91) changed `js/menu.js`, bundled in
 /// `assets/app.js`: the menu `LABEL` becomes "Versions, proposals, views and profiles" and the
 /// script fetches the pill's href in place of the hard-coded PAGE (with its same-origin http/https
 /// check from fix rounds 2827fddd and 2f7023bd). Only `assets/app.js` changed; re-taken.

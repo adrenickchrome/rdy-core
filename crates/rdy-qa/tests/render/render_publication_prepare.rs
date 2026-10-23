@@ -190,7 +190,7 @@ fn scopes() -> Vec<(&'static str, tempfile::TempDir, Rdy, Scope)> {
 /// (scope, static, live at `/`). Re-taken in hpb6 for the notice styles added to
 /// `assets/site.css`; every other file, the label, the header, their ranges and the summary
 /// kept their bytes.
-/// Re-taken in PRS Task 5 (plan 2026-10-20-rdy-site-profiles, Task 5: the menu `LABEL` becomes
+/// Re-taken for the live profiles change (D-CWC91: the menu `LABEL` becomes
 /// "Versions, proposals, views and profiles" and the script fetches the pill's href in place of
 /// the hard-coded PAGE; fix rounds 2827fddd and 2f7023bd add its same-origin http/https check):
 /// only `assets/app.js`, which bundles `js/menu.js`, changed; every other file, the label, the
