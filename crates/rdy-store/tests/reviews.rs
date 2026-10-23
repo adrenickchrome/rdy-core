@@ -21,7 +21,7 @@ fn review(vkey: Hash, reason: &str) -> Review {
         case_hash: None,
         verdict: Verdict::Dismiss,
         reason: reason.into(),
-        findings: vec![],
+        citations: vec![],
         provenance: Provenance {
             actor: "agent:r".into(),
             run: Some("x".into()),
@@ -197,7 +197,7 @@ fn mention(block: &str, entity: &str, verdict: Verdict, at_ms: i64) -> Review {
         case_hash: None,
         verdict,
         reason: "an everyday word here".into(),
-        findings: vec![],
+        citations: vec![],
         provenance: Provenance {
             actor: "agent:a".into(),
             run: Some("r".into()),

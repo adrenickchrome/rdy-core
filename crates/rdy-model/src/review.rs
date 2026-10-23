@@ -17,7 +17,7 @@ pub struct Review {
     /// Why, in the reviewer's words.
     pub reason: String,
     /// Notes on single blocks.
-    pub findings: Vec<Finding>,
+    pub citations: Vec<Citation>,
     /// Who reviewed, in which run and role, and when.
     pub provenance: Provenance,
 }
@@ -67,7 +67,7 @@ pub enum Verdict {
 
 /// A note on one block. Field order is format.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Finding {
+pub struct Citation {
     pub block: BlockId,
     pub note: String,
 }

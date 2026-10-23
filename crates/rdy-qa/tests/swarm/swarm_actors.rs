@@ -536,7 +536,7 @@ fn sg4_a_reviewer_judges_an_odd_contra_pair_without_advice() {
     let judged = rows[0]["judged"].as_object().expect("a verdict");
     assert_eq!(judged["actor"], "agent:a2", "{rows:?}");
     assert_eq!(
-        judged["findings"].as_array().map(Vec::len),
+        judged["citations"].as_array().map(Vec::len),
         Some(2),
         "{rows:?}"
     );

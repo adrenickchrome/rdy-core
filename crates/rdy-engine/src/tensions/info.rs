@@ -121,7 +121,7 @@ pub struct TensionInfo {
     /// landing it describes. The gate judges this form; the in-flight set does not hold it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proposal: Option<String>,
-    /// A semantic tension's verdict: who judged the pair, their findings and advice, and a
+    /// A semantic tension's verdict: who judged the pair, their citations and advice, and a
     /// person's acceptance of the advice (D-WMCFW).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub judged: Option<JudgedInfo>,
@@ -178,7 +178,7 @@ pub struct JudgedInfo {
     pub actor: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
-    pub findings: Vec<FindingInfo>,
+    pub citations: Vec<CitationInfo>,
     /// The reviewer's reason that the tension should block, when the verdict advised it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub advice: Option<String>,
@@ -189,7 +189,7 @@ pub struct JudgedInfo {
 
 /// A reviewer's note on one block.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct FindingInfo {
+pub struct CitationInfo {
     pub block: String,
     pub note: String,
 }
@@ -281,7 +281,7 @@ impl ReadState {
     }
 
     /// The verdict behind `t` when `t` is a semantic tension whose pair has an open record in
-    /// the semantic state: the review's reviewer and findings, the record's advice, and the
+    /// the semantic state: the review's reviewer and citations, the record's advice, and the
     /// acceptance when the record's latest version is one. `None` when the review cannot be read.
     pub(crate) fn judged_info(&self, t: &Tension) -> Option<JudgedInfo> {
         let key = pair_of(t)?;
@@ -308,10 +308,10 @@ impl ReadState {
             review: rec.review.to_string(),
             actor: r.provenance.actor,
             run: r.provenance.run,
-            findings: r
-                .findings
+            citations: r
+                .citations
                 .into_iter()
-                .map(|f| FindingInfo {
+                .map(|f| CitationInfo {
                     block: f.block.to_string(),
                     note: f.note,
                 })

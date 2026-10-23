@@ -374,9 +374,9 @@ fn landing_history(
         .collect())
 }
 
-/// The block ids a review names: its findings and its subject's blocks.
+/// The block ids a review names: its citations and its subject's blocks.
 fn review_blocks(r: &Review) -> Vec<&BlockId> {
-    let mut out: Vec<&BlockId> = r.findings.iter().map(|f| &f.block).collect();
+    let mut out: Vec<&BlockId> = r.citations.iter().map(|f| &f.block).collect();
     match &r.subject {
         ReviewSubject::Tension { blocks, .. } => out.extend(blocks),
         ReviewSubject::Mention { block, entity } => {

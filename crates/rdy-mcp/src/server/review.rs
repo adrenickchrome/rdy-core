@@ -15,7 +15,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Answer a review request: verdict tension, with findings that cite the blocks, or no_tension; pass the case_hash you read. A tension verdict opens an advisory tension; severity blocking with a reason advises a person to make it block, and gates nothing until the person accepts. Needs the reviewer role and an actor other than the blocks' authors."
+        description = "Answer a review request: verdict tension, with citations {block, note} on the two blocks, or no_tension; pass the case_hash you read. A tension verdict opens an advisory tension; severity blocking with a reason advises a person to make it block, and gates nothing until the person accepts. Needs the reviewer role and an actor other than the blocks' authors."
     )]
     async fn rdy_review_submit(
         &self,

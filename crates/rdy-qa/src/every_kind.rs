@@ -37,7 +37,7 @@ use rdy_model::plan::{
 use rdy_model::redaction::{Redaction, RedactionApply};
 use rdy_model::signature::{Signature, StatementSource};
 use rdy_model::{
-    ActorRun, Answer, AnswerAct, Assurance, BlockId, Finding, Hash, PairItem, Provenance,
+    ActorRun, Answer, AnswerAct, Assurance, BlockId, Citation, Hash, PairItem, Provenance,
     RelayEvidence, RepoId, Review, ReviewSubject, Role, SemanticTension, Verdict, pair_key,
 };
 use rdy_store::Relay;
@@ -210,7 +210,7 @@ pub const V15_KINDS: [u8; 20] = [
 pub const CANARY_BODY: &str = "Kestrel body canary.";
 /// The removed term's name field: a selected canary, held only by the removed payloads.
 pub const CANARY_FIELD: &str = "Kestrel field canary";
-/// The removed term's alias: a source string that a review finding, a tension's advice and an
+/// The removed term's alias: a source string that a review citation, a tension's advice and an
 /// answer's note and relayed words quote whole. Those records are kept (D-EPK1Z, RULING F3 (a)).
 pub const QUOTED_ALIAS: &str = "Osprey quoted alias";
 /// The body of the claim the term's change creates beside it, which no request selects.
@@ -281,7 +281,7 @@ fn advise_blocking(r: &mut Rdy, x: &BlockId, y: &BlockId) {
 }
 
 /// Records agent:r's `tension` verdict on `x` and `y` at their contents in flight, for case
-/// `case`: one finding on `y` with `note`, and a semantic tension with `advice` that does not
+/// `case`: one citation on `y` with `note`, and a semantic tension with `advice` that does not
 /// block (a REVIEW and a TENSION whose text a removal report can find as quotes).
 pub fn verdict(r: &mut Rdy, x: &BlockId, y: &BlockId, case: Hash, note: &str, advice: &str) {
     verdict_with_reason(r, x, y, case, note, advice, "");
@@ -320,7 +320,7 @@ pub fn verdict_with_reason(
         case_hash: Some(case),
         verdict: Verdict::Tension,
         reason: reason.into(),
-        findings: vec![Finding {
+        citations: vec![Citation {
             block: y.clone(),
             note: note.into(),
         }],
@@ -392,7 +392,7 @@ fn foreign_export(out: &Path) {
 /// `pending/`), a `.rdyignore` with the line `*.draft.yaml`, and a `.rdy/local.yaml` with
 /// `actor: human:qa` (a dump leaves it out). Its last landing is a person's approval of one
 /// content removal: a term version (its body and name the canaries, its alias quoted whole by a
-/// kept review finding, tension advice and answer), the change that embeds it beside an
+/// kept review citation, tension advice and answer), the change that embeds it beside an
 /// unaffected sibling op, a duplicate frame of the version, and a blob whose first chunk another
 /// blob shares. The built project then holds three valid signatures (store format 14): the
 /// person's approval of the seed landing, the agent's relay of the relayed landing and the
@@ -556,7 +556,7 @@ fn build(segment_max: Option<u64>) -> tempfile::TempDir {
     // canaries a person removes at the end, its alias the text audit records quote) and an
     // unaffected sibling claim. The person snoozes its approve item through a relay whose note
     // and words quote the alias (an ANSWER quote candidate), then lands it; a reviewer's verdict
-    // on the pair quotes the alias in its finding and its advice (REVIEW and TENSION quote
+    // on the pair quotes the alias in its citation and its advice (REVIEW and TENSION quote
     // candidates, RULING F3 (a)). The v0.2.0 tag below names a landing that holds the term.
     let sec = s.section.clone();
     let (term, sibling, cv) = on(&e, move |r| {

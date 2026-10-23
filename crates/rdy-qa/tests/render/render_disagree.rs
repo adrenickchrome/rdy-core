@@ -47,7 +47,7 @@ pub fn judged_contradiction() -> (tempfile::TempDir, Rdy, Spec) {
         case_hash: Some(Hash([9; 32])),
         verdict: Verdict::Tension,
         reason: String::new(),
-        findings: vec![],
+        citations: vec![],
         provenance: provenance.clone(),
     };
     let tension = SemanticTension {

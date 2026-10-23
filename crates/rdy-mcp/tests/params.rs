@@ -393,7 +393,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         DumpParams,
         EditorialParams,
         ExportParams,
-        FindingParams,
+        CitationParams,
         IdParams,
         InboxParams,
         IntentParams,
@@ -1600,4 +1600,35 @@ fn hpb15_publish_params_are_closed_and_keep_latest_is_optional() {
             "{key}"
         );
     }
+}
+
+/// rf2: `findings` is no key of rdy_review_submit any more; the refusal is the normal strict-input
+/// text, and its fix names citations through the whole key list. A close misspelling gets the
+/// nearest-key hint. No alias or special parser exists.
+#[test]
+fn rf2_old_findings_is_refused_before_write() {
+    let base = json!({"request": "rq-000000000000", "case_hash": "x", "verdict": "tension"});
+    let mut args = base.clone();
+    args["findings"] = json!([{"block": "c-AAAAA", "note": "n"}]);
+    assert_eq!(
+        refusal::<ReviewSubmitParams>("rdy_review_submit", args),
+        bad(
+            "rdy_review_submit: unknown parameter \"findings\"",
+            "remove \"findings\"; the parameters here are case_hash, citations, reason, request, severity, verdict"
+        )
+    );
+    let mut args = base.clone();
+    args["citatons"] = json!([]);
+    let (code, message, fix) = refusal::<ReviewSubmitParams>("rdy_review_submit", args);
+    assert_eq!(code, "E_BAD_INPUT");
+    assert!(
+        message.contains("citatons") && fix.contains("citations"),
+        "{message} {fix}"
+    );
+    let mut ok = base;
+    ok["citations"] = json!([{"block": "c-AAAAA", "note": "n"}]);
+    let p =
+        parse_params::<ReviewSubmitParams>("rdy_review_submit", ok.as_object().unwrap().clone())
+            .unwrap();
+    assert_eq!(p.citations.unwrap().len(), 1);
 }

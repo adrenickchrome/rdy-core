@@ -87,7 +87,7 @@ pub struct CaseEntity {
 pub fn verdict_schema() -> Value {
     json!({
         "verdict": ["tension", "no_tension"],
-        "findings": "a list of {block, note}: block is one of the two block ids; note is 1 to 2000 characters; a tension verdict needs 1 to 20 findings, a no_tension verdict 0 to 20",
+        "citations": "a list of {block, note}: block is one of the two block ids; note is 1 to 2000 characters; a tension verdict needs 1 to 20 citations, a no_tension verdict 0 to 20",
         "severity": "advisory (default) or blocking, on a tension verdict only: blocking advises a person to make the tension block; it gates nothing until a person accepts it",
         "reason": "with severity blocking only: why the tension should block, 1 to 2000 characters",
     })
@@ -263,11 +263,11 @@ fn shared_entities(m: &Materialized, lex: &Lexicon, a: &Block, b: &Block) -> Vec
 mod tests {
     use super::*;
 
-    /// guard: the schema names the verdict, the findings and the advice.
+    /// guard: the schema names the verdict, the citations and the advice.
     #[test]
     fn se6_the_verdict_schema_names_the_advice() {
         let s = verdict_schema();
-        for k in ["verdict", "findings", "severity", "reason"] {
+        for k in ["verdict", "citations", "severity", "reason"] {
             assert!(!s[k].is_null(), "{k}");
         }
         assert_eq!(s["verdict"], json!(["tension", "no_tension"]));

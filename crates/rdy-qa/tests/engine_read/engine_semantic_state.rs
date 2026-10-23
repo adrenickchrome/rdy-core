@@ -32,7 +32,7 @@ fn verdict(items: Vec<PairItem>, v: Verdict) -> Review {
         case_hash: Some(Hash([9; 32])),
         verdict: v,
         reason: String::new(),
-        findings: vec![],
+        citations: vec![],
         provenance: Provenance {
             actor: "agent:r".into(),
             run: Some("r".into()),

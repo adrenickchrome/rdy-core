@@ -2,7 +2,7 @@
 //! accepted tension refuses (D-KJ71P, D-2K8Q5, D-WMCFW); a landed one stays in canon (F6).
 use rdy_engine::semantic::candidates::request_label;
 use rdy_engine::semantic::case::case_hash;
-use rdy_engine::semantic::submit::{FindingRequest, ReviewSubmitRequest};
+use rdy_engine::semantic::submit::{CitationRequest, ReviewSubmitRequest};
 use rdy_engine::tensions::api::AcceptRequest;
 use rdy_engine::tensions::*;
 use rdy_engine::*;
@@ -51,7 +51,7 @@ fn judge_pair(r: &mut Rdy, pair: Option<(&BlockId, &BlockId)>, advise: bool) {
             request: label,
             case_hash: hash,
             verdict: "tension".into(),
-            findings: vec![FindingRequest {
+            citations: vec![CitationRequest {
                 block: on,
                 note: "these two cannot both hold".into(),
             }],

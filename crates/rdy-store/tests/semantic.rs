@@ -40,7 +40,7 @@ fn verdict(v: Verdict, at_ms: i64) -> Review {
         case_hash: Some(Hash([9; 32])),
         verdict: v,
         reason: String::new(),
-        findings: vec![Finding {
+        citations: vec![Citation {
             block: BlockId::parse("c-AAAAA").unwrap(),
             note: "A says ten, B says five".into(),
         }],
@@ -301,7 +301,7 @@ fn se1_appending_variants_keeps_earlier_review_bytes() {
         case_hash: None,
         verdict: Verdict::Dismiss,
         reason: "fine".into(),
-        findings: vec![],
+        citations: vec![],
         provenance: prov(1),
     };
     let bytes = postcard::to_allocvec(&r).unwrap();
@@ -457,7 +457,7 @@ fn se1_tension_review() -> Review {
         case_hash: None,
         verdict: Verdict::Dismiss,
         reason: "fine".into(),
-        findings: vec![],
+        citations: vec![],
         provenance: prov(1),
     }
 }
@@ -516,4 +516,68 @@ fn se1_a_latest_version_that_does_not_decode_is_decode() {
         .put_tension_versions(&[accepted(&first_version(h), bad)])
         .unwrap_err();
     assert!(matches!(e, rdy_store::StoreError::Decode(_)), "{e:?}");
+}
+
+const OLD_BYTES: &str = "0203030303030303030303030303030303030303030303030303030303030303030107632d4141414141040404040404040404040404040404040404040404040404040404040404040401090909090909090909090909090909090909090909090909090909090909090902037768790207632d4141414141026e3107632d4242424242026e32076167656e743a72010178020e";
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn rf2_review() -> Review {
+    let a = BlockId::parse("c-AAAAA").unwrap();
+    Review {
+        subject: ReviewSubject::Pair {
+            key: Hash([3; 32]),
+            items: vec![PairItem {
+                block: a.clone(),
+                content: Hash([4; 32]),
+            }],
+        },
+        case_hash: Some(Hash([9; 32])),
+        verdict: Verdict::Tension,
+        reason: "why".into(),
+        citations: vec![
+            Citation {
+                block: a,
+                note: "n1".into(),
+            },
+            Citation {
+                block: BlockId::parse("c-BBBBB").unwrap(),
+                note: "n2".into(),
+            },
+        ],
+        provenance: Provenance {
+            actor: "agent:r".into(),
+            run: Some("x".into()),
+            role: Role::Reviewer,
+            at_ms: 7,
+        },
+    }
+}
+
+/// rf2: a Citation review encodes byte for byte as the pre-change fixture and decodes the old
+/// bytes; no serde alias is present.
+#[test]
+fn rf2_review_rename_keeps_positional_bytes() {
+    let r = rf2_review();
+    assert_eq!(hex(&postcard::to_allocvec(&r).unwrap()), OLD_BYTES);
+    let old: Vec<u8> = (0..OLD_BYTES.len() / 2)
+        .map(|i| u8::from_str_radix(&OLD_BYTES[2 * i..2 * i + 2], 16).unwrap())
+        .collect();
+    assert_eq!(postcard::from_bytes::<Review>(&old).unwrap(), r);
+    // no alias: the JSON form has the new key only
+    let j = serde_json::to_value(&r).unwrap();
+    assert!(
+        j.get("citations").is_some() && j.get("findings").is_none(),
+        "{j}"
+    );
+    let mut old_json = j.clone();
+    let c = old_json
+        .as_object_mut()
+        .unwrap()
+        .remove("citations")
+        .unwrap();
+    old_json["findings"] = c;
+    assert!(serde_json::from_value::<Review>(old_json).is_err());
 }

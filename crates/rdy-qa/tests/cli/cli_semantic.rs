@@ -39,7 +39,7 @@ fn se8_rdy_resolve_accept_and_the_listings_show_the_advice() {
         case_hash: Some(Hash([9; 32])),
         verdict: Verdict::Tension,
         reason: String::new(),
-        findings: vec![Finding {
+        citations: vec![Citation {
             block: sp.b.clone(),
             note: "B and C cannot both hold".into(),
         }],

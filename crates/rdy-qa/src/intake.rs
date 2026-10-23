@@ -117,7 +117,7 @@ pub fn verdict_on(r: &mut Rdy, scope: &Scope, x: &BlockId, y: &BlockId, actor: &
         case_hash: Some(Hash([9; 32])),
         verdict: Verdict::Tension,
         reason: String::new(),
-        findings: vec![Finding {
+        citations: vec![Citation {
             block: x.clone(),
             note: "these two cannot both hold".into(),
         }],

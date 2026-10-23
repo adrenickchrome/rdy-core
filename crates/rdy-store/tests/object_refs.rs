@@ -12,8 +12,8 @@ use rdy_model::redaction::{
 use rdy_model::signature::Signature;
 use rdy_model::{
     ActorRun, AltChoice, AltMember, AltSet, AltStatus, Answer, AnswerAct, ApprovalEvidence,
-    Assurance, Block, BlockId, Change, ChangeLinks, EditorialClass, EvidenceKind, FieldValue,
-    Finding, Hash, Intent, IntentStatus, Justification, LandingRecord, Link, Op, PairItem,
+    Assurance, Block, BlockId, Change, ChangeLinks, Citation, EditorialClass, EvidenceKind,
+    FieldValue, Hash, Intent, IntentStatus, Justification, LandingRecord, Link, Op, PairItem,
     Proposal, Provenance, RelayEvidence, Review, ReviewSubject, Role, SemanticTension,
     StateSnapshot, Tag, Verdict,
 };
@@ -200,7 +200,7 @@ fn review(subject: ReviewSubject, verdict: Verdict) -> Review {
         case_hash: Some(h(65)),
         verdict,
         reason: t("review.reason"),
-        findings: vec![Finding {
+        citations: vec![Citation {
             block: id("c-00001"),
             note: t("review.finding.note"),
         }],

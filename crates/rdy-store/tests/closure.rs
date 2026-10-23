@@ -258,7 +258,7 @@ fn source() -> Src {
                 case_hash: None,
                 verdict: Verdict::Tension,
                 reason: "they disagree".into(),
-                findings: vec![],
+                citations: vec![],
                 provenance: w.clone(),
             },
         )

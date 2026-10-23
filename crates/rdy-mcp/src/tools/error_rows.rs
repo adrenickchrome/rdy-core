@@ -46,7 +46,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         "E_REVIEW_INVALID",
-        "rdy_review_submit: the verdict fails its schema (a verdict other than tension or no_tension, a finding on another block, an empty or over-long note, a tension with no finding, more than 20 findings, a severity other than advisory or blocking, advice on a no_tension, advice to block without a reason)",
+        "rdy_review_submit: the verdict fails its schema (a verdict other than tension or no_tension, a citation on another block, an empty or over-long note, a tension with no citation, more than 20 citations, a severity other than advisory or blocking, advice on a no_tension, advice to block without a reason)",
         "send the corrected payload",
     ),
     (

@@ -131,19 +131,19 @@ fn tension_text(t: &Value) -> String {
     out
 }
 
-/// A semantic tension's verdict: who judged it and the first finding, the advice, and who
+/// A semantic tension's verdict: who judged it and the first citation, the advice, and who
 /// accepted it. Empty for a tension with no verdict.
 fn judged_text(j: &Value) -> String {
     if !j.is_object() {
         return String::new();
     }
-    let findings = j["findings"].as_array().map_or(&[][..], Vec::as_slice);
+    let citations = j["citations"].as_array().map_or(&[][..], Vec::as_slice);
     let mut out = format!("\n  judged by {}", text(&j["actor"]));
-    if let Some(f) = findings.first() {
+    if let Some(f) = citations.first() {
         out.push_str(&format!(": {}", text(&f["note"])));
     }
-    if findings.len() > 1 {
-        out.push_str(&format!(" (+{} more)", findings.len() - 1));
+    if citations.len() > 1 {
+        out.push_str(&format!(" (+{} more)", citations.len() - 1));
     }
     if let Some(advice) = j["advice"].as_str() {
         out.push_str(&format!("\n  advises blocking: {advice}"));
@@ -389,14 +389,14 @@ mod tests {
         );
     }
 
-    /// D-WMCFW: a judged tension names its reviewer and first finding, the advice, and who
+    /// D-WMCFW: a judged tension names its reviewer and first citation, the advice, and who
     /// accepted it, relayed by whom, in which words.
     #[test]
     fn se8_a_judged_tension_names_the_verdict_the_advice_and_the_acceptance() {
         let t = json!({"id": "tn-0123456789ab", "severity": "blocking", "kind": "semantic",
             "status": "open", "summary": "a reviewer judged that c-A and c-B disagree", "sides": [],
             "judged": {"review": "ab", "actor": "agent:r", "advice": "it contradicts the gate rule",
-                "findings": [{"block": "c-A", "note": "A and B cannot both hold"}, {"block": "c-B", "note": "n"}],
+                "citations": [{"block": "c-A", "note": "A and B cannot both hold"}, {"block": "c-B", "note": "n"}],
                 "accepted": {"actor": "human:qa", "relayed_by": "agent:w/7", "evidence": "yes", "at": "t"}}});
         assert_eq!(
             tension_text(&t),

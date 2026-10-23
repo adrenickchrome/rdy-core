@@ -312,7 +312,7 @@ impl ReadState {
             case_hash: None,
             verdict: Verdict::Dismiss,
             reason: reason.to_string(),
-            findings: vec![],
+            citations: vec![],
             provenance: s.provenance(),
         })
     }

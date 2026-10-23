@@ -34,9 +34,9 @@ fn request(req: &str, hash: &str, verdict: &str, on: &[BlockId]) -> ReviewSubmit
         request: req.into(),
         case_hash: hash.into(),
         verdict: verdict.into(),
-        findings: on
+        citations: on
             .iter()
-            .map(|b| FindingRequest {
+            .map(|b| CitationRequest {
                 block: b.to_string(),
                 note: "these two cannot both hold".into(),
             })
@@ -95,7 +95,7 @@ fn se7_a_tension_verdict_opens_an_advisory_tension_and_releases_the_lease() {
     );
     let review = r.store().review(&info.review.parse().unwrap()).unwrap();
     assert_eq!(review.verdict, Verdict::Tension);
-    assert_eq!(review.findings.len(), 1);
+    assert_eq!(review.citations.len(), 1);
 }
 
 #[test]
@@ -225,7 +225,7 @@ fn se7_the_schema_is_checked() {
         E_REVIEW_INVALID
     );
     let e = submit(&mut r, &who, &rq, &h, "tension", &[]).unwrap_err();
-    assert_eq!(e.message, "a tension verdict needs at least one finding");
+    assert_eq!(e.message, "a tension verdict needs at least one citation");
     let e = submit(
         &mut r,
         &who,
@@ -238,7 +238,7 @@ fn se7_the_schema_is_checked() {
     assert_eq!(
         e.message,
         format!(
-            "finding 1: block {} is not one of {} and {}",
+            "citation 1: block {} is not one of {} and {}",
             s.doc, blocks[0], blocks[1]
         )
     );
@@ -247,12 +247,12 @@ fn se7_the_schema_is_checked() {
         submit(&mut r, &who, &rq, &h, "tension", &many)
             .unwrap_err()
             .message,
-        "a verdict takes at most 20 findings"
+        "a verdict takes at most 20 citations"
     );
     let mut blank = request(&rq, &h, "tension", &blocks[..1]);
-    blank.findings[0].note = "  ".into();
+    blank.citations[0].note = "  ".into();
     let e = r.submit_verdict(&who, blank).unwrap_err();
-    assert_eq!(e.message, "finding 1: a note needs 1 to 2000 characters");
+    assert_eq!(e.message, "citation 1: a note needs 1 to 2000 characters");
     assert_eq!(
         submit(&mut r, &who, "rq-xyz", &h, "tension", &blocks[..1])
             .unwrap_err()

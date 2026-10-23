@@ -2029,7 +2029,7 @@ fn tier_reviews(out: &mut Vec<Measure>, r: &mut Rdy, sfx: &str, runs: &Runs, are
     use rdy_engine::semantic::accept_advice::AcceptInfo;
     use rdy_engine::semantic::candidates::request_label;
     use rdy_engine::semantic::case::case_hash;
-    use rdy_engine::semantic::submit::{CheckedSubmit, FindingRequest, ReviewSubmitRequest};
+    use rdy_engine::semantic::submit::{CheckedSubmit, CitationRequest, ReviewSubmitRequest};
     use rdy_engine::tensions::api::AcceptRequest;
     use rdy_engine::tensions::{TensionKind, TensionSeverity, tension_label};
     let actor = "agent:perf-reviewer";
@@ -2098,7 +2098,7 @@ fn tier_reviews(out: &mut Vec<Measure>, r: &mut Rdy, sfx: &str, runs: &Runs, are
             request: request_label(&q.key),
             case_hash: hash.to_string(),
             verdict: "tension".into(),
-            findings: vec![FindingRequest {
+            citations: vec![CitationRequest {
                 block: q.items[0].block.to_string(),
                 note: "These two blocks cannot both hold.".into(),
             }],

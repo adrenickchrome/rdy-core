@@ -5,7 +5,7 @@
 //! A ready batch whose version has advised tensions that no one accepted gets one `resolve`
 //! item, ref `advice:P-x@n`. It stands beside the batch, after its exceptions, and the person
 //! answers once for the batch: accept the advice or dismiss with a reason. Its `members` are one
-//! line a tension, with the reviewer's first finding, and its one fact is the advised digest.
+//! line a tension, with the reviewer's first citation, and its one fact is the advised digest.
 //!
 //! # Blocking tensions (D-562QR)
 //!
@@ -82,11 +82,11 @@ fn advice_item(st: &ReadState, batch: &Item, p: &Proposal) -> Result<Option<Item
         .iter()
         .map(|a| {
             let info = st.tension_info(&a.tension);
-            let finding = info
+            let citation = info
                 .judged
-                .and_then(|j| j.findings.into_iter().next())
+                .and_then(|j| j.citations.into_iter().next())
                 .map_or(a.tension.summary.clone(), |f| f.note);
-            format!("{}  {finding}", tension_label(&a.tension.id))
+            format!("{}  {citation}", tension_label(&a.tension.id))
         })
         .collect();
     it.facts = vec![Fact {

@@ -285,7 +285,7 @@ fn contradiction(r: &mut Rdy, s: &Spec) {
         case_hash: Some(Hash([9; 32])),
         verdict: Verdict::Tension,
         reason: "REASONCANARY review reason".into(),
-        findings: vec![],
+        citations: vec![],
         provenance: provenance.clone(),
     };
     let tension = SemanticTension {
