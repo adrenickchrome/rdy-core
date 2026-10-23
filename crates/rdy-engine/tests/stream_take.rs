@@ -1237,10 +1237,24 @@ fn ha13_twin_tags_of_one_version_keep_their_relay_signatures() {
     let dir = tempfile::tempdir().unwrap();
     let (mut a, mut b, _, _) = twins(dir.path());
     // clones A and B of one repo, at one landing: A's plain 1.0.0, B's relayed and signed 1.0.0
-    let ta = tag(&mut a, "1.0.0");
-    let tb = relay_tag(&mut b, "1.0.0");
+    // equal tag times on purpose: the two TAG objects differ by owned content (A's message,
+    // B's absent one), not by clock
+    let ta = {
+        let _clock = pin_clock(1_800_000_000_000);
+        tag_msg(&mut a, "1.0.0", Some("Plain twin"))
+    };
+    let tb = {
+        let _clock = pin_clock(1_800_000_000_000);
+        relay_tag(&mut b, "1.0.0")
+    };
     let l = landing_of(&a, ta);
     assert_eq!(landing_of(&b, tb), l);
+    let (xa, xb) = (
+        a.store().read_tag(&ta).unwrap(),
+        b.store().read_tag(&tb).unwrap(),
+    );
+    assert_eq!(xa.tagged_by.at_ms, xb.tagged_by.at_ms);
+    assert_ne!(xa.message, xb.message);
     assert_ne!(ta, tb);
     let source = signature_checks(&b.read(), &tb, None).unwrap();
     assert_eq!(
