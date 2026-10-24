@@ -272,9 +272,10 @@ fn ok1_hostile_manifest_and_encoding_are_bounded() {
         "unknown field extra"
     );
     assert_eq!(
-        reason(&list(&[format!(
-            "{{\"name\":\"a\",\"class\":\"compatible\",\"required_rdy\":\"1.0.0\",\"why\":0}}"
-        )])),
+        reason(&list(&[
+            "{\"name\":\"a\",\"class\":\"compatible\",\"required_rdy\":\"1.0.0\",\"why\":0}"
+                .to_string()
+        ])),
         "unknown field why"
     );
     let long = "k".repeat(100);
