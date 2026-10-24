@@ -306,6 +306,11 @@ where
     );
 }
 
+type SetText = fn(&mut Assessment, String);
+type Edit = fn(&mut Assessment);
+type EditIssue = fn(&mut AssessmentIssue);
+type SetRows = fn(&mut Assessment, u32);
+
 // ---- tests --------------------------------------------------------------------------------
 
 #[test]
@@ -456,7 +461,7 @@ fn ok3_assessment_is_full_and_canonical() {
     // text limits: 4,096 bytes pass, 4,097 fail, at each place
     let ok = "x".repeat(4096);
     let long = "x".repeat(4097);
-    let texts: [(&str, fn(&mut Assessment, String)); 3] = [
+    let texts: [(&str, SetText); 3] = [
         ("card fact", |a, t| a.card.facts[0] = t),
         ("issue fix", |a, t| a.issues[0].fix = t),
         ("tension summary", |a, t| a.tensions[0].summary = t),
@@ -524,7 +529,7 @@ fn ok3_assessment_is_full_and_canonical() {
     assert_eq!(PLAN_KINDS.len(), 6);
 
     // ordering and distinct rows, in every vector
-    let unsorted: [(&str, fn(&mut Assessment)); 18] = [
+    let unsorted: [(&str, Edit); 18] = [
         ("scope blocks", |a| a.scope.blocks = vec![id(32), id(31)]),
         ("scope duplicate", |a| a.scope.blocks = vec![id(31), id(31)]),
         ("reach", |a| a.reach = vec![id(20), id(19)]),
@@ -610,7 +615,7 @@ fn ok3_assessment_is_full_and_canonical() {
     }
     // the issue key is (block, dimension, code, subject, fix, dismissal): each part breaks a tie
     let base = issue(40, "ungrounded");
-    let tie: [(&str, fn(&mut AssessmentIssue)); 5] = [
+    let tie: [(&str, EditIssue); 5] = [
         ("dimension", |i| i.dimension = "governed".into()),
         ("code", |i| i.code = "dangling_ref".into()),
         ("subject", |i| i.subject = None),
@@ -695,7 +700,7 @@ fn ok3_assessment_is_full_and_canonical() {
 fn ok3_assessment_row_limits() {
     // 100,000 rows pass in every list that has a limit; 100,001 fail
     let limit = 100_000u32;
-    let lists: [(&str, fn(&mut Assessment, u32)); 13] = [
+    let lists: [(&str, SetRows); 13] = [
         ("scope blocks", |a, n| {
             a.scope.blocks = (0..n).map(id).collect()
         }),
