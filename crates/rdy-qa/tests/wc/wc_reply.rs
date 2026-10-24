@@ -29,7 +29,7 @@ fn mfb6_a_commit_prints_and_carries_the_intents_on_its_blocks() {
         text.contains("\nintents on these blocks:\n  intent "),
         "{text}"
     );
-    assert!(text.contains(" by agent:a/ra "), "{text}");
+    assert!(text.contains(" by agent:a (run ra) "), "{text}");
     set_body(&s, "notes.yaml", &seed.note, "Note, reworded again.");
     ok(&s, &["add", "notes.yaml"]);
     let (okk, v) = json(&s, &["commit", "-m", "again"]);

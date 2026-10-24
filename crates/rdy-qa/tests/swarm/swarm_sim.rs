@@ -1364,8 +1364,10 @@ fn sg5_two_colliding_views_land_one_after_the_other() {
             o.journal
         )
     });
+    // D-ME2HD: the collision is a conflict or a blocking tension, an issue of a version that is
+    // not ready; the owner's write or repin below resolves it
     assert!(
-        matches!(&refused.outcome, Met::Refused(c) if c == "E_CONFLICT_UNRESOLVED" || c == "E_BLOCKING_TENSION"),
+        matches!(&refused.outcome, Met::Refused(c) if c == "E_PROPOSAL_NOT_READY"),
         "swarm seed {SEED}: the second landing: {refused:#?}"
     );
     let last = other.last().expect("a land entry");

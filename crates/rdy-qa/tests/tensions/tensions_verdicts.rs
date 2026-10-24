@@ -348,10 +348,11 @@ fn se7_the_author_of_either_block_cannot_judge_the_pair() {
     )
     .unwrap_err();
     assert_eq!(e.code, E_SELF_REVIEW);
-    // human:qa landed the canon side (spec_doc writes as the human writer)
+    // human:qa landed the canon side (spec_doc writes as the human writer); a human: actor is
+    // only ever the person's own session (D-ME2C0), here with the reviewer role
     let e = submit(
         &mut r,
-        &reviewer("human:qa"),
+        &Session::human("human:qa".into(), Role::Reviewer).unwrap(),
         &rq,
         &h,
         "tension",

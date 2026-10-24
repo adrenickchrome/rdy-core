@@ -202,11 +202,13 @@ pub(crate) fn approver(s: &Session) -> Result<Session, RdyError> {
 /// - an agent session with no `relayed_by`: refused (`E_PERMISSION`);
 /// - an agent session with `relayed_by` but no evidence: refused (`E_BAD_INPUT`, the pairing);
 ///   with blank evidence, the landing's own refusal of an empty quote (`E_BAD_INPUT`);
-/// - an agent session whose `relayed_by` is exactly its actor, or its `actor/run` when it has a
-///   run: the human actor (`cx.human`) as the approver, relayed by the session's actor and run
-///   (taken from the session, never parsed from the flag);
-/// - an agent session whose `relayed_by` is anything else: refused (`E_PERMISSION`), with a fix
-///   that names the session's actor, a spelling this check accepts;
+/// - an agent session whose `relayed_by` is exactly its actor (the actor alone, D-PWB82): the
+///   human actor (`cx.human`) as the approver, relayed by the session's actor and run (the run
+///   taken from the session, never from the flag);
+/// - an agent session whose `relayed_by` is outside the actor form: the grammar's refusal
+///   (`E_BAD_INPUT`);
+/// - an agent session whose `relayed_by` is another actor: refused (`E_PERMISSION`), with a fix
+///   that names the session's actor, the spelling this check accepts;
 /// - a human session with `session_ref` or `question` and no relay: refused (`E_BAD_INPUT`,
 ///   `<field> needs relayed_by`), `session_ref` named first;
 /// - a quote or a question longer than the table allows, or a `session_ref` longer than a view
@@ -267,22 +269,27 @@ fn approval_refusal(s: &Session, input: &RelayInput, refusal: RelayRefusal) -> R
             )
         }
         RelayRefusal::NeedsEvidence { .. } => pair(),
-        r @ (RelayRefusal::TooLong | RelayRefusal::SessionRefTooLong) => r.error(),
+        r @ (RelayRefusal::TooLong
+        | RelayRefusal::SessionRefTooLong
+        | RelayRefusal::BadIdentity { .. }) => r.error(),
     }
 }
 
-/// The refusal of a `relayed_by` that is not the session's actor or `actor/run`, if it is not.
-/// The flag is compared whole with the session's own spellings, never split: an agent actor may
-/// contain '/', so splitting would misread `agent:a/b` as actor `agent:a`, run `b`.
+/// The refusal of a `relayed_by` that is not the session's actor, if it is not: the grammar's
+/// refusal (`E_BAD_INPUT`) when it is outside the actor form, else `E_PERMISSION` when it is
+/// another actor. The flag names an actor only (D-PWB82) and is compared whole, never split: an
+/// agent actor may contain '/', and the run always comes from the session.
 fn not_itself(s: &Session, by: &str) -> Option<RdyError> {
-    let me = match &s.run {
-        Some(r) => format!("{}/{r}", s.actor),
-        None => s.actor.clone(),
-    };
-    (by != s.actor && by != me).then(|| {
+    if let Err(e) = rdy_engine::identity::validate_actor(by) {
+        return Some(e);
+    }
+    (by != s.actor).then(|| {
         RdyError::new(
             E_PERMISSION,
-            format!("{me} relays only as itself, not as {by}"),
+            format!(
+                "{} relays only as itself, not as {by}",
+                rdy_engine::identity::actor_run_text(&s.actor, s.run.as_deref())
+            ),
             format!(
                 "pass --relayed-by {} with the person's words in --evidence",
                 s.actor
@@ -483,7 +490,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             parse(
                 op,
                 args,
-                "{op, name?, from?, base?, pin?, view?, views?, changes?, cascade?, a?, b?, all?, stale?, reason?, owner?, none?, target?, max_tokens?, relayed_by?, evidence?, question?, session_ref?}",
+                "{op, name?, from?, base?, pin?, view?, views?, changes?, cascade?, a?, b?, all?, stale?, reason?, owner?: {actor, run?}, none?, target?, max_tokens?, relayed_by?, evidence?, question?, session_ref?}; own {name, owner?: {actor, run?}, none?, evidence, question?, session_ref?}",
             )?,
         ),
         "wc_view" => wc_view(cx, parse(op, args, "{view?, ids?, blobs_dir?}")?),

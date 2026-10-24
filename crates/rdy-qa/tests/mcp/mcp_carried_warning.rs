@@ -9,6 +9,7 @@ use rdy_model::redaction::{
 };
 use rdy_model::{Block, Change, Hash, Op, Provenance, Role};
 use rdy_qa::fixtures::{project, write};
+use rdy_qa::intake::TEST_SUMMARY;
 use rdy_qa::mcp::{McpClient, Reply};
 use rdy_store::kinds;
 use rdy_store::redaction::StoredFrame;
@@ -138,14 +139,17 @@ fn projects() -> (tempfile::TempDir, tempfile::TempDir) {
         .unwrap();
         let p = r
             .propose(
-                &Session::human("human:qa".into(), Role::Writer),
+                &Session::human("human:qa".into(), Role::Writer).unwrap(),
                 "work",
                 "Base",
-                None,
+                Some(TEST_SUMMARY),
             )
             .unwrap();
-        r.land(&Session::human("human:qa".into(), Role::Approver), &p.id)
-            .unwrap();
+        r.land(
+            &Session::human("human:qa".into(), Role::Approver).unwrap(),
+            &p.id,
+        )
+        .unwrap();
         r.close().unwrap();
         if carrying {
             carry(dir.path());

@@ -1624,7 +1624,8 @@ impl Agent {
                 (true, None) => return self.skip("propose", Skip::NothingToPropose),
             }
         };
-        let mut args = json!({"title": format!("{view} step {}", self.link.step), "view": view});
+        let title = format!("{view} step {}", self.link.step);
+        let mut args = json!({"title": title, "summary": title, "view": view});
         if contra.is_none()
             && let Some(set) = &self.alt_set
         {

@@ -588,10 +588,12 @@ impl ServeHandler {
                 ),
             }
         })?;
-        let human = self
-            .human
-            .clone()
-            .unwrap_or_else(|| human_actor_for_env(&self.shared.engine().root()));
+        // D-ME2C0: the configured (or test-hook) human and the client's actor and run are checked
+        // before a session is recorded; a refusal leaves the session table as it was
+        let human = match self.human.clone() {
+            Some(h) => h,
+            None => human_actor_for_env(&self.shared.engine().root())?,
+        };
         let s = classify(&human, a.actor.as_deref(), a.run.as_deref(), Role::Writer)?;
         let reply = json!({
             "actor": s.actor,

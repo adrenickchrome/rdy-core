@@ -35,11 +35,11 @@ const HEAD: usize = 37;
 const DAMAGED_FIX: &str = "dump the project again; rdy never repairs a dump";
 
 fn writer() -> Session {
-    Session::human("human:t".into(), Role::Writer)
+    Session::human("human:t".into(), Role::Writer).unwrap()
 }
 
 fn approver() -> Session {
-    Session::human("human:t".into(), Role::Approver)
+    Session::human("human:t".into(), Role::Approver).unwrap()
 }
 
 /// Writes one doc with a prose block to view `work`; returns the block's id.
@@ -64,7 +64,9 @@ fn add(r: &mut Rdy, n: usize, body: &str) -> String {
 
 /// Lands view `work`; returns the landing id.
 fn land(r: &mut Rdy) -> String {
-    let p = r.propose(&writer(), "work", "Work", None).unwrap();
+    let p = r
+        .propose(&writer(), "work", "Work", Some("test summary"))
+        .unwrap();
     r.land(&approver(), &p.id).unwrap()
 }
 
@@ -86,7 +88,7 @@ fn remove(r: &mut Rdy, target: &str) {
     )
     .unwrap();
     let p = r
-        .propose(&writer(), "redact", "Remove the code", None)
+        .propose(&writer(), "redact", "Remove the code", Some("test summary"))
         .unwrap();
     r.land(&approver(), &p.id).unwrap();
 }

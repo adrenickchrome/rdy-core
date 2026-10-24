@@ -25,15 +25,15 @@ use std::process::Command;
 // ---- sessions and writes ----
 
 fn writer() -> Session {
-    Session::human("human:qa".into(), Role::Writer)
+    Session::human("human:qa".into(), Role::Writer).unwrap()
 }
 
 fn approver() -> Session {
-    Session::human("human:qa".into(), Role::Approver)
+    Session::human("human:qa".into(), Role::Approver).unwrap()
 }
 
 fn reader() -> Session {
-    Session::human("human:qa".into(), Role::Reader)
+    Session::human("human:qa".into(), Role::Reader).unwrap()
 }
 
 fn agent(run: &str) -> Session {
@@ -1077,7 +1077,7 @@ fn cp8_reader_and_view_owner_guards_precede_write() {
         assert_eq!(log_state(&r), before);
         let e = r.answer_plan(&agent("r2"), "r1", answers).unwrap_err();
         assert_eq!(e.code, E_VIEW_OWNER, "{e}");
-        assert_eq!(e.message, "view \"r1\" is owned by agent:qa/r1");
+        assert_eq!(e.message, "view \"r1\" is owned by agent:qa (run r1)");
         assert_eq!(log_state(&r), before);
         let e = r.answer_plan(&owner, "work", answers).unwrap_err();
         assert_eq!(e.code, E_VIEW_OWNER, "{e}");
@@ -1817,7 +1817,11 @@ fn cp8_retained_reads_keep_their_plan_across_answers_and_landings() {
 
     // a landing after the state was published: the bound proposal had not landed at its
     // sequence, so its chain stays live there
-    let version = r.store_mut().propose("w", "edit a", prov()).unwrap();
+    let changes = r.store_mut().included("w").unwrap().as_ref().clone();
+    let version = r
+        .store_mut()
+        .propose_changes("w", "edit a", Some("test summary"), prov(), changes, None)
+        .unwrap();
     let answered = r.read().reader().plan(&first).unwrap();
     let bound = Plan {
         stable: Some(first),
@@ -1868,7 +1872,11 @@ fn cp8_answer_only_successors_keep_the_last_bound_proposal() {
         &s.b,
         &format!("B builds firmly on {{{{{}}}}} and {{{{{}}}}}.", s.a, s.c),
     );
-    let version = r.store_mut().propose("w", "edit b", prov()).unwrap();
+    let changes = r.store_mut().included("w").unwrap().as_ref().clone();
+    let version = r
+        .store_mut()
+        .propose_changes("w", "edit b", Some("test summary"), prov(), changes, None)
+        .unwrap();
     let pref = format!("P-{}@1", version.short());
     let bound = Plan {
         stable: None,

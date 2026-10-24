@@ -3,6 +3,7 @@
 use rdy_engine::events::{Event, EventKind};
 use rdy_engine::*;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::TEST_SUMMARY;
 use rdy_qa::invariants::check;
 use rdy_store::view::ViewOpKind;
 use serde_json::json;
@@ -266,7 +267,7 @@ fn reb1_pinned_closed_and_empty_views_are_not_rebased_and_the_proposing_views_la
     r.invalidate();
     r.view_create(&a, "empty", None, false).unwrap();
     write_as(&mut r, &a, "p", update(&c, &v, "p's")).unwrap();
-    let p = r.propose(&a, "p", "p", None).unwrap();
+    let p = r.propose(&a, "p", "p", Some(TEST_SUMMARY)).unwrap();
     let later = write_as(&mut r, &a, "p", claim(&section, "after proposing"))
         .unwrap()
         .change;

@@ -707,6 +707,15 @@ fn os_from_uname(stdout: &[u8]) -> io::Result<String> {
     Ok(line.to_string())
 }
 
+/// `prefix` followed by the byte 0xFF: an environment value that is not Unicode, for the
+/// refusal of a session identity read from the environment.
+pub fn not_unicode(prefix: &str) -> std::ffi::OsString {
+    use std::os::unix::ffi::OsStringExt;
+    let mut bytes = prefix.as_bytes().to_vec();
+    bytes.push(0xff);
+    std::ffi::OsString::from_vec(bytes)
+}
+
 /// A command that runs the POSIX shell script `script` (`sh -c`), for a stub child process.
 pub fn shell_script(script: &str) -> Command {
     let mut cmd = Command::new("sh");

@@ -2,7 +2,7 @@
 //! `chat`, role `reviewer`) for every act that has a tool (FW-UX1, D-KQ4CA; F5, D-VF4RH). The
 //! command line is the fallback, and only for this closed list:
 //!
-//! - `rdy approve`, relayed (`--relayed-by agent:relay/chat`, the path FW-B9 gives; no MCP tool
+//! - `rdy approve`, relayed (`--relayed-by agent:relay`, the path FW-B9 gives; no MCP tool
 //!   approves in M2) and, about one landing in five, direct (CLI parity);
 //! - the working copy: `rdy checkout`, `rdy add`, `rdy commit`, `rdy update`, and `rdy propose`
 //!   for the human's view `work`, which no agent may act in.
@@ -31,8 +31,9 @@ use std::time::Duration;
 const CLI_BUDGET: Duration = Duration::from_secs(120);
 /// The actor a direct command journals as (the user config `Served` writes names it).
 const HUMAN: &str = "human:qa";
-/// The relay as `rdy approve --relayed-by` names it: the relaying agent's own actor and run.
-const RELAY: &str = "agent:relay/chat";
+/// The relay as `rdy approve --relayed-by` names it: the relaying agent's own actor alone; the
+/// relay records the session's run (D-PWB82).
+const RELAY: &str = RELAY_ACTOR;
 /// The relaying agent's actor and run: the relay runs as this session (D-HA7YZ).
 const RELAY_ACTOR: &str = "agent:relay";
 const RELAY_RUN: &str = "chat";
@@ -588,7 +589,15 @@ impl Person {
         let mut made = None;
         let res = self.wc(
             "wc_propose",
-            &["propose", "--view", "work", "--title", &title],
+            &[
+                "propose",
+                "--view",
+                "work",
+                "--title",
+                &title,
+                "--summary",
+                &title,
+            ],
             |en, v| {
                 en.view = Some("work".to_string());
                 en.block = v["ref"].as_str().map(str::to_string);

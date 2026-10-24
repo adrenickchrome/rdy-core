@@ -59,9 +59,9 @@ pub(crate) struct ResolveArgs {
     /// Requires --relayed-by.
     #[arg(long, value_name = "WORDS", requires_all = ["relayed_act", "relayed_by"])]
     evidence: Option<String>,
-    /// The agent that relays the person's answer: your own actor (or actor/run). Only an agent
-    /// session relays. Requires --evidence.
-    #[arg(long, value_name = "ACTOR[/RUN]", requires_all = ["relayed_act", "evidence"])]
+    /// The agent that relays the person's words: your own actor. The run comes from your
+    /// session. Only an agent session relays. Requires --evidence.
+    #[arg(long, value_name = "ACTOR", requires_all = ["relayed_act", "evidence"])]
     relayed_by: Option<String>,
     /// The question the person was asked.
     #[arg(long, value_name = "TEXT", requires = "evidence")]
@@ -151,8 +151,12 @@ fn judged_text(j: &Value) -> String {
     let a = &j["accepted"];
     if a.is_object() {
         out.push_str(&format!("\n  accepted by {}", text(&a["actor"])));
-        if let Some(by) = a["relayed_by"].as_str() {
-            out.push_str(&format!(" (relayed by {by})"));
+        // the relayer is an object, its actor and run apart (D-PWB82)
+        if let Some(by) = a["relayed_by"]["actor"].as_str() {
+            out.push_str(&format!(
+                " (relayed by {})",
+                rdy_engine::identity::actor_run_text(by, a["relayed_by"]["run"].as_str())
+            ));
         }
         if let Some(words) = a["evidence"].as_str() {
             out.push_str(&format!(": \"{words}\""));
@@ -341,9 +345,11 @@ pub(crate) fn resolve(env: &Env, a: ResolveArgs) -> Result<(Value, String), Erro
     } else {
         let relayed = v["relayed_by"]["actor"]
             .as_str()
-            .map(|a| match v["relayed_by"]["run"].as_str() {
-                Some(run) => format!(", relayed by {a}/{run}"),
-                None => format!(", relayed by {a}"),
+            .map(|a| {
+                format!(
+                    ", relayed by {}",
+                    rdy_engine::identity::actor_run_text(a, v["relayed_by"]["run"].as_str())
+                )
             })
             .unwrap_or_default();
         format!(
@@ -397,10 +403,18 @@ mod tests {
             "status": "open", "summary": "a reviewer judged that c-A and c-B disagree", "sides": [],
             "judged": {"review": "ab", "actor": "agent:r", "advice": "it contradicts the gate rule",
                 "citations": [{"block": "c-A", "note": "A and B cannot both hold"}, {"block": "c-B", "note": "n"}],
-                "accepted": {"actor": "human:qa", "relayed_by": "agent:w/7", "evidence": "yes", "at": "t"}}});
+                "accepted": {"actor": "human:qa", "relayed_by": {"actor": "agent:w", "run": "7"}, "evidence": "yes", "at": "t"}}});
         assert_eq!(
             tension_text(&t),
-            "tn-0123456789ab  blocking  semantic  open  a reviewer judged that c-A and c-B disagree\n  judged by agent:r: A and B cannot both hold (+1 more)\n  advises blocking: it contradicts the gate rule\n  accepted by human:qa (relayed by agent:w/7): \"yes\""
+            "tn-0123456789ab  blocking  semantic  open  a reviewer judged that c-A and c-B disagree\n  judged by agent:r: A and B cannot both hold (+1 more)\n  advises blocking: it contradicts the gate rule\n  accepted by human:qa (relayed by agent:w (run 7)): \"yes\""
+        );
+        // a relayer with no run prints its actor alone
+        let mut t = t;
+        t["judged"]["accepted"]["relayed_by"] = json!({"actor": "agent:w/x", "run": null});
+        assert!(
+            tension_text(&t).ends_with("accepted by human:qa (relayed by agent:w/x): \"yes\""),
+            "{}",
+            tension_text(&t)
         );
     }
 }

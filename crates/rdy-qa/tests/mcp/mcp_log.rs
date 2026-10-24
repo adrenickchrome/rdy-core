@@ -4,6 +4,7 @@ use rdy_engine::*;
 use rdy_mcp::tools::*;
 use rdy_mcp::view_tools::rdy_log;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::TEST_SUMMARY;
 use serde_json::{from_value, json};
 use std::sync::Arc;
 
@@ -30,7 +31,9 @@ fn logt1_rdy_log_takes_limit_and_since_and_names_the_proposer() {
         },
     )
     .unwrap();
-    let p = r.propose(&a, "ra", "Agent work", None).unwrap();
+    let p = r
+        .propose(&a, "ra", "Agent work", Some(TEST_SUMMARY))
+        .unwrap();
     r.land(&approver(), &p.id).unwrap();
     r.tag(&approver(), "v1.0.0", None, None).unwrap();
     let mut st = McpState::new(Arc::new(Local::new(r)));

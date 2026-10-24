@@ -3,11 +3,21 @@
 //! views paragraph of `rdy_schema`, and `rdy_log`. The request itself is run by
 //! `rdy_engine::view_api::run_view`, the dispatcher the daemon's `view` op shares.
 use crate::tools::{McpState, budget, check_tokens, session};
-use rdy_engine::view_api::{ViewRequest, run_view};
+use rdy_engine::view_api::{OwnerInput, ViewRequest, run_view};
 use rdy_engine::*;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
+
+/// own: the new owner, its actor and run apart (D-PWB82).
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerParams {
+    /// The new owner's actor: human:<name>, agent:<name>[/<name>], or ci:<repo_id>/<name>.
+    pub actor: String,
+    /// The owner's run. Omit it for an owner with no run.
+    pub run: Option<String>,
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -40,8 +50,8 @@ pub struct ViewParams {
     pub stale: Option<u32>,
     /// close: why, recorded on the view.
     pub reason: Option<String>,
-    /// own: the new owner, actor or actor/run.
-    pub owner: Option<String>,
+    /// own: the new owner as {actor, run?}.
+    pub owner: Option<OwnerParams>,
     /// own: leave the view unowned.
     pub none: Option<bool>,
     /// undo: the op to undo (default: your newest undoable op on the view).
@@ -73,13 +83,13 @@ pub struct LogParams {
 }
 
 /// `rdy_schema`'s paragraph on views.
-pub const SCHEMA_DOC: &str = "rdy_view {op, ...} works on views. Ops: create {name, base?, pin?}, fork {from, name}, include {changes, view?} (brings the changes' dependencies; a change that already landed is refused), exclude {changes, cascade?, view?}, compare {a?, b?} (default: your view against canon), list {all?, stale?}, show {view?}, close {name|views|stale, reason?, evidence?, question?, session_ref?}, own {view, owner?, none?, evidence, question?, session_ref?}, undo {view?, target?, cascade?}, resolve {block, landed: true, view?} (takes the landed side of a conflict on an accepted or rejected decision: the view reads canon's frozen version, and the change depends on every side); own and close with stale are a person's acts: relay their words with evidence (without it an MCP session gets E_PERMISSION); the act runs as the person, and the reply names relayed_by and the answer record. Every view op defaults to your own view. Ownership: an agent commits to, includes into, excludes from, undoes on, closes and proposes a view only if it owns it (the session that created it or first wrote to it); it never acts in work, the human's view, and with no view it writes to work-<actor>; include another session's changes into yours instead. A conflict is recorded, not an error: two sides changed one block, reads show the base version with a conflict (sides, changes, landings), and you resolve it by writing the block from the version you want (on an accepted or rejected decision, an edit is E_FROZEN; take the landed side with resolve); rdy_propose lists every conflict and marks the ones its version carries as blocking. Codes (each one's when and fix are in errors): E_VIEW_OWNER, E_VIEW_EXISTS, E_VIEW_CLOSED, E_HAS_DEPENDENTS, E_DEPS_MISSING, E_CONFLICT_UNRESOLVED, E_PROPOSAL_MOVED, E_UNDO_BLOCKED, E_UNDO_LANDING, E_NOTHING_TO_UNDO. include, exclude and undo return consequences (max_tokens bounds them); they take no brief.";
+pub const SCHEMA_DOC: &str = "rdy_view {op, ...} works on views. Ops: create {name, base?, pin?}, fork {from, name}, include {changes, view?} (brings the changes' dependencies; a change that already landed is refused), exclude {changes, cascade?, view?}, compare {a?, b?} (default: your view against canon), list {all?, stale?}, show {view?}, close {name|views|stale, reason?, evidence?, question?, session_ref?}, own {name, owner?: {actor, run?}, none?, evidence, question?, session_ref?}, undo {view?, target?, cascade?}, resolve {block, landed: true, view?} (takes the landed side of a conflict on an accepted or rejected decision: the view reads canon's frozen version, and the change depends on every side); own and close with stale are a person's acts: relay their words with evidence (without it an MCP session gets E_PERMISSION); the act runs as the person, and the reply names relayed_by and the answer record. Every view op defaults to your own view. Ownership: an agent commits to, includes into, excludes from, undoes on, closes and proposes a view only if it owns it (the session that created it or first wrote to it); it never acts in work, the human's view, and with no view it writes to work-<actor>; include another session's changes into yours instead. A conflict is recorded, not an error: two sides changed one block, reads show the base version with a conflict (sides, changes, landings), and you resolve it by writing the block from the version you want (on an accepted or rejected decision, an edit is E_FROZEN; take the landed side with resolve); rdy_propose lists every conflict and marks the ones its version carries as blocking. Codes (each one's when and fix are in errors): E_VIEW_OWNER, E_VIEW_EXISTS, E_VIEW_CLOSED, E_HAS_DEPENDENTS, E_DEPS_MISSING, E_CONFLICT_UNRESOLVED, E_PROPOSAL_MOVED, E_UNDO_BLOCKED, E_UNDO_LANDING, E_NOTHING_TO_UNDO. include, exclude and undo return consequences (max_tokens bounds them); they take no brief.";
 
 /// `rdy_view`: builds the request field by field and runs it for the session.
 pub fn rdy_view(st: &mut McpState, p: ViewParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     let s = session(st)?;
-    let person = human_actor_for_env(&st.engine.root());
+    let person = human_actor_for_env(&st.engine.root())?;
     let max_tokens = p.max_tokens;
     let req = ViewRequest {
         op: p.op,
@@ -96,7 +106,10 @@ pub fn rdy_view(st: &mut McpState, p: ViewParams) -> Result<Value, RdyError> {
         all: p.all,
         stale: p.stale,
         reason: p.reason,
-        owner: p.owner,
+        owner: p.owner.map(|o| OwnerInput {
+            actor: o.actor,
+            run: o.run,
+        }),
         none: p.none,
         target: p.target,
         block: p.block,

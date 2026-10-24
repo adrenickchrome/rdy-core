@@ -1076,31 +1076,53 @@ fn read_levels(
     Ok(files)
 }
 
-/// The non-empty `actor` string of the file at `level`, if it was read.
-fn actor_of(files: &[(Level, Mapping)], level: Level) -> Option<String> {
+/// The raw `actor` value of the file at `level`, if it was read and has the key, with the file's
+/// name: an empty string or a wrong type is kept, for [`config_levels::configured_actor`] to
+/// refuse when the person is asked for.
+fn actor_of(
+    files: &[(Level, Mapping)],
+    level: Level,
+    user_file: Option<&Path>,
+) -> Option<(Value, String)> {
     files
         .iter()
         .find(|(l, _)| *l == level)
         .and_then(|(_, m)| m.get("actor"))
-        .and_then(Value::as_str)
-        .filter(|a| !a.is_empty())
-        .map(str::to_string)
+        .map(|v| (v.clone(), config_levels::file_name(level, user_file)))
+}
+
+/// The configured person of the two raw actors, local first, else the bounded fallback of `user`.
+fn person_of(
+    local: Option<&(Value, String)>,
+    user_actor: Option<&(Value, String)>,
+    user: Option<&str>,
+) -> Result<String, RdyError> {
+    Ok(
+        config_levels::configured_actor(raw_actor(local), raw_actor(user_actor))?
+            .unwrap_or_else(|| crate::identity::fallback_actor(user)),
+    )
+}
+
+fn raw_actor(a: Option<&(Value, String)>) -> Option<(&Value, &str)> {
+    a.map(|(v, s)| (v, s.as_str()))
 }
 
 /// The human actor the settings name, read as `HubConfig::load` reads the files and by the
 /// same precedence as [`HubConfig::human_actor`], but without the remote and install checks:
 /// settings that fail only those (two share remotes, a limit) still name their person. A file
-/// that does not read within the settings bounds is the error `load` gives, and the caller
-/// does not know the actor.
+/// that does not read within the settings bounds is the error `load` gives, and an actor outside
+/// the form is refused as [`config_levels::configured_actor`] refuses it.
 pub fn configured_human_actor(
     project: Option<&Path>,
     user_file: Option<&Path>,
     user: Option<&str>,
 ) -> Result<String, RdyError> {
     let files = read_levels(project, user_file)?;
-    Ok(actor_of(&files, Level::Local)
-        .or_else(|| actor_of(&files, Level::User))
-        .unwrap_or_else(|| format!("human:{}", user.unwrap_or("unknown"))))
+    person_of(
+        actor_of(&files, Level::Local, user_file).as_ref(),
+        actor_of(&files, Level::User, user_file).as_ref(),
+        user,
+    )
 }
 
 /// The hub settings in effect: remotes, installs, their display rows and warnings. It never
@@ -1114,8 +1136,10 @@ pub struct HubConfig {
     /// The hub settings' `W_CONFIG_UNKNOWN` warnings, sorted by file (user, project, local),
     /// then by path.
     pub warnings: Vec<Issue>,
-    local_actor: Option<String>,
-    user_actor: Option<String>,
+    /// The raw `actor` of `.rdy/local.yaml` and of the user config, with each file's name: kept
+    /// as written, so loading never refuses an actor and only [`HubConfig::human_actor`] does.
+    local_actor: Option<(Value, String)>,
+    user_actor: Option<(Value, String)>,
 }
 
 impl HubConfig {
@@ -1126,8 +1150,8 @@ impl HubConfig {
     /// warnings as its issues. The credential file is never opened.
     pub fn load(project: Option<&Path>, user_file: Option<&Path>) -> Result<HubConfig, RdyError> {
         let files = read_levels(project, user_file)?;
-        let local_actor = actor_of(&files, Level::Local);
-        let user_actor = actor_of(&files, Level::User);
+        let local_actor = actor_of(&files, Level::Local, user_file);
+        let user_actor = actor_of(&files, Level::User, user_file);
         let mut parts = Vec::new();
         let mut notes = Vec::new();
         for (level, mut map) in files {
@@ -1204,14 +1228,12 @@ impl HubConfig {
         OriginFence::new(install.clone(), pinned)
     }
 
-    /// The human actor: `actor` in `.rdy/local.yaml`, else in the user config, else
-    /// `human:<user>` (`human:unknown` with no user), as `human_actor_for` reads it, from the
-    /// files this config already read within their bounds.
-    pub fn human_actor(&self, user: Option<&str>) -> String {
-        self.local_actor
-            .clone()
-            .or_else(|| self.user_actor.clone())
-            .unwrap_or_else(|| format!("human:{}", user.unwrap_or("unknown")))
+    /// The human actor: `actor` in `.rdy/local.yaml`, else in the user config, else the bounded
+    /// fallback of `user` (`human:unknown` with no user), as `human_actor_for` reads it, from the
+    /// files this config already read within their bounds. An actor outside the form, or of the
+    /// wrong type, is refused naming its file.
+    pub fn human_actor(&self, user: Option<&str>) -> Result<String, RdyError> {
+        person_of(self.local_actor.as_ref(), self.user_actor.as_ref(), user)
     }
 
     /// The remote a command uses: `name` when given (`E_NOT_FOUND` when no remote has it), else

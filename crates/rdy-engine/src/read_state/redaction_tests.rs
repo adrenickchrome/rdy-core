@@ -13,11 +13,11 @@ use std::sync::Arc;
 const SECRET: &str = "The launch code is ZEBRA-7731.";
 
 fn writer() -> Session {
-    Session::human("human:t".into(), Role::Writer)
+    Session::human("human:t".into(), Role::Writer).unwrap()
 }
 
 fn approver() -> Session {
-    Session::human("human:t".into(), Role::Approver)
+    Session::human("human:t".into(), Role::Approver).unwrap()
 }
 
 fn write(r: &mut Rdy, view: &str, ops: serde_json::Value) -> crate::WriteResult {
@@ -70,7 +70,9 @@ fn world() -> World {
             {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Ledger"}, "body": "A ledger."}
         ]),
     );
-    let base = r.propose(&writer(), "work", "Base", None).unwrap();
+    let base = r
+        .propose(&writer(), "work", "Base", Some("test summary"))
+        .unwrap();
     let landing: Hash = r.land(&approver(), &base.id).unwrap().parse().unwrap();
     r.tag(&approver(), "v1.0.0", None, None).unwrap();
     let term = w.created["$t"].clone();
@@ -93,7 +95,7 @@ fn world() -> World {
         )
         .unwrap();
     let prop = r
-        .propose(&writer(), "redact", "Remove the code", None)
+        .propose(&writer(), "redact", "Remove the code", Some("test summary"))
         .unwrap();
     World {
         _dir: dir,
@@ -291,7 +293,9 @@ fn rdx10_ordinary_publishes_keep_cache_reuse() {
     assert!(!side.created.is_empty());
     let before = w.r.read();
     before.materialized(&Scope::Canon).unwrap();
-    let p = w.r.propose(&writer(), "side", "Other", None).unwrap();
+    let p =
+        w.r.propose(&writer(), "side", "Other", Some("test summary"))
+            .unwrap();
     w.r.land(&approver(), &p.id).unwrap();
     let landed = w.r.read();
     assert!(Arc::ptr_eq(&before.as_of, &landed.as_of), "landing: as-of");

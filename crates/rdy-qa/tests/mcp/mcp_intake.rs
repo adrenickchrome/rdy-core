@@ -851,7 +851,7 @@ fn removal_version(summary: Option<&str>) -> (tempfile::TempDir, McpState, Strin
     use rdy_engine::{Session, WriteRequest};
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
-    let human = Session::human(PERSON.into(), rdy_model::Role::Writer);
+    let human = Session::human(PERSON.into(), rdy_model::Role::Writer).unwrap();
     let w = r
         .write(
             &human,

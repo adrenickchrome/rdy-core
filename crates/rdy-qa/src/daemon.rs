@@ -491,6 +491,16 @@ impl Served {
 
     /// Runs `rdy --project <dir> <args>` with `RDY_ACTOR=actor` and, if given, `RDY_RUN=run`.
     pub fn rdy_as(&self, actor: &str, run: Option<&str>, args: &[&str]) -> std::process::Output {
+        self.rdy_as_os(actor.as_ref(), run.map(AsRef::as_ref), args)
+    }
+
+    /// `rdy_as` with environment values that need not be Unicode.
+    pub fn rdy_as_os(
+        &self,
+        actor: &std::ffi::OsStr,
+        run: Option<&std::ffi::OsStr>,
+        args: &[&str],
+    ) -> std::process::Output {
         let mut cmd = self.command(args);
         cmd.env("RDY_ACTOR", actor);
         if let Some(r) = run {
@@ -517,6 +527,16 @@ impl Served {
     /// `rdy_as(actor, run, args)`, parsed (pass `--json` in `args`).
     pub fn json_as(&self, actor: &str, run: Option<&str>, args: &[&str]) -> (bool, Value) {
         Served::parsed(self.rdy_as(actor, run, args))
+    }
+
+    /// `rdy_as_os(actor, run, args)`, parsed (pass `--json` in `args`).
+    pub fn json_as_os(
+        &self,
+        actor: &std::ffi::OsStr,
+        run: Option<&std::ffi::OsStr>,
+        args: &[&str],
+    ) -> (bool, Value) {
+        Served::parsed(self.rdy_as_os(actor, run, args))
     }
 
     /// The human's environment (`XDG_CONFIG_HOME`), for commands a test builds itself.

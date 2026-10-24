@@ -39,7 +39,9 @@ fn write(r: &mut Rdy, view: &str, ops: Value) -> WriteResult {
 }
 
 fn land(r: &mut Rdy, view: &str) {
-    let p = r.propose(&writer(), view, "spv2", None).unwrap();
+    let p = r
+        .propose(&writer(), view, "spv2", Some("test summary"))
+        .unwrap();
     r.land(&approver(), &p.id).unwrap();
 }
 

@@ -31,12 +31,12 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         "E_CONFLICT_UNRESOLVED",
-        "the proposal version carries a conflict it does not resolve (each is an issue)",
+        "an issue names a conflict the proposal version does not resolve",
         "write the block from the version you want, then propose again",
     ),
     (
         "E_BLOCKING_TENSION",
-        "a landing would put a blocking tension into canon: a side of the tension is in the proposal, every side would be in canon after it, and the tension is not dismissed (each is an issue)",
+        "an issue names an undismissed blocking tension that the landing would put into canon",
         "resolve each as the fix names for its kind (a change to a side; a repin helps a stale citation, never a semantic tension), or dismiss it with rdy_resolve {tension, dismiss: {reason}} (a reviewer of another actor, or a human); rdy_tensions {involving: <change>} lists them, a form only this landing gives with its proposal",
     ),
     (
@@ -168,6 +168,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "E_EXCEPTION_OPEN",
         "an approval names a version whose exceptions have no answer",
         "answer each exception card first",
+    ),
+    (
+        "E_PROPOSAL_NOT_READY",
+        "the proposal version fails readiness; issues name each failed check",
+        "fix each issue and propose again: rdy_propose / rdy propose",
     ),
     (
         "E_ITEM_MOVED",

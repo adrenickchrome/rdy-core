@@ -96,7 +96,15 @@ fn import_propose_approve_render_fsck() {
     json(dir.path(), &["import", ex, "--view", "migrate"]);
     let p = json(
         dir.path(),
-        &["propose", "--view", "migrate", "--title", "migrate"],
+        &[
+            "propose",
+            "--view",
+            "migrate",
+            "--title",
+            "migrate",
+            "--summary",
+            "test summary",
+        ],
     );
     let pid = p["id"].as_str().unwrap().to_string();
     let landed = json(dir.path(), &["approve", &pid]);
@@ -240,7 +248,7 @@ fn seed_and_land(dir: &std::path::Path, title: &str) -> String {
             },
         )
         .unwrap();
-    let p = r.propose(&w, "work", title, None).unwrap();
+    let p = r.propose(&w, "work", title, Some("test summary")).unwrap();
     r.land(&a, &p.id).unwrap();
     res.created.values().next().cloned().unwrap_or_default()
 }
@@ -412,7 +420,15 @@ fn new_ls_and_paths_end_to_end() {
     );
     let p = json(
         dir.path(),
-        &["propose", "--view", "work", "--title", "tree"],
+        &[
+            "propose",
+            "--view",
+            "work",
+            "--title",
+            "tree",
+            "--summary",
+            "test summary",
+        ],
     );
     json(dir.path(), &["approve", p["id"].as_str().unwrap()]);
     let show = json(dir.path(), &["show", "wallets/transactions"]);
@@ -433,7 +449,18 @@ fn repr1_log_json_shows_each_landings_assurance() {
     json(dir.path(), &["init"]);
     json(dir.path(), &["new", "folder", "probe"]);
     json(dir.path(), &["new", "doc", "probe/one", "--title", "One"]);
-    let p = json(dir.path(), &["propose", "--view", "work", "--title", "p"]);
+    let p = json(
+        dir.path(),
+        &[
+            "propose",
+            "--view",
+            "work",
+            "--title",
+            "p",
+            "--summary",
+            "test summary",
+        ],
+    );
     json(dir.path(), &["approve", p["id"].as_str().unwrap()]);
     let log = json(dir.path(), &["log"]);
     assert_eq!(log[0]["assurance"], "local");
@@ -491,7 +518,18 @@ fn chain1_status_counts_each_views_changes() {
         counts(&st),
         vec![("side".to_string(), 1), ("work".to_string(), 2)]
     );
-    let p = json(dir.path(), &["propose", "--view", "work", "--title", "two"]);
+    let p = json(
+        dir.path(),
+        &[
+            "propose",
+            "--view",
+            "work",
+            "--title",
+            "two",
+            "--summary",
+            "test summary",
+        ],
+    );
     json(dir.path(), &["approve", p["id"].as_str().unwrap()]);
     // F11 (Demo findings): a view whose changes all landed holds none and leaves the list.
     let st = json(dir.path(), &["status"]);

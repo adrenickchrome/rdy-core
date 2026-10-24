@@ -1,5 +1,5 @@
 {
-  "cursor": "0.30006.0",
+  "cursor": "0.30045.0",
   "entries": [
     {
       "event": "tension_opened",
@@ -23,15 +23,15 @@
         "0bb807c1f412755d419d7f03ca1329e6694e3b34b14ecab4446a6631b0d17c90",
         "ed2ae5f9f34b286e346af82b32dc61608ae05336b36ed2d6dced3285a1365c02"
       ],
-      "line": "tension 0bb807c1f412 opened on your change ed2ae5f9f34b (unjustified_change, blocking): a view changed (op c260aa4e229d)"
+      "line": "tension 0bb807c1f412 opened on your change ed2ae5f9f34b (unjustified_change, blocking): a view changed (op e422f88c2745)"
     },
     {
       "event": "tension_resolved",
       "ids": [
         "0bb807c1f412755d419d7f03ca1329e6694e3b34b14ecab4446a6631b0d17c90",
-        "b9597bf9c1c1b3150ca6532526d73115c6e29d9560f98055ef8a3a31e14939e4"
+        "ac5f98f575990670d4270d07b4959f1f4a75258e0b73d5cdbcc1380297b77eff"
       ],
-      "line": "tension 0bb807c1f412 no longer involves your in-flight changes: a view changed (op b9597bf9c1c1)"
+      "line": "tension 0bb807c1f412 no longer involves your in-flight changes: a view changed (op ac5f98f57599)"
     },
     {
       "event": "tension_opened",
@@ -39,7 +39,7 @@
         "0bb807c1f412755d419d7f03ca1329e6694e3b34b14ecab4446a6631b0d17c90",
         "ed2ae5f9f34b286e346af82b32dc61608ae05336b36ed2d6dced3285a1365c02"
       ],
-      "line": "tension 0bb807c1f412 opened on your change ed2ae5f9f34b (unjustified_change, blocking): a view changed (op c1addb7d015e)"
+      "line": "tension 0bb807c1f412 opened on your change ed2ae5f9f34b (unjustified_change, blocking): a view changed (op 174e655b3f54)"
     },
     {
       "event": "tension_opened",
@@ -93,9 +93,9 @@
     {
       "event": "pending_added",
       "ids": [
-        "00faa4143b8653b05d20297aba2c4899d0cc9465e02631dfc8bfc0cfd4a808c8"
+        "5c16bbb9451e4ccdbcf9697a19b8569180883172755fd4c9fb2b8eadebf406e1"
       ],
-      "line": "P-00faa4143b86@1 waits for an answer; read rdy_pending"
+      "line": "P-5c16bbb9451e@1 waits for an answer; read rdy_pending"
     },
     {
       "event": "pending_added",
@@ -107,9 +107,9 @@
     {
       "event": "pending_added",
       "ids": [
-        "fcd39a375b6ed575b7f71fc87e8676c73f007da97141e788d767a26c1c2ca18e"
+        "f47208d5573b287c418c0721b54b1d9b1784b879ce2aacbc893e6f1086442c66"
       ],
-      "line": "P-00faa4143b86@2 waits for an answer; read rdy_pending"
+      "line": "P-5c16bbb9451e@2 waits for an answer; read rdy_pending"
     }
   ],
   "more": false

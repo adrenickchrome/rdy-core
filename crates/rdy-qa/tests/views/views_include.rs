@@ -2,6 +2,7 @@
 //! with dependents unless cascaded.
 use rdy_engine::*;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::TEST_SUMMARY;
 use rdy_qa::invariants::check;
 use serde_json::json;
 
@@ -335,7 +336,7 @@ fn incl1_a_child_whose_parent_cannot_be_brought_along_is_refused_naming_the_pare
             "a",
             "the section",
             Some(std::slice::from_ref(&c1.change)),
-            None,
+            Some(TEST_SUMMARY),
         )
         .unwrap();
     r.land_report(&approver(), &p.r#ref).unwrap();

@@ -275,10 +275,10 @@ pub fn header(briefing: &Value) -> String {
         let views = at("views").map(|v| {
             let o = &v["owner"];
             let by = if o.is_object() {
-                match o["run"].as_str() {
-                    Some(run) => format!(" by {}/{run}", s(o, "actor")),
-                    None => format!(" by {}", s(o, "actor")),
-                }
+                format!(
+                    " by {}",
+                    rdy_engine::identity::actor_run_text(s(o, "actor"), o["run"].as_str())
+                )
             } else {
                 ", unowned".to_string()
             };
@@ -299,10 +299,7 @@ pub fn header(briefing: &Value) -> String {
             )
         });
         let intents = at("intents").map(|i| {
-            let by = match i["run"].as_str() {
-                Some(run) => format!("{}/{run}", s(i, "actor")),
-                None => s(i, "actor").to_string(),
-            };
+            let by = rdy_engine::identity::actor_run_text(s(i, "actor"), i["run"].as_str());
             let n = i["blocks"].as_array().map_or(0, Vec::len);
             format!(
                 "intent {} by {by} in {}: {} (until {}) on {n} block(s)",
@@ -495,10 +492,7 @@ fn intents_part(reply: &Value) -> String {
     }
     let mut t = String::from("\nintents on these blocks:");
     for i in items {
-        let by = match i["run"].as_str() {
-            Some(run) => format!("{}/{run}", s(i, "actor")),
-            None => s(i, "actor").to_string(),
-        };
+        let by = rdy_engine::identity::actor_run_text(s(i, "actor"), i["run"].as_str());
         let n = i["blocks"].as_array().map_or(0, Vec::len);
         t.push_str(&format!(
             "\n  intent {} by {by} in {}: {} (until {}) on {n} block(s)",
@@ -984,7 +978,7 @@ mod tests {
         assert_eq!(
             &lines[at + 1..at + 4],
             &[
-                "#   view va by agent:a/r1 (last write 2026-10-06T10:00:00Z): c-A",
+                "#   view va by agent:a (run r1) (last write 2026-10-06T10:00:00Z): c-A",
                 "#   view vu, unowned (last write 2026-10-06T11:00:00Z): c-A, c-B",
                 "#   proposal P-abcdef012345@2 from pa \"Change A\": c-A",
             ]
@@ -1318,7 +1312,7 @@ mod tests {
         });
         assert_eq!(
             consequences_text(&v),
-            "\nconsequences:\n  dependent c-B: confirm (references c-A)\nintents on these blocks:\n  intent in-1 by agent:a/ra in va: rewording (until 2026-10-10T00:00:00Z) on 2 block(s)\nnot worked out: the tension changes (E_IO: tensions busy)\nnot worked out: suggestions (E_IO: index busy)"
+            "\nconsequences:\n  dependent c-B: confirm (references c-A)\nintents on these blocks:\n  intent in-1 by agent:a (run ra) in va: rewording (until 2026-10-10T00:00:00Z) on 2 block(s)\nnot worked out: the tension changes (E_IO: tensions busy)\nnot worked out: suggestions (E_IO: index busy)"
         );
     }
 

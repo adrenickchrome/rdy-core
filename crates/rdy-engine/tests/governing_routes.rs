@@ -63,7 +63,7 @@ fn commit(r: &mut Rdy, blocks: Vec<Block>) {
         .into_iter()
         .map(|block| Op::Create { block })
         .collect();
-    let s = Session::human("human:t".into(), Role::Writer);
+    let s = Session::human("human:t".into(), Role::Writer).unwrap();
     r.store_mut()
         .commit_to_view(
             "w",

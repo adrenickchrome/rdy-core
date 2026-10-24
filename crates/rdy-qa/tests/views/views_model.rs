@@ -11,6 +11,7 @@ use rdy_engine::views::UndoResult;
 use rdy_engine::*;
 use rdy_model::{BlockId, Hash};
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::TEST_SUMMARY;
 use rdy_qa::invariants::check;
 use serde_json::json;
 use std::cell::RefCell;
@@ -532,12 +533,13 @@ impl Model {
             return Err(E_STALE_BASE);
         }
         // approve: a version holding a landed change (a pinned or closed view keeps one that
-        // landed from another view) is refused first, then one with a blocking conflict
+        // landed from another view) is refused first, then one with a blocking conflict, which
+        // is not ready: the conflict is its first readiness issue (D-ME2HD)
         if v.included.iter().any(|&c| self.changes[c].landed.is_some()) {
             return Err(E_ALREADY_LANDED);
         }
         if blocking {
-            return Err(E_CONFLICT_UNRESOLVED);
+            return Err(E_PROPOSAL_NOT_READY);
         }
         Ok(state)
     }
@@ -1059,10 +1061,20 @@ impl<'a> Driver<'a> {
                 let want = plan.as_ref().map(|_| ()).map_err(|e| *e);
                 let got = self
                     .r
-                    .propose(&session(&v), &v, "model", None)
+                    .propose(&session(&v), &v, "model", Some(TEST_SUMMARY))
                     .and_then(|p| self.r.land_report(&approver(), &p.id));
+                // the predicted conflict is the refusal's first issue
+                if want == Err(E_PROPOSAL_NOT_READY)
+                    && let Err(e) = &got
+                    && e.code == E_PROPOSAL_NOT_READY
+                    && e.issues.first().map(|i| i.code) != Some(E_CONFLICT_UNRESOLVED)
+                {
+                    return Err(fail(format!(
+                        "{what}: the model predicts a conflict, the engine's first issue is another: {e:?}"
+                    )));
+                }
                 let Some(info) = self.expect(&what, want, got)? else {
-                    if want == Err(E_CONFLICT_UNRESOLVED) {
+                    if want == Err(E_PROPOSAL_NOT_READY) {
                         self.stats.borrow_mut().conflict_unresolved += 1;
                     }
                     return Ok(true);

@@ -5,6 +5,7 @@ use rdy_daemon::{
     spawn_serve,
 };
 use rdy_engine::engine::Local;
+use rdy_engine::identity::{env_actor, env_run};
 use rdy_engine::wc::state::{POINTER_FILE, Place, WcState, pointer_project};
 use rdy_engine::{
     E_BAD_INPUT, E_IO, RdyError, Session, classify, human_actor_for_env, serve_config,
@@ -100,11 +101,21 @@ pub(crate) fn bound_view(env: &Env) -> Result<Option<String>, ErrorReply> {
     Ok(WcState::load_bound(place)?.map(|b| b.view))
 }
 
-/// Whether the command runs as the human: `RDY_ACTOR` unset or naming the human actor.
-pub(crate) fn human_session(env: &Env) -> bool {
-    match std::env::var("RDY_ACTOR") {
-        Ok(a) => a == human_actor_for_env(&env.project),
-        Err(_) => true,
+/// `RDY_ACTOR` and `RDY_RUN` as every session of this process reads them: unset is `None`, and a
+/// value that is not Unicode is the grammar's `E_BAD_INPUT` (the actor first), never unset.
+pub(crate) fn session_env() -> Result<(Option<String>, Option<String>), RdyError> {
+    let actor = env_actor(std::env::var_os("RDY_ACTOR").as_deref())?;
+    let run = env_run(std::env::var_os("RDY_RUN").as_deref())?;
+    Ok((actor, run))
+}
+
+/// Whether the command runs as the human: `RDY_ACTOR` unset or naming the human actor. Naming
+/// one needs the configured person, whose refusal is the error; an identity that is not
+/// Unicode is refused (`session_env`).
+pub(crate) fn human_session(env: &Env) -> Result<bool, ErrorReply> {
+    match session_env()?.0 {
+        Some(a) => Ok(a == human_actor_for_env(&env.project)?),
+        None => Ok(true),
     }
 }
 
@@ -124,7 +135,7 @@ fn with_bound_view(env: &Env, op: &str, mut args: Value) -> Result<Value, ErrorR
     };
     if wants
         && (args.is_object() || args.is_null())
-        && human_session(env)
+        && human_session(env)?
         && let Some(view) = bound_view(env)?
     {
         args["view"] = Value::String(view);
@@ -184,27 +195,29 @@ pub(crate) enum Conn {
 
 impl Conn {
     pub(crate) fn open(env: &Env) -> Result<Conn, ErrorReply> {
-        let actor = std::env::var("RDY_ACTOR").ok();
-        let run = std::env::var("RDY_RUN").ok();
         // before the store or the pack is opened: one state gives one text, with or without a
         // daemon (a missing custom pack is the clone's state, not a wrong pack line)
         require_project(&env.project)?;
+        // D-ME2C0: an identity that is not Unicode is refused here, on both paths, before any
+        // classification or daemon start
+        let (actor, run) = session_env()?;
         if env.no_daemon {
+            // D-ME2C0: the identity is resolved and checked before the store is opened
+            let human = human_actor_for_env(&env.project)?;
+            let session = classify(&human, actor.as_deref(), run.as_deref(), Role::Writer)?;
             let local = Local::open(&env.project)?;
-            let human = human_actor_for_env(&env.project);
-            match classify(&human, actor.as_deref(), run.as_deref(), Role::Writer) {
-                Ok(session) => Ok(Conn::Direct {
-                    local: Box::new(local),
-                    session,
-                    human,
-                    cwd: env.cwd.clone(),
-                }),
-                Err(e) => {
-                    close_local(local);
-                    Err(e.into())
-                }
-            }
+            Ok(Conn::Direct {
+                local: Box::new(local),
+                session,
+                human,
+                cwd: env.cwd.clone(),
+            })
         } else {
+            // D-Q8NFG: the configured person is resolved before a daemon is started, so an
+            // actor outside the form is its own E_BAD_INPUT naming its file, never the
+            // E_DAEMON_START of a daemon whose store open refused it. The daemon resolves it
+            // again for the session it classifies.
+            human_actor_for_env(&env.project)?;
             let rt = runtime()?;
             let run_dir = RunDir::of_project(&env.project);
             let opts = start_options(&env.project, &env.cwd, Proto::Ctl);

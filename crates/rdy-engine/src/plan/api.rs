@@ -1071,7 +1071,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let r = Rdy::init(dir.path(), "rdy-standard").unwrap();
         let st = r.read();
-        let s = Session::human("human:qa".into(), Role::Writer);
+        let s = Session::human("human:qa".into(), Role::Writer).unwrap();
         let target = Hash([0x11; 32]);
         let plan = plan_of(&[target]);
         let mut prior: Vec<PlanAnswer> = (0..MAX_PLAN_ANSWERS as u64)

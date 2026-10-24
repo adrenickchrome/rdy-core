@@ -6,7 +6,7 @@ use rdy_model::{BlockId, Hash};
 use rdy_model::{EditorialClass, Justification, Role};
 use rdy_qa::edit_loop::{brief_of, spec_doc, stable_spec, write_cited_as};
 use rdy_qa::fixtures::*;
-use rdy_qa::intake::{confirm_before_landing, summary_for};
+use rdy_qa::intake::{TEST_SUMMARY, assert_not_ready, confirm_before_landing, summary_for};
 use rdy_qa::packs::qa_project;
 use rdy_qa::tensions::*;
 use serde_json::json;
@@ -22,6 +22,13 @@ fn propose(r: &mut Rdy, view: &str) -> ProposalInfo {
 fn approve(r: &mut Rdy, p: &ProposalInfo) -> Result<String, RdyError> {
     confirm_before_landing(r, &approver(), p);
     r.land(&approver(), &p.id)
+}
+/// Checks the approval of `p` is refused as not ready (D-ME2HD), with the queue's issues for it,
+/// whose codes are `codes`; returns the refusal.
+fn refused(r: &mut Rdy, p: &ProposalInfo, codes: &[&str]) -> RdyError {
+    let e = approve(r, p).unwrap_err();
+    assert_not_ready(r, &e, &p.r#ref, codes);
+    e
 }
 fn reviewer() -> Session {
     Session::agent("agent:r".into(), Some("rr".into()), Role::Reviewer).unwrap()
@@ -43,15 +50,9 @@ fn tgat1_a_shift_between_two_views_refuses_neither_and_the_second_refuses_after_
     }
     approve(&mut r, &pa).unwrap();
     let pb = propose(&mut r, "b");
+    // the listing names the refusing tension; the refusal carries it as a readiness issue
     assert_eq!(pb.tensions[0].refuses, Some(true));
-    let e = approve(&mut r, &pb).unwrap_err();
-    assert_eq!(e.code, E_BLOCKING_TENSION);
-    assert!(
-        e.issues
-            .iter()
-            .any(|i| i.code == E_BLOCKING_TENSION && i.message.contains(&pb.tensions[0].id)),
-        "{e:?}"
-    );
+    refused(&mut r, &pb, &[E_BLOCKING_TENSION]);
     put(&mut r, "b", json!([{"op": "repin", "id": y.to_string()}]));
     let pb = propose(&mut r, "b");
     assert!(pb.tensions.is_empty(), "{:?}", pb.tensions);
@@ -75,10 +76,7 @@ fn tgat1_two_colliding_views_land_one_after_the_other_and_the_collision_is_repor
             .all(|t| t.kind != TensionKind::EditCollision),
         "reported once, as the conflict"
     );
-    assert_eq!(
-        approve(&mut r, &pb).unwrap_err().code,
-        E_CONFLICT_UNRESOLVED
-    );
+    refused(&mut r, &pb, &[E_CONFLICT_UNRESOLVED]);
     // a write on a conflicted block names the version it edited: the conflict's base
     let base = r
         .read()
@@ -120,7 +118,7 @@ fn tgat1_two_forking_decisions_in_one_proposal_refuse() {
             .iter()
             .any(|t| t.kind == TensionKind::Fork && t.refuses == Some(true))
     );
-    assert_eq!(approve(&mut r, &pa).unwrap_err().code, E_BLOCKING_TENSION);
+    refused(&mut r, &pa, &[E_BLOCKING_TENSION]);
 }
 
 #[test]
@@ -186,7 +184,7 @@ fn tgat1_an_unjustified_change_refuses_when_the_pack_makes_it_blocking() {
             .iter()
             .any(|t| t.kind == TensionKind::UnjustifiedChange && t.refuses == Some(true))
     );
-    assert_eq!(approve(&mut r, &pa).unwrap_err().code, E_BLOCKING_TENSION);
+    refused(&mut r, &pa, &[E_BLOCKING_TENSION]);
     let ops: Vec<OpInput> = serde_json::from_value(upd(&s.c, "C, typo fixed.")).unwrap();
     r.write_briefed(
         &ag("j"),
@@ -283,7 +281,7 @@ fn tgat1_a_dismissed_fork_lands_and_stays_open_in_canon() {
             .iter()
             .any(|x| x.kind == TensionKind::Fork && x.refuses == Some(true))
     );
-    assert_eq!(approve(&mut r, &pb).unwrap_err().code, E_BLOCKING_TENSION);
+    refused(&mut r, &pb, &[E_BLOCKING_TENSION]);
     r.dismiss_tension(&reviewer(), &tension_label(&t.id), "both stand")
         .unwrap();
     let pb = propose(&mut r, "b");
@@ -352,7 +350,13 @@ fn tgat1_a_subset_that_leaves_out_the_repin_refuses() {
         whole.tensions
     );
     let p = r
-        .propose_subset(&writer(), "b", "b", Some(&[c1.to_string()]), None)
+        .propose_subset(
+            &writer(),
+            "b",
+            "b",
+            Some(&[c1.to_string()]),
+            Some(TEST_SUMMARY),
+        )
         .unwrap();
     assert!(
         p.tensions
@@ -361,8 +365,7 @@ fn tgat1_a_subset_that_leaves_out_the_repin_refuses() {
         "{:?}",
         p.tensions
     );
-    let e = approve(&mut r, &p).unwrap_err();
-    assert_eq!(e.code, E_BLOCKING_TENSION, "{e:?}");
+    refused(&mut r, &p, &[E_BLOCKING_TENSION]);
 }
 
 /// One step of a gate scenario: (kind, view, target, n). Kinds: 0 edit a claim, 1 cite one,
@@ -387,9 +390,9 @@ fn wr(
 }
 
 /// Runs `steps` on a stable spec project (so lifecycles mix: canon stable, a view's draft). At each propose step: `propose` reports a refusing tension
-/// exactly when `land` refuses with `E_BLOCKING_TENSION`; every refusing entry is listed in the
-/// form that refuses (open and blocking); and a reviewer (an actor that wrote no side) can
-/// dismiss each one, after which it no longer refuses.
+/// exactly when `land` refuses with an `E_BLOCKING_TENSION` issue; every refusing entry is
+/// listed in the form that refuses (open and blocking); and a reviewer (an actor that wrote no
+/// side) can dismiss each one, after which it no longer refuses.
 fn propose_agrees_with_land(steps: Vec<Step>) -> Result<(), TestCaseError> {
     let (_d, mut r) = project();
     let s = stable_spec(&mut r);
@@ -478,14 +481,14 @@ fn propose_agrees_with_land(steps: Vec<Step>) -> Result<(), TestCaseError> {
                 // refused as not closed, which proposes nothing)
                 let propose = |r: &mut Rdy| {
                     if n == 0 {
-                        r.propose(&writer(), vn, vn, None)
+                        r.propose(&writer(), vn, vn, Some(TEST_SUMMARY))
                     } else {
                         let ids: Vec<String> = inc
                             .iter()
                             .take(n as usize)
                             .map(|h: &Hash| h.to_string())
                             .collect();
-                        r.propose_subset(&writer(), vn, vn, Some(&ids), None)
+                        r.propose_subset(&writer(), vn, vn, Some(&ids), Some(TEST_SUMMARY))
                     }
                 };
                 let Ok(p) = propose(&mut r) else { continue };
@@ -504,9 +507,16 @@ fn propose_agrees_with_land(steps: Vec<Step>) -> Result<(), TestCaseError> {
                 }
                 refused.extend(refusing.iter().map(|t| t.id.clone()));
                 let landed = r.land(&approver(), &p.id);
-                let gate = matches!(&landed, Err(e) if e.code == E_BLOCKING_TENSION);
+                // D-ME2HD: a refusing tension is an issue of a version that is not ready
+                let gate = matches!(&landed, Err(e) if e.code == E_PROPOSAL_NOT_READY
+                    && e.issues.iter().any(|x| x.code == E_BLOCKING_TENSION));
                 if !p.blocking.is_empty() {
-                    prop_assert!(!gate, "a blocking conflict refuses first: {landed:?}");
+                    // the conflict issue comes first; a tension issue may follow it
+                    prop_assert!(
+                        matches!(&landed, Err(e) if e.code == E_PROPOSAL_NOT_READY
+                            && e.issues.first().map(|x| x.code) == Some(E_CONFLICT_UNRESOLVED)),
+                        "a blocking conflict refuses first: {landed:?}"
+                    );
                     continue;
                 }
                 prop_assert_eq!(
@@ -607,7 +617,7 @@ fn tgat1_a_landing_form_with_its_own_severity_is_listed_and_dismissable() {
         "the in-flight form is listed as information: {:?}",
         pb.tensions
     );
-    assert_eq!(approve(&mut r, &pb).unwrap_err().code, E_BLOCKING_TENSION);
+    refused(&mut r, &pb, &[E_BLOCKING_TENSION]);
     // b's own session cannot clear a blocking form
     assert!(r.dismiss_tension(&ag("b"), &landing.id, "fine").is_err());
     r.dismiss_tension(&reviewer(), &landing.id, "both fine")
@@ -696,7 +706,7 @@ fn tgat1_a_landing_only_fork_is_dismissable_by_its_id() {
         "a landing-only form"
     );
     let id = refusing[0].id.clone();
-    assert_eq!(approve(&mut r, &pb).unwrap_err().code, E_BLOCKING_TENSION);
+    refused(&mut r, &pb, &[E_BLOCKING_TENSION]);
     r.dismiss_tension(&reviewer(), &id, "both stand").unwrap();
     let pb = propose(&mut r, "b");
     approve(&mut r, &pb).unwrap();
@@ -739,12 +749,12 @@ fn tgat1_a_landing_only_form_is_listed_with_its_proposal() {
         open(&r).iter().all(|t| tension_label(&t.id) != refusing[0]),
         "a landing-only form"
     );
-    let e = approve(&mut r, &pb).unwrap_err();
-    assert_eq!(e.code, E_BLOCKING_TENSION);
+    let e = refused(&mut r, &pb, &[E_BLOCKING_TENSION]);
     assert!(
-        e.fix.contains("rdy tensions --involving <change>"),
-        "{}",
-        e.fix
+        e.issues[0]
+            .fix
+            .contains("rdy tensions --involving <change>"),
+        "{e:?}"
     );
     let engine = Local::new(r);
     let listed = |req: TensionsRequest| -> Vec<serde_json::Value> {
@@ -914,7 +924,7 @@ fn tgat1_a_group_with_one_member_in_the_proposal_refuses_only_when_all_would_be_
         .collect();
     want.sort();
     assert_eq!(rb[0].blocks, want, "c is in flight elsewhere: not a member");
-    assert_eq!(approve(&mut r, &pb).unwrap_err().code, E_BLOCKING_TENSION);
+    refused(&mut r, &pb, &[E_BLOCKING_TENSION]);
     r.dismiss_tension(&reviewer(), &rb[0].id, "one meaning")
         .unwrap();
     let pb = propose(&mut r, "b");
@@ -928,7 +938,7 @@ fn tgat1_a_group_with_one_member_in_the_proposal_refuses_only_when_all_would_be_
         rc[0].status, "open",
         "the membership changed: the dismissal is void"
     );
-    assert_eq!(approve(&mut r, &pc).unwrap_err().code, E_BLOCKING_TENSION);
+    refused(&mut r, &pc, &[E_BLOCKING_TENSION]);
     assert!(rc[0].blocks.contains(&c.to_string()), "{:?}", rc[0].blocks);
 }
 
@@ -1023,7 +1033,14 @@ fn msw21_the_landing_judges_the_landing_sets_net_change() {
         j_implements(&s.decision),
     );
     let po = r
-        .propose_with(&writer(), "o", "o", Some(&[c5.to_string()]), None, None)
+        .propose_with(
+            &writer(),
+            "o",
+            "o",
+            Some(&[c5.to_string()]),
+            Some(TEST_SUMMARY),
+            None,
+        )
         .unwrap();
-    assert_eq!(approve(&mut r, &po).unwrap_err().code, E_BLOCKING_TENSION);
+    refused(&mut r, &po, &[E_BLOCKING_TENSION]);
 }

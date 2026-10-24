@@ -213,7 +213,7 @@ fn new_supporting(
     view: Option<String>,
 ) -> Result<(Value, String), ErrorReply> {
     let view = match view {
-        None if crate::conn::human_session(env) => crate::conn::bound_view(env)?,
+        None if crate::conn::human_session(env)? => crate::conn::bound_view(env)?,
         named => named,
     };
     args["view"] = json!(view);
@@ -259,7 +259,7 @@ fn new_profile(
 ) -> Result<(Value, String), ErrorReply> {
     let key = text(&args["key"]).to_string();
     let view = match view {
-        None if crate::conn::human_session(env) => crate::conn::bound_view(env)?,
+        None if crate::conn::human_session(env)? => crate::conn::bound_view(env)?,
         named => named,
     };
     let mut args = args;

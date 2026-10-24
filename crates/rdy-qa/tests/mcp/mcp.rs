@@ -73,10 +73,18 @@ fn hook1_the_release_binary_has_no_test_hook() {
         "rdy_session",
         json!({"actor": "__rdy_test_panic__", "role": "writer"}),
     );
-    assert!(
-        reply.code().is_none(),
-        "the magic actor is an ordinary actor in a release build: {reply:?}"
-    );
+    // the magic actor is an ordinary actor in a release build: outside rdy's actor form, so it
+    // gets the ordinary grammar refusal (D-ME2C0) as a tool error, never a panic
+    match &reply {
+        Reply::ToolError(e) => {
+            assert_eq!(e["code"], "E_BAD_INPUT", "{reply:?}");
+            assert_eq!(
+                e["message"], "the actor \"__rdy_test_panic__\" is not in rdy's actor form",
+                "{reply:?}"
+            );
+        }
+        other => panic!("the magic actor is an ordinary actor in a release build: {other:?}"),
+    }
     c.alive();
     let bin = std::fs::read(rdy_bin()).unwrap();
     let marker = b"__rdy_test_panic__";

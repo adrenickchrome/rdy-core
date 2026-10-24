@@ -164,7 +164,8 @@ struct Stats {
     writes_ok: BTreeMap<&'static str, usize>,
     lands_ok: usize,
     effective_rebalances: usize,
-    /// refused landings by code; gate refusals as `E_VALIDATION/<first error issue>`
+    /// refused landings by code; gate refusals as `E_VALIDATION/<first error issue>`, a version
+    /// that is not ready by its first issue
     land_refused: BTreeMap<String, usize>,
     write_refused: BTreeMap<String, usize>,
     siblings_rekeyed: usize,
@@ -233,6 +234,9 @@ fn new_violations(
         .collect()
 }
 
+/// The counter a refusal goes under: `E_VALIDATION/<first error issue>` for a gate refusal, the
+/// first issue's code for a version that is not ready (D-ME2HD: its causes are issues), else
+/// the code.
 fn refusal(e: &RdyError) -> String {
     match e
         .issues
@@ -240,6 +244,7 @@ fn refusal(e: &RdyError) -> String {
         .find(|i| i.severity == rdy_schema::Severity::Error)
     {
         Some(i) if e.code == E_VALIDATION => format!("{}/{}", e.code, i.code),
+        Some(i) if e.code == E_PROPOSAL_NOT_READY => i.code.to_string(),
         _ => e.code.to_string(),
     }
 }
@@ -331,10 +336,11 @@ impl Sim<'_> {
             }
             Err(e) => {
                 let mut s = self.stats.borrow_mut();
-                *s.land_refused.entry(refusal(&e)).or_default() += 1;
-                if e.code == E_CONFLICT_UNRESOLVED {
+                let counter = refusal(&e);
+                if counter == E_CONFLICT_UNRESOLVED {
                     s.conflict_unresolved_at_land += 1;
                 }
+                *s.land_refused.entry(counter).or_default() += 1;
                 drop(s);
                 self.generation[slot as usize] += 1;
                 if let Err(x) = check(&self.r, &Scope::Canon) {

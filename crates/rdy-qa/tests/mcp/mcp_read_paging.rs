@@ -3,6 +3,7 @@
 use rdy_engine::RdyError;
 use rdy_mcp::tools::*;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::TEST_SUMMARY;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -304,7 +305,7 @@ fn rpag1_every_page_fits_max_tokens_under_a_conflict_on_the_root() {
         )
         .unwrap();
     }
-    let pa = r.propose(&sa, "a", "a", None).unwrap();
+    let pa = r.propose(&sa, "a", "a", Some(TEST_SUMMARY)).unwrap();
     r.land_report(&approver(), &pa.r#ref).unwrap();
     let mut st = McpState::new(std::sync::Arc::new(rdy_engine::engine::Local::new(r)));
     rdy_session(

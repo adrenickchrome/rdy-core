@@ -73,7 +73,12 @@ fn fixture() -> Fixture {
         json!([{"op": "create", "type": "doc", "id": "$d", "fields": {"name": "a", "title": "A", "doc_type": "page"}}]),
     );
     let p = r
-        .propose(&session(Role::Writer), "work", "first", None)
+        .propose(
+            &session(Role::Writer),
+            "work",
+            "first",
+            Some("test summary"),
+        )
         .unwrap();
     let landing: Hash = r
         .land(&session(Role::Approver), &p.id)
@@ -260,7 +265,7 @@ fn three_landings() -> (tempfile::TempDir, [Hash; 3]) {
             json!([{"op": "create", "type": "doc", "fields": {"title": title, "doc_type": "page"}}]),
         );
         let p = r
-            .propose(&session(Role::Writer), "work", title, None)
+            .propose(&session(Role::Writer), "work", title, Some("test summary"))
             .unwrap();
         out[i] = r
             .land(&session(Role::Approver), &p.id)
@@ -313,7 +318,12 @@ fn reflects_fixture() -> (tempfile::TempDir, Hash, [Hash; 2]) {
         ]),
     );
     let p = r
-        .propose(&session(Role::Writer), "work", "first", None)
+        .propose(
+            &session(Role::Writer),
+            "work",
+            "first",
+            Some("test summary"),
+        )
         .unwrap();
     r.land(&session(Role::Approver), &p.id).unwrap();
     let claim = BlockId::parse(&w.created["$c"]).unwrap();
@@ -359,7 +369,12 @@ fn reflects_fixture() -> (tempfile::TempDir, Hash, [Hash; 2]) {
         r.invalidate();
     }
     let p = r
-        .propose(&session(Role::Writer), "work", "reflects", None)
+        .propose(
+            &session(Role::Writer),
+            "work",
+            "reflects",
+            Some("test summary"),
+        )
         .unwrap();
     let landing: Hash = r
         .land(&session(Role::Approver), &p.id)

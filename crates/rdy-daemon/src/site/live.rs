@@ -994,7 +994,7 @@ mod tests {
     /// Writes `ops` into `view` as a writer, then lands the view as an approver.
     fn write_and_land(r: &mut Rdy, view: &str, ops: Value) {
         let ops: Vec<Value> = serde_json::from_value(ops).unwrap();
-        let writer = Session::human("human:qa".into(), Role::Writer);
+        let writer = Session::human("human:qa".into(), Role::Writer).unwrap();
         r.write(
             &writer,
             WriteRequest {
@@ -1005,9 +1005,14 @@ mod tests {
             },
         )
         .unwrap();
-        let p = r.propose(&writer, view, view, None).unwrap();
-        r.land(&Session::human("human:qa".into(), Role::Approver), &p.id)
+        let p = r
+            .propose(&writer, view, view, Some("test summary"))
             .unwrap();
+        r.land(
+            &Session::human("human:qa".into(), Role::Approver).unwrap(),
+            &p.id,
+        )
+        .unwrap();
     }
 
     fn one_doc(name: &str) -> Value {

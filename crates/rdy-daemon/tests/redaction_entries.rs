@@ -52,7 +52,7 @@ impl Engine for Retained {
 }
 
 fn human() -> Session {
-    Session::human("human:t".into(), Role::Writer)
+    Session::human("human:t".into(), Role::Writer).unwrap()
 }
 
 /// One MCP session over an in-process duplex: JSON-RPC lines out, replies by id.

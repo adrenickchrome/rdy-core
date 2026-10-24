@@ -46,6 +46,9 @@ pub(crate) struct ServeArgs {
 pub(crate) fn mcp(env: &Env) -> Result<(Value, String), ErrorReply> {
     // before the proxy creates .rdy/run and starts a daemon that would fail at open
     require_project(&env.project)?;
+    // D-Q8NFG: before either transport starts, so the direct path's E_IO and the proxy's
+    // E_DAEMON_START never stand in for the configured person's own refusal
+    configured_actor(env)?;
     if !env.no_daemon {
         // the proxy; the runtime is not waited on at exit (a stdin read may be pending)
         let rt = runtime()?;
@@ -64,6 +67,14 @@ pub(crate) fn mcp(env: &Env) -> Result<(Value, String), ErrorReply> {
     rt.block_on(rdy_mcp::server::serve_stdio(env.project.clone(), agent))
         .map_err(|e| ErrorReply::new(E_IO, e.to_string(), "check the project path"))?;
     Ok((Value::Null, String::new()))
+}
+
+/// D-Q8NFG: the configured person, resolved as every ordinary command resolves it
+/// (`Conn::open`), so an actor outside the form is the same `E_BAD_INPUT` naming its file. Run
+/// before a transport or a daemon starts: a refusal creates no `.rdy/run`.
+fn configured_actor(env: &Env) -> Result<(), ErrorReply> {
+    rdy_engine::human_actor_for_env(&env.project)?;
+    Ok(())
 }
 
 /// The exit code of a daemon run: 0, or 2 when another rdy process holds the store, else 1. The
@@ -91,6 +102,16 @@ pub(crate) fn run_serve(
     profile: Option<&str>,
     as_json: bool,
 ) -> ExitCode {
+    // D-Q8NFG: every start (foreground, detached, profile) refuses the configured person
+    // before it spawns or starts a daemon. A stop needs no person, and a spawned daemon's
+    // client has already checked it.
+    if !stop
+        && !spawned
+        && let Err(e) = configured_actor(env)
+    {
+        print_error(&e, as_json);
+        return ExitCode::FAILURE;
+    }
     if let Some(profile) = profile {
         return serve_profile(env, profile, as_json);
     }
@@ -257,8 +278,15 @@ async fn winner(run: &RunDir, hello: &Hello, start_timeout: Duration) -> Option<
 /// one, then `site_url` with the profile and `only`. Closing the connection leaves the daemon
 /// running.
 fn reuse(rt: &tokio::runtime::Runtime, client: Client, profile: &str, as_json: bool) -> ExitCode {
-    let actor = std::env::var("RDY_ACTOR").ok();
-    let run = std::env::var("RDY_RUN").ok();
+    // D-ME2C0: an identity that is not Unicode is refused before the session handshake
+    let (actor, run) = match crate::conn::session_env() {
+        Ok(pair) => pair,
+        Err(e) => {
+            client.close();
+            print_error(&e.into(), as_json);
+            return ExitCode::FAILURE;
+        }
+    };
     let mut client = client.with_agent(Arc::new(CallerAgent::from_env()));
     let out = rt.block_on(async {
         client

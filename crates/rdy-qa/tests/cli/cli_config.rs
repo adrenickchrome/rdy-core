@@ -58,7 +58,10 @@ fn cfgl1_the_most_specific_level_wins() {
         serve_config(&p).idle_timeout,
         std::time::Duration::from_secs(300)
     );
-    assert_eq!(human_actor_for(&p, Some(&uf), Some("u")), "human:here");
+    assert_eq!(
+        human_actor_for(&p, Some(&uf), Some("u")).unwrap(),
+        "human:here"
+    );
     let fp = pack_fingerprint(&p).unwrap();
     assert!(
         fp.files.iter().any(|(f, _)| f.ends_with(LOCAL_FILE)),
@@ -285,5 +288,304 @@ fn msw19_a_dotted_review_key_warns_in_rdy_config_and_rdy_status() {
             "{args:?}: {out}"
         );
         assert!(!out.contains("E_CONFIG"), "{args:?}: {out}");
+    }
+}
+
+/// id3 (D-ME2C0, D-KQ4CA): the CLI through its daemon, the CLI with `--no-daemon` and MCP refuse
+/// an actor or run outside the form with the same error; a human claim has the same code and
+/// message in each, with the CLI's fix at the command line and the MCP fix over MCP.
+#[test]
+fn id3_cli_and_mcp_share_identity_errors() {
+    use rdy_qa::mcp::{McpClient, Reply};
+    use serde_json::{Value, json};
+    let s = Served::new();
+    let triple = |v: &Value| {
+        (
+            v["code"].as_str().unwrap_or_default().to_string(),
+            v["message"].as_str().unwrap_or_default().to_string(),
+            v["fix"].as_str().unwrap_or_default().to_string(),
+        )
+    };
+    let cli = |actor: &str, run: Option<&str>, no_daemon: bool| {
+        let mut args = vec![];
+        if no_daemon {
+            args.push("--no-daemon");
+        }
+        args.extend(["--json", "status"]);
+        let (ok, v) = s.json_as(actor, run, &args);
+        assert!(!ok, "{actor:?} {run:?} (no daemon: {no_daemon}): {v}");
+        triple(&v)
+    };
+    let mut mcp = McpClient::start_proxy(&s);
+    let mut over_mcp = |actor: &str, run: Option<&str>| {
+        let mut args = json!({"actor": actor, "role": "writer"});
+        if let Some(r) = run {
+            args["run"] = json!(r);
+        }
+        match mcp.call("rdy_session", args) {
+            Reply::ToolError(v) => triple(&v),
+            other => panic!("{actor:?} {run:?}: expected a tool error, got {other:?}"),
+        }
+    };
+    let long_actor = format!("agent:{}", "x".repeat(200));
+    for (actor, run) in [
+        ("Agent:X", None),
+        ("agent:x ", Some("r1")),
+        (long_actor.as_str(), None),
+        ("agent:x", Some("run:7")),
+        ("agent:x", Some("work")),
+        ("agent:x", Some(".hidden")),
+    ] {
+        let daemon = cli(actor, run, false);
+        assert_eq!(daemon.0, "E_BAD_INPUT", "{actor:?} {run:?}: {daemon:?}");
+        assert!(
+            daemon.1.ends_with(" is not in rdy's actor form")
+                || daemon.1.ends_with(" is not in rdy's run form"),
+            "{daemon:?}"
+        );
+        assert_eq!(
+            cli(actor, run, true),
+            daemon,
+            "{actor:?} {run:?}: --no-daemon"
+        );
+        assert_eq!(over_mcp(actor, run), daemon, "{actor:?} {run:?}: MCP");
+    }
+    // a human claim: one code and message; each transport gives its own fix
+    for (actor, run) in [("human:other", None), ("human:other", Some("r1"))] {
+        let message = "an agent session cannot claim a human actor".to_string();
+        let cli_fix = "unset RDY_ACTOR to act as the person, or relay their words".to_string();
+        let want = ("E_PERMISSION".to_string(), message.clone(), cli_fix);
+        assert_eq!(cli(actor, run, false), want, "{actor:?} {run:?}");
+        assert_eq!(
+            cli(actor, run, true),
+            want,
+            "{actor:?} {run:?}: --no-daemon"
+        );
+        assert_eq!(
+            over_mcp(actor, run),
+            (
+                "E_PERMISSION".to_string(),
+                message,
+                "claim your own agent: actor, and relay the person's words with rdy_answer"
+                    .to_string()
+            ),
+            "{actor:?} {run:?}: MCP"
+        );
+    }
+    // MCP is an agent surface: even the configured human's own actor is a claim there
+    assert_eq!(over_mcp("human:qa", None).0, "E_PERMISSION");
+    // the refusals above came while the daemon held the store: `--no-daemon` checked the
+    // identity before it opened the store. The configured human at the command line is the
+    // human, both ways (the store is free once the daemon stops).
+    let (ok, v) = s.json_as("human:qa", Some("r1"), &["--json", "status"]);
+    assert!(ok, "{v}");
+    drop(mcp);
+    s.stop();
+    let (ok, v) = s.json_as("human:qa", Some("r1"), &["--no-daemon", "--json", "status"]);
+    assert!(ok, "{v}");
+}
+
+/// id3 (D-ME2C0): an `RDY_ACTOR` or `RDY_RUN` that is not Unicode is a value outside the form,
+/// never an unset variable. Through the daemon, with `--no-daemon`, and in the session of a
+/// reused profile site, the CLI refuses it with the grammar's bounded `E_BAD_INPUT` before it
+/// classifies the session: it neither becomes the configured human nor loses its run. The
+/// refused commands start no daemon.
+#[test]
+fn id3_a_non_unicode_actor_or_run_is_refused_on_every_cli_path() {
+    use rdy_qa::platform::not_unicode;
+    use serde_json::Value;
+    use std::ffi::OsStr;
+    let s = Served::new();
+    let triple = |v: &Value| {
+        (
+            v["code"].as_str().unwrap_or_default().to_string(),
+            v["message"].as_str().unwrap_or_default().to_string(),
+            v["fix"].as_str().unwrap_or_default().to_string(),
+        )
+    };
+    let want = |e: rdy_engine::RdyError| (e.code.to_string(), e.message, e.fix);
+    let bad_actor = want(rdy_engine::identity::validate_actor("agent:\u{fffd}").unwrap_err());
+    let bad_human = want(rdy_engine::identity::validate_actor("human:qa\u{fffd}").unwrap_err());
+    let bad_run = want(rdy_engine::identity::validate_run("r\u{fffd}").unwrap_err());
+    let agent_actor = not_unicode("agent:");
+    let human_actor = not_unicode("human:qa");
+    let run = not_unicode("r");
+    // an environment actor, its run, and the refusal they get
+    type Case<'a> = (&'a OsStr, Option<&'a OsStr>, &'a (String, String, String));
+    let cases: [Case<'_>; 5] = [
+        (&agent_actor, None, &bad_actor),
+        (&human_actor, None, &bad_human),
+        (&agent_actor, Some(OsStr::new("r1")), &bad_actor),
+        (OsStr::new("agent:x"), Some(&run), &bad_run),
+        (OsStr::new("human:qa"), Some(&run), &bad_run),
+    ];
+    for (actor, run, want) in cases {
+        for args in [
+            &["--no-daemon", "--json", "status"][..],
+            &["--json", "status"][..],
+        ] {
+            let (ok, v) = s.json_as_os(actor, run, args);
+            assert!(!ok, "{actor:?} {run:?} {args:?}: {v}");
+            assert_eq!(&triple(&v), want, "{actor:?} {run:?} {args:?}");
+        }
+    }
+    assert!(
+        s.daemon_pid().is_none(),
+        "a refused command starts no daemon"
+    );
+    // a running daemon's profile site: the session handshake of `serve --profile`
+    let (ok, v) = s.json(&["--json", "status"]);
+    assert!(ok, "{v}");
+    let pid = s.daemon_pid().expect("the daemon runs");
+    for (actor, run, want) in cases {
+        let (ok, v) = s.json_as_os(actor, run, &["--json", "serve", "--profile", "guide"]);
+        assert!(!ok, "{actor:?} {run:?}: {v}");
+        assert_eq!(&triple(&v), want, "{actor:?} {run:?}: serve --profile");
+    }
+    assert_eq!(s.daemon_pid(), Some(pid), "the same daemon runs");
+    s.stop();
+}
+
+/// id3 (D-Q8NFG, fix round 2): a configured actor outside the form is the plain `E_BAD_INPUT`
+/// naming its file on every CLI path, also when no daemon runs. The CLI resolves the configured
+/// person before it starts a daemon, so the refusal is never the generic `E_DAEMON_START`, and
+/// the refused command starts none. A local actor and a user actor are each named by their
+/// own file; a running daemon gives the same refusal once the configured actor goes bad.
+#[test]
+fn id3_an_invalid_configured_actor_is_refused_before_a_daemon_starts() {
+    use serde_json::Value;
+    let s = Served::new();
+    let triple = |v: &Value| {
+        (
+            v["code"].as_str().unwrap_or_default().to_string(),
+            v["message"].as_str().unwrap_or_default().to_string(),
+            v["fix"].as_str().unwrap_or_default().to_string(),
+        )
+    };
+    let forms = "human:<name>, agent:<name>, agent:<handle>/<name> or ci:<repo_id>/<name>";
+    let want = |file: &str| {
+        (
+            "E_BAD_INPUT".to_string(),
+            "the actor \"Nick\" is not in rdy's actor form".to_string(),
+            format!("set actor in {file} to {forms}"),
+        )
+    };
+    let refused_everywhere = |want: &(String, String, String), what: &str| {
+        for args in [
+            &["--json", "status"][..],
+            &["--no-daemon", "--json", "status"][..],
+        ] {
+            let (ok, v) = s.json(args);
+            assert!(!ok, "{what} {args:?}: {v}");
+            assert_eq!(&triple(&v), want, "{what} {args:?} as the person");
+            let (ok, v) = s.json_as("agent:w", Some("r1"), args);
+            assert!(!ok, "{what} {args:?}: {v}");
+            assert_eq!(&triple(&v), want, "{what} {args:?} as an agent");
+        }
+    };
+    let local = s.dir.path().join(LOCAL_FILE);
+    let local_valid = std::fs::read_to_string(&local).ok();
+    let restore_local = || match &local_valid {
+        Some(t) => std::fs::write(&local, t).unwrap(),
+        None => std::fs::remove_file(&local).unwrap(),
+    };
+    let user_file = s.user_config();
+    let user_valid = std::fs::read_to_string(&user_file).unwrap();
+    // a user actor outside the form, no daemon running
+    std::fs::write(&user_file, "actor: Nick\n").unwrap();
+    refused_everywhere(&want(&user_file.display().to_string()), "user");
+    assert!(
+        s.daemon_pid().is_none(),
+        "a refused command starts no daemon"
+    );
+    // a local actor outside the form, no daemon running
+    std::fs::write(&user_file, &user_valid).unwrap();
+    append(s.dir.path(), LOCAL_FILE, "actor: Nick\n");
+    refused_everywhere(&want(LOCAL_FILE), "local");
+    assert!(
+        s.daemon_pid().is_none(),
+        "a refused command starts no daemon"
+    );
+    // a running daemon: the same refusal once the local actor goes bad
+    restore_local();
+    let (ok, v) = s.json(&["--json", "status"]);
+    assert!(ok, "{v}");
+    let pid = s.daemon_pid().expect("the daemon runs");
+    append(s.dir.path(), LOCAL_FILE, "actor: Nick\n");
+    let (ok, v) = s.json(&["--json", "status"]);
+    assert!(!ok, "{v}");
+    assert_eq!(triple(&v), want(LOCAL_FILE), "a running daemon");
+    assert_eq!(s.daemon_pid(), Some(pid), "the same daemon runs");
+    restore_local();
+    s.stop();
+}
+
+/// id3 (D-Q8NFG, final ruling): a configured actor outside the form is the same `E_BAD_INPUT`
+/// naming its file on every cold-start transport as on an ordinary command: `rdy serve`
+/// (foreground and detached), `rdy mcp` through the daemon proxy and `rdy mcp --no-daemon`.
+/// Each exits as `rdy status` does, prints the identical code, message and fix, and leaves no
+/// `.rdy/run` and no daemon: the CLI resolves the configured person before any transport starts.
+#[test]
+fn id3_cold_start_transports_refuse_an_invalid_configured_actor_as_status_does() {
+    use serde_json::Value;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    let s = Served::new();
+    append(s.dir.path(), LOCAL_FILE, "actor: Nick\n");
+    let run = s.run_dir();
+    assert!(!run.path().exists(), "a fresh project has no .rdy/run");
+    // runs the command with no stdin (an MCP session that never gets a request), killed past a
+    // hang guard so a transport that starts serving fails the test instead of hanging it
+    let output = |args: &[&str]| {
+        let mut child = rdy_qa::daemon::human_command(s.dir.path(), &s.env_pairs(), args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn rdy");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while child.try_wait().expect("wait for rdy").is_none() {
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        child.wait_with_output().expect("collect rdy's output")
+    };
+    let parsed = |out: &std::process::Output| -> Value {
+        let text = String::from_utf8_lossy(&out.stderr);
+        serde_json::from_str(text.trim().lines().last().unwrap_or(""))
+            .unwrap_or_else(|_| Value::String(text.into_owned()))
+    };
+    let status = output(&["--json", "status"]);
+    let want = parsed(&status);
+    let forms = "human:<name>, agent:<name>, agent:<handle>/<name> or ci:<repo_id>/<name>";
+    assert_eq!(want["code"], "E_BAD_INPUT", "{want}");
+    assert_eq!(
+        want["message"], "the actor \"Nick\" is not in rdy's actor form",
+        "{want}"
+    );
+    assert_eq!(
+        want["fix"],
+        format!("set actor in {LOCAL_FILE} to {forms}"),
+        "{want}"
+    );
+    for args in [
+        &["--json", "serve"][..],
+        &["--json", "serve", "--detach"][..],
+        &["--json", "mcp"][..],
+        &["--json", "--no-daemon", "mcp"][..],
+    ] {
+        let out = output(args);
+        assert_eq!(out.status.code(), status.status.code(), "{args:?}: {out:?}");
+        assert!(out.stdout.is_empty(), "{args:?}: {out:?}");
+        assert_eq!(
+            parsed(&out),
+            want,
+            "{args:?}: the same refusal as rdy status"
+        );
+        assert!(!run.path().exists(), "{args:?} leaves no .rdy/run");
+        assert!(s.daemon_pid().is_none(), "{args:?} starts no daemon");
     }
 }

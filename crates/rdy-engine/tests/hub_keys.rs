@@ -548,7 +548,7 @@ impl SigningAgent for FailingAgent {
 // ---------------------------------------------------------------------------------------------
 
 fn human() -> Session {
-    Session::human("human:nick".to_string(), Role::Writer)
+    Session::human("human:nick".to_string(), Role::Writer).unwrap()
 }
 
 fn agent_session() -> Session {

@@ -9,7 +9,9 @@ use rdy_engine::answer::{AnswerInfo, AnswerRequest};
 use rdy_engine::consequence::propose_and_report;
 use rdy_engine::engine::Engine;
 use rdy_engine::pending::{CARD_MAX_TOKENS, ItemKind, Pending, PendingQuery};
-use rdy_engine::{DecisionInput, Local, ProposalInfo, Rdy, Scope, Session};
+use rdy_engine::{
+    DecisionInput, E_PROPOSAL_NOT_READY, Local, ProposalInfo, Rdy, RdyError, Scope, Session,
+};
 use rdy_model::*;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -23,8 +25,8 @@ pub const BATCH_SUMMARY: &str =
     "Lets a visitor read a shared doc without an account, and records five decisions on access.";
 /// The person every answer of these fixtures names.
 pub const PERSON: &str = "human:qa";
-/// The one summary a test gives a version that lands a proposed decision (Task 17 ruling): a
-/// version is approved through a card, and readiness needs a summary (D-4PG9Y, D-3JZP4).
+/// The one summary a test gives a version it lands or approves: every approval path refuses a
+/// version that is not ready, and readiness needs a summary (D-4PG9Y, D-3JZP4, D-ME2HD).
 pub const TEST_SUMMARY: &str = "test summary";
 
 /// What [`batch_project`] built.
@@ -319,6 +321,63 @@ pub fn pending(r: &Rdy) -> Pending {
         .expect("pending")
 }
 
+/// The issues the queue lists for version `pref` (`P-x@n`) under `not_ready`, as [`PERSON`] sees
+/// it: an approval of the version is refused with exactly these (D-ME2HD).
+pub fn not_ready_issues(r: &Rdy, pref: &str) -> Vec<rdy_schema::Issue> {
+    let q = pending(r);
+    q.not_ready
+        .iter()
+        .find(|n| n.r#ref == pref)
+        .unwrap_or_else(|| panic!("{pref} is not listed as not ready: {:#?}", q.not_ready))
+        .issues
+        .clone()
+}
+
+/// Checks `e` is the refusal of version `pref` (`P-x@n`), which is not ready (D-ME2HD):
+/// `E_PROPOSAL_NOT_READY`, its message counting the issues, its fix, no card, and exactly the
+/// queue's readiness issues for the version, whose codes are `codes`. Returns the issues.
+pub fn assert_not_ready(
+    r: &Rdy,
+    e: &RdyError,
+    pref: &str,
+    codes: &[&str],
+) -> Vec<rdy_schema::Issue> {
+    let issues = not_ready_issues(r, pref);
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            E_PROPOSAL_NOT_READY,
+            format!(
+                "{pref} is not ready: {} issue{}",
+                issues.len(),
+                if issues.len() == 1 { "" } else { "s" }
+            )
+            .as_str(),
+            "fix each issue and propose again: rdy_propose / rdy propose"
+        ),
+        "{e:#?}"
+    );
+    assert_eq!(e.issues, issues, "{e:#?}");
+    assert!(e.corrected.is_none(), "{e:#?}");
+    assert_eq!(
+        issues.iter().map(|i| i.code).collect::<Vec<_>>(),
+        codes,
+        "{issues:#?}"
+    );
+    issues
+}
+
+/// The version an `E_PROPOSAL_NOT_READY` refusal names: its message reads `<P-x@n> is not
+/// ready: <n> issue(s)`. For a test whose landing helper proposed the version itself.
+pub fn refused_ref(e: &RdyError) -> String {
+    assert_eq!(e.code, E_PROPOSAL_NOT_READY, "{e:#?}");
+    e.message
+        .split_once(" is not ready: ")
+        .unwrap_or_else(|| panic!("not a not-ready message: {e:#?}"))
+        .0
+        .to_string()
+}
+
 /// A local answer of `act` by [`PERSON`] to `item`, choosing option `option` (label `label`).
 pub fn answer(item: &str, act: AnswerAct, option: &str, label: &str) -> Answer {
     Answer {
@@ -363,11 +422,11 @@ pub fn writes_decision(r: &Rdy, id: &str) -> bool {
     changes_write_decision(r, &p.changes)
 }
 
-/// The summary a test proposes view `view` with: [`TEST_SUMMARY`] when one of its included
-/// changes writes a decision (a version that lands one is approved through a card), else none.
-pub fn summary_for(r: &Rdy, view: &str) -> Option<&'static str> {
-    let changes = r.read().included(view);
-    changes_write_decision(r, &changes).then_some(TEST_SUMMARY)
+/// The summary a test proposes view `view` with to land it: [`TEST_SUMMARY`], for every view.
+/// Every approval path refuses a version with no summary (D-ME2HD readiness), whether or not it
+/// writes a decision.
+pub fn summary_for(_r: &Rdy, _view: &str) -> Option<&'static str> {
+    Some(TEST_SUMMARY)
 }
 
 /// The sweep rule of F2 (D-DKJS5) before a landing of version `p`: when it writes a decision,

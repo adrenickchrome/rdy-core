@@ -54,8 +54,8 @@ pub(crate) struct SignInArgs {
     /// The person's answer to the card: confirm or cancel. Needs --card-hash.
     #[arg(long, value_enum)]
     answer: Option<AnswerArg>,
-    /// You, the relaying agent, as actor[/run]; run this under your own RDY_ACTOR.
-    #[arg(long)]
+    /// The agent that relays the person's words: your own actor. The run comes from your session.
+    #[arg(long, value_name = "ACTOR")]
     relayed_by: Option<String>,
     /// The person's words, quoted.
     #[arg(long)]
@@ -132,15 +132,14 @@ fn token_line(g: &AccessGrant) -> String {
 }
 
 /// The standalone caller: the bounded configured person (for a sign-out whose settings do not
-/// load, the user config's actor read on its own, else `human:$USER`), classified with
-/// `RDY_ACTOR` and `RDY_RUN` as a writer.
+/// load, the user config's actor read on its own), classified with
+/// `RDY_ACTOR` and `RDY_RUN` as a writer (an identity that is not Unicode is refused).
 fn caller(
     settings: Option<&HubConfig>,
     user_file: &std::path::Path,
 ) -> Result<(Session, String), RdyError> {
-    let person = auth_person(settings, user_file);
-    let actor = std::env::var("RDY_ACTOR").ok();
-    let run = std::env::var("RDY_RUN").ok();
+    let person = auth_person(settings, user_file)?;
+    let (actor, run) = crate::conn::session_env()?;
     let session = classify(&person, actor.as_deref(), run.as_deref(), Role::Writer)?;
     Ok((session, person))
 }

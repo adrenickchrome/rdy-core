@@ -5,6 +5,7 @@ use rdy_engine::*;
 use rdy_model::BlockId;
 use rdy_qa::edit_loop::*;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::TEST_SUMMARY;
 use serde_json::{Value, json};
 
 /// [`stable_spec`], then accepted decisions `d` (three, citing claim A) and `other` (citing
@@ -273,7 +274,9 @@ fn cp5_content_edit_with_no_justification_still_refuses_when_blocking() {
         Some(&ta),
     )
     .unwrap();
-    let p = r.propose(&writer(), "bad", "bad", None).unwrap();
+    let p = r
+        .propose(&writer(), "bad", "bad", Some(TEST_SUMMARY))
+        .unwrap();
     assert!(
         unjustified(&p.tensions)
             .iter()
@@ -281,8 +284,7 @@ fn cp5_content_edit_with_no_justification_still_refuses_when_blocking() {
         "{:#?}",
         p.tensions
     );
-    assert_eq!(
-        r.land(&approver(), &p.id).unwrap_err().code,
-        rdy_engine::E_BLOCKING_TENSION
-    );
+    // D-ME2HD: the unjustified change is a readiness issue of the refusal
+    let e = r.land(&approver(), &p.id).unwrap_err();
+    rdy_qa::intake::assert_not_ready(&r, &e, &p.r#ref, &[rdy_engine::E_BLOCKING_TENSION]);
 }

@@ -6,8 +6,9 @@
 //! - **signed**: the SSHSIG verifies (namespace, sha512, accepted key type), the statement is in
 //!   the grammar and its kind's namespace is the record's, and the statement names the key that
 //!   signed it. Otherwise `invalid` (`E_SIG_INVALID`).
-//! - **statement**: the statement rebuilt from the subject, for the current repo id and then for
-//!   each fork source the caller gives, equals the signed bytes exactly. Otherwise `mismatch`
+//! - **statement**: the statement rebuilt from the subject, in the statement version its signed
+//!   bytes name (D-PWB82), for the current repo id and then for each fork source the caller
+//!   gives, equals the signed bytes exactly. Otherwise `mismatch`
 //!   (`E_SIG_OBJECT_MISMATCH` for a valid signature). In a holder only (ruling task-13), a valid
 //!   signature whose statement, rebuilt for the repo id it names, equals the signed bytes, but
 //!   names a repo id other than the holder's own, is `foreign_repo`, with that repo id: signed in
@@ -32,7 +33,7 @@ use crate::signing_crypto::verify_sshsig;
 use crate::{E_SIG_INVALID, E_SIG_OBJECT_MISMATCH, RdyError, sig_unknown_key, signing_limit};
 use rdy_model::signature::{
     MAX_NAMESPACE, MAX_SIG, MAX_SIGNATURE, MAX_SIGNER_TEXT, MAX_STATEMENT, ParsedStatement,
-    Signature, StatementKind, StatementSource, parse_statement, statement,
+    Signature, StatementKind, StatementSource, parse_statement, statement_for_version,
 };
 use rdy_model::{ActorRun, Answer, Hash, LandingRecord, RepoId, Tag};
 use rdy_store::holder::{StoreMode, answer_tag_object_ref};
@@ -291,7 +292,10 @@ enum Coverage<'c> {
 /// trust is checked for, when the record names the subject, the statement's form fits it, and
 /// the statement rebuilt for the current repo id, or else for one of the fork sources, equals
 /// the signed bytes. In a holder, a statement that equals the one rebuilt for the other repo id
-/// it names is `Foreign`. `None` otherwise.
+/// it names is `Foreign`. `None` otherwise. Every rebuild is in the version the signed bytes
+/// name, never today's output version: a version 1 relay keeps its joined relayer, and a
+/// version 2 relay proves its `relayed_by` line is the whole stored relay actor, which is the
+/// principal.
 fn covered<'c>(
     record: &Signature,
     parsed: &ParsedStatement<'_>,
@@ -352,8 +356,9 @@ fn covered<'c>(
         .iter()
         .copied()
         .filter(|source| *source != context.current_repo);
+    let version = parsed.version();
     for repo in std::iter::once(context.current_repo).chain(fallback) {
-        match statement(source, Some(repo), key) {
+        match statement_for_version(source, Some(repo), key, version) {
             Ok(bytes) if bytes == record.statement => return Some(Coverage::Covered(principal)),
             Ok(_) => {}
             // the record cannot be the source of this statement for any repo id
@@ -368,7 +373,7 @@ fn covered<'c>(
     if named == context.current_repo || context.source_repos.contains(&named) {
         return None;
     }
-    match statement(source, Some(named), key) {
+    match statement_for_version(source, Some(named), key, version) {
         Ok(bytes) if bytes == record.statement => Some(Coverage::Foreign(named)),
         _ => None,
     }

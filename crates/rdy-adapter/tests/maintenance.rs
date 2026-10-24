@@ -50,7 +50,7 @@ fn land_tag(r: &mut Rdy, id: Option<&str>, body: &str, name: &str) -> String {
         )
         .unwrap();
     let p = r
-        .propose(&session(Role::Writer), "work", "T", None)
+        .propose(&session(Role::Writer), "work", "T", Some("test summary"))
         .unwrap();
     r.land(&session(Role::Approver), &p.id).unwrap();
     r.tag(&session(Role::Approver), name, None, None).unwrap();

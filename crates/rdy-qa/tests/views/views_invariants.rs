@@ -1,6 +1,7 @@
 //! vinv1: spec §15.3 invariants 1-4 for views, in the checker.
 use rdy_engine::*;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::TEST_SUMMARY;
 use rdy_qa::invariants::{check, check_views};
 use rdy_store::view::ViewOpKind;
 use serde_json::json;
@@ -110,7 +111,7 @@ fn vinv1_a_clean_swarm_passes() {
         }
         let lander = format!("s{}", 1 + round % 3);
         let p = r
-            .propose(&agents[1 + round % 3], &lander, "t", None)
+            .propose(&agents[1 + round % 3], &lander, "t", Some(TEST_SUMMARY))
             .unwrap();
         let _ = r.land_report(&approver(), &p.r#ref);
         assert!(rules(&r).is_empty(), "round {round}: {:?}", check_views(&r));

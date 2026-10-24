@@ -5,6 +5,7 @@ use rdy_engine::{Rdy, Scope};
 use rdy_model::Hash;
 use rdy_qa::daemon::Served;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::TEST_SUMMARY;
 use rdy_qa::invariants::check_all;
 use rdy_qa::mcp::{DEADLINE, McpClient};
 use rdy_qa::tensions::ag;
@@ -265,7 +266,7 @@ fn rebasing_landing() -> (Served, Landing) {
     )
     .unwrap();
     let p = r
-        .propose(&writer(), "work", "the person's edit", None)
+        .propose(&writer(), "work", "the person's edit", Some(TEST_SUMMARY))
         .unwrap();
     let st = r.read();
     let old_head = st.canon_head().expect("a canon head");

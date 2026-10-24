@@ -19,11 +19,16 @@
 //! answered as shown).
 //! - A proposal ref that is no longer its proposal's latest version: `E_PROPOSAL_MOVED`, with the
 //!   text of an approval of a moved version.
+//! - An approval (option `approve`, or the recommended option of a list) of a proposal's latest
+//!   version that has not landed, was not withdrawn and is not ready, in any spelling of its ref:
+//!   `E_PROPOSAL_NOT_READY`, with the queue's readiness issues in the queue's order and no card,
+//!   as every approval path refuses it (D-ME2HD).
 //! - Any other ref that is not in the queue (its version moved, it was answered, it landed, or
-//!   its batch is not ready): `E_ITEM_MOVED`, `<ref> changed since it was shown`. A batch that is
-//!   not ready lists its issues. One exception: a `defer:P-x@n` ref of an open proposal's latest
-//!   version binds its deferral card whether or not the version is ready or the card answered
-//!   (D-AAQ9Z), so a refused card takes a later acceptance; every other check below applies.
+//!   its batch is not ready and the answer is no approval): `E_ITEM_MOVED`, `<ref> changed since
+//!   it was shown`. A batch that is not ready lists its issues. One exception: a `defer:P-x@n`
+//!   ref of an open proposal's latest version binds its deferral card whether or not the version
+//!   is ready or the card answered (D-AAQ9Z), so a refused card takes a later acceptance; every
+//!   other check below applies.
 //! - A relayed answer passes `card_hash`. A local answer may omit it, and then binds to the
 //!   version only. A decision version proposed in two views stands beside each batch with the
 //!   same ref and its own card, so a `card_hash` picks the card of that ref with that hash. When
@@ -53,7 +58,8 @@ pub mod resolve;
 
 use crate::error::{E_BAD_INPUT, E_ITEM_MOVED, E_PROPOSAL_MOVED, RdyError};
 use crate::gate::{
-    LandInfo, landed_as, latest_version, moved, resolve_in, withdrawn, withdrawn_error,
+    LandInfo, landed_as, latest_version, moved, proposal_not_ready, resolve_in, withdrawn,
+    withdrawn_error,
 };
 use crate::pending::PendingQuery;
 use crate::pending::queue::{Eligible, deferral_card};
@@ -462,7 +468,8 @@ fn bind(
         cards.push(card);
     }
     let Some(first) = cards.first() else {
-        return Err(gone(st, &q, r)?);
+        let approving = matches!(pick, Pick::Id("approve") | Pick::Recommended);
+        return Err(gone(st, &q, r, approving)?);
     };
     let card_hash = match shown {
         Some(h) => Some(h.parse::<Hash>().map_err(|_| {
@@ -562,11 +569,14 @@ pub fn is_item_ref(r: &str) -> bool {
 
 /// The refusal of `r`, which is not in the queue `q`: a proposal version that is not its
 /// latest is `E_PROPOSAL_MOVED`; a latest version that has not landed and that a close of its
-/// view withdrew is `E_VIEW_CLOSED` (D-K0SS1), with no fresh card (the queue has none); anything
-/// else, an `advice:` ref of a withdrawn version too (R3), is `E_ITEM_MOVED`. `E_PROPOSAL_MOVED`
-/// and `E_ITEM_MOVED` carry the fresh card when the queue has one, and a batch that is not ready
-/// lists its issues.
-fn gone(st: &ReadState, q: &Eligible, r: &str) -> Result<RdyError, RdyError> {
+/// view withdrew is `E_VIEW_CLOSED` (D-K0SS1), with no fresh card (the queue has none); an
+/// approval (`approving`) of a latest version that has not landed and that the queue lists as
+/// not ready, by its canonical ref, is `E_PROPOSAL_NOT_READY` with the queue's issues and no
+/// card (D-ME2HD); anything else, an `advice:` ref of a withdrawn version too (R3), a rejection
+/// or a Later of a version that is not ready, and a version a `reject_proposal` answer took out,
+/// is `E_ITEM_MOVED`. `E_PROPOSAL_MOVED` and `E_ITEM_MOVED` carry the fresh card when the queue
+/// has one, and a batch that is not ready lists its issues.
+fn gone(st: &ReadState, q: &Eligible, r: &str, approving: bool) -> Result<RdyError, RdyError> {
     let mut e = None;
     if is_proposal_ref(r) {
         let pref = resolve_in(st, r)?;
@@ -574,8 +584,14 @@ fn gone(st: &ReadState, q: &Eligible, r: &str) -> Result<RdyError, RdyError> {
         let p = st.reader().proposal(&pref.version)?;
         if latest != pref.version {
             e = Some(moved(st, &pref, &latest, &p.view)?);
-        } else if landed_as(st, &p)?.is_none() && withdrawn(st, &pref.version, &p)? {
-            return Ok(withdrawn_error(&pref, &p.view));
+        } else if landed_as(st, &p)?.is_none() {
+            if withdrawn(st, &pref.version, &p)? {
+                return Ok(withdrawn_error(&pref, &p.view));
+            }
+            let canonical = pref.to_string();
+            if approving && let Some(n) = q.not_ready.iter().find(|n| n.r#ref == canonical) {
+                return Ok(proposal_not_ready(&pref, n.issues.clone()));
+            }
         }
     }
     let mut e = e.unwrap_or_else(|| changed(E_ITEM_MOVED, r));

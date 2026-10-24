@@ -324,7 +324,7 @@ mod tests {
                 "  depends_on D-1 -> c-Z",
                 "  references D-1 -> c-Y",
                 "  accepted in 0123456789ab P-abc@2 by human:nick",
-                "  relayed by agent:relay/r-9",
+                "  relayed by agent:relay (run r-9)",
                 "  imported by human:nick",
                 "1 D-2 live: Two.",
                 "  refines D-2 -> D-1 (the words)",
@@ -350,7 +350,7 @@ mod tests {
             vec![
                 "premise f-1 finding: Disputes rose.",
                 "answers q-1: Who signs?",
-                "introduced: fedcba987654 P-def@1 \"First\" by agent:a/r1",
+                "introduced: fedcba987654 P-def@1 \"First\" by agent:a (run r1)",
                 "more: D-8, D-9",
             ]
         );

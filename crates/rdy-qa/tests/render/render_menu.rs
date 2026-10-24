@@ -25,12 +25,20 @@ fn proposed() -> (tempfile::TempDir, Rdy, ProposalInfo) {
     )
     .unwrap();
     edit_tutorial(&mut r, "editing", "So far we have used three patterns.");
-    r.view_own(&writer(), "editing", Some("agent:design_thread"))
+    r.view_own(&writer(), "editing", Some(&owner("agent:design_thread")))
         .unwrap();
     let p = r
         .propose(&writer(), "editing", "Tighten the tutorial", None)
         .unwrap();
     (dir, r, p)
+}
+
+/// An owner with no run (D-PWB82: the actor and the run apart).
+fn owner(actor: &str) -> rdy_engine::view_api::OwnerInput {
+    rdy_engine::view_api::OwnerInput {
+        actor: actor.into(),
+        run: None,
+    }
 }
 
 fn edit_tutorial(r: &mut Rdy, view: &str, body: &str) {
@@ -302,7 +310,7 @@ fn sr8_the_key_moves_with_what_the_menu_shows() {
     assert_ne!(k4, k3, "a new proposal moves the key");
 
     // a change of owner (the menu names the owner)
-    r.view_own(&writer(), "editing", Some("agent:claude"))
+    r.view_own(&writer(), "editing", Some(&owner("agent:claude")))
         .unwrap();
     let k5 = key(&r);
     assert_ne!(k5, k4, "an ownership change moves the key");

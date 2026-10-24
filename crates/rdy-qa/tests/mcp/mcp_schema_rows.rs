@@ -37,12 +37,30 @@ fn erow1_every_view_brief_and_daemon_code_has_a_row() {
         W_SITE_PROFILE,
         E_DUMP,
         E_EXCEPTION_OPEN,
+        E_PROPOSAL_NOT_READY,
         E_ITEM_MOVED,
         rdy_engine::card_words::W_CARD_WORDS,
     ] {
         let (when, fix) = row(code);
         assert!(!when.is_empty() && !fix.is_empty(), "{code}");
     }
+    // D-ME2HD: the refusal of a version that is not ready, and the two cause codes its issues
+    // carry
+    assert_eq!(
+        row(E_PROPOSAL_NOT_READY),
+        (
+            "the proposal version fails readiness; issues name each failed check",
+            "fix each issue and propose again: rdy_propose / rdy propose"
+        )
+    );
+    assert_eq!(
+        row(E_CONFLICT_UNRESOLVED).0,
+        "an issue names a conflict the proposal version does not resolve"
+    );
+    assert_eq!(
+        row(E_BLOCKING_TENSION).0,
+        "an issue names an undismissed blocking tension that the landing would put into canon"
+    );
     // one fix for every E_PAGE_STALE, briefing cursor and read cursor alike
     assert_eq!(row(E_PAGE_STALE).1, PAGE_STALE_FIX);
     let (_, fix) = row("W_SKELETON_MISSING");

@@ -1,11 +1,13 @@
 //! Ownership (own1): the human reassigns a view (`rdy view own`) and closes idle views in bulk
 //! (`rdy view close --stale`). Both are a person's acts, so an agent session relays them with the
 //! person's words (D-KQ4CA): the act then runs as the person, and an `ANSWER` in the same batch
-//! holds the relay (`view_own_as`, `view_close_stale_as`).
+//! holds the relay (`view_own_as`, `view_close_stale_as`). A new owner is an actor and an
+//! optional run in separate fields (D-PWB82), never one string.
 use super::{CloseResult, ViewHeadInfo, head_info, no_view};
 use crate::answer::relay::{RelayInput, RelayRefusal, relayed};
 use crate::error::*;
 use crate::version::answer_write_error;
+use crate::view_api::OwnerInput;
 use crate::{Delta, Rdy, Session};
 use rdy_model::{ActorRun, Answer, AnswerAct, EvidenceKind};
 use rdy_store::Owner;
@@ -77,33 +79,28 @@ fn answer_of(item: String, act: AnswerAct, who: &Session, relay: rdy_store::Rela
     }
 }
 
-/// An owner as `rdy view own` takes it: `<actor>` or `<actor>/<run>`, split at the first `/`.
-fn parse_owner(text: &str) -> Result<Owner, RdyError> {
-    let (actor, run) = match text.split_once('/') {
-        Some((actor, run)) => (actor, Some(run)),
-        None => (text, None),
-    };
-    if actor.is_empty() || run.is_some_and(str::is_empty) {
-        return Err(RdyError::new(
-            E_BAD_INPUT,
-            "owner must be <actor>[/<run>]",
-            "for example agent:claude/r1, or agent:claude for a session with no run",
-        ));
+/// The stored owner of a new owner input (D-PWB82): the actor, then a supplied run, each in its
+/// form; then the two fields copied as they are. The actor is never split: `agent:a/b` with no
+/// run is the actor `agent:a/b`, and a run comes only from the run field.
+fn owner_of(input: &OwnerInput) -> Result<Owner, RdyError> {
+    crate::identity::validate_owner_actor(&input.actor)?;
+    if let Some(run) = &input.run {
+        crate::identity::validate_run(run)?;
     }
     Ok(Owner {
-        actor: actor.to_string(),
-        run: run.map(str::to_string),
+        actor: input.actor.clone(),
+        run: input.run.clone(),
     })
 }
 
 impl Rdy {
-    /// own1: the human reassigns `view` to `owner` (`<actor>[/<run>]`), or leaves it unowned
+    /// own1: the human reassigns `view` to `owner` (an actor and an optional run), or leaves it unowned
     /// (`None`), so that the next commit claims it. Works on a closed view and leaves it closed.
     pub fn view_own(
         &mut self,
         s: &Session,
         view: &str,
-        owner: Option<&str>,
+        owner: Option<&OwnerInput>,
     ) -> Result<ViewHeadInfo, RdyError> {
         if !s.is_human() {
             return Err(RdyError::new(
@@ -113,7 +110,7 @@ impl Rdy {
             ));
         }
         self.check_own(s, view)?;
-        let owner = owner.map(parse_owner).transpose()?;
+        let owner = owner.map(owner_of).transpose()?;
         self.store
             .view_append(view, vec![ViewOpKind::Own { owner }], &s.provenance())?;
         self.publish(Delta::View {
@@ -164,16 +161,19 @@ impl Rdy {
     ///   `question` or `session_ref` alone is case 5 of the table.
     /// - Otherwise the table: a human session that names a relay is refused; an agent session
     ///   needs the person's words, and names no `relayed_by` over MCP (`implicit` when it names
-    ///   none) or its own actor at the command line. The hand-over then runs as the person, and
-    ///   one batch holds the view op and an `ANSWER` (act `view_own`, item `own:<view>`,
-    ///   evidence `text`, `targets` the view op) that holds the relay.
+    ///   none) or its own actor alone at the command line (the relay records the session's
+    ///   run). The hand-over then runs as the person, and one batch holds the view op and an
+    ///   `ANSWER` (act `view_own`, item `own:<view>`, evidence `text`, `targets` the view op)
+    ///   that holds the relay.
+    /// - The new owner's actor and run are checked after the relay and the view's rules, before
+    ///   any write: a refusal writes neither the view op nor the `ANSWER`.
     pub fn view_own_as(
         &mut self,
         s: &Session,
         person: &str,
         relay: &RelayInput,
         view: &str,
-        owner: Option<&str>,
+        owner: Option<&OwnerInput>,
     ) -> Result<OwnInfo, RdyError> {
         if no_relay(relay)? {
             return Ok(OwnInfo {
@@ -192,7 +192,7 @@ impl Rdy {
             });
         };
         self.check_own(&who, view)?;
-        let owner = owner.map(parse_owner).transpose()?;
+        let owner = owner.map(owner_of).transpose()?;
         let relayed_by = by.by.clone();
         let a = answer_of(format!("own:{view}"), AnswerAct::ViewOwn, &who, by);
         let appends = [(view.to_string(), vec![ViewOpKind::Own { owner }])];

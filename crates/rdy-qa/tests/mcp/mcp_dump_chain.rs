@@ -378,7 +378,7 @@ fn hc8_stopped_warning_lists_reapprovable_targets() {
     // the listed target is one a person can approve again in the stopped project
     let mut r = Rdy::open(&to).unwrap();
     r.redact_in(
-        &Session::human("human:qa".into(), Role::Writer),
+        &Session::human("human:qa".into(), Role::Writer).unwrap(),
         "again",
         RedactInput {
             targets: vec![targets[0].to_string()],

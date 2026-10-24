@@ -457,11 +457,11 @@ mod tests {
     use std::rc::Rc;
 
     fn writer() -> Session {
-        Session::human("human:t".into(), Role::Writer)
+        Session::human("human:t".into(), Role::Writer).unwrap()
     }
 
     fn approver() -> Session {
-        Session::human("human:t".into(), Role::Approver)
+        Session::human("human:t".into(), Role::Approver).unwrap()
     }
 
     /// An error as its code, message and fix.
@@ -490,7 +490,9 @@ mod tests {
                 },
             )
             .unwrap();
-        let p = r.propose(&writer(), "work", "Base", None).unwrap();
+        let p = r
+            .propose(&writer(), "work", "Base", Some("test summary"))
+            .unwrap();
         let l: Hash = r.land(&approver(), &p.id).unwrap().parse().unwrap();
         let blocks = (0..n)
             .map(|i| w.created[&format!("$p{i}")].clone())

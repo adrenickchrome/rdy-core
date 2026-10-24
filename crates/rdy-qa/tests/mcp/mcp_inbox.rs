@@ -30,7 +30,14 @@ fn agent(s: &Served, areas: Option<Value>) -> McpClient {
 fn land(s: &Served, path: &str) {
     let (ok, v) = s.json(&["--json", "new", "doc", path]);
     assert!(ok, "{v}");
-    let (ok, p) = s.json(&["--json", "propose", "--title", "t"]);
+    let (ok, p) = s.json(&[
+        "--json",
+        "propose",
+        "--title",
+        "t",
+        "--summary",
+        "test summary",
+    ]);
     assert!(ok, "{p}");
     let (ok, v) = s.json(&["--json", "approve", p["id"].as_str().unwrap()]);
     assert!(ok, "{v}");
@@ -72,7 +79,18 @@ fn ib7_an_agent_reads_and_acks_the_persons_inbox_from_chat() {
     assert!(ok, "{v}");
     let (ok, v) = s.json_as("agent:b", None, &["--json", "new", "doc", "payments/b"]);
     assert!(ok, "{v}");
-    let (ok, p) = s.json_as("agent:b", None, &["--json", "propose", "--title", "t"]);
+    let (ok, p) = s.json_as(
+        "agent:b",
+        None,
+        &[
+            "--json",
+            "propose",
+            "--title",
+            "t",
+            "--summary",
+            "test summary",
+        ],
+    );
     assert!(ok, "{p}");
     let (ok, v) = s.json(&["--json", "approve", p["id"].as_str().unwrap()]);
     assert!(ok, "{v}");

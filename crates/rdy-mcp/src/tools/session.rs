@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SessionParams {
-    /// Who is acting, e.g. "agent:designer" or "human:nick".
+    /// Who is acting: this agent's own actor, e.g. "agent:designer" (a human actor is refused).
     pub actor: String,
     /// The run this agent belongs to; also the default view name.
     pub run: Option<String>,
@@ -63,6 +63,10 @@ fn fit_tree(mut nodes: Vec<TreeNode>, max_tokens: usize) -> Vec<TreeNode> {
     nodes
 }
 
+/// The fix of an agent session's human claim over MCP (D-ME2C0): the CLI's names RDY_ACTOR.
+const MCP_HUMAN_CLAIM_FIX: &str =
+    "claim your own agent: actor, and relay the person's words with rdy_answer";
+
 pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyError> {
     // compiled only for this crate's own tests: a release binary has no hook and reads no env
     #[cfg(test)]
@@ -99,7 +103,13 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
             "pick a view name without ':'",
         ));
     }
-    let session = Session::agent(p.actor, p.run, role)?;
+    // D-ME2C0: MCP is an agent surface; a human actor here is a claim, with its MCP fix
+    let session = Session::agent(p.actor, p.run, role).map_err(|mut e| {
+        if Session::is_human_claim(&e) {
+            e.fix = MCP_HUMAN_CLAIM_FIX.to_string();
+        }
+        e
+    })?;
     let view = p.view.unwrap_or_else(|| session.default_view());
     // ses1: a reader may read canon by default; a session that writes needs a view of its own
     if view == "canon" && role != Role::Reader {
@@ -109,6 +119,9 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
             "pick another view name; only a reader session may use canon",
         ));
     }
+    // the configured person is resolved before anything changes: a refusal (an unreadable config,
+    // an actor outside the form) leaves the earlier session, view and subscription as they were
+    let person = human_actor_for_env(&st.engine.root())?;
     // ib3: the subscription is written before the session is set, so a refused area leaves the
     // earlier session as it was
     let sub = rdy_engine::inbox::sub::subscribe(&*st.engine, &session, p.areas)?;
@@ -129,7 +142,6 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
     });
     // s-4A488: what waits for the person, so the agent checks the queue at session start. The
     // count never hides a snoozed item; a queue that cannot be read does not fail the session.
-    let person = human_actor_for_env(&st.engine.root());
     let query = PendingQuery {
         person,
         ..PendingQuery::default()

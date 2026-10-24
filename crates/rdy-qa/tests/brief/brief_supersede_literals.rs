@@ -10,7 +10,7 @@ use rdy_engine::*;
 use rdy_model::{BlockId, Hash, Justification};
 use rdy_qa::edit_loop::*;
 use rdy_qa::fixtures::*;
-use rdy_qa::intake::{confirm_before_landing, summary_for};
+use rdy_qa::intake::{TEST_SUMMARY, confirm_before_landing, summary_for};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
@@ -1090,7 +1090,7 @@ fn sdc5_propose_compares_canon_and_landed_version_uses_its_prev() {
     );
     let q = "q".to_string();
     land_and_report(&e, move |r| {
-        let p = r.propose(&writer(), &q, &q, None)?;
+        let p = r.propose(&writer(), &q, &q, Some(TEST_SUMMARY))?;
         r.land_report(&approver(), &p.id)
     })
     .unwrap();

@@ -6,7 +6,7 @@ use rdy_engine::alt::*;
 use rdy_engine::tensions::api::AcceptRequest;
 use rdy_engine::*;
 use rdy_qa::fixtures::*;
-use rdy_qa::intake::{BATCH_VIEW, batch_project};
+use rdy_qa::intake::{BATCH_VIEW, TEST_SUMMARY, batch_project};
 use rdy_qa::tensions::ag;
 use serde_json::json;
 
@@ -21,7 +21,9 @@ fn proposed_in_v() -> (tempfile::TempDir, Rdy, String, ProposalInfo) {
     let (_doc, section, _c) = seed_doc(&mut r, "seed");
     land(&mut r, "seed").unwrap();
     write(&mut r, "v", claim(&section, "a")).unwrap();
-    let p = r.propose(&writer(), "v", "first", None).unwrap();
+    let p = r
+        .propose(&writer(), "v", "first", Some(TEST_SUMMARY))
+        .unwrap();
     (d, r, section, p)
 }
 
@@ -78,7 +80,9 @@ fn vw2_after_an_undo_of_the_close_the_new_version_lands() {
     let close = head_op(&r, "v");
     r.undo(&writer(), "v", Some(&close), false).unwrap();
     write(&mut r, "v", claim(&section, "b")).unwrap();
-    let p2 = r.propose(&writer(), "v", "second", None).unwrap();
+    let p2 = r
+        .propose(&writer(), "v", "second", Some(TEST_SUMMARY))
+        .unwrap();
     assert_eq!(
         r.read().proposal_show(&p1.r#ref).unwrap().state,
         "superseded"
@@ -149,7 +153,14 @@ fn vw2_a_losing_members_version_is_refused_with_e_view_closed() {
     let (_d, mut r) = project();
     let set = setup(&mut r);
     let pa = r
-        .propose_with(&writer(), "a", "x", None, None, Some(&pick(&set, "x")))
+        .propose_with(
+            &writer(),
+            "a",
+            "x",
+            None,
+            Some(TEST_SUMMARY),
+            Some(&pick(&set, "x")),
+        )
         .unwrap();
     let pb = r
         .propose_with(&writer(), "b", "y", None, None, Some(&pick(&set, "y")))
@@ -265,7 +276,9 @@ fn vw1_a_version_proposed_in_a_closed_view_stays_withdrawn_after_the_close_is_un
     assert!(!r.read().view_head("v").unwrap().closed, "the view reopens");
     still_withdrawn(&mut r, "after the close is undone");
     write(&mut r, "v", claim(&section, "b")).unwrap();
-    let p2 = r.propose(&writer(), "v", "second", None).unwrap();
+    let p2 = r
+        .propose(&writer(), "v", "second", Some(TEST_SUMMARY))
+        .unwrap();
     assert_ne!(p2.r#ref, pref, "a new version");
     assert_eq!(r.read().proposal_show(&p2.r#ref).unwrap().state, "open");
     r.land(&approver(), &p2.id).unwrap();

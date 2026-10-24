@@ -194,8 +194,12 @@ impl ReadState {
 
     /// The intents `f` selects, as of `now_ms`: newest first by the time each was first posted,
     /// then by id. Open intents come from the published index; only `include_expired` reads the
-    /// withdrawn ones from the store.
+    /// withdrawn ones from the store. A supplied actor filter is a named input, checked against
+    /// the actor form (O10); the stored intents' own actors are read as they are.
     pub fn intents(&self, f: &IntentFilter, now_ms: i64) -> Result<Vec<IntentInfo>, RdyError> {
+        if let Some(a) = &f.actor {
+            crate::identity::validate_actor(a)?;
+        }
         if let Some(e) = &self.error {
             return Err(e.clone());
         }

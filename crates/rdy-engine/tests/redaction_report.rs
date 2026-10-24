@@ -46,15 +46,15 @@ const ORIGIN: Location = Location {
 };
 
 fn writer() -> Session {
-    Session::human("human:t".into(), Role::Writer)
+    Session::human("human:t".into(), Role::Writer).unwrap()
 }
 
 fn approver() -> Session {
-    Session::human("human:t".into(), Role::Approver)
+    Session::human("human:t".into(), Role::Approver).unwrap()
 }
 
 fn reader() -> Session {
-    Session::human("human:t".into(), Role::Reader)
+    Session::human("human:t".into(), Role::Reader).unwrap()
 }
 
 fn agent(run: &str) -> Session {
@@ -977,10 +977,22 @@ fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
     );
     let k = id(&w.created["$k"]);
     // a proposal title, a landing by an approver whose actor holds the token, and a tag message
-    let token_approver = Session::human(format!("human:{TOKEN}"), Role::Approver);
+    // the token's capitals are outside today's actor form (D-ME2C0): the approver stands for a
+    // landing an older rdy recorded, so it is built raw, not by the constructor
+    let token_approver = Session {
+        actor: format!("human:{TOKEN}"),
+        run: Some("cli".into()),
+        role: Role::Approver,
+        kind: rdy_engine::SessionKind::Human,
+    };
     let pi =
-        p.r.propose(&writer(), "work", &format!("{TOKEN} proposal"), None)
-            .unwrap();
+        p.r.propose(
+            &writer(),
+            "work",
+            &format!("{TOKEN} proposal"),
+            Some("test summary"),
+        )
+        .unwrap();
     let landing = p.r.land(&token_approver, &pi.id).unwrap();
     p.r.tag(&approver(), "v1.0.0", None, Some(format!("tag {TOKEN}")))
         .unwrap();
@@ -1274,7 +1286,9 @@ fn rdx5_selectors_have_one_closed_grammar() {
     let blob = p.r.store_mut().put_blob(b"blob bytes").unwrap();
     let chunk = Hash::of(b"blob bytes");
     p.r.invalidate();
-    let pi = p.r.propose(&writer(), "work", "seed", None).unwrap();
+    let pi =
+        p.r.propose(&writer(), "work", "seed", Some("test summary"))
+            .unwrap();
     let landing = p.r.land(&approver(), &pi.id).unwrap();
     let target_err = |p: &P, sel: &str| -> RdyError {
         p.r.read()
@@ -1412,7 +1426,9 @@ fn rdx5_all_versions_includes_closed_and_unlanded_history() {
     let _clock = pin_clock(1_000_000);
     let mut p = base();
     let v1 = version(&p.r, "work", &p.prose);
-    let pi = p.r.propose(&writer(), "work", "seed", None).unwrap();
+    let pi =
+        p.r.propose(&writer(), "work", "seed", Some("test summary"))
+            .unwrap();
     p.r.land(&approver(), &pi.id).unwrap();
     // old canon v1; v2 unlanded in work
     write(
@@ -1518,7 +1534,9 @@ fn rdx5_report_names_landings_tags_views_proposals_and_snapshots() {
     let _clock = pin_clock(1_000_000);
     let mut p = base();
     let vp = version(&p.r, "work", &p.prose);
-    let pi = p.r.propose(&writer(), "work", "seed", None).unwrap();
+    let pi =
+        p.r.propose(&writer(), "work", "seed", Some("test summary"))
+            .unwrap();
     let landing = h(&p.r.land(&approver(), &pi.id).unwrap());
     p.r.tag(&approver(), "v1.0.0", None, None).unwrap();
     let state = p.r.read().reader().landing(&landing).unwrap().state;
@@ -1569,7 +1587,9 @@ fn rdx5_report_names_landings_tags_views_proposals_and_snapshots() {
         json!([{"op": "update", "id": p.prose.to_string(), "base": vp.to_string(), "body": "second"}]),
         "",
     );
-    let pi2 = p.r.propose(&writer(), "work", "second", None).unwrap();
+    let pi2 =
+        p.r.propose(&writer(), "work", "second", Some("test summary"))
+            .unwrap();
     let l2 = h(&p.r.land(&approver(), &pi2.id).unwrap());
     write(
         &mut p.r,
@@ -1578,7 +1598,9 @@ fn rdx5_report_names_landings_tags_views_proposals_and_snapshots() {
         json!([{"op": "create", "type": "folder", "fields": {"name": "other", "title": "Other"}}]),
         "",
     );
-    let pi3 = p.r.propose(&writer(), "work", "third", None).unwrap();
+    let pi3 =
+        p.r.propose(&writer(), "work", "third", Some("test summary"))
+            .unwrap();
     let l3 = h(&p.r.land(&approver(), &pi3.id).unwrap());
     p.r.tag(&approver(), "v3.0.0", None, None).unwrap();
     let st = p.r.read();
@@ -1638,7 +1660,9 @@ fn rdx5_embedded_changes_and_shared_chunks_are_mandatory() {
     let fy = id(&wy.created["$y"]);
     let fy_change = h(&wy.change);
     let vfy = version(&p.r, "work", &fy);
-    let py = p.r.propose(&writer(), "work", "figure y", None).unwrap();
+    let py =
+        p.r.propose(&writer(), "work", "figure y", Some("test summary"))
+            .unwrap();
     let landing_y = h(&p.r.land(&approver(), &py.id).unwrap());
     p.r.tag(&approver(), "v0.9.0", None, None).unwrap();
     let state_y = p.r.read().reader().landing(&landing_y).unwrap().state;
@@ -1655,7 +1679,9 @@ fn rdx5_embedded_changes_and_shared_chunks_are_mandatory() {
     let fx = id(&w.created["$x"]);
     let fx_change = h(&w.change);
     let vfx = version(&p.r, "work", &fx);
-    let pi = p.r.propose(&writer(), "work", "figures", None).unwrap();
+    let pi =
+        p.r.propose(&writer(), "work", "figures", Some("test summary"))
+            .unwrap();
     let landing = h(&p.r.land(&approver(), &pi.id).unwrap());
     p.r.tag(&approver(), "v1.0.0", None, None).unwrap();
     let state = p.r.read().reader().landing(&landing).unwrap().state;
@@ -2729,7 +2755,9 @@ fn sig4_redaction_scan_reports_signature_text() {
     let _clock = pin_clock(1_000_000);
     let mut p = base();
     let vp = version(&p.r, "work", &p.prose);
-    let pi = p.r.propose(&writer(), "work", "seed", None).unwrap();
+    let pi =
+        p.r.propose(&writer(), "work", "seed", Some("test summary"))
+            .unwrap();
     let landing = h(&p.r.land(&approver(), &pi.id).unwrap());
     let tag = h(&p.r.tag(&approver(), "v1.0.0", None, None).unwrap().tag);
     let statement = format!("rdy-statement: 1\nkind: approval\nnote: {SECRET}\n");

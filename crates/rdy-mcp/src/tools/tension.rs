@@ -139,7 +139,7 @@ pub fn rdy_tensions(st: &mut McpState, p: TensionsParams) -> Result<Value, RdyEr
 /// person is the project's human actor (O18).
 pub fn rdy_resolve(st: &mut McpState, p: ResolveParams) -> Result<Value, RdyError> {
     let s = session(st)?;
-    let person = human_actor_for_env(&st.engine.root());
+    let person = human_actor_for_env(&st.engine.root())?;
     run_resolve(
         &*st.engine,
         &s,

@@ -225,18 +225,16 @@ fn di5_a_version_that_is_not_ready_is_not_an_item() {
             "propose it again with a summary in plain words for the person who approves it"
         )
     );
-    // the landing gives the same texts today
+    // every approval path refuses each with the same issues (D-ME2HD); the summary too
     for (version, code) in [
         (&m.blocking, E_BLOCKING_TENSION),
         (&m.conflict, E_CONFLICT_UNRESOLVED),
+        (&m.no_summary, E_VALIDATION),
     ] {
-        let issue = &not_ready[version.r#ref.as_str()][0];
+        let issues = not_ready[version.r#ref.as_str()].clone();
         let e = r.land(&approver(), &version.r#ref).unwrap_err();
-        assert_eq!(e.code, code, "{e}");
-        assert_eq!(
-            (issue.code, issue.message.as_str(), issue.fix.as_str()),
-            (e.code, e.message.as_str(), e.fix.as_str())
-        );
+        assert_not_ready(&r, &e, &version.r#ref, &[code]);
+        assert_eq!(&e.issues, &issues);
     }
     assert!(
         q.items
@@ -669,16 +667,15 @@ fn di5_a_conflict_does_not_hide_a_blocking_tension() {
         .issues;
     let codes: Vec<&str> = issues.iter().map(|i| i.code).collect();
     assert_eq!(codes, vec![E_CONFLICT_UNRESOLVED, E_BLOCKING_TENSION]);
-    // the conflict as the landing gives it: the landing stops there
+    // the landing gives both issues, the conflict first (D-ME2HD)
     let e = r.land(&approver(), &v2.r#ref).unwrap_err();
-    assert_eq!(
-        (e.code, e.message.as_str(), e.fix.as_str()),
-        (
-            issues[0].code,
-            issues[0].message.as_str(),
-            issues[0].fix.as_str()
-        )
+    assert_not_ready(
+        &r,
+        &e,
+        &v2.r#ref,
+        &[E_CONFLICT_UNRESOLVED, E_BLOCKING_TENSION],
     );
+    assert_eq!(&e.issues, issues);
     // the blocking tension as the landing words it, with the same fix the blocking view's has
     let alone = &q
         .not_ready

@@ -150,7 +150,7 @@ fn write(r: &mut Rdy, ops: Value) -> rdy_engine::WriteResult {
 
 fn land(r: &mut Rdy) -> Hash {
     let p = r
-        .propose(&session(Role::Writer), "work", "T", None)
+        .propose(&session(Role::Writer), "work", "T", Some("test summary"))
         .unwrap();
     r.land(&session(Role::Approver), &p.id)
         .unwrap()

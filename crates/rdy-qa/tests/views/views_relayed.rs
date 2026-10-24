@@ -5,7 +5,7 @@
 //! session cannot relay, and an agent needs the person's words.
 use rdy_engine::answer::relay::RelayInput;
 use rdy_engine::engine::Local;
-use rdy_engine::view_api::{ViewRequest, run_view};
+use rdy_engine::view_api::{OwnerInput, ViewRequest, run_view};
 use rdy_engine::*;
 use rdy_model::{ActorRun, Answer, AnswerAct, EvidenceKind, Hash, Role};
 use rdy_qa::daemon::Served;
@@ -45,6 +45,14 @@ fn words(quote: &str) -> RelayInput {
     }
 }
 
+/// A new owner: its actor and run apart (D-PWB82).
+fn owner(actor: &str, run: Option<&str>) -> OwnerInput {
+    OwnerInput {
+        actor: actor.into(),
+        run: run.map(str::to_string),
+    }
+}
+
 fn req(v: serde_json::Value) -> ViewRequest {
     serde_json::from_value(v).unwrap()
 }
@@ -57,8 +65,8 @@ fn new_doc(name: &str) -> serde_json::Value {
     json!([{"op": "create", "type": "doc", "fields": {"name": name, "title": name, "doc_type": "page"}}])
 }
 
-/// A project with the seed doc landed, and views `a` (owned by `agent:a/r1`) and `b` (owned by
-/// `agent:b/r1`); `seed` stays open.
+/// A project with the seed doc landed, and views `a` (owned by `agent:a`, run `r1`) and `b` (owned
+/// by `agent:b`, run `r1`); `seed` stays open.
 fn project_with_views() -> (tempfile::TempDir, Rdy) {
     let (d, mut r) = project();
     let (_doc, section, _c) = seed_doc(&mut r, "seed");
@@ -137,7 +145,7 @@ fn di10_a_relayed_hand_over_records_the_person_and_an_answer() {
             FOUNDER,
             &words("Give a to b"),
             "a",
-            Some("agent:b/r2"),
+            Some(&owner("agent:b", Some("r2"))),
         )
         .unwrap();
     assert_eq!(
@@ -464,7 +472,13 @@ fn di10_a_human_session_cannot_relay_a_hand_over() {
         },
     ] {
         let e = r
-            .view_own_as(&me, "human:qa", &relay, "a", Some("agent:b/r2"))
+            .view_own_as(
+                &me,
+                "human:qa",
+                &relay,
+                "a",
+                Some(&owner("agent:b", Some("r2"))),
+            )
             .unwrap_err();
         refused(&e, E_PERMISSION, said, fix);
         let e = r
@@ -481,7 +495,7 @@ fn di10_a_human_session_cannot_relay_a_hand_over() {
             "human:qa",
             &RelayInput::default(),
             "a",
-            Some("agent:b/r2"),
+            Some(&owner("agent:b", Some("r2"))),
         )
         .unwrap();
     assert_eq!((&info.relayed_by, &info.answer), (&None, &None));
@@ -599,7 +613,7 @@ fn di10_a_relayed_batch_writes_nothing_when_a_view_fails_its_checks() {
     assert_eq!(stored.targets, last_of(&r, kinds::VIEW_OP));
 }
 
-/// A served project with views `a` (owned by `agent:a/r1`) and `seed`, all idle.
+/// A served project with views `a` (owned by `agent:a`, run `r1`) and `seed`, all idle.
 fn served_views() -> Served {
     let s = Served::new();
     let mut r = Rdy::open(s.dir.path()).unwrap();
@@ -620,7 +634,7 @@ fn served_views() -> Served {
 fn di10_the_cli_relays_own_and_stale_close() {
     let s = served_views();
     let own = |extra: &[&str]| -> Vec<String> {
-        let mut v: Vec<String> = ["--json", "view", "own", "a", "agent:b/r2"]
+        let mut v: Vec<String> = ["--json", "view", "own", "a", "agent:b", "--run", "r2"]
             .iter()
             .map(|a| a.to_string())
             .collect();
@@ -660,7 +674,7 @@ fn di10_the_cli_relays_own_and_stale_close() {
         (v["code"].as_str(), v["message"].as_str()),
         (
             Some("E_PERMISSION"),
-            Some("agent:w relays only as itself, not as agent:other")
+            Some("agent:w (run r7) relays only as itself, not as agent:other")
         ),
         "{v}"
     );
@@ -693,7 +707,7 @@ fn di10_the_cli_relays_own_and_stale_close() {
         Some("r7"),
         own(&[
             "--relayed-by",
-            "agent:w/r7",
+            "agent:w",
             "--evidence",
             "Give it to b",
             "--question",
@@ -727,7 +741,7 @@ fn di10_the_cli_relays_own_and_stale_close() {
     );
     let out = String::from_utf8_lossy(&o.stdout).into_owned();
     assert!(o.status.success(), "{o:?}");
-    assert_eq!(out.trim(), "view a owner none, relayed by agent:w/r7");
+    assert_eq!(out.trim(), "view a owner none, relayed by agent:w (run r7)");
 
     // the stale close: the person's default view stays, and the idle ones close
     std::thread::sleep(std::time::Duration::from_millis(30));

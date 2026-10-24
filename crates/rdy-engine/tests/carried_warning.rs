@@ -29,11 +29,11 @@ const SECOND: &str = "The backup code is ZEBRA-9999.";
 const PERSON: &str = "human:t";
 
 fn writer() -> Session {
-    Session::human(PERSON.into(), Role::Writer)
+    Session::human(PERSON.into(), Role::Writer).unwrap()
 }
 
 fn approver() -> Session {
-    Session::human(PERSON.into(), Role::Approver)
+    Session::human(PERSON.into(), Role::Approver).unwrap()
 }
 
 fn agent() -> Session {
@@ -83,7 +83,9 @@ fn project() -> (tempfile::TempDir, BlockId, BlockId) {
             },
         )
         .unwrap();
-    let p = r.propose(&writer(), "work", "Base", None).unwrap();
+    let p = r
+        .propose(&writer(), "work", "Base", Some("test summary"))
+        .unwrap();
     r.land(&approver(), &p.id).unwrap();
     r.close().unwrap();
     (

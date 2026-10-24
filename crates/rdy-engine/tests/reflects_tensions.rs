@@ -14,11 +14,11 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 fn writer() -> Session {
-    Session::human("human:qa".into(), Role::Writer)
+    Session::human("human:qa".into(), Role::Writer).unwrap()
 }
 
 fn approver() -> Session {
-    Session::human("human:qa".into(), Role::Approver)
+    Session::human("human:qa".into(), Role::Approver).unwrap()
 }
 
 fn id(s: &str) -> BlockId {

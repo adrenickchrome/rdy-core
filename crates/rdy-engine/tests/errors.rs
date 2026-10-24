@@ -105,7 +105,7 @@ fn fsck_project(n: usize) -> (tempfile::TempDir, rdy_engine::Rdy, Vec<Hash>) {
             justification: None,
             message: String::new(),
         }).unwrap();
-        let p = r.propose(&w, "work", "p", None).unwrap();
+        let p = r.propose(&w, "work", "p", Some("test summary")).unwrap();
         out.push(r.land(&a, &p.id).unwrap().parse().unwrap());
     }
     (dir, r, out)

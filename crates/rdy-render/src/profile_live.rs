@@ -814,7 +814,7 @@ mod spv4 {
     use std::collections::{BTreeMap, HashMap};
 
     fn session(role: Role) -> Session {
-        Session::human("human:qa".into(), role)
+        Session::human("human:qa".into(), role).unwrap()
     }
 
     fn write(r: &mut Rdy, view: &str, ops: Value) -> BTreeMap<String, String> {
@@ -835,7 +835,7 @@ mod spv4 {
 
     fn land(r: &mut Rdy, view: &str) {
         let p = r
-            .propose(&session(Role::Writer), view, view, None)
+            .propose(&session(Role::Writer), view, view, Some("test summary"))
             .expect("propose");
         r.land(&session(Role::Approver), &p.id).expect("land");
     }

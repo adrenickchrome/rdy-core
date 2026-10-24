@@ -9,11 +9,13 @@ use rdy_engine::*;
 use rdy_model::{BlockId, Role};
 use rdy_qa::edit_loop::spec_doc;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::{TEST_SUMMARY, assert_not_ready};
 use rdy_qa::tensions::*;
 use std::collections::BTreeSet;
 
 fn propose(r: &mut Rdy, view: &str) -> ProposalInfo {
-    r.propose(&writer(), view, view, None).unwrap()
+    r.propose(&writer(), view, view, Some(TEST_SUMMARY))
+        .unwrap()
 }
 fn approve(r: &mut Rdy, p: &ProposalInfo) -> Result<String, RdyError> {
     r.land(&approver(), &p.id)
@@ -111,14 +113,9 @@ fn se11_an_advised_semantic_tension_never_refuses_and_an_accepted_one_does() {
         .unwrap();
     assert_eq!(t.refuses, Some(true), "an accepted tension refuses");
     let id = t.id.clone();
+    // D-ME2HD: the tension is a readiness issue; the listing above names it
     let e = approve(&mut r, &p).unwrap_err();
-    assert_eq!(e.code, E_BLOCKING_TENSION);
-    assert!(
-        e.issues
-            .iter()
-            .any(|i| i.code == E_BLOCKING_TENSION && i.message.contains(&id)),
-        "{e:?}"
-    );
+    assert_not_ready(&r, &e, &p.r#ref, &[E_BLOCKING_TENSION]);
     r.dismiss_tension(&reviewer("agent:d"), &id, "B and C agree after all")
         .unwrap();
     let p = propose(&mut r, "a");
@@ -169,11 +166,9 @@ fn se11_each_view_is_judged_on_its_own_landing_form() {
     let p = propose(&mut r, held);
     accept(&mut r, &p);
     let p = propose(&mut r, held);
-    assert_eq!(
-        approve(&mut r, &p).unwrap_err().code,
-        E_BLOCKING_TENSION,
-        "the accepted form refuses its own view"
-    );
+    // the accepted form refuses its own view (D-ME2HD: as a readiness issue)
+    let e = approve(&mut r, &p).unwrap_err();
+    assert_not_ready(&r, &e, &p.r#ref, &[E_BLOCKING_TENSION]);
     let q = propose(&mut r, other);
     assert!(
         !q.tensions.iter().any(|t| t.kind == TensionKind::Semantic),

@@ -122,10 +122,7 @@ pub(crate) fn act(
     let parent = r.decision_parent(&view, given.as_deref())?;
     let attested_by = match &by.relay {
         Some(relay) => {
-            let agent = match &relay.by.run {
-                Some(run) => format!("{}/{run}", relay.by.actor),
-                None => relay.by.actor.clone(),
-            };
+            let agent = crate::identity::actor_run_text(&relay.by.actor, relay.by.run.as_deref());
             format!(
                 "{person} (relayed by {agent}: \"{}\")",
                 relay.evidence.quoted

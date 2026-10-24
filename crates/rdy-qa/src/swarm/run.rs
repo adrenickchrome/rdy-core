@@ -67,8 +67,9 @@ const PACE_WAIT: Duration = Duration::from_secs(1800);
 const CLI_BUDGET: Duration = Duration::from_secs(120);
 /// How long the run waits for a stopped daemon to exit (a hang guard).
 const STOP_WAIT: Duration = Duration::from_secs(60);
-/// The relay as `rdy approve --relayed-by` names it: the relaying agent's own actor and run.
-const RELAY: &str = "agent:relay/chat";
+/// The relay as `rdy approve --relayed-by` names it: the relaying agent's own actor alone; the
+/// relay records the session's run (D-PWB82).
+const RELAY: &str = RELAY_ACTOR;
 /// The relaying agent's actor and run: the relay runs as this session (D-HA7YZ).
 const RELAY_ACTOR: &str = "agent:relay";
 const RELAY_RUN: &str = "chat";
@@ -639,31 +640,39 @@ fn listing_once(relay: &mut Link, args: Value) -> Option<BTreeMap<String, Value>
 /// The relay's `rdy_tensions` with `args`, whole, by label. When one read is cut for its budget
 /// (the deep tier), the listing is read in parts that together hold every tension that is not a
 /// read-time overlap: canon's (`scope: canon`) and each open view's (`view`), each kind apart,
-/// and a view's kind still cut change by change (`involving`) (ruling task-5.5). A part still cut
-/// fails the run with the seed.
+/// and a view's kind still cut change by change (`involving`) (ruling task-5.5). A listing of one
+/// view (`args` names a `view`) is read in that view's parts alone, and its change-by-change
+/// parts keep the view filter. A part still cut fails the run with the seed.
 fn listing(relay: &mut Link, args: Value) -> BTreeMap<String, Value> {
     if let Some(rows) = listing_once(relay, args.clone()) {
         return rows;
     }
-    let mut scopes: Vec<Value> = vec![json!({"scope": "canon"})];
-    let e = relay.entry("view_list");
-    let mut views: Vec<String> = vec![];
-    relay.exec(
-        e,
-        "view_list",
-        "rdy_view",
-        json!({"op": "list", "all": true}),
-        |_, v| {
-            views = v["views"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|r| r["closed"] != true)
-                .filter_map(|r| r["name"].as_str().map(str::to_string))
-                .collect();
-        },
-    );
-    scopes.extend(views.iter().map(|v| json!({"view": v})));
+    let one_view = args["view"].as_str().map(str::to_string);
+    let scopes: Vec<Value> = match &one_view {
+        Some(v) => vec![json!({"view": v})],
+        None => {
+            let mut scopes = vec![json!({"scope": "canon"})];
+            let e = relay.entry("view_list");
+            let mut views: Vec<String> = vec![];
+            relay.exec(
+                e,
+                "view_list",
+                "rdy_view",
+                json!({"op": "list", "all": true}),
+                |_, v| {
+                    views = v["views"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|r| r["closed"] != true)
+                        .filter_map(|r| r["name"].as_str().map(str::to_string))
+                        .collect();
+                },
+            );
+            scopes.extend(views.iter().map(|v| json!({"view": v})));
+            scopes
+        }
+    };
     let mut out = BTreeMap::new();
     for scope in scopes {
         for kind in KINDS {
@@ -685,7 +694,9 @@ fn listing(relay: &mut Link, args: Value) -> BTreeMap<String, Value> {
             };
             for c in view_changes(relay, view) {
                 let mut one = part.clone();
-                one.as_object_mut().map(|m| m.remove("view"));
+                if one_view.is_none() {
+                    one.as_object_mut().map(|m| m.remove("view"));
+                }
                 one["involving"] = json!(c);
                 match listing_once(relay, one.clone()) {
                     Some(rows) => out.extend(rows),
@@ -1017,12 +1028,24 @@ fn settle_order(set: &Value, bound: &str, order: &[String], busy: &[String]) -> 
 
 /// What the drain's propose came to.
 enum Proposed {
-    /// The proposal's ref.
-    Ref(String),
+    /// The proposal's ref, and the tensions its reply lists as refusing its landing (`refuses`),
+    /// by label.
+    Ref(String, BTreeSet<String>),
     /// The view holds nothing more.
     Empty,
     /// The drain settled an open set first: the view proposes again.
     Again,
+}
+
+/// The labels of the tensions a propose reply lists (`rows`, its `tensions`) as refusing the
+/// version's landing (`refuses: true`).
+fn refusing_of(rows: &Value) -> BTreeSet<String> {
+    rows.as_array()
+        .into_iter()
+        .flatten()
+        .filter(|t| t["refuses"] == true)
+        .filter_map(|t| t["id"].as_str().map(str::to_string))
+        .collect()
 }
 
 /// Whether the listed tension `row` fits the drain row for `kind`, the kind the refusal's issue
@@ -1136,8 +1159,8 @@ impl Drain {
             if shown["head"]["closed"] == true || empty {
                 return;
             }
-            let pref = match self.propose(i, v, round, &shown) {
-                Proposed::Ref(pref) => pref,
+            let (pref, refusing) = match self.propose(i, v, round, &shown) {
+                Proposed::Ref(pref, refusing) => (pref, refusing),
                 Proposed::Empty => return,
                 Proposed::Again => continue,
             };
@@ -1145,7 +1168,7 @@ impl Drain {
                 None => return,
                 Some(r) => {
                     last.clone_from(&r.code);
-                    self.resolve(i, v, &r);
+                    self.resolve(i, v, &pref, &refusing, &r);
                 }
             }
             round += 1;
@@ -1261,7 +1284,8 @@ impl Drain {
         // each dangling reference is repaired once: a second refusal for it fails the run
         let mut repaired: BTreeSet<(String, String)> = BTreeSet::new();
         loop {
-            let mut args = json!({"view": v, "title": format!("{v} drain round {round}")});
+            let title = format!("{v} drain round {round}");
+            let mut args = json!({"view": v, "title": title, "summary": title});
             if let Some((set, member)) = self.alternative(v) {
                 args["alternatives"] = json!({"set": set, "chosen": member});
             }
@@ -1269,10 +1293,12 @@ impl Drain {
             let mut e = link.entry("propose");
             e.view = Some(v.to_string());
             let res = link.raw("propose", "rdy_propose", args);
+            let mut refusing = BTreeSet::new();
             match &res {
                 Res::Ok(r) => {
                     e.block = r["ref"].as_str().map(str::to_string);
                     e.seen = labels_of(&r["tensions"]);
+                    refusing = refusing_of(&r["tensions"]);
                 }
                 Res::Refused(code, message) => {
                     e.outcome = Met::Refused(code.clone());
@@ -1283,7 +1309,7 @@ impl Drain {
             let made = e.block.clone();
             link.journal.record(e);
             match (res, made) {
-                (Res::Ok(_), Some(p)) => return Proposed::Ref(p),
+                (Res::Ok(_), Some(p)) => return Proposed::Ref(p, refusing),
                 (Res::Refused(code, message), _)
                     if code == "E_ALT_MEMBER" || code == "E_ALT_CHOSEN" =>
                 {
@@ -1647,88 +1673,161 @@ impl Drain {
         Some(Refusal { code, body })
     }
 
-    /// The closed table of resolutions (ledger O5). Anything outside it fails the run.
-    fn resolve(&mut self, i: usize, v: &str, r: &Refusal) {
+    /// The closed table of resolutions (ledger O5). Anything outside it fails the run. A
+    /// version that is not ready (`E_PROPOSAL_NOT_READY`, D-ME2HD) is resolved only when each of
+    /// its issues is a conflict or a blocking tension: the conflicts first, when it has any; the
+    /// tensions on a later round. Any other issue code fails the run, as an outer
+    /// `E_VALIDATION` did. The cause issues carry no block or tension id, so the drain reads them
+    /// from the version (`pref`), the tensions its propose reply lists as refusing (`refusing`)
+    /// and the view's listing, never from the issues' text.
+    fn resolve(&mut self, i: usize, v: &str, pref: &str, refusing: &BTreeSet<String>, r: &Refusal) {
         let issues: Vec<Value> = r.body["issues"].as_array().cloned().unwrap_or_default();
         match r.code.as_str() {
             "E_PROPOSAL_MOVED" => {}
-            "E_CONFLICT_UNRESOLVED" => {
-                let blocks: BTreeSet<String> = issues
+            "E_PROPOSAL_NOT_READY" => {
+                let codes: Vec<String> = issues
                     .iter()
-                    .filter_map(|x| x["block"].as_str().map(str::to_string))
+                    .map(|x| x["code"].as_str().unwrap_or_default().to_string())
                     .collect();
-                if blocks.is_empty() {
-                    self.no_rule(v, &r.code, "no conflict listed");
+                if codes.is_empty() {
+                    self.no_rule(v, &r.code, "no issue listed");
                 }
-                let shown = self
-                    .show(i, v)
-                    .unwrap_or_else(|| link_fail(&self.cfg, v, "show"));
-                for b in blocks {
-                    let conflict = shown["conflicts"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .find(|c| c["block"] == b.as_str())
-                        .unwrap_or_else(|| self.no_rule(v, &r.code, "a conflict the view lacks"));
-                    let canon = conflict["sides"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .find(|s| !s["landed"].is_null() || s["change"].is_null())
-                        .unwrap_or_else(|| {
-                            self.no_rule(v, &r.code, "a conflict with no canon side")
-                        });
-                    let version = canon["version"].as_str().map(str::to_string);
-                    let body = self.body(i, &b, "canon");
-                    let ops = json!([{"op": "update", "id": b, "base": version, "body": body}]);
-                    self.write(i, v, &b, ops, "write", &r.code, "conflict");
+                if let Some(other) = codes
+                    .iter()
+                    .find(|c| *c != "E_CONFLICT_UNRESOLVED" && *c != "E_BLOCKING_TENSION")
+                {
+                    self.no_rule(v, other, "land");
                 }
-            }
-            "E_BLOCKING_TENSION" => {
-                if issues.is_empty() {
-                    self.no_rule(v, &r.code, "no tension listed");
-                }
-                for x in &issues {
-                    let message = x["message"].as_str().unwrap_or_default();
-                    let mut words = message.split_whitespace();
-                    let label = words.next().unwrap_or_default().to_string();
-                    let kind = words
-                        .next()
-                        .unwrap_or_default()
-                        .trim_end_matches(':')
-                        .to_string();
-                    let row = self.tension(i, v, &label, &r.code, &kind);
-                    self.resolve_tension(i, v, &row, &r.code, &kind);
+                let version = self.version(i, v, pref, &r.code);
+                if codes.iter().any(|c| c == "E_CONFLICT_UNRESOLVED") {
+                    self.resolve_conflicts(i, v, &version, "E_CONFLICT_UNRESOLVED");
+                } else {
+                    self.resolve_tensions(i, v, &version, refusing, "E_BLOCKING_TENSION");
                 }
             }
             other => self.no_rule(v, other, "land"),
         }
     }
 
-    /// The row of tension `label` as agent `i` lists the tensions of view `v` (landing forms
-    /// included).
-    fn tension(&mut self, i: usize, v: &str, label: &str, code: &str, kind: &str) -> Value {
+    /// Version `pref` as agent `i` reads it (`rdy_read`, whole): its `proposal`. A cut reply
+    /// fails the run.
+    fn version(&mut self, i: usize, v: &str, pref: &str, code: &str) -> Value {
         let link = self.agent(i);
-        let e = link.entry("tensions");
-        let mut rows = vec![];
+        let mut e = link.entry("read");
+        e.block = Some(pref.to_string());
+        let mut got = None;
         link.exec(
             e,
-            "tensions",
-            "rdy_tensions",
-            json!({"view": v, "max_tokens": ALL}),
-            |en, r| {
-                en.seen = labels_of(&r["tensions"]);
-                rows = r["tensions"].as_array().cloned().unwrap_or_default();
-            },
+            "read",
+            "rdy_read",
+            json!({"id": pref, "max_tokens": ALL}),
+            |_, r| got = Some(r.clone()),
         );
-        let row = rows
-            .into_iter()
-            .find(|t| t["id"] == label)
-            .unwrap_or_else(|| self.no_rule(v, code, &format!("{kind}, not listed")));
-        if let Err(why) = row_fits(&row, kind) {
-            self.no_rule(v, code, &format!("{kind}, {why}"));
+        let Some(got) = got else {
+            link_fail(&self.cfg, v, "read")
+        };
+        if got.get("omitted").is_some() || got.get("truncated").is_some() {
+            self.no_rule(
+                v,
+                code,
+                &format!("{pref}, read with a reply cut for its budget"),
+            );
         }
-        row
+        got["proposal"].clone()
+    }
+
+    /// The conflicts of `version` (its `conflicts`, in block-id order): agent `i` writes each
+    /// block from canon's side. None listed fails the run.
+    fn resolve_conflicts(&mut self, i: usize, v: &str, version: &Value, code: &str) {
+        let mut conflicts: Vec<Value> =
+            version["conflicts"].as_array().cloned().unwrap_or_default();
+        if conflicts.is_empty() {
+            self.no_rule(v, code, "no conflict listed");
+        }
+        conflicts.sort_by(|a, b| {
+            a["block"]
+                .as_str()
+                .unwrap_or_default()
+                .cmp(b["block"].as_str().unwrap_or_default())
+        });
+        for conflict in conflicts {
+            let b = conflict["block"]
+                .as_str()
+                .unwrap_or_else(|| self.no_rule(v, code, "a conflict with no block"))
+                .to_string();
+            let canon = conflict["sides"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|s| !s["landed"].is_null() || s["change"].is_null())
+                .unwrap_or_else(|| self.no_rule(v, code, "a conflict with no canon side"));
+            let base = canon["version"].as_str().map(str::to_string);
+            let body = self.body(i, &b, "canon");
+            let ops = json!([{"op": "update", "id": b, "base": base, "body": body}]);
+            self.write(i, v, &b, ops, "write", code, "conflict");
+        }
+    }
+
+    /// The blocking tensions `version`'s landing would put into canon, as agent `i` lists the
+    /// open blocking tensions of view `v`: the rows with a change side, each change side one of
+    /// the version's changes, and no intent side (a side with neither is canon), that the propose
+    /// reply lists as refusing (`refusing`: the landing form), by id. The view also lists the
+    /// in-flight form of each live write of those changes, which the reply lists beside the
+    /// landing form as information and which does not refuse: a view that wrote a block again
+    /// since still lists each earlier write as against canon, and resolving that row would write
+    /// from canon's version, a base the view no longer holds (`E_STALE_BASE`). Each is resolved
+    /// by its kind, once per block:
+    /// a row whose blocks in the view an earlier row's resolution already wrote is skipped. None
+    /// selected fails the run.
+    fn resolve_tensions(
+        &mut self,
+        i: usize,
+        v: &str,
+        version: &Value,
+        refusing: &BTreeSet<String>,
+        code: &str,
+    ) {
+        let changes: BTreeSet<String> = version["changes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| c["change"].as_str().map(str::to_string))
+            .collect();
+        let args = json!({"view": v, "severity": "blocking", "status": "open", "max_tokens": ALL});
+        let rows = listing(self.agent(i), args);
+        // the listing is by label: its order is the rows' id order
+        let selected: Vec<Value> = rows
+            .into_values()
+            .filter(|row| row["id"].as_str().is_some_and(|id| refusing.contains(id)))
+            .filter(|row| {
+                let sides = row["sides"].as_array().cloned().unwrap_or_default();
+                let mut of_change = sides.iter().filter_map(|s| s["change"].as_str()).peekable();
+                of_change.peek().is_some()
+                    && of_change.all(|c| changes.contains(c))
+                    && sides.iter().all(|s| s["intent"].is_null())
+            })
+            .collect();
+        if selected.is_empty() {
+            self.no_rule(v, code, "no blocking tension of the version listed");
+        }
+        // the view lists one in-flight form per change that wrote a block: the first row's
+        // write or repin settles the block for every later row on it
+        let mut settled: BTreeSet<String> = BTreeSet::new();
+        for row in selected {
+            let kind = row["kind"].as_str().unwrap_or_default().to_string();
+            if let Err(why) = row_fits(&row, &kind) {
+                self.no_rule(v, code, &format!("{kind}, {why}"));
+            }
+            let own: Vec<String> = Drain::own_blocks(&row, v)
+                .into_iter()
+                .map(|(b, _)| b)
+                .collect();
+            if !own.is_empty() && own.iter().all(|b| settled.contains(b)) {
+                continue;
+            }
+            self.resolve_tension(i, v, &row, code, &kind);
+            settled.extend(own);
+        }
     }
 
     /// The blocks of `row`'s sides that view `v` holds, each at its side's version.
@@ -1970,6 +2069,19 @@ mod tests {
     /// Adversarial review: the drain picks its row by the kind the refusal's issue names, and
     /// holds the listed row to it: the listed kind must be that kind, and the `semantic` row is
     /// only for a semantic tension a person accepted (D-WMCFW: only an accepted one blocks).
+    #[test]
+    fn sg5_the_drain_resolves_only_the_tensions_a_propose_reply_lists_as_refusing() {
+        let reply = json!([
+            {"id": "tn-000000000001", "refuses": true},
+            {"id": "tn-000000000002", "refuses": false},
+            {"id": "tn-000000000003"},
+            {"id": "tn-000000000004", "refuses": true},
+        ]);
+        let got: Vec<String> = refusing_of(&reply).into_iter().collect();
+        assert_eq!(got, ["tn-000000000001", "tn-000000000004"]);
+        assert!(refusing_of(&Value::Null).is_empty());
+    }
+
     #[test]
     fn sg5_the_drain_holds_a_blocking_tension_row_to_its_kind() {
         let accepted = json!({"kind": "semantic", "judged": {"accepted": {"person": "p"}}});

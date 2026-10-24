@@ -1,6 +1,7 @@
 //! The gate: landing twice (land1); a re-created folder against other views' folders (gate1, guard).
 use rdy_engine::*;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::TEST_SUMMARY;
 use rdy_qa::invariants::check;
 use serde_json::json;
 
@@ -12,7 +13,9 @@ fn doc_ops(title: &str) -> serde_json::Value {
 fn land1_approving_a_landed_proposal_again_is_refused_with_its_landing() {
     let (_d, mut r) = project();
     write(&mut r, "work", doc_ops("One")).unwrap();
-    let p = r.propose(&writer(), "work", "first", None).unwrap();
+    let p = r
+        .propose(&writer(), "work", "first", Some(TEST_SUMMARY))
+        .unwrap();
     let landing = r.land(&approver(), &p.id).unwrap();
     let before = r.store().landings().unwrap().len();
     let e = r.land(&approver(), &p.id).unwrap_err();
@@ -65,7 +68,9 @@ fn land1_an_older_proposal_whose_changes_landed_in_a_newer_one_is_refused() {
     write(&mut r, "work", doc_ops("One")).unwrap();
     let older = r.propose(&writer(), "work", "older", None).unwrap();
     write(&mut r, "work", doc_ops("Two")).unwrap();
-    let newer = r.propose(&writer(), "work", "newer", None).unwrap();
+    let newer = r
+        .propose(&writer(), "work", "newer", Some(TEST_SUMMARY))
+        .unwrap();
     let landing = r.land(&approver(), &newer.id).unwrap();
     let e = r.land(&approver(), &older.id).unwrap_err();
     assert_eq!(e.code, "E_ALREADY_LANDED", "{e}");

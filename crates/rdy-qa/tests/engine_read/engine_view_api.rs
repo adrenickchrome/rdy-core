@@ -112,7 +112,7 @@ fn vapi1_every_op_dispatches_and_defaults_to_the_sessions_view() {
         &human_writer(),
         "human:qa",
         "work",
-        req(json!({"op": "own", "view": "r1", "owner": "agent:z/r2"})),
+        req(json!({"op": "own", "view": "r1", "owner": {"actor": "agent:z", "run": "r2"}})),
     )
     .unwrap();
     assert_eq!(v["owner"], json!({"actor": "agent:z", "run": "r2"}));
@@ -121,7 +121,7 @@ fn vapi1_every_op_dispatches_and_defaults_to_the_sessions_view() {
         &human_writer(),
         "human:qa",
         "work",
-        req(json!({"op": "own", "view": "r1", "owner": "agent:z", "none": true})),
+        req(json!({"op": "own", "view": "r1", "owner": {"actor": "agent:z"}, "none": true})),
     )
     .unwrap_err();
     assert_eq!(err.code, E_BAD_INPUT, "{err}");

@@ -118,7 +118,7 @@ fn tdis1_a_human_who_wrote_a_side_cannot_dismiss_it() {
         rdy_engine::E_SELF_REVIEW
     );
     r.dismiss_tension(
-        &Session::human("human:other".into(), Role::Writer),
+        &Session::human("human:other".into(), Role::Writer).unwrap(),
         &tn,
         "ok",
     )
@@ -301,7 +301,7 @@ fn tdis1_every_producer_on_a_canon_side_is_an_author() {
     let (_d, mut r) = project();
     r.set_detectors_for_tests(&CANON_DETS);
     let s = spec_doc(&mut r);
-    let other = Session::human("human:other".into(), Role::Writer);
+    let other = Session::human("human:other".into(), Role::Writer).unwrap();
     write_as(&mut r, &writer(), "work", upd(&s.c, "C paired.")).unwrap();
     write_as(
         &mut r,
@@ -319,7 +319,7 @@ fn tdis1_every_producer_on_a_canon_side_is_an_author() {
     let tn = tension_label(&t.id);
     for who in [
         approver(),
-        Session::human("human:other".into(), Role::Approver),
+        Session::human("human:other".into(), Role::Approver).unwrap(),
     ] {
         assert_eq!(
             r.dismiss_tension(&who, &tn, "x").unwrap_err().code,
@@ -365,7 +365,7 @@ fn tdis1_the_actor_who_deleted_a_canon_block_is_an_author_of_its_absent_side() {
         rdy_engine::E_SELF_REVIEW
     );
     r.dismiss_tension(
-        &Session::human("human:other".into(), Role::Writer),
+        &Session::human("human:other".into(), Role::Writer).unwrap(),
         &tn,
         "ok",
     )
@@ -595,7 +595,7 @@ fn tdis1_tension_info_lists_every_author_of_a_canon_side() {
     let (_d, mut r) = project();
     r.set_detectors_for_tests(&CANON_DETS);
     let s = spec_doc(&mut r);
-    let other = Session::human("human:other".into(), Role::Writer);
+    let other = Session::human("human:other".into(), Role::Writer).unwrap();
     write_as(&mut r, &writer(), "work", upd(&s.c, "C paired.")).unwrap();
     write_as(
         &mut r,

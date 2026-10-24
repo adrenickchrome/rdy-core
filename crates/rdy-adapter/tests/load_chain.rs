@@ -45,7 +45,7 @@ fn add(r: &mut Rdy, n: usize, body: &str) -> String {
 
 fn land(r: &mut Rdy) {
     let p = r
-        .propose(&session(Role::Writer), "work", "Work", None)
+        .propose(&session(Role::Writer), "work", "Work", Some("test summary"))
         .unwrap();
     r.land(&session(Role::Approver), &p.id).unwrap();
 }
@@ -75,7 +75,12 @@ fn remove(r: &mut Rdy, target: &str) {
     )
     .unwrap();
     let p = r
-        .propose(&session(Role::Writer), "redact", "Remove the code", None)
+        .propose(
+            &session(Role::Writer),
+            "redact",
+            "Remove the code",
+            Some("test summary"),
+        )
         .unwrap();
     r.land(&session(Role::Approver), &p.id).unwrap();
 }

@@ -961,7 +961,7 @@ fn hpb15_publish_requires_a_session_and_refuses_unknown_keys() {
     let wire =
         HttpPublishWire::new(HttpHubTransport::new(settings.fence(&install).unwrap()).unwrap());
     let clock = SystemHubClock;
-    let s = Session::human("human:qa".into(), Role::Approver);
+    let s = Session::human("human:qa".into(), Role::Approver).unwrap();
     assert_eq!(approver().role, Role::Approver);
     let result = PublishService::new(k.proj.path(), &k.home.config(), &api, &clock, &wire)
         .run(

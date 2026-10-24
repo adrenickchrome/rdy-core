@@ -40,7 +40,7 @@ pub(crate) fn refuse_in_copy(env: &Env, view: Option<&str>) -> Result<(), ErrorR
     let Some(place) = env.place.as_ref() else {
         return Ok(());
     };
-    if !crate::conn::human_session(env) {
+    if !crate::conn::human_session(env)? {
         return Ok(());
     }
     let Some(bound) = bound_view(env)? else {

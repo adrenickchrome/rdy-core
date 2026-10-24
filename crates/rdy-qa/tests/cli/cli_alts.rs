@@ -44,7 +44,18 @@ fn malt1_cli_create_propose_approve_closes_the_other_member() {
     ]);
     assert!(!ok && v["code"] == "E_BAD_INPUT", "{v}");
     let (ok, v) = s.json(&[
-        "--json", "propose", "--title", "pick a", "--view", "a", "--alt", &set, "--chosen", "x",
+        "--json",
+        "propose",
+        "--title",
+        "pick a",
+        "--view",
+        "a",
+        "--alt",
+        &set,
+        "--chosen",
+        "x",
+        "--summary",
+        "test summary",
     ]);
     assert!(ok, "{v}");
     let pref = v["ref"].as_str().unwrap().to_string();

@@ -4,6 +4,10 @@
 mod hub_tls;
 
 use hub_tls::{Ca, Recorded, Reply, Server};
+use rdy_engine::hub_config::{
+    Credential, CredentialFile, PendingSignIn, encode_credentials, parse_credentials,
+};
+use rdy_engine::hub_credentials::{AuthPhase, HubCredentials};
 use rdy_engine::hub_http::{HttpHubTransport, route};
 use rdy_engine::hub_types::*;
 use rdy_engine::{
@@ -11,6 +15,7 @@ use rdy_engine::{
     E_UPSTREAM_ORIGIN, E_UPSTREAM_PROTOCOL, E_UPSTREAM_TOKEN, Session, SessionKind,
 };
 use rdy_model::Role;
+use rdy_store::pio;
 use std::path::PathBuf;
 
 const ACCESS: &str = "rdyh_a_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd2F6gYf";
@@ -84,6 +89,7 @@ fn kind(f: &HubFailure) -> String {
         HubFailure::Refused => "Refused".into(),
         HubFailure::Transport { may_have_sent } => format!("Transport({may_have_sent})"),
         HubFailure::Protocol => "Protocol".into(),
+        HubFailure::InvalidHandle => "InvalidHandle".into(),
         HubFailure::Local(e) => format!("Local({})", e.code),
     }
 }
@@ -1108,17 +1114,21 @@ fn hsa4_every_request_keeps_its_caller_claim() {
             None,
         ),
         (
-            RequestClaim::from_session(&agent_session("agent:Клод", Some("прогон-1"))).unwrap(),
-            "agent:Клод",
-            Some("прогон-1"),
+            RequestClaim::from_session(&agent_session("agent:ab/cd", Some("Run.7"))).unwrap(),
+            "agent:ab/cd",
+            Some("Run.7"),
         ),
         (
-            RequestClaim::from_session(&agent_session("ci:nightly", Some("build 7"))).unwrap(),
-            "ci:nightly",
-            Some("build 7"),
+            RequestClaim::from_session(&agent_session(
+                "ci:0123456789abcdef0123456789abcdef/nightly",
+                Some("build-7"),
+            ))
+            .unwrap(),
+            "ci:0123456789abcdef0123456789abcdef/nightly",
+            Some("build-7"),
         ),
         (
-            RequestClaim::from_session(&Session::human("human:nick".into(), Role::Writer))
+            RequestClaim::from_session(&Session::human("human:nick".into(), Role::Writer).unwrap())
                 .unwrap()
                 .bind_human("test-person")
                 .unwrap(),
@@ -1153,7 +1163,8 @@ fn hsa4_every_request_keeps_its_caller_claim() {
     }
     // A key route needs a claim that is valid to send; nothing is sent otherwise.
     let unbound_human =
-        RequestClaim::from_session(&Session::human("human:nick".into(), Role::Writer)).unwrap();
+        RequestClaim::from_session(&Session::human("human:nick".into(), Role::Writer).unwrap())
+            .unwrap();
     let mut forged = claims[0].0.clone();
     forged.actor = "human:test-person".into();
     let mut bad_run = claims[0].0.clone();
@@ -1166,13 +1177,112 @@ fn hsa4_every_request_keeps_its_caller_claim() {
             (Some(unbound_human.clone()), local(E_ACTOR_UNBOUND)),
             (Some(forged.clone()), local(E_ACTOR_UNBOUND)),
             (Some(bad_run.clone()), local(E_ACTOR_UNBOUND)),
-            (Some(long_actor.clone()), local(E_LIMIT)),
+            (Some(long_actor.clone()), local(E_ACTOR_UNBOUND)),
         ] {
             let mut call = hub.call(op.clone());
             call.claim = claim;
             assert_eq!(hub.refuse(call), want, "{op:?}");
         }
     }
+    hub.finish();
+}
+
+#[test]
+fn id5_invalid_claims_never_reach_transport() {
+    let mut hub = Hub::start();
+    let o = hub.origin();
+    let key_ops: Vec<HubOperation> = all_operations().into_iter().filter(is_key_route).collect();
+    let repo = "0123456789abcdef0123456789abcdef";
+
+    // Valid two-name agent and CI claims arrive byte for byte.
+    let valid = [
+        ("agent:a/b".to_string(), Some("Run.1")),
+        ("agent:a/b".to_string(), None),
+        (format!("ci:{repo}/nightly"), Some("w-7")),
+        (format!("ci:{repo}/a"), None),
+    ];
+    for (actor, run) in &valid {
+        let claim = RequestClaim::from_session(&agent_session(actor, *run)).unwrap();
+        for op in &key_ops {
+            let mut call = hub.call(op.clone());
+            call.claim = Some(claim.clone());
+            let (r, req) = hub.send(success(op, &o), call);
+            assert!(r.is_ok(), "{op:?}: {r:?}");
+            assert_eq!(req.header("rdy-actor"), Some(actor.as_str()), "{op:?}");
+            assert_eq!(req.header("rdy-run"), *run, "{op:?}");
+        }
+    }
+    let sent = hub.server.requests().len();
+    assert_eq!(sent, valid.len() * key_ops.len());
+
+    // Invalid actors and runs, set on a valid claim as a caller with the public fields could,
+    // fail with the existing text and are never sent.
+    let base = RequestClaim::from_session(&agent_session("agent:a/b", Some("r"))).unwrap();
+    let bad_actors = [
+        "agent:A",
+        "agent:a b",
+        "agent:é",
+        "agent:x\u{a0}",
+        "agent:a/b/c",
+        "agent:-a",
+        "agent:a-",
+        "ci:nightly",
+        "ci:ビルド",
+        "ci:0123456789abcdef0123456789abcde/a",
+        "ci:0123456789ABCDEF0123456789abcdef/a",
+        "Agent:a",
+        "bot:a",
+        "agent:",
+        "agent:a\nb",
+    ];
+    let long_actor = format!("agent:{}", "a".repeat(MAX_ACTOR_BYTES));
+    let bad_runs = [
+        "",
+        "r 7",
+        "ré",
+        "-a",
+        "a-",
+        "a/b",
+        "a:b",
+        "none",
+        "work",
+        "canon",
+        "inflight",
+        "reaffirm-1",
+        "r\n7",
+    ];
+    let long_run = "r".repeat(MAX_RUN_BYTES);
+    for op in &key_ops {
+        for actor in bad_actors.iter().copied().chain([long_actor.as_str()]) {
+            let mut claim = base.clone();
+            claim.actor = actor.to_string();
+            let mut call = hub.call(op.clone());
+            call.claim = Some(claim);
+            assert_eq!(hub.refuse(call), local(E_ACTOR_UNBOUND), "{op:?} {actor:?}");
+        }
+        for run in bad_runs.iter().copied().chain([long_run.as_str()]) {
+            let mut claim = base.clone();
+            claim.run = Some(run.to_string());
+            let mut call = hub.call(op.clone());
+            call.claim = Some(claim);
+            assert_eq!(hub.refuse(call), local(E_ACTOR_UNBOUND), "{op:?} {run:?}");
+        }
+    }
+    assert_eq!(
+        hub.server.requests().len(),
+        sent,
+        "no invalid claim was sent"
+    );
+    // The refusal keeps its existing text.
+    let mut claim = base.clone();
+    claim.actor = "agent:A".to_string();
+    let e = claim.validate_for_send().unwrap_err();
+    assert_eq!(e.code, E_ACTOR_UNBOUND);
+    assert_eq!(e.message, "the session actor is not a hub actor");
+    assert_eq!(
+        e.fix,
+        "set an actor in the hub's human, agent or ci form, then try again"
+    );
     hub.finish();
 }
 
@@ -2208,11 +2318,6 @@ fn hsa4_hub_fixtures_round_trip() {
         (
             HubOperation::Me,
             200,
-            ME_REPLY.replace(r#""handle":"test-person""#, r#""handle":"test person""#),
-        ),
-        (
-            HubOperation::Me,
-            200,
             ME_REPLY.replace(r#""kind":"person""#, r#""kind":"robot""#),
         ),
         (
@@ -2325,6 +2430,27 @@ fn hsa4_hub_fixtures_round_trip() {
         let (r, _) = hub.send(Reply::json(status, &body), hub.call(op));
         assert_eq!(failure(r), "Protocol", "{body}");
     }
+    // A whole `/me` reply with a handle outside the actor form is its own failure, so sign-in
+    // can tell it from a reply that asks for another sign-in. Anything else wrong with the reply
+    // stays a plain protocol failure.
+    let (r, _) = hub.send(
+        Reply::json(
+            200,
+            &ME_REPLY.replace(r#""handle":"test-person""#, r#""handle":"test person""#),
+        ),
+        hub.call(HubOperation::Me),
+    );
+    assert_eq!(failure(r), "InvalidHandle");
+    let (r, _) = hub.send(
+        Reply::json(
+            200,
+            &ME_REPLY
+                .replace(r#""handle":"test-person""#, r#""handle":"test person""#)
+                .replace(ACCOUNT, "acc_"),
+        ),
+        hub.call(HubOperation::Me),
+    );
+    assert_eq!(failure(r), "Protocol");
 
     // A reply time is RFC3339 within 64 bytes. The compromise-input rules (nine fractional
     // digits, no leap second) bind only what rdy sends, so a hub time beyond them is kept as
@@ -2478,4 +2604,122 @@ fn hsa4_each_exchange_builds_and_drops_its_own_client() {
     server.wait_closed(2);
     drop(transport);
     assert_eq!(server.finish(), 0);
+}
+
+/// Sign-in over the real transport and decoder: a `/me` reply whose handle is outside the actor
+/// form is the hub's malformed reply (`E_UPSTREAM_PROTOCOL`), not a sign-in to repeat, and
+/// nothing ready is saved. Every other `/me` failure keeps `E_UPSTREAM_AUTH`.
+#[test]
+fn id5_invalid_handle_in_a_real_me_reply_fails_sign_in_as_protocol() {
+    let long = "a".repeat(65);
+    let bad_handles = [
+        "test person",
+        "Test-Person",
+        "a/b",
+        "é",
+        "-a",
+        "a-",
+        "",
+        long.as_str(),
+    ];
+    let me_with = |handle: &str| {
+        ME_REPLY.replace(
+            r#""handle":"test-person""#,
+            &format!(r#""handle":"{handle}""#),
+        )
+    };
+    let other_failures = [
+        ME_REPLY.replace(r#""kind":"person""#, r#""kind":"robot""#),
+        ME_REPLY.replace(r#","created_at":"2026-08-01T08:00:00Z""#, ""),
+        ME_REPLY.replace("acc_00000000000000000000000001", "bad"),
+        // An invalid handle with another fault is not the handle's failure alone.
+        me_with("test person").replace("acc_00000000000000000000000001", "bad"),
+    ];
+    let good = me_with("test-person");
+
+    let run = |me_body: &str| -> (
+        Result<rdy_engine::hub_credentials::AuthState, rdy_engine::RdyError>,
+        String,
+        String,
+    ) {
+        let mut server = Server::start();
+        let o = server.origin().to_string();
+        let install = Origin::parse(&o).unwrap();
+        let dir = tempfile::Builder::new()
+            .permissions(pio::permissions(0o700))
+            .tempdir()
+            .unwrap();
+        let cfg = dir.path().join("cfg/rdy");
+        pio::dir_mode(std::fs::DirBuilder::new().recursive(true), 0o700)
+            .create(&cfg)
+            .unwrap();
+        let ca = dir.path().join("ca.pem");
+        std::fs::write(&ca, server.ca_pem()).unwrap();
+        let user_file = cfg.join("config.yaml");
+        std::fs::write(
+            &user_file,
+            format!(
+                "hub:\n  installs:\n    {o}:\n      ca_file: {}\n",
+                ca.display()
+            ),
+        )
+        .unwrap();
+        let creds = cfg.join("credentials.yaml");
+        let mut file = CredentialFile::default();
+        file.set(
+            install.clone(),
+            Some(Credential::Pending(PendingSignIn {
+                machine_name: MACHINE.into(),
+                device_code: Secret::new(DEVICE_CODE),
+                user_code: USER_CODE.into(),
+                verification_uri: format!("{o}/app/device"),
+                expires_at_ms: i64::MAX / 2,
+                next_poll_at_ms: 0,
+                interval_seconds: 5,
+            })),
+        );
+        std::fs::write(&creds, encode_credentials(&file).unwrap()).unwrap();
+        std::fs::set_permissions(&creds, pio::permissions(0o600)).unwrap();
+
+        server.reply(Reply::json(200, &sub(METADATA_REPLY, &o)));
+        server.reply(Reply::json(200, TOKEN_REPLY));
+        server.reply(Reply::json(200, me_body));
+        server.accept_n(3);
+        let transport = HttpHubTransport::new(OriginFence::new(install.clone(), []).unwrap())
+            .expect("transport");
+        let service = HubCredentials::new(None, &user_file, &transport, &SystemHubClock);
+        let r = service.state(&install, &agent_claim());
+        let text = std::fs::read_to_string(&creds).unwrap_or_default();
+        let on_disk = parse_credentials(text.as_bytes())
+            .unwrap()
+            .get(&install)
+            .map(|c| c.state().to_string())
+            .unwrap_or_default();
+        assert_eq!(
+            server.requests().len(),
+            3,
+            "metadata, token and `/me` were all sent: {r:?}"
+        );
+        assert_eq!(server.finish(), 0);
+        (r, on_disk, text)
+    };
+
+    for handle in bad_handles {
+        let (r, saved, text) = run(&me_with(handle));
+        assert!(!text.contains(ACCESS), "no token is saved: {handle:?}");
+        let e = r.expect_err(handle);
+        assert_eq!(e.code, E_UPSTREAM_PROTOCOL, "{handle:?}");
+        assert_eq!(saved, "reauth_required", "{handle:?}");
+    }
+    for body in &other_failures {
+        let (r, saved, text) = run(body);
+        assert!(!text.contains(ACCESS), "no token is saved: {body}");
+        assert_eq!(r.expect_err(body).code, E_UPSTREAM_AUTH, "{body}");
+        assert_eq!(saved, "reauth_required", "{body}");
+    }
+    // The settled reply signs in.
+    let (r, saved, _) = run(&good);
+    let ok = r.unwrap();
+    assert_eq!(ok.state, AuthPhase::SignedIn);
+    assert_eq!(saved, "ready");
 }

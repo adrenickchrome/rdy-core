@@ -2,6 +2,7 @@
 //! the exact bytes of a future tag, proposal or landing does not hide that object.
 use rdy_model::*;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::TEST_SUMMARY;
 use rdy_store::kinds;
 use serde_json::json;
 
@@ -131,13 +132,21 @@ fn kind1_an_asset_with_a_future_proposals_bytes_does_not_hide_it() {
         alternative: None,
         provenance: by(Role::Writer),
         canon_at: st.engine.read().canon_head(),
-        summary: None,
+        summary: Some(TEST_SUMMARY.into()),
     };
     upload(&mut st, &postcard::to_allocvec(&predicted).unwrap());
     let p: Hash = on_writer(&st, |r| {
+        let changes = r.store_mut().included("work").unwrap().as_ref().clone();
         let p = r
             .store_mut()
-            .propose("work", "p", by(Role::Writer))
+            .propose_changes(
+                "work",
+                "p",
+                Some(TEST_SUMMARY),
+                by(Role::Writer),
+                changes,
+                None,
+            )
             .unwrap();
         // a write outside the engine must be followed by invalidate() (snap1 precondition)
         r.invalidate();

@@ -17,7 +17,9 @@ use rdy_engine::{
     E_BAD_INPUT, E_IO, E_LIMIT, E_SIG_INVALID, E_SIG_OBJECT_MISMATCH, Rdy, RdyError, Session,
     SessionKind, WriteRequest,
 };
-use rdy_model::signature::{Signature, StatementSource, statement};
+use rdy_model::signature::{
+    Signature, StatementSource, parse_statement, statement, statement_for_version,
+};
 use rdy_model::{
     ActorRun, Answer, AnswerAct, Assurance, EvidenceKind, Hash, LandingRecord, Provenance,
     RelayEvidence, RepoId, Role, Tag,
@@ -744,9 +746,12 @@ fn sig6_trust_uses_the_structured_relay_actor() {
     let relayed = landing(Assurance::Relayed);
     let c = ctx(landing_subject(relayed.clone()));
     let g = relay_sig(&relayed, Key::Ed);
-    // the statement joins the relayer's actor and run with one `/`
+    // the statement (version 2) names the relayer's actor and run on two lines
     let text = String::from_utf8(g.statement.clone()).unwrap();
-    assert!(text.contains("relayed_by: agent:a/b/run/1\n"), "{text}");
+    assert!(
+        text.contains("relayed_by: agent:a/b\nrelayed_run: run/1\n"),
+        "{text}"
+    );
     let line = Key::Ed.line();
     let trusted = |file: String| check_signature(&g, &c, Some(&trust(&file))).trust;
 
@@ -1118,7 +1123,7 @@ fn land_one(r: &mut Rdy, title: &str) -> Hash {
     )
     .unwrap();
     let p = r
-        .propose(&session(Role::Writer), "work", title, None)
+        .propose(&session(Role::Writer), "work", title, Some("test summary"))
         .unwrap();
     r.land(&session(Role::Approver), &p.id)
         .unwrap()
@@ -1755,4 +1760,304 @@ fn ha13_a_holder_shows_another_projects_signature_as_foreign() {
             );
         }
     }
+}
+
+// ---- id2: versioned relay statements (D-PWB82, D-17AA8) ----
+
+/// The version 1 relay of `landing(Relayed)` in `REPO`, by `Key::Ed`: frozen as the version 1
+/// emitter wrote it. The relayer `agent:a/b` with run `run/1` is one joined value.
+const V1_RELAY_APPROVE: &str = "rdy-statement: 1\n\
+kind: relay\n\
+repo: 11111111111111111111111111111111\n\
+act: approve\n\
+proposal_version: 0404040404040404040404040404040404040404040404040404040404040404\n\
+base: 0202020202020202020202020202020202020202020202020202020202020202\n\
+actor: human:founder\n\
+relayed_by: agent:a/b/run/1\n\
+evidence: 69163be7d19be2ba72df1073181ed915b257b8a307a8d75120e8805a5a988783\n\
+key: SHA256:MEflzmy6hlCyjCwUMWY05BP0w/ypa9ng2gm4h3GQCFM\n";
+
+/// The version 1 relay of `tag()` in `REPO`, by `Key::Ed`, whose answer was relayed by the
+/// historical actor `Agent:T X` with run `R 9`: neither fits today's session grammar.
+const V1_RELAY_TAG: &str = "rdy-statement: 1\n\
+kind: relay\n\
+repo: 11111111111111111111111111111111\n\
+act: tag\n\
+tag: 7777777777777777777777777777777777777777777777777777777777777777\n\
+name: v1.0.0\n\
+landing: 0606060606060606060606060606060606060606060606060606060606060606\n\
+actor: human:founder\n\
+relayed_by: Agent:T X/R 9\n\
+answer: 5555555555555555555555555555555555555555555555555555555555555555\n\
+key: SHA256:MEflzmy6hlCyjCwUMWY05BP0w/ypa9ng2gm4h3GQCFM\n";
+
+/// The tag relay answer of the version 1 vector.
+fn historical_answer() -> Answer {
+    let mut a = tag_answer(TAG_HASH);
+    a.relayed_by = Some(ActorRun {
+        actor: "Agent:T X".into(),
+        run: Some("R 9".into()),
+    });
+    a
+}
+
+/// A real signature by `Key::Ed` over the fixed version 1 statement `v1`, moved to `repo`.
+fn v1_signature(subject: Hash, v1: &str, repo: RepoId) -> Signature {
+    let text = v1.replace(&REPO.to_string(), &repo.to_string());
+    signature(subject, "rdy-relay-v1", text.into_bytes(), Key::Ed, 1)
+}
+
+#[test]
+fn id2_old_relay_signatures_keep_coverage() {
+    let relayed = landing(Assurance::Relayed);
+    let answer = historical_answer();
+    let fp = Key::Ed.fp();
+    let line = Key::Ed.line();
+    // today's emitter writes other bytes: the check must rebuild version 1 from the signed bytes
+    let now_approve = statement(StatementSource::RelayApproval(&relayed), Some(REPO), &fp).unwrap();
+    let now_tag = statement(
+        StatementSource::RelayTag {
+            hash: TAG_HASH,
+            tag: &tag(),
+            answer_hash: ANSWER_HASH,
+            answer: &answer,
+        },
+        Some(REPO),
+        &fp,
+    )
+    .unwrap();
+    assert_ne!(now_approve, V1_RELAY_APPROVE.as_bytes());
+    assert_ne!(now_tag, V1_RELAY_TAG.as_bytes());
+    assert!(V1_RELAY_APPROVE.contains("\nrelayed_by: agent:a/b/run/1\n"));
+    assert!(V1_RELAY_TAG.contains("\nrelayed_by: Agent:T X/R 9\n"));
+
+    let cases = [
+        (
+            landing_subject(relayed.clone()),
+            LANDING_HASH,
+            V1_RELAY_APPROVE,
+            "agent:a/b",
+        ),
+        (
+            tag_subject(Some((ANSWER_HASH, answer.clone()))),
+            TAG_HASH,
+            V1_RELAY_TAG,
+            "Agent:T X",
+        ),
+    ];
+    for (subject, hash, v1, principal) in cases {
+        let g = v1_signature(hash, v1, REPO);
+        let parsed = parse_statement(&g.statement).unwrap();
+        assert_eq!((parsed.version(), parsed.relayed_run()), (1, None));
+        let file = trust(&format!("\"{principal}\" {line}"));
+
+        // the current repo: covered, and trusted for the stored relay actor
+        let c = check_signature(&g, &ctx(subject.clone()), Some(&file));
+        assert_eq!(
+            (
+                c.signed.as_str(),
+                c.statement.as_str(),
+                c.trust.as_str(),
+                c.code.as_deref()
+            ),
+            ("valid", "match", "trusted", None),
+            "{v1}"
+        );
+        assert!(c.warnings.is_empty());
+
+        // fork ancestry: a version 1 signature of the fork source
+        let source = v1_signature(hash, v1, SOURCE_REPO);
+        let fork = CheckContext {
+            current_repo: OTHER_REPO,
+            source_repos: vec![SOURCE_REPO],
+            ..ctx(subject.clone())
+        };
+        assert_eq!(
+            statement_of(&check_signature(&source, &fork, None)),
+            ("match", None)
+        );
+        let unrelated = CheckContext {
+            source_repos: vec![],
+            ..fork.clone()
+        };
+        assert_eq!(
+            statement_of(&check_signature(&source, &unrelated, None)),
+            ("mismatch", Some(E_SIG_OBJECT_MISMATCH))
+        );
+
+        // a holder: its own repo matches; another project's repo is foreign
+        let own = CheckContext {
+            holder: true,
+            ..ctx(subject.clone())
+        };
+        assert_eq!(
+            statement_of(&check_signature(&g, &own, None)),
+            ("match", None)
+        );
+        let holder = CheckContext {
+            current_repo: OTHER_REPO,
+            holder: true,
+            ..ctx(subject.clone())
+        };
+        let c = check_signature(&g, &holder, None);
+        assert_eq!(
+            (
+                c.statement.as_str(),
+                c.code.as_deref(),
+                c.foreign_repo.as_deref()
+            ),
+            ("foreign_repo", None, Some(REPO.to_string().as_str()))
+        );
+    }
+
+    // the old bytes still bind the stored relayer: no run, or another run, is a mismatch
+    for run in [None, Some("run/2")] {
+        let mut rec = relayed.clone();
+        rec.relayed_by.as_mut().unwrap().run = run.map(Into::into);
+        let g = v1_signature(LANDING_HASH, V1_RELAY_APPROVE, REPO);
+        assert_eq!(
+            statement_of(&check_signature(&g, &ctx(landing_subject(rec)), None)),
+            ("mismatch", Some(E_SIG_OBJECT_MISMATCH)),
+            "{run:?}"
+        );
+    }
+    // the joined value is never split: actor `agent:a/b/run` with run `1` signs the same bytes
+    let mut joined = relayed.clone();
+    joined.relayed_by = Some(ActorRun {
+        actor: "agent:a/b/run".into(),
+        run: Some("1".into()),
+    });
+    let g = v1_signature(LANDING_HASH, V1_RELAY_APPROVE, REPO);
+    assert_eq!(
+        statement_of(&check_signature(&g, &ctx(landing_subject(joined)), None)),
+        ("match", None)
+    );
+}
+
+#[test]
+fn id2_separate_relay_actor_and_run_are_bound() {
+    let fp = Key::Ed.fp();
+    let line = Key::Ed.line();
+    let with = |actor: &str, run: Option<&str>| LandingRecord {
+        relayed_by: Some(ActorRun {
+            actor: actor.into(),
+            run: run.map(Into::into),
+        }),
+        ..landing(Assurance::Relayed)
+    };
+    let slash = with("agent:a/b", None);
+    let split = with("agent:a", Some("b"));
+    let text = |l: &LandingRecord, v: u8| {
+        String::from_utf8(
+            statement_for_version(StatementSource::RelayApproval(l), Some(REPO), &fp, v).unwrap(),
+        )
+        .unwrap()
+    };
+    // version 2 signs the two pairs distinctly; version 1 joined them into one value
+    assert!(text(&slash, 2).contains("\nrelayed_by: agent:a/b\nrelayed_run: none\n"));
+    assert!(text(&split, 2).contains("\nrelayed_by: agent:a\nrelayed_run: b\n"));
+    assert_ne!(text(&slash, 2), text(&split, 2));
+    assert_eq!(text(&slash, 1), text(&split, 1));
+
+    let ga = relay_sig(&slash, Key::Ed);
+    let gb = relay_sig(&split, Key::Ed);
+    for g in [&ga, &gb] {
+        assert_eq!(parse_statement(&g.statement).unwrap().version(), 2);
+    }
+    let check = |g: &Signature, rec: &LandingRecord| {
+        let c = check_signature(g, &ctx(landing_subject(rec.clone())), None);
+        (c.statement, c.code)
+    };
+    let matched = ("match".to_string(), None);
+    let mismatch = (
+        "mismatch".to_string(),
+        Some(E_SIG_OBJECT_MISMATCH.to_string()),
+    );
+    assert_eq!(check(&ga, &slash), matched);
+    assert_eq!(check(&gb, &split), matched);
+    assert_eq!(check(&ga, &split), mismatch, "no run is not run b");
+    assert_eq!(check(&gb, &slash), mismatch, "run b is not no run");
+    // changing either stored field breaks coverage
+    for (what, g, rec) in [
+        ("slash actor", &ga, with("agent:a/c", None)),
+        ("slash run added", &ga, with("agent:a/b", Some("x"))),
+        ("split actor", &gb, with("agent:x", Some("b"))),
+        ("split run", &gb, with("agent:a", Some("c"))),
+        ("split run removed", &gb, with("agent:a", None)),
+    ] {
+        assert_eq!(check(g, &rec), mismatch, "{what}");
+    }
+
+    // the same for a tag relay, read off the answer's relayer
+    let answer = |actor: &str, run: Option<&str>| {
+        let mut a = tag_answer(TAG_HASH);
+        a.relayed_by = Some(ActorRun {
+            actor: actor.into(),
+            run: run.map(Into::into),
+        });
+        a
+    };
+    let tag_sig_of = |a: &Answer| {
+        signed(
+            TAG_HASH,
+            StatementSource::RelayTag {
+                hash: TAG_HASH,
+                tag: &tag(),
+                answer_hash: ANSWER_HASH,
+                answer: a,
+            },
+            REPO,
+            Key::Ed,
+            1,
+        )
+    };
+    let tag_check = |g: &Signature, a: Answer| {
+        let c = check_signature(g, &ctx(tag_subject(Some((ANSWER_HASH, a)))), None);
+        (c.statement, c.code)
+    };
+    let (ta, tb) = (answer("agent:a/b", None), answer("agent:a", Some("b")));
+    let (gta, gtb) = (tag_sig_of(&ta), tag_sig_of(&tb));
+    assert_ne!(gta.statement, gtb.statement);
+    assert_eq!(tag_check(&gta, ta.clone()), matched);
+    assert_eq!(tag_check(&gtb, tb.clone()), matched);
+    assert_eq!(tag_check(&gta, tb.clone()), mismatch);
+    assert_eq!(tag_check(&gtb, ta.clone()), mismatch);
+    assert_eq!(tag_check(&gta, answer("agent:a/b", Some("b"))), mismatch);
+    assert_eq!(tag_check(&gtb, answer("agent:a", Some("c"))), mismatch);
+
+    // trust: the principal is the stored relay actor, whole, with slash-aware patterns
+    let trusted = |g: &Signature, rec: &LandingRecord, file: String| {
+        check_signature(g, &ctx(landing_subject(rec.clone())), Some(&trust(&file))).trust
+    };
+    for (pattern, slash_trust, split_trust) in [
+        ("agent:a/b", "trusted", "unknown"),
+        ("agent:a", "unknown", "trusted"),
+        ("agent:a/*", "trusted", "unknown"),
+        ("agent:*,!agent:a/*", "unknown", "trusted"),
+        ("agent:*", "trusted", "trusted"),
+        ("agent:a/b/none", "unknown", "unknown"),
+    ] {
+        assert_eq!(
+            trusted(&ga, &slash, format!("{pattern} {line}")),
+            slash_trust,
+            "agent:a/b, no run: {pattern}"
+        );
+        assert_eq!(
+            trusted(&gb, &split, format!("{pattern} {line}")),
+            split_trust,
+            "agent:a, run b: {pattern}"
+        );
+    }
+    let tag_trust = |g: &Signature, a: Answer, pattern: &str| {
+        check_signature(
+            g,
+            &ctx(tag_subject(Some((ANSWER_HASH, a)))),
+            Some(&trust(&format!("{pattern} {line}"))),
+        )
+        .trust
+    };
+    assert_eq!(tag_trust(&gta, ta.clone(), "agent:a/b"), "trusted");
+    assert_eq!(tag_trust(&gta, ta, "agent:a"), "unknown");
+    assert_eq!(tag_trust(&gtb, tb.clone(), "agent:a"), "trusted");
+    assert_eq!(tag_trust(&gtb, tb, "agent:a/b"), "unknown");
 }

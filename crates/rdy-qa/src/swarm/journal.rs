@@ -172,8 +172,8 @@ const PROPOSE_CODES: &[&str] = &[
 const LAND_CODES: &[&str] = &[
     "E_ALT_MEMBER",
     "E_PROPOSAL_MOVED",
-    "E_CONFLICT_UNRESOLVED",
-    "E_BLOCKING_TENSION",
+    // D-ME2HD: a conflict or a blocking tension is an issue of a version that is not ready
+    "E_PROPOSAL_NOT_READY",
     "E_ALT_UNCHOSEN",
     "E_ALT_CHOSEN",
     "E_ALREADY_LANDED",

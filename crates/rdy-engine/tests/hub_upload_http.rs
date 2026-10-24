@@ -111,6 +111,7 @@ fn kind(f: &HubFailure) -> String {
         HubFailure::Refused => "Refused".into(),
         HubFailure::Transport { may_have_sent } => format!("Transport({may_have_sent})"),
         HubFailure::Protocol => "Protocol".into(),
+        HubFailure::InvalidHandle => "InvalidHandle".into(),
         HubFailure::Local(e) => format!("Local({})", e.code),
     }
 }

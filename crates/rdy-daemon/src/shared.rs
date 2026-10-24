@@ -321,7 +321,7 @@ mod tests {
         let log = site_log();
         let dir = tempfile::tempdir().unwrap();
         let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
-        let writer = Session::human("human:qa".into(), Role::Writer);
+        let writer = Session::human("human:qa".into(), Role::Writer).unwrap();
         let ops = vec![
             serde_json::json!({"op": "create", "type": "doc", "id": "$g", "fields": {"name": "glossary", "title": "Our words", "doc_type": "page"}}),
             serde_json::json!({"op": "create", "type": "section", "id": "$s", "parent": "$g", "fields": {"title": "Words"}}),
@@ -381,7 +381,7 @@ mod tests {
         use rdy_model::Role;
         let dir = tempfile::tempdir().unwrap();
         let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
-        let writer = Session::human("human:qa".into(), Role::Writer);
+        let writer = Session::human("human:qa".into(), Role::Writer).unwrap();
         for view in ["a b", "team/a.b", "ä", "x%2Fy", "p", ".", ".."] {
             let ops = vec![serde_json::json!({"op": "create", "type": "doc",
                 "fields": {"name": "d", "title": "D", "doc_type": "overview"}})];
@@ -527,11 +527,11 @@ mod tests {
     use serde_json::json;
 
     fn writer() -> Session {
-        Session::human("human:qa".into(), Role::Writer)
+        Session::human("human:qa".into(), Role::Writer).unwrap()
     }
 
     fn approver() -> Session {
-        Session::human("human:qa".into(), Role::Approver)
+        Session::human("human:qa".into(), Role::Approver).unwrap()
     }
 
     fn put(r: &mut Rdy, view: &str, ops: Value) -> std::collections::BTreeMap<String, String> {
@@ -549,7 +549,9 @@ mod tests {
     }
 
     fn land(r: &mut Rdy, view: &str) {
-        let p = r.propose(&writer(), view, view, None).unwrap();
+        let p = r
+            .propose(&writer(), view, view, Some("test summary"))
+            .unwrap();
         r.land(&approver(), &p.id).unwrap();
     }
 
@@ -890,7 +892,7 @@ mod tests {
         let w = world();
         let rt = open_listeners(&w.sh, w.dir.path());
         let e = w.sh.engine();
-        let s = Session::human("human:qa".into(), Role::Writer);
+        let s = Session::human("human:qa".into(), Role::Writer).unwrap();
         let cx = OpContext {
             engine: &*e,
             session: &s,

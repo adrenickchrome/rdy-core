@@ -69,9 +69,9 @@ pub enum ViewCmd {
         /// --relayed-by.
         #[arg(long, value_name = "WORDS", requires_all = ["stale", "relayed_by"])]
         evidence: Option<String>,
-        /// The agent that relays the person's act: your own actor (or actor/run). Only an agent
-        /// session relays. Requires --evidence.
-        #[arg(long, value_name = "ACTOR[/RUN]", requires_all = ["stale", "evidence"])]
+        /// The agent that relays the person's words: your own actor. The run comes from your
+        /// session. Only an agent session relays. Requires --evidence.
+        #[arg(long, value_name = "ACTOR", requires_all = ["stale", "evidence"])]
         relayed_by: Option<String>,
         /// The question the person was asked.
         #[arg(long, value_name = "TEXT", requires = "evidence")]
@@ -80,19 +80,24 @@ pub enum ViewCmd {
         #[arg(long = "session", value_name = "REF", requires = "evidence")]
         session_ref: Option<String>,
     },
-    /// Hand a view to another session (actor[/run]), or leave it unowned. A person's act: an
-    /// agent session relays it with the person's words (--relayed-by and --evidence).
+    /// Hand a view to an actor and optional run, or leave it unowned. A person's act: an agent
+    /// session relays it with the person's words (--relayed-by and --evidence).
     Own {
         view: String,
+        /// The new owner's actor: human:<name>, agent:<name>[/<name>], or ci:<repo_id>/<name>.
+        #[arg(value_name = "ACTOR")]
         owner: Option<String>,
+        /// The owner's run. Omit it for an owner with no run.
+        #[arg(long)]
+        run: Option<String>,
         #[arg(long)]
         none: bool,
         /// The person's words, quoted, when an agent relays the act. Requires --relayed-by.
         #[arg(long, value_name = "WORDS", requires = "relayed_by")]
         evidence: Option<String>,
-        /// The agent that relays the person's act: your own actor (or actor/run). Only an agent
-        /// session relays. Requires --evidence.
-        #[arg(long, value_name = "ACTOR[/RUN]", requires = "evidence")]
+        /// The agent that relays the person's words: your own actor. The run comes from your
+        /// session. Only an agent session relays. Requires --evidence.
+        #[arg(long, value_name = "ACTOR", requires = "evidence")]
         relayed_by: Option<String>,
         /// The question the person was asked.
         #[arg(long, value_name = "TEXT", requires = "evidence")]
@@ -144,12 +149,17 @@ pub fn args_of(cmd: &ViewCmd) -> Value {
         ViewCmd::Own {
             view,
             owner,
+            run,
             none,
             evidence,
             relayed_by,
             question,
             session_ref,
         } => {
+            // the owner is an object, its run apart (D-PWB82); a run alone is refused in `view`
+            let owner = owner
+                .as_ref()
+                .map(|actor| json!({"actor": actor, "run": run}));
             json!({"op": "own", "view": view, "owner": owner, "none": none,
                 "evidence": evidence, "question": question, "session_ref": session_ref,
                 "relayed_by": relayed_by})
@@ -174,19 +184,16 @@ fn short(s: &str) -> &str {
     &s[..s.len().min(12)]
 }
 
-/// `actor` or `actor/run`, from an `{actor, run}` object.
+/// `<actor> (run <run>)`, or the actor alone, from an `{actor, run}` object.
 fn owner_text(o: &Value) -> String {
-    match o["run"].as_str() {
-        Some(run) => format!("{}/{run}", text(&o["actor"])),
-        None => text(&o["actor"]).to_string(),
-    }
+    rdy_engine::identity::actor_run_text(text(&o["actor"]), o["run"].as_str())
 }
 
 fn count(v: &Value) -> usize {
     v.as_array().map_or(0, Vec::len)
 }
 
-/// `view {name} ({n} changes, base {short|none}{, pinned}{, owner {actor[/run]}})`.
+/// `view {name} ({n} changes, base {short|none}{, pinned}{, owner {actor}{ (run {run})}})`.
 fn head_line(h: &Value) -> String {
     let mut line = format!(
         "view {} ({} changes, base {}",
@@ -443,13 +450,14 @@ fn close_text(v: &Value) -> String {
     lines.join("\n")
 }
 
-/// `relayed by <actor>[/<run>]`, when the reply names the relaying agent.
+/// `relayed by <actor> (run <run>)`, or without the run clause when there is none, when the
+/// reply names the relaying agent.
 fn relayed_line(v: &Value) -> Option<String> {
     let by = v["relayed_by"]["actor"].as_str()?;
-    Some(match v["relayed_by"]["run"].as_str() {
-        Some(run) => format!("relayed by {by}/{run}"),
-        None => format!("relayed by {by}"),
-    })
+    Some(format!(
+        "relayed by {}",
+        rdy_engine::identity::actor_run_text(by, v["relayed_by"]["run"].as_str())
+    ))
 }
 
 /// The text of the `view` op's reply to `cmd`.
@@ -580,7 +588,25 @@ pub(crate) fn undo(env: &Env, a: UndoArgs) -> Result<(Value, String), ErrorReply
     Ok((v, t))
 }
 
+/// The refusal of `--run` with no owner: a run belongs to an owner's actor.
+fn run_without_owner() -> ErrorReply {
+    ErrorReply::new(
+        rdy_engine::E_BAD_INPUT,
+        "--run needs an owner",
+        "pass an actor before --run, or omit --run",
+    )
+}
+
 pub(crate) fn view(env: &Env, cmd: ViewCmd) -> Result<(Value, String), ErrorReply> {
+    // the command line's own combinations, before the op: `--run` names an owner's run
+    if let ViewCmd::Own {
+        owner: None,
+        run: Some(_),
+        ..
+    } = &cmd
+    {
+        return Err(run_without_owner());
+    }
     let v = call(env, "view", args_of(&cmd))?;
     let t = render_view(&cmd, &v);
     Ok((v, t))

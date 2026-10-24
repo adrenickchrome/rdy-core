@@ -33,11 +33,11 @@ const ROTATE: &str = "Rotate or revoke the secret. Redaction does not undo its e
 const IRREVERSIBLE: &str = "Approved content removal cannot be undone.";
 
 fn writer() -> Session {
-    Session::human(PERSON.into(), Role::Writer)
+    Session::human(PERSON.into(), Role::Writer).unwrap()
 }
 
 fn approver() -> Session {
-    Session::human(PERSON.into(), Role::Approver)
+    Session::human(PERSON.into(), Role::Approver).unwrap()
 }
 
 fn agent() -> Session {

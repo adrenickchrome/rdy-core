@@ -11,6 +11,7 @@ use rdy_engine::*;
 use rdy_model::Role;
 use rdy_qa::daemon::Served;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::TEST_SUMMARY;
 use serde_json::{Value, json};
 
 const SECRET: &str = "The launch code is ZEBRA-7731.";
@@ -57,7 +58,7 @@ fn op_as(
 
 /// The CLI's human session: `human:qa`, a writer (`Conn::open` classifies it so).
 fn human() -> Session {
-    Session::human("human:qa".into(), Role::Writer)
+    Session::human("human:qa".into(), Role::Writer).unwrap()
 }
 
 /// The project's log position, read with the daemon stopped (as text, to compare).
@@ -341,7 +342,7 @@ fn rdx13_reader_dry_run_and_owned_view_rules_are_preserved() {
     let before = seq(&s);
     // a reader's report works; its request is refused (a CLI session is a writer, so the reader
     // takes the CLI's Direct route, `dispatch`)
-    let reader = Session::human("human:qa".into(), Role::Reader);
+    let reader = Session::human("human:qa".into(), Role::Reader).unwrap();
     let report = op_as(&s, &reader, "redact", args(true)).unwrap();
     let err = op_as(&s, &reader, "redact", args(false)).unwrap_err();
     assert_eq!(err.code, "E_PERMISSION", "{err:?}");
@@ -432,7 +433,7 @@ fn rdx13_reader_dry_run_and_owned_view_rules_are_preserved() {
     );
     let e = error_of(&o);
     assert_eq!(e["code"], "E_VIEW_OWNER", "{e}");
-    assert_eq!(e["message"], "view \"r1\" is owned by agent:a/r1");
+    assert_eq!(e["message"], "view \"r1\" is owned by agent:a (run r1)");
     assert_eq!(seq(&s), before);
 }
 
@@ -1083,7 +1084,9 @@ fn edit_with_script(s: &Served, id: &str, body: &str) -> std::process::Output {
 fn rdx13_an_edit_replaces_the_removal_notice_with_fresh_text() {
     let (s, id) = secret_served();
     with_rdy(&s, |r| {
-        let base = r.propose(&writer(), "work", "Base", None).unwrap();
+        let base = r
+            .propose(&writer(), "work", "Base", Some(TEST_SUMMARY))
+            .unwrap();
         r.land(&approver(), &base.id).unwrap();
         let v = version_of(r, &Scope::Canon, &id);
         let res = r

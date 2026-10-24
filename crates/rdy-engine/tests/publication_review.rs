@@ -71,7 +71,12 @@ fn redact(r: &mut Rdy, targets: &[String]) -> Hash {
         .unwrap();
     let request = res.redaction.expect("a request is recorded");
     let p = r
-        .propose(&session(Role::Writer), "redact", "Remove", None)
+        .propose(
+            &session(Role::Writer),
+            "redact",
+            "Remove",
+            Some("test summary"),
+        )
         .unwrap();
     r.land(&session(Role::Approver), &p.id).unwrap();
     request

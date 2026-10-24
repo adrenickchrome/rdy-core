@@ -401,7 +401,7 @@ fn hsa8_cli_card_confirmation_has_no_agent_bypass() {
                 "yes, sign in",
             ]),
             "E_PERMISSION",
-            "agent:bot relays only as itself, not as agent:other",
+            "agent:bot (run r1) relays only as itself, not as agent:other",
         ),
         (
             with(&[
@@ -415,7 +415,22 @@ fn hsa8_cli_card_confirmation_has_no_agent_bypass() {
                 "yes, sign in",
             ]),
             "E_PERMISSION",
-            "agent:bot relays only as itself, not as human:qa",
+            "agent:bot (run r1) relays only as itself, not as human:qa",
+        ),
+        // the flag names the actor alone: a joined actor and run is another actor
+        (
+            with(&[
+                "--card-hash",
+                &hash,
+                "--answer",
+                "confirm",
+                "--relayed-by",
+                "agent:bot/r1",
+                "--evidence",
+                "yes, sign in",
+            ]),
+            "E_PERMISSION",
+            "agent:bot (run r1) relays only as itself, not as agent:bot/r1",
         ),
         (
             with(&[
@@ -424,7 +439,7 @@ fn hsa8_cli_card_confirmation_has_no_agent_bypass() {
                 "--answer",
                 "confirm",
                 "--relayed-by",
-                "agent:bot/r1",
+                "agent:bot",
                 "--evidence",
                 "yes, sign in",
             ]),
@@ -438,7 +453,7 @@ fn hsa8_cli_card_confirmation_has_no_agent_bypass() {
                 "--answer",
                 "confirm",
                 "--relayed-by",
-                "agent:bot/r1",
+                "agent:bot",
                 "--evidence",
                 "yes, sign in",
             ]),
@@ -563,7 +578,7 @@ fn hsa8_cli_card_confirmation_has_no_agent_bypass() {
             "--answer",
             "cancel",
             "--relayed-by",
-            "agent:bot/r1",
+            "agent:bot",
             "--evidence",
             "no, cancel it",
         ])),
@@ -594,6 +609,109 @@ fn hsa8_cli_card_confirmation_has_no_agent_bypass() {
             "sign-in pending for {o}\ncode: {USER_CODE}\nopen: {o}/app/device\ncheck again with rdy auth state --install {o}\n"
         )
     );
+    assert_eq!(
+        routes(&hub.requests()),
+        [route("GET", META), route("POST", "/auth/device")]
+    );
+    assert_eq!(hub.finish(), 0);
+}
+
+/// id4 (D-PWB82): an auth relay names the relaying agent's actor alone, and the session gives
+/// the run. A joined actor and run is refused, as an unequal actor or as outside the actor form,
+/// before any request or credential write; confirm and cancel take the whole actor.
+#[test]
+fn id4_auth_relay_uses_actor_only() {
+    let home = Home::new();
+    let cwd = tempfile::tempdir().unwrap();
+    let c = cwd.path();
+    let mut hub = Server::start();
+    home.trust(&hub);
+    let o = hub.origin().to_string();
+    let hash = card_hash(&o, MACHINE);
+    let answer = |answer: &str, by: &str| -> Vec<String> {
+        [
+            "auth",
+            "sign-in",
+            "--install",
+            &o,
+            "--machine-name",
+            MACHINE,
+            "--card-hash",
+            &hash,
+            "--answer",
+            answer,
+            "--relayed-by",
+            by,
+            "--evidence",
+            "yes, sign in",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    };
+    let one: &[(&str, &str)] = &[("RDY_ACTOR", "agent:bot"), ("RDY_RUN", "r1")];
+    let two: &[(&str, &str)] = &[("RDY_ACTOR", "agent:bot/x"), ("RDY_RUN", "r1")];
+    let two_bare: &[(&str, &str)] = &[("RDY_ACTOR", "agent:bot/x")];
+    let actor_fix = "use human:<name>, agent:<name>, agent:<handle>/<name> or ci:<repo_id>/<name>";
+    for a in ["confirm", "cancel"] {
+        for (env, by, code, message, fix) in [
+            (
+                one,
+                "agent:bot/r1",
+                "E_PERMISSION",
+                "agent:bot (run r1) relays only as itself, not as agent:bot/r1".to_string(),
+                "pass --relayed-by agent:bot with the person's words as evidence",
+            ),
+            (
+                two,
+                "agent:bot/x/r1",
+                "E_BAD_INPUT",
+                "the actor \"agent:bot/x/r1\" is not in rdy's actor form".to_string(),
+                actor_fix,
+            ),
+            (
+                two,
+                "agent:bot",
+                "E_PERMISSION",
+                "agent:bot/x (run r1) relays only as itself, not as agent:bot".to_string(),
+                "pass --relayed-by agent:bot/x with the person's words as evidence",
+            ),
+            (
+                two_bare,
+                "agent:bot",
+                "E_PERMISSION",
+                "agent:bot/x relays only as itself, not as agent:bot".to_string(),
+                "pass --relayed-by agent:bot/x with the person's words as evidence",
+            ),
+        ] {
+            let (ok, e) = home.json_as(c, env, &args(&answer(a, by)));
+            assert!(!ok, "{a} {by}");
+            assert_eq!(
+                (
+                    err_code(&e),
+                    e["message"].as_str().unwrap_or(""),
+                    e["fix"].as_str().unwrap_or("")
+                ),
+                (code, message.as_str(), fix),
+                "{a} {by}: {e}"
+            );
+        }
+    }
+    assert!(!home.creds().exists(), "no refusal wrote a credential");
+    assert!(hub.requests().is_empty(), "no refusal sent a request");
+
+    // the whole actor: a two-name actor with no run cancels, and with its run confirms
+    let (ok, v) = home.json_as(c, two_bare, &args(&answer("cancel", "agent:bot/x")));
+    assert!(ok, "{v}");
+    assert_eq!(v["state"], "cancelled");
+    let (ok, v) = home.json_as(c, one, &args(&answer("cancel", "agent:bot")));
+    assert!(ok, "{v}");
+    assert_eq!(v["state"], "cancelled");
+    assert!(hub.requests().is_empty(), "a cancel sends no request");
+    queue_start(&mut hub);
+    let (ok, v) = home.json_as(c, two, &args(&answer("confirm", "agent:bot/x")));
+    assert!(ok, "{v}");
+    assert_eq!(v["state"], "pending", "{v}");
     assert_eq!(
         routes(&hub.requests()),
         [route("GET", META), route("POST", "/auth/device")]
@@ -1480,18 +1598,35 @@ fn warning_codes(v: &Value) -> Vec<String> {
         .collect()
 }
 
-/// Sign-out removes this machine's saved sign-in even when the settings do not load: a user
-/// config that does not parse, or one with two share remotes. The record is removed durably
-/// first; the hub sign-out, which needs the settings, then cannot be confirmed, so the reply is
-/// signed_out with `W_UPSTREAM_SIGNOUT_LOCAL`, and no request is sent.
+/// Sign-out removes this machine's saved sign-in even when the settings fail their remote
+/// checks (two share remotes). The record is removed durably first; the hub sign-out, which
+/// needs the settings, then cannot be confirmed, so the reply is signed_out with
+/// `W_UPSTREAM_SIGNOUT_LOCAL`, and no request is sent. A user config that does not parse names
+/// no person (D-ME2C0, D-Q8NFG): the caller is not known, so sign-out is that file's
+/// `E_CONFIG` and the record is unchanged; no fallback identity signs out.
 #[test]
 fn hsa8_cli_sign_out_is_local_first_whatever_the_settings() {
     let cwd = tempfile::tempdir().unwrap();
     let c = cwd.path();
-    for broken in [
-        format!("actor: [{PERSON}\n"),
-        "remotes:\n  a: {url: \"https://a.example.com\", mode: share}\n  b: {url: \"https://b.example.com\", mode: share}\n".to_string(),
-    ] {
+    // a config that does not parse: refused before the removal, naming the file
+    let home = Home::new();
+    let text = std::fs::read_to_string(home.config()).unwrap();
+    std::fs::write(home.config(), format!("{text}actor: [{PERSON}\n")).unwrap();
+    let o = "https://hub.example.com";
+    home.seed(vec![(o, ready(ACCESS, REFRESH, now() + 3_000_000))]);
+    let before = std::fs::read(home.creds()).unwrap();
+    let (ok, e) = home.json(c, &["auth", "sign-out", "--install", o]);
+    assert!(!ok, "{e}");
+    assert_eq!(err_code(&e), "E_CONFIG", "{e}");
+    let shown = home.config().display().to_string();
+    assert!(e["message"].as_str().unwrap_or("").contains(&shown), "{e}");
+    assert_eq!(std::fs::read(home.creds()).unwrap(), before, "unchanged");
+    let (ok, _, err) = home.text(c, &[], &["auth", "sign-out", "--install", o]);
+    assert!(!ok);
+    assert!(err.starts_with("error E_CONFIG: "), "{err}");
+    assert_eq!(std::fs::read(home.creds()).unwrap(), before, "unchanged");
+    {
+        let broken = "remotes:\n  a: {url: \"https://a.example.com\", mode: share}\n  b: {url: \"https://b.example.com\", mode: share}\n";
         let home = Home::new();
         let hub = Server::start();
         home.trust(&hub);
@@ -1504,9 +1639,15 @@ fn hsa8_cli_sign_out_is_local_first_whatever_the_settings() {
         home.seed(vec![(&o, ready(ACCESS, REFRESH, now() + 3_000_000))]);
         let (ok, v) = home.json(c, &["auth", "sign-out", "--install", &o]);
         assert!(ok, "{broken}: {v}");
-        assert_eq!((v["install"].as_str(), v["state"].as_str()), (Some(o.as_str()), Some("signed_out")));
+        assert_eq!(
+            (v["install"].as_str(), v["state"].as_str()),
+            (Some(o.as_str()), Some("signed_out"))
+        );
         assert_eq!(warning_codes(&v), ["W_UPSTREAM_SIGNOUT_LOCAL"], "{v}");
-        assert!(home.read_creds().is_empty(), "{broken}: the record is removed");
+        assert!(
+            home.read_creds().is_empty(),
+            "{broken}: the record is removed"
+        );
         // as text, again with nothing saved: a no-op reply
         let (ok, out, err) = home.text(c, &[], &["auth", "sign-out", "--install", &o]);
         assert!(ok, "{err}");
@@ -1520,7 +1661,7 @@ fn hsa8_cli_sign_out_is_local_first_whatever_the_settings() {
 /// user config still reads within its bounds, so its `actor` is the person, and `RDY_ACTOR`
 /// naming it is that person, not `human:$USER`. The record is removed durably, then the reply
 /// is signed_out with `W_UPSTREAM_SIGNOUT_LOCAL`. A config that does not parse names no actor,
-/// so the same caller stays refused there and the record is unchanged.
+/// so the same caller is refused there with that file's `E_CONFIG` and the record is unchanged.
 #[test]
 fn hsa8_cli_sign_out_keeps_the_configured_actor_when_remotes_fail() {
     let cwd = tempfile::tempdir().unwrap();
@@ -1553,6 +1694,7 @@ fn hsa8_cli_sign_out_keeps_the_configured_actor_when_remotes_fail() {
     assert_eq!(hub.finish(), 0);
 
     // a config that does not parse: the actor is not known, so the explicit human is refused
+    // with that file's E_CONFIG, before the removal
     let home = Home::new();
     std::fs::write(home.config(), "actor: [human:test-person\n").unwrap();
     let o = "https://hub.example.com";
@@ -1560,6 +1702,62 @@ fn hsa8_cli_sign_out_keeps_the_configured_actor_when_remotes_fail() {
     let before = std::fs::read(home.creds()).unwrap();
     let (ok, e) = home.json_as(c, human, &["auth", "sign-out", "--install", o]);
     assert!(!ok, "{e}");
-    assert_eq!(err_code(&e), "E_ACTOR_UNBOUND", "{e}");
+    assert_eq!(err_code(&e), "E_CONFIG", "{e}");
     assert_eq!(std::fs::read(home.creds()).unwrap(), before, "unchanged");
+}
+
+/// id3 (D-ME2C0): the standalone `rdy auth` refuses an `RDY_ACTOR` or `RDY_RUN` that is not
+/// Unicode with the grammar's bounded `E_BAD_INPUT` before it classifies the caller: the value
+/// is never read as unset (the configured person) and a run is never dropped. The saved sign-in
+/// is unchanged and nothing is sent.
+#[test]
+fn id3_cli_auth_refuses_a_non_unicode_actor_or_run() {
+    use rdy_qa::platform::not_unicode;
+    use std::ffi::OsStr;
+    let cwd = tempfile::tempdir().unwrap();
+    let c = cwd.path();
+    let home = Home::new();
+    let o = "https://hub.example.com";
+    home.seed(vec![(o, ready(ACCESS, REFRESH, now() + 3_000_000))]);
+    let before = std::fs::read(home.creds()).unwrap();
+    let want = |e: rdy_engine::RdyError| (e.code.to_string(), e.message, e.fix);
+    let bad_actor = want(rdy_engine::identity::validate_actor("agent:\u{fffd}").unwrap_err());
+    let bad_human = want(rdy_engine::identity::validate_actor("human:qa\u{fffd}").unwrap_err());
+    let bad_run = want(rdy_engine::identity::validate_run("r\u{fffd}").unwrap_err());
+    let (agent_actor, human_actor, run) = (
+        not_unicode("agent:"),
+        not_unicode("human:qa"),
+        not_unicode("r"),
+    );
+    // an environment actor, its run, and the refusal they get
+    type Case<'a> = (&'a OsStr, Option<&'a OsStr>, &'a (String, String, String));
+    let cases: [Case<'_>; 4] = [
+        (&agent_actor, None, &bad_actor),
+        (&human_actor, None, &bad_human),
+        (OsStr::new("agent:x"), Some(&run), &bad_run),
+        (OsStr::new(PERSON), Some(&run), &bad_run),
+    ];
+    for (actor, run, want) in cases {
+        for args in [
+            ["--json", "auth", "sign-out", "--install", o],
+            ["--json", "auth", "state", "--install", o],
+        ] {
+            let mut cmd = home.command(c, &[], &args);
+            cmd.env("RDY_ACTOR", actor);
+            if let Some(r) = run {
+                cmd.env("RDY_RUN", r);
+            }
+            let out = cmd.output().expect("run rdy");
+            clean(&out, &args);
+            let (ok, e) = parsed(&out);
+            assert!(!ok, "{actor:?} {run:?} {args:?}: {e}");
+            let got = (
+                err_code(&e).to_string(),
+                e["message"].as_str().unwrap_or("").to_string(),
+                e["fix"].as_str().unwrap_or("").to_string(),
+            );
+            assert_eq!(&got, want, "{actor:?} {run:?} {args:?}");
+            assert_eq!(std::fs::read(home.creds()).unwrap(), before, "unchanged");
+        }
+    }
 }

@@ -12,7 +12,7 @@ fn port1_a_read_after_a_write_sees_it_and_overview_counts_the_states_views() {
     let mut c = McpClient::start(dir.path());
     c.call(
         "rdy_session",
-        json!({"actor": "a", "run": "r1", "role": "writer"}),
+        json!({"actor": "agent:a", "run": "r1", "role": "writer"}),
     )
     .ok();
     let w = c.call("rdy_write", json!({"ops": [{"op": "create", "type": "doc", "id": "$d", "fields": {"name": "a", "title": "A", "doc_type": "page"}}]})).ok();
@@ -35,7 +35,7 @@ fn port1_a_pipelined_write_then_read_is_answered_in_order_and_the_read_sees_the_
     let mut c = McpClient::start(dir.path());
     c.call(
         "rdy_session",
-        json!({"actor": "a", "run": "r1", "role": "writer"}),
+        json!({"actor": "agent:a", "run": "r1", "role": "writer"}),
     )
     .ok();
     let w = c.next_id();

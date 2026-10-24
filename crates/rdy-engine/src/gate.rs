@@ -3,7 +3,7 @@ use crate::answer::card_of;
 use crate::answer::relay::{RelayInput, relayed};
 use crate::coord_graph::AltRef;
 use crate::error::*;
-use crate::pending::queue::approval_holds;
+use crate::pending::queue::{approval_holds, approval_readiness};
 use crate::pending::{Item, PlanCardBinding};
 use crate::plan::lifecycle::{PlanSummary, ProposePlanRequest};
 use crate::session::rfc3339;
@@ -56,12 +56,14 @@ pub struct ProposalInfo {
     /// Every conflict of the view.
     pub conflicts: Vec<ConflictInfo>,
     /// The conflicts this version carries on the blocks it writes: they refuse its landing
-    /// (`E_CONFLICT_UNRESOLVED`) until resolved in the view and proposed again.
+    /// (an `E_CONFLICT_UNRESOLVED` issue of `E_PROPOSAL_NOT_READY`) until resolved in the view
+    /// and proposed again.
     pub blocking: Vec<ConflictInfo>,
     /// The tensions that involve one of the version's changes, each with `refuses`: the
-    /// refusing ones first (they refuse its landing, `E_BLOCKING_TENSION`; read from what the
-    /// version lands, its landing form), then by id; at most `PROPOSAL_TENSIONS_MAX`. A kind
-    /// judged on the net change (unjustified_change, FW-JU1) is listed only in its landing form.
+    /// refusing ones first (they refuse its landing, an `E_BLOCKING_TENSION` issue; read from
+    /// what the version lands, its landing form), then by id; at most `PROPOSAL_TENSIONS_MAX`.
+    /// A kind judged on the net change (unjustified_change, FW-JU1) is listed only in its
+    /// landing form.
     /// A tension whose blocks all carry a blocking conflict is left out: the conflict reports it.
     pub tensions: Vec<TensionInfo>,
     /// The tensions left out past `PROPOSAL_TENSIONS_MAX`.
@@ -400,19 +402,11 @@ fn relay_evidence_kind(
             "quote the human's words with --evidence",
         ));
     }
-    if relay.by.actor.trim().is_empty() {
-        return Err(RdyError::new(
-            E_BAD_INPUT,
-            "relayed_by needs an actor",
-            "name the relaying agent, e.g. --relayed-by agent:name",
-        ));
-    }
-    if relay.by.run.as_deref().is_some_and(|r| r.trim().is_empty()) {
-        return Err(RdyError::new(
-            E_BAD_INPUT,
-            "relayed_by has an empty run",
-            "name the run after '/', e.g. --relayed-by agent:name/run-7, or drop the '/'",
-        ));
+    // a new relay's agent: the actor, then a run, each in its form (D-ME2C0, D-PWB82); a stored
+    // landing is never checked here
+    crate::identity::validate_actor(&relay.by.actor)?;
+    if let Some(run) = &relay.by.run {
+        crate::identity::validate_run(run)?;
     }
     if relay.evidence.session_ref.trim().is_empty() {
         return Err(RdyError::new(
@@ -704,15 +698,15 @@ pub(crate) fn open_proposals(st: &ReadState) -> Result<Vec<(ProposalRef, Proposa
 }
 
 /// The landing checks of version `pref` (`p`, with its changes `changes` read), computed on a
-/// published state for the needs-you queue: checks 1 to 3 of the plan's closed readiness list
-/// ("Readiness before M3b", D-3JZP4). Each failed check is one issue with the code, message and
-/// fix the landing gives today:
+/// published state: checks 1 to 3 of the plan's closed readiness list ("Readiness before M3b",
+/// D-3JZP4). The queue and every approval path read them (D-ME2HD). Each failed check is one
+/// issue with its own code, message and fix:
 /// 1. a conflict on a block the version writes (`gconf1`, `E_CONFLICT_UNRESOLVED`);
 /// 2. a blocking tension the landing would put into canon (`tgat1`, `E_BLOCKING_TENSION`);
 /// 3. an error in the canon the landing would give (`E_VALIDATION`, or the merge's refusal).
 ///
-/// The landing stops at the first failed check; the queue makes each check it can, so the agent
-/// gets every fix at once (fix round 1). A version with a conflict still gets check 2, less the
+/// Each check that can be made is made, so the agent gets every fix at once (fix round 1). A
+/// version with a conflict still gets check 2, less the
 /// tensions whose blocks all carry the conflict (the conflict reports them, as
 /// `proposal_tensions` leaves them out). Check 3 is not made for it: the canon its landing would
 /// give depends on how the conflict is resolved, and the merge onto canon refuses for the same
@@ -971,26 +965,34 @@ impl ReadState {
     }
 }
 
-/// The fix of `E_EXCEPTION_OPEN` for a version with no summary: its exceptions are no items of the
-/// queue until the version is ready, and readiness needs a summary (D-4PG9Y, D-3JZP4).
-const EXCEPTION_FIX_NO_SUMMARY: &str = "propose again with a summary (rdy propose --summary <text> / rdy_propose {summary}), then answer each exception card";
+/// D-ME2HD: the refusal of an approval of version `pref`, which is not ready. Its issues are the
+/// version's readiness issues, in the queue's order, each with its own code and fix
+/// ([`crate::pending::queue::approval_readiness`]); none is added, dropped, merged or re-worded.
+/// The message counts them (one issue reads `1 issue`, more read `<n> issues`; TASK-548). No card.
+pub(crate) fn proposal_not_ready(pref: &ProposalRef, issues: Vec<Issue>) -> RdyError {
+    let mut e = RdyError::new(
+        E_PROPOSAL_NOT_READY,
+        format!(
+            "{pref} is not ready: {} issue{}",
+            issues.len(),
+            if issues.len() == 1 { "" } else { "s" }
+        ),
+        "fix each issue and propose again: rdy_propose / rdy propose",
+    );
+    e.issues = issues;
+    e
+}
 
 /// F2 (D-DKJS5): the refusal of an approval while exceptions of `pref` have no confirm answer. It
-/// names each exception and carries its card in `corrected.exceptions` (O21). The fix is closed:
-/// a version with no summary is proposed again with one first ([`EXCEPTION_FIX_NO_SUMMARY`]);
-/// any other version answers each exception card.
-fn exceptions_open(pref: &ProposalRef, p: &Proposal, open: &[Item]) -> RdyError {
+/// names each exception and carries its card in `corrected.exceptions` (O21). A version with no
+/// summary never gets here: readiness refuses it first (D-ME2HD).
+fn exceptions_open(pref: &ProposalRef, open: &[Item]) -> RdyError {
     let refs: Vec<&str> = open.iter().map(|i| i.r#ref.as_str()).collect();
     let cards: Vec<_> = open.iter().map(card_of).collect();
-    let fix = if p.summary.as_deref().is_none_or(|s| s.trim().is_empty()) {
-        EXCEPTION_FIX_NO_SUMMARY.to_string()
-    } else {
-        format!("answer each exception card first: {}", refs.join(", "))
-    };
     RdyError::new(
         E_EXCEPTION_OPEN,
         format!("{} exceptions of {pref} have no answer", open.len()),
-        fix,
+        format!("answer each exception card first: {}", refs.join(", ")),
     )
     .with_corrected(serde_json::json!({ "exceptions": cards }))
 }
@@ -2572,47 +2574,28 @@ impl Rdy {
         linked_alts(&st, &p.view, p.alternative.as_ref(), &p.changes, &changes)?;
         // FW-HB1: canon may have moved since the version was proposed
         self.check_base_moved(&st, &pref, &p, &changes, &opts)?;
-        // gconf1: the version's own changes (not the view's current set) must carry no conflict
-        // on the blocks they write
-        let blocking = blocking_conflicts(&st, &p.view, &p.changes)?;
-        if !blocking.is_empty() {
-            return Err(unresolved(&st, &p.view, &blocking)?);
+        // D-ME2HD: every approval path refuses a version that is not ready, with the queue's
+        // readiness issues in the queue's order (gconf1's conflicts on the blocks the version's
+        // own changes write, tgat1's blocking tensions, the prospective canon, the summary, the
+        // bound plan, and F1's rejected decisions and re-affirmations and refused deferrals)
+        let ready = approval_readiness(&st, &pref, p.clone())?;
+        if !ready.is_empty() {
+            return Err(proposal_not_ready(&pref, ready));
         }
-        // tgat1: a blocking, undismissed tension every side of which would be in canon after
-        // the landing refuses it
         // the ops fold in the order the merge applies the changes (deps first), not the list
-        // order: a version can list a delete before the creation it depends on. A merge that
-        // refuses is left to `prospective_issues` below, which reports it.
+        // order: a version can list a delete before the creation it depends on
         let applied = st.landing_order(&changes);
-        let mut cache = crate::tensions::info::InfoCache::default();
-        let landing = st.landing_tensions_applied(&p.view, &p.changes, &changes, &applied)?;
-        let refusing: Vec<TensionInfo> = st
-            .refusing_among(&p.changes, landing)
-            .iter()
-            .map(|t| st.tension_info_with(t, &mut cache))
-            .collect();
-        if !refusing.is_empty() {
-            return Err(blocking_tensions(&pref, &refusing));
-        }
         // F2 (D-DKJS5, D-T5S9A, D-GV465): every approval path waits until each exception of the
-        // version has a confirm answer. F1: a decision whose current version the person
-        // rejected never lands, exception or not (final review fix round 1, R1), with the issue
-        // readiness gives; nor does a rejected re-affirmation or a refused deferral card. Then
-        // D-AAQ9Z: an unanswered deferral card, on a version with no decision op too. Only a
-        // version that writes a decision can carry an exception or a rejection of one, so only
-        // it reads the version whole.
+        // version has a confirm answer. Then D-AAQ9Z: an unanswered deferral card, on a version
+        // with no decision op too. Only a version that writes a decision can carry an exception,
+        // so only it reads the version whole.
         let decides = changes.iter().flat_map(|c| &c.ops).any(|op| {
             matches!(op, Op::Create { block } | Op::Update { block, .. }
                 if block.block_type == decision::DECISION)
         });
         let holds = approval_holds(&st, &pref, decides)?;
         if !holds.open.is_empty() {
-            return Err(exceptions_open(&pref, &p, &holds.open));
-        }
-        if let Some(first) = holds.rejected.first() {
-            let mut e = RdyError::new(E_VALIDATION, first.message.clone(), first.fix.clone());
-            e.issues = holds.rejected;
-            return Err(e);
+            return Err(exceptions_open(&pref, &holds.open));
         }
         if let Some((card, n)) = &holds.deferral {
             return Err(deferrals_open(&pref, card, *n));

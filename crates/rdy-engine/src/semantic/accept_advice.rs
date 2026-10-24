@@ -118,7 +118,8 @@ fn bad(message: String, fix: &str) -> RdyError {
 /// ([`relayed`]): a human session accepts plainly, as itself, and names no relay (C5); an agent
 /// session accepts only by relaying the person's words, as itself: over MCP the session is the
 /// relay (no `relayed_by`, `implicit` when it names none), at the command line `relayed_by` is
-/// its own actor or `actor/run`. A relayed acceptance runs as the person `person`. The table's
+/// its own actor alone, and the relay records the session's run. A relayed acceptance runs as
+/// the person `person`. The table's
 /// refusals keep the acceptance's own text for an agent with no words.
 fn relay_of(
     s: &Session,

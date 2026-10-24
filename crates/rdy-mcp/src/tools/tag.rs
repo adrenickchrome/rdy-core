@@ -29,7 +29,7 @@ pub struct TagParams {
 /// `rdy_tag`: the person's tag, relayed by this agent session (the relay table, case 4).
 pub fn rdy_tag(st: &mut McpState, p: TagParams) -> Result<Value, RdyError> {
     let s = session(st)?;
-    let person = human_actor_for_env(&st.engine.root());
+    let person = human_actor_for_env(&st.engine.root())?;
     let relay = RelayInput {
         relayed_by: None,
         evidence: Some(p.evidence),

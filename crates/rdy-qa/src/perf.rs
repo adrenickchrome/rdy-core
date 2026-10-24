@@ -2857,7 +2857,7 @@ fn tier_coord_chosen(
         };
         // F2: a version that lands the choice decision carries a summary, and the person
         // confirms its exceptions before the landing
-        let summary = decision.is_some().then_some(crate::intake::TEST_SUMMARY);
+        let summary = Some(crate::intake::TEST_SUMMARY);
         let p = r
             .propose_with(&writer(), &w, &w, None, summary, Some(&pick))
             .expect("a choosing proposal");
@@ -3320,7 +3320,12 @@ fn approved_removal(r: &mut Rdy, target: &BlockId) {
     r.redact_in(&writer(), "redact", input)
         .expect("record the request");
     let prop = r
-        .propose(&writer(), "redact", "Remove one block", None)
+        .propose(
+            &writer(),
+            "redact",
+            "Remove one block",
+            Some(crate::intake::TEST_SUMMARY),
+        )
         .expect("propose");
     r.land(&approver(), &prop.id).expect("land the removal");
 }
@@ -3558,7 +3563,12 @@ fn tier_redaction(
         r.redact_in(&writer(), "redact", input.clone())
             .expect("record the request");
         let prop = r
-            .propose(&writer(), "redact", "Remove one block", None)
+            .propose(
+                &writer(),
+                "redact",
+                "Remove one block",
+                Some(crate::intake::TEST_SUMMARY),
+            )
             .expect("propose");
         let s = Instant::now();
         r.land(&approver(), &prop.id).expect("land the removal");
@@ -5130,7 +5140,7 @@ pub fn run_workload() -> Vec<Measure> {
         write(&mut r, &view, json!(ops)).expect("flat write");
         // the product path only: these docs write no decision, so nothing waits for an answer
         let p = r
-            .propose(&writer(), &view, &view, None)
+            .propose(&writer(), &view, &view, Some(crate::intake::TEST_SUMMARY))
             .expect("flat propose");
         r.land(&approver(), &p.id).expect("flat land");
     }));

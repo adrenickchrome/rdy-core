@@ -2,12 +2,13 @@
 //! the order of `KEY_LEVELS`; `code_paths` shows one row per repo, each with the level it comes
 //! from (F1). Runs in this process: it reads files and needs no daemon.
 use crate::ErrorReply;
-use rdy_engine::config_levels::{effective, user_file_from_env};
+use rdy_engine::config_levels::{inspect, user_file_from_env};
 use serde_json::{Value, json};
 use std::path::Path;
 
 pub fn run(project: &Path, show_origin: bool) -> Result<(Value, String), ErrorReply> {
-    let eff = effective(project, user_file_from_env().as_deref())?;
+    // an actor outside the form is shown as written; resolving the person refuses it
+    let eff = inspect(project, user_file_from_env().as_deref())?;
     let mut lines = Vec::with_capacity(eff.origins.len());
     for o in &eff.origins {
         let mut line = format!("{} = {}", o.key, o.value_line());

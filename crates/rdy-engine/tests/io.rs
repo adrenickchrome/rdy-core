@@ -54,7 +54,9 @@ fn rich_project(dir: &std::path::Path) -> Rdy {
     ])).unwrap(), justification: None, message: String::new() }).unwrap();
     let s = res.created["$s"].clone();
     let t = res.created["$t"].clone();
-    let p = r.propose(&agent(), "work", "seed", None).unwrap();
+    let p = r
+        .propose(&agent(), "work", "seed", Some("test summary"))
+        .unwrap();
     r.land(&founder(), &p.id).unwrap();
     r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
         {"op": "create", "type": "claim", "parent": s, "body": format!("Uses {{{{{t}}}}}."), "links": {"describes": [{"target": t, "part": "the balance part"}]}}
@@ -102,7 +104,9 @@ fn export_import_round_trip_preserves_every_version_hash() {
         "E_PERMISSION"
     );
     b.import(&founder(), "import", out.path()).unwrap();
-    let p = b.propose(&founder(), "import", "migrate", None).unwrap();
+    let p = b
+        .propose(&founder(), "import", "migrate", Some("test summary"))
+        .unwrap();
     b.land(&founder(), &p.id).unwrap();
     let imported = b
         .read()
@@ -714,7 +718,9 @@ fn export_import_export_is_byte_identical() {
     let b_dir = tempfile::tempdir().unwrap();
     let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
     b.import(&founder(), "import", out1.path()).unwrap();
-    let p = b.propose(&founder(), "import", "migrate", None).unwrap();
+    let p = b
+        .propose(&founder(), "import", "migrate", Some("test summary"))
+        .unwrap();
     b.land(&founder(), &p.id).unwrap();
     assert_eq!(
         b.read()

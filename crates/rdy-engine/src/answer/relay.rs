@@ -14,10 +14,11 @@
 //!    act only by relaying the person's words ([`RelayRefusal::NoEvidence`]).
 //! 4. An agent session with `evidence`. Over MCP (`implicit`), the session is the relay:
 //!    `relayed_by` must be absent ([`RelayRefusal::RelayedByOverMcp`]). At the command line,
-//!    `relayed_by` must be given ([`RelayRefusal::NoRelayedBy`]) and must be the session's actor,
-//!    or `<actor>/<run>` when the session has a run ([`RelayRefusal::NotItself`]). The flag is
-//!    compared whole and never split, since an actor may hold `/`. The relay records the session's
-//!    own actor and run.
+//!    `relayed_by` must be given ([`RelayRefusal::NoRelayedBy`]), in the actor form
+//!    ([`RelayRefusal::BadIdentity`]), and byte for byte the session's actor
+//!    ([`RelayRefusal::NotItself`]). The flag names an actor only, never a run (D-PWB82): it is
+//!    never split, since an actor may hold `/`. The relay records the session's own actor and
+//!    run, the run always from the session.
 //! 5. `question` or `session_ref` without `evidence`: refused
 //!    ([`RelayRefusal::NeedsEvidence`]).
 //! 6. The quote and the question hold 1 to 2000 characters after trimming
@@ -25,7 +26,9 @@
 //!    ([`RelayRefusal::SessionRefTooLong`]) and defaults to `mcp` (implicit) or `cli`.
 //!
 //! In cases 1 and 4 the act runs as `Session::human(person, Role::Approver)`: the person is the
-//! actor of the act, and the agent is `relayed_by`.
+//! actor of the act, and the agent is `relayed_by`. A person whose actor is outside the actor
+//! form makes no session: [`RelayRefusal::BadIdentity`] carries the constructor's refusal. It
+//! also carries the refusal of a `relayed_by` outside the actor form.
 //!
 //! # Wording
 //!
@@ -33,6 +36,7 @@
 //! [`RelayRefusal::error`] gives the answer's texts; the daemon's `relay_approver` keeps its own.
 use crate::Session;
 use crate::error::{E_BAD_INPUT, E_PERMISSION, RdyError};
+use crate::identity::{actor_run_text, validate_actor};
 use rdy_model::{ActorRun, EvidenceKind, RelayEvidence, Role};
 use rdy_store::Relay;
 
@@ -45,8 +49,8 @@ const MAX_SESSION_REF: usize = crate::write::MAX_VIEW_NAME;
 /// What a caller passes for a relay. Every field is optional; [`relayed`] checks them together.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RelayInput {
-    /// The relaying agent as the command line names it: `<actor>` or `<actor>/<run>`. Absent over
-    /// MCP, where the session is the relay.
+    /// The relaying agent as the command line names it: its actor alone (the run comes from the
+    /// session). Absent over MCP, where the session is the relay.
     pub relayed_by: Option<String>,
     /// The person's words, quoted.
     pub evidence: Option<String>,
@@ -69,14 +73,22 @@ pub enum RelayRefusal {
     RelayedByOverMcp,
     /// 4: an agent at the command line names no `relayed_by`.
     NoRelayedBy,
-    /// 4: `relayed_by` (`by`) is not the session's own actor or actor/run.
-    NotItself { actor: String, by: String },
+    /// 4: `relayed_by` (`by`), in the actor form, is not the session's own actor (`actor`,
+    /// whose run is `run`).
+    NotItself {
+        actor: String,
+        run: Option<String>,
+        by: String,
+    },
     /// 5: `field` (`question` or `session_ref`) without evidence.
     NeedsEvidence { field: &'static str },
     /// 6: the quote or the question is longer than [`MAX_QUOTE`].
     TooLong,
     /// 6: `session_ref` is longer than a view name.
     SessionRefTooLong,
+    /// The person's actor, or the `relayed_by` an agent names, is outside the actor form: the
+    /// bounded `E_BAD_INPUT` message and fix of the grammar's refusal (D-ME2C0).
+    BadIdentity { message: String, fix: String },
 }
 
 impl RelayRefusal {
@@ -103,9 +115,12 @@ impl RelayRefusal {
                 "relayed_by and evidence go together",
                 "pass both (--relayed-by and --evidence) or neither",
             ),
-            RelayRefusal::NotItself { actor, by } => RdyError::new(
+            RelayRefusal::NotItself { actor, run, by } => RdyError::new(
                 E_PERMISSION,
-                format!("{actor} relays only as itself, not as {by}"),
+                format!(
+                    "{} relays only as itself, not as {by}",
+                    actor_run_text(actor, run.as_deref())
+                ),
                 format!("pass --relayed-by {actor} with the person's words as evidence"),
             ),
             RelayRefusal::NeedsEvidence { field } => RdyError::new(
@@ -123,6 +138,9 @@ impl RelayRefusal {
                 format!("session_ref takes at most {MAX_SESSION_REF} characters"),
                 "use a short session id, not the conversation",
             ),
+            RelayRefusal::BadIdentity { message, fix } => {
+                RdyError::new(E_BAD_INPUT, message.clone(), fix.clone())
+            }
         }
     }
 }
@@ -136,7 +154,12 @@ pub fn relayed(
     r: &RelayInput,
     implicit: bool,
 ) -> Result<(Session, Option<Relay>), RelayRefusal> {
-    let as_person = || Session::human(person.to_string(), Role::Approver);
+    let as_person = || {
+        Session::human(person.to_string(), Role::Approver).map_err(|e| RelayRefusal::BadIdentity {
+            message: e.message,
+            fix: e.fix,
+        })
+    };
     if s.is_human() {
         // 2
         if r.relayed_by.is_some() || r.evidence.is_some() {
@@ -145,7 +168,7 @@ pub fn relayed(
         // 5
         needs_evidence(r)?;
         // 1
-        return Ok((as_person(), None));
+        return Ok((as_person()?, None));
     }
     // 3
     let quote = r
@@ -161,13 +184,15 @@ pub fn relayed(
         }
     } else {
         let by = r.relayed_by.as_deref().ok_or(RelayRefusal::NoRelayedBy)?;
-        let me = match &s.run {
-            Some(run) => format!("{}/{run}", s.actor),
-            None => s.actor.clone(),
-        };
-        if by != s.actor && by != me {
+        // the grammar first, then the session's actor byte for byte; the run is the session's
+        validate_actor(by).map_err(|e| RelayRefusal::BadIdentity {
+            message: e.message,
+            fix: e.fix,
+        })?;
+        if by != s.actor {
             return Err(RelayRefusal::NotItself {
                 actor: s.actor.clone(),
+                run: s.run.clone(),
                 by: by.to_string(),
             });
         }
@@ -195,7 +220,7 @@ pub fn relayed(
     }
     let session_ref = session_ref.unwrap_or(if implicit { "mcp" } else { "cli" });
     Ok((
-        as_person(),
+        as_person()?,
         Some(Relay {
             by: ActorRun {
                 actor: s.actor.clone(),

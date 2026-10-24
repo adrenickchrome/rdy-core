@@ -9,6 +9,16 @@ use crate::{Session, now_ms};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+/// A new owner as `own` takes it (D-PWB82): the actor, and the run in its own field. An input
+/// only, never stored: `own` checks both and copies them into the stored `Owner`. An omitted or
+/// null run is no run; an empty one is refused.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerInput {
+    pub actor: String,
+    pub run: Option<String>,
+}
+
 /// One view request: `op` and the fields that op takes.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,7 +37,7 @@ pub struct ViewRequest {
     pub all: Option<bool>,
     pub stale: Option<u32>,
     pub reason: Option<String>,
-    pub owner: Option<String>,
+    pub owner: Option<OwnerInput>,
     pub none: Option<bool>,
     pub target: Option<String>,
     /// resolve: the conflicted block (id, key or path).
@@ -43,7 +53,8 @@ pub struct ViewRequest {
     /// own and close with stale: where the person said it (default: `mcp` over MCP, `cli` at
     /// the command line).
     pub session_ref: Option<String>,
-    /// own and close with stale, at the command line: the agent that relays, `<actor>[/<run>]`.
+    /// own and close with stale, at the command line: the agent that relays, its actor alone
+    /// (the relay records the session's run).
     pub relayed_by: Option<String>,
 }
 
@@ -198,20 +209,20 @@ pub fn run_view(
                 (Some(_), true) => {
                     return Err(needs(
                         "own takes an owner or none, not both",
-                        "pass owner: <actor>[/<run>], or none: true to leave it unowned",
+                        "pass owner: {actor, run?}, or none: true to leave it unowned",
                     ));
                 }
                 (None, false) => {
                     return Err(needs(
                         "own needs an owner or none",
-                        "pass owner: <actor>[/<run>], or none: true to leave it unowned",
+                        "pass owner: {actor, run?}, or none: true to leave it unowned",
                     ));
                 }
                 (owner, _) => owner,
             };
             let relay = req.relay();
             write_typed(engine, move |r| {
-                r.view_own_as(&s, &person, &relay, &view, owner.as_deref())
+                r.view_own_as(&s, &person, &relay, &view, owner.as_ref())
             })
         }
         "resolve" => {

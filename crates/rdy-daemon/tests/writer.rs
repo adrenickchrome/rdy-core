@@ -28,7 +28,7 @@ fn doc(
     ]))
     .unwrap();
     r.write(
-        &Session::human("human:t".into(), Role::Writer),
+        &Session::human("human:t".into(), Role::Writer).unwrap(),
         WriteRequest {
             view: view.into(),
             ops,

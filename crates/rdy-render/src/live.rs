@@ -313,7 +313,7 @@ mod sr5 {
     use serde_json::json;
 
     fn session(role: Role) -> Session {
-        Session::human("human:qa".into(), role)
+        Session::human("human:qa".into(), role).unwrap()
     }
 
     fn write(r: &mut Rdy, view: &str, ops: serde_json::Value) {
@@ -338,7 +338,12 @@ mod sr5 {
         rdy_engine::testkit::generate_tree(dir.path(), 1, 1, 1);
         let mut r = Rdy::open(dir.path()).expect("open");
         let p = r
-            .propose(&session(Role::Writer), "work", "first", None)
+            .propose(
+                &session(Role::Writer),
+                "work",
+                "first",
+                Some("test summary"),
+            )
             .expect("propose");
         r.land(&session(Role::Approver), &p.id).expect("land");
         let key = |r: &Rdy, s: &Scope| inputs_key(&r.read(), s, 0).expect("key");
@@ -359,7 +364,11 @@ mod sr5 {
         );
         let a = Scope::View("a".into());
         let before = key(&r, &a);
-        r.view_own(&session(Role::Writer), "a", Some("agent:claude"))
+        let owner = rdy_engine::view_api::OwnerInput {
+            actor: "agent:claude".into(),
+            run: None,
+        };
+        r.view_own(&session(Role::Writer), "a", Some(&owner))
             .expect("own");
         assert_ne!(key(&r, &a), before, "a change of owner moves view a's key");
     }

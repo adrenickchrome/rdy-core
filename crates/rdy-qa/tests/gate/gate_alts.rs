@@ -88,7 +88,14 @@ fn altg1_landing_a_member_closes_the_other_open_members_and_chooses() {
     let set = setup(&mut r);
     r.view_close(&writer(), &["c".into()], "by hand").unwrap();
     let p = r
-        .propose_with(&writer(), "a", "x", None, None, Some(&pick(&set, "x")))
+        .propose_with(
+            &writer(),
+            "a",
+            "x",
+            None,
+            Some(TEST_SUMMARY),
+            Some(&pick(&set, "x")),
+        )
         .unwrap();
     r.land(&approver(), &p.id).unwrap();
     let rows = r.read().log_rows().unwrap();
@@ -117,7 +124,14 @@ fn altg1_land_reports_chosen_and_closed() {
     let (_d, mut r) = project();
     let set = setup(&mut r);
     let p = r
-        .propose_with(&writer(), "b", "y", None, None, Some(&pick(&set, "y")))
+        .propose_with(
+            &writer(),
+            "b",
+            "y",
+            None,
+            Some(TEST_SUMMARY),
+            Some(&pick(&set, "y")),
+        )
         .unwrap();
     let info = r.land_report(&approver(), &p.id).unwrap();
     assert_eq!(info.chosen.as_ref().unwrap().member, "b");
@@ -131,7 +145,14 @@ fn altg1_land_rechecks_the_set_at_approval() {
     let (_d, mut r) = project();
     let set = setup(&mut r);
     let pa = r
-        .propose_with(&writer(), "a", "x", None, None, Some(&pick(&set, "x")))
+        .propose_with(
+            &writer(),
+            "a",
+            "x",
+            None,
+            Some(TEST_SUMMARY),
+            Some(&pick(&set, "x")),
+        )
         .unwrap();
     let pb = r
         .propose_with(&writer(), "b", "y", None, None, Some(&pick(&set, "y")))
@@ -207,7 +228,14 @@ fn altg1_a_proposal_from_before_the_set_cannot_land_once_another_member_is_chose
         E_ALT_UNCHOSEN
     );
     let pa = r
-        .propose_with(&writer(), "a", "x", None, None, Some(&pick(&set, "x")))
+        .propose_with(
+            &writer(),
+            "a",
+            "x",
+            None,
+            Some(TEST_SUMMARY),
+            Some(&pick(&set, "x")),
+        )
         .unwrap();
     r.land(&approver(), &pa.id).unwrap();
     let e = r.land(&approver(), &pb.id).unwrap_err();
@@ -228,7 +256,9 @@ fn altg1_a_proposal_from_before_the_set_cannot_land_once_another_member_is_chose
         json!([{"op": "create", "type": "claim", "parent": section, "body": "after"}]),
     )
     .unwrap();
-    let later = r.propose(&writer(), "a", "after", None).unwrap();
+    let later = r
+        .propose(&writer(), "a", "after", Some(TEST_SUMMARY))
+        .unwrap();
     r.land(&approver(), &later.id).unwrap();
 }
 
@@ -289,7 +319,14 @@ fn altg1_a_members_change_lands_only_from_its_own_view_with_its_pick() {
     assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
     // from its own view with its own pick it proposes and lands
     let pb = r
-        .propose_with(&writer(), "b", "y", None, None, Some(&pick(&set, "y")))
+        .propose_with(
+            &writer(),
+            "b",
+            "y",
+            None,
+            Some(TEST_SUMMARY),
+            Some(&pick(&set, "y")),
+        )
         .unwrap();
     r.land(&approver(), &pb.id).unwrap();
     assert!(canon_bodies(&r).iter().any(|b| b == "alt B2"));
@@ -304,7 +341,14 @@ fn altg1_a_reopened_member_view_the_set_did_not_choose_cannot_propose() {
         .unwrap()
         .id;
     let pa = r
-        .propose_with(&writer(), "a", "x", None, None, Some(&pick(&set, "x")))
+        .propose_with(
+            &writer(),
+            "a",
+            "x",
+            None,
+            Some(TEST_SUMMARY),
+            Some(&pick(&set, "x")),
+        )
         .unwrap();
     r.land(&approver(), &pa.id).unwrap();
     assert!(r.read().view_head("b").unwrap().closed);
@@ -329,7 +373,14 @@ fn altg1_a_close_reason_shows_in_view_show_and_view_ls() {
     let set = setup(&mut r);
     r.view_close(&writer(), &["c".into()], "by hand").unwrap();
     let p = r
-        .propose_with(&writer(), "a", "x", None, None, Some(&pick(&set, "x")))
+        .propose_with(
+            &writer(),
+            "a",
+            "x",
+            None,
+            Some(TEST_SUMMARY),
+            Some(&pick(&set, "x")),
+        )
         .unwrap();
     r.land(&approver(), &p.id).unwrap();
     let st = r.read();
@@ -365,7 +416,14 @@ fn altg1_a_lost_member_cannot_propose_under_a_later_set_or_a_pick() {
         .unwrap()
         .id;
     let pa = r
-        .propose_with(&writer(), "a", "x", None, None, Some(&pick(&set, "x")))
+        .propose_with(
+            &writer(),
+            "a",
+            "x",
+            None,
+            Some(TEST_SUMMARY),
+            Some(&pick(&set, "x")),
+        )
         .unwrap();
     r.land(&approver(), &pa.id).unwrap();
     assert!(r.undo(&writer(), "b", None, false).unwrap().reopened);
@@ -398,7 +456,14 @@ fn altg1_a_lost_member_cannot_propose_under_a_later_set_or_a_pick() {
     assert!(e.fix.contains("outside the set"), "{}", e.fix);
     // the later set's other member still proposes and lands
     let pd = r
-        .propose_with(&writer(), "d", "q", None, None, Some(&pick(&later, "q")))
+        .propose_with(
+            &writer(),
+            "d",
+            "q",
+            None,
+            Some(TEST_SUMMARY),
+            Some(&pick(&later, "q")),
+        )
         .unwrap();
     r.land(&approver(), &pd.id).unwrap();
     assert!(canon_bodies(&r).iter().any(|b| b == "alt D"));
@@ -459,7 +524,14 @@ fn msw2_a_pre_set_change_two_members_hold_is_common_ground() {
         .unwrap()
         .id;
     let p = r
-        .propose_with(&writer(), "a", "a", None, None, Some(&pick(&set, "x")))
+        .propose_with(
+            &writer(),
+            "a",
+            "a",
+            None,
+            Some(TEST_SUMMARY),
+            Some(&pick(&set, "x")),
+        )
         .unwrap();
     r.land(&approver(), &p.id).unwrap();
     let bodies = canon_bodies(&r);
@@ -731,7 +803,7 @@ fn msw20_a_change_a_member_includes_after_the_set_was_created_is_not_bound() {
         .unwrap();
     r.view_include(&writer(), "d", std::slice::from_ref(&k))
         .unwrap();
-    let p = r.propose(&writer(), "d", "d", None).unwrap();
+    let p = r.propose(&writer(), "d", "d", Some(TEST_SUMMARY)).unwrap();
     r.land(&approver(), &p.id).unwrap();
     assert!(canon_bodies(&r).iter().any(|b| b == "K"));
 }
@@ -749,7 +821,7 @@ fn msw20_common_ground_at_creation_stays_common_when_a_member_excludes_it() {
         .unwrap();
     r.view_include(&writer(), "d", std::slice::from_ref(&g))
         .unwrap();
-    let p = r.propose(&writer(), "d", "d", None).unwrap();
+    let p = r.propose(&writer(), "d", "d", Some(TEST_SUMMARY)).unwrap();
     r.land(&approver(), &p.id).unwrap();
     assert!(canon_bodies(&r).iter().any(|b| b == "ground G"));
 }
@@ -801,7 +873,7 @@ fn msw20_removing_a_member_releases_its_bindings() {
     r.alt_remove(&writer(), &set, "z").unwrap();
     r.view_include(&writer(), "d", std::slice::from_ref(&k))
         .unwrap();
-    let p = r.propose(&writer(), "d", "d", None).unwrap();
+    let p = r.propose(&writer(), "d", "d", Some(TEST_SUMMARY)).unwrap();
     r.land(&approver(), &p.id).unwrap();
     assert!(canon_bodies(&r).iter().any(|b| b == "K"));
 }
@@ -931,7 +1003,7 @@ fn msw20_an_abandoned_set_binds_nothing() {
     let b2 = claim_in(&mut r, "b", &section, "B2");
     r.alt_abandon(&writer(), &set, "neither").unwrap();
     r.view_include(&writer(), "d", &[b, b2]).unwrap();
-    let p = r.propose(&writer(), "d", "d", None).unwrap();
+    let p = r.propose(&writer(), "d", "d", Some(TEST_SUMMARY)).unwrap();
     r.land(&approver(), &p.id).unwrap();
     let bodies = canon_bodies(&r);
     assert!(
@@ -953,7 +1025,14 @@ fn msw20_a_choice_with_no_decision_releases_a_losers_change_only_with_a_new_deci
         .unwrap()
         .id;
     let p = r
-        .propose_with(&writer(), "a", "x", None, None, Some(&pick(&set, "x")))
+        .propose_with(
+            &writer(),
+            "a",
+            "x",
+            None,
+            Some(TEST_SUMMARY),
+            Some(&pick(&set, "x")),
+        )
         .unwrap();
     let landing = r.land(&approver(), &p.id).unwrap();
     r.view_include(&writer(), "d", std::slice::from_ref(&b))
@@ -1067,7 +1146,14 @@ fn msw20_a_losers_own_decision_does_not_release_it_when_the_choice_recorded_none
         .unwrap()
         .change;
     let p = r
-        .propose_with(&writer(), "a", "x", None, None, Some(&pick(&set, "x")))
+        .propose_with(
+            &writer(),
+            "a",
+            "x",
+            None,
+            Some(TEST_SUMMARY),
+            Some(&pick(&set, "x")),
+        )
         .unwrap();
     r.land(&approver(), &p.id).unwrap();
     r.view_include(&writer(), "d", &[b, use_b]).unwrap();
@@ -1127,7 +1213,14 @@ block_types:
         .unwrap()
         .id;
     let p = r
-        .propose_with(&writer(), "a", "x", None, None, Some(&pick(&set, "x")))
+        .propose_with(
+            &writer(),
+            "a",
+            "x",
+            None,
+            Some(TEST_SUMMARY),
+            Some(&pick(&set, "x")),
+        )
         .unwrap();
     r.land(&approver(), &p.id).unwrap();
     r.view_include(&writer(), "d", std::slice::from_ref(&b))
@@ -1244,7 +1337,7 @@ fn msw20_two_holders_when_a_member_joins_make_common_ground() {
         .unwrap();
     r.view_include(&writer(), "d", std::slice::from_ref(&k))
         .unwrap();
-    let p = r.propose(&writer(), "d", "d", None).unwrap();
+    let p = r.propose(&writer(), "d", "d", Some(TEST_SUMMARY)).unwrap();
     r.land(&approver(), &p.id).unwrap();
     assert!(canon_bodies(&r).iter().any(|b| b == "K"));
 }
@@ -1327,7 +1420,14 @@ fn vw1_a_losing_members_version_reads_withdrawn_after_the_choosing_landing() {
     let (_d, mut r) = project();
     let set = setup(&mut r);
     let pa = r
-        .propose_with(&writer(), "a", "x", None, None, Some(&pick(&set, "x")))
+        .propose_with(
+            &writer(),
+            "a",
+            "x",
+            None,
+            Some(TEST_SUMMARY),
+            Some(&pick(&set, "x")),
+        )
         .unwrap();
     let pb = r
         .propose_with(&writer(), "b", "y", None, None, Some(&pick(&set, "y")))

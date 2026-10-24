@@ -5,6 +5,7 @@ use rdy_engine::{Rdy, Scope};
 use rdy_model::*;
 use rdy_qa::edit_loop::spec_doc;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::{assert_not_ready, refused_ref};
 use rdy_qa::tensions::*;
 
 /// `id`'s content in flight (canon's when no in-flight change writes it).
@@ -297,22 +298,30 @@ fn se5_a_refusal_for_an_accepted_semantic_tension_names_a_text_change_not_a_repi
     put(&mut r, "a", upd(&s.c, "C contradicts A."));
     let key = judge(&mut r, &s.a, &s.c);
     accept(&mut r, &key);
+    // D-ME2HD: the tension is a readiness issue, with the cause's fix
     let e = land(&mut r, "a").unwrap_err();
-    assert_eq!(e.code, "E_BLOCKING_TENSION");
+    let pref = refused_ref(&e);
+    let issues = assert_not_ready(&r, &e, &pref, &["E_BLOCKING_TENSION"]);
+    let fix = &issues[0].fix;
     assert!(
-        e.fix
-            .starts_with("change the text of a side, or dismiss it ("),
-        "{}",
-        e.fix
-    );
-    assert!(!e.fix.contains("repin"), "{}", e.fix);
-    // the issue names the landing form, whose id differs from the in-flight one
-    assert_eq!(e.issues.len(), 1);
-    let fix = &e.issues[0].fix;
-    assert!(
-        fix.starts_with("tn-") && fix.ends_with(": change the text of a side, or dismiss it"),
+        fix.starts_with("change the text of a side, or dismiss it ("),
         "{fix}"
     );
+    assert!(!fix.contains("repin"), "{fix}");
+    // the version's listing names the refusing tension
+    let st = r.read();
+    let version = st.proposal_version(&r.resolve_proposal(&pref).unwrap().version);
+    let (listed, _) = st
+        .proposal_tensions(
+            "a",
+            &version.unwrap().changes,
+            &std::collections::BTreeSet::new(),
+            100,
+        )
+        .unwrap();
+    let refusing: Vec<&TensionInfo> = listed.iter().filter(|t| t.refuses == Some(true)).collect();
+    assert_eq!(refusing.len(), 1, "{listed:#?}");
+    assert_eq!(refusing[0].kind, TensionKind::Semantic);
 }
 
 /// guard (fix round 1): an existing kind's refusal keeps its text.
@@ -323,15 +332,18 @@ fn se5_an_existing_kinds_refusal_text_is_unchanged() {
     put(&mut r, "b", cite(&s.section, &s.a));
     put(&mut r, "a", upd(&s.a, "A changed."));
     land(&mut r, "a").unwrap();
+    // D-ME2HD: the cause keeps its message and fix, inside the issue
     let e = land(&mut r, "b").unwrap_err();
-    assert_eq!(e.code, "E_BLOCKING_TENSION");
+    let pref = refused_ref(&e);
+    let issues = assert_not_ready(&r, &e, &pref, &["E_BLOCKING_TENSION"]);
     assert_eq!(
-        e.fix,
+        issues[0].message,
+        format!("landing {pref} would put 1 blocking tension(s) into canon")
+    );
+    assert_eq!(
+        issues[0].fix,
         "resolve each with a change, repin the citation, or dismiss it (rdy resolve <tn-…> --dismiss <reason>; a reviewer of another actor or a human); rdy tensions --involving <change> lists them, a form only this landing gives with its proposal"
     );
-    assert_eq!(e.issues.len(), 1);
-    let fix = &e.issues[0].fix;
-    assert!(fix.starts_with("resolve, repin or dismiss tn-"), "{fix}");
 }
 
 /// Records a tension verdict on `a` and `b` at the given contents.
@@ -412,7 +424,8 @@ fn se5_another_views_edit_of_the_canon_side_keeps_the_tension() {
     let t = one(&r, TensionKind::Semantic);
     assert_eq!(t.severity, TensionSeverity::Blocking);
     assert_eq!(change_sides(&t), vec![change_of(&wa)]);
-    assert_eq!(land(&mut r, "a").unwrap_err().code, "E_BLOCKING_TENSION");
+    let e = land(&mut r, "a").unwrap_err();
+    assert_not_ready(&r, &e, &refused_ref(&e), &["E_BLOCKING_TENSION"]);
 }
 
 /// guard (final ruling 2): a view that edits the canon side itself holds its own text there, so

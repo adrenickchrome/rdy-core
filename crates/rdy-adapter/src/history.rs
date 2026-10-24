@@ -172,7 +172,12 @@ mod tests {
         );
         let secret = w.created["$p"].clone();
         let p = r
-            .propose(&session(Role::Writer), "work", "first", None)
+            .propose(
+                &session(Role::Writer),
+                "work",
+                "first",
+                Some("test summary"),
+            )
             .unwrap();
         let l1: Hash = r
             .land(&session(Role::Approver), &p.id)
@@ -194,7 +199,7 @@ mod tests {
                     r,
                     json!([{"op": "create", "type": "doc", "fields": {"title": title, "doc_type": "page"}}]),
                 );
-                let p = r.propose(&session(Role::Writer), "work", title, None)?;
+                let p = r.propose(&session(Role::Writer), "work", title, Some("test summary"))?;
                 let l = r.land(&session(Role::Approver), &p.id)?;
                 if let Some(name) = tag {
                     r.tag(&session(Role::Approver), name, None, None)?;
@@ -441,7 +446,12 @@ mod tests {
                         r,
                         json!([{"op": "create", "type": "doc", "fields": {"title": "later", "doc_type": "page"}}]),
                     );
-                    let p = r.propose(&session(Role::Writer), "work", "later", None)?;
+                    let p = r.propose(
+                        &session(Role::Writer),
+                        "work",
+                        "later",
+                        Some("test summary"),
+                    )?;
                     let l = r.land(&session(Role::Approver), &p.id)?;
                     r.store_mut().put_signature(&Signature {
                         subject: l1,

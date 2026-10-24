@@ -215,7 +215,7 @@ fn ib4_a_reviewer_who_wrote_the_items_gets_no_review_request() {
     let rv = Session::agent("agent:rv".into(), Some("rv".into()), Role::Reviewer).unwrap();
     let rvs = sub_at_head(&r, &rv, &[]);
     // human:qa wrote the canon side of every request (the spec)
-    let qa = Session::human("human:qa".into(), Role::Reviewer);
+    let qa = Session::human("human:qa".into(), Role::Reviewer).unwrap();
     let qas = sub_at_head(&r, &qa, &[]);
     put(&mut r, "a", upd(&spec.c, "C contradicts B."));
     assert_eq!(events(&entries(&r, &rvs)), ["review_requested"]);

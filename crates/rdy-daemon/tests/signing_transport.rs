@@ -280,7 +280,7 @@ impl Handler for Signer {
                 let e = self.engine.as_ref().expect("an engine");
                 write_typed(&**e, |r| {
                     let ops = serde_json::from_value(json!([{"op": "create", "type": "doc", "id": "$d", "fields": {"name": "w", "title": "W", "doc_type": "page"}}])).unwrap();
-                    let s = Session::human("human:t".into(), Role::Writer);
+                    let s = Session::human("human:t".into(), Role::Writer).unwrap();
                     r.write(&s, WriteRequest { view: "work".into(), ops, justification: None, message: String::new() })
                 })
                 .map_err(ErrorReply::from)
@@ -1108,7 +1108,7 @@ async fn sig5_direct_cli_and_stdio_receive_the_caller_agent() {
             let dir = tempfile::tempdir().unwrap();
             let local =
                 rdy_engine::engine::Local::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
-            let s = Session::human("human:t".into(), Role::Writer);
+            let s = Session::human("human:t".into(), Role::Writer).unwrap();
             let keys =
                 rdy_daemon::ops::with_direct_context(&local, &s, "human:t", dir.path(), |cx| {
                     for op in ["status", "ls", "log", "tags"] {

@@ -176,7 +176,7 @@ fn rf12_trace_refusals_cross_both_boundaries() {
     // max_tokens and an unknown key: MCP and the daemon's JSON op
     let (dir2, r2) = project();
     let e2 = Local::new(r2);
-    let human = Session::human("human:qa".into(), Role::Reader);
+    let human = Session::human("human:qa".into(), Role::Reader).unwrap();
     let cx = OpContext {
         engine: &e2,
         session: &human,
@@ -288,7 +288,7 @@ fn rf12_trace_is_registered_as_an_epoch_guarded_read() {
     // a read, not a write: nothing is appended in this process's engine either
     let (dir2, r2) = project();
     let e2 = Local::new(r2);
-    let human = Session::human("human:qa".into(), Role::Reader);
+    let human = Session::human("human:qa".into(), Role::Reader).unwrap();
     let cx = OpContext {
         engine: &e2,
         session: &human,
@@ -319,7 +319,7 @@ fn rf12_trace_is_registered_as_an_epoch_guarded_read() {
         from_value(json!({"actor": "agent:qa", "run": "qa", "role": "reader"})).unwrap(),
     )
     .unwrap();
-    let human = Session::human("human:qa".into(), Role::Reader);
+    let human = Session::human("human:qa".into(), Role::Reader).unwrap();
     let cx3 = OpContext {
         engine: &*served,
         session: &human,

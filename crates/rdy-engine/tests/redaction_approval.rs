@@ -25,15 +25,15 @@ const PERSON: &str = "human:t";
 const QUARANTINE: &str = "Quarantine files may hold the content. Redaction does not remove them. A person can run rdy fsck --clean-quarantine.";
 
 fn writer() -> Session {
-    Session::human(PERSON.into(), Role::Writer)
+    Session::human(PERSON.into(), Role::Writer).unwrap()
 }
 
 fn reviewer() -> Session {
-    Session::human(PERSON.into(), Role::Reviewer)
+    Session::human(PERSON.into(), Role::Reviewer).unwrap()
 }
 
 fn approver() -> Session {
-    Session::human(PERSON.into(), Role::Approver)
+    Session::human(PERSON.into(), Role::Approver).unwrap()
 }
 
 fn agent() -> Session {
@@ -97,7 +97,9 @@ fn landed_with(body: &str) -> P {
             {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Ledger"}, "body": "A ledger."}
         ]),
     );
-    let prop = r.propose(&writer(), "work", "Base", None).unwrap();
+    let prop = r
+        .propose(&writer(), "work", "Base", Some("test summary"))
+        .unwrap();
     let landing = r.land(&approver(), &prop.id).unwrap();
     r.tag(&approver(), "v1.0.0", None, None).unwrap();
     P {
@@ -682,7 +684,9 @@ fn rdx10_redaction_moves_are_logged_in_the_authorizing_batch() {
         ]),
     );
     let twin = id(&w.created["$t"]);
-    let base = p.r.propose(&writer(), "work", "Glossary", None).unwrap();
+    let base =
+        p.r.propose(&writer(), "work", "Glossary", Some("test summary"))
+            .unwrap();
     p.r.land(&approver(), &base.id).unwrap();
     let v =
         p.r.read()

@@ -40,11 +40,11 @@ const REFRESH: &str = "rdyh_r_efghijklmnopqrstuvwxyz0123456789ABCDEFGH3qAvLC";
 const T0: i64 = 1_800_000_000_000;
 
 fn writer() -> Session {
-    Session::human("human:founder".into(), Role::Writer)
+    Session::human("human:founder".into(), Role::Writer).unwrap()
 }
 
 fn founder() -> Session {
-    Session::human("human:founder".into(), Role::Approver)
+    Session::human("human:founder".into(), Role::Approver).unwrap()
 }
 
 fn write(r: &mut Rdy, ops: Value) -> WriteResult {
@@ -61,7 +61,9 @@ fn write(r: &mut Rdy, ops: Value) -> WriteResult {
 }
 
 fn land(r: &mut Rdy) {
-    let p = r.propose(&writer(), "work", "hpb14", None).unwrap();
+    let p = r
+        .propose(&writer(), "work", "hpb14", Some("test summary"))
+        .unwrap();
     r.land(&founder(), &p.id).unwrap();
 }
 

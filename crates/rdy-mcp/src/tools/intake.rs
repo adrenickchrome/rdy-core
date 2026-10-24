@@ -92,7 +92,7 @@ pub fn evidence_kind(kind: Option<&str>) -> Result<Option<EvidenceKind>, RdyErro
 pub fn rdy_pending(st: &mut McpState, p: PendingParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
-    let person = human_actor_for_env(&st.engine.root());
+    let person = human_actor_for_env(&st.engine.root())?;
     let q = st.engine.read().pending(&PendingQuery {
         person,
         session_ref: p.session_ref,
@@ -105,7 +105,7 @@ pub fn rdy_pending(st: &mut McpState, p: PendingParams) -> Result<Value, RdyErro
 /// relayed by this agent session. The person is the project's human actor (O18).
 pub fn rdy_answer(st: &mut McpState, p: AnswerParams) -> Result<Value, RdyError> {
     let s = session(st)?;
-    let person = human_actor_for_env(&st.engine.root());
+    let person = human_actor_for_env(&st.engine.root())?;
     let relay = RelayInput {
         relayed_by: None,
         evidence: Some(p.evidence),

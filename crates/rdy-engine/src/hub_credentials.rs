@@ -38,9 +38,10 @@ use crate::hub_config::{
 use crate::hub_http::route;
 use crate::hub_types::{
     DevicePollReply, HubCall, HubClock, HubFailure, HubMetadata, HubOperation, HubReply,
-    HubTransport, MAX_ACTOR_BYTES, MAX_CONFIG_BYTES, Origin, RefreshReply, RequestClaim, Secret,
-    TokenPair, check_machine_name, deadline_ms, slow_down,
+    HubTransport, MAX_CONFIG_BYTES, Origin, RefreshReply, RequestClaim, Secret, TokenPair,
+    check_machine_name, deadline_ms, slow_down,
 };
+use crate::identity;
 use crate::session::Session;
 use rdy_model::{EvidenceKind, Hash};
 use rdy_schema::Issue;
@@ -222,12 +223,10 @@ fn card_hash(card: &str) -> String {
     Hash::of(card.as_bytes()).to_string()
 }
 
-/// Whether `handle` makes a human actor the hub grammar takes: 1 or more visible ASCII
-/// characters within the actor bound (the rule of `RequestClaim::bind_human`).
+/// Whether `handle` makes a human actor: a name (`identity::is_name`), the rule of
+/// `RequestClaim::bind_human`.
 fn handle_ok(handle: &str) -> bool {
-    !handle.is_empty()
-        && HUMAN_PREFIX.len() + handle.len() <= MAX_ACTOR_BYTES
-        && handle.bytes().all(|b| (0x21..=0x7e).contains(&b))
+    identity::is_name(handle)
 }
 
 /// Whether a ready record's access has more than [`ACCESS_MARGIN_MS`] left at `now`.
@@ -634,6 +633,9 @@ impl<'a> HubCredentials<'a> {
         pair.validate().map_err(|_| auth())?;
         let me = match self.me(install, &d.ca_file, &pair.access_token) {
             Ok(HubReply::Me(me)) if handle_ok(&me.handle) => me,
+            // A handle outside the actor form is the hub's malformed reply, not a sign-in to
+            // repeat. Nothing is saved.
+            Ok(HubReply::Me(_)) | Err(HubFailure::InvalidHandle) => return Err(upstream_protocol()),
             _ => return Err(auth()),
         };
         let ready = ReadyCredential {

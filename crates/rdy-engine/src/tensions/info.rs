@@ -201,9 +201,10 @@ pub struct AcceptanceInfo {
     pub actor: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
-    /// `actor[/run]` of the agent that relayed the answer at the command line.
+    /// The agent that relayed the answer, its actor and run apart (D-PWB82); an absent run is
+    /// null.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub relayed_by: Option<String>,
+    pub relayed_by: Option<rdy_model::ActorRun>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -294,10 +295,7 @@ impl ReadState {
             AcceptanceInfo {
                 actor: p.actor.clone(),
                 run: p.run.clone(),
-                relayed_by: rec.relayed_by.as_ref().map(|b| match &b.run {
-                    Some(run) => format!("{}/{run}", b.actor),
-                    None => b.actor.clone(),
-                }),
+                relayed_by: rec.relayed_by.clone(),
                 evidence: relay.map(|e| e.quoted.clone()),
                 question: relay.and_then(|e| e.question.clone()),
                 session_ref: relay.map(|e| e.session_ref.clone()),

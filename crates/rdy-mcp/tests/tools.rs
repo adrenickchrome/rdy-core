@@ -195,9 +195,9 @@ fn failed_session_leaves_state_unchanged() {
     let (_d, mut st) = state();
     start(&mut st);
     for bad in [
-        json!({"actor": "a", "role": "writer", "view": "canon"}),
-        json!({"actor": "a", "role": "writer", "run": "canon"}),
-        json!({"actor": "a", "role": "boss"}),
+        json!({"actor": "agent:a", "role": "writer", "view": "canon"}),
+        json!({"actor": "agent:a", "role": "writer", "run": "canon"}),
+        json!({"actor": "agent:a", "role": "boss"}),
     ] {
         assert!(rdy_session(&mut st, serde_json::from_value(bad).unwrap()).is_err());
         assert_eq!(st.view, "run-7");
@@ -331,7 +331,7 @@ fn land_and_tag(st: &mut McpState) -> String {
     seed(st);
     let p = rdy_propose(
         st,
-        serde_json::from_value(json!({"title": "seed"})).unwrap(),
+        serde_json::from_value(json!({"title": "seed", "summary": "test summary"})).unwrap(),
     )
     .unwrap();
     let pid = p["id"].as_str().unwrap().to_string();
@@ -346,14 +346,20 @@ fn land_and_tag(st: &mut McpState) -> String {
 #[test]
 fn run_ids_with_colons_become_view_names_without() {
     let (_d, mut st) = state();
-    let r = rdy_session(
+    // id3 (D-ME2C0): a run holds no ':', so the session is refused with the run's form
+    let e = rdy_session(
         &mut st,
         serde_json::from_value(json!({"actor": "agent:x", "run": "batch:7:a", "role": "writer"}))
             .unwrap(),
     )
-    .unwrap();
-    assert_eq!(r["view"], "batch-7-a");
-    assert_eq!(st.view, "batch-7-a");
+    .unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT");
+    assert_eq!(e.message, "the run \"batch:7:a\" is not in rdy's run form");
+    assert_eq!(
+        e.fix,
+        "use 1 to 64 letters, digits, -, _ or ., with a letter or digit at each end; not none, work, canon, inflight or reaffirm-\u{2026}"
+    );
+    assert!(st.session.is_none(), "no session was set");
     let e = rdy_session(
         &mut st,
         serde_json::from_value(json!({"actor": "agent:x", "role": "writer", "view": "a:b"}))
@@ -621,7 +627,7 @@ fn chain1_overview_counts_each_views_changes() {
     assert_eq!(views(&mut st), json!([{"name": "run-7", "changes": 2}]));
     let p = rdy_propose(
         &mut st,
-        serde_json::from_value(json!({"title": "two"})).unwrap(),
+        serde_json::from_value(json!({"title": "two", "summary": "test summary"})).unwrap(),
     )
     .unwrap();
     let pid = p["id"].as_str().unwrap().to_string();
@@ -760,7 +766,7 @@ fn ib3_overview_at_a_past_landing_leaves_coverage_out() {
     .unwrap();
     let p = rdy_propose(
         &mut st,
-        serde_json::from_value(json!({"title": "later"})).unwrap(),
+        serde_json::from_value(json!({"title": "later", "summary": "test summary"})).unwrap(),
     )
     .unwrap();
     let pid = p["id"].as_str().unwrap().to_string();

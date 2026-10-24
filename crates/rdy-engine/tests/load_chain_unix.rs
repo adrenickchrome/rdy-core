@@ -14,11 +14,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 fn writer() -> Session {
-    Session::human("human:t".into(), Role::Writer)
+    Session::human("human:t".into(), Role::Writer).unwrap()
 }
 
 fn approver() -> Session {
-    Session::human("human:t".into(), Role::Approver)
+    Session::human("human:t".into(), Role::Approver).unwrap()
 }
 
 /// Writes one doc with a prose block to view `work`, then lands it.
@@ -37,7 +37,9 @@ fn add_and_land(r: &mut Rdy, n: usize) {
         },
     )
     .unwrap();
-    let p = r.propose(&writer(), "work", "Work", None).unwrap();
+    let p = r
+        .propose(&writer(), "work", "Work", Some("test summary"))
+        .unwrap();
     r.land(&approver(), &p.id).unwrap();
 }
 

@@ -27,11 +27,11 @@ const EXPORT_FIX: &str =
     "follow the newest file of this store's chain, or start a new chain with rdy dump";
 
 fn writer() -> Session {
-    Session::human("human:t".into(), Role::Writer)
+    Session::human("human:t".into(), Role::Writer).unwrap()
 }
 
 fn approver() -> Session {
-    Session::human("human:t".into(), Role::Approver)
+    Session::human("human:t".into(), Role::Approver).unwrap()
 }
 
 /// Writes one doc with a prose block to view `work`: one ordinary batch (or more).
@@ -56,7 +56,9 @@ fn add(r: &mut Rdy, n: usize, body: &str) -> String {
 
 /// Lands view `work`.
 fn land(r: &mut Rdy) {
-    let p = r.propose(&writer(), "work", "Work", None).unwrap();
+    let p = r
+        .propose(&writer(), "work", "Work", Some("test summary"))
+        .unwrap();
     r.land(&approver(), &p.id).unwrap();
 }
 
@@ -802,7 +804,7 @@ fn removable(dir: &Path) -> (Rdy, ProposalInfo, Arc<ReadState>) {
     )
     .unwrap();
     let prop = r
-        .propose(&writer(), "redact", "Remove the code", None)
+        .propose(&writer(), "redact", "Remove the code", Some("test summary"))
         .unwrap();
     (r, prop, early)
 }
