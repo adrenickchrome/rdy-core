@@ -144,7 +144,16 @@ fn refused_by_feature(dir: &Path) {
 fn fmt2_a_store_of_a_newer_format_is_refused_before_anything_is_opened() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    Store::create(&dir).unwrap().put_blob(b"x").unwrap();
+    let mut s = Store::create(&dir).unwrap();
+    s.put_blob(b"x").unwrap();
+    // a newer rdy's store: its log's features ref and its FORMAT both name the feature (a FORMAT
+    // alone that lists more than its sealed log is a failed first use's leftover, and opens)
+    s.set_refs_unchecked_for_tests(vec![(
+        rdy_store::format::REF_STORE_FEATURES.into(),
+        newer().to_json(),
+    )])
+    .unwrap();
+    drop(s);
     std::fs::write(dir.join("FORMAT"), newer().to_text()).unwrap();
     let before = tree(&dir);
     refused_by_feature(&dir);

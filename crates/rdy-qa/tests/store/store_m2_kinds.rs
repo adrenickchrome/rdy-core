@@ -111,6 +111,15 @@ fn sg6_a_store_of_the_next_format_is_refused_and_untouched() {
         class: rdy_store::format::FeatureClass::Incompatible,
         required_rdy: "99.0.0".into(),
     }]);
+    // the log's features ref names it too: a FORMAT alone that lists more than its sealed log
+    // is a failed first use's leftover, and opens
+    let mut s = rdy_store::Store::open(&project.join(".rdy/store")).unwrap();
+    s.set_refs_unchecked_for_tests(vec![(
+        rdy_store::format::REF_STORE_FEATURES.into(),
+        next.to_json(),
+    )])
+    .unwrap();
+    drop(s);
     std::fs::write(project.join(".rdy/store/FORMAT"), next.to_text()).unwrap();
     let before = tree(&project);
     let e = Rdy::open(&project)
