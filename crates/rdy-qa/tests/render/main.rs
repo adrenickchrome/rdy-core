@@ -4,6 +4,7 @@
 mod render;
 mod render_build;
 mod render_changes;
+mod render_diagram_environment;
 mod render_diagrams;
 mod render_disagree;
 mod render_disagree_group;

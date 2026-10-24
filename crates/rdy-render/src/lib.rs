@@ -35,6 +35,8 @@ mod version;
 
 pub use html::{Link, escape, text_html};
 pub use one_page::{RenderedPage, render_publication_page};
+/// Diagrams drawn as SVG, behind the one pinned crate (D-FY4VF).
+pub use rdy_diagram as diagram;
 
 use prepare::{Presentation, ProfilePresentation};
 use rdy_engine::publication::PublicationSource;

@@ -1,0 +1,13 @@
+flowchart LR
+    subgraph S1[first]
+        A1[A] --> B1[B]
+    end
+    subgraph S2[second]
+        A2[A] --> B2[B]
+    end
+    subgraph S3[third]
+        A3[A] --> B3[B]
+    end
+    B1 --> A2
+    B2 --> A3
+    B3 --> A1

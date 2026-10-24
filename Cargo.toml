@@ -9,6 +9,7 @@ version = "0.22.0"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+rdy-diagram = { path = "crates/rdy-diagram" }
 rdy-model = { path = "crates/rdy-model" }
 rdy-schema = { path = "crates/rdy-schema" }
 rdy-store = { path = "crates/rdy-store" }
@@ -62,6 +63,8 @@ crc32fast = "=1.5.0"
 time = { version = "=0.3.55", features = ["parsing", "formatting"] }
 # Dependency logging facade; the engine caps it at compile time so no record is ever written.
 log = "=0.4.34"
+# Diagrams: Mermaid source drawn as SVG, behind rdy-diagram alone (D-FY4VF, D-KAGB2).
+mmdflux = { version = "=2.6.1", default-features = false }
 # QA release notices: Cargo.lock parsing.
 toml = { version = "=0.9.8", default-features = false, features = ["parse", "serde", "std"] }
 # QA release notices: SPDX license expressions.

@@ -1,0 +1,8 @@
+flowchart TD
+    A[A's start] --> B{B}
+    B -->|first| C[first's step]
+    B -->|second| D[second's step]
+    C --> E[third]
+    D --> F[A's retry]
+    F --> G[B's check]
+    G --> E

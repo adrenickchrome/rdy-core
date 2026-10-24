@@ -1571,7 +1571,7 @@ mod tests {
         for target in TARGETS {
             let (notices, crates) = inventory(target, &release).expect("inventory");
             let names: BTreeSet<&str> = crates.iter().map(|c| c.name.as_str()).collect();
-            assert_eq!(crates.len(), 172, "{target}: linked crates.io packages");
+            assert_eq!(crates.len(), 178, "{target}: linked crates.io packages");
             for absent in [
                 // build-only and proc-macro (or proc-macro-only) packages
                 "autocfg",
@@ -1607,7 +1607,7 @@ mod tests {
             assert_eq!(notices.mpl, locked_mpl(), "{target}");
             assert_eq!(
                 headings(&notices.bytes).len(),
-                172,
+                178,
                 "{target}: one entry each"
             );
             let text = String::from_utf8(notices.bytes.clone()).expect("utf-8");
@@ -1623,6 +1623,67 @@ mod tests {
             for_target("x86_64-apple-darwin"),
             Err(MSG_INVALID_ARGUMENTS.to_string())
         );
+    }
+
+    /// The runtime packages the pinned diagram crate adds to the release binary, sorted.
+    const DIAGRAM_RUNTIME: [(&str, &str, &str); 6] = [
+        ("mmdflux", "2.6.1", "MIT"),
+        ("pest", "2.9.4", "MIT OR Apache-2.0"),
+        ("psm", "0.1.24", "MIT OR Apache-2.0"),
+        ("stacker", "0.1.25", "MIT OR Apache-2.0"),
+        ("ucd-trie", "0.1.7", "MIT OR Apache-2.0"),
+        ("unicode-width", "0.2.2", "MIT OR Apache-2.0"),
+    ];
+
+    #[test]
+    fn dgm1_release_notices_cover_the_resolved_runtime_graph() {
+        let release = Sources::release();
+        for target in TARGETS {
+            let (notices, crates) = inventory(target, &release).expect("inventory");
+            // every linked package once, sorted by name and then version bytes
+            let mut covered: Vec<(&str, &str)> = crates
+                .iter()
+                .map(|c| (c.name.as_str(), c.version.as_str()))
+                .collect();
+            covered.sort_by(|a, b| by_name_version(*a, *b));
+            covered.dedup();
+            assert_eq!(covered.len(), crates.len(), "{target}: each package once");
+            let want: Vec<String> = covered.iter().map(|(n, v)| format!("{n} {v}")).collect();
+            assert_eq!(headings(&notices.bytes), want, "{target}: sorted coverage");
+            // the diagram crate's runtime closure, each with its own license files
+            let text = String::from_utf8(notices.bytes.clone()).expect("utf-8");
+            for (name, version, license) in DIAGRAM_RUNTIME {
+                let c = crates
+                    .iter()
+                    .find(|c| c.name == name && c.version == version)
+                    .unwrap_or_else(|| panic!("{target}: links {name} {version}"));
+                assert_eq!(c.license.as_deref(), Some(license), "{target}: {name}");
+                let files = license_files(&c.dir).expect("license files");
+                assert!(!files.is_empty(), "{target}: {name} ships a license file");
+                assert!(
+                    text.contains(&format!("{name} {version}\nLicense: {license}\n")),
+                    "{target}: {name}'s entry"
+                );
+                for file in &files {
+                    assert!(
+                        text.contains(&format!("\n--- {file} ---\n")),
+                        "{name}: {file}"
+                    );
+                }
+            }
+            // build-only and proc-macro additions are not linked; valuable is not in the graph
+            let names: BTreeSet<&str> = crates.iter().map(|c| c.name.as_str()).collect();
+            for absent in ["pest_derive", "pest_generator", "pest_meta", "valuable"] {
+                assert!(!names.contains(absent), "{target} links no {absent}");
+            }
+            // no license text is checked in for them, and the MPL set is unchanged
+            assert!(
+                OVERRIDES
+                    .iter()
+                    .all(|o| DIAGRAM_RUNTIME.iter().all(|(n, _, _)| o.name != *n))
+            );
+            assert_eq!(notices.mpl, locked_mpl(), "{target}: the MPL set");
+        }
     }
 
     #[test]

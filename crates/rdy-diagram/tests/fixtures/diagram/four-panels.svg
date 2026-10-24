@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 247.34 728.00" style="max-width: 247.34px; background-color: #ffffff; --bg:#ffffff; --fg:#27272a; --line:#939395; --accent:#47474a; --muted:#a9a9aa; --surface:#f9f9f9; --border:#d4d4d4; --cluster-bkg:#f9f9f9; --note-fill:#f9f9f9;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <style>
+    svg {
+      --_text: var(--fg);
+      --_text-sec: color-mix(in srgb, var(--fg) 60%, var(--bg));
+      --_text-muted: var(--muted);
+      --_text-faint: color-mix(in srgb, var(--fg) 25%, var(--bg));
+      --_line: var(--line);
+      --_arrow: var(--accent);
+      --_node-fill: var(--surface);
+      --_node-stroke: var(--border);
+      --_group-fill: var(--bg);
+      --_cluster-bkg: var(--cluster-bkg);
+      --_note-fill: var(--note-fill);
+    }
+  </style>
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#47474a" data-svg-role="graph-marker-fill" style="fill:var(--_arrow);" />
+    </marker>
+  </defs>
+  <g transform="translate(-20.00,-27.00)">
+    <g class="clusters">
+      <g class="cluster" id="P1" data-id="P1" data-look="classic">
+        <rect class="subgraph" x="38.00" y="35.00" width="221.34" height="100.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" data-svg-role="graph-subgraph-rect" style="fill:var(--_cluster-bkg);stroke:var(--_node-stroke);" />
+        <text x="148.67" y="39.00" text-anchor="middle" dominant-baseline="hanging" fill="#27272a" data-svg-role="graph-subgraph-text" style="fill:var(--_text);">first</text>
+      </g>
+      <g class="cluster" id="P2" data-id="P2" data-look="classic">
+        <rect class="subgraph" x="38.00" y="239.00" width="221.34" height="100.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" data-svg-role="graph-subgraph-rect" style="fill:var(--_cluster-bkg);stroke:var(--_node-stroke);" />
+        <text x="148.67" y="243.00" text-anchor="middle" dominant-baseline="hanging" fill="#27272a" data-svg-role="graph-subgraph-text" style="fill:var(--_text);">second</text>
+      </g>
+      <g class="cluster" id="P3" data-id="P3" data-look="classic">
+        <rect class="subgraph" x="38.00" y="443.00" width="221.34" height="100.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" data-svg-role="graph-subgraph-rect" style="fill:var(--_cluster-bkg);stroke:var(--_node-stroke);" />
+        <text x="148.67" y="447.00" text-anchor="middle" dominant-baseline="hanging" fill="#27272a" data-svg-role="graph-subgraph-text" style="fill:var(--_text);">third</text>
+      </g>
+      <g class="cluster" id="P4" data-id="P4" data-look="classic">
+        <rect class="subgraph" x="28.00" y="647.00" width="221.34" height="100.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" data-svg-role="graph-subgraph-rect" style="fill:var(--_cluster-bkg);stroke:var(--_node-stroke);" />
+        <text x="138.67" y="651.00" text-anchor="middle" dominant-baseline="hanging" fill="#27272a" data-svg-role="graph-subgraph-text" style="fill:var(--_text);">fourth</text>
+      </g>
+    </g>
+    <g class="edgePaths">
+      <path d="M123.67,93.00 L169.67,93.00" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" marker-end="url(#arrowhead)" />
+      <path d="M123.67,297.00 L169.67,297.00" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" marker-end="url(#arrowhead)" />
+      <path d="M123.67,501.00 L169.67,501.00" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" marker-end="url(#arrowhead)" />
+      <path d="M113.67,705.00 L159.67,705.00" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" marker-end="url(#arrowhead)" />
+      <path d="M209.01,120.00 L209.01,190.00 Q209.01,195.00 204.01,195.00 L93.34,195.00 Q88.34,195.00 88.34,200.00 L88.34,266.00" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" marker-end="url(#arrowhead)" />
+      <path d="M209.01,324.00 L209.01,394.00 Q209.01,399.00 204.01,399.00 L93.34,399.00 Q88.34,399.00 88.34,404.00 L88.34,470.00" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" marker-end="url(#arrowhead)" />
+      <path d="M209.01,528.00 L209.01,598.00 Q209.01,603.00 204.01,603.00 L83.34,603.00 Q78.34,603.00 78.34,608.00 L78.34,674.00" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="A1" data-id="A1" data-look="classic">
+        <rect x="53.00" y="66.00" width="70.67" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="88.34" y="93.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">A</text>
+      </g>
+      <g class="node default" id="A2" data-id="A2" data-look="classic">
+        <rect x="53.00" y="270.00" width="70.67" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="88.34" y="297.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">A</text>
+      </g>
+      <g class="node default" id="A3" data-id="A3" data-look="classic">
+        <rect x="53.00" y="474.00" width="70.67" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="88.34" y="501.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">A</text>
+      </g>
+      <g class="node default" id="A4" data-id="A4" data-look="classic">
+        <rect x="43.00" y="678.00" width="70.67" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="78.34" y="705.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">A</text>
+      </g>
+      <g class="node default" id="B1" data-id="B1" data-look="classic">
+        <rect x="173.67" y="66.00" width="70.67" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="209.01" y="93.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">B</text>
+      </g>
+      <g class="node default" id="B2" data-id="B2" data-look="classic">
+        <rect x="173.67" y="270.00" width="70.67" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="209.01" y="297.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">B</text>
+      </g>
+      <g class="node default" id="B3" data-id="B3" data-look="classic">
+        <rect x="173.67" y="474.00" width="70.67" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="209.01" y="501.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">B</text>
+      </g>
+      <g class="node default" id="B4" data-id="B4" data-look="classic">
+        <rect x="163.67" y="678.00" width="70.67" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="199.01" y="705.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">B</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+    </g>
+  </g>
+</svg>

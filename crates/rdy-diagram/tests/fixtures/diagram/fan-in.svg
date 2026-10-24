@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 404.49 174.00" style="max-width: 404.49px; background-color: #ffffff; --bg:#ffffff; --fg:#27272a; --line:#939395; --accent:#47474a; --muted:#a9a9aa; --surface:#f9f9f9; --border:#d4d4d4; --cluster-bkg:#f9f9f9; --note-fill:#f9f9f9;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <style>
+    svg {
+      --_text: var(--fg);
+      --_text-sec: color-mix(in srgb, var(--fg) 60%, var(--bg));
+      --_text-muted: var(--muted);
+      --_text-faint: color-mix(in srgb, var(--fg) 25%, var(--bg));
+      --_line: var(--line);
+      --_arrow: var(--accent);
+      --_node-fill: var(--surface);
+      --_node-stroke: var(--border);
+      --_group-fill: var(--bg);
+      --_cluster-bkg: var(--cluster-bkg);
+      --_note-fill: var(--note-fill);
+    }
+  </style>
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#47474a" data-svg-role="graph-marker-fill" style="fill:var(--_arrow);" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M85.77,62.00 L85.77,68.40 Q85.77,73.40 90.77,73.40 L167.23,73.40 Q172.23,73.40 172.23,78.40 L172.23,108.00" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" marker-end="url(#arrowhead)" />
+      <path d="M199.57,62.00 L199.57,108.00" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" marker-end="url(#arrowhead)" />
+      <path d="M313.37,62.00 L313.37,68.40 Q313.37,73.40 308.37,73.40 L231.91,73.40 Q226.91,73.40 226.91,78.40 L226.91,108.00" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="A" data-id="A" data-look="classic">
+        <rect x="8.00" y="8.00" width="85.77" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="50.89" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">first</text>
+      </g>
+      <g class="node default" id="B" data-id="B" data-look="classic">
+        <rect x="143.77" y="8.00" width="111.59" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="199.57" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">second</text>
+      </g>
+      <g class="node default" id="C" data-id="C" data-look="classic">
+        <rect x="305.37" y="8.00" width="91.12" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="350.93" y="35.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">third</text>
+      </g>
+      <g class="node default" id="D" data-id="D" data-look="classic">
+        <rect x="164.23" y="112.00" width="70.67" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="199.57" y="139.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">B</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+    </g>
+  </g>
+</svg>

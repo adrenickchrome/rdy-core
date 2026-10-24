@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 304.51 274.00" style="max-width: 304.51px; background-color: #ffffff; --bg:#ffffff; --fg:#27272a; --line:#939395; --accent:#47474a; --muted:#a9a9aa; --surface:#f9f9f9; --border:#d4d4d4; --cluster-bkg:#f9f9f9; --note-fill:#f9f9f9;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <style>
+    svg {
+      --_text: var(--fg);
+      --_text-sec: color-mix(in srgb, var(--fg) 60%, var(--bg));
+      --_text-muted: var(--muted);
+      --_text-faint: color-mix(in srgb, var(--fg) 25%, var(--bg));
+      --_line: var(--line);
+      --_arrow: var(--accent);
+      --_node-fill: var(--surface);
+      --_node-stroke: var(--border);
+      --_group-fill: var(--bg);
+      --_cluster-bkg: var(--cluster-bkg);
+      --_note-fill: var(--note-fill);
+    }
+  </style>
+  <defs>
+    <marker id="seq-arrowhead" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#47474a" data-svg-role="sequence-marker-fill" style="fill:var(--_arrow);" />
+    </marker>
+  </defs>
+  <g class="lifelines">
+    <line x1="65.16" y1="54.00" x2="65.16" y2="264.00" stroke="#939395" stroke-width="1" stroke-dasharray="5,5" data-svg-role="sequence-line" style="stroke:var(--_line);" />
+    <line x1="252.90" y1="54.00" x2="252.90" y2="264.00" stroke="#939395" stroke-width="1" stroke-dasharray="5,5" data-svg-role="sequence-line" style="stroke:var(--_line);" />
+  </g>
+  <g class="participants">
+    <rect x="10.00" y="10.00" width="110.32" height="44.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1" data-svg-role="sequence-participant-box" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+    <text x="65.16" y="32.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="sequence-text" style="fill:var(--_text);">first #35;1</text>
+    <rect x="211.29" y="10.00" width="83.23" height="44.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1" data-svg-role="sequence-participant-box" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+    <text x="252.90" y="32.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="sequence-text" style="fill:var(--_text);">second</text>
+  </g>
+  <g class="events">
+    <line x1="65.16" y1="74.00" x2="252.90" y2="74.00" stroke="#939395" stroke-width="1" marker-end="url(#seq-arrowhead)" data-svg-role="sequence-line" style="stroke:var(--_line);"/>
+    <text x="159.03" y="70.00" text-anchor="middle" dominant-baseline="auto" fill="#27272a" data-svg-role="sequence-text" style="fill:var(--_text);">ask #60;x#62;</text>
+    <line x1="252.90" y1="124.00" x2="65.16" y2="124.00" stroke="#939395" stroke-width="1" stroke-dasharray="6,4" marker-end="url(#seq-arrowhead)" data-svg-role="sequence-line" style="stroke:var(--_line);"/>
+    <text x="159.03" y="120.00" text-anchor="middle" dominant-baseline="auto" fill="#27272a" data-svg-role="sequence-text" style="fill:var(--_text);">answer #123;y#125;</text>
+    <path d="M 55.16 174.00 L 255.90 174.00 L 262.90 181.00 L 262.90 214.00 L 55.16 214.00 Z" fill="#f9f9f9" stroke="#939395" stroke-width="1" data-svg-role="sequence-note" style="fill:var(--_note-fill);stroke:var(--_line);" />
+    <path d="M 255.90 174.00 L 255.90 181.00 L 262.90 181.00" fill="none" stroke="#939395" stroke-width="1" data-svg-role="sequence-line" style="stroke:var(--_line);" />
+    <text x="159.03" y="194.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="sequence-text" style="fill:var(--_text);">third #124; done</text>
+  </g>
+</svg>

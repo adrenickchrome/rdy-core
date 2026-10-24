@@ -1,0 +1,6 @@
+stateDiagram-v2
+    [*] --> S1
+    state "first #40;A#41;" as S1
+    state "second #96;B#96;" as S2
+    S1 --> S2 : go #59; now
+    S2 --> [*]
