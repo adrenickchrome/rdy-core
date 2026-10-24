@@ -214,7 +214,10 @@ fn standalone_expect(
 
 /// Builds the fourteen members in memory from the shared builders; scratch stores go under
 /// `scratch`. The dump members first, then the sync members.
-fn build_members(scratch: &Path) -> (Vec<(&'static str, Vec<u8>)>, Vec<(&'static str, Vec<u8>)>) {
+/// Fixture members by file name: `(name, bytes)`.
+type Members = Vec<(&'static str, Vec<u8>)>;
+
+fn build_members(scratch: &Path) -> (Members, Members) {
     let mut out: Vec<(&str, Vec<u8>)> = vec![];
 
     let c = chain_fixture::project_chain_current();
