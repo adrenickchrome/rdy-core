@@ -195,9 +195,9 @@ fn failed_session_leaves_state_unchanged() {
     let (_d, mut st) = state();
     start(&mut st);
     for bad in [
-        json!({"actor": "a", "role": "writer", "view": "canon"}),
-        json!({"actor": "a", "role": "writer", "run": "canon"}),
-        json!({"actor": "a", "role": "boss"}),
+        json!({"actor": "agent:a", "role": "writer", "view": "canon"}),
+        json!({"actor": "agent:a", "role": "writer", "run": "canon"}),
+        json!({"actor": "agent:a", "role": "boss"}),
     ] {
         assert!(rdy_session(&mut st, serde_json::from_value(bad).unwrap()).is_err());
         assert_eq!(st.view, "run-7");
