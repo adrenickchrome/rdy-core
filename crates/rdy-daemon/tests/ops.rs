@@ -229,12 +229,13 @@ fn ctl2_render_export_and_check_resolve_relative_paths_against_the_session_cwd()
     let s = human();
     doc(&e, "a");
     write_typed(&e, |r| {
-        r.propose(&human(), "work", "p", None).and_then(|p| {
-            r.land_report(
-                &Session::human("human:t".into(), Role::Approver).unwrap(),
-                &p.id,
-            )
-        })
+        r.propose(&human(), "work", "p", Some("test summary"))
+            .and_then(|p| {
+                r.land_report(
+                    &Session::human("human:t".into(), Role::Approver).unwrap(),
+                    &p.id,
+                )
+            })
     })
     .unwrap();
     let cwd = tempfile::tempdir().unwrap();
@@ -313,7 +314,12 @@ fn ctl2_new_propose_approve_tag_land_through_the_writer_and_the_next_read_sees_t
             .values()
             .any(|x| x.as_str().unwrap().starts_with("d-"))
     );
-    let p = dispatch(&c, "propose", json!({"title": "first"})).unwrap();
+    let p = dispatch(
+        &c,
+        "propose",
+        json!({"title": "first", "summary": "test summary"}),
+    )
+    .unwrap();
     let pid = p["id"].as_str().unwrap().to_string();
     let l = dispatch(&c, "approve", json!({"proposal": pid})).unwrap();
     assert!(l["landing"].is_string(), "{l}");
@@ -400,7 +406,12 @@ fn ctl2_import_reindex_and_fsck_run_and_fsck_reports_the_open() {
     let s = human();
     let c = cx(&e, &s, d.path());
     dispatch(&c, "new_doc", json!({"path": "a"})).unwrap();
-    let p = dispatch(&c, "propose", json!({"title": "t"})).unwrap();
+    let p = dispatch(
+        &c,
+        "propose",
+        json!({"title": "t", "summary": "test summary"}),
+    )
+    .unwrap();
     dispatch(&c, "approve", json!({"proposal": p["id"]})).unwrap();
     let other = tempfile::tempdir().unwrap();
     let o = Local::new(Rdy::init(other.path(), "rdy-standard").unwrap());

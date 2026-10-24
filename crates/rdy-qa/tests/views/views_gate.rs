@@ -2,6 +2,7 @@
 //! blocks the proposal writes; subsets must be closed.
 use rdy_engine::*;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::{TEST_SUMMARY, assert_not_ready};
 use rdy_qa::invariants::check;
 use serde_json::json;
 
@@ -24,8 +25,8 @@ fn collide_and_land(first: &str, second: &str) {
     let sb = as_agent("agent:b", "r1");
     write_as(&mut r, &sa, "a", update(&c, &v, "a's")).unwrap();
     write_as(&mut r, &sb, "b", update(&c, &v, "b's")).unwrap();
-    let pa = r.propose(&sa, "a", "a", None).unwrap();
-    let pb = r.propose(&sb, "b", "b", None).unwrap();
+    let pa = r.propose(&sa, "a", "a", Some(TEST_SUMMARY)).unwrap();
+    let pb = r.propose(&sb, "b", "b", Some(TEST_SUMMARY)).unwrap();
     assert!(pa.conflicts.is_empty() && pb.conflicts.is_empty());
     let (pf, ps, sess_second) = if first == "a" {
         (&pa, &pb, &sb)
@@ -41,19 +42,30 @@ fn collide_and_land(first: &str, second: &str) {
         "{e}"
     );
     // re-proposed on the new canon without resolving: the version carries the recorded conflict
-    let p2 = r.propose(sess_second, second, "rebased", None).unwrap();
+    let p2 = r
+        .propose(sess_second, second, "rebased", Some(TEST_SUMMARY))
+        .unwrap();
     assert_eq!(
         (p2.version, p2.blocking.len(), p2.conflicts.len()),
         (2, 1, 1)
     );
+    // D-ME2HD: the conflict is the refusal's one readiness issue; the version's listing names
+    // its block and its canon side
     let e = r.land_report(&approver(), &p2.r#ref).unwrap_err();
-    assert_eq!(e.code, E_CONFLICT_UNRESOLVED, "{e}");
-    assert_eq!(e.issues.len(), 1);
-    assert_eq!(e.issues[0].block.as_ref().unwrap().to_string(), c);
-    assert!(e.issues[0].message.contains("canon"), "{:?}", e.issues[0]);
+    assert_not_ready(&r, &e, &p2.r#ref, &[E_CONFLICT_UNRESOLVED]);
+    assert_eq!(p2.blocking[0].block, c);
+    assert!(
+        p2.blocking[0]
+            .sides
+            .iter()
+            .any(|s| s.landed.is_some() || s.change.is_none()),
+        "{:?}",
+        p2.blocking[0]
+    );
     let e2 = r.land_report(&approver(), &p2.r#ref).unwrap_err();
     assert_eq!(
-        e2.code, E_CONFLICT_UNRESOLVED,
+        (e2.code, &e2.message, &e2.issues),
+        (e.code, &e.message, &e.issues),
         "refused the same way until resolved"
     );
     let conflict = r
@@ -74,8 +86,8 @@ fn collide_and_land(first: &str, second: &str) {
     );
     // Review Focus 2: p2 predates the resolution, so it still carries the conflict
     let e3 = r.land_report(&approver(), &p2.r#ref).unwrap_err();
-    assert_eq!(e3.code, E_CONFLICT_UNRESOLVED, "{e3}");
-    assert!(e3.fix.contains("propose again"), "{e3}");
+    let issues = assert_not_ready(&r, &e3, &p2.r#ref, &[E_CONFLICT_UNRESOLVED]);
+    assert!(issues[0].fix.contains("propose again"), "{e3}");
     let p3 = r.propose(sess_second, second, "resolved", None).unwrap();
     assert_eq!(p3.version, 3);
     assert!(p3.conflicts.is_empty() && p3.blocking.is_empty());
@@ -122,7 +134,7 @@ fn gconf1_propose_lists_every_conflict_and_marks_the_blocking_ones() {
     .unwrap()
     .change;
     r.view_include(&sa, "a", std::slice::from_ref(&cb)).unwrap();
-    let whole = r.propose(&sa, "a", "whole", None).unwrap();
+    let whole = r.propose(&sa, "a", "whole", Some(TEST_SUMMARY)).unwrap();
     assert_eq!(whole.conflicts.len(), 1);
     assert_eq!(
         whole
@@ -133,7 +145,7 @@ fn gconf1_propose_lists_every_conflict_and_marks_the_blocking_ones() {
         vec![whole.conflicts[0].id.clone()]
     );
     let e = r.land_report(&approver(), &whole.r#ref).unwrap_err();
-    assert_eq!(e.code, E_CONFLICT_UNRESOLVED, "{e}");
+    assert_not_ready(&r, &e, &whole.r#ref, &[E_CONFLICT_UNRESOLVED]);
     let subset = r
         .propose_subset(&sa, "a", "just y", Some(std::slice::from_ref(&cy)), None)
         .unwrap();
@@ -184,7 +196,13 @@ fn gconf1_a_subset_must_be_closed_and_name_changes_in_the_view() {
         .unwrap_err();
     assert_eq!(e.code, E_BAD_INPUT, "{e}");
     let ok = r
-        .propose_subset(&sa, "a", "t", Some(&[c2.clone(), c1.change.clone()]), None)
+        .propose_subset(
+            &sa,
+            "a",
+            "t",
+            Some(&[c2.clone(), c1.change.clone()]),
+            Some(TEST_SUMMARY),
+        )
         .unwrap();
     assert_eq!(ok.changes, 2);
     r.land_report(&approver(), &ok.r#ref).unwrap();
@@ -282,7 +300,9 @@ fn gconf1_a_version_listing_a_delete_before_its_decisions_creation_lands() {
     // c includes b's delete: the include adds the creation too, after it in the set
     r.view_include(&sc, "c", std::slice::from_ref(&deleted.change))
         .unwrap();
-    let p = r.propose(&sc, "c", "net nothing", None).unwrap();
+    let p = r
+        .propose(&sc, "c", "net nothing", Some(TEST_SUMMARY))
+        .unwrap();
     assert_eq!(p.changes, 2, "the delete and the creation it depends on");
     let info = r.land_report(&approver(), &p.r#ref).unwrap();
     assert!(info.warnings.is_empty(), "{info:?}");
@@ -333,7 +353,7 @@ fn gconf1_a_subset_without_the_creation_of_a_childs_parent_is_e_deps_missing() {
             "a",
             "t",
             Some(&[c2.change.clone(), c1.change.clone()]),
-            None,
+            Some(TEST_SUMMARY),
         )
         .unwrap();
     r.land_report(&approver(), &ok.r#ref).unwrap();
@@ -358,31 +378,52 @@ fn msw2_an_approve_path_stale_base_tells_the_approver_what_the_author_must_do() 
     )
     .unwrap();
     land(&mut r, "b").unwrap();
+    let changes = r.store_mut().included("pinned").unwrap().as_ref().clone();
     let pid = r
         .store_mut()
-        .propose("pinned", "p", sa.provenance())
+        .propose_changes(
+            "pinned",
+            "p",
+            Some(TEST_SUMMARY),
+            sa.provenance(),
+            changes.clone(),
+            None,
+        )
         .unwrap();
     r.invalidate();
+    let pref = r.resolve_proposal(&pid.to_string()).unwrap().to_string();
     // M2d2: the gate reports the edit collision as a blocking tension before it merges; a
-    // human approver dismisses it, so the landing reaches the merge and its stale base
+    // human approver dismisses it, and the merge's stale base still refuses. D-ME2HD: both are
+    // readiness issues of one refusal, in the queue's order; the version's listing names the
+    // tensions
     let t = r.land_report(&approver(), &pid.to_string()).unwrap_err();
-    assert_eq!(t.code, E_BLOCKING_TENSION, "{t}");
-    for i in &t.issues {
-        let label = i.message.split_whitespace().next().unwrap();
+    assert_not_ready(&r, &t, &pref, &[E_BLOCKING_TENSION, E_STALE_BASE]);
+    let (listed, _) = r
+        .read()
+        .proposal_tensions("pinned", &changes, &Default::default(), 100)
+        .unwrap();
+    let refusing: Vec<String> = listed
+        .iter()
+        .filter(|t| t.refuses == Some(true))
+        .map(|t| t.id.clone())
+        .collect();
+    assert!(!refusing.is_empty(), "{listed:#?}");
+    for label in &refusing {
         r.dismiss_tension(&approver(), label, "the approver sees the stale base")
             .unwrap();
     }
     let e = r.land_report(&approver(), &pid.to_string()).unwrap_err();
-    assert_eq!(e.code, E_STALE_BASE, "{e}");
+    let issues = assert_not_ready(&r, &e, &pref, &[E_STALE_BASE]);
+    let stale = &issues[0];
     assert!(
-        !e.message.contains("you read it"),
+        !stale.message.contains("you read it"),
         "the message speaks to the approver: {e}"
     );
     assert!(
-        e.fix.contains("pinned") && e.fix.contains(&c),
+        stale.fix.contains("pinned") && stale.fix.contains(&c),
         "the fix names the view and the block: {e}"
     );
-    assert!(!e.fix.contains("rebase the view"), "{e}");
+    assert!(!stale.fix.contains("rebase the view"), "{e}");
 }
 
 #[test]

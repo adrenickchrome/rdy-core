@@ -188,7 +188,9 @@ fn redact(r: &mut Rdy, targets: &[String]) {
         )
         .unwrap();
     assert!(res.redaction.is_some());
-    let p = r.propose(&s, "redact", "Remove", None).unwrap();
+    let p = r
+        .propose(&s, "redact", "Remove", Some("test summary"))
+        .unwrap();
     r.land(&founder(), &p.id).unwrap();
 }
 

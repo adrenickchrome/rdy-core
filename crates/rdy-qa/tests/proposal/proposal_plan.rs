@@ -9,7 +9,7 @@ use rdy_engine::{E_PLAN_ITEM, ProposalInfo, Rdy, RdyError, Session};
 use rdy_model::plan::{Plan, PlanAct, PlanHead, PlanKind, item_display, item_hash};
 use rdy_model::{BlockId, Hash, Role};
 use rdy_qa::fixtures::{approver, project, write, writer};
-use rdy_qa::intake::PERSON;
+use rdy_qa::intake::{PERSON, TEST_SUMMARY};
 use rdy_store::kinds;
 use rdy_store::segment::Location;
 use serde_json::{Value, json};
@@ -58,6 +58,7 @@ fn propose(r: &mut Rdy, view: &str, answers: &[PlanAnswerInput]) -> Result<Propo
         &writer(),
         ProposePlanRequest {
             plan_answers: answers,
+            summary: Some(TEST_SUMMARY),
             ..ProposePlanRequest::new(view, view)
         },
     )
@@ -417,7 +418,7 @@ fn cp10_invalid_plan_answer_does_not_commit_rekeys() {
         Some("O"),
     )
     .unwrap();
-    let pa = r.propose(&writer(), "a", "a", None).unwrap();
+    let pa = r.propose(&writer(), "a", "a", Some(TEST_SUMMARY)).unwrap();
     r.land(&approver(), &pa.id).unwrap();
     let before = log_state(&r);
     let in_view = r.store().included("b").unwrap().len();

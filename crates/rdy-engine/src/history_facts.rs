@@ -490,7 +490,9 @@ mod tests {
                 },
             )
             .unwrap();
-        let p = r.propose(&writer(), "work", "Base", None).unwrap();
+        let p = r
+            .propose(&writer(), "work", "Base", Some("test summary"))
+            .unwrap();
         let l: Hash = r.land(&approver(), &p.id).unwrap().parse().unwrap();
         let blocks = (0..n)
             .map(|i| w.created[&format!("$p{i}")].clone())

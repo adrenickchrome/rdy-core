@@ -188,9 +188,9 @@ pub fn frozen_conflict(r: &mut Rdy) -> (String, String, String) {
     (d, s, cc)
 }
 
-/// Proposes `view` as a writer (with a summary when it writes a decision,
-/// [`summary_for`](crate::intake::summary_for)), confirms each exception as the approver (F2)
-/// and lands it as the approver; returns the landing id.
+/// Proposes `view` as a writer with a summary ([`summary_for`](crate::intake::summary_for):
+/// readiness needs one, D-ME2HD), confirms each exception as the approver (F2) and lands it as
+/// the approver; returns the landing id.
 pub fn land(r: &mut Rdy, view: &str) -> Result<String, RdyError> {
     let summary = crate::intake::summary_for(r, view);
     let p = r.propose(&writer(), view, view, summary)?;

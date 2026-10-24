@@ -353,7 +353,7 @@ mod tests {
             },
         )
         .unwrap();
-        let p = r.propose(&s, "work", title, None).unwrap();
+        let p = r.propose(&s, "work", title, Some("test summary")).unwrap();
         let a = Session::human("human:t".into(), Role::Approver).unwrap();
         r.land(&a, &p.id).unwrap().parse().unwrap()
     }

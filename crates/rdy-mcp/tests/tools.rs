@@ -331,7 +331,7 @@ fn land_and_tag(st: &mut McpState) -> String {
     seed(st);
     let p = rdy_propose(
         st,
-        serde_json::from_value(json!({"title": "seed"})).unwrap(),
+        serde_json::from_value(json!({"title": "seed", "summary": "test summary"})).unwrap(),
     )
     .unwrap();
     let pid = p["id"].as_str().unwrap().to_string();
@@ -627,7 +627,7 @@ fn chain1_overview_counts_each_views_changes() {
     assert_eq!(views(&mut st), json!([{"name": "run-7", "changes": 2}]));
     let p = rdy_propose(
         &mut st,
-        serde_json::from_value(json!({"title": "two"})).unwrap(),
+        serde_json::from_value(json!({"title": "two", "summary": "test summary"})).unwrap(),
     )
     .unwrap();
     let pid = p["id"].as_str().unwrap().to_string();
@@ -766,7 +766,7 @@ fn ib3_overview_at_a_past_landing_leaves_coverage_out() {
     .unwrap();
     let p = rdy_propose(
         &mut st,
-        serde_json::from_value(json!({"title": "later"})).unwrap(),
+        serde_json::from_value(json!({"title": "later", "summary": "test summary"})).unwrap(),
     )
     .unwrap();
     let pid = p["id"].as_str().unwrap().to_string();

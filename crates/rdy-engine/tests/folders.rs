@@ -148,7 +148,9 @@ pub fn legacy_doc(r: &mut Rdy, view: &str, id: &str, title: &str, parent: Option
 fn a_legacy_view_with_a_nameless_doc_still_lands() {
     let (_d, mut r) = project();
     let id = legacy_doc(&mut r, "old", "d-AAAAB", "Legacy notes", None);
-    let p = r.propose(&agent(), "old", "legacy", None).unwrap();
+    let p = r
+        .propose(&agent(), "old", "legacy", Some("test summary"))
+        .unwrap();
     r.land(&founder(), &p.id).unwrap();
     assert!(
         r.read()
@@ -475,7 +477,9 @@ fn a_doc_in_the_deepest_folder_exports_and_round_trips() {
         {"op": "create", "type": "doc", "parent": res.created["$f31"], "fields": {"title": "Leaf", "doc_type": "overview"}}
     ]))
     .unwrap();
-    let p = r.propose(&agent(), "work", "deep", None).unwrap();
+    let p = r
+        .propose(&agent(), "work", "deep", Some("test summary"))
+        .unwrap();
     r.land(&founder(), &p.id).unwrap();
     let original = r
         .read()
@@ -491,7 +495,9 @@ fn a_doc_in_the_deepest_folder_exports_and_round_trips() {
 
     let (_d2, mut b) = project();
     b.import(&founder(), "import", out.path()).unwrap();
-    let p = b.propose(&founder(), "import", "migrate", None).unwrap();
+    let p = b
+        .propose(&founder(), "import", "migrate", Some("test summary"))
+        .unwrap();
     b.land(&founder(), &p.id).unwrap();
     let imported = b
         .read()

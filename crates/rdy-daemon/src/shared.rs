@@ -549,7 +549,9 @@ mod tests {
     }
 
     fn land(r: &mut Rdy, view: &str) {
-        let p = r.propose(&writer(), view, view, None).unwrap();
+        let p = r
+            .propose(&writer(), view, view, Some("test summary"))
+            .unwrap();
         r.land(&approver(), &p.id).unwrap();
     }
 

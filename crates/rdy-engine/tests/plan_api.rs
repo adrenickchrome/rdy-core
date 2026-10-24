@@ -1817,7 +1817,11 @@ fn cp8_retained_reads_keep_their_plan_across_answers_and_landings() {
 
     // a landing after the state was published: the bound proposal had not landed at its
     // sequence, so its chain stays live there
-    let version = r.store_mut().propose("w", "edit a", prov()).unwrap();
+    let changes = r.store_mut().included("w").unwrap().as_ref().clone();
+    let version = r
+        .store_mut()
+        .propose_changes("w", "edit a", Some("test summary"), prov(), changes, None)
+        .unwrap();
     let answered = r.read().reader().plan(&first).unwrap();
     let bound = Plan {
         stable: Some(first),
@@ -1868,7 +1872,11 @@ fn cp8_answer_only_successors_keep_the_last_bound_proposal() {
         &s.b,
         &format!("B builds firmly on {{{{{}}}}} and {{{{{}}}}}.", s.a, s.c),
     );
-    let version = r.store_mut().propose("w", "edit b", prov()).unwrap();
+    let changes = r.store_mut().included("w").unwrap().as_ref().clone();
+    let version = r
+        .store_mut()
+        .propose_changes("w", "edit b", Some("test summary"), prov(), changes, None)
+        .unwrap();
     let pref = format!("P-{}@1", version.short());
     let bound = Plan {
         stable: None,

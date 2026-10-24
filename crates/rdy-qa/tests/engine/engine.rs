@@ -1,5 +1,6 @@
 use rdy_engine::*;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::TEST_SUMMARY;
 use rdy_qa::invariants::check;
 use serde_json::json;
 
@@ -497,7 +498,7 @@ fn ord3_rebalance_landed_under_an_open_proposal_warns_siblings_rekeyed() {
     // A rebalances and lands first
     write(&mut r, "va", json!([{"op": "rebalance", "parent": s}])).unwrap();
     land(&mut r, "va").unwrap();
-    let prop = r.propose(&writer(), "vb", "b", None).unwrap();
+    let prop = r.propose(&writer(), "vb", "b", Some(TEST_SUMMARY)).unwrap();
     let w = prop
         .warnings
         .iter()

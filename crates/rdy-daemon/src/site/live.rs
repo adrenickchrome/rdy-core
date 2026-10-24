@@ -1005,7 +1005,9 @@ mod tests {
             },
         )
         .unwrap();
-        let p = r.propose(&writer, view, view, None).unwrap();
+        let p = r
+            .propose(&writer, view, view, Some("test summary"))
+            .unwrap();
         r.land(
             &Session::human("human:qa".into(), Role::Approver).unwrap(),
             &p.id,

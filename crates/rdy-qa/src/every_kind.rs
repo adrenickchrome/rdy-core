@@ -519,7 +519,9 @@ fn build(segment_max: Option<u64>) -> tempfile::TempDir {
     let sec = s.section.clone();
     on(&e, move |r| {
         put(r, "rel", claim(&sec, "Relayed claim."));
-        let p = r.propose(&ag("rel"), "rel", "rel", None).unwrap();
+        let p = r
+            .propose(&ag("rel"), "rel", "rel", Some(crate::intake::TEST_SUMMARY))
+            .unwrap();
         let relay = Relay {
             by: ActorRun {
                 actor: "agent:relay".into(),

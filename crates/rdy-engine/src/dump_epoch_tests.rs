@@ -43,7 +43,9 @@ fn removable(dir: &Path) -> (Rdy, ProposalInfo) {
             },
         )
         .unwrap();
-    let base = r.propose(&writer(), "work", "Base", None).unwrap();
+    let base = r
+        .propose(&writer(), "work", "Base", Some("test summary"))
+        .unwrap();
     r.land(&approver(), &base.id).unwrap();
     r.tag(&approver(), "v1.0.0", None, None).unwrap();
     r.redact_in(
@@ -58,7 +60,7 @@ fn removable(dir: &Path) -> (Rdy, ProposalInfo) {
     )
     .unwrap();
     let prop = r
-        .propose(&writer(), "redact", "Remove the code", None)
+        .propose(&writer(), "redact", "Remove the code", Some("test summary"))
         .unwrap();
     (r, prop)
 }

@@ -66,7 +66,7 @@ fn write(r: &mut Rdy, ops: Value) -> BTreeMap<String, String> {
 
 fn land(r: &mut Rdy, title: &str) {
     let p = r
-        .propose(&session(Role::Writer), "work", title, None)
+        .propose(&session(Role::Writer), "work", title, Some("test summary"))
         .unwrap();
     r.land(&session(Role::Approver), &p.id).unwrap();
 }

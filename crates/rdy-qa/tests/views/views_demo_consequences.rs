@@ -62,7 +62,10 @@ fn df4_rewriting_a_suspect_block_names_the_suspect() {
         kept(&w2, &b).is_some(),
         "write 2 names no kept suspect: {w2:#}"
     );
-    let p = propose_and_report(&e, None, |r| r.propose(&writer(), "w", "A and B", None)).unwrap();
+    let p = propose_and_report(&e, None, |r| {
+        r.propose(&writer(), "w", "A and B", Some(TEST_SUMMARY))
+    })
+    .unwrap();
     assert!(
         kept(&p, &b).is_some(),
         "propose names no kept suspect: {p:#}"

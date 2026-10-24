@@ -45,7 +45,9 @@ fn add(r: &mut Rdy, n: usize, body: &str) -> String {
 
 /// Lands view `work`; returns the landing id.
 fn land(r: &mut Rdy) -> String {
-    let p = r.propose(&writer(), "work", "Work", None).unwrap();
+    let p = r
+        .propose(&writer(), "work", "Work", Some("test summary"))
+        .unwrap();
     r.land(&approver(), &p.id).unwrap()
 }
 
@@ -63,7 +65,7 @@ fn remove(r: &mut Rdy, target: &str) {
     )
     .unwrap();
     let p = r
-        .propose(&writer(), "redact", "Remove the code", None)
+        .propose(&writer(), "redact", "Remove the code", Some("test summary"))
         .unwrap();
     r.land(&approver(), &p.id).unwrap();
 }

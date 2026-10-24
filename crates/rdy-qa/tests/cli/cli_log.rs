@@ -2,6 +2,7 @@
 use rdy_engine::*;
 use rdy_qa::daemon::Served;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::TEST_SUMMARY;
 use serde_json::{Value, from_value, json};
 
 const AT: &str = "2026-10-05T09:00:00Z";
@@ -32,7 +33,9 @@ fn seeded() -> (Served, String, String) {
         },
     )
     .unwrap();
-    let p = r.propose(&a, "ra", "Agent work", None).unwrap();
+    let p = r
+        .propose(&a, "ra", "Agent work", Some(TEST_SUMMARY))
+        .unwrap();
     r.land(&approver(), &p.id).unwrap();
     let l2 = r.read().canon_head().unwrap().to_string();
     r.tag(&approver(), "v1.0.0", None, None).unwrap();

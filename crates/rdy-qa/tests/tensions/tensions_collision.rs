@@ -6,6 +6,7 @@ use rdy_engine::tensions::*;
 use rdy_model::BlockId;
 use rdy_qa::edit_loop::spec_doc;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::TEST_SUMMARY;
 use rdy_qa::tensions::*;
 use serde_json::{Value, json};
 
@@ -287,7 +288,7 @@ fn tcol1_a_resolution_that_covers_canon_through_an_included_change_is_not_a_coll
         canon.is_empty(),
         "b builds on canon's version through o's change: {canon:#?}"
     );
-    let p = r.propose(&writer(), "b", "b", None).unwrap();
+    let p = r.propose(&writer(), "b", "b", Some(TEST_SUMMARY)).unwrap();
     assert!(p.blocking.is_empty(), "{:?}", p.blocking);
     r.land(&approver(), &p.id).unwrap();
 }

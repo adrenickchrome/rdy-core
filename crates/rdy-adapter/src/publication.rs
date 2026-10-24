@@ -267,7 +267,7 @@ mod tests {
                 "fields": {"key": "site", "title": "Site", "audience": "org", "select": [d]}}]),
         );
         let p = r
-            .propose(&session(Role::Writer), "work", "ha6", None)
+            .propose(&session(Role::Writer), "work", "ha6", Some("test summary"))
             .unwrap();
         r.land(&session(Role::Approver), &p.id).unwrap();
         r.tag(&session(Role::Approver), "v1.0.0", None, None)

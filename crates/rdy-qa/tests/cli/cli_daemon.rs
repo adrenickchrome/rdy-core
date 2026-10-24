@@ -149,7 +149,18 @@ fn cli2_an_agent_actor_defaults_to_its_own_view_and_cannot_take_the_humans() {
         v["code"], E_VIEW_OWNER,
         "another run of the same actor is another session: {v}"
     );
-    let (ok, p) = s.json_as("agent:x", None, &["--json", "propose", "--title", "t"]);
+    let (ok, p) = s.json_as(
+        "agent:x",
+        None,
+        &[
+            "--json",
+            "propose",
+            "--title",
+            "t",
+            "--summary",
+            "test summary",
+        ],
+    );
     assert!(ok, "{p}");
     let (ok, v) = s.json_as(
         "agent:x",

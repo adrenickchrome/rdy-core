@@ -37,7 +37,9 @@ fn add_and_land(r: &mut Rdy, n: usize) {
         },
     )
     .unwrap();
-    let p = r.propose(&writer(), "work", "Work", None).unwrap();
+    let p = r
+        .propose(&writer(), "work", "Work", Some("test summary"))
+        .unwrap();
     r.land(&approver(), &p.id).unwrap();
 }
 

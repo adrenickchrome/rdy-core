@@ -15,8 +15,8 @@ use rdy_engine::pending::{
 };
 use rdy_engine::plan::{PlanAnswerInput, ProposePlanRequest};
 use rdy_engine::{
-    DecisionInput, E_BAD_INPUT, E_DEFERRAL_OPEN, E_EXCEPTION_OPEN, E_ITEM_MOVED, E_VALIDATION,
-    LandOptions, ProposalInfo, Rdy, RdyError, Session,
+    DecisionInput, E_BAD_INPUT, E_DEFERRAL_OPEN, E_EXCEPTION_OPEN, E_ITEM_MOVED,
+    E_PROPOSAL_NOT_READY, E_VALIDATION, LandOptions, ProposalInfo, Rdy, RdyError, Session,
 };
 use rdy_mcp::tools::{McpState, rdy_answer, rdy_pending, rdy_session};
 use rdy_model::plan::{PlanAct, PlanKind, PlanOutcome, item_display, item_hash};
@@ -187,6 +187,22 @@ fn land_err(r: &mut Rdy, pref: &str) -> RdyError {
         .unwrap_err();
     assert_eq!(log_end(r), before, "a refused landing writes nothing");
     e
+}
+
+/// Checks `e` is the refusal of `pref`, which is not ready, with the queue's issues `issues`
+/// (D-ME2HD).
+fn not_ready(e: &RdyError, pref: &str, issues: &[rdy_schema::Issue]) {
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            E_PROPOSAL_NOT_READY,
+            format!("{pref} is not ready: {} issues", issues.len()).as_str(),
+            "fix each issue and propose again: rdy_propose / rdy propose"
+        ),
+        "{e}"
+    );
+    assert_eq!(e.issues, issues, "{e}");
+    assert!(e.corrected.is_none(), "{e}");
 }
 
 /// Checks `e` is the deferral hold of `pref`, with `n` deferrals and the card `card`.
@@ -715,14 +731,7 @@ fn cp12_refusal_is_not_ready_and_new_version_needs_new_answer() {
     );
     assert_eq!(nr.issues[0].fix, "close the items and propose again");
     let e = land_err(&mut r, &p2.r#ref);
-    assert_eq!(
-        (e.code, e.message.as_str(), e.fix.as_str()),
-        (
-            E_VALIDATION,
-            nr.issues[0].message.as_str(),
-            "close the items and propose again"
-        )
-    );
+    not_ready(&e, &p2.r#ref, &nr.issues);
     // the next version is unanswered again
     edit(&mut r, "w", &s.z, "Z stands quite still.");
     let p3 = propose(&mut r, "w", &[]);
@@ -927,14 +936,7 @@ fn cp12_one_way_reaffirm_has_its_own_exception() {
     );
     assert_eq!(nr.issues[0].block, Some(id(&one)));
     let e = land_err(&mut r, &p.r#ref);
-    assert_eq!(
-        (e.code, e.message.as_str(), e.fix.as_str()),
-        (
-            E_VALIDATION,
-            nr.issues[0].message.as_str(),
-            "drop the re-affirmation and propose again"
-        )
-    );
+    not_ready(&e, &p.r#ref, &nr.issues);
     // a new re-affirmation of the decision, in another view: its own version binds new answers
     write(
         &mut r,
@@ -1461,12 +1463,13 @@ fn cp12_refused_deferral_takes_a_later_acceptance() {
     // an accepted card still binds an explicit answer: a refusal replaces the acceptance
     let v = answer(&mut r, "o2").unwrap();
     assert_eq!(v.act, "refuse_deferrals");
-    assert!(
-        queue(&r).not_ready.iter().any(|n| n.r#ref == p.r#ref),
-        "refused again"
-    );
+    let nr = queue(&r)
+        .not_ready
+        .into_iter()
+        .find(|n| n.r#ref == p.r#ref)
+        .expect("refused again");
     let e = land_err(&mut r, &p.r#ref);
-    assert_eq!(e.code, E_VALIDATION, "{e}");
+    not_ready(&e, &p.r#ref, &nr.issues);
     // a card hash that is not the card's is still E_ITEM_MOVED, with the fresh card
     let before = log_end(&r);
     let e = r

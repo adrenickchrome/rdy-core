@@ -4,6 +4,7 @@ use rdy_engine::tensions::{TensionKind, TensionSeverity, tension_label};
 use rdy_engine::*;
 use rdy_qa::edit_loop::{brief_of, stable_spec, write_cited_as};
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::{TEST_SUMMARY, assert_not_ready, refused_ref};
 use rdy_qa::landing_audit::{Landed, audit, landed_of};
 use rdy_qa::packs::qa_project;
 use rdy_qa::tensions::{ag, change_of, of_kind, one, put, upd};
@@ -119,11 +120,9 @@ fn sg1_a_blocking_tension_alone_is_flagged_and_a_dismissed_or_advisory_one_is_no
         "precondition: no conflict"
     );
     assert_eq!(rules(&audit(&before, &landed)), vec!["blocking_landed"]);
+    // precondition: the gate refuses, with the tension as its one readiness issue (D-ME2HD)
     let e = land(&mut r, "a").unwrap_err();
-    assert_eq!(
-        e.code, E_BLOCKING_TENSION,
-        "precondition: the gate refuses: {e}"
-    );
+    assert_not_ready(&r, &e, &refused_ref(&e), &[E_BLOCKING_TENSION]);
     // dismissed by the human: the gate lands it, and the audit does not flag it
     r.dismiss_tension(&writer(), &tension_label(&t.id), "a deliberate change")
         .unwrap();
@@ -197,7 +196,13 @@ fn sg1_a_subset_that_carries_no_conflict_is_not_flagged() {
     };
     assert!(rules(&audit(&before, &whole)).contains(&"conflict_landed"));
     let p = r
-        .propose_subset(&sa, "a", "just a", Some(std::slice::from_ref(&ca)), None)
+        .propose_subset(
+            &sa,
+            "a",
+            "just a",
+            Some(std::slice::from_ref(&ca)),
+            Some(TEST_SUMMARY),
+        )
         .unwrap();
     assert!(p.blocking.is_empty());
     let l = r.land(&approver(), &p.id).unwrap();
@@ -206,7 +211,7 @@ fn sg1_a_subset_that_carries_no_conflict_is_not_flagged() {
 
 /// Fix round 1 (probe P1b): a version that predates its view's resolution still carries the
 /// conflict (gconf1 Review Focus 2). With edit_collision advisory no tension hides it: the gate
-/// refuses with `E_CONFLICT_UNRESOLVED`, and the audit flags `conflict_landed`.
+/// refuses with an `E_CONFLICT_UNRESOLVED` issue, and the audit flags `conflict_landed`.
 #[test]
 fn sg1_a_stale_version_over_a_resolved_view_is_flagged() {
     let (d, mut r) = project();
@@ -227,7 +232,7 @@ fn sg1_a_stale_version_over_a_resolved_view_is_flagged() {
         .unwrap()
         .change;
     land(&mut r, "a").unwrap();
-    let p = r.propose(&sb, "b", "b", None).unwrap();
+    let p = r.propose(&sb, "b", "b", Some(TEST_SUMMARY)).unwrap();
     assert_eq!(p.blocking.len(), 1, "the version carries the conflict");
     // b resolves the conflict in its view, after the version was proposed
     let block = rdy_model::BlockId::parse(&c).unwrap();
@@ -269,11 +274,9 @@ fn sg1_a_stale_version_over_a_resolved_view_is_flagged() {
         v[0].detail,
         format!("landing of b: block {c} had an unresolved conflict")
     );
+    // precondition: the gate refuses, with the conflict as its one readiness issue (D-ME2HD)
     let e = r.land_report(&approver(), &p.r#ref).unwrap_err();
-    assert_eq!(
-        e.code, E_CONFLICT_UNRESOLVED,
-        "precondition: the gate refuses: {e}"
-    );
+    assert_not_ready(&r, &e, &p.r#ref, &[E_CONFLICT_UNRESOLVED]);
 }
 
 #[test]
@@ -334,7 +337,7 @@ fn chosen_x_then_more(r: &mut Rdy) -> (rdy_model::Hash, rdy_model::Hash) {
         chosen: "x".into(),
     };
     let p = r
-        .propose_with(&writer(), "x", "x", None, None, Some(&pick))
+        .propose_with(&writer(), "x", "x", None, Some(TEST_SUMMARY), Some(&pick))
         .unwrap();
     let later = put(r, "x", claim("X three."));
     r.land(&approver(), &p.id).unwrap();

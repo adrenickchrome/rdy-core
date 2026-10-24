@@ -3,6 +3,7 @@
 //! vhost1: hostile view names and large sizes for views and rebase.
 use rdy_engine::*;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::TEST_SUMMARY;
 use rdy_qa::invariants::{check, check_views};
 use rdy_store::segment::CrashPoint;
 use rdy_store::view::{Owner, ViewOpKind};
@@ -192,7 +193,7 @@ fn vhost1_a_5000_change_include_and_a_50_view_landing_stay_correct() {
         update(&hot_claim, &hot_base, "the landing's edit"),
     )
     .unwrap();
-    let prop = r.propose(&p, "p", "land", None).unwrap();
+    let prop = r.propose(&p, "p", "land", Some(TEST_SUMMARY)).unwrap();
     let info = r.land_report(&approver(), &prop.r#ref).unwrap();
     assert_eq!(
         info.rebased.len(),
@@ -260,7 +261,9 @@ fn landing_project(dir: &Path) -> String {
     }
     let p = as_agent("agent:p", "r");
     write_as(&mut r, &p, "p", update(&c, &base, "the landing's edit")).unwrap();
-    r.propose(&p, "p", "land", None).unwrap().r#ref
+    r.propose(&p, "p", "land", Some(TEST_SUMMARY))
+        .unwrap()
+        .r#ref
 }
 
 /// A project with a change in view `src`; returns the change.

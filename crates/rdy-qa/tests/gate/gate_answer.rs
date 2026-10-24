@@ -10,8 +10,8 @@ use rdy_engine::answer::{AnswerInfo, AnswerRequest};
 use rdy_engine::engine::Local;
 use rdy_engine::pending::{Item, ItemKind, Pending};
 use rdy_engine::{
-    E_BAD_INPUT, E_EXCEPTION_OPEN, E_ITEM_MOVED, E_PERMISSION, E_PROPOSAL_MOVED, E_VIEW_CLOSED,
-    Rdy, RdyError, Scope, Session,
+    E_BAD_INPUT, E_EXCEPTION_OPEN, E_ITEM_MOVED, E_PERMISSION, E_PROPOSAL_MOVED,
+    E_PROPOSAL_NOT_READY, E_VIEW_CLOSED, Rdy, RdyError, Scope, Session,
 };
 use rdy_model::{ActorRun, Answer, AnswerAct, EvidenceKind, Hash, Role};
 use rdy_qa::fixtures::{approver, land};
@@ -719,7 +719,8 @@ fn di7_a_rejected_decision_makes_the_batch_not_ready() {
         not_ready.issues.iter().any(|i| i.message == issue),
         "{not_ready:#?}"
     );
-    // the version cannot be approved until its author drops or revises the decision
+    // the version cannot be approved until its author drops or revises the decision: the
+    // approval is refused with the queue's readiness issues and no card (D-ME2HD)
     let e = r
         .answer(
             &approver(),
@@ -729,10 +730,15 @@ fn di7_a_rejected_decision_makes_the_batch_not_ready() {
         .unwrap_err();
     refused(
         &e,
-        E_ITEM_MOVED,
-        &format!("{} changed since it was shown", b.r#ref),
+        E_PROPOSAL_NOT_READY,
+        &format!(
+            "{} is not ready: {} issues",
+            b.r#ref,
+            not_ready.issues.len()
+        ),
     );
-    assert!(e.issues.iter().any(|i| i.message == issue), "{e:#?}");
+    assert_eq!(e.issues, not_ready.issues, "{e:#?}");
+    assert!(e.corrected.is_none(), "{e:#?}");
     assert_eq!(r.read().canon_head(), head, "nothing reaches canon");
 }
 
@@ -865,7 +871,7 @@ fn di7_all_recommended_records_each_item_on_its_own() {
     let e = r
         .answer_all_recommended(&agent(), PERSON, &rest, &rest_hashes, relay)
         .unwrap_err();
-    assert_eq!(e.code, E_ITEM_MOVED, "{e}");
+    assert_eq!(e.code, E_PROPOSAL_NOT_READY, "{e}");
     let corrected = e.corrected.as_ref().expect("what was done");
     let reported: Vec<&str> = corrected["done"]
         .as_array()
@@ -928,7 +934,12 @@ fn di7_the_daemon_relay_texts_do_not_change() {
     let a = agent();
     let cwd = dir.path().to_path_buf();
     dispatch(&ctx(&e, &human, &cwd), "new_doc", json!({"path": "a"})).unwrap();
-    let p = dispatch(&ctx(&e, &human, &cwd), "propose", json!({"title": "t"})).unwrap();
+    let p = dispatch(
+        &ctx(&e, &human, &cwd),
+        "propose",
+        json!({"title": "t", "summary": "test summary"}),
+    )
+    .unwrap();
     let id = p["id"].as_str().unwrap().to_string();
     let approve = |s: &Session, extra: Value| {
         let mut args = json!({"proposal": id});
@@ -1132,7 +1143,12 @@ fn di7_the_daemon_approval_checks_the_whole_relay() {
     let a = agent();
     let cwd = dir.path().to_path_buf();
     dispatch(&ctx(&e, &human, &cwd), "new_doc", json!({"path": "a"})).unwrap();
-    let p = dispatch(&ctx(&e, &human, &cwd), "propose", json!({"title": "t"})).unwrap();
+    let p = dispatch(
+        &ctx(&e, &human, &cwd),
+        "propose",
+        json!({"title": "t", "summary": "test summary"}),
+    )
+    .unwrap();
     let id = p["id"].as_str().unwrap().to_string();
     let approve = |s: &Session, extra: Value| {
         let mut args = json!({"proposal": id});

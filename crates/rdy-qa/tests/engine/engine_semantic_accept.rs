@@ -682,9 +682,13 @@ fn se8_advice_stays_on_the_card_while_another_view_edits_the_canon_side() {
     assert_eq!(show.advised.len(), 1);
     let a = r.accept_advice(&writer(), "human:qa", direct(&p)).unwrap();
     assert_eq!(a.accepted.len(), 1);
-    assert_eq!(
-        land(&mut r, "a").unwrap_err().code,
-        rdy_engine::E_BLOCKING_TENSION
+    // D-ME2HD: the accepted tension is a readiness issue of the refusal
+    let e = land(&mut r, "a").unwrap_err();
+    rdy_qa::intake::assert_not_ready(
+        &r,
+        &e,
+        &rdy_qa::intake::refused_ref(&e),
+        &[rdy_engine::E_BLOCKING_TENSION],
     );
 }
 

@@ -4,6 +4,7 @@ use rdy_engine::*;
 use rdy_mcp::tools::*;
 use rdy_model::{ActorRun, BlockId, EditorialClass, Justification, RelayEvidence};
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::TEST_SUMMARY;
 use serde_json::{Value, from_value, json};
 use std::sync::Arc;
 
@@ -269,7 +270,7 @@ fn df7_context_history_names_the_relay() {
         )
         .unwrap();
     let claim = w.created.values().next().unwrap().clone();
-    let p = r.propose(&a, "r1", "c", None).unwrap();
+    let p = r.propose(&a, "r1", "c", Some(TEST_SUMMARY)).unwrap();
     r.land_with(
         &approver(),
         &p.r#ref,

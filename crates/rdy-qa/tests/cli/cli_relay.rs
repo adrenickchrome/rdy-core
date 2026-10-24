@@ -4,6 +4,7 @@ use rdy_engine::engine::Local;
 use rdy_engine::*;
 use rdy_qa::daemon::Served;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::TEST_SUMMARY;
 use serde_json::{Value, json};
 
 /// Runs `f` on the project with the daemon stopped (it holds the store while it runs).
@@ -26,7 +27,9 @@ fn proposed() -> (Served, String) {
             json!([{"op": "create", "type": "claim", "parent": section, "body": "x"}]),
         )
         .unwrap();
-        r.propose(&writer(), "work", "t", None).unwrap().r#ref
+        r.propose(&writer(), "work", "t", Some(TEST_SUMMARY))
+            .unwrap()
+            .r#ref
     });
     (s, pref)
 }
@@ -109,8 +112,9 @@ fn relay1_a_plain_approve_stays_local_and_prints_the_version_first() {
     assert!(ok, "{text}{err}");
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines[0], format!("approving {pref}: t (1 change(s))"));
+    assert_eq!(lines[1], "summary: test summary", "{text}");
     assert!(
-        lines[1].starts_with("landed ") && lines[1].ends_with(&format!("({pref})")),
+        lines[2].starts_with("landed ") && lines[2].ends_with(&format!("({pref})")),
         "{text}"
     );
     let (_, rows) = s.json(&["--json", "log"]);
@@ -179,7 +183,8 @@ fn relay1_flags_pair_the_version_must_be_exact_and_a_moved_proposal_is_refused()
             json!([{"op": "create", "type": "claim", "parent": section, "body": "y"}]),
         )
         .unwrap();
-        r.propose(&writer(), "work", "t2", None).unwrap();
+        r.propose(&writer(), "work", "t2", Some(TEST_SUMMARY))
+            .unwrap();
     });
     let (ok, v) = s.json_as(
         "agent:r",
@@ -234,7 +239,10 @@ fn relay1_the_approve_op_refuses_half_a_relay() {
         json!([{"op": "create", "type": "claim", "parent": section, "body": "x"}]),
     )
     .unwrap();
-    let pref = r.propose(&writer(), "work", "t", None).unwrap().r#ref;
+    let pref = r
+        .propose(&writer(), "work", "t", Some(TEST_SUMMARY))
+        .unwrap()
+        .r#ref;
     let e = Local::new(r);
     let h = writer();
     let cx = OpContext {
@@ -410,7 +418,7 @@ fn hb1_strict_refuses_a_moved_base_for_one_call() {
             json!([{"op": "create", "type": "claim", "parent": section, "body": "unrelated"}]),
         )
         .unwrap();
-        let po = r.propose(&o, "other", "o", None).unwrap();
+        let po = r.propose(&o, "other", "o", Some(TEST_SUMMARY)).unwrap();
         r.land_report(&approver(), &po.r#ref).unwrap();
     });
     let (ok, v) = s.json(&["--json", "approve", &pref, "--strict"]);
@@ -434,7 +442,10 @@ fn msw2_the_approve_op_refuses_an_empty_relay_actor_run_or_session_ref() {
         json!([{"op": "create", "type": "claim", "parent": section, "body": "x"}]),
     )
     .unwrap();
-    let pref = r.propose(&writer(), "work", "t", None).unwrap().r#ref;
+    let pref = r
+        .propose(&writer(), "work", "t", Some(TEST_SUMMARY))
+        .unwrap()
+        .r#ref;
     let e = Local::new(r);
     let a = agent("agent:r", Some("x"));
     let cx = OpContext {

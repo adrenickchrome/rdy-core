@@ -1123,7 +1123,7 @@ fn land_one(r: &mut Rdy, title: &str) -> Hash {
     )
     .unwrap();
     let p = r
-        .propose(&session(Role::Writer), "work", title, None)
+        .propose(&session(Role::Writer), "work", title, Some("test summary"))
         .unwrap();
     r.land(&session(Role::Approver), &p.id)
         .unwrap()

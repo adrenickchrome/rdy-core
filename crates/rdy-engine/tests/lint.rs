@@ -302,7 +302,9 @@ fn inside_a_project_canon_resolves_references_and_parents() {
         )
         .unwrap();
     r.invalidate();
-    let p = r.propose(&agent, "work", "seed", None).unwrap();
+    let p = r
+        .propose(&agent, "work", "seed", Some("test summary"))
+        .unwrap();
     r.land(&founder, &p.id).unwrap();
     let canon = r.read().materialized(&Scope::Canon).unwrap().clone();
     let (w, s) = (&res.created["$w"], &res.created["$s"]);

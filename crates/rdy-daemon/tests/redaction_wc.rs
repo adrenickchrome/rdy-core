@@ -72,7 +72,7 @@ fn rdx6_export_and_checkout_skip_an_unreadable_blob() {
     );
     let doc = w.created["$d"].clone();
     let p = r
-        .propose(&human(Role::Writer), "work", "plan", None)
+        .propose(&human(Role::Writer), "work", "plan", Some("test summary"))
         .unwrap();
     r.land(&human(Role::Approver), &p.id).unwrap();
     r.close().unwrap();

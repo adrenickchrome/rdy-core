@@ -11,6 +11,7 @@ use rdy_engine::*;
 use rdy_model::Role;
 use rdy_qa::daemon::Served;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::TEST_SUMMARY;
 use serde_json::{Value, json};
 
 const SECRET: &str = "The launch code is ZEBRA-7731.";
@@ -1083,7 +1084,9 @@ fn edit_with_script(s: &Served, id: &str, body: &str) -> std::process::Output {
 fn rdx13_an_edit_replaces_the_removal_notice_with_fresh_text() {
     let (s, id) = secret_served();
     with_rdy(&s, |r| {
-        let base = r.propose(&writer(), "work", "Base", None).unwrap();
+        let base = r
+            .propose(&writer(), "work", "Base", Some(TEST_SUMMARY))
+            .unwrap();
         r.land(&approver(), &base.id).unwrap();
         let v = version_of(r, &Scope::Canon, &id);
         let res = r

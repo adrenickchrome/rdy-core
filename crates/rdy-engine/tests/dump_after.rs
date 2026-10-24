@@ -56,7 +56,9 @@ fn add(r: &mut Rdy, n: usize, body: &str) -> String {
 
 /// Lands view `work`.
 fn land(r: &mut Rdy) {
-    let p = r.propose(&writer(), "work", "Work", None).unwrap();
+    let p = r
+        .propose(&writer(), "work", "Work", Some("test summary"))
+        .unwrap();
     r.land(&approver(), &p.id).unwrap();
 }
 
@@ -802,7 +804,7 @@ fn removable(dir: &Path) -> (Rdy, ProposalInfo, Arc<ReadState>) {
     )
     .unwrap();
     let prop = r
-        .propose(&writer(), "redact", "Remove the code", None)
+        .propose(&writer(), "redact", "Remove the code", Some("test summary"))
         .unwrap();
     (r, prop, early)
 }

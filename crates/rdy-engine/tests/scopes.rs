@@ -31,7 +31,9 @@ fn land_one(r: &mut Rdy, title: &str) -> String {
         },
     )
     .unwrap();
-    let p = r.propose(&writer(), "work", title, None).unwrap();
+    let p = r
+        .propose(&writer(), "work", title, Some("test summary"))
+        .unwrap();
     r.land(&founder(), &p.id).unwrap()
 }
 
@@ -194,7 +196,9 @@ fn legacy_colon_views_stay_readable_and_proposable_but_not_writable() {
         r.import(&founder(), "a:b", out.path()).unwrap_err().code,
         "E_RESERVED_VIEW"
     );
-    let p = r.propose(&writer(), "tag:x", "legacy", None).unwrap();
+    let p = r
+        .propose(&writer(), "tag:x", "legacy", Some("test summary"))
+        .unwrap();
     r.land(&founder(), &p.id).unwrap();
     assert!(
         r.read()

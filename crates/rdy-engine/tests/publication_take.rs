@@ -61,7 +61,12 @@ fn write(r: &mut Rdy, ops: Value) -> WriteResult {
 
 fn land(r: &mut Rdy) {
     let p = r
-        .propose(&session(Role::Writer), "work", "hpb17", None)
+        .propose(
+            &session(Role::Writer),
+            "work",
+            "hpb17",
+            Some("test summary"),
+        )
         .unwrap();
     r.land(&session(Role::Approver), &p.id).unwrap();
 }

@@ -21,6 +21,41 @@ fn founder() -> Session {
     }
 }
 
+/// The issues the queue lists for version `pref` under `not_ready` (D-ME2HD: an approval
+/// refuses with exactly these).
+fn not_ready_issues(r: &Rdy, pref: &str) -> Vec<rdy_schema::Issue> {
+    let q = r
+        .read()
+        .pending(&pending::PendingQuery {
+            person: "human:founder".into(),
+            session_ref: None,
+            max_tokens: pending::CARD_MAX_TOKENS,
+        })
+        .unwrap();
+    q.not_ready
+        .into_iter()
+        .find(|n| n.r#ref == pref)
+        .unwrap_or_else(|| panic!("{pref} is not listed as not ready"))
+        .issues
+}
+
+/// Checks `e` is the refusal of a version `pref` that is not ready, with the queue's issues
+/// for it, whose codes are `codes`.
+fn assert_not_ready(r: &Rdy, e: &RdyError, pref: &str, codes: &[&str]) {
+    let issues = not_ready_issues(r, pref);
+    assert_eq!(e.code, E_PROPOSAL_NOT_READY, "{e:?}");
+    assert_eq!(
+        e.message,
+        format!("{pref} is not ready: {} issues", issues.len())
+    );
+    assert_eq!(e.issues, issues);
+    assert_eq!(
+        issues.iter().map(|i| i.code).collect::<Vec<_>>(),
+        codes,
+        "{issues:#?}"
+    );
+}
+
 fn setup() -> (tempfile::TempDir, Rdy, String) {
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
@@ -156,7 +191,9 @@ fn propose_rules() {
         {"op": "create", "type": "term", "id": "$t", "parent": s, "fields": {"name": "Ledger"}, "body": "Balances."},
         {"op": "create", "type": "claim", "parent": s, "body": "Uses the {{$t}}."}
     ])).unwrap(), justification: None, message: String::new() }).unwrap();
-    let p = r.propose(&agent(), "work", "terms", None).unwrap();
+    let p = r
+        .propose(&agent(), "work", "terms", Some("test summary"))
+        .unwrap();
     r.land(&founder(), &p.id).unwrap();
     // another view deletes the term while the claim still references it
     r.write(
@@ -285,20 +322,21 @@ fn revoke_links_and_requires_a_decision() {
 #[test]
 fn propose_marks_a_collision_with_a_landing_as_blocking() {
     let (_d, mut r, s) = setup();
-    let p = r.propose(&agent(), "work", "skeleton", None).unwrap();
+    let p = r
+        .propose(&agent(), "work", "skeleton", Some("test summary"))
+        .unwrap();
     r.land(&founder(), &p.id).unwrap();
     upd(&mut r, "a", &s, json!({"title": "A"})).unwrap();
     upd(&mut r, "b", &s, json!({"title": "B"})).unwrap();
-    let pb = r.propose(&agent(), "b", "b", None).unwrap();
+    let pb = r.propose(&agent(), "b", "b", Some("test summary")).unwrap();
     r.land(&founder(), &pb.id).unwrap();
     // gconf1: the landing rebased a and recorded the collision; propose reports it as blocking
     // and the gate refuses the version until a resolves it
-    let pa = r.propose(&agent(), "a", "a", None).unwrap();
+    let pa = r.propose(&agent(), "a", "a", Some("test summary")).unwrap();
     assert_eq!((pa.conflicts.len(), pa.blocking.len()), (1, 1));
-    assert_eq!(
-        r.land(&founder(), &pa.id).unwrap_err().code,
-        "E_CONFLICT_UNRESOLVED"
-    );
+    // D-ME2HD: the conflict is a readiness issue of the refusal
+    let e = r.land(&founder(), &pa.id).unwrap_err();
+    assert_not_ready(&r, &e, &pa.r#ref, &[E_CONFLICT_UNRESOLVED]);
 }
 
 #[test]
@@ -373,7 +411,9 @@ fn w(
 fn two_views() -> (tempfile::TempDir, Rdy, Session) {
     let (d, mut r, s) = setup();
     let t = w(&mut r, &agent(), "work", json!([{"op": "create", "type": "term", "id": "$t", "parent": s, "fields": {"name": "Ledger"}, "body": "Balances."}])).unwrap().created["$t"].clone();
-    let p = r.propose(&agent(), "work", "seed", None).unwrap();
+    let p = r
+        .propose(&agent(), "work", "seed", Some("test summary"))
+        .unwrap();
     r.land(&founder(), &p.id).unwrap();
     let run2 = Session {
         actor: "agent:designer".into(),
@@ -395,7 +435,9 @@ fn two_views() -> (tempfile::TempDir, Rdy, Session) {
 #[test]
 fn propose_refuses_orphans_and_dangling_refs_after_canon_moved() {
     let (_d, mut r, run2) = two_views();
-    let p1 = r.propose(&agent(), "run-1", "remove", None).unwrap();
+    let p1 = r
+        .propose(&agent(), "run-1", "remove", Some("test summary"))
+        .unwrap();
     r.land(&founder(), &p1.id).unwrap();
     let head = r.store().canon_head().unwrap();
     let e = r.propose(&run2, "run-2", "add claim", None).unwrap_err();
@@ -416,16 +458,19 @@ fn propose_refuses_orphans_and_dangling_refs_after_canon_moved() {
 #[test]
 fn land_refuses_orphans_and_dangling_refs_when_canon_moved_after_propose() {
     let (_d, mut r, run2) = two_views();
-    let p2 = r.propose(&run2, "run-2", "add claim", None).unwrap();
-    let p1 = r.propose(&agent(), "run-1", "remove", None).unwrap();
+    let p2 = r
+        .propose(&run2, "run-2", "add claim", Some("test summary"))
+        .unwrap();
+    let p1 = r
+        .propose(&agent(), "run-1", "remove", Some("test summary"))
+        .unwrap();
     r.land(&founder(), &p1.id).unwrap();
     let head = r.store().canon_head().unwrap();
-    // tgat1: the claim still cites the deleted term, a blocking tension that refuses first;
-    // once a human dismisses it, the gate's validation refuses the orphan
-    assert_eq!(
-        r.land(&founder(), &p2.id).unwrap_err().code,
-        "E_BLOCKING_TENSION"
-    );
+    // tgat1: the claim still cites the deleted term, a blocking tension; the gate's validation
+    // refuses the orphan too. D-ME2HD: both are readiness issues of one refusal, in the queue's
+    // order
+    let e = r.land(&founder(), &p2.id).unwrap_err();
+    assert_not_ready(&r, &e, &p2.r#ref, &[E_BLOCKING_TENSION, E_VALIDATION]);
     let blocking: Vec<String> = r
         .read()
         .tensions()
@@ -439,12 +484,16 @@ fn land_refuses_orphans_and_dangling_refs_when_canon_moved_after_propose() {
         r.dismiss_tension(&founder(), &t, "the validation is under test")
             .unwrap();
     }
+    // once a human dismisses the tension, the orphan alone refuses; the validation's first error
+    // names it
     let e = r.land(&founder(), &p2.id).unwrap_err();
-    assert_eq!(e.code, "E_VALIDATION");
+    assert_not_ready(&r, &e, &p2.r#ref, &[E_VALIDATION]);
+    let m = &e.issues[0].message;
     assert!(
-        e.issues.iter().any(|i| i.code == "E_MISSING_PARENT"),
-        "{:?}",
-        e.issues
+        m.starts_with("c-")
+            && m.contains(" has parent s-")
+            && m.ends_with(", which does not exist"),
+        "{e:?}"
     );
     assert_eq!(r.store().canon_head().unwrap(), head);
     let canon = r.read().materialized(&Scope::Canon).unwrap();
@@ -465,7 +514,9 @@ fn land_with_a_hash_that_is_not_a_proposal_is_bad_input() {
 }
 
 fn land_work(r: &mut Rdy, title: &str) {
-    let p = r.propose(&agent(), "work", title, None).unwrap();
+    let p = r
+        .propose(&agent(), "work", title, Some("test summary"))
+        .unwrap();
     r.land(&founder(), &p.id).unwrap();
 }
 
@@ -495,7 +546,9 @@ fn propose_refuses_deleting_a_parent_that_gained_a_child_in_canon() {
         json!([{"op": "create", "type": "claim", "parent": s, "body": "A claim."}]),
     )
     .unwrap();
-    let p2 = r.propose(&run2, "run-2", "add claim", None).unwrap();
+    let p2 = r
+        .propose(&run2, "run-2", "add claim", Some("test summary"))
+        .unwrap();
     r.land(&founder(), &p2.id).unwrap();
     let head = r.store().canon_head().unwrap();
     let e = r.propose(&agent(), "run-1", "remove S", None).unwrap_err();
@@ -545,16 +598,21 @@ fn deleting_a_parent_that_gained_a_moved_child_in_canon_is_refused() {
         json!([{"op": "move", "id": c, "parent": s}]),
     )
     .unwrap();
-    let p1 = r.propose(&agent(), "run-1", "remove S", None).unwrap();
-    let p2 = r.propose(&run2, "run-2", "move claim", None).unwrap();
+    let p1 = r
+        .propose(&agent(), "run-1", "remove S", Some("test summary"))
+        .unwrap();
+    let p2 = r
+        .propose(&run2, "run-2", "move claim", Some("test summary"))
+        .unwrap();
     r.land(&founder(), &p2.id).unwrap();
     let head = r.store().canon_head().unwrap();
+    // D-ME2HD: the validation's first error is the readiness issue; it names the orphan
     let e = r.land(&founder(), &p1.id).unwrap_err();
-    assert_eq!(e.code, "E_VALIDATION");
-    assert!(
-        e.issues.iter().any(|i| i.code == "E_MISSING_PARENT"),
-        "{:?}",
-        e.issues
+    assert_not_ready(&r, &e, &p1.r#ref, &[E_VALIDATION]);
+    assert_eq!(
+        e.issues[0].message,
+        format!("{c} has parent {s}, which this proposal deletes"),
+        "{e:?}"
     );
     assert_eq!(r.store().canon_head().unwrap(), head);
 }
@@ -576,7 +634,9 @@ fn recreating_a_deleted_block_under_its_old_id_is_not_a_dangling_ref() {
     )
     .unwrap();
     w(&mut r, &agent(), "run-1", json!([{"op": "create", "type": "term", "id": t, "parent": s, "fields": {"name": "Ledger"}, "body": "Balances, recomputed."}])).unwrap();
-    let p = r.propose(&agent(), "run-1", "replace term", None).unwrap();
+    let p = r
+        .propose(&agent(), "run-1", "replace term", Some("test summary"))
+        .unwrap();
     r.land(&founder(), &p.id).unwrap();
     assert_eq!(
         r.read()
@@ -616,7 +676,7 @@ fn recreating_a_deleted_parent_and_child_under_their_old_ids_is_not_an_orphan() 
         {"op": "create", "type": "claim", "id": c, "parent": s2, "body": "Kept, again."}
     ])).unwrap();
     let p = r
-        .propose(&agent(), "run-1", "rebuild section", None)
+        .propose(&agent(), "run-1", "rebuild section", Some("test summary"))
         .unwrap();
     r.land(&founder(), &p.id).unwrap();
     let claim = r
@@ -644,7 +704,7 @@ fn the_gate_refuses_names_that_clash_after_another_landing() {
         json!([{"op": "create", "type": "folder", "fields": {"name": "wallets"}}]),
     )
     .unwrap();
-    let p = r.propose(&agent(), "a", "a", None).unwrap();
+    let p = r.propose(&agent(), "a", "a", Some("test summary")).unwrap();
     r.land(&founder(), &p.id).unwrap();
     let e = r.propose(&agent(), "b", "b", None).unwrap_err();
     assert_eq!(e.code, "E_VALIDATION");
@@ -669,7 +729,9 @@ fn the_gate_refuses_a_parent_cycle_made_by_two_views() {
         ]),
     )
     .unwrap();
-    let p = r.propose(&agent(), "work", "seed", None).unwrap();
+    let p = r
+        .propose(&agent(), "work", "seed", Some("test summary"))
+        .unwrap();
     r.land(&founder(), &p.id).unwrap();
     let (x, y) = (res.created["$x"].clone(), res.created["$y"].clone());
     w(
@@ -686,7 +748,7 @@ fn the_gate_refuses_a_parent_cycle_made_by_two_views() {
         json!([{"op": "move", "id": y, "parent": x}]),
     )
     .unwrap();
-    let p = r.propose(&agent(), "a", "a", None).unwrap();
+    let p = r.propose(&agent(), "a", "a", Some("test summary")).unwrap();
     r.land(&founder(), &p.id).unwrap();
     let e = r.propose(&agent(), "b", "b", None).unwrap_err();
     assert_eq!(e.code, "E_VALIDATION");
@@ -731,7 +793,7 @@ fn the_gate_refuses_folders_nested_too_deep_by_two_views() {
         json!([{"op": "move", "id": p, "parent": q15}]),
     )
     .unwrap();
-    let pa = r.propose(&agent(), "a", "a", None).unwrap();
+    let pa = r.propose(&agent(), "a", "a", Some("test summary")).unwrap();
     r.land(&founder(), &pa.id).unwrap();
     let e = r.propose(&agent(), "b", "b", None).unwrap_err();
     assert_eq!(e.code, "E_VALIDATION");

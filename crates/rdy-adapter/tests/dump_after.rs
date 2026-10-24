@@ -44,7 +44,7 @@ fn land_tag(r: &mut Rdy, n: usize, name: &str) {
     )
     .unwrap();
     let p = r
-        .propose(&session(Role::Writer), "work", "T", None)
+        .propose(&session(Role::Writer), "work", "T", Some("test summary"))
         .unwrap();
     r.land(&session(Role::Approver), &p.id).unwrap();
     r.tag(&session(Role::Approver), name, None, None).unwrap();

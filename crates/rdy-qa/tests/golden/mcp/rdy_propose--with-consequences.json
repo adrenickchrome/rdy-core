@@ -1,6 +1,6 @@
 {
   "blocking": [],
-  "canon_at": "63825437b9f76688439bf634fc7d971d745519343f0f8767fd446dd757961213",
+  "canon_at": "dd7d9efcec0b42f7f035bb404b05a7ef4dcccd3f263bf15dc8b0864682416bd4",
   "changes": 1,
   "conflicts": [],
   "consequences": [
@@ -15,7 +15,7 @@
       },
       "block": "c-WKHEZ",
       "follow_up": "confirm",
-      "id": "cq-3d57c7cd325e9e88",
+      "id": "cq-ab5ff423cab31774",
       "kind": "suspect"
     }
   ],
@@ -31,7 +31,7 @@
       }
     ]
   },
-  "id": "00faa4143b8653b05d20297aba2c4899d0cc9465e02631dfc8bfc0cfd4a808c8",
+  "id": "5c16bbb9451e4ccdbcf9697a19b8569180883172755fd4c9fb2b8eadebf406e1",
   "plan": {
     "by_kind": {
       "confirm": {
@@ -78,8 +78,8 @@
     ],
     "open": 1
   },
-  "ref": "P-00faa4143b86@1",
-  "stable": "00faa4143b8653b05d20297aba2c4899d0cc9465e02631dfc8bfc0cfd4a808c8",
+  "ref": "P-5c16bbb9451e@1",
+  "stable": "5c16bbb9451e4ccdbcf9697a19b8569180883172755fd4c9fb2b8eadebf406e1",
   "summary": "Rewords A and C.",
   "tensions": [
     {

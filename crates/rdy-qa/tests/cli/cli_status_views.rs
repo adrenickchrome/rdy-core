@@ -48,7 +48,16 @@ fn df9_landed_view_stays_listed() {
         json!([{"name": "import", "changes": 1}])
     );
     // the human lands it
-    let (ok, p) = s.json(&["--json", "propose", "--title", "import", "--view", "import"]);
+    let (ok, p) = s.json(&[
+        "--json",
+        "propose",
+        "--title",
+        "import",
+        "--view",
+        "import",
+        "--summary",
+        "test summary",
+    ]);
     assert!(ok, "{p}");
     let pref = p["ref"].as_str().unwrap().to_string();
     let o = s.rdy(&["approve", &pref]);

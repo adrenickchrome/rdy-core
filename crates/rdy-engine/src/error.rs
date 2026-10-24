@@ -68,6 +68,8 @@ pub const E_PROPOSAL_MOVED: &str = "E_PROPOSAL_MOVED";
 /// An approval names a version whose exceptions have no confirm answer (F2); `corrected` holds
 /// each exception's fresh card.
 pub const E_EXCEPTION_OPEN: &str = "E_EXCEPTION_OPEN";
+/// A proposal version fails readiness; each reason is an issue with its own code and fix.
+pub const E_PROPOSAL_NOT_READY: &str = "E_PROPOSAL_NOT_READY";
 /// An answer names a queue item that changed or left the queue since its card was shown;
 /// `corrected` holds the fresh card when the item has one.
 pub const E_ITEM_MOVED: &str = "E_ITEM_MOVED";
@@ -1000,7 +1002,7 @@ pub fn upstream_signout_local() -> Issue {
 
 /// Every error code the engine defines: each `E_*` constant of this module and the briefing's
 /// two. It is the engine's whole static error set, not one feature's subset.
-const CORE_ERROR_CODES: [&str; 101] = [
+const CORE_ERROR_CODES: [&str; 102] = [
     E_LOCKED,
     E_HELD_BY_READER,
     E_NO_PROJECT,
@@ -1042,6 +1044,7 @@ const CORE_ERROR_CODES: [&str; 101] = [
     E_VIEW_CLOSED,
     E_PROPOSAL_MOVED,
     E_EXCEPTION_OPEN,
+    E_PROPOSAL_NOT_READY,
     E_ITEM_MOVED,
     E_HAS_DEPENDENTS,
     E_DEPS_MISSING,

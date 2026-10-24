@@ -71,16 +71,21 @@
 //!
 //! A version is ready when the landing's checks pass (no conflict on a block it writes, no
 //! blocking tension it would put into canon, no error in the canon it would give;
-//! `gate::landing_readiness`), it carries a summary, and no decision of it was rejected (F1).
-//! A version that is not ready is no item: it is listed under `not_ready`, one issue per failed
-//! check, for the agent and never on a card.
+//! `gate::landing_readiness`), it carries a summary, its bound plan can be read, and no decision
+//! or one_way re-affirmation of it was rejected and no deferral card of it refused (F1,
+//! D-AAQ9Z). A version that is not ready is no item: it is listed under `not_ready`, one issue
+//! per failed check, for the agent and never on a card. Every approval path (a direct approval,
+//! `rdy answer`, `rdy_answer` and `all_recommended`) refuses a version that is not ready with
+//! `E_PROPOSAL_NOT_READY`, whose issues are these, in this order ([`approval_readiness`],
+//! D-ME2HD).
 //!
 //! # Answers (O23)
 //!
 //! The queue reads the answers (`answer/<item>`): a `reject_proposal` answer to `P-x@n` takes the
 //! version and everything beside it out of the queue; a `confirm` answer to `<D-id>@<version>`
-//! takes that item out; a `reject_decision` answer makes the batch not ready, and the landing
-//! refuses it too, whether the decision is an exception now or not ([`approval_holds`]); an
+//! takes that item out; a `reject_decision` answer makes the batch not ready, and every approval
+//! path refuses it with `E_PROPOSAL_NOT_READY`, whether the decision is an exception now or not
+//! ([`approval_readiness`]); an
 //! `answer_question` answer to `<Q-id>@<version>` takes the question out (its decision waits for
 //! a landing).
 //!
@@ -319,19 +324,14 @@ impl ReadState {
     }
 }
 
-/// What holds version `pref` back from landing (F1, F2), read once for the landing.
+/// What holds version `pref` back from landing (F2, D-AAQ9Z), read once for the landing. A
+/// rejected decision or re-affirmation and refused deferrals are no hold: readiness refuses them
+/// first ([`approval_readiness`], D-ME2HD).
 pub(crate) struct Holds {
     /// The exception items that have no `confirm` answer bound to the decision's current
-    /// version (F2): a rejected decision's item is among them while it is an exception; a
-    /// rejected re-affirmation's is not (its rejection is in `rejected`). Each card is cut to
-    /// [`CARD_DEFAULT_TOKENS`].
+    /// version (F2). A rejected re-affirmation's item is not among them: readiness refuses its
+    /// version. Each card is cut to [`CARD_DEFAULT_TOKENS`].
     pub open: Vec<Item>,
-    /// One issue for each proposed decision of the version whose current version the person
-    /// rejected (F1), whether it is an exception now or not: the issue readiness gives (final
-    /// review fix round 1, R1: a rejected decision that stops being an exception, say once
-    /// content applies it, still never lands). A rejected re-affirmation and refused deferrals
-    /// are among them.
-    pub rejected: Vec<Issue>,
     /// The version's deferral card while no acceptance is bound to it (D-AAQ9Z), cut to
     /// [`CARD_DEFAULT_TOKENS`], and how many deferrals it lists.
     pub deferral: Option<(Item, usize)>,
@@ -340,11 +340,12 @@ pub(crate) struct Holds {
 }
 
 /// What holds version `pref` back from landing ([`Holds`]). It does not ask whether the version
-/// is ready otherwise; the landing asks that itself. `land_with` calls it (Task 17), so every
-/// approval path waits. Only a version that writes a decision (`decides`) can carry an exception
-/// or a rejected decision or re-affirmation, so only it reads the version whole; any bound
-/// version reads its change plan for the deferral card. A bound version whose change plan cannot
-/// be read is that error: its deferrals cannot be known (fail closed).
+/// is ready; the landing asks [`approval_readiness`] first. `land_with` calls it (Task 17), so
+/// every approval path waits. Only a version that writes a decision (`decides`) can carry an
+/// exception, so only it reads the version whole; any bound version reads its change plan for
+/// the deferral card. A bound version whose change plan cannot be read is that error: its
+/// deferrals cannot be known (fail closed). Readiness reports such a plan first, so this return
+/// stays only as a guard.
 pub(crate) fn approval_holds(
     st: &ReadState,
     pref: &ProposalRef,
@@ -355,7 +356,7 @@ pub(crate) fn approval_holds(
     // the clock is read only where a card is built: a version that writes no decision and has
     // no deferral card reads it never, as before D-AAQ9Z, so a landing's stamps (and with them
     // every later id and hash of a pinned clock) do not move
-    let (card, rejected) = if decides {
+    let card = if decides {
         let v = Version::read(st, *pref, p)?;
         let now = now_ms();
         if v.plan_bound.is_some()
@@ -367,8 +368,8 @@ pub(crate) fn approval_holds(
             if answered(st, &item.r#ref, AnswerAct::Confirm)? {
                 continue;
             }
-            // a rejected re-affirmation has its answer: the landing refuses it with the issue
-            // readiness gives (`rejected`), not as an open card
+            // a rejected re-affirmation has its answer: readiness refuses its version with the
+            // issue the queue gives, never as an open card
             if item.exception == Some(ExceptionKind::ReaffirmOneWay)
                 && answered(st, &item.r#ref, AnswerAct::RejectReaffirm)?
             {
@@ -376,12 +377,9 @@ pub(crate) fn approval_holds(
             }
             open.push(finish(item, CARD_DEFAULT_TOKENS)?);
         }
-        (v.deferral_item(now), v.rejected(st)?)
+        v.deferral_item(now)
     } else {
-        match bound_deferral_item(st, pref, &p, now_ms)? {
-            None => (None, vec![]),
-            Some(card) => (card, deferrals_refused(st, pref)?.into_iter().collect()),
-        }
+        bound_deferral_item(st, pref, &p, now_ms)?.flatten()
     };
     let (mut deferral, mut accepted_by) = (None, None);
     if let Some(item) = card {
@@ -395,10 +393,23 @@ pub(crate) fn approval_holds(
     }
     Ok(Holds {
         open,
-        rejected,
         deferral,
         accepted: accepted_by,
     })
+}
+
+/// The readiness issues of version `pref` (record `p`), in the queue's order: the issues the
+/// queue lists under `not_ready` for it. Empty when the version is ready. Every approval path
+/// refuses a version that is not ready with them (D-ME2HD, [`crate::gate::proposal_not_ready`]).
+/// It is the queue's one readiness ([`Version::readiness`]) on the same published state. The
+/// version is read without its removal cards: readiness never reads them, and the landing's own
+/// freshness check computes each removal report once.
+pub(crate) fn approval_readiness(
+    st: &ReadState,
+    pref: &ProposalRef,
+    p: Proposal,
+) -> Result<Vec<Issue>, RdyError> {
+    Version::read_for(st, *pref, p, Removal::Skip)?.readiness(st)
 }
 
 /// The deferral card of version `pref` (whose record is `p`), answered or not, read from its
@@ -699,15 +710,37 @@ struct Version {
     plan: Result<VersionPlan, RdyError>,
 }
 
+/// Whether [`Version::read_for`] reads the removal cards of a version.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Removal {
+    /// Reads them, with the freshness check of each request (`removal_cards`): the cards need
+    /// them.
+    Read,
+    /// Leaves them out (`removal` none): readiness never reads them.
+    Skip,
+}
+
 impl Version {
     fn read(st: &ReadState, pref: ProposalRef, p: Proposal) -> Result<Version, RdyError> {
+        Version::read_for(st, pref, p, Removal::Read)
+    }
+
+    fn read_for(
+        st: &ReadState,
+        pref: ProposalRef,
+        p: Proposal,
+        removal: Removal,
+    ) -> Result<Version, RdyError> {
         let changes = changes_of(st, &p.changes)?;
         let touched: BTreeSet<BlockId> = changes
             .iter()
             .flat_map(|c| c.ops.iter().map(|o| o.block_id().clone()))
             .collect();
         let tensions = open_tensions(st, &p)?;
-        let (removal, removal_reports) = removal_cards(st, &p.changes)?;
+        let (removal, removal_reports) = match removal {
+            Removal::Read => removal_cards(st, &p.changes)?,
+            Removal::Skip => (None, BTreeMap::new()),
+        };
         // canon's graph first, so the prospective canon carries it instead of building another
         let canon_g = st.graph(&Scope::Canon)?;
         let built = candidate_build(st, &changes)?;
@@ -837,7 +870,8 @@ impl Version {
     }
 
     /// F1: one issue for each proposed decision whose current version has a `reject_decision`
-    /// answer, exception or not. Readiness and the landing ([`approval_holds`]) share it.
+    /// answer, exception or not; then a rejected one_way re-affirmation and refused deferrals.
+    /// Readiness gives them, so the queue and every approval path refuse them alike (D-ME2HD).
     fn rejected(&self, st: &ReadState) -> Result<Vec<Issue>, RdyError> {
         let mut issues = vec![];
         for d in &self.decisions {
@@ -1604,11 +1638,18 @@ mod tests {
                 .open
                 .is_empty()
         );
-        // a later reject opens it again: a rejected decision has no confirm (F1, F2)
+        // a later reject opens it again: a rejected decision has no confirm (F1, F2); readiness
+        // gives the rejection (D-ME2HD)
         let r = reopened(r, &answer(&ex.r#ref, AnswerAct::RejectDecision));
-        let holds = approval_holds(&r.read(), &pref, true).unwrap();
-        let open = holds.open;
-        assert_eq!(holds.rejected.len(), 1, "{:#?}", holds.rejected);
+        let st = r.read();
+        let open = approval_holds(&st, &pref, true).unwrap().open;
+        let p = st.reader().proposal(&pref.version).unwrap();
+        let rejected = approval_readiness(&st, &pref, p).unwrap();
+        assert_eq!(rejected.len(), 1, "{rejected:#?}");
+        assert_eq!(
+            rejected[0].message,
+            format!("{one_way} was rejected; drop or revise it, then propose again")
+        );
         assert_eq!(
             open.iter().map(|i| i.r#ref.as_str()).collect::<Vec<_>>(),
             vec![ex.r#ref.as_str()]

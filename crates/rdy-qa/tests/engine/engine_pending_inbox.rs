@@ -6,7 +6,7 @@ use rdy_engine::{Rdy, Session};
 use rdy_model::Role;
 use rdy_qa::edit_loop::{Spec, spec_doc};
 use rdy_qa::fixtures::*;
-use rdy_qa::intake::verdict_on;
+use rdy_qa::intake::{TEST_SUMMARY, verdict_on};
 use rdy_qa::reindex_check::{derived, reindex_reproduces};
 use rdy_qa::tensions::{ag, created, put};
 use rdy_store::inbox::{InboxCursor, InboxSub};
@@ -229,7 +229,7 @@ fn advised_project() -> (
         "$q",
     );
     let p = r
-        .propose_subset(&ag("v1"), "v1", "Guests", None, None)
+        .propose_subset(&ag("v1"), "v1", "Guests", None, Some(TEST_SUMMARY))
         .unwrap();
     let sub = watcher_at_head(&r);
     verdict_on(

@@ -196,7 +196,9 @@ fn dangling_and_junk_blobs_become_placeholders() {
             raw_figure("fg-BBBBB", &s, "a2", "not-a-hash", "junk"),
         ],
     );
-    let p = r.propose(&agent(), "work", "seed", None).unwrap();
+    let p = r
+        .propose(&agent(), "work", "seed", Some("test summary"))
+        .unwrap();
     r.land(&founder(), &p.id).unwrap();
     let out = tempfile::tempdir().unwrap();
     let summary = render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
@@ -320,7 +322,9 @@ fn link_labels_render_references_as_text_on_one_line() {
     r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
         {"op": "create", "type": "claim", "parent": s, "body": format!("Compare {{{{{claim}}}}}.")}
     ])).unwrap(), justification: None, message: String::new() }).unwrap();
-    let p = r.propose(&agent(), "work", "seed", None).unwrap();
+    let p = r
+        .propose(&agent(), "work", "seed", Some("test summary"))
+        .unwrap();
     r.land(&founder(), &p.id).unwrap();
     let out = tempfile::tempdir().unwrap();
     render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
@@ -351,7 +355,9 @@ fn site_tree(r: &mut Rdy) -> serde_json::Map<String, serde_json::Value> {
         {"op": "create", "type": "folder", "id": "$c", "parent": "$w", "fields": {"name": "cards", "description": "Card products."}},
         {"op": "create", "type": "doc", "id": "$l", "parent": "$c", "fields": {"title": "Limits", "doc_type": "page"}}
     ])).unwrap(), justification: None, message: String::new() }).unwrap();
-    let p = r.propose(&agent(), "work", "tree", None).unwrap();
+    let p = r
+        .propose(&agent(), "work", "tree", Some("test summary"))
+        .unwrap();
     r.land(&founder(), &p.id).unwrap();
     serde_json::to_value(res.created)
         .unwrap()

@@ -83,7 +83,9 @@ fn project() -> (tempfile::TempDir, BlockId, BlockId) {
             },
         )
         .unwrap();
-    let p = r.propose(&writer(), "work", "Base", None).unwrap();
+    let p = r
+        .propose(&writer(), "work", "Base", Some("test summary"))
+        .unwrap();
     r.land(&approver(), &p.id).unwrap();
     r.close().unwrap();
     (

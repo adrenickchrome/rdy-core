@@ -1,10 +1,27 @@
 //! A canon delete is not silently undone: a view that wrote a block before canon deleted it
 //! lands only when one of its changes depends on the delete. Otherwise the propose or the land
-//! refuses with the conflict, whatever number of changes the view made to the block after.
+//! refuses with the conflict (an issue of a version that is not ready, D-ME2HD), whatever number
+//! of changes the view made to the block after.
 use rdy_engine::*;
 use rdy_model::BlockId;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::{not_ready_issues, refused_ref};
 use serde_json::{Value, json};
+
+/// The refusal of a landing whose version carries the conflict with canon's delete: not ready
+/// (D-ME2HD), with the conflict as its one issue.
+const REFUSED: &str = "E_PROPOSAL_NOT_READY [E_CONFLICT_UNRESOLVED]";
+
+/// A landing's refusal as these pins read it: a version that is not ready by its issue codes,
+/// after checking they are the queue's for it; any other refusal by its code.
+fn refusal(r: &Rdy, e: &RdyError) -> String {
+    if e.code != E_PROPOSAL_NOT_READY {
+        return e.code.to_string();
+    }
+    assert_eq!(e.issues, not_ready_issues(r, &refused_ref(e)), "{e:?}");
+    let codes: Vec<&str> = e.issues.iter().map(|i| i.code).collect();
+    format!("{} [{}]", e.code, codes.join(", "))
+}
 
 /// A glossary doc with sections S1 and S2 and one term T in S1, landed. Returns the project,
 /// T, S1, S2 and the doc.
@@ -72,7 +89,7 @@ fn late_writes_after_canon_delete(steps: &[Step]) -> Result<bool, String> {
         r.read().block(&Scope::Canon, &tid).is_err(),
         "T deleted in canon"
     );
-    land(&mut r, "late").map_err(|e| e.code.to_string())?;
+    land(&mut r, "late").map_err(|e| refusal(&r, &e))?;
     Ok(r.read().block(&Scope::Canon, &tid).is_ok())
 }
 
@@ -80,7 +97,7 @@ fn assert_refused(steps: &[Step]) {
     let out = late_writes_after_canon_delete(steps);
     assert_eq!(
         out,
-        Err(E_CONFLICT_UNRESOLVED.to_string()),
+        Err(REFUSED.to_string()),
         "{steps:?}: a view that never saw the delete must not undo it"
     );
 }
@@ -124,7 +141,7 @@ fn rres1_a_single_doc_rename_after_a_canon_delete_still_refuses() {
     .expect("delete the doc");
     land(&mut r, "del").expect("land the delete");
     let e = land(&mut r, "late").unwrap_err();
-    assert_eq!(e.code, E_CONFLICT_UNRESOLVED, "{e:?}");
+    assert_eq!(refusal(&r, &e), REFUSED, "{e:?}");
     let did = BlockId::parse(&doc).unwrap();
     assert!(r.read().block(&Scope::Canon, &did).is_err());
 }
@@ -161,7 +178,7 @@ fn rres1_table_no_sequence_of_late_writes_brings_a_canon_delete_back() {
     assert_eq!(seqs.len(), 4 + 12 + 36);
     for steps in seqs {
         match late_writes_after_canon_delete(&steps) {
-            Err(code) => assert_eq!(code, E_CONFLICT_UNRESOLVED, "{steps:?}"),
+            Err(code) => assert_eq!(code, REFUSED, "{steps:?}"),
             Ok(back) => assert!(!back, "{steps:?}: T came back to canon"),
         }
     }
@@ -231,7 +248,7 @@ fn rres2_a_delete_and_re_create_written_before_a_canon_delete_refuses() {
     .unwrap();
     land(&mut r, "del").unwrap();
     let e = land(&mut r, "late").unwrap_err();
-    assert_eq!(e.code, E_CONFLICT_UNRESOLVED, "{e:?}");
+    assert_eq!(refusal(&r, &e), REFUSED, "{e:?}");
     let tid = BlockId::parse(&t).unwrap();
     assert!(
         r.read().block(&Scope::Canon, &tid).is_err(),
@@ -342,7 +359,7 @@ fn rres3_a_refused_re_create_resolves_in_process_without_a_reopen() {
     .unwrap();
     land(&mut r, "del").unwrap();
     let e = land(&mut r, "late").unwrap_err();
-    assert_eq!(e.code, E_CONFLICT_UNRESOLVED, "{e:?}");
+    assert_eq!(refusal(&r, &e), REFUSED, "{e:?}");
     let c = published_and_fresh(&mut r, "late");
     assert_eq!(c.len(), 1, "{c:?}");
     let side = c[0].sides.iter().find_map(|s| s.version).unwrap();
@@ -474,7 +491,7 @@ fn rres4_one_update_written_before_a_canon_delete_refuses() {
     land(&mut r, "a").unwrap();
     assert_eq!(published_and_fresh(&mut r, "b").len(), 1);
     let e = land(&mut r, "b").unwrap_err();
-    assert_eq!(e.code, E_CONFLICT_UNRESOLVED, "{e:?}");
+    assert_eq!(refusal(&r, &e), REFUSED, "{e:?}");
     let tid = BlockId::parse(&t).unwrap();
     assert!(
         r.read().block(&Scope::Canon, &tid).is_err(),

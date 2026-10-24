@@ -3,6 +3,7 @@ use rdy_engine::*;
 use rdy_model::{BlockId, Justification};
 use rdy_qa::daemon::Served;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::TEST_SUMMARY;
 use serde_json::{from_value, json};
 
 /// Every stamp the seed writes reads as this (the clock is pinned while seeding).
@@ -259,7 +260,7 @@ fn df7_blame_omits_relay() {
             )
             .unwrap();
         let claim = w.created.values().next().unwrap().clone();
-        let pref = r.propose(&a, "r1", "c", None).unwrap().r#ref;
+        let pref = r.propose(&a, "r1", "c", Some(TEST_SUMMARY)).unwrap().r#ref;
         r.close().unwrap();
         (claim, pref)
     };

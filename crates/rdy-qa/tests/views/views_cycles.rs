@@ -3,6 +3,7 @@
 //! hangs a write.
 use rdy_engine::*;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::{TEST_SUMMARY, assert_not_ready};
 use serde_json::json;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -109,17 +110,19 @@ fn cyc1_a_landing_that_would_make_canon_cyclic_is_refused() {
     // x is pinned: the landing of y does not rebase it, so its proposal lands behind canon
     r.view_create(&writer(), "x", None, true).unwrap();
     write(&mut r, "x", mv(&a, &b)).unwrap();
-    let px = r.propose(&writer(), "x", "x", None).unwrap();
+    let px = r.propose(&writer(), "x", "x", Some(TEST_SUMMARY)).unwrap();
     write(&mut r, "y", mv(&b, &a)).unwrap();
     land(&mut r, "y").unwrap();
     let canon = r.read().canon_head();
-    // the gate's own check of the prospective canon refuses it
+    // the gate's own check of the prospective canon refuses it: its first error is the
+    // readiness issue (D-ME2HD), and it names the cycle
     let e = r.land(&approver(), &px.id).unwrap_err();
-    assert_eq!(e.code, E_VALIDATION, "{e}");
+    let issues = assert_not_ready(&r, &e, &px.r#ref, &[E_VALIDATION]);
+    let m = &issues[0].message;
     assert!(
-        e.issues.iter().any(|i| i.code == "E_PARENT_CYCLE"),
-        "{:?}",
-        e.issues
+        (m.starts_with(&a) || m.starts_with(&b))
+            && m.ends_with(" would be inside itself: its parents loop back to it"),
+        "{e:?}"
     );
     assert_eq!(r.read().canon_head(), canon, "nothing landed");
     r.fsck().unwrap();

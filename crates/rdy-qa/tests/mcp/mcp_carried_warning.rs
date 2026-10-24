@@ -9,6 +9,7 @@ use rdy_model::redaction::{
 };
 use rdy_model::{Block, Change, Hash, Op, Provenance, Role};
 use rdy_qa::fixtures::{project, write};
+use rdy_qa::intake::TEST_SUMMARY;
 use rdy_qa::mcp::{McpClient, Reply};
 use rdy_store::kinds;
 use rdy_store::redaction::StoredFrame;
@@ -141,7 +142,7 @@ fn projects() -> (tempfile::TempDir, tempfile::TempDir) {
                 &Session::human("human:qa".into(), Role::Writer).unwrap(),
                 "work",
                 "Base",
-                None,
+                Some(TEST_SUMMARY),
             )
             .unwrap();
         r.land(

@@ -62,7 +62,12 @@ fn write(r: &mut Rdy, ops: Value) -> rdy_engine::WriteResult {
 
 fn land(r: &mut Rdy) {
     let p = r
-        .propose(&session(Role::Writer), "work", "hpb17", None)
+        .propose(
+            &session(Role::Writer),
+            "work",
+            "hpb17",
+            Some("test summary"),
+        )
         .unwrap();
     r.land(&session(Role::Approver), &p.id).unwrap();
 }
@@ -117,7 +122,9 @@ fn redact(r: &mut Rdy, targets: &[String]) -> Hash {
         )
         .unwrap();
     let request = res.redaction.expect("a request is recorded");
-    let p = r.propose(&s, "redact", "Remove", None).unwrap();
+    let p = r
+        .propose(&s, "redact", "Remove", Some("test summary"))
+        .unwrap();
     r.land(&session(Role::Approver), &p.id).unwrap();
     request
 }

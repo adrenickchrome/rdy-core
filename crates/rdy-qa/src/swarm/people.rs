@@ -589,7 +589,15 @@ impl Person {
         let mut made = None;
         let res = self.wc(
             "wc_propose",
-            &["propose", "--view", "work", "--title", &title],
+            &[
+                "propose",
+                "--view",
+                "work",
+                "--title",
+                &title,
+                "--summary",
+                &title,
+            ],
             |en, v| {
                 en.view = Some("work".to_string());
                 en.block = v["ref"].as_str().map(str::to_string);

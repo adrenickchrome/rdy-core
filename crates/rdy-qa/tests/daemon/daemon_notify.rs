@@ -72,7 +72,14 @@ fn update(c: &mut McpClient, id: &rdy_model::BlockId, body: &str) {
 fn land(s: &Served, path: &str) {
     let (ok, v) = s.json(&["--json", "new", "doc", path]);
     assert!(ok, "{v}");
-    let (ok, p) = s.json(&["--json", "propose", "--title", "t"]);
+    let (ok, p) = s.json(&[
+        "--json",
+        "propose",
+        "--title",
+        "t",
+        "--summary",
+        "test summary",
+    ]);
     assert!(ok, "{p}");
     let (ok, v) = s.json(&["--json", "approve", p["id"].as_str().unwrap()]);
     assert!(ok, "{v}");

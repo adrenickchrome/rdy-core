@@ -81,7 +81,11 @@ fn sg3_the_kill_falls_inside_the_run() {
 
 #[test]
 fn sg3_the_outcome_table_is_closed() {
-    assert!(allowed("land", "E_BLOCKING_TENSION"));
+    // D-ME2HD: a conflict or a blocking tension refuses a landing as an issue of a version
+    // that is not ready, never as the outer code
+    assert!(allowed("land", "E_PROPOSAL_NOT_READY"));
+    assert!(!allowed("land", "E_BLOCKING_TENSION"));
+    assert!(!allowed("land", "E_CONFLICT_UNRESOLVED"));
     assert!(allowed("write_no_brief", "E_BRIEF_REQUIRED"));
     assert!(!allowed("write_no_brief", "E_STALE_BASE"));
     assert!(!allowed("write", "E_INTERNAL"));

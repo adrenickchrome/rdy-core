@@ -3,6 +3,7 @@
 use rdy_engine::*;
 use rdy_qa::edit_loop::*;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::TEST_SUMMARY;
 use serde_json::{Value, json};
 
 fn upd(id: &impl ToString, body: &str) -> Value {
@@ -93,7 +94,9 @@ fn infl1_open_proposals_that_touch_a_covered_block_are_listed_at_their_latest_ve
     );
     assert_eq!(p.blocks, vec![s.a.to_string()]);
     write(&mut r, "pa", upd(&s.c, "C in pa.")).unwrap();
-    let p2 = r.propose(&writer(), "pa", "Change A and C", None).unwrap();
+    let p2 = r
+        .propose(&writer(), "pa", "Change A and C", Some(TEST_SUMMARY))
+        .unwrap();
     let b = brief_of(&r, &Scope::Canon, &[&s.a]);
     let refs: Vec<&str> = b
         .inflight

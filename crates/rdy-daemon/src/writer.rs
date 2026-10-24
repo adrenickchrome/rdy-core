@@ -830,7 +830,7 @@ mod tests {
                     )?;
                     if land {
                         let h = Session::human("human:qa".into(), Role::Approver).unwrap();
-                        let p = r.propose(&s, &view, "t", None)?;
+                        let p = r.propose(&s, &view, "t", Some("test summary"))?;
                         r.land(&h, &p.id)?;
                     }
                     Ok(serde_json::to_value(w).unwrap())

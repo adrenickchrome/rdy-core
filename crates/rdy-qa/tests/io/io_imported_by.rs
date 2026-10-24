@@ -1,6 +1,7 @@
 //! ib13 (FW-F7b, D-JCVPD): a block's history names the importer of an imported change.
 use rdy_engine::*;
 use rdy_model::*;
+use rdy_qa::intake::TEST_SUMMARY;
 use serde_json::json;
 use std::path::Path;
 
@@ -43,7 +44,7 @@ fn two_authors(dir: &Path) -> (Rdy, String, String) {
         ]),
     );
     let d = w.created["$d"].clone();
-    let p = r.propose(&a, "va", "a", None).unwrap();
+    let p = r.propose(&a, "va", "a", Some(TEST_SUMMARY)).unwrap();
     r.land(&founder(), &p.id).unwrap();
     let b = sess("agent:b", Some("r2"), Role::Writer);
     let w = put(
@@ -55,7 +56,7 @@ fn two_authors(dir: &Path) -> (Rdy, String, String) {
         ]),
     );
     let prose = w.created["$p"].clone();
-    let p = r.propose(&b, "vb", "b", None).unwrap();
+    let p = r.propose(&b, "vb", "b", Some(TEST_SUMMARY)).unwrap();
     r.land(&founder(), &p.id).unwrap();
     (r, d, prose)
 }

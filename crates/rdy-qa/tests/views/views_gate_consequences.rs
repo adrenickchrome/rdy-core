@@ -7,6 +7,7 @@ use rdy_model::{BlockId, Hash};
 use rdy_qa::daemon::Served;
 use rdy_qa::edit_loop::*;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::TEST_SUMMARY;
 use rdy_qa::mcp::McpClient;
 use serde_json::{Value, json};
 
@@ -48,7 +49,10 @@ fn pcq1_propose_reports_what_landing_would_make_suspect_in_canon() {
 #[test]
 fn pcq1_the_approval_reports_the_same_consequences_with_the_same_ids() {
     let (_d, e, _s) = changed_a();
-    let p = propose_and_report(&e, None, |r| r.propose(&writer(), "w", "Change A", None)).unwrap();
+    let p = propose_and_report(&e, None, |r| {
+        r.propose(&writer(), "w", "Change A", Some(TEST_SUMMARY))
+    })
+    .unwrap();
     let pref = p["ref"].as_str().unwrap().to_string();
     let l = land_and_report(&e, move |r| {
         r.land_with(&approver(), &pref, LandOptions::default())
@@ -89,7 +93,15 @@ fn pcq1_the_cli_prints_consequences_at_propose_and_after_the_landing_line() {
         sp
     };
     let line = format!("suspect {}: confirm (references {})", sp.b, sp.a);
-    let out = s.rdy(&["propose", "--title", "Change A", "--view", "w"]);
+    let out = s.rdy(&[
+        "propose",
+        "--title",
+        "Change A",
+        "--view",
+        "w",
+        "--summary",
+        "test summary",
+    ]);
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(
         out.status.success(),
@@ -121,8 +133,9 @@ fn pcq1_the_cli_prints_consequences_at_propose_and_after_the_landing_line() {
         String::from_utf8_lossy(&out.stderr)
     );
     let lines: Vec<&str> = text.lines().collect();
-    assert!(lines[1].starts_with("landed "), "{text}");
-    assert_eq!(lines[2], "consequences:", "{text}");
+    assert_eq!(lines[1], "summary: test summary", "{text}");
+    assert!(lines[2].starts_with("landed "), "{text}");
+    assert_eq!(lines[3], "consequences:", "{text}");
     assert!(lines.iter().any(|l| l.trim() == line), "{text}");
     s.stop();
 }

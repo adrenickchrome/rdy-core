@@ -6,8 +6,8 @@ use rdy_engine::answer::AnswerRequest;
 use rdy_engine::engine::Local;
 use rdy_engine::pending::{CARD_MAX_TOKENS, ExceptionKind, Item, ItemKind, PendingQuery};
 use rdy_engine::{
-    DecisionInput, E_CONFLICT_UNRESOLVED, E_EXCEPTION_OPEN, E_PROPOSAL_MOVED, E_VALIDATION,
-    LandOptions, Rdy, RdyError, Scope,
+    DecisionInput, E_CONFLICT_UNRESOLVED, E_EXCEPTION_OPEN, E_PROPOSAL_MOVED, E_PROPOSAL_NOT_READY,
+    E_VALIDATION, LandOptions, Rdy, RdyError, Scope,
 };
 use rdy_mcp::tools::{McpState, rdy_answer, rdy_pending, rdy_session};
 use rdy_qa::daemon::Served;
@@ -248,7 +248,18 @@ fn di17_refusals_keep_their_order() {
     let e = r
         .land_with(&approver(), &x, LandOptions::default())
         .unwrap_err();
-    assert_eq!(e.code, E_CONFLICT_UNRESOLVED, "{e}");
+    // D-ME2HD: the conflict is a readiness issue, which comes before the exception hold
+    assert_eq!(e.code, E_PROPOSAL_NOT_READY, "{e}");
+    let nr = pending(&r)
+        .not_ready
+        .into_iter()
+        .find(|n| n.r#ref == x)
+        .expect("x is not ready");
+    assert_eq!(e.issues, nr.issues, "{e}");
+    assert_eq!(
+        e.issues.iter().map(|i| i.code).collect::<Vec<_>>(),
+        vec![E_CONFLICT_UNRESOLVED]
+    );
     // a version that moved: view y proposes, then proposes again
     decide_in(&mut r, "y", unapplied(&spec, "Guests see a footer"));
     let first = propose(&mut r, "y");
@@ -320,8 +331,9 @@ fn di17_a_version_with_no_exception_lands_as_before() {
 }
 
 /// Ruling task-17, option D: the queue lists a version's exception cards only once the version is
-/// ready, and readiness needs a summary (D-4PG9Y, D-3JZP4). So a version with no summary is told
-/// to propose again with one first. Once it has one, the fix names each card.
+/// ready, and readiness needs a summary (D-4PG9Y, D-3JZP4). So a version with no summary is not
+/// ready: its approval is refused with the summary issue, before the exception hold (D-ME2HD).
+/// Once it has one, the fix names each card.
 #[test]
 fn di17_a_version_with_no_summary_is_told_to_propose_again_with_one() {
     let dir = tempfile::tempdir().unwrap();
@@ -341,35 +353,32 @@ fn di17_a_version_with_no_summary_is_told_to_propose_again_with_one() {
         .land_with(&approver(), &bare, LandOptions::default())
         .unwrap_err();
     assert_eq!(
-        (e.code, e.message.as_str()),
+        (e.code, e.message.as_str(), e.fix.as_str()),
         (
-            E_EXCEPTION_OPEN,
-            format!("1 exceptions of {bare} have no answer").as_str()
+            E_PROPOSAL_NOT_READY,
+            format!("{bare} is not ready: 1 issues").as_str(),
+            "fix each issue and propose again: rdy_propose / rdy propose"
         ),
         "{e}"
     );
+    let nr = pending(&r)
+        .not_ready
+        .into_iter()
+        .find(|n| n.r#ref == bare)
+        .expect("the bare version is not ready");
+    assert_eq!(e.issues, nr.issues, "{e}");
     assert_eq!(
-        e.fix,
-        "propose again with a summary (rdy propose --summary <text> / rdy_propose {summary}), then answer each exception card"
+        (e.issues[0].code, e.issues[0].message.as_str()),
+        (E_VALIDATION, format!("{bare} has no summary").as_str())
     );
-    let cards = e.corrected.as_ref().expect("the cards")["exceptions"]
-        .as_array()
-        .expect("a list")
-        .clone();
-    assert_eq!(cards.len(), 1, "{cards:#?}");
-    assert!(
-        cards[0]["ref"]
-            .as_str()
-            .unwrap()
-            .starts_with(&format!("{d}@")),
-        "{cards:#?}"
-    );
+    assert!(e.corrected.is_none(), "no card: {e}");
     assert_eq!(log_end(&r), before, "a refused landing writes nothing");
     // proposed again with a summary, the version is ready and the fix names each card
     let pref = propose(&mut r, GUEST);
     assert_ne!(pref, bare);
     let ex = exceptions_of(&r, &pref);
     assert_eq!(ex.len(), 1, "{ex:#?}");
+    assert!(ex[0].r#ref.starts_with(&format!("{d}@")), "{ex:#?}");
     let e = r
         .land_with(&approver(), &pref, LandOptions::default())
         .unwrap_err();
@@ -425,14 +434,17 @@ fn di17_a_rejected_decision_never_lands_once_it_stops_being_an_exception() {
         nr.issues[0].message,
         format!("{d} was rejected; drop or revise it, then propose again")
     );
-    // a local approval refuses with the queue's issue, and writes nothing
+    // a local approval refuses with the queue's issue, and writes nothing (D-ME2HD)
     let before = log_end(&r);
     let e = r
         .land_with(&approver(), &second, LandOptions::default())
         .unwrap_err();
-    assert_eq!(e.code, E_VALIDATION, "{e}");
-    assert_eq!(e.message, nr.issues[0].message, "{e}");
-    assert_eq!(e.fix, nr.issues[0].fix, "{e}");
+    assert_eq!(e.code, E_PROPOSAL_NOT_READY, "{e}");
+    assert_eq!(e.message, format!("{second} is not ready: 1 issues"), "{e}");
+    assert_eq!(
+        e.fix, "fix each issue and propose again: rdy_propose / rdy propose",
+        "{e}"
+    );
     assert_eq!(e.issues, nr.issues, "{e}");
     assert_eq!(log_end(&r), before, "a refused landing writes nothing");
     // so does the relayed approval through rdy_answer: the version is no item
@@ -447,6 +459,7 @@ fn di17_a_rejected_decision_never_lands_once_it_stops_being_an_exception() {
         .unwrap(),
     )
     .unwrap_err();
+    assert_eq!(e.code, E_PROPOSAL_NOT_READY, "{e}");
     assert_eq!(e.issues, nr.issues, "{e}");
     assert_eq!(st.engine.read().seq(), published, "nothing is written");
     let canon = st.engine.read().materialized(&Scope::Canon).unwrap();

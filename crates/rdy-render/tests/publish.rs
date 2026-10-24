@@ -61,7 +61,9 @@ fn write(r: &mut Rdy, ops: Value) -> WriteResult {
 }
 
 fn land(r: &mut Rdy) {
-    let p = r.propose(&writer(), "work", "hpb14", None).unwrap();
+    let p = r
+        .propose(&writer(), "work", "hpb14", Some("test summary"))
+        .unwrap();
     r.land(&founder(), &p.id).unwrap();
 }
 

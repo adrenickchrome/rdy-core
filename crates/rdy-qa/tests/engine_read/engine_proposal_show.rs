@@ -2,6 +2,7 @@
 //! conflicts and other reasons that block approving it now, and its version chain.
 use rdy_engine::*;
 use rdy_qa::fixtures::*;
+use rdy_qa::intake::TEST_SUMMARY;
 use serde_json::json;
 
 fn claim(parent: &str, body: &str) -> serde_json::Value {
@@ -25,7 +26,9 @@ fn two_versions() -> (tempfile::TempDir, Rdy, ProposalInfo, ProposalInfo) {
     write(&mut r, "work", claim(&section, "a")).unwrap();
     let p1 = r.propose(&writer(), "work", "first", None).unwrap();
     write(&mut r, "work", claim(&section, "b")).unwrap();
-    let p2 = r.propose(&writer(), "work", "second", None).unwrap();
+    let p2 = r
+        .propose(&writer(), "work", "second", Some(TEST_SUMMARY))
+        .unwrap();
     (d, r, p1, p2)
 }
 
@@ -54,7 +57,7 @@ fn pshow1_a_version_shows_its_changes_blocks_and_version_chain() {
     let p = r.read().reader().proposal(&p2.id.parse().unwrap()).unwrap();
     assert_eq!(s.proposed_by.actor, p.provenance.actor);
     assert!(s.conflicts.is_empty() && s.blocking.is_empty(), "{s:?}");
-    assert_eq!(s.summary, None);
+    assert_eq!(s.summary.as_deref(), Some(TEST_SUMMARY));
     let chain: Vec<(&str, bool, bool)> = s
         .versions
         .iter()
@@ -117,7 +120,7 @@ fn pshow1_a_conflicted_version_lists_its_blocking_conflicts() {
     let sb = as_agent("agent:b", "r1");
     write_as(&mut r, &sa, "a", update(&c, &v, "a's")).unwrap();
     write_as(&mut r, &sb, "b", update(&c, &v, "b's")).unwrap();
-    let pa = r.propose(&sa, "a", "a", None).unwrap();
+    let pa = r.propose(&sa, "a", "a", Some(TEST_SUMMARY)).unwrap();
     r.propose(&sb, "b", "b", None).unwrap();
     r.land_report(&approver(), &pa.r#ref).unwrap();
     let pb2 = r.propose(&sb, "b", "rebased", None).unwrap();
@@ -249,7 +252,9 @@ fn proposed_in_v() -> (tempfile::TempDir, Rdy, String, ProposalInfo) {
     let (_doc, section, _c) = seed_doc(&mut r, "seed");
     land(&mut r, "seed").unwrap();
     write(&mut r, "v", claim(&section, "a")).unwrap();
-    let p = r.propose(&writer(), "v", "first", None).unwrap();
+    let p = r
+        .propose(&writer(), "v", "first", Some(TEST_SUMMARY))
+        .unwrap();
     (d, r, section, p)
 }
 

@@ -835,7 +835,7 @@ mod spv4 {
 
     fn land(r: &mut Rdy, view: &str) {
         let p = r
-            .propose(&session(Role::Writer), view, view, None)
+            .propose(&session(Role::Writer), view, view, Some("test summary"))
             .expect("propose");
         r.land(&session(Role::Approver), &p.id).expect("land");
     }
