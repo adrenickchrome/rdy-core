@@ -12,6 +12,9 @@
 //!
 //! The tree is written to a staging directory beside `out` and renamed into place, so `out` holds
 //! the whole tree or nothing. The module makes portable `std::fs` calls only (D-1RXEA).
+//!
+//! The same block writer gives Copy its Markdown ([`copy_parts`], D-BRF4P, D-E8P8J): a fragment
+//! of a site page, with no front matter and no anchor line, whose links lead to the site's pages.
 use super::{Href, PBlock, PageKind, Print, PrintDoc, PrintSummary, Run};
 use crate::llms::md_escape as llms_escape;
 use rdy_engine::{E_BAD_INPUT, E_IO, RdyError};
@@ -77,10 +80,179 @@ fn relative(from: &str, to: &str) -> String {
 
 /// What a page needs to write its blocks.
 struct Cx<'a> {
-    /// The `.md` path of the file being written.
-    file: &'a str,
+    /// The path the links are written from: the `.md` path of the file being written, or the
+    /// site page a fragment is copied from.
+    from: &'a str,
     /// The figures of the print.
     blobs: &'a BTreeMap<Hash, super::Blob>,
+    /// A fragment ([`copy_parts`]): a link leads to the site page (`.html`), and no block writes
+    /// its anchor line.
+    fragment: bool,
+}
+
+/// One part of a Copy fragment ([`copy_parts`]): literal Markdown, or a link target.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum CopyPart {
+    /// Markdown, written as the export writes it.
+    Text(String),
+    /// A link target as the page names it: a path relative to the page the fragment is copied
+    /// from, with its anchor, or an authored external URL. The reader of the fragment resolves
+    /// it and writes it in Markdown's link-target escape.
+    Url(String),
+}
+
+/// A piece of Markdown as the block writer builds it.
+#[derive(Clone, Debug)]
+enum Seg {
+    Text(String),
+    /// A link target before its escape. `cell` says it sits in a table cell, where a `|` would
+    /// end the cell.
+    Url {
+        raw: String,
+        cell: bool,
+    },
+}
+
+/// Markdown with its link targets kept apart: the export writes each target escaped in place
+/// ([`Md::export`]), and a fragment hands it over as a [`CopyPart::Url`] ([`Md::into_parts`]).
+/// It never holds an empty text piece or two text pieces side by side.
+#[derive(Clone, Debug, Default)]
+struct Md(Vec<Seg>);
+
+impl Md {
+    fn text(s: &str) -> Md {
+        let mut md = Md::default();
+        md.push_str(s);
+        md
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn push_str(&mut self, s: &str) {
+        if s.is_empty() {
+            return;
+        }
+        match self.0.last_mut() {
+            Some(Seg::Text(t)) => t.push_str(s),
+            _ => self.0.push(Seg::Text(s.to_string())),
+        }
+    }
+
+    fn push_url(&mut self, raw: String) {
+        self.0.push(Seg::Url { raw, cell: false });
+    }
+
+    fn append(&mut self, other: Md) {
+        for seg in other.0 {
+            match seg {
+                Seg::Text(t) => self.push_str(&t),
+                url => self.0.push(url),
+            }
+        }
+    }
+
+    /// `prefix`, then `self`.
+    fn prefixed(self, prefix: &str) -> Md {
+        let mut md = Md::text(prefix);
+        md.append(self);
+        md
+    }
+
+    /// The lines of `self`: a link target never holds a line break.
+    fn lines(self) -> Vec<Md> {
+        let mut out = vec![Md::default()];
+        for seg in self.0 {
+            match seg {
+                Seg::Text(t) => {
+                    for (i, line) in t.split('\n').enumerate() {
+                        if i > 0 {
+                            out.push(Md::default());
+                        }
+                        out.last_mut().expect("a line").push_str(line);
+                    }
+                }
+                url => out.last_mut().expect("a line").0.push(url),
+            }
+        }
+        out
+    }
+
+    /// `self` as a table cell: a `|` is `\|` in its text, and its link targets keep one too.
+    fn cell(self) -> Md {
+        Md(self
+            .0
+            .into_iter()
+            .map(|seg| match seg {
+                Seg::Text(t) => Seg::Text(t.replace('|', "\\|")),
+                Seg::Url { raw, .. } => Seg::Url { raw, cell: true },
+            })
+            .collect())
+    }
+
+    /// `f` applied to the text that starts `self`; a line starts with text, as a link starts
+    /// with `[`.
+    fn map_first(mut self, f: impl FnOnce(&str) -> String) -> Md {
+        if let Some(Seg::Text(t)) = self.0.first_mut() {
+            *t = f(t);
+            if t.is_empty() {
+                self.0.remove(0);
+            }
+        }
+        self
+    }
+
+    /// `f` applied to the text that ends `self`; a line ends with text, as a link ends with `)`.
+    fn map_last(mut self, f: impl FnOnce(&str) -> String) -> Md {
+        if let Some(Seg::Text(t)) = self.0.last_mut() {
+            *t = f(t);
+            if t.is_empty() {
+                self.0.pop();
+            }
+        }
+        self
+    }
+
+    /// The export's Markdown: each link target escaped in place.
+    fn export(&self) -> String {
+        let mut out = String::new();
+        for seg in &self.0 {
+            match seg {
+                Seg::Text(t) => out.push_str(t),
+                Seg::Url { raw, cell: false } => out.push_str(&url(raw)),
+                Seg::Url { raw, cell: true } => out.push_str(&url(raw).replace('|', "\\|")),
+            }
+        }
+        out
+    }
+
+    /// Hands `self` to a fragment's parts. A target in a table cell writes its `|` as `%7C`,
+    /// which leads to the same place and leaves the cell whole.
+    fn into_parts(self, out: &mut Vec<CopyPart>) {
+        for seg in self.0 {
+            match seg {
+                Seg::Text(t) => push_text(out, &t),
+                Seg::Url { raw, cell } => out.push(CopyPart::Url(if cell {
+                    raw.replace('|', "%7C")
+                } else {
+                    raw
+                })),
+            }
+        }
+    }
+}
+
+/// `s` at the end of `out`, in the text part that ends it when there is one.
+fn push_text(out: &mut Vec<CopyPart>, s: &str) {
+    if s.is_empty() {
+        return;
+    }
+    match out.last_mut() {
+        Some(CopyPart::Text(t)) => t.push_str(s),
+        _ => out.push(CopyPart::Text(s.to_string())),
+    }
 }
 
 /// `s` with each `&` that opens something a reader takes for a character reference written as
@@ -127,21 +299,30 @@ fn guard_line(line: &str) -> String {
     }
 }
 
-/// The lines of `text` (already escaped), each guarded by [`guard_line`].
-fn guarded_lines(text: &str) -> Vec<String> {
-    text.split('\n').map(guard_line).collect()
+/// The lines of `text` (already escaped), each guarded by [`guard_line`]. A line's guard reads
+/// the text that starts it: a line with a link is never all `=`.
+fn guarded_lines(text: Md) -> Vec<Md> {
+    text.lines()
+        .into_iter()
+        .map(|l| l.map_first(guard_line))
+        .collect()
 }
 
 /// An ATX heading line. `text` is escaped; a `#` that ends it is text, not a closing sequence.
 fn heading(level: usize, text: &str) -> String {
-    let mut text = text.to_string();
-    if text.ends_with('#') {
-        text.pop();
-        text.push_str("\\#");
-    }
-    format!("{} {text}", "#".repeat(level.clamp(1, 6)))
-        .trim_end()
-        .to_string()
+    heading_md(level, Md::text(text)).export()
+}
+
+/// [`heading`] of Markdown that may hold links.
+fn heading_md(level: usize, text: Md) -> Md {
+    let text = text.map_last(|t| match t.strip_suffix('#') {
+        Some(rest) => format!("{rest}\\#"),
+        None => t.to_string(),
+    });
+    let mut line = Md::text(&"#".repeat(level.clamp(1, 6)));
+    line.push_str(" ");
+    line.append(text);
+    line.map_last(|t| t.trim_end().to_string())
 }
 
 /// A link target as Markdown reads it inside `(…)`.
@@ -181,11 +362,30 @@ fn longest_backticks(s: &str) -> usize {
 }
 
 impl Cx<'_> {
+    /// Where a link leads, before its escape: the export's `.md` file, or a fragment's site page.
+    fn target(&self, href: &Href) -> String {
+        match href {
+            Href::External(u) => u.clone(),
+            Href::Page { page, anchor } => {
+                let mut t = if self.fragment {
+                    relative(self.from, page)
+                } else {
+                    relative(self.from, &md_path(page))
+                };
+                if let Some(a) = anchor {
+                    t.push('#');
+                    t.push_str(a);
+                }
+                t
+            }
+        }
+    }
+
     /// The words of one run's piece of a line, in the run's look.
-    fn piece(&self, run: &Run, piece: &str, line_start: bool) -> String {
+    fn piece(&self, run: &Run, piece: &str, line_start: bool) -> Md {
         let core = piece.trim();
         if core.is_empty() {
-            return piece.to_string();
+            return Md::text(piece);
         }
         let lead = &piece[..piece.len() - piece.trim_start().len()];
         let trail = &piece[piece.trim_end().len()..];
@@ -201,26 +401,22 @@ impl Cx<'_> {
             (false, true) => format!("*{out}*"),
             (false, false) => out,
         };
-        if let Some(href) = &run.link {
-            let target = match href {
-                Href::External(u) => url(u),
-                Href::Page { page, anchor } => {
-                    let mut t = relative(self.file, &md_path(page));
-                    if let Some(a) = anchor {
-                        t.push('#');
-                        t.push_str(a);
-                    }
-                    url(&t)
-                }
-            };
-            out = format!("[{out}]({target})");
+        let mut md = Md::text(lead);
+        match &run.link {
+            Some(href) => {
+                md.push_str(&format!("[{out}]("));
+                md.push_url(self.target(href));
+                md.push_str(")");
+            }
+            None => md.push_str(&out),
         }
-        format!("{lead}{out}{trail}")
+        md.push_str(trail);
+        md
     }
 
     /// Runs as one piece of Markdown text; a line break in a run is `br`.
-    fn inline(&self, runs: &[Run], br: &str, line_start: bool) -> String {
-        let mut out = String::new();
+    fn inline(&self, runs: &[Run], br: &str, line_start: bool) -> Md {
+        let mut out = Md::default();
         let mut start = line_start;
         for run in runs {
             for (i, piece) in run.text.split('\n').enumerate() {
@@ -231,7 +427,7 @@ impl Cx<'_> {
                 if piece.is_empty() {
                     continue;
                 }
-                out.push_str(&self.piece(run, piece, start));
+                out.append(self.piece(run, piece, start));
                 start = false;
             }
         }
@@ -239,22 +435,22 @@ impl Cx<'_> {
     }
 
     /// The lines of `blocks`, one blank line between blocks.
-    fn blocks(&self, blocks: &[PBlock]) -> Vec<String> {
-        let mut out: Vec<String> = vec![];
+    fn blocks(&self, blocks: &[PBlock]) -> Vec<Md> {
+        let mut out: Vec<Md> = vec![];
         for b in blocks {
             let lines = self.block(b);
             if lines.is_empty() {
                 continue;
             }
             if !out.is_empty() {
-                out.push(String::new());
+                out.push(Md::default());
             }
             out.extend(lines);
         }
         out
     }
 
-    fn block(&self, b: &PBlock) -> Vec<String> {
+    fn block(&self, b: &PBlock) -> Vec<Md> {
         match b {
             PBlock::Heading {
                 level,
@@ -262,30 +458,32 @@ impl Cx<'_> {
                 runs,
             } => {
                 let text = self.inline(runs, " ", false);
-                anchored(anchor, true, vec![heading(usize::from(*level), &text)])
+                self.anchored(anchor, true, vec![heading_md(usize::from(*level), text)])
             }
             PBlock::Para { anchor, runs } => {
                 let text = self.inline(runs, "\\\n", true);
-                anchored(anchor, true, guarded_lines(&text))
+                self.anchored(anchor, true, guarded_lines(text))
             }
             PBlock::List {
                 ordered,
                 start,
                 items,
             } => self.list(*ordered, *start, items),
-            PBlock::Table { anchor, head, rows } => anchored(anchor, false, self.table(head, rows)),
+            PBlock::Table { anchor, head, rows } => {
+                self.anchored(anchor, false, self.table(head, rows))
+            }
             PBlock::Code { anchor, lang, text } => {
                 let fence = "`".repeat((longest_backticks(text) + 1).max(3));
                 let info = lang
                     .as_deref()
                     .filter(|l| !l.chars().any(|c| c.is_whitespace() || c == '`'))
                     .unwrap_or("");
-                let mut lines = vec![format!("{fence}{info}")];
+                let mut lines = vec![Md::text(&format!("{fence}{info}"))];
                 if !text.is_empty() {
-                    lines.extend(text.split('\n').map(str::to_string));
+                    lines.extend(text.split('\n').map(Md::text));
                 }
-                lines.push(fence);
-                anchored(anchor, false, lines)
+                lines.push(Md::text(&fence));
+                self.anchored(anchor, false, lines)
             }
             PBlock::Figure {
                 anchor,
@@ -297,23 +495,22 @@ impl Cx<'_> {
                 let file = blob.and_then(|h| self.blobs.get(&h)).map(|b| &b.file);
                 let alt_text = alt.split_whitespace().collect::<Vec<_>>().join(" ");
                 if let Some(file) = file {
-                    lines.push(format!(
-                        "![{}]({})",
-                        md_escape(&alt_text, false),
-                        url(&relative(self.file, file))
-                    ));
+                    let mut image = Md::text(&format!("![{}](", md_escape(&alt_text, false)));
+                    image.push_url(relative(self.from, file));
+                    image.push_str(")");
+                    lines.push(image);
                 }
                 let caption = self.inline(caption, "\\\n", true);
                 if file.is_none() && caption.is_empty() && !alt_text.is_empty() {
-                    lines.push(guard_line(&md_escape(&alt_text, true)));
+                    lines.push(Md::text(&guard_line(&md_escape(&alt_text, true))));
                 }
                 if !caption.is_empty() {
                     if !lines.is_empty() {
-                        lines.push(String::new());
+                        lines.push(Md::default());
                     }
-                    lines.extend(guarded_lines(&caption));
+                    lines.extend(guarded_lines(caption));
                 }
-                anchored(anchor, false, lines)
+                self.anchored(anchor, false, lines)
             }
             PBlock::Callout {
                 anchor,
@@ -324,24 +521,24 @@ impl Cx<'_> {
                 let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
                 let inner = self.blocks(blocks);
                 if !label.is_empty() {
-                    lines.push(format!("> **{}**", md_escape(&label, false)));
+                    lines.push(Md::text(&format!("> **{}**", md_escape(&label, false))));
                     if !inner.is_empty() {
-                        lines.push(">".to_string());
+                        lines.push(Md::text(">"));
                     }
                 }
                 lines.extend(inner.into_iter().map(|l| {
                     if l.is_empty() {
-                        ">".to_string()
+                        Md::text(">")
                     } else {
-                        format!("> {l}")
+                        l.prefixed("> ")
                     }
                 }));
-                anchored(anchor, false, lines)
+                self.anchored(anchor, false, lines)
             }
         }
     }
 
-    fn list(&self, ordered: bool, start: u32, items: &[Vec<PBlock>]) -> Vec<String> {
+    fn list(&self, ordered: bool, start: u32, items: &[Vec<PBlock>]) -> Vec<Md> {
         let mut out = vec![];
         for (i, item) in items.iter().enumerate() {
             let mark = if ordered {
@@ -353,17 +550,17 @@ impl Cx<'_> {
             let marker = format!("{mark:<width$}");
             let mut lines = self.blocks(item).into_iter();
             match lines.next() {
-                Some(first) => out.push(format!("{marker}{first}")),
-                None => out.push(mark),
+                Some(first) => out.push(first.prefixed(&marker)),
+                None => out.push(Md::text(&mark)),
             }
             let pad = " ".repeat(width);
-            out.extend(lines.map(|l| if l.is_empty() { l } else { format!("{pad}{l}") }));
+            out.extend(lines.map(|l| if l.is_empty() { l } else { l.prefixed(&pad) }));
         }
         out
     }
 
     /// A pipe table: a cell writes `|` as `\|` and joins its lines with one space (O28 (e)).
-    fn table(&self, head: &[Vec<Run>], rows: &[Vec<Vec<Run>>]) -> Vec<String> {
+    fn table(&self, head: &[Vec<Run>], rows: &[Vec<Vec<Run>>]) -> Vec<Md> {
         let cols = rows
             .iter()
             .map(Vec::len)
@@ -374,29 +571,83 @@ impl Cx<'_> {
             return vec![];
         }
         let row = |cells: &[Vec<Run>]| {
-            let mut texts: Vec<String> = cells
+            let mut texts: Vec<Md> = cells
                 .iter()
-                .map(|c| self.inline(c, " ", false).replace('|', "\\|"))
+                .map(|c| self.inline(c, " ", false).cell())
                 .collect();
-            texts.resize(cols, String::new());
-            format!("| {} |", texts.join(" | "))
+            texts.resize(cols, Md::default());
+            let mut line = Md::text("| ");
+            for (i, cell) in texts.into_iter().enumerate() {
+                if i > 0 {
+                    line.push_str(" | ");
+                }
+                line.append(cell);
+            }
+            line.push_str(" |");
+            line
         };
-        let mut lines = vec![row(head), format!("|{}", " --- |".repeat(cols))];
+        let mut lines = vec![row(head), Md::text(&format!("|{}", " --- |".repeat(cols)))];
         lines.extend(rows.iter().map(|r| row(r)));
         lines
     }
+
+    /// `lines` after the line that names their anchor. A heading and a paragraph follow it
+    /// directly; any other block follows a blank line, so a reader that needs the blank line
+    /// finds it. A fragment writes no anchor line (D-E8P8J).
+    fn anchored(&self, anchor: &Option<String>, adjacent: bool, lines: Vec<Md>) -> Vec<Md> {
+        let Some(a) = anchor.as_ref().filter(|_| !self.fragment) else {
+            return lines;
+        };
+        let mut out = vec![Md::text(&format!(
+            "<a id=\"{}\"></a>",
+            a.replace('"', "&quot;")
+        ))];
+        if !lines.is_empty() && !adjacent {
+            out.push(Md::default());
+        }
+        out.extend(lines);
+        out
+    }
 }
 
-/// `lines` after the line that names their anchor. A heading and a paragraph follow it directly;
-/// any other block follows a blank line, so a reader that needs the blank line finds it.
-fn anchored(anchor: &Option<String>, adjacent: bool, lines: Vec<String>) -> Vec<String> {
-    let Some(a) = anchor else { return lines };
-    let mut out = vec![format!("<a id=\"{}\"></a>", a.replace('"', "&quot;"))];
-    if !lines.is_empty() && !adjacent {
-        out.push(String::new());
+/// Copy's Markdown of `blocks` on the site page `page` (D-BRF4P, D-E8P8J): the blocks as the
+/// export writes them, one blank line between blocks and one line feed at the end, with no front
+/// matter and no anchor line. A link leads to the site page (`.html`) and the anchor the print
+/// gives it; each target is a [`CopyPart::Url`] relative to `page`, so the reader resolves it
+/// against the page it shows. A diagram is its source, fenced in its language; a removed block is
+/// its notice. No two text parts are side by side, and an empty range has no part. Each block is
+/// written into the result once, as it is read: the page's own bounds hold, and nothing else
+/// caps the result.
+pub fn copy_parts(
+    blocks: &[PBlock],
+    page: &str,
+    blobs: &BTreeMap<Hash, super::Blob>,
+) -> Result<Vec<CopyPart>, RdyError> {
+    let cx = Cx {
+        from: page,
+        blobs,
+        fragment: true,
+    };
+    let mut out = vec![];
+    for b in blocks {
+        let lines = cx.block(b);
+        if lines.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            push_text(&mut out, "\n\n");
+        }
+        for (i, line) in lines.into_iter().enumerate() {
+            if i > 0 {
+                push_text(&mut out, "\n");
+            }
+            line.into_parts(&mut out);
+        }
     }
-    out.extend(lines);
-    out
+    if !out.is_empty() {
+        push_text(&mut out, "\n");
+    }
+    Ok(out)
 }
 
 /// A string as YAML reads it: a JSON string (O28 (c)).
@@ -433,13 +684,19 @@ fn page_file(p: &Print, d: &PrintDoc, generated: bool) -> String {
     out.push_str(&format!("{}\n", heading(1, &text_line(&d.title, false))));
     let file = md_path(&d.page);
     let cx = Cx {
-        file: &file,
+        from: &file,
         blobs: &p.blobs,
+        fragment: false,
     };
     let lines = cx.blocks(&d.blocks);
     if !lines.is_empty() {
         out.push('\n');
-        out.push_str(&lines.join("\n"));
+        for (i, line) in lines.iter().enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            out.push_str(&line.export());
+        }
         out.push('\n');
     }
     out
