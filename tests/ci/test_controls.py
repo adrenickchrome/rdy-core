@@ -1022,6 +1022,21 @@ class plz5_CoverageProfiles(unittest.TestCase):
         self.assertTrue(good.exists())
         self.assertEqual(self.cargo_calls(), [])
 
+    def test_unstattable_entries_stay_fatal(self):
+        # A readable but non-searchable directory lists its entries but refuses to stat them.
+        if os.geteuid() == 0:  # root stats anything
+            self.skipTest('root can stat any entry')
+        nested = self.profile('nested/deep.profraw', b'good|valid')
+        self.root.chmod(0o400)
+        self.addCleanup(self.root.chmod, 0o700)
+        with self.assertRaises(OSError):
+            self.run_precheck()
+        self.assertIsNone(self.check_then_report())
+        self.assertEqual(self.checked_paths(), [])
+        self.assertEqual(self.cargo_calls(), [])
+        self.root.chmod(0o700)
+        self.assertEqual(nested.read_bytes(), b'good|valid')
+
     def test_unmovable_profiles_stay_fatal(self):
         bad = self.profile('d/bad.profraw', b'corrupt|bytes')
         with self.assertRaises(OSError):

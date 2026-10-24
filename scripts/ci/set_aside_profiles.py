@@ -11,6 +11,7 @@ nothing, runs no report and removes nothing: rejected profiles are kept under RU
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
@@ -30,7 +31,9 @@ def profiles(directory):
     """Yield every .profraw below `directory` in name order, one directory read at a time."""
     for name in sorted(os.listdir(directory)):
         path = directory / name
-        if os.path.isdir(path) and not os.path.islink(path):
+        # lstat propagates every stat error and never follows a symlink, so a directory link is
+        # not entered (os.path.isdir would turn a stat error into False and skip the entry).
+        if stat.S_ISDIR(os.lstat(path).st_mode):
             yield from profiles(path)
         elif name.endswith('.profraw'):
             yield path
