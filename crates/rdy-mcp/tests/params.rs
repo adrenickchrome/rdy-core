@@ -364,7 +364,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
     use rdy_mcp::entity_tools::AcceptParams;
     use rdy_mcp::intent_tools::IntentParams;
     use rdy_mcp::search_tools::SearchParams;
-    use rdy_mcp::view_tools::LogParams;
+    use rdy_mcp::view_tools::{LogParams, OwnerParams};
     let mut refused = Vec::new();
     let mut checked: Vec<&str> = Vec::new();
     macro_rules! check {
@@ -373,9 +373,10 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
             checked.push(stringify!($t));
         )* };
     }
-    // The 58 `*Params` types, nested ones included (`EditorialParams`, `ReflectsParams`,
+    // The 59 `*Params` types, nested ones included (`EditorialParams`, `ReflectsParams`,
     // `AltMemberParams`, `AltPickParams`, `DismissParams`, `DecideParams`, `MentionParams`,
-    // `AcceptAdviceParams`, `RelayParams`, `RecommendedParams`, `PlanAnswerParams`).
+    // `AcceptAdviceParams`, `RelayParams`, `RecommendedParams`, `PlanAnswerParams`,
+    // `OwnerParams`).
     check!(
         AcceptAdviceParams,
         AcceptParams,
@@ -404,6 +405,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         LoadParams,
         LogParams,
         MentionParams,
+        OwnerParams,
         PendingParams,
         PlanAnswerParams,
         PlanParams,
