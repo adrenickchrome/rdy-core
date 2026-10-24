@@ -410,13 +410,16 @@ fn dgm4_empty_blocks_add_no_blank_lines() {
         start: 1,
         items: vec![vec![para(""), para("x"), para(""), para("y")]],
     };
-    assert_eq!(copy(&[list.clone()]), "-   x\n\n    y\n");
+    assert_eq!(copy(std::slice::from_ref(&list)), "-   x\n\n    y\n");
     let callout = PBlock::Callout {
         anchor: None,
         label: "Note".into(),
         blocks: vec![para("a"), para(""), para("b"), para("")],
     };
-    assert_eq!(copy(&[callout.clone()]), "> **Note**\n>\n> a\n>\n> b\n");
+    assert_eq!(
+        copy(std::slice::from_ref(&callout)),
+        "> **Note**\n>\n> a\n>\n> b\n"
+    );
     // the export writes these blocks as it did before
     let p = print_of(
         page,
