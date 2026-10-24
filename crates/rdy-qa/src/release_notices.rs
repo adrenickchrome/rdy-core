@@ -10,7 +10,7 @@
 //! cache into a new directory, checks each copy against `Cargo.lock`, and returns the release
 //! notes part that names them. [`check_release_text`] checks a release's notes against that part,
 //! and checks their changes part: in place, and naming any store or dump format move since the
-//! previous release with its dump-and-load step (D-7PQEF).
+//! previous release with a dump-and-load step only when the store format moves (D-7PQEF, D-MYEW8).
 use crate::platform;
 use crate::release_install::{self, TARGETS, valid_path, valid_target, valid_version};
 use serde::Deserialize;
@@ -75,7 +75,7 @@ pub const MSG_FORMAT_MOVE: &str = "release sources: release notes do not name th
 /// The published releases, oldest first: each version with the dump format and store format it
 /// writes. The changes part of a release's notes covers everything since the newest row before
 /// it (D-7PQEF). A release adds its row once it is published.
-pub const RELEASED: &[(&str, u32, u32)] = &[("0.17.0", 3, 16)];
+pub const RELEASED: &[(&str, u32, u32)] = &[("0.17.0", 3, 16), ("0.20.0", 3, 18)];
 /// The groups of the changes part, in order; each is left out when empty (D-7PQEF).
 pub const CHANGES_GROUPS: [&str; 5] = [
     "### New features",
@@ -922,18 +922,13 @@ fn format_move_line(
     if (pd, ps) == (cd, cs) {
         return None;
     }
-    let what = if ps != cs {
-        format!("the store format moves from {ps} to {cs}")
-    } else {
-        format!("the dump format moves from {pd} to {cd}")
-    };
-    let refuses = if ps != cs {
-        format!(" rdy {version} refuses a store made by rdy {previous} with `E_STORE_FORMAT`.")
-    } else {
-        String::new()
-    };
+    if ps != cs {
+        return Some(format!(
+            "- **Breaking: the store format moves from {ps} to {cs} (dump pair ({pd}, {ps}) to ({cd}, {cs})).** rdy {version} refuses a store made by rdy {previous} with `E_STORE_FORMAT`. To move a project, run `rdy dump --out <file>` with rdy {previous}, then `rdy load <file> <dir>` with rdy {version}, into a directory with no store."
+        ));
+    }
     Some(format!(
-        "- **Breaking: {what} (dump pair ({pd}, {ps}) to ({cd}, {cs})).**{refuses} To move a project, run `rdy dump --out <file>` with rdy {previous}, then `rdy load <file> <dir>` with rdy {version}, into a directory with no store."
+        "- **Breaking: the dump format moves from {pd} to {cd} (dump pair ({pd}, {ps}) to ({cd}, {ps})).** rdy {version} opens a store made by rdy {previous} as it is, and loads every earlier dump. rdy {previous} cannot load a dump made by rdy {version}."
     ))
 }
 
@@ -2477,6 +2472,24 @@ mod tests {
         )
     }
 
+    /// The published 0.20.0 row is the previous release of later versions (TASK-540).
+    #[test]
+    fn plz2_published_020_is_the_previous_release() {
+        assert_eq!(
+            previous_release("0.21.0", RELEASED),
+            Some(("0.20.0", 3, 18))
+        );
+        assert_eq!(
+            previous_release("0.20.0", RELEASED),
+            Some(("0.17.0", 3, 16))
+        );
+        assert_eq!(
+            previous_release("0.19.0", RELEASED),
+            Some(("0.17.0", 3, 16))
+        );
+        assert_eq!(previous_release("0.17.0", RELEASED), None);
+    }
+
     /// The changes part (D-7PQEF): in place after Try it and before Feedback, with known groups
     /// in order, and the format move line in its Changes group when the formats moved since the
     /// previous release.
@@ -2501,7 +2514,13 @@ mod tests {
         assert_eq!(
             format_move_line("0.21.0", ("0.20.0", 3, 18), (4, 18)).as_deref(),
             Some(
-                "- **Breaking: the dump format moves from 3 to 4 (dump pair (3, 18) to (4, 18)).** To move a project, run `rdy dump --out <file>` with rdy 0.20.0, then `rdy load <file> <dir>` with rdy 0.21.0, into a directory with no store."
+                "- **Breaking: the dump format moves from 3 to 4 (dump pair (3, 18) to (4, 18)).** rdy 0.21.0 opens a store made by rdy 0.20.0 as it is, and loads every earlier dump. rdy 0.20.0 cannot load a dump made by rdy 0.21.0."
+            )
+        );
+        assert_eq!(
+            format_move_line("0.21.0", ("0.17.0", 3, 16), (4, 18)).as_deref(),
+            Some(
+                "- **Breaking: the store format moves from 16 to 18 (dump pair (3, 16) to (4, 18)).** rdy 0.21.0 refuses a store made by rdy 0.17.0 with `E_STORE_FORMAT`. To move a project, run `rdy dump --out <file>` with rdy 0.17.0, then `rdy load <file> <dir>` with rdy 0.21.0, into a directory with no store."
             )
         );
         assert_eq!(format_move_line("0.21.0", ("0.20.0", 3, 18), (3, 18)), None);

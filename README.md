@@ -268,9 +268,10 @@ rdy worktree add ../review work-review   # a second folder, bound to its own vie
 `rdy-qa` hardening suite (model, store, schema, engine, io, mcp, cli, render) and a perf-regression
 tier, and writes `target/qa/report.md`. Flags: `--deep` (before a milestone), `--only <area>`,
 `--skip-perf`, `--rebaseline` (after an intended performance change; commit the baseline diff).
+It first runs `cargo fetch --locked`, so the release checks have the crates of every release target.
 
-`--only perf` runs the release build and the perf tier only. `--only <area>` for any other area
-keeps fmt, clippy, the workspace tests, the `rdy-qa` unit tests and the perf tier (unless
+`--only perf` runs the locked fetch, the release build and the perf tier only. `--only <area>`
+for any other area keeps fmt, clippy, the workspace tests, the `rdy-qa` unit tests and the perf tier (unless
 `--skip-perf`) and narrows only the hardening suite to that area's test files. The `swarm` area runs eight scripted agents and one person against one daemon, through MCP first. It checks for lost writes, unreported tensions, landings past the gate and inboxes that differ from the log. It also checks that every stable write cites a briefing.
 
 ## License

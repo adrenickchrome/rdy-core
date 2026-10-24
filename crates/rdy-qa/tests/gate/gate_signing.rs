@@ -1579,9 +1579,10 @@ fn sig8_later_signing_checks_person_kind_relay_and_duplicates() {
     assert_err(&e, E_PERMISSION, "policy approvals cannot be signed");
     assert_eq!(
         e.fix,
-        "wait for the authority policy to define their signer"
+        "a policy landing has no signature; sign the landing of the policy version it was accepted under"
     );
     assert_eq!(agent.calls(), 0);
+    assert!(stored(&p.e, &policy).is_empty());
 
     // targets that resolve to no stored landing, or to more than one
     let e = run_sign(&*p.e, &agent, &approver(), "abcdef0123", None).unwrap_err();
