@@ -1028,12 +1028,24 @@ fn settle_order(set: &Value, bound: &str, order: &[String], busy: &[String]) -> 
 
 /// What the drain's propose came to.
 enum Proposed {
-    /// The proposal's ref.
-    Ref(String),
+    /// The proposal's ref, and the tensions its reply lists as refusing its landing (`refuses`),
+    /// by label.
+    Ref(String, BTreeSet<String>),
     /// The view holds nothing more.
     Empty,
     /// The drain settled an open set first: the view proposes again.
     Again,
+}
+
+/// The labels of the tensions a propose reply lists (`rows`, its `tensions`) as refusing the
+/// version's landing (`refuses: true`).
+fn refusing_of(rows: &Value) -> BTreeSet<String> {
+    rows.as_array()
+        .into_iter()
+        .flatten()
+        .filter(|t| t["refuses"] == true)
+        .filter_map(|t| t["id"].as_str().map(str::to_string))
+        .collect()
 }
 
 /// Whether the listed tension `row` fits the drain row for `kind`, the kind the refusal's issue
@@ -1147,8 +1159,8 @@ impl Drain {
             if shown["head"]["closed"] == true || empty {
                 return;
             }
-            let pref = match self.propose(i, v, round, &shown) {
-                Proposed::Ref(pref) => pref,
+            let (pref, refusing) = match self.propose(i, v, round, &shown) {
+                Proposed::Ref(pref, refusing) => (pref, refusing),
                 Proposed::Empty => return,
                 Proposed::Again => continue,
             };
@@ -1156,7 +1168,7 @@ impl Drain {
                 None => return,
                 Some(r) => {
                     last.clone_from(&r.code);
-                    self.resolve(i, v, &pref, &r);
+                    self.resolve(i, v, &pref, &refusing, &r);
                 }
             }
             round += 1;
@@ -1281,10 +1293,12 @@ impl Drain {
             let mut e = link.entry("propose");
             e.view = Some(v.to_string());
             let res = link.raw("propose", "rdy_propose", args);
+            let mut refusing = BTreeSet::new();
             match &res {
                 Res::Ok(r) => {
                     e.block = r["ref"].as_str().map(str::to_string);
                     e.seen = labels_of(&r["tensions"]);
+                    refusing = refusing_of(&r["tensions"]);
                 }
                 Res::Refused(code, message) => {
                     e.outcome = Met::Refused(code.clone());
@@ -1295,7 +1309,7 @@ impl Drain {
             let made = e.block.clone();
             link.journal.record(e);
             match (res, made) {
-                (Res::Ok(_), Some(p)) => return Proposed::Ref(p),
+                (Res::Ok(_), Some(p)) => return Proposed::Ref(p, refusing),
                 (Res::Refused(code, message), _)
                     if code == "E_ALT_MEMBER" || code == "E_ALT_CHOSEN" =>
                 {
@@ -1664,8 +1678,9 @@ impl Drain {
     /// its issues is a conflict or a blocking tension: the conflicts first, when it has any; the
     /// tensions on a later round. Any other issue code fails the run, as an outer
     /// `E_VALIDATION` did. The cause issues carry no block or tension id, so the drain reads them
-    /// from the version (`pref`) and the view's listing, never from the issues' text.
-    fn resolve(&mut self, i: usize, v: &str, pref: &str, r: &Refusal) {
+    /// from the version (`pref`), the tensions its propose reply lists as refusing (`refusing`)
+    /// and the view's listing, never from the issues' text.
+    fn resolve(&mut self, i: usize, v: &str, pref: &str, refusing: &BTreeSet<String>, r: &Refusal) {
         let issues: Vec<Value> = r.body["issues"].as_array().cloned().unwrap_or_default();
         match r.code.as_str() {
             "E_PROPOSAL_MOVED" => {}
@@ -1687,7 +1702,7 @@ impl Drain {
                 if codes.iter().any(|c| c == "E_CONFLICT_UNRESOLVED") {
                     self.resolve_conflicts(i, v, &version, "E_CONFLICT_UNRESOLVED");
                 } else {
-                    self.resolve_tensions(i, v, &version, "E_BLOCKING_TENSION");
+                    self.resolve_tensions(i, v, &version, refusing, "E_BLOCKING_TENSION");
                 }
             }
             other => self.no_rule(v, other, "land"),
@@ -1755,10 +1770,23 @@ impl Drain {
 
     /// The blocking tensions `version`'s landing would put into canon, as agent `i` lists the
     /// open blocking tensions of view `v`: the rows with a change side, each change side one of
-    /// the version's changes, and no intent side (a side with neither is canon), by id. Each is
-    /// resolved by its kind, once per block: a row whose blocks in the view an earlier row's
-    /// resolution already wrote is skipped. None selected fails the run.
-    fn resolve_tensions(&mut self, i: usize, v: &str, version: &Value, code: &str) {
+    /// the version's changes, and no intent side (a side with neither is canon), that the propose
+    /// reply lists as refusing (`refusing`: the landing form), by id. The view also lists the
+    /// in-flight form of each live write of those changes, which the reply lists beside the
+    /// landing form as information and which does not refuse: a view that wrote a block again
+    /// since still lists each earlier write as against canon, and resolving that row would write
+    /// from canon's version, a base the view no longer holds (`E_STALE_BASE`). Each is resolved
+    /// by its kind, once per block:
+    /// a row whose blocks in the view an earlier row's resolution already wrote is skipped. None
+    /// selected fails the run.
+    fn resolve_tensions(
+        &mut self,
+        i: usize,
+        v: &str,
+        version: &Value,
+        refusing: &BTreeSet<String>,
+        code: &str,
+    ) {
         let changes: BTreeSet<String> = version["changes"]
             .as_array()
             .into_iter()
@@ -1770,6 +1798,7 @@ impl Drain {
         // the listing is by label: its order is the rows' id order
         let selected: Vec<Value> = rows
             .into_values()
+            .filter(|row| row["id"].as_str().is_some_and(|id| refusing.contains(id)))
             .filter(|row| {
                 let sides = row["sides"].as_array().cloned().unwrap_or_default();
                 let mut of_change = sides.iter().filter_map(|s| s["change"].as_str()).peekable();
@@ -2040,6 +2069,19 @@ mod tests {
     /// Adversarial review: the drain picks its row by the kind the refusal's issue names, and
     /// holds the listed row to it: the listed kind must be that kind, and the `semantic` row is
     /// only for a semantic tension a person accepted (D-WMCFW: only an accepted one blocks).
+    #[test]
+    fn sg5_the_drain_resolves_only_the_tensions_a_propose_reply_lists_as_refusing() {
+        let reply = json!([
+            {"id": "tn-000000000001", "refuses": true},
+            {"id": "tn-000000000002", "refuses": false},
+            {"id": "tn-000000000003"},
+            {"id": "tn-000000000004", "refuses": true},
+        ]);
+        let got: Vec<String> = refusing_of(&reply).into_iter().collect();
+        assert_eq!(got, ["tn-000000000001", "tn-000000000004"]);
+        assert!(refusing_of(&Value::Null).is_empty());
+    }
+
     #[test]
     fn sg5_the_drain_holds_a_blocking_tension_row_to_its_kind() {
         let accepted = json!({"kind": "semantic", "judged": {"accepted": {"person": "p"}}});
