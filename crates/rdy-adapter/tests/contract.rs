@@ -2,7 +2,7 @@
 
 use rdy_adapter::{
     Block, BlockId, Hash, Identity, Origin, RdyError, RepoId, Snapshot, StoreHandle, Tag,
-    encode_block, hash_bytes,
+    core_error_code, encode_block, hash_bytes,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -79,6 +79,17 @@ fn ha3_a_consumer_needs_only_the_adapter_crate() {
     assert_eq!(h, Hash::of(&bytes));
     let _e: Option<RdyError> = None;
     handle.close().unwrap();
+}
+
+#[test]
+fn plz1_adapter_reexports_core_error_code() {
+    let check: fn(&str) -> Option<&'static str> = core_error_code;
+    let kept: Option<&'static str> = {
+        let supplied = String::from("E_LOCKED");
+        check(&supplied)
+    };
+    assert_eq!(kept, Some("E_LOCKED"));
+    assert_eq!(check("E_HUB_BUSY"), None);
 }
 
 #[test]

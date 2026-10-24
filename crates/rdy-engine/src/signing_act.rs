@@ -836,7 +836,7 @@ pub fn run_sign(
                 return Err(RdyError::new(
                     E_PERMISSION,
                     "policy approvals cannot be signed",
-                    "wait for the authority policy to define their signer",
+                    "a policy landing has no signature; sign the landing of the policy version it was accepted under",
                 ));
             }
             (

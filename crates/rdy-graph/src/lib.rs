@@ -1,4 +1,6 @@
 pub mod coord;
+#[cfg(test)]
+mod relink_tests;
 
 use imbl::OrdMap;
 use rdy_model::decision::{self, DecisionStatus};
@@ -100,7 +102,8 @@ pub struct Suspect {
 }
 
 /// The edges, content hashes and decision statuses of one state. Its maps are persistent, so a clone is
-/// O(1) and [`Graph::with_changes`] carries a graph across a write in O(changed edges × log n).
+/// O(1).
+/// Relink work is linear in E_old + E_new + U for the whole call, plus one stable sort per changed key. The persistent maps copy each touched leaf once per call, with every list in that leaf; this copy is not counted here.
 /// Every edge list is ordered by (generator id, index within the generator's edges), where an
 /// edge's generator is the block whose own content makes it (see `Graph::edges_of`).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -258,6 +261,36 @@ const REFLECTS: &str = "reflects";
 /// block) without following them.
 pub const IMPACT_SHOWN: [&str; 2] = [decision::REFINES, decision::SUPERSEDES];
 
+#[cfg(test)]
+thread_local! {
+    /// The edge work [`Graph::with_changes`] has done on this thread: comparisons, set lookups,
+    /// edges copied, slots visited and slots moved in the adjacency lists the call changes. It
+    /// does not count the copy-on-write copies the persistent maps make. Test support only;
+    /// `relink_tests` resets and reads it.
+    static WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Charges `n` units of edge work to this thread's test counter. Outside tests it does nothing.
+#[inline(always)]
+fn charge(n: usize) {
+    #[cfg(test)]
+    WORK.with(|w| w.set(w.get() + n as u64));
+    #[cfg(not(test))]
+    let _ = n;
+}
+
+/// Resets this thread's work counter to zero.
+#[cfg(test)]
+fn reset_work() {
+    WORK.with(|w| w.set(0));
+}
+
+/// This thread's work since the last [`reset_work`].
+#[cfg(test)]
+fn work() -> u64 {
+    WORK.with(|w| w.get())
+}
+
 /// The block whose own content makes `e`: the child for `Contains`, `from` otherwise.
 fn generator(e: &Edge) -> &BlockId {
     match e.kind {
@@ -266,26 +299,60 @@ fn generator(e: &Edge) -> &BlockId {
     }
 }
 
-/// Removes the first element equal to `e` from `map[key]`, dropping the list once it is empty.
-fn unlist(map: &mut OrdMap<BlockId, Vec<Edge>>, key: &BlockId, e: &Edge) {
-    let Some(list) = map.get_mut(key) else {
-        return;
-    };
-    let start = list.partition_point(|x| generator(x) < generator(e));
-    if let Some(i) = list[start..].iter().position(|x| x == e) {
-        list.remove(start + i);
-    }
-    if list.is_empty() {
-        map.remove(key);
+/// Removes from each list in `keys` every edge an `old` block generates, in one stable pass per
+/// list, and drops a list once it is empty.
+fn drop_generated(
+    map: &mut OrdMap<BlockId, Vec<Edge>>,
+    keys: &BTreeSet<BlockId>,
+    old: &BTreeSet<BlockId>,
+) {
+    for key in keys {
+        charge(1);
+        let Some(list) = map.get_mut(key) else {
+            continue;
+        };
+        list.retain(|e| {
+            // the slot visited and the set lookup
+            charge(2);
+            !old.contains(generator(e))
+        });
+        // each kept slot is moved at most once
+        charge(list.len());
+        if list.is_empty() {
+            map.remove(key);
+        }
     }
 }
 
-/// Inserts `e` into `map[key]` after every edge whose generator sorts at or before `e`'s, so a
-/// generator's edges, inserted in order, stay in its run and in their own order.
-fn enlist(map: &mut OrdMap<BlockId, Vec<Edge>>, key: BlockId, e: Edge) {
-    let list = map.entry(key).or_default();
-    let at = list.partition_point(|x| generator(x) <= generator(&e));
-    list.insert(at, e);
+/// Merges each group of new edges into its list in one pass. A group is stably sorted by
+/// generator first, so a generator's edges keep their own order; at equal generators every
+/// existing edge comes before a new one. Edges are never deduplicated.
+fn merge_generated(map: &mut OrdMap<BlockId, Vec<Edge>>, groups: BTreeMap<BlockId, Vec<Edge>>) {
+    for (key, mut add) in groups {
+        add.sort_by(|a, b| {
+            charge(1);
+            generator(a).cmp(generator(b))
+        });
+        charge(1);
+        let list = map.entry(key).or_default();
+        let kept = std::mem::take(list);
+        let mut merged = Vec::with_capacity(kept.len() + add.len());
+        let mut add = add.into_iter().peekable();
+        for e in kept {
+            while let Some(n) = add.next_if(|n| {
+                charge(1);
+                generator(n) < generator(&e)
+            }) {
+                charge(1);
+                merged.push(n);
+            }
+            charge(1);
+            merged.push(e);
+        }
+        charge(add.len());
+        merged.extend(add);
+        *list = merged;
+    }
 }
 
 /// The edges from `b` that its own content makes, in the order a graph lists them: one
@@ -419,24 +486,38 @@ impl Graph {
         new: impl IntoIterator<Item = &'a Block>,
     ) -> Graph {
         let mut g = self.clone();
+        let mut old_ids = BTreeSet::new();
+        let mut outs = BTreeSet::new();
+        let mut incs = BTreeSet::new();
         for b in old {
             g.contents.remove(&b.id);
             g.redacted.remove(&b.id);
             g.decision_status.remove(&b.id);
             g.reaffirmed.remove(&b.id);
+            charge(1);
+            old_ids.insert(b.id.clone());
             for e in Graph::edges_of(b) {
-                unlist(&mut g.out, &e.from, &e);
-                unlist(&mut g.inc, &e.to, &e);
+                charge(2);
+                outs.insert(e.from);
+                incs.insert(e.to);
             }
         }
+        drop_generated(&mut g.out, &outs, &old_ids);
+        drop_generated(&mut g.inc, &incs, &old_ids);
+        let mut add_out: BTreeMap<BlockId, Vec<Edge>> = BTreeMap::new();
+        let mut add_inc: BTreeMap<BlockId, Vec<Edge>> = BTreeMap::new();
         for b in new {
             g.add_content(b);
             g.add_status(b);
             for e in Graph::edges_of(b) {
-                enlist(&mut g.inc, e.to.clone(), e.clone());
-                enlist(&mut g.out, e.from.clone(), e);
+                // two group lookups and two copies
+                charge(4);
+                add_inc.entry(e.to.clone()).or_default().push(e.clone());
+                add_out.entry(e.from.clone()).or_default().push(e);
             }
         }
+        merge_generated(&mut g.out, add_out);
+        merge_generated(&mut g.inc, add_inc);
         g
     }
 

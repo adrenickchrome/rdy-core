@@ -1,5 +1,6 @@
 //! `cargo qa`: the full regression and hardening gate, with a report in `target/qa/`.
 use clap::Parser;
+use rdy_qa::gate_steps::{build_steps, cargo, fail_tail};
 use rdy_qa::perf::{self, Baseline, Measure};
 use rdy_qa::report::{self, Area, Gate, Report};
 use std::collections::BTreeMap;
@@ -13,10 +14,11 @@ struct Args {
     /// Multiply proptest case counts by 10 and run the slow sweeps (before a milestone).
     #[arg(long)]
     deep: bool,
-    /// Narrow the run to one area. `perf`: the release build and the perf tier only. Any other
-    /// area (model, store, schema, engine, io, mcp, cli, render, ...): the release build, fmt,
-    /// clippy, the workspace tests, that area's rdy-qa test binary (`tests/<area>/main.rs`), the
-    /// rdy-qa unit tests and the perf tier (unless --skip-perf).
+    /// Narrow the run to one area. `perf`: the locked fetch (`cargo fetch --locked`), the release
+    /// build and the perf tier only. Any other area (model, store, schema, engine, io, mcp, cli,
+    /// render, ...): the locked fetch (`cargo fetch --locked`), the release build, fmt, clippy,
+    /// the workspace tests, that area's rdy-qa test binary (`tests/<area>/main.rs`), the rdy-qa
+    /// unit tests and the perf tier (unless --skip-perf).
     #[arg(long, value_name = "AREA")]
     only: Option<String>,
     /// Skip the perf-regression tier.
@@ -50,12 +52,6 @@ fn step(name: &str, mut cmd: Command) -> (bool, String) {
         }
         Err(e) => (false, format!("could not run: {e}")),
     }
-}
-
-fn cargo(args: &[&str]) -> Command {
-    let mut c = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
-    c.args(args);
-    c
 }
 
 /// Sets `RDY_QA_REQUIRE_ALL=1` on a test command when the gate runs with `--require-all`.
@@ -191,14 +187,6 @@ fn perf_tier(
     (verdicts, note, ok)
 }
 
-fn fail_tail(ok: bool, out: &str) -> String {
-    if ok {
-        String::new()
-    } else {
-        report::tail(out, 20)
-    }
-}
-
 fn main() {
     let args = Args::parse();
     let start = Instant::now();
@@ -220,7 +208,7 @@ fn main() {
     };
 
     let machine = perf::machine_class();
-    let mut gates = vec![];
+    let mut gates = build_steps(step);
     let mut areas: Vec<Area> = vec![];
     let mut seeds = vec![];
 
@@ -231,15 +219,6 @@ fn main() {
             detail,
         });
     };
-
-    let (ok, out) = step(
-        "build rdy-cli",
-        cargo(&["build", "--release", "-p", "rdy-cli"]),
-    );
-    gate("cargo build --release -p rdy-cli", ok, fail_tail(ok, &out));
-    if !ok {
-        eprintln!("{out}");
-    }
 
     if plan.checks {
         let (ok, out) = step("fmt", cargo(&["fmt", "--all", "--check"]));
