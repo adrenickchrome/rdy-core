@@ -153,7 +153,7 @@ chrome	L	Soft keyword
 chrome	-	A word that is a keyword only in a specific grammatical position and an ordinary name elsewhere.
 chrome	-	and
 chrome	-	are soft keywords. See
-chrome	-	match and case are soft keywords.
+chrome	-	match and case are soft keywords
 chrome	-	.
 chrome	-	defined in Pattern matching by example › Terms
 chrome	L	Structural pattern matching, v1.0.0, 2 updates since.

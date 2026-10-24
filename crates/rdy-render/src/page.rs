@@ -3,7 +3,7 @@ use crate::html::{self, BlockCtx, Link};
 use crate::inline::{self, Ctx, LocalLink};
 use crate::prepare::{Presentation, ProfilePresentation};
 use crate::publication::LocalTargets;
-use crate::site::{Site, Url, rel};
+use crate::site::{ID_INSIDE, Site, Url, rel};
 use crate::trail::Trail;
 use crate::{Mode, assets, changes, home, nav, review, search, toc, trail, version};
 use rdy_engine::{Materialized, VersionInfo, VersionPosition};
@@ -1270,19 +1270,20 @@ fn disagreements_body(sh: &Shared, page: &str) -> DisagreementsBody {
 }
 
 /// What a lone disagreement quotes of the block `id`, whose link label is `label`. A label that is
-/// the block's own summary is replaced by the summary's words, an unresolved reference read as
-/// the unresolved marker's words, cut at a word boundary to 80 characters (`home::cut_plain`). A
-/// title, a name or any other label stays.
+/// the block's own summary (an id-shaped word in it read as `…`, as the label reads it) is
+/// replaced by the summary's words, an unresolved reference read as the unresolved marker's words,
+/// cut at a word boundary to 80 characters (`home::cut_plain`). A title, a name or any other
+/// label stays.
 fn quote_of(sh: &Shared, id: &BlockId, label: String) -> String {
     let Some(b) = sh.m.get(id) else { return label };
-    let summary = |keep_token: bool| {
+    let words = |keep_token: bool| {
         let words = sh.site.summary_words(b, 0, keep_token);
-        words.chars().take(80).collect::<String>()
+        ID_INSIDE.replace_all(&words, "…").into_owned()
     };
-    if summary(true) != label {
+    if words(true).chars().take(80).collect::<String>() != label {
         return label;
     }
-    home::cut_plain(&sh.site.summary_words(b, 0, false), 80)
+    home::cut_plain(&words(false), 80)
 }
 
 /// The folders above `doc`, top first, joined as the breadcrumb and the hover join them

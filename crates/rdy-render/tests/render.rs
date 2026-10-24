@@ -330,7 +330,7 @@ fn link_labels_render_references_as_text_on_one_line() {
     render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let page = std::fs::read_to_string(out.path().join("ledger.html")).unwrap();
     assert!(
-        page.contains(">Corrections are new entries per Ledger is append-only.</a>"),
+        page.contains(">Corrections are new entries per Ledger is append-only</a>."),
         "a link's label is the target's text on one line, its references shown as text: {page}"
     );
     assert!(

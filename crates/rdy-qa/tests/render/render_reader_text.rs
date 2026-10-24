@@ -220,6 +220,17 @@ fn dgm7_automatic_reference_period_is_not_doubled() {
         );
     }
 
+    // the next visible character counts, across a closing mark (ruling task-7)
+    let strong = format!("See **{{{{{ID}}}}}**.");
+    assert_eq!(
+        (html_of(&strong, "Done."), plain_of(&strong, "Done.")),
+        (
+            "See <strong><a href=\"x.html\">Done</a></strong>.".to_string(),
+            "See Done.".to_string()
+        ),
+        "the label's period goes before a period that follows a closing strong"
+    );
+
     // a lone disagreement quotes the same words as the page
     let (_d, r) = lone("Readers rely on {{{C}}}.");
     assert_eq!(

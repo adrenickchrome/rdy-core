@@ -562,20 +562,21 @@ fn reserved(r: &mut Rdy) -> Scope {
 /// `assets/app.js`: the menu `LABEL` becomes "Versions, proposals, views and profiles" and the
 /// script fetches the pill's href in place of the hard-coded PAGE (with its same-origin http/https
 /// check from fix rounds 2827fddd and 2f7023bd). Only `assets/app.js` changed; re-taken.
+/// Re-taken after the reference period rule (ruling task-7): an automatic label drops its final period before an authored period; only that text moved.
 #[test]
 fn ec3_the_site_build_is_unchanged() {
     const BASE: [(&str, &str); 3] = [
         (
             "canon",
-            "e0d7d62a6e961854f0307029f01aba846ef650b6a453ac8a9064ab2b638047cb",
+            "31554e3b0fbe469441c754350a7f34fc79ddcbf659b402c3488e0a18cdb18d00",
         ),
         (
             "view:editing",
-            "fad00635ef970f18bbe5ef33221e8d6f953e868be4b52a6ada5800b85d14a398",
+            "955f4338279ebd2b780f7ea5f78336527ddabb44eef655547aed0e9a5e183442",
         ),
         (
             "view:reserved",
-            "dd24f0a2118f30302c5b2a741fedc9e4df7819298502eedb60310a9eff0963b1",
+            "f4d4a9a51381f3828765c134f66c9a76cd12fa77c300b68331f4975124e81585",
         ),
     ];
     // the ids the corpus's generated pages and the reserved docs draw come from a seeded stream
