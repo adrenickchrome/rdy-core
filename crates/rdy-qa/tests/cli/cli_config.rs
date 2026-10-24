@@ -519,3 +519,73 @@ fn id3_an_invalid_configured_actor_is_refused_before_a_daemon_starts() {
     restore_local();
     s.stop();
 }
+
+/// id3 (D-Q8NFG, final ruling): a configured actor outside the form is the same `E_BAD_INPUT`
+/// naming its file on every cold-start transport as on an ordinary command: `rdy serve`
+/// (foreground and detached), `rdy mcp` through the daemon proxy and `rdy mcp --no-daemon`.
+/// Each exits as `rdy status` does, prints the identical code, message and fix, and leaves no
+/// `.rdy/run` and no daemon: the CLI resolves the configured person before any transport starts.
+#[test]
+fn id3_cold_start_transports_refuse_an_invalid_configured_actor_as_status_does() {
+    use serde_json::Value;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    let s = Served::new();
+    append(s.dir.path(), LOCAL_FILE, "actor: Nick\n");
+    let run = s.run_dir();
+    assert!(!run.path().exists(), "a fresh project has no .rdy/run");
+    // runs the command with no stdin (an MCP session that never gets a request), killed past a
+    // hang guard so a transport that starts serving fails the test instead of hanging it
+    let output = |args: &[&str]| {
+        let mut child = rdy_qa::daemon::human_command(s.dir.path(), &s.env_pairs(), args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn rdy");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while child.try_wait().expect("wait for rdy").is_none() {
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        child.wait_with_output().expect("collect rdy's output")
+    };
+    let parsed = |out: &std::process::Output| -> Value {
+        let text = String::from_utf8_lossy(&out.stderr);
+        serde_json::from_str(text.trim().lines().last().unwrap_or(""))
+            .unwrap_or_else(|_| Value::String(text.into_owned()))
+    };
+    let status = output(&["--json", "status"]);
+    let want = parsed(&status);
+    let forms = "human:<name>, agent:<name>, agent:<handle>/<name> or ci:<repo_id>/<name>";
+    assert_eq!(want["code"], "E_BAD_INPUT", "{want}");
+    assert_eq!(
+        want["message"], "the actor \"Nick\" is not in rdy's actor form",
+        "{want}"
+    );
+    assert_eq!(
+        want["fix"],
+        format!("set actor in {LOCAL_FILE} to {forms}"),
+        "{want}"
+    );
+    for args in [
+        &["--json", "serve"][..],
+        &["--json", "serve", "--detach"][..],
+        &["--json", "mcp"][..],
+        &["--json", "--no-daemon", "mcp"][..],
+    ] {
+        let out = output(args);
+        assert_eq!(out.status.code(), status.status.code(), "{args:?}: {out:?}");
+        assert!(out.stdout.is_empty(), "{args:?}: {out:?}");
+        assert_eq!(
+            parsed(&out),
+            want,
+            "{args:?}: the same refusal as rdy status"
+        );
+        assert!(!run.path().exists(), "{args:?} leaves no .rdy/run");
+        assert!(s.daemon_pid().is_none(), "{args:?} starts no daemon");
+    }
+}
