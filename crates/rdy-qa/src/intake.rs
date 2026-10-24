@@ -347,7 +347,12 @@ pub fn assert_not_ready(
         (e.code, e.message.as_str(), e.fix.as_str()),
         (
             E_PROPOSAL_NOT_READY,
-            format!("{pref} is not ready: {} issues", issues.len()).as_str(),
+            format!(
+                "{pref} is not ready: {} issue{}",
+                issues.len(),
+                if issues.len() == 1 { "" } else { "s" }
+            )
+            .as_str(),
             "fix each issue and propose again: rdy_propose / rdy propose"
         ),
         "{e:#?}"
@@ -363,7 +368,7 @@ pub fn assert_not_ready(
 }
 
 /// The version an `E_PROPOSAL_NOT_READY` refusal names: its message reads `<P-x@n> is not
-/// ready: <n> issues`. For a test whose landing helper proposed the version itself.
+/// ready: <n> issue(s)`. For a test whose landing helper proposed the version itself.
 pub fn refused_ref(e: &RdyError) -> String {
     assert_eq!(e.code, E_PROPOSAL_NOT_READY, "{e:#?}");
     e.message

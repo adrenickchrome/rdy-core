@@ -49,7 +49,7 @@ fn erow1_every_view_brief_and_daemon_code_has_a_row() {
     assert_eq!(
         row(E_PROPOSAL_NOT_READY),
         (
-            "the proposal version fails readiness; each issue names one reason, with its own code and fix, in the queue's order",
+            "the proposal version fails readiness; issues name each failed check",
             "fix each issue and propose again: rdy_propose / rdy propose"
         )
     );

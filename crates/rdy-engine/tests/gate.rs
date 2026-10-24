@@ -46,7 +46,11 @@ fn assert_not_ready(r: &Rdy, e: &RdyError, pref: &str, codes: &[&str]) {
     assert_eq!(e.code, E_PROPOSAL_NOT_READY, "{e:?}");
     assert_eq!(
         e.message,
-        format!("{pref} is not ready: {} issues", issues.len())
+        format!(
+            "{pref} is not ready: {} issue{}",
+            issues.len(),
+            if issues.len() == 1 { "" } else { "s" }
+        )
     );
     assert_eq!(e.issues, issues);
     assert_eq!(

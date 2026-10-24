@@ -171,7 +171,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         "E_PROPOSAL_NOT_READY",
-        "the proposal version fails readiness; each issue names one reason, with its own code and fix, in the queue's order",
+        "the proposal version fails readiness; issues name each failed check",
         "fix each issue and propose again: rdy_propose / rdy propose",
     ),
     (

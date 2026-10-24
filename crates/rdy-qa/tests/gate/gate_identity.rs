@@ -42,10 +42,13 @@ const NOT_READY_FIX: &str = "fix each issue and propose again: rdy_propose / rdy
 /// The summary every ready version here carries.
 const SUMMARY: &str = "Changes one thing.";
 
-/// The message of the refusal of `pref` with `n` issues: one issue reads `1 issues`, as
-/// D-ME2HD writes it.
+/// The message of the refusal of `pref` with `n` issues: one issue reads `1 issue`, more read
+/// `<n> issues` (TASK-548).
 fn not_ready_message(pref: &str, n: usize) -> String {
-    format!("{pref} is not ready: {n} issues")
+    format!(
+        "{pref} is not ready: {n} issue{}",
+        if n == 1 { "" } else { "s" }
+    )
 }
 
 /// Checks `e` is the refusal of `pref` whose issues are `issues`, with no corrected payload.
@@ -891,17 +894,13 @@ fn id6_message_counts_issues_and_catalogue_has_the_row() {
     let (spec, _, made) = not_ready_versions(&mut r);
     // one issue, then two (the conflict and the tension)
     let q = pending(&r);
-    for (pref, n) in [(&made.bare, 1), (&made.both, 2)] {
+    for (pref, n, text) in [(&made.bare, 1, "1 issue"), (&made.both, 2, "2 issues")] {
         let issues = queue_issues(&q, pref);
         assert_eq!(issues.len(), n, "{issues:#?}");
         let e = r
             .land_with(&approver(), pref, LandOptions::default())
             .unwrap_err();
-        assert_eq!(
-            e.message,
-            format!("{pref} is not ready: {n} issues"),
-            "{e:#?}"
-        );
+        assert_eq!(e.message, format!("{pref} is not ready: {text}"), "{e:#?}");
         assert_eq!(e.issues, issues);
     }
     // then three: a new conflict on C, the blocking change and no summary. A propose's
@@ -965,7 +964,7 @@ fn id6_message_counts_issues_and_catalogue_has_the_row() {
     assert_eq!(
         row(NOT_READY),
         (
-            "the proposal version fails readiness; each issue names one reason, with its own code and fix, in the queue's order",
+            "the proposal version fails readiness; issues name each failed check",
             NOT_READY_FIX
         )
     );

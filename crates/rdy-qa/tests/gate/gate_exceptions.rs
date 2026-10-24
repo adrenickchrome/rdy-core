@@ -356,7 +356,7 @@ fn di17_a_version_with_no_summary_is_told_to_propose_again_with_one() {
         (e.code, e.message.as_str(), e.fix.as_str()),
         (
             E_PROPOSAL_NOT_READY,
-            format!("{bare} is not ready: 1 issues").as_str(),
+            format!("{bare} is not ready: 1 issue").as_str(),
             "fix each issue and propose again: rdy_propose / rdy propose"
         ),
         "{e}"
@@ -440,7 +440,7 @@ fn di17_a_rejected_decision_never_lands_once_it_stops_being_an_exception() {
         .land_with(&approver(), &second, LandOptions::default())
         .unwrap_err();
     assert_eq!(e.code, E_PROPOSAL_NOT_READY, "{e}");
-    assert_eq!(e.message, format!("{second} is not ready: 1 issues"), "{e}");
+    assert_eq!(e.message, format!("{second} is not ready: 1 issue"), "{e}");
     assert_eq!(
         e.fix, "fix each issue and propose again: rdy_propose / rdy propose",
         "{e}"

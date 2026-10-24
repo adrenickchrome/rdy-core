@@ -968,11 +968,15 @@ impl ReadState {
 /// D-ME2HD: the refusal of an approval of version `pref`, which is not ready. Its issues are the
 /// version's readiness issues, in the queue's order, each with its own code and fix
 /// ([`crate::pending::queue::approval_readiness`]); none is added, dropped, merged or re-worded.
-/// The message counts them (one issue reads `1 issues`, as D-ME2HD writes it). No card.
+/// The message counts them (one issue reads `1 issue`, more read `<n> issues`; TASK-548). No card.
 pub(crate) fn proposal_not_ready(pref: &ProposalRef, issues: Vec<Issue>) -> RdyError {
     let mut e = RdyError::new(
         E_PROPOSAL_NOT_READY,
-        format!("{pref} is not ready: {} issues", issues.len()),
+        format!(
+            "{pref} is not ready: {} issue{}",
+            issues.len(),
+            if issues.len() == 1 { "" } else { "s" }
+        ),
         "fix each issue and propose again: rdy_propose / rdy propose",
     );
     e.issues = issues;

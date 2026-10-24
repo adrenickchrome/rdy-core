@@ -196,7 +196,12 @@ fn not_ready(e: &RdyError, pref: &str, issues: &[rdy_schema::Issue]) {
         (e.code, e.message.as_str(), e.fix.as_str()),
         (
             E_PROPOSAL_NOT_READY,
-            format!("{pref} is not ready: {} issues", issues.len()).as_str(),
+            format!(
+                "{pref} is not ready: {} issue{}",
+                issues.len(),
+                if issues.len() == 1 { "" } else { "s" }
+            )
+            .as_str(),
             "fix each issue and propose again: rdy_propose / rdy propose"
         ),
         "{e}"

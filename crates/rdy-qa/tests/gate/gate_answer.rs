@@ -732,9 +732,10 @@ fn di7_a_rejected_decision_makes_the_batch_not_ready() {
         &e,
         E_PROPOSAL_NOT_READY,
         &format!(
-            "{} is not ready: {} issues",
+            "{} is not ready: {} issue{}",
             b.r#ref,
-            not_ready.issues.len()
+            not_ready.issues.len(),
+            if not_ready.issues.len() == 1 { "" } else { "s" }
         ),
     );
     assert_eq!(e.issues, not_ready.issues, "{e:#?}");
