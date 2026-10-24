@@ -102,8 +102,8 @@ pub struct Suspect {
 }
 
 /// The edges, content hashes and decision statuses of one state. Its maps are persistent, so a clone is
-/// O(1) and [`Graph::with_changes`] carries a graph across a write in time linear in the changed
-/// edges and the edges of the lists they touch, plus ordered-map lookups.
+/// O(1).
+/// Relink work is linear in E_old + E_new + U for the whole call, plus one stable sort per changed key. The persistent maps copy each touched leaf once per call, with every list in that leaf; this copy is not counted here.
 /// Every edge list is ordered by (generator id, index within the generator's edges), where an
 /// edge's generator is the block whose own content makes it (see `Graph::edges_of`).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -264,8 +264,9 @@ pub const IMPACT_SHOWN: [&str; 2] = [decision::REFINES, decision::SUPERSEDES];
 #[cfg(test)]
 thread_local! {
     /// The edge work [`Graph::with_changes`] has done on this thread: comparisons, set lookups,
-    /// edges copied, slots visited and slots moved. Test support only; `relink_tests` resets and
-    /// reads it.
+    /// edges copied, slots visited and slots moved in the adjacency lists the call changes. It
+    /// does not count the copy-on-write copies the persistent maps make. Test support only;
+    /// `relink_tests` resets and reads it.
     static WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
