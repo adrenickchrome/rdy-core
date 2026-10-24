@@ -976,3 +976,48 @@ fn ok1_upgrade_receipt_steps_are_bounded() {
     let two = UpgradeReceipt::parse(receipt("\"a\",\"b\"", "").as_bytes()).unwrap();
     assert_eq!(two.steps, ["a", "b"]);
 }
+
+/// Fix round 3: a first use whose batch is durable (marker and sync) and whose index update
+/// then fails is rolled back only if the truncate works. When the truncate fails too, the
+/// marked batch stays in the log, so `FORMAT` keeps the manifest it published and the store
+/// reopens with the feature. Both the write path and a held batch's seal.
+#[test]
+fn ok1_a_first_use_that_cannot_roll_back_keeps_format() {
+    let _known = inject_test_feature(FeatureClass::Compatible, kinds::BLOB_CHUNK);
+    let with = manifest(vec![feature(
+        TEST_FEATURE,
+        FeatureClass::Compatible,
+        "99.0.0",
+    )]);
+    let format_text = |dir: &Path| std::fs::read_to_string(dir.join(FORMAT_FILE)).unwrap();
+    for held in [false, true] {
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("s");
+        let mut s = Store::create(&dir).unwrap();
+        if held {
+            s.set_held(true).unwrap();
+            s.put_blob(b"first use").unwrap();
+            s.fail_next_index_apply();
+            s.fail_next_rollback();
+            assert!(s.seal(vec![]).is_err(), "held: the seal fails");
+        } else {
+            s.fail_next_index_apply();
+            s.fail_next_rollback();
+            assert!(s.put_blob(b"first use").is_err(), "the write fails");
+        }
+        assert_eq!(
+            format_text(&dir),
+            with.to_text(),
+            "held {held}: FORMAT keeps the published manifest"
+        );
+        drop(s);
+        let s = Store::open(&dir).unwrap_or_else(|e| panic!("held {held}: reopen: {e:?}"));
+        assert_eq!(
+            log_manifest(&s),
+            with,
+            "held {held}: the marked batch is the log's"
+        );
+        assert_eq!(s.features(), &with);
+        assert_eq!(format_text(&dir), with.to_text());
+    }
+}

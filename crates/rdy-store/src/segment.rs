@@ -129,6 +129,8 @@ pub struct SegmentLog {
     fail_partial: Option<usize>,
     /// The frames the next appends write whole before `fail_partial` fires.
     fail_skip: usize,
+    /// Test hook: the next `sync` fails (see `fail_next_sync`).
+    fail_sync: bool,
     /// Test hook: the armed crash point (see `crash_at`).
     crash: Option<CrashPoint>,
     /// What the log's validated redaction applies authorize: the holes every scan and walk of
@@ -1115,6 +1117,7 @@ impl SegmentLog {
             fail_roll: false,
             fail_partial: None,
             fail_skip: 0,
+            fail_sync: false,
             crash: None,
             auth: Arc::default(),
         };
@@ -1221,6 +1224,7 @@ impl SegmentLog {
             fail_roll: false,
             fail_partial: None,
             fail_skip: 0,
+            fail_sync: false,
             crash: None,
             auth,
         };
@@ -1276,6 +1280,12 @@ impl SegmentLog {
     #[doc(hidden)]
     pub fn fail_next_roll(&mut self) {
         self.fail_roll = true;
+    }
+
+    /// Test hook: the next `sync` fails, after everything before it was written.
+    #[doc(hidden)]
+    pub fn fail_next_sync(&mut self) {
+        self.fail_sync = true;
     }
 
     /// Test hook: the next append writes only the first `bytes` bytes of its frame, then fails.
@@ -1579,6 +1589,9 @@ impl SegmentLog {
     }
 
     pub fn sync(&mut self) -> io::Result<()> {
+        if std::mem::take(&mut self.fail_sync) {
+            return Err(io::Error::other("injected sync failure"));
+        }
         self.writer.sync_data()
     }
 

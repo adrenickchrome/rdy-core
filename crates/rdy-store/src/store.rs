@@ -1408,12 +1408,8 @@ impl Store {
                 .any(|(k, _)| crate::codec::logical_kind(*k) == kinds::REDACTION_APPLY)
         }) {
             // the batch's features become the store's at its sync (`seal_held_apply`); a refusal
-            // keeps the batch open with them, and only a batch that rolled back puts FORMAT back
-            let sealed = self.seal_held_apply(last).map(|_| ());
-            if sealed.is_err() && self.open.is_none() && self.held_features.take().is_some() {
-                self.restore_mirror();
-            }
-            return sealed;
+            // keeps the batch open with them, and only a confirmed rollback puts FORMAT back
+            return self.seal_held_apply(last).map(|_| ());
         }
         // `last` is decoded before anything is appended: a value that does not decode is
         // refused with the batch still open, and nothing poisoned
@@ -1434,19 +1430,16 @@ impl Store {
             Err(e) => {
                 let ahead = published || self.held_features.is_some();
                 self.held_features = None;
-                if ahead {
-                    self.restore_mirror();
-                }
                 self.open = None;
                 if was_open {
                     self.poison();
                     self.stale_index = true;
                 }
-                // as in `write`: a log that cannot be rolled back poisons the store
-                let rolled_back = !std::mem::take(&mut self.faults.rollback)
-                    && self.log.truncate_to(start).is_ok();
-                if !rolled_back {
-                    self.poison();
+                // as in `write`: a log that cannot be rolled back poisons the store, and keeps
+                // the FORMAT it published (its marked batch may still be in the log; the next
+                // open judges by the log)
+                if self.roll_back(start) && ahead {
+                    self.restore_mirror();
                 }
                 Err(e)
             }
@@ -1822,15 +1815,9 @@ impl Store {
             // append left past the end and a segment a failed roll left behind — so neither a
             // later write, a verify nor a reindex can see it. The frames of earlier writes of an
             // open held batch are before `start`, and stay open.
-            let rollback = if std::mem::take(&mut self.faults.rollback) {
-                Err(std::io::Error::other("injected rollback failure"))
-            } else {
-                self.log.truncate_to(start)
-            };
-            if rollback.is_err() {
-                self.poison();
-            }
-            if published {
+            // Only a confirmed rollback puts FORMAT back: a batch that stays in the log, marked
+            // (its index update failed after the sync), uses what FORMAT lists now.
+            if self.roll_back(start) && published {
                 self.restore_mirror();
             }
         }
@@ -1840,10 +1827,10 @@ impl Store {
     /// The first use of a feature (D-WWAK7): when the new objects of `items` use features the
     /// store's manifest (or the open held batch's) does not name, `FORMAT` is made to list the
     /// merged manifest, then the merged manifest's `meta/store_features` ref joins `items`, so the
-    /// batch that first uses a feature activates it. A batch that fails appends neither, and its
-    /// caller puts `FORMAT` back ([`Store::restore_mirror`]); a `FORMAT` that lists more than the
-    /// sealed log (a crash before the batch sealed) opens by the log's features, and the open
-    /// puts it back. Returns the items, the merged manifest, if any, and whether `FORMAT` was
+    /// batch that first uses a feature activates it. A batch that fails and rolls back appends
+    /// neither, and its caller puts `FORMAT` back ([`Store::restore_mirror`]); one whose rollback
+    /// fails keeps `FORMAT` as published. A `FORMAT` that lists more than the sealed log (a crash
+    /// before the batch sealed) opens by the log's features, and the open puts it back. Returns the items, the merged manifest, if any, and whether `FORMAT` was
     /// rewritten.
     fn first_use(&self, mut items: Frames) -> Result<FirstUse, StoreError> {
         let current = self.held_features.as_ref().unwrap_or(&self.features);
@@ -1883,7 +1870,7 @@ impl Store {
     }
 
     /// Puts `FORMAT` back to the features of the sealed log and of the open held batch, after a
-    /// batch that published more failed (D-WWAK7: the sealed log is the authority, and a failed
+    /// batch that published more failed and was rolled back (D-WWAK7: the sealed log is the authority, and a failed
     /// first use never needs a newer rdy). Best effort: a `FORMAT` left ahead is the crash
     /// window's leftover, which the next open puts back.
     fn restore_mirror(&self) {
@@ -2159,6 +2146,13 @@ impl Store {
     #[doc(hidden)]
     pub fn fail_next_rollback(&mut self) {
         self.faults.rollback = true;
+    }
+
+    /// Test hook: the next log sync fails, after the frames before it (and a batch's marker)
+    /// were written.
+    #[doc(hidden)]
+    pub fn fail_next_sync(&mut self) {
+        self.log.fail_next_sync();
     }
 
     /// Test hook: the next appended frame is written only in part, then the write fails.
@@ -3260,22 +3254,25 @@ impl Store {
         let Some(open) = self.open.take() else {
             return;
         };
-        if self.held_features.take().is_some() {
-            self.restore_mirror();
-        }
+        let ahead = self.held_features.take().is_some();
         self.poison();
         self.stale_index = true;
-        self.roll_back(open.start);
+        if self.roll_back(open.start) && ahead {
+            self.restore_mirror();
+        }
     }
 
-    /// The rollback of a batch that failed before its sync: the log is cut back to `to`; a
-    /// rollback that fails poisons the store.
-    fn roll_back(&mut self, to: Location) {
+    /// The rollback of a failed batch: the log is cut back to `to`. Returns whether it was; a
+    /// rollback that fails poisons the store. Only after a confirmed rollback may a caller put
+    /// `FORMAT` back ([`Store::restore_mirror`]): a batch that stays in the log, marked, uses
+    /// the features `FORMAT` lists.
+    fn roll_back(&mut self, to: Location) -> bool {
         let rolled_back =
             !std::mem::take(&mut self.faults.rollback) && self.log.truncate_to(to).is_ok();
         if !rolled_back {
             self.poison();
         }
+        rolled_back
     }
 
     /// Whether the index's seven redaction tables hold exactly the rows the log's validated records
@@ -3610,11 +3607,17 @@ impl Store {
                 activation
             }
             Err(e) => {
-                // not synced: nothing is authorized, and the batch goes as a failed seal's does
+                // not synced: nothing is authorized, and the batch goes as a failed seal's does.
+                // FORMAT goes back to the sealed log's only once the batch is gone: a marker
+                // written whole may survive a failed sync, and a failed truncate keeps it in the
+                // log, so FORMAT keeps the manifest the batch published
                 self.open = None;
                 self.poison();
                 self.stale_index = true;
-                self.roll_back(start);
+                let ahead = self.held_features.take().is_some();
+                if self.roll_back(start) && ahead {
+                    self.restore_mirror();
+                }
                 return Err(e);
             }
         };
@@ -3741,8 +3744,9 @@ impl Store {
         } else {
             None
         };
-        // the features this batch activates are listed by FORMAT before it seals; any failure
-        // before the batch is durable puts FORMAT back
+        // the features this batch activates are listed by FORMAT before it seals; a failure
+        // that rolls the batch back puts FORMAT back (a failed rollback keeps it: the batch may
+        // stay in the log, marked)
         let published = match &plan.features {
             Some(f) => self.publish_mirror(f)?,
             None => false,
@@ -3752,8 +3756,7 @@ impl Store {
         let (frames, entries) = match appended {
             Ok(a) => a,
             Err(e) => {
-                self.roll_back(before);
-                if published {
+                if self.roll_back(before) && published {
                     self.restore_mirror();
                 }
                 return Err(e);
@@ -3765,8 +3768,7 @@ impl Store {
             match crate::redaction_import::bootstrap_holder(self.log.readers()) {
                 Ok(a) => Some(a),
                 Err(e) => {
-                    self.roll_back(before);
-                    if published {
+                    if self.roll_back(before) && published {
                         self.restore_mirror();
                     }
                     return Err(TakeError::Store(e));
@@ -3777,8 +3779,7 @@ impl Store {
         };
         self.log.crash_point(CrashPoint::BeforeSync);
         if let Err(e) = self.log.sync() {
-            self.roll_back(before);
-            if published {
+            if self.roll_back(before) && published {
                 self.restore_mirror();
             }
             return Err(TakeError::Store(e.into()));
@@ -3793,8 +3794,7 @@ impl Store {
             };
             if let Err(e) = indexed {
                 // as a failed write: nothing past `before` is acknowledged
-                self.roll_back(before);
-                if published {
+                if self.roll_back(before) && published {
                     self.restore_mirror();
                 }
                 return Err(TakeError::Store(e));

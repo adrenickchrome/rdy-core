@@ -1390,3 +1390,85 @@ fn ok1_a_held_apply_seal_keeps_the_feature_it_first_uses() {
         assert!(!s.features().has(TEST_FEATURE));
     }
 }
+
+/// Fix round 3 (finding 3): a held apply seal whose sync fails and whose rollback then fails
+/// too has not rolled back. The batch, marker included, may stay in the log, so `FORMAT` keeps
+/// the manifest the batch published, and the next open judges by the log: a complete batch
+/// makes the feature the store's, and a torn one puts `FORMAT` back to the sealed log's.
+#[test]
+fn ok1_a_held_apply_seal_that_cannot_roll_back_keeps_format() {
+    use rdy_store::format::{FeatureClass, TEST_FEATURE, inject_test_feature, read_format_file};
+    let _known = inject_test_feature(FeatureClass::Compatible, kinds::LANDING);
+    let transition = || {
+        Transitions {
+            at_ms: 60,
+            resolved: vec![],
+            opened: vec![],
+            gone: vec![],
+            new: vec![],
+        }
+        .frame()
+    };
+    let held = || {
+        let (w, mut s) = World::new();
+        record(&mut s, &w.secret("work"));
+        let p = s.propose("work", "Remove content", writer()).unwrap();
+        s.set_held(true).unwrap();
+        s.land_atomic(request(p, person(Role::Approver), false))
+            .unwrap();
+        let ahead = read_format_file(&w.path).unwrap().unwrap();
+        assert!(ahead.has(TEST_FEATURE), "FORMAT lists the open batch's");
+        (w, s, ahead)
+    };
+    let mirror = |w: &World| read_format_file(&w.path).unwrap().unwrap();
+
+    // the marker is written whole, the sync fails and the truncate fails: the complete batch
+    // stays in the log, and FORMAT keeps its feature
+    {
+        let (w, mut s, ahead) = held();
+        s.fail_next_sync();
+        s.fail_next_rollback();
+        let e = s.seal(vec![transition()]).unwrap_err();
+        assert!(matches!(e, StoreError::Io(_)), "{e:?}");
+        assert_eq!(mirror(&w), ahead, "FORMAT keeps the published manifest");
+        assert!(s.put_blob(b"later").is_err(), "the store is poisoned");
+        drop(s);
+        let s = Store::open(&w.path).expect("the store reopens");
+        assert!(
+            s.features().has(TEST_FEATURE),
+            "the marked batch is the log's"
+        );
+        assert_eq!(&mirror(&w), s.features());
+        assert!(!on_disk(&w.path, SECRET), "the open finished the removal");
+    }
+
+    // the marker is torn and the truncate fails: FORMAT keeps the published manifest, and the
+    // open puts it back to the sealed log's
+    {
+        let (w, mut s, ahead) = held();
+        let sealed = s.features().clone();
+        s.fail_append_at_frame_for_tests(Some((1, 10)));
+        s.fail_next_rollback();
+        assert!(s.seal(vec![transition()]).is_err());
+        assert_eq!(mirror(&w), ahead, "FORMAT keeps the published manifest");
+        drop(s);
+        let s = Store::open(&w.path).expect("the store reopens");
+        assert_eq!(s.features(), &sealed);
+        assert_eq!(&mirror(&w), &sealed, "the open put FORMAT back");
+        assert!(on_disk(&w.path, SECRET), "nothing erased");
+    }
+
+    // an abandoned batch whose truncate fails: FORMAT keeps the published manifest, and the
+    // open puts it back to the sealed log's (the batch has no marker)
+    {
+        let (w, mut s, ahead) = held();
+        let sealed = s.features().clone();
+        s.fail_next_rollback();
+        s.abandon_open_batch();
+        assert_eq!(mirror(&w), ahead, "FORMAT keeps the published manifest");
+        drop(s);
+        let s = Store::open(&w.path).expect("the store reopens");
+        assert_eq!(s.features(), &sealed);
+        assert_eq!(&mirror(&w), &sealed, "the open put FORMAT back");
+    }
+}

@@ -1514,6 +1514,50 @@ fn ok1_take_keeps_the_stream_features_and_activates_first_use() {
     assert_eq!(manifest_of(&h), want);
 }
 
+/// Fix round 3: a take whose batch is synced and whose index update then fails is rolled back
+/// only if the truncate works. When the truncate fails too, the marked batch stays in the log,
+/// so `FORMAT` keeps the manifest the take published and the holder reopens with it.
+#[test]
+fn ok1_a_take_that_cannot_roll_back_keeps_format() {
+    use rdy_store::format::{
+        FORMAT_FILE, FeatureClass, StoreFeature, StoreFeatures, TEST_FEATURE, inject_test_feature,
+    };
+    let future = StoreFeature {
+        name: "zz_future".into(),
+        class: FeatureClass::Compatible,
+        required_rdy: "99.1.0".into(),
+    };
+    let _known = inject_test_feature(FeatureClass::Compatible, kinds::TAG);
+    let (dir, _path, repo, landing, _tag, file) =
+        put_tag_upload(StoreFeatures::of(vec![future.clone()]));
+    let hpath = dir.path().join("h");
+    let mut h = Store::create_holder(&hpath, repo).unwrap();
+    let target = UploadTarget {
+        tag: "v1".into(),
+        landing,
+    };
+    let want = StoreFeatures::of(vec![
+        StoreFeature {
+            name: TEST_FEATURE.into(),
+            class: FeatureClass::Compatible,
+            required_rdy: "99.0.0".into(),
+        },
+        future,
+    ]);
+    h.fail_next_index_apply();
+    h.fail_next_rollback();
+    assert!(take(&mut h, &open(&[file]), &target).is_err());
+    assert_eq!(
+        std::fs::read_to_string(hpath.join(FORMAT_FILE)).unwrap(),
+        want.to_text(),
+        "FORMAT keeps the published manifest"
+    );
+    drop(h);
+    let h = Store::open(&hpath).expect("the holder reopens");
+    assert_eq!(manifest_of(&h), want, "the marked batch is the log's");
+    assert_eq!(h.features(), &want);
+}
+
 /// `n` unknown compatible features named `{prefix}000` on.
 fn unknown_features(prefix: &str, n: usize) -> Vec<rdy_store::format::StoreFeature> {
     (0..n)
