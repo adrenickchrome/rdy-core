@@ -131,6 +131,13 @@ impl Md {
         self.0.is_empty()
     }
 
+    /// `self` shows nothing: no link target, and text of white space only.
+    fn is_blank(&self) -> bool {
+        self.0
+            .iter()
+            .all(|seg| matches!(seg, Seg::Text(t) if t.trim().is_empty()))
+    }
+
     fn push_str(&mut self, s: &str) {
         if s.is_empty() {
             return;
@@ -434,14 +441,26 @@ impl Cx<'_> {
         out
     }
 
+    /// The lines of `b`, or `None` when it writes nothing: no line, or in a fragment no line that
+    /// shows anything (an empty paragraph), so it adds no blank line around it. The export keeps
+    /// such a block's lines.
+    fn written(&self, b: &PBlock) -> Option<Vec<Md>> {
+        let lines = self.block(b);
+        let shows = if self.fragment {
+            lines.iter().any(|l| !l.is_blank())
+        } else {
+            !lines.is_empty()
+        };
+        shows.then_some(lines)
+    }
+
     /// The lines of `blocks`, one blank line between blocks.
     fn blocks(&self, blocks: &[PBlock]) -> Vec<Md> {
         let mut out: Vec<Md> = vec![];
         for b in blocks {
-            let lines = self.block(b);
-            if lines.is_empty() {
+            let Some(lines) = self.written(b) else {
                 continue;
-            }
+            };
             if !out.is_empty() {
                 out.push(Md::default());
             }
@@ -630,10 +649,9 @@ pub fn copy_parts(
     };
     let mut out = vec![];
     for b in blocks {
-        let lines = cx.block(b);
-        if lines.is_empty() {
+        let Some(lines) = cx.written(b) else {
             continue;
-        }
+        };
         if !out.is_empty() {
             push_text(&mut out, "\n\n");
         }

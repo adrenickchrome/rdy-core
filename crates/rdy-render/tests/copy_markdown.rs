@@ -364,3 +364,67 @@ fn dgm4_payload_is_linear_and_bounded() {
     );
     assert!(payload_growth >= text_growth);
 }
+
+fn para(s: &str) -> PBlock {
+    PBlock::Para {
+        anchor: None,
+        runs: if s.is_empty() {
+            vec![]
+        } else {
+            vec![rdy_render::print::Run {
+                text: s.into(),
+                bold: false,
+                italic: false,
+                code: false,
+                link: None,
+            }]
+        },
+    }
+}
+
+/// A block that writes no words adds no blank line to a fragment, at the top level or inside a
+/// list item or a callout (fix round 1). The export keeps its bytes.
+#[test]
+fn dgm4_empty_blocks_add_no_blank_lines() {
+    let page = "page.html";
+    let copy = |blocks: &[PBlock]| -> String {
+        let parts = copy_parts(blocks, page, &BTreeMap::new()).expect("copy");
+        assert_coalesced(&parts);
+        joined(&parts)
+    };
+    // a term with an empty name and a list body, as the site page shows it
+    let term = from_html(
+        "<p>Before</p><dl class=\"term\"><dt></dt><dd><ul><li>example</li></ul></dd></dl>\
+         <p>After</p>",
+        page,
+    );
+    assert_eq!(copy(&term), "Before\n\n-   example\n\nAfter\n");
+    // between and after nonempty blocks
+    assert_eq!(copy(&[para("A"), para(""), para("B")]), "A\n\nB\n");
+    assert_eq!(copy(&[para("A"), para("")]), "A\n");
+    assert_eq!(copy(&[para(""), para("A")]), "A\n");
+    assert_eq!(copy(&[para(""), para(" ")]), "");
+    // nested sequences: a list item and a callout
+    let list = PBlock::List {
+        ordered: false,
+        start: 1,
+        items: vec![vec![para(""), para("x"), para(""), para("y")]],
+    };
+    assert_eq!(copy(&[list.clone()]), "-   x\n\n    y\n");
+    let callout = PBlock::Callout {
+        anchor: None,
+        label: "Note".into(),
+        blocks: vec![para("a"), para(""), para("b"), para("")],
+    };
+    assert_eq!(copy(&[callout.clone()]), "> **Note**\n>\n> a\n>\n> b\n");
+    // the export writes these blocks as it did before
+    let p = print_of(
+        page,
+        vec![para("A"), para(""), list, callout, para("")],
+        BTreeMap::new(),
+    );
+    assert_eq!(
+        export_body(&export_page(&p)),
+        "A\n\n\n\n-   \n\n    x\n\n\n\n    y\n\n> **Note**\n>\n> a\n>\n>\n>\n> b\n>\n>\n\n\n"
+    );
+}
