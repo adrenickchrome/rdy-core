@@ -81,12 +81,23 @@ fn invalid(object: ObjectKey) -> StreamError {
     StreamError::bad_record(0, 0, Reason::InvalidRemovalProof).with_object(Some(object))
 }
 
-/// The present payload of `k`: a missing record is E_UNRESOLVED_REF; a dropped one, or one whose
-/// bytes are not its hash's, is no proof.
+/// The present body of `k` (its payload, less a versioned record's version, `crate::codec`): a
+/// missing record is E_UNRESOLVED_REF; a dropped one, or one whose bytes are not its hash's, is
+/// no proof.
 fn payload(source: &mut dyn ObjectSource, k: ObjectKey) -> Result<Vec<u8>, StreamError> {
     match source.record(k)? {
         None => Err(StreamError::unresolved(0, 0, k)),
-        Some(StreamRecord::Present { payload, .. }) if Hash::of(&payload) == k.hash => Ok(payload),
+        Some(r @ StreamRecord::Present { .. }) => {
+            let StreamRecord::Present { payload, .. } = &r else {
+                unreachable!("a present record")
+            };
+            if Hash::of(payload) != k.hash {
+                return Err(invalid(k));
+            }
+            crate::codec::split(r.raw_kind(), payload)
+                .map(|o| o.body.to_vec())
+                .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(k)))
+        }
         Some(_) => Err(invalid(k)),
     }
 }

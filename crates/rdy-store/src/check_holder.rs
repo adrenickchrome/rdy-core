@@ -30,7 +30,6 @@ use crate::holder::{
 use crate::index::hash_from;
 use crate::kinds;
 use crate::object_refs::{ObjectKey, PORTABLE_KINDS, refs_of};
-use crate::store::decode;
 use rdy_model::{Answer, Block, BlockId, Change, Hash, LandingRecord, StateSnapshot, Tag};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -144,13 +143,12 @@ impl<'a> Closure<'a> {
     /// that entry's block, and each blob by the rules a blob read keeps.
     fn run(&mut self) -> Result<(), StoreError> {
         while let Some(key) = self.stack.pop() {
-            let payload = match self.reader.get_kind(key.kind, &key.hash) {
+            let (raw, payload) = match self.reader.get_kind_raw(key.kind, &key.hash) {
                 Ok(p) => p,
                 Err(StoreError::Redacted { .. }) => continue,
                 Err(e) => return Err(e),
             };
-            let refs =
-                refs_of(key.kind, &payload).map_err(|e| bad(format!("object {key}: {e}")))?;
+            let refs = refs_of(raw, &payload).map_err(|e| bad(format!("object {key}: {e}")))?;
             let mut children = Vec::with_capacity(refs.len());
             for r in refs {
                 self.edges += 1;
@@ -179,16 +177,16 @@ impl<'a> Closure<'a> {
             let mut chunks_read = false;
             match key.kind {
                 kinds::LANDING => {
-                    let rec: LandingRecord = decode(&payload)?;
+                    let rec: LandingRecord = crate::codec::decode_record(raw, &payload)?;
                     self.reader.check_landing_fields(&key.hash, &rec)?;
                     self.landings.insert(key.hash, Arc::new(rec));
                 }
                 kinds::BLOCK => {
-                    let b: Block = decode(&payload)?;
+                    let b: Block = crate::codec::decode_record(raw, &payload)?;
                     self.ids.insert(key.hash, b.id);
                 }
                 kinds::SNAPSHOT => {
-                    let state: StateSnapshot = decode(&payload)?;
+                    let state: StateSnapshot = crate::codec::decode_record(raw, &payload)?;
                     for (id, v) in state.blocks {
                         match self.ids.get(&v) {
                             Some(of) => check_entry(&key.hash, &id, &v, of)?,

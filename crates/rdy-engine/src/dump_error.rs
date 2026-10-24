@@ -87,10 +87,14 @@ pub fn load_repo_mismatch(file: &Path, file_repo: &RepoId, chain_repo: &RepoId) 
     ))
 }
 
-/// A file is of another store format than the chain.
-pub fn load_store_mismatch(file: &Path, file_format: u32, chain_format: u32) -> RdyError {
+/// A file is of another store (a scalar format, or feature manifest) than the chain.
+pub fn load_store_mismatch(
+    file: &Path,
+    file_store: &rdy_store::format::DumpStore,
+    chain_store: &rdy_store::format::DumpStore,
+) -> RdyError {
     load(format!(
-        "{} is of store format {file_format}, but the chain is of store format {chain_format}",
+        "{} is of {file_store}, but the chain is of {chain_store}",
         file.display()
     ))
 }
@@ -133,10 +137,15 @@ pub fn export_repo_mismatch(file: Option<&Path>, file_repo: &RepoId, repo: &Repo
     ))
 }
 
-/// The previous dump is of another store format than this store.
-pub fn export_store_mismatch(file: Option<&Path>, file_format: u32, format: u32) -> RdyError {
+/// The previous dump is of another store (a scalar format, or feature manifest) than this
+/// store.
+pub fn export_store_mismatch(
+    file: Option<&Path>,
+    file_store: &rdy_store::format::DumpStore,
+    store: &rdy_store::format::DumpStore,
+) -> RdyError {
     export(format!(
-        "{} is of store format {file_format}, but this store is of store format {format}",
+        "{} is of {file_store}, but this store is of {store}",
         named(file)
     ))
 }

@@ -4,7 +4,8 @@
 //! chain types of a dump summary (`ChainEnd`, `BatchMarker`, `DumpKind`, `Location`) are here,
 //! so a consumer can build every field of one through this crate alone; so are the stop of a
 //! chain load (`DumpStop`) and the rows and stop of its summary (`LoadedChainFile`,
-//! `StoppedAt`). A holder dumps and loads
+//! `StoppedAt`), and the format types of the facts (`DumpStore`, the store of a dump, and
+//! `StoreFeatures`, a feature manifest). A holder dumps and loads
 //! with no project file (D-BPYN8). There is no upgrade call: load reads every released dump
 //! format and `fsck` checks the result.
 
@@ -15,6 +16,7 @@ pub use rdy_engine::{
     BatchMarker, ChainEnd, DumpKind, DumpSummary, FsckReport, LoadSummary, LoadedChainFile,
     Location, StoppedAt,
 };
+pub use rdy_store::format::{DumpStore, FeatureClass, StoreFeature, StoreFeatures};
 use std::path::{Path, PathBuf};
 
 /// The formats this rdy writes and reads.

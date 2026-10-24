@@ -8,25 +8,30 @@
 //! place in a log. It holds only portable objects, so two stores can exchange a history whatever
 //! their own layouts are.
 //!
-//! # Stream format 1
+//! # Stream format 2
 //!
-//! Integers are little endian.
+//! Integers are little endian. Stream format 1 (a scalar store format in its header) is not
+//! read: it has no pre-release compatibility promise.
 //!
-//! - **Prelude:** the 8 bytes `RDYSYNC\n`, then `stream_format: u32` (1).
+//! - **Prelude:** the 8 bytes `RDYSYNC\n`, then `stream_format: u32` (2).
 //! - **Frames:** each is framed as a store frame: `len: u32`, `kind: u8`, `hash: [u8; 32]`
 //!   (`Hash::of(payload)`), `payload`.
 //! - **Order (closed):** one `HEADER` (0xF0); zero or more object frames, each a portable
-//!   object of its store kind ([`SYNC_KINDS`]) or a `DROPPED` record (0xF3); one `TRAILER`
-//!   (0xFF); the end of the file. A batch of no object frames is valid: its root is a
-//!   prerequisite that the take must find.
-//! - **`HEADER` payload:** `store_format: u32`, `repo_id: [u8; 16]`, `purpose: u8` (0:
+//!   object's raw frame, exactly as the store holds it ([`SYNC_KINDS`] by logical kind; a
+//!   versioned frame keeps its raw kind and version prefix, `crate::codec`) or a `DROPPED`
+//!   record (0xF3); one `TRAILER` (0xFF); the end of the file. A batch of no object frames is
+//!   valid: its root is a prerequisite that the take must find.
+//! - **`HEADER` payload:** `features_len: u32` and the store's feature manifest as canonical
+//!   JSON (`crate::format`, at most 65,536 bytes), `repo_id: [u8; 16]`, `purpose: u8` (0:
 //!   `tag_history`), `tag: [u8; 32]` (the root TAG's hash), `prerequisites: u32`, then that many
-//!   keys `kind: u8 || hash: [u8; 32]`, strictly ascending. At most [`MAX_PREREQUISITES`] keys,
-//!   so at most [`MAX_HEADER_BYTES`] bytes. No sequence number, upload id or end-of-upload mark.
-//! - **`DROPPED` payload:** the 102-byte body of a dump's `DROPPED` record
-//!   (`crate::dump::DROPPED_LEN`): `original_kind || original_hash || original_len: u32 ||
-//!   apply_hash || has_residue: u8 || residue_hash`. Its logical key is the original kind and
-//!   hash. It carries no place in a source log.
+//!   logical keys `kind: u8 || hash: [u8; 32]`, strictly ascending. At most
+//!   [`MAX_PREREQUISITES`] keys, so at most [`MAX_HEADER_BYTES`] bytes. No sequence number,
+//!   upload id or end-of-upload mark. A manifest that is not valid, or that names an unknown
+//!   incompatible feature, is E_STORE_FORMAT.
+//! - **`DROPPED` payload:** the 104-byte body of a dump-4 `DROPPED` record
+//!   (`crate::dump::ENCODED_DROPPED_LEN`): `logical_kind || encoding: u16 || original_hash ||
+//!   original_len: u32 || apply_hash || has_residue: u8 || residue_hash`. Its logical key is the
+//!   logical kind and the original hash. It carries no place in a source log.
 //! - **`TRAILER` payload:** exactly 48 bytes: `records: u64` (the object frames), `bytes: u64`
 //!   (every byte of the file before the trailer frame, prelude included), `digest: [u8; 32]`:
 //!   `Hash::of` over `kind: u8 || len: u64 || hash: [u8; 32]` of the `HEADER` and every object
@@ -47,9 +52,10 @@
 //! is complete or that a removal is authorized; the take checks those over every file.
 use crate::bounded::{CHUNK_BYTES, MAX_CHUNK_BYTES, MAX_RECORD_BYTES, RECORD_BYTES, RecordError};
 use crate::dump::{
-    DROPPED_LEN, Frame, LINK_LEN, check_dropped, dropped_payload, link, parse_dropped,
+    ENCODED_DROPPED_LEN, Frame, LINK_LEN, check_dropped, encoded_dropped_payload, link,
+    parse_encoded_dropped,
 };
-use crate::format::STORE_FORMAT;
+use crate::format::{MAX_MANIFEST_BYTES, StoreFeatures, check_features};
 use crate::kinds;
 use crate::object_refs::{ObjectKey, ObjectRef, refs_of};
 use crate::segment::HEADER as FRAME_HEADER;
@@ -66,7 +72,7 @@ use std::io::{self, Read, Write};
 /// The 8 bytes every sync batch starts with.
 pub const MAGIC: &[u8; 8] = b"RDYSYNC\n";
 /// The stream format this rdy writes and reads.
-pub const STREAM_FORMAT: u32 = 1;
+pub const STREAM_FORMAT: u32 = 2;
 
 /// The frame kinds of the stream's own records. Object frames keep their store kinds.
 pub mod rec {
@@ -86,12 +92,13 @@ pub const MAX_EDGES: u64 = 1_000_000;
 pub const MAX_HISTORY_DEPTH: u64 = 100_000;
 /// The most prerequisites of one header.
 pub const MAX_PREREQUISITES: usize = 100_000;
-/// The fixed bytes of a header payload, before its prerequisite keys.
+/// The fixed bytes of a header payload, besides its manifest and its prerequisite keys.
 pub const HEADER_FIXED: usize = 4 + 16 + 1 + 32 + 4;
 /// The bytes of one prerequisite key in a header.
 pub const KEY_LEN: usize = 1 + 32;
-/// The most bytes of one header payload: [`HEADER_FIXED`] plus [`MAX_PREREQUISITES`] keys.
-pub const MAX_HEADER_BYTES: usize = HEADER_FIXED + MAX_PREREQUISITES * KEY_LEN;
+/// The most bytes of one header payload: [`HEADER_FIXED`], the largest manifest and
+/// [`MAX_PREREQUISITES`] keys.
+pub const MAX_HEADER_BYTES: usize = HEADER_FIXED + MAX_MANIFEST_BYTES + MAX_PREREQUISITES * KEY_LEN;
 /// The exact length of a trailer payload.
 pub const TRAILER_LEN: usize = 8 + 8 + 32;
 /// The most batch files of one upload.
@@ -163,13 +170,14 @@ impl StreamPurpose {
     }
 }
 
-/// A batch's header: the stream and store formats, the source repo, the purpose, the upload's
-/// root TAG and this batch's prerequisites (strictly ascending keys). JSON writes the repo id and
-/// the hash as full lowercase hex and each key as `{"kind", "hash"}`.
+/// A batch's header: the stream format, the source store's features, the source repo, the
+/// purpose, the upload's root TAG and this batch's prerequisites (strictly ascending logical
+/// keys). JSON writes the repo id and the hash as full lowercase hex and each key as
+/// `{"kind", "hash"}`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct StreamHeader {
     pub stream_format: u32,
-    pub store_format: u32,
+    pub features: StoreFeatures,
     #[serde(serialize_with = "hex_repo")]
     pub repo_id: RepoId,
     pub purpose: StreamPurpose,
@@ -179,11 +187,17 @@ pub struct StreamHeader {
 }
 
 impl StreamHeader {
-    /// The header of a tag history of this rdy's formats, for `repo_id`, rooted at TAG `tag`.
-    pub fn tag_history(repo_id: RepoId, tag: Hash, prerequisites: Vec<ObjectKey>) -> Self {
+    /// The header of a tag history of this rdy's stream format, from a store of `features`, for
+    /// `repo_id`, rooted at TAG `tag`.
+    pub fn tag_history(
+        features: StoreFeatures,
+        repo_id: RepoId,
+        tag: Hash,
+        prerequisites: Vec<ObjectKey>,
+    ) -> Self {
         StreamHeader {
             stream_format: STREAM_FORMAT,
-            store_format: STORE_FORMAT,
+            features,
             repo_id,
             purpose: StreamPurpose::TagHistory,
             tag,
@@ -200,20 +214,23 @@ impl StreamHeader {
     }
 }
 
-/// One object record of a batch: a portable object's original bytes, or the identity of one
-/// whose payload an approved removal dropped (its original length, the apply that removed it
-/// and its residue, none for a blob chunk). JSON writes hashes as full lowercase hex, a payload
-/// as lowercase hex and an absent residue as null.
+/// One object record of a batch: a portable object's original stored bytes (with its encoding:
+/// the payload of a versioned record starts with its version), or the identity of one whose
+/// payload an approved removal dropped (its encoding, its original length, the apply that
+/// removed it and its residue, none for a blob chunk). The key is logical. JSON writes hashes as
+/// full lowercase hex, a payload as lowercase hex and an absent residue as null.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamRecord {
     Present {
         key: ObjectKey,
+        encoding: u16,
         #[serde(serialize_with = "hex_bytes")]
         payload: Vec<u8>,
     },
     Dropped {
         key: ObjectKey,
+        encoding: u16,
         original_len: u32,
         #[serde(serialize_with = "hex_hash")]
         apply: Hash,
@@ -230,11 +247,46 @@ impl StreamRecord {
         }
     }
 
-    /// The bytes of the record's frame payload: the object's, or the 102 of a `DROPPED` record.
+    /// The bytes of the record's frame payload: the object's, or the 104 of a `DROPPED` record.
     pub fn frame_len(&self) -> u64 {
         match self {
             StreamRecord::Present { payload, .. } => payload.len() as u64,
-            StreamRecord::Dropped { .. } => DROPPED_LEN as u64,
+            StreamRecord::Dropped { .. } => ENCODED_DROPPED_LEN as u64,
+        }
+    }
+
+    /// A present record's body: its payload, less a versioned record's version
+    /// (`crate::codec`); None for a dropped record. The refusal is the codec's.
+    pub fn body(&self) -> Option<Result<&[u8], RecordError>> {
+        match self {
+            StreamRecord::Present { payload, .. } => {
+                Some(crate::codec::split(self.raw_kind(), payload).map(|o| o.body))
+            }
+            StreamRecord::Dropped { .. } => None,
+        }
+    }
+
+    /// A present record decoded as `T` within its bounds, through its encoding
+    /// (`crate::codec`); None for a dropped record.
+    pub fn typed<T: serde::de::DeserializeOwned + 'static>(
+        &self,
+    ) -> Option<Result<T, RecordError>> {
+        match self {
+            StreamRecord::Present { payload, .. } => {
+                Some(crate::codec::decode_bounded(self.raw_kind(), payload))
+            }
+            StreamRecord::Dropped { .. } => None,
+        }
+    }
+
+    /// The raw kind of the record's frame: the logical kind, with the high bit when the record
+    /// is versioned (`crate::codec`).
+    pub fn raw_kind(&self) -> u8 {
+        match self {
+            StreamRecord::Present { key, encoding, .. }
+            | StreamRecord::Dropped { key, encoding, .. } => {
+                crate::codec::raw_kind(key.kind, *encoding)
+            }
         }
     }
 
@@ -243,7 +295,7 @@ impl StreamRecord {
     /// [`StreamRecord::proof`]). Sorted, no repeats.
     pub fn refs(&self) -> Result<Vec<ObjectRef>, RecordError> {
         match self {
-            StreamRecord::Present { key, payload } => refs_of(key.kind, payload),
+            StreamRecord::Present { payload, .. } => refs_of(self.raw_kind(), payload),
             StreamRecord::Dropped { residue, .. } => Ok(residue
                 .iter()
                 .map(|r| ObjectRef {
@@ -320,8 +372,10 @@ fn hex_bytes<S: Serializer>(b: &[u8], s: S) -> Result<S::Ok, S::Error> {
 
 /// The header's payload. The header's fields are checked first ([`check_header`]).
 fn header_payload(h: &StreamHeader) -> Vec<u8> {
-    let mut p = Vec::with_capacity(HEADER_FIXED + h.prerequisites.len() * KEY_LEN);
-    p.extend_from_slice(&h.store_format.to_le_bytes());
+    let json = h.features.to_json();
+    let mut p = Vec::with_capacity(HEADER_FIXED + json.len() + h.prerequisites.len() * KEY_LEN);
+    p.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    p.extend_from_slice(&json);
     p.extend_from_slice(&h.repo_id.0);
     p.push(h.purpose.byte());
     p.extend_from_slice(&h.tag.0);
@@ -338,20 +392,14 @@ fn bad_header() -> StreamError {
     StreamError::bad_record(0, PRELUDE, Reason::InvalidHeader)
 }
 
-/// The rules of a header's fields, shared by the writer and the reader: this rdy's store format,
-/// at most [`MAX_PREREQUISITES`] prerequisites, each of a sync kind, strictly ascending.
+/// The rules of a header's fields, shared by the writer and the reader: a manifest this rdy
+/// reads (E_STORE_FORMAT otherwise), at most [`MAX_PREREQUISITES`] prerequisites, each of a sync
+/// kind, strictly ascending.
 fn check_header(h: &StreamHeader) -> Result<(), StreamError> {
     if h.stream_format != STREAM_FORMAT {
         return Err(bad_header());
     }
-    if h.store_format != STORE_FORMAT {
-        return Err(StreamError::store_format(
-            Some(0),
-            PRELUDE,
-            h.store_format,
-            STORE_FORMAT,
-        ));
-    }
+    check_features(&h.features).map_err(|e| StreamError::store_format(Some(0), PRELUDE, &e))?;
     if h.prerequisites.len() > MAX_PREREQUISITES {
         return Err(StreamError::limit(Some(0), PRELUDE, LIMIT_PREREQUISITES));
     }
@@ -368,15 +416,33 @@ fn parse_header(p: &[u8]) -> Result<StreamHeader, StreamError> {
     if p.len() < HEADER_FIXED {
         return Err(bad_header());
     }
-    let store_format = u32::from_le_bytes(p[0..4].try_into().expect("4 bytes"));
-    if store_format != STORE_FORMAT {
+    let manifest_len = u32::from_le_bytes(p[0..4].try_into().expect("4 bytes")) as usize;
+    if manifest_len > MAX_MANIFEST_BYTES {
+        let e = crate::format::ManifestError("manifest exceeds 65536 bytes".into());
         return Err(StreamError::store_format(
             Some(0),
             PRELUDE,
-            store_format,
-            STORE_FORMAT,
+            &e.store_error(),
         ));
     }
+    if p.len() < HEADER_FIXED + manifest_len {
+        return Err(bad_header());
+    }
+    let features = match StoreFeatures::parse_fallible(&p[4..4 + manifest_len]) {
+        Ok(f) => f,
+        Err(crate::format::ParseFailure::Manifest(e)) => {
+            return Err(StreamError::store_format(
+                Some(0),
+                PRELUDE,
+                &e.store_error(),
+            ));
+        }
+        Err(crate::format::ParseFailure::Allocation) => {
+            return Err(StreamError::allocation(Some(0), PRELUDE));
+        }
+    };
+    // the rest of the header, as it was before the manifest
+    let p = &p[manifest_len..];
     let repo_id = RepoId(p[4..20].try_into().expect("16 bytes"));
     let purpose = StreamPurpose::of(p[20]).ok_or(StreamError::purpose(Some(0), PRELUDE, p[20]))?;
     let tag = Hash(p[21..53].try_into().expect("32 bytes"));
@@ -399,7 +465,7 @@ fn parse_header(p: &[u8]) -> Result<StreamHeader, StreamError> {
     }
     let h = StreamHeader {
         stream_format: STREAM_FORMAT,
-        store_format,
+        features,
         repo_id,
         purpose,
         tag,
@@ -533,25 +599,39 @@ impl<W: Write> StreamWriter<W> {
             return Err(bad(Reason::ObjectIsRepeated));
         }
         self.within(n, at, r.frame_len())?;
+        let raw = r.raw_kind();
         let (kind, hash, payload): (u8, Hash, std::borrow::Cow<[u8]>) = match r {
             StreamRecord::Present { payload, .. } => {
                 payload_bound(n, at, key.kind, payload.len() as u64)?;
+                // the raw frame as the store holds it: its encoding must split
+                crate::codec::split(raw, payload)
+                    .map_err(|e| StreamError::from_record(n, at, &e).with_object(Some(key)))?;
                 if Hash::of(payload) != key.hash {
                     return Err(bad(Reason::HashMismatch));
                 }
-                (key.kind, key.hash, payload.as_slice().into())
+                (raw, key.hash, payload.as_slice().into())
             }
             StreamRecord::Dropped {
+                encoding,
                 original_len,
                 apply,
                 residue,
                 ..
             } => {
+                // a versioned removal has no residue adapter yet
+                if *encoding != 0 {
+                    return Err(bad(Reason::UnknownEncodingVersion));
+                }
                 check_dropped(key.kind, residue.as_ref(), *original_len)
                     .map_err(|_| bad(Reason::InvalidDroppedRecord))?;
                 self.pending.add(n, at, *original_len)?;
-                let body =
-                    dropped_payload(key.kind, &key.hash, *original_len, apply, residue.as_ref());
+                let body = encoded_dropped_payload(
+                    key.kind,
+                    &key.hash,
+                    *original_len,
+                    apply,
+                    residue.as_ref(),
+                );
                 (rec::DROPPED, Hash::of(&body), body.to_vec().into())
             }
         };
@@ -653,12 +733,16 @@ impl<R: Read> StreamReader<R> {
         }
         let mut format = [0u8; 4];
         me.exact(&mut format, 0, MAGIC.len() as u64)?;
-        if u32::from_le_bytes(format) != STREAM_FORMAT {
-            return Err(StreamError::bad_record(
-                0,
-                MAGIC.len() as u64,
-                Reason::InvalidHeader,
-            ));
+        match u32::from_le_bytes(format) {
+            STREAM_FORMAT => {}
+            1 => return Err(StreamError::sync_format_one(MAGIC.len() as u64)),
+            _ => {
+                return Err(StreamError::bad_record(
+                    0,
+                    MAGIC.len() as u64,
+                    Reason::InvalidHeader,
+                ));
+            }
         }
         me.offset = PRELUDE;
         let (len, kind, hash) = me.head(0)?;
@@ -737,7 +821,7 @@ impl<R: Read> StreamReader<R> {
             return Ok(None);
         }
         let bad = |reason| StreamError::bad_record(n, at, reason);
-        if kind != rec::DROPPED && !is_sync_kind(kind) {
+        if kind != rec::DROPPED && !is_sync_kind(crate::codec::logical_kind(kind)) {
             return Err(bad(Reason::UnknownKind));
         }
         if n > MAX_RECORDS {
@@ -748,17 +832,21 @@ impl<R: Read> StreamReader<R> {
         }
         let record = if kind == rec::DROPPED {
             // refused by its header alone, before its payload is read
-            if len != DROPPED_LEN as u64 {
+            if len != ENCODED_DROPPED_LEN as u64 {
                 return Err(bad(Reason::InvalidDroppedRecord));
             }
             let p = self.payload(n, at, len, &hash)?;
+            // a versioned removal has no residue adapter yet
+            if p[1..3] != [0, 0] {
+                return Err(bad(Reason::UnknownEncodingVersion));
+            }
             let Ok(Frame::Dropped {
                 kind,
                 hash: original,
                 len: original_len,
                 apply,
                 residue,
-            }) = parse_dropped(&p)
+            }) = parse_encoded_dropped(&p)
             else {
                 return Err(bad(Reason::InvalidDroppedRecord));
             };
@@ -772,17 +860,29 @@ impl<R: Read> StreamReader<R> {
                 .map_err(|e| e.with_object(Some(key)))?;
             StreamRecord::Dropped {
                 key,
+                encoding: 0,
                 original_len,
                 apply,
                 residue,
             }
         } else {
-            let key = ObjectKey { kind, hash };
-            payload_bound(n, at, kind, len).map_err(|e| e.with_object(Some(key)))?;
+            // the logical key; the frame keeps its raw kind and its encoding
+            let key = ObjectKey {
+                kind: crate::codec::logical_kind(kind),
+                hash,
+            };
+            payload_bound(n, at, key.kind, len).map_err(|e| e.with_object(Some(key)))?;
             let payload = self
                 .payload(n, at, len, &hash)
                 .map_err(|e| e.with_object(Some(key)))?;
-            StreamRecord::Present { key, payload }
+            let encoding = crate::codec::split(kind, &payload)
+                .map_err(|e| StreamError::from_record(n, at, &e).with_object(Some(key)))?
+                .version;
+            StreamRecord::Present {
+                key,
+                encoding,
+                payload,
+            }
         };
         self.chain.add(n, at, kind, len, &hash)?;
         self.records = n;
@@ -873,9 +973,12 @@ pub(crate) fn depth_of(
 /// every file of an upload this way, and the upload whole, so no take keeps an answer or a plan
 /// that the holder's fsck would refuse.
 fn record_rules(n: u64, offset: u64, r: &StreamRecord) -> Result<(), StreamError> {
-    let StreamRecord::Present { key, payload } = r else {
+    let StreamRecord::Present { key, payload, .. } = r else {
         return Ok(());
     };
+    let payload = crate::codec::split(r.raw_kind(), payload)
+        .map_err(|e| StreamError::from_record(n, offset, &e).with_object(Some(*key)))?
+        .body;
     if key.kind == crate::kinds::PLAN {
         // the plan record rules (`crate::plan`), with fsck's own text; its chain, bound
         // proposal and seal need the records around it, which the whole-upload check

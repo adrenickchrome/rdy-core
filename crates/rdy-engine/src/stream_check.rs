@@ -16,7 +16,6 @@ use crate::error::{E_REPO_MISMATCH, RdyError};
 use crate::publication;
 use crate::stream_error::{Reason, StreamError, to_rdy};
 use rdy_model::{Block, RepoId};
-use rdy_store::bounded;
 use rdy_store::kinds::{self, BlobManifest};
 use rdy_store::object_refs::ObjectKey;
 use rdy_store::sync_stream::{self, StreamHeader, StreamRecord};
@@ -78,22 +77,25 @@ fn repo_mismatch(source: &RepoId, target: &RepoId) -> RdyError {
 /// The local limits of record `n`, whose frame starts at byte `at`. A record of another kind,
 /// or a dropped one, has no local limit beyond its frame and typed decode.
 fn check_record(n: u64, at: u64, r: &StreamRecord) -> Result<(), Stop> {
-    let StreamRecord::Present { key, payload } = r else {
+    let StreamRecord::Present { key, payload, .. } = r else {
         return Ok(());
     };
+    let raw = r.raw_kind();
     let bad = |reason| Stop::Stream(StreamError::bad_record(n, at, reason).with_object(Some(*key)));
     // the stream check's typed decode of these bytes already passed; this one reads the value
     let decoded = |e| Stop::Stream(StreamError::from_record(n, at, &e).with_object(Some(*key)));
     match key.kind {
         kinds::BLOCK => {
-            let b: Block = bounded::decode(payload).map_err(decoded)?;
+            let b: Block = rdy_store::codec::decode_bounded(raw, payload).map_err(decoded)?;
             publication::check_block_limits(&b).map_err(|e| positioned(n, at, *key, e))
         }
         kinds::BLOB_MANIFEST => {
-            let m: BlobManifest = bounded::decode(payload).map_err(decoded)?;
+            let m: BlobManifest =
+                rdy_store::codec::decode_bounded(raw, payload).map_err(decoded)?;
+            let body = rdy_store::codec::split(raw, payload).map_err(decoded)?.body;
             // the bytes `put_blob` writes, which a blob read requires: no other encoding of
             // the same manifest (such as a varint that is not minimal) is a blob
-            if !m.is_encoding_of(payload) {
+            if !m.is_encoding_of(body) {
                 return Err(bad(Reason::RecordDoesNotDecode));
             }
             let l = publication::limits();

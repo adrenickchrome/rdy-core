@@ -315,13 +315,21 @@ impl ObjectSource for StoreSource<'_> {
         if let Some(s) = self.reader.index().redaction_span_at(&loc).map_err(err)? {
             return Ok(Some(StreamRecord::Dropped {
                 key,
+                encoding: 0,
                 original_len: s.span.len,
                 apply: s.apply,
                 residue: s.span.residue,
             }));
         }
-        let payload = self.reader.get_kind(key.kind, &key.hash).map_err(err)?;
-        Ok(Some(StreamRecord::Present { key, payload }))
+        let (raw, payload) = self.reader.get_kind_raw(key.kind, &key.hash).map_err(err)?;
+        let encoding = crate::codec::split(raw, &payload)
+            .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(key)))?
+            .version;
+        Ok(Some(StreamRecord::Present {
+            key,
+            encoding,
+            payload,
+        }))
     }
 }
 
@@ -497,8 +505,8 @@ impl Walk<'_> {
     fn carried_refusal(&self, carried: Hash) -> StreamError {
         let reader = self.source.reader;
         let err = |e| store_error(e, Some(self.root));
-        let name = match reader.get_kind(kinds::TAG, &self.root.hash) {
-            Ok(payload) => match crate::bounded::decode::<Tag>(&payload) {
+        let name = match reader.get_kind_raw(kinds::TAG, &self.root.hash) {
+            Ok((raw, payload)) => match crate::codec::decode_bounded::<Tag>(raw, &payload) {
                 Ok(t) => t.name,
                 Err(e) => return StreamError::from_record(0, 0, &e).with_object(Some(self.root)),
             },
@@ -616,10 +624,13 @@ impl Walk<'_> {
             if w.seen.contains(&key) {
                 return Ok(());
             }
-            let Some(StreamRecord::Present { payload, .. }) = source.record(key)? else {
+            let Some(r @ StreamRecord::Present { .. }) = source.record(key)? else {
                 return Ok(());
             };
-            let a: Answer = crate::bounded::decode(&payload)
+            let StreamRecord::Present { payload, .. } = &r else {
+                unreachable!("a present record")
+            };
+            let a: Answer = crate::codec::decode_bounded(r.raw_kind(), payload)
                 .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(key)))?;
             if a.targets.iter().any(|t| ask.contains(t)) {
                 w.reach(key)?;
@@ -642,10 +653,13 @@ impl Walk<'_> {
     /// and lies before the end (O11).
     fn relay_answer(&mut self) -> Result<Option<ObjectKey>, StreamError> {
         let root = self.root;
-        let Some(StreamRecord::Present { payload, .. }) = self.source.record(root)? else {
+        let Some(r @ StreamRecord::Present { .. }) = self.source.record(root)? else {
             return Ok(None);
         };
-        let tag: Tag = crate::bounded::decode(&payload)
+        let StreamRecord::Present { payload, .. } = &r else {
+            unreachable!("a present record")
+        };
+        let tag: Tag = crate::codec::decode_bounded(r.raw_kind(), payload)
             .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(root)))?;
         let item = format!("tag:{}", tag.name);
         let Some((h, a)) = self

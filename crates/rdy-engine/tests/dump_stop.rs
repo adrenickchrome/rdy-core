@@ -250,7 +250,11 @@ fn hc2_chain_errors_match_every_documented_row() {
         load_fix,
     );
     check(
-        de::load_store_mismatch(f, 16, 17),
+        de::load_store_mismatch(
+            f,
+            &rdy_store::format::DumpStore::Legacy(16),
+            &rdy_store::format::DumpStore::Legacy(17),
+        ),
         E_DUMP_CHAIN,
         "a/b.dump is of store format 16, but the chain is of store format 17",
         load_fix,
@@ -293,7 +297,11 @@ fn hc2_chain_errors_match_every_documented_row() {
             export_fix,
         );
         check(
-            de::export_store_mismatch(file, 15, 16),
+            de::export_store_mismatch(
+                file,
+                &rdy_store::format::DumpStore::Legacy(15),
+                &rdy_store::format::DumpStore::Legacy(16),
+            ),
             E_DUMP_CHAIN,
             &format!("{text} is of store format 15, but this store is of store format 16"),
             export_fix,

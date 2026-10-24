@@ -3,7 +3,8 @@
 //! has no such ref. The mode is set only in the store's first sealed batch, with its format and
 //! repo id (`Store::create_holder`), and never added, changed or removed later.
 //!
-//! A holder's refs are closed: `meta/store_format`, `meta/repo_id`, `meta/origin`, the creation's
+//! A holder's refs are closed: `meta/store_features`, `meta/upgrade`, a dump's historical
+//! `meta/store_format`, `meta/repo_id`, `meta/origin`, the creation's
 //! `meta/store_mode`, `tag/<name>` and (O11, ruling task-13) `answer/tag-object:<hash>`, which
 //! names the relay answer of the TAG object whose hash is `<hash>` (64 lowercase hex digits):
 //! an ANSWER of act `tag` and item `tag:<that tag's name>` whose targets are exactly that TAG
@@ -28,7 +29,7 @@
 //! its index stands, whether or not anything is left to replay; the replay then goes on with the
 //! walk's rules, so a batch that a failed catch-up left half indexed is judged whole again.
 use crate::error::StoreError;
-use crate::format::REF_STORE_FORMAT;
+use crate::format::{REF_STORE_FEATURES, REF_STORE_FORMAT, REF_UPGRADE};
 use crate::kinds::{self, RefUpdate};
 use crate::meta::{REF_ORIGIN, REF_REPO_ID};
 use crate::segment::{Holes, Location, SegmentReader};
@@ -127,7 +128,8 @@ pub fn decode_mode(value: Option<&[u8]>) -> Result<StoreMode, StoreError> {
 
 /// Where a ref belongs, for a holder.
 enum Family<'a> {
-    /// `meta/store_format`, `meta/repo_id` or `meta/origin`.
+    /// `meta/store_features`, `meta/upgrade`, `meta/store_format`, `meta/repo_id` or
+    /// `meta/origin`.
     Meta,
     /// `meta/store_mode`: the creation's only.
     Mode,
@@ -140,7 +142,15 @@ enum Family<'a> {
 }
 
 fn family(name: &str) -> Family<'_> {
-    if name == REF_STORE_FORMAT || name == REF_REPO_ID || name == REF_ORIGIN {
+    if [
+        REF_STORE_FEATURES,
+        REF_UPGRADE,
+        REF_STORE_FORMAT,
+        REF_REPO_ID,
+        REF_ORIGIN,
+    ]
+    .contains(&name)
+    {
         Family::Meta
     } else if name == REF_STORE_MODE {
         Family::Mode

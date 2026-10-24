@@ -118,8 +118,10 @@ fn carry(dir: &Path) {
     }
     i.append_carried(&residues, std::slice::from_ref(&rec))
         .unwrap();
-    i.upgrade(rdy_store::format::Format::CURRENT.store_format)
-        .unwrap();
+    i.upgrade(&rdy_store::format::DumpStore::Features(
+        rdy_store::format::baseline_features(),
+    ))
+    .unwrap();
     i.finish().unwrap();
 }
 

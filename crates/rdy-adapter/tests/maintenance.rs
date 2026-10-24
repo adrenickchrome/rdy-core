@@ -183,10 +183,9 @@ fn ha12_format_calls_need_no_store() {
     let facts = maintenance::formats();
     let engine = rdy_engine::formats::formats();
     assert_eq!(facts, engine);
-    assert!(facts.reads.contains(&DumpPair {
-        dump: facts.dump,
-        store: facts.store
-    }));
+    assert_eq!(facts.reads_features, [1]);
+    assert!(!facts.reads.iter().any(|p| p.dump == facts.dump));
+    let _ = DumpPair { dump: 3, store: 18 };
 
     let dir = divergent_holder(root.path(), RepoId([8; 16]));
     let h = StoreHandle::open_holder(&dir).unwrap();
@@ -196,7 +195,13 @@ fn ha12_format_calls_need_no_store() {
     h.close().unwrap();
 
     let seen = maintenance::inspect_dump(&dump).unwrap();
-    assert_eq!((seen.dump, seen.store), (facts.dump, facts.store));
+    assert_eq!(
+        (seen.dump, &seen.store),
+        (
+            facts.dump,
+            &maintenance::DumpStore::Features(facts.store.clone())
+        )
+    );
     assert_eq!(seen.rdy, facts.rdy);
     let e = expect_err(maintenance::inspect_dump(&root.path().join("missing")));
     assert_eq!(e.code, "E_BAD_INPUT");
@@ -225,9 +230,13 @@ fn frozen(name: &str) -> PathBuf {
 
 #[test]
 fn rf4_adapter_formats_and_old_stream_refusal() {
-    // store format 18, dump format 3, stream format 1, and every released pair: no store opened
+    // the baseline features, dump format 4, stream format 2, and every released pair: no store
+    // opened
     let facts = maintenance::formats();
-    assert_eq!((facts.store, facts.dump, facts.stream), (18, 3, 1));
+    assert_eq!(
+        (facts.store.clone(), facts.dump, facts.stream),
+        (rdy_store::format::baseline_features(), 4, 2)
+    );
     let pairs: Vec<(u32, u32)> = facts.reads.iter().map(|p| (p.dump, p.store)).collect();
     assert_eq!(
         pairs,
@@ -244,7 +253,8 @@ fn rf4_adapter_formats_and_old_stream_refusal() {
         ]
     );
     assert_eq!(facts, rdy_engine::formats::formats());
-    // a batch of store format 17 is refused by the check, before its records
+    // a batch whose manifest names an unknown incompatible feature is refused by the check,
+    // before its records
     let root = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(&root.path().join("p"), "rdy-standard").unwrap();
     land_tag(&mut r, None, "base", "v1.0.0");
@@ -255,21 +265,33 @@ fn rf4_adapter_formats_and_old_stream_refusal() {
     r.close().unwrap();
     rdy_adapter::stream::check_batch(bytes.as_slice(), Some(repo)).unwrap();
     // the header frame follows the 12-byte prelude: 4 length bytes, the kind and the hash, then
-    // its payload, whose first 4 bytes are the store format
+    // its payload, which starts with the manifest's length and JSON
     let len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-    let mut payload = bytes[49..49 + len].to_vec();
-    assert_eq!(payload[..4], 18u32.to_le_bytes());
-    payload[..4].copy_from_slice(&17u32.to_le_bytes());
-    let mut old = bytes.clone();
-    old[17..49].copy_from_slice(&rdy_model::Hash::of(&payload).0);
-    old[49..49 + len].copy_from_slice(&payload);
+    let payload = bytes[49..49 + len].to_vec();
+    let json = rdy_store::format::baseline_features().to_json();
+    assert_eq!(payload[..4], (json.len() as u32).to_le_bytes());
+    let newer = rdy_store::format::StoreFeatures::of(vec![rdy_store::format::StoreFeature {
+        name: "zz_future".into(),
+        class: rdy_store::format::FeatureClass::Incompatible,
+        required_rdy: "99.0.0".into(),
+    }])
+    .to_json();
+    let mut forged = (newer.len() as u32).to_le_bytes().to_vec();
+    forged.extend_from_slice(&newer);
+    forged.extend_from_slice(&payload[4 + json.len()..]);
+    let mut old = bytes[..12].to_vec();
+    old.extend_from_slice(&(forged.len() as u32).to_le_bytes());
+    old.push(bytes[16]);
+    old.extend_from_slice(&rdy_model::Hash::of(&forged).0);
+    old.extend_from_slice(&forged);
+    old.extend_from_slice(&bytes[49 + len..]);
     let e = rdy_adapter::stream::check_batch(old.as_slice(), Some(repo)).unwrap_err();
     assert_eq!(
         (e.code, e.message.as_str(), e.fix.as_str()),
         (
             "E_STORE_FORMAT",
-            "stream store format 17 does not match 18",
-            "write the stream with the pinned rdy build"
+            "store feature zz_future needs rdy 99.0.0",
+            "open the project with rdy 99.0.0 or later"
         )
     );
     // a native store of format 17 is refused with the dump-and-load fix
@@ -281,13 +303,23 @@ fn rf4_adapter_formats_and_old_stream_refusal() {
     .unwrap();
     let e = expect_err(StoreHandle::open(&p));
     assert_eq!(e.code, "E_STORE_FORMAT");
-    assert_eq!(e.fix, rdy_store::format::move_with_dump("17"));
+    assert_eq!(e.message, "store format 17 predates feature-based stores");
+    assert_eq!(
+        e.fix,
+        "dump with the rdy that wrote this store, then load into a directory with no store"
+    );
     // a released dump of the pair (3, 17) still loads, as a holder, and checks clean
     let seen = maintenance::inspect_dump(&frozen("v3-s17-holder.rdydump")).unwrap();
-    assert_eq!((seen.dump, seen.store), (3, 17));
+    assert_eq!(
+        (seen.dump, &seen.store),
+        (3, &maintenance::DumpStore::Legacy(17))
+    );
     let to = root.path().join("old");
     let loaded = maintenance::load(&frozen("v3-s17-holder.rdydump"), &to).unwrap();
-    assert_eq!((loaded.dump_format, loaded.store_format), (3, 17));
+    assert_eq!(
+        (loaded.dump_format, &loaded.store_format),
+        (3, &maintenance::DumpStore::Legacy(17))
+    );
     let h = StoreHandle::open_holder(&to).unwrap();
     assert_eq!(fsck_json(&h), serde_json::to_value(&loaded.fsck).unwrap());
     h.close().unwrap();

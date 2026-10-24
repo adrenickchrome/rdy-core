@@ -241,7 +241,8 @@ pub(crate) enum Place {
 pub(crate) trait PlanLookup {
     /// Where the object of `kind` and hash `h` stands.
     fn place(&self, kind: u8, h: &Hash) -> Result<Place, StoreError>;
-    /// The payload of an object [`PlanLookup::place`] found.
+    /// The body of an object [`PlanLookup::place`] found: its payload, less a versioned
+    /// record's version (`crate::codec`).
     fn read(&self, kind: u8, h: &Hash) -> Result<Vec<u8>, StoreError>;
     /// The latest plan version of `view` before this one, if any.
     fn latest(&self, view: &str) -> Result<Option<Hash>, StoreError>;
@@ -564,10 +565,14 @@ impl Held for StoreReader {
 
     fn block_id_at(&self, loc: Location, v: &Hash) -> Result<Option<BlockId>, StoreError> {
         match self.segments().read_hashed(loc) {
-            Ok((kinds::BLOCK, found, payload)) if found == *v => {
-                Ok(crate::store::decode::<rdy_model::Block>(&payload)
-                    .ok()
-                    .map(|b| b.id))
+            Ok((raw, found, payload))
+                if found == *v && crate::codec::logical_kind(raw) == kinds::BLOCK =>
+            {
+                Ok(
+                    crate::codec::decode_record::<rdy_model::Block>(raw, &payload)
+                        .ok()
+                        .map(|b| b.id),
+                )
             }
             // a frame the walk did not hand out (a removed payload): its stub has the id
             _ => self.block_id(v),
@@ -668,10 +673,12 @@ pub(crate) fn entries(
     match kind {
         kinds::PLAN => plan_entries(hash, loc, payload, r),
         kinds::ANSWER => answer_entries(hash, loc, payload, r),
-        kinds::TRANSITION => Ok(match crate::store::decode::<Transitions>(payload) {
-            Ok(t) => transition_entries(&t, loc),
-            Err(_) => vec![],
-        }),
+        kinds::TRANSITION => Ok(
+            match crate::codec::decode_record::<Transitions>(kinds::TRANSITION, payload) {
+                Ok(t) => transition_entries(&t, loc),
+                Err(_) => vec![],
+            },
+        ),
         _ => Ok(vec![]),
     }
 }
@@ -742,7 +749,7 @@ pub(crate) fn answer_entries(
     payload: &[u8],
     r: &Resolver<'_>,
 ) -> Result<Vec<IndexEntry>, StoreError> {
-    let Ok(a) = crate::store::decode::<Answer>(payload) else {
+    let Ok(a) = crate::codec::decode_record::<Answer>(kinds::ANSWER, payload) else {
         return Ok(vec![]);
     };
     if a.act != AnswerAct::KeepSuspect || crate::answer::invalid(&a).is_some() {
@@ -801,11 +808,12 @@ struct WriteLookup<'a> {
 
 impl WriteLookup<'_> {
     /// The payload of `kind` and `h` among `items`.
+    /// The body of the item of logical kind `kind` with hash `h`, as `crate::codec` splits it.
     fn item(&self, kind: u8, h: &Hash) -> Option<&[u8]> {
         self.items
             .iter()
-            .find(|(k, p)| *k == kind && Hash::of(p) == *h)
-            .map(|(_, p)| &p[..])
+            .find(|(k, p)| crate::codec::logical_kind(*k) == kind && Hash::of(p) == *h)
+            .and_then(|(k, p)| crate::codec::split(*k, p).ok().map(|o| o.body))
     }
 
     /// The plans among `items`, in order.
@@ -823,7 +831,10 @@ impl PlanLookup for WriteLookup<'_> {
             return Ok(Place::Batch);
         }
         let open = self.store.open_batch().unwrap_or(&[]);
-        if open.iter().any(|(k, f)| *k == kind && f == h) {
+        if open
+            .iter()
+            .any(|(k, f)| crate::codec::logical_kind(*k) == kind && f == h)
+        {
             return Ok(Place::Batch);
         }
         Ok(if self.store.has_kind(kind, h)? {
@@ -836,7 +847,7 @@ impl PlanLookup for WriteLookup<'_> {
     fn read(&self, kind: u8, h: &Hash) -> Result<Vec<u8>, StoreError> {
         match self.item(kind, h) {
             Some(p) => Ok(p.to_vec()),
-            None => self.store.get_kind(kind, h),
+            None => self.store.get_body(kind, h),
         }
     }
 
@@ -883,8 +894,10 @@ impl PlanLookup for WriteLookup<'_> {
         Ok(self
             .items
             .iter()
-            .filter(|(k, _)| *k == kinds::LANDING)
-            .find(|(_, b)| bounded::decode::<LandingRecord>(b).is_ok_and(|l| l.proposal == *p))
+            .filter(|(k, _)| crate::codec::logical_kind(*k) == kinds::LANDING)
+            .find(|(k, b)| {
+                crate::codec::decode_bounded::<LandingRecord>(*k, b).is_ok_and(|l| l.proposal == *p)
+            })
             .map(|(_, b)| Hash::of(b)))
     }
 
@@ -1145,7 +1158,7 @@ impl PlanLookup for CheckLookup<'_> {
     }
 
     fn read(&self, kind: u8, h: &Hash) -> Result<Vec<u8>, StoreError> {
-        self.reader.get_kind(kind, h)
+        self.reader.get_body(kind, h)
     }
 
     fn latest(&self, view: &str) -> Result<Option<Hash>, StoreError> {

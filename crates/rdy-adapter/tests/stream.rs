@@ -195,7 +195,12 @@ fn ha14_early_batch_returns_keys_without_root() {
     let totals: StreamTotals = reader.finish().unwrap();
     assert_eq!(totals.records, f.report.records);
     assert!(!leaves.is_empty() && leaves.len() < f.report.keys.len());
-    let header = StreamHeader::tag_history(f.repo, f.tag, vec![root]);
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        f.repo,
+        f.tag,
+        vec![root],
+    );
     let mut writer = StreamWriter::new(Vec::new(), &header).unwrap();
     for rec in &leaves {
         writer.record(rec).unwrap();
@@ -459,6 +464,7 @@ fn with_payload(bytes: &[u8], change: Hash, payload: &[u8]) -> Vec<u8> {
         if r.key().hash == change {
             found = true;
             w.record(&StreamRecord::Present {
+                encoding: 0,
                 key: ObjectKey {
                     kind: r.key().kind,
                     hash: Hash::of(payload),

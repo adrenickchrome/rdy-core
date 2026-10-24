@@ -456,8 +456,8 @@ impl StoreReader {
         }
         let mut hashes: Vec<Hash> = items.iter().map(|(_, p)| Hash::of(p)).collect();
         for (kind, payload) in items {
-            if *kind == kinds::CHANGE {
-                let change: Change = decode(payload)?;
+            if crate::codec::logical_kind(*kind) == kinds::CHANGE {
+                let change: Change = crate::codec::decode_record(*kind, payload)?;
                 for op in &change.ops {
                     if let rdy_model::Op::Create { block } | rdy_model::Op::Update { block, .. } =
                         op
@@ -821,11 +821,15 @@ pub(crate) fn residue_names(r: &RedactionResidue, kind: u8, h: &Hash) -> bool {
 /// accepts a residue that would replay other history than the original. A payload that does not
 /// decode, or is not its record's canonical encoding, has no residue.
 pub(crate) fn residue_matches(kind: u8, payload: &[u8], r: &RedactionResidue) -> bool {
-    match (kind, r) {
-        (kinds::BLOCK, RedactionResidue::Block(res)) => decode::<Block>(payload)
-            .is_ok_and(|b| encode(&b) == payload && *res == BlockResidue::of(&b)),
-        (kinds::CHANGE, RedactionResidue::Change(res)) => decode::<Change>(payload)
-            .is_ok_and(|c| encode(&c) == payload && *res == ChangeResidue::of(&c)),
+    // the frame's body, by its encoding (`crate::codec`): the residue derives from it
+    let Ok(o) = crate::codec::split(kind, payload) else {
+        return false;
+    };
+    match (o.kind, r) {
+        (kinds::BLOCK, RedactionResidue::Block(res)) => crate::codec::decode_split::<Block>(&o)
+            .is_ok_and(|b| encode(&b) == o.body && *res == BlockResidue::of(&b)),
+        (kinds::CHANGE, RedactionResidue::Change(res)) => crate::codec::decode_split::<Change>(&o)
+            .is_ok_and(|c| encode(&c) == o.body && *res == ChangeResidue::of(&c)),
         _ => false,
     }
 }
@@ -1106,11 +1110,13 @@ impl Store {
                     _ => StoreError::corrupt_at(loc),
                 });
             }
-            if kind == kinds::BLOCK && !all_ids.is_empty() {
+            if crate::codec::logical_kind(kind) == kinds::BLOCK && !all_ids.is_empty() {
                 // the version's id: from the payload, or from the stub of a removed version; a
                 // payload that is no block is a version of no id
                 let id = match frame {
-                    StoredFrame::Present { payload, .. } => decode::<Block>(payload).ok(),
+                    StoredFrame::Present { payload, .. } => {
+                        crate::codec::decode_record::<Block>(kind, payload).ok()
+                    }
                     StoredFrame::Dropped { .. } => Some(self.get_block(&hash)?),
                 }
                 .map(|b| b.id);

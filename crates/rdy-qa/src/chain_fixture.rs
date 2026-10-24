@@ -37,6 +37,13 @@
 //! same boundaries. [`project_chain`] and [`holder_chain`] select no stage, so their output is
 //! the format-17 sequence's, unchanged.
 //!
+//! The current set (D-WWAK7, D-69AY3): [`project_chain_current`] and [`holder_chain_current`]
+//! select the stages of the store this rdy writes, over the same shared builders. With every
+//! kind's latest encoding 0 and no registered feature, that is the store format 18 sequence;
+//! the current writer gives it dump format 4, a feature manifest and the latest-encoding map
+//! ([`current_formats`]). A later encoding or feature extends the current stage selector, and
+//! its task freezes a new complete set; a released set is never regenerated.
+//!
 //! Each standalone full fixture is a dump of a stopped load: the full dump written after the
 //! removals, loaded at the missing stop (every carried span is zero), then written to again. The
 //! project gets a new block, an ordinary tagged landing and a person's approved removal of that
@@ -107,6 +114,25 @@ enum Stages {
     None,
     /// The reflects fixture's three stages (D-4WC6R).
     Reflects,
+}
+
+/// The stages of the store this rdy writes: every stage of the shared builders.
+const CURRENT_STAGES: Stages = Stages::Reflects;
+
+/// What the current set pins of the written formats: the dump and sync formats, the feature
+/// manifest a new store writes and the latest encoding of every assigned kind.
+pub fn current_formats() -> serde_json::Value {
+    let encodings: serde_json::Map<String, serde_json::Value> =
+        rdy_store::dump::current_frame_kinds()
+            .iter()
+            .map(|k| (k.to_string(), json!(rdy_store::codec::latest(*k))))
+            .collect();
+    json!({
+        "dump_format": rdy_store::dump::DUMP_FORMAT,
+        "stream_format": rdy_store::sync_stream::STREAM_FORMAT,
+        "features": rdy_store::format::baseline_features(),
+        "encodings": encodings,
+    })
 }
 
 /// The removable blob: a full first chunk (1 MiB of one byte) and a short second chunk.
@@ -336,6 +362,11 @@ pub fn project_chain_v18() -> Chain {
     project_chain_with(Stages::Reflects)
 }
 
+/// The project chain of the store this rdy writes (see the module).
+pub fn project_chain_current() -> Chain {
+    project_chain_with(CURRENT_STAGES)
+}
+
 fn project_chain_with(stages: Stages) -> Chain {
     let _clock = pin_clock(CLOCK_MS);
     rdy_model::seed_ids_for_tests(PROJECT_SEED);
@@ -465,6 +496,11 @@ pub fn holder_chain() -> (Chain, HolderUploads) {
 /// The holder chain with the store format 18 stages (see the module).
 pub fn holder_chain_v18() -> (Chain, HolderUploads) {
     holder_chain_with(Stages::Reflects)
+}
+
+/// The holder chain of the store this rdy writes (see the module).
+pub fn holder_chain_current() -> (Chain, HolderUploads) {
+    holder_chain_with(CURRENT_STAGES)
 }
 
 fn holder_chain_with(stages: Stages) -> (Chain, HolderUploads) {

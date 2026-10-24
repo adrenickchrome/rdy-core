@@ -5,7 +5,6 @@ use rdy_qa::inbox::on;
 use rdy_qa::invariants::check_all;
 use rdy_qa::reindex_check::reindex_reproduces;
 use rdy_store::StoreCheck;
-use rdy_store::format::STORE_FORMAT;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -106,12 +105,13 @@ fn sg6_a_store_of_the_next_format_is_refused_and_untouched() {
     let copy = tempfile::tempdir().unwrap();
     let project = copy.path().join("p");
     copy_tree(dir.path(), &project);
-    let next = STORE_FORMAT + 1;
-    std::fs::write(
-        project.join(".rdy/store/FORMAT"),
-        format!("rdy store format\nstore_format {next}\n"),
-    )
-    .unwrap();
+    // a feature this rdy does not know, of class incompatible
+    let next = rdy_store::format::StoreFeatures::of(vec![rdy_store::format::StoreFeature {
+        name: "future_x".into(),
+        class: rdy_store::format::FeatureClass::Incompatible,
+        required_rdy: "99.0.0".into(),
+    }]);
+    std::fs::write(project.join(".rdy/store/FORMAT"), next.to_text()).unwrap();
     let before = tree(&project);
     let e = Rdy::open(&project)
         .err()

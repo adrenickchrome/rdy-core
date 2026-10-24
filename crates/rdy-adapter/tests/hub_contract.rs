@@ -374,8 +374,12 @@ mod hub {
             }
             needed.insert(root);
             needed.retain(|k| !mine.contains(k));
-            let h =
-                StreamHeader::tag_history(header.repo_id, header.tag, needed.into_iter().collect());
+            let h = StreamHeader::tag_history(
+                rdy_store::format::baseline_features(),
+                header.repo_id,
+                header.tag,
+                needed.into_iter().collect(),
+            );
             let mut w = StreamWriter::new(Vec::new(), &h).map_err(|e| to_rdy(&e))?;
             for rec in part {
                 w.record(rec).map_err(|e| to_rdy(&e))?;
@@ -672,7 +676,13 @@ fn ha16_hub_contract_resumes_with_persistent_batch_files() {
     holder.close().unwrap();
     let formats = maintenance::inspect_dump(&out).unwrap();
     let writes = maintenance::formats();
-    assert_eq!((formats.dump, formats.store), (writes.dump, writes.store));
+    assert_eq!(
+        (formats.dump, formats.store),
+        (
+            writes.dump,
+            maintenance::DumpStore::Features(writes.store.clone())
+        )
+    );
     let copy = dir.path().join("copy");
     maintenance::load(&out, &copy).unwrap();
     assert!(
@@ -730,7 +740,13 @@ fn rf4_hub_contract_takes_a_reflects_history() {
     holder.dump(&out).unwrap();
     holder.close().unwrap();
     let seen = maintenance::inspect_dump(&out).unwrap();
-    assert_eq!((seen.dump, seen.store), (3, 18));
+    assert_eq!(
+        (seen.dump, seen.store),
+        (
+            4,
+            maintenance::DumpStore::Features(rdy_store::format::baseline_features())
+        )
+    );
     let copy = dir.path().join("reflects-copy");
     maintenance::load(&out, &copy).unwrap();
     assert!(

@@ -9,10 +9,13 @@
 //! starts at offset 0 of the next segment. So a held batch that passed the soft segment limit in
 //! the source passes it here too.
 //!
-//! A dump of an older store format gets one more batch after its own: `upgrade` appends it, and
-//! it sets `meta/store_format` to this rdy's store format (FW-UP1, in its smallest form). Until
-//! M3a a store format change only adds kinds and refs (D-F0904), so no frame is re-encoded.
-//! A log of a store format before 12 has no repo id: the upgrade batch gives it one (RULING F2).
+//! A dump of a scalar store format (dump formats 1 to 3) gets one more batch after its own:
+//! `upgrade` appends it, and it sets `meta/store_features` to the baseline features
+//! (`crate::format::baseline_features`; FW-UP1, in its smallest form). The historical
+//! `meta/store_format` refs the dump holds stay as they are, and no frame is re-encoded
+//! (D-F0904). A log of a store format before 12 has no repo id: the upgrade batch gives it one
+//! (RULING F2). A dump of a feature store (dump format 4) gets no batch: its log holds its
+//! manifest, which the load keeps, unknown compatible features included.
 //!
 //! A converter for another store format must remap every location inside a payload
 //! (`RefUpdate.at`, `InboxCursor.at`) if it changes the layout.
@@ -49,7 +52,7 @@ use crate::dump::{
 use crate::dump_chain::chain_text;
 use crate::dump_scan::{FrameAction, ScanPlan};
 use crate::error::StoreError;
-use crate::format::{self, Format};
+use crate::format::{self, DumpStore, StoreFeatures};
 use crate::fsutil::sync_dir;
 use crate::holder::{FirstBatch, RefRules, StoreMode};
 use crate::kinds::{self, RefUpdate};
@@ -106,6 +109,10 @@ pub struct Ingest {
     carried_done: bool,
     /// Whether `upgrade` ran: the carried batch comes before it.
     upgraded: bool,
+    /// The value of the last `meta/store_features` ref an ingested frame set.
+    features_ref: Option<Vec<u8>>,
+    /// The features `upgrade` gave the store, which `finish` mirrors in `FORMAT`.
+    features: Option<StoreFeatures>,
 }
 
 /// What an ingest wrote: the dump's batches and their data frames (an upgrade batch is not
@@ -182,6 +189,8 @@ impl Ingest {
             has_carried: false,
             carried_done: false,
             upgraded: false,
+            features_ref: None,
+            features: None,
         })
     }
 
@@ -299,9 +308,14 @@ impl Ingest {
                     hashes.push(hash);
                     self.has_apply |= *kind == kinds::REDACTION_APPLY;
                     self.has_carried |= *kind == kinds::REDACTION_CARRIED;
-                    sets_repo_id |= *kind == kinds::REF_UPDATE
-                        && postcard::from_bytes::<RefUpdate>(payload)
-                            .is_ok_and(|u| u.name == REF_REPO_ID);
+                    if *kind == kinds::REF_UPDATE
+                        && let Ok(u) = postcard::from_bytes::<RefUpdate>(payload)
+                    {
+                        sets_repo_id |= u.name == REF_REPO_ID;
+                        if u.name == format::REF_STORE_FEATURES {
+                            self.features_ref = Some(u.value);
+                        }
+                    }
                 }
                 Frame::Dropped {
                     kind,
@@ -524,41 +538,57 @@ impl Ingest {
     }
 
     /// The logged upgrade step (FW-UP1, D-WWAK7, D-F0904), in its smallest form. `from` is the
-    /// store format of the dump's log. The cases (closed):
-    /// - `from` is this rdy's store format: nothing is appended (such a log holds its id);
-    /// - `from` is older: one batch is appended after the dump's batches. It holds the
-    ///   `REF_UPDATE` that sets `meta/store_format` to this rdy's store format, salted with the
-    ///   log end as every ref write is; then, when no ingested frame set `meta/repo_id`, the
+    /// store of the dump's log. The cases (closed):
+    /// - a feature store: nothing is appended, and the store keeps the manifest its log holds,
+    ///   which must be `from`'s (`dump metadata does not match its header` otherwise); a
+    ///   manifest this rdy may not write is refused;
+    /// - a scalar store format up to 18: one batch is appended after the dump's batches. It holds
+    ///   the `REF_UPDATE` that sets `meta/store_features` to the baseline features, salted with
+    ///   the log end as every ref write is; then, when no ingested frame set `meta/repo_id`, the
     ///   `REF_UPDATE` of `meta/repo_id` with a new repo id, salted with the log end plus one
-    ///   (RULING F2); then its marker. Every earlier byte is kept;
-    /// - `from` is newer: refused with `StoreError::Dump`, and nothing is appended.
+    ///   (RULING F2); then its marker. Every earlier byte is kept, the historical
+    ///   `meta/store_format` refs among them;
+    /// - a later scalar format: refused with `StoreError::Dump`, and nothing is appended.
     ///
     /// Returns whether it appended the batch. Call it once, after the last `batch` (and after
     /// `append_carried`, if it runs).
-    pub fn upgrade(&mut self, from: u32) -> Result<bool, StoreError> {
+    pub fn upgrade(&mut self, from: &DumpStore) -> Result<bool, StoreError> {
         self.upgrade_with(from, None)
     }
 
     /// [`Ingest::upgrade`] of a chain prefix: when no ingested frame set `meta/repo_id`, the
     /// upgrade batch sets `repo`, the id the chain's headers name, not a new one. A prefix
     /// that stops before the source's own upgrade batch is the same repo as the chain.
-    pub fn upgrade_in_repo(&mut self, from: u32, repo: RepoId) -> Result<bool, StoreError> {
+    pub fn upgrade_in_repo(&mut self, from: &DumpStore, repo: RepoId) -> Result<bool, StoreError> {
         self.upgrade_with(from, Some(repo))
     }
 
-    fn upgrade_with(&mut self, from: u32, repo: Option<RepoId>) -> Result<bool, StoreError> {
+    fn upgrade_with(&mut self, from: &DumpStore, repo: Option<RepoId>) -> Result<bool, StoreError> {
         self.upgraded = true;
-        let current = Format::CURRENT.store_format;
-        if from > current {
+        let from = match from {
+            DumpStore::Features(m) => {
+                format::check_writable(m)?;
+                if self
+                    .features_ref
+                    .as_ref()
+                    .is_some_and(|v| *v != m.to_json())
+                {
+                    return Err(dump_error(crate::dump_scan::METADATA_MISMATCH.into()));
+                }
+                self.features = Some(m.clone());
+                return Ok(false);
+            }
+            DumpStore::Legacy(n) => *n,
+        };
+        if from > format::LAST_SCALAR_STORE_FORMAT {
             return Err(dump_error(format!(
-                "store format {from} is newer than this rdy's store format {current}"
+                "store format {from} is newer than the last scalar store format {}",
+                format::LAST_SCALAR_STORE_FORMAT
             )));
         }
-        if from == current {
-            return Ok(false);
-        }
+        let features = format::baseline_features();
         let start = self.log.end();
-        let mut refs = vec![(format::REF_STORE_FORMAT, format::encode_u32(current))];
+        let mut refs = vec![(format::REF_STORE_FEATURES, features.to_json())];
         if !self.has_repo_id {
             refs.push((
                 REF_REPO_ID,
@@ -585,6 +615,7 @@ impl Ingest {
         let placed = self.log.append_frames(&frames, false)?;
         self.log
             .append_marker(start, placed.iter().map(|(_, h)| h))?;
+        self.features = Some(features);
         Ok(true)
     }
 
@@ -668,13 +699,21 @@ impl Ingest {
     /// Checks every dropped frame's authorization against the complete log (see `batch`): a
     /// refusal is `StoreError::Dump`, and no `FORMAT` is written, so nothing opens the directory.
     /// Then makes the new log durable: one sync of the log, then of `segments/`. Then writes
-    /// `FORMAT` (this rdy's store format: `upgrade` made the log say it too) and syncs the store
-    /// directory. Writes no index.
+    /// `FORMAT`, the mirror of the features the log holds (`upgrade`'s; without `upgrade`, the
+    /// last features ref ingested, else the baseline), and syncs the store directory. Writes no
+    /// index.
     pub fn finish(mut self) -> Result<IngestReport, StoreError> {
         self.check_drops()?;
         self.log.sync()?;
         sync_dir(&self.dir.join(SEGMENTS_DIR))?;
-        format::write_format_file(&self.dir, Format::CURRENT)?;
+        let features = match self.features.take() {
+            Some(f) => f,
+            None => match &self.features_ref {
+                Some(v) => format::decode_features(v)?,
+                None => format::baseline_features(),
+            },
+        };
+        format::write_format_file(&self.dir, &features)?;
         sync_dir(&self.dir)?;
         Ok(IngestReport {
             batches: self.batches,

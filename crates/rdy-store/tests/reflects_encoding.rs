@@ -3,7 +3,7 @@
 //! pair stays readable; a native store of format 17 is refused, with the dump-and-load fix.
 use rdy_model::*;
 use rdy_store::dump::{DUMP_FORMAT, READS, frame_kinds};
-use rdy_store::format::{FORMAT_FILE, Format, STORE_FORMAT, move_with_dump, write_format_file};
+use rdy_store::format::{FORMAT_FILE, LAST_SCALAR_STORE_FORMAT};
 use rdy_store::{Store, StoreError};
 use std::collections::BTreeMap;
 
@@ -45,7 +45,7 @@ fn change(op: Op, j: Justification) -> Change {
 
 #[test]
 fn rf4_pair18_keeps_all_released_pairs() {
-    assert_eq!((DUMP_FORMAT, STORE_FORMAT), (3, 18));
+    assert_eq!((DUMP_FORMAT, LAST_SCALAR_STORE_FORMAT), (4, 18));
     assert_eq!(
         READS,
         &[
@@ -80,22 +80,18 @@ fn rf4_pair18_keeps_all_released_pairs() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s");
     Store::create(&path).unwrap().close().unwrap();
-    write_format_file(&path, Format { store_format: 17 }).unwrap();
-    assert_eq!(
-        std::fs::read_to_string(path.join(FORMAT_FILE)).unwrap(),
-        "rdy store format\nstore_format 17\n"
-    );
+    std::fs::write(
+        path.join(FORMAT_FILE),
+        "rdy store format\nstore_format 17\n",
+    )
+    .unwrap();
     match Store::open(&path) {
         Err(StoreError::Format { message, fix }) => {
+            assert_eq!(message, "store format 17 predates feature-based stores");
             assert_eq!(
-                message,
-                format!(
-                    "this store was written by a different rdy build: {} has store format 17, \
-                     and this rdy uses store format 18",
-                    path.display()
-                )
+                fix,
+                "dump with the rdy that wrote this store, then load into a directory with no store"
             );
-            assert_eq!(fix, move_with_dump("17"));
         }
         Err(e) => panic!("another error: {e:?}"),
         Ok(_) => panic!("a store of format 17 opened"),

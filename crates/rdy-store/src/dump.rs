@@ -110,6 +110,24 @@
 //! place is checked arithmetic: one past `u64::MAX` is `dump position overflows`. The chain links between files
 //! are checked by the loader of a chain.
 //!
+//! # Dump format 4
+//!
+//! Dump format 4 carries a feature store (D-WWAK7): its store is a feature manifest, not a
+//! format number. It keeps format 3's magic, container framing, `FILE`, `BATCH` and `TRAILER`
+//! layouts and every format-3 rule.
+//!
+//! - **`HEADER` payload:** format 3's, with `store_format: u32` replaced, in its place, by the
+//!   manifest: `features_len: u32` and the manifest's canonical JSON (`crate::format`, at most
+//!   65,536 bytes). The reader applies the store's compatibility rules to it: a manifest that is
+//!   not valid, or that names an unknown incompatible feature, is refused.
+//! - **Frames:** the raw frames, byte for byte, of every kind of the latest store
+//!   ([`current_frame_kinds`]). A versioned frame keeps its raw kind (`logical | 0x80`) and its
+//!   version prefix (`crate::codec`); its version must be one its kind registers.
+//! - **`DROPPED` payload (104 bytes):** `logical_kind: u8 || encoding: u16 || original_hash ||
+//!   original_len: u32 || apply_hash || has_residue: u8 || residue_hash`: format 3's proof with
+//!   the frame's encoding after its logical kind. The `BATCH` record's digests use the frame's
+//!   raw kind. Until a removed versioned record has its residue adapter, the encoding is 0.
+//!
 //! A record payload holds at most `MAX_BLOB_BYTES` (64 MiB): a longer one is refused by its
 //! length, before it is read or written. A carried removal record (kind 23) is decoded by the
 //! bounded record decoder (`crate::bounded`) when it is read or written, and refused with that
@@ -121,6 +139,8 @@
 //! abort.
 use crate::dump_chain::{self, BatchMarker, DumpChainHeader, DumpKind, chain_text, follows};
 use crate::error::StoreError;
+pub use crate::format::DumpStore;
+use crate::format::StoreFeatures;
 use crate::holder::{HOLDER_MODE, REF_STORE_MODE, StoreMode};
 use crate::kinds::{self, BatchCommit};
 use crate::redaction::StoredFrame;
@@ -151,11 +171,13 @@ pub fn on_batch_walk_record(hook: Option<RecordHook>) {
 
 /// The 8 bytes every dump starts with.
 pub const MAGIC: &[u8; 8] = b"RDYDUMP\n";
-/// The dump format this rdy writes: 3, of store format 18 (the pair (3, 18)).
-pub const DUMP_FORMAT: u32 = 3;
-/// The `(dump_format, store_format)` pairs this rdy reads. A pair, once released, never leaves
-/// this list (D-69AY3). No (1, 13) pair exists: store formats 13 to 15 travel only in dump
-/// format 2, and store formats 16 to 18 only in dump format 3.
+/// The dump format this rdy writes: 4, of a feature store.
+pub const DUMP_FORMAT: u32 = 4;
+/// The manifest grammars this rdy reads in a dump of `DUMP_FORMAT`.
+pub const READS_FEATURES: &[u32] = &[1];
+/// The released `(dump_format, store_format)` pairs of scalar stores this rdy reads. A pair, once
+/// released, never leaves this list (D-69AY3). No (1, 13) pair exists: store formats 13 to 15
+/// travel only in dump format 2, and store formats 16 to 18 only in dump format 3.
 pub const READS: &[(u32, u32)] = &[
     (1, 10),
     (1, 11),
@@ -195,8 +217,20 @@ const MARKER_LEN: usize = 4 + 8 + 4 + 32;
 pub const HEADER_FIXED: usize = 1 + 4 + 16 + 4 + 8 + MARKER_LEN + 32 + 4 + 8 + MARKER_LEN + 2;
 /// The length of a format-1 or format-2 `HEADER` payload before its `rdy` text.
 const LEGACY_HEADER_FIXED: usize = 4 + 4 + 8 + 2;
-/// The length of a `DROPPED` record's payload.
+/// The length of a `DROPPED` record's payload in dump formats 2 and 3.
 pub const DROPPED_LEN: usize = 1 + 32 + 4 + 32 + 1 + 32;
+/// The length of a `DROPPED` record's payload in dump format 4 (and in a sync batch): the
+/// encoding after the logical kind.
+pub const ENCODED_DROPPED_LEN: usize = DROPPED_LEN + 2;
+
+/// The length of a `DROPPED` record's payload in a dump of `format`.
+pub(crate) fn dropped_len(format: u32) -> usize {
+    if format >= 4 {
+        ENCODED_DROPPED_LEN
+    } else {
+        DROPPED_LEN
+    }
+}
 
 /// One store frame of a batch, as the log holds it: `Present` with its payload, or `Dropped`, a
 /// frame whose payload an applied redaction removed. `Dropped` keeps the frame's original kind,
@@ -270,6 +304,62 @@ pub(crate) fn dropped_payload(
         p[70..102].copy_from_slice(&r.0);
     }
     p
+}
+
+/// The 104 bytes of the dump-4 (and sync) `DROPPED` record of a dropped frame of raw kind
+/// `kind`: its logical kind, its encoding, then the format-3 proof. A versioned frame's encoding
+/// is kept with its residue adapter; until one exists the caller refuses it (`check_encoded`).
+pub(crate) fn encoded_dropped_payload(
+    kind: u8,
+    hash: &Hash,
+    len: u32,
+    apply: &Hash,
+    residue: Option<&Hash>,
+) -> [u8; ENCODED_DROPPED_LEN] {
+    let legacy = dropped_payload(crate::codec::logical_kind(kind), hash, len, apply, residue);
+    let mut p = [0u8; ENCODED_DROPPED_LEN];
+    p[0] = legacy[0];
+    // encoding 0: a versioned removal is refused before this is written
+    p[3..].copy_from_slice(&legacy[1..]);
+    p
+}
+
+/// The rule of a dropped frame's encoding: a versioned removal (a marked raw kind) has no
+/// residue adapter yet, so it is refused as an unknown encoding version.
+pub(crate) fn check_encoded(kind: u8) -> Result<(), Cow<'static, str>> {
+    if kind & crate::codec::VERSIONED != 0 {
+        return Err(crate::bounded::RecordError::UnknownVersion
+            .to_string()
+            .into());
+    }
+    Ok(())
+}
+
+/// Decodes the payload of a dump-4 (or sync) `DROPPED` record: exactly 104 bytes, an encoding of
+/// 0 (no versioned removal has its residue adapter yet), then the rules of [`parse_dropped`].
+pub(crate) fn parse_encoded_dropped(p: &[u8]) -> Result<Frame, Cow<'static, str>> {
+    if p.len() != ENCODED_DROPPED_LEN {
+        return Err(drop_text::WRONG_LENGTH.into());
+    }
+    let encoding = u16::from_le_bytes([p[1], p[2]]);
+    if encoding != 0 {
+        return Err(crate::bounded::RecordError::UnknownVersion
+            .to_string()
+            .into());
+    }
+    let mut legacy = [0u8; DROPPED_LEN];
+    legacy[0] = p[0];
+    legacy[1..].copy_from_slice(&p[3..]);
+    parse_dropped(&legacy)
+}
+
+/// The `DROPPED` record parser of a dump of `format`.
+pub(crate) fn parse_dropped_of(format: u32, p: &[u8]) -> Result<Frame, Cow<'static, str>> {
+    if format >= 4 {
+        parse_encoded_dropped(p)
+    } else {
+        parse_dropped(p)
+    }
 }
 
 /// A dump refusal of a dropped frame (the `what` of `StoreError::Dump`, closed).
@@ -363,12 +453,13 @@ fn batch_end(start: u64, frames: &[Frame]) -> Option<u64> {
     })
 }
 
-/// The dump's header: the store format of its frames, the source log's end, the writing rdy's
-/// version (for people only), and the chain facts of dump format 3 (None for formats 1 and 2,
-/// which have none). A writer needs them: it writes dump format 3 only.
+/// The dump's header: the store of its frames (a scalar format up to dump format 3, a feature
+/// manifest in dump format 4), the source log's end, the writing rdy's version (for people
+/// only), and the chain facts of dump formats 3 and 4 (None for formats 1 and 2, which have
+/// none). A writer needs them: it writes dump format 4 only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DumpHeader {
-    pub store_format: u32,
+    pub store: DumpStore,
     pub log_end: Location,
     pub rdy: String,
     pub chain: Option<DumpChainHeader>,
@@ -1193,6 +1284,57 @@ pub fn frame_kinds(dump_format: u32, store_format: u32) -> Option<&'static [u8]>
         .map(|(_, k)| *k)
 }
 
+/// The logical kinds of the latest store: every assigned kind but the batch marker, the kinds a
+/// dump-4 frame may have (a versioned frame's logical kind among them).
+pub fn current_frame_kinds() -> &'static [u8] {
+    frame_kinds(3, crate::format::LAST_SCALAR_STORE_FORMAT).expect("the last scalar pair")
+}
+
+/// The raw kinds a dump's batch frames may have: a released pair's exact set, or the latest
+/// store's kinds, where a marked raw kind needs a kind that registers versioned encodings.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum FrameKinds {
+    Legacy(&'static [u8]),
+    Current,
+}
+
+impl FrameKinds {
+    /// The frame kinds of a dump of `format` with header `header`; None for a pair this rdy does
+    /// not read.
+    pub(crate) fn of(format: u32, store: &DumpStore) -> Option<FrameKinds> {
+        match store {
+            DumpStore::Legacy(n) if READS.contains(&(format, *n)) => {
+                frame_kinds(format, *n).map(FrameKinds::Legacy)
+            }
+            DumpStore::Features(_) if format == DUMP_FORMAT => Some(FrameKinds::Current),
+            _ => None,
+        }
+    }
+
+    /// Whether a frame of raw kind `raw` may stand in a batch.
+    pub(crate) fn allows(self, raw: u8) -> bool {
+        match self {
+            FrameKinds::Legacy(k) => k.contains(&raw),
+            FrameKinds::Current => {
+                let kind = crate::codec::logical_kind(raw);
+                current_frame_kinds().contains(&kind)
+                    && (raw == kind || crate::codec::latest(kind) > 0)
+            }
+        }
+    }
+
+    /// The encoding rule of a present frame: in a dump of the latest store, its raw kind and
+    /// payload split (`crate::codec`). Err is the codec's refusal.
+    pub(crate) fn check_payload(self, raw: u8, payload: &[u8]) -> Result<(), String> {
+        match self {
+            FrameKinds::Legacy(_) => Ok(()),
+            FrameKinds::Current => crate::codec::split(raw, payload)
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+        }
+    }
+}
+
 /// The `BATCH` record's `kinds`: `Hash::of` over each frame's (original) `kind || hash`, in
 /// order. None when its buffer cannot be allocated.
 fn kinds_digest(frames: &[Frame]) -> Option<Hash> {
@@ -1297,11 +1439,13 @@ fn put_marker(p: &mut Vec<u8>, m: &BatchMarker) {
     p.extend_from_slice(&m.digest.0);
 }
 
-/// The format-3 header payload of `h` with its chain facts `c`.
-fn header_payload(h: &DumpHeader, c: &DumpChainHeader) -> Vec<u8> {
-    let mut p = Vec::with_capacity(HEADER_FIXED + h.rdy.len());
+/// The format-4 header payload of `h` with its chain facts `c` and manifest `features`.
+fn header_payload(h: &DumpHeader, c: &DumpChainHeader, features: &StoreFeatures) -> Vec<u8> {
+    let json = features.to_json();
+    let mut p = Vec::with_capacity(HEADER_FIXED + json.len() + h.rdy.len());
     p.push(c.kind.byte());
-    p.extend_from_slice(&h.store_format.to_le_bytes());
+    p.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    p.extend_from_slice(&json);
     p.extend_from_slice(&c.repo_id.0);
     put_location(&mut p, &c.base);
     put_marker(&mut p, &c.base_batch);
@@ -1314,14 +1458,37 @@ fn header_payload(h: &DumpHeader, c: &DumpChainHeader) -> Vec<u8> {
 }
 
 /// Parses the header payload of a dump of `format`. Err: the refusal (it does not parse, its
-/// text cannot be allocated, or a full dump's base facts are not the origin's).
-fn parse_header(format: u32, p: &[u8]) -> Result<DumpHeader, &'static str> {
+/// text cannot be allocated, its manifest is not valid, or a full dump's base facts are not the
+/// origin's).
+fn parse_header(format: u32, p: &[u8]) -> Result<DumpHeader, Cow<'static, str>> {
     let mut c = Cursor(p);
+    let mut manifest: Option<crate::format::ParseFailure> = None;
     let fields = (|| {
-        let (kind, store_format) = if format >= 3 {
-            (Some(DumpKind::of_byte(c.u8()?)?), c.u32()?)
+        let (kind, store) = if format >= 4 {
+            let kind = DumpKind::of_byte(c.u8()?)?;
+            let len = c.u32()? as usize;
+            if len > crate::format::MAX_MANIFEST_BYTES {
+                manifest = Some(crate::format::ParseFailure::Manifest(
+                    crate::format::ManifestError("manifest exceeds 65536 bytes".into()),
+                ));
+                return None;
+            }
+            let json = c.take(len)?;
+            // every allocation of the reader is fallible: the manifest's too
+            match StoreFeatures::parse_fallible(json) {
+                Ok(m) => (Some(kind), DumpStore::Features(m)),
+                Err(e) => {
+                    manifest = Some(e);
+                    return None;
+                }
+            }
+        } else if format >= 3 {
+            (
+                Some(DumpKind::of_byte(c.u8()?)?),
+                DumpStore::Legacy(c.u32()?),
+            )
         } else {
-            (None, c.u32()?)
+            (None, DumpStore::Legacy(c.u32()?))
         };
         let mut chain = match kind {
             Some(kind) => Some(DumpChainHeader {
@@ -1344,15 +1511,21 @@ fn parse_header(format: u32, p: &[u8]) -> Result<DumpHeader, &'static str> {
             return None;
         }
         let rdy = std::str::from_utf8(c.take(rdy_len)?).ok()?;
-        c.0.is_empty()
-            .then_some((store_format, log_end, rdy, chain))
+        c.0.is_empty().then_some((store, log_end, rdy, chain))
     })();
-    let (store_format, log_end, rdy, chain) = fields.ok_or(chain_text::HEADER)?;
+    match manifest {
+        Some(crate::format::ParseFailure::Manifest(e)) => {
+            return Err(format!("store feature manifest is invalid: {e}").into());
+        }
+        Some(crate::format::ParseFailure::Allocation) => return Err(drop_text::ALLOCATION.into()),
+        None => {}
+    }
+    let (store, log_end, rdy, chain) = fields.ok_or(chain_text::HEADER)?;
     if chain.is_some_and(|c| c.kind == DumpKind::Full && !c.has_origin_base()) {
-        return Err(chain_text::FULL_BASE);
+        return Err(chain_text::FULL_BASE.into());
     }
     Ok(DumpHeader {
-        store_format,
+        store,
         log_end,
         rdy: try_string(rdy).ok_or(drop_text::ALLOCATION)?,
         chain,
@@ -1458,8 +1631,8 @@ pub struct DumpWriter<W: Write> {
     w: W,
     phase: Phase,
     last_path: Option<String>,
-    /// The store kinds a frame may have (`frame_kinds` of the header's pair).
-    kinds: &'static [u8],
+    /// The store kinds a frame may have.
+    kinds: FrameKinds,
     /// `kind || len || hash` of every record so far (the trailer's digest covers them).
     chain: Vec<u8>,
     totals: DumpTotals,
@@ -1468,9 +1641,10 @@ pub struct DumpWriter<W: Write> {
 impl<W: Write> DumpWriter<W> {
     /// Writes the prelude and the header, always of `DUMP_FORMAT` (there is no writer of an
     /// older format). Refuses a header with no chain facts or an `rdy` text over 256 bytes (the
-    /// header does not parse), and a header whose store format is not one this rdy reads in a
-    /// dump of `DUMP_FORMAT` (`READS`): its reader would refuse the dump. The chain facts are
-    /// the caller's: the reader checks them against the batches.
+    /// header does not parse), a header of a scalar store (no dump of `DUMP_FORMAT` holds one),
+    /// and a manifest the reader would refuse (an invalid one, or one with an unknown
+    /// incompatible feature). The chain facts are the caller's: the reader checks them against
+    /// the batches.
     pub fn new(w: W, header: &DumpHeader) -> Result<Self, StoreError> {
         let Some(chain) = header
             .chain
@@ -1479,16 +1653,14 @@ impl<W: Write> DumpWriter<W> {
         else {
             return Err(StoreError::Refused(chain_text::HEADER.into()));
         };
-        let Some(kinds) = READS
-            .contains(&(DUMP_FORMAT, header.store_format))
-            .then(|| frame_kinds(DUMP_FORMAT, header.store_format))
-            .flatten()
-        else {
-            return Err(StoreError::Refused(store_format_not_read(
-                header.store_format,
-                DUMP_FORMAT,
-            )));
+        let features = match &header.store {
+            DumpStore::Features(m) => m,
+            DumpStore::Legacy(n) => {
+                return Err(StoreError::Refused(store_format_not_read(*n, DUMP_FORMAT)));
+            }
         };
+        crate::format::check_features(features)?;
+        let kinds = FrameKinds::Current;
         let mut me = DumpWriter {
             w,
             phase: Phase::Files,
@@ -1500,7 +1672,7 @@ impl<W: Write> DumpWriter<W> {
         me.w.write_all(MAGIC)?;
         me.w.write_all(&DUMP_FORMAT.to_le_bytes())?;
         me.totals.bytes = (MAGIC.len() + 4) as u64;
-        me.record(rec::HEADER, &header_payload(header, chain))?;
+        me.record(rec::HEADER, &header_payload(header, chain, features))?;
         Ok(me)
     }
 
@@ -1549,7 +1721,7 @@ impl<W: Write> DumpWriter<W> {
         }
         let mut dropped = false;
         for f in &b.frames {
-            if !self.kinds.contains(&f.kind()) {
+            if !self.kinds.allows(f.kind()) {
                 return Err(StoreError::Refused(cannot_stand(f.kind())));
             }
             match f {
@@ -1567,6 +1739,9 @@ impl<W: Write> DumpWriter<W> {
                         ));
                     }
                     check_carried(*kind, payload).map_err(StoreError::Refused)?;
+                    self.kinds
+                        .check_payload(*kind, payload)
+                        .map_err(StoreError::Refused)?;
                 }
                 Frame::Dropped {
                     kind, residue, len, ..
@@ -1574,6 +1749,7 @@ impl<W: Write> DumpWriter<W> {
                     if !drops_allowed(DUMP_FORMAT) {
                         return Err(StoreError::Refused(drop_text::NOT_ALLOWED.into()));
                     }
+                    check_encoded(*kind).map_err(|what| StoreError::Refused(what.into()))?;
                     check_dropped(*kind, residue.as_ref(), *len)
                         .map_err(|what| StoreError::Refused(what.into()))?;
                     dropped = true;
@@ -1621,7 +1797,7 @@ impl<W: Write> DumpWriter<W> {
                     apply,
                     residue,
                 } => {
-                    let p = dropped_payload(*kind, hash, *len, apply, residue.as_ref());
+                    let p = encoded_dropped_payload(*kind, hash, *len, apply, residue.as_ref());
                     self.record(rec::DROPPED, &p)?;
                 }
             }
@@ -1685,8 +1861,8 @@ pub struct DumpReader<R: Read> {
     /// The error that ended the read, if one did.
     failed: Option<StoreError>,
     last_path: Option<String>,
-    /// The store kinds a frame may have (`frame_kinds` of the dump's pair).
-    kinds: &'static [u8],
+    /// The store kinds a frame may have.
+    kinds: FrameKinds,
     /// `kind || len || hash` of every record read so far, the trailer's excepted.
     chain: Vec<u8>,
     totals: DumpTotals,
@@ -1811,7 +1987,7 @@ pub(crate) fn read_prelude(r: &mut impl Read) -> Result<u32, StoreError> {
     let mut format = [0u8; 4];
     read_exact_at(r, &mut format, MAGIC.len() as u64)?;
     let format = u32::from_le_bytes(format);
-    if !READS.iter().any(|(d, _)| *d == format) {
+    if format != DUMP_FORMAT && !READS.iter().any(|(d, _)| *d == format) {
         return Err(damaged(MAGIC.len() as u64, dump_format_not_read(format)));
     }
     Ok(format)
@@ -1838,18 +2014,19 @@ pub(crate) fn header_of(
     format: u32,
     at: u64,
     p: &[u8],
-) -> Result<(DumpHeader, &'static [u8]), StoreError> {
+) -> Result<(DumpHeader, FrameKinds), StoreError> {
     let header = parse_header(format, p).map_err(|what| damaged(at, what))?;
-    let Some(kinds) = READS
-        .contains(&(format, header.store_format))
-        .then(|| frame_kinds(format, header.store_format))
-        .flatten()
-    else {
-        return Err(damaged(
-            at,
-            store_format_not_read(header.store_format, format),
-        ));
+    let Some(kinds) = FrameKinds::of(format, &header.store) else {
+        let n = match &header.store {
+            DumpStore::Legacy(n) => *n,
+            DumpStore::Features(_) => 0,
+        };
+        return Err(damaged(at, store_format_not_read(n, format)));
     };
+    // the store's compatibility rules: an unknown incompatible feature refuses the dump
+    if let DumpStore::Features(m) = &header.store {
+        crate::format::check_features(m)?;
+    }
     Ok((header, kinds))
 }
 
@@ -1869,7 +2046,9 @@ pub fn read_envelope<R: Read + Seek>(
     if head[4] != rec::HEADER {
         return Err(damaged(at, cannot_stand(head[4])));
     }
-    let fixed = if format >= 3 {
+    let fixed = if format >= 4 {
+        HEADER_FIXED + crate::format::MAX_MANIFEST_BYTES
+    } else if format >= 3 {
         HEADER_FIXED
     } else {
         LEGACY_HEADER_FIXED
@@ -1955,7 +2134,7 @@ pub(crate) fn read_head(
         if !drops_allowed(format) {
             return Err(damaged(at, drop_text::NOT_ALLOWED));
         }
-        if len != DROPPED_LEN as u64 {
+        if len != dropped_len(format) as u64 {
             return Err(damaged(at, drop_text::WRONG_LENGTH));
         }
     }
@@ -2111,7 +2290,7 @@ impl<R: Read> DumpReader<R> {
             phase: ReadPhase::Files,
             failed: None,
             last_path: None,
-            kinds: &[],
+            kinds: FrameKinds::Legacy(&[]),
             chain: Vec::new(),
             totals: DumpTotals::default(),
             format: 0,
@@ -2238,7 +2417,7 @@ impl<R: Read> DumpReader<R> {
             self.link(&f)?;
             let frame = if f.kind == rec::DROPPED {
                 dropped = true;
-                parse_dropped(&f.payload).map_err(|what| damaged(f.at, what))?
+                parse_dropped_of(self.format, &f.payload).map_err(|what| damaged(f.at, what))?
             } else {
                 Frame::Present {
                     kind: f.kind,
@@ -2246,11 +2425,14 @@ impl<R: Read> DumpReader<R> {
                     payload: f.payload,
                 }
             };
-            if !self.kinds.contains(&frame.kind()) {
+            if !self.kinds.allows(frame.kind()) {
                 return Err(damaged(f.at, cannot_stand(frame.kind())));
             }
             if let Some(payload) = frame.present_payload() {
                 check_carried(frame.kind(), payload).map_err(|what| damaged(f.at, what))?;
+                self.kinds
+                    .check_payload(frame.kind(), payload)
+                    .map_err(|what| damaged(f.at, what))?;
             }
             frames
                 .try_reserve(1)

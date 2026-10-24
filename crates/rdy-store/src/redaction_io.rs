@@ -39,7 +39,7 @@ use crate::redaction::{
     residual_versions, residue_matches, targets_agree,
 };
 use crate::segment::{self, HEADER, Hole, Holes, Location, header_at};
-use crate::store::{decode, encode};
+use crate::store::encode;
 use rdy_model::redaction::{
     MAX_RECORD_BYTES, Redaction, RedactionApply, RedactionResidue, ResidualOp, record_buffer,
 };
@@ -257,6 +257,8 @@ impl Authorization {
         hash: Hash,
         loc: Location,
     ) -> Result<Vec<IndexEntry>, StoreError> {
+        // the logical kind, by the kind rule alone: the hole's bytes are not read
+        let kind = crate::codec::logical_kind(kind);
         let mut out = vec![IndexEntry::Object { kind, hash, loc }];
         if kind == kinds::CHANGE {
             let residue = self
@@ -626,7 +628,8 @@ pub(crate) fn apply_record(payload: &[u8]) -> Option<RedactionApply> {
     if payload.len() > MAX_RECORD_BYTES {
         return None;
     }
-    let record = decode::<RedactionApply>(payload).ok()?;
+    let record =
+        crate::codec::decode_record::<RedactionApply>(kinds::REDACTION_APPLY, payload).ok()?;
     (encode(&record) == payload).then_some(record)
 }
 
@@ -910,7 +913,11 @@ fn request_of(
     let Some(payload) = access.record(*loc, kinds::REDACTION, &record.request)? else {
         return Ok(None);
     };
-    Ok(decode::<Redaction>(&payload).ok().map(|r| (*loc, r)))
+    Ok(
+        crate::codec::decode_record::<Redaction>(kinds::REDACTION, &payload)
+            .ok()
+            .map(|r| (*loc, r)),
+    )
 }
 
 /// The holes `applies` would authorize, by their requests' spans alone, unchecked: what the scan
@@ -1046,7 +1053,8 @@ impl Validator {
             .iter()
             .find(|(_, h)| *h == record.landing)
             .ok_or_else(at)?;
-        let landing: LandingRecord = decode(
+        let landing: LandingRecord = crate::codec::decode_record(
+            kinds::LANDING,
             &access
                 .record(*lloc, kinds::LANDING, &record.landing)?
                 .ok_or_else(at)?,
@@ -1096,7 +1104,8 @@ impl Validator {
                                 .get(&r)
                                 .filter(|l| **l < a.loc)
                                 .ok_or_else(bad)?;
-                            let res: RedactionResidue = decode(
+                            let res: RedactionResidue = crate::codec::decode_record(
+                                kinds::REDACTION_RESIDUE,
                                 &access
                                     .record(*rloc, kinds::REDACTION_RESIDUE, &r)?
                                     .ok_or_else(bad)?,
@@ -1367,11 +1376,11 @@ fn check_log(
         if auth.erasable(&f.loc) {
             at_frame.insert(f.loc);
         }
-        if f.kind == kinds::BLOB_MANIFEST
+        if crate::codec::logical_kind(f.kind) == kinds::BLOB_MANIFEST
             && blobs.contains(&f.hash)
             && !chunks_of.contains_key(&f.hash)
             && let Some(p) = f.intact()?
-            && let Ok(m) = decode::<BlobManifest>(&p)
+            && let Ok(m) = crate::codec::decode_record::<BlobManifest>(f.kind, &p)
         {
             chunks_of.insert(f.hash, m.chunks);
         }
@@ -1466,7 +1475,7 @@ fn check_log(
                         if !residue_matches(f.kind, &p, r) {
                             return Err(StoreError::corrupt_at(f.loc));
                         }
-                        decode::<Block>(&p)
+                        crate::codec::decode_record::<Block>(f.kind, &p)
                             .map_err(|_| StoreError::corrupt_at(f.loc))?
                             .id
                     }
@@ -1479,7 +1488,7 @@ fn check_log(
                             // an intact copy of selected content that no span lists
                             return Err(StoreError::corrupt_at(f.loc));
                         }
-                        match decode::<Block>(&p) {
+                        match crate::codec::decode_record::<Block>(f.kind, &p) {
                             Ok(b) => b.id,
                             Err(_) => return Ok(()),
                         }
@@ -1526,7 +1535,7 @@ fn check_log(
                         }
                     }
                 } else if let Some(p) = f.intact()?
-                    && let Ok(c) = decode::<Change>(&p)
+                    && let Ok(c) = crate::codec::decode_record::<Change>(f.kind, &p)
                     && c.ops.iter().any(|op| match op {
                         Op::Create { block } | Op::Update { block, .. } => {
                             selected_versions.contains(&block.version_hash())

@@ -4,6 +4,7 @@ mod canon;
 mod change;
 mod coord;
 pub mod decision;
+pub mod encoding;
 pub mod engine_fields;
 pub mod entity;
 mod hash;

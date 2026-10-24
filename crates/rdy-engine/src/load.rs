@@ -14,9 +14,10 @@
 //! 3. Create the project directory and its `.rdy` if missing, then `.rdy/store.loading`.
 //! 4. Ingest every batch at its source place; the trailer must verify. The batches must end
 //!    where the header says the source log ends, and there must be at least one (every store
-//!    holds its format batch from its first open). When the dump's store format is older than
-//!    this rdy's, append one batch that sets `meta/store_format` to this rdy's (FW-UP1, in its
-//!    smallest form). Then check each dropped frame's authorization against the whole log (dump
+//!    holds its format batch from its first open). When the dump is of a scalar store format,
+//!    append one batch that sets `meta/store_features` to the baseline features (FW-UP1, in its
+//!    smallest form); a dump of a feature store keeps its manifest and gets no batch. Then
+//!    check each dropped frame's authorization against the whole log (dump
 //!    format 2, `rdy_store::ingest`): a refusal is damage at the end of the stream, where the
 //!    check runs. Then write the store's `FORMAT`.
 //!    The first batch also sets the store's mode. A holder (D-BPYN8) holds no project file: a
@@ -135,7 +136,8 @@ fn place_fault(step: PlaceFault) -> std::io::Result<()> {
 pub struct LoadSummary {
     pub project: String,
     pub dump_format: u32,
-    pub store_format: u32,
+    /// The dump's store: `{"legacy": <n>}` or `{"features": {...}}`.
+    pub store_format: rdy_store::format::DumpStore,
     pub batches: u64,
     pub frames: u64,
     pub files_written: Vec<String>,
@@ -303,7 +305,7 @@ pub(crate) fn load_opened<R: Read>(
             &mut reader,
             first,
             header.log_end,
-            header.store_format,
+            &header.store,
             &mut made,
         )?;
         // the ingest validated the mode: a holder carries no project file (D-BPYN8)
@@ -314,7 +316,7 @@ pub(crate) fn load_opened<R: Read>(
         Ok(LoadSummary {
             project: project.display().to_string(),
             dump_format,
-            store_format: header.store_format,
+            store_format: header.store.clone(),
             batches,
             frames,
             files_written: placed.written,
@@ -561,9 +563,8 @@ fn holds_store(dir: &Path) -> bool {
 
 /// Steps 3 and 4: creates the project and its `.rdy` if missing, then streams every batch into
 /// `.rdy/store.loading` and verifies the trailer. The batches must end at `log_end`, the end of
-/// the source log that the header names, and there must be at least one. Then a dump of a store
-/// format older than this rdy's (`store_format`) gets its one upgrade batch, and the store gets
-/// its `FORMAT`. Returns the dump's batches and frames written, and whether the first batch set
+/// the source log that the header names, and there must be at least one. Then a dump of a scalar
+/// store format (`store`) gets its one upgrade batch, and the store gets its `FORMAT`. Returns the dump's batches and frames written, and whether the first batch set
 /// the holder mode (the ingest has refused any other mode value).
 fn ingest<R: Read>(
     file: &Path,
@@ -571,7 +572,7 @@ fn ingest<R: Read>(
     reader: &mut DumpReader<R>,
     first: Option<(u64, DumpBatch)>,
     log_end: Location,
-    store_format: u32,
+    store: &rdy_store::format::DumpStore,
     made: &mut Made,
 ) -> Result<(u64, u64, bool), RdyError> {
     let holder = first.as_ref().is_some_and(|(_, b)| sets_holder_mode(b));
@@ -604,9 +605,9 @@ fn ingest<R: Read>(
     if n == 0 {
         return Err(incomplete("it holds no batches".to_string()));
     }
-    // a dump of an older store format gets one logged batch that names this rdy's format
+    // a dump of a scalar store format gets one logged batch that names its features
     ingest
-        .upgrade(store_format)
+        .upgrade(store)
         .map_err(|e| target_error(&loading, e))?;
     // the dropped frames' authorizations are checked against the whole stream, at its end
     let at = reader.offset();

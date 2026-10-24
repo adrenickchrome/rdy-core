@@ -857,7 +857,8 @@ impl Store {
         let current = |id: &BlockId| canon.blocks.get(id).copied();
         let parts = self.commit_parts(view, vec![change], &current, &[], None, &by)?;
         let (cid, pos) = parts.placed[0];
-        let committed: Change = crate::store::decode(&parts.changes[pos].1)?;
+        let committed: Change =
+            crate::codec::decode_record(parts.changes[pos].0, &parts.changes[pos].1)?;
         // the view's Create op first, then the change, then its Commit op; the head ref is the
         // close's to write
         let mut ops = parts.views.into_iter();

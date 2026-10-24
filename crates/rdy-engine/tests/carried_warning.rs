@@ -281,8 +281,10 @@ fn carry(dir: &Path, specs: &[Spec]) -> Vec<(Hash, RedactionCarried)> {
     }
     let only: Vec<RedactionCarried> = records.iter().map(|(_, r)| r.clone()).collect();
     i.append_carried(&residues, &only).unwrap();
-    i.upgrade(rdy_store::format::Format::CURRENT.store_format)
-        .unwrap();
+    i.upgrade(&rdy_store::format::DumpStore::Features(
+        rdy_store::format::baseline_features(),
+    ))
+    .unwrap();
     i.finish().unwrap();
     records
 }

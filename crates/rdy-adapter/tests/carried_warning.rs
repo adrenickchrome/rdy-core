@@ -424,8 +424,10 @@ fn carry(store: &Path, origin: &Origin, names: &[Names]) -> (Hash, RedactionCarr
     }
     i.append_carried(&residues, std::slice::from_ref(&rec))
         .unwrap();
-    i.upgrade(rdy_store::format::Format::CURRENT.store_format)
-        .unwrap();
+    i.upgrade(&rdy_store::format::DumpStore::Features(
+        rdy_store::format::baseline_features(),
+    ))
+    .unwrap();
     i.finish().unwrap();
     (carried, rec)
 }

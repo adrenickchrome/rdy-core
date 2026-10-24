@@ -9,7 +9,7 @@ use rdy_store::dump::{
     RemovalFacts, frame_kinds,
 };
 use rdy_store::dump_chain::{BatchMarker, DumpChainHeader};
-use rdy_store::format::STORE_FORMAT;
+use rdy_store::format::{DumpStore, LAST_SCALAR_STORE_FORMAT, baseline_features};
 use rdy_store::kinds::{self, batch_digest};
 use rdy_store::segment::Location;
 use rdy_store::{Store, StoreError, signature};
@@ -387,11 +387,11 @@ fn sig4_failed_write_leaves_no_subject_or_signature() {
     assert_eq!(s.signatures_of(&l).unwrap().len(), 1);
 }
 
-/// A dump of `s` whose header names `store_format`: the writer's verdict on its batches.
-fn dump_as(s: &Store, store_format: u32) -> Result<Vec<u8>, StoreError> {
+/// A dump of `s` whose header names `store`: the writer's verdict on its batches.
+fn dump_as(s: &Store, store: DumpStore) -> Result<Vec<u8>, StoreError> {
     let r = s.reader();
     let header = DumpHeader {
-        store_format,
+        store,
         log_end: s.log_end(),
         rdy: "test".into(),
         chain: Some(DumpChainHeader::full(
@@ -417,7 +417,7 @@ fn dump_as(s: &Store, store_format: u32) -> Result<Vec<u8>, StoreError> {
 
 #[test]
 fn sig4_dump_pairs_keep_their_own_kind_sets() {
-    assert_eq!((DUMP_FORMAT, STORE_FORMAT), (3, 18));
+    assert_eq!((DUMP_FORMAT, LAST_SCALAR_STORE_FORMAT), (4, 18));
     assert!(READS.contains(&(2, 14)));
     assert!(frame_kinds(2, 14).unwrap().contains(&kinds::SIGNATURE));
     for pair in [(1, 10), (1, 11), (1, 12), (2, 13)] {
@@ -438,14 +438,17 @@ fn sig4_dump_pairs_keep_their_own_kind_sets() {
     assert_eq!(frame_kinds(2, 14).unwrap(), &want[..]);
     // (3, 16) keeps the signature: the kinds of (2, 15) and 23
     assert!(frame_kinds(3, 16).unwrap().contains(&kinds::SIGNATURE));
-    // a store with a signature dumps as (3, 18) and reads back with its frame
+    // a store with a signature dumps in dump format 4 and reads back with its frame
     let (_d, _p, mut s) = store();
     let t = s.put_tag(&tag("v1.0.0", Hash([3; 32]))).unwrap();
     let g = sig(t, "rdy-tag-v1", b"tag", &[1]);
     let id = s.put_signature(&g).unwrap();
-    let bytes = dump_as(&s, STORE_FORMAT).unwrap();
+    let bytes = dump_as(&s, DumpStore::Features(baseline_features())).unwrap();
     let (mut r, format, h) = DumpReader::open(&bytes[..]).unwrap();
-    assert_eq!((format, h.store_format), (3, 18));
+    assert_eq!(
+        (format, h.store),
+        (4, DumpStore::Features(baseline_features()))
+    );
     let mut found = false;
     while let Some(item) = r.next().unwrap() {
         if let DumpItem::Batch(b) = item {
@@ -459,8 +462,8 @@ fn sig4_dump_pairs_keep_their_own_kind_sets() {
     // no writer of the (2, 13) set exists any more: its header is refused before a byte is
     // written, and the reader's (2, 13) set above still refuses kind 11
     refused(
-        dump_as(&s, 13),
-        "store format 13 in a dump of format 3 is not one this rdy reads",
+        dump_as(&s, DumpStore::Legacy(13)),
+        "store format 13 in a dump of format 4 is not one this rdy reads",
     );
     // a hand-made batch with kind 11 under an old header is refused by the writer too
     let payload = signature::frames(std::slice::from_ref(&g))
@@ -481,18 +484,18 @@ fn sig4_dump_pairs_keep_their_own_kind_sets() {
         frames: vec![frame],
     };
     let old = DumpHeader {
-        store_format: 13,
+        store: DumpStore::Legacy(13),
         log_end: s.log_end(),
         rdy: "test".into(),
         chain: Some(DumpChainHeader::full(RepoId([1; 16]), BatchMarker::of(&b))),
     };
     refused(
         DumpWriter::new(Vec::new(), &old).map(|_| ()),
-        "store format 13 in a dump of format 3 is not one this rdy reads",
+        "store format 13 in a dump of format 4 is not one this rdy reads",
     );
-    // the current writer takes the same batch: (3, 16) assigns kind 11
+    // the current writer takes the same batch: the latest store assigns kind 11
     let current = DumpHeader {
-        store_format: STORE_FORMAT,
+        store: DumpStore::Features(baseline_features()),
         ..old
     };
     DumpWriter::new(Vec::new(), &current)

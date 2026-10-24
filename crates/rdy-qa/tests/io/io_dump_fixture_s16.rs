@@ -35,7 +35,9 @@ use rdy_model::redaction::RedactionCarried;
 use rdy_qa::chain_fixture::{self, V16_KINDS};
 use rdy_qa::every_kind;
 use rdy_store::dump::{DUMP_FORMAT, DumpItem, DumpReader, read_envelope};
-use rdy_store::format::{REF_STORE_FORMAT, STORE_FORMAT, encode_u32};
+use rdy_store::format::{
+    DumpStore, LAST_SCALAR_STORE_FORMAT, REF_STORE_FEATURES, baseline_features,
+};
 use rdy_store::holder::{ANSWER_TAG_OBJECT_REF, REF_STORE_MODE};
 use rdy_store::kinds;
 use rdy_store::redaction::StoredFrame;
@@ -209,7 +211,7 @@ fn file_facts(name: &str, p: &Path) -> Value {
     json!({
         "name": name,
         "dump_format": format,
-        "store_format": header.store_format,
+        "store_format": legacy(&header.store),
         "rdy": header.rdy,
         "log_end": loc(header.log_end),
         "chain": header.chain,
@@ -381,7 +383,7 @@ fn store_facts(r: &Rdy, upto: Location) -> Value {
 fn summary_facts(s: &LoadSummary) -> Value {
     json!({
         "dump_format": s.dump_format,
-        "store_format": s.store_format,
+        "store_format": legacy(&s.store_format),
         "batches": s.batches,
         "frames": s.frames,
         "files_written": s.files_written,
@@ -527,7 +529,7 @@ fn hc9_write_format_three_fixtures_once() {
         );
     }
     assert_eq!(
-        (DUMP_FORMAT, STORE_FORMAT),
+        (DUMP_FORMAT, LAST_SCALAR_STORE_FORMAT),
         (3, 16),
         "the v3-s16 fixtures hold dump format 3 and store format 16"
     );
@@ -664,7 +666,7 @@ fn holds(project: &Path, needle: &[u8]) -> bool {
 /// this rdy's store format, and with the frames of `upgrade` upgrade batch data frames counted.
 fn as_read_now(want: &Value, upgrade: u64) -> Value {
     let mut want = want.clone();
-    want["facts"]["refs"][REF_STORE_FORMAT] = json!(hex(&encode_u32(STORE_FORMAT)));
+    want["facts"]["refs"][REF_STORE_FEATURES] = json!(hex(&baseline_features().to_json()));
     if upgrade > 0 {
         let n = &mut want["facts"]["objects"][kinds::REF_UPDATE.to_string()];
         *n = json!(n.as_u64().unwrap() + upgrade);
@@ -1143,15 +1145,9 @@ fn hc9_stopped_fixtures_redump_reload_and_reindex() {
 /// later one. When this rdy writes a later store format than 16, its load appended that batch
 /// already, and nothing is appended.
 fn as_a_later_rdy(dir: &Path, holder: bool) -> u32 {
-    if STORE_FORMAT != 16 {
-        return 16;
-    }
-    let mut r = open(dir, holder);
-    r.store_mut()
-        .set_refs_unchecked_for_tests(vec![(REF_STORE_FORMAT.into(), encode_u32(STORE_FORMAT))])
-        .unwrap();
-    r.close().unwrap();
-    15
+    // this rdy writes feature stores: its load appended that batch already
+    let _ = (dir, holder);
+    16
 }
 
 #[test]
@@ -1606,4 +1602,12 @@ fn hc9_invariants_accept_a_carried_removal_whose_request_is_not_held() {
     }
     rdy_qa::invariants::check_all(&r).unwrap_or_else(|v| panic!("{v:#?}"));
     r.close().unwrap();
+}
+
+/// The scalar store format of a released dump's header.
+fn legacy(s: &DumpStore) -> u32 {
+    match s {
+        DumpStore::Legacy(n) => *n,
+        DumpStore::Features(_) => panic!("a released pair holds a scalar store"),
+    }
 }

@@ -120,15 +120,15 @@ impl Records for Plain<'_> {
 }
 
 /// The record `key`, decoded within its bounds; None when the source does not hold it present.
-pub(crate) fn typed<T: serde::de::DeserializeOwned>(
+pub(crate) fn typed<T: serde::de::DeserializeOwned + 'static>(
     source: &mut dyn ObjectSource,
     key: ObjectKey,
 ) -> Result<Option<T>, StreamError> {
-    match source.record(key)? {
-        Some(StreamRecord::Present { payload, .. }) => bounded::decode(&payload)
+    match source.record(key)?.as_ref().and_then(StreamRecord::typed) {
+        Some(r) => r
             .map(Some)
             .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(key))),
-        _ => Ok(None),
+        None => Ok(None),
     }
 }
 
@@ -427,7 +427,12 @@ impl crate::plan::PlanLookup for ContextLookup<'_> {
         let key = ObjectKey { kind, hash: *h };
         let record = self.keep(self.rec.borrow_mut().object_source().record(key))?;
         match record {
-            Some(StreamRecord::Present { payload, .. }) => Ok(payload),
+            // its body, as the plan lookups read it (`crate::codec`)
+            Some(r @ StreamRecord::Present { .. }) => r
+                .body()
+                .expect("a present record")
+                .map(<[u8]>::to_vec)
+                .map_err(|e| StoreError::Decode(e.to_string())),
             // a removed record reads as removed, as fsck reads it: by the apply that removed it
             Some(StreamRecord::Dropped { apply, .. }) => {
                 Err(StoreError::Redacted { request: apply })
@@ -701,11 +706,11 @@ pub(crate) fn approved_block_versions(
 /// whose payload embeds one of the approved block versions `versions` (a Create or Update that
 /// writes it). Such a change needs its own approval (`TakeError::UncoveredChange`). A payload
 /// that does not decode as a change embeds nothing.
-pub(crate) fn embeds_approved(key: &ObjectKey, payload: &[u8], versions: &HashSet<Hash>) -> bool {
-    key.kind == kinds::CHANGE
+pub(crate) fn embeds_approved(r: &StreamRecord, versions: &HashSet<Hash>) -> bool {
+    r.key().kind == kinds::CHANGE
         && !versions.is_empty()
-        && crate::store::decode::<rdy_model::Change>(payload)
-            .is_ok_and(|c| crate::redaction_import::embeds(&c, versions))
+        && r.typed::<rdy_model::Change>()
+            .is_some_and(|c| c.is_ok_and(|c| crate::redaction_import::embeds(&c, versions)))
 }
 
 /// The take's step 7 over the incoming records with nothing held: the first key of `input_keys`
@@ -726,8 +731,8 @@ pub(crate) fn uncovered_change(
         .collect();
     keys.sort_unstable();
     for key in keys {
-        if let Some(StreamRecord::Present { payload, .. }) = rec.object_source().record(*key)?
-            && embeds_approved(key, &payload, &versions)
+        if let Some(r @ StreamRecord::Present { .. }) = rec.object_source().record(*key)?
+            && embeds_approved(&r, &versions)
         {
             return Ok(Some(key.hash));
         }
@@ -758,13 +763,8 @@ fn complete(
         return Err(StreamError::bad_record(0, 0, Reason::NoBatchFiles));
     };
     for h in &headers[1..] {
-        if (h.repo_id, h.purpose, h.tag, h.store_format)
-            != (
-                header.repo_id,
-                header.purpose,
-                header.tag,
-                header.store_format,
-            )
+        if (h.repo_id, h.purpose, h.tag, &h.features)
+            != (header.repo_id, header.purpose, header.tag, &header.features)
         {
             return Err(StreamError::bad_record(
                 0,
@@ -880,7 +880,12 @@ pub fn check_complete(
 /// or a dropped record's descriptor.
 #[derive(Clone, Copy, Debug)]
 enum Place {
-    Present { record: u64, offset: u64, len: u32 },
+    Present {
+        record: u64,
+        offset: u64,
+        len: u32,
+        encoding: u16,
+    },
     Dropped(Drop),
 }
 
@@ -902,6 +907,7 @@ impl<R: Read + Seek> Indexed<R> {
         if let Some((apply, t)) = self.masked.get(&key) {
             return Ok(Some(StreamRecord::Dropped {
                 key,
+                encoding: 0,
                 original_len: t.len,
                 apply: *apply,
                 residue: t.residue,
@@ -911,6 +917,7 @@ impl<R: Read + Seek> Indexed<R> {
             None => Ok(None),
             Some(Place::Dropped(d)) => Ok(Some(StreamRecord::Dropped {
                 key,
+                encoding: 0,
                 original_len: d.original_len,
                 apply: d.apply,
                 residue: d.residue,
@@ -919,9 +926,14 @@ impl<R: Read + Seek> Indexed<R> {
                 record,
                 offset,
                 len,
+                encoding,
             }) => {
-                let payload = self.frame(key, *record, *offset, *len)?;
-                Ok(Some(StreamRecord::Present { key, payload }))
+                let payload = self.frame(key, *encoding, *record, *offset, *len)?;
+                Ok(Some(StreamRecord::Present {
+                    key,
+                    encoding: *encoding,
+                    payload,
+                }))
             }
         }
     }
@@ -930,6 +942,7 @@ impl<R: Read + Seek> Indexed<R> {
     fn frame(
         &self,
         key: ObjectKey,
+        encoding: u16,
         record: u64,
         offset: u64,
         len: u32,
@@ -953,7 +966,10 @@ impl<R: Read + Seek> Indexed<R> {
         let mut head = [0u8; HEADER as usize];
         input.read_exact(&mut head).map_err(read)?;
         let got = u32::from_le_bytes(head[0..4].try_into().expect("4 bytes"));
-        if got != len || head[4] != key.kind || head[5..37] != key.hash.0 {
+        if got != len
+            || head[4] != crate::codec::raw_kind(key.kind, encoding)
+            || head[5..37] != key.hash.0
+        {
             return Err(changed());
         }
         let mut payload = Vec::new();
@@ -1034,10 +1050,13 @@ impl<R: Read + Seek> CheckedStream<R> {
             |_| Ok::<(), StreamError>(()),
             |n, offset, r| {
                 let place = match r {
-                    StreamRecord::Present { payload, .. } => Place::Present {
+                    StreamRecord::Present {
+                        payload, encoding, ..
+                    } => Place::Present {
                         record: n,
                         offset,
                         len: payload.len() as u32,
+                        encoding: *encoding,
                     },
                     StreamRecord::Dropped {
                         original_len,
@@ -1174,7 +1193,9 @@ impl<R: Read + Seek> CheckedStream<R> {
             hash: version,
         };
         match self.read(key)? {
-            Some(StreamRecord::Present { payload, .. }) => bounded::decode(&payload)
+            Some(r @ StreamRecord::Present { .. }) => r
+                .typed()
+                .expect("a present record")
                 .map(Some)
                 .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(key))),
             Some(StreamRecord::Dropped {
@@ -1208,15 +1229,15 @@ impl<R: Read + Seek> CheckedStream<R> {
 
     /// The present record `key`, decoded within its bounds; None when the stream does not hold
     /// it present.
-    pub fn typed<T: serde::de::DeserializeOwned>(
+    pub fn typed<T: serde::de::DeserializeOwned + 'static>(
         &self,
         key: ObjectKey,
     ) -> Result<Option<T>, StreamError> {
-        match self.read(key)? {
-            Some(StreamRecord::Present { payload, .. }) => bounded::decode(&payload)
+        match self.read(key)?.as_ref().and_then(StreamRecord::typed) {
+            Some(r) => r
                 .map(Some)
                 .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(key))),
-            _ => Ok(None),
+            None => Ok(None),
         }
     }
 }

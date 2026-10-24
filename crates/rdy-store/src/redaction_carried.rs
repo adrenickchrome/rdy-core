@@ -40,7 +40,7 @@ use crate::redaction::{
 };
 use crate::redaction_io::{Authorization, Collected, FrameLog, SpanAuth, out_of_memory};
 use crate::segment::{HEADER, Hole, Holes, Location};
-use crate::store::{StoreReader, decode};
+use crate::store::StoreReader;
 use rdy_model::redaction::{
     CarriedSpan, FramePlace, MAX_RECORD_BYTES, RedactionCarried, RedactionResidue,
 };
@@ -518,7 +518,11 @@ fn check_span(
                     let payload = log
                         .record(*rloc, kinds::REDACTION_RESIDUE, &h)?
                         .ok_or_else(bad)?;
-                    decode::<RedactionResidue>(&payload).map_err(|_| bad())?
+                    crate::codec::decode_record::<RedactionResidue>(
+                        kinds::REDACTION_RESIDUE,
+                        &payload,
+                    )
+                    .map_err(|_| bad())?
                 }
             };
             if !residue_names(&res, s.kind, &s.hash) {

@@ -391,8 +391,11 @@ fn hc7_whole_chain_preserves_the_source_log() {
     let files = vec![f0.clone(), i1.clone(), i2.clone()];
     let s = chain_load(&files, &to, None);
     assert_eq!(segs(&to), segs(&root), "the source log, byte for byte");
-    assert_eq!(s.dump_format, 3);
-    assert_eq!(s.store_format, rdy_store::format::STORE_FORMAT);
+    assert_eq!(s.dump_format, 4);
+    assert_eq!(
+        s.store_format,
+        rdy_store::format::DumpStore::Features(rdy_store::format::baseline_features())
+    );
     let source = batches(&root, ORIGIN, None);
     assert_eq!(s.batches, source.len() as u64);
     assert_eq!(
@@ -1384,8 +1387,8 @@ fn open_any(dir: &Path) -> Rdy {
 #[test]
 fn hc7_stop_before_a_migration_upgrade_keeps_the_prefix_format() {
     // a released store moved by this rdy holds an upgrade batch at the end of its source log;
-    // its format-3 dump can still stop at any batch before that upgrade: the stopped prefix
-    // holds the old store format, so the load appends its own upgrade batch last, and keeps
+    // its dump can still stop at any batch before that upgrade: the stopped prefix holds the
+    // old store format, so the load appends its own upgrade batch last, and keeps
     // the chain's repo id when the prefix set none
     let d = tempfile::tempdir().unwrap();
     for name in ["v1-s10", "v2-s15", "v2-s15-holder"] {

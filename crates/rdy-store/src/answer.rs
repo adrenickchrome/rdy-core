@@ -318,7 +318,7 @@ impl StoreReader {
                 } => return Err(StoreError::corrupt_at(at)),
                 _ => return Ok(()),
             };
-            let a: Answer = postcard::from_bytes(payload)
+            let a: Answer = crate::codec::decode_record(kinds::ANSWER, payload)
                 .map_err(|_| StoreError::Decode(damage(&h, "it does not decode")))?;
             if let Some(rule) = invalid(&a) {
                 return Err(StoreError::Decode(damage(&h, rule)));

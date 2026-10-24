@@ -255,7 +255,7 @@ impl StoreReader {
                 _ => return Ok(()),
             };
             let damage = |what: String| bad(format!("transition record {hash}: {what}"));
-            let rec: Transitions = postcard::from_bytes(payload)
+            let rec: Transitions = crate::codec::decode_record(kinds::TRANSITION, payload)
                 .map_err(|_| damage("its value does not decode".into()))?;
             if let Some(what) = rec.invalid() {
                 return Err(damage(what));
@@ -479,7 +479,7 @@ impl StoreReader {
     /// Every ref under `prefix` names an object of `kind`, and walking `prev` from it reaches a
     /// first version (no `stable`, no `prev`) whose hash is the ref's key; every version on the way
     /// has `stable == Some(key)`. Returns (stable id, latest version) per ref, in key order.
-    fn check_chains<T: DeserializeOwned>(
+    fn check_chains<T: DeserializeOwned + 'static>(
         &self,
         kind: u8,
         prefix: &str,

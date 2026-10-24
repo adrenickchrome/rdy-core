@@ -40,15 +40,15 @@ Do not add a dependency that points the other way.
 
 - The log is the record. The index is derived from it and can always be rebuilt.
 - Run `rdy reindex` to rebuild the index.
-- Open also rebuilds an index that lost the store format ref.
+- Open also rebuilds an index that lost the store features ref.
 - Fail closed. The store refuses a write that it cannot make durable.
 - The store refuses a damaged log. It never repairs the log silently.
 - Never lose the log. No code path deletes or rewrites acknowledged log data.
 - Two paths cut the log, and both touch only unacknowledged bytes.
 - Open quarantines a torn tail. It copies the bytes aside first.
 - A failed write rolls back what it appended.
-- `STORE_FORMAT` is in `crates/rdy-store/src/format.rs`. Change it only in a plan that says so.
-- The store refuses a store in another format with `E_STORE_FORMAT`.
+- The store's features and their registry are in `crates/rdy-store/src/format.rs`. Register a feature or a new object encoding only in a plan that says so.
+- The store refuses a store it may not write with `E_STORE_FORMAT`.
 - Until rdy is published there is no migration. Fix forward.
 
 ## Inputs

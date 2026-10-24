@@ -124,7 +124,12 @@ fn upload(path: &Path, tag: Hash, out: &Path) -> Vec<File> {
     let s = Store::open(path).unwrap();
     let r = s.reader();
     let c = closure(&r, tag, &BTreeSet::new()).unwrap();
-    let header = StreamHeader::tag_history(r.repo_id().unwrap().unwrap(), tag, c.prerequisites);
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        r.repo_id().unwrap().unwrap(),
+        tag,
+        c.prerequisites,
+    );
     let mut source = StoreSource {
         reader: &r,
         end: END_OF_LOG,
@@ -450,7 +455,7 @@ fn hc1_a_holder_dump_names_its_lowest_local_span() {
     assert_eq!(tally.resolved(&r, end).unwrap(), want, "the writer's facts");
     assert_eq!(tally.facts().unwrap(), want, "the file's facts");
     let header = DumpHeader {
-        store_format: rdy_store::format::STORE_FORMAT,
+        store: rdy_store::format::DumpStore::Features(rdy_store::format::baseline_features()),
         log_end: end,
         rdy: "test".into(),
         chain: Some(DumpChainHeader::full(
@@ -663,7 +668,11 @@ fn ha11_reindex_rebuilds_logical_authorization_without_maps() {
     for (n, batch) in batches.iter().enumerate() {
         ingest.batch(n as u64 + 1, batch).unwrap();
     }
-    ingest.upgrade(rdy_store::format::STORE_FORMAT).unwrap();
+    ingest
+        .upgrade(&rdy_store::format::DumpStore::Features(
+            rdy_store::format::baseline_features(),
+        ))
+        .unwrap();
     ingest.finish().unwrap();
     let l = Store::open(&loaded).unwrap();
     assert_eq!(reads(&l).0, want.0);
@@ -986,6 +995,7 @@ fn conflicting(b: &Base, name: &str, edit: SpanEdit) -> (Vec<File>, Hash, Items)
         (
             k,
             StreamRecord::Present {
+                encoding: 0,
                 key: k,
                 payload: payload.clone(),
             },
@@ -998,6 +1008,7 @@ fn conflicting(b: &Base, name: &str, edit: SpanEdit) -> (Vec<File>, Hash, Items)
     put(
         secret,
         StreamRecord::Dropped {
+            encoding: 0,
             key: secret,
             original_len: len,
             apply: aid,
@@ -1009,7 +1020,12 @@ fn conflicting(b: &Base, name: &str, edit: SpanEdit) -> (Vec<File>, Hash, Items)
         put(k, r);
     }
     let repo = Store::open(&b.src).unwrap().repo_id().unwrap().unwrap();
-    let header = StreamHeader::tag_history(repo, tid, prerequisites.into_iter().collect());
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        repo,
+        tid,
+        prerequisites.into_iter().collect(),
+    );
     let out = b.dir.path().join(format!("{name}.rdysync"));
     write_batch(&mut source, &header, &order, File::create(&out).unwrap()).unwrap();
     (vec![File::open(&out).unwrap()], lid, records)

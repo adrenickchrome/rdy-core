@@ -1,7 +1,7 @@
 //! `rdy dump` (plan Dump and load; D-69AY3, D-D2NPN, D-FR0C4): the whole project as one
-//! stream of the current dump format, 3 (`rdy_store::dump`), a full dump: its header names the
-//! repo, the origin as its base and the marker of the last batch, and its trailer the removal
-//! facts of its applies. It holds the published log's
+//! stream of the current dump format, 4 (`rdy_store::dump`), a full dump: its header names the
+//! store's feature manifest, the repo, the origin as its base and the marker of the last batch,
+//! and its trailer the removal facts of its applies. It holds the published log's
 //! sealed batches, byte for byte, and the closed set of project files (F5): `.rdy.yaml`,
 //! `.rdyignore` and the pack files in `.rdy/packs`, never `.rdy/local.yaml`. A holder's dump
 //! (D-BPYN8) holds no project file: it reads neither `.rdy.yaml` nor `.rdy/packs`, and its
@@ -33,7 +33,7 @@ use rdy_store::dump::{
     RemovalTally, is_project_file, read_envelope,
 };
 use rdy_store::dump_chain::{BatchMarker, ChainEnd, DumpChainHeader, DumpKind};
-use rdy_store::format::STORE_FORMAT;
+use rdy_store::format::DumpStore;
 use rdy_store::fsutil::sync_dir;
 use rdy_store::holder::StoreMode;
 use rdy_store::segment::Location;
@@ -56,7 +56,8 @@ pub struct DumpSummary {
     pub out: Option<String>,
     pub dump_format: u32,
     pub kind: DumpKind,
-    pub store_format: u32,
+    /// The dump's store: `{"features": {...}}`, the store's manifest.
+    pub store_format: DumpStore,
     #[serde(serialize_with = "ids::repo")]
     pub repo_id: RepoId,
     pub base: Location,
@@ -77,7 +78,7 @@ impl DumpSummary {
     pub fn chain_end(&self) -> ChainEnd {
         ChainEnd {
             repo_id: self.repo_id,
-            store_format: self.store_format,
+            store_format: self.store_format.clone(),
             end: self.end,
             end_batch: self.end_batch,
             digest: self.digest,
@@ -202,7 +203,7 @@ pub fn chain_end_of<R: Read + Seek>(file: &Path, r: &mut R) -> Result<ChainEnd, 
     };
     Ok(ChainEnd {
         repo_id: chain.repo_id,
-        store_format: header.store_format,
+        store_format: header.store,
         end: header.log_end,
         end_batch: chain.end_batch,
         digest: trailer.digest,
@@ -256,11 +257,12 @@ impl ReadState {
                 &repo_id,
             ));
         }
-        if prev.store_format != STORE_FORMAT {
+        let store = store_of(self)?;
+        if prev.store_format != store {
             return Err(dump_error::export_store_mismatch(
                 file,
-                prev.store_format,
-                STORE_FORMAT,
+                &prev.store_format,
+                &store,
             ));
         }
         let at = prev.end;
@@ -294,7 +296,7 @@ impl ReadState {
                 out: None,
                 dump_format: DUMP_FORMAT,
                 kind: DumpKind::Increment,
-                store_format: STORE_FORMAT,
+                store_format: store,
                 repo_id,
                 base: at,
                 end: at,
@@ -354,6 +356,7 @@ impl ReadState {
     fn dump_to(&self, out: &Path, prev: Option<&ChainEnd>) -> Result<DumpSummary, RdyError> {
         self.check_dump_out(out)?;
         let files = self.dump_files()?;
+        let store = store_of(self)?;
         let (totals, chain) = place(out, DUMP_CMD, |partial, file| {
             self.write_chain(BufWriter::new(file), &files, prev)
                 .and_then(|(buf, t, chain)| {
@@ -368,7 +371,7 @@ impl ReadState {
             out: Some(out.display().to_string()),
             dump_format: DUMP_FORMAT,
             kind: chain.kind,
-            store_format: STORE_FORMAT,
+            store_format: store,
             repo_id: chain.repo_id,
             base: chain.base,
             end: self.seq(),
@@ -440,7 +443,7 @@ impl ReadState {
             Some(prev) => (DumpChainHeader::after(prev, end_batch), prev.end),
         };
         let header = DumpHeader {
-            store_format: STORE_FORMAT,
+            store: store_of(self)?,
             log_end: self.seq(),
             // the workspace version: the header names the rdy that wrote the dump (O17)
             rdy: env!("CARGO_PKG_VERSION").to_string(),
@@ -492,6 +495,11 @@ fn repo_id_of(st: &ReadState) -> Result<RepoId, RdyError> {
         .reader()
         .repo_id()?
         .ok_or_else(|| StoreError::Decode("the store has no meta/repo_id; run rdy fsck".into()))?)
+}
+
+/// The store of a dump of `st`: its feature manifest (the log's `meta/store_features`).
+fn store_of(st: &ReadState) -> Result<DumpStore, RdyError> {
+    Ok(DumpStore::Features(st.reader().store_features()?))
 }
 
 /// The command `rdy dump` names in its texts.

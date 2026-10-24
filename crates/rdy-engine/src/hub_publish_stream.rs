@@ -110,6 +110,8 @@ pub struct HistorySent {
 /// One tag's complete history, exported and checked, ready to send (see the module docs).
 pub struct PreparedHistory {
     stream: CheckedStream<File>,
+    /// The source store's features, which every batch's header names.
+    features: rdy_store::format::StoreFeatures,
     repo_id: RepoId,
     tag: Hash,
     /// HA1's records in dependency order.
@@ -263,9 +265,11 @@ impl PreparedHistory {
             );
         }
         let repo_id = facts.repo_id;
+        let features = report.header.features.clone();
         read.ensure_current_epoch()?;
         Ok(PreparedHistory {
             stream,
+            features,
             repo_id,
             tag: tag_hash,
             order,
@@ -539,8 +543,12 @@ fn write_batch(
     scratch
         .seek(SeekFrom::Start(0))
         .map_err(|_| scratch_error())?;
-    let header =
-        StreamHeader::tag_history(history.repo_id, history.tag, batch.prerequisites.clone());
+    let header = StreamHeader::tag_history(
+        history.features.clone(),
+        history.repo_id,
+        history.tag,
+        batch.prerequisites.clone(),
+    );
     let mut out = BufWriter::new(&mut *scratch);
     let mut w = StreamWriter::new(&mut out, &header).map_err(from_stream)?;
     for &p in &batch.places {

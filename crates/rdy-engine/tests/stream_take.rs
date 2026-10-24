@@ -235,7 +235,12 @@ fn split(r: &Rdy, tag: Hash, n: usize) -> Vec<Vec<u8>> {
             }
             needed.insert(root);
             needed.retain(|k| !mine.contains(k));
-            let header = StreamHeader::tag_history(repo(r), tag, needed.into_iter().collect());
+            let header = StreamHeader::tag_history(
+                rdy_store::format::baseline_features(),
+                repo(r),
+                tag,
+                needed.into_iter().collect(),
+            );
             closure::write_batch(&mut source, &header, &records, Vec::new())
                 .unwrap()
                 .0

@@ -26,7 +26,9 @@ use rdy_model::signature::Signature;
 use rdy_model::{Assurance, BlockId, Hash};
 use rdy_qa::every_kind;
 use rdy_store::dump::{DUMP_FORMAT, DumpBatch, DumpItem, DumpReader, Frame};
-use rdy_store::format::{REF_STORE_FORMAT, STORE_FORMAT, encode_u32};
+use rdy_store::format::{
+    DumpStore, LAST_SCALAR_STORE_FORMAT, REF_STORE_FEATURES, baseline_features,
+};
 use rdy_store::kinds::{self, BlobManifest, RefUpdate};
 use rdy_store::meta::{REF_ORIGIN, REF_REPO_ID};
 use rdy_store::redaction::StoredFrame;
@@ -93,7 +95,7 @@ fn dump_batches(p: &Path) -> (Vec<DumpBatch>, Location, u32, u32) {
             out.push(b);
         }
     }
-    (out, h.log_end, format, h.store_format)
+    (out, h.log_end, format, legacy(&h.store))
 }
 
 /// Each batch's start as `[segment, offset]`, in log order.
@@ -216,7 +218,7 @@ fn sig10_write_the_v2_s14_fixture() {
         "the v2-s14 fixture is written once: never rewrite it"
     );
     assert_eq!(
-        (DUMP_FORMAT, STORE_FORMAT),
+        (DUMP_FORMAT, LAST_SCALAR_STORE_FORMAT),
         (2, 14),
         "the v2-s14 fixture holds dump format 2 and store format 14"
     );
@@ -229,7 +231,10 @@ fn sig10_write_the_v2_s14_fixture() {
     let scratch = tempfile::tempdir().unwrap();
     let tmp = scratch.path().join(DUMP);
     let d = r.read().dump(&tmp).unwrap();
-    assert_eq!((d.dump_format, d.store_format), (2, 14));
+    assert_eq!(
+        (d.dump_format, d.store_format.clone()),
+        (2, DumpStore::Legacy(14))
+    );
     let mut facts = every_kind::facts(&r);
     facts["redaction"] = removal_facts(&r);
     r.close().unwrap();
@@ -258,7 +263,10 @@ fn sig10_the_v2_s14_fixture_loads_with_every_hash() {
     let to = tempfile::tempdir().unwrap();
     let dir = to.path().join("p");
     let s = load(&fixture(DUMP), &dir).unwrap();
-    assert_eq!((s.dump_format, s.store_format), (2, 14));
+    assert_eq!(
+        (s.dump_format, s.store_format.clone()),
+        (2, DumpStore::Legacy(14))
+    );
     let expect = expect();
     let (batches, log_end, format, fixture_format) = dump_batches(&fixture(DUMP));
     assert_eq!((format, fixture_format), (2, 14));
@@ -279,7 +287,7 @@ fn sig10_the_v2_s14_fixture_loads_with_every_hash() {
     // every ref holds its value, and no other ref exists; `meta/store_format` names this rdy's
     // store format. The fixture holds its repo id and its origin: a load keeps both.
     let mut want = expect["refs"].clone();
-    want[REF_STORE_FORMAT] = json!(hex(&encode_u32(STORE_FORMAT)));
+    want[REF_STORE_FEATURES] = json!(hex(&baseline_features().to_json()));
     assert!(want[REF_REPO_ID].is_string(), "the fixture holds a repo id");
     assert!(want[REF_ORIGIN].is_string(), "the fixture holds an origin");
     assert_eq!(got["refs"], want, "every ref");
@@ -375,7 +383,7 @@ fn sig10_the_v2_s14_fixture_loads_with_every_hash() {
             Ok(())
         })
         .unwrap();
-    if STORE_FORMAT == fixture_format {
+    if fixture_format > LAST_SCALAR_STORE_FORMAT {
         assert!(tail.is_empty(), "nothing past the fixture's log: {tail:?}");
     } else {
         assert_eq!(tail.len(), 2, "one ref frame and its marker: {tail:?}");
@@ -384,8 +392,8 @@ fn sig10_the_v2_s14_fixture_loads_with_every_hash() {
         assert_eq!(
             u,
             RefUpdate {
-                name: REF_STORE_FORMAT.into(),
-                value: encode_u32(STORE_FORMAT),
+                name: REF_STORE_FEATURES.into(),
+                value: baseline_features().to_json(),
                 at: log_end,
             }
         );
@@ -877,7 +885,12 @@ fn sig10_all_released_pairs_stay_readable() {
         let to = tempfile::tempdir().unwrap();
         let dir = to.path().join("p");
         let s = load(&fixture(f.dump), &dir).unwrap();
-        assert_eq!((s.dump_format, s.store_format), f.pair, "{}", f.dump);
+        assert_eq!(
+            (s.dump_format, legacy(&s.store_format)),
+            f.pair,
+            "{}",
+            f.dump
+        );
         let r = Rdy::open(&dir).unwrap();
         let mut frames = 0;
         for b in &batches {
@@ -927,5 +940,13 @@ fn sig10_all_released_pairs_stay_readable() {
         r.close().unwrap();
         rdy_qa::reindex_check::reindex_reproduces(&dir)
             .unwrap_or_else(|v| panic!("{}: {v:#?}", f.dump));
+    }
+}
+
+/// The scalar store format of a released dump's header.
+fn legacy(s: &DumpStore) -> u32 {
+    match s {
+        DumpStore::Legacy(n) => *n,
+        DumpStore::Features(_) => panic!("a released pair holds a scalar store"),
     }
 }

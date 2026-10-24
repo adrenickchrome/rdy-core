@@ -11,13 +11,13 @@ serde.workspace = true
 postcard.workspace = true
 redb.workspace = true
 thiserror.workspace = true
+serde_json.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-serde_json.workspace = true
 proptest.workspace = true
 criterion.workspace = true
 fjall = "3"

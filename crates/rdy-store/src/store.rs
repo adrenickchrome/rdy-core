@@ -1,6 +1,6 @@
 use crate::error::StoreError;
 use crate::fileid::FileId;
-use crate::format::{self, Format};
+use crate::format::{self, StoreFeatures};
 use crate::fsutil;
 use crate::holder::{Creation, FirstBatch, RefRules, RefWrite, StoreMode, Walk};
 use crate::index::{Index, IndexEntry};
@@ -162,6 +162,11 @@ pub struct Store {
     /// What the log's first sealed batch set (store format 15): the store's mode, which the ref
     /// rules of every write and replay follow, and where that batch ends.
     creation: Creation,
+    /// The features the log's latest `meta/store_features` ref holds (sealed batches only).
+    features: StoreFeatures,
+    /// The features of the open held batch, when one of its writes activated a feature: they
+    /// become `features` when the batch seals.
+    held_features: Option<StoreFeatures>,
 }
 
 /// A held batch not yet sealed: where its first data frame is, and the kind and hash of each of
@@ -358,7 +363,7 @@ impl StoreLock {
 
     /// Whether this is the lock of the store at `dir`: the held file is the file at `dir/lock`.
     /// A store directory renamed after the lock was taken keeps its lock.
-    fn guards(&self, dir: &Path) -> bool {
+    pub(crate) fn guards(&self, dir: &Path) -> bool {
         matches!(
             (FileId::of_file(&self.0.0), FileId::lstat(&dir.join("lock"))),
             (Ok(a), Ok(b)) if a == b
@@ -423,7 +428,7 @@ fn entries_for_frame(
     r: &mut Resolver<'_>,
 ) -> Result<Vec<IndexEntry>, StoreError> {
     let out = frame_entries(kind, hash, loc, payload, r)?;
-    r.note(kind, hash, loc)?;
+    r.note(crate::codec::logical_kind(kind), hash, loc)?;
     Ok(out)
 }
 
@@ -439,6 +444,10 @@ fn frame_entries(
         // a marker is neither an object nor a dedupe candidate
         return Ok(vec![]);
     }
+    // the logical kind and the body of the frame's encoding (`crate::codec`): an index, a
+    // dependency and a redaction identity know objects by their logical kind
+    let o = crate::codec::split(kind, payload).map_err(|e| StoreError::Decode(e.to_string()))?;
+    let (kind, payload) = (o.kind, o.body);
     let mut out = vec![IndexEntry::Object { kind, hash, loc }];
     match kind {
         kinds::CHANGE => {
@@ -541,8 +550,12 @@ impl Held for ReplayHeld<'_> {
             );
         }
         Ok(match self.log.read_hashed(loc) {
-            Ok((kinds::BLOCK, found, payload)) if found == *v => {
-                decode::<Block>(&payload).ok().map(|b| b.id)
+            Ok((raw, found, payload))
+                if found == *v && crate::codec::logical_kind(raw) == kinds::BLOCK =>
+            {
+                crate::codec::decode_record::<Block>(raw, &payload)
+                    .ok()
+                    .map(|b| b.id)
             }
             _ => None,
         })
@@ -776,7 +789,7 @@ fn replay_into(
             ],
             Some(payload) => entries_for_frame(v.kind, v.hash, loc, payload, &mut r)?,
             None => {
-                r.note(v.kind, v.hash, loc)?;
+                r.note(crate::codec::logical_kind(v.kind), v.hash, loc)?;
                 auth.entries_for_hole(v.kind, v.hash, loc)?
             }
         });
@@ -825,7 +838,7 @@ impl Store {
             }
             Err(e) => return Err(e.into()),
         };
-        format::write_format_file(dir, Format::CURRENT)?;
+        format::write_format_file(dir, &format::baseline_features())?;
         synced.push(dir.to_path_buf());
         Store::open_current_format(dir, synced, None, None)
     }
@@ -846,14 +859,15 @@ impl Store {
         };
         synced.push(dir.to_path_buf());
         let mut store = Store::open_current_format(dir, synced, None, Some(repo_id))?;
-        format::write_format_file(dir, Format::CURRENT)?;
+        format::write_format_file(dir, &store.features)?;
         store.synced.push(dir.to_path_buf());
         Ok(store)
     }
 
     /// Opens an existing store. Opening never creates, upgrades or claims a store (fmt3): a path
-    /// that is not a directory with a `FORMAT` file naming the current store format is refused before
-    /// anything in it is created, locked, opened or written.
+    /// that is not a directory with a `FORMAT` file whose features this rdy may write is refused
+    /// before anything in it is created, locked, opened or written. Until a read-only open
+    /// exists, a store this rdy may only read is refused with the feature's required build.
     pub fn open(dir: &Path) -> Result<Store, StoreError> {
         Store::check_existing(dir)?;
         Store::open_current_format(dir, vec![], None, None)
@@ -871,8 +885,18 @@ impl Store {
         Store::open_current_format(dir, vec![], Some(lock.clone()), None)
     }
 
+    /// The current locked open ([`Store::open_locked`]) without an upgrade policy: the upgrade
+    /// transaction's own open of the store it upgrades.
+    #[allow(dead_code)]
+    pub(crate) fn open_unupgraded_locked(
+        dir: &Path,
+        lock: &StoreLock,
+    ) -> Result<Store, StoreError> {
+        Store::open_locked(dir, lock)
+    }
+
     /// The checks [`Store::open`] makes before it creates, locks, opens or writes anything: `dir`
-    /// is a directory with a `FORMAT` file naming the current store format. Reads only.
+    /// is a directory with a `FORMAT` file whose features this rdy may write. Reads only.
     pub fn check_existing(dir: &Path) -> Result<(), StoreError> {
         match std::fs::symlink_metadata(dir) {
             Ok(m) if m.file_type().is_dir() => {}
@@ -883,7 +907,7 @@ impl Store {
             Err(e) => return Err(e.into()),
         }
         match format::read_format_file(dir)? {
-            Some(f) => format::check_format(f, dir),
+            Some(f) => format::check_writable(&f),
             None => Err(format::other_build(dir, "has no FORMAT file")),
         }
     }
@@ -1012,6 +1036,8 @@ impl Store {
             open: None,
             stale_index: false,
             creation,
+            features: format::baseline_features(),
+            held_features: None,
         };
         let (upto, end) = (store.index().indexed_upto()?, store.log.end());
         if upto > end {
@@ -1030,9 +1056,10 @@ impl Store {
                 ),
             });
         }
-        // FORMAT says 3; a log that says otherwise is refused before the index moves
-        if let Some(n) = store.format_ref()? {
-            format::check_format(Format { store_format: n }, dir)?;
+        // the log's features are the store's: one this rdy may not write, or one FORMAT does not
+        // list, is refused before the index moves
+        if let Some(f) = store.features_ref()? {
+            store.check_log_features(&f)?;
         }
         // the index's redaction rows must be the ones the log's validated records give: a
         // forged or forgotten row is rebuilt from the log, never trusted
@@ -1065,8 +1092,17 @@ impl Store {
         Ok(store)
     }
 
-    /// The log's `meta/store_format` ref, as the index holds it.
-    fn format_ref(&self) -> Result<Option<u32>, StoreError> {
+    /// The log's `meta/store_features` ref, as the index holds it; an invalid manifest is the
+    /// manifest refusal.
+    fn features_ref(&self) -> Result<Option<StoreFeatures>, StoreError> {
+        self.index()
+            .get_ref(format::REF_STORE_FEATURES)?
+            .map(|v| format::decode_features(&v))
+            .transpose()
+    }
+
+    /// The log's historical `meta/store_format` ref, as the index holds it.
+    fn scalar_ref(&self) -> Result<Option<u32>, StoreError> {
         self.index()
             .get_ref(format::REF_STORE_FORMAT)?
             .map(|v| {
@@ -1080,15 +1116,29 @@ impl Store {
             .transpose()
     }
 
-    /// Makes the log hold the store's format, which `FORMAT` (already checked) says. The log's
-    /// ref is the truth: any other number there is refused, and so is a log with frames and no
-    /// number. An index with no number over a log with frames may have lost it (an old partial
-    /// rebuild), so the index is first rebuilt from the log and asked again. A new store (an
-    /// empty log; `create` wrote `FORMAT` first) gets the ref and its repo id (`meta/repo_id`) as
-    /// one marked batch, then a checkpoint. A crash before that leaves `FORMAT` and an empty log,
-    /// which the next open finishes. (`create_holder` writes `FORMAT` only after this.)
+    /// Refuses log features `f` that this rdy may not write, and features `FORMAT` does not
+    /// list (`FORMAT` may list more: a first use whose batch did not commit). Then they are the
+    /// store's.
+    fn check_log_features(&mut self, f: &StoreFeatures) -> Result<(), StoreError> {
+        format::check_writable(f)?;
+        match format::read_format_file(&self.dir)? {
+            Some(mirror) if f.is_subset_of(&mirror) => {}
+            _ => return Err(format::unmirrored(&self.dir)),
+        }
+        self.features = f.clone();
+        Ok(())
+    }
+
+    /// Makes the log hold the store's features, which `FORMAT` (already checked) mirrors. The
+    /// log's ref is the truth. A log with frames and no features ref is refused: an index with
+    /// no ref over a log with frames may have lost it (an old partial rebuild), so the index is
+    /// first rebuilt from the log and asked again; a log that holds only a scalar store format is
+    /// refused by that number. A new store (an empty log; `create` wrote `FORMAT` first) gets the
+    /// ref and its repo id (`meta/repo_id`) as one marked batch, then a checkpoint. A crash
+    /// before that leaves `FORMAT` and an empty log, which the next open finishes.
+    /// (`create_holder` writes `FORMAT` only after this.)
     ///
-    /// With `holder`, the new store's batch is a holder's: the format, the repo id `holder`
+    /// With `holder`, the new store's batch is a holder's: the features, the repo id `holder`
     /// names and `meta/store_mode`.
     fn ensure_format(&mut self, holder: Option<RepoId>) -> Result<(), StoreError> {
         let held_frames = self.log.end()
@@ -1096,30 +1146,37 @@ impl Store {
                 segment: 0,
                 offset: 0,
             };
-        match self.format_ref()? {
-            Some(n) => format::check_format(Format { store_format: n }, &self.dir)?,
+        match self.features_ref()? {
+            Some(f) => self.check_log_features(&f)?,
             None if held_frames => {
                 // an index that lost the ref (an old partial rebuild) is rebuilt from the log;
-                // a log that really has no format ref is still refused
+                // a log that really has no features ref is still refused
                 self.reindex()?;
                 self.report.index_rebuilt = true;
-                match self.format_ref()? {
-                    Some(n) => format::check_format(Format { store_format: n }, &self.dir)?,
+                match self.features_ref()? {
+                    Some(f) => self.check_log_features(&f)?,
                     None => {
-                        return Err(format::other_build(
-                            &self.dir,
-                            "has a log with no store format",
-                        ));
+                        return Err(match self.scalar_ref()? {
+                            Some(n) => format::scalar_refusal(&self.dir, n),
+                            None => {
+                                format::other_build(&self.dir, "has a log with no store features")
+                            }
+                        });
                     }
                 }
             }
             None => {
-                // one batch of the format and the repo id (D-DAGNB): set_refs refuses meta/ refs
+                // the features FORMAT mirrors (a new store's baseline), or the baseline for a
+                // holder, whose FORMAT comes after this batch
+                let features = match holder {
+                    Some(_) => format::baseline_features(),
+                    None => format::read_format_file(&self.dir)?
+                        .unwrap_or_else(format::baseline_features),
+                };
+                // one batch of the features and the repo id (D-DAGNB): set_refs refuses meta/
+                // refs
                 let mut refs = vec![
-                    (
-                        format::REF_STORE_FORMAT.into(),
-                        format::encode_u32(Format::CURRENT.store_format),
-                    ),
+                    (format::REF_STORE_FEATURES.into(), features.to_json()),
                     (
                         crate::meta::REF_REPO_ID.into(),
                         crate::meta::encode_repo_id(&holder.unwrap_or_else(RepoId::new)),
@@ -1142,11 +1199,69 @@ impl Store {
                     },
                     end: self.log.end(),
                 };
+                self.features = features;
                 // a new store is durable from its first open
                 self.checkpoint()?;
             }
         }
         Ok(())
+    }
+
+    /// The features the log's latest `meta/store_features` ref holds.
+    pub fn features(&self) -> &StoreFeatures {
+        &self.features
+    }
+
+    /// The upgrade transaction's commit (D-WWAK7): exactly the features ref (`features`) and the
+    /// receipt ref (`receipt`, an [`format::UpgradeReceipt`]'s JSON) in one unheld batch. Refused
+    /// with a held batch open, a receipt that does not validate, a receipt whose `source_end` is
+    /// not the current sealed end, whose `from` is not the current manifest's hash, or whose `to`
+    /// is not `features`' hash. Returns the batch's `BATCH_COMMIT` hash. No public ref write
+    /// passes these checks.
+    #[allow(dead_code)]
+    pub(crate) fn commit_upgrade_refs(
+        &mut self,
+        features: &StoreFeatures,
+        receipt: &[u8],
+    ) -> Result<Hash, StoreError> {
+        if self.open.is_some() {
+            return Err(batch_open("before the upgrade batch"));
+        }
+        let r = format::UpgradeReceipt::parse(receipt).map_err(StoreError::Refused)?;
+        if r.source_end != self.log.end() {
+            return Err(StoreError::Refused(
+                "the upgrade receipt does not start at the sealed end".into(),
+            ));
+        }
+        if r.from != self.features.hash() {
+            return Err(StoreError::Refused(
+                "the upgrade receipt does not start from the store's features".into(),
+            ));
+        }
+        if r.to != features.hash() {
+            return Err(StoreError::Refused(
+                "the upgrade receipt does not end at the new features".into(),
+            ));
+        }
+        features.validate().map_err(|e| e.store_error())?;
+        let items = self.ref_items(vec![
+            (format::REF_STORE_FEATURES.into(), features.to_json()),
+            (format::REF_UPGRADE.into(), receipt.to_vec()),
+        ]);
+        let start = self.log.end();
+        let held = self.held;
+        self.held = false;
+        let wrote = self.write_refs(items, RefWrite::Unchecked);
+        self.held = held;
+        wrote?;
+        self.features = features.clone();
+        // the batch's marker, as the log wrote it over the batch's frames
+        let marker = kinds::BatchCommit {
+            start,
+            frames: self.last_batch.len() as u32,
+            digest: kinds::batch_digest(self.last_batch.iter().map(|(_, h)| h)),
+        };
+        Ok(Hash::of(&encode(&marker)))
     }
 
     /// Test hook: the directories `open` fsynced because it created something in them.
@@ -1259,8 +1374,14 @@ impl Store {
             .as_ref()
             .is_some_and(|o| o.frames.iter().any(|(k, _)| *k == kinds::REDACTION_APPLY))
         {
-            return self.seal_held_apply(last).map(|_| ());
+            let sealed = self.seal_held_apply(last).map(|_| ());
+            let held = self.held_features.take();
+            if let (Ok(()), Some(f)) = (&sealed, held) {
+                self.features = f;
+            }
+            return sealed;
         }
+        let (last, activated) = self.first_use(last)?;
         // `last` is decoded before anything is appended: a value that does not decode is
         // refused with the batch still open, and nothing poisoned
         let mut probe = Resolver::new(&NoneHeld);
@@ -1269,8 +1390,15 @@ impl Store {
         }
         let start = self.open.as_ref().map_or(self.log.end(), |o| o.start);
         match self.seal_batch(last) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                if let Some(f) = activated.or_else(|| self.held_features.take()) {
+                    self.features = f;
+                }
+                self.held_features = None;
+                Ok(())
+            }
             Err(e) => {
+                self.held_features = None;
                 self.open = None;
                 if was_open {
                     self.poison();
@@ -1623,14 +1751,26 @@ impl Store {
         }
         self.refuse_removed(&items)?;
         self.check_new_signatures(&items)?;
+        let (items, activated) = self.first_use(items)?;
         let start = self.log.end();
-        let result = if self.held {
+        let mut result = if self.held {
             self.append_held(items)
         } else {
             self.append_and_index(items)
         };
+        // the caller's hashes are its own items': the features ref a first use added is not one
+        if let (Ok(hashes), Some(_)) = (&mut result, &activated) {
+            hashes.pop();
+        }
         if result.is_ok() {
             self.writes += 1;
+            if let Some(f) = activated {
+                if self.held && self.open.is_some() {
+                    self.held_features = Some(f);
+                } else {
+                    self.features = f;
+                }
+            }
         }
         if result.is_err() {
             // nothing past `start` was acknowledged: discard it — including bytes a partial
@@ -1649,6 +1789,39 @@ impl Store {
         result
     }
 
+    /// The first use of a feature (D-WWAK7): when the new objects of `items` use features the
+    /// store's manifest (or the open held batch's) does not name, `FORMAT` is made to list the
+    /// merged manifest, then the merged manifest's `meta/store_features` ref joins `items`, so the
+    /// batch that first uses a feature activates it. A batch that fails appends neither; a
+    /// `FORMAT` that lists more than the log is the one leftover of a failed first use, and opens.
+    /// Returns the items and the merged manifest, if any.
+    fn first_use(&self, mut items: Frames) -> Result<(Frames, Option<StoreFeatures>), StoreError> {
+        let current = self.held_features.as_ref().unwrap_or(&self.features);
+        let mut needed: Vec<format::StoreFeature> = vec![];
+        for (raw, payload) in &items {
+            let kind = crate::codec::logical_kind(*raw);
+            if kind == kinds::REF_UPDATE || kind == kinds::BATCH_COMMIT {
+                continue;
+            }
+            let body = crate::codec::split(*raw, payload).map_or(&payload[..], |o| o.body);
+            for f in format::required_features(kind, body) {
+                if !current.has(&f.name) && !needed.contains(&f) {
+                    needed.push(f);
+                }
+            }
+        }
+        if needed.is_empty() {
+            return Ok((items, None));
+        }
+        let merged = current.merged(&needed);
+        let mirror = format::read_format_file(&self.dir)?;
+        if !mirror.is_some_and(|m| merged.is_subset_of(&m)) {
+            format::write_format_file(&self.dir, &merged)?;
+        }
+        items.extend(self.ref_items(vec![(format::REF_STORE_FEATURES.into(), merged.to_json())]));
+        Ok((items, Some(merged)))
+    }
+
     /// `items` with what the store already holds left out, and the hash of every item.
     fn dedupe(&self, items: Vec<(u8, Vec<u8>)>) -> Result<(Vec<Hash>, Frames), StoreError> {
         let mut hashes = Vec::with_capacity(items.len());
@@ -1660,13 +1833,15 @@ impl Store {
             // kind1: dedupe by (kind, hash); the same bytes under another kind are another
             // object. A ref update or a transition record is never deduped: two batches may log
             // the same bytes.
-            if kind != kinds::REF_UPDATE
-                && kind != kinds::TRANSITION
-                && (seen.contains(&(kind, hash)) || self.index().typed(kind, &hash)?.is_some())
+            let logical = crate::codec::logical_kind(kind);
+            if logical != kinds::REF_UPDATE
+                && logical != kinds::TRANSITION
+                && (seen.contains(&(logical, hash))
+                    || self.index().typed(logical, &hash)?.is_some())
             {
                 continue;
             }
-            seen.insert((kind, hash));
+            seen.insert((logical, hash));
             batch.push((kind, payload));
         }
         Ok((hashes, batch))
@@ -1948,7 +2123,7 @@ impl Store {
             }
             TypedRecord::Other => {}
         }
-        Ok(self.write(vec![(kind, encode(value))])?[0])
+        Ok(self.write(vec![crate::codec::item(kind, value)])?[0])
     }
 
     /// Successful `write` calls since open (atom1: a landing is one).
@@ -2062,10 +2237,14 @@ impl Store {
     /// The hash `put_blob` would return for these bytes, without storing anything.
     pub fn blob_hash(bytes: &[u8]) -> Hash {
         let chunks: Vec<Hash> = bytes.chunks(CHUNK).map(Hash::of).collect();
-        Hash::of(&encode(&BlobManifest {
-            len: bytes.len() as u64,
-            chunks,
-        }))
+        crate::codec::encode(
+            kinds::BLOB_MANIFEST,
+            &BlobManifest {
+                len: bytes.len() as u64,
+                chunks,
+            },
+        )
+        .hash()
     }
 
     pub fn put_blob(&mut self, bytes: &[u8]) -> Result<Hash, StoreError> {
@@ -2074,12 +2253,12 @@ impl Store {
             .map(|c| (kinds::BLOB_CHUNK, c.to_vec()))
             .collect();
         let chunks: Vec<Hash> = items.iter().map(|(_, c)| Hash::of(c)).collect();
-        items.push((
+        items.push(crate::codec::item(
             kinds::BLOB_MANIFEST,
-            encode(&BlobManifest {
+            &BlobManifest {
                 len: bytes.len() as u64,
                 chunks,
-            }),
+            },
         ));
         Ok(*self.write(items)?.last().expect("manifest hash"))
     }
@@ -2220,6 +2399,12 @@ impl StoreReader {
     /// The payload of the object of `kind` with hash `h` (kind1). A payload a redaction removed
     /// is `Redacted`.
     pub fn get_kind(&self, kind: u8, h: &Hash) -> Result<Vec<u8>, StoreError> {
+        self.get_kind_raw(kind, h).map(|(_, payload)| payload)
+    }
+
+    /// [`StoreReader::get_kind`] with the frame's raw kind: the stored payload of the object of
+    /// logical kind `kind` with hash `h`, as `crate::codec` splits it.
+    pub fn get_kind_raw(&self, kind: u8, h: &Hash) -> Result<(u8, Vec<u8>), StoreError> {
         self.refuse_pending()?;
         let loc = self
             .index()
@@ -2228,23 +2413,43 @@ impl StoreReader {
         if let Some(request) = self.mask_at(&loc)? {
             return Err(StoreError::Redacted { request });
         }
-        let (found_kind, payload) = self.read_object(h, loc)?;
+        let (raw, payload) = self.read_object(h, loc)?;
+        let found_kind = crate::codec::logical_kind(raw);
         if found_kind != kind {
             return Err(StoreError::Decode(format!(
                 "the index places a kind {kind} object {h} at {loc:?}, which holds kind {found_kind}; run rdy reindex"
             )));
         }
+        Ok((raw, payload))
+    }
+
+    /// The body of the object of logical kind `kind` with hash `h`: its stored payload less a
+    /// versioned record's version (`crate::codec`), for a reader that decodes it as the current
+    /// type.
+    pub fn get_body(&self, kind: u8, h: &Hash) -> Result<Vec<u8>, StoreError> {
+        let (raw, mut payload) = self.get_kind_raw(kind, h)?;
+        let at = payload.len()
+            - crate::codec::split(raw, &payload)
+                .map_err(|e| StoreError::Decode(e.to_string()))?
+                .body
+                .len();
+        payload.drain(..at);
         Ok(payload)
     }
 
-    /// The object of `kind` with hash `h`, decoded.
-    pub fn get_typed<T: DeserializeOwned>(&self, kind: u8, h: &Hash) -> Result<T, StoreError> {
-        decode(&self.get_kind(kind, h)?)
+    /// The object of `kind` with hash `h`, decoded through its encoding (`crate::codec`).
+    pub fn get_typed<T: DeserializeOwned + 'static>(
+        &self,
+        kind: u8,
+        h: &Hash,
+    ) -> Result<T, StoreError> {
+        let (raw, payload) = self.get_kind_raw(kind, h)?;
+        crate::codec::decode_record(raw, &payload)
     }
 
     /// The object of `kind` with hash `h`, decoded; an object of another kind with that hash is
     /// named as what it is (`{h} is not a {what} (object kind {k})`), never decoded as `T`.
-    pub(crate) fn get_named<T: DeserializeOwned>(
+    pub(crate) fn get_named<T: DeserializeOwned + 'static>(
         &self,
         kind: u8,
         what: &str,
@@ -2330,8 +2535,9 @@ impl StoreReader {
         self.shared.frames_read.load(Ordering::Relaxed)
     }
 
-    pub fn get<T: DeserializeOwned>(&self, h: &Hash) -> Result<T, StoreError> {
-        decode(&self.get_raw(h)?.1)
+    pub fn get<T: DeserializeOwned + 'static>(&self, h: &Hash) -> Result<T, StoreError> {
+        let (raw, payload) = self.get_raw(h)?;
+        crate::codec::decode_record(raw, &payload)
     }
 
     pub fn has(&self, h: &Hash) -> Result<bool, StoreError> {
@@ -2345,12 +2551,16 @@ impl StoreReader {
     /// the same bytes never stands in for a removed version. With no `BLOCK` frame of that hash,
     /// the first object with it is decoded, as before redaction existed.
     pub fn get_block(&self, version: &Hash) -> Result<Block, StoreError> {
-        let read = match self.get_kind(kinds::BLOCK, version) {
-            Err(StoreError::NotFound(_)) => self.get_raw(version).map(|(_, payload)| payload),
+        let read = match self.get_kind_raw(kinds::BLOCK, version) {
+            // the first object with that hash, read as a block's encoding-zero body, as before
+            // redaction existed
+            Err(StoreError::NotFound(_)) => self
+                .get_raw(version)
+                .map(|(_, payload)| (kinds::BLOCK, payload)),
             r => r,
         };
         match read {
-            Ok(payload) => decode(&payload),
+            Ok((raw, payload)) => crate::codec::decode_record(raw, &payload),
             Err(StoreError::Redacted { request }) => self.block_projection(version, request),
             Err(e) => Err(e),
         }
@@ -2451,7 +2661,7 @@ impl StoreReader {
     /// canonical encoding, with no masked manifest or chunk, and the chunk count its length
     /// gives. No chunk is read.
     fn blob_manifest(&self, h: &Hash) -> Result<BlobManifest, StoreError> {
-        let payload = match self.get_kind(kinds::BLOB_MANIFEST, h) {
+        let (raw, payload) = match self.get_kind_raw(kinds::BLOB_MANIFEST, h) {
             Ok(p) => p,
             // kind1: an object of another kind with this hash is never the blob
             Err(StoreError::NotFound(_)) if self.has(h)? => {
@@ -2462,10 +2672,12 @@ impl StoreReader {
             }
             Err(e) => return Err(e),
         };
-        let m: BlobManifest = decode(&payload)?;
+        let o =
+            crate::codec::split(raw, &payload).map_err(|e| StoreError::Decode(e.to_string()))?;
+        let m: BlobManifest = crate::codec::decode_split(&o)?;
         // postcard ignores trailing bytes; a manifest that is not its own canonical encoding
         // is not what `put_blob` wrote, and would not re-import under its own name
-        if encode(&m) != payload {
+        if encode(&m) != o.body {
             return Err(StoreError::Decode(format!(
                 "{h} is not a canonical blob manifest"
             )));
@@ -2782,10 +2994,10 @@ impl Store {
         let mut items = vec![];
         for op in &change.ops {
             if let Op::Create { block } | Op::Update { block, .. } = op {
-                items.push((kinds::BLOCK, encode(block)));
+                items.push(crate::codec::item(kinds::BLOCK, block));
             }
         }
-        items.push((kinds::CHANGE, encode(change)));
+        items.push(crate::codec::item(kinds::CHANGE, change));
         let change_pos = items.len() - 1;
         Ok((items, change_pos))
     }
@@ -2966,6 +3178,7 @@ impl Store {
         let Some(open) = self.open.take() else {
             return;
         };
+        self.held_features = None;
         self.poison();
         self.stale_index = true;
         self.roll_back(open.start);
@@ -3683,6 +3896,99 @@ fn unchecked_put(kind: u8) -> StoreError {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::format::{FeatureClass, StoreFeature, StoreFeatures, UpgradeReceipt};
+
+    /// ok1: the upgrade transaction's commit writes exactly the features and receipt refs in one
+    /// unheld batch, after the receipt's own checks, and returns that batch's marker hash.
+    #[test]
+    fn ok1_upgrade_refs_commit_in_one_checked_batch() {
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("s");
+        let mut s = Store::create(&dir).unwrap();
+        let lock = s._lock.clone();
+        assert!(
+            lock.guards(&dir),
+            "the store's own lock guards its directory"
+        );
+        let to = StoreFeatures::of(vec![StoreFeature {
+            name: "test_upgrade".into(),
+            class: FeatureClass::Compatible,
+            required_rdy: "1.0.0".into(),
+        }]);
+        let receipt = |from: Hash, to: Hash, end: Location| UpgradeReceipt {
+            from,
+            to,
+            steps: vec!["test_upgrade".into()],
+            source_end: end,
+            backup: format!(".store-upgrade-{}-{}", "a".repeat(64), "b".repeat(64)),
+        };
+        let end = s.log_end();
+        let from = s.features().hash();
+        // each check refuses before anything is appended
+        for bad in [
+            receipt(
+                from,
+                to.hash(),
+                Location {
+                    segment: 0,
+                    offset: 1,
+                },
+            ),
+            receipt(Hash([1; 32]), to.hash(), end),
+            receipt(from, Hash([2; 32]), end),
+            UpgradeReceipt {
+                backup: "backup".into(),
+                ..receipt(from, to.hash(), end)
+            },
+        ] {
+            assert!(matches!(
+                s.commit_upgrade_refs(&to, &bad.to_json()),
+                Err(StoreError::Refused(_))
+            ));
+            assert_eq!(s.log_end(), end, "nothing is appended");
+        }
+        s.set_held(true).unwrap();
+        s.put_blob(b"held").unwrap();
+        assert!(
+            s.commit_upgrade_refs(&to, b"{}").is_err(),
+            "a held batch is open"
+        );
+        s.set_held(false).unwrap();
+        let end = s.log_end();
+        let good = receipt(from, to.hash(), end);
+        let marker = s.commit_upgrade_refs(&to, &good.to_json()).unwrap();
+        let batch: Vec<u8> = s.last_batch().iter().map(|(k, _)| *k).collect();
+        assert_eq!(batch, [kinds::REF_UPDATE, kinds::REF_UPDATE]);
+        assert_eq!(
+            s.get_ref(crate::format::REF_STORE_FEATURES).unwrap(),
+            Some(to.to_json())
+        );
+        assert_eq!(
+            s.get_ref(crate::format::REF_UPGRADE).unwrap(),
+            Some(good.to_json())
+        );
+        assert_eq!(s.features(), &to);
+        let mut last = None;
+        s.log
+            .for_each_from(end, |_, kind, hash, _, _| {
+                if kind == kinds::BATCH_COMMIT {
+                    last = Some(hash);
+                }
+                Ok::<(), StoreError>(())
+            })
+            .unwrap();
+        assert_eq!(last, Some(marker), "the batch's marker hash");
+        s.reader().check_meta().unwrap();
+        drop((s, lock));
+        let s = Store::open_unupgraded_locked(&dir, &StoreLock::take(&dir).unwrap());
+        // FORMAT still mirrors the old manifest: the mirror is the upgrade's to publish
+        assert!(
+            s.is_err(),
+            "a log whose features FORMAT does not list is refused"
+        );
+    }
+
     #[test]
     fn msw4_store_drop_never_uses_eprintln() {
         let src = include_str!("store.rs");

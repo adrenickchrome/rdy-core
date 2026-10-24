@@ -3,6 +3,7 @@ pub mod bounded;
 mod check;
 pub mod check_holder;
 pub mod closure;
+pub mod codec;
 pub mod coord;
 pub mod dump;
 pub mod dump_chain;

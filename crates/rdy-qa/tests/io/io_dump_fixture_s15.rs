@@ -16,14 +16,14 @@
 //! Both were written on stores whose segments hold `FIXTURE_SEGMENT_MAX` bytes, so a load must
 //! put each batch at its source place. A later store format may add kinds and refs, never
 //! re-encode (D-F0904): a load of these fixtures then appends one batch after the fixture's log,
-//! which sets `meta/store_format` to that rdy's store format (FW-UP1). The tests allow exactly
+//! which sets `meta/store_features` to the baseline features (FW-UP1). The tests allow exactly
 //! that batch. No adapter is used here: the engine and the store are the dump's readers.
 use rdy_engine::{Rdy, Scope, load::load};
 use rdy_model::redaction::CONTENT_REMOVED;
 use rdy_model::{BlockId, Hash};
 use rdy_qa::every_kind;
 use rdy_store::dump::{DUMP_FORMAT, DumpBatch, DumpItem, DumpReader, Frame, READS};
-use rdy_store::format::{REF_STORE_FORMAT, STORE_FORMAT, encode_u32};
+use rdy_store::format::{DumpStore, REF_STORE_FEATURES, REF_STORE_FORMAT, baseline_features};
 use rdy_store::holder::{ANSWER_TAG_OBJECT_REF, REF_STORE_MODE};
 use rdy_store::kinds::{self, RefUpdate};
 use rdy_store::meta::{REF_ORIGIN, REF_REPO_ID};
@@ -130,7 +130,11 @@ fn dump_batches(p: &Path) -> (Vec<DumpBatch>, Location, u32, u32) {
             out.push(b);
         }
     }
-    (out, h.log_end, format, h.store_format)
+    let store = match h.store {
+        DumpStore::Legacy(n) => n,
+        DumpStore::Features(_) => panic!("{}: a released pair holds a scalar store", p.display()),
+    };
+    (out, h.log_end, format, store)
 }
 
 /// Each batch's start as `[segment, offset]`, in log order.
@@ -240,7 +244,10 @@ fn write_new(p: &Path, bytes: &[u8]) {
 /// segment limit and each batch's start.
 fn dump_and_facts(r: &Rdy, tmp: &Path, holder: bool) -> Value {
     let d = r.read().dump(tmp).unwrap();
-    assert_eq!((d.dump_format, d.store_format), (2, 15));
+    assert_eq!(
+        (d.dump_format, &d.store_format),
+        (2, &DumpStore::Legacy(15))
+    );
     let (batches, log_end, ..) = dump_batches(tmp);
     let mut facts = every_kind::facts(r);
     facts["identity"] = every_kind::identity_facts(r, Some(log_end));
@@ -276,9 +283,9 @@ fn ha17_write_fixtures_once() {
         );
     }
     assert_eq!(
-        (DUMP_FORMAT, STORE_FORMAT),
-        (2, 15),
-        "the v2-s15 fixtures hold dump format 2 and store format 15"
+        DUMP_FORMAT, 2,
+        "the v2-s15 fixtures hold dump format 2 and store format 15: this rdy writes another \
+         format, and a released set is never regenerated"
     );
     std::fs::create_dir_all(sync_fixture(SYNC).parent().unwrap()).unwrap();
     // members go to a scratch directory first, so each one is only ever created whole
@@ -373,27 +380,25 @@ fn tail(r: &Rdy, from: Location) -> Vec<(u8, Vec<u8>)> {
     out
 }
 
-/// Past a fixture's log end, a load holds nothing while the store format is 15, and for a newer
-/// store format only the upgrade batch, which holds `meta/store_format` alone. Returns the
-/// number of data frames past the end.
+/// Past a fixture's log end (a fixture of store format `fixture_format`, which holds its repo
+/// id), a load holds only the upgrade batch to a feature store, which holds
+/// `meta/store_features` alone: the baseline features. Returns the number of data frames past
+/// the end.
 pub(crate) fn upgrade_tail(r: &Rdy, log_end: Location, fixture_format: u32) -> u64 {
     let tail = tail(r, log_end);
-    if STORE_FORMAT == fixture_format {
-        assert!(tail.is_empty(), "nothing past the fixture's log: {tail:?}");
-    } else {
-        assert_eq!(tail.len(), 2, "one ref frame and its marker: {tail:?}");
-        assert_eq!(tail[0].0, kinds::REF_UPDATE);
-        let u: RefUpdate = postcard::from_bytes(&tail[0].1).unwrap();
-        assert_eq!(
-            u,
-            RefUpdate {
-                name: REF_STORE_FORMAT.into(),
-                value: encode_u32(STORE_FORMAT),
-                at: log_end,
-            }
-        );
-        assert_eq!(tail[1].0, kinds::BATCH_COMMIT);
-    }
+    assert!(fixture_format >= 12, "a fixture that holds its repo id");
+    assert_eq!(tail.len(), 2, "one ref frame and its marker: {tail:?}");
+    assert_eq!(tail[0].0, kinds::REF_UPDATE);
+    let u: RefUpdate = postcard::from_bytes(&tail[0].1).unwrap();
+    assert_eq!(
+        u,
+        RefUpdate {
+            name: REF_STORE_FEATURES.into(),
+            value: baseline_features().to_json(),
+            at: log_end,
+        }
+    );
+    assert_eq!(tail[1].0, kinds::BATCH_COMMIT);
     tail.iter()
         .filter(|(kind, _)| *kind != kinds::BATCH_COMMIT)
         .count() as u64
@@ -407,7 +412,10 @@ fn load_and_check(dump: &str, expect: &Value, holder: bool) -> (Rdy, tempfile::T
     let to = tempfile::tempdir().unwrap();
     let dir = to.path().join("p");
     let s = load(&fixture(dump), &dir).unwrap();
-    assert_eq!((s.dump_format, s.store_format), (2, 15));
+    assert_eq!(
+        (s.dump_format, &s.store_format),
+        (2, &DumpStore::Legacy(15))
+    );
     let (batches, log_end, format, fixture_format) = dump_batches(&fixture(dump));
     assert_eq!((format, fixture_format), (2, 15));
     let bytes = std::fs::read(fixture(dump)).unwrap();
@@ -431,7 +439,9 @@ fn load_and_check(dump: &str, expect: &Value, holder: bool) -> (Rdy, tempfile::T
     let got = every_kind::facts(&r);
     assert_eq!(got["landings"], expect["landings"], "{dump}: landings");
     let mut want = expect["refs"].clone();
-    want[REF_STORE_FORMAT] = json!(hex(&encode_u32(STORE_FORMAT)));
+    // the historical store format stays; the upgrade batch adds the features
+    assert_eq!(want[REF_STORE_FORMAT], json!(hex(b"15")));
+    want[REF_STORE_FEATURES] = json!(hex(&baseline_features().to_json()));
     assert!(want[REF_REPO_ID].is_string(), "{dump}: a repo id");
     assert_eq!(got["refs"], want, "{dump}: every ref");
     assert_eq!(
@@ -759,18 +769,18 @@ fn ha17_holder_dump_rebuilds_logical_authorization_without_canon() {
 }
 
 /// A released fixture: its dump, its expect file, the checksums of both and its pair.
-struct Released {
-    dump: &'static str,
-    expect: &'static str,
-    dump_blake3: &'static str,
-    expect_blake3: &'static str,
-    pair: (u32, u32),
-    holder: bool,
+pub(crate) struct Released {
+    pub(crate) dump: &'static str,
+    pub(crate) expect: &'static str,
+    pub(crate) dump_blake3: &'static str,
+    pub(crate) expect_blake3: &'static str,
+    pub(crate) pair: (u32, u32),
+    pub(crate) holder: bool,
 }
 
 /// Every released fixture of a full dump. The checksums repeat the ones each pair's own test pins:
 /// a change to any file needs a founder decision, and none is made here.
-const RELEASED: [Released; 13] = [
+pub(crate) const RELEASED: [Released; 13] = [
     Released {
         dump: "v1-s10.rdydump",
         expect: "v1-s10.expect.json",
@@ -879,17 +889,17 @@ const RELEASED: [Released; 13] = [
 
 /// A released dump chain: its full dump and increments in chain order, its expect file, the
 /// checksums of each (in that order) and its pair.
-struct ReleasedChain {
-    files: [&'static str; 3],
-    expect: &'static str,
-    blake3: [&'static str; 4],
-    pair: (u32, u32),
-    holder: bool,
+pub(crate) struct ReleasedChain {
+    pub(crate) files: [&'static str; 3],
+    pub(crate) expect: &'static str,
+    pub(crate) blake3: [&'static str; 4],
+    pub(crate) pair: (u32, u32),
+    pub(crate) holder: bool,
 }
 
 /// Every released dump chain. The checksums repeat the ones `io_dump_fixture_s16`,
 /// `io_dump_fixture_s17` and `io_dump_fixture_s18` pin.
-const RELEASED_CHAINS: [ReleasedChain; 6] = [
+pub(crate) const RELEASED_CHAINS: [ReleasedChain; 6] = [
     ReleasedChain {
         files: [
             "v3-s16-chain-full.rdydump",
@@ -1037,17 +1047,17 @@ fn check_loaded(
             || pair.0 == 1,
         "{what}: a dump format 2 or 3 fixture holds dropped records"
     );
-    // the loaded store carries the fixture's log, then at most the upgrade batch of ref updates
+    // the loaded store carries the fixture's log, then the upgrade batch of ref updates to a
+    // feature store
     let tail = tail(&r, log_end);
     assert!(
         tail.iter()
             .all(|(k, _)| *k == kinds::REF_UPDATE || *k == kinds::BATCH_COMMIT),
         "{what}: the load adds ref updates only: {tail:?}"
     );
-    assert_eq!(
-        tail.is_empty(),
-        store_format == STORE_FORMAT,
-        "{what}: an upgrade batch only for an older store format"
+    assert!(
+        !tail.is_empty() && store_format <= rdy_store::format::LAST_SCALAR_STORE_FORMAT,
+        "{what}: an upgrade batch for every scalar store format"
     );
     let facts = every_kind::facts(&r);
     assert_eq!(facts["fsck"]["unlogged_moves"], 0, "{what}");
@@ -1077,7 +1087,18 @@ fn ha17_all_released_dump_pairs_still_load() {
                 .flat_map(|c| c.files.iter().chain([&c.expect]).map(|n| n.to_string())),
         )
         .collect();
-    assert_eq!(on_disk, listed, "every fixture member is a released one");
+    let listed: BTreeSet<String> = listed
+        .into_iter()
+        .chain(
+            crate::io_feature_fixture::dump_members()
+                .into_iter()
+                .map(str::to_string),
+        )
+        .collect();
+    assert_eq!(
+        on_disk, listed,
+        "every fixture member is a released one or a member of a complete feature set"
+    );
     // the nine released pairs, each with its fixture, and each pair this rdy reads among them
     let pairs: BTreeSet<(u32, u32)> = RELEASED.iter().map(|f| f.pair).collect();
     assert_eq!(
@@ -1099,10 +1120,9 @@ fn ha17_all_released_dump_pairs_still_load() {
         pairs,
         "each released pair this rdy reads has a fixture, and each fixture's pair is read"
     );
-    assert!(
-        pairs.contains(&(DUMP_FORMAT, STORE_FORMAT)),
-        "the pair this rdy writes"
-    );
+    // the dump format this rdy writes holds a feature store; its complete set is registered
+    assert_eq!(DUMP_FORMAT, 4);
+    crate::io_feature_fixture::assert_written_set_is_registered();
     for c in &RELEASED_CHAINS {
         assert!(pairs.contains(&c.pair), "{}", c.expect);
     }
@@ -1129,7 +1149,12 @@ fn ha17_all_released_dump_pairs_still_load() {
         let to = tempfile::tempdir().unwrap();
         let dir = to.path().join("p");
         let s = load(&fixture(f.dump), &dir).unwrap();
-        assert_eq!((s.dump_format, s.store_format), f.pair, "{}", f.dump);
+        assert_eq!(
+            (s.dump_format, &s.store_format),
+            (f.pair.0, &DumpStore::Legacy(f.pair.1)),
+            "{}",
+            f.dump
+        );
         check_loaded(
             f.dump,
             &dir,
@@ -1160,7 +1185,12 @@ fn ha17_all_released_dump_pairs_still_load() {
         let dir = to.path().join("p");
         let files: Vec<PathBuf> = c.files.iter().map(|n| fixture(n)).collect();
         let s = rdy_engine::load::load_chain(&files, &dir, None).unwrap();
-        assert_eq!((s.dump_format, s.store_format), c.pair, "{}", c.expect);
+        assert_eq!(
+            (s.dump_format, &s.store_format),
+            (c.pair.0, &DumpStore::Legacy(c.pair.1)),
+            "{}",
+            c.expect
+        );
         assert_eq!(s.chain.len(), 3);
         check_loaded(
             c.expect, &dir, &batches, log_end, c.pair.1, c.pair, c.holder,

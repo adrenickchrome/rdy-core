@@ -215,7 +215,10 @@ fn ha12_holder_dump_load_preserves_mode_identity_and_divergent_tags() {
     let dump = root.path().join("h.rdydump");
     let summary = src.read().dump(&dump).unwrap();
     assert!(summary.files.is_empty(), "{summary:?}");
-    assert_eq!(summary.store_format, rdy_store::format::STORE_FORMAT);
+    assert_eq!(
+        summary.store_format,
+        rdy_store::format::DumpStore::Features(rdy_store::format::baseline_features())
+    );
 
     let target = root.path().join("loaded");
     let loaded = load::load(&dump, &target).unwrap();

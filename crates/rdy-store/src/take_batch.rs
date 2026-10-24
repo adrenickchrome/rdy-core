@@ -62,7 +62,7 @@
 //! after the checks is refused (`input changed during take`) and its unacknowledged bytes are
 //! rolled back. No private spool is needed: the append's re-read closes the race.
 use crate::closure::{END_OF_LOG, StoreSource, dependency_order, store_error};
-use crate::dump::{DROPPED_LEN, Frame, dropped_payload, parse_dropped};
+use crate::dump::{ENCODED_DROPPED_LEN, Frame, encoded_dropped_payload, parse_encoded_dropped};
 use crate::error::StoreError;
 use crate::kinds;
 use crate::object_refs::{ObjectKey, ObjectRef, refs_of};
@@ -387,7 +387,7 @@ pub(crate) fn verify(files: &[File], v: &Verify, buf: &mut Vec<u8>) -> Result<()
         Verify::Present(at) => reread(files, at, buf),
         Verify::Dropped(at, key, len, apply, residue) => {
             reread(files, at, buf)?;
-            match parse_dropped(buf) {
+            match parse_encoded_dropped(buf) {
                 Ok(Frame::Dropped {
                     kind,
                     hash,
@@ -422,6 +422,7 @@ impl ObjectSource for UploadSource<'_> {
         if let Some((apply, t)) = self.masked.get(&key) {
             return Ok(Some(StreamRecord::Dropped {
                 key,
+                encoding: 0,
                 original_len: t.len,
                 apply: *apply,
                 residue: t.residue,
@@ -431,11 +432,19 @@ impl ObjectSource for UploadSource<'_> {
             if let Some(at) = &e.present {
                 let mut payload = Vec::new();
                 reread(self.files, at, &mut payload).map_err(|e| e.with_object(Some(key)))?;
-                return Ok(Some(StreamRecord::Present { key, payload }));
+                let encoding = crate::codec::split(at.kind, &payload)
+                    .map_err(|e| StreamError::from_record(at.record, at.offset, &e))?
+                    .version;
+                return Ok(Some(StreamRecord::Present {
+                    key,
+                    encoding,
+                    payload,
+                }));
             }
             if let Some((_, d)) = e.dropped.first() {
                 return Ok(Some(StreamRecord::Dropped {
                     key,
+                    encoding: 0,
                     original_len: d.original_len,
                     apply: d.apply,
                     residue: d.residue,
@@ -500,12 +509,21 @@ impl Records for UploadSource<'_> {
 
 impl UploadSource<'_> {
     /// The present bytes of union key `key`.
-    fn union_payload(&self, key: &ObjectKey) -> Result<Option<Vec<u8>>, StreamError> {
+    /// The union's present record of `key`, read again from its file, with the encoding its
+    /// raw frame kind gives (`crate::codec`).
+    fn union_record(&self, key: &ObjectKey) -> Result<Option<StreamRecord>, StreamError> {
         match self.union.get(key).and_then(|e| e.present.as_ref()) {
             Some(at) => {
                 let mut payload = Vec::new();
                 reread(self.files, at, &mut payload).map_err(|e| e.with_object(Some(*key)))?;
-                Ok(Some(payload))
+                let encoding = crate::codec::split(at.kind, &payload)
+                    .map_err(|e| StreamError::from_record(at.record, at.offset, &e))?
+                    .version;
+                Ok(Some(StreamRecord::Present {
+                    key: *key,
+                    encoding,
+                    payload,
+                }))
             }
             None => Ok(None),
         }
@@ -513,18 +531,19 @@ impl UploadSource<'_> {
 
     /// The record `key` decoded within its bounds, from the union's present bytes or the
     /// holder's.
-    fn typed<T: serde::de::DeserializeOwned>(
+    fn typed<T: serde::de::DeserializeOwned + 'static>(
         &mut self,
         key: ObjectKey,
     ) -> Result<Option<T>, StreamError> {
-        let payload = match self.union_payload(&key)? {
-            Some(p) => p,
+        let r = match self.union_record(&key)? {
+            Some(r) => r,
             None => match self.store.record(key)? {
-                Some(StreamRecord::Present { payload, .. }) => payload,
+                Some(r @ StreamRecord::Present { .. }) => r,
                 _ => return Ok(None),
             },
         };
-        crate::bounded::decode(&payload)
+        r.typed()
+            .expect("a present record")
             .map(Some)
             .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(key)))
     }
@@ -581,12 +600,12 @@ fn index_files(
                 first = Some(report.header.clone());
             }
             Some(h) => {
-                if (h.repo_id, h.purpose, h.tag, h.store_format)
+                if (h.repo_id, h.purpose, h.tag, &h.features)
                     != (
                         report.header.repo_id,
                         report.header.purpose,
                         report.header.tag,
-                        report.header.store_format,
+                        &report.header.features,
                     )
                 {
                     return Err(StreamError::bad_record(
@@ -614,8 +633,9 @@ fn index_files(
                 None => union.entry(key).or_default(),
             };
             match r {
-                StreamRecord::Present { payload, .. } => {
-                    let refs = refs_of(key.kind, &payload)
+                StreamRecord::Present { ref payload, .. } => {
+                    let raw = r.raw_kind();
+                    let refs = refs_of(raw, payload)
                         .map_err(|e| StreamError::from_record(n, offset, &e))?;
                     counts.edges += refs.len() as u64;
                     if entry.present.is_none() {
@@ -623,7 +643,7 @@ fn index_files(
                             file: i,
                             record: n,
                             offset,
-                            kind: key.kind,
+                            kind: raw,
                             len: payload.len() as u32,
                             hash: key.hash,
                         });
@@ -650,7 +670,7 @@ fn index_files(
                         )
                         .into());
                     }
-                    let body = dropped_payload(
+                    let body = encoded_dropped_payload(
                         key.kind,
                         &key.hash,
                         original_len,
@@ -669,7 +689,7 @@ fn index_files(
                                 record: n,
                                 offset,
                                 kind: rec::DROPPED,
-                                len: DROPPED_LEN as u32,
+                                len: ENCODED_DROPPED_LEN as u32,
                                 hash: Hash::of(&body),
                             },
                             d,
@@ -751,22 +771,30 @@ pub(crate) fn prepare<E>(
         if rx.holds(k)? {
             continue;
         }
-        let Some(payload) = source.union_payload(k)? else {
+        let Some(r) = source.union_record(k)? else {
             continue;
         };
         let mut items = Vec::new();
-        if let Ok(g) = crate::bounded::decode::<Signature>(&payload) {
+        if let Some(Ok(g)) = r.typed::<Signature>() {
             for kind in [kinds::LANDING, kinds::TAG] {
                 let subject = ObjectKey {
                     kind,
                     hash: g.subject,
                 };
-                if let Some(p) = source.union_payload(&subject)? {
-                    items.push((kind, p));
+                if let Some(s @ StreamRecord::Present { .. }) = source.union_record(&subject)? {
+                    let raw = s.raw_kind();
+                    let StreamRecord::Present { payload, .. } = s else {
+                        unreachable!("a present record")
+                    };
+                    items.push((raw, payload));
                 }
             }
         }
-        items.push((kinds::SIGNATURE, payload));
+        let raw = r.raw_kind();
+        let StreamRecord::Present { payload, .. } = r else {
+            unreachable!("a present record")
+        };
+        items.push((raw, payload));
         reader.check_new_signatures(&items)?;
     }
     // 5. the closure
@@ -848,11 +876,18 @@ pub(crate) fn prepare<E>(
             let verify = match (&e.present, e.dropped.first()) {
                 (Some(at), _) => {
                     // a present record an approval covers: its bytes are the tuple's
-                    let payload = source.union_payload(key)?.expect("a present record");
+                    let r = source.union_record(key)?.expect("a present record");
+                    let StreamRecord::Present { payload, .. } = &r else {
+                        unreachable!("a present record")
+                    };
+                    let body = r
+                        .body()
+                        .expect("a present record")
+                        .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(*key)))?;
                     let fits = payload.len() == t.len as usize
                         && match t.residue {
-                            Some(r) => {
-                                residue_matches(key.kind, &payload, &residue(&mut source, r)?)
+                            Some(res) => {
+                                residue_matches(key.kind, body, &residue(&mut source, res)?)
                             }
                             None => true,
                         };
@@ -892,8 +927,8 @@ pub(crate) fn prepare<E>(
             // 7. a new change that embeds an approved version needs its own approval (the rule
             // a checked stream applies with nothing held: `stream_source::uncovered_change`)
             if key.kind == kinds::CHANGE && !block_versions.is_empty() {
-                let payload = source.union_payload(key)?.expect("a present record");
-                if stream_source::embeds_approved(key, &payload, &block_versions) {
+                let r = source.union_record(key)?.expect("a present record");
+                if stream_source::embeds_approved(&r, &block_versions) {
                     return Err(TakeError::UncoveredChange(key.hash));
                 }
             }
@@ -964,12 +999,12 @@ pub(crate) fn prepare<E>(
                 }
                 local_spans += 1;
                 redacted.insert(key);
-            } else if f.kind == kinds::CHANGE
+            } else if crate::codec::logical_kind(f.kind) == kinds::CHANGE
                 && !new_versions.is_empty()
                 && !approved.contains_key(&key)
                 && f.len as usize <= rdy_model::redaction::MAX_RECORD_BYTES
                 && let Some(p) = f.intact()?
-                && let Ok(c) = crate::store::decode::<Change>(&p)
+                && let Ok(c) = crate::codec::decode_record::<Change>(f.kind, &p)
                 && embeds(&c, &new_versions)
             {
                 failed = Some(TakeError::UncoveredChange(f.hash));
@@ -1041,8 +1076,8 @@ pub(crate) fn prepare<E>(
                 hash,
             };
             let stored: Option<Tag> = match held {
-                Some(v) if v == hash.0 => match reader.get_kind(kinds::TAG, &hash) {
-                    Ok(p) => crate::bounded::decode(&p).ok(),
+                Some(v) if v == hash.0 => match reader.get_kind_raw(kinds::TAG, &hash) {
+                    Ok((raw, p)) => crate::codec::decode_bounded(raw, &p).ok(),
                     Err(_) => None,
                 },
                 _ => None,

@@ -400,8 +400,10 @@ fn carry_canary(dir: &std::path::Path) -> Hash {
     }
     let residues: Vec<RedactionResidue> = found.into_iter().map(|f| f.4).collect();
     i.append_carried(&residues, &[rec]).unwrap();
-    i.upgrade(rdy_store::format::Format::CURRENT.store_format)
-        .unwrap();
+    i.upgrade(&rdy_store::format::DumpStore::Features(
+        rdy_store::format::baseline_features(),
+    ))
+    .unwrap();
     i.finish().unwrap();
     carried
 }

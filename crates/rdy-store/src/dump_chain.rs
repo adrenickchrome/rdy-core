@@ -114,14 +114,15 @@ impl BatchMarker {
     }
 }
 
-/// Where a dump chain ends: its repo, its store format, the end of its last file in the source
-/// log, that file's end marker and its trailer digest. The next increment starts here.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Where a dump chain ends: its repo, its store (a scalar format or a feature manifest), the end
+/// of its last file in the source log, that file's end marker and its trailer digest. The next
+/// increment starts here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChainEnd {
     #[serde(serialize_with = "hex_repo", deserialize_with = "repo_hex")]
     pub repo_id: RepoId,
-    pub store_format: u32,
+    pub store_format: crate::format::DumpStore,
     pub end: Location,
     pub end_batch: BatchMarker,
     #[serde(with = "hex::one")]

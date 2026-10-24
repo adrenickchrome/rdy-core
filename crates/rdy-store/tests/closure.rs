@@ -421,6 +421,7 @@ impl Src {
 fn write(reader: &StoreReader, tag: Hash, known: &BTreeSet<ObjectKey>) -> Vec<u8> {
     let c = closure(reader, tag, known).unwrap();
     let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
         reader.repo_id().unwrap().unwrap(),
         tag,
         c.prerequisites.clone(),
@@ -617,10 +618,15 @@ fn ha5_known_keys_do_not_stop_the_walk() {
         Some(StreamRecord::Present { payload, .. }) => payload,
         other => panic!("the tag is present: {other:?}"),
     };
-    let header =
-        StreamHeader::tag_history(reader.repo_id().unwrap().unwrap(), src.tag, vec![landing]);
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        reader.repo_id().unwrap().unwrap(),
+        src.tag,
+        vec![landing],
+    );
     let mut w = rdy_store::sync_stream::StreamWriter::new(Vec::new(), &header).unwrap();
     w.record(&StreamRecord::Present {
+        encoding: 0,
         key: root,
         payload: tag_bytes,
     })
@@ -751,6 +757,7 @@ fn ha5_removed_payloads_use_placeholders_and_later_proofs() {
     with_original.insert(
         block,
         StreamRecord::Present {
+            encoding: 0,
             key: block,
             payload: enc(&src.secret),
         },
@@ -771,6 +778,7 @@ fn ha5_removed_payloads_use_placeholders_and_later_proofs() {
         records.insert(
             k,
             StreamRecord::Present {
+                encoding: 0,
                 key: k,
                 payload: bytes,
             },
@@ -887,6 +895,7 @@ fn ha5_a_new_request_cannot_reuse_an_approval() {
         records.insert(
             k,
             StreamRecord::Present {
+                encoding: 0,
                 key: k,
                 payload: bytes,
             },
@@ -1335,7 +1344,12 @@ fn export(path: &std::path::Path, tag: Hash) -> Result<Vec<u8>, StreamError> {
     let s = Store::open(path).unwrap();
     let r = s.reader();
     let c = closure(&r, tag, &BTreeSet::new())?;
-    let header = StreamHeader::tag_history(r.repo_id().unwrap().unwrap(), tag, c.prerequisites);
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        r.repo_id().unwrap().unwrap(),
+        tag,
+        c.prerequisites,
+    );
     let mut source = StoreSource {
         reader: &r,
         end: END_OF_LOG,

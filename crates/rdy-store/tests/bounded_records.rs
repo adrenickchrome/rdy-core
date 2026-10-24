@@ -449,13 +449,30 @@ fn ha1_stream_errors_use_the_exact_texts() {
         )
     );
     assert_eq!(
-        text(&StreamError::store_format(Some(0), 0, 14, 15)),
+        text(&StreamError::store_format(
+            Some(0),
+            0,
+            &rdy_store::StoreError::Format {
+                message: "store feature x needs rdy 9.0.0".into(),
+                fix: "open the project with rdy 9.0.0 or later".into(),
+            }
+        )),
         (
             "E_STORE_FORMAT",
-            "stream store format 14 does not match 15".into(),
-            "write the stream with the pinned rdy build".into(),
+            "store feature x needs rdy 9.0.0".into(),
+            "open the project with rdy 9.0.0 or later".into(),
             Some(0),
             0
+        )
+    );
+    assert_eq!(
+        text(&StreamError::sync_format_one(8)),
+        (
+            "E_STORE_FORMAT",
+            "sync batch format 1 is not supported".into(),
+            "write the stream with the pinned rdy build".into(),
+            Some(0),
+            8
         )
     );
     assert_eq!(

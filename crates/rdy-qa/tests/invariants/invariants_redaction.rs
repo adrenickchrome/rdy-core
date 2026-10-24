@@ -30,7 +30,7 @@ use rdy_qa::every_kind;
 use rdy_qa::fixtures::{approver, land, write, writer};
 use rdy_qa::invariants::{check, check_all, frozen_report};
 use rdy_store::dump::DUMP_FORMAT;
-use rdy_store::format::STORE_FORMAT;
+use rdy_store::format::{DumpStore, baseline_features};
 use rdy_store::kinds;
 use rdy_store::redaction::StoredFrame;
 use rdy_store::segment::Location;
@@ -622,7 +622,10 @@ fn rdx15_approved_removal_survives_restart_reindex_dump_and_clone() {
                     let file = scratch.path().join(format!("s{seed}-{k}.rdydump"));
                     let r = Rdy::open(&at).unwrap();
                     let d = r.read().dump(&file).unwrap();
-                    assert_eq!((d.dump_format, d.store_format), (DUMP_FORMAT, STORE_FORMAT));
+                    assert_eq!(
+                        (d.dump_format, &d.store_format),
+                        (DUMP_FORMAT, &DumpStore::Features(baseline_features()))
+                    );
                     r.close().unwrap();
                     load(&file, &next).unwrap();
                     at = next;

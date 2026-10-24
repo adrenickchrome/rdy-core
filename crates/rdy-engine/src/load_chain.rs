@@ -201,7 +201,7 @@ pub(crate) fn load_verified(plan: &ChainPlan, project: &Path) -> Result<LoadSumm
         Ok(LoadSummary {
             project: project.display().to_string(),
             dump_format: first.format,
-            store_format: first.header.store_format,
+            store_format: first.header.store.clone(),
             batches,
             frames,
             files_written: placed.written,
@@ -449,7 +449,7 @@ fn ingest_tail(
         .append_carried(scan.residues(), scan.carried())
         .map_err(|e| carried_target_error(loading, e))?;
     ingest
-        .upgrade_in_repo(scan.store_format(), chain_repo(scan))
+        .upgrade_in_repo(scan.store(), chain_repo(scan))
         .map_err(|e| target_error(loading, e))?;
     ingest.finish().map_err(|e| match e {
         StoreError::Dump { what, .. } => damaged(file, at, &what),
@@ -533,7 +533,7 @@ fn scan_error(files: &[PathBuf], e: ScanError) -> RdyError {
                     dump_error::load_repo_mismatch(path, &file, &chain)
                 }
                 ChainLink::StoreFormat { file, chain } => {
-                    dump_error::load_store_mismatch(path, file, chain)
+                    dump_error::load_store_mismatch(path, &file, &chain)
                 }
                 ChainLink::Position { start, prev_end } => dump_error::load_position_mismatch(
                     path,

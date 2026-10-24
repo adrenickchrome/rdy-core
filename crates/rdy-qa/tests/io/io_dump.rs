@@ -9,7 +9,7 @@ use rdy_qa::fixtures::{land, write, writer};
 use rdy_qa::inbox::on;
 use rdy_qa::packs::qa_project;
 use rdy_store::dump::{DUMP_FORMAT, DumpBatch, DumpHeader, DumpItem, DumpReader};
-use rdy_store::format::STORE_FORMAT;
+use rdy_store::format::{DumpStore, baseline_features};
 use rdy_store::kinds::{self, BatchCommit};
 use rdy_store::redaction::StoredFrame;
 use rdy_store::segment::Location;
@@ -320,9 +320,12 @@ fn dl5_the_header_names_the_rdy_that_wrote_it() {
     let summary = r.read().dump(&out).unwrap();
     let (header, _) = read_back(&out);
     assert_eq!(header.rdy, env!("CARGO_PKG_VERSION"));
-    assert_eq!(header.store_format, STORE_FORMAT);
-    assert_eq!(summary.dump_format, 3);
-    assert_eq!(summary.store_format, STORE_FORMAT);
+    assert_eq!(header.store, DumpStore::Features(baseline_features()));
+    assert_eq!(summary.dump_format, 4);
+    assert_eq!(
+        summary.store_format,
+        DumpStore::Features(baseline_features())
+    );
 }
 
 /// The names in `dir` that hold `.partial-`.

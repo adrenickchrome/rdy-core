@@ -17,7 +17,7 @@ use rdy_model::redaction::{
 use rdy_model::{Block, Change, Hash, Provenance, Role};
 use rdy_store::dump::{DumpBatch, Frame};
 use rdy_store::error::StoreError;
-use rdy_store::format::Format;
+use rdy_store::format::{DumpStore, baseline_features};
 use rdy_store::ingest::{Ingest, IngestReport};
 use rdy_store::kinds;
 use rdy_store::redaction::StoredFrame;
@@ -34,8 +34,8 @@ const SEGMENT_MAX: u64 = 64 * 1024 * 1024;
 pub const HEADER: u64 = 4 + 1 + 32;
 
 /// This rdy's store format.
-pub fn store_format() -> u32 {
-    Format::CURRENT.store_format
+pub fn store_format() -> DumpStore {
+    DumpStore::Features(baseline_features())
 }
 
 /// The source request, apply and landing a carried record names; none of them is in any test
@@ -233,7 +233,7 @@ pub fn ingest(
         i.batch(n as u64 + 1, b)?;
     }
     i.append_carried(residues, records)?;
-    i.upgrade(store_format())?;
+    i.upgrade(&store_format())?;
     i.finish()
 }
 

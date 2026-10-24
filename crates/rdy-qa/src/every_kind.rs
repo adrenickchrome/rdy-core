@@ -64,9 +64,10 @@ use std::path::{Path, PathBuf};
 /// list (`V1_FAMILIES` in `io_dump_fixture.rs`, `V11_FAMILIES` in `io_dump_fixture_s11.rs`,
 /// `V12_FAMILIES` in `io_dump_fixture_s12.rs`, `V13_FAMILIES` in `io_dump_fixture_s13.rs`,
 /// `V14_FAMILIES` in `io_dump_fixture_s14.rs`, `V15_FAMILIES` and `HOLDER_FAMILIES` in
-/// `io_dump_fixture_s15.rs`).
+/// `io_dump_fixture_s15.rs`, `V17_FAMILIES` in `io_dump_fixture_s17.rs`). A feature-based store
+/// (D-WWAK7) holds `meta/store_features` in place of `meta/store_format`.
 pub const FAMILIES: [&str; 17] = [
-    "meta/store_format",
+    "meta/store_features",
     "meta/repo_id",
     "meta/origin",
     "view/",
@@ -1463,6 +1464,46 @@ fn relay_words(quote: &str, session_ref: &str) -> RelayInput {
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// The feature facts of the store `r` (D-WWAK7): its manifest, as its `meta/store_features` ref
+/// holds it, and the encoding versions of its present frames before `upto`, each logical kind
+/// with the count of frames of each version (a dropped frame keeps its raw kind).
+pub fn feature_facts(r: &Rdy, upto: Location) -> serde_json::Value {
+    let mut encodings: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
+    r.store()
+        .reader()
+        .for_each_record_from(
+            Location {
+                segment: 0,
+                offset: 0,
+            },
+            upto,
+            |_, f, _| {
+                let (kind, version) = match f {
+                    StoredFrame::Present { kind, payload, .. } => {
+                        if kind == kinds::BATCH_COMMIT {
+                            return Ok(());
+                        }
+                        let o = rdy_store::codec::split(kind, payload)
+                            .map_err(|e| rdy_store::StoreError::Decode(e.to_string()))?;
+                        (o.kind, o.version)
+                    }
+                    StoredFrame::Dropped { kind, .. } => (rdy_store::codec::logical_kind(kind), 0),
+                };
+                *encodings
+                    .entry(kind.to_string())
+                    .or_default()
+                    .entry(version.to_string())
+                    .or_default() += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+    json!({
+        "manifest": r.store().reader().store_features().unwrap(),
+        "encodings": encodings,
+    })
 }
 
 /// What a later rdy must read the same from this project, after a dump and a load:

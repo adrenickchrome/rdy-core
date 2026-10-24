@@ -190,12 +190,19 @@ impl ObjectSource for LogSource<'_> {
             StoreError::Io(e) => StreamError::io(None, 0, &e),
             e => io(e),
         };
-        match self.log.header_at(loc).map_err(header_io)? {
-            Some((len, _, _)) if len as usize <= MAX_RECORD_BYTES => {}
+        let raw = match self.log.header_at(loc).map_err(header_io)? {
+            Some((len, raw, _)) if len as usize <= MAX_RECORD_BYTES => raw,
             _ => return Ok(None),
-        }
+        };
         let payload = self.log.record(loc, key.kind, &key.hash).map_err(io)?;
-        Ok(payload.map(|payload| StreamRecord::Present { key, payload }))
+        Ok(payload.and_then(|payload| {
+            let encoding = crate::codec::split(raw, &payload).ok()?.version;
+            Some(StreamRecord::Present {
+                key,
+                encoding,
+                payload,
+            })
+        }))
     }
 }
 
@@ -376,13 +383,16 @@ fn derive(
                     kind: kinds::REDACTION_RESIDUE,
                     hash: r,
                 };
-                let Some(StreamRecord::Present { payload, .. }) =
+                let Some(rec @ StreamRecord::Present { .. }) =
                     source.record(key).map_err(|e| proof_error(e, a.loc))?
                 else {
                     return Err(corrupt());
                 };
+                let StreamRecord::Present { payload, .. } = &rec else {
+                    unreachable!("a present record")
+                };
                 let res: RedactionResidue =
-                    crate::bounded::decode(&payload).map_err(|_| corrupt())?;
+                    crate::codec::decode_bounded(rec.raw_kind(), payload).map_err(|_| corrupt())?;
                 residues.insert(r, res);
             }
         }
@@ -495,11 +505,11 @@ fn derive_spans(
                         residue: r.objects[&key].residue,
                     });
             }
-        } else if f.kind == kinds::CHANGE
+        } else if crate::codec::logical_kind(f.kind) == kinds::CHANGE
             && !versions.is_empty()
             && f.len as usize <= MAX_RECORD_BYTES
             && let Some(p) = f.intact()?
-            && let Ok(change) = crate::store::decode::<Change>(&p)
+            && let Ok(change) = crate::codec::decode_record::<Change>(f.kind, &p)
             && embeds(&change, &versions)
         {
             // an intact copy of removed content that no approval covers

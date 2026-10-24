@@ -72,6 +72,13 @@ pub enum RecordError {
     /// `16777216 record bytes`.
     #[error("{maximum} {name}")]
     Limit { name: &'static str, maximum: u64 },
+    /// A versioned frame names an encoding version its kind does not register (`crate::codec`).
+    #[error("unknown encoding version")]
+    UnknownVersion,
+    /// A versioned frame names version 0, which only an unmarked frame may have
+    /// (`crate::codec`).
+    #[error("noncanonical encoding version")]
+    NoncanonicalVersion,
 }
 
 impl RecordError {

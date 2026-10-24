@@ -52,7 +52,7 @@ use rdy_store::stream_source::CheckedStream;
 use rdy_store::sync_proof::ObjectSource;
 use rdy_store::sync_stream::{MAX_STREAM_BYTES, StreamRecord};
 use rdy_store::take_batch::{UploadFacts, UploadTarget, check_input_bounds};
-use rdy_store::{StoreError, StoreReader, bounded};
+use rdy_store::{StoreError, StoreReader};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -429,7 +429,7 @@ impl<R: Read + Seek> TagHistorySource for StreamHistory<'_, R> {
             hash: h,
         };
         match self.0.read(key).map_err(from_stream)? {
-            Some(StreamRecord::Present { payload, .. }) => decode(&payload, key),
+            Some(r @ StreamRecord::Present { .. }) => decode(&r, key),
             Some(StreamRecord::Dropped { .. }) => match self.0.redaction_of(&key) {
                 Some(request) => Err(StoreError::Redacted { request }.into()),
                 None => Err(to_rdy(StreamError::unresolved(0, 0, key))),
@@ -689,23 +689,26 @@ fn check_records(
         if held.holds(key)? {
             continue;
         }
-        let Some(StreamRecord::Present { payload, .. }) = source.record(*key).map_err(to_rdy)?
-        else {
+        let Some(r @ StreamRecord::Present { .. }) = source.record(*key).map_err(to_rdy)? else {
             continue;
         };
         let at = |e: RdyError| at_object(e, *key);
         if key.kind == kinds::BLOCK {
-            let b: Block = decode(&payload, *key)?;
+            let b: Block = decode(&r, *key)?;
             publication::check_block_limits(&b).map_err(at)?;
             continue;
         }
-        let m: BlobManifest = decode(&payload, *key)?;
+        let m: BlobManifest = decode(&r, *key)?;
         let malformed = || {
             to_rdy(
                 StreamError::bad_record(0, 0, Reason::RecordDoesNotDecode).with_object(Some(*key)),
             )
         };
-        if !m.is_encoding_of(&payload) {
+        let body = r
+            .body()
+            .expect("a present record")
+            .map_err(|_| malformed())?;
+        if !m.is_encoding_of(body) {
             return Err(malformed());
         }
         let l = publication::limits();
@@ -1044,9 +1047,12 @@ impl<'a, 's> ObjectPublicationSource<'a, 's> {
 
     /// The present record `key`, decoded within its bounds; None when the source does not hold
     /// it intact.
-    fn typed<T: serde::de::DeserializeOwned>(&self, key: ObjectKey) -> Result<Option<T>, RdyError> {
+    fn typed<T: serde::de::DeserializeOwned + 'static>(
+        &self,
+        key: ObjectKey,
+    ) -> Result<Option<T>, RdyError> {
         match self.record(key)? {
-            Some(StreamRecord::Present { payload, .. }) => decode(&payload, key).map(Some),
+            Some(r @ StreamRecord::Present { .. }) => decode(&r, key).map(Some),
             _ => Ok(None),
         }
     }
@@ -1261,7 +1267,7 @@ fn read_block(source: &mut dyn ObjectSource, version: Hash) -> Result<Option<Blo
         hash: version,
     };
     match source.record(key).map_err(to_rdy)? {
-        Some(StreamRecord::Present { payload, .. }) => decode(&payload, key).map(Some),
+        Some(r @ StreamRecord::Present { .. }) => decode(&r, key).map(Some),
         Some(StreamRecord::Dropped {
             apply,
             residue: Some(residue),
@@ -1306,17 +1312,31 @@ fn manifest(source: &mut dyn ObjectSource, h: Hash) -> Result<Option<BlobManifes
 
 /// The present record `key` of `source`, decoded within its bounds; None when the source does
 /// not hold it intact.
-fn typed<T: serde::de::DeserializeOwned>(
+fn typed<T: serde::de::DeserializeOwned + 'static>(
     source: &mut dyn ObjectSource,
     key: ObjectKey,
 ) -> Result<Option<T>, RdyError> {
-    match source.record(key).map_err(to_rdy)? {
-        Some(StreamRecord::Present { payload, .. }) => decode(&payload, key).map(Some),
-        _ => Ok(None),
+    // through the record's encoding (`rdy_store::codec`)
+    match source
+        .record(key)
+        .map_err(to_rdy)?
+        .as_ref()
+        .and_then(StreamRecord::typed)
+    {
+        Some(r) => r
+            .map(Some)
+            .map_err(|e| to_rdy(StreamError::from_record(0, 0, &e).with_object(Some(key)))),
+        None => Ok(None),
     }
 }
 
-fn decode<T: serde::de::DeserializeOwned>(payload: &[u8], key: ObjectKey) -> Result<T, RdyError> {
-    bounded::decode(payload)
+/// The present record `r` of `key`, decoded within its bounds through its encoding
+/// (`rdy_store::codec`).
+fn decode<T: serde::de::DeserializeOwned + 'static>(
+    r: &StreamRecord,
+    key: ObjectKey,
+) -> Result<T, RdyError> {
+    r.typed()
+        .expect("a present record")
         .map_err(|e| to_rdy(StreamError::from_record(0, 0, &e).with_object(Some(key))))
 }

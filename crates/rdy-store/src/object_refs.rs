@@ -82,10 +82,17 @@ pub struct ObjectRef {
     pub hash: Hash,
 }
 
-/// The objects the record of kind `kind` with bytes `payload` names, sorted by (kind, hash) with
-/// `None` first and without repeats. `Kind` for a kind that is not an assigned portable kind;
-/// `Decode` or `Limit` for bytes that are not exactly one bounded record of the kind.
+/// The objects the record of raw kind `kind` with stored bytes `payload` names, sorted by (kind,
+/// hash) with `None` first and without repeats. The frame is split first (`crate::codec`): its
+/// body, of any encoding its kind registers, is read as the current type. `Kind` for a kind that
+/// is not an assigned portable kind; `Decode` or `Limit` for bytes that are not exactly one
+/// bounded record of the kind; an encoding version refusal of the codec's own.
 pub fn refs_of(kind: u8, payload: &[u8]) -> Result<Vec<ObjectRef>, RecordError> {
+    if !is_portable(crate::codec::logical_kind(kind)) {
+        return Err(RecordError::Kind);
+    }
+    let split = crate::codec::split(kind, payload)?;
+    let (kind, payload) = (split.kind, split.body);
     let mut e = Edges(Vec::new());
     match kind {
         BLOCK => e.block(&bounded::decode::<Block>(payload)?)?,

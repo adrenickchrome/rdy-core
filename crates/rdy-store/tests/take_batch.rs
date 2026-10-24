@@ -223,7 +223,12 @@ fn write(
     prerequisites: Vec<ObjectKey>,
     path: &Path,
 ) {
-    let header = StreamHeader::tag_history(*repo, tag, prerequisites);
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        *repo,
+        tag,
+        prerequisites,
+    );
     let mut source = StoreSource {
         reader: r,
         end: END_OF_LOG,
@@ -248,12 +253,18 @@ fn write_extra(
         source.insert(
             k,
             StreamRecord::Present {
+                encoding: 0,
                 key: k,
                 payload: payload.clone(),
             },
         );
     }
-    let header = StreamHeader::tag_history(*repo, tag, prerequisites);
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        *repo,
+        tag,
+        prerequisites,
+    );
     write_batch(&mut source, &header, &keys, File::create(path).unwrap()).unwrap();
 }
 
@@ -1216,6 +1227,7 @@ fn forged_upload(src: &Src, removed: &Removed, proof: Hash, name: &str) -> (Path
             } => {
                 placeholder.get_or_insert(key);
                 StreamRecord::Dropped {
+                    encoding: 0,
                     key,
                     original_len,
                     apply: proof,
@@ -1231,7 +1243,12 @@ fn forged_upload(src: &Src, removed: &Removed, proof: Hash, name: &str) -> (Path
     let mut prerequisites = header.prerequisites.clone();
     prerequisites.push(key(kinds::REDACTION_APPLY, proof));
     prerequisites.sort();
-    let header = StreamHeader::tag_history(src.repo, src.tag, prerequisites);
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        src.repo,
+        src.tag,
+        prerequisites,
+    );
     let file = src.dir.path().join(format!("{name}.rdysync"));
     write_batch(&mut records, &header, &keys, File::create(&file).unwrap()).unwrap();
     (file, placeholder.expect("a placeholder"))

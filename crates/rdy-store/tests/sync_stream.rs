@@ -8,7 +8,7 @@ use rdy_model::{
 };
 use rdy_store::dump::{DumpBatch, DumpHeader, DumpWriter, Frame, RemovalFacts};
 use rdy_store::dump_chain::{BatchMarker, DumpChainHeader};
-use rdy_store::format::STORE_FORMAT;
+use rdy_store::format::baseline_features;
 use rdy_store::kinds::{self, batch_digest};
 use rdy_store::object_refs::ObjectKey;
 use rdy_store::segment::Location;
@@ -24,6 +24,10 @@ use std::io::Read;
 const REPO: RepoId = RepoId([7; 16]);
 const HEAD: usize = 37;
 const PRELUDE: u64 = 12;
+/// The bytes of the baseline manifest's JSON in a header.
+fn manifest_len() -> usize {
+    baseline_features().to_json().len()
+}
 
 fn enc<T: serde::Serialize>(v: &T) -> Vec<u8> {
     postcard::to_allocvec(v).unwrap()
@@ -85,6 +89,7 @@ fn intent(prev: Option<Hash>, n: u64) -> Intent {
 fn present<T: serde::Serialize>(kind: u8, value: &T) -> StreamRecord {
     let payload = enc(value);
     StreamRecord::Present {
+        encoding: 0,
         key: key(kind, Hash::of(&payload)),
         payload,
     }
@@ -92,13 +97,19 @@ fn present<T: serde::Serialize>(kind: u8, value: &T) -> StreamRecord {
 
 fn raw(kind: u8, payload: &[u8]) -> StreamRecord {
     StreamRecord::Present {
+        encoding: 0,
         key: key(kind, Hash::of(payload)),
         payload: payload.to_vec(),
     }
 }
 
 fn header(tag: Hash, prerequisites: Vec<ObjectKey>) -> StreamHeader {
-    StreamHeader::tag_history(REPO, tag, prerequisites)
+    StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        REPO,
+        tag,
+        prerequisites,
+    )
 }
 
 /// `records` written as one batch with `header`.
@@ -167,6 +178,7 @@ fn ha5_stream_one_has_exact_header_frames_and_trailer() {
     let records = vec![
         present(kinds::BLOCK, &b),
         StreamRecord::Dropped {
+            encoding: 0,
             key: key(kinds::BLOB_CHUNK, chunk),
             original_len: 5,
             apply,
@@ -186,7 +198,9 @@ fn ha5_stream_one_has_exact_header_frames_and_trailer() {
     let bytes = batch(&h, &records);
 
     // the bytes, field by field
-    let mut hp = STORE_FORMAT.to_le_bytes().to_vec();
+    let json = baseline_features().to_json();
+    let mut hp = (json.len() as u32).to_le_bytes().to_vec();
+    hp.extend_from_slice(&json);
     hp.extend_from_slice(&REPO.0);
     hp.push(0);
     hp.extend_from_slice(&root.0);
@@ -195,17 +209,17 @@ fn ha5_stream_one_has_exact_header_frames_and_trailer() {
     hp.extend_from_slice(&landing.0);
     hp.push(kinds::REDACTION_APPLY);
     hp.extend_from_slice(&apply.0);
-    assert_eq!(hp.len(), 57 + 2 * 33);
-    let mut dropped = vec![kinds::BLOB_CHUNK];
+    assert_eq!(hp.len(), 57 + json.len() + 2 * 33);
+    let mut dropped = vec![kinds::BLOB_CHUNK, 0, 0];
     dropped.extend_from_slice(&chunk.0);
     dropped.extend_from_slice(&5u32.to_le_bytes());
     dropped.extend_from_slice(&apply.0);
     dropped.push(0);
     dropped.extend_from_slice(&[0u8; 32]);
-    assert_eq!(dropped.len(), 102);
+    assert_eq!(dropped.len(), 104);
     let (bp, tp) = (enc(&b), enc(&t));
     let mut want = MAGIC.to_vec();
-    want.extend_from_slice(&1u32.to_le_bytes());
+    want.extend_from_slice(&2u32.to_le_bytes());
     want.extend(frame(0xF0, &hp));
     want.extend(frame(kinds::BLOCK, &bp));
     want.extend(frame(0xF3, &dropped));
@@ -222,13 +236,13 @@ fn ha5_stream_one_has_exact_header_frames_and_trailer() {
     trailer.extend_from_slice(&before.to_le_bytes());
     trailer.extend_from_slice(&digest.0);
     want.extend(frame(0xFF, &trailer));
-    assert_eq!(bytes, want, "stream format 1, byte for byte");
+    assert_eq!(bytes, want, "stream format 2, byte for byte");
 
-    // the DROPPED body is dump format 2's, byte for byte
+    // the DROPPED body is dump format 4's, byte for byte
     let mut dump = DumpWriter::new(
         Vec::new(),
         &DumpHeader {
-            store_format: STORE_FORMAT,
+            store: rdy_store::format::DumpStore::Features(rdy_store::format::baseline_features()),
             log_end: Location {
                 segment: 0,
                 offset: 0,
@@ -293,8 +307,8 @@ fn ha5_stream_one_has_exact_header_frames_and_trailer() {
     assert_eq!(
         json["header"],
         serde_json::json!({
-            "stream_format": 1,
-            "store_format": STORE_FORMAT,
+            "stream_format": 2,
+            "features": {"manifest_version": 1, "features": []},
             "repo_id": "07070707070707070707070707070707",
             "purpose": "tag_history",
             "tag": root.to_string(),
@@ -314,6 +328,7 @@ fn ha5_stream_one_has_exact_header_frames_and_trailer() {
         serde_json::to_value(&records[1]).unwrap(),
         serde_json::json!({"dropped": {
             "key": {"kind": 6, "hash": chunk.to_string()},
+            "encoding": 0,
             "original_len": 5,
             "apply": apply.to_string(),
             "residue": null,
@@ -441,7 +456,7 @@ fn ha5_batch_prerequisites_are_exact_and_local() {
         vec![a_key, root_key]
     );
     // a needed key that is not listed: named at the snapshot that needs it
-    let first_at = PRELUDE + HEAD as u64 + 57 + 33;
+    let first_at = PRELUDE + HEAD as u64 + 57 + manifest_len() as u64 + 33;
     let missing = batch(&header(root, vec![root_key]), std::slice::from_ref(&s));
     assert_eq!(
         check(&missing).unwrap_err(),
@@ -545,6 +560,7 @@ fn ha5_batch_prerequisites_are_exact_and_local() {
     // prerequisite (fix round 1); an apply of the batch is a later proof, so it may follow
     let residue = Hash([21; 32]);
     let dropped = StreamRecord::Dropped {
+        encoding: 0,
         key: a_key,
         original_len: 40,
         apply: Hash([22; 32]),
@@ -606,6 +622,7 @@ fn ha5_batch_prerequisites_are_exact_and_local() {
         unreachable!()
     };
     let proved = StreamRecord::Dropped {
+        encoding: 0,
         key: k,
         original_len,
         apply: real_apply.key().hash,
@@ -657,7 +674,7 @@ fn batch_unchecked(h: &StreamHeader, records: &[StreamRecord]) -> Vec<u8> {
     let hp = &bytes[PRELUDE as usize + HEAD..];
     link(&mut chain, 0xF0, hp);
     for r in records {
-        let StreamRecord::Present { key, payload } = r else {
+        let StreamRecord::Present { key, payload, .. } = r else {
             panic!("present records only")
         };
         bytes.extend(frame(key.kind, payload));
@@ -678,7 +695,7 @@ fn ha5_changed_hash_and_trailer_are_refused() {
     let b = block("b-00002", "two");
     let h = header(root, vec![key(kinds::TAG, root)]);
     let bytes = batch(&h, &[present(kinds::BLOCK, &a), present(kinds::BLOCK, &b)]);
-    let first_at = PRELUDE + HEAD as u64 + 57 + 33;
+    let first_at = PRELUDE + HEAD as u64 + 57 + manifest_len() as u64 + 33;
     let second_at = first_at + HEAD as u64 + enc(&a).len() as u64;
     let trailer_at = second_at + HEAD as u64 + enc(&b).len() as u64;
     assert_eq!(trailer_at + HEAD as u64 + 48, bytes.len() as u64);
@@ -803,11 +820,23 @@ fn ha5_changed_hash_and_trailer_are_refused() {
         bad(0, 0, "invalid header")
     );
     let mut format = bytes.clone();
-    format[8] = 2;
+    format[8] = 3;
     assert_eq!(
         refusal(check(&format).unwrap_err()),
         bad(0, 8, "invalid header")
     );
+    // stream format 1 is not read
+    format[8] = 1;
+    let e = check(&format).unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            "E_STORE_FORMAT",
+            "sync batch format 1 is not supported",
+            "write the stream with the pinned rdy build"
+        )
+    );
+    let m = 4 + manifest_len();
     let header_with = |at: usize, value: &[u8]| {
         let mut hp = bytes[PRELUDE as usize + HEAD..first_at as usize].to_vec();
         hp[at..at + value.len()].copy_from_slice(value);
@@ -816,7 +845,7 @@ fn ha5_changed_hash_and_trailer_are_refused() {
         out.extend_from_slice(&bytes[first_at as usize..]);
         out
     };
-    let e = check(&header_with(20, &[1])).unwrap_err();
+    let e = check(&header_with(m + 16, &[1])).unwrap_err();
     assert_eq!(
         (e.code, e.message.as_str(), e.fix.as_str()),
         (
@@ -825,20 +854,19 @@ fn ha5_changed_hash_and_trailer_are_refused() {
             "request a tag_history stream"
         )
     );
-    let e = check(&header_with(0, &(STORE_FORMAT - 1).to_le_bytes())).unwrap_err();
+    // a manifest of another grammar: `{"manifest_version":2,...`
+    let e = check(&header_with(4 + 20, b"2")).unwrap_err();
     assert_eq!(
-        (e.code, e.message),
+        (e.code, e.message.as_str(), e.fix.as_str()),
         (
             "E_STORE_FORMAT",
-            format!(
-                "stream store format {} does not match {STORE_FORMAT}",
-                STORE_FORMAT - 1
-            )
+            "store feature manifest is invalid: unsupported manifest version",
+            "restore the store from a backup"
         )
     );
     // a prerequisite of a kind no batch holds
     assert_eq!(
-        refusal(check(&header_with(57, &[kinds::TRANSITION])).unwrap_err()),
+        refusal(check(&header_with(m + 53, &[kinds::TRANSITION])).unwrap_err()),
         bad(0, PRELUDE, "invalid header")
     );
     // a first frame that is not the header
@@ -1017,10 +1045,11 @@ fn ha5_lengths_counts_edges_and_depth_are_bounded() {
     assert_eq!(max.len(), 100_000);
     let h = header(root, max.clone());
     let bytes = batch(&h, &[]);
+    let cap = 3_300_057 + manifest_len();
     assert_eq!(
         bytes.len(),
-        12 + HEAD + 3_300_057 + HEAD + 48,
-        "the exact header cap"
+        12 + HEAD + cap + HEAD + 48,
+        "the header cap of 100000 keys"
     );
     let (_, read) = StreamReader::open(&bytes[..]).unwrap();
     assert_eq!(read.prerequisites.len(), 100_000);
@@ -1030,8 +1059,9 @@ fn ha5_lengths_counts_edges_and_depth_are_bounded() {
     };
     assert_eq!(limit(e), exceeds("100000 prerequisites"));
     // a header that says 100001 keys, and one longer than the cap
-    let mut hp = bytes[PRELUDE as usize + HEAD..PRELUDE as usize + HEAD + 3_300_057].to_vec();
-    hp[53..57].copy_from_slice(&100_001u32.to_le_bytes());
+    let mut hp = bytes[PRELUDE as usize + HEAD..PRELUDE as usize + HEAD + cap].to_vec();
+    let m = 4 + manifest_len();
+    hp[m + 49..m + 53].copy_from_slice(&100_001u32.to_le_bytes());
     let mut said = bytes[..PRELUDE as usize].to_vec();
     said.extend(frame(0xF0, &hp));
     let Err(e) = StreamReader::open(&said[..]) else {
@@ -1039,13 +1069,13 @@ fn ha5_lengths_counts_edges_and_depth_are_bounded() {
     };
     assert_eq!(limit(e), exceeds("100000 prerequisites"));
     let mut long = bytes[..PRELUDE as usize].to_vec();
-    long.extend(frame_head(0xF0, 3_300_058));
+    long.extend(frame_head(0xF0, 3_365_594));
     let Err(e) = StreamReader::open(&long[..]) else {
         panic!("the reader refuses a longer header")
     };
     assert_eq!(
         (e.code, e.message.as_str()),
-        ("E_LIMIT", "stream exceeds 3300057 header bytes")
+        ("E_LIMIT", "stream exceeds 3365593 header bytes")
     );
 
     // record payloads: a typed record's 16777216 bytes, a chunk's 1048576, claimed by the frame
@@ -1069,6 +1099,7 @@ fn ha5_lengths_counts_edges_and_depth_are_bounded() {
     let drops = |n: u8| -> Vec<StreamRecord> {
         (0..n)
             .map(|i| StreamRecord::Dropped {
+                encoding: 0,
                 key: key(kinds::BLOB_CHUNK, Hash([i + 1; 32])),
                 original_len: 64 << 20,
                 apply: Hash([200; 32]),
@@ -1093,7 +1124,7 @@ fn ha5_lengths_counts_edges_and_depth_are_bounded() {
         exceeds("1073741824 pending dropped bytes")
     );
     let mut b = sixteen[..sixteen.len() - HEAD - 48].to_vec();
-    let mut body = vec![kinds::BLOB_CHUNK];
+    let mut body = vec![kinds::BLOB_CHUNK, 0, 0];
     body.extend_from_slice(&[17u8; 32]);
     body.extend_from_slice(&1u32.to_le_bytes());
     body.extend_from_slice(&[200u8; 32]);
@@ -1240,15 +1271,16 @@ fn fault(record: u64, offset: u64, reason: &str, object: Option<ObjectKey>) -> S
 }
 
 /// The frame offset of each of `records` in a batch whose header lists `prerequisites` keys:
-/// the first at 12 + 37 + 57 + 33k, each next one frame header and payload further.
+/// the first at 12 + 37 + 57 + the manifest + 33k, each next one frame header and payload
+/// further.
 fn offsets(prerequisites: usize, records: &[StreamRecord]) -> Vec<u64> {
-    let mut at = PRELUDE + HEAD as u64 + 57 + 33 * prerequisites as u64;
+    let mut at = PRELUDE + HEAD as u64 + 57 + manifest_len() as u64 + 33 * prerequisites as u64;
     let mut out = vec![];
     for r in records {
         out.push(at);
         let len = match r {
             StreamRecord::Present { payload, .. } => payload.len() as u64,
-            StreamRecord::Dropped { .. } => 102,
+            StreamRecord::Dropped { .. } => 104,
         };
         at += HEAD as u64 + len;
     }
@@ -1327,6 +1359,7 @@ fn plb2_dependency_errors_keep_the_source_position() {
     let a_key = key(kinds::BLOCK, a.version_hash());
     let apply_key = key(kinds::REDACTION_APPLY, Hash([22; 32]));
     let residue = StreamRecord::Dropped {
+        encoding: 0,
         key: a_key,
         original_len: 40,
         apply: Hash([22; 32]),
@@ -1346,6 +1379,7 @@ fn plb2_dependency_errors_keep_the_source_position() {
 
     // a dropped record's apply proof: two dropped records share it, the first one is named
     let dropped = |chunk: u8| StreamRecord::Dropped {
+        encoding: 0,
         key: key(kinds::BLOB_CHUNK, Hash([chunk; 32])),
         original_len: 5,
         apply: Hash([22; 32]),
@@ -1438,9 +1472,10 @@ fn plb2_header_dependency_errors_are_specific_and_ordered() {
     // a header's own order and shape faults are still an invalid header
     let two = sorted(vec![a_key, root_key]);
     let bytes = batch(&header(root, two.clone()), std::slice::from_ref(&snap));
-    let records_at = PRELUDE as usize + HEAD + 57 + 2 * 33;
+    let records_at = PRELUDE as usize + HEAD + 57 + manifest_len() + 2 * 33;
     let reheader = |count: u32, keys: &[ObjectKey]| {
-        let mut hp = bytes[PRELUDE as usize + HEAD..PRELUDE as usize + HEAD + 53].to_vec();
+        let mut hp =
+            bytes[PRELUDE as usize + HEAD..PRELUDE as usize + HEAD + 53 + manifest_len()].to_vec();
         hp.extend_from_slice(&count.to_le_bytes());
         for k in keys {
             hp.push(k.kind);
