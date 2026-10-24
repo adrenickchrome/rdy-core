@@ -212,25 +212,34 @@ fn add_unknown_key(v: &mut Value, n: &mut usize) -> bool {
     }
 }
 
+fn refuses_everywhere<T: serde::de::DeserializeOwned + serde::Serialize>(record: &T, total: usize) {
+    let value = serde_yaml_ng::to_value(record).unwrap();
+    assert_eq!(mappings(&value), total);
+    serde_yaml_ng::from_value::<T>(value.clone()).unwrap();
+    for n in 0..total {
+        let mut edited = value.clone();
+        let mut at = n;
+        assert!(add_unknown_key(&mut edited, &mut at));
+        assert!(
+            serde_yaml_ng::from_value::<T>(edited).is_err(),
+            "mapping {n}"
+        );
+    }
+}
+
 #[test]
 fn ok3_dispute_inputs_reject_unknown_keys() {
-    // only the dispute's own keys are refused: Provenance is an existing record type
-    let value = serde_yaml_ng::to_value(dispute("r")).unwrap();
-    let mut edited = value.clone();
-    assert!(add_unknown_key(&mut edited, &mut 0));
-    assert!(serde_yaml_ng::from_value::<Dispute>(edited).is_err());
-    serde_yaml_ng::from_value::<Dispute>(value).unwrap();
-
+    // the record and its provenance both refuse unknown keys
+    refuses_everywhere(&dispute("r"), 2);
     let resolution = DisputeResolution {
         dispute: h(3),
         outcome: DisputeOutcome::Upheld,
         by: who("lee", None, 1),
         correction: Some(h(4)),
     };
-    let value = serde_yaml_ng::to_value(&resolution).unwrap();
-    assert!(mappings(&value) >= 2);
-    let mut edited = value.clone();
-    assert!(add_unknown_key(&mut edited, &mut 0));
-    assert!(serde_yaml_ng::from_value::<DisputeResolution>(edited).is_err());
-    serde_yaml_ng::from_value::<DisputeResolution>(value).unwrap();
+    refuses_everywhere(&resolution, 2);
+    // Provenance itself keeps its historical, permissive behaviour
+    let mut p = serde_yaml_ng::to_value(who("lee", None, 1)).unwrap();
+    add_unknown_key(&mut p, &mut 0);
+    serde_yaml_ng::from_value::<Provenance>(p).unwrap();
 }

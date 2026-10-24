@@ -342,21 +342,9 @@ fn ok3_check_request_inputs_reject_unknown_keys() {
     // the request, its subject, the code and the existing actor and relay records
     assert_eq!(total, 6);
     serde_yaml_ng::from_value::<CheckRequest>(value.clone()).unwrap();
-    // the request, subject and code refuse unknown keys; mapping order is the field order
-    let mut refused = 0;
+    // every mapping refuses an unknown key: the request, subject, code, requested_by,
+    // relayed_by and relay (mapping order is the field order)
     for n in 0..total {
-        let mut edited = value.clone();
-        let mut at = n;
-        assert!(add_unknown_key(&mut edited, &mut at));
-        if serde_yaml_ng::from_value::<CheckRequest>(edited).is_err() {
-            refused += 1;
-        }
-    }
-    assert!(
-        refused >= 3,
-        "request, subject and code must refuse unknown keys"
-    );
-    for n in [0usize, 1] {
         let mut edited = value.clone();
         let mut at = n;
         assert!(add_unknown_key(&mut edited, &mut at));
@@ -365,4 +353,22 @@ fn ok3_check_request_inputs_reject_unknown_keys() {
             "mapping {n}"
         );
     }
+    // the existing records keep their historical, permissive behaviour
+    let mut p = serde_yaml_ng::to_value(full().requested_by).unwrap();
+    add_unknown_key(&mut p, &mut 0);
+    serde_yaml_ng::from_value::<Provenance>(p).unwrap();
+    let mut a = serde_yaml_ng::to_value(full().relayed_by.unwrap()).unwrap();
+    add_unknown_key(&mut a, &mut 0);
+    serde_yaml_ng::from_value::<ActorRun>(a).unwrap();
+    let mut r = serde_yaml_ng::to_value(full().relay.unwrap()).unwrap();
+    add_unknown_key(&mut r, &mut 0);
+    serde_yaml_ng::from_value::<RelayEvidence>(r).unwrap();
+    // absent options still read as None
+    let mut bare = serde_yaml_ng::to_value(full()).unwrap();
+    let m = bare.as_mapping_mut().unwrap();
+    m.remove("relayed_by");
+    m.remove("relay");
+    m.remove("reason");
+    let bare: CheckRequest = serde_yaml_ng::from_value(bare).unwrap();
+    assert!(bare.relayed_by.is_none() && bare.relay.is_none());
 }

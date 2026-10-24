@@ -1,7 +1,8 @@
 //! A request for a check: a pure stored value. No writer exists yet.
 //!
 //! Declaration order is the wire format (postcard's field order and variant index). Unknown keys
-//! are refused. The carrier parses no git revision, no check name and no actor text.
+//! are refused at every level, including the actor and relay records. The carrier parses no git
+//! revision, no check name and no actor text.
 
 use crate::assessment::{MAX_ROWS, strictly_increasing};
 use crate::dispute::reason_in_bounds;
@@ -48,8 +49,11 @@ pub struct CheckRequest {
     pub case_hash: Hash,
     pub mode: CheckMode,
     pub reason: Option<String>,
+    #[serde(deserialize_with = "crate::strict::provenance")]
     pub requested_by: Provenance,
+    #[serde(default, deserialize_with = "crate::strict::actor_run_opt")]
     pub relayed_by: Option<ActorRun>,
+    #[serde(default, deserialize_with = "crate::strict::relay_opt")]
     pub relay: Option<RelayEvidence>,
 }
 

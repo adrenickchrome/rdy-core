@@ -18,6 +18,7 @@ pub mod plan;
 pub mod redaction;
 pub mod repo_id;
 pub mod signature;
+mod strict;
 pub mod tree;
 mod value;
 

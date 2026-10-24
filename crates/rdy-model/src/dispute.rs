@@ -1,7 +1,7 @@
 //! A dispute of a landing, and the record that resolves it: pure stored values.
 //!
 //! Declaration order is the wire format (postcard's field order and variant index). Unknown keys
-//! are refused. Actor text stays as it was written: no input grammar applies here.
+//! are refused, at every level, including the actor records. Actor text stays as it was written: no input grammar applies here.
 
 use crate::{Hash, Provenance};
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,7 @@ pub(crate) fn reason_in_bounds(reason: &str) -> bool {
 #[serde(deny_unknown_fields)]
 pub struct Dispute {
     pub landing: Hash,
+    #[serde(deserialize_with = "crate::strict::provenance")]
     pub opened_by: Provenance,
     pub reason: String,
     pub at_ms: i64,
@@ -53,6 +54,7 @@ pub enum DisputeOutcome {
 pub struct DisputeResolution {
     pub dispute: Hash,
     pub outcome: DisputeOutcome,
+    #[serde(deserialize_with = "crate::strict::provenance")]
     pub by: Provenance,
     pub correction: Option<Hash>,
 }
