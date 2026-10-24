@@ -6,8 +6,9 @@
 //! read. Bounds are checked before the source reaches the pinned crate: bytes first, then a
 //! linear count of statements and nesting depth. The count is not a second Mermaid parser: it
 //! follows the pinned parser only where a comment, a quote or a line end decides what is
-//! structure. Flowchart depth comes from one forward walk over the pinned grammar's structure,
-//! and class and state depth from the pinned line parsers' rules (see `flowchart`).
+//! structure. Flowchart depth comes from the pinned grammar's own reading, which reads a
+//! subgraph with no `end` again as nodes (see `flowchart`), and class and state depth from the
+//! pinned line parsers' rules.
 //!
 //! A panic in the pinned crate is a drawing fault, never a crash, and prints nothing.
 //!
@@ -726,7 +727,7 @@ mod tests {
 
     /// Lines for random flowcharts: subgraphs opened in every way the grammar allows, `end` in
     /// and out of labels and comments, every shape and link, and text the grammar refuses.
-    const PIECES: [&str; 44] = [
+    const PIECES: [&str; 47] = [
         "subgraph S{n}\n",
         "subgraph S{n}[title {n}]\n",
         "subgraph S{n} \"t {n}\"\n",
@@ -736,6 +737,8 @@ mod tests {
         "subgraph S{n}\n\n",
         "subgraph S{n}[\"q]\n",
         "subgraph S-->{n}\n",
+        "subgraph S{n}[(t]\n",
+        "subgraph S{n}--x\n",
         "end\n",
         "end\n",
         "end\n",
@@ -747,6 +750,7 @@ mod tests {
         "N{n}[\"q subgraph end ] x\"]\n",
         "N{n}(\nend\nx)\n",
         "N{n}[\"x\nend\"]\n",
+        "N{n}[\"y\"]\n",
         "N{n}[x\nsubgraph S{n}\nend]\n",
         "N{n} --> M{n}\n",
         "N{n} -->|subgraph end| M{n}\n",
@@ -776,7 +780,8 @@ mod tests {
     const CASES: usize = 1000;
 
     /// Random flowcharts: the walk's bound is never below the depth the pinned crate parses,
-    /// and equals it whenever the walk read the whole source with every subgraph closed.
+    /// and equals it whenever the walk read the whole source and every subgraph it attempted
+    /// closed.
     #[test]
     fn dgm1_flowchart_walk_matches_the_pinned_parser() {
         let mut seed: u64 = 0x5eed_d6a1;
@@ -814,6 +819,49 @@ mod tests {
             parsed > 100 && exact > 100,
             "parsed {parsed}, exact {exact}"
         );
+    }
+
+    /// The flowchart walk does work in proportion to the text, whatever the text holds: each
+    /// shape counts its operations (no timing), on inputs of about 60 KB built to make a scan
+    /// read the same bytes again.
+    #[test]
+    fn dgm1_flowchart_walk_is_linear() {
+        let fill = |head: &str, piece: &str, tail: &str| {
+            let n = (60000 - head.len() - tail.len()) / piece.len();
+            format!("{head}{}{tail}", piece.repeat(n))
+        };
+        let cases = [
+            // a dotted link's start, then one long run of dots with no end
+            fill("flowchart LR\nA -. ", ".", "X\n"),
+            fill("flowchart LR\nA -. x", ".", "- B\n"),
+            fill("flowchart LR\nA -. ", ". ", "X\n"),
+            fill("flowchart LR\nA -- ", "-x", "\n"),
+            fill("flowchart LR\nA == ", "=x", "\n"),
+            // labelled links that find no end on their line, one after another
+            fill("flowchart LR\n", "A -. x ", "\n"),
+            fill("flowchart LR\n", "subgraph a-.b;", "\n"),
+            // open subgraphs whose titles read differently as nodes
+            fill("flowchart LR\n", "subgraph S[\"x]\n", ""),
+            fill("flowchart LR\n", "subgraph S[\"x\" ]\n", ""),
+            fill("flowchart LR\n", "subgraph S[(x]\n", ""),
+            fill("flowchart LR\n", "subgraph S\nA[\"x]\n", ""),
+            fill("flowchart LR\n", "subgraph S\n", "end\n"),
+            // labels across lines, quotes and comments
+            fill("flowchart LR\nA[\"", "x\n", ""),
+            fill("flowchart LR\nA(", "x\n", ""),
+            fill("flowchart LR\n", "A[\"x] ", "\n"),
+            fill("flowchart LR\n", "A %% \"\n", ""),
+            fill("flowchart LR\n", "(", ""),
+            fill("flowchart LR\n", "A --> ", "B\n"),
+        ];
+        for src in &cases {
+            let (work, len) = flowchart::work(src);
+            assert!(
+                work <= 40 * len,
+                "{work} operations for {len} bytes: {:?}",
+                &src[..60]
+            );
+        }
     }
 
     /// The variable that makes [`dgm1_guarded_panic_child`] run.

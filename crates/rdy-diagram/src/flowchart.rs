@@ -1,40 +1,58 @@
-//! The flowchart depth bound: one forward walk over the pinned grammar's structure.
+//! The flowchart depth bound: the pinned grammar's own reading, with the one choice it takes
+//! back.
 //!
 //! The pinned crate first drops the lines its flowchart grammar cannot start (see
 //! [`preprocess`]), then parses the rest with a PEG grammar. The walk reads that same text the
-//! way the grammar's first attempt reads it: statements, comments, node shapes, edge labels and
-//! subgraph headers, each with the grammar's own terminators. So a keyword in a comment or a
-//! label is text, a subgraph can open after a node on the same line, and subgraphs in a row
-//! never add up. It keeps no parse tree: only a position, a depth and the deepest depth.
+//! way the grammar reads it: statements, comments, node shapes, edge labels and subgraph
+//! headers, each with the grammar's own terminators. So a keyword in a comment or a label is
+//! text, a subgraph can open after a node on the same line, and subgraphs in a row never add up.
 //!
-//! When the walk meets text that the grammar's first attempt cannot read, the pinned crate
-//! backtracks and can read earlier text another way. The walk does not follow that. So then,
-//! and when a subgraph is left open whose header reads differently as plain nodes, the bound is
-//! the larger of the walk's depth and the keyword bound ([`keyword_bound`]). No reading nests
-//! deeper than the keyword bound.
+//! The grammar takes back one choice after it has read on: a subgraph. It reads `subgraph`, its
+//! spec and its body up to the `end` that closes it. When no `end` comes, because the body
+//! meets the end of the text or text it cannot read, it reads the same header again as plain
+//! nodes and goes on from there. The walk does the same, whatever the title. A title can read
+//! differently as nodes (a quote that a later quote closes swallows the text between), and the
+//! walk then goes on where the nodes end.
+//!
+//! The grammar reads a statement that starts at a given place the same way at every depth, and
+//! a body that starts there the same way in every subgraph. So the walk keeps, for each place,
+//! where its statement ends and where a body that starts there ends, and reads each one once.
+//! It does not recurse: the bodies it is reading are a stack. Every search for a terminator is
+//! a lookup in a table built in one pass, so the walk is linear in the text.
+//!
+//! The bound is the deepest nesting the grammar attempts: a body counts while it is read, also
+//! when no `end` closes it and its header is then read as nodes. When the grammar cannot read
+//! the text at all, the bound is also at least the keyword bound ([`keyword_bound`]).
 
-use std::ops::Range;
+/// No entry yet.
+const NONE: u32 = u32::MAX;
+/// The statement or body that starts here cannot be read.
+const FAIL: u32 = u32::MAX - 1;
 
-/// The deepest subgraph nesting the pinned flowchart grammar can read in `src`, the diagram's
+/// The deepest subgraph nesting the pinned flowchart grammar attempts in `src`, the diagram's
 /// source with any BOM removed and CRLF as LF.
 pub(crate) fn depth(src: &str) -> usize {
     walk(src).0
 }
 
-/// The bound, and whether the walk read the whole source with every subgraph closed: then the
-/// bound is the depth the grammar reads.
+/// The bound, and whether it is exact: the grammar reads the whole text and every subgraph it
+/// attempts closes. Then the bound is the nesting the grammar parses.
 pub(crate) fn walk(src: &str) -> (usize, bool) {
     let text = preprocess(crate::after_front_matter(src));
-    let mut walk = Walk::new(&text);
-    let read = walk.flowchart();
-    let exact = read.is_ok() && walk.depth == 0;
-    // A subgraph left open is read again as plain nodes, which nests no deeper unless its
-    // header reads differently as nodes.
-    if read.is_ok() && !(walk.depth > 0 && walk.reread) {
-        (walk.deepest, exact)
-    } else {
-        (walk.deepest.max(keyword_bound(text.as_bytes())), exact)
+    let mut grammar = Grammar::new(&text);
+    match grammar.flowchart() {
+        Ok(deepest) => (deepest, !grammar.reread),
+        Err(deepest) => (deepest.max(keyword_bound(text.as_bytes())), false),
     }
+}
+
+/// The operations the walk takes on `src`, and the length of the text it walks.
+#[cfg(test)]
+pub(crate) fn work(src: &str) -> (usize, usize) {
+    let text = preprocess(crate::after_front_matter(src));
+    let mut grammar = Grammar::new(&text);
+    let _ = grammar.flowchart();
+    (grammar.work.get(), text.len())
 }
 
 /// The text the pinned crate's flowchart grammar parses: the lines after front matter, from
@@ -149,13 +167,13 @@ fn keywords(bytes: &[u8], mut found: impl FnMut(bool)) {
     }
 }
 
-/// The text the grammar's first attempt cannot read here.
-struct Stuck;
-
-/// The terminators the walk searches for. `Walk::at` holds where each one starts.
-const TERMINATORS: [&[u8]; 12] = [
-    b")", b"))", b"])", b"]]", b")]", b"}}", b"\\]", b"/]", b"]", b"}", b"|", b"\"",
+/// The terminators the walk searches for. `Grammar::at` holds where each one starts.
+const TERMINATORS: [&[u8]; 14] = [
+    b")", b"))", b"])", b"]]", b")]", b"}}", b"\\]", b"/]", b"]", b"}", b"|", b"\"", b"--", b"==",
 ];
+
+/// The header's and `direction`'s values.
+const DIRECTIONS: [&[u8]; 5] = [b"TD", b"TB", b"BT", b"LR", b"RL"];
 
 /// A node shape: its opener, the text that ends its label, and its closer at that point.
 struct Shape {
@@ -232,181 +250,344 @@ enum Link {
     Solid,
 }
 
-struct Walk<'a> {
+/// What the statement at a place gives.
+enum Step {
+    /// The statement's nesting, and where the next one starts.
+    Next(usize, u32),
+    /// A subgraph header whose body, which starts here, the walk has not read yet.
+    Open(usize),
+    /// Text the grammar cannot read, after this nesting attempted.
+    Stuck(u32),
+}
+
+/// A statement loop being read: the top level, or the body of a subgraph being attempted.
+struct Loop {
+    body: bool,
+    /// Where its next statement starts.
+    at: usize,
+    /// Where its statements start in the walk's list of statements read.
+    from: usize,
+}
+
+struct Grammar<'a> {
     text: &'a str,
     s: &'a [u8],
     i: usize,
-    depth: usize,
-    deepest: usize,
-    /// Whether a subgraph header the walk opened reads differently as plain nodes, should the
-    /// grammar read it again that way.
-    reread: bool,
-    /// Whether a `"` in a rectangle label can still open a quoted chunk: once one finds no
-    /// close, no later one can.
-    chunks: bool,
     /// For each terminator, the positions it starts at, in order.
     at: Vec<Vec<u32>>,
+    /// Where a dotted link's end (`-`? `.`+ `-`, no spaces) starts, in order.
+    dotted: Vec<u32>,
+    /// Where a line end (LF or CR) is, in order.
+    line_ends: Vec<u32>,
+    /// Where a line end or `;` is, in order.
+    stops: Vec<u32>,
+    /// For each place outside a quoted chunk, the `]` that ends a rectangle label read from
+    /// there.
+    rect: Vec<u32>,
+    /// For each statement start: where the next statement starts, and the nesting attempted.
+    next: Vec<u32>,
+    nest: Vec<u32>,
+    /// For each place a body line starts: where the body's closing `end` starts, and the
+    /// nesting attempted from there to the body's end.
+    body_end: Vec<u32>,
+    body_max: Vec<u32>,
+    /// Whether a subgraph found no `end` and its header was read again as nodes.
+    reread: bool,
+    #[cfg(test)]
+    work: std::cell::Cell<usize>,
 }
 
-impl<'a> Walk<'a> {
+impl<'a> Grammar<'a> {
     fn new(text: &'a str) -> Self {
         let s = text.as_bytes();
+        let n = s.len();
+        // the source is at most 65536 bytes, so every position fits in a u32
         let mut at = vec![Vec::new(); TERMINATORS.len()];
-        for i in 0..s.len() {
+        let (mut line_ends, mut stops) = (Vec::new(), Vec::new());
+        for i in 0..n {
             for (k, t) in TERMINATORS.iter().enumerate() {
                 if s[i..].starts_with(t) {
-                    // the source is at most 65536 bytes
                     at[k].push(i as u32);
                 }
             }
+            if matches!(s[i], b'\n' | b'\r') {
+                line_ends.push(i as u32);
+            }
+            if matches!(s[i], b'\n' | b'\r' | b';') {
+                stops.push(i as u32);
+            }
         }
-        Walk {
+        // a dotted link's end starts on each dot of a run that a `-` follows, and on the `-`
+        // just before such a run
+        let mut dotted = Vec::new();
+        let mut i = 0;
+        while i < n {
+            if s[i] != b'.' {
+                i += 1;
+                continue;
+            }
+            let run = i;
+            while i < n && s[i] == b'.' {
+                i += 1;
+            }
+            if s.get(i) == Some(&b'-') {
+                if run > 0 && s[run - 1] == b'-' {
+                    dotted.push(run as u32 - 1);
+                }
+                dotted.extend(run as u32..i as u32);
+            }
+        }
+        // `text_rect`: a `"` opens a chunk that the next `"` not after `\` closes; with no
+        // close it is text. Read from the right, each place points past its chunks to its `]`.
+        let mut rect = vec![NONE; n + 1];
+        let mut quote = NONE;
+        for k in (0..n).rev() {
+            rect[k] = match s[k] {
+                b']' => k as u32,
+                b'"' if quote != NONE => rect[quote as usize + 1],
+                _ => rect[k + 1],
+            };
+            if s[k] == b'"' && (k == 0 || s[k - 1] != b'\\') {
+                quote = k as u32;
+            }
+        }
+        Grammar {
             text,
             s,
             i: 0,
-            depth: 0,
-            deepest: 0,
-            reread: false,
-            chunks: true,
             at,
+            dotted,
+            line_ends,
+            stops,
+            rect,
+            next: vec![NONE; n + 1],
+            nest: vec![0; n + 1],
+            body_end: vec![NONE; n + 1],
+            body_max: vec![0; n + 1],
+            reread: false,
+            #[cfg(test)]
+            work: Default::default(),
         }
     }
 
-    /// `flowchart = SOI ~ header ~ separator ~ ((statement | comment) ~ separator?)* ~ EOI`,
-    /// with each `subgraph_stmt` read without recursion: its body is the same loop one level
-    /// deeper, and it ends at a body line that is `end` before a line end, `;` or the end.
-    fn flowchart(&mut self) -> Result<(), Stuck> {
+    /// `flowchart = SOI ~ header ~ separator ~ ((statement | comment) ~ separator?)* ~ EOI`.
+    /// Ok with the deepest nesting attempted when the grammar reads the whole text; else Err
+    /// with the deepest nesting attempted before it stops.
+    fn flowchart(&mut self) -> Result<usize, usize> {
+        let Some(start) = self.header() else {
+            return Err(0);
+        };
+        let mut deepest = 0;
+        let mut loops = vec![Loop {
+            body: false,
+            at: start,
+            from: 0,
+        }];
+        // the statements the loops have read so far, with their nesting
+        let mut read: Vec<(u32, u32)> = Vec::new();
+        loop {
+            let top = loops.len() - 1;
+            let Loop { body, at, from } = loops[top];
+            if !body && at == self.s.len() {
+                return Ok(deepest);
+            }
+            if body {
+                // `subgraph_body_line = !(end_keyword ~ (NEWLINE | ";" | EOI)) ~ ...`
+                let ended = if self.body_end[at] != NONE {
+                    Some((self.body_end[at], self.body_max[at]))
+                } else if at == self.s.len() {
+                    Some((FAIL, 0))
+                } else if self.closes(at) {
+                    Some((at as u32, 0))
+                } else {
+                    None
+                };
+                if let Some((end, max)) = ended {
+                    self.finish(&mut read, from, at, end, max);
+                    loops.pop();
+                    continue;
+                }
+            }
+            match self.step(at) {
+                Step::Next(next, nest) => {
+                    read.push((at as u32, nest));
+                    loops[top].at = next;
+                    if !body {
+                        deepest = deepest.max(nest as usize);
+                    }
+                }
+                Step::Open(line) => loops.push(Loop {
+                    body: true,
+                    at: line,
+                    from: read.len(),
+                }),
+                Step::Stuck(nest) if !body => return Err(deepest.max(nest as usize)),
+                Step::Stuck(nest) => {
+                    self.finish(&mut read, from, at, FAIL, nest);
+                    loops.pop();
+                }
+            }
+        }
+    }
+
+    /// Ends the body loop whose statements are `read[from..]` and that stopped at `at`. `end`
+    /// is where its closing `end` starts, or FAIL; `max` is the nesting attempted from `at` on.
+    /// Each statement start in it gets the same end, and the nesting from there on.
+    fn finish(&mut self, read: &mut Vec<(u32, u32)>, from: usize, at: usize, end: u32, max: u32) {
+        self.body_end[at] = end;
+        self.body_max[at] = max;
+        let mut deepest = max;
+        for &(p, nest) in read[from..].iter().rev() {
+            deepest = deepest.max(nest);
+            self.body_end[p as usize] = end;
+            self.body_max[p as usize] = deepest;
+        }
+        read.truncate(from);
+    }
+
+    /// The statement (or comment) that starts at `at`, then `separator?`: where the next one
+    /// starts. A subgraph whose body closes is its header to its `end`; one whose body does not
+    /// close is read as nodes. Either way its nesting is one more than its body's.
+    fn step(&mut self, at: usize) -> Step {
+        self.tick();
+        match self.next[at] {
+            FAIL => return Step::Stuck(self.nest[at]),
+            NONE => {}
+            next => return Step::Next(next as usize, self.nest[at]),
+        }
+        let mut nest = 0;
+        let end = if self.s[at..].starts_with(b"%%") {
+            Some(self.line_end(at))
+        } else if let Some(body) = self.subgraph_header(at) {
+            let body = self.skip_ws(body);
+            match self.body_end[body] {
+                NONE => return Step::Open(body),
+                FAIL => {
+                    self.reread = true;
+                    nest = self.body_max[body] + 1;
+                    self.i = at;
+                    self.statement().then_some(self.i)
+                }
+                end => {
+                    nest = self.body_max[body] + 1;
+                    Some(end as usize + 3)
+                }
+            }
+        } else {
+            self.i = at;
+            self.statement().then_some(self.i)
+        };
+        self.nest[at] = nest;
+        match end {
+            Some(end) => {
+                let next = self.after(end);
+                self.next[at] = next as u32;
+                Step::Next(next, nest)
+            }
+            None => {
+                self.next[at] = FAIL;
+                Step::Stuck(nest)
+            }
+        }
+    }
+
+    /// `header ~ separator`: where the first statement starts.
+    fn header(&mut self) -> Option<usize> {
+        self.i = 0;
         self.ws();
         if !(self.word(b"graph") || self.word(b"flowchart")) {
-            return Err(Stuck);
+            return None;
         }
         self.ws();
-        for d in [b"TD", b"TB", b"BT", b"LR", b"RL"] {
+        for d in DIRECTIONS {
             if self.word(d) {
                 break;
             }
         }
         self.ws();
-        if !self.separators() {
-            return Err(Stuck);
-        }
-        loop {
-            self.ws();
-            if self.i == self.s.len() {
-                return Ok(());
-            }
-            if self.depth > 0 && self.closes() {
-                self.i += 3;
-                self.depth -= 1;
-            } else if self.at_bytes(b"%%") {
-                self.i = self.line_end(self.i);
-            } else if self.subgraph_header() {
-                self.depth += 1;
-                self.deepest = self.deepest.max(self.depth);
-                continue;
-            } else if !self.statement() {
-                return Err(Stuck);
-            }
-            self.ws();
-            self.separators();
-        }
-    }
-
-    /// Whether a body line here is the `end` that closes its subgraph.
-    fn closes(&self) -> bool {
-        if !self.s[self.i..]
-            .get(..3)
-            .is_some_and(|w| w.eq_ignore_ascii_case(b"end"))
-        {
-            return false;
-        }
-        let mut j = self.i + 3;
-        while matches!(self.s.get(j), Some(b' ' | b'\t')) {
-            j += 1;
-        }
-        matches!(self.s.get(j), None | Some(b'\n' | b'\r' | b';'))
-    }
-
-    /// A subgraph header that opens a body: `subgraph`, its spec, then one line end or `;`, and
-    /// a body line next. The grammar reads a header with a separator or the end right after it
-    /// as plain nodes, because its body needs a line before `end`. Otherwise nothing moves.
-    fn subgraph_header(&mut self) -> bool {
-        let start = self.i;
-        if !self.word(b"subgraph") {
-            return false;
-        }
-        self.ws();
-        let reread = match self.subgraph_spec() {
-            Some(reread) => reread,
-            None => {
-                self.i = start;
-                return false;
-            }
-        };
-        self.ws();
         if self.newline().is_none() && !self.byte(b';') {
-            self.i = start;
-            return false;
+            return None;
         }
-        let body = self.i;
+        Some(self.after(self.i))
+    }
+
+    /// Where the next statement starts after one that ends at `end`: past spaces, separators
+    /// and spaces.
+    fn after(&mut self, end: usize) -> usize {
+        self.i = end;
         self.ws();
-        if self.i == self.s.len() || self.newline().is_some() || self.at_bytes(b";") {
-            self.i = start;
+        while self.newline().is_some() || self.byte(b';') {
+            self.ws();
+        }
+        self.i
+    }
+
+    fn skip_ws(&mut self, at: usize) -> usize {
+        self.i = at;
+        self.ws();
+        self.i
+    }
+
+    /// Whether a body line at `at` is the `end` that closes its subgraph: `end` before a line
+    /// end, `;` or the end of the text.
+    fn closes(&mut self, at: usize) -> bool {
+        self.i = at;
+        if !self.word(b"end") {
             return false;
         }
-        self.i = body;
-        self.reread |= reread;
-        true
+        self.ws();
+        matches!(self.s.get(self.i), None | Some(b'\n' | b'\r' | b';'))
+    }
+
+    /// `subgraph_keyword ~ subgraph_spec ~ (NEWLINE | ";")` at `at`: where its body starts.
+    fn subgraph_header(&mut self, at: usize) -> Option<usize> {
+        self.i = at;
+        if !self.word(b"subgraph") {
+            return None;
+        }
+        self.ws();
+        if !self.subgraph_spec() {
+            return None;
+        }
+        self.ws();
+        (self.newline().is_some() || self.byte(b';')).then_some(self.i)
     }
 
     /// `subgraph_spec`: an id with a `[title]`, an id with a `"title"`, a `"title"`, or an id.
-    /// Some means it matched; its flag says whether plain nodes read it differently: a title
-    /// that a node shape or a quoted chunk would end elsewhere, or an id that a node id would
-    /// end early.
-    fn subgraph_spec(&mut self) -> Option<bool> {
-        let start = self.i;
-        if let Some(id) = self.subgraph_id() {
-            let node_id_differs = self.s[id.clone()]
-                .windows(2)
-                .any(|w| w[0] == b'-' && matches!(w[1], b'-' | b'>' | b'.'));
-            let after_id = self.i;
-            self.ws();
-            if self.byte(b'[') {
-                let shape_differs = matches!(self.s.get(self.i), Some(b'[' | b'(' | b'/' | b'\\'));
-                self.ws();
-                if let Some(end) = self.label_end(self.i, b"]") {
-                    let quoted = self.s[self.i..end].contains(&b'"');
-                    self.i = end + 1;
-                    return Some(node_id_differs || shape_differs || quoted);
-                }
-            }
-            self.i = after_id;
-            self.ws();
-            if self.quoted_title() {
-                return Some(node_id_differs);
-            }
-            self.i = after_id;
-            return Some(node_id_differs);
+    fn subgraph_spec(&mut self) -> bool {
+        if !self.subgraph_id() {
+            return self.quoted_title();
         }
-        self.i = start;
-        self.quoted_title().then_some(false)
+        let after_id = self.i;
+        self.ws();
+        if self.byte(b'[') {
+            self.ws();
+            if let Some(end) = self.label_end(self.i, b"]") {
+                self.i = end + 1;
+                return true;
+            }
+        }
+        self.i = after_id;
+        self.ws();
+        if !self.quoted_title() {
+            self.i = after_id;
+        }
+        true
     }
 
     /// `subgraph_id = @{ (LETTER | NUMBER | "_") ~ (LETTER | NUMBER | "_" | "-" | ".")* }`.
-    fn subgraph_id(&mut self) -> Option<Range<usize>> {
-        let start = self.i;
-        let first = self.char_here()?;
-        if !(is_letter_or_number(first) || first == '_') {
-            return None;
+    fn subgraph_id(&mut self) -> bool {
+        match self.char_here() {
+            Some(c) if is_letter_or_number(c) || c == '_' => self.i += c.len_utf8(),
+            _ => return false,
         }
-        self.i += first.len_utf8();
         while let Some(c) = self.char_here() {
             if !(is_letter_or_number(c) || matches!(c, '_' | '-' | '.')) {
                 break;
             }
             self.i += c.len_utf8();
         }
-        Some(start..self.i)
+        true
     }
 
     /// `"` ~ text without `"` ~ `"`, the text not empty.
@@ -428,14 +609,13 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// One statement other than a subgraph that opens: a keyword line or a vertex statement.
+    /// One statement other than a subgraph whose body closes: a keyword line or a vertex
+    /// statement. Starts at `self.i`.
     fn statement(&mut self) -> bool {
         for kw in [&b"style"[..], b"classDef", b"class", b"click", b"linkStyle"] {
             if self.keyword_at(kw) {
-                self.i += kw.len();
-                while self.i < self.s.len() && !matches!(self.s[self.i], b'\n' | b'\r' | b';') {
-                    self.i += 1;
-                }
+                // to the line end or `;`
+                self.i = next_in(&self.stops, self.i).unwrap_or(self.s.len());
                 return true;
             }
         }
@@ -443,10 +623,7 @@ impl<'a> Walk<'a> {
             let start = self.i;
             self.i += b"direction".len();
             self.ws();
-            if [b"TD", b"TB", b"BT", b"LR", b"RL"]
-                .iter()
-                .any(|d| self.word(*d))
-            {
+            if DIRECTIONS.iter().any(|d| self.word(d)) {
                 return true;
             }
             self.i = start;
@@ -456,6 +633,7 @@ impl<'a> Walk<'a> {
 
     /// A keyword with no letter, digit or `_` after it, in any case. Nothing moves.
     fn keyword_at(&self, kw: &[u8]) -> bool {
+        self.tick();
         let Some(head) = self.s[self.i..].get(..kw.len()) else {
             return false;
         };
@@ -595,31 +773,17 @@ impl<'a> Walk<'a> {
         false
     }
 
-    /// `"[" ~ text_rect ~ "]"`: the label runs to the first `]` outside quoted chunks. A chunk
-    /// is `"` to the next `"` that is not `\"`; a `"` with no close is text.
+    /// `"[" ~ text_rect ~ "]"`: the label runs to the first `]` outside quoted chunks, and is
+    /// not empty.
     fn rectangle(&mut self) -> bool {
         let start = self.i;
         if !self.byte(b'[') {
             return false;
         }
         self.ws();
-        let mut j = self.i;
-        while j < self.s.len() {
-            match self.s[j] {
-                b']' if j > self.i => {
-                    self.i = j + 1;
-                    return true;
-                }
-                b']' => break,
-                b'"' if self.chunks => match crate::close_quote(self.s, j + 1, false) {
-                    Some(close) => j = close + 1,
-                    None => {
-                        self.chunks = false;
-                        j += 1;
-                    }
-                },
-                _ => j += 1,
-            }
+        if self.s.get(self.i).is_some_and(|b| *b != b']') && self.rect[self.i] != NONE {
+            self.i = self.rect[self.i] as usize + 1;
+            return true;
         }
         self.i = start;
         false
@@ -677,38 +841,23 @@ impl<'a> Walk<'a> {
         }
         self.ws();
         let text = self.i;
-        let mut j = text;
-        while j < self.s.len() && !matches!(self.s[j], b'\n' | b'\r') {
-            if self.link_end_at(link, j) {
-                break;
-            }
-            j += 1;
-        }
-        if j == text || j == self.s.len() || matches!(self.s[j], b'\n' | b'\r') {
-            return false;
-        }
-        self.i = j;
-        self.link_end(link)
-    }
-
-    /// Whether a link's end starts at `j`, read with no spaces: `-`? `.`+ `-` for dotted,
-    /// `=` `=`+ for thick, `-` `-`+ for solid.
-    fn link_end_at(&self, link: Link, j: usize) -> bool {
-        let s = self.s;
-        match link {
+        // the first place the link's end starts, read with no spaces: `-`? `.`+ `-` for
+        // dotted, `=` `=`+ for thick, `-` `-`+ for solid
+        let end = match link {
             Link::Dotted => {
-                let mut k = j;
-                if s.get(k) == Some(&b'-') {
-                    k += 1;
-                }
-                let dots = k;
-                while s.get(k) == Some(&b'.') {
-                    k += 1;
-                }
-                k > dots && s.get(k) == Some(&b'-')
+                self.tick();
+                next_in(&self.dotted, text)
             }
-            Link::Thick => s[j..].starts_with(b"=="),
-            Link::Solid => s[j..].starts_with(b"--"),
+            Link::Thick => self.next_at(b"==", text),
+            Link::Solid => self.next_at(b"--", text),
+        };
+        let line_end = self.line_end(text);
+        match end {
+            Some(end) if end > text && end < line_end => {
+                self.i = end;
+                self.link_end(link)
+            }
+            _ => false,
         }
     }
 
@@ -814,6 +963,7 @@ impl<'a> Walk<'a> {
 
     /// An optional `<`, `x` or `o` before a link; the walk keeps it, as the grammar does.
     fn arrow_left(&mut self) {
+        self.tick();
         if matches!(self.s.get(self.i), Some(b'<' | b'x' | b'o')) {
             self.i += 1;
         }
@@ -838,29 +988,20 @@ impl<'a> Walk<'a> {
 
     /// The first place at or after `from` where the terminator `t` starts.
     fn next_at(&self, t: &[u8], from: usize) -> Option<usize> {
+        self.tick();
         let k = TERMINATORS.iter().position(|x| *x == t)?;
-        let at = &self.at[k];
-        let n = at.partition_point(|p| (*p as usize) < from);
-        at.get(n).map(|p| *p as usize)
+        next_in(&self.at[k], from)
     }
 
-    /// One or more line ends or `;`, spaces between them.
-    fn separators(&mut self) -> bool {
-        if self.newline().is_none() && !self.byte(b';') {
-            return false;
-        }
-        loop {
-            let before = self.i;
-            self.ws();
-            if self.newline().is_none() && !self.byte(b';') {
-                self.i = before;
-                return true;
-            }
-        }
+    /// The position of the next line end at or after `i`, or the end.
+    fn line_end(&self, i: usize) -> usize {
+        self.tick();
+        next_in(&self.line_ends, i).unwrap_or(self.s.len())
     }
 
     /// A line end: LF, CRLF or a lone CR. Moves past it.
     fn newline(&mut self) -> Option<()> {
+        self.tick();
         match self.s.get(self.i) {
             Some(b'\n') => self.i += 1,
             Some(b'\r') => {
@@ -874,21 +1015,22 @@ impl<'a> Walk<'a> {
         Some(())
     }
 
-    /// The position of the next line end at or after `i`, or the end.
-    fn line_end(&self, i: usize) -> usize {
-        self.s[i..]
-            .iter()
-            .position(|b| matches!(b, b'\n' | b'\r'))
-            .map_or(self.s.len(), |n| i + n)
+    /// Counts one operation, for the linearity test.
+    fn tick(&self) {
+        #[cfg(test)]
+        self.work.set(self.work.get() + 1);
     }
 
     fn ws(&mut self) {
+        self.tick();
         while matches!(self.s.get(self.i), Some(b' ' | b'\t')) {
+            self.tick();
             self.i += 1;
         }
     }
 
     fn byte(&mut self, b: u8) -> bool {
+        self.tick();
         let found = self.s.get(self.i) == Some(&b);
         if found {
             self.i += 1;
@@ -897,7 +1039,8 @@ impl<'a> Walk<'a> {
     }
 
     fn bytes(&mut self, b: &[u8]) -> bool {
-        let found = self.at_bytes(b);
+        self.tick();
+        let found = self.s[self.i..].starts_with(b);
         if found {
             self.i += b.len();
         }
@@ -908,17 +1051,15 @@ impl<'a> Walk<'a> {
     fn run(&mut self, b: u8) -> bool {
         let start = self.i;
         while self.s.get(self.i) == Some(&b) {
+            self.tick();
             self.i += 1;
         }
         self.i > start
     }
 
-    fn at_bytes(&self, b: &[u8]) -> bool {
-        self.s[self.i..].starts_with(b)
-    }
-
     /// An ASCII word in any case, with nothing required after it.
     fn word(&mut self, w: &[u8]) -> bool {
+        self.tick();
         let found = self.s[self.i..]
             .get(..w.len())
             .is_some_and(|head| head.eq_ignore_ascii_case(w));
@@ -929,8 +1070,15 @@ impl<'a> Walk<'a> {
     }
 
     fn char_here(&self) -> Option<char> {
+        self.tick();
         self.text[self.i..].chars().next()
     }
+}
+
+/// The first entry of the ordered list `at` that is at or after `from`.
+fn next_in(at: &[u32], from: usize) -> Option<usize> {
+    let n = at.partition_point(|p| (*p as usize) < from);
+    at.get(n).map(|p| *p as usize)
 }
 
 /// The grammar's `LETTER | NUMBER`, as Rust's alphabetic and numeric classes give it.

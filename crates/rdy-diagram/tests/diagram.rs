@@ -1053,6 +1053,56 @@ fn dgm1_flowchart_depth_reads_structure_only() {
     assert_eq!(short(render(&after_label(33))), invalid(OVER_DEPTH));
 }
 
+/// A subgraph left open is read again as plain nodes, also when its title reads differently
+/// that way. Its body is read as structure both times, so keywords in comments and labels and
+/// subgraphs in a row add no depth. Nesting the parser attempts is still refused at 33.
+#[test]
+fn dgm1_open_subgraphs_are_read_again_as_structure() {
+    let opens = "subgraph ".repeat(33);
+    let closes = "end ".repeat(33);
+    // a title whose quote no later quote closes, and one whose quote a later label closes
+    let open = "subgraph S[\"x]\n";
+    for src in [
+        format!("flowchart LR\n{open}%% {opens}{closes}\n"),
+        format!("flowchart LR\n{open}A[\"{opens}{closes}\"]\n"),
+        format!("flowchart LR\n{open}A[\"y\"]\n%% {opens}{closes}\n"),
+        format!("flowchart LR\n{open}A[\"y\"] --> B[{opens}{closes}]\n"),
+        format!("flowchart LR\n{open}A -->|{opens}{closes}| B\n"),
+        format!(
+            "flowchart LR\n{open}{}",
+            (0..70)
+                .map(|i| format!("subgraph T{i}\nA{i}\nend\n"))
+                .collect::<String>()
+        ),
+        format!(
+            "flowchart LR\n{open}A[\"y\"]\n{}",
+            (0..70)
+                .map(|i| format!("subgraph T{i};A{i};end;"))
+                .collect::<String>()
+        ),
+        // the other titles that read differently as nodes
+        format!("flowchart LR\nsubgraph S[(x]\n%% {opens}{closes}\n"),
+        format!("flowchart LR\nsubgraph a--b\n%% {opens}{closes}\n"),
+    ] {
+        assert!(drawn(&render(&src)), "{src}");
+    }
+    // nesting inside or after an open subgraph is still refused at 33 attempted levels
+    for open in ["subgraph S[\"x]\n", "subgraph S[(x]\n", "subgraph S\n"] {
+        let after = |n: usize| {
+            nest(
+                "flowchart TD",
+                open,
+                n,
+                |i| format!("subgraph T{i}\n"),
+                "B\n",
+                "end\n",
+            )
+        };
+        assert!(drawn(&render(&after(31))), "{open}");
+        assert_eq!(short(render(&after(32))), invalid(OVER_DEPTH), "{open}");
+    }
+}
+
 /// A source the pinned crate panics on while it lays the drawing out: an empty subgraph inside
 /// another.
 const LIBRARY_PANICS: &str = "flowchart TD\nsubgraph S0\nsubgraph S1\nend\nend\n";
