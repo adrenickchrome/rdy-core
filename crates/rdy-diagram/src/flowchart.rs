@@ -17,6 +17,9 @@
 //! The grammar reads a statement that starts at a given place the same way at every depth, and
 //! a body that starts there the same way in every subgraph. So the walk keeps, for each place,
 //! where its statement ends and where a body that starts there ends, and reads each one once.
+//! The rest of a vertex statement after a node's head (its class, then `&` nodes and links)
+//! also reads the same from a given place. Titles read as nodes can reach one closer from many
+//! starts, so the walk also keeps where the statement ends for each such place.
 //! It does not recurse: the bodies it is reading are a stack. Every search for a terminator is
 //! a lookup in a table built in one pass, so the walk is linear in the text.
 //!
@@ -291,6 +294,12 @@ struct Grammar<'a> {
     /// nesting attempted from there to the body's end.
     body_end: Vec<u32>,
     body_max: Vec<u32>,
+    /// For each place a node's head (its identifier and shape) ends in a vertex statement:
+    /// where the statement ends. Titles read as nodes can reach the same closer from many
+    /// starts, and the rest of the statement is then read once.
+    rest_end: Vec<u32>,
+    /// The heads [`Grammar::rest`] passes before it knows where the statement ends.
+    heads: Vec<u32>,
     /// Whether a subgraph found no `end` and its header was read again as nodes.
     reread: bool,
     #[cfg(test)]
@@ -364,6 +373,8 @@ impl<'a> Grammar<'a> {
             nest: vec![0; n + 1],
             body_end: vec![NONE; n + 1],
             body_max: vec![0; n + 1],
+            rest_end: vec![NONE; n + 1],
+            heads: Vec::new(),
             reread: false,
             #[cfg(test)]
             work: Default::default(),
@@ -644,58 +655,73 @@ impl<'a> Grammar<'a> {
                 .is_some_and(|c| is_letter_or_number(c) || c == '_')
     }
 
-    /// `vertex_statement = node_group ~ edge_segment*`.
+    /// `vertex_statement = node_group ~ edge_segment*`, with `node_group = node ~ ("&" ~
+    /// node)*` and `node = identifier ~ shape? ~ class_annotation?`.
     fn vertex_statement(&mut self) -> bool {
-        if !self.node_group() {
+        if !self.node_head() {
             return false;
         }
-        loop {
-            let before = self.i;
-            self.ws();
-            if !(self.edge_connector() && {
-                self.ws();
-                self.node_group()
-            }) {
-                self.i = before;
-                return true;
-            }
-        }
+        self.rest();
+        true
     }
 
-    /// `node_group = node ~ ("&" ~ node)*`.
-    fn node_group(&mut self) -> bool {
-        if !self.node() {
-            return false;
-        }
+    /// The rest of a vertex statement after a node's head, from `self.i`: the node's class,
+    /// then `("&" ~ node)*`, then `edge_segment*`. After each node the rest reads the same, so
+    /// it depends only on where the head ends. Each place gets its statement end once, in
+    /// `rest_end`.
+    fn rest(&mut self) {
+        let mut heads = std::mem::take(&mut self.heads);
         loop {
-            let before = self.i;
-            self.ws();
-            if !(self.byte(b'&') && {
-                self.ws();
-                self.node()
-            }) {
-                self.i = before;
-                return true;
+            self.tick();
+            let head = self.i;
+            if self.rest_end[head] != NONE {
+                self.i = self.rest_end[head] as usize;
+                break;
             }
+            heads.push(head as u32);
+            // `class_annotation?`
+            self.ws();
+            if !(self.bytes(b":::") && {
+                self.ws();
+                self.class_name()
+            }) {
+                self.i = head;
+            }
+            let node_end = self.i;
+            // `"&" ~ node`, which the node's group tries first
+            self.ws();
+            if self.byte(b'&') && {
+                self.ws();
+                self.node_head()
+            } {
+                continue;
+            }
+            // else `edge_connector ~ node_group`
+            self.i = node_end;
+            self.ws();
+            if self.edge_connector() && {
+                self.ws();
+                self.node_head()
+            } {
+                continue;
+            }
+            self.i = node_end;
+            break;
         }
+        for head in heads.drain(..) {
+            self.rest_end[head as usize] = self.i as u32;
+        }
+        self.heads = heads;
     }
 
-    /// `node = identifier ~ shape? ~ class_annotation?`.
-    fn node(&mut self) -> bool {
+    /// A node's head: `identifier ~ shape?`.
+    fn node_head(&mut self) -> bool {
         if !self.identifier() {
             return false;
         }
         let before = self.i;
         self.ws();
         if !self.shape() {
-            self.i = before;
-        }
-        let before = self.i;
-        self.ws();
-        if !(self.bytes(b":::") && {
-            self.ws();
-            self.class_name()
-        }) {
             self.i = before;
         }
         true

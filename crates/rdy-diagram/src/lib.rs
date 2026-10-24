@@ -854,13 +854,44 @@ mod tests {
             fill("flowchart LR\n", "(", ""),
             fill("flowchart LR\n", "A --> ", "B\n"),
         ];
-        for src in &cases {
+        // open headers whose titles, read as nodes, all reach one closer and then the same
+        // long rest of a statement: a chain of links, `&` nodes, or a class name
+        let shared = |piece: &str, close: &str, rest: &str| {
+            let n = (60000 - 20 - close.len()) / (piece.len() + rest.len());
+            format!(
+                "flowchart LR\n{}{close}{}\n",
+                piece.repeat(n),
+                rest.repeat(n)
+            )
+        };
+        let shared_rests = [
+            shared("subgraph S[(x]\n", "A[(z)]", " --> B"),
+            shared("subgraph S[(x]\n", "A[(z)]", " & B"),
+            shared("subgraph S[(x]\n", "A[(z)]:::", "c"),
+            shared("subgraph S[(x]\n", "A[(z)]", " -- y --> B[q] & C"),
+            shared("subgraph S[\"x]\n", "A[\"z\"]", " --> B"),
+            shared("subgraph S[\"x]\n", "\"]", " ==> B"),
+        ];
+        let mut over = Vec::new();
+        for src in cases.iter().chain(&shared_rests) {
             let (work, len) = flowchart::work(src);
-            assert!(
-                work <= 40 * len,
-                "{work} operations for {len} bytes: {:?}",
-                &src[..60]
+            if work > 40 * len {
+                over.push(format!(
+                    "{work} operations for {len} bytes: {:?} .. {:?}",
+                    &src[..60],
+                    &src[src.len() - 40..]
+                ));
+            }
+        }
+        assert!(over.is_empty(), "{over:#?}");
+        // the shared rest changes no depth: every open header still counts
+        for n in [32, 33, 40] {
+            let src = format!(
+                "flowchart LR\n{}A[(z)]{}\n",
+                "subgraph S[(x]\n".repeat(n),
+                " --> B".repeat(n)
             );
+            assert_eq!(flowchart::depth(&src), n, "{n} open headers");
         }
     }
 
