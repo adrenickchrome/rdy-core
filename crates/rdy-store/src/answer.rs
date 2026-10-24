@@ -51,7 +51,7 @@
 //! `put_answer` refuses an answer that breaks a rule of the record with `StoreError::Refused`.
 use crate::error::StoreError;
 use crate::index::hash_from;
-use crate::store::{Frames, encode};
+use crate::store::Frames;
 use crate::{Store, StoreReader, kinds};
 use rdy_model::{Answer, AnswerAct, EvidenceKind, Hash};
 
@@ -218,7 +218,7 @@ impl Store {
         a: &Answer,
         extra: Vec<(u8, Vec<u8>)>,
     ) -> Result<(Hash, Frames), StoreError> {
-        let bytes = encode(a);
+        let (kind, bytes) = crate::codec::item(kinds::ANSWER, a);
         let id = Hash::of(&bytes);
         if let Some(rule) = invalid(a) {
             return Err(StoreError::Refused(damage(&id, rule)));
@@ -235,14 +235,14 @@ impl Store {
         let is_block = |t: &Hash| -> Result<bool, StoreError> {
             Ok(extra
                 .iter()
-                .any(|(k, p)| *k == kinds::BLOCK && Hash::of(p) == *t)
+                .any(|(k, p)| crate::codec::logical_kind(*k) == kinds::BLOCK && Hash::of(p) == *t)
                 || self.has_kind(kinds::BLOCK, t)?)
         };
         if let Some(rule) = invalid_targets(a, is_block)? {
             return Err(StoreError::Refused(damage(&id, rule)));
         }
         let mut items = extra;
-        items.push((kinds::ANSWER, bytes));
+        items.push((kind, bytes));
         items.extend(self.ref_items_pub(vec![(ref_of(a), id.0.to_vec())]));
         Ok((id, items))
     }

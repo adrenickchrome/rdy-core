@@ -240,7 +240,7 @@ impl Store {
             ));
         };
         let (op, _, head) = self.close_part(&fresh.view, &fresh.head, REAFFIRM_CLOSE_REASON, by);
-        prepared.items.push((kinds::VIEW_OP, op));
+        prepared.items.push(op);
         prepared
             .items
             .extend(self.ref_items_pub(vec![(view_ref(&fresh.view), encode(&head))]));
@@ -326,30 +326,36 @@ impl Store {
                 let aid = Hash::of(&frames[pos].1);
                 items.extend(frames);
                 let by = &accept.provenance;
-                let commit = encode(&ViewOp {
-                    view: p.view.clone(),
-                    prev: Some(head.head),
-                    op: ViewOpKind::Commit { change: aid },
-                    actor: by.actor.clone(),
-                    run: by.run.clone(),
-                    at_ms: by.at_ms,
-                });
-                let tip = Hash::of(&commit);
-                items.push((kinds::VIEW_OP, commit));
+                let commit = crate::codec::item(
+                    kinds::VIEW_OP,
+                    &ViewOp {
+                        view: p.view.clone(),
+                        prev: Some(head.head),
+                        op: ViewOpKind::Commit { change: aid },
+                        actor: by.actor.clone(),
+                        run: by.run.clone(),
+                        at_ms: by.at_ms,
+                    },
+                );
+                let tip = Hash::of(&commit.1);
+                items.push(commit);
                 final_changes.push(aid);
-                let fin = encode(&Proposal {
-                    stable: Some(stable),
-                    prev: Some(req.proposal),
-                    title: p.title.clone(),
-                    view: p.view.clone(),
-                    changes: final_changes.clone(),
-                    alternative: p.alternative.clone(),
-                    provenance: p.provenance.clone(),
-                    canon_at: p.canon_at,
-                    summary: p.summary.clone(),
-                });
-                let final_id = Hash::of(&fin);
-                items.push((kinds::PROPOSAL, fin));
+                let fin = crate::codec::item(
+                    kinds::PROPOSAL,
+                    &Proposal {
+                        stable: Some(stable),
+                        prev: Some(req.proposal),
+                        title: p.title.clone(),
+                        view: p.view.clone(),
+                        changes: final_changes.clone(),
+                        alternative: p.alternative.clone(),
+                        provenance: p.provenance.clone(),
+                        canon_at: p.canon_at,
+                        summary: p.summary.clone(),
+                    },
+                );
+                let final_id = Hash::of(&fin.1);
+                items.push(fin);
                 latest_ref = Some((proposal_ref(&stable), final_id.0.to_vec()));
                 accept_change = Some(accept);
                 (tip, final_id, Some(aid))
@@ -368,8 +374,9 @@ impl Store {
         changes.extend(accept_change.iter().cloned());
         let (prev_head, prev_state) = (self.canon_head()?, self.canon_state()?);
         let state = self.merge_checked(&prev_state, &changes)?.0.state;
-        let sid = state.id();
-        items.push((kinds::SNAPSHOT, encode(&state)));
+        let snapshot = crate::codec::item(kinds::SNAPSHOT, &state);
+        let sid = Hash::of(&snapshot.1);
+        items.push(snapshot);
         // 6. the landing. A removal landing names the requests of the carriers it lands in
         // `checks`, sorted and without repeats: its hash, and so a signed tag, commits to the
         // exact removal set (D-CC90E), and no other request of the same carrier can reuse the
@@ -408,26 +415,29 @@ impl Store {
         // 6a. the redaction applies of the carriers it lands, checked before anything is written
         let applies =
             self.prepare_redaction_apply(&p.view, &included, &landing, accept_change.as_ref())?;
-        let lbytes = encode(&landing);
-        let lid = Hash::of(&lbytes);
+        let lframe = crate::codec::item(kinds::LANDING, &landing);
+        let lid = Hash::of(&lframe.1);
         let landing_record = landing;
-        items.push((kinds::LANDING, lbytes));
+        items.push(lframe);
         // 6b. the set's next version, chosen by this landing
         let mut alt_ref = None;
         let alt_version = match (&req.alt, alt_prev) {
             (Some(alt), Some(prev_version)) => {
-                let next = encode(&AltSet {
-                    stable: Some(alt.set),
-                    prev: Some(alt.prev),
-                    status: AltStatus::Chosen {
-                        member: alt.member.clone(),
-                        landing: lid,
+                let next = crate::codec::item(
+                    kinds::ALT_SET,
+                    &AltSet {
+                        stable: Some(alt.set),
+                        prev: Some(alt.prev),
+                        status: AltStatus::Chosen {
+                            member: alt.member.clone(),
+                            landing: lid,
+                        },
+                        provenance: req.approver.clone(),
+                        ..prev_version
                     },
-                    provenance: req.approver.clone(),
-                    ..prev_version
-                });
-                let id = Hash::of(&next);
-                items.push((kinds::ALT_SET, next));
+                );
+                let id = Hash::of(&next.1);
+                items.push(next);
                 alt_ref = Some((format!("{ALT_REF}{}", alt.set), id.0.to_vec()));
                 Some(id)
             }
@@ -548,7 +558,7 @@ impl Store {
                     if !h.closed {
                         let reason = chosen_reason(&alt.set, &alt.member);
                         let (op, _, new_head) = self.close_part(&name, &h, &reason, &req.approver);
-                        items.push((kinds::VIEW_OP, op));
+                        items.push(op);
                         view_refs.push((view_ref(&name), encode(&new_head)));
                         closed.push(name);
                     }
@@ -570,25 +580,28 @@ impl Store {
                 &mut producers,
                 &deleter,
             )?;
-            let rebase = encode(&ViewOp {
-                view: name.clone(),
-                prev: Some(if proposing { tip } else { vhead.head }),
-                op: ViewOpKind::Rebase {
-                    landing: lid,
-                    dropped: dropped.clone(),
-                    remaining: remaining.clone(),
-                    conflicts: conflicts.clone(),
+            let rebase = crate::codec::item(
+                kinds::VIEW_OP,
+                &ViewOp {
+                    view: name.clone(),
+                    prev: Some(if proposing { tip } else { vhead.head }),
+                    op: ViewOpKind::Rebase {
+                        landing: lid,
+                        dropped: dropped.clone(),
+                        remaining: remaining.clone(),
+                        conflicts: conflicts.clone(),
+                    },
+                    actor: req.approver.actor.clone(),
+                    run: req.approver.run.clone(),
+                    at_ms: req.approver.at_ms,
                 },
-                actor: req.approver.actor.clone(),
-                run: req.approver.run.clone(),
-                at_ms: req.approver.at_ms,
-            });
+            );
             let last_write_ms = match (&accept_change, proposing) {
                 (Some(a), true) => a.provenance.at_ms,
                 _ => vhead.last_write_ms,
             };
             let new_head = ViewHead {
-                head: Hash::of(&rebase),
+                head: Hash::of(&rebase.1),
                 base: Some(lid),
                 len: remaining.len() as u64,
                 owner: vhead.owner,
@@ -596,7 +609,7 @@ impl Store {
                 closed: vhead.closed,
                 last_write_ms,
             };
-            items.push((kinds::VIEW_OP, rebase));
+            items.push(rebase);
             if proposing && fresh_change.is_some() {
                 fresh_head = Some(new_head);
             } else {
@@ -664,8 +677,12 @@ impl Store {
         bound: Option<&Plan>,
         seal: Option<&Plan>,
     ) -> Result<(), StoreError> {
-        let refuse =
-            |p: &Plan, reason: &str| Err(StoreError::Refused(crate::plan::damage(&p.id(), reason)));
+        let refuse = |p: &Plan, reason: &str| {
+            Err(StoreError::Refused(crate::plan::damage(
+                &crate::plan::plan_hash(p),
+                reason,
+            )))
+        };
         if let Some(b) = bound {
             if b.seal.is_some() {
                 return refuse(b, crate::plan::INVALID_SEAL);

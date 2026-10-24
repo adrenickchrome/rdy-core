@@ -45,6 +45,12 @@ pub(crate) fn open_ref(view: &str) -> String {
     format!("open/{view}")
 }
 
+/// The hash a proposal version is stored under: its frame's, in the PROPOSAL kind's latest
+/// encoding.
+fn proposal_hash(p: &Proposal) -> Hash {
+    crate::codec::encode(kinds::PROPOSAL, p).hash()
+}
+
 fn tag_ref(name: &str) -> String {
     format!("tag/{name}")
 }
@@ -516,51 +522,63 @@ impl Store {
                     actor: p.actor.clone(),
                     run: p.run.clone(),
                 });
-                let create = encode(&view_op(
-                    None,
-                    ViewOpKind::Create {
-                        base,
-                        owner: first.clone(),
-                        pinned: false,
-                    },
-                ));
-                let id = Hash::of(&create);
-                views.push((kinds::VIEW_OP, create));
+                let create = crate::codec::item(
+                    kinds::VIEW_OP,
+                    &view_op(
+                        None,
+                        ViewOpKind::Create {
+                            base,
+                            owner: first.clone(),
+                            pinned: false,
+                        },
+                    ),
+                );
+                let id = Hash::of(&create.1);
+                views.push(create);
                 (id, base, 0, first, false)
             }
         };
         if catch_up && let Some(landing) = canon {
-            let rebase = encode(&view_op(
-                Some(prev),
-                ViewOpKind::Rebase {
-                    landing,
-                    dropped: vec![],
-                    remaining: vec![],
-                    conflicts: vec![],
-                },
-            ));
-            prev = Hash::of(&rebase);
+            let rebase = crate::codec::item(
+                kinds::VIEW_OP,
+                &view_op(
+                    Some(prev),
+                    ViewOpKind::Rebase {
+                        landing,
+                        dropped: vec![],
+                        remaining: vec![],
+                        conflicts: vec![],
+                    },
+                ),
+            );
+            prev = Hash::of(&rebase.1);
             base = canon;
-            views.push((kinds::VIEW_OP, rebase));
+            views.push(rebase);
         }
         if owner.is_none()
             && let Some(o) = claim
         {
-            let own = encode(&view_op(
-                Some(prev),
-                ViewOpKind::Own {
-                    owner: Some(o.clone()),
-                },
-            ));
-            prev = Hash::of(&own);
+            let own = crate::codec::item(
+                kinds::VIEW_OP,
+                &view_op(
+                    Some(prev),
+                    ViewOpKind::Own {
+                        owner: Some(o.clone()),
+                    },
+                ),
+            );
+            prev = Hash::of(&own.1);
             owner = Some(o);
-            views.push((kinds::VIEW_OP, own));
+            views.push(own);
         }
         // 5. one commit op per change, in order: one write's commits sit in a row in the log
         for (cid, _) in &placed {
-            let commit = encode(&view_op(Some(prev), ViewOpKind::Commit { change: *cid }));
-            prev = Hash::of(&commit);
-            views.push((kinds::VIEW_OP, commit));
+            let commit = crate::codec::item(
+                kinds::VIEW_OP,
+                &view_op(Some(prev), ViewOpKind::Commit { change: *cid }),
+            );
+            prev = Hash::of(&commit.1);
+            views.push(commit);
         }
         let new_head = ViewHead {
             head: prev,
@@ -672,7 +690,7 @@ impl Store {
         alternative: Option<AltChoice>,
     ) -> Result<Hash, StoreError> {
         let p = self.first_of(view, title, summary, by, changes, alternative)?;
-        let id = Hash::of(&encode(&p));
+        let id = proposal_hash(&p);
         self.write_version(&p, id)
     }
 
@@ -691,7 +709,7 @@ impl Store {
         a: Answer,
     ) -> Result<(Hash, Hash), StoreError> {
         let p = self.first_of(view, title, summary, by, changes, alternative)?;
-        let id = Hash::of(&encode(&p));
+        let id = proposal_hash(&p);
         self.write_version_answered(&p, id, a)
     }
 
@@ -778,7 +796,7 @@ impl Store {
             }
             None => {
                 let p = self.first_of(view, title, summary, by, changes, alternative)?;
-                let id = Hash::of(&encode(&p));
+                let id = proposal_hash(&p);
                 (p, id)
             }
         };
@@ -880,7 +898,7 @@ impl Store {
             StoreError::Refused("the re-affirmation commit gave no view head".into())
         })?;
         let p = self.first_of(view, title, Some(summary), by, vec![cid], None)?;
-        let stable = Hash::of(&encode(&p));
+        let stable = proposal_hash(&p);
         let (version, frames) = self.version_items(&p, stable)?;
         items.extend(frames);
         Ok(PreparedProposal {
@@ -908,7 +926,7 @@ impl Store {
         prepared: &mut PreparedProposal,
         plan: &Plan,
     ) -> Result<Hash, StoreError> {
-        let id = plan.id();
+        let id = crate::plan::plan_hash(plan);
         if plan.seal.is_some() {
             return Err(StoreError::Refused(crate::plan::damage(
                 &id,
@@ -1067,9 +1085,9 @@ impl Store {
         if p.changes.is_empty() {
             return Err(StoreError::EmptyProposal(p.view.clone()));
         }
-        let bytes = encode(p);
+        let (kind, bytes) = crate::codec::item(kinds::PROPOSAL, p);
         let id = Hash::of(&bytes);
-        let mut items = vec![(kinds::PROPOSAL, bytes)];
+        let mut items = vec![(kind, bytes)];
         items.extend(self.ref_items_pub(vec![
             (proposal_ref(&stable), id.0.to_vec()),
             (open_ref(&p.view), stable.0.to_vec()),
@@ -1155,9 +1173,9 @@ impl Store {
 
     /// The tag's id and the frames `put_tag` writes: the tag, then `tag/<name>` → its id.
     fn tag_items(&self, tag: &Tag) -> (Hash, Frames) {
-        let bytes = postcard::to_allocvec(tag).expect("encode tag");
+        let (kind, bytes) = crate::codec::item(kinds::TAG, tag);
         let id = Hash::of(&bytes);
-        let mut items = vec![(kinds::TAG, bytes)];
+        let mut items = vec![(kind, bytes)];
         items.extend(self.ref_items_pub(vec![(tag_ref(&tag.name), id.0.to_vec())]));
         (id, items)
     }

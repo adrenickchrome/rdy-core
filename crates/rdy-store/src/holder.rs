@@ -300,7 +300,7 @@ impl RefRules {
         match (kind, payload) {
             (kinds::REF_UPDATE, Some(p)) => self.on_ref_frame(self.creation.in_first(loc), p),
             (kinds::BATCH_COMMIT, _) => self.on_marker(),
-            (kinds::TAG, Some(p)) => {
+            (k, Some(p)) if crate::codec::logical_kind(k) == kinds::TAG => {
                 self.on_tag(p);
                 Ok(())
             }
@@ -389,8 +389,33 @@ pub(crate) enum RefWrite {
     Public,
     /// The take's crate-private write: a holder's `answer/tag-object:<hash>` beside its TAG.
     Take,
+    /// The upgrade transaction's commit (`Store::commit_upgrade_refs`): exactly the features
+    /// ref and the receipt ref, after the receipt's own checks.
+    Upgrade,
     /// The creation batch, and the test hook that forges refs: no ref rule.
     Unchecked,
+}
+
+/// Refuses a `meta/upgrade` write in `items` unless `how` is the upgrade transaction's own
+/// commit (or the unchecked creation and test hook): no public write or seal writes it.
+pub(crate) fn refuse_upgrade_writes(
+    items: &[(u8, Vec<u8>)],
+    how: RefWrite,
+) -> Result<(), StoreError> {
+    if matches!(how, RefWrite::Upgrade | RefWrite::Unchecked) {
+        return Ok(());
+    }
+    let upgrade = items
+        .iter()
+        .filter(|(k, _)| *k == kinds::REF_UPDATE)
+        .filter_map(|(_, p)| decode_ref(p))
+        .any(|u| u.name == REF_UPGRADE);
+    if upgrade {
+        return Err(StoreError::Refused(format!(
+            "only the store upgrade writes ref {REF_UPGRADE}"
+        )));
+    }
+    Ok(())
 }
 
 /// The ref rules of a write of `items` to a store of `mode`, before anything is appended. The
@@ -413,6 +438,16 @@ pub(crate) fn check_ref_writes(
             .filter(|(k, _)| *k == kinds::REF_UPDATE)
             .filter_map(|(_, p)| decode_ref(p))
     };
+    if how == RefWrite::Upgrade {
+        // the upgrade's own batch: the features ref and the receipt ref, nothing else
+        let names: Vec<String> = decoded().map(|u| u.name).collect();
+        if names != [REF_STORE_FEATURES, REF_UPGRADE] || items.len() != names.len() {
+            return Err(StoreError::Refused(
+                "the upgrade batch holds exactly the features and receipt refs".into(),
+            ));
+        }
+        return Ok(());
+    }
     if mode == StoreMode::Project {
         // a project's only rule: the mode ref is never written
         if decoded().any(|u| u.name == REF_STORE_MODE) {
@@ -433,7 +468,7 @@ pub(crate) fn check_ref_writes(
                 };
                 let beside = items
                     .iter()
-                    .any(|(k, p)| *k == kinds::TAG && Hash::of(p) == h);
+                    .any(|(k, p)| crate::codec::logical_kind(*k) == kinds::TAG && Hash::of(p) == h);
                 if how != RefWrite::Take || !(beside || has_tag(&h)?) {
                     return Err(cannot_write(&u.name));
                 }

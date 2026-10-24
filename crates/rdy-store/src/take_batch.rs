@@ -64,6 +64,7 @@
 use crate::closure::{END_OF_LOG, StoreSource, dependency_order, store_error};
 use crate::dump::{ENCODED_DROPPED_LEN, Frame, encoded_dropped_payload, parse_encoded_dropped};
 use crate::error::StoreError;
+use crate::format::{StoreFeature, StoreFeatures};
 use crate::kinds;
 use crate::object_refs::{ObjectKey, ObjectRef, refs_of};
 use crate::redaction::residue_matches;
@@ -271,7 +272,8 @@ pub(crate) struct At {
     file: usize,
     record: u64,
     offset: u64,
-    kind: u8,
+    /// The record's raw kind on the wire, as its source stored it.
+    pub(crate) kind: u8,
     len: u32,
     hash: Hash,
 }
@@ -283,6 +285,8 @@ struct Entry {
     present: Option<At>,
     refs: Vec<ObjectRef>,
     dropped: Vec<(At, Drop)>,
+    /// The features its present record uses (`format::required_features`).
+    needs: Vec<StoreFeature>,
 }
 
 /// How a planned write is checked again at the append.
@@ -337,6 +341,8 @@ pub(crate) struct Plan {
     pub(crate) redacted_objects: u64,
     pub(crate) tag_hash: Hash,
     pub(crate) tag: Tag,
+    /// The holder's merged features when this batch activates any (its last ref sets them).
+    pub(crate) features: Option<StoreFeatures>,
 }
 
 /// The holder as the take reads it: its reader, its log's segment files and authorization, the
@@ -347,6 +353,8 @@ pub(crate) struct Receiver<'a> {
     pub(crate) auth: &'a Authorization,
     pub(crate) end: Location,
     pub(crate) repo: RepoId,
+    /// The holder's features: its log's `meta/store_features`.
+    pub(crate) features: &'a StoreFeatures,
 }
 
 impl Receiver<'_> {
@@ -637,6 +645,10 @@ fn index_files(
                     let raw = r.raw_kind();
                     let refs = refs_of(raw, payload)
                         .map_err(|e| StreamError::from_record(n, offset, &e))?;
+                    // the reader checked the frame splits
+                    let needs = crate::codec::split(raw, payload)
+                        .map(|o| crate::format::required_features(o.kind, o.body))
+                        .map_err(|e| StreamError::from_record(n, offset, &e))?;
                     counts.edges += refs.len() as u64;
                     if entry.present.is_none() {
                         entry.present = Some(At {
@@ -648,6 +660,7 @@ fn index_files(
                             hash: key.hash,
                         });
                         entry.refs = refs;
+                        entry.needs = needs;
                     }
                 }
                 StreamRecord::Dropped {
@@ -739,6 +752,10 @@ pub(crate) fn prepare<E>(
         }
         Err(IndexError::Stream(e)) => return Err(e.into()),
     };
+    // the stream's features: this holder writes what it takes, so a feature it may only read,
+    // or not open, refuses the take before anything is read further
+    crate::format::check_writable(&header.features)
+        .map_err(|e| StreamError::store_format(Some(0), 0, &e))?;
     let objects: Vec<ObjectKey> = union.keys().copied().collect();
     let reader = rx.reader;
     let mut source = UploadSource {
@@ -970,7 +987,7 @@ pub(crate) fn prepare<E>(
                 return Ok(());
             }
             let key = ObjectKey {
-                kind: f.kind,
+                kind: crate::codec::logical_kind(f.kind),
                 hash: f.hash,
             };
             if incoming_keys.contains(&key) {
@@ -1089,6 +1106,19 @@ pub(crate) fn prepare<E>(
         }
     };
     refs.extend(answer_refs);
+    // the holder keeps the stream's features (unknown compatible ones included) and activates
+    // those its new records first use, with the features ref in this same batch (D-WWAK7)
+    let mut needs: Vec<StoreFeature> = header.features.features.clone();
+    for (w, _) in writes.values() {
+        if let Write::Present { key, .. } = w {
+            needs.extend(union[key].needs.iter().cloned());
+        }
+    }
+    let merged = rx.features.merged(&needs);
+    let features = (merged != *rx.features).then_some(merged);
+    if let Some(f) = &features {
+        refs.push((crate::format::REF_STORE_FEATURES.into(), f.to_json()));
+    }
     // 9. the receiver caps of a holder that holds an approval after this batch
     if redaction_after {
         // the ref frames exactly as the store salts them (`Store::ref_items`); the marker at its
@@ -1151,5 +1181,6 @@ pub(crate) fn prepare<E>(
         redacted_objects: redacted.len() as u64,
         tag_hash,
         tag,
+        features,
     })
 }

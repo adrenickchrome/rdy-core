@@ -38,11 +38,11 @@ pub fn is_removable(kind: u8) -> bool {
     REMOVABLE_KINDS.contains(&kind)
 }
 
-/// Whether `kind` is one of the redaction record kinds, which only the store's checked redaction
-/// writers write (the carried record only through a load's ingest, `Ingest::append_carried`).
+/// Whether `kind` (a raw or a logical kind) is one of the redaction record kinds, which only the
+/// store's checked redaction writers write (the carried record only through a load's ingest, `Ingest::append_carried`).
 pub fn is_redaction_kind(kind: u8) -> bool {
     matches!(
-        kind,
+        crate::codec::logical_kind(kind),
         kinds::REDACTION
             | kinds::REDACTION_RESIDUE
             | kinds::REDACTION_APPLY
@@ -163,13 +163,13 @@ impl PreparedRedactionApply {
         self.requests
             .iter()
             .map(|(request, report_hash)| {
-                (
+                crate::codec::item(
                     kinds::REDACTION_APPLY,
-                    encode(&RedactionApply {
+                    &RedactionApply {
                         request: *request,
                         landing,
                         report_hash: *report_hash,
-                    }),
+                    },
                 )
             })
             .collect()
@@ -184,11 +184,12 @@ struct Checked {
     carrier_id: Hash,
     request: Redaction,
     request_id: Hash,
-    request_bytes: Vec<u8>,
+    /// The request's frame: its raw kind and payload.
+    request_frame: (u8, Vec<u8>),
     /// The supplied residues, as given (for the recheck at commit).
     residues: Vec<RedactionResidue>,
-    /// Each distinct residue's encoding, in the order supplied.
-    residue_frames: Vec<Vec<u8>>,
+    /// Each distinct residue's frame, in the order supplied.
+    residue_frames: Vec<(u8, Vec<u8>)>,
 }
 
 /// A read projection overlay: the masks of named, recorded requests that no apply activated.
@@ -600,14 +601,10 @@ impl Store {
             claim,
             &committer,
         )?;
-        let mut items: Vec<(u8, Vec<u8>)> = checked
-            .residue_frames
-            .into_iter()
-            .map(|b| (kinds::REDACTION_RESIDUE, b))
-            .collect();
+        let mut items: Vec<(u8, Vec<u8>)> = checked.residue_frames;
         let carrier_pos = items.len() + parts.placed[0].1;
         items.extend(parts.changes);
-        items.push((kinds::REDACTION, checked.request_bytes));
+        items.push(checked.request_frame);
         items.extend(parts.views);
         let written = self.write_guarded(items)?;
         if written[carrier_pos] != checked.carrier_id {
@@ -707,17 +704,23 @@ impl Store {
             limit: limit::RECORD,
         };
         let mut buf = record_buffer().map_err(|_| too_big())?;
-        let request_bytes = encode_into(request, &mut buf)
-            .map_err(|_| too_big())?
-            .to_vec();
-        let request_id = Hash::of(&request_bytes);
+        // each record framed in its kind's latest encoding (`crate::codec`); its id is the
+        // frame's hash
+        let request_frame = crate::codec::frame_latest(
+            kinds::REDACTION,
+            encode_into(request, &mut buf)
+                .map_err(|_| too_big())?
+                .to_vec(),
+        );
+        let request_id = Hash::of(&request_frame.1);
         let mut supplied: HashMap<Hash, &RedactionResidue> = HashMap::new();
         let mut residue_frames = vec![];
         for r in residues {
             let bytes = encode_into(r, &mut buf).map_err(|_| too_big())?;
-            let h = Hash::of(bytes);
+            let frame = crate::codec::frame_latest(kinds::REDACTION_RESIDUE, bytes.to_vec());
+            let h = Hash::of(&frame.1);
             if supplied.insert(h, r).is_none() {
-                residue_frames.push(bytes.to_vec());
+                residue_frames.push(frame);
             }
         }
         drop(buf);
@@ -736,7 +739,7 @@ impl Store {
             carrier_id,
             request: request.clone(),
             request_id,
-            request_bytes,
+            request_frame,
             residues: residues.to_vec(),
             residue_frames,
         })

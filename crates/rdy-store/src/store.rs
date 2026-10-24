@@ -395,6 +395,10 @@ struct Faults {
 /// Frames for one `write`: `(kind, payload)` pairs, in write order.
 pub(crate) type Frames = Vec<(u8, Vec<u8>)>;
 
+/// What [`Store::first_use`] made of a batch: its items, the merged manifest it activates, if
+/// any, and whether `FORMAT` was rewritten for it.
+type FirstUse = (Frames, Option<StoreFeatures>, bool);
+
 pub(crate) fn encode<T: Serialize>(v: &T) -> Vec<u8> {
     postcard::to_allocvec(v).expect("postcard encoding of an in-memory value cannot fail")
 }
@@ -708,6 +712,18 @@ fn read_creation(log: &SegmentLog) -> Result<Creation, StoreError> {
     }
 }
 
+/// The features of the last sealed `meta/store_features` ref of the store at `dir`, read from
+/// its segments with no lock and no writer; None when there is none or it is not a valid
+/// manifest.
+fn sealed_log_features(dir: &Path) -> Result<Option<StoreFeatures>, StoreError> {
+    let value = crate::segment::sealed_ref_value(
+        &dir.join("segments"),
+        format::REF_STORE_FEATURES,
+        format::MAX_MANIFEST_BYTES,
+    )?;
+    Ok(value.and_then(|v| StoreFeatures::parse(&v).ok()))
+}
+
 /// The refusal of a holder's creation where a store, or anything else, already is.
 fn already_exists(dir: &Path) -> StoreError {
     StoreError::Io(std::io::Error::new(
@@ -896,7 +912,9 @@ impl Store {
     }
 
     /// The checks [`Store::open`] makes before it creates, locks, opens or writes anything: `dir`
-    /// is a directory with a `FORMAT` file whose features this rdy may write. Reads only.
+    /// is a directory with a `FORMAT` file whose features this rdy may write. A `FORMAT` that
+    /// lists more than its sealed log (a first use whose batch never sealed) is judged by the
+    /// sealed log's features, read from the segments. Reads only.
     pub fn check_existing(dir: &Path) -> Result<(), StoreError> {
         match std::fs::symlink_metadata(dir) {
             Ok(m) if m.file_type().is_dir() => {}
@@ -907,7 +925,15 @@ impl Store {
             Err(e) => return Err(e.into()),
         }
         match format::read_format_file(dir)? {
-            Some(f) => format::check_writable(&f),
+            Some(f) => match format::check_writable(&f) {
+                Ok(()) => Ok(()),
+                // the sealed log is the authority: a FORMAT ahead of it (a first use whose batch
+                // never sealed) does not refuse a log this rdy may write
+                Err(refusal) => match sealed_log_features(dir)? {
+                    Some(log) if log.is_subset_of(&f) => format::check_writable(&log),
+                    _ => Err(refusal),
+                },
+            },
             None => Err(format::other_build(dir, "has no FORMAT file")),
         }
     }
@@ -1059,7 +1085,7 @@ impl Store {
         // the log's features are the store's: one this rdy may not write, or one FORMAT does not
         // list, is refused before the index moves
         if let Some(f) = store.features_ref()? {
-            store.check_log_features(&f)?;
+            store.check_log_features(&f, false)?;
         }
         // the index's redaction rows must be the ones the log's validated records give: a
         // forged or forgotten row is rebuilt from the log, never trusted
@@ -1117,12 +1143,18 @@ impl Store {
     }
 
     /// Refuses log features `f` that this rdy may not write, and features `FORMAT` does not
-    /// list (`FORMAT` may list more: a first use whose batch did not commit). Then they are the
-    /// store's.
-    fn check_log_features(&mut self, f: &StoreFeatures) -> Result<(), StoreError> {
+    /// list (`FORMAT` may list more: a first use whose batch did not seal). Then they are the
+    /// store's. With `repair` (`f` is the caught-up log's), a `FORMAT` that lists more is put
+    /// back to `f`: the sealed log is the authority.
+    fn check_log_features(&mut self, f: &StoreFeatures, repair: bool) -> Result<(), StoreError> {
         format::check_writable(f)?;
         match format::read_format_file(&self.dir)? {
-            Some(mirror) if f.is_subset_of(&mirror) => {}
+            Some(mirror) if mirror == *f => {}
+            Some(mirror) if f.is_subset_of(&mirror) => {
+                if repair {
+                    format::write_format_file(&self.dir, f)?;
+                }
+            }
             _ => return Err(format::unmirrored(&self.dir)),
         }
         self.features = f.clone();
@@ -1147,14 +1179,14 @@ impl Store {
                 offset: 0,
             };
         match self.features_ref()? {
-            Some(f) => self.check_log_features(&f)?,
+            Some(f) => self.check_log_features(&f, true)?,
             None if held_frames => {
                 // an index that lost the ref (an old partial rebuild) is rebuilt from the log;
                 // a log that really has no features ref is still refused
                 self.reindex()?;
                 self.report.index_rebuilt = true;
                 match self.features_ref()? {
-                    Some(f) => self.check_log_features(&f)?,
+                    Some(f) => self.check_log_features(&f, true)?,
                     None => {
                         return Err(match self.scalar_ref()? {
                             Some(n) => format::scalar_refusal(&self.dir, n),
@@ -1248,20 +1280,21 @@ impl Store {
             (format::REF_STORE_FEATURES.into(), features.to_json()),
             (format::REF_UPGRADE.into(), receipt.to_vec()),
         ]);
-        let start = self.log.end();
+        // where the batch starts: the end, or the next segment's start when it rolls
+        let start = self.log.batch_start(&items);
         let held = self.held;
         self.held = false;
-        let wrote = self.write_refs(items, RefWrite::Unchecked);
+        let wrote = self.write_refs(items, RefWrite::Upgrade);
         self.held = held;
         wrote?;
         self.features = features.clone();
-        // the batch's marker, as the log wrote it over the batch's frames
-        let marker = kinds::BatchCommit {
-            start,
-            frames: self.last_batch.len() as u32,
-            digest: kinds::batch_digest(self.last_batch.iter().map(|(_, h)| h)),
-        };
-        Ok(Hash::of(&encode(&marker)))
+        // the batch's marker, as the log wrote it: the last frame from the batch's start
+        self.log
+            .scan_from(start)?
+            .last()
+            .filter(|(_, kind, _)| *kind == kinds::BATCH_COMMIT)
+            .map(|(_, _, hash)| *hash)
+            .ok_or_else(|| StoreError::Decode("the upgrade batch has no marker".into()))
     }
 
     /// Test hook: the directories `open` fsynced because it created something in them.
@@ -1369,25 +1402,27 @@ impl Store {
         self.check_new_signatures(&last)?;
         // a held batch that holds a redaction apply seals through the apply hook, which never
         // takes the rollback below once the batch is synced
-        if self
-            .open
-            .as_ref()
-            .is_some_and(|o| o.frames.iter().any(|(k, _)| *k == kinds::REDACTION_APPLY))
-        {
+        if self.open.as_ref().is_some_and(|o| {
+            o.frames
+                .iter()
+                .any(|(k, _)| crate::codec::logical_kind(*k) == kinds::REDACTION_APPLY)
+        }) {
             let sealed = self.seal_held_apply(last).map(|_| ());
             let held = self.held_features.take();
-            if let (Ok(()), Some(f)) = (&sealed, held) {
-                self.features = f;
+            match (&sealed, held) {
+                (Ok(()), Some(f)) => self.features = f,
+                (Err(_), Some(_)) => self.restore_mirror(),
+                _ => {}
             }
             return sealed;
         }
-        let (last, activated) = self.first_use(last)?;
         // `last` is decoded before anything is appended: a value that does not decode is
         // refused with the batch still open, and nothing poisoned
         let mut probe = Resolver::new(&NoneHeld);
         for (kind, payload) in &last {
             entries_for_frame(*kind, Hash::of(payload), ORIGIN, payload, &mut probe)?;
         }
+        let (last, activated, published) = self.first_use(last)?;
         let start = self.open.as_ref().map_or(self.log.end(), |o| o.start);
         match self.seal_batch(last) {
             Ok(()) => {
@@ -1398,7 +1433,11 @@ impl Store {
                 Ok(())
             }
             Err(e) => {
+                let ahead = published || self.held_features.is_some();
                 self.held_features = None;
+                if ahead {
+                    self.restore_mirror();
+                }
                 self.open = None;
                 if was_open {
                     self.poison();
@@ -1714,6 +1753,12 @@ impl Store {
 
     /// The ref rules of a write or seal of `items`, before anything is appended.
     fn check_refs(&self, items: &[(u8, Vec<u8>)], how: RefWrite) -> Result<(), StoreError> {
+        self.check_mode_refs(items, how)?;
+        crate::holder::refuse_upgrade_writes(items, how)
+    }
+
+    /// The mode and holder ref rules of [`Store::check_refs`] alone.
+    fn check_mode_refs(&self, items: &[(u8, Vec<u8>)], how: RefWrite) -> Result<(), StoreError> {
         crate::holder::check_ref_writes(self.creation.mode, items, how, |h| {
             self.has_kind(kinds::TAG, h)
         })
@@ -1740,10 +1785,11 @@ impl Store {
         // a held batch that holds a redaction apply takes only its seal: its TRANSITION is the
         // last data frame, and no copy of the content it removes can join it before the seal
         if self.held
-            && self
-                .open
-                .as_ref()
-                .is_some_and(|o| o.frames.iter().any(|(k, _)| *k == kinds::REDACTION_APPLY))
+            && self.open.as_ref().is_some_and(|o| {
+                o.frames
+                    .iter()
+                    .any(|(k, _)| crate::codec::logical_kind(*k) == kinds::REDACTION_APPLY)
+            })
         {
             return Err(StoreError::Refused(
                 "the held batch holds a redaction apply: seal it before writing more".into(),
@@ -1751,7 +1797,7 @@ impl Store {
         }
         self.refuse_removed(&items)?;
         self.check_new_signatures(&items)?;
-        let (items, activated) = self.first_use(items)?;
+        let (items, activated, published) = self.first_use(items)?;
         let start = self.log.end();
         let mut result = if self.held {
             self.append_held(items)
@@ -1785,6 +1831,9 @@ impl Store {
             if rollback.is_err() {
                 self.poison();
             }
+            if published {
+                self.restore_mirror();
+            }
         }
         result
     }
@@ -1792,10 +1841,12 @@ impl Store {
     /// The first use of a feature (D-WWAK7): when the new objects of `items` use features the
     /// store's manifest (or the open held batch's) does not name, `FORMAT` is made to list the
     /// merged manifest, then the merged manifest's `meta/store_features` ref joins `items`, so the
-    /// batch that first uses a feature activates it. A batch that fails appends neither; a
-    /// `FORMAT` that lists more than the log is the one leftover of a failed first use, and opens.
-    /// Returns the items and the merged manifest, if any.
-    fn first_use(&self, mut items: Frames) -> Result<(Frames, Option<StoreFeatures>), StoreError> {
+    /// batch that first uses a feature activates it. A batch that fails appends neither, and its
+    /// caller puts `FORMAT` back ([`Store::restore_mirror`]); a `FORMAT` that lists more than the
+    /// sealed log (a crash before the batch sealed) opens by the log's features, and the open
+    /// puts it back. Returns the items, the merged manifest, if any, and whether `FORMAT` was
+    /// rewritten.
+    fn first_use(&self, mut items: Frames) -> Result<FirstUse, StoreError> {
         let current = self.held_features.as_ref().unwrap_or(&self.features);
         let mut needed: Vec<format::StoreFeature> = vec![];
         for (raw, payload) in &items {
@@ -1811,15 +1862,38 @@ impl Store {
             }
         }
         if needed.is_empty() {
-            return Ok((items, None));
+            return Ok((items, None, false));
         }
         let merged = current.merged(&needed);
-        let mirror = format::read_format_file(&self.dir)?;
-        if !mirror.is_some_and(|m| merged.is_subset_of(&m)) {
-            format::write_format_file(&self.dir, &merged)?;
-        }
+        let published = self.publish_mirror(&merged)?;
         items.extend(self.ref_items(vec![(format::REF_STORE_FEATURES.into(), merged.to_json())]));
-        Ok((items, Some(merged)))
+        Ok((items, Some(merged), published))
+    }
+
+    /// Makes `FORMAT` list `features` before the batch that activates them seals, so no rdy
+    /// that does not know them opens the store meanwhile. Returns whether it rewrote `FORMAT`.
+    fn publish_mirror(&self, features: &StoreFeatures) -> Result<bool, StoreError> {
+        let mirror = format::read_format_file(&self.dir)?;
+        if mirror.is_some_and(|m| features.is_subset_of(&m)) {
+            return Ok(false);
+        }
+        format::write_format_file(&self.dir, features)?;
+        Ok(true)
+    }
+
+    /// Puts `FORMAT` back to the features of the sealed log and of the open held batch, after a
+    /// batch that published more failed (D-WWAK7: the sealed log is the authority, and a failed
+    /// first use never needs a newer rdy). Best effort: a `FORMAT` left ahead is the crash
+    /// window's leftover, which the next open puts back.
+    fn restore_mirror(&self) {
+        let features = self.held_features.as_ref().unwrap_or(&self.features);
+        if format::read_format_file(&self.dir)
+            .ok()
+            .flatten()
+            .is_none_or(|m| m != *features)
+        {
+            let _ = format::write_format_file(&self.dir, features);
+        }
     }
 
     /// `items` with what the store already holds left out, and the hash of every item.
@@ -1884,7 +1958,10 @@ impl Store {
     fn append_and_index(&mut self, items: Vec<(u8, Vec<u8>)>) -> Result<Vec<Hash>, StoreError> {
         // an apply seals only through `seal_apply_batch`, whose failures after the sync never
         // reach this path's rollback
-        if items.iter().any(|(k, _)| *k == kinds::REDACTION_APPLY) {
+        if items
+            .iter()
+            .any(|(k, _)| crate::codec::logical_kind(*k) == kinds::REDACTION_APPLY)
+        {
             return Err(StoreError::Refused(
                 "a redaction apply seals only through the checked apply writer".into(),
             ));
@@ -2160,7 +2237,8 @@ impl Store {
     /// mode cannot change`, and a ref a holder never holds is `a holder store cannot write ref`.
     pub fn set_refs(&mut self, refs: Vec<(String, Vec<u8>)>) -> Result<(), StoreError> {
         let items = self.ref_items(refs.clone());
-        self.check_refs(&items, RefWrite::Public)?;
+        // the mode and holder rules first; a `meta/` ref is refused below, before `write`
+        self.check_mode_refs(&items, RefWrite::Public)?;
         // a `plan/` ref: only the plan writers write one, with its plan
         crate::plan::refuse_plan_writes(&items)?;
         if let Some((name, _)) = refs
@@ -2236,7 +2314,10 @@ impl Store {
 
     /// The hash `put_blob` would return for these bytes, without storing anything.
     pub fn blob_hash(bytes: &[u8]) -> Hash {
-        let chunks: Vec<Hash> = bytes.chunks(CHUNK).map(Hash::of).collect();
+        let chunks: Vec<Hash> = bytes
+            .chunks(CHUNK)
+            .map(|c| Hash::of(&crate::codec::frame_latest(kinds::BLOB_CHUNK, c.to_vec()).1))
+            .collect();
         crate::codec::encode(
             kinds::BLOB_MANIFEST,
             &BlobManifest {
@@ -2250,7 +2331,7 @@ impl Store {
     pub fn put_blob(&mut self, bytes: &[u8]) -> Result<Hash, StoreError> {
         let mut items: Vec<(u8, Vec<u8>)> = bytes
             .chunks(CHUNK)
-            .map(|c| (kinds::BLOB_CHUNK, c.to_vec()))
+            .map(|c| crate::codec::frame_latest(kinds::BLOB_CHUNK, c.to_vec()))
             .collect();
         let chunks: Vec<Hash> = items.iter().map(|(_, c)| Hash::of(c)).collect();
         items.push(crate::codec::item(
@@ -2396,10 +2477,10 @@ impl StoreReader {
         Ok((kind, payload))
     }
 
-    /// The payload of the object of `kind` with hash `h` (kind1). A payload a redaction removed
-    /// is `Redacted`.
+    /// The body of the object of `kind` with hash `h` (kind1), in whatever encoding it was
+    /// written ([`StoreReader::get_body`]). A payload a redaction removed is `Redacted`.
     pub fn get_kind(&self, kind: u8, h: &Hash) -> Result<Vec<u8>, StoreError> {
-        self.get_kind_raw(kind, h).map(|(_, payload)| payload)
+        self.get_body(kind, h)
     }
 
     /// [`StoreReader::get_kind`] with the frame's raw kind: the stored payload of the object of
@@ -3178,7 +3259,9 @@ impl Store {
         let Some(open) = self.open.take() else {
             return;
         };
-        self.held_features = None;
+        if self.held_features.take().is_some() {
+            self.restore_mirror();
+        }
         self.poison();
         self.stale_index = true;
         self.roll_back(open.start);
@@ -3393,7 +3476,10 @@ impl Store {
         if self.open.is_some() {
             return Err(batch_open("before a redaction apply"));
         }
-        if !items.iter().any(|(k, _)| *k == kinds::REDACTION_APPLY) {
+        if !items
+            .iter()
+            .any(|(k, _)| crate::codec::logical_kind(*k) == kinds::REDACTION_APPLY)
+        {
             return Err(StoreError::Refused(
                 "a redaction apply batch holds at least one REDACTION_APPLY".into(),
             ));
@@ -3471,7 +3557,9 @@ impl Store {
         // `land_atomic` checked the applies against the log as it stood then, and their masks
         // are not active yet: a BLOCK, CHANGE or BLOB_CHUNK in the tail could add a copy of the
         // removed content that no span covers. So the tail holds the TRANSITION only.
-        if !(last.is_empty() || (last.len() == 1 && last[0].0 == kinds::TRANSITION)) {
+        if !(last.is_empty()
+            || (last.len() == 1 && crate::codec::logical_kind(last[0].0) == kinds::TRANSITION))
+        {
             return Err(StoreError::Refused(
                 "a held batch that holds a redaction apply seals with nothing or one TRANSITION"
                     .into(),
@@ -3596,6 +3684,7 @@ impl Store {
                 auth: &auth,
                 end: self.log.end(),
                 repo,
+                features: &self.features,
             },
             files,
             target,
@@ -3635,6 +3724,7 @@ impl Store {
             };
             Ok(plan.writes.iter().any(|w| w.key() == key) || self.has_kind(kinds::TAG, h)?)
         })?;
+        crate::holder::refuse_upgrade_writes(&refs, RefWrite::Take)?;
         let epoch = if plan.new_applies {
             Some(
                 self.shared
@@ -3646,12 +3736,21 @@ impl Store {
         } else {
             None
         };
+        // the features this batch activates are listed by FORMAT before it seals; any failure
+        // before the batch is durable puts FORMAT back
+        let published = match &plan.features {
+            Some(f) => self.publish_mirror(f)?,
+            None => false,
+        };
         let before = self.log.end();
         let appended = self.append_take(files, &plan, &refs);
         let (frames, entries) = match appended {
             Ok(a) => a,
             Err(e) => {
                 self.roll_back(before);
+                if published {
+                    self.restore_mirror();
+                }
                 return Err(e);
             }
         };
@@ -3662,6 +3761,9 @@ impl Store {
                 Ok(a) => Some(a),
                 Err(e) => {
                     self.roll_back(before);
+                    if published {
+                        self.restore_mirror();
+                    }
                     return Err(TakeError::Store(e));
                 }
             }
@@ -3671,6 +3773,9 @@ impl Store {
         self.log.crash_point(CrashPoint::BeforeSync);
         if let Err(e) = self.log.sync() {
             self.roll_back(before);
+            if published {
+                self.restore_mirror();
+            }
             return Err(TakeError::Store(e.into()));
         }
         self.log.crash_point(CrashPoint::AfterSync);
@@ -3684,15 +3789,24 @@ impl Store {
             if let Err(e) = indexed {
                 // as a failed write: nothing past `before` is acknowledged
                 self.roll_back(before);
+                if published {
+                    self.restore_mirror();
+                }
                 return Err(TakeError::Store(e));
             }
             self.log.crash_point(CrashPoint::AfterIndex);
+            if let Some(f) = &plan.features {
+                self.features = f.clone();
+            }
             self.writes += 1;
             self.acknowledge(frames);
             return Ok(taken(self.log.end(), n));
         };
         // authorized: the batch is durable, and no error below rolls it back
         self.log.set_authorization(Arc::new(auth));
+        if let Some(f) = &plan.features {
+            self.features = f.clone();
+        }
         if crate::redaction_io::hit(crate::redaction_io::Failpoint::AfterApplySync).is_err() {
             return Err(TakeError::Store(self.pending_failure()));
         }
@@ -3750,11 +3864,13 @@ impl Store {
                 Write::Present { key, at } => {
                     crate::take_batch::reread(files, at, &mut buf)
                         .map_err(|e| e.with_object(Some(*key)))?;
-                    let (loc, hash) = self.log.append_unrolled(key.kind, &buf)?;
+                    // the verified frame as its source stored it: its raw kind, never the
+                    // logical kind of its key
+                    let (loc, hash) = self.log.append_unrolled(at.kind, &buf)?;
                     if !plan.redaction {
-                        entries.extend(entries_for_frame(key.kind, hash, loc, &buf, &mut r)?);
+                        entries.extend(entries_for_frame(at.kind, hash, loc, &buf, &mut r)?);
                     }
-                    frames.push((key.kind, hash));
+                    frames.push((at.kind, hash));
                 }
                 Write::Dropped { key, len, verify } => {
                     crate::take_batch::verify(files, verify, &mut buf)
@@ -3987,6 +4103,42 @@ mod tests {
             s.is_err(),
             "a log whose features FORMAT does not list is refused"
         );
+    }
+
+    /// ok1: when the upgrade batch rolls to a new segment, the hash returned is the marker the
+    /// log wrote there.
+    #[test]
+    fn ok1_upgrade_refs_return_the_marker_across_a_segment_roll() {
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("s");
+        let mut s = Store::create(&dir).unwrap();
+        s.set_segment_max(1);
+        let to = StoreFeatures::of(vec![StoreFeature {
+            name: "test_upgrade".into(),
+            class: FeatureClass::Compatible,
+            required_rdy: "1.0.0".into(),
+        }]);
+        let end = s.log_end();
+        let receipt = UpgradeReceipt {
+            from: s.features().hash(),
+            to: to.hash(),
+            steps: vec!["test_upgrade".into()],
+            source_end: end,
+            backup: format!(".store-upgrade-{}-{}", "a".repeat(64), "b".repeat(64)),
+        };
+        let marker = s.commit_upgrade_refs(&to, &receipt.to_json()).unwrap();
+        let now = s.log_end();
+        assert_eq!(now.segment, end.segment + 1, "the batch rolled");
+        let frames = s
+            .log
+            .scan_from(Location {
+                segment: now.segment,
+                offset: 0,
+            })
+            .unwrap();
+        let (_, kind, hash) = *frames.last().unwrap();
+        assert_eq!(kind, kinds::BATCH_COMMIT);
+        assert_eq!(marker, hash, "the marker the log wrote");
     }
 
     #[test]

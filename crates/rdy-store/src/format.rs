@@ -9,8 +9,10 @@
 //!
 //! The scalar formats of earlier rdy builds (`rdy store format`, `store_format <n>`) are refused
 //! here: 10 to 18 moved with dump and load, a later number is no build's, and an earlier one is
-//! re-created. Opening never writes a `FORMAT`: only `Store::create`, `Store::create_holder`, a
-//! load and a feature's first use do.
+//! re-created. Only `Store::create`, `Store::create_holder`, a load and a feature's first use
+//! write a `FORMAT`; an open writes one only to put back a `FORMAT` that lists more than its
+//! sealed log (the leftover of a first use whose batch never sealed), because the log's ref is
+//! the authority.
 use crate::error::StoreError;
 use crate::fsutil;
 use crate::segment::Location;
@@ -76,15 +78,6 @@ impl FeatureClass {
             FeatureClass::Compatible => "compatible",
             FeatureClass::ReadOnlyCompatible => "read_only_compatible",
             FeatureClass::Incompatible => "incompatible",
-        }
-    }
-
-    fn parse(s: &str) -> Option<FeatureClass> {
-        match s {
-            "compatible" => Some(FeatureClass::Compatible),
-            "read_only_compatible" => Some(FeatureClass::ReadOnlyCompatible),
-            "incompatible" => Some(FeatureClass::Incompatible),
-            _ => None,
         }
     }
 }
@@ -252,85 +245,392 @@ impl StoreFeatures {
     }
 
     /// [`StoreFeatures::parse`] for a reader whose every allocation is fallible (a dump's or a
-    /// sync batch's header): the canonical JSON, each name and version taken by fallible growth,
-    /// then [`StoreFeatures::validate`]. Any other text gets the refusal of the general parse
-    /// (bounded by [`MAX_MANIFEST_BYTES`]), whose reason names the fault.
+    /// sync batch's header). Any JSON text is read by the bounded reader ([`json`]): the whole
+    /// text is checked with no allocation, the feature count before any storage grows for it,
+    /// and each name and version is taken by fallible growth (`Allocation` when it is refused),
+    /// then [`StoreFeatures::validate`]. The refusal reasons are the closed manifest reasons.
     pub fn parse_fallible(bytes: &[u8]) -> Result<StoreFeatures, ParseFailure> {
+        let refuse = |reason: &str| ParseFailure::Manifest(ManifestError::of(reason));
         if bytes.len() > MAX_MANIFEST_BYTES {
-            return Err(ParseFailure::Manifest(ManifestError::of(
-                "manifest exceeds 65536 bytes",
-            )));
+            return Err(refuse("manifest exceeds 65536 bytes"));
         }
-        match canonical(bytes) {
-            Ok(Some(m)) => {
-                m.validate().map_err(ParseFailure::Manifest)?;
-                Ok(m)
+        let invalid = || refuse(INVALID_JSON);
+        let b = bytes;
+        let top = json::document(b).ok_or_else(invalid)?;
+        if b[top] != b'{' {
+            return Err(invalid());
+        }
+        // the last of a repeated key wins; the first unknown key in name order is refused
+        let (mut version, mut list) = (None, None);
+        let mut unknown: Option<json::Span> = None;
+        for (key, value) in json::members(b, top) {
+            if json::is(b, key, "manifest_version") {
+                version = Some(value);
+            } else if json::is(b, key, "features") {
+                list = Some(value);
+            } else if unknown.is_none_or(|u| json::key_order(b, key, u).is_lt()) {
+                unknown = Some(key);
             }
-            Ok(None) => StoreFeatures::parse(bytes).map_err(ParseFailure::Manifest),
-            Err(()) => Err(ParseFailure::Allocation),
         }
-    }
-
-    /// Parses and validates a manifest's JSON. The length is checked before anything is parsed;
-    /// unknown keys, missing or mistyped fields and an unknown class are refused.
-    pub fn parse(bytes: &[u8]) -> Result<StoreFeatures, ManifestError> {
-        if bytes.len() > MAX_MANIFEST_BYTES {
-            return Err(ManifestError::of("manifest exceeds 65536 bytes"));
+        if let Some(k) = unknown {
+            return Err(ParseFailure::Manifest(unknown_field(b, k)));
         }
-        let invalid = || ManifestError::of(INVALID_JSON);
-        let v: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| invalid())?;
-        let top = v.as_object().ok_or_else(invalid)?;
-        unknown_key(top, &["manifest_version", "features"])?;
-        let version = top
-            .get("manifest_version")
-            .and_then(|v| v.as_u64())
+        let version = version
+            .and_then(|v| json::as_u64(&b[v.0..v.1]))
             .ok_or_else(invalid)?;
         if version != u64::from(MANIFEST_VERSION) {
-            return Err(ManifestError::of("unsupported manifest version"));
+            return Err(refuse("unsupported manifest version"));
         }
-        let list = top
-            .get("features")
-            .and_then(|v| v.as_array())
+        let list = list.filter(|v| b[v.0] == b'[').ok_or_else(invalid)?;
+        let count = json::elements(b, list.0).count();
+        if count > MAX_FEATURES {
+            return Err(refuse("more than 256 features"));
+        }
+        let mut features: Vec<StoreFeature> = Vec::new();
+        features
+            .try_reserve_exact(count)
+            .map_err(|_| ParseFailure::Allocation)?;
+        for item in json::elements(b, list.0) {
+            if b[item.0] != b'{' {
+                return Err(invalid());
+            }
+            let (mut name, mut class, mut required) = (None, None, None);
+            let mut unknown: Option<json::Span> = None;
+            for (key, value) in json::members(b, item.0) {
+                if json::is(b, key, "name") {
+                    name = Some(value);
+                } else if json::is(b, key, "class") {
+                    class = Some(value);
+                } else if json::is(b, key, "required_rdy") {
+                    required = Some(value);
+                } else if unknown.is_none_or(|u| json::key_order(b, key, u).is_lt()) {
+                    unknown = Some(key);
+                }
+            }
+            if let Some(k) = unknown {
+                return Err(ParseFailure::Manifest(unknown_field(b, k)));
+            }
+            // a string value's text, without its quotes
+            let text = |v: Option<json::Span>| {
+                v.filter(|v| b[v.0] == b'"')
+                    .map(|v| (v.0 + 1, v.1 - 1))
+                    .ok_or_else(invalid)
+            };
+            let name = text(name)?;
+            let class = text(class)?;
+            let class = [
+                FeatureClass::Compatible,
+                FeatureClass::ReadOnlyCompatible,
+                FeatureClass::Incompatible,
+            ]
+            .into_iter()
+            .find(|c| json::is(b, class, c.as_str()))
             .ok_or_else(invalid)?;
-        if list.len() > MAX_FEATURES {
-            return Err(ManifestError::of("more than 256 features"));
-        }
-        let mut features = Vec::with_capacity(list.len());
-        for item in list {
-            let o = item.as_object().ok_or_else(invalid)?;
-            unknown_key(o, &["name", "class", "required_rdy"])?;
-            let text = |k: &str| o.get(k).and_then(|v| v.as_str()).ok_or_else(invalid);
-            let name = text("name")?;
-            let class = FeatureClass::parse(text("class")?).ok_or_else(invalid)?;
-            let required_rdy = text("required_rdy")?;
+            let required = text(required)?;
             features.push(StoreFeature {
-                name: name.to_string(),
+                name: json::decode(b, name).ok_or(ParseFailure::Allocation)?,
                 class,
-                required_rdy: required_rdy.to_string(),
+                required_rdy: json::decode(b, required).ok_or(ParseFailure::Allocation)?,
             });
         }
         let m = StoreFeatures {
             manifest_version: MANIFEST_VERSION,
             features,
         };
-        m.validate()?;
+        m.validate().map_err(ParseFailure::Manifest)?;
         Ok(m)
+    }
+
+    /// Parses and validates a manifest's JSON, as [`StoreFeatures::parse_fallible`] does: the
+    /// length is checked before anything is parsed; unknown keys, missing or mistyped fields and
+    /// an unknown class are refused. A refused allocation is the allocator's failure, as for any
+    /// infallible collection.
+    pub fn parse(bytes: &[u8]) -> Result<StoreFeatures, ManifestError> {
+        match StoreFeatures::parse_fallible(bytes) {
+            Ok(m) => Ok(m),
+            Err(ParseFailure::Manifest(e)) => Err(e),
+            Err(ParseFailure::Allocation) => {
+                std::alloc::handle_alloc_error(std::alloc::Layout::new::<StoreFeature>())
+            }
+        }
     }
 }
 
-/// Refuses an object key outside `allowed`: the first unknown key in name order, clipped.
-fn unknown_key(
-    o: &serde_json::Map<String, serde_json::Value>,
-    allowed: &[&str],
-) -> Result<(), ManifestError> {
-    let mut unknown: Vec<&String> = o
-        .keys()
-        .filter(|k| !allowed.contains(&k.as_str()))
-        .collect();
-    unknown.sort();
-    match unknown.first() {
-        Some(k) => Err(ManifestError(format!("unknown field {}", clip(k)))),
-        None => Ok(()),
+/// The refusal of the unknown key `key` (a string's text span in `b`), clipped.
+fn unknown_field(b: &[u8], key: json::Span) -> ManifestError {
+    let text: String = json::chars(&b[key.0..key.1]).collect();
+    ManifestError(format!("unknown field {}", clip(&text)))
+}
+
+/// A bounded JSON reader. [`document`] checks a whole text with no allocation and the accept set
+/// of `serde_json::from_slice`: RFC 8259's grammar, UTF-8, string escapes with no lone
+/// surrogate, numbers that fit an `f64`, and at most 127 nested arrays and objects. The walkers
+/// then read values by their byte spans; none allocates but [`decode`], which grows fallibly.
+mod json {
+    use std::cmp::Ordering;
+
+    /// A value's bytes in the text: `[start, end)`; for a string's text, without its quotes.
+    pub(super) type Span = (usize, usize);
+
+    /// The most nested arrays and objects, plus one (serde_json's recursion limit).
+    const DEPTH: usize = 128;
+
+    fn ws(b: &[u8], mut i: usize) -> usize {
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') {
+            i += 1;
+        }
+        i
+    }
+
+    /// Where the one value of text `b` starts, if `b` is valid JSON: UTF-8, one value and
+    /// whitespace around it.
+    pub(super) fn document(b: &[u8]) -> Option<usize> {
+        std::str::from_utf8(b).ok()?;
+        let start = ws(b, 0);
+        let end = value(b, start, DEPTH)?;
+        (ws(b, end) == b.len()).then_some(start)
+    }
+
+    /// The end of the valid value at `i`, with `depth` containers still allowed.
+    fn value(b: &[u8], i: usize, depth: usize) -> Option<usize> {
+        match *b.get(i)? {
+            b'{' => {
+                let depth = depth - 1;
+                if depth == 0 {
+                    return None;
+                }
+                let mut j = ws(b, i + 1);
+                if *b.get(j)? == b'}' {
+                    return Some(j + 1);
+                }
+                loop {
+                    j = string(b, j)?;
+                    j = ws(b, j);
+                    if *b.get(j)? != b':' {
+                        return None;
+                    }
+                    j = value(b, ws(b, j + 1), depth)?;
+                    j = ws(b, j);
+                    match *b.get(j)? {
+                        b',' => j = ws(b, j + 1),
+                        b'}' => return Some(j + 1),
+                        _ => return None,
+                    }
+                }
+            }
+            b'[' => {
+                let depth = depth - 1;
+                if depth == 0 {
+                    return None;
+                }
+                let mut j = ws(b, i + 1);
+                if *b.get(j)? == b']' {
+                    return Some(j + 1);
+                }
+                loop {
+                    j = value(b, j, depth)?;
+                    j = ws(b, j);
+                    match *b.get(j)? {
+                        b',' => j = ws(b, j + 1),
+                        b']' => return Some(j + 1),
+                        _ => return None,
+                    }
+                }
+            }
+            b'"' => string(b, i),
+            b't' => literal(b, i, b"true"),
+            b'f' => literal(b, i, b"false"),
+            b'n' => literal(b, i, b"null"),
+            b'-' | b'0'..=b'9' => number(b, i),
+            _ => None,
+        }
+    }
+
+    fn literal(b: &[u8], i: usize, word: &[u8]) -> Option<usize> {
+        b[i..].starts_with(word).then_some(i + word.len())
+    }
+
+    fn digits(b: &[u8], mut i: usize) -> usize {
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        i
+    }
+
+    /// The end of the number at `i`: `-? (0 | [1-9][0-9]*) (. [0-9]+)? ([eE] [+-]? [0-9]+)?`,
+    /// whose value is a finite `f64`.
+    fn number(b: &[u8], i: usize) -> Option<usize> {
+        let mut j = i + usize::from(b[i] == b'-');
+        match *b.get(j)? {
+            b'0' => j += 1,
+            b'1'..=b'9' => j = digits(b, j),
+            _ => return None,
+        }
+        if b.get(j) == Some(&b'.') {
+            let k = digits(b, j + 1);
+            if k == j + 1 {
+                return None;
+            }
+            j = k;
+        }
+        if matches!(b.get(j), Some(b'e' | b'E')) {
+            j += 1;
+            if matches!(b.get(j), Some(b'+' | b'-')) {
+                j += 1;
+            }
+            let k = digits(b, j);
+            if k == j {
+                return None;
+            }
+            j = k;
+        }
+        let text = std::str::from_utf8(&b[i..j]).ok()?;
+        text.parse::<f64>().ok().filter(|v| v.is_finite())?;
+        Some(j)
+    }
+
+    fn hex4(b: &[u8], i: usize) -> Option<u16> {
+        let h = b.get(i..i + 4)?;
+        let text = std::str::from_utf8(h).ok()?;
+        if !h.iter().all(u8::is_ascii_hexdigit) {
+            return None;
+        }
+        u16::from_str_radix(text, 16).ok()
+    }
+
+    /// The end of the valid string at `i` (just past its closing quote).
+    fn string(b: &[u8], i: usize) -> Option<usize> {
+        if *b.get(i)? != b'"' {
+            return None;
+        }
+        let mut j = i + 1;
+        loop {
+            match *b.get(j)? {
+                b'"' => return Some(j + 1),
+                b'\\' => match *b.get(j + 1)? {
+                    b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => j += 2,
+                    b'u' => {
+                        let n = hex4(b, j + 2)?;
+                        j += 6;
+                        match n {
+                            0xDC00..=0xDFFF => return None,
+                            0xD800..=0xDBFF => {
+                                if b.get(j..j + 2)? != b"\\u" {
+                                    return None;
+                                }
+                                if !(0xDC00..=0xDFFF).contains(&hex4(b, j + 2)?) {
+                                    return None;
+                                }
+                                j += 6;
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => return None,
+                },
+                0..=0x1f => return None,
+                _ => j += 1,
+            }
+        }
+    }
+
+    /// The members of the valid object at `open` (its `{`): each key's text span and value span.
+    pub(super) fn members(b: &[u8], open: usize) -> impl Iterator<Item = (Span, Span)> + '_ {
+        let mut i = open + 1;
+        std::iter::from_fn(move || {
+            let mut j = ws(b, i);
+            match *b.get(j)? {
+                b'}' => return None,
+                b',' => j = ws(b, j + 1),
+                _ => {}
+            }
+            let key_end = string(b, j)?;
+            let start = ws(b, ws(b, key_end) + 1);
+            let end = value(b, start, usize::MAX)?;
+            i = end;
+            Some(((j + 1, key_end - 1), (start, end)))
+        })
+    }
+
+    /// The element spans of the valid array at `open` (its `[`).
+    pub(super) fn elements(b: &[u8], open: usize) -> impl Iterator<Item = Span> + '_ {
+        let mut i = open + 1;
+        std::iter::from_fn(move || {
+            let mut j = ws(b, i);
+            match *b.get(j)? {
+                b']' => return None,
+                b',' => j = ws(b, j + 1),
+                _ => {}
+            }
+            let end = value(b, j, usize::MAX)?;
+            i = end;
+            Some((j, end))
+        })
+    }
+
+    /// The characters of a valid string's text `raw` (between its quotes), escapes decoded.
+    pub(super) fn chars(raw: &[u8]) -> impl Iterator<Item = char> + '_ {
+        let mut i = 0;
+        std::iter::from_fn(move || {
+            let c = *raw.get(i)?;
+            if c != b'\\' {
+                let rest = std::str::from_utf8(&raw[i..]).ok()?;
+                let ch = rest.chars().next()?;
+                i += ch.len_utf8();
+                return Some(ch);
+            }
+            let e = *raw.get(i + 1)?;
+            i += 2;
+            Some(match e {
+                b'b' => '\u{8}',
+                b'f' => '\u{c}',
+                b'n' => '\n',
+                b'r' => '\r',
+                b't' => '\t',
+                b'u' => {
+                    let n = u32::from(hex4(raw, i)?);
+                    i += 4;
+                    if (0xD800..=0xDBFF).contains(&n) {
+                        let low = u32::from(hex4(raw, i + 2)?);
+                        i += 6;
+                        char::from_u32(0x10000 + ((n - 0xD800) << 10) + (low - 0xDC00))?
+                    } else {
+                        char::from_u32(n)?
+                    }
+                }
+                other => char::from(other),
+            })
+        })
+    }
+
+    /// Whether the string text at `key` is `lit`.
+    pub(super) fn is(b: &[u8], key: Span, lit: &str) -> bool {
+        chars(&b[key.0..key.1]).eq(lit.chars())
+    }
+
+    /// The order of two string texts by their characters (a `String`'s order).
+    pub(super) fn key_order(b: &[u8], x: Span, y: Span) -> Ordering {
+        chars(&b[x.0..x.1]).cmp(chars(&b[y.0..y.1]))
+    }
+
+    /// The decoded string text at `text`, in fallibly grown storage; None when it is refused.
+    pub(super) fn decode(b: &[u8], text: Span) -> Option<String> {
+        let raw = &b[text.0..text.1];
+        let len: usize = chars(raw).map(char::len_utf8).sum();
+        let mut s = String::new();
+        s.try_reserve_exact(len).ok()?;
+        s.extend(chars(raw));
+        Some(s)
+    }
+
+    /// A number token's value when it is a `u64` (no sign, fraction or exponent, and in range).
+    pub(super) fn as_u64(token: &[u8]) -> Option<u64> {
+        if token.is_empty() || !token.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        token.iter().try_fold(0u64, |n, d| {
+            n.checked_mul(10)?.checked_add(u64::from(d - b'0'))
+        })
     }
 }
 
@@ -405,110 +705,6 @@ fn known_class(name: &str) -> Option<FeatureClass> {
             .find(|(f, _)| f.name == name)
             .map(|(f, _)| f.class)
     })
-}
-
-/// A copy of `b` (ASCII) in a fallibly grown string; Err when the growth is refused.
-fn try_text(b: &[u8]) -> Result<String, ()> {
-    let mut s = String::new();
-    s.try_reserve_exact(b.len()).map_err(|_| ())?;
-    s.push_str(std::str::from_utf8(b).map_err(|_| ())?);
-    Ok(s)
-}
-
-/// The canonical manifest JSON `b`, parsed with fallible growth only: Ok(None) when `b` is not
-/// canonical, Err when a growth is refused. Names and versions are read as the characters their
-/// grammars allow; [`StoreFeatures::validate`] checks the grammars.
-fn canonical(b: &[u8]) -> Result<Option<StoreFeatures>, ()> {
-    struct Cur<'a>(&'a [u8]);
-    impl<'a> Cur<'a> {
-        fn lit(&mut self, l: &[u8]) -> bool {
-            match self.0.strip_prefix(l) {
-                Some(rest) => {
-                    self.0 = rest;
-                    true
-                }
-                None => false,
-            }
-        }
-        /// The bytes up to the next `"`, each one of `ok`.
-        fn word(&mut self, ok: impl Fn(u8) -> bool) -> Option<&'a [u8]> {
-            let n = self.0.iter().position(|c| *c == b'"')?;
-            let (w, rest) = self.0.split_at(n);
-            if !w.iter().all(|c| ok(*c)) {
-                return None;
-            }
-            self.0 = &rest[1..];
-            Some(w)
-        }
-    }
-    let mut c = Cur(b);
-    if !c.lit(br#"{"manifest_version":"#) {
-        return Ok(None);
-    }
-    let digits = c.0.iter().take_while(|d| d.is_ascii_digit()).count();
-    let Some(version) = std::str::from_utf8(&c.0[..digits])
-        .ok()
-        .and_then(|d| d.parse::<u32>().ok())
-        .filter(|_| digits == 1 || c.0[0] != b'0')
-    else {
-        return Ok(None);
-    };
-    c.0 = &c.0[digits..];
-    if !c.lit(br#","features":["#) {
-        return Ok(None);
-    }
-    let mut features: Vec<StoreFeature> = Vec::new();
-    let mut first = true;
-    loop {
-        if c.lit(b"]}") {
-            break;
-        }
-        if !first && !c.lit(b",") {
-            return Ok(None);
-        }
-        first = false;
-        if features.len() > MAX_FEATURES {
-            return Ok(None);
-        }
-        if !c.lit(br#"{"name":""#) {
-            return Ok(None);
-        }
-        let Some(name) = c.word(|x| x.is_ascii_lowercase() || x.is_ascii_digit() || x == b'_')
-        else {
-            return Ok(None);
-        };
-        if !c.lit(br#","class":""#) {
-            return Ok(None);
-        }
-        let Some(class) = c
-            .word(|x| x.is_ascii_lowercase() || x == b'_')
-            .and_then(|w| FeatureClass::parse(std::str::from_utf8(w).ok()?))
-        else {
-            return Ok(None);
-        };
-        if !c.lit(br#","required_rdy":""#) {
-            return Ok(None);
-        }
-        let Some(required) = c.word(|x| x.is_ascii_digit() || x == b'.') else {
-            return Ok(None);
-        };
-        if !c.lit(b"}") {
-            return Ok(None);
-        }
-        features.try_reserve(1).map_err(|_| ())?;
-        features.push(StoreFeature {
-            name: try_text(name)?,
-            class,
-            required_rdy: try_text(required)?,
-        });
-    }
-    if !c.0.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(StoreFeatures {
-        manifest_version: version,
-        features,
-    }))
 }
 
 /// The features a new store, and a legacy dump's load, start with.
@@ -601,6 +797,7 @@ pub struct UpgradeReceipt {
     pub from: Hash,
     #[serde(with = "crate::transition::hex::one")]
     pub to: Hash,
+    #[serde(deserialize_with = "bounded_steps")]
     pub steps: Vec<String>,
     pub source_end: Location,
     pub backup: String,
@@ -648,6 +845,51 @@ impl UpgradeReceipt {
         }
         Ok(())
     }
+}
+
+/// A receipt's steps, counted before storage grows for them: the first
+/// `MAX_RECEIPT_STEPS + 1` are kept (so [`UpgradeReceipt::validate`] refuses the count), each
+/// later one is read as a string and dropped, so every decode fault is still the decoder's.
+fn bounded_steps<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    struct Steps;
+    impl<'de> serde::de::Visitor<'de> for Steps {
+        type Value = Vec<String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a list of step names")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Vec<String>, A::Error> {
+            let mut steps = Vec::new();
+            while steps.len() <= MAX_RECEIPT_STEPS {
+                match seq.next_element::<String>()? {
+                    Some(s) => steps.push(s),
+                    None => return Ok(steps),
+                }
+            }
+            while seq.next_element::<Text>()?.is_some() {}
+            Ok(steps)
+        }
+    }
+    /// A string, read and dropped.
+    struct Text;
+    impl<'de> Deserialize<'de> for Text {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Text, D::Error> {
+            struct V;
+            impl serde::de::Visitor<'_> for V {
+                type Value = Text;
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("a step name")
+                }
+                fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Text, E> {
+                    Ok(Text)
+                }
+            }
+            d.deserialize_str(V)
+        }
+    }
+    d.deserialize_seq(Steps)
 }
 
 /// The fix for a refusal with no store format to go by.

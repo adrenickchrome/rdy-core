@@ -171,6 +171,12 @@ pub fn encode<T: Serialize + 'static>(kind: u8, value: &T) -> EncodedObject {
     }
 }
 
+/// The `(raw kind, payload)` item of a new object of logical kind `kind` whose encoding-latest
+/// body its writer built itself (a bounded encoder's record, or a blob chunk's bytes).
+pub fn frame_latest(kind: u8, body: Vec<u8>) -> (u8, Vec<u8>) {
+    frame(kind, latest(kind), body).expect("the latest encoding of a kind frames")
+}
+
 /// [`encode`]'s `(raw kind, payload)` item for a store write.
 pub fn item<T: Serialize + 'static>(kind: u8, value: &T) -> (u8, Vec<u8>) {
     encode(kind, value).into_item()

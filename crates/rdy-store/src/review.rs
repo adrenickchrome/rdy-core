@@ -11,7 +11,6 @@
 use crate::coord::key_hash;
 use crate::error::StoreError;
 use crate::index::hash_from;
-use crate::store::encode;
 use crate::{Store, StoreReader, kinds};
 use rdy_model::{BlockId, Hash, Review, ReviewSubject, SemanticTension, Verdict, pair_key};
 use std::collections::BTreeSet;
@@ -82,7 +81,7 @@ impl Store {
                 ));
             }
         };
-        let bytes = encode(r);
+        let (kind, bytes) = crate::codec::item(kinds::REVIEW, r);
         let id = Hash::of(&bytes);
         let name = format!("{DISMISS_REF}{vkey}");
         if let Some(held) = self.get_ref(&name)? {
@@ -94,7 +93,7 @@ impl Store {
                 "tension vkey {vkey} is already dismissed by review {held}"
             )));
         }
-        let mut items = vec![(kinds::REVIEW, bytes)];
+        let mut items = vec![(kind, bytes)];
         items.extend(self.ref_items_pub(vec![(name, id.0.to_vec())]));
         Ok((id, Some(items)))
     }
@@ -150,14 +149,14 @@ impl Store {
                 ));
             }
         };
-        let bytes = encode(r);
+        let (kind, bytes) = crate::codec::item(kinds::REVIEW, r);
         let id = Hash::of(&bytes);
         if let Some(held) = self.get_ref(&name)?
             && hash_from(&held, "mention ref")? == id
         {
             return Ok(id);
         }
-        let mut items = vec![(kinds::REVIEW, bytes)];
+        let mut items = vec![(kind, bytes)];
         items.extend(self.ref_items_pub(vec![(name, id.0.to_vec())]));
         self.write(items)?;
         Ok(id)
@@ -194,7 +193,7 @@ impl Store {
                 "a tension verdict writes the tension's first version, and only a tension verdict does",
             ));
         }
-        let bytes = encode(r);
+        let (kind, bytes) = crate::codec::item(kinds::REVIEW, r);
         let id = Hash::of(&bytes);
         let first = match t {
             Some(t) => {
@@ -211,8 +210,8 @@ impl Store {
                          is not blocking and carries no relay",
                     ));
                 }
-                let tbytes = encode(t);
-                Some((Hash::of(&tbytes), tbytes))
+                let tframe = crate::codec::item(kinds::TENSION, t);
+                Some((Hash::of(&tframe.1), tframe))
             }
             None => None,
         };
@@ -232,10 +231,10 @@ impl Store {
                 return Err(refuse(format!("pair {key} is settled by review {held}")));
             }
         }
-        let mut items = vec![(kinds::REVIEW, bytes)];
+        let mut items = vec![(kind, bytes)];
         let mut refs = vec![(pair, id.0.to_vec())];
-        let tid = first.map(|(tid, tbytes)| {
-            items.push((kinds::TENSION, tbytes));
+        let tid = first.map(|(tid, tframe)| {
+            items.push(tframe);
             refs.push((format!("{SEMANTIC_REF}{key}"), tid.0.to_vec()));
             tid
         });
@@ -293,10 +292,10 @@ impl Store {
                      blocking, with the same pair, verdict and advice"
                 )));
             }
-            let bytes = encode(t);
+            let (kind, bytes) = crate::codec::item(kinds::TENSION, t);
             let id = Hash::of(&bytes);
             ids.push(id);
-            items.push((kinds::TENSION, bytes));
+            items.push((kind, bytes));
             refs.push((name, id.0.to_vec()));
         }
         if ids.is_empty() {

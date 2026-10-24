@@ -213,9 +213,10 @@ impl Transitions {
         None
     }
 
-    /// The frame Task 15 appends: `(kinds::TRANSITION, postcard bytes)`.
+    /// The frame a batch appends: its raw kind and payload, in the TRANSITION kind's latest
+    /// encoding (`crate::codec`).
     pub fn frame(&self) -> (u8, Vec<u8>) {
-        (kinds::TRANSITION, crate::store::encode(self))
+        crate::codec::item(kinds::TRANSITION, self)
     }
 }
 

@@ -419,7 +419,11 @@ impl StoreReader {
                 .ok_or(StoreError::NotFound(*h))
         };
         let (la, lb) = (at(a)?, at(b)?);
-        let len = crate::segment::HEADER + encode(&self.view_op(a)?).len() as u64;
+        // the frame's stored length, whatever its encoding
+        let Some((payload, _, _)) = self.segments().header(la)? else {
+            return Err(StoreError::NotFound(*a));
+        };
+        let len = crate::segment::HEADER + u64::from(payload);
         Ok(la.segment == lb.segment && la.offset + len == lb.offset)
     }
 
@@ -652,7 +656,7 @@ impl Store {
             owner: owner.clone(),
             pinned,
         };
-        let bytes = encode(&view_op(name, None, create, by));
+        let (kind, bytes) = crate::codec::item(kinds::VIEW_OP, &view_op(name, None, create, by));
         let head = ViewHead {
             head: Hash::of(&bytes),
             base,
@@ -662,7 +666,7 @@ impl Store {
             closed: false,
             last_write_ms: by.at_ms,
         };
-        let mut items = vec![(kinds::VIEW_OP, bytes)];
+        let mut items = vec![(kind, bytes)];
         items.extend(self.ref_items_pub(vec![(view_ref(name), encode(&head))]));
         self.write(items)?;
         Ok(head)
@@ -693,7 +697,7 @@ impl Store {
             changes: changes.clone(),
             owner: owner.clone(),
         };
-        let bytes = encode(&view_op(name, None, fork, by));
+        let (kind, bytes) = crate::codec::item(kinds::VIEW_OP, &view_op(name, None, fork, by));
         let mut head = ViewHead {
             head: Hash::of(&bytes),
             base: src.base,
@@ -703,7 +707,7 @@ impl Store {
             closed: false,
             last_write_ms: by.at_ms,
         };
-        let mut items = vec![(kinds::VIEW_OP, bytes)];
+        let mut items = vec![(kind, bytes)];
         let canon = self.canon_head()?;
         if let Some(landing) = canon
             && !src.pinned
@@ -747,9 +751,10 @@ impl Store {
                 remaining,
                 conflicts,
             };
-            let bytes = encode(&view_op(name, Some(head.head), rebase, by));
+            let (kind, bytes) =
+                crate::codec::item(kinds::VIEW_OP, &view_op(name, Some(head.head), rebase, by));
             head.head = Hash::of(&bytes);
-            items.push((kinds::VIEW_OP, bytes));
+            items.push((kind, bytes));
         }
         items.extend(self.ref_items_pub(vec![(view_ref(name), encode(&head))]));
         self.write(items)?;
@@ -893,10 +898,10 @@ impl Store {
             ) {
                 last_write = by.at_ms;
             }
-            let bytes = encode(&view_op(name, prev, op, by));
+            let (kind, bytes) = crate::codec::item(kinds::VIEW_OP, &view_op(name, prev, op, by));
             prev = Some(Hash::of(&bytes));
             written.extend(prev);
-            items.push((kinds::VIEW_OP, bytes));
+            items.push((kind, bytes));
         }
         // 5. the new head, in the same write
         let new_head = ViewHead {
@@ -913,26 +918,29 @@ impl Store {
     }
 
     /// A `Close { reason }` op of view `name` after its head `prev_head`, for a caller's batch
-    /// (altw1): the op's bytes, its id and the closed head (everything else kept). Nothing is
-    /// written here.
+    /// (altw1): the op's frame (its raw kind and bytes), its id and the closed head (everything
+    /// else kept). Nothing is written here.
     pub(crate) fn close_part(
         &self,
         name: &str,
         prev_head: &ViewHead,
         reason: &str,
         by: &Provenance,
-    ) -> (Vec<u8>, Hash, ViewHead) {
+    ) -> ((u8, Vec<u8>), Hash, ViewHead) {
         let close = ViewOpKind::Close {
             reason: reason.to_string(),
         };
-        let bytes = encode(&view_op(name, Some(prev_head.head), close, by));
-        let id = Hash::of(&bytes);
+        let item = crate::codec::item(
+            kinds::VIEW_OP,
+            &view_op(name, Some(prev_head.head), close, by),
+        );
+        let id = Hash::of(&item.1);
         let head = ViewHead {
             head: id,
             closed: true,
             ..prev_head.clone()
         };
-        (bytes, id, head)
+        (item, id, head)
     }
 
     /// Whether `ops` hold an op that can add a change to view `name`: an `Include`, or an `Undo`

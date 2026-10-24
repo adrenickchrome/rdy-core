@@ -449,3 +449,201 @@ fn ok1_dropped_project_frames_keep_their_encoding() {
         }
     }
 }
+
+fn who(actor: &str, role: Role) -> Provenance {
+    Provenance {
+        actor: actor.into(),
+        run: Some("r".into()),
+        role,
+        at_ms: 7,
+    }
+}
+
+/// Every writer asks the codec for its kind's latest encoding: with encoding 1 registered for
+/// each kind whose store identity is its stored frame's hash, every object a writer authors is
+/// a versioned frame of version 1, the hash each writer returns and each ref names is that
+/// frame's, and the store reads, reindexes and reopens as before. BLOCK and CHANGE keep their
+/// model identities (`Block::version_hash`, `Change::id`) until their encodings move.
+#[test]
+fn ok1_every_writer_writes_its_kinds_latest_encoding() {
+    let versioned = [
+        kinds::PROPOSAL,
+        kinds::LANDING,
+        kinds::SNAPSHOT,
+        kinds::BLOB_CHUNK,
+        kinds::BLOB_MANIFEST,
+        kinds::TAG,
+        kinds::ANSWER,
+        kinds::SIGNATURE,
+        kinds::VIEW_OP,
+        kinds::INTENT,
+        kinds::ALT_SET,
+        kinds::REVIEW,
+    ];
+    let _v1: Vec<_> = versioned
+        .iter()
+        .map(|k| codec::test_encoding(*k, 1))
+        .collect();
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let mut s = Store::create(&dir).unwrap();
+    let created = batches_of(&s).len();
+    let side = s
+        .view_create("side", None, None, false, &who("agent:w", Role::Writer))
+        .unwrap();
+    let cid = s
+        .commit_to_view(
+            "work",
+            change(
+                "work",
+                vec![Op::Create {
+                    block: block("b-00001", "alpha"),
+                }],
+            ),
+        )
+        .unwrap();
+    let proposal = s
+        .propose_changes(
+            "work",
+            "first",
+            Some("the first version"),
+            who("agent:w", Role::Writer),
+            vec![cid],
+            None,
+        )
+        .unwrap();
+    let landing = s
+        .land(&proposal, who("human:alice", Role::Approver))
+        .unwrap();
+    let (tag, answer) = s
+        .put_tag_answered(
+            &Tag {
+                name: "v1".into(),
+                landing,
+                message: None,
+                tagged_by: who("human:alice", Role::Approver),
+            },
+            Answer {
+                item: "tag:v1".into(),
+                act: AnswerAct::Tag,
+                option: None,
+                label: None,
+                options: vec![],
+                card_hash: None,
+                targets: vec![],
+                person: who("human:alice", Role::Approver),
+                relayed_by: None,
+                relay_evidence: None,
+                evidence_kind: None,
+                note: None,
+            },
+        )
+        .unwrap();
+    let signature = s
+        .put_signature(&rdy_model::signature::Signature {
+            subject: landing,
+            namespace: "rdy-approval-v1".into(),
+            statement: b"statement".to_vec(),
+            sig: vec![1],
+            signed_by: who("human:alice", Role::Approver),
+        })
+        .unwrap();
+    let blob = s.put_blob(b"a blob").unwrap();
+    let intent = s
+        .put_intent(&Intent {
+            stable: None,
+            prev: None,
+            actor: "agent:a".into(),
+            run: Some("r".into()),
+            view: "work".into(),
+            area: None,
+            blocks: vec![],
+            angle: "an angle".into(),
+            expires_at_ms: 10_000,
+            status: IntentStatus::Open,
+            at_ms: 5,
+        })
+        .unwrap();
+    let alt = s
+        .put_alt_set(&AltSet {
+            stable: None,
+            prev: None,
+            title: "Fee model".into(),
+            question: None,
+            members: vec![AltMember {
+                label: "side".into(),
+                view: "side".into(),
+            }],
+            status: AltStatus::Open,
+            provenance: who("agent:a", Role::Writer),
+        })
+        .unwrap();
+    let review = s
+        .put_dismissal(&Review {
+            subject: ReviewSubject::Tension {
+                id: Hash([1; 32]),
+                vkey: Hash([5; 32]),
+                kind: "edit_collision".into(),
+                severity: "blocking".into(),
+                sides: vec!["canon".into()],
+                blocks: vec![BlockId::parse("c-AAAAA").unwrap()],
+            },
+            case_hash: None,
+            verdict: Verdict::Dismiss,
+            reason: "fine".into(),
+            citations: vec![],
+            provenance: who("agent:r", Role::Reviewer),
+        })
+        .unwrap();
+    // every object frame since creation: a versioned kind's is version 1, the others' are 0
+    let mut written = std::collections::BTreeSet::new();
+    let mut hashes = std::collections::BTreeSet::new();
+    for b in &batches_of(&s)[created..] {
+        for f in &b.frames {
+            let Frame::Present {
+                kind,
+                hash,
+                payload,
+            } = f
+            else {
+                panic!("no frame is dropped here");
+            };
+            let o = codec::split(*kind, payload).unwrap();
+            if o.kind == kinds::REF_UPDATE || o.kind == kinds::BATCH_COMMIT {
+                assert_eq!(*kind, o.kind);
+                continue;
+            }
+            let want = u16::from(versioned.contains(&o.kind));
+            assert_eq!(o.version, want, "kind {}", o.kind);
+            assert_eq!(*kind, codec::raw_kind(o.kind, want), "kind {}", o.kind);
+            assert_eq!(*hash, Hash::of(payload));
+            written.insert(o.kind);
+            hashes.insert(*hash);
+        }
+    }
+    for k in versioned {
+        assert!(written.contains(&k), "a writer wrote kind {k}");
+    }
+    // each writer returns its frame's hash, and its refs name it
+    for h in [
+        side.head, proposal, landing, tag, answer, signature, blob, intent, alt, review,
+    ] {
+        assert!(hashes.contains(&h), "{h} is a written frame's hash");
+    }
+    assert_eq!(s.get_ref("tag/v1").unwrap(), Some(tag.0.to_vec()));
+    let check = |s: &Store| {
+        let t: Tag = s.get_typed(kinds::TAG, &tag).unwrap();
+        assert_eq!(t.landing, landing);
+        assert_eq!(s.landing(&landing).unwrap().proposal, proposal);
+        assert_eq!(s.get_blob(&blob).unwrap(), b"a blob");
+        assert_eq!(s.view_head("side").unwrap().unwrap().head, side.head);
+        s.check_meta().unwrap();
+        s.check_objects().unwrap();
+    };
+    check(&s);
+    s.reindex().unwrap();
+    check(&s);
+    drop(s);
+    let s = Store::open(&dir).unwrap();
+    check(&s);
+}

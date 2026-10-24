@@ -661,23 +661,26 @@ impl Ingest {
         let mut c = redaction_io::collect(self.log.readers())?;
         // the residues the log does not hold yet, once each, by residue hash, each within the
         // record bound
-        let mut missing: std::collections::BTreeMap<Hash, Vec<u8>> = Default::default();
+        let mut missing: std::collections::BTreeMap<Hash, (u8, Vec<u8>)> = Default::default();
         if !residues.is_empty() {
             let mut buf = rdy_model::redaction::record_buffer().map_err(|_| record_too_big())?;
             for r in residues {
                 let bytes =
                     rdy_model::redaction::encode_into(r, &mut buf).map_err(|_| record_too_big())?;
-                let h = Hash::of(bytes);
+                // the residue's frame in its kind's latest encoding (`crate::codec`)
+                let frame = crate::codec::frame_latest(kinds::REDACTION_RESIDUE, bytes.to_vec());
+                let h = Hash::of(&frame.1);
                 if !c.residue_at.contains_key(&h) && !missing.contains_key(&h) {
-                    missing.insert(h, bytes.to_vec());
+                    missing.insert(h, frame);
                 }
             }
         }
-        let mut frames: Vec<(u8, Vec<u8>)> = missing
-            .into_values()
-            .map(|b| (kinds::REDACTION_RESIDUE, b))
-            .collect();
-        frames.extend(encoded.into_iter().map(|b| (kinds::REDACTION_CARRIED, b)));
+        let mut frames: Vec<(u8, Vec<u8>)> = missing.into_values().collect();
+        frames.extend(
+            encoded
+                .into_iter()
+                .map(|b| crate::codec::frame_latest(kinds::REDACTION_CARRIED, b)),
+        );
         let start = self.log.end();
         let after = c.push_batch(start, &frames)?;
         match self.mode {

@@ -972,6 +972,69 @@ fn open_readers(dir: &Path) -> io::Result<Vec<File>> {
     Ok(readers)
 }
 
+/// The value of ref `name` in the last sealed batch of the log in `dir` that sets it, read with
+/// no lock and no writer: each segment frame by frame by its header, a ref's payload read and
+/// hash-checked, a batch counted only at a valid marker, the walk ending at the first frame that
+/// does not fit its file or the first marker that does not close its batch. Nothing is written.
+/// A ref frame longer than `max_value` and its name is skipped unread (it holds no such value).
+pub(crate) fn sealed_ref_value(
+    dir: &Path,
+    name: &str,
+    max_value: usize,
+) -> io::Result<Option<Vec<u8>>> {
+    let max_frame = (max_value + name.len() + 64) as u64;
+    let mut found = None;
+    let mut seg = 0u32;
+    'segments: while let Some(f) = open_if_present(&seg_path(dir, seg))? {
+        let file_len = f.metadata()?.len();
+        let mut offset = 0u64;
+        let mut since: Vec<(u64, Hash)> = vec![];
+        let mut pending = None;
+        while let Some((len, kind, hash)) = header_at(&f, offset, file_len)? {
+            let read = |n: u64| -> io::Result<Option<Vec<u8>>> {
+                let mut p = vec![0u8; n as usize];
+                pio::read_exact_at(&f, &mut p, offset + HEADER)?;
+                Ok((Hash::of(&p) == hash).then_some(p))
+            };
+            if kind == kinds::BATCH_COMMIT {
+                let closes = u64::from(len) <= MARKER_MAX
+                    && read(u64::from(len))?.is_some_and(|p| marker_matches(seg, &since, &p));
+                if !closes {
+                    break 'segments;
+                }
+                if let Some(v) = pending.take() {
+                    found = Some(v);
+                }
+                since.clear();
+            } else {
+                if kind == kinds::REF_UPDATE && u64::from(len) <= max_frame {
+                    let Some(p) = read(u64::from(len))? else {
+                        break 'segments;
+                    };
+                    if let Ok(u) = postcard::from_bytes::<kinds::RefUpdate>(&p)
+                        && u.name == name
+                    {
+                        pending = Some(u.value);
+                    }
+                }
+                since.push((offset, hash));
+            }
+            offset += HEADER + u64::from(len);
+        }
+        seg += 1;
+    }
+    Ok(found)
+}
+
+/// `path` opened read-only, or None when it does not exist.
+fn open_if_present(path: &Path) -> io::Result<Option<File>> {
+    match File::open(path) {
+        Ok(f) => Ok(Some(f)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 /// True if the last two segments hold a `BATCH_COMMIT`: the log was written by M2 and opens under
 /// the marker rule. Each segment is read in order until its first bad frame. Behind that damage a
 /// marker still counts if it closes a real batch of the file (see `acknowledged_batch_follows`),

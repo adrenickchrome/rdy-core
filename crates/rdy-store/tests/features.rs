@@ -393,3 +393,413 @@ fn ok1_hostile_manifest_and_encoding_are_bounded() {
     assert!(matches!(e, StoreError::Decode(_)), "{e:?}");
     let _ = Hash::of(&body);
 }
+
+/// A global allocator that records the largest single request of this thread, and refuses
+/// every request while this thread asks it to.
+mod alloc_probe {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    pub struct Probe;
+
+    thread_local! {
+        static LARGEST: Cell<usize> = const { Cell::new(0) };
+        static REFUSE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Records a request of `n` bytes; false when it is to be refused.
+    fn admit(n: usize) -> bool {
+        let _ = LARGEST.try_with(|l| l.set(l.get().max(n)));
+        !REFUSE.try_with(Cell::get).unwrap_or(false)
+    }
+
+    // SAFETY: every admitted call goes to `System` with the caller's arguments unchanged; a
+    // refused one returns null, which `GlobalAlloc` allows for a failed allocation.
+    #[allow(unsafe_code)]
+    unsafe impl GlobalAlloc for Probe {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            if !admit(layout.size()) {
+                return std::ptr::null_mut();
+            }
+            // SAFETY: the caller's layout, as `GlobalAlloc::alloc` requires.
+            unsafe { System.alloc(layout) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: `ptr` came from `System` with `layout` (every allocation here is System's).
+            unsafe { System.dealloc(ptr, layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            if !admit(new_size) {
+                return std::ptr::null_mut();
+            }
+            // SAFETY: `ptr` came from `System` with `layout`; the caller's new size.
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    /// `f`'s result and the largest single request this thread made while it ran.
+    pub fn largest<T>(f: impl FnOnce() -> T) -> (T, usize) {
+        LARGEST.with(|l| l.set(0));
+        let out = f();
+        (out, LARGEST.with(Cell::get))
+    }
+
+    /// `f`'s result with every allocation of this thread refused while it runs.
+    pub fn refusing<T>(f: impl FnOnce() -> T) -> T {
+        REFUSE.with(|r| r.set(true));
+        let out = f();
+        REFUSE.with(|r| r.set(false));
+        out
+    }
+}
+
+#[global_allocator]
+static PROBE: alloc_probe::Probe = alloc_probe::Probe;
+
+/// The general manifest parse as it stood before the bounded parser: a `serde_json::Value`,
+/// then each rule in order. Its refusal texts are the contract the bounded parser keeps.
+fn reference_reason(bytes: &[u8]) -> Result<StoreFeatures, String> {
+    use serde_json::Value;
+    let invalid = || "invalid JSON".to_string();
+    if bytes.len() > 65_536 {
+        return Err("manifest exceeds 65536 bytes".into());
+    }
+    let unknown = |o: &serde_json::Map<String, Value>, allowed: &[&str]| -> Result<(), String> {
+        let mut u: Vec<&String> = o
+            .keys()
+            .filter(|k| !allowed.contains(&k.as_str()))
+            .collect();
+        u.sort();
+        match u.first() {
+            Some(k) => Err(format!(
+                "unknown field {}",
+                match k.char_indices().nth(80) {
+                    Some((at, _)) => format!("{}\u{2026}", &k[..at]),
+                    None => k.to_string(),
+                }
+            )),
+            None => Ok(()),
+        }
+    };
+    let v: Value = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let top = v.as_object().ok_or_else(invalid)?;
+    unknown(top, &["manifest_version", "features"])?;
+    let version = top
+        .get("manifest_version")
+        .and_then(Value::as_u64)
+        .ok_or_else(invalid)?;
+    if version != 1 {
+        return Err("unsupported manifest version".into());
+    }
+    let list = top
+        .get("features")
+        .and_then(Value::as_array)
+        .ok_or_else(invalid)?;
+    if list.len() > 256 {
+        return Err("more than 256 features".into());
+    }
+    let mut features = vec![];
+    for item in list {
+        let o = item.as_object().ok_or_else(invalid)?;
+        unknown(o, &["name", "class", "required_rdy"])?;
+        let text = |k: &str| o.get(k).and_then(Value::as_str).ok_or_else(invalid);
+        let name = text("name")?;
+        let class = match text("class")? {
+            "compatible" => FeatureClass::Compatible,
+            "read_only_compatible" => FeatureClass::ReadOnlyCompatible,
+            "incompatible" => FeatureClass::Incompatible,
+            _ => return Err(invalid()),
+        };
+        features.push(feature(name, class, text("required_rdy")?));
+    }
+    let m = manifest(features);
+    m.validate().map_err(|e| e.to_string())?;
+    Ok(m)
+}
+
+/// Noncanonical manifests (D-WWAK7; limits before allocation): the bounded parser refuses each
+/// text with the reason the general parse gave, a collection over its limit before any storage
+/// grows for it, and a refused allocation as `Allocation`, never an abort.
+#[test]
+fn ok1_noncanonical_manifests_parse_within_their_bounds() {
+    use alloc_probe::{largest, refusing};
+    use rdy_store::format::{ManifestError, ParseFailure};
+    // 30,000 zeros after leading whitespace: refused by count, with no storage grown for them
+    let zeros = vec!["0"; 30_000].join(",");
+    let hostile = format!(" {{\"manifest_version\":1,\"features\":[{zeros}]}}");
+    assert_eq!(hostile.len(), 60_036);
+    let (got, big) = largest(|| StoreFeatures::parse_fallible(hostile.as_bytes()));
+    assert_eq!(
+        got,
+        Err(ParseFailure::Manifest(ManifestError(
+            "more than 256 features".into()
+        )))
+    );
+    assert!(big < 1024, "a request of {big} bytes");
+    let (got, big) = largest(|| StoreFeatures::parse(hostile.as_bytes()));
+    assert_eq!(got.unwrap_err().to_string(), "more than 256 features");
+    assert!(big < 1024, "a request of {big} bytes");
+    // a refused allocation is Allocation, canonical or not
+    let one = manifest(vec![feature("a", FeatureClass::Compatible, "1.0.0")]);
+    let spaced = "{ \"features\" : [ {\"required_rdy\":\"1.0.0\", \"class\":\"compatible\", \"name\":\"a\"} ],\n \"manifest_version\" : 1 }";
+    assert_eq!(
+        StoreFeatures::parse_fallible(spaced.as_bytes()),
+        Ok(one.clone())
+    );
+    assert_eq!(
+        refusing(|| StoreFeatures::parse_fallible(spaced.as_bytes())),
+        Err(ParseFailure::Allocation)
+    );
+    let canonical = one.to_json();
+    assert_eq!(
+        refusing(|| StoreFeatures::parse_fallible(&canonical)),
+        Err(ParseFailure::Allocation)
+    );
+    // an empty manifest needs no allocation at all
+    assert_eq!(
+        refusing(|| StoreFeatures::parse_fallible(b" {\"features\":[],\"manifest_version\":1} ")),
+        Ok(baseline_features())
+    );
+    // every case reads as the general parse read it
+    let f = |name: &str| {
+        format!("{{\"name\":\"{name}\",\"class\":\"compatible\",\"required_rdy\":\"1.0.0\"}}")
+    };
+    let nested = |depth: usize| {
+        format!(
+            "{{\"manifest_version\":1,\"features\":[],\"deep\":{}{}}}",
+            "[".repeat(depth),
+            "]".repeat(depth)
+        )
+    };
+    let many_objects = vec![f("a"); 300].join(",");
+    let mut cases: Vec<String> = vec![
+        "".into(),
+        " ".into(),
+        "{}".into(),
+        "{\"manifest_version\":1,\"features\":[]}".into(),
+        " \t\r\n{\"manifest_version\":1,\"features\":[]}\n\t ".into(),
+        "{\"manifest\\u005fversion\":1,\"features\":[]}".into(),
+        "{\"manifest_version\":2,\"manifest_version\":1,\"features\":[]}".into(),
+        "{\"manifest_version\":1,\"manifest_version\":2,\"features\":[]}".into(),
+        "{\"manifest_version\":1,\"features\":[{}],\"features\":[]}".into(),
+        "{\"manifest_version\":1.0,\"features\":[]}".into(),
+        "{\"manifest_version\":1e0,\"features\":[]}".into(),
+        "{\"manifest_version\":-1,\"features\":[]}".into(),
+        "{\"manifest_version\":-0,\"features\":[]}".into(),
+        "{\"manifest_version\":01,\"features\":[]}".into(),
+        "{\"manifest_version\":18446744073709551616,\"features\":[]}".into(),
+        "{\"manifest_version\":18446744073709551615,\"features\":[]}".into(),
+        "{\"manifest_version\":true,\"features\":[]}".into(),
+        "{\"manifest_version\":null,\"features\":[]}".into(),
+        "{\"manifest_version\":1,\"features\":[],}".into(),
+        "{\"manifest_version\":1,\"features\":[1,]}".into(),
+        "{\"manifest_version\":1,\"features\":[]} x".into(),
+        "{\"manifest_version\":1,\"features\":[]}{}".into(),
+        "{\"manifest_version\":1 \"features\":[]}".into(),
+        "{\"manifest_version\":1,\"features\":[],\"b\":1,\"a\":[}".into(),
+        "{\"manifest_version\":1,\"features\":[],\"b\":1,\"a\":2}".into(),
+        "{\"manifest_version\":7,\"features\":3,\"zz\":{\"x\":[1,2,{\"y\":null}]}}".into(),
+        "{\"manifest_version\":1,\"features\":[],\"\\u00e9t\\u00e9\":1}".into(),
+        "{\"manifest_version\":1,\"features\":[],\"\\ud83d\\ude00\":1,\"\\u00ff\":1}".into(),
+        "{\"manifest_version\":1,\"features\":[],\"\\ud800\":1}".into(),
+        "{\"manifest_version\":1,\"features\":[],\"\\udc00x\":1}".into(),
+        "{\"manifest_version\":1,\"features\":[],\"\\x\":1}".into(),
+        "{\"manifest_version\":1,\"features\":[],\"\\u12\":1}".into(),
+        "{\"manifest_version\":1,\"features\":[],\"a\tb\":1}".into(),
+        "{\"manifest_version\":1,\"features\":[],\"a\\/b\\\\c\\\"d\\b\\f\\n\\r\\t\":1}".into(),
+        "{\"manifest_version\":1,\"features\":[\"a\"]}".into(),
+        "{\"manifest_version\":1,\"features\":[1,2,3]}".into(),
+        format!("{{\"manifest_version\":1,\"features\":[{many_objects}]}}"),
+        format!("{{\"manifest_version\":1,\"features\":[{many_objects},]}}"),
+        format!(
+            "{{\"manifest_version\":1,\"features\":[{},{{\"name\":1}}]}}",
+            f("a")
+        ),
+        format!("{{\"manifest_version\":1,\"features\":[{{\"name\":1}},{{\"why\":1}}]}}"),
+        format!(
+            "{{\"manifest_version\":1,\"features\":[{{\"name\":\"\\u0061\",\"class\":\"compatible\",\"required_rdy\":\"1.0.0\"}}]}}"
+        ),
+        format!(
+            "{{\"manifest_version\":1,\"features\":[{{\"name\":\"a\",\"name\":\"b\",\"class\":\"incompatible\",\"required_rdy\":\"1.0.0\"}}]}}"
+        ),
+        format!(
+            "{{\"manifest_version\":1,\"features\":[{{\"name\":\"a\",\"class\":\"compatible\",\"required_rdy\":\"1.0.0\",\"z\":1,\"y\":[}}]}}"
+        ),
+        format!(
+            "{{\"manifest_version\":1,\"features\":[{{\"name\":\"a\",\"class\":\"compatibl\\u0065\",\"required_rdy\":\"1.0.0\"}}]}}"
+        ),
+        format!(
+            "{{\"manifest_version\":1,\"features\":[{{\"name\":\"a\",\"class\":\"compatible\",\"required_rdy\":1}}]}}"
+        ),
+        format!(
+            "{{\"manifest_version\":1,\"features\":[{},{}]}}",
+            f("b"),
+            f("a")
+        ),
+        format!(
+            "{{\"manifest_version\":1,\"features\":[],\"{}\":1}}",
+            "\u{e9}".repeat(100)
+        ),
+        "\u{feff}{\"manifest_version\":1,\"features\":[]}".into(),
+        "{\"manifest_version\":1,\"features\":[],\"k\":\"\u{e9}\"}".into(),
+        "[]".into(),
+        "null".into(),
+        "\"text\"".into(),
+        "1".into(),
+        "{\"manifest_version\":1,\"features\":[],\"n\":[0,-0,1.5,-2e-3,1E+9,0.0]}".into(),
+        "{\"manifest_version\":1,\"features\":[],\"n\":[1.]}".into(),
+        "{\"manifest_version\":1,\"features\":[],\"n\":[.5]}".into(),
+        "{\"manifest_version\":1,\"features\":[],\"n\":[+1]}".into(),
+        "{\"manifest_version\":1,\"features\":[],\"n\":[1e]}".into(),
+        "{\"manifest_version\":1,\"features\":[],\"n\":[tru]}".into(),
+        "{\"manifest_version\":1,\"features\":[],\"n\":[true,false,null]}".into(),
+        "{\"manifest_version\":1,\"features\":[],\"n\":1e400}".into(),
+        "{\"manifest_version\":1,\"features\":[],\"n\":-1e400}".into(),
+        "{\"manifest_version\":1,\"features\":[],\"n\":1e-400}".into(),
+        format!(
+            "{{\"manifest_version\":1,\"features\":[],\"n\":{}}}",
+            "9".repeat(400)
+        ),
+        format!(
+            "{{\"manifest_version\":{},\"features\":[]}}",
+            "1".repeat(30)
+        ),
+    ];
+    for depth in [1, 126, 127, 128, 129, 400] {
+        cases.push(nested(depth));
+    }
+    let mut cases: Vec<Vec<u8>> = cases.into_iter().map(String::into_bytes).collect();
+    cases.push(b"{\"manifest_version\":1,\"features\":[],\"\xff\":1}".to_vec());
+    cases.push(b"{\"manifest_version\":1,\"features\":[]}\xff".to_vec());
+    for case in &cases {
+        let want = reference_reason(case);
+        let got = StoreFeatures::parse(case).map_err(|e| e.to_string());
+        assert_eq!(got, want, "{:?}", String::from_utf8_lossy(case));
+        let fallible = StoreFeatures::parse_fallible(case).map_err(|e| match e {
+            ParseFailure::Manifest(m) => m.to_string(),
+            ParseFailure::Allocation => "allocation".into(),
+        });
+        assert_eq!(fallible, want, "{:?}", String::from_utf8_lossy(case));
+    }
+}
+
+/// D-WWAK7: only the upgrade transaction writes `meta/upgrade`. Every public write and seal of
+/// a project or a holder refuses it, and nothing is appended.
+#[test]
+fn ok1_public_writes_refuse_the_upgrade_ref() {
+    use rdy_store::format::REF_UPGRADE;
+    let refused = "only the store upgrade writes ref meta/upgrade";
+    for holder in [false, true] {
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("s");
+        let mut s = if holder {
+            Store::create_holder(&dir, rdy_model::RepoId([3; 16])).unwrap()
+        } else {
+            Store::create(&dir).unwrap()
+        };
+        let item = |s: &Store| {
+            (
+                kinds::REF_UPDATE,
+                postcard::to_allocvec(&kinds::RefUpdate {
+                    name: REF_UPGRADE.into(),
+                    value: b"not a receipt".to_vec(),
+                    at: s.log_end(),
+                })
+                .unwrap(),
+            )
+        };
+        let end = s.log_end();
+        let refusal = |r: Result<(), StoreError>| match r {
+            Err(StoreError::Refused(m)) => assert_eq!(m, refused, "holder {holder}"),
+            other => panic!("holder {holder}: {other:?}"),
+        };
+        refusal(s.write(vec![item(&s)]).map(|_| ()));
+        s.set_held(true).unwrap();
+        refusal(s.write(vec![item(&s)]).map(|_| ()));
+        refusal(s.seal(vec![item(&s)]));
+        s.set_held(false).unwrap();
+        assert_eq!(s.log_end(), end, "holder {holder}: nothing appended");
+        assert_eq!(s.get_ref(REF_UPGRADE).unwrap(), None);
+        s.check_meta().unwrap();
+    }
+}
+
+/// D-WWAK7: the sealed log is the authority over its `FORMAT` mirror. A first use that fails
+/// puts the mirror back, and an open after a crash that left the mirror ahead of the log (the
+/// first use's batch never sealed) opens by the log's features and puts the mirror back, so
+/// the store never needs a newer rdy for a feature it does not use.
+#[test]
+fn ok1_a_failed_first_use_needs_no_newer_build() {
+    for class in [FeatureClass::Incompatible, FeatureClass::ReadOnlyCompatible] {
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("s");
+        let mut s = Store::create(&dir).unwrap();
+        let mirror = std::fs::read_to_string(dir.join(FORMAT_FILE)).unwrap();
+        assert_eq!(mirror, baseline_features().to_text());
+        {
+            let _known = inject_test_feature(class, kinds::BLOB_CHUNK);
+            let end = s.log_end();
+            s.fail_next_append_after(40);
+            assert!(s.put_blob(b"first use").is_err(), "{class:?}");
+            assert_eq!(s.log_end(), end, "{class:?}: nothing appended");
+            assert_eq!(log_manifest(&s), baseline_features());
+            assert_eq!(
+                std::fs::read_to_string(dir.join(FORMAT_FILE)).unwrap(),
+                mirror,
+                "{class:?}: FORMAT is the log's again"
+            );
+        }
+        drop(s);
+        // an rdy that does not know the feature opens and writes
+        let mut s = Store::open(&dir).unwrap();
+        s.put_blob(b"a later write").unwrap();
+        drop(s);
+        // the crash window: FORMAT published ahead of a first use whose batch never sealed
+        let ahead = manifest(vec![feature(TEST_FEATURE, class, "99.0.0")]);
+        std::fs::write(dir.join(FORMAT_FILE), ahead.to_text()).unwrap();
+        let s = Store::open(&dir).unwrap();
+        assert_eq!(log_manifest(&s), baseline_features(), "{class:?}");
+        assert_eq!(s.features(), &baseline_features());
+        assert_eq!(
+            std::fs::read_to_string(dir.join(FORMAT_FILE)).unwrap(),
+            mirror,
+            "{class:?}: the open puts FORMAT back to the log's"
+        );
+        drop(s);
+        Store::open(&dir).unwrap();
+    }
+}
+
+/// An upgrade receipt's steps are counted before storage grows for them: a receipt of 20,000
+/// steps is refused for its step count with no large request, and its other faults keep their
+/// order (a receipt that does not decode says so first).
+#[test]
+fn ok1_upgrade_receipt_steps_are_bounded() {
+    use alloc_probe::largest;
+    use rdy_store::format::UpgradeReceipt;
+    let receipt = |steps: &str, extra: &str| {
+        format!(
+            "{{\"from\":\"{}\",\"to\":\"{}\",\"steps\":[{steps}],\"source_end\":{{\"segment\":0,\"offset\":0}},\"backup\":\".store-upgrade-{}-{}\"{extra}}}",
+            "0".repeat(64),
+            "1".repeat(64),
+            "a".repeat(64),
+            "b".repeat(64)
+        )
+    };
+    let many = vec!["\"\""; 20_000].join(",");
+    let text = receipt(&many, "");
+    let (got, big) = largest(|| UpgradeReceipt::parse(text.as_bytes()));
+    assert_eq!(got.unwrap_err(), "upgrade receipt has more than 256 steps");
+    assert!(big < 16_384, "a request of {big} bytes");
+    assert_eq!(
+        UpgradeReceipt::parse(receipt(&many, ",\"x\":1").as_bytes()).unwrap_err(),
+        "upgrade receipt does not decode"
+    );
+    let not_text = format!("{many},1");
+    assert_eq!(
+        UpgradeReceipt::parse(receipt(&not_text, "").as_bytes()).unwrap_err(),
+        "upgrade receipt does not decode"
+    );
+    let two = UpgradeReceipt::parse(receipt("\"a\",\"b\"", "").as_bytes()).unwrap();
+    assert_eq!(two.steps, ["a", "b"]);
+}
