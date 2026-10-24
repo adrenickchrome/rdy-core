@@ -1514,6 +1514,95 @@ fn ok1_take_keeps_the_stream_features_and_activates_first_use() {
     assert_eq!(manifest_of(&h), want);
 }
 
+/// `n` unknown compatible features named `{prefix}000` on.
+fn unknown_features(prefix: &str, n: usize) -> Vec<rdy_store::format::StoreFeature> {
+    (0..n)
+        .map(|i| rdy_store::format::StoreFeature {
+            name: format!("{prefix}{i:03}"),
+            class: rdy_store::format::FeatureClass::Compatible,
+            required_rdy: "1.0.0".into(),
+        })
+        .collect()
+}
+
+/// D-WWAK7: the manifest a take would leave (the holder's, the stream header's and the take's
+/// first uses) keeps the manifest's bounds. A union of more than 256 features is refused before
+/// `FORMAT` or the log changes, whichever parts make it up; one that reaches the bound lands.
+#[test]
+fn ok1_take_refuses_a_merged_manifest_over_its_bounds() {
+    use rdy_store::format::{
+        FORMAT_FILE, FeatureClass, REF_STORE_FEATURES, StoreFeatures, inject_test_feature,
+        write_format_file,
+    };
+    // the TAG of every upload first uses the test feature
+    let _known = inject_test_feature(FeatureClass::Compatible, kinds::TAG);
+    // (holder's features, header's features, refused)
+    let cases: Vec<(usize, usize, bool)> = vec![
+        (0, 256, true),   // a full header and the first use
+        (200, 57, true),  // the holder and the header
+        (255, 1, true),   // the holder, the header and the first use
+        (128, 128, true), // half and half, and the first use
+        (254, 1, false),  // exactly the bound
+        (0, 255, false),  // exactly the bound
+    ];
+    for (held, carried, refused) in cases {
+        let case = format!("holder {held}, header {carried}");
+        let header = StoreFeatures::of(unknown_features("h", carried));
+        let (dir, _path, repo, landing, tag, file) = put_tag_upload(header);
+        let hpath = dir.path().join("h");
+        let mut h = Store::create_holder(&hpath, repo).unwrap();
+        let mine = StoreFeatures::of(unknown_features("a", held));
+        if held > 0 {
+            h.set_refs_unchecked_for_tests(vec![(REF_STORE_FEATURES.into(), mine.to_json())])
+                .unwrap();
+            write_format_file(&hpath, &mine).unwrap();
+            drop(h);
+            h = Store::open(&hpath).unwrap();
+        }
+        assert_eq!(h.features(), &mine, "{case}");
+        let end = h.log_end();
+        let before = segment_bytes(&hpath);
+        let format_before = std::fs::read(hpath.join(FORMAT_FILE)).unwrap();
+        let target = UploadTarget {
+            tag: "v1".into(),
+            landing,
+        };
+        let got = take(&mut h, &open(&[file]), &target);
+        if !refused {
+            got.unwrap();
+            assert_eq!(manifest_of(&h).features.len(), 256, "{case}");
+            assert_eq!(h.features(), &manifest_of(&h), "{case}");
+            assert!(h.has_kind(kinds::TAG, &tag).unwrap(), "{case}");
+            drop(h);
+            Store::open(&hpath).unwrap().check_meta().unwrap();
+            continue;
+        }
+        let e = stream_err(got.unwrap_err());
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (
+                "E_STORE_FORMAT",
+                "store feature manifest is invalid: more than 256 features",
+                "restore the store from a backup"
+            ),
+            "{case}"
+        );
+        assert_eq!(h.log_end(), end, "{case}: nothing appended");
+        assert_eq!(h.features(), &mine, "{case}");
+        assert!(!h.has_kind(kinds::TAG, &tag).unwrap(), "{case}");
+        drop(h);
+        assert_eq!(segment_bytes(&hpath), before, "{case}");
+        assert_eq!(
+            std::fs::read(hpath.join(FORMAT_FILE)).unwrap(),
+            format_before,
+            "{case}"
+        );
+        let h = Store::open(&hpath).unwrap();
+        assert_eq!(manifest_of(&h), mine, "{case}");
+        h.check_meta().unwrap();
+    }
+}
+
 /// The batch markers of `h`'s log from `from` on.
 fn markers_since(h: &Store, from: rdy_store::segment::Location) -> usize {
     log_frames(h)

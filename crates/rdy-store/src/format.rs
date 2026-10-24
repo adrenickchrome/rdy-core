@@ -111,6 +111,16 @@ impl ManifestError {
         ManifestError(reason.to_string())
     }
 
+    /// The error of `reason`, in fallibly grown storage: a refused allocation is `Allocation`,
+    /// so a fallible reader's refusal never aborts.
+    fn try_of(reason: &str) -> Result<ManifestError, ParseFailure> {
+        let mut text = String::new();
+        text.try_reserve_exact(reason.len())
+            .map_err(|_| ParseFailure::Allocation)?;
+        text.push_str(reason);
+        Ok(ManifestError(text))
+    }
+
     /// The store's refusal of a manifest with this reason (E_STORE_FORMAT).
     pub fn store_error(&self) -> StoreError {
         StoreError::Format {
@@ -142,17 +152,27 @@ pub fn valid_feature_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
 }
 
+/// The most bytes of a feature name.
+const MAX_NAME_BYTES: usize = 64;
+/// The most bytes of a valid required version: three `u32` components and two dots.
+const MAX_REQUIRED_RDY_BYTES: usize = 32;
+
 /// Whether `v` is a required version: three decimal `u32` components joined by dots, with no
-/// leading zero except zero itself.
+/// leading zero except zero itself. It allocates nothing: the components are counted as they
+/// are read.
 pub fn valid_required_rdy(v: &str) -> bool {
-    let parts: Vec<&str> = v.split('.').collect();
-    parts.len() == 3
-        && parts.iter().all(|p| {
-            !p.is_empty()
-                && p.bytes().all(|c| c.is_ascii_digit())
-                && (p.len() == 1 || !p.starts_with('0'))
-                && p.parse::<u32>().is_ok()
-        })
+    let mut count = 0;
+    for p in v.split('.') {
+        count += 1;
+        let valid = !p.is_empty()
+            && p.bytes().all(|c| c.is_ascii_digit())
+            && (p.len() == 1 || !p.starts_with('0'))
+            && p.parse::<u32>().is_ok();
+        if count > 3 || !valid {
+            return false;
+        }
+    }
+    count == 3
 }
 
 impl StoreFeatures {
@@ -212,34 +232,51 @@ impl StoreFeatures {
 
     /// The manifest's own rules: grammar 1, at most 256 features with valid names and versions,
     /// no repeat, sorted by name, and a known feature in its registered class. It allocates
-    /// nothing, so a reader whose every allocation is fallible may call it.
+    /// nothing but the refusal's text.
     pub fn validate(&self) -> Result<(), ManifestError> {
+        self.rule().map_err(ManifestError::of)
+    }
+
+    /// The first manifest rule this manifest breaks, as its reason ([`StoreFeatures::validate`]).
+    /// It allocates nothing.
+    fn rule(&self) -> Result<(), &'static str> {
         if self.manifest_version != MANIFEST_VERSION {
-            return Err(ManifestError::of("unsupported manifest version"));
+            return Err("unsupported manifest version");
         }
         if self.features.len() > MAX_FEATURES {
-            return Err(ManifestError::of("more than 256 features"));
+            return Err("more than 256 features");
         }
         for f in &self.features {
             if !valid_feature_name(&f.name) {
-                return Err(ManifestError::of("invalid feature name"));
+                return Err("invalid feature name");
             }
             if !valid_required_rdy(&f.required_rdy) {
-                return Err(ManifestError::of("invalid required_rdy"));
+                return Err("invalid required_rdy");
             }
         }
         let fs = &self.features;
         if (0..fs.len()).any(|i| fs[i + 1..].iter().any(|g| g.name == fs[i].name)) {
-            return Err(ManifestError::of("duplicate feature"));
+            return Err("duplicate feature");
         }
         if fs.windows(2).any(|w| w[0].name >= w[1].name) {
-            return Err(ManifestError::of("features are not sorted"));
+            return Err("features are not sorted");
         }
         if fs
             .iter()
             .any(|f| known_class(&f.name).is_some_and(|c| c != f.class))
         {
-            return Err(ManifestError::of("wrong feature class"));
+            return Err("wrong feature class");
+        }
+        Ok(())
+    }
+
+    /// [`StoreFeatures::validate`] for a manifest a batch is to write (a first use's or a take's
+    /// merged manifest): its rules, and its canonical JSON within 65,536 bytes, so every reader
+    /// of the ref and of `FORMAT` accepts what is written.
+    pub fn validate_written(&self) -> Result<(), ManifestError> {
+        self.validate()?;
+        if self.to_json().len() > MAX_MANIFEST_BYTES {
+            return Err(ManifestError::of("manifest exceeds 65536 bytes"));
         }
         Ok(())
     }
@@ -248,9 +285,14 @@ impl StoreFeatures {
     /// sync batch's header). Any JSON text is read by the bounded reader ([`json`]): the whole
     /// text is checked with no allocation, the feature count before any storage grows for it,
     /// and each name and version is taken by fallible growth (`Allocation` when it is refused),
-    /// then [`StoreFeatures::validate`]. The refusal reasons are the closed manifest reasons.
+    /// then the manifest's rules. A name or version longer than any valid one is kept as the
+    /// empty text, which the rules refuse in its place, so no request grows with the input. The
+    /// refusal reasons are the closed manifest reasons, and their texts grow fallibly too.
     pub fn parse_fallible(bytes: &[u8]) -> Result<StoreFeatures, ParseFailure> {
-        let refuse = |reason: &str| ParseFailure::Manifest(ManifestError::of(reason));
+        let refuse = |reason: &str| match ManifestError::try_of(reason) {
+            Ok(e) => ParseFailure::Manifest(e),
+            Err(a) => a,
+        };
         if bytes.len() > MAX_MANIFEST_BYTES {
             return Err(refuse("manifest exceeds 65536 bytes"));
         }
@@ -273,7 +315,7 @@ impl StoreFeatures {
             }
         }
         if let Some(k) = unknown {
-            return Err(ParseFailure::Manifest(unknown_field(b, k)));
+            return Err(ParseFailure::Manifest(unknown_field(b, k)?));
         }
         let version = version
             .and_then(|v| json::as_u64(&b[v.0..v.1]))
@@ -308,7 +350,7 @@ impl StoreFeatures {
                 }
             }
             if let Some(k) = unknown {
-                return Err(ParseFailure::Manifest(unknown_field(b, k)));
+                return Err(ParseFailure::Manifest(unknown_field(b, k)?));
             }
             // a string value's text, without its quotes
             let text = |v: Option<json::Span>| {
@@ -328,16 +370,17 @@ impl StoreFeatures {
             .ok_or_else(invalid)?;
             let required = text(required)?;
             features.push(StoreFeature {
-                name: json::decode(b, name).ok_or(ParseFailure::Allocation)?,
+                name: json::decode(b, name, MAX_NAME_BYTES).ok_or(ParseFailure::Allocation)?,
                 class,
-                required_rdy: json::decode(b, required).ok_or(ParseFailure::Allocation)?,
+                required_rdy: json::decode(b, required, MAX_REQUIRED_RDY_BYTES)
+                    .ok_or(ParseFailure::Allocation)?,
             });
         }
         let m = StoreFeatures {
             manifest_version: MANIFEST_VERSION,
             features,
         };
-        m.validate().map_err(ParseFailure::Manifest)?;
+        m.rule().map_err(refuse)?;
         Ok(m)
     }
 
@@ -356,10 +399,26 @@ impl StoreFeatures {
     }
 }
 
-/// The refusal of the unknown key `key` (a string's text span in `b`), clipped.
-fn unknown_field(b: &[u8], key: json::Span) -> ManifestError {
-    let text: String = json::chars(&b[key.0..key.1]).collect();
-    ManifestError(format!("unknown field {}", clip(&text)))
+/// The refusal of the unknown key `key` (a string's text span in `b`), clipped as [`clip`]
+/// clips it: only the clipped text is read, into fallibly grown storage.
+fn unknown_field(b: &[u8], key: json::Span) -> Result<ManifestError, ParseFailure> {
+    const PREFIX: &str = "unknown field ";
+    const ELLIPSIS: char = '\u{2026}';
+    let raw = &b[key.0..key.1];
+    let kept = || json::chars(raw).take(80);
+    let more = json::chars(raw).nth(80).is_some();
+    let len = PREFIX.len()
+        + kept().map(char::len_utf8).sum::<usize>()
+        + if more { ELLIPSIS.len_utf8() } else { 0 };
+    let mut text = String::new();
+    text.try_reserve_exact(len)
+        .map_err(|_| ParseFailure::Allocation)?;
+    text.push_str(PREFIX);
+    text.extend(kept());
+    if more {
+        text.push(ELLIPSIS);
+    }
+    Ok(ManifestError(text))
 }
 
 /// A bounded JSON reader. [`document`] checks a whole text with no allocation and the accept set
@@ -574,8 +633,15 @@ mod json {
         std::iter::from_fn(move || {
             let c = *raw.get(i)?;
             if c != b'\\' {
-                let rest = std::str::from_utf8(&raw[i..]).ok()?;
-                let ch = rest.chars().next()?;
+                // the one character at `i` (the text is valid UTF-8): its lead byte's width
+                let width = match c {
+                    0..=0x7f => 1,
+                    0xc0..=0xdf => 2,
+                    0xe0..=0xef => 3,
+                    _ => 4,
+                };
+                let one = std::str::from_utf8(raw.get(i..i + width)?).ok()?;
+                let ch = one.chars().next()?;
                 i += ch.len_utf8();
                 return Some(ch);
             }
@@ -614,9 +680,13 @@ mod json {
     }
 
     /// The decoded string text at `text`, in fallibly grown storage; None when it is refused.
-    pub(super) fn decode(b: &[u8], text: Span) -> Option<String> {
+    /// A text of more than `most` bytes is the empty text, with nothing allocated.
+    pub(super) fn decode(b: &[u8], text: Span, most: usize) -> Option<String> {
         let raw = &b[text.0..text.1];
         let len: usize = chars(raw).map(char::len_utf8).sum();
+        if len > most {
+            return Some(String::new());
+        }
         let mut s = String::new();
         s.try_reserve_exact(len).ok()?;
         s.extend(chars(raw));

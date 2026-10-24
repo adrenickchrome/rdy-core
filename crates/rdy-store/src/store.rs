@@ -1407,12 +1407,11 @@ impl Store {
                 .iter()
                 .any(|(k, _)| crate::codec::logical_kind(*k) == kinds::REDACTION_APPLY)
         }) {
+            // the batch's features become the store's at its sync (`seal_held_apply`); a refusal
+            // keeps the batch open with them, and only a batch that rolled back puts FORMAT back
             let sealed = self.seal_held_apply(last).map(|_| ());
-            let held = self.held_features.take();
-            match (&sealed, held) {
-                (Ok(()), Some(f)) => self.features = f,
-                (Err(_), Some(_)) => self.restore_mirror(),
-                _ => {}
+            if sealed.is_err() && self.open.is_none() && self.held_features.take().is_some() {
+                self.restore_mirror();
             }
             return sealed;
         }
@@ -1865,6 +1864,8 @@ impl Store {
             return Ok((items, None, false));
         }
         let merged = current.merged(&needed);
+        // the merged manifest keeps the manifest's bounds, or nothing changes
+        merged.validate_written().map_err(|e| e.store_error())?;
         let published = self.publish_mirror(&merged)?;
         items.extend(self.ref_items(vec![(format::REF_STORE_FEATURES.into(), merged.to_json())]));
         Ok((items, Some(merged), published))
@@ -3617,8 +3618,12 @@ impl Store {
                 return Err(e);
             }
         };
-        // authorized: the apply is durable, and no error below rolls it back
+        // authorized: the apply is durable, and no error below rolls it back. The features the
+        // batch first used are the store's from here on, whatever fails next
         self.log.set_authorization(Arc::new(auth));
+        if let Some(f) = self.held_features.take() {
+            self.features = f;
+        }
         if crate::redaction_io::hit(crate::redaction_io::Failpoint::AfterApplySync).is_err() {
             self.open = None;
             return Err(self.pending_failure());

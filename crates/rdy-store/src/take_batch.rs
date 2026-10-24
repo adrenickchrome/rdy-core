@@ -1115,6 +1115,10 @@ pub(crate) fn prepare<E>(
         }
     }
     let merged = rx.features.merged(&needs);
+    // the manifest the holder would hold keeps the manifest's bounds, whichever parts make it up
+    merged
+        .validate_written()
+        .map_err(|e| StreamError::store_format(None, 0, &e.store_error()))?;
     let features = (merged != *rx.features).then_some(merged);
     if let Some(f) = &features {
         refs.push((crate::format::REF_STORE_FEATURES.into(), f.to_json()));

@@ -673,6 +673,189 @@ fn ok1_noncanonical_manifests_parse_within_their_bounds() {
     }
 }
 
+/// The manifest's refusals stay within their bounds too (limits before allocation): an overlong
+/// name, required version or unknown key is refused with the general parse's reason and no
+/// request near its length, and every refusal's text grows fallibly, so a refused allocation is
+/// `Allocation`, never an abort.
+#[test]
+fn ok1_manifest_refusals_allocate_within_their_bounds() {
+    use alloc_probe::{largest, refusing};
+    use rdy_store::format::{ManifestError, ParseFailure, valid_required_rdy};
+    let one = |name: &str, required: &str, extra: &str| {
+        format!(
+            "{{\"manifest_version\":1,\"features\":[{{\"name\":\"{name}\",\"class\":\"compatible\",\"required_rdy\":\"{required}\"{extra}}}]}}"
+        )
+    };
+    let dots = ".".repeat(60_000);
+    let long_key = "k".repeat(60_000);
+    let wide_key = "\u{e9}".repeat(20_000);
+    let cases: Vec<(String, String)> = vec![
+        (one("a", &dots, ""), "invalid required_rdy".into()),
+        (
+            one("a", &format!("1.2.{}", "3".repeat(60_000)), ""),
+            "invalid required_rdy".into(),
+        ),
+        (
+            one("a", &"\\u0031".repeat(10_000), ""),
+            "invalid required_rdy".into(),
+        ),
+        (
+            one(&"a".repeat(60_000), "1.0.0", ""),
+            "invalid feature name".into(),
+        ),
+        (
+            one(&"\\u0061".repeat(10_000), "1.0.0", ""),
+            "invalid feature name".into(),
+        ),
+        (
+            format!("{{\"manifest_version\":1,\"features\":[],\"{long_key}\":1}}"),
+            format!("unknown field {}\u{2026}", "k".repeat(80)),
+        ),
+        (
+            one("a", "1.0.0", &format!(",\"{wide_key}\":1")),
+            format!("unknown field {}\u{2026}", "\u{e9}".repeat(80)),
+        ),
+        (
+            format!(
+                "{{\"manifest_version\":1,\"features\":[],\"{}\":1}}",
+                "\\u00e9".repeat(10_000)
+            ),
+            format!("unknown field {}\u{2026}", "\u{e9}".repeat(80)),
+        ),
+    ];
+    for (text, want) in &cases {
+        let short = &text[..60];
+        assert!(text.len() <= 65_536, "{short}");
+        assert_eq!(
+            reference_reason(text.as_bytes()),
+            Err(want.clone()),
+            "{short}"
+        );
+        let (got, big) = largest(|| StoreFeatures::parse_fallible(text.as_bytes()));
+        assert_eq!(
+            got,
+            Err(ParseFailure::Manifest(ManifestError(want.clone()))),
+            "{short}"
+        );
+        assert!(big < 1024, "{short}: a request of {big} bytes");
+        let (got, big) = largest(|| StoreFeatures::parse(text.as_bytes()));
+        assert_eq!(got.unwrap_err().to_string(), *want, "{short}");
+        assert!(big < 1024, "{short}: a request of {big} bytes");
+        // the refusal's own text is storage too: refused, it is Allocation
+        assert_eq!(
+            refusing(|| StoreFeatures::parse_fallible(text.as_bytes())),
+            Err(ParseFailure::Allocation),
+            "{short}"
+        );
+    }
+    // every other refusal reason grows its text fallibly as well
+    let zeros = vec!["0"; 300].join(",");
+    let f = |name: &str| {
+        format!("{{\"name\":\"{name}\",\"class\":\"compatible\",\"required_rdy\":\"1.0.0\"}}")
+    };
+    for text in [
+        "{".to_string(),
+        "{\"manifest_version\":2,\"features\":[]}".into(),
+        format!("{{\"manifest_version\":1,\"features\":[{zeros}]}}"),
+        format!(
+            "{{\"manifest_version\":1,\"features\":[{},{}]}}",
+            f("a"),
+            f("a")
+        ),
+        format!(
+            "{{\"manifest_version\":1,\"features\":[{},{}]}}",
+            f("b"),
+            f("a")
+        ),
+        format!("{{\"manifest_version\":1,\"features\":[{}]}}", f("A")),
+        " ".repeat(65_537),
+    ] {
+        assert!(
+            StoreFeatures::parse_fallible(text.as_bytes()).is_err(),
+            "{text:.60}"
+        );
+        assert_eq!(
+            refusing(|| StoreFeatures::parse_fallible(text.as_bytes())),
+            Err(ParseFailure::Allocation),
+            "{text:.60}"
+        );
+    }
+    // the version rule itself collects nothing
+    let (ok, big) = largest(|| valid_required_rdy(&dots));
+    assert!(!ok);
+    assert!(big < 1024, "a request of {big} bytes");
+    for (v, want) in [
+        ("1.0.0", true),
+        ("0.23.0", true),
+        ("4294967295.4294967295.4294967295", true),
+        ("4294967296.0.0", false),
+        ("1.0", false),
+        ("1.0.0.0", false),
+        ("01.0.0", false),
+        ("1..0", false),
+        ("", false),
+        ("1.0.x", false),
+    ] {
+        assert_eq!(valid_required_rdy(v), want, "{v}");
+    }
+}
+
+/// `n` unknown compatible features, `f000` on, sorted by name.
+fn unknown_compatible(n: usize) -> Vec<StoreFeature> {
+    (0..n)
+        .map(|i| feature(&format!("f{i:03}"), FeatureClass::Compatible, "1.0.0"))
+        .collect()
+}
+
+/// A project whose log and `FORMAT` list `features`, reopened.
+fn project_with(features: &StoreFeatures) -> (tempfile::TempDir, PathBuf) {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let mut s = Store::create(&dir).unwrap();
+    s.set_refs_unchecked_for_tests(vec![(REF_STORE_FEATURES.into(), features.to_json())])
+        .unwrap();
+    rdy_store::format::write_format_file(&dir, features).unwrap();
+    drop(s);
+    (base, dir)
+}
+
+/// D-WWAK7: a first use whose merged manifest would break the manifest's bounds (more than 256
+/// features) is refused before `FORMAT` or the log changes; one that reaches the bound lands.
+#[test]
+fn ok1_first_use_refuses_a_manifest_over_its_bounds() {
+    let _known = inject_test_feature(FeatureClass::Compatible, kinds::BLOB_CHUNK);
+    let full = manifest(unknown_compatible(256));
+    let (_base, dir) = project_with(&full);
+    let mut s = Store::open(&dir).unwrap();
+    assert_eq!(s.features(), &full);
+    let end = s.log_end();
+    let before = tree(&dir.join("segments"));
+    let mirror = std::fs::read(dir.join(FORMAT_FILE)).unwrap();
+    let e = s.put_blob(b"first use").unwrap_err();
+    assert_eq!(
+        format_error(e),
+        (
+            "store feature manifest is invalid: more than 256 features".into(),
+            "restore the store from a backup".into()
+        )
+    );
+    assert_eq!(s.log_end(), end, "nothing appended");
+    assert_eq!(log_manifest(&s), full);
+    assert_eq!(s.features(), &full);
+    assert_eq!(std::fs::read(dir.join(FORMAT_FILE)).unwrap(), mirror);
+    drop(s);
+    assert_eq!(tree(&dir.join("segments")), before);
+    Store::open(&dir).unwrap();
+    // 255 and the first use: exactly the bound
+    let (_base, dir) = project_with(&manifest(unknown_compatible(255)));
+    let mut s = Store::open(&dir).unwrap();
+    s.put_blob(b"first use").unwrap();
+    assert_eq!(log_manifest(&s).features.len(), 256);
+    assert!(log_manifest(&s).has(TEST_FEATURE));
+    drop(s);
+    Store::open(&dir).unwrap();
+}
+
 /// D-WWAK7: only the upgrade transaction writes `meta/upgrade`. Every public write and seal of
 /// a project or a holder refuses it, and nothing is appended.
 #[test]
