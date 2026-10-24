@@ -1,9 +1,12 @@
 pub mod answer;
+pub mod assessment;
 pub mod block;
 mod canon;
 mod change;
+pub mod check_request;
 mod coord;
 pub mod decision;
+pub mod dispute;
 pub mod encoding;
 pub mod engine_fields;
 pub mod entity;
