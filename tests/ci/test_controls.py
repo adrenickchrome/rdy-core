@@ -5,9 +5,12 @@ import http.client
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import re
+import signal
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -33,6 +36,7 @@ def load(name):
 
 TOOLS = load('install_tools')
 SARIF = load('check_sarif')
+SET_ASIDE = load('set_aside_profiles')
 
 
 def report(score='8.1', results=True):
@@ -762,6 +766,377 @@ class ToolArchive(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.extract(entries)
 
+
+
+CI_WORKFLOW = (ROOT / '.github/workflows/ci.yml').read_text()
+PROFILE_ROOT = 'target/llvm-cov-target'
+CORRUPT_HEADER = 'error: {p}: invalid instrumentation profile data (file header is corrupt)\n'
+# The stub llvm-profdata reads the part of a profile before the first "|" as its behaviour.
+# Each entry is (stderr template, status); a negative status kills the stub with that signal.
+STUB_TABLE = {
+    'corrupt': (CORRUPT_HEADER, 1),
+    'suffix': (CORRUPT_HEADER[:-1] + ' x\n', 1),
+    'second': (CORRUPT_HEADER + 'note: more\n', 1),
+    'nolf': (CORRUPT_HEADER[:-1], 1),
+    'status2': (CORRUPT_HEADER, 2),
+    'signal': (CORRUPT_HEADER, -9),
+    'badmagic': ('error: {p}: invalid instrumentation profile data (bad magic)\n', 1),
+    'incomplete': ('error: {p}: unrecognized instrumentation profile encoding format\n'
+                   'note: Perhaps you forgot to use the --sample or --memory option?\n', 1),
+    'version': ('error: {p}: unsupported instrumentation profile format version\n', 1),
+    'body': ('error: {p}: malformed instrumentation profile data\n', 1),
+    'perm': ('error: {p}: Permission denied\n', 1),
+    'big': ('x' * 200000 + '\n', 3),
+}
+STUB_SOURCE = """#!{exe}
+import json, os, signal, sys
+with open(os.environ['STUB_LOG'], 'a') as log:
+    log.write(json.dumps(sys.argv[1:]) + '\\n')
+if len(sys.argv) != 3 or sys.argv[1] != 'show':
+    sys.exit(99)
+path = sys.argv[2]
+if not os.stat(path).st_mode & 0o400:
+    os.kill(os.getpid(), signal.SIGILL)
+with open(path, 'rb') as profile:
+    kind = profile.read().split(b'|')[0].decode()
+if kind == 'good':
+    print('stdout noise that must be discarded')
+    sys.exit(0)
+template, status = json.loads({table!r})[kind]
+sys.stderr.buffer.write(template.format(p=path).encode())
+sys.stderr.buffer.flush()
+if status < 0:
+    os.kill(os.getpid(), -status)
+sys.exit(status)
+"""
+CARGO_STUB = """#!/bin/sh
+echo "$*" >> "$CARGO_LOG"
+case "$*" in *--html*) kind=html;; *--json*) kind=json;; *) kind=summary; echo summary-line;; esac
+[ "$kind" = "$CARGO_FAIL" ] && exit 7
+exit 0
+"""
+# The Reports step as it stands in ci.yml: the first run line, the unchanged chmod explanation and
+# command, the one new call, then the three report commands in their order.
+RUN_START = ('      - name: Reports\n        if: always()\n        run: |\n'
+             '          set -euo pipefail\n')
+CHMOD_BLOCK = (
+    '          # The config_edit test hsa2_new_directories_are_0700_or_not_made_at_all runs its own\n'
+    '          # instrumented binary under umasks 477 and 700 on purpose. The profile runtime makes each\n'
+    '          # .profraw 0666 less the umask, so those profiles are whole but 0200 or 0066, and\n'
+    '          # llvm-profdata crashes (SIGILL) on a file it cannot open. Give the owner read back: the\n'
+    '          # data is kept, and any other merge error still fails this step.\n'
+    "          find target/llvm-cov-target -name '*.profraw' ! -perm -u=r -print -exec chmod u+r {} +\n")
+CHMOD_COMMAND = CHMOD_BLOCK.splitlines()[-1].strip()
+PRECHECK_LINE = '          python3 scripts/ci/set_aside_profiles.py\n'
+REPORT_LINES = ('          cargo llvm-cov report --summary-only | tee coverage-summary.txt\n'
+                '          cargo llvm-cov report --html --output-dir coverage-html\n'
+                '          cargo llvm-cov report --json --summary-only --output-path coverage-summary.json\n')
+REPORT_SCRIPT = ''.join(line.strip() + '\n' for line in REPORT_LINES.splitlines(True))
+
+
+class plz5_CoverageProfiles(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.dir = Path(temp.name).resolve()
+        previous = os.getcwd()
+        os.chdir(self.dir)
+        self.addCleanup(os.chdir, previous)
+        self.root = Path(PROFILE_ROOT)
+        self.root.mkdir(parents=True)
+        self.work = self.dir / 'runner-temp'
+        self.work.mkdir()
+        self.bin = self.dir / 'bin'
+        self.bin.mkdir()
+        self.profdata = self.bin / 'llvm-profdata'
+        self.profdata.write_text(STUB_SOURCE.format(exe=sys.executable, table=json.dumps(STUB_TABLE)))
+        self.profdata.chmod(0o755)
+        cargo = self.bin / 'cargo'
+        cargo.write_text(CARGO_STUB)
+        cargo.chmod(0o755)
+        self.stub_log = self.dir / 'stub.log'
+        self.cargo_log = self.dir / 'cargo.log'
+        env = mock.patch.dict(os.environ, {'STUB_LOG': str(self.stub_log), 'CARGO_LOG': str(self.cargo_log)})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def profile(self, relative, content, mode=None):
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        if mode is not None:
+            path.chmod(mode)
+        return path
+
+    def run_precheck(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            count = SET_ASIDE.set_aside_profiles(self.root, self.profdata, self.work)
+        return count, out.getvalue()
+
+    def run_reports(self, fail=''):
+        env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ['PATH'], CARGO_FAIL=fail)
+        return subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', REPORT_SCRIPT], env=env,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.dir)
+
+    def checked_paths(self):
+        if not self.stub_log.exists():
+            return []
+        return [json.loads(line)[1] for line in self.stub_log.read_text().splitlines()]
+
+    def cargo_calls(self):
+        return self.cargo_log.read_text().splitlines() if self.cargo_log.exists() else []
+
+    def expected_calls(self, count):
+        return ['llvm-cov report --summary-only', 'llvm-cov report --html --output-dir coverage-html',
+                'llvm-cov report --json --summary-only --output-path coverage-summary.json'][:count]
+
+    def set_aside_dirs(self):
+        return sorted(self.work.iterdir())
+
+    def check_then_report(self):
+        """What the step does: reports run only when the precheck succeeds (set -e)."""
+        try:
+            count, out = self.run_precheck()
+        except (SET_ASIDE.ProfileCheckFailed, OSError):
+            return None
+        return count, out, self.run_reports()
+
+    def refused(self, kind, content=b'x'):
+        path = self.profile('only.profraw', kind.encode() + b'|' + content)
+        template, status = STUB_TABLE[kind]
+        stderr = io.BytesIO()
+        fake = mock.Mock(buffer=stderr)
+        with mock.patch.object(sys, 'stderr', fake):
+            with self.assertRaises(SET_ASIDE.ProfileCheckFailed) as caught:
+                self.run_precheck()
+        self.assertEqual(caught.exception.status, status if status > 0 else 1)
+        self.assertEqual(stderr.getvalue(), template.format(p=str(path)).encode())
+        self.assertTrue(path.exists())
+        self.assertEqual(self.set_aside_dirs(), [])
+        return path
+
+    def test_corrupt_headers_are_set_aside(self):
+        self.profile('a/x.profraw', b'corrupt|first bytes \x00\xff')
+        self.profile('b c/x.profraw', b'corrupt|second bytes')
+        odd = 'tab\there\né.profraw'
+        self.profile(odd, b'corrupt|third')
+        good = self.profile('ok.profraw', b'good|valid')
+        self.profile('a/notes.txt', b'not a profile')
+        (self.dir / 'elsewhere').mkdir()
+        self.profile('../../elsewhere/y.profraw', b'corrupt|outside the tree')
+        (self.root / 'link').symlink_to(self.dir / 'elsewhere', target_is_directory=True)
+        result = self.check_then_report()
+        self.assertIsNotNone(result)
+        count, out, reports = result
+        self.assertEqual(count, 4)
+        self.assertEqual(self.checked_paths(), [
+            str(self.root / 'a/x.profraw'), str(self.root / 'b c/x.profraw'),
+            str(good), str(self.root / odd)])
+        (kept,) = self.set_aside_dirs()
+        self.assertRegex(kept.name, r'^rdy-profraw\.')
+        moves = [('a/x.profraw', b'corrupt|first bytes \x00\xff'), ('b c/x.profraw', b'corrupt|second bytes'),
+                 (odd, b'corrupt|third')]
+        expected = ''
+        for relative, content in moves:
+            source, destination = self.root / relative, kept / 'rejected' / relative
+            self.assertFalse(source.exists())
+            self.assertEqual(destination.read_bytes(), content)
+            expected += ('coverage: set aside corrupt-header profile: %s -> %s\n'
+                         % (json.dumps(str(source)), json.dumps(str(destination))))
+        self.assertEqual(out, expected)
+        self.assertTrue(out.isascii() and out.count('\n') == 3)
+        self.assertEqual(len({kept / 'rejected' / r for r, _ in moves}), 3)
+        self.assertEqual(good.read_bytes(), b'good|valid')
+        self.assertTrue((self.dir / 'elsewhere/y.profraw').exists())
+        self.assertEqual(reports.returncode, 0, reports.stderr)
+        self.assertEqual(self.cargo_calls(), self.expected_calls(3))
+
+    def test_empty_profiles_are_left_for_the_merge(self):
+        empty = self.profile('empty.profraw', b'')
+        good = self.profile('sub/ok.profraw', b'good|valid')
+        result = self.check_then_report()
+        self.assertIsNotNone(result)
+        count, out, reports = result
+        self.assertEqual(count, 1)
+        self.assertEqual(self.checked_paths(), [str(good)])
+        self.assertTrue(empty.exists())
+        self.assertEqual(empty.read_bytes(), b'')
+        self.assertEqual(out, '')
+        self.assertEqual(self.set_aside_dirs(), [])
+        self.assertEqual(reports.returncode, 0, reports.stderr)
+        self.assertEqual(self.cargo_calls(), self.expected_calls(3))
+
+    def test_owner_read_fix_keeps_valid_profiles(self):
+        self.assertIn(CHMOD_BLOCK, CI_WORKFLOW)
+        self.assertIn(RUN_START + CHMOD_BLOCK + PRECHECK_LINE + REPORT_LINES, CI_WORKFLOW)
+        write_only = self.profile('w.profraw', b'good|valid', 0o200)
+        group_other = self.profile('d/g.profraw', b'good|valid', 0o066)
+        chmod = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', CHMOD_COMMAND],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.dir)
+        self.assertEqual(chmod.returncode, 0, chmod.stderr)
+        result = self.check_then_report()
+        self.assertIsNotNone(result)
+        count, out, reports = result
+        self.assertEqual(count, 2)
+        self.assertEqual(out, '')
+        for path in (write_only, group_other):
+            self.assertEqual(path.read_bytes(), b'good|valid')
+        self.assertEqual(self.checked_paths(), [str(group_other), str(write_only)])
+        self.assertEqual(reports.returncode, 0, reports.stderr)
+        self.assertEqual(self.cargo_calls(), self.expected_calls(3))
+
+    def test_other_check_failures_stay_fatal(self):
+        for kind in STUB_TABLE:
+            if kind == 'corrupt':
+                continue
+            with self.subTest(kind=kind):
+                path = self.refused(kind)
+                self.assertIsNone(self.check_then_report_after_refusal())
+                path.unlink()
+                self.stub_log.unlink()
+        self.assertEqual(self.cargo_calls(), [])
+
+    def check_then_report_after_refusal(self):
+        with redirect_stdout(io.StringIO()), mock.patch.object(sys, 'stderr', mock.Mock(buffer=io.BytesIO())):
+            return self.check_then_report()
+
+    def test_environment_and_tree_failures_stay_fatal(self):
+        good = self.profile('ok.profraw', b'good|valid')
+        with self.assertRaises(OSError):
+            SET_ASIDE.set_aside_profiles(self.root, self.bin / 'missing-profdata', self.work)
+        with self.assertRaises(OSError):
+            SET_ASIDE.set_aside_profiles(self.dir / 'no-such-root', self.profdata, self.work)
+        (self.root / 'dangling.profraw').symlink_to(self.dir / 'nowhere')
+        with self.assertRaises(OSError):
+            self.run_precheck()
+        (self.root / 'dangling.profraw').unlink()
+        locked = self.root / 'locked'
+        locked.mkdir()
+        if os.geteuid() != 0:  # root reads any directory
+            locked.chmod(0)
+            with self.assertRaises(OSError):
+                self.run_precheck()
+            locked.chmod(0o700)
+        locked.rmdir()
+        self.assertTrue(good.exists())
+        self.assertEqual(self.cargo_calls(), [])
+
+    def test_unmovable_profiles_stay_fatal(self):
+        bad = self.profile('d/bad.profraw', b'corrupt|bytes')
+        with self.assertRaises(OSError):
+            SET_ASIDE.set_aside_profiles(self.root, self.profdata, self.dir / 'no-such-work-root')
+        self.assertTrue(bad.exists())
+        taken = self.work / 'prepared'
+        (taken / 'rejected/d').mkdir(parents=True)
+        (taken / 'rejected/d/bad.profraw').write_bytes(b'earlier')
+        out = io.StringIO()
+        with mock.patch.object(SET_ASIDE.tempfile, 'mkdtemp', return_value=str(taken)):
+            with redirect_stdout(out), self.assertRaises(OSError):
+                SET_ASIDE.set_aside_profiles(self.root, self.profdata, self.work)
+        self.assertEqual(out.getvalue(), '')
+        self.assertEqual(bad.read_bytes(), b'corrupt|bytes')
+        self.assertEqual((taken / 'rejected/d/bad.profraw').read_bytes(), b'earlier')
+        with mock.patch.object(SET_ASIDE.os, 'rename', side_effect=OSError('rename refused')):
+            with redirect_stdout(out), self.assertRaises(OSError):
+                self.run_precheck()
+        self.assertEqual(out.getvalue(), '')
+        self.assertEqual(bad.read_bytes(), b'corrupt|bytes')
+
+    def run_main(self, argv=('set_aside_profiles.py',), env=None, runs=(), check=None):
+        out, err = io.StringIO(), mock.Mock(buffer=io.BytesIO())
+        err.write = lambda text: err.buffer.write(text.encode())
+        err.flush = lambda: None
+        calls = []
+        pending = list(runs)
+
+        def fake_run(args, **kwargs):
+            calls.append(list(args))
+            item = pending.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return subprocess.CompletedProcess(args, item[0], item[1], item[2])
+        environment = {'RUNNER_TEMP': str(self.work)} if env is None else env
+        patches = [mock.patch.object(sys, 'argv', list(argv)), mock.patch.object(sys, 'stderr', err),
+                   mock.patch.dict(os.environ, environment), mock.patch.object(SET_ASIDE.subprocess, 'run', fake_run)]
+        if env is not None:
+            os.environ.pop('RUNNER_TEMP', None)
+        if check is not None:
+            patches.append(mock.patch.object(SET_ASIDE, 'set_aside_profiles', check))
+        with redirect_stdout(out):
+            for patch in patches:
+                patch.start()
+            try:
+                status = SET_ASIDE.main()
+            finally:
+                for patch in reversed(patches):
+                    patch.stop()
+        return status, out.getvalue(), err.buffer.getvalue().decode(), calls
+
+    def test_main_texts_and_arguments(self):
+        status, out, err, calls = self.run_main(argv=('set_aside_profiles.py', 'extra'))
+        self.assertEqual((status, out, err, calls), (1, '', 'coverage: expected no arguments\n', []))
+        status, out, err, calls = self.run_main(env={})
+        self.assertEqual((status, out, err, calls), (1, '', 'coverage: RUNNER_TEMP is not set\n', []))
+        status, out, err, calls = self.run_main(runs=[(2, '', 'rustc exploded\n')])
+        self.assertEqual((status, out, err), (1, '', 'rustc exploded\n'))
+        self.assertEqual(calls, [['rustc', '--print', 'sysroot']])
+        status, out, err, calls = self.run_main(runs=[(0, '/sys\n', ''), (3, '', 'no version\n')])
+        self.assertEqual((status, err), (1, 'no version\n'))
+        status, out, err, calls = self.run_main(runs=[(0, '/sys\n', ''), (0, 'rustc 1.99.0\nrelease: 1.99.0\n', '')])
+        self.assertEqual((status, out, err), (1, '', 'coverage: rustc did not report a host\n'))
+        status, out, err, calls = self.run_main(runs=[OSError('rustc: not found')])
+        self.assertEqual((status, out, err), (1, '', 'rustc: not found\n'))
+        seen = []
+
+        def check(root, profdata, work):
+            seen.append((root, profdata, work))
+            return 5
+        versions = (0, 'rustc 1.99.0\nhost: aarch64-apple-darwin\nrelease: 1.99.0\n', '')
+        status, out, err, calls = self.run_main(runs=[(0, '/sys root\n', ''), versions], check=check)
+        self.assertEqual((status, out, err), (0, '', ''))
+        self.assertEqual(calls, [['rustc', '--print', 'sysroot'], ['rustc', '-vV']])
+        self.assertEqual(seen, [(Path('target/llvm-cov-target'),
+                                 Path('/sys root/lib/rustlib/aarch64-apple-darwin/bin/llvm-profdata'),
+                                 self.work)])
+
+        def refuse(root, profdata, work):
+            raise SET_ASIDE.ProfileCheckFailed(3)
+
+        def fail(root, profdata, work):
+            raise PermissionError(13, 'Permission denied', 'x.profraw')
+        status, out, err, calls = self.run_main(runs=[(0, '/s\n', ''), versions], check=refuse)
+        self.assertEqual((status, out, err), (3, '', ''))
+        status, out, err, calls = self.run_main(runs=[(0, '/s\n', ''), versions], check=fail)
+        self.assertEqual((status, out, err), (1, '', "[Errno 13] Permission denied: 'x.profraw'\n"))
+
+    def test_merge_failures_stay_fatal(self):
+        self.profile('ok.profraw', b'good|valid')
+        for fail, calls in [('summary', 1), ('html', 2), ('json', 3)]:
+            with self.subTest(fail=fail):
+                self.cargo_log.unlink(missing_ok=True)
+                count, out = self.run_precheck()
+                self.assertEqual((count, out), (1, ''))
+                reports = self.run_reports(fail)
+                self.assertEqual(reports.returncode, 7)
+                self.assertEqual(self.cargo_calls(), self.expected_calls(calls))
+            self.stub_log.unlink()
+
+    def test_empty_and_all_corrupt_input_still_reach_the_first_report(self):
+        count, out = self.run_precheck()
+        self.assertEqual((count, out), (0, ''))
+        reports = self.run_reports('summary')
+        self.assertEqual(reports.returncode, 7)
+        self.assertEqual(self.cargo_calls(), self.expected_calls(1))
+        self.cargo_log.unlink()
+        self.profile('a/1.profraw', b'corrupt|1')
+        self.profile('b/1.profraw', b'corrupt|2')
+        count, out = self.run_precheck()
+        self.assertEqual(count, 2)
+        self.assertEqual(out.count('\n'), 2)
+        reports = self.run_reports('summary')
+        self.assertEqual(reports.returncode, 7)
+        self.assertEqual(self.cargo_calls(), self.expected_calls(1))
 
 
 if __name__ == '__main__':
