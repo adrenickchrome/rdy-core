@@ -1756,7 +1756,8 @@ impl Drain {
     /// The blocking tensions `version`'s landing would put into canon, as agent `i` lists the
     /// open blocking tensions of view `v`: the rows with a change side, each change side one of
     /// the version's changes, and no intent side (a side with neither is canon), by id. Each is
-    /// resolved by its kind. None selected fails the run.
+    /// resolved by its kind, once per block: a row whose blocks in the view an earlier row's
+    /// resolution already wrote is skipped. None selected fails the run.
     fn resolve_tensions(&mut self, i: usize, v: &str, version: &Value, code: &str) {
         let changes: BTreeSet<String> = version["changes"]
             .as_array()
@@ -1780,12 +1781,23 @@ impl Drain {
         if selected.is_empty() {
             self.no_rule(v, code, "no blocking tension of the version listed");
         }
+        // the view lists one in-flight form per change that wrote a block: the first row's
+        // write or repin settles the block for every later row on it
+        let mut settled: BTreeSet<String> = BTreeSet::new();
         for row in selected {
             let kind = row["kind"].as_str().unwrap_or_default().to_string();
             if let Err(why) = row_fits(&row, &kind) {
                 self.no_rule(v, code, &format!("{kind}, {why}"));
             }
+            let own: Vec<String> = Drain::own_blocks(&row, v)
+                .into_iter()
+                .map(|(b, _)| b)
+                .collect();
+            if !own.is_empty() && own.iter().all(|b| settled.contains(b)) {
+                continue;
+            }
             self.resolve_tension(i, v, &row, code, &kind);
+            settled.extend(own);
         }
     }
 
