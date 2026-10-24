@@ -767,8 +767,7 @@ fn dgm1_comments_and_quotes_hide_no_structure() {
         "end\n",
     );
     assert_eq!(short(render(&label_end)), invalid(OVER_DEPTH));
-    // the keyword bound reads no labels, so subgraphs in a row count only by halves: 64 in a
-    // row still draw
+    // subgraphs in a row never add up
     let mut row = String::from("flowchart TD\n");
     for i in 0..64 {
         row.push_str(&format!("subgraph S{i}\nA{i}\nend\n"));
@@ -799,7 +798,7 @@ fn dgm1_comments_and_quotes_hide_no_structure() {
     assert_eq!(deep.len(), 30926);
     assert_eq!(short(render(&deep)), invalid(OVER_STATEMENTS));
     // the two round-label quotes pair up as one string for the statement count, so this one
-    // counts few statements; the keyword bound still sees all 2000 subgraphs
+    // counts few statements; the depth walk reads each round label and sees all 2000 subgraphs
     assert_eq!(
         short(render(&subgraphs("A(\"x)\n", "B(\"y)\n", 2000))),
         invalid(OVER_DEPTH)
@@ -937,4 +936,172 @@ fn dgm1_hostile_raw_svg_is_captured_for_admission() {
             "{name}: differs from its fixture"
         );
     }
+}
+
+/// A state line opens a block only where the pinned state parser reads a composite state: its
+/// earlier rules come first. A transition, an inline description and a declaration with no id
+/// open nothing, even with `state` as the identifier.
+#[test]
+fn dgm1_state_blocks_follow_the_parser_precedence() {
+    let lines = |line: &dyn Fn(usize) -> String, n: usize| {
+        let mut s = String::from("stateDiagram-v2\n");
+        for i in 0..n {
+            s.push_str(&line(i));
+        }
+        s
+    };
+    for line in [
+        &(|_| "state --> B {\n".to_string()) as &dyn Fn(usize) -> String,
+        &|i| format!("state --> B{i} : go {{\n"),
+        &|i| format!("STATE --> state{i} {{\n"),
+        &|_| "state\t: brace {\n".to_string(),
+        &|_| "state: brace {\n".to_string(),
+        &|_| "state {\n".to_string(),
+        &|_| "state \"unclosed {\n".to_string(),
+        &|_| "direction LR {\n".to_string(),
+    ] {
+        let src = lines(line, 33);
+        assert!(drawn(&render(&src)), "{src}");
+    }
+    // `state ` with a space is never an inline description: the parser declares a state whose
+    // id is `:` and nests its body, so 33 of them nest 33 deep
+    assert_eq!(
+        short(render(&lines(&|_| "state : brace {\n".to_string(), 33))),
+        invalid(OVER_DEPTH)
+    );
+    assert!(drawn(&render(&lines(
+        &|_| "state : brace {\n".to_string(),
+        32
+    ))));
+    for line in [
+        &(|i| format!("state S{i} {{\n")) as &dyn Fn(usize) -> String,
+        &|i| format!("state \"x\" as S{i} {{\n"),
+        &|i| format!("STATE S{i}:::c {{\n"),
+    ] {
+        assert_eq!(short(render(&lines(line, 33))), invalid(OVER_DEPTH));
+    }
+}
+
+/// Flowchart depth comes from the pinned grammar's structure: keywords in comments and labels
+/// are text, and subgraphs in a row never add up. A subgraph opens wherever the grammar starts a
+/// statement, also after a node on the same line.
+#[test]
+fn dgm1_flowchart_depth_reads_structure_only() {
+    let opens = "subgraph ".repeat(33);
+    let closes = "end ".repeat(33);
+    for src in [
+        format!("flowchart LR\nA --> B\n%% {opens}{closes}\n"),
+        format!("flowchart LR\nA --> B %% {opens}{closes}\n"),
+        format!("flowchart LR\nA[\"{opens}{closes}\"] --> B\n"),
+        format!("flowchart LR\nA[{opens}{closes}] --> B\n"),
+        format!("flowchart LR\nA -->|{opens}{closes}| B\n"),
+        format!("flowchart LR\nA -- {opens}{closes} --> B\n"),
+        format!(
+            "flowchart LR\nA(\n{}{}x)\n",
+            "subgraph x\n".repeat(33),
+            "end\n".repeat(33)
+        ),
+        format!(
+            "flowchart LR\n{}",
+            (0..70)
+                .map(|i| format!("subgraph S{i}\nA{i}\nend\n"))
+                .collect::<String>()
+        ),
+        format!(
+            "flowchart LR\n{}\n",
+            (0..70)
+                .map(|i| format!("subgraph S{i};A{i};end;"))
+                .collect::<String>()
+        ),
+        // a separator right after a subgraph's header ends it: the grammar reads plain nodes
+        nest(
+            "flowchart TD",
+            "",
+            33,
+            |i| format!("subgraph S{i}\n\n"),
+            "B\n",
+            "end\n",
+        ),
+    ] {
+        assert!(drawn(&render(&src)), "{src}");
+    }
+    // a subgraph after a node on the same line still nests
+    let after_node = |n: usize| {
+        nest(
+            "flowchart TD",
+            "",
+            n,
+            |i| format!("A{i} subgraph S{i}\n"),
+            "B\n",
+            "end\n",
+        )
+    };
+    assert!(drawn(&render(&after_node(32))));
+    assert_eq!(short(render(&after_node(33))), invalid(OVER_DEPTH));
+    // a multi-line label hides no subgraph that follows it
+    let after_label = |n: usize| {
+        nest(
+            "flowchart TD",
+            "",
+            n,
+            |i| format!("subgraph S{i}\nA{i}[\"x\nend\"]\n"),
+            "B\n",
+            "end\n",
+        )
+    };
+    assert!(drawn(&render(&after_label(32))));
+    assert_eq!(short(render(&after_label(33))), invalid(OVER_DEPTH));
+}
+
+/// A source the pinned crate panics on while it lays the drawing out: an empty subgraph inside
+/// another.
+const LIBRARY_PANICS: &str = "flowchart TD\nsubgraph S0\nsubgraph S1\nend\nend\n";
+
+/// The variable that makes [`dgm1_library_panic_child`] run.
+const PANIC_CHILD: &str = "RDY_DIAGRAM_LIBRARY_PANIC_CHILD";
+
+/// The child half of [`dgm1_a_drawing_library_panic_prints_nothing`]. Without its variable it
+/// does nothing.
+#[test]
+fn dgm1_library_panic_child() {
+    if std::env::var_os(PANIC_CHILD).is_none() {
+        return;
+    }
+    let drawn = render(LIBRARY_PANICS);
+    assert_eq!(
+        drawn,
+        Diagram::Failed {
+            reason: "the drawing library failed on this source".to_string()
+        }
+    );
+    println!("child rendered {drawn:?}");
+}
+
+/// The pinned crate's own panic is a drawing fault, and a fresh process prints nothing of it:
+/// stderr holds no panic message and no payload.
+#[test]
+fn dgm1_a_drawing_library_panic_prints_nothing() {
+    let out = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "dgm1_library_panic_child",
+            "--nocapture",
+            "--test-threads",
+            "1",
+        ])
+        .env(PANIC_CHILD, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("child rendered Failed"),
+        "stdout:\n{stdout}"
+    );
+    assert!(!stderr.contains("panicked"), "stderr:\n{stderr}");
+    assert!(
+        !stderr.contains("no entry found for key"),
+        "stderr:\n{stderr}"
+    );
 }
