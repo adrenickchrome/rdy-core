@@ -191,7 +191,13 @@ pub fn closure_before(
     if prerequisites.len() > MAX_PREREQUISITES {
         return Err(StreamError::limit(None, 0, LIMIT_PREREQUISITES));
     }
-    let header = (HEADER_FIXED + prerequisites.len() * KEY_LEN) as u64;
+    // the header names the source store's features (sync format 2)
+    let manifest = reader
+        .store_features()
+        .map_err(|e| store_error(e, Some(root)))?
+        .to_json()
+        .len();
+    let header = (HEADER_FIXED + manifest + prerequisites.len() * KEY_LEN) as u64;
     let bytes =
         MAGIC.len() as u64 + 4 + FRAME_HEADER + header + body + FRAME_HEADER + TRAILER_LEN as u64;
     if bytes > MAX_STREAM_BYTES {

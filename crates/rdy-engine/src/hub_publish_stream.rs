@@ -54,9 +54,10 @@ use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 
 /// The bytes of a stream frame's own header: length, kind and hash.
 const FRAME_HEADER: u64 = 4 + 1 + 32;
-/// The bytes of the prelude and the header frame with its fixed payload.
+/// The bytes of the prelude and the header frame with its fixed payload, besides the header's
+/// feature manifest ([`PreparedHistory::manifest`]).
 const BATCH_HEAD: u64 = MAGIC.len() as u64 + 4 + FRAME_HEADER + HEADER_FIXED as u64;
-/// The bytes of a batch beyond its prerequisite keys and object frames: [`BATCH_HEAD`] and the
+/// The bytes of a batch beyond its manifest, prerequisite keys and object frames: [`BATCH_HEAD`] and the
 /// trailer frame.
 const BATCH_FIXED: u64 = BATCH_HEAD + FRAME_HEADER + TRAILER_LEN as u64;
 
@@ -112,6 +113,8 @@ pub struct PreparedHistory {
     stream: CheckedStream<File>,
     /// The source store's features, which every batch's header names.
     features: rdy_store::format::StoreFeatures,
+    /// The bytes of `features`' canonical JSON in every batch's header.
+    manifest: u64,
     repo_id: RepoId,
     tag: Hash,
     /// HA1's records in dependency order.
@@ -266,10 +269,12 @@ impl PreparedHistory {
         }
         let repo_id = facts.repo_id;
         let features = report.header.features.clone();
+        let manifest = features.to_json().len() as u64;
         read.ensure_current_epoch()?;
         Ok(PreparedHistory {
             stream,
             features,
+            manifest,
             repo_id,
             tag: tag_hash,
             order,
@@ -292,7 +297,7 @@ impl PreparedHistory {
             .iter()
             .map(|l| FRAME_HEADER + l)
             .sum();
-        (u64::from(p) + 1, BATCH_HEAD + before)
+        (u64::from(p) + 1, BATCH_HEAD + self.manifest + before)
     }
 }
 
@@ -422,7 +427,10 @@ impl<'a> Tally<'a> {
     }
 
     fn bytes(&self) -> u64 {
-        BATCH_FIXED + KEY_LEN as u64 * self.prerequisites() as u64 + self.frames
+        BATCH_FIXED
+            + self.history.manifest
+            + KEY_LEN as u64 * self.prerequisites() as u64
+            + self.frames
     }
 
     /// The batch's prerequisites in key order.

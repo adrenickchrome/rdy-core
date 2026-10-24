@@ -36,8 +36,8 @@ use std::sync::Mutex;
 const CANARY: &str = "ZEBRA-7731";
 const ACCESS: &str = "rdyh_a_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd2F6gYf";
 /// The bytes of a batch with no object record and one prerequisite: prelude 12, header frame
-/// 37 + 57 + 33, trailer frame 37 + 48.
-const EMPTY_BATCH: u64 = 224;
+/// 37 + 57 + 36 (the baseline manifest) + 33, trailer frame 37 + 48.
+const EMPTY_BATCH: u64 = 260;
 const WIDE: BatchLimits = BatchLimits {
     bytes: 2_147_483_648,
     records: 1_000_000,
