@@ -365,39 +365,85 @@ fn dgm1_labels_keep_escape_codes() {
         "{out}"
     );
     assert!(out.contains(">9;secondsecondsecondsec</text>"), "{out}");
-    // node, edge and group labels keep their codes in every drawn family
-    for (name, codes) in [
+    // every drawn family keeps the full payload in each of its label contexts
+    let p = PAYLOAD_SVG;
+    for (name, whole, contexts) in [
+        // class: a class label, a member and an edge label (wrapped); a namespace name is an
+        // identifier, so a class diagram has no group label
         (
             "class",
-            &[
-                ">first #40;one#41;</text>",
-                ">uses #91;it#93;</text>",
-                ">second #59; third</text>",
-            ][..],
+            vec![format!("first {p}"), format!("+String {p}")],
+            3,
         ),
+        // sequence: a box (group) label, a participant, a loop (group) label, a message, a note
         (
             "sequence",
-            &[
-                ">first #35;1</text>",
-                ">ask #60;x#62;</text>",
-                ">answer #123;y#125;</text>",
-                ">third #124; done</text>",
+            vec![
+                format!("first {p}"),
+                format!("[second {p}]"),
+                format!("ask {p}"),
+                format!("third {p}"),
             ],
+            5,
         ),
+        // state: a state label, a description, a transition label (wrapped) and a note; a
+        // composite state shows its id, so a state diagram has no group label
         (
             "state",
-            &[
-                ">first #40;A#41;</text>",
-                ">second #96;B#96;</text>",
-                ">go #59; now</text>",
+            vec![
+                format!("first {p}"),
+                format!("second {p}"),
+                format!("third {p}"),
             ],
+            4,
+        ),
+        // flowchart: a subgraph label, a node label and an edge label (wrapped)
+        (
+            "labels",
+            vec![format!("fourth {p}"), format!("first {p}")],
+            3,
         ),
     ] {
         let out = svg(&source(name));
-        for code in codes {
-            assert!(out.contains(code), "{name}: {code}");
+        for text in &whole {
+            assert!(out.contains(&format!(">{text}</text>")), "{name}: {text}");
+        }
+        let texts = texts(&out);
+        for part in CODES
+            .iter()
+            .chain(&["&amp;", "back\\slash", "it&apos;s", "café ✓"])
+        {
+            let n: usize = texts.iter().map(|t| t.matches(part).count()).sum();
+            assert!(
+                n >= contexts,
+                "{name}: {part} in {n} of {contexts} contexts"
+            );
         }
     }
+}
+
+/// The thirteen decimal codes encode_label writes.
+const CODES: [&str; 13] = [
+    "#34;", "#35;", "#59;", "#60;", "#62;", "#91;", "#93;", "#40;", "#41;", "#123;", "#125;",
+    "#124;", "#96;",
+];
+
+/// The full label payload as the drawn SVG writes it: every code kept as written, `&` and `'`
+/// as entities. The fixtures write it with a bare `&` and `'`.
+const PAYLOAD_SVG: &str = "#34;q#34; #35;h #59;s #60;l#62; #91;b#93; #40;p#41; #123;c#125; #124;v #96;t#96; &amp; back\\slash it&apos;s café ✓";
+
+/// The content of every `<text>` element, in order.
+fn texts(svg: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = svg;
+    while let Some(open) = rest.find("<text") {
+        rest = &rest[open..];
+        let start = rest.find('>').expect("a whole text tag") + 1;
+        let end = rest.find("</text>").expect("a closed text element");
+        out.push(&rest[start..end]);
+        rest = &rest[end..];
+    }
+    out
 }
 
 #[test]
@@ -610,201 +656,285 @@ fn dgm1_hostile_input_is_bounded() {
     let _ = render(&parens);
 }
 
-/// The tags of an SVG: each tag's name and its attributes' names and values, lowercased.
-fn tags(svg: &str) -> Vec<(String, Vec<(String, String)>)> {
-    let mut out = Vec::new();
-    let mut rest = svg;
-    while let Some(start) = rest.find('<') {
-        rest = &rest[start + 1..];
-        let mut end = 0;
-        let mut quote = None;
-        for (i, c) in rest.char_indices() {
-            match (quote, c) {
-                (None, '"' | '\'') => quote = Some(c),
-                (Some(q), c) if c == q => quote = None,
-                (None, '>') => {
-                    end = i;
-                    break;
-                }
-                _ => {}
-            }
-        }
-        let tag = &rest[..end];
-        rest = &rest[end..];
-        let tag = tag.trim_start_matches('/').trim_end_matches('/');
-        let mut parts = tag.splitn(2, char::is_whitespace);
-        let name = parts.next().unwrap_or("").to_ascii_lowercase();
-        let mut attrs = Vec::new();
-        let mut a = parts.next().unwrap_or("").trim();
-        while !a.is_empty() {
-            let eq = a.find('=').unwrap_or(a.len());
-            let key = a[..eq].trim().to_ascii_lowercase();
-            a = a[eq..].trim_start_matches('=').trim_start();
-            let value = match a.chars().next() {
-                Some(q @ ('"' | '\'')) => {
-                    let close = a[1..].find(q).map(|i| i + 1).unwrap_or(a.len());
-                    let v = a[1..close].to_string();
-                    a = a.get(close + 1..).unwrap_or("").trim_start();
-                    v
-                }
-                _ => {
-                    let stop = a.find(char::is_whitespace).unwrap_or(a.len());
-                    let v = a[..stop].to_string();
-                    a = a[stop..].trim_start();
-                    v
-                }
-            };
-            attrs.push((key, value.to_ascii_lowercase()));
-        }
-        out.push((name, attrs));
+/// `header`, then `prefix`, then `n` openers, `inner`, and `n` copies of `close`.
+fn nest(
+    header: &str,
+    prefix: &str,
+    n: usize,
+    open: impl Fn(usize) -> String,
+    inner: &str,
+    close: &str,
+) -> String {
+    let mut s = format!("{header}\n{prefix}");
+    for i in 0..n {
+        s.push_str(&open(i));
     }
-    out
+    s.push_str(inner);
+    s.push_str(&close.repeat(n));
+    s
 }
 
-/// The elements an inert SVG never holds.
-const ACTIVE: [&str; 13] = [
-    "script",
-    "foreignobject",
-    "iframe",
-    "object",
-    "embed",
-    "image",
-    "img",
-    "a",
-    "use",
-    "animate",
-    "set",
-    "handler",
-    "listener",
-];
-
-/// Whether a CSS or attribute value names a resource outside the SVG.
-fn external(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    lower.contains("@import")
-        || lower.contains("javascript:")
-        || lower.contains("://")
-        || lower.match_indices("url(").any(|(at, _)| {
-            !lower[at + 4..]
-                .trim_start_matches(['\'', '"', ' '])
-                .starts_with('#')
-        })
-}
-
-/// No active element and no event or link attribute. Visible label words are not inspected.
-fn assert_no_active(svg: &str, what: &str) {
-    for (name, attrs) in tags(svg) {
-        assert!(
-            !ACTIVE.contains(&name.as_str()),
-            "{what}: a <{name}> element\n{svg}"
-        );
-        for (key, _) in attrs {
-            assert!(
-                !key.starts_with("on"),
-                "{what}: event attribute {key}\n{svg}"
-            );
-            assert!(
-                !key.ends_with("href") && key != "src",
-                "{what}: a link attribute {key}\n{svg}"
-            );
-        }
+/// A result for an assertion message: an SVG shows as its length only.
+fn short(d: Diagram) -> Diagram {
+    match d {
+        Diagram::Svg(svg) => Diagram::Svg(format!("<{} bytes of SVG>", svg.len())),
+        other => other,
     }
 }
 
-/// No active content and no external resource: attributes and style sheets name only local
-/// `#id` targets. Visible label words are not inspected.
-fn assert_inert(svg: &str, what: &str) {
-    assert_no_active(svg, what);
-    for (_, attrs) in tags(svg) {
-        for (key, value) in attrs {
-            if key == "xmlns" || key.starts_with("xmlns:") {
-                assert!(value.starts_with("http://www.w3.org/"), "{what}: {value}");
-                continue;
-            }
-            assert!(!external(&value), "{what}: external {key}={value}\n{svg}");
-        }
-    }
-    let mut rest = svg;
-    while let Some(open) = rest.find("<style") {
-        let body = &rest[open..];
-        let close = body.find("</style>").expect("a closed style element");
-        assert!(
-            !external(&body[..close]),
-            "{what}: an external style\n{svg}"
-        );
-        rest = &body[close..];
-    }
+fn drawn(d: &Diagram) -> bool {
+    matches!(d, Diagram::Svg(_))
 }
 
-/// Hostile labels and click directives draw no active content and no external resource.
+/// A comment, or a quote the pinned parser does not read as a string, hides no structure: the
+/// bounds see every block the pinned parser nests and every statement it reads, and they refuse
+/// before anything is drawn.
 #[test]
-fn dgm1_svg_has_no_active_content() {
-    for name in DRAWN {
-        assert_inert(&svg(&source(name)), name);
-    }
-    let labels_and_clicks = [
-        "flowchart LR\n    A[\"<script>alert(1)</script>\"] --> B[\"<img src=x onerror=alert(1)>\"]\n",
-        "flowchart LR\n    A[\"<foreignObject><div>x</div></foreignObject>\"] --> B\n",
-        "flowchart LR\n    A --> B\n    click A call alert(1)\n    click B href \"javascript:alert(1)\"\n",
-        "flowchart LR\n    A --> B\n    click A \"https://example.com\" \"tip\" _blank\n",
-        "flowchart LR\n    A[\"x\\\" onload=\\\"alert(1)\"] --> B[\"' onclick='alert(1)\"]\n",
-        "flowchart LR\n    A[\"&lt;script&gt;alert(1)&lt;/script&gt;\"] --> B[\"javascript:alert(1)\"]\n",
-        "flowchart LR\n    A[\"]]><script>alert(1)</script>\"] --> B[\"<!-- x --> <![CDATA[y]]>\"]\n",
-        "flowchart LR\n    A[\"@import url(https://example.com/s.css)\"] --> B\n",
-        "classDiagram\n    class A[\"<script>x</script>\"]\n    A --> B : <img onerror=x>\n    click A href \"javascript:x\"\n",
-        "sequenceDiagram\n    participant A as <script>x</script>\n    A->>B: <img src=x onerror=alert(1)>\n    Note over A: javascript:alert(1)\n",
-        "stateDiagram-v2\n    state \"<script>x</script>\" as S\n    S --> T : <a href=\"https://example.com\">x</a>\n",
-    ];
-    for (i, src) in labels_and_clicks.iter().enumerate() {
-        match render(src) {
-            Diagram::Svg(out) => assert_inert(&out, &format!("hostile {i}")),
-            other => assert!(
-                !matches!(other, Diagram::Failed { .. }),
-                "hostile {i}: {other:?}"
-            ),
-        }
-    }
-    // style values without a quote draw no active element, event or link attribute
-    for (i, src) in STYLES.iter().enumerate() {
-        match render(src) {
-            Diagram::Svg(out) => assert_no_active(&out, &format!("style {i}")),
-            other => assert!(
-                !matches!(other, Diagram::Failed { .. }),
-                "style {i}: {other:?}"
-            ),
-        }
-    }
-}
-
-const STYLES: [&str; 6] = [
-    "flowchart LR\n    A --> B\n    style A fill:url(https://example.com/x.svg),stroke:#f00\n",
-    "flowchart LR\n    A --> B\n    classDef evil fill:url(http://example.com/a),color:expression(alert(1))\n    class A evil\n",
-    "flowchart LR\n    A --> B\n    linkStyle 0 stroke:url(https://example.com/m)\n",
-    "flowchart LR\n    A --> B\n    style A fill:<script>x</script>\n",
-    "classDiagram\n    class A\n    A --> B\n    style A fill:url(https://example.com/x)\n",
-    "stateDiagram-v2\n    S --> T\n    classDef evil fill:url(https://example.com/x)\n    class S evil\n",
-];
-
-/// A defect of the pinned generator, pinned so the admission check that refuses it stays
-/// required: a style value reaches a presentation attribute as written and unescaped. A raw
-/// drawing can then name an external resource, hold a `<` in an attribute, or end the
-/// attribute with a quote and add an event attribute. Raw SVG is never served as is.
-#[test]
-fn dgm1_style_values_reach_raw_attributes() {
-    let raw = |i: usize| svg(STYLES[i]);
-    assert!(raw(0).contains(" fill=\"url(https://example.com/x.svg)\""));
-    assert!(raw(1).contains(" fill=\"url(http://example.com/a)\""));
-    assert!(raw(1).contains(" fill=\"expression(alert(1))\""));
-    assert!(raw(2).contains(" stroke=\"url(https://example.com/m)\""));
-    assert!(raw(3).contains(" fill=\"<script>x</script>\""));
-    assert!(raw(5).contains(" fill=\"url(https://example.com/x)\""));
-    // a quote in a style value ends the attribute, so a raw drawing can hold an event attribute
-    for src in [
-        "flowchart LR\n    A --> B\n    style A fill:#f00\" onload=\"alert(1)\n",
-        "flowchart LR\n    A --> B\n    classDef e fill:#f00\" onload=\"alert(1)\n    class A e\n",
-        "flowchart LR\n    A --> B\n    linkStyle 0 stroke:#f00\" onload=\"alert(1)\n",
-        "stateDiagram-v2\n    S --> T\n    classDef e fill:#f00\" onload=\"alert(1)\n    class S e\n",
+fn dgm1_comments_and_quotes_hide_no_structure() {
+    let states = |prefix: &str, n: usize| {
+        nest(
+            "stateDiagram-v2",
+            prefix,
+            n,
+            |i| format!("state S{i} {{\n"),
+            "[*] --> A\n",
+            "}\n",
+        )
+    };
+    // an inline comment's quote opens no string: the pinned state parser strips the comment
+    assert!(drawn(&render(&states("X: x %% \"\n", 32))));
+    assert_eq!(
+        short(render(&states("X: x %% \"\n", 33))),
+        invalid(OVER_DEPTH)
+    );
+    // a commented opening brace still opens a block, and a commented closer still closes
+    let commented = |n: usize| {
+        nest(
+            "stateDiagram-v2",
+            "",
+            n,
+            |i| format!("state S{i} {{ %% open {i}\n"),
+            "[*] --> A\n",
+            "} %% close\n",
+        )
+    };
+    assert!(drawn(&render(&commented(32))));
+    assert_eq!(short(render(&commented(33))), invalid(OVER_DEPTH));
+    // in line-based families a quote never reaches the next line
+    assert_eq!(short(render(&states("X : \"\n", 33))), invalid(OVER_DEPTH));
+    let namespaces = |n: usize| {
+        nest(
+            "classDiagram",
+            "class X[\"\n",
+            n,
+            |i| format!("namespace N{i} {{\n"),
+            "class A\n",
+            "}\n",
+        )
+    };
+    assert!(drawn(&render(&namespaces(32))));
+    assert_eq!(short(render(&namespaces(33))), invalid(OVER_DEPTH));
+    // flowchart: a comment's quote, a quote in a round label, a quote never closed, and an
+    // `end` inside a label hide no subgraph
+    let subgraphs = |prefix: &str, inner: &str, n: usize| {
+        nest(
+            "flowchart TD",
+            prefix,
+            n,
+            |i| format!("subgraph S{i}\n"),
+            inner,
+            "end\n",
+        )
+    };
+    for (prefix, inner) in [
+        ("A %% \"\n", "B\n"),
+        ("A(\"x)\n", "B(\"y)\n"),
+        ("A[\"x]\n", "B\n"),
     ] {
-        assert!(svg(src).contains("=\"#f00\" onload=\"alert(1)\""), "{src}");
+        assert!(drawn(&render(&subgraphs(prefix, inner, 32))), "{prefix}");
+        assert_eq!(
+            short(render(&subgraphs(prefix, inner, 33))),
+            invalid(OVER_DEPTH),
+            "{prefix}"
+        );
+    }
+    let label_end = nest(
+        "flowchart TD",
+        "",
+        33,
+        |i| format!("subgraph S{i}\nA{i}(\nend\nx)\n"),
+        "B\n",
+        "end\n",
+    );
+    assert_eq!(short(render(&label_end)), invalid(OVER_DEPTH));
+    // the keyword bound reads no labels, so subgraphs in a row count only by halves: 64 in a
+    // row still draw
+    let mut row = String::from("flowchart TD\n");
+    for i in 0..64 {
+        row.push_str(&format!("subgraph S{i}\nA{i}\nend\n"));
+    }
+    assert!(drawn(&render(&row)), "64 subgraphs in a row");
+    // the pinned flowchart grammar reads a lone CR as a line end
+    let cr = |n: usize| {
+        nest(
+            "flowchart TD",
+            "",
+            n,
+            |i| format!("subgraph S{i}\r"),
+            "B\r",
+            "end\r",
+        )
+    };
+    assert!(drawn(&render(&cr(32))));
+    assert_eq!(short(render(&cr(33))), invalid(OVER_DEPTH));
+    // statements: a comment's quote and an unclosed quote hide no statements
+    let flow = format!("flowchart LR\nA %% \"\n{}", "A\n".repeat(2048));
+    assert_eq!(short(render(&flow)), invalid(OVER_STATEMENTS));
+    let state = format!("stateDiagram-v2\nX : \"\n{}", "A --> B\n".repeat(2048));
+    assert_eq!(short(render(&state)), invalid(OVER_STATEMENTS));
+    // the reviewer's input: 2000 nested states after a comment's quote are 4003 statements,
+    // refused before drawing; 1000 nested blocks stay under the statement bound and are refused
+    // for their depth
+    let deep = states("X: x %% \"\n", 2000);
+    assert_eq!(deep.len(), 30926);
+    assert_eq!(short(render(&deep)), invalid(OVER_STATEMENTS));
+    // the two round-label quotes pair up as one string for the statement count, so this one
+    // counts few statements; the keyword bound still sees all 2000 subgraphs
+    assert_eq!(
+        short(render(&subgraphs("A(\"x)\n", "B(\"y)\n", 2000))),
+        invalid(OVER_DEPTH)
+    );
+    assert_eq!(
+        short(render(&states("X: x %% \"\n", 1000))),
+        invalid(OVER_DEPTH)
+    );
+    assert_eq!(
+        short(render(&subgraphs("A(\"x)\n", "B(\"y)\n", 1000))),
+        invalid(OVER_DEPTH)
+    );
+    assert_eq!(short(render(&namespaces(1000))), invalid(OVER_DEPTH));
+}
+
+/// Braces in state descriptions, transition labels and note text are label text, not blocks;
+/// a brace the pinned parser does not read as a closer closes nothing.
+#[test]
+fn dgm1_state_label_braces_are_not_structure() {
+    let lines = |line: &dyn Fn(usize) -> String, n: usize| {
+        let mut s = String::from("stateDiagram-v2\n");
+        for i in 0..n {
+            s.push_str(&line(i));
+        }
+        s
+    };
+    for line in [
+        &(|_| "S : brace {\n".to_string()) as &dyn Fn(usize) -> String,
+        &|i| format!("S{i} : brace {{\n"),
+        &|i| format!("A{i} --> B{i} : go {{\n"),
+        &|i| format!("note right of A{i} : text {{\n"),
+    ] {
+        let src = lines(line, 33);
+        assert!(drawn(&render(&src)), "{src}");
+    }
+    let note = format!(
+        "stateDiagram-v2\nA --> B\nnote right of A\n{}end note\n",
+        "text {\n".repeat(33)
+    );
+    assert!(drawn(&render(&note)), "multi-line note text");
+    // a closer inside a note's text, or a brace with text after it, closes nothing
+    for close_line in ["note left of X\n}\nend note\n", "} x\n"] {
+        let src = nest(
+            "stateDiagram-v2",
+            "",
+            33,
+            |i| format!("state S{i} {{\n{close_line}"),
+            "[*] --> A\n",
+            "}\n",
+        );
+        assert_eq!(short(render(&src)), invalid(OVER_DEPTH), "{close_line}");
+    }
+    let src = nest(
+        "classDiagram",
+        "",
+        33,
+        |i| format!("namespace N{i} {{\n}} x\n"),
+        "class A\n",
+        "}\n",
+    );
+    assert_eq!(short(render(&src)), invalid(OVER_DEPTH), "class");
+}
+
+/// Front matter with CRLF line ends draws what the same source with LF draws.
+#[test]
+fn dgm1_crlf_front_matter_draws_like_lf() {
+    let crlf = "---\r\nk0: v\r\nk1: v\r\nk2: v\r\nk3: v\r\nk4: v\r\nk5: v\r\ntitle: café\r\n---\r\nflowchart LR\r\nA --> B\r\n";
+    assert_eq!(crlf.len(), 89);
+    assert!(
+        render(crlf) == Diagram::Svg(svg(&crlf.replace("\r\n", "\n"))),
+        "{:?}",
+        short(render(crlf))
+    );
+    let two = "---\r\ntitle: first\r\nk: v\r\n---\r\nflowchart LR\r\nA --> B\r\n";
+    assert!(
+        render(two) == Diagram::Svg(svg(&two.replace("\r\n", "\n"))),
+        "{:?}",
+        short(render(two))
+    );
+    // a CRLF body without front matter draws like LF too
+    let body = "flowchart LR\r\n    A --> B\r\n";
+    assert!(
+        render(body) == Diagram::Svg(svg(&body.replace("\r\n", "\n"))),
+        "{:?}",
+        short(render(body))
+    );
+}
+
+/// The hostile fixtures under `fixtures/hostile`: `<name>.mmd` renders to `<name>.svg`.
+///
+/// The pinned crate copies `style`, `classDef` and `linkStyle` values into attributes as written,
+/// so a raw drawing can hold an event attribute or an external `url()`. Raw SVG carries no safety
+/// claim: these drawings are captured here, and the admission check that rewrites SVG before a
+/// page uses it refuses them.
+const HOSTILE: [&str; 19] = [
+    "label-script",
+    "label-foreign-object",
+    "label-attribute-quote",
+    "label-entities",
+    "label-cdata",
+    "label-import",
+    "click-call",
+    "click-url",
+    "class-hostile",
+    "sequence-hostile",
+    "state-hostile",
+    "style-event",
+    "style-url",
+    "style-script",
+    "classdef-event",
+    "classdef-url",
+    "linkstyle-event",
+    "linkstyle-url",
+    "state-classdef-event",
+];
+
+fn hostile(name: &str, ext: &str) -> Vec<u8> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/hostile")
+        .join(format!("{name}.{ext}"));
+    std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// Hostile labels, click directives and style values draw the same raw bytes every time. The
+/// bytes are captured as fixtures for the admission check; nothing here claims they are safe.
+#[test]
+fn dgm1_hostile_raw_svg_is_captured_for_admission() {
+    for name in HOSTILE {
+        let src = String::from_utf8(hostile(name, "mmd")).expect("UTF-8 source");
+        let first = render(&src);
+        assert_eq!(first, render(&src), "{name}: two renders");
+        assert!(drawn(&first), "{name}: {:?}", short(first.clone()));
+        assert!(
+            as_bytes(&first) == hostile(name, "svg"),
+            "{name}: differs from its fixture"
+        );
     }
 }

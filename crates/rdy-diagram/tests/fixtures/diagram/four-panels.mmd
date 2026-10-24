@@ -1,20 +1,21 @@
 flowchart TB
-    subgraph P1[first]
+    subgraph P1["first"]
         direction LR
-        A1[A] --> B1[B]
+        p1a["A: first second third"] -- first --> p1b["B: first second third"]
+        p1c["B before: first second"] -.-> p1b
     end
-    subgraph P2[second]
+    subgraph P2["second"]
         direction LR
-        A2[A] --> B2[B]
+        p2b["B: second third"] -- second --> p2r["A: second third first<br/>A kept, second third"]
+        p2a["A before: second first"] -.-> p2r
     end
-    subgraph P3[third]
+    subgraph P3["third"]
         direction LR
-        A3[A] --> B3[B]
+        p3a["A: second first"] -- "first second" --> p3b["B: second third"]
+        p3b -- third --> p3r["A: second third<br/>A kept, second third<br/>its first can go into B"]
     end
-    subgraph P4[fourth]
+    subgraph P4["fourth"]
         direction LR
-        A4[A] --> B4[B]
+        p4a["A: second first"] -- "second third" --> p4r["B: second first<br/>third kept, second third"]
+        p4b["B before: second third"] -.-> p4r
     end
-    B1 --> A2
-    B2 --> A3
-    B3 --> A4

@@ -1,8 +1,13 @@
-flowchart TD
-    A[A's start] --> B{B}
-    B -->|first| C[first's step]
-    B -->|second| D[second's step]
-    C --> E[third]
-    D --> F[A's retry]
-    F --> G[B's check]
-    G --> E
+flowchart LR
+    subgraph G1["first"]
+        a0["A"] --> a1["B"]
+    end
+    subgraph G2["second"]
+        b0["A"] --> b1["first"] --> b2["second"]
+    end
+    subgraph G3["third"]
+        c0["A"] --> c1["B"] --> c2["first'"] --> c3["second'"]
+        c4["first, second<br/>third, A's"]
+    end
+    G2 -. "first second" .-> G1
+    G1 -- third --> G3
