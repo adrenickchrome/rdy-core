@@ -615,22 +615,12 @@ fn ok1_noncanonical_manifests_parse_within_their_bounds() {
             "{{\"manifest_version\":1,\"features\":[{},{{\"name\":1}}]}}",
             f("a")
         ),
-        format!("{{\"manifest_version\":1,\"features\":[{{\"name\":1}},{{\"why\":1}}]}}"),
-        format!(
-            "{{\"manifest_version\":1,\"features\":[{{\"name\":\"\\u0061\",\"class\":\"compatible\",\"required_rdy\":\"1.0.0\"}}]}}"
-        ),
-        format!(
-            "{{\"manifest_version\":1,\"features\":[{{\"name\":\"a\",\"name\":\"b\",\"class\":\"incompatible\",\"required_rdy\":\"1.0.0\"}}]}}"
-        ),
-        format!(
-            "{{\"manifest_version\":1,\"features\":[{{\"name\":\"a\",\"class\":\"compatible\",\"required_rdy\":\"1.0.0\",\"z\":1,\"y\":[}}]}}"
-        ),
-        format!(
-            "{{\"manifest_version\":1,\"features\":[{{\"name\":\"a\",\"class\":\"compatibl\\u0065\",\"required_rdy\":\"1.0.0\"}}]}}"
-        ),
-        format!(
-            "{{\"manifest_version\":1,\"features\":[{{\"name\":\"a\",\"class\":\"compatible\",\"required_rdy\":1}}]}}"
-        ),
+        "{\"manifest_version\":1,\"features\":[{\"name\":1},{\"why\":1}]}".into(),
+        "{\"manifest_version\":1,\"features\":[{\"name\":\"\\u0061\",\"class\":\"compatible\",\"required_rdy\":\"1.0.0\"}]}".into(),
+        "{\"manifest_version\":1,\"features\":[{\"name\":\"a\",\"name\":\"b\",\"class\":\"incompatible\",\"required_rdy\":\"1.0.0\"}]}".into(),
+        "{\"manifest_version\":1,\"features\":[{\"name\":\"a\",\"class\":\"compatible\",\"required_rdy\":\"1.0.0\",\"z\":1,\"y\":[}]}".into(),
+        "{\"manifest_version\":1,\"features\":[{\"name\":\"a\",\"class\":\"compatibl\\u0065\",\"required_rdy\":\"1.0.0\"}]}".into(),
+        "{\"manifest_version\":1,\"features\":[{\"name\":\"a\",\"class\":\"compatible\",\"required_rdy\":1}]}".into(),
         format!(
             "{{\"manifest_version\":1,\"features\":[{},{}]}}",
             f("b"),
