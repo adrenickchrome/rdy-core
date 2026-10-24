@@ -393,7 +393,7 @@ fn plz4_relink_matches_rebuild_for_mixed_changes() {
     link(&mut d3, "supersedes", &d1.id, None);
     reaffirm(&mut d3, "D-AAAAA", Against::Retiring(vec![id("D-DDDDD")]));
 
-    let shared = vec![section, d1, d2, stub];
+    let shared = [section, d1, d2, stub];
     let before = by_id(shared.iter().cloned().chain([gone.clone(), claim.clone()]));
     let after = by_id(shared.iter().cloned().chain([claim2.clone(), d3.clone()]));
     let g = rebuild(&before, &t);
