@@ -274,6 +274,14 @@ fn cut(text: &[Ch], max: usize) -> Vec<Ch> {
     out
 }
 
+/// Plain `text` cut as [`cut`] says, as a string: whitespace collapsed, at most `max` characters
+/// (a word boundary when one falls in them), and one `…` when something was cut. A character has
+/// no code span here.
+pub(crate) fn cut_plain(text: &str, max: usize) -> String {
+    let chars: Vec<Ch> = text.chars().map(|c| (c, 0)).collect();
+    cut(&chars, max).into_iter().map(|(c, _)| c).collect()
+}
+
 /// `8 February 2021` for a time in milliseconds since the epoch (UTC).
 pub(crate) fn date(ms: i64) -> String {
     const MONTHS: [&str; 12] = [

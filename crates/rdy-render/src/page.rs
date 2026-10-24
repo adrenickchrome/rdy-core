@@ -1240,10 +1240,12 @@ fn disagreements_body(sh: &Shared, page: &str) -> DisagreementsBody {
                     let doc = sh.site.doc_of(id);
                     let folders = doc.map(|doc| folder_path(sh, &doc.id)).unwrap_or_default();
                     let doc = doc.map(|d| sh.site.label(d));
+                    // a lone block's quote is cut at a word boundary, as a summary is
+                    let quote = quote_of(sh, id, link.label);
                     let text = match doc {
                         Some(doc) if d.repeats > 1 => doc,
-                        Some(doc) if doc != link.label => format!("{doc} › {}", link.label),
-                        _ => link.label,
+                        Some(doc) if doc != quote => format!("{doc} › {quote}"),
+                        _ => quote,
                     };
                     Some((
                         DisagreementLink {
@@ -1265,6 +1267,22 @@ fn disagreements_body(sh: &Shared, page: &str) -> DisagreementsBody {
         })
         .collect();
     DisagreementsBody { entries }
+}
+
+/// What a lone disagreement quotes of the block `id`, whose link label is `label`. A label that is
+/// the block's own summary is replaced by the summary's words, an unresolved reference read as
+/// the unresolved marker's words, cut at a word boundary to 80 characters (`home::cut_plain`). A
+/// title, a name or any other label stays.
+fn quote_of(sh: &Shared, id: &BlockId, label: String) -> String {
+    let Some(b) = sh.m.get(id) else { return label };
+    let summary = |keep_token: bool| {
+        let words = sh.site.summary_words(b, 0, keep_token);
+        words.chars().take(80).collect::<String>()
+    };
+    if summary(true) != label {
+        return label;
+    }
+    home::cut_plain(&sh.site.summary_words(b, 0, false), 80)
 }
 
 /// The folders above `doc`, top first, joined as the breadcrumb and the hover join them
