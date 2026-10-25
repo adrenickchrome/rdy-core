@@ -492,6 +492,8 @@ mod tests {
         let orphan = {
             let mut r = Rdy::open(dir.path()).unwrap();
             let mut record = r.store().reader().landing(&l1).unwrap();
+            // a forged record from a read: it no longer has the read's identity
+            record.read_identity = None;
             record.proposal = Hash([7; 32]);
             record.prev = Some(l1);
             let orphan = r.store_mut().put(kinds::LANDING, &record).unwrap();

@@ -95,7 +95,8 @@ fn objects(src: &Rdy, keep: &dyn Fn(u8, &Hash) -> bool) -> Vec<(u8, Vec<u8>)> {
             ORIGIN,
             src.store().log_end(),
             |_, kind, hash, payload, _| {
-                if COPIED.contains(&kind) && keep(kind, &hash) {
+                let logical = rdy_store::codec::logical_kind(kind);
+                if COPIED.contains(&logical) && keep(logical, &hash) {
                     out.push((kind, payload.to_vec()));
                 }
                 Ok(())

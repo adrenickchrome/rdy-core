@@ -142,8 +142,8 @@ fn frames_of(store: &Path, needle: &str) -> Frames {
                         RedactionResidue::Block(BlockResidue::of(&b)),
                     ));
                 }
-                if kind == kinds::CHANGE
-                    && let Ok(c) = rdy_store::bounded::decode::<Change>(payload)
+                if rdy_store::codec::logical_kind(kind) == kinds::CHANGE
+                    && let Ok(c) = rdy_store::codec::decode_bounded::<Change>(kind, payload)
                     && c.ops.iter().any(|op| match op {
                         Op::Create { block } | Op::Update { block, .. } => {
                             block.body.contains(needle)

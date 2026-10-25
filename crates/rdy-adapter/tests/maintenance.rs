@@ -72,7 +72,7 @@ fn objects(src: &Rdy) -> Vec<(u8, Vec<u8>)> {
     let mut out = vec![];
     src.store()
         .for_each_frame_from(ORIGIN, src.store().log_end(), |_, kind, _, payload, _| {
-            if COPIED.contains(&kind) {
+            if COPIED.contains(&rdy_store::codec::logical_kind(kind)) {
                 out.push((kind, payload.to_vec()));
             }
             Ok(())

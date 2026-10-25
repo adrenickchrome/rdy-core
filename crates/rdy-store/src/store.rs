@@ -3137,6 +3137,12 @@ impl Store {
     ) -> Result<(Frames, usize), StoreError> {
         // a read projection is never serialized as an original object
         self.refuse_projection(change)?;
+        // a stored read is checked against its bytes before this edit of its deps, then becomes
+        // a new change: the commit writes it in the latest encoding
+        if change.stored_identity().is_some() {
+            crate::codec::encode(kinds::CHANGE, &*change)?;
+            change.read_identity = None;
+        }
         change.deps = self.change_deps_resolving(change, view, conflicts)?;
         let mut items = vec![];
         for op in &change.ops {

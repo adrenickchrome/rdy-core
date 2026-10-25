@@ -22,7 +22,7 @@ use crate::views::{Action, commit_claim};
 use crate::write::check_view_access;
 use crate::{Delta, Rdy, ReadState, Session};
 use rdy_model::redaction::{ReasonClass, RedactionWarning, carrier};
-use rdy_model::{Change, Hash, Redaction, hash_of};
+use rdy_model::{Change, Hash, Redaction};
 use rdy_store::StoreError;
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
@@ -275,7 +275,7 @@ fn record(
     let provenance = session.provenance();
     let carrier = carrier(view.to_string(), vec![], provenance.clone());
     let request = Redaction {
-        carrier: hash_of(&carrier),
+        carrier: carrier.id(),
         actor: provenance,
         targets: parts.request_targets,
         reason_class: result.reason_class,
