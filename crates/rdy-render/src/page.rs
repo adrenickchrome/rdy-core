@@ -433,7 +433,16 @@ impl DiagramAssets {
         if let Some(d) = self.drawn.get(source) {
             return d.clone();
         }
-        let drawn = match diagram::render(source) {
+        // tests can give a source a drawing of their own (one near the SVG bound)
+        #[cfg(test)]
+        let given = tests::DRAWN.with_borrow(|d| d.get(source).cloned());
+        #[cfg(not(test))]
+        let given: Option<String> = None;
+        let rendered = match given {
+            Some(svg) => diagram::Diagram::Svg(svg),
+            None => diagram::render(source),
+        };
+        let drawn = match rendered {
             diagram::Diagram::Svg(svg) => match diagram_svg::standalone(&svg) {
                 Ok(file) => {
                     let h = Hash::of(file.as_bytes());
@@ -456,6 +465,13 @@ impl DiagramAssets {
         tests::INLINES.set(tests::INLINES.get() + 1);
         let file = self.standalone.get(h).ok_or(diagram_svg::BAD_IDS)?;
         diagram_svg::inline(file, &h.to_string(), place)
+    }
+
+    /// Whether drawing `h` has an inline copy for its `place` on a page, as [`Self::inline`]
+    /// reads it, without building the copy (the print's question).
+    fn admits(&self, h: &Hash, place: usize) -> Result<(), &'static str> {
+        let file = self.standalone.get(h).ok_or(diagram_svg::BAD_IDS)?;
+        diagram_svg::inline_admits(file, &h.to_string(), place)
     }
 
     /// Records the warning of block `id` of the doc titled `doc`, which draws `why`: once per
@@ -513,16 +529,24 @@ impl Shared<'_> {
         }
         let mut d = self.diagrams.borrow_mut();
         let failed = match d.draw(source) {
-            // the print shows a drawn diagram as its source: the drawing and its file classify
-            // it (ruling task-6), and no inline copy is made
-            Ok(_) if !self.draw_diagrams => return DiagramShape::Drawable,
             Ok(h) => {
                 let mut places = places.borrow_mut();
                 let place = places.entry(h).or_default();
-                match d.inline(&h, *place) {
+                // the print shows a drawn diagram as its source: the drawing, its file and its
+                // place's inline copy classify it as on the site (ruling task-6), and the copy
+                // is counted, not made
+                let shown = if self.draw_diagrams {
+                    d.inline(&h, *place).map(Some)
+                } else {
+                    d.admits(&h, *place).map(|()| None)
+                };
+                match shown {
                     Ok(svg) => {
                         *place += 1;
-                        return DiagramShape::Drawn { hash: h, svg };
+                        return match svg {
+                            Some(svg) => DiagramShape::Drawn { hash: h, svg },
+                            None => DiagramShape::Drawable,
+                        };
                     }
                     Err(reason) => diagram::Diagram::Failed {
                         reason: reason.to_string(),
@@ -1675,6 +1699,9 @@ mod tests {
         pub(super) static COPIES: Cell<u64> = const { Cell::new(0) };
         /// The inline drawings this thread built.
         pub(super) static INLINES: Cell<u64> = const { Cell::new(0) };
+        /// The SVG a source draws, in place of the pinned crate's drawing.
+        pub(super) static DRAWN: std::cell::RefCell<std::collections::HashMap<String, String>> =
+            Default::default();
     }
 
     /// Final review M3: a print reads no Copy payload and no page's inline drawing, so it
@@ -1719,5 +1746,124 @@ mod tests {
         crate::build_site(&st, &Scope::Canon, crate::Mode::Static).expect("site");
         let (copies, inlines) = counts();
         assert_eq!((copies - before.0, inlines - before.1), (2, 2));
+    }
+
+    /// Final review (fix round 2): the print and the site give a diagram the same shape at the
+    /// inline bound (ruling task-6). The drawing's inline copy is exactly 4,194,304 bytes at
+    /// places 0 to 9 and over at place 10, so the site draws ten places and shows the eleventh
+    /// as its code block; the print shows ten as their source alone and the eleventh as the
+    /// site's code block, and builds no inline copy.
+    #[test]
+    fn dgm9_print_and_site_agree_at_the_inline_bound() {
+        use crate::diagram_svg::{MAX_BYTES, inline, standalone};
+        use crate::print::{PBlock, PageKind};
+        const H: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let svg = |fill: usize| {
+            let ids: String = (0..40).map(|k| format!("<g id=\"a{k}\" />")).collect();
+            format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\">{ids}<text>{}</text></svg>",
+                "x".repeat(fill)
+            )
+        };
+        let base = inline(&standalone(&svg(0)).unwrap(), H, 0).unwrap().len();
+        let near = svg(MAX_BYTES - base);
+        let source = "graph TD\n  Near --> Bound";
+        DRAWN.with_borrow_mut(|d| d.insert(source.to_string(), near));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut r = Rdy::init(dir.path(), "rdy-standard").expect("init");
+        let s = |role| Session::human("human:qa".into(), role).unwrap();
+        let mut ops = vec![
+            json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": "d", "title": "Doc", "doc_type": "page"}}),
+        ];
+        for k in 0..11 {
+            ops.push(json!({"op": "create", "type": "diagram", "parent": "$d", "fields": {"lang": "mermaid", "alt": format!("Place {k}")}, "body": source}));
+        }
+        r.write(
+            &s(Role::Writer),
+            WriteRequest {
+                view: "w".into(),
+                ops: serde_json::from_value(json!(ops)).unwrap(),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .expect("write");
+        let p = r
+            .propose(&s(Role::Writer), "w", "w", Some("test summary"))
+            .expect("propose");
+        r.land(&s(Role::Approver), &p.id).expect("land");
+        let st = r.read();
+
+        // the site: ten drawn places, then the eleventh as its code block
+        let site = crate::build_site(&st, &Scope::Canon, crate::Mode::Static).expect("site");
+        let html = String::from_utf8_lossy(&site.files["d.html"]).into_owned();
+        let shapes: Vec<&str> = html
+            .split("<figure class=\"diagram\"")
+            .skip(1)
+            .map(|f| {
+                if f.contains("class=\"diagram-canvas\"") {
+                    "drawn"
+                } else if f.contains("class=\"code-block\"") {
+                    "code block"
+                } else {
+                    "other"
+                }
+            })
+            .collect();
+        let mut want = vec!["drawn"; 10];
+        want.push("code block");
+        assert_eq!(shapes, want, "the site");
+
+        // the print: the same shapes less the drawing, and no inline copy
+        let before = INLINES.get();
+        let print = crate::print::build(&st, &Scope::Canon).expect("print");
+        assert_eq!(INLINES.get(), before, "the print built no inline copy");
+        let doc = print
+            .docs
+            .iter()
+            .find(|d| d.kind == PageKind::Doc)
+            .expect("the doc");
+        let text =
+            |runs: &[crate::print::Run]| runs.iter().map(|r| r.text.as_str()).collect::<String>();
+        let read: Vec<String> = doc
+            .blocks
+            .iter()
+            .map(|b| match b {
+                PBlock::Para { runs, .. } => format!("para {}", text(runs)),
+                PBlock::Code { lang, text, .. } => {
+                    format!("code {} {}", lang.as_deref().unwrap_or(""), text == source)
+                }
+                _ => "other".to_string(),
+            })
+            .collect();
+        let mut want: Vec<String> = (0..10)
+            .flat_map(|k| [format!("para Place {k}"), "code mermaid true".to_string()])
+            .collect();
+        want.extend([
+            "para Mermaid".to_string(),
+            "code mermaid true".to_string(),
+            "para Place 10".to_string(),
+        ]);
+        assert_eq!(read, want, "the print");
+        // and the site's llms words come in the print's order, less the source's summary line
+        let llms = String::from_utf8_lossy(&site.files["llms-full.txt"]).into_owned();
+        let start = llms.find("\nPlace 0\n").expect("the doc's words") + 1;
+        let end = llms.find("\nPlace 10\n").expect("the last caption") + "\nPlace 10".len();
+        let llms_words: Vec<&str> = llms[start..end]
+            .lines()
+            .filter(|l| !l.is_empty() && *l != "```" && *l != "Diagram source")
+            .collect();
+        let print_words: Vec<&str> = doc
+            .blocks
+            .iter()
+            .flat_map(|b| match b {
+                PBlock::Para { runs, .. } => vec![runs[0].text.as_str()],
+                PBlock::Code { text, .. } => text.lines().collect(),
+                _ => vec!["other"],
+            })
+            .collect();
+        assert_eq!(llms_words, print_words, "the llms words");
+        DRAWN.with_borrow_mut(|d| d.clear());
     }
 }

@@ -126,6 +126,34 @@ pub(crate) fn inline(
     asset_hash: &str,
     occurrence: usize,
 ) -> Result<String, &'static str> {
+    let mut out = Out::default();
+    write_inline(standalone, asset_hash, occurrence, &mut out)?;
+    out.finish()
+}
+
+/// Whether [`inline`] gives a copy for this place, with its reason if not, without building
+/// the copy: the same checks and the same output size, counted and not kept. The print reads
+/// it, so a diagram has the site's shape there (ruling task-6).
+pub(crate) fn inline_admits(
+    standalone: &str,
+    asset_hash: &str,
+    occurrence: usize,
+) -> Result<(), &'static str> {
+    let mut out = Out {
+        count_only: true,
+        ..Out::default()
+    };
+    write_inline(standalone, asset_hash, occurrence, &mut out)?;
+    out.finish().map(drop)
+}
+
+/// The checks and the writing of [`inline`], into `out`.
+fn write_inline(
+    standalone: &str,
+    asset_hash: &str,
+    occurrence: usize,
+    out: &mut Out,
+) -> Result<(), &'static str> {
     if standalone.len() > MAX_BYTES {
         return Err(OVER);
     }
@@ -138,9 +166,7 @@ pub(crate) fn inline(
     }
     let prefix = format!("dgm-{asset_hash}-{occurrence}-");
     let ids = Ids::new(&doc, Some(&prefix))?;
-    let mut out = Out::default();
-    write(&doc, &ids, Mode::Inline, &mut out)?;
-    out.finish()
+    write(&doc, &ids, Mode::Inline, out)
 }
 
 // ---- the XML reader ----
@@ -1248,11 +1274,14 @@ enum Esc {
 }
 
 /// The output, bounded by [`MAX_BYTES`]. Once over, it keeps nothing more, so a later
-/// element id fault still wins.
+/// element id fault still wins. With `count_only` it counts the bytes and keeps none.
 #[derive(Default)]
 struct Out {
     s: String,
+    /// The bytes written so far: the length of `s`, unless `count_only`.
+    len: usize,
     over: bool,
+    count_only: bool,
 }
 
 impl Out {
@@ -1272,8 +1301,12 @@ impl Out {
                 })
                 .sum(),
         };
-        if self.over || self.s.len() + len > MAX_BYTES {
+        if self.over || self.len + len > MAX_BYTES {
             self.over = true;
+            return;
+        }
+        self.len += len;
+        if self.count_only {
             return;
         }
         match esc {
@@ -1292,6 +1325,11 @@ impl Out {
                 }
             }
         }
+        debug_assert_eq!(
+            self.s.len(),
+            self.len,
+            "the counted length is the written one"
+        );
     }
 
     fn finish(self) -> Result<String, Fault> {
@@ -2346,6 +2384,7 @@ mod tests {
             let got = standalone(svg).map(|_| ());
             assert_eq!(got, want, "standalone {svg:.200}");
             assert_eq!(inline(svg, H, 0).map(|_| ()), want, "inline {svg:.200}");
+            assert_eq!(inline_admits(svg, H, 0), want, "admits {svg:.200}");
         };
 
         // size, at the boundary: an outside comment fills the input and is not written
@@ -2549,5 +2588,27 @@ mod tests {
             );
         }
         assert_eq!(converted, 15 + 11);
+    }
+
+    /// Final review (fix round 2): the print admits a drawing exactly when the site's inline copy
+    /// for the same place fits, with the same reason, and builds no copy. The copy is exactly the
+    /// bound at places 0 to 9; place 10's prefix is one byte longer at each id, so it is over.
+    #[test]
+    fn dgm9_admission_is_the_inline_copy_less_its_bytes() {
+        let svg = |fill: usize| {
+            let ids: String = (0..40).map(|k| format!("<g id=\"a{k}\" />")).collect();
+            doc(&format!("{ids}<text>{}</text>", "x".repeat(fill)))
+        };
+        let base = inline(&standalone(&svg(0)).unwrap(), H, 0).unwrap().len();
+        let asset = standalone(&svg(MAX_BYTES - base)).unwrap();
+        assert!(asset.len() <= MAX_BYTES, "{}", asset.len());
+        for place in [0, 9] {
+            assert_eq!(inline(&asset, H, place).map(|s| s.len()), Ok(MAX_BYTES));
+            assert_eq!(inline_admits(&asset, H, place), Ok(()), "place {place}");
+        }
+        assert_eq!(inline(&asset, H, 10), Err(OVER));
+        assert_eq!(inline_admits(&asset, H, 10), Err(OVER));
+        // an id fault still wins over the size, as inline's does
+        assert_eq!(inline_admits(&asset, "ABC", 10), Err(BAD_IDS));
     }
 }
