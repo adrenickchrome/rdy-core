@@ -365,9 +365,8 @@ fn dgm10_404_links_are_rooted_at_the_project_base() {
         }
         assert!(!html.contains("<base"), "{base}");
         for link in &found {
-            if link.starts_with('#') {
+            if let Some(id) = link.strip_prefix('#') {
                 // a fragment-only link keeps the page it is on
-                let id = &link[1..];
                 assert!(html.contains(&format!(" id=\"{id}\"")), "{base}: {link}");
                 continue;
             }

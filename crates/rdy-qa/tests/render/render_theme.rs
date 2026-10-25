@@ -47,11 +47,16 @@ fn theme1_every_page_has_the_toggle_landmarks_and_no_external_request() {
             "<main class=\"content\" id=\"main\"",
             "<footer class=\"foot\">",
             "<nav class=\"crumbs\" aria-label=\"Breadcrumb\">",
-            "<html lang=\"en\">",
             "<noscript>",
         ] {
             assert!(h.contains(s), "{}: {s}", p.display());
         }
+        // the generated not-found page's html element also carries its marker
+        let html = match h.contains("data-rdy-kind=\"not-found\"") {
+            true => "<html lang=\"en\" data-rdy-kind=\"not-found\">",
+            false => "<html lang=\"en\">",
+        };
+        assert!(h.contains(html), "{}: {html}", p.display());
         assert!(
             !h.contains("http://") && !h.contains("https://") && !h.contains("//fonts."),
             "{}",
