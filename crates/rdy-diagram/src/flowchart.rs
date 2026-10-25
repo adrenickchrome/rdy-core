@@ -34,12 +34,14 @@ const FAIL: u32 = u32::MAX - 1;
 
 /// The deepest subgraph nesting the pinned flowchart grammar attempts in `src`, the diagram's
 /// source with any BOM removed and CRLF as LF.
+#[cfg(test)]
 pub(crate) fn depth(src: &str) -> usize {
     read(src).depth
 }
 
 /// The bound, and whether it is exact: the grammar reads the whole text and every subgraph it
 /// attempts closes. Then the bound is the nesting the grammar parses.
+#[cfg(test)]
 pub(crate) fn walk(src: &str) -> (usize, bool) {
     let r = read(src);
     (r.depth, r.exact)
@@ -50,6 +52,7 @@ pub(crate) struct Reading {
     /// The depth bound.
     pub depth: usize,
     /// Whether the bound is the nesting the grammar parses (see [`walk`]).
+    #[cfg(test)]
     pub exact: bool,
     /// Whether a subgraph the grammar attempts finds no `end`, so its header is read again as
     /// nodes. The pinned parser keeps no memo, so it reads such a body again for each one.
@@ -64,13 +67,14 @@ pub(crate) struct Reading {
 pub(crate) fn read(src: &str) -> Reading {
     let text = preprocess(crate::after_front_matter(src));
     let mut grammar = Grammar::new(&text);
-    let (depth, exact) = match grammar.flowchart() {
+    let (depth, _exact) = match grammar.flowchart() {
         Ok(deepest) => (deepest, !grammar.reread),
         Err(deepest) => (deepest.max(keyword_bound(text.as_bytes())), false),
     };
     Reading {
         depth,
-        exact,
+        #[cfg(test)]
+        exact: _exact,
         unclosed: grammar.reread,
         longest_link: grammar.longest_link,
     }
