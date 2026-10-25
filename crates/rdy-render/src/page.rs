@@ -1,4 +1,5 @@
 //! The context of every page, and the one place that calls every module that fills a part of it.
+use crate::copy::{CopyPayload, CopyRange};
 use crate::html::{self, BlockCtx, DiagramView, Link};
 use crate::inline::{self, Ctx, LocalLink};
 use crate::prepare::{Presentation, ProfilePresentation};
@@ -153,6 +154,26 @@ pub struct Item {
     pub diff_html: Option<String>,
     /// The removed lines a draft shows just before this block.
     pub removed_before: Vec<RemovedLine>,
+    /// What the block's Copy control copies of the page's [`CopyPayload`]: the block, or a
+    /// section's heading and every block under it; none when that is empty (no Copy control).
+    pub copy: Option<CopyRange>,
+}
+
+/// The toolbar of an authored page's title (a doc's or a folder's): its block's Link, Copy ref
+/// and Copy. Link copies the page's URL, Copy the whole page.
+#[derive(Clone, Debug, Serialize)]
+pub struct TitleTools {
+    /// The doc's or folder's block id, which its Copy ref names.
+    pub id: String,
+    /// Empty: Link copies the page's URL, with no fragment.
+    pub anchor: String,
+    pub kind_word: &'static str,
+    pub presentational: bool,
+    pub ref_head: String,
+    #[serde(rename = "ref")]
+    pub ref_: String,
+    /// The whole page: its title, its lede or description and every block.
+    pub copy: Option<CopyRange>,
 }
 
 /// One removed line of a draft: the old text of a block the draft took out, as HTML.
@@ -339,6 +360,11 @@ pub struct PageContext {
     pub live: bool,
     pub items: Vec<Item>,
     pub body: Body,
+    /// The toolbar of an authored doc's or folder's title; none on a generated page.
+    pub title_tools: Option<TitleTools>,
+    /// The page's [`CopyPayload`] as JSON, which the page carries once as escaped text in a
+    /// hidden template; none on a page with no Copy control.
+    pub copy_page: Option<String>,
 }
 
 /// Which page to build.
@@ -894,6 +920,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
     let mut body = Body::default();
     let mut items = vec![];
     let mut pager = Pager::default();
+    let (mut title_tools, mut copy_page) = (None, None);
     match &kind {
         Kind::Home => {
             body.home = Some(home::build(
@@ -943,10 +970,23 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
                 }),
                 children,
             });
+            let lede = body
+                .folder
+                .as_ref()
+                .and_then(|f| f.description_html.as_deref());
+            (title_tools, copy_page) = page_copy(sh, f, &page_url, &title, lede, &mut []);
         }
         Kind::Doc(id) => {
             let doc = sh.m.get(id).expect("a doc exists");
-            let (doc_body, built) = doc_parts(sh, doc, &page_url, &title);
+            let (doc_body, mut built) = doc_parts(sh, doc, &page_url, &title);
+            (title_tools, copy_page) = page_copy(
+                sh,
+                doc,
+                &page_url,
+                &title,
+                doc_body.lede.as_deref(),
+                &mut built,
+            );
             body.doc = Some(doc_body);
             items = built;
             let (prev, next) = site.prev_next(id);
@@ -1024,9 +1064,70 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         live: matches!(sh.mode, Mode::Live { .. }),
         items,
         body,
+        title_tools,
+        copy_page,
         kind: kind_name,
         page_url,
     }
+}
+
+/// The Copy of an authored page (D-BRF4P, D-E8P8J): its [`CopyPayload`], each item's range and
+/// its title's toolbar. The payload is built from what the page shows, before any toolbar or diff
+/// panel goes in: the title (`b`'s label, `title`), the lede or folder description (`lede`, as
+/// HTML spans) and each item's HTML, in page order, each block once. A section's range is its
+/// heading and the items under it, up to the next item no deeper than it.
+fn page_copy(
+    sh: &Shared,
+    b: &Block,
+    page: &str,
+    title: &str,
+    lede: Option<&str>,
+    items: &mut [Item],
+) -> (Option<TitleTools>, Option<String>) {
+    let mut payload = CopyPayload::default();
+    payload.push_html(&format!("<h1>{}</h1>", html::escape(title)), page);
+    if let Some(l) = lede {
+        payload.push_html(&format!("<p>{l}</p>"), page);
+    }
+    // the payload's length before and after each item
+    let mut at = Vec::with_capacity(items.len() + 1);
+    for item in items.iter() {
+        at.push(payload.blocks.len());
+        payload.push_html(&item.html, page);
+    }
+    at.push(payload.blocks.len());
+    // one pass: each section waits on a stack until an item no deeper than it arrives, or the
+    // page ends; its range then ends where that item's starts
+    let mut open: Vec<usize> = vec![];
+    for i in 0..items.len() {
+        while let Some(&s) = open.last() {
+            if items[i].depth > items[s].depth {
+                break;
+            }
+            items[s].copy = CopyRange::of(at[s], at[i]);
+            open.pop();
+        }
+        if items[i].block_type == "section" {
+            open.push(i);
+        } else {
+            items[i].copy = CopyRange::of(at[i], at[i + 1]);
+        }
+    }
+    for s in open {
+        items[s].copy = CopyRange::of(at[s], at[items.len()]);
+    }
+    let (ref_head, ref_) = trail::ref_attrs(b, sh.site, sh.pin(), sh.m);
+    let tools = TitleTools {
+        id: b.id.to_string(),
+        anchor: String::new(),
+        kind_word: "page",
+        presentational: sh.pack.is_presentational(&b.block_type),
+        ref_head,
+        ref_,
+        copy: CopyRange::of(0, payload.blocks.len()),
+    };
+    let json = (!payload.blocks.is_empty()).then(|| payload.json());
+    (Some(tools), json)
 }
 
 /// A permalink page's path, and the label and href of the block it leads to.
@@ -1191,6 +1292,7 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
             change: sh.review.and_then(|r| r.mark(&b.id)),
             diff_html: edited_diff(sh, &b.id),
             removed_before: vec![],
+            copy: None,
         });
     }
     // the removed lines: before the block they stood before, else at the doc's end

@@ -183,17 +183,21 @@ fn tbar1_the_toolbar_holds_only_link_and_copy_ref_and_tab_reaches_it() {
     assert!(bars.len() > 3, "{h}");
     for b in &bars {
         let buttons: Vec<&str> = b.split("<button ").skip(1).collect();
-        assert!(!buttons.is_empty() && buttons.len() <= 2, "{b}");
+        // Link, then Copy ref and Copy where the block has them (D-BRF4P)
+        assert!(!buttons.is_empty() && buttons.len() <= 3, "{b}");
         assert!(
             buttons[0].starts_with("type=\"button\" class=\"tool copy-link\""),
             "{b}"
         );
-        if let Some(second) = buttons.get(1) {
-            assert!(
-                second.starts_with("type=\"button\" class=\"tool copy-ref\""),
-                "{b}"
-            );
+        let mut rest = buttons[1..].iter();
+        let mut next = rest.next();
+        if next.is_some_and(|s| s.starts_with("type=\"button\" class=\"tool copy-ref\"")) {
+            next = rest.next();
         }
+        if next.is_some_and(|s| s.starts_with("type=\"button\" class=\"tool copy-text\"")) {
+            next = rest.next();
+        }
+        assert!(next.is_none(), "{b}");
         for never in ["tabindex", "hidden", "aria-hidden", "disabled"] {
             assert!(!b.contains(never), "{never}: {b}");
         }

@@ -100,14 +100,19 @@ chrome	L	Tutorial
 chrome	L	Pattern matching by example
 content	L	Tutorial
 content	L	Pattern matching by example
+content	-	Link
+content	-	Copy ref
+content	-	Copy
 content	-	We will write the command parser for a small text adventure. The player types things like
 content	-	or
 content	-	; the game splits the line into words and has to decide what to do. Each section adds one feature of pattern matching to the parser.
 content	L	Introduction
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	The tutorial teaches by example. The exact rules are in
 content	-	The match statement and its patterns
 content	-	and the reasons for them in
@@ -116,45 +121,57 @@ content	-	.
 content	L	Matching sequences
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Splitting the input gives a list of words. Instead of checking its length by hand, describe the shape you expect.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	A pattern does two things. It verifies that the subject has a certain structure, here a list of exactly two items, and it binds names in the pattern to parts of the subject, here
 content	-	and
 content	-	.
 content	L	Matching several patterns
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Commands come in different lengths.
 content	-	is one word;
 content	-	is two.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	The match statement checks patterns from top to bottom. If a pattern does not match the subject, the next one is tried.
 content	L	Matching specific values
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Literal values in a pattern filter for particular commands.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Literals are compared with
 content	-	, except for
 content	-	,
@@ -166,15 +183,19 @@ content	-	and the sections around it.
 content	L	Matching the rest
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	A star inside a sequence pattern works like extended unpacking.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	This matches any sequence whose first element is
 content	-	. The remaining elements are gathered into a list bound to
 content	-	. See
@@ -183,42 +204,53 @@ content	-	.
 content	L	Adding a wildcard
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	To handle anything not yet covered, end with the wildcard.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	The wildcard always matches and binds nothing, so it only makes sense on its own as the last case. The language enforces that.
 content	L	Composing patterns
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Edited
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	So far we have used three simple patterns: capture patterns, which are bare names like
 content	-	; literal patterns; and the wildcard
 content	-	. They compose.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Patterns nest.
 content	-	matches a sequence of at least three items whose first item equals
 content	-	and whose second item is itself a sequence of two.
 content	L	Or patterns
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	A vertical bar joins alternatives. The first alternative that matches wins.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Every alternative must bind the same names.
 content	-	is not allowed, because after a successful match it would be unclear which of
 content	-	and
@@ -226,39 +258,50 @@ content	-	had a value.
 content	L	Capturing a sub-pattern
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	The
 content	-	keyword matches whatever is on its left and also binds the matched value to a name.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	L	Adding conditions
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	A guard adds a boolean test after the pattern. It is checked only if the pattern matched, and after all its names have been bound.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	The guard stays out of the pattern, which keeps the pattern declarative.
 content	L	Matching objects
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Suppose the game is now driven by events from a window. A class pattern checks the type of the event and matches its attributes.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	matches only if the event's type is
 content	-	or a subclass, and then matches the nested pattern against its
 content	-	attribute. See
@@ -267,79 +310,99 @@ content	-	.
 content	L	Matching positional attributes
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	A dataclass can be matched positionally, because the dataclass decorator declares the attribute order.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Any class can do the same by declaring
 content	-	__match_args__
 content	-	.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	L	Matching against constants
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	A dotted name in a pattern is looked up rather than bound, which is how to match an enumeration value.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Be careful: a bare name with no dots is always a capture.
 content	-	would bind
 content	-	to whatever the button was.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Note
 content	-	The most common slip in this feature is a bare name where a dotted one was meant. A reader should look twice at any capture that shares its spelling with a constant.
 content	L	Matching mappings
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	If actions arrive from the network as dictionaries, mapping patterns pick them apart by key.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Keys must be literals; values can be any pattern. Extra keys in the subject are ignored, so a pattern with a text key and a color key also matches a dictionary that carries a font key. See
 content	-	Mapping patterns
 content	-	.
 content	L	Matching built-in types
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Any class is a valid match target, including
 content	-	,
 content	-	and
 content	-	. Wrapping a capture in one checks the type of data that came from outside.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Why a single positional argument means "the whole value" for these classes is explained under class patterns in
 content	-	Class patterns
 content	-	.
 content	L	Worked examples
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Example
 content	-	A command line such as
 content	-	matches the case
@@ -348,6 +411,7 @@ content	-	to
 content	-	and runs the block that moves the player. The same line also matches the later wildcard, but the first matching case wins and the wildcard is never reached.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Example
 content	-	The line
 content	-	matches
@@ -356,62 +420,77 @@ content	-	to a list of two items. The line
 content	-	alone binds it to an empty list.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Note
 content	-	The sample output in this tutorial is formatted for reading and carries no meaning of its own.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	The next section holds one very long listing, the parser written out many times over, to show how the page copes with it.
 content	L	Exercises
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Try each of these on the adventure parser.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Example
 content	-	Add a command
 content	-	that matches a three-word command with the word
 content	-	in the middle.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Example
 content	-	Make
 content	-	accept either a direction or a room name, and keep the guard that checks the exits.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Example
 content	-	Write a case that matches any command whose last word is
 content	-	, and gives the rest of the line to the next case.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Example
 content	-	Handle a command that arrives as a dictionary with a verb key and a list of objects.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Note
 content	-	There is no single right answer to any exercise; each has several readable patterns.
 content	L	A long listing
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	L	Terms
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Case block
 content	-	One
 content	-	clause with its pattern, optional guard and indented block.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Binding
 content	-	Giving a name a value as a result of a successful match. Bindings outlive the block.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Soft keyword
 content	-	A word that is a keyword only in a specific grammatical position and an ordinary name elsewhere.
 content	-	and
@@ -421,12 +500,15 @@ content	-	.
 content	L	Quick sketches
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Code
 content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Diagram (source below)
 content	-	open full size
 content	L	Diagram source

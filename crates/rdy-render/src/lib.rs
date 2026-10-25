@@ -1,5 +1,6 @@
 mod assets;
 mod changes;
+pub mod copy;
 mod diagram_svg;
 pub mod disagree;
 mod highlight;

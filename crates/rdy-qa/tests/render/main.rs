@@ -5,6 +5,7 @@ mod render;
 mod render_blob_state;
 mod render_build;
 mod render_changes;
+mod render_copy_text;
 mod render_diagram_environment;
 mod render_diagrams;
 mod render_disagree;

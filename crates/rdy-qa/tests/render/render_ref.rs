@@ -29,6 +29,30 @@ fn ref1_every_block_carries_a_ref_in_the_grammar_and_headings_get_the_button() {
     );
     assert!(h.contains("class=\"tool copy-ref\" aria-label=\"Copy a reference to this block for an agent chat\">Copy ref</button>"));
     assert!(h.contains("class=\"tool copy-ref\" aria-label=\"Copy a reference to this section for an agent chat\">Copy ref</button>"), "sections have the toolbar too");
+    // the third control, Copy (D-BRF4P), after Copy ref on blocks and sections
+    assert!(h.contains("class=\"tool copy-ref\" aria-label=\"Copy a reference to this block for an agent chat\">Copy ref</button><button type=\"button\" class=\"tool copy-text\""), "{h}");
+    assert!(
+        h.contains("aria-label=\"Copy this block as Markdown\">Copy</button>"),
+        "{h}"
+    );
+    assert!(
+        h.contains("aria-label=\"Copy this section as Markdown\">Copy</button>"),
+        "{h}"
+    );
+    // the page title carries its doc's ref and the same toolbar: Link to the page, Copy ref, Copy
+    let doc = ids.doc.to_string();
+    assert_eq!(
+        unescape(attr(&h, &doc, "data-ref-head")),
+        format!("[{doc}] Ledgers")
+    );
+    assert!(unescape(attr(&h, &doc, "data-ref")).starts_with(&format!("[{doc}] Ledgers")));
+    assert!(h.contains("class=\"tool copy-link\" data-href=\"\" aria-label=\"Copy link to this page\">Link</button><button type=\"button\" class=\"tool copy-ref\" aria-label=\"Copy a reference to this page for an agent chat\">Copy ref</button><button type=\"button\" class=\"tool copy-text\""), "{h}");
+    assert_eq!(
+        h.matches("aria-label=\"Copy this page as Markdown\">Copy</button>")
+            .count(),
+        1,
+        "{h}"
+    );
     assert_eq!(h.matches("contextmenu").count(), 0);
     let js = std::fs::read_to_string(out.path().join("assets/app.js")).unwrap();
     // the theme toggle's arrow keys do call it (a keyboard event); the copy script never does

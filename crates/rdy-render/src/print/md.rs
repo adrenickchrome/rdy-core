@@ -333,7 +333,7 @@ fn heading_md(level: usize, text: Md) -> Md {
 }
 
 /// A link target as Markdown reads it inside `(…)`.
-fn url(raw: &str) -> String {
+pub(crate) fn url(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     for c in raw.chars() {
         match c {
