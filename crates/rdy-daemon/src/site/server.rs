@@ -606,11 +606,14 @@ async fn not_found(sh: Arc<Shared>, miss: Miss) -> Response {
 }
 
 /// The not-found answer of `miss`, from the state published now: status 404 and the themed
-/// page, which has no live script, stream or revision and joins no cache. The redaction epoch
-/// is checked before the build and again before the bytes go out, so a page of a state a
-/// removal made old is never sent: the existing `Busy` stands. A page whose layout cannot be
-/// built (a build error or a panic) is the plain not found, never another status. The versions
-/// menu, which has no page of its own to miss, gets canon's.
+/// page, which has no live script, stream or revision. The page is the one the target's live
+/// build made with its pages (ruling final, I1): the build the site keeps for the target as of
+/// the latest publish, built first when it has none, so a miss on a kept build reads no source.
+/// The redaction epoch is checked before the build is looked up and again before the bytes go
+/// out, and the build must be of the store's epoch now, so a page of a state a removal made old
+/// is never sent: the existing `Busy` stands. A target that does not build, or a page whose
+/// layout could not be built (a build error or a panic), is the plain not found, never another
+/// status. The versions menu, which has no page of its own to miss, gets canon's.
 fn not_found_now(sh: &Shared, miss: Miss) -> Response {
     let (target, kind) = match miss {
         Miss::Plain => return refusal(Refusal::NotFound),
@@ -620,25 +623,35 @@ fn not_found_now(sh: &Shared, miss: Miss) -> Response {
         }
         Miss::Page(target) => (target, NotFoundKind::Page),
     };
-    let st = sh.state.load_full();
-    if st.ensure_current_epoch().is_err() {
+    if sh.state.load().ensure_current_epoch().is_err() {
         return refusal(Refusal::Busy);
     }
-    let built = catch_unwind(AssertUnwindSafe(|| {
-        rdy_render::live::build_not_found(&st, &target, kind)
-    }));
-    // a removal while it built: the page of the old state is not sent
-    if st.ensure_current_epoch().is_err() {
+    let built = catch_unwind(AssertUnwindSafe(|| sh.site.refresh(sh, &target)));
+    let page = match built {
+        Ok(Ok(build)) => build
+            .live
+            .not_found
+            .get(kind)
+            .map(|html| (build.live.epoch, html.to_vec())),
+        Ok(Err(e)) if e.code == E_REDACTED_STATE => return refusal(Refusal::Busy),
+        Ok(Err(_)) | Err(_) => None,
+    };
+    // a removal since the build: the page of the old state is not sent
+    let st = sh.state.load();
+    if st.ensure_current_epoch().is_err()
+        || page
+            .as_ref()
+            .is_some_and(|(epoch, _)| *epoch != st.redaction_epoch())
+    {
         return refusal(Refusal::Busy);
     }
-    match built {
-        Ok(Ok(page)) => Response {
+    match page {
+        Some((_, html)) => Response {
             status: 404,
             headers: vec![("Content-Type", content_type("404.html").to_string())],
-            body: page.html,
+            body: html,
         },
-        Ok(Err(e)) if e.code == E_REDACTED_STATE => refusal(Refusal::Busy),
-        Ok(Err(_)) | Err(_) => refusal(Refusal::NotFound),
+        None => refusal(Refusal::NotFound),
     }
 }
 
@@ -671,5 +684,137 @@ async fn send(mut stream: TcpStream, r: &Response, head_only: bool) {
     .await;
     if matches!(sent, Ok(Ok(()))) {
         drain_now(&stream);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rdy_engine::{Rdy, Session, WriteRequest};
+    use rdy_model::Role;
+    use rdy_render::live::preparations_for_tests;
+    use serde_json::{Value, json};
+    use std::collections::BTreeMap;
+
+    fn writer() -> Session {
+        Session::human("human:qa".into(), Role::Writer).unwrap()
+    }
+
+    fn put(r: &mut Rdy, view: &str, ops: Value) -> BTreeMap<String, String> {
+        r.write(
+            &writer(),
+            WriteRequest {
+                view: view.into(),
+                ops: rdy_engine::parse_ops(ops.as_array().unwrap().clone()).unwrap(),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .unwrap_or_else(|e| panic!("write to {view}: {e}"))
+        .created
+        .iter()
+        .map(|(k, v)| (k.clone(), v.to_string()))
+        .collect()
+    }
+
+    fn land(r: &mut Rdy, view: &str) {
+        let p = r
+            .propose(&writer(), view, view, Some("test summary"))
+            .unwrap();
+        let approver = Session::human("human:qa".into(), Role::Approver).unwrap();
+        r.land(&approver, &p.id).unwrap();
+    }
+
+    /// Canon holds the doc `intro` and the org profile `guide`, which selects it; view `work`
+    /// edits the doc.
+    fn world() -> (tempfile::TempDir, Arc<Shared>) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let ids = put(
+            &mut r,
+            "w1",
+            json!([
+                {"op": "create", "type": "doc", "id": "$intro", "fields": {"name": "intro", "title": "Intro page", "doc_type": "page"}},
+                {"op": "create", "type": "prose", "id": "$ip", "parent": "$intro", "body": "INTRO-ONE"},
+                {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin page", "doc_type": "page"}}
+            ]),
+        );
+        land(&mut r, "w1");
+        put(
+            &mut r,
+            "admin",
+            json!([{"op": "create", "type": "publication_profile", "parent": ids["$admin"],
+                "fields": {"key": "guide", "title": "Guide book", "description": "About it.",
+                    "audience": "org", "select": [ids["$intro"]]}}]),
+        );
+        land(&mut r, "admin");
+        put(
+            &mut r,
+            "work",
+            json!([{"op": "update", "id": ids["$ip"], "body": "INTRO-VIEW"}]),
+        );
+        (dir, Shared::new(r))
+    }
+
+    /// Final review I1 (ruling final): a target's not-found page is built once, with its pages,
+    /// in the live build the site already keeps for it. A miss on a target whose build is kept
+    /// runs no preparation: no source or profile preparation, no setup and no history.
+    #[test]
+    fn dgm11_a_second_miss_on_one_entry_runs_no_preparation() {
+        let (_dir, sh) = world();
+        let canon = SiteTarget::Source(ScopeRef::Canon);
+        let targets = [
+            canon.clone(),
+            SiteTarget::Source(ScopeRef::View("work".into())),
+            SiteTarget::Profile {
+                scope: ScopeRef::Canon,
+                key: "guide".into(),
+            },
+            SiteTarget::Profile {
+                scope: ScopeRef::View("work".into()),
+                key: "guide".into(),
+            },
+            SiteTarget::ProfileOnly {
+                key: "guide".into(),
+            },
+        ];
+        let miss = |m: Miss| {
+            let before = preparations_for_tests();
+            let r = not_found_now(&sh, m);
+            (r, preparations_for_tests() - before)
+        };
+        for target in &targets {
+            let (first, _) = miss(Miss::Page(target.clone()));
+            assert_eq!(first.status, 404, "{target:?}");
+            assert!(
+                String::from_utf8_lossy(&first.body).contains("data-rdy-kind=\"not-found\""),
+                "{target:?}: the themed page"
+            );
+            for _ in 0..3 {
+                let (again, prepared) = miss(Miss::Page(target.clone()));
+                assert_eq!(
+                    prepared, 0,
+                    "{target:?}: a miss on a kept build prepares nothing"
+                );
+                assert_eq!(
+                    (again.status, &again.body),
+                    (404, &first.body),
+                    "{target:?}"
+                );
+            }
+        }
+        // canon's Scope variant comes from canon's kept build too
+        let (scope, prepared) = miss(Miss::Scope);
+        assert_eq!(prepared, 0, "the Scope variant prepares nothing");
+        assert_eq!(scope.status, 404);
+        assert!(String::from_utf8_lossy(&scope.body).contains("is not on the site now"));
+        // a page view builds the target once; its misses then prepare nothing
+        let tag_less = SiteTarget::Source(ScopeRef::View("admin".into()));
+        let before = preparations_for_tests();
+        sh.site.refresh(&sh, &tag_less).unwrap();
+        assert_eq!(preparations_for_tests() - before, 1, "the page's build");
+        let (r, prepared) = miss(Miss::Page(tag_less));
+        assert_eq!((r.status, prepared), (404, 0));
+        sh.shutdown().unwrap();
     }
 }

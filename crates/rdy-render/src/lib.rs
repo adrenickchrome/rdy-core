@@ -776,13 +776,16 @@ fn scope_warnings(
 /// A static build also writes the site's not-found page, rooted at the project's
 /// `site.base_path` (D-94BT2, D-E8P8J).
 pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFiles, RdyError> {
-    let not_found_base = matches!(mode, Mode::Static).then(|| rdy.site_base_path());
+    let not_found = match mode {
+        Mode::Static => NotFoundOut::File(rdy.site_base_path()),
+        Mode::Live { .. } => NotFoundOut::None,
+    };
     build_site_from(
         prepare::source(rdy, scope, prepare::Purpose::Site)?,
         mode,
         Slots::Source,
         None,
-        not_found_base,
+        not_found,
     )
     .map(|b| b.site)
 }
@@ -804,7 +807,7 @@ pub fn build_profile_site(
         Mode::Static,
         Slots::Source,
         None,
-        Some(read.site_base_path()),
+        NotFoundOut::File(read.site_base_path()),
     )
     .map(|b| b.site)
 }
@@ -850,7 +853,7 @@ pub fn build_publication(
         Mode::Static,
         Slots::Notices,
         Some(&budget),
-        None,
+        NotFoundOut::None,
     )?)
 }
 
@@ -931,6 +934,7 @@ fn artifact(built: BuiltSite) -> Result<PublicationArtifact, RdyError> {
         site,
         notices,
         media,
+        not_found: _,
     } = built;
     let manifest = manifest_of(&site.files, &notices, &media)?;
     let manifest_hash = manifest_hash(&manifest, MANIFEST_RECIPE)?;
@@ -970,6 +974,57 @@ struct BuiltSite {
     site: SiteFiles,
     notices: BTreeMap<String, u64>,
     media: BTreeMap<String, String>,
+    /// A live build's not-found pages; none for any other build.
+    not_found: NotFoundPages,
+}
+
+/// Which not-found pages a build makes, from the same setup and selected state as its files.
+#[derive(Clone, Copy)]
+enum NotFoundOut<'a> {
+    /// None: a publication build has no generated not-found page.
+    None,
+    /// A local static build: the Page variant at `404.html`, rooted at the base path.
+    File(&'a str),
+    /// A live build: the Page variant, and canon's Scope variant when `scope`, every link rooted
+    /// at the target's root, kept beside the files and never one of them.
+    Live { root: &'a str, scope: bool },
+}
+
+/// A live build's own not-found pages (D-94BT2, D-E8P8J), built once with its pages and kept
+/// with them, so a miss reads no source: the Page variant of the target, and on canon's source
+/// also the Scope variant. A page that cannot be built (a build error or a panic) is none, and
+/// the server then gives the plain answer; the build's pages still serve.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NotFoundPages {
+    pub page: Option<Vec<u8>>,
+    pub scope: Option<Vec<u8>>,
+}
+
+impl NotFoundPages {
+    /// The bytes of the variant `kind`, if the build has it.
+    pub fn get(&self, kind: NotFoundKind) -> Option<&[u8]> {
+        match kind {
+            NotFoundKind::Page => self.page.as_deref(),
+            NotFoundKind::Scope => self.scope.as_deref(),
+        }
+    }
+}
+
+/// The not-found page of `kind` for a live build, or none when it cannot be built: an error or
+/// a panic never fails the build of the target's pages.
+fn live_not_found(
+    sh: &page::Shared<'_>,
+    env: &minijinja::Environment<'static>,
+    root: &str,
+    kind: NotFoundKind,
+) -> Option<Vec<u8>> {
+    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        not_found::build(sh, env, root, kind)
+    }));
+    match built {
+        Ok(Ok(page)) => Some(page.html),
+        Ok(Err(_)) | Err(_) => None,
+    }
 }
 
 /// The manifest's limits (`publication_manifest`), as a publication build keeps them while it
@@ -1568,30 +1623,40 @@ struct Staged {
 }
 
 /// [`build_site`] from what [`prepare::source`] read: it reads no source. A publication build
-/// passes the manifest's limits as `budget`, kept while it builds. A local static build passes
-/// its base path as `not_found_base`: once the normal files are staged, the site's not-found
-/// page is added at `404.html` from the same selected state, unless an authored top-level doc
-/// has that page, which the build's last warning then says. Live and publication builds pass
-/// none.
+/// passes the manifest's limits as `budget`, kept while it builds. Once the normal files are
+/// staged, `not_found` says which not-found pages the same selected state also gives: a local
+/// static build adds the site's not-found page at `404.html`, unless an authored top-level doc
+/// has that page, which the build's last warning then says; a live build keeps its not-found
+/// pages beside its files (an authored `404.html` is the doc's page there, and a miss is still
+/// the generated page); a publication build has none.
 fn build_site_from(
     prepared: prepare::Prepared,
     mode: Mode,
     slots: Slots,
     budget: Option<&Budget>,
-    not_found_base: Option<&str>,
+    not_found: NotFoundOut,
 ) -> Result<BuiltSite, RdyError> {
-    let (staged, mut blobs) = with_shared(prepared, mode, |sh, env, extras| {
+    let ((staged, missing), mut blobs) = with_shared(prepared, mode, |sh, env, extras| {
         let mut staged = stage_site(sh, env, extras, slots, budget)?;
-        if let Some(base) = not_found_base {
-            if sh.site.page_taken(not_found::PAGE) {
+        let mut missing = NotFoundPages::default();
+        match not_found {
+            NotFoundOut::None => {}
+            NotFoundOut::File(_) if sh.site.page_taken(not_found::PAGE) => {
                 staged.summary.warnings.push(not_found::KEPT.into());
-            } else {
+            }
+            NotFoundOut::File(base) => {
                 // the theme files it loads are the site's own, already staged
                 let page = not_found::build(sh, env, base, NotFoundKind::Page)?;
                 put_file(&mut staged.files, budget, not_found::PAGE.into(), page.html)?;
             }
+            NotFoundOut::Live { root, scope } => {
+                missing.page = live_not_found(sh, env, root, NotFoundKind::Page);
+                if scope {
+                    missing.scope = live_not_found(sh, env, root, NotFoundKind::Scope);
+                }
+            }
         }
-        Ok(staged)
+        Ok((staged, missing))
     })?;
     let Staged {
         mut files,
@@ -1614,22 +1679,8 @@ fn build_site_from(
         },
         notices,
         media,
+        not_found: missing,
     })
-}
-
-/// The not-found page of `kind` for what [`prepare::source`] or a profile's preparation read,
-/// built in `mode` with the same setup, environment and selected state as a build of its site,
-/// every link rooted at `base`. It writes no other file and reads no source.
-pub(crate) fn build_not_found_from(
-    prepared: prepare::Prepared,
-    mode: Mode,
-    base: &str,
-    kind: NotFoundKind,
-) -> Result<NotFoundPage, RdyError> {
-    with_shared(prepared, mode, |sh, env, _| {
-        not_found::build(sh, env, base, kind)
-    })
-    .map(|(page, _)| page)
 }
 
 /// The media type each used figure file's first block named, by path.
@@ -2459,7 +2510,13 @@ mod limit_tests {
     fn build(r: &rdy_engine::Rdy, budget: Option<&Budget>) -> Result<BuiltSite, RdyError> {
         let read = r.read();
         let prepared = prepare::source(&read, &Scope::View("work".into()), prepare::Purpose::Site)?;
-        build_site_from(prepared, Mode::Static, Slots::Notices, budget, None)
+        build_site_from(
+            prepared,
+            Mode::Static,
+            Slots::Notices,
+            budget,
+            NotFoundOut::None,
+        )
     }
 
     /// The number of HTML pages of `b` that are not permalinks, and their bytes.

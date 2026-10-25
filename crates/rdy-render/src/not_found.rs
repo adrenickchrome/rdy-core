@@ -161,11 +161,15 @@ pub(crate) fn build(
         },
     )?;
     // the page writes no version label and no header: nothing on it is filled in later. Only
-    // the template writes a slot, never the site's text, so a slot here is a template bug.
-    debug_assert!(
-        slots.is_empty(),
-        "the not-found page wrote a label or header slot"
-    );
+    // the template writes a slot, never the site's text, so a slot here is a template bug, and
+    // an error in every build: the page would show an unfilled or stale label
+    if !slots.is_empty() {
+        return Err(RdyError::new(
+            rdy_engine::E_IO,
+            "template error: the not-found page wrote a label or header slot",
+            "this is a bug in rdy-render templates",
+        ));
+    }
     Ok(NotFoundPage {
         html,
         assets: assets::files()
@@ -218,6 +222,44 @@ mod tests {
             .map(|(p, b)| (p.to_string(), b))
             .collect();
         assert_eq!(page.assets, want);
+    }
+
+    /// Final review M1: a label or header slot on the not-found page is an error in every
+    /// build, not a debug check. A live build then keeps no page, and the server gives the
+    /// plain answer.
+    #[test]
+    fn dgm10_a_slot_on_the_not_found_page_is_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        rdy_engine::testkit::generate_tree(dir.path(), 1, 2, 1);
+        let r = rdy_engine::Rdy::open(dir.path()).expect("open");
+        let read = r.read();
+        let prepared = crate::prepare::source(
+            &read,
+            &rdy_engine::Scope::Canon,
+            crate::prepare::Purpose::Site,
+        )
+        .expect("prepare");
+        crate::with_shared(prepared, crate::Mode::Static, |sh, env, _| {
+            // the shipped template writes no slot
+            assert!(build(sh, env, "/", NotFoundKind::Page).is_ok());
+            let mut env = env.clone();
+            env.add_template("not_found.html", "<p>{{ version.text | label }}</p>")
+                .expect("template");
+            let e = build(sh, &env, "/", NotFoundKind::Page).expect_err("a slot");
+            assert_eq!(
+                (e.code, e.message.as_str(), e.fix.as_str()),
+                (
+                    rdy_engine::E_IO,
+                    "template error: the not-found page wrote a label or header slot",
+                    "this is a bug in rdy-render templates"
+                )
+            );
+            for kind in [NotFoundKind::Page, NotFoundKind::Scope] {
+                assert_eq!(crate::live_not_found(sh, &env, "/", kind), None);
+            }
+            Ok(())
+        })
+        .expect("built");
     }
 
     #[test]

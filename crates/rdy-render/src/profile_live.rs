@@ -16,8 +16,8 @@ use crate::prepare::{self, FigureBlobs, History, Presentation};
 use crate::render_input::capture_inputs;
 use crate::site::Site;
 use crate::{
-    Budget, Mode, NotFoundKind, NotFoundPage, Slots, build_not_found_from, build_site_from, inline,
-    publication, review, scope_warnings, version,
+    Budget, Mode, NotFoundOut, Slots, build_site_from, inline, publication, review, scope_warnings,
+    version,
 };
 use rdy_engine::diff::diff_states;
 use rdy_engine::publication::{
@@ -68,34 +68,22 @@ pub(crate) fn build_within(
 ) -> Result<ProfileBuild, RdyError> {
     let (prepared, profile, changes) = prepare_within(st, target, history, budget)?;
     let root = target.root();
+    // the target's not-found page, from the same selected state, kept with its pages
     let built = build_site_from(
         prepared,
         Mode::Live { root: &root },
         Slots::Source,
         Some(budget),
-        None,
+        NotFoundOut::Live {
+            root: &root,
+            scope: false,
+        },
     )?;
     Ok(ProfileBuild {
-        live: live::of_site(built.site, st.redaction_epoch()),
+        live: live::of_site(built.site, built.not_found, st.redaction_epoch()),
         profile,
         changes,
     })
-}
-
-/// The not-found page of `kind` for a profile target (`Profile` or `ProfileOnly`), rooted at
-/// the target's root: the same selected preparation as its build, within `budget`, with a
-/// history memo of its own (the page shows no chip). Any other target is the invalid-target
-/// error; a profile its scope does not hold is the existing error.
-pub(crate) fn not_found_within(
-    st: &ReadState,
-    target: &SiteTarget,
-    kind: NotFoundKind,
-    budget: &Budget,
-) -> Result<NotFoundPage, RdyError> {
-    let mut history = ProfileHistoryMemo::default();
-    let (prepared, _, _) = prepare_within(st, target, &mut history, budget)?;
-    let root = target.root();
-    build_not_found_from(prepared, Mode::Live { root: &root }, &root, kind)
 }
 
 /// What a build of a profile target reads, as [`build_within`] builds from it: the selected
@@ -108,6 +96,7 @@ fn prepare_within(
     budget: &Budget,
 ) -> Result<(prepare::Prepared, ResolvedProfile, Option<&'static str>), RdyError> {
     target.validate()?;
+    prepare::counted();
     let (route, scope_ref, key) = match target {
         SiteTarget::Profile { scope, key } => (true, scope.clone(), key.as_str()),
         SiteTarget::ProfileOnly { key } => (false, ScopeRef::Canon, key.as_str()),
