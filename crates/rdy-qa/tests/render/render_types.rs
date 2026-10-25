@@ -123,7 +123,12 @@ fn type1_anchors_are_unique_non_empty_and_never_ids() {
         .unwrap()
         .map(|e| e.unwrap().path())
         .find(|p| {
-            p.extension().is_some_and(|x| x == "html") && p.file_name().unwrap() != "index.html"
+            // the doc's page: not the home page or the generated not-found page
+            p.extension().is_some_and(|x| x == "html")
+                && p.file_name().unwrap() != "index.html"
+                && !std::fs::read_to_string(p)
+                    .unwrap()
+                    .contains("data-rdy-kind=\"not-found\"")
         })
         .unwrap();
     let h = std::fs::read_to_string(page).unwrap();

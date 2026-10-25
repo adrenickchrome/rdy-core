@@ -177,6 +177,7 @@ pub use pack_load::{
     FileStamp, PackFingerprint, ReloadOutcome, pack_fingerprint, pack_source_reads,
     pack_source_reads_on_this_thread, project_pack, resolve_pack,
 };
+pub use rdy_store::BlobState;
 pub use rdy_store::OpenReport;
 pub use rdy_store::fsutil::{sync_dir, write_durable};
 /// The notice channel of the library crates: stderr, unless a test captures the notice it

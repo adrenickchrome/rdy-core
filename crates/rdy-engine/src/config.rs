@@ -27,6 +27,9 @@ pub(crate) struct Config {
     pub(crate) decisions: Option<DecisionsConfig>,
     #[serde(default, skip_serializing_if = "ServeSection::is_empty")]
     pub(crate) serve: ServeSection,
+    /// The static site's settings (D-94BT2): a project setting, read by a full publish.
+    #[serde(default, skip_serializing_if = "SiteConfig::is_default")]
+    pub(crate) site: SiteConfig,
     /// The coverage the corpus aims at (FW-CO4a).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) coverage: Option<CoverageConfig>,
@@ -101,6 +104,29 @@ pub const DEFAULT_COVERAGE_TARGET: u32 = 80;
 
 fn default_coverage_target() -> u32 {
     DEFAULT_COVERAGE_TARGET
+}
+
+/// The `site:` section of `.rdy.yaml`. `config_levels` checks the form of `base_path` and sets
+/// `/` for a value outside it, so a section built from the effective settings holds a valid path.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct SiteConfig {
+    /// The path every link and asset of the static site starts at (`site.base_path`).
+    pub(crate) base_path: String,
+}
+
+impl Default for SiteConfig {
+    fn default() -> Self {
+        SiteConfig {
+            base_path: "/".to_string(),
+        }
+    }
+}
+
+impl SiteConfig {
+    fn is_default(&self) -> bool {
+        self.base_path == "/"
+    }
 }
 
 /// The `serve:` section of `.rdy.yaml`, in seconds.

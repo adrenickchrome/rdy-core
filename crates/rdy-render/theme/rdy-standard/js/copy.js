@@ -1,4 +1,4 @@
-// Copy link, Copy ref and Cite: the toolbar of a block, and the tap that shows it on a touch screen. No context menu is touched.
+// Copy link, Copy ref, Copy and Cite: the toolbar of a block, and the tap that shows it on a touch screen. No context menu is touched.
 (function () {
   "use strict";
   var COPIED_MS = 1500;
@@ -53,6 +53,11 @@
     return next && next.hasAttribute("data-rdy-block") ? next : null;
   }
 
+  function inEyebrow(node) {
+    var el = elementOf(node);
+    return !!(el && el.closest(".eyebrow"));
+  }
+
   function toolbarOf(block) {
     var inside = block.querySelector(".tools");
     if (inside) return inside;
@@ -69,6 +74,52 @@
     return flat.slice(0, cut).replace(/\s+$/, "") + "…";
   }
 
+  // Copy: the Markdown of a range of the page's payload, the one template the page carries. The
+  // template's parsed text is in its content; each link slot is resolved against the page's own
+  // address and written as the export writes a link target. Null when the range or a slot does
+  // not hold: nothing is copied, and nothing is ever requested.
+  var ESCAPED = { " ": "%20", "(": "%28", ")": "%29", "<": "%3C", ">": "%3E" };
+
+  function linkTarget(url) {
+    return url
+      .replace(/[\r\n\t]/g, "")
+      .replace(/[ ()<>]/g, function (c) { return ESCAPED[c]; })
+      .replace(/&(?=#?[A-Za-z0-9]+;)/g, "&amp;");
+  }
+
+  function index(btn, name) {
+    var v = btn.getAttribute(name);
+    return v !== null && /^(0|[1-9][0-9]{0,8})$/.test(v) ? Number(v) : -1;
+  }
+
+  function markdownOf(btn) {
+    try {
+      var tpl = document.querySelector("template[data-copy-page]");
+      if (!tpl || !tpl.content) return null;
+      var blocks = JSON.parse(tpl.content.textContent).blocks;
+      var start = index(btn, "data-copy-start");
+      var end = index(btn, "data-copy-end");
+      if (!Array.isArray(blocks) || start < 0 || end <= start || end > blocks.length) return null;
+      var out = [];
+      for (var i = start; i < end; i++) {
+        var parts = blocks[i];
+        if (!Array.isArray(parts)) return null;
+        var md = "";
+        for (var j = 0; j < parts.length; j++) {
+          var p = parts[j];
+          if (!p || typeof p.value !== "string") return null;
+          if (p.kind === "text") md += p.value;
+          else if (p.kind === "url") md += linkTarget(new URL(p.value, location.href).href);
+          else return null;
+        }
+        out.push(md);
+      }
+      return out.join("\n");
+    } catch (e) {
+      return null;
+    }
+  }
+
   function removeCite() {
     var old = document.querySelectorAll(".tool.cite");
     for (var i = 0; i < old.length; i++) {
@@ -80,6 +131,11 @@
   function showCite() {
     var sel = window.getSelection ? window.getSelection() : null;
     if (!sel || sel.rangeCount === 0 || sel.isCollapsed || !sel.toString().trim()) {
+      removeCite();
+      return;
+    }
+    // the eyebrow above a page's title names its folder, not the page: no words of it are cited
+    if (inEyebrow(sel.anchorNode) || inEyebrow(sel.focusNode)) {
       removeCite();
       return;
     }
@@ -147,6 +203,10 @@
       var block = blockOf(btn);
       var ref = block && block.getAttribute("data-ref");
       if (ref) copyText(ref, function (ok) { flash(btn, ok); });
+    } else if (btn.classList.contains("copy-text")) {
+      var md = markdownOf(btn);
+      if (md === null) flash(btn, false);
+      else copyText(md, function (ok) { flash(btn, ok); });
     } else if (btn.classList.contains("cite")) {
       var holder = btn._block || blockOf(btn);
       var head = holder && holder.getAttribute("data-ref-head");

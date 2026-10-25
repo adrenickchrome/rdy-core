@@ -287,6 +287,8 @@ pub(crate) fn config_warning_line(w: &rdy_schema::Issue) -> String {
 }
 
 fn main() -> ExitCode {
+    // first, while this process has one thread: the diagram crate's variables never reach it
+    rdy_daemon::sys::scrub_mmdflux_environment_at_startup();
     // `rdy load` refuses a target a live daemon still serves; the engine asks this probe
     rdy_engine::load::set_daemon_probe(rdy_daemon::live_daemon);
     // hpb9: the render process reads its standard input alone: before clap (so an argument

@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 2151.32 284.00" style="max-width: 2151.32px; background-color: #ffffff; --bg:#ffffff; --fg:#27272a; --line:#939395; --accent:#47474a; --muted:#a9a9aa; --surface:#f9f9f9; --border:#d4d4d4; --cluster-bkg:#f9f9f9; --note-fill:#f9f9f9;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <style>
+    svg {
+      --_text: var(--fg);
+      --_text-sec: color-mix(in srgb, var(--fg) 60%, var(--bg));
+      --_text-muted: var(--muted);
+      --_text-faint: color-mix(in srgb, var(--fg) 25%, var(--bg));
+      --_line: var(--line);
+      --_arrow: var(--accent);
+      --_node-fill: var(--surface);
+      --_node-stroke: var(--border);
+      --_group-fill: var(--bg);
+      --_cluster-bkg: var(--cluster-bkg);
+      --_note-fill: var(--note-fill);
+    }
+  </style>
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#47474a" data-svg-role="graph-marker-fill" style="fill:var(--_arrow);" />
+    </marker>
+  </defs>
+  <g transform="translate(-35.00,-20.00)">
+    <g class="clusters">
+      <g class="cluster" id="G" data-id="G" data-look="classic">
+        <rect class="subgraph" x="43.00" y="196.00" width="1495.72" height="100.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" data-svg-role="graph-subgraph-rect" style="fill:var(--_cluster-bkg);stroke:var(--_node-stroke);" />
+        <text x="790.86" y="200.00" text-anchor="middle" dominant-baseline="hanging" fill="#27272a" data-svg-role="graph-subgraph-text" style="fill:var(--_text);">group #91;one#93; #124; two</text>
+      </g>
+      <g class="cluster" id="H" data-id="H" data-look="classic">
+        <rect class="subgraph" x="43.00" y="32.00" width="1246.16" height="100.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" data-svg-role="graph-subgraph-rect" style="fill:var(--_cluster-bkg);stroke:var(--_node-stroke);" />
+        <text x="666.08" y="36.00" text-anchor="middle" dominant-baseline="hanging" fill="#27272a" data-svg-role="graph-subgraph-text" style="fill:var(--_text);">fourth #34;q#34; #35;h #59;s #60;l#62; #91;b#93; #40;p#41; #123;c#125; #124;v #96;t#96; &amp; back\slash it&apos;s café ✓</text>
+      </g>
+    </g>
+    <g class="edgePaths">
+      <path d="M330.61,254.00 L1179.04,254.00" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" marker-end="url(#arrowhead)" />
+      <path d="M1523.72,254.00 L1619.72,254.00" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" marker-end="url(#arrowhead)" />
+      <path d="M1805.55,254.00 L2083.20,254.00" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" marker-end="url(#arrowhead)" />
+      <path d="M911.99,90.00 L1179.04,90.00" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="A" data-id="A" data-look="classic">
+        <rect x="58.00" y="227.00" width="272.61" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="194.30" y="254.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">#34;first#34; #35;tag #59; end</text>
+      </g>
+      <g class="node default" id="B" data-id="B" data-look="classic">
+        <rect x="1183.04" y="227.00" width="340.69" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="1353.38" y="254.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">#60;second#62; &amp; back\slash it&apos;s café ✓</text>
+      </g>
+      <g class="node default" id="C" data-id="C" data-look="classic">
+        <rect x="1623.72" y="227.00" width="181.83" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="1714.64" y="254.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">&amp;lt;command&amp;gt;</text>
+      </g>
+      <g class="node default" id="D" data-id="D" data-look="classic">
+        <rect x="2087.20" y="227.00" width="91.12" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="2132.76" y="254.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">third</text>
+      </g>
+      <g class="node default" id="E" data-id="E" data-look="classic">
+        <rect x="58.00" y="63.00" width="853.99" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="485.00" y="90.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">first #34;q#34; #35;h #59;s #60;l#62; #91;b#93; #40;p#41; #123;c#125; #124;v #96;t#96; &amp; back\slash it&apos;s café ✓</text>
+      </g>
+      <g class="node default" id="F" data-id="F" data-look="classic">
+        <rect x="1183.04" y="63.00" width="91.12" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="1228.60" y="90.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">third</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+      <rect x="669.42" y="228.00" width="170.80" height="52.00" fill="#ffffff" data-svg-role="graph-edge-label-bg" style="fill:var(--bg);" />
+      <text x="754.82" y="242.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-edge-text" style="fill:var(--_text);">edge #40;x#41;</text>
+      <text x="754.82" y="266.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-edge-text" style="fill:var(--_text);">#123;y#125; #96;z#96;</text>
+      <rect x="1842.55" y="216.00" width="203.65" height="76.00" fill="#ffffff" data-svg-role="graph-edge-label-bg" style="fill:var(--bg);" />
+      <text x="1944.38" y="230.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-edge-text" style="fill:var(--_text);">thirdthirdthirdthirdthirdthir#5</text>
+      <text x="1944.38" y="254.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-edge-text" style="fill:var(--_text);">9;secondsecondsecondsec</text>
+      <text x="1944.38" y="278.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-edge-text" style="fill:var(--_text);">ond</text>
+      <rect x="948.99" y="28.00" width="193.05" height="124.00" fill="#ffffff" data-svg-role="graph-edge-label-bg" style="fill:var(--bg);" />
+      <text x="1045.51" y="42.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-edge-text" style="fill:var(--_text);">second #34;q#34; #35;h</text>
+      <text x="1045.51" y="66.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-edge-text" style="fill:var(--_text);">#59;s #60;l#62; #91;b#93;</text>
+      <text x="1045.51" y="90.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-edge-text" style="fill:var(--_text);">#40;p#41; #123;c#125;</text>
+      <text x="1045.51" y="114.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-edge-text" style="fill:var(--_text);">#124;v #96;t#96; &amp;</text>
+      <text x="1045.51" y="138.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-edge-text" style="fill:var(--_text);">back\slash it&apos;s café ✓</text>
+    </g>
+  </g>
+</svg>

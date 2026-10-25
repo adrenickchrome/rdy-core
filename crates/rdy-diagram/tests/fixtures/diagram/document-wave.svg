@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 330.60 102.25" style="max-width: 330.60px; background-color: #ffffff; --bg:#ffffff; --fg:#27272a; --line:#939395; --accent:#47474a; --muted:#a9a9aa; --surface:#f9f9f9; --border:#d4d4d4; --cluster-bkg:#f9f9f9; --note-fill:#f9f9f9;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <style>
+    svg {
+      --_text: var(--fg);
+      --_text-sec: color-mix(in srgb, var(--fg) 60%, var(--bg));
+      --_text-muted: var(--muted);
+      --_text-faint: color-mix(in srgb, var(--fg) 25%, var(--bg));
+      --_line: var(--line);
+      --_arrow: var(--accent);
+      --_node-fill: var(--surface);
+      --_node-stroke: var(--border);
+      --_group-fill: var(--bg);
+      --_cluster-bkg: var(--cluster-bkg);
+      --_note-fill: var(--note-fill);
+    }
+  </style>
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#47474a" data-svg-role="graph-marker-fill" style="fill:var(--_arrow);" />
+    </marker>
+  </defs>
+  <g transform="translate(0.00,0.00)">
+    <g class="edgePaths">
+      <path d="M63.77,51.12 L109.77,51.12" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" marker-end="url(#arrowhead)" />
+      <path d="M205.37,51.12 L251.37,51.12" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="A" data-id="A" data-look="classic">
+        <path d="M8.00,74.75 L8.00,74.75 L9.12,75.43 L10.23,76.10 L11.35,76.76 L12.46,77.39 L13.58,78.00 L14.69,78.58 L15.81,79.12 L16.92,79.61 L18.04,80.06 L19.15,80.45 L20.27,80.78 L21.39,81.06 L22.50,81.27 L23.62,81.41 L24.73,81.49 L25.85,81.50 L26.96,81.44 L28.08,81.31 L29.19,81.12 L30.31,80.86 L31.42,80.54 L32.54,80.16 L33.66,79.73 L34.77,79.25 L35.89,78.72 L37.00,78.15 L38.12,77.55 L39.23,76.92 L40.35,76.26 L41.46,75.60 L42.58,74.92 L43.70,74.24 L44.81,73.57 L45.93,72.91 L47.04,72.27 L48.16,71.65 L49.27,71.06 L50.39,70.51 L51.50,70.01 L52.62,69.55 L53.73,69.14 L54.85,68.79 L55.97,68.51 L57.08,68.28 L58.20,68.12 L59.31,68.03 L60.43,68.00 L61.54,68.04 L62.66,68.15 L63.77,68.33 L63.77,20.75 L8.00,20.75 Z" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="35.89" y="47.75" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">first</text>
+      </g>
+      <g class="node default" id="B" data-id="B" data-look="classic">
+        <path d="M123.77,66.38 L123.77,66.38 L125.41,67.73 L127.04,69.07 L128.67,70.39 L130.30,71.66 L131.93,72.88 L133.56,74.03 L135.20,75.11 L136.83,76.10 L138.46,76.99 L140.09,77.77 L141.72,78.44 L143.36,78.99 L144.99,79.41 L146.62,79.70 L148.25,79.85 L149.88,79.87 L151.52,79.75 L153.15,79.49 L154.78,79.11 L156.41,78.59 L158.04,77.95 L159.67,77.20 L161.31,76.33 L162.94,75.37 L164.57,74.31 L166.20,73.17 L167.83,71.97 L169.47,70.71 L171.10,69.40 L172.73,68.07 L174.36,66.71 L175.99,65.36 L177.63,64.01 L179.26,62.69 L180.89,61.41 L182.52,60.17 L184.15,59.00 L185.78,57.90 L187.42,56.89 L189.05,55.97 L190.68,55.16 L192.31,54.46 L193.94,53.89 L195.58,53.43 L197.21,53.11 L198.84,52.93 L200.47,52.88 L202.10,52.96 L203.74,53.18 L205.37,53.54 L205.37,12.38 L123.77,12.38 Z" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <path d="M118.77,71.38 L118.77,71.38 L120.41,72.73 L122.04,74.07 L123.67,75.39 L125.30,76.66 L126.93,77.88 L128.56,79.03 L130.20,80.11 L131.83,81.10 L133.46,81.99 L135.09,82.77 L136.72,83.44 L138.36,83.99 L139.99,84.41 L141.62,84.70 L143.25,84.85 L144.88,84.87 L146.52,84.75 L148.15,84.49 L149.78,84.11 L151.41,83.59 L153.04,82.95 L154.67,82.20 L156.31,81.33 L157.94,80.37 L159.57,79.31 L161.20,78.17 L162.83,76.97 L164.47,75.71 L166.10,74.40 L167.73,73.07 L169.36,71.71 L170.99,70.36 L172.63,69.01 L174.26,67.69 L175.89,66.41 L177.52,65.17 L179.15,64.00 L180.78,62.90 L182.42,61.89 L184.05,60.97 L185.68,60.16 L187.31,59.46 L188.94,58.89 L190.58,58.43 L192.21,58.11 L193.84,57.93 L195.47,57.88 L197.10,57.96 L198.74,58.18 L200.37,58.54 L200.37,17.38 L118.77,17.38 Z" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <path d="M113.77,76.38 L113.77,76.38 L115.41,77.73 L117.04,79.07 L118.67,80.39 L120.30,81.66 L121.93,82.88 L123.56,84.03 L125.20,85.11 L126.83,86.10 L128.46,86.99 L130.09,87.77 L131.72,88.44 L133.36,88.99 L134.99,89.41 L136.62,89.70 L138.25,89.85 L139.88,89.87 L141.52,89.75 L143.15,89.49 L144.78,89.11 L146.41,88.59 L148.04,87.95 L149.67,87.20 L151.31,86.33 L152.94,85.37 L154.57,84.31 L156.20,83.17 L157.83,81.97 L159.47,80.71 L161.10,79.40 L162.73,78.07 L164.36,76.71 L165.99,75.36 L167.63,74.01 L169.26,72.69 L170.89,71.41 L172.52,70.17 L174.15,69.00 L175.78,67.90 L177.42,66.89 L179.05,65.97 L180.68,65.16 L182.31,64.46 L183.94,63.89 L185.58,63.43 L187.21,63.11 L188.84,62.93 L190.47,62.88 L192.10,62.96 L193.74,63.18 L195.37,63.54 L195.37,22.38 L113.77,22.38 Z" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="154.57" y="49.38" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">second</text>
+      </g>
+      <g class="node default" id="C" data-id="C" data-look="classic">
+        <path d="M255.37,77.00 L255.37,77.00 L256.71,78.73 L258.06,80.44 L259.40,82.12 L260.75,83.75 L262.09,85.31 L263.44,86.79 L264.78,88.16 L266.13,89.43 L267.47,90.56 L268.81,91.56 L270.16,92.42 L271.50,93.12 L272.85,93.65 L274.19,94.02 L275.54,94.22 L276.88,94.24 L278.23,94.09 L279.57,93.76 L280.92,93.27 L282.26,92.61 L283.61,91.79 L284.95,90.83 L286.30,89.72 L287.64,88.49 L288.99,87.14 L290.33,85.69 L291.68,84.15 L293.02,82.54 L294.36,80.87 L295.71,79.16 L297.05,77.43 L298.40,75.70 L299.74,73.98 L301.09,72.29 L302.43,70.65 L303.78,69.07 L305.12,67.57 L306.47,66.17 L307.81,64.88 L309.16,63.71 L310.50,62.67 L311.85,61.78 L313.19,61.04 L314.54,60.47 L315.88,60.06 L317.23,59.82 L318.57,59.75 L319.92,59.86 L321.26,60.14 L322.60,60.59 L322.60,8.00 L255.37,8.00 Z" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <path d="M309.16,63.71 L310.50,62.67 L311.85,61.78 L313.19,61.04 L314.54,60.47 L315.88,60.06 L317.23,59.82 L318.57,59.75 L319.92,59.86 L321.26,60.14 L322.60,60.59 L322.60,46.46 Z" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" />
+        <text x="288.99" y="42.50" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">third</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+    </g>
+  </g>
+</svg>

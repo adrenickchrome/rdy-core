@@ -1,0 +1,10 @@
+{% extends "layout.html" %}
+{% block robots %}<meta name="robots" content="noindex">{% endblock %}
+{% block head_scope %}{% include "partials/search.html" %}{% endblock %}
+{% block content %}
+<article class="page"><header class="page-head"><h1>{{ title }}</h1></header>
+<p>{{ not_found.message }}</p>
+{% if not_found.scope %}<p>See the <a href="{{ not_found.latest_href }}">latest docs</a>, or open the <a href="{{ not_found.versions_href }}">list of versions, proposals and views</a>.</p>{% else %}<p><a href="#search">Search these pages</a>, or go to the <a href="{{ not_found.home_href }}">home page</a>.</p>{% endif %}
+</article>
+{% endblock %}
+{% block foot %}{% endblock %}

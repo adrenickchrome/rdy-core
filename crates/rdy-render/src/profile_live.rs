@@ -16,7 +16,8 @@ use crate::prepare::{self, FigureBlobs, History, Presentation};
 use crate::render_input::capture_inputs;
 use crate::site::Site;
 use crate::{
-    Budget, Mode, Slots, build_site_from, inline, publication, review, scope_warnings, version,
+    Budget, Mode, NotFoundOut, Slots, build_site_from, inline, publication, review, scope_warnings,
+    version,
 };
 use rdy_engine::diff::diff_states;
 use rdy_engine::publication::{
@@ -65,7 +66,37 @@ pub(crate) fn build_within(
     history: &mut ProfileHistoryMemo,
     budget: &Budget,
 ) -> Result<ProfileBuild, RdyError> {
+    let (prepared, profile, changes) = prepare_within(st, target, history, budget)?;
+    let root = target.root();
+    // the target's not-found page, from the same selected state, kept with its pages
+    let built = build_site_from(
+        prepared,
+        Mode::Live { root: &root },
+        Slots::Source,
+        Some(budget),
+        NotFoundOut::Live {
+            root: &root,
+            scope: false,
+        },
+    )?;
+    Ok(ProfileBuild {
+        live: live::of_site(built.site, built.not_found, st.redaction_epoch()),
+        profile,
+        changes,
+    })
+}
+
+/// What a build of a profile target reads, as [`build_within`] builds from it: the selected
+/// preparation, the profile the target resolved to, and the change summary's page the build
+/// will write, if any.
+fn prepare_within(
+    st: &ReadState,
+    target: &SiteTarget,
+    history: &mut ProfileHistoryMemo,
+    budget: &Budget,
+) -> Result<(prepare::Prepared, ResolvedProfile, Option<&'static str>), RdyError> {
     target.validate()?;
+    prepare::counted();
     let (route, scope_ref, key) = match target {
         SiteTarget::Profile { scope, key } => (true, scope.clone(), key.as_str()),
         SiteTarget::ProfileOnly { key } => (false, ScopeRef::Canon, key.as_str()),
@@ -338,23 +369,12 @@ pub(crate) fn build_within(
     prepared.history = hist;
     prepared.menu_url = target.menu_url();
     drop(m);
-    let root = target.root();
-    let built = build_site_from(
-        prepared,
-        Mode::Live { root: &root },
-        Slots::Source,
-        Some(budget),
-    )?;
-    Ok(ProfileBuild {
-        live: live::of_site(built.site, st.redaction_epoch()),
-        profile,
-        changes,
-    })
+    Ok((prepared, profile, changes))
 }
 
 /// The read scope a route names: a view must exist; `P-x` reads as the proposal's latest
 /// version; a tag must exist. The versions page is no read scope (`validate` refuses it nested).
-fn read_scope(st: &ReadState, scope: &ScopeRef) -> Result<Scope, RdyError> {
+pub(crate) fn read_scope(st: &ReadState, scope: &ScopeRef) -> Result<Scope, RdyError> {
     match scope {
         ScopeRef::Canon => Ok(Scope::Canon),
         ScopeRef::View(name) => st.resolve_read_scope(&format!("view:{name}"), None),

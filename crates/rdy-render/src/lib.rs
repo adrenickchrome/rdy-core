@@ -1,5 +1,7 @@
 mod assets;
 mod changes;
+pub mod copy;
+mod diagram_svg;
 pub mod disagree;
 mod highlight;
 mod home;
@@ -9,6 +11,7 @@ pub mod live;
 mod llms;
 pub mod menu;
 mod nav;
+mod not_found;
 mod one_page;
 mod page;
 mod prepare;
@@ -34,7 +37,10 @@ mod trail;
 mod version;
 
 pub use html::{Link, escape, text_html};
+pub use not_found::{NotFoundKind, NotFoundPage};
 pub use one_page::{RenderedPage, render_publication_page};
+/// Diagrams drawn as SVG, behind the one pinned crate (D-FY4VF).
+pub use rdy_diagram as diagram;
 
 use prepare::{Presentation, ProfilePresentation};
 use rdy_engine::publication::PublicationSource;
@@ -380,6 +386,7 @@ fn env() -> Result<minijinja::Environment<'static>, RdyError> {
         "changes.html",
         "redirect.html",
         "versions.html",
+        "not_found.html",
         "partials/nav.html",
         "partials/toc.html",
         "partials/pager.html",
@@ -766,12 +773,19 @@ fn scope_warnings(
 
 /// Builds the site of `scope` in memory. The same state, scope and mode give the same bytes.
 /// Without a profile it is the full source (RULING F2).
+/// A static build also writes the site's not-found page, rooted at the project's
+/// `site.base_path` (D-94BT2, D-E8P8J).
 pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFiles, RdyError> {
+    let not_found = match mode {
+        Mode::Static => NotFoundOut::File(rdy.site_base_path()),
+        Mode::Live { .. } => NotFoundOut::None,
+    };
     build_site_from(
         prepare::source(rdy, scope, prepare::Purpose::Site)?,
         mode,
         Slots::Source,
         None,
+        not_found,
     )
     .map(|b| b.site)
 }
@@ -781,13 +795,21 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
 /// trail, glossary, question, search entry, figure and agent file reads the profile's selected
 /// state alone. A public profile whose reference check is blocked refuses with
 /// `E_PUBLICATION_REFERENCE`; an org profile's warning comes first in the summary's warnings.
+/// It writes the profile's not-found page, rooted at the project's `site.base_path`.
 pub fn build_profile_site(
     read: &ReadState,
     scope_text: &str,
     profile: &str,
 ) -> Result<SiteFiles, RdyError> {
     let prepared = publication::prepare(read, scope_text, profile, prepare::Purpose::Site)?;
-    build_site_from(prepared, Mode::Static, Slots::Source, None).map(|b| b.site)
+    build_site_from(
+        prepared,
+        Mode::Static,
+        Slots::Source,
+        None,
+        NotFoundOut::File(read.site_base_path()),
+    )
+    .map(|b| b.site)
 }
 
 /// A publication artifact (D-KDFZ3, hub r-50C97): every served file by its site-relative path,
@@ -825,11 +847,13 @@ pub fn build_publication(
     let prepared = publication::prepare_resolved(source, resolved, tag_name, tag_redacted, inputs)?;
     // the manifest's limits hold while the site is built, not only once it is
     let budget = Budget::publication();
+    // a publication's links stay relative: it has no generated not-found page
     artifact(build_site_from(
         prepared,
         Mode::Static,
         Slots::Notices,
         Some(&budget),
+        NotFoundOut::None,
     )?)
 }
 
@@ -843,7 +867,8 @@ fn bad_manifest() -> RdyError {
     )
 }
 
-/// The media type of the generated file at `path`, by its extension.
+/// The media type of the generated file at `path`, by its extension. An SVG is generated only
+/// as a drawn diagram's file: `assets/diagrams/` and the 64 lowercase hex digits of its hash.
 fn generated_media_type(path: &str) -> Result<&'static str, RdyError> {
     let ext = path.rsplit_once('.').map(|(_, e)| e);
     Ok(match ext {
@@ -853,8 +878,16 @@ fn generated_media_type(path: &str) -> Result<&'static str, RdyError> {
         Some("css") => "text/css",
         Some("js") => "application/javascript",
         Some("woff2") => "font/woff2",
+        Some("svg") if is_diagram_file(path) => "image/svg+xml",
         _ => return Err(bad_manifest()),
     })
+}
+
+/// Whether `path` is a drawn diagram's file: `assets/diagrams/<64 lowercase hex>.svg`.
+fn is_diagram_file(path: &str) -> bool {
+    path.strip_prefix("assets/diagrams/")
+        .and_then(|name| name.strip_suffix(".svg"))
+        .is_some_and(|h| h.len() == 64 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
 }
 
 /// A media type without its parameters (`image/svg+xml; charset=utf-8` reads `image/svg+xml`).
@@ -901,6 +934,7 @@ fn artifact(built: BuiltSite) -> Result<PublicationArtifact, RdyError> {
         site,
         notices,
         media,
+        not_found: _,
     } = built;
     let manifest = manifest_of(&site.files, &notices, &media)?;
     let manifest_hash = manifest_hash(&manifest, MANIFEST_RECIPE)?;
@@ -940,6 +974,57 @@ struct BuiltSite {
     site: SiteFiles,
     notices: BTreeMap<String, u64>,
     media: BTreeMap<String, String>,
+    /// A live build's not-found pages; none for any other build.
+    not_found: NotFoundPages,
+}
+
+/// Which not-found pages a build makes, from the same setup and selected state as its files.
+#[derive(Clone, Copy)]
+enum NotFoundOut<'a> {
+    /// None: a publication build has no generated not-found page.
+    None,
+    /// A local static build: the Page variant at `404.html`, rooted at the base path.
+    File(&'a str),
+    /// A live build: the Page variant, and canon's Scope variant when `scope`, every link rooted
+    /// at the target's root, kept beside the files and never one of them.
+    Live { root: &'a str, scope: bool },
+}
+
+/// A live build's own not-found pages (D-94BT2, D-E8P8J), built once with its pages and kept
+/// with them, so a miss reads no source: the Page variant of the target, and on canon's source
+/// also the Scope variant. A page that cannot be built (a build error or a panic) is none, and
+/// the server then gives the plain answer; the build's pages still serve.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NotFoundPages {
+    pub page: Option<Vec<u8>>,
+    pub scope: Option<Vec<u8>>,
+}
+
+impl NotFoundPages {
+    /// The bytes of the variant `kind`, if the build has it.
+    pub fn get(&self, kind: NotFoundKind) -> Option<&[u8]> {
+        match kind {
+            NotFoundKind::Page => self.page.as_deref(),
+            NotFoundKind::Scope => self.scope.as_deref(),
+        }
+    }
+}
+
+/// The not-found page of `kind` for a live build, or none when it cannot be built: an error or
+/// a panic never fails the build of the target's pages.
+fn live_not_found(
+    sh: &page::Shared<'_>,
+    env: &minijinja::Environment<'static>,
+    root: &str,
+    kind: NotFoundKind,
+) -> Option<Vec<u8>> {
+    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        not_found::build(sh, env, root, kind)
+    }));
+    match built {
+        Ok(Ok(page)) => Some(page.html),
+        Ok(Err(_)) | Err(_) => None,
+    }
 }
 
 /// The manifest's limits (`publication_manifest`), as a publication build keeps them while it
@@ -1424,6 +1509,12 @@ fn with_shared<R>(
     let local = profile
         .as_ref()
         .map(|_| publication::LocalTargets::of(&site));
+    // each doc's group on the finished change summary, for the navigation's Edited links
+    let review_anchors: BTreeMap<String, String> = changes_summary
+        .iter()
+        .flat_map(|c| &c.groups)
+        .filter_map(|g| Some((g.href.clone()?, g.anchor.clone())))
+        .collect();
     let sh = page::Shared {
         site: &site,
         m,
@@ -1442,10 +1533,13 @@ fn with_shared<R>(
         header,
         headers: Default::default(),
         used_blobs: Default::default(),
+        draw_diagrams: true,
+        diagrams: Default::default(),
         governing: Default::default(),
         mode,
         inline_diffs,
         changes_page: changes_summary.is_some(),
+        review_anchors,
         since_page: since_summary.is_some(),
         profile: profile.as_ref(),
         local: local.as_ref(),
@@ -1529,15 +1623,40 @@ struct Staged {
 }
 
 /// [`build_site`] from what [`prepare::source`] read: it reads no source. A publication build
-/// passes the manifest's limits as `budget`, kept while it builds.
+/// passes the manifest's limits as `budget`, kept while it builds. Once the normal files are
+/// staged, `not_found` says which not-found pages the same selected state also gives: a local
+/// static build adds the site's not-found page at `404.html`, unless an authored top-level doc
+/// has that page, which the build's last warning then says; a live build keeps its not-found
+/// pages beside its files (an authored `404.html` is the doc's page there, and a miss is still
+/// the generated page); a publication build has none.
 fn build_site_from(
     prepared: prepare::Prepared,
     mode: Mode,
     slots: Slots,
     budget: Option<&Budget>,
+    not_found: NotFoundOut,
 ) -> Result<BuiltSite, RdyError> {
-    let (staged, mut blobs) = with_shared(prepared, mode, |sh, env, extras| {
-        stage_site(sh, env, extras, slots, budget)
+    let ((staged, missing), mut blobs) = with_shared(prepared, mode, |sh, env, extras| {
+        let mut staged = stage_site(sh, env, extras, slots, budget)?;
+        let mut missing = NotFoundPages::default();
+        match not_found {
+            NotFoundOut::None => {}
+            NotFoundOut::File(_) if sh.site.page_taken(not_found::PAGE) => {
+                staged.summary.warnings.push(not_found::KEPT.into());
+            }
+            NotFoundOut::File(base) => {
+                // the theme files it loads are the site's own, already staged
+                let page = not_found::build(sh, env, base, NotFoundKind::Page)?;
+                put_file(&mut staged.files, budget, not_found::PAGE.into(), page.html)?;
+            }
+            NotFoundOut::Live { root, scope } => {
+                missing.page = live_not_found(sh, env, root, NotFoundKind::Page);
+                if scope {
+                    missing.scope = live_not_found(sh, env, root, NotFoundKind::Scope);
+                }
+            }
+        }
+        Ok((staged, missing))
     })?;
     let Staged {
         mut files,
@@ -1560,6 +1679,7 @@ fn build_site_from(
         },
         notices,
         media,
+        not_found: missing,
     })
 }
 
@@ -1631,7 +1751,6 @@ fn stage_site(
     // the search index is held to the bytes one file may take while its entries are collected
     let (index_cap, index_limit) = budget.map_or((u64::MAX, String::new()), Budget::file_cap);
     let mut index = search::Index::new(site_name, index_cap);
-    let mut has_mermaid = false;
     // a publication has at most as many files as its limit: count its pages (the change
     // summaries included) before making any
     if let Some(b) = budget {
@@ -1647,7 +1766,6 @@ fn stage_site(
         kinds,
         |kind| {
             let ctx = build_page(sh, kind);
-            has_mermaid |= ctx.has_mermaid;
             page::finish(sh, &ctx, &mut index);
             if let Some(b) = budget {
                 b.index_holds(index.held());
@@ -1778,9 +1896,16 @@ fn stage_site(
     if !at.is_empty() {
         label_at.insert("llms-full.txt".into(), vec![(SlotKind::Label, at)]);
     }
-    for (path, bytes) in assets::files(has_mermaid) {
+    for (path, bytes) in assets::files() {
         put_file(&mut files, budget, path.into(), bytes)?;
     }
+    // the diagrams the pages drew, one file each, and the warnings of those they could not
+    // draw, after the build's own (in page and block order)
+    let diagrams = sh.diagrams.take();
+    for (path, bytes) in diagrams.files() {
+        put_file(&mut files, budget, path, bytes)?;
+    }
+    summary.warnings.extend(diagrams.warnings);
     let used = sh.used_blobs.take();
     Ok(Staged {
         files,
@@ -2328,10 +2453,21 @@ mod label_tests {
             ("assets/site.css", "text/css"),
             ("assets/app.js", "application/javascript"),
             ("assets/fonts/onest.woff2", "font/woff2"),
+            (
+                "assets/diagrams/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.svg",
+                "image/svg+xml",
+            ),
         ] {
             assert_eq!(generated_media_type(path).unwrap(), want);
         }
-        for path in ["assets/x.bin", "README", "a.htm"] {
+        for path in [
+            "assets/x.bin",
+            "README",
+            "a.htm",
+            "assets/x.svg",
+            "assets/diagrams/0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef.svg",
+            "assets/diagrams/a/b.svg",
+        ] {
             assert_eq!(
                 generated_media_type(path).unwrap_err().message,
                 "publication manifest is invalid"
@@ -2374,7 +2510,13 @@ mod limit_tests {
     fn build(r: &rdy_engine::Rdy, budget: Option<&Budget>) -> Result<BuiltSite, RdyError> {
         let read = r.read();
         let prepared = prepare::source(&read, &Scope::View("work".into()), prepare::Purpose::Site)?;
-        build_site_from(prepared, Mode::Static, Slots::Notices, budget)
+        build_site_from(
+            prepared,
+            Mode::Static,
+            Slots::Notices,
+            budget,
+            NotFoundOut::None,
+        )
     }
 
     /// The number of HTML pages of `b` that are not permalinks, and their bytes.

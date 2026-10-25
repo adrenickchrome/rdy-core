@@ -2,8 +2,11 @@
 //! One `mod` line per test file in this directory; a file without its line never runs
 //! (`tlay1_` checks). Keep the list sorted.
 mod render;
+mod render_blob_state;
 mod render_build;
 mod render_changes;
+mod render_copy_text;
+mod render_diagram_environment;
 mod render_diagrams;
 mod render_disagree;
 mod render_disagree_group;
@@ -19,6 +22,7 @@ mod render_menu;
 mod render_mermaid;
 mod render_nav;
 mod render_no_coverage;
+mod render_not_found;
 mod render_plain;
 mod render_presentational;
 mod render_print;
@@ -32,6 +36,7 @@ mod render_publication_prepare;
 mod render_publication_print;
 mod render_publication_site;
 mod render_publish;
+mod render_reader_text;
 mod render_redaction;
 mod render_ref;
 mod render_review;
@@ -40,6 +45,7 @@ mod render_review_nav;
 mod render_review_page;
 mod render_review_toggle;
 mod render_search;
+mod render_sidebar_state;
 mod render_site;
 mod render_site_profiles;
 mod render_techdocs;

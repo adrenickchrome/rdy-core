@@ -1,11 +1,14 @@
 //! The context of every page, and the one place that calls every module that fills a part of it.
-use crate::html::{self, BlockCtx, Link};
+use crate::copy::{CopyPayload, CopyRange};
+use crate::html::{self, BlockCtx, DiagramView, Link};
 use crate::inline::{self, Ctx, LocalLink};
 use crate::prepare::{Presentation, ProfilePresentation};
 use crate::publication::LocalTargets;
-use crate::site::{Site, Url, rel};
+use crate::site::{ID_INSIDE, Site, Url, rel};
 use crate::trail::Trail;
-use crate::{Mode, assets, changes, home, nav, review, search, toc, trail, version};
+use crate::{
+    Mode, assets, changes, diagram, diagram_svg, home, nav, review, search, toc, trail, version,
+};
 use rdy_engine::{Materialized, VersionInfo, VersionPosition};
 use rdy_graph::{EdgeKind, GoverningCache, Graph};
 use rdy_model::redaction::CONTENT_REMOVED;
@@ -13,7 +16,7 @@ use rdy_model::{Block, BlockId, Hash, decision, tree};
 use rdy_schema::Pack;
 use serde::Serialize;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// What a render reads, whichever page it builds.
 pub struct Shared<'a> {
@@ -51,6 +54,13 @@ pub struct Shared<'a> {
     /// The blobs some page links to, by the site-relative path of their file, with the media
     /// type of the first block that named that file, filled as pages are built.
     pub used_blobs: RefCell<BTreeMap<String, (Hash, String)>>,
+    /// Whether the pages draw their Mermaid diagrams: a site's do; the print shows each diagram as
+    /// its source and makes no file, inline copy or warning of it. The print's pages also have
+    /// no toolbar, so they build no Copy payload.
+    pub draw_diagrams: bool,
+    /// The diagrams the build's pages drew, and the warnings of those it could not draw, filled
+    /// as the pages are built (one thread builds them, before their templates are rendered).
+    pub diagrams: RefCell<DiagramAssets>,
     /// The governing route query's entity scans, shared by every trail read from `g`: an entity
     /// that many blocks describe is scanned once per render. It belongs to `g` alone.
     pub governing: RefCell<GoverningCache>,
@@ -62,6 +72,9 @@ pub struct Shared<'a> {
     /// The build writes `changes.html` (a review render whose path no doc owns); the review
     /// chip links it only then.
     pub changes_page: bool,
+    /// The anchor of each doc's group on `changes.html`, by the doc's site-relative page path:
+    /// the navigation's Edited word links there. Empty when the build writes no such summary.
+    pub review_anchors: BTreeMap<String, String>,
     /// The build writes `changes-since.html`; the landings chip links it only then.
     pub since_page: bool,
     /// A named profile's presentation (trail, chosen tag); none for a source output.
@@ -142,6 +155,26 @@ pub struct Item {
     pub diff_html: Option<String>,
     /// The removed lines a draft shows just before this block.
     pub removed_before: Vec<RemovedLine>,
+    /// What the block's Copy control copies of the page's [`CopyPayload`]: the block, or a
+    /// section's heading and every block under it; none when that is empty (no Copy control).
+    pub copy: Option<CopyRange>,
+}
+
+/// The toolbar of an authored page's title (a doc's or a folder's): its block's Link, Copy ref
+/// and Copy. Link copies the page's URL, Copy the whole page.
+#[derive(Clone, Debug, Serialize)]
+pub struct TitleTools {
+    /// The doc's or folder's block id, which its Copy ref names.
+    pub id: String,
+    /// Empty: Link copies the page's URL, with no fragment.
+    pub anchor: String,
+    pub kind_word: &'static str,
+    pub presentational: bool,
+    pub ref_head: String,
+    #[serde(rename = "ref")]
+    pub ref_: String,
+    /// The whole page: its title, its lede or description and every block.
+    pub copy: Option<CopyRange>,
 }
 
 /// One removed line of a draft: the old text of a block the draft took out, as HTML.
@@ -315,7 +348,6 @@ pub struct PageContext {
     pub toc: toc::Toc,
     pub pager: Pager,
     pub search_href: String,
-    pub has_mermaid: bool,
     pub has_terms: bool,
     pub has_questions: bool,
     /// A review render with marks, which offers Show changes and Show diff (sr7).
@@ -329,6 +361,11 @@ pub struct PageContext {
     pub live: bool,
     pub items: Vec<Item>,
     pub body: Body,
+    /// The toolbar of an authored doc's or folder's title; none on a generated page.
+    pub title_tools: Option<TitleTools>,
+    /// The page's [`CopyPayload`] as JSON, which the page carries once as escaped text in a
+    /// hidden template; none on a page with no Copy control.
+    pub copy_page: Option<String>,
 }
 
 /// Which page to build.
@@ -345,6 +382,118 @@ pub enum Kind<'a> {
     Changes(&'a changes::Summary),
     /// The summary of the landings since the tag (`changes-since.html`).
     ChangesSince(&'a changes::Summary),
+}
+
+/// The generated diagram files of one build (D-FY4VF, D-KAGB2, D-E8P8J): each drawing once, by
+/// the hash of its standalone bytes, and the build's diagram warnings in the order the pages and
+/// their blocks were built. It belongs to one build; nothing outlives it.
+#[derive(Default)]
+pub struct DiagramAssets {
+    /// Each resolved source drawn so far: the hash of its standalone file, or why it draws none.
+    drawn: HashMap<String, Result<Hash, diagram::Diagram>>,
+    /// The standalone SVG of each drawing, by the hash of its bytes.
+    standalone: BTreeMap<Hash, String>,
+    /// The drawings some page shows: the files the build writes.
+    used: BTreeSet<Hash>,
+    /// The blocks that warned: a block warns once per build.
+    warned: BTreeSet<BlockId>,
+    /// The warnings, one per block that does not draw, in page and block order.
+    pub warnings: Vec<String>,
+}
+
+/// What a diagram block is, before a page shows it: drawn, with its file's hash and the inline
+/// SVG of its place; drawn, for the print, which reads no inline copy; or not drawn, with why
+/// when it is a Mermaid source.
+enum DiagramShape {
+    Drawn { hash: Hash, svg: String },
+    Drawable,
+    Undrawn(Option<diagram::Diagram>),
+}
+
+impl DiagramAssets {
+    /// The site-relative path of the file of the drawing whose standalone bytes hash to `h`.
+    pub fn path(h: &Hash) -> String {
+        format!("assets/diagrams/{h}.svg")
+    }
+
+    /// The files of the drawings some page shows, by path, with their bytes.
+    pub fn files(&self) -> Vec<(String, Vec<u8>)> {
+        self.used
+            .iter()
+            .filter_map(|h| {
+                let svg = self.standalone.get(h)?;
+                Some((Self::path(h), svg.as_bytes().to_vec()))
+            })
+            .collect()
+    }
+
+    /// What `source` (a Mermaid diagram's resolved plain source) draws: the hash of its
+    /// standalone file, else why it draws none. Each source is drawn once per build.
+    fn draw(&mut self, source: &str) -> Result<Hash, diagram::Diagram> {
+        if let Some(d) = self.drawn.get(source) {
+            return d.clone();
+        }
+        // tests can give a source a drawing of their own (one near the SVG bound)
+        #[cfg(test)]
+        let given = tests::DRAWN.with_borrow(|d| d.get(source).cloned());
+        #[cfg(not(test))]
+        let given: Option<String> = None;
+        let rendered = match given {
+            Some(svg) => diagram::Diagram::Svg(svg),
+            None => diagram::render(source),
+        };
+        let drawn = match rendered {
+            diagram::Diagram::Svg(svg) => match diagram_svg::standalone(&svg) {
+                Ok(file) => {
+                    let h = Hash::of(file.as_bytes());
+                    self.standalone.entry(h).or_insert(file);
+                    Ok(h)
+                }
+                Err(reason) => Err(diagram::Diagram::Failed {
+                    reason: reason.to_string(),
+                }),
+            },
+            other => Err(other),
+        };
+        self.drawn.insert(source.to_string(), drawn.clone());
+        drawn
+    }
+
+    /// The inline copy of drawing `h` for its `place` on a page (its places counted from zero).
+    fn inline(&self, h: &Hash, place: usize) -> Result<String, &'static str> {
+        #[cfg(test)]
+        tests::INLINES.set(tests::INLINES.get() + 1);
+        let file = self.standalone.get(h).ok_or(diagram_svg::BAD_IDS)?;
+        diagram_svg::inline(file, &h.to_string(), place)
+    }
+
+    /// Whether drawing `h` has an inline copy for its `place` on a page, as [`Self::inline`]
+    /// reads it, without building the copy (the print's question).
+    fn admits(&self, h: &Hash, place: usize) -> Result<(), &'static str> {
+        let file = self.standalone.get(h).ok_or(diagram_svg::BAD_IDS)?;
+        diagram_svg::inline_admits(file, &h.to_string(), place)
+    }
+
+    /// Records the warning of block `id` of the doc titled `doc`, which draws `why`: once per
+    /// block per build.
+    fn warn(&mut self, doc: &str, id: &BlockId, why: &diagram::Diagram) {
+        if !self.warned.insert(id.clone()) {
+            return;
+        }
+        let words = match why {
+            diagram::Diagram::Invalid { reason } => {
+                format!("the Mermaid diagram does not parse: {reason}")
+            }
+            diagram::Diagram::Unsupported { header } => {
+                format!("rdy does not draw {header} diagrams, so it shows the source")
+            }
+            diagram::Diagram::Failed { reason } => {
+                format!("rdy could not draw the diagram: {reason}, so it shows the source")
+            }
+            diagram::Diagram::Svg(_) => return,
+        };
+        self.warnings.push(format!("{doc} ({id}): {words}"));
+    }
 }
 
 /// What a page writes in place of a removed block, whatever its type (D-3M81W): the notice and
@@ -365,6 +514,81 @@ fn kind_word(block_type: &str) -> &'static str {
 }
 
 impl Shared<'_> {
+    /// The shape of diagram `b`, whose resolved plain source is `source`: its drawing, else why a
+    /// Mermaid source draws none. `places` counts each drawing's places on the page so far, so
+    /// that two identical diagrams on one page have their own ids. The site and the print both
+    /// read this one choice (ruling task-6), so a diagram has the same shape in both.
+    fn diagram_shape(
+        &self,
+        b: &Block,
+        source: &str,
+        places: &RefCell<BTreeMap<Hash, usize>>,
+    ) -> DiagramShape {
+        if b.field_str("lang") != Some("mermaid") {
+            return DiagramShape::Undrawn(None);
+        }
+        let mut d = self.diagrams.borrow_mut();
+        let failed = match d.draw(source) {
+            Ok(h) => {
+                let mut places = places.borrow_mut();
+                let place = places.entry(h).or_default();
+                // the print shows a drawn diagram as its source: the drawing, its file and its
+                // place's inline copy classify it as on the site (ruling task-6), and the copy
+                // is counted, not made
+                let shown = if self.draw_diagrams {
+                    d.inline(&h, *place).map(Some)
+                } else {
+                    d.admits(&h, *place).map(|()| None)
+                };
+                match shown {
+                    Ok(svg) => {
+                        *place += 1;
+                        return match svg {
+                            Some(svg) => DiagramShape::Drawn { hash: h, svg },
+                            None => DiagramShape::Drawable,
+                        };
+                    }
+                    Err(reason) => diagram::Diagram::Failed {
+                        reason: reason.to_string(),
+                    },
+                }
+            }
+            Err(why) => why,
+        };
+        DiagramShape::Undrawn(Some(failed))
+    }
+
+    /// How the page at `page` shows diagram `b` of the doc titled `doc`, whose resolved plain
+    /// source is `source` (its [`Shared::diagram_shape`]). A Mermaid source that does not draw
+    /// warns, once per block per build, and shows its source; any other language shows its
+    /// source and does not warn. The print draws none, writes no file and warns of none: a
+    /// drawing prints as its source alone, and a source with no drawing as the site's code block.
+    fn diagram_view(
+        &self,
+        b: &Block,
+        source: &str,
+        doc: &str,
+        page: &str,
+        places: &RefCell<BTreeMap<Hash, usize>>,
+    ) -> DiagramView {
+        match self.diagram_shape(b, source, places) {
+            DiagramShape::Drawable => DiagramView::Source,
+            DiagramShape::Drawn { hash, svg } => {
+                self.diagrams.borrow_mut().used.insert(hash);
+                DiagramView::Drawn {
+                    svg,
+                    href: rel(page, &DiagramAssets::path(&hash)),
+                }
+            }
+            DiagramShape::Undrawn(why) => {
+                if let Some(why) = why.filter(|_| self.draw_diagrams) {
+                    self.diagrams.borrow_mut().warn(doc, &b.id, &why);
+                }
+                DiagramView::Fallback
+            }
+        }
+    }
+
     /// Whether `b` reads as removed content: a removed block (a stub), or a figure whose blob a
     /// redaction removed content of (a block of another side than the scope's, such as a draft's
     /// removed line, is not projected). Its page shows [`REMOVED_HTML`] in its place.
@@ -727,8 +951,8 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
     };
     let mut body = Body::default();
     let mut items = vec![];
-    let mut has_mermaid = false;
     let mut pager = Pager::default();
+    let (mut title_tools, mut copy_page) = (None, None);
     match &kind {
         Kind::Home => {
             body.home = Some(home::build(
@@ -778,13 +1002,30 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
                 }),
                 children,
             });
+            let lede = body
+                .folder
+                .as_ref()
+                .and_then(|f| f.description_html.as_deref());
+            // the print reads no Copy (its pages have no toolbar)
+            if sh.draw_diagrams {
+                (title_tools, copy_page) = page_copy(sh, f, &page_url, &title, lede, &mut []);
+            }
         }
         Kind::Doc(id) => {
             let doc = sh.m.get(id).expect("a doc exists");
-            let (doc_body, built, mermaid) = doc_parts(sh, doc, &page_url, &title);
+            let (doc_body, mut built) = doc_parts(sh, doc, &page_url, &title);
+            if sh.draw_diagrams {
+                (title_tools, copy_page) = page_copy(
+                    sh,
+                    doc,
+                    &page_url,
+                    &title,
+                    doc_body.lede.as_deref(),
+                    &mut built,
+                );
+            }
             body.doc = Some(doc_body);
             items = built;
-            has_mermaid = mermaid;
             let (prev, next) = site.prev_next(id);
             let link = |id: Option<BlockId>| {
                 let b = sh.m.get(&id?)?;
@@ -829,7 +1070,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         nav: if redirect {
             nav::Nav::default()
         } else {
-            nav::build(site, current, &page_url, facts)
+            nav::build(site, current, &page_url, facts, &sh.review_anchors)
         },
         // the glossary's "On this page" names its groups, however few; a doc's lists its sections
         toc: match &body.glossary {
@@ -849,7 +1090,6 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         },
         pager,
         search_href: rel(&page_url, "search-index.json"),
-        has_mermaid,
         has_terms,
         has_questions,
         reviewing: sh.review.is_some(),
@@ -861,9 +1101,72 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         live: matches!(sh.mode, Mode::Live { .. }),
         items,
         body,
+        title_tools,
+        copy_page,
         kind: kind_name,
         page_url,
     }
+}
+
+/// The Copy of an authored page (D-BRF4P, D-E8P8J): its [`CopyPayload`], each item's range and
+/// its title's toolbar. The payload is built from what the page shows, before any toolbar or diff
+/// panel goes in: the title (`b`'s label, `title`), the lede or folder description (`lede`, as
+/// HTML spans) and each item's HTML, in page order, each block once. A section's range is its
+/// heading and the items under it, up to the next item no deeper than it.
+fn page_copy(
+    sh: &Shared,
+    b: &Block,
+    page: &str,
+    title: &str,
+    lede: Option<&str>,
+    items: &mut [Item],
+) -> (Option<TitleTools>, Option<String>) {
+    #[cfg(test)]
+    tests::COPIES.set(tests::COPIES.get() + 1);
+    let mut payload = CopyPayload::default();
+    payload.push_html(&format!("<h1>{}</h1>", html::escape(title)), page);
+    if let Some(l) = lede {
+        payload.push_html(&format!("<p>{l}</p>"), page);
+    }
+    // the payload's length before and after each item
+    let mut at = Vec::with_capacity(items.len() + 1);
+    for item in items.iter() {
+        at.push(payload.blocks.len());
+        payload.push_html(&item.html, page);
+    }
+    at.push(payload.blocks.len());
+    // one pass: each section waits on a stack until an item no deeper than it arrives, or the
+    // page ends; its range then ends where that item's starts
+    let mut open: Vec<usize> = vec![];
+    for i in 0..items.len() {
+        while let Some(&s) = open.last() {
+            if items[i].depth > items[s].depth {
+                break;
+            }
+            items[s].copy = CopyRange::of(at[s], at[i]);
+            open.pop();
+        }
+        if items[i].block_type == "section" {
+            open.push(i);
+        } else {
+            items[i].copy = CopyRange::of(at[i], at[i + 1]);
+        }
+    }
+    for s in open {
+        items[s].copy = CopyRange::of(at[s], at[items.len()]);
+    }
+    let (ref_head, ref_) = trail::ref_attrs(b, sh.site, sh.pin(), sh.m);
+    let tools = TitleTools {
+        id: b.id.to_string(),
+        anchor: String::new(),
+        kind_word: "page",
+        presentational: sh.pack.is_presentational(&b.block_type),
+        ref_head,
+        ref_,
+        copy: CopyRange::of(0, payload.blocks.len()),
+    };
+    let json = (!payload.blocks.is_empty()).then(|| payload.json());
+    (Some(tools), json)
 }
 
 /// A permalink page's path, and the label and href of the block it leads to.
@@ -893,8 +1196,9 @@ pub fn finish(sh: &Shared, ctx: &PageContext, index: &mut search::Index) {
     }
 }
 
-/// The doc's own part of the context, its blocks as items and whether one is a Mermaid diagram.
-fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec<Item>, bool) {
+/// The doc's own part of the context and its blocks as items. Its diagrams are drawn here, in
+/// block order, before any template is rendered.
+fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec<Item>) {
     let (m, site) = (sh.m, sh.site);
     let link = |id: &BlockId| sh.link(page, id);
     let local = |h: &str| sh.local_href(page, h);
@@ -921,7 +1225,10 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
         lede_diff: lede_block.and_then(|l| edited_diff(sh, &l.id)),
         removed_end: vec![],
     };
-    let (mut items, mut has_mermaid) = (vec![], false);
+    let mut items = vec![];
+    // each drawing's places on this page
+    let places = RefCell::new(BTreeMap::new());
+    let diagram = |b: &Block, source: &str| sh.diagram_view(b, source, title, page, &places);
     let mut stack: Vec<(&Block, usize)> = m
         .children(Some(&doc.id))
         .into_iter()
@@ -941,9 +1248,6 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
         // publication profile, removed or not, is administrative and off every output
         if crate::site::is_off_site(b) || crate::site::is_profile(b) {
             continue;
-        }
-        if b.block_type == "diagram" && b.field_str("lang") == Some("mermaid") {
-            has_mermaid = true;
         }
         let anchor = site.anchors.get(&b.id).cloned().unwrap_or_default();
         let described_by: Vec<Link> =
@@ -975,6 +1279,7 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
             described_by: &described_by,
             unavailable: sh.unavailable,
             local_link: sh.local_link(&local),
+            diagram: &diagram,
         };
         let (ref_head, ref_) = trail::ref_attrs(b, site, sh.pin(), m);
         let presentational = sh.pack.is_presentational(&b.block_type);
@@ -1026,6 +1331,7 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
             change: sh.review.and_then(|r| r.mark(&b.id)),
             diff_html: edited_diff(sh, &b.id),
             removed_before: vec![],
+            copy: None,
         });
     }
     // the removed lines: before the block they stood before, else at the doc's end
@@ -1046,7 +1352,7 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
             None => doc_body.removed_end.push(html),
         }
     }
-    (doc_body, items, has_mermaid)
+    (doc_body, items)
 }
 
 /// A doc's lede: its first child when it is a prose of one paragraph (content directly in the
@@ -1116,6 +1422,8 @@ fn removed_html(sh: &Shared, blocks: &[Block], page: &str) -> String {
         described_by: &[],
         unavailable: sh.unavailable,
         local_link: sh.local_link(&local),
+        // a removed line draws nothing: its diagram reads as its old source below
+        diagram: &|_, _| DiagramView::Source,
     };
     let mut out = String::new();
     for b in blocks {
@@ -1240,10 +1548,12 @@ fn disagreements_body(sh: &Shared, page: &str) -> DisagreementsBody {
                     let doc = sh.site.doc_of(id);
                     let folders = doc.map(|doc| folder_path(sh, &doc.id)).unwrap_or_default();
                     let doc = doc.map(|d| sh.site.label(d));
+                    // a lone block's quote is cut at a word boundary, as a summary is
+                    let quote = quote_of(sh, id, link.label);
                     let text = match doc {
                         Some(doc) if d.repeats > 1 => doc,
-                        Some(doc) if doc != link.label => format!("{doc} › {}", link.label),
-                        _ => link.label,
+                        Some(doc) if doc != quote => format!("{doc} › {quote}"),
+                        _ => quote,
                     };
                     Some((
                         DisagreementLink {
@@ -1265,6 +1575,23 @@ fn disagreements_body(sh: &Shared, page: &str) -> DisagreementsBody {
         })
         .collect();
     DisagreementsBody { entries }
+}
+
+/// What a lone disagreement quotes of the block `id`, whose link label is `label`. A label that is
+/// the block's own summary (an id-shaped word in it read as `…`, as the label reads it) is
+/// replaced by the summary's words, an unresolved reference read as the unresolved marker's words,
+/// cut at a word boundary to 80 characters (`home::cut_plain`). A title, a name or any other
+/// label stays.
+fn quote_of(sh: &Shared, id: &BlockId, label: String) -> String {
+    let Some(b) = sh.m.get(id) else { return label };
+    let words = |keep_token: bool| {
+        let words = sh.site.summary_words(b, 0, keep_token);
+        ID_INSIDE.replace_all(&words, "…").into_owned()
+    };
+    if words(true).chars().take(80).collect::<String>() != label {
+        return label;
+    }
+    home::cut_plain(&words(false), 80)
 }
 
 /// The folders above `doc`, top first, joined as the breadcrumb and the hover join them
@@ -1358,4 +1685,185 @@ fn questions_body(sh: &Shared, page: &str) -> QuestionsBody {
         }
     }
     QuestionsBody { groups }
+}
+
+#[cfg(test)]
+mod tests {
+    use rdy_engine::{Rdy, Scope, Session, WriteRequest};
+    use rdy_model::Role;
+    use serde_json::json;
+    use std::cell::Cell;
+
+    thread_local! {
+        /// The Copy payloads this thread built.
+        pub(super) static COPIES: Cell<u64> = const { Cell::new(0) };
+        /// The inline drawings this thread built.
+        pub(super) static INLINES: Cell<u64> = const { Cell::new(0) };
+        /// The SVG a source draws, in place of the pinned crate's drawing.
+        pub(super) static DRAWN: std::cell::RefCell<std::collections::HashMap<String, String>> =
+            Default::default();
+    }
+
+    /// Final review M3: a print reads no Copy payload and no page's inline drawing, so it
+    /// builds neither. It still reads each diagram's shape, so the site and the print agree.
+    #[test]
+    fn dgm9_print_builds_no_copy_and_no_inline_drawing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut r = Rdy::init(dir.path(), "rdy-standard").expect("init");
+        let s = |role| Session::human("human:qa".into(), role).unwrap();
+        r.write(
+            &s(Role::Writer),
+            WriteRequest {
+                view: "w".into(),
+                ops: serde_json::from_value(json!([
+                    {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "f", "title": "Folder", "description": "Its words."}},
+                    {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"name": "d", "title": "Doc", "doc_type": "page"}},
+                    {"op": "create", "type": "prose", "parent": "$d", "body": "Words."},
+                    {"op": "create", "type": "diagram", "parent": "$d", "fields": {"lang": "mermaid", "alt": "Two boxes"}, "body": "graph TD\n  A --> B"},
+                    {"op": "create", "type": "diagram", "parent": "$d", "fields": {"lang": "mermaid", "alt": "Again"}, "body": "graph TD\n  A --> B"}
+                ]))
+                .unwrap(),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .expect("write");
+        let p = r
+            .propose(&s(Role::Writer), "w", "w", Some("test summary"))
+            .expect("propose");
+        r.land(&s(Role::Approver), &p.id).expect("land");
+        let st = r.read();
+        let counts = || (COPIES.get(), INLINES.get());
+        let before = counts();
+        let print = crate::print::build(&st, &Scope::Canon).expect("print");
+        assert!(!print.docs.is_empty());
+        assert_eq!(
+            counts(),
+            before,
+            "the print built no Copy and no inline drawing"
+        );
+        // the site builds both: one payload per doc or folder page, one inline per place
+        crate::build_site(&st, &Scope::Canon, crate::Mode::Static).expect("site");
+        let (copies, inlines) = counts();
+        assert_eq!((copies - before.0, inlines - before.1), (2, 2));
+    }
+
+    /// Final review (fix round 2): the print and the site give a diagram the same shape at the
+    /// inline bound (ruling task-6). The drawing's inline copy is exactly 4,194,304 bytes at
+    /// places 0 to 9 and over at place 10, so the site draws ten places and shows the eleventh
+    /// as its code block; the print shows ten as their source alone and the eleventh as the
+    /// site's code block, and builds no inline copy.
+    #[test]
+    fn dgm9_print_and_site_agree_at_the_inline_bound() {
+        use crate::diagram_svg::{MAX_BYTES, inline, standalone};
+        use crate::print::{PBlock, PageKind};
+        const H: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let svg = |fill: usize| {
+            let ids: String = (0..40).map(|k| format!("<g id=\"a{k}\" />")).collect();
+            format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\">{ids}<text>{}</text></svg>",
+                "x".repeat(fill)
+            )
+        };
+        let base = inline(&standalone(&svg(0)).unwrap(), H, 0).unwrap().len();
+        let near = svg(MAX_BYTES - base);
+        let source = "graph TD\n  Near --> Bound";
+        DRAWN.with_borrow_mut(|d| d.insert(source.to_string(), near));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut r = Rdy::init(dir.path(), "rdy-standard").expect("init");
+        let s = |role| Session::human("human:qa".into(), role).unwrap();
+        let mut ops = vec![
+            json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": "d", "title": "Doc", "doc_type": "page"}}),
+        ];
+        for k in 0..11 {
+            ops.push(json!({"op": "create", "type": "diagram", "parent": "$d", "fields": {"lang": "mermaid", "alt": format!("Place {k}")}, "body": source}));
+        }
+        r.write(
+            &s(Role::Writer),
+            WriteRequest {
+                view: "w".into(),
+                ops: serde_json::from_value(json!(ops)).unwrap(),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .expect("write");
+        let p = r
+            .propose(&s(Role::Writer), "w", "w", Some("test summary"))
+            .expect("propose");
+        r.land(&s(Role::Approver), &p.id).expect("land");
+        let st = r.read();
+
+        // the site: ten drawn places, then the eleventh as its code block
+        let site = crate::build_site(&st, &Scope::Canon, crate::Mode::Static).expect("site");
+        let html = String::from_utf8_lossy(&site.files["d.html"]).into_owned();
+        let shapes: Vec<&str> = html
+            .split("<figure class=\"diagram\"")
+            .skip(1)
+            .map(|f| {
+                if f.contains("class=\"diagram-canvas\"") {
+                    "drawn"
+                } else if f.contains("class=\"code-block\"") {
+                    "code block"
+                } else {
+                    "other"
+                }
+            })
+            .collect();
+        let mut want = vec!["drawn"; 10];
+        want.push("code block");
+        assert_eq!(shapes, want, "the site");
+
+        // the print: the same shapes less the drawing, and no inline copy
+        let before = INLINES.get();
+        let print = crate::print::build(&st, &Scope::Canon).expect("print");
+        assert_eq!(INLINES.get(), before, "the print built no inline copy");
+        let doc = print
+            .docs
+            .iter()
+            .find(|d| d.kind == PageKind::Doc)
+            .expect("the doc");
+        let text =
+            |runs: &[crate::print::Run]| runs.iter().map(|r| r.text.as_str()).collect::<String>();
+        let read: Vec<String> = doc
+            .blocks
+            .iter()
+            .map(|b| match b {
+                PBlock::Para { runs, .. } => format!("para {}", text(runs)),
+                PBlock::Code { lang, text, .. } => {
+                    format!("code {} {}", lang.as_deref().unwrap_or(""), text == source)
+                }
+                _ => "other".to_string(),
+            })
+            .collect();
+        let mut want: Vec<String> = (0..10)
+            .flat_map(|k| [format!("para Place {k}"), "code mermaid true".to_string()])
+            .collect();
+        want.extend([
+            "para Mermaid".to_string(),
+            "code mermaid true".to_string(),
+            "para Place 10".to_string(),
+        ]);
+        assert_eq!(read, want, "the print");
+        // and the site's llms words come in the print's order, less the source's summary line
+        let llms = String::from_utf8_lossy(&site.files["llms-full.txt"]).into_owned();
+        let start = llms.find("\nPlace 0\n").expect("the doc's words") + 1;
+        let end = llms.find("\nPlace 10\n").expect("the last caption") + "\nPlace 10".len();
+        let llms_words: Vec<&str> = llms[start..end]
+            .lines()
+            .filter(|l| !l.is_empty() && *l != "```" && *l != "Diagram source")
+            .collect();
+        let print_words: Vec<&str> = doc
+            .blocks
+            .iter()
+            .flat_map(|b| match b {
+                PBlock::Para { runs, .. } => vec![runs[0].text.as_str()],
+                PBlock::Code { text, .. } => text.lines().collect(),
+                _ => vec!["other"],
+            })
+            .collect();
+        assert_eq!(llms_words, print_words, "the llms words");
+        DRAWN.with_borrow_mut(|d| d.clear());
+    }
 }

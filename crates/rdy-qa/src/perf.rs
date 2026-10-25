@@ -6007,6 +6007,332 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     out
 }
 
+/// What `qa-perf` runs: the gate workload, or the one-shot renderer measurement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PerfMode {
+    /// No argument: [`run_workload`], unchanged.
+    Gate,
+    /// `--renderer-10k`: [`renderer_10k`], a measurement the gate never runs (D-FY4VF).
+    Renderer10k,
+}
+
+/// The text `qa-perf` prints, with exit code 2, for any argument list but the two it knows.
+const PERF_USAGE: &str = "usage: qa-perf [--renderer-10k]";
+
+/// Reads the arguments after the program name: none is the gate, exactly `--renderer-10k` is
+/// the renderer measurement, anything else is the usage text.
+pub fn perf_mode(args: &[String]) -> Result<PerfMode, String> {
+    match args {
+        [] => Ok(PerfMode::Gate),
+        [flag] if flag == "--renderer-10k" => Ok(PerfMode::Renderer10k),
+        _ => Err(PERF_USAGE.into()),
+    }
+}
+
+/// Text blocks (claims) in each doc of the renderer corpus, besides its one section.
+pub const TEXT_BLOCKS_PER_DOC: usize = 3;
+/// Every this-many-th doc in tree order, starting with the first, also holds one diagram.
+pub const DIAGRAM_EVERY: usize = 10;
+/// The docs, from the first in tree order, that each hold one figure of the shared blob.
+pub const SHARED_FIGURE_DOCS: usize = 10;
+/// The diagram families, in the order the corpus cycles them: flowchart, class, sequence, state.
+const DIAGRAM_FAMILIES: usize = 4;
+
+/// The shape of the renderer corpus: folders of docs, numbered in the order the renderer walks them.
+#[derive(Clone, Copy, Debug)]
+pub struct DiagramCorpus {
+    pub folders: usize,
+    pub docs_per_folder: usize,
+}
+
+impl DiagramCorpus {
+    /// The measured corpus: 1000 folders of ten docs.
+    pub const RENDERER_10K: DiagramCorpus = DiagramCorpus {
+        folders: 1000,
+        docs_per_folder: 10,
+    };
+    /// The corpus the correctness tests build: 2 folders and 20 docs.
+    pub const SAMPLE: DiagramCorpus = DiagramCorpus {
+        folders: 2,
+        docs_per_folder: 10,
+    };
+
+    pub fn docs(&self) -> usize {
+        self.folders * self.docs_per_folder
+    }
+
+    /// The tree-order numbers of the docs that hold a diagram.
+    pub fn diagram_docs(&self) -> impl Iterator<Item = usize> {
+        (0..self.docs()).step_by(DIAGRAM_EVERY)
+    }
+
+    pub fn diagrams(&self) -> usize {
+        self.diagram_docs().count()
+    }
+
+    /// Diagrams per family, in the order flowchart, class, sequence, state.
+    pub fn per_family(&self) -> [usize; DIAGRAM_FAMILIES] {
+        let mut counts = [0; DIAGRAM_FAMILIES];
+        for k in 0..self.diagrams() {
+            counts[k % DIAGRAM_FAMILIES] += 1;
+        }
+        counts
+    }
+}
+
+/// The Mermaid source of the `k`-th diagram (0-based), which sits in doc number `doc_no`. The
+/// family cycles with `k`; the doc number is in a label, so no two sources are equal and the
+/// build draws one asset for each.
+fn diagram_source(k: usize, doc_no: usize) -> String {
+    match k % DIAGRAM_FAMILIES {
+        0 => format!("graph TD\n    A[Intake {doc_no}] --> B[Review]\n    B --> C[Publish]"),
+        1 => format!(
+            "classDiagram\n    class Record{doc_no} {{\n        +String title\n        +check() bool\n    }}\n    Record{doc_no} --> Page : builds"
+        ),
+        2 => format!(
+            "sequenceDiagram\n    participant A as Client {doc_no}\n    participant B as Service\n    A->>B: request {doc_no}\n    B-->>A: reply"
+        ),
+        _ => format!(
+            "stateDiagram-v2\n    [*] --> Draft\n    Draft --> Review : submit {doc_no}\n    Review --> [*]"
+        ),
+    }
+}
+
+/// The path of every doc in `m`, in the order the renderer visits them: depth first, each
+/// folder's children in sibling order.
+fn docs_in_tree_order(m: &Materialized) -> Vec<String> {
+    let mut out = vec![];
+    let mut stack: Vec<_> = m.children(None).into_iter().rev().collect();
+    while let Some(b) = stack.pop() {
+        match b.block_type.as_str() {
+            "doc" => out.push(m.path_of(&b.id).expect("a doc has a path")),
+            "folder" => stack.extend(m.children(Some(&b.id)).into_iter().rev()),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Builds the renderer corpus in `project` and lands it: `generate_tree`'s folders of docs (one
+/// section and [`TEXT_BLOCKS_PER_DOC`] claims each), then one diagram in every
+/// [`DIAGRAM_EVERY`]-th doc and one figure of a single shared blob in each of the first
+/// [`SHARED_FIGURE_DOCS`] docs. Returns the open project and the doc paths in tree order.
+fn build_diagram_corpus(project: &std::path::Path, plan: DiagramCorpus) -> (Rdy, Vec<String>) {
+    let made = testkit::generate_tree(
+        project,
+        plan.folders,
+        plan.docs_per_folder,
+        TEXT_BLOCKS_PER_DOC,
+    );
+    assert_eq!(made.len(), plan.docs());
+    let mut r = Rdy::open(project).expect("open the corpus");
+    let blob = r
+        .store_mut()
+        .put_blob(b"\x89PNG\r\n\x1a\n generic shared figure")
+        .expect("put the shared blob")
+        .to_string();
+    let m = r
+        .read()
+        .materialized(&Scope::View("work".into()))
+        .expect("work");
+    // `generate_tree` lists docs in creation order; the renderer walks the tree
+    let docs = docs_in_tree_order(&m);
+    assert_eq!(
+        docs.iter().collect::<BTreeSet<_>>(),
+        made.iter().collect::<BTreeSet<_>>(),
+        "the tree holds the docs that were made"
+    );
+    assert_eq!(docs.len(), plan.docs());
+    let section_of = |n: usize| {
+        let doc = m.resolve_path(&docs[n]).expect("doc path");
+        m.children(Some(&doc))
+            .first()
+            .map(|b| b.id.to_string())
+            .expect("the doc's section")
+    };
+    let mut ops: Vec<serde_json::Value> = vec![];
+    for n in 0..SHARED_FIGURE_DOCS.min(plan.docs()) {
+        ops.push(
+            json!({"op": "create", "type": "figure", "parent": section_of(n),
+            "fields": {"blob": blob, "media_type": "image/png", "alt": "Shared figure"}}),
+        );
+    }
+    for (k, n) in plan.diagram_docs().enumerate() {
+        ops.push(
+            json!({"op": "create", "type": "diagram", "parent": section_of(n),
+            "fields": {"lang": "mermaid", "alt": format!("Diagram {n}")},
+            "body": diagram_source(k, n)}),
+        );
+    }
+    drop(m);
+    for batch in ops.chunks(100) {
+        write(&mut r, "work", json!(batch)).expect("write the diagrams and figures");
+    }
+    land(&mut r, "work").expect("land the corpus");
+    (r, docs)
+}
+
+/// What a rendered site holds, counted from its files (Task 12).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenderFacts {
+    pub docs: usize,
+    pub diagrams: usize,
+    /// Every file in the output, the `.rdy-site` marker included.
+    pub files: usize,
+    pub bytes: usize,
+    /// The bytes of the `.html` files.
+    pub html_bytes: usize,
+    /// The bytes inside every `<template data-copy-page hidden>`, as serialized.
+    pub copy_bytes: usize,
+    /// The bytes of the files under `assets/diagrams/` that end in `.svg`.
+    pub svg_bytes: usize,
+    /// The bytes of every sidebar `nav` element, tags included.
+    pub sidebar_bytes: usize,
+    pub copy_max_page_bytes: usize,
+    pub sidebar_max_page_bytes: usize,
+}
+
+const COPY_OPEN: &[u8] = b"<template data-copy-page hidden>";
+const COPY_CLOSE: &[u8] = b"</template>";
+const SIDEBAR_OPEN: &[u8] = b"<nav aria-label=\"Pages\"";
+const SIDEBAR_CLOSE: &[u8] = b"</nav>";
+
+fn find_bytes(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    hay.get(from..)?
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .map(|at| at + from)
+}
+
+/// The sum of the byte lengths of every `open`..`close` span in `html`: with `inner`, the bytes
+/// between the two (the markers excluded); without, the bytes from the start of `open` to the
+/// end of `close`. An `open` that is never closed counts nothing.
+fn span_bytes(html: &[u8], open: &[u8], close: &[u8], inner: bool) -> usize {
+    let (mut at, mut sum) = (0, 0);
+    while let Some(start) = find_bytes(html, open, at) {
+        let Some(end) = find_bytes(html, close, start + open.len()) else {
+            break;
+        };
+        sum += if inner {
+            end - (start + open.len())
+        } else {
+            end + close.len() - start
+        };
+        at = end + close.len();
+    }
+    sum
+}
+
+fn walk_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+    let mut entries = std::fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|e| e.path());
+    for entry in entries {
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            walk_files(&path, out)?;
+        } else {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+impl RenderFacts {
+    /// One page's Copy payload bytes and sidebar bytes.
+    pub fn page(path: &std::path::Path) -> std::io::Result<(usize, usize)> {
+        let html = std::fs::read(path)?;
+        Ok((
+            span_bytes(&html, COPY_OPEN, COPY_CLOSE, true),
+            span_bytes(&html, SIDEBAR_OPEN, SIDEBAR_CLOSE, false),
+        ))
+    }
+
+    /// Counts the site at `out` from its files, for a corpus of `docs` docs and `diagrams`
+    /// diagrams.
+    pub fn of(out: &std::path::Path, docs: usize, diagrams: usize) -> std::io::Result<Self> {
+        let mut paths = vec![];
+        walk_files(out, &mut paths)?;
+        let mut f = RenderFacts {
+            docs,
+            diagrams,
+            files: paths.len(),
+            bytes: 0,
+            html_bytes: 0,
+            copy_bytes: 0,
+            svg_bytes: 0,
+            sidebar_bytes: 0,
+            copy_max_page_bytes: 0,
+            sidebar_max_page_bytes: 0,
+        };
+        let svg_dir = out.join("assets").join("diagrams");
+        for path in &paths {
+            let len = std::fs::metadata(path)?.len() as usize;
+            f.bytes += len;
+            if path.extension().is_some_and(|e| e == "html") {
+                f.html_bytes += len;
+                let (copy, sidebar) = Self::page(path)?;
+                f.copy_bytes += copy;
+                f.sidebar_bytes += sidebar;
+                f.copy_max_page_bytes = f.copy_max_page_bytes.max(copy);
+                f.sidebar_max_page_bytes = f.sidebar_max_page_bytes.max(sidebar);
+            } else if path.starts_with(&svg_dir) && path.extension().is_some_and(|e| e == "svg") {
+                f.svg_bytes += len;
+            }
+        }
+        Ok(f)
+    }
+
+    /// The one stable stderr line of the measurement.
+    pub fn line(&self) -> String {
+        format!(
+            "render_diagrams_10k: docs={} diagrams={} files={} bytes={} html_bytes={} copy_bytes={} svg_bytes={} sidebar_bytes={} copy_max_page_bytes={} sidebar_max_page_bytes={}",
+            self.docs,
+            self.diagrams,
+            self.files,
+            self.bytes,
+            self.html_bytes,
+            self.copy_bytes,
+            self.svg_bytes,
+            self.sidebar_bytes,
+            self.copy_max_page_bytes,
+            self.sidebar_max_page_bytes
+        )
+    }
+}
+
+/// The one-shot renderer measurement (D-FY4VF; `qa-perf --renderer-10k`). Builds and lands the
+/// 10k-doc corpus (1000 diagrams, one shared figure blob), captures one `ReadState`, makes an
+/// empty output directory, and times the whole of `render_site` of canon into it: a fresh
+/// render with the prepared state and no earlier rendered-site cache. The build, the landing,
+/// the byte counts and the cleanup are outside the timer. It returns one `Measure`,
+/// `render_diagrams_10k`, with one run; nothing compares it with a baseline.
+///
+/// Before it returns it prints, to stderr, the fact line ([`RenderFacts::line`]) and one line
+/// for the first authored doc in tree order.
+pub fn renderer_10k() -> Vec<Measure> {
+    rdy_model::seed_ids_for_tests(0x7231_306b);
+    let plan = DiagramCorpus::RENDERER_10K;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (r, docs) = build_diagram_corpus(&dir.path().join("p"), plan);
+    let state = r.read();
+    let out = dir.path().join("site");
+    std::fs::create_dir_all(&out).expect("mkdir the output directory");
+    let measure = measure_timed("render_diagrams_10k", 1, |_| {
+        let s = Instant::now();
+        rdy_render::render_site(&state, &Scope::Canon, &out).expect("render the corpus");
+        s.elapsed()
+    });
+    let facts = RenderFacts::of(&out, plan.docs(), plan.diagrams()).expect("count the output");
+    eprintln!("{}", facts.line());
+    let (copy, sidebar) =
+        RenderFacts::page(&out.join(format!("{}.html", docs[0]))).expect("the first doc's page");
+    eprintln!(
+        "render_diagrams_10k first_doc: path={} copy_bytes={copy} sidebar_bytes={sidebar}",
+        docs[0]
+    );
+    vec![measure]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8354,5 +8680,271 @@ mod tests {
                 .unwrap_or_else(|| panic!("{op} missing"));
             assert!(m.median_ms > 0.0, "{op}: {m:?}");
         }
+    }
+
+    fn dgm12_args(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    /// Every file under `dir`, found by a walk that shares nothing with the counters it checks.
+    fn dgm12_walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut found = vec![];
+        for entry in std::fs::read_dir(dir).expect("read_dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                found.extend(dgm12_walk(&path));
+            } else {
+                found.push(path);
+            }
+        }
+        found
+    }
+
+    /// Task 12: the 10k plan declares 10000 docs and 1000 diagrams, 250 in each of the four drawn
+    /// families, each with its own label; a 20-doc sample built by the same code agrees with the
+    /// plan block for block.
+    #[test]
+    fn dgm12_fixture_has_the_declared_diagram_distribution() {
+        let big = DiagramCorpus::RENDERER_10K;
+        assert_eq!((big.folders, big.docs_per_folder), (1000, 10));
+        assert_eq!(big.docs(), 10_000);
+        assert_eq!(big.diagrams(), 1000);
+        assert_eq!(big.per_family(), [250, 250, 250, 250]);
+        assert_eq!(TEXT_BLOCKS_PER_DOC, 3);
+        assert_eq!(DIAGRAM_EVERY, 10);
+        assert_eq!(SHARED_FIGURE_DOCS, 10);
+        let sources: BTreeSet<String> = big
+            .diagram_docs()
+            .enumerate()
+            .map(|(k, n)| diagram_source(k, n))
+            .collect();
+        assert_eq!(
+            sources.len(),
+            1000,
+            "each label differs, so no asset repeats"
+        );
+        // every family's source draws; none is invalid or undrawn
+        for k in 0..4 {
+            let src = diagram_source(k, 7);
+            assert!(
+                matches!(
+                    rdy_render::diagram::render(&src),
+                    rdy_render::diagram::Diagram::Svg(_)
+                ),
+                "family {k} does not draw: {src}"
+            );
+        }
+
+        let small = DiagramCorpus::SAMPLE;
+        assert_eq!((small.folders, small.docs_per_folder), (2, 10));
+        assert_eq!(small.docs(), 20);
+        assert_eq!(small.diagrams(), 2);
+        assert_eq!(small.per_family(), [1, 1, 0, 0]);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (r, docs) = build_diagram_corpus(&dir.path().join("p"), small);
+        assert_eq!(docs.len(), 20);
+        let m = r.read().materialized(&Scope::Canon).expect("canon");
+        let of = |ty: &str| m.iter().filter(|b| b.block_type == ty).collect::<Vec<_>>();
+        assert_eq!(of("doc").len(), 20);
+        assert_eq!(of("section").len(), 20);
+        assert_eq!(of("claim").len(), 20 * TEXT_BLOCKS_PER_DOC);
+        assert_eq!(of("diagram").len(), 2);
+        assert_eq!(of("figure").len(), SHARED_FIGURE_DOCS);
+        let section_of = |n: usize| {
+            let doc = m.resolve_path(&docs[n]).expect("doc path");
+            m.children(Some(&doc))[0].id.clone()
+        };
+        for (k, n) in small.diagram_docs().enumerate() {
+            let section = section_of(n);
+            let found = of("diagram")
+                .into_iter()
+                .find(|b| b.parent.as_ref() == Some(&section))
+                .unwrap_or_else(|| panic!("doc {n} has no diagram"));
+            assert_eq!(found.body, diagram_source(k, n));
+            assert_eq!(
+                found.fields.get("lang"),
+                Some(&rdy_model::FieldValue::Str("mermaid".into()))
+            );
+        }
+        // one blob, referenced by ten docs
+        let blobs: BTreeSet<String> = of("figure")
+            .iter()
+            .map(|b| format!("{:?}", b.fields["blob"]))
+            .collect();
+        assert_eq!(blobs.len(), 1);
+        let parents: BTreeSet<_> = of("figure").iter().map(|b| b.parent.clone()).collect();
+        assert_eq!(
+            parents,
+            (0..SHARED_FIGURE_DOCS)
+                .map(|n| Some(section_of(n)))
+                .collect::<BTreeSet<_>>()
+        );
+    }
+
+    /// Task 12 (fix round 1): doc numbers follow the tree the renderer walks, depth first in
+    /// sibling order, not `generate_tree`'s creation order (all top-level folders, then the
+    /// nested ones). With 12 folders, two nest (`part-10` under `area-0`, `part-11` under
+    /// `area-1`) and a folder's subfolders come before its docs, so the first doc is nested.
+    #[test]
+    fn dgm12_docs_are_numbered_in_tree_order() {
+        let plan = DiagramCorpus {
+            folders: 12,
+            docs_per_folder: 1,
+        };
+        let expected: Vec<String> = [
+            "area-0/part-10/doc-0",
+            "area-0/doc-0",
+            "area-1/part-11/doc-0",
+            "area-1/doc-0",
+            "area-2/doc-0",
+            "area-3/doc-0",
+            "area-4/doc-0",
+            "area-5/doc-0",
+            "area-6/doc-0",
+            "area-7/doc-0",
+            "area-8/doc-0",
+            "area-9/doc-0",
+        ]
+        .iter()
+        .map(|p| p.to_string())
+        .collect();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (r, docs) = build_diagram_corpus(&dir.path().join("p"), plan);
+        assert_eq!(docs, expected, "doc paths in tree order");
+        // the diagrams go to the docs numbered 0 and 10 in that order
+        let m = r.read().materialized(&Scope::Canon).expect("canon");
+        let with_diagram: BTreeSet<String> = m
+            .iter()
+            .filter(|b| b.block_type == "diagram")
+            .map(|b| {
+                let section = b.parent.as_ref().expect("section");
+                let doc = m.doc_of(section).expect("doc");
+                m.path_of(&doc.id).expect("doc path")
+            })
+            .collect();
+        assert_eq!(
+            with_diagram,
+            BTreeSet::from([docs[0].clone(), docs[10].clone()])
+        );
+        assert_eq!(docs[0], "area-0/part-10/doc-0");
+        assert_eq!(docs[10], "area-8/doc-0");
+    }
+
+    /// Task 12: the counters read the files the render wrote. Exact numbers on a small tree of
+    /// known bytes, then agreement with an independent walk of a rendered sample. No duration is
+    /// asserted.
+    #[test]
+    fn dgm12_report_counts_actual_output_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("fake");
+        let put = |rel: &str, bytes: &[u8]| {
+            let path = out.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            std::fs::write(path, bytes).expect("write");
+        };
+        let a = "<nav aria-label=\"Pages\"><ul>x</ul></nav><template data-copy-page hidden>a &amp; b</template>";
+        let b = "<nav aria-label=\"Pages\">longer sidebar</nav><template data-copy-page hidden>\u{e9}</template><p>t</p>";
+        put("a.html", a.as_bytes());
+        put("sub/b.html", b.as_bytes());
+        put("go/c.html", b"<p>no sidebar</p>");
+        put("assets/diagrams/0.svg", b"<svg/>");
+        put("assets/1.png", b"abcd");
+        let f = RenderFacts::of(&out, 10_000, 1000).expect("facts");
+        let sidebar_a = "<nav aria-label=\"Pages\"><ul>x</ul></nav>".len();
+        let sidebar_b = "<nav aria-label=\"Pages\">longer sidebar</nav>".len();
+        assert_eq!(f.files, 5);
+        assert_eq!(f.bytes, a.len() + b.len() + 17 + 6 + 4);
+        assert_eq!(f.html_bytes, a.len() + b.len() + 17);
+        assert_eq!(f.svg_bytes, 6);
+        // the bytes inside the template as serialized: entity escapes count, the tags do not,
+        // and a two-byte letter counts as two
+        assert_eq!(f.copy_bytes, "a &amp; b".len() + 2);
+        assert_eq!(f.copy_max_page_bytes, "a &amp; b".len());
+        assert_eq!(f.sidebar_bytes, sidebar_a + sidebar_b);
+        assert_eq!(f.sidebar_max_page_bytes, sidebar_b);
+        assert_eq!(
+            f.line(),
+            format!(
+                "render_diagrams_10k: docs=10000 diagrams=1000 files=5 bytes={} html_bytes={} \
+                 copy_bytes=11 svg_bytes=6 sidebar_bytes={} copy_max_page_bytes=9 \
+                 sidebar_max_page_bytes={sidebar_b}",
+                f.bytes, f.html_bytes, f.sidebar_bytes
+            )
+        );
+
+        // a rendered sample
+        let proj = dir.path().join("p");
+        let (r, docs) = build_diagram_corpus(&proj, DiagramCorpus::SAMPLE);
+        let site = dir.path().join("site");
+        std::fs::create_dir_all(&site).expect("mkdir");
+        rdy_render::render_site(&r.read(), &Scope::Canon, &site).expect("render");
+        let f = RenderFacts::of(&site, 20, 2).expect("facts");
+        let files = dgm12_walk(&site);
+        let size = |p: &std::path::PathBuf| std::fs::metadata(p).expect("metadata").len() as usize;
+        assert_eq!(f.files, files.len());
+        assert_eq!(f.bytes, files.iter().map(size).sum::<usize>());
+        assert_eq!(
+            f.html_bytes,
+            files
+                .iter()
+                .filter(|p| p.extension().is_some_and(|e| e == "html"))
+                .map(size)
+                .sum::<usize>()
+        );
+        assert_eq!(
+            f.svg_bytes,
+            files
+                .iter()
+                .filter(|p| p.starts_with(site.join("assets/diagrams")))
+                .map(size)
+                .sum::<usize>()
+        );
+        assert!(f.sidebar_bytes > 0 && f.sidebar_max_page_bytes <= f.sidebar_bytes);
+        assert!(f.copy_max_page_bytes <= f.copy_bytes);
+        // the first authored doc in tree order has a page of its own
+        let first = RenderFacts::page(&site.join(format!("{}.html", docs[0]))).expect("first doc");
+        assert!(first.1 > 0, "the first doc's page carries a sidebar");
+    }
+
+    /// Task 12: the 10k measurement is its own mode. No argument keeps the gate workload; the
+    /// exact flag selects the measurement; anything else is the usage text. The binary's gate
+    /// branch calls `run_workload`, and `run_workload` never calls the measurement.
+    #[test]
+    fn dgm12_renderer_mode_is_separate_from_the_gate_workload() {
+        let usage = "usage: qa-perf [--renderer-10k]".to_string();
+        assert_eq!(perf_mode(&[]), Ok(PerfMode::Gate));
+        assert_eq!(
+            perf_mode(&dgm12_args(&["--renderer-10k"])),
+            Ok(PerfMode::Renderer10k)
+        );
+        for bad in [
+            vec!["--renderer-10k", "--renderer-10k"],
+            vec!["--renderer-10k", "x"],
+            vec!["x", "--renderer-10k"],
+            vec!["--renderer"],
+            vec!["--gate"],
+            vec!["--Renderer-10k"],
+            vec![""],
+        ] {
+            assert_eq!(perf_mode(&dgm12_args(&bad)), Err(usage.clone()), "{bad:?}");
+        }
+        let bin = include_str!("bin/qa-perf.rs");
+        let gate = bin.find("PerfMode::Gate").expect("the gate branch");
+        let renderer = bin
+            .find("PerfMode::Renderer10k")
+            .expect("the renderer branch");
+        assert!(gate < renderer, "the gate branch comes first");
+        assert!(bin[gate..renderer].contains("run_workload("));
+        assert!(!bin[gate..renderer].contains("renderer_10k"));
+        assert!(bin[renderer..].contains("renderer_10k()"));
+        assert!(bin.contains("perf_mode(&args)"));
+        assert!(bin.contains("eprintln!(\"{usage}\")"));
+        assert!(bin.contains("std::process::exit(2)"));
+        let src = include_str!("perf.rs");
+        let from = src.find("pub fn run_workload(").expect("run_workload");
+        let body = &src[from..from + src[from..].find("\n}\n").expect("its end")];
+        assert!(!body.contains("renderer_10k"));
+        assert!(!body.contains("PerfMode"));
     }
 }

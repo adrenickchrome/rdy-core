@@ -1,6 +1,6 @@
 //! Opening, creating and closing a project: the `Rdy` handle's accessors.
 
-use crate::config::{Config, ServeSection, parse_config, read_config, site_identity};
+use crate::config::{Config, ServeSection, SiteConfig, parse_config, read_config, site_identity};
 use crate::pack_load::{load_pack, load_pack_from, read_sources};
 use crate::read_state::{AsOfCache, Entry};
 use crate::{
@@ -114,6 +114,7 @@ impl Rdy {
             views: None,
             decisions: None,
             serve: ServeSection::default(),
+            site: SiteConfig::default(),
             coverage: None,
             propose: None,
         })
@@ -194,6 +195,7 @@ impl Rdy {
         let coverage_target = cfg.coverage_target();
         let (propose_cadence, propose_changes) = (cfg.propose_cadence(), cfg.propose_changes());
         let decisions_home = cfg.decisions_home();
+        let site_base_path = cfg.site.base_path.clone();
         let lease_ttl_ms = i64::from(cfg.lease_ttl_minutes()) * 60_000;
         // a placeholder until the first publish below, which replaces all of it
         let state = ArcSwap::from_pointee(ReadState {
@@ -213,6 +215,7 @@ impl Rdy {
             propose_cadence,
             propose_changes,
             decisions_home,
+            site_base_path,
             reader: store.reader(),
             as_of: Arc::clone(&as_of),
             vpos: Arc::clone(&vpos),

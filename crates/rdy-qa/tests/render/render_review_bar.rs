@@ -8,7 +8,8 @@ use std::path::Path;
 /// The toggles as the bar writes them: both wait for script.
 const TOGGLES: &str = "<div class=\"review-toggles\"><button id=\"show-changes\" type=\"button\" aria-pressed=\"true\" hidden>Show changes</button><button id=\"show-diff\" type=\"button\" aria-pressed=\"false\" hidden>Show diff</button></div>";
 
-/// Every page of a site but the permalink pages under `go/`, which hold no layout.
+/// Every page of a site but the permalink pages under `go/`, which hold no layout, and the
+/// generated not-found page, which has no review controls (its own dgm10 pin checks that).
 fn layout_pages(site: &Path) -> Vec<(String, String)> {
     pages(site)
         .into_iter()
@@ -19,6 +20,7 @@ fn layout_pages(site: &Path) -> Vec<(String, String)> {
                 std::fs::read_to_string(&p).unwrap(),
             )
         })
+        .filter(|(_, h)| !h.contains("data-rdy-kind=\"not-found\""))
         .collect()
 }
 

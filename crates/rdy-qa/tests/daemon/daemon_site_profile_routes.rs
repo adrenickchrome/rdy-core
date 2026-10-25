@@ -5,6 +5,7 @@
 //! The cache keeps each scope, profile and menu context apart, keeps each profile's history
 //! memo across builds, and keeps the redaction barriers. A blocked public profile serves with
 //! its warning while every durable output still refuses it.
+use crate::daemon_site_not_found::{Variant, assert_themed};
 use rdy_daemon::Shared;
 use rdy_daemon::site::guard::{Refusal, ScopeRef, SiteTarget, refusal};
 use rdy_daemon::site::live::{LiveEvent, LiveSite, SiteBuild, Subscription, normalize};
@@ -408,7 +409,8 @@ fn spv6_profile_routes_serve_each_scopes_revision() {
         assert_eq!(home.status, 200, "{root}: {}", home.head);
         assert!(text(&home).contains("Intro page"), "{root}");
     }
-    // a proposal-only profile: canon, the tag and the view hold no such profile
+    // a proposal-only profile: canon, the tag and the view hold no such profile. A target the
+    // site does not hold now is canon's Scope variant (dgm11)
     for path in [
         "~profile/fresh/",
         "~profile/fresh/manual/intro.html",
@@ -416,12 +418,16 @@ fn spv6_profile_routes_serve_each_scopes_revision() {
         "~view/work/~profile/fresh/",
         "~profile/nope/",
         "~view/work/~profile/nope/",
-        // a page the selection does not have
-        "~profile/guide/secret.html",
-        "~profile/guide/nope.html",
         "~view/nowhere/~profile/guide/",
     ] {
-        assert_refusal(&get(&w, path), Refusal::NotFound, path);
+        assert_themed(&get(&w, path), Variant::Scope, "/", "Tiny", path);
+        assert_eq!(head(&w, path).status, 404, "HEAD {path}");
+    }
+    // a page the selection does not have: the profile route's Page variant (dgm11)
+    for path in ["~profile/guide/secret.html", "~profile/guide/nope.html"] {
+        let r = get(&w, path);
+        assert_themed(&r, Variant::Page, "/~profile/guide/", "Guide book", path);
+        assert!(!text(&r).contains("SECRET-"), "{path}: an excluded doc");
         assert_eq!(head(&w, path).status, 404, "HEAD {path}");
     }
     // malformed profile metadata is a build error, not a missing page
@@ -434,7 +440,7 @@ fn spv6_profile_routes_serve_each_scopes_revision() {
     let source = get(&w, "manual/intro.html");
     assert_eq!(source.status, 200);
     assert!(text(&source).contains("INTRO-CANON-2") && text(&source).contains("Secret page"));
-    assert_refusal(&get(&w, "nope.html"), Refusal::NotFound, "source");
+    assert_themed(&get(&w, "nope.html"), Variant::Page, "/", "Tiny", "source");
 }
 
 // --- 2. queries ---------------------------------------------------------------------------------
@@ -509,10 +515,12 @@ fn spv6_queries_preserve_first_values_and_statuses() {
             query,
         );
     }
-    // a profile the scope does not hold: the plain answer
-    assert_refusal(
+    // a profile the scope does not hold: canon's Scope variant (dgm11)
+    assert_themed(
         &get(&w, "~versions/?profile=fresh"),
-        Refusal::NotFound,
+        Variant::Scope,
+        "/",
+        "Tiny",
         "an absent profile",
     );
 
@@ -590,7 +598,8 @@ fn spv6_queries_preserve_first_values_and_statuses() {
         "~profile/guide/../secret.html",
         "~tag/v1.0.0/~profile/guide",
     ] {
-        assert_refusal(&get(&w, path), Refusal::NotFound, path);
+        // a path the guard does not route: canon's Page variant (dgm11)
+        assert_themed(&get(&w, path), Variant::Page, "/", "Tiny", path);
     }
 }
 
@@ -821,9 +830,11 @@ fn spv6_profile_history_reuses_memo_and_warns_once() {
         assert!(!body.contains("since v1.0.0"), "no neutral chip: {body}");
         assert!(!body.contains("changes-since.html"), "no since link");
     }
-    assert_refusal(
+    assert_themed(
         &get(&w, "~view/work/~profile/guide/changes-since.html"),
-        Refusal::NotFound,
+        Variant::Page,
+        "/~view/work/~profile/guide/",
+        "Guide book",
         "no since page",
     );
     assert_eq!(

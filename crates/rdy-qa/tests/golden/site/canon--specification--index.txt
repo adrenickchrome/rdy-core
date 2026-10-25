@@ -10,20 +10,27 @@ chrome	-	Dark
 chrome	L	Pages
 chrome	L	Home
 chrome	L	Overview
+chrome	-	↗
 chrome	L	Specification
 chrome	L	The match statement and its patterns
 chrome	L	How a match runs
+chrome	L	↗
 chrome	L	Depth 0
+chrome	L	Depth 1
+chrome	-	↗
 chrome	L	Rationale
 chrome	L	Why the design is what it is
 chrome	L	Σημασιολογία
+chrome	-	↗
 chrome	L	Tutorial
 chrome	L	Pattern matching by example
+chrome	-	↗
 chrome	L	Proposals
 chrome	L	Unused variable syntax
 chrome	L	Explicit pattern syntax
 chrome	L	Precise semantics for pattern matching
 chrome	L	A deliberately long title that goes on and on, so that headings, breadcrumbs, navigation entries, page titles and search results all have to cope with a name far longer than anyone would choose for a.
+chrome	-	↗
 chrome	L	Appendix
 chrome	L	Appendix 1
 chrome	L	Appendix 2
@@ -85,6 +92,9 @@ chrome	-	Dark
 chrome	L	Structural pattern matching
 chrome	L	Specification
 chrome	L	Specification
+chrome	-	Link
+chrome	-	Copy ref
+chrome	-	Copy
 chrome	-	What each pattern kind matches, what it binds, and what is left undefined.
 chrome	-	The match statement and its patterns
 chrome	-	How a match runs

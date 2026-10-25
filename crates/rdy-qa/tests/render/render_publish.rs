@@ -933,6 +933,8 @@ fn hpb6_manifest_covers_every_served_file() {
             Some("woff2") => "font/woff2",
             Some("png") => "image/png",
             Some("pdf") => "application/pdf",
+            // generated: a drawn diagram's file only
+            Some("svg") if path.starts_with("assets/diagrams/") => "image/svg+xml",
             other => panic!("{path}: {other:?}"),
         }
     };
@@ -946,10 +948,21 @@ fn hpb6_manifest_covers_every_served_file() {
             "{path}"
         );
     }
+    let drawn: Vec<&String> = a
+        .files
+        .keys()
+        .filter(|p| p.starts_with("assets/diagrams/"))
+        .collect();
+    assert_eq!(drawn.len(), 1, "{:?}", a.files.keys());
+    assert_eq!(
+        drawn[0].as_str(),
+        format!("assets/diagrams/{}.svg", Hash::of(&a.files[drawn[0]]))
+    );
+    assert!(!a.files.keys().any(|p| p.starts_with("assets/js/")));
     for want in [
         "assets/site.css",
         "assets/app.js",
-        "assets/js/mermaid.min.js",
+        drawn[0].as_str(),
         "assets/fonts/onest.woff2",
         "search-index.json",
         "llms.txt",

@@ -111,7 +111,8 @@ fn pres1_asides_and_notes_get_no_trail_or_copy_ref() {
     let h = std::fs::read_to_string(out.path().join("t.html")).unwrap();
     assert!(h.contains("Decorative.") && h.contains("Margin."), "{h}");
     assert!(!h.contains("class=\"why\""), "{h}");
-    // only the section has a reference to copy; the three blocks each have a link
-    assert_eq!(h.matches("class=\"tool copy-ref\"").count(), 1, "{h}");
-    assert_eq!(h.matches("class=\"tool copy-link\"").count(), 3, "{h}");
+    // only the doc's title and the section have a reference to copy; the title and the three
+    // blocks each have a link
+    assert_eq!(h.matches("class=\"tool copy-ref\"").count(), 2, "{h}");
+    assert_eq!(h.matches("class=\"tool copy-link\"").count(), 4, "{h}");
 }

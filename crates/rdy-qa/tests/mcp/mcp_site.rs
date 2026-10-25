@@ -571,3 +571,64 @@ fn ls7_lan_mode_gives_the_lan_link_and_the_warning() {
     // the daemon warns once, where the person running it sees it
     assert_eq!(log.lines(), [rdy_qa::daemon::LAN_DOCS_LINE]);
 }
+
+/// The path of a site URL (`http://127.0.0.1:<port>/~view/x/` gives `/~view/x/`).
+fn path_of(url: &str) -> &str {
+    let rest = url.strip_prefix("http://").unwrap();
+    &rest[rest.find('/').unwrap()..]
+}
+
+/// Asserts `r` is the site's themed not-found page whose links start at `root`, with the words
+/// of `sentence` and no live behaviour (dgm11).
+#[track_caller]
+fn assert_themed_404(r: &http::Response, root: &str, sentence: &str, what: &str) {
+    assert_eq!(r.status, 404, "{what}: {}", r.head);
+    assert_eq!(r.header("content-type"), Some("text/html; charset=utf-8"));
+    let body = String::from_utf8_lossy(&r.body);
+    assert!(
+        body.contains("<html lang=\"en\" data-rdy-kind=\"not-found\">"),
+        "{what}: {body}"
+    );
+    assert!(body.contains("<h1>Page not found</h1>"), "{what}");
+    assert!(
+        body.contains(&format!("<p>{sentence}</p>")),
+        "{what}: {body}"
+    );
+    assert!(
+        body.contains(&format!("href=\"{root}index.html\"")),
+        "{what}: the home link at {root}"
+    );
+    assert!(
+        !body.contains("/_rdy/live.js") && !body.contains("data-events"),
+        "{what}"
+    );
+}
+
+/// dgm11: each link `rdy_site` gives reaches the scope's own themed not-found page for a page it
+/// does not have, and the canon link reaches canon's page for a scope the site does not hold.
+#[test]
+fn dgm11_mcp_site_links_reach_themed_404() {
+    const PAGE: &str =
+        "There is no page at this address. It may have moved, or the link may be wrong.";
+    const SCOPE: &str = "This link names a version, view, proposal or profile that is not on the site now. A view or proposal leaves the site when its work lands or stops.";
+    let (s, proposal, _) = golden_served();
+    let mut c = agent(&s);
+    let canon = c.call("rdy_site", json!({})).ok();
+    let root = canon["url"].as_str().unwrap().to_string();
+    let scope = format!("proposal:{}", proposal.r#ref);
+    for given in [
+        json!({}),
+        json!({"scope": "editing"}),
+        json!({"scope": scope}),
+        json!({"scope": "tag:v1.0.0"}),
+    ] {
+        let v = c.call("rdy_site", given.clone()).ok();
+        let url = v["url"].as_str().unwrap();
+        assert_eq!(page(url).status, 200, "{v}");
+        let r = page(&format!("{url}nosuch/page.html"));
+        assert_themed_404(&r, path_of(url), PAGE, &given.to_string());
+    }
+    let r = page(&format!("{root}~view/gone-view/"));
+    assert_themed_404(&r, "/", SCOPE, "a scope the site does not hold");
+    assert!(!String::from_utf8_lossy(&r.body).contains("gone-view"));
+}

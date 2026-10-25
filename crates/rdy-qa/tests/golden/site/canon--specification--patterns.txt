@@ -10,20 +10,27 @@ chrome	-	Dark
 chrome	L	Pages
 chrome	L	Home
 chrome	L	Overview
+chrome	-	↗
 chrome	L	Specification
 chrome	L	The match statement and its patterns
 chrome	L	How a match runs
+chrome	L	↗
 chrome	L	Depth 0
+chrome	L	Depth 1
+chrome	-	↗
 chrome	L	Rationale
 chrome	L	Why the design is what it is
 chrome	L	Σημασιολογία
+chrome	-	↗
 chrome	L	Tutorial
 chrome	L	Pattern matching by example
+chrome	-	↗
 chrome	L	Proposals
 chrome	L	Unused variable syntax
 chrome	L	Explicit pattern syntax
 chrome	L	Precise semantics for pattern matching
 chrome	L	A deliberately long title that goes on and on, so that headings, breadcrumbs, navigation entries, page titles and search results all have to cope with a name far longer than anyone would choose for a.
+chrome	-	↗
 chrome	L	Appendix
 chrome	L	Appendix 1
 chrome	L	Appendix 2
@@ -87,6 +94,9 @@ chrome	L	Specification
 chrome	L	The match statement and its patterns
 content	L	Specification
 content	L	The match statement and its patterns
+content	-	Link
+content	-	Copy ref
+content	-	Copy
 content	-	This document is the
 content	-	specification
 content	-	of the
@@ -99,6 +109,7 @@ content	-	the tutorial
 content	-	.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	The specification covers:
 content	-	the syntax of patterns
 content	-	capture and wildcard patterns
@@ -109,12 +120,14 @@ content	-	guards
 content	-	, which see the bindings of their own case
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Read it in this order:
 content	-	Patterns
 content	-	Evaluation
 content	-	Guards
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Note
 content	-	The keywords
 content	-	and
@@ -126,8 +139,10 @@ content	-	.
 content	L	Summary
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	This is the normative description of the match statement. It says what a match statement does and how each kind of pattern behaves, without commentary. The reasons behind the rules are in
 content	-	Why the design is what it is
 content	-	, and a guided walk through the feature is in
@@ -135,31 +150,38 @@ content	-	Pattern matching by example
 content	-	.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Every term used here is defined once, in the section called Terms.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Note
 content	-	Throughout the specification, the words must, should and may are used as the requirement words: a must is a rule, a should is a strong recommendation and a may is a permission.
 content	L	Terms
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Subject
 content	-	The value that follows
 content	-	. It is evaluated once; if the expression contains a comma, the subject is a tuple.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Pattern
 content	-	The text that follows
 content	-	. It describes a shape the subject must have and the names to bind to its parts.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Capture pattern
 content	-	A bare name other than
 content	-	. It always succeeds and binds the subject to the name.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Wildcard
 content	-	The single underscore,
 content	-	. It matches any subject and binds nothing.
@@ -175,12 +197,14 @@ trail	-	in patterns only and keep
 trail	-	.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Value pattern
 content	-	A dotted name such as
 content	-	. The name is looked up and compared with the subject using
 content	-	.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Literal pattern
 content	-	A pattern that matches one constant: a number, a string, or one of
 content	-	,
@@ -188,27 +212,33 @@ content	-	and
 content	-	.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Class pattern
 content	-	A dotted name followed by parentheses that hold subpatterns. It tests the type of the subject, then its attributes.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Mapping pattern
 content	-	A pattern written with braces. Each item pairs a key, which must be a literal or a value, with a subpattern for the value.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Sequence pattern
 content	-	A pattern written with square brackets or parentheses. It tests the length of the subject, then each item in turn.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Guard
 content	-	An expression after
 content	-	in a case block. It is evaluated only when the pattern has already succeeded.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Irrefutable
 content	-	A pattern whose syntax alone proves that it always succeeds. Only the last case block may have one.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Or-pattern
 content	-	Two or more patterns joined by
 content	-	. It succeeds at the first alternative that succeeds.
@@ -218,11 +248,13 @@ trail	-	Ruled: Alternatives in a pattern are separated by
 trail	-	.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	As-pattern
 content	-	A pattern followed by
 content	-	and a name. It matches its left side and also binds the subject to the name.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	__match_args__
 content	-	A class attribute that lists, in order, the attributes that positional subpatterns of a class pattern refer to.
 content	L	Why
@@ -231,61 +263,77 @@ trail	-	Ruled: Positional subpatterns map through
 trail	-	.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	A pattern is matched with a subject, or matched against it. The primary outcome is success or failure; a secondary outcome may be the binding of names.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Patterns often contain nested subpatterns. Processing usually moves left to right until an outcome is decided. When subpatterns are tried until one succeeds, only the bindings of the successful subpattern are kept. When they are tried until one fails, the bindings merge.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Requirement · must
 content	-	Code must not rely on bindings made during a failed match.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Claim
 content	-	Names bound by a successful pattern remain available after the match statement.
 content	L	The match statement
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	A match statement is a compound statement. Its grammar, in the notation used by the language reference, is given below.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Grammar
 content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Component
 content	L	The match statement
 content	-	The compound statement that tries each case block against one subject. It owns the order of evaluation and the scope of the names its patterns bind.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Interface
 content	L	Pattern grammar
 content	-	The grammar of a pattern: an as-pattern or an or-pattern, built from closed patterns. A closed pattern is a literal, a capture, a wildcard, a value, a group, a sequence, a mapping or a class pattern.
 content	L	Semantics
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	The subject expression is evaluated. If it contains a comma, a tuple is constructed by the usual rules.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	The case blocks are tried in order. The first whose pattern succeeds against the subject and whose guard, if present, is truthy, is selected. If a case block is selected its block runs; otherwise the match statement completes and no block runs.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	The same sequence is drawn as a flow in
 content	-	How a match runs
 content	-	.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Claim
 content	-	The subject expression is evaluated exactly once, however many case blocks the statement has.
 content	L	Soft keywords
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Requirement · must
 content	-	and
 content	-	are soft keywords.
@@ -298,17 +346,21 @@ trail	-	8 February 2021
 trail	-	Set aside: Every pattern element carries an explicit marker. Options considered: markers on every element, markers on captures only and the dotted-name rule.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	They are not reserved words in any other grammatical context. Code that uses either as a variable, function or attribute name keeps working.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Note
 content	-	The soft keyword
 content	-	only ever starts a line inside a match statement, so a reader finds it easy to recognise.
 content	L	Guards
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	A guard is evaluated
 content	-	only
 content	-	after its pattern matches, and
@@ -323,58 +375,74 @@ content	-	A guard that raises ends the whole
 content	-	statement.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	A guard is an optional expression, introduced by
 content	-	, that is evaluated only after the pattern of its case block has succeeded. It may be any expression and may have side effects.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Requirement · should
 content	-	Guards are evaluated strictly in case-block order, and only for case blocks whose pattern succeeded.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Evaluation stops as soon as a case block is selected. If a guard raises, the exception propagates and no later case block is tried.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Note
 content	-	A guard that raises stops the whole statement. It does not fall through to the next case block.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	The long identifier CaseBlockEvaluationOrderIsStrictlyTopToBottom names this rule in one of the test suites, which shows how a single unbroken word must fit a narrow page.
 content	L	Irrefutable case blocks
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	A pattern is irrefutable if its syntax alone proves that it always succeeds. The irrefutable patterns are capture patterns, wildcard patterns, as-patterns whose left side is irrefutable, or-patterns containing at least one irrefutable subpattern, and parenthesised irrefutable patterns.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Requirement · must
 content	-	A match statement may have at most one irrefutable case block, and it must be last.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	This is a compile-time error, so a case block that could never be reached cannot be written.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	L	Patterns
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	The top-level grammar of a pattern is:
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Grammar
 content	-	Copy
 content	L	Literal patterns
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	A literal pattern matches one constant: a signed number, a complex number written as
 content	-	or
 content	-	, a string (raw and bytes forms included, f-strings excluded) or one of the singletons
@@ -383,37 +451,45 @@ content	-	and
 content	-	.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Requirement · must
 content	-	Numbers and strings compare with
 content	-	. The singletons compare with
 content	-	.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Example
 content	-	matches the integer 42 and the float 42.0, because they compare equal.
 content	-	matches only the singleton.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	L	Capture patterns
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	A capture pattern is a bare name other than
 content	-	. It always succeeds and binds the subject to the name, following the scoping rules established for the walrus operator.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Requirement · must
 content	-	Within one pattern, a given name may be bound only once.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	is allowed, because each alternative binds
 content	-	once.
 content	-	is a syntax error.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Example
 content	-	In
 content	-	the name
@@ -421,59 +497,74 @@ content	-	is bound to the first item. In
 content	-	the name is bound twice, which is refused.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	L	Wildcard pattern
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	The single underscore,
 content	-	, matches any subject and binds nothing. As a whole pattern it is the usual final case.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	L	Value patterns
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	A value pattern is a dotted name such as
 content	-	or
 content	-	. The name is resolved by ordinary lookup, and the pattern succeeds if the resolved value compares equal to the subject with
 content	-	.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Requirement · may
 content	-	An implementation may cache a value pattern that appears more than once in the same match statement.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Code must not depend on the lookup being repeated, or on how many times it happens.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Note
 content	-	A value pattern can never bind a name, which is why the dotted form is the way to compare against a constant.
 content	L	Group patterns
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	A pattern in parentheses, with no comma, is a group pattern. It adds nothing but emphasis.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	A parenthesised pattern with a trailing comma is a one-item sequence pattern, as with tuples.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	L	Sequence patterns
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Why
 trail	-	8 February 2021
 trail	-	Ruled: Strings are sequences for matching.
@@ -481,14 +572,17 @@ trail	-	14 June 2021
 trail	-	Withdrawn: Strings and bytes are excluded from sequence patterns.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	A sequence pattern is written with square brackets or parentheses, or as a bare comma-separated list at the top level. It contains zero or more subpatterns and at most one star subpattern.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Requirement · must
 content	-	A subject is a sequence if its class inherits from
 content	-	, has been registered as one, or is a built-in class flagged as a sequence.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	The built-in classes so flagged are
 content	-	,
 content	-	,
@@ -501,6 +595,7 @@ content	-	and
 content	-	are usually considered sequences, they are deliberately not included and never match a sequence pattern.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Example
 content	-	matches the list
 content	-	and the tuple
@@ -508,13 +603,16 @@ content	-	, but not the string
 content	-	.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	L	Length rules
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Constraint
 content	-	A fixed-length pattern fails if the subject's length differs from the number of subpatterns.
 content	L	Why
@@ -524,110 +622,138 @@ trail	-	A fixed-length pattern fails if the subject's length differs from the nu
 trail	-	.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	A variable-length pattern fails if the subject has fewer items than there are non-star subpatterns. Otherwise subpatterns are matched left to right.
 content	L	Star subpatterns
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	A star subpattern, written
 content	-	or
 content	-	, binds a list of the items left over after the subpatterns before and after it have taken theirs.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Requirement · must
 content	-	A sequence pattern contains at most one star subpattern.
 content	L	Fixed length
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Without a star, the subject must have exactly as many items as the pattern has subpatterns. The empty pattern
 content	-	matches only an empty sequence.
 content	L	Reading elements
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Elements are read by subscripting and slicing, never by iteration, so a failed match never consumes anything.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Note
 content	-	A subject that is an iterator, such as a generator, is not a sequence and never matches a sequence pattern.
 content	L	Mapping patterns
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	A mapping pattern is written with braces. Each item is a key pattern, which must be a literal or value pattern, a colon, and a subpattern for the value.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Example
 content	-	The pattern
 content	-	matches a dictionary that has a text key, whatever else it holds.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Requirement · must
 content	-	A subject is a mapping if its class inherits from
 content	-	, has been registered as one, or is a built-in class flagged as a mapping.
 content	L	Keys
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Requirement · must
 content	-	Keys are looked up with the two-argument form of
 content	-	.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Matched items must already be present. A key is never created on the fly by
 content	-	or
 content	-	. Extra keys in the subject are ignored.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Requirement · must
 content	-	A mapping pattern may not contain duplicate keys.
 content	L	Double-star subpatterns
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	At most one double-star pattern is allowed, and it must come last. It binds a dictionary of the remaining items.
 content	L	Class patterns
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	A class pattern is a dotted name followed by parentheses containing zero or more positional subpatterns and zero or more keyword subpatterns, positional ones first.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Requirement · must
 content	-	The name must resolve to a type, and the subject must be an instance of it.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	If the name does not resolve to an instance of
 content	-	,
 content	-	is raised. The instance test uses
 content	-	, so an instance of a subclass matches.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Example
 content	-	matches an instance of
 content	-	whose two attributes are both zero, and any subclass instance too.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Actor
 content	L	The class author
 content	-	Whoever writes a class that others will match. The class author decides, through
@@ -635,16 +761,20 @@ content	-	, which attributes positional subpatterns refer to.
 content	L	Keyword subpatterns
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	A keyword subpattern
 content	-	reads the attribute
 content	-	from the subject and matches the subpattern against it. A missing attribute fails the match.
 content	L	Positional subpatterns
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Requirement · must
 content	-	Positional subpatterns are converted to keyword subpatterns through the class attribute
 content	-	.
@@ -654,14 +784,17 @@ trail	-	Ruled: Positional subpatterns map through
 trail	-	.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	If there are more positional subpatterns than
 content	-	,
 content	-	is raised.
 content	L	Built-in classes
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	For
 content	-	,
 content	-	,
@@ -677,46 +810,59 @@ content	-	, a single positional subpattern is matched against the whole subject 
 content	L	Or-patterns
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	An or-pattern tries each alternative left to right and succeeds at the first that succeeds. Every alternative must bind the same set of names.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Requirement · must
 content	-	Every alternative of an or-pattern must bind the same set of names.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Otherwise the guard or the block could refer to a name that was never bound.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Note
 content	-	An or-pattern with an irrefutable alternative is itself irrefutable, and must therefore be the last case.
 content	L	As-patterns
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	An as-pattern matches its left side and, on success, also binds the subject to the capture name.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Requirement · should
 content	-	The left side of an as-pattern may be any pattern except a capture or a wildcard.
 content	L	Notation
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	The tables below fix the vocabulary used in the rest of this page. The first is deliberately wide: it carries twenty attributes for each pattern kind.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Table 1
 content	L	Kind
 content	L	Written as
@@ -797,9 +943,11 @@ content	-	length and item reads
 content	-	Not a string or bytes.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	The second table holds values of every shape a cell may take: text, a list and a map.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Table 2
 content	L	Kind
 content	L	Names
@@ -813,37 +961,47 @@ content	-	k: v
 content	L	Side effects and undefined behaviour
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	The only side effect the matching process produces on purpose is the binding of names. The process does, however, rely on attribute access, instance checks,
 content	-	, equality and item access on the subject and its components.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Requirement · may
 content	-	Which methods are called, and how many times, is not specified.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	An implementation may call them once, repeatedly, or not at all where it can decide the outcome another way. Likewise it is unspecified whether a name captured earlier in a case block is bound when a later subpattern fails.
 content	L	Standard library support
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Named tuples and dataclasses define
 content	-	automatically. For a dataclass the order is that of the generated initialiser; fields declared with
 content	-	are omitted.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Other standard library classes gain
 content	-	where positional matching is clearly useful.
 content	L	Worked examples
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Each example gives a subject, a pattern and the outcome.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Example
 content	-	The subject
 content	-	matches
@@ -853,6 +1011,7 @@ content	-	is
 content	-	.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Example
 content	-	The subject
 content	-	matches
@@ -862,6 +1021,7 @@ content	-	is
 content	-	.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Example
 content	-	The subject
 content	-	matches
@@ -871,18 +1031,21 @@ content	-	as
 content	-	.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Example
 content	-	The subject
 content	-	does not match
 content	-	, because a string is not a sequence for matching.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Example
 content	-	The subject
 content	-	matches
 content	-	and binds nothing.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Example
 content	-	The subject
 content	-	matches
@@ -890,18 +1053,22 @@ content	-	and binds
 content	-	to 5; the guard runs after the capture.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 content	L	Compatibility
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	-	Because
 content	-	and
 content	-	are soft keywords, existing programs keep working unchanged. Tools built on a parser that looks one token ahead need to migrate to parse the new statement.
 content	-	Link
 content	-	Copy ref
+content	-	Copy
 content	L	Python
 content	-	Copy
 chrome	L	Previous

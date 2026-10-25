@@ -158,3 +158,38 @@ fn sr2_rdy_site_prints_changes_before_the_lan_link() {
     );
     assert_eq!(log.lines(), [rdy_qa::daemon::LAN_DOCS_LINE]);
 }
+
+/// dgm11: each link `rdy site` prints reaches the scope's own themed not-found page for a page
+/// it does not have, with the same status and words as the tool's link.
+#[test]
+fn dgm11_cli_site_links_reach_themed_404() {
+    const PAGE: &str =
+        "There is no page at this address. It may have moved, or the link may be wrong.";
+    let s = Served::new();
+    let (ok, v) = s.json(&["--json", "new", "doc", "ops", "--view", "editing"]);
+    assert!(ok, "{v}");
+    for args in [&["site"][..], &["site", "--scope", "view:editing"][..]] {
+        let text = stdout(&s.rdy(args));
+        let url = text.lines().next().unwrap();
+        assert_eq!(http::get(url).status, 200, "{args:?}");
+        let r = http::get(&format!("{url}nosuch/page.html"));
+        assert_eq!(r.status, 404, "{args:?}: {}", r.head);
+        assert_eq!(r.header("content-type"), Some("text/html; charset=utf-8"));
+        let body = String::from_utf8_lossy(&r.body);
+        let root = &url[url[7..].find('/').unwrap() + 7..];
+        assert!(
+            body.contains("<html lang=\"en\" data-rdy-kind=\"not-found\">"),
+            "{args:?}: {body}"
+        );
+        assert!(body.contains("<h1>Page not found</h1>"), "{args:?}");
+        assert!(body.contains(&format!("<p>{PAGE}</p>")), "{args:?}");
+        assert!(
+            body.contains(&format!("href=\"{root}index.html\"")),
+            "{args:?}: the home link at {root}"
+        );
+        assert!(
+            !body.contains("/_rdy/live.js") && !body.contains("data-events"),
+            "{args:?}"
+        );
+    }
+}

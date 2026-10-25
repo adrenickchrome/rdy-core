@@ -733,6 +733,16 @@ pub const W_SITE_LAN: &str = "W_SITE_LAN";
 /// profile-only site, whose reader can still read everything the project holds (D-DK03K). It is
 /// a name for the descriptive error table; a reply carries its warnings as text, with no code.
 pub const W_SITE_PROFILE: &str = "W_SITE_PROFILE";
+/// A Mermaid diagram does not parse (or is over an input bound), so the render shows it as its
+/// code block. A name for the descriptive error table; the render's warnings array carries the
+/// message as text, with no code.
+pub const W_DIAGRAM_INVALID: &str = "W_DIAGRAM_INVALID";
+/// A Mermaid diagram whose header keyword names a type rdy does not draw shows its source as a
+/// code block. A name for the descriptive error table; the render carries the message as text.
+pub const W_DIAGRAM_UNSUPPORTED: &str = "W_DIAGRAM_UNSUPPORTED";
+/// The drawn SVG of a diagram fails rdy's checks, so the render shows its source as a code
+/// block. A name for the descriptive error table; the render carries the message as text.
+pub const W_DIAGRAM_FAILED: &str = "W_DIAGRAM_FAILED";
 
 /// A file that is not a dump this rdy reads, a damaged dump, or a loaded project that fails fsck.
 pub const E_DUMP: &str = "E_DUMP";

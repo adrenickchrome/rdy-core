@@ -25,11 +25,11 @@ pub struct RenderedPage {
     pub html: Vec<u8>,
     /// Where the page's empty notice slot starts, in bytes.
     pub notice_offset: u64,
-    /// The files this page needs: the theme, a `assets/app.js` made for this page, and the
+    /// The files this page needs: the theme, the files of the diagrams the page draws and the
     /// figure files the page links, by path.
     pub assets: BTreeMap<String, Vec<u8>>,
     /// The page and its assets alone, as the site's manifest lists them. Its entries equal the
-    /// full site's for those paths, except `assets/app.js`, which depends on the page.
+    /// full site's for those paths.
     pub manifest: Manifest,
     /// The build's warnings: an org profile's reference warning first.
     pub warnings: Vec<String>,
@@ -99,10 +99,10 @@ fn resolve<'a>(sh: &page::Shared<'a>, path: &str) -> Option<Target<'a>> {
 /// and renders that one page only. No path of a file system is opened.
 ///
 /// The page links address the whole publication, and so do its search index URL and its notice
-/// slot's offset in its own bytes. The assets are the theme files, `assets/app.js` as this page
-/// needs it (the diagram library only when the page has a diagram) and the figure files the page
-/// links. The manifest lists the page and those assets. A path the publication has no page at,
-/// or whose page the profile leaves out, is `E_NOT_FOUND`.
+/// slot's offset in its own bytes. The assets are the theme files, the files of the diagrams the
+/// page draws and the figure files the page links. The manifest lists the page and those
+/// assets. A path the publication has no page at, or whose page the profile leaves out, is
+/// `E_NOT_FOUND`.
 pub fn render_publication_page(
     source: &dyn PublicationSource,
     m: &Materialized,
@@ -123,22 +123,25 @@ pub fn render_publication_page(
             Target::Page(kind) => build_page(sh, kind),
             Target::Permalink(id, url) => build_page(sh, Kind::Redirect(&id, &url)),
         };
-        let has_mermaid = ctx.has_mermaid;
         let (page_path, html, _, notice) = render_ctx(env, Slots::Notices, Some(&budget), &ctx)?;
+        // the page's diagrams, and the warnings of those it could not draw after the build's own
+        let diagrams = sh.diagrams.take();
+        let mut warnings = extras.warnings;
+        warnings.extend(diagrams.warnings.iter().cloned());
         Ok(Built {
             page_path,
             html,
             notice: notice.ok_or_else(bad_notice_slot)?,
-            has_mermaid,
+            diagrams: diagrams.files(),
             used: sh.used_blobs.take(),
-            warnings: extras.warnings,
+            warnings,
         })
     })?;
     let Built {
         page_path,
         html,
         notice,
-        has_mermaid,
+        diagrams,
         used,
         warnings,
     } = built;
@@ -146,8 +149,11 @@ pub fn render_publication_page(
     let mut files = BTreeMap::new();
     budget.count(1)?;
     files.insert(page_path.clone(), html);
-    for (name, bytes) in assets::files(has_mermaid) {
+    for (name, bytes) in assets::files() {
         put_file(&mut files, Some(&budget), name.into(), bytes)?;
+    }
+    for (path, bytes) in diagrams {
+        put_file(&mut files, Some(&budget), path, bytes)?;
     }
     copy_blobs(&mut files, Some(&budget), &used, &mut blobs)?;
     drop(blobs);
@@ -170,7 +176,8 @@ struct Built {
     page_path: String,
     html: Vec<u8>,
     notice: u64,
-    has_mermaid: bool,
+    /// The files of the diagrams the page draws, by path.
+    diagrams: Vec<(String, Vec<u8>)>,
     used: BTreeMap<String, (Hash, String)>,
     warnings: Vec<String>,
 }

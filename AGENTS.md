@@ -10,6 +10,7 @@ Read them through rdy's MCP tools.
 
 Each crate is in `crates/`.
 
+- `rdy-diagram`: draws a diagram's source as SVG, behind the one pinned diagram crate.
 - `rdy-model`: the core types, such as blocks, changes, proposals, decisions and the project tree.
 - `rdy-store`: the append-only segment log and the derived index (`redb`).
 - `rdy-schema`: schema packs, path globs and block validation.
@@ -24,10 +25,11 @@ Each crate is in `crates/`.
 
 A crate depends only on crates listed before it.
 
+- `rdy-diagram` depends on no rdy crate.
 - `rdy-model` depends on no rdy crate.
 - `rdy-store`, `rdy-schema` and `rdy-graph` depend on `rdy-model`.
 - `rdy-engine` depends on `rdy-model`, `rdy-schema`, `rdy-store` and `rdy-graph`.
-- `rdy-render` depends on `rdy-model`, `rdy-engine`, `rdy-graph` and `rdy-schema`.
+- `rdy-render` depends on `rdy-diagram`, `rdy-model`, `rdy-engine`, `rdy-graph` and `rdy-schema`.
 - `rdy-adapter` depends on `rdy-model`, `rdy-store`, `rdy-schema`, `rdy-engine` and `rdy-render`.
 - `rdy-mcp` depends on `rdy-model`, `rdy-engine`, `rdy-schema` and `rdy-graph`.
 - `rdy-daemon` depends on `rdy-engine`, `rdy-mcp`, `rdy-render` and `rdy-model`.

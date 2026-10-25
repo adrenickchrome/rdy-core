@@ -103,8 +103,9 @@ fn fill(site: &SiteFiles, label: &str, header: &str) -> BTreeMap<String, Vec<u8>
     out
 }
 
-/// Every page but a permalink page has two ranges (the header, then the colophon's label), the
-/// llms files one each (the head line's label), every other file none; each holds what the build
+/// Every page but a permalink page and the generated not-found page has two ranges (the header,
+/// then the colophon's label), the llms files one each (the head line's label), every other file
+/// (the not-found page included) none; each holds what the build
 /// wrote, at its place in the markup: the label as the build wrote it, the header as `header`
 /// when one is given (a live build: the same on every page).
 fn assert_label_places(site: &SiteFiles, header: Option<&str>) {
@@ -118,7 +119,9 @@ fn assert_label_places(site: &SiteFiles, header: Option<&str>) {
         let ranges = site.label_at.get(path).map_or(&[][..], Vec::as_slice);
         let text = String::from_utf8_lossy(bytes);
         let llms = path == "llms.txt" || path == "llms-full.txt";
-        let page = path.ends_with(".html") && !text.contains("data-rdy-kind=\"redirect\"");
+        let page = path.ends_with(".html")
+            && !text.contains("data-rdy-kind=\"redirect\"")
+            && !generated_404(bytes);
         let want: &[SlotKind] = if page {
             &[SlotKind::Header, SlotKind::Label]
         } else if llms {
@@ -190,6 +193,20 @@ fn assert_label_places(site: &SiteFiles, header: Option<&str>) {
     }
 }
 
+/// Whether `bytes` are the site's generated not-found page: its marker, never its file name.
+fn generated_404(bytes: &[u8]) -> bool {
+    String::from_utf8_lossy(bytes).contains("data-rdy-kind=\"not-found\"")
+}
+
+/// The paths of `site`'s files but the generated not-found page.
+fn without_404(site: &SiteFiles) -> Vec<&String> {
+    site.files
+        .iter()
+        .filter(|(_, b)| !generated_404(b))
+        .map(|(p, _)| p)
+        .collect()
+}
+
 /// `live` with its noscript sentence put back to the static one.
 fn unlive(path: &str, bytes: &[u8]) -> Vec<u8> {
     if path.ends_with(".html") {
@@ -207,10 +224,17 @@ fn ls1_a_live_build_filled_is_the_static_build() {
     let st = r.read();
     let stat = build_site(&st, &Scope::Canon, Mode::Static).unwrap();
     let live = build_site(&st, &Scope::Canon, LIVE).unwrap();
-    assert_eq!(
-        stat.files.keys().collect::<Vec<_>>(),
-        live.files.keys().collect::<Vec<_>>()
-    );
+    // the static build has one more file, its generated not-found page; the live build has none
+    let marked: Vec<&String> = stat
+        .files
+        .iter()
+        .filter(|(_, b)| generated_404(b))
+        .map(|(p, _)| p)
+        .collect();
+    assert_eq!(marked, ["404.html"]);
+    assert!(!live.files.values().any(|b| generated_404(b)));
+    assert_eq!(stat.files.len(), live.files.len() + 1);
+    assert_eq!(without_404(&stat), live.files.keys().collect::<Vec<_>>());
     assert_eq!(live.label, stat.label);
     let kinds = |s: &SiteFiles| -> BTreeMap<String, Vec<SlotKind>> {
         s.label_at
@@ -283,7 +307,8 @@ fn ls1_a_label_lookalike_in_content_is_never_filled() {
     }
     let other = "v2.0.0, 1 update since";
     let (a, b) = (fill(&live, other, HEADER), fill(&stat, other, HEADER));
-    assert_eq!(a.keys().collect::<Vec<_>>(), b.keys().collect::<Vec<_>>());
+    // the static build's generated not-found page is its one extra file
+    assert_eq!(a.keys().collect::<Vec<_>>(), without_404(&stat));
     for (path, bytes) in &a {
         assert!(unlive(path, bytes) == b[path], "{path}");
     }

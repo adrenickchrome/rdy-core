@@ -394,10 +394,15 @@ pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
         header: version::header(&position, None),
         headers: Default::default(),
         used_blobs: Default::default(),
+        // a print draws no diagram, writes no file and warns of none; each diagram has the site's
+        // shape less its drawing (ruling task-6)
+        draw_diagrams: false,
+        diagrams: Default::default(),
         governing: Default::default(),
         mode: Mode::Static,
         inline_diffs: Default::default(),
         changes_page: false,
+        review_anchors: Default::default(),
         since_page: false,
         profile: profile.as_ref(),
         local: local.as_ref(),

@@ -4,3 +4,5 @@ crates/rdy-qa/tests/*/main.rs merge=union
 crates/rdy-qa/fixtures/dump/* -text
 # The sync batch vectors are pinned the same way.
 crates/rdy-qa/fixtures/sync/* -text
+# The diagram goldens are compared byte for byte on every host.
+crates/rdy-diagram/tests/fixtures/** -text
