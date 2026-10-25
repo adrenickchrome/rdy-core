@@ -38,25 +38,21 @@ pub(crate) fn hit() {
     COUNT.set(COUNT.get().wrapping_add(1));
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The two counters are separate: a preparation is not a render, and a render is not a
-    /// preparation. Each check compares deltas on this thread.
-    #[test]
-    fn rdb2_preparation_probe_is_separate() {
-        let (renders_before, preparations_before) = (renders(), preparations());
-        prepared();
-        assert_eq!(preparations() - preparations_before, 1, "prepared adds one");
-        assert_eq!(renders() - renders_before, 0, "prepared leaves renders");
-        let (renders_before, preparations_before) = (renders(), preparations());
-        hit();
-        assert_eq!(renders() - renders_before, 1, "hit adds one render");
-        assert_eq!(
-            preparations() - preparations_before,
-            0,
-            "hit leaves preparations"
-        );
-    }
+/// The two counters are separate: a preparation is not a render, and a render is not a
+/// preparation. Each check compares deltas on this thread. The test sits here without a test
+/// module because this file holds no cfg of its own (`tests/probe_gate.rs`).
+#[test]
+fn rdb2_preparation_probe_is_separate() {
+    let (renders_before, preparations_before) = (renders(), preparations());
+    prepared();
+    assert_eq!(preparations() - preparations_before, 1, "prepared adds one");
+    assert_eq!(renders() - renders_before, 0, "prepared leaves renders");
+    let (renders_before, preparations_before) = (renders(), preparations());
+    hit();
+    assert_eq!(renders() - renders_before, 1, "hit adds one render");
+    assert_eq!(
+        preparations() - preparations_before,
+        0,
+        "hit leaves preparations"
+    );
 }
