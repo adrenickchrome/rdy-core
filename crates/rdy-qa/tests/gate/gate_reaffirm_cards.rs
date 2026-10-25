@@ -2064,7 +2064,9 @@ fn big_claims(parent: &str, n: usize, body: usize, extra: usize) -> Value {
 /// exactly at the bound, lands, and its tag exports.
 #[test]
 fn cp16_oversized_write_refuses_before_append() {
-    let max = rdy_store::bounded::MAX_RECORD_BYTES;
+    // the change's frame is its two-byte version prefix (encoding 1) and its body: the body's
+    // bound is the record bound less the prefix
+    let max = rdy_store::bounded::MAX_RECORD_BYTES - 2;
     let (_d, mut r) = project();
     let w = world(&mut r);
     let (n, body) = (17, 960_000);

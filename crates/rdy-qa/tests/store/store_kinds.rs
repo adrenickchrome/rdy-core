@@ -214,7 +214,9 @@ fn repr1_a_landing_reads_back_in_its_kind_with_its_id_after_a_reindex() {
         policy: None,
         read_identity: None,
     };
-    let lh = plant(&mut s, kinds::LANDING, postcard::to_allocvec(&l).unwrap());
+    // the landing's frame at its latest encoding
+    let (raw, payload) = rdy_store::codec::item(kinds::LANDING, &l).unwrap();
+    let lh = plant(&mut s, raw, payload);
     assert_eq!(lh, l.id());
     assert!(s.has_kind(kinds::LANDING, &lh).unwrap());
     assert_eq!(s.landing(&lh).unwrap(), l);

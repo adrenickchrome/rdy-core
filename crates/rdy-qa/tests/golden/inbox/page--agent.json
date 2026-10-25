@@ -1,20 +1,20 @@
 {
-  "cursor": "0.17929.0",
+  "cursor": "0.18125.0",
   "entries": [
     {
       "event": "tension_opened",
       "ids": [
-        "0260e4682e712ae9d553d929c056a9687b91f6129c6b2261d3e25032e468d85e",
-        "6e3e2e0e10c863f510e13bc74163742a6e53ffd151fcf3af76eebdb0859143e0"
+        "d4e17b59a58867bfbf312ab0ae36b8058c71b2be43488f678b42d80652a8cb8a",
+        "a0a20b9d7cf13336e08ed67dd17ca42a5cc1767e75ee096a2cd3d6b14991cc52"
       ],
-      "line": "tension 0260e4682e71 opened on your change 6e3e2e0e10c8 (edit_collision, blocking): a side changed (change 62c4254aa068)"
+      "line": "tension d4e17b59a588 opened on your change a0a20b9d7cf1 (edit_collision, blocking): a side changed (change 8430559140f4)"
     },
     {
       "event": "pending_added",
       "ids": [
-        "6bb398bc8e385e2f7fbd4e3a7a8a55c0f5a87eee3558f60cc64e1ae885537773"
+        "c01d473b080f73f3ab06e13cdcbdc0f985568f45b4764ff0a1360d45f6e9467e"
       ],
-      "line": "P-6bb398bc8e38@1 waits for an answer; read rdy_pending"
+      "line": "P-c01d473b080f@1 waits for an answer; read rdy_pending"
     },
     {
       "event": "intent_posted",
@@ -26,41 +26,41 @@
     {
       "event": "tension_opened",
       "ids": [
-        "af61f1dd8ba48d2b5a988be0e873995933808754a63cfa68df980b4e53f88271",
-        "6e3e2e0e10c863f510e13bc74163742a6e53ffd151fcf3af76eebdb0859143e0"
+        "0148aef6daee4ffd0c5371bb26d68006e51cc84965a62deccc9a694ae4f7299a",
+        "a0a20b9d7cf13336e08ed67dd17ca42a5cc1767e75ee096a2cd3d6b14991cc52"
       ],
-      "line": "tension af61f1dd8ba4 opened on your change 6e3e2e0e10c8 (edit_collision, blocking): a side changed (change 0c3f84a38d23)"
+      "line": "tension 0148aef6daee opened on your change a0a20b9d7cf1 (edit_collision, blocking): a side changed (change 045f519968a5)"
     },
     {
       "event": "pending_added",
       "ids": [
-        "d1b607188a1a9e4dc9edf6e91cc6fb489ac17cd1efe5b1c7bcc6baa59a751356"
+        "4cf5f61785af4dfb7e3d9a5eb34ab3e59e8b56fa8b7f68b6e84c24135f8001da"
       ],
-      "line": "P-d1b607188a1a@1 waits for an answer; read rdy_pending"
+      "line": "P-4cf5f61785af@1 waits for an answer; read rdy_pending"
     },
     {
       "event": "landed",
       "ids": [
-        "a4f6d4d4ad682800cae29299ffb14866fa3e22d4787b768791d1944a6f451cf7",
-        "d1b607188a1a9e4dc9edf6e91cc6fb489ac17cd1efe5b1c7bcc6baa59a751356"
+        "8e762e74369f605c416051cb870d3c4af24fa7225919f6312eb0f65fef6ff98d",
+        "4cf5f61785af4dfb7e3d9a5eb34ab3e59e8b56fa8b7f68b6e84c24135f8001da"
       ],
-      "line": "landing a4f6d4d4ad68 of view work changed 1 blocks in your areas (payments)"
+      "line": "landing 8e762e74369f of view work changed 1 blocks in your areas (payments)"
     },
     {
       "event": "view_rebased",
       "ids": [
-        "a4f6d4d4ad682800cae29299ffb14866fa3e22d4787b768791d1944a6f451cf7",
-        "a10aca6f09cb13bbd9fbb3fbe73518e2f04894b6d69a1f2130f18079a4565f25"
+        "8e762e74369f605c416051cb870d3c4af24fa7225919f6312eb0f65fef6ff98d",
+        "55aaba204127ef8ee2cf8ce582048bd469a43f047ec1dc28553598a1a9d5762c"
       ],
-      "line": "your view a rebased onto landing a4f6d4d4ad68 with 1 conflicts"
+      "line": "your view a rebased onto landing 8e762e74369f with 1 conflicts"
     },
     {
       "event": "tension_opened",
       "ids": [
-        "3527c16aea01d0ca14e40e922aee79c7184103ce2aceec1b7a3607c66bddce4a",
-        "6e3e2e0e10c863f510e13bc74163742a6e53ffd151fcf3af76eebdb0859143e0"
+        "e160a7ad99f250d7623f577a166f9bcaf049c5f15f81b619cfd42674ea7badba",
+        "a0a20b9d7cf13336e08ed67dd17ca42a5cc1767e75ee096a2cd3d6b14991cc52"
       ],
-      "line": "tension 3527c16aea01 replaces af61f1dd8ba4 on your change 6e3e2e0e10c8 (edit_collision, blocking): landing a4f6d4d4ad68"
+      "line": "tension e160a7ad99f2 replaces 0148aef6daee on your change a0a20b9d7cf1 (edit_collision, blocking): landing 8e762e74369f"
     }
   ],
   "more": false

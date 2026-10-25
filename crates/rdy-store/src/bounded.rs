@@ -105,7 +105,7 @@ pub enum TryDecodeError {
 
 /// The first bound of every typed record: at most [`MAX_RECORD_BYTES`] encoded bytes, else the
 /// [`RECORD_BYTES`] limit. [`decode`], [`try_decode`], [`check`] and [`fits`] share it.
-fn record_len(len: usize) -> Result<(), RecordError> {
+pub(crate) fn record_len(len: usize) -> Result<(), RecordError> {
     if len > MAX_RECORD_BYTES {
         return Err(RecordError::limit(RECORD_BYTES, MAX_RECORD_BYTES));
     }

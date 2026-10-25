@@ -220,7 +220,9 @@ const SITE_DIGESTS: [(&str, &str, &str); 4] = [
 
 /// The source print digests, captured from the unmodified base (22af149) before the refactor:
 /// (scope, [model without rdy_dir, pdf, html, md plain, md mkdocs]). The PDF digests carry the
-/// crate version (the PDF producer field) and were re-taken at the 0.7.0 merge of main.
+/// crate version (the PDF producer field) and were re-taken at the 0.7.0 merge of main. The
+/// proposal's were re-taken for object encoding 1: its scope text is `proposal:<hash>`, and the
+/// version's hash follows its changes' encoding-1 ids; the other scopes kept their bytes.
 const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "canon",
@@ -255,11 +257,11 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "proposal",
         [
-            "631048370e9da5fdcf57e88f1be37d4610444152fc9edce1835a4568c4c76a62",
-            "6f6f4bdf061c34fedacbc12cd0dd168451b99b305b211db9c65c9e88a4608524",
-            "2c77b990417a0b86e3d613b340af6fe30562c58142c0fa4c0e05bd3c1f589b25",
-            "e7a334c53da6cc5ad8fd0e46af8cd9fbbc5c1c3ca45f2db2e7874079d49f0ad6",
-            "60236789e2b544c65d11d5e3c825fb879b4b4f0e7230d4557570a8f4ecb495e9",
+            "d29b9083db2b584eea1b739ead3c077220909f4d68aacf93f635a76c269ad905",
+            "9d078b6ed8c45b53332ee406b85f2a2c9fb45504451141c7779bf823cf136753",
+            "5830f62d21c5799969dda4facf903aca5c9eddad929a9050f78aca1d16223557",
+            "deea59b2cb7e1c4ea1dcb74038f1f2ac133b279afae6b091aa0de1c49ef2357c",
+            "26148e3a62f57f443ae2faf73e097940e30ac98b60fc5b1c2fc4557511acc576",
         ],
     ),
 ];

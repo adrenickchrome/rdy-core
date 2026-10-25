@@ -455,7 +455,7 @@ fn canaries_only_in_selected_payloads(dir: &Path, req: &Redaction, picture: &[u8
         for needle in SELECTED.iter().map(|c| c.as_bytes()).chain([picture]) {
             if find(payload, needle, 0).is_some() {
                 assert!(
-                    spans.contains(&(*kind, *hash)),
+                    spans.contains(&(rdy_store::codec::logical_kind(*kind), *hash)),
                     "a selected canary is in frame {kind} {hash}, which the removal keeps"
                 );
             }

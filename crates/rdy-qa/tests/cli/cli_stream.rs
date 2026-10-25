@@ -72,9 +72,11 @@ fn batches() -> Batches {
         .iter()
         .copied()
         .filter(|k| {
-            refs_of(k.kind, &r.store().get_kind(k.kind, &k.hash).unwrap())
-                .unwrap()
-                .is_empty()
+            {
+                // the frame's raw kind and stored bytes: a change is encoding 1
+                let (raw, payload) = r.store().get_kind_raw(k.kind, &k.hash).unwrap();
+                refs_of(raw, &payload).unwrap().is_empty()
+            }
         })
         .collect();
     assert!(early_keys.iter().any(|k| k.kind == kinds::BLOCK));

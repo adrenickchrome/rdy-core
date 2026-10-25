@@ -211,7 +211,10 @@ fn rdx9_a_redacted_project_round_trips_and_clones() {
     let a = Rdy::open(src.dir.path()).unwrap();
     let src_recs = records(&a);
     let absent: Vec<&Rec> = src_recs.iter().filter(|r| r.proof.is_err()).collect();
-    let mut kinds_absent: Vec<u8> = absent.iter().map(|r| r.kind).collect();
+    let mut kinds_absent: Vec<u8> = absent
+        .iter()
+        .map(|r| rdy_store::codec::logical_kind(r.kind))
+        .collect();
     kinds_absent.dedup();
     assert_eq!(
         kinds_absent,

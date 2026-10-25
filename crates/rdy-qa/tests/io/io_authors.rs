@@ -89,7 +89,7 @@ fn change_locations(r: &Rdy) -> std::collections::BTreeMap<Hash, rdy_store::segm
         .reader()
         .for_each_record_from(origin, store.log_end(), |loc, f, _| {
             if let rdy_store::redaction::StoredFrame::Present { kind, hash, .. } = f
-                && kind == rdy_store::kinds::CHANGE
+                && rdy_store::codec::logical_kind(kind) == rdy_store::kinds::CHANGE
             {
                 out.insert(hash, loc);
             }

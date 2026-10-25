@@ -51,6 +51,16 @@ pub const IDENTITY_MISMATCH: &str = "stored record identity does not match its b
 /// The bit a versioned frame's raw kind sets.
 pub const VERSIONED: u8 = 0x80;
 
+/// Checks, before a writer appends it, that the frame of `value` at `kind`'s latest encoding fits
+/// one record: from version 1 on, the two-byte version prefix counts with the body against
+/// [`bounded::MAX_RECORD_BYTES`], as a stream and a dump bound the frame. The length is counted
+/// without building the encoding.
+pub fn fits_latest<T: Serialize + ?Sized>(kind: u8, value: &T) -> Result<(), RecordError> {
+    let prefix = if latest(kind) == 0 { 0 } else { 2 };
+    let len = postcard::experimental::serialized_size(value).map_err(|_| RecordError::Decode)?;
+    bounded::record_len(len.saturating_add(prefix))
+}
+
 /// One object as the store writes it: its logical kind, its encoding version and its stored
 /// payload (the version prefix included from version 1 on).
 #[derive(Clone, Debug, PartialEq, Eq)]

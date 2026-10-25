@@ -374,9 +374,10 @@ fn di1_no_existing_kind_changes_its_bytes() {
         let payload = payload.unwrap();
         let bytes = match f.kind() {
             kinds::BLOCK => again::<Block>(payload),
-            kinds::CHANGE => again::<Change>(payload),
+            // an encoding-0 change and landing keep their frozen shapes (object encoding 1)
+            kinds::CHANGE => again::<rdy_model::encoding::LegacyChangeV0>(payload),
             kinds::PROPOSAL => again::<Proposal>(payload),
-            kinds::LANDING => again::<LandingRecord>(payload),
+            kinds::LANDING => again::<rdy_model::encoding::LegacyLandingV0>(payload),
             kinds::SNAPSHOT => again::<StateSnapshot>(payload),
             // a chunk is raw bytes: no encoding to change
             kinds::BLOB_CHUNK => payload.to_vec(),

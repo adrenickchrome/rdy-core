@@ -595,10 +595,11 @@ fn dl1_an_unassigned_kind_is_refused() {
         Some(rdy_store::dump::current_frame_kinds()),
         Some(
             &[
-                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+                26, 27, 28
             ][..]
         ),
-        "exactly the kinds the latest store assigns (those of (3, 18))"
+        "exactly the kinds the latest store assigns (those of (3, 18) and the carried kinds)"
     );
     for (d, sf) in READS {
         assert!(frame_kinds(*d, *sf).is_some(), "({d}, {sf}) has its kinds");
@@ -613,8 +614,8 @@ fn dl1_an_unassigned_kind_is_refused() {
     let good = stream(&s, &batches, &[]);
     let recs = records(&good);
     let first = recs.iter().position(|(k, _)| *k < rec::HEADER).unwrap();
-    // 24 (the change plan) is the last assigned; 12 stays unassigned, and 25 is the next
-    for k in [12u8, 14, 25] {
+    // 28 (the check request) is the last assigned; 12 stays unassigned, and 29 is the next
+    for k in [12u8, 14, 29] {
         // the reader
         let mut r = recs.clone();
         r[first].0 = k;

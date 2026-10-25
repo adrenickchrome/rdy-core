@@ -137,8 +137,10 @@ fn dl3_the_every_kind_project_holds_every_kind_and_ref_family() {
     let r = Rdy::open(dir.path()).unwrap();
     let f = rdy_qa::every_kind::facts(&r);
     for k in rdy_qa::every_kind::V11_KINDS {
+        // the facts count frames by raw kind: a kind's frames of either encoding
+        let count = |raw: u8| f["objects"][raw.to_string()].as_u64().unwrap_or(0);
         assert!(
-            f["objects"][k.to_string()].as_u64().unwrap_or(0) >= 1,
+            count(k) + count(k | rdy_store::codec::VERSIONED) >= 1,
             "no frame of kind {k}: {f}"
         );
     }

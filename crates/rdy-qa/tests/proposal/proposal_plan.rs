@@ -106,13 +106,13 @@ fn log_state(r: &Rdy) -> (Location, Vec<(String, Vec<u8>)>) {
     )
 }
 
-/// The kinds of the frames from `from` to the log end, markers included.
+/// The logical kinds of the frames from `from` to the log end, markers included.
 fn frames_from(r: &Rdy, from: Location) -> Vec<u8> {
     let mut out = vec![];
     r.store()
         .reader()
         .for_each_frame_from(from, r.store().log_end(), |_, kind, _, _, _| {
-            out.push(kind);
+            out.push(rdy_store::codec::logical_kind(kind));
             Ok(())
         })
         .unwrap();
