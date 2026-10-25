@@ -218,26 +218,29 @@ fn scopes() -> Vec<(&'static str, tempfile::TempDir, Rdy, Scope)> {
 /// title toolbar (Link, Copy ref, Copy), the Copy button on each block and section toolbar, the
 /// page's hidden Copy payload template and `assets/app.js` (which bundles `js/copy.js`) moved;
 /// their content rows keep their text (the gold1_ goldens).
+/// Re-taken for the final review's fix round 1 (M2): Cite skips a selection in the eyebrow, so
+/// only `js/copy.js` changed and only `assets/app.js` moved; with the old script the digests
+/// were the ones before.
 const SITE_DIGESTS: [(&str, &str, &str); 4] = [
     (
         "canon",
-        "e6a0302ef54616d4997c5637a5dce816e6eec06e7b551d0dedf284a16ed9820b",
-        "34c96b0c706a5cd376c13b29dc2218af2d774851e50b82869590e81debf66dbb",
+        "bbae9ac75832387e158ebad641d73f8f0235e094b8f61a5c10280e259f601ba2",
+        "af6eec76b57da276ccb35911cb74bdde8a082397d5aebbc8a3a7583573c7c491",
     ),
     (
         "tag",
-        "d745df5ba0472951238a61fb8c3ac72193296471eb6f023ec21c33fd50001518",
-        "a5814c3ff9218e1ddf045d7dc2eb66fab7af45cf81e45efa3eead803f7376622",
+        "39c97cbf37557dc08e114fc95183a1da703ebd1c556cc0337628fa04ea7d82ab",
+        "52ab5387f388940c542e2d38b963344d0a23dcfd14cc3300eec72d5c86900dcc",
     ),
     (
         "view",
-        "01e588192c22b866d5189312dafa2b0995e72ae050a3b22c7bfcd8e632a5f62d",
-        "deaa2e8be84303f29280debe28db89c2dc375ad294077b8f0d6d41230e615388",
+        "312ecd22e4500fd16a3fff0b283193ee5b7b94fcf39c3e50c9c5157966a952b4",
+        "bdd405ceb8474edaf151d925a37a11621a31ff98fd574cdad863d3e893ae03fe",
     ),
     (
         "proposal",
-        "699d5d9ae7f5a4f45fef1f03c3980393d74a632db3ab628b556c1d84be7a64b7",
-        "d9e42986e3e2d22deec7481e3e162d5483fb9c6b5a5eb3642bd70ee5f7539955",
+        "cee9fd5fe1b9808e0b4b17e142eefac9538eabf8039f7313a926c62e6d54a834",
+        "e09fcf47d99ba0d3a7d4caeb9f2f2cb9cf66a6fef01cd99c7dff96142dae84cb",
     ),
 ];
 
