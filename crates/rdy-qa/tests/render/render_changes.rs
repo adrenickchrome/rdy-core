@@ -985,7 +985,10 @@ fn sr6_an_edited_doc_title_carries_its_inline_diff() {
     let out = rendered(&r, &Scope::View("w".into()));
     let page = read(out.path(), "a.html");
     assert!(
-        page.contains("<header class=\"page-head has-chg chg-edited\">"),
+        // the title's toolbar makes the header a block (Task 9, D-BRF4P)
+        page.contains(
+            "<header class=\"page-head block block-page has-chg chg-edited\" data-rdy-block="
+        ),
         "guard: {page}"
     );
     assert!(

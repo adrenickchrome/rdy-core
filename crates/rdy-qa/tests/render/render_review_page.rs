@@ -65,7 +65,8 @@ fn rv1_a_draft_page_bars_edited_and_new_blocks_and_marks_the_edited_lede() {
     )));
     assert!(a.contains("Where to begin.") && !a.contains("Where to start."));
     // the doc's own block did not change: its header carries no marker
-    assert!(a.contains("<header class=\"page-head\">"));
+    // (the title's toolbar makes the header a block: Task 9, D-BRF4P)
+    assert!(a.contains("<header class=\"page-head block block-page\" data-rdy-block="));
     assert_eq!(a.matches("chg-label").count(), 3, "lede, edited, new");
 }
 
@@ -93,7 +94,7 @@ fn rv1_a_new_doc_page_is_marked_new_once() {
     let h = html(out.path(), "fresh.html");
     let a = article(&h);
     assert!(
-        a.contains("<header class=\"page-head has-chg chg-new\">"),
+        a.contains("<header class=\"page-head block block-page has-chg chg-new\" data-rdy-block="),
         "{a}"
     );
     assert!(a.contains(&format!("</h1>{NEW}")), "{a}");

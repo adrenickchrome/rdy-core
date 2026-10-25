@@ -726,11 +726,11 @@ fn pub6_reference_words_are_uniform_across_surfaces() {
     assert!(refs.contains(&format!(
         "<pre class=\"code\"><code>graph TD\n  A[{u}] --&gt; B[Diagram display]</code>"
     )));
-    // the readable source and the copied reference's words
+    // the readable source, the copied reference's words and the page's Copy payload (Task 9)
     assert_eq!(
         refs.matches(&format!("A[{u}] --&gt; B[Diagram display]"))
             .count(),
-        2
+        3
     );
     assert!(page(&s, "glossary.html").contains(&format!("Defined via {u}.")));
     assert!(page(&s, "questions.html").contains(&format!("Ask about {u}?")));
