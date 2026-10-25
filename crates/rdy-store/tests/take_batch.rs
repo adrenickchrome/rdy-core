@@ -350,7 +350,7 @@ fn ha11_many_files_make_one_sealed_take() {
     let written: Vec<ObjectKey> = data
         .iter()
         .filter(|(_, k, _, _)| *k != kinds::REF_UPDATE)
-        .map(|(_, k, h, _)| key(*k, *h))
+        .map(|(_, k, h, _)| key(rdy_store::codec::logical_kind(*k), *h))
         .collect();
     assert_eq!(written, records);
     assert_eq!(h.get_ref("tag/v1").unwrap(), Some(src.tag.0.to_vec()));
@@ -904,7 +904,14 @@ fn ha11_changed_relay_answer_refuses_before_append() {
         records
             .into_iter()
             .map(|k| match source.record(k).unwrap().unwrap() {
-                StreamRecord::Present { payload, .. } => (k.kind, payload),
+                // the raw frame: its raw kind and payload
+                r @ StreamRecord::Present { .. } => {
+                    let raw = r.raw_kind();
+                    let StreamRecord::Present { payload, .. } = r else {
+                        unreachable!("a present record")
+                    };
+                    (raw, payload)
+                }
                 other => panic!("{other:?}"),
             })
             .collect()
@@ -1100,7 +1107,7 @@ fn carried_holder(
             held,
         ),
         span(
-            &find(&frames, kinds::CHANGE, Hash::of(&enc(&c))),
+            &find(&frames, kinds::CHANGE, c.id()),
             Some(&residues[1]),
             held,
         ),
@@ -1139,7 +1146,7 @@ fn proof_of(h: &Store, kind: u8, hash: Hash) -> Option<Hash> {
                 apply,
                 ..
             } = f
-                && (k, x) == (kind, hash)
+                && (rdy_store::codec::logical_kind(k), x) == (kind, hash)
             {
                 out = Some(apply);
             }
@@ -1155,7 +1162,7 @@ fn hc3_take_of_any_matching_apply_removes_held_payloads() {
     let removed = removed_copy(&src);
     let upload = upload_of(&src, &removed.path, src.tag, "removed");
     let alpha = src.alpha.version_hash();
-    let c = Hash::of(&enc(&alpha_change(&src)));
+    let c = alpha_change(&src).id();
     // the source's own apply removes the held payloads its carried record names
     let (path, rec) = carried_holder(&src, "own", removed.request, removed.apply, true, false);
     let mut h = Store::open(&path).unwrap();
@@ -1484,7 +1491,7 @@ fn ok1_take_keeps_the_stream_features_and_activates_first_use() {
         landing,
     };
     let got = take(&mut h, &open(&[file]), &target).unwrap();
-    let want = StoreFeatures::of(vec![
+    let want = rdy_store::format::baseline_features().merged(&[
         StoreFeature {
             name: TEST_FEATURE.into(),
             class: FeatureClass::Compatible,
@@ -1536,7 +1543,7 @@ fn ok1_a_take_that_cannot_roll_back_keeps_format() {
         tag: "v1".into(),
         landing,
     };
-    let want = StoreFeatures::of(vec![
+    let want = rdy_store::format::baseline_features().merged(&[
         StoreFeature {
             name: TEST_FEATURE.into(),
             class: FeatureClass::Compatible,
@@ -1580,22 +1587,24 @@ fn ok1_take_refuses_a_merged_manifest_over_its_bounds() {
     };
     // the TAG of every upload first uses the test feature
     let _known = inject_test_feature(FeatureClass::Compatible, kinds::TAG);
-    // (holder's features, header's features, refused)
+    // (holder's unknown features, header's unknown features, refused): each manifest also
+    // names the two baseline features (ok4), and the take first uses the test feature, so the
+    // merged manifest holds 3 more than the two counts
     let cases: Vec<(usize, usize, bool)> = vec![
-        (0, 256, true),   // a full header and the first use
-        (200, 57, true),  // the holder and the header
-        (255, 1, true),   // the holder, the header and the first use
-        (128, 128, true), // half and half, and the first use
-        (254, 1, false),  // exactly the bound
-        (0, 255, false),  // exactly the bound
+        (0, 254, true),   // a full header and the first use
+        (200, 54, true),  // the holder and the header
+        (253, 1, true),   // the holder, the header and the first use
+        (128, 126, true), // half and half, and the first use
+        (252, 1, false),  // exactly the bound
+        (0, 253, false),  // exactly the bound
     ];
     for (held, carried, refused) in cases {
         let case = format!("holder {held}, header {carried}");
-        let header = StoreFeatures::of(unknown_features("h", carried));
+        let header = rdy_store::format::baseline_features().merged(&unknown_features("h", carried));
         let (dir, _path, repo, landing, tag, file) = put_tag_upload(header);
         let hpath = dir.path().join("h");
         let mut h = Store::create_holder(&hpath, repo).unwrap();
-        let mine = StoreFeatures::of(unknown_features("a", held));
+        let mine = rdy_store::format::baseline_features().merged(&unknown_features("a", held));
         if held > 0 {
             h.set_refs_unchecked_for_tests(vec![(REF_STORE_FEATURES.into(), mine.to_json())])
                 .unwrap();

@@ -924,7 +924,255 @@ fn samples() -> Vec<Sample> {
         out.push(s("transition new suspect", TRANSITION, &record, edges));
     }
     out.extend(plan_samples());
+    out.extend(carried_samples());
     out
+}
+
+/// A plain provenance: no text marker (the carried samples' text is bounded by the decoder).
+fn plain_prov() -> Provenance {
+    Provenance {
+        actor: "agent:w".into(),
+        run: None,
+        role: Role::Writer,
+        at_ms: 5,
+    }
+}
+
+/// ok4: the carried shapes and the fields that name them, each with its edges. Pack, config,
+/// card, tension and case hashes and a briefing are identities, no edges. No text marker.
+fn carried_samples() -> Vec<Sample> {
+    use rdy_model::assessment::*;
+    let scores = AssessmentScores {
+        overall: 1,
+        grounded: 1,
+        consistent: 1,
+        current: 1,
+        connected: 1,
+        complete: 1,
+        governed: 1,
+    };
+    let issue = |dismissal: u8| AssessmentIssue {
+        block: id_of("b-00001"),
+        dimension: "grounded".into(),
+        code: "untied_content".into(),
+        subject: None,
+        fix: "f".into(),
+        dismissal: Some(h(dismissal)),
+    };
+    let assessment = Assessment {
+        proposal: h(130),
+        base: Some(h(131)),
+        method: 1,
+        pack: AssessmentPack {
+            name: "p".into(),
+            version: "1".into(),
+            digest: h(137),
+        },
+        config: h(138),
+        policy: Some(AssessedPolicy {
+            policy: Some(PolicyRef {
+                block: id_of("p-00001"),
+                version: h(132),
+            }),
+            verdict: PolicyVerdict::Accepts { rule: "r".into() },
+        }),
+        facts: AssessmentFacts {
+            changes: 0,
+            consequences: 0,
+            plan: AssessmentPlanCounts {
+                open: 0,
+                closed: 0,
+                deferred: 0,
+                by_kind: vec![],
+            },
+            supersedes: vec![],
+            reaffirms: vec![],
+            reversibility: vec![],
+            exceptions: vec![],
+        },
+        tensions: vec![AssessmentTension {
+            id: h(140),
+            kind: "fork".into(),
+            severity: AssessmentSeverity::Advisory,
+            status: AssessmentTensionStatus::Dismissed,
+            answer: Some(AssessmentPlanAnswerRef {
+                plan: h(133),
+                item: h(139),
+            }),
+            dismissal: Some(h(134)),
+            summary: "s".into(),
+            blocks: vec![],
+            vkey: h(141),
+        }],
+        tensions_omitted: 1,
+        suspects: vec![],
+        suspects_omitted: 2,
+        coverage: AssessmentCoverage {
+            pages: vec![],
+            corpus: AssessmentScoreChange {
+                before: scores.clone(),
+                after: scores,
+            },
+        },
+        confidence: AssessmentConfidence {
+            level: AssessmentLevel::Low,
+            reasons: vec![issue(136)],
+        },
+        reach: vec![],
+        card: AssessmentCard {
+            hash: h(139),
+            facts: vec![],
+        },
+        scope: AssessmentScope {
+            proposal: h(130),
+            blocks: vec![],
+        },
+        issues: vec![issue(135)],
+    };
+    let landing = LandingRecord {
+        proposal: h(160),
+        prev: None,
+        state: h(161),
+        approved_by: plain_prov(),
+        changes: vec![],
+        chosen: None,
+        checks: vec![],
+        assurance: Assurance::Policy,
+        relayed_by: None,
+        relay_evidence: None,
+        approved_version: None,
+        rebased_from: vec![],
+        evidence: None,
+        assessment: Some(h(150)),
+        policy: Some(PolicyRef {
+            block: id_of("p-00001"),
+            version: h(151),
+        }),
+        read_identity: None,
+    };
+    let replay = Change {
+        view: "work".into(),
+        ops: vec![],
+        deps: vec![h(162)],
+        provenance: plain_prov(),
+        justification: None,
+        message: String::new(),
+        links: ChangeLinks {
+            replayed_from: Some(h(152)),
+            briefing: Some(h(153)),
+            ..ChangeLinks::default()
+        },
+        read_identity: None,
+    };
+    let verdict = Answer {
+        item: format!("verdict:{}", h(149)),
+        act: AnswerAct::AcceptVerdict,
+        option: None,
+        label: None,
+        options: vec![],
+        card_hash: Some(h(154)),
+        targets: vec![],
+        person: plain_prov(),
+        relayed_by: None,
+        relay_evidence: None,
+        evidence_kind: None,
+        note: None,
+    };
+    vec![
+        s(
+            "assessment",
+            ASSESSMENT,
+            &assessment,
+            vec![
+                some(PROPOSAL, 130),
+                some(LANDING, 131),
+                some(BLOCK, 132),
+                some(PLAN, 133),
+                some(REVIEW, 134),
+                some(REVIEW, 135),
+                some(REVIEW, 136),
+            ],
+        ),
+        s(
+            "dispute",
+            DISPUTE,
+            &rdy_model::dispute::Dispute {
+                landing: h(142),
+                opened_by: plain_prov(),
+                reason: "r".into(),
+                at_ms: 1,
+            },
+            vec![some(LANDING, 142)],
+        ),
+        s(
+            "dispute resolution",
+            DISPUTE_RESOLUTION,
+            &rdy_model::dispute::DisputeResolution {
+                dispute: h(143),
+                outcome: rdy_model::dispute::DisputeOutcome::Upheld,
+                by: plain_prov(),
+                correction: Some(h(144)),
+            },
+            vec![some(DISPUTE, 143), some(LANDING, 144)],
+        ),
+        s(
+            "check request",
+            CHECK_REQUEST,
+            &rdy_model::check_request::CheckRequest {
+                check: "c".into(),
+                subject: rdy_model::check_request::CheckSubject {
+                    blocks: vec![id_of("b-00001")],
+                    change: Some(h(145)),
+                    version: Some(h(146)),
+                    code: None,
+                },
+                scope: "s".into(),
+                case_hash: h(147),
+                mode: rdy_model::check_request::CheckMode::Independent,
+                reason: None,
+                requested_by: plain_prov(),
+                relayed_by: None,
+                relay: None,
+            },
+            vec![some(CHANGE, 145), some(PROPOSAL, 146)],
+        ),
+        s(
+            "review check",
+            REVIEW,
+            &Review {
+                subject: ReviewSubject::Check { request: h(148) },
+                case_hash: Some(h(147)),
+                verdict: Verdict::Concern,
+                reason: "r".into(),
+                citations: vec![],
+                provenance: plain_prov(),
+            },
+            vec![some(CHECK_REQUEST, 148)],
+        ),
+        s(
+            "answer accept verdict",
+            ANSWER,
+            &verdict,
+            vec![some(REVIEW, 149)],
+        ),
+        s(
+            "landing assessed by policy",
+            LANDING,
+            &landing,
+            vec![
+                some(ASSESSMENT, 150),
+                some(BLOCK, 151),
+                some(PROPOSAL, 160),
+                some(SNAPSHOT, 161),
+            ],
+        ),
+        s(
+            "change replay",
+            CHANGE,
+            &replay,
+            vec![some(CHANGE, 152), some(CHANGE, 162)],
+        ),
+    ]
 }
 
 /// A plan version's sealed item: its identity, subject and cause are no edges; its accepting
@@ -1041,10 +1289,11 @@ fn ha1_refs_cover_every_assigned_object_kind() {
         .iter()
         .map(|s| rdy_store::codec::logical_kind(s.kind))
         .collect();
+    // ok4: the four carried kinds, 25 to 28
     let assigned: BTreeSet<u8> = (1..=7)
         .chain([9, 10, 11, 13])
         .chain(15..=22)
-        .chain([24])
+        .chain(24..=28)
         .collect();
     assert_eq!(covered, assigned);
     assert_eq!(
@@ -1097,6 +1346,8 @@ fn ha1_identity_hashes_are_not_dependencies() {
     // and a hash spelled in report text.
     let identities: BTreeSet<Hash> = [
         250, 28, 35, 51, 61, 62, 63, 64, 65, 66, 67, 70, 73, 89, 90, 91, 92, 102,
+        // ok4: pack digest, config, card, tension id and vkey, case, briefing, verdict card
+        137, 138, 139, 140, 141, 147, 153, 154,
     ]
     .into_iter()
     .map(h)
@@ -1190,6 +1441,19 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
             "{act:?}"
         );
     }
+    // ok4: an AcceptVerdict answer's item `verdict:<hex>` names its REVIEW, one more edge; an
+    // item of any other form names none
+    let mut verdict = answer(
+        AnswerAct::AcceptVerdict,
+        Role::Approver,
+        Some(EvidenceKind::Text),
+    );
+    verdict.item = format!("verdict:{}", h(38));
+    let mut want = answer_edges.clone();
+    want.push(some(REVIEW, 38));
+    assert_eq!(frame_refs(ANSWER, &verdict), Ok(sorted(want)));
+    verdict.act = AnswerAct::Confirm;
+    assert_eq!(frame_refs(ANSWER, &verdict), Ok(answer_edges.clone()));
     for role in &roles {
         let a = answer(AnswerAct::Confirm, *role, None);
         assert_eq!(
@@ -1511,7 +1775,8 @@ fn ha1_unknown_and_local_effect_kinds_are_refused() {
         frames: 1,
         digest: h(2),
     });
-    for kind in [0u8, 8, 12, 14, 23, 255] {
+    // 127, the highest logical kind, is the unassigned future kind (29 is reserved, D-FK58A)
+    for kind in [0u8, 8, 12, 14, 23, 127, 255] {
         for payload in [&tag, &ref_update, &commit, &vec![]] {
             assert_eq!(
                 refs_of(kind, payload),

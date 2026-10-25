@@ -100,7 +100,17 @@ fn batch(payload: &[u8]) -> Vec<u8> {
         &postcard::to_allocvec(&claim()).unwrap(),
     ))
     .unwrap();
-    w.record(&raw(kinds::CHANGE, payload)).unwrap();
+    // the change's frame in CHANGE's latest encoding: the version prefix, then the body
+    let (raw_kind, framed) = rdy_store::codec::frame_latest(kinds::CHANGE, payload.to_vec());
+    w.record(&StreamRecord::Present {
+        encoding: rdy_store::codec::split(raw_kind, &framed).unwrap().version,
+        key: ObjectKey {
+            kind: kinds::CHANGE,
+            hash: Hash::of(&framed),
+        },
+        payload: framed,
+    })
+    .unwrap();
     w.finish().unwrap().0
 }
 

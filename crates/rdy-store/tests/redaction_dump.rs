@@ -502,7 +502,10 @@ fn rdx9_a_dropped_record_preserves_original_offsets_and_hashes() {
         .iter()
         .map(|(i, j)| &src.batches[*i].frames[*j])
         .collect();
-    let kinds_of: Vec<u8> = dropped.iter().map(|f| f.kind()).collect();
+    let kinds_of: Vec<u8> = dropped
+        .iter()
+        .map(|f| rdy_store::codec::logical_kind(f.kind()))
+        .collect();
     assert_eq!(kinds_of, [BLOCK, CHANGE, BLOB_CHUNK, BLOB_CHUNK]);
     for f in &dropped {
         assert!(f.present_payload().is_none());
@@ -567,7 +570,8 @@ fn rdx9_a_dropped_record_preserves_original_offsets_and_hashes() {
     for (i, j) in src.dropped() {
         let f = &src.batches[i].frames[j];
         assert!(
-            t.has_kind(f.kind(), f.hash()).unwrap(),
+            t.has_kind(rdy_store::codec::logical_kind(f.kind()), f.hash())
+                .unwrap(),
             "{} stays",
             f.hash()
         );
@@ -607,6 +611,10 @@ fn rdx9_container_and_source_digests_cover_different_records() {
         let other = if recs[i].1[0] == BLOCK { CHANGE } else { BLOCK };
         let mut r = recs.clone();
         r[i].1[0] = other;
+        // an encoding the other kind may have when removed: a block's is 0
+        if other == BLOCK {
+            r[i].1[1..3].copy_from_slice(&[0, 0]);
+        }
         r[i].1[71] = 1;
         if r[i].1[72..].iter().all(|b| *b == 0) {
             r[i].1[72] = 1;
@@ -656,6 +664,8 @@ fn rdx9_container_and_source_digests_cover_different_records() {
         // a container that names a kind no redaction removes is refused on read
         let mut r = recs.clone();
         r[i].1[0] = kinds::PROPOSAL;
+        // with encoding 0, so the kind alone is what the reader refuses
+        r[i].1[1..3].copy_from_slice(&[0, 0]);
         assert_eq!(
             what(read(&forge(DUMP_FORMAT, &r)).unwrap_err()),
             INVALID_KIND
@@ -729,16 +739,20 @@ fn policy_batches(src: &Src) -> Vec<DumpBatch> {
     let frames = &mut bs[landing].frames;
     let li = frames
         .iter()
-        .position(|f| f.kind() == kinds::LANDING)
+        .position(|f| rdy_store::codec::logical_kind(f.kind()) == kinds::LANDING)
         .unwrap();
-    let mut l: LandingRecord = postcard::from_bytes(frames[li].present_payload().unwrap()).unwrap();
+    let mut l: LandingRecord =
+        rdy_store::codec::decode_record(frames[li].kind(), frames[li].present_payload().unwrap())
+            .unwrap();
+    // a forged record: no longer the read's identity
+    l.read_identity = None;
     l.assurance = Assurance::Policy;
     l.relayed_by = None;
     l.relay_evidence = None;
-    let lp = enc(&l);
+    let (lk, lp) = rdy_store::codec::item(kinds::LANDING, &l).unwrap();
     let lid = Hash::of(&lp);
     frames[li] = Frame::Present {
-        kind: kinds::LANDING,
+        kind: lk,
         hash: lid,
         payload: lp,
     };
@@ -1250,9 +1264,10 @@ fn rdx9_a_drop_claim_is_bounded_before_it_is_written() {
         Hash::of(b"no such apply"),
         None,
     );
+    // ok4: the baseline manifest is 183 bytes
     assert_eq!(
         stream.len(),
-        628,
+        775,
         "590 bytes in dump format 3, the manifest and the encoding"
     );
     let (_, _, bs) = read_dump(&stream).unwrap();
@@ -1543,7 +1558,8 @@ fn with_drops(raw: &Raw, kinds_dropped: &[u8]) -> Vec<DumpBatch> {
         };
         let (_, i, j) = places.iter().find(|(l, ..)| *l == loc).unwrap();
         batches[*i].frames[*j] = Frame::Dropped {
-            kind: span.kind,
+            // the frame's raw kind: a change of the latest encoding is marked
+            kind: batches[*i].frames[*j].kind(),
             hash: span.hash,
             len: span.len,
             apply,

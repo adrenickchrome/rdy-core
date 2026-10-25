@@ -130,6 +130,74 @@ struct Src {
     side_block: Hash,
     /// The bound plan of the proposal and the landing's seal.
     plans: [Hash; 2],
+    /// The carried shapes the landing reaches (ok4): its ASSESSMENT, a DISPUTE of it and its
+    /// DISPUTE_RESOLUTION, a CHECK_REQUEST of its change and a Check REVIEW of that request.
+    carried: Vec<ObjectKey>,
+}
+
+/// A minimal assessment of `proposal`: no rows, no policy.
+fn assessment_of(proposal: Hash) -> rdy_model::assessment::Assessment {
+    use rdy_model::assessment::*;
+    let scores = AssessmentScores {
+        overall: 100,
+        grounded: 100,
+        consistent: 100,
+        current: 100,
+        connected: 100,
+        complete: 100,
+        governed: 100,
+    };
+    Assessment {
+        proposal,
+        base: None,
+        method: 1,
+        pack: AssessmentPack {
+            name: "p".into(),
+            version: "1".into(),
+            digest: Hash([71; 32]),
+        },
+        config: Hash([72; 32]),
+        policy: None,
+        facts: AssessmentFacts {
+            changes: 1,
+            consequences: 0,
+            plan: AssessmentPlanCounts {
+                open: 0,
+                closed: 0,
+                deferred: 0,
+                by_kind: vec![],
+            },
+            supersedes: vec![],
+            reaffirms: vec![],
+            reversibility: vec![],
+            exceptions: vec![],
+        },
+        tensions: vec![],
+        tensions_omitted: 0,
+        suspects: vec![],
+        suspects_omitted: 0,
+        coverage: AssessmentCoverage {
+            pages: vec![],
+            corpus: AssessmentScoreChange {
+                before: scores.clone(),
+                after: scores,
+            },
+        },
+        confidence: AssessmentConfidence {
+            level: AssessmentLevel::High,
+            reasons: vec![],
+        },
+        reach: vec![],
+        card: AssessmentCard {
+            hash: Hash([73; 32]),
+            facts: vec![],
+        },
+        scope: AssessmentScope {
+            proposal,
+            blocks: vec![],
+        },
+        issues: vec![],
+    }
 }
 
 fn source() -> Src {
@@ -223,7 +291,22 @@ fn source() -> Src {
     };
     s.write_guarded_for_tests(plan_frames(&bound)).unwrap();
     s.seal(vec![]).unwrap();
-    let landing = s.land(&proposal, human.clone()).unwrap();
+    // ok4: the landing names its assessment (a carried shape)
+    let assessed = s.put(kinds::ASSESSMENT, &assessment_of(proposal)).unwrap();
+    let prepared = s
+        .prepare_land_altered_for_tests(
+            rdy_store::LandRequest {
+                proposal,
+                accept: None,
+                approver: human.clone(),
+                alt: None,
+                relay: None,
+                evidence: None,
+            },
+            &move |l| l.assessment = Some(assessed),
+        )
+        .unwrap();
+    let landing = s.commit_land(prepared, &[]).unwrap().landing;
     let version = s.landing(&landing).unwrap().proposal;
     let sealed = Plan {
         stable: Some(bound.id()),
@@ -312,6 +395,71 @@ fn source() -> Src {
     let relay = s
         .put_answer(&answer("tag:v1", AnswerAct::Tag, vec![]))
         .unwrap();
+    // ok4: a dispute of the landing and its resolution, a check request of the change and a
+    // check review of it: the closure attaches each
+    let dispute = s
+        .put(
+            kinds::DISPUTE,
+            &rdy_model::dispute::Dispute {
+                landing,
+                opened_by: human.clone(),
+                reason: "wrong".into(),
+                at_ms: 3,
+            },
+        )
+        .unwrap();
+    let resolution = s
+        .put(
+            kinds::DISPUTE_RESOLUTION,
+            &rdy_model::dispute::DisputeResolution {
+                dispute,
+                outcome: rdy_model::dispute::DisputeOutcome::Withdrawn,
+                by: human.clone(),
+                correction: None,
+            },
+        )
+        .unwrap();
+    let request = s
+        .put(
+            kinds::CHECK_REQUEST,
+            &rdy_model::check_request::CheckRequest {
+                check: "c".into(),
+                subject: rdy_model::check_request::CheckSubject {
+                    blocks: vec![],
+                    change: Some(change_id),
+                    version: None,
+                    code: None,
+                },
+                scope: "s".into(),
+                case_hash: Hash([74; 32]),
+                mode: rdy_model::check_request::CheckMode::Author,
+                reason: None,
+                requested_by: w.clone(),
+                relayed_by: None,
+                relay: None,
+            },
+        )
+        .unwrap();
+    let verdict = s
+        .put(
+            kinds::REVIEW,
+            &Review {
+                subject: ReviewSubject::Check { request },
+                case_hash: Some(Hash([74; 32])),
+                verdict: Verdict::Pass,
+                reason: String::new(),
+                citations: vec![],
+                provenance: w.clone(),
+            },
+        )
+        .unwrap();
+    let carried = vec![
+        key(kinds::ASSESSMENT, assessed),
+        key(kinds::DISPUTE, dispute),
+        key(kinds::DISPUTE_RESOLUTION, resolution),
+        key(kinds::CHECK_REQUEST, request),
+        key(kinds::REVIEW, verdict),
+    ];
     // another view's work, never landed
     let side = block("b-00003", "claim", "side work", BTreeMap::new());
     let side_change = s
@@ -364,6 +512,7 @@ fn source() -> Src {
         side_change,
         side_block: side.version_hash(),
         plans: [bound.id(), sealed.id()],
+        carried,
     }
 }
 
@@ -500,6 +649,8 @@ fn ha5_every_kind_closure_is_ordered_and_complete() {
     ]);
     want.extend(chunks.iter().map(|h| key(kinds::BLOB_CHUNK, *h)));
     want.extend(src.view_ops.iter().map(|h| key(kinds::VIEW_OP, *h)));
+    // ok4: the carried shapes, through the landing's edge and the attachment pass
+    want.extend(src.carried.iter().copied());
     want.extend(
         src.residues()
             .iter()
@@ -776,14 +927,16 @@ fn ha5_removed_payloads_use_placeholders_and_later_proofs() {
     // forged proofs: each is refused at the record that fails
     let request: Redaction = reader.redaction_request(&src.request()).unwrap();
     let real: RedactionApply = src.fixture.applies[0].1.clone();
+    // a forged record of `kind` whose body is `bytes`, framed in its kind's latest encoding
     let forge = |records: &mut BTreeMap<ObjectKey, StreamRecord>, kind: u8, bytes: Vec<u8>| {
-        let k = key(kind, Hash::of(&bytes));
+        let (raw, payload) = rdy_store::codec::frame_latest(kind, bytes);
+        let k = key(kind, Hash::of(&payload));
         records.insert(
             k,
             StreamRecord::Present {
-                encoding: 0,
+                encoding: rdy_store::codec::split(raw, &payload).unwrap().version,
                 key: k,
-                payload: bytes,
+                payload,
             },
         );
         k.hash
@@ -852,10 +1005,11 @@ fn ha5_removed_payloads_use_placeholders_and_later_proofs() {
     let mut collapsed = want.clone();
     collapsed.apply = a;
     collapsed.request = Hash::of(&enc(&twice));
-    collapsed.landing = Hash::of(&enc(&LandingRecord {
+    collapsed.landing = LandingRecord {
         checks: vec![collapsed.request],
         ..later.clone()
-    }));
+    }
+    .id();
     assert_eq!(check(&mut forged, a).unwrap(), collapsed);
     // unequal tuples of one key refuse
     let mut unequal = twice.clone();
@@ -893,14 +1047,16 @@ fn ha5_a_new_request_cannot_reuse_an_approval() {
         "the approval names the request it approved"
     );
     let real: RedactionApply = src.fixture.applies[0].1.clone();
+    // a forged record of `kind` whose body is `bytes`, framed in its kind's latest encoding
     let forge = |records: &mut BTreeMap<ObjectKey, StreamRecord>, kind: u8, bytes: Vec<u8>| {
-        let k = key(kind, Hash::of(&bytes));
+        let (raw, payload) = rdy_store::codec::frame_latest(kind, bytes);
+        let k = key(kind, Hash::of(&payload));
         records.insert(
             k,
             StreamRecord::Present {
-                encoding: 0,
+                encoding: rdy_store::codec::split(raw, &payload).unwrap().version,
                 key: k,
-                payload: bytes,
+                payload,
             },
         );
         k.hash
@@ -937,7 +1093,7 @@ fn ha5_a_new_request_cannot_reuse_an_approval() {
         kind: kinds::BLOCK,
         hash: figure,
         len: frame.len,
-        residue: Some(hash_of(&residue)),
+        residue: Some(redaction_fixture::residue_id(&residue)),
     });
     wider
         .manifest

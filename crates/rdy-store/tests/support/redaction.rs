@@ -231,10 +231,14 @@ pub fn relink(request: &mut Redaction, residues: &[RedactionResidue]) {
 }
 
 /// The frame of residue `r` in encoding `encoding`.
+///
+/// A residue with no form in `encoding` (a change residue of an encoding-1 change has none in
+/// encoding 0, ok4) keeps the latest encoding.
 pub fn residue_frame_in(r: &RedactionResidue, encoding: u16) -> (u8, Vec<u8>) {
-    let body = rdy_store::codec::residue_body(r, encoding)
-        .expect("the residue has a form in this encoding");
-    rdy_store::codec::frame(kinds::REDACTION_RESIDUE, encoding, body).unwrap()
+    match rdy_store::codec::residue_body(r, encoding) {
+        Some(body) => rdy_store::codec::frame(kinds::REDACTION_RESIDUE, encoding, body).unwrap(),
+        None => residue_frame(r),
+    }
 }
 
 /// [`relink`], naming each residue by its frame in encoding `encoding`.
@@ -776,7 +780,11 @@ pub fn authorized_batch_fixture(
     if let Some(t) = &opts.transition {
         items.push((kinds::TRANSITION, t.clone()));
     }
-    fixture.landing_batch = items.iter().map(|(k, p)| (*k, Hash::of(p))).collect();
+    // by the logical kind, as `Store::last_batch` names a batch's frames
+    fixture.landing_batch = items
+        .iter()
+        .map(|(k, p)| (rdy_store::codec::logical_kind(*k), Hash::of(p)))
+        .collect();
     fixture.landing_start = Some(append(dir, &items, opts.seal));
     fixture.proposal = Some(pid);
     fixture.landing = Some(lid);

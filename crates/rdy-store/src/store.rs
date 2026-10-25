@@ -1426,6 +1426,7 @@ impl Store {
 
     /// The kind and hash of each frame of the open held batch, in order; `None` when no batch is
     /// open.
+    /// (Each frame by its logical kind, `crate::codec`.)
     pub fn open_batch(&self) -> Option<&[(u8, Hash)]> {
         self.open.as_ref().map(|o| &o.frames[..])
     }
@@ -1515,8 +1516,11 @@ impl Store {
             });
         }
         let open = self.open.as_mut().expect("a batch is open");
-        open.frames
-            .extend(last.iter().zip(&placed).map(|((k, _), (_, h))| (*k, *h)));
+        open.frames.extend(
+            last.iter()
+                .zip(&placed)
+                .map(|((k, _), (_, h))| (crate::codec::logical_kind(*k), *h)),
+        );
         let placed_entries = self.placed_entries(&last, &placed)?;
         self.log.crash_point(CrashPoint::BeforeMarker);
         let open = self.open.as_ref().expect("a batch is open");
@@ -2007,8 +2011,12 @@ impl Store {
             start: placed[0].0,
             frames: vec![],
         });
-        open.frames
-            .extend(batch.iter().zip(&placed).map(|((k, _), (_, h))| (*k, *h)));
+        open.frames.extend(
+            batch
+                .iter()
+                .zip(&placed)
+                .map(|((k, _), (_, h))| (crate::codec::logical_kind(*k), *h)),
+        );
         Ok(hashes)
     }
 
@@ -3672,8 +3680,11 @@ impl Store {
         let synced = (|| -> Result<Vec<IndexEntry>, StoreError> {
             let placed = self.log.append_frames(&last, false)?;
             let open = self.open.as_mut().expect("a batch is open");
-            open.frames
-                .extend(last.iter().zip(&placed).map(|((k, _), (_, h))| (*k, *h)));
+            open.frames.extend(
+                last.iter()
+                    .zip(&placed)
+                    .map(|((k, _), (_, h))| (crate::codec::logical_kind(*k), *h)),
+            );
             let placed_entries = self.placed_entries(&last, &placed)?;
             let open = self.open.as_ref().expect("a batch is open");
             self.log

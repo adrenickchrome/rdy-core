@@ -163,9 +163,14 @@ fn frames(h: &Store) -> Vec<(Location, u8, Hash, bool)> {
     let mut out = vec![];
     h.reader()
         .for_each_record_from(ORIGIN, h.log_end(), |loc, f, _| {
+            // by the logical kind (`rdy_store::codec`)
             out.push(match f {
-                StoredFrame::Present { kind, hash, .. } => (loc, kind, hash, false),
-                StoredFrame::Dropped { kind, hash, .. } => (loc, kind, hash, true),
+                StoredFrame::Present { kind, hash, .. } => {
+                    (loc, rdy_store::codec::logical_kind(kind), hash, false)
+                }
+                StoredFrame::Dropped { kind, hash, .. } => {
+                    (loc, rdy_store::codec::logical_kind(kind), hash, true)
+                }
             });
             Ok(())
         })
@@ -312,12 +317,12 @@ fn ha11_all_local_copies_of_approved_tuples_are_removed() {
     let b = base(0);
     let h = Store::open(&b.holder).unwrap();
     let secret_bytes = h.get_raw(&b.secret.version_hash()).unwrap().1;
-    let change_bytes = h.get_kind(kinds::CHANGE, &b.change).unwrap();
+    let (change_kind, change_bytes) = h.get_kind_raw(kinds::CHANGE, &b.change).unwrap();
     drop(h);
     // a second physical copy of each removed object, in a later batch of the holder's log
     append_raw(
         &b.holder,
-        &[(kinds::BLOCK, secret_bytes), (kinds::CHANGE, change_bytes)],
+        &[(kinds::BLOCK, secret_bytes), (change_kind, change_bytes)],
     );
     let mut h = Store::open(&b.holder).unwrap();
     assert_eq!(copies(&h, b.secret_key()).len(), 2);
@@ -933,7 +938,7 @@ fn conflicting(b: &Base, name: &str, edit: SpanEdit) -> (Vec<File>, Hash, Items)
     let rid = Hash::of(&request_bytes);
     let mut landing = b.fixture.landing_record.clone().unwrap();
     landing.checks = vec![rid];
-    let landing_bytes = enc(&landing);
+    let (landing_kind, landing_bytes) = rdy_store::codec::item(kinds::LANDING, &landing).unwrap();
     let lid = Hash::of(&landing_bytes);
     let apply_bytes = enc(&RedactionApply {
         request: rid,
@@ -950,7 +955,7 @@ fn conflicting(b: &Base, name: &str, edit: SpanEdit) -> (Vec<File>, Hash, Items)
     let tid = Hash::of(&tag_bytes);
     records.extend([
         (kinds::REDACTION, request_bytes),
-        (kinds::LANDING, landing_bytes),
+        (landing_kind, landing_bytes),
         (kinds::REDACTION_APPLY, apply_bytes),
     ]);
     // the batch, ending with the tag; its prerequisites are every key a record names that the

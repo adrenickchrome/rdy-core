@@ -76,9 +76,9 @@ fn registry() -> Vec<UpgradeStep> {
 
 const STEPS: [&str; 3] = ["beta", "zeta", "alpha"];
 
-/// The manifest the registry makes from the baseline.
+/// The manifest the registry makes from the baseline (ok4: content-2 and object encodings).
 fn upgraded() -> StoreFeatures {
-    manifest(vec![
+    baseline_features().merged(&[
         feature("aa_other", FeatureClass::Compatible),
         test_feature(),
         feature("zz_extra", FeatureClass::Compatible),
@@ -509,7 +509,10 @@ fn ok5_upgrade_is_one_batch_and_keeps_all_hashes() {
     assert_eq!(s.landings().unwrap(), landings);
     for (h, rec) in &landings {
         assert_eq!(&s.landing(h).unwrap(), rec);
-        assert_eq!(s.get_raw(h).unwrap().0, kinds::LANDING);
+        assert_eq!(
+            rdy_store::codec::logical_kind(s.get_raw(h).unwrap().0),
+            kinds::LANDING
+        );
     }
     // the two ref frames (verify counts data frames, not markers)
     assert_eq!(s.verify().unwrap(), frame_count + 2);

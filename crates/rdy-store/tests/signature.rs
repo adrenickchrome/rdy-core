@@ -293,7 +293,7 @@ fn sig4_signatures_share_the_subject_batch() {
     let l = landing_record(7);
     let lh = l.id();
     let gl = sig(lh, "rdy-approval-v1", b"approval", &[2]);
-    let mut items = vec![(kinds::LANDING, enc(&l))];
+    let mut items = vec![rdy_store::codec::item(kinds::LANDING, &l).unwrap()];
     items.extend(signature::frames(std::slice::from_ref(&gl)).unwrap());
     s.write(items).unwrap();
     assert_eq!(s.signatures_of(&lh).unwrap(), vec![gl.id()]);

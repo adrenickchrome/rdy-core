@@ -308,7 +308,7 @@ fn ha5_stream_one_has_exact_header_frames_and_trailer() {
         json["header"],
         serde_json::json!({
             "stream_format": 2,
-            "features": {"manifest_version": 1, "features": []},
+            "features": serde_json::to_value(rdy_store::format::baseline_features()).unwrap(),
             "repo_id": "07070707070707070707070707070707",
             "purpose": "tag_history",
             "tag": root.to_string(),

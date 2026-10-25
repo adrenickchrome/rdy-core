@@ -135,7 +135,8 @@ fn rf4_reflects_changes_keep_their_bytes_in_the_store() {
         assert_eq!((&got.ops, &got.message), (&c.ops, &c.message));
         assert_eq!(got.id(), h);
         let bytes = postcard::to_allocvec(&got).unwrap();
-        assert_eq!(Hash::of(&bytes), h);
+        // the latest encoding: the hash covers the version prefix (ok4)
+        assert_eq!(rdy_model::encoding::encoded_hash(1, &bytes), h);
         assert_eq!(rdy_store::bounded::decode::<Change>(&bytes).unwrap(), got);
     }
     let check = s.check_objects().unwrap();

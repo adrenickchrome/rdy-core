@@ -100,7 +100,8 @@ fn append_raw(path: &Path, frames: &[(u8, Vec<u8>)]) {
 fn raw_frames(s: &Store) -> Vec<(Location, u8, Hash)> {
     let mut out = vec![];
     s.for_each_frame_from(ORIGIN, s.log_end(), |loc, kind, hash, _, _| {
-        out.push((loc, kind, hash));
+        // by the logical kind (`rdy_store::codec`)
+        out.push((loc, rdy_store::codec::logical_kind(kind), hash));
         Ok(())
     })
     .unwrap();
@@ -198,9 +199,10 @@ fn rdx2_a_request_is_one_batch_and_removes_nothing() {
     let batch: Vec<u8> = s.last_batch().iter().map(|(k, _)| *k).collect();
     assert_eq!(
         batch,
+        // by logical kind (`Store::last_batch`)
         vec![
-            residue_frame(&d.residues[0]).0,
-            residue_frame(&d.residues[1]).0,
+            kinds::REDACTION_RESIDUE,
+            kinds::REDACTION_RESIDUE,
             CHANGE,
             kinds::REDACTION,
             kinds::VIEW_OP,
@@ -757,7 +759,8 @@ fn rdx2_raw_reads_and_blob_reads_cannot_restore_content() {
                 assert_eq!(by, apply);
                 dropped.push(DropSpan {
                     place: place(loc),
-                    kind,
+                    // a span names its frame by the logical kind
+                    kind: rdy_store::codec::logical_kind(kind),
                     hash,
                     len,
                     residue,
@@ -791,7 +794,7 @@ fn rdx2_projected_or_erased_objects_cannot_be_written() {
             ),
         )
         .unwrap();
-    let ca_bytes = s.get_raw(&ca).unwrap().1;
+    let (ca_kind, ca_bytes) = s.get_raw(&ca).unwrap();
     let big: Vec<u8> = (0..MIB + 100).map(|i| (i % 249) as u8).collect();
     let x = s.put_blob(&big).unwrap();
     drop(s);
@@ -853,7 +856,7 @@ fn rdx2_projected_or_erased_objects_cannot_be_written() {
 
     // the erased hashes: the block, the change, the blob and its chunk, and a blob sharing it
     assert!(removed(req, s.write(vec![(BLOCK, enc(&a))])));
-    assert!(removed(req, s.write(vec![(CHANGE, ca_bytes)])));
+    assert!(removed(req, s.write(vec![(ca_kind, ca_bytes)])));
     assert!(removed(req, s.put_blob(&big)));
     assert!(removed(
         req,
@@ -996,10 +999,13 @@ fn rdx2_metadata_and_history_records_are_not_targets() {
             hash,
             payload,
         } = frame
-            && !is_removable(kind)
+            && !is_removable(rdy_store::codec::logical_kind(kind))
         {
-            seen.entry(kind)
-                .or_insert((loc, hash, payload.len() as u32));
+            seen.entry(rdy_store::codec::logical_kind(kind)).or_insert((
+                loc,
+                hash,
+                payload.len() as u32,
+            ));
         }
         Ok(())
     })
@@ -1016,7 +1022,7 @@ fn rdx2_metadata_and_history_records_are_not_targets() {
         kinds::BATCH_COMMIT,
         kinds::TRANSITION,
         kinds::REDACTION,
-        residue_frame(&d.residues[0]).0,
+        kinds::REDACTION_RESIDUE,
         kinds::REDACTION_APPLY,
     ]
     .into();
@@ -1516,7 +1522,7 @@ fn rdx2_put_checks_every_typed_block_and_change() {
     assert_eq!(s.get_block(&hb).unwrap(), other);
     let c = change("work", vec![]);
     let hc = s.put(CHANGE, &Box::new(c.clone())).unwrap();
-    assert_eq!(hc, Hash::of(&enc(&c)));
+    assert_eq!(hc, c.id());
 }
 
 #[test]

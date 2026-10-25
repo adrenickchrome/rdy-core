@@ -870,7 +870,9 @@ fn rdx7_every_physical_copy_must_be_covered() {
         record(&mut s, &spec);
         let payload = frame_of(&s, kind, hash).1;
         drop(s);
-        raw_append(&w.path, &[(kind, payload)]);
+        // the copy keeps the frame's raw kind: its kind's latest encoding
+        let raw = rdy_store::codec::raw_kind(kind, rdy_store::codec::latest(kind));
+        raw_append(&w.path, &[(raw, payload)]);
         let mut s = Store::open(&w.path).unwrap();
         assert_land_refuses(
             &mut s,
@@ -932,9 +934,9 @@ fn rdx7_apply_keeps_untargeted_blocks_reconstructible() {
             Op::Create { block: c.clone() },
         ],
     );
-    let c2_bytes = redaction_fixture::enc(&c2);
+    let (c2_kind, c2_bytes) = rdy_store::codec::item(kinds::CHANGE, &c2).unwrap();
     let c2_id = Hash::of(&c2_bytes);
-    let c2_at = raw_append(&w.path, &[(kinds::CHANGE, c2_bytes)]);
+    let c2_at = raw_append(&w.path, &[(c2_kind, c2_bytes)]);
     {
         let s = Store::open(&w.path).unwrap();
         assert!(!s.has_kind(BLOCK, &c.version_hash()).unwrap());
@@ -1050,7 +1052,13 @@ fn rdx7_held_apply_masks_nothing_before_seal() {
             change("other", vec![Op::Create { block: w.a.clone() }]),
         )
         .unwrap();
-        let open = s.open_batch().unwrap().to_vec();
+        // by the logical kind, as the logged batch reads it
+        let open: Vec<(u8, Hash)> = s
+            .open_batch()
+            .unwrap()
+            .iter()
+            .map(|(k, h)| (rdy_store::codec::logical_kind(*k), *h))
+            .collect();
         let e = s
             .land_atomic(request(p, person(Role::Approver), false))
             .unwrap_err();
@@ -1166,7 +1174,13 @@ fn rdx7_held_apply_seal_takes_only_its_transition() {
         s.set_held(true).unwrap();
         s.land_atomic(request(p, person(Role::Approver), false))
             .unwrap();
-        let open = s.open_batch().unwrap().to_vec();
+        // by the logical kind, as the logged batch reads it
+        let open: Vec<(u8, Hash)> = s
+            .open_batch()
+            .unwrap()
+            .iter()
+            .map(|(k, h)| (rdy_store::codec::logical_kind(*k), *h))
+            .collect();
         let (end, writes) = (s.log_end(), s.write_count());
         let e = s.seal(bad).unwrap_err();
         assert!(matches!(e, StoreError::Refused(_)), "{case}: {e:?}");
