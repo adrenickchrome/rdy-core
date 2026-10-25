@@ -1,5 +1,6 @@
 mod assets;
 mod changes;
+mod diagram_svg;
 pub mod disagree;
 mod highlight;
 mod home;
