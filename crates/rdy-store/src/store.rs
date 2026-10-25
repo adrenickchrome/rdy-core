@@ -167,6 +167,9 @@ pub struct Store {
     /// The features of the open held batch, when one of its writes activated a feature: they
     /// become `features` when the batch seals.
     held_features: Option<StoreFeatures>,
+    /// Opened by the upgrade transaction ([`Store::open_unupgraded_locked`]): a `FORMAT` that
+    /// still mirrors the manifest before the log's last upgrade receipt is accepted as it is.
+    upgrade_pending: bool,
 }
 
 /// A held batch not yet sealed: where its first data frame is, and the kind and hash of each of
@@ -902,13 +905,20 @@ impl Store {
     }
 
     /// The current locked open ([`Store::open_locked`]) without an upgrade policy: the upgrade
-    /// transaction's own open of the store it upgrades.
-    #[allow(dead_code)]
+    /// transaction's own open of the store it upgrades. It also opens a store whose `FORMAT`
+    /// still mirrors the manifest before a sealed upgrade batch, when the log's last upgrade
+    /// receipt explains the difference (its `from` is `FORMAT`'s hash, its `to` the log's): the
+    /// upgrade's completion runs its checks on that store, then publishes `FORMAT`
+    /// (`crate::upgrade::publish_checked`). `FORMAT` is never put back or published here.
     pub(crate) fn open_unupgraded_locked(
         dir: &Path,
         lock: &StoreLock,
     ) -> Result<Store, StoreError> {
-        Store::open_locked(dir, lock)
+        Store::check_existing(dir)?;
+        if !lock.guards(dir) {
+            return Err(StoreError::Locked(dir.to_path_buf()));
+        }
+        Store::open_current_format_with(dir, vec![], Some(lock.clone()), None, true)
     }
 
     /// The checks [`Store::open`] makes before it creates, locks, opens or writes anything: `dir`
@@ -943,9 +953,21 @@ impl Store {
     /// store a holder with that repo id.
     fn open_current_format(
         dir: &Path,
+        synced: Vec<PathBuf>,
+        held: Option<StoreLock>,
+        holder: Option<RepoId>,
+    ) -> Result<Store, StoreError> {
+        Store::open_current_format_with(dir, synced, held, holder, false)
+    }
+
+    /// [`Store::open_current_format`]; with `upgrade_pending`, a `FORMAT` that the log's last
+    /// upgrade receipt explains is accepted as it is ([`Store::open_unupgraded_locked`]).
+    fn open_current_format_with(
+        dir: &Path,
         mut synced: Vec<PathBuf>,
         held: Option<StoreLock>,
         holder: Option<RepoId>,
+        upgrade_pending: bool,
     ) -> Result<Store, StoreError> {
         let segments = dir.join("segments");
         // dur1: each directory created here is fsynced into its parent before any write is acked.
@@ -1064,6 +1086,7 @@ impl Store {
             creation,
             features: format::baseline_features(),
             held_features: None,
+            upgrade_pending,
         };
         let (upto, end) = (store.index().indexed_upto()?, store.log.end());
         if upto > end {
@@ -1155,10 +1178,25 @@ impl Store {
                     format::write_format_file(&self.dir, f)?;
                 }
             }
+            Some(mirror) if self.upgrade_pending && self.receipt_explains(&mirror, f)? => {}
             _ => return Err(format::unmirrored(&self.dir)),
         }
         self.features = f.clone();
         Ok(())
+    }
+
+    /// Whether the log's last upgrade receipt (`meta/upgrade`, as the index holds it) took the
+    /// store from `mirror` to `log`: a `FORMAT` the upgrade has not published yet.
+    fn receipt_explains(
+        &self,
+        mirror: &StoreFeatures,
+        log: &StoreFeatures,
+    ) -> Result<bool, StoreError> {
+        let Some(v) = self.index().get_ref(format::REF_UPGRADE)? else {
+            return Ok(false);
+        };
+        Ok(format::UpgradeReceipt::parse(&v)
+            .is_ok_and(|r| r.from == mirror.hash() && r.to == log.hash()))
     }
 
     /// Makes the log hold the store's features, which `FORMAT` (already checked) mirrors. The
@@ -1250,7 +1288,6 @@ impl Store {
     /// not the current sealed end, whose `from` is not the current manifest's hash, or whose `to`
     /// is not `features`' hash. Returns the batch's `BATCH_COMMIT` hash. No public ref write
     /// passes these checks.
-    #[allow(dead_code)]
     pub(crate) fn commit_upgrade_refs(
         &mut self,
         features: &StoreFeatures,
@@ -4102,11 +4139,16 @@ mod tests {
         assert_eq!(last, Some(marker), "the batch's marker hash");
         s.reader().check_meta().unwrap();
         drop((s, lock));
-        let s = Store::open_unupgraded_locked(&dir, &StoreLock::take(&dir).unwrap());
-        // FORMAT still mirrors the old manifest: the mirror is the upgrade's to publish
-        assert!(
-            s.is_err(),
-            "a log whose features FORMAT does not list is refused"
+        let old = std::fs::read(dir.join(crate::format::FORMAT_FILE)).unwrap();
+        // FORMAT still mirrors the old manifest: the mirror is the upgrade's to publish. The
+        // upgrade's own open accepts the store, as the receipt explains the difference, and
+        // leaves FORMAT as it is.
+        let s = Store::open_unupgraded_locked(&dir, &StoreLock::take(&dir).unwrap()).unwrap();
+        assert_eq!(s.features(), &to);
+        drop(s);
+        assert_eq!(
+            std::fs::read(dir.join(crate::format::FORMAT_FILE)).unwrap(),
+            old
         );
     }
 

@@ -1,5 +1,6 @@
 use rdy_schema::Issue;
 use rdy_store::StoreError;
+use rdy_store::error::UpgradeFailure;
 use serde::Serialize;
 use std::fmt;
 
@@ -683,6 +684,18 @@ impl From<StoreError> for RdyError {
                 "A read projection cannot be written.",
                 "Write a new block version from source content.",
             ),
+            e @ StoreError::Upgrade { failure, .. } => RdyError::new(
+                match failure {
+                    UpgradeFailure::Moved => E_UPGRADE_MOVED,
+                    UpgradeFailure::BackupMismatch | UpgradeFailure::BackupFileType => {
+                        E_UPGRADE_BACKUP
+                    }
+                    UpgradeFailure::CheckFailed | UpgradeFailure::FsckFailed => E_UPGRADE_FAILED,
+                    UpgradeFailure::Limit => E_LIMIT,
+                },
+                e.to_string(),
+                failure.fix(),
+            ),
             StoreError::Io(e) if e.kind() == std::io::ErrorKind::InvalidData => RdyError::new(
                 E_IO,
                 format!("i/o error: {e}"),
@@ -741,6 +754,13 @@ pub const E_DUMP: &str = "E_DUMP";
 pub const E_DUMP_CHAIN: &str = "E_DUMP_CHAIN";
 /// A load stop the dump chain does not hold. Built by [`crate::dump_error`].
 pub const E_LOAD_STOP: &str = "E_LOAD_STOP";
+/// The store changed after its upgrade was planned.
+pub const E_UPGRADE_MOVED: &str = "E_UPGRADE_MOVED";
+/// The upgrade backup is incomplete or does not match the store, or the store holds a link or
+/// a special file.
+pub const E_UPGRADE_BACKUP: &str = "E_UPGRADE_BACKUP";
+/// The upgrade batch is durable, but the store check or fsck failed.
+pub const E_UPGRADE_FAILED: &str = "E_UPGRADE_FAILED";
 
 /// The session actor is not in the hub's `human:`, `agent:` or `ci:` form, an agent session
 /// claims a human actor, or a human claim is not bound to the install's account handle. Built by
@@ -1002,7 +1022,7 @@ pub fn upstream_signout_local() -> Issue {
 
 /// Every error code the engine defines: each `E_*` constant of this module and the briefing's
 /// two. It is the engine's whole static error set, not one feature's subset.
-const CORE_ERROR_CODES: [&str; 102] = [
+const CORE_ERROR_CODES: [&str; 105] = [
     E_LOCKED,
     E_HELD_BY_READER,
     E_NO_PROJECT,
@@ -1103,6 +1123,9 @@ const CORE_ERROR_CODES: [&str; 102] = [
     E_UPSTREAM_CA,
     E_UPSTREAM_KEY_PROOF,
     E_UPSTREAM_ACTOR_CLAIM,
+    E_UPGRADE_MOVED,
+    E_UPGRADE_BACKUP,
+    E_UPGRADE_FAILED,
     crate::brief::E_BRIEF_REQUIRED,
     crate::brief::E_BRIEF_STALE,
 ];
@@ -1112,4 +1135,72 @@ const CORE_ERROR_CODES: [&str; 102] = [
 /// stay the source of the spelling, and nothing is allocated or leaked.
 pub fn core_error_code(code: &str) -> Option<&'static str> {
     CORE_ERROR_CODES.iter().copied().find(|c| *c == code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn ok5_upgrade_failures_keep_their_rows() {
+        let name = format!(".store-upgrade-{}-{}", "a".repeat(64), "b".repeat(64));
+        let backup = PathBuf::from("/somewhere/.rdy").join(&name);
+        let of = |failure, backup: Option<PathBuf>| {
+            let e = RdyError::from(StoreError::Upgrade { failure, backup });
+            (e.code, e.message, e.fix)
+        };
+        let moved = "the store changed after the upgrade was planned";
+        assert_eq!(
+            of(UpgradeFailure::Moved, None),
+            (
+                E_UPGRADE_MOVED,
+                moved.to_string(),
+                "run rdy_upgrade with dry_run true, or rdy upgrade --dry-run, then retry".into()
+            )
+        );
+        let mismatch = "the upgrade backup is incomplete or does not match the store";
+        assert_eq!(
+            of(UpgradeFailure::BackupMismatch, Some(backup.clone())),
+            (
+                E_UPGRADE_BACKUP,
+                format!("{mismatch}; backup: {name}"),
+                "move the incomplete backup aside, then retry".into()
+            )
+        );
+        assert_eq!(
+            of(UpgradeFailure::BackupFileType, None),
+            (
+                E_UPGRADE_BACKUP,
+                "the store contains a link or a special file".into(),
+                "remove the link or special file, then retry the upgrade".into()
+            )
+        );
+        let failed = "the upgrade batch is durable, but the store check failed";
+        for f in [UpgradeFailure::CheckFailed, UpgradeFailure::FsckFailed] {
+            assert_eq!(
+                of(f, Some(backup.clone())),
+                (
+                    E_UPGRADE_FAILED,
+                    format!("{failed}; backup: {name}"),
+                    "stop the daemon and restore the backup before retrying".into()
+                ),
+                "{f:?}"
+            );
+        }
+        assert_eq!(
+            of(UpgradeFailure::Limit, None),
+            (
+                E_LIMIT,
+                "the upgrade backup exceeds its file or path limit".into(),
+                "reduce the store's extra files, then retry".into()
+            )
+        );
+        // the message names the backup, never the host path it is at
+        let (_, message, _) = of(UpgradeFailure::CheckFailed, Some(backup));
+        assert!(!message.contains("/somewhere"), "{message}");
+        // I/O errors keep E_IO
+        let io = RdyError::from(StoreError::Io(std::io::Error::other("disk")));
+        assert_eq!(io.code, E_IO);
+    }
 }

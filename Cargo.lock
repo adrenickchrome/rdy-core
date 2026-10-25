@@ -2104,6 +2104,7 @@ dependencies = [
 name = "rdy-store"
 version = "0.22.0"
 dependencies = [
+ "blake3",
  "criterion",
  "fjall",
  "libc",

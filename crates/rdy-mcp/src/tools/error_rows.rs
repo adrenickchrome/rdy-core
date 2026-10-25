@@ -160,6 +160,21 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "pass a file rdy dump wrote; a damaged dump is never repaired: dump the project again; for an older dump, load it, then clone the loaded project",
     ),
     (
+        E_UPGRADE_MOVED,
+        "the store changed after the upgrade was planned",
+        "run rdy_upgrade with dry_run true, or rdy upgrade --dry-run, then retry",
+    ),
+    (
+        E_UPGRADE_BACKUP,
+        "the backup is incomplete, differs from the store, or contains a link or special file",
+        "follow the reported backup fix, then retry",
+    ),
+    (
+        E_UPGRADE_FAILED,
+        "the upgrade batch is durable, but the store check or fsck failed",
+        "stop the daemon and restore the backup before retrying",
+    ),
+    (
         "W_SKELETON_MISSING",
         "a doc lacks a required section of its doc_type; reported once per doc per session, and later writes count the repeats in warnings_repeated",
         "add the section, or give the doc a doc_type without it (page)",

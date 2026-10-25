@@ -38,6 +38,7 @@ pub mod sync_proof;
 pub mod sync_stream;
 pub mod take_batch;
 pub mod transition;
+pub mod upgrade;
 pub mod view;
 
 pub use answer::{ANSWER_REF, PENDING_REF, answer_ref, snooze_ref};
