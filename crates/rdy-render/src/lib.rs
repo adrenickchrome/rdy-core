@@ -1617,6 +1617,21 @@ fn build_site_from(
     })
 }
 
+/// The not-found page of `kind` for what [`prepare::source`] or a profile's preparation read,
+/// built in `mode` with the same setup, environment and selected state as a build of its site,
+/// every link rooted at `base`. It writes no other file and reads no source.
+pub(crate) fn build_not_found_from(
+    prepared: prepare::Prepared,
+    mode: Mode,
+    base: &str,
+    kind: NotFoundKind,
+) -> Result<NotFoundPage, RdyError> {
+    with_shared(prepared, mode, |sh, env, _| {
+        not_found::build(sh, env, base, kind)
+    })
+    .map(|(page, _)| page)
+}
+
 /// The media type each used figure file's first block named, by path.
 fn used_media(used: &BTreeMap<String, (Hash, String)>) -> BTreeMap<String, String> {
     used.iter()

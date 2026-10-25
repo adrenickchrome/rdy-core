@@ -2,7 +2,10 @@
 //! scope's build. It tells when the inputs of a build changed (so an unrelated commit costs no
 //! build), which pages changed between two builds, and the bytes to send for a page: its version
 //! label and header filled in and the live script added. Nothing here touches the file system.
-use crate::{Mode, SiteFiles, Slot, SlotKind, Slots, build_site_from, disagree, escape, prepare};
+use crate::{
+    Mode, NotFoundKind, NotFoundPage, SiteFiles, Slot, SlotKind, Slots, build_not_found_from,
+    build_site_from, disagree, escape, prepare,
+};
 use rdy_engine::site_scope::ScopeRef;
 use rdy_engine::site_target::SiteTarget;
 use rdy_engine::{E_BAD_INPUT, RdyError, ReadState, Scope};
@@ -104,6 +107,40 @@ pub fn build_live(
         None,
     )?;
     Ok(of_site(built.site, st.redaction_epoch()))
+}
+
+/// The not-found page of `kind` for `target` as the live server serves it (D-94BT2, D-E8P8J):
+/// built from the same source or profile preparation as [`build_live`] and
+/// [`build_profile_live`] build the target's pages from, in its layout, with its selected
+/// identity and navigation, every link rooted at the target's root, and no live behaviour (no
+/// script, stream, slot or revision). A source target reads its scope (a view must exist, `P-x`
+/// is the proposal's latest version, a tag must exist); a profile target reads its profile in
+/// its scope, within the publication manifest's limits. The versions menu, and any target that
+/// does not resolve, is the existing error: the caller chooses another page or the plain answer.
+pub fn build_not_found(
+    st: &ReadState,
+    target: &SiteTarget,
+    kind: NotFoundKind,
+) -> Result<NotFoundPage, RdyError> {
+    target.validate()?;
+    match target {
+        SiteTarget::Source(scope) if *scope != ScopeRef::Versions => {
+            let resolved = crate::profile_live::read_scope(st, scope)?;
+            rdy_engine::refuse_inflight_export(&resolved)?;
+            let mut prepared = prepare::source(st, &resolved, prepare::Purpose::Site)?;
+            prepared.menu_url = target.menu_url();
+            let root = target.root();
+            build_not_found_from(prepared, Mode::Live { root: &root }, &root, kind)
+        }
+        SiteTarget::Profile { .. } | SiteTarget::ProfileOnly { .. } => {
+            crate::profile_live::not_found_within(st, target, kind, &crate::Budget::publication())
+        }
+        _ => Err(RdyError::new(
+            E_BAD_INPUT,
+            "invalid live site target",
+            "use a source scope and a publication profile key",
+        )),
+    }
 }
 
 /// A live build of a publication profile (D-CWC91, D-DK03K): the site of the profile's selected

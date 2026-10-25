@@ -5,6 +5,7 @@
 //! profile canon no longer holds serves no page, and its slot stays until the daemon stops. The
 //! foreground entry point validates its profile before any HTTP port opens, and every failure
 //! stops the daemon it created.
+use crate::daemon_site_not_found::{Variant, assert_themed};
 use rdy_daemon::site::addr::profile_candidates;
 use rdy_daemon::site::guard::SiteTarget;
 use rdy_daemon::site::guard::{Refusal, refusal};
@@ -534,8 +535,10 @@ fn spv7_listener_mode_wins_over_host_path_and_events() {
             "query {q}"
         );
     }
-    // the source page of another doc is not selected
-    assert_refusal(&get(only, "secret.html"), Refusal::NotFound, "secret.html");
+    // the source page of another doc is not selected: the listener's own Page variant (dgm11)
+    let r = get(only, "secret.html");
+    assert_themed(&r, Variant::Page, "/", "Guide book", "secret.html");
+    selected_only(&text(&r), "secret.html");
 
     // a valid source Host cannot change the mode, on either port
     for (port, host) in [
@@ -550,7 +553,8 @@ fn spv7_listener_mode_wins_over_host_path_and_events() {
         );
     }
 
-    // every decoded `/~` family is the plain 404 on the profile-only port
+    // every decoded `/~` family is the listener's own Page variant on the profile-only port,
+    // never a source page (dgm11)
     let prop = &w.prop;
     let families = [
         "~profile/guide/manual/intro.html".to_string(),
@@ -574,7 +578,9 @@ fn spv7_listener_mode_wins_over_host_path_and_events() {
         "_rdy/other".to_string(),
     ];
     for path in &families {
-        assert_refusal(&get(only, path), Refusal::NotFound, path);
+        let r = get(only, path);
+        assert_themed(&r, Variant::Page, "/", "Guide book", path);
+        selected_only(&text(&r), path);
     }
     // the same profile routes on the full listener still serve
     let full = get(source, "~profile/guide/manual/intro.html");
@@ -603,7 +609,8 @@ fn spv7_listener_mode_wins_over_host_path_and_events() {
     ] {
         drop(Sse::open(&ev(&query)));
     }
-    // a recognized, well-formed context that selects another target: the plain 404
+    // a recognized, well-formed context that selects another target: the listener's own
+    // Page variant, before any stream (dgm11)
     for query in [
         format!("scope=canon&{page_q}{rev_label}&profile=other"),
         format!("scope=canon&{page_q}{rev_label}&profile=implicit:org"),
@@ -619,7 +626,8 @@ fn spv7_listener_mode_wins_over_host_path_and_events() {
         format!("scope=canon&{page_q}{rev_label}&profile=other&profile=guide"),
     ] {
         let r = refused_events(only, &query);
-        assert_refusal(&r, Refusal::NotFound, &query);
+        assert_themed(&r, Variant::Page, "/", "Guide book", &query);
+        selected_only(&text(&r), &query);
     }
     // a malformed value stays 400
     for query in [
@@ -1218,10 +1226,13 @@ fn spv7_removal_evicts_pages_assets_and_streams() {
     }
     assert_refusal(&refused_events(only, &q), Refusal::NotFound, "events");
     assert_eq!(head(only, "manual/intro.html").status, 404);
-    // the full listener's profile route is gone too
-    assert_refusal(
+    // the full listener's profile route is gone too: a profile the site does not hold now is
+    // canon's Scope variant there (dgm11)
+    assert_themed(
         &get(port_of(&w.url), "~profile/guide/manual/intro.html"),
-        Refusal::NotFound,
+        Variant::Scope,
+        "/",
+        "Tiny",
         "full listener",
     );
     // the slot stays, and its start is refused while canon lacks the key

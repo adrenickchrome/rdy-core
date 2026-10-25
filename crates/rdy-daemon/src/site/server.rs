@@ -9,7 +9,7 @@
 //! asset, and closes the connection.
 use crate::daemon::{DaemonHandle, log};
 use crate::shared::Shared;
-use crate::site::guard::{Guard, ListenerMode, Refusal, Route, SiteTarget, refusal};
+use crate::site::guard::{Guard, ListenerMode, Refusal, Route, ScopeRef, SiteTarget, refusal};
 use crate::site::http::{
     MAX_HEAD_BYTES, Method, ParseError, Response, content_type, parse_head, to_bytes,
 };
@@ -20,8 +20,10 @@ use rdy_engine::engine::{SITE_LAN_FIX, SiteWarning};
 use rdy_engine::publication::{IMPLICIT_ORG, profile_at};
 use rdy_engine::{E_NOT_FOUND, E_REDACTED_STATE, ReadState};
 use rdy_engine::{ServeConfig, serve_config};
+use rdy_render::NotFoundKind;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -443,11 +445,19 @@ async fn serve_conn(stream: TcpStream, ctx: Arc<Ctx>, sh: Arc<Shared>) {
     let current = state.ensure_current_epoch().is_ok();
     drop(state);
     let route = match ctx.guard.check(&request) {
+        // a path the guard does not route, after the Host, Origin and method checks: the
+        // listener's own not-found page, once the same epoch and availability checks as a page
+        // pass. The path is not read again
+        Err(Refusal::NotFound) if !current => Err(refusal(Refusal::Busy)),
+        Err(Refusal::NotFound) => match held(&ctx, &sh, None).await {
+            Some(f) => Err(refusal(f)),
+            None => Err(not_found(Arc::clone(&sh), Miss::Page(listener_target(&ctx.guard))).await),
+        },
         Err(f) => Err(refusal(f)),
         Ok(_) if !current => Err(refusal(Refusal::Busy)),
         // a profile-only listener serves nothing while canon does not hold its key: every
         // guarded path, cached or not, is then the plain not found (D-DK03K)
-        Ok(route) => match held(&ctx, &sh, &route).await {
+        Ok(route) => match held(&ctx, &sh, Some(&route)).await {
             Some(f) => Err(refusal(f)),
             None => Ok(route),
         },
@@ -495,8 +505,10 @@ async fn serve_conn(stream: TcpStream, ctx: Arc<Ctx>, sh: Arc<Shared>) {
 /// The availability check of a profile-only listener, after the epoch check and before any
 /// bytes: `None` when the listener is full, or when canon still holds its key. A key canon no
 /// longer holds is not found. Malformed or redacted metadata lets a page take the build path,
-/// which logs why it is broken; the script and the events are then broken at once.
-async fn held(ctx: &Ctx, sh: &Arc<Shared>, route: &Route) -> Option<Refusal> {
+/// which logs why it is broken, and a path the guard does not route (`route` is `None`) take
+/// its not-found page's build, which then gives the plain answer; the script and the events are
+/// then broken at once.
+async fn held(ctx: &Ctx, sh: &Arc<Shared>, route: Option<&Route>) -> Option<Refusal> {
     let ListenerMode::ProfileOnly { key } = ctx.guard.mode() else {
         return None;
     };
@@ -509,13 +521,14 @@ async fn held(ctx: &Ctx, sh: &Arc<Shared>, route: &Route) -> Option<Refusal> {
     match found {
         Ok(Availability::Held) => None,
         Ok(Availability::Missing) => Some(Refusal::NotFound),
-        Ok(Availability::Broken) if matches!(route, Route::Page { .. }) => None,
+        Ok(Availability::Broken) if matches!(route, None | Some(Route::Page { .. })) => None,
         Ok(Availability::Broken) | Err(_) => Some(Refusal::Broken),
     }
 }
 
 /// A page or file of `target`: the config check on an HTML page, then the target's build as of
-/// the latest publish, then the bytes the server sends for `path`.
+/// the latest publish, then the bytes the server sends for `path`. A path the build does not
+/// have is the target's not-found page; a target the site does not hold now is canon's.
 async fn page(sh: Arc<Shared>, target: SiteTarget, path: String) -> Response {
     let built = tokio::task::spawn_blocking(move || {
         // a page load reloads a changed config, as a new connection does (`session_started`)
@@ -525,22 +538,34 @@ async fn page(sh: Arc<Shared>, target: SiteTarget, path: String) -> Response {
         let build = match sh.site.refresh(&sh, &target) {
             Ok(b) => b,
             // a removal since the entry check: the build of the old state was discarded
-            Err(e) if e.code == E_REDACTED_STATE => return Err(Refusal::Busy),
+            Err(e) if e.code == E_REDACTED_STATE => return Err(refusal(Refusal::Busy)),
             // a scope that does not resolve names no view or proposal, and a profile its scope
-            // does not hold has no pages: not found, the plain answer (the menu of canon always
-            // resolves, and a failed build of it is broken, not missing)
-            Err(_) if missing(&sh.state.load_full(), &target) => return Err(Refusal::NotFound),
+            // does not hold has no pages: canon's page for a scope that is not on the site now,
+            // which never names it. A profile-only listener whose profile is gone has no layout:
+            // the plain answer (the menu of canon always resolves, and a failed build of it is
+            // broken, not missing)
+            Err(_) if missing(&sh.state.load_full(), &target) => {
+                let miss = match target {
+                    SiteTarget::ProfileOnly { .. } => Miss::Plain,
+                    _ => Miss::Scope,
+                };
+                return Err(not_found_now(&sh, miss));
+            }
             Err(e) => {
                 log(&format!(
                     "site: the {} pages did not build ({e})",
                     label(&target)
                 ));
-                return Err(Refusal::Broken);
+                return Err(refusal(Refusal::Broken));
             }
         };
-        rdy_render::live::page(&build.live, &path, &target)
-            .map(|body| (content_type(&path), body))
-            .ok_or(Refusal::NotFound)
+        match rdy_render::live::page(&build.live, &path, &target) {
+            Some(body) => Ok((content_type(&path), body)),
+            None => {
+                drop(build);
+                Err(not_found_now(&sh, Miss::Page(target)))
+            }
+        }
     })
     .await;
     match built {
@@ -549,8 +574,71 @@ async fn page(sh: Arc<Shared>, target: SiteTarget, path: String) -> Response {
             headers: vec![("Content-Type", kind.to_string())],
             body,
         },
-        Ok(Err(f)) => refusal(f),
+        Ok(Err(r)) => r,
         Err(_panicked) => refusal(Refusal::Broken),
+    }
+}
+
+/// Which not-found answer a request gets (D-94BT2, D-E8P8J; the matrix of system/site n-REYZ9).
+enum Miss {
+    /// The Page variant of a target: a path it does not have, rooted at its prefix.
+    Page(SiteTarget),
+    /// Canon's Scope variant: a scope or profile that is not on the site now.
+    Scope,
+    /// The plain not found: a profile-only listener whose profile is gone.
+    Plain,
+}
+
+/// The target whose Page variant a path the guard does not route gets on this listener: canon
+/// on the full listener, the listener's own profile on a profile-only one.
+fn listener_target(guard: &Guard) -> SiteTarget {
+    match guard.mode() {
+        ListenerMode::Full => SiteTarget::Source(ScopeRef::Canon),
+        ListenerMode::ProfileOnly { key } => SiteTarget::ProfileOnly { key: key.clone() },
+    }
+}
+
+/// [`not_found_now`] off the async runtime; a panicked build is the plain answer.
+async fn not_found(sh: Arc<Shared>, miss: Miss) -> Response {
+    tokio::task::spawn_blocking(move || not_found_now(&sh, miss))
+        .await
+        .unwrap_or_else(|_panicked| refusal(Refusal::NotFound))
+}
+
+/// The not-found answer of `miss`, from the state published now: status 404 and the themed
+/// page, which has no live script, stream or revision and joins no cache. The redaction epoch
+/// is checked before the build and again before the bytes go out, so a page of a state a
+/// removal made old is never sent: the existing `Busy` stands. A page whose layout cannot be
+/// built (a build error or a panic) is the plain not found, never another status. The versions
+/// menu, which has no page of its own to miss, gets canon's.
+fn not_found_now(sh: &Shared, miss: Miss) -> Response {
+    let (target, kind) = match miss {
+        Miss::Plain => return refusal(Refusal::NotFound),
+        Miss::Scope => (SiteTarget::Source(ScopeRef::Canon), NotFoundKind::Scope),
+        Miss::Page(SiteTarget::Menu { .. } | SiteTarget::Source(ScopeRef::Versions)) => {
+            (SiteTarget::Source(ScopeRef::Canon), NotFoundKind::Page)
+        }
+        Miss::Page(target) => (target, NotFoundKind::Page),
+    };
+    let st = sh.state.load_full();
+    if st.ensure_current_epoch().is_err() {
+        return refusal(Refusal::Busy);
+    }
+    let built = catch_unwind(AssertUnwindSafe(|| {
+        rdy_render::live::build_not_found(&st, &target, kind)
+    }));
+    // a removal while it built: the page of the old state is not sent
+    if st.ensure_current_epoch().is_err() {
+        return refusal(Refusal::Busy);
+    }
+    match built {
+        Ok(Ok(page)) => Response {
+            status: 404,
+            headers: vec![("Content-Type", content_type("404.html").to_string())],
+            body: page.html,
+        },
+        Ok(Err(e)) if e.code == E_REDACTED_STATE => refusal(Refusal::Busy),
+        Ok(Err(_)) | Err(_) => refusal(Refusal::NotFound),
     }
 }
 
