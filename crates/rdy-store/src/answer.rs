@@ -51,6 +51,7 @@
 //! `put_answer` refuses an answer that breaks a rule of the record with `StoreError::Refused`.
 use crate::error::StoreError;
 use crate::index::hash_from;
+use crate::object_refs::ObjectKey;
 use crate::store::Frames;
 use crate::{Store, StoreReader, kinds};
 use rdy_model::{Answer, AnswerAct, EvidenceKind, Hash};
@@ -241,10 +242,53 @@ impl Store {
         if let Some(rule) = invalid_targets(a, is_block)? {
             return Err(StoreError::Refused(damage(&id, rule)));
         }
+        // a carried act's item, targets and bindings (`crate::carried_records`), before a byte
+        // is written; its record is the store's (the batch's earlier frames are not read)
+        let key = ObjectKey {
+            kind: kinds::ANSWER,
+            hash: id,
+        };
+        if let Err(reason) = crate::carried_records::validate_local(kind, &bytes) {
+            return Err(crate::carried_records::refusal(&id, kinds::ANSWER, reason));
+        }
+        let mut source = PendingAnswer {
+            store: crate::carried_records::StoreObjects(self),
+            key,
+            body: &bytes,
+        };
+        if let Some(reason) = crate::carried_records::validate_refs(&mut source, key)? {
+            return Err(crate::carried_records::refusal(&id, kinds::ANSWER, reason));
+        }
+        if a.act == AnswerAct::AcceptVerdict
+            && let Some(r) = crate::carried_records::verdict_item(&a.item)
+            && !self.has_kind(kinds::REVIEW, &r)?
+        {
+            return Err(crate::carried_records::refusal(
+                &id,
+                kinds::ANSWER,
+                crate::carried_records::VERDICT_REVIEW,
+            ));
+        }
         let mut items = extra;
         items.push((kind, bytes));
         items.extend(self.ref_items_pub(vec![(ref_of(a), id.0.to_vec())]));
         Ok((id, items))
+    }
+}
+
+/// The store's objects and one answer not written yet, as the carried checks read them.
+struct PendingAnswer<'a> {
+    store: crate::carried_records::StoreObjects<'a>,
+    key: ObjectKey,
+    body: &'a [u8],
+}
+
+impl crate::carried_records::CarriedSource for PendingAnswer<'_> {
+    fn object(&mut self, key: ObjectKey) -> Result<Option<(u16, Vec<u8>)>, StoreError> {
+        if key == self.key {
+            return Ok(Some((0, self.body.to_vec())));
+        }
+        self.store.object(key)
     }
 }
 

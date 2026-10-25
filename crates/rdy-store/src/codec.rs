@@ -312,10 +312,10 @@ pub fn encode<T: Serialize + 'static>(kind: u8, value: &T) -> Result<EncodedObje
     Ok(encode_new(kind, value))
 }
 
-/// `value` as a new object of logical kind `kind`, in that kind's latest encoding. For a value
-/// with no read identity: every kind but CHANGE and LANDING, whose writers use [`encode`].
+/// `value` as a new object of logical kind `kind`, in that kind's latest encoding, its read
+/// identity (if any) ignored. For a kind whose values have none: every kind but CHANGE and
+/// LANDING, whose writers use [`encode`].
 pub fn encode_new<T: Serialize + ?Sized>(kind: u8, value: &T) -> EncodedObject {
-    debug_assert!(kind != kinds::CHANGE && kind != kinds::LANDING || cfg!(test));
     let body = postcard_of(value);
     let version = latest(kind);
     let (_, payload) = frame(kind, version, body).expect("the latest encoding of a kind frames");

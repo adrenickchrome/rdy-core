@@ -136,8 +136,8 @@ fn decoded<T: serde::de::DeserializeOwned + 'static>(o: &ObjectBytes<'_>) -> Opt
 
 /// The structure of the record of raw kind `raw` with stored payload `payload`, from its own
 /// bytes: Task 3's record rules, a Check review's verdict, case, reason and citations, a
-/// carried answer's item and targets, and a plan's tension rules (a policy landing's fields are
-/// a landing field rule, `crate::check::landing_field_rules`). A
+/// carried answer's item and targets, a policy landing's fields (also a landing field rule,
+/// `crate::check::landing_field_rules`, through the same function) and a plan's tension rules. A
 /// record that does not split or decode passes here: the decoders refuse it with their own
 /// errors. Err is the closed reason.
 pub fn validate_local(raw: u8, payload: &[u8]) -> Result<(), &'static str> {
@@ -167,6 +167,10 @@ pub fn validate_local(raw: u8, payload: &[u8]) -> Result<(), &'static str> {
         },
         kinds::ANSWER => match decoded::<Answer>(&o) {
             Some(a) => answer_local(&a),
+            None => Ok(()),
+        },
+        kinds::LANDING => match decoded::<LandingRecord>(&o) {
+            Some(l) => landing_local(&l),
             None => Ok(()),
         },
         kinds::PLAN => match crate::plan::decode_plan(o.body) {
