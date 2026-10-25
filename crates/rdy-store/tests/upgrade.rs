@@ -234,6 +234,12 @@ fn backup_name(from: &StoreFeatures, terminal: Hash) -> String {
     format!(".store-upgrade-{}-{terminal}", from.hash())
 }
 
+/// Where a backup keeps its copy of the store file at `rel`: its `store` directory, beside its
+/// own `backup.json`.
+fn copy_of(backup: &Path, rel: &str) -> PathBuf {
+    backup.join("store").join(rel)
+}
+
 fn upgrade_error(e: StoreError) -> (UpgradeFailure, Option<PathBuf>) {
     match e {
         StoreError::Upgrade { failure, backup } => (failure, backup),
@@ -461,7 +467,11 @@ fn ok5_upgrade_is_one_batch_and_keeps_all_hashes() {
         let bytes = old_tree[&dir.join(path)].as_ref().unwrap();
         assert_eq!(f["len"], bytes.len() as u64, "{path}");
         assert_eq!(f["blake3"], Hash::of(bytes).to_string(), "{path}");
-        assert_eq!(copied[&backup.join(path)].as_ref(), Some(bytes), "{path}");
+        assert_eq!(
+            copied[&copy_of(&backup, path)].as_ref(),
+            Some(bytes),
+            "{path}"
+        );
         listed.push(path.to_string());
     }
     let mut want: Vec<String> = old_tree
@@ -571,7 +581,7 @@ fn ok5_backup_is_complete_before_append() {
     assert!(!files.is_empty());
     for f in files {
         let path = f["path"].as_str().unwrap();
-        let bytes = copied[&backup.join(path)].as_ref().unwrap();
+        let bytes = copied[&copy_of(&backup, path)].as_ref().unwrap();
         assert_eq!(f["blake3"], Hash::of(bytes).to_string(), "{path}");
         assert_eq!(old_tree[&dir.join(path)].as_ref(), Some(bytes), "{path}");
     }
@@ -646,8 +656,10 @@ fn ok5_each_failure_keeps_acknowledged_bytes() {
             "{fault:?}: FORMAT is untouched"
         );
         assert!(backup.is_dir(), "{fault:?}: the backup is kept");
-        if let Fault::Reindex = fault {
-            // after the seal: the batch is durable and the receipt waits for its completion
+        if let Fault::IndexApply | Fault::Reindex = fault {
+            // after the seal: the marker's sync is the upgrade's commit point, so an index
+            // update that fails after it keeps the batch too. The batch is durable, the index
+            // is rebuilt from the log, and the receipt waits for its completion
             assert_eq!(upgrade_batches(&dir), 1, "{fault:?}");
             let now = inspect_with(&dir, &registry()).unwrap();
             assert!(
@@ -1181,7 +1193,7 @@ fn ok5_backup_limits_and_links_fail_closed() {
     // the extra regular file is copied with the store's
     let backup = report.backup.unwrap();
     assert_eq!(
-        std::fs::read(backup.join("extra").join("deeper").join("note")).unwrap(),
+        std::fs::read(copy_of(&backup, "extra/deeper/note")).unwrap(),
         b"kept"
     );
     assert!(
@@ -1190,7 +1202,7 @@ fn ok5_backup_limits_and_links_fail_closed() {
             .join(backup.file_name().unwrap())
             .is_dir()
     );
-    assert!(!backup.join("lock").exists());
+    assert!(!copy_of(&backup, "lock").exists() && !backup.join("lock").exists());
 
     // a complete backup of the unchanged store is reused, but not once it holds a link
     let (b, dir, plan) = fresh();
@@ -1214,7 +1226,284 @@ fn ok5_backup_limits_and_links_fail_closed() {
     );
     assert_eq!(upgrade_batches(&dir), 0);
     std::fs::remove_file(backup.join("planted")).unwrap();
+    // a link in the copy, and a stray entry in place of the copy, are refused too
+    std::os::unix::fs::symlink(dir.join("FORMAT"), copy_of(&backup, "planted")).unwrap();
+    assert_eq!(
+        upgrade_error(apply_with(&dir, &lock, &plan, &registry()).unwrap_err()),
+        (UpgradeFailure::BackupMismatch, Some(backup.clone()))
+    );
+    std::fs::remove_file(copy_of(&backup, "planted")).unwrap();
+    std::fs::rename(backup.join("store"), backup.join("stray")).unwrap();
+    assert_eq!(
+        upgrade_error(apply_with(&dir, &lock, &plan, &registry()).unwrap_err()),
+        (UpgradeFailure::BackupMismatch, Some(backup.clone()))
+    );
+    std::fs::rename(backup.join("stray"), backup.join("store")).unwrap();
+    assert_eq!(upgrade_batches(&dir), 0);
     let report = apply_with(&dir, &lock, &plan, &registry()).unwrap();
     assert_eq!(report.backup, Some(backup));
     assert_eq!(upgrade_batches(&dir), 1);
+}
+
+/// The mode bits of `path`, never through a link.
+fn mode(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::symlink_metadata(path)
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o7777
+}
+
+fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// The entry names of the directory `dir`, sorted.
+fn names(dir: &Path) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    out.sort();
+    out
+}
+
+/// Stops an upgrade once its backup is complete, before the store opens.
+fn stop_at_backup(p: Phase<'_>) -> std::io::Result<()> {
+    match p {
+        Phase::BackupComplete => Err(std::io::Error::other("stop after the backup")),
+        _ => Ok(()),
+    }
+}
+
+#[test]
+fn ok5_backup_keeps_store_files_apart_from_its_manifest() {
+    let _f = known();
+    let base = tempfile::tempdir().unwrap();
+    let dir = project(base.path());
+    // store files with the names of the backup's own manifest and of its temp file
+    std::fs::write(dir.join("backup.json"), b"a person's file").unwrap();
+    std::fs::write(dir.join(".backup.json.tmp"), b"another person's file").unwrap();
+    let old_tree = tree(&dir);
+    let report = upgrade(&dir).unwrap();
+    assert!(report.changed);
+    let backup = report.backup.unwrap();
+    // the backup holds its manifest and the copy, apart
+    assert_eq!(names(&backup), ["backup.json", "store"]);
+    for rel in ["backup.json", ".backup.json.tmp"] {
+        assert_eq!(
+            std::fs::read(copy_of(&backup, rel)).ok().as_ref(),
+            old_tree[&dir.join(rel)].as_ref(),
+            "{rel}: the copied file keeps its bytes"
+        );
+    }
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(backup.join("backup.json")).unwrap()).unwrap();
+    let files = json["files"].as_array().unwrap();
+    for rel in ["backup.json", ".backup.json.tmp"] {
+        assert!(files.iter().any(|f| f["path"] == rel), "{rel} is listed");
+    }
+    // every listed file's copy has its recorded digest and its source's bytes
+    for f in files {
+        let path = f["path"].as_str().unwrap();
+        let copy = std::fs::read(copy_of(&backup, path)).unwrap();
+        assert_eq!(f["blake3"], Hash::of(&copy).to_string(), "{path}");
+        assert_eq!(old_tree[&dir.join(path)].as_ref(), Some(&copy), "{path}");
+    }
+}
+
+#[test]
+fn ok5_backup_is_private_to_its_owner() {
+    let _f = known();
+    let base = tempfile::tempdir().unwrap();
+    let dir = project(base.path());
+    set_mode(&dir, 0o700);
+    set_mode(&dir.join("FORMAT"), 0o600);
+    set_mode(&dir.join("index.redb"), 0o400);
+    let report = upgrade(&dir).unwrap();
+    let backup = report.backup.unwrap();
+    // no group or other bit on the backup or on anything in it
+    assert_eq!(mode(&backup) & 0o077, 0, "{:o}", mode(&backup));
+    let all = tree(&backup);
+    assert!(all.len() > 4);
+    for p in all.keys() {
+        assert_eq!(mode(p) & 0o077, 0, "{}: {:o}", p.display(), mode(p));
+    }
+    // a file keeps no more of its owner's bits than its source has
+    assert_eq!(mode(&copy_of(&backup, "FORMAT")), 0o600);
+    assert_eq!(mode(&copy_of(&backup, "index.redb")), 0o400);
+
+    // a backup that other users can read is not reused
+    let base = tempfile::tempdir().unwrap();
+    let dir = project(base.path());
+    let name = backup_name(&baseline_features(), terminal(&dir));
+    let backup = base.path().join(".rdy").join(&name);
+    let plan = inspect_with(&dir, &registry()).unwrap();
+    with_hook_for_tests(stop_at_backup, || upgrade(&dir)).unwrap_err();
+    let lock = StoreLock::take(&dir).unwrap();
+    for (path, open, private) in [
+        (copy_of(&backup, "FORMAT"), 0o644, 0o600),
+        (backup.join("store").join("segments"), 0o755, 0o700),
+        (backup.clone(), 0o755, 0o700),
+    ] {
+        set_mode(&path, open);
+        assert_eq!(
+            upgrade_error(apply_with(&dir, &lock, &plan, &registry()).unwrap_err()),
+            (UpgradeFailure::BackupMismatch, Some(backup.clone())),
+            "{}",
+            path.display()
+        );
+        assert_eq!(upgrade_batches(&dir), 0);
+        set_mode(&path, private);
+    }
+    let report = apply_with(&dir, &lock, &plan, &registry()).unwrap();
+    assert_eq!(report.backup, Some(backup));
+    assert_eq!(upgrade_batches(&dir), 1);
+}
+
+#[test]
+fn ok5_backup_never_follows_a_substituted_path() {
+    let _f = known();
+    // the new backup directory is moved and a link to another directory takes its name
+    let base = tempfile::tempdir().unwrap();
+    let dir = project(base.path());
+    let old_segments = segments(&dir);
+    let backup = base
+        .path()
+        .join(".rdy")
+        .join(backup_name(&baseline_features(), terminal(&dir)));
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("backup.json"), b"keep me").unwrap();
+    let swap = {
+        let (backup, outside, moved) = (
+            backup.clone(),
+            outside.path().to_path_buf(),
+            base.path().join("moved"),
+        );
+        let mut done = false;
+        move |p: Phase<'_>| {
+            if let Phase::Copy(_) = p
+                && !done
+            {
+                done = true;
+                std::fs::rename(&backup, &moved)?;
+                std::os::unix::fs::symlink(&outside, &backup)?;
+            }
+            Ok(())
+        }
+    };
+    let e = with_hook_for_tests(swap, || upgrade(&dir)).unwrap_err();
+    assert_eq!(
+        upgrade_error(e),
+        (UpgradeFailure::BackupMismatch, Some(backup.clone()))
+    );
+    assert_eq!(names(outside.path()), ["backup.json"], "nothing is added");
+    assert_eq!(
+        std::fs::read(outside.path().join("backup.json")).unwrap(),
+        b"keep me"
+    );
+    assert_eq!(segments(&dir), old_segments, "nothing is appended");
+    assert_eq!(upgrade_batches(&dir), 0);
+
+    // a listed store file is replaced by a link just before its copy
+    let base = tempfile::tempdir().unwrap();
+    let dir = project(base.path());
+    std::fs::write(dir.join("note"), b"mine").unwrap();
+    let old_segments = segments(&dir);
+    let backup = base
+        .path()
+        .join(".rdy")
+        .join(backup_name(&baseline_features(), terminal(&dir)));
+    let secret = outside.path().join("secret");
+    std::fs::write(&secret, b"not the store's").unwrap();
+    let swap = {
+        let (note, secret) = (dir.join("note"), secret.clone());
+        move |p: Phase<'_>| {
+            if let Phase::Copy("note") = p {
+                std::fs::remove_file(&note)?;
+                std::os::unix::fs::symlink(&secret, &note)?;
+            }
+            Ok(())
+        }
+    };
+    let e = with_hook_for_tests(swap, || upgrade(&dir)).unwrap_err();
+    assert_eq!(
+        upgrade_error(e),
+        (UpgradeFailure::BackupFileType, Some(backup.clone()))
+    );
+    assert!(
+        tree(&backup)
+            .values()
+            .all(|c| c.as_deref() != Some(&b"not the store's"[..])),
+        "the link's target is not copied"
+    );
+    assert!(
+        !backup.join("backup.json").exists(),
+        "the backup is not complete"
+    );
+    assert_eq!(segments(&dir), old_segments, "nothing is appended");
+    assert_eq!(upgrade_batches(&dir), 0);
+}
+
+#[test]
+fn ok5_reused_backup_refuses_hard_links_and_a_linked_manifest() {
+    let _f = known();
+    let base = tempfile::tempdir().unwrap();
+    let dir = project(base.path());
+    let name = backup_name(&baseline_features(), terminal(&dir));
+    let backup = base.path().join(".rdy").join(&name);
+    let plan = inspect_with(&dir, &registry()).unwrap();
+    with_hook_for_tests(stop_at_backup, || upgrade(&dir)).unwrap_err();
+    let seg = "segments/seg-000000.log";
+    let copy = copy_of(&backup, seg);
+    let saved = std::fs::read(&copy).unwrap();
+    let old_segments = segments(&dir);
+    let lock = StoreLock::take(&dir).unwrap();
+
+    // the copied segment is replaced by a hard link to the active one, with a copy's mode, so
+    // the same bytes and the same privacy: only its identity tells it from a copy
+    set_mode(&dir.join(seg), 0o600);
+    std::fs::remove_file(&copy).unwrap();
+    std::fs::hard_link(dir.join(seg), &copy).unwrap();
+    assert_eq!(
+        upgrade_error(apply_with(&dir, &lock, &plan, &registry()).unwrap_err()),
+        (UpgradeFailure::BackupMismatch, Some(backup.clone()))
+    );
+    assert_eq!(segments(&dir), old_segments, "nothing is appended");
+    assert_eq!(
+        std::fs::read(&copy).unwrap(),
+        saved,
+        "the backup's bytes stay"
+    );
+    assert_eq!(upgrade_batches(&dir), 0);
+    std::fs::remove_file(&copy).unwrap();
+    std::fs::write(&copy, &saved).unwrap();
+    set_mode(&copy, 0o600);
+
+    // backup.json is moved out and a link to it takes its place
+    let manifest = backup.join("backup.json");
+    let outside = tempfile::tempdir().unwrap();
+    let moved = outside.path().join("backup.json");
+    std::fs::rename(&manifest, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &manifest).unwrap();
+    assert_eq!(
+        upgrade_error(apply_with(&dir, &lock, &plan, &registry()).unwrap_err()),
+        (UpgradeFailure::BackupMismatch, Some(backup.clone()))
+    );
+    assert_eq!(upgrade_batches(&dir), 0);
+    std::fs::remove_file(&manifest).unwrap();
+    std::fs::rename(&moved, &manifest).unwrap();
+
+    // the independent, complete backup is reused, and the upgrade's append leaves it as it was
+    let report = apply_with(&dir, &lock, &plan, &registry()).unwrap();
+    assert_eq!(report.backup, Some(backup.clone()));
+    assert_eq!(upgrade_batches(&dir), 1);
+    assert!(segments(&dir)[&seg["segments/".len()..]].len() > saved.len());
+    assert_eq!(
+        std::fs::read(&copy).unwrap(),
+        saved,
+        "the backup's bytes stay"
+    );
 }

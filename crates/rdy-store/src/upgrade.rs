@@ -7,9 +7,12 @@
 //!
 //! 1. it reads the store again and requires the plan it was given;
 //! 2. an empty plan returns at once, with no backup and no batch;
-//! 3. it copies the closed store to the sibling `.store-upgrade-<manifest hash>-<batch hash>`
-//!    (every regular file but the lock and the open sentinel; a link or a special file is
-//!    refused), fsyncs every file and directory, and writes `backup.json` last;
+//! 3. it copies the closed store to the sibling `.store-upgrade-<manifest hash>-<batch hash>`:
+//!    the backup is private to this user before any byte is copied, its `store` directory holds
+//!    the copy (every regular file but the lock and the open sentinel; a link or a special file
+//!    is refused), every file and directory is fsynced, and `backup.json` is written last,
+//!    beside the copy. Every step names an entry of an open directory and follows no link, and
+//!    a backup or store path that was moved or replaced fails the upgrade;
 //! 4. it opens the store with no upgrade policy and appends one marked batch: the new
 //!    `meta/store_features` and the `meta/upgrade` receipt;
 //! 5. it rebuilds the index and runs the project's or the holder's store check.
@@ -19,8 +22,10 @@
 //! receipt reports `pending_check`, and its plan is empty, so no second batch is written.
 //! Nothing here restores a backup: a person does that, after stopping the daemon.
 use crate::error::{StoreError, UpgradeFailure};
+use crate::fileid::FileId;
 use crate::format::{self, StoreFeature, StoreFeatures, UpgradeReceipt};
 use crate::holder::StoreMode;
+use crate::pio::{self, EntryKind};
 use crate::segment::{self, HEADER, MARKER_MAX};
 use crate::store::INDEX_OPEN_SENTINEL;
 use crate::{Store, StoreLock, fsutil, kinds};
@@ -28,7 +33,8 @@ use rdy_model::Hash;
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
-use std::fs::{File, OpenOptions};
+use std::ffi::{OsStr, OsString};
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -38,8 +44,11 @@ pub const MAX_STEPS: usize = 256;
 pub const MAX_BACKUP_ENTRIES: usize = 1_000_000;
 /// The most bytes of one relative path in a backup.
 pub const MAX_BACKUP_PATH_BYTES: usize = 1_048_576;
-/// The file a complete backup writes last.
+/// The file a complete backup writes last, at its top.
 pub const BACKUP_MANIFEST: &str = "backup.json";
+/// The directory at a backup's top that holds the copy of the store, beside [`BACKUP_MANIFEST`]:
+/// so no store file can take the manifest's name or its temp file's.
+pub const BACKUP_STORE: &str = "store";
 /// The name prefix of a backup, the store directory's sibling.
 pub const BACKUP_PREFIX: &str = ".store-upgrade-";
 /// The copy buffer of a backup.
@@ -524,13 +533,30 @@ fn apply_with(
     }
     let terminal = terminal.ok_or_else(|| moved(None))?;
     let name = format!("{BACKUP_PREFIX}{}-{terminal}", now.from.hash());
-    let parent = dir
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let backup = parent.join(&name);
-    let listing = list_store(dir)?;
-    make_backup(dir, &backup, &listing, &now.from, terminal)?;
+    let (parent_path, store_name) = split_store_path(dir)?;
+    let backup = parent_path.join(&name);
+    // every backup step names an entry of one of these handles, never a path
+    let parent = pio::open_dir(parent_path)?;
+    let source = Source {
+        dir,
+        handle: pio::open_dir_at(&parent, store_name)?,
+    };
+    if FileId::lstat(dir)? != FileId::of_file(&source.handle)? {
+        return Err(moved(None));
+    }
+    let listing = list_tree(
+        &source.handle,
+        &[LOCK_FILE, INDEX_OPEN_SENTINEL],
+        |_, _, _| Ok(()),
+    )?;
+    let target = Target {
+        parent: &parent,
+        parent_path,
+        path: &backup,
+        name: name.as_ref(),
+    };
+    make_backup(&source, &target, &listing, &now.from, terminal)?;
+    drop(parent);
     hit(Phase::BackupComplete)?;
 
     let mut store = Store::open_unupgraded_locked(dir, lock)?;
@@ -545,7 +571,8 @@ fn apply_with(
         source_end: store.log_end(),
         backup: name,
     };
-    // the store's own rollback undoes a failure before the seal; the backup stays
+    // the store's own rollback undoes a failure before the marker's sync; from the sync on, the
+    // batch stays (the store rebuilds its index from the log) and so does the backup
     let batch = store.commit_upgrade_refs(&now.to, &receipt.to_json())?;
     hit(Phase::Sealed(&mut store))?;
     store.reindex()?;
@@ -574,6 +601,36 @@ fn apply_with(
     })
 }
 
+/// The parent directory of the store directory `dir` and the store directory's name there.
+fn split_store_path(dir: &Path) -> io::Result<(&Path, &OsStr)> {
+    let name = dir.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} does not end in a store directory name", dir.display()),
+        )
+    })?;
+    let parent = dir
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    Ok((parent, name))
+}
+
+/// The store a backup copies: its path, and its directory opened in its parent.
+struct Source<'a> {
+    dir: &'a Path,
+    handle: File,
+}
+
+/// Where a backup goes: the store's parent directory (open, and its path), and the backup's
+/// path and its name in that parent.
+struct Target<'a> {
+    parent: &'a File,
+    parent_path: &'a Path,
+    path: &'a Path,
+    name: &'a OsStr,
+}
+
 /// The entries a backup of a store copies: its directories and its regular files (with their
 /// lengths) by relative path, in path order, and the sum of the files' lengths.
 #[derive(Debug, Default)]
@@ -592,11 +649,11 @@ fn add_len(total: u64, len: u64) -> Result<u64, StoreError> {
 
 /// A relative path joined from `prefix` and `name`, within the path bound; `name` must be one
 /// normal component. A name that is not UTF-8 is an I/O error.
-fn relative(prefix: &str, name: &std::ffi::OsStr, path: &Path) -> Result<String, StoreError> {
+fn relative(prefix: &str, name: &OsStr) -> Result<String, StoreError> {
     let name = name.to_str().ok_or_else(|| {
         StoreError::Io(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("{} is not a UTF-8 file name", path.display()),
+            format!("{name:?} is not a UTF-8 file name"),
         ))
     })?;
     if !is_component(name) {
@@ -622,53 +679,110 @@ fn is_component(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
 }
 
-/// Lists the store at `dir` for its backup: every directory and regular file under it, but the
-/// lock file and the open sentinel at its top. A link or any other kind of file is refused, and
-/// so is a listing past its entry or path bound. Reads only.
-fn list_store(dir: &Path) -> Result<Listing, StoreError> {
-    list_tree(dir, &[LOCK_FILE, INDEX_OPEN_SENTINEL])
+/// The relative path `rel` split at its last component: its directory (`""` for the top) and
+/// its name.
+fn split_rel(rel: &str) -> (&str, &OsStr) {
+    let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+    (dir, OsStr::new(name))
 }
 
-/// Lists the tree at `root` ([`list_store`]), leaving out the top-level names `skip`.
-fn list_tree(root: &Path, skip: &[&str]) -> Result<Listing, StoreError> {
+/// The refusal of a link or a special file where a directory or a regular file belongs, or
+/// `e` itself.
+fn file_type_error(e: io::Error) -> StoreError {
+    if pio::is_link_refusal(&e) {
+        failed(UpgradeFailure::BackupFileType, None)
+    } else {
+        e.into()
+    }
+}
+
+/// The directory at the relative path `rel` under the open directory `root` (`""` is `root`),
+/// opened component by component, never through a link.
+fn open_rel_dir(root: &File, rel: &str) -> Result<File, StoreError> {
+    let mut at = root.try_clone()?;
+    if rel.is_empty() {
+        return Ok(at);
+    }
+    for part in rel.split('/') {
+        at = pio::open_dir_at(&at, OsStr::new(part)).map_err(file_type_error)?;
+    }
+    Ok(at)
+}
+
+/// The regular file `name` of the open directory `dir`, opened for reading, never through a
+/// link; anything else is the file-type refusal.
+fn open_file_at(dir: &File, name: &OsStr) -> Result<File, StoreError> {
+    let f = pio::open_read_at(dir, name).map_err(file_type_error)?;
+    if !f.metadata()?.is_file() {
+        return Err(failed(UpgradeFailure::BackupFileType, None));
+    }
+    Ok(f)
+}
+
+/// Lists the store at `dir` for its backup ([`list_tree`], leaving out the lock file and the
+/// open sentinel at its top). Reads only.
+fn list_store(dir: &Path) -> Result<Listing, StoreError> {
+    let root = pio::open_dir(dir)?;
+    list_tree(&root, &[LOCK_FILE, INDEX_OPEN_SENTINEL], |_, _, _| Ok(()))
+}
+
+/// Lists the tree under the open directory `root`: every directory and regular file under it,
+/// but the top-level names `skip`, each read through a handle and never through a link. A link
+/// or any other kind of file is refused, and so is a listing past its entry or path bound.
+/// `visit` is called with each directory's and file's relative path, its open handle (for
+/// reading) and its metadata. Reads only.
+fn list_tree(
+    root: &File,
+    skip: &[&str],
+    mut visit: impl FnMut(&str, &File, &std::fs::Metadata) -> Result<(), StoreError>,
+) -> Result<Listing, StoreError> {
     let max_entries = LIMITS.with(|l| l.get().0);
     let mut out = Listing::default();
     let mut entries = 0usize;
     let mut todo: Vec<String> = vec![String::new()];
     while let Some(prefix) = todo.pop() {
-        let here = if prefix.is_empty() {
-            root.to_path_buf()
-        } else {
-            root.join(&prefix)
-        };
-        for e in std::fs::read_dir(&here)? {
-            let e = e?;
-            let path = e.path();
-            if prefix.is_empty() && skip.iter().any(|s| e.file_name() == *s) {
-                continue;
+        let here = open_rel_dir(root, &prefix)?;
+        let mut names: Vec<OsString> = Vec::new();
+        pio::for_each_entry(&here, |name| {
+            if prefix.is_empty() && skip.iter().any(|s| name == *s) {
+                return Ok(());
             }
             entries += 1;
             if entries > max_entries {
                 return Err(failed(UpgradeFailure::Limit, None));
             }
-            let rel = relative(&prefix, &e.file_name(), &path)?;
-            let m = std::fs::symlink_metadata(&path)?;
-            let t = m.file_type();
-            if t.is_dir() {
-                out.dirs
-                    .try_reserve(1)
-                    .and_then(|()| todo.try_reserve(1))
-                    .map_err(|_| failed(UpgradeFailure::Limit, None))?;
-                out.dirs.push(rel.clone());
-                todo.push(rel);
-            } else if t.is_file() {
-                out.bytes = add_len(out.bytes, m.len())?;
-                out.files
-                    .try_reserve(1)
-                    .map_err(|_| failed(UpgradeFailure::Limit, None))?;
-                out.files.push((rel, m.len()));
-            } else {
-                return Err(failed(UpgradeFailure::BackupFileType, None));
+            names
+                .try_reserve(1)
+                .map_err(|_| failed(UpgradeFailure::Limit, None))?;
+            names.push(name.to_os_string());
+            Ok(())
+        })?;
+        for name in names {
+            let rel = relative(&prefix, &name)?;
+            match pio::entry_kind_at(&here, &name)? {
+                EntryKind::Dir => {
+                    let d = pio::open_dir_at(&here, &name).map_err(file_type_error)?;
+                    visit(&rel, &d, &d.metadata()?)?;
+                    out.dirs
+                        .try_reserve(1)
+                        .and_then(|()| todo.try_reserve(1))
+                        .map_err(|_| failed(UpgradeFailure::Limit, None))?;
+                    out.dirs.push(rel.clone());
+                    todo.push(rel);
+                }
+                EntryKind::File => {
+                    let f = open_file_at(&here, &name)?;
+                    let m = f.metadata()?;
+                    visit(&rel, &f, &m)?;
+                    out.bytes = add_len(out.bytes, m.len())?;
+                    out.files
+                        .try_reserve(1)
+                        .map_err(|_| failed(UpgradeFailure::Limit, None))?;
+                    out.files.push((rel, m.len()));
+                }
+                EntryKind::Link | EntryKind::Other => {
+                    return Err(failed(UpgradeFailure::BackupFileType, None));
+                }
             }
         }
     }
@@ -678,8 +792,8 @@ fn list_tree(root: &Path, skip: &[&str]) -> Result<Listing, StoreError> {
 }
 
 /// `backup.json`: the store the backup is of (its manifest's hash and its last batch marker),
-/// then its directories and files by relative path, in path order, each file with its length
-/// and BLAKE3 digest.
+/// then its directories and files by relative path in the store, in path order, each file with
+/// its length and BLAKE3 digest. The copies are in the backup's [`BACKUP_STORE`] directory.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BackupManifest {
@@ -708,7 +822,11 @@ fn copy_buffer() -> Result<Vec<u8>, StoreError> {
 
 /// Streams `src` through `buf`, into `dst` when there is one; returns the bytes read and their
 /// BLAKE3 digest.
-fn stream(src: &mut File, mut dst: Option<&mut File>, buf: &mut [u8]) -> io::Result<(u64, Hash)> {
+fn stream(
+    mut src: impl Read,
+    mut dst: Option<&mut File>,
+    buf: &mut [u8],
+) -> io::Result<(u64, Hash)> {
     let mut hasher = blake3::Hasher::new();
     let mut n = 0u64;
     loop {
@@ -727,59 +845,142 @@ fn stream(src: &mut File, mut dst: Option<&mut File>, buf: &mut [u8]) -> io::Res
     Ok((n, Hash(*hasher.finalize().as_bytes())))
 }
 
-/// Makes `backup` the complete backup of the closed store at `dir` (`listing`). A new backup is
-/// created with create-new semantics, each file copied and fsynced, each directory fsynced, and
-/// `backup.json` written last and fsynced with its parent. An existing backup is used only when
-/// its `backup.json` is this store's and every file it lists has its recorded length and digest;
-/// otherwise it is `E_UPGRADE_BACKUP`, and nothing in it changes.
+/// `e`, naming `backup` when it is an upgrade failure that names none yet.
+fn naming(e: StoreError, backup: &Path) -> StoreError {
+    match e {
+        StoreError::Upgrade {
+            failure,
+            backup: None,
+        } => failed(failure, Some(backup)),
+        e => e,
+    }
+}
+
+/// Whether `meta` is owned by this user, with no permission bit for its group or others.
+fn is_owned_private(meta: &std::fs::Metadata) -> bool {
+    pio::owner(meta) == pio::own_uid() && pio::is_owner_only(meta)
+}
+
+/// The mode of a backup's copy of a file whose metadata is `source`: its owner may read it, and
+/// write it only when the source's owner may; its group and others get nothing. So a copy is
+/// never more open than its source.
+fn copy_mode(source: &std::fs::Metadata) -> u32 {
+    0o400 | (pio::mode_of(source) & 0o200)
+}
+
+/// Creates the private directory `name` in the open directory `dir` (mode 0o700 whatever the
+/// umask) and opens it, never through a link. The open must find an empty directory of this
+/// user's with that mode, or it is not the one made here.
+fn make_private_dir_at(dir: &File, name: &OsStr) -> Result<File, StoreError> {
+    pio::create_private_dir_at(dir, name)?;
+    open_made_dir(dir, name)
+}
+
+/// Opens the directory `name` just created in the open directory `dir`
+/// ([`make_private_dir_at`]), with its mode set to 0o700 first.
+fn open_made_dir(dir: &File, name: &OsStr) -> Result<File, StoreError> {
+    pio::set_mode_at(dir, name, 0o700)?;
+    let made = pio::open_dir_at(dir, name).map_err(file_type_error)?;
+    let m = made.metadata()?;
+    if !(pio::is_private_dir(&m) && pio::owner(&m) == pio::own_uid() && pio::is_empty_dir(&made)?) {
+        return Err(failed(UpgradeFailure::BackupMismatch, None));
+    }
+    Ok(made)
+}
+
+/// Whether the backup and the store are still at their paths: the backup's path names the
+/// backup directory this upgrade wrote (`root`), and the store's path the store it copied. A
+/// path that was moved or replaced, by a link or another directory, fails the upgrade before
+/// anything is appended.
+fn in_place(source: &Source<'_>, target: &Target<'_>, root: &File) -> Result<(), StoreError> {
+    if FileId::lstat(target.path).ok() != Some(FileId::of_file(root)?) {
+        return Err(failed(UpgradeFailure::BackupMismatch, None));
+    }
+    if FileId::lstat(source.dir).ok() != Some(FileId::of_file(&source.handle)?) {
+        return Err(moved(None));
+    }
+    Ok(())
+}
+
+/// Makes the target the complete backup of the closed store `source` (`listing`). A new backup
+/// is created with create-new semantics, private to this user before any byte is copied, with
+/// the store's copy in its [`BACKUP_STORE`] directory: each directory and file is created new,
+/// each file copied, fsynced and never more open than its source, each directory fsynced, and
+/// `backup.json` written last beside the copy, then fsynced with the backup and its parent.
+/// Every step names an entry of an open directory, never through a link. An existing backup is
+/// used only when it passes [`reuse_backup`]; otherwise it is `E_UPGRADE_BACKUP`, and nothing in
+/// it changes.
 fn make_backup(
-    dir: &Path,
-    backup: &Path,
+    source: &Source<'_>,
+    target: &Target<'_>,
     listing: &Listing,
     from: &StoreFeatures,
     terminal: Hash,
 ) -> Result<(), StoreError> {
-    let parent = backup.parent().unwrap_or(Path::new("."));
-    match std::fs::create_dir(backup) {
-        Ok(()) => fsutil::sync_dir(parent)?,
+    match pio::create_private_dir_at(target.parent, target.name) {
+        Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            return reuse_backup(dir, backup, listing, from, terminal);
+            return reuse_backup(source, target, listing, from, terminal)
+                .map_err(|e| naming(e, target.path));
         }
         Err(e) => return Err(e.into()),
     }
-    let mut buf = copy_buffer()?;
+    write_backup(source, target, listing, from, terminal).map_err(|e| naming(e, target.path))
+}
+
+/// The new backup's steps ([`make_backup`]); its directory exists, empty.
+fn write_backup(
+    source: &Source<'_>,
+    target: &Target<'_>,
+    listing: &Listing,
+    from: &StoreFeatures,
+    terminal: Hash,
+) -> Result<(), StoreError> {
+    target.parent.sync_all()?;
+    fsutil::record(target.parent_path);
+    let root = open_made_dir(target.parent, target.name)?;
+    let copy = make_private_dir_at(&root, BACKUP_STORE.as_ref())?;
+    let copy_path = target.path.join(BACKUP_STORE);
     for d in &listing.dirs {
-        std::fs::create_dir(backup.join(d))?;
+        let (at, name) = split_rel(d);
+        make_private_dir_at(&open_rel_dir(&copy, at)?, name)?;
     }
+    let mut buf = copy_buffer()?;
     let mut files = Vec::new();
     files
         .try_reserve_exact(listing.files.len())
-        .map_err(|_| failed(UpgradeFailure::Limit, Some(backup)))?;
+        .map_err(|_| failed(UpgradeFailure::Limit, None))?;
     for (rel, len) in &listing.files {
         hit(Phase::Copy(rel))?;
-        let mut src = File::open(dir.join(rel))?;
-        let to = backup.join(rel);
-        let mut dst = OpenOptions::new().write(true).create_new(true).open(&to)?;
-        let (n, digest) = stream(&mut src, Some(&mut dst), &mut buf)?;
+        let (at, name) = split_rel(rel);
+        let src = open_file_at(&open_rel_dir(&source.handle, at)?, name)?;
+        let mode = copy_mode(&src.metadata()?);
+        let mut dst = pio::create_private_at(&open_rel_dir(&copy, at)?, name)?;
+        dst.set_permissions(pio::permissions(mode))?;
+        let (n, digest) = stream(&src, Some(&mut dst), &mut buf)?;
         if n != *len {
-            return Err(failed(UpgradeFailure::BackupMismatch, Some(backup)));
+            return Err(failed(UpgradeFailure::BackupMismatch, None));
         }
         hit(Phase::Sync(rel))?;
         dst.sync_all()?;
-        fsutil::record(&to);
+        fsutil::record(&copy_path.join(rel));
         files.push(BackupFile {
             path: rel.clone(),
             len: n,
             blake3: digest.to_string(),
         });
     }
-    // the deepest directories first, then the backup itself
+    // the deepest directories first, then the copy and the backup itself
     for d in listing.dirs.iter().rev() {
         hit(Phase::Sync(d))?;
-        fsutil::sync_dir(&backup.join(d))?;
+        open_rel_dir(&copy, d)?.sync_all()?;
+        fsutil::record(&copy_path.join(d));
     }
     hit(Phase::Sync(""))?;
-    fsutil::sync_dir(backup)?;
+    copy.sync_all()?;
+    fsutil::record(&copy_path);
+    root.sync_all()?;
+    fsutil::record(target.path);
     let manifest = BackupManifest {
         source_manifest: from.hash().to_string(),
         terminal_batch: terminal.to_string(),
@@ -787,31 +988,51 @@ fn make_backup(
         files,
     };
     let json = serde_json::to_vec(&manifest).map_err(|e| StoreError::Decode(e.to_string()))?;
-    fsutil::write_durable(&backup.join(BACKUP_MANIFEST), &json)?;
-    fsutil::sync_dir(parent)?;
+    // backup.json and its temp file stand beside the copy, so no store file can take their name
+    fsutil::replace_in_dir(&root, target.path, BACKUP_MANIFEST.as_ref(), &json, None)?;
+    in_place(source, target, &root)?;
+    target.parent.sync_all()?;
+    fsutil::record(target.parent_path);
     Ok(())
 }
 
-/// Uses the existing `backup` when it is complete and matches the store ([`make_backup`]).
+/// Uses the existing backup ([`make_backup`]) when it is complete, private and independent of
+/// the store: it holds only `backup.json` and the copy, every directory and file in it is a
+/// directory or a regular file of this user's with no bit for others, `backup.json` is the text
+/// this store's files give now, the copy holds exactly the files it lists with their recorded
+/// lengths and digests, and no copied file is one of the store's own files (a hard link would
+/// change with the active log). Nothing in the backup changes.
 fn reuse_backup(
-    dir: &Path,
-    backup: &Path,
+    source: &Source<'_>,
+    target: &Target<'_>,
     listing: &Listing,
     from: &StoreFeatures,
     terminal: Hash,
 ) -> Result<(), StoreError> {
-    let mismatch = || failed(UpgradeFailure::BackupMismatch, Some(backup));
-    if !std::fs::symlink_metadata(backup)?.file_type().is_dir() {
+    let mismatch = || failed(UpgradeFailure::BackupMismatch, None);
+    let opened = |e: io::Error| {
+        if pio::is_link_refusal(&e) {
+            mismatch()
+        } else {
+            e.into()
+        }
+    };
+    let root = pio::open_dir_at(target.parent, target.name).map_err(opened)?;
+    if !is_owned_private(&root.metadata()?) {
         return Err(mismatch());
     }
-    // what backup.json must say: this store's files as they are now
+    // what backup.json must say: this store's files as they are now, and which files they are
     let mut buf = copy_buffer()?;
+    let mut ids = BTreeSet::new();
     let mut files = Vec::new();
     files
         .try_reserve_exact(listing.files.len())
-        .map_err(|_| failed(UpgradeFailure::Limit, Some(backup)))?;
+        .map_err(|_| failed(UpgradeFailure::Limit, None))?;
     for (rel, _) in &listing.files {
-        let (len, digest) = stream(&mut File::open(dir.join(rel))?, None, &mut buf)?;
+        let (at, name) = split_rel(rel);
+        let src = open_file_at(&open_rel_dir(&source.handle, at)?, name)?;
+        ids.insert(FileId::of_file(&src)?);
+        let (len, digest) = stream(&src, None, &mut buf)?;
         files.push(BackupFile {
             path: rel.clone(),
             len,
@@ -825,41 +1046,75 @@ fn reuse_backup(
         files,
     };
     let want = serde_json::to_vec(&expected).map_err(|e| StoreError::Decode(e.to_string()))?;
-    // read at most one byte more than the expected text
-    let mut got = Vec::new();
-    match File::open(backup.join(BACKUP_MANIFEST)) {
-        Ok(f) => {
-            got.try_reserve_exact(want.len() + 1)
-                .map_err(|_| failed(UpgradeFailure::Limit, Some(backup)))?;
-            f.take(want.len() as u64 + 1).read_to_end(&mut got)?;
+    // the backup's top holds backup.json and the copy, and nothing else
+    let mut top: Vec<OsString> = Vec::new();
+    pio::for_each_entry(&root, |name| {
+        if top.len() == 2 {
+            return Err(mismatch());
         }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(mismatch()),
-        Err(e) => return Err(e.into()),
+        top.push(name.to_os_string());
+        Ok(())
+    })?;
+    top.sort();
+    if top != [BACKUP_MANIFEST, BACKUP_STORE] {
+        return Err(mismatch());
     }
+    // backup.json: a private regular file, read through no link, and at most one byte more
+    // than the expected text
+    let manifest = match open_file_at(&root, BACKUP_MANIFEST.as_ref()) {
+        Ok(f) => f,
+        Err(StoreError::Upgrade { .. }) => return Err(mismatch()),
+        Err(e) => return Err(e),
+    };
+    if !is_owned_private(&manifest.metadata()?) {
+        return Err(mismatch());
+    }
+    let mut got = Vec::new();
+    got.try_reserve_exact(want.len() + 1)
+        .map_err(|_| failed(UpgradeFailure::Limit, None))?;
+    (&manifest)
+        .take(want.len() as u64 + 1)
+        .read_to_end(&mut got)?;
     if got != want {
         return Err(mismatch());
     }
-    // the backup holds exactly what backup.json lists, each file with its recorded digest
-    let held = match list_tree(backup, &[BACKUP_MANIFEST]) {
+    // the copy holds exactly what backup.json lists, each file private, independent of the
+    // store's files and with its recorded digest
+    let copy = pio::open_dir_at(&root, BACKUP_STORE.as_ref()).map_err(opened)?;
+    if !is_owned_private(&copy.metadata()?) {
+        return Err(mismatch());
+    }
+    let mut digests: Vec<BackupFile> = Vec::new();
+    digests
+        .try_reserve_exact(expected.files.len())
+        .map_err(|_| failed(UpgradeFailure::Limit, None))?;
+    let held = list_tree(&copy, &[], |rel, f, m| {
+        if !is_owned_private(m) || ids.contains(&FileId::of(m)) {
+            return Err(mismatch());
+        }
+        if m.is_file() {
+            if digests.len() == expected.files.len() {
+                return Err(mismatch());
+            }
+            let (len, digest) = stream(f, None, &mut buf)?;
+            digests.push(BackupFile {
+                path: rel.to_string(),
+                len,
+                blake3: digest.to_string(),
+            });
+        }
+        Ok(())
+    });
+    let held = match held {
         Ok(held) => held,
         Err(StoreError::Upgrade { .. }) => return Err(mismatch()),
         Err(e) => return Err(e),
     };
-    let listed: Vec<(String, u64)> = expected
-        .files
-        .iter()
-        .map(|f| (f.path.clone(), f.len))
-        .collect();
-    if held.dirs != expected.dirs || held.files != listed {
+    digests.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+    if held.dirs != expected.dirs || digests != expected.files {
         return Err(mismatch());
     }
-    for f in &expected.files {
-        let (len, digest) = stream(&mut File::open(backup.join(&f.path))?, None, &mut buf)?;
-        if len != f.len || digest.to_string() != f.blake3 {
-            return Err(mismatch());
-        }
-    }
-    Ok(())
+    in_place(source, target, &root)
 }
 
 #[cfg(test)]
@@ -884,14 +1139,13 @@ mod tests {
         for bad in ["", ".", "..", "a/b", "a\\b", "a\0b"] {
             assert!(!is_component(bad), "{bad:?}");
         }
-        let p = Path::new("x");
-        assert_eq!(relative("", "FORMAT".as_ref(), p).unwrap(), "FORMAT");
-        assert_eq!(relative("a", "b".as_ref(), p).unwrap(), "a/b");
+        assert_eq!(relative("", "FORMAT".as_ref()).unwrap(), "FORMAT");
+        assert_eq!(relative("a", "b".as_ref()).unwrap(), "a/b");
         // the path bound counts the joined path's bytes
         with_backup_limits_for_tests(10, 3, || {
-            assert_eq!(relative("a", "b".as_ref(), p).unwrap(), "a/b");
+            assert_eq!(relative("a", "b".as_ref()).unwrap(), "a/b");
             assert!(matches!(
-                relative("a", "bc".as_ref(), p),
+                relative("a", "bc".as_ref()),
                 Err(StoreError::Upgrade {
                     failure: UpgradeFailure::Limit,
                     ..

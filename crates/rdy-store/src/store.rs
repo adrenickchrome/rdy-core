@@ -170,6 +170,10 @@ pub struct Store {
     /// Opened by the upgrade transaction ([`Store::open_unupgraded_locked`]): a `FORMAT` that
     /// still mirrors the manifest before the log's last upgrade receipt is accepted as it is.
     upgrade_pending: bool,
+    /// The last unheld batch's marker is synced and its index update has not finished: set by
+    /// `append_and_index` between the two. The upgrade's commit (`commit_upgrade_refs`) reads it
+    /// to keep a batch whose index update failed after its sync.
+    synced_unindexed: bool,
 }
 
 /// A held batch not yet sealed: where its first data frame is, and the kind and hash of each of
@@ -1087,6 +1091,7 @@ impl Store {
             features: format::baseline_features(),
             held_features: None,
             upgrade_pending,
+            synced_unindexed: false,
         };
         let (upto, end) = (store.index().indexed_upto()?, store.log.end());
         if upto > end {
@@ -1288,6 +1293,11 @@ impl Store {
     /// not the current sealed end, whose `from` is not the current manifest's hash, or whose `to`
     /// is not `features`' hash. Returns the batch's `BATCH_COMMIT` hash. No public ref write
     /// passes these checks.
+    ///
+    /// The marker's sync is the commit point. A failure before it rolls the batch back, as a
+    /// failed write does. A failure after it (the index update) keeps the batch: the store's
+    /// features become the batch's, the index is rebuilt from the log, and the error is
+    /// returned, so the receipt waits for the upgrade's completion.
     pub(crate) fn commit_upgrade_refs(
         &mut self,
         features: &StoreFeatures,
@@ -1321,9 +1331,21 @@ impl Store {
         let start = self.log.batch_start(&items);
         let held = self.held;
         self.held = false;
+        self.synced_unindexed = false;
         let wrote = self.write_refs(items, RefWrite::Upgrade);
         self.held = held;
-        wrote?;
+        if let Err(e) = wrote {
+            if std::mem::take(&mut self.synced_unindexed) {
+                // past the commit point: the batch is durable, and the features are the log's.
+                // The index is rebuilt from the log; if that fails too, the handle is poisoned
+                // and its close removes the index, which the next open rebuilds
+                self.features = features.clone();
+                if self.reindex().is_err() {
+                    self.poison();
+                }
+            }
+            return Err(e);
+        }
         self.features = features.clone();
         // the batch's marker, as the log wrote it: the last frame from the batch's start
         self.log
@@ -1847,6 +1869,13 @@ impl Store {
                 }
             }
         }
+        if result.is_err() && how == RefWrite::Upgrade && self.synced_unindexed {
+            // the upgrade's commit point is its marker's sync (D-WWAK7): its batch stays in the
+            // log, and the index, which lacks it, is stale until `commit_upgrade_refs` rebuilds it
+            self.stale_index = true;
+            return result;
+        }
+        self.synced_unindexed = false;
         if result.is_err() {
             // nothing past `start` was acknowledged: discard it — including bytes a partial
             // append left past the end and a segment a failed roll left behind — so neither a
@@ -2001,11 +2030,13 @@ impl Store {
         let entries = self.placed_entries(&batch, &placed)?;
         self.log.crash_point(CrashPoint::BeforeSync);
         self.log.sync()?;
+        self.synced_unindexed = true;
         self.log.crash_point(CrashPoint::AfterSync);
         if self.take_index_fault() {
             return Err(StoreError::Db("injected index failure".into()));
         }
         self.index().apply(&entries, self.log.end())?;
+        self.synced_unindexed = false;
         self.log.crash_point(CrashPoint::AfterIndex);
         self.acknowledge(
             batch
