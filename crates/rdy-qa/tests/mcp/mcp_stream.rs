@@ -514,9 +514,9 @@ struct Case {
 }
 
 /// The frame offset of the first record after a header with `k` prerequisites and the baseline
-/// manifest (36 bytes).
+/// manifest (183 bytes, ok4).
 fn first_at(k: u64) -> u64 {
-    12 + 37 + 57 + 36 + 33 * k
+    12 + 37 + 57 + 183 + 33 * k
 }
 
 fn plb2_cases() -> Vec<Case> {

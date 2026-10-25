@@ -1567,11 +1567,13 @@ fn sig8_later_signing_checks_person_kind_relay_and_duplicates() {
     // a policy approval cannot be signed
     let policy = on(&p.e, move |r| {
         let mut rec: LandingRecord = r.store().landing(&local).unwrap();
+        // a forged record from a read: it no longer has the read's identity
+        rec.read_identity = None;
         rec.assurance = Assurance::Policy;
         rec.changes.clear();
-        let bytes = postcard::to_allocvec(&rec).unwrap();
+        let (kind, bytes) = rdy_store::codec::item(kinds::LANDING, &rec).unwrap();
         let h = Hash::of(&bytes);
-        r.store_mut().write(vec![(kinds::LANDING, bytes)]).unwrap();
+        r.store_mut().write(vec![(kind, bytes)]).unwrap();
         h
     });
     let agent = FakeAgent::new(&keys);

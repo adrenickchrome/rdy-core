@@ -260,12 +260,13 @@ fn scan(store: &Path) -> Vec<Found> {
                             block: Some(b),
                         });
                     }
-                    if kind == kinds::CHANGE
-                        && let Ok(c) = rdy_store::bounded::decode::<Change>(payload)
+                    if rdy_store::codec::logical_kind(kind) == kinds::CHANGE
+                        && let Ok(c) = rdy_store::codec::decode_bounded::<Change>(kind, payload)
                     {
                         out.push(Found {
                             loc,
-                            kind,
+                            // a span names its frame by the logical kind
+                            kind: kinds::CHANGE,
                             hash,
                             len,
                             residue: RedactionResidue::Change(ChangeResidue::of(&c)),

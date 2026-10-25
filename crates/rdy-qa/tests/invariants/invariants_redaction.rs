@@ -1087,6 +1087,7 @@ fn rdx15_a_removed_frozen_decision_is_covered_not_compared() {
         prev: Some(head),
         state: Hash::of(&snap_bytes),
         changes: vec![],
+        read_identity: None,
         ..rec
     };
     let landing = postcard::to_allocvec(&forged).unwrap();

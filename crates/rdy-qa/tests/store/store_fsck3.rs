@@ -70,6 +70,8 @@ fn fsck3_relay_fields_must_agree_with_assurance() {
     let p = s.propose("v", "t", prov("human:h")).unwrap();
     let l = s.land(&p, prov("human:h")).unwrap();
     let mut rec = s.landing(&l).unwrap();
+    // a forged record from a read: it no longer has the read's identity
+    rec.read_identity = None;
     // the edited records carry no changes, so the change -> landing index (first landing wins)
     // stays consistent and only the relay rules can fail
     rec.changes = vec![];
@@ -124,6 +126,8 @@ fn evk1_fsck_checks_the_evidence_kind_against_assurance() {
     let p = s.propose("v", "t", prov("human:h")).unwrap();
     let l = s.land(&p, prov("human:h")).unwrap();
     let mut rec = s.landing(&l).unwrap();
+    // a forged record from a read: it no longer has the read's identity
+    rec.read_identity = None;
     rec.changes = vec![];
     let ev = |kind| ApprovalEvidence {
         kind,

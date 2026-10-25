@@ -2004,6 +2004,8 @@ fn cp16_reaffirm_write_bound_counts_the_change_deps() {
     // change: its bytes without and with its deps
     let probe = write(&mut r, "probe", reaffirm_ops(&ids, &w.a, &vec![200; n])).unwrap();
     let mut ch: Change = r.store().change(&probe.change.parse().unwrap()).unwrap();
+    // a forged record from a read: it no longer has the read's identity
+    ch.read_identity = None;
     let with = postcard::to_allocvec(&ch).unwrap().len();
     ch.deps.clear();
     let without = postcard::to_allocvec(&ch).unwrap().len();

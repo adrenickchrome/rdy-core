@@ -118,7 +118,13 @@ fn written(r: &Rdy, header: &StreamHeader, records: &[ObjectKey]) -> Vec<u8> {
 
 /// The original bytes of `key` in `r`.
 fn payload(r: &Rdy, key: ObjectKey) -> Vec<u8> {
-    r.store().get_kind(key.kind, &key.hash).unwrap()
+    r.store().get_kind_raw(key.kind, &key.hash).unwrap().1
+}
+
+/// `refs_of` the stored frame of `key`: its raw kind and payload.
+fn refs_of_stored(r: &Rdy, key: ObjectKey) -> Vec<rdy_store::object_refs::ObjectRef> {
+    let (raw, payload) = r.store().get_kind_raw(key.kind, &key.hash).unwrap();
+    refs_of(raw, &payload).unwrap()
 }
 
 /// What a check refused: its code, message and fix.
@@ -376,7 +382,7 @@ fn ha9_keys_are_returned_in_wire_order() {
     let (leaves, rest): (Vec<ObjectKey>, Vec<ObjectKey>) = c
         .records
         .iter()
-        .partition(|k| refs_of(k.kind, &payload(&r, **k)).unwrap().is_empty());
+        .partition(|k| refs_of_stored(&r, **k).is_empty());
     assert!(leaves.len() >= 3, "{leaves:?}");
     let mut order: Vec<ObjectKey> = leaves.iter().rev().copied().collect();
     order.extend(rest);
@@ -483,7 +489,7 @@ fn ha9_batch_can_precede_root_and_dependencies() {
         .records
         .iter()
         .copied()
-        .filter(|k| refs_of(k.kind, &payload(&r, *k)).unwrap().is_empty())
+        .filter(|k| refs_of_stored(&r, *k).is_empty())
         .collect();
     assert!(leaves.iter().any(|k| k.kind == kinds::BLOCK));
     assert!(leaves.iter().any(|k| k.kind == kinds::BLOB_CHUNK));

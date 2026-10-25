@@ -1946,6 +1946,7 @@ fn id2_separate_relay_actor_and_run_are_bound() {
             actor: actor.into(),
             run: run.map(Into::into),
         }),
+        read_identity: None,
         ..landing(Assurance::Relayed)
     };
     let slash = with("agent:a/b", None);

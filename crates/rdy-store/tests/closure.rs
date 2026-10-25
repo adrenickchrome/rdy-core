@@ -984,6 +984,7 @@ fn ha5_removed_payloads_use_placeholders_and_later_proofs() {
             kinds::LANDING,
             enc(&LandingRecord {
                 checks: vec![rh],
+                read_identity: None,
                 ..later.clone()
             }),
         );
@@ -1007,6 +1008,7 @@ fn ha5_removed_payloads_use_placeholders_and_later_proofs() {
     collapsed.request = Hash::of(&enc(&twice));
     collapsed.landing = LandingRecord {
         checks: vec![collapsed.request],
+        read_identity: None,
         ..later.clone()
     }
     .id();
@@ -1125,6 +1127,7 @@ fn ha5_a_new_request_cannot_reuse_an_approval() {
                 kinds::LANDING,
                 enc(&LandingRecord {
                     checks,
+                    read_identity: None,
                     ..later.clone()
                 }),
             );

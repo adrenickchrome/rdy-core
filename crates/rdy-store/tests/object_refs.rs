@@ -443,6 +443,7 @@ fn samples() -> Vec<Sample> {
         links: ChangeLinks::default(),
         justification: Some(Justification::Implements(vec![id("d-00003")])),
         ops: vec![],
+        read_identity: None,
         ..edit.clone()
     };
     let proposal = Proposal {
@@ -1677,6 +1678,7 @@ fn ha1_refs_are_sorted_and_unique() {
             intent: Some(h(3)),
             ..ChangeLinks::default()
         },
+        read_identity: None,
         ..change(
             "change",
             vec![],

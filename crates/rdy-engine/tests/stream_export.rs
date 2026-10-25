@@ -303,17 +303,29 @@ fn carry_canary(dir: &std::path::Path) -> Hash {
                     && holds(&b)
                 {
                     let res = RedactionResidue::Block(BlockResidue::of(&b));
-                    found.push((loc, kind, hash, payload.len() as u32, res));
+                    found.push((
+                        loc,
+                        rdy_store::codec::logical_kind(kind),
+                        hash,
+                        payload.len() as u32,
+                        res,
+                    ));
                 }
-                if kind == kinds::CHANGE
-                    && let Ok(c) = rdy_store::bounded::decode::<Change>(payload)
+                if rdy_store::codec::logical_kind(kind) == kinds::CHANGE
+                    && let Ok(c) = rdy_store::codec::decode_bounded::<Change>(kind, payload)
                     && c.ops.iter().any(|op| match op {
                         Op::Create { block } | Op::Update { block, .. } => holds(block),
                         Op::Delete { .. } => false,
                     })
                 {
                     let res = RedactionResidue::Change(ChangeResidue::of(&c));
-                    found.push((loc, kind, hash, payload.len() as u32, res));
+                    found.push((
+                        loc,
+                        rdy_store::codec::logical_kind(kind),
+                        hash,
+                        payload.len() as u32,
+                        res,
+                    ));
                 }
             }
             Ok(())

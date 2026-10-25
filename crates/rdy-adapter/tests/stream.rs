@@ -464,7 +464,8 @@ fn with_payload(bytes: &[u8], change: Hash, payload: &[u8]) -> Vec<u8> {
         if r.key().hash == change {
             found = true;
             w.record(&StreamRecord::Present {
-                encoding: 0,
+                // the record's own encoding: the payload keeps its version prefix
+                encoding: r.raw_kind() >> 7,
                 key: ObjectKey {
                     kind: r.key().kind,
                     hash: Hash::of(payload),
@@ -503,15 +504,19 @@ fn rf4_hostile_reflects_stream_leaves_holder_unchanged() {
     let good = check_batch(bytes.as_slice(), Some(repo)).unwrap();
     let id = change.id();
     let encoded = postcard::to_allocvec(&change).unwrap();
-    assert_eq!(Hash::of(&encoded), id);
+    // the latest encoding: the id covers the version prefix (ok4)
+    assert_eq!(rdy_model::encoding::encoded_hash(1, &encoded), id);
     // the justification's bytes: 01 (Some), 02 (Reflects), 01 (one source), ...
     let at = encoded
         .windows(3)
         .rposition(|w| w == [1, 2, 1])
         .expect("the justification");
-    let mut oversized = encoded[..at + 2].to_vec();
+    // each hostile payload keeps the frame's version prefix
+    let mut oversized = vec![1, 0];
+    oversized.extend_from_slice(&encoded[..at + 2]);
     oversized.extend(varint(1 << 40));
-    let truncated = encoded[..encoded.len() - 1].to_vec();
+    let mut truncated = vec![1, 0];
+    truncated.extend_from_slice(&encoded[..encoded.len() - 1]);
     let root = dir.path().join("holder");
     StoreHandle::create_holder(&root, repo)
         .unwrap()

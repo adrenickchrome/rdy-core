@@ -48,9 +48,10 @@ fn ha8_formats_match_current_constants_and_released_pairs() {
         keys,
         ["dump", "rdy", "reads", "reads_features", "store", "stream"]
     );
+    // ok4: the baseline names content-2 identity and object encodings
     assert_eq!(
         v["store"],
-        serde_json::json!({"manifest_version": 1, "features": []})
+        serde_json::to_value(rdy_store::format::baseline_features()).unwrap()
     );
     let mut pair_keys: Vec<&str> = v["reads"][0]
         .as_object()
@@ -89,7 +90,7 @@ fn ha8_inspect_reads_only_the_dump_header() {
     // the store in JSON: the feature manifest
     assert_eq!(
         serde_json::to_value(&facts).unwrap()["store"],
-        serde_json::json!({"features": {"manifest_version": 1, "features": []}})
+        serde_json::json!({"features": rdy_store::format::baseline_features()})
     );
     // a legacy dump's store in JSON: its number
     assert_eq!(

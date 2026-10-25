@@ -67,8 +67,8 @@ fn carry(dir: &Path) -> (Hash, Hash, Hash, String) {
                 {
                     target = Some((b.id.clone(), b.version_hash()));
                     RedactionResidue::Block(BlockResidue::of(&b))
-                } else if kind == kinds::CHANGE
-                    && let Ok(c) = rdy_store::bounded::decode::<Change>(payload)
+                } else if rdy_store::codec::logical_kind(kind) == kinds::CHANGE
+                    && let Ok(c) = rdy_store::codec::decode_bounded::<Change>(kind, payload)
                     && c.ops.iter().any(|op| match op {
                         Op::Create { block } | Op::Update { block, .. } => {
                             block.body.contains("ZEBRA-7731")
@@ -85,7 +85,8 @@ fn carry(dir: &Path) -> (Hash, Hash, Hash, String) {
                         segment: loc.segment,
                         offset: loc.offset,
                     },
-                    kind,
+                    // a span names its frame by the logical kind
+                    kind: rdy_store::codec::logical_kind(kind),
                     hash,
                     len: payload.len() as u32,
                     // named by its frame in the latest encoding, as an rdy of this version writes it

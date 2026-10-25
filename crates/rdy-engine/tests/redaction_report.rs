@@ -182,6 +182,7 @@ fn prov(actor: &str) -> Provenance {
 }
 
 /// Every frame from `from` to the log end: kind, hash, payload (None when dropped).
+/// Every frame from `from`: its logical kind, hash and payload (none when dropped).
 fn frames_from(r: &Rdy, from: Location) -> Vec<(u8, Hash, Option<Vec<u8>>)> {
     let mut out = vec![];
     r.read()
@@ -192,8 +193,14 @@ fn frames_from(r: &Rdy, from: Location) -> Vec<(u8, Hash, Option<Vec<u8>>)> {
                     kind,
                     hash,
                     payload,
-                } => (kind, hash, Some(payload.to_vec())),
-                StoredFrame::Dropped { kind, hash, .. } => (kind, hash, None),
+                } => (
+                    rdy_store::codec::logical_kind(kind),
+                    hash,
+                    Some(payload.to_vec()),
+                ),
+                StoredFrame::Dropped { kind, hash, .. } => {
+                    (rdy_store::codec::logical_kind(kind), hash, None)
+                }
             });
             Ok(())
         })

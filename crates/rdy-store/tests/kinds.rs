@@ -73,6 +73,7 @@ fn repr1_objects_read_back_in_their_kind_with_their_ids() {
             client_nonce: Some("n".into()),
             ..Default::default()
         },
+        read_identity: None,
         ..change(
             "work",
             vec![Op::Create {

@@ -1157,6 +1157,7 @@ fn hpb5_tag_marker_matches_source_without_holder_canon() {
     // `a` points to a landing that is `b` only by name: re-link it to close the loop
     let a2 = LandingRecord {
         prev: Some(bh),
+        read_identity: None,
         ..h.landings[&ah].clone()
     };
     h.landings.insert(ah, a2);
