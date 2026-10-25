@@ -111,10 +111,8 @@ fn sub_depth(nav: &str, needle: &str) -> i32 {
             depth += 1;
         } else if rest.starts_with("<ul") {
             stack.push(false);
-        } else if rest.starts_with("</ul>") {
-            if stack.pop() == Some(true) {
-                depth -= 1;
-            }
+        } else if rest.starts_with("</ul>") && stack.pop() == Some(true) {
+            depth -= 1;
         }
         rest = &rest[1..];
     }
