@@ -11,6 +11,7 @@ pub mod live;
 mod llms;
 pub mod menu;
 mod nav;
+mod not_found;
 mod one_page;
 mod page;
 mod prepare;
@@ -36,6 +37,7 @@ mod trail;
 mod version;
 
 pub use html::{Link, escape, text_html};
+pub use not_found::{NotFoundKind, NotFoundPage};
 pub use one_page::{RenderedPage, render_publication_page};
 /// Diagrams drawn as SVG, behind the one pinned crate (D-FY4VF).
 pub use rdy_diagram as diagram;
@@ -384,6 +386,7 @@ fn env() -> Result<minijinja::Environment<'static>, RdyError> {
         "changes.html",
         "redirect.html",
         "versions.html",
+        "not_found.html",
         "partials/nav.html",
         "partials/toc.html",
         "partials/pager.html",
@@ -770,12 +773,16 @@ fn scope_warnings(
 
 /// Builds the site of `scope` in memory. The same state, scope and mode give the same bytes.
 /// Without a profile it is the full source (RULING F2).
+/// A static build also writes the site's not-found page, rooted at the project's
+/// `site.base_path` (D-94BT2, D-E8P8J).
 pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFiles, RdyError> {
+    let not_found_base = matches!(mode, Mode::Static).then(|| rdy.site_base_path());
     build_site_from(
         prepare::source(rdy, scope, prepare::Purpose::Site)?,
         mode,
         Slots::Source,
         None,
+        not_found_base,
     )
     .map(|b| b.site)
 }
@@ -785,13 +792,21 @@ pub fn build_site(rdy: &ReadState, scope: &Scope, mode: Mode) -> Result<SiteFile
 /// trail, glossary, question, search entry, figure and agent file reads the profile's selected
 /// state alone. A public profile whose reference check is blocked refuses with
 /// `E_PUBLICATION_REFERENCE`; an org profile's warning comes first in the summary's warnings.
+/// It writes the profile's not-found page, rooted at the project's `site.base_path`.
 pub fn build_profile_site(
     read: &ReadState,
     scope_text: &str,
     profile: &str,
 ) -> Result<SiteFiles, RdyError> {
     let prepared = publication::prepare(read, scope_text, profile, prepare::Purpose::Site)?;
-    build_site_from(prepared, Mode::Static, Slots::Source, None).map(|b| b.site)
+    build_site_from(
+        prepared,
+        Mode::Static,
+        Slots::Source,
+        None,
+        Some(read.site_base_path()),
+    )
+    .map(|b| b.site)
 }
 
 /// A publication artifact (D-KDFZ3, hub r-50C97): every served file by its site-relative path,
@@ -829,11 +844,13 @@ pub fn build_publication(
     let prepared = publication::prepare_resolved(source, resolved, tag_name, tag_redacted, inputs)?;
     // the manifest's limits hold while the site is built, not only once it is
     let budget = Budget::publication();
+    // a publication's links stay relative: it has no generated not-found page
     artifact(build_site_from(
         prepared,
         Mode::Static,
         Slots::Notices,
         Some(&budget),
+        None,
     )?)
 }
 
@@ -1551,15 +1568,30 @@ struct Staged {
 }
 
 /// [`build_site`] from what [`prepare::source`] read: it reads no source. A publication build
-/// passes the manifest's limits as `budget`, kept while it builds.
+/// passes the manifest's limits as `budget`, kept while it builds. A local static build passes
+/// its base path as `not_found_base`: once the normal files are staged, the site's not-found
+/// page is added at `404.html` from the same selected state, unless an authored top-level doc
+/// has that page, which the build's last warning then says. Live and publication builds pass
+/// none.
 fn build_site_from(
     prepared: prepare::Prepared,
     mode: Mode,
     slots: Slots,
     budget: Option<&Budget>,
+    not_found_base: Option<&str>,
 ) -> Result<BuiltSite, RdyError> {
     let (staged, mut blobs) = with_shared(prepared, mode, |sh, env, extras| {
-        stage_site(sh, env, extras, slots, budget)
+        let mut staged = stage_site(sh, env, extras, slots, budget)?;
+        if let Some(base) = not_found_base {
+            if sh.site.page_taken(not_found::PAGE) {
+                staged.summary.warnings.push(not_found::KEPT.into());
+            } else {
+                // the theme files it loads are the site's own, already staged
+                let page = not_found::build(sh, env, base, NotFoundKind::Page)?;
+                put_file(&mut staged.files, budget, not_found::PAGE.into(), page.html)?;
+            }
+        }
+        Ok(staged)
     })?;
     let Staged {
         mut files,
@@ -2412,7 +2444,7 @@ mod limit_tests {
     fn build(r: &rdy_engine::Rdy, budget: Option<&Budget>) -> Result<BuiltSite, RdyError> {
         let read = r.read();
         let prepared = prepare::source(&read, &Scope::View("work".into()), prepare::Purpose::Site)?;
-        build_site_from(prepared, Mode::Static, Slots::Notices, budget)
+        build_site_from(prepared, Mode::Static, Slots::Notices, budget, None)
     }
 
     /// The number of HTML pages of `b` that are not permalinks, and their bytes.

@@ -190,9 +190,16 @@ fn redirect(html: &str) -> bool {
     html.contains("data-rdy-kind=\"redirect\"")
 }
 
-/// A doc page: not a folder or home page, a collected page or a `go/` page.
+/// The site's generated not-found page: its marker, never its file name.
+fn generated_404(html: &str) -> bool {
+    html.contains("data-rdy-kind=\"not-found\"")
+}
+
+/// A doc page: not a folder or home page, a collected page, a `go/` page or the generated
+/// not-found page.
 fn doc_page(rel: &str, html: &str) -> bool {
     !redirect(html)
+        && !generated_404(html)
         && !rel.starts_with("go/")
         && !rel.ends_with("index.html")
         && rel != "glossary.html"
@@ -297,7 +304,12 @@ fn struct1_a_skip_link_comes_first_in_the_body() {
 #[test]
 fn struct1_every_page_has_the_version_pill_the_crumbs_and_the_theme_toggle() {
     each_page(true, |Page { rel, html, .. }| {
-        assert!(html.contains("data-rdy-version"), "{rel}: version pill");
+        // the generated not-found page shows no version; it keeps the crumbs and the toggle
+        assert_eq!(
+            html.contains("data-rdy-version"),
+            !generated_404(html),
+            "{rel}: version pill"
+        );
         assert!(html.contains("class=\"crumbs\""), "{rel}: crumbs");
         assert!(
             html.contains("role=\"radiogroup\""),

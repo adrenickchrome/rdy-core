@@ -591,6 +591,11 @@ fn ec3_two_builds_of_one_state_are_equal() {
     assert_eq!(view(&r), view(&r));
 }
 
+/// Whether `bytes` are the site's generated not-found page: its marker, never its file name.
+fn generated_404(bytes: &[u8]) -> bool {
+    String::from_utf8_lossy(bytes).contains("data-rdy-kind=\"not-found\"")
+}
+
 /// The site's bytes, as one digest: every file (its path and bytes), the label, the header,
 /// where the label and header sit, the warnings and the counts.
 fn site_digest(s: &SiteFiles) -> String {
@@ -599,7 +604,8 @@ fn site_digest(s: &SiteFiles) -> String {
         buf.extend_from_slice(&(b.len() as u64).to_le_bytes());
         buf.extend_from_slice(b);
     };
-    for (path, bytes) in &s.files {
+    // the generated not-found page is left out, so the digest pins every other file's bytes
+    for (path, bytes) in s.files.iter().filter(|(_, b)| !generated_404(b)) {
         put(path.as_bytes());
         put(bytes);
     }

@@ -344,6 +344,7 @@ pub(crate) fn build_within(
         Mode::Live { root: &root },
         Slots::Source,
         Some(budget),
+        None,
     )?;
     Ok(ProfileBuild {
         live: live::of_site(built.site, st.redaction_epoch()),

@@ -25,11 +25,17 @@ impl Digest {
     }
 }
 
+/// Whether `bytes` are the site's generated not-found page: its marker, never its file name.
+fn generated_404(bytes: &[u8]) -> bool {
+    String::from_utf8_lossy(bytes).contains("data-rdy-kind=\"not-found\"")
+}
+
 /// The digest of a whole built site: every file by path and bytes, the label, the header, where
 /// the label and header went, and the summary.
 fn site_digest(s: &SiteFiles) -> String {
     let mut d = Digest::default();
-    for (path, bytes) in &s.files {
+    // the generated not-found page is left out, so the digest pins every other file's bytes
+    for (path, bytes) in s.files.iter().filter(|(_, b)| !generated_404(b)) {
         d.piece(path.as_bytes()).piece(bytes);
     }
     d.piece(s.label.as_bytes()).piece(s.header.as_bytes());

@@ -1,8 +1,8 @@
 <!doctype html>
-<html lang="{{ lang }}">
+<html lang="{{ lang }}"{% if kind == "not-found" %} data-rdy-kind="not-found"{% endif %}>
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1">{% block robots %}{% endblock %}
 <title>{% if kind == "home" %}{{ site_name }}{% else %}{{ title }} · {{ site_name }}{% endif %}</title>
 {% if site_description and kind == "home" %}<meta name="description" content="{{ site_description }}">{% endif %}
 <script>{{ init_js|safe }}</script>

@@ -17,6 +17,11 @@ fn ver1_every_page_carries_the_site_worded_version_pill() {
         if h.contains("redirect") {
             continue;
         }
+        // the generated not-found page shows no version
+        if h.contains("data-rdy-kind=\"not-found\"") {
+            assert!(!h.contains("data-rdy-version"), "{}", p.display());
+            continue;
+        }
         // the pill shows only the version; no tag, no landings chip (F3)
         assert!(
             h.contains("data-rdy-version><a class=\"pill\" href=\"")

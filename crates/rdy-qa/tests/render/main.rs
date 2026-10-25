@@ -22,6 +22,7 @@ mod render_menu;
 mod render_mermaid;
 mod render_nav;
 mod render_no_coverage;
+mod render_not_found;
 mod render_plain;
 mod render_presentational;
 mod render_print;

@@ -96,7 +96,13 @@ pub fn build_live(
     let mut prepared = prepare::source(st, scope, prepare::Purpose::Site)?;
     prepared.menu_url = target.menu_url();
     let root = target.root();
-    let built = build_site_from(prepared, Mode::Live { root: &root }, Slots::Source, None)?;
+    let built = build_site_from(
+        prepared,
+        Mode::Live { root: &root },
+        Slots::Source,
+        None,
+        None,
+    )?;
     Ok(of_site(built.site, st.redaction_epoch()))
 }
 
