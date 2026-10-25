@@ -1732,8 +1732,7 @@ A second stderr line, `render_diagrams_10k first_doc: path=<doc path> copy_bytes
 sidebar_bytes=<n>`, gives the same two counts for the first doc in tree order.
 
 What the time grows with: the docs and pages written, the sidebar each page carries, the Copy
-payload of each page, and one SVG drawing for each diagram. The figure blob is read once for the
-build and written once.
+payload of each page, and one SVG drawing for each diagram. The ten figures share one blob.
 
 No time is recorded here. The first timing is the bench's, taken on the final integrated commit.
 
