@@ -415,10 +415,13 @@ fn the_site_mirrors_the_folder_tree() {
         t.contains("href=\"../terms.html#ledger\" title=\"Terms › Terms\">Ledger</a>"),
         "relative link across folders: {t}"
     );
+    // renderer Task 8 (PL 55): a folder off the current path is a closed disclosure with one
+    // first-level list, so the sibling folder's doc is listed once, under it, and nothing deeper
     assert!(
-        !t.contains("limits.html"),
-        "a cousin folder's contents are not shown"
+        t.contains("aria-label=\"Go to Cards\">↗</a><details class=\"nav-fold\"><summary>Cards</summary><ul class=\"nav-sub\">"),
+        "an off-path folder is a closed disclosure: {t}"
     );
+    assert_eq!(t.matches("limits.html").count(), 1, "{t}");
 
     let cards = read("wallets/cards/index.html");
     assert!(cards.contains("Card products."), "{cards}");
@@ -435,10 +438,13 @@ fn the_site_mirrors_the_folder_tree() {
         index.contains("<a class=\"card\" href=\"wallets/index.html\"><strong>Wallets</strong>"),
         "the home page has a card for each top-level entry: {index}"
     );
+    // renderer Task 8: one first-level list under each folder of a top-level group, closed,
+    // and nothing deeper (dgm8_ pins the one extra level)
     assert!(
-        !index.contains("limits.html"),
-        "the home page does not list the whole tree: {index}"
+        index.contains("aria-label=\"Go to Cards\">↗</a><details class=\"nav-fold\"><summary>Cards</summary><ul class=\"nav-sub\">"),
+        "the home page shows the folder closed: {index}"
     );
+    assert_eq!(index.matches("limits.html").count(), 1, "{index}");
 }
 
 #[test]
