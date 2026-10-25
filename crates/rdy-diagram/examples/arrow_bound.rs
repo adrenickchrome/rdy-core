@@ -2116,6 +2116,9 @@ mod tests {
         }
     }
 
+    /// A logged draw: the case, the budget, the weight and the phase.
+    type Draw = (usize, u32, u32, Phase);
+
     type Rule<'a> = Box<dyn Fn(&Case, usize, u32, u32, Phase) -> u64 + 'a>;
 
     /// A probe whose repetitions take the time a rule gives, on a clock the repetitions move.
@@ -2123,7 +2126,7 @@ mod tests {
         index: HashMap<Case, usize>,
         time: Cell<u64>,
         rule: Rule<'a>,
-        log: Vec<(usize, u32, u32, Phase)>,
+        log: Vec<Draw>,
     }
 
     impl<'a> Mock<'a> {
@@ -2200,7 +2203,7 @@ mod tests {
     fn drive(
         mode: Mode,
         rule: impl Fn(&Case, usize, u32, u32, Phase) -> u64,
-    ) -> (Finish, String, Vec<(usize, u32, u32, Phase)>) {
+    ) -> (Finish, String, Vec<Draw>) {
         let cases = enumerate();
         let mut mock = Mock::new(&cases, Box::new(rule));
         let mut out = Vec::new();
@@ -2290,10 +2293,8 @@ mod tests {
         assert_eq!(draws_of(d, Phase::Refine), Vec::<u32>::new());
         assert_eq!(*draws_of(c, Phase::Ladder).last().unwrap(), 1024);
         assert_eq!(draws_of(d, Phase::Ladder), LADDER);
-        assert_eq!(
-            mock.log.len(),
-            8 + 116 + 8 + 16 + 11 + 16 - 1 + 1 - 1 + 0 - 0 + 0
-        );
+        // a: 8 ladder + 116 refine; b: 8 + 16; c: 10 ladder; d: 16 ladder
+        assert_eq!(mock.log.len(), 8 + 116 + 8 + 16 + 10 + 16);
 
         // no unsafe draw in the refine range: the candidate is F - 1
         let candidate = |slow_from: u32, only_at: Option<u32>| {
