@@ -775,18 +775,203 @@ fn ok2_old_dump_analysis_changes_without_object_changes() {
                 "message": format!("the answer to {item} lapsed: {} changed", s.t),
                 "fix": "answer the item again"}])
     );
+
+    // The other two suspect-eligible edge kinds: view k gives f an `implements` link and g a
+    // `conditional_on` link to t, each pinned at t's content-1 hash, the pin an older rdy
+    // recorded while t was current. Both are suspect now.
+    let w = put(
+        &mut r,
+        "k",
+        json!([
+            {"op": "create", "type": "claim", "id": "$f", "parent": s.sec, "after": s.e, "body": "F stands."},
+            {"op": "create", "type": "claim", "id": "$g", "parent": s.sec, "after": "$f", "body": "G stands."}
+        ]),
+    );
+    let t_canon = r.read().block(&Scope::Canon, &id(&s.t)).unwrap();
+    let old_pin = content_1(&t_canon, &tr);
+    assert_ne!(old_pin, t_canon.content_hash_with(&tr));
+    let mut kinds_of = vec![];
+    for (key, kind) in [("$f", "implements"), ("$g", "conditional_on")] {
+        let b = id(&w.created[key]);
+        let mut next = r.read().block(&view("k"), &b).unwrap();
+        let base = next.version_hash();
+        next.links.insert(
+            kind.into(),
+            vec![Link {
+                target: id(&s.t),
+                part: None,
+            }],
+        );
+        next.pins.insert(id(&s.t), old_pin);
+        commit(&mut r, "k", base, next);
+        kinds_of.push((b.to_string(), kind));
+    }
+    let st = r.read();
+    let mut got: Vec<(String, String)> = st
+        .suspects(&view("k"))
+        .unwrap()
+        .into_iter()
+        .filter(|x| x.target == id(&s.t))
+        .map(|x| {
+            let b = st.block(&view("k"), &x.block).unwrap();
+            (x.block.to_string(), edge_kind(&b, &x.target))
+        })
+        .collect();
+    got.sort();
+    let mut want: Vec<(String, String)> = kinds_of
+        .iter()
+        .map(|(b, k)| (b.clone(), (*k).to_string()))
+        .collect();
+    want.sort();
+    assert_eq!(
+        got, want,
+        "an old implements and conditional_on pin are suspect"
+    );
+    drop(st);
+
+    // A dismissal whose vkey holds no content: an unjustified deletion of e in a stable
+    // section. An rdy before content-2 keyed it with the bare absent marker `-`; it lapses too.
+    let sec = id(&s.sec);
+    let token = {
+        let b = r
+            .read()
+            .brief(
+                &Scope::Canon,
+                &rdy_engine::Coverage {
+                    ids: vec![s.sec.clone()],
+                    path: None,
+                },
+                None,
+            )
+            .unwrap();
+        b.register(&r.briefs());
+        b.base.token
+    };
+    r.write_briefed(
+        &agent("st"),
+        WriteRequest {
+            view: "st".into(),
+            ops: parse_ops(vec![
+                json!({"op": "update", "id": sec.to_string(), "fields": {"lifecycle": "stable"}}),
+            ])
+            .unwrap(),
+            justification: None,
+            message: String::new(),
+        },
+        Some(token),
+    )
+    .unwrap();
+    land(&mut r, "st");
+    let e_canon = r.read().block(&Scope::Canon, &id(&s.e)).unwrap();
+    commit_op(
+        &mut r,
+        "z",
+        Op::Delete {
+            base: e_canon.version_hash(),
+            id: id(&s.e),
+        },
+    );
+    let deleted = |r: &Rdy| {
+        let st = r.read();
+        let set = st.tensions().unwrap();
+        let found: Vec<_> = set
+            .involving_block(&id(&s.e))
+            .into_iter()
+            .filter(|x| x.kind == TensionKind::UnjustifiedChange)
+            .collect();
+        assert_eq!(found.len(), 1, "{found:?}");
+        let x = found[0].clone();
+        let status = st.tension_status(&x);
+        (x, status)
+    };
+    let (x, status) = deleted(&r);
+    assert_eq!(status, TensionStatus::Open);
+    assert!(
+        x.involved
+            .iter()
+            .all(|i| i.version.is_none() && i.content.is_none()),
+        "the deleted block's item holds no content: {x:?}"
+    );
+    let legacy = legacy_vkey(x.kind, x.severity, &x.involved);
+    assert_ne!(x.vkey, legacy, "the vkey names the content generation");
+    let review = rdy_model::Review {
+        subject: ReviewSubject::Tension {
+            id: x.id,
+            vkey: legacy,
+            kind: x.kind.name().into(),
+            severity: x.severity.to_string(),
+            sides: x.sides.iter().map(|s| s.label()).collect(),
+            blocks: x.blocks(),
+        },
+        case_hash: None,
+        verdict: rdy_model::Verdict::Dismiss,
+        reason: "the deletion stands".into(),
+        citations: vec![],
+        provenance: Provenance {
+            actor: "human:qa".into(),
+            run: None,
+            role: Role::Approver,
+            at_ms: 5,
+        },
+    };
+    r.store_mut().put_dismissal(&review).unwrap();
+    r.invalidate();
+    assert_eq!(
+        deleted(&r).1,
+        TensionStatus::Open,
+        "the old dismissal lapsed"
+    );
+    r.close().unwrap();
+    let mut r = Rdy::open(_d2.path()).unwrap();
+    r.reconcile_transitions().unwrap();
+    assert_eq!(
+        deleted(&r).1,
+        TensionStatus::Open,
+        "still lapsed after a reopen and reconciliation"
+    );
+    r.close().unwrap();
+}
+
+/// The vkey an rdy before content-2 gave a tension (`rdy-tension-vkey-2\0`, `-` for an item with
+/// no content), recomputed here only to show what an old dismissal names.
+fn legacy_vkey(
+    kind: TensionKind,
+    severity: rdy_engine::tensions::TensionSeverity,
+    involved: &[Involved],
+) -> Hash {
+    let mut items: Vec<(&BlockId, &Option<Hash>)> =
+        involved.iter().map(|i| (&i.block, &i.content)).collect();
+    items.sort();
+    let mut bytes = b"rdy-tension-vkey-2\0".to_vec();
+    for part in [kind.name().to_string(), severity.to_string()] {
+        bytes.extend_from_slice(part.as_bytes());
+        bytes.push(0);
+    }
+    for (block, content) in items {
+        let content = content.map_or_else(|| "-".to_string(), |h| h.to_string());
+        for part in [block.to_string(), content] {
+            bytes.extend_from_slice(part.as_bytes());
+            bytes.push(0);
+        }
+    }
+    Hash::of(&bytes)
 }
 
 /// A typed store commit of `next` (from version `base`) to view `v`: every change `v` includes
 /// is a dep. It stands in for a write an rdy before content-2 made.
 fn commit(r: &mut Rdy, v: &str, base: Hash, next: Block) {
+    commit_op(r, v, Op::Update { base, block: next });
+}
+
+/// A typed store commit of `op` to view `v` ([`commit`]).
+fn commit_op(r: &mut Rdy, v: &str, op: Op) {
     let deps = r.read().included(v).to_vec();
     r.store_mut()
         .commit_to_view(
             v,
             Change {
                 view: v.into(),
-                ops: vec![Op::Update { base, block: next }],
+                ops: vec![op],
                 deps,
                 provenance: Provenance {
                     actor: format!("agent:{v}"),

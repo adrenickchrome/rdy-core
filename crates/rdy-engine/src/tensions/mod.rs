@@ -166,10 +166,26 @@ pub fn tension_id(kind: TensionKind, severity: TensionSeverity, involved: &[Invo
     Hash::of(&bytes)
 }
 
+/// The content part of an involved item as a vkey hashes it: the content hash's hex, or, for a
+/// deleted or absent block, `-` and the content domain ([`rdy_model::block::CONTENT_DOMAIN`]
+/// without its trailing zero). The absent marker names the content generation too, so a vkey
+/// that holds no content still changes with it, and every dismissal of an older generation
+/// lapses (D-TX3KH).
+fn vkey_content_text(c: &Option<Hash>) -> String {
+    match c {
+        Some(h) => h.to_string(),
+        None => {
+            let domain = rdy_model::block::CONTENT_DOMAIN;
+            let domain = domain.strip_suffix(b"\0").unwrap_or(domain);
+            format!("-{}", String::from_utf8_lossy(domain))
+        }
+    }
+}
+
 /// A tension's vkey (FW-CH7): the kind, the severity, and each involved item's block and
-/// content hash (items sorted by block, then content; `-` for a deleted or absent block). It
-/// leaves out the side labels and the full versions, so only a change of a side's content gives
-/// a new one. A landing, which changes a side's label and accepts a proposed decision
+/// content hash (items sorted by block, then content; `-rdy-content-2` for a deleted or absent
+/// block, [`vkey_content_text`]). It leaves out the side labels and the full versions, so only
+/// a change of a side's content gives a new one. A landing, which changes a side's label and accepts a proposed decision
 /// (`status`, `decided_at`), keeps it; so do a repin and a tracking-field edit, which
 /// [`rdy_model::Block::content_hash_with`] leaves out. A change of severity (a lifecycle or
 /// pack change) gives a new one, so a dismissal made under one severity does not hold under
@@ -184,7 +200,7 @@ pub fn tension_vkey(kind: TensionKind, severity: TensionSeverity, involved: &[In
         bytes.push(0);
     }
     for (block, content) in items {
-        for part in [block.to_string(), version_text(content)] {
+        for part in [block.to_string(), vkey_content_text(content)] {
             bytes.extend_from_slice(part.as_bytes());
             bytes.push(0);
         }
