@@ -96,7 +96,7 @@ fn prepare_within(
     budget: &Budget,
 ) -> Result<(prepare::Prepared, ResolvedProfile, Option<&'static str>), RdyError> {
     target.validate()?;
-    prepare::counted();
+    crate::probe::prepared();
     let (route, scope_ref, key) = match target {
         SiteTarget::Profile { scope, key } => (true, scope.clone(), key.as_str()),
         SiteTarget::ProfileOnly { key } => (false, ScopeRef::Canon, key.as_str()),

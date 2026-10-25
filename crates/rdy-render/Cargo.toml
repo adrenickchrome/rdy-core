@@ -21,7 +21,8 @@ subsetter.workspace = true
 miniz_oxide.workspace = true
 
 [features]
-# Counts the render entry points (see `probe`); on for the adapter's tests, off otherwise.
+# Counts the render entry points and the preparations (see `probe`); on for the adapter's and
+# the daemon's tests, off otherwise.
 probe = []
 
 [dev-dependencies]

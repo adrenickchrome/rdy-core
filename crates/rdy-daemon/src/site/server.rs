@@ -692,7 +692,7 @@ mod tests {
     use super::*;
     use rdy_engine::{Rdy, Session, WriteRequest};
     use rdy_model::Role;
-    use rdy_render::live::preparations_for_tests;
+    use rdy_render::probe::preparations;
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
 
@@ -779,9 +779,9 @@ mod tests {
             },
         ];
         let miss = |m: Miss| {
-            let before = preparations_for_tests();
+            let before = preparations();
             let r = not_found_now(&sh, m);
-            (r, preparations_for_tests() - before)
+            (r, preparations() - before)
         };
         for target in &targets {
             let (first, _) = miss(Miss::Page(target.clone()));
@@ -810,9 +810,9 @@ mod tests {
         assert!(String::from_utf8_lossy(&scope.body).contains("is not on the site now"));
         // a page view builds the target once; its misses then prepare nothing
         let tag_less = SiteTarget::Source(ScopeRef::View("admin".into()));
-        let before = preparations_for_tests();
+        let before = preparations();
         sh.site.refresh(&sh, &tag_less).unwrap();
-        assert_eq!(preparations_for_tests() - before, 1, "the page's build");
+        assert_eq!(preparations() - before, 1, "the page's build");
         let (r, prepared) = miss(Miss::Page(tag_less));
         assert_eq!((r.status, prepared), (404, 0));
         sh.shutdown().unwrap();

@@ -18,11 +18,13 @@ mod prepare;
 pub mod print;
 #[cfg(feature = "probe")]
 pub mod probe;
-/// The feature-off probe: private, and `hit()` compiles to nothing.
+/// The feature-off probe: private, and `hit()` and `prepared()` compile to nothing.
 #[cfg(not(feature = "probe"))]
 mod probe {
     #[inline(always)]
     pub(crate) fn hit() {}
+    #[inline(always)]
+    pub(crate) fn prepared() {}
 }
 pub mod process;
 mod profile_live;

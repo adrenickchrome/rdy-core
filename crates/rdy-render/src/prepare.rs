@@ -139,24 +139,8 @@ pub(crate) fn source(
     scope: &Scope,
     purpose: Purpose,
 ) -> Result<Prepared, RdyError> {
-    counted();
+    crate::probe::prepared();
     source_reading(rdy, scope, purpose, rdy)
-}
-
-thread_local! {
-    static PREPARATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-/// Counts one preparation of a source or a profile on this thread ([`preparations_for_tests`]).
-pub(crate) fn counted() {
-    PREPARATIONS.set(PREPARATIONS.get().wrapping_add(1));
-}
-
-/// Test hook: this thread's count of source and profile preparations so far. A test reads the
-/// difference over a call that runs on its thread.
-#[doc(hidden)]
-pub fn preparations_for_tests() -> u64 {
-    PREPARATIONS.get()
 }
 
 /// [`source`], reading the figure blobs through `reads`.

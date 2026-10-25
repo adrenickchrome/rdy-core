@@ -131,7 +131,6 @@ pub struct ProfileBuild {
     pub changes: Option<&'static str>,
 }
 
-pub use crate::prepare::preparations_for_tests;
 pub use crate::profile_live::{ProfileHistoryMemo, build_profile_live};
 
 /// The live build of a built site whose state captured redaction epoch `epoch`: its files and
