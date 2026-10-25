@@ -613,12 +613,12 @@ fn dgm9_title_and_section_have_one_toolbar() {
     // every item: one toolbar, Link, Copy ref and Copy in that order
     let blocks: Vec<&str> = page.split("<div class=\"block ").skip(1).collect();
     assert_eq!(blocks.len(), 13);
+    let tool = Regex::new(r#"class="tool ([a-z-]+)""#).unwrap();
     for b in &blocks {
         let b = &b[..b.find("\n").unwrap_or(b.len())];
         let bars = bars_of(b);
         assert_eq!(bars.len(), 1, "one toolbar: {b}");
-        let classes: Vec<&str> = Regex::new(r#"class="tool ([a-z-]+)""#)
-            .unwrap()
+        let classes: Vec<&str> = tool
             .captures_iter(&bars[0])
             .map(|c| c.get(1).unwrap().as_str())
             .collect();
@@ -898,6 +898,8 @@ fn dgm9_copy_works_from_file_without_requests() {
     assert_eq!(v["log"]["exec"], 0);
 }
 
+// the render binary includes the shared redaction fixture from several files
+#[allow(clippy::duplicate_mod)]
 #[path = "../../../rdy-store/tests/support/redaction.rs"]
 mod redaction_fixture;
 
