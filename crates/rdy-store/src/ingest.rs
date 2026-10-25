@@ -338,9 +338,12 @@ impl Ingest {
                     {
                         return Err(refused_allocation());
                     }
+                    // the header keeps the raw kind; the pending record names the logical kind,
+                    // as the authorization's holes do (`crate::codec`)
                     let loc = self.log.append_dropped(*kind, hash, *len)?;
+                    let logical = crate::codec::logical_kind(*kind);
                     self.pending.push(PendingDrop {
-                        record: dropped_payload(*kind, hash, *len, apply, residue.as_ref()),
+                        record: dropped_payload(logical, hash, *len, apply, residue.as_ref()),
                         loc,
                         released: false,
                     });

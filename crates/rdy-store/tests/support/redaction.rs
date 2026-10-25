@@ -205,7 +205,7 @@ pub struct Draft {
 impl Draft {
     /// The carrier's id (its deps are the store's: a zero-op change has none).
     pub fn carrier_id(&self) -> Hash {
-        hash_of(&self.carrier)
+        self.carrier.id()
     }
 
     /// The request's hash.
@@ -232,7 +232,9 @@ pub fn relink(request: &mut Redaction, residues: &[RedactionResidue]) {
 
 /// The frame of residue `r` in encoding `encoding`.
 pub fn residue_frame_in(r: &RedactionResidue, encoding: u16) -> (u8, Vec<u8>) {
-    rdy_store::codec::frame(kinds::REDACTION_RESIDUE, encoding, enc(r)).unwrap()
+    let body = rdy_store::codec::residue_body(r, encoding)
+        .expect("the residue has a form in this encoding");
+    rdy_store::codec::frame(kinds::REDACTION_RESIDUE, encoding, body).unwrap()
 }
 
 /// [`relink`], naming each residue by its frame in encoding `encoding`.
@@ -266,7 +268,7 @@ pub struct LogFrame {
     pub payload: Option<Vec<u8>>,
 }
 
-/// Every frame of the log up to `end`.
+/// Every frame of the log up to `end`, each by its logical kind (`rdy_store::codec`).
 pub fn frames(reader: &StoreReader, end: Location) -> Vec<LogFrame> {
     let mut out = vec![];
     reader
@@ -278,7 +280,7 @@ pub fn frames(reader: &StoreReader, end: Location) -> Vec<LogFrame> {
                     payload,
                 } => out.push(LogFrame {
                     loc,
-                    kind,
+                    kind: rdy_store::codec::logical_kind(kind),
                     hash,
                     len: payload.len() as u32,
                     payload: Some(payload.to_vec()),
@@ -287,7 +289,7 @@ pub fn frames(reader: &StoreReader, end: Location) -> Vec<LogFrame> {
                     kind, hash, len, ..
                 } => out.push(LogFrame {
                     loc,
-                    kind,
+                    kind: rdy_store::codec::logical_kind(kind),
                     hash,
                     len,
                     payload: None,
@@ -386,7 +388,7 @@ pub fn build_request(store: &Store, spec: &RequestSpec) -> Draft {
     }
     let carrier = carrier(spec.view.clone(), vec![], spec.requester.clone());
     let request = Redaction {
-        carrier: hash_of(&carrier),
+        carrier: carrier.id(),
         actor: spec.requester.clone(),
         targets: spec.targets.clone(),
         reason_class: spec.reason_class,
@@ -574,9 +576,11 @@ pub fn authorized_batch_fixture(
                 items.push(frame);
             }
         }
-        let carrier_bytes = enc(&draft.carrier);
+        // the carrier's frame in CHANGE's latest encoding (`rdy_store::codec`)
+        let (carrier_kind, carrier_bytes) =
+            rdy_store::codec::item(kinds::CHANGE, &draft.carrier).unwrap();
         let carrier_id = Hash::of(&carrier_bytes);
-        items.push((kinds::CHANGE, carrier_bytes));
+        items.push((carrier_kind, carrier_bytes));
         let request_bytes = enc(&draft.request);
         let request_id = Hash::of(&request_bytes);
         items.push((kinds::REDACTION, request_bytes));
@@ -709,7 +713,8 @@ pub fn authorized_batch_fixture(
     if let Some(hook) = &opts.on_landing {
         hook(&mut landing);
     }
-    let landing_bytes = enc(&landing);
+    // the landing's frame in LANDING's latest encoding (`rdy_store::codec`)
+    let (landing_kind, landing_bytes) = rdy_store::codec::item(kinds::LANDING, &landing).unwrap();
     let lid = Hash::of(&landing_bytes);
     let rebase = enc(&ViewOp {
         view: view.clone(),
@@ -736,7 +741,7 @@ pub fn authorized_batch_fixture(
     let mut items = vec![
         (kinds::PROPOSAL, proposal_bytes),
         (kinds::SNAPSHOT, state_bytes),
-        (kinds::LANDING, landing_bytes),
+        (landing_kind, landing_bytes),
         (kinds::VIEW_OP, rebase),
     ];
     let end = store.log_end();

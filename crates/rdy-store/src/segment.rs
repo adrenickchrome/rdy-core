@@ -295,10 +295,12 @@ fn read_frame_or_hole(
     file_len: u64,
     holes: &Holes,
 ) -> io::Result<Option<FrameRead>> {
+    // a hole is known by its logical kind; it keeps its header's raw kind (`crate::codec`)
     if let Some(h) = holes.get(&loc)
-        && header_at(f, loc.offset, file_len)? == Some((h.len, h.kind, h.hash))
+        && let Some((len, raw, hash)) = header_at(f, loc.offset, file_len)?
+        && (len, crate::codec::logical_kind(raw), hash) == (h.len, h.kind, h.hash)
     {
-        return Ok(Some(FrameRead::Hole(h.kind, h.hash, h.len)));
+        return Ok(Some(FrameRead::Hole(raw, h.hash, h.len)));
     }
     Ok(read_frame(f, loc.offset, file_len)?.map(|(k, h, p)| FrameRead::Whole(k, h, p)))
 }
@@ -1888,7 +1890,11 @@ impl SegmentLog {
             .write(true)
             .open(seg_path(&self.dir, loc.segment))?;
         let file_len = f.metadata()?.len();
-        if header_at(&f, loc.offset, file_len)? != Some((span.len, span.kind, span.hash)) {
+        // the span names the frame by its logical kind (`crate::codec`)
+        if header_at(&f, loc.offset, file_len)?
+            .map(|(len, raw, hash)| (len, crate::codec::logical_kind(raw), hash))
+            != Some((span.len, span.kind, span.hash))
+        {
             return Err(corrupt());
         }
         let start = loc.offset.checked_add(HEADER).ok_or_else(corrupt)?;

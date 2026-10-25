@@ -60,7 +60,7 @@ pub fn approver() -> Provenance {
     }
 }
 
-/// One frame of a log: where it is, its kind, its hash and its payload length.
+/// One frame of a log: where it is, its logical kind, its hash and its payload length.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Framed {
     pub loc: Location,
@@ -103,7 +103,7 @@ pub fn framed(reader: &StoreReader, end: Location) -> Vec<Framed> {
                 if kind != kinds::BATCH_COMMIT {
                     out.push(Framed {
                         loc,
-                        kind,
+                        kind: rdy_store::codec::logical_kind(kind),
                         hash,
                         len,
                     });

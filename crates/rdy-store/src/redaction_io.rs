@@ -598,7 +598,8 @@ impl Collected {
     ) -> Result<(), StoreError> {
         p.since.push((loc.offset, hash));
         let start = *p.start.get_or_insert(loc);
-        match kind {
+        // by the logical kind: a frame of any encoding (`crate::codec`)
+        match crate::codec::logical_kind(kind) {
             kinds::REDACTION_APPLY => p.applies.push(ApplyFrame {
                 loc,
                 hash,
@@ -619,10 +620,7 @@ impl Collected {
             }),
             kinds::LANDING => p.landings.push((loc, hash)),
             kinds::REDACTION => p.requests.push((loc, hash)),
-            // a residue of any encoding (`crate::codec`)
-            k if crate::codec::logical_kind(k) == kinds::REDACTION_RESIDUE => {
-                p.residues.push((loc, hash))
-            }
+            kinds::REDACTION_RESIDUE => p.residues.push((loc, hash)),
             _ => {}
         }
         Ok(())
@@ -807,6 +805,24 @@ pub(crate) fn read_record(
     }
     let payload = read_payload(f, loc.offset + HEADER, len)?;
     Ok((Hash::of(&payload) == *hash).then_some(payload))
+}
+
+/// The record of logical kind `kind` with hash `hash` at `loc`, of any encoding its kind
+/// registers, read and hash-checked through `access`: its raw kind and payload. None when the
+/// frame there is no such record.
+pub(crate) fn read_versioned(
+    access: &mut dyn RecordAccess,
+    loc: Location,
+    kind: u8,
+    hash: &Hash,
+) -> Result<Option<(u8, Vec<u8>)>, StoreError> {
+    for version in crate::codec::first(kind)..=crate::codec::latest(kind) {
+        let raw = crate::codec::raw_kind(kind, version);
+        if let Some(payload) = access.record(loc, raw, hash)? {
+            return Ok(Some((raw, payload)));
+        }
+    }
+    Ok(None)
 }
 
 /// The residue record with hash `hash` at `loc`, of any encoding its kind registers, read and
@@ -1122,13 +1138,10 @@ impl Validator {
             .iter()
             .find(|(_, h)| *h == record.landing)
             .ok_or_else(at)?;
-        let landing: LandingRecord = crate::codec::decode_record(
-            kinds::LANDING,
-            &access
-                .record(*lloc, kinds::LANDING, &record.landing)?
-                .ok_or_else(at)?,
-        )
-        .map_err(|_| at())?;
+        let (raw, payload) =
+            read_versioned(access, *lloc, kinds::LANDING, &record.landing)?.ok_or_else(at)?;
+        let landing: LandingRecord =
+            crate::codec::decode_record(raw, &payload).map_err(|_| at())?;
         if !human_approval(&landing) {
             return Err(if pending_from.is_some_and(|p| a.loc >= p) {
                 StoreError::RedactionHuman
@@ -1526,7 +1539,8 @@ fn check_log(
     };
     log.walk(upto, memory, &mut |f| {
         let hole = auth.erasable(&f.loc);
-        match f.kind {
+        // by the logical kind; `f.kind` stays the frame's raw kind for its decode
+        match crate::codec::logical_kind(f.kind) {
             kinds::BLOCK => {
                 if !selected_versions.contains(&f.hash)
                     && !kept_versions.contains(&f.hash)

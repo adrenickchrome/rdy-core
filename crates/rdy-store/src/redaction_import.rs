@@ -463,8 +463,10 @@ fn derive_spans(
     let mut spans: BTreeMap<Location, SpanAuth> = BTreeMap::new();
     let mut spans_count = 0u64;
     log.walk(upto, &BTreeMap::new(), &mut |f| {
+        // keyed by the logical kind; `f.kind` stays the frame's raw kind for its decode
+        let logical = crate::codec::logical_kind(f.kind);
         let key = ObjectKey {
-            kind: f.kind,
+            kind: logical,
             hash: f.hash,
         };
         if let Some(by) = approved.get(&key) {
@@ -486,7 +488,7 @@ fn derive_spans(
             holes.insert(
                 f.loc,
                 Hole {
-                    kind: f.kind,
+                    kind: logical,
                     hash: f.hash,
                     len: f.len,
                 },
@@ -508,7 +510,7 @@ fn derive_spans(
                     .or_default()
                     .push(RedactedSpan {
                         loc: f.loc,
-                        kind: f.kind,
+                        kind: logical,
                         hash: f.hash,
                         len: f.len,
                         residue: r.objects[&key].residue,

@@ -501,7 +501,12 @@ fn check_span(
 ) -> Result<(), StoreError> {
     let loc = location(s.place);
     let bad = || StoreError::corrupt_at(loc);
-    if log.header_at(loc)? != Some((s.len, s.kind, s.hash)) {
+    // the span names the frame by its logical kind; its raw kind is the residue's source
+    // encoding's (checked below)
+    let Some((len, raw, hash)) = log.header_at(loc)? else {
+        return Err(bad());
+    };
+    if (len, crate::codec::logical_kind(raw), hash) != (s.len, s.kind, s.hash) {
         return Err(bad());
     }
     // the residue: one of this object, sealed before the record
@@ -518,7 +523,9 @@ fn check_span(
                     crate::redaction_io::read_residue(log, *rloc, &h)?.ok_or_else(bad)?
                 }
             };
-            if !residue_names(&res.0, s.kind, &s.hash) {
+            if !residue_names(&res.0, s.kind, &s.hash)
+                || !crate::redaction::marker_agrees(raw, s.kind, Some(&res.0))
+            {
                 return Err(bad());
             }
             Some((h, res))
@@ -580,7 +587,7 @@ fn check_span(
     if Hash::of(&payload) == s.hash {
         // intact: what its residue records
         if let Some((_, (res, encoding))) = &residue
-            && !residue_matches(s.kind, &payload, res, *encoding)
+            && !residue_matches(raw, &payload, res, *encoding)
         {
             return Err(bad());
         }

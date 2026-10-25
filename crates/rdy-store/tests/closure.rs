@@ -1328,7 +1328,7 @@ fn carry(
             held,
         ),
         span(
-            &find(&frames, kinds::CHANGE, hash_of(c)),
+            &find(&frames, kinds::CHANGE, c.id()),
             Some(&residues[1]),
             held,
         ),

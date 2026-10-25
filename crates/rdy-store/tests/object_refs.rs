@@ -376,6 +376,18 @@ fn enc<T: Serialize>(v: &T) -> Vec<u8> {
     postcard::to_allocvec(v).unwrap()
 }
 
+/// `v` as a stored frame of logical kind `kind`, in that kind's latest encoding: its raw kind
+/// and payload.
+fn frame<T: Serialize + 'static>(kind: u8, v: &T) -> (u8, Vec<u8>) {
+    rdy_store::codec::item(kind, v).unwrap()
+}
+
+/// `refs_of` the frame of `v` as a stored object of logical kind `kind`.
+fn frame_refs<T: Serialize + 'static>(kind: u8, v: &T) -> Result<Vec<ObjectRef>, RecordError> {
+    let (raw, payload) = frame(kind, v);
+    refs_of(raw, &payload)
+}
+
 /// One sample record: its arm's name, kind, bytes and expected edges (in any order).
 struct Sample {
     arm: &'static str,
@@ -384,11 +396,13 @@ struct Sample {
     edges: Vec<ObjectRef>,
 }
 
-fn s<T: Serialize>(arm: &'static str, kind: u8, v: &T, edges: Vec<ObjectRef>) -> Sample {
+/// A sample of `v` as the frame of logical kind `kind`: its raw kind and payload.
+fn s<T: Serialize + 'static>(arm: &'static str, kind: u8, v: &T, edges: Vec<ObjectRef>) -> Sample {
+    let (kind, bytes) = frame(kind, v);
     Sample {
         arm,
         kind,
-        bytes: enc(v),
+        bytes,
         edges,
     }
 }
@@ -1023,7 +1037,10 @@ fn ha1_refs_cover_every_assigned_object_kind() {
             sample.arm
         );
     }
-    let covered: BTreeSet<u8> = all.iter().map(|s| s.kind).collect();
+    let covered: BTreeSet<u8> = all
+        .iter()
+        .map(|s| rdy_store::codec::logical_kind(s.kind))
+        .collect();
     let assigned: BTreeSet<u8> = (1..=7)
         .chain([9, 10, 11, 13])
         .chain(15..=22)
@@ -1064,7 +1081,7 @@ fn ha1_refs_cover_every_assigned_object_kind() {
         ChangeLinks::default(),
         Justification::Implements(vec![]),
     );
-    assert_eq!(refs_of(CHANGE, &enc(&embeds)), Err(RecordError::Decode));
+    assert_eq!(frame_refs(CHANGE, &(embeds)), Err(RecordError::Decode));
     // A span names its object by a portable kind only.
     let mut r = redaction();
     r.manifest.spans[0].kind = 12;
@@ -1085,8 +1102,8 @@ fn ha1_identity_hashes_are_not_dependencies() {
     .map(h)
     .collect();
     for sample in samples() {
-        let refs = refs_of(sample.kind, &sample.bytes).unwrap();
-        for r in &refs {
+        let edges = refs_of(sample.kind, &sample.bytes).unwrap();
+        for r in &edges {
             assert!(
                 !identities.contains(&r.hash),
                 "{}: identity {:?} became an edge",
@@ -1116,11 +1133,11 @@ fn ha1_identity_hashes_are_not_dependencies() {
     };
     assert_eq!(refs_of(ANSWER, &enc(&answer)), Ok(vec![any(4)]));
     // A change residue's own id is not a dependency of it.
-    let refs = refs_of(
+    let edges = frame_refs(
         REDACTION_RESIDUE,
-        &enc(&RedactionResidue::Change(change_residue())),
+        &RedactionResidue::Change(change_residue()),
     );
-    assert!(!refs.unwrap().iter().any(|r| r.hash == h(92)));
+    assert!(!edges.unwrap().iter().any(|r| r.hash == h(92)));
 }
 
 /// Every variant of `$ty`, listed through an exhaustive match: a new variant does not compile
@@ -1221,7 +1238,7 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
         for kind in &evidence {
             let l = landing(*assurance, *kind);
             assert_eq!(
-                refs_of(LANDING, &enc(&l)),
+                frame_refs(LANDING, &(l)),
                 Ok(sorted(landing_edges.clone())),
                 "{assurance:?} {kind:?}"
             );
@@ -1238,7 +1255,7 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
         };
         let c = change("change", vec![], ChangeLinks::default(), editorial.clone());
         assert_eq!(
-            refs_of(CHANGE, &enc(&c)),
+            frame_refs(CHANGE, &(c)),
             Ok(vec![some(CHANGE, 5)]),
             "{class:?}"
         );
@@ -1247,7 +1264,7 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
         residue.links = ChangeLinks::default();
         residue.justification = Some(editorial);
         assert_eq!(
-            refs_of(REDACTION_RESIDUE, &enc(&RedactionResidue::Change(residue))),
+            frame_refs(REDACTION_RESIDUE, &(RedactionResidue::Change(residue))),
             Ok(vec![some(CHANGE, 97)]),
             "residue {class:?}"
         );
@@ -1266,7 +1283,7 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
     }
     let c = change("change", vec![], ChangeLinks::default(), reflects.clone());
     assert_eq!(
-        refs_of(CHANGE, &enc(&c)),
+        frame_refs(CHANGE, &(c)),
         Ok(vec![some(CHANGE, 5)]),
         "reflects"
     );
@@ -1275,7 +1292,7 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
     residue.links = ChangeLinks::default();
     residue.justification = Some(reflects);
     assert_eq!(
-        refs_of(REDACTION_RESIDUE, &enc(&RedactionResidue::Change(residue))),
+        frame_refs(REDACTION_RESIDUE, &(RedactionResidue::Change(residue))),
         Ok(vec![some(CHANGE, 97)]),
         "residue reflects"
     );
@@ -1368,7 +1385,7 @@ fn ha1_refs_are_sorted_and_unique() {
         read_identity: None,
     };
     assert_eq!(
-        refs_of(LANDING, &enc(&landing)),
+        frame_refs(LANDING, &(landing)),
         Ok(vec![
             any(0),
             any(1),
@@ -1403,9 +1420,9 @@ fn ha1_refs_are_sorted_and_unique() {
             Justification::Implements(vec![]),
         )
     };
-    let refs = refs_of(CHANGE, &enc(&edit)).unwrap();
+    let edges = frame_refs(CHANGE, &edit).unwrap();
     assert_eq!(
-        refs,
+        edges,
         vec![
             some(BLOCK, 9),
             some(CHANGE, 3),
@@ -1414,9 +1431,9 @@ fn ha1_refs_are_sorted_and_unique() {
         ]
     );
     for sample in samples() {
-        let refs = refs_of(sample.kind, &sample.bytes).unwrap();
+        let edges = refs_of(sample.kind, &sample.bytes).unwrap();
         assert!(
-            refs.windows(2).all(|w| w[0] < w[1]),
+            edges.windows(2).all(|w| w[0] < w[1]),
             "{}: not strictly ascending",
             sample.arm
         );
@@ -1730,7 +1747,7 @@ fn cp3_plan_refs_are_typed_and_identity_hashes_are_not_edges() {
     let mut trailing = enc(&sealed);
     trailing.push(0);
     assert_eq!(refs_of(PLAN, &trailing), Err(RecordError::Decode));
-    // PLAN is a portable kind; kind 25 is not
+    // PLAN is a portable kind; kind 127, the highest logical kind, is not
     assert!(PORTABLE_KINDS.contains(&PLAN));
-    assert_eq!(refs_of(25, &enc(&sealed)), Err(RecordError::Kind));
+    assert_eq!(refs_of(127, &enc(&sealed)), Err(RecordError::Kind));
 }
