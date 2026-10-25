@@ -2179,6 +2179,9 @@ pub struct CarriedFixture {
     pub needs_person: Hash,
     pub request: Hash,
     pub case: Hash,
+    /// The dispute of the policy landing that stays open: the first use of the dispute feature,
+    /// before a chain's first boundary.
+    pub open_dispute: Hash,
     /// The three disputes (to be upheld, dismissed and withdrawn) and their landings.
     pub disputes: Vec<(Hash, Hash)>,
     /// The Pass, Concern and Fail check reviews.
@@ -2428,8 +2431,9 @@ fn edit_op(r: &Rdy, id: &BlockId, body: &str) -> rdy_model::Op {
 /// The first carried stage: a policy block and a claim, landed; a change of the claim and its
 /// replay (with `replayed_from` and `briefing`); the replay's ASSESSMENT under the policy (an
 /// Accepts verdict with a rule) and a NeedsPerson one with no policy; the replay's policy
-/// landing, which names the first assessment and the policy; and a CHECK_REQUEST of the replay
-/// with its `check/` ref.
+/// landing, which names the first assessment and the policy; a dispute of that landing that
+/// stays open; and a CHECK_REQUEST of the replay with its `check/` ref. A dump chain keeps one
+/// feature manifest, so this stage uses every feature its later stages use, but plan_tension.
 pub fn add_carried_fixture_records(r: &mut Rdy) -> CarriedFixture {
     let w = write(r, CARRIED_DOC, json!([
         {"op": "create", "type": "doc", "id": "$d", "fields": {"name": CARRIED_DOC, "title": CARRIED_DOC, "doc_type": "page"}},
@@ -2515,6 +2519,15 @@ pub fn add_carried_fixture_records(r: &mut Rdy) -> CarriedFixture {
     let landing = r.store_mut().commit_land(prepared, &[]).unwrap().landing;
     r.invalidate();
     r.seal_open().unwrap();
+    let open = rdy_model::dispute::Dispute {
+        landing,
+        opened_by: carried_prov(PERSON, Role::Approver, CARRIED_AT_MS),
+        reason: "the policy landing needs a second look".into(),
+        at_ms: CARRIED_AT_MS,
+    };
+    let open_dispute = r.store_mut().put(kinds::DISPUTE, &open).unwrap();
+    r.invalidate();
+    r.seal_open().unwrap();
     // the check request of the replay and its ref
     let q = carried_check_request(replay, proposal, &claim);
     let request = r.store_mut().put(kinds::CHECK_REQUEST, &q).unwrap();
@@ -2536,6 +2549,7 @@ pub fn add_carried_fixture_records(r: &mut Rdy) -> CarriedFixture {
         needs_person,
         request,
         case: q.case_hash,
+        open_dispute,
         disputes: vec![],
         verdicts: vec![],
     }

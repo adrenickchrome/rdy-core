@@ -720,10 +720,11 @@ fn hpb5_full_validation_reuses_take_checks() {
         links: ChangeLinks::default(),
         read_identity: None,
     };
-    let embedding_bytes = enc(&embedding);
+    // a change is written at its latest encoding: its frame payload holds the version
+    let embedding = rdy_store::codec::encode_new(kinds::CHANGE, &embedding);
     let embedding_key = ObjectKey {
         kind: kinds::CHANGE,
-        hash: Hash::of(&embedding_bytes),
+        hash: embedding.hash(),
     };
     let attach = Answer {
         item: "D-x@1".into(),
@@ -742,9 +743,9 @@ fn hpb5_full_validation_reuses_take_checks() {
     let attach_bytes = enc(&attach);
     let mut embedded = records.clone();
     embedded.push(StreamRecord::Present {
-        encoding: 0,
+        encoding: embedding.version,
         key: embedding_key,
-        payload: embedding_bytes,
+        payload: embedding.payload,
     });
     embedded.push(StreamRecord::Present {
         encoding: 0,

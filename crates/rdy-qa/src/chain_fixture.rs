@@ -50,10 +50,11 @@
 //!   block ([`E1_EARLY_CANARY`]), a blob of two chunks ([`E1_BLOB_CANARY`]) and the first carried
 //!   stage (`every_kind::add_carried_fixture_records`: a replay with `replayed_from` and
 //!   `briefing`, an Accepts and a NeedsPerson ASSESSMENT, the replay's policy landing and a
-//!   CHECK_REQUEST with its `check/` ref), then tags [`E1_TAGS`]`[0]`. Increment 1 holds a
-//!   tension plan's landing and seal (Updated, Confirmed and Dismissed items, with a Dismiss
-//!   answer), an ordinary landing, three disputes and a Check review of each new verdict, then
-//!   `[1]`. Increment 2 holds the resolutions (Upheld, Dismissed, Withdrawn), a Dispute, a
+//!   CHECK_REQUEST with its `check/` ref, and a dispute of the policy landing that stays open),
+//!   a tension plan's landing and seal (Updated, Confirmed and Dismissed items, with a Dismiss
+//!   answer), then tags [`E1_TAGS`]`[0]`. A dump chain keeps one feature manifest, so every
+//!   feature's first use is before the full dump. Increment 1 holds an ordinary landing, three
+//!   disputes and a Check review of each new verdict, then `[1]`. Increment 2 holds the resolutions (Upheld, Dismissed, Withdrawn), a Dispute, a
 //!   ResolveDispute and an AcceptVerdict answer, a late block (the held stop), the first removal
 //!   (the early block, the blob and the released chain's ordinary block [`E1_OLD_CANARY`], whose
 //!   records are encoding 0; the missing stop is the end of its proposal), the second removal
@@ -182,6 +183,8 @@ pub struct Chain {
     /// A stop before the removal's apply; in the full dump written after the removal, every
     /// payload it selects before the stop is missing.
     pub missing_stop: String,
+    /// The tag of the standalone project fixture: above every tag of the chain.
+    pub standalone_tag: &'static str,
 }
 
 impl Chain {
@@ -464,6 +467,7 @@ fn project_chain_with(stages: Stages) -> Chain {
         post,
         held_stop: format!("landing:{late_landing}"),
         missing_stop: position(missing),
+        standalone_tag: STANDALONE_TAG,
     }
 }
 
@@ -478,7 +482,7 @@ pub fn project_standalone(c: &Chain) -> Standalone {
     let mut r = Rdy::open(&root).unwrap();
     r.store_mut().set_segment_max(SEGMENT_MAX);
     let (target, _) = landed_block(&mut r, "harrier-standalone", STANDALONE_CANARY);
-    tag(&mut r, STANDALONE_TAG);
+    tag(&mut r, c.standalone_tag);
     remove(
         &mut r,
         "rq-standalone",
@@ -493,7 +497,7 @@ pub fn project_standalone(c: &Chain) -> Standalone {
         dir,
         root,
         dump,
-        stop: format!("tag:{STANDALONE_TAG}"),
+        stop: format!("tag:{}", c.standalone_tag),
     }
 }
 
@@ -624,6 +628,7 @@ fn holder_chain_with(stages: Stages) -> (Chain, HolderUploads) {
         post,
         held_stop: format!("tag:{}", every_kind::HOLDER_TAGS[1]),
         missing_stop: format!("tag:{}", every_kind::HOLDER_TAGS[0]),
+        standalone_tag: STANDALONE_TAG,
         dir: built.dir,
     };
     (chain, HolderUploads { uploads: ups, stop })
@@ -834,6 +839,8 @@ pub const E1_OLD_CANARY: &str = "An ordinary block.";
 pub const TENSION_VIEW: &str = "e1-tension";
 /// The e1 tags: before the full dump, in increment 1 and in increment 2.
 pub const E1_TAGS: [&str; 3] = ["v7.0.0", "v7.1.0", "v7.2.0"];
+/// The tag of the e1 standalone project fixture.
+pub const E1_STANDALONE_TAG: &str = "v7.3.0";
 
 /// The released `(3, 18)` project chain: the e1 project's base.
 pub fn released_chain() -> Vec<PathBuf> {
@@ -901,6 +908,9 @@ fn tension_sealed_landing(r: &mut Rdy, proposal: Hash, bound: &Plan, approver: &
             answer: None,
         });
     }
+    // a plan's answers and a seal's items are in id order
+    answers.sort_by_key(|a| a.item);
+    items.sort_by_key(|i| i.id);
     let seal = Plan {
         stable: Some(bound.id()),
         prev: Some(bound.id()),
@@ -983,15 +993,16 @@ fn project_chain_e1(uploads: Option<&std::path::Path>) -> (Chain, Vec<Upload>) {
     let blob = r.store_mut().put_blob(&e1_blob_bytes()).unwrap();
     seal(&mut r);
     let mut fx = every_kind::add_carried_fixture_records(&mut r);
-    ups.push(e1_upload(&mut r, &ups_dir, E1_TAGS[0], "e1-0.rdysync"));
-    let full = dir.path().join("chain-full.rdydump");
-    let s0 = r.read().dump(&full).unwrap();
-    // increment 1: the tension plan's landing and seal, an ordinary landing, the disputes and
-    // the check verdicts, then the tag
+    // the tension plan's landing and seal: a dump chain keeps one feature manifest, so every
+    // feature's first use is before the full dump
     let (proposal, bound) = bound_plan(&mut r, TENSION_VIEW, "A block a tension plan covers.");
     seal(&mut r);
     let tension = tension_sealed_landing(&mut r, proposal, &bound, PERSON);
     seal(&mut r);
+    ups.push(e1_upload(&mut r, &ups_dir, E1_TAGS[0], "e1-0.rdysync"));
+    let full = dir.path().join("chain-full.rdydump");
+    let s0 = r.read().dump(&full).unwrap();
+    // increment 1: an ordinary landing, the disputes and the check verdicts, then the tag
     landed_block(&mut r, "e1-ordinary", "An e1 block of an ordinary landing.");
     let ordinary = r.read().canon_head().unwrap();
     let policy = fx.landing;
@@ -1035,6 +1046,7 @@ fn project_chain_e1(uploads: Option<&std::path::Path>) -> (Chain, Vec<Upload>) {
         post,
         held_stop: format!("landing:{late_landing}"),
         missing_stop: position(missing),
+        standalone_tag: E1_STANDALONE_TAG,
     };
     (chain, ups)
 }
@@ -1102,6 +1114,7 @@ fn holder_chain_e1() -> (Chain, HolderUploads) {
         post,
         held_stop: format!("tag:{}", E1_TAGS[1]),
         missing_stop: format!("tag:{}", E1_TAGS[0]),
+        standalone_tag: E1_STANDALONE_TAG,
         dir,
     };
     let stop = format!("tag:{}", E1_TAGS[1]);

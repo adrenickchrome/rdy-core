@@ -399,9 +399,11 @@ pub(crate) fn reflects_facts(r: &Rdy, upto: Location) -> Value {
             else {
                 return Ok(());
             };
-            match kind {
+            match rdy_store::codec::logical_kind(kind) {
                 kinds::CHANGE => {
-                    let c: rdy_model::Change = rdy_store::bounded::decode(payload).unwrap();
+                    // of either encoding: the frame's raw kind names it
+                    let c: rdy_model::Change =
+                        rdy_store::codec::decode_record(kind, payload).unwrap();
                     if let Some(j @ rdy_model::Justification::Reflects { .. }) = &c.justification {
                         changes.push(json!({
                             "at": loc(at),

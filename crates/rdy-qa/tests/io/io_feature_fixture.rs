@@ -149,24 +149,66 @@ const E1_SYNC_EXPECT: &str = "v2-f1-e1.expect.json";
 /// Each dump member of the set `v4-f1-e1` and its blake3, set when it was written. A change here
 /// needs a founder decision.
 const E1_MEMBERS: [(&str, &str); 12] = [
-    (E1_FULL, "E1_FULL_DIGEST"),
-    (E1_FULL_EXPECT, "E1_FULL_EXPECT_DIGEST"),
-    (E1_CHAIN_FULL, "E1_CHAIN_FULL_DIGEST"),
-    (E1_CHAIN_1, "E1_CHAIN_1_DIGEST"),
-    (E1_CHAIN_2, "E1_CHAIN_2_DIGEST"),
-    (E1_CHAIN_EXPECT, "E1_CHAIN_EXPECT_DIGEST"),
-    (E1_HOLDER, "E1_HOLDER_DIGEST"),
-    (E1_HOLDER_EXPECT, "E1_HOLDER_EXPECT_DIGEST"),
-    (E1_HOLDER_CHAIN_FULL, "E1_HOLDER_CHAIN_FULL_DIGEST"),
-    (E1_HOLDER_CHAIN_1, "E1_HOLDER_CHAIN_1_DIGEST"),
-    (E1_HOLDER_CHAIN_2, "E1_HOLDER_CHAIN_2_DIGEST"),
-    (E1_HOLDER_CHAIN_EXPECT, "E1_HOLDER_CHAIN_EXPECT_DIGEST"),
+    (
+        E1_FULL,
+        "6909115400534d16e7f24ee884e3a2b1f19678e325cbc7ce81290db87aaba0ee",
+    ),
+    (
+        E1_FULL_EXPECT,
+        "7887b6a7d1c61aae21ee1ea382c40cee4dd7f19486a30f12cbc470b225d3600e",
+    ),
+    (
+        E1_CHAIN_FULL,
+        "4277facc3f5211003da5dea0ee80bcf73883b3bfdcb38f8ff54a351935beba35",
+    ),
+    (
+        E1_CHAIN_1,
+        "567d23317260cb8243f33ae266d2403ac20d812d3a09048abe1e0753c391b757",
+    ),
+    (
+        E1_CHAIN_2,
+        "78c29157ebcc42752df39bfe3d822d39456419be8b6afe04df6a5566109e01eb",
+    ),
+    (
+        E1_CHAIN_EXPECT,
+        "30867bacc8c44b8ad4a59f1e89095c9ab845c09c336d6f95c6e965a73f21d972",
+    ),
+    (
+        E1_HOLDER,
+        "9e2adc18b759160fb9b708c3cd3874fac1184438d077fe6d80350b2bd972b2da",
+    ),
+    (
+        E1_HOLDER_EXPECT,
+        "f6168d0c4409adb9ff2b441d66bba9eb93b2db16810134d0d99e126a7f82a2c7",
+    ),
+    (
+        E1_HOLDER_CHAIN_FULL,
+        "f62df037f738a9b62026d85d92963b4e0ceaaf8fc9f9ee114ca147624706e30b",
+    ),
+    (
+        E1_HOLDER_CHAIN_1,
+        "c52e42ea0d623f58fe6ab90df3a67bc8d5c71507374ed01d8f474b5c1019a571",
+    ),
+    (
+        E1_HOLDER_CHAIN_2,
+        "9f8221dd72a99f44c4e453fafd29993c70f0e12ec598eddf8cc9fa95aef68040",
+    ),
+    (
+        E1_HOLDER_CHAIN_EXPECT,
+        "490f8617150cbca312efaef1ddb8124439ae375aea1b618e5e8174022e0b9b03",
+    ),
 ];
 
 /// The sync members of the set `v2-f1-e1` and their blake3, set when they were written.
 const E1_SYNC_MEMBERS: [(&str, &str); 2] = [
-    (E1_SYNC, "E1_SYNC_DIGEST"),
-    (E1_SYNC_EXPECT, "E1_SYNC_EXPECT_DIGEST"),
+    (
+        E1_SYNC,
+        "9e479fd7a95f79f50806f2badf8a0363ff2ac3ad659a9d3c56027db81a2e784a",
+    ),
+    (
+        E1_SYNC_EXPECT,
+        "c8ec99cb4b84819b2d253544d2203eb33c24e90d8506a4dc68d3097d4343e325",
+    ),
 ];
 
 /// The names of a complete set's members, and the holder tag its sync batch carries.
@@ -848,7 +890,40 @@ fn check_set_loads(n: &Names, inputs: &[s18::Input], store: Option<&Value>, move
     );
     let (h, _, taken) = take_split(&bytes, &d.path().join("sync-take"));
     h.close().unwrap();
-    assert_eq!(taken, expect["taken"], "the take and what the holder reads");
+    if moves {
+        // the take writes this rdy's baseline manifest into its new holder: the holder's
+        // manifest ref and its ref updates differ from the frozen take's, which wrote none
+        assert_eq!(
+            without_manifest(&taken),
+            without_manifest(&expect["taken"]),
+            "the take and what the holder reads"
+        );
+    } else {
+        assert_eq!(taken, expect["taken"], "the take and what the holder reads");
+    }
+}
+
+/// `v` without the facts a new holder's feature manifest decides: its `meta/store_features`
+/// ref and every ref update (kind 8) it holds.
+fn without_manifest(v: &Value) -> Value {
+    match v {
+        Value::Object(m) => Value::Object(
+            m.iter()
+                .filter(|(k, _)| k.as_str() != "meta/store_features")
+                .map(|(k, v)| (k.clone(), without_manifest(v)))
+                .collect(),
+        ),
+        Value::Array(a) => Value::Array(
+            a.iter()
+                .filter(|x| {
+                    !x.as_str()
+                        .is_some_and(|s| s.starts_with(&format!("{}:", kinds::REF_UPDATE)))
+                })
+                .map(without_manifest)
+                .collect(),
+        ),
+        _ => v.clone(),
+    }
 }
 
 #[test]
