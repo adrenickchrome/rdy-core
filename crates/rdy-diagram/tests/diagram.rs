@@ -160,7 +160,7 @@ const OVER_STATEMENTS: &str = "the source has over 2048 statements";
 const OVER_DEPTH: &str = "the source nests subgraphs or blocks over 32 deep";
 const UNKNOWN: &str = "unknown diagram type";
 const UNCLOSED: &str = "a subgraph is not closed with end";
-const OVER_LINK: &str = "the source has a link over 256 bytes";
+const OVER_ARROW: &str = "the source has an arrow over 256 bytes";
 
 /// The child half of the fresh-process check: renders the fixture the parent names and writes
 /// the golden form where the parent says. Without the parent's variables it does nothing.
@@ -1028,13 +1028,13 @@ fn dgm1_flowchart_depth_reads_structure_only() {
         "end\n",
     );
     assert_eq!(short(render(&separated)), invalid(UNCLOSED), "{separated}");
-    // keywords in a link label: the depth bound comes first, so the link bound's reason shows
-    // that they add no depth (ruling final: a link is over 256 bytes here)
+    // keywords in an arrow's label: the depth bound comes first, so the arrow bound's reason
+    // shows that they add no depth (ruling final: an arrow is over 256 bytes here)
     for src in [
         format!("flowchart LR\nA -->|{opens}{closes}| B\n"),
         format!("flowchart LR\nA -- {opens}{closes} --> B\n"),
     ] {
-        assert_eq!(short(render(&src)), invalid(OVER_LINK), "{src}");
+        assert_eq!(short(render(&src)), invalid(OVER_ARROW), "{src}");
     }
     // a subgraph after a node on the same line still nests
     let after_node = |n: usize| {
@@ -1171,11 +1171,11 @@ fn dgm1_a_drawing_library_panic_prints_nothing() {
 
 /// Final review I2 (ruling final): the two inputs inside every other bound that held the pinned
 /// crate for minutes or hours are refused before it is called. A subgraph that no `end` closes
-/// (the pinned grammar reads its body again for each one, so k of them cost about 2^k) and a link
-/// whose arrow and label pass 256 bytes (a long arrow spans as many ranks as it has dots or
+/// (the pinned grammar reads its body again for each one, so k of them cost about 2^k) and an
+/// arrow whose run and label pass 256 bytes (a long arrow spans as many ranks as it has dots or
 /// dashes). The reasons are exact; no test here times anything.
 #[test]
-fn dgm1_unclosed_subgraphs_and_long_links_are_refused() {
+fn dgm1_unclosed_subgraphs_and_long_arrows_are_refused() {
     // the reviewer's sources: k nested subgraphs that no `end` closes
     for k in [16, 18, 20, 22] {
         let src = format!(
@@ -1204,42 +1204,42 @@ fn dgm1_unclosed_subgraphs_and_long_links_are_refused() {
     );
     assert!(drawn(&render(&closed)), "32 closed subgraphs");
 
-    // the reviewer's long dotted links: 16,000 and 60,000 dots
+    // the reviewer's long dotted arrows: 16,000 and 60,000 dots
     for dots in [16000, 60000] {
         let src = format!("flowchart LR\nA -. x{}- B\n", ".".repeat(dots));
         assert!(src.len() <= 65536);
-        assert_eq!(short(render(&src)), invalid(OVER_LINK), "{dots} dots");
+        assert_eq!(short(render(&src)), invalid(OVER_ARROW), "{dots} dots");
     }
-    // a link is its arrow and its label: 256 bytes draw, 257 do not, in every link form
+    // an arrow is its run and its label: 256 bytes draw, 257 do not, in every arrow form
     let dotted = |n: usize| format!("-. x{}->", ".".repeat(n - 6));
     let solid = |n: usize| format!("-- {} -->", "y".repeat(n - 7));
     let thick = |n: usize| format!("== {} ==>", "y".repeat(n - 7));
     let piped = |n: usize| format!("-->|{}|", "y".repeat(n - 5));
     let long = |n: usize| format!("{}>", "-".repeat(n - 1));
-    for (form, link) in [
+    for (form, arrow) in [
         ("dotted", &dotted as &dyn Fn(usize) -> String),
         ("solid", &solid),
         ("thick", &thick),
         ("piped", &piped),
         ("long", &long),
     ] {
-        assert_eq!(link(256).len(), 256, "{form}");
-        let src = |n: usize| format!("flowchart LR\nA {} B\n", link(n));
+        assert_eq!(arrow(256).len(), 256, "{form}");
+        let src = |n: usize| format!("flowchart LR\nA {} B\n", arrow(n));
         assert!(drawn(&render(&src(256))), "{form}: 256 bytes");
         assert_eq!(
             short(render(&src(257))),
-            invalid(OVER_LINK),
+            invalid(OVER_ARROW),
             "{form}: 257 bytes"
         );
-        // later in a chain, or after a subgraph, it is still one link
-        let chained = format!("flowchart LR\nA --> B {} C --> D\n", link(257));
+        // later in a chain, or after a subgraph, it is still one arrow
+        let chained = format!("flowchart LR\nA --> B {} C --> D\n", arrow(257));
         assert_eq!(
             short(render(&chained)),
-            invalid(OVER_LINK),
+            invalid(OVER_ARROW),
             "{form}: chained"
         );
     }
-    // the same bytes in a node label are no link
+    // the same bytes in a node label are no arrow
     let label = format!("flowchart LR\nA[\"{}\"] --> B\n", ".".repeat(1000));
     assert!(drawn(&render(&label)), "dots in a node label");
 }

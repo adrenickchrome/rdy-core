@@ -57,9 +57,9 @@ pub(crate) struct Reading {
     /// Whether a subgraph the grammar attempts finds no `end`, so its header is read again as
     /// nodes. The pinned parser keeps no memo, so it reads such a body again for each one.
     pub unclosed: bool,
-    /// The longest link the walk read: its bytes from the arrow's first character through its
-    /// arrow head and its `|label|`, with the label text of a labelled link between.
-    pub longest_link: usize,
+    /// The longest arrow the walk read: its bytes from its first character through its head and
+    /// its `|label|`, with the label text of a labelled arrow between.
+    pub longest_arrow: usize,
 }
 
 /// Reads `src`, the diagram's source with any BOM removed and CRLF as LF, as the pinned
@@ -76,7 +76,7 @@ pub(crate) fn read(src: &str) -> Reading {
         #[cfg(test)]
         exact: _exact,
         unclosed: grammar.reread,
-        longest_link: grammar.longest_link,
+        longest_arrow: grammar.longest_arrow,
     }
 }
 
@@ -333,8 +333,8 @@ struct Grammar<'a> {
     heads: Vec<u32>,
     /// Whether a subgraph found no `end` and its header was read again as nodes.
     reread: bool,
-    /// The longest link read so far, in bytes.
-    longest_link: usize,
+    /// The longest arrow read so far, in bytes.
+    longest_arrow: usize,
     #[cfg(test)]
     work: std::cell::Cell<usize>,
 }
@@ -409,7 +409,7 @@ impl<'a> Grammar<'a> {
             rest_end: vec![NONE; n + 1],
             heads: Vec::new(),
             reread: false,
-            longest_link: 0,
+            longest_arrow: 0,
             #[cfg(test)]
             work: Default::default(),
         }
@@ -733,9 +733,9 @@ impl<'a> Grammar<'a> {
             // else `edge_connector ~ node_group`
             self.i = node_end;
             self.ws();
-            let link = self.i;
+            let arrow = self.i;
             if self.edge_connector() && {
-                self.longest_link = self.longest_link.max(self.i - link);
+                self.longest_arrow = self.longest_arrow.max(self.i - arrow);
                 self.ws();
                 self.node_head()
             } {

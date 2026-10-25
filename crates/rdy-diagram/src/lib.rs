@@ -10,8 +10,8 @@
 //! subgraph with no `end` again as nodes (see `flowchart`), and class and state depth from the
 //! pinned line parsers' rules. Two flowchart shapes inside those bounds would hold the pinned
 //! crate for minutes or hours, so they are refused too: a subgraph that no `end` closes (the
-//! grammar reads its body again, and nested ones multiply), and a link over 256 bytes (an arrow
-//! spans one rank per dot or dash).
+//! grammar reads its body again, and nested ones multiply), and an arrow over 256 bytes (its run
+//! and its label; it spans one rank per dot or dash).
 //!
 //! A panic in the pinned crate is a drawing fault, never a crash, and prints nothing.
 //!
@@ -31,15 +31,15 @@ pub const MAX_STATEMENTS: usize = 2048;
 pub const MAX_DEPTH: usize = 32;
 /// The most bytes a drawn SVG may have.
 pub const MAX_SVG_BYTES: usize = 4194304;
-/// The most bytes one flowchart link may have: its arrow and its label text.
-pub const MAX_LINK_BYTES: usize = 256;
+/// The most bytes one flowchart arrow may have: its run (dots, dashes or equals) and its label.
+pub const MAX_ARROW_BYTES: usize = 256;
 
 const OVER_BYTES: &str = "the source is over 65536 bytes";
 const OVER_STATEMENTS: &str = "the source has over 2048 statements";
 const OVER_DEPTH: &str = "the source nests subgraphs or blocks over 32 deep";
 const OVER_SVG: &str = "the drawn diagram is over 4194304 bytes";
 const UNCLOSED: &str = "a subgraph is not closed with end";
-const OVER_LINK: &str = "the source has a link over 256 bytes";
+const OVER_ARROW: &str = "the source has an arrow over 256 bytes";
 /// The reason when the pinned crate panics on a source.
 const LIBRARY_FAILED: &str = "the drawing library failed on this source";
 /// The pinned crate's text when it detects no diagram type.
@@ -170,8 +170,8 @@ pub fn render(source: &str) -> Diagram {
     if m.unclosed {
         return invalid(UNCLOSED);
     }
-    if m.longest_link > MAX_LINK_BYTES {
-        return invalid(OVER_LINK);
+    if m.longest_arrow > MAX_ARROW_BYTES {
+        return invalid(OVER_ARROW);
     }
     let config = RenderConfig {
         svg_theme: Some(SvgThemeConfig {
@@ -355,12 +355,12 @@ struct Measure {
     depth: usize,
     /// A flowchart subgraph the pinned grammar attempts finds no `end`.
     unclosed: bool,
-    /// The longest flowchart link, in bytes.
-    longest_link: usize,
+    /// The longest flowchart arrow, in bytes.
+    longest_arrow: usize,
 }
 
 /// Counts the statements of `src` after front matter, its deepest nesting and, in a flowchart,
-/// whether a subgraph finds no `end` and its longest link. The other families' pinned parsers
+/// whether a subgraph finds no `end` and its longest arrow. The other families' pinned parsers
 /// read each line once, so an unclosed block is read once and costs nothing more.
 fn measure(src: &str, family: Family) -> Measure {
     let body = after_front_matter(src);
@@ -369,14 +369,14 @@ fn measure(src: &str, family: Family) -> Measure {
         statements,
         depth: 0,
         unclosed: false,
-        longest_link: 0,
+        longest_arrow: 0,
     };
     match family {
         Family::Flowchart => {
             let r = flowchart::read(src);
             m.depth = r.depth;
             m.unclosed = r.unclosed;
-            m.longest_link = r.longest_link;
+            m.longest_arrow = r.longest_arrow;
         }
         Family::Class => m.depth = class_depth(body),
         Family::State => m.depth = state_depth(body),
