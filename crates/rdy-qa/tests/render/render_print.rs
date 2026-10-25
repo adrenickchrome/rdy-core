@@ -663,20 +663,23 @@ fn reserved(r: &mut Rdy) -> Scope {
 /// title toolbar (Link, Copy ref, Copy), the Copy button on each block and section toolbar, the
 /// page's hidden Copy payload template and `assets/app.js` (which bundles `js/copy.js`) moved;
 /// their content rows keep their text (the gold1_ goldens).
+/// Re-taken for the final review's fix round 1 (M2): Cite skips a selection in the eyebrow, so
+/// only `js/copy.js` changed and only `assets/app.js` moved; with the old script the digests
+/// were the ones before.
 #[test]
 fn ec3_the_site_build_is_unchanged() {
     const BASE: [(&str, &str); 3] = [
         (
             "canon",
-            "16d32f24748ee5ccaf70113278b82e6cc3cfe432022ab7bed381eaf26e097fa0",
+            "fa77ed9448725329640a60ab642c473720320d790a54ae05f324d15c2c7b95fc",
         ),
         (
             "view:editing",
-            "c80f61e893b7b63c80846ca77b1ebbb5e60234e6ceeea57a39dc8aaf4e46c48d",
+            "cb5e57fdca94ae6e9f0773c0049ae5c109796e66b1ff2b673bf3005fea245642",
         ),
         (
             "view:reserved",
-            "550b80f242a4cb6049c796bf3d909413b20431fbd08bef595cdb0c868b7770ce",
+            "b7b7a2960a1f89eee12842598db77134494199b0e24109c0fa9c549232b6c957",
         ),
     ];
     // the ids the corpus's generated pages and the reserved docs draw come from a seeded stream
