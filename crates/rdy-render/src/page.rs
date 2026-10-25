@@ -55,7 +55,8 @@ pub struct Shared<'a> {
     /// type of the first block that named that file, filled as pages are built.
     pub used_blobs: RefCell<BTreeMap<String, (Hash, String)>>,
     /// Whether the pages draw their Mermaid diagrams: a site's do; the print shows each diagram as
-    /// its source and makes no file or warning of it.
+    /// its source and makes no file, inline copy or warning of it. The print's pages also have
+    /// no toolbar, so they build no Copy payload.
     pub draw_diagrams: bool,
     /// The diagrams the build's pages drew, and the warnings of those it could not draw, filled
     /// as the pages are built (one thread builds them, before their templates are rendered).
@@ -401,9 +402,11 @@ pub struct DiagramAssets {
 }
 
 /// What a diagram block is, before a page shows it: drawn, with its file's hash and the inline
-/// SVG of its place, or not drawn, with why when it is a Mermaid source.
+/// SVG of its place; drawn, for the print, which reads no inline copy; or not drawn, with why
+/// when it is a Mermaid source.
 enum DiagramShape {
     Drawn { hash: Hash, svg: String },
+    Drawable,
     Undrawn(Option<diagram::Diagram>),
 }
 
@@ -449,6 +452,8 @@ impl DiagramAssets {
 
     /// The inline copy of drawing `h` for its `place` on a page (its places counted from zero).
     fn inline(&self, h: &Hash, place: usize) -> Result<String, &'static str> {
+        #[cfg(test)]
+        tests::INLINES.set(tests::INLINES.get() + 1);
         let file = self.standalone.get(h).ok_or(diagram_svg::BAD_IDS)?;
         diagram_svg::inline(file, &h.to_string(), place)
     }
@@ -508,6 +513,9 @@ impl Shared<'_> {
         }
         let mut d = self.diagrams.borrow_mut();
         let failed = match d.draw(source) {
+            // the print shows a drawn diagram as its source: the drawing and its file classify
+            // it (ruling task-6), and no inline copy is made
+            Ok(_) if !self.draw_diagrams => return DiagramShape::Drawable,
             Ok(h) => {
                 let mut places = places.borrow_mut();
                 let place = places.entry(h).or_default();
@@ -540,7 +548,7 @@ impl Shared<'_> {
         places: &RefCell<BTreeMap<Hash, usize>>,
     ) -> DiagramView {
         match self.diagram_shape(b, source, places) {
-            DiagramShape::Drawn { .. } if !self.draw_diagrams => DiagramView::Source,
+            DiagramShape::Drawable => DiagramView::Source,
             DiagramShape::Drawn { hash, svg } => {
                 self.diagrams.borrow_mut().used.insert(hash);
                 DiagramView::Drawn {
@@ -974,19 +982,24 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
                 .folder
                 .as_ref()
                 .and_then(|f| f.description_html.as_deref());
-            (title_tools, copy_page) = page_copy(sh, f, &page_url, &title, lede, &mut []);
+            // the print reads no Copy (its pages have no toolbar)
+            if sh.draw_diagrams {
+                (title_tools, copy_page) = page_copy(sh, f, &page_url, &title, lede, &mut []);
+            }
         }
         Kind::Doc(id) => {
             let doc = sh.m.get(id).expect("a doc exists");
             let (doc_body, mut built) = doc_parts(sh, doc, &page_url, &title);
-            (title_tools, copy_page) = page_copy(
-                sh,
-                doc,
-                &page_url,
-                &title,
-                doc_body.lede.as_deref(),
-                &mut built,
-            );
+            if sh.draw_diagrams {
+                (title_tools, copy_page) = page_copy(
+                    sh,
+                    doc,
+                    &page_url,
+                    &title,
+                    doc_body.lede.as_deref(),
+                    &mut built,
+                );
+            }
             body.doc = Some(doc_body);
             items = built;
             let (prev, next) = site.prev_next(id);
@@ -1084,6 +1097,8 @@ fn page_copy(
     lede: Option<&str>,
     items: &mut [Item],
 ) -> (Option<TitleTools>, Option<String>) {
+    #[cfg(test)]
+    tests::COPIES.set(tests::COPIES.get() + 1);
     let mut payload = CopyPayload::default();
     payload.push_html(&format!("<h1>{}</h1>", html::escape(title)), page);
     if let Some(l) = lede {
@@ -1646,4 +1661,63 @@ fn questions_body(sh: &Shared, page: &str) -> QuestionsBody {
         }
     }
     QuestionsBody { groups }
+}
+
+#[cfg(test)]
+mod tests {
+    use rdy_engine::{Rdy, Scope, Session, WriteRequest};
+    use rdy_model::Role;
+    use serde_json::json;
+    use std::cell::Cell;
+
+    thread_local! {
+        /// The Copy payloads this thread built.
+        pub(super) static COPIES: Cell<u64> = const { Cell::new(0) };
+        /// The inline drawings this thread built.
+        pub(super) static INLINES: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// Final review M3: a print reads no Copy payload and no page's inline drawing, so it
+    /// builds neither. It still reads each diagram's shape, so the site and the print agree.
+    #[test]
+    fn dgm9_print_builds_no_copy_and_no_inline_drawing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut r = Rdy::init(dir.path(), "rdy-standard").expect("init");
+        let s = |role| Session::human("human:qa".into(), role).unwrap();
+        r.write(
+            &s(Role::Writer),
+            WriteRequest {
+                view: "w".into(),
+                ops: serde_json::from_value(json!([
+                    {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "f", "title": "Folder", "description": "Its words."}},
+                    {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"name": "d", "title": "Doc", "doc_type": "page"}},
+                    {"op": "create", "type": "prose", "parent": "$d", "body": "Words."},
+                    {"op": "create", "type": "diagram", "parent": "$d", "fields": {"lang": "mermaid", "alt": "Two boxes"}, "body": "graph TD\n  A --> B"},
+                    {"op": "create", "type": "diagram", "parent": "$d", "fields": {"lang": "mermaid", "alt": "Again"}, "body": "graph TD\n  A --> B"}
+                ]))
+                .unwrap(),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .expect("write");
+        let p = r
+            .propose(&s(Role::Writer), "w", "w", Some("test summary"))
+            .expect("propose");
+        r.land(&s(Role::Approver), &p.id).expect("land");
+        let st = r.read();
+        let counts = || (COPIES.get(), INLINES.get());
+        let before = counts();
+        let print = crate::print::build(&st, &Scope::Canon).expect("print");
+        assert!(!print.docs.is_empty());
+        assert_eq!(
+            counts(),
+            before,
+            "the print built no Copy and no inline drawing"
+        );
+        // the site builds both: one payload per doc or folder page, one inline per place
+        crate::build_site(&st, &Scope::Canon, crate::Mode::Static).expect("site");
+        let (copies, inlines) = counts();
+        assert_eq!((copies - before.0, inlines - before.1), (2, 2));
+    }
 }

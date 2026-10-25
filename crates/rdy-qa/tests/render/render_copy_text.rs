@@ -223,7 +223,7 @@ function El(tag, attrs) {
   this.parentNode = null; this.style = {};
 }
 function matchOne(e, sel) {
-  const m = /^([a-zA-Z]*)((?:\.[\w-]+|\[[^\]]+\])*)$/.exec(sel.trim());
+  const m = /^([a-zA-Z][a-zA-Z0-9]*)?((?:\.[\w-]+|\[[^\]]+\])*)$/.exec(sel.trim());
   if (!m) throw new Error('the harness does not know the selector ' + sel);
   if (m[1] && e.tagName !== m[1].toUpperCase()) return false;
   const parts = m[2].match(/\.[\w-]+|\[[^\]]+\]/g) || [];
@@ -239,6 +239,8 @@ El.prototype = {
   get children() { return this.nodes.filter((n) => n instanceof El); },
   get textContent() { return this.nodes.map((n) => (n instanceof El ? n.textContent : n)).join(''); },
   set textContent(v) { this.nodes = [String(v)]; },
+  get className() { return this.attrs.class || ''; },
+  set className(v) { this.attrs.class = String(v); },
   get nextElementSibling() { const s = this.parentNode ? this.parentNode.children : []; return s[s.indexOf(this) + 1] || null; },
   get previousElementSibling() { const s = this.parentNode ? this.parentNode.children : []; const i = s.indexOf(this); return i > 0 ? s[i - 1] : null; },
   get classList() {
@@ -335,9 +337,17 @@ for (const src of spec.scripts) {
     window, document, navigator, location, setTimeout, clearTimeout, fail, fail);
 }
 const settle = () => new Promise((r) => setImmediate(r));
+let selection = null;
+window.getSelection = () => selection || { rangeCount: 0, isCollapsed: true, toString: () => '', removeAllRanges() {}, addRange() {} };
 const h = {
   out: {}, log,
   buttons: (cls) => body.querySelectorAll('.' + cls),
+  q: (sel) => body.querySelector(sel),
+  // the reader selects `text` from `anchor` to `focus`: the page hears of the selection change
+  select(anchor, focus, text) {
+    selection = { rangeCount: 1, isCollapsed: false, anchorNode: anchor, focusNode: focus, toString: () => text };
+    (docL.selectionchange || []).forEach((f) => f({ type: 'selectionchange' }));
+  },
   async click(btn) {
     const ev = { type: 'click', target: btn, preventDefault() { throw new Error('preventDefault was called'); } };
     (docL.click || []).forEach((f) => f(ev));
@@ -667,6 +677,52 @@ fn dgm9_title_and_section_have_one_toolbar() {
     spec["html"] = json!([template_of(&page), head]);
     let v = run(spec);
     assert_eq!(v["link"], "http://h/area/guide.html");
+}
+
+/// Final review M2: the page title's header is a block, and Cite quotes a selection in it as the
+/// page's words. The eyebrow above the title names the folder, not the page, so a selection in
+/// it, or one that starts or ends there, offers no Cite; a selection in the title still does.
+#[test]
+fn dgm9_cite_skips_the_eyebrow() {
+    let f = fixture();
+    let out = f.site(&Scope::Canon);
+    let page = html(out.path(), GUIDE);
+    let head_at = page.find("<header class=\"page-head").unwrap();
+    let head = &page[head_at..head_at + page[head_at..].find("</header>").unwrap()];
+    assert!(head.contains("<p class=\"eyebrow\">"), "{head}");
+    if !node_or_skip("dgm9_cite_skips_the_eyebrow") {
+        return;
+    }
+    let mut spec = page_spec(
+        &page,
+        "http://h/area/guide.html",
+        r#"
+        const eyebrow = h.q('.eyebrow'), title = h.q('h1');
+        h.select(eyebrow, eyebrow, eyebrow.textContent);
+        h.out.eyebrow = h.buttons('cite').length;
+        h.select(eyebrow, title, eyebrow.textContent + ' Guide');
+        h.out.into_title = h.buttons('cite').length;
+        h.select(title, eyebrow, 'Guide ' + eyebrow.textContent);
+        h.out.from_title = h.buttons('cite').length;
+        h.select(title, title, 'Guide page');
+        h.out.title = h.buttons('cite').length;
+        h.select(eyebrow, eyebrow, eyebrow.textContent);
+        h.out.again = h.buttons('cite').length;
+        "#,
+    );
+    spec["html"] = json!([template_of(&page), head]);
+    let v = run(spec);
+    assert_eq!(
+        (
+            &v["eyebrow"],
+            &v["into_title"],
+            &v["from_title"],
+            &v["title"],
+            &v["again"]
+        ),
+        (&json!(0), &json!(0), &json!(0), &json!(1), &json!(0)),
+        "{v}"
+    );
 }
 
 /// A link is the absolute URL of its page and the anchor the page gives the target, resolved

@@ -53,6 +53,11 @@
     return next && next.hasAttribute("data-rdy-block") ? next : null;
   }
 
+  function inEyebrow(node) {
+    var el = elementOf(node);
+    return !!(el && el.closest(".eyebrow"));
+  }
+
   function toolbarOf(block) {
     var inside = block.querySelector(".tools");
     if (inside) return inside;
@@ -126,6 +131,11 @@
   function showCite() {
     var sel = window.getSelection ? window.getSelection() : null;
     if (!sel || sel.rangeCount === 0 || sel.isCollapsed || !sel.toString().trim()) {
+      removeCite();
+      return;
+    }
+    // the eyebrow above a page's title names its folder, not the page: no words of it are cited
+    if (inEyebrow(sel.anchorNode) || inEyebrow(sel.focusNode)) {
       removeCite();
       return;
     }

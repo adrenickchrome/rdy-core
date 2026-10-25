@@ -274,6 +274,62 @@ fn dgm8_sidebar_works_without_script() {
     assert!(!page.contains("rdy:sidebar"), "no inline state script");
 }
 
+/// Final review M4: a folder off the path (here `Big`, inside the top-level group `Area`) holds
+/// its first level only, cut to 50 entries from its start, then a "+N more" row that leads to
+/// the folder's page. A folder among them is a plain page link, and nothing it holds is listed.
+#[test]
+fn dgm8_an_off_path_folder_lists_at_most_fifty_children() {
+    let _clock = fixture_clock();
+    let (_d, mut r) = tiny();
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$intro", "fields": {"name": "intro", "title": "Intro", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "section", "parent": "$intro", "fields": {"title": "Summary"}}),
+        json!({"op": "create", "type": "folder", "id": "$area", "fields": {"name": "area", "title": "Area"}}),
+        json!({"op": "create", "type": "folder", "id": "$big", "parent": "$area", "fields": {"name": "big", "title": "Big"}}),
+        json!({"op": "create", "type": "folder", "id": "$inner", "parent": "$big", "fields": {"name": "inner", "title": "Inner"}}),
+        json!({"op": "create", "type": "doc", "id": "$inside", "parent": "$inner", "fields": {"name": "inside", "title": "Inside", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "section", "parent": "$inside", "fields": {"title": "Summary"}}),
+    ];
+    for i in 0..52 {
+        let id = format!("$d{i}");
+        ops.push(json!({"op": "create", "type": "doc", "id": id, "parent": "$big", "fields": {"name": format!("d{i:02}"), "title": format!("Child {i:02}"), "doc_type": "overview"}}));
+        ops.push(json!({"op": "create", "type": "section", "parent": id, "fields": {"title": "Summary"}}));
+    }
+    write(&mut r, "work", Value::Array(ops)).expect("the big folder");
+    land(&mut r, "work").expect("land");
+    let out = tempfile::tempdir().unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
+    let nav = nav_of(&html(out.path(), "intro.html"));
+    // the folder is closed, and its list is its first 50 children, then the more row
+    let fold = "<a class=\"nav-go\" href=\"area/big/index.html\" aria-label=\"Go to Big\">\u{2197}</a><details class=\"nav-fold\"><summary>Big</summary><ul class=\"nav-sub\">";
+    let at = nav.find(fold).unwrap_or_else(|| panic!("{nav}"));
+    let list = &nav[at + fold.len()..];
+    let list = &list[..list.find("</ul>").expect("the list ends")];
+    assert_eq!(list.matches("<li").count(), 51, "{list}");
+    assert!(
+        list.ends_with("<li class=\"more\"><a href=\"area/big/index.html\">+3 more</a></li>"),
+        "{list}"
+    );
+    // the folder among them is a page link, not a disclosure, and what it holds is not listed
+    assert!(
+        list.starts_with(
+            "<li class=\"nav-item\"><a href=\"area/big/inner/index.html\">Inner</a></li>"
+        ),
+        "{list}"
+    );
+    assert!(
+        !list.contains("<details") && !list.contains("nav-go"),
+        "{list}"
+    );
+    assert!(!nav.contains(">Inside</a>"), "{nav}");
+    for i in 0..49 {
+        assert!(list.contains(&format!(">Child {i:02}</a>")), "{i}: {list}");
+    }
+    for i in 49..52 {
+        assert!(!nav.contains(&format!(">Child {i:02}</a>")), "{i}: {nav}");
+    }
+}
+
 // ---- the script, in node ----------------------------------------------------------------
 
 /// A just-enough DOM for `sidebar.js`: the sidebar's own markup parsed into elements, a
