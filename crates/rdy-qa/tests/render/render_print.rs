@@ -650,20 +650,23 @@ fn reserved(r: &mut Rdy) -> Scope {
 /// of the pages that have one, their removed library script tag, the new `assets/diagrams/` files,
 /// `assets/js/mermaid.min.js` (gone), the diagram rules of `assets/site.css`, `assets/app.js`
 /// (without `js/mermaid-init.js`) and an `open full size` line per drawing in `llms-full.txt` moved.
+/// Re-taken for Task 6 fix round 1 (ruling task-6): the open link is a reader control, so each
+/// drawing's `open full size` line left `llms-full.txt`; every other file and the warnings kept
+/// their bytes.
 #[test]
 fn ec3_the_site_build_is_unchanged() {
     const BASE: [(&str, &str); 3] = [
         (
             "canon",
-            "a75099e44625fe4568b6b29e0a77c29e0d4e7236fa6beb6ebd9aee3db8a718e4",
+            "2fb4e1af20874e879d3d17440abeb2667e3d393a2247b19fdc48b5bdff2d5c3b",
         ),
         (
             "view:editing",
-            "ef3f931395c7f5fc23ff715622dcd2f1af8956d74f204d2c7fd324ba500a2e65",
+            "bfa689593ca95553b5b597449cc93417a1c523a9ed7ee8dbf8a63a9be28fba3c",
         ),
         (
             "view:reserved",
-            "d5955717afd1bcbe0c93275856e6abd88b88d16f638a489733a24c11fbd41380",
+            "696c71b994ec406ae5a54321a705b58902ea581936ffb634ccad5e30772c06da",
         ),
     ];
     // the ids the corpus's generated pages and the reserved docs draw come from a seeded stream

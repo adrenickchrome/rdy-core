@@ -205,21 +205,24 @@ fn scopes() -> Vec<(&'static str, tempfile::TempDir, Rdy, Scope)> {
 /// of the pages that have one, their removed library script tag, the new `assets/diagrams/` files,
 /// `assets/js/mermaid.min.js` (gone), the diagram rules of `assets/site.css`, `assets/app.js`
 /// (without `js/mermaid-init.js`) and an `open full size` line per drawing in `llms-full.txt` moved.
+/// Re-taken for Task 6 fix round 1 (ruling task-6): the open link is a reader control, so each
+/// drawing's `open full size` line left `llms-full.txt`; every other file and the warnings kept
+/// their bytes.
 const SITE_DIGESTS: [(&str, &str, &str); 4] = [
     (
         "canon",
-        "1c628443ffd31522d2c1dbdd52abd24a1cd69a85ca313a3478caa8379ed95dd6",
-        "df0b2f3f465e66ac592d97a70031e62386264d3aa948237f4d011d3884f9677e",
+        "392175367bef8b3bda58d0bb6e3ecd7e611a08bc910586062d974f2a464e9c0d",
+        "a2dab6a80cd68cf2afd060b17a66010f80241eb6591cb7505f644ccd2f7bf4b4",
     ),
     (
         "tag",
-        "264e043f0f9334acedbb582548255a9d1cfd8d6898e013b713098267e156942c",
-        "35ced4bb5f94e33e5e870a03440839d33f8103179a41ecfbaecc748eb119f8e3",
+        "a61c667858aa42ef3bd56c7fe5dc3a4854d43a939700f67990f4d6eeeffbcffb",
+        "4a4ba2d67d187857aa4959b7b79f984d96dfa3a51ca0c62957e5a6f69065e10c",
     ),
     (
         "view",
-        "942d79cb3f7f9df74687df26bd44756fe67365b974954dd940f33b305c379813",
-        "de0f5c9b0b5080c0fe8a56287582c8a97389b767882f60681c760c1b6db5135c",
+        "6b5b955f7428772e2d50db77c272876f4ae65784734d8f8fd00bce9436bf76e2",
+        "c53a284ae01a8c2c06ce216d125dd236c1bc77f42dbf077b1486819934252ac8",
     ),
     (
         "proposal",
