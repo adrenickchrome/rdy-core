@@ -1972,6 +1972,7 @@ dependencies = [
  "ed25519-dalek",
  "imbl",
  "log",
+ "postcard",
  "proptest",
  "rcgen",
  "rdy-engine",
