@@ -1,6 +1,8 @@
 //! dgm2 (D-FY4VF, D-P687F; n-62GWK): a build reads each figure blob's state from its metadata and
 //! reads bytes only for the blobs its selected output shows. A removed figure keeps the existing
 //! notice; a named profile never fetches the bytes of a figure outside its selection.
+// the shared fixture is also a module of `render_publication_site` (pub6), which keeps it private
+#[allow(clippy::duplicate_mod)]
 #[path = "../../../rdy-store/tests/support/redaction.rs"]
 mod redaction_fixture;
 
