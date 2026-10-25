@@ -359,6 +359,9 @@ fn ok5_dry_run_writes_nothing() {
     assert_eq!(tree(base.path()), before);
 }
 
+/// A frame the upgrade appended: its kind, and a ref update's name and value.
+type AddedFrame = (u8, Option<(String, Vec<u8>)>);
+
 #[test]
 fn ok5_upgrade_is_one_batch_and_keeps_all_hashes() {
     let _f = known();
@@ -415,7 +418,7 @@ fn ok5_upgrade_is_one_batch_and_keeps_all_hashes() {
     // one batch: the old frames keep their bytes, and only the two refs and a marker follow
     keeps_bytes(&old_segments, &segments(&dir));
     assert_eq!(new_frames[..old_frames.len()], old_frames[..]);
-    let added: Vec<(u8, Option<(String, Vec<u8>)>)> = new_frames[old_frames.len()..]
+    let added: Vec<AddedFrame> = new_frames[old_frames.len()..]
         .iter()
         .map(|(k, _, p)| {
             let u = (*k == kinds::REF_UPDATE)
