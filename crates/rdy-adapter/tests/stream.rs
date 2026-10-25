@@ -465,7 +465,7 @@ fn with_payload(bytes: &[u8], change: Hash, payload: &[u8]) -> Vec<u8> {
             found = true;
             w.record(&StreamRecord::Present {
                 // the record's own encoding: the payload keeps its version prefix
-                encoding: r.raw_kind() >> 7,
+                encoding: u16::from(r.raw_kind() >> 7),
                 key: ObjectKey {
                     kind: r.key().kind,
                     hash: Hash::of(payload),

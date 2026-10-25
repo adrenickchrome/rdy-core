@@ -2148,3 +2148,494 @@ fn sign_relay_tag(r: &mut Rdy, t: Hash) {
     );
     put_signed(r, &g);
 }
+
+// ---------------------------------------------------------------------------------------------
+// The carried records (object encoding 1): the shapes that no product path writes yet, built
+// through the store's own writers and carrier APIs. Shared by the e1 fixture stages
+// (`chain_fixture`), in three stages: [`add_carried_fixture_records`] before a chain's first
+// boundary, [`dispute_carried_fixture`] in its first increment and
+// [`resolve_carried_fixture`] in its second.
+
+/// The doc and view of the carried records' blocks.
+pub const CARRIED_DOC: &str = "e1-carried";
+/// The view of the change a replay copies.
+pub const CARRIED_SOURCE_VIEW: &str = "e1-replay-source";
+/// The view of the replay, whose landing is a policy landing.
+pub const CARRIED_REPLAY_VIEW: &str = "e1-replay";
+/// The view of the correction a resolution names.
+pub const CARRIED_CORRECTION_VIEW: &str = "e1-correction";
+
+/// What the carried stages wrote, for the later stages.
+pub struct CarriedFixture {
+    /// The claim the replay edits and the check names.
+    pub claim: BlockId,
+    pub policy: rdy_model::assessment::PolicyRef,
+    /// The replayed change and its proposal.
+    pub replay: Hash,
+    pub proposal: Hash,
+    /// The policy landing of the replay.
+    pub landing: Hash,
+    pub assessment: Hash,
+    pub needs_person: Hash,
+    pub request: Hash,
+    pub case: Hash,
+    /// The three disputes (to be upheld, dismissed and withdrawn) and their landings.
+    pub disputes: Vec<(Hash, Hash)>,
+    /// The Pass, Concern and Fail check reviews.
+    pub verdicts: Vec<Hash>,
+}
+
+fn carried_prov(actor: &str, role: Role, at_ms: i64) -> Provenance {
+    Provenance {
+        actor: actor.into(),
+        run: Some("run-e1".into()),
+        role,
+        at_ms,
+    }
+}
+
+fn carried_change(
+    view: &str,
+    ops: Vec<rdy_model::Op>,
+    links: rdy_model::ChangeLinks,
+) -> rdy_model::Change {
+    rdy_model::Change {
+        view: view.into(),
+        ops,
+        deps: vec![],
+        provenance: carried_prov("agent:e1-writer", Role::Writer, CARRIED_AT_MS),
+        justification: None,
+        message: "an edit of the carried claim".into(),
+        links,
+        read_identity: None,
+    }
+}
+
+/// The time of every carried record's provenance.
+pub const CARRIED_AT_MS: i64 = 1_760_000_100_000;
+
+/// An assessment of `proposal` on `base`, every list populated: its policy accepted by `policy`
+/// under a named rule, or with none a NeedsPerson verdict; a tension dismissed by review
+/// `dismissal`; nonzero omitted counts.
+pub fn carried_assessment(
+    proposal: Hash,
+    base: Option<Hash>,
+    policy: Option<rdy_model::assessment::PolicyRef>,
+    dismissal: Hash,
+    blocks: Vec<BlockId>,
+) -> rdy_model::assessment::Assessment {
+    use rdy_model::assessment::*;
+    let verdict = match &policy {
+        Some(_) => PolicyVerdict::Accepts {
+            rule: "maintainers-approve".into(),
+        },
+        None => PolicyVerdict::NeedsPerson {
+            role: Some("maintainer".into()),
+            reasons: vec!["no authority policy is set".into()],
+        },
+    };
+    let scores = AssessmentScores {
+        overall: 90,
+        grounded: 91,
+        consistent: 92,
+        current: 93,
+        connected: 94,
+        complete: 95,
+        governed: 96,
+    };
+    let issue = AssessmentIssue {
+        block: blocks[0].clone(),
+        dimension: "grounded".into(),
+        code: "untied_content".into(),
+        subject: Some("the edited claim".into()),
+        fix: "tie the claim to a decision".into(),
+        dismissal: Some(dismissal),
+    };
+    Assessment {
+        proposal,
+        base,
+        method: 1,
+        pack: AssessmentPack {
+            name: "rdy-qa".into(),
+            version: "1.0.0".into(),
+            digest: Hash::of(b"e1 pack digest"),
+        },
+        config: Hash::of(b"e1 config"),
+        policy: Some(AssessedPolicy { policy, verdict }),
+        facts: AssessmentFacts {
+            changes: 1,
+            consequences: 2,
+            plan: AssessmentPlanCounts {
+                open: 1,
+                closed: 2,
+                deferred: 3,
+                by_kind: vec![(
+                    "tension".into(),
+                    AssessmentCounts {
+                        open: 1,
+                        closed: 0,
+                        deferred: 0,
+                    },
+                )],
+            },
+            supersedes: vec![],
+            reaffirms: vec![],
+            reversibility: vec![],
+            exceptions: vec![AssessmentException {
+                kind: AssessmentExceptionKind::OneWay,
+                reference: blocks[0].to_string(),
+            }],
+        },
+        tensions: vec![AssessmentTension {
+            id: Hash::of(b"e1 tension id"),
+            kind: "edit_collision".into(),
+            severity: AssessmentSeverity::Blocking,
+            status: AssessmentTensionStatus::Dismissed,
+            answer: None,
+            dismissal: Some(dismissal),
+            summary: "two edits of one claim".into(),
+            blocks: blocks.clone(),
+            vkey: Hash::of(b"e1 tension vkey"),
+        }],
+        tensions_omitted: 7,
+        suspects: vec![],
+        suspects_omitted: 5,
+        coverage: AssessmentCoverage {
+            pages: vec![],
+            corpus: AssessmentScoreChange {
+                before: scores.clone(),
+                after: scores,
+            },
+        },
+        confidence: AssessmentConfidence {
+            level: AssessmentLevel::Medium,
+            reasons: vec![issue.clone()],
+        },
+        reach: blocks.clone(),
+        card: AssessmentCard {
+            hash: Hash::of(b"e1 card"),
+            facts: vec!["one claim is edited".into()],
+        },
+        scope: AssessmentScope { proposal, blocks },
+        issues: vec![issue],
+    }
+}
+
+/// A person's dismissal of a tension on `blocks`.
+pub fn carried_tension_review(blocks: Vec<BlockId>) -> Review {
+    Review {
+        subject: ReviewSubject::Tension {
+            id: Hash::of(b"e1 tension id"),
+            vkey: Hash::of(b"e1 tension vkey"),
+            kind: "edit_collision".into(),
+            severity: "blocking".into(),
+            sides: vec!["a".into(), "b".into()],
+            blocks,
+        },
+        case_hash: None,
+        verdict: Verdict::Dismiss,
+        reason: "the two edits agree".into(),
+        citations: vec![],
+        provenance: carried_prov("human:qa-e1", Role::Reviewer, CARRIED_AT_MS),
+    }
+}
+
+/// A check request of `change` and `version` on `on`, every field populated.
+pub fn carried_check_request(
+    change: Hash,
+    version: Hash,
+    on: &BlockId,
+) -> rdy_model::check_request::CheckRequest {
+    use rdy_model::check_request::*;
+    CheckRequest {
+        check: "consistency".into(),
+        subject: CheckSubject {
+            blocks: vec![on.clone()],
+            change: Some(change),
+            version: Some(version),
+            code: Some(CheckCode {
+                repo: "app".into(),
+                from: "a".repeat(40),
+                to: "b".repeat(40),
+            }),
+        },
+        scope: "docs".into(),
+        case_hash: Hash::of(b"e1 check case"),
+        mode: CheckMode::Independent,
+        reason: Some("a second look at the replay".into()),
+        requested_by: carried_prov("agent:e1-writer", Role::Writer, CARRIED_AT_MS),
+        relayed_by: Some(ActorRun {
+            actor: "agent:e1-relay".into(),
+            run: None,
+        }),
+        relay: Some(RelayEvidence {
+            quoted: "check the replay".into(),
+            session_ref: "sess-e1".into(),
+            question: None,
+        }),
+    }
+}
+
+/// A check review of `request` with `verdict`: a Pass has no reason and no citation.
+pub fn carried_check_review(request: Hash, case: Hash, verdict: Verdict, on: &BlockId) -> Review {
+    let (reason, citations) = match verdict {
+        Verdict::Pass => (String::new(), vec![]),
+        _ => (
+            format!("{verdict:?} found in the replay"),
+            vec![Citation {
+                block: on.clone(),
+                note: "the edited claim".into(),
+            }],
+        ),
+    };
+    Review {
+        subject: ReviewSubject::Check { request },
+        case_hash: Some(case),
+        verdict,
+        reason,
+        citations,
+        provenance: carried_prov("agent:e1-checker", Role::Reviewer, CARRIED_AT_MS),
+    }
+}
+
+/// A person's answer `act` of `item` with `targets`.
+pub fn carried_answer(item: String, act: AnswerAct, targets: Vec<Hash>) -> Answer {
+    Answer {
+        item,
+        act,
+        option: None,
+        label: None,
+        options: vec![],
+        card_hash: None,
+        targets,
+        person: carried_prov(PERSON, Role::Approver, CARRIED_AT_MS),
+        relayed_by: None,
+        relay_evidence: None,
+        evidence_kind: None,
+        note: None,
+    }
+}
+
+/// The edit of block `id` as canon reads it, with `body`: the update op.
+fn edit_op(r: &Rdy, id: &BlockId, body: &str) -> rdy_model::Op {
+    let mut b = r.read().block(&Scope::Canon, id).unwrap();
+    let base = b.version_hash();
+    b.read_identity = None;
+    b.body = body.into();
+    rdy_model::Op::Update { base, block: b }
+}
+
+/// The first carried stage: a policy block and a claim, landed; a change of the claim and its
+/// replay (with `replayed_from` and `briefing`); the replay's ASSESSMENT under the policy (an
+/// Accepts verdict with a rule) and a NeedsPerson one with no policy; the replay's policy
+/// landing, which names the first assessment and the policy; and a CHECK_REQUEST of the replay
+/// with its `check/` ref.
+pub fn add_carried_fixture_records(r: &mut Rdy) -> CarriedFixture {
+    let w = write(r, CARRIED_DOC, json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": CARRIED_DOC, "title": CARRIED_DOC, "doc_type": "page"}},
+        {"op": "create", "type": "prose", "id": "$p", "parent": "$d", "body": "The e1 authority policy: maintainers approve."},
+        {"op": "create", "type": "prose", "id": "$c", "parent": "$d", "after": "$p", "body": "The carried claim."}
+    ]))
+    .unwrap();
+    land(r, CARRIED_DOC).unwrap();
+    r.seal_open().unwrap();
+    let (policy_id, claim) = (created(&w, "$p"), created(&w, "$c"));
+    let policy = rdy_model::assessment::PolicyRef {
+        version: r
+            .read()
+            .block(&Scope::Canon, &policy_id)
+            .unwrap()
+            .version_hash(),
+        block: policy_id,
+    };
+    let base = r.read().canon_head();
+    // the change a replay copies, and the replay
+    let op = edit_op(r, &claim, "The carried claim, edited by a replay.");
+    let source = r
+        .store_mut()
+        .commit_to_view(
+            CARRIED_SOURCE_VIEW,
+            carried_change(CARRIED_SOURCE_VIEW, vec![op.clone()], Default::default()),
+        )
+        .unwrap();
+    let links = rdy_model::ChangeLinks {
+        replayed_from: Some(source),
+        briefing: Some(Hash::of(b"e1 briefing token")),
+        ..Default::default()
+    };
+    let replay = r
+        .store_mut()
+        .commit_to_view(
+            CARRIED_REPLAY_VIEW,
+            carried_change(CARRIED_REPLAY_VIEW, vec![op], links),
+        )
+        .unwrap();
+    let proposal = r
+        .store_mut()
+        .propose(
+            CARRIED_REPLAY_VIEW,
+            "a replayed edit",
+            carried_prov("agent:e1-writer", Role::Writer, CARRIED_AT_MS),
+        )
+        .unwrap();
+    r.invalidate();
+    r.seal_open().unwrap();
+    // the assessments and the policy landing
+    let dismissal = r
+        .store_mut()
+        .put(kinds::REVIEW, &carried_tension_review(vec![claim.clone()]))
+        .unwrap();
+    let a = carried_assessment(
+        proposal,
+        base,
+        Some(policy.clone()),
+        dismissal,
+        vec![claim.clone()],
+    );
+    let assessment = r.store_mut().put(kinds::ASSESSMENT, &a).unwrap();
+    let needs = carried_assessment(proposal, None, None, dismissal, vec![claim.clone()]);
+    let needs_person = r.store_mut().put(kinds::ASSESSMENT, &needs).unwrap();
+    let named = policy.clone();
+    let req = rdy_store::LandRequest {
+        proposal,
+        accept: None,
+        approver: carried_prov(PERSON, Role::Approver, CARRIED_AT_MS),
+        alt: None,
+        relay: None,
+        evidence: None,
+    };
+    let prepared = r
+        .store()
+        .prepare_land_altered_for_tests(req, &move |l| {
+            l.assessment = Some(assessment);
+            l.policy = Some(named.clone());
+            l.assurance = Assurance::Policy;
+        })
+        .unwrap();
+    let landing = r.store_mut().commit_land(prepared, &[]).unwrap().landing;
+    r.invalidate();
+    r.seal_open().unwrap();
+    // the check request of the replay and its ref
+    let q = carried_check_request(replay, proposal, &claim);
+    let request = r.store_mut().put(kinds::CHECK_REQUEST, &q).unwrap();
+    r.store_mut()
+        .set_refs(vec![(
+            format!("{}{request}", rdy_store::carried_records::CHECK_REF_PREFIX),
+            request.0.to_vec(),
+        )])
+        .unwrap();
+    r.invalidate();
+    r.seal_open().unwrap();
+    CarriedFixture {
+        claim,
+        policy,
+        replay,
+        proposal,
+        landing,
+        assessment,
+        needs_person,
+        request,
+        case: q.case_hash,
+        disputes: vec![],
+        verdicts: vec![],
+    }
+}
+
+/// The second carried stage: a dispute of each of `landings` (the policy landing first), and a
+/// Check review of the request for each new verdict (Pass, Concern, Fail).
+pub fn dispute_carried_fixture(r: &mut Rdy, fx: &mut CarriedFixture, landings: [Hash; 3]) {
+    for (i, l) in landings.into_iter().enumerate() {
+        let d = rdy_model::dispute::Dispute {
+            landing: l,
+            opened_by: carried_prov(PERSON, Role::Approver, CARRIED_AT_MS),
+            reason: format!("dispute {i}: the landing is wrong"),
+            at_ms: CARRIED_AT_MS + i as i64,
+        };
+        let h = r.store_mut().put(kinds::DISPUTE, &d).unwrap();
+        fx.disputes.push((h, l));
+    }
+    fx.verdicts = [Verdict::Pass, Verdict::Concern, Verdict::Fail]
+        .into_iter()
+        .map(|v| {
+            r.store_mut()
+                .put(
+                    kinds::REVIEW,
+                    &carried_check_review(fx.request, fx.case, v, &fx.claim),
+                )
+                .unwrap()
+        })
+        .collect();
+    r.invalidate();
+    r.seal_open().unwrap();
+}
+
+/// The third carried stage: a correction of the claim, landed; the resolutions of the three
+/// disputes (Upheld with the correction, Dismissed, Withdrawn); a Dispute, a ResolveDispute and
+/// an AcceptVerdict answer (of the Concern review). Returns the correction's landing.
+pub fn resolve_carried_fixture(r: &mut Rdy, fx: &CarriedFixture) -> Hash {
+    use rdy_model::dispute::{DisputeOutcome, DisputeResolution};
+    let op = edit_op(r, &fx.claim, "The carried claim, corrected.");
+    r.store_mut()
+        .commit_to_view(
+            CARRIED_CORRECTION_VIEW,
+            carried_change(CARRIED_CORRECTION_VIEW, vec![op], Default::default()),
+        )
+        .unwrap();
+    let v = r
+        .store_mut()
+        .propose(
+            CARRIED_CORRECTION_VIEW,
+            "a correction",
+            carried_prov("agent:e1-writer", Role::Writer, CARRIED_AT_MS),
+        )
+        .unwrap();
+    let correction = r
+        .store_mut()
+        .land(&v, carried_prov(PERSON, Role::Approver, CARRIED_AT_MS))
+        .unwrap();
+    r.invalidate();
+    r.seal_open().unwrap();
+    let outcomes = [
+        (DisputeOutcome::Upheld, Some(correction)),
+        (DisputeOutcome::Dismissed, None),
+        (DisputeOutcome::Withdrawn, None),
+    ];
+    let mut resolutions = vec![];
+    for ((d, _), (outcome, correction)) in fx.disputes.iter().zip(outcomes) {
+        let res = DisputeResolution {
+            dispute: *d,
+            outcome,
+            by: carried_prov(PERSON, Role::Approver, CARRIED_AT_MS),
+            correction,
+        };
+        resolutions.push(r.store_mut().put(kinds::DISPUTE_RESOLUTION, &res).unwrap());
+    }
+    let (d, l) = fx.disputes[0];
+    let p = rdy_store::carried_records::DISPUTE_PREFIX;
+    r.store_mut()
+        .put_answer(&carried_answer(
+            format!("{p}{l}"),
+            AnswerAct::Dispute,
+            vec![d],
+        ))
+        .unwrap();
+    let p = rdy_store::carried_records::RESOLVE_PREFIX;
+    r.store_mut()
+        .put_answer(&carried_answer(
+            format!("{p}{d}"),
+            AnswerAct::ResolveDispute,
+            vec![resolutions[0]],
+        ))
+        .unwrap();
+    let p = rdy_store::carried_records::VERDICT_PREFIX;
+    r.store_mut()
+        .put_answer(&carried_answer(
+            format!("{p}{}", fx.verdicts[1]),
+            AnswerAct::AcceptVerdict,
+            vec![],
+        ))
+        .unwrap();
+    r.invalidate();
+    r.seal_open().unwrap();
+    correction
+}

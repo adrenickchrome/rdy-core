@@ -1,26 +1,34 @@
-//! ok1: the complete fixture set of the written wire format (D-69AY3: "every later rdy reads every
-//! dump format that rdy has released"; D-WWAK7: each object records its encoding version, and
-//! feature compatibility replaces the format number; D-F0904). The set `v4-f1-e0` holds dump
-//! format 4 and sync batch format 2 of a feature store of manifest grammar 1, with no feature and
-//! every kind's latest encoding 0. The stem names the set; it is no store format number. Write it
-//! once: never rewrite it, and never regenerate it to fix a later reader.
+//! ok1, ok4: the complete fixture sets of the written wire formats (D-69AY3: "every later rdy
+//! reads every dump format that rdy has released"; D-WWAK7: each object records its encoding
+//! version, and feature compatibility replaces the format number; D-F0904). Each set holds dump
+//! format 4 and sync batch format 2 of a feature store of manifest grammar 1. The stem names the
+//! set; it is no store format number. Write a set once: never rewrite it, and never regenerate it
+//! to fix a later reader.
 //!
-//! The members follow the `(3, 18)` set (`io_dump_fixture_s18`), built by the same shared
-//! builders through their current stage selector (`chain_fixture::project_chain_current`,
-//! `holder_chain_current`; the standalone builders are shared):
+//! - `v4-f1-e0` and `v2-f1-e0` (ok1): no feature, every kind's latest encoding 0. They follow the
+//!   `(3, 18)` set (`io_dump_fixture_s18`), built by the shared builders' store format 18 stages.
+//! - `v4-f1-e1` and `v2-f1-e1` (ok4): object encoding 1. CHANGE, LANDING and REDACTION_RESIDUE
+//!   are encoding 1, and kinds 25 to 28 are new at encoding 1. The project holds a load of the
+//!   released `(3, 18)` chain, so its old changes, landings and residues stay encoding 0; the
+//!   carried records follow (`chain_fixture`, the e1 sequence). Every manifest holds the seven
+//!   registered features, each through its first use.
 //!
-//! - `v4-f1-e0-chain-full`, `-chain-1` and `-chain-2` are a full dump and two increments of one
-//!   project, and `v4-f1-e0` its standalone full fixture;
-//! - `v4-f1-e0-holder-chain-*` and `v4-f1-e0-holder` are the same for a holder;
-//! - `v2-f1-e0.rdysync` is one sync batch, the history of the holder's relayed tag
-//!   (`io_sync_fixture::SYNC_TAG`), exported from the standalone holder.
+//! The members of each set are built by the shared builders through their stage selector of
+//! that time (`chain_fixture::project_chain_current`, `holder_chain_current`; the standalone
+//! builders are shared):
+//!
+//! - `-chain-full`, `-chain-1` and `-chain-2` are a full dump and two increments of one project,
+//!   and the bare stem its standalone full fixture;
+//! - `-holder-chain-*` and `-holder` are the same for a holder;
+//! - the `.rdysync` member is one sync batch, the history of one holder tag, exported from the
+//!   standalone holder.
 //!
 //! Every expect file pins what a load of its files must give, as the `(3, 18)` set pins it, and
 //! the formats the set holds (`chain_fixture::current_formats`): the dump and sync formats, the
-//! feature manifest and the latest-encoding map. A load of a dump of the current format appends
-//! no batch of its own. A future dump format, newly registered feature or new latest encoding
-//! needs a new complete set in its own task; [`ok1_written_wire_format_has_a_complete_fixture_set`]
-//! refuses a written format without one.
+//! feature manifest a new store writes and the latest-encoding map. A load of a dump of the
+//! current format appends no batch of its own. A future dump format, newly registered feature or
+//! new latest encoding needs a new complete set in its own task;
+//! [`ok1_written_wire_format_has_a_complete_fixture_set`] refuses a written format without one.
 use crate::io_dump_fixture_s15::{
     RELEASED, RELEASED_CHAINS, first_start_logs_moves, fixture, without_moves,
 };
@@ -35,7 +43,8 @@ use rdy_store::dump::{
     DUMP_FORMAT, DumpBatch, DumpItem, DumpReader, DumpStore, DumpWriter, ENCODED_DROPPED_LEN,
     Frame, READS, rec,
 };
-use rdy_store::format::baseline_features;
+use rdy_store::format::{StoreFeatures, baseline_features, registered_features};
+use rdy_store::kinds;
 use rdy_store::segment::Location;
 use rdy_store::sync_stream::STREAM_FORMAT;
 use serde_json::{Value, json};
@@ -122,20 +131,119 @@ const SYNC_MEMBERS: [(&str, &str); 2] = [
     ),
 ];
 
-/// A complete fixture set of a written wire format: its dump members, its sync members, and the
-/// expect file that records the formats it holds.
+const E1_FULL: &str = "v4-f1-e1.rdydump";
+const E1_FULL_EXPECT: &str = "v4-f1-e1.expect.json";
+const E1_CHAIN_FULL: &str = "v4-f1-e1-chain-full.rdydump";
+const E1_CHAIN_1: &str = "v4-f1-e1-chain-1.rdydump";
+const E1_CHAIN_2: &str = "v4-f1-e1-chain-2.rdydump";
+const E1_CHAIN_EXPECT: &str = "v4-f1-e1-chain.expect.json";
+const E1_HOLDER: &str = "v4-f1-e1-holder.rdydump";
+const E1_HOLDER_EXPECT: &str = "v4-f1-e1-holder.expect.json";
+const E1_HOLDER_CHAIN_FULL: &str = "v4-f1-e1-holder-chain-full.rdydump";
+const E1_HOLDER_CHAIN_1: &str = "v4-f1-e1-holder-chain-1.rdydump";
+const E1_HOLDER_CHAIN_2: &str = "v4-f1-e1-holder-chain-2.rdydump";
+const E1_HOLDER_CHAIN_EXPECT: &str = "v4-f1-e1-holder-chain.expect.json";
+const E1_SYNC: &str = "v2-f1-e1.rdysync";
+const E1_SYNC_EXPECT: &str = "v2-f1-e1.expect.json";
+
+/// Each dump member of the set `v4-f1-e1` and its blake3, set when it was written. A change here
+/// needs a founder decision.
+const E1_MEMBERS: [(&str, &str); 12] = [
+    (E1_FULL, "E1_FULL_DIGEST"),
+    (E1_FULL_EXPECT, "E1_FULL_EXPECT_DIGEST"),
+    (E1_CHAIN_FULL, "E1_CHAIN_FULL_DIGEST"),
+    (E1_CHAIN_1, "E1_CHAIN_1_DIGEST"),
+    (E1_CHAIN_2, "E1_CHAIN_2_DIGEST"),
+    (E1_CHAIN_EXPECT, "E1_CHAIN_EXPECT_DIGEST"),
+    (E1_HOLDER, "E1_HOLDER_DIGEST"),
+    (E1_HOLDER_EXPECT, "E1_HOLDER_EXPECT_DIGEST"),
+    (E1_HOLDER_CHAIN_FULL, "E1_HOLDER_CHAIN_FULL_DIGEST"),
+    (E1_HOLDER_CHAIN_1, "E1_HOLDER_CHAIN_1_DIGEST"),
+    (E1_HOLDER_CHAIN_2, "E1_HOLDER_CHAIN_2_DIGEST"),
+    (E1_HOLDER_CHAIN_EXPECT, "E1_HOLDER_CHAIN_EXPECT_DIGEST"),
+];
+
+/// The sync members of the set `v2-f1-e1` and their blake3, set when they were written.
+const E1_SYNC_MEMBERS: [(&str, &str); 2] = [
+    (E1_SYNC, "E1_SYNC_DIGEST"),
+    (E1_SYNC_EXPECT, "E1_SYNC_EXPECT_DIGEST"),
+];
+
+/// The names of a complete set's members, and the holder tag its sync batch carries.
+struct Names {
+    full: &'static str,
+    full_expect: &'static str,
+    chain: [&'static str; 3],
+    chain_expect: &'static str,
+    holder: &'static str,
+    holder_expect: &'static str,
+    holder_chain: [&'static str; 3],
+    holder_chain_expect: &'static str,
+    sync: &'static str,
+    sync_expect: &'static str,
+    sync_tag: &'static str,
+}
+
+impl Names {
+    fn expects(&self) -> [&'static str; 4] {
+        [
+            self.full_expect,
+            self.chain_expect,
+            self.holder_expect,
+            self.holder_chain_expect,
+        ]
+    }
+}
+
+const E0: Names = Names {
+    full: FULL,
+    full_expect: FULL_EXPECT,
+    chain: [CHAIN_FULL, CHAIN_1, CHAIN_2],
+    chain_expect: CHAIN_EXPECT,
+    holder: HOLDER,
+    holder_expect: HOLDER_EXPECT,
+    holder_chain: [HOLDER_CHAIN_FULL, HOLDER_CHAIN_1, HOLDER_CHAIN_2],
+    holder_chain_expect: HOLDER_CHAIN_EXPECT,
+    sync: SYNC,
+    sync_expect: SYNC_EXPECT,
+    sync_tag: SYNC_TAG,
+};
+
+const E1: Names = Names {
+    full: E1_FULL,
+    full_expect: E1_FULL_EXPECT,
+    chain: [E1_CHAIN_FULL, E1_CHAIN_1, E1_CHAIN_2],
+    chain_expect: E1_CHAIN_EXPECT,
+    holder: E1_HOLDER,
+    holder_expect: E1_HOLDER_EXPECT,
+    holder_chain: [E1_HOLDER_CHAIN_FULL, E1_HOLDER_CHAIN_1, E1_HOLDER_CHAIN_2],
+    holder_chain_expect: E1_HOLDER_CHAIN_EXPECT,
+    sync: E1_SYNC,
+    sync_expect: E1_SYNC_EXPECT,
+    sync_tag: chain_fixture::E1_TAGS[2],
+};
+
+/// A complete fixture set of a written wire format: its names, its dump members and its sync
+/// members with their blake3.
 struct FeatureSet {
+    names: &'static Names,
     dump: &'static [(&'static str, &'static str)],
     sync: &'static [(&'static str, &'static str)],
-    formats_in: &'static str,
 }
 
 /// The registered complete sets, oldest first. A set, once registered, never leaves this list.
-const SETS: [FeatureSet; 1] = [FeatureSet {
-    dump: &MEMBERS,
-    sync: &SYNC_MEMBERS,
-    formats_in: FULL_EXPECT,
-}];
+const SETS: [FeatureSet; 2] = [
+    FeatureSet {
+        names: &E0,
+        dump: &MEMBERS,
+        sync: &SYNC_MEMBERS,
+    },
+    FeatureSet {
+        names: &E1,
+        dump: &E1_MEMBERS,
+        sync: &E1_SYNC_MEMBERS,
+    },
+];
 
 /// The dump members of every registered set: the on-disk inventory of `ha17_` adds them to the
 /// released pairs' members.
@@ -149,8 +257,8 @@ fn read_expect(name: &str) -> Value {
     serde_json::from_str(&std::fs::read_to_string(fixture(name)).unwrap()).unwrap()
 }
 
-fn read_sync_expect() -> Value {
-    serde_json::from_str(&std::fs::read_to_string(sync_fixture(SYNC_EXPECT)).unwrap()).unwrap()
+fn read_sync_expect(n: &Names) -> Value {
+    serde_json::from_str(&std::fs::read_to_string(sync_fixture(n.sync_expect)).unwrap()).unwrap()
 }
 
 /// The current wire formats have a complete registered set, every member of it on disk with its
@@ -159,7 +267,10 @@ pub(crate) fn assert_written_set_is_registered() {
     let now = chain_fixture::current_formats();
     let set = SETS
         .iter()
-        .find(|s| read_expect(s.formats_in)["formats"] == now)
+        .find(|s| {
+            fixture(s.names.full_expect).exists()
+                && read_expect(s.names.full_expect)["formats"] == now
+        })
         .unwrap_or_else(|| {
             panic!(
                 "the written formats {now} have no complete fixture set: freeze one in this task"
@@ -214,91 +325,116 @@ fn standalone_expect(
     v
 }
 
-/// Builds the fourteen members in memory from the shared builders; scratch stores go under
-/// `scratch`. The dump members first, then the sync members.
 /// Fixture members by file name: `(name, bytes)`.
 type Members = Vec<(&'static str, Vec<u8>)>;
 
-fn build_members(scratch: &Path) -> (Members, Members) {
+/// Builds the fourteen members of the set named `n` in memory from the shared builders' current
+/// stages; scratch stores go under `scratch`. The dump members first, then the sync members.
+fn build_members(n: &Names, scratch: &Path) -> (Members, Members) {
     let mut out: Vec<(&str, Vec<u8>)> = vec![];
 
     let c = chain_fixture::project_chain_current();
     let s = chain_fixture::project_standalone(&c);
     let d = scratch.join("project");
     std::fs::create_dir_all(&d).unwrap();
-    let expect = chain_expect(&c.files(), [CHAIN_FULL, CHAIN_1, CHAIN_2], &c, &d, false);
-    for (name, p) in [
-        (CHAIN_FULL, &c.full),
-        (CHAIN_1, &c.inc1),
-        (CHAIN_2, &c.inc2),
-    ] {
+    let expect = chain_expect(&c.files(), n.chain, &c, &d, false);
+    for (name, p) in n.chain.into_iter().zip(c.files()) {
         out.push((name, std::fs::read(p).unwrap()));
     }
-    out.push((CHAIN_EXPECT, s18::pretty(&expect)));
-    let expect = standalone_expect(&s.dump, FULL, &c.missing_stop, &s.stop, &d, false);
-    out.push((FULL, std::fs::read(&s.dump).unwrap()));
-    out.push((FULL_EXPECT, s18::pretty(&expect)));
+    out.push((n.chain_expect, s18::pretty(&expect)));
+    let expect = standalone_expect(&s.dump, n.full, &c.missing_stop, &s.stop, &d, false);
+    out.push((n.full, std::fs::read(&s.dump).unwrap()));
+    out.push((n.full_expect, s18::pretty(&expect)));
 
     let (hc, ups) = chain_fixture::holder_chain_current();
     let hs = chain_fixture::holder_standalone(&hc, &ups);
     let d = scratch.join("holder");
     std::fs::create_dir_all(&d).unwrap();
-    let names = [HOLDER_CHAIN_FULL, HOLDER_CHAIN_1, HOLDER_CHAIN_2];
-    let expect = chain_expect(&hc.files(), names, &hc, &d, true);
-    for (name, p) in names.into_iter().zip(hc.files()) {
+    let expect = chain_expect(&hc.files(), n.holder_chain, &hc, &d, true);
+    for (name, p) in n.holder_chain.into_iter().zip(hc.files()) {
         out.push((name, std::fs::read(p).unwrap()));
     }
-    out.push((HOLDER_CHAIN_EXPECT, s18::pretty(&expect)));
-    let expect = standalone_expect(&hs.dump, HOLDER, &hc.missing_stop, &hs.stop, &d, true);
-    out.push((HOLDER, std::fs::read(&hs.dump).unwrap()));
-    out.push((HOLDER_EXPECT, s18::pretty(&expect)));
+    out.push((n.holder_chain_expect, s18::pretty(&expect)));
+    let expect = standalone_expect(&hs.dump, n.holder, &hc.missing_stop, &hs.stop, &d, true);
+    out.push((n.holder, std::fs::read(&hs.dump).unwrap()));
+    out.push((n.holder_expect, s18::pretty(&expect)));
 
-    // the sync batch: the relayed tag's history, exported from the standalone holder
-    let bytes = export_sync_tag(&hs.root);
+    // the sync batch: the tag's history, exported from the standalone holder
+    let bytes = export_sync_tag(&hs.root, n.sync_tag);
     let (h, _, taken) = take_split(&bytes, &scratch.join("sync"));
     h.close().unwrap();
     let expect = json!({
         "formats": chain_fixture::current_formats(),
-        "tag": SYNC_TAG,
+        "tag": n.sync_tag,
         "stream": stream_facts(&bytes),
         "taken": taken,
     });
-    let sync = vec![(SYNC, bytes), (SYNC_EXPECT, s18::pretty(&expect))];
+    let sync = vec![(n.sync, bytes), (n.sync_expect, s18::pretty(&expect))];
     (out, sync)
 }
 
-/// The sync batch of [`SYNC_TAG`]'s history, exported by this rdy from the holder at `root`.
-fn export_sync_tag(root: &Path) -> Vec<u8> {
+/// The sync batch of `tag`'s history, exported by this rdy from the holder at `root`.
+fn export_sync_tag(root: &Path, tag: &str) -> Vec<u8> {
     let held = Rdy::open_holder(root).unwrap();
-    let tag = held
+    let t = held
         .store()
         .tags()
         .unwrap()
         .into_iter()
-        .find(|(n, ..)| n == SYNC_TAG)
+        .find(|(n, ..)| n == tag)
         .unwrap()
         .1;
-    let bytes = every_kind::export_tag(&held, tag);
+    let bytes = every_kind::export_tag(&held, t);
     held.close().unwrap();
     bytes
 }
 
-/// Writes the fourteen members of the set `v4-f1-e0` once. Run by hand, never by the gate, after
-/// the readers fail: `cargo test -p rdy-qa --release --test io ok1_write_feature_fixture_set_once
-/// -- --ignored`. It refuses a member that exists.
+/// The latest encoding of each kind that object encoding 1 moved or added: every other kind's
+/// is 0.
+const E1_ENCODINGS: [u8; 7] = [
+    kinds::CHANGE,
+    kinds::LANDING,
+    kinds::REDACTION_RESIDUE,
+    kinds::ASSESSMENT,
+    kinds::DISPUTE,
+    kinds::DISPUTE_RESOLUTION,
+    kinds::CHECK_REQUEST,
+];
+
+/// The latest-encoding map of the e1 set.
+fn e1_encodings() -> Value {
+    let m: serde_json::Map<String, Value> = rdy_store::dump::current_frame_kinds()
+        .iter()
+        .map(|k| (k.to_string(), json!(u16::from(E1_ENCODINGS.contains(k)))))
+        .collect();
+    json!(m)
+}
+
+/// The manifest of a store that has used every registered feature.
+fn all_features() -> StoreFeatures {
+    StoreFeatures {
+        manifest_version: 1,
+        features: registered_features(),
+    }
+}
+
+/// Writes the fourteen members of the set `v4-f1-e1` once. Run by hand, never by the gate, after
+/// the readers fail: `cargo test -p rdy-qa --release --test io ok4_write_encoding_fixture_set_once
+/// -- --ignored`. It refuses a member that exists. (The e0 set's writer went with its stages:
+/// the current builders write the e1 sequence.)
 #[test]
 #[ignore]
-fn ok1_write_feature_fixture_set_once() {
-    for (m, _) in MEMBERS {
+fn ok4_write_encoding_fixture_set_once() {
+    for (m, _) in E1_MEMBERS {
         assert!(
             !fixture(m).exists(),
-            "{m}: the v4-f1-e0 fixtures are written once: never rewrite them"
+            "{m}: the v4-f1-e1 fixtures are written once: never rewrite them"
         );
     }
-    for (m, _) in SYNC_MEMBERS {
+    for (m, _) in E1_SYNC_MEMBERS {
         assert!(
             !sync_fixture(m).exists(),
-            "{m}: the v2-f1-e0 fixtures are written once: never rewrite them"
+            "{m}: the v2-f1-e1 fixtures are written once: never rewrite them"
         );
     }
     assert_eq!(
@@ -307,22 +443,14 @@ fn ok1_write_feature_fixture_set_once() {
             "dump_format": 4,
             "stream_format": 2,
             "features": baseline_features(),
-            "encodings": chain_fixture::current_formats()["encodings"].clone(),
+            "encodings": e1_encodings(),
         }),
-        "the v4-f1-e0 set holds dump format 4 and sync format 2"
-    );
-    assert!(
-        chain_fixture::current_formats()["encodings"]
-            .as_object()
-            .unwrap()
-            .values()
-            .all(|v| *v == json!(0)),
-        "every kind's latest encoding is 0"
+        "the v4-f1-e1 set holds dump format 4, sync format 2 and object encoding 1"
     );
     let scratch = tempfile::tempdir().unwrap();
-    let (dump, sync) = build_members(scratch.path());
-    assert_eq!(dump.len(), MEMBERS.len());
-    assert_eq!(sync.len(), SYNC_MEMBERS.len());
+    let (dump, sync) = build_members(&E1, scratch.path());
+    assert_eq!(dump.len(), E1_MEMBERS.len());
+    assert_eq!(sync.len(), E1_SYNC_MEMBERS.len());
     for (name, bytes) in &dump {
         write_new(&fixture(name), bytes);
         eprintln!("{name} blake3 {}", Hash::of(bytes));
@@ -336,35 +464,69 @@ fn ok1_write_feature_fixture_set_once() {
 // ---------------------------------------------------------------------------------------------
 // the checks
 
-const PROJECT_CHAIN: s18::Input = s18::Input {
-    names: &[CHAIN_FULL, CHAIN_1, CHAIN_2],
-    expect: CHAIN_EXPECT,
-    holder: false,
-    stops: &["held_stop", "missing_stop"],
-    canaries: s18::PROJECT_CANARIES,
-};
-const HOLDER_CHAIN: s18::Input = s18::Input {
-    names: &[HOLDER_CHAIN_FULL, HOLDER_CHAIN_1, HOLDER_CHAIN_2],
-    expect: HOLDER_CHAIN_EXPECT,
-    holder: true,
-    stops: &["held_stop", "missing_stop"],
-    canaries: s18::HOLDER_CANARIES,
-};
-const PROJECT_FULL: s18::Input = s18::Input {
-    names: &[FULL],
-    expect: FULL_EXPECT,
-    holder: false,
-    stops: &["missing_stop"],
-    canaries: s18::PROJECT_CANARIES,
-};
-const HOLDER_FULL: s18::Input = s18::Input {
-    names: &[HOLDER],
-    expect: HOLDER_EXPECT,
-    holder: true,
-    stops: &["missing_stop"],
-    canaries: s18::HOLDER_CANARIES,
-};
-const INPUTS: [s18::Input; 4] = [PROJECT_CHAIN, HOLDER_CHAIN, PROJECT_FULL, HOLDER_FULL];
+/// The four inputs of a set: the project and holder chains, then their full fixtures.
+fn inputs(
+    n: &'static Names,
+    canaries: [&'static [&'static [u8]]; 2],
+    held: &'static [&'static [u8]],
+) -> [s18::Input; 4] {
+    [
+        s18::Input {
+            names: &n.chain,
+            expect: n.chain_expect,
+            holder: false,
+            stops: &["held_stop", "missing_stop"],
+            canaries: canaries[0],
+            held,
+        },
+        s18::Input {
+            names: &n.holder_chain,
+            expect: n.holder_chain_expect,
+            holder: true,
+            stops: &["held_stop", "missing_stop"],
+            canaries: canaries[1],
+            held,
+        },
+        s18::Input {
+            names: std::slice::from_ref(&n.full),
+            expect: n.full_expect,
+            holder: false,
+            stops: &["missing_stop"],
+            canaries: canaries[0],
+            held,
+        },
+        s18::Input {
+            names: std::slice::from_ref(&n.holder),
+            expect: n.holder_expect,
+            holder: true,
+            stops: &["missing_stop"],
+            canaries: canaries[1],
+            held,
+        },
+    ]
+}
+
+/// The removed payloads of the e1 set: the released chain's and every e1 removal's, in both the
+/// project and the holder.
+const E1_CANARIES: &[&[u8]] = &[
+    chain_fixture::EARLY_CANARY.as_bytes(),
+    chain_fixture::LATE_CANARY.as_bytes(),
+    chain_fixture::BLOB_CANARY,
+    chain_fixture::STANDALONE_CANARY.as_bytes(),
+    every_kind::CANARY_BODY.as_bytes(),
+    every_kind::CANARY_FIELD.as_bytes(),
+    chain_fixture::E1_EARLY_CANARY.as_bytes(),
+    chain_fixture::E1_LATE_CANARY.as_bytes(),
+    chain_fixture::E1_BLOB_CANARY,
+    chain_fixture::E1_OLD_CANARY.as_bytes(),
+];
+
+/// The payloads an e1 chain's stops hold: the first e1 removal's (the holder takes no blob).
+const E1_HELD: &[&[u8]] = &[
+    chain_fixture::E1_EARLY_CANARY.as_bytes(),
+    chain_fixture::E1_BLOB_CANARY,
+    chain_fixture::E1_OLD_CANARY.as_bytes(),
+];
 
 /// The data frames past `end` in the store at `dir`: none, since a dump of the current format
 /// needs no upgrade batch.
@@ -378,14 +540,15 @@ fn nothing_after(dir: &Path, end: Location, holder: bool, what: &str) {
     r.close().unwrap();
 }
 
-#[test]
-fn ok1_feature_fixture_members_are_immutable() {
+/// Every member of `set` keeps its pinned blake3, and the writer refuses it.
+fn members_are_immutable(set: &FeatureSet) {
     // A change to any member needs a founder decision. The checksums are fixed here, apart from
     // any writer: a later writer that writes other bytes changes nothing in this check.
-    let paths = MEMBERS
+    let paths = set
+        .dump
         .iter()
         .map(|(n, d)| (fixture(n), *d))
-        .chain(SYNC_MEMBERS.iter().map(|(n, d)| (sync_fixture(n), *d)));
+        .chain(set.sync.iter().map(|(n, d)| (sync_fixture(n), *d)));
     for (p, digest) in paths {
         let bytes = std::fs::read(&p).unwrap();
         assert_eq!(Hash::of(&bytes).to_string(), digest, "{}", p.display());
@@ -400,29 +563,121 @@ fn ok1_feature_fixture_members_are_immutable() {
 }
 
 #[test]
+fn ok1_feature_fixture_members_are_immutable() {
+    members_are_immutable(&SETS[0]);
+}
+
+#[test]
+fn ok4_encoding_fixture_members_are_immutable() {
+    members_are_immutable(&SETS[1]);
+}
+
+#[test]
 fn ok1_written_wire_format_has_a_complete_fixture_set() {
     let now = chain_fixture::current_formats();
     assert_eq!(now["dump_format"], json!(DUMP_FORMAT));
     assert_eq!(now["stream_format"], json!(STREAM_FORMAT));
     assert_eq!(now["features"], json!(baseline_features()));
+    // the latest-encoding map of object encoding 1
+    assert_eq!(now["encodings"], e1_encodings());
     assert_written_set_is_registered();
     // every expect file of the set names the same formats
-    for name in [
-        FULL_EXPECT,
-        CHAIN_EXPECT,
-        HOLDER_EXPECT,
-        HOLDER_CHAIN_EXPECT,
-    ] {
+    for name in E1.expects() {
         assert_eq!(read_expect(name)["formats"], now, "{name}");
     }
-    assert_eq!(read_sync_expect()["formats"], now);
+    assert_eq!(read_sync_expect(&E1)["formats"], now);
+    // the registered set's manifests hold every registered feature, through first use
+    let all = json!({"features": all_features()});
+    for name in [E1.full, E1.holder] {
+        assert_eq!(
+            s18::file_facts(name, &fixture(name))["store_format"],
+            all,
+            "{name}"
+        );
+    }
+    for name in E1.chain.iter().chain(&E1.holder_chain) {
+        let f = s18::file_facts(name, &fixture(name));
+        assert!(
+            f["store_format"]["features"]["features"]
+                .as_array()
+                .unwrap()
+                .len()
+                >= 2,
+            "{name}"
+        );
+    }
+    assert_eq!(
+        s18::file_facts(E1.chain[2], &fixture(E1.chain[2]))["store_format"],
+        all
+    );
+    assert_eq!(
+        s18::file_facts(E1.holder_chain[2], &fixture(E1.holder_chain[2]))["store_format"],
+        all
+    );
 }
 
 #[test]
 fn ok1_complete_feature_fixture_set_loads() {
+    let store = StoreFeatures {
+        manifest_version: 1,
+        features: vec![],
+    };
+    let canaries = [s18::PROJECT_CANARIES, s18::HOLDER_CANARIES];
+    let store = json!({ "features": store });
+    check_set_loads(&E0, &inputs(&E0, canaries, s18::HELD), Some(&store), true);
+}
+
+#[test]
+fn ok4_complete_encoding_fixture_set_loads() {
+    let input = inputs(&E1, [E1_CANARIES, E1_CANARIES], E1_HELD);
+    // each file's manifest is the one its expect file pins: the features used up to its end
+    // (`ok1_written_wire_format_has_a_complete_fixture_set` pins all seven in the full fixtures
+    // and the last increments)
+    check_set_loads(&E1, &input, None, false);
+    // the e1 records under their latest encodings, the old records under encoding 0: each kind
+    // of each encoding the set promises is in its files
+    for i in &input {
+        let files: Vec<PathBuf> = i.names.iter().map(|n| fixture(n)).collect();
+        let mut seen = std::collections::BTreeSet::new();
+        for p in &files {
+            let (mut rd, _, _) =
+                DumpReader::open(BufReader::new(std::fs::File::open(p).unwrap())).unwrap();
+            while let Some(item) = rd.next().unwrap() {
+                if let DumpItem::Batch(b) = item {
+                    for f in &b.frames {
+                        if let Frame::Present { kind, .. } = f {
+                            seen.insert(*kind);
+                        }
+                    }
+                }
+            }
+        }
+        let v = rdy_store::codec::VERSIONED;
+        for k in [kinds::CHANGE, kinds::LANDING, kinds::REDACTION_RESIDUE] {
+            assert!(seen.contains(&k), "{}: kind {k} encoding 0", i.expect);
+            assert!(seen.contains(&(k | v)), "{}: kind {k} encoding 1", i.expect);
+        }
+        let new = [
+            kinds::ASSESSMENT,
+            kinds::DISPUTE,
+            kinds::DISPUTE_RESOLUTION,
+            kinds::CHECK_REQUEST,
+        ];
+        for k in new {
+            assert!(seen.contains(&(k | v)), "{}: kind {k}", i.expect);
+        }
+    }
+}
+
+/// The checks of one complete set `n` over its four `inputs`: each file's facts and, when the set
+/// has one manifest, that manifest (`store`), the whole load (byte for byte, no batch after it, no removed
+/// payload, every frame, a reindex, fsck, the invariants), a chain's full dump alone, each fixed
+/// stop, and the sync batch (its facts, its check, the current export and its take). `moves`:
+/// the set was written before content-2, so its unlogged move count is analysis, which the first
+/// writable start logs (`first_start_logs_moves`).
+fn check_set_loads(n: &Names, inputs: &[s18::Input], store: Option<&Value>, moves: bool) {
     let d = tempfile::tempdir().unwrap();
-    let store = json!({"features": baseline_features()});
-    for input in &INPUTS {
+    for input in inputs {
         let what = input.expect;
         let expect = read_expect(input.expect);
         let files: Vec<PathBuf> = input.names.iter().map(|n| fixture(n)).collect();
@@ -439,7 +694,9 @@ fn ok1_complete_feature_fixture_set_loads() {
         }
         for (i, f) in facts.iter().enumerate() {
             assert_eq!(f["dump_format"], json!(4), "{what}");
-            assert_eq!(f["store_format"], store, "{what}: the feature manifest");
+            if let Some(store) = store {
+                assert_eq!(&f["store_format"], store, "{what}: the feature manifest");
+            }
             assert_eq!(f["batches"], f["trailer"]["batches"]);
             assert_eq!(f["frames"], f["trailer"]["frames"]);
             if i > 0 {
@@ -459,13 +716,15 @@ fn ok1_complete_feature_fixture_set_loads() {
         );
         drop(w);
         let got = s18::whole_facts_of(&s, &files, &to, input.holder);
-        // the set was written before content-2: its unlogged move count is analysis, which the
-        // first writable start logs (`first_start_logs_moves`)
-        assert_eq!(
-            without_moves(&got),
-            without_moves(&expect["whole"]),
-            "{what}: the whole load"
-        );
+        if moves {
+            assert_eq!(
+                without_moves(&got),
+                without_moves(&expect["whole"]),
+                "{what}: the whole load"
+            );
+        } else {
+            assert_eq!(got, expect["whole"], "{what}: the whole load");
+        }
         nothing_after(&to, s18::chain_end(&files), input.holder, what);
         for c in input.canaries {
             assert!(
@@ -483,7 +742,8 @@ fn ok1_complete_feature_fixture_set_loads() {
                 if let DumpItem::Batch(b) = item {
                     for f in &b.frames {
                         frames += 1;
-                        assert!(r.store().has_kind(f.kind(), f.hash()).unwrap(), "{what}");
+                        let kind = f.kind() & !rdy_store::codec::VERSIONED;
+                        assert!(r.store().has_kind(kind, f.hash()).unwrap(), "{what}");
                     }
                 }
             }
@@ -499,7 +759,9 @@ fn ok1_complete_feature_fixture_set_loads() {
         );
         r.fsck().unwrap();
         r.close().unwrap();
-        first_start_logs_moves(&to, input.holder, what);
+        if moves {
+            first_start_logs_moves(&to, input.holder, what);
+        }
         let r = s18::open(&to, input.holder);
         if input.holder {
             r.close().unwrap();
@@ -512,11 +774,15 @@ fn ok1_complete_feature_fixture_set_loads() {
         if files.len() > 1 {
             let to = d.path().join(format!("{what}-alone"));
             let got = s18::whole_facts(&files[..1], &to, input.holder);
-            assert_eq!(
-                without_moves(&got),
-                without_moves(&expect["full_alone"]),
-                "{what}: the full dump alone"
-            );
+            if moves {
+                assert_eq!(
+                    without_moves(&got),
+                    without_moves(&expect["full_alone"]),
+                    "{what}: the full dump alone"
+                );
+            } else {
+                assert_eq!(got, expect["full_alone"], "{what}: the full dump alone");
+            }
             nothing_after(&to, s18::chain_end(&files[..1]), input.holder, what);
         }
         // each fixed stop: its position, its carried batch byte for byte, and its facts
@@ -542,7 +808,11 @@ fn ok1_complete_feature_fixture_set_loads() {
                 assert!(!s18::holds(&to, c), "{what}");
             }
             let got = s18::stop_facts_of(&s, selector, &to, input.holder, None);
-            assert_eq!(without_moves(&got), without_moves(want), "{what}");
+            if moves {
+                assert_eq!(without_moves(&got), without_moves(want), "{what}");
+            } else {
+                assert_eq!(&got, want, "{what}");
+            }
             let r = s18::open(&to, input.holder);
             r.fsck().unwrap();
             r.close().unwrap();
@@ -550,9 +820,10 @@ fn ok1_complete_feature_fixture_set_loads() {
     }
     // the sync batch: its bytes and facts, its check, the current export of the same tag from
     // the loaded holder fixture, and its take
-    let bytes = std::fs::read(sync_fixture(SYNC)).unwrap();
-    let expect = read_sync_expect();
+    let bytes = std::fs::read(sync_fixture(n.sync)).unwrap();
+    let expect = read_sync_expect(n);
     assert_eq!(&bytes[8..12], &2u32.to_le_bytes(), "sync batch format 2");
+    assert_eq!(expect["tag"], json!(n.sync_tag));
     assert_eq!(stream_facts(&bytes), expect["stream"]);
     let report = check_batch(bytes.as_slice(), None).unwrap();
     assert_eq!(
@@ -569,9 +840,9 @@ fn ok1_complete_feature_fixture_set_loads() {
             .unwrap()
     );
     let loaded = d.path().join("sync-holder");
-    s18::chain_load(&[fixture(HOLDER)], &loaded, None);
+    s18::chain_load(&[fixture(n.holder)], &loaded, None);
     assert_eq!(
-        export_sync_tag(&loaded),
+        export_sync_tag(&loaded, n.sync_tag),
         bytes,
         "the current export of the tag is the frozen batch, byte for byte"
     );

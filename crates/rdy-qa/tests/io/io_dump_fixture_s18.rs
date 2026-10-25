@@ -736,6 +736,8 @@ pub(crate) struct Input {
     pub(crate) holder: bool,
     pub(crate) stops: &'static [&'static str],
     pub(crate) canaries: &'static [&'static [u8]],
+    /// The canaries a chain's stops hold: the payloads that a removal after both stops takes.
+    pub(crate) held: &'static [&'static [u8]],
 }
 
 impl Input {
@@ -756,6 +758,15 @@ pub(crate) const HOLDER_CANARIES: &[&[u8]] = &[
     every_kind::HOLDER_CANARY.as_bytes(),
     every_kind::HOLDER_BLOB,
 ];
+/// The canaries a `(3, 18)` chain's stops hold: the early block and the blob (project), the
+/// holder's prose and blob; the late block, the standalone block and every earlier removal stay
+/// removed.
+pub(crate) const HELD: &[&[u8]] = &[
+    chain_fixture::EARLY_CANARY.as_bytes(),
+    chain_fixture::BLOB_CANARY,
+    every_kind::HOLDER_CANARY.as_bytes(),
+    every_kind::HOLDER_BLOB,
+];
 
 const PROJECT_CHAIN: Input = Input {
     names: &[CHAIN_FULL, CHAIN_1, CHAIN_2],
@@ -763,6 +774,7 @@ const PROJECT_CHAIN: Input = Input {
     holder: false,
     stops: &["held_stop", "missing_stop"],
     canaries: PROJECT_CANARIES,
+    held: HELD,
 };
 const HOLDER_CHAIN: Input = Input {
     names: &[HOLDER_CHAIN_FULL, HOLDER_CHAIN_1, HOLDER_CHAIN_2],
@@ -770,6 +782,7 @@ const HOLDER_CHAIN: Input = Input {
     holder: true,
     stops: &["held_stop", "missing_stop"],
     canaries: HOLDER_CANARIES,
+    held: HELD,
 };
 const PROJECT_FULL: Input = Input {
     names: &[FULL],
@@ -777,6 +790,7 @@ const PROJECT_FULL: Input = Input {
     holder: false,
     stops: &["missing_stop"],
     canaries: PROJECT_CANARIES,
+    held: HELD,
 };
 const HOLDER_FULL: Input = Input {
     names: &[HOLDER],
@@ -784,6 +798,7 @@ const HOLDER_FULL: Input = Input {
     holder: true,
     stops: &["missing_stop"],
     canaries: HOLDER_CANARIES,
+    held: HELD,
 };
 const INPUTS: [Input; 4] = [PROJECT_CHAIN, HOLDER_CHAIN, PROJECT_FULL, HOLDER_FULL];
 
@@ -956,19 +971,12 @@ pub(crate) fn helds(c: &Value) -> Vec<bool> {
 /// Whether the store at `stop` holds the payload with `canary`, as the expect file pins it: a
 /// held span of a carried record, or a payload no removal selected before the stop.
 pub(crate) fn stop_holds(stop: &Value, input: &Input, canary: &[u8]) -> bool {
-    // the early block and the blob are held at a chain's stops; the late block, the standalone
-    // block and every earlier removal stay removed
-    let held_in_chain: [&[u8]; 4] = [
-        chain_fixture::EARLY_CANARY.as_bytes(),
-        chain_fixture::BLOB_CANARY,
-        every_kind::HOLDER_CANARY.as_bytes(),
-        every_kind::HOLDER_BLOB,
-    ];
+    // the input's held canaries are held at a chain's stops; every other one stays removed
     let chain = input.names.len() > 1;
     let all_zero = tail_carried(stop)
         .iter()
         .all(|c| helds(c).iter().all(|h| !*h));
-    chain && !all_zero && held_in_chain.contains(&canary)
+    chain && !all_zero && input.held.contains(&canary)
 }
 
 #[test]

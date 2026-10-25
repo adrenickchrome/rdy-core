@@ -29,8 +29,7 @@ use rdy_store::sync_proof::{ObjectSource, PortableRemoval, RemovalObject, check}
 use rdy_store::sync_stream::{SYNC_KINDS, StreamHeader, StreamReader, StreamRecord, check_batch};
 use rdy_store::{Store, StoreReader};
 use redaction_fixture::{
-    Fixture, FixtureOptions, Proof, RequestSpec, authorized_batch_fixture, enc, frames, hash_of,
-    residue_id,
+    Fixture, FixtureOptions, Proof, RequestSpec, authorized_batch_fixture, enc, frames, residue_id,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;

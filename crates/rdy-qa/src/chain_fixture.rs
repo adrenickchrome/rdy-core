@@ -38,11 +38,31 @@
 //! the format-17 sequence's, unchanged.
 //!
 //! The current set (D-WWAK7, D-69AY3): [`project_chain_current`] and [`holder_chain_current`]
-//! select the stages of the store this rdy writes, over the same shared builders. With every
-//! kind's latest encoding 0 and no registered feature, that is the store format 18 sequence;
-//! the current writer gives it dump format 4, a feature manifest and the latest-encoding map
+//! select the stages of the store this rdy writes, over the same shared builders, and the
+//! current writer gives them dump format 4, a feature manifest and the latest-encoding map
 //! ([`current_formats`]). A later encoding or feature extends the current stage selector, and
-//! its task freezes a new complete set; a released set is never regenerated.
+//! its task freezes a new complete set; a released set is never regenerated. The `e0` set holds
+//! the store format 18 sequence. The `e1` sequence (object encoding 1) holds old encoding-0
+//! records and every latest encoding:
+//!
+//! - The project starts from a load of the released `(3, 18)` chain ([`released_chain`]): its
+//!   changes, landings and residues are encoding 0. Before the full dump it adds a removable
+//!   block ([`E1_EARLY_CANARY`]), a blob of two chunks ([`E1_BLOB_CANARY`]) and the first carried
+//!   stage (`every_kind::add_carried_fixture_records`: a replay with `replayed_from` and
+//!   `briefing`, an Accepts and a NeedsPerson ASSESSMENT, the replay's policy landing and a
+//!   CHECK_REQUEST with its `check/` ref), then tags [`E1_TAGS`]`[0]`. Increment 1 holds a
+//!   tension plan's landing and seal (Updated, Confirmed and Dismissed items, with a Dismiss
+//!   answer), an ordinary landing, three disputes and a Check review of each new verdict, then
+//!   `[1]`. Increment 2 holds the resolutions (Upheld, Dismissed, Withdrawn), a Dispute, a
+//!   ResolveDispute and an AcceptVerdict answer, a late block (the held stop), the first removal
+//!   (the early block, the blob and the released chain's ordinary block [`E1_OLD_CANARY`], whose
+//!   records are encoding 0; the missing stop is the end of its proposal), the second removal
+//!   (the late block) and a last landing, then `[2]`.
+//! - The holder is a new holder of the project's repo. It takes the upload of each tag, exported
+//!   when the tag was made, one at each boundary, then the first two again, which append
+//!   nothing. A holder takes no answer that names neither a landing nor a tag, and no assessment
+//!   that no landing names: the three carried answers and the NeedsPerson assessment stay in the
+//!   project.
 //!
 //! Each standalone full fixture is a dump of a stopped load: the full dump written after the
 //! removals, loaded at the missing stop (every carried span is zero), then written to again. The
@@ -114,10 +134,13 @@ enum Stages {
     None,
     /// The reflects fixture's three stages (D-4WC6R).
     Reflects,
+    /// The carried records of object encoding 1 (kinds 25 to 28 and the new fields), over a
+    /// load of the released `(3, 18)` chain: the e1 sequence.
+    Carried,
 }
 
 /// The stages of the store this rdy writes: every stage of the shared builders.
-const CURRENT_STAGES: Stages = Stages::Reflects;
+const CURRENT_STAGES: Stages = Stages::Carried;
 
 /// What the current set pins of the written formats: the dump and sync formats, the feature
 /// manifest a new store writes and the latest encoding of every assigned kind.
@@ -368,6 +391,9 @@ pub fn project_chain_current() -> Chain {
 }
 
 fn project_chain_with(stages: Stages) -> Chain {
+    if stages == Stages::Carried {
+        return project_chain_e1(None).0;
+    }
     let _clock = pin_clock(CLOCK_MS);
     rdy_model::seed_ids_for_tests(PROJECT_SEED);
     let dir = tempfile::tempdir().unwrap();
@@ -504,6 +530,9 @@ pub fn holder_chain_current() -> (Chain, HolderUploads) {
 }
 
 fn holder_chain_with(stages: Stages) -> (Chain, HolderUploads) {
+    if stages == Stages::Carried {
+        return holder_chain_e1();
+    }
     let _clock = pin_clock(CLOCK_MS);
     rdy_model::seed_ids_for_tests(HOLDER_SEED);
     let built = every_kind::holder(SEGMENT_MAX);
@@ -585,6 +614,7 @@ fn holder_chain_with(stages: Stages) -> (Chain, HolderUploads) {
     h.close().unwrap();
     rdy_model::unseed_ids_for_tests();
     ups.extend(reflects.into_iter().flatten());
+    let stop = format!("tag:{}", every_kind::HOLDER_TAGS[1]);
     let chain = Chain {
         source: None,
         root,
@@ -596,7 +626,7 @@ fn holder_chain_with(stages: Stages) -> (Chain, HolderUploads) {
         missing_stop: format!("tag:{}", every_kind::HOLDER_TAGS[0]),
         dir: built.dir,
     };
-    (chain, HolderUploads(ups))
+    (chain, HolderUploads { uploads: ups, stop })
 }
 
 /// The uploads of [`PLAN_TAG`] and [`PLAN_FORK_TAG`]: the every-kind holder's second source
@@ -694,8 +724,11 @@ fn tagged_upload(
     }
 }
 
-/// The every-kind holder's uploads, which the holder chain took.
-pub struct HolderUploads(Vec<Upload>);
+/// The uploads the holder chain took, and the stop of the standalone holder fixture.
+pub struct HolderUploads {
+    uploads: Vec<Upload>,
+    stop: String,
+}
 
 /// The standalone holder fixture's store (see the module), built from `c` and the uploads it
 /// took.
@@ -707,13 +740,10 @@ pub fn holder_standalone(c: &Chain, ups: &HolderUploads) -> Standalone {
     load_chain(std::slice::from_ref(&c.post), &root, Some(&stop)).unwrap();
     let mut h = Rdy::open_holder(&root).unwrap();
     h.store_mut().set_segment_max(SEGMENT_MAX);
-    take(&mut h, &ups.0[1]);
-    take(&mut h, &ups.0[2]);
-    // store format 17: both sealed plan landings' histories again, after the removal
-    take(&mut h, &ups.0[3]);
-    take(&mut h, &ups.0[4]);
-    // store format 18: the reflects source's histories again, when the chain took them
-    for u in &ups.0[5..] {
+    // every upload after the first again, in the chain's order: the later tags, both sealed plan
+    // landings' histories (store format 17) and the reflects source's histories (store format
+    // 18), or the e1 project's later tags
+    for u in &ups.uploads[1..] {
         take(&mut h, u);
     }
     let dump = dir.path().join("standalone-holder.rdydump");
@@ -723,7 +753,7 @@ pub fn holder_standalone(c: &Chain, ups: &HolderUploads) -> Standalone {
         dir,
         root,
         dump,
-        stop: format!("tag:{}", every_kind::HOLDER_TAGS[1]),
+        stop: ups.stop.clone(),
     }
 }
 
@@ -783,3 +813,297 @@ pub const V17_KINDS: [u8; 22] = [
     kinds::REDACTION_CARRIED,
     kinds::PLAN,
 ];
+
+// ---------------------------------------------------------------------------------------------
+// The e1 sequence (object encoding 1): see the module.
+
+/// The id seed of the e1 stages.
+pub const E1_SEED: u64 = 0xE1E1;
+/// The clock of the e1 stages: after every time of the released chain.
+pub const E1_CLOCK_MS: i64 = CLOCK_MS + 100_000;
+/// The body of the e1 block that the first removal takes.
+pub const E1_EARLY_CANARY: &str = "Kestrel early canary.";
+/// The body of the e1 block that the second removal takes.
+pub const E1_LATE_CANARY: &str = "Kestrel late canary.";
+/// The tail of the e1 blob that the first removal takes.
+pub const E1_BLOB_CANARY: &[u8] = b"Kestrel blob canary tail.";
+/// The body of the released chain's ordinary block, which the first e1 removal also takes: its
+/// version and change are encoding 0.
+pub const E1_OLD_CANARY: &str = "An ordinary block.";
+/// The view of the e1 tension plan.
+pub const TENSION_VIEW: &str = "e1-tension";
+/// The e1 tags: before the full dump, in increment 1 and in increment 2.
+pub const E1_TAGS: [&str; 3] = ["v7.0.0", "v7.1.0", "v7.2.0"];
+
+/// The released `(3, 18)` project chain: the e1 project's base.
+pub fn released_chain() -> Vec<PathBuf> {
+    released(&[
+        "v3-s18-chain-full.rdydump",
+        "v3-s18-chain-1.rdydump",
+        "v3-s18-chain-2.rdydump",
+    ])
+}
+
+fn released(names: &[&str]) -> Vec<PathBuf> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/dump");
+    names.iter().map(|n| dir.join(n)).collect()
+}
+
+/// The removable e1 blob: a full first chunk and a short second chunk.
+pub fn e1_blob_bytes() -> Vec<u8> {
+    let mut b = vec![0x6c_u8; 1 << 20];
+    b.extend_from_slice(E1_BLOB_CANARY);
+    b
+}
+
+/// The landing of `proposal` by `approver` and its seal, which ends `bound`'s chain: three
+/// tension items, sealed Updated, Confirmed and Dismissed, with a Done, a Confirm and a Dismiss
+/// answer. Returns the landing.
+fn tension_sealed_landing(r: &mut Rdy, proposal: Hash, bound: &Plan, approver: &str) -> Hash {
+    let person = plan_prov(approver, Role::Approver);
+    let landing = r.store_mut().land(&proposal, person.clone()).unwrap();
+    let version = r.store().landing(&landing).unwrap().proposal;
+    let cause = BlockId::parse("D-00002").unwrap();
+    let rows = [
+        ("b-00001", PlanOutcome::Updated, PlanAct::Done, None),
+        (
+            "b-00002",
+            PlanOutcome::Confirmed,
+            PlanAct::Confirm,
+            Some("the tension still holds"),
+        ),
+        (
+            "b-00003",
+            PlanOutcome::Dismissed,
+            PlanAct::Dismiss,
+            Some("the tension is not real"),
+        ),
+    ];
+    let mut answers = vec![];
+    let mut items = vec![];
+    for (i, (subject, outcome, act, reason)) in rows.into_iter().enumerate() {
+        let item = item_hash(&cause, subject, PlanKind::Tension);
+        answers.push(PlanAnswer {
+            item,
+            act,
+            reason: reason.map(str::to_string),
+            subject: Some(Hash([0x71 + i as u8; 32])),
+            cause: Hash([0x74 + i as u8; 32]),
+            by: plan_prov("agent:plan", Role::Writer),
+        });
+        items.push(SealedItem {
+            id: item,
+            kind: PlanKind::Tension,
+            subject: subject.into(),
+            cause: cause.clone(),
+            edge: "tension".into(),
+            outcome,
+            answer: None,
+        });
+    }
+    let seal = Plan {
+        stable: Some(bound.id()),
+        prev: Some(bound.id()),
+        proposal: Some(version),
+        answers,
+        provenance: person,
+        seal: Some(PlanSeal {
+            landing,
+            version,
+            decisions: vec![cause],
+            items,
+        }),
+        ..bound.clone()
+    };
+    r.store_mut()
+        .write_guarded_for_tests(every_kind::plan_frames(&seal))
+        .unwrap();
+    r.invalidate();
+    landing
+}
+
+/// Tags canon's head of `r` `name`, then exports, checks and writes the tag's history to `dir`
+/// as the upload file `file`. Exported at once, so a later removal is not in it.
+fn e1_upload(r: &mut Rdy, dir: &std::path::Path, name: &str, file: &str) -> Upload {
+    tag(r, name);
+    let t = r
+        .store()
+        .tags()
+        .unwrap()
+        .into_iter()
+        .find(|(n, ..)| n == name)
+        .unwrap()
+        .1;
+    let landing = r.store().read_tag(&t).unwrap().landing;
+    let bytes = every_kind::export_tag(r, t);
+    let repo = r.store().repo_id().unwrap().unwrap();
+    rdy_engine::stream_check::check_batch(bytes.as_slice(), Some(repo)).unwrap();
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join(file);
+    std::fs::write(&path, &bytes).unwrap();
+    Upload {
+        files: vec![path],
+        target: UploadTarget {
+            tag: name.into(),
+            landing,
+        },
+    }
+}
+
+/// The id of the canon block whose body is `body`.
+fn canon_block(r: &Rdy, body: &str) -> String {
+    let m = r.read().materialized(&rdy_engine::Scope::Canon).unwrap();
+    let mut found = m
+        .iter()
+        .filter(|b| b.body == body)
+        .map(|b| b.id.to_string());
+    let id = found.next().expect("the block is in canon");
+    assert!(found.next().is_none(), "one block has the body {body:?}");
+    id
+}
+
+/// The e1 project chain (see the module), and the uploads of its three tags, each exported when
+/// it was made. `uploads` is the directory of the upload files, or none.
+fn project_chain_e1(uploads: Option<&std::path::Path>) -> (Chain, Vec<Upload>) {
+    let _clock = pin_clock(E1_CLOCK_MS);
+    rdy_model::seed_ids_for_tests(E1_SEED);
+    let dir = tempfile::tempdir().unwrap();
+    let src = tempfile::tempdir().unwrap();
+    let root = src.path().join("e1");
+    load_chain(&released_chain(), &root, None).unwrap();
+    let mut r = Rdy::open(&root).unwrap();
+    r.store_mut().set_segment_max(SEGMENT_MAX);
+    let ups_dir = uploads
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| dir.path().join("uploads"));
+    let mut ups = vec![];
+    // before the full dump: the removable block, the blob of two chunks, the replay, its
+    // assessments, its policy landing and its check request
+    let (early, _) = landed_block(&mut r, "e1-early", E1_EARLY_CANARY);
+    let blob = r.store_mut().put_blob(&e1_blob_bytes()).unwrap();
+    seal(&mut r);
+    let mut fx = every_kind::add_carried_fixture_records(&mut r);
+    ups.push(e1_upload(&mut r, &ups_dir, E1_TAGS[0], "e1-0.rdysync"));
+    let full = dir.path().join("chain-full.rdydump");
+    let s0 = r.read().dump(&full).unwrap();
+    // increment 1: the tension plan's landing and seal, an ordinary landing, the disputes and
+    // the check verdicts, then the tag
+    let (proposal, bound) = bound_plan(&mut r, TENSION_VIEW, "A block a tension plan covers.");
+    seal(&mut r);
+    let tension = tension_sealed_landing(&mut r, proposal, &bound, PERSON);
+    seal(&mut r);
+    landed_block(&mut r, "e1-ordinary", "An e1 block of an ordinary landing.");
+    let ordinary = r.read().canon_head().unwrap();
+    let policy = fx.landing;
+    every_kind::dispute_carried_fixture(&mut r, &mut fx, [policy, tension, ordinary]);
+    ups.push(e1_upload(&mut r, &ups_dir, E1_TAGS[1], "e1-1.rdysync"));
+    let inc1 = dir.path().join("chain-1.rdydump");
+    let s1 = r.read().dump_after(&s0.chain_end(), &inc1).unwrap();
+    // increment 2: the resolutions and the answers, the late block, both removals (the first
+    // takes an e1 block, the blob and the released chain's ordinary block, whose records are
+    // encoding 0) and a last tagged landing
+    every_kind::resolve_carried_fixture(&mut r, &fx);
+    let old = canon_block(&r, E1_OLD_CANARY);
+    let (late, late_landing) = landed_block(&mut r, "e1-late", E1_LATE_CANARY);
+    let missing = remove(
+        &mut r,
+        "rq-e1-early",
+        vec![early, format!("blob:{blob}"), old],
+        "the early blocks name a person",
+    );
+    remove(
+        &mut r,
+        "rq-e1-late",
+        vec![late],
+        "the late block names a person",
+    );
+    landed_block(&mut r, "e1-after", "An e1 block after the removals.");
+    ups.push(e1_upload(&mut r, &ups_dir, E1_TAGS[2], "e1-2.rdysync"));
+    let inc2 = dir.path().join("chain-2.rdydump");
+    r.read().dump_after(&s1.chain_end(), &inc2).unwrap();
+    let post = dir.path().join("post.rdydump");
+    r.read().dump(&post).unwrap();
+    r.close().unwrap();
+    rdy_model::unseed_ids_for_tests();
+    let chain = Chain {
+        dir,
+        source: Some(src),
+        root,
+        full,
+        inc1,
+        inc2,
+        post,
+        held_stop: format!("landing:{late_landing}"),
+        missing_stop: position(missing),
+    };
+    (chain, ups)
+}
+
+/// The e1 holder chain (see the module): a new holder of the e1 project's repo takes the
+/// project's three tag uploads, one at each boundary, then the first two again.
+fn holder_chain_e1() -> (Chain, HolderUploads) {
+    let up_dir = tempfile::tempdir().unwrap();
+    let (project, ups) = project_chain_e1(Some(up_dir.path()));
+    let repo = {
+        let r = Rdy::open(&project.root).unwrap();
+        let repo = r.store().repo_id().unwrap().unwrap();
+        r.close().unwrap();
+        repo
+    };
+    let _clock = pin_clock(E1_CLOCK_MS + 50_000);
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("chain-holder");
+    let mut h = Rdy::create_holder(&root, repo).unwrap();
+    h.store_mut().set_segment_max(SEGMENT_MAX);
+    take(&mut h, &ups[0]);
+    let full = dir.path().join("holder-chain-full.rdydump");
+    let s0 = h.read().dump(&full).unwrap();
+    take(&mut h, &ups[1]);
+    let inc1 = dir.path().join("holder-chain-1.rdydump");
+    let s1 = h.read().dump_after(&s0.chain_end(), &inc1).unwrap();
+    take(&mut h, &ups[2]);
+    // the earlier uploads again: every key is held, so nothing is appended
+    let end = h.store().log_end();
+    take(&mut h, &ups[1]);
+    take(&mut h, &ups[0]);
+    assert_eq!(h.store().log_end(), end, "a repeated take appends nothing");
+    let inc2 = dir.path().join("holder-chain-2.rdydump");
+    h.read().dump_after(&s1.chain_end(), &inc2).unwrap();
+    let post = dir.path().join("holder-post.rdydump");
+    h.read().dump(&post).unwrap();
+    h.close().unwrap();
+    // the uploads live as long as the chain: their directory moves under it
+    let kept = dir.path().join("uploads");
+    std::fs::create_dir_all(&kept).unwrap();
+    let ups = ups
+        .into_iter()
+        .map(|u| {
+            let files = u
+                .files
+                .iter()
+                .map(|f| {
+                    let to = kept.join(f.file_name().unwrap());
+                    std::fs::copy(f, &to).unwrap();
+                    to
+                })
+                .collect();
+            Upload {
+                files,
+                target: u.target,
+            }
+        })
+        .collect();
+    let chain = Chain {
+        source: None,
+        root,
+        full,
+        inc1,
+        inc2,
+        post,
+        held_stop: format!("tag:{}", E1_TAGS[1]),
+        missing_stop: format!("tag:{}", E1_TAGS[0]),
+        dir,
+    };
+    let stop = format!("tag:{}", E1_TAGS[1]);
+    (chain, HolderUploads { uploads: ups, stop })
+}

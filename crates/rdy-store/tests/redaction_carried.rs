@@ -18,8 +18,7 @@ mod redaction_fixture;
 use carried_fixture::{
     Framed, HEADER, append_raw, approver, block_residue, carried_frames, carried_hash,
     change_residue, copy_store, find, framed, framed_at, ingest, load, log_bytes, poke, record,
-    residue_frame, residue_hash, source_apply, source_landing, source_request, span, store_format,
-    zero,
+    residue_hash, source_apply, source_landing, source_request, span, store_format, zero,
 };
 use rdy_model::redaction::{CONTENT_REMOVED, RedactTarget, RedactionCarried, RedactionResidue};
 use rdy_model::*;

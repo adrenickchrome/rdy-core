@@ -1582,8 +1582,7 @@ fn unknown_features(prefix: &str, n: usize) -> Vec<rdy_store::format::StoreFeatu
 #[test]
 fn ok1_take_refuses_a_merged_manifest_over_its_bounds() {
     use rdy_store::format::{
-        FORMAT_FILE, FeatureClass, REF_STORE_FEATURES, StoreFeatures, inject_test_feature,
-        write_format_file,
+        FORMAT_FILE, FeatureClass, REF_STORE_FEATURES, inject_test_feature, write_format_file,
     };
     // the TAG of every upload first uses the test feature
     let _known = inject_test_feature(FeatureClass::Compatible, kinds::TAG);
