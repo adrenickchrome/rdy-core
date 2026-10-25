@@ -89,8 +89,10 @@ pub(crate) struct Reading {
     /// The ids of the top-level subgraphs, in source order, when the drawing input stacks them
     /// with hidden arrows (D-438Y2); else empty. The grammar reads the whole text and every
     /// subgraph closes; there are at least two top-level subgraphs; each sets its own direction
-    /// in its own body and has an id; and no id is read both inside one top-level subgraph and
-    /// inside another or outside every subgraph, and no arrow completes outside every subgraph.
+    /// in its own body and has an id; no header at any depth has only a quoted title; and no id
+    /// is read both inside one top-level subgraph and inside another or outside every subgraph,
+    /// and no arrow completes outside every subgraph. `render` keeps the stacked drawing only
+    /// when it removes an overlap and adds none.
     pub stacked: Vec<String>,
 }
 
@@ -139,14 +141,21 @@ pub(crate) fn normalize_subgraph_blanks(src: &str) -> Cow<'_, str> {
     runs.sort_unstable();
     runs.dedup();
     // the bytes of `src` to delete, as ranges in order; places only grow along the text
+    let bytes = src.as_bytes();
     let mut cut: Vec<(usize, usize)> = Vec::new();
     for (from, to) in runs {
         for k in from..to {
             let at = base + map[k as usize] as usize;
+            // an LF that joins lines stands for the line's whole end: a CR there is the CR of a
+            // CR LF that CR CR LF left, so both go
+            let len = if bytes[at..].starts_with(b"\r\n") {
+                2
+            } else {
+                1
+            };
             match cut.last_mut() {
-                Some((_, end)) if *end == at => *end += 1,
-                Some((_, end)) if *end > at => {}
-                _ => cut.push((at, at + 1)),
+                Some((_, end)) if *end >= at => *end = (*end).max(at + len),
+                _ => cut.push((at, at + len)),
             }
         }
     }
@@ -468,6 +477,9 @@ struct Grammar<'a> {
     ids: Vec<(u32, u32, u32)>,
     /// Whether an arrow completes outside every subgraph, or the id table is full.
     crossed: bool,
+    /// Whether a header at any depth has only a quoted title. The pinned crate names such a
+    /// subgraph `subGraph<N>`, an id the walk does not see, so an arrow could reach it unseen.
+    quoted_only: bool,
     /// Whether the statement just read is a `direction` statement.
     direction_read: bool,
     /// Where the id of the last subgraph spec read is, if it has one.
@@ -553,6 +565,7 @@ impl<'a> Grammar<'a> {
             tops: Vec::new(),
             ids: Vec::new(),
             crossed: false,
+            quoted_only: false,
             direction_read: false,
             header_id: None,
             #[cfg(test)]
@@ -680,6 +693,9 @@ impl<'a> Grammar<'a> {
         let end = if self.s[at..].starts_with(b"%%") {
             Some(self.line_end(at))
         } else if let Some(body) = self.subgraph_header(at) {
+            if self.header_id.is_none() {
+                self.quoted_only = true;
+            }
             let body = self.skip_ws(body);
             match self.body_end[body] {
                 NONE => return Step::Open(body),
@@ -1108,12 +1124,32 @@ impl<'a> Grammar<'a> {
         true
     }
 
-    /// Whether a connector starts at `at`: an optional left head, then a dash or an equals sign
-    /// (a solid, dotted or thick start), or a tilde (an invisible start).
+    /// Whether a connector starts at `at`: an optional left head, then the grammar's spaces, then
+    /// a dash or an equals sign (a solid, dotted or thick start), or a tilde (an invisible start).
+    ///
+    /// An `x` or `o` is a left head only where the identifier rule stops after it: before a space
+    /// or tab, an equals sign, or a dash that `-`, `>` or `.` follows. Else the grammar reads it
+    /// as the start of a node id, such as `x-ray`.
     fn connector_start(&self, at: usize) -> bool {
         self.tick();
-        let head = usize::from(matches!(self.s.get(at), Some(b'<' | b'x' | b'o')));
-        matches!(self.s.get(at + head), Some(b'-' | b'=')) || self.s.get(at) == Some(&b'~')
+        if self.s.get(at) == Some(&b'~') {
+            return true;
+        }
+        let head = match self.s.get(at) {
+            Some(b'<') => true,
+            Some(b'x' | b'o') => match self.s.get(at + 1) {
+                Some(b' ' | b'\t' | b'=') => true,
+                Some(b'-') => matches!(self.s.get(at + 2), Some(b'-' | b'>' | b'.')),
+                _ => false,
+            },
+            _ => false,
+        };
+        let mut k = at + usize::from(head);
+        while matches!(self.s.get(k), Some(b' ' | b'\t')) {
+            self.tick();
+            k += 1;
+        }
+        matches!(self.s.get(k), Some(b'-' | b'='))
     }
 
     /// Keeps an id read at `start..end` in context `ctx`, for the stack check.
@@ -1128,7 +1164,11 @@ impl<'a> Grammar<'a> {
     /// The top-level subgraph ids that hidden arrows may stack, after a walk that read the whole
     /// text with every subgraph closed (see [`Reading::stacked`]); else empty.
     fn stacked(&mut self) -> Vec<String> {
-        if self.crossed || self.tops.len() < 2 || !self.tops.iter().all(|t| t.direction) {
+        if self.crossed
+            || self.quoted_only
+            || self.tops.len() < 2
+            || !self.tops.iter().all(|t| t.direction)
+        {
             return Vec::new();
         }
         let mut ids = Vec::with_capacity(self.tops.len());

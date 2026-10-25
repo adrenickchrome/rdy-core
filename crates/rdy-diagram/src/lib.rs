@@ -17,7 +17,10 @@
 //! CRLF becomes LF; in a flowchart, each blank line that directly follows a subgraph header goes
 //! (D-R7C3W); and top-level subgraphs that each set their own direction get hidden arrows
 //! between them, so they stack along the diagram's direction (D-438Y2). The bounds read the
-//! drawing input. Every fallback shows the author's own bytes, which no rewrite reaches.
+//! drawing input, hidden arrows included. A stacked source is drawn twice, without and with its
+//! hidden arrows, and rdy keeps the stacked drawing only when its overlapping subgraph pairs
+//! ([`layout`]) are a strict subset of the other's: it removes an overlap and adds none. Every
+//! fallback shows the author's own bytes, which no rewrite reaches.
 //!
 //! A panic in the pinned crate is a drawing fault, never a crash, and prints nothing.
 //!
@@ -186,8 +189,18 @@ pub fn render(source: &str) -> Diagram {
     if m.longest_arrow > MAX_ARROW_BYTES {
         return invalid(OVER_ARROW);
     }
-    let drawing = stack(drawing, &m.stacked);
-    let src = drawing.as_ref();
+    let base = draw(&drawing, detected.is_none());
+    if m.stacked.len() < 2 {
+        return base;
+    }
+    // a stacked source draws twice: as written, and with its hidden arrows (ruling task-1)
+    let stacked = draw(&stack(drawing, &m.stacked), false);
+    choose(base, stacked)
+}
+
+/// Draws the drawing input `src` in one guarded call. `undetected` is whether the pinned
+/// crate's detection found no diagram type.
+fn draw(src: &str, undetected: bool) -> Diagram {
     let config = RenderConfig {
         svg_theme: Some(SvgThemeConfig {
             mode: SvgThemeMode::Dynamic,
@@ -207,9 +220,29 @@ pub fn render(source: &str) -> Diagram {
         Err(e) => match e.message.strip_prefix(PARSE_ERROR) {
             Some(reason) => invalid(reason),
             // an unknown or absent header: the pinned crate's detection refused it
-            None if detected.is_none() => Diagram::Invalid { reason: e.message },
+            None if undetected => Diagram::Invalid { reason: e.message },
             None => Diagram::Failed { reason: e.message },
         },
+    }
+}
+
+/// The drawing rdy keeps for a stacked source (D-438Y2, ruling task-1): the stacked drawing
+/// only when its overlapping subgraph pairs are a strict subset of the base drawing's, so it
+/// removes an overlap and adds none; else the base drawing. When one draw fails, the other is
+/// kept if it drew; when both fail, the base result is kept. A drawing whose geometry cannot be
+/// read keeps the base.
+fn choose(base: Diagram, stacked: Diagram) -> Diagram {
+    match (&base, &stacked) {
+        (Diagram::Svg(b), Diagram::Svg(s)) => {
+            let fewer = match (layout::overlap_set(b), layout::overlap_set(s)) {
+                (Ok(b), Ok(s)) => s.len() < b.len() && s.is_subset(&b),
+                _ => false,
+            };
+            if fewer { stacked } else { base }
+        }
+        (Diagram::Svg(_), _) => base,
+        (_, Diagram::Svg(_)) => stacked,
+        _ => base,
     }
 }
 
@@ -718,6 +751,265 @@ fn trim(bytes: &[u8]) -> &[u8] {
     &bytes[start..end]
 }
 
+/// A drawn diagram's geometry, read from the pinned crate's SVG (D-438Y2). `render` reads it to
+/// choose between a stacked source's two drawings, and the geometry pin reads it to check them.
+///
+/// Every number is an integer count of hundredths: two decimals and an optional minus. Any
+/// other form is an error with its text. The pinned crate draws inside one root
+/// `<g transform="translate(DX,DY)">`, which opens before `<g class="clusters">`; the SVG holds
+/// exactly one `transform=` attribute. DX is added to every x read, and DY to every y.
+pub mod layout {
+    use std::collections::BTreeSet;
+    use std::fmt;
+
+    /// A rectangle, in hundredths, in the root translate's frame.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Rect {
+        pub x: i64,
+        pub y: i64,
+        pub w: i64,
+        pub h: i64,
+    }
+
+    impl Rect {
+        /// Whether `other` lies inside this one; its edges may touch.
+        pub fn holds(&self, other: &Rect) -> bool {
+            other.x >= self.x
+                && other.y >= self.y
+                && other.x + other.w <= self.x + self.w
+                && other.y + other.h <= self.y + self.h
+        }
+
+        /// Whether the interiors intersect; touching edges do not.
+        pub fn intersects(&self, other: &Rect) -> bool {
+            self.x < other.x + other.w
+                && other.x < self.x + self.w
+                && self.y < other.y + other.h
+                && other.y < self.y + self.h
+        }
+
+        /// Whether the point lies inside; a point on an edge is inside.
+        pub fn has(&self, (x, y): (i64, i64)) -> bool {
+            x >= self.x && x <= self.x + self.w && y >= self.y && y <= self.y + self.h
+        }
+    }
+
+    impl fmt::Display for Rect {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                f,
+                "(x {}, y {}, width {}, height {})",
+                show(self.x),
+                show(self.y),
+                show(self.w),
+                show(self.h)
+            )
+        }
+    }
+
+    /// Hundredths as the SVG writes them.
+    pub fn show(n: i64) -> String {
+        let sign = if n < 0 { "-" } else { "" };
+        format!("{sign}{}.{:02}", n.abs() / 100, n.abs() % 100)
+    }
+
+    /// A subgraph: `<g class="cluster" id="ID" data-id="ID"`, with the first
+    /// `graph-subgraph-rect` rect and the first `graph-subgraph-text` text in its group.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Subgraph {
+        pub id: String,
+        pub rect: Rect,
+        /// The title's anchor, if the group has a title.
+        pub title: Option<(i64, i64)>,
+    }
+
+    /// A drawing's viewBox size, its root translate and its subgraphs, in source order.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Layout {
+        pub size: (i64, i64),
+        pub translate: (i64, i64),
+        pub subgraphs: Vec<Subgraph>,
+    }
+
+    /// A number as an integer count of hundredths: two decimals, an optional minus.
+    fn hundredths(text: &str) -> Result<i64, String> {
+        let fail = || format!("not a number with two decimals: {text:?}");
+        let (neg, digits) = match text.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, text),
+        };
+        let (whole, frac) = digits.split_once('.').ok_or_else(fail)?;
+        let all_digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        if !all_digits(whole) || frac.len() != 2 || !all_digits(frac) || whole.len() > 12 {
+            return Err(fail());
+        }
+        let n = whole.parse::<i64>().map_err(|_| fail())? * 100
+            + frac.parse::<i64>().map_err(|_| fail())?;
+        Ok(if neg { -n } else { n })
+    }
+
+    /// The tag that starts at `at`: from `<` through its `>`.
+    fn tag_at(svg: &str, at: usize) -> Result<&str, String> {
+        let end = svg[at..]
+            .find('>')
+            .ok_or_else(|| format!("an unclosed tag at {at}"))?;
+        Ok(&svg[at..=at + end])
+    }
+
+    /// The value of attribute `name` in `tag`.
+    fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+        let key = format!(" {name}=\"");
+        let start = tag.find(&key)? + key.len();
+        let end = tag[start..].find('"')? + start;
+        Some(&tag[start..end])
+    }
+
+    fn number(tag: &str, name: &str) -> Result<i64, String> {
+        hundredths(attr(tag, name).ok_or_else(|| format!("no {name}: {tag}"))?)
+    }
+
+    /// The first `<element` tag in `svg[from..to]` whose `data-svg-role` is `role`.
+    fn first_with_role<'a>(
+        svg: &'a str,
+        from: usize,
+        to: usize,
+        element: &str,
+        role: &str,
+    ) -> Result<Option<&'a str>, String> {
+        let open = format!("<{element} ");
+        let mut at = from;
+        while let Some(i) = svg[at..to].find(&open) {
+            let tag = tag_at(svg, at + i)?;
+            if attr(tag, "data-svg-role") == Some(role) {
+                return Ok(Some(tag));
+            }
+            at += i + open.len();
+        }
+        Ok(None)
+    }
+
+    fn rect(tag: &str, (dx, dy): (i64, i64)) -> Result<Rect, String> {
+        Ok(Rect {
+            x: number(tag, "x")? + dx,
+            y: number(tag, "y")? + dy,
+            w: number(tag, "width")?,
+            h: number(tag, "height")?,
+        })
+    }
+
+    /// Reads a drawing's viewBox, root translate and subgraphs.
+    pub fn read(svg: &str) -> Result<Layout, String> {
+        let root = tag_at(svg, svg.find("<svg").ok_or("no svg element")?)?;
+        let view = attr(root, "viewBox").ok_or_else(|| format!("no viewBox: {root}"))?;
+        let parts: Vec<&str> = view.split(' ').collect();
+        if !(parts.len() == 4 && parts[0] == "0" && parts[1] == "0") {
+            return Err(format!("viewBox is not \"0 0 W H\": {view:?}"));
+        }
+        let size = (hundredths(parts[2])?, hundredths(parts[3])?);
+        let transforms = svg.matches("transform=").count();
+        if transforms != 1 {
+            return Err(format!("the SVG holds {transforms} transforms, not one"));
+        }
+        let at = svg.find("transform=").unwrap_or(0);
+        let g = svg[..at].rfind('<').ok_or("a transform outside a tag")?;
+        let tag = tag_at(svg, g)?;
+        let (dx, dy) = attr(tag, "transform")
+            .and_then(|t| t.strip_prefix("translate("))
+            .and_then(|t| t.strip_suffix(')'))
+            .and_then(|t| t.split_once(','))
+            .filter(|_| tag.starts_with("<g transform="))
+            .ok_or_else(|| format!("not a root translate: {tag}"))?;
+        let translate = (hundredths(dx)?, hundredths(dy)?);
+        let clusters = svg
+            .find("<g class=\"clusters\">")
+            .ok_or("no clusters group")?;
+        if g > clusters {
+            return Err("the translate opens after the clusters".to_string());
+        }
+        let mut subgraphs = Vec::new();
+        let mut from = 0;
+        while let Some(i) = svg[from..].find("<g class=\"cluster\" id=\"") {
+            let at = from + i;
+            let tag = tag_at(svg, at)?;
+            let id = attr(tag, "id").unwrap_or_default();
+            if attr(tag, "data-id") != Some(id) {
+                return Err(format!("a cluster's data-id is not its id: {tag}"));
+            }
+            // the cluster's group ends at its first closing tag
+            let end = svg[at..].find("</g>").map_or(svg.len(), |e| at + e);
+            let shape = first_with_role(svg, at, end, "rect", "graph-subgraph-rect")?
+                .ok_or_else(|| format!("{id} has no rectangle"))?;
+            let title = match first_with_role(svg, at, end, "text", "graph-subgraph-text")? {
+                Some(text) => Some((
+                    number(text, "x")? + translate.0,
+                    number(text, "y")? + translate.1,
+                )),
+                None => None,
+            };
+            subgraphs.push(Subgraph {
+                id: id.to_string(),
+                rect: rect(shape, translate)?,
+                title,
+            });
+            from = at + tag.len();
+        }
+        Ok(Layout {
+            size,
+            translate,
+            subgraphs,
+        })
+    }
+
+    /// The node rectangles of a drawing: each `<g class="node` tag that holds `data-id`, with
+    /// the first `graph-node-shape` rect before the next node.
+    pub fn nodes(svg: &str, layout: &Layout) -> Result<Vec<(String, Rect)>, String> {
+        const NODE: &str = "<g class=\"node";
+        let mut nodes = Vec::new();
+        let mut from = 0;
+        while let Some(i) = svg[from..].find(NODE) {
+            let at = from + i;
+            let tag = tag_at(svg, at)?;
+            let next = svg[at + NODE.len()..]
+                .find(NODE)
+                .map_or(svg.len(), |n| at + NODE.len() + n);
+            if let Some(id) = attr(tag, "data-id") {
+                let shape = first_with_role(svg, at, next, "rect", "graph-node-shape")?
+                    .ok_or_else(|| format!("node {id} has no rectangle"))?;
+                nodes.push((id.to_string(), rect(shape, layout.translate)?));
+            }
+            from = at + tag.len();
+        }
+        Ok(nodes)
+    }
+
+    /// The subgraph pairs that overlap: their interiors intersect and neither holds the other.
+    /// Each pair is its two ids in source order, and the pairs come in source order.
+    pub fn overlapping(layout: &Layout) -> Vec<(&str, &str)> {
+        let s = &layout.subgraphs;
+        let mut out = Vec::new();
+        for (i, a) in s.iter().enumerate() {
+            for b in &s[i + 1..] {
+                if a.rect.intersects(&b.rect) && !a.rect.holds(&b.rect) && !b.rect.holds(&a.rect) {
+                    out.push((a.id.as_str(), b.id.as_str()));
+                }
+            }
+        }
+        out
+    }
+
+    /// The overlapping pairs of a drawing, each as its two ids in order.
+    pub(crate) fn overlap_set(svg: &str) -> Result<BTreeSet<(String, String)>, String> {
+        let layout = read(svg)?;
+        Ok(overlapping(&layout)
+            .into_iter()
+            .map(|(a, b)| {
+                let (a, b) = if a <= b { (a, b) } else { (b, a) };
+                (a.to_string(), b.to_string())
+            })
+            .collect())
+    }
+}
+
 /// A test-only hook: makes the `n`th guarded call on this thread panic.
 #[cfg(test)]
 mod test_hook {
@@ -976,13 +1268,15 @@ mod tests {
     #[test]
     fn rdb1_unended_arrows_stop_before_drawing() {
         let dots = ".".repeat(60000);
-        for end in ["", "\n", "\r\n"] {
-            let src = format!("flowchart LR\nA -. {dots}X{end}");
-            assert!(src.len() <= MAX_SOURCE_BYTES);
-            test_hook::panic_at(2);
-            let got = render(&src);
-            test_hook::panic_at(0);
-            assert_eq!(got, invalid(OVER_ARROW), "ending {end:?}");
+        for start in ["-.", "< -."] {
+            for end in ["", "\n", "\r\n"] {
+                let src = format!("flowchart LR\nA {start} {dots}X{end}");
+                assert!(src.len() <= MAX_SOURCE_BYTES);
+                test_hook::panic_at(2);
+                let got = render(&src);
+                test_hook::panic_at(0);
+                assert_eq!(got, invalid(OVER_ARROW), "{start:?}, ending {end:?}");
+            }
         }
     }
 
@@ -1042,6 +1336,11 @@ mod tests {
                 "flowchart TD\rsubgraph X\rA\rend\r",
             ),
             ("flowchart TD\nsubgraph X\n  ", "flowchart TD\nsubgraph X\n"),
+            // CR CR LF, once CRLF is LF: each blank line's whole CR LF goes
+            (
+                "flowchart TD\r\nsubgraph X\r\n  \r\n\r\nA\r\nend\r\n",
+                "flowchart TD\r\nsubgraph X\r\nA\r\nend\r\n",
+            ),
         ] {
             assert_eq!(normalize(src), want, "{src:?}");
         }
@@ -1105,6 +1404,12 @@ mod tests {
             format!(
                 "flowchart TB\nsubgraph \"first\"\n{dir}a1 --> a2\nend\nsubgraph P2\n{dir}b1 --> b2\nend\n"
             ),
+            // a nested header with only a quoted title: the pinned crate names it subGraph0, and
+            // an arrow from another top-level subgraph reaches it
+            two(
+                &format!("{dir}subgraph \"inner\"\na1 --> a2\nend\n"),
+                &format!("{dir}b1 --> subGraph0\n"),
+            ),
         ];
         for src in &drawn {
             assert!(flowchart::read(src).stacked.is_empty(), "{src}");
@@ -1114,6 +1419,206 @@ mod tests {
         let unclosed = format!("flowchart TB\nsubgraph P1\n{dir}a1\nend\nsubgraph P2\n{dir}b1\n");
         assert!(flowchart::read(&unclosed).stacked.is_empty());
         assert_eq!(render(&unclosed), invalid(UNCLOSED));
+    }
+
+    /// The reviewer's source (rdb1, fix round 1): it meets the stack condition, and it drew with
+    /// no overlap before the hidden arrows existed. With them, T1 and T2 overlap.
+    const ADDS_AN_OVERLAP: &str = "flowchart TB\nsubgraph T1\ndirection LR\nsubgraph Q1\ndirection RL\nq4 --> q4b\nend\nn2 -- e --> n3\nend\nsubgraph T2\ndirection RL\nn5\nn6\nn7\nend\n";
+
+    /// rdb1 (D-438Y2, ruling task-1): rdy keeps the stacked drawing only when it removes an
+    /// overlap and adds none; else it keeps the base drawing, byte for byte.
+    #[test]
+    fn rdb1_the_stacked_drawing_must_remove_an_overlap() {
+        let pairs = |d: &Diagram| match d {
+            Diagram::Svg(svg) => layout::overlap_set(svg).expect("readable"),
+            other => panic!("not drawn: {other:?}"),
+        };
+        // the reviewer's source: the base has no overlap and the stacked drawing adds one
+        assert_eq!(flowchart::read(ADDS_AN_OVERLAP).stacked, ["T1", "T2"]);
+        assert!(pairs(&base_svg(ADDS_AN_OVERLAP)).is_empty());
+        assert!(!pairs(&stacked_svg(ADDS_AN_OVERLAP)).is_empty());
+        assert!(render(ADDS_AN_OVERLAP) == base_svg(ADDS_AN_OVERLAP));
+        // four-panels and four-cases: the stacked drawing removes every overlap
+        for src in [
+            include_str!("../tests/fixtures/diagram/four-panels.mmd"),
+            include_str!("../tests/fixtures/diagram/four-cases.mmd"),
+        ] {
+            assert!(!pairs(&base_svg(src)).is_empty());
+            assert!(render(src) == stacked_svg(src));
+            assert!(render(src) != base_svg(src));
+        }
+        // one draw fails: the other is kept. Guarded call 2 draws the base, call 3 the stack.
+        let four = include_str!("../tests/fixtures/diagram/four-panels.mmd");
+        for (call, want) in [(2, stacked_svg(four)), (3, base_svg(four))] {
+            test_hook::panic_at(call);
+            let got = render(four);
+            test_hook::panic_at(0);
+            assert!(got == want, "guarded call {call} fails");
+        }
+        // the choice itself, on hand-built drawings
+        let a = ("A", 0, 0, 10, 10);
+        let b = ("B", 5, 5, 10, 10);
+        let c = ("C", 100, 0, 10, 10);
+        let c_on_a = ("C", 8, 0, 10, 10);
+        let b_far = ("B", 50, 50, 10, 10);
+        let b_on_c = ("B", 105, 5, 10, 10);
+        let failed = |r: &str| Diagram::Failed {
+            reason: r.to_string(),
+        };
+        for (name, base, stacked, keep_stacked) in [
+            (
+                "removes AB, adds none",
+                drawn(&[a, b, c]),
+                drawn(&[a, b_far, c]),
+                true,
+            ),
+            (
+                "removes AB, keeps BC",
+                drawn(&[a, b, ("C", 10, 10, 10, 10)]),
+                drawn(&[a, ("B", 15, 15, 10, 10), ("C", 10, 10, 10, 10)]),
+                true,
+            ),
+            (
+                "adds AC, removes AB",
+                drawn(&[a, b, c]),
+                drawn(&[a, b_far, c_on_a]),
+                false,
+            ),
+            ("keeps AB", drawn(&[a, b, c]), drawn(&[a, b, c]), false),
+            (
+                "adds BC, keeps AB",
+                drawn(&[a, b, c]),
+                drawn(&[a, b, ("C", 12, 12, 10, 10)]),
+                false,
+            ),
+            (
+                "none either way",
+                drawn(&[a, b_far, c]),
+                drawn(&[a, b_on_c, ("C", 200, 0, 10, 10)]),
+                false,
+            ),
+            ("adds AB", drawn(&[a, b_far, c]), drawn(&[a, b, c]), false),
+            (
+                "the stack is unreadable",
+                drawn(&[a, b, c]),
+                Diagram::Svg("<svg>".into()),
+                false,
+            ),
+            ("the base fails", failed("base"), drawn(&[a, b, c]), true),
+            (
+                "the stack fails",
+                drawn(&[a, b_far, c]),
+                invalid("stacked"),
+                false,
+            ),
+            ("both fail", failed("base"), invalid("stacked"), false),
+        ] {
+            let want = if keep_stacked { &stacked } else { &base }.clone();
+            assert_eq!(choose(base, stacked), want, "{name}");
+        }
+    }
+
+    /// What the pinned crate draws for the stacked drawing input of `src`.
+    fn stacked_svg(src: &str) -> Diagram {
+        let ids = flowchart::read(src).stacked;
+        assert!(ids.len() >= 2, "not stacked: {src}");
+        base_svg(&stack(Cow::Borrowed(src), &ids))
+    }
+
+    /// A hand-built drawing: one subgraph rectangle per `(id, x, y, width, height)`, in whole
+    /// units, under the root translate `(10, -5)`.
+    fn drawn(rects: &[(&str, i64, i64, i64, i64)]) -> Diagram {
+        let mut svg = String::from(
+            "<svg viewBox=\"0 0 1000.00 1000.00\"><g transform=\"translate(10.00,-5.00)\"><g class=\"clusters\">",
+        );
+        for (id, x, y, w, h) in rects {
+            svg.push_str(&format!(
+                "<g class=\"cluster\" id=\"{id}\" data-id=\"{id}\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" data-svg-role=\"graph-subgraph-rect\" /></g>",
+                layout::show((x - 10) * 100),
+                layout::show((y + 5) * 100),
+                layout::show(w * 100),
+                layout::show(h * 100)
+            ));
+        }
+        svg.push_str("</g></g></svg>");
+        Diagram::Svg(svg)
+    }
+
+    /// rdb1 (D-438Y2): the one geometry function. Two subgraphs overlap when their interiors
+    /// intersect and neither holds the other; an edge is inside.
+    #[test]
+    fn rdb1_overlap_geometry() {
+        let pairs = |rects: &[(&str, i64, i64, i64, i64)]| {
+            let Diagram::Svg(svg) = drawn(rects) else {
+                unreachable!()
+            };
+            let l = layout::read(&svg).expect("readable");
+            layout::overlapping(&l)
+                .into_iter()
+                .map(|(a, b)| format!("{a}{b}"))
+                .collect::<Vec<_>>()
+        };
+        let none: Vec<String> = Vec::new();
+        let outer = ("A", 0, 0, 100, 100);
+        // nested, also with shared edges
+        assert_eq!(pairs(&[outer, ("B", 10, 10, 20, 20)]), none, "nested");
+        assert_eq!(
+            pairs(&[outer, ("B", 0, 0, 100, 20)]),
+            none,
+            "nested on edges"
+        );
+        assert_eq!(
+            pairs(&[("B", 10, 10, 20, 20), outer]),
+            none,
+            "nested, inner first"
+        );
+        // edge and corner contact
+        assert_eq!(pairs(&[outer, ("B", 100, 0, 10, 10)]), none, "edge contact");
+        assert_eq!(
+            pairs(&[outer, ("B", 100, 100, 10, 10)]),
+            none,
+            "corner contact"
+        );
+        // disjoint
+        assert_eq!(pairs(&[outer, ("B", 200, 200, 10, 10)]), none, "disjoint");
+        // intersecting, also when one sticks out of the other by one unit
+        assert_eq!(
+            pairs(&[outer, ("B", 50, 50, 100, 10)]),
+            ["AB"],
+            "intersecting"
+        );
+        assert_eq!(
+            pairs(&[outer, ("B", 0, 0, 101, 10)]),
+            ["AB"],
+            "out by one unit"
+        );
+        assert_eq!(
+            pairs(&[outer, ("B", 90, 0, 20, 10), ("C", 95, 2, 10, 5)]),
+            ["AB", "AC"],
+            "pairs in source order; B holds C"
+        );
+        // the root translate is added before the comparison
+        let l = layout::read(&match drawn(&[("A", 0, 0, 10, 10)]) {
+            Diagram::Svg(svg) => svg,
+            _ => unreachable!(),
+        })
+        .unwrap();
+        assert_eq!(l.translate, (1000, -500));
+        assert_eq!(
+            l.subgraphs[0].rect,
+            layout::Rect {
+                x: 0,
+                y: 0,
+                w: 1000,
+                h: 1000
+            }
+        );
+        // a number in another form is an error with its text
+        let odd = "<svg viewBox=\"0 0 10 10.00\"></svg>";
+        assert_eq!(
+            layout::read(odd),
+            Err("not a number with two decimals: \"10\"".to_string())
+        );
     }
 
     /// The variable that makes [`dgm1_guarded_panic_child`] run.

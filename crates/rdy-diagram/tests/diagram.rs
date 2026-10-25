@@ -1258,6 +1258,11 @@ fn rdb1_unended_arrow_lengths_use_the_line_end() {
     let thick = |n: usize| format!("={}", " ".repeat(n - 1));
     let invisible = |n: usize| format!("~~{}", " ".repeat(n - 2));
     let piped = |n: usize| format!("-->|{}", "y".repeat(n - 4));
+    // a left head, with spaces before the run or with none
+    let left_spaced = |n: usize| format!("< -. {}", ".".repeat(n - 5));
+    let x_spaced = |n: usize| format!("x -{}", " ".repeat(n - 3));
+    let x_dotted = |n: usize| format!("x-. {}", ".".repeat(n - 4));
+    let o_dotted = |n: usize| format!("o-. {}", ".".repeat(n - 4));
     // `é` is two bytes
     let wide = |n: usize| format!("-->|{}{}", "y".repeat((n - 4) % 2), "é".repeat((n - 4) / 2));
     for (form, arrow) in [
@@ -1267,6 +1272,10 @@ fn rdb1_unended_arrow_lengths_use_the_line_end() {
         ("invisible", &invisible),
         ("piped", &piped),
         ("wide", &wide),
+        ("left head, spaced", &left_spaced),
+        ("x head, spaced", &x_spaced),
+        ("x head", &x_dotted),
+        ("o head", &o_dotted),
     ] {
         for n in [256, 257] {
             assert_eq!(arrow(n).len(), n, "{form}");
@@ -1298,6 +1307,15 @@ fn rdb1_unended_arrow_lengths_use_the_line_end() {
     // a complete plain `--` wins over the inline label it could start: the long id is its end
     let long_id = format!("flowchart LR\nA -- {}\n", "B".repeat(300));
     assert!(drawn(&render(&long_id)), "{:?}", short(render(&long_id)));
+    // an `x` or `o` that the identifier reads on from is a node, not a left head
+    for head in ["x", "o"] {
+        let node = format!("flowchart LR\nA {head}-ray[\"{}\"]\n", "y".repeat(300));
+        assert!(drawn(&render(&node)), "{head}: {:?}", short(render(&node)));
+    }
+    // complete arrows with an `x` or `o` head draw
+    for src in ["flowchart LR\nA x--> B\n", "flowchart LR\nA o--o B\n"] {
+        assert!(drawn(&render(src)), "{src:?}: {:?}", short(render(src)));
+    }
 }
 
 /// `flowchart TD`, one subgraph `header`, then `blanks` blank lines, then a body and `end`, with
@@ -1333,6 +1351,23 @@ fn rdb1_blank_lines_after_subgraph_headers_draw() {
                 }
             }
         }
+    }
+    // a line that ends in CR CR LF keeps one CR LF once CRLF becomes LF: the whole line end goes
+    for (src, clean) in [
+        (
+            "flowchart TD\r\r\nsubgraph S\r\r\n\r\r\nA --> B\r\r\nend\r\r\n",
+            "flowchart TD\r\r\nsubgraph S\r\r\nA --> B\r\r\nend\r\r\n",
+        ),
+        (
+            "flowchart TD\r\r\nsubgraph S\r\r\n  \r\r\n\t\r\r\nA --> B\r\r\nend\r\r\n",
+            "flowchart TD\r\r\nsubgraph S\r\r\nA --> B\r\r\nend\r\r\n",
+        ),
+    ] {
+        assert!(
+            render(src) == Diagram::Svg(svg(clean)),
+            "{src:?}: {:?}",
+            short(render(src))
+        );
     }
     // a blank after a line the pinned crate drops before it parses
     for dropped in ["%%{init: {}}%%", "accTitle: a title"] {
