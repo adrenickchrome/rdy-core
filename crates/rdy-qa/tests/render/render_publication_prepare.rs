@@ -199,26 +199,28 @@ fn scopes() -> Vec<(&'static str, tempfile::TempDir, Rdy, Scope)> {
 /// Re-taken for the renderer plan's Task 8 (sidebar folders): the navigation markup of the pages,
 /// the sidebar rules of `assets/site.css` and `assets/app.js` (which now bundles `js/sidebar.js`)
 /// moved; their content rows keep their text.
+/// Re-taken again in Task 8 fix round 1: only `js/sidebar.js` changed (byte-size bounds and absolute-URL
+/// validation of the stored state), so only `assets/app.js` moved.
 const SITE_DIGESTS: [(&str, &str, &str); 4] = [
     (
         "canon",
-        "0b66e9099b5b13cbf3d7cfff368e6db2c39d45cc205c3256e0a30dcf21d73dd6",
-        "24240e670e92ab39a7c329d47b812d8049c0f8ffb646ffc57a48615e16ac2fd0",
+        "6b3ba15a04e04d5561759dab1d989d807511f01634fd9a6782169187aa9a0adc",
+        "46411fe9734b81a312a4d51ee8bb4248ff783e7fc80f7652e08054ea6821f69a",
     ),
     (
         "tag",
-        "b818f2c48d2709bcafd84ba2cb15487867cb76415ace75653a20ffd722f6c226",
-        "eaac6414ac29494329f35ab55687b2ea14278c7740dd5f8f03331b3e82584a21",
+        "7b05e688545260026dfa39baeda331c805acfb4246ace8f5bf73470206d1024e",
+        "b8f40e74d08bf5b1f10cbcbcb2da40fba465793bcc80098a2ca9cd77ce632140",
     ),
     (
         "view",
-        "377939ba17ed877acea1daec5bfdd062de077de37a6401e90ce44c6e5446df9f",
-        "40266b4ca8b5dab55be6cb3dafb2d83b3769df89a51f5aeefbdc947475e289fe",
+        "cbb5a040ab15ef1c97587c2eb7f8032c2fb936d84a53e57caf8755aa1f6af7b4",
+        "2604b0542dd6ec327b6322c132e7539730091311b7db4e38f210b944c9f79de3",
     ),
     (
         "proposal",
-        "6da171ab0c974d31b748ddf49986084c1b2709f74e7209fe989a200ac37d74e6",
-        "a2170f1b83226de0a495bcaa2dc21cced778b3f957388919e0d948006f96e7f9",
+        "42040fce946ccad843e3df6a59434732d52bbcd1a557dd6be83fcf3d7f71748d",
+        "578162e14793e6328cc423e83d5b0ddab5e68ad23bb834a88e280ed897672234",
     ),
 ];
 

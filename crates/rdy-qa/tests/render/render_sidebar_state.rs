@@ -1,6 +1,6 @@
 //! Task 8 of the renderer plan (dgm8): the sidebar's folders disclose in place, hold one more
 //! level than the path shows, indent per level, and keep their open state for the session; the
-//! page works the same without the script (D-X61DT, D-1GYT4, D-42YMF, D-E8P8J).
+//! page works the same without the script.
 use rdy_engine::Scope;
 use rdy_qa::golden::*;
 use serde_json::{Value, json};
@@ -601,6 +601,7 @@ fn dgm8_sidebar_state_is_bounded_and_scoped() {
         const P = '{SIDE_ONE}';
         const key = (u) => 'rdy:sidebar:1:' + u;
         const state = (s, u) => s.data.get(key(u));
+        const OTHER = 'http://h/area/other/index.html';
         // scoped: another origin, a live scope prefix and a file site each have a key
         const sites = ['http://h/', 'http://h/~scopes/draft/', 'https://other.example/docs/', 'file:///tmp/site/'];
         for (const base of sites) {{
@@ -626,6 +627,14 @@ fn dgm8_sidebar_state_is_bounded_and_scoped() {
           longEntry: JSON.stringify({{ open: ['http://h/' + 'x'.repeat(2048)] }}),
           oversized: JSON.stringify({{ open: [], pad: 'x'.repeat(65536) }}),
           nonAscii: JSON.stringify({{ open: ['http://h/é'] }}),
+          // each of these would open Other if the state were taken: the whole state is refused
+          multibyte: JSON.stringify({{ open: [OTHER], pad: 'é'.repeat(40000) }}),
+          notUrl: JSON.stringify({{ open: [OTHER, 'abcdef'] }}),
+          relative: JSON.stringify({{ open: [OTHER, '/area/other/index.html'] }}),
+          otherScheme: JSON.stringify({{ open: [OTHER, 'javascript:alert(1)'] }}),
+          quote: JSON.stringify({{ open: [OTHER, 'http://h/a"b'] }}),
+          backslash: JSON.stringify({{ open: [OTHER, 'http://h/a\\b'] }}),
+          notCanonical: JSON.stringify({{ open: [OTHER, 'HTTP://H/area/mid/../x'] }}),
         }};
         h.out.ignored = {{}};
         for (const [name, raw] of Object.entries(bad)) {{
@@ -641,6 +650,25 @@ fn dgm8_sidebar_state_is_bounded_and_scoped() {
           s.data.set(key('http://h/index.html'), JSON.stringify({{ open: ok }}));
           const p = h.page(P, 'http://h/' + P, {{ storage: s }}); p.ready();
           h.out.at256 = p.openLabels();
+        }}
+
+        // the size limit counts bytes of the stored text: exactly 65536 is read, one more is not
+        {{
+          const mk = (extra) => {{
+            const open = Array.from({{ length: 31 }}, (_, i) => 'http://h/' + String(i).padStart(4, '0') + 'z'.repeat(2048 - 13));
+            open.push(OTHER);
+            open.push('http://h/last');
+            const fixed = Buffer.byteLength(JSON.stringify({{ open }}));
+            open[open.length - 1] += 'q'.repeat(65536 - fixed + extra);
+            return JSON.stringify({{ open }});
+          }};
+          for (const [name, extra] of [['atLimit', 0], ['overLimit', 1]]) {{
+            const raw = mk(extra);
+            h.out[name + 'Bytes'] = Buffer.byteLength(raw);
+            const s = h.newStorage(); s.data.set(key('http://h/index.html'), raw);
+            const p = h.page(P, 'http://h/' + P, {{ storage: s }}); p.ready();
+            h.out[name] = p.openLabels();
+          }}
         }}
 
         // more than 256 once merged: the path first, then the lowest of the rest (Other, opened
@@ -675,7 +703,7 @@ fn dgm8_sidebar_state_is_bounded_and_scoped() {
           const raw = s.data.get(key(base + 'index.html'));
           const kept = JSON.parse(raw).open;
           h.out.size = {{
-            length: raw.length,
+            length: Buffer.byteLength(raw),
             path: ['area/index.html', 'area/mid/index.html', 'area/mid/side/index.html'].map((u) => kept.includes(base + u)),
             entries: kept.length,
             parses: Object.keys(JSON.parse(raw)).join(),
@@ -712,6 +740,13 @@ fn dgm8_sidebar_state_is_bounded_and_scoped() {
         "longEntry",
         "oversized",
         "nonAscii",
+        "multibyte",
+        "notUrl",
+        "relative",
+        "otherScheme",
+        "quote",
+        "backslash",
+        "notCanonical",
     ] {
         assert_eq!(
             v["ignored"][name],
@@ -721,6 +756,10 @@ fn dgm8_sidebar_state_is_bounded_and_scoped() {
     }
     // an accepted state is applied; here none of its paths is a folder of the page, so the page
     // keeps the native defaults of its path
+    assert_eq!(v["atLimitBytes"], 65536, "{v}");
+    assert_eq!(v["overLimitBytes"], 65537, "{v}");
+    assert_eq!(v["atLimit"], json!(["Area", "Mid", "Side", "Other"]), "{v}");
+    assert_eq!(v["overLimit"], json!(["Area", "Mid", "Side"]), "{v}");
     assert_eq!(v["at256"], json!(["Area", "Mid", "Side"]), "{v}");
     assert_eq!(
         v["cap"],

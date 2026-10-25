@@ -566,20 +566,22 @@ fn reserved(r: &mut Rdy) -> Scope {
 /// Re-taken for the renderer plan's Task 8 (sidebar folders): the navigation markup of the pages,
 /// the sidebar rules of `assets/site.css` and `assets/app.js` (which now bundles `js/sidebar.js`)
 /// moved; their content rows keep their text (the gold1_ goldens).
+/// Re-taken again in Task 8 fix round 1: only `js/sidebar.js` changed (byte-size bounds and absolute-URL
+/// validation of the stored state), so only `assets/app.js` moved.
 #[test]
 fn ec3_the_site_build_is_unchanged() {
     const BASE: [(&str, &str); 3] = [
         (
             "canon",
-            "3ab2b91a5c37054a29456ad2acfcea05a87afdfb5c65d9d433acf5423e279b8c",
+            "5d7cadbab816c874878ec3963cd4c5ffaf915df1d43f9617fc6c2b39fe0d7f62",
         ),
         (
             "view:editing",
-            "5ccc0165812eff5226eeb2c0000a8c0ca514cfe783e831e9fdcf2e4a01e1991f",
+            "799ddaa337252816d967b196eca321d7b927dc1d5921279b67527ca52452d499",
         ),
         (
             "view:reserved",
-            "155fc0e05b80c32efcccff8613fb51ae26aefad64ad5c028a3cf6844fe04a0f2",
+            "568dfaf67c5bd373e51c9cb13f20c16b321cff0b64718858d44786e54245467b",
         ),
     ];
     // the ids the corpus's generated pages and the reserved docs draw come from a seeded stream
