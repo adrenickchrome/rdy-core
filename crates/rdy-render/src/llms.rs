@@ -422,12 +422,14 @@ pub(crate) fn attr<'a>(tag: &'a str, key: &str) -> Option<&'a str> {
     }
 }
 
-/// An element whose words a reader never sees on the page: a button's label, what only a screen
-/// reader hears (`class="visually-hidden"`), the diagram canvas (`aria-hidden="true"`; its
-/// words are under "Diagram source"), and a script, a stylesheet (an SVG's own included) or a
-/// template. Only the attributes count, never an href or title that mentions them.
+/// An element whose words a reader never sees on the page: a reader control (a button's label or
+/// a diagram's open link, `p class="diagram-open"`; D-3BM8P), what only a screen reader hears
+/// (`class="visually-hidden"`), the diagram canvas (`aria-hidden="true"`; its words are under
+/// "Diagram source"), and a script, a stylesheet (an SVG's own included) or a template. Only the
+/// attributes count, never an href or title that mentions them.
 pub(crate) fn unseen(name: &str, tag: &str) -> bool {
     matches!(name, "button" | "script" | "style" | "template")
+        || (name == "p" && attr(tag, "class") == Some("diagram-open"))
         || attr(tag, "aria-hidden") == Some("true")
         || attr(tag, "class").is_some_and(|c| c.split_whitespace().any(|c| c == "visually-hidden"))
 }
@@ -758,6 +760,20 @@ mod tests {
             "## The case clause\n\nA guard & a pattern.\n\n- one\n- two\n  1. first\n\n\
              Table 1\n\n| A | B |\n| --- | --- |\n| a \\| b | 2 |\n\nPython\n\n\
              ```\nif x < 1:\n    pass\n```\n\nAlt"
+        );
+    }
+
+    #[test]
+    fn dgm6_a_diagrams_open_link_adds_no_words() {
+        // ruling task-6: the open link is a reader control (D-3BM8P), like the Copy button;
+        // another class, or the same words as authored text, still read
+        let html = "<figure class=\"diagram\" data-lang=\"mermaid\"><p class=\"visually-hidden\">Alt</p>\
+            <p class=\"diagram-open\"><a href=\"assets/diagrams/x.svg\">open full size</a></p>\
+            <figcaption>Alt</figcaption></figure><p class=\"diagram-opener\">Kept</p>\
+            <p class=\"note\"><a href=\"x.svg\">open full size</a></p><p>open full size</p>";
+        assert_eq!(
+            reader_text(html),
+            "Alt\n\nKept\n\nopen full size\n\nopen full size"
         );
     }
 

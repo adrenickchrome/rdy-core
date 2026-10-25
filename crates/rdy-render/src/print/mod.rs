@@ -394,7 +394,8 @@ pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
         header: version::header(&position, None),
         headers: Default::default(),
         used_blobs: Default::default(),
-        // a print shows each diagram as its source: it draws none and warns of none
+        // a print draws no diagram, writes no file and warns of none; each diagram has the site's
+        // shape less its drawing (ruling task-6)
         draw_diagrams: false,
         diagrams: Default::default(),
         governing: Default::default(),

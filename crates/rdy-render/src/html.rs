@@ -377,7 +377,9 @@ pub enum DiagramView {
     /// Its source as a code block, in place of a drawing: a Mermaid source rdy does not draw, or
     /// a language rdy has no drawing for.
     Fallback,
-    /// Its source under "Diagram source" alone: an output that shows no picture (the print).
+    /// Its source under "Diagram source" alone: a drawing in an output that shows no picture
+    /// (the print, which shows a source with no drawing as [`DiagramView::Fallback`], as the site
+    /// does).
     Source,
 }
 

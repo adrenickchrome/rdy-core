@@ -276,6 +276,84 @@ fn ec3_print_has_the_words_of_llms_full() {
     }
 }
 
+/// Ruling task-6: a diagram's words are the same in the print and in llms-full, whatever its
+/// shape: drawn (its "open full size" link is a reader control and adds no words), D2, and an
+/// invalid, an undrawn and a failed Mermaid (each a code block with its language, then its
+/// caption). Authored text that reads "open full size" stays in both.
+#[test]
+fn dgm6_print_and_llms_read_the_same_diagram_words() {
+    let (_d, mut r, _ids) = project();
+    let diagram = |lang: &str, alt: &str, body: &str| {
+        json!({"op": "create", "type": "diagram", "parent": "$s",
+            "fields": {"lang": lang, "alt": alt}, "body": body})
+    };
+    write(
+        &mut r,
+        "dgm6",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Diagram words", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Shapes"}},
+            diagram("mermaid", "Drawn flow", "flowchart LR\n  A[start] --> B[end]"),
+            diagram("d2", "D2 flow", "a -> b: goes"),
+            diagram("mermaid", "Invalid flow", "flowchart LR\n A["),
+            diagram("mermaid", "Undrawn pie", "pie\n  \"a\" : 1"),
+            diagram("mermaid", "Failed flow",
+                "flowchart LR\n    A --> B\n    classDef e fill:#f00\" onload=\"alert(1)\n    class A e"),
+            {"op": "create", "type": "prose", "parent": "$s", "body": "open full size"}
+        ]),
+    )
+    .expect("the diagrams");
+    land(&mut r, "dgm6").expect("land them");
+    let p = canon(&r);
+    let site = build_site(&r.read(), &Scope::Canon, Mode::Static).unwrap();
+    let full = String::from_utf8(site.files["llms-full.txt"].clone()).unwrap();
+    let sections = llms_sections(&full);
+    let docs = tree_docs(&p);
+    assert_eq!(sections.len(), docs.len());
+    let (d, section) = docs
+        .iter()
+        .zip(&sections)
+        .find(|(d, _)| d.title == "Diagram words")
+        .expect("the doc and its section");
+    // the site draws the one flow and shows the other four as code blocks
+    let page = String::from_utf8(site.files[&d.page].clone()).unwrap();
+    assert_eq!(
+        page.matches("<p class=\"diagram-open\">").count(),
+        1,
+        "{page}"
+    );
+    assert_eq!(
+        page.matches("<div class=\"code-block\">").count(),
+        4,
+        "{page}"
+    );
+    assert_eq!(doc_words(d), llms_words(section), "{section}");
+    // the control adds no words; the authored line is in both
+    let authored = |l: &&str| l.trim() == "open full size";
+    assert_eq!(section.lines().filter(authored).count(), 1, "{section}");
+    assert!(
+        d.blocks
+            .iter()
+            .any(|b| matches!(b, PBlock::Para { runs, .. } if text(runs) == "open full size")),
+        "{:?}",
+        d.blocks
+    );
+    // each fallback reads its language, its source, then its caption, in both
+    for (label, alt) in [
+        ("D2", "D2 flow"),
+        ("Mermaid", "Invalid flow"),
+        ("Mermaid", "Undrawn pie"),
+        ("Mermaid", "Failed flow"),
+    ] {
+        let at = section.find(alt).expect(alt);
+        let before = &section[..at];
+        let lang = before.rfind(label).expect(label);
+        assert!(before[lang..].contains("```"), "{alt}: {section}");
+    }
+    // the print draws none
+    assert!(p.blobs.values().all(|b| !b.file.contains("diagrams")));
+}
+
 #[test]
 fn ec3_print_shows_no_block_id() {
     let (_d, r, _ids) = project();

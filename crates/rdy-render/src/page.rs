@@ -374,6 +374,13 @@ pub struct DiagramAssets {
     pub warnings: Vec<String>,
 }
 
+/// What a diagram block is, before a page shows it: drawn, with its file's hash and the inline
+/// SVG of its place, or not drawn, with why when it is a Mermaid source.
+enum DiagramShape {
+    Drawn { hash: Hash, svg: String },
+    Undrawn(Option<diagram::Diagram>),
+}
+
 impl DiagramAssets {
     /// The site-relative path of the file of the drawing whose standalone bytes hash to `h`.
     pub fn path(h: &Hash) -> String {
@@ -460,24 +467,18 @@ fn kind_word(block_type: &str) -> &'static str {
 }
 
 impl Shared<'_> {
-    /// How the page at `page` shows diagram `b` of the doc titled `doc`, whose resolved plain
-    /// source is `source`. `places` counts each drawing's places on the page so far, so that two
-    /// identical diagrams on one page have their own ids. A Mermaid source that does not draw
-    /// warns, once per block per build, and shows its source; any other language shows its
-    /// source and does not warn. The print shows every diagram as its source.
-    fn diagram_view(
+    /// The shape of diagram `b`, whose resolved plain source is `source`: its drawing, else why a
+    /// Mermaid source draws none. `places` counts each drawing's places on the page so far, so
+    /// that two identical diagrams on one page have their own ids. The site and the print both
+    /// read this one choice (ruling task-6), so a diagram has the same shape in both.
+    fn diagram_shape(
         &self,
         b: &Block,
         source: &str,
-        doc: &str,
-        page: &str,
         places: &RefCell<BTreeMap<Hash, usize>>,
-    ) -> DiagramView {
-        if !self.draw_diagrams {
-            return DiagramView::Source;
-        }
+    ) -> DiagramShape {
         if b.field_str("lang") != Some("mermaid") {
-            return DiagramView::Fallback;
+            return DiagramShape::Undrawn(None);
         }
         let mut d = self.diagrams.borrow_mut();
         let failed = match d.draw(source) {
@@ -487,11 +488,7 @@ impl Shared<'_> {
                 match d.inline(&h, *place) {
                     Ok(svg) => {
                         *place += 1;
-                        d.used.insert(h);
-                        return DiagramView::Drawn {
-                            svg,
-                            href: rel(page, &DiagramAssets::path(&h)),
-                        };
+                        return DiagramShape::Drawn { hash: h, svg };
                     }
                     Err(reason) => diagram::Diagram::Failed {
                         reason: reason.to_string(),
@@ -500,8 +497,38 @@ impl Shared<'_> {
             }
             Err(why) => why,
         };
-        d.warn(doc, &b.id, &failed);
-        DiagramView::Fallback
+        DiagramShape::Undrawn(Some(failed))
+    }
+
+    /// How the page at `page` shows diagram `b` of the doc titled `doc`, whose resolved plain
+    /// source is `source` (its [`Shared::diagram_shape`]). A Mermaid source that does not draw
+    /// warns, once per block per build, and shows its source; any other language shows its
+    /// source and does not warn. The print draws none, writes no file and warns of none: a
+    /// drawing prints as its source alone, and a source with no drawing as the site's code block.
+    fn diagram_view(
+        &self,
+        b: &Block,
+        source: &str,
+        doc: &str,
+        page: &str,
+        places: &RefCell<BTreeMap<Hash, usize>>,
+    ) -> DiagramView {
+        match self.diagram_shape(b, source, places) {
+            DiagramShape::Drawn { .. } if !self.draw_diagrams => DiagramView::Source,
+            DiagramShape::Drawn { hash, svg } => {
+                self.diagrams.borrow_mut().used.insert(hash);
+                DiagramView::Drawn {
+                    svg,
+                    href: rel(page, &DiagramAssets::path(&hash)),
+                }
+            }
+            DiagramShape::Undrawn(why) => {
+                if let Some(why) = why.filter(|_| self.draw_diagrams) {
+                    self.diagrams.borrow_mut().warn(doc, &b.id, &why);
+                }
+                DiagramView::Fallback
+            }
+        }
     }
 
     /// Whether `b` reads as removed content: a removed block (a stub), or a figure whose blob a
