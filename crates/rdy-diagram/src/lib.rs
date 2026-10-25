@@ -8,7 +8,10 @@
 //! follows the pinned parser only where a comment, a quote or a line end decides what is
 //! structure. Flowchart depth comes from the pinned grammar's own reading, which reads a
 //! subgraph with no `end` again as nodes (see `flowchart`), and class and state depth from the
-//! pinned line parsers' rules.
+//! pinned line parsers' rules. Two flowchart shapes inside those bounds would hold the pinned
+//! crate for minutes or hours, so they are refused too: a subgraph that no `end` closes (the
+//! grammar reads its body again, and nested ones multiply), and a link over 256 bytes (an arrow
+//! spans one rank per dot or dash).
 //!
 //! A panic in the pinned crate is a drawing fault, never a crash, and prints nothing.
 //!
@@ -28,11 +31,15 @@ pub const MAX_STATEMENTS: usize = 2048;
 pub const MAX_DEPTH: usize = 32;
 /// The most bytes a drawn SVG may have.
 pub const MAX_SVG_BYTES: usize = 4194304;
+/// The most bytes one flowchart link may have: its arrow and its label text.
+pub const MAX_LINK_BYTES: usize = 256;
 
 const OVER_BYTES: &str = "the source is over 65536 bytes";
 const OVER_STATEMENTS: &str = "the source has over 2048 statements";
 const OVER_DEPTH: &str = "the source nests subgraphs or blocks over 32 deep";
 const OVER_SVG: &str = "the drawn diagram is over 4194304 bytes";
+const UNCLOSED: &str = "a subgraph is not closed with end";
+const OVER_LINK: &str = "the source has a link over 256 bytes";
 /// The reason when the pinned crate panics on a source.
 const LIBRARY_FAILED: &str = "the drawing library failed on this source";
 /// The pinned crate's text when it detects no diagram type.
@@ -153,12 +160,18 @@ pub fn render(source: &str) -> Diagram {
         Some("sequence") => Family::Sequence,
         _ => Family::Unknown,
     };
-    let (statements, depth) = measure(src, family);
-    if statements > MAX_STATEMENTS {
+    let m = measure(src, family);
+    if m.statements > MAX_STATEMENTS {
         return invalid(OVER_STATEMENTS);
     }
-    if depth > MAX_DEPTH {
+    if m.depth > MAX_DEPTH {
         return invalid(OVER_DEPTH);
+    }
+    if m.unclosed {
+        return invalid(UNCLOSED);
+    }
+    if m.longest_link > MAX_LINK_BYTES {
+        return invalid(OVER_LINK);
     }
     let config = RenderConfig {
         svg_theme: Some(SvgThemeConfig {
@@ -336,17 +349,40 @@ fn code_len(bytes: &[u8]) -> Option<usize> {
     (digits > 0 && bytes.get(end) == Some(&b';')).then_some(end + 1)
 }
 
-/// Counts the statements of `src` after front matter, and its deepest nesting.
-fn measure(src: &str, family: Family) -> (usize, usize) {
+/// What the bounds read in a source.
+struct Measure {
+    statements: usize,
+    depth: usize,
+    /// A flowchart subgraph the pinned grammar attempts finds no `end`.
+    unclosed: bool,
+    /// The longest flowchart link, in bytes.
+    longest_link: usize,
+}
+
+/// Counts the statements of `src` after front matter, its deepest nesting and, in a flowchart,
+/// whether a subgraph finds no `end` and its longest link. The other families' pinned parsers
+/// read each line once, so an unclosed block is read once and costs nothing more.
+fn measure(src: &str, family: Family) -> Measure {
     let body = after_front_matter(src);
     let statements = segments(body.as_bytes(), family);
-    let depth = match family {
-        Family::Flowchart => flowchart::depth(src),
-        Family::Class => class_depth(body),
-        Family::State => state_depth(body),
-        Family::Sequence | Family::Unknown => 0,
+    let mut m = Measure {
+        statements,
+        depth: 0,
+        unclosed: false,
+        longest_link: 0,
     };
-    (statements, depth)
+    match family {
+        Family::Flowchart => {
+            let r = flowchart::read(src);
+            m.depth = r.depth;
+            m.unclosed = r.unclosed;
+            m.longest_link = r.longest_link;
+        }
+        Family::Class => m.depth = class_depth(body),
+        Family::State => m.depth = state_depth(body),
+        Family::Sequence | Family::Unknown => {}
+    }
+    m
 }
 
 /// Counts statements in one pass: nonempty lines or `;`-separated segments outside double-quoted

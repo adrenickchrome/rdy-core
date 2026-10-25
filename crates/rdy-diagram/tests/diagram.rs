@@ -159,6 +159,8 @@ const OVER_BYTES: &str = "the source is over 65536 bytes";
 const OVER_STATEMENTS: &str = "the source has over 2048 statements";
 const OVER_DEPTH: &str = "the source nests subgraphs or blocks over 32 deep";
 const UNKNOWN: &str = "unknown diagram type";
+const UNCLOSED: &str = "a subgraph is not closed with end";
+const OVER_LINK: &str = "the source has a link over 256 bytes";
 
 /// The child half of the fresh-process check: renders the fixture the parent names and writes
 /// the golden form where the parent says. Without the parent's variables it does nothing.
@@ -994,8 +996,6 @@ fn dgm1_flowchart_depth_reads_structure_only() {
         format!("flowchart LR\nA --> B %% {opens}{closes}\n"),
         format!("flowchart LR\nA[\"{opens}{closes}\"] --> B\n"),
         format!("flowchart LR\nA[{opens}{closes}] --> B\n"),
-        format!("flowchart LR\nA -->|{opens}{closes}| B\n"),
-        format!("flowchart LR\nA -- {opens}{closes} --> B\n"),
         format!(
             "flowchart LR\nA(\n{}{}x)\n",
             "subgraph x\n".repeat(33),
@@ -1013,17 +1013,28 @@ fn dgm1_flowchart_depth_reads_structure_only() {
                 .map(|i| format!("subgraph S{i};A{i};end;"))
                 .collect::<String>()
         ),
-        // a separator right after a subgraph's header ends it: the grammar reads plain nodes
-        nest(
-            "flowchart TD",
-            "",
-            33,
-            |i| format!("subgraph S{i}\n\n"),
-            "B\n",
-            "end\n",
-        ),
     ] {
         assert!(drawn(&render(&src)), "{src}");
+    }
+    // a separator right after a subgraph's header ends it: the grammar finds no `end` for it and
+    // reads its header as plain nodes, so it adds no depth, and the subgraph is not closed
+    // (ruling final)
+    let separated = nest(
+        "flowchart TD",
+        "",
+        33,
+        |i| format!("subgraph S{i}\n\n"),
+        "B\n",
+        "end\n",
+    );
+    assert_eq!(short(render(&separated)), invalid(UNCLOSED), "{separated}");
+    // keywords in a link label: the depth bound comes first, so the link bound's reason shows
+    // that they add no depth (ruling final: a link is over 256 bytes here)
+    for src in [
+        format!("flowchart LR\nA -->|{opens}{closes}| B\n"),
+        format!("flowchart LR\nA -- {opens}{closes} --> B\n"),
+    ] {
+        assert_eq!(short(render(&src)), invalid(OVER_LINK), "{src}");
     }
     // a subgraph after a node on the same line still nests
     let after_node = |n: usize| {
@@ -1084,7 +1095,9 @@ fn dgm1_open_subgraphs_are_read_again_as_structure() {
         format!("flowchart LR\nsubgraph S[(x]\n%% {opens}{closes}\n"),
         format!("flowchart LR\nsubgraph a--b\n%% {opens}{closes}\n"),
     ] {
-        assert!(drawn(&render(&src)), "{src}");
+        // the depth bound comes first: the unclosed reason shows the body added no depth
+        // (ruling final: an open subgraph is refused before the pinned crate reads it again)
+        assert_eq!(short(render(&src)), invalid(UNCLOSED), "{src}");
     }
     // nesting inside or after an open subgraph is still refused at 33 attempted levels
     for open in ["subgraph S[\"x]\n", "subgraph S[(x]\n", "subgraph S\n"] {
@@ -1098,7 +1111,7 @@ fn dgm1_open_subgraphs_are_read_again_as_structure() {
                 "end\n",
             )
         };
-        assert!(drawn(&render(&after(31))), "{open}");
+        assert_eq!(short(render(&after(31))), invalid(UNCLOSED), "{open}");
         assert_eq!(short(render(&after(32))), invalid(OVER_DEPTH), "{open}");
     }
 }
@@ -1154,4 +1167,79 @@ fn dgm1_a_drawing_library_panic_prints_nothing() {
         !stderr.contains("no entry found for key"),
         "stderr:\n{stderr}"
     );
+}
+
+/// Final review I2 (ruling final): the two inputs inside every other bound that held the pinned
+/// crate for minutes or hours are refused before it is called. A subgraph that no `end` closes
+/// (the pinned grammar reads its body again for each one, so k of them cost about 2^k) and a link
+/// whose arrow and label pass 256 bytes (a long arrow spans as many ranks as it has dots or
+/// dashes). The reasons are exact; no test here times anything.
+#[test]
+fn dgm1_unclosed_subgraphs_and_long_links_are_refused() {
+    // the reviewer's sources: k nested subgraphs that no `end` closes
+    for k in [16, 18, 20, 22] {
+        let src = format!(
+            "flowchart LR\n{}A\n",
+            (0..k)
+                .map(|i| format!("subgraph U{i}\n"))
+                .collect::<String>()
+        );
+        assert_eq!(short(render(&src)), invalid(UNCLOSED), "k = {k}");
+    }
+    // one is enough, wherever it is
+    for src in [
+        "flowchart LR\nsubgraph S\nA --> B\n",
+        "flowchart LR\nA --> B\nsubgraph S[\"x]\nC\n",
+        "graph TD\nsubgraph S\nsubgraph T\nA\nend\n",
+    ] {
+        assert_eq!(short(render(src)), invalid(UNCLOSED), "{src}");
+    }
+    // a closed nesting 32 deep still draws
+    let closed = format!(
+        "flowchart TD\n{}A --> B\n{}",
+        (0..32)
+            .map(|i| format!("subgraph S{i}\n"))
+            .collect::<String>(),
+        "end\n".repeat(32)
+    );
+    assert!(drawn(&render(&closed)), "32 closed subgraphs");
+
+    // the reviewer's long dotted links: 16,000 and 60,000 dots
+    for dots in [16000, 60000] {
+        let src = format!("flowchart LR\nA -. x{}- B\n", ".".repeat(dots));
+        assert!(src.len() <= 65536);
+        assert_eq!(short(render(&src)), invalid(OVER_LINK), "{dots} dots");
+    }
+    // a link is its arrow and its label: 256 bytes draw, 257 do not, in every link form
+    let dotted = |n: usize| format!("-. x{}->", ".".repeat(n - 6));
+    let solid = |n: usize| format!("-- {} -->", "y".repeat(n - 7));
+    let thick = |n: usize| format!("== {} ==>", "y".repeat(n - 7));
+    let piped = |n: usize| format!("-->|{}|", "y".repeat(n - 5));
+    let long = |n: usize| format!("{}>", "-".repeat(n - 1));
+    for (form, link) in [
+        ("dotted", &dotted as &dyn Fn(usize) -> String),
+        ("solid", &solid),
+        ("thick", &thick),
+        ("piped", &piped),
+        ("long", &long),
+    ] {
+        assert_eq!(link(256).len(), 256, "{form}");
+        let src = |n: usize| format!("flowchart LR\nA {} B\n", link(n));
+        assert!(drawn(&render(&src(256))), "{form}: 256 bytes");
+        assert_eq!(
+            short(render(&src(257))),
+            invalid(OVER_LINK),
+            "{form}: 257 bytes"
+        );
+        // later in a chain, or after a subgraph, it is still one link
+        let chained = format!("flowchart LR\nA --> B {} C --> D\n", link(257));
+        assert_eq!(
+            short(render(&chained)),
+            invalid(OVER_LINK),
+            "{form}: chained"
+        );
+    }
+    // the same bytes in a node label are no link
+    let label = format!("flowchart LR\nA[\"{}\"] --> B\n", ".".repeat(1000));
+    assert!(drawn(&render(&label)), "dots in a node label");
 }
