@@ -1304,21 +1304,36 @@ impl Out {
     }
 }
 
+/// Which colors a palette rule gives the slots.
+#[derive(Clone, Copy)]
+enum Column {
+    Site,
+    Light,
+    Dark,
+}
+
+fn palette_rule(root: &str, column: Column) -> String {
+    let decls: Vec<String> = PALETTE
+        .iter()
+        .map(|&(slot, token, light, dark)| match column {
+            Column::Site => format!("--dgm-{slot}: var({token});"),
+            Column::Light => format!("--dgm-{slot}: {light};"),
+            Column::Dark => format!("--dgm-{slot}: {dark};"),
+        })
+        .collect();
+    format!("#{root} {{ {} }}", decls.join(" "))
+}
+
+/// The palette written first in the stylesheet: the asset's light colors and its OS-dark rule,
+/// or the site's tokens inline.
 fn palette(mode: Mode, root: &str) -> String {
-    let rule = |value: &dyn Fn(&(&str, &str, &str, &str)) -> String| {
-        let decls: Vec<String> = PALETTE
-            .iter()
-            .map(|p| format!("--dgm-{}: {};", p.0, value(p)))
-            .collect();
-        format!("#{root} {{ {} }}", decls.join(" "))
-    };
     match mode {
         Mode::Standalone => format!(
             "\n    {}\n    @media (prefers-color-scheme: dark) {{\n      {}\n    }}",
-            rule(&|p| p.2.to_string()),
-            rule(&|p| p.3.to_string())
+            palette_rule(root, Column::Light),
+            palette_rule(root, Column::Dark)
         ),
-        Mode::Inline => format!("\n    {}", rule(&|p| format!("var({})", p.1))),
+        Mode::Inline => format!("\n    {}", palette_rule(root, Column::Site)),
     }
 }
 
@@ -1703,14 +1718,13 @@ fn root_compound(core: &str, ids: &Ids) -> Option<usize> {
         3
     } else if core.starts_with(":root") {
         5
-    } else if let Some(rest) = core.strip_prefix('#') {
+    } else {
+        let rest = core.strip_prefix('#')?;
         let end = ident_end(rest.as_bytes(), 0);
         if ids.map.get(&rest[..end]) != Some(&ids.root) {
             return None;
         }
         1 + end
-    } else {
-        return None;
     };
     if b.get(len).is_some_and(|&c| ident_byte(c) || c == b'(') {
         return None;
@@ -2495,6 +2509,8 @@ mod tests {
             hostile.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
             expect.iter().map(|(n, _)| *n).collect::<Vec<_>>()
         );
+        let event = Regex::new(r"<[^>]*\son[a-z]+=").unwrap();
+        let fetch = Regex::new(r#"<[^>]*url\(\s*['"]?http"#).unwrap();
         for ((name, raw), (_, want)) in hostile.iter().zip(expect) {
             assert_eq!(standalone(raw).map(|_| ()), want, "{name}");
             assert_eq!(inline(raw, H, 0).map(|_| ()), want, "{name} inline");
@@ -2503,9 +2519,7 @@ mod tests {
                     for tag in ["<script", "<foreignObject", "<a ", "<img", "<div"] {
                         assert!(!out.contains(tag), "{name}: {tag}");
                     }
-                    let event = Regex::new(r"<[^>]*\son[a-z]+=").unwrap();
                     assert!(!event.is_match(&out), "{name}");
-                    let fetch = Regex::new(r#"<[^>]*url\(\s*['"]?http"#).unwrap();
                     assert!(!fetch.is_match(&out), "{name}");
                     assert!(!style_text(&out).contains("url(http"), "{name}");
                 }
