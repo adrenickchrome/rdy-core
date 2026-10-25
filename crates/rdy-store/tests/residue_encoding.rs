@@ -344,7 +344,7 @@ fn ok2_residue_encoding_picks_one_derivation() {
     // a preparation takes no encoding-0 residue: every supplied residue is written and checked
     // in the latest encoding, so a content-1 residue is refused there
     let path = dir.path().join("prepare");
-    let mut s = seeded(&path);
+    let s = seeded(&path);
     let mut d = build_request(&s, &RequestSpec::new("work", vec![version(&secret())]));
     set_content(&mut d, legacy_content_1_hash(&secret()));
     relink(&mut d.request, &d.residues);

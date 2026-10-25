@@ -14,7 +14,7 @@ use rdy_store::transition::Transitions;
 use rdy_store::{Store, StoreError};
 use redaction_fixture::{
     Draft, FixtureOptions, ORIGIN, Proof, RequestSpec, authorized_batch_fixture, build_request,
-    enc, hash_of, relink, residue_frame, residue_id, segment_bytes,
+    enc, relink, residue_frame, residue_id, segment_bytes,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
