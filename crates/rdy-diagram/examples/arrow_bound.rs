@@ -50,9 +50,13 @@ const MIN_N: u32 = 200;
 const LINKS: u64 = 15;
 /// The number of top-level subgraphs in the stacked shapes.
 const STACKED: usize = 16;
-/// Whether the render path refuses a source by its arrow cost. Set it to true once it does, and the
-/// verify step then checks the wrapper rows: `svg` at N and `invalid` at N + 1.
-const WRAPPER_BOUND_LANDED: bool = false;
+/// The arrows of the source that finds out whether the render path holds the arrow bound. It is far
+/// over the top of the ladder.
+const LANDING_ARROWS: usize = 9000;
+/// The start of the reason the render path gives once it holds the arrow bound.
+const REASON_HEAD: &str = "the source has over ";
+/// The end of that reason.
+const REASON_TAIL: &str = " arrows, counting a longer or labelled arrow as more than one";
 
 const USAGE: &str = "usage: arrow_bound scan | verify <N> <weight>";
 const HEADER: &str = "phase\tshape\tstyle\tdirection\tpadding\tarrows\tlabelled\tspan\tweight\tbudget\tcost\tbytes\tstatements\tdepth\trepeat\telapsed_ns\tresult\tsvg_bytes";
@@ -1277,6 +1281,8 @@ trait Probe {
     fn draw(&mut self, case: &Case, budget: u32, weight: u32, phase: Phase) -> Drawn;
     /// Draws one of the four diagnostic sources.
     fn diagnostic(&mut self, which: usize, weight: u32) -> Drawn;
+    /// Whether the render path refuses a source by its arrow cost.
+    fn bound_landed(&mut self) -> bool;
     /// Nanoseconds since the run began.
     fn elapsed(&mut self) -> u64;
 }
@@ -1335,7 +1341,36 @@ enum Verified {
 
 /// The reason the render path gives once the arrow bound is in.
 fn bound_reason(n: u32) -> String {
-    format!("the source has over {n} arrows, counting a longer or labelled arrow as more than one")
+    format!("{REASON_HEAD}{n}{REASON_TAIL}")
+}
+
+/// Whether a draw through the render path shows that it holds the arrow bound: the result is
+/// `invalid`, and the reason has the bound's two texts.
+fn bound_landed(attempt: &Attempt, reason: Option<&str>) -> bool {
+    attempt.result == Res::Invalid
+        && reason.is_some_and(|r| r.starts_with(REASON_HEAD) && r.ends_with(REASON_TAIL))
+}
+
+/// The source that finds out whether the render path holds the arrow bound: one flowchart line of
+/// plain `-->` arrows, far over the ladder top and inside the five existing bounds. The node ids
+/// repeat after 676, so the chain stays inside the source-size bound.
+fn landing_source() -> String {
+    let id = |i: usize| -> String {
+        let (hi, lo) = (i % 676 / 26, i % 26);
+        format!(
+            "x{}{}",
+            char::from(b'a' + u8::try_from(hi).unwrap_or(0)),
+            char::from(b'a' + u8::try_from(lo).unwrap_or(0))
+        )
+    };
+    let mut text = String::from("flowchart LR\n");
+    text.push_str(&id(0));
+    for i in 1..=LANDING_ARROWS {
+        text.push_str("-->");
+        text.push_str(&id(i));
+    }
+    text.push('\n');
+    text
 }
 
 struct Search<'a> {
@@ -1343,7 +1378,7 @@ struct Search<'a> {
     cases: &'a [Case],
     out: &'a mut dyn Write,
     /// The verdicts of ladder and refine draws, so that a draw is never repeated.
-    memo: HashMap<(usize, u32, u32), bool>,
+    memo: HashMap<(usize, u32, u32), Verdict>,
 }
 
 impl<'a> Search<'a> {
@@ -1379,32 +1414,43 @@ impl<'a> Search<'a> {
         Ok(drawn)
     }
 
-    /// Whether a case draws safely at a budget in the ladder or the refine range. An unlabelled
-    /// case draws the same at every weight, so its draw is shared.
-    fn safe(&mut self, case: usize, budget: u32, weight: u32, phase: Phase) -> Result<bool, Halt> {
+    /// How a case draws at a budget in the ladder or the refine range. An unlabelled case draws
+    /// the same at every weight, so its draw is shared.
+    fn verdict(
+        &mut self,
+        case: usize,
+        budget: u32,
+        weight: u32,
+        phase: Phase,
+    ) -> Result<Verdict, Halt> {
         let shared = if self.cases[case].weighted() {
             weight
         } else {
             1
         };
         let key = (case, budget, shared);
-        if let Some(safe) = self.memo.get(&key) {
-            return Ok(*safe);
+        if let Some(verdict) = self.memo.get(&key) {
+            return Ok(*verdict);
         }
-        let safe = self.draw(case, budget, weight, phase)?.verdict == Verdict::Safe;
-        self.memo.insert(key, safe);
-        Ok(safe)
+        let verdict = self.draw(case, budget, weight, phase)?.verdict;
+        self.memo.insert(key, verdict);
+        Ok(verdict)
     }
 
     /// Steps 1 and 2 for the cases `set` at a weight: the ladder, then the refine range. The
-    /// result is the candidate.
+    /// result is the candidate. A budget the case cannot be built at ends that case's ladder or
+    /// refine. It sets no first unsafe budget and gives no candidate.
     fn candidate(&mut self, set: &[usize], weight: u32) -> Result<u32, Halt> {
         let mut firsts = Vec::new();
         for &case in set {
             for (rung, &budget) in LADDER.iter().enumerate() {
-                if !self.safe(case, budget, weight, Phase::Ladder)? {
-                    firsts.push((case, rung));
-                    break;
+                match self.verdict(case, budget, weight, Phase::Ladder)? {
+                    Verdict::Safe => {}
+                    Verdict::Unsafe => {
+                        firsts.push((case, rung));
+                        break;
+                    }
+                    Verdict::Inapplicable => break,
                 }
             }
         }
@@ -1419,20 +1465,39 @@ impl<'a> Search<'a> {
                 continue;
             }
             for budget in before + 1..failed {
-                if !self.safe(case, budget, weight, Phase::Refine)? {
-                    unsafe_at = Some(unsafe_at.map_or(budget, |u| u.min(budget)));
-                    break;
+                match self.verdict(case, budget, weight, Phase::Refine)? {
+                    Verdict::Safe => {}
+                    Verdict::Unsafe => {
+                        unsafe_at = Some(unsafe_at.map_or(budget, |u| u.min(budget)));
+                        break;
+                    }
+                    Verdict::Inapplicable => break,
                 }
             }
         }
         Ok(unsafe_at.unwrap_or(failed) - 1)
     }
 
+    /// The four diagnostic rows. They report only.
+    fn diagnostics(&mut self, weight: u32) -> Result<(), Halt> {
+        for which in 0..4 {
+            self.boundary()?;
+            let drawn = self.probe.diagnostic(which, weight);
+            self.emit(&drawn)?;
+        }
+        Ok(())
+    }
+
     /// Step 5: every applicable case must draw safely at N through the pinned crate, and at
-    /// least one must not at N + 1, unless N is the top of the ladder. A failure at N lowers N
-    /// by one and repeats when `lowering`. The wrapper rows only report until the render path
-    /// holds the bound. The diagnostic rows follow a pass.
+    /// least one applicable case must draw unsafely at N + 1, unless N is the top of the ladder.
+    /// An inapplicable draw is skipped at N and is never the unsafe row at N + 1. A failure at N
+    /// lowers N by one and repeats when `lowering`; the first unsafe case then ends the matrix.
+    /// Without `lowering`, the whole matrix at N is drawn, then the four diagnostic rows, and the
+    /// result is `Failed`. The wrapper rows only report until the render path holds the bound,
+    /// which one draw through it finds out before the first phase. The diagnostic rows follow a
+    /// pass.
     fn verify(&mut self, mut n: u32, weight: u32, lowering: bool) -> Result<Verified, Halt> {
+        let landed = self.probe.bound_landed();
         loop {
             if n == 0 {
                 return Ok(Verified::NoPositive);
@@ -1442,7 +1507,9 @@ impl<'a> Search<'a> {
                 let drawn = self.draw(case, n, weight, Phase::VerifyLibrary)?;
                 if drawn.verdict == Verdict::Unsafe {
                     all_safe = false;
-                    break;
+                    if lowering {
+                        break;
+                    }
                 }
             }
             if !all_safe {
@@ -1450,26 +1517,24 @@ impl<'a> Search<'a> {
                     n -= 1;
                     continue;
                 }
+                self.diagnostics(weight)?;
                 return Ok(Verified::Failed(n));
             }
             let mut wrapper_passes = true;
             for case in 0..self.cases.len() {
                 let drawn = self.draw(case, n, weight, Phase::VerifyWrapper)?;
-                if WRAPPER_BOUND_LANDED
-                    && drawn.verdict != Verdict::Inapplicable
-                    && drawn.last != Res::Svg
-                {
+                if landed && drawn.verdict != Verdict::Inapplicable && drawn.last != Res::Svg {
                     wrapper_passes = false;
                 }
             }
             let mut any_unsafe = false;
             for case in 0..self.cases.len() {
                 let drawn = self.draw(case, n + 1, weight, Phase::VerifyLibrary)?;
-                any_unsafe |= drawn.verdict != Verdict::Safe;
+                any_unsafe |= drawn.verdict == Verdict::Unsafe;
             }
             for case in 0..self.cases.len() {
                 let drawn = self.draw(case, n + 1, weight, Phase::VerifyWrapper)?;
-                if WRAPPER_BOUND_LANDED
+                if landed
                     && drawn.verdict != Verdict::Inapplicable
                     && !(drawn.last == Res::Invalid && drawn.reason == Some(bound_reason(n)))
                 {
@@ -1479,11 +1544,7 @@ impl<'a> Search<'a> {
             if !wrapper_passes || (!any_unsafe && n != TOP) {
                 return Ok(Verified::Failed(n));
             }
-            for which in 0..4 {
-                self.boundary()?;
-                let drawn = self.probe.diagnostic(which, weight);
-                self.emit(&drawn)?;
-            }
+            self.diagnostics(weight)?;
             return Ok(Verified::Passed(n));
         }
     }
@@ -1506,9 +1567,6 @@ impl<'a> Search<'a> {
         let all: Vec<usize> = (0..self.cases.len()).collect();
 
         let u = self.candidate(&unlabelled, 1)?;
-        if u == 0 {
-            return Ok(Finish::NoPositive);
-        }
         if u < MIN_N {
             self.selected(u, 1)?;
             return Ok(Finish::Under(u, 1));
@@ -1642,6 +1700,11 @@ impl Probe for Real {
         };
         let budget = u32::try_from(source.meta.cost).unwrap_or(u32::MAX);
         self.timed(&labels, Phase::Diagnostic, source, (budget, weight))
+    }
+
+    fn bound_landed(&mut self) -> bool {
+        let (attempt, reason) = wrapped(&landing_source());
+        bound_landed(&attempt, reason.as_deref())
     }
 
     fn elapsed(&mut self) -> u64 {
@@ -2121,11 +2184,19 @@ mod tests {
 
     type Rule<'a> = Box<dyn Fn(&Case, usize, u32, u32, Phase) -> u64 + 'a>;
 
+    type Gap<'a> = Box<dyn Fn(&Case, usize, u32, Phase) -> bool + 'a>;
+
     /// A probe whose repetitions take the time a rule gives, on a clock the repetitions move.
+    /// A gap rule makes a draw inapplicable. `landed` and `wrapper_limit` stand for the render
+    /// path: whether the detection draw is refused with the bound's reason, and the largest
+    /// budget the wrapper phase still draws.
     struct Mock<'a> {
         index: HashMap<Case, usize>,
         time: Cell<u64>,
         rule: Rule<'a>,
+        gap: Option<Gap<'a>>,
+        landed: bool,
+        wrapper_limit: Option<u32>,
         log: Vec<Draw>,
     }
 
@@ -2135,8 +2206,22 @@ mod tests {
                 index: cases.iter().enumerate().map(|(i, c)| (*c, i)).collect(),
                 time: Cell::new(0),
                 rule,
+                gap: None,
+                landed: false,
+                wrapper_limit: None,
                 log: Vec::new(),
             }
+        }
+
+        fn gap(mut self, gap: impl Fn(&Case, usize, u32, Phase) -> bool + 'a) -> Mock<'a> {
+            self.gap = Some(Box::new(gap));
+            self
+        }
+
+        fn render_path(mut self, landed: bool, wrapper_limit: Option<u32>) -> Mock<'a> {
+            self.landed = landed;
+            self.wrapper_limit = wrapper_limit;
+            self
         }
     }
 
@@ -2144,13 +2229,29 @@ mod tests {
         fn draw(&mut self, case: &Case, budget: u32, weight: u32, phase: Phase) -> Drawn {
             let at = self.index[case];
             self.log.push((at, budget, weight, phase));
+            if self
+                .gap
+                .as_ref()
+                .is_some_and(|gap| gap(case, at, budget, phase))
+            {
+                return Drawn::inapplicable(&Labels::of(case), phase, budget, weight);
+            }
             let ns = (self.rule)(case, at, budget, weight, phase);
+            let refusal = match (phase, self.wrapper_limit) {
+                (Phase::VerifyWrapper, Some(limit)) if budget > limit => Some(bound_reason(limit)),
+                _ => None,
+            };
+            let result = if refusal.is_some() {
+                Res::Invalid
+            } else {
+                Res::Svg
+            };
             let mut clock = Scripted(&self.time);
             let time = &self.time;
             let reps = run_reps(&mut clock, &mut || {
                 time.set(time.get() + ns);
                 Attempt {
-                    result: Res::Svg,
+                    result,
                     svg_bytes: 10,
                 }
             });
@@ -2160,8 +2261,12 @@ mod tests {
                 &Meta::default(),
                 (budget, weight),
                 &reps,
-                None,
+                refusal,
             )
+        }
+
+        fn bound_landed(&mut self) -> bool {
+            self.landed
         }
 
         fn diagnostic(&mut self, which: usize, weight: u32) -> Drawn {
@@ -2197,6 +2302,14 @@ mod tests {
         (0..cases.len())
             .filter(|i| cases[*i].class() == class)
             .collect()
+    }
+
+    /// Runs a mode on a built mock and returns how it ended, its report and the draws.
+    fn run_mock(mode: Mode, mut mock: Mock) -> (Finish, String, Vec<Draw>) {
+        let cases = enumerate();
+        let mut out = Vec::new();
+        let finish = run(mode, &mut mock, &cases, &mut out).unwrap();
+        (finish, String::from_utf8(out).unwrap(), mock.log)
     }
 
     /// Runs a mode on a rule and returns how it ended, its report and the draws.
@@ -2349,6 +2462,17 @@ mod tests {
         assert_eq!(finish.code(), 3);
         assert!(report.ends_with("selected\t150\t1\n"));
         assert!(log.iter().all(|e| !cases[e.0].weighted()));
+        // U = 0 is under 200 too: it prints the selection and exits 3, and draws no labelled case
+        let (finish, report, log) = drive(
+            Mode::Scan,
+            |case, _, _, _, _| {
+                if case.weighted() { SAFE } else { SLOW }
+            },
+        );
+        assert_eq!(finish, Finish::Under(0, 1));
+        assert_eq!(finish.code(), 3);
+        assert!(report.ends_with("selected\t0\t1\n"));
+        assert!(log.iter().all(|e| !cases[e.0].weighted()));
         // L = 0 exits 1
         let (finish, report, _) = drive(Mode::Scan, |case, _, budget, _, _| {
             if case.weighted() || budget > 400 {
@@ -2415,6 +2539,239 @@ mod tests {
         assert_eq!(finish, Finish::NotVerified(300));
         assert!(!report.contains("selected"));
         assert!(log.iter().all(|e| e.1 == 300));
+    }
+
+    #[test]
+    fn rdb3_verify_failure_draws_the_matrix_and_diagnostics() {
+        let cases = enumerate();
+        // verify mode: the first unsafe case at N does not end the matrix
+        let (finish, report, log) = drive(Mode::Verify(300, 4), |_, at, budget, _, _| {
+            if budget >= 300 && at == 5 { SLOW } else { SAFE }
+        });
+        assert_eq!(finish, Finish::NotVerified(300));
+        assert!(!report.contains("selected"));
+        let drawn: Vec<usize> = log
+            .iter()
+            .filter(|e| e.3 == Phase::VerifyLibrary)
+            .map(|e| e.0)
+            .collect();
+        assert_eq!(drawn, (0..cases.len()).collect::<Vec<_>>());
+        assert!(
+            log.iter()
+                .all(|e| e.3 == Phase::VerifyLibrary && e.1 == 300)
+        );
+        let diagnostics = report
+            .lines()
+            .filter(|l| l.starts_with("diagnostic\t"))
+            .count();
+        assert_eq!(
+            diagnostics,
+            4 * REPS,
+            "the four diagnostic rows, three repetitions each"
+        );
+        // the diagnostic rows follow the matrix
+        let last_matrix = report.rfind("\nverify-library\t").unwrap();
+        let first_diagnostic = report.find("\ndiagnostic\t").unwrap();
+        assert!(last_matrix < first_diagnostic);
+
+        // scan mode keeps the early break and lowers N: the first unsafe case ends the matrix
+        let (finish, report, log) = drive(Mode::Scan, |_, at, budget, _, phase| {
+            let slow = budget > 400 || (phase == Phase::VerifyLibrary && at == 7 && budget >= 400);
+            if slow { SLOW } else { SAFE }
+        });
+        assert_eq!(finish, Finish::Selected(399, 1));
+        let first_lowered = log
+            .iter()
+            .position(|e| e.3 == Phase::VerifyLibrary && e.1 == 399)
+            .unwrap();
+        let at_400 = log[..first_lowered]
+            .iter()
+            .filter(|e| e.3 == Phase::VerifyLibrary && e.1 == 400)
+            .count();
+        assert_eq!(
+            at_400, 8,
+            "scan mode stops at the first unsafe case and lowers N"
+        );
+        // the diagnostics are drawn once, after the pass
+        assert_eq!(
+            report
+                .lines()
+                .filter(|l| l.starts_with("diagnostic\t"))
+                .count(),
+            4 * REPS
+        );
+    }
+
+    #[test]
+    fn rdb3_inapplicable_is_not_unsafe() {
+        let cases = enumerate();
+        let unlabelled = indexes(&cases, Class::Unlabelled);
+        let (a, b) = (unlabelled[0], unlabelled[1]);
+        let candidate = |mock: &mut Mock, set: &[usize]| {
+            let mut out = Vec::new();
+            Search::new(mock, &cases, &mut out)
+                .candidate(set, 1)
+                .map_err(|_| "halt")
+                .unwrap()
+        };
+        let draws_of = |mock: &Mock, at: usize, phase: Phase| -> Vec<u32> {
+            mock.log
+                .iter()
+                .filter(|e| e.0 == at && e.3 == phase)
+                .map(|e| e.1)
+                .collect()
+        };
+
+        // the ladder stops at an inapplicable budget and sets no first unsafe budget
+        let mut mock = Mock::new(&cases, Box::new(|_, _, _, _, _| SAFE))
+            .gap(move |_, at, budget, _| at == a && budget >= 256);
+        assert_eq!(candidate(&mut mock, &[a, b]), 8192, "no case is unsafe");
+        assert_eq!(
+            draws_of(&mock, a, Phase::Ladder),
+            [16, 32, 64, 128, 192, 256]
+        );
+        assert!(draws_of(&mock, a, Phase::Refine).is_empty());
+        assert_eq!(draws_of(&mock, b, Phase::Ladder), LADDER);
+
+        // the refine treats an inapplicable budget as the end of that case, not as a failure:
+        // a is unsafe from 500; b is inapplicable from 385 to 511 and unsafe from 512
+        let rule = move |_: &Case, at: usize, budget: u32, _: u32, _: Phase| {
+            let limit = if at == a { 500 } else { 512 };
+            if budget >= limit { SLOW } else { SAFE }
+        };
+        let mut mock = Mock::new(&cases, Box::new(rule))
+            .gap(move |_, at, budget, _| at == b && (385..512).contains(&budget));
+        assert_eq!(candidate(&mut mock, &[a, b]), 499);
+        assert_eq!(
+            draws_of(&mock, b, Phase::Refine),
+            [385],
+            "b ends at its first gap"
+        );
+        assert_eq!(
+            draws_of(&mock, a, Phase::Refine),
+            (385..=500).collect::<Vec<_>>()
+        );
+        // when no F case finds an unsafe budget, the candidate is F - 1
+        let mut mock = Mock::new(&cases, Box::new(rule))
+            .gap(move |_, at, budget, _| at == b && (385..512).contains(&budget));
+        assert_eq!(candidate(&mut mock, &[b]), 511);
+
+        // a stack-16-linked case with F_c = 16 gives no candidate of 0: its refine range 1..15
+        // is inapplicable from the first budget
+        let stack = cases
+            .iter()
+            .position(|c| {
+                c.shape == Shape::StackLinked
+                    && c.style == Style::One(Form::Arrow)
+                    && c.dir == Dir::Lr
+                    && c.pad == Pad::None
+            })
+            .unwrap();
+        assert!(generate(&cases[stack], 14, 1).is_none());
+        assert!(generate(&cases[stack], 16, 1).is_some());
+        let mut mock = Mock::new(&cases, Box::new(|_, _, _, _, _| SLOW))
+            .gap(|case, _, budget, _| generate(case, u64::from(budget), 1).is_none());
+        assert_eq!(candidate(&mut mock, &[stack]), 15);
+        assert_eq!(draws_of(&mock, stack, Phase::Ladder), [16]);
+        assert_eq!(
+            draws_of(&mock, stack, Phase::Refine),
+            [1],
+            "it ends at the first gap"
+        );
+
+        // verify at N skips an inapplicable case; N + 1 needs an applicable unsafe row
+        let x = 3;
+        let rule = |_: &Case, at: usize, budget: u32, _: u32, _: Phase| {
+            if at == 9 && budget > 300 { SLOW } else { SAFE }
+        };
+        let mock =
+            Mock::new(&cases, Box::new(rule)).gap(move |_, at, budget, _| at == x && budget >= 300);
+        let (finish, report, log) = run_mock(Mode::Verify(300, 1), mock);
+        assert_eq!(finish, Finish::Selected(300, 1));
+        assert!(log.contains(&(x, 300, 1, Phase::VerifyLibrary)));
+        let skipped = Drawn::inapplicable(&Labels::of(&cases[x]), Phase::VerifyLibrary, 300, 1);
+        assert!(report.contains(&format!("{}\n", skipped.rows[0].line())));
+        // every row at N + 1 is inapplicable: no unsafe row, so the limit is not found
+        let mock =
+            Mock::new(&cases, Box::new(|_, _, _, _, _| SAFE)).gap(|_, _, budget, _| budget >= 301);
+        let (finish, report, _) = run_mock(Mode::Verify(300, 1), mock);
+        assert_eq!(finish, Finish::NotVerified(300));
+        assert!(!report.contains("selected"));
+        // one case is inapplicable at N + 1 and the rest are safe: still not found
+        let mock = Mock::new(&cases, Box::new(|_, _, _, _, _| SAFE))
+            .gap(move |_, at, budget, _| at == x && budget >= 301);
+        let (finish, _, _) = run_mock(Mode::Verify(300, 1), mock);
+        assert_eq!(finish, Finish::NotVerified(300));
+    }
+
+    #[test]
+    fn rdb3_the_wrapper_gate_is_detected_at_run_time() {
+        // the detection reads the render path's refusal: invalid, with the bound's two texts
+        let refused = Attempt {
+            result: Res::Invalid,
+            svg_bytes: 0,
+        };
+        let drawn = Attempt {
+            result: Res::Svg,
+            svg_bytes: 5,
+        };
+        assert!(bound_landed(&refused, Some(&bound_reason(300))));
+        assert!(bound_landed(&refused, Some(&bound_reason(1))));
+        assert!(!bound_landed(&drawn, None));
+        assert!(!bound_landed(&drawn, Some(&bound_reason(300))));
+        assert!(!bound_landed(&refused, None));
+        assert!(!bound_landed(
+            &refused,
+            Some("the source has an arrow over 256 bytes")
+        ));
+        assert!(!bound_landed(
+            &refused,
+            Some("the source has over 300 arrows")
+        ));
+        assert!(!bound_landed(
+            &refused,
+            Some("a subgraph is not closed, counting a longer or labelled arrow as more than one")
+        ));
+        // the detection source is far over the ladder top and inside every other bound
+        let text = landing_source();
+        assert_eq!(text.matches("-->").count(), 9000);
+        assert!(text.len() <= MAX_SOURCE_BYTES, "{} bytes", text.len());
+        assert_eq!(text.lines().count(), 2, "one header line and one statement");
+        assert!(text.lines().all(|l| l.len() <= 256 * 1024));
+
+        // not landed: the wrapper rows only report, whatever the wrapper does
+        let cases = enumerate();
+        let unsafe_above = |_: &Case, _: usize, budget: u32, _: u32, phase: Phase| {
+            if budget > 300 && phase == Phase::VerifyLibrary {
+                SLOW
+            } else {
+                SAFE
+            }
+        };
+        for limit in [None, Some(299), Some(300), Some(500)] {
+            let mock = Mock::new(&cases, Box::new(unsafe_above)).render_path(false, limit);
+            let (finish, _, _) = run_mock(Mode::Verify(300, 1), mock);
+            assert_eq!(
+                finish,
+                Finish::Selected(300, 1),
+                "not landed, limit {limit:?}"
+            );
+        }
+        // landed: svg at N and invalid with the exact reason at N + 1, or the verify fails
+        let mock = Mock::new(&cases, Box::new(unsafe_above)).render_path(true, Some(300));
+        let (finish, report, _) = run_mock(Mode::Verify(300, 1), mock);
+        assert_eq!(finish, Finish::Selected(300, 1));
+        assert!(report.contains("\tinvalid\t"));
+        // the wrapper refuses already at N
+        let mock = Mock::new(&cases, Box::new(unsafe_above)).render_path(true, Some(299));
+        let (finish, _, _) = run_mock(Mode::Verify(300, 1), mock);
+        assert_eq!(finish, Finish::NotVerified(300));
+        // the wrapper still draws at N + 1
+        for limit in [Some(500), None] {
+            let mock = Mock::new(&cases, Box::new(unsafe_above)).render_path(true, limit);
+            let (finish, _, _) = run_mock(Mode::Verify(300, 1), mock);
+            assert_eq!(finish, Finish::NotVerified(300), "limit {limit:?}");
+        }
     }
 
     #[test]
