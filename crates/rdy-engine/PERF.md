@@ -1674,3 +1674,67 @@ No correctness test asserts a duration. No laptop figures are judged here: the f
 these ops is the Linux bench's. The ops are PASS-NEW until the baseline holds them.
 
 Deep gate (bench): <orchestrator fills in>
+
+## Renderer: diagrams in a 10k-doc build (2026-10-24)
+
+One measurement of the site build with native diagrams, Copy and the sidebar. It is a
+measurement, not a gate: the result is "recorded once; no speed target or regression baseline."
+`qa-baseline.json` is not changed, no machine class is added, and `compare` and the rebaseline
+never see it.
+
+Run it on the bench class only, once, on the final integrated commit:
+
+```
+cargo run -p rdy-qa --release --bin qa-perf -- --renderer-10k
+```
+
+`qa-perf` with no argument runs the gate workload as before. Any other argument list prints
+`usage: qa-perf [--renderer-10k]` to stderr and exits 2. The pins are in `crates/rdy-qa/src/perf.rs`
+(`dgm12_` tests), so `cargo qa` runs them.
+
+| op | what it times | runs | target |
+|---|---|---|---|
+| `render_diagrams_10k` | `render_site` of canon into an empty output directory, with one `ReadState` captured before the timer: the complete durable operation, up to and including the placement of the output | 1 | none: recorded once |
+
+Fixture (built with `testkit::generate_tree`, then landed, before the timer):
+
+- 1000 folders with ten docs each: exactly 10,000 docs. Each doc has one section and three
+  claims.
+- Every tenth doc in tree order, starting with the first, also has one Mermaid diagram: exactly
+  1000. The families cycle flowchart, class, sequence and state, 250 each. One label holds the
+  doc number, so no two diagrams draw the same SVG.
+- One shared figure blob. The first ten docs in tree order each hold a figure of it.
+- No invalid or unsupported diagram. The labels are generic.
+
+Timer boundary: a fresh render with the prepared read state and no earlier rendered-site cache.
+The fixture build, the landing, the byte counts and the cleanup are outside it. The reported time
+is that one duration; `median_ms` and `p95_ms` are both equal to it.
+
+Before the final Measure JSON line on stdout, the run prints one stable line to stderr:
+
+```
+render_diagrams_10k: docs=<n> diagrams=<n> files=<n> bytes=<n> html_bytes=<n> copy_bytes=<n> svg_bytes=<n> sidebar_bytes=<n> copy_max_page_bytes=<n> sidebar_max_page_bytes=<n>
+```
+
+Every count is taken from the files in the output directory:
+
+- `files` and `bytes`: every file, the `.rdy-site` marker included.
+- `html_bytes`: the `.html` files.
+- `copy_bytes`: the bytes inside each `<template data-copy-page hidden>` element as serialized
+  in the HTML, entity escapes included and the template tags excluded. It is zero while a build
+  has no Copy template.
+- `svg_bytes`: the `.svg` files under `assets/diagrams/`.
+- `sidebar_bytes`: the bytes of each sidebar `nav` element, its tags included.
+- `copy_max_page_bytes` and `sidebar_max_page_bytes`: the largest single page's Copy payload and
+  sidebar.
+
+A second stderr line, `render_diagrams_10k first_doc: path=<doc path> copy_bytes=<n>
+sidebar_bytes=<n>`, gives the same two counts for the first doc in tree order.
+
+What the time grows with: the docs and pages written, the sidebar each page carries, the Copy
+payload of each page, and one SVG drawing for each diagram. The figure blob is read once for the
+build and written once.
+
+No time is recorded here. The first timing is the bench's, taken on the final integrated commit.
+
+Deep gate (bench): <orchestrator fills in>
