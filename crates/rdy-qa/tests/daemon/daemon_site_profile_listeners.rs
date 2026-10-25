@@ -5,7 +5,7 @@
 //! profile canon no longer holds serves no page, and its slot stays until the daemon stops. The
 //! foreground entry point validates its profile before any HTTP port opens, and every failure
 //! stops the daemon it created.
-use crate::daemon_site_not_found::{Variant, assert_themed};
+use crate::daemon_site_not_found::{Variant, assert_plain, assert_themed};
 use rdy_daemon::site::addr::profile_candidates;
 use rdy_daemon::site::guard::SiteTarget;
 use rdy_daemon::site::guard::{Refusal, refusal};
@@ -1183,6 +1183,14 @@ fn spv7_registry_and_shared_http_limits_are_bounded() {
     assert!(sh.profile_sites.keys().is_empty());
 }
 
+/// The profile-only listener's answer once its profile is gone (ruling task-11): exactly the
+/// 74-byte plain NotFound body with `text/plain; charset=utf-8`, never a themed or source page.
+#[track_caller]
+fn exact_plain(r: &http::Response, what: &str) {
+    assert_plain(r, Refusal::NotFound, what);
+    assert_eq!(r.body.len(), 74, "{what}");
+}
+
 #[test]
 fn spv7_removal_evicts_pages_assets_and_streams() {
     let w = world();
@@ -1222,10 +1230,18 @@ fn spv7_removal_evicts_pages_assets_and_streams() {
         "assets/app.js",
         "_rdy/live.js",
     ] {
-        assert_refusal(&get(only, path), Refusal::NotFound, path);
+        exact_plain(&get(only, path), path);
     }
-    assert_refusal(&refused_events(only, &q), Refusal::NotFound, "events");
-    assert_eq!(head(only, "manual/intro.html").status, 404);
+    exact_plain(&refused_events(only, &q), "events");
+    let h = head(only, "manual/intro.html");
+    assert_eq!(h.status, 404, "HEAD: {}", h.head);
+    assert_eq!(
+        (h.header("content-type"), h.header("content-length")),
+        (Some("text/plain; charset=utf-8"), Some("74")),
+        "HEAD: {}",
+        h.head
+    );
+    assert!(h.body.is_empty(), "HEAD");
     // the full listener's profile route is gone too: a profile the site does not hold now is
     // canon's Scope variant there (dgm11)
     assert_themed(
@@ -1247,11 +1263,7 @@ fn spv7_removal_evicts_pages_assets_and_streams() {
     // one warning per disappearance: a later publish says nothing again
     unrelated_landing(&sh, &w);
     sh.site.step(&sh);
-    assert_refusal(
-        &get(only, "manual/intro.html"),
-        Refusal::NotFound,
-        "still gone",
-    );
+    exact_plain(&get(only, "manual/intro.html"), "still gone");
     let warned = rec
         .logs()
         .iter()
@@ -1276,11 +1288,7 @@ fn spv7_removal_evicts_pages_assets_and_streams() {
     // a second disappearance warns again
     remove_profile(&sh, &fresh);
     rec.await_log(&removed_line("guide"));
-    assert_refusal(
-        &get(only, "manual/intro.html"),
-        Refusal::NotFound,
-        "gone again",
-    );
+    exact_plain(&get(only, "manual/intro.html"), "gone again");
 }
 
 /// Holds every subscribe of a profile-only target after its refresh, before its stream

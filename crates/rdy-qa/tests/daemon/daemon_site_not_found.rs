@@ -146,12 +146,23 @@ pub(crate) fn assert_plain(r: &http::Response, f: Refusal, what: &str) {
 
 // --- the world ----------------------------------------------------------------------------------
 
+/// Each revision's intro doc title and profile title: canon, tag `v1.0.0`, view `work` and
+/// proposal `prop`. No title holds another.
+const REVISIONS: [(&str, &str); 4] = [
+    ("Canon intro", "Guide book"),
+    ("Tagged intro", "Tagged guide"),
+    ("Work intro", "Work guide"),
+    ("Prop intro", "Prop guide"),
+];
+
 /// The project of every pin, named `Tiny`. Canon holds a folder `manual` (doc `intro`, page
 /// `manual/intro.html`, prose `INTRO-CANON`), a top-level `secret` doc (prose `SECRET-WORDS`),
-/// and an `admin` doc that holds profile `guide` (org, `Guide book`, the folder). Tag `v1.0.0`
-/// is canon. View `work` edits intro to `INTRO-VIEW`; proposal `prop` edits it to `INTRO-PROP`.
-/// View `authored` adds a top-level doc named 404 (`AUTHORED-404-BODY`). View `bad` holds a
-/// profile `zzzz` whose metadata is malformed.
+/// and an `admin` doc that holds profile `guide` (org, the folder). Each revision names the
+/// intro doc and the profile in its own way (see [`REVISIONS`]), so each one's navigation and
+/// profile title show which revision a page was prepared from: tag `v1.0.0` is canon before a
+/// later landing renames both. View `work` edits intro to `INTRO-VIEW`; proposal `prop` edits
+/// it to `INTRO-PROP`. View `authored` adds a top-level doc named 404 (`AUTHORED-404-BODY`).
+/// View `bad` holds a profile `zzzz` whose metadata is malformed.
 struct World {
     h: Hosted,
     url: String,
@@ -175,7 +186,7 @@ fn world() -> World {
         "w1",
         json!([
             {"op": "create", "type": "folder", "id": "$manual", "fields": {"name": "manual", "title": "Manual", "description": "Manual folder."}},
-            {"op": "create", "type": "doc", "id": "$intro", "parent": "$manual", "fields": {"name": "intro", "title": "Intro page", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$intro", "parent": "$manual", "fields": {"name": "intro", "title": REVISIONS[1].0, "doc_type": "page"}},
             {"op": "create", "type": "prose", "id": "$ip", "parent": "$intro", "body": "INTRO-CANON"},
             {"op": "create", "type": "doc", "id": "$secret", "fields": {"name": "secret", "title": "Secret page", "doc_type": "page"}},
             {"op": "create", "type": "prose", "id": "$sp", "parent": "$secret", "body": "SECRET-WORDS"},
@@ -188,22 +199,35 @@ fn world() -> World {
         &mut r,
         "admin",
         json!([{"op": "create", "type": "publication_profile", "id": "$guide", "parent": admin,
-            "fields": {"key": "guide", "title": "Guide book", "description": "About Guide book.",
+            "fields": {"key": "guide", "title": REVISIONS[1].1, "description": "About the guide.",
                 "audience": "org", "select": [manual]}}]),
     ));
     land(&mut r, "admin").unwrap();
     r.tag(&approver(), "v1.0.0", None, None).unwrap();
-    let ip = ids["$ip"].clone();
-    put(
-        &mut r,
-        "work",
-        json!([{"op": "update", "id": ip, "body": "INTRO-VIEW"}]),
+    let (ip, intro, guide) = (
+        ids["$ip"].clone(),
+        ids["$intro"].clone(),
+        ids["$guide"].clone(),
     );
-    put(
-        &mut r,
-        "prop",
-        json!([{"op": "update", "id": ip, "body": "INTRO-PROP"}]),
-    );
+    // each revision's own names: canon after the tag, then the view and the proposal
+    let rename = |(doc, profile): (&str, &str)| {
+        json!([
+            {"op": "update", "id": intro, "fields": {"title": doc}},
+            {"op": "update", "id": guide, "fields": {"title": profile}}
+        ])
+    };
+    put(&mut r, "rename", rename(REVISIONS[0]));
+    land(&mut r, "rename").unwrap();
+    let mut ops = rename(REVISIONS[2]);
+    ops.as_array_mut()
+        .unwrap()
+        .push(json!({"op": "update", "id": ip, "body": "INTRO-VIEW"}));
+    put(&mut r, "work", ops);
+    let mut ops = rename(REVISIONS[3]);
+    ops.as_array_mut()
+        .unwrap()
+        .push(json!({"op": "update", "id": ip, "body": "INTRO-PROP"}));
+    put(&mut r, "prop", ops);
     let prop = r
         .propose(&writer(), "prop", "Prop", Some("Edits the intro."))
         .unwrap()
@@ -375,20 +399,27 @@ fn dgm11_every_live_scope_gets_its_own_404() {
     let w = world();
     let port = port_of(&w.url);
     let prop = &w.prop;
-    for (root, name) in [
-        ("/".to_string(), "Tiny"),
-        ("/~tag/v1.0.0/".into(), "Tiny"),
-        ("/~view/work/".into(), "Tiny"),
-        (format!("/~proposal/{prop}/"), "Tiny"),
-        ("/~profile/guide/".into(), "Guide book"),
-        ("/~tag/v1.0.0/~profile/guide/".into(), "Guide book"),
-        ("/~view/work/~profile/guide/".into(), "Guide book"),
-        (format!("/~proposal/{prop}/~profile/guide/"), "Guide book"),
+    // each root with the index of its revision in REVISIONS
+    for (root, at) in [
+        ("/".to_string(), 0),
+        ("/~tag/v1.0.0/".into(), 1),
+        ("/~view/work/".into(), 2),
+        (format!("/~proposal/{prop}/"), 3),
+        ("/~profile/guide/".into(), 0),
+        ("/~tag/v1.0.0/~profile/guide/".into(), 1),
+        ("/~view/work/~profile/guide/".into(), 2),
+        (format!("/~proposal/{prop}/~profile/guide/"), 3),
     ] {
+        let profiled = root.contains("~profile");
+        let (doc, profile) = REVISIONS[at];
+        let name = if profiled { profile } else { "Tiny" };
         // the scope serves its pages
         let home = get(port, &root[1..]);
         assert_eq!(home.status, 200, "{root}: {}", home.head);
-        let profiled = root.contains("~profile");
+        assert!(
+            text(&home).contains(doc),
+            "{root}: the fixture's own revision"
+        );
         // a missing page, a missing file deep under the root, and on a profile an excluded page
         let mut missing = vec![
             "nosuch.html",
@@ -411,14 +442,30 @@ fn dgm11_every_live_scope_gets_its_own_404() {
                     assert!(!text(&r).contains(needle), "{what}: holds {needle:?}");
                 }
                 assert!(
-                    text(&r).contains("Intro page"),
-                    "{what}: the selected navigation"
+                    text(&r).contains(&format!(">{doc}<")),
+                    "{what}: the selected navigation of its own revision"
                 );
             } else {
                 assert!(
                     text(&r).contains("Secret page"),
                     "{what}: the scope's navigation"
                 );
+                assert!(
+                    text(&r).contains(&format!(">{doc}<")),
+                    "{what}: the navigation of its own revision"
+                );
+            }
+            // prepared from its own revision, never another's
+            for (i, (other_doc, other_profile)) in REVISIONS.iter().enumerate() {
+                if i == at {
+                    continue;
+                }
+                for needle in [other_doc, other_profile] {
+                    assert!(
+                        !text(&r).contains(needle),
+                        "{what}: holds {needle:?} of another revision"
+                    );
+                }
             }
         }
     }
