@@ -563,20 +563,23 @@ fn reserved(r: &mut Rdy) -> Scope {
 /// script fetches the pill's href in place of the hard-coded PAGE (with its same-origin http/https
 /// check from fix rounds 2827fddd and 2f7023bd). Only `assets/app.js` changed; re-taken.
 /// Re-taken after the reference period rule (ruling task-7): an automatic label drops its final period before an authored period; only that text moved.
+/// Re-taken for the renderer plan's Task 8 (sidebar folders): the navigation markup of the pages,
+/// the sidebar rules of `assets/site.css` and `assets/app.js` (which now bundles `js/sidebar.js`)
+/// moved; their content rows keep their text (the gold1_ goldens).
 #[test]
 fn ec3_the_site_build_is_unchanged() {
     const BASE: [(&str, &str); 3] = [
         (
             "canon",
-            "31554e3b0fbe469441c754350a7f34fc79ddcbf659b402c3488e0a18cdb18d00",
+            "3ab2b91a5c37054a29456ad2acfcea05a87afdfb5c65d9d433acf5423e279b8c",
         ),
         (
             "view:editing",
-            "955f4338279ebd2b780f7ea5f78336527ddabb44eef655547aed0e9a5e183442",
+            "5ccc0165812eff5226eeb2c0000a8c0ca514cfe783e831e9fdcf2e4a01e1991f",
         ),
         (
             "view:reserved",
-            "f4d4a9a51381f3828765c134f66c9a76cd12fa77c300b68331f4975124e81585",
+            "155fc0e05b80c32efcccff8613fb51ae26aefad64ad5c028a3cf6844fe04a0f2",
         ),
     ];
     // the ids the corpus's generated pages and the reserved docs draw come from a seeded stream

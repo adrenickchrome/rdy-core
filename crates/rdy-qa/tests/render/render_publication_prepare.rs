@@ -196,26 +196,29 @@ fn scopes() -> Vec<(&'static str, tempfile::TempDir, Rdy, Scope)> {
 /// only `assets/app.js`, which bundles `js/menu.js`, changed; every other file, the label, the
 /// header, their ranges and the summary kept their bytes.
 /// Re-taken after the reference period rule (ruling task-7): an automatic label drops its final period before an authored period; only that text moved.
+/// Re-taken for the renderer plan's Task 8 (sidebar folders): the navigation markup of the pages,
+/// the sidebar rules of `assets/site.css` and `assets/app.js` (which now bundles `js/sidebar.js`)
+/// moved; their content rows keep their text.
 const SITE_DIGESTS: [(&str, &str, &str); 4] = [
     (
         "canon",
-        "3852ef50a321bfb2c2af9ffacaed98bce6164f0b7c1b083e26d49c696027152d",
-        "3a03953c3be01934a9f258eddf15f0d5e7b0eb9a55f75cff6a86c735763a66a4",
+        "0b66e9099b5b13cbf3d7cfff368e6db2c39d45cc205c3256e0a30dcf21d73dd6",
+        "24240e670e92ab39a7c329d47b812d8049c0f8ffb646ffc57a48615e16ac2fd0",
     ),
     (
         "tag",
-        "9c32c79c122fe745d240d6b891a50970e81d60ce1279539bb9353fb5e2362385",
-        "70ebd274c583424435228b66d8d88a4d1ebd079ba90b4ebb37fc816a6dca736f",
+        "b818f2c48d2709bcafd84ba2cb15487867cb76415ace75653a20ffd722f6c226",
+        "eaac6414ac29494329f35ab55687b2ea14278c7740dd5f8f03331b3e82584a21",
     ),
     (
         "view",
-        "cc19f5543d6cd2470e0e6a8582e82b47241fd6f9fcd1525d8ab6d5133784f18e",
-        "b297ca1963ab22defd4b4a70ede959499bd02b36d5fad2acddbf1bbfdf88f389",
+        "377939ba17ed877acea1daec5bfdd062de077de37a6401e90ce44c6e5446df9f",
+        "40266b4ca8b5dab55be6cb3dafb2d83b3769df89a51f5aeefbdc947475e289fe",
     ),
     (
         "proposal",
-        "c368d4dec5a3f6a76ea226abe65f741be7a44daa051d222c05b02aa1151261e5",
-        "440ce521b45445fb2dd389a718a6b3d092f73c302a8a983f50f58d1ff29d1e53",
+        "6da171ab0c974d31b748ddf49986084c1b2709f74e7209fe989a200ac37d74e6",
+        "a2170f1b83226de0a495bcaa2dc21cced778b3f957388919e0d948006f96e7f9",
     ),
 ];
 
