@@ -1493,7 +1493,7 @@ impl<'a> Search<'a> {
     /// An inapplicable draw is skipped at N and is never the unsafe row at N + 1. A failure at N
     /// lowers N by one and repeats when `lowering`; the first unsafe case then ends the matrix.
     /// Without `lowering`, the whole matrix at N is drawn, then the four diagnostic rows, and the
-    /// result is `Failed`. The wrapper rows only report until the render path holds the bound,
+    /// result is `Failed`. Every failure return draws the four diagnostic rows first. The wrapper rows only report until the render path holds the bound,
     /// which one draw through it finds out before the first phase. The diagnostic rows follow a
     /// pass.
     fn verify(&mut self, mut n: u32, weight: u32, lowering: bool) -> Result<Verified, Halt> {
@@ -1542,6 +1542,7 @@ impl<'a> Search<'a> {
                 }
             }
             if !wrapper_passes || (!any_unsafe && n != TOP) {
+                self.diagnostics(weight)?;
                 return Ok(Verified::Failed(n));
             }
             self.diagnostics(weight)?;
@@ -2509,7 +2510,14 @@ mod tests {
         });
         assert_eq!(finish, Finish::NotVerified(400));
         assert!(!report.contains("selected"));
-        assert!(!report.contains("\ndiagnostic\t"));
+        assert_eq!(
+            report
+                .lines()
+                .filter(|l| l.starts_with("diagnostic\t"))
+                .count(),
+            4 * REPS,
+            "a failing run draws the diagnostic rows too"
+        );
         // nothing unsafe at all: the candidate is the top of the ladder, which needs no N + 1
         let (finish, _, _) = drive(Mode::Scan, |_, _, _, _, _| SAFE);
         assert_eq!(finish, Finish::Selected(8192, 1));
@@ -2573,6 +2581,35 @@ mod tests {
         let last_matrix = report.rfind("\nverify-library\t").unwrap();
         let first_diagnostic = report.find("\ndiagnostic\t").unwrap();
         assert!(last_matrix < first_diagnostic);
+
+        // the other failure returns draw the diagnostic rows as well: a landed wrapper that
+        // refuses at N, and an N + 1 matrix with no applicable unsafe row
+        let diagnostic_rows = |report: &str| {
+            report
+                .lines()
+                .filter(|l| l.starts_with("diagnostic\t"))
+                .count()
+        };
+        let unsafe_above = |_: &Case, _: usize, budget: u32, _: u32, phase: Phase| {
+            if budget > 300 && phase == Phase::VerifyLibrary {
+                SLOW
+            } else {
+                SAFE
+            }
+        };
+        let mock = Mock::new(&cases, Box::new(unsafe_above)).render_path(true, Some(299));
+        let (finish, report, _) = run_mock(Mode::Verify(300, 1), mock);
+        assert_eq!(finish, Finish::NotVerified(300));
+        assert_eq!(diagnostic_rows(&report), 4 * REPS, "wrapper refuses at N");
+        let mock =
+            Mock::new(&cases, Box::new(|_, _, _, _, _| SAFE)).gap(|_, _, budget, _| budget >= 301);
+        let (finish, report, _) = run_mock(Mode::Verify(300, 1), mock);
+        assert_eq!(finish, Finish::NotVerified(300));
+        assert_eq!(
+            diagnostic_rows(&report),
+            4 * REPS,
+            "every row at N + 1 is inapplicable"
+        );
 
         // scan mode keeps the early break and lowers N: the first unsafe case ends the matrix
         let (finish, report, log) = drive(Mode::Scan, |_, at, budget, _, phase| {
