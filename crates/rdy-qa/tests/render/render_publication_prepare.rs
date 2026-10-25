@@ -208,26 +208,30 @@ fn scopes() -> Vec<(&'static str, tempfile::TempDir, Rdy, Scope)> {
 /// Re-taken for Task 6 fix round 1 (ruling task-6): the open link is a reader control, so each
 /// drawing's `open full size` line left `llms-full.txt`; every other file and the warnings kept
 /// their bytes.
+/// Re-taken for the renderer plan's Task 9 (Copy, ruling task-8 form): each doc and folder page's
+/// title toolbar (Link, Copy ref, Copy), the Copy button on each block and section toolbar, the
+/// page's hidden Copy payload template and `assets/app.js` (which bundles `js/copy.js`) moved;
+/// their content rows keep their text (the gold1_ goldens).
 const SITE_DIGESTS: [(&str, &str, &str); 4] = [
     (
         "canon",
-        "392175367bef8b3bda58d0bb6e3ecd7e611a08bc910586062d974f2a464e9c0d",
-        "a2dab6a80cd68cf2afd060b17a66010f80241eb6591cb7505f644ccd2f7bf4b4",
+        "e6a0302ef54616d4997c5637a5dce816e6eec06e7b551d0dedf284a16ed9820b",
+        "34c96b0c706a5cd376c13b29dc2218af2d774851e50b82869590e81debf66dbb",
     ),
     (
         "tag",
-        "a61c667858aa42ef3bd56c7fe5dc3a4854d43a939700f67990f4d6eeeffbcffb",
-        "4a4ba2d67d187857aa4959b7b79f984d96dfa3a51ca0c62957e5a6f69065e10c",
+        "d745df5ba0472951238a61fb8c3ac72193296471eb6f023ec21c33fd50001518",
+        "a5814c3ff9218e1ddf045d7dc2eb66fab7af45cf81e45efa3eead803f7376622",
     ),
     (
         "view",
-        "6b5b955f7428772e2d50db77c272876f4ae65784734d8f8fd00bce9436bf76e2",
-        "c53a284ae01a8c2c06ce216d125dd236c1bc77f42dbf077b1486819934252ac8",
+        "01e588192c22b866d5189312dafa2b0995e72ae050a3b22c7bfcd8e632a5f62d",
+        "deaa2e8be84303f29280debe28db89c2dc375ad294077b8f0d6d41230e615388",
     ),
     (
         "proposal",
-        "0aee03cee5a90c7541ead7b5f0fb172ddec1a4e7d667ee0510448b160ac76d04",
-        "a98782db54855ef3148c25aad46064377a04c5e28a2694a49362e7ddf6130916",
+        "699d5d9ae7f5a4f45fef1f03c3980393d74a632db3ab628b556c1d84be7a64b7",
+        "d9e42986e3e2d22deec7481e3e162d5483fb9c6b5a5eb3642bd70ee5f7539955",
     ),
 ];
 

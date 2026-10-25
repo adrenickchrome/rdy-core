@@ -653,20 +653,24 @@ fn reserved(r: &mut Rdy) -> Scope {
 /// Re-taken for Task 6 fix round 1 (ruling task-6): the open link is a reader control, so each
 /// drawing's `open full size` line left `llms-full.txt`; every other file and the warnings kept
 /// their bytes.
+/// Re-taken for the renderer plan's Task 9 (Copy, ruling task-8 form): each doc and folder page's
+/// title toolbar (Link, Copy ref, Copy), the Copy button on each block and section toolbar, the
+/// page's hidden Copy payload template and `assets/app.js` (which bundles `js/copy.js`) moved;
+/// their content rows keep their text (the gold1_ goldens).
 #[test]
 fn ec3_the_site_build_is_unchanged() {
     const BASE: [(&str, &str); 3] = [
         (
             "canon",
-            "2fb4e1af20874e879d3d17440abeb2667e3d393a2247b19fdc48b5bdff2d5c3b",
+            "16d32f24748ee5ccaf70113278b82e6cc3cfe432022ab7bed381eaf26e097fa0",
         ),
         (
             "view:editing",
-            "bfa689593ca95553b5b597449cc93417a1c523a9ed7ee8dbf8a63a9be28fba3c",
+            "c80f61e893b7b63c80846ca77b1ebbb5e60234e6ceeea57a39dc8aaf4e46c48d",
         ),
         (
             "view:reserved",
-            "696c71b994ec406ae5a54321a705b58902ea581936ffb634ccad5e30772c06da",
+            "550b80f242a4cb6049c796bf3d909413b20431fbd08bef595cdb0c868b7770ce",
         ),
     ];
     // the ids the corpus's generated pages and the reserved docs draw come from a seeded stream
