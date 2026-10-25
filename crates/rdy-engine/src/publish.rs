@@ -80,6 +80,7 @@ impl Rdy {
                     propose_cadence: prev.propose_cadence,
                     propose_changes: prev.propose_changes,
                     decisions_home: prev.decisions_home.clone(),
+                    site_base_path: prev.site_base_path.clone(),
                     reader: self.store.reader(),
                     as_of: Arc::clone(&self.as_of),
                     vpos: Arc::clone(&self.vpos),
@@ -291,6 +292,7 @@ impl Rdy {
             coverage_target,
             (propose_cadence, propose_changes),
             decisions_home,
+            site_base_path,
             lease_ttl_ms,
         ) = (
             Arc::clone(&prev.name),
@@ -300,6 +302,7 @@ impl Rdy {
             prev.coverage_target,
             (prev.propose_cadence, prev.propose_changes),
             prev.decisions_home.clone(),
+            prev.site_base_path.clone(),
             prev.lease_ttl_ms,
         );
         // the coordination refs: re-read by a publish that may have moved them, else carried. A
@@ -571,6 +574,7 @@ impl Rdy {
             propose_cadence,
             propose_changes,
             decisions_home,
+            site_base_path,
             reader: self.store.reader(),
             as_of: Arc::clone(&self.as_of),
             vpos: Arc::clone(&self.vpos),
@@ -876,6 +880,7 @@ impl Rdy {
             propose_cadence: cfg.propose_cadence(),
             propose_changes: cfg.propose_changes(),
             decisions_home: cfg.decisions_home(),
+            site_base_path: cfg.site.base_path.clone(),
             reader,
             as_of: caches.as_of,
             vpos: caches.vpos,
@@ -1018,6 +1023,7 @@ impl Rdy {
             propose_cadence: prev.propose_cadence,
             propose_changes: prev.propose_changes,
             decisions_home: prev.decisions_home.clone(),
+            site_base_path: prev.site_base_path.clone(),
             reader: self.store.reader(),
             as_of: caches.as_of,
             vpos: caches.vpos,

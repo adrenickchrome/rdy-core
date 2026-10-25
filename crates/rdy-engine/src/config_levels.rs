@@ -138,6 +138,9 @@ pub enum Ty {
     /// A string. A string that is not one of the choices is not a wrong type: `range_warnings`
     /// warns and sets the key's default at that level.
     Choice(&'static [&'static str]),
+    /// A string. A string outside the form of [`valid_site_base_path`] is not a wrong type:
+    /// `range_warnings` warns and sets the key's default at that level.
+    BasePath,
     /// Not read by `Config` yet: any value.
     Any,
 }
@@ -147,7 +150,7 @@ impl Ty {
     fn check(self, v: &Value) -> Result<(), String> {
         let r = match self {
             Ty::Any => return Ok(()),
-            Ty::Str => serde_yaml_ng::from_value::<String>(v.clone()).map(drop),
+            Ty::Str | Ty::BasePath => serde_yaml_ng::from_value::<String>(v.clone()).map(drop),
             Ty::OptStr => serde_yaml_ng::from_value::<Option<String>>(v.clone()).map(drop),
             Ty::Bool => serde_yaml_ng::from_value::<bool>(v.clone()).map(drop),
             Ty::U32 => serde_yaml_ng::from_value::<u32>(v.clone()).map(drop),
@@ -238,6 +241,12 @@ pub const KEY_LEVELS: &[KeyRule] = &[
         levels: PROJECT_ONLY,
         ty: Ty::OptStr,
         default: None,
+    },
+    KeyRule {
+        key: SITE_BASE_PATH,
+        levels: PROJECT_ONLY,
+        ty: Ty::BasePath,
+        default: Some("/"),
     },
     KeyRule {
         key: "reviews.require_up_to_date",
@@ -372,6 +381,39 @@ pub const KEY_LEVELS: &[KeyRule] = &[
         default: None,
     },
 ];
+
+/// The static site's base path (D-94BT2), by its dotted key.
+pub const SITE_BASE_PATH: &str = "site.base_path";
+
+/// The most bytes of a `site.base_path`.
+const SITE_BASE_PATH_MAX: usize = 2048;
+
+/// Whether `value` is a usable `site.base_path`: `/`, or a path of 2 to 2048 UTF-8 bytes that
+/// begins and ends with one slash. Its segments are not empty, are not `.` or `..`, and hold only
+/// ASCII letters, digits, `-`, `_`, `.` and `~`. No URL parser is needed for that closed form
+/// (no percent escape, colon, backslash, query, fragment, space or non-ASCII byte).
+pub fn valid_site_base_path(value: &str) -> bool {
+    if value == "/" {
+        return true;
+    }
+    if value.len() < 2 || value.len() > SITE_BASE_PATH_MAX {
+        return false;
+    }
+    let Some(inner) = value
+        .strip_prefix('/')
+        .and_then(|rest| rest.strip_suffix('/'))
+    else {
+        return false;
+    };
+    inner.split('/').all(|segment| {
+        !segment.is_empty()
+            && segment != "."
+            && segment != ".."
+            && segment
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~'))
+    })
+}
 
 /// The signing settings, by their dotted keys.
 pub const SIGNING_KEY: &str = "signing.key";
@@ -918,10 +960,11 @@ fn wrong_file_warnings(level: Level, map: &mut Mapping, user_file: Option<&Path>
 
 /// The `W_CONFIG_UNKNOWN` warnings of the range-checked keys of `map`: a percent outside 0 to 100,
 /// a port outside 1024 to 65535, an address that is not a private IPv4 literal, a count outside 1
-/// to 1000 and a choice that is not one of its words. rdy keeps going (config mistakes warn). A
-/// percent, a port and an address are removed from `map`, so the next level or the default
-/// applies. A count and a choice get the key's default at the level that holds the wrong value:
-/// the message says "using <default>", so a lower level never answers instead (FW-PC1).
+/// to 1000, a choice that is not one of its words and a base path outside the closed form. rdy
+/// keeps going (config mistakes warn). A percent, a port and an address are removed from `map`,
+/// so the next level or the default applies. A count, a choice and a base path get the key's
+/// default at the level that holds the wrong value: the message says "using <default>", so a
+/// lower level never answers instead (FW-PC1, D-94BT2).
 fn range_warnings(map: &mut Mapping) -> Vec<Issue> {
     let mut out = Vec::new();
     for rule in KEY_LEVELS {
@@ -1019,10 +1062,34 @@ fn range_warnings(map: &mut Mapping) -> Vec<Issue> {
                     format!("set {} to {list}", rule.key),
                 )
             }
+            Ty::BasePath => {
+                let bad = get_path(map, rule.key).is_some_and(|v| match v {
+                    Value::String(s) => !valid_site_base_path(s),
+                    _ => false,
+                });
+                if !bad {
+                    continue;
+                }
+                (
+                    format!(
+                        "{} must be / or an absolute path that ends with /, at most 2048 bytes, \
+                         with only letters, digits, -, _, . and ~ between the slashes; using {}",
+                        rule.key,
+                        rule.default.unwrap_or("/")
+                    ),
+                    format!(
+                        "set {} to / or to an absolute path that ends with /, such as /docs/, in \
+                         {PROJECT_FILE}",
+                        rule.key
+                    ),
+                )
+            }
             _ => continue,
         };
         let default: Option<Value> = match rule.ty {
-            Ty::Count | Ty::Choice(_) => rule.default.and_then(|d| serde_yaml_ng::from_str(d).ok()),
+            Ty::Count | Ty::Choice(_) | Ty::BasePath => {
+                rule.default.and_then(|d| serde_yaml_ng::from_str(d).ok())
+            }
             _ => None,
         };
         match default {
