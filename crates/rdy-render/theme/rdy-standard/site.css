@@ -204,16 +204,30 @@ figcaption { font-size: 0.84rem; color: var(--ink-soft); margin-top: 0.5rem; }
 /* == nav == */
 .sidenav nav { font-size: 0.9rem; }
 .nav-root, .nav-root ul { list-style: none; margin: 0; padding: 0; }
-.nav-group { margin: 0 0 1.4rem; }
-.nav-group-link { text-decoration: none; }
+.nav-group { position: relative; margin: 0 0 1.4rem; }
 .nav-group-label { display: block; font-size: 0.74rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft); margin: 0 0 0.35rem; padding: 0 0.6rem; }
-.nav-group-link:hover .nav-group-label, .nav-group-link[aria-current] .nav-group-label { color: var(--accent-ink); }
 .nav-item { margin: 0; }
 .nav-item > a { display: block; padding: 0.3rem 0.6rem; border-radius: 6px; color: var(--ink); text-decoration: none; line-height: 1.4; overflow-wrap: anywhere; }
 .nav-item > a:hover { background: var(--surface); }
 .nav-item.on-path > a { font-weight: 600; }
 .nav-item.is-active > a { background: var(--accent-soft); color: var(--accent-ink); font-weight: 600; }
-.nav-sub { margin: 0.1rem 0 0.2rem 0.6rem; padding-left: 0.5rem; border-left: 1px solid var(--line); }
+/* a folder opens and closes in place (details and summary, with no script); the link to its own page is the arrow beside it, never inside the summary */
+.nav-folder { position: relative; }
+.nav-fold > summary { position: relative; display: block; list-style: none; cursor: pointer; }
+.nav-fold > summary::-webkit-details-marker { display: none; }
+.nav-fold > summary::before { content: ''; position: absolute; inset-inline-start: 0.35rem; top: 50%; width: 0.4rem; height: 0.4rem; border-right: 2px solid var(--ink-soft); border-bottom: 2px solid var(--ink-soft); transform: translateY(-65%) rotate(-45deg); }
+.nav-fold[open] > summary::before { transform: translateY(-65%) rotate(45deg); }
+.nav-folder > .nav-fold > summary { padding: 0.3rem 2.2rem 0.3rem 1.3rem; border-radius: 6px; color: var(--ink); line-height: 1.4; overflow-wrap: anywhere; }
+.nav-folder > .nav-fold > summary:hover { background: var(--surface); }
+.nav-item.on-path > .nav-fold > summary { font-weight: 600; }
+.nav-item.is-active > .nav-fold > summary { background: var(--accent-soft); color: var(--accent-ink); font-weight: 600; }
+.nav-group > .nav-fold > summary { padding-inline-end: 2.2rem; }
+.nav-group > .nav-fold > summary .nav-group-label { padding-inline-start: 1.3rem; }
+.nav-group > .nav-fold > summary:hover .nav-group-label, .nav-group > .nav-go[aria-current] + .nav-fold .nav-group-label { color: var(--accent-ink); }
+.nav-item > a.nav-go, .nav-group > a.nav-go { position: absolute; inset-inline-end: 0.2rem; top: 0; z-index: 1; padding: 0.3rem 0.5rem; background: transparent; color: var(--ink-soft); font-size: 0.85rem; font-weight: 400; line-height: 1.4; }
+.nav-group > a.nav-go { top: -0.3rem; }
+.nav-item > a.nav-go:hover, .nav-group > a.nav-go:hover, .nav-item > a.nav-go[aria-current], .nav-group > a.nav-go[aria-current] { background: transparent; color: var(--accent-ink); }
+.nav-root .nav-sub { margin: 0.1rem 0 0.2rem; padding-inline-start: 0.875rem; }
 .more > a { display: block; padding: 0.3rem 0.6rem; color: var(--ink-soft); font-size: 0.84rem; text-decoration: none; }
 .more > a:hover { color: var(--accent-ink); text-decoration: underline; }
 /* == /nav == */
@@ -395,6 +409,9 @@ details.chg-removed > summary { cursor: pointer; color: var(--ink-soft); font-we
 .chg-old { margin-top: 0.4rem; color: var(--ink-soft); text-decoration: none; overflow-wrap: anywhere; }
 .nav-removed { padding: 0.3rem 0.6rem; color: var(--ink-soft); line-height: 1.4; overflow-wrap: anywhere; }
 .nav-group .chg-label, .nav-item .chg-label { margin-inline-start: 0.4rem; }
+/* the Edited word of the navigation leads to the doc's group on the change summary */
+a.chg-label { text-decoration: none; user-select: auto; -webkit-user-select: auto; }
+a.chg-label:hover { color: var(--accent-ink); text-decoration: underline; }
 .changes { list-style: none; margin: 0 0 1rem; padding: 0; }
 .changes li { margin: 0 0 0.35rem; overflow-wrap: anywhere; }
 .changes .chg-label { margin-inline: 0.4rem; }

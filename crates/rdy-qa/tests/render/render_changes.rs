@@ -411,7 +411,20 @@ fn sr6_change_pages_are_not_in_search_or_llms() {
         for p in pages(out) {
             let h = std::fs::read_to_string(&p).unwrap();
             if let Some(nav) = between(&h, "<nav aria-label=\"Pages\">", "</nav>") {
-                assert!(!nav.contains("changes"), "{}: {nav}", p.display());
+                // the one way the summary shows in navigation: an Edited word that leads to
+                // its doc's group; never an entry of its own
+                let mut plain = nav.to_string();
+                while let Some(i) = plain.find("<a class=\"chg chg-label chg-edited\" href=\"") {
+                    let end = plain[i..].find("</a>").expect("the link ends") + "</a>".len();
+                    let link = plain[i..i + end].to_string();
+                    assert!(
+                        link.contains("changes.html#") && link.ends_with(">Edited</a>"),
+                        "{}: {link}",
+                        p.display()
+                    );
+                    plain.replace_range(i..i + end, "");
+                }
+                assert!(!plain.contains("changes"), "{}: {plain}", p.display());
             }
         }
         assert!(!out.join("go/changes.html").exists());

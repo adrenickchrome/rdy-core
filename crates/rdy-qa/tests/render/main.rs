@@ -43,6 +43,7 @@ mod render_review_nav;
 mod render_review_page;
 mod render_review_toggle;
 mod render_search;
+mod render_sidebar_state;
 mod render_site;
 mod render_site_profiles;
 mod render_techdocs;
