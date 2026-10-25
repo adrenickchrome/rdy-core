@@ -269,6 +269,7 @@ fn outcome_of(c: &compute::PlanCandidate, answers: &[PlanAnswer]) -> PlanOutcome
         PlanAct::Confirm => PlanOutcome::Confirmed,
         PlanAct::Done => PlanOutcome::Done,
         PlanAct::Defer => PlanOutcome::Deferred,
+        PlanAct::Dismiss => PlanOutcome::Dismissed,
     }
 }
 

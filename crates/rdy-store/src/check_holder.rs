@@ -498,6 +498,9 @@ impl StoreReader {
         // the chains and seals a holder took, with no `plan/` ref (`check_meta` refuses one)
         self.check_plans()?;
         self.check_signatures()?;
+        // the carried shapes it took, by the project's own rules (no `check/` ref: `check_meta`
+        // refuses one)
+        self.check_carried_records()?;
         Ok(StoreCheck {
             views: 0,
             view_ops: 0,

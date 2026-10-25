@@ -21,7 +21,11 @@
 //!   holder requires it with the tag;
 //! - the REDACTION request whose carrier is a closure change;
 //! - the active REDACTION_APPLY of every request that names a closure block version, change,
-//!   blob manifest or chunk: a later removal proof, so a receiver can erase its own copies too.
+//!   blob manifest or chunk: a later removal proof, so a receiver can erase its own copies too;
+//! - every DISPUTE of a closure landing, and every DISPUTE_RESOLUTION of a closure dispute (its
+//!   correction landing follows through its own link);
+//! - every CHECK_REQUEST whose subject names a closure change or proposal version, and every
+//!   REVIEW whose subject is a closure check request.
 //!
 //! Each attachment's own links join the walk (an apply's request and its human landing, with
 //! that landing's history), and attachments are taken again until no new key appears: a key is
@@ -156,7 +160,8 @@ pub fn closure_before(
             .map(|k| k.hash)
             .filter(|h| !w.asked.contains(h))
             .collect();
-        if ask.is_empty() {
+        let carried = w.attach_carried()?;
+        if ask.is_empty() && !carried {
             break;
         }
         w.attach_answers(&ask)?;
@@ -653,6 +658,94 @@ impl Walk<'_> {
             return Err(e);
         }
         walked.map_err(|e| store_error(e, None))
+    }
+
+    /// One pass over the carried shapes before the end: each DISPUTE of a closure landing, each
+    /// DISPUTE_RESOLUTION of a closure dispute, each CHECK_REQUEST whose subject names a closure
+    /// change or proposal version, and each REVIEW of a closure check request joins the walk.
+    /// Returns whether one joined.
+    fn attach_carried(&mut self) -> Result<bool, StreamError> {
+        let has = |w: &Self, kind: u8| w.nodes.keys().any(|k| k.kind == kind);
+        let mut joined = false;
+        let passes: [(u8, &[u8]); 4] = [
+            (kinds::DISPUTE, &[kinds::LANDING]),
+            (kinds::DISPUTE_RESOLUTION, &[kinds::DISPUTE]),
+            (kinds::CHECK_REQUEST, &[kinds::CHANGE, kinds::PROPOSAL]),
+            (kinds::REVIEW, &[kinds::CHECK_REQUEST]),
+        ];
+        for (kind, triggers) in passes {
+            if !triggers.iter().any(|t| has(self, *t)) {
+                continue;
+            }
+            let reader = self.source.reader;
+            let mut source = StoreSource {
+                reader,
+                end: self.source.end,
+            };
+            let mut found: Vec<ObjectKey> = vec![];
+            let mut failed: Option<StreamError> = None;
+            let nodes = &self.nodes;
+            let seen = &self.seen;
+            let mut visit = |h: Hash| -> Result<(), StreamError> {
+                let key = ObjectKey { kind, hash: h };
+                if seen.contains(&key) {
+                    return Ok(());
+                }
+                let Some(r @ StreamRecord::Present { .. }) = source.record(key)? else {
+                    return Ok(());
+                };
+                let StreamRecord::Present { payload, .. } = &r else {
+                    return Ok(());
+                };
+                let bad = |e: crate::bounded::RecordError| {
+                    StreamError::from_record(0, 0, &e).with_object(Some(key))
+                };
+                let held = |kind: u8, hash: Hash| nodes.contains_key(&ObjectKey { kind, hash });
+                let attach = match kind {
+                    kinds::DISPUTE => {
+                        let d: rdy_model::dispute::Dispute =
+                            crate::codec::decode_bounded(r.raw_kind(), payload).map_err(bad)?;
+                        held(kinds::LANDING, d.landing)
+                    }
+                    kinds::DISPUTE_RESOLUTION => {
+                        let d: rdy_model::dispute::DisputeResolution =
+                            crate::codec::decode_bounded(r.raw_kind(), payload).map_err(bad)?;
+                        held(kinds::DISPUTE, d.dispute)
+                    }
+                    kinds::CHECK_REQUEST => {
+                        let c: rdy_model::check_request::CheckRequest =
+                            crate::codec::decode_bounded(r.raw_kind(), payload).map_err(bad)?;
+                        c.subject.change.is_some_and(|h| held(kinds::CHANGE, h))
+                            || c.subject.version.is_some_and(|h| held(kinds::PROPOSAL, h))
+                    }
+                    _ => {
+                        let v: rdy_model::Review =
+                            crate::codec::decode_bounded(r.raw_kind(), payload).map_err(bad)?;
+                        matches!(v.subject, rdy_model::ReviewSubject::Check { request }
+                            if held(kinds::CHECK_REQUEST, request))
+                    }
+                };
+                if attach {
+                    found.push(key);
+                }
+                Ok(())
+            };
+            let walked = reader.for_each_object_of(kind, |h| {
+                visit(h).map_err(|e| {
+                    failed = Some(e);
+                    StoreError::Refused("the closure's carried pass stopped".into())
+                })
+            });
+            if let Some(e) = failed {
+                return Err(e);
+            }
+            walked.map_err(|e| store_error(e, None))?;
+            for key in found {
+                joined = true;
+                self.reach(key)?;
+            }
+        }
+        Ok(joined)
     }
 
     /// The ANSWER that the ref `answer/tag:<root name>` names, when it has act Tag and that item

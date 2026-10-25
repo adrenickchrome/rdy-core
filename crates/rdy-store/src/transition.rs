@@ -216,7 +216,7 @@ impl Transitions {
     /// The frame a batch appends: its raw kind and payload, in the TRANSITION kind's latest
     /// encoding (`crate::codec`).
     pub fn frame(&self) -> (u8, Vec<u8>) {
-        crate::codec::item(kinds::TRANSITION, self)
+        crate::codec::item_new(kinds::TRANSITION, self)
     }
 }
 

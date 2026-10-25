@@ -1,3 +1,5 @@
+#![cfg(unix)]
+// Unix only: it sets file modes, makes symlinks and reads a child's signal. FW-XP1 Phase 4 ports it.
 //! The store upgrade transaction (D-WWAK7): a dry run writes nothing; an upgrade backs the closed
 //! store up completely, then appends one marked batch with the new manifest and its receipt,
 //! rebuilds the index and runs the store check. FORMAT keeps the old mirror until the engine's
@@ -1036,6 +1038,9 @@ fn holder(base: &Path, with_block: bool) -> PathBuf {
                 approved_version: None,
                 rebased_from: vec![],
                 evidence: None,
+                assessment: None,
+                policy: None,
+                read_identity: None,
             },
         )
         .unwrap();

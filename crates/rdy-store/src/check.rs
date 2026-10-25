@@ -157,6 +157,8 @@ impl StoreReader {
         self.check_plans()?;
         self.check_signatures()?;
         self.check_carried()?;
+        self.check_carried_records()?;
+        self.check_check_refs()?;
         self.check_meta()?;
         Ok(StoreCheck {
             views,
@@ -172,6 +174,55 @@ impl StoreReader {
             transitions,
             answers,
         })
+    }
+
+    /// Every record that may hold a carried shape keeps the carried record rules
+    /// (`crate::carried_records::validate`): its structure and the bindings of what it names.
+    pub(crate) fn check_carried_records(&self) -> Result<(), StoreError> {
+        for kind in crate::object_refs::PORTABLE_KINDS {
+            if !crate::carried_records::may_carry(kind) {
+                continue;
+            }
+            let mut hashes = vec![];
+            self.for_each_object_of(kind, |h| {
+                hashes.push(h);
+                Ok(())
+            })?;
+            for h in hashes {
+                let (raw, payload) = match self.get_kind_raw(kind, &h) {
+                    Ok(f) => f,
+                    Err(StoreError::Redacted { .. }) => continue,
+                    Err(e) => return Err(e),
+                };
+                let key = crate::object_refs::ObjectKey { kind, hash: h };
+                crate::carried_records::validate(
+                    &mut crate::carried_records::StoreObjects(self),
+                    key,
+                    raw,
+                    &payload,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Every `check/<hash>` ref names the CHECK_REQUEST of that hash (`invalid check ref`).
+    fn check_check_refs(&self) -> Result<(), StoreError> {
+        for (name, value) in self.refs_with_prefix(crate::carried_records::CHECK_REF_PREFIX)? {
+            let named = crate::carried_records::check_ref_key(&name);
+            let value = crate::index::hash_from(&value, &format!("{name} ref")).ok();
+            match (named, value) {
+                (Some(k), Some(v)) if k == v && self.has_kind(kinds::CHECK_REQUEST, &v)? => {}
+                (_, v) => {
+                    return Err(crate::carried_records::refusal(
+                        &v.unwrap_or(Hash([0; 32])),
+                        kinds::CHECK_REQUEST,
+                        crate::carried_records::CHECK_REF,
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Every span of every carried record has its row in the span index with the span's own
@@ -364,7 +415,11 @@ impl StoreReader {
             // A new verdict must decide here whether it is a mention's.
             match r.verdict {
                 Verdict::Dismiss | Verdict::Restore => {}
-                Verdict::Tension | Verdict::NoTension => {
+                Verdict::Tension
+                | Verdict::NoTension
+                | Verdict::Pass
+                | Verdict::Concern
+                | Verdict::Fail => {
                     return Err(bad(format!("{at}: review {h} is not a mention review")));
                 }
             }
@@ -908,6 +963,13 @@ pub fn landing_field_rules<E: From<StoreError>>(
         return Err(E::from(bad(format!(
             "landing {l}: relayed_by and relay_evidence must both be set or both unset"
         ))));
+    }
+    if let Err(reason) = crate::carried_records::landing_local(rec) {
+        return Err(E::from(crate::carried_records::refusal(
+            l,
+            kinds::LANDING,
+            reason,
+        )));
     }
     if (rec.assurance == Assurance::Relayed) != rec.relayed_by.is_some() {
         return Err(E::from(bad(format!(

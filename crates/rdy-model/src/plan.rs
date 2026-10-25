@@ -34,6 +34,8 @@ pub enum PlanKind {
     Confirm,
     /// Change the code that implements the decision.
     UpdateImplementation,
+    /// Settle a tension the decision change opens (appended: index 5).
+    Tension,
 }
 
 impl PlanKind {
@@ -45,6 +47,7 @@ impl PlanKind {
             PlanKind::Reaffirm => "reaffirm",
             PlanKind::Confirm => "confirm",
             PlanKind::UpdateImplementation => "update_implementation",
+            PlanKind::Tension => "tension",
         }
     }
 }
@@ -56,6 +59,8 @@ pub enum PlanAct {
     Confirm,
     Defer,
     Done,
+    /// Dismiss a tension item, with a reason (appended: index 3).
+    Dismiss,
 }
 
 impl PlanAct {
@@ -65,6 +70,7 @@ impl PlanAct {
             PlanAct::Confirm => "confirm",
             PlanAct::Defer => "defer",
             PlanAct::Done => "done",
+            PlanAct::Dismiss => "dismiss",
         }
     }
 }
@@ -83,6 +89,8 @@ pub enum PlanOutcome {
     Done,
     Deferred,
     Open,
+    /// A tension item a person dismissed (appended: index 10).
+    Dismissed,
 }
 
 impl PlanOutcome {
@@ -99,6 +107,7 @@ impl PlanOutcome {
             PlanOutcome::Done => "done",
             PlanOutcome::Deferred => "deferred",
             PlanOutcome::Open => "open",
+            PlanOutcome::Dismissed => "dismissed",
         }
     }
 }
@@ -106,7 +115,8 @@ impl PlanOutcome {
 /// The outcomes a sealed item of `kind` may have (Task 3: enum combinations; D-4JMPH): its
 /// computed closes, the outcomes of the acts that may answer it, `deferred` and `open`. A
 /// document subject the version deletes closes as `updated`, whatever its kind (task-6 R1, O4).
-/// The writers, fsck and a holder's take check every sealed item against it.
+/// A tension item seals with exactly `updated`, `confirmed` or `dismissed`; no other kind may be
+/// `dismissed`. The writers, fsck and a holder's take check every sealed item against it.
 pub fn allowed_outcomes(kind: PlanKind) -> &'static [PlanOutcome] {
     use PlanOutcome::*;
     match kind {
@@ -115,6 +125,7 @@ pub fn allowed_outcomes(kind: PlanKind) -> &'static [PlanOutcome] {
         PlanKind::Reaffirm => &[Reaffirmed, Retired, Updated, Deferred, Open],
         PlanKind::Confirm => &[Repinned, Updated, Confirmed, Deferred, Open],
         PlanKind::UpdateImplementation => &[Committed, Done, Deferred, Open],
+        PlanKind::Tension => &[Updated, Confirmed, Dismissed],
     }
 }
 

@@ -210,6 +210,9 @@ fn repr1_a_landing_reads_back_in_its_kind_with_its_id_after_a_reindex() {
             choice: Some("land".into()),
             card_hash: None,
         }),
+        assessment: None,
+        policy: None,
+        read_identity: None,
     };
     let lh = plant(&mut s, kinds::LANDING, postcard::to_allocvec(&l).unwrap());
     assert_eq!(lh, l.id());

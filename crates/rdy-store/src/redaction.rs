@@ -163,7 +163,7 @@ impl PreparedRedactionApply {
         self.requests
             .iter()
             .map(|(request, report_hash)| {
-                crate::codec::item(
+                crate::codec::item_new(
                     kinds::REDACTION_APPLY,
                     &RedactionApply {
                         request: *request,
@@ -405,7 +405,7 @@ impl StoreReader {
     /// change or block whose marker names a request that removed it is `Redacted`; a forged or
     /// unmatched marker is `ProjectedWrite`.
     pub(crate) fn refuse_projection(&self, change: &Change) -> Result<(), StoreError> {
-        if let Some(orig) = change.read_identity {
+        if let Some(orig) = change.redacted_id() {
             let request = match self.mask_of(kinds::CHANGE, &orig)? {
                 Some(m) => Some(m.request),
                 None => self
@@ -637,7 +637,10 @@ impl Store {
                         .segments()
                         .read_hashed(s.loc)
                         .map_err(|_| StoreError::corrupt_at(s.loc))?;
-                    if kind != s.kind || hash != s.hash || payload.len() != s.len as usize {
+                    if crate::codec::logical_kind(kind) != s.kind
+                        || hash != s.hash
+                        || payload.len() != s.len as usize
+                    {
                         return Err(StoreError::corrupt_at(s.loc));
                     }
                 }
@@ -767,7 +770,7 @@ struct Selection {
 impl Selection {
     /// Whether the frame of `kind` with hash `h` holds selected content.
     fn holds(&self, kind: u8, h: &Hash) -> bool {
-        match kind {
+        match crate::codec::logical_kind(kind) {
             kinds::BLOCK => self.versions.contains(h),
             kinds::CHANGE => self.changes.contains(h),
             kinds::BLOB_CHUNK => self.chunks.contains(h),
@@ -813,15 +816,42 @@ pub(crate) fn check_bounds(request: &Redaction) -> Result<(), StoreError> {
 
 /// Whether residue `r` is the residue of a span of `kind` over the frame with hash `h`.
 pub(crate) fn residue_names(r: &RedactionResidue, kind: u8, h: &Hash) -> bool {
+    let kind = crate::codec::logical_kind(kind);
     match r {
         RedactionResidue::Block(b) => kind == kinds::BLOCK && b.version == *h,
         RedactionResidue::Change(c) => kind == kinds::CHANGE && c.change == *h,
     }
 }
 
+/// The encoding of the removed frame a residue names (`source_encoding`): a block residue's is
+/// always 0, a change residue's 0 or CHANGE's latest. None for a residue whose source encoding
+/// this registry does not permit.
+pub(crate) fn source_encoding(r: &RedactionResidue) -> Option<u16> {
+    match r {
+        RedactionResidue::Block(b) => (b.source_encoding == 0).then_some(0),
+        RedactionResidue::Change(c) => {
+            (c.source_encoding <= crate::codec::latest(kinds::CHANGE)).then_some(c.source_encoding)
+        }
+    }
+}
+
+/// Whether raw kind `raw` of a removed frame is the raw kind its span of logical kind `kind` and
+/// its residue give: the residue's source encoding decides the version marker (no residue: a
+/// blob chunk, encoding 0).
+pub(crate) fn marker_agrees(raw: u8, kind: u8, residue: Option<&RedactionResidue>) -> bool {
+    let encoding = match residue {
+        Some(r) => match source_encoding(r) {
+            Some(e) => e,
+            None => return false,
+        },
+        None => 0,
+    };
+    raw == crate::codec::raw_kind(kind, encoding)
+}
+
 /// Whether residue `r`, stored in encoding `encoding`, is exactly the residue the store derives
-/// from the intact payload `payload` of a frame of `kind`: a block's identity facts, or a
-/// change's id, audit fields, dependencies and every op in order, each naming its block by
+/// from the intact payload `payload` of a frame of raw kind `raw`: a block's identity facts, or
+/// a change's id, audit fields, dependencies and every op in order, each naming its block by
 /// version. Shared by the checked preparation and apply (`check_spans`) and the open's
 /// authorization bootstrap, so no path accepts a residue that would replay other history than
 /// the original. A payload that does not decode, or is not its record's canonical encoding, has
@@ -830,9 +860,11 @@ pub(crate) fn residue_names(r: &RedactionResidue, kind: u8, h: &Hash) -> bool {
 /// The residue's encoding decides the one derivation of a block residue's content hash
 /// (`crate::codec::REGISTERED`): encoding 1 holds the content-2 hash, encoding 0 the content-1
 /// hash an rdy before content-2 recorded ([`rdy_model::encoding::legacy_content_1_hash`]). The
-/// whole residue is compared, its content hash included. Any other encoding has no residue.
+/// whole residue is compared, its content hash and source encoding included: the frame's raw
+/// kind and its version prefix must be the source encoding's ([`marker_agrees`]). Any other
+/// residue encoding has no residue.
 pub(crate) fn residue_matches(
-    kind: u8,
+    raw: u8,
     payload: &[u8],
     r: &RedactionResidue,
     encoding: u16,
@@ -843,14 +875,20 @@ pub(crate) fn residue_matches(
         1 => Block::content_hash,
         _ => return false,
     };
+    if !marker_agrees(raw, crate::codec::logical_kind(raw), Some(r)) {
+        return false;
+    }
     // the frame's body, by its encoding (`crate::codec`): the residue derives from it
-    let Ok(o) = crate::codec::split(kind, payload) else {
+    let Ok(o) = crate::codec::split(raw, payload) else {
         return false;
     };
+    if source_encoding(r) != Some(o.version) {
+        return false;
+    }
     match (o.kind, r) {
         (kinds::BLOCK, RedactionResidue::Block(res)) => crate::codec::decode_split::<Block>(&o)
             .is_ok_and(|b| {
-                encode(&b) == o.body
+                crate::codec::is_canonical(&o, &b)
                     && *res
                         == BlockResidue {
                             content_hash: content(&b),
@@ -858,7 +896,7 @@ pub(crate) fn residue_matches(
                         }
             }),
         (kinds::CHANGE, RedactionResidue::Change(res)) => crate::codec::decode_split::<Change>(&o)
-            .is_ok_and(|c| encode(&c) == o.body && *res == ChangeResidue::of(&c)),
+            .is_ok_and(|c| crate::codec::is_canonical(&o, &c) && *res == ChangeResidue::of(&c)),
         _ => false,
     }
 }
@@ -1037,7 +1075,9 @@ impl Store {
                 None => {
                     let (kind, hash, payload) =
                         self.segments().read_hashed(at).map_err(|_| corrupt())?;
-                    if kind != span.kind || hash != span.hash || payload.len() != span.len as usize
+                    if crate::codec::logical_kind(kind) != span.kind
+                        || hash != span.hash
+                        || payload.len() != span.len as usize
                     {
                         return Err(corrupt());
                     }
@@ -1045,12 +1085,12 @@ impl Store {
                         // the residue keeps the frame's own hash: a payload that decodes but is
                         // not its record's canonical encoding cannot be given one
                         (kinds::BLOCK, Some((res @ RedactionResidue::Block(_), encoding))) => {
-                            if !residue_matches(span.kind, &payload, res, encoding) {
+                            if !residue_matches(kind, &payload, res, encoding) {
                                 return Err(corrupt());
                             }
                         }
                         (kinds::CHANGE, Some((res @ RedactionResidue::Change(c), encoding))) => {
-                            if !residue_matches(span.kind, &payload, res, encoding) {
+                            if !residue_matches(kind, &payload, res, encoding) {
                                 return Err(corrupt());
                             }
                             for version in residual_versions(c) {
@@ -1061,7 +1101,8 @@ impl Store {
                                 }
                             }
                         }
-                        (kinds::BLOB_CHUNK, None) if span.residue.is_none() => {}
+                        (kinds::BLOB_CHUNK, None)
+                            if span.residue.is_none() && kind == kinds::BLOB_CHUNK => {}
                         _ => return Err(corrupt()),
                     }
                 }

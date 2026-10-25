@@ -462,7 +462,7 @@ fn frame_entries(
     let mut out = vec![IndexEntry::Object { kind, hash, loc }];
     match kind {
         kinds::CHANGE => {
-            let change: Change = decode(payload)?;
+            let change: Change = crate::codec::decode_split(&o)?;
             for op in &change.ops {
                 match op {
                     Op::Create { block } | Op::Update { block, .. } => {
@@ -490,7 +490,7 @@ fn frame_entries(
             });
         }
         kinds::LANDING => {
-            let rec: LandingRecord = decode(payload)?;
+            let rec: LandingRecord = crate::codec::decode_split(&o)?;
             out.extend(rec.changes.into_iter().map(|change| IndexEntry::Landed {
                 change,
                 landing: hash,
@@ -1906,8 +1906,7 @@ impl Store {
             if kind == kinds::REF_UPDATE || kind == kinds::BATCH_COMMIT {
                 continue;
             }
-            let body = crate::codec::split(*raw, payload).map_or(&payload[..], |o| o.body);
-            for f in format::required_features(kind, body) {
+            for f in format::required_features(*raw, payload) {
                 if !current.has(&f.name) && !needed.contains(&f) {
                     needed.push(f);
                 }
@@ -2263,7 +2262,7 @@ impl Store {
             }
             TypedRecord::Other => {}
         }
-        Ok(self.write(vec![crate::codec::item(kind, value)])?[0])
+        Ok(self.write(vec![crate::codec::item(kind, value)?])?[0])
     }
 
     /// Successful `write` calls since open (atom1: a landing is one).
@@ -2381,7 +2380,7 @@ impl Store {
             .chunks(CHUNK)
             .map(|c| Hash::of(&crate::codec::frame_latest(kinds::BLOB_CHUNK, c.to_vec()).1))
             .collect();
-        crate::codec::encode(
+        crate::codec::encode_new(
             kinds::BLOB_MANIFEST,
             &BlobManifest {
                 len: bytes.len() as u64,
@@ -2397,7 +2396,7 @@ impl Store {
             .map(|c| crate::codec::frame_latest(kinds::BLOB_CHUNK, c.to_vec()))
             .collect();
         let chunks: Vec<Hash> = items.iter().map(|(_, c)| Hash::of(c)).collect();
-        items.push(crate::codec::item(
+        items.push(crate::codec::item_new(
             kinds::BLOB_MANIFEST,
             &BlobManifest {
                 len: bytes.len() as u64,
@@ -2571,14 +2570,18 @@ impl StoreReader {
     /// versioned record's version (`crate::codec`), for a reader that decodes it as the current
     /// type.
     pub fn get_body(&self, kind: u8, h: &Hash) -> Result<Vec<u8>, StoreError> {
+        Ok(self.get_versioned_body(kind, h)?.1)
+    }
+
+    /// [`StoreReader::get_body`] with the frame's encoding version: what a reader needs to decode
+    /// the body of a kind whose encodings differ in shape (`crate::codec::decode_bounded_split`).
+    pub fn get_versioned_body(&self, kind: u8, h: &Hash) -> Result<(u16, Vec<u8>), StoreError> {
         let (raw, mut payload) = self.get_kind_raw(kind, h)?;
-        let at = payload.len()
-            - crate::codec::split(raw, &payload)
-                .map_err(|e| StoreError::Decode(e.to_string()))?
-                .body
-                .len();
+        let o =
+            crate::codec::split(raw, &payload).map_err(|e| StoreError::Decode(e.to_string()))?;
+        let (version, at) = (o.version, payload.len() - o.body.len());
         payload.drain(..at);
-        Ok(payload)
+        Ok((version, payload))
     }
 
     /// The object of `kind` with hash `h`, decoded through its encoding (`crate::codec`).
@@ -3138,10 +3141,10 @@ impl Store {
         let mut items = vec![];
         for op in &change.ops {
             if let Op::Create { block } | Op::Update { block, .. } = op {
-                items.push(crate::codec::item(kinds::BLOCK, block));
+                items.push(crate::codec::item_new(kinds::BLOCK, block));
             }
         }
-        items.push(crate::codec::item(kinds::CHANGE, change));
+        items.push(crate::codec::item(kinds::CHANGE, change)?);
         let change_pos = items.len() - 1;
         Ok((items, change_pos))
     }

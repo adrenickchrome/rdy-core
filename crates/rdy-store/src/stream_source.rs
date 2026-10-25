@@ -192,6 +192,14 @@ struct Attachments {
     seals: HashMap<Hash, Vec<ObjectKey>>,
     /// The relay answers of the root (O11).
     relay: Vec<ObjectKey>,
+    /// Disputes by the landing they dispute.
+    disputes: HashMap<Hash, Vec<ObjectKey>>,
+    /// Dispute resolutions by the dispute they resolve.
+    resolutions: HashMap<Hash, Vec<ObjectKey>>,
+    /// Check requests by the change and the proposal version their subject names.
+    checks: HashMap<ObjectKey, Vec<ObjectKey>>,
+    /// Check reviews by the request they answer.
+    verdicts: HashMap<Hash, Vec<ObjectKey>>,
 }
 
 /// Collects the incoming records' attachments: every answer, signature, request and apply they
@@ -213,6 +221,10 @@ fn attachments(
                 | kinds::REDACTION
                 | kinds::REDACTION_APPLY
                 | kinds::PLAN
+                | kinds::DISPUTE
+                | kinds::DISPUTE_RESOLUTION
+                | kinds::CHECK_REQUEST
+                | kinds::REVIEW
         )
     });
     for k in keys.copied() {
@@ -242,6 +254,38 @@ fn attachments(
                 if let Some(seal) = typed::<rdy_model::plan::Plan>(source, k)?.and_then(|p| p.seal)
                 {
                     a.seals.entry(seal.landing).or_default().push(k);
+                }
+            }
+            kinds::DISPUTE => {
+                if let Some(d) = typed::<rdy_model::dispute::Dispute>(source, k)? {
+                    a.disputes.entry(d.landing).or_default().push(k);
+                }
+            }
+            kinds::DISPUTE_RESOLUTION => {
+                if let Some(r) = typed::<rdy_model::dispute::DisputeResolution>(source, k)? {
+                    a.resolutions.entry(r.dispute).or_default().push(k);
+                }
+            }
+            kinds::CHECK_REQUEST => {
+                if let Some(r) = typed::<rdy_model::check_request::CheckRequest>(source, k)? {
+                    for (kind, h) in [
+                        (kinds::CHANGE, r.subject.change),
+                        (kinds::PROPOSAL, r.subject.version),
+                    ] {
+                        if let Some(hash) = h {
+                            a.checks
+                                .entry(ObjectKey { kind, hash })
+                                .or_default()
+                                .push(k);
+                        }
+                    }
+                }
+            }
+            kinds::REVIEW => {
+                if let Some(rdy_model::ReviewSubject::Check { request }) =
+                    typed::<rdy_model::Review>(source, k)?.map(|r| r.subject)
+                {
+                    a.verdicts.entry(request).or_default().push(k);
                 }
             }
             _ => {
@@ -288,7 +332,9 @@ fn named_objects(r: &Redaction) -> BTreeSet<ObjectKey> {
 /// links (through every record of the source), or attached as the closure attaches it
 /// (`crate::closure`): answers of reached landings and tags, signatures of reached landings and
 /// of the root, the root's relay answer (O11), the sealed plans of reached landings, requests of
-/// reached carriers, and applies whose request names a reached object. The first incoming key outside it, in key order, is
+/// reached carriers, applies whose request names a reached object, the disputes of reached
+/// landings and the resolutions of reached disputes, and the check requests of reached changes
+/// and proposal versions and the reviews of reached requests. The first incoming key outside it, in key order, is
 /// `object is outside the tag closure`. A record of the source that is not incoming (a holder's)
 /// may be reached, and is never required to be.
 pub(crate) fn check_closure(
@@ -346,6 +392,18 @@ pub(crate) fn check_closure(
         }
         if k.kind == kinds::CHANGE {
             links.extend(att.requests.get(&k.hash).into_iter().flatten());
+        }
+        // the carried shapes: the disputes of a landing and their resolutions, the check
+        // requests of a change or proposal version and their reviews
+        if k.kind == kinds::LANDING {
+            links.extend(att.disputes.get(&k.hash).into_iter().flatten());
+        }
+        if k.kind == kinds::DISPUTE {
+            links.extend(att.resolutions.get(&k.hash).into_iter().flatten());
+        }
+        links.extend(att.checks.get(&k).into_iter().flatten());
+        if k.kind == kinds::CHECK_REQUEST {
+            links.extend(att.verdicts.get(&k.hash).into_iter().flatten());
         }
         links.extend(att.applies.get(&k).into_iter().flatten());
         edges += links.len() as u64;
@@ -423,15 +481,18 @@ impl crate::plan::PlanLookup for ContextLookup<'_> {
         })
     }
 
-    fn read(&self, kind: u8, h: &Hash) -> Result<Vec<u8>, StoreError> {
+    fn read(&self, kind: u8, h: &Hash) -> Result<(u16, Vec<u8>), StoreError> {
         let key = ObjectKey { kind, hash: *h };
         let record = self.keep(self.rec.borrow_mut().object_source().record(key))?;
         match record {
-            // its body, as the plan lookups read it (`crate::codec`)
-            Some(r @ StreamRecord::Present { .. }) => r
-                .body()
-                .expect("a present record")
-                .map(<[u8]>::to_vec)
+            // its encoding and body, as the plan lookups read it (`crate::codec`)
+            Some(StreamRecord::Present {
+                key,
+                encoding,
+                ref payload,
+                ..
+            }) => crate::codec::split(crate::codec::raw_kind(key.kind, encoding), payload)
+                .map(|o| (o.version, o.body.to_vec()))
                 .map_err(|e| StoreError::Decode(e.to_string())),
             // a removed record reads as removed, as fsck reads it: by the apply that removed it
             Some(StreamRecord::Dropped { apply, .. }) => {
@@ -469,7 +530,14 @@ impl crate::plan::PlanLookup for ContextLookup<'_> {
     fn landing_here(&self, p: &Hash) -> Result<Option<Hash>, StoreError> {
         let landing = |h: &Hash| -> Result<Option<LandingRecord>, StoreError> {
             match self.read(kinds::LANDING, h) {
-                Ok(b) => Ok(bounded::decode::<LandingRecord>(&b).ok()),
+                Ok((version, b)) => Ok(crate::codec::decode_bounded_split::<LandingRecord>(
+                    &crate::codec::ObjectBytes {
+                        kind: kinds::LANDING,
+                        version,
+                        body: &b,
+                    },
+                )
+                .ok()),
                 Err(StoreError::Redacted { .. } | StoreError::NotFound(_)) => Ok(None),
                 Err(e) => Err(e),
             }
@@ -496,7 +564,7 @@ impl crate::plan::PlanLookup for ContextLookup<'_> {
             return Ok(None);
         };
         let version = match self.read(kinds::PROPOSAL, p) {
-            Ok(b) => bounded::decode::<rdy_model::Proposal>(&b).ok(),
+            Ok((_, b)) => bounded::decode::<rdy_model::Proposal>(&b).ok(),
             Err(StoreError::Redacted { .. } | StoreError::NotFound(_)) => None,
             Err(e) => return Err(e),
         };
@@ -540,6 +608,33 @@ pub(crate) fn check_typed_context(
         failed: RefCell::new(None),
     };
     let grow = || StreamError::allocation(None, 0);
+    // the carried shapes first: their structure and the bindings of what they name
+    // (`crate::carried_records`), over the incoming records and the holder's
+    for k in incoming.iter().copied() {
+        if !crate::carried_records::may_carry(k.kind) {
+            continue;
+        }
+        let record = look.rec.get_mut().object_source().record(k)?;
+        let Some(r @ StreamRecord::Present { .. }) = record else {
+            continue;
+        };
+        let StreamRecord::Present { payload, .. } = &r else {
+            continue;
+        };
+        if let Err(reason) = crate::carried_records::validate_local(r.raw_kind(), payload) {
+            return Err(look.broken(k, &carried_text(k, reason)));
+        }
+        let mut source = StreamObjects(look.rec.get_mut().object_source(), None);
+        let found = crate::carried_records::validate_refs(&mut source, k);
+        if let Some(e) = source_failure(&mut source) {
+            return Err(e);
+        }
+        match found {
+            Ok(None) => {}
+            Ok(Some(reason)) => return Err(look.broken(k, &carried_text(k, reason))),
+            Err(e) => return Err(look.failure(e, k)),
+        }
+    }
     for k in incoming.iter().copied() {
         match k.kind {
             kinds::PLAN => {
@@ -588,6 +683,48 @@ pub(crate) fn check_typed_context(
         }
     }
     Ok(())
+}
+
+/// The text of a carried record refusal: `record {hash} (kind {kind}): {reason}`.
+fn carried_text(k: ObjectKey, reason: &str) -> String {
+    match crate::carried_records::refusal(&k.hash, k.kind, reason) {
+        StoreError::Decode(m) => m,
+        e => e.to_string(),
+    }
+}
+
+/// The records of a stream's source as a [`crate::carried_records::CarriedSource`]: a present
+/// record's encoding and body. A stream error stops the read; it is kept and returned by
+/// [`source_failure`].
+struct StreamObjects<'a>(&'a mut dyn ObjectSource, Option<StreamError>);
+
+/// The stream error a [`StreamObjects`] read met, if any.
+fn source_failure(s: &mut StreamObjects<'_>) -> Option<StreamError> {
+    s.1.take()
+}
+
+impl crate::carried_records::CarriedSource for StreamObjects<'_> {
+    fn object(&mut self, key: ObjectKey) -> Result<Option<(u16, Vec<u8>)>, StoreError> {
+        match self.0.record(key) {
+            Ok(Some(StreamRecord::Present {
+                key,
+                encoding,
+                payload,
+            })) => {
+                let raw = crate::codec::raw_kind(key.kind, encoding);
+                let o = crate::codec::split(raw, &payload)
+                    .map_err(|e| StoreError::Decode(e.to_string()))?;
+                Ok(Some((o.version, o.body.to_vec())))
+            }
+            Ok(_) => Ok(None),
+            Err(e) => {
+                self.1 = Some(e);
+                Err(StoreError::Refused(
+                    "the carried record check stopped".into(),
+                ))
+            }
+        }
+    }
 }
 
 /// Checks each apply of `applies` by its portable proof over the source, and returns what each

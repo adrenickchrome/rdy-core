@@ -911,8 +911,8 @@ impl RowsOf for RedactionReport {
 #[test]
 fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
     let _clock = pin_clock(1_000_000);
-    // the registry equals the closed inventory: 1 to 11 and 13 to 24; 12 is unassigned
-    let expected: Vec<u8> = (1..=11).chain(13..=24).collect();
+    // the registry equals the closed inventory: 1 to 11 and 13 to 28; 12 is unassigned
+    let expected: Vec<u8> = (1..=11).chain(13..=28).collect();
     assert_eq!(ASSIGNED_KINDS.to_vec(), expected);
     assert_eq!(
         [
@@ -939,6 +939,10 @@ fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
             kinds::REDACTION_APPLY,
             kinds::REDACTION_CARRIED,
             kinds::PLAN,
+            kinds::ASSESSMENT,
+            kinds::DISPUTE,
+            kinds::DISPUTE_RESOLUTION,
+            kinds::CHECK_REQUEST,
         ],
         ASSIGNED_KINDS
     );
@@ -962,7 +966,11 @@ fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
     // the change plan: every string of the decoded version
     assert_eq!(kinds::PLAN, 24);
     assert_eq!(text_policy(24), Some(TextPolicy::Strings));
-    for k in [0, 12, 25, 255] {
+    // the carried shapes: every string of each typed record
+    for k in 25..=28 {
+        assert_eq!(text_policy(k), Some(TextPolicy::Strings), "kind {k}");
+    }
+    for k in [0, 12, 127, 255] {
         assert_eq!(text_policy(k), None, "kind {k}");
     }
     // a literal quote case for each retained text type
@@ -1833,10 +1841,10 @@ fn rdx5_assessment_support_is_explicitly_not_implemented() {
     // the base registry holds no assessment kind: every assigned kind has a policy, and a new
     // content-bearing kind without a visitor is refused, never read as absent
     require_text_policies(&ASSIGNED_KINDS).unwrap();
-    let e = require_text_policies(&[kinds::PLAN + 1]).unwrap_err();
+    let e = require_text_policies(&[127]).unwrap_err();
     assert_eq!(
         e.message,
-        "the redaction report has no text policy for object kind 25"
+        "the redaction report has no text policy for object kind 127"
     );
     assert!(require_text_policies(&[12]).is_err());
 }

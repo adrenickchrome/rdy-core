@@ -121,7 +121,7 @@ const PRELUDE: u64 = MAGIC.len() as u64 + 4;
 /// The store kinds an object frame may have: the portable kinds less TRANSITION, a batch's own
 /// local record (no FILE, REF_UPDATE, BATCH_COMMIT or TRANSITION is portable). Ascending. A
 /// kind-None link resolves among these.
-pub const SYNC_KINDS: [u8; 19] = [
+pub const SYNC_KINDS: [u8; 23] = [
     kinds::BLOCK,
     kinds::CHANGE,
     kinds::PROPOSAL,
@@ -141,6 +141,10 @@ pub const SYNC_KINDS: [u8; 19] = [
     kinds::REDACTION_RESIDUE,
     kinds::REDACTION_APPLY,
     kinds::PLAN,
+    kinds::ASSESSMENT,
+    kinds::DISPUTE,
+    kinds::DISPUTE_RESOLUTION,
+    kinds::CHECK_REQUEST,
 ];
 
 /// Whether an object frame of `kind` may stand in a sync batch.
@@ -618,8 +622,8 @@ impl<W: Write> StreamWriter<W> {
                 residue,
                 ..
             } => {
-                // a versioned removal has no residue adapter yet
-                if *encoding != 0 {
+                // a removed frame's encoding: its residue names the same one (the proof checks)
+                if !crate::dump::dropped_encoding_allowed(key.kind, *encoding) {
                     return Err(bad(Reason::UnknownEncodingVersion));
                 }
                 check_dropped(key.kind, residue.as_ref(), *original_len)
@@ -627,6 +631,7 @@ impl<W: Write> StreamWriter<W> {
                 self.pending.add(n, at, *original_len)?;
                 let body = encoded_dropped_payload(
                     key.kind,
+                    *encoding,
                     &key.hash,
                     *original_len,
                     apply,
@@ -837,7 +842,7 @@ impl<R: Read> StreamReader<R> {
             }
             let p = self.payload(n, at, len, &hash)?;
             // a versioned removal has no residue adapter yet
-            if p[1..3] != [0, 0] {
+            if !crate::dump::dropped_encoding_allowed(p[0], u16::from_le_bytes([p[1], p[2]])) {
                 return Err(bad(Reason::UnknownEncodingVersion));
             }
             let Ok(Frame::Dropped {
@@ -852,7 +857,7 @@ impl<R: Read> StreamReader<R> {
             };
             // a removable kind (`parse_dropped`), so a sync kind
             let key = ObjectKey {
-                kind,
+                kind: crate::codec::logical_kind(kind),
                 hash: original,
             };
             self.pending
@@ -860,7 +865,7 @@ impl<R: Read> StreamReader<R> {
                 .map_err(|e| e.with_object(Some(key)))?;
             StreamRecord::Dropped {
                 key,
-                encoding: 0,
+                encoding: u16::from_le_bytes([p[1], p[2]]),
                 original_len,
                 apply,
                 residue,

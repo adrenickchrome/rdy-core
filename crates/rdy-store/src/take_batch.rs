@@ -402,7 +402,9 @@ pub(crate) fn verify(files: &[File], v: &Verify, buf: &mut Vec<u8>) -> Result<()
                     len: l,
                     apply: a,
                     residue: r,
-                }) if (kind, hash, l, a, r) == (key.kind, key.hash, *len, *apply, *residue) => {
+                }) if (crate::codec::logical_kind(kind), hash, l, a, r)
+                    == (key.kind, key.hash, *len, *apply, *residue) =>
+                {
                     Ok(())
                 }
                 _ => Err(StreamError::bad_record(
@@ -628,7 +630,7 @@ fn index_files(
                         .map_err(|e| StreamError::from_record(n, offset, &e))?;
                     // the reader checked the frame splits
                     let needs = crate::codec::split(raw, payload)
-                        .map(|o| crate::format::required_features(o.kind, o.body))
+                        .map(|_| crate::format::required_features(raw, payload))
                         .map_err(|e| StreamError::from_record(n, offset, &e))?;
                     counts.edges += refs.len() as u64;
                     if entry.present.is_none() {
@@ -645,6 +647,7 @@ fn index_files(
                     }
                 }
                 StreamRecord::Dropped {
+                    encoding,
                     original_len,
                     apply,
                     residue,
@@ -666,6 +669,7 @@ fn index_files(
                     }
                     let body = encoded_dropped_payload(
                         key.kind,
+                        encoding,
                         &key.hash,
                         original_len,
                         &apply,

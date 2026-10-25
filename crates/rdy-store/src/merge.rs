@@ -18,6 +18,9 @@ pub struct MergeChange<'a> {
     pub id: Hash,
     pub deps: &'a [Hash],
     pub ops: &'a [Op],
+    /// Whether the change replays another (`ChangeLinks::replayed_from` is set). Carried to the
+    /// merge; the merge's behavior does not depend on it yet.
+    pub is_replay: bool,
 }
 
 /// One competing version of a conflicted block.
@@ -192,6 +195,7 @@ pub fn merge_on_blocks(
             id: c.id,
             deps: c.deps,
             ops,
+            is_replay: c.is_replay,
         })
         .collect();
     merge(&base, &changes, producer, deleter)

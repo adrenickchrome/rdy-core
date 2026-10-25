@@ -107,14 +107,18 @@ fn versioned(source: &mut dyn ObjectSource, k: ObjectKey) -> Result<(Vec<u8>, u1
     }
 }
 
-/// The record of `k`, decoded within its bounds.
-fn typed<T: DeserializeOwned>(
+/// The record of `k`, decoded within its bounds in the encoding its frame records.
+fn typed<T: DeserializeOwned + 'static>(
     source: &mut dyn ObjectSource,
     k: ObjectKey,
 ) -> Result<T, StreamError> {
-    let p = payload(source, k)?;
-    bounded::decode(&p)
-        .map_err(|e: RecordError| StreamError::from_record(0, 0, &e).with_object(Some(k)))
+    let (body, version) = versioned(source, k)?;
+    crate::codec::decode_bounded_split(&crate::codec::ObjectBytes {
+        kind: k.kind,
+        version,
+        body: &body,
+    })
+    .map_err(|e: RecordError| StreamError::from_record(0, 0, &e).with_object(Some(k)))
 }
 
 /// Checks the removal that apply `apply` records against the records `source` holds, and returns
@@ -203,7 +207,12 @@ pub fn check(source: &mut dyn ObjectSource, apply: Hash) -> Result<PortableRemov
                 if let HashEntry::Vacant(v) = residues.entry(r) {
                     let k = key(kinds::REDACTION_RESIDUE, r);
                     let (body, encoding) = versioned(source, k)?;
-                    let res = bounded::decode(&body).map_err(|e: RecordError| {
+                    let res = crate::codec::decode_bounded_split(&crate::codec::ObjectBytes {
+                        kind: kinds::REDACTION_RESIDUE,
+                        version: encoding,
+                        body: &body,
+                    })
+                    .map_err(|e: RecordError| {
                         StreamError::from_record(0, 0, &e).with_object(Some(k))
                     })?;
                     v.insert((res, encoding));
@@ -241,15 +250,20 @@ pub fn check(source: &mut dyn ObjectSource, apply: Hash) -> Result<PortableRemov
     for (k, tuple) in &objects {
         match source.record(*k)? {
             None => {}
-            Some(StreamRecord::Present { payload, .. }) => {
+            Some(StreamRecord::Present {
+                payload,
+                encoding: frame_encoding,
+                ..
+            }) => {
+                let raw = crate::codec::raw_kind(k.kind, frame_encoding);
                 let fits = Hash::of(&payload) == k.hash
                     && payload.len() == tuple.len as usize
                     && match tuple.residue {
                         Some(r) => {
                             let (res, encoding) = &residues[&r];
-                            residue_matches(k.kind, &payload, res, *encoding)
+                            residue_matches(raw, &payload, res, *encoding)
                         }
-                        None => true,
+                        None => raw == k.kind,
                     };
                 if !fits {
                     return Err(invalid(*k));

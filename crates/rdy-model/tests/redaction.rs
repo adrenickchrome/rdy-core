@@ -2,6 +2,10 @@
 //! postcard shape; a removed block or change keeps its recorded identity through a skipped read
 //! field, so every existing kind keeps its bytes and hashes.
 use rdy_model::decision::is_frozen;
+use rdy_model::encoding::{
+    EncodedIdentity, LegacyBlockResidueV0, LegacyChangeResidueV0, LegacyChangeV0,
+    LegacyRedactionResidueV0, encoded_hash,
+};
 use rdy_model::redaction::*;
 use rdy_model::*;
 use std::collections::BTreeMap;
@@ -151,6 +155,8 @@ fn change() -> Change {
                 actor: "human:i".into(),
                 run: None,
             }),
+            replayed_from: None,
+            briefing: None,
         },
         read_identity: None,
     }
@@ -179,18 +185,37 @@ fn rdx1_old_objects_keep_their_bytes_and_hashes() {
     );
     assert_eq!(decoded.version_hash(), hash_of(&decoded));
 
+    // the change bytes are encoding 0: they decode only through the frozen shape, never into
+    // the larger current struct
     let change_bytes = unhex(CHANGE);
-    let decoded: Change = postcard::from_bytes(&change_bytes).unwrap();
+    assert!(postcard::from_bytes::<Change>(&change_bytes).is_err());
+    let frozen: LegacyChangeV0 = postcard::from_bytes(&change_bytes).unwrap();
+    assert_eq!(enc(&frozen), change_bytes, "a change gained or lost a byte");
+    assert_eq!(hash_of(&frozen).to_string(), CHANGEID);
+    let identity = EncodedIdentity {
+        hash: Hash::of(&change_bytes),
+        version: 0,
+    };
+    let decoded = frozen.into_current(identity);
     assert_eq!(decoded, change());
-    assert_eq!(decoded.read_identity, None);
-    assert!(!decoded.is_projection());
     assert_eq!(
-        enc(&decoded),
-        change_bytes,
-        "a change gained or lost a byte"
+        decoded.read_identity,
+        Some(ChangeReadIdentity::Stored(identity))
     );
+    assert!(!decoded.is_projection());
     assert_eq!(decoded.id().to_string(), CHANGEID);
-    assert_eq!(decoded.id(), hash_of(&decoded));
+    assert_eq!(
+        enc(&LegacyChangeV0::from_current(&decoded).unwrap()),
+        change_bytes,
+        "the reverse conversion gives the original bytes"
+    );
+    // the same change written anew is encoding 1: the old body, two absent options, and an id
+    // over the version prefix
+    let mut latest = change_bytes.clone();
+    latest.extend([0, 0]);
+    assert_eq!(enc(&change()), latest);
+    assert_eq!(change().id(), encoded_hash(1, &latest));
+    assert_ne!(change().id().to_string(), CHANGEID);
 
     for (op, fixture) in change().ops.iter().zip(OPS) {
         let bytes = unhex(fixture);
@@ -358,21 +383,37 @@ fn rdx1_records_have_fixed_field_and_variant_order() {
         order: "m".into(),
         content_hash: h(b"c"),
         frozen: true,
+        source_encoding: 0,
     });
-    roundtrip(
-        &block_residue,
-        &cat(&[
-            vec![0],
-            hb(&h(b"v")),
-            s("p-XYZ34"),
-            s("decision"),
-            vec![1],
-            s("s-PAR01"),
-            s("m"),
-            hb(&h(b"c")),
-            vec![1],
-        ]),
+    let block_v0 = cat(&[
+        vec![0],
+        hb(&h(b"v")),
+        s("p-XYZ34"),
+        s("decision"),
+        vec![1],
+        s("s-PAR01"),
+        s("m"),
+        hb(&h(b"c")),
+        vec![1],
+    ]);
+    // encoding 0, frozen: no source encoding
+    let frozen = LegacyRedactionResidueV0::Block(LegacyBlockResidueV0 {
+        version: h(b"v"),
+        id: x.clone(),
+        block_type: "decision".into(),
+        parent: Some(id("s-PAR01")),
+        order: "m".into(),
+        content_hash: h(b"c"),
+        frozen: true,
+    });
+    roundtrip(&frozen, &block_v0);
+    assert_eq!(frozen.clone().into_current(), block_residue);
+    assert_eq!(
+        LegacyRedactionResidueV0::from_current(&block_residue),
+        Some(frozen)
     );
+    // encoding 1, the latest: the source encoding last
+    roundtrip(&block_residue, &cat(&[block_v0, vec![0]]));
 
     // REDACTION_RESIDUE, change form: create, update, delete in that order.
     let change_residue = RedactionResidue::Change(ChangeResidue {
@@ -398,30 +439,56 @@ fn rdx1_records_have_fixed_field_and_variant_order() {
         justification: None,
         message: "m".into(),
         links: ChangeLinks::default(),
+        source_encoding: 1,
     });
+    let change_head = cat(&[
+        vec![1],
+        hb(&h(b"chg")),
+        s("work"),
+        vec![3, 0],
+        s("p-XYZ34"),
+        hb(&h(b"v1")),
+        vec![1],
+        hb(&h(b"v1")),
+        s("p-XYZ34"),
+        hb(&h(b"v2")),
+        vec![2],
+        hb(&h(b"v2")),
+        s("p-XYZ34"),
+        vec![1],
+        hb(&h(b"dep")),
+        pb,
+        vec![0],
+        s("m"),
+    ]);
+    // encoding 0, frozen: the four-option links, no source encoding
+    let RedactionResidue::Change(c) = &change_residue else {
+        unreachable!("a change residue")
+    };
+    let frozen = LegacyRedactionResidueV0::Change(LegacyChangeResidueV0 {
+        change: c.change,
+        view: c.view.clone(),
+        ops: c.ops.clone(),
+        deps: c.deps.clone(),
+        provenance: c.provenance.clone(),
+        justification: None,
+        message: "m".into(),
+        links: Default::default(),
+    });
+    roundtrip(&frozen, &cat(&[change_head.clone(), vec![0, 0, 0, 0]]));
+    assert_eq!(
+        LegacyRedactionResidueV0::from_current(&change_residue),
+        None,
+        "encoding 0 holds only an encoding-0 source"
+    );
+    let RedactionResidue::Change(from_v0) = frozen.into_current() else {
+        unreachable!("a change residue")
+    };
+    assert_eq!(from_v0.source_encoding, 0);
+    // encoding 1, the latest: six-option links, then the source encoding
     roundtrip(
         &change_residue,
-        &cat(&[
-            vec![1],
-            hb(&h(b"chg")),
-            s("work"),
-            vec![3, 0],
-            s("p-XYZ34"),
-            hb(&h(b"v1")),
-            vec![1],
-            hb(&h(b"v1")),
-            s("p-XYZ34"),
-            hb(&h(b"v2")),
-            vec![2],
-            hb(&h(b"v2")),
-            s("p-XYZ34"),
-            vec![1],
-            hb(&h(b"dep")),
-            pb,
-            vec![0],
-            s("m"),
-            vec![0, 0, 0, 0],
-        ]),
+        &cat(&[change_head, vec![0, 0, 0, 0, 0, 0], vec![1]]),
     );
 
     // The closed enums: declaration order is the variant index.
@@ -446,6 +513,10 @@ fn rdx1_records_have_fixed_field_and_variant_order() {
         ImpactKind::Review,
         ImpactKind::Tension,
         ImpactKind::Answer,
+        ImpactKind::Assessment,
+        ImpactKind::Dispute,
+        ImpactKind::DisputeResolution,
+        ImpactKind::CheckRequest,
     ];
     for (i, k) in kinds.iter().enumerate() {
         roundtrip(k, &[i as u8]);
@@ -460,6 +531,7 @@ fn rdx1_records_have_fixed_field_and_variant_order() {
         roundtrip(r, &[i as u8]);
     }
     roundtrip(&AssessmentSupport::NotImplemented, &[0]);
+    roundtrip(&AssessmentSupport::Carried, &[1]);
     roundtrip(&CopyStatus::Unknown, &[0]);
 }
 
@@ -558,10 +630,14 @@ fn rdx1_a_projection_keeps_its_recorded_identity() {
     assert_eq!(second, &other);
     assert_eq!(projected.clone().id(), c.id());
 
-    // A normal change keeps the existing algorithm.
+    // A normal change keeps the existing algorithm, in its latest encoding: the hash of the
+    // version prefix and its body. The fixture's encoding-0 id is the frozen body's hash.
     assert!(!c.is_projection());
-    assert_eq!(c.id(), hash_of(&c));
-    assert_eq!(change().id().to_string(), CHANGEID);
+    assert_eq!(c.id(), encoded_hash(1, &enc(&c)));
+    assert_eq!(
+        hash_of(&LegacyChangeV0::from_current(&change()).unwrap()).to_string(),
+        CHANGEID
+    );
 }
 
 #[test]
@@ -719,6 +795,17 @@ fn rdx1_human_readable_hashes_are_full_lowercase_hex() {
         serde_yaml_ng::from_str::<ChangeResidue>(&text).unwrap(),
         residue
     );
+    // the encoding-1 link options are full hex too
+    let mut replay = residue.clone();
+    replay.links.replayed_from = Some(h(b"source"));
+    replay.links.briefing = Some(h(b"briefing"));
+    let text = serde_yaml_ng::to_string(&replay).unwrap();
+    assert!(text.contains(&h(b"source").to_string()), "{text}");
+    assert!(text.contains(&h(b"briefing").to_string()), "{text}");
+    assert_eq!(
+        serde_yaml_ng::from_str::<ChangeResidue>(&text).unwrap(),
+        replay
+    );
 
     // The bounded encoder writes the same bytes as the allocating one, and refuses a short buffer.
     let mut buf = [0u8; 4096];
@@ -755,6 +842,24 @@ fn rdx1_residue_link_hashes_are_full_lowercase_hex() {
         links["imported_by"]["actor"],
         Value::String("human:i".into())
     );
+    assert_eq!(links["replayed_from"], Value::Null);
+    assert_eq!(links["briefing"], Value::Null);
+    let mut replay = residue.clone();
+    replay.links.replayed_from = Some(h(b"source"));
+    replay.links.briefing = Some(h(b"briefing"));
+    let v = serde_yaml_ng::to_value(&replay).unwrap();
+    assert_eq!(
+        v["links"]["replayed_from"],
+        Value::String(h(b"source").to_string())
+    );
+    assert_eq!(
+        v["links"]["briefing"],
+        Value::String(h(b"briefing").to_string())
+    );
+    assert_eq!(
+        serde_yaml_ng::from_value::<ChangeResidue>(v).unwrap(),
+        replay
+    );
     assert_eq!(
         serde_yaml_ng::from_value::<ChangeResidue>(value.clone()).unwrap(),
         residue
@@ -783,9 +888,9 @@ fn rdx1_residue_link_hashes_are_full_lowercase_hex() {
     short["links"]["intent"] = Value::String(intent.short());
     assert!(serde_yaml_ng::from_value::<ChangeResidue>(short).is_err());
 
-    // Postcard: the links keep ChangeLinks's own bytes, as the residue's last field.
+    // Postcard: the links keep ChangeLinks's own bytes, followed by the source encoding.
     let bytes = enc(&residue);
-    assert!(bytes.ends_with(&enc(&original.links)));
+    assert!(bytes.ends_with(&cat(&[enc(&original.links), enc(&residue.source_encoding)])));
     assert_eq!(
         postcard::from_bytes::<ChangeResidue>(&bytes).unwrap(),
         residue
@@ -822,9 +927,12 @@ fn rdx1_residue_links_omitted_intent_reads_as_none() {
         residue
     );
 
-    // Postcard still delegates to ChangeLinks's own bytes.
+    // Postcard still delegates to ChangeLinks's own bytes, then the source encoding.
     let bytes = enc(&residue);
-    assert!(bytes.ends_with(&enc(&ChangeLinks::default())));
+    assert!(bytes.ends_with(&cat(&[
+        enc(&ChangeLinks::default()),
+        enc(&residue.source_encoding)
+    ])));
     assert_eq!(
         postcard::from_bytes::<ChangeResidue>(&bytes).unwrap(),
         residue

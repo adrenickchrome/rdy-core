@@ -326,7 +326,7 @@ impl Store {
                 let aid = Hash::of(&frames[pos].1);
                 items.extend(frames);
                 let by = &accept.provenance;
-                let commit = crate::codec::item(
+                let commit = crate::codec::item_new(
                     kinds::VIEW_OP,
                     &ViewOp {
                         view: p.view.clone(),
@@ -340,7 +340,7 @@ impl Store {
                 let tip = Hash::of(&commit.1);
                 items.push(commit);
                 final_changes.push(aid);
-                let fin = crate::codec::item(
+                let fin = crate::codec::item_new(
                     kinds::PROPOSAL,
                     &Proposal {
                         stable: Some(stable),
@@ -374,7 +374,7 @@ impl Store {
         changes.extend(accept_change.iter().cloned());
         let (prev_head, prev_state) = (self.canon_head()?, self.canon_state()?);
         let state = self.merge_checked(&prev_state, &changes)?.0.state;
-        let snapshot = crate::codec::item(kinds::SNAPSHOT, &state);
+        let snapshot = crate::codec::item_new(kinds::SNAPSHOT, &state);
         let sid = Hash::of(&snapshot.1);
         items.push(snapshot);
         // 6. the landing. A removal landing names the requests of the carriers it lands in
@@ -410,12 +410,15 @@ impl Store {
             approved_version: Some(req.proposal),
             rebased_from: vec![],
             evidence: req.evidence,
+            assessment: None,
+            policy: None,
+            read_identity: None,
         };
         alter(&mut landing);
         // 6a. the redaction applies of the carriers it lands, checked before anything is written
         let applies =
             self.prepare_redaction_apply(&p.view, &included, &landing, accept_change.as_ref())?;
-        let lframe = crate::codec::item(kinds::LANDING, &landing);
+        let lframe = crate::codec::item(kinds::LANDING, &landing)?;
         let lid = Hash::of(&lframe.1);
         let landing_record = landing;
         items.push(lframe);
@@ -423,7 +426,7 @@ impl Store {
         let mut alt_ref = None;
         let alt_version = match (&req.alt, alt_prev) {
             (Some(alt), Some(prev_version)) => {
-                let next = crate::codec::item(
+                let next = crate::codec::item_new(
                     kinds::ALT_SET,
                     &AltSet {
                         stable: Some(alt.set),
@@ -580,7 +583,7 @@ impl Store {
                 &mut producers,
                 &deleter,
             )?;
-            let rebase = crate::codec::item(
+            let rebase = crate::codec::item_new(
                 kinds::VIEW_OP,
                 &ViewOp {
                     view: name.clone(),
@@ -821,6 +824,7 @@ impl Store {
                 id: *id,
                 deps: &c.deps,
                 ops: &c.ops,
+                is_replay: c.links.replayed_from.is_some(),
             })
             .collect();
         // the merge asks only for canon's versions of `isect`: read them first, so a read error

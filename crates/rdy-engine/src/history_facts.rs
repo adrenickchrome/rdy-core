@@ -607,6 +607,9 @@ mod tests {
             approved_version: None,
             rebased_from: vec![],
             evidence: None,
+            assessment: None,
+            policy: None,
+            read_identity: None,
         }
     }
 

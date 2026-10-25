@@ -133,6 +133,8 @@ fn cgr1_view_show_rows_carry_the_change_links() {
         }),
         client_nonce: None,
         imported_by: None,
+        replayed_from: None,
+        briefing: None,
     };
     r.write_linked(&writer(), req, links, None).unwrap();
     let detail = serde_json::to_value(r.read().view_show("w").unwrap()).unwrap();

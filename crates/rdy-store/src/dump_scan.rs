@@ -962,22 +962,25 @@ fn zeros(len: u32, at: u64) -> Result<Vec<u8>, StoreError> {
 }
 
 impl RecordAccess for ChainAccess<'_, '_> {
-    fn has_frame(
+    fn frame_kind(
         &mut self,
         loc: Location,
         len: u32,
         kind: u8,
         hash: &Hash,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<Option<u8>, StoreError> {
+        let agrees = |(l, k, h): (u32, u8, Hash)| {
+            ((l, crate::codec::logical_kind(k), h) == (len, kind, *hash)).then_some(k)
+        };
         if let Some(d) = self.drops.get(&key(loc)) {
-            return Ok((d.len, d.kind, d.hash) == (len, kind, *hash));
+            return Ok(agrees((d.len, d.kind, d.hash)));
         }
         if let Some(r) = self.find(loc) {
-            return Ok((r.len, r.kind, r.hash) == (len, kind, *hash));
+            return Ok(agrees((r.len, r.kind, r.hash)));
         }
         Ok(self
             .frame_at(loc)?
-            .is_some_and(|f| (f.len, f.kind, f.hash) == (len, kind, *hash)))
+            .and_then(|f| agrees((f.len, f.kind, f.hash))))
     }
 
     fn record(

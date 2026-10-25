@@ -81,7 +81,7 @@ impl Store {
                 ));
             }
         };
-        let (kind, bytes) = crate::codec::item(kinds::REVIEW, r);
+        let (kind, bytes) = crate::codec::item_new(kinds::REVIEW, r);
         let id = Hash::of(&bytes);
         let name = format!("{DISMISS_REF}{vkey}");
         if let Some(held) = self.get_ref(&name)? {
@@ -149,7 +149,7 @@ impl Store {
                 ));
             }
         };
-        let (kind, bytes) = crate::codec::item(kinds::REVIEW, r);
+        let (kind, bytes) = crate::codec::item_new(kinds::REVIEW, r);
         let id = Hash::of(&bytes);
         if let Some(held) = self.get_ref(&name)?
             && hash_from(&held, "mention ref")? == id
@@ -193,7 +193,7 @@ impl Store {
                 "a tension verdict writes the tension's first version, and only a tension verdict does",
             ));
         }
-        let (kind, bytes) = crate::codec::item(kinds::REVIEW, r);
+        let (kind, bytes) = crate::codec::item_new(kinds::REVIEW, r);
         let id = Hash::of(&bytes);
         let first = match t {
             Some(t) => {
@@ -210,7 +210,7 @@ impl Store {
                          is not blocking and carries no relay",
                     ));
                 }
-                let tframe = crate::codec::item(kinds::TENSION, t);
+                let tframe = crate::codec::item_new(kinds::TENSION, t);
                 Some((Hash::of(&tframe.1), tframe))
             }
             None => None,
@@ -292,7 +292,7 @@ impl Store {
                      blocking, with the same pair, verdict and advice"
                 )));
             }
-            let (kind, bytes) = crate::codec::item(kinds::TENSION, t);
+            let (kind, bytes) = crate::codec::item_new(kinds::TENSION, t);
             let id = Hash::of(&bytes);
             ids.push(id);
             items.push((kind, bytes));

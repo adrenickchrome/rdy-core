@@ -65,6 +65,10 @@ pub fn kind_name(k: ImpactKind) -> &'static str {
         ImpactKind::Review => "review",
         ImpactKind::Tension => "tension",
         ImpactKind::Answer => "answer",
+        ImpactKind::Assessment => "assessment",
+        ImpactKind::Dispute => "dispute",
+        ImpactKind::DisputeResolution => "dispute_resolution",
+        ImpactKind::CheckRequest => "check_request",
     }
 }
 

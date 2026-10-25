@@ -283,7 +283,7 @@ fn deep_warning(n: usize, levels: usize) -> RedactionWarning {
 
 /// The impact kind whose ordinal is `n`.
 fn impact_kind(n: u8) -> ImpactKind {
-    const ALL: [ImpactKind; 11] = [
+    const ALL: [ImpactKind; 15] = [
         ImpactKind::BlockVersion,
         ImpactKind::Change,
         ImpactKind::Landing,
@@ -295,6 +295,10 @@ fn impact_kind(n: u8) -> ImpactKind {
         ImpactKind::Review,
         ImpactKind::Tension,
         ImpactKind::Answer,
+        ImpactKind::Assessment,
+        ImpactKind::Dispute,
+        ImpactKind::DisputeResolution,
+        ImpactKind::CheckRequest,
     ];
     ALL[usize::from(n)]
 }
@@ -384,6 +388,8 @@ fn review_blocks(r: &Review) -> Vec<&BlockId> {
             out.push(entity);
         }
         ReviewSubject::Pair { items, .. } => out.extend(items.iter().map(|i| &i.block)),
+        // a check review names its request, not a block
+        ReviewSubject::Check { .. } => {}
     }
     out
 }
@@ -1062,6 +1068,27 @@ pub(crate) fn compute_excluding(
                 let r: RefUpdate = reader.get_typed(kinds::REF_UPDATE, &h)?;
                 quotes.scan(audit, &rec, false, &r.name)?;
             }
+            // the carried shapes (no writer yet): each whole typed record, which core reports
+            // and cannot erase
+            kinds::ASSESSMENT => {
+                let a: rdy_model::assessment::Assessment =
+                    reader.get_typed(kinds::ASSESSMENT, &h)?;
+                quotes.scan(ImpactKind::Assessment, &rec, false, &a)?;
+            }
+            kinds::DISPUTE => {
+                let d: rdy_model::dispute::Dispute = reader.get_typed(kinds::DISPUTE, &h)?;
+                quotes.scan(ImpactKind::Dispute, &rec, false, &d)?;
+            }
+            kinds::DISPUTE_RESOLUTION => {
+                let d: rdy_model::dispute::DisputeResolution =
+                    reader.get_typed(kinds::DISPUTE_RESOLUTION, &h)?;
+                quotes.scan(ImpactKind::DisputeResolution, &rec, false, &d)?;
+            }
+            kinds::CHECK_REQUEST => {
+                let c: rdy_model::check_request::CheckRequest =
+                    reader.get_typed(kinds::CHECK_REQUEST, &h)?;
+                quotes.scan(ImpactKind::CheckRequest, &rec, false, &c)?;
+            }
             kinds::PLAN => {
                 // the whole decoded version, as for an answer: the view, each answer's reason,
                 // each sealed item's subject and edge and every other stored text. A plan is an
@@ -1584,6 +1611,9 @@ mod tests {
             approved_version: None,
             rebased_from: vec![],
             evidence: None,
+            assessment: None,
+            policy: None,
+            read_identity: None,
         };
         let chain: BTreeMap<Hash, LandingRecord> = [
             (hx(10), landing(None)),

@@ -1034,6 +1034,12 @@ pub fn add_plan_fixture_records(r: &mut Rdy, parent: &BlockId, cause: &BlockId) 
                     PlanOutcome::Done,
                     None,
                 ),
+                PlanAct::Dismiss => (
+                    PlanKind::Tension,
+                    subject.to_string(),
+                    PlanOutcome::Dismissed,
+                    None,
+                ),
             };
             SealedItem {
                 id: *item,

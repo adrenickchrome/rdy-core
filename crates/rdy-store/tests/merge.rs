@@ -32,6 +32,7 @@ fn view(cs: &[Owned]) -> Vec<MergeChange<'_>> {
             id: c.id,
             deps: &c.deps,
             ops: &c.ops,
+            is_replay: false,
         })
         .collect()
 }

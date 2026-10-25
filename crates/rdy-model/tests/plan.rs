@@ -258,7 +258,8 @@ fn cp1_old_answer_discriminants_and_record_bytes_stay_fixed() {
         let back: AnswerAct = postcard::from_bytes(&[i as u8]).unwrap();
         assert_eq!(back, *a);
     }
-    assert!(postcard::from_bytes::<AnswerAct>(&[14]).is_err());
+    // 14 to 16 are the carried acts (ok4_new_shapes_have_fixed_ordinals_and_bytes); 17 is none
+    assert!(postcard::from_bytes::<AnswerAct>(&[17]).is_err());
     assert_eq!(
         hex(&enc(&full_answer(AnswerAct::RejectDecision))),
         ANSWER_HEX

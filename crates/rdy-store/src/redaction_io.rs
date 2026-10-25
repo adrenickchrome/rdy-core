@@ -835,14 +835,15 @@ pub(crate) fn read_residue(
 /// a batch not yet written) are one source ([`LogAccess`]); the files of a dump chain are another
 /// (`crate::dump_scan`). The validator's rules are the same over both.
 pub(crate) trait RecordAccess {
-    /// Whether a frame starts at `loc` whose header holds `len`, `kind` and `hash`.
-    fn has_frame(
+    /// The raw kind of the frame that starts at `loc` when its header holds `len`, logical kind
+    /// `kind` and `hash`; None when no such frame starts there.
+    fn frame_kind(
         &mut self,
         loc: Location,
         len: u32,
         kind: u8,
         hash: &Hash,
-    ) -> Result<bool, StoreError>;
+    ) -> Result<Option<u8>, StoreError>;
 
     /// The record of `kind` with hash `hash` at `loc`, read and hash-checked; None when the
     /// frame there is not that record or does not match its hash.
@@ -903,17 +904,19 @@ pub(crate) struct LogAccess<'a> {
 }
 
 impl RecordAccess for LogAccess<'_> {
-    fn has_frame(
+    fn frame_kind(
         &mut self,
         loc: Location,
         len: u32,
         kind: u8,
         hash: &Hash,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<Option<u8>, StoreError> {
         let Some(f) = self.readers.get(loc.segment as usize) else {
-            return Ok(false);
+            return Ok(None);
         };
-        Ok(header_at(f, loc.offset, f.metadata()?.len())? == Some((len, kind, *hash)))
+        Ok(header_at(f, loc.offset, f.metadata()?.len())?
+            .filter(|(l, k, h)| (*l, crate::codec::logical_kind(*k), h) == (len, kind, hash))
+            .map(|(_, k, _)| k))
     }
 
     fn record(
@@ -1156,9 +1159,9 @@ impl Validator {
                 return Err(bad());
             }
             prev = Some(loc);
-            if !access.has_frame(loc, span.len, span.kind, &span.hash)? {
-                return Err(bad());
-            }
+            let raw = access
+                .frame_kind(loc, span.len, span.kind, &span.hash)?
+                .ok_or_else(bad)?;
             let residue = match span.kind {
                 kinds::BLOCK | kinds::CHANGE => {
                     let r = span.residue.ok_or_else(bad)?;
@@ -1175,13 +1178,15 @@ impl Validator {
                             res
                         }
                     };
-                    if !residue_fits(span.kind, &span.hash, &res.0, &versions, &version_hashes) {
+                    if !residue_fits(span.kind, &span.hash, &res.0, &versions, &version_hashes)
+                        || !crate::redaction::marker_agrees(raw, span.kind, Some(&res.0))
+                    {
                         return Err(bad());
                     }
                     Some((r, res))
                 }
                 _ => {
-                    if span.residue.is_some() {
+                    if span.residue.is_some() || raw != span.kind {
                         return Err(bad());
                     }
                     None

@@ -656,7 +656,8 @@ impl Store {
             owner: owner.clone(),
             pinned,
         };
-        let (kind, bytes) = crate::codec::item(kinds::VIEW_OP, &view_op(name, None, create, by));
+        let (kind, bytes) =
+            crate::codec::item_new(kinds::VIEW_OP, &view_op(name, None, create, by));
         let head = ViewHead {
             head: Hash::of(&bytes),
             base,
@@ -697,7 +698,7 @@ impl Store {
             changes: changes.clone(),
             owner: owner.clone(),
         };
-        let (kind, bytes) = crate::codec::item(kinds::VIEW_OP, &view_op(name, None, fork, by));
+        let (kind, bytes) = crate::codec::item_new(kinds::VIEW_OP, &view_op(name, None, fork, by));
         let mut head = ViewHead {
             head: Hash::of(&bytes),
             base: src.base,
@@ -752,7 +753,7 @@ impl Store {
                 conflicts,
             };
             let (kind, bytes) =
-                crate::codec::item(kinds::VIEW_OP, &view_op(name, Some(head.head), rebase, by));
+                crate::codec::item_new(kinds::VIEW_OP, &view_op(name, Some(head.head), rebase, by));
             head.head = Hash::of(&bytes);
             items.push((kind, bytes));
         }
@@ -898,7 +899,8 @@ impl Store {
             ) {
                 last_write = by.at_ms;
             }
-            let (kind, bytes) = crate::codec::item(kinds::VIEW_OP, &view_op(name, prev, op, by));
+            let (kind, bytes) =
+                crate::codec::item_new(kinds::VIEW_OP, &view_op(name, prev, op, by));
             prev = Some(Hash::of(&bytes));
             written.extend(prev);
             items.push((kind, bytes));
@@ -930,7 +932,7 @@ impl Store {
         let close = ViewOpKind::Close {
             reason: reason.to_string(),
         };
-        let item = crate::codec::item(
+        let item = crate::codec::item_new(
             kinds::VIEW_OP,
             &view_op(name, Some(prev_head.head), close, by),
         );

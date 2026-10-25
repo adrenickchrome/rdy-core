@@ -677,15 +677,24 @@ impl Ingest {
                 let bytes =
                     rdy_model::redaction::encode_into(r, &mut buf).map_err(|_| record_too_big())?;
                 // the residue's frame in the encoding whose hash a record names (an old
-                // residue keeps encoding 0), else in its kind's latest encoding
+                // residue keeps encoding 0, in its frozen shape), else in its kind's latest
+                // encoding
                 let frame_in = |v: u16| {
-                    crate::codec::frame(kinds::REDACTION_RESIDUE, v, bytes.to_vec())
-                        .expect("a registered encoding of a residue frames")
+                    let body = if v == latest {
+                        Some(bytes.to_vec())
+                    } else {
+                        crate::codec::residue_body(r, v)
+                    };
+                    body.map(|b| {
+                        crate::codec::frame(kinds::REDACTION_RESIDUE, v, b)
+                            .expect("a registered encoding of a residue frames")
+                    })
                 };
                 let frame = (0..latest)
-                    .map(frame_in)
+                    .filter_map(frame_in)
                     .find(|f| named.contains(&Hash::of(&f.1)))
-                    .unwrap_or_else(|| frame_in(latest));
+                    .or_else(|| frame_in(latest))
+                    .expect("the latest encoding holds every residue");
                 let h = Hash::of(&frame.1);
                 if !c.residue_at.contains_key(&h) && !missing.contains_key(&h) {
                     missing.insert(h, frame);

@@ -306,11 +306,11 @@ pub(crate) fn dropped_payload(
     p
 }
 
-/// The 104 bytes of the dump-4 (and sync) `DROPPED` record of a dropped frame of raw kind
-/// `kind`: its logical kind, its encoding, then the format-3 proof. A versioned frame's encoding
-/// is kept with its residue adapter; until one exists the caller refuses it (`check_encoded`).
+/// The 104 bytes of the dump-4 (and sync) `DROPPED` record of a dropped frame of logical kind
+/// `kind` in encoding `encoding`: its logical kind, its encoding, then the format-3 proof.
 pub(crate) fn encoded_dropped_payload(
     kind: u8,
+    encoding: u16,
     hash: &Hash,
     len: u32,
     apply: &Hash,
@@ -319,30 +319,51 @@ pub(crate) fn encoded_dropped_payload(
     let legacy = dropped_payload(crate::codec::logical_kind(kind), hash, len, apply, residue);
     let mut p = [0u8; ENCODED_DROPPED_LEN];
     p[0] = legacy[0];
-    // encoding 0: a versioned removal is refused before this is written
+    p[1..3].copy_from_slice(&encoding.to_le_bytes());
     p[3..].copy_from_slice(&legacy[1..]);
     p
 }
 
-/// The rule of a dropped frame's encoding: a versioned removal (a marked raw kind) has no
-/// residue adapter yet, so it is refused as an unknown encoding version.
-pub(crate) fn check_encoded(kind: u8) -> Result<(), Cow<'static, str>> {
-    if kind & crate::codec::VERSIONED != 0 {
+/// Whether a removed frame of logical kind `kind` may have encoding `encoding`: a change (the
+/// one removable kind with versioned encodings) of any encoding CHANGE registers, a block or a
+/// blob chunk of encoding 0. Its residue names the same source encoding, which the proof checks.
+pub(crate) fn dropped_encoding_allowed(kind: u8, encoding: u16) -> bool {
+    encoding == 0 || (kind == kinds::CHANGE && encoding <= crate::codec::latest(kinds::CHANGE))
+}
+
+/// The encoding of a dropped frame of raw kind `raw`: 0 for an unmarked one; for a marked
+/// change, CHANGE's latest encoding (the one versioned encoding a removable kind registers).
+/// Any other marked kind is refused as an unknown encoding version.
+pub(crate) fn dropped_encoding(raw: u8) -> Result<u16, Cow<'static, str>> {
+    if raw & crate::codec::VERSIONED == 0 {
+        return Ok(0);
+    }
+    let kind = crate::codec::logical_kind(raw);
+    let encoding = crate::codec::latest(kind);
+    if kind != kinds::CHANGE || encoding == 0 {
         return Err(crate::bounded::RecordError::UnknownVersion
             .to_string()
             .into());
     }
-    Ok(())
+    Ok(encoding)
 }
 
-/// Decodes the payload of a dump-4 (or sync) `DROPPED` record: exactly 104 bytes, an encoding of
-/// 0 (no versioned removal has its residue adapter yet), then the rules of [`parse_dropped`].
+/// The rule of a dropped frame's encoding: a marked raw kind must be a versioned removable kind
+/// ([`dropped_encoding`]).
+pub(crate) fn check_encoded(kind: u8) -> Result<(), Cow<'static, str>> {
+    dropped_encoding(kind).map(|_| ())
+}
+
+/// Decodes the payload of a dump-4 (or sync) `DROPPED` record: exactly 104 bytes, an encoding
+/// its kind may have when removed ([`dropped_encoding_allowed`]), then the rules of
+/// [`parse_dropped`]. The frame's kind is its raw kind: the logical kind, marked when the
+/// encoding is not 0.
 pub(crate) fn parse_encoded_dropped(p: &[u8]) -> Result<Frame, Cow<'static, str>> {
     if p.len() != ENCODED_DROPPED_LEN {
         return Err(drop_text::WRONG_LENGTH.into());
     }
     let encoding = u16::from_le_bytes([p[1], p[2]]);
-    if encoding != 0 {
+    if !dropped_encoding_allowed(p[0], encoding) {
         return Err(crate::bounded::RecordError::UnknownVersion
             .to_string()
             .into());
@@ -350,7 +371,22 @@ pub(crate) fn parse_encoded_dropped(p: &[u8]) -> Result<Frame, Cow<'static, str>
     let mut legacy = [0u8; DROPPED_LEN];
     legacy[0] = p[0];
     legacy[1..].copy_from_slice(&p[3..]);
-    parse_dropped(&legacy)
+    match parse_dropped(&legacy)? {
+        Frame::Dropped {
+            kind,
+            hash,
+            len,
+            apply,
+            residue,
+        } => Ok(Frame::Dropped {
+            kind: crate::codec::raw_kind(kind, encoding),
+            hash,
+            len,
+            apply,
+            residue,
+        }),
+        f @ Frame::Present { .. } => Ok(f),
+    }
 }
 
 /// The `DROPPED` record parser of a dump of `format`.
@@ -1285,9 +1321,40 @@ pub fn frame_kinds(dump_format: u32, store_format: u32) -> Option<&'static [u8]>
 }
 
 /// The logical kinds of the latest store: every assigned kind but the batch marker, the kinds a
-/// dump-4 frame may have (a versioned frame's logical kind among them).
+/// dump-4 frame may have (a versioned frame's logical kind among them). Ascending: the kinds of
+/// store format 18 and the four carried kinds.
+pub const CURRENT_FRAME_KINDS: [u8; 26] = [
+    kinds::BLOCK,
+    kinds::CHANGE,
+    kinds::PROPOSAL,
+    kinds::LANDING,
+    kinds::SNAPSHOT,
+    kinds::BLOB_CHUNK,
+    kinds::BLOB_MANIFEST,
+    kinds::REF_UPDATE,
+    kinds::TAG,
+    kinds::ANSWER,
+    kinds::SIGNATURE,
+    kinds::VIEW_OP,
+    kinds::INTENT,
+    kinds::ALT_SET,
+    kinds::REVIEW,
+    kinds::TENSION,
+    kinds::TRANSITION,
+    kinds::REDACTION,
+    kinds::REDACTION_RESIDUE,
+    kinds::REDACTION_APPLY,
+    kinds::REDACTION_CARRIED,
+    kinds::PLAN,
+    kinds::ASSESSMENT,
+    kinds::DISPUTE,
+    kinds::DISPUTE_RESOLUTION,
+    kinds::CHECK_REQUEST,
+];
+
+/// [`CURRENT_FRAME_KINDS`].
 pub fn current_frame_kinds() -> &'static [u8] {
-    frame_kinds(3, crate::format::LAST_SCALAR_STORE_FORMAT).expect("the last scalar pair")
+    &CURRENT_FRAME_KINDS
 }
 
 /// The raw kinds a dump's batch frames may have: a released pair's exact set, or the latest
@@ -1750,7 +1817,7 @@ impl<W: Write> DumpWriter<W> {
                         return Err(StoreError::Refused(drop_text::NOT_ALLOWED.into()));
                     }
                     check_encoded(*kind).map_err(|what| StoreError::Refused(what.into()))?;
-                    check_dropped(*kind, residue.as_ref(), *len)
+                    check_dropped(crate::codec::logical_kind(*kind), residue.as_ref(), *len)
                         .map_err(|what| StoreError::Refused(what.into()))?;
                     dropped = true;
                 }
@@ -1797,7 +1864,16 @@ impl<W: Write> DumpWriter<W> {
                     apply,
                     residue,
                 } => {
-                    let p = encoded_dropped_payload(*kind, hash, *len, apply, residue.as_ref());
+                    let encoding =
+                        dropped_encoding(*kind).map_err(|w| StoreError::Refused(w.into()))?;
+                    let p = encoded_dropped_payload(
+                        crate::codec::logical_kind(*kind),
+                        encoding,
+                        hash,
+                        *len,
+                        apply,
+                        residue.as_ref(),
+                    );
                     self.record(rec::DROPPED, &p)?;
                 }
             }

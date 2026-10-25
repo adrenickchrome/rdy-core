@@ -231,7 +231,7 @@ fn ok1_version_prefix_is_hashed() {
         "a versioned body decodes into the current type"
     );
     // the writer's encoding is the kind's latest
-    let e = codec::encode(kinds::TAG, &tag);
+    let e = codec::encode(kinds::TAG, &tag).unwrap();
     assert_eq!((e.kind, e.version), (kinds::TAG, 1));
     assert_eq!(e.payload, payload);
     // another version prefix is another hash, and an unknown version

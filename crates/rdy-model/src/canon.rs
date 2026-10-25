@@ -1,3 +1,5 @@
+use crate::assessment::PolicyRef;
+use crate::encoding::{EncodedIdentity, LANDING_ENCODING, encoded_hash};
 use crate::{AltChoice, BlockId, Hash, Provenance, hash_of};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -36,7 +38,7 @@ impl Proposal {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Serialize, Deserialize)]
 pub struct LandingRecord {
     pub proposal: Hash,
     pub prev: Option<Hash>,
@@ -55,11 +57,50 @@ pub struct LandingRecord {
     pub rebased_from: Vec<Hash>,
     /// How the approval was obtained, when that is recorded.
     pub evidence: Option<ApprovalEvidence>,
+    /// The ASSESSMENT of the approved version (encoding 1). None from every product writer.
+    pub assessment: Option<Hash>,
+    /// The authority policy block version that accepted the landing (encoding 1). Set only with
+    /// assurance `policy` and no relay. None from every product writer.
+    pub policy: Option<PolicyRef>,
+    /// The identity of a stored read: never serialized, `None` on every new landing. A caller
+    /// that edits a stored read clears it first.
+    #[serde(skip)]
+    pub read_identity: Option<EncodedIdentity>,
 }
 
 impl LandingRecord {
+    /// The landing's id: a stored read's recorded hash, else the hash of its latest encoding
+    /// ([`LANDING_ENCODING`]: the version prefix and the body).
     pub fn id(&self) -> Hash {
-        hash_of(self)
+        match self.read_identity {
+            Some(i) => i.hash,
+            None => encoded_hash(
+                LANDING_ENCODING,
+                &postcard::to_allocvec(self)
+                    .expect("postcard encoding of an in-memory value cannot fail"),
+            ),
+        }
+    }
+}
+
+/// Equal fields: a stored read equals the same landing built anew.
+impl PartialEq for LandingRecord {
+    fn eq(&self, o: &LandingRecord) -> bool {
+        self.proposal == o.proposal
+            && self.prev == o.prev
+            && self.state == o.state
+            && self.approved_by == o.approved_by
+            && self.changes == o.changes
+            && self.chosen == o.chosen
+            && self.checks == o.checks
+            && self.assurance == o.assurance
+            && self.relayed_by == o.relayed_by
+            && self.relay_evidence == o.relay_evidence
+            && self.approved_version == o.approved_version
+            && self.rebased_from == o.rebased_from
+            && self.evidence == o.evidence
+            && self.assessment == o.assessment
+            && self.policy == o.policy
     }
 }
 

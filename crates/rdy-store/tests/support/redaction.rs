@@ -702,6 +702,9 @@ pub fn authorized_batch_fixture(
         approved_version: Some(pid),
         rebased_from: vec![],
         evidence: p.evidence.clone(),
+        assessment: None,
+        policy: None,
+        read_identity: None,
     };
     if let Some(hook) = &opts.on_landing {
         hook(&mut landing);

@@ -48,6 +48,45 @@ pub const MAX_FEATURES: usize = 256;
 pub const MAX_RECEIPT_BYTES: usize = 65_536;
 /// The most steps of one upgrade receipt.
 pub const MAX_RECEIPT_STEPS: usize = 256;
+/// The first rdy that knows the registered features (O20): the release that carries them.
+pub const FEATURE_REQUIRED_RDY: &str = "0.23.0";
+/// A version's stored readiness assessment (ASSESSMENT, a landing's `assessment`).
+pub const FEATURE_ASSESSMENT: &str = "assessment";
+/// A check request (CHECK_REQUEST, a Check review or verdict, an AcceptVerdict answer).
+pub const FEATURE_CHECK_REQUEST: &str = "check_request";
+/// Content identity without sibling order (content-2, D-TX3KH): no first-use record.
+pub const FEATURE_CONTENT_HASH_V2: &str = "content_hash_v2";
+/// A dispute and its resolution (DISPUTE, DISPUTE_RESOLUTION, a Dispute or ResolveDispute
+/// answer).
+pub const FEATURE_DISPUTE: &str = "dispute";
+/// Versioned object encodings (D-WWAK7): any frame of encoding 1 or more.
+pub const FEATURE_OBJECT_ENCODING: &str = "object_encoding";
+/// A tension plan item (PlanKind::Tension, PlanAct::Dismiss, PlanOutcome::Dismissed).
+pub const FEATURE_PLAN_TENSION: &str = "plan_tension";
+/// A replayed change (`ChangeLinks::replayed_from`).
+pub const FEATURE_VIEW_REPLAY: &str = "view_replay";
+
+/// The features this rdy registers (O11, D-1HDVA), sorted by name. Each is `incompatible` and
+/// needs [`FEATURE_REQUIRED_RDY`].
+pub const REGISTERED_FEATURES: [&str; 7] = [
+    FEATURE_ASSESSMENT,
+    FEATURE_CHECK_REQUEST,
+    FEATURE_CONTENT_HASH_V2,
+    FEATURE_DISPUTE,
+    FEATURE_OBJECT_ENCODING,
+    FEATURE_PLAN_TENSION,
+    FEATURE_VIEW_REPLAY,
+];
+
+/// The registered feature `name`, with its class and required version.
+fn registered(name: &str) -> StoreFeature {
+    StoreFeature {
+        name: name.into(),
+        class: FeatureClass::Incompatible,
+        required_rdy: FEATURE_REQUIRED_RDY.into(),
+    }
+}
+
 /// The name of the feature tests inject ([`inject_test_feature`]); production never registers
 /// it.
 pub const TEST_FEATURE: &str = "test_feature";
@@ -769,6 +808,9 @@ pub enum ParseFailure {
 
 /// The registered class of feature `name`, if this rdy registers it. Allocates nothing.
 fn known_class(name: &str) -> Option<FeatureClass> {
+    if REGISTERED_FEATURES.contains(&name) {
+        return Some(FeatureClass::Incompatible);
+    }
     TEST_FEATURES.with(|t| {
         t.borrow()
             .iter()
@@ -777,30 +819,114 @@ fn known_class(name: &str) -> Option<FeatureClass> {
     })
 }
 
-/// The features a new store, and a legacy dump's load, start with.
+/// The features a new store, and a legacy dump's load, start with: content-2 identity and
+/// versioned encodings, which every store this rdy writes uses.
 pub fn baseline_features() -> StoreFeatures {
     StoreFeatures {
         manifest_version: 1,
-        features: vec![],
+        features: vec![
+            registered(FEATURE_CONTENT_HASH_V2),
+            registered(FEATURE_OBJECT_ENCODING),
+        ],
     }
 }
 
-/// The features this rdy registers (production registers none), and the injected test feature
+/// The features this rdy registers ([`REGISTERED_FEATURES`]), and the injected test feature
 /// while a test holds it.
 pub fn registered_features() -> Vec<StoreFeature> {
-    TEST_FEATURES.with(|t| t.borrow().iter().map(|(f, _)| f.clone()).collect())
+    let mut out: Vec<StoreFeature> = REGISTERED_FEATURES.iter().map(|n| registered(n)).collect();
+    TEST_FEATURES.with(|t| out.extend(t.borrow().iter().map(|(f, _)| f.clone())));
+    out
 }
 
-/// The features a new object of logical kind `kind` with body `body` uses: what its first write
-/// activates in the batch that writes it. Production registers none.
-pub fn required_features(kind: u8, _body: &[u8]) -> Vec<StoreFeature> {
+/// The features a new object uses: what its first write activates in the batch that writes it.
+/// `raw` is the frame's raw kind and `payload` its stored payload (`crate::codec`). A frame of
+/// encoding 1 or more uses `object_encoding`; a record that uses a carried shape uses that
+/// shape's feature (D-1HDVA):
+///
+/// - `view_replay`: a CHANGE whose `links.replayed_from` is set;
+/// - `assessment`: an ASSESSMENT, or a LANDING whose `assessment` is set;
+/// - `plan_tension`: a PLAN with a sealed item of kind Tension or outcome Dismissed, or an answer
+///   with act Dismiss;
+/// - `dispute`: a DISPUTE, a DISPUTE_RESOLUTION, or an ANSWER with act Dispute or
+///   ResolveDispute;
+/// - `check_request`: a CHECK_REQUEST, a REVIEW with subject Check or verdict Pass, Concern or
+///   Fail, or an ANSWER with act AcceptVerdict.
+///
+/// A frame that does not split or decode uses nothing here: its own checks refuse it.
+pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
+    use crate::kinds;
+    let mut out: Vec<StoreFeature> = vec![];
+    let Ok(o) = crate::codec::split(raw, payload) else {
+        return out;
+    };
+    let mut add = |name: &str| {
+        if !out.iter().any(|f| f.name == name) {
+            out.push(registered(name));
+        }
+    };
+    if o.version >= 1 {
+        add(FEATURE_OBJECT_ENCODING);
+    }
+    fn typed<T: serde::de::DeserializeOwned + 'static>(
+        o: &crate::codec::ObjectBytes<'_>,
+    ) -> Option<T> {
+        crate::codec::decode_bounded_split(o).ok()
+    }
+    match o.kind {
+        kinds::CHANGE => {
+            if typed::<rdy_model::Change>(&o).is_some_and(|c| c.links.replayed_from.is_some()) {
+                add(FEATURE_VIEW_REPLAY);
+            }
+        }
+        kinds::LANDING => {
+            if typed::<rdy_model::LandingRecord>(&o).is_some_and(|l| l.assessment.is_some()) {
+                add(FEATURE_ASSESSMENT);
+            }
+        }
+        kinds::ASSESSMENT => add(FEATURE_ASSESSMENT),
+        kinds::PLAN => {
+            use rdy_model::plan::{PlanAct, PlanKind, PlanOutcome};
+            if let Ok(p) = crate::plan::decode_plan(o.body) {
+                let sealed =
+                    p.seal.iter().flat_map(|s| &s.items).any(|i| {
+                        i.kind == PlanKind::Tension || i.outcome == PlanOutcome::Dismissed
+                    });
+                if sealed || p.answers.iter().any(|a| a.act == PlanAct::Dismiss) {
+                    add(FEATURE_PLAN_TENSION);
+                }
+            }
+        }
+        kinds::DISPUTE | kinds::DISPUTE_RESOLUTION => add(FEATURE_DISPUTE),
+        kinds::ANSWER => {
+            use rdy_model::AnswerAct;
+            match typed::<rdy_model::Answer>(&o).map(|a| a.act) {
+                Some(AnswerAct::Dispute | AnswerAct::ResolveDispute) => add(FEATURE_DISPUTE),
+                Some(AnswerAct::AcceptVerdict) => add(FEATURE_CHECK_REQUEST),
+                _ => {}
+            }
+        }
+        kinds::CHECK_REQUEST => add(FEATURE_CHECK_REQUEST),
+        kinds::REVIEW => {
+            use rdy_model::{ReviewSubject, Verdict};
+            if typed::<rdy_model::Review>(&o).is_some_and(|r| {
+                matches!(r.subject, ReviewSubject::Check { .. })
+                    || matches!(r.verdict, Verdict::Pass | Verdict::Concern | Verdict::Fail)
+            }) {
+                add(FEATURE_CHECK_REQUEST);
+            }
+        }
+        _ => {}
+    }
     TEST_FEATURES.with(|t| {
-        t.borrow()
-            .iter()
-            .filter(|(_, trigger)| *trigger == kind)
-            .map(|(f, _)| f.clone())
-            .collect()
-    })
+        out.extend(
+            t.borrow()
+                .iter()
+                .filter(|(_, trigger)| *trigger == o.kind)
+                .map(|(f, _)| f.clone()),
+        )
+    });
+    out
 }
 
 thread_local! {

@@ -193,6 +193,7 @@ fn ok2_redacted_identity_is_not_recomputed() {
         order: original.order.clone(),
         content_hash: saved_content,
         frozen: true,
+        source_encoding: 0,
     });
     let bytes = postcard::to_allocvec(&residue).unwrap();
     let RedactionResidue::Block(back) = postcard::from_bytes::<RedactionResidue>(&bytes).unwrap()

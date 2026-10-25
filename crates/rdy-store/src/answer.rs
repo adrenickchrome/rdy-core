@@ -218,7 +218,7 @@ impl Store {
         a: &Answer,
         extra: Vec<(u8, Vec<u8>)>,
     ) -> Result<(Hash, Frames), StoreError> {
-        let (kind, bytes) = crate::codec::item(kinds::ANSWER, a);
+        let (kind, bytes) = crate::codec::item_new(kinds::ANSWER, a);
         let id = Hash::of(&bytes);
         if let Some(rule) = invalid(a) {
             return Err(StoreError::Refused(damage(&id, rule)));
@@ -336,6 +336,20 @@ impl StoreReader {
             };
             if let Some(rule) = invalid_targets(&a, is_block)? {
                 return Err(StoreError::Decode(damage(&h, rule)));
+            }
+            // an accepted verdict's review is in the log before it, as a target is (O17)
+            if a.act == AnswerAct::AcceptVerdict
+                && let Some(r) = crate::carried_records::verdict_item(&a.item)
+                && !self
+                    .index()
+                    .typed(kinds::REVIEW, &r)?
+                    .is_some_and(|l| l < at)
+            {
+                return Err(crate::carried_records::refusal(
+                    &h,
+                    kinds::ANSWER,
+                    crate::carried_records::VERDICT_REVIEW,
+                ));
             }
             n += 1;
             Ok(())

@@ -846,7 +846,9 @@ fn rdx2_projected_or_erased_objects_cannot_be_written() {
     assert!(p.is_projection());
     assert!(removed(req, s.commit_change(p, vec![])));
     let mut fake = change("work", vec![]);
-    fake.read_identity = Some(Hash::of(b"not a removed change"));
+    fake.read_identity = Some(ChangeReadIdentity::Redacted(Hash::of(
+        b"not a removed change",
+    )));
     assert!(projected(s.commit_change(fake, vec![])));
 
     // the erased hashes: the block, the change, the blob and its chunk, and a blob sharing it
@@ -1425,7 +1427,9 @@ fn rdx2_put_cannot_serialize_a_projection() {
     );
     assert!(projected(s.put(BLOCK, &forged)));
     let mut fake = change("work", vec![]);
-    fake.read_identity = Some(Hash::of(b"not a removed change"));
+    fake.read_identity = Some(ChangeReadIdentity::Redacted(Hash::of(
+        b"not a removed change",
+    )));
     assert!(projected(s.put(CHANGE, &fake)));
     assert_eq!(s.log_end(), end, "no refused put left a frame");
     // an ordinary block still puts
@@ -1491,7 +1495,9 @@ fn rdx2_put_checks_every_typed_block_and_change() {
     );
     assert!(projected(s.put(CHANGE, &Box::new(unmatched_op))));
     let mut fake = change("work", vec![]);
-    fake.read_identity = Some(Hash::of(b"not a removed change"));
+    fake.read_identity = Some(ChangeReadIdentity::Redacted(Hash::of(
+        b"not a removed change",
+    )));
     assert!(projected(s.put(CHANGE, &Box::new(fake))));
     // a value put cannot see into is refused for BLOCK and CHANGE, even when it is ordinary
     assert!(unchecked(s.put(BLOCK, &Wrapped(stub.clone()))));

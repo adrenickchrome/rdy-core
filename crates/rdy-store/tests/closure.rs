@@ -202,6 +202,8 @@ fn source() -> Src {
                     }),
                     client_nonce: None,
                     imported_by: None,
+                    replayed_from: None,
+                    briefing: None,
                 },
             ),
         )

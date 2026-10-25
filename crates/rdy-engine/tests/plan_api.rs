@@ -940,6 +940,8 @@ fn cp8_plan_act_matrix_and_duplicate_aliases_are_exact() {
             PlanKind::Reaffirm => (&s.a, dep.clone()),
             PlanKind::Confirm => (&s.a, s.b.clone()),
             PlanKind::UpdateImplementation => (&s.a, "app:f.rs".to_string()),
+            // a carried kind: no computed plan holds one, and this test asks for none
+            PlanKind::Tension => (&s.a, s.b.clone()),
         };
         let i = pi(cause, &subject, kind);
         assert_eq!(row(&v, &i)["kind"], kind.as_str());

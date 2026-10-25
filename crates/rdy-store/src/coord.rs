@@ -55,7 +55,7 @@ impl Store {
             "intent",
             i.stable,
             i.prev,
-            crate::codec::item(kinds::INTENT, i),
+            crate::codec::item_new(kinds::INTENT, i),
         )
     }
 
@@ -66,7 +66,7 @@ impl Store {
             "alternative set",
             s.stable,
             s.prev,
-            crate::codec::item(kinds::ALT_SET, s),
+            crate::codec::item_new(kinds::ALT_SET, s),
         )
     }
 
@@ -81,7 +81,7 @@ impl Store {
         reason: &str,
         by: &Provenance,
     ) -> Result<AltWrite, StoreError> {
-        let (kind, bytes) = crate::codec::item(kinds::ALT_SET, next);
+        let (kind, bytes) = crate::codec::item_new(kinds::ALT_SET, next);
         let id = Hash::of(&bytes);
         let name = self.chain_check(ALT_REF, "alternative set", next.stable, next.prev, id)?;
         let mut items = vec![(kind, bytes)];

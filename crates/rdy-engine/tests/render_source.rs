@@ -1012,6 +1012,9 @@ fn landing_rec(prev: Option<Hash>, changes: Vec<Hash>, n: u8) -> LandingRecord {
         approved_version: None,
         rebased_from: vec![],
         evidence: None,
+        assessment: None,
+        policy: None,
+        read_identity: None,
     }
 }
 

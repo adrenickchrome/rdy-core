@@ -29,7 +29,8 @@ pub use canon::{
     StateSnapshot, Tag,
 };
 pub use change::{
-    AltChoice, Change, ChangeLinks, EditorialClass, Justification, Op, Provenance, Role,
+    AltChoice, Change, ChangeLinks, ChangeReadIdentity, EditorialClass, Justification, Op,
+    Provenance, Role,
 };
 pub use coord::{AltMember, AltSet, AltStatus, Intent, IntentStatus};
 pub use hash::Hash;

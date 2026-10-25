@@ -581,6 +581,9 @@ fn ha7_holder_accepts_unknown_source_block_types() {
                 approved_version: None,
                 rebased_from: vec![],
                 evidence: None,
+                assessment: None,
+                policy: None,
+                read_identity: None,
             },
         )
         .unwrap();
@@ -946,6 +949,9 @@ fn linear_holder(dir: &Path, n: usize) -> (Rdy, Vec<Hash>) {
                     approved_version: None,
                     rebased_from: vec![],
                     evidence: None,
+                    assessment: None,
+                    policy: None,
+                    read_identity: None,
                 },
             )
             .unwrap();
@@ -1100,6 +1106,9 @@ fn ha7_holder_fsck_refuses_a_snapshot_version_of_another_block() {
                 approved_version: None,
                 rebased_from: vec![],
                 evidence: None,
+                assessment: None,
+                policy: None,
+                read_identity: None,
             },
         )
         .unwrap();

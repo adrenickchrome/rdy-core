@@ -70,6 +70,9 @@ fn vector_landing() -> LandingRecord {
         approved_version: Some(Hash([3; 32])),
         rebased_from: vec![],
         evidence: None,
+        assessment: None,
+        policy: None,
+        read_identity: None,
     }
 }
 

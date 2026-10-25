@@ -158,6 +158,8 @@ fn links(of: &str) -> ChangeLinks {
         alternative: alt(7, of),
         client_nonce: Some(t(&format!("{of}.client_nonce"))),
         imported_by: Some(actor_run(&format!("{of}.imported_by"))),
+        replayed_from: None,
+        briefing: None,
     }
 }
 
@@ -363,7 +365,10 @@ fn change_residue() -> ChangeResidue {
             alternative: alt(99, "residue.alt"),
             client_nonce: Some(t("residue.client_nonce")),
             imported_by: Some(actor_run("residue.imported_by")),
+            replayed_from: None,
+            briefing: None,
         },
+        source_encoding: 1,
     }
 }
 
@@ -464,6 +469,9 @@ fn samples() -> Vec<Sample> {
             // the card shown: an identity
             card_hash: Some(h(28)),
         }),
+        assessment: None,
+        policy: None,
+        read_identity: None,
     };
     let snapshot = StateSnapshot {
         blocks: BTreeMap::from([(id("c-00001"), h(30)), (id("d-00003"), h(31))]),
@@ -853,6 +861,7 @@ fn samples() -> Vec<Sample> {
                 order: t("residue.order"),
                 content_hash: h(91),
                 frozen: true,
+                source_encoding: 0,
             }),
             vec![],
         ),
@@ -1152,10 +1161,10 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
     let answer_edges = vec![any(36), any(37)];
     let acts = every!(AnswerAct: RejectProposal, Later, Confirm, RejectDecision, AnswerQuestion,
         Dismiss, Tag, ViewOwn, CloseStale, Propose, KeepSuspect, AcceptDeferrals, RefuseDeferrals,
-        RejectReaffirm);
+        RejectReaffirm, Dispute, ResolveDispute, AcceptVerdict);
     let roles = every!(Role: Reader, Writer, Reviewer, Approver);
     let evidence = every!(EvidenceKind: Elicited, Card, Text);
-    assert_eq!((acts.len(), roles.len(), evidence.len()), (14, 4, 3));
+    assert_eq!((acts.len(), roles.len(), evidence.len()), (17, 4, 3));
     for act in &acts {
         let a = answer(*act, Role::Approver, Some(EvidenceKind::Text));
         assert_eq!(
@@ -1201,6 +1210,9 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
             choice: None,
             card_hash: Some(h(28)),
         }),
+        assessment: None,
+        policy: None,
+        read_identity: None,
     };
     let landing_edges = vec![some(PROPOSAL, 20), some(SNAPSHOT, 22), some(CHANGE, 23)];
     let assurances = every!(Assurance: Policy, Relayed, Local);
@@ -1271,11 +1283,12 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
     // a request's reason class and its report rows
     let reasons = every!(ReasonClass: Secret, Personal, Legal, Retraction);
     let impacts = every!(ImpactKind: BlockVersion, Change, Landing, Tag, View, Proposal,
-        StateSnapshot, AuditText, Review, Tension, Answer);
+        StateSnapshot, AuditText, Review, Tension, Answer, Assessment, Dispute, DisputeResolution,
+        CheckRequest);
     let relations = every!(ImpactRelation: Removed, Embeds, References, Quotes);
     let copies = every!(CopyKind: Render, Export, Dump, Clone, Published, WorkingCopy);
     let statuses = every!(CopyStatus: Unknown);
-    let support = every!(AssessmentSupport: NotImplemented);
+    let support = every!(AssessmentSupport: NotImplemented, Carried);
     assert_eq!(
         (
             reasons.len(),
@@ -1285,7 +1298,7 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
             statuses.len(),
             support.len()
         ),
-        (4, 11, 4, 6, 1, 1)
+        (4, 15, 4, 6, 1, 2)
     );
     let request = |reason_class: ReasonClass, inside: Vec<ImpactRow>, outside: Vec<CopyRow>| {
         let mut r = redaction();
@@ -1350,6 +1363,9 @@ fn ha1_refs_are_sorted_and_unique() {
         approved_version: Some(h(1)),
         rebased_from: vec![h(9), h(8)],
         evidence: None,
+        assessment: None,
+        policy: None,
+        read_identity: None,
     };
     assert_eq!(
         refs_of(LANDING, &enc(&landing)),

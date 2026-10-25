@@ -318,8 +318,9 @@ pub fn events_for_batch(
                         actor: r.provenance.actor,
                         run: r.provenance.run,
                     },
-                    // a mention review (FW-CV4) is not a tension dismissal; no event names it yet
-                    ReviewSubject::Mention { .. } => continue,
+                    // a mention review (FW-CV4) is not a tension dismissal, and a check review is
+                    // carried with no event yet: no event names either
+                    ReviewSubject::Mention { .. } | ReviewSubject::Check { .. } => continue,
                 };
                 out.push(Event {
                     seq,
@@ -352,6 +353,9 @@ fn verdict_name(v: Verdict) -> &'static str {
         Verdict::Restore => "restore",
         Verdict::Tension => "tension",
         Verdict::NoTension => "no_tension",
+        Verdict::Pass => "pass",
+        Verdict::Concern => "concern",
+        Verdict::Fail => "fail",
     }
 }
 

@@ -157,6 +157,9 @@ fn repr1_a_landing_with_every_field_set_survives_the_store_and_a_reindex() {
             choice: Some("land".into()),
             card_hash: None,
         }),
+        assessment: None,
+        policy: None,
+        read_identity: None,
     };
     let lh = s
         .write(vec![(kinds::LANDING, postcard::to_allocvec(&l).unwrap())])

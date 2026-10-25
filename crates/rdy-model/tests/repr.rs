@@ -1,6 +1,7 @@
 //! The record shapes (plan M2a1, repr1). A shape's postcard encoding is its fields in declaration
 //! order, so comparing it with the tuple of its fields freezes the order; an id is the hash of
 //! that encoding.
+use rdy_model::encoding::{LegacyChangeLinksV0, LegacyChangeV0, LegacyLandingV0, encoded_hash};
 use rdy_model::*;
 
 fn enc<T: serde::Serialize>(v: &T) -> Vec<u8> {
@@ -32,6 +33,8 @@ fn links() -> ChangeLinks {
             actor: "human:imp".into(),
             run: Some("run-2".into()),
         }),
+        replayed_from: None,
+        briefing: None,
     }
 }
 
@@ -80,6 +83,9 @@ fn full_landing() -> LandingRecord {
             choice: Some("land".into()),
             card_hash: Some(Hash::of(b"card")),
         }),
+        assessment: None,
+        policy: None,
+        read_identity: None,
     }
 }
 
@@ -104,19 +110,56 @@ fn cc1_change_links_end_with_imported_by() {
         actor: "human:imp".into(),
         run: Some("run-2".into()),
     };
+    // encoding 0, frozen: four options, imported_by last
+    assert_eq!(
+        enc(&LegacyChangeLinksV0 {
+            imported_by: Some(imp.clone()),
+            ..LegacyChangeLinksV0::default()
+        }),
+        enc(&(
+            None::<Hash>,
+            None::<AltChoice>,
+            None::<String>,
+            Some(imp.clone())
+        ))
+    );
+    // encoding 1, the latest: imported_by is followed by replayed_from, then briefing
     assert_eq!(
         enc(&ChangeLinks {
             imported_by: Some(imp.clone()),
             ..ChangeLinks::default()
         }),
-        enc(&(None::<Hash>, None::<AltChoice>, None::<String>, Some(imp)))
+        enc(&(
+            None::<Hash>,
+            None::<AltChoice>,
+            None::<String>,
+            Some(imp.clone()),
+            None::<Hash>,
+            None::<Hash>
+        ))
+    );
+    assert_eq!(
+        enc(&ChangeLinks {
+            imported_by: Some(imp.clone()),
+            replayed_from: Some(Hash::of(b"source")),
+            briefing: Some(Hash::of(b"briefing")),
+            ..ChangeLinks::default()
+        }),
+        enc(&(
+            None::<Hash>,
+            None::<AltChoice>,
+            None::<String>,
+            Some(imp),
+            Some(Hash::of(b"source")),
+            Some(Hash::of(b"briefing"))
+        ))
     );
 }
 
 #[test]
 fn repr1_a_change_is_its_old_fields_followed_by_its_links() {
     let c = change(links());
-    let mut want = enc(&(
+    let head = enc(&(
         &c.view,
         &c.ops,
         &c.deps,
@@ -124,13 +167,30 @@ fn repr1_a_change_is_its_old_fields_followed_by_its_links() {
         &c.justification,
         &c.message,
     ));
-    want.extend(enc(&links()));
-    assert_eq!(enc(&c), want);
-    assert_eq!(c.id(), Hash::of(&want));
+    // encoding 0, frozen: the six fields and the four-option links; the id hashes that body
+    let v0 = LegacyChangeV0::from_current(&c).unwrap();
+    let mut want = head.clone();
+    want.extend(enc(&LegacyChangeLinksV0::from_current(&links()).unwrap()));
+    assert_eq!(enc(&v0), want);
+    assert_eq!(hash_of(&v0), Hash::of(&want));
     assert_eq!(
-        enc(&ChangeLinks::default()),
+        enc(&LegacyChangeLinksV0::default()),
         vec![0, 0, 0, 0],
         "four absent options"
+    );
+    // encoding 1, the latest: the same fields, the six-option links; the id hashes the version
+    // prefix and that body
+    let mut want = head;
+    want.extend(enc(&links()));
+    assert_eq!(enc(&c), want);
+    assert_eq!(c.id(), encoded_hash(1, &want));
+    let mut framed = vec![1, 0];
+    framed.extend(&want);
+    assert_eq!(c.id(), Hash::of(&framed));
+    assert_eq!(
+        enc(&ChangeLinks::default()),
+        vec![0, 0, 0, 0, 0, 0],
+        "six absent options"
     );
     assert_eq!(
         enc(&links()),
@@ -141,7 +201,9 @@ fn repr1_a_change_is_its_old_fields_followed_by_its_links() {
             Some(ActorRun {
                 actor: "human:imp".into(),
                 run: Some("run-2".into()),
-            })
+            }),
+            None::<Hash>,
+            None::<Hash>
         ))
     );
     assert_eq!(enc(&alt()), enc(&(Hash::of(b"set"), "alt-a")));
@@ -181,25 +243,49 @@ fn repr1_proposal_and_landing_field_order_is_frozen() {
     );
     assert_eq!(p.id(), Hash::of(&enc(&p)));
     let l = full_landing();
-    assert_eq!(
-        enc(&l),
-        enc(&(
-            l.proposal,
-            l.prev,
-            l.state,
-            &l.approved_by,
-            &l.changes,
-            &l.chosen,
-            &l.checks,
-            l.assurance,
-            &l.relayed_by,
-            &l.relay_evidence,
-            l.approved_version,
-            &l.rebased_from,
-            &l.evidence,
-        ))
+    let fields = enc(&(
+        l.proposal,
+        l.prev,
+        l.state,
+        &l.approved_by,
+        &l.changes,
+        &l.chosen,
+        &l.checks,
+        l.assurance,
+        &l.relayed_by,
+        &l.relay_evidence,
+        l.approved_version,
+        &l.rebased_from,
+        &l.evidence,
+    ));
+    // encoding 0, frozen: the thirteen fields
+    let v0 = LegacyLandingV0::from_current(&l).unwrap();
+    assert_eq!(enc(&v0), fields);
+    assert_eq!(hash_of(&v0), Hash::of(&fields));
+    // encoding 1, the latest: the thirteen fields, then assessment and policy
+    let mut want = fields;
+    want.extend(enc(&(
+        None::<Hash>,
+        None::<rdy_model::assessment::PolicyRef>,
+    )));
+    assert_eq!(enc(&l), want);
+    assert_eq!(l.id(), encoded_hash(1, &want));
+    let policy = rdy_model::assessment::PolicyRef {
+        block: BlockId::parse("p-AAAAA").unwrap(),
+        version: Hash::of(b"policy"),
+    };
+    let set = LandingRecord {
+        assessment: Some(Hash::of(b"assessment")),
+        policy: Some(policy.clone()),
+        ..full_landing()
+    };
+    let mut want = enc(&v0);
+    want.extend(enc(&(Some(Hash::of(b"assessment")), Some(policy))));
+    assert_eq!(enc(&set), want);
+    assert!(
+        LegacyLandingV0::from_current(&set).is_none(),
+        "encoding 0 cannot hold the new fields"
     );
-    assert_eq!(l.id(), Hash::of(&enc(&l)));
     assert_ne!(
         local_landing(l.approved_version).id(),
         l.id(),
@@ -224,6 +310,12 @@ fn repr1_landing_assurance_and_relay_fields_have_fixed_encodings() {
         question: Some("land it?".into()),
     };
     assert_eq!(enc(&ev), enc(&("yes, land it", "sess-1", Some("land it?"))));
+    // encoding 1: a landing's policy is its block id, then the block version
+    let policy = rdy_model::assessment::PolicyRef {
+        block: BlockId::parse("p-AAAAA").unwrap(),
+        version: Hash::of(b"policy"),
+    };
+    assert_eq!(enc(&policy), enc(&("p-AAAAA", Hash::of(b"policy"))));
 }
 
 /// Review Focus 6: what M2 writes after `checks` is a fixed tail of bytes.
@@ -243,13 +335,20 @@ fn repr1_an_m2_landings_new_fields_encode_as_a_fixed_tail() {
     want.extend([0x02, 0x00, 0x00, 0x01]);
     want.extend(Hash::of(b"p").0);
     want.extend([0x00, 0x00]);
+    // M2 wrote encoding 0: its frozen body ends there
+    let v0 = |l: &LandingRecord| enc(&LegacyLandingV0::from_current(l).unwrap());
     assert_eq!(
-        enc(&l),
+        v0(&l),
         want,
         "local, no relay, no evidence, the version, no rebase, no approval evidence"
     );
+    // encoding 1: no assessment, no policy
+    want.extend([0x00, 0x00]);
+    assert_eq!(enc(&l), want);
     let mut want = head;
     want.extend([0x02, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    assert_eq!(v0(&local_landing(None)), want);
+    want.extend([0x00, 0x00]);
     assert_eq!(enc(&local_landing(None)), want);
 }
 

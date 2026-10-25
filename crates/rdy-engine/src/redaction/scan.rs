@@ -131,7 +131,7 @@ pub enum TextPolicy {
 }
 
 /// The assigned kinds of the store's closed registry, in code order. Code 12 is unassigned.
-pub const ASSIGNED_KINDS: [u8; 23] = [
+pub const ASSIGNED_KINDS: [u8; 27] = [
     kinds::BLOCK,
     kinds::CHANGE,
     kinds::PROPOSAL,
@@ -155,6 +155,10 @@ pub const ASSIGNED_KINDS: [u8; 23] = [
     kinds::REDACTION_APPLY,
     kinds::REDACTION_CARRIED,
     kinds::PLAN,
+    kinds::ASSESSMENT,
+    kinds::DISPUTE,
+    kinds::DISPUTE_RESOLUTION,
+    kinds::CHECK_REQUEST,
 ];
 
 /// The text policy of `kind`; `None` for a kind the report has no visitor for. A new assigned
@@ -176,7 +180,11 @@ pub fn text_policy(kind: u8) -> Option<TextPolicy> {
         | kinds::TRANSITION
         | kinds::REDACTION
         | kinds::REDACTION_CARRIED
-        | kinds::PLAN => Some(TextPolicy::Strings),
+        | kinds::PLAN
+        | kinds::ASSESSMENT
+        | kinds::DISPUTE
+        | kinds::DISPUTE_RESOLUTION
+        | kinds::CHECK_REQUEST => Some(TextPolicy::Strings),
         kinds::REF_UPDATE => Some(TextPolicy::NameOnly),
         kinds::REDACTION_RESIDUE => Some(TextPolicy::OriginalIdentity),
         kinds::SNAPSHOT

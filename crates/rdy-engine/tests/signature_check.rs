@@ -163,6 +163,9 @@ fn landing(assurance: Assurance) -> LandingRecord {
         approved_version: Some(h(4)),
         rebased_from: vec![],
         evidence: None,
+        assessment: None,
+        policy: None,
+        read_identity: None,
     }
 }
 

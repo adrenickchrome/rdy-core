@@ -176,7 +176,9 @@ pub(crate) fn invalid_record(p: &Plan) -> Option<&'static str> {
         || p.answers.len() > MAX_PLAN_ANSWERS
         || p.heads.len() > MAX_PLAN_HEADS
         || !p.answers.iter().all(|a| match a.act {
-            PlanAct::Confirm | PlanAct::Defer => a.reason.as_deref().is_some_and(valid_reason),
+            PlanAct::Confirm | PlanAct::Defer | PlanAct::Dismiss => {
+                a.reason.as_deref().is_some_and(valid_reason)
+            }
             PlanAct::Done => a.reason.is_none(),
         })
         || !p
@@ -241,9 +243,9 @@ pub(crate) enum Place {
 pub(crate) trait PlanLookup {
     /// Where the object of `kind` and hash `h` stands.
     fn place(&self, kind: u8, h: &Hash) -> Result<Place, StoreError>;
-    /// The body of an object [`PlanLookup::place`] found: its payload, less a versioned
-    /// record's version (`crate::codec`).
-    fn read(&self, kind: u8, h: &Hash) -> Result<Vec<u8>, StoreError>;
+    /// The encoding and body of an object [`PlanLookup::place`] found: its payload, less a
+    /// versioned record's version (`crate::codec`).
+    fn read(&self, kind: u8, h: &Hash) -> Result<(u16, Vec<u8>), StoreError>;
     /// The latest plan version of `view` before this one, if any.
     fn latest(&self, view: &str) -> Result<Option<Hash>, StoreError>;
     /// The unsealed version bound to proposal `p` before this one, if any.
@@ -263,13 +265,20 @@ pub(crate) trait PlanLookup {
 }
 
 /// The typed record of `kind` that `look` reads; None when it does not decode.
-fn typed<T: serde::de::DeserializeOwned>(
+fn typed<T: serde::de::DeserializeOwned + 'static>(
     look: &dyn PlanLookup,
     kind: u8,
     h: &Hash,
 ) -> Result<Option<T>, StoreError> {
     match look.read(kind, h) {
-        Ok(p) => Ok(bounded::decode::<T>(&p).ok()),
+        Ok((version, body)) => Ok(crate::codec::decode_bounded_split::<T>(
+            &crate::codec::ObjectBytes {
+                kind,
+                version,
+                body: &body,
+            },
+        )
+        .ok()),
         Err(StoreError::Redacted { .. }) => Ok(None),
         Err(e) => Err(e),
     }
@@ -305,7 +314,7 @@ fn chain_ended(look: &dyn PlanLookup, head: &Plan) -> Result<bool, StoreError> {
         return Ok(true);
     }
     let read = |h: &Hash| -> Result<Option<Plan>, StoreError> {
-        look.read(kinds::PLAN, h).map(|b| decode_plan(&b).ok())
+        look.read(kinds::PLAN, h).map(|(_, b)| decode_plan(&b).ok())
     };
     match last_bound(head, &read)? {
         Some(v) => look.landed(&v),
@@ -347,7 +356,7 @@ fn approved_binding(look: &dyn PlanLookup, p: &Plan, q: &Plan) -> Result<Option<
         };
         let Some(next) = look
             .read(kinds::PLAN, &prev)
-            .map(|b| decode_plan(&b).ok())?
+            .map(|(_, b)| decode_plan(&b).ok())?
         else {
             return Ok(None);
         };
@@ -395,7 +404,7 @@ pub(crate) fn invalid_context(
             }
             let Some(q) = look
                 .read(kinds::PLAN, &prev)
-                .map(|b| decode_plan(&b).ok())?
+                .map(|(_, b)| decode_plan(&b).ok())?
             else {
                 return Ok(Some(INVALID_CHAIN));
             };
@@ -430,7 +439,9 @@ pub(crate) fn invalid_context(
         // proposal's seal names no chain at all
         None if p.seal.is_none() && !holder && !binds_after_unbound(look, p)? => {
             if let Some(l) = look.latest(&p.view)? {
-                let q = look.read(kinds::PLAN, &l).map(|b| decode_plan(&b).ok())?;
+                let q = look
+                    .read(kinds::PLAN, &l)
+                    .map(|(_, b)| decode_plan(&b).ok())?;
                 let ended = match q {
                     Some(q) => chain_ended(look, &q)?,
                     None => false,
@@ -809,11 +820,11 @@ struct WriteLookup<'a> {
 impl WriteLookup<'_> {
     /// The payload of `kind` and `h` among `items`.
     /// The body of the item of logical kind `kind` with hash `h`, as `crate::codec` splits it.
-    fn item(&self, kind: u8, h: &Hash) -> Option<&[u8]> {
+    fn item(&self, kind: u8, h: &Hash) -> Option<(u16, &[u8])> {
         self.items
             .iter()
             .find(|(k, p)| crate::codec::logical_kind(*k) == kind && Hash::of(p) == *h)
-            .and_then(|(k, p)| crate::codec::split(*k, p).ok().map(|o| o.body))
+            .and_then(|(k, p)| crate::codec::split(*k, p).ok().map(|o| (o.version, o.body)))
     }
 
     /// The plans among `items`, in order.
@@ -847,10 +858,10 @@ impl PlanLookup for WriteLookup<'_> {
         })
     }
 
-    fn read(&self, kind: u8, h: &Hash) -> Result<Vec<u8>, StoreError> {
+    fn read(&self, kind: u8, h: &Hash) -> Result<(u16, Vec<u8>), StoreError> {
         match self.item(kind, h) {
-            Some(p) => Ok(p.to_vec()),
-            None => self.store.get_body(kind, h),
+            Some((v, p)) => Ok((v, p.to_vec())),
+            None => self.store.get_versioned_body(kind, h),
         }
     }
 
@@ -911,7 +922,7 @@ impl PlanLookup for WriteLookup<'_> {
 
 /// The hash a plan version is stored under: its frame's, in the PLAN kind's latest encoding.
 pub(crate) fn plan_hash(plan: &Plan) -> Hash {
-    crate::codec::encode(kinds::PLAN, plan).hash()
+    crate::codec::encode_new(kinds::PLAN, plan).hash()
 }
 
 impl Store {
@@ -941,7 +952,7 @@ impl Store {
         batch: &[(u8, Vec<u8>)],
     ) -> Result<(Hash, Frames), StoreError> {
         let id = self.check_plan(plan, batch)?;
-        let mut items = vec![crate::codec::item(kinds::PLAN, plan)];
+        let mut items = vec![crate::codec::item_new(kinds::PLAN, plan)];
         items.extend(self.ref_items_pub(vec![(plan_ref(&plan.view), id.0.to_vec())]));
         Ok((id, items))
     }
@@ -954,7 +965,7 @@ impl Store {
         plan: &Plan,
         batch: &[(u8, Vec<u8>)],
     ) -> Result<Hash, StoreError> {
-        let frame = crate::codec::encode(kinds::PLAN, plan);
+        let frame = crate::codec::encode_new(kinds::PLAN, plan);
         let id = frame.hash();
         let body = crate::codec::split(frame.raw_kind(), &frame.payload)
             .map_err(|e| StoreError::Decode(e.to_string()))?
@@ -1168,8 +1179,8 @@ impl PlanLookup for CheckLookup<'_> {
         })
     }
 
-    fn read(&self, kind: u8, h: &Hash) -> Result<Vec<u8>, StoreError> {
-        self.reader.get_body(kind, h)
+    fn read(&self, kind: u8, h: &Hash) -> Result<(u16, Vec<u8>), StoreError> {
+        self.reader.get_versioned_body(kind, h)
     }
 
     fn latest(&self, view: &str) -> Result<Option<Hash>, StoreError> {

@@ -48,7 +48,7 @@ pub(crate) fn open_ref(view: &str) -> String {
 /// The hash a proposal version is stored under: its frame's, in the PROPOSAL kind's latest
 /// encoding.
 fn proposal_hash(p: &Proposal) -> Hash {
-    crate::codec::encode(kinds::PROPOSAL, p).hash()
+    crate::codec::encode_new(kinds::PROPOSAL, p).hash()
 }
 
 fn tag_ref(name: &str) -> String {
@@ -187,6 +187,7 @@ impl StoreReader {
                 id: c.id(),
                 deps: &c.deps,
                 ops: &c.ops,
+                is_replay: c.links.replayed_from.is_some(),
             })
             .collect();
         let deleters = self.merge_deleters(
@@ -522,7 +523,7 @@ impl Store {
                     actor: p.actor.clone(),
                     run: p.run.clone(),
                 });
-                let create = crate::codec::item(
+                let create = crate::codec::item_new(
                     kinds::VIEW_OP,
                     &view_op(
                         None,
@@ -539,7 +540,7 @@ impl Store {
             }
         };
         if catch_up && let Some(landing) = canon {
-            let rebase = crate::codec::item(
+            let rebase = crate::codec::item_new(
                 kinds::VIEW_OP,
                 &view_op(
                     Some(prev),
@@ -558,7 +559,7 @@ impl Store {
         if owner.is_none()
             && let Some(o) = claim
         {
-            let own = crate::codec::item(
+            let own = crate::codec::item_new(
                 kinds::VIEW_OP,
                 &view_op(
                     Some(prev),
@@ -573,7 +574,7 @@ impl Store {
         }
         // 5. one commit op per change, in order: one write's commits sit in a row in the log
         for (cid, _) in &placed {
-            let commit = crate::codec::item(
+            let commit = crate::codec::item_new(
                 kinds::VIEW_OP,
                 &view_op(Some(prev), ViewOpKind::Commit { change: *cid }),
             );
@@ -1085,7 +1086,7 @@ impl Store {
         if p.changes.is_empty() {
             return Err(StoreError::EmptyProposal(p.view.clone()));
         }
-        let (kind, bytes) = crate::codec::item(kinds::PROPOSAL, p);
+        let (kind, bytes) = crate::codec::item_new(kinds::PROPOSAL, p);
         let id = Hash::of(&bytes);
         let mut items = vec![(kind, bytes)];
         items.extend(self.ref_items_pub(vec![
@@ -1173,7 +1174,7 @@ impl Store {
 
     /// The tag's id and the frames `put_tag` writes: the tag, then `tag/<name>` → its id.
     fn tag_items(&self, tag: &Tag) -> (Hash, Frames) {
-        let (kind, bytes) = crate::codec::item(kinds::TAG, tag);
+        let (kind, bytes) = crate::codec::item_new(kinds::TAG, tag);
         let id = Hash::of(&bytes);
         let mut items = vec![(kind, bytes)];
         items.extend(self.ref_items_pub(vec![(tag_ref(&tag.name), id.0.to_vec())]));
