@@ -864,7 +864,12 @@ pub(crate) fn compute_excluding(
                     } else {
                         RedactionResidue::Change(ChangeResidue::of(&reader.change(&f.hash)?))
                     };
-                    let id = Hash::of(encode_into(&r, &mut buf).map_err(|_| over(limit::RECORD))?);
+                    // the residue's id is its frame's hash in the latest encoding, as the
+                    // store writes it (`rdy_store::codec`)
+                    let body = encode_into(&r, &mut buf).map_err(|_| over(limit::RECORD))?;
+                    let id = Hash::of(
+                        &rdy_store::codec::frame_latest(kinds::REDACTION_RESIDUE, body.to_vec()).1,
+                    );
                     residue_ids.insert(f.hash, id);
                     residues.push(r);
                     id

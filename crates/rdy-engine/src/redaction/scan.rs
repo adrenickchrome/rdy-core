@@ -40,8 +40,8 @@ const BLOCK_ID: &str = "BlockId";
 /// variants are the nested field containers `Limits::levels` counts.
 const FIELD_VALUE: &str = "FieldValue";
 
-/// One frame of the log: where it is, its kind, object hash and payload length, and whether the
-/// store still serves its payload.
+/// One frame of the log: where it is, its logical kind, object hash and payload length, and
+/// whether the store still serves its payload.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Frame {
     pub(crate) loc: Location,
@@ -102,7 +102,8 @@ pub(crate) fn walk(
         }
         out.push(Frame {
             loc,
-            kind,
+            // the logical kind: a frame of any encoding (`rdy_store::codec`)
+            kind: rdy_store::codec::logical_kind(kind),
             hash,
             len,
             present,

@@ -184,11 +184,12 @@ pub fn replay(
     Ok(out)
 }
 
-/// The kind and hash of a frame the record walker hands out, present or dropped.
+/// The logical kind and hash of a frame the record walker hands out, present or dropped: a
+/// frame of any encoding (`rdy_store::codec`).
 pub(crate) fn frame_kind(frame: &StoredFrame<'_>) -> (u8, Hash) {
     match *frame {
         StoredFrame::Present { kind, hash, .. } | StoredFrame::Dropped { kind, hash, .. } => {
-            (kind, hash)
+            (rdy_store::codec::logical_kind(kind), hash)
         }
     }
 }
