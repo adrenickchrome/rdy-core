@@ -14,7 +14,7 @@
           "Rules"
         ],
         "id": "c-CFPE0",
-        "side": "ed2ae5f9f34b286e346af82b32dc61608ae05336b36ed2d6dced3285a1365c02",
+        "side": "2b1eda529acaba58a51fee8e119384fdf92d28d39b6b3d61b05196eeb166cc3c",
         "text": [
           {
             "field": "body",
@@ -22,7 +22,7 @@
           }
         ],
         "type": "claim",
-        "version": "459b9670e0f24752d508abfa0787f712a1bee7844629782ddc4505263064890a"
+        "version": "f960e2ac81de4410669a4179c3671ceac66580639aa69f643e13d684cd4f9279"
       },
       {
         "doc": "spec",
@@ -32,7 +32,7 @@
           "Rules"
         ],
         "id": "c-WKHEZ",
-        "side": "canon@611a65c919a8b6986cc93d3c2905e092076295d97f5f1bee7f17a776967c5e77",
+        "side": "canon@7ea8d590a451cf54d50e8f2a294595c9959b1c75490f15ee64a75fdee406f71e",
         "text": [
           {
             "field": "body",
@@ -40,13 +40,13 @@
           }
         ],
         "type": "claim",
-        "version": "d08882353685daf9502ef16d7a2b38d179aad7e539d16929886873c6df447a79"
+        "version": "a9728cd9454cdb78af9d7190df430c690ce127221bb89ee277470b759d8075f5"
       }
     ],
     "entities": [],
     "kind": "tension",
     "question": "Do these two blocks disagree? Answer tension when they cannot both hold, else no_tension. A tension names, for each block that takes part, what in it disagrees.",
-    "request": "rq-5607f5767811",
+    "request": "rq-e6db2a9b28b7",
     "rule": "premise",
     "schema": {
       "citations": "a list of {block, note}: block is one of the two block ids; note is 1 to 2000 characters; a tension verdict needs 1 to 20 citations, a no_tension verdict 0 to 20",
@@ -58,8 +58,8 @@
       ]
     }
   },
-  "case_hash": "b9213a0c521e2cd1a130f9e2851fe0b24b3792c9c9bc56cd6c41a3bcd1a6a1c6",
+  "case_hash": "87822cdf9ba7008d81f584de5d8abe474d1c86b78cf5d173269ee4366df93252",
   "kind": "tension",
   "lease_expires_at": "2025-10-09T09:03:20Z",
-  "request": "rq-5607f5767811"
+  "request": "rq-e6db2a9b28b7"
 }

@@ -16,23 +16,23 @@
       },
       "block": "c-WKHEZ",
       "follow_up": "confirm",
-      "id": "cq-2c8d7466e0127e33",
+      "id": "cq-5f922fb0e4ac4143",
       "kind": "suspect"
     }
   ],
-  "head": "ac5f98f575990670d4270d07b4959f1f4a75258e0b73d5cdbcc1380297b77eff",
+  "head": "c860e2b5a281af64ee168927838bdda91954370b60b8aa811517b921576beb08",
   "on_change": {
     "resolved": [
       {
-        "id": "tn-0bb807c1f412",
+        "id": "tn-4e4e0cec8f83",
         "kind": "unjustified_change",
-        "tension": "0bb807c1f412755d419d7f03ca1329e6694e3b34b14ecab4446a6631b0d17c90"
+        "tension": "4e4e0cec8f83c0b5e6cc0687260473b05a20bd7e9750d53ce85bbad576fbd9a9"
       }
     ],
     "tensions": []
   },
   "removed": [
-    "ed5f2a300bd9b9929d67ee81ae2bc55784d71c89ff6263cb5559e30ba6ab925f"
+    "3926a260d6782279b7ca6d7eee06375b68eb39773ef4c36cb6fc4532e4b80f4a"
   ],
   "view": "a"
 }

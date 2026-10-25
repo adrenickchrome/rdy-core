@@ -9,7 +9,7 @@
           "Rules"
         ],
         "id": "D-FXQB6",
-        "side": "canon@c7470ee0aa798904bdf316dd5af40211210e35b12c95f99fac763bf956eb2d87",
+        "side": "canon@39761f2fd48ae96bfcd114cda1559add9cc3d1f05f486930d40051a8ea02f9a4",
         "text": [
           {
             "field": "statement",
@@ -27,7 +27,7 @@
           "Rules"
         ],
         "id": "c-G07JH",
-        "side": "38fd9f5435d171b5f9eab0395c92aa73ff112444d3708f65f8e0ef35228fb119",
+        "side": "66249a1a3d4d8c35026fc6cf1708f63f69112112eee8da75b6336bc6de3f7f53",
         "text": [
           {
             "field": "body",
@@ -41,7 +41,7 @@
     "entities": [],
     "kind": "tension",
     "question": "Do these two blocks disagree? Answer tension when they cannot both hold, else no_tension. A tension names, for each block that takes part, what in it disagrees.",
-    "request": "rq-7d078d58c7f4",
+    "request": "rq-201c1b69fc91",
     "rule": "section",
     "schema": {
       "citations": "a list of {block, note}: block is one of the two block ids; note is 1 to 2000 characters; a tension verdict needs 1 to 20 citations, a no_tension verdict 0 to 20",
@@ -53,5 +53,5 @@
       ]
     }
   },
-  "case_hash": "19793d48870227bef3c90992f614d603e24dc7c95bad7f9d9e2d39ffbcc3bbe3"
+  "case_hash": "53df5019f4dcbb9cdd980a0370e36c84e4b79408bf90f911cdf3ea252c7cdba8"
 }
