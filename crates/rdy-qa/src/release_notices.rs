@@ -2632,7 +2632,10 @@ mod tests {
 
         // Notes without the format move line, or with it outside the Changes group, refuse.
         let no_line = good.replacen(&format!("{line}\n"), "", 1);
-        let edited = good.replacen(&line, &line.replace("16 to 18", "17 to 18"), 1);
+        // The edit names another previous store format; it must change the line whatever the
+        // current store is (a scalar pair or feature-based stores).
+        let edited = good.replacen(&line, &line.replace("from 16 to", "from 17 to"), 1);
+        assert_ne!(edited, good, "the edit changes the line");
         let in_fixes = good.replacen(&format!("{line}\n"), "", 1).replacen(
             "- A fix.\n",
             &format!("- A fix.\n{line}\n"),
