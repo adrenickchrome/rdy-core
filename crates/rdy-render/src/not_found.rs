@@ -137,6 +137,9 @@ pub(crate) fn build(
         review_heading: None,
         live: false,
         items: vec![],
+        // the not-found page has no title toolbar and nothing to copy (Task 9's Copy)
+        title_tools: None,
+        copy_page: None,
         body: Default::default(),
     };
     let words = Words {
