@@ -186,8 +186,8 @@ fn cap_added(groups: &mut [NavGroup], fills: &[Fill], limit: usize) {
         return;
     }
     let mut seq = 0;
-    for (g, &fill) in groups.iter_mut().zip(fills) {
-        apply_cut(&mut g.entries, fill, &mut seq, &cut);
+    for g in groups.iter_mut() {
+        apply_cut(&mut g.entries, &mut seq, &cut);
     }
 }
 
@@ -216,13 +216,13 @@ fn collect_closed(entries: &[NavEntry], fill: Fill, level: usize, out: &mut Vec<
 
 /// Turns each closed folder of `entries` that `cut` marks into a page link, walking in the
 /// order [`collect_closed`] lists them; `seq` counts the closed folders passed.
-fn apply_cut(entries: &mut [NavEntry], fill: Fill, seq: &mut usize, cut: &[bool]) {
+fn apply_cut(entries: &mut [NavEntry], seq: &mut usize, cut: &[bool]) {
     for e in entries {
         if !e.folder {
             continue;
         }
         if e.current || e.on_path {
-            apply_cut(&mut e.children, fill, seq, cut);
+            apply_cut(&mut e.children, seq, cut);
         } else {
             if cut[*seq] {
                 e.folder = false;
