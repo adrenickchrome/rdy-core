@@ -424,7 +424,9 @@ fn cp1_metadata_changes_version_but_not_content() {
 }
 
 /// The base encoding of a block without the engine fields, pinned at the base commit: Block's
-/// bytes, its version hash and both content hashes stay what they were.
+/// bytes and its version hash stay what they were. `GOLDEN_CONTENT` and
+/// `GOLDEN_CONTENT_TRACKED` are its historical content-1 hashes, which [`content_1`] recomputes;
+/// the content-2 hashes are `GOLDEN_CONTENT_2` and `GOLDEN_CONTENT_2_TRACKED`.
 const GOLDEN_BLOCK_HEX: &str = concat!(
     "07632d374b51324d05636c61696d0107732d3144454e5401560606615f6e756c6c0006625f626f6f6c010105635f696e74",
     "025305645f737472030bc39c6ec3af63c3b864c3a906655f6c6973740402020203017805665f6d61700501016b0100",
@@ -435,6 +437,43 @@ const GOLDEN_BLOCK_HEX: &str = concat!(
 const GOLDEN_CONTENT: &str = "03ac8d9c5bf3c66abca69e48b866bb5b0069d2ca684a51a330320173e6cf1692";
 const GOLDEN_CONTENT_TRACKED: &str =
     "4782c40e22637879d83532792288c708944eb087c542f3023ebe1239e86e3049";
+const GOLDEN_CONTENT_2: &str = "4ba94b30d0b0efcce50721247469fa0c71573daccb051117f5f6802ae5d12c08";
+const GOLDEN_CONTENT_2_TRACKED: &str =
+    "e868067306472b7a38acb73d6aba0772fa6db12a88c584c908b8709989d65939";
+
+/// The retired content-1 hash of `b` (domain `rdy-content-1\0`, with the order key), recomputed
+/// here only to check the historical vectors. No production path accepts it.
+fn content_1(b: &Block, t: &Tracking) -> Hash {
+    #[derive(serde::Serialize)]
+    struct Content1<'a> {
+        id: &'a BlockId,
+        block_type: &'a String,
+        parent: &'a Option<BlockId>,
+        order: &'a String,
+        fields: Vec<(&'a String, &'a FieldValue)>,
+        body: &'a String,
+        links: &'a BTreeMap<String, Vec<Link>>,
+    }
+    let tracked = t.fields(&b.block_type);
+    let content = Content1 {
+        id: &b.id,
+        block_type: &b.block_type,
+        parent: &b.parent,
+        order: &b.order,
+        fields: b
+            .fields
+            .iter()
+            .filter(|(k, _)| !["status", "decided_at", "lifecycle"].contains(&k.as_str()))
+            .filter(|(k, _)| !engine_fields::is_engine_field(k))
+            .filter(|(k, _)| !tracked.is_some_and(|f| f.contains(k.as_str())))
+            .collect(),
+        body: &b.body,
+        links: &b.links,
+    };
+    let mut bytes = b"rdy-content-1\0".to_vec();
+    bytes.extend(enc(&content));
+    Hash::of(&bytes)
+}
 
 #[test]
 fn cp1_old_block_encoding_is_unchanged() {
@@ -445,11 +484,21 @@ fn cp1_old_block_encoding_is_unchanged() {
         b.version_hash().to_string(),
         "3900f27b4ae5bff77eb9b5e6313e5f30b77df8fb3274ce3d56e1b8074356d71e"
     );
-    assert_eq!(b.content_hash().to_string(), GOLDEN_CONTENT);
+    assert_eq!(b.content_hash().to_string(), GOLDEN_CONTENT_2);
     assert_eq!(
         b.content_hash_with(&custom_tracking()).to_string(),
+        GOLDEN_CONTENT_2_TRACKED
+    );
+    // the historical content-1 vectors, by the legacy calculation
+    assert_eq!(
+        content_1(&b, &Tracking::default()).to_string(),
+        GOLDEN_CONTENT
+    );
+    assert_eq!(
+        content_1(&b, &custom_tracking()).to_string(),
         GOLDEN_CONTENT_TRACKED
     );
+    assert_ne!(GOLDEN_CONTENT_2, GOLDEN_CONTENT);
     let back: Block = postcard::from_bytes(&enc(&b)).unwrap();
     assert_eq!(back, b);
 }

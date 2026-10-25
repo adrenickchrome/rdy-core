@@ -9,7 +9,10 @@ use std::collections::BTreeMap;
 // Bytes and hashes recorded at BASE 192ace4 (before the redaction model existed).
 const BLOCK: &str = "07702d58595a3334086465636973696f6e0107732d5041523031016d06046c6973740401030161036d61700501016b0206016e020d046e6f6e6500026f6b0101057469746c6503094f6c64207469746c6509426f647920746578740107726566696e65730107642d41424331320101700107642d41424331326cc8677933df2f583de49ba1c77d836754fe84fe0d16d5d283fdd6bb89ae7d20";
 const BLOCKV: &str = "5c6c9c291c19d0d52e0fce6894883a83bcadc223d8296fbb33bc2ba6dcb8386e";
+/// The fixture block's historical content-1 hash, which [`content_1`] recomputes.
 const BLOCKC: &str = "1132b101e2ba2a08a9c359c3b78fdec71ed7b63612a6d41206f107829ef3fffa";
+/// The fixture block's content-2 hash: its order key is left out.
+const BLOCKC2: &str = "2affef9a69370fb1f2aa4b276e036cfb2005ba252b0399a85ecb054611f2c699";
 const CHANGE: &str = "04776f726b030007702d58595a3334086465636973696f6e0107732d5041523031016d06046c6973740401030161036d61700501016b0206016e020d046e6f6e6500026f6b0101057469746c6503094f6c64207469746c6509426f647920746578740107726566696e65730107642d41424331320101700107642d41424331326cc8677933df2f583de49ba1c77d836754fe84fe0d16d5d283fdd6bb89ae7d2001de8f3fcf327eb911b2c368e011e0ffdee22fed456b4f4508337018ba46a0639d07702d58595a3334086465636973696f6e0107732d5041523031016d06046c6973740401030161036d61700501016b0206016e020d046e6f6e6500026f6b0101057469746c6503094f6c64207469746c6509426f647920746578740107726566696e65730107642d41424331320101700107642d41424331326cc8677933df2f583de49ba1c77d836754fe84fe0d16d5d283fdd6bb89ae7d2002afae16e5c35fafc0bb2c5333310842c4b11e4d3946d9e09df5c194047375d47e07712d44454e393901f286bc69f76edf5946c3b4ef9035baeb30bb4568981070ea34026a2dc4528737076167656e743a61010272310180c0f2f5b46601010203776879036d736701f0877c0e1ab8f4c605052fb919df4dc8cb7ff4df5a9cd5e85e8796a5727533d901e672e5cd4b1892ec81b2f8b2ef2d451f0a7e3ba808d2211c045432f767de0d2e03616c7401016e010768756d616e3a6900";
 const CHANGEID: &str = "46bab620a169a77ae758d3fd09f08e44e1eecfa75cbca5ab32d413d3cea4581b";
 const OPS: [&str; 3] = [
@@ -17,6 +20,38 @@ const OPS: [&str; 3] = [
     "01de8f3fcf327eb911b2c368e011e0ffdee22fed456b4f4508337018ba46a0639d07702d58595a3334086465636973696f6e0107732d5041523031016d06046c6973740401030161036d61700501016b0206016e020d046e6f6e6500026f6b0101057469746c6503094f6c64207469746c6509426f647920746578740107726566696e65730107642d41424331320101700107642d41424331326cc8677933df2f583de49ba1c77d836754fe84fe0d16d5d283fdd6bb89ae7d20",
     "02afae16e5c35fafc0bb2c5333310842c4b11e4d3946d9e09df5c194047375d47e07712d44454e3939",
 ];
+
+/// The retired content-1 hash of `b` (domain `rdy-content-1\0`, with the order key; no tracking
+/// fields), recomputed here only to check the historical vector. No production path accepts it.
+fn content_1(b: &Block) -> Hash {
+    #[derive(serde::Serialize)]
+    struct Content1<'a> {
+        id: &'a BlockId,
+        block_type: &'a String,
+        parent: &'a Option<BlockId>,
+        order: &'a String,
+        fields: Vec<(&'a String, &'a FieldValue)>,
+        body: &'a String,
+        links: &'a BTreeMap<String, Vec<Link>>,
+    }
+    let content = Content1 {
+        id: &b.id,
+        block_type: &b.block_type,
+        parent: &b.parent,
+        order: &b.order,
+        fields: b
+            .fields
+            .iter()
+            .filter(|(k, _)| !["status", "decided_at", "lifecycle"].contains(&k.as_str()))
+            .filter(|(k, _)| !rdy_model::engine_fields::is_engine_field(k))
+            .collect(),
+        body: &b.body,
+        links: &b.links,
+    };
+    let mut bytes = b"rdy-content-1\0".to_vec();
+    bytes.extend(enc(&content));
+    Hash::of(&bytes)
+}
 
 fn unhex(s: &str) -> Vec<u8> {
     (0..s.len())
@@ -136,7 +171,12 @@ fn rdx1_old_objects_keep_their_bytes_and_hashes() {
     assert_eq!(decoded.read_identity, None);
     assert_eq!(enc(&decoded), block_bytes, "a block gained or lost a byte");
     assert_eq!(decoded.version_hash().to_string(), BLOCKV);
-    assert_eq!(decoded.content_hash().to_string(), BLOCKC);
+    assert_eq!(decoded.content_hash().to_string(), BLOCKC2);
+    assert_eq!(
+        content_1(&decoded).to_string(),
+        BLOCKC,
+        "the historical vector"
+    );
     assert_eq!(decoded.version_hash(), hash_of(&decoded));
 
     let change_bytes = unhex(CHANGE);

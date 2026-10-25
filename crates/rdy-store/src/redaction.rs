@@ -823,6 +823,11 @@ pub(crate) fn residue_names(r: &RedactionResidue, kind: u8, h: &Hash) -> bool {
 /// preparation and apply (`check_spans`) and the open's authorization bootstrap, so no path
 /// accepts a residue that would replay other history than the original. A payload that does not
 /// decode, or is not its record's canonical encoding, has no residue.
+///
+/// A block residue's content hash is the one recorded when the residue was made, under the
+/// content encoding of that rdy (an older residue holds a content-1 hash, which kept the order
+/// key). It is kept as recorded and never derived again, so it is not compared here; every other
+/// fact is.
 pub(crate) fn residue_matches(kind: u8, payload: &[u8], r: &RedactionResidue) -> bool {
     // the frame's body, by its encoding (`crate::codec`): the residue derives from it
     let Ok(o) = crate::codec::split(kind, payload) else {
@@ -830,7 +835,14 @@ pub(crate) fn residue_matches(kind: u8, payload: &[u8], r: &RedactionResidue) ->
     };
     match (o.kind, r) {
         (kinds::BLOCK, RedactionResidue::Block(res)) => crate::codec::decode_split::<Block>(&o)
-            .is_ok_and(|b| encode(&b) == o.body && *res == BlockResidue::of(&b)),
+            .is_ok_and(|b| {
+                encode(&b) == o.body
+                    && *res
+                        == BlockResidue {
+                            content_hash: res.content_hash,
+                            ..BlockResidue::of(&b)
+                        }
+            }),
         (kinds::CHANGE, RedactionResidue::Change(res)) => crate::codec::decode_split::<Change>(&o)
             .is_ok_and(|c| encode(&c) == o.body && *res == ChangeResidue::of(&c)),
         _ => false,

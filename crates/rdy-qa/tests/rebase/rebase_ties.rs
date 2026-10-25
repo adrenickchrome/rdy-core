@@ -9,11 +9,10 @@
 //! `before` inside a tie uses the write's fallback: it re-keys the smaller side of the tied run.
 //! Known cost: the fallback writes siblings the agent did not touch, so another view's edit of a
 //! re-keyed sibling conflicts when both land
-//! (`sg2_an_insert_into_a_tie_conflicts_with_a_concurrent_edit_of_the_re_keyed_sibling` pins it);
-//! and since `order` is part of a block's content hash, a pin on a re-keyed sibling goes stale.
+//! (`sg2_an_insert_into_a_tie_conflicts_with_a_concurrent_edit_of_the_re_keyed_sibling` pins it).
 //! In a stable doc, an unjustified insert also opens `unjustified_change` on the re-keyed sibling.
-//! The M3 intake item "Order-key ties and the content hash" (leave `order` out of the content
-//! hash at the next store format change, then re-key at landing) removes the cost.
+//! A block's content hash leaves out its order key, so a pin on a re-keyed sibling stays current
+//! (`ok2_an_insert_into_a_tie_keeps_the_re_keyed_siblings_pin` pins it).
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed, TestRunner};
 use rdy_engine::*;
@@ -789,10 +788,9 @@ fn sg2_an_insert_into_a_tie_does_not_re_key_a_conflicted_sibling() {
 }
 
 #[test]
-fn sg2_an_insert_into_a_tie_makes_a_pin_on_the_re_keyed_sibling_suspect() {
-    // The second known cost of the fallback: `order` is part of the content hash a pin records,
-    // so a block that cites the re-keyed sibling turns suspect of it (the M3 intake item
-    // "Order-key ties and the content hash" removes this).
+fn ok2_an_insert_into_a_tie_keeps_the_re_keyed_siblings_pin() {
+    // The fallback re-keys a sibling the agent did not touch. The content hash a pin records
+    // leaves out the order key, so a block that cites the re-keyed sibling stays current.
     let (_d, mut r, section, ids) = tied_run(2);
     let (x, y) = (ids[1].clone(), ids[2].clone());
     let w = write_as(
@@ -824,7 +822,11 @@ fn sg2_an_insert_into_a_tie_makes_a_pin_on_the_re_keyed_sibling_suspect() {
         version_of(&r, &canon(), &y),
         "the insert after {x} re-keyed {y}"
     );
-    assert_eq!(suspects(&r, "c"), vec![(citer, y)]);
+    assert_eq!(
+        suspects(&r, "c"),
+        vec![],
+        "order alone makes nothing suspect: {citer} keeps its pin on {y}"
+    );
 }
 
 #[test]
