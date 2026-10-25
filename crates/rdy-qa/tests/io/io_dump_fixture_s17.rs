@@ -23,7 +23,7 @@
 //! the plan facts: every PLAN record and every row of the four plan tables. A later store format
 //! adds kinds and refs, never re-encodes (D-F0904): a load then appends one upgrade batch after the
 //! source log or the carried batch, and the checks allow exactly that batch.
-use crate::io_dump_fixture_s15::fixture;
+use crate::io_dump_fixture_s15::{first_start_logs_moves, fixture, without_moves};
 use rdy_engine::Rdy;
 use rdy_engine::dump_stop::DumpStop;
 use rdy_engine::load::{LoadSummary, load_chain};
@@ -758,8 +758,11 @@ fn check_store(got: &Value, want: &Value, upgrade: u64, what: &str) {
         assert_eq!(got[member], want[member], "{what}: {member}");
     }
     for member in ["refs", "objects", "landings", "signatures", "fsck"] {
+        // the fsck's unlogged move count is analysis, checked by the first writable start
+        // (`first_start_logs_moves`)
         assert_eq!(
-            got["facts"][member], want["facts"][member],
+            without_moves(&got["facts"][member]),
+            without_moves(&want["facts"][member]),
             "{what}: {member}"
         );
     }
@@ -966,6 +969,11 @@ fn cp3_format17_project_and_holder_load_with_every_hash() {
             tables,
             "{what}: a reindex rebuilds every table"
         );
+        // the first writable start logs the moves content-2 leaves, then the logged invariant
+        // holds
+        r.close().unwrap();
+        first_start_logs_moves(&to, input.holder, what);
+        let r = open(&to, input.holder);
         if input.holder {
             r.fsck().unwrap();
             r.close().unwrap();

@@ -307,7 +307,8 @@ fn rdx9_all_released_dump_pairs_still_load() {
             (1, DumpStore::Legacy(store_format)),
             "{name}"
         );
-        assert_eq!(s.fsck.unlogged_moves, 0, "{name}");
+        // the load's unlogged moves are analysis: the first writable start logs exactly them
+        let unlogged = s.fsck.unlogged_moves;
         let (mut rd, _, _) = DumpReader::open(std::fs::File::open(fixture(name)).unwrap()).unwrap();
         let r = Rdy::open(&dir).unwrap();
         let mut n = 0;
@@ -338,6 +339,11 @@ fn rdx9_all_released_dump_pairs_still_load() {
         );
         r.fsck().unwrap();
         r.close().unwrap();
+        assert_eq!(
+            crate::io_dump_fixture_s15::first_start_logs_moves(&dir, false, name),
+            unlogged,
+            "{name}"
+        );
         rdy_qa::reindex_check::reindex_reproduces(&dir)
             .unwrap_or_else(|v| panic!("{name}: {v:#?}"));
     }

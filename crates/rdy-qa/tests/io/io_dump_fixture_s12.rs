@@ -234,6 +234,8 @@ fn ec13_the_v1_s12_fixture_loads_with_every_hash() {
     // the reindex check opens the project itself, so the store lock is released first
     drop(reader);
     r.close().unwrap();
+    // the first writable start logs the moves content-2 leaves, then the logged invariant holds
+    crate::io_dump_fixture_s15::first_start_logs_moves(&dir, false, "v1-s12");
     rdy_qa::reindex_check::reindex_reproduces(&dir).unwrap_or_else(|v| panic!("{v:#?}"));
 }
 

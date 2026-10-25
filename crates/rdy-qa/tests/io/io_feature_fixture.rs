@@ -21,7 +21,9 @@
 //! no batch of its own. A future dump format, newly registered feature or new latest encoding
 //! needs a new complete set in its own task; [`ok1_written_wire_format_has_a_complete_fixture_set`]
 //! refuses a written format without one.
-use crate::io_dump_fixture_s15::{RELEASED, RELEASED_CHAINS, fixture};
+use crate::io_dump_fixture_s15::{
+    RELEASED, RELEASED_CHAINS, first_start_logs_moves, fixture, without_moves,
+};
 use crate::io_dump_fixture_s18 as s18;
 use crate::io_sync_fixture::{SYNC_TAG, stream_facts, sync_fixture, take_split};
 use rdy_engine::Rdy;
@@ -457,7 +459,13 @@ fn ok1_complete_feature_fixture_set_loads() {
         );
         drop(w);
         let got = s18::whole_facts_of(&s, &files, &to, input.holder);
-        assert_eq!(got, expect["whole"], "{what}: the whole load");
+        // the set was written before content-2: its unlogged move count is analysis, which the
+        // first writable start logs (`first_start_logs_moves`)
+        assert_eq!(
+            without_moves(&got),
+            without_moves(&expect["whole"]),
+            "{what}: the whole load"
+        );
         nothing_after(&to, s18::chain_end(&files), input.holder, what);
         for c in input.canaries {
             assert!(
@@ -490,6 +498,9 @@ fn ok1_complete_feature_fixture_set_loads() {
             "{what}: a reindex rebuilds every table"
         );
         r.fsck().unwrap();
+        r.close().unwrap();
+        first_start_logs_moves(&to, input.holder, what);
+        let r = s18::open(&to, input.holder);
         if input.holder {
             r.close().unwrap();
         } else {
@@ -501,7 +512,11 @@ fn ok1_complete_feature_fixture_set_loads() {
         if files.len() > 1 {
             let to = d.path().join(format!("{what}-alone"));
             let got = s18::whole_facts(&files[..1], &to, input.holder);
-            assert_eq!(got, expect["full_alone"], "{what}: the full dump alone");
+            assert_eq!(
+                without_moves(&got),
+                without_moves(&expect["full_alone"]),
+                "{what}: the full dump alone"
+            );
             nothing_after(&to, s18::chain_end(&files[..1]), input.holder, what);
         }
         // each fixed stop: its position, its carried batch byte for byte, and its facts
@@ -527,7 +542,7 @@ fn ok1_complete_feature_fixture_set_loads() {
                 assert!(!s18::holds(&to, c), "{what}");
             }
             let got = s18::stop_facts_of(&s, selector, &to, input.holder, None);
-            assert_eq!(got, *want, "{what}");
+            assert_eq!(without_moves(&got), without_moves(want), "{what}");
             let r = s18::open(&to, input.holder);
             r.fsck().unwrap();
             r.close().unwrap();

@@ -380,6 +380,88 @@ fn tail(r: &Rdy, from: Location) -> Vec<(u8, Vec<u8>)> {
     out
 }
 
+/// `v` (store facts, or any part of them) without each fsck's `unlogged_moves` count: the
+/// historical facts of a released fixture, which content-2 does not change (D-69AY3). The count
+/// is analysis: under content-2 (D-TX3KH, D-XTPJE) a store an older rdy wrote has moves left for
+/// its first writable start, which [`first_start_logs_moves`] checks apart.
+pub(crate) fn without_moves(v: &Value) -> Value {
+    match v {
+        Value::Object(m) => Value::Object(
+            m.iter()
+                .filter(|(k, _)| k.as_str() != "unlogged_moves")
+                .map(|(k, x)| (k.clone(), without_moves(x)))
+                .collect(),
+        ),
+        Value::Array(a) => Value::Array(a.iter().map(without_moves).collect()),
+        x => x.clone(),
+    }
+}
+
+/// The first writable start of the store loaded at `dir` (a holder when `holder`): it logs
+/// exactly the moves fsck counts as unlogged, as one batch of one TRANSITION record whose every
+/// move has cause `reopened`, and a second start logs nothing and leaves fsck with no unlogged
+/// move. Returns the count. The logged invariant holds only after it (D-XTPJE: the first daemon
+/// start logs one reopened batch).
+pub(crate) fn first_start_logs_moves(dir: &Path, holder: bool, what: &str) -> usize {
+    use rdy_store::transition::Cause;
+    let open = || {
+        if holder {
+            Rdy::open_holder(dir).unwrap()
+        } else {
+            Rdy::open(dir).unwrap()
+        }
+    };
+    let mut r = open();
+    let n = r.fsck().unwrap().unlogged_moves;
+    let at = r.store().log_end();
+    assert_eq!(
+        r.reconcile_transitions().unwrap(),
+        n,
+        "{what}: the first start logs every unlogged move"
+    );
+    if n > 0 {
+        let batch = r.store().last_batch().to_vec();
+        assert_eq!(batch.len(), 1, "{what}: one record in one batch: {batch:?}");
+        assert_eq!(batch[0].0, kinds::TRANSITION, "{what}");
+        assert!(r.store().log_end() > at, "{what}");
+        let rec = r.read().reader().transitions(&batch[0].1).unwrap();
+        let causes: Vec<Cause> = rec
+            .opened
+            .iter()
+            .chain(&rec.resolved)
+            .map(|m| m.why.cause)
+            .chain(rec.new.iter().chain(&rec.gone).map(|m| m.why.cause))
+            .collect();
+        assert_eq!(causes.len(), n, "{what}: {rec:?}");
+        assert!(
+            causes.iter().all(|c| *c == Cause::Reopened),
+            "{what}: every move is reopened: {rec:?}"
+        );
+    } else {
+        assert_eq!(
+            r.store().log_end(),
+            at,
+            "{what}: nothing to log, nothing written"
+        );
+    }
+    r.close().unwrap();
+    let mut r = open();
+    let after = r.store().log_end();
+    assert_eq!(
+        r.reconcile_transitions().unwrap(),
+        0,
+        "{what}: a second start"
+    );
+    assert_eq!(
+        r.store().log_end(),
+        after,
+        "{what}: a second start writes nothing"
+    );
+    assert_eq!(r.fsck().unwrap().unlogged_moves, 0, "{what}");
+    r.close().unwrap();
+    n
+}
+
 /// Past a fixture's log end (a fixture of store format `fixture_format`, which holds its repo
 /// id), a load holds only the upgrade batch to a feature store, which holds
 /// `meta/store_features` alone: the baseline features. Returns the number of data frames past
@@ -517,7 +599,13 @@ fn load_and_check(dump: &str, expect: &Value, holder: bool) -> (Rdy, tempfile::T
     for member in ["frames", "checked_payloads"] {
         want_fsck[member] = json!(want_fsck[member].as_u64().unwrap() + upgrade);
     }
-    assert_eq!(got["fsck"], want_fsck, "{dump}: fsck counts");
+    // the unlogged move count is analysis, which the first writable start logs
+    // (`first_start_logs_moves`)
+    assert_eq!(
+        without_moves(&got["fsck"]),
+        without_moves(&want_fsck),
+        "{dump}: fsck counts"
+    );
     (r, to)
 }
 
@@ -558,6 +646,10 @@ fn ha17_new_pair_loads_every_kind_and_holder_ref() {
     assert!(refs.contains_key(REF_ORIGIN));
     assert_eq!(expect["signatures"].as_object().unwrap().len(), 3);
     assert!(expect["redaction"]["dropped"].as_array().unwrap().len() > 1);
+    // the first writable start logs the moves content-2 leaves, then the logged invariant holds
+    r.close().unwrap();
+    first_start_logs_moves(&to.path().join("p"), false, DUMP);
+    let r = Rdy::open(&to.path().join("p")).unwrap();
     rdy_qa::invariants::check_all(&r).unwrap_or_else(|v| panic!("{v:#?}"));
     r.close().unwrap();
     rdy_qa::reindex_check::reindex_reproduces(&to.path().join("p"))
@@ -1059,8 +1151,15 @@ fn check_loaded(
         !tail.is_empty() && store_format <= rdy_store::format::LAST_SCALAR_STORE_FORMAT,
         "{what}: an upgrade batch for every scalar store format"
     );
-    let facts = every_kind::facts(&r);
-    assert_eq!(facts["fsck"]["unlogged_moves"], 0, "{what}");
+    // the unlogged moves are analysis: the first writable start logs them, then the logged
+    // invariant holds
+    r.close().unwrap();
+    first_start_logs_moves(dir, holder, what);
+    let r = if holder {
+        Rdy::open_holder(dir).unwrap()
+    } else {
+        Rdy::open(dir).unwrap()
+    };
     if holder {
         r.fsck().unwrap();
         r.close().unwrap();

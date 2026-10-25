@@ -487,7 +487,17 @@ fn sig10_the_v2_s14_fixture_loads_with_every_hash() {
     for member in ["frames", "checked_payloads"] {
         want_fsck[member] = json!(want_fsck[member].as_u64().unwrap() + upgrade);
     }
-    assert_eq!(got["fsck"], want_fsck, "fsck counts");
+    // the unlogged move count is analysis: the first writable start logs it, then the logged
+    // invariant holds
+    use crate::io_dump_fixture_s15::{first_start_logs_moves, without_moves};
+    assert_eq!(
+        without_moves(&got["fsck"]),
+        without_moves(&want_fsck),
+        "fsck counts"
+    );
+    r.close().unwrap();
+    first_start_logs_moves(&dir, false, "v2-s14");
+    let r = Rdy::open(&dir).unwrap();
     rdy_qa::invariants::check_all(&r).unwrap_or_else(|v| panic!("{v:#?}"));
     r.close().unwrap();
     // the reindex check opens the project itself, so the store lock is released first
@@ -935,7 +945,11 @@ fn sig10_all_released_pairs_stay_readable() {
         // no signature exists, and the store checks as one of the current format
         let facts = every_kind::facts(&r);
         assert_eq!(facts["signatures"], json!({}), "{}", f.dump);
-        assert_eq!(facts["fsck"]["unlogged_moves"], 0, "{}", f.dump);
+        // the unlogged moves are analysis: the first writable start logs them, then the logged
+        // invariant holds
+        r.close().unwrap();
+        crate::io_dump_fixture_s15::first_start_logs_moves(&dir, false, f.dump);
+        let r = Rdy::open(&dir).unwrap();
         rdy_qa::invariants::check_all(&r).unwrap_or_else(|v| panic!("{}: {v:#?}", f.dump));
         r.close().unwrap();
         rdy_qa::reindex_check::reindex_reproduces(&dir)

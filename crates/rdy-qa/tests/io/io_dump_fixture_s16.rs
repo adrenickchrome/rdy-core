@@ -26,7 +26,7 @@
 //! and each fixed stop's position, warnings and appended carried batch, byte for byte. A later
 //! store format adds kinds and refs, never re-encodes (D-F0904): a load then appends one upgrade
 //! batch after the source log or the carried batch, and the tests allow exactly that batch.
-use crate::io_dump_fixture_s15::fixture;
+use crate::io_dump_fixture_s15::{first_start_logs_moves, fixture, without_moves};
 use rdy_engine::dump_stop::DumpStop;
 use rdy_engine::load::{LoadSummary, load_chain};
 use rdy_engine::{Rdy, RdyError, WriteRequest};
@@ -695,8 +695,11 @@ fn check_store(got: &Value, want: &Value, upgrade: u64, what: &str) {
         assert_eq!(got[member], want[member], "{what}: {member}");
     }
     for member in ["refs", "objects", "landings", "signatures", "fsck"] {
+        // the fsck's unlogged move count is analysis, checked by the first writable start
+        // (`first_start_logs_moves`)
         assert_eq!(
-            got["facts"][member], want["facts"][member],
+            without_moves(&got["facts"][member]),
+            without_moves(&want["facts"][member]),
             "{what}: {member}"
         );
     }
@@ -841,6 +844,11 @@ fn hc9_full_and_three_file_chains_load_whole() {
             }
         }
         assert_eq!(json!(frames), expect_frames(&expect), "{what}");
+        // the first writable start logs the moves content-2 leaves, then the logged invariant
+        // holds
+        r.close().unwrap();
+        first_start_logs_moves(&to, input.holder, what);
+        let r = open(&to, input.holder);
         if input.holder {
             r.fsck().unwrap();
             r.close().unwrap();
@@ -1112,13 +1120,17 @@ fn hc9_stopped_fixtures_redump_reload_and_reindex() {
             let again = d.path().join(format!("{}-{name}.rdydump", input.expect));
             r.read().dump(&again).unwrap();
             r.close().unwrap();
-            if !input.holder {
-                rdy_qa::reindex_check::reindex_reproduces(&a).unwrap_or_else(|v| panic!("{v:#?}"));
-            }
             let b = d.path().join(format!("{}-{name}-b", input.expect));
             let s = chain_load(std::slice::from_ref(&again), &b, None);
             assert!(s.warnings.is_empty(), "{what}: {:?}", s.warnings);
             assert_eq!(segs(&b), segs(&a), "{what}: the same log");
+            // the first writable start of each logs the moves content-2 leaves, then the logged
+            // invariant holds
+            let n = first_start_logs_moves(&a, input.holder, &what);
+            assert_eq!(first_start_logs_moves(&b, input.holder, &what), n, "{what}");
+            if !input.holder {
+                rdy_qa::reindex_check::reindex_reproduces(&a).unwrap_or_else(|v| panic!("{v:#?}"));
+            }
             // a later write of the store's own mode
             let mut r = open(&b, input.holder);
             if input.holder {
@@ -1576,6 +1588,8 @@ fn hc9_invariants_accept_a_carried_removal_whose_request_is_not_held() {
         &to,
         Some(want["selector"].as_str().unwrap()),
     );
+    // the first writable start logs the moves content-2 leaves
+    first_start_logs_moves(&to, false, "held_stop");
     let carried = tail_carried(&want);
     let request: Hash = carried[1]["record"]["request"]
         .as_str()
