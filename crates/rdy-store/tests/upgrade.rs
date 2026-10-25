@@ -1448,6 +1448,61 @@ fn ok5_backup_never_follows_a_substituted_path() {
 }
 
 #[test]
+fn ok5_backup_copy_directory_is_never_substituted() {
+    let _f = known();
+    // at the first copy, the backup's copy directory is moved away, and a link to an empty
+    // directory, or another empty directory, takes its name: the copy goes on through its
+    // handle, so backup.json would describe files that are not at the backup's path
+    for by_link in [true, false] {
+        let base = tempfile::tempdir().unwrap();
+        let dir = project(base.path());
+        let old_segments = segments(&dir);
+        let backup = base
+            .path()
+            .join(".rdy")
+            .join(backup_name(&baseline_features(), terminal(&dir)));
+        let empty = tempfile::tempdir().unwrap();
+        let swap = {
+            let (copy, moved, empty) = (
+                backup.join("store"),
+                base.path().join("moved"),
+                empty.path().to_path_buf(),
+            );
+            let mut done = false;
+            move |p: Phase<'_>| {
+                if let Phase::Copy(_) = p
+                    && !done
+                {
+                    done = true;
+                    std::fs::rename(&copy, &moved)?;
+                    if by_link {
+                        std::os::unix::fs::symlink(&empty, &copy)?;
+                    } else {
+                        std::fs::create_dir(&copy)?;
+                        set_mode(&copy, 0o700);
+                    }
+                }
+                Ok(())
+            }
+        };
+        let e = with_hook_for_tests(swap, || upgrade(&dir)).unwrap_err();
+        assert_eq!(
+            upgrade_error(e),
+            (UpgradeFailure::BackupMismatch, Some(backup.clone())),
+            "by link: {by_link}"
+        );
+        assert!(names(empty.path()).is_empty(), "by link: {by_link}");
+        assert!(
+            names(&backup.join("store")).is_empty(),
+            "by link: {by_link}"
+        );
+        assert_eq!(segments(&dir), old_segments, "nothing is appended");
+        assert_eq!(upgrade_batches(&dir), 0);
+        assert!(!inspect_with(&dir, &registry()).unwrap().pending_check);
+    }
+}
+
+#[test]
 fn ok5_reused_backup_refuses_hard_links_and_a_linked_manifest() {
     let _f = known();
     let base = tempfile::tempdir().unwrap();

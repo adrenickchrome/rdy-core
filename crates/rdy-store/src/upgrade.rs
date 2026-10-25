@@ -889,12 +889,30 @@ fn open_made_dir(dir: &File, name: &OsStr) -> Result<File, StoreError> {
 }
 
 /// Whether the backup and the store are still at their paths: the backup's path names the
-/// backup directory this upgrade wrote (`root`), and the store's path the store it copied. A
-/// path that was moved or replaced, by a link or another directory, fails the upgrade before
-/// anything is appended.
-fn in_place(source: &Source<'_>, target: &Target<'_>, root: &File) -> Result<(), StoreError> {
+/// backup directory this upgrade wrote or read (`root`), that directory's [`BACKUP_STORE`]
+/// entry is the copy directory it wrote or read (`copy`), a directory and never a link, and
+/// the store's path names the store it copied. A path or an entry that was moved or replaced,
+/// by a link or another directory, fails the upgrade before anything is appended.
+fn in_place(
+    source: &Source<'_>,
+    target: &Target<'_>,
+    root: &File,
+    copy: &File,
+) -> Result<(), StoreError> {
+    let mismatch = || failed(UpgradeFailure::BackupMismatch, None);
     if FileId::lstat(target.path).ok() != Some(FileId::of_file(root)?) {
-        return Err(failed(UpgradeFailure::BackupMismatch, None));
+        return Err(mismatch());
+    }
+    // the copy is read through the backup's handle, so its entry there is the one checked
+    let entry = match pio::open_dir_at(root, BACKUP_STORE.as_ref()) {
+        Ok(entry) => entry,
+        Err(e) if e.kind() == io::ErrorKind::NotFound || pio::is_link_refusal(&e) => {
+            return Err(mismatch());
+        }
+        Err(e) => return Err(e.into()),
+    };
+    if FileId::of_file(&entry)? != FileId::of_file(copy)? {
+        return Err(mismatch());
     }
     if FileId::lstat(source.dir).ok() != Some(FileId::of_file(&source.handle)?) {
         return Err(moved(None));
@@ -990,7 +1008,7 @@ fn write_backup(
     let json = serde_json::to_vec(&manifest).map_err(|e| StoreError::Decode(e.to_string()))?;
     // backup.json and its temp file stand beside the copy, so no store file can take their name
     fsutil::replace_in_dir(&root, target.path, BACKUP_MANIFEST.as_ref(), &json, None)?;
-    in_place(source, target, &root)?;
+    in_place(source, target, &root, &copy)?;
     target.parent.sync_all()?;
     fsutil::record(target.parent_path);
     Ok(())
@@ -1114,7 +1132,7 @@ fn reuse_backup(
     if held.dirs != expected.dirs || digests != expected.files {
         return Err(mismatch());
     }
-    in_place(source, target, &root)
+    in_place(source, target, &root, &copy)
 }
 
 #[cfg(test)]
