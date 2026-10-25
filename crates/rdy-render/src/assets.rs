@@ -30,23 +30,13 @@ const APP_JS: &[&[u8]] = &[
     theme!("js/sidebar.js"),
 ];
 
-/// The diagram library, written only for a site that has a diagram.
-pub const MERMAID: (&str, &[u8]) = (
-    "assets/js/mermaid.min.js",
-    theme!("vendor/mermaid/mermaid.min.js"),
-);
-
-/// What starts the diagram library, appended to `app.js` only for a site that has a diagram.
-pub const MERMAID_INIT: &[u8] = theme!("js/mermaid-init.js");
-
 /// The text of the inline script that sets the theme before the page paints.
 pub const INIT_JS: &str = include_str!("../theme/rdy-standard/js/init.js");
 
-/// The bytes of `assets/app.js`.
-pub fn app_js(has_mermaid: bool) -> Vec<u8> {
+/// The bytes of `assets/app.js`: the same for every page and every site.
+pub fn app_js() -> Vec<u8> {
     let mut out = vec![];
-    let init: &[&[u8]] = if has_mermaid { &[MERMAID_INIT] } else { &[] };
-    for part in APP_JS.iter().chain(init) {
+    for part in APP_JS {
         out.extend_from_slice(part);
         if !part.is_empty() && !part.ends_with(b"\n") {
             out.push(b'\n');
@@ -55,17 +45,14 @@ pub fn app_js(has_mermaid: bool) -> Vec<u8> {
     out
 }
 
-/// The theme's files by their site-relative paths: the stylesheet, the fonts, the scripts, and
-/// the diagram library when `has_mermaid`.
-pub fn files(has_mermaid: bool) -> Vec<(&'static str, Vec<u8>)> {
+/// The theme's files by their site-relative paths: the stylesheet, the fonts and the scripts.
+/// Diagrams are drawn when the site is built, so the theme has no diagram library.
+pub fn files() -> Vec<(&'static str, Vec<u8>)> {
     let mut out: Vec<(&'static str, Vec<u8>)> = THEME
         .iter()
         .map(|(name, bytes)| (*name, bytes.to_vec()))
         .collect();
-    out.push(("assets/app.js", app_js(has_mermaid)));
-    if has_mermaid {
-        out.push((MERMAID.0, MERMAID.1.to_vec()));
-    }
+    out.push(("assets/app.js", app_js()));
     out
 }
 
@@ -105,6 +92,14 @@ mod tests {
     #[test]
     fn the_theme_lists_the_stylesheet_first_and_the_diagram_library_is_separate() {
         assert_eq!(THEME[0].0, "assets/site.css");
-        assert_eq!(MERMAID.0, "assets/js/mermaid.min.js");
+        // no diagram library: diagrams are drawn when the site is built
+        let files = files();
+        assert_eq!(files[0].0, "assets/site.css");
+        assert!(
+            files
+                .iter()
+                .all(|(path, bytes)| !path.starts_with("assets/js/")
+                    && !String::from_utf8_lossy(bytes).contains("mermaid"))
+        );
     }
 }

@@ -1,11 +1,13 @@
 //! The context of every page, and the one place that calls every module that fills a part of it.
-use crate::html::{self, BlockCtx, Link};
+use crate::html::{self, BlockCtx, DiagramView, Link};
 use crate::inline::{self, Ctx, LocalLink};
 use crate::prepare::{Presentation, ProfilePresentation};
 use crate::publication::LocalTargets;
 use crate::site::{ID_INSIDE, Site, Url, rel};
 use crate::trail::Trail;
-use crate::{Mode, assets, changes, home, nav, review, search, toc, trail, version};
+use crate::{
+    Mode, assets, changes, diagram, diagram_svg, home, nav, review, search, toc, trail, version,
+};
 use rdy_engine::{Materialized, VersionInfo, VersionPosition};
 use rdy_graph::{EdgeKind, GoverningCache, Graph};
 use rdy_model::redaction::CONTENT_REMOVED;
@@ -13,7 +15,7 @@ use rdy_model::{Block, BlockId, Hash, decision, tree};
 use rdy_schema::Pack;
 use serde::Serialize;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// What a render reads, whichever page it builds.
 pub struct Shared<'a> {
@@ -51,6 +53,12 @@ pub struct Shared<'a> {
     /// The blobs some page links to, by the site-relative path of their file, with the media
     /// type of the first block that named that file, filled as pages are built.
     pub used_blobs: RefCell<BTreeMap<String, (Hash, String)>>,
+    /// Whether the pages draw their Mermaid diagrams: a site's do; the print shows each diagram as
+    /// its source and makes no file or warning of it.
+    pub draw_diagrams: bool,
+    /// The diagrams the build's pages drew, and the warnings of those it could not draw, filled
+    /// as the pages are built (one thread builds them, before their templates are rendered).
+    pub diagrams: RefCell<DiagramAssets>,
     /// The governing route query's entity scans, shared by every trail read from `g`: an entity
     /// that many blocks describe is scanned once per render. It belongs to `g` alone.
     pub governing: RefCell<GoverningCache>,
@@ -318,7 +326,6 @@ pub struct PageContext {
     pub toc: toc::Toc,
     pub pager: Pager,
     pub search_href: String,
-    pub has_mermaid: bool,
     pub has_terms: bool,
     pub has_questions: bool,
     /// A review render with marks, which offers Show changes and Show diff (sr7).
@@ -350,6 +357,91 @@ pub enum Kind<'a> {
     ChangesSince(&'a changes::Summary),
 }
 
+/// The generated diagram files of one build (D-FY4VF, D-KAGB2, D-E8P8J): each drawing once, by
+/// the hash of its standalone bytes, and the build's diagram warnings in the order the pages and
+/// their blocks were built. It belongs to one build; nothing outlives it.
+#[derive(Default)]
+pub struct DiagramAssets {
+    /// Each resolved source drawn so far: the hash of its standalone file, or why it draws none.
+    drawn: HashMap<String, Result<Hash, diagram::Diagram>>,
+    /// The standalone SVG of each drawing, by the hash of its bytes.
+    standalone: BTreeMap<Hash, String>,
+    /// The drawings some page shows: the files the build writes.
+    used: BTreeSet<Hash>,
+    /// The blocks that warned: a block warns once per build.
+    warned: BTreeSet<BlockId>,
+    /// The warnings, one per block that does not draw, in page and block order.
+    pub warnings: Vec<String>,
+}
+
+impl DiagramAssets {
+    /// The site-relative path of the file of the drawing whose standalone bytes hash to `h`.
+    pub fn path(h: &Hash) -> String {
+        format!("assets/diagrams/{h}.svg")
+    }
+
+    /// The files of the drawings some page shows, by path, with their bytes.
+    pub fn files(&self) -> Vec<(String, Vec<u8>)> {
+        self.used
+            .iter()
+            .filter_map(|h| {
+                let svg = self.standalone.get(h)?;
+                Some((Self::path(h), svg.as_bytes().to_vec()))
+            })
+            .collect()
+    }
+
+    /// What `source` (a Mermaid diagram's resolved plain source) draws: the hash of its
+    /// standalone file, else why it draws none. Each source is drawn once per build.
+    fn draw(&mut self, source: &str) -> Result<Hash, diagram::Diagram> {
+        if let Some(d) = self.drawn.get(source) {
+            return d.clone();
+        }
+        let drawn = match diagram::render(source) {
+            diagram::Diagram::Svg(svg) => match diagram_svg::standalone(&svg) {
+                Ok(file) => {
+                    let h = Hash::of(file.as_bytes());
+                    self.standalone.entry(h).or_insert(file);
+                    Ok(h)
+                }
+                Err(reason) => Err(diagram::Diagram::Failed {
+                    reason: reason.to_string(),
+                }),
+            },
+            other => Err(other),
+        };
+        self.drawn.insert(source.to_string(), drawn.clone());
+        drawn
+    }
+
+    /// The inline copy of drawing `h` for its `place` on a page (its places counted from zero).
+    fn inline(&self, h: &Hash, place: usize) -> Result<String, &'static str> {
+        let file = self.standalone.get(h).ok_or(diagram_svg::BAD_IDS)?;
+        diagram_svg::inline(file, &h.to_string(), place)
+    }
+
+    /// Records the warning of block `id` of the doc titled `doc`, which draws `why`: once per
+    /// block per build.
+    fn warn(&mut self, doc: &str, id: &BlockId, why: &diagram::Diagram) {
+        if !self.warned.insert(id.clone()) {
+            return;
+        }
+        let words = match why {
+            diagram::Diagram::Invalid { reason } => {
+                format!("the Mermaid diagram does not parse: {reason}")
+            }
+            diagram::Diagram::Unsupported { header } => {
+                format!("rdy does not draw {header} diagrams, so it shows the source")
+            }
+            diagram::Diagram::Failed { reason } => {
+                format!("rdy could not draw the diagram: {reason}, so it shows the source")
+            }
+            diagram::Diagram::Svg(_) => return,
+        };
+        self.warnings.push(format!("{doc} ({id}): {words}"));
+    }
+}
+
 /// What a page writes in place of a removed block, whatever its type (D-3M81W): the notice and
 /// nothing of the block's text, fields, links, file, reason or redaction.
 pub const REMOVED_HTML: &str = "<p class=\"redacted\">Content removed.</p>";
@@ -368,6 +460,50 @@ fn kind_word(block_type: &str) -> &'static str {
 }
 
 impl Shared<'_> {
+    /// How the page at `page` shows diagram `b` of the doc titled `doc`, whose resolved plain
+    /// source is `source`. `places` counts each drawing's places on the page so far, so that two
+    /// identical diagrams on one page have their own ids. A Mermaid source that does not draw
+    /// warns, once per block per build, and shows its source; any other language shows its
+    /// source and does not warn. The print shows every diagram as its source.
+    fn diagram_view(
+        &self,
+        b: &Block,
+        source: &str,
+        doc: &str,
+        page: &str,
+        places: &RefCell<BTreeMap<Hash, usize>>,
+    ) -> DiagramView {
+        if !self.draw_diagrams {
+            return DiagramView::Source;
+        }
+        if b.field_str("lang") != Some("mermaid") {
+            return DiagramView::Fallback;
+        }
+        let mut d = self.diagrams.borrow_mut();
+        let failed = match d.draw(source) {
+            Ok(h) => {
+                let mut places = places.borrow_mut();
+                let place = places.entry(h).or_default();
+                match d.inline(&h, *place) {
+                    Ok(svg) => {
+                        *place += 1;
+                        d.used.insert(h);
+                        return DiagramView::Drawn {
+                            svg,
+                            href: rel(page, &DiagramAssets::path(&h)),
+                        };
+                    }
+                    Err(reason) => diagram::Diagram::Failed {
+                        reason: reason.to_string(),
+                    },
+                }
+            }
+            Err(why) => why,
+        };
+        d.warn(doc, &b.id, &failed);
+        DiagramView::Fallback
+    }
+
     /// Whether `b` reads as removed content: a removed block (a stub), or a figure whose blob a
     /// redaction removed content of (a block of another side than the scope's, such as a draft's
     /// removed line, is not projected). Its page shows [`REMOVED_HTML`] in its place.
@@ -730,7 +866,6 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
     };
     let mut body = Body::default();
     let mut items = vec![];
-    let mut has_mermaid = false;
     let mut pager = Pager::default();
     match &kind {
         Kind::Home => {
@@ -784,10 +919,9 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         }
         Kind::Doc(id) => {
             let doc = sh.m.get(id).expect("a doc exists");
-            let (doc_body, built, mermaid) = doc_parts(sh, doc, &page_url, &title);
+            let (doc_body, built) = doc_parts(sh, doc, &page_url, &title);
             body.doc = Some(doc_body);
             items = built;
-            has_mermaid = mermaid;
             let (prev, next) = site.prev_next(id);
             let link = |id: Option<BlockId>| {
                 let b = sh.m.get(&id?)?;
@@ -852,7 +986,6 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         },
         pager,
         search_href: rel(&page_url, "search-index.json"),
-        has_mermaid,
         has_terms,
         has_questions,
         reviewing: sh.review.is_some(),
@@ -896,8 +1029,9 @@ pub fn finish(sh: &Shared, ctx: &PageContext, index: &mut search::Index) {
     }
 }
 
-/// The doc's own part of the context, its blocks as items and whether one is a Mermaid diagram.
-fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec<Item>, bool) {
+/// The doc's own part of the context and its blocks as items. Its diagrams are drawn here, in
+/// block order, before any template is rendered.
+fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec<Item>) {
     let (m, site) = (sh.m, sh.site);
     let link = |id: &BlockId| sh.link(page, id);
     let local = |h: &str| sh.local_href(page, h);
@@ -924,7 +1058,10 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
         lede_diff: lede_block.and_then(|l| edited_diff(sh, &l.id)),
         removed_end: vec![],
     };
-    let (mut items, mut has_mermaid) = (vec![], false);
+    let mut items = vec![];
+    // each drawing's places on this page
+    let places = RefCell::new(BTreeMap::new());
+    let diagram = |b: &Block, source: &str| sh.diagram_view(b, source, title, page, &places);
     let mut stack: Vec<(&Block, usize)> = m
         .children(Some(&doc.id))
         .into_iter()
@@ -944,9 +1081,6 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
         // publication profile, removed or not, is administrative and off every output
         if crate::site::is_off_site(b) || crate::site::is_profile(b) {
             continue;
-        }
-        if b.block_type == "diagram" && b.field_str("lang") == Some("mermaid") {
-            has_mermaid = true;
         }
         let anchor = site.anchors.get(&b.id).cloned().unwrap_or_default();
         let described_by: Vec<Link> =
@@ -978,6 +1112,7 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
             described_by: &described_by,
             unavailable: sh.unavailable,
             local_link: sh.local_link(&local),
+            diagram: &diagram,
         };
         let (ref_head, ref_) = trail::ref_attrs(b, site, sh.pin(), m);
         let presentational = sh.pack.is_presentational(&b.block_type);
@@ -1049,7 +1184,7 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
             None => doc_body.removed_end.push(html),
         }
     }
-    (doc_body, items, has_mermaid)
+    (doc_body, items)
 }
 
 /// A doc's lede: its first child when it is a prose of one paragraph (content directly in the
@@ -1119,6 +1254,8 @@ fn removed_html(sh: &Shared, blocks: &[Block], page: &str) -> String {
         described_by: &[],
         unavailable: sh.unavailable,
         local_link: sh.local_link(&local),
+        // a removed line draws nothing: its diagram reads as its old source below
+        diagram: &|_, _| DiagramView::Source,
     };
     let mut out = String::new();
     for b in blocks {

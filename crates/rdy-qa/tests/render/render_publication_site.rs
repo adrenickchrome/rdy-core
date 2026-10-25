@@ -707,16 +707,30 @@ fn pub6_reference_words_are_uniform_across_surfaces() {
         assert!(!holding(&s, &label).is_empty(), "{label}");
     }
     assert_absent_pages(&s, "Python code 2");
-    // the drawn canvas and the readable source read the same words
+    // the drawing, its file and the readable source read the same selected words
+    let at = refs.find("<span class=\"diagram-svg\"").expect("a drawing");
+    let drawn = &refs[at..];
+    let drawn = &drawn[..drawn.find("</svg>").unwrap()];
     assert!(
-        refs.contains(&format!("<pre class=\"mermaid\">graph TD\n  A[{u}]")),
-        "{refs}"
+        drawn.contains(&format!(">{u}<")) && drawn.contains(">Diagram display<"),
+        "{drawn}"
     );
-    // the canvas, the readable source and the copied reference's words
+    let files: Vec<&String> = s
+        .files
+        .keys()
+        .filter(|p| p.starts_with("assets/diagrams/"))
+        .collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    let file = page(&s, files[0]);
+    assert!(file.contains(&format!(">{u}<")) && file.contains(">Diagram display<"));
+    assert!(refs.contains(&format!(
+        "<pre class=\"code\"><code>graph TD\n  A[{u}] --&gt; B[Diagram display]</code>"
+    )));
+    // the readable source and the copied reference's words
     assert_eq!(
         refs.matches(&format!("A[{u}] --&gt; B[Diagram display]"))
             .count(),
-        3
+        2
     );
     assert!(page(&s, "glossary.html").contains(&format!("Defined via {u}.")));
     assert!(page(&s, "questions.html").contains(&format!("Ask about {u}?")));

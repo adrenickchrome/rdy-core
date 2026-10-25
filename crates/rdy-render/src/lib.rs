@@ -846,7 +846,8 @@ fn bad_manifest() -> RdyError {
     )
 }
 
-/// The media type of the generated file at `path`, by its extension.
+/// The media type of the generated file at `path`, by its extension. An SVG is generated only
+/// as a drawn diagram's file: `assets/diagrams/` and the 64 lowercase hex digits of its hash.
 fn generated_media_type(path: &str) -> Result<&'static str, RdyError> {
     let ext = path.rsplit_once('.').map(|(_, e)| e);
     Ok(match ext {
@@ -856,8 +857,16 @@ fn generated_media_type(path: &str) -> Result<&'static str, RdyError> {
         Some("css") => "text/css",
         Some("js") => "application/javascript",
         Some("woff2") => "font/woff2",
+        Some("svg") if is_diagram_file(path) => "image/svg+xml",
         _ => return Err(bad_manifest()),
     })
+}
+
+/// Whether `path` is a drawn diagram's file: `assets/diagrams/<64 lowercase hex>.svg`.
+fn is_diagram_file(path: &str) -> bool {
+    path.strip_prefix("assets/diagrams/")
+        .and_then(|name| name.strip_suffix(".svg"))
+        .is_some_and(|h| h.len() == 64 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
 }
 
 /// A media type without its parameters (`image/svg+xml; charset=utf-8` reads `image/svg+xml`).
@@ -1451,6 +1460,8 @@ fn with_shared<R>(
         header,
         headers: Default::default(),
         used_blobs: Default::default(),
+        draw_diagrams: true,
+        diagrams: Default::default(),
         governing: Default::default(),
         mode,
         inline_diffs,
@@ -1641,7 +1652,6 @@ fn stage_site(
     // the search index is held to the bytes one file may take while its entries are collected
     let (index_cap, index_limit) = budget.map_or((u64::MAX, String::new()), Budget::file_cap);
     let mut index = search::Index::new(site_name, index_cap);
-    let mut has_mermaid = false;
     // a publication has at most as many files as its limit: count its pages (the change
     // summaries included) before making any
     if let Some(b) = budget {
@@ -1657,7 +1667,6 @@ fn stage_site(
         kinds,
         |kind| {
             let ctx = build_page(sh, kind);
-            has_mermaid |= ctx.has_mermaid;
             page::finish(sh, &ctx, &mut index);
             if let Some(b) = budget {
                 b.index_holds(index.held());
@@ -1788,9 +1797,16 @@ fn stage_site(
     if !at.is_empty() {
         label_at.insert("llms-full.txt".into(), vec![(SlotKind::Label, at)]);
     }
-    for (path, bytes) in assets::files(has_mermaid) {
+    for (path, bytes) in assets::files() {
         put_file(&mut files, budget, path.into(), bytes)?;
     }
+    // the diagrams the pages drew, one file each, and the warnings of those they could not
+    // draw, after the build's own (in page and block order)
+    let diagrams = sh.diagrams.take();
+    for (path, bytes) in diagrams.files() {
+        put_file(&mut files, budget, path, bytes)?;
+    }
+    summary.warnings.extend(diagrams.warnings);
     let used = sh.used_blobs.take();
     Ok(Staged {
         files,
@@ -2338,10 +2354,21 @@ mod label_tests {
             ("assets/site.css", "text/css"),
             ("assets/app.js", "application/javascript"),
             ("assets/fonts/onest.woff2", "font/woff2"),
+            (
+                "assets/diagrams/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.svg",
+                "image/svg+xml",
+            ),
         ] {
             assert_eq!(generated_media_type(path).unwrap(), want);
         }
-        for path in ["assets/x.bin", "README", "a.htm"] {
+        for path in [
+            "assets/x.bin",
+            "README",
+            "a.htm",
+            "assets/x.svg",
+            "assets/diagrams/0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef.svg",
+            "assets/diagrams/a/b.svg",
+        ] {
             assert_eq!(
                 generated_media_type(path).unwrap_err().message,
                 "publication manifest is invalid"

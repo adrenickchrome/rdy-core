@@ -6,7 +6,8 @@ CDN, no `@import` of a URL: the site makes no request to another origin.
 
 ## Status
 
-All vendored files are fetched and checksum-verified. Fonts are referenced by the stylesheet's
+All vendored files are fetched and checksum-verified. The theme has no diagram library:
+diagrams are drawn as SVG when the site is built, by the pinned crate behind `rdy-diagram`. Fonts are referenced by the stylesheet's
 `@font-face` rules (`fonts/onest.woff2`, `fonts/geist-mono.woff2`) with the full fallback stacks
 (`--font-text`, `--font-mono`) behind them.
 
@@ -49,22 +50,4 @@ All vendored files are fetched and checksum-verified. Fonts are referenced by th
   curl -fL -o crates/rdy-render/theme/rdy-standard/fonts/geist-mono.woff2 'https://cdn.jsdelivr.net/npm/geist@1.7.2/dist/fonts/geist-mono/GeistMono-Variable.woff2'
   curl -fL -o crates/rdy-render/theme/rdy-standard/fonts/OFL-GeistMono.txt 'https://cdn.jsdelivr.net/npm/geist@1.7.2/LICENSE.txt'
   shasum -a 256 crates/rdy-render/theme/rdy-standard/fonts/geist-mono.woff2 crates/rdy-render/theme/rdy-standard/fonts/OFL-GeistMono.txt
-  ```
-
-## vendor/mermaid/mermaid.min.js and vendor/mermaid/LICENSE: fetched
-
-- Library: Mermaid 11.17.2, MIT licence. Written to `assets/js/mermaid.min.js` only for a site that has a Mermaid diagram.
-- Origin: the npm package `mermaid@11.17.2` (tarball `https://registry.npmjs.org/mermaid/-/mermaid-11.17.2.tgz`, integrity
-  `sha512-V6K3C8EBdEsPFZXSKMJe6ppQOENxuHARr9GvHX4hh47lAbhMRD9qf4oEK7LoaRQxULMa80/qt5gHO73aCleBBg==`). `dist/mermaid.min.js` and `LICENSE` are
-  byte-identical in the tarball and on jsDelivr, which is where the pinned fetch commands point.
-- `mermaid.min.js`: 3,572,661 bytes, sha256 `581ed7d74bd9048d0e3a91363927d72ef22942d7722546b27f7cc29e35390eb8`.
-- `LICENSE`: 1,089 bytes, sha256 `ec9fb67dcb25eccc416ed56e1aab819222c805a2a4bfe4cb19e7556bf2ffde80`.
-- It is an esbuild IIFE that ends `globalThis["mermaid"] = ….default`, so `window.mermaid` exists once the file has run (it is not a UMD module). The
-  file contains URLs inside its licence comments; `js/mermaid-init.js` and `app.js` contain none.
-- Commands (a mismatch of either checksum stops the fetch):
-
-  ```
-  curl -fL -o crates/rdy-render/theme/rdy-standard/vendor/mermaid/mermaid.min.js 'https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.min.js'
-  curl -fL -o crates/rdy-render/theme/rdy-standard/vendor/mermaid/LICENSE 'https://cdn.jsdelivr.net/npm/mermaid@11.17.2/LICENSE'
-  shasum -a 256 crates/rdy-render/theme/rdy-standard/vendor/mermaid/mermaid.min.js crates/rdy-render/theme/rdy-standard/vendor/mermaid/LICENSE
   ```

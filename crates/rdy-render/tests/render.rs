@@ -123,22 +123,36 @@ fn renders_docs_decisions_diagrams_and_assets() {
     );
     assert!(doc.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
     assert!(!doc.contains("<script>alert(1)"));
-    assert!(doc.contains("<pre class=\"mermaid\">graph TD\n  A --&gt; B</pre>"));
-    assert!(
-        doc.contains("assets/js/mermaid.min.js") && !doc.contains("cdn"),
-        "the page with a diagram loads the vendored library"
-    );
+    // the diagram is drawn when the site is built: one inline SVG, hidden from the text, and a
+    // link to its generated file; no diagram library is loaded
+    assert!(doc.contains(
+        "<details class=\"diagram-canvas\"><summary aria-label=\"Expand diagram\"><span class=\"diagram-scroll\"><span class=\"diagram-svg\" aria-hidden=\"true\"><svg "
+    ));
+    let fig = &doc[doc.find("<figure class=\"diagram\"").unwrap()..];
+    let fig = &fig[..fig.find("</figure>").unwrap()];
+    assert_eq!(fig.matches("<svg ").count(), 1, "one inline SVG: {fig}");
+    assert!(doc.contains("<code>graph TD\n  A --&gt; B</code>"));
+    let drawn: Vec<std::path::PathBuf> = std::fs::read_dir(out.path().join("assets/diagrams"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(drawn.len(), 1);
+    let bytes = std::fs::read(&drawn[0]).unwrap();
+    let file = format!("assets/diagrams/{}.svg", Hash::of(&bytes));
+    assert!(doc.contains(&format!("<a href=\"{file}\">open full size</a>")));
+    assert!(String::from_utf8(bytes).unwrap().contains(">A<"));
+    assert!(!doc.contains("mermaid.min.js") && !doc.contains("cdn"));
     assert!(doc.contains(&format!("src=\"assets/{blob}.png\"")) && doc.contains("alt=\"logo\""));
     assert!(!out.path().join("_decision").exists() && !doc.contains("_decision"));
 
     let index = std::fs::read_to_string(out.path().join("index.html")).unwrap();
     assert!(index.contains(&"identity.html".to_string()));
     assert!(
-        !index.contains("mermaid"),
-        "no diagram script on pages without diagrams"
+        !index.contains("mermaid") && !index.contains("assets/diagrams/"),
+        "no diagram on pages without diagrams"
     );
     assert!(out.path().join(format!("assets/{blob}.png")).exists());
-    assert!(out.path().join("assets/js/mermaid.min.js").exists());
+    assert!(!out.path().join("assets/js").exists());
 }
 
 /// Commits `blocks` to `view` straight through the store, past the write path's checks: an older
@@ -267,11 +281,16 @@ fn escaped_braces_render_literally_and_diagram_references_become_labels() {
     let out = tempfile::tempdir().unwrap();
     render_site(&r.read(), &Scope::View("work".into()), out.path()).unwrap();
     let doc = std::fs::read_to_string(out.path().join("flows.html")).unwrap();
+    // the drawing and its source read the reference as its label; a hexagon is kept as written
     assert!(
-        doc.contains(
-            "<pre class=\"mermaid\">graph TD\n  A{{Decide?}} --&gt; B[Ledger &amp; co]</pre>"
-        ),
+        doc.contains("<code>graph TD\n  A{{Decide?}} --&gt; B[Ledger &amp; co]</code>"),
         "{doc}"
+    );
+    let drawn = &doc[doc.find("<span class=\"diagram-svg\"").unwrap()..];
+    let drawn = &drawn[..drawn.find("</svg>").unwrap()];
+    assert!(
+        drawn.contains(">Decide?<") && drawn.contains(">Ledger &amp; co<"),
+        "{drawn}"
     );
     // Code blocks are highlighted at build time (Docs experience Task 9), so the verbatim check
     // compares the visible text with the markup stripped, not the raw HTML.

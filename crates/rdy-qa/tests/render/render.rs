@@ -30,9 +30,8 @@ fn render_hostile_text_is_escaped_on_every_page() {
             let rest = &html[i..];
             let tag = &rest[..rest.find('>').map_or(rest.len(), |j| j + 1)];
             let init = rest.starts_with(&format!("<script>{INIT_JS}</script>"));
-            let external = tag.starts_with("<script src=\"")
-                && (tag.ends_with("assets/app.js\" defer>")
-                    || tag.ends_with("assets/js/mermaid.min.js\" defer>"));
+            let external =
+                tag.starts_with("<script src=\"") && tag.ends_with("assets/app.js\" defer>");
             assert!(
                 init || external,
                 "{}: unexpected <script: {tag:?}",

@@ -20,10 +20,28 @@ fn mer1_labels_in_diagram_source_are_escaped_for_mermaid() {
     let out = tempfile::tempdir().unwrap();
     rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let page = std::fs::read_to_string(out.path().join("tx.html")).unwrap();
+    // the drawn labels show the characters, decoded once; no Mermaid code and no id is shown
+    let at = page.find("<span class=\"diagram-svg\"").expect("a drawing");
+    let drawn = &page[at..];
+    let drawn = &drawn[..drawn.find("</svg>").unwrap()];
     assert!(
-        page.contains("A[Ledger #93; #34;q#34; #40;x#41; #124; y] --&gt; B[Done]"),
+        drawn.contains(">Ledger ] &quot;q&quot; (x) | y<"),
+        "{drawn}"
+    );
+    assert!(drawn.contains(">C# ;x<"), "{drawn}");
+    assert!(drawn.contains(">Done<"), "{drawn}");
+    for code in ["#93;", "#34;", "#40;", "#124;", "#35;", "#59;"] {
+        assert!(!page.contains(code), "{code}: {page}");
+    }
+    let read = r.read();
+    let m = read.materialized(&Scope::Canon).unwrap();
+    for id in m.ids() {
+        assert!(!drawn.contains(&id.to_string()), "{id}");
+    }
+    // the readable source reads the labels as written
+    assert!(
+        page.contains("A[Ledger ] &quot;q&quot; (x) | y] --&gt; B[Done]"),
         "{page}"
     );
-    assert!(page.contains("C[C#35; #59;x]"), "{page}");
-    assert!(page.contains("assets/js/mermaid.min.js"), "{page}");
+    assert!(!page.contains("mermaid.min.js"), "{page}");
 }

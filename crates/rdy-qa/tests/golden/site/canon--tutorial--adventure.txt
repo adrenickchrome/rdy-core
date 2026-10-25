@@ -424,6 +424,7 @@ content	-	Copy
 content	-	Link
 content	-	Copy ref
 content	-	Diagram (source below)
+content	-	open full size
 content	L	Diagram source
 chrome	L	Previous
 chrome	L	Σημασιολογία

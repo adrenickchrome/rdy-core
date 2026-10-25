@@ -120,6 +120,7 @@ content	-	The same order, drawn as a diagram:
 content	-	Link
 content	-	Copy ref
 content	-	The evaluation of a match statement as a flowchart
+content	-	open full size
 content	L	The evaluation of a match statement as a flowchart
 content	L	Diagram source
 content	-	Link
@@ -137,6 +138,7 @@ content	-	.
 content	-	Link
 content	-	Copy ref
 content	-	The grammar of a pattern as a tree
+content	-	open full size
 content	L	The grammar of a pattern as a tree
 content	L	Diagram source
 content	L	Pattern kinds at a glance

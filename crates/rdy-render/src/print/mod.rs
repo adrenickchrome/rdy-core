@@ -394,6 +394,9 @@ pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
         header: version::header(&position, None),
         headers: Default::default(),
         used_blobs: Default::default(),
+        // a print shows each diagram as its source: it draws none and warns of none
+        draw_diagrams: false,
+        diagrams: Default::default(),
         governing: Default::default(),
         mode: Mode::Static,
         inline_diffs: Default::default(),

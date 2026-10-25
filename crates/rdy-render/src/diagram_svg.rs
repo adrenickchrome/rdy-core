@@ -13,11 +13,6 @@
 //! class that fails gives the reason: size, XML structure, active content, external resources,
 //! element ids.
 
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the site's diagram output calls these next")
-)]
-
 use crate::html::escape;
 use std::borrow::Cow;
 use std::collections::HashMap;
