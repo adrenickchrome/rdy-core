@@ -1027,7 +1027,11 @@ fn dgm1_flowchart_depth_reads_structure_only() {
         "B\n",
         "end\n",
     );
-    assert_eq!(short(render(&separated)), invalid(UNCLOSED), "{separated}");
+    assert_eq!(
+        short(render(&separated)),
+        invalid(OVER_DEPTH),
+        "{separated}"
+    );
     // keywords in an arrow's label: the depth bound comes first, so the arrow bound's reason
     // shows that they add no depth (ruling final: an arrow is over 256 bytes here)
     for src in [
@@ -1242,4 +1246,118 @@ fn dgm1_unclosed_subgraphs_and_long_arrows_are_refused() {
     // the same bytes in a node label are no arrow
     let label = format!("flowchart LR\nA[\"{}\"] --> B\n", ".".repeat(1000));
     assert!(drawn(&render(&label)), "dots in a node label");
+}
+
+/// rdb1 (D-R7C3W): an arrow that starts but has no end on its line counts from its start to the
+/// line end, in UTF-8 bytes. 256 bytes are never refused for their length; 257 are, in every
+/// form. A node label is no arrow, and a complete plain `--` before a long id is a complete arrow.
+#[test]
+fn rdb1_unended_arrow_lengths_use_the_line_end() {
+    let dotted = |n: usize| format!("-. {}", ".".repeat(n - 3));
+    let solid = |n: usize| format!("-{}", " ".repeat(n - 1));
+    let thick = |n: usize| format!("={}", " ".repeat(n - 1));
+    let invisible = |n: usize| format!("~~{}", " ".repeat(n - 2));
+    let piped = |n: usize| format!("-->|{}", "y".repeat(n - 4));
+    // `é` is two bytes
+    let wide = |n: usize| format!("-->|{}{}", "y".repeat((n - 4) % 2), "é".repeat((n - 4) / 2));
+    for (form, arrow) in [
+        ("dotted", &dotted as &dyn Fn(usize) -> String),
+        ("solid", &solid),
+        ("thick", &thick),
+        ("invisible", &invisible),
+        ("piped", &piped),
+        ("wide", &wide),
+    ] {
+        for n in [256, 257] {
+            assert_eq!(arrow(n).len(), n, "{form}");
+        }
+        for end in ["\n", "\r\n", ""] {
+            let src = |n: usize| format!("flowchart LR\nA {}{end}", arrow(n));
+            assert_ne!(
+                short(render(&src(256))),
+                invalid(OVER_ARROW),
+                "{form}: 256 bytes, ending {end:?}"
+            );
+            assert_eq!(
+                short(render(&src(257))),
+                invalid(OVER_ARROW),
+                "{form}: 257 bytes, ending {end:?}"
+            );
+        }
+        // a later line is not part of the arrow
+        let next = format!("flowchart LR\nA {}\nB --> C\n", arrow(256));
+        assert_ne!(
+            short(render(&next)),
+            invalid(OVER_ARROW),
+            "{form}: next line"
+        );
+    }
+    // the same bytes in a node label are no arrow
+    let label = format!("flowchart LR\nA[\"{}\"] --> B\n", ".".repeat(1000));
+    assert!(drawn(&render(&label)), "dots in a node label");
+    // a complete plain `--` wins over the inline label it could start: the long id is its end
+    let long_id = format!("flowchart LR\nA -- {}\n", "B".repeat(300));
+    assert!(drawn(&render(&long_id)), "{:?}", short(render(&long_id)));
+}
+
+/// `flowchart TD`, one subgraph `header`, then `blanks` blank lines, then a body and `end`, with
+/// line ending `nl`.
+fn blank_after(header: &str, blank: &str, repeat: usize, nl: &str) -> String {
+    format!(
+        "flowchart TD{nl}{header}{nl}{}A --> B{nl}end{nl}",
+        format!("{blank}{nl}").repeat(repeat)
+    )
+}
+
+/// rdb1 (D-R7C3W): rdy drops each blank line that directly follows a subgraph header before it
+/// draws. Each source draws exactly what the same source without those lines draws.
+#[test]
+fn rdb1_blank_lines_after_subgraph_headers_draw() {
+    for header in [
+        "subgraph S",
+        "subgraph S[the title]",
+        "subgraph S \"the title\"",
+        "subgraph \"the title\"",
+        "X subgraph S",
+    ] {
+        for nl in ["\n", "\r\n", "\r"] {
+            let clean = svg(&blank_after(header, "", 0, nl));
+            for blank in ["", " ", "\t", " \t  "] {
+                for repeat in [1, 3] {
+                    let src = blank_after(header, blank, repeat, nl);
+                    assert!(
+                        render(&src) == Diagram::Svg(clean.clone()),
+                        "{src:?}: {:?}",
+                        short(render(&src))
+                    );
+                }
+            }
+        }
+    }
+    // a blank after a line the pinned crate drops before it parses
+    for dropped in ["%%{init: {}}%%", "accTitle: a title"] {
+        let src = format!("flowchart TD\nsubgraph S\n{dropped}\n\nA --> B\nend\n");
+        let clean = format!("flowchart TD\nsubgraph S\n{dropped}\nA --> B\nend\n");
+        assert!(render(&src) == Diagram::Svg(svg(&clean)), "{src:?}");
+    }
+    // closed nesting 32 deep draws; the blank lines add nothing
+    let nested = |blank: &str| {
+        nest(
+            "flowchart TD",
+            "",
+            32,
+            |i| format!("subgraph S{i}\n{blank}"),
+            "A --> B\n",
+            "end\n",
+        )
+    };
+    assert!(render(&nested("\n  \n")) == Diagram::Svg(svg(&nested(""))));
+    // a blank run at the end of the text in a subgraph that no `end` closes
+    for src in [
+        "flowchart TD\nsubgraph S\n\n  \n",
+        "flowchart TD\nsubgraph S\n\t ",
+        "flowchart TD\nsubgraph S\n\n",
+    ] {
+        assert_eq!(short(render(src)), invalid(UNCLOSED), "{src:?}");
+    }
 }

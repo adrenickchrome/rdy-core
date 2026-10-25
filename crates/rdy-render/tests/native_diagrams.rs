@@ -635,3 +635,134 @@ fn dgm6_profiles_never_emit_excluded_text() {
     }
     assert!(print.blobs.is_empty());
 }
+
+/// The page's Copy payload: the JSON in its one Copy template, as a browser reads its text.
+fn copy_payload(html: &str) -> Value {
+    let open = "<template data-copy-page hidden>";
+    let start = html.find(open).expect("a Copy template") + open.len();
+    let end = html[start..].find("</template>").unwrap() + start;
+    let text = html[start..end]
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&");
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"))
+}
+
+/// Every string in a JSON value, joined.
+fn strings(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Array(a) => a.iter().map(strings).collect(),
+        Value::Object(o) => o.values().map(strings).collect(),
+        _ => String::new(),
+    }
+}
+
+/// HTML text as the page escapes it.
+fn escaped(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// rdb1 (D-R7C3W): rdy draws from a rewritten copy of the source (CRLF as LF, no blank line
+/// after a subgraph header), and every fallback shows the author's own bytes. The refusal is the
+/// length reason, which the rewrite reaches: at the base this source was not closed.
+#[test]
+fn rdb1_normalized_fallback_keeps_original_source() {
+    let long = "y".repeat(300);
+    let refused =
+        format!("flowchart TD\r\nsubgraph S\r\n\r\nA --> B\r\nC -- {long} --> D\r\nend\r\n");
+    let valid = "flowchart TD\nsubgraph S\n\n  \nA[start] --> B[stop]\nend\n";
+    let (_d, r, ids) = project(Value::Array(diagram_doc(
+        "norm",
+        "Norm page",
+        &[("mermaid", "Long", &refused), ("mermaid", "Blank", valid)],
+    )));
+    let s = site(&r);
+    let html = page(&s.files, "norm.html");
+    let figs = figures(&html);
+    assert_eq!(figs.len(), 2, "{html}");
+    // the refused source: its code block holds the original bytes, CR and blank line kept
+    assert!(
+        figs[0].contains(&format!(
+            "<pre class=\"code\"><code class=\"language-mermaid\">{}</code></pre>",
+            escaped(&refused)
+        )),
+        "{:?}",
+        figs[0]
+    );
+    // and so does the page's Copy data
+    let copy = strings(&copy_payload(&html));
+    assert!(copy.contains(&refused), "{copy:?}");
+    // the valid blank-line diagram draws, with no warning
+    assert!(figs[1].contains("diagram-canvas"), "{}", figs[1]);
+    assert!(figs[1].contains(">start<") && figs[1].contains(">stop<"));
+    assert!(copy.contains(valid), "{copy:?}");
+    assert_eq!(
+        s.summary.warnings,
+        vec![format!(
+            "Norm page ({}): the Mermaid diagram does not parse: the source has an arrow over 256 bytes",
+            ids["$norm0"]
+        )]
+    );
+}
+
+/// rdb1 (D-438Y2): the hidden arrows that stack separate subgraphs are in the drawing input
+/// only. A four-panel source that is refused shows its own bytes, with no `~~~` line.
+#[test]
+fn rdb1_stacked_fallback_keeps_original_source() {
+    let four = include_str!("../../rdy-diagram/tests/fixtures/diagram/four-panels.mmd");
+    let refused = four.replacen(
+        "        direction LR\n",
+        &format!(
+            "        direction LR\n        z1 -- {} --> z2\n",
+            "y".repeat(300)
+        ),
+        1,
+    );
+    assert_ne!(refused, four);
+    let (_d, r, ids) = project(Value::Array(diagram_doc(
+        "stack",
+        "Stack page",
+        &[("mermaid", "Refused", &refused), ("mermaid", "Drawn", four)],
+    )));
+    let s = site(&r);
+    let html = page(&s.files, "stack.html");
+    let figs = figures(&html);
+    assert_eq!(figs.len(), 2, "{html}");
+    assert!(
+        figs[0].contains(&format!(
+            "<pre class=\"code\"><code class=\"language-mermaid\">{}</code></pre>",
+            escaped(&refused)
+        )),
+        "{:?}",
+        figs[0]
+    );
+    let copy = strings(&copy_payload(&html));
+    assert!(copy.contains(&refused), "{copy:?}");
+    // the drawn one's source under "Diagram source" is the author's too
+    assert!(figs[1].contains("diagram-canvas"), "{}", figs[1]);
+    assert!(figs[1].contains(&format!(
+        "<pre class=\"code\"><code>{}</code></pre>",
+        escaped(four)
+    )));
+    assert!(copy.contains(four), "{copy:?}");
+    for fig in &figs {
+        let source = &fig[fig.find("<pre class=\"code\">").unwrap()..];
+        assert!(!source.contains("~~~"), "{source}");
+    }
+    assert!(!copy.contains("~~~"), "{copy:?}");
+    assert_eq!(
+        s.summary.warnings,
+        vec![format!(
+            "Stack page ({}): the Mermaid diagram does not parse: the source has an arrow over 256 bytes",
+            ids["$stack0"]
+        )]
+    );
+}

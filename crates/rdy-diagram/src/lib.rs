@@ -13,6 +13,12 @@
 //! grammar reads its body again, and nested ones multiply), and an arrow over 256 bytes (its run
 //! and its label; it spans one rank per dot or dash).
 //!
+//! The pinned crate draws from the drawing input, a copy of the source with three rewrites:
+//! CRLF becomes LF; in a flowchart, each blank line that directly follows a subgraph header goes
+//! (D-R7C3W); and top-level subgraphs that each set their own direction get hidden arrows
+//! between them, so they stack along the diagram's direction (D-438Y2). The bounds read the
+//! drawing input. Every fallback shows the author's own bytes, which no rewrite reaches.
+//!
 //! A panic in the pinned crate is a drawing fault, never a crash, and prints nothing.
 //!
 //! The pinned crate reads six environment variables at run time. The binary removes them at
@@ -160,8 +166,15 @@ pub fn render(source: &str) -> Diagram {
         Some("sequence") => Family::Sequence,
         _ => Family::Unknown,
     };
-    let m = measure(src, family);
-    if m.statements > MAX_STATEMENTS {
+    // the drawing input: the bounds and the pinned crate read it, and no fallback shows it
+    let drawing = match family {
+        Family::Flowchart => flowchart::normalize_subgraph_blanks(src),
+        _ => Cow::Borrowed(src),
+    };
+    let m = measure(&drawing, family);
+    // each hidden arrow is one more statement
+    let hidden = m.stacked.len().saturating_sub(1);
+    if m.statements + hidden > MAX_STATEMENTS {
         return invalid(OVER_STATEMENTS);
     }
     if m.depth > MAX_DEPTH {
@@ -173,6 +186,8 @@ pub fn render(source: &str) -> Diagram {
     if m.longest_arrow > MAX_ARROW_BYTES {
         return invalid(OVER_ARROW);
     }
+    let drawing = stack(drawing, &m.stacked);
+    let src = drawing.as_ref();
     let config = RenderConfig {
         svg_theme: Some(SvgThemeConfig {
             mode: SvgThemeMode::Dynamic,
@@ -196,6 +211,26 @@ pub fn render(source: &str) -> Diagram {
             None => Diagram::Failed { reason: e.message },
         },
     }
+}
+
+/// The drawing input with a hidden arrow between each two top-level subgraphs in `ids`, in order
+/// (D-438Y2): one line `<id> ~~~ <next id>` each, after an LF if the text does not end with one.
+/// Fewer than two ids add nothing.
+fn stack<'a>(drawing: Cow<'a, str>, ids: &[String]) -> Cow<'a, str> {
+    if ids.len() < 2 {
+        return drawing;
+    }
+    let mut out = drawing.into_owned();
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    for pair in ids.windows(2) {
+        out.push_str(&pair[0]);
+        out.push_str(" ~~~ ");
+        out.push_str(&pair[1]);
+        out.push('\n');
+    }
+    Cow::Owned(out)
 }
 
 /// Runs one call into the pinned crate. A panic is a drawing fault, never a crash; its message
@@ -357,6 +392,8 @@ struct Measure {
     unclosed: bool,
     /// The longest flowchart arrow, in bytes.
     longest_arrow: usize,
+    /// The top-level flowchart subgraphs that hidden arrows stack, in order (see `flowchart`).
+    stacked: Vec<String>,
 }
 
 /// Counts the statements of `src` after front matter, its deepest nesting and, in a flowchart,
@@ -370,6 +407,7 @@ fn measure(src: &str, family: Family) -> Measure {
         depth: 0,
         unclosed: false,
         longest_arrow: 0,
+        stacked: Vec::new(),
     };
     match family {
         Family::Flowchart => {
@@ -377,6 +415,7 @@ fn measure(src: &str, family: Family) -> Measure {
             m.depth = r.depth;
             m.unclosed = r.unclosed;
             m.longest_arrow = r.longest_arrow;
+            m.stacked = r.stacked;
         }
         Family::Class => m.depth = class_depth(body),
         Family::State => m.depth = state_depth(body),
@@ -929,6 +968,152 @@ mod tests {
             );
             assert_eq!(flowchart::depth(&src), n, "{n} open headers");
         }
+    }
+
+    /// rdb1 (D-R7C3W): an arrow that starts but has no end on its line counts from its start to
+    /// the line end, so 60,000 dots with no end are refused before the drawing call. Guarded
+    /// call 2 (the draw) is set to panic: a refusal never reaches it. No timing.
+    #[test]
+    fn rdb1_unended_arrows_stop_before_drawing() {
+        let dots = ".".repeat(60000);
+        for end in ["", "\n", "\r\n"] {
+            let src = format!("flowchart LR\nA -. {dots}X{end}");
+            assert!(src.len() <= MAX_SOURCE_BYTES);
+            test_hook::panic_at(2);
+            let got = render(&src);
+            test_hook::panic_at(0);
+            assert_eq!(got, invalid(OVER_ARROW), "ending {end:?}");
+        }
+    }
+
+    /// rdb1 (D-R7C3W): only the blank lines that directly follow a real subgraph header go. A
+    /// blank line in a label, a title, a comment or front matter stays, and so does one after a
+    /// node or `end`, or after a header that a `;` ends. Unchanged input comes back borrowed.
+    #[test]
+    fn rdb1_normalization_keeps_nonstructural_blank_lines() {
+        use flowchart::normalize_subgraph_blanks as normalize;
+        for src in [
+            // multiline node labels
+            "flowchart TD\nA[\"x\n\ny\"] --> B\n",
+            "flowchart TD\nA(\nsubgraph X\n\nB)\n",
+            "flowchart TD\nsubgraph S\nA[\"subgraph X\n\nz\"]\nend\n",
+            // quoted titles
+            "flowchart TD\nsubgraph \"subgraph X\n\nz\"\nA\nend\n",
+            "flowchart TD\nsubgraph S[subgraph X\n\nz]\nA\nend\n",
+            // comments
+            "flowchart TD\n%% subgraph X\n\nA\n",
+            "flowchart TD\nA %% subgraph X\n\nB\n",
+            // front matter
+            "---\ntitle: subgraph X\n\n---\nflowchart TD\nA\n",
+            // a blank after a node or `end`
+            "flowchart TD\nsubgraph X\nA\n\nend\n",
+            "flowchart TD\nsubgraph X\nA\nend\n\nB\n",
+            // a header that a `;` ends, then a line ending
+            "flowchart TD\nsubgraph X;\nA\nend\n",
+            "flowchart TD\nsubgraph X;\n\nA\nend\n",
+        ] {
+            let got = normalize(src);
+            assert!(matches!(got, Cow::Borrowed(_)), "{src:?}");
+            assert_eq!(got, src);
+        }
+        for (src, want) in [
+            (
+                "flowchart TD\nsubgraph X\n\n  \n\t\nA\nend\n",
+                "flowchart TD\nsubgraph X\nA\nend\n",
+            ),
+            (
+                "flowchart TD\nsubgraph X\n\nsubgraph Y\n \nA\nend\nend\n",
+                "flowchart TD\nsubgraph X\nsubgraph Y\nA\nend\nend\n",
+            ),
+            (
+                "flowchart TD\nsubgraph X\n\nA[\"p\n\nq\"]\n\nend\n",
+                "flowchart TD\nsubgraph X\nA[\"p\n\nq\"]\n\nend\n",
+            ),
+            (
+                "---\ntitle: x\n---\nflowchart TD\nsubgraph X\n\nA\nend\n",
+                "---\ntitle: x\n---\nflowchart TD\nsubgraph X\nA\nend\n",
+            ),
+            (
+                "flowchart TD\nsubgraph X\n%%{init: {}}%%\n\naccTitle: t\n\t\nA\nend\n",
+                "flowchart TD\nsubgraph X\n%%{init: {}}%%\naccTitle: t\nA\nend\n",
+            ),
+            (
+                "flowchart TD\rsubgraph X\r\r \rA\rend\r",
+                "flowchart TD\rsubgraph X\rA\rend\r",
+            ),
+            ("flowchart TD\nsubgraph X\n  ", "flowchart TD\nsubgraph X\n"),
+        ] {
+            assert_eq!(normalize(src), want, "{src:?}");
+        }
+        assert_eq!(
+            render("flowchart TD\nsubgraph X;\nA\nend\n"),
+            invalid(UNCLOSED)
+        );
+    }
+
+    /// What the base drew for `src`: the pinned crate's SVG, with no rewrite.
+    fn base_svg(src: &str) -> Diagram {
+        let config = RenderConfig {
+            svg_theme: Some(SvgThemeConfig {
+                mode: SvgThemeMode::Dynamic,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        Diagram::Svg(mmdflux::render_diagram(src, OutputFormat::Svg, &config).expect("drawn"))
+    }
+
+    /// rdb1 (D-438Y2): separate top-level subgraphs that each set their own direction are
+    /// stacked with hidden arrows in the drawing input only. Every other shape stays as it was.
+    #[test]
+    fn rdb1_hidden_arrows_only_in_the_drawing_input() {
+        let four = include_str!("../tests/fixtures/diagram/four-panels.mmd");
+        assert_eq!(flowchart::read(four).stacked, ["P1", "P2", "P3", "P4"]);
+        let two =
+            |a: &str, b: &str| format!("flowchart TB\nsubgraph P1\n{a}end\nsubgraph P2\n{b}end\n");
+        let dir = "direction LR\n";
+        assert_eq!(
+            flowchart::read(&two(
+                &format!("{dir}a1 --> a2\n"),
+                &format!("{dir}b1 --> b2\n")
+            ))
+            .stacked,
+            ["P1", "P2"]
+        );
+        let drawn = [
+            // one subgraph
+            format!("flowchart TB\nsubgraph P1\n{dir}a1 --> a2\nend\n"),
+            // a top-level subgraph without its own direction
+            two("a1 --> a2\n", &format!("{dir}b1 --> b2\n")),
+            // a direction only in a nested subgraph
+            two(
+                &format!("subgraph Q\n{dir}a1 --> a2\nend\n"),
+                &format!("{dir}b1 --> b2\n"),
+            ),
+            // an arrow between two subgraphs' nodes
+            two(&format!("{dir}a1 --> b1\n"), &format!("{dir}b1 --> b2\n")),
+            // a node id in two subgraphs
+            two(&format!("{dir}a1 --> x\n"), &format!("{dir}x --> b2\n")),
+            // an arrow to a subgraph id
+            two(&format!("{dir}a1 --> P2\n"), &format!("{dir}b1 --> b2\n")),
+            // an arrow at the top level
+            format!(
+                "{}t1 --> t2\n",
+                two(&format!("{dir}a1 --> a2\n"), &format!("{dir}b1 --> b2\n"))
+            ),
+            // a header with only a quoted title
+            format!(
+                "flowchart TB\nsubgraph \"first\"\n{dir}a1 --> a2\nend\nsubgraph P2\n{dir}b1 --> b2\nend\n"
+            ),
+        ];
+        for src in &drawn {
+            assert!(flowchart::read(src).stacked.is_empty(), "{src}");
+            assert!(render(src) == base_svg(src), "{src}");
+        }
+        // an unclosed subgraph
+        let unclosed = format!("flowchart TB\nsubgraph P1\n{dir}a1\nend\nsubgraph P2\n{dir}b1\n");
+        assert!(flowchart::read(&unclosed).stacked.is_empty());
+        assert_eq!(render(&unclosed), invalid(UNCLOSED));
     }
 
     /// The variable that makes [`dgm1_guarded_panic_child`] run.
