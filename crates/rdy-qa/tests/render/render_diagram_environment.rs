@@ -53,6 +53,19 @@ fn dgm1_main_scrubs_before_startup() {
         .expect("main's first statement");
     assert_eq!(first, SEAM_CALL, "main's first statement");
 
+    // the perf binary's main starts the same way, before it reads its arguments (Task 12)
+    let perf = std::fs::read_to_string(crates.join("rdy-qa/src/bin/qa-perf.rs")).unwrap();
+    let at = perf
+        .find("\nfn main() {\n")
+        .expect("the perf binary's main");
+    let first = perf[at..]
+        .lines()
+        .skip(2)
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with("//"))
+        .expect("the perf main's first statement");
+    assert_eq!(first, SEAM_CALL, "the perf main's first statement");
+
     // the seam removes exactly the six names, and names no other variable of the crate
     let sys = std::fs::read_to_string(crates.join("rdy-daemon/src/sys/mod.rs")).unwrap();
     let def = sys.find(SEAM_DEF).expect("the seam in rdy_daemon::sys");
@@ -69,7 +82,8 @@ fn dgm1_main_scrubs_before_startup() {
         "the seam removes each name"
     );
 
-    // the seam's one production call is main's first statement: no renderer, test or harness
+    // the seam's production calls are the first statement of a binary's main (the CLI's, and
+    // the perf binary's, which perf.rs pins on its own): no renderer, test or harness
     let mut files = Vec::new();
     rust_files(&crates, &mut files);
     let mut calls = Vec::new();
@@ -89,10 +103,18 @@ fn dgm1_main_scrubs_before_startup() {
         }
     }
     calls.sort();
-    assert_eq!(calls.len(), 2, "the definition and one call: {calls:?}");
+    assert_eq!(
+        calls.len(),
+        3,
+        "the definition and two binary calls: {calls:?}"
+    );
     assert!(calls[0].starts_with("rdy-cli/src/main.rs:"), "{calls:?}");
     assert!(
         calls[1].starts_with("rdy-daemon/src/sys/mod.rs:"),
+        "{calls:?}"
+    );
+    assert!(
+        calls[2].starts_with("rdy-qa/src/bin/qa-perf.rs:"),
         "{calls:?}"
     );
 }

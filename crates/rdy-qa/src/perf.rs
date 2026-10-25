@@ -6038,7 +6038,7 @@ pub const SHARED_FIGURE_DOCS: usize = 10;
 /// The diagram families, in the order the corpus cycles them: flowchart, class, sequence, state.
 const DIAGRAM_FAMILIES: usize = 4;
 
-/// The shape of the renderer corpus: folders of docs, `generate_tree`'s tree order.
+/// The shape of the renderer corpus: folders of docs, numbered in the order the renderer walks them.
 #[derive(Clone, Copy, Debug)]
 pub struct DiagramCorpus {
     pub folders: usize,
@@ -6098,18 +6098,33 @@ fn diagram_source(k: usize, doc_no: usize) -> String {
     }
 }
 
+/// The path of every doc in `m`, in the order the renderer visits them: depth first, each
+/// folder's children in sibling order.
+fn docs_in_tree_order(m: &Materialized) -> Vec<String> {
+    let mut out = vec![];
+    let mut stack: Vec<_> = m.children(None).into_iter().rev().collect();
+    while let Some(b) = stack.pop() {
+        match b.block_type.as_str() {
+            "doc" => out.push(m.path_of(&b.id).expect("a doc has a path")),
+            "folder" => stack.extend(m.children(Some(&b.id)).into_iter().rev()),
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Builds the renderer corpus in `project` and lands it: `generate_tree`'s folders of docs (one
 /// section and [`TEXT_BLOCKS_PER_DOC`] claims each), then one diagram in every
 /// [`DIAGRAM_EVERY`]-th doc and one figure of a single shared blob in each of the first
 /// [`SHARED_FIGURE_DOCS`] docs. Returns the open project and the doc paths in tree order.
 fn build_diagram_corpus(project: &std::path::Path, plan: DiagramCorpus) -> (Rdy, Vec<String>) {
-    let docs = testkit::generate_tree(
+    let made = testkit::generate_tree(
         project,
         plan.folders,
         plan.docs_per_folder,
         TEXT_BLOCKS_PER_DOC,
     );
-    assert_eq!(docs.len(), plan.docs());
+    assert_eq!(made.len(), plan.docs());
     let mut r = Rdy::open(project).expect("open the corpus");
     let blob = r
         .store_mut()
@@ -6120,6 +6135,14 @@ fn build_diagram_corpus(project: &std::path::Path, plan: DiagramCorpus) -> (Rdy,
         .read()
         .materialized(&Scope::View("work".into()))
         .expect("work");
+    // `generate_tree` lists docs in creation order; the renderer walks the tree
+    let docs = docs_in_tree_order(&m);
+    assert_eq!(
+        docs.iter().collect::<BTreeSet<_>>(),
+        made.iter().collect::<BTreeSet<_>>(),
+        "the tree holds the docs that were made"
+    );
+    assert_eq!(docs.len(), plan.docs());
     let section_of = |n: usize| {
         let doc = m.resolve_path(&docs[n]).expect("doc path");
         m.children(Some(&doc))
@@ -8757,6 +8780,55 @@ mod tests {
                 .map(|n| Some(section_of(n)))
                 .collect::<BTreeSet<_>>()
         );
+    }
+
+    /// Task 12 (fix round 1): doc numbers follow the tree the renderer walks, depth first in
+    /// sibling order, not `generate_tree`'s creation order (all top-level folders, then the
+    /// nested ones). With 12 folders, two nest (`part-10` under `area-0`, `part-11` under
+    /// `area-1`) and a folder's subfolders come before its docs, so the first doc is nested.
+    #[test]
+    fn dgm12_docs_are_numbered_in_tree_order() {
+        let plan = DiagramCorpus {
+            folders: 12,
+            docs_per_folder: 1,
+        };
+        let expected: Vec<String> = [
+            "area-0/part-10/doc-0",
+            "area-0/doc-0",
+            "area-1/part-11/doc-0",
+            "area-1/doc-0",
+            "area-2/doc-0",
+            "area-3/doc-0",
+            "area-4/doc-0",
+            "area-5/doc-0",
+            "area-6/doc-0",
+            "area-7/doc-0",
+            "area-8/doc-0",
+            "area-9/doc-0",
+        ]
+        .iter()
+        .map(|p| p.to_string())
+        .collect();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (r, docs) = build_diagram_corpus(&dir.path().join("p"), plan);
+        assert_eq!(docs, expected, "doc paths in tree order");
+        // the diagrams go to the docs numbered 0 and 10 in that order
+        let m = r.read().materialized(&Scope::Canon).expect("canon");
+        let with_diagram: BTreeSet<String> = m
+            .iter()
+            .filter(|b| b.block_type == "diagram")
+            .map(|b| {
+                let section = b.parent.as_ref().expect("section");
+                let doc = m.doc_of(section).expect("doc");
+                m.path_of(&doc.id).expect("doc path")
+            })
+            .collect();
+        assert_eq!(
+            with_diagram,
+            BTreeSet::from([docs[0].clone(), docs[10].clone()])
+        );
+        assert_eq!(docs[0], "area-0/part-10/doc-0");
+        assert_eq!(docs[10], "area-8/doc-0");
     }
 
     /// Task 12: the counters read the files the render wrote. Exact numbers on a small tree of

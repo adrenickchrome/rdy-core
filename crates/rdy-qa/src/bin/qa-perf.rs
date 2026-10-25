@@ -1,6 +1,8 @@
 use rdy_qa::perf::{PerfMode, perf_mode};
 
 fn main() {
+    // first, while this process has one thread: the diagram crate's variables never reach it
+    rdy_daemon::sys::scrub_mmdflux_environment_at_startup();
     // an argument that is not UTF-8 is not the flag, so it gets the usage text
     let args: Vec<String> = std::env::args_os()
         .skip(1)
