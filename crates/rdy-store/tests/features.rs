@@ -42,6 +42,12 @@ fn manifest(features: Vec<StoreFeature>) -> StoreFeatures {
     }
 }
 
+/// The baseline (ok4: content-2 and object encodings) with `features` added: what a new store's
+/// log names once it first uses them.
+fn baseline_with(features: Vec<StoreFeature>) -> StoreFeatures {
+    baseline_features().merged(&features)
+}
+
 fn format_error(e: StoreError) -> (String, String) {
     match e {
         StoreError::Format { message, fix } => (message, fix),
@@ -112,7 +118,7 @@ fn store_with_unknown(class: FeatureClass) -> (tempfile::TempDir, PathBuf) {
         s.put_blob(b"uses the feature").unwrap();
         assert_eq!(
             log_manifest(&s),
-            manifest(vec![feature(TEST_FEATURE, class, "99.0.0")])
+            baseline_with(vec![feature(TEST_FEATURE, class, "99.0.0")])
         );
     }
     (base, dir)
@@ -151,11 +157,19 @@ fn ok1_feature_classes_choose_access_at_open() {
 
 #[test]
 fn ok1_test_feature_first_use_and_ref_are_one_batch() {
+    // production registers its seven features (ok4); none is this test's
     assert!(
-        registered_features().is_empty(),
-        "production registers no feature"
+        registered_features().iter().all(|f| f.name != TEST_FEATURE),
+        "production never registers the test feature"
     );
-    assert_eq!(baseline_features(), manifest(vec![]));
+    assert_eq!(
+        baseline_features()
+            .features
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect::<Vec<_>>(),
+        ["content_hash_v2", "object_encoding"]
+    );
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
     let mut s = Store::create(&dir).unwrap();
@@ -164,7 +178,7 @@ fn ok1_test_feature_first_use_and_ref_are_one_batch() {
     s.put_blob(b"before").unwrap();
     assert!(s.last_batch().iter().all(|(k, _)| *k != kinds::REF_UPDATE));
     let _known = inject_test_feature(FeatureClass::Compatible, kinds::BLOB_CHUNK);
-    let with = manifest(vec![feature(
+    let with = baseline_with(vec![feature(
         TEST_FEATURE,
         FeatureClass::Compatible,
         "99.0.0",
@@ -558,7 +572,7 @@ fn ok1_noncanonical_manifests_parse_within_their_bounds() {
     // an empty manifest needs no allocation at all
     assert_eq!(
         refusing(|| StoreFeatures::parse_fallible(b" {\"features\":[],\"manifest_version\":1} ")),
-        Ok(baseline_features())
+        Ok(manifest(vec![]))
     );
     // every case reads as the general parse read it
     let f = |name: &str| {
@@ -928,7 +942,7 @@ fn ok1_a_failed_first_use_needs_no_newer_build() {
         s.put_blob(b"a later write").unwrap();
         drop(s);
         // the crash window: FORMAT published ahead of a first use whose batch never sealed
-        let ahead = manifest(vec![feature(TEST_FEATURE, class, "99.0.0")]);
+        let ahead = baseline_with(vec![feature(TEST_FEATURE, class, "99.0.0")]);
         std::fs::write(dir.join(FORMAT_FILE), ahead.to_text()).unwrap();
         let s = Store::open(&dir).unwrap();
         assert_eq!(log_manifest(&s), baseline_features(), "{class:?}");
@@ -984,7 +998,7 @@ fn ok1_upgrade_receipt_steps_are_bounded() {
 #[test]
 fn ok1_a_first_use_that_cannot_roll_back_keeps_format() {
     let _known = inject_test_feature(FeatureClass::Compatible, kinds::BLOB_CHUNK);
-    let with = manifest(vec![feature(
+    let with = baseline_with(vec![feature(
         TEST_FEATURE,
         FeatureClass::Compatible,
         "99.0.0",

@@ -305,8 +305,8 @@ fn hc3_only_ingest_can_append_carried() {
         .collect();
     let mut residues: Vec<Hash> = src.residues().iter().map(residue_hash).collect();
     residues.sort();
-    // a residue of the latest encoding: its frame's raw kind
-    let raw = residue_frame(&src.residues()[0]).0;
+    // a residue of the latest encoding, by its logical kind
+    let raw = kinds::REDACTION_RESIDUE;
     assert_eq!(
         tail,
         vec![

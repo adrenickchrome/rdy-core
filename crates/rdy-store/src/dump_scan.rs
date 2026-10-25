@@ -564,7 +564,13 @@ impl ScanPlan {
     ) -> Result<FrameAction, StoreError> {
         match self.planned.get(&(place.segment, place.offset)) {
             None => Ok(FrameAction::Keep),
-            Some(p) if (p.kind, p.hash, p.len) == (kind, hash, len) => Ok(p.action),
+            // by the logical kind: a frame of any encoding (`crate::codec`)
+            Some(p)
+                if (crate::codec::logical_kind(p.kind), p.hash, p.len)
+                    == (crate::codec::logical_kind(kind), hash, len) =>
+            {
+                Ok(p.action)
+            }
             Some(_) => Err(damaged(0, drop_text::SPAN)),
         }
     }
@@ -1966,7 +1972,7 @@ impl<'p> Scan<'p> {
                 }
             }
             _ => {
-                if fh.kind == kinds::LANDING {
+                if crate::codec::logical_kind(fh.kind) == kinds::LANDING {
                     push(&mut self.landing_hashes, (at, fh.hash), i, fh.at)?;
                     push(&mut self.batch_landings, (at, rec_), i, fh.at)?;
                     if let Some(StopMatch::LandingPrefix(prefix)) = self.stop
@@ -1976,7 +1982,7 @@ impl<'p> Scan<'p> {
                         matched.0 = true;
                     }
                 }
-                if (holder || first_of_log) && is_removable(fh.kind) {
+                if (holder || first_of_log) && is_removable(crate::codec::logical_kind(fh.kind)) {
                     push(events, Event::Copy { at, rec: rec_ }, i, fh.at)?;
                 }
                 self.skip(r, f, fh)?;
@@ -2180,7 +2186,10 @@ impl<'p> Scan<'p> {
         if file.is_some_and(|f| f != d.file) || d.apply != authority {
             return Err(damaged(d.offset, drop_text::NO_AUTHORIZATION));
         }
-        if (d.kind, d.hash, d.len) != (identity.0, identity.1, identity.2) {
+        // the span names the frame by its logical kind (`crate::codec`)
+        if (crate::codec::logical_kind(d.kind), d.hash, d.len)
+            != (identity.0, identity.1, identity.2)
+        {
             return Err(damaged(d.offset, drop_text::SPAN));
         }
         if d.residue != identity.3 {
@@ -2400,8 +2409,9 @@ impl<'p> Scan<'p> {
         if self.mode != Some(StoreMode::Holder) || self.holder.over.is_some() {
             return Ok(());
         }
+        // keyed by the logical kind; the copy keeps its raw kind (`crate::codec`)
         let k = ObjectKey {
-            kind: r.kind,
+            kind: crate::codec::logical_kind(r.kind),
             hash: r.hash,
         };
         let c = KeyCopy {
@@ -2451,8 +2461,9 @@ impl<'p> Scan<'p> {
         } else {
             None
         };
+        // the residue proof reads the copy by its raw kind (`crate::redaction::residue_matches`)
         if !copy_fits(
-            k.kind,
+            c.rec.kind,
             c.rec.len,
             intact.as_deref(),
             &tuple,
@@ -3066,7 +3077,7 @@ impl<'p> Scan<'p> {
                 self.holder
                     .approved
                     .get(&ObjectKey {
-                        kind: d.kind,
+                        kind: crate::codec::logical_kind(d.kind),
                         hash: d.hash,
                     })
                     .map(|(t, a)| (*a, t.residue))

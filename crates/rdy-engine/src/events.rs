@@ -202,12 +202,16 @@ pub fn events_for_batch(
 ) -> Result<Vec<Event>, RdyError> {
     let mut out = Vec::new();
     // the set a close in this batch belongs to: the batch's alternative set version, if any
-    let set = match frames.iter().find(|(k, _)| *k == kinds::ALT_SET) {
+    let set = match frames
+        .iter()
+        .find(|(k, _)| rdy_store::codec::logical_kind(*k) == kinds::ALT_SET)
+    {
         Some((_, h)) => Some(reader.alt_set(h)?.stable_id(*h)),
         None => None,
     };
     for &(kind, hash) in frames {
-        match kind {
+        // by the logical kind: a frame of any encoding (`rdy_store::codec`)
+        match rdy_store::codec::logical_kind(kind) {
             kinds::VIEW_OP => {
                 let op = reader.view_op(&hash)?;
                 let at_ms = op.at_ms;

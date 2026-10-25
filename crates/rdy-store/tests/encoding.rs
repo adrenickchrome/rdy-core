@@ -124,7 +124,9 @@ fn ok1_frame_versions_preserve_raw_zero_bytes() {
     drop(s);
     let bytes = segment(&src);
 
-    // every stored frame is of encoding 0: unmarked, its payload its body, its hash the body's
+    // every stored frame is of its kind's latest encoding: encoding 0 unmarked, its payload its
+    // body; a kind with a registered encoding (CHANGE, ok4) marked, its payload the version
+    // prefix and its body; its hash the stored payload's in both
     let mut at = 0usize;
     for b in &batches {
         for f in &b.frames {
@@ -136,17 +138,17 @@ fn ok1_frame_versions_preserve_raw_zero_bytes() {
             else {
                 panic!("no frame is dropped here");
             };
-            assert_eq!(kind & codec::VERSIONED, 0);
-            assert_eq!(
-                codec::split(*kind, payload).unwrap(),
-                ObjectBytes {
-                    kind: *kind,
-                    version: 0,
-                    body: payload
-                }
-            );
-            assert_eq!(*hash, encoded_hash(0, payload));
-            assert_eq!(codec::latest(*kind), 0, "every kind's latest encoding is 0");
+            let logical = codec::logical_kind(*kind);
+            let version = codec::latest(logical);
+            assert_eq!(*kind, codec::raw_kind(logical, version));
+            let o = codec::split(*kind, payload).unwrap();
+            assert_eq!((o.kind, o.version), (logical, version));
+            let body_at = if version == 0 { 0 } else { 2 };
+            assert_eq!(o.body, &payload[body_at..]);
+            assert_eq!(*hash, encoded_hash(version, o.body));
+            if logical != kinds::CHANGE {
+                assert_eq!(version, 0, "every other kind's latest encoding here is 0");
+            }
             // the frame's exact bytes at its place: header, then the payload
             let frame_at = bytes[at..]
                 .windows(32)
@@ -412,7 +414,8 @@ fn ok1_dropped_project_frames_keep_their_encoding() {
         .collect();
     assert!(!dropped.is_empty());
     let dump = write_dump(&features, &batches);
-    // each DROPPED record: logical kind, encoding 0, then the format-3 proof order
+    // each DROPPED record: logical kind, its encoding (a change's is CHANGE's latest, ok4),
+    // then the format-3 proof order
     let (_, _, back) = read_dump(&dump).unwrap();
     assert_eq!(back, batches, "kind, length and proof survive");
     for f in &dropped {
@@ -426,7 +429,13 @@ fn ok1_dropped_project_frames_keep_their_encoding() {
         else {
             unreachable!()
         };
-        let mut want = vec![*kind, 0, 0];
+        let encoding = if *kind & codec::VERSIONED != 0 {
+            codec::latest(codec::logical_kind(*kind))
+        } else {
+            0
+        };
+        let mut want = vec![codec::logical_kind(*kind)];
+        want.extend_from_slice(&encoding.to_le_bytes());
         want.extend_from_slice(&hash.0);
         want.extend_from_slice(&len.to_le_bytes());
         want.extend_from_slice(&apply.0);
@@ -438,9 +447,9 @@ fn ok1_dropped_project_frames_keep_their_encoding() {
             .position(|w| w == want)
             .expect("the DROPPED record");
         assert_eq!(dump[at - 33], rec::DROPPED);
-        // a versioned removal has no residue adapter: refused
+        // an encoding the removed kind does not register is refused
         let mut forged = dump.clone();
-        forged[at + 1] = 1;
+        forged[at + 1] = encoding as u8 + 1;
         let h = Hash::of(&forged[at..at + ENCODED_DROPPED_LEN]);
         forged[at - 32..at].copy_from_slice(&h.0);
         match read_dump(&forged) {
@@ -613,7 +622,8 @@ fn ok1_every_writer_writes_its_kinds_latest_encoding() {
                 assert_eq!(*kind, o.kind);
                 continue;
             }
-            let want = u16::from(versioned.contains(&o.kind));
+            // a test-registered kind's, or a kind's registered latest (CHANGE and LANDING, ok4)
+            let want = codec::latest(o.kind);
             assert_eq!(o.version, want, "kind {}", o.kind);
             assert_eq!(*kind, codec::raw_kind(o.kind, want), "kind {}", o.kind);
             assert_eq!(*hash, Hash::of(payload));

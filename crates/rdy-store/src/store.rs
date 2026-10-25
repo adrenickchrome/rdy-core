@@ -1395,8 +1395,8 @@ impl Store {
         }
     }
 
-    /// The kind and hash of every data frame the last successful `write` appended, after dedupe
-    /// and in write order (batch markers excluded); empty right after open and after a write
+    /// The logical kind and hash of every data frame the last successful `write` appended, after
+    /// dedupe and in write order (batch markers excluded); empty right after open and after a write
     /// that appended nothing. A failed write leaves it as it was. With held batches, the last
     /// sealed batch: a held write sets it only when it appended nothing and no batch is open.
     pub fn last_batch(&self) -> &[(u8, Hash)] {
@@ -1557,7 +1557,11 @@ impl Store {
         // The write is acknowledged: it is durable in the log. A checkpoint is only the index
         // catching up, so a failure of one is recorded and retried, never returned.
         self.pending += frames.len() as u64 + 1;
-        self.last_batch = frames;
+        // the batch's objects by their logical kinds (`crate::codec`)
+        self.last_batch = frames
+            .into_iter()
+            .map(|(k, h)| (crate::codec::logical_kind(k), h))
+            .collect();
         self.last_batch_end = self.log.end();
         self.last_write = Instant::now();
         if self.pending >= self.checkpoint_frames

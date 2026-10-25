@@ -267,7 +267,7 @@ fn patch_header(bytes: &[u8], from: usize, new: &[u8]) -> Vec<u8> {
 }
 
 /// The offsets of a format-4 header payload's fields, after its baseline manifest.
-const M: usize = 36;
+const M: usize = 183;
 const H_STORE: usize = 5;
 const H_REPO: usize = 5 + M;
 const H_BASE: usize = 21 + M;
@@ -340,7 +340,7 @@ fn history() -> History {
             .unwrap(),
         *frames
             .iter()
-            .find(|f| f.kind == kinds::CHANGE && f.hash == c1)
+            .find(|f| rdy_store::codec::logical_kind(f.kind) == kinds::CHANGE && f.hash == c1)
             .unwrap(),
     ];
     let removal = remove(
@@ -1209,7 +1209,7 @@ fn loaded(held: bool) -> Loaded {
         .unwrap();
     let cf = *all
         .iter()
-        .find(|f| f.kind == kinds::CHANGE && f.hash == cid)
+        .find(|f| rdy_store::codec::logical_kind(f.kind) == kinds::CHANGE && f.hash == cid)
         .unwrap();
     let residues = vec![block_residue(&secret), change_residue(&stored)];
     let mut spans = vec![
@@ -1703,7 +1703,7 @@ fn payload_of(it: &Items, kind: u8, hash: Hash) -> Vec<u8> {
     it.batches
         .iter()
         .flat_map(|b| b.frames.iter())
-        .find(|f| f.kind() == kind && *f.hash() == hash)
+        .find(|f| rdy_store::codec::logical_kind(f.kind()) == kind && *f.hash() == hash)
         .and_then(|f| f.present_payload())
         .unwrap()
         .to_vec()
@@ -2192,7 +2192,11 @@ fn hc5_carried_records_keep_their_store_rules() {
     let f0 = h.bytes(&h.f0);
     let it = items(&f0);
     let c1 = h.secret_frames[1].hash;
-    let stored: Change = postcard::from_bytes(&payload_of(&it, kinds::CHANGE, c1)).unwrap();
+    let stored: Change = rdy_store::codec::decode_record(
+        rdy_store::codec::raw_kind(kinds::CHANGE, rdy_store::codec::latest(kinds::CHANGE)),
+        &payload_of(&it, kinds::CHANGE, c1),
+    )
+    .unwrap();
     let residues = vec![block_residue(&h.secret), change_residue(&stored)];
     let spans = vec![
         span(&h.secret_frames[0], Some(&residues[0]), true),
@@ -2266,7 +2270,11 @@ fn carried_flood(h: &History, n: usize) -> (Vec<PathBuf>, usize) {
     let f0 = h.bytes(&h.f0);
     let it = items(&f0);
     let c1 = h.secret_frames[1].hash;
-    let stored: Change = postcard::from_bytes(&payload_of(&it, kinds::CHANGE, c1)).unwrap();
+    let stored: Change = rdy_store::codec::decode_record(
+        rdy_store::codec::raw_kind(kinds::CHANGE, rdy_store::codec::latest(kinds::CHANGE)),
+        &payload_of(&it, kinds::CHANGE, c1),
+    )
+    .unwrap();
     let residues = vec![block_residue(&h.secret), change_residue(&stored)];
     let spans = vec![
         span(&h.secret_frames[0], Some(&residues[0]), true),

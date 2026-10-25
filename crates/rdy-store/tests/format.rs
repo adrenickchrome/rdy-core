@@ -16,9 +16,15 @@ fn format_error(e: StoreError) -> (String, String) {
 #[test]
 fn ok1_the_format_text_is_the_feature_manifest() {
     assert_eq!(LAST_SCALAR_STORE_FORMAT, 18);
+    // ok4: the baseline names content-2 identity and object encodings
     assert_eq!(
         baseline_features().to_text(),
-        "rdy store features 1\n{\"manifest_version\":1,\"features\":[]}\n"
+        concat!(
+            "rdy store features 1\n{\"manifest_version\":1,\"features\":[",
+            "{\"name\":\"content_hash_v2\",\"class\":\"incompatible\",\"required_rdy\":\"0.23.0\"},",
+            "{\"name\":\"object_encoding\",\"class\":\"incompatible\",\"required_rdy\":\"0.23.0\"}",
+            "]}\n"
+        )
     );
     let m = StoreFeatures::of(vec![
         StoreFeature {

@@ -679,27 +679,36 @@ fn embedding_change(levels: usize, map: bool, update: bool) -> Vec<u8> {
         links: Default::default(),
         read_identity: None,
     };
-    postcard::to_allocvec(&change).unwrap()
+    // the change's frame payload in CHANGE's latest encoding (ok4: the version prefix first)
+    rdy_store::codec::item(rdy_store::kinds::CHANGE, &change)
+        .unwrap()
+        .1
+}
+
+/// The raw kind of a change frame in CHANGE's latest encoding.
+fn change_raw() -> u8 {
+    let kind = rdy_store::kinds::CHANGE;
+    rdy_store::codec::raw_kind(kind, rdy_store::codec::latest(kind))
 }
 
 #[test]
 fn ha1_field_nesting_bound_fits_the_deepest_embedding_record() {
     use rdy_model::MAX_FIELD_NESTING;
-    use rdy_store::kinds::CHANGE;
+    let change = change_raw();
     // the write-side bound is what the stream decoder's own counting allows in the deepest
     // record that embeds a block: at MAX_FIELD_NESTING levels it decodes, one more is refused
     for map in [false, true] {
         for update in [true, false] {
             let at = embedding_change(MAX_FIELD_NESTING, map, update);
             assert!(
-                refs_of(CHANGE, &at).is_ok(),
+                refs_of(change, &at).is_ok(),
                 "map {map} update {update}: {:?}",
-                refs_of(CHANGE, &at)
+                refs_of(change, &at)
             );
         }
         let over = embedding_change(MAX_FIELD_NESTING + 1, map, true);
         assert_eq!(
-            unit(refs_of(CHANGE, &over)),
+            unit(refs_of(change, &over)),
             limit(NESTING, 64),
             "map {map}"
         );
@@ -807,7 +816,8 @@ fn cp3_hostile_plan_hints_do_not_allocate_from_the_hint() {
     let act = plan_prefix().len() + 1 + 32;
     assert_eq!(good[act], 2, "the act byte of Done");
     let mut bad = good.clone();
-    bad[act] = 3;
+    // past Dismiss (3, ok4)
+    bad[act] = 4;
     assert_eq!(decode(&bad), Err(RecordError::Decode));
     let item = rdy_model::plan::SealedItem {
         id: Hash([9; 32]),
@@ -839,7 +849,8 @@ fn cp3_hostile_plan_hints_do_not_allocate_from_the_hint() {
     assert_eq!(good[kind], 4, "the kind byte of update_implementation");
     let outcome = at + sub.len() - 2;
     assert_eq!(good[outcome], 9, "the outcome byte of open");
-    for (i, v) in [(kind, 5u8), (outcome, 10u8)] {
+    // past Tension (5) and Dismissed (10), ok4
+    for (i, v) in [(kind, 6u8), (outcome, 11u8)] {
         let mut bad = good.clone();
         bad[i] = v;
         assert_eq!(decode(&bad), Err(RecordError::Decode), "byte {i} = {v}");

@@ -450,7 +450,7 @@ fn frames(s: &Store, from: Location, to: Location) -> Vec<(u8, Hash)> {
     let mut out = vec![];
     s.reader()
         .for_each_frame_from(from, to, |_, kind, hash, _, _| {
-            out.push((kind, hash));
+            out.push((rdy_store::codec::logical_kind(kind), hash));
             Ok(())
         })
         .unwrap();

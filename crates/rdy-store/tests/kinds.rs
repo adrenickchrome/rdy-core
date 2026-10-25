@@ -162,7 +162,7 @@ fn repr1_a_landing_with_every_field_set_survives_the_store_and_a_reindex() {
         read_identity: None,
     };
     let lh = s
-        .write(vec![(kinds::LANDING, postcard::to_allocvec(&l).unwrap())])
+        .write(vec![rdy_store::codec::item(kinds::LANDING, &l).unwrap()])
         .unwrap()[0];
     assert_eq!(lh, l.id());
     assert_eq!(s.landing(&lh).unwrap(), l);
