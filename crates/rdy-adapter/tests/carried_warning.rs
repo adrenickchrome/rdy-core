@@ -200,6 +200,12 @@ fn target(tag: &str, landing: Hash) -> UploadTarget {
     }
 }
 
+/// The id of a new residue `r`: the hash of its frame in its kind's latest encoding, as an rdy of
+/// this version writes one (`rdy_store::codec`).
+fn residue_id(r: &RedactionResidue) -> Hash {
+    Hash::of(&rdy_store::codec::frame_latest(kinds::REDACTION_RESIDUE, enc(r)).1)
+}
+
 /// `value`'s record encoding, through the model's bounded encoder.
 fn enc<T: serde::Serialize>(value: &T) -> Vec<u8> {
     let mut buf = vec![0u8; 1 << 20];
@@ -334,7 +340,7 @@ fn carry(store: &Path, origin: &Origin, names: &[Names]) -> (Hash, RedactionCarr
             kind: f.kind,
             hash: f.hash,
             len: f.len,
-            residue: Some(Hash::of(&enc(&f.residue))),
+            residue: Some(residue_id(&f.residue)),
             held,
         });
     };

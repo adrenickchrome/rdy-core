@@ -496,9 +496,18 @@ fn sig10_the_v2_s14_fixture_loads_with_every_hash() {
         "fsck counts"
     );
     r.close().unwrap();
-    first_start_logs_moves(&dir, false, "v2-s14");
+    let logged = first_start_logs_moves(&dir, false, "v2-s14");
     let r = Rdy::open(&dir).unwrap();
     rdy_qa::invariants::check_all(&r).unwrap_or_else(|v| panic!("{v:#?}"));
+    // the first start added its one TRANSITION record and nothing else
+    let started = every_kind::facts(&r)["objects"].clone();
+    let mut want_started = got["objects"].clone();
+    if logged > 0 {
+        let t = kinds::TRANSITION.to_string();
+        let n = want_started[&t].as_u64().unwrap_or(0);
+        want_started[&t] = json!(n + 1);
+    }
+    assert_eq!(started, want_started, "after the first start");
     r.close().unwrap();
     // the reindex check opens the project itself, so the store lock is released first
     rdy_qa::reindex_check::reindex_reproduces(&dir).unwrap_or_else(|v| panic!("{v:#?}"));
@@ -507,7 +516,7 @@ fn sig10_the_v2_s14_fixture_loads_with_every_hash() {
     r.reindex().unwrap();
     let again = every_kind::facts(&r);
     assert_eq!(again["signatures"], expect["signatures"], "after a reindex");
-    assert_eq!(again["objects"], got["objects"], "after a reindex");
+    assert_eq!(again["objects"], started, "after a reindex");
     r.close().unwrap();
 }
 

@@ -37,9 +37,14 @@ fn lpin1_content_hash_ignores_pins_and_derived_fields_and_nothing_else() {
     let mut body = b.clone();
     body.body = "A holds, changed.".into();
     assert_ne!(body.content_hash(), b.content_hash());
+    // D-TX3KH (ok2): the order key is out of the content hash; a parent change is in it
     let mut moved = b.clone();
     moved.order = "a2".into();
-    assert_ne!(moved.content_hash(), b.content_hash());
+    assert_eq!(moved.content_hash(), b.content_hash());
+    assert_ne!(moved.version_hash(), b.version_hash());
+    let mut reparented = b.clone();
+    reparented.parent = Some(id("s-BBBBB"));
+    assert_ne!(reparented.content_hash(), b.content_hash());
     assert_ne!(
         b.content_hash(),
         b.version_hash(),

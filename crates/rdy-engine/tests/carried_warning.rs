@@ -95,6 +95,12 @@ fn project() -> (tempfile::TempDir, BlockId, BlockId) {
     )
 }
 
+/// The id of a new residue `r`: the hash of its frame in its kind's latest encoding, as an rdy of
+/// this version writes one (`rdy_store::codec`).
+fn residue_id(r: &RedactionResidue) -> Hash {
+    Hash::of(&rdy_store::codec::frame_latest(kinds::REDACTION_RESIDUE, enc(r)).1)
+}
+
 /// `value`'s record encoding, through the model's bounded encoder.
 fn enc<T: serde::Serialize>(value: &T) -> Vec<u8> {
     let mut buf = vec![0u8; 1 << 20];
@@ -185,7 +191,7 @@ fn record_of(f: &Frames, spec: Spec) -> RedactionCarried {
         kind,
         hash: x.1,
         len: x.2,
-        residue: Some(Hash::of(&enc(&x.3))),
+        residue: Some(residue_id(&x.3)),
         held,
     };
     let mut spans = vec![];

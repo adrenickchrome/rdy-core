@@ -88,7 +88,10 @@ fn carry(dir: &Path) -> (Hash, Hash, Hash, String) {
                     kind,
                     hash,
                     len: payload.len() as u32,
-                    residue: Some(Hash::of(&enc(&residue))),
+                    // named by its frame in the latest encoding, as an rdy of this version writes it
+                    residue: Some(Hash::of(
+                        &rdy_store::codec::frame_latest(kinds::REDACTION_RESIDUE, enc(&residue)).1,
+                    )),
                     held: true,
                 });
                 residues.push(residue);

@@ -195,7 +195,9 @@ fn keeps_the_source(src: &Path, src_recs: &[Rec], to: &Path, what: &str) {
     assert_eq!(&got[..src_recs.len()], src_recs, "{what}: every record");
     for rec in src_recs.iter().filter(|r| r.kind != kinds::BATCH_COMMIT) {
         assert!(
-            r.store().has_kind(rec.kind, &rec.hash).unwrap(),
+            r.store()
+                .has_kind(rdy_store::codec::logical_kind(rec.kind), &rec.hash)
+                .unwrap(),
             "{what}: {} stays",
             rec.hash
         );

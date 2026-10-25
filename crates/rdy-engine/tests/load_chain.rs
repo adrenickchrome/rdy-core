@@ -477,14 +477,13 @@ fn hc7_stopped_load_has_exact_prefix_residues_carried_upgrade_order() {
     let tail = batches(&to, c.f0_end, None);
     assert_eq!(tail.len(), 1, "{tail:?}");
     let kinds_of: Vec<u8> = tail[0].frames.iter().map(|f| f.kind()).collect();
-    assert_eq!(
-        kinds_of,
-        vec![
-            kinds::REDACTION_RESIDUE,
-            kinds::REDACTION_RESIDUE,
-            kinds::REDACTION_CARRIED
-        ]
+    // this rdy wrote the residues, so each is framed in its kind's latest encoding (ok2:
+    // REDACTION_RESIDUE encoding 1)
+    let residue = rdy_store::codec::raw_kind(
+        kinds::REDACTION_RESIDUE,
+        rdy_store::codec::latest(kinds::REDACTION_RESIDUE),
     );
+    assert_eq!(kinds_of, vec![residue, residue, kinds::REDACTION_CARRIED]);
     let residues: Vec<Hash> = tail[0].frames[..2].iter().map(|f| *f.hash()).collect();
     assert!(residues[0] < residues[1], "residues sorted by hash");
     let carried_hash = *tail[0].frames[2].hash();

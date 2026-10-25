@@ -947,9 +947,10 @@ fn rdx15_snapshots_are_references_and_assessment_support_is_absent() {
     let st = p.r.read();
     st.reader()
         .for_each_record_from(ORIGIN, st.seq(), |_, f, _| {
-            seen.insert(match f {
+            // by logical kind: a frame of any encoding (`rdy_store::codec`)
+            seen.insert(rdy_store::codec::logical_kind(match f {
                 StoredFrame::Present { kind, .. } | StoredFrame::Dropped { kind, .. } => kind,
-            });
+            }));
             Ok(())
         })
         .unwrap();

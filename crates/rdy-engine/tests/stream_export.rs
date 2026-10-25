@@ -353,7 +353,10 @@ fn carry_canary(dir: &std::path::Path) -> Hash {
                 kind: *kind,
                 hash: *hash,
                 len: *len,
-                residue: Some(Hash::of(&enc(res))),
+                // named by its frame in the latest encoding, as an rdy of this version writes it
+                residue: Some(Hash::of(
+                    &rdy_store::codec::frame_latest(kinds::REDACTION_RESIDUE, enc(res)).1,
+                )),
                 held: false,
             })
             .collect(),
