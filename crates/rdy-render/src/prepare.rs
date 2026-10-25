@@ -5,13 +5,13 @@
 use crate::site::Site;
 use crate::{changes, disagree, review, version};
 use rdy_engine::{
-    E_REDACTED, Materialized, RdyError, ReadState, Scope, VersionInfo, VersionPosition,
+    BlobState, E_REDACTED, Materialized, RdyError, ReadState, Scope, VersionInfo, VersionPosition,
 };
 use rdy_graph::Graph;
 use rdy_model::redaction::BlockResidue;
 use rdy_model::{Block, BlockId, Hash, Op};
 use rdy_schema::Pack;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -139,6 +139,16 @@ pub(crate) fn source(
     scope: &Scope,
     purpose: Purpose,
 ) -> Result<Prepared, RdyError> {
+    source_reading(rdy, scope, purpose, rdy)
+}
+
+/// [`source`], reading the figure blobs through `reads`.
+fn source_reading(
+    rdy: &ReadState,
+    scope: &Scope,
+    purpose: Purpose,
+    reads: &dyn BlobReads,
+) -> Result<Prepared, RdyError> {
     let position = rdy.version_position(scope)?;
     let versions = rdy.versions()?;
     // when each version's landing was approved (only the versions' landings are read)
@@ -153,14 +163,14 @@ pub(crate) fn source(
     // the figure blobs the store holds; a figure whose blob lost content reads as removed from
     // here on, so no page, summary or print reads its file or words
     let mut blobs = FigureBlobs::default();
-    let m = blobs.side(rdy, scope, true)?;
+    let m = blobs.side(rdy, reads, scope, true)?;
     let site_name = rdy.project_name();
     let description = rdy.project_description();
     let pack = rdy.pack().clone();
     let g = rdy.graph(scope)?;
     let disagreements = disagree::list(rdy, scope)?;
     let history = history(
-        rdy, scope, purpose, &m, &pack, &site_name, &position, &mut blobs,
+        rdy, reads, scope, purpose, &m, &pack, &site_name, &position, &mut blobs,
     )?;
     let scope_text = scope_text(&versions, scope);
     Ok(Prepared {
@@ -205,6 +215,7 @@ fn scope_text(versions: &[VersionInfo], scope: &Scope) -> String {
 #[allow(clippy::too_many_arguments)]
 fn history(
     rdy: &ReadState,
+    reads: &dyn BlobReads,
     scope: &Scope,
     purpose: Purpose,
     m: &Materialized,
@@ -254,7 +265,7 @@ fn history(
     let mut inline_diffs: BTreeMap<BlockId, String> = BTreeMap::new();
     if let (Some(r), Some(rv)) = (&reviewed, listed.as_ref()) {
         let (diff, from) = match &base {
-            Some(b) => (Some(rdy.diff(b, scope)?), blobs.side(rdy, b, false)?),
+            Some(b) => (Some(rdy.diff(b, scope)?), blobs.side(rdy, reads, b, false)?),
             None => (None, Default::default()),
         };
         let sides = changes::Sides {
@@ -288,10 +299,10 @@ fn history(
     {
         let rv = review::between(rdy, &tag, &to)?;
         let diff = rdy.diff(&tag, &to)?;
-        let from = blobs.side(rdy, &tag, false)?;
+        let from = blobs.side(rdy, reads, &tag, false)?;
         // both sides read against the `to` side's site (O4)
         let to_m = (to != *scope)
-            .then(|| blobs.side(rdy, &to, false))
+            .then(|| blobs.side(rdy, reads, &to, false))
             .transpose()?;
         let to_site = to_m.as_ref().map(|tm| Site::new(tm, pack, site_name));
         let sides = changes::Sides {
@@ -328,12 +339,14 @@ fn history(
 /// The figure blobs a build reads (D-3M81W): the bytes of each readable blob of the scope, and
 /// the blobs a redaction removed a chunk of, by the first request that removed one. A removed
 /// blob's bytes are never read, so they never reach an asset file or the print's image decoder.
+/// Each blob's state is read once per build from its metadata, and its bytes once, only when the
+/// scope a build pages shows it (D-FY4VF).
 #[derive(Default)]
 pub(crate) struct FigureBlobs {
     pub bytes: BTreeMap<Hash, Vec<u8>>,
     pub removed: BTreeMap<Hash, Hash>,
-    /// The blobs of another side (a change summary's) that read whole; their bytes are not kept.
-    readable: BTreeSet<Hash>,
+    /// The state each blob this build reached read as, kept for the build's other sides.
+    states: BTreeMap<Hash, BlobState>,
 }
 
 impl FigureBlobs {
@@ -343,38 +356,48 @@ impl FigureBlobs {
         FigureBlobs {
             bytes,
             removed,
-            readable: BTreeSet::new(),
+            states: BTreeMap::new(),
         }
     }
 
-    /// The blocks of `scope`, each figure whose blob lost content read as removed. `keep` keeps
-    /// the bytes of each readable blob (the scope a build pages); a change summary's other side
-    /// only learns which blobs lost content.
+    /// The blocks of `scope`, each figure whose blob lost content read as removed. `keep` reads
+    /// and keeps the bytes of each readable blob (the scope a build pages); a change summary's
+    /// other side only reads which blobs lost content, never a byte.
     fn side(
         &mut self,
         rdy: &ReadState,
+        reads: &dyn BlobReads,
         scope: &Scope,
         keep: bool,
     ) -> Result<Arc<Materialized>, RdyError> {
         let m = rdy.materialized(scope)?;
         for b in m.iter() {
             let Some(h) = figure_blob(b) else { continue };
-            if self.bytes.contains_key(&h)
-                || self.removed.contains_key(&h)
-                || self.readable.contains(&h)
-                || !rdy.reader().has_blob(&h).unwrap_or(false)
-            {
+            if self.bytes.contains_key(&h) {
                 continue;
             }
-            match rdy.reader().get_blob(&h).map_err(RdyError::from) {
-                Ok(bytes) if keep => {
-                    self.bytes.insert(h, bytes);
+            let state = match self.states.get(&h) {
+                Some(state) => *state,
+                None => {
+                    let state = reads.state(&h)?;
+                    self.states.insert(h, state);
+                    if let BlobState::Removed(request) = state {
+                        self.removed.insert(h, request);
+                    }
+                    state
                 }
-                Ok(_) => {
-                    self.readable.insert(h);
+            };
+            if !keep || state != BlobState::Readable {
+                continue;
+            }
+            // a readable blob the paged scope shows: its bytes, once
+            match reads.bytes(&h) {
+                Ok(bytes) => {
+                    self.bytes.insert(h, bytes);
                 }
                 Err(e) => match removed_by(&e) {
                     Some(request) => {
+                        self.states.insert(h, BlobState::Removed(request));
                         self.removed.insert(h, request);
                     }
                     None => return Err(e),
@@ -403,6 +426,23 @@ impl FigureBlobs {
         } else {
             Arc::new(m.with(&ops))
         }
+    }
+}
+
+/// What collecting a build's figure blobs reads of the store: a blob's state from its metadata,
+/// and its bytes. A source build reads through the store; a test counts the reads.
+pub(crate) trait BlobReads {
+    fn state(&self, h: &Hash) -> Result<BlobState, RdyError>;
+    fn bytes(&self, h: &Hash) -> Result<Vec<u8>, RdyError>;
+}
+
+impl BlobReads for ReadState {
+    fn state(&self, h: &Hash) -> Result<BlobState, RdyError> {
+        self.reader().blob_state(h).map_err(RdyError::from)
+    }
+
+    fn bytes(&self, h: &Hash) -> Result<Vec<u8>, RdyError> {
+        self.reader().get_blob(h).map_err(RdyError::from)
     }
 }
 
@@ -479,4 +519,119 @@ pub(crate) fn reviewed_of(
         }
         Scope::Canon | Scope::At(_) | Scope::Inflight => None,
     })
+}
+
+#[cfg(test)]
+mod dgm2 {
+    use super::*;
+    use rdy_engine::{Rdy, Session, WriteRequest};
+    use rdy_model::Role;
+    use serde_json::{Value, json};
+    use std::cell::RefCell;
+
+    fn session(role: Role) -> Session {
+        Session::human("human:qa".into(), role).unwrap()
+    }
+
+    fn write(r: &mut Rdy, view: &str, ops: Value) -> BTreeMap<String, String> {
+        r.write(
+            &session(Role::Writer),
+            WriteRequest {
+                view: view.into(),
+                ops: serde_json::from_value(ops).expect("ops"),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .expect("write")
+        .created
+        .into_iter()
+        .collect()
+    }
+
+    fn land(r: &mut Rdy, view: &str) {
+        let p = r
+            .propose(&session(Role::Writer), view, view, Some("test summary"))
+            .expect("propose");
+        r.land(&session(Role::Approver), &p.id).expect("land");
+    }
+
+    /// The store, with each blob state and byte read counted by hash.
+    struct Counting<'a> {
+        rdy: &'a ReadState,
+        states: RefCell<BTreeMap<Hash, u32>>,
+        bytes: RefCell<BTreeMap<Hash, u32>>,
+    }
+
+    impl BlobReads for Counting<'_> {
+        fn state(&self, h: &Hash) -> Result<BlobState, RdyError> {
+            *self.states.borrow_mut().entry(*h).or_default() += 1;
+            self.rdy.state(h)
+        }
+
+        fn bytes(&self, h: &Hash) -> Result<Vec<u8>, RdyError> {
+            *self.bytes.borrow_mut().entry(*h).or_default() += 1;
+            self.rdy.bytes(h)
+        }
+    }
+
+    #[test]
+    fn dgm2_one_blob_read_per_build() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut r = Rdy::init(dir.path(), "rdy-standard").expect("init");
+        let shared = r.store_mut().put_blob(b"shared figure bytes").unwrap();
+        let old = r.store_mut().put_blob(b"history figure bytes").unwrap();
+        let fig = |id: &str, parent: &str, blob: &Hash| {
+            json!({"op": "create", "type": "figure", "id": id, "parent": parent,
+                "fields": {"blob": blob.to_string(), "media_type": "image/png", "alt": "A figure"}})
+        };
+        // the shared blob in two docs, and a blob only the tag's history shows
+        let ids = write(
+            &mut r,
+            "w1",
+            json!([
+                {"op": "create", "type": "doc", "id": "$a", "fields": {"name": "a", "title": "Doc A", "doc_type": "page"}},
+                {"op": "create", "type": "prose", "id": "$ap", "parent": "$a", "body": "A words."},
+                {"op": "create", "type": "doc", "id": "$b", "fields": {"name": "b", "title": "Doc B", "doc_type": "page"}},
+                fig("$fa", "$a", &shared),
+                fig("$fb", "$b", &shared),
+                fig("$fo", "$a", &old),
+            ]),
+        );
+        land(&mut r, "w1");
+        r.tag(&session(Role::Approver), "v1.0.0", None, None)
+            .expect("tag");
+        write(&mut r, "w2", json!([{"op": "delete", "id": ids["$fo"]}]));
+        land(&mut r, "w2");
+        // a view under review: its base (canon), the tag and canon are the history sides
+        write(
+            &mut r,
+            "work",
+            json!([{"op": "update", "id": ids["$ap"], "body": "A words, edited."}]),
+        );
+        let st = r.read();
+        let reads = Counting {
+            rdy: &st,
+            states: RefCell::default(),
+            bytes: RefCell::default(),
+        };
+        let scope = Scope::View("work".into());
+        for build in 1..=2u32 {
+            let p = source_reading(&st, &scope, Purpose::Site, &reads).expect("prepare");
+            assert!(p.history.since.is_some(), "the tag's history is read");
+            assert_eq!(p.blobs.bytes.keys().collect::<Vec<_>>(), vec![&shared]);
+            // one byte read and one metadata read of the shared blob per build; the history-only
+            // blob's state is read once and its bytes never
+            assert_eq!(
+                *reads.bytes.borrow(),
+                BTreeMap::from([(shared, build)]),
+                "build {build}"
+            );
+            assert_eq!(
+                *reads.states.borrow(),
+                BTreeMap::from([(shared, build), (old, build)]),
+                "build {build}"
+            );
+        }
+    }
 }
