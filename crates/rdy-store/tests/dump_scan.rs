@@ -811,7 +811,7 @@ fn hc5_proof_lookups_use_recorded_offsets() {
     );
     let kinds_read: Vec<u8> = distinct
         .iter()
-        .map(|o| recs.iter().find(|x| x.offset == *o).unwrap().kind)
+        .map(|o| rdy_store::codec::logical_kind(recs.iter().find(|x| x.offset == *o).unwrap().kind))
         .collect();
     // the apply's landing, its request and its two distinct residues: nothing else
     let mut sorted = kinds_read.clone();
@@ -1095,7 +1095,7 @@ fn hc5_later_apply_distinguishes_held_and_missing_bytes() {
     let hashes: Vec<Hash> = held
         .residues()
         .iter()
-        .map(|r| Hash::of(&postcard::to_allocvec(r).unwrap()))
+        .map(carried_fixture::residue_hash)
         .collect();
     let mut sorted = hashes.clone();
     sorted.sort();

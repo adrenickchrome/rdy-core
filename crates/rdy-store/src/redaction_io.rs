@@ -187,6 +187,9 @@ pub(crate) struct Applied {
     pub(crate) record: RedactionApply,
 }
 
+/// Decoded residues by residue hash, each with the encoding its frame records.
+pub(crate) type Residues = HashMap<Hash, (RedactionResidue, u16)>;
+
 /// What a log's validated redaction applies authorize, derived from the log alone.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Authorization {
@@ -195,6 +198,9 @@ pub(crate) struct Authorization {
     pub(crate) spans: BTreeMap<Location, SpanAuth>,
     /// The residues the spans name, decoded.
     pub(crate) residues: HashMap<Hash, RedactionResidue>,
+    /// The encoding each residue's frame records, by residue hash: it decides the one derivation
+    /// the residue's proof check uses (`crate::redaction::residue_matches`).
+    pub(crate) residue_encodings: HashMap<Hash, u16>,
     /// The validated applies, in log order.
     pub(crate) applies: Vec<Applied>,
     /// Every sealed request frame inside the acknowledged log, in log order.
@@ -209,6 +215,42 @@ pub(crate) struct Authorization {
 }
 
 impl Authorization {
+    /// Keeps residue `h`, `res`, stored in encoding `encoding`, for the spans that name it; a
+    /// residue kept already stays as it is.
+    pub(crate) fn keep_residue(
+        &mut self,
+        h: Hash,
+        res: RedactionResidue,
+        encoding: u16,
+    ) -> Result<(), StoreError> {
+        if !self.residues.contains_key(&h) {
+            self.residues.try_reserve(1).map_err(|_| out_of_memory())?;
+            self.residue_encodings
+                .try_reserve(1)
+                .map_err(|_| out_of_memory())?;
+            self.residues.insert(h, res);
+            self.residue_encodings.insert(h, encoding);
+        }
+        Ok(())
+    }
+
+    /// Keeps every residue of `residues` (see [`Authorization::keep_residue`]).
+    pub(crate) fn keep_residues(&mut self, residues: Residues) -> Result<(), StoreError> {
+        for (h, (res, encoding)) in residues {
+            self.keep_residue(h, res, encoding)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the kept residue `h` is exactly the residue of the intact `payload` of a frame
+    /// of `kind`, under the encoding its frame records (`crate::redaction::residue_matches`).
+    pub(crate) fn residue_matches(&self, kind: u8, payload: &[u8], h: &Hash) -> bool {
+        match (self.residues.get(h), self.residue_encodings.get(h)) {
+            (Some(r), Some(e)) => residue_matches(kind, payload, r, *e),
+            _ => false,
+        }
+    }
+
     /// Whether an active redaction exists: a validated apply, or a span whose zeros a carried
     /// record accounts for.
     pub(crate) fn is_active(&self) -> bool {
@@ -577,7 +619,10 @@ impl Collected {
             }),
             kinds::LANDING => p.landings.push((loc, hash)),
             kinds::REDACTION => p.requests.push((loc, hash)),
-            kinds::REDACTION_RESIDUE => p.residues.push((loc, hash)),
+            // a residue of any encoding (`crate::codec`)
+            k if crate::codec::logical_kind(k) == kinds::REDACTION_RESIDUE => {
+                p.residues.push((loc, hash))
+            }
             _ => {}
         }
         Ok(())
@@ -762,6 +807,27 @@ pub(crate) fn read_record(
     }
     let payload = read_payload(f, loc.offset + HEADER, len)?;
     Ok((Hash::of(&payload) == *hash).then_some(payload))
+}
+
+/// The residue record with hash `hash` at `loc`, of any encoding its kind registers, read and
+/// hash-checked through `access`, and the encoding its frame records. None when the frame there
+/// is no residue of that hash; a residue that does not decode is `None` too.
+pub(crate) fn read_residue(
+    access: &mut dyn RecordAccess,
+    loc: Location,
+    hash: &Hash,
+) -> Result<Option<(RedactionResidue, u16)>, StoreError> {
+    for version in 0..=crate::codec::latest(kinds::REDACTION_RESIDUE) {
+        let raw = crate::codec::raw_kind(kinds::REDACTION_RESIDUE, version);
+        if let Some(payload) = access.record(loc, raw, hash)? {
+            return Ok(
+                crate::codec::decode_identified::<RedactionResidue>(raw, &payload)
+                    .ok()
+                    .map(|(r, id)| (r, id.version)),
+            );
+        }
+    }
+    Ok(None)
 }
 
 /// Where the apply validator reads the records it needs (the proof source seam): a frame's
@@ -1077,7 +1143,7 @@ impl Validator {
             request.manifest.versions.iter().cloned().collect();
         let version_hashes: HashSet<Hash> = versions.iter().map(|(_, v)| *v).collect();
         // each distinct residue of this request is read once
-        let mut read: HashMap<Hash, RedactionResidue> = HashMap::new();
+        let mut read: HashMap<Hash, (RedactionResidue, u16)> = HashMap::new();
         let mut prev: Option<Location> = None;
         let mut spans = Vec::with_capacity(request.manifest.spans.len());
         for span in &request.manifest.spans {
@@ -1104,18 +1170,12 @@ impl Validator {
                                 .get(&r)
                                 .filter(|l| **l < a.loc)
                                 .ok_or_else(bad)?;
-                            let res: RedactionResidue = crate::codec::decode_record(
-                                kinds::REDACTION_RESIDUE,
-                                &access
-                                    .record(*rloc, kinds::REDACTION_RESIDUE, &r)?
-                                    .ok_or_else(bad)?,
-                            )
-                            .map_err(|_| bad())?;
+                            let res = read_residue(access, *rloc, &r)?.ok_or_else(bad)?;
                             read.insert(r, res.clone());
                             res
                         }
                     };
-                    if !residue_fits(span.kind, &span.hash, &res, &versions, &version_hashes) {
+                    if !residue_fits(span.kind, &span.hash, &res.0, &versions, &version_hashes) {
                         return Err(bad());
                     }
                     Some((r, res))
@@ -1149,8 +1209,8 @@ impl Validator {
                             carried: false,
                         },
                     );
-                    if let Some((r, res)) = residue {
-                        auth.residues.insert(r, res);
+                    if let Some((r, (res, encoding))) = residue {
+                        auth.keep_residue(r, res, encoding)?;
                     }
                 }
             }
@@ -1471,8 +1531,10 @@ fn check_log(
                 }
                 let id = match (hole, f.intact()?) {
                     (true, Some(p)) => {
-                        let r = residue_of(&f.loc).ok_or_else(|| StoreError::corrupt_at(f.loc))?;
-                        if !residue_matches(f.kind, &p, r) {
+                        let r = auth.spans[&f.loc]
+                            .residue
+                            .ok_or_else(|| StoreError::corrupt_at(f.loc))?;
+                        if !auth.residue_matches(f.kind, &p, &r) {
                             return Err(StoreError::corrupt_at(f.loc));
                         }
                         crate::codec::decode_record::<Block>(f.kind, &p)
@@ -1529,8 +1591,10 @@ fn check_log(
             kinds::CHANGE => {
                 if hole {
                     if let Some(p) = f.intact()? {
-                        let r = residue_of(&f.loc).ok_or_else(|| StoreError::corrupt_at(f.loc))?;
-                        if !residue_matches(f.kind, &p, r) {
+                        let r = auth.spans[&f.loc]
+                            .residue
+                            .ok_or_else(|| StoreError::corrupt_at(f.loc))?;
+                        if !auth.residue_matches(f.kind, &p, &r) {
                             return Err(StoreError::corrupt_at(f.loc));
                         }
                     }

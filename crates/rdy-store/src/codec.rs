@@ -15,7 +15,9 @@
 //! a decoded value keeps the identity of the object it came from as metadata
 //! ([`rdy_model::encoding::EncodedIdentity`]), never in its postcard or JSON encoding.
 //!
-//! At this store every kind's latest encoding is 0.
+//! The registered encodings ([`REGISTERED`]): REDACTION_RESIDUE has encoding 1, whose body has
+//! encoding 0's shape and whose block residue records the content-2 hash (D-TX3KH: order left
+//! out). Every other kind's latest encoding is 0.
 use crate::bounded::{self, RecordError};
 use crate::error::StoreError;
 use crate::kinds;
@@ -87,21 +89,35 @@ fn never_versioned(kind: u8) -> bool {
     kind == kinds::REF_UPDATE || kind == kinds::BATCH_COMMIT
 }
 
+/// The encodings production registers past 0: (logical kind, latest version). A kind not here
+/// has encoding 0 alone.
+///
+/// REDACTION_RESIDUE 1: the body of encoding 0, but a block residue's `content_hash` is the
+/// content-2 hash of the removed block (order left out). An encoding-0 block residue holds the
+/// content-1 hash an rdy before content-2 recorded; the residue's encoding alone decides which
+/// derivation its proof check uses (`crate::redaction::residue_matches`).
+pub const REGISTERED: &[(u8, u16)] = &[(kinds::REDACTION_RESIDUE, 1)];
+
 thread_local! {
     /// Test-registered encodings of this thread: (logical kind, latest version).
     static TEST_ENCODINGS: RefCell<Vec<(u8, u16)>> = const { RefCell::new(Vec::new()) };
 }
 
-/// The latest encoding of logical kind `kind`: what every new object of it is written in. At
-/// this store it is 0 for every kind.
+/// The latest encoding of logical kind `kind`: what every new object of it is written in. It is
+/// the kind's [`REGISTERED`] version, else 0 (or a higher test-registered one on this thread).
 pub fn latest(kind: u8) -> u16 {
+    let registered = REGISTERED
+        .iter()
+        .filter(|(k, _)| *k == kind)
+        .map(|(_, v)| *v)
+        .max()
+        .unwrap_or(0);
     TEST_ENCODINGS.with(|t| {
         t.borrow()
             .iter()
             .filter(|(k, _)| *k == kind)
             .map(|(_, v)| *v)
-            .max()
-            .unwrap_or(0)
+            .fold(registered, u16::max)
     })
 }
 
@@ -284,7 +300,7 @@ impl Drop for TestEncoding {
 }
 
 /// Test hook: registers encodings 1 to `version` of logical kind `kind` on this thread, until the
-/// guard drops. Production registers no encoding but 0.
+/// guard drops. Production registers only [`REGISTERED`].
 #[doc(hidden)]
 pub fn test_encoding(kind: u8, version: u16) -> TestEncoding {
     assert!(version > 0 && kind & VERSIONED == 0 && !never_versioned(kind));

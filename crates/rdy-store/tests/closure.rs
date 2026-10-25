@@ -30,6 +30,7 @@ use rdy_store::sync_stream::{SYNC_KINDS, StreamHeader, StreamReader, StreamRecor
 use rdy_store::{Store, StoreReader};
 use redaction_fixture::{
     Fixture, FixtureOptions, Proof, RequestSpec, authorized_batch_fixture, enc, frames, hash_of,
+    residue_id,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -388,7 +389,7 @@ impl Src {
             .draft
             .residues
             .iter()
-            .map(hash_of)
+            .map(residue_id)
             .collect()
     }
 
@@ -527,8 +528,8 @@ fn ha5_every_kind_closure_is_ordered_and_complete() {
     let order = &c.records;
     let records = records_of(&bytes);
     for (i, k) in order.iter().enumerate() {
-        if let StreamRecord::Present { payload, .. } = &records[k] {
-            for e in refs_of(k.kind, payload).unwrap() {
+        if let r @ StreamRecord::Present { payload, .. } = &records[k] {
+            for e in refs_of(r.raw_kind(), payload).unwrap() {
                 if let Some(kind) = e.kind {
                     assert!(
                         position(order, key(kind, e.hash)) < i,
@@ -1097,16 +1098,17 @@ fn ha5_attachments_reach_a_fixed_point_without_identity_cycles() {
     let bytes = write(&reader, src.tag, &BTreeSet::new());
     let records = records_of(&bytes);
     for r in src.residues() {
-        let StreamRecord::Present { payload, .. } = &records[&key(kinds::REDACTION_RESIDUE, r)]
+        let rec @ StreamRecord::Present { payload, .. } =
+            &records[&key(kinds::REDACTION_RESIDUE, r)]
         else {
             panic!("a residue travels whole")
         };
-        let refs = refs_of(kinds::REDACTION_RESIDUE, payload).unwrap();
+        let refs = refs_of(rec.raw_kind(), payload).unwrap();
         assert!(
             !refs
                 .iter()
                 .any(|e| e.hash == src.secret.version_hash() && e.kind == Some(kinds::BLOCK))
-                || payload_is_change_residue(payload),
+                || payload_is_change_residue(rec.raw_kind(), payload),
             "a block residue has no link to its block"
         );
     }
@@ -1148,10 +1150,11 @@ fn ha5_attachments_reach_a_fixed_point_without_identity_cycles() {
     assert_eq!(dependency_order(a, &outside).unwrap(), vec![a]);
 }
 
-/// Whether a residue payload is a change residue (which links to the blocks it kept).
-fn payload_is_change_residue(payload: &[u8]) -> bool {
+/// Whether a residue payload of raw kind `raw` is a change residue (which links to the blocks it
+/// kept).
+fn payload_is_change_residue(raw: u8, payload: &[u8]) -> bool {
     matches!(
-        postcard::from_bytes::<rdy_model::redaction::RedactionResidue>(payload),
+        rdy_store::codec::decode_record::<rdy_model::redaction::RedactionResidue>(raw, payload),
         Ok(rdy_model::redaction::RedactionResidue::Change(_))
     )
 }

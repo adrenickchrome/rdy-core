@@ -18,7 +18,8 @@ mod redaction_fixture;
 use carried_fixture::{
     Framed, HEADER, append_raw, approver, block_residue, carried_frames, carried_hash,
     change_residue, copy_store, find, framed, framed_at, ingest, load, log_bytes, poke, record,
-    residue_hash, source_apply, source_landing, source_request, span, store_format, zero,
+    residue_frame, residue_hash, source_apply, source_landing, source_request, span, store_format,
+    zero,
 };
 use rdy_model::redaction::{CONTENT_REMOVED, RedactTarget, RedactionCarried, RedactionResidue};
 use rdy_model::*;
@@ -304,11 +305,13 @@ fn hc3_only_ingest_can_append_carried() {
         .collect();
     let mut residues: Vec<Hash> = src.residues().iter().map(residue_hash).collect();
     residues.sort();
+    // a residue of the latest encoding: its frame's raw kind
+    let raw = residue_frame(&src.residues()[0]).0;
     assert_eq!(
         tail,
         vec![
-            (kinds::REDACTION_RESIDUE, residues[0]),
-            (kinds::REDACTION_RESIDUE, residues[1]),
+            (raw, residues[0]),
+            (raw, residues[1]),
             (kinds::REDACTION_CARRIED, carried_hash(&rec)),
         ]
     );

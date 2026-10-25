@@ -34,7 +34,8 @@ use crate::kinds;
 use crate::object_refs::ObjectKey;
 use crate::redaction::{limit, residue_matches};
 use crate::redaction_io::{
-    Applied, Authorization, Collected, FrameLog, LogAccess, SpanAuth, collect, read_record,
+    Applied, Authorization, Collected, FrameLog, LogAccess, Residues, SpanAuth, collect,
+    read_record,
 };
 use crate::segment::{self, HEADER, Hole, Holes, Location, header_at};
 use crate::stream_error::StreamError;
@@ -191,10 +192,15 @@ impl ObjectSource for LogSource<'_> {
             e => io(e),
         };
         let raw = match self.log.header_at(loc).map_err(header_io)? {
-            Some((len, raw, _)) if len as usize <= MAX_RECORD_BYTES => raw,
+            Some((len, raw, _))
+                if len as usize <= MAX_RECORD_BYTES
+                    && crate::codec::logical_kind(raw) == key.kind =>
+            {
+                raw
+            }
             _ => return Ok(None),
         };
-        let payload = self.log.record(loc, key.kind, &key.hash).map_err(io)?;
+        let payload = self.log.record(loc, raw, &key.hash).map_err(io)?;
         Ok(payload.and_then(|payload| {
             let encoding = crate::codec::split(raw, &payload).ok()?.version;
             Some(StreamRecord::Present {
@@ -243,17 +249,16 @@ fn locate(
     let mut first: HashMap<ObjectKey, Location> = HashMap::new();
     log.walk(upto, &BTreeMap::new(), &mut |f| {
         scanned.add(f.len, caps)?;
-        if PROOF_KINDS.contains(&f.kind) {
+        // keyed by the logical kind: a frame of any encoding (`crate::codec`)
+        let kind = crate::codec::logical_kind(f.kind);
+        if PROOF_KINDS.contains(&kind) {
             first
                 .try_reserve(1)
                 .map_err(|_| StoreError::RedactionLimit {
                     limit: limit::FRAMES,
                 })?;
             first
-                .entry(ObjectKey {
-                    kind: f.kind,
-                    hash: f.hash,
-                })
+                .entry(ObjectKey { kind, hash: f.hash })
                 .or_insert(f.loc);
         }
         Ok(())
@@ -321,7 +326,7 @@ pub(crate) fn check_proved(
     upto: Location,
     applies: &[(Location, Hash)],
     removals: BTreeMap<Hash, PortableRemoval>,
-    residues: HashMap<Hash, RedactionResidue>,
+    residues: Residues,
 ) -> Result<(), StoreError> {
     let mut imported = Imported::of(removals);
     let caps = ReceiverCaps::current();
@@ -333,10 +338,10 @@ pub(crate) fn check_proved(
     let mut auth = Authorization {
         holes,
         spans,
-        residues,
         imported: Some(imported),
         ..Authorization::default()
     };
+    auth.keep_residues(residues)?;
     crate::redaction_carried::overlay(c, log, &mut auth, upto)
 }
 
@@ -370,7 +375,7 @@ fn derive(
     // 1. every apply by its links
     let mut applies: Vec<Applied> = Vec::with_capacity(frames.len());
     let mut imported = Imported::default();
-    let mut residues: HashMap<Hash, RedactionResidue> = HashMap::new();
+    let mut residues: Residues = HashMap::new();
     for a in &frames {
         let corrupt = || StoreError::corrupt_at(a.loc);
         let record = a.record.clone().ok_or_else(corrupt)?;
@@ -393,7 +398,10 @@ fn derive(
                 };
                 let res: RedactionResidue =
                     crate::codec::decode_bounded(rec.raw_kind(), payload).map_err(|_| corrupt())?;
-                residues.insert(r, res);
+                let encoding = crate::codec::split(rec.raw_kind(), payload)
+                    .map_err(|_| corrupt())?
+                    .version;
+                residues.insert(r, (res, encoding));
             }
         }
         imported.removals.insert(a.hash, removal);
@@ -405,15 +413,16 @@ fn derive(
     }
     let placed: Vec<(Location, Hash)> = applies.iter().map(|a| (a.loc, a.hash)).collect();
     let (holes, spans) = derive_spans(log, upto, &placed, &mut imported, &residues, &caps)?;
-    Ok(Authorization {
+    let mut auth = Authorization {
         holes,
         spans,
-        residues,
         applies,
         requests,
         imported: Some(imported),
-        carried: vec![],
-    })
+        ..Authorization::default()
+    };
+    auth.keep_residues(residues)?;
+    Ok(auth)
 }
 
 /// Rules 2 and 3 (see the module docs) over every frame of `log` before `upto`, for the proved
@@ -425,7 +434,7 @@ fn derive_spans(
     upto: Location,
     applies: &[(Location, Hash)],
     imported: &mut Imported,
-    residues: &HashMap<Hash, RedactionResidue>,
+    residues: &Residues,
     caps: &ReceiverCaps,
 ) -> Result<(Holes, BTreeMap<Location, SpanAuth>), StoreError> {
     // 2. and 3. every copy of an approved tuple, and every uncovered embedding
@@ -533,13 +542,13 @@ pub(crate) fn copy_fits(
     len: u32,
     intact: Option<&[u8]>,
     tuple: &crate::sync_proof::RemovalObject,
-    residues: &HashMap<Hash, RedactionResidue>,
+    residues: &Residues,
 ) -> bool {
     len == tuple.len
         && match (intact, tuple.residue) {
             (Some(p), Some(r)) => residues
                 .get(&r)
-                .is_some_and(|res| residue_matches(kind, p, res)),
+                .is_some_and(|(res, encoding)| residue_matches(kind, p, res, *encoding)),
             _ => true,
         }
 }

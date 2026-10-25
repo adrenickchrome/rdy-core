@@ -85,6 +85,11 @@ fn invalid(object: ObjectKey) -> StreamError {
 /// missing record is E_UNRESOLVED_REF; a dropped one, or one whose bytes are not its hash's, is
 /// no proof.
 fn payload(source: &mut dyn ObjectSource, k: ObjectKey) -> Result<Vec<u8>, StreamError> {
+    versioned(source, k).map(|(body, _)| body)
+}
+
+/// The body of the record of `k` and the encoding its frame records.
+fn versioned(source: &mut dyn ObjectSource, k: ObjectKey) -> Result<(Vec<u8>, u16), StreamError> {
     match source.record(k)? {
         None => Err(StreamError::unresolved(0, 0, k)),
         Some(r @ StreamRecord::Present { .. }) => {
@@ -95,7 +100,7 @@ fn payload(source: &mut dyn ObjectSource, k: ObjectKey) -> Result<Vec<u8>, Strea
                 return Err(invalid(k));
             }
             crate::codec::split(r.raw_kind(), payload)
-                .map(|o| o.body.to_vec())
+                .map(|o| (o.body.to_vec(), o.version))
                 .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(k)))
         }
         Some(_) => Err(invalid(k)),
@@ -184,7 +189,7 @@ pub fn check(source: &mut dyn ObjectSource, apply: Hash) -> Result<PortableRemov
         let manifest: BlobManifest = typed(source, key(kinds::BLOB_MANIFEST, *b))?;
         chunks.extend(manifest.chunks);
     }
-    let mut residues: HashMap<Hash, RedactionResidue> = HashMap::new();
+    let mut residues: HashMap<Hash, (RedactionResidue, u16)> = HashMap::new();
     let mut objects: BTreeMap<ObjectKey, RemovalObject> = BTreeMap::new();
     for span in &m.spans {
         let k = key(span.kind, span.hash);
@@ -196,12 +201,17 @@ pub fn check(source: &mut dyn ObjectSource, apply: Hash) -> Result<PortableRemov
         match span.residue {
             Some(r) => {
                 if let HashEntry::Vacant(v) = residues.entry(r) {
-                    v.insert(typed(source, key(kinds::REDACTION_RESIDUE, r))?);
+                    let k = key(kinds::REDACTION_RESIDUE, r);
+                    let (body, encoding) = versioned(source, k)?;
+                    let res = bounded::decode(&body).map_err(|e: RecordError| {
+                        StreamError::from_record(0, 0, &e).with_object(Some(k))
+                    })?;
+                    v.insert((res, encoding));
                 }
                 if !residue_fits(
                     span.kind,
                     &span.hash,
-                    &residues[&r],
+                    &residues[&r].0,
                     &versions,
                     &version_hashes,
                 ) {
@@ -235,7 +245,10 @@ pub fn check(source: &mut dyn ObjectSource, apply: Hash) -> Result<PortableRemov
                 let fits = Hash::of(&payload) == k.hash
                     && payload.len() == tuple.len as usize
                     && match tuple.residue {
-                        Some(r) => residue_matches(k.kind, &payload, &residues[&r]),
+                        Some(r) => {
+                            let (res, encoding) = &residues[&r];
+                            residue_matches(k.kind, &payload, res, *encoding)
+                        }
                         None => true,
                     };
                 if !fits {

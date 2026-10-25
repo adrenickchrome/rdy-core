@@ -625,7 +625,9 @@ impl Ingest {
     /// `upgrade`, is `StoreError::Dump`; a refused call writes nothing and counts for nothing.
     /// The batch holds the residues of `residues` that the log does not hold yet, once each and
     /// sorted by residue hash, then `records` in the caller's order (its validated source-apply
-    /// order). Before a byte is written:
+    /// order). A residue is framed in the encoding whose frame hash a record names (a residue
+    /// written before content-2 keeps encoding 0), else in its kind's latest encoding. Before a
+    /// byte is written:
     ///
     /// - each record keeps its bounds (`redaction_carried::check_bounds`: more than 100,000
     ///   spans is `RedactionLimit` `100000 carried spans`, more than 16,777,216 encoded bytes
@@ -663,12 +665,27 @@ impl Ingest {
         // record bound
         let mut missing: std::collections::BTreeMap<Hash, (u8, Vec<u8>)> = Default::default();
         if !residues.is_empty() {
+            // the residue hashes the records name: each names its residue's source frame, whose
+            // hash covers the encoding that frame records (`crate::codec`)
+            let named: std::collections::HashSet<Hash> = records
+                .iter()
+                .flat_map(|r| r.spans.iter().filter_map(|s| s.residue))
+                .collect();
+            let latest = crate::codec::latest(kinds::REDACTION_RESIDUE);
             let mut buf = rdy_model::redaction::record_buffer().map_err(|_| record_too_big())?;
             for r in residues {
                 let bytes =
                     rdy_model::redaction::encode_into(r, &mut buf).map_err(|_| record_too_big())?;
-                // the residue's frame in its kind's latest encoding (`crate::codec`)
-                let frame = crate::codec::frame_latest(kinds::REDACTION_RESIDUE, bytes.to_vec());
+                // the residue's frame in the encoding whose hash a record names (an old
+                // residue keeps encoding 0), else in its kind's latest encoding
+                let frame_in = |v: u16| {
+                    crate::codec::frame(kinds::REDACTION_RESIDUE, v, bytes.to_vec())
+                        .expect("a registered encoding of a residue frames")
+                };
+                let frame = (0..latest)
+                    .map(frame_in)
+                    .find(|f| named.contains(&Hash::of(&f.1)))
+                    .unwrap_or_else(|| frame_in(latest));
                 let h = Hash::of(&frame.1);
                 if !c.residue_at.contains_key(&h) && !missing.contains_key(&h) {
                     missing.insert(h, frame);

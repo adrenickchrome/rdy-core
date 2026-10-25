@@ -536,25 +536,6 @@ impl UploadSource<'_> {
             None => Ok(None),
         }
     }
-
-    /// The record `key` decoded within its bounds, from the union's present bytes or the
-    /// holder's.
-    fn typed<T: serde::de::DeserializeOwned + 'static>(
-        &mut self,
-        key: ObjectKey,
-    ) -> Result<Option<T>, StreamError> {
-        let r = match self.union_record(&key)? {
-            Some(r) => r,
-            None => match self.store.record(key)? {
-                Some(r @ StreamRecord::Present { .. }) => r,
-                _ => return Ok(None),
-            },
-        };
-        r.typed()
-            .expect("a present record")
-            .map(Some)
-            .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(key)))
-    }
 }
 
 /// The upload-wide counts over every file, repeats included.
@@ -720,15 +701,28 @@ fn index_files(
     Ok(first.expect("at least one file"))
 }
 
-/// The residue `r`, decoded, from the union or the holder.
-fn residue(source: &mut UploadSource, r: Hash) -> Result<RedactionResidue, StreamError> {
+/// The residue `r`, from the union's present bytes or the holder's, and the encoding its frame
+/// records.
+fn residue(source: &mut UploadSource, r: Hash) -> Result<(RedactionResidue, u16), StreamError> {
     let key = ObjectKey {
         kind: kinds::REDACTION_RESIDUE,
         hash: r,
     };
-    source
-        .typed(key)?
-        .ok_or_else(|| StreamError::unresolved(0, 0, key))
+    let rec = match source.union_record(&key)? {
+        Some(rec) => rec,
+        None => match source.store.record(key)? {
+            Some(rec @ StreamRecord::Present { .. }) => rec,
+            _ => return Err(StreamError::unresolved(0, 0, key)),
+        },
+    };
+    let StreamRecord::Present { encoding, .. } = rec else {
+        unreachable!("a present record")
+    };
+    let res = rec
+        .typed()
+        .expect("a present record")
+        .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(key)))?;
+    Ok((res, encoding))
 }
 
 /// Prepares a take (module docs, steps 1 to 9): every check before anything is written, the
@@ -904,7 +898,8 @@ pub(crate) fn prepare<E>(
                     let fits = payload.len() == t.len as usize
                         && match t.residue {
                             Some(res) => {
-                                residue_matches(key.kind, body, &residue(&mut source, res)?)
+                                let (res, encoding) = residue(&mut source, res)?;
+                                residue_matches(key.kind, body, &res, encoding)
                             }
                             None => true,
                         };
@@ -1002,7 +997,7 @@ pub(crate) fn prepare<E>(
                 let fits = f.len == t.len
                     && match (intact, t.residue) {
                         (Some(p), Some(r)) => match residue(&mut source, r) {
-                            Ok(res) => residue_matches(f.kind, &p, &res),
+                            Ok((res, encoding)) => residue_matches(f.kind, &p, &res, encoding),
                             Err(e) => {
                                 failed = Some(e.into());
                                 return Err(StoreError::Refused(String::new()));

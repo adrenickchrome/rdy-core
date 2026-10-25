@@ -73,6 +73,17 @@ pub fn hash_of<T: Serialize>(value: &T) -> Hash {
     Hash::of(&enc(value))
 }
 
+/// The frame of a new residue `r` as the store writes one: its raw kind and payload, in its
+/// kind's latest encoding.
+pub fn residue_frame(r: &RedactionResidue) -> (u8, Vec<u8>) {
+    rdy_store::codec::frame_latest(kinds::REDACTION_RESIDUE, enc(r))
+}
+
+/// The hash of a new residue `r`: its frame's ([`residue_frame`]).
+pub fn residue_id(r: &RedactionResidue) -> Hash {
+    Hash::of(&residue_frame(r).1)
+}
+
 /// The six fixed outside-copy rows (D-14SAY), in CopyKind order.
 pub fn outside_rows() -> Vec<CopyRow> {
     [
@@ -212,6 +223,20 @@ impl Draft {
 /// Points each block and change span at the residue whose recorded version or change is the
 /// span's hash, and each chunk span at none.
 pub fn relink(request: &mut Redaction, residues: &[RedactionResidue]) {
+    relink_in(
+        request,
+        residues,
+        rdy_store::codec::latest(kinds::REDACTION_RESIDUE),
+    );
+}
+
+/// The frame of residue `r` in encoding `encoding`.
+pub fn residue_frame_in(r: &RedactionResidue, encoding: u16) -> (u8, Vec<u8>) {
+    rdy_store::codec::frame(kinds::REDACTION_RESIDUE, encoding, enc(r)).unwrap()
+}
+
+/// [`relink`], naming each residue by its frame in encoding `encoding`.
+pub fn relink_in(request: &mut Redaction, residues: &[RedactionResidue], encoding: u16) {
     for span in &mut request.manifest.spans {
         span.residue = residues
             .iter()
@@ -219,7 +244,7 @@ pub fn relink(request: &mut Redaction, residues: &[RedactionResidue]) {
                 RedactionResidue::Block(b) => span.kind == kinds::BLOCK && b.version == span.hash,
                 RedactionResidue::Change(c) => span.kind == kinds::CHANGE && c.change == span.hash,
             })
-            .map(hash_of);
+            .map(|r| Hash::of(&residue_frame_in(r, encoding).1));
     }
 }
 
@@ -356,7 +381,7 @@ pub fn build_request(store: &Store, spec: &RequestSpec) -> Draft {
             kind: *kind,
             hash: *hash,
             len: *len,
-            residue: residue.as_ref().map(hash_of),
+            residue: residue.as_ref().map(residue_id),
         });
     }
     let carrier = carrier(spec.view.clone(), vec![], spec.requester.clone());
@@ -404,6 +429,9 @@ pub struct FixtureOptions {
     pub on_draft: Option<DraftHook>,
     pub on_landing: Option<LandingHook>,
     pub on_applies: Option<ApplyHook>,
+    /// The encoding the residue frames are written in: the latest (a new residue), or 0 (a
+    /// residue an rdy before content-2 wrote). Spans name residues as [`relink_in`] does.
+    pub residue_encoding: u16,
 }
 
 impl FixtureOptions {
@@ -417,6 +445,7 @@ impl FixtureOptions {
             on_draft: None,
             on_landing: None,
             on_applies: None,
+            residue_encoding: rdy_store::codec::latest(kinds::REDACTION_RESIDUE),
         }
     }
 
@@ -540,9 +569,9 @@ pub fn authorized_batch_fixture(
         let mut items: Vec<(u8, Vec<u8>)> = vec![];
         let mut seen = BTreeSet::new();
         for r in &draft.residues {
-            let bytes = enc(r);
-            if seen.insert(Hash::of(&bytes)) {
-                items.push((kinds::REDACTION_RESIDUE, bytes));
+            let frame = residue_frame_in(r, opts.residue_encoding);
+            if seen.insert(Hash::of(&frame.1)) {
+                items.push(frame);
             }
         }
         let carrier_bytes = enc(&draft.carrier);

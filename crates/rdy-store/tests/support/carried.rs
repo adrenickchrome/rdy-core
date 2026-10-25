@@ -140,9 +140,14 @@ pub fn change_residue(c: &Change) -> RedactionResidue {
     RedactionResidue::Change(ChangeResidue::of(c))
 }
 
-/// The hash of a residue's encoding.
+/// The frame of a new residue `r` as the store writes one, in its kind's latest encoding.
+pub fn residue_frame(r: &RedactionResidue) -> (u8, Vec<u8>) {
+    rdy_store::codec::frame_latest(kinds::REDACTION_RESIDUE, postcard::to_allocvec(r).unwrap())
+}
+
+/// The hash of a new residue `r`: its frame's.
 pub fn residue_hash(r: &RedactionResidue) -> Hash {
-    Hash::of(&postcard::to_allocvec(r).unwrap())
+    Hash::of(&residue_frame(r).1)
 }
 
 /// The carried span of frame `f`, with `residue` and `held`.
@@ -268,15 +273,12 @@ pub fn carried_frames(
     residues: &[RedactionResidue],
     records: &[RedactionCarried],
 ) -> Vec<(u8, Vec<u8>)> {
-    let mut by_hash: BTreeMap<Hash, Vec<u8>> = BTreeMap::new();
+    let mut by_hash: BTreeMap<Hash, (u8, Vec<u8>)> = BTreeMap::new();
     for r in residues {
-        let b = postcard::to_allocvec(r).unwrap();
-        by_hash.insert(Hash::of(&b), b);
+        let f = residue_frame(r);
+        by_hash.insert(Hash::of(&f.1), f);
     }
-    let mut out: Vec<(u8, Vec<u8>)> = by_hash
-        .into_values()
-        .map(|b| (kinds::REDACTION_RESIDUE, b))
-        .collect();
+    let mut out: Vec<(u8, Vec<u8>)> = by_hash.into_values().collect();
     out.extend(
         records
             .iter()

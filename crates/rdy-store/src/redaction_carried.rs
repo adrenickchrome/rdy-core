@@ -507,25 +507,18 @@ fn check_span(
     // the residue: one of this object, sealed before the record
     let residue = match s.residue {
         Some(h) => {
-            let res = match auth.residues.get(&h) {
-                Some(res) => res.clone(),
-                None => {
+            let res = match (auth.residues.get(&h), auth.residue_encodings.get(&h)) {
+                (Some(res), Some(e)) => (res.clone(), *e),
+                _ => {
                     let rloc = c
                         .residue_at
                         .get(&h)
                         .filter(|l| **l < f.loc)
                         .ok_or_else(bad)?;
-                    let payload = log
-                        .record(*rloc, kinds::REDACTION_RESIDUE, &h)?
-                        .ok_or_else(bad)?;
-                    crate::codec::decode_record::<RedactionResidue>(
-                        kinds::REDACTION_RESIDUE,
-                        &payload,
-                    )
-                    .map_err(|_| bad())?
+                    crate::redaction_io::read_residue(log, *rloc, &h)?.ok_or_else(bad)?
                 }
             };
-            if !residue_names(&res, s.kind, &s.hash) {
+            if !residue_names(&res.0, s.kind, &s.hash) {
                 return Err(bad());
             }
             Some((h, res))
@@ -586,8 +579,8 @@ fn check_span(
     let payload = log.payload(loc, s.len)?;
     if Hash::of(&payload) == s.hash {
         // intact: what its residue records
-        if let Some((_, res)) = &residue
-            && !residue_matches(s.kind, &payload, res)
+        if let Some((_, (res, encoding))) = &residue
+            && !residue_matches(s.kind, &payload, res, *encoding)
         {
             return Err(bad());
         }
@@ -607,13 +600,9 @@ fn check_span(
 fn keep_residue(
     auth: &mut Authorization,
     h: Hash,
-    res: RedactionResidue,
+    (res, encoding): (RedactionResidue, u16),
 ) -> Result<(), StoreError> {
-    if !auth.residues.contains_key(&h) {
-        auth.residues.try_reserve(1).map_err(|_| out_of_memory())?;
-        auth.residues.insert(h, res);
-    }
-    Ok(())
+    auth.keep_residue(h, res, encoding)
 }
 
 /// The index entry of a validated carried record.

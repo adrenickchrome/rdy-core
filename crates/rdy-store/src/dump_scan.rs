@@ -649,7 +649,8 @@ struct Holder {
     first: HashMap<ObjectKey, (Rec, bool)>,
     copies: HashMap<ObjectKey, Vec<KeyCopy>>,
     approved: HashMap<ObjectKey, (RemovalObject, Hash)>,
-    residues: HashMap<Hash, RedactionResidue>,
+    /// The residues the approved tuples name, each with the encoding its frame records.
+    residues: crate::redaction_io::Residues,
     scanned: Scanned,
     over: Option<StoreError>,
     spans: u64,
@@ -1841,11 +1842,15 @@ impl<'p> Scan<'p> {
             self.holder_count(rec_, false)?;
         }
         let mut matched = (false, false);
+        // a residue of any encoding (`crate::codec`); the other removal records have encoding 0
+        let residue = crate::codec::logical_kind(fh.kind) == kinds::REDACTION_RESIDUE;
         match fh.kind {
-            kinds::REDACTION
-            | kinds::REDACTION_RESIDUE
-            | kinds::REDACTION_APPLY
-            | kinds::REDACTION_CARRIED => {
+            k if residue
+                || matches!(
+                    k,
+                    kinds::REDACTION | kinds::REDACTION_APPLY | kinds::REDACTION_CARRIED
+                ) =>
+            {
                 if fh.len > MAX_RECORD_BYTES as u64 {
                     // a removal record over the record bound is no record: a proof that needs
                     // it fails, and a carried one is refused as the reader refuses it
@@ -1867,7 +1872,7 @@ impl<'p> Scan<'p> {
                             .map_err(|_| alloc(i, fh.at))?;
                         self.note(at, rec_, i, fh.at)?;
                     }
-                    kinds::REDACTION_RESIDUE => {
+                    _ if residue => {
                         self.collected
                             .note_residue(at, fh.hash)
                             .map_err(|_| alloc(i, fh.at))?;
@@ -2037,8 +2042,9 @@ impl<'p> Scan<'p> {
         {
             self.holder.over = Some(e);
         }
+        // keyed by the logical kind: a frame of any encoding (`crate::codec`)
         let k = ObjectKey {
-            kind: r.kind,
+            kind: crate::codec::logical_kind(r.kind),
             hash: r.hash,
         };
         if self.holder.over.is_none()
@@ -2294,7 +2300,7 @@ impl<'p> Scan<'p> {
             };
             let checked = sync_proof::check(&mut objects, hash);
             // the residues its tuples name, read once for this proof (from its cache)
-            let mut residues: Vec<(Hash, Option<RedactionResidue>)> = Vec::new();
+            let mut residues: Vec<(Hash, Option<(RedactionResidue, u16)>)> = Vec::new();
             if let Ok(removal) = &checked {
                 for t in removal.objects.values() {
                     let Some(r) = t.residue else { continue };
@@ -2309,13 +2315,14 @@ impl<'p> Scan<'p> {
                     };
                     let res = match objects.record(k) {
                         Ok(Some(r @ StreamRecord::Present { .. })) => match &r {
-                            StreamRecord::Present { payload, .. } => {
-                                crate::codec::decode_bounded::<RedactionResidue>(
-                                    r.raw_kind(),
-                                    payload,
-                                )
-                                .ok()
-                            }
+                            StreamRecord::Present {
+                                payload, encoding, ..
+                            } => crate::codec::decode_bounded::<RedactionResidue>(
+                                r.raw_kind(),
+                                payload,
+                            )
+                            .ok()
+                            .map(|res| (res, *encoding)),
                             _ => None,
                         },
                         _ => None,

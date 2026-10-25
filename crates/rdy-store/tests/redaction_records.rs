@@ -14,7 +14,7 @@ use rdy_store::transition::Transitions;
 use rdy_store::{Store, StoreError};
 use redaction_fixture::{
     Draft, FixtureOptions, ORIGIN, Proof, RequestSpec, authorized_batch_fixture, build_request,
-    enc, hash_of, relink, segment_bytes,
+    enc, hash_of, relink, residue_frame, residue_id, segment_bytes,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -199,8 +199,8 @@ fn rdx2_a_request_is_one_batch_and_removes_nothing() {
     assert_eq!(
         batch,
         vec![
-            kinds::REDACTION_RESIDUE,
-            kinds::REDACTION_RESIDUE,
+            residue_frame(&d.residues[0]).0,
+            residue_frame(&d.residues[1]).0,
             CHANGE,
             kinds::REDACTION,
             kinds::VIEW_OP,
@@ -208,7 +208,7 @@ fn rdx2_a_request_is_one_batch_and_removes_nothing() {
         ],
         "residues, carrier, request and the view commit in one batch"
     );
-    let residue_ids: Vec<Hash> = d.residues.iter().map(hash_of).collect();
+    let residue_ids: Vec<Hash> = d.residues.iter().map(residue_id).collect();
     assert_eq!(s.last_batch()[0].1, residue_ids[0]);
     assert_eq!(s.last_batch()[1].1, residue_ids[1]);
     assert_eq!(s.last_batch()[2].1, d.carrier_id());
@@ -373,7 +373,7 @@ fn rdx2_every_embedded_block_occurrence_has_a_residue() {
             .iter()
             .filter_map(|s| s.residue)
             .collect();
-        bad.residues.retain(|r| named.contains(&hash_of(r)));
+        bad.residues.retain(|r| named.contains(&residue_id(r)));
         let e = s
             .prepare_redaction(&bad.carrier, &bad.request, &bad.residues)
             .unwrap_err();
@@ -506,13 +506,13 @@ fn rdx2_residue_validation_rejects_forged_identity() {
         b.version = Hash::of(b"another version");
     }
     let at = block_span(&x);
-    x.request.manifest.spans[at].residue = Some(hash_of(&x.residues[r]));
+    x.request.manifest.spans[at].residue = Some(residue_id(&x.residues[r]));
     cases.push(("block hash", x, at));
 
     let mut x = d.clone();
     let at = block_span(&x);
     let cr = change_residue(&x);
-    x.request.manifest.spans[at].residue = Some(hash_of(&x.residues[cr]));
+    x.request.manifest.spans[at].residue = Some(residue_id(&x.residues[cr]));
     cases.push(("residue kind", x, at));
 
     let mut x = d.clone();
@@ -1014,7 +1014,7 @@ fn rdx2_metadata_and_history_records_are_not_targets() {
         kinds::BATCH_COMMIT,
         kinds::TRANSITION,
         kinds::REDACTION,
-        kinds::REDACTION_RESIDUE,
+        residue_frame(&d.residues[0]).0,
         kinds::REDACTION_APPLY,
     ]
     .into();
@@ -1268,7 +1268,7 @@ fn rdx2_seal_cannot_activate_an_unapproved_request() {
     let records = [
         (kinds::REDACTION_APPLY, enc(&apply)),
         (kinds::REDACTION, enc(&d.request)),
-        (kinds::REDACTION_RESIDUE, enc(&d.residues[0])),
+        residue_frame(&d.residues[0]),
     ];
     let av = a.version_hash();
 

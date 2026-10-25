@@ -27,7 +27,7 @@ use rdy_store::take_batch::{BatchTaken, TagChoice, TakeError, UploadFacts, Uploa
 use rdy_store::{Store, StoreError};
 use redaction_fixture::{
     Fixture, FixtureOptions, ORIGIN, Proof, RequestSpec, authorized_batch_fixture, enc,
-    segment_bytes,
+    residue_frame, segment_bytes,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -965,7 +965,7 @@ fn conflicting(b: &Base, name: &str, edit: SpanEdit) -> (Vec<File>, Hash, Items)
         .collect();
     let in_batch: BTreeSet<ObjectKey> = present
         .iter()
-        .map(|(k, p)| key(*k, Hash::of(p)))
+        .map(|(k, p)| key(rdy_store::codec::logical_kind(*k), Hash::of(p)))
         .chain([secret])
         .collect();
     for (kind, payload) in &present {
@@ -990,12 +990,13 @@ fn conflicting(b: &Base, name: &str, edit: SpanEdit) -> (Vec<File>, Hash, Items)
         order.push(k);
         source.insert(k, r);
     };
+    // a record by its logical kind, with the encoding its raw frame kind gives
     let present_record = |kind: u8, payload: &Vec<u8>| {
-        let k = key(kind, Hash::of(payload));
+        let k = key(rdy_store::codec::logical_kind(kind), Hash::of(payload));
         (
             k,
             StreamRecord::Present {
-                encoding: 0,
+                encoding: rdy_store::codec::split(kind, payload).unwrap().version,
                 key: k,
                 payload: payload.clone(),
             },
@@ -1042,9 +1043,9 @@ fn other_residue(s: &mut rdy_model::redaction::DropSpan) -> Items {
     let block = block("b-00001", CANARY);
     let mut res = rdy_model::redaction::BlockResidue::of(&block);
     res.order = "W".into();
-    let bytes = enc(&rdy_model::redaction::RedactionResidue::Block(res));
-    s.residue = Some(Hash::of(&bytes));
-    vec![(kinds::REDACTION_RESIDUE, bytes)]
+    let frame = residue_frame(&rdy_model::redaction::RedactionResidue::Block(res));
+    s.residue = Some(Hash::of(&frame.1));
+    vec![frame]
 }
 
 #[test]

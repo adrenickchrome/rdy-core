@@ -830,3 +830,23 @@ fn rdx1_residue_links_omitted_intent_reads_as_none() {
         residue
     );
 }
+
+#[test]
+fn ok2_the_encoding_0_residue_derivation_is_the_historical_content_1_hash() {
+    // the one derivation an encoding-0 residue's proof check uses: the released content-1
+    // vector, and the independent legacy calculation of this file
+    let decoded: Block = postcard::from_bytes(&unhex(BLOCK)).unwrap();
+    let legacy = rdy_model::encoding::legacy_content_1_hash(&decoded);
+    assert_eq!(legacy.to_string(), BLOCKC);
+    assert_eq!(legacy, content_1(&decoded));
+    assert_ne!(
+        legacy,
+        decoded.content_hash(),
+        "content-2 leaves out the order key"
+    );
+    // the order key is in it: a move gives another content-1 hash
+    let mut moved = decoded.clone();
+    moved.order = "W".into();
+    assert_ne!(rdy_model::encoding::legacy_content_1_hash(&moved), legacy);
+    assert_eq!(moved.content_hash(), decoded.content_hash());
+}
