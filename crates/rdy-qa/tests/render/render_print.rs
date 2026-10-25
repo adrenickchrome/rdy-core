@@ -568,20 +568,24 @@ fn reserved(r: &mut Rdy) -> Scope {
 /// moved; their content rows keep their text (the gold1_ goldens).
 /// Re-taken again in Task 8 fix round 1: only `js/sidebar.js` changed (byte-size bounds and absolute-URL
 /// validation of the stored state), so only `assets/app.js` moved.
+/// Re-taken for the renderer plan's Task 6 (native diagrams, ruling task-8): the diagram figures
+/// of the pages that have one, their removed library script tag, the new `assets/diagrams/` files,
+/// `assets/js/mermaid.min.js` (gone), the diagram rules of `assets/site.css`, `assets/app.js`
+/// (without `js/mermaid-init.js`) and an `open full size` line per drawing in `llms-full.txt` moved.
 #[test]
 fn ec3_the_site_build_is_unchanged() {
     const BASE: [(&str, &str); 3] = [
         (
             "canon",
-            "5d7cadbab816c874878ec3963cd4c5ffaf915df1d43f9617fc6c2b39fe0d7f62",
+            "a75099e44625fe4568b6b29e0a77c29e0d4e7236fa6beb6ebd9aee3db8a718e4",
         ),
         (
             "view:editing",
-            "799ddaa337252816d967b196eca321d7b927dc1d5921279b67527ca52452d499",
+            "ef3f931395c7f5fc23ff715622dcd2f1af8956d74f204d2c7fd324ba500a2e65",
         ),
         (
             "view:reserved",
-            "568dfaf67c5bd373e51c9cb13f20c16b321cff0b64718858d44786e54245467b",
+            "d5955717afd1bcbe0c93275856e6abd88b88d16f638a489733a24c11fbd41380",
         ),
     ];
     // the ids the corpus's generated pages and the reserved docs draw come from a seeded stream

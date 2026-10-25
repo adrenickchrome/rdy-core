@@ -201,26 +201,30 @@ fn scopes() -> Vec<(&'static str, tempfile::TempDir, Rdy, Scope)> {
 /// moved; their content rows keep their text.
 /// Re-taken again in Task 8 fix round 1: only `js/sidebar.js` changed (byte-size bounds and absolute-URL
 /// validation of the stored state), so only `assets/app.js` moved.
+/// Re-taken for the renderer plan's Task 6 (native diagrams, ruling task-8): the diagram figures
+/// of the pages that have one, their removed library script tag, the new `assets/diagrams/` files,
+/// `assets/js/mermaid.min.js` (gone), the diagram rules of `assets/site.css`, `assets/app.js`
+/// (without `js/mermaid-init.js`) and an `open full size` line per drawing in `llms-full.txt` moved.
 const SITE_DIGESTS: [(&str, &str, &str); 4] = [
     (
         "canon",
-        "6b3ba15a04e04d5561759dab1d989d807511f01634fd9a6782169187aa9a0adc",
-        "46411fe9734b81a312a4d51ee8bb4248ff783e7fc80f7652e08054ea6821f69a",
+        "1c628443ffd31522d2c1dbdd52abd24a1cd69a85ca313a3478caa8379ed95dd6",
+        "df0b2f3f465e66ac592d97a70031e62386264d3aa948237f4d011d3884f9677e",
     ),
     (
         "tag",
-        "7b05e688545260026dfa39baeda331c805acfb4246ace8f5bf73470206d1024e",
-        "b8f40e74d08bf5b1f10cbcbcb2da40fba465793bcc80098a2ca9cd77ce632140",
+        "264e043f0f9334acedbb582548255a9d1cfd8d6898e013b713098267e156942c",
+        "35ced4bb5f94e33e5e870a03440839d33f8103179a41ecfbaecc748eb119f8e3",
     ),
     (
         "view",
-        "cbb5a040ab15ef1c97587c2eb7f8032c2fb936d84a53e57caf8755aa1f6af7b4",
-        "2604b0542dd6ec327b6322c132e7539730091311b7db4e38f210b944c9f79de3",
+        "942d79cb3f7f9df74687df26bd44756fe67365b974954dd940f33b305c379813",
+        "de0f5c9b0b5080c0fe8a56287582c8a97389b767882f60681c760c1b6db5135c",
     ),
     (
         "proposal",
-        "42040fce946ccad843e3df6a59434732d52bbcd1a557dd6be83fcf3d7f71748d",
-        "578162e14793e6328cc423e83d5b0ddab5e68ad23bb834a88e280ed897672234",
+        "0aee03cee5a90c7541ead7b5f0fb172ddec1a4e7d667ee0510448b160ac76d04",
+        "a98782db54855ef3148c25aad46064377a04c5e28a2694a49362e7ddf6130916",
     ),
 ];
 
