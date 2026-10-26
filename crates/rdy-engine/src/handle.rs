@@ -223,18 +223,17 @@ impl Rdy {
             return Ok(None);
         }
         let dir = self.store.dir().to_path_buf();
-        let from =
-            rdy_store::format::read_format_file(&dir)?.ok_or_else(|| StoreError::Upgrade {
-                failure: rdy_store::error::UpgradeFailure::Moved,
-                backup: None,
-            })?;
+        let from = rdy_store::format::read_format_file(&dir)?.ok_or(StoreError::Upgrade {
+            failure: rdy_store::error::UpgradeFailure::Moved,
+            backup: None,
+        })?;
         let receipt = self
             .store
             .get_ref(rdy_store::format::REF_UPGRADE)?
             .map(|v| rdy_store::format::UpgradeReceipt::parse(&v))
             .transpose()
             .map_err(|e| StoreError::Decode(format!("meta/upgrade is not a valid receipt: {e}")))?
-            .ok_or_else(|| StoreError::Upgrade {
+            .ok_or(StoreError::Upgrade {
                 failure: rdy_store::error::UpgradeFailure::Moved,
                 backup: None,
             })?;

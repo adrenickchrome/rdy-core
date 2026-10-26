@@ -147,7 +147,8 @@ fn ok1_feature_classes_choose_access_at_open() {
         "read-only: nothing under the store changed"
     );
     // incompatible: refused before anything under the store changes
-    for (class, what) in [(FeatureClass::Incompatible, "incompatible")] {
+    {
+        let (class, what) = (FeatureClass::Incompatible, "incompatible");
         let (_b, dir) = store_with_unknown(class);
         let before = tree(&dir);
         let e = Store::open(&dir).err().expect(what);
