@@ -2712,8 +2712,35 @@ impl Rdy {
         // are re-keyed, each from its proposed version, which the view must still hold. A key
         // folds into the block's acceptance or key update, so no two updates share a base.
         let canon = st.materialized(&Scope::Canon)?;
-        let placed = crate::landing_order::placed(&canon, &ops);
-        let order_keys = crate::landing_order::rekeys(&canon, &prospective, &vm, &placed)?;
+        // D-1FT5Y: a block whose op kept its base's order key, where canon's version differs
+        // from that base only by its key, lands with canon's key and the op's other fields. It
+        // is no placed block, and the re-key reads the candidate with canon's keys.
+        let kept = crate::landing_order::kept_places(st.reader(), &canon, &prospective, &ops)?;
+        let with_kept;
+        let candidate = if kept.is_empty() {
+            &prospective
+        } else {
+            let restored: Vec<Op> = kept
+                .iter()
+                .map(|(id, k)| {
+                    let b = prospective
+                        .get(id)
+                        .expect("a kept block is in the prospective canon");
+                    let mut at = b.clone();
+                    at.order = k.clone();
+                    Op::Update {
+                        base: b.version_hash(),
+                        block: at,
+                    }
+                })
+                .collect();
+            with_kept = prospective.with(&restored);
+            &with_kept
+        };
+        let mut placed = crate::landing_order::placed(&canon, &ops);
+        placed.retain(|id| !kept.contains_key(id));
+        let mut order_keys = crate::landing_order::rekeys(&canon, candidate, &vm, &placed)?;
+        order_keys.extend(kept);
         for (id, k) in &order_keys {
             let b = prospective
                 .get(id)

@@ -28,6 +28,41 @@ pub fn placed(canon: &Materialized, ops: &[Op]) -> BTreeSet<BlockId> {
         .collect()
 }
 
+/// The blocks whose landing keeps canon's place (D-1FT5Y): block → canon's order key. A block's
+/// first op in the applied ops `ops` is an update from a base that canon's version differs from
+/// only by its order key (a landed move within its parent, or a landing's re-key), and the
+/// block's version in `candidate` (canon with the landing's changes) keeps that base's parent and
+/// order key. The merge applied the op with the op's own version, so the landing stores that
+/// version with canon's order key, in its acceptance change: the op never undoes canon's place.
+pub fn kept_places(
+    reader: &rdy_store::StoreReader,
+    canon: &Materialized,
+    candidate: &Materialized,
+    ops: &[Op],
+) -> Result<BTreeMap<BlockId, String>, RdyError> {
+    let mut seen = BTreeSet::new();
+    let mut out = BTreeMap::new();
+    for op in ops {
+        if !seen.insert(op.block_id().clone()) {
+            continue;
+        }
+        let Op::Update { base, block } = op else {
+            continue;
+        };
+        let (Some(c), Some(now)) = (canon.get(&block.id), candidate.get(&block.id)) else {
+            continue;
+        };
+        if !reader.order_only(&c.version_hash(), base) {
+            continue;
+        }
+        let from = reader.get_block(base)?;
+        if now.parent == from.parent && now.order == from.order {
+            out.insert(block.id.clone(), c.order.clone());
+        }
+    }
+    Ok(out)
+}
+
 /// The new order keys a landing gives the `placed` blocks of `candidate` (canon with the
 /// landing's changes) that tie with a sibling: block → key.
 ///

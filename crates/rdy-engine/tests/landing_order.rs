@@ -786,7 +786,8 @@ fn ok6_a_landing_rekey_respects_a_later_insert_past_a_deleted_sibling() {
 /// Final ruling 2 (round 2): a canon side that differs from an includer's op base only by its
 /// order key is no conflict. v1 appends q; w includes v1's change and edits q; v0 lands, then v1
 /// lands with a re-key. w has no conflict and keeps its own version of q (its text, with v1's old
-/// tied key) until it lands; its landing then re-keys q, so canon never holds the tie.
+/// tied key) until it lands; its landing then gives q canon's key (round 3), so canon never
+/// holds the tie.
 #[test]
 fn ok6_an_includer_of_a_rekeyed_block_has_no_conflict() {
     for run in 0..ID_RUNS {
@@ -834,9 +835,78 @@ fn ok6_an_includer_of_a_rekeyed_block_has_no_conflict() {
             "{run}: q after p, where its landings put it"
         );
         assert_eq!(
+            block(&r, &Scope::Canon, &q).order,
+            canon_q.order,
+            "{run}: q keeps canon's key"
+        );
+        assert_eq!(
             block(&r, &Scope::Canon, &q).body,
             "q, as w reads it",
             "{run}"
         );
+    }
+}
+
+/// Final ruling round 3: a landing must not undo a landed move. Canon holds base, b; view m
+/// moves b before base; view w edits b's body from canon. m lands, then w lands: canon holds
+/// b, base, with w's body on b. w's op kept its base's order key while canon's version differs
+/// from that base only by its key, so w's landing stores b with canon's key, in its acceptance
+/// change.
+#[test]
+fn ok6_a_landing_keeps_a_landed_move() {
+    for run in 0..ID_RUNS {
+        let (_d, mut r, sec, base) = seeded();
+        let b = append(&mut r, "s", &sec, "second");
+        land(&mut r, "s");
+        put(
+            &mut r,
+            "m",
+            json!([{"op": "move", "id": b, "parent": sec, "before": base}]),
+        );
+        put(
+            &mut r,
+            "w",
+            json!([{"op": "update", "id": b, "body": "second, as w reads it"}]),
+        );
+        land(&mut r, "m");
+        let moved = block(&r, &Scope::Canon, &b).order;
+        assert_eq!(
+            ids_of(&kids(&r, &Scope::Canon, &sec)),
+            vec![b.clone(), base.clone()],
+            "{run}: m's move landed"
+        );
+        let conflicts = r.read().conflicts(&view("w")).unwrap();
+        assert!(
+            conflicts.is_empty(),
+            "{run}: no conflict in w: {conflicts:?}"
+        );
+        let pw = propose(&mut r, "w");
+        let lw =
+            approve(&mut r, &pw).unwrap_or_else(|e| panic!("{run}: land w: {e} {:?}", e.issues));
+        let k = kids(&r, &Scope::Canon, &sec);
+        assert_eq!(
+            ids_of(&k),
+            vec![b.clone(), base.clone()],
+            "{run}: w's landing keeps m's move: {k:?}"
+        );
+        assert_eq!(tied_pairs(&k), 0, "{run}: no tie: {k:?}");
+        let cb = block(&r, &Scope::Canon, &b);
+        assert_eq!(cb.body, "second, as w reads it", "{run}: w's text");
+        assert_eq!(cb.order, moved, "{run}: canon's key");
+        // the landing's acceptance change stored that version
+        let acc = accept_change(&r, &lw).expect("w's landing stores b at canon's key");
+        let stored: Vec<&Block> = acc
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Update { block, .. } if block.id.to_string() == b => Some(block),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stored.len(), 1, "{run}: one update of b: {acc:?}");
+        assert_eq!(stored[0].order, moved, "{run}");
+        assert_eq!(stored[0].body, "second, as w reads it", "{run}");
+        let report = r.fsck().unwrap_or_else(|e| panic!("{run}: fsck: {e}"));
+        assert!(report.warnings.is_empty(), "{run}: {report:?}");
     }
 }
