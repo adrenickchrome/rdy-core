@@ -180,7 +180,8 @@ pub(crate) fn tree() -> Value {
     let mut cmd = Cli::command();
     cmd.build();
     let mut v = command_json(&cmd);
-    v["version"] = json!(cmd.get_version().unwrap_or_default());
+    // the version is the producer's, not a contract surface (cli.runtime normalizes it the same way)
+    v["version"] = json!("<version>");
     v["about"] = json!(cmd.get_about().map(|s| s.to_string()).unwrap_or_default());
     v
 }
@@ -255,5 +256,19 @@ fn ok14_cli_contract_from_clap_is_complete() {
     assert_eq!(
         &actual, want,
         "the command tree changed: a public change needs an upgrade or deprecation path (D-TXFHR)"
+    );
+}
+
+/// The producer's version is not a contract surface: `cli.runtime` records it as `<version>`, and
+/// the tree must too, or the release minor and the `(preview)` mark fail the tree comparison.
+#[test]
+fn ok14_cli_tree_leaves_out_the_producer_version() {
+    let t = tree();
+    assert_eq!(t["version"], "<version>", "the tree names the version");
+    let text = t.to_string();
+    let version = env!("CARGO_PKG_VERSION");
+    assert!(
+        !text.contains(version),
+        "the tree holds the producer version {version}"
     );
 }

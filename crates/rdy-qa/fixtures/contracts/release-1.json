@@ -6,16 +6,240 @@
         "success": 0,
         "usage": 2
       },
+      "not_probed_commands": {
+        "add": "working copy: the working_copy row records its replies",
+        "alt": "needs two open views and a question; its MCP twin is listed too",
+        "auth": "signs in to a hosted service",
+        "check": "checks a file; the config row records its refusal",
+        "checkout": "working copy: the working_copy row records its replies",
+        "clone": "writes a second project; the dump_load row covers the bytes",
+        "commit": "working copy: the working_copy row records its replies",
+        "dump": "writes a file; the dump_load row covers the bytes",
+        "edit": "working copy: the working_copy row records its replies",
+        "export": "writes a file tree; the markdown_exports row covers it",
+        "import": "reads a directory of YAML; the working copy and sync rows cover the formats",
+        "init": "makes a project; every probe starts from one",
+        "intent renew": "the same reply as post",
+        "key bind": "changes the signing key",
+        "key retire": "changes the signing key",
+        "key revoke": "changes the signing key",
+        "keys": "assigns keys to people",
+        "load": "replaces a project from a dump; the dump_load row covers it",
+        "mcp": "starts the MCP server; the mcp row covers it",
+        "new finding": "needs a finding pack",
+        "new profile": "needs a publication profile",
+        "new source": "needs a source file",
+        "pack": "checks a pack file; the schema_packs row covers it",
+        "plan confirm": "needs an open plan item",
+        "plan defer": "needs an open plan item",
+        "plan done": "needs an open plan item",
+        "publication": "needs a publication profile",
+        "publish": "uploads a site to a host",
+        "reaffirm": "needs a suspect decision; the write op of the same name is an MCP write",
+        "redact": "destroys content; no dry run is probed",
+        "reindex": "rebuilds derived state; the derived_identities row covers it",
+        "remote add": "edits the remotes of the project",
+        "remote rm": "edits the remotes of the project",
+        "remote set-mode": "edits the remotes of the project",
+        "render": "writes a site to a directory; the site_urls row covers its routes",
+        "render-stream": "renders a stream file",
+        "repin": "needs a pinned reference to move",
+        "serve": "starts a daemon",
+        "sign": "needs a signing key",
+        "site": "starts or reads the live site",
+        "stream": "checks a stream file; the sync row covers it",
+        "update": "working copy: the working_copy row records its replies",
+        "view compare": "the same reply as the MCP compare",
+        "view exclude": "needs an included change",
+        "view fork": "the same reply as new",
+        "view include": "needs another view's change",
+        "view own": "changes who owns a view",
+        "view replay": "needs excluded changes",
+        "view resolve": "needs a view with a conflict",
+        "worktree": "working copy: the working_copy row records its replies"
+      },
       "probes": {
+        "answer": {
+          "exits": [
+            0,
+            1
+          ],
+          "stderr": {
+            "code": "string",
+            "fix": "string",
+            "message": "string"
+          },
+          "stdout": {
+            "act": "string",
+            "answer": "string",
+            "assurance": "string",
+            "label": "string",
+            "landing": "null",
+            "next": "null|string",
+            "option": "string",
+            "ref": "string",
+            "relayed_by": "null"
+          }
+        },
+        "approve": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "approved": "string",
+            "assurance": "string",
+            "changes": "number",
+            "consequences": [
+              {
+                "because": {
+                  "changed": "string",
+                  "edge": "string",
+                  "edges": [
+                    "string"
+                  ],
+                  "values": []
+                },
+                "block": "string",
+                "fix": "string",
+                "follow_up": "string",
+                "id": "string",
+                "kind": "string"
+              }
+            ],
+            "landing": "string",
+            "rebased": [
+              {
+                "conflicts": "number",
+                "dropped": "number",
+                "view": "string"
+              }
+            ],
+            "signatures": [],
+            "summary": "string",
+            "title": "string",
+            "version": "string",
+            "warnings": []
+          }
+        },
+        "brief": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "base": {
+              "blocks": [
+                {
+                  "id": "string",
+                  "version": "string"
+                }
+              ],
+              "depends": "number",
+              "token": "string"
+            },
+            "coverage": {
+              "confidence": "string",
+              "dimensions": {
+                "connected": "number",
+                "consistent": "number",
+                "current": "number",
+                "grounded": "number"
+              },
+              "issues": [
+                {
+                  "block": "string",
+                  "code": "string",
+                  "dimension": "string",
+                  "fix": "string",
+                  "subject": "null"
+                }
+              ],
+              "pages": [
+                {
+                  "doc": "string",
+                  "path": "string",
+                  "score": "number"
+                }
+              ],
+              "reasons": [
+                {
+                  "block": "string",
+                  "code": "string",
+                  "dimension": "string",
+                  "fix": "string",
+                  "subject": "null|string"
+                }
+              ],
+              "score": "number"
+            },
+            "covers": "number",
+            "dependents": [
+              {
+                "block": "string",
+                "kind": "string",
+                "on": "string",
+                "summary": "string"
+              }
+            ],
+            "governs": [
+              {
+                "blocks": [
+                  "string"
+                ],
+                "decision": "string",
+                "statement": "string",
+                "status": "string"
+              }
+            ],
+            "inflight": {
+              "intents": [],
+              "proposals": [],
+              "tensions": [],
+              "views": []
+            },
+            "lineage": [],
+            "recorded": "bool",
+            "suspects": [],
+            "will_go_stale": [
+              {
+                "block": "string",
+                "follow_up": "string",
+                "on": "string",
+                "states": [],
+                "via": "string"
+              }
+            ]
+          }
+        },
+        "config": {
+          "exits": [
+            0
+          ],
+          "stdout": [
+            {
+              "file": "null|string",
+              "key": "string",
+              "level": "string",
+              "value": "bool|number|string"
+            }
+          ]
+        },
         "coverage": {
-          "exit": 0,
-          "json": {
-            "areas": [],
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "areas": [
+              {
+                "area": "string",
+                "score": "number"
+              }
+            ],
             "dimensions": {
               "complete": "number",
               "connected": "number",
               "consistent": "number",
               "current": "number",
+              "governed": "number",
               "grounded": "number"
             },
             "issues": [
@@ -24,7 +248,7 @@
                 "code": "string",
                 "dimension": "string",
                 "fix": "string",
-                "subject": "null"
+                "subject": "null|string"
               }
             ],
             "issues_total": "number",
@@ -35,7 +259,10 @@
               "phases": [
                 {
                   "dimension_issues": {
-                    "connected": "number"
+                    "complete?": "number",
+                    "connected?": "number",
+                    "current?": "number",
+                    "grounded?": "number"
                   },
                   "dimensions": [
                     "string"
@@ -60,12 +287,13 @@
             "scope": "string",
             "score": "number",
             "similar_kinds": []
-          },
-          "stream": "stdout"
+          }
         },
         "fsck": {
-          "exit": 0,
-          "json": {
+          "exits": [
+            0
+          ],
+          "stdout": {
             "alt_sets": "number",
             "frames": "number",
             "intents": "number",
@@ -85,12 +313,139 @@
             "unlogged_moves": "number",
             "versions": "number",
             "views": "number"
-          },
-          "stream": "stdout"
+          }
+        },
+        "impact": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "by_area": {
+              "spec": "number"
+            },
+            "items": [
+              {
+                "areas": [
+                  "string"
+                ],
+                "block_type": "string",
+                "depth": "number",
+                "id": "string",
+                "summary": "string",
+                "via": {
+                  "from": "string",
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "inbox": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "cursor": "string",
+            "entries": [],
+            "more": "bool",
+            "started": "bool"
+          }
+        },
+        "intent list": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "intents": [
+              {
+                "actor": "string",
+                "angle": "string",
+                "area": "null",
+                "blocks": [
+                  "string"
+                ],
+                "expires_at": "string",
+                "expires_at_ms": "number",
+                "id": "string",
+                "intent": "string",
+                "posted_at": "string",
+                "posted_at_ms": "number",
+                "prev": "null",
+                "run": "string",
+                "status": "string",
+                "version": "string",
+                "view": "string"
+              }
+            ]
+          }
+        },
+        "intent post": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "intent": {
+              "actor": "string",
+              "angle": "string",
+              "area": "null",
+              "blocks": [
+                "string"
+              ],
+              "expires_at": "string",
+              "expires_at_ms": "number",
+              "id": "string",
+              "intent": "string",
+              "posted_at": "string",
+              "posted_at_ms": "number",
+              "prev": "null",
+              "run": "string",
+              "status": "string",
+              "version": "string",
+              "view": "string"
+            }
+          }
+        },
+        "intent withdraw": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "intent": {
+              "actor": "string",
+              "angle": "string",
+              "area": "null",
+              "blocks": [
+                "string"
+              ],
+              "expires_at": "string",
+              "expires_at_ms": "number",
+              "id": "string",
+              "intent": "string",
+              "posted_at": "string",
+              "posted_at_ms": "number",
+              "prev": "string",
+              "run": "string",
+              "status": "string",
+              "version": "string",
+              "view": "string"
+            }
+          }
+        },
+        "key show": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "agent_key": "null",
+            "key": "null",
+            "sign": "string"
+          }
         },
         "log": {
-          "exit": 0,
-          "json": [
+          "exits": [
+            0
+          ],
+          "stdout": [
             {
               "approved": "string",
               "approved_by": "string",
@@ -101,7 +456,7 @@
               "changes": "number",
               "evidence": "null",
               "landing": "string",
-              "prev": "null",
+              "prev": "null|string",
               "proposal": "string",
               "proposed_by": {
                 "actor": "string",
@@ -111,15 +466,24 @@
               "relay_evidence": "null",
               "relayed_by": "null",
               "summary": "string",
-              "tags": [],
+              "tags": [
+                "string"
+              ],
               "title": "string"
             }
-          ],
-          "stream": "stdout"
+          ]
         },
         "ls": {
-          "exit": 0,
-          "json": [
+          "exits": [
+            0,
+            1
+          ],
+          "stderr": {
+            "code": "string",
+            "fix": "string",
+            "message": "string"
+          },
+          "stdout": [
             {
               "doc_type": "string",
               "id": "string",
@@ -128,42 +492,404 @@
               "title": "string",
               "type": "string"
             }
+          ]
+        },
+        "new doc": {
+          "exits": [
+            0
           ],
-          "stream": "stdout"
+          "stdout": {
+            "change": "string",
+            "consequences": [],
+            "coverage": {
+              "after": "number",
+              "before": "number",
+              "pages": [
+                {
+                  "after": "number",
+                  "before": "number",
+                  "doc": "string",
+                  "path": "string"
+                }
+              ]
+            },
+            "created": {
+              "$doc": "string"
+            },
+            "keys": {
+              "<id>": "string"
+            },
+            "on_change": {
+              "resolved": [],
+              "tensions": []
+            },
+            "suggestions": [],
+            "view": "string",
+            "warnings": []
+          }
+        },
+        "new folder": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "change": "string",
+            "consequences": [],
+            "coverage": {
+              "after": "number",
+              "before": "number",
+              "pages": []
+            },
+            "created": {
+              "op0": "string"
+            },
+            "keys": {
+              "<id>": "string"
+            },
+            "on_change": {
+              "resolved": [],
+              "tensions": []
+            },
+            "suggestions": [],
+            "view": "string",
+            "warnings": []
+          }
         },
         "no-such-command": {
-          "exit": 2,
-          "json": "null",
-          "stream": "stderr"
+          "exits": [
+            2
+          ],
+          "stderr_text": "string"
         },
         "pending": {
-          "exit": 0,
-          "json": {
-            "items": [],
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "items": [
+              {
+                "age": "string",
+                "batch": "null|string",
+                "blocking": "bool",
+                "card": "string",
+                "card_hash": "string",
+                "exception": "null|string",
+                "facts": [
+                  {
+                    "name": "string",
+                    "value": "string"
+                  }
+                ],
+                "kind": "string",
+                "members": [
+                  "string"
+                ],
+                "options": [
+                  {
+                    "consequences": [
+                      "string"
+                    ],
+                    "id": "string",
+                    "label": "string",
+                    "reason?": "string",
+                    "recommended?": "bool"
+                  }
+                ],
+                "raised_at": "string",
+                "raised_by": "string",
+                "ref": "string",
+                "summary": "null|string",
+                "summary_by": "null|string",
+                "title": "string",
+                "why": "string"
+              }
+            ],
             "not_ready": [],
             "omitted": "number",
             "snoozed": "number"
-          },
-          "stream": "stdout"
+          }
         },
-        "show c-ZZZZZ": {
-          "exit": 1,
-          "json": {
+        "plan": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "code": {
+              "files": "number",
+              "unavailable": "bool"
+            },
+            "counts": {
+              "by_kind": {
+                "confirm": {
+                  "closed": "number",
+                  "deferred": "number",
+                  "open": "number"
+                },
+                "reaffirm": {
+                  "closed": "number",
+                  "deferred": "number",
+                  "open": "number"
+                },
+                "rejustify": {
+                  "closed": "number",
+                  "deferred": "number",
+                  "open": "number"
+                },
+                "update": {
+                  "closed": "number",
+                  "deferred": "number",
+                  "open": "number"
+                },
+                "update_implementation": {
+                  "closed": "number",
+                  "deferred": "number",
+                  "open": "number"
+                }
+              },
+              "closed": "number",
+              "deferred": "number",
+              "open": "number"
+            },
+            "items": [
+              {
+                "cause": "string",
+                "edge": "string",
+                "id": "string",
+                "kind": "string",
+                "state": "string",
+                "subject": "string"
+              }
+            ],
+            "notes": [],
+            "plan": "string",
+            "scope": "string"
+          }
+        },
+        "propose": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "blocking": [],
+            "canon_at": "string",
+            "changes": "number",
+            "conflicts": [],
+            "consequences": [],
+            "coverage": {
+              "after": "number",
+              "before": "number",
+              "pages": [
+                {
+                  "after": "number",
+                  "before": "number",
+                  "doc": "string",
+                  "path": "string"
+                }
+              ]
+            },
+            "id": "string",
+            "plan": {
+              "by_kind": {
+                "confirm": {
+                  "closed": "number",
+                  "deferred": "number",
+                  "open": "number"
+                },
+                "reaffirm": {
+                  "closed": "number",
+                  "deferred": "number",
+                  "open": "number"
+                },
+                "rejustify": {
+                  "closed": "number",
+                  "deferred": "number",
+                  "open": "number"
+                },
+                "update": {
+                  "closed": "number",
+                  "deferred": "number",
+                  "open": "number"
+                },
+                "update_implementation": {
+                  "closed": "number",
+                  "deferred": "number",
+                  "open": "number"
+                }
+              },
+              "closed": "number",
+              "code": {
+                "files": "number",
+                "unavailable": "bool"
+              },
+              "deferred": "number",
+              "items": [],
+              "open": "number"
+            },
+            "ref": "string",
+            "stable": "string",
+            "summary": "string",
+            "tensions": [],
+            "title": "string",
+            "version": "number",
+            "warnings": []
+          }
+        },
+        "remote list": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "remotes": [],
+            "warnings": []
+          }
+        },
+        "resolve": {
+          "exits": [
+            1
+          ],
+          "stderr": {
+            "code": "string",
+            "fix": "string",
+            "message": "string"
+          }
+        },
+        "search": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "ignore_case": "bool",
+            "matches": [
+              {
+                "confidence": "string",
+                "coverage": "number",
+                "id": "string",
+                "issues": "number",
+                "lines": [
+                  {
+                    "field": "string",
+                    "line": "number",
+                    "text": "string"
+                  }
+                ],
+                "path": "string",
+                "type": "string"
+              }
+            ],
+            "query": "string",
+            "regex": "bool",
+            "total": "number",
+            "totals": {
+              "docs": [
+                {
+                  "hits": "number",
+                  "path": "string"
+                }
+              ],
+              "types": {
+                "claim": "number"
+              }
+            }
+          }
+        },
+        "show": {
+          "exits": [
+            0,
+            1
+          ],
+          "stderr": {
             "code": "string",
             "fix": "string",
             "message": "string"
           },
-          "stream": "stderr"
+          "stdout": {
+            "areas": [
+              "string"
+            ],
+            "block_type": "string",
+            "body": "string",
+            "children": [
+              "string"
+            ],
+            "doc": "string",
+            "fields": {
+              "doc_type?": "string",
+              "key?": "string",
+              "key_auto?": "bool",
+              "name?": "string",
+              "title?": "string"
+            },
+            "governing": [
+              "string"
+            ],
+            "history": [
+              {
+                "author": {
+                  "actor": "string",
+                  "at_ms": "number",
+                  "role": "string",
+                  "run": "string"
+                },
+                "change": "string",
+                "justification": "null",
+                "landing": {
+                  "approved_by": "string",
+                  "assurance": "string",
+                  "at_ms": "number",
+                  "id": "string"
+                },
+                "message": "string",
+                "op": "string",
+                "version": "string"
+              }
+            ],
+            "history_more": "bool",
+            "id": "string",
+            "incoming": [
+              {
+                "from": "string",
+                "kind": "string",
+                "part": "null",
+                "pin": "null|string",
+                "to": "string"
+              }
+            ],
+            "justification": "null",
+            "outgoing": [
+              {
+                "from": "string",
+                "kind": {
+                  "|any": [
+                    "string",
+                    {
+                      "Link": "string"
+                    }
+                  ]
+                },
+                "part": "null",
+                "pin": "null|string",
+                "to": "string"
+              }
+            ],
+            "parent": "null|string",
+            "status": "null",
+            "status_words": "null",
+            "suspects": [],
+            "version": "string"
+          }
         },
         "status": {
-          "exit": 0,
-          "json": {
+          "exits": [
+            0
+          ],
+          "stdout": {
             "coverage": {
               "dimensions": {
                 "complete": "number",
                 "connected": "number",
                 "consistent": "number",
                 "current": "number",
+                "governed": "number",
                 "grounded": "number"
               },
               "issues_total": "number",
@@ -192,44 +918,244 @@
               "frozen": "bool",
               "label": "string",
               "landings_since": "number",
-              "version": "null",
+              "version": {
+                "landing": "string",
+                "name": "string"
+              },
               "view": "null"
             },
-            "views": [],
+            "views": [
+              {
+                "changes": "number",
+                "name": "string",
+                "owner": {
+                  "actor": "string",
+                  "run": "string"
+                },
+                "version_position": {
+                  "frozen": "bool",
+                  "label": "string",
+                  "landings_since": "number",
+                  "version": {
+                    "landing": "string",
+                    "name": "string"
+                  },
+                  "view": {
+                    "name": "string",
+                    "unlanded_changes": "number"
+                  }
+                }
+              }
+            ],
             "warnings": []
-          },
-          "stream": "stdout"
+          }
         },
         "suspects": {
-          "exit": 0,
-          "json": {
-            "items": []
-          },
-          "stream": "stdout"
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "items": [
+              {
+                "block": "string",
+                "reason": "string",
+                "target": "string"
+              }
+            ]
+          }
+        },
+        "tag": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "at_ms": "number",
+            "landing": "string",
+            "message": "string",
+            "name": "string",
+            "signatures": [],
+            "tag": "string",
+            "tagged_by": "string"
+          }
         },
         "tags": {
-          "exit": 0,
-          "json": {
-            "current": "null",
-            "versions": []
-          },
-          "stream": "stdout"
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "current": "string",
+            "versions": [
+              {
+                "at_ms": "number",
+                "landing": "string",
+                "message": "string",
+                "name": "string",
+                "tag": "string",
+                "tagged_by": "string"
+              }
+            ]
+          }
         },
         "tensions": {
-          "exit": 0,
-          "json": {
+          "exits": [
+            0
+          ],
+          "stdout": {
             "counts": {
               "blocking_open": "number",
               "dismissed": "number",
               "open": "number"
             },
-            "tensions": []
-          },
-          "stream": "stdout"
+            "tensions": [
+              {
+                "blocks": [
+                  "string"
+                ],
+                "id": "string",
+                "judged": {
+                  "actor": "string",
+                  "advice": "string",
+                  "citations": [
+                    {
+                      "block": "string",
+                      "note": "string"
+                    }
+                  ],
+                  "review": "string",
+                  "run": "string"
+                },
+                "kind": "string",
+                "severity": "string",
+                "sides": [
+                  {
+                    "actor": "string",
+                    "authors?": [
+                      "string"
+                    ],
+                    "blocks": [
+                      {
+                        "block": "string",
+                        "version": "string"
+                      }
+                    ],
+                    "change?": "string",
+                    "landing?": "string",
+                    "run": "string",
+                    "side": "string",
+                    "views": [
+                      "string"
+                    ]
+                  }
+                ],
+                "status": "string",
+                "summary": "string",
+                "tension": "string"
+              }
+            ]
+          }
+        },
+        "trace": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "block_type": "string",
+            "decisions": [
+              {
+                "accepted_in": {
+                  "approved_by": "string",
+                  "assurance": "string",
+                  "author": {
+                    "actor": "string",
+                    "at_ms": "number",
+                    "role": "string",
+                    "run": "string"
+                  },
+                  "id": "string",
+                  "proposal": "string",
+                  "title": "string"
+                },
+                "decided_at": "string",
+                "depth": "number",
+                "id": "string",
+                "plans": {
+                  "committed": "number",
+                  "confirmed": "number",
+                  "deferred": "number",
+                  "done": "number",
+                  "open": "number",
+                  "reaffirmed": "number",
+                  "relinked": "number",
+                  "repinned": "number",
+                  "retired": "number",
+                  "updated": "number"
+                },
+                "recorded_at": "string",
+                "statement": "string",
+                "status": "string"
+              }
+            ],
+            "edges": [],
+            "frontier": [],
+            "governing": [
+              {
+                "decision": "string",
+                "status": "string",
+                "via": "string"
+              }
+            ],
+            "id": "string",
+            "introduced": {
+              "approved_by": "string",
+              "assurance": "string",
+              "author": {
+                "actor": "string",
+                "at_ms": "number",
+                "role": "string",
+                "run": "string"
+              },
+              "id": "string",
+              "proposal": "string",
+              "title": "string"
+            },
+            "premises": [],
+            "questions": [],
+            "sources": [],
+            "summary": "string",
+            "ungrounded": "bool"
+          }
+        },
+        "undo": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "cascaded": [],
+            "closed": "bool",
+            "conflicts": [],
+            "consequences": [],
+            "effect": "string",
+            "excluded": [
+              "string"
+            ],
+            "included": [],
+            "kind": "string",
+            "on_change": {
+              "resolved": [],
+              "tensions": []
+            },
+            "op": "string",
+            "rebased": "bool",
+            "reopened": "bool",
+            "undone": "string",
+            "view": "string"
+          }
         },
         "upgrade": {
-          "exit": 0,
-          "json": {
+          "exits": [
+            0
+          ],
+          "stdout": {
             "backup": "null",
             "batch": "null",
             "changed": "bool",
@@ -241,8 +1167,107 @@
             "reindexed": "bool",
             "steps": [],
             "to": "string"
-          },
-          "stream": "stdout"
+          }
+        },
+        "view close": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "closed": [
+              {
+                "reason": "string",
+                "view": "string"
+              }
+            ]
+          }
+        },
+        "view ls": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "views": [
+              {
+                "base": "string",
+                "blocks": "number",
+                "changes": "number",
+                "closed": "bool",
+                "conflicts": "number",
+                "effective_base": "string",
+                "idle": "bool",
+                "last_write_ms": "number",
+                "name": "string",
+                "owner": {
+                  "actor": "string",
+                  "run": "string"
+                },
+                "pinned": "bool"
+              }
+            ]
+          }
+        },
+        "view new": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "base": "string",
+            "changes": "number",
+            "closed": "bool",
+            "head": "string",
+            "owner": {
+              "actor": "string",
+              "run": "string"
+            },
+            "pinned": "bool",
+            "view": "string"
+          }
+        },
+        "view show": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "blocks": "number",
+            "changes": [
+              {
+                "actor": "string",
+                "at_ms": "number",
+                "blocks": [
+                  "string"
+                ],
+                "id": "string",
+                "message": "string",
+                "replayed_from": "null",
+                "run": "string"
+              }
+            ],
+            "conflicts": [],
+            "effective_base": "string",
+            "head": {
+              "base": "string",
+              "changes": "number",
+              "closed": "bool",
+              "head": "string",
+              "owner": {
+                "actor": "string",
+                "run": "string"
+              },
+              "pinned": "bool",
+              "view": "string"
+            },
+            "ops": [
+              {
+                "actor": "string",
+                "at_ms": "number",
+                "id": "string",
+                "kind": "string",
+                "run": "string",
+                "undone": "bool"
+              }
+            ]
+          }
         }
       },
       "version_text": {
@@ -10038,7 +11063,7 @@
           ]
         }
       ],
-      "version": "0.24.0 (preview)"
+      "version": "<version>"
     }
   },
   "config": {
@@ -11703,6 +12728,7 @@
               "<a id=\"wallets\"",
               "<a id=\"ledger\""
             ],
+            "blake3": "8fc0e5dbb19fe2ff90eab08b354b966c5faeb8f34d30ee2cce00b616d48e05d2",
             "front_matter_keys": [
               "title"
             ],
@@ -11712,22 +12738,22 @@
             ],
             "link_targets": [
               "wallets/transactions.md#guards"
-            ],
-            "normalized_blake3": "8fc0e5dbb19fe2ff90eab08b354b966c5faeb8f34d30ee2cce00b616d48e05d2"
+            ]
           },
           "docs/index.md": {
             "anchors": [],
+            "blake3": "ba0d04f74af7281faae4f323184bd144e8e8bdb44e65d2c96e9d22b92de13269",
             "front_matter_keys": [
               "title"
             ],
             "headings": [
               "# Wallets"
             ],
-            "link_targets": [],
-            "normalized_blake3": "ba0d04f74af7281faae4f323184bd144e8e8bdb44e65d2c96e9d22b92de13269"
+            "link_targets": []
           },
           "docs/wallets/index.md": {
             "anchors": [],
+            "blake3": "c0b21748b980be044462e299dee96bdd29e79f4b1fd8f7b90b62a323d1f91210",
             "front_matter_keys": [
               "rdy_id",
               "title"
@@ -11735,8 +12761,7 @@
             "headings": [
               "# Wallets"
             ],
-            "link_targets": [],
-            "normalized_blake3": "d6df0df5066059108f6cbc8f20a825a96769a14ff17a672a784a9c8233b97d70"
+            "link_targets": []
           },
           "docs/wallets/transactions.md": {
             "anchors": [
@@ -11745,6 +12770,7 @@
               "<a id=\"is-a-ledger-a-sequence\"",
               "<a id=\"see-ledgers-are-atomic-and-ledger\""
             ],
+            "blake3": "41b458c3ea9ece884e40c0f854604dbc09b1254fd7128ddd3760f28f47636831",
             "front_matter_keys": [
               "rdy_id",
               "title"
@@ -11756,15 +12782,14 @@
             "link_targets": [
               "transactions.md#ledger",
               "transactions.md#ledger"
-            ],
-            "normalized_blake3": "a1e18eba33f4bd75ae93899dc495390a21c8dee3db8c20edae2eb17bf22a0c77"
+            ]
           },
           "mkdocs.yml": {
             "anchors": [],
+            "blake3": "75182cdbbabf1a2a2971e8ec942496288496b9e913847f06f0772fb3d5d41f6f",
             "front_matter_keys": null,
             "headings": [],
-            "link_targets": [],
-            "normalized_blake3": "75182cdbbabf1a2a2971e8ec942496288496b9e913847f06f0772fb3d5d41f6f"
+            "link_targets": []
           }
         }
       },
@@ -11775,6 +12800,7 @@
               "<a id=\"wallets\"",
               "<a id=\"ledger\""
             ],
+            "blake3": "8fc0e5dbb19fe2ff90eab08b354b966c5faeb8f34d30ee2cce00b616d48e05d2",
             "front_matter_keys": [
               "title"
             ],
@@ -11784,22 +12810,22 @@
             ],
             "link_targets": [
               "wallets/transactions.md#guards"
-            ],
-            "normalized_blake3": "8fc0e5dbb19fe2ff90eab08b354b966c5faeb8f34d30ee2cce00b616d48e05d2"
+            ]
           },
           "index.md": {
             "anchors": [],
+            "blake3": "ba0d04f74af7281faae4f323184bd144e8e8bdb44e65d2c96e9d22b92de13269",
             "front_matter_keys": [
               "title"
             ],
             "headings": [
               "# Wallets"
             ],
-            "link_targets": [],
-            "normalized_blake3": "ba0d04f74af7281faae4f323184bd144e8e8bdb44e65d2c96e9d22b92de13269"
+            "link_targets": []
           },
           "wallets/index.md": {
             "anchors": [],
+            "blake3": "c0b21748b980be044462e299dee96bdd29e79f4b1fd8f7b90b62a323d1f91210",
             "front_matter_keys": [
               "rdy_id",
               "title"
@@ -11807,8 +12833,7 @@
             "headings": [
               "# Wallets"
             ],
-            "link_targets": [],
-            "normalized_blake3": "d6df0df5066059108f6cbc8f20a825a96769a14ff17a672a784a9c8233b97d70"
+            "link_targets": []
           },
           "wallets/transactions.md": {
             "anchors": [
@@ -11817,6 +12842,7 @@
               "<a id=\"is-a-ledger-a-sequence\"",
               "<a id=\"see-ledgers-are-atomic-and-ledger\""
             ],
+            "blake3": "41b458c3ea9ece884e40c0f854604dbc09b1254fd7128ddd3760f28f47636831",
             "front_matter_keys": [
               "rdy_id",
               "title"
@@ -11828,8 +12854,7 @@
             "link_targets": [
               "transactions.md#ledger",
               "transactions.md#ledger"
-            ],
-            "normalized_blake3": "a1e18eba33f4bd75ae93899dc495390a21c8dee3db8c20edae2eb17bf22a0c77"
+            ]
           }
         }
       },
@@ -11840,6 +12865,7 @@
               "<a id=\"wallets\"",
               "<a id=\"ledger\""
             ],
+            "blake3": "f0ee7a381115e24065e4c954e479ca082a17c195201758764a93ccaa73ba7ea9",
             "front_matter_keys": [
               "title"
             ],
@@ -11849,22 +12875,22 @@
             ],
             "link_targets": [
               "wallets/transactions.md#guards"
-            ],
-            "normalized_blake3": "f0ee7a381115e24065e4c954e479ca082a17c195201758764a93ccaa73ba7ea9"
+            ]
           },
           "docs/index.md": {
             "anchors": [],
+            "blake3": "4d0bdcc6aec4d30b6ace0365f4429cb3315426a58c8940c10a2b94a8eb72f866",
             "front_matter_keys": [
               "title"
             ],
             "headings": [
               "# Wallets"
             ],
-            "link_targets": [],
-            "normalized_blake3": "4d0bdcc6aec4d30b6ace0365f4429cb3315426a58c8940c10a2b94a8eb72f866"
+            "link_targets": []
           },
           "docs/wallets/index.md": {
             "anchors": [],
+            "blake3": "91cc83d26976621486bc6f1869b2cb242769460e84250c3dcea7b5f76e5ca392",
             "front_matter_keys": [
               "rdy_id",
               "title"
@@ -11872,8 +12898,7 @@
             "headings": [
               "# Wallets"
             ],
-            "link_targets": [],
-            "normalized_blake3": "7db9e27ec13fdeed8d2ab49a456c8704b128c7a0a06af66694c12893749abc4d"
+            "link_targets": []
           },
           "docs/wallets/transactions.md": {
             "anchors": [
@@ -11882,6 +12907,7 @@
               "<a id=\"is-a-ledger-a-sequence\"",
               "<a id=\"see-ledgers-are-atomic-and-ledger\""
             ],
+            "blake3": "33f4c09df95193492cb4cc97a361c37b27d28bd6df5e4fc7f84b8e82dc695419",
             "front_matter_keys": [
               "rdy_id",
               "title"
@@ -11893,17 +12919,16 @@
             "link_targets": [
               "transactions.md#ledger",
               "transactions.md#ledger"
-            ],
-            "normalized_blake3": "ed0dfa7c3e231d51dbeceee7866a4907b8d3fafe1ab8c069e1a52e791e61cd7c"
+            ]
           },
           "mkdocs.yml": {
             "anchors": [],
+            "blake3": "c26fe2e4b46bcfb71a4ae762b34b404cde298fc3fa4be17bae0f574b3f7a1962",
             "front_matter_keys": null,
             "headings": [
               "# generated by rdy, edit in rdy"
             ],
-            "link_targets": [],
-            "normalized_blake3": "c26fe2e4b46bcfb71a4ae762b34b404cde298fc3fa4be17bae0f574b3f7a1962"
+            "link_targets": []
           }
         }
       }
@@ -11935,6 +12960,19 @@
         "fix": "send the corrected payload: verdict tension or no_tension",
         "message": "verdict \"pass\" is not tension or no_tension"
       }
+    },
+    "ops_not_probed": {
+      "rdy_alternatives abandon": "needs an alternative set",
+      "rdy_alternatives add": "needs an alternative set",
+      "rdy_alternatives compare": "needs an alternative set",
+      "rdy_alternatives create": "needs two open views and a question block",
+      "rdy_alternatives remove": "needs an alternative set",
+      "rdy_intent renew": "the same reply as post",
+      "rdy_view exclude": "needs an included change",
+      "rdy_view include": "needs another view's change",
+      "rdy_view own": "changes who owns a view",
+      "rdy_view replay": "needs excluded changes",
+      "rdy_view resolve": "needs a view with a conflict"
     },
     "refusal_envelope": {
       "code": "string",
@@ -12045,14 +13083,260 @@
       "W_PUBLICATION_REFERENCE"
     ],
     "result_fields": {
+      "rdy_alternatives list": {
+        "ok": {
+          "sets": []
+        }
+      },
+      "rdy_answer": {
+        "ok": {
+          "act": "string",
+          "answer": "null|string",
+          "assurance": "string",
+          "label": "string",
+          "landing": {
+            "|null": {
+              "approved": "string",
+              "assurance": "string",
+              "changes": "number",
+              "consequences": [
+                {
+                  "because": {
+                    "changed": "string",
+                    "edge": "string",
+                    "edges": [
+                      "string"
+                    ],
+                    "values": []
+                  },
+                  "block": "string",
+                  "fix": "string",
+                  "follow_up": "string",
+                  "id": "string",
+                  "kind": "string"
+                }
+              ],
+              "landing": "string",
+              "rebased": [
+                {
+                  "conflicts": "number",
+                  "dropped": "number",
+                  "view": "string"
+                }
+              ],
+              "summary": "string",
+              "title": "string",
+              "version": "string",
+              "warnings": []
+            }
+          },
+          "next": "null|string",
+          "option": "string",
+          "ref": "string",
+          "relayed_by": {
+            "actor": "string",
+            "run": "string"
+          },
+          "signatures?": []
+        },
+        "refusal_codes": [
+          "E_PROPOSAL_MOVED"
+        ],
+        "refused": {
+          "code": "string",
+          "corrected": {
+            "card": "string",
+            "card_hash": "string",
+            "ref": "string"
+          },
+          "fix": "string",
+          "issues": [],
+          "message": "string"
+        }
+      },
+      "rdy_brief": {
+        "ok": {
+          "base": {
+            "blocks": [
+              {
+                "id": "string",
+                "version": "string"
+              }
+            ],
+            "depends": "number",
+            "token": "string"
+          },
+          "coverage": {
+            "confidence": "string",
+            "dimensions": {
+              "connected": "number",
+              "consistent": "number",
+              "current": "number",
+              "grounded": "number"
+            },
+            "issues": [
+              {
+                "block": "string",
+                "code": "string",
+                "dimension": "string",
+                "fix": "string",
+                "subject": "null"
+              }
+            ],
+            "pages": [
+              {
+                "doc": "string",
+                "path": "string",
+                "score": "number"
+              }
+            ],
+            "reasons": [
+              {
+                "block": "string",
+                "code": "string",
+                "dimension": "string",
+                "fix": "string",
+                "subject": "null|string"
+              }
+            ],
+            "score": "number"
+          },
+          "covers": "number",
+          "dependents": [
+            {
+              "block": "string",
+              "kind": "string",
+              "on": "string",
+              "summary": "string"
+            }
+          ],
+          "governs": [
+            {
+              "blocks": [
+                "string"
+              ],
+              "decision": "string",
+              "statement": "string",
+              "status": "string"
+            }
+          ],
+          "inflight": {
+            "intents": [],
+            "proposals": [],
+            "tensions": [],
+            "views": []
+          },
+          "lineage": [],
+          "suspects": [],
+          "will_go_stale": [
+            {
+              "block": "string",
+              "follow_up": "string",
+              "on": "string",
+              "states": [],
+              "via": "string"
+            }
+          ]
+        }
+      },
+      "rdy_context": {
+        "ok": {
+          "areas": [
+            "string"
+          ],
+          "block_type": "string",
+          "body": "string",
+          "children": [],
+          "doc": "string",
+          "fields": {},
+          "governing": [
+            "string"
+          ],
+          "history": [
+            {
+              "author": {
+                "actor": "string",
+                "at_ms": "number",
+                "role": "string",
+                "run": "string"
+              },
+              "change": "string",
+              "justification": "null",
+              "landing": {
+                "approved_by": "string",
+                "assurance": "string",
+                "at_ms": "number",
+                "id": "string"
+              },
+              "message": "string",
+              "op": "string",
+              "version": "string"
+            }
+          ],
+          "history_more": "bool",
+          "id": "string",
+          "incoming": [
+            {
+              "from": "string",
+              "kind": {
+                "|any": [
+                  "string",
+                  {
+                    "|any": [
+                      "string",
+                      {
+                        "Link": "string"
+                      }
+                    ]
+                  }
+                ]
+              },
+              "part": "null",
+              "pin": "null|string",
+              "to": "string"
+            }
+          ],
+          "justification": "null",
+          "outgoing": [
+            {
+              "from": "string",
+              "kind": {
+                "Link": "string"
+              },
+              "part": "null",
+              "pin": "string",
+              "to": "string"
+            }
+          ],
+          "parent": "string",
+          "status": "null",
+          "suspects": [],
+          "version": "string"
+        },
+        "refusal_codes": [
+          "E_UNKNOWN_BLOCK"
+        ],
+        "refused": {
+          "code": "string",
+          "fix": "string",
+          "issues": [],
+          "message": "string"
+        }
+      },
       "rdy_coverage": {
         "ok": {
-          "areas": [],
+          "areas": [
+            {
+              "area": "string",
+              "score": "number"
+            }
+          ],
           "dimensions": {
             "complete": "number",
             "connected": "number",
             "consistent": "number",
             "current": "number",
+            "governed": "number",
             "grounded": "number"
           },
           "issues": [
@@ -12060,8 +13344,13 @@
               "block": "string",
               "code": "string",
               "dimension": "string",
+              "dismissed?": {
+                "actor": "string",
+                "reason": "string",
+                "review": "string"
+              },
               "fix": "string",
-              "subject": "null"
+              "subject": "null|string"
             }
           ],
           "issues_total": "number",
@@ -12072,7 +13361,12 @@
             "phases": [
               {
                 "dimension_issues": {
-                  "connected": "number"
+                  "complete?": "number",
+                  "connected?": "number",
+                  "consistent?": "number",
+                  "current?": "number",
+                  "governed?": "number",
+                  "grounded?": "number"
                 },
                 "dimensions": [
                   "string"
@@ -12099,6 +13393,145 @@
           "similar_kinds": []
         }
       },
+      "rdy_decide": {
+        "ok": {
+          "change": "string",
+          "consequences": [],
+          "coverage": {
+            "after": "number",
+            "before": "number",
+            "pages": [
+              {
+                "after": "number",
+                "before": "number",
+                "doc": "string",
+                "path": "string"
+              }
+            ]
+          },
+          "created": {
+            "$decision": "string"
+          },
+          "on_change": {
+            "resolved": [],
+            "tensions": []
+          },
+          "related_decisions": [],
+          "suggestions": [],
+          "warnings": [],
+          "warnings_repeated": "number"
+        }
+      },
+      "rdy_impact": {
+        "ok": {
+          "by_area": {
+            "spec": "number"
+          },
+          "items": [
+            {
+              "areas": [
+                "string"
+              ],
+              "block_type": "string",
+              "depth": "number",
+              "id": "string",
+              "summary": "string",
+              "via": {
+                "from": "string",
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "rdy_inbox": {
+        "ok": {
+          "cursor": "string",
+          "entries": [
+            {
+              "event": "string",
+              "ids": [
+                "string"
+              ],
+              "line": "string"
+            }
+          ],
+          "more": "bool",
+          "person?": "string",
+          "started?": "bool"
+        }
+      },
+      "rdy_intent list": {
+        "ok": {
+          "intents": [
+            {
+              "actor": "string",
+              "angle": "string",
+              "area": "null",
+              "blocks": [
+                "string"
+              ],
+              "expires_at": "string",
+              "expires_at_ms": "number",
+              "id": "string",
+              "intent": "string",
+              "posted_at": "string",
+              "posted_at_ms": "number",
+              "prev": "null",
+              "run": "string",
+              "status": "string",
+              "version": "string",
+              "view": "string"
+            }
+          ]
+        }
+      },
+      "rdy_intent post": {
+        "ok": {
+          "intent": {
+            "actor": "string",
+            "angle": "string",
+            "area": "null",
+            "blocks": [
+              "string"
+            ],
+            "expires_at": "string",
+            "expires_at_ms": "number",
+            "id": "string",
+            "intent": "string",
+            "posted_at": "string",
+            "posted_at_ms": "number",
+            "prev": "null",
+            "run": "string",
+            "status": "string",
+            "version": "string",
+            "view": "string"
+          }
+        }
+      },
+      "rdy_intent withdraw": {
+        "ok": {
+          "intent": {
+            "actor": "string",
+            "angle": "string",
+            "area": "null",
+            "blocks": [
+              "string"
+            ],
+            "expires_at": "string",
+            "expires_at_ms": "number",
+            "id": "string",
+            "intent": "string",
+            "posted_at": "string",
+            "posted_at_ms": "number",
+            "prev": "string",
+            "run": "string",
+            "status": "string",
+            "version": "string",
+            "view": "string"
+          }
+        }
+      },
       "rdy_key_show": {
         "ok": {
           "agent_key": "null",
@@ -12116,19 +13549,41 @@
             "at": "string",
             "at_ms": "number",
             "changes": "number",
-            "evidence": "null",
+            "evidence": {
+              "|null": {
+                "card_hash": "string",
+                "choice": "string",
+                "kind": "string",
+                "options": [
+                  "string"
+                ]
+              }
+            },
             "landing": "string",
-            "prev": "null",
+            "prev": "null|string",
             "proposal": "string",
             "proposed_by": {
               "actor": "string",
               "run": "string"
             },
             "rebased_from": [],
-            "relay_evidence": "null",
-            "relayed_by": "null",
+            "relay_evidence": {
+              "|null": {
+                "question": "string",
+                "quoted": "string",
+                "session_ref": "string"
+              }
+            },
+            "relayed_by": {
+              "|null": {
+                "actor": "string",
+                "run": "string"
+              }
+            },
             "summary": "string",
-            "tags": [],
+            "tags": [
+              "string"
+            ],
             "title": "string"
           }
         ]
@@ -12144,6 +13599,7 @@
               "connected": "number",
               "consistent": "number",
               "current": "number",
+              "governed": "number",
               "grounded": "number"
             },
             "issues_total": "number",
@@ -12183,18 +13639,63 @@
             "frozen": "bool",
             "label": "string",
             "landings_since": "number",
-            "version": "null",
+            "version": {
+              "landing": "string",
+              "name": "string"
+            },
             "view": {
               "name": "string",
               "unlanded_changes": "number"
             }
           },
-          "views": []
+          "views": [
+            {
+              "changes": "number",
+              "name": "string"
+            }
+          ]
         }
       },
       "rdy_pending": {
         "ok": {
-          "items": [],
+          "items": [
+            {
+              "age": "string",
+              "batch": "null|string",
+              "blocking": "bool",
+              "card": "string",
+              "card_hash": "string",
+              "exception": "null|string",
+              "facts": [
+                {
+                  "name": "string",
+                  "value": "string"
+                }
+              ],
+              "kind": "string",
+              "members": [
+                "string"
+              ],
+              "options": [
+                {
+                  "consequences": [
+                    "string"
+                  ],
+                  "id": "string",
+                  "label": "string",
+                  "reason?": "string",
+                  "recommended?": "bool"
+                }
+              ],
+              "raised_at": "string",
+              "raised_by": "string",
+              "ref": "string",
+              "summary": "null|string",
+              "summary_by": "null|string",
+              "title": "string",
+              "why": "string"
+            }
+          ],
           "not_ready": [],
           "omitted": "number",
           "snoozed": "number"
@@ -12238,13 +13739,191 @@
             "deferred": "number",
             "open": "number"
           },
-          "items": [],
+          "items": [
+            {
+              "cause": "string",
+              "edge": "string",
+              "id": "string",
+              "kind": "string",
+              "state": "string",
+              "subject": "string"
+            }
+          ],
           "notes": [],
-          "plan": "null",
+          "plan": "string",
           "scope": "string"
         }
       },
+      "rdy_propose": {
+        "ok": {
+          "blocking": [],
+          "canon_at": "string",
+          "changes": "number",
+          "conflicts": [],
+          "consequences": [],
+          "coverage": {
+            "after": "number",
+            "before": "number",
+            "pages": [
+              {
+                "after": "number",
+                "before": "number",
+                "doc": "string",
+                "path": "string"
+              }
+            ]
+          },
+          "id": "string",
+          "plan": {
+            "by_kind": {
+              "confirm": {
+                "closed": "number",
+                "deferred": "number",
+                "open": "number"
+              },
+              "reaffirm": {
+                "closed": "number",
+                "deferred": "number",
+                "open": "number"
+              },
+              "rejustify": {
+                "closed": "number",
+                "deferred": "number",
+                "open": "number"
+              },
+              "update": {
+                "closed": "number",
+                "deferred": "number",
+                "open": "number"
+              },
+              "update_implementation": {
+                "closed": "number",
+                "deferred": "number",
+                "open": "number"
+              }
+            },
+            "closed": "number",
+            "code": {
+              "files": "number",
+              "unavailable": "bool"
+            },
+            "deferred": "number",
+            "items": [],
+            "open": "number"
+          },
+          "ref": "string",
+          "stable": "string",
+          "summary": "string",
+          "tensions": [
+            {
+              "blocks": [
+                "string"
+              ],
+              "id": "string",
+              "kind": "string",
+              "refuses": "bool",
+              "severity": "string",
+              "sides": [
+                {
+                  "actor": "string",
+                  "blocks": [
+                    {
+                      "block": "string",
+                      "version": "string"
+                    }
+                  ],
+                  "change": "string",
+                  "run": "string",
+                  "side": "string",
+                  "views": [
+                    "string"
+                  ]
+                }
+              ],
+              "status": "string",
+              "summary": "string",
+              "tension": "string"
+            }
+          ],
+          "title": "string",
+          "version": "number",
+          "warnings": [
+            {
+              "block": "string",
+              "code": "string",
+              "fix": "string",
+              "message": "string",
+              "severity": "string"
+            }
+          ]
+        }
+      },
       "rdy_read": {
+        "ok": {
+          "format": "string",
+          "id": "string",
+          "text": "string"
+        }
+      },
+      "rdy_resolve": {
+        "ok": {
+          "id": "string",
+          "kind": "string",
+          "review": "string",
+          "severity": "string",
+          "status": "string",
+          "tension": "string"
+        }
+      },
+      "rdy_review_next": {
+        "ok": {
+          "case": {
+            "blocks": [
+              {
+                "doc": "string",
+                "governing": [
+                  {
+                    "id": "string",
+                    "statement": "string"
+                  }
+                ],
+                "headings": [
+                  "string"
+                ],
+                "id": "string",
+                "side": "string",
+                "text": [
+                  {
+                    "field": "string",
+                    "text": "string"
+                  }
+                ],
+                "type": "string",
+                "version": "string"
+              }
+            ],
+            "entities": [],
+            "kind": "string",
+            "question": "string",
+            "request": "string",
+            "rule": "string",
+            "schema": {
+              "citations": "string",
+              "reason": "string",
+              "severity": "string",
+              "verdict": [
+                "string"
+              ]
+            }
+          },
+          "case_hash": "string",
+          "kind": "string",
+          "lease_expires_at": "string",
+          "request": "string"
+        },
+        "refusal_codes": [
+          "E_BAD_INPUT"
+        ],
         "refused": {
           "code": "string",
           "fix": "string",
@@ -12252,27 +13931,113 @@
           "message": "string"
         }
       },
+      "rdy_review_submit": {
+        "ok": {
+          "advice?": "string",
+          "request": "string",
+          "review": "string",
+          "severity?": "string",
+          "suppressed?": "bool",
+          "tension?": "string",
+          "verdict": "string"
+        },
+        "refusal_codes": [
+          "E_REVIEW_STALE"
+        ],
+        "refused": {
+          "code": "string",
+          "fix": "string",
+          "issues": [],
+          "message": "string"
+        }
+      },
+      "rdy_revoke": {
+        "ok": {
+          "change": "string",
+          "consequences": [],
+          "coverage": {
+            "after": "number",
+            "before": "number",
+            "pages": [
+              {
+                "after": "number",
+                "before": "number",
+                "doc": "string",
+                "path": "string"
+              }
+            ]
+          },
+          "created": {
+            "$decision": "string"
+          },
+          "on_change": {
+            "resolved": [],
+            "tensions": []
+          },
+          "related_decisions": [
+            {
+              "decision": "string",
+              "for": "string",
+              "relation": "string",
+              "statement": "string",
+              "status": "string"
+            }
+          ],
+          "suggestions": [],
+          "warnings": [
+            {
+              "block": "string",
+              "code": "string",
+              "fix": "string",
+              "message": "string",
+              "severity": "string"
+            }
+          ],
+          "warnings_repeated": "number"
+        }
+      },
       "rdy_schema": {
         "ok": {
-          "alternatives": "string",
-          "areas": [],
-          "brief": "string",
-          "change_plan": {
+          "alternatives?": "string",
+          "areas?": [
+            {
+              "description": "string",
+              "name": "string",
+              "paths": [
+                "string"
+              ]
+            }
+          ],
+          "body?": "string",
+          "brief?": "string",
+          "change_plan?": {
             "examples": [
               {
-                "id": "string",
-                "op": "string",
-                "reason": "string"
+                "answers?": [
+                  {
+                    "act": "string",
+                    "item": "string",
+                    "reason": "string"
+                  }
+                ],
+                "because?": "string",
+                "code?": "bool",
+                "id?": "string",
+                "op?": "string",
+                "reason?": "string",
+                "view?": "string"
               }
             ],
             "rule": "string"
           },
-          "consequences": "string",
-          "decisions": {
+          "children?": [],
+          "class?": "string",
+          "consequences?": "string",
+          "decisions?": {
             "home": "null",
             "rule": "string"
           },
-          "doc_types": [
+          "doc_types?": [
             {
               "doc_type": "string",
               "skeleton": [
@@ -12283,14 +14048,14 @@
               ]
             }
           ],
-          "edit_loop": "string",
-          "entities": {
+          "edit_loop?": "string",
+          "entities?": {
             "rule": "string",
             "types": [
               "string"
             ]
           },
-          "errors": {
+          "errors?": {
             "E_ACTOR_UNBOUND": {
               "fix": "string",
               "when": "string"
@@ -12692,9 +14457,17 @@
               "when": "string"
             }
           },
-          "inbox": "string",
-          "intents": "string",
-          "limits": {
+          "example?": {
+            "body": "string",
+            "fields": {},
+            "op": "string",
+            "parent": "string",
+            "type": "string"
+          },
+          "fields?": {},
+          "inbox?": "string",
+          "intents?": "string",
+          "limits?": {
             "asset_bytes": "number",
             "asset_bytes_stdio": "number",
             "max_tokens": "number",
@@ -12703,7 +14476,7 @@
             "socket_line_bytes": "number",
             "transport": "string"
           },
-          "link_shape": {
+          "link_shape?": {
             "example": {
               "decided_by": [
                 {
@@ -12719,10 +14492,29 @@
             "shape": "string",
             "update": "string"
           },
-          "link_types": [
+          "link_types?": [
             "string"
           ],
-          "ops": {
+          "links?": {
+            "example": {
+              "decided_by": [
+                {
+                  "target": "string"
+                }
+              ],
+              "describes": [
+                {
+                  "target": "string"
+                }
+              ]
+            },
+            "kinds": [
+              "string"
+            ],
+            "shape": "string",
+            "update": "string"
+          },
+          "ops?": {
             "create": "string",
             "delete": "string",
             "move": "string",
@@ -12731,12 +14523,17 @@
             "repin": "string",
             "update": "string"
           },
-          "pack": "string",
-          "reviews": "string",
-          "signing": "string",
-          "tensions": "string",
-          "text": "string",
-          "types": [
+          "pack?": "string",
+          "prefix?": "string",
+          "reviews?": "string",
+          "signing?": "string",
+          "tensions?": "string",
+          "text?": "string",
+          "traits?": [
+            "string"
+          ],
+          "type?": "string",
+          "types?": [
             {
               "class": "string",
               "prefix": "string",
@@ -12746,12 +14543,50 @@
               "type": "string"
             }
           ],
-          "views": "string"
+          "views?": "string"
+        }
+      },
+      "rdy_search": {
+        "ok": {
+          "ignore_case": "bool",
+          "matches": [
+            {
+              "confidence": "string",
+              "coverage": "number",
+              "id": "string",
+              "issues": "number",
+              "lines": [
+                {
+                  "field": "string",
+                  "line": "number",
+                  "text": "string"
+                }
+              ],
+              "path": "string",
+              "type": "string"
+            }
+          ],
+          "query": "string",
+          "regex": "bool",
+          "total": "number",
+          "totals": {
+            "docs": [
+              {
+                "hits": "number",
+                "path": "string"
+              }
+            ],
+            "types": {
+              "claim": "number"
+            }
+          }
         }
       },
       "rdy_session": {
         "ok": {
-          "areas": [],
+          "areas": [
+            "string"
+          ],
           "pending": {
             "blocking": "number",
             "items": "number"
@@ -12763,15 +14598,88 @@
           "view": "string"
         }
       },
+      "rdy_supersede": {
+        "ok": {
+          "change": "string",
+          "consequences": [],
+          "coverage": {
+            "after": "number",
+            "before": "number",
+            "pages": [
+              {
+                "after": "number",
+                "before": "number",
+                "doc": "string",
+                "path": "string"
+              }
+            ]
+          },
+          "created": {
+            "$decision": "string"
+          },
+          "inherited": {
+            "affects": [
+              "string"
+            ]
+          },
+          "on_change": {
+            "resolved": [],
+            "tensions": []
+          },
+          "related_decisions": [
+            {
+              "decision": "string",
+              "for": "string",
+              "relation": "string",
+              "statement": "string",
+              "status": "string"
+            }
+          ],
+          "suggestions": [],
+          "warnings": [],
+          "warnings_repeated": "number"
+        }
+      },
       "rdy_suspects": {
         "ok": {
-          "items": []
+          "items": [
+            {
+              "block": "string",
+              "reason": "string",
+              "target": "string"
+            }
+          ]
+        }
+      },
+      "rdy_tag": {
+        "ok": {
+          "answer": "string",
+          "at_ms": "number",
+          "landing": "string",
+          "message": "string",
+          "name": "string",
+          "relayed_by": {
+            "actor": "string",
+            "run": "string"
+          },
+          "signatures": [],
+          "tag": "string",
+          "tagged_by": "string"
         }
       },
       "rdy_tags": {
         "ok": {
-          "current": "null",
-          "versions": []
+          "current": "string",
+          "versions": [
+            {
+              "at_ms": "number",
+              "landing": "string",
+              "message": "string",
+              "name": "string",
+              "tag": "string",
+              "tagged_by": "string"
+            }
+          ]
         }
       },
       "rdy_tensions": {
@@ -12781,7 +14689,132 @@
             "dismissed": "number",
             "open": "number"
           },
-          "tensions": []
+          "tensions": [
+            {
+              "blocks": [
+                "string"
+              ],
+              "id": "string",
+              "judged?": {
+                "actor": "string",
+                "advice": "string",
+                "citations": [
+                  {
+                    "block": "string",
+                    "note": "string"
+                  }
+                ],
+                "review": "string",
+                "run": "string"
+              },
+              "kind": "string",
+              "read_time?": "bool",
+              "severity": "string",
+              "sides": [
+                {
+                  "actor": "string",
+                  "authors?": [
+                    "string"
+                  ],
+                  "blocks": [
+                    {
+                      "block": "string",
+                      "version": "string"
+                    }
+                  ],
+                  "change?": "string",
+                  "intent?": "string",
+                  "landing?": "string",
+                  "run": "string",
+                  "side": "string",
+                  "views": [
+                    "string"
+                  ]
+                }
+              ],
+              "status": "string",
+              "summary": "string",
+              "tension": "string"
+            }
+          ]
+        }
+      },
+      "rdy_trace": {
+        "ok": {
+          "block_type": "string",
+          "decisions": [
+            {
+              "accepted_in?": {
+                "approved_by": "string",
+                "assurance": "string",
+                "author": {
+                  "actor": "string",
+                  "at_ms": "number",
+                  "role": "string",
+                  "run": "string"
+                },
+                "id": "string",
+                "proposal": "string",
+                "title": "string"
+              },
+              "decided_at?": "string",
+              "depth": "number",
+              "id": "string",
+              "plans": {
+                "committed": "number",
+                "confirmed": "number",
+                "deferred": "number",
+                "done": "number",
+                "open": "number",
+                "reaffirmed": "number",
+                "relinked": "number",
+                "repinned": "number",
+                "retired": "number",
+                "updated": "number"
+              },
+              "recorded_at": "string",
+              "reversibility?": "string",
+              "statement": "string",
+              "status": "string"
+            }
+          ],
+          "edges": [
+            {
+              "from": "string",
+              "kind": {
+                "Link": "string"
+              },
+              "part": "null",
+              "to": "string"
+            }
+          ],
+          "frontier": [],
+          "governing": [
+            {
+              "decision": "string",
+              "status": "string",
+              "via": "string"
+            }
+          ],
+          "id": "string",
+          "introduced": {
+            "approved_by": "string",
+            "assurance": "string",
+            "author": {
+              "actor": "string",
+              "at_ms": "number",
+              "role": "string",
+              "run": "string"
+            },
+            "id": "string",
+            "proposal": "string",
+            "title": "string"
+          },
+          "premises": [],
+          "questions": [],
+          "sources": [],
+          "summary": "string",
+          "ungrounded": "bool"
         }
       },
       "rdy_upgrade": {
@@ -12798,11 +14831,255 @@
           "steps": [],
           "to": "string"
         }
+      },
+      "rdy_view close": {
+        "ok": {
+          "closed": [
+            {
+              "reason": "string",
+              "view": "string"
+            }
+          ]
+        }
+      },
+      "rdy_view compare": {
+        "ok": {
+          "a": "string",
+          "added": [
+            {
+              "block_type": "string",
+              "conflict": "null",
+              "fields": [],
+              "from_parent": "null",
+              "id": "string",
+              "path": "null",
+              "to_parent": "null"
+            }
+          ],
+          "b": "string",
+          "changed": [
+            {
+              "block_type": "string",
+              "conflict": "null",
+              "fields": [
+                "string"
+              ],
+              "from_parent": "null",
+              "id": "string",
+              "path": "null",
+              "to_parent": "null"
+            }
+          ],
+          "conflicted": [],
+          "deleted": [],
+          "moved": []
+        }
+      },
+      "rdy_view create": {
+        "ok": {
+          "base": "string",
+          "changes": "number",
+          "closed": "bool",
+          "head": "string",
+          "owner": {
+            "actor": "string",
+            "run": "string"
+          },
+          "pinned": "bool",
+          "view": "string"
+        }
+      },
+      "rdy_view fork": {
+        "ok": {
+          "base": "string",
+          "changes": "number",
+          "closed": "bool",
+          "head": "string",
+          "owner": {
+            "actor": "string",
+            "run": "string"
+          },
+          "pinned": "bool",
+          "view": "string"
+        }
+      },
+      "rdy_view list": {
+        "ok": {
+          "views": [
+            {
+              "base": "string",
+              "blocks": "number",
+              "changes": "number",
+              "closed": "bool",
+              "conflicts": "number",
+              "effective_base": "string",
+              "idle": "bool",
+              "last_write_ms": "number",
+              "name": "string",
+              "owner": {
+                "actor": "string",
+                "run": "string"
+              },
+              "pinned": "bool"
+            }
+          ]
+        }
+      },
+      "rdy_view show": {
+        "ok": {
+          "blocks": "number",
+          "changes": [
+            {
+              "actor": "string",
+              "at_ms": "number",
+              "blocks": [
+                "string"
+              ],
+              "id": "string",
+              "message": "string",
+              "replayed_from": "null",
+              "run": "string"
+            }
+          ],
+          "conflicts": [],
+          "effective_base": "string",
+          "head": {
+            "base": "string",
+            "changes": "number",
+            "closed": "bool",
+            "head": "string",
+            "owner": {
+              "actor": "string",
+              "run": "string"
+            },
+            "pinned": "bool",
+            "view": "string"
+          },
+          "ops": [
+            {
+              "actor": "string",
+              "at_ms": "number",
+              "id": "string",
+              "kind": "string",
+              "run": "string",
+              "undone": "bool"
+            }
+          ]
+        }
+      },
+      "rdy_view undo": {
+        "refusal_codes": [
+          "E_NOTHING_TO_UNDO"
+        ],
+        "refused": {
+          "code": "string",
+          "fix": "string",
+          "issues": [],
+          "message": "string"
+        }
+      },
+      "rdy_write": {
+        "ok": {
+          "change": "string",
+          "consequences": [
+            {
+              "because": {
+                "changed": "string",
+                "edge": "string"
+              },
+              "block": "string",
+              "fix": "string",
+              "follow_up": "string",
+              "id": "string",
+              "kind": "string",
+              "tension": "string"
+            }
+          ],
+          "coverage": {
+            "after": "number",
+            "before": "number",
+            "pages": [
+              {
+                "after": "number",
+                "before": "number",
+                "doc": "string",
+                "path": "string"
+              }
+            ]
+          },
+          "created": {
+            "$n?": "string"
+          },
+          "on_change": {
+            "resolved": [],
+            "tensions": [
+              {
+                "blocks": [
+                  "string"
+                ],
+                "id": "string",
+                "kind": "string",
+                "severity": "string",
+                "sides": [
+                  {
+                    "actor": "string",
+                    "blocks": [
+                      {
+                        "block": "string",
+                        "version": "string"
+                      }
+                    ],
+                    "change": "string",
+                    "run": "string",
+                    "side": "string",
+                    "views": [
+                      "string"
+                    ]
+                  }
+                ],
+                "status": "string",
+                "summary": "string",
+                "tension": "string"
+              }
+            ]
+          },
+          "suggestions": [],
+          "warnings": [
+            {
+              "block": "string",
+              "code": "string",
+              "fix": "string",
+              "message": "string",
+              "severity": "string"
+            }
+          ],
+          "warnings_repeated?": "number"
+        }
       }
+    },
+    "result_fields_not_captured": {
+      "rdy_accept": "takes suggestions from a write or search reply and writes links",
+      "rdy_asset": "stores a file",
+      "rdy_auth": "signs in to a hosted service",
+      "rdy_clone": "writes a second project to disk",
+      "rdy_dump": "writes a file; the dump_load row covers the bytes",
+      "rdy_export": "writes a file tree; the markdown_exports row covers it",
+      "rdy_key_bind": "changes the signing key",
+      "rdy_key_retire": "changes the signing key",
+      "rdy_key_revoke": "changes the signing key",
+      "rdy_load": "replaces a project from a dump; the dump_load row covers it",
+      "rdy_publication_check": "needs a publication profile",
+      "rdy_publish": "uploads a site to a host",
+      "rdy_redact": "destroys content; no dry run is probed",
+      "rdy_remote": "edits the remotes of the project",
+      "rdy_render": "writes a site to a directory; the site_urls row covers its routes",
+      "rdy_sign": "needs a signing key",
+      "rdy_site": "starts or reads the live site",
+      "rdy_stream_check": "checks a stream file; the sync row covers it"
     },
     "sources": [
       "rdy mcp tools/list",
-      "tools/call on read-only tools"
+      "tools/call against a seeded project"
     ],
     "tool_names": [
       "rdy_accept",
@@ -17109,7 +19386,13 @@
     "canon_routes": [
       "404.html",
       "glossary.html",
-      "go/<id>.html",
+      "go/D-G5WXZ.html",
+      "go/Q-PEGK8.html",
+      "go/c-C841A.html",
+      "go/d-A0SZJ.html",
+      "go/fd-D20NW.html",
+      "go/s-6R4FJ.html",
+      "go/t-TXRZP.html",
       "index.html",
       "questions.html",
       "wallets/index.html",
@@ -17940,13 +20223,22 @@
       },
       "guides/intro.yaml": [
         {
-          "fields": {
-            "doc_type": "string",
-            "key": "string",
+          "body?": "string",
+          "fields?": {
+            "doc_type?": "string",
+            "key?": "string",
             "title": "string"
           },
           "id": "string",
+          "links?": {
+            "describes": [
+              {
+                "target": "string"
+              }
+            ]
+          },
           "order": "string",
+          "parent?": "string",
           "type": "string"
         }
       ]

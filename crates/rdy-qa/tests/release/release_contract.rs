@@ -119,13 +119,32 @@ fn ordinal<T: Serialize>(v: &T) -> u64 {
     u64::from(postcard::to_allocvec(v).expect("postcard encodes")[0])
 }
 
-/// The shape of a JSON value: objects as their sorted members, arrays as their first element's
-/// shape, scalars as their type. No id, time or text of the run is in it.
+/// The shape of a JSON value: objects as their sorted members, an array as the merge of the
+/// shapes of all its elements (a member that only some elements hold ends in `?`), scalars as
+/// their type. No id, time or text of the run is in it.
 fn shape(v: &Value) -> Value {
     match v {
-        Value::Object(m) => Value::Object(m.iter().map(|(k, v)| (k.clone(), shape(v))).collect()),
-        Value::Array(a) => match a.first() {
-            Some(first) => json!([shape(first)]),
+        Value::Object(m) => {
+            // a member named by an id or a hash is one entry, whatever its id
+            let id = Regex::new(r"^([A-Za-z]{1,3}-[0-9A-Za-z]{5,16}|[0-9a-f]{64})$").unwrap();
+            let mut out = Map::new();
+            for (k, v) in m {
+                let key = if id.is_match(k) {
+                    "<id>".to_string()
+                } else {
+                    k.clone()
+                };
+                let one = shape(v);
+                let merged = match out.get(&key) {
+                    Some(old) => merge_shape(old, &one),
+                    None => one,
+                };
+                out.insert(key, merged);
+            }
+            Value::Object(out)
+        }
+        Value::Array(a) => match a.iter().map(shape).reduce(|x, y| merge_shape(&x, &y)) {
+            Some(all) => json!([all]),
             None => json!([]),
         },
         Value::String(_) => json!("string"),
@@ -135,7 +154,76 @@ fn shape(v: &Value) -> Value {
     }
 }
 
-/// Replaces what varies between runs: temporary paths, block ids, hashes and 13-digit times.
+/// The union of two shapes. An empty array adds nothing. An object member that one side lacks,
+/// or marks with `?`, ends in `?`. Two scalar types join with `|` in sorted order. A null with a
+/// value becomes `{"|null": value}` and two kinds that differ become `{"|any": [..]}`.
+fn merge_shape(a: &Value, b: &Value) -> Value {
+    if a == b {
+        return a.clone();
+    }
+    match (a, b) {
+        (Value::Array(x), Value::Array(y)) => match (x.first(), y.first()) {
+            (Some(x), Some(y)) => json!([merge_shape(x, y)]),
+            (Some(x), None) => json!([x]),
+            (None, Some(y)) => json!([y]),
+            (None, None) => json!([]),
+        },
+        (Value::Object(x), Value::Object(y))
+            if !x.contains_key("|null")
+                && !y.contains_key("|null")
+                && !x.contains_key("|any")
+                && !y.contains_key("|any") =>
+        {
+            let key = |k: &str| k.trim_end_matches('?').to_string();
+            let mut names: Vec<String> = x.keys().chain(y.keys()).map(|k| key(k)).collect();
+            names.sort();
+            names.dedup();
+            let find = |m: &Map<String, Value>, name: &str| {
+                m.iter()
+                    .find(|(k, _)| key(k) == name)
+                    .map(|(k, v)| (k.ends_with('?'), v.clone()))
+            };
+            let mut out = Map::new();
+            for name in names {
+                let (fx, fy) = (find(x, &name), find(y, &name));
+                let optional = fx.as_ref().is_none_or(|f| f.0) || fy.as_ref().is_none_or(|f| f.0);
+                let value = match (fx, fy) {
+                    (Some((_, a)), Some((_, b))) => merge_shape(&a, &b),
+                    (Some((_, a)), None) => a,
+                    (None, Some((_, b))) => b,
+                    (None, None) => unreachable!("the name comes from one of the objects"),
+                };
+                out.insert(if optional { format!("{name}?") } else { name }, value);
+            }
+            Value::Object(out)
+        }
+        (Value::String(x), Value::String(y)) => {
+            let mut kinds: Vec<&str> = x.split('|').chain(y.split('|')).collect();
+            kinds.sort();
+            kinds.dedup();
+            json!(kinds.join("|"))
+        }
+        (Value::Object(x), other) | (other, Value::Object(x)) if x.contains_key("|null") => {
+            let inner = &x["|null"];
+            if other == &json!("null") {
+                Value::Object(x.clone())
+            } else {
+                json!({"|null": merge_shape(inner, other)})
+            }
+        }
+        (Value::String(s), other) | (other, Value::String(s)) if s == "null" => {
+            json!({"|null": other})
+        }
+        (x, y) => {
+            let mut both = vec![x.clone(), y.clone()];
+            both.sort_by_key(Value::to_string);
+            json!({"|any": both})
+        }
+    }
+}
+
+/// Replaces what varies between runs: absolute temporary paths and random ports. Ids, hashes
+/// and dates are fixed by the seed helpers, so they stay in the text and are pinned with it.
 fn normalize(text: &str, paths: &[&Path]) -> String {
     let mut out = text.to_string();
     for p in paths {
@@ -145,14 +233,369 @@ fn normalize(text: &str, paths: &[&Path]) -> String {
             out = out.replace(c.to_string_lossy().as_ref(), "<path>");
         }
     }
-    let hash = Regex::new(r"\b[0-9a-f]{64}\b").unwrap();
-    let id = Regex::new(r"\b[A-Za-z]{1,3}-[0-9A-Z]{5}\b").unwrap();
-    let time = Regex::new(r"\b1[0-9]{12}\b").unwrap();
     let port = Regex::new(r"127\.0\.0\.1:[0-9]+").unwrap();
-    let out = hash.replace_all(&out, "<hash>");
-    let out = id.replace_all(&out, "<id>");
-    let out = time.replace_all(&out, "<elapsed>");
     port.replace_all(&out, "127.0.0.1:<port>").into_owned()
+}
+
+// ---- source scanning ----
+
+/// The end of a comment, string or character literal that starts at `i`, or `None` when `i` is
+/// code. Raw strings, byte strings and lifetimes are told apart from character literals.
+fn skip_literal(b: &[u8], i: usize) -> Option<usize> {
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let prev = |k: usize| if i >= k { Some(b[i - k]) } else { None };
+    if b[i..].starts_with(b"//") {
+        return Some(
+            b[i..]
+                .iter()
+                .position(|c| *c == b'\n')
+                .map_or(b.len(), |p| i + p),
+        );
+    }
+    if b[i..].starts_with(b"/*") {
+        let (mut depth, mut k) = (0usize, i);
+        while k < b.len() {
+            if b[k..].starts_with(b"/*") {
+                depth += 1;
+                k += 2;
+            } else if b[k..].starts_with(b"*/") {
+                depth -= 1;
+                k += 2;
+                if depth == 0 {
+                    return Some(k);
+                }
+            } else {
+                k += 1;
+            }
+        }
+        return Some(b.len());
+    }
+    let raw_start = b[i] == b'r'
+        && match prev(1) {
+            None => true,
+            Some(c) if !ident(c) => true,
+            Some(b'b') => !prev(2).is_some_and(ident),
+            Some(_) => false,
+        };
+    if raw_start {
+        let mut k = i + 1;
+        while k < b.len() && b[k] == b'#' {
+            k += 1;
+        }
+        if k < b.len() && b[k] == b'"' {
+            let hashes = k - i - 1;
+            let mut close = vec![b'"'];
+            close.extend(std::iter::repeat_n(b'#', hashes));
+            let from = k + 1;
+            let end = b[from..]
+                .windows(close.len())
+                .position(|w| w == close.as_slice())
+                .map_or(b.len(), |p| from + p + close.len());
+            return Some(end);
+        }
+        return None;
+    }
+    if b[i] == b'"' {
+        let mut k = i + 1;
+        while k < b.len() {
+            match b[k] {
+                b'\\' => k += 2,
+                b'"' => return Some(k + 1),
+                _ => k += 1,
+            }
+        }
+        return Some(b.len());
+    }
+    if b[i] == b'\'' {
+        if i + 1 < b.len() && b[i + 1] == b'\\' {
+            // an escape: the closing quote is the first one after the escaped character
+            let end = b[(i + 3).min(b.len())..]
+                .iter()
+                .position(|c| *c == b'\'')
+                .map_or(b.len(), |p| i + 3 + p + 1);
+            return Some(end);
+        }
+        // one character, then the closing quote; anything else is a lifetime
+        let width = match b.get(i + 1) {
+            Some(c) if *c >= 0xF0 => 4,
+            Some(c) if *c >= 0xE0 => 3,
+            Some(c) if *c >= 0xC0 => 2,
+            _ => 1,
+        };
+        if b.get(i + 1 + width) == Some(&b'\'') {
+            return Some(i + 2 + width);
+        }
+        return Some(i + 1);
+    }
+    None
+}
+
+/// The first byte after the whitespace, comments and attributes that start at `i`.
+fn skip_trivia_and_attrs(b: &[u8], mut i: usize) -> usize {
+    loop {
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= b.len() {
+            return i;
+        }
+        if b[i..].starts_with(b"//") || b[i..].starts_with(b"/*") {
+            i = skip_literal(b, i).unwrap_or(i + 1);
+        } else if b[i..].starts_with(b"#[") || b[i..].starts_with(b"#![") {
+            let (mut depth, mut k) = (0usize, i);
+            while k < b.len() {
+                if let Some(n) = skip_literal(b, k) {
+                    k = n;
+                    continue;
+                }
+                match b[k] {
+                    b'[' => depth += 1,
+                    b']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            k += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                k += 1;
+            }
+            i = k;
+        } else {
+            return i;
+        }
+    }
+}
+
+/// The end of the item (or field, or statement, or match arm) that starts at `i`: just past its
+/// closing `;`, `,` or `}`, or at the closer of the enclosing block when the item ends without one.
+fn item_end(b: &[u8], i: usize) -> usize {
+    #[derive(PartialEq)]
+    enum Mode {
+        Item,
+        Let,
+        Other,
+    }
+    let start = skip_trivia_and_attrs(b, i);
+    // the first words decide how the item ends
+    let words: Vec<String> = {
+        let mut ws = vec![];
+        let mut k = start;
+        while ws.len() < 4 && k < b.len() {
+            while k < b.len() && !(b[k].is_ascii_alphanumeric() || b[k] == b'_') {
+                if matches!(b[k], b'{' | b'}' | b';' | b',' | b':' | b'=') {
+                    k = b.len();
+                    break;
+                }
+                k += 1;
+            }
+            let from = k;
+            while k < b.len() && (b[k].is_ascii_alphanumeric() || b[k] == b'_') {
+                k += 1;
+            }
+            if from < k {
+                ws.push(String::from_utf8_lossy(&b[from..k]).into_owned());
+            }
+        }
+        ws
+    };
+    let item_words = [
+        "fn",
+        "struct",
+        "enum",
+        "impl",
+        "mod",
+        "trait",
+        "use",
+        "static",
+        "const",
+        "type",
+        "extern",
+        "unsafe",
+        "async",
+        "macro_rules",
+        "union",
+    ];
+    let first = words
+        .iter()
+        .find(|w| {
+            w.as_str() != "pub"
+                && w.as_str() != "crate"
+                && w.as_str() != "super"
+                && w.as_str() != "in"
+        })
+        .map(String::as_str)
+        .unwrap_or("");
+    let mode = if first == "let" {
+        Mode::Let
+    } else if item_words.contains(&first) {
+        Mode::Item
+    } else {
+        Mode::Other
+    };
+    let starts_with_block = b.get(start) == Some(&b'{');
+    let (mut paren, mut brace, mut angle) = (0i64, 0i64, 0i64);
+    let (mut opened, mut arrow) = (false, false);
+    let mut k = start;
+    while k < b.len() {
+        if let Some(n) = skip_literal(b, k) {
+            k = n;
+            continue;
+        }
+        let c = b[k];
+        match c {
+            b'(' | b'[' => paren += 1,
+            b')' | b']' => {
+                paren -= 1;
+                if paren < 0 {
+                    return k;
+                }
+            }
+            b'{' => {
+                brace += 1;
+                if brace == 1 && paren == 0 {
+                    opened = true;
+                }
+            }
+            b'}' => {
+                brace -= 1;
+                if brace < 0 {
+                    return k;
+                }
+                if brace == 0 && paren == 0 && opened {
+                    let block_ends = match mode {
+                        Mode::Item => true,
+                        Mode::Let => false,
+                        Mode::Other => starts_with_block || arrow,
+                    };
+                    if block_ends {
+                        return k + 1;
+                    }
+                }
+            }
+            b'=' if b.get(k + 1) == Some(&b'>') => {
+                arrow = true;
+                k += 1;
+            }
+            b'-' if b.get(k + 1) == Some(&b'>') => k += 1,
+            b'<' if paren == 0 && brace == 0 => angle += 1,
+            b'>' if paren == 0 && brace == 0 => angle -= 1,
+            b';' if paren == 0 && brace == 0 => return k + 1,
+            b',' if paren == 0 && brace == 0 && angle <= 0 && mode == Mode::Other => return k + 1,
+            _ => {}
+        }
+        k += 1;
+    }
+    b.len()
+}
+
+/// The source text without its test-only items: each `#[cfg(test)]` and the one item it marks
+/// (a module to its closing brace, a function, field, `use` or statement to its end) are blanked,
+/// newlines kept so a line number still points into the original. Everything else stays, and the
+/// scan never stops at the first attribute.
+fn product_text(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = b.to_vec();
+    let blank = |out: &mut Vec<u8>, from: usize, to: usize| {
+        for byte in &mut out[from..to] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    };
+    if b.starts_with(b"#![cfg(test)]") {
+        blank(&mut out, 0, b.len());
+        return String::from_utf8(out).expect("blanking keeps the text valid");
+    }
+    let mut i = 0;
+    while i < b.len() {
+        if let Some(n) = skip_literal(b, i) {
+            i = n;
+            continue;
+        }
+        if b[i..].starts_with(b"#[cfg(test)]") {
+            let end = item_end(b, i + "#[cfg(test)]".len()).max(i + "#[cfg(test)]".len());
+            blank(&mut out, i, end);
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    String::from_utf8(out).expect("blanking keeps the text valid")
+}
+
+/// The line, without a trailing `//` comment that sits outside a string.
+fn code_of(line: &str) -> &str {
+    let mut quotes = 0;
+    for (n, c) in line.char_indices() {
+        if c == '"' {
+            quotes += 1;
+        } else if c == '/' && quotes % 2 == 0 && line[n..].starts_with("//") {
+            return &line[..n];
+        }
+    }
+    line
+}
+
+/// The byte ranges of the top-level, comma-separated parts of `line` (commas inside brackets do
+/// not split): a match arm is one part, so two arms on one line are two parts.
+fn parts_of(line: &str) -> Vec<(usize, usize)> {
+    let b = line.as_bytes();
+    let (mut parts, mut depth, mut from, mut k) = (vec![], 0i64, 0usize, 0usize);
+    while k < b.len() {
+        if let Some(n) = skip_literal(b, k) {
+            k = n;
+            continue;
+        }
+        match b[k] {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b',' if depth == 0 => {
+                parts.push((from, k));
+                from = k + 1;
+            }
+            _ => {}
+        }
+        k += 1;
+    }
+    parts.push((from, b.len()));
+    parts
+}
+
+/// The places in `product` (already free of test items) that construct a carried value. A
+/// comparison, a `matches!` and the pattern side of a match arm read it. A carried value to the
+/// right of `=>`, or anywhere else, writes it.
+fn carried_writes(rel: &str, product: &str, needles: &[&str]) -> Vec<String> {
+    let mut hits = vec![];
+    for (n, raw) in product.lines().enumerate() {
+        let line = code_of(raw);
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        for needle in needles {
+            for (pos, _) in line.match_indices(needle) {
+                let (from, to) = parts_of(line)
+                    .into_iter()
+                    .find(|(f, t)| *f <= pos && pos < *t)
+                    .unwrap_or((0, line.len()));
+                let part = &line[from..to];
+                let (before, after) = (&part[..pos - from], &part[pos - from + needle.len()..]);
+                let in_pattern = part
+                    .find("=>")
+                    .is_some_and(|a| a >= pos - from + needle.len());
+                let compared = before.trim_end().ends_with("==")
+                    || before.trim_end().ends_with("!=")
+                    || after.trim_start().starts_with("==")
+                    || after.trim_start().starts_with("!=")
+                    || before.contains("matches!(");
+                if !in_pattern && !compared {
+                    hits.push(format!("{rel}:{}: {}", n + 1, raw.trim()));
+                }
+            }
+        }
+    }
+    hits
 }
 
 // ---- store ----
@@ -892,56 +1335,442 @@ fn signatures_row() -> Value {
     })
 }
 
-// ---- cli ----
+// ---- the seeded project and the probes ----
 
-/// A small landed project for the probes of the release binary.
-fn seed(r: &mut rdy_engine::Rdy) {
-    rdy_qa::fixtures::seed_doc(r, "seed");
-    rdy_qa::fixtures::land(r, "seed").expect("land the seed");
+/// The project of the probes: a landed spec with a tag, a suspect, an open tension, a pending
+/// batch (its approval card, four exceptions and an advice card) and a view with a review
+/// request, so no result array of the probes is empty for lack of data.
+struct Rich {
+    dir: tempfile::TempDir,
+    batch: rdy_qa::intake::Batch,
 }
 
-/// The facts of the release binary: the exit value and the JSON field set of each probe.
-fn cli_runtime() -> Value {
-    let (d, mut r) = project();
-    seed(&mut r);
+/// The pack of the probes: one area, so the coverage areas hold an entry.
+const RICH_PACK: &str = "name: rdy-release\nversion: \"1\"\nextends: rdy-standard\nareas:\n  spec:\n    description: the spec doc\n    paths: [spec, spec/**]\n";
+
+fn rich_project() -> Rich {
+    use rdy_qa::tensions::{put, upd};
+    rdy_model::seed_ids_for_tests(14);
+    let _clock = rdy_qa::golden::fixture_clock();
+    let (dir, mut r, batch) = rdy_qa::intake::batch_project();
+    r.tag(
+        &rdy_qa::fixtures::approver(),
+        "v1.0.0",
+        None,
+        Some("Release 1".into()),
+    )
+    .expect("tag the spec");
+    // a landed edit of claim A: claim B, pinned to A, is a suspect
+    rdy_qa::fixtures::write(
+        &mut r,
+        "s",
+        json!([{"op": "update", "id": batch.spec.a.to_string(), "body": "A holds, now at length."}]),
+    )
+    .expect("edit A");
+    rdy_qa::fixtures::land(&mut r, "s").expect("land the edit");
+    // a view that gives the reviewers a request
+    put(&mut r, "a", upd(&batch.spec.c, "C contradicts B."));
     r.close().expect("close");
-    let (cfg, env) = rdy_qa::fixtures::human_env("human:qa");
-    let mut probes = Map::new();
-    let list: &[&[&str]] = &[
-        &["--json", "status"],
-        &["--json", "tags"],
-        &["--json", "ls"],
-        &["--json", "log"],
-        &["--json", "tensions"],
-        &["--json", "suspects"],
-        &["--json", "pending"],
-        &["--json", "coverage"],
-        &["--json", "fsck"],
-        &["--json", "upgrade"],
-        &["--json", "show", "c-ZZZZZ"],
-        &["--json", "no-such-command"],
-    ];
-    for args in list {
-        let (code, out, err) = rdy_in(d.path(), &env, args);
-        let body = if out.trim().is_empty() {
-            err.trim()
-        } else {
-            out.trim()
+    rdy_qa::packs::use_pack(dir.path(), "rdy-release", RICH_PACK, "");
+    std::fs::write(dir.path().join(".rdy/local.yaml"), "actor: human:qa\n").expect("the person");
+    rdy_model::unseed_ids_for_tests();
+    Rich { dir, batch }
+}
+
+/// What the probes saw, by label: for each, the merged shape of every success and of every
+/// refusal, and the refusal codes (MCP) or the exit values (CLI).
+#[derive(Default)]
+struct Seen(BTreeMap<String, Value>);
+
+impl Seen {
+    fn note(&mut self, label: &str, slot: &str, shape: Value) {
+        let e = self.0.entry(label.to_string()).or_insert_with(|| json!({}));
+        let merged = match e.get(slot) {
+            Some(old) => merge_shape(old, &shape),
+            None => shape,
         };
-        let v: Value = serde_json::from_str(body).unwrap_or(json!(null));
-        probes.insert(
-            args[1..].join(" "),
-            json!({"exit": code, "stream": if out.trim().is_empty() { "stderr" } else { "stdout" }, "json": shape(&v)}),
+        e[slot] = merged;
+    }
+
+    fn add_to_set(&mut self, label: &str, slot: &str, item: Value) {
+        let e = self.0.entry(label.to_string()).or_insert_with(|| json!({}));
+        let mut items: Vec<Value> = e
+            .get(slot)
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default();
+        if !items.contains(&item) {
+            items.push(item);
+            items.sort_by_key(Value::to_string);
+        }
+        e[slot] = Value::Array(items);
+    }
+
+    fn into_value(self) -> Value {
+        Value::Object(self.0.into_iter().collect())
+    }
+}
+
+/// One MCP call, noted under `label`.
+fn mcp_probe(
+    seen: &mut Seen,
+    c: &mut rdy_qa::mcp::McpClient,
+    tool: &str,
+    label: &str,
+    args: Value,
+) -> rdy_qa::mcp::Reply {
+    use rdy_qa::mcp::Reply;
+    let reply = c.call(tool, args);
+    match &reply {
+        Reply::Ok(v) => seen.note(label, "ok", shape(v)),
+        Reply::ToolError(v) => {
+            seen.note(label, "refused", shape(v));
+            seen.add_to_set(label, "refusal_codes", v["code"].clone());
+        }
+        Reply::RpcError(v) => seen.note(label, "protocol_error", shape(v)),
+    }
+    reply
+}
+
+/// The value of a success, else null.
+fn ok_of(reply: &rdy_qa::mcp::Reply) -> Value {
+    match reply {
+        rdy_qa::mcp::Reply::Ok(v) => v.clone(),
+        _ => Value::Null,
+    }
+}
+
+/// A write tool called with no briefing; when it asks for one (E_BRIEF_REQUIRED, E_BRIEF_STALE)
+/// the briefing of `ids` in `view` is fetched and the call repeats with its token. `at` is the
+/// path of the parameter that holds the token (`brief`, or `decision.brief`).
+fn mcp_briefed(
+    seen: &mut Seen,
+    c: &mut rdy_qa::mcp::McpClient,
+    tool: &str,
+    label: &str,
+    mut args: Value,
+    ids: &[String],
+    view: &str,
+) -> rdy_qa::mcp::Reply {
+    let first = mcp_probe(seen, c, tool, label, args.clone());
+    if matches!(first.code(), Some("E_BRIEF_REQUIRED" | "E_BRIEF_STALE")) {
+        let b = ok_of(&mcp_probe(
+            seen,
+            c,
+            "rdy_brief",
+            "rdy_brief",
+            json!({"ids": ids, "scope": view}),
+        ));
+        let token = b["base"]["token"].clone();
+        assert!(token.is_string(), "the briefing holds a token: {b}");
+        if tool == "rdy_supersede" {
+            args["decision"]["brief"] = token;
+        } else {
+            args["brief"] = token;
+        }
+        return mcp_probe(seen, c, tool, label, args);
+    }
+    first
+}
+
+/// One CLI call in the person's environment with `--json`, noted under `label`; the parsed
+/// body of stdout (else of stderr), or null.
+fn cli_probe(
+    seen: &mut Seen,
+    dir: &Path,
+    env: &[(String, String)],
+    label: &str,
+    args: &[&str],
+) -> Value {
+    let mut a = vec!["--json"];
+    a.extend_from_slice(args);
+    let (code, out, err) = rdy_in(dir, env, &a);
+    seen.add_to_set(label, "exits", json!(code));
+    let (slot, body) = if out.trim().is_empty() {
+        ("stderr", err.trim())
+    } else {
+        ("stdout", out.trim())
+    };
+    match serde_json::from_str::<Value>(body) {
+        Ok(v) => {
+            seen.note(label, slot, shape(&v));
+            v
+        }
+        Err(_) => {
+            seen.note(label, &format!("{slot}_text"), json!("string"));
+            Value::Null
+        }
+    }
+}
+
+// ---- cli ----
+
+/// The commands the runtime probes do not run, by path (a top-level name stands for the command
+/// and everything under it), each with the reason. Every other command of the `cli.tree` is
+/// probed (`ok14_probes_account_for_every_command`).
+const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
+    (
+        "add",
+        "working copy: the working_copy row records its replies",
+    ),
+    (
+        "alt",
+        "needs two open views and a question; its MCP twin is listed too",
+    ),
+    ("auth", "signs in to a hosted service"),
+    ("check", "checks a file; the config row records its refusal"),
+    (
+        "checkout",
+        "working copy: the working_copy row records its replies",
+    ),
+    (
+        "clone",
+        "writes a second project; the dump_load row covers the bytes",
+    ),
+    (
+        "commit",
+        "working copy: the working_copy row records its replies",
+    ),
+    ("dump", "writes a file; the dump_load row covers the bytes"),
+    (
+        "edit",
+        "working copy: the working_copy row records its replies",
+    ),
+    (
+        "export",
+        "writes a file tree; the markdown_exports row covers it",
+    ),
+    (
+        "import",
+        "reads a directory of YAML; the working copy and sync rows cover the formats",
+    ),
+    ("init", "makes a project; every probe starts from one"),
+    ("intent renew", "the same reply as post"),
+    ("key bind", "changes the signing key"),
+    ("key retire", "changes the signing key"),
+    ("key revoke", "changes the signing key"),
+    ("keys", "assigns keys to people"),
+    (
+        "load",
+        "replaces a project from a dump; the dump_load row covers it",
+    ),
+    ("mcp", "starts the MCP server; the mcp row covers it"),
+    ("pack", "checks a pack file; the schema_packs row covers it"),
+    ("plan confirm", "needs an open plan item"),
+    ("new finding", "needs a finding pack"),
+    ("new profile", "needs a publication profile"),
+    ("new source", "needs a source file"),
+    ("plan defer", "needs an open plan item"),
+    ("plan done", "needs an open plan item"),
+    ("publication", "needs a publication profile"),
+    ("publish", "uploads a site to a host"),
+    (
+        "reaffirm",
+        "needs a suspect decision; the write op of the same name is an MCP write",
+    ),
+    ("redact", "destroys content; no dry run is probed"),
+    (
+        "reindex",
+        "rebuilds derived state; the derived_identities row covers it",
+    ),
+    ("remote add", "edits the remotes of the project"),
+    ("remote rm", "edits the remotes of the project"),
+    ("remote set-mode", "edits the remotes of the project"),
+    (
+        "render",
+        "writes a site to a directory; the site_urls row covers its routes",
+    ),
+    ("render-stream", "renders a stream file"),
+    ("repin", "needs a pinned reference to move"),
+    ("serve", "starts a daemon"),
+    ("sign", "needs a signing key"),
+    ("site", "starts or reads the live site"),
+    ("stream", "checks a stream file; the sync row covers it"),
+    (
+        "update",
+        "working copy: the working_copy row records its replies",
+    ),
+    ("view compare", "the same reply as the MCP compare"),
+    ("view exclude", "needs an included change"),
+    ("view fork", "the same reply as new"),
+    ("view include", "needs another view's change"),
+    ("view own", "changes who owns a view"),
+    ("view replay", "needs excluded changes"),
+    ("view resolve", "needs a view with a conflict"),
+    (
+        "worktree",
+        "working copy: the working_copy row records its replies",
+    ),
+];
+
+/// The facts of the release binary: exit values and the merged JSON field sets of read, write,
+/// answer and review commands run against the seeded project.
+fn cli_runtime() -> Value {
+    let rich = rich_project();
+    let b = &rich.batch;
+    let dir = rich.dir.path();
+    let (cfg, env) = rdy_qa::fixtures::human_env("human:qa");
+    let mut seen = Seen::default();
+    let (a, c, doc, proposal) = (
+        b.spec.a.to_string(),
+        b.spec.c.to_string(),
+        b.spec.doc.to_string(),
+        b.r#ref.clone(),
+    );
+    let mut p = |label: &str, args: &[&str]| cli_probe(&mut seen, dir, &env, label, args);
+    // reads
+    for (label, args) in [
+        ("status", vec!["status"]),
+        ("tags", vec!["tags"]),
+        ("ls", vec!["ls"]),
+        ("log", vec!["log", "--limit", "3"]),
+        ("tensions", vec!["tensions"]),
+        ("suspects", vec!["suspects"]),
+        ("pending", vec!["pending"]),
+        ("coverage", vec!["coverage"]),
+        ("fsck", vec!["fsck"]),
+        ("upgrade", vec!["upgrade"]),
+        ("show", vec!["show", &a]),
+        ("show", vec!["show", &doc]),
+        ("impact", vec!["impact", &a]),
+        ("trace", vec!["trace", &a]),
+        ("search", vec!["search", "holds"]),
+        ("brief", vec!["brief", &a]),
+        ("plan", vec!["plan", "--proposal", &proposal]),
+        ("config", vec!["config"]),
+        ("view ls", vec!["view", "ls"]),
+        ("view show", vec!["view", "show", "batch"]),
+        ("key show", vec!["key", "show"]),
+        ("remote list", vec!["remote", "list"]),
+        ("show", vec!["show", "c-ZZZZZ"]),
+        ("no-such-command", vec!["no-such-command"]),
+    ] {
+        p(label, &args);
+    }
+    // the person answers the four exceptions, then approves the batch
+    for _ in 0..4 {
+        let queue = p("pending", &["pending"]);
+        let item = queue["items"]
+            .as_array()
+            .and_then(|items| items.iter().find(|i| i["kind"] == "confirm"))
+            .cloned()
+            .expect("an exception card is pending");
+        p(
+            "answer",
+            &[
+                "answer",
+                item["ref"].as_str().unwrap(),
+                "confirm",
+                "--card",
+                item["card_hash"].as_str().unwrap(),
+                "--note",
+                "fine",
+            ],
         );
     }
-    let (code, out, _) = rdy_in(d.path(), &env, &["--version"]);
+    let queue = p("pending", &["pending"]);
+    let advice = queue["items"]
+        .as_array()
+        .and_then(|items| items.iter().find(|i| i["kind"] == "resolve"))
+        .cloned()
+        .expect("the advice card is pending");
+    // the person wrote the canon side of the tension: a refusal (E_SELF_REVIEW)
+    let tension = b_tension(&p("tensions", &["tensions"]));
+    p(
+        "resolve",
+        &["resolve", &tension, "--dismiss", "checked: they agree"],
+    );
+    p(
+        "answer",
+        &[
+            "answer",
+            advice["ref"].as_str().unwrap(),
+            "later",
+            "--card",
+            advice["card_hash"].as_str().unwrap(),
+        ],
+    );
+    p("approve", &["approve", &proposal]);
+    p("tag", &["tag", "v1.1.0", "-m", "Second"]);
+    p("log", &["log", "--limit", "2"]);
+    // the person's own view
+    p("new folder", &["new", "folder", "guides"]);
+    p(
+        "new doc",
+        &[
+            "new",
+            "doc",
+            "guides/intro",
+            "--type",
+            "page",
+            "--title",
+            "Intro",
+        ],
+    );
+    p("ls", &["ls", "guides"]);
+    p(
+        "propose",
+        &[
+            "propose",
+            "--title",
+            "Guides",
+            "--summary",
+            "Adds a guides folder.",
+        ],
+    );
+    let queue = p("pending", &["pending"]);
+    if let Some(item) = queue["items"]
+        .as_array()
+        .and_then(|items| items.iter().find(|i| i["kind"] == "approve"))
+    {
+        p(
+            "answer",
+            &[
+                "answer",
+                item["ref"].as_str().unwrap(),
+                "reject",
+                "--card",
+                item["card_hash"].as_str().unwrap(),
+            ],
+        );
+    }
+    p("view new", &["view", "new", "scratch"]);
+    p(
+        "view close",
+        &["view", "close", "scratch", "--reason", "done"],
+    );
+    let posted = p(
+        "intent post",
+        &["intent", "post", "--angle", "tidy", "--blocks", &c],
+    );
+    p("intent list", &["intent", "list"]);
+    if let Some(id) = posted["intent"]["id"].as_str() {
+        p("intent withdraw", &["intent", "withdraw", id]);
+    }
+    p("undo", &["undo"]);
+    p("inbox", &["inbox"]);
+    let (code, out, _) = rdy_in(dir, &env, &["--version"]);
     let version = out.trim().replace(env!("CARGO_PKG_VERSION"), "<version>");
     drop(cfg);
+    let not_captured: Map<String, Value> = CLI_NOT_CAPTURED
+        .iter()
+        .map(|(c, why)| ((*c).to_string(), json!(why)))
+        .collect();
     json!({
         "exit_values": {"success": 0, "refusal": 1, "usage": 2},
         "version_text": {"exit": code, "text": version},
-        "probes": probes,
+        "probes": seen.into_value(),
+        "not_probed_commands": not_captured,
     })
+}
+
+/// The id of the advised semantic tension in a `tensions` reply.
+fn b_tension(v: &Value) -> String {
+    v["tensions"]
+        .as_array()
+        .and_then(|t| t.iter().find(|t| t["kind"] == "semantic"))
+        .and_then(|t| t["id"].as_str())
+        .expect("the advised tension is listed")
+        .to_string()
 }
 
 // ---- mcp ----
@@ -956,28 +1785,480 @@ fn refusal_of(reply: rdy_qa::mcp::Reply) -> Value {
     }
 }
 
-/// The read tools whose result fields the row records: each takes no required parameter and
-/// changes nothing.
-const READ_PROBES: &[&str] = &[
-    "rdy_overview",
-    "rdy_schema",
-    "rdy_tags",
-    "rdy_suspects",
-    "rdy_tensions",
-    "rdy_pending",
-    "rdy_coverage",
-    "rdy_log",
-    "rdy_read",
-    "rdy_plan",
-    "rdy_key_show",
-    "rdy_upgrade",
+/// The tools whose result fields the row does not record, each with the reason. Every other tool
+/// is called against the seeded project; the row pins the tool list and every parameter schema.
+const MCP_NOT_CAPTURED: &[(&str, &str)] = &[
+    (
+        "rdy_accept",
+        "takes suggestions from a write or search reply and writes links",
+    ),
+    ("rdy_asset", "stores a file"),
+    ("rdy_auth", "signs in to a hosted service"),
+    ("rdy_clone", "writes a second project to disk"),
+    (
+        "rdy_dump",
+        "writes a file; the dump_load row covers the bytes",
+    ),
+    (
+        "rdy_export",
+        "writes a file tree; the markdown_exports row covers it",
+    ),
+    ("rdy_key_bind", "changes the signing key"),
+    ("rdy_key_retire", "changes the signing key"),
+    ("rdy_key_revoke", "changes the signing key"),
+    (
+        "rdy_load",
+        "replaces a project from a dump; the dump_load row covers it",
+    ),
+    ("rdy_publication_check", "needs a publication profile"),
+    ("rdy_publish", "uploads a site to a host"),
+    ("rdy_redact", "destroys content; no dry run is probed"),
+    ("rdy_remote", "edits the remotes of the project"),
+    (
+        "rdy_render",
+        "writes a site to a directory; the site_urls row covers its routes",
+    ),
+    ("rdy_sign", "needs a signing key"),
+    ("rdy_site", "starts or reads the live site"),
+    (
+        "rdy_stream_check",
+        "checks a stream file; the sync row covers it",
+    ),
 ];
+
+/// The operations of the `op` tools that the probes do not run, as `tool op`, each with the
+/// reason. The test `ok14_probes_account_for_every_command` checks each against the tool's
+/// parameter text.
+const MCP_OPS_NOT_PROBED: &[(&str, &str)] = &[
+    (
+        "rdy_alternatives create",
+        "needs two open views and a question block",
+    ),
+    ("rdy_alternatives add", "needs an alternative set"),
+    ("rdy_alternatives remove", "needs an alternative set"),
+    ("rdy_alternatives compare", "needs an alternative set"),
+    ("rdy_alternatives abandon", "needs an alternative set"),
+    ("rdy_intent renew", "the same reply as post"),
+    ("rdy_view include", "needs another view's change"),
+    ("rdy_view exclude", "needs an included change"),
+    ("rdy_view replay", "needs excluded changes"),
+    ("rdy_view own", "changes who owns a view"),
+    ("rdy_view resolve", "needs a view with a conflict"),
+];
+
+/// Runs the MCP probes: a writer reads the seeded project and answers the exception cards, a
+/// reviewer judges requests and dismisses the advice, and the writer approves the batch, tags,
+/// writes, decides, supersedes, revokes and proposes.
+fn mcp_probes(rich: &Rich, seen: &mut Seen) {
+    use rdy_qa::mcp::McpClient;
+    let b = &rich.batch;
+    let dir = rich.dir.path();
+    let (a, c, doc, section) = (
+        b.spec.a.to_string(),
+        b.spec.c.to_string(),
+        b.spec.doc.to_string(),
+        b.spec.section.to_string(),
+    );
+    let words = |extra: Value| {
+        let mut v = json!({
+            "evidence": "Yes, go ahead.",
+            "question": "Shall I record your answer?",
+            "session_ref": "chat-7"
+        });
+        for (k, x) in extra.as_object().expect("an object") {
+            v[k] = x.clone();
+        }
+        v
+    };
+    let session =
+        |who: &str, role: &str| json!({"actor": format!("agent:{who}"), "run": who, "role": role});
+
+    // the writer reads
+    let mut w = McpClient::start(dir);
+    let mut batch_session = session("batch", "writer");
+    batch_session["areas"] = json!(["spec"]);
+    mcp_probe(
+        seen,
+        &mut w,
+        "rdy_session",
+        "rdy_session",
+        batch_session.clone(),
+    );
+    for (tool, args) in [
+        ("rdy_overview", json!({})),
+        ("rdy_schema", json!({})),
+        ("rdy_schema", json!({"block_type": "claim"})),
+        ("rdy_tags", json!({})),
+        ("rdy_suspects", json!({})),
+        ("rdy_tensions", json!({"view": "batch"})),
+        ("rdy_pending", json!({})),
+        ("rdy_coverage", json!({})),
+        ("rdy_log", json!({"limit": 3})),
+        ("rdy_read", json!({"id": doc})),
+        ("rdy_read", json!({"id": c})),
+        ("rdy_plan", json!({"proposal": b.r#ref})),
+        ("rdy_key_show", json!({})),
+        ("rdy_upgrade", json!({"dry_run": true})),
+        ("rdy_context", json!({"id": a})),
+        ("rdy_impact", json!({"id": a})),
+        ("rdy_trace", json!({"id": a})),
+        ("rdy_search", json!({"query": "holds"})),
+        ("rdy_brief", json!({"ids": [a]})),
+        ("rdy_view", json!({"op": "list"})),
+        ("rdy_view", json!({"op": "show", "name": "batch"})),
+        (
+            "rdy_view",
+            json!({"op": "compare", "a": "batch", "b": "canon"}),
+        ),
+        ("rdy_view", json!({"op": "compare", "a": "a", "b": "canon"})),
+        ("rdy_alternatives", json!({"op": "list"})),
+        ("rdy_context", json!({"id": "c-ZZZZZ"})),
+    ] {
+        let label = match args["op"].as_str() {
+            Some(op) => format!("{tool} {op}"),
+            None => tool.to_string(),
+        };
+        mcp_probe(seen, &mut w, tool, &label, args);
+    }
+    let tension = b_tension(&ok_of(&mcp_probe(
+        seen,
+        &mut w,
+        "rdy_tensions",
+        "rdy_tensions",
+        json!({"view": "batch"}),
+    )));
+    // intents and views
+    let posted = ok_of(&mcp_probe(
+        seen,
+        &mut w,
+        "rdy_intent",
+        "rdy_intent post",
+        json!({"op": "post", "angle": "tidy", "blocks": [c]}),
+    ));
+    mcp_probe(
+        seen,
+        &mut w,
+        "rdy_intent",
+        "rdy_intent list",
+        json!({"op": "list"}),
+    );
+    mcp_probe(
+        seen,
+        &mut w,
+        "rdy_view",
+        "rdy_view create",
+        json!({"op": "create", "name": "scratch"}),
+    );
+    // the person answers the four exceptions
+    for _ in 0..4 {
+        let queue = ok_of(&mcp_probe(
+            seen,
+            &mut w,
+            "rdy_pending",
+            "rdy_pending",
+            json!({}),
+        ));
+        let item = queue["items"]
+            .as_array()
+            .and_then(|items| items.iter().find(|i| i["kind"] == "confirm"))
+            .cloned()
+            .expect("an exception card is pending");
+        mcp_probe(
+            seen,
+            &mut w,
+            "rdy_answer",
+            "rdy_answer",
+            words(json!({"ref": item["ref"], "option": "confirm", "card_hash": item["card_hash"]})),
+        );
+    }
+    // a refused answer: the card moved
+    mcp_probe(
+        seen,
+        &mut w,
+        "rdy_answer",
+        "rdy_answer",
+        words(json!({"ref": b.r#ref, "option": "approve", "card_hash": "0".repeat(64)})),
+    );
+    drop(w);
+
+    // a reviewer dismisses the advice (the person wrote the other side, so the writer cannot)
+    let mut rv = McpClient::start(dir);
+    mcp_probe(
+        seen,
+        &mut rv,
+        "rdy_session",
+        "rdy_session",
+        session("rev", "reviewer"),
+    );
+    mcp_probe(seen, &mut rv, "rdy_tensions", "rdy_tensions", json!({}));
+    mcp_probe(
+        seen,
+        &mut rv,
+        "rdy_resolve",
+        "rdy_resolve",
+        json!({"tension": tension, "dismiss": {"reason": "checked: they agree"}}),
+    );
+    drop(rv);
+
+    // the writer approves, tags and writes
+    let mut w = McpClient::start(dir);
+    mcp_probe(seen, &mut w, "rdy_session", "rdy_session", batch_session);
+    let queue = ok_of(&mcp_probe(
+        seen,
+        &mut w,
+        "rdy_pending",
+        "rdy_pending",
+        json!({}),
+    ));
+    let approval = queue["items"]
+        .as_array()
+        .and_then(|items| items.iter().find(|i| i["kind"] == "approve"))
+        .cloned()
+        .expect("the approval card is pending");
+    mcp_probe(
+        seen,
+        &mut w,
+        "rdy_answer",
+        "rdy_answer",
+        words(json!({
+            "ref": approval["ref"],
+            "option": approval["options"][0]["id"],
+            "card_hash": approval["card_hash"],
+        })),
+    );
+    mcp_probe(
+        seen,
+        &mut w,
+        "rdy_tag",
+        "rdy_tag",
+        words(json!({"version": "v1.1.0", "message": "Second"})),
+    );
+    if let Some(id) = posted["intent"]["id"].as_str() {
+        mcp_probe(
+            seen,
+            &mut w,
+            "rdy_intent",
+            "rdy_intent withdraw",
+            json!({"op": "withdraw", "intent": id}),
+        );
+    }
+    mcp_probe(
+        seen,
+        &mut w,
+        "rdy_view",
+        "rdy_view close",
+        json!({"op": "close", "name": "scratch", "reason": "done"}),
+    );
+    // an edit of the claim that view `a` also edits: a collision, its tension in the reply
+    mcp_briefed(
+        seen,
+        &mut w,
+        "rdy_write",
+        "rdy_write",
+        json!({"view": "side", "ops": [{"op": "update", "id": c, "body": "C stands, in a new way."}]}),
+        &[c.clone()],
+        "side",
+    );
+    let created = ok_of(&mcp_probe(
+        seen,
+        &mut w,
+        "rdy_write",
+        "rdy_write",
+        json!({"view": "side", "ops": [
+            {"op": "create", "type": "claim", "id": "$n", "parent": section, "body": "Side notes stay short."}
+        ]}),
+    ));
+    assert!(
+        created["created"]["$n"].is_string(),
+        "the write created a claim: {created}"
+    );
+    let decided = ok_of(&mcp_probe(
+        seen,
+        &mut w,
+        "rdy_decide",
+        "rdy_decide",
+        json!({
+            "view": "side", "statement": "Side notes end at one line",
+            "title": "Side notes end at one line",
+            "why": "Side notes end at one line: the person decides it",
+            "reversibility": "two_way", "affects": [c], "parent": section,
+        }),
+    ));
+    let first = decided["created"]["$decision"].as_str();
+    let briefed_ids = vec![c.clone(), section.clone()];
+    let decided = if first.is_some() {
+        decided
+    } else {
+        ok_of(&mcp_briefed(
+            seen,
+            &mut w,
+            "rdy_decide",
+            "rdy_decide",
+            json!({
+                "view": "side", "statement": "Side notes end at one line",
+                "title": "Side notes end at one line",
+                "why": "Side notes end at one line: the person decides it",
+                "reversibility": "two_way", "affects": [c], "parent": section,
+            }),
+            &briefed_ids,
+            "side",
+        ))
+    };
+    let decision = decided["created"]["$decision"]
+        .as_str()
+        .expect("the decision was recorded")
+        .to_string();
+    let superseded = ok_of(&mcp_briefed(
+        seen,
+        &mut w,
+        "rdy_supersede",
+        "rdy_supersede",
+        json!({
+            "old": decision,
+            "decision": {
+                "view": "side", "statement": "Side notes end at two lines",
+                "title": "Side notes end at two lines",
+                "why": "Side notes end at two lines: the person decides it",
+                "reversibility": "two_way", "parent": section,
+            },
+        }),
+        &briefed_ids,
+        "side",
+    ));
+    let newest = superseded["created"]["$decision"]
+        .as_str()
+        .map(str::to_string);
+    if let Some(newest) = newest {
+        mcp_briefed(
+            seen,
+            &mut w,
+            "rdy_revoke",
+            "rdy_revoke",
+            json!({"view": "side", "target": newest, "reason": "the rule is dropped", "parent": section}),
+            &briefed_ids,
+            "side",
+        );
+    }
+    mcp_probe(
+        seen,
+        &mut w,
+        "rdy_view",
+        "rdy_view fork",
+        json!({"op": "fork", "from": "side", "name": "side2"}),
+    );
+    mcp_probe(
+        seen,
+        &mut w,
+        "rdy_view",
+        "rdy_view undo",
+        json!({"op": "undo", "view": "side2"}),
+    );
+    mcp_probe(
+        seen,
+        &mut w,
+        "rdy_propose",
+        "rdy_propose",
+        json!({"view": "side", "title": "Side notes", "summary": "Adds a short side note and a rule about it."}),
+    );
+    let queue = ok_of(&mcp_probe(
+        seen,
+        &mut w,
+        "rdy_pending",
+        "rdy_pending",
+        json!({}),
+    ));
+    if let Some(item) = queue["items"]
+        .as_array()
+        .and_then(|items| items.iter().find(|i| i["kind"] == "approve"))
+    {
+        mcp_probe(
+            seen,
+            &mut w,
+            "rdy_answer",
+            "rdy_answer",
+            words(json!({"ref": item["ref"], "option": "reject", "card_hash": item["card_hash"]})),
+        );
+    }
+    for (tool, args) in [
+        ("rdy_inbox", json!({})),
+        ("rdy_inbox", json!({"person": true})),
+        ("rdy_log", json!({"limit": 2})),
+        ("rdy_tags", json!({})),
+        ("rdy_suspects", json!({})),
+        ("rdy_coverage", json!({})),
+        ("rdy_plan", json!({"view": "side"})),
+    ] {
+        mcp_probe(seen, &mut w, tool, tool, args);
+    }
+    drop(w);
+
+    // a reviewer judges requests: a tension with advice to block, a settled request, no tension
+    let mut rv = McpClient::start(dir);
+    mcp_probe(
+        seen,
+        &mut rv,
+        "rdy_session",
+        "rdy_session",
+        session("rev", "reviewer"),
+    );
+    for (i, verdict) in ["tension", "no_tension", "no_tension"].iter().enumerate() {
+        let next = ok_of(&mcp_probe(
+            seen,
+            &mut rv,
+            "rdy_review_next",
+            "rdy_review_next",
+            json!({"kind": "tension"}),
+        ));
+        if !next["request"].is_string() {
+            break;
+        }
+        let mut args = json!({
+            "request": next["request"], "case_hash": next["case_hash"], "verdict": verdict,
+        });
+        if i == 0 {
+            args["citations"] = json!([{
+                "block": next["case"]["blocks"][0]["id"],
+                "note": "these two cannot both hold"
+            }]);
+            args["severity"] = json!("blocking");
+            args["reason"] = json!("it contradicts the gate rule");
+        }
+        mcp_probe(
+            seen,
+            &mut rv,
+            "rdy_review_submit",
+            "rdy_review_submit",
+            args.clone(),
+        );
+        if i == 0 {
+            // the same request again is stale
+            mcp_probe(
+                seen,
+                &mut rv,
+                "rdy_review_submit",
+                "rdy_review_submit",
+                args,
+            );
+        }
+    }
+    mcp_probe(
+        seen,
+        &mut rv,
+        "rdy_review_next",
+        "rdy_review_next",
+        json!({"kind": "mention"}),
+    );
+    mcp_probe(seen, &mut rv, "rdy_tensions", "rdy_tensions", json!({}));
+    let _ = (doc, a);
+}
 
 fn mcp_row() -> Value {
     use rdy_qa::mcp::{McpClient, Reply};
-    let (d, mut r) = project();
-    seed(&mut r);
-    r.close().expect("close");
+    let rich = rich_project();
+    let mut seen = Seen::default();
+    mcp_probes(&rich, &mut seen);
+    let (d, r) = rdy_qa::fixtures::project();
+    drop(r);
     let mut c = McpClient::start(d.path());
     let mut tools = c.tools();
     tools.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
@@ -1004,38 +2285,30 @@ fn mcp_row() -> Value {
         let name = t["name"].as_str().expect("tool name").to_string();
         schemas.insert(name, json!({"input_schema": t["inputSchema"]}));
     }
-    // the result fields of the read tools that take no required parameter, called in an agent
-    // session; a call with a required parameter missing is a refusal and shows
-    // the envelope
-    let session = c.call(
-        "rdy_session",
-        json!({"actor": "agent:qa", "run": "qa", "role": "writer"}),
-    );
-    let mut results = Map::new();
-    results.insert(
-        "rdy_session".into(),
-        match session {
-            Reply::Ok(v) => json!({"ok": shape(&v)}),
-            _ => panic!("the session opens"),
-        },
-    );
-    for name in READ_PROBES {
-        let facts = match c.call(name, json!({})) {
-            Reply::Ok(v) => json!({"ok": shape(&v)}),
-            Reply::ToolError(v) => json!({"refused": shape(&v)}),
-            Reply::RpcError(_) => json!({"protocol_error": true}),
-        };
-        results.insert((*name).to_string(), facts);
+    // every tool is probed or listed with a reason, and not both
+    let probed: std::collections::BTreeSet<String> = seen
+        .0
+        .keys()
+        .map(|l| l.split(' ').next().unwrap_or_default().to_string())
+        .collect();
+    for (tool, _) in MCP_NOT_CAPTURED {
+        assert!(schemas.contains_key(*tool), "{tool} is not a tool");
+        assert!(
+            !probed.contains(*tool),
+            "{tool} is probed and listed as not captured"
+        );
+    }
+    for name in schemas.keys() {
+        assert!(
+            probed.contains(name) || MCP_NOT_CAPTURED.iter().any(|(t, _)| t == name),
+            "{name} is neither probed nor listed in MCP_NOT_CAPTURED"
+        );
     }
     // the refusal envelope: a tool error holds code, message and fix
     let refusal = match c.call("rdy_context", json!({"id": "c-ZZZZZ"})) {
         Reply::ToolError(v) => shape(&v),
         other => panic!("an unknown block is a tool error: {:?}", other.is_ok()),
     };
-    assert!(
-        schemas.len() >= 50 && results.len() > 5,
-        "the MCP surface has a source"
-    );
     drop(c);
     // the review writer refuses the carried verdicts and the check kind (no product writer of a
     // Check review, a Pass, a Concern or a Fail exists)
@@ -1058,11 +2331,21 @@ fn mcp_row() -> Value {
         "rdy_review_next check".into(),
         refusal_of(rv.call("rdy_review_next", json!({"kind": "check"}))),
     );
+    let not_captured: Map<String, Value> = MCP_NOT_CAPTURED
+        .iter()
+        .map(|(t, why)| ((*t).to_string(), json!(why)))
+        .collect();
+    let ops_not_probed: Map<String, Value> = MCP_OPS_NOT_PROBED
+        .iter()
+        .map(|(t, why)| ((*t).to_string(), json!(why)))
+        .collect();
     json!({
-        "sources": ["rdy mcp tools/list", "tools/call on read-only tools"],
+        "sources": ["rdy mcp tools/list", "tools/call against a seeded project"],
         "tool_names": tools.iter().map(|t| t["name"].clone()).collect::<Vec<_>>(),
         "tools": schemas,
-        "result_fields": results,
+        "result_fields": seen.into_value(),
+        "result_fields_not_captured": not_captured,
+        "ops_not_probed": ops_not_probed,
         "carried_value_refusals": refusals,
         "refusal_envelope": refusal,
         "refusal_error_rows": rdy_mcp::tools::ERROR_ROWS.iter().map(|(c, _, _)| *c).collect::<Vec<_>>(),
@@ -1104,8 +2387,8 @@ fn errors_row() -> Value {
             continue;
         }
         let text = std::fs::read_to_string(&f).expect("read a source file");
-        let product = text.split("#[cfg(test)]").next().unwrap_or("");
-        for m in consts.captures_iter(product) {
+        let product = product_text(&text);
+        for m in consts.captures_iter(&product) {
             let (name, value) = (m[1].to_string(), m[2].to_string());
             let template = name.ends_with("_FIX") || name.ends_with("_MESSAGE");
             if template {
@@ -1279,6 +2562,9 @@ fn packs_row() -> Value {
 
 fn markdown_row() -> Value {
     use rdy_render::print::md::{Layout, write_markdown};
+    // fixed ids and a pinned clock: the ids and hashes in the exported text are pinned with it
+    rdy_model::seed_ids_for_tests(14);
+    let _clock = rdy_qa::golden::fixture_clock();
     let (_d, r, _ids) = rdy_qa::golden::site_with_decision();
     let p = rdy_render::print::build(&r.read(), &Scope::Canon).expect("the print builds");
     let mut layouts = Map::new();
@@ -1326,7 +2612,7 @@ fn markdown_row() -> Value {
                     "headings": heading.find_iter(&text).map(|m| m.as_str().to_string()).collect::<Vec<_>>(),
                     "anchors": anchor.find_iter(&text).map(|m| m.as_str().to_string()).collect::<Vec<_>>(),
                     "link_targets": link.captures_iter(&text).map(|c| c[1].to_string()).collect::<Vec<_>>(),
-                    "normalized_blake3": blake3_of(text.as_bytes()),
+                    "blake3": blake3_of(text.as_bytes()),
                 })
             } else {
                 json!({"len": bytes.len(), "blake3": blake3_of(&bytes)})
@@ -1336,6 +2622,7 @@ fn markdown_row() -> Value {
         assert!(files.contains_key("index.md") || files.contains_key("docs/index.md"));
         layouts.insert(name.into(), json!({"files": files}));
     }
+    rdy_model::unseed_ids_for_tests();
     json!({
         "sources": ["rdy_render::print::md::write_markdown", "rdy_qa::golden site_with_decision"],
         "layouts": layouts,
@@ -1393,7 +2680,9 @@ fn site_row() -> Value {
         );
     }
     // the pages of a rendered site: canon pages, block permalinks and assets
-    let (_d, r, ids) = rdy_qa::golden::site_with_decision();
+    rdy_model::seed_ids_for_tests(14);
+    let _clock = rdy_qa::golden::fixture_clock();
+    let (_d, r, _ids) = rdy_qa::golden::site_with_decision();
     let out = tempfile::tempdir().expect("tempdir");
     rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).expect("render canon");
     let mut routes: Vec<String> = rdy_qa::golden::pages(out.path())
@@ -1410,8 +2699,10 @@ fn site_row() -> Value {
         .collect();
     routes.sort();
     routes.dedup();
-    let _ = ids;
-    let has_go = routes.iter().any(|r| r.starts_with("go/"));
+    rdy_model::unseed_ids_for_tests();
+    let has_go = routes
+        .iter()
+        .any(|r| r.starts_with("go/") && r.ends_with(".html"));
     assert!(has_go, "a block permalink route is in the site: {routes:?}");
     let tag_ok: Vec<Value> = ["v1.2.0", "1.0", ".", "..", "a/b"]
         .iter()
@@ -1829,15 +3120,7 @@ fn ok14_future_record_writers_remain_absent() {
     let mut offenders = vec![];
     // the string forms of the carried acts: no product code names them either
     let literals = ["\"resolve_dispute\"", "\"accept_verdict\""];
-    for f in &files {
-        let text = std::fs::read_to_string(f).expect("read");
-        let product = text.split("#[cfg(test)]").next().unwrap_or("");
-        for l in literals {
-            if product.contains(l) {
-                offenders.push(format!("{}: names the act {l}", f.display()));
-            }
-        }
-    }
+    let needles: Vec<&str> = acts.iter().chain(verdicts.iter()).copied().collect();
     for f in files {
         let rel = f
             .strip_prefix(workspace_root().join("crates"))
@@ -1845,27 +3128,435 @@ fn ok14_future_record_writers_remain_absent() {
             .to_string_lossy()
             .replace('\\', "/");
         let text = std::fs::read_to_string(&f).expect("read");
-        let product = text.split("#[cfg(test)]").next().unwrap_or("");
-        for needle in acts.iter().chain(verdicts.iter()) {
-            for (i, line) in product.lines().enumerate() {
-                let t = line.trim_start();
-                if t.starts_with("//") || !line.contains(needle) {
-                    continue;
-                }
-                // a match arm or a comparison reads the value; only a construction writes it
-                let reads = t.contains("=>")
-                    || t.contains("==")
-                    || t.contains("matches!")
-                    || t.contains("!=");
-                if !reads {
-                    offenders.push(format!("{rel}:{}: {t}", i + 1));
-                }
+        let product = product_text(&text);
+        for l in literals {
+            if product.contains(l) {
+                offenders.push(format!("{rel}: names the act {l}"));
             }
         }
+        offenders.extend(carried_writes(&rel, &product, &needles));
     }
     assert!(
         offenders.is_empty(),
         "product code writes a carried act, verdict or subject:\n{}",
         offenders.join("\n")
+    );
+}
+
+/// A source with a test hook early in a struct, a test module declaration, and product code
+/// after both: a scan that stops at the first `#[cfg(test)]` never sees the lines below them.
+const PLANTED: &str = r#"
+struct Shared {
+    seen: u8,
+    #[cfg(test)]
+    hook: Option<Box<dyn Fn(u8, u8) -> u8>>,
+    other: u8,
+}
+#[cfg(test)]
+mod contract;
+fn early() -> char { '{' }
+#[cfg(test)]
+impl Shared {
+    fn probe(&self) { let _ = AnswerAct::Dispute; }
+}
+pub const E_PLANTED: &str = "E_PLANTED";
+fn parse(s: &str) -> Option<Verdict> {
+    match s {
+        "pass" => Some(Verdict::Pass),
+        _ => None,
+    }
+}
+fn two(s: &str) -> Verdict { match s { "a" => Verdict::Pass, "b" => Verdict::Fail, _ => x } }
+fn late() -> Answer { Answer::new(AnswerAct::ResolveDispute) }
+fn reads(v: Verdict) -> bool { v == Verdict::Fail || matches!(v, Verdict::Concern) }
+fn arm(v: Verdict) -> u8 { match v { Verdict::Pass | Verdict::Fail => 1, _ => 0 } }
+fn subject(s: &ReviewSubject) -> bool { matches!(s, ReviewSubject::Check { .. }) }
+fn build(request: Hash) -> ReviewSubject { ReviewSubject::Check { request } }
+#[cfg(test)]
+mod tests {
+    fn t() { let _ = ReviewSubject::Check { request }; let c = '}'; }
+}
+const AFTER: &str = "x";
+"#;
+
+#[test]
+fn ok14_source_scan_keeps_product_code_after_an_early_test_hook() {
+    let product = product_text(PLANTED);
+    assert_eq!(
+        product.lines().count(),
+        PLANTED.lines().count(),
+        "lines stay aligned"
+    );
+    for kept in [
+        "other: u8",
+        "E_PLANTED",
+        "fn late",
+        "const AFTER",
+        "fn build",
+    ] {
+        assert!(
+            product.contains(kept),
+            "product code {kept:?} was dropped:\n{product}"
+        );
+    }
+    for gone in [
+        "hook",
+        "mod contract",
+        "fn probe",
+        "mod tests",
+        "let c = '}'",
+    ] {
+        assert!(
+            !product.contains(gone),
+            "test code {gone:?} was kept:\n{product}"
+        );
+    }
+    // the errors row sees a constant defined after the hook
+    let consts = Regex::new(r#"const\s+(E_[A-Z_]+)\s*:"#).unwrap();
+    assert!(consts.is_match(&product));
+}
+
+#[test]
+fn ok14_source_scan_finds_a_writer_after_a_hook_and_in_a_match_arm() {
+    let product = product_text(PLANTED);
+    let needles = [
+        "AnswerAct::Dispute",
+        "AnswerAct::ResolveDispute",
+        "Verdict::Pass",
+        "Verdict::Concern",
+        "Verdict::Fail",
+        "ReviewSubject::Check",
+    ];
+    // the old cut at the first attribute sees none of them
+    let cut = PLANTED.split("#[cfg(test)]").next().unwrap();
+    assert!(carried_writes("planted.rs", cut, &needles).is_empty());
+    let hits = carried_writes("planted.rs", &product, &needles);
+    let text = hits.join("\n");
+    // the parser arm, both arms of the one-line match, the late construction and the builder
+    assert_eq!(hits.len(), 5, "{text}");
+    for want in [
+        "\"pass\" => Some",
+        "\"b\" => Verdict::Fail",
+        "AnswerAct::ResolveDispute",
+        "ReviewSubject::Check { request }",
+    ] {
+        assert!(text.contains(want), "no hit for {want}:\n{text}");
+    }
+    // reads and the test module are not hits
+    for not in ["fn reads", "fn arm", "fn subject", "fn probe", "fn t()"] {
+        assert!(!text.contains(not), "{not} is a read or a test:\n{text}");
+    }
+}
+
+/// The paths in `v` that end in an empty array: a field set the probes could not see.
+fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::Array(a) if a.is_empty() => out.push(path.to_string()),
+        Value::Array(a) => a
+            .iter()
+            .for_each(|x| empty_arrays(&format!("{path}[]"), x, out)),
+        Value::Object(m) => m
+            .iter()
+            .for_each(|(k, x)| empty_arrays(&format!("{path}/{k}"), x, out)),
+        _ => {}
+    }
+}
+
+/// The replies of the seeded project that still hold an empty array, so the fields of its
+/// elements are not pinned, so a field of such an element is outside the contract this fixture
+/// pins. They are empty because no project of this size holds the kind (signatures, quarantined
+/// frames, upgrade steps, lineage, stale states, code files) or because the one call that fills
+/// them is not worth its set-up (a conflict, a moved block, a plan note). The list is explicit
+/// so that coverage is not claimed for them: a new empty array fails the test, and a path that
+/// fills up must leave the list.
+const EMPTY_IN_FIXTURE: &[&str] = &[
+    "cli/approve/stdout/consequences[]/because/values",
+    "cli/approve/stdout/signatures",
+    "cli/approve/stdout/warnings",
+    "cli/brief/stdout/inflight/intents",
+    "cli/brief/stdout/inflight/proposals",
+    "cli/brief/stdout/inflight/tensions",
+    "cli/brief/stdout/inflight/views",
+    "cli/brief/stdout/lineage",
+    "cli/brief/stdout/suspects",
+    "cli/brief/stdout/will_go_stale[]/states",
+    "cli/coverage/stdout/kinds",
+    "cli/coverage/stdout/similar_kinds",
+    "cli/fsck/stdout/open_report/quarantined",
+    "cli/fsck/stdout/quarantine",
+    "cli/inbox/stdout/entries",
+    "cli/log/stdout[]/rebased_from",
+    "cli/new doc/stdout/consequences",
+    "cli/new doc/stdout/on_change/resolved",
+    "cli/new doc/stdout/on_change/tensions",
+    "cli/new doc/stdout/suggestions",
+    "cli/new doc/stdout/warnings",
+    "cli/new folder/stdout/consequences",
+    "cli/new folder/stdout/coverage/pages",
+    "cli/new folder/stdout/on_change/resolved",
+    "cli/new folder/stdout/on_change/tensions",
+    "cli/new folder/stdout/suggestions",
+    "cli/new folder/stdout/warnings",
+    "cli/pending/stdout/not_ready",
+    "cli/plan/stdout/notes",
+    "cli/propose/stdout/blocking",
+    "cli/propose/stdout/conflicts",
+    "cli/propose/stdout/consequences",
+    "cli/propose/stdout/plan/items",
+    "cli/propose/stdout/tensions",
+    "cli/propose/stdout/warnings",
+    "cli/remote list/stdout/remotes",
+    "cli/remote list/stdout/warnings",
+    "cli/show/stdout/suspects",
+    "cli/status/stdout/coverage/kinds",
+    "cli/status/stdout/coverage/similar_kinds",
+    "cli/status/stdout/open_report/quarantined",
+    "cli/status/stdout/quarantine",
+    "cli/status/stdout/warnings",
+    "cli/tag/stdout/signatures",
+    "cli/trace/stdout/edges",
+    "cli/trace/stdout/frontier",
+    "cli/trace/stdout/premises",
+    "cli/trace/stdout/questions",
+    "cli/trace/stdout/sources",
+    "cli/undo/stdout/cascaded",
+    "cli/undo/stdout/conflicts",
+    "cli/undo/stdout/consequences",
+    "cli/undo/stdout/included",
+    "cli/undo/stdout/on_change/resolved",
+    "cli/undo/stdout/on_change/tensions",
+    "cli/upgrade/stdout/steps",
+    "cli/view show/stdout/conflicts",
+    "mcp/rdy_alternatives list/ok/sets",
+    "mcp/rdy_answer/ok/landing/|null/consequences[]/because/values",
+    "mcp/rdy_answer/ok/landing/|null/warnings",
+    "mcp/rdy_answer/ok/signatures?",
+    "mcp/rdy_answer/refused/issues",
+    "mcp/rdy_brief/ok/inflight/intents",
+    "mcp/rdy_brief/ok/inflight/proposals",
+    "mcp/rdy_brief/ok/inflight/tensions",
+    "mcp/rdy_brief/ok/inflight/views",
+    "mcp/rdy_brief/ok/lineage",
+    "mcp/rdy_brief/ok/suspects",
+    "mcp/rdy_brief/ok/will_go_stale[]/states",
+    "mcp/rdy_context/ok/children",
+    "mcp/rdy_context/ok/suspects",
+    "mcp/rdy_context/refused/issues",
+    "mcp/rdy_coverage/ok/kinds",
+    "mcp/rdy_coverage/ok/similar_kinds",
+    "mcp/rdy_decide/ok/consequences",
+    "mcp/rdy_decide/ok/on_change/resolved",
+    "mcp/rdy_decide/ok/on_change/tensions",
+    "mcp/rdy_decide/ok/related_decisions",
+    "mcp/rdy_decide/ok/suggestions",
+    "mcp/rdy_decide/ok/warnings",
+    "mcp/rdy_log/ok[]/rebased_from",
+    "mcp/rdy_overview/ok/coverage/kinds",
+    "mcp/rdy_overview/ok/coverage/similar_kinds",
+    "mcp/rdy_overview/ok/open_report/quarantined",
+    "mcp/rdy_pending/ok/not_ready",
+    "mcp/rdy_plan/ok/notes",
+    "mcp/rdy_propose/ok/blocking",
+    "mcp/rdy_propose/ok/conflicts",
+    "mcp/rdy_propose/ok/consequences",
+    "mcp/rdy_propose/ok/plan/items",
+    "mcp/rdy_review_next/ok/case/entities",
+    "mcp/rdy_review_next/refused/issues",
+    "mcp/rdy_review_submit/refused/issues",
+    "mcp/rdy_revoke/ok/consequences",
+    "mcp/rdy_revoke/ok/on_change/resolved",
+    "mcp/rdy_revoke/ok/on_change/tensions",
+    "mcp/rdy_revoke/ok/suggestions",
+    "mcp/rdy_schema/ok/children?",
+    "mcp/rdy_supersede/ok/consequences",
+    "mcp/rdy_supersede/ok/on_change/resolved",
+    "mcp/rdy_supersede/ok/on_change/tensions",
+    "mcp/rdy_supersede/ok/suggestions",
+    "mcp/rdy_supersede/ok/warnings",
+    "mcp/rdy_tag/ok/signatures",
+    "mcp/rdy_trace/ok/frontier",
+    "mcp/rdy_trace/ok/premises",
+    "mcp/rdy_trace/ok/questions",
+    "mcp/rdy_trace/ok/sources",
+    "mcp/rdy_upgrade/ok/steps",
+    "mcp/rdy_view compare/ok/added[]/fields",
+    "mcp/rdy_view compare/ok/conflicted",
+    "mcp/rdy_view compare/ok/deleted",
+    "mcp/rdy_view compare/ok/moved",
+    "mcp/rdy_view show/ok/conflicts",
+    "mcp/rdy_view undo/refused/issues",
+    "mcp/rdy_write/ok/on_change/resolved",
+    "mcp/rdy_write/ok/suggestions",
+];
+
+#[test]
+fn ok14_probes_see_populated_replies() {
+    let fixture = read_fixture();
+    let mut empty = vec![];
+    empty_arrays("cli", &fixture["cli"]["runtime"]["probes"], &mut empty);
+    empty_arrays("mcp", &fixture["mcp"]["result_fields"], &mut empty);
+    empty.sort();
+    empty.dedup();
+    let allowed: Vec<String> = EMPTY_IN_FIXTURE.iter().map(|s| (*s).to_string()).collect();
+    assert_eq!(
+        empty, allowed,
+        "empty arrays in the probe shapes hide the fields of their elements"
+    );
+    // the tension, suspect, pending item and tag the brief names are in the shapes
+    let mcp = &fixture["mcp"]["result_fields"];
+    assert!(mcp["rdy_tensions"]["ok"]["tensions"][0]["sides"][0]["actor"].is_string());
+    assert!(mcp["rdy_suspects"]["ok"]["items"][0]["target"].is_string());
+    assert!(mcp["rdy_pending"]["ok"]["items"][0]["card_hash"].is_string());
+    assert!(mcp["rdy_tags"]["ok"]["versions"][0]["name"].is_string());
+    let cli = &fixture["cli"]["runtime"]["probes"];
+    assert!(cli["tensions"]["stdout"]["tensions"][0]["id"].is_string());
+    assert!(cli["suspects"]["stdout"]["items"][0]["target"].is_string());
+    assert!(cli["pending"]["stdout"]["items"][0]["card_hash"].is_string());
+    assert!(cli["tags"]["stdout"]["versions"][0]["name"].is_string());
+    // the writer, answer and review tools were called and answered
+    for tool in [
+        "rdy_write",
+        "rdy_decide",
+        "rdy_supersede",
+        "rdy_revoke",
+        "rdy_propose",
+        "rdy_answer",
+        "rdy_tag",
+        "rdy_resolve",
+        "rdy_review_next",
+        "rdy_review_submit",
+        "rdy_view create",
+        "rdy_intent post",
+    ] {
+        assert!(mcp[tool]["ok"].is_object(), "{tool} has no recorded result");
+    }
+    for refusal in ["rdy_answer", "rdy_review_submit"] {
+        assert!(
+            mcp[refusal]["refusal_codes"]
+                .as_array()
+                .is_some_and(|c| !c.is_empty()),
+            "{refusal} has no recorded refusal"
+        );
+    }
+    for cmd in [
+        "answer",
+        "approve",
+        "tag",
+        "propose",
+        "new doc",
+        "new folder",
+        "view new",
+        "intent post",
+    ] {
+        assert!(
+            cli[cmd]["stdout"].is_object(),
+            "{cmd} has no recorded result"
+        );
+    }
+}
+
+#[test]
+fn ok14_probes_account_for_every_command() {
+    let fixture = read_fixture();
+    let probed: Vec<&String> = fixture["cli"]["runtime"]["probes"]
+        .as_object()
+        .expect("probes")
+        .keys()
+        .collect();
+    let listed = fixture["cli"]["runtime"]["not_probed_commands"]
+        .as_object()
+        .expect("the commands that are not probed");
+    let covered = |path: &str| {
+        probed
+            .iter()
+            .any(|l| *l == path || l.starts_with(&format!("{path} ")))
+            || listed.contains_key(path)
+    };
+    let mut paths = vec![];
+    for top in fixture["cli"]["tree"]["subcommands"]
+        .as_array()
+        .expect("commands")
+    {
+        let name = top["name"].as_str().expect("name");
+        paths.push(name.to_string());
+        for sub in top["subcommands"].as_array().into_iter().flatten() {
+            paths.push(format!("{name} {}", sub["name"].as_str().expect("name")));
+        }
+    }
+    for path in &paths {
+        let parent = path.split(' ').next().unwrap_or_default();
+        let probed_here = probed
+            .iter()
+            .any(|l| *l == path || l.starts_with(&format!("{path} ")));
+        let ok = if path.contains(' ') {
+            covered(path) || listed.contains_key(parent)
+        } else {
+            // a command with subcommands is covered when each of them is, or when it is listed
+            let has_subs = paths.iter().any(|p| p.starts_with(&format!("{path} ")));
+            covered(path) || (has_subs && probed_here)
+        };
+        assert!(
+            ok,
+            "the command `{path}` is neither probed nor listed in CLI_NOT_CAPTURED"
+        );
+    }
+    for path in listed.keys() {
+        assert!(
+            paths.contains(path),
+            "`{path}` is listed but is not a command"
+        );
+        assert!(
+            !probed.iter().any(|l| *l == path),
+            "`{path}` is probed and listed as not probed"
+        );
+    }
+    // every tool is probed or listed, and each unprobed operation is one the tool takes
+    let mcp = &fixture["mcp"];
+    let results = mcp["result_fields"].as_object().expect("results");
+    let skipped = mcp["result_fields_not_captured"]
+        .as_object()
+        .expect("not captured");
+    for name in mcp["tool_names"].as_array().expect("tools") {
+        let name = name.as_str().expect("name");
+        assert!(
+            results
+                .keys()
+                .any(|k| k == name || k.starts_with(&format!("{name} ")))
+                || skipped.contains_key(name),
+            "{name} is neither probed nor listed"
+        );
+    }
+    for op in mcp["ops_not_probed"].as_object().expect("ops").keys() {
+        let (tool, verb) = op.split_once(' ').expect("`tool op`");
+        let text = mcp["tools"][tool]["input_schema"]["properties"]["op"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            text.contains(verb),
+            "{tool} has no operation {verb}: {text}"
+        );
+        assert!(!results.contains_key(op), "{op} is probed and listed");
+    }
+}
+
+#[test]
+fn ok14_probe_shapes_merge_every_array_element() {
+    let v = json!({"items": [{"a": 1, "keep": {"x": 1}}, {"a": 2, "b": "text"}, {"a": null, "keep": {"y": true}}], "empty": []});
+    assert_eq!(
+        shape(&v),
+        json!({
+            "items": [{"a": "null|number", "b?": "string", "keep?": {"x?": "number", "y?": "bool"}}],
+            "empty": [],
+        })
+    );
+    // a member named by an id is one entry whatever the id
+    assert_eq!(
+        shape(&json!({"d-AAAAA": 1, "d-BBBBB": 2, "name": 3})),
+        json!({"<id>": "number", "name": "number"})
+    );
+    // an empty array adds nothing to a merge, and a value after a null keeps its shape
+    assert_eq!(
+        shape(&json!([[], [{"k": 1}], null])),
+        json!([{"|null": [{"k": "number"}]}])
     );
 }
