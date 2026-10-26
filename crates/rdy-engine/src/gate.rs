@@ -1490,6 +1490,25 @@ fn rekeyable_in(changes: &[Change], applied: &[usize], canon: &Materialized) -> 
         .collect()
 }
 
+/// The acceptance change's message: the phrases for the ops it holds (`accepts` decisions,
+/// gives new `keys`, gives new `order_keys`), in that order, joined as a list, then ` in {title}`.
+fn acceptance_message(accepts: bool, keys: bool, order_keys: bool, title: &str) -> String {
+    let what: Vec<&str> = [
+        (accepts, "accept decisions"),
+        (keys, "give new keys"),
+        (order_keys, "give new order keys"),
+    ]
+    .into_iter()
+    .filter_map(|(on, phrase)| on.then_some(phrase))
+    .collect();
+    let list = match what.as_slice() {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    format!("{list} in {title}")
+}
+
 /// The ops of the changes at `applied` (positions in `changes`), in applied order.
 pub(crate) fn applied_ops(changes: &[Change], applied: &[usize]) -> Vec<Op> {
     applied
@@ -2686,6 +2705,38 @@ impl Rdy {
         if let Some(e) = stale.into_iter().next() {
             return Err(e);
         }
+        // D-TX3KH: a block this version places that would share its order key with a sibling
+        // gets a key of its own, in the acceptance change. Only the version's own placed blocks
+        // are re-keyed, each from its proposed version, which the view must still hold. A key
+        // folds into the block's acceptance or key update, so no two updates share a base.
+        let canon = st.materialized(&Scope::Canon)?;
+        let placed = crate::landing_order::placed(&canon, &ops);
+        let order_keys = crate::landing_order::rekeys(&canon, &prospective, &placed)?;
+        for (id, k) in &order_keys {
+            let b = prospective
+                .get(id)
+                .expect("a re-keyed block is in the prospective canon");
+            if vm.get(id).map(|v| v.version_hash()) != Some(b.version_hash()) {
+                return Err(crate::landing_order::stale_error(id, &p.view));
+            }
+            let mut folded = false;
+            for op in &mut accept_ops {
+                if let Op::Update { block, .. } = op
+                    && block.id == *id
+                {
+                    block.order = k.clone();
+                    folded = true;
+                }
+            }
+            if !folded {
+                let mut rekeyed = b.clone();
+                rekeyed.order = k.clone();
+                accept_ops.push(Op::Update {
+                    base: b.version_hash(),
+                    block: rekeyed,
+                });
+            }
+        }
 
         // 3. dry run: validate the final change list before writing anything. The acceptance
         // carries the deps the store gives it when it commits it to the view (the view's own
@@ -2699,11 +2750,12 @@ impl Rdy {
                 deps: vec![],
                 provenance: s.provenance(),
                 justification: None,
-                message: match (accepts, re.is_empty()) {
-                    (_, true) => format!("accept decisions in {}", p.title),
-                    (0, false) => format!("give new keys in {}", p.title),
-                    _ => format!("accept decisions and give new keys in {}", p.title),
-                },
+                message: acceptance_message(
+                    accepts > 0,
+                    !re.is_empty(),
+                    !order_keys.is_empty(),
+                    &p.title,
+                ),
                 links: ChangeLinks::default(),
                 read_identity: None,
             };

@@ -52,6 +52,7 @@ pub mod inflight;
 pub mod intent;
 mod io;
 mod keys;
+pub mod landing_order;
 pub mod lexicon;
 mod lint;
 pub mod load;

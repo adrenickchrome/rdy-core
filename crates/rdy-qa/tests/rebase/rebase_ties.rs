@@ -1,12 +1,13 @@
 //! sg2: order keys under rebase (spec §15.3 `rebase`, D-8EH6E). Views that append under one
-//! parent from one base can end with equal order keys once they land; a tie is harmless when the
-//! order it gives is stable and a later insert still lands where it was asked. Every state
-//! passes the invariant checker, on canon and on each view. The ties that must hold are made on
-//! purpose with `land_with_a_tie` (or written raw), so they stay a tie whatever the engine's
-//! landing does.
+//! parent from one base give their blocks one key; a normal landing gives its own blocks keys of
+//! their own (D-TX3KH), so two normal landings never tie. A tie that canon already holds is
+//! harmless when the order it gives is stable and a later insert still lands where it was asked.
+//! Every state passes the invariant checker, on canon and on each view. The ties that must hold
+//! are made on purpose with `land_with_a_tie` (or written raw), which bypasses the engine's
+//! acceptance change, so they stay a tie.
 //!
-//! M2 does not re-key at landing (ruling task-2-round2), so ties stay possible and an `after` or
-//! `before` inside a tie uses the write's fallback: it re-keys the smaller side of the tied run.
+//! An `after` or `before` inside such a historical tie uses the write's fallback: it re-keys the
+//! smaller side of the tied run.
 //! Known cost: the fallback writes siblings the agent did not touch, so another view's edit of a
 //! re-keyed sibling conflicts when both land
 //! (`sg2_an_insert_into_a_tie_conflicts_with_a_concurrent_edit_of_the_re_keyed_sibling` pins it).
@@ -57,7 +58,7 @@ fn seeded() -> (tempfile::TempDir, Rdy, String, String) {
 }
 
 #[test]
-fn sg2_two_views_appending_under_one_parent_land_with_a_tie_or_distinct_keys() {
+fn ok6_two_normal_landings_have_distinct_keys() {
     let (_d, mut r, section, base) = seeded();
     let a = append(&mut r, "a", &section, "from a");
     let b = append(&mut r, "b", &section, "from b");
@@ -79,6 +80,12 @@ fn sg2_two_views_appending_under_one_parent_land_with_a_tie_or_distinct_keys() {
         assert!(ids.contains(id), "{id} is missing from {ids:?}");
     }
     assert_eq!(ids[0], base, "the seeded claim stays first: {ids:?}");
+    let keys: std::collections::BTreeSet<String> = m
+        .children(Some(&section_id))
+        .iter()
+        .map(|c| c.order.clone())
+        .collect();
+    assert_eq!(keys.len(), 3, "the two landings have distinct keys");
 }
 
 #[test]
