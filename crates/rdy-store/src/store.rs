@@ -3969,11 +3969,17 @@ impl Store {
                     }
                     frames.push((at.kind, hash));
                 }
-                Write::Dropped { key, len, verify } => {
+                Write::Dropped {
+                    key,
+                    raw,
+                    len,
+                    verify,
+                } => {
                     crate::take_batch::verify(files, verify, &mut buf)
                         .map_err(|e| e.with_object(Some(*key)))?;
-                    self.log.append_dropped(key.kind, &key.hash, *len)?;
-                    frames.push((key.kind, key.hash));
+                    // the removed frame's raw kind, as its source stored it
+                    self.log.append_dropped(*raw, &key.hash, *len)?;
+                    frames.push((*raw, key.hash));
                 }
             }
         }

@@ -175,11 +175,11 @@ const E1_MEMBERS: [(&str, &str); 12] = [
     ),
     (
         E1_HOLDER,
-        "9e2adc18b759160fb9b708c3cd3874fac1184438d077fe6d80350b2bd972b2da",
+        "6d84b5ee1783cad5a351f22b6c7a20b34fbf81785ec7e0163c670eceb11088b6",
     ),
     (
         E1_HOLDER_EXPECT,
-        "f6168d0c4409adb9ff2b441d66bba9eb93b2db16810134d0d99e126a7f82a2c7",
+        "01af7230958b19c82974513dc5083e10577b10b2e238f7ea1cb9fbbf9dbcd320",
     ),
     (
         E1_HOLDER_CHAIN_FULL,
@@ -191,11 +191,11 @@ const E1_MEMBERS: [(&str, &str); 12] = [
     ),
     (
         E1_HOLDER_CHAIN_2,
-        "9f8221dd72a99f44c4e453fafd29993c70f0e12ec598eddf8cc9fa95aef68040",
+        "1023d2c2ee39431df418d9553aa3efde34fc691d8079ad981a91f2149bfc19a7",
     ),
     (
         E1_HOLDER_CHAIN_EXPECT,
-        "490f8617150cbca312efaef1ddb8124439ae375aea1b618e5e8174022e0b9b03",
+        "b104926c782e9ef353d0262a05cc30c772deaee98ddd3f620a074630719b7c82",
     ),
 ];
 
@@ -203,11 +203,11 @@ const E1_MEMBERS: [(&str, &str); 12] = [
 const E1_SYNC_MEMBERS: [(&str, &str); 2] = [
     (
         E1_SYNC,
-        "9e479fd7a95f79f50806f2badf8a0363ff2ac3ad659a9d3c56027db81a2e784a",
+        "bd5a28a70c13b487f39ec28027396eee29982d83e711ed2eeb2cbca7acfe74c6",
     ),
     (
         E1_SYNC_EXPECT,
-        "c8ec99cb4b84819b2d253544d2203eb33c24e90d8506a4dc68d3097d4343e325",
+        "4843f554dfcffb506489e1dae57c07bc98c69698e29b513236dca3ad09e7af20",
     ),
 ];
 
@@ -681,14 +681,20 @@ fn ok4_complete_encoding_fixture_set_loads() {
     for i in &input {
         let files: Vec<PathBuf> = i.names.iter().map(|n| fixture(n)).collect();
         let mut seen = std::collections::BTreeSet::new();
+        let mut dropped = std::collections::BTreeSet::new();
         for p in &files {
             let (mut rd, _, _) =
                 DumpReader::open(BufReader::new(std::fs::File::open(p).unwrap())).unwrap();
             while let Some(item) = rd.next().unwrap() {
                 if let DumpItem::Batch(b) = item {
                     for f in &b.frames {
-                        if let Frame::Present { kind, .. } = f {
-                            seen.insert(*kind);
+                        match f {
+                            Frame::Present { kind, .. } => {
+                                seen.insert(*kind);
+                            }
+                            Frame::Dropped { kind, .. } => {
+                                dropped.insert(*kind);
+                            }
                         }
                     }
                 }
@@ -707,6 +713,10 @@ fn ok4_complete_encoding_fixture_set_loads() {
         ];
         for k in new {
             assert!(seen.contains(&(k | v)), "{}: kind {k}", i.expect);
+        }
+        // a removed change of either encoding keeps its raw kind, in a project and a holder
+        for k in [kinds::CHANGE, kinds::CHANGE | v] {
+            assert!(dropped.contains(&k), "{}: a removed kind {k}", i.expect);
         }
     }
 }

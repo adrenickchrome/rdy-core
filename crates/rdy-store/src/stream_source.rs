@@ -59,10 +59,11 @@ pub(crate) fn bad(reason: Reason, object: ObjectKey) -> StreamError {
     StreamError::bad_record(0, 0, reason).with_object(Some(object))
 }
 
-/// A dropped record's descriptor: its original length, the apply that removed it and its
-/// residue (none for a blob chunk).
+/// A dropped record's descriptor: the encoding of the removed frame, its original length, the
+/// apply that removed it and its residue (none for a blob chunk).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Drop {
+    pub(crate) encoding: u16,
     pub(crate) original_len: u32,
     pub(crate) apply: Hash,
     pub(crate) residue: Option<Hash>,
@@ -760,6 +761,17 @@ pub(crate) fn approved_tuples<'a>(
     approved
 }
 
+/// Whether a dropped record in `encoding` names the encoding its residue records as
+/// its source encoding (`crate::redaction::source_encoding`, the rule of
+/// `crate::redaction::marker_agrees`): a blob chunk (no residue) is encoding 0. A removed
+/// change keeps its own encoding, so a frame written from the record keeps its raw kind.
+pub(crate) fn drop_encoding_agrees(encoding: u16, residue: Option<&RedactionResidue>) -> bool {
+    match residue {
+        Some(r) => crate::redaction::source_encoding(r) == Some(encoding),
+        None => encoding == 0,
+    }
+}
+
 /// Whether dropped record `d` of `key` fits the removal its apply validated (`removal`): that
 /// removal approves exactly the record's length and residue.
 pub(crate) fn drop_fits(removal: Option<&PortableRemoval>, key: &ObjectKey, d: &Drop) -> bool {
@@ -999,11 +1011,13 @@ pub fn check_complete(
     let mut drops =
         |rec: &mut dyn Records, key: &ObjectKey| match rec.object_source().record(*key)? {
             Some(StreamRecord::Dropped {
+                encoding,
                 original_len,
                 apply,
                 residue,
                 ..
             }) => Ok(vec![Drop {
+                encoding,
                 original_len,
                 apply,
                 residue,
@@ -1030,8 +1044,9 @@ enum Place {
 struct Indexed<R> {
     input: RefCell<R>,
     index: BTreeMap<ObjectKey, Place>,
-    /// The approved removal that covers each key it covers: the first apply and its tuple.
-    masked: BTreeMap<ObjectKey, (Hash, RemovalObject)>,
+    /// The approved removal that covers each key it covers: the first apply, its tuple and the
+    /// source encoding its residue records.
+    masked: BTreeMap<ObjectKey, (Hash, RemovalObject, u16)>,
     /// The request that removed each object an approved request removes or names.
     removed: BTreeMap<ObjectKey, Hash>,
 }
@@ -1041,10 +1056,10 @@ impl<R: Read + Seek> Indexed<R> {
     /// from its frame (its header must still be the frame indexed, and its payload its hash), a
     /// dropped one as its descriptor.
     fn read(&self, key: ObjectKey) -> Result<Option<StreamRecord>, StreamError> {
-        if let Some((apply, t)) = self.masked.get(&key) {
+        if let Some((apply, t, encoding)) = self.masked.get(&key) {
             return Ok(Some(StreamRecord::Dropped {
                 key,
-                encoding: 0,
+                encoding: *encoding,
                 original_len: t.len,
                 apply: *apply,
                 residue: t.residue,
@@ -1054,7 +1069,7 @@ impl<R: Read + Seek> Indexed<R> {
             None => Ok(None),
             Some(Place::Dropped(d)) => Ok(Some(StreamRecord::Dropped {
                 key,
-                encoding: 0,
+                encoding: d.encoding,
                 original_len: d.original_len,
                 apply: d.apply,
                 residue: d.residue,
@@ -1196,11 +1211,13 @@ impl<R: Read + Seek> CheckedStream<R> {
                         encoding: *encoding,
                     },
                     StreamRecord::Dropped {
+                        encoding,
                         original_len,
                         apply,
                         residue,
                         ..
                     } => Place::Dropped(Drop {
+                        encoding: *encoding,
                         original_len: *original_len,
                         apply: *apply,
                         residue: *residue,
@@ -1386,7 +1403,28 @@ impl<R: Read + Seek> Indexed<R> {
     fn mask(&mut self, done: &Complete) -> Result<(), StreamError> {
         for (k, by) in &done.approved {
             if let Some((apply, t)) = by.first() {
-                self.masked.insert(*k, (*apply, *t));
+                let encoding = match t.residue {
+                    Some(r) => {
+                        let residue_key = ObjectKey {
+                            kind: kinds::REDACTION_RESIDUE,
+                            hash: r,
+                        };
+                        match self
+                            .read(residue_key)?
+                            .as_ref()
+                            .and_then(StreamRecord::typed)
+                        {
+                            Some(Ok(r)) => crate::redaction::recorded_source_encoding(&r),
+                            Some(Err(e)) => {
+                                return Err(StreamError::from_record(0, 0, &e)
+                                    .with_object(Some(residue_key)));
+                            }
+                            None => 0,
+                        }
+                    }
+                    None => 0,
+                };
+                self.masked.insert(*k, (*apply, *t, encoding));
             }
         }
         for r in done.incoming.values() {

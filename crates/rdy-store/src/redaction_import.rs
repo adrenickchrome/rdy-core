@@ -536,9 +536,11 @@ fn derive_spans(
 }
 
 /// Whether a local copy of an approved key (rule 2) is what its approved `tuple` says: its header
-/// keeps the tuple's length `len`, and its payload, when it is intact (`intact`), is what the
-/// tuple's residue records (`residue_matches`, the residue decoded in `residues`). An all-zero or
-/// partly zero payload is an erased or interrupted copy, and passes.
+/// keeps the tuple's length `len` and the raw kind of the residue's source encoding
+/// (`crate::redaction::marker_agrees`; a blob chunk's is unmarked), and its payload, when it is
+/// intact (`intact`), is what the tuple's residue records (`residue_matches`, the residue decoded
+/// in `residues`). An all-zero or partly zero payload is an erased or interrupted copy, and
+/// passes the payload rule.
 pub(crate) fn copy_fits(
     kind: u8,
     len: u32,
@@ -546,12 +548,16 @@ pub(crate) fn copy_fits(
     tuple: &crate::sync_proof::RemovalObject,
     residues: &Residues,
 ) -> bool {
+    let logical = crate::codec::logical_kind(kind);
     len == tuple.len
         && match (intact, tuple.residue) {
             (Some(p), Some(r)) => residues
                 .get(&r)
                 .is_some_and(|(res, encoding)| residue_matches(kind, p, res, *encoding)),
-            _ => true,
+            (None, Some(r)) => residues
+                .get(&r)
+                .is_none_or(|(res, _)| crate::redaction::marker_agrees(kind, logical, Some(res))),
+            (_, None) => kind == logical,
         }
 }
 

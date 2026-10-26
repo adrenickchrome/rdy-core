@@ -79,7 +79,7 @@ pub const REGISTERED_FEATURES: [&str; 7] = [
 ];
 
 /// The registered feature `name`, with its class and required version.
-fn registered(name: &str) -> StoreFeature {
+pub(crate) fn registered(name: &str) -> StoreFeature {
     StoreFeature {
         name: name.into(),
         class: FeatureClass::Incompatible,
@@ -873,13 +873,14 @@ pub fn required_features(raw: u8, payload: &[u8]) -> Vec<StoreFeature> {
     ) -> Option<T> {
         crate::codec::decode_bounded_split(o).ok()
     }
+    // an encoding-0 change or landing has no carried field: it is not decoded
     match o.kind {
-        kinds::CHANGE => {
+        kinds::CHANGE if o.version >= 1 => {
             if typed::<rdy_model::Change>(&o).is_some_and(|c| c.links.replayed_from.is_some()) {
                 add(FEATURE_VIEW_REPLAY);
             }
         }
-        kinds::LANDING => {
+        kinds::LANDING if o.version >= 1 => {
             if typed::<rdy_model::LandingRecord>(&o).is_some_and(|l| l.assessment.is_some()) {
                 add(FEATURE_ASSESSMENT);
             }

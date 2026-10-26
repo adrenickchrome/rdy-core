@@ -21,7 +21,7 @@ use crate::object_refs::ObjectKey;
 use rdy_model::assessment::Assessment;
 use rdy_model::check_request::CheckRequest;
 use rdy_model::dispute::{Dispute, DisputeResolution};
-use rdy_model::plan::{Plan, PlanAct, PlanKind, outcome_allowed};
+use rdy_model::plan::{Plan, PlanAct, PlanKind};
 use rdy_model::{
     Answer, AnswerAct, Assurance, Block, Hash, LandingRecord, Review, ReviewSubject, Verdict,
 };
@@ -43,8 +43,6 @@ pub const DISPUTE_TARGET: &str = "invalid dispute answer target";
 pub const PLAN_ANSWER: &str = "assessment plan answer is missing";
 /// A Dismiss plan answer answers a sealed item that is not a tension.
 pub const DISMISS: &str = "dismiss is not a tension answer";
-/// A sealed plan item has an outcome its kind does not allow.
-pub const OUTCOME: &str = "outcome is not allowed for this plan kind";
 /// A `check/` ref does not name the CHECK_REQUEST of its key.
 pub const CHECK_REF: &str = "invalid check ref";
 /// A review's verdict does not fit its subject.
@@ -259,20 +257,13 @@ pub(crate) fn landing_local(l: &LandingRecord) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// A sealed item's outcome is one its kind allows (a tension item seals as updated, confirmed or
-/// dismissed, and no other kind as dismissed), and a Dismiss answer of the plan answers only a
-/// tension item it seals.
+/// A Dismiss answer of the plan answers only a tension item it seals. (A sealed item's outcome
+/// is one its kind allows by the plan record rules, `crate::plan::invalid_record`, which every
+/// path applies first: `invalid seal`.)
 fn plan_local(p: &Plan) -> Result<(), &'static str> {
     let Some(seal) = &p.seal else {
         return Ok(());
     };
-    if seal
-        .items
-        .iter()
-        .any(|i| !outcome_allowed(i.kind, i.outcome))
-    {
-        return Err(OUTCOME);
-    }
     let not_tension: HashSet<&Hash> = seal
         .items
         .iter()

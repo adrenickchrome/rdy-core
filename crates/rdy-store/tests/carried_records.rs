@@ -1100,8 +1100,18 @@ fn ok4_reference_identities_are_not_object_edges() {
     c.open().reader().check_objects().unwrap();
 }
 
-/// What one corruption does to the carriers' source before the take: the refusal's reason.
-type Corrupt = (&'static str, Box<dyn Fn(&Carriers, &mut Store)>);
+/// Which checks reach a corruption: a holder's take of the newest tag and the source's fsck,
+/// or the source's fsck alone. A take carries only a tag's closure (`outside the tag closure`
+/// otherwise): no `check/` ref and no answer that targets neither a landing nor a tag.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Reach {
+    Take,
+    Fsck,
+}
+
+/// What one corruption does to the carriers' source before the take: the refusal's reason and
+/// the checks that reach it.
+type Corrupt = (&'static str, Reach, Box<dyn Fn(&Carriers, &mut Store)>);
 
 fn corruptions() -> Vec<Corrupt> {
     fn review(s: &mut Store, c: &Carriers, r: Review) {
@@ -1111,6 +1121,7 @@ fn corruptions() -> Vec<Corrupt> {
     vec![
         (
             carried::CHECK_VERDICT,
+            Reach::Take,
             Box::new(|c: &Carriers, s: &mut Store| {
                 let mut r = check_review(c.request, Hash::of(b"case"), Verdict::Pass, &c.b);
                 r.verdict = Verdict::Tension;
@@ -1119,6 +1130,7 @@ fn corruptions() -> Vec<Corrupt> {
         ),
         (
             carried::CHECK_CASE,
+            Reach::Take,
             Box::new(|c: &Carriers, s: &mut Store| {
                 review(
                     s,
@@ -1129,6 +1141,7 @@ fn corruptions() -> Vec<Corrupt> {
         ),
         (
             carried::CHECK_CITATIONS,
+            Reach::Take,
             Box::new(|c: &Carriers, s: &mut Store| {
                 let mut r = check_review(c.request, Hash::of(b"case"), Verdict::Concern, &c.b);
                 r.citations.clear();
@@ -1137,6 +1150,7 @@ fn corruptions() -> Vec<Corrupt> {
         ),
         (
             carried::CHECK_REASON,
+            Reach::Take,
             Box::new(|c: &Carriers, s: &mut Store| {
                 let mut r = check_review(c.request, Hash::of(b"case"), Verdict::Fail, &c.b);
                 r.reason = "  ".into();
@@ -1145,6 +1159,7 @@ fn corruptions() -> Vec<Corrupt> {
         ),
         (
             "invalid dispute reason",
+            Reach::Take,
             Box::new(|c: &Carriers, s: &mut Store| {
                 s.put(
                     kinds::DISPUTE,
@@ -1160,6 +1175,7 @@ fn corruptions() -> Vec<Corrupt> {
         ),
         (
             carried::DISPUTE_ITEM,
+            Reach::Take,
             Box::new(|c: &Carriers, s: &mut Store| {
                 // targets the landing, so the closure attaches it
                 s.put(
@@ -1171,6 +1187,7 @@ fn corruptions() -> Vec<Corrupt> {
         ),
         (
             carried::WRONG_KIND,
+            Reach::Take,
             Box::new(|c: &Carriers, s: &mut Store| {
                 s.put(
                     kinds::ANSWER,
@@ -1181,6 +1198,7 @@ fn corruptions() -> Vec<Corrupt> {
         ),
         (
             carried::VERDICT_TARGETS,
+            Reach::Take,
             Box::new(|c: &Carriers, s: &mut Store| {
                 s.put(
                     kinds::ANSWER,
@@ -1195,6 +1213,7 @@ fn corruptions() -> Vec<Corrupt> {
         ),
         (
             carried::POLICY_FIELDS,
+            Reach::Take,
             Box::new(|c: &Carriers, s: &mut Store| {
                 // a policy landing with a relay: a new landing on canon, tagged instead
                 let mut b = block("b-00002", "Relayed policy.");
@@ -1221,6 +1240,7 @@ fn corruptions() -> Vec<Corrupt> {
         ),
         (
             carried::POLICY_BLOCK,
+            Reach::Take,
             Box::new(|c: &Carriers, s: &mut Store| {
                 let mut b = block("b-00003", "Wrong policy.");
                 b.order = "X".into();
@@ -1240,6 +1260,7 @@ fn corruptions() -> Vec<Corrupt> {
         ),
         (
             carried::ASSESSMENT_PROPOSAL,
+            Reach::Take,
             Box::new(|c: &Carriers, s: &mut Store| {
                 let mut b = block("b-00004", "Wrong assessment.");
                 b.order = "Y".into();
@@ -1253,6 +1274,7 @@ fn corruptions() -> Vec<Corrupt> {
         ),
         (
             carried::ASSESSMENT_BASE,
+            Reach::Take,
             Box::new(|c: &Carriers, s: &mut Store| {
                 let mut b = block("b-00005", "Wrong base.");
                 b.order = "Z".into();
@@ -1274,7 +1296,195 @@ fn corruptions() -> Vec<Corrupt> {
                 retag(s, bad);
             }),
         ),
+        (
+            carried::DISPUTE_TARGET,
+            Reach::Take,
+            Box::new(|c: &Carriers, s: &mut Store| {
+                // two targets: the landing, so the closure attaches it, and its dispute
+                s.put(
+                    kinds::ANSWER,
+                    &answer(
+                        format!("dispute:{}", c.l3),
+                        AnswerAct::Dispute,
+                        vec![c.l3, c.dispute],
+                    ),
+                )
+                .unwrap();
+            }),
+        ),
+        (
+            carried::DISPUTE_TARGET,
+            Reach::Fsck,
+            Box::new(|c: &Carriers, s: &mut Store| {
+                // its one DISPUTE names another landing (l2) than its item (l3); the answer
+                // writer refuses it before a byte is written
+                let bad = answer(
+                    format!("dispute:{}", c.l3),
+                    AnswerAct::Dispute,
+                    vec![c.dispute],
+                );
+                let end = s.log_end();
+                let e = s.put_answer(&bad).unwrap_err();
+                assert!(e.to_string().contains(carried::DISPUTE_TARGET), "{e}");
+                assert_eq!(s.log_end(), end);
+                s.put(kinds::ANSWER, &bad).unwrap();
+            }),
+        ),
+        (
+            carried::PLAN_ANSWER,
+            Reach::Take,
+            Box::new(|c: &Carriers, s: &mut Store| {
+                // an answer-only plan of item h(1); the assessment's tension names item h(2)
+                let plan = rdy_model::plan::Plan {
+                    stable: None,
+                    prev: None,
+                    view: "side".into(),
+                    proposal: None,
+                    answers: vec![rdy_model::plan::PlanAnswer {
+                        item: h(1),
+                        act: PlanAct::Confirm,
+                        reason: Some("it holds".into()),
+                        subject: None,
+                        cause: h(3),
+                        by: writer(),
+                    }],
+                    heads: vec![],
+                    provenance: writer(),
+                    seal: None,
+                };
+                let plan = s.put_plan(&plan).unwrap();
+                let mut b = block("b-00006", "Wrong plan answer.");
+                b.order = "a".into();
+                s.commit_to_view("work", change(vec![Op::Create { block: b }]))
+                    .unwrap();
+                let v = s.propose("work", "wrong plan answer", writer()).unwrap();
+                let mut a = assessment(v, Some(c.l3), None, c.dismissal, vec![c.b.clone()]);
+                a.tensions[0].status = AssessmentTensionStatus::Open;
+                a.tensions[0].dismissal = None;
+                a.tensions[0].answer = Some(AssessmentPlanAnswerRef { plan, item: h(2) });
+                let ah = s.put(kinds::ASSESSMENT, &a).unwrap();
+                let bad = land_altered(s, v, &move |l| l.assessment = Some(ah));
+                retag(s, bad);
+            }),
+        ),
+        (
+            carried::DISMISS,
+            Reach::Take,
+            Box::new(|c: &Carriers, s: &mut Store| {
+                // a seal of a reaffirm item, and a Dismiss answer of that item
+                let item = SealedItemSpec::new(&c.b, PlanKind::Reaffirm, PlanOutcome::Reaffirmed);
+                let dismiss = rdy_model::plan::PlanAnswer {
+                    item: item.id(),
+                    act: PlanAct::Dismiss,
+                    reason: Some("not real".into()),
+                    subject: None,
+                    cause: h(3),
+                    by: writer(),
+                };
+                let bad = sealed_side(s, "b-00007", "b", item, vec![dismiss]);
+                retag(s, bad);
+            }),
+        ),
+        (
+            // the plan record rules judge an outcome its kind does not allow, a tension's too:
+            // the carrier adds no second rule (`invalid seal`)
+            "invalid seal",
+            Reach::Take,
+            Box::new(|c: &Carriers, s: &mut Store| {
+                let item = SealedItemSpec::new(&c.b, PlanKind::Tension, PlanOutcome::Deferred);
+                let bad = sealed_side(s, "b-00008", "c", item, vec![]);
+                retag(s, bad);
+            }),
+        ),
+        (
+            carried::CHECK_REF,
+            Reach::Fsck,
+            Box::new(|c: &Carriers, s: &mut Store| {
+                // the request's ref names another hash
+                s.set_refs(vec![(
+                    format!("{}{}", carried::CHECK_REF_PREFIX, c.request),
+                    c.pass.0.to_vec(),
+                )])
+                .unwrap();
+            }),
+        ),
     ]
+}
+
+/// A sealed item of `kind` and `outcome` on block `b`, caused by `D-00002`.
+struct SealedItemSpec(rdy_model::plan::SealedItem);
+
+impl SealedItemSpec {
+    fn new(b: &BlockId, kind: PlanKind, outcome: PlanOutcome) -> SealedItemSpec {
+        let cause = id("D-00002");
+        SealedItemSpec(rdy_model::plan::SealedItem {
+            id: rdy_model::plan::item_hash(&cause, b.as_str(), kind),
+            kind,
+            subject: b.to_string(),
+            cause,
+            edge: "reflects".into(),
+            outcome,
+            answer: None,
+        })
+    }
+
+    fn id(&self) -> Hash {
+        self.0.id
+    }
+}
+
+/// A landing on canon of a new block `block_id` (sibling order `order`) and its unbound seal of
+/// `item` with `answers`, in the landing's batch, as the landing composition writes a seal.
+/// Returns the landing.
+fn sealed_side(
+    s: &mut Store,
+    block_id: &str,
+    order: &str,
+    item: SealedItemSpec,
+    answers: Vec<rdy_model::plan::PlanAnswer>,
+) -> Hash {
+    let mut b = block(block_id, "A sealed side.");
+    b.order = order.into();
+    s.commit_to_view("side", change(vec![Op::Create { block: b }]))
+        .unwrap();
+    let p = s.propose("side", "side", writer()).unwrap();
+    s.set_held(true).unwrap();
+    let l = s.land(&p, approver()).unwrap();
+    let v = s.landing(&l).unwrap().proposal;
+    let plan = rdy_model::plan::Plan {
+        stable: None,
+        prev: None,
+        view: "side".into(),
+        proposal: Some(v),
+        answers,
+        heads: vec![],
+        provenance: approver(),
+        seal: Some(rdy_model::plan::PlanSeal {
+            landing: l,
+            version: v,
+            decisions: vec![item.0.cause.clone()],
+            items: vec![item.0],
+        }),
+    };
+    let frames = vec![
+        codec::item_new(kinds::PLAN, &plan),
+        (
+            kinds::REF_UPDATE,
+            postcard::to_allocvec(&rdy_store::kinds::RefUpdate {
+                name: rdy_store::plan::plan_ref("side"),
+                value: plan.id().0.to_vec(),
+                at: rdy_store::segment::Location {
+                    segment: 0,
+                    offset: 0,
+                },
+            })
+            .unwrap(),
+        ),
+    ];
+    s.write_guarded_for_tests(frames).unwrap();
+    s.seal(vec![]).unwrap();
+    s.set_held(false).unwrap();
+    l
 }
 
 impl Carriers {
@@ -1309,10 +1519,16 @@ fn retag(s: &mut Store, landing: Hash) {
 
 #[test]
 fn ok4_bad_carriers_fail_before_take_seal() {
-    for (reason, corrupt) in corruptions() {
+    for (reason, reach, corrupt) in corruptions() {
         let c = carriers();
         let mut s = c.open();
         corrupt(&c, &mut s);
+        if reach == Reach::Fsck {
+            drop(s);
+            let e = c.open().reader().check_objects().unwrap_err();
+            assert!(e.to_string().contains(reason), "{reason}: {e}");
+            continue;
+        }
         // the corruption is reached from the newest tag: v2 when one was made, else v1
         let v2 = s.reader().tags().unwrap().into_iter().find(|t| t.0 == "v2");
         let (tag_name, tag) = match &v2 {
@@ -1657,6 +1873,68 @@ fn ok4_features_activate_in_their_first_use_batch() {
     let loaded = Store::open(&to).unwrap();
     assert_eq!(log_manifest(&loaded), baseline_features());
     let _ = kept;
+    drop(loaded);
+    // a log whose records use a feature its manifest does not name: a raw batch past the
+    // store's writers holds a plan with a Dismiss answer (plan_tension)
+    let src = d.path().join("under-src");
+    drop(Store::create(&src).unwrap());
+    let mut plan = plan.clone();
+    plan.answers[0].act = PlanAct::Dismiss;
+    {
+        let (mut log, q) = rdy_store::segment::SegmentLog::open_marked(
+            &src.join("segments"),
+            64 * 1024 * 1024,
+            None,
+        )
+        .unwrap();
+        assert!(q.is_empty());
+        log.append_batch(&[codec::item_new(kinds::PLAN, &plan)])
+            .unwrap();
+        log.sync().unwrap();
+    }
+    let s = Store::open(&src).unwrap();
+    assert_eq!(log_manifest(&s), baseline_features());
+    let mut batches = vec![];
+    s.reader()
+        .for_each_batch(s.log_end(), |b| {
+            batches.push(b);
+            Ok(())
+        })
+        .unwrap();
+    drop(s);
+    let ingest = |name: &str| {
+        let mut i = Ingest::create(&d.path().join(name)).unwrap();
+        for (n, b) in batches.iter().enumerate() {
+            i.batch(n as u64 + 1, b).unwrap();
+        }
+        i
+    };
+    // a legacy load's final batch merges the features its records use into the baseline
+    let mut i = ingest("legacy-under");
+    assert!(i.upgrade(&format::DumpStore::Legacy(18)).unwrap());
+    i.finish().unwrap();
+    let loaded = Store::open(&d.path().join("legacy-under")).unwrap();
+    assert_eq!(
+        names(&log_manifest(&loaded)),
+        ["content_hash_v2", "object_encoding", "plan_tension"]
+    );
+    assert_eq!(
+        format::read_format_file(&d.path().join("legacy-under")).unwrap(),
+        Some(log_manifest(&loaded))
+    );
+    drop(loaded);
+    // a dump-4 load keeps its manifest only when the manifest names every feature its records
+    // use: one that under-reports is refused, and the load appends nothing
+    let mut i = ingest("dump4-under");
+    let end = i.end();
+    match i.upgrade(&format::DumpStore::Features(baseline_features())) {
+        Err(StoreError::Dump { what: m, .. }) => assert_eq!(
+            m,
+            "the dump's records use feature plan_tension, which its manifest does not name"
+        ),
+        other => panic!("an under-reported manifest was kept: {other:?}"),
+    }
+    assert_eq!(i.end(), end);
 }
 
 #[test]

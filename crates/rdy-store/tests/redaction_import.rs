@@ -1174,3 +1174,162 @@ fn ha11_complete_retry_fits_the_receiver_caps() {
         assert_eq!(segment_bytes(&b.holder), before);
     }
 }
+
+/// The raw kind of every dropped frame of `k` in the store at `h`.
+fn dropped_raw_kinds(h: &Store, k: ObjectKey) -> Vec<(Location, u8)> {
+    let mut out = vec![];
+    h.reader()
+        .for_each_record_from(ORIGIN, h.log_end(), |loc, f, _| {
+            if let StoredFrame::Dropped { kind, hash, .. } = f
+                && key(rdy_store::codec::logical_kind(kind), hash) == k
+            {
+                out.push((loc, kind));
+            }
+            Ok(())
+        })
+        .unwrap();
+    out
+}
+
+/// The dropped record a store source gives for `k`: its encoding.
+fn dropped_encoding_of(path: &Path, k: ObjectKey) -> u16 {
+    let s = Store::open(path).unwrap();
+    let r = s.reader();
+    let mut source = StoreSource {
+        reader: &r,
+        end: END_OF_LOG,
+    };
+    match source.record(k).unwrap() {
+        Some(rdy_store::sync_stream::StreamRecord::Dropped { encoding, .. }) => encoding,
+        other => panic!("{k}: {other:?}"),
+    }
+}
+
+/// A store source whose dropped changes claim encoding 0, as an older writer wrote them.
+struct UnmarkedDrops<'a>(StoreSource<'a>);
+
+impl ObjectSource for UnmarkedDrops<'_> {
+    fn record(
+        &mut self,
+        key: ObjectKey,
+    ) -> Result<Option<rdy_store::sync_stream::StreamRecord>, StreamError> {
+        Ok(match self.0.record(key)? {
+            Some(rdy_store::sync_stream::StreamRecord::Dropped {
+                key,
+                original_len,
+                apply,
+                residue,
+                ..
+            }) => Some(rdy_store::sync_stream::StreamRecord::Dropped {
+                key,
+                encoding: 0,
+                original_len,
+                apply,
+                residue,
+            }),
+            other => other,
+        })
+    }
+}
+
+/// ok4: a removed change of encoding 1 keeps its encoding on the sync path. The project's
+/// frame, the stream's dropped record and the holder's frame all say encoding 1 (raw kind
+/// 0x82), as the residue's source encoding does; a re-export from the holder says it again. A
+/// dropped record that says another encoding than its residue, and a holder frame whose header
+/// lost its marker, are refused.
+#[test]
+fn ok4_a_removed_new_change_keeps_its_marker_through_a_take() {
+    let b = base(0);
+    let marked = rdy_store::codec::raw_kind(kinds::CHANGE, 1);
+    assert_eq!(marked, 0x82);
+    let project = Store::open(&b.src).unwrap();
+    let ours = dropped_raw_kinds(&project, b.change_key());
+    assert_eq!(ours.len(), 1);
+    assert_eq!(ours[0].1, marked, "the project's dropped change is marked");
+    drop(project);
+    assert_eq!(dropped_encoding_of(&b.src, b.change_key()), 1);
+    // a new holder takes v2, whose closure holds the change as a dropped record
+    let fresh = b.dir.path().join("fresh");
+    let repo = Store::open(&b.src).unwrap().repo_id().unwrap().unwrap();
+    let mut h = Store::create_holder(&fresh, repo).unwrap();
+    b.take_v2(&mut h).unwrap();
+    let held = dropped_raw_kinds(&h, b.change_key());
+    assert_eq!(held.len(), 1);
+    assert_eq!(
+        held[0].1, marked,
+        "the holder's dropped change keeps the marker"
+    );
+    h.reader().check_holder().unwrap();
+    drop(h);
+    assert_eq!(dropped_encoding_of(&fresh, b.change_key()), 1);
+    // a stream whose dropped change says encoding 0 is refused before a byte is written
+    let file = b.dir.path().join("unmarked.rdysync");
+    {
+        let s = Store::open(&b.src).unwrap();
+        let r = s.reader();
+        let c = closure(&r, b.v2.0, &BTreeSet::new()).unwrap();
+        let header = StreamHeader::tag_history(
+            rdy_store::format::baseline_features(),
+            repo,
+            b.v2.0,
+            c.prerequisites,
+        );
+        let mut source = UnmarkedDrops(StoreSource {
+            reader: &r,
+            end: END_OF_LOG,
+        });
+        write_batch(
+            &mut source,
+            &header,
+            &c.records,
+            File::create(&file).unwrap(),
+        )
+        .unwrap();
+    }
+    let other = b.dir.path().join("other");
+    let mut h = Store::create_holder(&other, repo).unwrap();
+    let before = segment_bytes(&other);
+    let e = match take(&mut h, &[File::open(&file).unwrap()], "v2", b.v2.1) {
+        Err(TakeError::Stream(e)) => e,
+        got => panic!("an unmarked drop of a marked change was taken: {got:?}"),
+    };
+    assert!(e.message.contains("invalid removal proof"), "{e:?}");
+    assert_eq!(segment_bytes(&other), before);
+    drop(h);
+    // a holder frame whose header lost its marker fails the holder's own checks
+    let (loc, _) = held[0];
+    let seg = fresh
+        .join("segments")
+        .join(format!("seg-{:06}.log", loc.segment));
+    let mut bytes = std::fs::read(&seg).unwrap();
+    assert_eq!(bytes[loc.offset as usize + 4], marked);
+    bytes[loc.offset as usize + 4] = kinds::CHANGE;
+    std::fs::write(&seg, bytes).unwrap();
+    let refused = Store::open(&fresh).and_then(|h| h.reader().check_holder().map(|_| ()));
+    assert!(
+        refused.is_err(),
+        "a dropped change frame without its marker is accepted"
+    );
+}
+
+/// ok4: one take of two files of the same tag, one that holds an encoding-1 change present and
+/// one that holds its approved removal, takes the change as its drop.
+#[test]
+fn ok4_a_present_new_change_and_its_removal_in_one_take() {
+    let b = base(0);
+    // `base` wrote v1's upload before the removal: the change is present in it
+    let first = File::open(b.dir.path().join("v1-first.rdysync")).unwrap();
+    let after = b.file(b.v1.0, "v1-after");
+    let repo = Store::open(&b.src).unwrap().repo_id().unwrap().unwrap();
+    let fresh = b.dir.path().join("fresh");
+    let mut h = Store::create_holder(&fresh, repo).unwrap();
+    let mut files = vec![first];
+    files.extend(after);
+    let got = take(&mut h, &files, "v1", b.v1.1).unwrap();
+    assert_eq!(got.redacted_objects, 2);
+    let held = dropped_raw_kinds(&h, b.change_key());
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].1, rdy_store::codec::raw_kind(kinds::CHANGE, 1));
+    assert!(!holds_canary(&fresh));
+    h.reader().check_holder().unwrap();
+}

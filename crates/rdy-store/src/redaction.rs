@@ -835,6 +835,15 @@ pub(crate) fn source_encoding(r: &RedactionResidue) -> Option<u16> {
     }
 }
 
+/// The source encoding residue `r` records, as it is written (whether this registry permits
+/// it or not: [`source_encoding`] judges that).
+pub(crate) fn recorded_source_encoding(r: &RedactionResidue) -> u16 {
+    match r {
+        RedactionResidue::Block(b) => b.source_encoding,
+        RedactionResidue::Change(c) => c.source_encoding,
+    }
+}
+
 /// Whether raw kind `raw` of a removed frame is the raw kind its span of logical kind `kind` and
 /// its residue give: the residue's source encoding decides the version marker (no residue: a
 /// blob chunk, encoding 0).

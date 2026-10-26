@@ -294,8 +294,9 @@ struct Entry {
 pub(crate) enum Verify {
     /// A present record of a file.
     Present(At),
-    /// A dropped record of a file, with its descriptor.
-    Dropped(At, ObjectKey, u32, Hash, Option<Hash>),
+    /// A dropped record of a file, with its descriptor: its key, the removed frame's raw kind,
+    /// its original length, its apply and its residue.
+    Dropped(At, ObjectKey, u8, u32, Hash, Option<Hash>),
 }
 
 /// One frame the take writes, in canonical order.
@@ -303,9 +304,11 @@ pub(crate) enum Verify {
 pub(crate) enum Write {
     /// The original bytes of a present record.
     Present { key: ObjectKey, at: At },
-    /// The original header and zeros of an approved drop.
+    /// The original header and zeros of an approved drop: the removed frame's raw kind (its
+    /// residue's source encoding, `crate::codec`), never the logical kind of its key.
     Dropped {
         key: ObjectKey,
+        raw: u8,
         len: u32,
         verify: Verify,
     },
@@ -393,7 +396,7 @@ pub(crate) fn reread(files: &[File], at: &At, buf: &mut Vec<u8>) -> Result<(), S
 pub(crate) fn verify(files: &[File], v: &Verify, buf: &mut Vec<u8>) -> Result<(), StreamError> {
     match v {
         Verify::Present(at) => reread(files, at, buf),
-        Verify::Dropped(at, key, len, apply, residue) => {
+        Verify::Dropped(at, key, raw, len, apply, residue) => {
             reread(files, at, buf)?;
             match parse_encoded_dropped(buf) {
                 Ok(Frame::Dropped {
@@ -402,8 +405,8 @@ pub(crate) fn verify(files: &[File], v: &Verify, buf: &mut Vec<u8>) -> Result<()
                     len: l,
                     apply: a,
                     residue: r,
-                }) if (crate::codec::logical_kind(kind), hash, l, a, r)
-                    == (key.kind, key.hash, *len, *apply, *residue) =>
+                }) if (kind, hash, l, a, r) == (*raw, key.hash, *len, *apply, *residue)
+                    && crate::codec::logical_kind(kind) == key.kind =>
                 {
                     Ok(())
                 }
@@ -424,15 +427,15 @@ struct UploadSource<'a> {
     files: &'a [File],
     union: &'a BTreeMap<ObjectKey, Entry>,
     store: StoreSource<'a>,
-    masked: BTreeMap<ObjectKey, (Hash, RemovalObject)>,
+    masked: BTreeMap<ObjectKey, (Hash, RemovalObject, u16)>,
 }
 
 impl ObjectSource for UploadSource<'_> {
     fn record(&mut self, key: ObjectKey) -> Result<Option<StreamRecord>, StreamError> {
-        if let Some((apply, t)) = self.masked.get(&key) {
+        if let Some((apply, t, encoding)) = self.masked.get(&key) {
             return Ok(Some(StreamRecord::Dropped {
                 key,
-                encoding: 0,
+                encoding: *encoding,
                 original_len: t.len,
                 apply: *apply,
                 residue: t.residue,
@@ -454,7 +457,7 @@ impl ObjectSource for UploadSource<'_> {
             if let Some((_, d)) = e.dropped.first() {
                 return Ok(Some(StreamRecord::Dropped {
                     key,
-                    encoding: 0,
+                    encoding: d.encoding,
                     original_len: d.original_len,
                     apply: d.apply,
                     residue: d.residue,
@@ -676,6 +679,7 @@ fn index_files(
                         residue.as_ref(),
                     );
                     let d = Drop {
+                        encoding,
                         original_len,
                         apply,
                         residue,
@@ -851,10 +855,18 @@ pub(crate) fn prepare<E>(
         .values()
         .flat_map(|r| r.objects.keys().copied())
         .collect();
-    // every dropped record names a validated apply that approves its exact tuple
+    // every dropped record names a validated apply that approves its exact tuple, and keeps
+    // the encoding its residue records
     for (key, e) in &union {
         for (_, d) in &e.dropped {
             if !stream_source::drop_fits(removal_of(&d.apply), key, d) {
+                return Err(bad(Reason::InvalidRemovalProof, *key).into());
+            }
+            let res = match d.residue {
+                Some(r) => Some(residue(&mut source, r)?.0),
+                None => None,
+            };
+            if !stream_source::drop_encoding_agrees(d.encoding, res.as_ref()) {
                 return Err(bad(Reason::InvalidRemovalProof, *key).into());
             }
         }
@@ -889,32 +901,34 @@ pub(crate) fn prepare<E>(
         let covered = approved.contains_key(key) || e.present.is_none();
         if covered {
             let t = one_tuple(key, Some(e))?;
-            let verify = match (&e.present, e.dropped.first()) {
+            let (raw, verify) = match (&e.present, e.dropped.first()) {
                 (Some(at), _) => {
                     // a present record an approval covers: its bytes are the tuple's
                     let r = source.union_record(key)?.expect("a present record");
                     let StreamRecord::Present { payload, .. } = &r else {
                         unreachable!("a present record")
                     };
-                    let body = r
-                        .body()
-                        .expect("a present record")
-                        .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(*key)))?;
+                    // the frame's raw kind and whole payload: the residue derives from its body
+                    // and names its encoding (`residue_matches`)
                     let fits = payload.len() == t.len as usize
                         && match t.residue {
                             Some(res) => {
                                 let (res, encoding) = residue(&mut source, res)?;
-                                residue_matches(key.kind, body, &res, encoding)
+                                residue_matches(r.raw_kind(), payload, &res, encoding)
                             }
-                            None => true,
+                            None => r.raw_kind() == key.kind,
                         };
                     if !fits {
                         return Err(bad(Reason::InvalidRemovalProof, *key).into());
                     }
-                    Verify::Present(*at)
+                    (at.kind, Verify::Present(*at))
                 }
                 (None, Some((at, d))) => {
-                    Verify::Dropped(*at, *key, d.original_len, d.apply, d.residue)
+                    let raw = crate::codec::raw_kind(key.kind, d.encoding);
+                    (
+                        raw,
+                        Verify::Dropped(*at, *key, raw, d.original_len, d.apply, d.residue),
+                    )
                 }
                 (None, None) => unreachable!("a union key has a representation"),
             };
@@ -933,6 +947,7 @@ pub(crate) fn prepare<E>(
                 (
                     Write::Dropped {
                         key: *key,
+                        raw,
                         len: t.len,
                         verify,
                     },
@@ -1037,7 +1052,11 @@ pub(crate) fn prepare<E>(
     // 8. the caller's check, with removed objects as their drops
     for (k, by) in &approved {
         if let Some((apply, t)) = by.first() {
-            source.masked.insert(*k, (*apply, *t));
+            let encoding = match t.residue {
+                Some(r) => crate::redaction::recorded_source_encoding(&residue(&mut source, r)?.0),
+                None => 0,
+            };
+            source.masked.insert(*k, (*apply, *t, encoding));
         }
     }
     // the relay answer of every tag object of the union (O11, ruling task-13), each named by

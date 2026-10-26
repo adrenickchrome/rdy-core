@@ -11,11 +11,13 @@
 //!
 //! A dump of a scalar store format (dump formats 1 to 3) gets one more batch after its own:
 //! `upgrade` appends it, and it sets `meta/store_features` to the baseline features
-//! (`crate::format::baseline_features`; FW-UP1, in its smallest form). The historical
+//! (`crate::format::baseline_features`; FW-UP1, in its smallest form), merged with every feature
+//! the ingested records use (`crate::format::required_features`, their first use). The historical
 //! `meta/store_format` refs the dump holds stay as they are, and no frame is re-encoded
 //! (D-F0904). A log of a store format before 12 has no repo id: the upgrade batch gives it one
 //! (RULING F2). A dump of a feature store (dump format 4) gets no batch: its log holds its
-//! manifest, which the load keeps, unknown compatible features included.
+//! manifest, which the load keeps, unknown compatible features included. That manifest must name
+//! every feature the ingested records use; a dump that under-reports one is refused.
 //!
 //! A converter for another store format must remap every location inside a payload
 //! (`RefUpdate.at`, `InboxCursor.at`) if it changes the layout.
@@ -52,7 +54,7 @@ use crate::dump::{
 use crate::dump_chain::chain_text;
 use crate::dump_scan::{FrameAction, ScanPlan};
 use crate::error::StoreError;
-use crate::format::{self, DumpStore, StoreFeatures};
+use crate::format::{self, DumpStore, StoreFeature, StoreFeatures};
 use crate::fsutil::sync_dir;
 use crate::holder::{FirstBatch, RefRules, StoreMode};
 use crate::kinds::{self, RefUpdate};
@@ -113,6 +115,9 @@ pub struct Ingest {
     features_ref: Option<Vec<u8>>,
     /// The features `upgrade` gave the store, which `finish` mirrors in `FORMAT`.
     features: Option<StoreFeatures>,
+    /// The features the ingested records use (`format::required_features`, and
+    /// `object_encoding` for a dropped frame of a versioned encoding), each once.
+    used: Vec<StoreFeature>,
 }
 
 /// What an ingest wrote: the dump's batches and their data frames (an upgrade batch is not
@@ -142,6 +147,12 @@ fn names_carried(
                 && (s.kind, s.hash, s.len, s.residue) == identity
         })
     })
+}
+
+/// The refusal of a dump-4 load whose records use feature `name`, which its manifest does not
+/// name.
+pub fn feature_not_named(name: &str) -> String {
+    format!("the dump's records use feature {name}, which its manifest does not name")
 }
 
 fn dump_error(what: String) -> StoreError {
@@ -191,6 +202,7 @@ impl Ingest {
             upgraded: false,
             features_ref: None,
             features: None,
+            used: Vec::new(),
         })
     }
 
@@ -306,6 +318,7 @@ impl Ingest {
                 Frame::Present { kind, payload, .. } => {
                     let (_, hash) = self.log.append_unrolled(*kind, payload)?;
                     hashes.push(hash);
+                    self.uses(format::required_features(*kind, payload));
                     self.has_apply |= *kind == kinds::REDACTION_APPLY;
                     self.has_carried |= *kind == kinds::REDACTION_CARRIED;
                     if *kind == kinds::REF_UPDATE
@@ -341,6 +354,9 @@ impl Ingest {
                     // the header keeps the raw kind; the pending record names the logical kind,
                     // as the authorization's holes do (`crate::codec`)
                     let loc = self.log.append_dropped(*kind, hash, *len)?;
+                    if *kind & crate::codec::VERSIONED != 0 {
+                        self.uses(vec![format::registered(format::FEATURE_OBJECT_ENCODING)]);
+                    }
                     let logical = crate::codec::logical_kind(*kind);
                     self.pending.push(PendingDrop {
                         record: dropped_payload(logical, hash, *len, apply, residue.as_ref()),
@@ -365,6 +381,15 @@ impl Ingest {
         self.batches += 1;
         self.frames += hashes.len() as u64;
         Ok(())
+    }
+
+    /// Notes features `f` as used by an ingested record.
+    fn uses(&mut self, f: Vec<StoreFeature>) {
+        for f in f {
+            if !self.used.iter().any(|u| u.name == f.name) {
+                self.used.push(f);
+            }
+        }
     }
 
     /// Judges batch `b`'s refs by the holder rules (`crate::holder::RefRules`) before it is
@@ -543,10 +568,12 @@ impl Ingest {
     /// The logged upgrade step (FW-UP1, D-WWAK7, D-F0904), in its smallest form. `from` is the
     /// store of the dump's log. The cases (closed):
     /// - a feature store: nothing is appended, and the store keeps the manifest its log holds,
-    ///   which must be `from`'s (`dump metadata does not match its header` otherwise); a
-    ///   manifest this rdy may not write is refused;
+    ///   which must be `from`'s (`dump metadata does not match its header` otherwise) and must
+    ///   name every feature the ingested records use (`format::required_features`;
+    ///   [`feature_not_named`] otherwise); a manifest this rdy may not write is refused;
     /// - a scalar store format up to 18: one batch is appended after the dump's batches. It holds
-    ///   the `REF_UPDATE` that sets `meta/store_features` to the baseline features, salted with
+    ///   the `REF_UPDATE` that sets `meta/store_features` to the baseline features merged with
+    ///   every feature the ingested records use, salted with
     ///   the log end as every ref write is; then, when no ingested frame set `meta/repo_id`, the
     ///   `REF_UPDATE` of `meta/repo_id` with a new repo id, salted with the log end plus one
     ///   (RULING F2); then its marker. Every earlier byte is kept, the historical
@@ -578,6 +605,10 @@ impl Ingest {
                 {
                     return Err(dump_error(crate::dump_scan::METADATA_MISMATCH.into()));
                 }
+                // a valid dump's manifest names every feature its records use (D-1HDVA)
+                if let Some(f) = self.used.iter().find(|f| !m.has(&f.name)) {
+                    return Err(dump_error(feature_not_named(&f.name)));
+                }
                 self.features = Some(m.clone());
                 return Ok(false);
             }
@@ -589,7 +620,8 @@ impl Ingest {
                 format::LAST_SCALAR_STORE_FORMAT
             )));
         }
-        let features = format::baseline_features();
+        // the baseline, and every feature the ingested records use (their first use)
+        let features = format::baseline_features().merged(&self.used);
         let start = self.log.end();
         let mut refs = vec![(format::REF_STORE_FEATURES, features.to_json())];
         if !self.has_repo_id {

@@ -324,9 +324,18 @@ impl ObjectSource for StoreSource<'_> {
         };
         let err = |e| store_error(e, Some(key));
         if let Some(s) = self.reader.index().redaction_span_at(&loc).map_err(err)? {
+            // the removed frame's encoding, from the raw kind its header keeps
+            let raw = match self.reader.segments().header(loc) {
+                Ok(Some((_, raw, _))) => raw,
+                Ok(None) => return Err(err(StoreError::corrupt_at(loc))),
+                Err(e) => return Err(err(StoreError::Io(e))),
+            };
+            let encoding = crate::dump::dropped_encoding(raw).map_err(|_| {
+                StreamError::bad_record(0, 0, Reason::UnknownEncodingVersion).with_object(Some(key))
+            })?;
             return Ok(Some(StreamRecord::Dropped {
                 key,
-                encoding: 0,
+                encoding,
                 original_len: s.span.len,
                 apply: s.apply,
                 residue: s.span.residue,

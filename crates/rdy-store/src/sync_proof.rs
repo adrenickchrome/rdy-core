@@ -276,7 +276,15 @@ pub fn check(source: &mut dyn ObjectSource, apply: Hash) -> Result<PortableRemov
             }) if original_len != tuple.len || residue != tuple.residue => {
                 return Err(invalid(*k));
             }
-            Some(StreamRecord::Dropped { .. }) => {}
+            // a dropped record keeps the encoding its residue records as the removed frame's
+            Some(StreamRecord::Dropped {
+                encoding, residue, ..
+            }) => {
+                let res = residue.map(|r| &residues[&r].0);
+                if !crate::stream_source::drop_encoding_agrees(encoding, res) {
+                    return Err(invalid(*k));
+                }
+            }
         }
     }
     Ok(PortableRemoval {
