@@ -1593,7 +1593,7 @@ fn ok12_a_live_reader_is_refused_before_the_backup() {
     );
     // nothing was copied or appended: no backup beside the store, the store as it was
     assert!(
-        names(&dir.parent().unwrap().to_path_buf())
+        names(dir.parent().unwrap())
             .iter()
             .all(|n| !n.starts_with(".store-upgrade-")),
         "no backup"
