@@ -1251,6 +1251,46 @@ fn hpb14_each_request_uses_current_access_and_the_same_claim() {
     );
 }
 
+/// Runs the standard publish on its own thread and holds it at the first `during` request
+/// while `between` runs on this thread, then lets it go on, and returns the run's outcome.
+fn hold_at(
+    e: &mut Env,
+    wire: &Wire,
+    during: &'static str,
+    between: impl FnOnce(&mut Env),
+) -> Result<PublishResult, RdyError> {
+    let read = e.r.read();
+    let reached = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    let (r1, r2) = (Arc::clone(&reached), Arc::clone(&resume));
+    let mut held_once = false;
+    wire.on_step(move |step| {
+        if step == during && !held_once {
+            held_once = true;
+            r1.wait();
+            r2.wait();
+        }
+    });
+    let (project, user_file) = (e.project.clone(), e.user_file.clone());
+    let api = Api::default();
+    let clock = Clock::at(T0);
+    std::thread::scope(|s| {
+        let (api, clock) = (&api, &clock);
+        let h = s.spawn(move || {
+            PublishService::new(&project, &user_file, api, clock, wire).run(
+                read,
+                &agent(),
+                standard(),
+                &Renderer::default(),
+            )
+        });
+        reached.wait();
+        between(e);
+        resume.wait();
+        h.join().unwrap()
+    })
+}
+
 /// A redaction applied while the upload runs stops it before its next phase: no later request
 /// and no publish is sent, and no success is returned. A redaction that lands while the publish
 /// request is in flight returns no success either, though the hub answered with a valid
@@ -1260,39 +1300,9 @@ fn hpb14_each_request_uses_current_access_and_the_same_claim() {
 fn hpb14_redaction_between_phases_aborts_before_publish() {
     for during in ["objects", "file", "publish"] {
         let mut e = env();
-        let read = e.r.read();
-        let reached = Arc::new(Barrier::new(2));
-        let resume = Arc::new(Barrier::new(2));
         let wire = Wire::new();
-        let (r1, r2) = (Arc::clone(&reached), Arc::clone(&resume));
-        let mut held_once = false;
-        wire.on_step(move |step| {
-            if step == during && !held_once {
-                held_once = true;
-                r1.wait();
-                r2.wait();
-            }
-        });
-        let (project, user_file) = (e.project.clone(), e.user_file.clone());
-        let api = Api::default();
-        let clock = Clock::at(T0);
         let target = e.ids.b.to_string();
-        let outcome = std::thread::scope(|s| {
-            let wire = &wire;
-            let (api, clock) = (&api, &clock);
-            let h = s.spawn(move || {
-                PublishService::new(&project, &user_file, api, clock, wire).run(
-                    read,
-                    &agent(),
-                    standard(),
-                    &Renderer::default(),
-                )
-            });
-            reached.wait();
-            redact(&mut e.r, &[target]);
-            resume.wait();
-            h.join().unwrap()
-        });
+        let outcome = hold_at(&mut e, &wire, during, |e| redact(&mut e.r, &[target]));
         let err = outcome.expect_err(during);
         assert_eq!(err.code, E_REDACTED_STATE, "{during}: {err:?}");
         let steps = wire.steps();
@@ -1330,6 +1340,36 @@ fn hpb14_redaction_between_phases_aborts_before_publish() {
             _ => assert_eq!(steps.iter().filter(|s| **s == "file").count(), 1),
         }
     }
+}
+
+/// The race harness never outwaits a run that ends before the held request: it returns
+/// that outcome (a failed run here) at once, so a broken run fails the test and does not hold
+/// the test binary for hours (the M3a gate hangs).
+#[test]
+fn hpb14_the_race_harness_returns_when_the_run_ends_before_the_held_request() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut e = env();
+        let wire = Wire::new().failing("state", upstream_transport());
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            hold_at(&mut e, &wire, "objects", |_| {
+                panic!("the run never reached objects, so nothing runs between")
+            })
+        }));
+        let _ = tx.send(outcome.map(|o| o.map(|_| ()).map_err(|e| e.code)));
+    });
+    let outcome = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the race harness returns within 30 s when the run ends before the held request");
+    let refused = outcome.expect_err("hold_at reports a run that ended early as a panic");
+    let text = refused
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        text.contains("ended before it reached objects") && text.contains(E_UPSTREAM_TRANSPORT),
+        "the panic names the held request and the run's outcome: {text}"
+    );
 }
 
 /// A lost publish reply, or a reply that breaks the candidate contract, may mean the candidate
