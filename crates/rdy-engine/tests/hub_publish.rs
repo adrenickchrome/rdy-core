@@ -1262,7 +1262,7 @@ enum Race {
     /// The run is held at the request.
     Reached,
     /// The run returned, or panicked.
-    Ended(std::thread::Result<Result<PublishResult, RdyError>>),
+    Ended(Box<std::thread::Result<Result<PublishResult, RdyError>>>),
 }
 
 /// Runs the standard publish on its own thread and holds it at the first `during` request
@@ -1285,9 +1285,16 @@ fn hold_at(
             reached
                 .send(Race::Reached)
                 .expect("the race harness waits for the held request");
-            resume.recv_timeout(RACE_LIMIT).unwrap_or_else(|e| {
-                panic!("held at {during}: the test did not let the run go on within {RACE_LIMIT:?} ({e})")
-            });
+            match resume.recv_timeout(RACE_LIMIT) {
+                Ok(()) => {}
+                // the test failed while the run was held; it reports its own failure
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("held at {during}: the test stopped before it let the run go on")
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+                    "held at {during}: the test did not let the run go on within {RACE_LIMIT:?}"
+                ),
+            }
         }
     });
     let read = e.r.read();
@@ -1304,7 +1311,7 @@ fn hold_at(
                 &Renderer::default(),
             )
         }));
-        let _ = events.send(Race::Ended(outcome));
+        let _ = events.send(Race::Ended(Box::new(outcome)));
     });
     let next = |what: &str| {
         seen.recv_timeout(RACE_LIMIT).unwrap_or_else(|e| {
@@ -1313,19 +1320,21 @@ fn hold_at(
     };
     match next("held request") {
         Race::Reached => {}
-        Race::Ended(Ok(outcome)) => {
-            panic!("the run ended before it reached {during}: {outcome:?}")
-        }
-        Race::Ended(Err(p)) => panic!(
-            "the run ended before it reached {during}: it panicked: {}",
-            panic_text(&p)
-        ),
+        Race::Ended(outcome) => match *outcome {
+            Ok(outcome) => panic!("the run ended before it reached {during}: {outcome:?}"),
+            Err(p) => panic!(
+                "the run ended before it reached {during}: it panicked: {}",
+                panic_text(&*p)
+            ),
+        },
     }
     between(e);
     go.send(()).expect("the held run waits to go on");
     match next("end of the run") {
-        Race::Ended(Ok(outcome)) => outcome,
-        Race::Ended(Err(p)) => panic::resume_unwind(p),
+        Race::Ended(outcome) => match *outcome {
+            Ok(outcome) => outcome,
+            Err(p) => panic::resume_unwind(p),
+        },
         Race::Reached => unreachable!("the run is held once"),
     }
 }
@@ -1414,6 +1423,28 @@ fn hpb14_the_race_harness_returns_when_the_run_ends_before_the_held_request() {
         text.contains("ended before it reached objects") && text.contains(E_UPSTREAM_TRANSPORT),
         "the panic names the held request and the run's outcome: {text}"
     );
+}
+
+/// The race harness never outwaits a step between the held request and its release that fails:
+/// the held run is let go, and the failure (a panic of the redaction here) reaches the test at
+/// once. The M3a gates hung here when `redact` failed while the run was held.
+#[test]
+fn hpb14_the_race_harness_returns_when_the_step_between_fails() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut e = env();
+        let wire = Arc::new(Wire::new());
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            hold_at(&mut e, &wire, "objects", |_| panic!("the redaction failed"))
+        }));
+        let _ = tx.send(outcome.map(|o| o.map(|_| ()).map_err(|e| e.code)));
+    });
+    let outcome = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the race harness returns within 30 s when the step between fails");
+    let refused = outcome.expect_err("the failure of the step between reaches the test");
+    let text = panic_text(&*refused);
+    assert_eq!(text, "the redaction failed", "the step's own panic");
 }
 
 /// A lost publish reply, or a reply that breaks the candidate contract, may mean the candidate
