@@ -658,6 +658,93 @@ fn ok1_written_wire_format_has_a_complete_fixture_set() {
     );
 }
 
+/// ok13: the written format has a fixture. The dump format, the sync format, the feature
+/// manifest and the latest-encoding map this rdy writes match one complete registered set, and
+/// the native store fixture records the same manifest and map. This extends the current-set
+/// assertion of `ok1_` and `ha17_`; it does not postpone it. A new dump format, a newly
+/// registered feature or a new latest encoding fails here until the same task freezes a new
+/// complete set.
+#[test]
+fn ok13_the_written_format_has_a_fixture() {
+    let now = chain_fixture::current_formats();
+    assert_eq!(now["dump_format"], json!(DUMP_FORMAT));
+    assert_eq!(now["stream_format"], json!(STREAM_FORMAT));
+    // exactly one registered set matches the written formats, and it is the newest
+    let matching: Vec<&FeatureSet> = SETS
+        .iter()
+        .filter(|s| {
+            fixture(s.names.full_expect).exists()
+                && read_expect(s.names.full_expect)["formats"] == now
+        })
+        .collect();
+    assert_eq!(matching.len(), 1, "one complete set matches {now}");
+    let set = matching[0];
+    assert!(std::ptr::eq(set, SETS.last().unwrap()), "the newest set");
+    // twelve dump members and two sync members, each with a verified digest
+    assert_eq!(set.dump.len(), 12);
+    assert_eq!(set.sync.len(), 2);
+    assert_written_set_is_registered();
+    // the sync pair is current too: its expect file and its batch name the written formats
+    assert_eq!(read_sync_expect(set.names)["formats"], now);
+    // every expect file of the set names the written formats
+    for name in set.names.expects() {
+        assert_eq!(read_expect(name)["formats"], now, "{name}");
+    }
+    // the manifest: every registered feature, through first use, in the set's full fixtures
+    let all = json!({"features": all_features()});
+    for name in [set.names.full, set.names.holder] {
+        assert_eq!(
+            s18::file_facts(name, &fixture(name))["store_format"],
+            all,
+            "{name}"
+        );
+    }
+    // the latest-encoding map covers every kind this rdy writes
+    let map = now["encodings"].as_object().unwrap();
+    let kinds_now: Vec<String> = rdy_store::dump::current_frame_kinds()
+        .iter()
+        .map(|k| k.to_string())
+        .collect();
+    assert_eq!(
+        map.keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        kinds_now.into_iter().collect()
+    );
+    // the native store fixture records the same manifest and map
+    let native = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/store/feature-1/expect.json");
+    let native: Value = serde_json::from_str(&std::fs::read_to_string(native).unwrap()).unwrap();
+    assert_eq!(native["store"]["manifest"], all["features"]);
+    assert_eq!(native["store"]["encodings"], now["encodings"]);
+    // no complete set is lost: e0 stays registered with all its members, and the nine legacy
+    // pairs keep their dump and expect files
+    for s in &SETS {
+        for (name, _) in s.dump {
+            assert!(fixture(name).exists(), "{name}");
+        }
+        for (name, _) in s.sync {
+            assert!(sync_fixture(name).exists(), "{name}");
+        }
+    }
+    assert_eq!(SETS[0].names.full, FULL);
+    assert_eq!(SETS[0].dump.len(), 12);
+    assert_eq!(SETS[0].sync.len(), 2);
+    let pairs: std::collections::BTreeSet<(u32, u32)> = RELEASED.iter().map(|f| f.pair).collect();
+    assert_eq!(pairs.len(), 9, "the nine legacy pairs");
+    for f in &RELEASED {
+        assert!(
+            fixture(f.dump).exists() && fixture(f.expect).exists(),
+            "{}",
+            f.dump
+        );
+    }
+    for c in &RELEASED_CHAINS {
+        for name in c.files.iter().chain([&c.expect]) {
+            assert!(fixture(name).exists(), "{name}");
+        }
+    }
+}
+
 #[test]
 fn ok1_complete_feature_fixture_set_loads() {
     let store = StoreFeatures {
