@@ -21,9 +21,12 @@ pub enum ViewCmd {
     Fork { from: String, name: String },
     /// Include changes, and the changes they depend on, in a view.
     Include { view: String, changes: Vec<String> },
-    /// Replay selected changes into your open view.
+    // `about` keeps the closing period, which a doc comment would drop
+    #[command(about = "Replay selected changes into your open view.")]
     Replay {
+        /// The open view you own.
         view: String,
+        /// The changes to replay, from any view.
         #[arg(required = true, num_args = 1..)]
         changes: Vec<String>,
     },
