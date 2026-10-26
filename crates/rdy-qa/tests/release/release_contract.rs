@@ -375,6 +375,8 @@ fn item_end(b: &[u8], i: usize) -> usize {
     enum Mode {
         Item,
         Let,
+        /// `if`, `match`, `while`, `for`, `loop`: ends at its closing brace, past any `else` chain.
+        Control,
         Other,
     }
     let start = skip_trivia_and_attrs(b, i);
@@ -427,10 +429,25 @@ fn item_end(b: &[u8], i: usize) -> usize {
         })
         .map(String::as_str)
         .unwrap_or("");
+    // `name! { .. }`: a macro invoked with braces ends at its closing brace, like an item
+    let braced_macro = {
+        let mut k = start;
+        while k < b.len() && (b[k].is_ascii_alphanumeric() || b[k] == b'_' || b[k] == b':') {
+            k += 1;
+        }
+        let bang = k > start && b.get(k) == Some(&b'!');
+        let mut m = k + 1;
+        while bang && m < b.len() && b[m].is_ascii_whitespace() {
+            m += 1;
+        }
+        bang && b.get(m) == Some(&b'{')
+    };
     let mode = if first == "let" {
         Mode::Let
-    } else if item_words.contains(&first) {
+    } else if item_words.contains(&first) || braced_macro {
         Mode::Item
+    } else if ["if", "match", "while", "for", "loop"].contains(&first) {
+        Mode::Control
     } else {
         Mode::Other
     };
@@ -468,6 +485,18 @@ fn item_end(b: &[u8], i: usize) -> usize {
                         Mode::Item => true,
                         Mode::Let => false,
                         Mode::Other => starts_with_block || arrow,
+                        Mode::Control => {
+                            // the statement goes on after `else` and in a method call or `?`
+                            let mut m = k + 1;
+                            while m < b.len() && b[m].is_ascii_whitespace() {
+                                m += 1;
+                            }
+                            let else_follows = b[m..].starts_with(b"else")
+                                && !b
+                                    .get(m + 4)
+                                    .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_');
+                            !(else_follows || matches!(b.get(m), Some(b'.') | Some(b'?')))
+                        }
                     };
                     if block_ends {
                         return k + 1;
@@ -495,19 +524,25 @@ fn item_end(b: &[u8], i: usize) -> usize {
 /// newlines kept so a line number still points into the original. Everything else stays, and the
 /// scan never stops at the first attribute.
 fn product_text(src: &str) -> String {
-    let b = src.as_bytes();
-    let mut out = b.to_vec();
-    let blank = |out: &mut Vec<u8>, from: usize, to: usize| {
+    let mut out = src.as_bytes().to_vec();
+    for (from, to) in test_regions(src) {
         for byte in &mut out[from..to] {
             if *byte != b'\n' {
                 *byte = b' ';
             }
         }
-    };
-    if b.starts_with(b"#![cfg(test)]") {
-        blank(&mut out, 0, b.len());
-        return String::from_utf8(out).expect("blanking keeps the text valid");
     }
+    String::from_utf8(out).expect("blanking keeps the text valid")
+}
+
+/// The byte ranges `product_text` blanks: each `#[cfg(test)]` with the one item it marks (a
+/// whole file for `#![cfg(test)]`).
+fn test_regions(src: &str) -> Vec<(usize, usize)> {
+    let b = src.as_bytes();
+    if b.starts_with(b"#![cfg(test)]") {
+        return vec![(0, b.len())];
+    }
+    let mut regions = vec![];
     let mut i = 0;
     while i < b.len() {
         if let Some(n) = skip_literal(b, i) {
@@ -516,13 +551,13 @@ fn product_text(src: &str) -> String {
         }
         if b[i..].starts_with(b"#[cfg(test)]") {
             let end = item_end(b, i + "#[cfg(test)]".len()).max(i + "#[cfg(test)]".len());
-            blank(&mut out, i, end);
+            regions.push((i, end));
             i = end;
             continue;
         }
         i += 1;
     }
-    String::from_utf8(out).expect("blanking keeps the text valid")
+    regions
 }
 
 /// The line, without a trailing `//` comment that sits outside a string.
@@ -3177,6 +3212,26 @@ mod tests {
     fn t() { let _ = ReviewSubject::Check { request }; let c = '}'; }
 }
 const AFTER: &str = "x";
+fn stmt_site(x: bool) {
+    #[cfg(test)]
+    if x {
+        let _ = 1;
+    } else if !x {
+        let _ = 2;
+    }
+    let v = Verdict::Pass;
+    #[cfg(test)]
+    thread_local! {
+        static HOOK: u8 = const { 0 };
+    }
+    pub const E_X: &str = "E_X";
+    #[cfg(test)]
+    match x {
+        true => {}
+        false => {}
+    }
+    let w = Verdict::Fail;
+}
 "#;
 
 #[test]
@@ -3217,6 +3272,134 @@ fn ok14_source_scan_keeps_product_code_after_an_early_test_hook() {
 }
 
 #[test]
+fn ok14_source_scan_ends_a_test_statement_and_a_test_macro_at_their_own_closer() {
+    let product = product_text(PLANTED);
+    for kept in [
+        "let v = Verdict::Pass;",
+        "pub const E_X",
+        "let w = Verdict::Fail;",
+    ] {
+        assert!(
+            product.contains(kept),
+            "product code {kept:?} after a test statement or macro was dropped:\n{product}"
+        );
+    }
+    for gone in [
+        "let _ = 1;",
+        "let _ = 2;",
+        "thread_local",
+        "static HOOK",
+        "true => {}",
+    ] {
+        assert!(
+            !product.contains(gone),
+            "test code {gone:?} was kept:\n{product}"
+        );
+    }
+    let hits = carried_writes("planted.rs", &product, &["Verdict::Pass", "Verdict::Fail"]);
+    let text = hits.join("\n");
+    assert!(text.contains("let v = Verdict::Pass;"), "{text}");
+    assert!(text.contains("let w = Verdict::Fail;"), "{text}");
+}
+
+/// Every real source file under the crates: a blanked test item ends at its own closer. The
+/// attribute line sits at an indentation; every later line of the blanked run is indented deeper,
+/// except the last, which may start with a closer (`}`, `)`, `]`) at the same indentation. A run
+/// that swallowed the next statement or item fails here.
+#[test]
+fn ok14_source_scan_blanks_no_line_outside_the_item_a_test_attribute_marks() {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).expect("read the sources") {
+            let p = e.expect("entry").path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    let mut files = vec![];
+    for krate in std::fs::read_dir(workspace_root().join("crates")).expect("crates") {
+        let src = krate.expect("crate").path().join("src");
+        if src.is_dir() {
+            walk(&src, &mut files);
+        }
+    }
+    files.sort();
+    assert!(files.len() > 50, "the crates have sources");
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let mut offenders = vec![];
+    let mut checked = 0;
+    for f in files {
+        let text = std::fs::read_to_string(&f).expect("read a source file");
+        if text.starts_with("#![cfg(test)]") {
+            continue;
+        }
+        let lines: Vec<&str> = text.lines().collect();
+        // the lines that start inside a string, raw string or block comment: their indentation
+        // is text, not code
+        let mut inside = std::collections::BTreeSet::new();
+        {
+            let b = text.as_bytes();
+            let (mut i, mut line) = (0, 0usize);
+            while i < b.len() {
+                if let Some(n) = skip_literal(b, i) {
+                    inside.extend(
+                        (line + 1..=line + b[i..n].iter().filter(|c| **c == b'\n').count())
+                            .collect::<Vec<_>>(),
+                    );
+                    line += b[i..n].iter().filter(|c| **c == b'\n').count();
+                    i = n;
+                    continue;
+                }
+                if b[i] == b'\n' {
+                    line += 1;
+                }
+                i += 1;
+            }
+        }
+        for (from, to) in test_regions(&text) {
+            let first = text[..from].matches('\n').count();
+            let last = text[..to].matches('\n').count();
+            let attr_line = lines[first];
+            if !attr_line.trim_start().starts_with("#[cfg(test)]") {
+                continue;
+            }
+            checked += 1;
+            let base = indent(attr_line);
+            // the item's own first line follows the attribute (and any further attributes or
+            // comments); an attribute written before the item on one line has no such line
+            let mut body_from = first + 1;
+            if attr_line.trim() == "#[cfg(test)]" {
+                while lines.get(body_from).is_some_and(|l| {
+                    l.trim_start().starts_with("#[") || l.trim_start().starts_with("//")
+                }) {
+                    body_from += 1;
+                }
+                body_from += 1;
+            }
+            for (n, l) in lines.iter().enumerate().take(last + 1).skip(body_from) {
+                if l.trim().is_empty() || indent(l) > base || inside.contains(&n) {
+                    continue;
+                }
+                let closer = l.trim_start().starts_with(['}', ')', ']']);
+                if !(closer && indent(l) == base) {
+                    offenders.push(format!(
+                        "{}:{}: blanked, but outside the item marked at line {}: {}",
+                        f.display(),
+                        n + 1,
+                        first + 1,
+                        l.trim()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(checked > 100, "the sources hold test items ({checked})");
+    assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+}
+
+#[test]
 fn ok14_source_scan_finds_a_writer_after_a_hook_and_in_a_match_arm() {
     let product = product_text(PLANTED);
     let needles = [
@@ -3232,8 +3415,9 @@ fn ok14_source_scan_finds_a_writer_after_a_hook_and_in_a_match_arm() {
     assert!(carried_writes("planted.rs", cut, &needles).is_empty());
     let hits = carried_writes("planted.rs", &product, &needles);
     let text = hits.join("\n");
-    // the parser arm, both arms of the one-line match, the late construction and the builder
-    assert_eq!(hits.len(), 5, "{text}");
+    // the parser arm, both arms of the one-line match, the late construction, the builder and the
+    // two statements that follow a test `if` and a test macro
+    assert_eq!(hits.len(), 7, "{text}");
     for want in [
         "\"pass\" => Some",
         "\"b\" => Verdict::Fail",
