@@ -782,3 +782,61 @@ fn ok6_a_landing_rekey_respects_a_later_insert_past_a_deleted_sibling() {
         );
     }
 }
+
+/// Final ruling 2 (round 2): a canon side that differs from an includer's op base only by its
+/// order key is no conflict. v1 appends q; w includes v1's change and edits q; v0 lands, then v1
+/// lands with a re-key. w has no conflict and keeps its own version of q (its text, with v1's old
+/// tied key) until it lands; its landing then re-keys q, so canon never holds the tie.
+#[test]
+fn ok6_an_includer_of_a_rekeyed_block_has_no_conflict() {
+    for run in 0..ID_RUNS {
+        let (_d, mut r, sec, base) = seeded();
+        let p = append(&mut r, "v0", &sec, "from v0");
+        let w1 = put(
+            &mut r,
+            "v1",
+            json!([{"op": "create", "type": "claim", "id": "$n", "parent": sec, "body": "from v1"}]),
+        );
+        let q = w1.created["$n"].clone();
+        let tied = block(&r, &view("v1"), &q).order;
+        assert_eq!(block(&r, &view("v0"), &p).order, tied, "{run}: one key");
+        r.view_include(&agent("w"), "w", std::slice::from_ref(&w1.change))
+            .unwrap_or_else(|e| panic!("{run}: include: {e}"));
+        put(
+            &mut r,
+            "w",
+            json!([{"op": "update", "id": q, "body": "q, as w reads it"}]),
+        );
+        land(&mut r, "v0");
+        let l1 = land(&mut r, "v1");
+        let acc = accept_change(&r, &l1).expect("v1 re-keys q");
+        assert_eq!(acc.message, "give new order keys in v1", "{run}");
+        let canon_q = block(&r, &Scope::Canon, &q);
+        assert_ne!(canon_q.order, tied, "{run}: canon's q has a key of its own");
+        let conflicts = r.read().conflicts(&view("w")).unwrap();
+        assert!(
+            conflicts.is_empty(),
+            "{run}: no order-only conflict in w: {conflicts:?}"
+        );
+        let wq = block(&r, &view("w"), &q);
+        assert_eq!(wq.body, "q, as w reads it", "{run}: w's text");
+        assert_eq!(
+            wq.order, tied,
+            "{run}: w keeps its own version, with the old key"
+        );
+        let pw = propose(&mut r, "w");
+        approve(&mut r, &pw).unwrap_or_else(|e| panic!("{run}: land w: {e} {:?}", e.issues));
+        let k = kids(&r, &Scope::Canon, &sec);
+        assert_eq!(tied_pairs(&k), 0, "{run}: canon holds no tie: {k:?}");
+        assert_eq!(
+            ids_of(&k),
+            vec![base.clone(), p.clone(), q.clone()],
+            "{run}: q after p, where its landings put it"
+        );
+        assert_eq!(
+            block(&r, &Scope::Canon, &q).body,
+            "q, as w reads it",
+            "{run}"
+        );
+    }
+}

@@ -405,14 +405,14 @@ fn res1_merge_on_blocks_matches_the_full_merge_on_the_named_blocks() {
             is_replay: false,
         },
     ];
-    let full = merge(&base, &changes, &|_| None, &|_| None);
+    let full = merge(&base, &changes, &|_| None, &|_| None, &|_, _| false);
     assert_eq!(
         full.conflicts.len(),
         1,
         "two creates of c-00001 conflict; c-00002 is clean"
     );
     let only1: BTreeSet<BlockId> = [id("c-00001")].into();
-    let part = merge_on_blocks(&base, &changes, &|_| None, &|_| None, &only1);
+    let part = merge_on_blocks(&base, &changes, &|_| None, &|_| None, &|_, _| false, &only1);
     assert_eq!(part.conflicts, full.conflicts);
     assert_eq!(
         part.state.blocks.len(),
@@ -420,7 +420,7 @@ fn res1_merge_on_blocks_matches_the_full_merge_on_the_named_blocks() {
         "the conflicted block reads as its (absent) base; c-00002 is not in the result"
     );
     let only2: BTreeSet<BlockId> = [id("c-00002")].into();
-    let part2 = merge_on_blocks(&base, &changes, &|_| None, &|_| None, &only2);
+    let part2 = merge_on_blocks(&base, &changes, &|_| None, &|_| None, &|_, _| false, &only2);
     assert!(part2.conflicts.is_empty());
     assert_eq!(
         part2.state.blocks.keys().collect::<Vec<_>>(),

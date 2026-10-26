@@ -835,7 +835,16 @@ impl Store {
             }
         }
         let known = |v: &Hash| producers.get(v).copied().flatten();
-        Ok(merge_on_blocks(state, &input, &known, deleter, &isect).conflicts)
+        let order_only = self.order_only_pairs(state, rest.iter().flat_map(|c| &c.ops));
+        Ok(merge_on_blocks(
+            state,
+            &input,
+            &known,
+            deleter,
+            &|v, e| order_only.contains(&(*v, *e)),
+            &isect,
+        )
+        .conflicts)
     }
 }
 

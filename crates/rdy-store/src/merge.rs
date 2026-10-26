@@ -6,7 +6,9 @@
 //! sides). A conflict is data, not an error; a change that depends on every side of a conflict
 //! resolves it. A block the base lacks reads as deleted by the change `deleter` names; when no
 //! change is known for that delete, no change can depend on it, so its side is never resolved. A
-//! create of a deleted id that does not depend on the delete conflicts with it.
+//! create of a deleted id that does not depend on the delete conflicts with it. A base version
+//! that differs from an op's base only by its order key (a landing's re-key, a key re-derive) is
+//! no conflict for that op (D-TX3KH): the op applies, so order never costs a person a conflict.
 use rdy_model::{BlockId, Hash, Op, StateSnapshot};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -22,8 +24,9 @@ pub struct MergeChange<'a> {
     /// Whether the change replays another (`ChangeLinks::replayed_from` is set). A replay
     /// applies after the ordinary changes that do not wait for it. Its op on a clean block
     /// follows the ordinary rules: an equal base applies, an equal result agrees whatever the
-    /// bases and whoever wrote the version (the op is already satisfied), and anything else
-    /// conflicts. Its op on a conflicted block adds its side (none when a side already holds its
+    /// bases and whoever wrote the version (the op is already satisfied), a base version that
+    /// differs from its base only by its order key agrees as it does for any op, and anything
+    /// else conflicts. Its op on a conflicted block adds its side (none when a side already holds its
     /// version) and keeps every side there: its deps never resolve a conflict (only an ordinary
     /// write that covers every side does).
     pub is_replay: bool,
@@ -97,6 +100,8 @@ enum Slot {
     Clean {
         version: Option<Hash>,
         owner: Option<Hash>,
+        /// The version is the base snapshot's: no change of this merge wrote it yet.
+        from_base: bool,
     },
     Conflicted {
         base: Option<Hash>,
@@ -162,14 +167,16 @@ fn order(changes: &[MergeChange<'_>]) -> Vec<usize> {
 
 /// Merges `changes` onto `base`. `producer` names the change that produced a base version, and
 /// `deleter` the change that deleted a block the base lacks, so that a side from the base can be
-/// depended on.
+/// depended on. `order_only(v, e)` says whether base version `v` differs from an op's base `e`
+/// only by its order key (`StoreReader::order_only_pairs` reads them).
 pub fn merge(
     base: &StateSnapshot,
     changes: &[MergeChange<'_>],
     producer: &dyn Fn(&Hash) -> Option<Hash>,
     deleter: &dyn Fn(&BlockId) -> Option<Hash>,
+    order_only: &dyn Fn(&Hash, &Hash) -> bool,
 ) -> Merged {
-    merge_indexed(base, changes, producer, deleter).0
+    merge_indexed(base, changes, producer, deleter, order_only).0
 }
 
 /// `merge` restricted to `blocks`: the base holds only those blocks and each change only its ops
@@ -180,6 +187,7 @@ pub fn merge_on_blocks(
     changes: &[MergeChange<'_>],
     producer: &dyn Fn(&Hash) -> Option<Hash>,
     deleter: &dyn Fn(&BlockId) -> Option<Hash>,
+    order_only: &dyn Fn(&Hash, &Hash) -> bool,
     blocks: &BTreeSet<BlockId>,
 ) -> Merged {
     let base = StateSnapshot {
@@ -208,7 +216,7 @@ pub fn merge_on_blocks(
             is_replay: c.is_replay,
         })
         .collect();
-    merge(&base, &changes, producer, deleter)
+    merge(&base, &changes, producer, deleter, order_only)
 }
 
 /// `merge`, with each entry of `Merged::order` also given as its position in `changes` (its
@@ -219,6 +227,7 @@ pub fn merge_indexed(
     changes: &[MergeChange<'_>],
     producer: &dyn Fn(&Hash) -> Option<Hash>,
     deleter: &dyn Fn(&BlockId) -> Option<Hash>,
+    order_only: &dyn Fn(&Hash, &Hash) -> bool,
 ) -> (Merged, Vec<usize>) {
     let ordered = order(changes);
     let mut slots: BTreeMap<BlockId, Slot> = BTreeMap::new();
@@ -242,6 +251,7 @@ pub fn merge_indexed(
                         Some(v) => producer(&v),
                         None => deleter(block),
                     },
+                    from_base: true,
                 }
             });
             let expected = op.base();
@@ -254,16 +264,33 @@ pub fn merge_indexed(
                 version: new,
             };
             match slot {
-                Slot::Clean { version, owner }
-                    if *version == expected && (expected.is_some() || knows(owner)) =>
-                {
+                Slot::Clean {
+                    version,
+                    owner,
+                    from_base,
+                } if *version == expected && (expected.is_some() || knows(owner)) => {
                     *version = new;
                     *owner = Some(c.id);
+                    *from_base = false;
                 }
                 // ops that reach the block's version agree with it, whatever their bases and
                 // whoever the writers, replays included
                 Slot::Clean { version, .. } if *version == new => {}
-                Slot::Clean { version, owner } => {
+                // a canon side that differs from the op's base only by its order key (a
+                // landing's re-key, a key re-derive) is no conflict: the op applies with its own
+                // version, and its own landing re-keys a tie it would make (D-TX3KH)
+                Slot::Clean {
+                    version,
+                    owner,
+                    from_base,
+                } if *from_base
+                    && version.is_some_and(|v| expected.is_some_and(|e| order_only(&v, &e))) =>
+                {
+                    *version = new;
+                    *owner = Some(c.id);
+                    *from_base = false;
+                }
+                Slot::Clean { version, owner, .. } => {
                     let theirs = Side {
                         change: *owner,
                         version: *version,
@@ -284,6 +311,7 @@ pub fn merge_indexed(
                     *slot = Slot::Clean {
                         version: new,
                         owner: Some(c.id),
+                        from_base: false,
                     };
                 }
                 Slot::Conflicted { sides, .. } => {

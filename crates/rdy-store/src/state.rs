@@ -15,6 +15,18 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
+/// Whether `a` and `b` are two versions of one block that differ only by their order key (a
+/// redacted projection never does: its read identity is its own).
+fn differs_only_in_order(a: &Block, b: &Block) -> bool {
+    a.order != b.order
+        && a.read_identity.is_none()
+        && b.read_identity.is_none()
+        && Block {
+            order: b.order.clone(),
+            ..a.clone()
+        } == *b
+}
+
 /// The frames of one view commit (`Store::commit_parts`): the changes' frames, then the view ops
 /// and the head ref, and each change's id with the position of its `CHANGE` frame in `changes`.
 pub(crate) struct CommitParts {
@@ -135,6 +147,41 @@ impl StoreReader {
         })
     }
 
+    /// The pairs (`base`'s version, op base) of `ops` that differ only by their order key
+    /// (`merge::merge`'s `order_only`): for each op whose base is not `base`'s version of its
+    /// block, both versions are read. A version this cannot read makes no pair, so the merge
+    /// keeps its conflict.
+    pub fn order_only_pairs<'a>(
+        &self,
+        base: &StateSnapshot,
+        ops: impl IntoIterator<Item = &'a Op>,
+    ) -> BTreeSet<(Hash, Hash)> {
+        let mut seen: BTreeSet<(Hash, Hash)> = BTreeSet::new();
+        let mut out = BTreeSet::new();
+        for op in ops {
+            let (Some(e), Some(v)) = (op.base(), base.blocks.get(op.block_id())) else {
+                continue;
+            };
+            if !seen.insert((*v, e)) {
+                continue;
+            }
+            if self.order_only(v, &e) {
+                out.insert((*v, e));
+            }
+        }
+        out
+    }
+
+    /// Whether versions `v` and `e` of one block differ only by their order key. A version this
+    /// cannot read, or a redacted one, never does.
+    pub fn order_only(&self, v: &Hash, e: &Hash) -> bool {
+        v != e
+            && matches!(
+                (self.get_block(v), self.get_block(e)),
+                (Ok(a), Ok(b)) if differs_only_in_order(&a, &b)
+            )
+    }
+
     /// The state landing `landing` recorded; the empty state for None.
     pub fn state_of(&self, landing: Option<Hash>) -> Result<StateSnapshot, StoreError> {
         match landing {
@@ -207,11 +254,13 @@ impl StoreReader {
                 producers.insert(*v, self.producer(v)?);
             }
         }
+        let order_only = self.order_only_pairs(base, changes.iter().flat_map(|c| &c.ops));
         Ok(merge_indexed(
             base,
             &input,
             &|v| producers.get(v).copied().flatten(),
             &|b| deleters.get(b).copied(),
+            &|v, e| order_only.contains(&(*v, *e)),
         ))
     }
 

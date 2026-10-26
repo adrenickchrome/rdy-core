@@ -80,13 +80,13 @@ const CANON: &str = "canon producer";
 /// The base state (block b-00001 at `v0`, produced by CANON) and the merge of `cs` onto it.
 fn merged(base: &StateSnapshot, cs: &[Owned]) -> rdy_store::merge::Merged {
     let producer = |v: &Hash| base.blocks.values().any(|x| x == v).then(|| h(CANON));
-    merge(base, &input(cs), &producer, &|_| None)
+    merge(base, &input(cs), &producer, &|_| None, &|_, _| false)
 }
 
 /// The merge of `cs` onto `base`, each base version produced by the change labelled `by`.
 fn merged_by(base: &StateSnapshot, cs: &[Owned], by: &str) -> rdy_store::merge::Merged {
     let producer = |v: &Hash| base.blocks.values().any(|x| x == v).then(|| h(by));
-    merge(base, &input(cs), &producer, &|_| None)
+    merge(base, &input(cs), &producer, &|_| None, &|_, _| false)
 }
 
 fn conflict(block_: &BlockId, base: Option<Hash>, mut sides: Vec<Side>) -> Conflict {

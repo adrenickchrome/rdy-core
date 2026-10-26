@@ -263,11 +263,13 @@ fn carried_conflicts(
             producers.insert(*v, p);
         }
     }
+    let order_only = reader.order_only_pairs(&state, changes.iter().flat_map(|(_, ch)| &ch.ops));
     Ok(merge_on_blocks(
         &state,
         &input,
         &|v| producers.get(v).copied().flatten(),
         &|b| deleters.get(b).copied(),
+        &|v, e| order_only.contains(&(*v, *e)),
         &touched,
     )
     .conflicts)

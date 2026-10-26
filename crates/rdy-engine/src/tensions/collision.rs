@@ -13,7 +13,8 @@
 //! block) on the producer of canon's version or, when canon has no version of the block, on
 //! the change that deleted it (as of canon's head). A canon version with no known producer is
 //! settled by a chain that depends on another in-flight write of the block; a delete with no
-//! known deleter is never undone. A chain that is not against canon edits, for the merge, from
+//! known deleter is never undone. A canon version that differs from the root base only by its
+//! order key is built on, as the merge reads it (D-TX3KH). A chain that is not against canon edits, for the merge, from
 //! canon's version: that is its root, so a resolution pairs with a fresh edit from canon.
 //!
 //! (a) Every pair of live writes on one block from distinct changes with equal roots and
@@ -184,7 +185,13 @@ fn chain(cx: &DetectCx<'_>, all: &[Arc<Write>], w: &Write) -> Chain {
 /// on canon's side. A chain that is not against canon edits, for the merge, from canon's
 /// version, which becomes its root: a resolution pairs with a fresh edit from that version.
 fn judge(cx: &DetectCx<'_>, ch: &mut Chain, all: &[Arc<Write>], cv: Option<Hash>, owner: &Owner) {
-    if ch.root == cv || ch.first == cv {
+    // canon's version differs from the root base only by its order key (a landing's re-key):
+    // the merge applies the first write, so the chain is built on canon's version (D-TX3KH)
+    let order_only = || match (cv, ch.root) {
+        (Some(c), Some(r)) => cx.st.reader().order_only(&c, &r),
+        _ => false,
+    };
+    if ch.root == cv || ch.first == cv || order_only() {
         ch.root = cv;
         return;
     }

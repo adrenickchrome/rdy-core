@@ -814,11 +814,13 @@ pub(crate) fn blocking_conflicts(
             producers.insert(*v, reader.producer(v)?);
         }
     }
+    let order_only = reader.order_only_pairs(&state, cs.iter().flat_map(|c| &c.ops));
     Ok(merge_on_blocks(
         &state,
         &input,
         &|v| producers.get(v).copied().flatten(),
         &|b| deleters.get(b).copied(),
+        &|v, e| order_only.contains(&(*v, *e)),
         &touched,
     )
     .conflicts)

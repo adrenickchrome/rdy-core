@@ -379,11 +379,15 @@ impl ReadState {
                 producers.insert(*v, self.reader().producer(v)?);
             }
         }
+        let order_only = self
+            .reader()
+            .order_only_pairs(&bases[&entry.base], changes.iter().flat_map(|c| &c.ops));
         let n = merge_on_blocks(
             &bases[&entry.base],
             &input,
             &|v| producers.get(v).copied().flatten(),
             &|b| deleters.get(b).copied(),
+            &|v, e| order_only.contains(&(*v, *e)),
             blocks,
         )
         .conflicts
