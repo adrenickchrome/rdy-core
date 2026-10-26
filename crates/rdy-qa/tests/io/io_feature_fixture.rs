@@ -711,13 +711,18 @@ fn ok13_the_written_format_has_a_fixture() {
             .collect::<std::collections::BTreeSet<_>>(),
         kinds_now.into_iter().collect()
     );
-    // the native store fixture records the same manifest and map. Only this guard compares them
-    // with the current code: a change here forces a new complete set, and the store reader test
-    // never does, so an immutable fixture that still opens is not failed by a later registry
+    // the native store fixture of the format this rdy writes records the same manifest and map
+    // while that format is unpublished. A native fixture is owed for each published store format
+    // (D-WWAK7), not for each change: once feature-1 is published it is frozen, and only the next
+    // published format owes the next one. Only this guard compares it with the current code; the
+    // store reader test never does, so an immutable fixture that still opens is not failed by a
+    // later registry
     let native = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/store/feature-1/expect.json");
     let native: Value = serde_json::from_str(&std::fs::read_to_string(native).unwrap()).unwrap();
-    assert_eq!(native["store"]["manifest"], all["features"]);
-    assert_eq!(native["store"]["encodings"], now["encodings"]);
+    if native["published"] == json!(false) {
+        assert_eq!(native["store"]["manifest"], all["features"]);
+        assert_eq!(native["store"]["encodings"], now["encodings"]);
+    }
     // no complete set is lost: e0 stays registered with all its members, and the nine legacy
     // pairs keep their dump and expect files
     for s in &SETS {
