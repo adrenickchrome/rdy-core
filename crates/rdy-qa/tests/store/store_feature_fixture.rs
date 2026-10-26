@@ -20,7 +20,7 @@ use rdy_engine::{Rdy, Scope, read_only_feature_for_tests};
 use rdy_model::Hash;
 use rdy_qa::chain_fixture;
 use rdy_qa::every_kind;
-use rdy_store::format::{StoreAccess, registered_features};
+use rdy_store::format::StoreAccess;
 use rdy_store::kinds;
 use rdy_store::redaction::StoredFrame;
 use rdy_store::segment::Location;
@@ -35,6 +35,11 @@ const INVENTORY_BLAKE3: &str = "6e1c8d9cd17db7a22befd61f3a4004642529f72cddb39459
 
 /// The number of segment files of the fixture, set when it was written.
 const SEGMENT_COUNT: usize = 61;
+
+/// The members of the expect file's `store` object that record the code at write time and not a
+/// fact an open reads from the store. The fixture is immutable, so the reader must not compare
+/// them with the current code: a new latest encoding would fail a store that still opens.
+const CODE_RECORDED: [&str; 1] = ["encodings"];
 
 fn fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/store/feature-1")
@@ -157,8 +162,10 @@ fn origin() -> Location {
 }
 
 /// What an open of the store must read, as the expect file records it: the manifest, the
-/// latest-encoding map, the frame and batch counts, the object keys, the refs, the tags, the
-/// landings, the raw encodings and the signatures.
+/// frame and batch counts, the object keys, the refs, the tags, the landings, the raw encodings
+/// and the signatures. It also writes `encodings`, the latest-encoding map of the code that wrote
+/// the fixture. That member is a record of the writer, not a fact of the store: the reader never
+/// compares it (`CODE_RECORDED`), and the io written-format guard holds it.
 fn store_facts(r: &Rdy) -> Value {
     let end = r.store().log_end();
     let (mut frames, mut batches) = (0u64, 0u64);
@@ -297,6 +304,9 @@ fn open_checked_copy() {
     let got = store_facts(&r);
     assert_eq!(got["fsck"], want["store"]["fsck"], "fsck report");
     for member in want["store"].as_object().unwrap().keys() {
+        if CODE_RECORDED.contains(&member.as_str()) {
+            continue;
+        }
         assert_eq!(got[member], want["store"][member], "{member}");
     }
     // the carriers read back: canon materializes and the invariants hold
@@ -343,13 +353,25 @@ fn open_read_only_copy() {
 
 #[test]
 fn ok13_native_feature_store_rebuilds_and_checks() {
+    // the opened store reports the recorded manifest (compared member by member inside)
     open_checked_copy();
-    // the recorded manifest holds every registered feature, each through first use
+    // the recorded manifest is grammar 1 with the seven features registered when it was written,
+    // each through first use. These are facts of the frozen fixture, not of the current code: a
+    // later feature changes the code's registry and leaves this store as it is.
     let want = read_expect();
-    assert_eq!(
-        want["store"]["manifest"],
-        json!({"manifest_version": 1, "features": registered_features()})
-    );
+    let manifest = &want["store"]["manifest"];
+    assert_eq!(manifest["manifest_version"], 1);
+    let features = manifest["features"].as_array().unwrap();
+    assert_eq!(features.len(), 7, "{manifest}");
+    let names: Vec<&str> = features
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    assert_eq!(names, sorted, "sorted by name");
+    sorted.dedup();
+    assert_eq!(sorted.len(), 7, "no feature twice");
 }
 
 #[test]

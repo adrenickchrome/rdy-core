@@ -711,7 +711,9 @@ fn ok13_the_written_format_has_a_fixture() {
             .collect::<std::collections::BTreeSet<_>>(),
         kinds_now.into_iter().collect()
     );
-    // the native store fixture records the same manifest and map
+    // the native store fixture records the same manifest and map. Only this guard compares them
+    // with the current code: a change here forces a new complete set, and the store reader test
+    // never does, so an immutable fixture that still opens is not failed by a later registry
     let native = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/store/feature-1/expect.json");
     let native: Value = serde_json::from_str(&std::fs::read_to_string(native).unwrap()).unwrap();
     assert_eq!(native["store"]["manifest"], all["features"]);
