@@ -165,3 +165,41 @@ fn ok9_read_only_fsck_and_reads_run_through_the_ops() {
     shared.shutdown().unwrap();
     assert_eq!(tree(&root), before, "daemon: no project byte changed");
 }
+
+/// `fsck {clean_quarantine: true}` by the human on a read-only project refuses with
+/// E_STORE_READ_ONLY before the check runs, through a direct engine and through the daemon's
+/// writer, and removes no quarantine file: the cleanup changes the source store.
+#[test]
+fn ok9_read_only_fsck_clean_quarantine_refuses_and_changes_no_byte() {
+    let (_base, root, _id) = read_only_project();
+    let store = root.join(".rdy/store");
+    std::fs::write(store.join("index.redb.damaged-1"), b"a damaged index").unwrap();
+    std::fs::write(store.join("segments/0000.seg.torn-1"), b"a torn tail").unwrap();
+    let before = tree(&root);
+    let s = session(Role::Writer);
+    let clean = json!({"clean_quarantine": true});
+    let refused = |c: &OpContext<'_>, what: &str| {
+        let e = dispatch(c, "fsck", clean.clone()).unwrap_err();
+        assert_eq!(e.code, rdy_engine::E_STORE_READ_ONLY, "{what}: {e:?}");
+    };
+    // a direct engine: the CLI's --no-daemon
+    let local = Local::open(&root).unwrap();
+    assert_eq!(
+        local.inspect(|r| Ok(r.store().access())).unwrap(),
+        StoreAccess::ReadOnly
+    );
+    let c = cx(&local, &s, &root);
+    refused(&c, "direct");
+    fsck_passes(&c, "direct");
+    local.close().unwrap();
+    assert_eq!(tree(&root), before, "direct: no project byte changed");
+    // the daemon's writer
+    let shared = Shared::new(Rdy::open(&root).unwrap());
+    let e = shared.engine();
+    let c = cx(&*e, &s, &root);
+    refused(&c, "daemon");
+    fsck_passes(&c, "daemon");
+    drop(e);
+    shared.shutdown().unwrap();
+    assert_eq!(tree(&root), before, "daemon: no project byte changed");
+}

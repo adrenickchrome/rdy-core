@@ -1121,6 +1121,48 @@ mod tests {
         drop(other);
     }
 
+    /// On a writable store, the recovery after a panic leaves no batch open, as it did before
+    /// read-only stores: `Local::write` does not catch the panic, so its own seal never ran, and
+    /// the republish's full publish (`Rdy::invalidate`) seals the batch the write left open.
+    /// Pins existing behaviour (task 9 fix round 2).
+    #[tokio::test(flavor = "current_thread")]
+    async fn ok9_a_panicked_local_write_has_its_open_batch_sealed_by_the_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let local = Arc::new(Local::new(rdy));
+        let server = RdyServer::new(
+            Arc::clone(&local) as Arc<dyn Engine>,
+            None,
+            NotifyHub::new(),
+        );
+        let e = server
+            .blocking("a_write", false, |st| {
+                st.engine.write(Box::new(|r| {
+                    r.store_mut().put_blob(b"a partial write").unwrap();
+                    assert!(
+                        r.store().open_batch().is_some(),
+                        "the append opened a batch"
+                    );
+                    panic!("boom")
+                }))
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, E_INTERNAL, "{e:?}");
+        assert!(
+            e.message.contains("boom") && !e.message.contains("not republished"),
+            "{e:?}"
+        );
+        assert!(
+            local
+                .inspect(|r| Ok(r.store().open_batch().is_none()))
+                .unwrap(),
+            "the recovery sealed the panicked write's batch"
+        );
+        drop(server);
+        Arc::try_unwrap(local).ok().unwrap().close().unwrap();
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn ib10_a_panic_in_a_blocking_body_republishes_or_says_it_did_not() {
         let notes = rdy_engine::capture_notices_for_tests(&["after a panic in a_read "]);
