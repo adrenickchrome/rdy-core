@@ -81,6 +81,17 @@ pub trait Engine: Send + Sync {
             "drop --no-daemon, or run rdy render --out <path>",
         ))
     }
+    /// The connected project's store upgrade facts (`rdy_upgrade`, D-WWAK7, D-1HDVA): its
+    /// features, no steps (a normally opened store is already upgraded) and the last
+    /// `meta/upgrade` receipt, read from one captured state ([`crate::maintenance::connected`]).
+    /// An apply to a read-only store is `E_STORE_READ_ONLY`. It never opens, locks or stops the
+    /// store or a process, and never selects another project.
+    fn upgrade(
+        &self,
+        req: crate::maintenance::UpgradeRequest,
+    ) -> Result<crate::maintenance::UpgradeReport, RdyError> {
+        crate::maintenance::connected(&self.read(), req.dry_run)
+    }
     /// Publishes a tag to a publish remote's hub site as a candidate (an output seam like
     /// [`Engine::render`]): the daemon runs the coordinator off its writer. An engine with no
     /// daemon refuses.

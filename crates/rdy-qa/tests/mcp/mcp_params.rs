@@ -80,6 +80,17 @@ fn mparm1_every_tool_answers_a_wrong_typed_parameter_with_e_bad_input() {
         );
     }
     assert_eq!(covered.len() + NO_PARAMS.len(), tools.len(), "{covered:?}");
+    // ok11: rdy_upgrade's one parameter, a boolean, given a string
+    assert!(covered.iter().any(|n| n == "rdy_upgrade"), "{covered:?}");
+    let e = tool_error(c.call("rdy_upgrade", json!({"dry_run": "x"})));
+    assert_eq!(e["code"], "E_BAD_INPUT", "{e}");
+    assert!(
+        e["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("rdy_upgrade: parameter \"dry_run\" must be "),
+        "{e}"
+    );
     c.alive();
 }
 
@@ -165,13 +176,25 @@ fn hd7_every_tool_publishes_a_closed_schema() {
     let (dir, r) = project();
     drop(r);
     let mut c = McpClient::start(dir.path());
-    for t in c.tools() {
+    let tools = c.tools();
+    for t in &tools {
         assert_eq!(
             t["inputSchema"]["additionalProperties"], false,
             "{}",
             t["name"]
         );
     }
+    // ok11: rdy_upgrade publishes dry_run and nothing else
+    let upgrade = tools
+        .iter()
+        .find(|t| t["name"] == "rdy_upgrade")
+        .expect("rdy_upgrade is listed");
+    let keys: Vec<&String> = upgrade["inputSchema"]["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .collect();
+    assert_eq!(keys, ["dry_run"]);
 }
 
 #[test]
@@ -206,4 +229,7 @@ fn hd7_every_tool_accepts_its_documented_parameters() {
             }
         }
     }
+    // ok11: rdy_upgrade's documented input, given in full
+    let r = c.call("rdy_upgrade", json!({"dry_run": true}));
+    assert!(r.code().is_none(), "{r:?}");
 }

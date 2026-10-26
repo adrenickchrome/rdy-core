@@ -376,6 +376,16 @@ impl Pending {
         deadline: Instant,
         progress: &mut dyn FnMut(&str),
     ) -> Result<Client, ErrorReply> {
+        self.wait_for(deadline, progress).await
+    }
+
+    /// `wait`, generic over the callback so a `Send` one keeps the future `Send` (the stop the
+    /// upgrade sends from `connect_or_start` waits so).
+    async fn wait_for<P: FnMut(&str) + ?Sized>(
+        self,
+        deadline: Instant,
+        progress: &mut P,
+    ) -> Result<Client, ErrorReply> {
         let run = self.run.clone();
         self.wait_until(deadline, progress)
             .await
@@ -592,7 +602,10 @@ pub async fn request_stop(
     let client = match attempt(run, found.stream, found.reply) {
         Attempt::NoDaemon(_) => return Ok(None),
         Attempt::Ready(c) => Some(c),
-        Attempt::Starting(p) => Some(p.wait(Instant::now() + start_timeout, &mut |_| {}).await?),
+        Attempt::Starting(p) => Some(
+            p.wait_for(Instant::now() + start_timeout, &mut |_: &str| {})
+                .await?,
+        ),
         // a daemon of another version: it is exiting already
         Attempt::Exiting => None,
         Attempt::Refused(e) => return Err(e),
@@ -879,6 +892,14 @@ impl Start<'_> {
                 Attempt::Starting(p) => {
                     return finish(p, run, deadline, start_timeout, progress, None).await;
                 }
+                // a daemon of another version serves a store this rdy upgrades first: it is
+                // stopped, with `request_stop`'s identity checks, and this rdy's daemon starts
+                // once the upgrade is complete (D-WWAK7)
+                Attempt::Refused(e)
+                    if e.code == E_DAEMON_VERSION && crate::maintenance::needs_upgrade(run) =>
+                {
+                    crate::maintenance::stop_daemon(&run.root(), run, start_timeout).await?;
+                }
                 Attempt::Refused(e) => return Err(e),
                 Attempt::Exiting => saw_exiting = true,
                 Attempt::NoDaemon(_) => {}
@@ -965,6 +986,10 @@ impl Start<'_> {
                 tokio::time::sleep(HELD_POLL).await;
             }
         }
+
+        // 3b. a store that needs an upgrade, or the completion of a sealed one, is upgraded
+        // before any daemon serves it: the full fsck, then `FORMAT`, then the spawn (D-WWAK7)
+        crate::maintenance::before_start(run, deadline).await?;
 
         // 4. spawn
         let log_from = log_len(run);

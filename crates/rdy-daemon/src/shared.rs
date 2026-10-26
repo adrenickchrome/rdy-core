@@ -289,6 +289,16 @@ impl Engine for DaemonEngine {
         )
     }
 
+    /// `rdy_upgrade`: the connected project's facts from the published state, through the same
+    /// captured-state helper as the engine's default. It never calls the stop coordinator
+    /// (`crate::maintenance`): the daemon answering here is never stopped by its own result.
+    fn upgrade(
+        &self,
+        req: rdy_engine::maintenance::UpgradeRequest,
+    ) -> Result<rdy_engine::maintenance::UpgradeReport, RdyError> {
+        rdy_engine::maintenance::connected(&self.read(), req.dry_run)
+    }
+
     /// `rdy_publish`: the publish helper's candidate upload, from one read state, off the
     /// writer: no write runs and no lock is held while it sends.
     fn publish(&self, req: PublishRequest, session: &Session) -> Result<Value, RdyError> {

@@ -37,6 +37,7 @@ mod site_cmd;
 mod stream_cmd;
 mod tension_cmd;
 mod trace_text;
+mod upgrade_cmd;
 mod view_cmd;
 mod wc;
 
@@ -171,6 +172,9 @@ enum Cmd {
     Clone(dump_cmd::CloneArgs),
     Reindex,
     Fsck(project_cmd::FsckArgs),
+    // the about is given in full: a doc comment would lose its closing period
+    #[command(about = "Inspect or upgrade this project's store.")]
+    Upgrade(upgrade_cmd::UpgradeArgs),
     /// Run the MCP server over stdio.
     Mcp,
     /// Lint a doc file, a _folder.yaml or a directory without touching the store. Inside a
@@ -277,7 +281,9 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Clone(a) => dump_cmd::clone(env, a, cli.project),
         Cmd::Reindex => project_cmd::reindex(env),
         Cmd::Fsck(a) => project_cmd::fsck(env, a),
-        Cmd::Check(_) | Cmd::Serve(_) | Cmd::Auth { .. } => unreachable!("handled in main"),
+        Cmd::Check(_) | Cmd::Serve(_) | Cmd::Auth { .. } | Cmd::Upgrade(_) => {
+            unreachable!("handled in main")
+        }
     }
 }
 
@@ -335,6 +341,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // ok11: store maintenance runs before any ordinary project connection: no project lookup,
+    // working copy, config warning or daemon start comes first (D-WWAK7)
+    if let Cmd::Upgrade(a) = &cli.cmd {
+        return upgrade_cmd::upgrade(a, cli.project.as_deref(), &cwd, as_json);
+    }
     let project = cli.project.clone().unwrap_or_else(|| find_project(&cwd));
     let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,

@@ -57,6 +57,7 @@ pub mod lexicon;
 mod lint;
 pub mod load;
 pub mod load_chain;
+pub mod maintenance;
 mod materialize;
 pub mod mention_review;
 mod pack_load;
