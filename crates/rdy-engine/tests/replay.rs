@@ -676,7 +676,8 @@ fn ok7_replay_missing_parent_is_atomic() {
     );
     assert_eq!(log_state(r), before);
     // with the parent in the target, the same replay goes through
-    r.view_include(&human(), "t", &[s0.change.clone()]).unwrap();
+    r.view_include(&human(), "t", std::slice::from_ref(&s0.change))
+        .unwrap();
     let res = replay(r, &human(), "t", &[s1, s2]);
     assert_eq!(res.replayed.len(), 2);
 }
@@ -1131,15 +1132,11 @@ fn ok7_replay_limits_precede_allocation() {
     // the order is Kahn's, ready set ascending, edges only inside the selection
     let order =
         replay_order_for_tests(&[(c, vec![]), (a, vec![c, Hash::of(b"x")]), (b, vec![])]).unwrap();
-    let mut ready = vec![b, c];
-    ready.sort();
-    let want = if ready[0] == c {
-        // c first, then a and b ascending
-        let mut rest = vec![a, b];
-        rest.sort();
-        [vec![c], rest].concat()
-    } else {
-        vec![b, c, a]
+    // b and c are ready at once; a waits for c
+    let want = match (c < b, a < b) {
+        (true, true) => vec![c, a, b],
+        (true, false) => vec![c, b, a],
+        (false, _) => vec![b, c, a],
     };
     assert_eq!(order, want);
     // a removed source: the redaction refusal, nothing written
