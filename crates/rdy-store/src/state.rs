@@ -187,7 +187,7 @@ impl StoreReader {
                 id: c.id(),
                 deps: &c.deps,
                 ops: &c.ops,
-                replayed_from: c.links.replayed_from,
+                is_replay: c.links.replayed_from.is_some(),
             })
             .collect();
         let deleters = self.merge_deleters(

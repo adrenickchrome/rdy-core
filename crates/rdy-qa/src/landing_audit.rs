@@ -248,7 +248,7 @@ fn carried_conflicts(
             id: *id,
             deps: &ch.deps,
             ops: &ch.ops,
-            replayed_from: ch.links.replayed_from,
+            is_replay: ch.links.replayed_from.is_some(),
         })
         .collect();
     let deleters = reader

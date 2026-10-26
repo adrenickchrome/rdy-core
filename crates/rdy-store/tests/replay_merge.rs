@@ -1,9 +1,10 @@
 //! ok7: the merge of a replayed change (`ChangeLinks::replayed_from` set) and the store's one
-//! write of a prepared replay. A replay op whose base differs from the block's version conflicts
-//! even when its result equals that version, unless that version's writer is the replay's own
-//! source (or the replay is the writer's source): the two ops then share the base and the
-//! result, and agree. A replay op on a conflicted block keeps every side and adds its own. Ordinary changes keep the existing rules. The prepared write stores the
-//! changes with the deps the caller gave and one `Include` in one batch.
+//! write of a prepared replay. An op whose result equals the block's version agrees with it,
+//! whatever the bases and whoever the writers, replays included. A replay op whose base differs
+//! from the block's version and whose result differs too conflicts. A replay op on a conflicted
+//! block keeps every side and adds its own. Ordinary changes keep the existing rules. The
+//! prepared write stores the changes with the deps the caller gave and one `Include` in one
+//! batch.
 use rdy_model::*;
 use rdy_store::kinds;
 use rdy_store::merge::{Conflict, MergeChange, Side, conflict_id, merge};
@@ -69,7 +70,7 @@ fn input(cs: &[Owned]) -> Vec<MergeChange<'_>> {
             id: c.id,
             deps: &c.deps,
             ops: &c.ops,
-            replayed_from: c.from,
+            is_replay: c.from.is_some(),
         })
         .collect()
 }
@@ -79,6 +80,12 @@ const CANON: &str = "canon producer";
 /// The base state (block b-00001 at `v0`, produced by CANON) and the merge of `cs` onto it.
 fn merged(base: &StateSnapshot, cs: &[Owned]) -> rdy_store::merge::Merged {
     let producer = |v: &Hash| base.blocks.values().any(|x| x == v).then(|| h(CANON));
+    merge(base, &input(cs), &producer, &|_| None)
+}
+
+/// The merge of `cs` onto `base`, each base version produced by the change labelled `by`.
+fn merged_by(base: &StateSnapshot, cs: &[Owned], by: &str) -> rdy_store::merge::Merged {
+    let producer = |v: &Hash| base.blocks.values().any(|x| x == v).then(|| h(by));
     merge(base, &input(cs), &producer, &|_| None)
 }
 
@@ -123,7 +130,7 @@ fn fixture() -> Fixture {
 }
 
 #[test]
-fn ok7_replay_equal_result_on_another_base_conflicts() {
+fn ok7_replay_equal_result_on_another_base_agrees() {
     let f = fixture();
     // the source updated v1 to the body the target already holds
     let op = Op::Update {
@@ -133,30 +140,39 @@ fn ok7_replay_equal_result_on_another_base_conflicts() {
     // an ordinary change that reaches the same result agrees with the target (existing rule)
     let ordinary = merged(&f.base, &[owned("w", vec![], vec![op.clone()], false)]);
     assert!(ordinary.conflicts.is_empty(), "{:?}", ordinary.conflicts);
-    // a replay records the divergence: the source base, the target's side and its own side
+    // so does a replay of a source unrelated to the target's version: the op is already
+    // satisfied (ruling task-7-round1)
     let replay = merged(&f.base, &[owned("r", vec![], vec![op.clone()], true)]);
+    assert!(replay.conflicts.is_empty(), "{:?}", replay.conflicts);
+    assert_eq!(replay.state.blocks.get(&f.b), Some(&f.v0.version_hash()));
+    // and a replay of the version's own producer, landed
+    let own = merged(&f.base, &[replay_of("r", vec![], vec![op], CANON)]);
+    assert!(own.conflicts.is_empty(), "{:?}", own.conflicts);
+    assert_eq!(own.state.blocks.get(&f.b), Some(&f.v0.version_hash()));
+    // and a create of the id with the body the target holds
+    let create = Op::Create {
+        block: f.v0.clone(),
+    };
+    let same = merged(&f.base, &[owned("r", vec![], vec![create], true)]);
+    assert!(same.conflicts.is_empty(), "{:?}", same.conflicts);
+    // another base and another result is a divergence: the source base, the target's side and
+    // the replay's own side
+    let other = Op::Update {
+        base: f.v1.version_hash(),
+        block: f.v2.clone(),
+    };
+    let replay = merged(&f.base, &[owned("r", vec![], vec![other], true)]);
     let want = conflict(
         &f.b,
         Some(f.v1.version_hash()),
         vec![
             side(Some(h(CANON)), Some(f.v0.version_hash())),
-            side(Some(h("r")), Some(f.v0.version_hash())),
+            side(Some(h("r")), Some(f.v2.version_hash())),
         ],
     );
     assert_eq!(replay.conflicts, vec![want]);
     // the conflicted block reads as its conflict's base
     assert_eq!(replay.state.blocks.get(&f.b), Some(&f.v1.version_hash()));
-    // the target's version came from the replay's own source (it landed): the two ops share
-    // the base and the result, so they agree (ruling task-7 item 2)
-    let own = merged(&f.base, &[replay_of("r", vec![], vec![op], CANON)]);
-    assert!(own.conflicts.is_empty(), "{:?}", own.conflicts);
-    assert_eq!(own.state.blocks.get(&f.b), Some(&f.v0.version_hash()));
-    // so does a create of the id the source created, with its body
-    let create = Op::Create {
-        block: f.v0.clone(),
-    };
-    let own = merged(&f.base, &[replay_of("r", vec![], vec![create], CANON)]);
-    assert!(own.conflicts.is_empty(), "{:?}", own.conflicts);
 }
 
 #[test]
@@ -281,9 +297,9 @@ fn ok7_replay_delete_and_create_cases_keep_base_and_sides() {
             ],
         )]
     );
-    // a create of an id the target holds, with the same body: still a collision
+    // a create of an id the target holds, with another body: a collision
     let create = Op::Create {
-        block: f.v0.clone(),
+        block: f.v2.clone(),
     };
     let m = merged(&f.base, &[owned("r", vec![], vec![create], true)]);
     assert_eq!(
@@ -293,7 +309,7 @@ fn ok7_replay_delete_and_create_cases_keep_base_and_sides() {
             None,
             vec![
                 side(Some(h(CANON)), Some(f.v0.version_hash())),
-                side(Some(h("r")), Some(f.v0.version_hash())),
+                side(Some(h("r")), Some(f.v2.version_hash())),
             ],
         )]
     );
@@ -323,40 +339,30 @@ fn ok7_replay_delete_and_create_cases_keep_base_and_sides() {
 #[test]
 fn ok7_replay_and_ordinary_order_never_decides_a_divergence() {
     // a replay and an ordinary change create the same block with the same body, or update it
-    // from one base to one result. Whichever the merge applies first (its order is by id), the
-    // outcome is the same: a divergence when the ordinary change is not the replay's source,
-    // agreement when it is (the same base and the same result, ruling task-7 item 2)
+    // from one base to one result. Whichever the merge applies first (its order is by id), they
+    // agree, whether or not the ordinary change is the replay's source (ruling task-7-round1)
     let base = StateSnapshot::default();
     let b = bid("b-00009");
     let v = block("b-00009", "same");
     let create = Op::Create { block: v.clone() };
     let mut seen = vec![];
     for (replay, ordinary) in [("first", "second"), ("second", "first")] {
-        let cs = [
-            owned(replay, vec![], vec![create.clone()], true),
-            owned(ordinary, vec![], vec![create.clone()], false),
-        ];
-        let m = merged(&base, &cs);
-        assert_eq!(
-            m.conflicts,
-            vec![conflict(
-                &b,
-                None,
-                vec![
-                    side(Some(h(replay)), Some(v.version_hash())),
-                    side(Some(h(ordinary)), Some(v.version_hash())),
-                ],
-            )],
-            "replay {replay}"
-        );
-        // the replay of the ordinary change itself agrees with it, in either order
-        let cs = [
-            replay_of(replay, vec![], vec![create.clone()], ordinary),
-            owned(ordinary, vec![], vec![create.clone()], false),
-        ];
-        let m = merged(&base, &cs);
-        assert!(m.conflicts.is_empty(), "replay {replay}: {:?}", m.conflicts);
-        assert_eq!(m.state.blocks.get(&b), Some(&v.version_hash()));
+        for cs in [
+            // a replay of a source the merge does not hold
+            [
+                owned(replay, vec![], vec![create.clone()], true),
+                owned(ordinary, vec![], vec![create.clone()], false),
+            ],
+            // the replay of the ordinary change itself
+            [
+                replay_of(replay, vec![], vec![create.clone()], ordinary),
+                owned(ordinary, vec![], vec![create.clone()], false),
+            ],
+        ] {
+            let m = merged(&base, &cs);
+            assert!(m.conflicts.is_empty(), "replay {replay}: {:?}", m.conflicts);
+            assert_eq!(m.state.blocks.get(&b), Some(&v.version_hash()));
+        }
         seen.push(h(replay) < h(ordinary));
     }
     // both orders ran
@@ -368,18 +374,20 @@ fn ok7_replay_and_ordinary_order_never_decides_a_divergence() {
         block: f.v2.clone(),
     };
     for (replay, ordinary) in [("first", "second"), ("second", "first")] {
-        let cs = [
-            replay_of(replay, vec![h(CANON)], vec![upd.clone()], ordinary),
-            owned(ordinary, vec![h(CANON)], vec![upd.clone()], false),
-        ];
-        let m = merged(&f.base, &cs);
-        assert!(m.conflicts.is_empty(), "replay {replay}: {:?}", m.conflicts);
-        assert_eq!(m.state.blocks.get(&f.b), Some(&f.v2.version_hash()));
-        let cs = [
-            owned(replay, vec![h(CANON)], vec![upd.clone()], true),
-            owned(ordinary, vec![h(CANON)], vec![upd.clone()], false),
-        ];
-        assert_eq!(merged(&f.base, &cs).conflicts.len(), 1, "replay {replay}");
+        for cs in [
+            [
+                owned(replay, vec![h(CANON)], vec![upd.clone()], true),
+                owned(ordinary, vec![h(CANON)], vec![upd.clone()], false),
+            ],
+            [
+                replay_of(replay, vec![h(CANON)], vec![upd.clone()], ordinary),
+                owned(ordinary, vec![h(CANON)], vec![upd.clone()], false),
+            ],
+        ] {
+            let m = merged(&f.base, &cs);
+            assert!(m.conflicts.is_empty(), "replay {replay}: {:?}", m.conflicts);
+            assert_eq!(m.state.blocks.get(&f.b), Some(&f.v2.version_hash()));
+        }
     }
     // two ordinary creates still agree (existing rule)
     let cs = [
@@ -387,6 +395,47 @@ fn ok7_replay_and_ordinary_order_never_decides_a_divergence() {
         owned("second", vec![], vec![create], false),
     ];
     assert!(merged(&base, &cs).conflicts.is_empty());
+}
+
+#[test]
+fn ok7_two_replays_of_one_source_agree() {
+    // source S updates b from v0 to v2, and is replayed as r1 into one view and r2 into
+    // another (ruling task-7-round1, case a)
+    let f = fixture();
+    let upd = Op::Update {
+        base: f.v0.version_hash(),
+        block: f.v2.clone(),
+    };
+    // in flight, both in one merge, in either id order: they agree
+    let mut seen = vec![];
+    for (r1, r2) in [("r1", "r2"), ("r2", "r1")] {
+        let cs = [
+            replay_of(r1, vec![h(CANON)], vec![upd.clone()], "S"),
+            replay_of(r2, vec![h(CANON)], vec![upd.clone()], "S"),
+        ];
+        let m = merged(&f.base, &cs);
+        assert!(m.conflicts.is_empty(), "{r1}: {:?}", m.conflicts);
+        assert_eq!(m.state.blocks.get(&f.b), Some(&f.v2.version_hash()));
+        seen.push(h(r1) < h(r2));
+    }
+    assert_ne!(seen[0], seen[1]);
+    // r1 landed before S: the base holds v2, produced by r1, and r2 still agrees with it
+    let mut landed = StateSnapshot::default();
+    landed.blocks.insert(f.b.clone(), f.v2.version_hash());
+    let m = merged_by(
+        &landed,
+        &[replay_of("r2", vec![h(CANON)], vec![upd.clone()], "S")],
+        "r1",
+    );
+    assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+    assert_eq!(m.state.blocks.get(&f.b), Some(&f.v2.version_hash()));
+    // and so does S itself, an ordinary change
+    let m = merged_by(
+        &landed,
+        &[owned("S", vec![h(CANON)], vec![upd], false)],
+        "r1",
+    );
+    assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
 }
 
 #[test]

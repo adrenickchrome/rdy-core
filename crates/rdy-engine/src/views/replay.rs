@@ -1,10 +1,8 @@
 //! Replay: selected changes, from any view and landed or not, become new changes in an owned
 //! open view, one new change per source change, in one view op. A replay brings none of its
 //! sources' other dependencies. Each op keeps its source base: a base the target does not hold
-//! is a recorded conflict, even when the replayed result equals the target's version (the merge
-//! reads `replayed_from`), unless the source itself wrote that version: a replay and its own
-//! source share each op's base and result, and agree (ruling task-7 item 2). Undo of the one
-//! `Include` removes the whole replay.
+//! is a recorded conflict, unless the replayed result equals the target's version, which the op
+//! then already satisfies. Undo of the one `Include` removes the whole replay.
 use super::{
     Action, ConflictInfo, check_view_op, conflict_infos, no_view, owner_of, parse_change, strings,
 };
@@ -139,8 +137,8 @@ enum Slot {
 }
 
 /// The target as each replay leaves it, in replay order: the target's materialized versions and
-/// recorded conflicts, then each replayed op applied (an equal base) or conflicted (another base,
-/// or a block already conflicted).
+/// recorded conflicts, then each replayed op applied (an equal base), agreeing (an equal result)
+/// or conflicted (another base and another result, or a block already conflicted).
 struct Preview<'a> {
     versions: &'a dyn Fn(&BlockId) -> Option<Hash>,
     conflicted: HashSet<BlockId>,
@@ -163,43 +161,25 @@ impl Preview<'_> {
     }
 }
 
-/// Whether `src` wrote the target's version `v` of block `id`, as the merge names the writer: of
-/// `v`'s producers, the ones `view` includes, else canon's producer (`producer`); for an absent
-/// block, `src`'s delete when `view` includes it, else the delete that removed it from the
-/// view's base. A replay then shares the op's base and result with that writer, and agrees.
-fn written_by(
+/// The changes `view` includes that wrote the target's version `v` of block `id`: of `v`'s
+/// producers, the ones `view` includes; for an absent block, the included changes that delete
+/// it. `src` never counts: a replay never depends on its own source.
+fn view_writers(
     st: &ReadState,
-    view: &str,
     included: &HashSet<Hash>,
     src: &Hash,
-    source: &Change,
     id: &BlockId,
     v: Option<Hash>,
-) -> Result<bool, RdyError> {
+) -> Result<Vec<Hash>, RdyError> {
     let reader = st.reader();
-    Ok(match v {
-        Some(v) => {
-            let own: Vec<Hash> = reader
-                .producers(&v)?
-                .into_iter()
-                .filter(|p| included.contains(p))
-                .collect();
-            if own.is_empty() {
-                reader.producer(&v)? == Some(*src)
-            } else {
-                own.contains(src)
-            }
-        }
-        None => {
-            let deletes = source
-                .ops
-                .iter()
-                .any(|op| matches!(op, Op::Delete { id: d, .. } if d == id));
-            deletes
-                && (included.contains(src)
-                    || reader.deleter_at(id, st.effective_base(view).as_ref())? == Some(*src))
-        }
-    })
+    let all = match v {
+        Some(v) => reader.producers(&v)?,
+        None => reader.deleters(id)?,
+    };
+    Ok(all
+        .into_iter()
+        .filter(|w| w != src && included.contains(w))
+        .collect())
 }
 
 /// The new change for `source` (its hash `src`), replayed into `view` at ordinal `n`, with
@@ -268,12 +248,14 @@ impl Rdy {
     /// replay that writes one of its blocks. An op whose base is the target's version applies,
     /// and the change then depends on what the view's ordinary write would (the version's
     /// producer, or a re-created id's delete), so it merges after it (ruling task-7 item 3: an
-    /// ordinary write on that version records the same dep, and no source or source dep enters);
-    /// an op whose result is the target's version that the source itself wrote agrees with it;
-    /// any other base is a recorded conflict. A block the call creates or moves under a parent
-    /// needs that parent clean once the whole call is applied: held by the target, or created
-    /// by a selected source whose replay is clean (ruling task-7 item 1, as include's parent
-    /// rule counts every id the call creates). Nothing is written when any check fails.
+    /// ordinary write on that version records the same dep, and no source or source dep enters).
+    /// An op whose result is the target's version agrees with it, whatever its base (ruling
+    /// task-7-round1), and the change depends on the view's own writers of that version other
+    /// than its source, so it merges after them in every hash order. Any other op (another base
+    /// and another result) is a recorded conflict. A block the call creates or moves under a
+    /// parent needs that parent clean once the whole call is applied: held by the target, or
+    /// created by a selected source whose replay is clean (ruling task-7 item 1, as include's
+    /// parent rule counts every id the call creates). Nothing is written when any check fails.
     pub fn view_replay(
         &mut self,
         s: &Session,
@@ -390,12 +372,12 @@ impl Rdy {
                         }
                         Slot::Clean(new)
                     }
-                    // the source itself wrote the target's version: one base, one result
-                    Slot::Clean(v)
-                        if v == new
-                            && preview.targets_own(id)
-                            && written_by(&st, view, &included, src, source, id, v)? =>
-                    {
+                    // the result is the target's version: already satisfied, whatever the base.
+                    // It merges after the view's writers of that version
+                    Slot::Clean(v) if v == new => {
+                        if preview.targets_own(id) {
+                            deps.extend(view_writers(&st, &included, src, id, v)?);
+                        }
                         Slot::Clean(new)
                     }
                     _ => Slot::Conflicted,

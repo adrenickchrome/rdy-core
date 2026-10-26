@@ -1,7 +1,8 @@
 //! ok7: replay. Selected changes become new changes in an owned open view, one per distinct
 //! source, in dependency order, with one `Include` for the whole call. A replay brings no
 //! unselected dependency, keeps each source base, and records a conflict wherever the target's
-//! version differs from that base, even when the replayed result equals it.
+//! version differs from that base and from the replayed result. A result equal to the target's
+//! version is already satisfied, and records none.
 mod common;
 
 #[path = "../../rdy-store/tests/support/redaction.rs"]
@@ -453,8 +454,8 @@ fn ok7_replay_divergence_records_every_op_case() {
     let s_del = h(&write(r, &human(), "src", json!([{"op": "delete", "id": p.y}])).change);
     let s_miss = update(r, &human(), "src", &p.z, "z src");
     let s_eq = update(r, &human(), "src", &p.w, "w same");
-    // a replay of the landed creator into a view that still holds its version: one base and
-    // one result with its own source, so no conflict (ruling task-7 item 2)
+    // a replay of the landed creator into a view that still holds its version: the result is
+    // the target's version, so no conflict
     new_view(r, &human(), "same");
     let res = replay(r, &human(), "same", &[s_new]);
     assert!(res.conflicts.is_empty(), "{:?}", res.conflicts);
@@ -495,12 +496,6 @@ fn ok7_replay_divergence_records_every_op_case() {
             cz,
             &[(Some(t_miss), None), (rn(&s_miss), src_v(r, &p.z))],
         ),
-        // the same result on another base is still a divergence
-        shape(
-            &p.w,
-            cw,
-            &[(Some(t_eq), src_v(r, &p.w)), (rn(&s_eq), src_v(r, &p.w))],
-        ),
         // a create of an id the target holds (at another version)
         shape(
             &kid,
@@ -515,9 +510,13 @@ fn ok7_replay_divergence_records_every_op_case() {
     for c in &res.conflicts {
         assert_eq!(c.id, recipe_id(c), "{}", c.block);
     }
+    // w: another base (canon's) but the result the target holds (t_eq's): no conflict, and w
+    // keeps that version (ruling task-7-round1); x above is the same base with another result
+    assert_ne!(cw, version(r, "t", &p.w));
+    assert_eq!(version(r, "t", &p.w), src_v(r, &p.w));
     // the conflicts are the view's: a read agrees, and a conflicted block reads as its base
     let read = r.read().conflicts(&Scope::View("t".into())).unwrap();
-    assert_eq!(read.len(), 5);
+    assert_eq!(read.len(), 4);
     assert_eq!(version(r, "t", &p.x), cx);
     // the target's own changes are untouched
     for c in [t_upd, t_y, t_miss, t_eq, t_k] {
@@ -757,8 +756,9 @@ fn ok7_replay_parent_created_by_the_same_call() {
 
 #[test]
 fn ok7_replay_and_its_source_never_conflict() {
-    // ruling task-7 item 2: source S updates x (u to v) in view a and is replayed into b as R.
-    // S and R share the base and the result, so no later merge records a conflict between them
+    // ruling task-7 item 2, as ruling task-7-round1 restates it: source S updates x (u to v) in
+    // view a and is replayed into b as R. S and R reach one result, so no later merge records a
+    // conflict between them
     let mut p = project();
     let r = &mut p.r;
     let s = update(r, &human(), "a", &p.x, "x in a");
@@ -787,7 +787,8 @@ fn ok7_replay_and_its_source_never_conflict() {
     assert_eq!(canon_version(r, &p.x), version(r, "c", &p.x));
     assert_eq!(canon_version(r, &p.y), version(r, "b", &p.y));
     // a landed doc and, unlanded, a prose under it, replayed into a view that holds the doc:
-    // the doc's create agrees with its own source, so the prose finds its parent there
+    // the doc's create reaches the version the view holds and agrees, so the prose finds its
+    // parent there
     let d = write(
         r,
         &human(),
@@ -832,6 +833,76 @@ fn ok7_replay_and_its_source_never_conflict() {
     update(r, &human(), "a2", &p.w, "w in a2");
     land(r, "a2");
     assert_eq!(canon_version(r, &p.z), version(r, "a2", &p.z));
+}
+
+#[test]
+fn ok7_two_replays_of_one_source_agree_after_one_lands() {
+    // ruling task-7-round1, case a: S updates x in view a and is replayed into b (as r1) and
+    // into c (as r2). b lands before S does, so canon's x is r1's. c then holds r2 against r1:
+    // one result, so no conflict, and c lands
+    let mut p = project();
+    let r = &mut p.r;
+    let s = update(r, &human(), "a", &p.x, "x in a");
+    new_view(r, &human(), "b");
+    new_view(r, &human(), "c");
+    assert!(replay(r, &human(), "b", &[s]).conflicts.is_empty());
+    assert!(replay(r, &human(), "c", &[s]).conflicts.is_empty());
+    update(r, &human(), "c", &p.y, "y in c");
+    let conflicts = |r: &Rdy, v: &str| r.read().conflicts(&Scope::View(v.into())).unwrap().len();
+    let inflight = |r: &Rdy| r.read().conflicts(&Scope::Inflight).unwrap().len();
+    land(r, "b");
+    assert_eq!(canon_version(r, &p.x), version(r, "a", &p.x));
+    assert_eq!(conflicts(r, "c"), 0);
+    assert_eq!(conflicts(r, "a"), 0);
+    assert_eq!(inflight(r), 0);
+    land(r, "c");
+    assert_eq!(canon_version(r, &p.x), version(r, "a", &p.x));
+    assert_eq!(canon_version(r, &p.y), version(r, "c", &p.y));
+    // and S's own view still lands after both
+    update(r, &human(), "a", &p.z, "z in a");
+    assert_eq!(conflicts(r, "a"), 0);
+    land(r, "a");
+    assert_eq!(canon_version(r, &p.z), version(r, "a", &p.z));
+}
+
+#[test]
+fn ok7_replay_equal_result_agrees_in_any_hash_order() {
+    // view t holds r0, a replay that moved x from canon's u to v. A second source reached v
+    // from another base u2 and is replayed into t: its result is t's version, so it agrees. It
+    // merges after r0 (its writer of v) whichever sorts first by hash, so no read of t ever
+    // sees v against v
+    let mut p = project();
+    let r = &mut p.r;
+    let mut orders = BTreeSet::new();
+    for n in 0..64 {
+        if orders.len() == 2 {
+            break;
+        }
+        let body = format!("x v{n}");
+        let s0 = update(r, &human(), &format!("a{n}"), &p.x, &body);
+        let t = format!("t{n}");
+        new_view(r, &human(), &t);
+        let r0 = new_of(&replay(r, &human(), &t, &[s0]), &s0);
+        let other = format!("s{n}");
+        update(r, &human(), &other, &p.x, &format!("x u2 {n}"));
+        let s1 = update(r, &human(), &other, &p.x, &body);
+        assert_eq!(version(r, &other, &p.x), version(r, &t, &p.x));
+        let res = replay(r, &human(), &t, &[s1]);
+        assert!(res.conflicts.is_empty(), "{:?}", res.conflicts);
+        let r1 = new_of(&res, &s1);
+        assert!(change(r, &r1).deps.contains(&r0));
+        assert!(!change(r, &r1).deps.contains(&s1));
+        assert!(
+            r.read()
+                .conflicts(&Scope::View(t.clone()))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(version(r, &t, &p.x), version(r, &other, &p.x));
+        orders.insert(r1 < r0);
+    }
+    // both hash orders ran
+    assert_eq!(orders.len(), 2);
 }
 
 fn update_fields(r: &mut Rdy, view: &str, id: &str, title: &str) {

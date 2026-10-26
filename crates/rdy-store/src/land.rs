@@ -824,7 +824,7 @@ impl Store {
                 id: *id,
                 deps: &c.deps,
                 ops: &c.ops,
-                replayed_from: c.links.replayed_from,
+                is_replay: c.links.replayed_from.is_some(),
             })
             .collect();
         // the merge asks only for canon's versions of `isect`: read them first, so a read error

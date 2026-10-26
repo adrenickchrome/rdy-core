@@ -801,7 +801,7 @@ pub(crate) fn blocking_conflicts(
             id: *id,
             deps: &c.deps,
             ops: &c.ops,
-            replayed_from: c.links.replayed_from,
+            is_replay: c.links.replayed_from.is_some(),
         })
         .collect();
     let deleters = reader.merge_deleters(base.as_ref(), &state, &touched)?;
