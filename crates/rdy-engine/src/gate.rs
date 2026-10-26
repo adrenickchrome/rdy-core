@@ -2711,7 +2711,7 @@ impl Rdy {
         // folds into the block's acceptance or key update, so no two updates share a base.
         let canon = st.materialized(&Scope::Canon)?;
         let placed = crate::landing_order::placed(&canon, &ops);
-        let order_keys = crate::landing_order::rekeys(&canon, &prospective, &placed)?;
+        let order_keys = crate::landing_order::rekeys(&canon, &prospective, &vm, &placed)?;
         for (id, k) in &order_keys {
             let b = prospective
                 .get(id)

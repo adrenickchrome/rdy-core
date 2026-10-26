@@ -706,3 +706,79 @@ fn ok6_reindex_reproduces_final_order() {
     assert_eq!(state(&r), landed, "a rebuilt index reads the same canon");
     r.fsck().unwrap();
 }
+
+/// Inserts a claim with `body` directly after `after` under `section` in view `v`; returns its id.
+fn insert_after(r: &mut Rdy, v: &str, section: &str, after: &str, body: &str) -> String {
+    put(
+        r,
+        v,
+        json!([{"op": "create", "type": "claim", "id": "$n", "parent": section, "after": after, "body": body}]),
+    )
+    .created["$n"]
+        .clone()
+}
+
+/// The run of each landing pin below, over fresh ids: a pin over one id draw could pass on a
+/// hash order by chance.
+const ID_RUNS: usize = 6;
+
+#[test]
+fn ok6_a_landing_rekey_keeps_the_views_later_block_after_it() {
+    for run in 0..ID_RUNS {
+        let (_d, mut r, sec, base) = seeded();
+        let pa = append(&mut r, "a", &sec, "from a");
+        let p = append(&mut r, "b", &sec, "from b");
+        let pb = propose(&mut r, "b");
+        // b writes on after it proposed: Q goes after P, outside the version
+        let q = append(&mut r, "b", &sec, "after P");
+        land(&mut r, "a");
+        approve(&mut r, &pb).unwrap_or_else(|e| panic!("{run}: land b: {e}"));
+        let vk = kids(&r, &view("b"), &sec);
+        assert_eq!(tied_pairs(&vk), 0, "{run}: no tie in b's view: {vk:?}");
+        assert_eq!(
+            ids_of(&vk),
+            vec![base.clone(), pa.clone(), p.clone(), q.clone()],
+            "{run}: b's view keeps Q after P"
+        );
+        land(&mut r, "b");
+        let k = kids(&r, &Scope::Canon, &sec);
+        assert_eq!(tied_pairs(&k), 0, "{run}: no tie in canon: {k:?}");
+        assert_eq!(
+            ids_of(&k),
+            vec![base.clone(), pa.clone(), p.clone(), q.clone()],
+            "{run}: P before Q in canon"
+        );
+    }
+}
+
+#[test]
+fn ok6_a_landing_rekey_respects_a_later_insert_past_a_deleted_sibling() {
+    for run in 0..ID_RUNS {
+        let (_d, mut r, sec, base) = seeded();
+        let e = append(&mut r, "e", &sec, "next sibling");
+        land(&mut r, "e");
+        let p = insert_after(&mut r, "b", &sec, &base, "from b");
+        let pb = propose(&mut r, "b");
+        // b writes on after it proposed: Q goes after P, outside the version
+        let q = insert_after(&mut r, "b", &sec, &p, "after P");
+        let pa = insert_after(&mut r, "a", &sec, &base, "from a");
+        put(&mut r, "a", json!([{"op": "delete", "id": e}]));
+        land(&mut r, "a");
+        approve(&mut r, &pb).unwrap_or_else(|e| panic!("{run}: land b: {e}"));
+        let vk = kids(&r, &view("b"), &sec);
+        assert_eq!(tied_pairs(&vk), 0, "{run}: no tie in b's view: {vk:?}");
+        assert_eq!(
+            ids_of(&vk),
+            vec![base.clone(), pa.clone(), p.clone(), q.clone()],
+            "{run}: b's view keeps Q after P"
+        );
+        land(&mut r, "b");
+        let k = kids(&r, &Scope::Canon, &sec);
+        assert_eq!(tied_pairs(&k), 0, "{run}: no tie in canon: {k:?}");
+        assert_eq!(
+            ids_of(&k),
+            vec![base.clone(), pa.clone(), p.clone(), q.clone()],
+            "{run}: P before Q in canon"
+        );
+    }
+}

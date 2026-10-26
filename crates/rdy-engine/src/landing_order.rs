@@ -38,12 +38,19 @@ pub fn placed(canon: &Materialized, ops: &[Op]) -> BTreeSet<BlockId> {
 /// key, in their `(order, id)` order. So the landing makes no new tie, and the same inputs give
 /// the same keys.
 ///
+/// The next distinct key is the smaller of two: the next one in `candidate`, and the next one
+/// above the run's key under the same parent in `view` (the proposing view, which the landing
+/// rebases). So a block the view holds after the run but has not proposed (one written after the
+/// propose) keeps its place after the re-keyed blocks: the re-key never ties with it or passes
+/// it. With neither, there is no upper bound.
+///
 /// Refusals, before anything is written: `E_FROZEN` for a placed frozen decision that would need
 /// a new key (a frozen decision is never re-keyed), and `E_ORDER_DEPTH` when the keys do not fit
 /// between the two bounds under the key cap.
 pub fn rekeys(
     canon: &Materialized,
     candidate: &Materialized,
+    view: &Materialized,
     placed: &BTreeSet<BlockId>,
 ) -> Result<BTreeMap<BlockId, String>, RdyError> {
     let parents: BTreeSet<Option<BlockId>> = placed
@@ -54,6 +61,7 @@ pub fn rekeys(
     let mut out = BTreeMap::new();
     for parent in parents {
         let kids = candidate.children(parent.as_ref());
+        let in_view = view.children(parent.as_ref());
         let mut from = 0;
         while from < kids.len() {
             let mut to = from + 1;
@@ -75,8 +83,13 @@ pub fn rekeys(
                 }) {
                     return Err(frozen_error(&frozen.id));
                 }
-                let hi = kids.get(to).map(|b| b.order.as_str());
-                let keys = rdy_model::order_run(Some(&run[0].order), hi, movers.len())
+                let key = run[0].order.as_str();
+                let next_in_view = in_view.iter().map(|b| b.order.as_str()).find(|o| *o > key);
+                let hi = match (kids.get(to).map(|b| b.order.as_str()), next_in_view) {
+                    (Some(c), Some(v)) => Some(c.min(v)),
+                    (c, v) => c.or(v),
+                };
+                let keys = rdy_model::order_run(Some(key), hi, movers.len())
                     .map_err(|_| depth_error(&movers[0].id))?;
                 out.extend(movers.iter().map(|b| b.id.clone()).zip(keys));
             }
