@@ -27,6 +27,22 @@ fn differs_only_in_order(a: &Block, b: &Block) -> bool {
         } == *b
 }
 
+/// The order-only edits `StoreReader::order_only_pairs` found: (canon's version, op base, op's
+/// new version).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OrderOnlyEdits(BTreeSet<(Hash, Hash, Hash)>);
+
+impl OrderOnlyEdits {
+    /// Whether `op` is an order-only edit against canon's version `v` (`merge::merge`'s
+    /// `order_only`).
+    pub fn holds(&self, v: &Hash, op: &Op) -> bool {
+        match op {
+            Op::Update { base, block } => self.0.contains(&(*v, *base, block.version_hash())),
+            _ => false,
+        }
+    }
+}
+
 /// The frames of one view commit (`Store::commit_parts`): the changes' frames, then the view ops
 /// and the head ref, and each change's id with the position of its `CHANGE` frame in `changes`.
 pub(crate) struct CommitParts {
@@ -147,38 +163,47 @@ impl StoreReader {
         })
     }
 
-    /// The pairs (`base`'s version, op base) of `ops` that differ only by their order key
-    /// (`merge::merge`'s `order_only`): for each op whose base is not `base`'s version of its
-    /// block, both versions are read. A version this cannot read makes no pair, so the merge
-    /// keeps its conflict.
+    /// The order-only edits of `ops` against `base` (`merge::merge`'s `order_only`): each update
+    /// whose base is not `base`'s version of its block and that `order_only_edit` accepts. A
+    /// version this cannot read makes no entry, so the merge keeps its conflict.
     pub fn order_only_pairs<'a>(
         &self,
         base: &StateSnapshot,
         ops: impl IntoIterator<Item = &'a Op>,
-    ) -> BTreeSet<(Hash, Hash)> {
-        let mut seen: BTreeSet<(Hash, Hash)> = BTreeSet::new();
+    ) -> OrderOnlyEdits {
+        let mut seen: BTreeSet<(Hash, Hash, Hash)> = BTreeSet::new();
         let mut out = BTreeSet::new();
         for op in ops {
-            let (Some(e), Some(v)) = (op.base(), base.blocks.get(op.block_id())) else {
+            let Op::Update { base: e, block } = op else {
                 continue;
             };
-            if !seen.insert((*v, e)) {
+            let Some(v) = base.blocks.get(&block.id) else {
+                continue;
+            };
+            let key = (*v, *e, block.version_hash());
+            if !seen.insert(key) {
                 continue;
             }
-            if self.order_only(v, &e) {
-                out.insert((*v, e));
+            if self.order_only_edit(v, e, block) {
+                out.insert(key);
             }
         }
-        out
+        OrderOnlyEdits(out)
     }
 
-    /// Whether versions `v` and `e` of one block differ only by their order key. A version this
-    /// cannot read, or a redacted one, never does.
-    pub fn order_only(&self, v: &Hash, e: &Hash) -> bool {
+    /// Whether an update from version `e` to `new` is an order-only edit against canon's version
+    /// `v`: `v` differs from `e` only by its order key, and `new` keeps `e`'s parent and order key
+    /// (D-TX3KH, D-1FT5Y; final ruling round 4). A version this cannot read, or a redacted one,
+    /// never makes one. Only such an edit applies with no conflict, and only its landing keeps
+    /// canon's place: a move, a parent change or a re-key is a choice of its own. The merge, the
+    /// edit-collision detector and the landing all ask this.
+    pub fn order_only_edit(&self, v: &Hash, e: &Hash, new: &Block) -> bool {
         v != e
             && matches!(
                 (self.get_block(v), self.get_block(e)),
                 (Ok(a), Ok(b)) if differs_only_in_order(&a, &b)
+                    && new.parent == b.parent
+                    && new.order == b.order
             )
     }
 
@@ -260,7 +285,7 @@ impl StoreReader {
             &input,
             &|v| producers.get(v).copied().flatten(),
             &|b| deleters.get(b).copied(),
-            &|v, e| order_only.contains(&(*v, *e)),
+            &|v, op| order_only.holds(v, op),
         ))
     }
 

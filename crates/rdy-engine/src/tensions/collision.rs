@@ -185,10 +185,17 @@ fn chain(cx: &DetectCx<'_>, all: &[Arc<Write>], w: &Write) -> Chain {
 /// on canon's side. A chain that is not against canon edits, for the merge, from canon's
 /// version, which becomes its root: a resolution pairs with a fresh edit from that version.
 fn judge(cx: &DetectCx<'_>, ch: &mut Chain, all: &[Arc<Write>], cv: Option<Hash>, owner: &Owner) {
-    // canon's version differs from the root base only by its order key (a landing's re-key):
-    // the merge applies the first write, so the chain is built on canon's version (D-TX3KH)
-    let order_only = || match (cv, ch.root) {
-        (Some(c), Some(r)) => cx.st.reader().order_only(&c, &r),
+    // the chain's first write is an edit that keeps its base's place, and canon's version
+    // differs from that base only by its order key (a landing's re-key, a landed move): the
+    // merge applies the first write, so the chain is built on canon's version (D-TX3KH). A
+    // move, a parent change, a re-key or a delete stays against canon (final ruling round 4).
+    let order_only = || match (cv, ch.root, ch.first) {
+        (Some(c), Some(r), Some(f)) => {
+            let reader = cx.st.reader();
+            reader
+                .get_block(&f)
+                .is_ok_and(|new| reader.order_only_edit(&c, &r, &new))
+        }
         _ => false,
     };
     if ch.root == cv || ch.first == cv || order_only() {

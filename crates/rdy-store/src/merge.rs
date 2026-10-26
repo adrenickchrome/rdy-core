@@ -167,14 +167,16 @@ fn order(changes: &[MergeChange<'_>]) -> Vec<usize> {
 
 /// Merges `changes` onto `base`. `producer` names the change that produced a base version, and
 /// `deleter` the change that deleted a block the base lacks, so that a side from the base can be
-/// depended on. `order_only(v, e)` says whether base version `v` differs from an op's base `e`
-/// only by its order key (`StoreReader::order_only_pairs` reads them).
+/// depended on. `order_only(v, op)` says whether `op` is an order-only edit against base version
+/// `v` (`StoreReader::order_only_edit`): an update whose base differs from `v` only by its order
+/// key and whose new version keeps that base's parent and order key
+/// (`StoreReader::order_only_pairs` reads them).
 pub fn merge(
     base: &StateSnapshot,
     changes: &[MergeChange<'_>],
     producer: &dyn Fn(&Hash) -> Option<Hash>,
     deleter: &dyn Fn(&BlockId) -> Option<Hash>,
-    order_only: &dyn Fn(&Hash, &Hash) -> bool,
+    order_only: &dyn Fn(&Hash, &Op) -> bool,
 ) -> Merged {
     merge_indexed(base, changes, producer, deleter, order_only).0
 }
@@ -187,7 +189,7 @@ pub fn merge_on_blocks(
     changes: &[MergeChange<'_>],
     producer: &dyn Fn(&Hash) -> Option<Hash>,
     deleter: &dyn Fn(&BlockId) -> Option<Hash>,
-    order_only: &dyn Fn(&Hash, &Hash) -> bool,
+    order_only: &dyn Fn(&Hash, &Op) -> bool,
     blocks: &BTreeSet<BlockId>,
 ) -> Merged {
     let base = StateSnapshot {
@@ -227,7 +229,7 @@ pub fn merge_indexed(
     changes: &[MergeChange<'_>],
     producer: &dyn Fn(&Hash) -> Option<Hash>,
     deleter: &dyn Fn(&BlockId) -> Option<Hash>,
-    order_only: &dyn Fn(&Hash, &Hash) -> bool,
+    order_only: &dyn Fn(&Hash, &Op) -> bool,
 ) -> (Merged, Vec<usize>) {
     let ordered = order(changes);
     let mut slots: BTreeMap<BlockId, Slot> = BTreeMap::new();
@@ -276,16 +278,16 @@ pub fn merge_indexed(
                 // ops that reach the block's version agree with it, whatever their bases and
                 // whoever the writers, replays included
                 Slot::Clean { version, .. } if *version == new => {}
-                // a canon side that differs from the op's base only by its order key (a
-                // landing's re-key, a key re-derive) is no conflict: the op applies with its own
-                // version, and its own landing re-keys a tie it would make (D-TX3KH)
+                // an edit against a canon side that differs from the op's base only by its order
+                // key (a landing's re-key, a key re-derive, a landed move) is no conflict: the op
+                // applies with its own version, and its own landing re-keys a tie it would make
+                // (D-TX3KH) or keeps canon's place (D-1FT5Y). A move, a parent change, a re-key
+                // or a delete against such a side still conflicts (final ruling round 4).
                 Slot::Clean {
                     version,
                     owner,
                     from_base,
-                } if *from_base
-                    && version.is_some_and(|v| expected.is_some_and(|e| order_only(&v, &e))) =>
-                {
+                } if *from_base && version.is_some_and(|v| order_only(&v, op)) => {
                     *version = new;
                     *owner = Some(c.id);
                     *from_base = false;

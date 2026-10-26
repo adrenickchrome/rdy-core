@@ -841,7 +841,7 @@ impl Store {
             &input,
             &known,
             deleter,
-            &|v, e| order_only.contains(&(*v, *e)),
+            &|v, op| order_only.holds(v, op),
             &isect,
         )
         .conflicts)

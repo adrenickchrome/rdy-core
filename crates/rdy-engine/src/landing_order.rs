@@ -32,8 +32,8 @@ pub fn placed(canon: &Materialized, ops: &[Op]) -> BTreeSet<BlockId> {
 /// first op in the applied ops `ops` is an update from a base that canon's version differs from
 /// only by its order key (a landed move within its parent, or a landing's re-key), and the
 /// block's version in `candidate` (canon with the landing's changes) keeps that base's parent and
-/// order key. The merge applied the op with the op's own version, so the landing stores that
-/// version with canon's order key, in its acceptance change: the op never undoes canon's place.
+/// order key (`StoreReader::order_only_edit`, the predicate the merge asks). The merge applied the
+/// op with the op's own version, so the landing stores that version with canon's order key, in its acceptance change: the op never undoes canon's place.
 pub fn kept_places(
     reader: &rdy_store::StoreReader,
     canon: &Materialized,
@@ -52,11 +52,7 @@ pub fn kept_places(
         let (Some(c), Some(now)) = (canon.get(&block.id), candidate.get(&block.id)) else {
             continue;
         };
-        if !reader.order_only(&c.version_hash(), base) {
-            continue;
-        }
-        let from = reader.get_block(base)?;
-        if now.parent == from.parent && now.order == from.order {
+        if reader.order_only_edit(&c.version_hash(), base, now) {
             out.insert(block.id.clone(), c.order.clone());
         }
     }

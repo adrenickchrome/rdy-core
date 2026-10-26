@@ -910,3 +910,65 @@ fn ok6_a_landing_keeps_a_landed_move() {
         assert!(report.warnings.is_empty(), "{run}: {report:?}");
     }
 }
+
+/// Final ruling round 4: the order-only rule is for edits only. Canon holds base, b, c; view m
+/// moves b before base; view w moves b after c. m lands. w's move is a choice that differs from
+/// m's landed move, so w has a conflict and its landing is refused.
+#[test]
+fn ok6_a_move_against_a_landed_move_conflicts() {
+    for run in 0..ID_RUNS {
+        let (_d, mut r, sec, base) = seeded();
+        let b = append(&mut r, "s", &sec, "b");
+        let c = append(&mut r, "s", &sec, "c");
+        land(&mut r, "s");
+        put(
+            &mut r,
+            "m",
+            json!([{"op": "move", "id": b, "parent": sec, "before": base}]),
+        );
+        put(
+            &mut r,
+            "w",
+            json!([{"op": "move", "id": b, "parent": sec, "after": c}]),
+        );
+        land(&mut r, "m");
+        let landed = vec![b.clone(), base.clone(), c.clone()];
+        assert_eq!(ids_of(&kids(&r, &Scope::Canon, &sec)), landed, "{run}");
+        let conflicts = r.read().conflicts(&view("w")).unwrap();
+        assert_eq!(conflicts.len(), 1, "{run}: {conflicts:?}");
+        let pw = propose(&mut r, "w");
+        let e = approve(&mut r, &pw).expect_err("w's move must not undo m's landed move");
+        assert_eq!(e.code, "E_PROPOSAL_NOT_READY", "{run}: {e}");
+        let codes: Vec<_> = e.issues.iter().map(|i| i.code).collect();
+        assert_eq!(codes, ["E_CONFLICT_UNRESOLVED"], "{run}: {e:?}");
+        assert_eq!(ids_of(&kids(&r, &Scope::Canon, &sec)), landed, "{run}");
+    }
+}
+
+/// Final ruling round 4: canon holds base, b; view m moves b before base; view w deletes b. m
+/// lands. w's delete is against m's landed move, so w has a conflict and its landing is refused.
+#[test]
+fn ok6_a_delete_against_a_landed_move_conflicts() {
+    for run in 0..ID_RUNS {
+        let (_d, mut r, sec, base) = seeded();
+        let b = append(&mut r, "s", &sec, "b");
+        land(&mut r, "s");
+        put(
+            &mut r,
+            "m",
+            json!([{"op": "move", "id": b, "parent": sec, "before": base}]),
+        );
+        put(&mut r, "w", json!([{"op": "delete", "id": b}]));
+        land(&mut r, "m");
+        let landed = vec![b.clone(), base.clone()];
+        assert_eq!(ids_of(&kids(&r, &Scope::Canon, &sec)), landed, "{run}");
+        let conflicts = r.read().conflicts(&view("w")).unwrap();
+        assert_eq!(conflicts.len(), 1, "{run}: {conflicts:?}");
+        let pw = propose(&mut r, "w");
+        let e = approve(&mut r, &pw).expect_err("w's delete must not undo m's landed move");
+        assert_eq!(e.code, "E_PROPOSAL_NOT_READY", "{run}: {e}");
+        let codes: Vec<_> = e.issues.iter().map(|i| i.code).collect();
+        assert_eq!(codes, ["E_CONFLICT_UNRESOLVED"], "{run}: {e:?}");
+        assert_eq!(ids_of(&kids(&r, &Scope::Canon, &sec)), landed, "{run}");
+    }
+}

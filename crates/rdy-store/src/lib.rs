@@ -63,5 +63,5 @@ pub use store::{
     unclean_closes_for_tests,
 };
 mod state;
-pub use state::{PreparedTag, ViewRecord, apply_op};
+pub use state::{OrderOnlyEdits, PreparedTag, ViewRecord, apply_op};
 pub use view::{Owner, ResolvedOp, ViewHead, ViewOp, ViewOpKind};

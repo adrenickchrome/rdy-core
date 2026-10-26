@@ -901,7 +901,8 @@ fn ok6_an_order_only_canon_side_is_no_conflict() {
             block: blk(1, "q, as w reads it"),
         }],
     );
-    let order_only = |v: &Hash, e: &Hash| (*v, *e) == (rekeyed.version_hash(), tied.version_hash());
+    let order_only =
+        |v: &Hash, op: &Op| (*v, op.base()) == (rekeyed.version_hash(), Some(tied.version_hash()));
     let m = merge(
         &base,
         &view(std::slice::from_ref(&edit)),
@@ -942,7 +943,7 @@ fn ok6_an_order_only_canon_side_is_no_conflict() {
             block: blk(1, "z"),
         }],
     );
-    let all_pairs = |v: &Hash, e: &Hash| v != e;
+    let all_pairs = |v: &Hash, op: &Op| op.base() != Some(*v);
     let m = merge(&base, &view(&[mover, other]), &p, &|_| None, &all_pairs);
     assert_eq!(m.conflicts.len(), 1, "{m:?}");
     assert!(

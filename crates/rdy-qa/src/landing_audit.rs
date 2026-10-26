@@ -269,7 +269,7 @@ fn carried_conflicts(
         &input,
         &|v| producers.get(v).copied().flatten(),
         &|b| deleters.get(b).copied(),
-        &|v, e| order_only.contains(&(*v, *e)),
+        &|v, op| order_only.holds(v, op),
         &touched,
     )
     .conflicts)
