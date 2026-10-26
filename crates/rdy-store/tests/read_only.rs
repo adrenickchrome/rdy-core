@@ -235,6 +235,26 @@ fn ok9_every_mutation_entry_refuses_before_append() {
     // removal: the apply writer and the finishing of removals
     read_only_error(s.seal_redaction_batch_for_tests(vec![]).unwrap_err());
     read_only_error(s.finish_redactions().unwrap_err());
+    // a holder's take of upload batches: refused before a file is read or its check runs
+    let upload = tempfile::NamedTempFile::new().unwrap();
+    let target = rdy_store::take_batch::UploadTarget {
+        tag: "v1.0.0".into(),
+        landing: Hash::of(b"a landing"),
+    };
+    let mut checked = false;
+    match s.take_batches(
+        &[std::fs::File::open(upload.path()).unwrap()],
+        &target,
+        |_, _| {
+            checked = true;
+            Err::<rdy_store::take_batch::TagChoice, ()>(())
+        },
+    ) {
+        Err(rdy_store::take_batch::TakeError::Store(e)) => read_only_error(e),
+        Err(_) => panic!("not the read-only refusal"),
+        Ok(_) => panic!("a read-only store took a batch"),
+    }
+    assert!(!checked, "the take's check never ran");
     // the source index: a rebuild
     read_only_error(s.reindex().unwrap_err());
     read_only_error(s.ensure_writable().unwrap_err());
@@ -337,6 +357,10 @@ fn ok9_read_only_tail_and_pending_removal_fail_closed() {
     );
     assert!(e.to_string().contains("damages acknowledged data"), "{e}");
     assert_eq!(tree(&f.dir), before, "nothing was quarantined or cut");
+    // the last acknowledged batch, damaged where no later marker follows: the index's floor
+    // says it was acknowledged, so the read-only open refuses it exactly as the writable open
+    // does, and no read (and so no dump) is served without it
+    last_batch_damage_is_refused();
     // an authorized removal that has not finished: E_REDACTION_PENDING before a read escapes
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
@@ -382,4 +406,239 @@ fn ok9_read_only_tail_and_pending_removal_fail_closed() {
         "Content removal was authorized but has not finished."
     );
     assert_eq!(tree(&dir), before, "the removal was not finished here");
+}
+
+/// The store with `t/a`, the blob that activated the read-only test feature and `t/z` as the
+/// last batch, closed cleanly (the index's floor is the log's end), and one byte flipped inside
+/// the first frame of that last batch: its marker is intact. Returns the base, the store and
+/// where the last batch starts.
+fn damaged_last_batch() -> (tempfile::TempDir, PathBuf, rdy_store::segment::Location) {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let start = {
+        let _known = inject_test_feature(FeatureClass::ReadOnlyCompatible, kinds::BLOB_CHUNK);
+        let mut s = Store::create(&dir).unwrap();
+        s.set_refs(vec![("t/a".into(), vec![1])]).unwrap();
+        s.put_blob(BLOB).unwrap();
+        let start = s.log_end();
+        s.set_refs(vec![("t/z".into(), vec![26; 64])]).unwrap();
+        assert!(
+            s.log_end().offset > start.offset + 37 + 8,
+            "one whole batch"
+        );
+        s.close().unwrap();
+        start
+    };
+    let seg = dir
+        .join("segments")
+        .join(format!("seg-{:06}.log", start.segment));
+    let mut bytes = std::fs::read(&seg).unwrap();
+    bytes[start.offset as usize + 37 + 4] ^= 0xff;
+    std::fs::write(&seg, &bytes).unwrap();
+    (base, dir, start)
+}
+
+fn last_batch_damage_is_refused() {
+    let (_base, dir, start) = damaged_last_batch();
+    let parent = dir.parent().unwrap().to_path_buf();
+    let before = tree(&parent);
+    let refusal = |e: StoreError| {
+        assert!(
+            matches!(&e, StoreError::Io(io) if io.kind() == std::io::ErrorKind::InvalidData),
+            "{e:?}"
+        );
+        let text = e.to_string();
+        assert!(
+            text.contains(&format!(
+                "corruption at offset {} in {}",
+                start.offset,
+                dir.join("segments").join("seg-000000.log").display()
+            )) && text.contains("damages acknowledged data; refusing to truncate"),
+            "{text}"
+        );
+        text
+    };
+    let mut texts = vec![];
+    for policy in [OpenPolicy::AutoUpgrade, OpenPolicy::RequireCurrent] {
+        let e = Store::open_with_policy(&dir, policy)
+            .err()
+            .expect("the damaged last batch is refused read-only");
+        texts.push(refusal(e));
+    }
+    assert_eq!(
+        tree(&parent),
+        before,
+        "the read-only refusal changed nothing"
+    );
+    // the writable open, with the feature known, refuses the same damage with the same text
+    let _known = inject_test_feature(FeatureClass::ReadOnlyCompatible, kinds::BLOB_CHUNK);
+    let e = Store::open(&dir)
+        .err()
+        .expect("the damaged last batch is refused writable");
+    assert_eq!(
+        refusal(e),
+        texts[0],
+        "both opens decide the tail the same way"
+    );
+}
+
+#[test]
+fn ok9_unknown_encoding_refuses_the_open() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let version = rdy_store::codec::latest(kinds::TAG) + 1;
+    {
+        let _known = inject_test_feature(FeatureClass::ReadOnlyCompatible, kinds::BLOB_CHUNK);
+        let _newer = rdy_store::codec::test_encoding(kinds::TAG, version);
+        let mut s = Store::create(&dir).unwrap();
+        s.put_blob(BLOB).unwrap();
+        let tag = Tag {
+            name: "v1.0.0".into(),
+            landing: Hash::of(b"a landing"),
+            message: None,
+            tagged_by: Provenance {
+                actor: "human:someone".into(),
+                run: None,
+                role: Role::Approver,
+                at_ms: 1,
+            },
+        };
+        s.write(vec![rdy_store::codec::item_new(kinds::TAG, &tag)])
+            .unwrap();
+        s.close().unwrap();
+    }
+    let parent = dir.parent().unwrap().to_path_buf();
+    let before = tree(&parent);
+    for policy in [OpenPolicy::AutoUpgrade, OpenPolicy::RequireCurrent] {
+        let e = Store::open_with_policy(&dir, policy)
+            .err()
+            .expect("an object this rdy cannot read refuses the open");
+        match e {
+            StoreError::Format { message, fix } => assert_eq!(
+                (message.as_str(), fix.as_str()),
+                (
+                    format!(
+                        "the store holds an object this rdy cannot read: kind TAG, encoding {version}"
+                    )
+                    .as_str(),
+                    "open the project with a newer rdy"
+                ),
+                "{policy:?}"
+            ),
+            other => panic!("{policy:?}: not the format refusal: {other:?}"),
+        }
+    }
+    assert_eq!(tree(&parent), before, "no source byte changed");
+}
+
+#[test]
+fn ok9_pending_upgrade_refuses_a_read_only_open() {
+    use rdy_store::format::{StoreFeature, StoreFeatures};
+    use rdy_store::upgrade::{self, UpgradeStep};
+    let f = read_only_store();
+    // a newer rdy, which knows the read-only feature, seals an upgrade that adds a feature
+    // this rdy does not know either, and stops before its completion publishes FORMAT
+    let added = StoreFeature {
+        name: "zz_added".into(),
+        class: FeatureClass::Compatible,
+        required_rdy: "100.2.0".into(),
+    };
+    let registry = vec![UpgradeStep {
+        id: "add_zz".into(),
+        from: StoreFeatures::of(vec![]),
+        to: StoreFeatures::of(vec![added]),
+    }];
+    {
+        let _known = inject_test_feature(FeatureClass::ReadOnlyCompatible, kinds::BLOB_CHUNK);
+        let lock = StoreLock::take(&f.dir).unwrap();
+        let plan = upgrade::inspect_with_registry_for_tests(&f.dir, &registry).unwrap();
+        assert_eq!(plan.steps, ["add_zz"]);
+        upgrade::apply_locked_with_registry_for_tests(&f.dir, &lock, &plan, &registry).unwrap();
+    }
+    let format_before = std::fs::read(f.dir.join("FORMAT")).unwrap();
+    let parent = f.dir.parent().unwrap().to_path_buf();
+    let before = tree(&parent);
+    for policy in [OpenPolicy::AutoUpgrade, OpenPolicy::RequireCurrent] {
+        let e = Store::open_with_policy(&f.dir, policy)
+            .err()
+            .expect("a pending upgrade is never read");
+        match e {
+            StoreError::Format { message, fix } => assert_eq!(
+                (message.as_str(), fix.as_str()),
+                (
+                    "the store has an upgrade a newer rdy started and did not finish",
+                    "open the project with rdy 100.2.0 or later to finish the upgrade"
+                ),
+                "{policy:?}"
+            ),
+            other => panic!("{policy:?}: not the format refusal: {other:?}"),
+        }
+        assert_eq!(tree(&parent), before, "{policy:?}: no source byte changed");
+    }
+    assert_eq!(std::fs::read(f.dir.join("FORMAT")).unwrap(), format_before);
+}
+
+/// A store whose upgrade plan cannot be made never opens as current: the planner's refusal is
+/// the open's, under both policies, and nothing is upgraded or written.
+#[cfg(unix)]
+#[test]
+fn ok9_a_plan_that_cannot_be_made_never_opens() {
+    use rdy_store::error::UpgradeFailure;
+    use rdy_store::format::{StoreFeature, StoreFeatures, TEST_FEATURE};
+    use rdy_store::upgrade::UpgradeStep;
+    let feature = |name: &str, class| StoreFeature {
+        name: name.into(),
+        class,
+        required_rdy: "99.0.0".into(),
+    };
+    let add_test = vec![UpgradeStep {
+        id: "add_test".into(),
+        from: StoreFeatures::of(vec![]),
+        to: StoreFeatures::of(vec![feature(TEST_FEATURE, FeatureClass::Incompatible)]),
+    }];
+    let _known = inject_test_feature(FeatureClass::Incompatible, kinds::INTENT);
+    // a stray link in the store: the planner refuses its backup; nothing opens or changes
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let mut s = Store::create(&dir).unwrap();
+    s.set_refs(vec![("t/a".into(), vec![1])]).unwrap();
+    s.close().unwrap();
+    std::os::unix::fs::symlink(dir.join("FORMAT"), dir.join("stray")).unwrap();
+    let before = tree(&base.path().to_path_buf());
+    for policy in [OpenPolicy::AutoUpgrade, OpenPolicy::RequireCurrent] {
+        let e = Store::open_with_registry_for_tests(&dir, policy, &add_test)
+            .err()
+            .expect("a plan that cannot be made never opens");
+        assert!(
+            matches!(
+                e,
+                StoreError::Upgrade {
+                    failure: UpgradeFailure::BackupFileType,
+                    backup: None
+                }
+            ),
+            "{policy:?}: {e:?}"
+        );
+        assert_eq!(tree(&base.path().to_path_buf()), before, "{policy:?}");
+    }
+    // a planned manifest with a feature this rdy cannot write: the planner's format refusal,
+    // though the store itself opens
+    std::fs::remove_file(dir.join("stray")).unwrap();
+    let unknown = vec![UpgradeStep {
+        id: "add_unknown".into(),
+        from: StoreFeatures::of(vec![]),
+        to: StoreFeatures::of(vec![feature("zz_unknown", FeatureClass::Incompatible)]),
+    }];
+    for policy in [OpenPolicy::AutoUpgrade, OpenPolicy::RequireCurrent] {
+        let e = Store::open_with_registry_for_tests(&dir, policy, &unknown)
+            .err()
+            .expect("a plan that cannot be made never opens");
+        assert!(
+            matches!(&e, StoreError::Format { message, .. } if message == "store feature zz_unknown needs rdy 99.0.0"),
+            "{policy:?}: {e:?}"
+        );
+    }
+    let s = Store::open(&dir).unwrap();
+    assert!(!s.features().has(TEST_FEATURE), "nothing was upgraded");
+    assert_eq!(s.get_ref("t/a").unwrap(), Some(vec![1]));
 }

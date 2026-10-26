@@ -281,10 +281,8 @@ impl RdyServer {
                     r
                 }
                 Err(panic) => {
-                    let republished = st.engine.write(Box::new(|r| {
-                        r.invalidate();
-                        Ok(serde_json::Value::Null)
-                    }));
+                    // a clean republish writes nothing, so a read-only store runs it too
+                    let republished = st.engine.republish();
                     let msg = panic
                         .downcast_ref::<&str>()
                         .map(|s| s.to_string())
@@ -913,16 +911,7 @@ async fn serve_stdio_inner(
         // the clean close: checkpoint, close the index, remove the sentinel; a tool call still
         // holding the engine (none should, once the service has ended) leaves the close to the
         // last drop, which reports a failure the same way
-        let closed = match Arc::try_unwrap(local) {
-            Ok(local) => local.close(),
-            Err(local) => local
-                .write(Box::new(|r| {
-                    r.checkpoint()?;
-                    Ok(serde_json::Value::Null)
-                }))
-                .map(|_| ()),
-        };
-        if let Err(e) = closed {
+        if let Err(e) = close_local(local) {
             eprintln!(
                 "rdy mcp: the store did not close cleanly ({e}); the next open catches its index up from the log"
             );
@@ -931,6 +920,22 @@ async fn serve_stdio_inner(
     .await;
     quit?;
     Ok(())
+}
+
+/// Closes the stdio server's engine: the clean close when this is its last holder, else a
+/// checkpoint, and the last drop closes it. A read-only store (D-WWAK7) has no checkpoint to
+/// make: its index is private, and its last reader removes it.
+fn close_local(local: Arc<Local>) -> Result<(), RdyError> {
+    match Arc::try_unwrap(local) {
+        Ok(local) => local.close(),
+        Err(local) if local.inspect(|r| Ok(r.is_read_only()))? => Ok(()),
+        Err(local) => local
+            .write(Box::new(|r| {
+                r.checkpoint()?;
+                Ok(serde_json::Value::Null)
+            }))
+            .map(|_| ()),
+    }
 }
 
 /// Serves `server` over `(r, w)` until the peer closes, with the session's tool calls stamped
@@ -1068,6 +1073,52 @@ mod tests {
                 "rdy mcp: after a panic in rdy_session the state was not republished (E_DAEMON_GONE: the daemon's writer has stopped)"
             ]
         );
+    }
+
+    /// A read-only project (D-WWAK7): its store has a read-only feature this rdy does not
+    /// know.
+    fn read_only_project() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let _known = rdy_engine::read_only_feature_for_tests();
+        let mut r = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
+        r.store_mut().put_blob(b"uses the feature").unwrap();
+        r.seal_open().unwrap();
+        r.close().unwrap();
+        dir
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ok9_a_tool_panic_on_a_read_only_project_republishes() {
+        let notes = rdy_engine::capture_notices_for_tests(&["after a panic in a_read_only_read "]);
+        let dir = read_only_project();
+        let local = Arc::new(Local::open(dir.path()).unwrap());
+        assert!(local.inspect(|r| Ok(r.is_read_only())).unwrap());
+        let server = RdyServer::new(
+            Arc::clone(&local) as Arc<dyn Engine>,
+            None,
+            NotifyHub::new(),
+        );
+        let before = local.read();
+        let e = server
+            .blocking("a_read_only_read", false, |_| panic!("boom"))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, E_INTERNAL, "{e:?}");
+        assert!(e.message.contains("boom"), "{e:?}");
+        assert!(
+            !e.message.contains("E_STORE_READ_ONLY") && !e.message.contains("not republished"),
+            "{e:?}"
+        );
+        assert!(notes.notices().is_empty(), "{:?}", notes.notices());
+        // the next read is of a fresh state, republished from the store
+        let after = local.read();
+        assert!(!Arc::ptr_eq(&before, &after), "the state was republished");
+        assert_eq!(after.seq(), before.seq());
+        // the close with another holder left: no checkpoint fallback on a read-only store
+        drop(server);
+        let other = Arc::clone(&local);
+        close_local(local).unwrap();
+        drop(other);
     }
 
     #[tokio::test(flavor = "current_thread")]

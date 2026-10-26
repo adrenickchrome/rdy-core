@@ -418,3 +418,83 @@ fn ok9_completion_refuses_corrupt_tags_signatures_and_folds() {
         }
     }
 }
+
+/// A holder's completion runs the holder's fsck (`Rdy::fsck` dispatches to it): its tag is
+/// checked against its own history. A project's fsck would refuse the tag, since a holder has
+/// no canon chain for it to be in.
+#[test]
+fn ok9_holder_completion_runs_the_holder_fsck() {
+    let _f = known();
+    let (base, root, _) = project();
+    let mut r = Rdy::open(&root).unwrap();
+    r.tag(&session(Role::Approver), "v1.0.0", None, None)
+        .unwrap();
+    // the tag's history, as a holder takes it: every copied object, then the tag's ref
+    let copied = [
+        kinds::BLOCK,
+        kinds::CHANGE,
+        kinds::PROPOSAL,
+        kinds::LANDING,
+        kinds::SNAPSHOT,
+        kinds::BLOB_CHUNK,
+        kinds::BLOB_MANIFEST,
+        kinds::TAG,
+    ];
+    let mut items = vec![];
+    r.store()
+        .for_each_frame_from(
+            rdy_store::segment::Location {
+                segment: 0,
+                offset: 0,
+            },
+            r.store().log_end(),
+            |_, kind, _, payload, _| {
+                if copied.contains(&rdy_store::codec::logical_kind(kind)) {
+                    items.push((kind, payload.to_vec()));
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+    let refs: Vec<(String, Vec<u8>)> = r
+        .store()
+        .tags()
+        .unwrap()
+        .into_iter()
+        .map(|(n, h, _)| (format!("tag/{n}"), h.0.to_vec()))
+        .collect();
+    r.close().unwrap();
+    let holder = base.path().join("h");
+    let mut h = Rdy::create_holder(&holder, rdy_model::RepoId([1; 16])).unwrap();
+    h.store_mut().write(items).unwrap();
+    h.store_mut().set_refs(refs).unwrap();
+    h.seal_open().unwrap();
+    h.close().unwrap();
+    make_pending(&holder);
+    let (seen, out) = phases(None, || {
+        Rdy::open_with_registry_for_tests(
+            &holder,
+            StoreMode::Holder,
+            OpenPolicy::AutoUpgrade,
+            &registry(),
+        )
+    });
+    let h = out.unwrap();
+    assert_eq!(
+        seen,
+        vec![
+            CompletionPhase::BeforeFsck,
+            CompletionPhase::Checked,
+            CompletionPhase::Published
+        ]
+    );
+    assert!(!h.store().upgrade_pending());
+    assert_eq!(
+        h.fsck().unwrap().versions,
+        1,
+        "the holder's fsck checks its tag"
+    );
+    h.close().unwrap();
+    assert_eq!(format_text(&holder), upgraded().to_text());
+    assert_eq!(upgrade_batches(&holder), 1);
+}

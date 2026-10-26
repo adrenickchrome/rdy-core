@@ -890,21 +890,28 @@ fn check_tail(
 }
 
 /// The read-only open's tail check on segment `seg` (see [`check_tail`]): damage that an
-/// acknowledged batch follows is refused, with the writable open's refusal; anything else is an
-/// unacknowledged tail, left as it is. Nothing is written.
+/// acknowledged batch follows, or that starts before the index's `floor`, is refused with the
+/// writable open's refusal; anything else is an unacknowledged tail, left as it is. Nothing is
+/// written.
 fn refuse_acknowledged_damage(
     f: &File,
     dir: &Path,
     seg: u32,
     scan: &Scan,
     file_len: u64,
+    floor: Option<Location>,
     holes: &Holes,
 ) -> Result<(), StoreError> {
     let b = scan.boundary.unwrap_or(0);
     if b >= file_len {
         return Ok(());
     }
-    let follows = acknowledged_batch_follows(f, seg, b, scan.stop, file_len, holes)?;
+    let end_of_good = Location {
+        segment: seg,
+        offset: b,
+    };
+    let follows = floor.is_some_and(|fl| fl > end_of_good)
+        || acknowledged_batch_follows(f, seg, b, scan.stop, file_len, holes)?;
     if follows {
         let e = damaged_error(scan.stop, &seg_path(dir, seg));
         return Err(damage_refusal(e, f, seg, scan.stop, file_len));
@@ -1262,12 +1269,14 @@ impl SegmentLog {
     /// marker rule as [`SegmentLog::open_authorized`], with no writer. Nothing is created,
     /// quarantined, cut, removed or synced. A tail after the acknowledged boundary (a torn or
     /// unmarked batch) is left in its file and ignored: the log ends at the boundary, and the
-    /// returned flag says a tail was ignored. Damage that an acknowledged batch follows is
-    /// refused as the writable open refuses it. A log with no segment file is refused.
+    /// returned flag says a tail was ignored. Damage that an acknowledged batch follows, or
+    /// that starts before the index's `floor` (as the writable open reads it), is refused as
+    /// the writable open refuses it. A log with no segment file is refused.
     pub(crate) fn open_read_only(
         dir: &Path,
         max_len: u64,
         store_dir: &Path,
+        floor: Option<Location>,
     ) -> Result<(SegmentLog, bool), StoreError> {
         let mut readers = vec![];
         while let Some(f) = open_if_present(&seg_path(dir, readers.len() as u32))? {
@@ -1305,13 +1314,13 @@ impl SegmentLog {
                 )
                 .into());
             }
-            refuse_acknowledged_damage(f, dir, last, &scan, file_len, holes)?;
+            refuse_acknowledged_damage(f, dir, last, &scan, file_len, floor, holes)?;
             readers.pop();
             (prev_len, file_len > 0)
         } else {
             let b = scan.boundary.unwrap_or(0);
             if b < file_len {
-                refuse_acknowledged_damage(f, dir, last, &scan, file_len, holes)?;
+                refuse_acknowledged_damage(f, dir, last, &scan, file_len, floor, holes)?;
             }
             (b, b < file_len)
         };

@@ -271,6 +271,12 @@ impl Rdy {
         Ok(self.store.ensure_writable()?)
     }
 
+    /// Whether this handle's store permits reads only (D-WWAK7): every write refuses with
+    /// E_STORE_READ_ONLY, and closing it writes nothing.
+    pub fn is_read_only(&self) -> bool {
+        self.store.access() == rdy_store::format::StoreAccess::ReadOnly
+    }
+
     /// The handle over `store`, already open, for the project or holder at `project` with
     /// `context`: the pack, its lineage and fingerprint, and the config that fill the handle's
     /// fields. The first publish reads the store's state.
@@ -495,6 +501,17 @@ impl Rdy {
     pub fn idle_days(&self) -> u32 {
         self.read().idle_days()
     }
+}
+
+/// Test hook: while the guard is held, this thread knows a read-only store feature that the
+/// next blob a project writes activates. Once it drops, no rdy knows the feature, so that
+/// project's store is read-only (D-WWAK7). No CLI, MCP, config or environment path reaches it.
+#[doc(hidden)]
+pub fn read_only_feature_for_tests() -> rdy_store::format::TestFeature {
+    rdy_store::format::inject_test_feature(
+        rdy_store::format::FeatureClass::ReadOnlyCompatible,
+        rdy_store::kinds::BLOB_CHUNK,
+    )
 }
 
 /// A point of [`Rdy::complete_upgrade`] where a test hook runs

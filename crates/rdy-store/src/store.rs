@@ -338,6 +338,35 @@ fn open_index(dir: &Path, unclean: bool) -> Result<OpenedIndex, StoreError> {
     }
 }
 
+/// The floor the read-only open of the store at `dir` reads its log with: the `indexed_upto`
+/// the writable open would trust ([`open_index`]), read without writing to the source. The
+/// source index is copied into `scratch` (the open's private directory) and checked there, so
+/// redb may repair the copy as it would repair the source; the copy is removed before this
+/// returns. As in the writable open, a missing index, one that does not open, and one whose
+/// check found damage while no sentinel says the store was open give no floor (the writable
+/// open rebuilds those).
+fn read_only_floor(
+    dir: &Path,
+    unclean: bool,
+    scratch: &Path,
+) -> Result<Option<Location>, StoreError> {
+    let source = dir.join("index.redb");
+    if !source.exists() {
+        return Ok(None);
+    }
+    let copy = scratch.join("floor.redb");
+    std::fs::copy(&source, &copy)?;
+    let opened = std::panic::catch_unwind(|| {
+        Index::open_checked(&copy).and_then(|c| Ok((c.clean, c.index.acknowledged()?)))
+    })
+    .unwrap_or_else(|_| Err(StoreError::Db("index panicked while opening".into())));
+    remove_if_present(&copy)?;
+    Ok(match opened {
+        Ok((clean, acked)) if clean || unclean => acked,
+        _ => None,
+    })
+}
+
 /// Sets the damaged index aside and opens an empty one.
 fn rebuild_index(path: &Path, repaired: bool) -> Result<OpenedIndex, StoreError> {
     set_aside(path)?;
@@ -523,7 +552,7 @@ fn frame_entries(
     }
     // the logical kind and the body of the frame's encoding (`crate::codec`): an index, a
     // dependency and a redaction identity know objects by their logical kind
-    let o = crate::codec::split(kind, payload).map_err(|e| StoreError::Decode(e.to_string()))?;
+    let o = crate::codec::split_stored(kind, payload)?;
     let (kind, payload) = (o.kind, o.body);
     let mut out = vec![IndexEntry::Object { kind, hash, loc }];
     match kind {
@@ -815,6 +844,25 @@ fn read_only_access(features: &StoreFeatures) -> Access {
     }
 }
 
+/// The refusal (E_STORE_FORMAT) of a read-only open whose log holds a sealed upgrade to
+/// `features` that its `FORMAT` mirror does not show yet: the newer rdy that started it must
+/// finish it. It names the highest `required_rdy` among the features this rdy does not know.
+fn unfinished_upgrade(features: &StoreFeatures) -> StoreError {
+    let known = format::registered_features();
+    let version = |v: &str| -> Vec<u32> { v.split('.').map(|p| p.parse().unwrap_or(0)).collect() };
+    let required = features
+        .features
+        .iter()
+        .filter(|f| !known.iter().any(|k| k.name == f.name))
+        .map(|f| f.required_rdy.as_str())
+        .max_by_key(|v| version(v))
+        .unwrap_or(format::FEATURE_REQUIRED_RDY);
+    StoreError::Format {
+        message: "the store has an upgrade a newer rdy started and did not finish".into(),
+        fix: format!("open the project with rdy {required} or later to finish the upgrade"),
+    }
+}
+
 /// The upgrade plan of the closed store at `dir`: with this rdy's steps, or with `registry`'s
 /// (a test hook's).
 fn plan_upgrade(
@@ -1066,11 +1114,24 @@ impl Store {
         {
             return Store::open_read_only(dir, held.cloned(), feature, required_rdy);
         }
-        // a store the planner refuses keeps the open's own refusal: only a plan the planner
-        // could make is applied, and the open below judges the store as it always did
+        // A format refusal of the planner keeps the open's own refusal: the open judges the
+        // same store again, with its own text. An open that finds nothing to refuse returns
+        // the planner's refusal, so a store whose plan could not be made never opens as
+        // current. Every other refusal of the planner (a backup limit or file type, an invalid
+        // registry, I/O) is the open's at once.
         let (steps, pending) = match plan_upgrade(dir, registry) {
             Ok(plan) => (!plan.steps.is_empty(), plan.pending_check),
-            Err(_) => (false, false),
+            Err(planned @ StoreError::Format { .. }) => {
+                drop(Store::open_current_format_with(
+                    dir,
+                    vec![],
+                    held.cloned(),
+                    None,
+                    false,
+                )?);
+                return Err(planned);
+            }
+            Err(e) => return Err(e),
         };
         match policy {
             OpenPolicy::RequireCurrent => {
@@ -1419,12 +1480,15 @@ impl Store {
             });
         }
         let unclean = std::fs::symlink_metadata(dir.join(INDEX_OPEN_SENTINEL)).is_ok();
-        let (log, tail) = SegmentLog::open_read_only(&segments, SEGMENT_MAX, dir)?;
-        let creation = read_creation(&log)?;
-        // the private index: built here and owned by every reader; a failed build removes it
+        // the private index's directory: owned by every reader; a failed open removes it
         let private = tempfile::Builder::new()
             .prefix(".rdy-read-only-")
             .tempdir()?;
+        // the writable open's floor, read from a private copy of the source index: damage
+        // before it is acknowledged data, refused as the writable open refuses it
+        let floor = read_only_floor(dir, unclean, private.path())?;
+        let (log, tail) = SegmentLog::open_read_only(&segments, SEGMENT_MAX, dir, floor)?;
+        let creation = read_creation(&log)?;
         let index = Index::open(&private.path().join("index.redb"))?;
         replay_into(&log, &index, ORIGIN, None, RefRules::new(creation))?;
         let reader = StoreReader {
@@ -1493,7 +1557,12 @@ impl Store {
         format::check_features(&f)?;
         match format::read_format_file(dir)? {
             Some(mirror) if mirror == f || f.is_subset_of(&mirror) => {}
-            Some(mirror) if store.receipt_explains(&mirror, &f)? => {}
+            // a newer rdy sealed an upgrade and did not finish it (its store check may have
+            // failed): this rdy cannot run that rdy's completion, so it serves no read of it,
+            // under either policy
+            Some(mirror) if store.receipt_explains(&mirror, &f)? => {
+                return Err(unfinished_upgrade(&f));
+            }
             _ => return Err(format::unmirrored(dir)),
         }
         store.features = f;
@@ -3045,8 +3114,7 @@ impl StoreReader {
     /// the body of a kind whose encodings differ in shape (`crate::codec::decode_bounded_split`).
     pub fn get_versioned_body(&self, kind: u8, h: &Hash) -> Result<(u16, Vec<u8>), StoreError> {
         let (raw, mut payload) = self.get_kind_raw(kind, h)?;
-        let o =
-            crate::codec::split(raw, &payload).map_err(|e| StoreError::Decode(e.to_string()))?;
+        let o = crate::codec::split_stored(raw, &payload)?;
         let (version, at) = (o.version, payload.len() - o.body.len());
         payload.drain(..at);
         Ok((version, payload))
@@ -3300,8 +3368,7 @@ impl StoreReader {
             }
             Err(e) => return Err(e),
         };
-        let o =
-            crate::codec::split(raw, &payload).map_err(|e| StoreError::Decode(e.to_string()))?;
+        let o = crate::codec::split_stored(raw, &payload)?;
         let m: BlobManifest = crate::codec::decode_split(&o)?;
         // postcard ignores trailing bytes; a manifest that is not its own canonical encoding
         // is not what `put_blob` wrote, and would not re-import under its own name

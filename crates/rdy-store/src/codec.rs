@@ -388,8 +388,76 @@ fn dispatches(kind: u8, t: TypeId) -> bool {
     want.contains(&t)
 }
 
-fn decode_error(e: RecordError) -> StoreError {
-    StoreError::Decode(e.to_string())
+/// The name of logical kind `kind`, as this module names kinds (`kinds::TAG` is `TAG`), or its
+/// number when this rdy assigns it no name.
+fn kind_name(kind: u8) -> String {
+    use crate::kinds::*;
+    let name = match kind {
+        BLOCK => "BLOCK",
+        CHANGE => "CHANGE",
+        PROPOSAL => "PROPOSAL",
+        LANDING => "LANDING",
+        SNAPSHOT => "SNAPSHOT",
+        BLOB_CHUNK => "BLOB_CHUNK",
+        BLOB_MANIFEST => "BLOB_MANIFEST",
+        REF_UPDATE => "REF_UPDATE",
+        TAG => "TAG",
+        ANSWER => "ANSWER",
+        SIGNATURE => "SIGNATURE",
+        VIEW_OP => "VIEW_OP",
+        BATCH_COMMIT => "BATCH_COMMIT",
+        INTENT => "INTENT",
+        ALT_SET => "ALT_SET",
+        REVIEW => "REVIEW",
+        TENSION => "TENSION",
+        TRANSITION => "TRANSITION",
+        REDACTION => "REDACTION",
+        REDACTION_RESIDUE => "REDACTION_RESIDUE",
+        REDACTION_APPLY => "REDACTION_APPLY",
+        REDACTION_CARRIED => "REDACTION_CARRIED",
+        PLAN => "PLAN",
+        ASSESSMENT => "ASSESSMENT",
+        DISPUTE => "DISPUTE",
+        DISPUTE_RESOLUTION => "DISPUTE_RESOLUTION",
+        CHECK_REQUEST => "CHECK_REQUEST",
+        _ => return kind.to_string(),
+    };
+    name.to_string()
+}
+
+/// The refusal (E_STORE_FORMAT) of a stored frame of raw kind `raw` and payload `payload` whose
+/// encoding this rdy does not read: a compatible feature never authorizes guessing an encoding.
+fn unknown_encoding(raw: u8, payload: &[u8]) -> StoreError {
+    let version = if raw & VERSIONED == 0 {
+        0
+    } else {
+        payload
+            .first_chunk::<2>()
+            .map_or(0, |v| u16::from_le_bytes(*v))
+    };
+    StoreError::Format {
+        message: format!(
+            "the store holds an object this rdy cannot read: kind {}, encoding {version}",
+            kind_name(logical_kind(raw))
+        ),
+        fix: "open the project with a newer rdy".into(),
+    }
+}
+
+/// The store error of a stored frame of raw kind `raw` and payload `payload` that [`split`]
+/// refused with `e`: an encoding this rdy does not read is [`unknown_encoding`], any other
+/// refusal a frame that does not decode.
+fn stored_error(raw: u8, payload: &[u8], e: RecordError) -> StoreError {
+    match e {
+        RecordError::UnknownVersion => unknown_encoding(raw, payload),
+        e => StoreError::Decode(e.to_string()),
+    }
+}
+
+/// [`split`] of a stored frame, with the store's refusals ([`stored_error`]): what every read
+/// and replay of the store's own frames uses.
+pub(crate) fn split_stored(raw: u8, payload: &[u8]) -> Result<ObjectBytes<'_>, StoreError> {
+    split(raw, payload).map_err(|e| stored_error(raw, payload, e))
 }
 
 /// The stored frame of raw kind `kind` with payload `payload`, decoded as `T`: the frame is
@@ -399,7 +467,7 @@ pub fn decode_record<T: DeserializeOwned + 'static>(
     kind: u8,
     payload: &[u8],
 ) -> Result<T, StoreError> {
-    let o = split(kind, payload).map_err(decode_error)?;
+    let o = split_stored(kind, payload)?;
     decode_split(&o)
 }
 
@@ -535,7 +603,7 @@ pub fn decode_identified<T: DeserializeOwned + 'static>(
     kind: u8,
     payload: &[u8],
 ) -> Result<(T, EncodedIdentity), StoreError> {
-    let o = split(kind, payload).map_err(decode_error)?;
+    let o = split_stored(kind, payload)?;
     let value = decode_split(&o)?;
     Ok((
         value,

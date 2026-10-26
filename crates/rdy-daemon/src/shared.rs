@@ -8,7 +8,9 @@ use crate::site::live::{LiveSite, spawn_site_worker};
 use crate::watch::PackWatch;
 use crate::writer::{Writer, WriterHandle};
 use arc_swap::ArcSwap;
-use rdy_engine::engine::{Engine, ExportRequest, RenderRequest, SiteFacts, SiteLink, WriteFn};
+use rdy_engine::engine::{
+    Engine, ExportRequest, ReadFn, RenderRequest, SiteFacts, SiteLink, WriteFn,
+};
 use rdy_engine::hub_publish::PublishRequest;
 use rdy_engine::semantic::lease::LeaseRegistry;
 use rdy_engine::site_target::SiteTarget;
@@ -183,6 +185,14 @@ impl Engine for DaemonEngine {
 
     fn write(&self, f: WriteFn) -> Result<Value, RdyError> {
         self.0.writer.run(f)
+    }
+
+    fn read_serialized(&self, f: ReadFn) -> Result<Value, RdyError> {
+        self.0.writer.read(f)
+    }
+
+    fn republish(&self) -> Result<(), RdyError> {
+        self.0.writer.republish()
     }
 
     fn open_report(&self) -> OpenReport {
