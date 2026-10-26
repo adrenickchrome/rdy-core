@@ -95,6 +95,9 @@ fn backups(root: &Path) -> Vec<String> {
     out
 }
 
+/// A phase of the upgrade, with whether the daemon had exited by the first copy.
+type Seen = (String, Option<bool>);
+
 /// A closed project at `<base>/p`.
 fn closed_project() -> (tempfile::TempDir, PathBuf) {
     let base = short_tempdir();
@@ -230,7 +233,7 @@ fn ok11_apply_stops_before_backup() {
     let old = format_text(&root);
     // the copy barrier: each phase of the upgrade is recorded, the first copy with whether the
     // daemon's process had exited by then
-    let seen: Rc<RefCell<Vec<(String, Option<bool>)>>> = Rc::default();
+    let seen: Rc<RefCell<Vec<Seen>>> = Rc::default();
     let rec = Rc::clone(&seen);
     let r = upgrade::with_hook_for_tests(
         move |p| {
@@ -379,7 +382,7 @@ fn ok11_start_upgrades_before_serving() {
                 assert!(live_daemon(&root).is_some());
             }
             _ => {
-                let e = out.err().expect("the completion fails");
+                let e = out.expect_err("the completion fails");
                 let names = backups(&root);
                 assert_eq!(names.len(), 1, "the backup is kept");
                 assert!(root.join(".rdy").join(&names[0]).is_dir());
