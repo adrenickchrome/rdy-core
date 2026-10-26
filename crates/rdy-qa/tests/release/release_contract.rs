@@ -986,10 +986,10 @@ fn mcp_row() -> Value {
         match v {
             Value::Object(m) => {
                 for (k, x) in m.iter_mut() {
-                    if k == "required" {
-                        if let Some(a) = x.as_array_mut() {
-                            a.sort_by_key(|e| e.as_str().map(str::to_string));
-                        }
+                    if k == "required"
+                        && let Some(a) = x.as_array_mut()
+                    {
+                        a.sort_by_key(|e| e.as_str().map(str::to_string));
                     }
                     sort_required(x);
                 }
@@ -1282,6 +1282,9 @@ fn markdown_row() -> Value {
     let (_d, r, _ids) = rdy_qa::golden::site_with_decision();
     let p = rdy_render::print::build(&r.read(), &Scope::Canon).expect("the print builds");
     let mut layouts = Map::new();
+    let heading = Regex::new(r"(?m)^#{1,6} .*$").unwrap();
+    let link = Regex::new(r"\]\(([^)\s]+)\)").unwrap();
+    let anchor = Regex::new(r#"\{#[^}]+\}|<a (?:id|name)="[^"]+""#).unwrap();
     for (name, layout) in [
         ("plain", Layout::Plain),
         ("mkdocs", Layout::Mkdocs),
@@ -1310,9 +1313,6 @@ fn markdown_row() -> Value {
         let mut all = vec![];
         walk(&out, &out, &mut all);
         all.sort();
-        let heading = Regex::new(r"(?m)^#{1,6} .*$").unwrap();
-        let link = Regex::new(r"\]\(([^)\s]+)\)").unwrap();
-        let anchor = Regex::new(r#"\{#[^}]+\}|<a (?:id|name)="[^"]+""#).unwrap();
         for (rel, bytes) in all {
             let entry = if rel.ends_with(".md") || rel.ends_with(".yml") {
                 let text = normalize(&String::from_utf8_lossy(&bytes), &[dir.path()]);
