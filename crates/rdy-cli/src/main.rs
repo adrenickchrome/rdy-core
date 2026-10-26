@@ -13,6 +13,8 @@ mod brief_cmd;
 mod brief_text;
 mod config_cmd;
 mod conn;
+#[cfg(test)]
+mod contract;
 mod coverage_cmd;
 mod dump_cmd;
 mod edit_cmd;
