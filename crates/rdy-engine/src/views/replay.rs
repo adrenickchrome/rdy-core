@@ -2,7 +2,9 @@
 //! open view, one new change per source change, in one view op. A replay brings none of its
 //! sources' other dependencies. Each op keeps its source base: a base the target does not hold
 //! is a recorded conflict, even when the replayed result equals the target's version (the merge
-//! reads `replayed_from`). Undo of the one `Include` removes the whole replay.
+//! reads `replayed_from`), unless the source itself wrote that version: a replay and its own
+//! source share each op's base and result, and agree (ruling task-7 item 2). Undo of the one
+//! `Include` removes the whole replay.
 use super::{
     Action, ConflictInfo, check_view_op, conflict_infos, no_view, owner_of, parse_change, strings,
 };
@@ -153,6 +155,51 @@ impl Preview<'_> {
             None => Slot::Clean((self.versions)(id)),
         }
     }
+
+    /// Whether `id` still holds the target's own version (no earlier replay of this call wrote
+    /// it) and that version is clean.
+    fn targets_own(&self, id: &BlockId) -> bool {
+        !self.slots.contains_key(id) && !self.conflicted.contains(id)
+    }
+}
+
+/// Whether `src` wrote the target's version `v` of block `id`, as the merge names the writer: of
+/// `v`'s producers, the ones `view` includes, else canon's producer (`producer`); for an absent
+/// block, `src`'s delete when `view` includes it, else the delete that removed it from the
+/// view's base. A replay then shares the op's base and result with that writer, and agrees.
+fn written_by(
+    st: &ReadState,
+    view: &str,
+    included: &HashSet<Hash>,
+    src: &Hash,
+    source: &Change,
+    id: &BlockId,
+    v: Option<Hash>,
+) -> Result<bool, RdyError> {
+    let reader = st.reader();
+    Ok(match v {
+        Some(v) => {
+            let own: Vec<Hash> = reader
+                .producers(&v)?
+                .into_iter()
+                .filter(|p| included.contains(p))
+                .collect();
+            if own.is_empty() {
+                reader.producer(&v)? == Some(*src)
+            } else {
+                own.contains(src)
+            }
+        }
+        None => {
+            let deletes = source
+                .ops
+                .iter()
+                .any(|op| matches!(op, Op::Delete { id: d, .. } if d == id));
+            deletes
+                && (included.contains(src)
+                    || reader.deleter_at(id, st.effective_base(view).as_ref())? == Some(*src))
+        }
+    })
 }
 
 /// The new change for `source` (its hash `src`), replayed into `view` at ordinal `n`, with
@@ -220,8 +267,13 @@ impl Rdy {
     /// briefing, and depends on the replays of its selected deps and on the latest earlier
     /// replay that writes one of its blocks. An op whose base is the target's version applies,
     /// and the change then depends on what the view's ordinary write would (the version's
-    /// producer, or a re-created id's delete), so it merges after it; any other base is a
-    /// recorded conflict. Nothing is written when any check fails.
+    /// producer, or a re-created id's delete), so it merges after it (ruling task-7 item 3: an
+    /// ordinary write on that version records the same dep, and no source or source dep enters);
+    /// an op whose result is the target's version that the source itself wrote agrees with it;
+    /// any other base is a recorded conflict. A block the call creates or moves under a parent
+    /// needs that parent clean once the whole call is applied: held by the target, or created
+    /// by a selected source whose replay is clean (ruling task-7 item 1, as include's parent
+    /// rule counts every id the call creates). Nothing is written when any check fails.
     pub fn view_replay(
         &mut self,
         s: &Session,
@@ -295,6 +347,7 @@ impl Rdy {
             conflicted: target_conflicts.iter().map(|c| c.block.clone()).collect(),
             slots: HashMap::new(),
         };
+        let included: HashSet<Hash> = st.included(view).iter().copied().collect();
         let by = s.provenance();
         let mut new_of: HashMap<Hash, Hash> = HashMap::new();
         let mut last_writer: HashMap<BlockId, Hash> = HashMap::new();
@@ -307,6 +360,8 @@ impl Rdy {
             .try_reserve_exact(order.len())
             .map_err(|_| limit())?;
         let mut bytes = 0usize;
+        // each parent a create or a move puts a block under, in replay order
+        let mut placed: Vec<BlockId> = Vec::new();
         for (n, &i) in order.iter().enumerate() {
             let (src, source) = &sources[i];
             let mut deps: BTreeSet<Hash> = source
@@ -335,21 +390,22 @@ impl Rdy {
                         }
                         Slot::Clean(new)
                     }
+                    // the source itself wrote the target's version: one base, one result
+                    Slot::Clean(v)
+                        if v == new
+                            && preview.targets_own(id)
+                            && written_by(&st, view, &included, src, source, id, v)? =>
+                    {
+                        Slot::Clean(new)
+                    }
                     _ => Slot::Conflicted,
                 };
                 preview.slots.insert(id.clone(), slot);
                 mine.insert(id);
             }
-            // the parent rule: a parent the target holds clean, or an earlier clean replay's
             for op in &source.ops {
-                if let Some(p) = placed_under(&st, op)?
-                    && !matches!(preview.get(&p), Slot::Clean(Some(_)))
-                {
-                    return Err(RdyError::new(
-                        E_DEPS_MISSING,
-                        format!("replay needs parent {p} in view {view:?}"),
-                        "create the parent in the target view, then replay again",
-                    ));
+                if let Some(p) = placed_under(&st, op)? {
+                    placed.push(p);
                 }
             }
             if !ordinary.is_empty() {
@@ -382,6 +438,19 @@ impl Rdy {
             replayed_list.push((*src, id));
             prepared.push(change);
         }
+        // the parent rule, over the whole call: a parent the target holds clean once every
+        // replay is applied (the target's own, or one a selected source creates cleanly)
+        if let Some(p) = placed
+            .iter()
+            .find(|p| !matches!(preview.get(p), Slot::Clean(Some(_))))
+        {
+            return Err(RdyError::new(
+                E_DEPS_MISSING,
+                format!("replay needs parent {p} in view {view:?}"),
+                "create the parent in the target view, then replay again",
+            ));
+        }
+        drop(placed);
         // 6. the candidate graph: no parent loop with what the view holds
         let moved = moved_blocks(&st, &prepared)?;
         if !moved.is_empty() {

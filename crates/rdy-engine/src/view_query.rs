@@ -360,7 +360,7 @@ impl ReadState {
                 id: *id,
                 deps: &c.deps,
                 ops: &c.ops,
-                is_replay: c.links.replayed_from.is_some(),
+                replayed_from: c.links.replayed_from,
             })
             .collect();
         let deleters =

@@ -390,19 +390,19 @@ fn res1_merge_on_blocks_matches_the_full_merge_on_the_named_blocks() {
             id: i1,
             deps: &[],
             ops: &o1,
-            is_replay: false,
+            replayed_from: None,
         },
         MergeChange {
             id: i2,
             deps: &[],
             ops: &o2,
-            is_replay: false,
+            replayed_from: None,
         },
         MergeChange {
             id: i3,
             deps: &[],
             ops: &o3,
-            is_replay: false,
+            replayed_from: None,
         },
     ];
     let full = merge(&base, &changes, &|_| None, &|_| None);

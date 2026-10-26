@@ -453,12 +453,19 @@ fn ok7_replay_divergence_records_every_op_case() {
     let s_del = h(&write(r, &human(), "src", json!([{"op": "delete", "id": p.y}])).change);
     let s_miss = update(r, &human(), "src", &p.z, "z src");
     let s_eq = update(r, &human(), "src", &p.w, "w same");
+    // a replay of the landed creator into a view that still holds its version: one base and
+    // one result with its own source, so no conflict (ruling task-7 item 2)
+    new_view(r, &human(), "same");
+    let res = replay(r, &human(), "same", &[s_new]);
+    assert!(res.conflicts.is_empty(), "{:?}", res.conflicts);
+    assert_eq!(version(r, "same", &kid), ck);
     // the target diverges on every block
     new_view(r, &human(), "t");
     let t_upd = update(r, &human(), "t", &p.x, "x t");
     let t_y = update(r, &human(), "t", &p.y, "y t");
     let t_miss = h(&write(r, &human(), "t", json!([{"op": "delete", "id": p.z}])).change);
     let t_eq = update(r, &human(), "t", &p.w, "w same");
+    let t_k = update(r, &human(), "t", &kid, "k t");
     assert_eq!(version(r, "t", &p.w), version(r, "src", &p.w));
     let res = replay(r, &human(), "t", &[s_upd, s_del, s_miss, s_eq, s_new]);
     let rn = |s: &Hash| Some(new_of(&res, s));
@@ -494,8 +501,12 @@ fn ok7_replay_divergence_records_every_op_case() {
             cw,
             &[(Some(t_eq), src_v(r, &p.w)), (rn(&s_eq), src_v(r, &p.w))],
         ),
-        // a create of an id the target holds
-        shape(&kid, None, &[(Some(s_new), ck), (rn(&s_new), ck)]),
+        // a create of an id the target holds (at another version)
+        shape(
+            &kid,
+            None,
+            &[(Some(t_k), Some(change_version(r, &t_k))), (rn(&s_new), ck)],
+        ),
     ]
     .into_iter()
     .map(|s| (s.0.clone(), s))
@@ -509,7 +520,7 @@ fn ok7_replay_divergence_records_every_op_case() {
     assert_eq!(read.len(), 5);
     assert_eq!(version(r, "t", &p.x), cx);
     // the target's own changes are untouched
-    for c in [t_upd, t_y, t_miss, t_eq] {
+    for c in [t_upd, t_y, t_miss, t_eq, t_k] {
         assert!(included(r, "t").contains(&c));
     }
 }
@@ -680,6 +691,147 @@ fn ok7_replay_missing_parent_is_atomic() {
         .unwrap();
     let res = replay(r, &human(), "t", &[s1, s2]);
     assert_eq!(res.replayed.len(), 2);
+}
+
+#[test]
+fn ok7_replay_parent_created_by_the_same_call() {
+    // ruling task-7 item 1: one write creates doc d, the next puts a prose under it, and the
+    // second does not depend on the first. A replay of both succeeds whichever sorts first by
+    // hash: the parent rule reads the whole call, as include's does
+    let mut p = project();
+    let r = &mut p.r;
+    let mut orders = BTreeSet::new();
+    for n in 0..64 {
+        if orders.len() == 2 {
+            break;
+        }
+        let src = format!("src{n}");
+        let d = write(
+            r,
+            &human(),
+            &src,
+            json!([{"op": "create", "type": "doc", "id": "$d", "fields": {"name": format!("d{n}"), "title": "D", "doc_type": "page"}}]),
+        );
+        let did = d.created["$d"].clone();
+        let w1 = h(&d.change);
+        let c = write(
+            r,
+            &human(),
+            &src,
+            json!([{"op": "create", "type": "prose", "id": "$n", "parent": did, "body": format!("Under d, {n}.")}]),
+        );
+        let w2 = h(&c.change);
+        assert!(!change(r, &w2).deps.contains(&w1));
+        let t = format!("t{n}");
+        new_view(r, &human(), &t);
+        let res = replay(r, &human(), &t, &[w1, w2]);
+        assert!(res.conflicts.is_empty(), "{:?}", res.conflicts);
+        let prose = r
+            .read()
+            .block(
+                &Scope::View(t.clone()),
+                &BlockId::parse(&c.created["$n"]).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(prose.parent, Some(BlockId::parse(&did).unwrap()));
+        orders.insert(w2 < w1);
+        // a parent that an unselected change creates is still refused, with the exact text
+        let u = format!("u{n}");
+        new_view(r, &human(), &u);
+        let before = log_state(r);
+        let e = replay_err(r, &human(), &u, &[w2.to_string()]);
+        assert_eq!(e.code, E_DEPS_MISSING);
+        assert_eq!(
+            e.message,
+            format!("replay needs parent {did} in view \"{u}\"")
+        );
+        assert_eq!(
+            e.fix,
+            "create the parent in the target view, then replay again"
+        );
+        assert_eq!(log_state(r), before);
+    }
+    // both hash orders ran
+    assert_eq!(orders.len(), 2);
+}
+
+#[test]
+fn ok7_replay_and_its_source_never_conflict() {
+    // ruling task-7 item 2: source S updates x (u to v) in view a and is replayed into b as R.
+    // S and R share the base and the result, so no later merge records a conflict between them
+    let mut p = project();
+    let r = &mut p.r;
+    let s = update(r, &human(), "a", &p.x, "x in a");
+    new_view(r, &human(), "b");
+    new_view(r, &human(), "c");
+    let inflight = |r: &Rdy| r.read().conflicts(&Scope::Inflight).unwrap().len();
+    assert_eq!(inflight(r), 0);
+    let res = replay(r, &human(), "b", &[s]);
+    assert!(res.conflicts.is_empty(), "{:?}", res.conflicts);
+    let res = replay(r, &human(), "c", &[s]);
+    assert!(res.conflicts.is_empty(), "{:?}", res.conflicts);
+    // (1) the in-flight scope merges S and both replays: no conflict
+    assert_eq!(inflight(r), 0);
+    // (2) an include of S into c beside its replay: no conflict on x
+    r.view_include(&human(), "c", &[s.to_string()]).unwrap();
+    let conflicts = |r: &Rdy, v: &str| r.read().conflicts(&Scope::View(v.into())).unwrap().len();
+    assert_eq!(conflicts(r, "c"), 0);
+    assert_eq!(version(r, "c", &p.x), version(r, "a", &p.x));
+    // (3) after view a lands, b and c hold no conflict on x, and b can land
+    update(r, &human(), "b", &p.y, "y in b");
+    land(r, "a");
+    assert_eq!(conflicts(r, "b"), 0);
+    assert_eq!(conflicts(r, "c"), 0);
+    assert_eq!(inflight(r), 0);
+    land(r, "b");
+    assert_eq!(canon_version(r, &p.x), version(r, "c", &p.x));
+    assert_eq!(canon_version(r, &p.y), version(r, "b", &p.y));
+    // a landed doc and, unlanded, a prose under it, replayed into a view that holds the doc:
+    // the doc's create agrees with its own source, so the prose finds its parent there
+    let d = write(
+        r,
+        &human(),
+        "a3",
+        json!([{"op": "create", "type": "doc", "id": "$d", "fields": {"name": "three", "title": "Three", "doc_type": "page"}}]),
+    );
+    let did = d.created["$d"].clone();
+    land(r, "a3");
+    let n = write(
+        r,
+        &human(),
+        "a4",
+        json!([{"op": "create", "type": "prose", "id": "$n", "parent": did, "body": "Under three."}]),
+    );
+    new_view(r, &human(), "b3");
+    let res = replay(r, &human(), "b3", &[h(&d.change), h(&n.change)]);
+    assert!(res.conflicts.is_empty(), "{:?}", res.conflicts);
+    assert_eq!(
+        r.read()
+            .block(
+                &Scope::View("b3".into()),
+                &BlockId::parse(&n.created["$n"]).unwrap()
+            )
+            .unwrap()
+            .parent,
+        Some(BlockId::parse(&did).unwrap())
+    );
+    // a landed delete, replayed into a view whose base no longer holds the block: it agrees
+    let del = h(&write(r, &human(), "a5", json!([{"op": "delete", "id": p.y}])).change);
+    land(r, "a5");
+    new_view(r, &human(), "b5");
+    let res = replay(r, &human(), "b5", &[del]);
+    assert!(res.conflicts.is_empty(), "{:?}", res.conflicts);
+    assert_eq!(version(r, "b5", &p.y), None);
+    // and the other way round: the replay lands first, then its source's view lands
+    let s2 = update(r, &human(), "a2", &p.z, "z in a2");
+    new_view(r, &human(), "b2");
+    let res = replay(r, &human(), "b2", &[s2]);
+    assert!(res.conflicts.is_empty(), "{:?}", res.conflicts);
+    land(r, "b2");
+    assert_eq!(conflicts(r, "a2"), 0);
+    update(r, &human(), "a2", &p.w, "w in a2");
+    land(r, "a2");
+    assert_eq!(canon_version(r, &p.z), version(r, "a2", &p.z));
 }
 
 fn update_fields(r: &mut Rdy, view: &str, id: &str, title: &str) {

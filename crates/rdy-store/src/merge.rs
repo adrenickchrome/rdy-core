@@ -19,13 +19,24 @@ pub struct MergeChange<'a> {
     pub id: Hash,
     pub deps: &'a [Hash],
     pub ops: &'a [Op],
-    /// Whether the change replays another (`ChangeLinks::replayed_from` is set). A replay's op
-    /// whose base is not the block's version conflicts even when its result equals that version,
-    /// as does any op on another base whose block a replay wrote last in this merge, so the
-    /// order of a replay and an ordinary change never decides between them. A replay's op on a
-    /// conflicted block adds its side and keeps every side there: its deps never resolve a
-    /// conflict (only an ordinary write that covers every side does).
-    pub is_replay: bool,
+    /// The change this one replays (`ChangeLinks::replayed_from`), if any. A replay's op whose
+    /// base is not the block's version conflicts even when its result equals that version, as
+    /// does any op on another base whose block a replay wrote last in this merge, so the order of
+    /// a replay and an ordinary change never decides between them. The one exception is a replay
+    /// and its own source: the replay copies the source's ops, so the two share each op's base
+    /// and result and agree, as two ordinary ops with one result do (ruling task-7 item 2). The
+    /// source can be the change that wrote the block in this merge or the producer of the base
+    /// version (a landed source). A replay's op on a conflicted block adds its side and keeps
+    /// every side there: its deps never resolve a conflict (only an ordinary write that covers
+    /// every side does).
+    pub replayed_from: Option<Hash>,
+}
+
+impl MergeChange<'_> {
+    /// Whether the change replays another.
+    pub fn is_replay(&self) -> bool {
+        self.replayed_from.is_some()
+    }
 }
 
 /// One competing version of a conflicted block.
@@ -96,8 +107,9 @@ enum Slot {
     Clean {
         version: Option<Hash>,
         owner: Option<Hash>,
-        /// Whether `owner` is a replay of this merge (a base version's producer never is).
-        replay: bool,
+        /// The change `owner` replays, when `owner` is a replay of this merge (a base version's
+        /// producer never counts as one).
+        source: Option<Hash>,
     },
     Conflicted {
         base: Option<Hash>,
@@ -122,7 +134,7 @@ fn order(changes: &[MergeChange<'_>]) -> Vec<usize> {
         }
     }
     let id = |i: usize| changes[nodes[i]].id;
-    let key = |i: usize| (changes[nodes[i]].is_replay, changes[nodes[i]].id);
+    let key = |i: usize| (changes[nodes[i]].is_replay(), changes[nodes[i]].id);
     let mut indegree = vec![0usize; nodes.len()];
     let mut succ: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
     for (i, &at) in nodes.iter().enumerate() {
@@ -206,7 +218,7 @@ pub fn merge_on_blocks(
             id: c.id,
             deps: c.deps,
             ops,
-            is_replay: c.is_replay,
+            replayed_from: c.replayed_from,
         })
         .collect();
     merge(&base, &changes, producer, deleter)
@@ -243,7 +255,7 @@ pub fn merge_indexed(
                         Some(v) => producer(&v),
                         None => deleter(block),
                     },
-                    replay: false,
+                    source: None,
                 }
             });
             let expected = op.base();
@@ -259,17 +271,27 @@ pub fn merge_indexed(
                 Slot::Clean {
                     version,
                     owner,
-                    replay,
+                    source,
                 } if *version == expected && (expected.is_some() || knows(owner)) => {
                     *version = new;
                     *owner = Some(c.id);
-                    *replay = c.is_replay;
+                    *source = c.replayed_from;
                 }
-                // ordinary ops that reach the same result agree; a replay's differing base is a
-                // divergence even then, on either side
+                // ordinary ops that reach the same result agree, and so do a replay and its own
+                // source (one base, one result); a replay's differing base is a divergence
+                // otherwise, on either side
                 Slot::Clean {
-                    version, replay, ..
-                } if *version == new && !c.is_replay && !*replay => {}
+                    version,
+                    owner,
+                    source,
+                } if *version == new
+                    && match (c.replayed_from, *source) {
+                        (None, None) => true,
+                        // the replay meets its source, or the source meets its replay
+                        (from, source) => {
+                            (from.is_some() && from == *owner) || source == Some(c.id)
+                        }
+                    } => {}
                 Slot::Clean { version, owner, .. } => {
                     let theirs = Side {
                         change: *owner,
@@ -280,12 +302,12 @@ pub fn merge_indexed(
                         sides: vec![theirs, mine],
                     };
                 }
-                Slot::Conflicted { sides, .. } if c.is_replay => sides.push(mine),
+                Slot::Conflicted { sides, .. } if c.is_replay() => sides.push(mine),
                 Slot::Conflicted { sides, .. } if sides.iter().all(settled) => {
                     *slot = Slot::Clean {
                         version: new,
                         owner: Some(c.id),
-                        replay: false,
+                        source: None,
                     };
                 }
                 Slot::Conflicted { sides, .. } => {
