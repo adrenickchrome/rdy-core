@@ -1119,19 +1119,27 @@ impl Store {
         // the planner's refusal, so a store whose plan could not be made never opens as
         // current. Every other refusal of the planner (a backup limit or file type, an invalid
         // registry, I/O) is the open's at once.
-        let (steps, pending) = match plan_upgrade(dir, registry) {
-            Ok(plan) => (!plan.steps.is_empty(), plan.pending_check),
-            Err(planned @ StoreError::Format { .. }) => {
-                drop(Store::open_current_format_with(
-                    dir,
-                    vec![],
-                    held.cloned(),
-                    None,
-                    false,
-                )?);
-                return Err(planned);
-            }
-            Err(e) => return Err(e),
+        // With no registered step there is nothing to plan, and the open's own check of the
+        // log's features and the last receipt gives the planner's answers: a pending completion
+        // is accepted by AutoUpgrade and refused by RequireCurrent (`UpgradeRequired`), and a
+        // store the planner would refuse is refused by the open. So the sealed log is not walked
+        // on every open.
+        let (steps, pending) = match registry {
+            None if !crate::upgrade::has_registered_steps() => (false, false),
+            _ => match plan_upgrade(dir, registry) {
+                Ok(plan) => (!plan.steps.is_empty(), plan.pending_check),
+                Err(planned @ StoreError::Format { .. }) => {
+                    drop(Store::open_current_format_with(
+                        dir,
+                        vec![],
+                        held.cloned(),
+                        None,
+                        false,
+                    )?);
+                    return Err(planned);
+                }
+                Err(e) => return Err(e),
+            },
         };
         match policy {
             OpenPolicy::RequireCurrent => {
@@ -1654,7 +1662,19 @@ impl Store {
     /// store's. With `repair` (`f` is the caught-up log's), a `FORMAT` that lists more is put
     /// back to `f`: the sealed log is the authority.
     fn check_log_features(&mut self, f: &StoreFeatures, repair: bool) -> Result<(), StoreError> {
-        format::check_writable(f)?;
+        if let Err(refusal) = format::check_writable(f) {
+            // a sealed upgrade to a read-only feature this rdy does not know, which a newer rdy
+            // did not finish: this rdy cannot complete it (ruling task-9), whatever FORMAT says
+            if matches!(format::check_features(f), Ok(format::StoreAccess::ReadOnly))
+                && let Some(mirror) = format::read_format_file(&self.dir)?
+                && mirror != *f
+                && !f.is_subset_of(&mirror)
+                && self.receipt_explains(&mirror, f)?
+            {
+                return Err(unfinished_upgrade(f));
+            }
+            return Err(refusal);
+        }
         match format::read_format_file(&self.dir)? {
             Some(mirror) if mirror == *f => {}
             Some(mirror) if f.is_subset_of(&mirror) => {
@@ -3080,6 +3100,22 @@ impl StoreReader {
     /// written ([`StoreReader::get_body`]). A payload a redaction removed is `Redacted`.
     pub fn get_kind(&self, kind: u8, h: &Hash) -> Result<Vec<u8>, StoreError> {
         self.get_body(kind, h)
+    }
+
+    /// The stored payload length of the object of logical kind `kind` with hash `h`, read from
+    /// its frame header alone: no payload is read or allocated.
+    pub fn stored_len(&self, kind: u8, h: &Hash) -> Result<u64, StoreError> {
+        self.refuse_pending()?;
+        let loc = self
+            .index()
+            .typed(kind, h)?
+            .ok_or(StoreError::NotFound(*h))?;
+        match self.shared.segments.header(loc)? {
+            Some((len, _, found)) if found == *h => Ok(u64::from(len)),
+            _ => Err(StoreError::Decode(format!(
+                "the index places {h} at {loc:?}, which does not hold it; run rdy reindex"
+            ))),
+        }
     }
 
     /// [`StoreReader::get_kind`] with the frame's raw kind: the stored payload of the object of

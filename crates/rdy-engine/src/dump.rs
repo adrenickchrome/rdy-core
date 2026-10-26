@@ -258,7 +258,9 @@ impl ReadState {
             ));
         }
         let store = store_of(self)?;
-        if prev.store_format != store {
+        // a feature's first use after the previous file grows the manifest: the increment
+        // follows it as long as every feature of the previous file is still there as it was
+        if !store.follows(&prev.store_format) {
             return Err(dump_error::export_store_mismatch(
                 file,
                 &prev.store_format,

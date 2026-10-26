@@ -754,6 +754,63 @@ fn ok7_replay_parent_created_by_the_same_call() {
     assert_eq!(orders.len(), 2);
 }
 
+/// A replayed child depends on the replay that supplies its parent in the same call, whichever
+/// source sorts first by hash: excluding the parent's replay alone is `E_HAS_DEPENDENTS`, and
+/// including the child elsewhere brings the parent's replay with it, so neither leaves an orphan.
+#[test]
+fn ok7_a_replayed_child_depends_on_the_replay_of_its_parent() {
+    let mut p = project();
+    let r = &mut p.r;
+    let mut orders = BTreeSet::new();
+    for n in 0..64 {
+        if orders.len() == 2 {
+            break;
+        }
+        let src = format!("src{n}");
+        let d = write(
+            r,
+            &human(),
+            &src,
+            json!([{"op": "create", "type": "doc", "id": "$d", "fields": {"name": format!("d{n}"), "title": "D", "doc_type": "page"}}]),
+        );
+        let did = d.created["$d"].clone();
+        let w1 = h(&d.change);
+        let c = write(
+            r,
+            &human(),
+            &src,
+            json!([{"op": "create", "type": "prose", "id": "$n", "parent": did, "body": format!("Under d, {n}.")}]),
+        );
+        let w2 = h(&c.change);
+        assert!(!change(r, &w2).deps.contains(&w1));
+        let t = format!("t{n}");
+        new_view(r, &human(), &t);
+        let res = replay(r, &human(), &t, &[w2, w1]);
+        let (r1, r2) = (new_of(&res, &w1), new_of(&res, &w2));
+        assert!(change(r, &r2).deps.contains(&r1), "{n}");
+        // the parent's replay is first, so the call stays one acyclic write
+        let sources: Vec<Hash> = res.replayed.iter().map(|x| h(&x.source)).collect();
+        assert_eq!(sources, vec![w1, w2]);
+        // excluding the parent's replay alone is refused; nothing changes
+        let before = log_state(r);
+        let e = r
+            .view_exclude(&human(), &t, &[r1.to_string()], false)
+            .unwrap_err();
+        assert_eq!(e.code, E_HAS_DEPENDENTS, "{e}");
+        assert_eq!(log_state(r), before);
+        // including the child elsewhere brings its parent's replay
+        let u = format!("u{n}");
+        new_view(r, &human(), &u);
+        r.view_include(&human(), &u, &[r2.to_string()]).unwrap();
+        assert!(included(r, &u).contains(&r1));
+        r.propose(&human(), &u, "ok7", Some(common::TEST_SUMMARY))
+            .unwrap_or_else(|e| panic!("propose {u}: {e}"));
+        orders.insert(w2 < w1);
+    }
+    // both hash orders ran
+    assert_eq!(orders.len(), 2);
+}
+
 #[test]
 fn ok7_replay_and_its_source_never_conflict() {
     // ruling task-7 item 2, as ruling task-7-round1 restates it: source S updates x (u to v) in
@@ -1338,8 +1395,16 @@ fn ok7_replay_limits_precede_allocation() {
     new_view(&mut p.r, &human(), "t");
     let before = log_state(&p.r);
     let input: Vec<String> = big.iter().map(|c| c.to_string()).collect();
+    let read = p.r.read().reader().frames_read();
     assert_eq!(as_tuple(replay_err(&mut p.r, &human(), "t", &input)), limit);
     assert_eq!(log_state(&p.r), before);
+    // the stored lengths are checked before a source is read: the second source, which the
+    // first leaves no room for, is never read or decoded
+    assert_eq!(
+        p.r.read().reader().frames_read() - read,
+        1,
+        "only the first source was read"
+    );
     // a cycle among the selected sources (a content-addressed log holds none, so the order is
     // checked directly)
     let (a, b, c) = (Hash::of(b"a"), Hash::of(b"b"), Hash::of(b"c"));
@@ -1387,4 +1452,200 @@ fn ok7_replay_limits_precede_allocation() {
     let e = replay_err(&mut r, &human(), "t", &[s.to_string()]);
     assert_eq!(e.code, E_REDACTED, "{e}");
     assert_eq!(log_state(&r), before);
+}
+
+/// The dump `file` written again at `out` with its header store set by `store`: the same files
+/// and batches, a valid trailer, a hand-made manifest.
+fn rewrite_store(
+    file: &std::path::Path,
+    out: &std::path::Path,
+    store: impl FnOnce(&mut rdy_store::format::StoreFeatures),
+) {
+    use rdy_store::dump::{DumpItem, DumpReader, DumpWriter, RemovalTally};
+    use rdy_store::format::DumpStore;
+    let (mut rd, _, mut header) =
+        DumpReader::open(std::io::BufReader::new(File::open(file).unwrap())).unwrap();
+    let mut items = vec![];
+    while let Some(item) = rd.next().unwrap() {
+        items.push(item);
+    }
+    match &mut header.store {
+        DumpStore::Features(m) => store(m),
+        DumpStore::Legacy(n) => panic!("a feature dump, not store format {n}"),
+    }
+    let mut w = DumpWriter::new(File::create(out).unwrap(), &header).unwrap();
+    let mut tally = RemovalTally::default();
+    for item in &items {
+        match item {
+            DumpItem::File { path, bytes } => w.file(path, bytes).unwrap(),
+            DumpItem::Batch(b) => {
+                tally.observe(b).unwrap();
+                w.batch(b).unwrap();
+            }
+        }
+    }
+    w.finish(tally.facts().unwrap()).unwrap();
+}
+
+/// A dump chain crosses a feature's first use: a full dump, an increment, one replay (the first
+/// use of `view_replay`), then an increment after it. The chain loads, passes fsck, and holds the
+/// grown manifest. A manifest that lost or changed a feature never follows, with the existing
+/// texts.
+#[test]
+fn ok4_a_dump_chain_crosses_a_first_use() {
+    use rdy_engine::dump::chain_end_of;
+    use rdy_store::dump_chain::ChainEnd;
+    use rdy_store::format::{
+        DumpStore, FEATURE_DISPUTE, FEATURE_VIEW_REPLAY, StoreFeatures, registered_features,
+    };
+    let export_fix =
+        "follow the newest file of this store's chain, or start a new chain with rdy dump";
+    let load_fix = "pass the full dump, then each increment in chain order";
+    let json = |m: &StoreFeatures| String::from_utf8(m.to_json()).unwrap();
+    let mut p = project();
+    let d = p.dir.path().to_path_buf();
+    let (full, inc1, inc2) = (
+        d.join("full.rdydump"),
+        d.join("inc1.rdydump"),
+        d.join("inc2.rdydump"),
+    );
+    let r = &mut p.r;
+    let sx = update(r, &human(), "src", &p.x, "x src");
+    r.read().dump(&full).unwrap();
+    update(r, &human(), "src", &p.y, "y src");
+    r.read().dump_after_file(&full, &inc1).unwrap();
+    let before = r.read().reader().store_features().unwrap();
+    assert!(!before.has(FEATURE_VIEW_REPLAY));
+    // the replay is the feature's first use: the manifest grows
+    new_view(r, &human(), "t");
+    replay(r, &human(), "t", &[sx]);
+    let after = r.read().reader().store_features().unwrap();
+    assert!(after.has(FEATURE_VIEW_REPLAY));
+    assert!(before.is_subset_of(&after) && before != after);
+    // the increment after the first use follows the newest file of the chain
+    let s = r.read().dump_after_file(&inc1, &inc2).unwrap();
+    assert!(s.out.is_some());
+    assert_eq!(s.store_format, DumpStore::Features(after.clone()));
+    // the chain loads, passes fsck and holds the grown manifest
+    let loaded = d.join("loaded");
+    let summary = load::load_chain(&[full.clone(), inc1.clone(), inc2.clone()], &loaded, None)
+        .unwrap_or_else(|e| panic!("chain load: {e}"));
+    assert_eq!(summary.store_format, DumpStore::Features(after.clone()));
+    let l = Rdy::open(&loaded).unwrap();
+    l.fsck().unwrap();
+    assert_eq!(l.read().reader().store_features().unwrap(), after);
+    assert_eq!(
+        included(&l, "t").len(),
+        included(r, "t").len(),
+        "the replay is in the loaded view"
+    );
+    drop(l);
+
+    // export: a previous file that names a feature this store lacks (a shrink) is refused
+    let prev = chain_end_of(&inc2, &mut File::open(&inc2).unwrap()).unwrap();
+    let dispute: Vec<_> = registered_features()
+        .into_iter()
+        .filter(|f| f.name == FEATURE_DISPUTE)
+        .collect();
+    let grown = after.merged(&dispute);
+    let out = d.join("never.rdydump");
+    let e = r
+        .read()
+        .dump_after(
+            &ChainEnd {
+                store_format: DumpStore::Features(grown.clone()),
+                ..prev.clone()
+            },
+            &out,
+        )
+        .unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            E_DUMP_CHAIN,
+            format!(
+                "previous dump is of store features {}, but this store is of store features {}",
+                json(&grown),
+                json(&after)
+            )
+            .as_str(),
+            export_fix
+        )
+    );
+    // and so is one whose feature has another required version (a changed feature)
+    let mut changed = after.clone();
+    changed.features[0].required_rdy = "0.0.1".into();
+    let e = r
+        .read()
+        .dump_after(
+            &ChainEnd {
+                store_format: DumpStore::Features(changed.clone()),
+                ..prev.clone()
+            },
+            &out,
+        )
+        .unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            E_DUMP_CHAIN,
+            format!(
+                "previous dump is of store features {}, but this store is of store features {}",
+                json(&changed),
+                json(&after)
+            )
+            .as_str(),
+            export_fix
+        )
+    );
+    assert!(!out.exists());
+
+    // load: an increment whose manifest lost a feature of the file before it is refused
+    let shrunk = d.join("inc1-shrunk.rdydump");
+    rewrite_store(&inc1, &shrunk, |m| {
+        m.features.retain(|f| f.name != "object_encoding")
+    });
+    let to = d.join("never-a");
+    let e = load::load_chain(&[full.clone(), shrunk.clone(), inc2.clone()], &to, None).unwrap_err();
+    let mut lost = before.clone();
+    lost.features.retain(|f| f.name != "object_encoding");
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            E_DUMP_CHAIN,
+            format!(
+                "{} is of store features {}, but the chain is of store features {}",
+                shrunk.display(),
+                json(&lost),
+                json(&before)
+            )
+            .as_str(),
+            load_fix
+        )
+    );
+    assert!(!to.join(".rdy").exists());
+    // and so is one whose feature changed its required version
+    let bent = d.join("inc2-changed.rdydump");
+    rewrite_store(&inc2, &bent, |m| {
+        m.features[0].required_rdy = "0.0.1".into()
+    });
+    let mut bent_store = after.clone();
+    bent_store.features[0].required_rdy = "0.0.1".into();
+    let to = d.join("never-b");
+    let e = load::load_chain(&[full, inc1, bent.clone()], &to, None).unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            E_DUMP_CHAIN,
+            format!(
+                "{} is of store features {}, but the chain is of store features {}",
+                bent.display(),
+                json(&bent_store),
+                json(&before)
+            )
+            .as_str(),
+            load_fix
+        )
+    );
+    assert!(!to.join(".rdy").exists());
 }

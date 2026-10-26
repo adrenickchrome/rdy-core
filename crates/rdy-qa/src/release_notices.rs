@@ -2600,9 +2600,9 @@ mod tests {
         assert_eq!(format_move_line("0.21.0", ("0.20.0", 3, 18), (3, 18)), None);
         // O18: from the last scalar store to feature-based stores
         assert_eq!(
-            format_move_line("0.23.0", ("0.20.0", 3, 18), current_store()).as_deref(),
+            format_move_line("0.26.0", ("0.20.0", 3, 18), current_store()).as_deref(),
             Some(
-                "- **Breaking: the store format moves from 18 to feature-based stores (dump pair (3, 18) to dump format 4).** rdy 0.23.0 refuses a store made by rdy 0.20.0 with `E_STORE_FORMAT`. To move a project, run `rdy dump --out <file>` with rdy 0.20.0, then `rdy load <file> <dir>` with rdy 0.23.0, into a directory with no store."
+                "- **Breaking: the store format moves from 18 to feature-based stores (dump pair (3, 18) to dump format 4).** rdy 0.26.0 refuses a store made by rdy 0.20.0 with `E_STORE_FORMAT`. To move a project, run `rdy dump --out <file>` with rdy 0.20.0, then `rdy load <file> <dir>` with rdy 0.26.0, into a directory with no store."
             )
         );
         assert_eq!(current_store(), WrittenStore::Features(4));

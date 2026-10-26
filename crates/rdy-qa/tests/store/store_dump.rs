@@ -614,8 +614,9 @@ fn dl1_an_unassigned_kind_is_refused() {
     let good = stream(&s, &batches, &[]);
     let recs = records(&good);
     let first = recs.iter().position(|(k, _)| *k < rec::HEADER).unwrap();
-    // 28 (the check request) is the last assigned; 12 stays unassigned, and 29 is the next
-    for k in [12u8, 14, 29] {
+    // 28 (the check request) is the last assigned; 12 and 14 stay unassigned, and 127 is
+    // unassigned past every reserved kind (29 is reserved for a later record)
+    for k in [12u8, 14, 127] {
         // the reader
         let mut r = recs.clone();
         r[first].0 = k;

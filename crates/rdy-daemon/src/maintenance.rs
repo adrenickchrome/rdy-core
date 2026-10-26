@@ -3,9 +3,9 @@
 //!
 //! The coordinator plans the closed store first (`rdy_engine::maintenance::plan`). A plan with
 //! no steps and no pending completion returns unchanged: no daemon is stopped, no lock taken.
-//! Otherwise it stops the project's daemon with [`request_stop`] (its peer identity checks
-//! included), waits for that daemon to exit, takes `start.lock` (so no client starts a daemon
-//! meanwhile), and applies the plan through `rdy_engine::maintenance::apply_planned`, which
+//! Otherwise it takes `start.lock` (so no client starts a daemon meanwhile), stops the
+//! project's daemon with [`request_stop`] (its peer identity checks included), waits for that
+//! daemon to exit, and applies the plan through `rdy_engine::maintenance::apply_planned`, which
 //! takes the store lock, plans again and runs the upgrade and its completion. The old daemon is
 //! not restarted: the next ordinary connection starts this rdy's.
 //!
@@ -30,6 +30,33 @@ const POLL: Duration = Duration::from_millis(25);
 /// How long the coordinator waits for a stopped daemon to exit: its drain, then its blocking
 /// work and the store's close (as `rdy serve --stop` waits).
 const STOP_WAIT: Duration = Duration::from_secs(120);
+
+thread_local! {
+    /// The steps an ordinary connection's start plans with on this thread
+    /// ([`with_start_registry_for_tests`]); None is this rdy's.
+    static START_REGISTRY: std::cell::RefCell<Option<Vec<UpgradeStep>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test hook: runs `f` with the start of an ordinary connection on this thread
+/// ([`before_start`], and the stop of another version's daemon) planning with `registry`.
+#[doc(hidden)]
+pub fn with_start_registry_for_tests<T>(registry: Vec<UpgradeStep>, f: impl FnOnce() -> T) -> T {
+    struct Off;
+    impl Drop for Off {
+        fn drop(&mut self) {
+            START_REGISTRY.with(|r| *r.borrow_mut() = None);
+        }
+    }
+    START_REGISTRY.with(|r| *r.borrow_mut() = Some(registry));
+    let _off = Off;
+    f()
+}
+
+/// The steps a connection's start plans with on this thread.
+fn start_registry() -> Option<Vec<UpgradeStep>> {
+    START_REGISTRY.with(|r| r.borrow().clone())
+}
 
 /// How many times a coordinator has run in this process (a test reads it).
 static COORDINATOR_RUNS: AtomicU64 = AtomicU64::new(0);
@@ -138,8 +165,9 @@ fn hello(root: &Path, run: &RunDir) -> Option<Hello> {
     })
 }
 
-/// The coordinator of [`run`]: stops the project's daemon, waits for it to exit, takes
-/// `start.lock` and applies `planned` under it.
+/// The coordinator of [`run`]: takes `start.lock`, so no ordinary connection starts a daemon
+/// meanwhile, then stops the project's daemon, waits for it to exit and applies `planned` under
+/// the lock.
 async fn coordinate(
     root: &Path,
     planned: UpgradePlan,
@@ -148,7 +176,6 @@ async fn coordinate(
     COORDINATOR_RUNS.fetch_add(1, Ordering::SeqCst);
     let run = RunDir::of_project(root);
     let timeout = rdy_engine::serve_config(root).start_timeout;
-    stop_daemon(root, &run, timeout).await.map_err(rdy_error)?;
     run.ensure().map_err(|e| {
         RdyError::new(
             E_IO,
@@ -162,15 +189,20 @@ async fn coordinate(
     let _start = start_lock(&run, Instant::now() + timeout)
         .await
         .map_err(rdy_error)?;
+    stop_daemon(root, &run, timeout, None)
+        .await
+        .map_err(rdy_error)?;
     apply_while_locked(root, &planned, registry, Instant::now() + timeout).await
 }
 
 /// Asks the project's daemon to stop ([`request_stop`]) and waits for it to exit: its process
-/// when its pid is known, else its socket. Nothing is done when no daemon answers.
+/// when its pid is known, else its socket. Nothing is done when no daemon answers. The wait ends
+/// after [`STOP_WAIT`], or at `deadline` when that comes first (a connection's own deadline).
 pub(crate) async fn stop_daemon(
     root: &Path,
     run: &RunDir,
     start_timeout: Duration,
+    deadline: Option<Instant>,
 ) -> Result<(), ErrorReply> {
     let Some(hello) = hello(root, run) else {
         return Ok(());
@@ -183,14 +215,15 @@ pub(crate) async fn stop_daemon(
         Some(p) => !crate::spawn::process_alive(p),
         None => !socket.exists(),
     };
-    let deadline = Instant::now() + STOP_WAIT;
+    let started = Instant::now();
+    let until = deadline.map_or(started + STOP_WAIT, |d| d.min(started + STOP_WAIT));
     while !gone() {
-        if Instant::now() >= deadline {
+        if Instant::now() >= until {
             return Err(ErrorReply::new(
                 E_DAEMON_GONE,
                 format!(
                     "the daemon was asked to stop for the upgrade but has not exited within {} s",
-                    STOP_WAIT.as_secs()
+                    until.saturating_duration_since(started).as_secs()
                 ),
                 "look at .rdy/run/daemon.log; run rdy serve --stop, then retry rdy upgrade",
             ));
@@ -260,7 +293,8 @@ pub(crate) async fn before_start(run: &RunDir, deadline: Instant) -> Result<(), 
         return Ok(());
     };
     COORDINATOR_RUNS.fetch_add(1, Ordering::SeqCst);
-    apply_while_locked(&root, &planned, None, deadline)
+    let registry = start_registry();
+    apply_while_locked(&root, &planned, registry.as_deref(), deadline)
         .await
         .map(|_| ())
         .map_err(ErrorReply::from)
@@ -272,7 +306,7 @@ fn start_plan(root: &Path) -> Result<Option<UpgradePlan>, ErrorReply> {
     if std::fs::symlink_metadata(&format).is_err() {
         return Ok(None);
     }
-    match m::plan(root) {
+    match plan(root, start_registry().as_deref()) {
         Ok(p) if m::needs_work(&p) => Ok(Some(p)),
         Ok(_) => Ok(None),
         Err(e) if e.code == rdy_engine::E_STORE_FORMAT => Err(e.into()),

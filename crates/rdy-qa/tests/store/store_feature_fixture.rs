@@ -437,4 +437,29 @@ fn ok13_store_fixture_publication_marker_is_explicit() {
     for bad in ["/Users", "/home/", "/tmp", "/var/", "\\\\", ":\\"] {
         assert!(!text.contains(bad), "the expect file names {bad}");
     }
+    // no host: the file holds only its four members, none of them a host's, and no text names
+    // this machine or a local network name
+    let mut keys: Vec<&str> = want
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort();
+    assert_eq!(keys, ["inventory", "producer_commit", "published", "store"]);
+    let host = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_lowercase())
+        .unwrap_or_default();
+    let lower = text.to_lowercase();
+    for name in [host.as_str(), host.split('.').next().unwrap_or("")] {
+        assert!(
+            name.len() < 3 || !lower.contains(name),
+            "the expect file names this host {name}"
+        );
+    }
+    for bad in [".local\"", ".lan\"", ".internal\"", "localhost"] {
+        assert!(!lower.contains(bad), "the expect file names a host: {bad}");
+    }
 }

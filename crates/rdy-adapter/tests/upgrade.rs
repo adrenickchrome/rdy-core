@@ -486,6 +486,13 @@ fn ok12_held_snapshot_blocks_maintenance_until_released() {
     let h = StoreHandle::open_holder(&root).unwrap();
     let e = locked(&root);
     assert_eq!((e.code, e.fix.as_str()), ("E_LOCKED", LOCKED_FIX), "{e:?}");
+    assert_eq!(
+        e.message,
+        format!(
+            "the project store at {} is held by another rdy process (the daemon, or a command run with --no-daemon)",
+            root.join(".rdy").join("store").display()
+        )
+    );
     // a dry run needs neither the lock nor a handle, and lists the plan
     let dry = maintenance::upgrade_with_registry_for_tests(&root, true, &registry()).unwrap();
     assert_eq!(dry.steps, ["add_test"]);

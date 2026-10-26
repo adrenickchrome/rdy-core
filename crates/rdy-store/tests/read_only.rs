@@ -578,6 +578,63 @@ fn ok9_pending_upgrade_refuses_a_read_only_open() {
     assert_eq!(std::fs::read(f.dir.join("FORMAT")).unwrap(), format_before);
 }
 
+/// A newer rdy sealed an upgrade that adds a read-only feature this rdy does not know, on a
+/// store whose `FORMAT` this rdy may write, and stopped before its completion published `FORMAT`.
+/// Every open refuses it with the unfinished-upgrade text (ruling task-9), never the older
+/// "needs rdy" text, and changes no log or `FORMAT` byte.
+#[test]
+fn ok9_a_pending_upgrade_to_an_unknown_read_only_feature_is_unfinished() {
+    use rdy_store::format::{StoreFeature, StoreFeatures, TEST_FEATURE, TEST_FEATURE_RDY};
+    use rdy_store::upgrade::{self, UpgradeStep};
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("store");
+    Store::create(&dir).unwrap().close().unwrap();
+    let registry = vec![UpgradeStep {
+        id: "add_read_only".into(),
+        from: StoreFeatures::of(vec![]),
+        to: StoreFeatures::of(vec![StoreFeature {
+            name: TEST_FEATURE.into(),
+            class: FeatureClass::ReadOnlyCompatible,
+            required_rdy: TEST_FEATURE_RDY.into(),
+        }]),
+    }];
+    {
+        let _known = inject_test_feature(FeatureClass::ReadOnlyCompatible, kinds::BLOB_CHUNK);
+        let lock = StoreLock::take(&dir).unwrap();
+        let plan = upgrade::inspect_with_registry_for_tests(&dir, &registry).unwrap();
+        assert_eq!(plan.steps, ["add_read_only"]);
+        upgrade::apply_locked_with_registry_for_tests(&dir, &lock, &plan, &registry).unwrap();
+    }
+    // the log and FORMAT: the open refuses once it reads the log's features, after it opened
+    // the derived index, so only derived files may differ
+    let kept =
+        |t: BTreeMap<PathBuf, Option<(u64, Vec<u8>)>>| -> Vec<(PathBuf, Option<(u64, Vec<u8>)>)> {
+            t.into_iter()
+                .filter(|(p, _)| p.starts_with(dir.join("segments")) || p.ends_with("FORMAT"))
+                .collect()
+        };
+    let before = kept(tree(base.path()));
+    for policy in [OpenPolicy::AutoUpgrade, OpenPolicy::RequireCurrent] {
+        match Store::open_with_policy(&dir, policy).err() {
+            Some(StoreError::Format { message, fix }) => assert_eq!(
+                (message.as_str(), fix.as_str()),
+                (
+                    "the store has an upgrade a newer rdy started and did not finish",
+                    format!("open the project with rdy {TEST_FEATURE_RDY} or later to finish the upgrade")
+                        .as_str()
+                ),
+                "{policy:?}"
+            ),
+            other => panic!("{policy:?}: not the unfinished-upgrade refusal: {other:?}"),
+        }
+        assert_eq!(
+            kept(tree(base.path())),
+            before,
+            "{policy:?}: no log or FORMAT byte changed"
+        );
+    }
+}
+
 /// A store whose upgrade plan cannot be made never opens as current: the planner's refusal is
 /// the open's, under both policies, and nothing is upgraded or written.
 #[cfg(unix)]

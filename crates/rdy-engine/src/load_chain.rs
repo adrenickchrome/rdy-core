@@ -27,6 +27,7 @@ use rdy_store::dump_scan::{
     ChainLink, ChainSource, Envelope, FileRole, METADATA_MISMATCH, ProjectFile, ScanError,
     ScanPlan, StopFailure, StopMatch, scan,
 };
+use rdy_store::format::DumpStore;
 use rdy_store::holder::StoreMode;
 use rdy_store::ingest::Ingest;
 use rdy_store::redaction::limit;
@@ -201,7 +202,12 @@ pub(crate) fn load_verified(plan: &ChainPlan, project: &Path) -> Result<LoadSumm
         Ok(LoadSummary {
             project: project.display().to_string(),
             dump_format: first.format,
-            store_format: first.header.store.clone(),
+            // a feature chain's manifest grows with first uses: the store the load holds is
+            // the one in force at its end
+            store_format: match scan.store() {
+                DumpStore::Features(_) => scan.store().clone(),
+                DumpStore::Legacy(_) => first.header.store.clone(),
+            },
             batches,
             frames,
             files_written: placed.written,

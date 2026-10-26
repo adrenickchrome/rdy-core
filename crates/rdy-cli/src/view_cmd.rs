@@ -416,7 +416,8 @@ fn show_text(v: &Value, all: bool) -> String {
             short(text(&c["id"])),
             text(&c["actor"]),
             if message.is_empty() { "-" } else { message },
-            if c["client_nonce"].is_string() {
+            // a replay's nonce is its own: only a working-copy commit is marked
+            if c["client_nonce"].is_string() && c["replayed_from"].is_null() {
                 " [wc]"
             } else {
                 ""
@@ -702,6 +703,33 @@ mod tests {
             let t = render(op, &reply);
             assert!(t.ends_with(want), "{op}: {t}");
         }
+    }
+
+    /// ok10: only a working-copy commit is marked `[wc]`. A replay carries a client nonce of
+    /// its own (`replay:<head>:<n>`) and is marked by its source instead.
+    #[test]
+    fn ok10_a_replayed_change_is_not_marked_as_a_working_copy_commit() {
+        let mut d = detail(1);
+        d["changes"] = json!([
+            {"id": "cd".repeat(32), "actor": "agent:a", "run": null, "at_ms": 1, "message": "",
+             "blocks": ["c-00001"], "client_nonce": format!("replay:{}:0", "ab".repeat(32)),
+             "replayed_from": "ef".repeat(32)},
+            {"id": "12".repeat(32), "actor": "human:qa", "run": null, "at_ms": 2,
+             "message": "from files", "blocks": ["c-00002"], "client_nonce": "n-1"}
+        ]);
+        let t = show_text(&d, false);
+        let line = |id: &str| {
+            t.lines()
+                .find(|l| l.starts_with(&format!("  {id}")))
+                .unwrap()
+        };
+        let replayed = line(&"cd".repeat(6));
+        assert!(!replayed.contains("[wc]"), "{replayed}");
+        assert!(
+            replayed.ends_with(&format!(" replayed from {}", "ef".repeat(6))),
+            "{replayed}"
+        );
+        assert!(line(&"12".repeat(6)).contains("from files [wc]"), "{t}");
     }
 
     /// Final-review fix round 1: a close op prints its reason, and `view ls --all` prints why

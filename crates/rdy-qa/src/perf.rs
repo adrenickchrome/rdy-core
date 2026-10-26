@@ -4997,6 +4997,7 @@ fn m3a_replay(
             .iter()
             .map(|m| m.change.parse().expect("replayed hash"))
             .collect();
+        assert_eq!(res.replayed.len(), n, "one mapping row per source");
         assert_eq!(mapped, want, "every source is replayed once");
         assert_eq!(made.len(), n, "each source has its own new change");
         assert!(made.is_disjoint(&want), "a replay writes new changes");
@@ -5048,7 +5049,7 @@ fn m3a_landing(
     let fx = parent.join(format!("m3a{sfx}-landing-{n}"));
     copy_project(&base.dir, &fx);
     let section = base.section.to_string();
-    let (proposal, a, b, changes) = {
+    let (proposal, a, b, changes, first) = {
         let mut r = Rdy::open(&fx).expect("open the landing fixture");
         let mut ids = vec![];
         for (view, body) in [
@@ -5088,7 +5089,13 @@ fn m3a_landing(
             .expect("propose the second view");
         crate::intake::confirm_before_landing(&mut r, &approver(), &p);
         r.close().expect("close the fixture");
-        (p.id.clone(), ids[0].clone(), ids[1].clone(), p.changes)
+        (
+            p.id.clone(),
+            ids[0].clone(),
+            ids[1].clone(),
+            p.changes,
+            first,
+        )
     };
     let mut facts = None;
     out.push(measure_timed(&op, runs, |i| {
@@ -5107,7 +5114,9 @@ fn m3a_landing(
                 .order
         };
         let (ka, kb) = (key(&a), key(&b));
+        assert_eq!(ka, first, "the block landed first keeps its key");
         assert_ne!(ka, kb, "the landing gave its own block a key of its own");
+        let distinct = BTreeSet::from([ka.clone(), kb.clone()]).len() as u64;
         if i == 0 {
             let objects = scan_frame_count(&r);
             drop(r);
@@ -5118,7 +5127,7 @@ fn m3a_landing(
                 ops: 1,
                 bytes: segment_bytes(&work),
                 objects,
-                extra: vec![("distinct_keys", 2)],
+                extra: vec![("distinct_keys", distinct)],
             });
         } else {
             drop(r);
@@ -5181,7 +5190,8 @@ fn m3a_read_only(
             r.is_read_only(),
             "the unknown feature makes the open read-only"
         );
-        assert_eq!(before, dir_digest(&dir), "the source store is unchanged");
+        let unchanged = before == dir_digest(&dir);
+        assert!(unchanged, "the source store is unchanged");
         if i == 0 {
             let objects = scan_frame_count(&r);
             facts = Some(M3aFacts {
@@ -5191,7 +5201,7 @@ fn m3a_read_only(
                 ops: 0,
                 bytes: segment_bytes(&work),
                 objects,
-                extra: vec![("source_bytes_unchanged", 1)],
+                extra: vec![("source_bytes_unchanged", u64::from(unchanged))],
             });
         }
         drop(r);
@@ -5255,6 +5265,7 @@ fn m3a_upgrade(
         assert!(backup.is_dir(), "the backup stays beside the store");
         let receipt = report.receipt.as_ref().expect("one upgrade receipt");
         assert_eq!(receipt.steps, [M3A_STEP.to_string()]);
+        let receipts = u64::from(report.receipt.is_some());
         let mirror = rdy_store::format::read_format_file(&work.join(".rdy").join("store"))
             .expect("read FORMAT")
             .expect("FORMAT is published");
@@ -5273,7 +5284,7 @@ fn m3a_upgrade(
                 ops: 0,
                 bytes: segment_bytes(&work),
                 objects,
-                extra: vec![("receipts", 1), ("backup_bytes", dir_bytes(&backup))],
+                extra: vec![("receipts", receipts), ("backup_bytes", dir_bytes(&backup))],
             });
         }
         std::fs::remove_dir_all(&work).expect("remove the copy");
@@ -5849,7 +5860,7 @@ pub fn run_workload() -> Vec<Measure> {
     drop(r);
     // on projects of their own: the records they add move nothing above
     tier_coord(&mut out, dir.path(), "", &TYPICAL_RUNS, COORD_N);
-    tier_m3a(&mut out, dir.path(), "", 5, &M3A_TYPICAL);
+    tier_m3a(&mut out, dir.path(), "", TYPICAL_RUNS.landing, &M3A_TYPICAL);
     // the large `rdy_write` last, on a reopened project: its 6,000 blocks move nothing above
     tier_mcp(&mut out, &proj);
     if crate::fixtures::deep() {
@@ -6571,7 +6582,7 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     tier_inbox(&mut out, &mut r, &fx, sfx, &LARGE_RUNS, 200);
     drop(r);
     // on projects of their own: the 10,000-block cases of the M3a operations
-    tier_m3a(&mut out, parent, sfx, 3, &M3A_LARGE);
+    tier_m3a(&mut out, parent, sfx, LARGE_RUNS.landing, &M3A_LARGE);
     out
 }
 
@@ -8435,8 +8446,8 @@ mod tests {
             )
         );
         assert!(large.contains("tier_intake(&mut out, &mut r, sfx, LARGE_RUNS.view_ops);"));
-        at("tier_m3a(&mut out, dir.path(), \"\", 5, &M3A_TYPICAL);");
-        assert!(large.contains("tier_m3a(&mut out, parent, sfx, 3, &M3A_LARGE);"));
+        at("tier_m3a(&mut out, dir.path(), \"\", TYPICAL_RUNS.landing, &M3A_TYPICAL);");
+        assert!(large.contains("tier_m3a(&mut out, parent, sfx, LARGE_RUNS.landing, &M3A_LARGE);"));
     }
 
     /// Task 15 (tb-A4DAV): the nine reported operations have their names, in the typical tier,
@@ -8520,10 +8531,14 @@ mod tests {
         };
         let typical = body("pub fn run_workload(");
         assert_eq!(typical.matches("tier_m3a(").count(), 1);
-        assert!(typical.contains("tier_m3a(&mut out, dir.path(), \"\", 5, &M3A_TYPICAL);"));
+        assert!(
+            typical.contains(
+                "tier_m3a(&mut out, dir.path(), \"\", TYPICAL_RUNS.landing, &M3A_TYPICAL);"
+            )
+        );
         let large = body("fn run_large_tier(");
         assert_eq!(large.matches("tier_m3a(").count(), 1);
-        assert!(large.contains("tier_m3a(&mut out, parent, sfx, 3, &M3A_LARGE);"));
+        assert!(large.contains("tier_m3a(&mut out, parent, sfx, LARGE_RUNS.landing, &M3A_LARGE);"));
     }
 
     /// Task 15: reduced fixtures run each operation for real, with no timing assertion: the

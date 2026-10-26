@@ -229,6 +229,71 @@ fn ok7_replay_keeps_every_side_of_a_conflict() {
     assert_eq!(m.conflicts[0].sides, want);
 }
 
+/// A replay op on a conflicted block whose result equals a side already there adds no side:
+/// "v against v" never reaches a person (ruling task-7-round1), so a replay and the source it
+/// copies, once that source landed, are one side.
+#[test]
+fn ok7_a_replay_equal_to_a_conflict_side_adds_no_side() {
+    let f = fixture();
+    let to_v2 = Op::Update {
+        base: f.v1.version_hash(),
+        block: f.v2.clone(),
+    };
+    let to_v0 = Op::Update {
+        base: f.v1.version_hash(),
+        block: f.v0.clone(),
+    };
+    let want = conflict(
+        &f.b,
+        Some(f.v1.version_hash()),
+        vec![
+            side(Some(h(CANON)), Some(f.v0.version_hash())),
+            side(Some(h("w")), Some(f.v2.version_hash())),
+        ],
+    );
+    // the ordinary source conflicts with the target; its replay reaches the same version
+    let m = merged(
+        &f.base,
+        &[
+            owned("w", vec![], vec![to_v2.clone()], false),
+            replay_of("r", vec![], vec![to_v2.clone()], "w"),
+        ],
+    );
+    assert_eq!(m.conflicts, vec![want.clone()]);
+    // a replay that reaches the target's own version adds no side either
+    let m = merged(
+        &f.base,
+        &[
+            owned("w", vec![], vec![to_v2.clone()], false),
+            owned("r", vec![], vec![to_v0], true),
+        ],
+    );
+    assert_eq!(m.conflicts, vec![want]);
+    // a replay with a third version still adds its side
+    let v3 = block("b-00001", "a third result");
+    let m = merged(
+        &f.base,
+        &[
+            owned("w", vec![], vec![to_v2], false),
+            owned(
+                "r",
+                vec![],
+                vec![Op::Update {
+                    base: f.v1.version_hash(),
+                    block: v3.clone(),
+                }],
+                true,
+            ),
+        ],
+    );
+    assert_eq!(m.conflicts[0].sides.len(), 3, "{:?}", m.conflicts);
+    assert!(
+        m.conflicts[0]
+            .sides
+            .contains(&side(Some(h("r")), Some(v3.version_hash())))
+    );
+}
+
 #[test]
 fn ok7_replay_never_resolves_a_conflict_its_deps_cover() {
     let f = fixture();

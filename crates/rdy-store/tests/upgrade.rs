@@ -1607,3 +1607,38 @@ fn ok12_a_live_reader_is_refused_before_the_backup() {
     assert!(report.changed && report.batch.is_some(), "{report:?}");
     assert_eq!(upgrade_batches(&dir), 1);
 }
+
+/// ok9: with no registered upgrade step, an open plans nothing, so it walks no sealed log for a
+/// plan: the cost of a writable or RequireCurrent open does not grow with the log. An open with
+/// steps (the injected registry here) still plans from the sealed log.
+#[test]
+fn ok9_an_open_with_no_registered_step_walks_no_log() {
+    use rdy_store::OpenPolicy;
+    assert!(
+        !upgrade::has_registered_steps(),
+        "production registers no step"
+    );
+    let base = tempfile::tempdir().unwrap();
+    let dir = project(base.path());
+    for policy in [OpenPolicy::AutoUpgrade, OpenPolicy::RequireCurrent] {
+        let walks = upgrade::sealed_walks_for_tests();
+        Store::open_with_policy(&dir, policy)
+            .unwrap()
+            .close()
+            .unwrap();
+        assert_eq!(
+            upgrade::sealed_walks_for_tests(),
+            walks,
+            "{policy:?}: the open walked the log for a plan"
+        );
+    }
+    let walks = upgrade::sealed_walks_for_tests();
+    Store::open_with_registry_for_tests(&dir, OpenPolicy::RequireCurrent, &[])
+        .unwrap()
+        .close()
+        .unwrap();
+    assert!(
+        upgrade::sealed_walks_for_tests() > walks,
+        "an open with a registry plans from the sealed log"
+    );
+}

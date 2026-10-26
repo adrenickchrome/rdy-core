@@ -21,8 +21,8 @@ fn ok1_the_format_text_is_the_feature_manifest() {
         baseline_features().to_text(),
         concat!(
             "rdy store features 1\n{\"manifest_version\":1,\"features\":[",
-            "{\"name\":\"content_hash_v2\",\"class\":\"incompatible\",\"required_rdy\":\"0.23.0\"},",
-            "{\"name\":\"object_encoding\",\"class\":\"incompatible\",\"required_rdy\":\"0.23.0\"}",
+            "{\"name\":\"content_hash_v2\",\"class\":\"incompatible\",\"required_rdy\":\"0.26.0\"},",
+            "{\"name\":\"object_encoding\",\"class\":\"incompatible\",\"required_rdy\":\"0.26.0\"}",
             "]}\n"
         )
     );

@@ -102,6 +102,23 @@ pub struct UpgradeReport {
 /// This rdy's upgrade steps. The first release registers none.
 const REGISTRY: &[UpgradeStep] = &[];
 
+/// Whether this rdy registers any upgrade step. With none, an open plans nothing and does not
+/// walk the sealed log for a plan (`Store::open` relies on its own receipt check instead).
+pub fn has_registered_steps() -> bool {
+    !REGISTRY.is_empty()
+}
+
+thread_local! {
+    /// How many sealed-log walks of the planner ran on this thread ([`sealed_walks_for_tests`]).
+    static WALKS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Test hook: how many times the planner walked a sealed log on this thread.
+#[doc(hidden)]
+pub fn sealed_walks_for_tests() -> u64 {
+    WALKS.with(Cell::get)
+}
+
 /// Plans the upgrade of the store at `dir` with this rdy's steps (see the module docs). Reads
 /// only: no store is opened, no lock is taken or created, nothing is written.
 pub fn inspect(dir: &Path) -> Result<UpgradePlan, StoreError> {
@@ -296,6 +313,7 @@ struct Sealed {
 /// only at a marker that closes it, the walk ending at the first frame that does not fit its
 /// file or the first marker that does not close its batch. Nothing is written.
 fn sealed(dir: &Path) -> io::Result<Sealed> {
+    WALKS.with(|w| w.set(w.get() + 1));
     let longest = format::REF_STORE_FEATURES
         .len()
         .max(format::REF_UPGRADE.len());

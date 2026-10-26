@@ -23,8 +23,9 @@ pub struct MergeChange<'a> {
     /// applies after the ordinary changes that do not wait for it. Its op on a clean block
     /// follows the ordinary rules: an equal base applies, an equal result agrees whatever the
     /// bases and whoever wrote the version (the op is already satisfied), and anything else
-    /// conflicts. Its op on a conflicted block adds its side and keeps every side there: its
-    /// deps never resolve a conflict (only an ordinary write that covers every side does).
+    /// conflicts. Its op on a conflicted block adds its side (none when a side already holds its
+    /// version) and keeps every side there: its deps never resolve a conflict (only an ordinary
+    /// write that covers every side does).
     pub is_replay: bool,
 }
 
@@ -272,7 +273,13 @@ pub fn merge_indexed(
                         sides: vec![theirs, mine],
                     };
                 }
-                Slot::Conflicted { sides, .. } if c.is_replay => sides.push(mine),
+                // a replay adds its side, unless a side already holds its version: "v against
+                // v" never reaches a person
+                Slot::Conflicted { sides, .. } if c.is_replay => {
+                    if !sides.iter().any(|s| s.version == mine.version) {
+                        sides.push(mine);
+                    }
+                }
                 Slot::Conflicted { sides, .. } if sides.iter().all(settled) => {
                     *slot = Slot::Clean {
                         version: new,

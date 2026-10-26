@@ -13,25 +13,32 @@ use std::process::ExitCode;
 
 #[derive(clap::Args)]
 pub(crate) struct UpgradeArgs {
-    /// The project directory (default: --project, else the current directory).
+    /// The project directory (default: --project, else the nearest ancestor containing .rdy/).
     dir: Option<PathBuf>,
     /// Inspect the upgrade without writes: no daemon is started or stopped, and no lock, backup or index is written.
     #[arg(long)]
     dry_run: bool,
 }
 
-/// The directory `rdy upgrade` acts on: its `dir`, else the global `--project`, else `cwd`.
-pub(crate) fn target(a: &UpgradeArgs, project: Option<&Path>, cwd: &Path) -> PathBuf {
-    a.dir
-        .clone()
-        .or_else(|| project.map(Path::to_path_buf))
-        .unwrap_or_else(|| cwd.to_path_buf())
+/// The directory `rdy upgrade` acts on, and whether it was searched for: its `dir` exactly,
+/// else the global `--project`, else the project every other command finds from `cwd` (the
+/// nearest ancestor containing `.rdy/`).
+pub(crate) fn target(a: &UpgradeArgs, project: Option<&Path>, cwd: &Path) -> (PathBuf, bool) {
+    match a.dir.clone().or_else(|| project.map(Path::to_path_buf)) {
+        Some(dir) => (dir, false),
+        None => (crate::conn::find_project(cwd), true),
+    }
 }
 
 /// Runs `rdy upgrade` and prints its result: the report's JSON with `--json`, else its text;
-/// an rdy error in the shared error form, with the failure exit.
+/// an rdy error in the shared error form, with the failure exit. A searched directory that is no
+/// project gets the error every other command gives there (`E_NO_PROJECT`).
 pub(crate) fn upgrade(a: &UpgradeArgs, project: Option<&Path>, cwd: &Path, json: bool) -> ExitCode {
-    let dir = target(a, project, cwd);
+    let (dir, searched) = target(a, project, cwd);
+    if searched && let Err(e) = crate::conn::require_project(&dir) {
+        print_error(&e, json);
+        return ExitCode::FAILURE;
+    }
     match result(rdy_daemon::maintenance::run(&dir, a.dry_run)) {
         Ok((v, text)) => {
             if json {
@@ -126,17 +133,35 @@ mod tests {
         );
     }
 
-    /// ok11: the directory is the argument, else `--project`, else the working directory.
+    /// ok11: the directory is the argument, else `--project`, else the project found from the
+    /// working directory (the nearest ancestor containing `.rdy/`).
     #[test]
     fn ok11_the_target_is_dir_then_project_then_cwd() {
         let a = |dir: Option<&str>| UpgradeArgs {
             dir: dir.map(PathBuf::from),
             dry_run: false,
         };
-        let cwd = Path::new("/cwd");
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".rdy")).unwrap();
+        let sub = root.path().join("sub/deeper");
+        std::fs::create_dir_all(&sub).unwrap();
         let p = Path::new("/project");
-        assert_eq!(target(&a(Some("/d")), Some(p), cwd), PathBuf::from("/d"));
-        assert_eq!(target(&a(None), Some(p), cwd), PathBuf::from("/project"));
-        assert_eq!(target(&a(None), None, cwd), PathBuf::from("/cwd"));
+        // an explicit directory means that directory exactly, even inside a project
+        assert_eq!(
+            target(&a(Some("/d")), Some(p), &sub),
+            (PathBuf::from("/d"), false)
+        );
+        assert_eq!(
+            target(&a(Some("sub")), None, root.path()),
+            (PathBuf::from("sub"), false)
+        );
+        assert_eq!(
+            target(&a(None), Some(p), &sub),
+            (PathBuf::from("/project"), false)
+        );
+        assert_eq!(
+            target(&a(None), None, &sub),
+            (root.path().to_path_buf(), true)
+        );
     }
 }

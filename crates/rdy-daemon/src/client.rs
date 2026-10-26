@@ -898,7 +898,13 @@ impl Start<'_> {
                 Attempt::Refused(e)
                     if e.code == E_DAEMON_VERSION && crate::maintenance::needs_upgrade(run) =>
                 {
-                    crate::maintenance::stop_daemon(&run.root(), run, start_timeout).await?;
+                    crate::maintenance::stop_daemon(
+                        &run.root(),
+                        run,
+                        start_timeout,
+                        Some(deadline),
+                    )
+                    .await?;
                 }
                 Attempt::Refused(e) => return Err(e),
                 Attempt::Exiting => saw_exiting = true,

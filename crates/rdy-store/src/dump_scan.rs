@@ -152,7 +152,8 @@ pub enum ChainLink {
     LegacyStop { format: u32 },
     /// The file's repo is not the chain's.
     Repo { file: RepoId, chain: RepoId },
-    /// The file's store (format or features) is not the chain's.
+    /// The file's store (format or features) does not follow the store of the file before it
+    /// (`chain`): another scalar format, or a manifest that lost or changed a feature.
     StoreFormat { file: DumpStore, chain: DumpStore },
     /// The file starts elsewhere than the end of the file before it.
     Position { start: Location, prev_end: Location },
@@ -344,8 +345,8 @@ impl ChainSource {
 }
 
 /// The link check of input `i` of `n` (O11's order within a link): its kind, its dump format,
-/// then against the chain (`first`) and the file before it (`prev`), its repo, store format,
-/// base, base marker and `prev` digest.
+/// then against the chain (`first`) and the file before it (`prev`), its repo, store (which
+/// follows `prev`'s), base, base marker and `prev` digest.
 fn check_link(
     i: usize,
     n: usize,
@@ -376,10 +377,13 @@ fn check_link(
             chain: head.repo_id,
         });
     }
-    if env.header.store != first.header.store {
+    // each file's store follows the store of the file before it: the same scalar format, or a
+    // manifest that only grew (each new feature by its first use, which `end_of_file` proves
+    // against the file's own log)
+    if !env.header.store.follows(&prev.header.store) {
         return Some(ChainLink::StoreFormat {
             file: env.header.store.clone(),
-            chain: first.header.store.clone(),
+            chain: prev.header.store.clone(),
         });
     }
     if chain.base != prev.header.log_end {

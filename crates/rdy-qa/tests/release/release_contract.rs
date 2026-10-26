@@ -2,8 +2,10 @@
 //! ships after M3a; D-XTWM9; D-69AY3). One machine-readable fixture,
 //! `fixtures/contracts/release-1.json`, holds thirteen rows, one for each surface the decision
 //! lists. Every row is generated from the code that owns the surface (its registry, parser, schema
-//! or an existing fixture), never typed by hand, and the tests compare the live generation with the
-//! fixture. A public contract change after Release 1 must update a versioned fixture and satisfy
+//! or an existing fixture), and the tests compare the live generation with the fixture. The members
+//! that [`DESCRIPTIVE`] lists are the exception: they describe a layout or a rule in words for the
+//! reader, are typed here, and cannot fail on their own; the digests, sizes and probes of their
+//! rows are what pin those surfaces. A public contract change after Release 1 must update a versioned fixture and satisfy
 //! the upgrade or deprecation rule of D-TXFHR; this file is the baseline of the release candidate.
 //!
 //! - The `cli` row has two members. `cli.tree` is the real clap command tree: the test-only module
@@ -57,6 +59,23 @@ const ROWS: [&str; 13] = [
     "store",
     "sync",
     "working_copy",
+];
+
+/// The row members typed by hand: words that describe a surface for the reader. Each is pinned
+/// by another member of its row (a fixture digest, a size, a probe), never by itself.
+const DESCRIPTIVE: [&str; 12] = [
+    "cli.runtime.exit_values",
+    "derived_identities.domains",
+    "site_urls.block_route",
+    "store.encoding_versions.frame_header_bytes",
+    "store.feature_rules",
+    "store.manifest.name_grammar",
+    "store.manifest.required_rdy_grammar",
+    "sync.header_fields",
+    "sync.logical_keys",
+    "sync.order",
+    "sync.prerequisite_order",
+    "sync.trailer_fields",
 ];
 
 /// The grammar of the inventory file itself.
@@ -598,6 +617,27 @@ fn parts_of(line: &str) -> Vec<(usize, usize)> {
     parts
 }
 
+/// Whether the text that ends at a needle (`before`) leaves it inside the parentheses of a
+/// `matches!(`: the last one opened and not yet closed. A `matches!(..)` that closed before the
+/// needle (`if matches!(a, B) { Verdict::Pass }`) does not read it.
+fn inside_matches(before: &str) -> bool {
+    let Some(open) = before.rfind("matches!(") else {
+        return false;
+    };
+    let mut depth = 0i32;
+    for c in before[open + "matches!".len()..].chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 {
+            return false;
+        }
+    }
+    depth > 0
+}
+
 /// The places in `product` (already free of test items) that construct a carried value. A
 /// comparison, a `matches!` and the pattern side of a match arm read it. A carried value to the
 /// right of `=>`, or anywhere else, writes it.
@@ -623,7 +663,7 @@ fn carried_writes(rel: &str, product: &str, needles: &[&str]) -> Vec<String> {
                     || before.trim_end().ends_with("!=")
                     || after.trim_start().starts_with("==")
                     || after.trim_start().starts_with("!=")
-                    || before.contains("matches!(");
+                    || inside_matches(before);
                 if !in_pattern && !compared {
                     hits.push(format!("{rel}:{}: {}", n + 1, raw.trim()));
                 }
@@ -846,7 +886,11 @@ fn store_row() -> Value {
             "max_bytes": MAX_MANIFEST_BYTES,
             "max_features": MAX_FEATURES,
             "format_file": rdy_store::format::FORMAT_FILE,
-            "format_first_line": "rdy store features 1",
+            "format_first_line": baseline_features()
+                .to_text()
+                .lines()
+                .next()
+                .expect("FORMAT has a first line"),
             "authority_ref": REF_STORE_FEATURES,
             "upgrade_receipt_ref": REF_UPGRADE,
             "name_grammar": "[a-z][a-z0-9_]{0,63}",
@@ -1022,7 +1066,7 @@ fn sync_row() -> Value {
             "features_len: u32", "features: canonical JSON", "repo_id: [u8; 16]",
             "purpose: u8", "tag: [u8; 32]", "prerequisites: u32", "keys: kind u8 + hash [u8; 32]",
         ],
-        "purposes": [[0, "tag_history"]],
+        "purposes": purposes(),
         "logical_keys": "kind: u8 || hash: [u8; 32]",
         "prerequisite_order": "strictly ascending logical keys",
         "trailer_fields": ["records: u64", "bytes: u64", "digest: [u8; 32]"],
@@ -2734,6 +2778,8 @@ fn site_row() -> Value {
         .collect();
     routes.sort();
     routes.dedup();
+    // the asset route: the one top directory of the rendered site that holds its stylesheets
+    let asset_route = asset_route_of(out.path());
     rdy_model::unseed_ids_for_tests();
     let has_go = routes
         .iter()
@@ -2757,8 +2803,54 @@ fn site_row() -> Value {
         "percent_encode": rdy_engine::site_scope::percent_encode("a b/c.d"),
         "canon_routes": routes,
         "block_route": "go/<block id>.html",
-        "asset_route": "assets/",
+        "asset_route": asset_route,
     })
+}
+
+/// The route of a rendered site's assets: the top directory of `site` that holds every
+/// stylesheet and script, with a trailing slash. A site with none, or with them in two places, is
+/// no contract row.
+fn asset_route_of(site: &Path) -> String {
+    fn walk(dir: &Path, base: &Path, out: &mut Vec<String>) {
+        for e in std::fs::read_dir(dir).expect("read the rendered site") {
+            let p = e.expect("entry").path();
+            if p.is_dir() {
+                walk(&p, base, out);
+            } else if p.extension().is_some_and(|x| x == "css" || x == "js") {
+                let rel = p.strip_prefix(base).expect("under the site");
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    let mut files = vec![];
+    walk(site, site, &mut files);
+    let mut tops: Vec<String> = files
+        .iter()
+        .map(|f| match f.split_once('/') {
+            Some((top, _)) => format!("{top}/"),
+            None => String::new(),
+        })
+        .collect();
+    tops.sort();
+    tops.dedup();
+    assert!(
+        tops.len() == 1 && !tops[0].is_empty(),
+        "one asset directory holds the stylesheets and scripts: {files:?}"
+    );
+    tops.remove(0)
+}
+
+/// The sync batch purposes: each header byte the reader accepts, with the purpose's JSON name.
+fn purposes() -> Value {
+    let rows: Vec<Value> = (0..=u8::MAX)
+        .filter_map(|b| sync_stream::StreamPurpose::of(b).map(|p| (b, p)))
+        .map(|(b, p)| {
+            assert_eq!(p.byte(), b, "a purpose's byte reads back as itself");
+            json!([b, p])
+        })
+        .collect();
+    assert!(!rows.is_empty(), "the reader accepts a purpose");
+    json!(rows)
 }
 
 // ---- derived identities ----
@@ -2964,6 +3056,27 @@ fn ok14_release_contract_matches_all_surfaces() {
             now, want,
             "row {name} changed: a public contract change needs an upgrade or deprecation path (D-TXFHR)"
         );
+    }
+}
+
+/// Every member typed by hand is listed in [`DESCRIPTIVE`], and each listed member is in the
+/// fixture, so the list says exactly which members cannot fail on their own.
+#[test]
+fn ok14_descriptive_members_are_listed_and_present() {
+    let fixture = read_fixture();
+    let mut sorted = DESCRIPTIVE.to_vec();
+    sorted.sort();
+    assert_eq!(sorted, DESCRIPTIVE, "sorted, no repeat");
+    sorted.dedup();
+    assert_eq!(sorted.len(), DESCRIPTIVE.len());
+    for path in DESCRIPTIVE {
+        let mut v = &fixture;
+        for part in path.split('.') {
+            v = v
+                .get(part)
+                .unwrap_or_else(|| panic!("{path}: the fixture has no member {part}"));
+        }
+        assert!(!v.is_null(), "{path}");
     }
 }
 
@@ -3430,6 +3543,22 @@ fn ok14_source_scan_finds_a_writer_after_a_hook_and_in_a_match_arm() {
     for not in ["fn reads", "fn arm", "fn subject", "fn probe", "fn t()"] {
         assert!(!text.contains(not), "{not} is a read or a test:\n{text}");
     }
+}
+
+/// A carried value inside a `matches!(..)` is a read; one after the `matches!` closed, on the
+/// same line, is a write.
+#[test]
+fn ok14_source_scan_counts_a_write_after_a_closed_matches() {
+    let needles = ["Verdict::Pass"];
+    let read = "fn r(v: Verdict) -> bool { matches!(v, Verdict::Pass) }\n";
+    assert!(carried_writes("a.rs", read, &needles).is_empty());
+    let nested = "fn r(v: Option<Verdict>) -> bool { matches!(v, Some(Verdict::Pass)) }\n";
+    assert!(carried_writes("a.rs", nested, &needles).is_empty());
+    let write =
+        "fn w(b: bool) -> Verdict { if matches!(b, true) { Verdict::Pass } else { x() } }\n";
+    assert_eq!(carried_writes("a.rs", write, &needles).len(), 1);
+    assert!(!inside_matches("if matches!(b, true) { "));
+    assert!(inside_matches("matches!(v, Some("));
 }
 
 /// The paths in `v` that end in an empty array: a field set the probes could not see.

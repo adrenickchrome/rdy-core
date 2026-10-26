@@ -409,6 +409,53 @@ fn ok11_start_upgrades_before_serving() {
     }
 }
 
+/// An ordinary connection of another rdy version finds this build's daemon serving a store it
+/// must upgrade first: it stops that daemon (with `request_stop`'s checks), waits for it to exit,
+/// upgrades and completes under `start.lock`, and only then spawns its own daemon.
+#[test]
+fn ok11_a_connection_stops_another_versions_daemon_before_its_upgrade() {
+    let s = Served::new();
+    assert!(s.rdy(&["status"]).status.success());
+    let root = s.dir.path().to_path_buf();
+    let pid = live_daemon(&root).expect("the daemon runs");
+    let old = format_text(&root);
+    // what the spawn saw: whether the old daemon had exited, and FORMAT then
+    let seen: Arc<Mutex<Vec<(bool, String)>>> = Arc::default();
+    let spawned = Arc::clone(&seen);
+    let at = root.clone();
+    let opts = StartOptions::new(
+        "0.0.0-another".to_string(),
+        Proto::Ctl,
+        root.clone(),
+        Box::new(move |_run| {
+            spawned
+                .lock()
+                .unwrap()
+                .push((exited(pid), format_text(&at)));
+            Err(std::io::Error::other("this test spawns no daemon"))
+        }),
+    );
+    let run = RunDir::of_project(&root);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let out = rdy_daemon::maintenance::with_start_registry_for_tests(registry(), || {
+        rt.block_on(async { connect_or_start(&run, opts).await.map(|c| c.close()) })
+    });
+    assert!(out.is_err(), "the test's spawn fails");
+    assert!(exited(pid), "the other version's daemon was stopped");
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        [(true, upgraded().to_text())],
+        "one spawn, after the old daemon exited and the upgrade completed"
+    );
+    assert_ne!(format_text(&root), old);
+    assert_eq!(upgrade_batches(&root), 1);
+    assert_eq!(backups(&root).len(), 1);
+}
+
 #[test]
 fn ok11_two_upgraders_seal_once() {
     let (_base, root) = closed_project();

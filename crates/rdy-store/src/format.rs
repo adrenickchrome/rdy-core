@@ -48,8 +48,9 @@ pub const MAX_FEATURES: usize = 256;
 pub const MAX_RECEIPT_BYTES: usize = 65_536;
 /// The most steps of one upgrade receipt.
 pub const MAX_RECEIPT_STEPS: usize = 256;
-/// The first rdy that knows the registered features (O20): the release that carries them.
-pub const FEATURE_REQUIRED_RDY: &str = "0.23.0";
+/// The first rdy that knows the registered features: the release that carries them. The
+/// workspace version of that release equals it.
+pub const FEATURE_REQUIRED_RDY: &str = "0.26.0";
 /// A version's stored readiness assessment (ASSESSMENT, a landing's `assessment`).
 pub const FEATURE_ASSESSMENT: &str = "assessment";
 /// A check request (CHECK_REQUEST, a Check review or verdict, an AcceptVerdict answer).
@@ -970,6 +971,21 @@ pub fn inject_test_feature(class: FeatureClass, trigger: u8) -> TestFeature {
 pub enum DumpStore {
     Legacy(u32),
     Features(StoreFeatures),
+}
+
+impl DumpStore {
+    /// Whether a dump file of this store may follow a file of `prev` in one dump chain: the same
+    /// scalar store format, or a manifest of the same grammar that holds every feature of
+    /// `prev`'s with its class and required version. A chain's manifest only grows, each feature
+    /// by its first use (which the file's own log proves); a shrink or a changed feature never
+    /// follows.
+    pub fn follows(&self, prev: &DumpStore) -> bool {
+        match (prev, self) {
+            (DumpStore::Legacy(a), DumpStore::Legacy(b)) => a == b,
+            (DumpStore::Features(a), DumpStore::Features(b)) => a.is_subset_of(b),
+            _ => false,
+        }
+    }
 }
 
 impl std::fmt::Display for DumpStore {

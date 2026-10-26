@@ -590,6 +590,26 @@ fn ok12_carriers_survive_holder_take_and_snapshot() {
     // a new snapshot sees both, with the carriers in each history
     let late = h.snapshot().unwrap();
     assert_eq!(late.tags().unwrap().len(), 2);
+    // the API reads the landing's appended fields as the source stored them
+    let want = Store::open(&c.path)
+        .unwrap()
+        .reader()
+        .landing(&c.l2)
+        .unwrap();
+    assert_eq!(want.assessment, Some(c.assessment));
+    assert!(want.policy.is_some());
+    assert_eq!(want.assurance, Assurance::Policy);
+    let facts = late.landing_facts(c.l2).unwrap();
+    assert_eq!(facts.hash, c.l2);
+    assert_eq!(facts.record, want, "landing_facts reads the stored landing");
+    let in_history = late.tag_history(V2).unwrap();
+    let l2 = in_history
+        .iter()
+        .find(|f| f.hash == c.l2)
+        .expect("the policy landing is in the tag's history");
+    assert_eq!(l2.record.assessment, Some(c.assessment));
+    assert_eq!(l2.record.policy, want.policy);
+    assert_eq!(l2.record.assurance, Assurance::Policy);
     let late_report = late
         .write_stream(V2, &BTreeSet::new(), std::io::sink())
         .unwrap();

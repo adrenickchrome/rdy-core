@@ -490,7 +490,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             parse(
                 op,
                 args,
-                "{op, name?, from?, base?, pin?, view?, views?, changes?, cascade?, a?, b?, all?, stale?, reason?, owner?: {actor, run?}, none?, target?, max_tokens?, relayed_by?, evidence?, question?, session_ref?}; own {name, owner?: {actor, run?}, none?, evidence, question?, session_ref?}",
+                "{op, name?, from?, base?, pin?, view?, views?, changes?, cascade?, a?, b?, all?, stale?, reason?, owner?: {actor, run?}, none?, target?, block?, landed?, max_tokens?, relayed_by?, evidence?, question?, session_ref?}; op is create, fork, include, exclude, replay, compare, list, show, close, own, resolve or undo; own {name, owner?: {actor, run?}, none?, evidence, question?, session_ref?}",
             )?,
         ),
         "wc_view" => wc_view(cx, parse(op, args, "{view?, ids?, blobs_dir?}")?),

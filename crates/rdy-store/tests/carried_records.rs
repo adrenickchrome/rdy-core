@@ -1712,6 +1712,14 @@ fn last_batch_refs(s: &Store) -> Vec<String> {
         .collect()
 }
 
+/// The release that carries the registered features is the one whose rdy first reads them: the
+/// workspace version equals the version every registered feature requires. It fails until the
+/// release's version commit sets the workspace to that version.
+#[test]
+fn ok4_merge_version_equals_feature_required_rdy() {
+    assert_eq!(env!("CARGO_PKG_VERSION"), FEATURE_REQUIRED_RDY);
+}
+
 #[test]
 fn ok4_features_activate_in_their_first_use_batch() {
     // every registered feature is incompatible and needs the release that carries them
@@ -1731,7 +1739,7 @@ fn ok4_features_activate_in_their_first_use_batch() {
             "view_replay"
         ]
     );
-    assert_eq!(FEATURE_REQUIRED_RDY, "0.23.0");
+    assert_eq!(FEATURE_REQUIRED_RDY, "0.26.0");
     for f in &registered {
         assert_eq!(f.class, FeatureClass::Incompatible, "{}", f.name);
         assert_eq!(f.required_rdy, FEATURE_REQUIRED_RDY, "{}", f.name);

@@ -155,3 +155,60 @@ fn ok11_cli_upgrade_reports_a_current_store_and_keeps_its_daemon() {
         "{out:?}"
     );
 }
+
+/// ok11: with no directory and no `--project`, `rdy upgrade` finds the project as every other
+/// command does: the nearest ancestor containing `.rdy/`. Where there is none, it gives the
+/// `E_NO_PROJECT` error `rdy status` gives there, never a re-create fix.
+#[test]
+fn ok11_upgrade_from_a_subdirectory_reports_on_the_project() {
+    let s = Served::new();
+    let root = s.dir.path().to_path_buf();
+    let sub = root.join("sub/deeper");
+    std::fs::create_dir_all(&sub).unwrap();
+    let run = |dir: &Path, args: &[&str]| {
+        Command::new(rdy_bin())
+            .args(args)
+            .current_dir(dir)
+            .env_remove("RDY_NO_DAEMON")
+            .output()
+            .unwrap()
+    };
+    let at_root = run(&root, &["--json", "upgrade", "--dry-run"]);
+    assert!(at_root.status.success(), "{at_root:?}");
+    let want: Value = serde_json::from_slice(&at_root.stdout).unwrap();
+    let before = tree(&root);
+    let out = run(&sub, &["--json", "upgrade", "--dry-run"]);
+    assert!(out.status.success(), "{out:?}");
+    let got: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(got, want, "the report on the project");
+    let out = run(&sub, &["upgrade", "--dry-run"]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "store is current\n");
+    assert!(out.stderr.is_empty(), "{out:?}");
+    assert_eq!(tree(&root), before, "nothing was written");
+    assert!(!sub.join(".rdy").exists(), "no nested project");
+    // no project above: the error every other command gives there
+    let none = tempfile::tempdir().unwrap();
+    for json in [false, true] {
+        let args = |cmd: &[&'static str]| -> Vec<&'static str> {
+            let mut v: Vec<&'static str> = if json { vec!["--json"] } else { vec![] };
+            v.extend_from_slice(cmd);
+            v
+        };
+        let status = run(none.path(), &args(&["status"]));
+        let upgrade = run(none.path(), &args(&["upgrade", "--dry-run"]));
+        assert!(!status.status.success() && !upgrade.status.success());
+        assert_eq!(upgrade.status.code(), status.status.code());
+        assert_eq!(
+            String::from_utf8_lossy(&upgrade.stderr),
+            String::from_utf8_lossy(&status.stderr),
+            "json {json}"
+        );
+        assert_eq!(upgrade.stdout, status.stdout, "json {json}");
+        let text = String::from_utf8_lossy(&upgrade.stderr).to_string()
+            + &String::from_utf8_lossy(&upgrade.stdout);
+        assert!(text.contains("E_NO_PROJECT"), "{text}");
+        assert!(!text.contains("re-create"), "{text}");
+    }
+    assert_eq!(std::fs::read_dir(none.path()).unwrap().count(), 0);
+}

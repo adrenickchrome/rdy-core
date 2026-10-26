@@ -105,7 +105,8 @@ enum Cmd {
     Redact(redact_cmd::RedactArgs),
     /// Approve a proposal version: P-<id>@<n>, P-<id> (its latest version) or a version hash.
     Approve(land_cmd::ApproveArgs),
-    /// Create, fork, include, exclude, compare, list, show, close and hand over views.
+    /// Create, fork, include, replay, exclude, resolve, compare, list, show, close and hand over
+    /// views.
     View {
         #[command(subcommand)]
         cmd: view_cmd::ViewCmd,

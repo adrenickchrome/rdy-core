@@ -299,6 +299,10 @@ impl Rdy {
             .try_reserve_exact(requested.len())
             .map_err(|_| limit())?;
         let mut ops = 0usize;
+        // the stored bytes of the sources, from their frame headers alone, before any is read:
+        // the new changes copy their contents, so sources over the byte limit are refused before
+        // they are held (step 5 checks the new changes' exact bytes)
+        let mut stored = 0u64;
         for c in &requested {
             if !reader.has_kind(kinds::CHANGE, c)? {
                 return Err(RdyError::new(
@@ -307,6 +311,10 @@ impl Rdy {
                     "check the id with rdy view show <view>",
                 ));
             }
+            stored = stored
+                .checked_add(reader.stored_len(kinds::CHANGE, c)?)
+                .filter(|b| *b <= MAX_REPLAY_BYTES as u64)
+                .ok_or_else(limit)?;
             let change = reader.change(c)?;
             reader.refuse_copy_of(&change)?;
             ops = ops
@@ -315,11 +323,36 @@ impl Rdy {
                 .ok_or_else(limit)?;
             sources.push((*c, change));
         }
-        // 4. the order: the graph the selected sources induce
+        // 4. the order: the graph the selected sources induce. A source that puts a block under a
+        // parent another selected source creates also follows that source, so the child's
+        // replay can depend on the parent's; when those extra edges would make a cycle, the
+        // order is the deps' alone
         let nodes: Vec<(Hash, Vec<Hash>)> =
             sources.iter().map(|(h, c)| (*h, c.deps.clone())).collect();
-        let order = replay_order(&nodes)?;
-        drop(nodes);
+        let mut creator: HashMap<&BlockId, Hash> = HashMap::new();
+        for (h, c) in &sources {
+            for op in &c.ops {
+                if let Op::Create { block } = op {
+                    creator.entry(&block.id).or_insert(*h);
+                }
+            }
+        }
+        let mut with_parents = nodes.clone();
+        for ((h, c), (_, deps)) in sources.iter().zip(with_parents.iter_mut()) {
+            for op in &c.ops {
+                if let Some(p) = placed_under(&st, op)?
+                    && let Some(w) = creator.get(&p)
+                    && w != h
+                {
+                    deps.push(*w);
+                }
+            }
+        }
+        let order = match replay_order(&with_parents) {
+            Ok(order) => order,
+            Err(_) => replay_order(&nodes)?,
+        };
+        drop((nodes, with_parents, creator));
         // 5. the preview and the new changes, in replay order
         let m = st.materialized(&Scope::View(view.to_string()))?;
         let target_conflicts = st.conflicts(&Scope::View(view.to_string()))?;
@@ -385,8 +418,13 @@ impl Rdy {
                 preview.slots.insert(id.clone(), slot);
                 mine.insert(id);
             }
+            // a parent an earlier replay of this call wrote: the child's replay depends on it,
+            // so no exclude or include separates them
             for op in &source.ops {
                 if let Some(p) = placed_under(&st, op)? {
+                    if let Some(w) = last_writer.get(&p) {
+                        deps.insert(*w);
+                    }
                     placed.push(p);
                 }
             }
