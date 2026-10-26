@@ -15,8 +15,11 @@ use redaction_fixture::{FixtureOptions, Proof, RequestSpec, authorized_batch_fix
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// Every path under a directory, with its length and contents (None for a directory).
+type Tree = BTreeMap<PathBuf, Option<(u64, Vec<u8>)>>;
+
 /// Every path under `dir` with its length and contents (None for a directory).
-fn tree(dir: &Path) -> BTreeMap<PathBuf, Option<(u64, Vec<u8>)>> {
+fn tree(dir: &Path) -> Tree {
     let mut out = BTreeMap::new();
     for e in std::fs::read_dir(dir).unwrap() {
         let p = e.unwrap().path();
@@ -607,12 +610,11 @@ fn ok9_a_pending_upgrade_to_an_unknown_read_only_feature_is_unfinished() {
     }
     // the log and FORMAT: the open refuses once it reads the log's features, after it opened
     // the derived index, so only derived files may differ
-    let kept =
-        |t: BTreeMap<PathBuf, Option<(u64, Vec<u8>)>>| -> Vec<(PathBuf, Option<(u64, Vec<u8>)>)> {
-            t.into_iter()
-                .filter(|(p, _)| p.starts_with(dir.join("segments")) || p.ends_with("FORMAT"))
-                .collect()
-        };
+    let kept = |t: Tree| -> Tree {
+        t.into_iter()
+            .filter(|(p, _)| p.starts_with(dir.join("segments")) || p.ends_with("FORMAT"))
+            .collect()
+    };
     let before = kept(tree(base.path()));
     for policy in [OpenPolicy::AutoUpgrade, OpenPolicy::RequireCurrent] {
         match Store::open_with_policy(&dir, policy).err() {
