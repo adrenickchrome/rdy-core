@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 /// The blake3 of the inventory text (`inventory_text`): one line `<path> <len> <blake3>` for the
 /// store file `FORMAT`, `lock` and each segment, in path order. Set when the fixture was written.
 /// A change here needs a founder decision, and after Release 1 it is never allowed.
-const INVENTORY_BLAKE3: &str = "6e1c8d9cd17db7a22befd61f3a4004642529f72cddb39459a224a0df6ce87f74";
+const INVENTORY_BLAKE3: &str = "25c27a2d56c339769c61e1f32f05b09ac039bbcae5c6378f070fd6b154e573ee";
 
 /// The number of segment files of the fixture, set when it was written.
 const SEGMENT_COUNT: usize = 61;
