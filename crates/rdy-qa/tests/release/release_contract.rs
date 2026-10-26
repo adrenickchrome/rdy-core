@@ -886,11 +886,13 @@ fn store_row() -> Value {
             "max_bytes": MAX_MANIFEST_BYTES,
             "max_features": MAX_FEATURES,
             "format_file": rdy_store::format::FORMAT_FILE,
-            "format_first_line": baseline_features()
+            "format_text": rdy_store::format::format_file_text(),
+            "features_file": rdy_store::format::FEATURES_FILE,
+            "features_first_line": baseline_features()
                 .to_text()
                 .lines()
                 .next()
-                .expect("FORMAT has a first line"),
+                .expect("FEATURES has a first line"),
             "authority_ref": REF_STORE_FEATURES,
             "upgrade_receipt_ref": REF_UPGRADE,
             "name_grammar": "[a-z][a-z0-9_]{0,63}",
