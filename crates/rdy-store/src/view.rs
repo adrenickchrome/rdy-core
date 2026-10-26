@@ -10,7 +10,7 @@ use crate::merge::Conflict;
 use crate::state::view_ref;
 use crate::store::{Frames, encode};
 use crate::{Store, StoreReader};
-use rdy_model::{Answer, Hash, Provenance};
+use rdy_model::{Answer, Change, Hash, Op, Provenance};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -430,6 +430,14 @@ impl StoreReader {
     /// The ids of every op of view `name`'s chain that the index holds, in ascending hash order.
     pub fn view_op_ids(&self, name: &str) -> Result<Vec<Hash>, StoreError> {
         self.index().view_ops(name)
+    }
+
+    /// The refusal of a write that copies `change`: `Redacted` (naming the request) or
+    /// `ProjectedWrite` when it is a read projection or embeds a projected block version, as a
+    /// write of it would be refused. A replay checks its sources with it before it prepares
+    /// anything.
+    pub fn refuse_copy_of(&self, change: &Change) -> Result<(), StoreError> {
+        self.refuse_projection(change)
     }
 
     /// The landing that carried `change` into canon, if one has (lidx1).
@@ -917,6 +925,79 @@ impl Store {
         };
         items.extend(self.ref_items_pub(vec![(view_ref(name), encode(&new_head))]));
         Ok((items, new_head, written))
+    }
+
+    /// Stores `changes`, each prepared by the caller as a replay (`links.replayed_from` set, its
+    /// deps final), and one `Include` of them all into view `name`, in one write: one batch, so
+    /// the `Include` is the one op that undoes the whole replay. The deps are kept as given, never
+    /// recomputed: each must name an earlier change of `changes` or a stored change. The view
+    /// must exist and be open. The float catch-up of `view_append` applies. Refused with nothing
+    /// written: no changes, a change that is no replay or that is a read projection (or embeds
+    /// one), the same change twice, and a dep the store lacks. Returns the `Include`'s id (the
+    /// view's new head) and the changes' ids, in order.
+    pub fn view_replay_prepared(
+        &mut self,
+        name: &str,
+        changes: &[Change],
+        by: &Provenance,
+    ) -> Result<(Hash, Vec<Hash>), StoreError> {
+        if changes.is_empty() {
+            return Err(StoreError::Decode(
+                "view_replay_prepared: no changes".into(),
+            ));
+        }
+        let head = self
+            .view_head(name)?
+            .ok_or_else(|| StoreError::UnknownView(name.to_string()))?;
+        if head.closed {
+            return Err(StoreError::ViewClosed(name.to_string()));
+        }
+        let mut items: Frames = vec![];
+        let mut ids: Vec<Hash> = vec![];
+        let mut seen: HashSet<Hash> = HashSet::new();
+        for change in changes {
+            self.refuse_projection(change)?;
+            if change.links.replayed_from.is_none() {
+                return Err(StoreError::Decode(
+                    "view_replay_prepared: a change is no replay".into(),
+                ));
+            }
+            for d in &change.deps {
+                if !seen.contains(d) && !self.has_kind(kinds::CHANGE, d)? {
+                    return Err(StoreError::NotFound(*d));
+                }
+            }
+            for op in &change.ops {
+                if let Op::Create { block } | Op::Update { block, .. } = op {
+                    items.push(crate::codec::item_new(kinds::BLOCK, block));
+                }
+            }
+            let item = crate::codec::item(kinds::CHANGE, change)?;
+            let id = Hash::of(&item.1);
+            if id != change.id() {
+                return Err(StoreError::Decode(format!(
+                    "view_replay_prepared: change {} encodes as {id}",
+                    change.id()
+                )));
+            }
+            if !seen.insert(id) {
+                return Err(StoreError::Decode(format!(
+                    "change {id} is committed twice in one write"
+                )));
+            }
+            ids.push(id);
+            items.push(item);
+        }
+        let (frames, new_head, _) = self.view_append_frames(
+            name,
+            vec![ViewOpKind::Include {
+                changes: ids.clone(),
+            }],
+            by,
+        )?;
+        items.extend(frames);
+        self.write(items)?;
+        Ok((new_head.head, ids))
     }
 
     /// A `Close { reason }` op of view `name` after its head `prev_head`, for a caller's batch

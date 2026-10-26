@@ -17,10 +17,15 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 mod own;
+mod replay;
 mod resolve;
 mod undo;
 
 pub use own::{OwnInfo, StaleClose};
+pub use replay::{
+    MAX_REPLAY_BYTES, MAX_REPLAY_CHANGES, MAX_REPLAY_OPS, ReplayResult, ReplayedChange,
+    replay_order_for_tests,
+};
 pub use resolve::ResolveResult;
 pub use undo::{CloseResult, UndoResult};
 pub(crate) use undo::{kind_name, net_undone};
@@ -98,6 +103,7 @@ pub enum Action {
     Close,
     Undo,
     Propose,
+    Replay,
 }
 
 impl Action {
@@ -109,6 +115,7 @@ impl Action {
             Action::Close => "close",
             Action::Undo => "undo",
             Action::Propose => "propose",
+            Action::Replay => "replay",
         }
     }
 }
@@ -141,8 +148,8 @@ fn no_create(s: &Session) -> Result<(), RdyError> {
 }
 
 /// The role, existence, closed and ownership rules for `action` on `view`. A commit or an
-/// include into a view with no ref creates it; a closed view takes no commit, include or
-/// exclude; an agent acts only in a view it owns (`check_view_access`). Propose keeps its own
+/// include into a view with no ref creates it; a closed view takes no commit, include, exclude
+/// or replay; an agent acts only in a view it owns (`check_view_access`). Propose keeps its own
 /// role, existence and closed checks (a closed view takes no proposal, D-K0SS1, R2, in
 /// `propose_relayed`) and takes only the ownership rule here (legacy `:` views stay proposable
 /// by the human).
@@ -167,7 +174,11 @@ pub(crate) fn check_view_op(
         None if matches!(action, Action::Commit | Action::Include) => {}
         None => return Err(no_view(view)),
         Some(h)
-            if h.closed && matches!(action, Action::Commit | Action::Include | Action::Exclude) =>
+            if h.closed
+                && matches!(
+                    action,
+                    Action::Commit | Action::Include | Action::Exclude | Action::Replay
+                ) =>
         {
             return Err(StoreError::ViewClosed(view.to_string()).into());
         }

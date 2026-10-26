@@ -1,6 +1,7 @@
 //! The conflict-aware merge (merge1). Pure: it reads no store and does no I/O.
 //!
-//! Changes apply in "deps first, then change id" order. Each block is either clean (a version
+//! Changes apply in "deps first, then change id" order (a replay after the ordinary changes
+//! that do not wait for it). Each block is either clean (a version
 //! and the change that produced it) or conflicted (the failing op's base and the competing
 //! sides). A conflict is data, not an error; a change that depends on every side of a conflict
 //! resolves it. A block the base lacks reads as deleted by the change `deleter` names; when no
@@ -18,8 +19,12 @@ pub struct MergeChange<'a> {
     pub id: Hash,
     pub deps: &'a [Hash],
     pub ops: &'a [Op],
-    /// Whether the change replays another (`ChangeLinks::replayed_from` is set). Carried to the
-    /// merge; the merge's behavior does not depend on it yet.
+    /// Whether the change replays another (`ChangeLinks::replayed_from` is set). A replay's op
+    /// whose base is not the block's version conflicts even when its result equals that version,
+    /// as does any op on another base whose block a replay wrote last in this merge, so the
+    /// order of a replay and an ordinary change never decides between them. A replay's op on a
+    /// conflicted block adds its side and keeps every side there: its deps never resolve a
+    /// conflict (only an ordinary write that covers every side does).
     pub is_replay: bool,
 }
 
@@ -91,6 +96,8 @@ enum Slot {
     Clean {
         version: Option<Hash>,
         owner: Option<Hash>,
+        /// Whether `owner` is a replay of this merge (a base version's producer never is).
+        replay: bool,
     },
     Conflicted {
         base: Option<Hash>,
@@ -98,8 +105,11 @@ enum Slot {
     },
 }
 
-/// Deps first, then change id: Kahn's algorithm over the distinct input changes, its ready set
-/// ordered by id ascending; any nodes a cycle leaves unplaced follow in ascending id order.
+/// Deps first, then ordinary changes before replays, then change id: Kahn's algorithm over the
+/// distinct input changes, its ready set ordered by (replay, id) ascending, so a replay applies
+/// after every ordinary change that does not wait for one (the target it was replayed onto);
+/// any nodes a cycle leaves unplaced follow in ascending id order. Without replays the order is
+/// deps first, then change id.
 /// Returns each applied change's position in `changes` (its first, when listed twice).
 fn order(changes: &[MergeChange<'_>]) -> Vec<usize> {
     let mut index: HashMap<Hash, usize> = HashMap::with_capacity(changes.len());
@@ -112,6 +122,7 @@ fn order(changes: &[MergeChange<'_>]) -> Vec<usize> {
         }
     }
     let id = |i: usize| changes[nodes[i]].id;
+    let key = |i: usize| (changes[nodes[i]].is_replay, changes[nodes[i]].id);
     let mut indegree = vec![0usize; nodes.len()];
     let mut succ: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
     for (i, &at) in nodes.iter().enumerate() {
@@ -124,11 +135,11 @@ fn order(changes: &[MergeChange<'_>]) -> Vec<usize> {
             }
         }
     }
-    let mut ready: BinaryHeap<Reverse<(Hash, usize)>> = indegree
+    let mut ready: BinaryHeap<Reverse<((bool, Hash), usize)>> = indegree
         .iter()
         .enumerate()
         .filter(|(_, n)| **n == 0)
-        .map(|(i, _)| Reverse((id(i), i)))
+        .map(|(i, _)| Reverse((key(i), i)))
         .collect();
     let mut placed = vec![false; nodes.len()];
     let mut out = Vec::with_capacity(nodes.len());
@@ -138,7 +149,7 @@ fn order(changes: &[MergeChange<'_>]) -> Vec<usize> {
         for &s in &succ[i] {
             indegree[s] -= 1;
             if indegree[s] == 0 {
-                ready.push(Reverse((id(s), s)));
+                ready.push(Reverse((key(s), s)));
             }
         }
     }
@@ -232,6 +243,7 @@ pub fn merge_indexed(
                         Some(v) => producer(&v),
                         None => deleter(block),
                     },
+                    replay: false,
                 }
             });
             let expected = op.base();
@@ -244,14 +256,21 @@ pub fn merge_indexed(
                 version: new,
             };
             match slot {
-                Slot::Clean { version, owner }
-                    if *version == expected && (expected.is_some() || knows(owner)) =>
-                {
+                Slot::Clean {
+                    version,
+                    owner,
+                    replay,
+                } if *version == expected && (expected.is_some() || knows(owner)) => {
                     *version = new;
                     *owner = Some(c.id);
+                    *replay = c.is_replay;
                 }
-                Slot::Clean { version, .. } if *version == new => {}
-                Slot::Clean { version, owner } => {
+                // ordinary ops that reach the same result agree; a replay's differing base is a
+                // divergence even then, on either side
+                Slot::Clean {
+                    version, replay, ..
+                } if *version == new && !c.is_replay && !*replay => {}
+                Slot::Clean { version, owner, .. } => {
                     let theirs = Side {
                         change: *owner,
                         version: *version,
@@ -261,10 +280,12 @@ pub fn merge_indexed(
                         sides: vec![theirs, mine],
                     };
                 }
+                Slot::Conflicted { sides, .. } if c.is_replay => sides.push(mine),
                 Slot::Conflicted { sides, .. } if sides.iter().all(settled) => {
                     *slot = Slot::Clean {
                         version: new,
                         owner: Some(c.id),
+                        replay: false,
                     };
                 }
                 Slot::Conflicted { sides, .. } => {
