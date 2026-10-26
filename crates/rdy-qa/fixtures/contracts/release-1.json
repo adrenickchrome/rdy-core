@@ -19765,8 +19765,10 @@
     },
     "manifest": {
       "authority_ref": "meta/store_features",
+      "features_file": "FEATURES",
+      "features_first_line": "rdy store features 1",
       "format_file": "FORMAT",
-      "format_first_line": "rdy store features 1",
+      "format_text": "rdy store format\nstore_format 19\n",
       "max_bytes": 65536,
       "max_features": 256,
       "name_grammar": "[a-z][a-z0-9_]{0,63}",
@@ -19775,8 +19777,9 @@
       "version": 1
     },
     "native_fixture": {
-      "FORMAT": "553 674f31d397efabaeeba7ed61b0cfc8245c24d86ad710c650601ec94c187fc2db",
-      "expect.json": "137050 ed8123cf7060708c48b29d6657be39c25f84047282cc710daf102f6aecc477cb",
+      "FEATURES": "553 674f31d397efabaeeba7ed61b0cfc8245c24d86ad710c650601ec94c187fc2db",
+      "FORMAT": "33 4c868f80ec8fe4af835ef534d83468e8b2121b4a5dcf5cfd9319113d914e6a90",
+      "expect.json": "137189 fb4d958ba409ff770d3f03c5db6fee3870999f558b212c51e9e5dfe2e4f6d961",
       "lock": "0 af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
       "segments/seg-000000.log": "4018 3e8c57fa450d574662205c916c3fdc2d49df697af1c0987ba467d9ab839a2953",
       "segments/seg-000001.log": "3866 bf9c3cc705a87b406985b8428733a20dd96a23b38d6e735541e6e5c08d9ea25d",
