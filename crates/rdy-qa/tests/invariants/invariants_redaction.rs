@@ -917,9 +917,9 @@ fn rdx15_snapshots_are_references_and_assessment_support_is_absent() {
         p.landing.to_string(),
         "the tag names the same landing"
     );
-    // the request records the report-only references and no assessment
+    // the request records the report-only references and the carried-record scan status
     let req = reader.redaction_request(&res.redaction.unwrap()).unwrap();
-    assert_eq!(req.manifest.assessment, AssessmentSupport::NotImplemented);
+    assert_eq!(req.manifest.assessment, AssessmentSupport::Carried);
     assert!(
         req.manifest
             .inside
