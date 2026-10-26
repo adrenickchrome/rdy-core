@@ -102,10 +102,32 @@ pub struct UpgradeReport {
 /// This rdy's upgrade steps. The first release registers none.
 const REGISTRY: &[UpgradeStep] = &[];
 
-/// Whether this rdy registers any upgrade step. With none, an open plans nothing and does not
-/// walk the sealed log for a plan (`Store::open` relies on its own receipt check instead).
+/// Whether this rdy registers any upgrade step. With none, an open plans nothing.
 pub fn has_registered_steps() -> bool {
     !REGISTRY.is_empty()
+}
+
+/// Whether the store at `dir` may hold a sealed upgrade whose completion is pending, read
+/// without walking the log. An upgrade writes its backup `.store-upgrade-<from>-<batch>` beside
+/// the store before it appends its batch, and its completion publishes `FORMAT` only after
+/// that, so a pending completion has a backup named by the manifest `FORMAT` still mirrors.
+/// False only when `FORMAT` reads and no such backup is there; anything this cannot read is
+/// true, so the planner judges it.
+pub(crate) fn may_be_pending(dir: &Path) -> bool {
+    let Ok(Some(mirror)) = format::read_format_file(dir) else {
+        return true;
+    };
+    let Some(parent) = dir.parent() else {
+        return true;
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return true;
+    };
+    let prefix = format!("{BACKUP_PREFIX}{}-", mirror.hash());
+    entries.into_iter().any(|e| match e {
+        Ok(e) => e.file_name().to_string_lossy().starts_with(&prefix),
+        Err(_) => true,
+    })
 }
 
 thread_local! {

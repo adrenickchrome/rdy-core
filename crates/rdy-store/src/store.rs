@@ -1119,14 +1119,29 @@ impl Store {
         // the planner's refusal, so a store whose plan could not be made never opens as
         // current. Every other refusal of the planner (a backup limit or file type, an invalid
         // registry, I/O) is the open's at once.
-        // With no registered step there is nothing to plan, and the open's own check of the
-        // log's features and the last receipt gives the planner's answers: a pending completion
-        // is accepted by AutoUpgrade and refused by RequireCurrent (`UpgradeRequired`), and a
-        // store the planner would refuse is refused by the open. So the sealed log is not walked
-        // on every open.
+        // With no registered step there is nothing to plan, and with no upgrade backup named by
+        // the manifest FORMAT mirrors no completion can be pending: the open's own checks then
+        // give the planner's answers, so the sealed log is not walked on every open. A store
+        // that may be pending is planned, so RequireCurrent refuses it before anything is
+        // written.
         let (steps, pending) = match registry {
-            None if !crate::upgrade::has_registered_steps() => (false, false),
+            None if !crate::upgrade::has_registered_steps()
+                && !crate::upgrade::may_be_pending(dir) =>
+            {
+                (false, false)
+            }
             _ => match plan_upgrade(dir, registry) {
+                // a pending completion this rdy cannot run (a read-only feature it does not
+                // know): refused with the unfinished-upgrade text, before anything is written
+                Ok(plan)
+                    if plan.pending_check
+                        && matches!(
+                            format::check_features(&plan.from),
+                            Ok(format::StoreAccess::ReadOnly)
+                        ) =>
+                {
+                    return Err(unfinished_upgrade(&plan.from));
+                }
                 Ok(plan) => (!plan.steps.is_empty(), plan.pending_check),
                 Err(planned @ StoreError::Format { .. }) => {
                     drop(Store::open_current_format_with(

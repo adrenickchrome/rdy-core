@@ -584,7 +584,7 @@ fn ok9_pending_upgrade_refuses_a_read_only_open() {
 /// A newer rdy sealed an upgrade that adds a read-only feature this rdy does not know, on a
 /// store whose `FORMAT` this rdy may write, and stopped before its completion published `FORMAT`.
 /// Every open refuses it with the unfinished-upgrade text (ruling task-9), never the older
-/// "needs rdy" text, and changes no log or `FORMAT` byte.
+/// "needs rdy" text, before anything is written.
 #[test]
 fn ok9_a_pending_upgrade_to_an_unknown_read_only_feature_is_unfinished() {
     use rdy_store::format::{StoreFeature, StoreFeatures, TEST_FEATURE, TEST_FEATURE_RDY};
@@ -608,14 +608,7 @@ fn ok9_a_pending_upgrade_to_an_unknown_read_only_feature_is_unfinished() {
         assert_eq!(plan.steps, ["add_read_only"]);
         upgrade::apply_locked_with_registry_for_tests(&dir, &lock, &plan, &registry).unwrap();
     }
-    // the log and FORMAT: the open refuses once it reads the log's features, after it opened
-    // the derived index, so only derived files may differ
-    let kept = |t: Tree| -> Tree {
-        t.into_iter()
-            .filter(|(p, _)| p.starts_with(dir.join("segments")) || p.ends_with("FORMAT"))
-            .collect()
-    };
-    let before = kept(tree(base.path()));
+    let before = tree(base.path());
     for policy in [OpenPolicy::AutoUpgrade, OpenPolicy::RequireCurrent] {
         match Store::open_with_policy(&dir, policy).err() {
             Some(StoreError::Format { message, fix }) => assert_eq!(
@@ -629,11 +622,7 @@ fn ok9_a_pending_upgrade_to_an_unknown_read_only_feature_is_unfinished() {
             ),
             other => panic!("{policy:?}: not the unfinished-upgrade refusal: {other:?}"),
         }
-        assert_eq!(
-            kept(tree(base.path())),
-            before,
-            "{policy:?}: no log or FORMAT byte changed"
-        );
+        assert_eq!(tree(base.path()), before, "{policy:?}: no byte changed");
     }
 }
 
