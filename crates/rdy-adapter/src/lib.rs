@@ -21,7 +21,8 @@ pub mod take;
 mod value;
 
 pub use maintenance::{
-    ChainEnd, DumpStop, LoadedChainFile, StoppedAt, UpgradePlan, UpgradeReport, UpgradeStep,
+    ChainEnd, DumpStop, LoadedChainFile, StoppedAt, UpgradePlan, UpgradeReceipt, UpgradeReport,
+    UpgradeStep,
 };
 pub use publication::{ProfileFacts, profile_facts};
 pub use publication_take::{

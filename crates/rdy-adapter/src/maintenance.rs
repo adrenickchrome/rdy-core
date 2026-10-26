@@ -22,7 +22,7 @@ pub use rdy_engine::{
     BatchMarker, ChainEnd, DumpKind, DumpSummary, FsckReport, LoadSummary, LoadedChainFile,
     Location, StoppedAt,
 };
-pub use rdy_store::format::{DumpStore, FeatureClass, StoreFeature, StoreFeatures};
+pub use rdy_store::format::{DumpStore, FeatureClass, StoreFeature, StoreFeatures, UpgradeReceipt};
 pub use rdy_store::upgrade::{UpgradePlan, UpgradeReport, UpgradeStep};
 use std::path::{Path, PathBuf};
 

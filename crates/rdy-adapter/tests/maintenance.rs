@@ -362,3 +362,16 @@ fn ok12_upgrade_calls_leave_a_current_store_alone() {
     maintenance::upgrade(&dir, true).unwrap();
     h.close().unwrap();
 }
+
+/// A host names the receipt of its move ledger through this crate alone (lib.rs: every type a
+/// signature uses is re-exported), by both the module path and the crate root.
+#[test]
+fn ok12_upgrade_receipt_type_is_reachable_through_the_adapter() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = divergent_holder(root.path(), RepoId([9; 16]));
+    let plan = maintenance::inspect_store(&dir).unwrap();
+    let report = maintenance::upgrade(&dir, true).unwrap();
+    let from_plan: &Option<maintenance::UpgradeReceipt> = &plan.receipt;
+    let from_report: &Option<rdy_adapter::UpgradeReceipt> = &report.receipt;
+    assert!(from_plan.is_none() && from_report.is_none());
+}
