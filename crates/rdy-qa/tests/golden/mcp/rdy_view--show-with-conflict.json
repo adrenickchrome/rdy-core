@@ -9,6 +9,7 @@
       ],
       "id": "7fe334bf2b2708ed71d761d47c8f84afd866c8f005598d9505007efa7ef6a21a",
       "message": "a edits A",
+      "replayed_from": null,
       "run": "a"
     },
     {
@@ -20,6 +21,7 @@
       ],
       "id": "22ece7bddcd1850f4ba0f33a9b558761481c6ed666e8db77240f69920a80a03f",
       "message": "b edits A and C",
+      "replayed_from": null,
       "run": "b"
     }
   ],

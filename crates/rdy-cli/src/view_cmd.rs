@@ -21,6 +21,12 @@ pub enum ViewCmd {
     Fork { from: String, name: String },
     /// Include changes, and the changes they depend on, in a view.
     Include { view: String, changes: Vec<String> },
+    /// Replay selected changes into your open view.
+    Replay {
+        view: String,
+        #[arg(required = true, num_args = 1..)]
+        changes: Vec<String>,
+    },
     /// Take changes out of a view.
     Exclude {
         view: String,
@@ -117,6 +123,9 @@ pub fn args_of(cmd: &ViewCmd) -> Value {
         ViewCmd::Fork { from, name } => json!({"op": "fork", "from": from, "name": name}),
         ViewCmd::Include { view, changes } => {
             json!({"op": "include", "view": view, "changes": changes})
+        }
+        ViewCmd::Replay { view, changes } => {
+            json!({"op": "replay", "view": view, "changes": changes})
         }
         ViewCmd::Exclude {
             view,
@@ -411,6 +420,9 @@ fn show_text(v: &Value, all: bool) -> String {
             },
             blocks_text(&blocks, all)
         ));
+        if let Some(source) = c["replayed_from"].as_str() {
+            out.push_str(&format!(" replayed from {}", short(source)));
+        }
     }
     out.push_str("\nconflicts:");
     out.push_str(&conflict_lines(&v["conflicts"], "  "));
@@ -469,8 +481,8 @@ pub fn render_view(cmd: &ViewCmd, reply: &Value) -> String {
 }
 
 /// The text of the `view` op's reply to a request of kind `op` (`create`, `fork`, `include`,
-/// `exclude`, `compare`, `list`, `show`, `close`, `own`, `resolve` or `undo`). Include, exclude and undo
-/// end with their consequences.
+/// `exclude`, `replay`, `compare`, `list`, `show`, `close`, `own`, `resolve` or `undo`). Include,
+/// exclude, replay and undo end with their consequences.
 pub fn render(op: &str, reply: &Value) -> String {
     match op {
         "create" | "fork" => head_line(reply),
@@ -483,6 +495,16 @@ pub fn render(op: &str, reply: &Value) -> String {
             if count(&reply["added_deps"]) > 0 {
                 out.push_str(&format!(" (+{} dependencies)", count(&reply["added_deps"])));
             }
+            out.push_str(&conflict_lines(&reply["conflicts"], ""));
+            out.push_str(&crate::brief_text::consequences_text(reply));
+            out
+        }
+        "replay" => {
+            let mut out = format!(
+                "replayed {} change(s) into {}",
+                count(&reply["replayed"]),
+                text(&reply["view"])
+            );
             out.push_str(&conflict_lines(&reply["conflicts"], ""));
             out.push_str(&crate::brief_text::consequences_text(reply));
             out

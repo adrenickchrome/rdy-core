@@ -67,6 +67,8 @@ pub struct ChangeSummary {
     /// The alternative set and member the change was written as.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alternative: Option<AltRef>,
+    /// The full hash of the change this one replays, or null for any other change.
+    pub replayed_from: Option<String>,
 }
 
 /// One op of a view's chain.
@@ -543,6 +545,7 @@ impl ReadState {
                     set: alt_label(&a.set),
                     member: a.member,
                 }),
+                replayed_from: change.links.replayed_from.map(|h| h.to_string()),
             });
         }
         let head: Hash = info
