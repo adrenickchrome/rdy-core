@@ -280,8 +280,9 @@ fn ok10_mcp_and_cli_replay_match() {
         assert_eq!(shown["head"]["changes"], 3, "{shown}");
     }
     // one shape: the two replies differ only in ids that depend on the project and the time
+    // (the replay order follows the sources' hashes, which differ between the projects)
     let masked = |reply: &Value, view: &str, ids: &Ids| {
-        norm(
+        let mut v = norm(
             reply,
             view,
             &[
@@ -289,7 +290,10 @@ fn ok10_mcp_and_cli_replay_match() {
                 (ids.cy.as_str(), "<cy>"),
                 (ids.claim.as_str(), "<claim>"),
             ],
-        )
+        );
+        let rows = v["replayed"].as_array_mut().unwrap();
+        rows.sort_by_key(|r| r["source"].as_str().unwrap().to_string());
+        v
     };
     assert_eq!(
         masked(&from_cli, "cli", &ids_cli),
@@ -452,6 +456,11 @@ fn ok10_replay_then_undo_is_one_act() {
 #[test]
 fn ok10_replay_rejects_extra_fields_and_limits() {
     let (s, ids) = served_replay(&["cli"], &[]);
+    // warm up the daemon and the MCP session, so the log stops growing for reasons of its own
+    let mut c = mcp(&s);
+    c.call("rdy_view", json!({"op": "show", "view": "cli"}))
+        .ok();
+    drop(c);
     let end = log_end(&s);
     let mut c = mcp(&s);
     // a field replay does not take, over MCP; the first in declaration order is named
@@ -463,10 +472,7 @@ fn ok10_replay_rejects_extra_fields_and_limits() {
             "name",
         ),
         (json!({"reason": "r", "target": "t"}), "reason"),
-        (
-            json!({"relayed_by": "agent:a", "evidence": "w"}),
-            "evidence",
-        ),
+        (json!({"question": "q", "evidence": "w"}), "evidence"),
     ] {
         let mut req = json!({"op": "replay", "view": "cli", "changes": [ids.cx]});
         req.as_object_mut()
