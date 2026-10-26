@@ -21,7 +21,7 @@ use crate::error::{E_PERMISSION, RdyError};
 use crate::views::{Action, commit_claim};
 use crate::write::check_view_access;
 use crate::{Delta, Rdy, ReadState, Session};
-use rdy_model::redaction::{ReasonClass, RedactionWarning, carrier};
+use rdy_model::redaction::{AssessmentSupport, ReasonClass, RedactionWarning, carrier};
 use rdy_model::{Change, Hash, Redaction};
 use rdy_store::StoreError;
 use serde::{Deserialize, Serialize};
@@ -169,6 +169,42 @@ pub struct LimitsGuard(Option<Limits>);
 impl Drop for LimitsGuard {
     fn drop(&mut self) {
         LIMITS.with(|c| c.set(self.0));
+    }
+}
+
+thread_local! {
+    static SUPPORT: Cell<Option<AssessmentSupport>> = const { Cell::new(None) };
+}
+
+/// The status this build's reports give the recorded assessment kinds: `Carried`, as the scan
+/// reads them (a build with the `test-support` feature lets a test replace it for its thread).
+pub(crate) fn current_support() -> AssessmentSupport {
+    #[cfg(feature = "test-support")]
+    if let Some(s) = SUPPORT.with(Cell::get) {
+        return s;
+    }
+    AssessmentSupport::Carried
+}
+
+/// Tests only (the `test-support` feature, which no normal build enables): this thread's
+/// reports carry `support` as their assessment status until the guard drops, so a test can
+/// record a request as an earlier release did.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn override_assessment_support_for_tests(support: AssessmentSupport) -> SupportGuard {
+    SupportGuard(SUPPORT.with(|c| c.replace(Some(support))))
+}
+
+/// Restores the status [`override_assessment_support_for_tests`] replaced when dropped.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+#[must_use = "the status is replaced only while the guard lives"]
+pub struct SupportGuard(Option<AssessmentSupport>);
+
+#[cfg(feature = "test-support")]
+impl Drop for SupportGuard {
+    fn drop(&mut self) {
+        SUPPORT.with(|c| c.set(self.0));
     }
 }
 
@@ -399,8 +435,7 @@ pub(crate) fn check_fresh(
         .manifest
         .report_hash(&mut buf)
         .map_err(|_| crate::error::redaction_limit(rdy_store::redaction::limit::RECORD))?;
-    let fresh = report::hash_as_recorded(&full.manifest, &r.manifest, &mut buf)?;
-    if full.prospective || fresh != bound || full.request_targets != r.targets {
+    if full.prospective || full.report.report_hash != bound || full.request_targets != r.targets {
         return Err(StoreError::RedactionStale.into());
     }
     Ok(())

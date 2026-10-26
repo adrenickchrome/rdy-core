@@ -9,10 +9,12 @@
 use rdy_engine::redaction::presentation::report_text;
 use rdy_engine::redaction::{
     ASSIGNED_KINDS, Limits, RedactInput, RedactionReport, TextPolicy, dry_run,
-    override_limits_for_tests, require_text_policies, text_policy,
+    override_assessment_support_for_tests, override_limits_for_tests, require_text_policies,
+    text_policy,
 };
 use rdy_engine::{
-    E_REDACTION_LIMIT, Rdy, RdyError, Scope, Session, WriteRequest, WriteResult, pin_clock,
+    E_REDACTION_LIMIT, E_REDACTION_STALE, Rdy, RdyError, Scope, Session, WriteRequest, WriteResult,
+    pin_clock,
 };
 use rdy_model::assessment::*;
 use rdy_model::check_request::{CheckCode, CheckMode, CheckRequest, CheckSubject};
@@ -444,7 +446,7 @@ fn ok8_every_carried_kind_has_a_text_policy() {
 #[test]
 fn ok8_every_assessment_text_is_scanned() {
     let _clock = pin_clock(1_000_000);
-    let mut s = scan_project(16);
+    let mut s = scan_project(20);
     let neutral = vec![s.term.clone()];
     type Edit = fn(&mut Assessment, &str);
     let edits: Vec<(&'static str, Edit)> = vec![
@@ -490,6 +492,18 @@ fn ok8_every_assessment_text_is_scanned() {
             a.confidence.reasons[0].fix = t.into()
         }),
         ("card fact", |a, t| a.card.facts = vec![t.into()]),
+        ("tension kind", |a, t| a.tensions[0].kind = t.into()),
+        ("issue dimension", |a, t| a.issues[0].dimension = t.into()),
+        ("issue code", |a, t| a.issues[0].code = t.into()),
+        ("confidence dimension", |a, t| {
+            a.confidence.reasons[0].dimension = t.into()
+        }),
+        ("confidence code", |a, t| {
+            a.confidence.reasons[0].code = t.into()
+        }),
+        ("plan by_kind name", |a, t| {
+            a.facts.plan.by_kind[0].0 = t.into()
+        }),
     ];
     let table = edits
         .into_iter()
@@ -624,6 +638,7 @@ fn ok8_check_requests_and_all_verdict_text_are_scanned() {
         table.push((label, note));
     }
     for (label, verdict) in [
+        ("pass reason", Verdict::Pass),
         ("concern reason", Verdict::Concern),
         ("fail reason", Verdict::Fail),
     ] {
@@ -1290,6 +1305,82 @@ fn ok8_current_support_does_not_rewrite_old_reports() {
     // every target removed: the report is still Carried
     let gone = dry(&f.r, &f.target());
     assert_eq!(gone.assessment, AssessmentSupport::Carried);
+    let _ = &f.dir;
+}
+
+/// A request recorded before the report said `Carried` binds the hash of its own manifest, which
+/// carried `NotImplemented`. Nothing reads that hash as a current one: the request is refused as
+/// stale (a request that is not landed is live work, not a dump), and recording it again binds
+/// the current hash (fix forward, D-69AY3).
+#[test]
+fn ok8_a_request_recorded_before_carried_support_goes_stale() {
+    let _clock = pin_clock(1_000_000);
+    let mut f = refs_project();
+    let _ = carriers(&mut f);
+    // recorded as an earlier release did
+    let old = {
+        let _status = override_assessment_support_for_tests(AssessmentSupport::NotImplemented);
+        f.r.redact_in(&writer(), "old", input(&f.target(), false))
+            .unwrap()
+    };
+    assert_eq!(old.report.assessment, AssessmentSupport::NotImplemented);
+    let stored =
+        f.r.read()
+            .reader()
+            .redaction_request(&old.redaction.unwrap())
+            .unwrap();
+    assert_eq!(
+        stored.manifest.assessment,
+        AssessmentSupport::NotImplemented
+    );
+    // the support exists now: the old request cannot be approved
+    let e =
+        f.r.propose(
+            &writer(),
+            "old",
+            "Remove the code",
+            Some("Removes the leaked code."),
+        )
+        .and_then(|p| f.r.land(&approver(), &p.id).map(|_| ()))
+        .unwrap_err();
+    assert_eq!(e.code, E_REDACTION_STALE, "{e}");
+    assert_eq!(
+        e.message,
+        "The redaction report changed after the request was recorded."
+    );
+    assert_eq!(
+        e.fix,
+        "Record a new request, show its report, and ask for approval again."
+    );
+    assert_eq!(
+        f.r.read()
+            .reader()
+            .redaction_of(kinds::BLOCK, &f.v1)
+            .unwrap(),
+        None,
+        "nothing was removed"
+    );
+    // recorded again under the current code, in its own view: it lands
+    let new =
+        f.r.redact_in(&writer(), "again", input(&f.target(), false))
+            .unwrap();
+    assert_eq!(new.report.assessment, AssessmentSupport::Carried);
+    let pi =
+        f.r.propose(
+            &writer(),
+            "again",
+            "Remove the code",
+            Some("Removes the leaked code."),
+        )
+        .unwrap();
+    f.r.land(&approver(), &pi.id).unwrap();
+    assert!(
+        f.r.read()
+            .reader()
+            .redaction_of(kinds::BLOCK, &f.v1)
+            .unwrap()
+            .is_some()
+    );
     let _ = &f.dir;
 }
 

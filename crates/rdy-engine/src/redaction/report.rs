@@ -281,21 +281,6 @@ fn deep_warning(n: usize, levels: usize) -> RedactionWarning {
     }
 }
 
-/// The report hash of the `fresh` manifest as a request recorded with `recorded` bound it.
-/// The assessment status is a hash input, so a request recorded when the report said
-/// `NotImplemented` keeps that hash at its approval: the fresh manifest is read with the
-/// recorded status, and every other part must match as before. A report computed now says
-/// `Carried`.
-pub(crate) fn hash_as_recorded(
-    fresh: &RedactionManifest,
-    recorded: &RedactionManifest,
-    buf: &mut [u8],
-) -> Result<Hash, RdyError> {
-    let mut m = fresh.clone();
-    m.assessment = recorded.assessment;
-    m.report_hash(buf).map_err(|_| over(limit::RECORD))
-}
-
 /// What the references of the carried records need, read in the one pass over the log. The
 /// decoded records are not kept.
 #[derive(Default)]
@@ -841,7 +826,7 @@ pub(crate) fn compute_excluding(
             inside: vec![],
             outside: outside.clone(),
             quarantine: quarantine.clone(),
-            assessment: AssessmentSupport::Carried,
+            assessment: super::current_support(),
         };
         return finish(
             Draft {
@@ -1394,7 +1379,7 @@ pub(crate) fn compute_excluding(
         inside,
         outside,
         quarantine,
-        assessment: AssessmentSupport::Carried,
+        assessment: super::current_support(),
     };
     let drop_frames = u64::try_from(manifest.spans.len()).map_err(|_| over(limit::FRAMES))?;
     let prospective = prospective_hits(
@@ -1667,36 +1652,6 @@ mod tests {
             deps: deps.to_vec(),
             ..ChangeInfo::default()
         }
-    }
-
-    #[test]
-    fn ok8_a_request_keeps_the_hash_it_was_recorded_under() {
-        let manifest = |assessment| RedactionManifest {
-            versions: vec![],
-            blobs: vec![],
-            shared_blobs: vec![],
-            spans: vec![],
-            inside: vec![],
-            outside: outside_rows(),
-            quarantine: vec![],
-            assessment,
-        };
-        let mut buf = vec![0u8; 4096];
-        let old = manifest(AssessmentSupport::NotImplemented);
-        let now = manifest(AssessmentSupport::Carried);
-        let bound = old.report_hash(&mut buf).unwrap();
-        assert_ne!(bound, now.report_hash(&mut buf).unwrap());
-        // the fresh manifest says Carried; the request bound NotImplemented: same hash
-        assert_eq!(hash_as_recorded(&now, &old, &mut buf).unwrap(), bound);
-        // any other difference still changes the hash
-        let mut other = manifest(AssessmentSupport::Carried);
-        other.quarantine = vec!["segments/x.torn-1".into()];
-        assert_ne!(hash_as_recorded(&other, &old, &mut buf).unwrap(), bound);
-        // a request recorded now binds Carried
-        assert_eq!(
-            hash_as_recorded(&now, &now, &mut buf).unwrap(),
-            now.report_hash(&mut buf).unwrap()
-        );
     }
 
     #[test]
