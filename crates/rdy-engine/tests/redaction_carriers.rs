@@ -328,9 +328,15 @@ fn scan_project(n: usize) -> Scan {
     }
 }
 
+/// Builds the record that holds a token in one field (the token and a distinct tag).
+type Build = Box<dyn Fn(&str, u8) -> Rec>;
+
+/// The rows of a scan table: the label of a text field, and its builder.
+type Table = Vec<(&'static str, Build)>;
+
 /// A table row: the label of a text field, and the record that holds `token` in it.
 enum Rec {
-    Assessment(Assessment),
+    Assessment(Box<Assessment>),
     Dispute(Dispute),
     Resolution(DisputeResolution),
     Request(CheckRequest),
@@ -339,13 +345,16 @@ enum Rec {
 
 /// Puts the record of each table row with its own token, then checks that the dry run reports
 /// exactly one uneraseable quote of that token on that record, and a Quotes impact row.
-fn check_table(s: &mut Scan, table: Vec<(&'static str, Box<dyn Fn(&str, u8) -> Rec>)>) {
+fn check_table(s: &mut Scan, table: Table) {
     assert!(table.len() <= s.tokens.len(), "enough source strings");
     let mut want: BTreeMap<(u8, String), (ImpactKind, String)> = BTreeMap::new();
     for (k, (label, build)) in table.iter().enumerate() {
         let token = s.tokens[k].clone();
         let (kind, hash) = match build(&token, k as u8) {
-            Rec::Assessment(a) => (ImpactKind::Assessment, put(&mut s.r, kinds::ASSESSMENT, &a)),
+            Rec::Assessment(a) => (
+                ImpactKind::Assessment,
+                put(&mut s.r, kinds::ASSESSMENT, &*a),
+            ),
             Rec::Dispute(d) => (ImpactKind::Dispute, put(&mut s.r, kinds::DISPUTE, &d)),
             Rec::Resolution(d) => (
                 ImpactKind::DisputeResolution,
@@ -486,10 +495,10 @@ fn ok8_every_assessment_text_is_scanned() {
         .into_iter()
         .map(|(label, edit)| {
             let blocks = neutral.clone();
-            let build: Box<dyn Fn(&str, u8) -> Rec> = Box::new(move |t, tag| {
+            let build: Build = Box::new(move |t, tag| {
                 let mut a = assessment(tag, &blocks);
                 edit(&mut a, t);
-                Rec::Assessment(a)
+                Rec::Assessment(Box::new(a))
             });
             (label, build)
         })
@@ -503,7 +512,7 @@ fn ok8_dispute_reason_and_provenance_are_scanned() {
     let mut s = scan_project(8);
     let landing = Hash::of(b"a landing");
     let dispute_hash = Hash::of(b"a dispute");
-    let table: Vec<(&'static str, Box<dyn Fn(&str, u8) -> Rec>)> = vec![
+    let table: Table = vec![
         (
             "dispute reason",
             Box::new(move |t, _| Rec::Dispute(dispute(landing, t))),
@@ -581,11 +590,11 @@ fn ok8_check_requests_and_all_verdict_text_are_scanned() {
             c.relay.as_mut().unwrap().question = Some(t.into())
         }),
     ];
-    let mut table: Vec<(&'static str, Box<dyn Fn(&str, u8) -> Rec>)> = edits
+    let mut table: Table = edits
         .into_iter()
         .map(|(label, edit)| {
             let blocks = neutral.clone();
-            let build: Box<dyn Fn(&str, u8) -> Rec> = Box::new(move |t, tag| {
+            let build: Build = Box::new(move |t, tag| {
                 let mut c = request(tag, &blocks);
                 edit(&mut c, t);
                 Rec::Request(c)
@@ -602,7 +611,7 @@ fn ok8_check_requests_and_all_verdict_text_are_scanned() {
         ("fail citation", Verdict::Fail),
     ] {
         let term = s.term.clone();
-        let note: Box<dyn Fn(&str, u8) -> Rec> = Box::new(move |t, _| {
+        let note: Build = Box::new(move |t, _| {
             let mut v = check_review(req, case, verdict, &term, t);
             if verdict == Verdict::Pass {
                 v.citations.push(Citation {
@@ -619,7 +628,7 @@ fn ok8_check_requests_and_all_verdict_text_are_scanned() {
         ("fail reason", Verdict::Fail),
     ] {
         let term = s.term.clone();
-        let reason: Box<dyn Fn(&str, u8) -> Rec> = Box::new(move |t, _| {
+        let reason: Build = Box::new(move |t, _| {
             let mut v = check_review(req, case, verdict, &term, "a neutral note");
             v.reason = t.into();
             Rec::Review(v)

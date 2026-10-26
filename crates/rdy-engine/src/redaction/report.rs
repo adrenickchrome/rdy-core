@@ -281,10 +281,11 @@ fn deep_warning(n: usize, levels: usize) -> RedactionWarning {
     }
 }
 
-/// The report hash of the `fresh` manifest as a request recorded with `recorded` bound it. The assessment
-/// status is a hash input, so a request recorded when the report said `NotImplemented` keeps
-/// that hash at its approval: the fresh manifest is read with the recorded status, and every
-/// other part must match as before. A report computed now says `Carried`.
+/// The report hash of the `fresh` manifest as a request recorded with `recorded` bound it.
+/// The assessment status is a hash input, so a request recorded when the report said
+/// `NotImplemented` keeps that hash at its approval: the fresh manifest is read with the
+/// recorded status, and every other part must match as before. A report computed now says
+/// `Carried`.
 pub(crate) fn hash_as_recorded(
     fresh: &RedactionManifest,
     recorded: &RedactionManifest,
