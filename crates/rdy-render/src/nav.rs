@@ -10,7 +10,9 @@ use std::collections::BTreeMap;
 const CAP: usize = 50;
 
 /// The most entries the added first-level lists hold in total on one page (D-RQ3X4).
-const ADDED_ENTRIES: usize = 400;
+/// The number was measured on the bench on 2026-10-25 (10k docs): the largest page sidebar
+/// is 49,628 bytes at 79 and 50,445 at 80, and the bound is under 50,000.
+const ADDED_ENTRIES: usize = 79;
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Nav {
@@ -686,7 +688,8 @@ mod site_tests {
 
     #[test]
     fn rdb5_a_large_site_holds_at_most_the_cap_per_page() {
-        let k = ADDED_ENTRIES / 50 + 2;
+        // the tree size is fixed (it was ADDED_ENTRIES / 50 + 2 = 10 when the cap was 400); it stays above the cap
+        let k = 10;
         let dir = tempfile::tempdir().expect("tempdir");
         rdy_engine::testkit::generate_tree(dir.path(), 10 + 10 * k, 5, 1);
         let r = rdy_engine::Rdy::open(dir.path()).expect("open");
