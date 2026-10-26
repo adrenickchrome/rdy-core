@@ -155,6 +155,21 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "relay the warning; use rdy site for the full source link, or restore the profile",
     ),
     (
+        "W_DIAGRAM_INVALID",
+        "A Mermaid diagram does not parse, so the render shows it as its code block. The render never fails for it.",
+        "correct the diagram source",
+    ),
+    (
+        "W_DIAGRAM_UNSUPPORTED",
+        "A Mermaid diagram whose header keyword names a type that rdy does not draw shows its source as a code block.",
+        "use a flowchart, class, sequence or state diagram, or keep it as source",
+    ),
+    (
+        "W_DIAGRAM_FAILED",
+        "The drawn SVG of a diagram fails rdy's checks, so the render shows its source as a code block.",
+        "simplify the diagram, or report it as a bug in rdy, with the diagram's source",
+    ),
+    (
         "E_DUMP",
         "the file is not a dump this rdy reads, the dump is damaged, the loaded project fails fsck, or a clone's dump is older than store format 12",
         "pass a file rdy dump wrote; a damaged dump is never repaired: dump the project again; for an older dump, load it, then clone the loaded project",

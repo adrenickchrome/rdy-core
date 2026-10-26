@@ -1,0 +1,11 @@
+flowchart TD
+    A[A] --> C[third]
+    B[B] --> C
+    A --> D[first]
+    B --> D
+    subgraph S[second]
+        direction LR
+        E[A] --> F[B]
+    end
+    C --> E
+    D --> F

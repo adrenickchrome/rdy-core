@@ -643,5 +643,7 @@ fn build_in(
         label_at: BTreeMap::new(),
         warnings: vec![],
         epoch: st.redaction_epoch(),
+        // the menu has no page to miss: a miss under it is canon's (the server's choice)
+        not_found: Default::default(),
     })
 }

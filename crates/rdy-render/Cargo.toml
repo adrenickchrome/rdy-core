@@ -6,6 +6,7 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
+rdy-diagram.workspace = true
 rdy-model.workspace = true
 rdy-engine.workspace = true
 rdy-graph.workspace = true

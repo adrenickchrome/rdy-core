@@ -19,6 +19,6 @@ chrome	L	Retired reference
 chrome	L	Where the docs disagree
 chrome	L	Where the docs disagree
 chrome	-	This page still points to something that was retired.
-chrome	-	Notes › Readers rely on C stands alone..
+chrome	-	Notes › Readers rely on C stands alone.
 chrome	-	Spec › C stands alone.
 chrome	L	Retired reference, unversioned.

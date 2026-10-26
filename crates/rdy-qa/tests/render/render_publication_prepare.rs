@@ -25,11 +25,17 @@ impl Digest {
     }
 }
 
+/// Whether `bytes` are the site's generated not-found page: its marker, never its file name.
+fn generated_404(bytes: &[u8]) -> bool {
+    String::from_utf8_lossy(bytes).contains("data-rdy-kind=\"not-found\"")
+}
+
 /// The digest of a whole built site: every file by path and bytes, the label, the header, where
 /// the label and header went, and the summary.
 fn site_digest(s: &SiteFiles) -> String {
     let mut d = Digest::default();
-    for (path, bytes) in &s.files {
+    // the generated not-found page is left out, so the digest pins every other file's bytes
+    for (path, bytes) in s.files.iter().filter(|(_, b)| !generated_404(b)) {
         d.piece(path.as_bytes()).piece(bytes);
     }
     d.piece(s.label.as_bytes()).piece(s.header.as_bytes());
@@ -195,26 +201,46 @@ fn scopes() -> Vec<(&'static str, tempfile::TempDir, Rdy, Scope)> {
 /// the hard-coded PAGE; fix rounds 2827fddd and 2f7023bd add its same-origin http/https check):
 /// only `assets/app.js`, which bundles `js/menu.js`, changed; every other file, the label, the
 /// header, their ranges and the summary kept their bytes.
+/// Re-taken after the reference period rule (ruling task-7): an automatic label drops its final period before an authored period; only that text moved.
+/// Re-taken for the renderer plan's Task 8 (sidebar folders): the navigation markup of the pages,
+/// the sidebar rules of `assets/site.css` and `assets/app.js` (which now bundles `js/sidebar.js`)
+/// moved; their content rows keep their text.
+/// Re-taken again in Task 8 fix round 1: only `js/sidebar.js` changed (byte-size bounds and absolute-URL
+/// validation of the stored state), so only `assets/app.js` moved.
+/// Re-taken for the renderer plan's Task 6 (native diagrams, ruling task-8): the diagram figures
+/// of the pages that have one, their removed library script tag, the new `assets/diagrams/` files,
+/// `assets/js/mermaid.min.js` (gone), the diagram rules of `assets/site.css`, `assets/app.js`
+/// (without `js/mermaid-init.js`) and an `open full size` line per drawing in `llms-full.txt` moved.
+/// Re-taken for Task 6 fix round 1 (ruling task-6): the open link is a reader control, so each
+/// drawing's `open full size` line left `llms-full.txt`; every other file and the warnings kept
+/// their bytes.
+/// Re-taken for the renderer plan's Task 9 (Copy, ruling task-8 form): each doc and folder page's
+/// title toolbar (Link, Copy ref, Copy), the Copy button on each block and section toolbar, the
+/// page's hidden Copy payload template and `assets/app.js` (which bundles `js/copy.js`) moved;
+/// their content rows keep their text (the gold1_ goldens).
+/// Re-taken for the final review's fix round 1 (M2): Cite skips a selection in the eyebrow, so
+/// only `js/copy.js` changed and only `assets/app.js` moved; with the old script the digests
+/// were the ones before.
 const SITE_DIGESTS: [(&str, &str, &str); 4] = [
     (
         "canon",
-        "4f64de348cef587c86874945afaae939fa4218f6fbd60f735dc9650b423c8653",
-        "851cfcc46b876fc1a306a6c06b38ebb7c985327fe1ac5e983b65543c3fe3d01f",
+        "bbae9ac75832387e158ebad641d73f8f0235e094b8f61a5c10280e259f601ba2",
+        "af6eec76b57da276ccb35911cb74bdde8a082397d5aebbc8a3a7583573c7c491",
     ),
     (
         "tag",
-        "990c5e75fd658a17158dc323539972cf040f31411b022944b1ac6e87a1491f74",
-        "3f93c55625ab0d470ded2dcd20cc90d4a55f338f9ce09829c062d8e391867fde",
+        "39c97cbf37557dc08e114fc95183a1da703ebd1c556cc0337628fa04ea7d82ab",
+        "52ab5387f388940c542e2d38b963344d0a23dcfd14cc3300eec72d5c86900dcc",
     ),
     (
         "view",
-        "df67151694ff6f4f26ad94dd1f38deeb6ee783b0e13757f329ba4956ae68aae0",
-        "42d4fe73a0ec70ef07c7cec2f307316921c82903a0b80abfc8d4fe3316913f60",
+        "312ecd22e4500fd16a3fff0b283193ee5b7b94fcf39c3e50c9c5157966a952b4",
+        "bdd405ceb8474edaf151d925a37a11621a31ff98fd574cdad863d3e893ae03fe",
     ),
     (
         "proposal",
-        "c368d4dec5a3f6a76ea226abe65f741be7a44daa051d222c05b02aa1151261e5",
-        "440ce521b45445fb2dd389a718a6b3d092f73c302a8a983f50f58d1ff29d1e53",
+        "cee9fd5fe1b9808e0b4b17e142eefac9538eabf8039f7313a926c62e6d54a834",
+        "e09fcf47d99ba0d3a7d4caeb9f2f2cb9cf66a6fef01cd99c7dff96142dae84cb",
     ),
 ];
 
@@ -223,35 +249,36 @@ const SITE_DIGESTS: [(&str, &str, &str); 4] = [
 /// crate version (the PDF producer field) and were re-taken at the 0.7.0 merge of main. The
 /// proposal's were re-taken for object encoding 1: its scope text is `proposal:<hash>`, and the
 /// version's hash follows its changes' encoding-1 ids; the other scopes kept their bytes.
+/// Re-taken after the reference period rule (ruling task-7): an automatic label drops its final period before an authored period; only that text moved.
 const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "canon",
         [
-            "84fbbf923af3bea784c101f69f0c8bde48b5de7f587d02ce62132eba628728b9",
-            "1f11b48f2af3af7ab8d9e6a8ad98596e3181b8dd63b4bc85e4e0e1c756a809ba",
-            "1254c1001737892e1f0ea20ec3ab4993f9ce684c97b193f5ada6bb09d8445142",
-            "a943098d24ccf984658403df96a3f311b142c90e7b764eef247562699e2cd8d7",
-            "6984953d91796ef67f268dc7bdc3bfbf076253aa1356c77eb46c9d4bacb3c24d",
+            "449e831d3d9a8ce4c815d67c82ceb9882cb4ef3a0d7942814d9e9cc19b23cf59",
+            "998a127285a0c7a623a78212f23eb98cceb92d1bdfaf7bdfa5f6f43d26853adc",
+            "938c9836e463189769cb4d487178c6425a9fbe988027970549c20768293d1b40",
+            "9c07f3c2a6b76e09131538f66b58ef5eb6826791faa2351d8ac4e0102744a980",
+            "5be1453c6b29b76de993e5a562b3e972926d57b1073fd4dccf2a21a4b4058832",
         ],
     ),
     (
         "tag",
         [
-            "855eab380b64b94361c87f775b60a406e78a7d0e8fea00b5da8ffec1f0f384c8",
-            "27e70ec170c51d8c9689312ccc6fd5c39605838d4a7ad8e595d84836c8052148",
-            "53ce7675b9e938c31ce92b8160230b6af99d10d6ca48af11e72d16c92667a015",
-            "9cffc2a308540e6ad7610e2af7c3973fc8655d15f34668682f5219cc490ce4be",
-            "b561e223280d7fabc9c6d01dc1f629e59181ea4bea1360aa9f443ef09f3205be",
+            "fa8390847bb9fb3ca37037994919553542c8e3d35034d23b63d24c7c3d5b71f0",
+            "b343a5b5d478cfdeca78cd8fc3c4040afcacfdf16f76306be4122c254a97a104",
+            "c8a8b44f679d1d5be3116346f252b6dd14e1109418d8a070c73a0767096bdcc5",
+            "db1857ceb8bf4b1082e70cfd9998c0fc162f16aee6dc0d19b244a7fcf0905bef",
+            "64ee2f7e057704eabf633568380874172061d9c64de3b0ea5209611ffa945fb0",
         ],
     ),
     (
         "view",
         [
-            "fcbe79bc01b641aee08d7ad7794cff02a96208e7b503ce21c7b9128c18bae49b",
-            "c197b6e9dc4e2f617f2bc7151364040f878b781e0342d1594dc4760bea1eacd7",
-            "21001f066775b54d02924d382c65a73ea776a315612b3e0e930cb9bacb5e2d77",
-            "6dbce21b6ae082807d92313182695e098d5737ca9de9e63af530d24f10f02689",
-            "6d41c3661756568ca0957040786ecab66dd94cdb9f1b664804eedd5460376704",
+            "28270a66f2a099986b7123828f7797dfba9a748da1a7bfc42d71527355879eca",
+            "9d0ee3035447042b8ef884e13947f952fdf3269a2f159cdc34c5a2123b8576f8",
+            "40640e6325548294e74f05ccb7a4910a65d9242fab0df3b5c2c232ecbad93fb1",
+            "6fd72f8df9966c7d1429a0c30d2081800699fb43a7288cad204b42c7e68f548f",
+            "513f948e73af5d16b2352b42e9611a59bd64f1b80e772a929fed3f829411def6",
         ],
     ),
     (

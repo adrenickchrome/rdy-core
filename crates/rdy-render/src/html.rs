@@ -91,23 +91,6 @@ fn anchor(l: &Link) -> String {
     }
 }
 
-/// mer1: escapes a label for Mermaid. Characters Mermaid reads as syntax become `#<code>;` entity
-/// codes, which Mermaid decodes before parsing and shows as the characters; line breaks become
-/// spaces. `&` is left to the HTML escape.
-fn mermaid_label(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '"' | '#' | ';' | '<' | '>' | '[' | ']' | '(' | ')' | '{' | '}' | '|' | '`' => {
-                out.push_str(&format!("#{};", c as u32))
-            }
-            '\n' | '\r' => out.push(' '),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
 /// The words a reference reads as where no link may go: its display text, the target's key for
 /// a key-typed reference whose target still has one, the target's label, else `unavailable` (the
 /// unresolved marker's words, or a named profile's); never the id.
@@ -131,16 +114,17 @@ fn diagram_label(
     }
 }
 
-/// Escaped diagram source with each id-shaped `{{id}}` replaced by its label (see
-/// [`diagram_label`]), escaped for Mermaid and then for HTML, so the diagram renderer sees plain
-/// text. Other `{{…}}` (e.g. Mermaid hexagons) is kept as written.
+/// The diagram's resolved plain source, as the drawing reads it: each id-shaped `{{id}}` replaced
+/// by its label (see [`diagram_label`]) with Mermaid's syntax characters as label codes
+/// ([`crate::diagram::encode_label`]), and the rdy escape `\{{` read as `{{`. Other `{{…}}`
+/// (e.g. Mermaid hexagons) is kept as written. Nothing is escaped for HTML.
 pub fn diagram_source(
     text: &str,
     link: &dyn Fn(&BlockId) -> Option<Link>,
     unavailable: &str,
 ) -> String {
-    with_refs(text, RefMode::IdShaped, &|span| {
-        escape(&mermaid_label(&diagram_label(span, link, unavailable)))
+    with_refs(text, RefMode::IdShaped, &inline::unescape_braces, &|span| {
+        crate::diagram::encode_label(&diagram_label(span, link, unavailable))
     })
 }
 
@@ -151,15 +135,22 @@ pub(crate) fn readable_source(
     link: &dyn Fn(&BlockId) -> Option<Link>,
     unavailable: &str,
 ) -> String {
-    with_refs(text, RefMode::IdShaped, &|span| {
-        escape(&diagram_label(span, link, unavailable))
-    })
+    with_refs(
+        text,
+        RefMode::IdShaped,
+        &|s| escape(&inline::unescape_braces(s)),
+        &|span| escape(&diagram_label(span, link, unavailable)),
+    )
 }
 
-/// Escapes diagram source between references (turning the rdy escape `\{{` into `{{`) and
-/// renders each reference with `r`.
-fn with_refs(text: &str, mode: RefMode, r: &dyn Fn(&RefSpan) -> String) -> String {
-    let plain = |s: &str| escape(&inline::unescape_braces(s));
+/// Diagram source with the text between references read by `plain` and each reference
+/// rendered with `r`.
+fn with_refs(
+    text: &str,
+    mode: RefMode,
+    plain: &dyn Fn(&str) -> String,
+    r: &dyn Fn(&RefSpan) -> String,
+) -> String {
     let mut out = String::new();
     let mut last = 0;
     for span in ref_spans(text, mode) {
@@ -373,6 +364,23 @@ pub struct BlockCtx<'a> {
     pub unavailable: &'a str,
     /// A named profile's filter of authored local links ([`inline::Ctx::local_link`]).
     pub local_link: Option<inline::LocalLink<'a>>,
+    /// How the page shows a diagram block, from the block and its resolved plain source
+    /// ([`diagram_source`]).
+    pub diagram: &'a dyn Fn(&Block, &str) -> DiagramView,
+}
+
+/// How a page shows a diagram (D-FY4VF, D-KAGB2, D-3BM8P).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DiagramView {
+    /// Drawn: the one inline SVG of this place, and the page-relative href of its file.
+    Drawn { svg: String, href: String },
+    /// Its source as a code block, in place of a drawing: a Mermaid source rdy does not draw, or
+    /// a language rdy has no drawing for.
+    Fallback,
+    /// Its source under "Diagram source" alone: a drawing in an output that shows no picture
+    /// (the print, which shows a source with no drawing as [`DiagramView::Fallback`], as the site
+    /// does).
+    Source,
 }
 
 /// A type's name as a reader reads it: the type id with `_` as a space and its first letter
@@ -568,33 +576,7 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
             )
         }
         "table" => table_html(b, ctx, &ictx),
-        "diagram" => {
-            let lang = b.field_str("lang").unwrap_or("");
-            // the alt text is plain words: the hidden text and the caption
-            let alt = b
-                .field_str("alt")
-                .filter(|a| !a.trim().is_empty())
-                .map(|a| words_html(a, link, ctx.unavailable));
-            // only Mermaid has a renderer on the site; any other language shows its source
-            let canvas = if lang == "mermaid" {
-                format!(
-                    "<div class=\"diagram-canvas\" aria-hidden=\"true\"><pre class=\"mermaid\">{}</pre></div>",
-                    diagram_source(&b.body, link, ctx.unavailable)
-                )
-            } else {
-                String::new()
-            };
-            // with no alt text the source below is the text alternative, and there is no caption
-            let (hidden, caption) = match &alt {
-                Some(a) => (a.as_str(), format!("<figcaption>{a}</figcaption>")),
-                None => ("Diagram (source below)", String::new()),
-            };
-            format!(
-                "<figure class=\"diagram\" data-lang=\"{}\"><p class=\"visually-hidden\">{hidden}</p>{canvas}{caption}<details class=\"diagram-source\"><summary>Diagram source</summary><pre class=\"code\"><code>{}</code></pre></details></figure>",
-                escape(lang),
-                readable_source(&b.body, link, ctx.unavailable)
-            )
-        }
+        "diagram" => diagram_html(b, ctx),
         "figure" => figure_html(b, ctx),
         "code" => {
             // with no language: the label `Code`, plain text, and no class on `<code>`; for a
@@ -646,6 +628,59 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
             format!("{primary}{}", body())
         }
     }
+}
+
+/// A diagram: its alt text (the hidden text and the caption) and its drawing, else its source.
+/// A drawing is native disclosure: its summary holds the one inline SVG, hidden from the text,
+/// and an open drawing takes the page's width (site.css). A link opens its file at full size,
+/// and the readable source stays under "Diagram source". A source with no drawing is a code
+/// block in place, with its language and the code-copy control, and is not highlighted.
+fn diagram_html(b: &Block, ctx: &BlockCtx) -> String {
+    let (link, unavailable) = (ctx.link, ctx.unavailable);
+    let lang = b.field_str("lang").unwrap_or("");
+    // the alt text is plain words: the hidden text and the caption
+    let alt = b
+        .field_str("alt")
+        .filter(|a| !a.trim().is_empty())
+        .map(|a| words_html(a, link, unavailable));
+    // with no alt text the source is the text alternative, and there is no caption
+    let (hidden, caption) = match &alt {
+        Some(a) => (a.as_str(), format!("<figcaption>{a}</figcaption>")),
+        None => ("Diagram (source below)", String::new()),
+    };
+    let readable = readable_source(&b.body, link, unavailable);
+    let source_details = || {
+        format!(
+            "<details class=\"diagram-source\"><summary>Diagram source</summary><pre class=\"code\"><code>{readable}</code></pre></details>"
+        )
+    };
+    let shown = match (ctx.diagram)(b, &diagram_source(&b.body, link, unavailable)) {
+        DiagramView::Drawn { svg, href } => format!(
+            "<details class=\"diagram-canvas\"><summary aria-label=\"Expand diagram\"><span class=\"diagram-scroll\"><span class=\"diagram-svg\" aria-hidden=\"true\">{svg}</span></span></summary></details><p class=\"diagram-open\"><a href=\"{}\">open full size</a></p>{caption}{}",
+            escape(&href),
+            source_details()
+        ),
+        DiagramView::Fallback => {
+            let human = match highlight::human_name(lang) {
+                n if n.is_empty() => "Code".to_string(),
+                n => n,
+            };
+            let class = if lang.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" class=\"language-{}\"", escape(lang.trim()))
+            };
+            format!(
+                "<div class=\"code-block\"><div class=\"code-head\"><span class=\"lang\">{}</span><button type=\"button\" class=\"tool copy-code\" aria-label=\"Copy code\">Copy</button></div><pre class=\"code\"><code{class}>{readable}</code></pre></div>{caption}",
+                escape(&human)
+            )
+        }
+        DiagramView::Source => format!("{caption}{}", source_details()),
+    };
+    format!(
+        "<figure class=\"diagram\" data-lang=\"{}\"><p class=\"visually-hidden\">{hidden}</p>{shown}</figure>",
+        escape(lang)
+    )
 }
 
 /// A table: wrapped so that it scrolls on its own, captioned, numeric columns right-aligned.

@@ -2,7 +2,10 @@
 //! scope's build. It tells when the inputs of a build changed (so an unrelated commit costs no
 //! build), which pages changed between two builds, and the bytes to send for a page: its version
 //! label and header filled in and the live script added. Nothing here touches the file system.
-use crate::{Mode, SiteFiles, Slot, SlotKind, Slots, build_site_from, disagree, escape, prepare};
+use crate::{
+    Mode, NotFoundOut, NotFoundPages, SiteFiles, Slot, SlotKind, Slots, build_site_from, disagree,
+    escape, prepare,
+};
 use rdy_engine::site_scope::ScopeRef;
 use rdy_engine::site_target::SiteTarget;
 use rdy_engine::{E_BAD_INPUT, RdyError, ReadState, Scope};
@@ -35,6 +38,13 @@ pub struct LiveBuild {
     /// The redaction epoch the build's state captured (D-CC90E): a build serves only while the
     /// store's epoch is still this one.
     pub epoch: u64,
+    /// The target's own not-found pages (D-94BT2, D-E8P8J; system/site n-REYZ9), built once
+    /// with the pages from the same preparation, in the target's layout and selected state with
+    /// every link rooted at its root, and kept with them: a new revision or removal epoch
+    /// replaces the build, and its not-found pages go with it. They have no live behaviour (no
+    /// script, stream, slot or revision) and are no file of the build, so `/404.html` stays a
+    /// miss unless an authored doc has it. The versions menu has none.
+    pub not_found: NotFoundPages,
 }
 
 /// The first 16 lowercase hex digits of the hash of `bytes`.
@@ -96,8 +106,19 @@ pub fn build_live(
     let mut prepared = prepare::source(st, scope, prepare::Purpose::Site)?;
     prepared.menu_url = target.menu_url();
     let root = target.root();
-    let built = build_site_from(prepared, Mode::Live { root: &root }, Slots::Source, None)?;
-    Ok(of_site(built.site, st.redaction_epoch()))
+    // canon's build also holds the Scope variant: the page of a scope the site does not hold
+    let canon = matches!(target, SiteTarget::Source(ScopeRef::Canon));
+    let built = build_site_from(
+        prepared,
+        Mode::Live { root: &root },
+        Slots::Source,
+        None,
+        NotFoundOut::Live {
+            root: &root,
+            scope: canon,
+        },
+    )?;
+    Ok(of_site(built.site, built.not_found, st.redaction_epoch()))
 }
 
 /// A live build of a publication profile (D-CWC91, D-DK03K): the site of the profile's selected
@@ -110,11 +131,13 @@ pub struct ProfileBuild {
     pub changes: Option<&'static str>,
 }
 
+pub use crate::prepare::preparations_for_tests;
 pub use crate::profile_live::{ProfileHistoryMemo, build_profile_live};
 
 /// The live build of a built site whose state captured redaction epoch `epoch`: its files and
-/// slots, with the revision of each page and of the label and the header.
-pub(crate) fn of_site(site: SiteFiles, epoch: u64) -> LiveBuild {
+/// slots, with the revision of each page and of the label and the header, and its not-found
+/// pages.
+pub(crate) fn of_site(site: SiteFiles, not_found: NotFoundPages, epoch: u64) -> LiveBuild {
     let SiteFiles {
         files,
         label,
@@ -140,6 +163,7 @@ pub(crate) fn of_site(site: SiteFiles, epoch: u64) -> LiveBuild {
         label_at,
         warnings: summary.warnings,
         epoch,
+        not_found,
     }
 }
 

@@ -1,0 +1,13 @@
+flowchart LR
+    subgraph G1["first"]
+        a0["A"] --> a1["B"]
+    end
+    subgraph G2["second"]
+        b0["A"] --> b1["first"] --> b2["second"]
+    end
+    subgraph G3["third"]
+        c0["A"] --> c1["B"] --> c2["first'"] --> c3["second'"]
+        c4["first, second<br/>third, A's"]
+    end
+    G2 -. "first second" .-> G1
+    G1 -- third --> G3

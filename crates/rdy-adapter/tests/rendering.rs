@@ -806,3 +806,76 @@ fn spv4_adapter_output_keeps_the_public_reference_gate() {
     }
     holder.close().unwrap();
 }
+
+/// dgm6 (D-FY4VF, D-KAGB2): a holder's one-page render carries the generated diagram file the
+/// page links, with the bytes and manifest entry of the source project's own render.
+#[test]
+fn dgm6_adapter_page_carries_generated_svg() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("src");
+    std::fs::create_dir_all(&root).unwrap();
+    drop(Rdy::init(&root, "rdy-standard").unwrap());
+    let mut r = Rdy::open(&root).unwrap();
+    write(
+        &mut r,
+        json!([
+            {"op": "create", "type": "doc", "id": "$flow", "fields": {"name": "flow", "title": "Flow page", "doc_type": "page"}},
+            {"op": "create", "type": "diagram", "parent": "$flow", "fields": {"lang": "mermaid", "alt": "The flow"},
+             "body": "flowchart LR\n  subgraph S[first]\n    A[start] --> B[end]\n  end"}
+        ]),
+    );
+    land(&mut r, "first");
+    let v1 = tag(&mut r, "v1.0.0");
+    let l1 = r.store().read_tag(&v1).unwrap().landing;
+    let src = Source {
+        r,
+        profile: String::new(),
+        secret: String::new(),
+        v1,
+        l1,
+    };
+    let inputs = capture_inputs(&src.r.read(), &Scope::At(l1)).unwrap();
+    let holder = src.holder(&dir.path().join("holder"), dir.path());
+    let snap = holder.snapshot().unwrap();
+    let got = snap
+        .render_page("v1.0.0", IMPLICIT_ORG, &inputs, "flow.html")
+        .unwrap();
+    assert_eq!(got, src.page(IMPLICIT_ORG, &inputs, "flow.html"));
+    let drawn: Vec<&String> = got
+        .assets
+        .keys()
+        .filter(|k| k.starts_with("assets/diagrams/"))
+        .collect();
+    assert_eq!(drawn.len(), 1, "{:?}", got.assets.keys());
+    let path = drawn[0];
+    let bytes = &got.assets[path];
+    assert_eq!(
+        path,
+        &format!("assets/diagrams/{}.svg", Hash::of(bytes)),
+        "named by the hash of its own bytes"
+    );
+    let svg = text(bytes);
+    assert!(svg.contains("<svg") && svg.contains(">start<") && svg.contains(">first<"));
+    assert!(!svg.contains("<script"));
+    let entry = got.manifest.files.iter().find(|e| &e.path == path).unwrap();
+    assert_eq!(
+        (
+            entry.media_type.as_str(),
+            entry.hash,
+            entry.size,
+            entry.notice_offset
+        ),
+        ("image/svg+xml", Hash::of(bytes), bytes.len() as u64, None)
+    );
+    let html = text(&got.html);
+    assert!(
+        html.contains(&format!("href=\"{path}\">open full size</a>")),
+        "{html}"
+    );
+    // the full render through the process ships the same file
+    let full = request(&snap, "v1.0.0", IMPLICIT_ORG, &inputs, RenderFormat::Site)
+        .and_then(|b| process(&b))
+        .unwrap();
+    assert_eq!(full.files.get(path), Some(bytes));
+    holder.close().unwrap();
+}

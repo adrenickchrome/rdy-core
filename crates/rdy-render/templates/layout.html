@@ -1,8 +1,8 @@
 <!doctype html>
-<html lang="{{ lang }}">
+<html lang="{{ lang }}"{% if kind == "not-found" %} data-rdy-kind="not-found"{% endif %}>
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1">{% block robots %}{% endblock %}
 <title>{% if kind == "home" %}{{ site_name }}{% else %}{{ title }} · {{ site_name }}{% endif %}</title>
 {% if site_description and kind == "home" %}<meta name="description" content="{{ site_description }}">{% endif %}
 <script>{{ init_js|safe }}</script>
@@ -42,6 +42,5 @@
 </div>
 <noscript><p class="noscript">{% block noscript %}{% if live %}Search and live updates need JavaScript.{% else %}Search needs JavaScript.{% endif %}{% endblock %} Everything else on this page works without it.</p></noscript>
 <script src="{{ root }}assets/app.js" defer></script>
-{% if has_mermaid %}<script src="{{ root }}assets/js/mermaid.min.js" defer></script>
-{% endif %}</body>
+</body>
 </html>

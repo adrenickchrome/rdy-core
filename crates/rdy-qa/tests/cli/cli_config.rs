@@ -138,6 +138,72 @@ fn cfgl1_rdy_config_show_origin() {
 }
 
 #[test]
+fn dgm5_config_cli_lists_the_project_origin() {
+    let s = Served::new();
+    // the key lists in KEY_LEVELS order, with its default and then its project origin
+    let in_table_order = |rows: &[serde_json::Value]| {
+        let at: Vec<usize> = rows
+            .iter()
+            .filter_map(|r| {
+                KEY_LEVELS
+                    .iter()
+                    .position(|k| Some(k.key) == r["key"].as_str())
+            })
+            .collect();
+        assert!(at.windows(2).all(|w| w[0] < w[1]), "{at:?}");
+    };
+    let (okk, v) = s.json(&["--json", "config", "--show-origin"]);
+    assert!(okk, "{v}");
+    let rows = v.as_array().unwrap();
+    in_table_order(rows);
+    let row = rows.iter().find(|r| r["key"] == "site.base_path").unwrap();
+    assert_eq!(row["value"], "/");
+    assert_eq!(row["level"], "default");
+    assert!(row["file"].is_null(), "{row}");
+    let text = String::from_utf8_lossy(&s.rdy(&["config", "--show-origin"]).stdout).into_owned();
+    assert!(
+        text.lines().any(|l| l == "site.base_path = /  # default"),
+        "{text}"
+    );
+
+    append(s.dir.path(), PROJECT_FILE, "site:\n  base_path: /docs/\n");
+    let (okk, v) = s.json(&["--json", "config", "--show-origin"]);
+    assert!(okk, "{v}");
+    let rows = v.as_array().unwrap();
+    in_table_order(rows);
+    let row = rows.iter().find(|r| r["key"] == "site.base_path").unwrap();
+    assert_eq!(row["value"], "/docs/");
+    assert_eq!(row["level"], "project");
+    assert!(
+        row["file"].as_str().unwrap().ends_with(".rdy.yaml"),
+        "{row}"
+    );
+    let keys: Vec<&str> = rows.iter().map(|r| r["key"].as_str().unwrap()).collect();
+    let at = |k: &str| keys.iter().position(|x| *x == k).unwrap();
+    assert!(at("pack") < at("site.base_path"));
+    assert!(at("site.base_path") < at("reviews.require_up_to_date"));
+    let text = String::from_utf8_lossy(&s.rdy(&["config", "--show-origin"]).stdout).into_owned();
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("site.base_path = /docs/  # ") && l.ends_with(".rdy.yaml")),
+        "{text}"
+    );
+    // the same effective value without the origin column
+    let text = String::from_utf8_lossy(&s.rdy(&["config"]).stdout).into_owned();
+    assert!(
+        text.lines().any(|l| l == "site.base_path = /docs/"),
+        "{text}"
+    );
+    // text and JSON list the same keys in the same order
+    let text = String::from_utf8_lossy(&s.rdy(&["config"]).stdout).into_owned();
+    let text_keys: Vec<&str> = text
+        .lines()
+        .filter_map(|l| l.split_once(" = ").map(|(k, _)| k))
+        .collect();
+    assert_eq!(text_keys, keys);
+}
+
+#[test]
 fn cfgl1_a_local_actor_makes_that_actor_the_human_here() {
     let s = Served::new();
     append(s.dir.path(), LOCAL_FILE, "actor: human:alias\n");

@@ -4,6 +4,7 @@ use crate::review::{Mark, Review};
 use crate::site::Site;
 use rdy_model::{Block, BlockId, tree};
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 /// The most entries a list shows; the rest are one "+N more" entry that leads to the folder page.
 const CAP: usize = 50;
@@ -43,10 +44,23 @@ pub struct NavEntry {
     pub more: Option<(usize, String)>,
     /// The word a draft gives the page.
     pub change: Option<Mark>,
+    /// A folder the reader can open and close in place: one of the folders of the neighbourhood
+    /// of the page (see [`Ctx::entry`]). Its children are one level down; the folders among them
+    /// are ordinary page links. It opens by default when it is on the path to the page.
+    pub folder: bool,
+    /// Where an Edited doc's word leads: its group on the change summary.
+    pub change_href: Option<String>,
 }
 
 /// The navigation as page `from` shows it, `current` being the block the page is for.
-pub fn build(site: &Site, current: Option<&BlockId>, from: &str, facts: SiteFacts) -> Nav {
+/// `review_anchors` holds the change summary's anchor of each doc, by page path.
+pub fn build(
+    site: &Site,
+    current: Option<&BlockId>,
+    from: &str,
+    facts: SiteFacts,
+    review_anchors: &BTreeMap<String, String>,
+) -> Nav {
     let review = facts.review;
     let chain = current.map(|c| site.chain(c)).unwrap_or_default();
     let ctx = Ctx {
@@ -55,6 +69,7 @@ pub fn build(site: &Site, current: Option<&BlockId>, from: &str, facts: SiteFact
         current,
         chain: &chain,
         review,
+        review_anchors,
     };
     let plain = |label: &str, to: &str| NavEntry {
         label: label.to_string(),
@@ -135,33 +150,75 @@ struct Ctx<'a> {
     chain: &'a [BlockId],
     /// What a draft changes; none for canon and tags.
     review: Option<&'a Review>,
+    /// The change summary's anchor of each doc, by page path; empty without that summary.
+    review_anchors: &'a BTreeMap<String, String>,
 }
 
 impl Ctx<'_> {
-    /// The entry of a folder or doc; a folder on the path is open one level, down to the page.
+    /// The entry of a folder or doc. A folder on the path is open down to the page. Any other
+    /// folder of the neighbourhood is closed and holds its first level only: its children are
+    /// plain page links, and a folder among them is not extended.
     fn entry(&self, b: &Block) -> NavEntry {
         let current = self.current == Some(&b.id);
         let on_path = !current && self.chain.contains(&b.id);
+        let mut e = self.plain(b, current, on_path);
+        if b.block_type == tree::FOLDER {
+            e.folder = true;
+            e.children = if current || on_path {
+                self.list(Some(&b.id), e.href.clone())
+            } else {
+                self.first_level(&b.id, e.href.clone())
+            };
+        }
+        e
+    }
+
+    /// The entry of a folder or doc, without children.
+    fn plain(&self, b: &Block, current: bool, on_path: bool) -> NavEntry {
         let href = self
             .site
             .page(&b.id)
             .map(|p| relative(self.from, &p))
             .unwrap_or_default();
-        let open = b.block_type == tree::FOLDER && (current || on_path);
-        let children = if open {
-            self.list(Some(&b.id), href.clone())
-        } else {
-            vec![]
-        };
+        let change = self.review.and_then(|r| r.page_mark(&b.id));
         NavEntry {
             label: self.site.label(b),
             href,
             current,
             on_path,
-            children,
-            more: None,
-            change: self.review.and_then(|r| r.page_mark(&b.id)),
+            change,
+            change_href: self.change_href(b, change),
+            ..NavEntry::default()
         }
+    }
+
+    /// Where the Edited word of a doc leads: its group on the change summary, when the build
+    /// writes that summary and the doc has a group.
+    fn change_href(&self, b: &Block, change: Option<Mark>) -> Option<String> {
+        if change != Some(Mark::Edited) || b.block_type == tree::FOLDER {
+            return None;
+        }
+        let anchor = self.review_anchors.get(&self.site.page(&b.id)?)?;
+        Some(format!("{}#{anchor}", relative(self.from, "changes.html")))
+    }
+
+    /// The first level of a folder off the path, cut to [`CAP`] from its start: page links only.
+    fn first_level(&self, folder: &BlockId, folder_href: String) -> Vec<NavEntry> {
+        let list = self.site.nav_list(Some(folder));
+        // no entry is on the path here: a capped list shows its first entries
+        let (start, capped) = match window(list.len(), None) {
+            None => (0, false),
+            Some(start) => (start, true),
+        };
+        let end = if capped { start + CAP } else { list.len() };
+        let mut out: Vec<NavEntry> = list[start..end]
+            .iter()
+            .map(|b| self.plain(b, false, false))
+            .collect();
+        if capped {
+            out.push(more(list.len(), folder_href));
+        }
+        out
     }
 
     /// The entries of the navigation list under `parent` (see [`Site::nav_list`]), cut to

@@ -33,18 +33,19 @@ impl Drop for Unseed {
 const BASE_PDF_DIGESTS: [(&str, &str); 3] = [
     (
         "canon",
-        "2dd5e4650ee46a48f413a5ee0dc3e49000fc15ea56a8d8567fcea057281dae0c",
+        "3e298d3543d81c636214bffe97f81b26b8e7f011af61d3868178e28af5b26e99",
     ),
     (
         "tag:v1.0.0",
-        "da18223eb0fe39879a9335339d894a4889da5a520b22f232e7bc2568ae347403",
+        "039f3d221943252c4e87d59415486509f26729e18e7f0290c7f86d768ca2f77a",
     ),
     (
         "view:editing",
-        "c7552ff804b45edf2d78b60e165522ae44440a7e8a27bc98d3071cc19d0bfcf7",
+        "a6766c573ab574521a87bfc5d9be59915452d1125433da1d1ed4bfd4cc0f975b",
     ),
 ];
 
+/// Re-taken after the reference period rule (ruling task-7): an automatic label drops its final period before an authored period; only that text moved.
 #[test]
 fn plx1_print_pdf_and_site_match_base_bytes() {
     let _unseed = Unseed;

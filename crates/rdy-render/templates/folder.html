@@ -1,6 +1,7 @@
 {% extends "layout.html" %}
 {% block content %}
-<h1>{{ body.folder.title }}</h1>
+{% if title_tools %}<div class="block block-page" data-rdy-block="{{ title_tools.id }}" data-ref-head="{{ title_tools.ref_head }}" data-ref="{{ title_tools.ref }}"><h1>{{ body.folder.title }}</h1>{% with item = title_tools %}{% include "partials/tools.html" %}{% endwith %}</div>{% else %}<h1>{{ body.folder.title }}</h1>{% endif %}
 {% if body.folder.description_html %}<p>{{ body.folder.description_html|safe }}</p>{% endif %}
 <ul class="children">{% for c in body.folder.children %}<li class="child-{{ c.kind }}"><a href="{{ c.href }}">{{ c.label }}</a></li>{% endfor %}</ul>
-{% endblock %}
+{% if copy_page %}<template data-copy-page hidden>{{ copy_page }}</template>
+{% endif %}{% endblock %}

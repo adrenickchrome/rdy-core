@@ -468,7 +468,12 @@ fn hpb10_page_assets_follow_the_page_context() {
     for t in theme {
         assert!(intro.assets.contains_key(t), "{t}");
     }
-    assert!(!intro.assets.contains_key("assets/js/mermaid.min.js"));
+    assert!(
+        !intro
+            .assets
+            .keys()
+            .any(|k| k.starts_with("assets/diagrams/"))
+    );
     // a page with no figure has none of its blobs, and the home page none of the intro's
     let home = p.one(IMPLICIT_ORG, "index.html");
     let mut names: Vec<&str> = home.assets.keys().map(String::as_str).collect();
@@ -476,15 +481,23 @@ fn hpb10_page_assets_follow_the_page_context() {
     let mut closed = theme.to_vec();
     closed.sort_unstable();
     assert_eq!(names, closed);
-    // a page with a diagram: the library and the script that starts it
+    // a page with a diagram: the theme and the diagram's generated file, which only it carries
     let flow = p.one(IMPLICIT_ORG, "flow.html");
-    assert!(flow.assets.contains_key("assets/js/mermaid.min.js"));
-    assert!(flow.assets["assets/app.js"] != intro.assets["assets/app.js"]);
-    assert!(flow.assets["assets/app.js"].len() > intro.assets["assets/app.js"].len());
-    // the full site has a diagram, so its script is the diagram page's, not the other pages'
-    assert!(flow.assets["assets/app.js"] == full.files["assets/app.js"]);
-    assert!(intro.assets["assets/app.js"] != full.files["assets/app.js"]);
-    // the manifest entry of the script is the page's own
+    let drawn: Vec<&String> = flow
+        .assets
+        .keys()
+        .filter(|k| !theme.contains(&k.as_str()))
+        .collect();
+    assert_eq!(drawn.len(), 1, "{:?}", flow.assets.keys());
+    assert!(drawn[0].starts_with("assets/diagrams/") && drawn[0].ends_with(".svg"));
+    assert_eq!(flow.assets[drawn[0]], full.files[drawn[0]]);
+    // no page carries a diagram library, and every page's script is the full site's
+    for r in [&intro, &flow, &home] {
+        assert!(!r.assets.keys().any(|k| k.starts_with("assets/js/")));
+        assert!(r.assets["assets/app.js"] == full.files["assets/app.js"]);
+    }
+    assert!(!full.files.keys().any(|k| k.starts_with("assets/js/")));
+    // the manifest entry of the script is the full site's
     let entry = |r: &RenderedPage| {
         r.manifest
             .files
@@ -494,7 +507,7 @@ fn hpb10_page_assets_follow_the_page_context() {
             .clone()
     };
     assert_eq!(entry(&intro).hash, Hash::of(&intro.assets["assets/app.js"]));
-    assert!(entry(&intro).hash != entry(&flow).hash);
+    assert!(entry(&intro) == entry(&flow));
     // no other page, no search index and no agent file is returned: those are the full
     // publication's, which the page still links
     for r in [&intro, &flow, &home] {

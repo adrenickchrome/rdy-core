@@ -6,7 +6,8 @@ use rdy_qa::site::{cascaded, parse_css};
 
 const BUTTON: &str = "<button id=\"show-changes\" type=\"button\" aria-pressed=\"true\" hidden>Show changes</button>";
 
-/// Every page of a site but the permalink pages under `go/`.
+/// Every page of a site but the permalink pages under `go/` and the generated not-found page,
+/// which has no review controls.
 fn layout_pages(site: &std::path::Path) -> Vec<(String, String)> {
     pages(site)
         .into_iter()
@@ -17,6 +18,7 @@ fn layout_pages(site: &std::path::Path) -> Vec<(String, String)> {
                 std::fs::read_to_string(&p).unwrap(),
             )
         })
+        .filter(|(_, h)| !h.contains("data-rdy-kind=\"not-found\""))
         .collect()
 }
 

@@ -9,7 +9,7 @@
 //! rules: canon, views, the in-flight scope and proposals are refused (`needs_tag`). Its
 //! publications capture empty canon, no views and the current tags. Its batches log no tension
 //! or suspect moves, and its fsck checks each tag's own history (`StoreReader::check_holder`).
-use crate::config::{Config, ServeSection};
+use crate::config::{Config, ServeSection, SiteConfig};
 use crate::handle::{Context, io};
 use crate::pack_load::load_pack_from;
 use crate::{E_BAD_INPUT, E_LIMIT, PackFingerprint, Rdy, RdyError};
@@ -82,6 +82,7 @@ pub(crate) fn holder_context() -> Result<Context, RdyError> {
             views: None,
             decisions: None,
             serve: ServeSection::default(),
+            site: SiteConfig::default(),
             coverage: None,
             propose: None,
         },

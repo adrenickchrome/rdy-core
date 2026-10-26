@@ -276,6 +276,84 @@ fn ec3_print_has_the_words_of_llms_full() {
     }
 }
 
+/// Ruling task-6: a diagram's words are the same in the print and in llms-full, whatever its
+/// shape: drawn (its "open full size" link is a reader control and adds no words), D2, and an
+/// invalid, an undrawn and a failed Mermaid (each a code block with its language, then its
+/// caption). Authored text that reads "open full size" stays in both.
+#[test]
+fn dgm6_print_and_llms_read_the_same_diagram_words() {
+    let (_d, mut r, _ids) = project();
+    let diagram = |lang: &str, alt: &str, body: &str| {
+        json!({"op": "create", "type": "diagram", "parent": "$s",
+            "fields": {"lang": lang, "alt": alt}, "body": body})
+    };
+    write(
+        &mut r,
+        "dgm6",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Diagram words", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Shapes"}},
+            diagram("mermaid", "Drawn flow", "flowchart LR\n  A[start] --> B[end]"),
+            diagram("d2", "D2 flow", "a -> b: goes"),
+            diagram("mermaid", "Invalid flow", "flowchart LR\n A["),
+            diagram("mermaid", "Undrawn pie", "pie\n  \"a\" : 1"),
+            diagram("mermaid", "Failed flow",
+                "flowchart LR\n    A --> B\n    classDef e fill:#f00\" onload=\"alert(1)\n    class A e"),
+            {"op": "create", "type": "prose", "parent": "$s", "body": "open full size"}
+        ]),
+    )
+    .expect("the diagrams");
+    land(&mut r, "dgm6").expect("land them");
+    let p = canon(&r);
+    let site = build_site(&r.read(), &Scope::Canon, Mode::Static).unwrap();
+    let full = String::from_utf8(site.files["llms-full.txt"].clone()).unwrap();
+    let sections = llms_sections(&full);
+    let docs = tree_docs(&p);
+    assert_eq!(sections.len(), docs.len());
+    let (d, section) = docs
+        .iter()
+        .zip(&sections)
+        .find(|(d, _)| d.title == "Diagram words")
+        .expect("the doc and its section");
+    // the site draws the one flow and shows the other four as code blocks
+    let page = String::from_utf8(site.files[&d.page].clone()).unwrap();
+    assert_eq!(
+        page.matches("<p class=\"diagram-open\">").count(),
+        1,
+        "{page}"
+    );
+    assert_eq!(
+        page.matches("<div class=\"code-block\">").count(),
+        4,
+        "{page}"
+    );
+    assert_eq!(doc_words(d), llms_words(section), "{section}");
+    // the control adds no words; the authored line is in both
+    let authored = |l: &&str| l.trim() == "open full size";
+    assert_eq!(section.lines().filter(authored).count(), 1, "{section}");
+    assert!(
+        d.blocks
+            .iter()
+            .any(|b| matches!(b, PBlock::Para { runs, .. } if text(runs) == "open full size")),
+        "{:?}",
+        d.blocks
+    );
+    // each fallback reads its language, its source, then its caption, in both
+    for (label, alt) in [
+        ("D2", "D2 flow"),
+        ("Mermaid", "Invalid flow"),
+        ("Mermaid", "Undrawn pie"),
+        ("Mermaid", "Failed flow"),
+    ] {
+        let at = section.find(alt).expect(alt);
+        let before = &section[..at];
+        let lang = before.rfind(label).expect(label);
+        assert!(before[lang..].contains("```"), "{alt}: {section}");
+    }
+    // the print draws none
+    assert!(p.blobs.values().all(|b| !b.file.contains("diagrams")));
+}
+
 #[test]
 fn ec3_print_shows_no_block_id() {
     let (_d, r, _ids) = project();
@@ -513,6 +591,11 @@ fn ec3_two_builds_of_one_state_are_equal() {
     assert_eq!(view(&r), view(&r));
 }
 
+/// Whether `bytes` are the site's generated not-found page: its marker, never its file name.
+fn generated_404(bytes: &[u8]) -> bool {
+    String::from_utf8_lossy(bytes).contains("data-rdy-kind=\"not-found\"")
+}
+
 /// The site's bytes, as one digest: every file (its path and bytes), the label, the header,
 /// where the label and header sit, the warnings and the counts.
 fn site_digest(s: &SiteFiles) -> String {
@@ -521,7 +604,8 @@ fn site_digest(s: &SiteFiles) -> String {
         buf.extend_from_slice(&(b.len() as u64).to_le_bytes());
         buf.extend_from_slice(b);
     };
-    for (path, bytes) in &s.files {
+    // the generated not-found page is left out, so the digest pins every other file's bytes
+    for (path, bytes) in s.files.iter().filter(|(_, b)| !generated_404(b)) {
         put(path.as_bytes());
         put(bytes);
     }
@@ -562,20 +646,40 @@ fn reserved(r: &mut Rdy) -> Scope {
 /// `assets/app.js`: the menu `LABEL` becomes "Versions, proposals, views and profiles" and the
 /// script fetches the pill's href in place of the hard-coded PAGE (with its same-origin http/https
 /// check from fix rounds 2827fddd and 2f7023bd). Only `assets/app.js` changed; re-taken.
+/// Re-taken after the reference period rule (ruling task-7): an automatic label drops its final period before an authored period; only that text moved.
+/// Re-taken for the renderer plan's Task 8 (sidebar folders): the navigation markup of the pages,
+/// the sidebar rules of `assets/site.css` and `assets/app.js` (which now bundles `js/sidebar.js`)
+/// moved; their content rows keep their text (the gold1_ goldens).
+/// Re-taken again in Task 8 fix round 1: only `js/sidebar.js` changed (byte-size bounds and absolute-URL
+/// validation of the stored state), so only `assets/app.js` moved.
+/// Re-taken for the renderer plan's Task 6 (native diagrams, ruling task-8): the diagram figures
+/// of the pages that have one, their removed library script tag, the new `assets/diagrams/` files,
+/// `assets/js/mermaid.min.js` (gone), the diagram rules of `assets/site.css`, `assets/app.js`
+/// (without `js/mermaid-init.js`) and an `open full size` line per drawing in `llms-full.txt` moved.
+/// Re-taken for Task 6 fix round 1 (ruling task-6): the open link is a reader control, so each
+/// drawing's `open full size` line left `llms-full.txt`; every other file and the warnings kept
+/// their bytes.
+/// Re-taken for the renderer plan's Task 9 (Copy, ruling task-8 form): each doc and folder page's
+/// title toolbar (Link, Copy ref, Copy), the Copy button on each block and section toolbar, the
+/// page's hidden Copy payload template and `assets/app.js` (which bundles `js/copy.js`) moved;
+/// their content rows keep their text (the gold1_ goldens).
+/// Re-taken for the final review's fix round 1 (M2): Cite skips a selection in the eyebrow, so
+/// only `js/copy.js` changed and only `assets/app.js` moved; with the old script the digests
+/// were the ones before.
 #[test]
 fn ec3_the_site_build_is_unchanged() {
     const BASE: [(&str, &str); 3] = [
         (
             "canon",
-            "e0d7d62a6e961854f0307029f01aba846ef650b6a453ac8a9064ab2b638047cb",
+            "fa77ed9448725329640a60ab642c473720320d790a54ae05f324d15c2c7b95fc",
         ),
         (
             "view:editing",
-            "fad00635ef970f18bbe5ef33221e8d6f953e868be4b52a6ada5800b85d14a398",
+            "cb5e57fdca94ae6e9f0773c0049ae5c109796e66b1ff2b673bf3005fea245642",
         ),
         (
             "view:reserved",
-            "dd24f0a2118f30302c5b2a741fedc9e4df7819298502eedb60310a9eff0963b1",
+            "b7b7a2960a1f89eee12842598db77134494199b0e24109c0fa9c549232b6c957",
         ),
     ];
     // the ids the corpus's generated pages and the reserved docs draw come from a seeded stream

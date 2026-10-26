@@ -1,24 +1,43 @@
-//! Bundled Mermaid, loaded only where needed, themed, degrading without JS (dia1).
+//! Diagrams drawn as SVG when the site is built: no library or script, themed by the site's
+//! tokens, and the source, alt and caption kept (dia1, D-FY4VF, D-KAGB2).
 use rdy_engine::Scope;
 use rdy_qa::golden::*;
+
+/// The diagram figures of a page, in order.
+fn figures(html: &str) -> Vec<&str> {
+    let mut out = vec![];
+    let mut rest = html;
+    while let Some(i) = rest.find("<figure class=\"diagram\"") {
+        let end = rest[i..].find("</figure>").unwrap() + i + "</figure>".len();
+        out.push(&rest[i..end]);
+        rest = &rest[end..];
+    }
+    out
+}
 
 #[test]
 fn dia1_a_diagram_page_bundles_mermaid_and_a_plain_page_does_not_load_it() {
     let (_d, r, _ids) = every_type_site(); // has one diagram on all.html
     let out = tempfile::tempdir().unwrap();
     rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
-    let js = out.path().join("assets/js/mermaid.min.js");
-    assert!(js.exists() && js.metadata().unwrap().len() > 3_000_000);
+    // no diagram library ships: the diagram is drawn into the page and its own file
+    assert!(!out.path().join("assets/js").exists());
     let all = std::fs::read_to_string(out.path().join("all.html")).unwrap();
-    assert!(all.contains("<script src=\"assets/js/mermaid.min.js\" defer></script>"));
-    let home = std::fs::read_to_string(out.path().join("index.html")).unwrap();
-    assert!(!home.contains("mermaid.min.js"));
-    let app = std::fs::read_to_string(out.path().join("assets/app.js")).unwrap();
+    assert!(!all.contains("mermaid.min.js"));
+    let fig = figures(&all)[0];
     assert!(
-        app.contains("securityLevel: \"strict\"")
-            && app.contains("rdy:theme")
-            && app.contains("prefers-color-scheme: dark")
+        fig.contains("<span class=\"diagram-svg\" aria-hidden=\"true\"><svg "),
+        "{fig}"
     );
+    let open = "<p class=\"diagram-open\"><a href=\"";
+    let href = &fig[fig.find(open).unwrap() + open.len()..];
+    let href = &href[..href.find('"').unwrap()];
+    assert!(href.starts_with("assets/diagrams/") && href.ends_with(".svg"));
+    assert!(out.path().join(href).exists());
+    let home = std::fs::read_to_string(out.path().join("index.html")).unwrap();
+    assert!(!home.contains("mermaid.min.js") && !home.contains("assets/diagrams/"));
+    let app = std::fs::read_to_string(out.path().join("assets/app.js")).unwrap();
+    assert!(!app.contains("mermaid"));
     // app.js loads nothing from a remote URL (menu.js names the "http:" and "https:" protocols
     // in its same-origin check, which is not a URL)
     assert!(!app.contains("http://") && !app.contains("https://"));
@@ -31,17 +50,16 @@ fn dia1_a_project_without_diagrams_ships_no_mermaid() {
     let out = tempfile::tempdir().unwrap();
     rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     assert!(!out.path().join("assets/js").exists());
+    assert!(!out.path().join("assets/diagrams").exists());
     assert!(
         !std::fs::read_to_string(out.path().join("assets/app.js"))
             .unwrap()
             .contains("mermaid.initialize")
     );
     for p in pages(out.path()) {
-        assert!(
-            !std::fs::read_to_string(&p).unwrap().contains("mermaid"),
-            "{}",
-            p.display()
-        );
+        let h = std::fs::read_to_string(&p).unwrap();
+        assert!(!h.contains("mermaid"), "{}", p.display());
+        assert!(!h.contains("diagram-svg"), "{}", p.display());
     }
 }
 
@@ -51,13 +69,17 @@ fn dia1_without_scripts_the_source_alt_and_caption_remain() {
     let out = tempfile::tempdir().unwrap();
     rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let all = std::fs::read_to_string(out.path().join("all.html")).unwrap();
-    let fig = &all[all.find("<figure class=\"diagram\"").unwrap()..all.find("</figure>").unwrap()];
+    let fig = figures(&all)[0];
+    // the drawing needs no script: native disclosure expands it and a link opens its file
     assert!(
-        fig.contains("<pre class=\"mermaid\">graph TD")
+        fig.contains("<details class=\"diagram-canvas\"><summary aria-label=\"Expand diagram\">")
+            && fig.contains(">open full size</a>")
             && fig.contains("<figcaption>The flow</figcaption>")
             && fig.contains("<p class=\"visually-hidden\">The flow</p>")
     );
-    assert!(fig.contains("<details class=\"diagram-source\">"));
+    assert!(fig.contains(
+        "<details class=\"diagram-source\"><summary>Diagram source</summary><pre class=\"code\"><code>graph TD"
+    ));
     assert!(!fig.contains("<script"));
 }
 
@@ -69,139 +91,18 @@ fn dia1_a_d2_diagram_shows_its_source_and_caption_only() {
     let out = tempfile::tempdir().unwrap();
     rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("d.html")).unwrap();
-    assert!(
-        h.contains("data-lang=\"d2\"")
-            && !h.contains("diagram-canvas")
-            && h.contains("a -&gt; b")
-            && h.contains("<figcaption>Boxes</figcaption>")
-    );
-    assert!(
-        !out.path().join("assets/js/mermaid.min.js").exists(),
-        "d2 needs no mermaid"
-    );
-}
-
-/// Fix round 1. layout.html loads `app.js` (which carries `mermaid-init.js`) before
-/// `mermaid.min.js`, both `defer`. Deferred scripts run while `readyState` is already
-/// `interactive`, so the init must wait for DOMContentLoaded, not start at once.
-#[test]
-fn dia1_the_init_waits_for_a_library_loaded_after_it_by_a_later_deferred_script() {
-    if !rdy_qa::skip::node_available() {
-        rdy_qa::skip::skip(
-            "dia1_the_init_waits_for_a_library_loaded_after_it_by_a_later_deferred_script",
-            rdy_qa::skip::Why::Prerequisite,
-            "node is not installed",
-        );
-        return;
-    }
-    let init = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../rdy-render/theme/rdy-standard/js/mermaid-init.js");
-    let init = std::fs::read_to_string(&init).unwrap();
-    let harness = format!(
-        r#"
-const listeners = {{}};
-const calls = [];
-const pre = {{ dataset: {{}}, textContent: 'graph TD\nA-->B', closest() {{ return figure; }} }};
-const figure = {{ classList: {{ add() {{}}, remove() {{}} }}, querySelector() {{ return {{ textContent: 'The flow' }}; }} }};
-global.window = global;
-global.document = {{
-  readyState: 'interactive', // what a deferred script sees
-  documentElement: {{ hasAttribute() {{ return false; }} }},
-  addEventListener(n, f) {{ (listeners[n] = listeners[n] || []).push(f); }},
-  querySelectorAll() {{ return [pre]; }},
-  createElement() {{ return {{ className: '', querySelector() {{ return null; }}, set innerHTML(v) {{}} }}; }},
-}};
-global.getComputedStyle = () => ({{ getPropertyValue: () => '#fff' }});
-global.matchMedia = undefined;
-(function () {{ {init} }})();   // app.js runs first: no mermaid yet
-global.mermaid = {{
-  initialize() {{ calls.push('initialize'); }},
-  render() {{ calls.push('render'); return Promise.resolve({{ svg: '<svg></svg>' }}); }},
-}};                              // mermaid.min.js runs second
-(listeners.DOMContentLoaded || []).forEach(f => f());   // then DOMContentLoaded
-setTimeout(() => {{ console.log(calls.join(',')); }}, 20);
-"#
-    );
-    let out = std::process::Command::new("node")
-        .arg("-e")
-        .arg(&harness)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    // its source as a code block in place, unhighlighted, with the code-copy control
+    let fig = figures(&h)[0];
     assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
-        "initialize,render",
-        "the diagram is drawn once mermaid has loaded"
+        fig,
+        "<figure class=\"diagram\" data-lang=\"d2\"><p class=\"visually-hidden\">Boxes</p><div class=\"code-block\"><div class=\"code-head\"><span class=\"lang\">D2</span><button type=\"button\" class=\"tool copy-code\" aria-label=\"Copy code\">Copy</button></div><pre class=\"code\"><code class=\"language-d2\">a -&gt; b</code></pre></div><figcaption>Boxes</figcaption></figure>"
     );
-}
-
-/// ls13 (visual review F3, rule 2.9): Mermaid sizes each label box from the text as it measures
-/// it when it draws. The site's text face (Onest, `font-display: swap`) was often still loading
-/// at DOMContentLoaded, so the boxes were measured in the fallback face and cut the last letters
-/// once Onest swapped in. The init waits until the text face has loaded before it draws.
-#[test]
-fn ls13_the_init_draws_only_once_the_text_face_has_loaded() {
-    if !rdy_qa::skip::node_available() {
-        rdy_qa::skip::skip(
-            "ls13_the_init_draws_only_once_the_text_face_has_loaded",
-            rdy_qa::skip::Why::Prerequisite,
-            "node is not installed",
-        );
-        return;
-    }
-    let init = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../rdy-render/theme/rdy-standard/js/mermaid-init.js");
-    let init = std::fs::read_to_string(&init).unwrap();
-    let harness = format!(
-        r#"
-const listeners = {{}};
-const calls = [];
-let loaded;
-const pre = {{ dataset: {{}}, textContent: 'graph TD\nA-->B', closest() {{ return figure; }} }};
-const figure = {{ classList: {{ add() {{}}, remove() {{}} }}, querySelector() {{ return {{ textContent: 'The flow' }}; }} }};
-global.window = global;
-global.document = {{
-  readyState: 'complete',
-  documentElement: {{ hasAttribute() {{ return false; }} }},
-  addEventListener(n, f) {{ (listeners[n] = listeners[n] || []).push(f); }},
-  querySelectorAll() {{ return [pre]; }},
-  createElement() {{ return {{ className: '', querySelector() {{ return null; }}, set innerHTML(v) {{}} }}; }},
-  fonts: {{
-    load(spec) {{ calls.push('load ' + spec); return new Promise(r => {{ loaded = r; }}); }},
-    ready: Promise.resolve(),
-  }},
-}};
-global.getComputedStyle = () => ({{ getPropertyValue: (n) => n === '--font-text' ? " 'Onest', Arial, sans-serif" : '#fff' }});
-global.matchMedia = undefined;
-global.mermaid = {{
-  initialize() {{ calls.push('initialize'); }},
-  render() {{ calls.push('render'); return Promise.resolve({{ svg: '<svg></svg>' }}); }},
-}};
-(function () {{ {init} }})();
-setTimeout(() => {{
-  calls.push('fonts loaded');
-  loaded([]);
-  setTimeout(() => {{ console.log(calls.join(',')); }}, 20);
-}}, 20);
-"#
-    );
-    let out = std::process::Command::new("node")
-        .arg("-e")
-        .arg(&harness)
-        .output()
-        .unwrap();
     assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
+        !out.path().join("assets/js").exists(),
+        "d2 needs no library"
     );
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
-        "load 14px 'Onest', Arial, sans-serif,fonts loaded,initialize,render",
-        "the diagram is measured in the page's face, not the fallback"
+    assert!(
+        !out.path().join("assets/diagrams").exists(),
+        "nor a drawing"
     );
 }

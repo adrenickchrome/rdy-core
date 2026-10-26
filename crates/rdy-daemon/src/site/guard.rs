@@ -535,7 +535,10 @@ pub fn refusal(f: Refusal) -> Response {
             503,
             "Too many live pages are open. Close some tabs, then reload this one.",
         ),
-        Refusal::Broken => (500, "The site could not be built. The daemon log says why."),
+        Refusal::Broken => (
+            500,
+            "This page could not be built. The person who runs this site can find the reason in rdy's log.",
+        ),
     };
     let mut r = text(status, body);
     if status == 405 {
@@ -786,6 +789,10 @@ mod tests {
         assert_eq!(refusal(Refusal::TooLarge).status, 431);
         assert_eq!(refusal(Refusal::Busy).status, 503);
         assert_eq!(refusal(Refusal::Broken).status, 500);
+        assert_eq!(
+            refusal(Refusal::Broken).body,
+            b"This page could not be built. The person who runs this site can find the reason in rdy's log.".to_vec()
+        );
     }
 
     const H: &str = "127.0.0.1:51000";

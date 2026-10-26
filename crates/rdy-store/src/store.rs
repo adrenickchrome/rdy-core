@@ -40,6 +40,18 @@ const CHUNK: usize = 1024 * 1024;
 /// manifest-kind object, so no manifest whose bytes an agent chose is ever read as a blob.
 pub const MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 
+/// What a blob's metadata permits ([`StoreReader::blob_state`]), read without its chunks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlobState {
+    /// The manifest is canonical and no removal masks it or a chunk. A byte read can still fail
+    /// on a damaged or absent chunk.
+    Readable,
+    /// A removal masks the manifest or a chunk: the request of the earliest authorizing apply.
+    Removed(Hash),
+    /// No manifest-kind object has this hash.
+    Missing,
+}
+
 /// What one `Store::open` did, for tests, `rdy` diagnostics and the QA gate.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OpenReport {
@@ -2763,6 +2775,19 @@ impl StoreReader {
     /// writes. One index lookup; it reads no frame.
     pub fn has_blob(&self, h: &Hash) -> Result<bool, StoreError> {
         self.has_kind(kinds::BLOB_MANIFEST, h)
+    }
+
+    /// The state of blob `h` from its manifest and the redaction masks alone: no chunk is read.
+    /// A manifest that is not what `put_blob` writes is the byte read's own error.
+    pub fn blob_state(&self, h: &Hash) -> Result<BlobState, StoreError> {
+        if !self.has_blob(h)? {
+            return Ok(BlobState::Missing);
+        }
+        match self.blob_manifest(h) {
+            Ok(_) => Ok(BlobState::Readable),
+            Err(StoreError::Redacted { request }) => Ok(BlobState::Removed(request)),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn get_blob(&self, h: &Hash) -> Result<Vec<u8>, StoreError> {

@@ -294,9 +294,22 @@ fn ls10_served_pages_pass_the_leak_scan() {
         let served = g.live.fetch(scope, prefix, true);
         let pages = page_set(served.path());
         assert!(pages.len() > 10, "{what}: guard: pages were served");
+        // the render writes one page the live build has not: its generated not-found page
+        let marked: Vec<String> = page_set(stat.path())
+            .into_iter()
+            .filter(|p| golden::html(stat.path(), p).contains("data-rdy-kind=\"not-found\""))
+            .collect();
+        assert_eq!(marked, ["404.html"], "{what}");
+        assert!(
+            !pages.contains(&marked[0]),
+            "{what}: the live build has no 404.html"
+        );
+        let written: Vec<String> = page_set(stat.path())
+            .into_iter()
+            .filter(|p| !marked.contains(p))
+            .collect();
         assert_eq!(
-            pages,
-            page_set(stat.path()),
+            pages, written,
             "{what}: the server sends the pages the render writes"
         );
         let found = leaks(served.path());

@@ -6,16 +6,24 @@ use std::path::Path;
 /// The inline script that sets the theme before the first paint, as the theme ships it.
 const INIT_JS: &str = include_str!("../../../rdy-render/theme/rdy-standard/js/init.js");
 
-fn hostile_site() -> (tempfile::TempDir, tempfile::TempDir) {
+/// The hostile project's canon site, and the project's configured root prefix
+/// (`site.base_path`).
+fn hostile_site() -> (tempfile::TempDir, tempfile::TempDir, String) {
     let (d, r) = golden::hostile();
     let out = tempfile::tempdir().unwrap();
     rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
-    (d, out)
+    let base = r.read().site_base_path().to_string();
+    (d, out, base)
+}
+
+/// The site's generated not-found page carries this marker; an authored `404.html` never does.
+fn generated_404(html: &str) -> bool {
+    html.contains("data-rdy-kind=\"not-found\"")
 }
 
 #[test]
 fn render_hostile_text_is_escaped_on_every_page() {
-    let (_d, site) = hostile_site();
+    let (_d, site, _) = hostile_site();
     for p in pages(site.path()) {
         let html = std::fs::read_to_string(&p).unwrap();
         for raw in [
@@ -30,9 +38,8 @@ fn render_hostile_text_is_escaped_on_every_page() {
             let rest = &html[i..];
             let tag = &rest[..rest.find('>').map_or(rest.len(), |j| j + 1)];
             let init = rest.starts_with(&format!("<script>{INIT_JS}</script>"));
-            let external = tag.starts_with("<script src=\"")
-                && (tag.ends_with("assets/app.js\" defer>")
-                    || tag.ends_with("assets/js/mermaid.min.js\" defer>"));
+            let external =
+                tag.starts_with("<script src=\"") && tag.ends_with("assets/app.js\" defer>");
             assert!(
                 init || external,
                 "{}: unexpected <script: {tag:?}",
@@ -59,8 +66,10 @@ struct LinkStats {
     go_targets: usize,
 }
 
-/// Checks every link in the site; returns the broken ones and what was covered.
-fn check_links(site: &Path) -> (Vec<String>, LinkStats) {
+/// Checks every link in the site; returns the broken ones and what was covered. A link on the
+/// generated not-found page is rooted at `base` (the configured root prefix): it resolves from
+/// the site's root once the prefix is stripped. Every other page's links are relative.
+fn check_links(site: &Path, base: &str) -> (Vec<String>, LinkStats) {
     let mut broken = vec![];
     let mut st = LinkStats::default();
     for p in pages(site) {
@@ -69,11 +78,21 @@ fn check_links(site: &Path) -> (Vec<String>, LinkStats) {
         st.max_depth = st
             .max_depth
             .max(p.strip_prefix(site).unwrap().components().count() - 1);
+        let rooted = generated_404(&html);
         for link in attrs(&html, "href").into_iter().chain(attrs(&html, "src")) {
             if link.starts_with("http://") || link.starts_with("https://") || link.is_empty() {
                 continue;
             }
             let link = unescape(link);
+            // the not-found page's links start at the base, all but those within the page
+            let (link, from) = match (rooted, link.strip_prefix(base)) {
+                (true, Some(rest)) => (rest.to_string(), site.join("index.html")),
+                (true, None) if !link.starts_with('#') => {
+                    broken.push(format!("{} → {link} (not under {base})", p.display()));
+                    continue;
+                }
+                _ => (link.clone(), p.clone()),
+            };
             let (file, anchor) = match link.split_once('#') {
                 Some((f, a)) => (f.to_string(), Some(a.to_string())),
                 None => (link.clone(), None),
@@ -88,7 +107,7 @@ fn check_links(site: &Path) -> (Vec<String>, LinkStats) {
             let mut target = if file.is_empty() {
                 p.clone()
             } else {
-                p.parent().unwrap().join(&file)
+                from.parent().unwrap().join(&file)
             };
             if !target.exists() {
                 broken.push(format!("{} → {link}", p.display()));
@@ -142,8 +161,8 @@ fn check_links(site: &Path) -> (Vec<String>, LinkStats) {
 
 #[test]
 fn render_every_link_resolves() {
-    let (_d, site) = hostile_site();
-    let (broken, _) = check_links(site.path());
+    let (_d, site, base) = hostile_site();
+    let (broken, _) = check_links(site.path(), &base);
     assert!(broken.is_empty(), "{broken:#?}");
 }
 
@@ -156,10 +175,11 @@ fn render_every_link_resolves_on_a_rich_site() {
         ("view", Scope::View("draft".into())),
         ("tag", Scope::At(landing)),
     ];
+    let base = r.read().site_base_path().to_string();
     for (name, scope) in scopes {
         let out = tempfile::tempdir().unwrap();
         rdy_render::render_site(&r.read(), &scope, out.path()).unwrap();
-        let (broken, st) = check_links(out.path());
+        let (broken, st) = check_links(out.path(), &base);
         assert!(broken.is_empty(), "{name}: {broken:#?}");
         assert!(st.pages >= 10, "{name}: {st:?}");
         assert!(st.max_depth >= 3, "{name}: {st:?}");

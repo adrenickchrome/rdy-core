@@ -82,7 +82,7 @@ pub fn spans_html(text: &str, ctx: &Ctx) -> String {
     let (toks, refs) = tokens(text, RefMode::Strict);
     let nodes = parse_spans(&toks, false);
     let mut out = String::new();
-    render_html(&nodes, &refs, ctx, false, &mut out);
+    render_html(&nodes, &refs, ctx, false, None, &mut out);
     out
 }
 
@@ -91,7 +91,7 @@ pub fn label_html(text: &str, ctx: &Ctx) -> String {
     let (toks, refs) = tokens(text, RefMode::Strict);
     let nodes = parse_label(&toks);
     let mut out = String::new();
-    render_html(&nodes, &refs, ctx, false, &mut out);
+    render_html(&nodes, &refs, ctx, false, None, &mut out);
     out
 }
 
@@ -184,7 +184,7 @@ fn plain_refs_in(
             parse_spans(&toks, false)
         };
         let mut out = String::new();
-        render_plain(&nodes, &refs, words, coded, &mut out);
+        render_plain(&nodes, &refs, words, coded, None, &mut out);
         out
     };
     match form {
@@ -740,14 +740,23 @@ fn text_html(s: &str) -> String {
     escape(s).replace('\n', "<br>")
 }
 
-fn render_html(nodes: &[Node], refs: &[RefSpan], ctx: &Ctx, in_link: bool, out: &mut String) {
-    for n in nodes {
+fn render_html(
+    nodes: &[Node],
+    refs: &[RefSpan],
+    ctx: &Ctx,
+    in_link: bool,
+    after: Option<char>,
+    out: &mut String,
+) {
+    for (i, n) in nodes.iter().enumerate() {
+        let next = next_char(nodes, i, after);
         match n {
             Node::Text(t) => out.push_str(&text_html(t)),
             Node::Ref(k) => {
                 let span = &refs[*k];
                 let link = target_of(span, ctx);
-                let words = text_html(&ref_words(span, link.as_ref(), ctx.unavailable));
+                let words = ref_words(span, link.as_ref(), ctx.unavailable);
+                let words = text_html(&one_period(span, words, next));
                 match link {
                     _ if in_link => out.push_str(&words),
                     // a named profile: a reference outside the selection is its words alone
@@ -777,17 +786,17 @@ fn render_html(nodes: &[Node], refs: &[RefSpan], ctx: &Ctx, in_link: bool, out: 
             }
             Node::Code(c) => {
                 out.push_str("<code>");
-                render_html(c, refs, ctx, in_link, out);
+                render_html(c, refs, ctx, in_link, None, out);
                 out.push_str("</code>");
             }
             Node::Strong(c) => {
                 out.push_str("<strong>");
-                render_html(c, refs, ctx, in_link, out);
+                render_html(c, refs, ctx, in_link, next, out);
                 out.push_str("</strong>");
             }
             Node::Em(c) => {
                 out.push_str("<em>");
-                render_html(c, refs, ctx, in_link, out);
+                render_html(c, refs, ctx, in_link, next, out);
                 out.push_str("</em>");
             }
             Node::Link { target, children } => match local_href(target, ctx) {
@@ -801,13 +810,38 @@ fn render_html(nodes: &[Node], refs: &[RefSpan], ctx: &Ctx, in_link: bool, out: 
                             ""
                         }
                     ));
-                    render_html(children, refs, ctx, true, out);
+                    render_html(children, refs, ctx, true, next, out);
                     out.push_str("</a>");
                 }
-                None => render_html(children, refs, ctx, true, out),
+                None => render_html(children, refs, ctx, true, next, out),
             },
         }
     }
+}
+
+/// The authored character right after `nodes[i]`: the first character of the text, emphasis or
+/// strong run that follows it (else `after`, what follows `nodes`). Another reference, a code span
+/// and a link are not authored text here; none of them starts a run that this reads.
+fn next_char(nodes: &[Node], i: usize, after: Option<char>) -> Option<char> {
+    match nodes.get(i + 1) {
+        None => after,
+        Some(Node::Text(t)) => t.chars().next(),
+        Some(Node::Strong(c) | Node::Em(c)) => match c.first() {
+            Some(Node::Text(t)) => t.chars().next(),
+            _ => None,
+        },
+        Some(_) => None,
+    }
+}
+
+/// `words`, the reading of the reference `span`, without its last period when it is a label the
+/// reference chose (no display text) and the authored character right after the reference is a
+/// period: the authored period then ends the sentence alone. Other text is unchanged.
+fn one_period(span: &RefSpan, mut words: String, next: Option<char>) -> String {
+    if span.display.is_none() && next == Some('.') && words.ends_with('.') {
+        words.pop();
+    }
+    words
 }
 
 /// `label` reads every reference, one with display text too.
@@ -816,6 +850,7 @@ fn render_plain(
     refs: &[RefSpan],
     label: &dyn Fn(&RefSpan) -> String,
     coded: bool,
+    after: Option<char>,
     out: &mut String,
 ) {
     // with `coded`, only a code span writes a bare mark: authored text is escaped
@@ -826,19 +861,22 @@ fn render_plain(
             out.push_str(t);
         }
     };
-    for n in nodes {
+    for (i, n) in nodes.iter().enumerate() {
+        let next = next_char(nodes, i, after);
         match n {
             Node::Text(t) => push(out, t),
-            Node::Ref(k) => push(out, &label(&refs[*k])),
+            Node::Ref(k) => {
+                let span = &refs[*k];
+                push(out, &one_period(span, label(span), next))
+            }
             Node::Code(c) if coded => {
                 out.push(CODE_OPEN);
-                render_plain(c, refs, label, coded, out);
+                render_plain(c, refs, label, coded, None, out);
                 out.push(CODE_CLOSE);
             }
-            Node::Code(c) | Node::Strong(c) | Node::Em(c) => {
-                render_plain(c, refs, label, coded, out)
-            }
-            Node::Link { children, .. } => render_plain(children, refs, label, coded, out),
+            Node::Code(c) => render_plain(c, refs, label, coded, None, out),
+            Node::Strong(c) | Node::Em(c) => render_plain(c, refs, label, coded, next, out),
+            Node::Link { children, .. } => render_plain(children, refs, label, coded, next, out),
         }
     }
 }

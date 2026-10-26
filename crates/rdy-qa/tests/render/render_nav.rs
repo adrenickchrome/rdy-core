@@ -33,11 +33,35 @@ fn nav1_groups_follow_top_level_folders_and_mark_the_current_page() {
         1,
         "only Gamma, on the path, is expanded: {nav}"
     );
+    assert!(
+        nav.contains("<details class=\"nav-fold\" open><summary>Gamma</summary>"),
+        "Gamma, on the path, is open: {nav}"
+    );
     let one = std::fs::read_to_string(out.path().join("a/one.html")).unwrap();
     let nav1 = &one[one.find("<nav aria-label=\"Pages\">").unwrap()..one.find("</aside>").unwrap()];
+    // Gamma is off the path: a closed folder with its first level, Three
     assert!(
-        nav1.contains(">Gamma</a>") && !nav1.contains(">Three</a>"),
-        "Gamma is a bare entry off the path: {nav1}"
+        nav1.contains("<details class=\"nav-fold\"><summary>Gamma</summary>")
+            && nav1.contains(">Three</a>")
+            && nav1.contains("aria-label=\"Go to Gamma\">\u{2197}</a>"),
+        "Gamma is a closed folder off the path, with its child: {nav1}"
+    );
+    assert_eq!(nav1.matches("class=\"nav-sub\"").count(), 1, "{nav1}");
+    // the grouping, the order and the mark of the page are the same
+    assert!(
+        nav1.contains("aria-current=\"page\">One</a>"),
+        "one entry is current: {nav1}"
+    );
+    assert_eq!(nav1.matches("aria-current=\"page\"").count(), 1, "{nav1}");
+    let at = |s: &str| nav1.find(s).unwrap_or_else(|| panic!("{s} in {nav1}"));
+    assert!(
+        at(">Home</a>") < at(">Intro</a>")
+            && at(">Intro</a>") < at("nav-group-label\">Alpha")
+            && at(">One</a>") < at(">Two</a>")
+            && at(">Two</a>") < at("nav-group-label\">Beta")
+            && at("nav-group-label\">Beta") < at("<summary>Gamma</summary>")
+            && at(">Three</a>") < at("nav-group-label\">Reference"),
+        "{nav1}"
     );
 }
 

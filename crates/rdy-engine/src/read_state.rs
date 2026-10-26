@@ -675,6 +675,9 @@ pub struct ReadState {
     pub(crate) propose_changes: u32,
     /// `decisions.home` in `.rdy.yaml`, read by a full publish (FW-PR2).
     pub(crate) decisions_home: Option<Arc<str>>,
+    /// `site.base_path` in `.rdy.yaml` (default `/`), read by a full publish (D-94BT2). It is
+    /// configuration, not source content or a stored record.
+    pub(crate) site_base_path: String,
     pub(crate) reader: StoreReader,
     pub(crate) as_of: Arc<AsOfCache>,
     /// The version-position cache, shared like `as_of` (read by the state's version reads).
@@ -816,6 +819,13 @@ impl ReadState {
     /// as the config read when this state was published.
     pub fn decisions_home(&self) -> Option<&str> {
         self.decisions_home.as_deref()
+    }
+
+    /// The path every link and asset of the static site starts at (`site.base_path`): `/`, or an
+    /// absolute path that ends with `/`. It is the config read when this state was published; the
+    /// getter reads no file.
+    pub fn site_base_path(&self) -> &str {
+        &self.site_base_path
     }
 
     /// The landing view `name` reads on: canon's head for a view with no ref or one that floats

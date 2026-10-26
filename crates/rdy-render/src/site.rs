@@ -84,7 +84,7 @@ pub fn typed_key(b: &Block) -> Option<&str> {
 }
 
 /// The id inside a longer text, as the leak scan reads it.
-static ID_INSIDE: LazyLock<Regex> =
+pub(crate) static ID_INSIDE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b[A-Za-z]{1,3}-[0-9A-HJKMNP-TV-Z]{5}\b").expect("a pattern"));
 
 /// One disagreement of the disagreements page: entries with the same sentence and the same pages
