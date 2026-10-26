@@ -161,7 +161,6 @@ fn ok9_read_only_fsck_and_reads_run_through_the_ops() {
     // a write still refuses, on the writer's gate
     let e2 = dispatch(&c, "reindex", json!({})).unwrap_err();
     assert_eq!(e2.code, rdy_engine::E_STORE_READ_ONLY, "{e2:?}");
-    drop(c);
     drop(e);
     shared.shutdown().unwrap();
     assert_eq!(tree(&root), before, "daemon: no project byte changed");

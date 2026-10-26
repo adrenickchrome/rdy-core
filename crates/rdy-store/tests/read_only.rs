@@ -603,8 +603,8 @@ fn ok9_a_plan_that_cannot_be_made_never_opens() {
     let mut s = Store::create(&dir).unwrap();
     s.set_refs(vec![("t/a".into(), vec![1])]).unwrap();
     s.close().unwrap();
-    std::os::unix::fs::symlink(dir.join("FORMAT"), dir.join("stray")).unwrap();
-    let before = tree(&base.path().to_path_buf());
+    rdy_store::pio::symlink(dir.join("FORMAT"), dir.join("stray")).unwrap();
+    let before = tree(base.path());
     for policy in [OpenPolicy::AutoUpgrade, OpenPolicy::RequireCurrent] {
         let e = Store::open_with_registry_for_tests(&dir, policy, &add_test)
             .err()
@@ -619,7 +619,7 @@ fn ok9_a_plan_that_cannot_be_made_never_opens() {
             ),
             "{policy:?}: {e:?}"
         );
-        assert_eq!(tree(&base.path().to_path_buf()), before, "{policy:?}");
+        assert_eq!(tree(base.path()), before, "{policy:?}");
     }
     // a planned manifest with a feature this rdy cannot write: the planner's format refusal,
     // though the store itself opens
