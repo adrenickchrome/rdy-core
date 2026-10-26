@@ -4831,6 +4831,7 @@ struct M3aFacts {
 }
 
 impl M3aFacts {
+    #[cfg(test)]
     fn extra(&self, key: &str) -> u64 {
         self.extra
             .iter()
