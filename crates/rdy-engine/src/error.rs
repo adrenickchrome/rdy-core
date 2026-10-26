@@ -684,6 +684,24 @@ impl From<StoreError> for RdyError {
                 "A read projection cannot be written.",
                 "Write a new block version from source content.",
             ),
+            StoreError::ReadOnly {
+                feature,
+                required_rdy,
+            } => RdyError::new(
+                E_STORE_READ_ONLY,
+                format!("store feature {feature} permits reads only"),
+                format!("open the project with rdy {required_rdy} or later to write"),
+            ),
+            StoreError::ReadOnlyNoLock => RdyError::new(
+                E_STORE_READ_ONLY,
+                "the read-only store has no lock file",
+                "open the project with the rdy build that wrote it",
+            ),
+            StoreError::UpgradeRequired => RdyError::new(
+                E_STORE_FORMAT,
+                "the store needs an upgrade before it can open",
+                "run the host's store maintenance, or rdy upgrade",
+            ),
             e @ StoreError::Upgrade { failure, .. } => RdyError::new(
                 match failure {
                     UpgradeFailure::Moved => E_UPGRADE_MOVED,
@@ -771,6 +789,9 @@ pub const E_UPGRADE_MOVED: &str = "E_UPGRADE_MOVED";
 pub const E_UPGRADE_BACKUP: &str = "E_UPGRADE_BACKUP";
 /// The upgrade batch is durable, but the store check or fsck failed.
 pub const E_UPGRADE_FAILED: &str = "E_UPGRADE_FAILED";
+/// A write to a store with an unknown read-only feature, or a read-only open of a store with no
+/// lock file.
+pub const E_STORE_READ_ONLY: &str = "E_STORE_READ_ONLY";
 
 /// The session actor is not in the hub's `human:`, `agent:` or `ci:` form, an agent session
 /// claims a human actor, or a human claim is not bound to the install's account handle. Built by
@@ -1032,7 +1053,7 @@ pub fn upstream_signout_local() -> Issue {
 
 /// Every error code the engine defines: each `E_*` constant of this module and the briefing's
 /// two. It is the engine's whole static error set, not one feature's subset.
-const CORE_ERROR_CODES: [&str; 105] = [
+const CORE_ERROR_CODES: [&str; 106] = [
     E_LOCKED,
     E_HELD_BY_READER,
     E_NO_PROJECT,
@@ -1136,6 +1157,7 @@ const CORE_ERROR_CODES: [&str; 105] = [
     E_UPGRADE_MOVED,
     E_UPGRADE_BACKUP,
     E_UPGRADE_FAILED,
+    E_STORE_READ_ONLY,
     crate::brief::E_BRIEF_REQUIRED,
     crate::brief::E_BRIEF_STALE,
 ];

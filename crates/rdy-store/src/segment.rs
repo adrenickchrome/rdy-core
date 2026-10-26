@@ -121,7 +121,9 @@ pub struct FrameView<'a> {
 pub struct SegmentLog {
     dir: PathBuf,
     readers: Vec<File>,
-    writer: File,
+    /// The last segment, open for appends: None in a read-only log
+    /// ([`SegmentLog::open_read_only`]), whose every write is refused.
+    writer: Option<File>,
     len: u64,
     max_len: u64,
     /// Test fault injection (see `fail_next_roll` / `fail_next_append_after`).
@@ -887,6 +889,29 @@ fn check_tail(
     quarantine(f, dir, &path, b, file_len).map(Some)
 }
 
+/// The read-only open's tail check on segment `seg` (see [`check_tail`]): damage that an
+/// acknowledged batch follows is refused, with the writable open's refusal; anything else is an
+/// unacknowledged tail, left as it is. Nothing is written.
+fn refuse_acknowledged_damage(
+    f: &File,
+    dir: &Path,
+    seg: u32,
+    scan: &Scan,
+    file_len: u64,
+    holes: &Holes,
+) -> Result<(), StoreError> {
+    let b = scan.boundary.unwrap_or(0);
+    if b >= file_len {
+        return Ok(());
+    }
+    let follows = acknowledged_batch_follows(f, seg, b, scan.stop, file_len, holes)?;
+    if follows {
+        let e = damaged_error(scan.stop, &seg_path(dir, seg));
+        return Err(damage_refusal(e, f, seg, scan.stop, file_len));
+    }
+    Ok(())
+}
+
 /// The end of the acknowledged log under the marker rule, reading `holes` as frames: the end of
 /// the last segment's last batch marker that matches its batch; with no such marker, the end of
 /// the segment before it (or the start of the log). Reads only; the open does the same scan
@@ -1113,7 +1138,7 @@ impl SegmentLog {
         let log = SegmentLog {
             dir: dir.to_path_buf(),
             readers,
-            writer,
+            writer: Some(writer),
             len: offset,
             max_len,
             fail_roll: false,
@@ -1220,7 +1245,7 @@ impl SegmentLog {
         let log = SegmentLog {
             dir: dir.to_path_buf(),
             readers,
-            writer,
+            writer: Some(writer),
             len,
             max_len,
             fail_roll: false,
@@ -1231,6 +1256,106 @@ impl SegmentLog {
             auth,
         };
         Ok((log, quarantined))
+    }
+
+    /// Opens the log in `dir` for reading only (D-WWAK7): the same redaction bootstrap and
+    /// marker rule as [`SegmentLog::open_authorized`], with no writer. Nothing is created,
+    /// quarantined, cut, removed or synced. A tail after the acknowledged boundary (a torn or
+    /// unmarked batch) is left in its file and ignored: the log ends at the boundary, and the
+    /// returned flag says a tail was ignored. Damage that an acknowledged batch follows is
+    /// refused as the writable open refuses it. A log with no segment file is refused.
+    pub(crate) fn open_read_only(
+        dir: &Path,
+        max_len: u64,
+        store_dir: &Path,
+    ) -> Result<(SegmentLog, bool), StoreError> {
+        let mut readers = vec![];
+        while let Some(f) = open_if_present(&seg_path(dir, readers.len() as u32))? {
+            readers.push(f);
+        }
+        if readers.is_empty() {
+            return Err(crate::format::other_build(
+                store_dir,
+                "has a log with no store features",
+            ));
+        }
+        let auth = Arc::new(match crate::redaction_import::log_mode(&readers)? {
+            crate::holder::StoreMode::Holder => {
+                crate::redaction_import::bootstrap_holder(&readers)?
+            }
+            crate::holder::StoreMode::Project => redaction_io::bootstrap(&readers)?,
+        });
+        let holes = &auth.holes;
+        let last = (readers.len() - 1) as u32;
+        let f = &readers[last as usize];
+        let file_len = f.metadata()?.len();
+        let scan = scan_marked(f, last, file_len, holes)?;
+        let (boundary, ignored) = if scan.boundary.is_none() && last > 0 {
+            // the last segment is one unacknowledged batch, if the one before it is sealed at a
+            // marker; the writable open removes it, this one reads the log without it
+            let prev = &readers[last as usize - 1];
+            let prev_len = prev.metadata()?.len();
+            if scan_marked(prev, last - 1, prev_len, holes)?.boundary != Some(prev_len) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{} does not end at a batch marker, but a later segment was started: the log is damaged; restore it from backup, then reopen",
+                        seg_path(dir, last - 1).display()
+                    ),
+                )
+                .into());
+            }
+            refuse_acknowledged_damage(f, dir, last, &scan, file_len, holes)?;
+            readers.pop();
+            (prev_len, file_len > 0)
+        } else {
+            let b = scan.boundary.unwrap_or(0);
+            if b < file_len {
+                refuse_acknowledged_damage(f, dir, last, &scan, file_len, holes)?;
+            }
+            (b, b < file_len)
+        };
+        let log = SegmentLog {
+            dir: dir.to_path_buf(),
+            readers,
+            writer: None,
+            len: boundary,
+            max_len,
+            fail_roll: false,
+            fail_partial: None,
+            fail_skip: 0,
+            fail_sync: false,
+            crash: None,
+            auth,
+        };
+        Ok((log, ignored))
+    }
+
+    /// The writer of the last segment; a read-only log refuses every write here.
+    fn writer(&self) -> io::Result<&File> {
+        self.writer.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the log is open for reading only",
+            )
+        })
+    }
+
+    /// The bytes of segment `seg` (file `f`) that the log's walks read: the file's length; in a
+    /// read-only log, the last segment ends at the acknowledged boundary, so the tail the open
+    /// ignored is never read.
+    fn walk_len(&self, seg: u32, f: &File) -> io::Result<u64> {
+        let len = f.metadata()?.len();
+        Ok(if self.writer.is_none() && seg == self.current() {
+            len.min(self.len)
+        } else {
+            len
+        })
+    }
+
+    /// Whether this log refuses every write ([`SegmentLog::open_read_only`]).
+    pub(crate) fn is_read_only(&self) -> bool {
+        self.writer.is_none()
     }
 
     /// Discards everything appended at or after `to`, which must not be before the start of the
@@ -1244,10 +1369,13 @@ impl SegmentLog {
             ));
         }
         if to.segment < self.current() {
-            self.writer = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(seg_path(&self.dir, to.segment))?;
+            self.writer()?;
+            self.writer = Some(
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(seg_path(&self.dir, to.segment))?,
+            );
             while self.current() > to.segment {
                 let id = self.current();
                 self.readers.pop();
@@ -1255,8 +1383,8 @@ impl SegmentLog {
             }
             sync_dir(&self.dir)?;
         }
-        self.writer.set_len(to.offset)?;
-        self.writer.sync_all()?;
+        self.writer()?.set_len(to.offset)?;
+        self.writer()?.sync_all()?;
         self.len = to.offset;
         // a roll that failed after creating its file may have left the next segment behind
         let stray = seg_path(&self.dir, self.current() + 1);
@@ -1309,7 +1437,7 @@ impl SegmentLog {
     /// only once the file and the directory are durable; on any failure the log is exactly as
     /// before and the new file is removed best-effort (`truncate_to` sweeps a leftover next segment).
     pub(crate) fn roll(&mut self) -> io::Result<()> {
-        self.writer.sync_all()?;
+        self.writer()?.sync_all()?;
         let path = seg_path(&self.dir, self.readers.len() as u32);
         let writer = OpenOptions::new()
             .read(true)
@@ -1318,7 +1446,7 @@ impl SegmentLog {
             .open(&path)?;
         match self.finish_roll(&writer, &path) {
             Ok(reader) => {
-                self.writer = writer;
+                self.writer = Some(writer);
                 self.readers.push(reader);
                 self.len = 0;
                 Ok(())
@@ -1369,10 +1497,10 @@ impl SegmentLog {
         if self.fail_partial.is_some() && self.fail_skip > 0 {
             self.fail_skip -= 1;
         } else if let Some(n) = self.fail_partial.take() {
-            write_observed(&self.writer, &buf[..n.min(buf.len())], self.len)?;
+            write_observed(self.writer()?, &buf[..n.min(buf.len())], self.len)?;
             return Err(io::Error::other("injected partial append"));
         }
-        write_observed(&self.writer, &buf, self.len)?;
+        write_observed(self.writer()?, &buf, self.len)?;
         let loc = Location {
             segment: self.current(),
             offset: self.len,
@@ -1507,10 +1635,10 @@ impl SegmentLog {
         small[5..head_len].copy_from_slice(&hash.0);
         if frame_len <= SMALL_FRAME {
             small[head_len..frame_len].copy_from_slice(payload);
-            write_observed(&self.writer, &small[..frame_len], self.len)?;
+            write_observed(self.writer()?, &small[..frame_len], self.len)?;
         } else {
-            write_observed(&self.writer, &small[..head_len], self.len)?;
-            write_observed(&self.writer, payload, self.len + HEADER)?;
+            write_observed(self.writer()?, &small[..head_len], self.len)?;
+            write_observed(self.writer()?, payload, self.len + HEADER)?;
         }
         self.len += frame_len as u64;
         Ok(loc)
@@ -1541,11 +1669,11 @@ impl SegmentLog {
         head[0..4].copy_from_slice(&len.to_le_bytes());
         head[4] = kind;
         head[5..37].copy_from_slice(&hash.0);
-        write_observed(&self.writer, &head, self.len)?;
+        write_observed(self.writer()?, &head, self.len)?;
         let mut at = self.len + HEADER;
         while at < end {
             let n = (end - at).min(ERASE_BUFFER as u64) as usize;
-            write_observed(&self.writer, &ZEROS[..n], at)?;
+            write_observed(self.writer()?, &ZEROS[..n], at)?;
             at += n as u64;
         }
         self.len = end;
@@ -1594,7 +1722,7 @@ impl SegmentLog {
         if std::mem::take(&mut self.fail_sync) {
             return Err(io::Error::other("injected sync failure"));
         }
-        self.writer.sync_data()
+        self.writer()?.sync_data()
     }
 
     /// Reads the frame at `loc` with the payload hash its header carries (already verified).
@@ -1603,7 +1731,7 @@ impl SegmentLog {
             .readers
             .get(loc.segment as usize)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such segment"))?;
-        let file_len = f.metadata()?.len();
+        let file_len = self.walk_len(loc.segment, f)?;
         read_frame(f, loc.offset, file_len)?
             .ok_or_else(|| refuse_frame(f, loc, file_len, corrupt_frame(loc)))
     }
@@ -1630,7 +1758,7 @@ impl SegmentLog {
             .readers
             .get(seg as usize)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such segment"))?;
-        Ok(f.metadata()?.len())
+        Ok(self.walk_len(seg, f)?)
     }
 
     /// Calls `f(location, kind, hash, payload, next)` for every frame from `from` to the end of
@@ -1665,7 +1793,7 @@ impl SegmentLog {
         let holes = &self.auth.holes;
         for seg in from.segment..=self.current() {
             let file = &self.readers[seg as usize];
-            let file_len = file.metadata()?.len();
+            let file_len = self.walk_len(seg, file)?;
             let mut offset = if seg == from.segment { from.offset } else { 0 };
             if offset > file_len {
                 // `from` lies past the end of its segment: frames before it are missing
@@ -1752,7 +1880,7 @@ impl SegmentLog {
         let mut dropped = 0;
         for seg in 0..=self.current() {
             let f = &self.readers[seg as usize];
-            let file_len = f.metadata()?.len();
+            let file_len = self.walk_len(seg, f)?;
             let mut offset = 0;
             // the frames read since the previous valid marker of this segment
             let mut since: Vec<(u64, Hash)> = vec![];
@@ -1830,7 +1958,7 @@ impl SegmentLog {
         let Some(f) = self.readers.get(loc.segment as usize) else {
             return Ok(false);
         };
-        Ok(read_frame_or_hole(f, loc, f.metadata()?.len(), &self.auth.holes)?.is_some())
+        Ok(read_frame_or_hole(f, loc, self.walk_len(loc.segment, f)?, &self.auth.holes)?.is_some())
     }
 
     /// Where `append_batch` would put the first frame of `frames`: the end of the log, or the start
@@ -1882,6 +2010,7 @@ impl SegmentLog {
             offset: span.place.offset,
         };
         let corrupt = || StoreError::corrupt_at(loc);
+        self.writer()?;
         if loc.segment > self.current() {
             return Err(corrupt());
         }
@@ -1915,6 +2044,7 @@ impl SegmentLog {
     /// Makes the payload writes to `segments` durable: one sync of each segment, then of the
     /// segments directory.
     pub(crate) fn sync_segments(&self, segments: &BTreeSet<u32>) -> io::Result<()> {
+        self.writer()?;
         for seg in segments {
             OpenOptions::new()
                 .read(true)

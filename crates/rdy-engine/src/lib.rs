@@ -32,6 +32,7 @@ pub mod formats;
 mod fsck;
 mod gate;
 mod handle;
+pub use handle::{CompletionPhase, with_completion_hook_for_tests};
 mod history;
 pub mod history_facts;
 mod holder;

@@ -131,11 +131,23 @@ fn ok1_feature_classes_choose_access_at_open() {
     let mut s = Store::open(&dir).unwrap();
     s.put_blob(b"a later write").unwrap();
     drop(s);
-    // read-only and incompatible: refused before anything under the store changes
-    for (class, what) in [
-        (FeatureClass::ReadOnlyCompatible, "read-only"),
-        (FeatureClass::Incompatible, "incompatible"),
-    ] {
+    // read-only (ok9): opens for reading only, refuses the write, and changes nothing
+    let (_b, dir) = store_with_unknown(FeatureClass::ReadOnlyCompatible);
+    let before = tree(&dir);
+    let mut s = Store::open(&dir).unwrap();
+    assert_eq!(s.access(), StoreAccess::ReadOnly);
+    assert!(matches!(
+        s.put_blob(b"a later write"),
+        Err(StoreError::ReadOnly { .. })
+    ));
+    drop(s);
+    assert_eq!(
+        tree(&dir),
+        before,
+        "read-only: nothing under the store changed"
+    );
+    // incompatible: refused before anything under the store changes
+    for (class, what) in [(FeatureClass::Incompatible, "incompatible")] {
         let (_b, dir) = store_with_unknown(class);
         let before = tree(&dir);
         let e = Store::open(&dir).err().expect(what);

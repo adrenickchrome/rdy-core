@@ -420,17 +420,22 @@ impl Writer {
                     // publish, so a write that changes them and then fails its seal never decides
                     // it (ruling task-11.1)
                     self.forward();
-                    let out = match catch_unwind(AssertUnwindSafe(|| f(&mut rdy))) {
-                        Ok(out) => out,
-                        Err(p) => {
-                            // the caches may be half-updated: republish a clean state
-                            self.invalidate_after_panic(&mut rdy, "a write");
-                            Err(RdyError::new(
-                                E_INTERNAL,
-                                format!("internal error on the writer: {}", panic_text(&*p)),
-                                "this is a bug in rdy; the request may or may not have been applied: re-read before retrying",
-                            ))
-                        }
+                    // a read-only store (D-WWAK7) runs no write closure; the store's own gate
+                    // refuses its appends too
+                    let out = match rdy.ensure_writable() {
+                        Err(e) => Err(e),
+                        Ok(()) => match catch_unwind(AssertUnwindSafe(|| f(&mut rdy))) {
+                            Ok(out) => out,
+                            Err(p) => {
+                                // the caches may be half-updated: republish a clean state
+                                self.invalidate_after_panic(&mut rdy, "a write");
+                                Err(RdyError::new(
+                                    E_INTERNAL,
+                                    format!("internal error on the writer: {}", panic_text(&*p)),
+                                    "this is a bug in rdy; the request may or may not have been applied: re-read before retrying",
+                                ))
+                            }
+                        },
                     };
                     // a raw write that `f` left open is sealed, with its moves, before the reply
                     let sealed = self.seal_open(&mut rdy);

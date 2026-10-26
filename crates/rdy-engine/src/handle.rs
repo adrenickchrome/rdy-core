@@ -10,7 +10,9 @@ use crate::{
 use arc_swap::ArcSwap;
 use rdy_schema::Pack;
 use rdy_store::holder::StoreMode;
-use rdy_store::{Store, layout};
+use rdy_store::upgrade::{UpgradeReport, UpgradeStep};
+use rdy_store::{OpenPolicy, Store, StoreError, layout};
+use std::cell::RefCell;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -128,7 +130,47 @@ impl Rdy {
     }
 
     pub fn open(project: &Path) -> Result<Rdy, RdyError> {
-        Rdy::open_with(project, None)
+        Rdy::open_with_policy(project, OpenPolicy::AutoUpgrade)
+    }
+
+    /// Opens `project` as [`Rdy::open`] does, with upgrade policy `policy` (embedded callers):
+    /// `AutoUpgrade` upgrades the store and completes the upgrade ([`Rdy::complete_upgrade`])
+    /// before the handle is returned; `RequireCurrent` refuses a store that needs either with
+    /// E_STORE_FORMAT, before anything is written.
+    pub fn open_with_policy(project: &Path, policy: OpenPolicy) -> Result<Rdy, RdyError> {
+        Rdy::open_with(project, policy, None)
+    }
+
+    /// Test hook: opens the project or holder (`mode`) at `root` with policy `policy` and the
+    /// upgrade steps `registry` in place of this rdy's, through the same opens as
+    /// [`Rdy::open_with_policy`] and [`Rdy::open_holder_with_policy`]. No CLI, MCP, config or
+    /// environment path reaches it.
+    #[doc(hidden)]
+    pub fn open_with_registry_for_tests(
+        root: &Path,
+        mode: StoreMode,
+        policy: OpenPolicy,
+        registry: &[UpgradeStep],
+    ) -> Result<Rdy, RdyError> {
+        match mode {
+            StoreMode::Project => Rdy::open_with(root, policy, Some(registry)),
+            StoreMode::Holder => Rdy::open_holder_with(root, policy, Some(registry)),
+        }
+    }
+
+    /// The store at `rdy_dir` (a `.rdy` directory), opened with `policy`: with this rdy's
+    /// upgrade steps, or with `registry`'s (a test hook's).
+    pub(crate) fn open_store(
+        rdy_dir: &Path,
+        policy: OpenPolicy,
+        registry: Option<&[UpgradeStep]>,
+    ) -> Result<Store, RdyError> {
+        Ok(match registry {
+            None => layout::open_project_store_with_policy(rdy_dir, policy)?,
+            Some(r) => {
+                Store::open_with_registry_for_tests(&rdy_dir.join(layout::STORE_DIR), policy, r)?
+            }
+        })
     }
 
     /// Opens `project` under `lock`, the store lock the caller took and keeps (a load, from
@@ -145,21 +187,89 @@ impl Rdy {
             StoreMode::Holder => crate::holder::holder_context()?,
             StoreMode::Project => project_context(project)?,
         };
-        Rdy::from_store(project, store, context)
+        let mut r = Rdy::from_store(project, store, context)?;
+        r.complete_upgrade()?;
+        Ok(r)
     }
 
-    fn open_with(project: &Path, lock: Option<&rdy_store::StoreLock>) -> Result<Rdy, RdyError> {
+    fn open_with(
+        project: &Path,
+        policy: OpenPolicy,
+        registry: Option<&[UpgradeStep]>,
+    ) -> Result<Rdy, RdyError> {
         let context = project_context(project)?;
-        let dot = project.join(".rdy");
-        let store = match lock {
-            Some(lock) => layout::open_project_store_locked(&dot, lock)?,
-            None => layout::open_project_store(&dot)?,
-        };
+        let store = Rdy::open_store(&project.join(".rdy"), policy, registry)?;
         // a holder is never read as a project: it has no canon, config or pack (D-BPYN8)
         if store.mode()? == StoreMode::Holder {
             return Err(crate::holder::is_a_holder());
         }
-        Rdy::from_store(project, store, context)
+        let mut r = Rdy::from_store(project, store, context)?;
+        r.complete_upgrade()?;
+        Ok(r)
+    }
+
+    /// Completes a sealed upgrade of this handle's store (D-WWAK7), once its state is
+    /// published and before any write: the receipt and the pending mirror are read through the
+    /// shared format reader, the full [`Rdy::fsck`] runs (a holder's through its holder fsck:
+    /// tag chains, signatures and the transition fold as well as the store's objects), then
+    /// `rdy_store::upgrade::publish_checked` writes `FORMAT`. `None` when nothing is pending.
+    ///
+    /// A failed fsck is E_UPGRADE_FAILED with the upgrade's backup: the sealed batch and the
+    /// old mirror stay, nothing is restored, and the next open runs the completion again
+    /// (with no second backup or batch). A mirror that could not be written stays old or
+    /// durably new; a retry is the same no-op or the same write.
+    pub fn complete_upgrade(&mut self) -> Result<Option<UpgradeReport>, RdyError> {
+        if !self.store.upgrade_pending() {
+            return Ok(None);
+        }
+        let dir = self.store.dir().to_path_buf();
+        let from =
+            rdy_store::format::read_format_file(&dir)?.ok_or_else(|| StoreError::Upgrade {
+                failure: rdy_store::error::UpgradeFailure::Moved,
+                backup: None,
+            })?;
+        let receipt = self
+            .store
+            .get_ref(rdy_store::format::REF_UPGRADE)?
+            .map(|v| rdy_store::format::UpgradeReceipt::parse(&v))
+            .transpose()
+            .map_err(|e| StoreError::Decode(format!("meta/upgrade is not a valid receipt: {e}")))?
+            .ok_or_else(|| StoreError::Upgrade {
+                failure: rdy_store::error::UpgradeFailure::Moved,
+                backup: None,
+            })?;
+        let backup = dir.parent().map(|p| p.join(&receipt.backup));
+        completion_point(CompletionPhase::BeforeFsck)?;
+        if self.fsck().is_err() {
+            return Err(StoreError::Upgrade {
+                failure: rdy_store::error::UpgradeFailure::FsckFailed,
+                backup,
+            }
+            .into());
+        }
+        completion_point(CompletionPhase::Checked)?;
+        rdy_store::upgrade::publish_checked(self.store_mut())?;
+        self.store.refresh_upgrade_pending()?;
+        completion_point(CompletionPhase::Published)?;
+        Ok(Some(UpgradeReport {
+            dry_run: false,
+            changed: true,
+            from,
+            to: self.store.features().clone(),
+            steps: receipt.steps.clone(),
+            backup,
+            batch: None,
+            reindexed: false,
+            checked: true,
+            receipt: Some(receipt),
+        }))
+    }
+
+    /// `E_STORE_READ_ONLY` when this handle's store permits reads only, and E_STORE_FORMAT
+    /// while its upgrade completion is pending: the gate every write entry runs before its
+    /// closure (`Local::write`, the daemon's writer).
+    pub fn ensure_writable(&self) -> Result<(), RdyError> {
+        Ok(self.store.ensure_writable()?)
     }
 
     /// The handle over `store`, already open, for the project or holder at `project` with
@@ -386,4 +496,53 @@ impl Rdy {
     pub fn idle_days(&self) -> u32 {
         self.read().idle_days()
     }
+}
+
+/// A point of [`Rdy::complete_upgrade`] where a test hook runs
+/// ([`with_completion_hook_for_tests`]).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompletionPhase {
+    /// The receipt is read; the full fsck has not run.
+    BeforeFsck,
+    /// The full fsck passed; `FORMAT` is not published yet.
+    Checked,
+    /// `FORMAT` is published.
+    Published,
+}
+
+type CompletionHook = Box<dyn FnMut(CompletionPhase) -> Result<(), RdyError>>;
+
+thread_local! {
+    /// This thread's completion hook ([`with_completion_hook_for_tests`]).
+    static COMPLETION_HOOK: RefCell<Option<CompletionHook>> = const { RefCell::new(None) };
+}
+
+/// Test hook: runs `f` with `hook` called at each [`CompletionPhase`] of an upgrade completion
+/// on this thread. An error the hook returns fails the completion there, as a kill or an I/O
+/// error at that point would. No CLI, MCP, config or environment path reaches it.
+#[doc(hidden)]
+pub fn with_completion_hook_for_tests<T>(
+    hook: impl FnMut(CompletionPhase) -> Result<(), RdyError> + 'static,
+    f: impl FnOnce() -> T,
+) -> T {
+    struct Off;
+    impl Drop for Off {
+        fn drop(&mut self) {
+            COMPLETION_HOOK.with(|h| *h.borrow_mut() = None);
+        }
+    }
+    COMPLETION_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(hook)));
+    let _off = Off;
+    f()
+}
+
+/// Calls this thread's completion hook, if any, at `phase`.
+fn completion_point(phase: CompletionPhase) -> Result<(), RdyError> {
+    let Some(mut hook) = COMPLETION_HOOK.with(|h| h.borrow_mut().take()) else {
+        return Ok(());
+    };
+    let r = hook(phase);
+    COMPLETION_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+    r
 }

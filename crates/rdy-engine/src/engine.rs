@@ -444,6 +444,15 @@ impl Local {
         Ok(Local::new(Rdy::open(project)?))
     }
 
+    /// Opens `project` as [`Local::open`] does, with upgrade policy `policy`
+    /// ([`Rdy::open_with_policy`]).
+    pub fn open_with_policy(
+        project: &Path,
+        policy: rdy_store::OpenPolicy,
+    ) -> Result<Local, RdyError> {
+        Ok(Local::new(Rdy::open_with_policy(project, policy)?))
+    }
+
     /// A write that panicked may have left the caches half-updated: a poisoned lock is
     /// recovered with an `invalidate` (the state is republished from the store) and the poison
     /// is cleared, so the next lock pays nothing.
@@ -499,6 +508,9 @@ impl Engine for Local {
     /// returned `Ok` and the seal fails, the seal's error is the write's.
     fn write(&self, f: WriteFn) -> Result<serde_json::Value, RdyError> {
         let mut r = self.lock();
+        // a read-only store runs no write closure (D-WWAK7): the store's own gate refuses its
+        // appends too
+        r.ensure_writable()?;
         let out = f(&mut r);
         let sealed = r.seal_open();
         match (out, sealed) {

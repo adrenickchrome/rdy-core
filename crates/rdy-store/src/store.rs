@@ -117,6 +117,42 @@ struct ReaderShared {
     /// Set when a removal failed after its apply was synced (E_REDACTION_PENDING): no reader of
     /// this family serves content again; a reopen finishes the removal.
     pending: AtomicBool,
+    /// What the open permits: a read-only store refuses every write (E_STORE_READ_ONLY).
+    access: Access,
+    /// A read-only store's lock and private index directory, held until the last reader drops.
+    /// Declared last: the readers' index is closed before the directory goes.
+    _hold: Option<ReadOnlyHold>,
+}
+
+/// What a store's open permits ([`Store::access`]). A read-only store keeps its first unknown
+/// read-only feature by name and the build that feature names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Access {
+    ReadWrite,
+    ReadOnly {
+        feature: String,
+        required_rdy: String,
+    },
+}
+
+/// What every reader of a read-only store holds: the store's lock, so no process writes or
+/// removes content beneath a read, and the private directory of the index built from the log,
+/// removed when the last reader drops.
+struct ReadOnlyHold {
+    _lock: StoreLock,
+    dir: tempfile::TempDir,
+}
+
+/// How an open treats a store that needs an upgrade (D-WWAK7). Neither policy stops a process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenPolicy {
+    /// Plan the upgrade, take the store lock, plan again and apply it, then open the upgraded
+    /// store. A sealed upgrade whose completion is still to come opens with that completion
+    /// pending: the engine runs its full fsck, then publishes `FORMAT`.
+    AutoUpgrade,
+    /// Refuse a store with planned steps or a pending completion (E_STORE_FORMAT, `the store
+    /// needs an upgrade before it can open`), before any backup, append or mirror publication.
+    RequireCurrent,
 }
 
 pub struct Store {
@@ -182,6 +218,10 @@ pub struct Store {
     /// Opened by the upgrade transaction ([`Store::open_unupgraded_locked`]): a `FORMAT` that
     /// still mirrors the manifest before the log's last upgrade receipt is accepted as it is.
     upgrade_pending: bool,
+    /// A sealed upgrade whose `FORMAT` mirror is still the old one: the engine's full fsck and
+    /// `crate::upgrade::publish_checked` are still to come, and every write is refused
+    /// (`UpgradeRequired`) until [`Store::refresh_upgrade_pending`] finds the mirror published.
+    completion_pending: bool,
     /// The last unheld batch's marker is synced and its index update has not finished: set by
     /// `append_and_index` between the two. The upgrade's commit (`commit_upgrade_refs`) reads it
     /// to keep a batch whose index update failed after its sync.
@@ -377,6 +417,20 @@ impl StoreLock {
             .truncate(false)
             .write(true)
             .open(dir.join("lock"))?;
+        Ok(StoreLock(Arc::new(HeldLock::take(file, dir)?)))
+    }
+
+    /// Takes the exclusive lock of the existing `dir/lock` without waiting, as [`StoreLock::take`]
+    /// does, and never creates the file: a read-only open writes nothing in its source store. A
+    /// missing lock file is `ReadOnlyNoLock`; another holder is `Locked`.
+    pub fn take_existing(dir: &Path) -> Result<StoreLock, StoreError> {
+        let file = match OpenOptions::new().read(true).open(dir.join("lock")) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(StoreError::ReadOnlyNoLock);
+            }
+            Err(e) => return Err(e.into()),
+        };
         Ok(StoreLock(Arc::new(HeldLock::take(file, dir)?)))
     }
 
@@ -743,6 +797,50 @@ fn sealed_log_features(dir: &Path) -> Result<Option<StoreFeatures>, StoreError> 
     Ok(value.and_then(|v| StoreFeatures::parse(&v).ok()))
 }
 
+/// The store access of `features`, which permit reads only: the first feature by name that
+/// this rdy does not register and whose class is read-only (a valid manifest is sorted by name).
+fn read_only_access(features: &StoreFeatures) -> Access {
+    let known = format::registered_features();
+    let f = features
+        .features
+        .iter()
+        .find(|f| {
+            f.class == format::FeatureClass::ReadOnlyCompatible
+                && !known.iter().any(|k| k.name == f.name)
+        })
+        .expect("a read-only manifest has an unknown read-only feature");
+    Access::ReadOnly {
+        feature: f.name.clone(),
+        required_rdy: f.required_rdy.clone(),
+    }
+}
+
+/// The upgrade plan of the closed store at `dir`: with this rdy's steps, or with `registry`'s
+/// (a test hook's).
+fn plan_upgrade(
+    dir: &Path,
+    registry: Option<&[crate::upgrade::UpgradeStep]>,
+) -> Result<crate::upgrade::UpgradePlan, StoreError> {
+    match registry {
+        None => crate::upgrade::inspect(dir),
+        Some(r) => crate::upgrade::inspect_with_registry_for_tests(dir, r),
+    }
+}
+
+/// Applies `plan` to the store at `dir` under `lock`: with this rdy's steps, or with
+/// `registry`'s (a test hook's).
+fn apply_upgrade(
+    dir: &Path,
+    lock: &StoreLock,
+    plan: &crate::upgrade::UpgradePlan,
+    registry: Option<&[crate::upgrade::UpgradeStep]>,
+) -> Result<crate::upgrade::UpgradeReport, StoreError> {
+    match registry {
+        None => crate::upgrade::apply_locked(dir, lock, plan),
+        Some(r) => crate::upgrade::apply_locked_with_registry_for_tests(dir, lock, plan, r),
+    }
+}
+
 /// The refusal of a holder's creation where a store, or anything else, already is.
 fn already_exists(dir: &Path) -> StoreError {
     StoreError::Io(std::io::Error::new(
@@ -899,13 +997,17 @@ impl Store {
         Ok(store)
     }
 
-    /// Opens an existing store. Opening never creates, upgrades or claims a store (fmt3): a path
-    /// that is not a directory with a `FORMAT` file whose features this rdy may write is refused
-    /// before anything in it is created, locked, opened or written. Until a read-only open
-    /// exists, a store this rdy may only read is refused with the feature's required build.
+    /// Opens an existing store with [`OpenPolicy::AutoUpgrade`]. Opening never creates or
+    /// claims a store (fmt3): a path that is not a directory with a `FORMAT` file whose features
+    /// this rdy may read is refused before anything in it is created, locked, opened or written.
+    /// A store with an unknown read-only feature opens for reading only (D-WWAK7).
     pub fn open(dir: &Path) -> Result<Store, StoreError> {
-        Store::check_existing(dir)?;
-        Store::open_current_format(dir, vec![], None, None)
+        Store::open_with_policy(dir, OpenPolicy::AutoUpgrade)
+    }
+
+    /// Opens an existing store as [`Store::open`] does, with upgrade policy `policy`.
+    pub fn open_with_policy(dir: &Path, policy: OpenPolicy) -> Result<Store, StoreError> {
+        Store::open_policy(dir, None, policy, None)
     }
 
     /// Opens an existing store as [`Store::open`] does, under `lock`, which the caller took on
@@ -913,11 +1015,82 @@ impl Store {
     /// released only when the caller drops it too. A lock that is not this store's is `Locked`:
     /// the caller does not hold the store.
     pub fn open_locked(dir: &Path, lock: &StoreLock) -> Result<Store, StoreError> {
-        Store::check_existing(dir)?;
+        Store::open_locked_with_policy(dir, lock, OpenPolicy::AutoUpgrade)
+    }
+
+    /// [`Store::open_locked`] with upgrade policy `policy`.
+    pub fn open_locked_with_policy(
+        dir: &Path,
+        lock: &StoreLock,
+        policy: OpenPolicy,
+    ) -> Result<Store, StoreError> {
+        Store::check_access(dir)?;
         if !lock.guards(dir) {
             return Err(StoreError::Locked(dir.to_path_buf()));
         }
-        Store::open_current_format(dir, vec![], Some(lock.clone()), None)
+        Store::open_policy(dir, Some(lock), policy, None)
+    }
+
+    /// Test hook: [`Store::open_with_policy`] with the upgrade steps `registry` in place of this
+    /// rdy's, through the same open. No CLI, MCP, config or environment path reaches it.
+    #[doc(hidden)]
+    pub fn open_with_registry_for_tests(
+        dir: &Path,
+        policy: OpenPolicy,
+        registry: &[crate::upgrade::UpgradeStep],
+    ) -> Result<Store, StoreError> {
+        Store::open_policy(dir, None, policy, Some(registry))
+    }
+
+    /// The open every policy shares. `registry` is None for this rdy's upgrade steps; only the
+    /// test hooks pass one.
+    ///
+    /// - A store this rdy may only read opens through [`Store::open_read_only`]: it is never
+    ///   upgraded.
+    /// - `RequireCurrent` refuses a store with planned steps or a pending completion before
+    ///   anything is written.
+    /// - `AutoUpgrade` with planned steps takes the store lock (or uses `held`), plans again
+    ///   and applies the plan (`crate::upgrade::apply_locked`), then opens the upgraded store
+    ///   under that lock. The open accepts a `FORMAT` the last upgrade receipt explains, and the
+    ///   store's completion stays pending ([`Store::upgrade_pending`]) for the engine.
+    fn open_policy(
+        dir: &Path,
+        held: Option<&StoreLock>,
+        policy: OpenPolicy,
+        registry: Option<&[crate::upgrade::UpgradeStep]>,
+    ) -> Result<Store, StoreError> {
+        if let Access::ReadOnly {
+            feature,
+            required_rdy,
+        } = Store::check_access(dir)?
+        {
+            return Store::open_read_only(dir, held.cloned(), feature, required_rdy);
+        }
+        let plan = plan_upgrade(dir, registry)?;
+        match policy {
+            OpenPolicy::RequireCurrent => {
+                if !plan.steps.is_empty() || plan.pending_check {
+                    return Err(StoreError::UpgradeRequired);
+                }
+                Store::open_current_format_with(dir, vec![], held.cloned(), None, false)
+            }
+            OpenPolicy::AutoUpgrade => {
+                let lock = if plan.steps.is_empty() {
+                    held.cloned()
+                } else {
+                    let lock = match held {
+                        Some(lock) => lock.clone(),
+                        None => StoreLock::take(dir)?, // lock1
+                    };
+                    // under the lock, the plan read before it is read again: another open may
+                    // have applied it meanwhile, which leaves only its completion
+                    let plan = plan_upgrade(dir, registry)?;
+                    apply_upgrade(dir, &lock, &plan, registry)?;
+                    Some(lock)
+                };
+                Store::open_current_format_with(dir, vec![], lock, None, true)
+            }
+        }
     }
 
     /// The current locked open ([`Store::open_locked`]) without an upgrade policy: the upgrade
@@ -937,10 +1110,44 @@ impl Store {
         Store::open_current_format_with(dir, vec![], Some(lock.clone()), None, true)
     }
 
-    /// The checks [`Store::open`] makes before it creates, locks, opens or writes anything: `dir`
-    /// is a directory with a `FORMAT` file whose features this rdy may write. A `FORMAT` that
-    /// lists more than its sealed log (a first use whose batch never sealed) is judged by the
-    /// sealed log's features, read from the segments. Reads only.
+    /// What this rdy may do with the store at `dir`, read before anything in it is created,
+    /// locked, opened or written: [`Store::check_existing`], where a store this rdy may only
+    /// read is `ReadOnly` with its first unknown read-only feature by name. The sealed log is
+    /// the authority over a `FORMAT` that lists more than it (a first use whose batch never
+    /// sealed). Reads only.
+    fn check_access(dir: &Path) -> Result<Access, StoreError> {
+        match std::fs::symlink_metadata(dir) {
+            Ok(m) if m.file_type().is_dir() => {}
+            Ok(_) => return Err(format::other_build(dir, "is not a directory")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(format::no_store(dir));
+            }
+            Err(e) => return Err(e.into()),
+        }
+        let Some(mirror) = format::read_format_file(dir)? else {
+            return Err(format::other_build(dir, "has no FORMAT file"));
+        };
+        let judged = match format::check_features(&mirror) {
+            Ok(format::StoreAccess::ReadWrite) => return Ok(Access::ReadWrite),
+            first => match sealed_log_features(dir)? {
+                Some(log) if log.is_subset_of(&mirror) => log,
+                _ => {
+                    first?;
+                    mirror
+                }
+            },
+        };
+        Ok(match format::check_features(&judged)? {
+            format::StoreAccess::ReadWrite => Access::ReadWrite,
+            format::StoreAccess::ReadOnly => read_only_access(&judged),
+        })
+    }
+
+    /// The checks a writable open makes before it creates, locks, opens or writes anything:
+    /// `dir` is a directory with a `FORMAT` file whose features this rdy may write. A `FORMAT`
+    /// that lists more than its sealed log (a first use whose batch never sealed) is judged by
+    /// the sealed log's features, read from the segments. A store this rdy may only read is
+    /// refused with the feature's required build. Reads only.
     pub fn check_existing(dir: &Path) -> Result<(), StoreError> {
         match std::fs::symlink_metadata(dir) {
             Ok(m) if m.file_type().is_dir() => {}
@@ -1073,6 +1280,8 @@ impl Store {
                 epoch: Arc::new(AtomicU64::new(0)),
                 poisoned: AtomicBool::new(false),
                 pending: AtomicBool::new(false),
+                access: Access::ReadWrite,
+                _hold: None,
             }),
             tracking: Arc::default(),
             epoch: 0,
@@ -1103,6 +1312,7 @@ impl Store {
             features: format::baseline_features(),
             held_features: None,
             upgrade_pending,
+            completion_pending: false,
             synced_unindexed: false,
         };
         let (upto, end) = (store.index().indexed_upto()?, store.log.end());
@@ -1158,6 +1368,189 @@ impl Store {
         Ok(store)
     }
 
+    /// Opens the store at `dir`, whose features permit reads only (D-WWAK7), for reading only:
+    /// no byte of the source store changes. It takes the existing lock file's exclusive lock
+    /// without creating it (a missing one is `ReadOnlyNoLock`), or uses `held`, and every
+    /// reader holds the lock until the last one drops, so no process writes or removes content
+    /// beneath a read.
+    ///
+    /// The sealed log is read by the writable open's rules with no writer
+    /// ([`SegmentLog::open_read_only`]): no sentinel, no quarantine, no cut, no `FORMAT`
+    /// repair, no source index, no removal finished. An unacknowledged tail is ignored and
+    /// reported as an unclean shutdown; damage an acknowledged batch follows is refused. The
+    /// index is a private one in a temporary directory, built from the log by the replay every
+    /// open uses, and removed when the last reader drops (or at once, when the replay fails).
+    /// An authorized removal that has not finished is `RedactionPending` before the store is
+    /// returned.
+    fn open_read_only(
+        dir: &Path,
+        held: Option<StoreLock>,
+        feature: String,
+        required_rdy: String,
+    ) -> Result<Store, StoreError> {
+        let segments = dir.join("segments");
+        let lock = match held {
+            Some(lock) => lock,
+            None => StoreLock::take_existing(dir)?,
+        };
+        if let Some((missing, later)) = find_gap(&segments)? {
+            return Err(StoreError::MissingFrames {
+                segment: seg_path(&segments, missing),
+                detail: format!(
+                    "{} exists but {} does not",
+                    seg_path(&segments, later).display(),
+                    seg_path(&segments, missing).display()
+                ),
+            });
+        }
+        if let Some(seg) = find_unsealed(&segments)? {
+            return Err(StoreError::MissingFrames {
+                segment: seg_path(&segments, seg),
+                detail: format!(
+                    "{} does not end at a batch marker, but {} exists",
+                    seg_path(&segments, seg).display(),
+                    seg_path(&segments, seg + 1).display()
+                ),
+            });
+        }
+        let unclean = std::fs::symlink_metadata(dir.join(INDEX_OPEN_SENTINEL)).is_ok();
+        let (log, tail) = SegmentLog::open_read_only(&segments, SEGMENT_MAX, dir)?;
+        let creation = read_creation(&log)?;
+        // the private index: built here and owned by every reader; a failed build removes it
+        let private = tempfile::Builder::new()
+            .prefix(".rdy-read-only-")
+            .tempdir()?;
+        let index = Index::open(&private.path().join("index.redb"))?;
+        replay_into(&log, &index, ORIGIN, None, RefRules::new(creation))?;
+        let reader = StoreReader {
+            index: Arc::new(index),
+            shared: Arc::new(ReaderShared {
+                dir: dir.to_path_buf(),
+                segments: SegmentReader::open(&segments),
+                sets: Mutex::new(HashMap::new()),
+                frames_read: AtomicU64::new(0),
+                refs_read: AtomicU64::new(0),
+                carried_frames_read: AtomicU64::new(0),
+                epoch: Arc::new(AtomicU64::new(0)),
+                poisoned: AtomicBool::new(false),
+                pending: AtomicBool::new(false),
+                access: Access::ReadOnly {
+                    feature,
+                    required_rdy,
+                },
+                _hold: Some(ReadOnlyHold {
+                    _lock: lock.clone(),
+                    dir: private,
+                }),
+            }),
+            tracking: Arc::default(),
+            epoch: 0,
+            preview: None,
+        };
+        let end = log.end();
+        let mut store = Store {
+            dir: dir.to_path_buf(),
+            log,
+            reader: Some(reader),
+            _lock: lock,
+            faults: Faults::default(),
+            poisoned: false,
+            synced: vec![],
+            report: OpenReport {
+                // an ignored tail is the leftover of a writer that died in a batch
+                unclean_shutdown: unclean || tail,
+                ..OpenReport::default()
+            },
+            opened: false,
+            pending: 0,
+            last_write: Instant::now(),
+            checkpoint_frames: CHECKPOINT_FRAMES,
+            checkpoints: 0,
+            checkpoint_error: None,
+            writes: 0,
+            last_batch: vec![],
+            last_batch_end: ORIGIN,
+            held: false,
+            open: None,
+            stale_index: false,
+            creation,
+            features: format::baseline_features(),
+            held_features: None,
+            upgrade_pending: false,
+            completion_pending: false,
+            synced_unindexed: false,
+        };
+        // the log's features are the store's; FORMAT is judged as the writable open judges it,
+        // and never repaired
+        let Some(f) = store.features_ref()? else {
+            return Err(format::other_build(dir, "has a log with no store features"));
+        };
+        format::check_features(&f)?;
+        match format::read_format_file(dir)? {
+            Some(mirror) if mirror == f || f.is_subset_of(&mirror) => {}
+            Some(mirror) if store.receipt_explains(&mirror, &f)? => {}
+            _ => return Err(format::unmirrored(dir)),
+        }
+        store.features = f;
+        store.check_mode_against(store.creation)?;
+        store.refuse_unfinished_removal()?;
+        debug_assert_eq!(store.index().indexed_upto()?, end);
+        store.opened = true;
+        Ok(store)
+    }
+
+    /// `RedactionPending` when an authorized removal of this read-only store's log has not
+    /// finished (a payload it authorizes is not all zero yet): no read handle escapes before a
+    /// writable open finishes it. A span only a carried record explains that is not all zero is
+    /// `RedactionCorrupt`, as the writable open finds it.
+    fn refuse_unfinished_removal(&self) -> Result<(), StoreError> {
+        let auth = Arc::clone(self.log.authorization());
+        for (loc, hole) in &auth.holes {
+            if self.log.hole_state(*loc, hole)? == Some(true) {
+                continue;
+            }
+            if !auth.erasable(loc) {
+                return Err(StoreError::corrupt_at(*loc));
+            }
+            return Err(StoreError::RedactionPending);
+        }
+        Ok(())
+    }
+
+    /// What this store's open permits: `ReadOnly` for a store with an unknown read-only
+    /// feature (D-WWAK7). Its readers keep it ([`StoreReader::access`]).
+    pub fn access(&self) -> format::StoreAccess {
+        StoreReader::access(self)
+    }
+
+    /// The one gate of every write (append, ref, seal, take, removal, reindex): a read-only
+    /// store refuses with `ReadOnly` (E_STORE_READ_ONLY), a store whose upgrade completion is
+    /// pending with `UpgradeRequired`. It runs before a feature is activated, a held batch
+    /// changes or a file is created.
+    pub fn ensure_writable(&self) -> Result<(), StoreError> {
+        StoreReader::ensure_writable(self)?;
+        if self.completion_pending {
+            return Err(StoreError::UpgradeRequired);
+        }
+        Ok(())
+    }
+
+    /// Whether a sealed upgrade of this store waits for its completion: the engine's full
+    /// fsck, then `crate::upgrade::publish_checked`. Writes are refused until then.
+    pub fn upgrade_pending(&self) -> bool {
+        self.completion_pending
+    }
+
+    /// Reads `FORMAT` again after the upgrade's completion published it: the completion is no
+    /// longer pending once the mirror lists the log's features. Returns whether it still is.
+    pub fn refresh_upgrade_pending(&mut self) -> Result<bool, StoreError> {
+        if self.completion_pending {
+            let mirror = format::read_format_file(&self.dir)?;
+            self.completion_pending = !mirror.is_some_and(|m| self.features.is_subset_of(&m));
+        }
+        Ok(self.completion_pending)
+    }
+
     /// The log's `meta/store_features` ref, as the index holds it; an invalid manifest is the
     /// manifest refusal.
     fn features_ref(&self) -> Result<Option<StoreFeatures>, StoreError> {
@@ -1195,7 +1588,14 @@ impl Store {
                     format::write_format_file(&self.dir, f)?;
                 }
             }
-            Some(mirror) if self.upgrade_pending && self.receipt_explains(&mirror, f)? => {}
+            Some(mirror) if self.receipt_explains(&mirror, f)? => {
+                // a sealed upgrade the engine has not completed: only an open that completes
+                // it (or the upgrade's own) accepts it, and it refuses writes until then
+                if !self.upgrade_pending {
+                    return Err(StoreError::UpgradeRequired);
+                }
+                self.completion_pending = true;
+            }
             _ => return Err(format::unmirrored(&self.dir)),
         }
         self.features = f.clone();
@@ -1461,6 +1861,7 @@ impl Store {
         if !was_open && last.is_empty() {
             return Ok(());
         }
+        self.ensure_writable()?;
         if self.poisoned {
             return Err(self.poisoned_err());
         }
@@ -1738,6 +2139,7 @@ impl Store {
     /// file until that reader drops (Unix). A temp that a kill leaves behind is removed by the
     /// next open, which holds the lock.
     pub fn reindex(&mut self) -> Result<(), StoreError> {
+        self.ensure_writable()?;
         if self.open.is_some() {
             return Err(batch_open("first"));
         }
@@ -1849,6 +2251,7 @@ impl Store {
         items: Vec<(u8, Vec<u8>)>,
         how: RefWrite,
     ) -> Result<Vec<Hash>, StoreError> {
+        self.ensure_writable()?;
         if self.poisoned {
             return Err(self.poisoned_err());
         }
@@ -2123,6 +2526,11 @@ impl Store {
     /// open failed was never `opened`, so it leaves a previous kill's sentinel alone.
     fn close_once(&mut self) -> Result<(), StoreError> {
         if !std::mem::take(&mut self.opened) {
+            return Ok(());
+        }
+        if self.log.is_read_only() {
+            // nothing to seal, checkpoint or remove: the private index goes with its last reader
+            drop(self.drop_index());
             return Ok(());
         }
         // an open held batch is sealed first, so a write left open is kept
@@ -2442,6 +2850,37 @@ impl Store {
 }
 
 impl StoreReader {
+    /// What the open of this reader's store permits; a reader keeps it after its store closes.
+    pub fn access(&self) -> format::StoreAccess {
+        match self.shared.access {
+            Access::ReadWrite => format::StoreAccess::ReadWrite,
+            Access::ReadOnly { .. } => format::StoreAccess::ReadOnly,
+        }
+    }
+
+    /// Test hook: the private index directory of a read-only store's readers.
+    #[doc(hidden)]
+    pub fn private_index_dir_for_tests(&self) -> Option<PathBuf> {
+        self.shared
+            ._hold
+            .as_ref()
+            .map(|h| h.dir.path().to_path_buf())
+    }
+
+    /// `ReadOnly` (E_STORE_READ_ONLY) when this reader's store permits reads only.
+    pub fn ensure_writable(&self) -> Result<(), StoreError> {
+        match &self.shared.access {
+            Access::ReadWrite => Ok(()),
+            Access::ReadOnly {
+                feature,
+                required_rdy,
+            } => Err(StoreError::ReadOnly {
+                feature: feature.clone(),
+                required_rdy: required_rdy.clone(),
+            }),
+        }
+    }
+
     pub fn dir(&self) -> &Path {
         &self.shared.dir
     }
@@ -3492,6 +3931,7 @@ impl Store {
     /// apply batch is synced. A failure poisons the store (`RedactionPending`): no write and no
     /// read is served, and the next open finishes the removal.
     pub fn finish_redactions(&mut self) -> Result<RedactionCounts, StoreError> {
+        self.ensure_writable()?;
         if self.poisoned {
             return Err(self.poisoned_err());
         }
@@ -3582,6 +4022,7 @@ impl Store {
         &mut self,
         items: Vec<(u8, Vec<u8>)>,
     ) -> Result<RedactionCounts, StoreError> {
+        self.ensure_writable()?;
         if self.poisoned {
             return Err(self.poisoned_err());
         }
@@ -3788,6 +4229,7 @@ impl Store {
     ) -> Result<crate::take_batch::BatchTaken, crate::take_batch::TakeError<E>> {
         use crate::take_batch::{Receiver, TakeError};
         crate::take_batch::check_input_bounds(files.len(), target).map_err(TakeError::Stream)?;
+        self.ensure_writable().map_err(TakeError::Store)?;
         if self.poisoned {
             return Err(TakeError::Store(self.poisoned_err()));
         }

@@ -55,6 +55,7 @@ pub use merge::{
     Conflict, MergeChange, Merged, Side, conflict_id, find_parent_cycle, merge, merge_on_blocks,
 };
 pub use segment::SegmentReader;
+pub use store::OpenPolicy;
 pub use store::{
     BlobState, CATCH_UP_CHUNK, CHECKPOINT_FRAMES, CHECKPOINT_IDLE, INDEX_OPEN_SENTINEL,
     MAX_BLOB_BYTES, NoticeCapture, OpenReport, Store, StoreLock, StoreReader,

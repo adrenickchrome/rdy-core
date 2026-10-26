@@ -2,7 +2,7 @@
 //! not a directory (an M2.0 project's stub file, for one) is a store of another rdy build and is
 //! refused before anything is locked or written.
 use crate::error::StoreError;
-use crate::store::{Store, StoreLock};
+use crate::store::{OpenPolicy, Store, StoreLock};
 use std::path::Path;
 
 /// The store directory inside `.rdy`.
@@ -18,6 +18,24 @@ pub fn open_project_store(rdy_dir: &Path) -> Result<Store, StoreError> {
 /// caller took on that store and keeps (see `Store::open_locked`).
 pub fn open_project_store_locked(rdy_dir: &Path, lock: &StoreLock) -> Result<Store, StoreError> {
     Store::open_locked(&rdy_dir.join(STORE_DIR), lock)
+}
+
+/// [`open_project_store`] with upgrade policy `policy` (see `Store::open_with_policy`).
+pub fn open_project_store_with_policy(
+    rdy_dir: &Path,
+    policy: OpenPolicy,
+) -> Result<Store, StoreError> {
+    Store::open_with_policy(&rdy_dir.join(STORE_DIR), policy)
+}
+
+/// [`open_project_store_locked`] with upgrade policy `policy` (see
+/// `Store::open_locked_with_policy`).
+pub fn open_project_store_locked_with_policy(
+    rdy_dir: &Path,
+    lock: &StoreLock,
+    policy: OpenPolicy,
+) -> Result<Store, StoreError> {
+    Store::open_locked_with_policy(&rdy_dir.join(STORE_DIR), lock, policy)
 }
 
 /// Creates the store of a new project (rdy init), durably (dur1); see `Store::create`.

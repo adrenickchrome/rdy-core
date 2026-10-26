@@ -120,6 +120,11 @@ impl Rdy {
         next: &ReadState,
         recheck: Option<Cause>,
     ) -> Result<Option<usize>, RdyError> {
+        // a read-only store (D-WWAK7) logs no moves: its reads build the same state in memory,
+        // and no write leaves a batch open
+        if self.store.access() == rdy_store::format::StoreAccess::ReadOnly {
+            return Ok(None);
+        }
         let frames: Vec<(u8, Hash)> = self.store.open_batch().unwrap_or_default().to_vec();
         let Some(cause) = self.batch_cause(&frames, recheck) else {
             self.store.seal(vec![])?;

@@ -56,6 +56,11 @@ pub fn run_inbox(engine: &dyn Engine, s: &Session, req: InboxRequest) -> Result<
         None => None,
     };
     let st = engine.read();
+    // an acknowledgment is a write: a read-only store (D-WWAK7) refuses it, persisted
+    // subscription or not
+    if req.ack {
+        st.reader().ensure_writable()?;
+    }
     let Some(sub) = st.reader().inbox(&s.actor, s.run.as_deref())? else {
         let sub = subscribe(engine, s, None)?;
         return Ok(json!({

@@ -100,6 +100,22 @@ pub enum StoreError {
     /// A read projection (a stub or a residual change) offered to a writer (E_BAD_INPUT).
     #[error("A read projection cannot be written.")]
     ProjectedWrite,
+    /// A write to a store this rdy may only read (E_STORE_READ_ONLY): `feature` is the store's
+    /// first unknown read-only feature by name, and `required_rdy` the build it names.
+    #[error("store feature {feature} permits reads only")]
+    ReadOnly {
+        feature: String,
+        required_rdy: String,
+    },
+    /// A read-only open of a store with no lock file (E_STORE_READ_ONLY): the open never
+    /// creates one in the source store.
+    #[error("the read-only store has no lock file")]
+    ReadOnlyNoLock,
+    /// A store that needs an upgrade (planned steps, or a sealed upgrade not yet completed),
+    /// opened under a policy that does not upgrade it, or written before its completion
+    /// (E_STORE_FORMAT).
+    #[error("the store needs an upgrade before it can open")]
+    UpgradeRequired,
     /// A store upgrade that failed (`crate::upgrade`); `backup` is the backup it kept, if any.
     #[error("{}", upgrade_message(*failure, backup.as_deref()))]
     Upgrade {
