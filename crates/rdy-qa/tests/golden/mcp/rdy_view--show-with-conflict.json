@@ -7,7 +7,7 @@
       "blocks": [
         "c-CFPE0"
       ],
-      "id": "2b1eda529acaba58a51fee8e119384fdf92d28d39b6b3d61b05196eeb166cc3c",
+      "id": "7fe334bf2b2708ed71d761d47c8f84afd866c8f005598d9505007efa7ef6a21a",
       "message": "a edits A",
       "run": "a"
     },
@@ -18,7 +18,7 @@
         "c-CFPE0",
         "c-ZCQ17"
       ],
-      "id": "3926a260d6782279b7ca6d7eee06375b68eb39773ef4c36cb6fc4532e4b80f4a",
+      "id": "22ece7bddcd1850f4ba0f33a9b558761481c6ed666e8db77240f69920a80a03f",
       "message": "b edits A and C",
       "run": "b"
     }
@@ -27,29 +27,29 @@
     {
       "base": "4d7e1fbf44d86dda5401261af3f7fbf47662512220f6df8390a6c1c80109d71f",
       "block": "c-CFPE0",
-      "id": "1e7092f74c1a70525496e39a7aa7495d418980a6b135fff84fa9a1e343a185c9",
+      "id": "5042afedec5d86877ec70396e1e2d0d97403e46c0ad56229f43d919297a89601",
       "sides": [
         {
-          "change": "2b1eda529acaba58a51fee8e119384fdf92d28d39b6b3d61b05196eeb166cc3c",
-          "landed": null,
-          "summary": "agent:a: a edits A",
-          "version": "f960e2ac81de4410669a4179c3671ceac66580639aa69f643e13d684cd4f9279"
-        },
-        {
-          "change": "3926a260d6782279b7ca6d7eee06375b68eb39773ef4c36cb6fc4532e4b80f4a",
+          "change": "22ece7bddcd1850f4ba0f33a9b558761481c6ed666e8db77240f69920a80a03f",
           "landed": null,
           "summary": "agent:b: b edits A and C",
           "version": "c3504b10595379dc2945f07f74be32a5d559e27cde7154bc4c43820b8ff99d81"
+        },
+        {
+          "change": "7fe334bf2b2708ed71d761d47c8f84afd866c8f005598d9505007efa7ef6a21a",
+          "landed": null,
+          "summary": "agent:a: a edits A",
+          "version": "f960e2ac81de4410669a4179c3671ceac66580639aa69f643e13d684cd4f9279"
         }
       ]
     }
   ],
-  "effective_base": "b4fb9e5a222fd47a4e39ee5d98971611e96ae368011f1ff71c951886b3a620bf",
+  "effective_base": "bf145aef0b62e33df39dfd06914c154bf4bec9cfe6bb66ee02601b3ad54cd514",
   "head": {
-    "base": "b4fb9e5a222fd47a4e39ee5d98971611e96ae368011f1ff71c951886b3a620bf",
+    "base": "bf145aef0b62e33df39dfd06914c154bf4bec9cfe6bb66ee02601b3ad54cd514",
     "changes": 2,
     "closed": false,
-    "head": "2fbc602cb2b305ceb28a348b61fd73ed7f70b25fa3b89ce941356bc713931fd6",
+    "head": "971c2d55598aea60aa7c5cab8e8bdfce81b05e14f38c5f2f4d0f0b4d1c7b3a41",
     "owner": {
       "actor": "agent:a",
       "run": "a"
@@ -61,7 +61,7 @@
     {
       "actor": "agent:a",
       "at_ms": 1760000000053,
-      "id": "2fbc602cb2b305ceb28a348b61fd73ed7f70b25fa3b89ce941356bc713931fd6",
+      "id": "971c2d55598aea60aa7c5cab8e8bdfce81b05e14f38c5f2f4d0f0b4d1c7b3a41",
       "kind": "include",
       "run": "a",
       "undone": false
@@ -69,7 +69,7 @@
     {
       "actor": "agent:a",
       "at_ms": 1760000000042,
-      "id": "f021d27a5baa10bc71fe45f2aca8cd4a5df5694117a88f55655dc92d07de1283",
+      "id": "9a66e096dcf238d39137d7b55de2b37c4039623487e232e98b4ea4337c5de2d3",
       "kind": "commit",
       "run": "a",
       "undone": false
@@ -77,7 +77,7 @@
     {
       "actor": "agent:a",
       "at_ms": 1760000000042,
-      "id": "32f63a5eef98f7d22ebef98ab82091c3e6ac56545a70cb13c3986b0b7bbf8cfa",
+      "id": "a0e62e1e6a888898a04cd6ce45703fc0f5ba199244711a7ca59c2101e414a0f6",
       "kind": "create",
       "run": "a",
       "undone": false
