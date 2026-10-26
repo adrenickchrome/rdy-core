@@ -847,7 +847,7 @@ fn read_only_access(features: &StoreFeatures) -> Access {
 /// The refusal (E_STORE_FORMAT) of a read-only open whose log holds a sealed upgrade to
 /// `features` that its `FORMAT` mirror does not show yet: the newer rdy that started it must
 /// finish it. It names the highest `required_rdy` among the features this rdy does not know.
-fn unfinished_upgrade(features: &StoreFeatures) -> StoreError {
+pub(crate) fn unfinished_upgrade(features: &StoreFeatures) -> StoreError {
     let known = format::registered_features();
     let version = |v: &str| -> Vec<u32> { v.split('.').map(|p| p.parse().unwrap_or(0)).collect() };
     let required = features

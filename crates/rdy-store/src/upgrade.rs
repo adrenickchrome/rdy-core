@@ -94,6 +94,9 @@ pub struct UpgradeReport {
     pub reindexed: bool,
     pub checked: bool,
     pub receipt: Option<format::UpgradeReceipt>,
+    /// A dry run's report of a store whose sealed upgrade still waits for its completion (the
+    /// full fsck, then `FORMAT`); false on every other report.
+    pub pending: bool,
 }
 
 /// This rdy's upgrade steps. The first release registers none.
@@ -424,6 +427,13 @@ fn inspect_with(
     Ok((plan, log.terminal))
 }
 
+/// The refusal (E_STORE_FORMAT) of a sealed upgrade to `features` that this rdy cannot complete:
+/// a newer rdy started it on a store with a read-only feature this rdy does not know. The text
+/// is the read-only open's (`Store::open` refuses the same store with it).
+pub fn unfinished_upgrade(features: &StoreFeatures) -> StoreError {
+    crate::store::unfinished_upgrade(features)
+}
+
 /// The plan with no steps from `from`.
 fn no_steps(from: StoreFeatures, pending: bool, receipt: Option<UpgradeReceipt>) -> UpgradePlan {
     UpgradePlan {
@@ -529,6 +539,7 @@ fn apply_with(
             reindexed: false,
             checked: false,
             receipt: now.receipt,
+            pending: false,
         });
     }
     let terminal = terminal.ok_or_else(|| moved(None))?;
@@ -598,6 +609,7 @@ fn apply_with(
         reindexed: true,
         checked: false,
         receipt: Some(receipt),
+        pending: false,
     })
 }
 

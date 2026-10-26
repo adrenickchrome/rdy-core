@@ -475,3 +475,44 @@ fn ok9_read_only_tail_and_pending_removal_fail_closed() {
     assert!(!out.path().join("p.rdydump").exists());
     assert_eq!(tree(&p.root), before, "no project byte changed");
 }
+
+/// Ruling task-11 item 1: a pending upgrade this rdy cannot complete (a newer rdy sealed it on
+/// a store with a read-only feature this rdy does not know) never reaches the pending report:
+/// the dry run and the apply of `rdy upgrade` refuse it with the read-only open's text (ruling
+/// task-9 item 3), and write nothing.
+#[test]
+fn ok11_a_pending_upgrade_this_rdy_cannot_finish_refuses_the_dry_run() {
+    use rdy_store::format::{StoreFeature, StoreFeatures};
+    use rdy_store::upgrade::{self, UpgradeStep};
+    let p = read_only_project();
+    let dir = p.root.join(".rdy").join("store");
+    let registry = vec![UpgradeStep {
+        id: "add_zz".into(),
+        from: StoreFeatures::of(vec![]),
+        to: StoreFeatures::of(vec![StoreFeature {
+            name: "zz_added".into(),
+            class: FeatureClass::Compatible,
+            required_rdy: "100.2.0".into(),
+        }]),
+    }];
+    {
+        let _known = inject_test_feature(FeatureClass::ReadOnlyCompatible, kinds::BLOB_CHUNK);
+        let lock = rdy_store::StoreLock::take(&dir).unwrap();
+        let plan = upgrade::inspect_with_registry_for_tests(&dir, &registry).unwrap();
+        upgrade::apply_locked_with_registry_for_tests(&dir, &lock, &plan, &registry).unwrap();
+    }
+    let before = tree(&p.root);
+    for dry_run in [true, false] {
+        let e = rdy_engine::maintenance::run(&p.root, dry_run).unwrap_err();
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (
+                E_STORE_FORMAT,
+                "the store has an upgrade a newer rdy started and did not finish",
+                "open the project with rdy 100.2.0 or later to finish the upgrade"
+            ),
+            "dry_run {dry_run}: {e:?}"
+        );
+    }
+    assert_eq!(tree(&p.root), before, "no project byte changed");
+}

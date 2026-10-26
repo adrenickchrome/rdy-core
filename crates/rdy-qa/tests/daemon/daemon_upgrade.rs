@@ -8,11 +8,14 @@ use rdy_daemon::{
     ErrorReply, Proto, RunDir, StartOptions, connect_or_start, live_daemon, serve_command,
     spawn_serve,
 };
+use rdy_engine::maintenance::{
+    apply_planned_with_registry_for_tests, plan_with_registry_for_tests, report_json, report_text,
+};
 use rdy_engine::{
     CompletionPhase, E_UPGRADE_FAILED, E_UPGRADE_MOVED, Rdy, Session, SessionKind, WriteRequest,
     with_completion_hook_for_tests,
 };
-use rdy_model::{Hash, Provenance, Role, Tag};
+use rdy_model::{Hash, Provenance, RepoId, Role, Tag};
 use rdy_qa::daemon::{Served, exited, short_tempdir};
 use rdy_qa::fixtures::rdy_bin;
 use rdy_store::format::{
@@ -427,13 +430,21 @@ fn ok11_two_upgraders_seal_once() {
         .count();
     assert_eq!(changed, 1, "{results:?}");
     for r in &results {
-        match r {
-            Ok(r) if r.changed => assert_eq!(r.steps, ["add_assessment"]),
-            // the second one found the store upgraded under the lock, or planned the old
-            // store before the first one sealed
-            Ok(r) => assert!(r.steps.is_empty() && r.receipt.is_some(), "{r:?}"),
-            Err(e) => assert_eq!(e.code, E_UPGRADE_MOVED, "{e:?}"),
+        // ruling task-11 item 2: the attempt that did not seal found no work left (under the
+        // lock, or in its first plan): the unchanged report, never E_UPGRADE_MOVED
+        let r = r
+            .as_ref()
+            .unwrap_or_else(|e| panic!("an empty re-plan is no moved plan: {e:?}"));
+        if r.changed {
+            assert_eq!(r.steps, ["add_assessment"]);
+            continue;
         }
+        assert!(
+            !r.dry_run && r.steps.is_empty() && r.receipt.is_some() && r.backup.is_none(),
+            "{r:?}"
+        );
+        assert_eq!(report_text(r), "store is current");
+        assert_eq!(report_json(r)["pending"], json!(false));
     }
     assert_eq!(upgrade_batches(&root), 1, "one batch");
     assert_eq!(backups(&root).len(), 1, "one backup");
@@ -445,4 +456,145 @@ fn ok11_two_upgraders_seal_once() {
         "{r:?}"
     );
     assert_eq!(upgrade_batches(&root), 1);
+}
+
+/// Ruling task-11 item 1: a dry run of a store whose sealed upgrade still waits for its
+/// completion says so, in text and JSON, and shows the transition the apply then makes: from
+/// the `FORMAT` mirror's manifest to the sealed one.
+#[test]
+fn ok11_a_pending_dry_run_says_so_and_matches_the_apply() {
+    // a current store: `store is current`, not pending
+    let (_current, root) = closed_project();
+    let r = rdy_daemon::maintenance::run(&root, true).unwrap();
+    assert_eq!(report_text(&r), "store is current");
+    assert_eq!(report_json(&r)["pending"], json!(false));
+
+    let (base, root) = closed_project();
+    make_pending(&root);
+    let before = tree(base.path());
+    let dry = run_with_registry_for_tests(&root, true, &registry()).unwrap();
+    assert_eq!(
+        report_text(&dry),
+        "store upgrade is pending: run rdy upgrade to finish it"
+    );
+    let v = report_json(&dry);
+    assert_eq!(v["pending"], json!(true));
+    assert_eq!(
+        (v["dry_run"].clone(), v["changed"].clone()),
+        (json!(true), json!(false))
+    );
+    assert_eq!(v["steps"], json!([]));
+    assert_eq!(
+        (dry.from.clone(), dry.to.clone()),
+        (baseline_features(), upgraded()),
+        "from the FORMAT mirror to the sealed manifest"
+    );
+    // the same through this rdy's own registry (a pending plan has no steps to plan)
+    let own = rdy_daemon::maintenance::run(&root, true).unwrap();
+    assert_eq!(
+        (own.from.clone(), own.to.clone(), own.pending),
+        (baseline_features(), upgraded(), true)
+    );
+    assert_eq!(tree(base.path()), before, "a dry run writes nothing");
+
+    let applied = run_with_registry_for_tests(&root, false, &registry()).unwrap();
+    assert!(
+        applied.changed && applied.checked && !applied.pending,
+        "{applied:?}"
+    );
+    assert_eq!(
+        (dry.from, dry.to),
+        (applied.from.clone(), applied.to.clone()),
+        "the dry run shows the transition the apply makes"
+    );
+    assert_eq!(report_json(&applied)["pending"], json!(false));
+    assert_eq!(format_text(&root), upgraded().to_text());
+    // completed: current again
+    let r = rdy_daemon::maintenance::run(&root, true).unwrap();
+    assert_eq!(report_text(&r), "store is current");
+    assert_eq!(report_json(&r)["pending"], json!(false));
+}
+
+/// Ruling task-11 item 2: a re-plan under the lock that differs from the reviewed plan, and is
+/// not empty, is E_UPGRADE_MOVED; nothing is backed up or written.
+#[test]
+fn ok11_a_moved_plan_is_e_upgrade_moved() {
+    let (base, root) = closed_project();
+    let planned = plan_with_registry_for_tests(&root, &registry()).unwrap();
+    assert_eq!(planned.steps, ["add_assessment"]);
+    // the steps this rdy would run now differ: another binary's plan
+    let other = vec![UpgradeStep {
+        id: "add_assessment_too".into(),
+        from: StoreFeatures::of(vec![]),
+        to: StoreFeatures::of(vec![assessment()]),
+    }];
+    let before = tree(base.path());
+    let e = apply_planned_with_registry_for_tests(&root, &planned, &other).unwrap_err();
+    assert_eq!(e.code, E_UPGRADE_MOVED, "{e:?}");
+    assert!(backups(&root).is_empty());
+    assert_eq!(upgrade_batches(&root), 0);
+    assert_eq!(format_text(&root), baseline_features().to_text());
+    let mut after = tree(base.path());
+    after.retain(|p, _| before.contains_key(p));
+    assert_eq!(after, before, "no byte of the project changed");
+}
+
+/// Finding 4: a project whose pack fails to load is refused as an ordinary open refuses it,
+/// before any backup or upgrade batch is written.
+#[test]
+fn ok11_apply_refuses_a_project_that_cannot_open_before_any_write() {
+    let (_base, root) = closed_project();
+    std::fs::write(
+        root.join(".rdy").join("packs").join("broken.yaml"),
+        "name: broken\nversion: [\n",
+    )
+    .unwrap();
+    let config = std::fs::read_to_string(root.join(".rdy.yaml")).unwrap();
+    let broken: String = config
+        .lines()
+        .map(|l| {
+            if l.starts_with("pack:") {
+                "pack: broken".to_string()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_ne!(broken, config, "{config}");
+    std::fs::write(root.join(".rdy.yaml"), broken + "\n").unwrap();
+    let opened = Rdy::open(&root).err().expect("the project cannot open");
+    let segments = tree(&store_dir(&root).join("segments"));
+    let e = run_with_registry_for_tests(&root, false, &registry()).unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (opened.code, opened.message.as_str(), opened.fix.as_str()),
+        "the ordinary open's refusal"
+    );
+    assert!(backups(&root).is_empty(), "no backup");
+    assert_eq!(upgrade_batches(&root), 0, "no upgrade batch");
+    assert_eq!(tree(&store_dir(&root).join("segments")), segments);
+    assert_eq!(format_text(&root), baseline_features().to_text());
+    // the dry run still shows the plan: it reads no project file
+    let dry = run_with_registry_for_tests(&root, true, &registry()).unwrap();
+    assert_eq!(dry.steps, ["add_assessment"]);
+}
+
+/// A holder is upgraded with the holder's context: no config or pack file is read for it.
+#[test]
+fn ok11_apply_upgrades_a_holder() {
+    let base = short_tempdir();
+    let root = base.path().join("h");
+    std::fs::create_dir(&root).unwrap();
+    Rdy::create_holder(&root, RepoId([7; 16]))
+        .unwrap()
+        .close()
+        .unwrap();
+    let r = rdy_engine::maintenance::run_with_registry_for_tests(&root, false, &registry())
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    assert!(r.changed && r.checked, "{r:?}");
+    assert_eq!(r.steps, ["add_assessment"]);
+    assert_eq!(format_text(&root), upgraded().to_text());
+    let e = rdy_engine::maintenance::run(&root, true).unwrap();
+    assert_eq!(report_text(&e), "store is current");
 }

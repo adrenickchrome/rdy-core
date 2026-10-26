@@ -126,6 +126,15 @@ pub fn decode_mode(value: Option<&[u8]>) -> Result<StoreMode, StoreError> {
     }
 }
 
+/// The mode of the closed store at `dir` (a store directory), read from its sealed log with no
+/// lock and no writer (`segment::sealed_ref_value`), before anything in it is opened or
+/// written: a caller that must know it first (an upgrade, which loads the project's config and
+/// pack before it writes). A store with no sealed mode ref is a project. Reads only.
+pub fn sealed_mode(dir: &std::path::Path) -> Result<StoreMode, StoreError> {
+    let value = crate::segment::sealed_ref_value(&dir.join("segments"), REF_STORE_MODE, 64)?;
+    decode_mode(value.as_deref())
+}
+
 /// Where a ref belongs, for a holder.
 enum Family<'a> {
     /// `meta/store_features`, `meta/upgrade`, `meta/store_format`, `meta/repo_id` or

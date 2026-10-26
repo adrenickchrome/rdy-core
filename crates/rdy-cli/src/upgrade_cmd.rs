@@ -77,10 +77,12 @@ mod tests {
             reindexed: changed,
             checked: changed,
             receipt: None,
+            pending: false,
         }
     }
 
-    /// ok11: the handler prints exactly one of the three texts, and the report's JSON shape.
+    /// ok11: the handler prints exactly one of the four texts (ruling task-11 item 1 adds the
+    /// pending one), and the report's JSON shape.
     #[test]
     fn ok11_the_handler_prints_the_report_text_and_json() {
         let hash = baseline_features().hash().to_string();
@@ -90,7 +92,7 @@ mod tests {
             v,
             json!({"dry_run": false, "changed": false, "from": hash, "to": hash, "steps": [],
                 "backup": null, "batch": null, "reindexed": false, "checked": false,
-                "receipt": null})
+                "receipt": null, "pending": false})
         );
         let (_, text) = result(Ok(report(true, false, &[]))).unwrap();
         assert_eq!(text, "store is current");
@@ -102,6 +104,16 @@ mod tests {
         assert_eq!(text, "store upgraded; backup: /p/.rdy/.store-upgrade-a-b");
         assert_eq!(v["backup"], json!("/p/.rdy/.store-upgrade-a-b"));
         assert_eq!(v["checked"], json!(true));
+        let (v, text) = result(Ok(UpgradeReport {
+            pending: true,
+            ..report(true, false, &[])
+        }))
+        .unwrap();
+        assert_eq!(
+            text,
+            "store upgrade is pending: run rdy upgrade to finish it"
+        );
+        assert_eq!(v["pending"], json!(true));
     }
 
     /// ok11: an rdy error reaches the caller with its code, message and fix unchanged.

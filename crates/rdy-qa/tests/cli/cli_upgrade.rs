@@ -110,6 +110,7 @@ fn ok11_cli_upgrade_reports_a_current_store_and_keeps_its_daemon() {
     assert_eq!(v["changed"], Value::Bool(false));
     assert_eq!(v["steps"], serde_json::json!([]));
     assert_eq!(v["receipt"], Value::Null);
+    assert_eq!(v["pending"], Value::Bool(false));
     assert_eq!(v["from"], v["to"]);
     assert_eq!(v["from"].as_str().unwrap().len(), 64);
     assert_eq!(tree(&root), before, "nothing was written");

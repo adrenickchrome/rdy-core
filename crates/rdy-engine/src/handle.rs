@@ -183,10 +183,38 @@ impl Rdy {
         lock: &rdy_store::StoreLock,
     ) -> Result<Rdy, RdyError> {
         let store = layout::open_project_store_locked(&project.join(".rdy"), lock)?;
-        let context = match store.mode()? {
-            StoreMode::Holder => crate::holder::holder_context()?,
-            StoreMode::Project => project_context(project)?,
-        };
+        let mode = store.mode()?;
+        let context = Rdy::context_of(project, mode)?;
+        let mut r = Rdy::from_store(project, store, context)?;
+        r.complete_upgrade()?;
+        Ok(r)
+    }
+
+    /// The context of the project or holder (`mode`) at `project`: a holder's fixed one, or the
+    /// project's, read from its config and pack files (a file that fails to load is the
+    /// ordinary open's refusal).
+    pub(crate) fn context_of(project: &Path, mode: StoreMode) -> Result<Context, RdyError> {
+        match mode {
+            StoreMode::Holder => crate::holder::holder_context(),
+            StoreMode::Project => project_context(project),
+        }
+    }
+
+    /// [`Rdy::open_locked`] with `context`, resolved by the caller for `mode` before it wrote
+    /// anything (an upgrade: a project that cannot open is refused before its backup). A store
+    /// of another mode is the adapter refusal of [`Rdy::open`] or [`Rdy::open_holder`].
+    pub(crate) fn open_locked_with(
+        project: &Path,
+        lock: &rdy_store::StoreLock,
+        mode: StoreMode,
+        context: Context,
+    ) -> Result<Rdy, RdyError> {
+        let store = layout::open_project_store_locked(&project.join(".rdy"), lock)?;
+        match (mode, store.mode()?) {
+            (StoreMode::Project, StoreMode::Holder) => return Err(crate::holder::is_a_holder()),
+            (StoreMode::Holder, StoreMode::Project) => return Err(crate::holder::is_a_project()),
+            _ => {}
+        }
         let mut r = Rdy::from_store(project, store, context)?;
         r.complete_upgrade()?;
         Ok(r)
@@ -261,6 +289,7 @@ impl Rdy {
             reindexed: false,
             checked: true,
             receipt: Some(receipt),
+            pending: false,
         }))
     }
 

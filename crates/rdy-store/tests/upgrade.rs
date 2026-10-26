@@ -420,6 +420,7 @@ fn ok5_upgrade_is_one_batch_and_keeps_all_hashes() {
             reindexed: true,
             checked: false,
             receipt: Some(receipt.clone()),
+            pending: false,
         }
     );
 
@@ -884,6 +885,7 @@ fn ok5_restart_retains_receipt_without_second_batch() {
                 reindexed: false,
                 checked: false,
                 receipt: Some(receipt.clone()),
+                pending: false,
             },
             "{phase}"
         );
@@ -923,6 +925,7 @@ fn ok5_noop_has_no_backup_or_batch() {
         reindexed: false,
         checked: false,
         receipt,
+        pending: false,
     };
     assert_eq!(
         upgrade::apply_locked(&dir, &lock, &plan).unwrap(),

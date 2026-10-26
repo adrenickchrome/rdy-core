@@ -69,7 +69,7 @@ fn run_with(
         m::refuse_read_only(&planned)?;
     }
     if dry_run || !m::needs_work(&planned) {
-        return Ok(m::unchanged(&planned, dry_run));
+        return m::unchanged(root, &planned, dry_run);
     }
     block_on(move || coordinate(root, planned, registry))
 }

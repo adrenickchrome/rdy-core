@@ -91,7 +91,7 @@ fn connected(dry_run: bool, features: &StoreFeatures, receipt: &Value) -> Value 
     let h = features.hash().to_string();
     json!({"dry_run": dry_run, "changed": false, "from": h, "to": h, "steps": [],
         "backup": null, "batch": null, "reindexed": false, "checked": false,
-        "receipt": receipt})
+        "receipt": receipt, "pending": false})
 }
 
 fn tool_error(r: Reply) -> Value {

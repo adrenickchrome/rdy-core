@@ -38,7 +38,9 @@ pub fn store_dir(root: &Path) -> PathBuf {
 
 /// The upgrade plan of the closed store of the project at `root`, with this rdy's steps. It
 /// opens no store, takes or creates no lock, and writes nothing. A preview store (a scalar
-/// format) is refused with its dump-and-load fix.
+/// format) is refused with its dump-and-load fix. A sealed upgrade whose completion is pending
+/// on a store with an unknown read-only feature is refused with the read-only open's text
+/// (ruling task-9 item 3): this rdy cannot complete it (ruling task-11 item 1).
 pub fn plan(root: &Path) -> Result<UpgradePlan, RdyError> {
     plan_with(root, None)
 }
@@ -55,10 +57,14 @@ pub fn plan_with_registry_for_tests(
 
 fn plan_with(root: &Path, registry: Option<&[UpgradeStep]>) -> Result<UpgradePlan, RdyError> {
     let dir = store_dir(root);
-    Ok(match registry {
+    let plan = match registry {
         None => rdy_store::upgrade::inspect(&dir)?,
         Some(r) => rdy_store::upgrade::inspect_with_registry_for_tests(&dir, r)?,
-    })
+    };
+    if plan.pending_check && read_only(&plan.from) {
+        return Err(rdy_store::upgrade::unfinished_upgrade(&plan.from).into());
+    }
+    Ok(plan)
 }
 
 /// Whether `plan` has work: steps to run, or a sealed upgrade whose fsck and `FORMAT` are still
@@ -98,13 +104,28 @@ pub fn refuse_read_only(plan: &UpgradePlan) -> Result<(), RdyError> {
     Ok(())
 }
 
-/// The report of `plan` when nothing runs: a dry run lists the planned steps; an apply with no
-/// work lists none. Nothing changed, no backup or batch, and neither check ran.
-pub fn unchanged(plan: &UpgradePlan, dry_run: bool) -> UpgradeReport {
-    UpgradeReport {
+/// The manifest an upgrade of `plan` at the project `root` goes from: the `FORMAT` mirror's
+/// while a sealed upgrade waits for its completion (the completion publishes the sealed
+/// manifest over it), else the plan's. A dry run and an apply of one store report the same.
+fn from_of(root: &Path, plan: &UpgradePlan) -> Result<StoreFeatures, RdyError> {
+    if !plan.pending_check {
+        return Ok(plan.from.clone());
+    }
+    Ok(format::read_format_file(&store_dir(root))?.unwrap_or_else(|| plan.from.clone()))
+}
+
+/// The report of `plan`, the plan of the project at `root`, when nothing runs: a dry run lists
+/// the planned steps and whether a completion is pending (ruling task-11 item 1); an apply
+/// with no work lists none. Nothing changed, no backup or batch, and neither check ran.
+pub fn unchanged(
+    root: &Path,
+    plan: &UpgradePlan,
+    dry_run: bool,
+) -> Result<UpgradeReport, RdyError> {
+    Ok(UpgradeReport {
         dry_run,
         changed: false,
-        from: plan.from.clone(),
+        from: from_of(root, plan)?,
         to: plan.to.clone(),
         steps: plan.steps.clone(),
         backup: None,
@@ -112,7 +133,8 @@ pub fn unchanged(plan: &UpgradePlan, dry_run: bool) -> UpgradeReport {
         reindexed: false,
         checked: false,
         receipt: plan.receipt.clone(),
-    }
+        pending: dry_run && plan.pending_check,
+    })
 }
 
 /// Inspects (`dry_run`) or upgrades the store of the project at `root`, with no stop
@@ -142,7 +164,7 @@ fn run_with(
         refuse_read_only(&planned)?;
     }
     if dry_run || !needs_work(&planned) {
-        return Ok(unchanged(&planned, dry_run));
+        return unchanged(root, &planned, dry_run);
     }
     apply_with(root, &planned, registry)
 }
@@ -150,8 +172,11 @@ fn run_with(
 /// Applies `planned` to the store of the project at `root`: takes the store's lock, plans
 /// again under it, runs the upgrade batch (`rdy_store::upgrade::apply_locked`), then opens the
 /// project under the same lock, whose completion runs the full fsck before `FORMAT` is
-/// published. A plan that changed since `planned` is `E_UPGRADE_MOVED`; a plan with no work
-/// left returns unchanged. The completed report goes to the caller.
+/// published. A plan with no work left (another coordinator finished it) returns unchanged; a
+/// plan with work that differs from `planned` is `E_UPGRADE_MOVED` (ruling task-11 item 2).
+/// The project's context (its config and pack, or a holder's) is resolved before anything is
+/// written, so a project that cannot open is refused as [`Rdy::open`] refuses it, with no
+/// backup or batch. The completed report goes to the caller.
 pub fn apply_planned(root: &Path, planned: &UpgradePlan) -> Result<UpgradeReport, RdyError> {
     apply_with(root, planned, None)
 }
@@ -190,18 +215,21 @@ fn apply_with(
     let plan = plan_with(root, registry)?;
     refuse_read_only(&plan)?;
     if !needs_work(&plan) {
-        return Ok(unchanged(&plan, false));
+        return unchanged(root, &plan, false);
     }
     if !same_plan(&plan, planned) {
         return Err(moved());
     }
-    let mirror = format::read_format_file(&dir)?;
+    // the ordinary open's refusals come first: nothing is written for a project that cannot open
+    let mode = rdy_store::holder::sealed_mode(&dir)?;
+    let context = Rdy::context_of(root, mode)?;
+    let from = from_of(root, &plan)?;
     let applied = match registry {
         None => rdy_store::upgrade::apply_locked(&dir, &lock, &plan)?,
         Some(r) => rdy_store::upgrade::apply_locked_with_registry_for_tests(&dir, &lock, &plan, r)?,
     };
     // the engine's open completes the sealed upgrade: the full fsck, then `FORMAT`
-    let r = Rdy::open_locked(root, &lock)?;
+    let r = Rdy::open_locked_with(root, &lock, mode, context)?;
     let receipt = receipt_of(r.store().get_ref(format::REF_UPGRADE)?)?;
     let backup = applied.backup.clone().or_else(|| {
         receipt
@@ -211,7 +239,7 @@ fn apply_with(
     let report = UpgradeReport {
         dry_run: false,
         changed: true,
-        from: mirror.unwrap_or_else(|| plan.from.clone()),
+        from,
         to: r.store().features().clone(),
         steps: plan.steps.clone(),
         backup,
@@ -219,6 +247,7 @@ fn apply_with(
         reindexed: applied.reindexed,
         checked: true,
         receipt,
+        pending: false,
     };
     r.close()?;
     drop(lock);
@@ -264,13 +293,14 @@ pub fn connected(state: &ReadState, dry_run: bool) -> Result<UpgradeReport, RdyE
         reindexed: false,
         checked: false,
         receipt,
+        pending: false,
     })
 }
 
 /// The report as `rdy upgrade --json` and `rdy_upgrade` return it: `from` and `to` are the
 /// manifests' hashes and `batch` the upgrade batch's marker, in full lower-case hex; `backup`
 /// is the backup's path as display text; an absent backup, batch or receipt is null. The
-/// receipt keeps its own canonical field names.
+/// receipt keeps its own canonical field names. `pending` (ruling task-11 item 1) follows them.
 pub fn report_json(r: &UpgradeReport) -> Value {
     json!({
         "dry_run": r.dry_run,
@@ -285,12 +315,14 @@ pub fn report_json(r: &UpgradeReport) -> Value {
         "receipt": r.receipt.as_ref().map(|rc| {
             serde_json::to_value(rc).expect("a receipt always serializes")
         }),
+        "pending": r.pending,
     })
 }
 
 /// The text `rdy upgrade` prints: `store is current`; `store upgrade needs {n} step(s)` and one
-/// `  {step}` line per step for a dry run with steps; `store upgraded; backup: {path}` after an
-/// apply.
+/// `  {step}` line per step for a dry run with steps; `store upgrade is pending: run rdy upgrade
+/// to finish it` for a dry run of a pending completion (ruling task-11 item 1); `store
+/// upgraded; backup: {path}` after an apply.
 pub fn report_text(r: &UpgradeReport) -> String {
     if r.changed {
         let backup = r
@@ -306,6 +338,9 @@ pub fn report_text(r: &UpgradeReport) -> String {
             out.push_str(&format!("\n  {s}"));
         }
         return out;
+    }
+    if r.pending {
+        return "store upgrade is pending: run rdy upgrade to finish it".into();
     }
     "store is current".into()
 }
