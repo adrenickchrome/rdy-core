@@ -217,7 +217,7 @@ pub struct Store {
     held_features: Option<StoreFeatures>,
     /// Opened by the upgrade transaction ([`Store::open_unupgraded_locked`]): a `FORMAT` that
     /// still mirrors the manifest before the log's last upgrade receipt is accepted as it is.
-    upgrade_pending: bool,
+    accept_pending: bool,
     /// A sealed upgrade whose `FORMAT` mirror is still the old one: the engine's full fsck and
     /// `crate::upgrade::publish_checked` are still to come, and every write is refused
     /// (`UpgradeRequired`) until [`Store::refresh_upgrade_pending`] finds the mirror published.
@@ -1066,16 +1066,21 @@ impl Store {
         {
             return Store::open_read_only(dir, held.cloned(), feature, required_rdy);
         }
-        let plan = plan_upgrade(dir, registry)?;
+        // a store the planner refuses keeps the open's own refusal: only a plan the planner
+        // could make is applied, and the open below judges the store as it always did
+        let (steps, pending) = match plan_upgrade(dir, registry) {
+            Ok(plan) => (!plan.steps.is_empty(), plan.pending_check),
+            Err(_) => (false, false),
+        };
         match policy {
             OpenPolicy::RequireCurrent => {
-                if !plan.steps.is_empty() || plan.pending_check {
+                if steps || pending {
                     return Err(StoreError::UpgradeRequired);
                 }
                 Store::open_current_format_with(dir, vec![], held.cloned(), None, false)
             }
             OpenPolicy::AutoUpgrade => {
-                let lock = if plan.steps.is_empty() {
+                let lock = if !steps {
                     held.cloned()
                 } else {
                     let lock = match held {
@@ -1311,7 +1316,7 @@ impl Store {
             creation,
             features: format::baseline_features(),
             held_features: None,
-            upgrade_pending,
+            accept_pending: upgrade_pending,
             completion_pending: false,
             synced_unindexed: false,
         };
@@ -1476,7 +1481,7 @@ impl Store {
             creation,
             features: format::baseline_features(),
             held_features: None,
-            upgrade_pending: false,
+            accept_pending: false,
             completion_pending: false,
             synced_unindexed: false,
         };
@@ -1591,7 +1596,7 @@ impl Store {
             Some(mirror) if self.receipt_explains(&mirror, f)? => {
                 // a sealed upgrade the engine has not completed: only an open that completes
                 // it (or the upgrade's own) accepts it, and it refuses writes until then
-                if !self.upgrade_pending {
+                if !self.accept_pending {
                     return Err(StoreError::UpgradeRequired);
                 }
                 self.completion_pending = true;

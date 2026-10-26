@@ -1758,7 +1758,7 @@ impl SegmentLog {
             .readers
             .get(seg as usize)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such segment"))?;
-        Ok(self.walk_len(seg, f)?)
+        self.walk_len(seg, f)
     }
 
     /// Calls `f(location, kind, hash, payload, next)` for every frame from `from` to the end of
