@@ -23,12 +23,22 @@ struct Ids {
     cy: String,
     /// The claim's version in canon: the base of `cx`.
     base: String,
-    /// The change each divergent view holds (a's own update of the claim).
-    own: String,
+    /// The change each divergent view holds (a's own update of the claim), by view.
+    own: Vec<(String, String)>,
 }
 
-/// The views agent a (run r1) owns, empty but for `own` where it is named in `diverged`.
-const PLAIN: [&str; 5] = ["cli", "mcp", "undo-cli", "undo-mcp", "show"];
+impl Ids {
+    fn own_of(&self, view: &str) -> &str {
+        &self
+            .own
+            .iter()
+            .find(|(v, _)| v == view)
+            .unwrap_or_else(|| panic!("no divergent view {view}"))
+            .1
+    }
+}
+
+/// The views of the conflict test: each holds a's own update of the seed claim.
 const DIVERGED: [&str; 3] = ["div-cli", "div-mcp", "div-text"];
 
 fn claim(parent: &str, body: &str) -> Value {
@@ -36,9 +46,9 @@ fn claim(parent: &str, body: &str) -> Value {
 }
 
 /// A served project: the seed doc landed; view `src` with agent b's two changes (an update of the
-/// seed claim, and a new claim); agent a's views `PLAIN` (each holding a claim of its own, so a
-/// view exists) and `DIVERGED` (each updating the seed claim).
-fn served_replay() -> (Served, Ids) {
+/// seed claim, and a new claim); agent a's views `plain` (each holding a claim of its own, so a
+/// view exists) and `diverged` (each updating the seed claim).
+fn served_replay(plain: &[&str], diverged: &[&str]) -> (Served, Ids) {
     let s = Served::new();
     let mut r = Rdy::open(s.dir.path()).unwrap();
     let (_doc, section, c) = seed_doc(&mut r, "seed");
@@ -63,12 +73,12 @@ fn served_replay() -> (Served, Ids) {
         .unwrap()
         .change;
     let a = as_agent("agent:a", "r1");
-    for v in PLAIN {
+    for v in plain {
         write_as(&mut r, &a, v, claim(&section, &format!("own in {v}"))).unwrap();
     }
-    let mut own = String::new();
-    for v in DIVERGED {
-        own = write_as(
+    let mut own = vec![];
+    for v in diverged {
+        let change = write_as(
             &mut r,
             &a,
             v,
@@ -76,6 +86,7 @@ fn served_replay() -> (Served, Ids) {
         )
         .unwrap()
         .change;
+        own.push((v.to_string(), change));
     }
     r.close().unwrap();
     (
@@ -126,7 +137,8 @@ fn is_hash(s: &str) -> bool {
 }
 
 /// `v` with the parts that differ between two equal replays masked: `sources` get their label,
-/// every other hash is `<hash>`, a consequence id is `<cq>` and `view` is `<view>`.
+/// every other hash is `<hash>`, a consequence id is `<cq>`, a tension id `<tn>`, another block id
+/// `<block>` and `view` is `<view>`.
 fn norm(v: &Value, view: &str, sources: &[(&str, &str)]) -> Value {
     match v {
         Value::String(s) => {
@@ -136,6 +148,10 @@ fn norm(v: &Value, view: &str, sources: &[(&str, &str)]) -> Value {
                 json!("<hash>")
             } else if s.starts_with("cq-") {
                 json!("<cq>")
+            } else if s.starts_with("tn-") {
+                json!("<tn>")
+            } else if s.len() == 7 && s.starts_with("c-") {
+                json!("<block>")
             } else if s == view {
                 json!("<view>")
             } else {
@@ -196,28 +212,34 @@ const REPLAY_KEYS: [&str; 10] = [
 
 #[test]
 fn ok10_mcp_and_cli_replay_match() {
-    let (s, ids) = served_replay();
-    let both = [ids.cx.as_str(), ids.cy.as_str()];
-    let (ok, from_cli) = cli(&s, &["--json", "view", "replay", "cli", &ids.cx, &ids.cy]);
+    // two equal projects: a replay into a second view would collide with the first
+    let (s_cli, ids_cli) = served_replay(&["cli"], &[]);
+    let (s_mcp, ids_mcp) = served_replay(&["mcp"], &[]);
+    let (ok, from_cli) = cli(
+        &s_cli,
+        &["--json", "view", "replay", "cli", &ids_cli.cx, &ids_cli.cy],
+    );
     assert!(ok, "{from_cli}");
-    let mut c = mcp(&s);
+    let mut c = mcp(&s_mcp);
     let from_mcp = c
         .call(
             "rdy_view",
-            json!({"op": "replay", "view": "mcp", "changes": both}),
+            json!({"op": "replay", "view": "mcp", "changes": [ids_mcp.cx, ids_mcp.cy]}),
         )
         .ok();
-    for (reply, view) in [(&from_cli, "cli"), (&from_mcp, "mcp")] {
+    for (reply, view, s, ids) in [
+        (&from_cli, "cli", &s_cli, &ids_cli),
+        (&from_mcp, "mcp", &s_mcp, &ids_mcp),
+    ] {
         for key in REPLAY_KEYS {
             assert!(reply.get(key).is_some(), "{view}: no {key}: {reply}");
         }
         assert_eq!(reply["view"], view);
         // the request reached the engine as the replay of exactly these two sources
+        let replayed = reply["replayed"].as_array().unwrap();
         assert_eq!(
             sorted(
-                reply["replayed"]
-                    .as_array()
-                    .unwrap()
+                replayed
                     .iter()
                     .map(|r| r["source"].as_str().unwrap().to_string())
                     .collect()
@@ -228,9 +250,7 @@ fn ok10_mcp_and_cli_replay_match() {
         assert_eq!(
             sorted(strings(&reply["added"])),
             sorted(
-                reply["replayed"]
-                    .as_array()
-                    .unwrap()
+                replayed
                     .iter()
                     .map(|r| r["change"].as_str().unwrap().to_string())
                     .collect()
@@ -240,11 +260,11 @@ fn ok10_mcp_and_cli_replay_match() {
         assert_eq!(reply["conflicts"], json!([]), "{reply}");
         assert!(reply["consequences"].is_array(), "{reply}");
         // the view's head is the one include op the reply names
-        let op = newest_op(&s, view);
+        let op = newest_op(s, view);
         assert_eq!(op["id"], reply["head"], "{view}: {op}");
         assert_eq!(op["kind"], "include", "{view}: {op}");
         // and the view holds the replays of both sources, once each, beside the change it had
-        let (ok, shown) = cli(&s, &["--json", "view", "show", view]);
+        let (ok, shown) = cli(s, &["--json", "view", "show", view]);
         assert!(ok, "{shown}");
         let from: Vec<String> = shown["changes"]
             .as_array()
@@ -259,17 +279,27 @@ fn ok10_mcp_and_cli_replay_match() {
         );
         assert_eq!(shown["head"]["changes"], 3, "{shown}");
     }
-    // one shape: the two replies differ only in hashes that depend on time, and the view name
-    let sources = [(ids.cx.as_str(), "<cx>"), (ids.cy.as_str(), "<cy>")];
+    // one shape: the two replies differ only in ids that depend on the project and the time
+    let masked = |reply: &Value, view: &str, ids: &Ids| {
+        norm(
+            reply,
+            view,
+            &[
+                (ids.cx.as_str(), "<cx>"),
+                (ids.cy.as_str(), "<cy>"),
+                (ids.claim.as_str(), "<claim>"),
+            ],
+        )
+    };
     assert_eq!(
-        norm(&from_cli, "cli", &sources),
-        norm(&from_mcp, "mcp", &sources)
+        masked(&from_cli, "cli", &ids_cli),
+        masked(&from_mcp, "mcp", &ids_mcp)
     );
 }
 
 #[test]
 fn ok10_replay_reply_has_consequences_and_conflicts() {
-    let (s, ids) = served_replay();
+    let (s, ids) = served_replay(&[], &DIVERGED);
     let (ok, reply) = cli(&s, &["--json", "view", "replay", "div-cli", &ids.cx]);
     assert!(ok, "{reply}");
     let new = reply["replayed"][0]["change"].as_str().unwrap().to_string();
@@ -287,7 +317,10 @@ fn ok10_replay_reply_has_consequences_and_conflicts() {
             .map(|x| x["change"].as_str().unwrap().to_string())
             .collect(),
     );
-    assert_eq!(changes, sorted(vec![ids.own.clone(), new.clone()]));
+    assert_eq!(
+        changes,
+        sorted(vec![ids.own_of("div-cli").to_string(), new.clone()])
+    );
     assert!(
         sides
             .iter()
@@ -344,7 +377,7 @@ fn ok10_replay_reply_has_consequences_and_conflicts() {
 
 #[test]
 fn ok10_replay_then_undo_is_one_act() {
-    let (s, ids) = served_replay();
+    let (s, ids) = served_replay(&["undo-cli", "undo-mcp"], &[]);
     let both = [ids.cx.as_str(), ids.cy.as_str()];
     let mut c = mcp(&s);
     // the command line
@@ -418,7 +451,7 @@ fn ok10_replay_then_undo_is_one_act() {
 
 #[test]
 fn ok10_replay_rejects_extra_fields_and_limits() {
-    let (s, ids) = served_replay();
+    let (s, ids) = served_replay(&["cli"], &[]);
     let end = log_end(&s);
     let mut c = mcp(&s);
     // a field replay does not take, over MCP; the first in declaration order is named
@@ -542,7 +575,7 @@ fn ok10_replay_rejects_extra_fields_and_limits() {
 
 #[test]
 fn ok10_view_show_names_replay_source() {
-    let (s, ids) = served_replay();
+    let (s, ids) = served_replay(&["show"], &[]);
     let (ok, replay) = cli(&s, &["--json", "view", "replay", "show", &ids.cx]);
     assert!(ok, "{replay}");
     let new = replay["replayed"][0]["change"]
@@ -595,42 +628,64 @@ fn ok10_view_show_names_replay_source() {
 
 #[test]
 fn ok10_failed_replay_does_not_publish() {
-    let (s, ids) = served_replay();
+    let (s, ids) = served_replay(&["cli"], &[]);
+    let ghost = "ab".repeat(32);
+    let other = |args: &[&str]| s.json_as("agent:c", Some("r1"), args);
+    // warm up each session, so the log stops growing for reasons of its own
+    let mut c = mcp(&s);
     let (ok, before_cli) = cli(&s, &["--json", "view", "show", "cli"]);
     assert!(ok, "{before_cli}");
     let (ok, before_src) = cli(&s, &["--json", "view", "show", "src"]);
     assert!(ok, "{before_src}");
-    let end = log_end(&s);
-    let ghost = "ab".repeat(32);
-    let mut c = mcp(&s);
-    // one real change and one that is not there: the whole call fails
-    let (ok, e) = cli(&s, &["--json", "view", "replay", "cli", &ids.cx, &ghost]);
-    assert!(!ok, "{e}");
-    assert!(e["code"].is_string(), "{e}");
-    let e = tool_error(c.call(
-        "rdy_view",
-        json!({"op": "replay", "view": "cli", "changes": [ids.cx, ghost]}),
-    ));
-    assert!(e["code"].is_string(), "{e}");
-    // a view of another actor
-    let (ok, e) = s.json_as(
-        "agent:c",
-        Some("r1"),
-        &["--json", "view", "replay", "cli", &ids.cx],
-    );
-    assert!(!ok, "{e}");
-    assert_eq!(e["code"], "E_VIEW_OWNER", "{e}");
-    // a field replay does not take
-    let e = tool_error(c.call(
-        "rdy_view",
-        json!({"op": "replay", "view": "cli", "changes": [ids.cx], "cascade": true}),
-    ));
-    assert_eq!(e["code"], "E_BAD_INPUT", "{e}");
-    // a view that is not there
-    let (ok, e) = cli(&s, &["--json", "view", "replay", "nope", &ids.cx]);
-    assert!(!ok, "{e}");
+    assert!(other(&["--json", "view", "show", "cli"]).0);
+    c.call("rdy_view", json!({"op": "show", "view": "cli"}))
+        .ok();
     drop(c);
-    assert_eq!(log_end(&s), end, "no frame was written");
+    let end = log_end(&s);
+    // each refusal, then the log: it ends where it did
+    let step = |label: &str, run: &dyn Fn() -> Option<Value>| {
+        let refused = run();
+        if let Some(e) = refused {
+            assert!(e["code"].is_string(), "{label}: {e}");
+        }
+        assert_eq!(log_end(&s), end, "{label}: a frame was written");
+    };
+    // one real change and one that is not there: the whole call fails
+    step("ghost, command line", &|| {
+        let (ok, e) = cli(&s, &["--json", "view", "replay", "cli", &ids.cx, &ghost]);
+        assert!(!ok, "{e}");
+        Some(e)
+    });
+    step("ghost, MCP", &|| {
+        let mut c = mcp(&s);
+        Some(tool_error(c.call(
+            "rdy_view",
+            json!({"op": "replay", "view": "cli", "changes": [ids.cx, ghost]}),
+        )))
+    });
+    // a view of another actor
+    step("foreign view", &|| {
+        let (ok, e) = other(&["--json", "view", "replay", "cli", &ids.cx]);
+        assert!(!ok, "{e}");
+        assert_eq!(e["code"], "E_VIEW_OWNER", "{e}");
+        Some(e)
+    });
+    // a field replay does not take
+    step("extra field", &|| {
+        let mut c = mcp(&s);
+        let e = tool_error(c.call(
+            "rdy_view",
+            json!({"op": "replay", "view": "cli", "changes": [ids.cx], "cascade": true}),
+        ));
+        assert_eq!(e["code"], "E_BAD_INPUT", "{e}");
+        Some(e)
+    });
+    // a view that is not there
+    step("no view", &|| {
+        let (ok, e) = cli(&s, &["--json", "view", "replay", "nope", &ids.cx]);
+        assert!(!ok, "{e}");
+        Some(e)
+    });
     let (_, after_cli) = cli(&s, &["--json", "view", "show", "cli"]);
     let (_, after_src) = cli(&s, &["--json", "view", "show", "src"]);
     assert_eq!(after_cli, before_cli);
