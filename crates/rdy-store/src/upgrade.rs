@@ -542,6 +542,13 @@ fn apply_with(
             pending: false,
         });
     }
+    // a reader of this process that outlived its handle still holds the index: refuse before the
+    // backup copies a live index file (a copy the store would no longer match once it is
+    // released, which would block the retry)
+    crate::index::check_not_held(&dir.join("index.redb")).map_err(|e| match e {
+        StoreError::HeldByReader(_) => StoreError::HeldByReader(dir.to_path_buf()),
+        e => e,
+    })?;
     let terminal = terminal.ok_or_else(|| moved(None))?;
     let name = format!("{BACKUP_PREFIX}{}-{terminal}", now.from.hash());
     let (parent_path, store_name) = split_store_path(dir)?;

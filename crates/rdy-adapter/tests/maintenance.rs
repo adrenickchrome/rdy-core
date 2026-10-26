@@ -324,3 +324,41 @@ fn rf4_adapter_formats_and_old_stream_refusal() {
     assert_eq!(fsck_json(&h), serde_json::to_value(&loaded.fsck).unwrap());
     h.close().unwrap();
 }
+
+/// Every path under `dir` with its length and contents (None for a directory).
+fn tree(dir: &Path) -> std::collections::BTreeMap<PathBuf, Option<(u64, Vec<u8>)>> {
+    let mut out = std::collections::BTreeMap::new();
+    for e in std::fs::read_dir(dir).unwrap() {
+        let p = e.unwrap().path();
+        let m = std::fs::symlink_metadata(&p).unwrap();
+        if m.is_dir() {
+            out.insert(p.clone(), None);
+            out.extend(tree(&p));
+        } else {
+            out.insert(p.clone(), Some((m.len(), std::fs::read(&p).unwrap())));
+        }
+    }
+    out
+}
+
+#[test]
+fn ok12_upgrade_calls_leave_a_current_store_alone() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = divergent_holder(root.path(), RepoId([9; 16]));
+    let before = tree(&dir);
+    // a current store has no plan, and an apply with no work writes nothing: no backup, no batch
+    let plan = maintenance::inspect_store(&dir).unwrap();
+    assert!(plan.steps.is_empty() && !plan.requires_upgrade && !plan.pending_check);
+    for dry_run in [true, false] {
+        let report = maintenance::upgrade(&dir, dry_run).unwrap();
+        assert!(!report.changed && !report.checked && report.steps.is_empty());
+        assert_eq!((report.batch, report.backup), (None, None));
+        assert_eq!(report.dry_run, dry_run);
+        assert_eq!(tree(&dir), before, "dry_run {dry_run}");
+    }
+    // a running owner does not stop the plan or a dry run
+    let h = StoreHandle::open_holder(&dir).unwrap();
+    assert_eq!(maintenance::inspect_store(&dir).unwrap(), plan);
+    maintenance::upgrade(&dir, true).unwrap();
+    h.close().unwrap();
+}

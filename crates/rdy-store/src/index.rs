@@ -587,6 +587,20 @@ fn open_error(path: &Path, e: redb::DatabaseError) -> StoreError {
     }
 }
 
+/// Refuses with `HeldByReader(path)` when another live database in this process holds the index
+/// file at `path` (a reader that outlived its store), before a caller copies or writes anything.
+/// It opens the existing file and drops it at once; a missing or unreadable file is no reader's,
+/// and the open that follows judges it.
+pub(crate) fn check_not_held(path: &Path) -> Result<(), StoreError> {
+    let probed = std::panic::catch_unwind(|| redb::Builder::new().open(path).map(drop));
+    match probed {
+        Ok(Err(redb::DatabaseError::DatabaseAlreadyOpen)) => {
+            Err(StoreError::HeldByReader(path.to_path_buf()))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// The raw rows of the seven redaction tables: carriers, items, objects, applied, active, spans,
 /// carried places.
 pub(crate) type RedactionRows = [BTreeMap<Vec<u8>, Vec<u8>>; 7];

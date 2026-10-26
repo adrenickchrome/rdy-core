@@ -5,7 +5,8 @@
 //! core: this crate adds none. Every type its signatures use is re-exported here, so a consumer
 //! depends on this crate alone. No raw `Local`, `Rdy`, `ReadState` or `StoreReader` escapes it.
 //! `rendering` writes a render request for the host's child process and renders one page of a
-//! captured tag; the renderer itself is core's (`rdy-render`).
+//! captured tag; the renderer itself is core's (`rdy-render`). A store upgrade is an explicit
+//! call (`maintenance::upgrade`): no open upgrades a store (D-WWAK7).
 //! No product behaviour is promised stable across pins.
 
 pub mod history;
@@ -19,13 +20,16 @@ pub mod stream;
 pub mod take;
 mod value;
 
-pub use maintenance::{ChainEnd, DumpStop, LoadedChainFile, StoppedAt};
+pub use maintenance::{
+    ChainEnd, DumpStop, LoadedChainFile, StoppedAt, UpgradePlan, UpgradeReport, UpgradeStep,
+};
 pub use publication::{ProfileFacts, profile_facts};
 pub use publication_take::{
     PublicationFacts, PublicationRefusal, PublicationTaken, PublicationTarget,
 };
 pub use rdy_engine::{CarriedTargetIssue, CarriedWarning, RdyError, core_error_code};
 pub use rdy_model::{Block, BlockId, Hash, RepoId, Tag};
+pub use rdy_store::holder::StoreMode;
 pub use rdy_store::meta::Origin;
 pub use store::{Identity, Snapshot, StoreHandle};
 pub use take::{StorePosition, TakeOutcome, UploadTarget};
