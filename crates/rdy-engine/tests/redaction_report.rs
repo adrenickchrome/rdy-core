@@ -1810,17 +1810,17 @@ fn rdx5_literal_quotes_are_candidates_not_automatic_targets() {
 }
 
 #[test]
-fn rdx5_assessment_support_is_explicitly_not_implemented() {
+fn ok8_assessment_support_is_carried() {
     let _clock = pin_clock(1_000_000);
     let p = base();
     let d =
         p.r.read()
             .redaction_report(&input(&[p.prose.to_string()], true))
             .unwrap();
-    // M3b adds the assessment kind; until then the report says so, with no count
-    assert_eq!(d.assessment, AssessmentSupport::NotImplemented);
+    // the reader scans the carried assessment records, with no count (an empty scan included)
+    assert_eq!(d.assessment, AssessmentSupport::Carried);
     let v = serde_json::to_value(&d).unwrap();
-    assert_eq!(v["assessment"], "not_implemented");
+    assert_eq!(v["assessment"], "carried");
     let keys: BTreeSet<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(
         keys,
@@ -1844,8 +1844,8 @@ fn rdx5_assessment_support_is_explicitly_not_implemented() {
     );
     let res = dry_run(&p.r.read(), &input(&[p.prose.to_string()], true)).unwrap();
     let text = report_text(&res, 4000).unwrap().text;
-    assert!(text.contains("\nRecorded assessments: not implemented.\n"));
-    // the base registry holds no assessment kind: every assigned kind has a policy, and a new
+    assert!(text.contains("\nRecorded assessments: scanned.\n"));
+    // every assigned kind has a policy, and a new
     // content-bearing kind without a visitor is refused, never read as absent
     require_text_policies(&ASSIGNED_KINDS).unwrap();
     let e = require_text_policies(&[127]).unwrap_err();

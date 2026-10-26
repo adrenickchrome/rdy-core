@@ -399,7 +399,8 @@ pub(crate) fn check_fresh(
         .manifest
         .report_hash(&mut buf)
         .map_err(|_| crate::error::redaction_limit(rdy_store::redaction::limit::RECORD))?;
-    if full.prospective || full.report.report_hash != bound || full.request_targets != r.targets {
+    let fresh = report::hash_as_recorded(&full.manifest, &r.manifest, &mut buf)?;
+    if full.prospective || fresh != bound || full.request_targets != r.targets {
         return Err(StoreError::RedactionStale.into());
     }
     Ok(())

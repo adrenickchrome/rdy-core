@@ -281,6 +281,64 @@ fn deep_warning(n: usize, levels: usize) -> RedactionWarning {
     }
 }
 
+/// The report hash of the `fresh` manifest as a request recorded with `recorded` bound it. The assessment
+/// status is a hash input, so a request recorded when the report said `NotImplemented` keeps
+/// that hash at its approval: the fresh manifest is read with the recorded status, and every
+/// other part must match as before. A report computed now says `Carried`.
+pub(crate) fn hash_as_recorded(
+    fresh: &RedactionManifest,
+    recorded: &RedactionManifest,
+    buf: &mut [u8],
+) -> Result<Hash, RdyError> {
+    let mut m = fresh.clone();
+    m.assessment = recorded.assessment;
+    m.report_hash(buf).map_err(|_| over(limit::RECORD))
+}
+
+/// What the references of the carried records need, read in the one pass over the log. The
+/// decoded records are not kept.
+#[derive(Default)]
+struct Carried {
+    /// The assessments that name a removed block or version.
+    assessments: Vec<Hash>,
+    /// Each dispute and the landing it disputes.
+    disputes: Vec<(Hash, Hash)>,
+    /// Each resolution, its dispute and its correction landing.
+    resolutions: Vec<(Hash, Hash, Option<Hash>)>,
+    requests: Vec<RequestFacts>,
+}
+
+/// A check request's subject, reduced to its references.
+struct RequestFacts {
+    hash: Hash,
+    /// Whether a block of its subject is a selected or referencing block.
+    on_block: bool,
+    change: Option<Hash>,
+    proposal: Option<Hash>,
+}
+
+/// Whether `a` names a block of the removal in its scope, reach, tensions, issues, confidence
+/// reasons or suspects (a block or its cause), or its policy version is a removed version.
+fn assessment_hits(
+    a: &rdy_model::assessment::Assessment,
+    versions: &HashSet<Hash>,
+    ids: &HashSet<&BlockId>,
+) -> bool {
+    let named = |b: &BlockId| ids.contains(b);
+    a.scope.blocks.iter().any(named)
+        || a.reach.iter().any(named)
+        || a.tensions.iter().any(|t| t.blocks.iter().any(named))
+        || a.issues.iter().any(|i| named(&i.block))
+        || a.confidence.reasons.iter().any(|i| named(&i.block))
+        || a.suspects
+            .iter()
+            .any(|s| named(&s.block) || named(&s.cause))
+        || a.policy
+            .as_ref()
+            .and_then(|p| p.policy.as_ref())
+            .is_some_and(|p| versions.contains(&p.version))
+}
+
 /// The impact kind whose ordinal is `n`.
 fn impact_kind(n: u8) -> ImpactKind {
     const ALL: [ImpactKind; 15] = [
@@ -782,7 +840,7 @@ pub(crate) fn compute_excluding(
             inside: vec![],
             outside: outside.clone(),
             quarantine: quarantine.clone(),
-            assessment: AssessmentSupport::NotImplemented,
+            assessment: AssessmentSupport::Carried,
         };
         return finish(
             Draft {
@@ -938,6 +996,8 @@ pub(crate) fn compute_excluding(
     let mut tensions: Vec<(Hash, SemanticTension)> = vec![];
     let mut answers: Vec<(Hash, Answer)> = vec![];
     let mut signatures: Vec<(Hash, Hash)> = vec![];
+    // the carried records, reduced to what their references need (no decoded record is kept)
+    let mut carried = Carried::default();
     let audit = ImpactKind::AuditText;
     for (i, f) in frames.iter().enumerate() {
         // the request's own batches are left out before the first-seen check, so the same
@@ -1074,20 +1134,31 @@ pub(crate) fn compute_excluding(
                 let a: rdy_model::assessment::Assessment =
                     reader.get_typed(kinds::ASSESSMENT, &h)?;
                 quotes.scan(ImpactKind::Assessment, &rec, false, &a)?;
+                if assessment_hits(&a, &versions, &affected_ids) {
+                    carried.assessments.push(h);
+                }
             }
             kinds::DISPUTE => {
                 let d: rdy_model::dispute::Dispute = reader.get_typed(kinds::DISPUTE, &h)?;
                 quotes.scan(ImpactKind::Dispute, &rec, false, &d)?;
+                carried.disputes.push((h, d.landing));
             }
             kinds::DISPUTE_RESOLUTION => {
                 let d: rdy_model::dispute::DisputeResolution =
                     reader.get_typed(kinds::DISPUTE_RESOLUTION, &h)?;
                 quotes.scan(ImpactKind::DisputeResolution, &rec, false, &d)?;
+                carried.resolutions.push((h, d.dispute, d.correction));
             }
             kinds::CHECK_REQUEST => {
                 let c: rdy_model::check_request::CheckRequest =
                     reader.get_typed(kinds::CHECK_REQUEST, &h)?;
                 quotes.scan(ImpactKind::CheckRequest, &rec, false, &c)?;
+                carried.requests.push(RequestFacts {
+                    hash: h,
+                    on_block: c.subject.blocks.iter().any(|b| affected_ids.contains(b)),
+                    change: c.subject.change,
+                    proposal: c.subject.version,
+                });
             }
             kinds::PLAN => {
                 // the whole decoded version, as for an answer: the view, each answer's reason,
@@ -1199,9 +1270,39 @@ pub(crate) fn compute_excluding(
             row(audit, h.to_string(), refs, false);
         }
     }
+    // the carried records: a dispute through its landing, a resolution through its dispute or
+    // its correction landing, a check request through its blocks, its change or its proposal
+    let mut affected_disputes: HashSet<Hash> = HashSet::new();
+    for (h, landing) in &carried.disputes {
+        if affected_landings.contains(landing) {
+            affected_disputes.insert(*h);
+            row(ImpactKind::Dispute, h.to_string(), refs, false);
+        }
+    }
+    for (h, dispute, correction) in &carried.resolutions {
+        if affected_disputes.contains(dispute)
+            || correction.is_some_and(|c| affected_landings.contains(&c))
+        {
+            row(ImpactKind::DisputeResolution, h.to_string(), refs, false);
+        }
+    }
+    for h in &carried.assessments {
+        row(ImpactKind::Assessment, h.to_string(), refs, false);
+    }
+    let mut affected_requests: HashSet<Hash> = HashSet::new();
+    for q in &carried.requests {
+        if q.on_block
+            || q.change.is_some_and(|c| hit(&c))
+            || q.proposal.is_some_and(|p| affected_proposals.contains(&p))
+        {
+            affected_requests.insert(q.hash);
+            row(ImpactKind::CheckRequest, q.hash.to_string(), refs, false);
+        }
+    }
     let mut affected_reviews: HashSet<Hash> = HashSet::new();
     for (h, r) in &reviews {
-        if review_blocks(r).iter().any(|b| affected_ids.contains(b)) {
+        let request = matches!(&r.subject, ReviewSubject::Check { request } if affected_requests.contains(request));
+        if request || review_blocks(r).iter().any(|b| affected_ids.contains(b)) {
             affected_reviews.insert(*h);
         }
     }
@@ -1292,7 +1393,7 @@ pub(crate) fn compute_excluding(
         inside,
         outside,
         quarantine,
-        assessment: AssessmentSupport::NotImplemented,
+        assessment: AssessmentSupport::Carried,
     };
     let drop_frames = u64::try_from(manifest.spans.len()).map_err(|_| over(limit::FRAMES))?;
     let prospective = prospective_hits(
@@ -1565,6 +1666,36 @@ mod tests {
             deps: deps.to_vec(),
             ..ChangeInfo::default()
         }
+    }
+
+    #[test]
+    fn ok8_a_request_keeps_the_hash_it_was_recorded_under() {
+        let manifest = |assessment| RedactionManifest {
+            versions: vec![],
+            blobs: vec![],
+            shared_blobs: vec![],
+            spans: vec![],
+            inside: vec![],
+            outside: outside_rows(),
+            quarantine: vec![],
+            assessment,
+        };
+        let mut buf = vec![0u8; 4096];
+        let old = manifest(AssessmentSupport::NotImplemented);
+        let now = manifest(AssessmentSupport::Carried);
+        let bound = old.report_hash(&mut buf).unwrap();
+        assert_ne!(bound, now.report_hash(&mut buf).unwrap());
+        // the fresh manifest says Carried; the request bound NotImplemented: same hash
+        assert_eq!(hash_as_recorded(&now, &old, &mut buf).unwrap(), bound);
+        // any other difference still changes the hash
+        let mut other = manifest(AssessmentSupport::Carried);
+        other.quarantine = vec!["segments/x.torn-1".into()];
+        assert_ne!(hash_as_recorded(&other, &old, &mut buf).unwrap(), bound);
+        // a request recorded now binds Carried
+        assert_eq!(
+            hash_as_recorded(&now, &now, &mut buf).unwrap(),
+            now.report_hash(&mut buf).unwrap()
+        );
     }
 
     #[test]

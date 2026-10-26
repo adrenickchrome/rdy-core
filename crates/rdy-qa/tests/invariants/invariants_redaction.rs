@@ -883,9 +883,9 @@ fn rdx15_snapshots_are_references_and_assessment_support_is_absent() {
     );
     assert!(has(ImpactKind::Landing, &p.landing.to_string()));
     assert!(has(ImpactKind::Tag, "v1.0.0"));
-    assert_eq!(dry.assessment, AssessmentSupport::NotImplemented);
+    assert_eq!(dry.assessment, AssessmentSupport::Carried);
     let j = serde_json::to_value(&dry).unwrap();
-    assert_eq!(j["assessment"], "not_implemented");
+    assert_eq!(j["assessment"], "carried");
     assert!(
         !j.to_string().contains("score"),
         "the report holds no score: {j}"
