@@ -185,8 +185,8 @@ fn ok1_frame_versions_preserve_raw_zero_bytes() {
     i.finish().unwrap();
     assert_eq!(segment(&to), bytes);
     assert_eq!(
-        std::fs::read(to.join("FORMAT")).unwrap(),
-        std::fs::read(src.join("FORMAT")).unwrap()
+        std::fs::read(to.join("FEATURES")).unwrap(),
+        std::fs::read(src.join("FEATURES")).unwrap()
     );
     // and its index, built and rebuilt from the log, reads every object
     let mut t = Store::open(&to).unwrap();

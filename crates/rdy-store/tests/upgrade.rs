@@ -8,8 +8,8 @@
 use rdy_model::*;
 use rdy_store::error::UpgradeFailure;
 use rdy_store::format::{
-    self, FORMAT_FILE, FeatureClass, REF_STORE_FEATURES, REF_UPGRADE, StoreFeature, StoreFeatures,
-    TEST_FEATURE, UpgradeReceipt, baseline_features, inject_test_feature,
+    self, FEATURES_FILE, FeatureClass, REF_STORE_FEATURES, REF_UPGRADE, StoreFeature,
+    StoreFeatures, TEST_FEATURE, UpgradeReceipt, baseline_features, inject_test_feature,
 };
 use rdy_store::upgrade::{
     self, MAX_BACKUP_ENTRIES, MAX_BACKUP_PATH_BYTES, Phase, UpgradePlan, UpgradeReport,
@@ -229,7 +229,7 @@ fn terminal(dir: &Path) -> Hash {
 }
 
 fn format_text(dir: &Path) -> String {
-    std::fs::read_to_string(dir.join(FORMAT_FILE)).unwrap()
+    std::fs::read_to_string(dir.join(FEATURES_FILE)).unwrap()
 }
 
 fn backup_name(from: &StoreFeatures, terminal: Hash) -> String {
@@ -903,6 +903,35 @@ fn ok5_restart_retains_receipt_without_second_batch() {
         assert_eq!(done.receipt, Some(receipt));
         assert_eq!(upgrade_batches(&dir), 1, "{phase}");
     }
+}
+
+/// Final ruling 3 (round 2): the completion publishes FEATURES first, then FORMAT, each by
+/// rename. FORMAT's bytes are the same before and after, so a crash between the two renames
+/// leaves the published store, and a crash before them leaves the pending one (above).
+#[test]
+fn ok5_a_completion_renames_features_before_format() {
+    let _f = known();
+    let base = tempfile::tempdir().unwrap();
+    let dir = project(base.path());
+    upgrade(&dir).unwrap();
+    let format = std::fs::read(dir.join(format::FORMAT_FILE)).unwrap();
+    assert_eq!(format, b"rdy store format\nstore_format 19\n");
+    assert_eq!(format_text(&dir), baseline_features().to_text(), "pending");
+    let ((), synced) = rdy_store::fsutil::record_syncs(|| complete(&dir));
+    let at = |name: &str| {
+        synced
+            .iter()
+            .position(|p| p == &dir.join(name))
+            .unwrap_or_else(|| panic!("{name} was not written: {synced:?}"))
+    };
+    assert!(at(FEATURES_FILE) < at(format::FORMAT_FILE), "{synced:?}");
+    assert_eq!(
+        std::fs::read(dir.join(format::FORMAT_FILE)).unwrap(),
+        format
+    );
+    assert_eq!(format_text(&dir), upgraded().to_text());
+    let done = inspect_with(&dir, &registry()).unwrap();
+    assert!(!done.pending_check && done.steps.is_empty(), "{done:?}");
 }
 
 #[test]

@@ -1445,7 +1445,7 @@ fn ok1_take_refuses_a_stream_this_holder_may_only_read() {
     let mut h = Store::create_holder(&hpath, repo).unwrap();
     let end = h.log_end();
     let before = segment_bytes(&hpath);
-    let format_before = std::fs::read(hpath.join(rdy_store::format::FORMAT_FILE)).unwrap();
+    let format_before = std::fs::read(hpath.join(rdy_store::format::FEATURES_FILE)).unwrap();
     let target = UploadTarget {
         tag: "v1".into(),
         landing,
@@ -1464,7 +1464,7 @@ fn ok1_take_refuses_a_stream_this_holder_may_only_read() {
     drop(h);
     assert_eq!(segment_bytes(&hpath), before);
     assert_eq!(
-        std::fs::read(hpath.join(rdy_store::format::FORMAT_FILE)).unwrap(),
+        std::fs::read(hpath.join(rdy_store::format::FEATURES_FILE)).unwrap(),
         format_before
     );
 }
@@ -1472,7 +1472,7 @@ fn ok1_take_refuses_a_stream_this_holder_may_only_read() {
 #[test]
 fn ok1_take_keeps_the_stream_features_and_activates_first_use() {
     use rdy_store::format::{
-        FORMAT_FILE, FeatureClass, StoreFeature, StoreFeatures, TEST_FEATURE, inject_test_feature,
+        FEATURES_FILE, FeatureClass, StoreFeature, StoreFeatures, TEST_FEATURE, inject_test_feature,
     };
     // an unknown compatible feature of the source, and the test feature that a TAG uses
     let future = StoreFeature {
@@ -1506,7 +1506,7 @@ fn ok1_take_keeps_the_stream_features_and_activates_first_use() {
     );
     assert_eq!(h.features(), &want);
     assert_eq!(
-        std::fs::read_to_string(hpath.join(FORMAT_FILE)).unwrap(),
+        std::fs::read_to_string(hpath.join(FEATURES_FILE)).unwrap(),
         want.to_text(),
         "FORMAT mirrors the log"
     );
@@ -1527,7 +1527,7 @@ fn ok1_take_keeps_the_stream_features_and_activates_first_use() {
 #[test]
 fn ok1_a_take_that_cannot_roll_back_keeps_format() {
     use rdy_store::format::{
-        FORMAT_FILE, FeatureClass, StoreFeature, StoreFeatures, TEST_FEATURE, inject_test_feature,
+        FEATURES_FILE, FeatureClass, StoreFeature, StoreFeatures, TEST_FEATURE, inject_test_feature,
     };
     let future = StoreFeature {
         name: "zz_future".into(),
@@ -1555,7 +1555,7 @@ fn ok1_a_take_that_cannot_roll_back_keeps_format() {
     h.fail_next_rollback();
     assert!(take(&mut h, &open(&[file]), &target).is_err());
     assert_eq!(
-        std::fs::read_to_string(hpath.join(FORMAT_FILE)).unwrap(),
+        std::fs::read_to_string(hpath.join(FEATURES_FILE)).unwrap(),
         want.to_text(),
         "FORMAT keeps the published manifest"
     );
@@ -1582,7 +1582,7 @@ fn unknown_features(prefix: &str, n: usize) -> Vec<rdy_store::format::StoreFeatu
 #[test]
 fn ok1_take_refuses_a_merged_manifest_over_its_bounds() {
     use rdy_store::format::{
-        FORMAT_FILE, FeatureClass, REF_STORE_FEATURES, inject_test_feature, write_format_file,
+        FEATURES_FILE, FeatureClass, REF_STORE_FEATURES, inject_test_feature, write_format_file,
     };
     // the TAG of every upload first uses the test feature
     let _known = inject_test_feature(FeatureClass::Compatible, kinds::TAG);
@@ -1614,7 +1614,7 @@ fn ok1_take_refuses_a_merged_manifest_over_its_bounds() {
         assert_eq!(h.features(), &mine, "{case}");
         let end = h.log_end();
         let before = segment_bytes(&hpath);
-        let format_before = std::fs::read(hpath.join(FORMAT_FILE)).unwrap();
+        let format_before = std::fs::read(hpath.join(FEATURES_FILE)).unwrap();
         let target = UploadTarget {
             tag: "v1".into(),
             landing,
@@ -1645,7 +1645,7 @@ fn ok1_take_refuses_a_merged_manifest_over_its_bounds() {
         drop(h);
         assert_eq!(segment_bytes(&hpath), before, "{case}");
         assert_eq!(
-            std::fs::read(hpath.join(FORMAT_FILE)).unwrap(),
+            std::fs::read(hpath.join(FEATURES_FILE)).unwrap(),
             format_before,
             "{case}"
         );

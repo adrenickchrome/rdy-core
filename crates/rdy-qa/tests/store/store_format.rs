@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 const RE_CREATE: &str = "re-create it with this rdy";
 
-/// The FORMAT text of a new store: the baseline features.
+/// The FEATURES text of a new store: the baseline features (its FORMAT is the two scalar lines).
 fn current_text() -> String {
     baseline_features().to_text()
 }
@@ -51,6 +51,10 @@ fn fmt1_a_new_store_records_its_format_in_the_log_and_in_format() {
     let s = Store::create(&dir).unwrap();
     assert_eq!(
         std::fs::read_to_string(dir.join("FORMAT")).unwrap(),
+        "rdy store format\nstore_format 19\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("FEATURES")).unwrap(),
         current_text()
     );
     assert_eq!(
@@ -76,7 +80,7 @@ fn fmt1_format_refs_survive_reindex() {
         Some(baseline_features().to_json())
     );
     assert_eq!(
-        std::fs::read_to_string(dir.join("FORMAT")).unwrap(),
+        std::fs::read_to_string(dir.join("FEATURES")).unwrap(),
         current_text()
     );
 }
@@ -154,7 +158,7 @@ fn fmt2_a_store_of_a_newer_format_is_refused_before_anything_is_opened() {
     )])
     .unwrap();
     drop(s);
-    std::fs::write(dir.join("FORMAT"), newer().to_text()).unwrap();
+    rdy_store::format::write_format_file(&dir, &newer()).unwrap();
     let before = tree(&dir);
     refused_by_feature(&dir);
     assert_eq!(tree(&dir), before, "nothing under the store changed");
@@ -194,7 +198,7 @@ fn fmt2_a_log_that_says_another_format_is_refused() {
         seg
     );
     assert_eq!(
-        std::fs::read_to_string(dir.join("FORMAT")).unwrap(),
+        std::fs::read_to_string(dir.join("FEATURES")).unwrap(),
         current_text()
     );
 }
@@ -215,7 +219,7 @@ fn fmt2_a_log_with_frames_and_no_store_format_is_refused() {
         .unwrap();
         log.sync().unwrap();
     }
-    std::fs::write(dir.join("FORMAT"), current_text()).unwrap();
+    rdy_store::format::write_format_file(&dir, &baseline_features()).unwrap();
     let seg = std::fs::read(dir.join("segments/seg-000000.log")).unwrap();
     refused(&dir, "has a log with no store features", RE_CREATE);
     assert_eq!(
@@ -413,7 +417,7 @@ fn fmt3_a_directory_that_is_not_a_store_is_never_claimed() {
     assert!(tree(&empty).is_empty());
     drop(Store::create(&empty).unwrap());
     assert_eq!(
-        std::fs::read_to_string(empty.join("FORMAT")).unwrap(),
+        std::fs::read_to_string(empty.join("FEATURES")).unwrap(),
         current_text()
     );
     drop(Store::open(&empty).unwrap());
@@ -426,7 +430,7 @@ fn fmt3_init_on_a_fresh_path_makes_a_format_3_store_that_reopens() {
     drop(Rdy::init(&proj, "rdy-standard").unwrap());
     let store = proj.join(".rdy/store");
     assert_eq!(
-        std::fs::read_to_string(store.join("FORMAT")).unwrap(),
+        std::fs::read_to_string(store.join("FEATURES")).unwrap(),
         current_text()
     );
     let r = Rdy::open(&proj).unwrap();

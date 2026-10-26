@@ -10,7 +10,7 @@ use rdy_engine::{
 use rdy_model::signature::Signature;
 use rdy_model::{Hash, Provenance, Role, Tag};
 use rdy_store::format::{
-    FORMAT_FILE, FeatureClass, StoreFeature, StoreFeatures, TEST_FEATURE, baseline_features,
+    FEATURES_FILE, FeatureClass, StoreFeature, StoreFeatures, TEST_FEATURE, baseline_features,
     inject_test_feature,
 };
 use rdy_store::holder::StoreMode;
@@ -118,7 +118,7 @@ fn store_dir(root: &Path) -> PathBuf {
 }
 
 fn format_text(root: &Path) -> String {
-    std::fs::read_to_string(store_dir(root).join(FORMAT_FILE)).unwrap()
+    std::fs::read_to_string(store_dir(root).join(FEATURES_FILE)).unwrap()
 }
 
 /// The `meta/upgrade` frames in the store's raw segments: one per upgrade batch.

@@ -10,7 +10,7 @@ use rdy_adapter::{Hash, RdyError, RepoId, StoreHandle, StoreMode};
 use rdy_engine::{Rdy, Session, SessionKind, WriteRequest, stream_export};
 use rdy_model::Role;
 use rdy_store::format::{
-    FORMAT_FILE, FeatureClass, StoreAccess, StoreFeature, StoreFeatures, TEST_FEATURE,
+    FEATURES_FILE, FeatureClass, StoreAccess, StoreFeature, StoreFeatures, TEST_FEATURE,
     baseline_features, inject_test_feature, read_format_file,
 };
 use rdy_store::upgrade::{self, Phase};
@@ -235,7 +235,7 @@ fn backups(root: &Path) -> Vec<String> {
 }
 
 fn format_text(root: &Path) -> String {
-    std::fs::read_to_string(store_dir(root).join(FORMAT_FILE)).unwrap()
+    std::fs::read_to_string(store_dir(root).join(FEATURES_FILE)).unwrap()
 }
 
 /// The stored frame (raw kind and payload) of each key, read from the closed store at `root`.

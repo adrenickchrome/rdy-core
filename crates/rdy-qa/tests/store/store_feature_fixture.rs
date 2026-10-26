@@ -6,7 +6,8 @@
 //! it. The wire fixtures of the dump and sync formats stay as they are; this one covers the
 //! native segment open that no dump can test.
 //!
-//! - `FORMAT`, `lock` and every file of `segments/` are the store files, byte for byte. The
+//! - `FEATURES`, `FORMAT`, `lock` and every file of `segments/` are the store files, byte for
+//!   byte. The
 //!   builder rolls its source log every 4096 bytes and the released chain it extends keeps its
 //!   own segment places (a payload names its places), so the log is many sealed segments
 //!   (`seg-000000.log` to the last one), all far below the 64 MiB roll threshold.
@@ -15,7 +16,7 @@
 //!   Release 1 ships and changes once, before publication; after that every file is immutable.
 //!
 //! Write the fixture once: never rewrite it, and never regenerate it to fix a later reader. The
-//! tests copy the three store files into a fresh project and never open the checked-in files.
+//! tests copy the store files into a fresh project and never open the checked-in files.
 use rdy_engine::{Rdy, Scope, read_only_feature_for_tests};
 use rdy_model::Hash;
 use rdy_qa::chain_fixture;
@@ -29,7 +30,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// The blake3 of the inventory text (`inventory_text`): one line `<path> <len> <blake3>` for the
-/// store file `FORMAT`, `lock` and each segment, in path order. Set when the fixture was written.
+/// store files `FEATURES`, `FORMAT`, `lock` and each segment, in path order. Set when the fixture was written.
 /// A change here needs a founder decision, and after Release 1 it is never allowed.
 const INVENTORY_BLAKE3: &str = "25c27a2d56c339769c61e1f32f05b09ac039bbcae5c6378f070fd6b154e573ee";
 
@@ -132,7 +133,7 @@ fn tree(dir: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
     out
 }
 
-/// A fresh temporary project whose `.rdy/store/` holds copies of the three store files in
+/// A fresh temporary project whose `.rdy/store/` holds copies of the store files in
 /// `from`, with the QA pack the builders use. No index exists.
 fn project_copy(from: &Path) -> (tempfile::TempDir, PathBuf) {
     let base = tempfile::tempdir().unwrap();
@@ -259,14 +260,14 @@ fn ok13_write_native_feature_fixture_once() {
         out.sync_all().unwrap();
         copied.push(f);
     }
-    assert!(copied.iter().any(|f| f == "FORMAT") && copied.iter().any(|f| f == "lock"));
-    for f in &copied {
+    assert_eq!(copied[..3], ["FEATURES", "FORMAT", "lock"]);
+    for f in &copied[3..] {
         assert!(
-            f == "FORMAT" || f == "lock" || (f.starts_with("segments/seg-") && f.ends_with(".log")),
+            f.starts_with("segments/seg-") && f.ends_with(".log"),
             "{f}: a store file"
         );
     }
-    let segments = copied.len() - 2;
+    let segments = copied.len() - 3;
     eprintln!("segments {segments}");
     // the facts are read from a copy of the files just written, as the readers read them
     let (_base, root) = project_copy(&dir);
@@ -394,10 +395,9 @@ fn ok13_fixture_copy_never_changes_source() {
     );
     // the directory holds the store files and expect.json and nothing else: no derived index
     let store = store_files(&dir);
-    assert_eq!(store.len(), SEGMENT_COUNT + 2);
-    assert_eq!(store[0], "FORMAT");
-    assert_eq!(store[1], "lock");
-    for (i, f) in store[2..].iter().enumerate() {
+    assert_eq!(store.len(), SEGMENT_COUNT + 3);
+    assert_eq!(store[..3], ["FEATURES", "FORMAT", "lock"]);
+    for (i, f) in store[3..].iter().enumerate() {
         assert_eq!(f, &format!("segments/seg-{i:06}.log"), "no gap");
     }
     let mut all = store.clone();
@@ -415,11 +415,11 @@ fn ok13_store_fixture_publication_marker_is_explicit() {
         commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit()),
         "{commit}"
     );
-    // the inventory entries are exact: FORMAT, every segment and the lock
+    // the inventory entries are exact: FEATURES, FORMAT, every segment and the lock
     let items = want["inventory"].as_array().unwrap();
     let files = store_files(&fixture_dir());
     assert_eq!(items.len(), files.len());
-    assert_eq!(items.len(), SEGMENT_COUNT + 2);
+    assert_eq!(items.len(), SEGMENT_COUNT + 3);
     for (item, f) in items.iter().zip(&files) {
         let (len, blake3) = digest_of(&fixture_dir().join(f));
         assert_eq!(
@@ -461,5 +461,46 @@ fn ok13_store_fixture_publication_marker_is_explicit() {
     }
     for bad in [".local\"", ".lan\"", ".internal\"", "localhost"] {
         assert!(!lower.contains(bad), "the expect file names a host: {bad}");
+    }
+}
+
+/// Final ruling 3 (round 2), end to end: a released rdy (`RDY_RELEASED_RDY`, the path of its
+/// binary; rdy 0.24.0 when this pin was added) opening an M3a store, the feature-1 fixture's and
+/// a new one, says a newer rdy wrote it, never that FORMAT is unreadable, and changes no byte.
+/// It needs a released binary, so the gate skips it; run it by hand: `RDY_RELEASED_RDY=<path>
+/// cargo test -p rdy-qa --release --test store ok13_a_released_rdy -- --ignored`.
+#[test]
+#[ignore = "needs RDY_RELEASED_RDY, the path of a released rdy binary"]
+fn ok13_a_released_rdy_reads_an_m3a_store_as_newer() {
+    let bin = std::env::var_os("RDY_RELEASED_RDY").expect("RDY_RELEASED_RDY names a released rdy");
+    let version = std::process::Command::new(&bin)
+        .arg("--version")
+        .output()
+        .unwrap();
+    eprintln!(
+        "released rdy: {}",
+        String::from_utf8_lossy(&version.stdout).trim()
+    );
+    let (_fixture, copied) = project_copy(&fixture_dir());
+    let fresh = tempfile::tempdir().unwrap();
+    drop(Rdy::init(fresh.path(), "rdy-standard").unwrap());
+    for root in [copied.as_path(), fresh.path()] {
+        let before = tree(&root.join(".rdy"));
+        let out = std::process::Command::new(&bin)
+            .args(["status", "--no-daemon"])
+            .current_dir(root)
+            .env("NO_COLOR", "1")
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        eprintln!("{}: {text}", root.display());
+        assert!(!out.status.success(), "{text}");
+        assert!(text.contains("a newer rdy wrote this store"), "{text}");
+        assert!(!text.contains("unreadable"), "{text}");
+        assert_eq!(tree(&root.join(".rdy")), before, "no byte changed");
     }
 }

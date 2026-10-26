@@ -120,7 +120,7 @@ fn sg6_a_store_of_the_next_format_is_refused_and_untouched() {
     )])
     .unwrap();
     drop(s);
-    std::fs::write(project.join(".rdy/store/FORMAT"), next.to_text()).unwrap();
+    std::fs::write(project.join(".rdy/store/FEATURES"), next.to_text()).unwrap();
     let before = tree(&project);
     let e = Rdy::open(&project)
         .err()

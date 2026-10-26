@@ -75,8 +75,8 @@ fn dl4_an_ingested_log_is_the_source_log_byte_for_byte() {
     ingest(&to, &batches(&s)).unwrap();
     assert_eq!(segments(&to), segments(&base.path().join("src")));
     assert_eq!(
-        std::fs::read(to.join("FORMAT")).unwrap(),
-        std::fs::read(base.path().join("src/FORMAT")).unwrap()
+        std::fs::read(to.join("FEATURES")).unwrap(),
+        std::fs::read(base.path().join("src/FEATURES")).unwrap()
     );
 }
 
@@ -245,7 +245,7 @@ fn dl8_a_log_of_an_older_store_format_gets_one_upgrade_batch() {
         "the source log is kept byte for byte"
     );
     assert_eq!(
-        std::fs::read(to.join("FORMAT")).unwrap(),
+        std::fs::read(to.join("FEATURES")).unwrap(),
         baseline_features().to_text().into_bytes()
     );
     let t = Store::open(&to).unwrap();

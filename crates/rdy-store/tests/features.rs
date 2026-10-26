@@ -5,7 +5,7 @@ use rdy_model::Hash;
 use rdy_store::bounded::RecordError;
 use rdy_store::codec::{self, ObjectBytes};
 use rdy_store::format::{
-    FORMAT_FILE, FeatureClass, REF_STORE_FEATURES, StoreAccess, StoreFeature, StoreFeatures,
+    FEATURES_FILE, FeatureClass, REF_STORE_FEATURES, StoreAccess, StoreFeature, StoreFeatures,
     TEST_FEATURE, baseline_features, check_features, inject_test_feature, registered_features,
 };
 use rdy_store::{Store, StoreError, kinds};
@@ -213,7 +213,7 @@ fn ok1_test_feature_first_use_and_ref_are_one_batch() {
     assert_eq!(s.last_batch()[1].1, h);
     assert_eq!(log_manifest(&s), with);
     assert_eq!(
-        std::fs::read_to_string(dir.join(FORMAT_FILE)).unwrap(),
+        std::fs::read_to_string(dir.join(FEATURES_FILE)).unwrap(),
         with.to_text(),
         "FORMAT mirrors the log"
     );
@@ -354,7 +354,7 @@ fn ok1_hostile_manifest_and_encoding_are_bounded() {
         "rdy store features 1\n{\"manifest_version\":1,\"features\":[],\"extra\":1}\n".into(),
         "rdy store features 1\n{\"manifest_version\":2,\"features\":[]}\n".into(),
     ] {
-        std::fs::write(dir.join(FORMAT_FILE), &text).unwrap();
+        std::fs::write(dir.join(FEATURES_FILE), &text).unwrap();
         let before = tree(&dir);
         let (message, fix) = format_error(Store::open(&dir).err().expect("refused"));
         assert!(
@@ -857,7 +857,7 @@ fn ok1_first_use_refuses_a_manifest_over_its_bounds() {
     assert_eq!(s.features(), &full);
     let end = s.log_end();
     let before = tree(&dir.join("segments"));
-    let mirror = std::fs::read(dir.join(FORMAT_FILE)).unwrap();
+    let mirror = std::fs::read(dir.join(FEATURES_FILE)).unwrap();
     let e = s.put_blob(b"first use").unwrap_err();
     assert_eq!(
         format_error(e),
@@ -869,7 +869,7 @@ fn ok1_first_use_refuses_a_manifest_over_its_bounds() {
     assert_eq!(s.log_end(), end, "nothing appended");
     assert_eq!(log_manifest(&s), full);
     assert_eq!(s.features(), &full);
-    assert_eq!(std::fs::read(dir.join(FORMAT_FILE)).unwrap(), mirror);
+    assert_eq!(std::fs::read(dir.join(FEATURES_FILE)).unwrap(), mirror);
     drop(s);
     assert_eq!(tree(&dir.join("segments")), before);
     Store::open(&dir).unwrap();
@@ -934,7 +934,7 @@ fn ok1_a_failed_first_use_needs_no_newer_build() {
         let base = tempfile::tempdir().unwrap();
         let dir = base.path().join("s");
         let mut s = Store::create(&dir).unwrap();
-        let mirror = std::fs::read_to_string(dir.join(FORMAT_FILE)).unwrap();
+        let mirror = std::fs::read_to_string(dir.join(FEATURES_FILE)).unwrap();
         assert_eq!(mirror, baseline_features().to_text());
         {
             let _known = inject_test_feature(class, kinds::BLOB_CHUNK);
@@ -944,7 +944,7 @@ fn ok1_a_failed_first_use_needs_no_newer_build() {
             assert_eq!(s.log_end(), end, "{class:?}: nothing appended");
             assert_eq!(log_manifest(&s), baseline_features());
             assert_eq!(
-                std::fs::read_to_string(dir.join(FORMAT_FILE)).unwrap(),
+                std::fs::read_to_string(dir.join(FEATURES_FILE)).unwrap(),
                 mirror,
                 "{class:?}: FORMAT is the log's again"
             );
@@ -956,12 +956,12 @@ fn ok1_a_failed_first_use_needs_no_newer_build() {
         drop(s);
         // the crash window: FORMAT published ahead of a first use whose batch never sealed
         let ahead = baseline_with(vec![feature(TEST_FEATURE, class, "99.0.0")]);
-        std::fs::write(dir.join(FORMAT_FILE), ahead.to_text()).unwrap();
+        std::fs::write(dir.join(FEATURES_FILE), ahead.to_text()).unwrap();
         let s = Store::open(&dir).unwrap();
         assert_eq!(log_manifest(&s), baseline_features(), "{class:?}");
         assert_eq!(s.features(), &baseline_features());
         assert_eq!(
-            std::fs::read_to_string(dir.join(FORMAT_FILE)).unwrap(),
+            std::fs::read_to_string(dir.join(FEATURES_FILE)).unwrap(),
             mirror,
             "{class:?}: the open puts FORMAT back to the log's"
         );
@@ -1016,7 +1016,7 @@ fn ok1_a_first_use_that_cannot_roll_back_keeps_format() {
         FeatureClass::Compatible,
         "99.0.0",
     )]);
-    let format_text = |dir: &Path| std::fs::read_to_string(dir.join(FORMAT_FILE)).unwrap();
+    let format_text = |dir: &Path| std::fs::read_to_string(dir.join(FEATURES_FILE)).unwrap();
     for held in [false, true] {
         let base = tempfile::tempdir().unwrap();
         let dir = base.path().join("s");

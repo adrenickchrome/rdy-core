@@ -4790,7 +4790,7 @@ mod tests {
         assert_eq!(last, Some(marker), "the batch's marker hash");
         s.reader().check_meta().unwrap();
         drop((s, lock));
-        let old = std::fs::read(dir.join(crate::format::FORMAT_FILE)).unwrap();
+        let old = std::fs::read(dir.join(crate::format::FEATURES_FILE)).unwrap();
         // FORMAT still mirrors the old manifest: the mirror is the upgrade's to publish. The
         // upgrade's own open accepts the store, as the receipt explains the difference, and
         // leaves FORMAT as it is.
@@ -4798,7 +4798,7 @@ mod tests {
         assert_eq!(s.features(), &to);
         drop(s);
         assert_eq!(
-            std::fs::read(dir.join(crate::format::FORMAT_FILE)).unwrap(),
+            std::fs::read(dir.join(crate::format::FEATURES_FILE)).unwrap(),
             old
         );
     }

@@ -19,7 +19,7 @@ use rdy_model::{Hash, Provenance, RepoId, Role, Tag};
 use rdy_qa::daemon::{Served, exited, short_tempdir};
 use rdy_qa::fixtures::rdy_bin;
 use rdy_store::format::{
-    FORMAT_FILE, StoreFeature, StoreFeatures, baseline_features, registered_features,
+    FEATURES_FILE, StoreFeature, StoreFeatures, baseline_features, registered_features,
 };
 use rdy_store::upgrade::{self, UpgradeStep};
 use rdy_store::{OpenPolicy, Store};
@@ -71,7 +71,7 @@ fn store_dir(root: &Path) -> PathBuf {
 }
 
 fn format_text(root: &Path) -> String {
-    std::fs::read_to_string(store_dir(root).join(FORMAT_FILE)).unwrap()
+    std::fs::read_to_string(store_dir(root).join(FEATURES_FILE)).unwrap()
 }
 
 /// The `meta/upgrade` frames in the store's raw segments: one per upgrade batch.

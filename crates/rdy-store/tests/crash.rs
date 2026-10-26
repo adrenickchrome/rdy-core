@@ -476,7 +476,7 @@ fn kill1_marker_shaped_bytes_in_a_torn_tail_are_quarantined_not_refused() {
 fn kill1_create_writes_format_before_anything_else() {
     let what = "a store holding only FORMAT";
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("FORMAT"), baseline_features().to_text()).unwrap();
+    rdy_store::format::write_format_file(dir.path(), &baseline_features()).unwrap();
     finished_format(dir.path(), &[], what);
 
     let torn = tempfile::tempdir().unwrap();
@@ -500,7 +500,7 @@ fn kill1_create_writes_format_before_anything_else() {
 fn empty_store(dir: &Path) {
     std::fs::create_dir_all(dir.join("segments")).unwrap();
     drop(rdy_store::index::Index::open(&dir.join("index.redb")).unwrap());
-    std::fs::write(dir.join("FORMAT"), baseline_features().to_text()).unwrap();
+    rdy_store::format::write_format_file(dir, &baseline_features()).unwrap();
 }
 
 /// Opens a store directory the way a crash left it and checks the open finished the format batch:
@@ -519,7 +519,7 @@ fn finished_format(dir: &Path, blobs: &[Vec<u8>], what: &str) {
     );
     // the feature manifest (D-WWAK7), in place of a format number
     assert_eq!(
-        std::fs::read_to_string(dir.join("FORMAT")).unwrap(),
+        std::fs::read_to_string(dir.join("FEATURES")).unwrap(),
         baseline_features().to_text(),
         "{what}"
     );

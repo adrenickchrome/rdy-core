@@ -558,7 +558,7 @@ fn ok9_pending_upgrade_refuses_a_read_only_open() {
         assert_eq!(plan.steps, ["add_zz"]);
         upgrade::apply_locked_with_registry_for_tests(&f.dir, &lock, &plan, &registry).unwrap();
     }
-    let format_before = std::fs::read(f.dir.join("FORMAT")).unwrap();
+    let format_before = std::fs::read(f.dir.join("FEATURES")).unwrap();
     let parent = f.dir.parent().unwrap().to_path_buf();
     let before = tree(&parent);
     for policy in [OpenPolicy::AutoUpgrade, OpenPolicy::RequireCurrent] {
@@ -578,7 +578,10 @@ fn ok9_pending_upgrade_refuses_a_read_only_open() {
         }
         assert_eq!(tree(&parent), before, "{policy:?}: no source byte changed");
     }
-    assert_eq!(std::fs::read(f.dir.join("FORMAT")).unwrap(), format_before);
+    assert_eq!(
+        std::fs::read(f.dir.join("FEATURES")).unwrap(),
+        format_before
+    );
 }
 
 /// A newer rdy sealed an upgrade that adds a read-only feature this rdy does not know, on a

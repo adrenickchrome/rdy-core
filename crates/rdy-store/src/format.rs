@@ -1,7 +1,13 @@
 //! The store's format (D-WWAK7): a feature manifest, not a format number. The manifest lists the
 //! features a store uses, each with its class and the first rdy that knows it. The authoritative
-//! copy is the log's ref `meta/store_features` (the manifest's canonical JSON); the `FORMAT` file
-//! mirrors it, so an open can refuse a store before it opens the index or the log.
+//! copy is the log's ref `meta/store_features` (the manifest's canonical JSON); the `FEATURES`
+//! file mirrors it, so an open can refuse a store before it opens the index or the log.
+//!
+//! `FORMAT` holds exactly two lines, `rdy store format` and `store_format 19`, so every released
+//! rdy reads a feature store as one a newer rdy wrote. The manifest is in `FEATURES` beside it:
+//! the line `rdy store features 1`, then the compact JSON. rdy writes `FEATURES` before `FORMAT`,
+//! each by rename; a `FORMAT` at 19 with no `FEATURES` is the invalid-manifest refusal. "The
+//! store's `FORMAT`" below means the two files together.
 //!
 //! An rdy that knows every feature of a manifest reads and writes the store. For a feature it
 //! does not know, the class decides: `compatible` permits writes, `read_only_compatible` permits
@@ -28,8 +34,13 @@ pub const LAST_SCALAR_STORE_FORMAT: u32 = 18;
 /// dump format 2 carries 13 to 15, dump format 3 carries 16 to 18. A store of this format or a
 /// later scalar one moves to a feature store with dump and load; an earlier one cannot.
 pub const FIRST_DUMP_STORE_FORMAT: u32 = 10;
-/// The mirror file in the store directory.
+/// The store format file in the store directory: two scalar lines.
 pub const FORMAT_FILE: &str = "FORMAT";
+/// The manifest's mirror file, beside `FORMAT`.
+pub const FEATURES_FILE: &str = "FEATURES";
+/// The scalar store format a feature store's `FORMAT` holds: one past the last scalar format, so
+/// an rdy of a scalar format reads the store as one a newer rdy wrote.
+pub const FEATURE_STORE_FORMAT: u32 = 19;
 /// The historical log ref of a scalar store format, in ASCII decimal. A load keeps the ones its
 /// dump holds as they are; no rdy writes one now.
 pub const REF_STORE_FORMAT: &str = "meta/store_format";
@@ -38,7 +49,7 @@ pub const REF_STORE_FEATURES: &str = "meta/store_features";
 /// The log ref of the last store upgrade's receipt ([`UpgradeReceipt`]). Only the internal
 /// upgrade transaction writes it.
 pub const REF_UPGRADE: &str = "meta/upgrade";
-/// The grammar of the `FORMAT` file and of the manifest.
+/// The grammar of the `FEATURES` file and of the manifest.
 pub const MANIFEST_VERSION: u32 = 1;
 /// The most bytes of one manifest's JSON.
 pub const MAX_MANIFEST_BYTES: usize = 65_536;
@@ -94,10 +105,17 @@ pub const TEST_FEATURE: &str = "test_feature";
 /// The required version of the injected test feature.
 pub const TEST_FEATURE_RDY: &str = "99.0.0";
 
-/// The first line of the `FORMAT` file.
+/// The first line of the `FEATURES` file.
 const FEATURES_LINE: &str = "rdy store features 1";
-/// The first line of a scalar `FORMAT` file (store formats up to 18).
+/// The first line of the `FEATURES` file, before its grammar number.
+const FEATURES_WORDS: &str = "rdy store features ";
+/// The first line of the `FORMAT` file, of every store format.
 const SCALAR_LINE: &str = "rdy store format";
+
+/// The text of a feature store's `FORMAT` file: `rdy store format`, then `store_format 19`.
+pub fn format_file_text() -> String {
+    format!("{SCALAR_LINE}\nstore_format {FEATURE_STORE_FORMAT}\n")
+}
 
 /// How an rdy that does not know a feature treats a store that uses it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -235,8 +253,8 @@ impl StoreFeatures {
         Hash::of(&self.to_json())
     }
 
-    /// The `FORMAT` text of this manifest: `rdy store features 1`, then the canonical JSON, each
-    /// on its own line.
+    /// The `FEATURES` text of this manifest: `rdy store features 1`, then the canonical JSON,
+    /// each on its own line.
     pub fn to_text(&self) -> String {
         format!(
             "{FEATURES_LINE}\n{}\n",
@@ -1190,12 +1208,14 @@ pub(crate) fn unmirrored(store_dir: &Path) -> StoreError {
     )
 }
 
-/// The most bytes of a `FORMAT` file: its first line and a manifest of the largest size.
+/// The most bytes of a `FEATURES` file: its first line and a manifest of the largest size. A
+/// `FORMAT` file has the same bound.
 const MAX_FORMAT_FILE_BYTES: u64 = (FEATURES_LINE.len() + 1 + MAX_MANIFEST_BYTES + 1) as u64;
 
-/// Parses `FORMAT` text. Err is the refusal (a scalar store, an invalid manifest, or text that
-/// is no `FORMAT` file); `path` and `store_dir` name the file and its store in the texts.
-fn parse_text(text: &str, path: &Path, store_dir: &Path) -> Result<StoreFeatures, StoreError> {
+/// Parses `FORMAT` text: Ok for a feature store (`store_format 19`). Err is the refusal (a
+/// scalar store, or text that is no `FORMAT` file); `path` and `store_dir` name the file and its
+/// store in the texts.
+fn parse_format(text: &str, path: &Path, store_dir: &Path) -> Result<(), StoreError> {
     let unreadable = |reason: &str| StoreError::Format {
         message: format!(
             "the store's FORMAT file at {} is unreadable: {reason}",
@@ -1204,43 +1224,68 @@ fn parse_text(text: &str, path: &Path, store_dir: &Path) -> Result<StoreFeatures
         fix: "restore FORMAT from backup, or re-create it with this rdy".into(),
     };
     let (first, rest) = text.split_once('\n').unwrap_or((text, ""));
-    if first == SCALAR_LINE {
-        let mut store_format = None;
-        for line in rest.lines() {
-            let number = line
-                .split_once(' ')
-                .and_then(|(key, n)| decode_u32(n.as_bytes()).map(|n| (key, n)));
-            match number {
-                Some(("store_format", n)) => store_format = Some(n),
-                Some(_) => {}
-                None => {
-                    return Err(unreadable(&format!(
-                        "bad line {line:?}: expected `<key> <number>`"
-                    )));
-                }
-            }
-        }
-        return Err(match store_format {
-            Some(n) => scalar_refusal(store_dir, n),
-            None => other_build(store_dir, "has a FORMAT file with no store_format line"),
-        });
-    }
-    if first != FEATURES_LINE {
+    if first != SCALAR_LINE {
         return Err(unreadable(&format!(
-            "the first line is not {FEATURES_LINE:?}"
+            "the first line is not {SCALAR_LINE:?}"
         )));
     }
+    let mut store_format = None;
+    for line in rest.lines() {
+        let number = line
+            .split_once(' ')
+            .and_then(|(key, n)| decode_u32(n.as_bytes()).map(|n| (key, n)));
+        match number {
+            Some(("store_format", n)) => store_format = Some(n),
+            Some(_) => {}
+            None => {
+                return Err(unreadable(&format!(
+                    "bad line {line:?}: expected `<key> <number>`"
+                )));
+            }
+        }
+    }
+    match store_format {
+        Some(FEATURE_STORE_FORMAT) => Ok(()),
+        Some(n) => Err(scalar_refusal(store_dir, n)),
+        None => Err(other_build(
+            store_dir,
+            "has a FORMAT file with no store_format line",
+        )),
+    }
+}
+
+/// Parses `FEATURES` text (None: the file is missing). Every fault is the invalid-manifest
+/// refusal: a missing file, a first line that is not `rdy store features 1` (`unsupported
+/// manifest version` for another grammar number), or JSON that is not one valid manifest line.
+fn parse_features(text: Option<&str>) -> Result<StoreFeatures, StoreError> {
+    let invalid = |reason: &str| ManifestError::of(reason).store_error();
+    let Some(text) = text else {
+        return Err(invalid(INVALID_JSON));
+    };
+    let (first, rest) = text.split_once('\n').unwrap_or((text, ""));
+    if first != FEATURES_LINE {
+        return Err(
+            match first.strip_prefix(FEATURES_WORDS).map(str::as_bytes) {
+                Some(n) if decode_u32(n).is_some() => invalid("unsupported manifest version"),
+                _ => invalid(INVALID_JSON),
+            },
+        );
+    }
     let Some(json) = rest.strip_suffix('\n').filter(|j| !j.contains('\n')) else {
-        return Err(ManifestError::of(INVALID_JSON).store_error());
+        return Err(invalid(INVALID_JSON));
     };
     StoreFeatures::parse(json.as_bytes()).map_err(|e| e.store_error())
 }
 
-/// Reads `<store_dir>/FORMAT`: None if the file does not exist. A scalar store's file, and a
-/// file that is not a valid manifest, are refused; a file longer than a manifest can make it is
-/// refused before it is read.
-pub fn read_format_file(store_dir: &Path) -> Result<Option<StoreFeatures>, StoreError> {
-    let path = store_dir.join(FORMAT_FILE);
+/// The text of `<store_dir>/<name>`: None if the file does not exist. A file longer than a
+/// manifest can make is refused before it is read; `utf8` is the refusal of bytes that are not
+/// UTF-8.
+fn read_bounded(
+    store_dir: &Path,
+    name: &str,
+    utf8: impl FnOnce(&Path) -> StoreError,
+) -> Result<Option<String>, StoreError> {
+    let path = store_dir.join(name);
     let too_long = || ManifestError::of("manifest exceeds 65536 bytes").store_error();
     let len = match std::fs::metadata(&path) {
         Ok(m) => m.len(),
@@ -1250,23 +1295,49 @@ pub fn read_format_file(store_dir: &Path) -> Result<Option<StoreFeatures>, Store
     if len > MAX_FORMAT_FILE_BYTES {
         return Err(too_long());
     }
-    let bytes = std::fs::read(&path)?;
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
     if bytes.len() as u64 > MAX_FORMAT_FILE_BYTES {
         return Err(too_long());
     }
-    let text = String::from_utf8(bytes).map_err(|_| StoreError::Format {
+    String::from_utf8(bytes).map(Some).map_err(|_| utf8(&path))
+}
+
+/// Reads the store's features from `<store_dir>/FORMAT` and `<store_dir>/FEATURES`: None if
+/// `FORMAT` does not exist. A scalar store's `FORMAT`, a `FORMAT` that is no `FORMAT` file, and a
+/// `FEATURES` that is missing or not a valid manifest are refused; a file longer than a manifest
+/// can make is refused before it is read.
+pub fn read_format_file(store_dir: &Path) -> Result<Option<StoreFeatures>, StoreError> {
+    let Some(text) = read_bounded(store_dir, FORMAT_FILE, |path| StoreError::Format {
         message: format!(
             "the store's FORMAT file at {} is unreadable: it is not UTF-8 text",
             path.display()
         ),
         fix: "restore FORMAT from backup, or re-create it with this rdy".into(),
+    })?
+    else {
+        return Ok(None);
+    };
+    parse_format(&text, &store_dir.join(FORMAT_FILE), store_dir)?;
+    let features = read_bounded(store_dir, FEATURES_FILE, |_| {
+        ManifestError::of(INVALID_JSON).store_error()
     })?;
-    parse_text(&text, &path, store_dir).map(Some)
+    parse_features(features.as_deref()).map(Some)
 }
 
-/// Writes `<store_dir>/FORMAT` durably, as the mirror of `features`.
+/// Writes the store's features durably: `<store_dir>/FEATURES` as the mirror of `features`,
+/// then `<store_dir>/FORMAT`, each by rename. So a crash between the two leaves the new manifest
+/// beside a `FORMAT` of the same bytes (a feature store's `FORMAT` never changes), or, for a new
+/// store, no `FORMAT` (no open accepts it).
 pub fn write_format_file(store_dir: &Path, features: &StoreFeatures) -> Result<(), StoreError> {
-    fsutil::write_durable(&store_dir.join(FORMAT_FILE), features.to_text().as_bytes())?;
+    fsutil::write_durable(
+        &store_dir.join(FEATURES_FILE),
+        features.to_text().as_bytes(),
+    )?;
+    fsutil::write_durable(&store_dir.join(FORMAT_FILE), format_file_text().as_bytes())?;
     Ok(())
 }
 
