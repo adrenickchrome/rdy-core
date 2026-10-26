@@ -2056,7 +2056,7 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
         "rdy_write",
         "rdy_write",
         json!({"view": "side", "ops": [{"op": "update", "id": c, "body": "C stands, in a new way."}]}),
-        &[c.clone()],
+        std::slice::from_ref(&c),
         "side",
     );
     let created = ok_of(&mcp_probe(
@@ -3506,7 +3506,7 @@ fn ok14_probes_account_for_every_command() {
             "`{path}` is listed but is not a command"
         );
         assert!(
-            !probed.iter().any(|l| *l == path),
+            !probed.contains(&path),
             "`{path}` is probed and listed as not probed"
         );
     }
