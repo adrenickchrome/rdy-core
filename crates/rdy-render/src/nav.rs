@@ -737,13 +737,18 @@ mod site_tests {
                     "{page}: a path folder lost its list"
                 );
             }
-            // another top-level group has a closed folder that shows as a plain page link
+            // another top-level group has a closed folder that the cap cut: a plain link to its folder page
             const LINK: &str = "<li class=\"nav-item\"><a href=\"";
             let plain = groups(nav)
                 .into_iter()
                 .filter(|g| !g.contains("aria-current=\"page\""))
                 .flat_map(|g| g.split(LINK).skip(1))
-                .any(|rest| rest.split('"').next().is_some_and(|h| h.contains("part-")));
+                .any(|rest| {
+                    // a cut folder links to its folder page; a doc link ends in `doc-N.html`
+                    rest.split('"')
+                        .next()
+                        .is_some_and(|h| h.contains("part-") && h.ends_with("/index.html"))
+                });
             assert!(
                 plain,
                 "{page}: no closed folder of another group is a page link"
