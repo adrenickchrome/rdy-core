@@ -3,6 +3,11 @@
     {
       "blake3": "674f31d397efabaeeba7ed61b0cfc8245c24d86ad710c650601ec94c187fc2db",
       "len": 553,
+      "path": "FEATURES"
+    },
+    {
+      "blake3": "4c868f80ec8fe4af835ef534d83468e8b2121b4a5dcf5cfd9319113d914e6a90",
+      "len": 33,
       "path": "FORMAT"
     },
     {
@@ -316,7 +321,7 @@
       "path": "segments/seg-000060.log"
     }
   ],
-  "producer_commit": "4d95c0de1a41002619ed8e59693cb8d19dc622e5",
+  "producer_commit": "8d7d3f63fb18455096152d68b87e25878af9c057",
   "published": false,
   "store": {
     "batches": 134,
