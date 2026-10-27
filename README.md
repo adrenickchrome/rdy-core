@@ -17,7 +17,20 @@ This is a **preview**: things will change before Release 1. See "About this prev
 - **A live docs site.** `rdy site` gives you a local site that refreshes as changes land.
 - **Local and private.** Everything runs on your machine: no account, no hosted service, no model inside rdy.
 
-## Install (about a minute)
+## Install
+
+Quick to install, low friction to start: one command, no account, no sudo.
+
+On macOS (Apple Silicon) or Linux (x86_64):
+
+```sh
+curl -fsSL https://getrdy.dev/install.sh | sh
+```
+
+The installer verifies SHA-256, installs to `~/.local/bin`, and asks before changing your shell profile. [Read the script](https://getrdy.dev/install.sh). Open a new terminal afterward, or run the PATH command it prints.
+
+<details>
+<summary>Manual archive installation</summary>
 
 **macOS (Apple silicon):**
 
@@ -47,6 +60,8 @@ On macOS, if you downloaded the archive in a browser instead of with curl, macOS
 
 To check the signature of the download first, see "Verify the download" at the bottom. You do not need it to use rdy.
 
+</details>
+
 ## Try it: your first project
 
 1. **Make a project.**
@@ -58,20 +73,20 @@ To check the signature of the download first, see "Verify the download" at the b
 2. **Connect your agent.** For Claude Code:
 
    ```sh
-   claude mcp add rdy -- rdy mcp --project ~/my-project
+   claude mcp add rdy -e RDY_ACTOR=agent:local/claude -- rdy mcp --project "$PWD"
    ```
 
    For another MCP client, add this server to its config (write the full path; most clients do not expand `~`):
 
    ```json
-   { "mcpServers": { "rdy": { "command": "rdy", "args": ["mcp", "--project", "/home/you/my-project"] } } }
+   { "mcpServers": { "rdy": { "command": "rdy", "args": ["mcp", "--project", "/home/you/my-project"], "env": { "RDY_ACTOR": "agent:local/client" } } } }
    ```
 
 3. **Give your agent the guide.** Download `AGENTS.md` (or `CLAUDE.md`, the same text) from the [release page](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.20.0) into the project folder. It tells the agent how to work with rdy. The `AGENTS.md` in this repository is a different file, for people who work on rdy itself.
 
 4. **Ask your agent for something real.** For example:
 
-   > Start an rdy session as a writer. Create a doc "Payments" with a requirement "Refunds settle within 5 business days" and a decision explaining why. Then propose it.
+   > Start an rdy session in your own view, then read its overview. Help me design Tally, a shopping-list app with no accounts. Create Sharing and Onboarding docs and link them to the decision. Propose the first design for my approval.
 
 5. **Review and approve it yourself.**
 
@@ -87,7 +102,7 @@ To check the signature of the download first, see "Verify the download" at the b
    rdy site
    ```
 
-   Open the link. Now ask your agent to change the decision, and watch rdy flag what the change affects before you approve it.
+   Open the link. Now ask your agent: “Add guest mode. Anyone with the link can see the list and tick items, not edit them.” The agent briefs on Sharing, writes in its own view, handles the consequences for Onboarding, and brings you the proposal to approve. This is the same Tally example illustrated at [getrdy.dev](https://getrdy.dev/#demo).
 
 ## Quick start
 
