@@ -71,10 +71,7 @@ fn starts_ci<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
 /// is `---`, everything through the next line whose trimmed text is `---`. Then the header: the
 /// first line that is not blank or a `%%` comment, which `header` must accept, else the parser
 /// stops and there are no lines.
-fn after_header<'a>(
-    src: &'a str,
-    header: impl Fn(&str) -> bool,
-) -> Option<impl Iterator<Item = &'a str>> {
+fn after_header(src: &str, header: impl Fn(&str) -> bool) -> Option<impl Iterator<Item = &str>> {
     let mut lines = src.lines().peekable();
     if lines.peek().is_some_and(|l| l.trim() == "---") {
         lines.next();
