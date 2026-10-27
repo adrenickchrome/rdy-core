@@ -11,7 +11,10 @@
 //! pinned line parsers' rules. Two flowchart shapes inside those bounds would hold the pinned
 //! crate for minutes or hours, so they are refused too: a subgraph that no `end` closes (the
 //! grammar reads its body again, and nested ones multiply), and an arrow over 256 bytes (its run
-//! and its label; it spans one rank per dot or dash).
+//! and its label; it spans one rank per dot or dash). The last refusal is the arrows' cost
+//! (D-VACA9): each arrow the source expands to costs its rank span, times a weight when it has a
+//! label, and a source whose arrows cost over [`MAX_ARROWS`] is not drawn. The flowchart walk
+//! gives the flowchart's cost, and a line recognizer (see `arrows`) the other families'.
 //!
 //! The pinned crate draws from the drawing input, a copy of the source with three rewrites:
 //! CRLF becomes LF; in a flowchart, each blank line that directly follows a subgraph header goes
@@ -30,6 +33,7 @@
 use mmdflux::{OutputFormat, RenderConfig, SvgThemeConfig, SvgThemeMode};
 use std::borrow::Cow;
 
+mod arrows;
 mod flowchart;
 
 /// The most bytes a source may have.
@@ -42,6 +46,12 @@ pub const MAX_DEPTH: usize = 32;
 pub const MAX_SVG_BYTES: usize = 4194304;
 /// The most bytes one flowchart arrow may have: its run (dots, dashes or equals) and its label.
 pub const MAX_ARROW_BYTES: usize = 256;
+/// The most arrows a drawn source may cost in total (D-VACA9, D-R7C3W; founder ruling TASK-795).
+/// Each arrow the source expands to costs its rank span (the pinned crate's `minlen`), times
+/// [`LABELLED_ARROW_WEIGHT`] when it has a label.
+pub const MAX_ARROWS: usize = 200;
+/// What a labelled arrow's rank span is multiplied by in the arrow cost (D-VACA9).
+pub const LABELLED_ARROW_WEIGHT: usize = 1;
 /// The pinned drawing crate and its version, as the diagram cache keys a drawing (D-XM8MP).
 pub const DRAWING_CRATE: &str = "mmdflux 2.6.1";
 
@@ -51,6 +61,8 @@ const OVER_DEPTH: &str = "the source nests subgraphs or blocks over 32 deep";
 const OVER_SVG: &str = "the drawn diagram is over 4194304 bytes";
 const UNCLOSED: &str = "a subgraph is not closed with end";
 const OVER_ARROW: &str = "the source has an arrow over 256 bytes";
+/// Every arrow cost saturates here, so no count or product grows past what the bound reads.
+const ARROW_CAP: usize = MAX_ARROWS + 1;
 /// The reason when the pinned crate panics on a source.
 const LIBRARY_FAILED: &str = "the drawing library failed on this source";
 /// The pinned crate's text when it detects no diagram type.
@@ -134,6 +146,19 @@ enum Family {
     Unknown,
 }
 
+impl Family {
+    /// The family of the pinned crate's detected diagram type.
+    fn of(detected: Option<&str>) -> Family {
+        match detected {
+            Some("flowchart") => Family::Flowchart,
+            Some("class") => Family::Class,
+            Some("state") => Family::State,
+            Some("sequence") => Family::Sequence,
+            _ => Family::Unknown,
+        }
+    }
+}
+
 /// Draws `source`, a diagram's resolved plain source, as SVG: its pre-draw refusals
 /// ([`admit`]), then its drawing ([`Admitted::draw`]).
 pub fn render(source: &str) -> Diagram {
@@ -180,13 +205,7 @@ pub fn admit(source: &str) -> Result<Admitted<'_>, Diagram> {
             header: header.to_string(),
         });
     }
-    let family = match detected {
-        Some("flowchart") => Family::Flowchart,
-        Some("class") => Family::Class,
-        Some("state") => Family::State,
-        Some("sequence") => Family::Sequence,
-        _ => Family::Unknown,
-    };
+    let family = Family::of(detected);
     let undetected = detected.is_none();
     // the drawing input: the bounds and the pinned crate read it, and no fallback shows it
     let drawing = match (family, src) {
@@ -214,6 +233,10 @@ pub fn admit(source: &str) -> Result<Admitted<'_>, Diagram> {
     }
     if m.longest_arrow > MAX_ARROW_BYTES {
         return Err(invalid(OVER_ARROW));
+    }
+    // the last pre-draw refusal (D-VACA9): what the source's arrows cost, hidden ones included
+    if m.arrows > MAX_ARROWS {
+        return Err(over_arrows());
     }
     Ok(Admitted {
         drawing,
@@ -372,6 +395,15 @@ fn invalid(reason: &str) -> Diagram {
     }
 }
 
+/// The refusal of a source whose arrows cost more than [`MAX_ARROWS`] (D-VACA9).
+fn over_arrows() -> Diagram {
+    Diagram::Invalid {
+        reason: format!(
+            "the source has over {MAX_ARROWS} arrows, counting a longer or labelled arrow as more than one"
+        ),
+    }
+}
+
 /// Escapes a label for Mermaid source. Characters Mermaid reads as syntax become `#<code>;`
 /// decimal codes; line breaks become spaces; every other character is kept.
 pub fn encode_label(label: &str) -> String {
@@ -471,11 +503,14 @@ struct Measure {
     longest_arrow: usize,
     /// The top-level flowchart subgraphs that hidden arrows stack, in order (see `flowchart`).
     stacked: Vec<String>,
+    /// What the arrows cost (D-VACA9), hidden arrows included, saturated at `MAX_ARROWS + 1`.
+    arrows: usize,
 }
 
-/// Counts the statements of `src` after front matter, its deepest nesting and, in a flowchart,
-/// whether a subgraph finds no `end` and its longest arrow. The other families' pinned parsers
-/// read each line once, so an unclosed block is read once and costs nothing more.
+/// Counts the statements of `src` after front matter, its deepest nesting, what its arrows cost
+/// and, in a flowchart, whether a subgraph finds no `end` and its longest arrow. The other
+/// families' pinned parsers read each line once, so an unclosed block is read once and costs
+/// nothing more.
 fn measure(src: &str, family: Family) -> Measure {
     let body = after_front_matter(src);
     let statements = segments(body.as_bytes(), family);
@@ -485,6 +520,7 @@ fn measure(src: &str, family: Family) -> Measure {
         unclosed: false,
         longest_arrow: 0,
         stacked: Vec::new(),
+        arrows: 0,
     };
     match family {
         Family::Flowchart => {
@@ -493,10 +529,18 @@ fn measure(src: &str, family: Family) -> Measure {
             m.unclosed = r.unclosed;
             m.longest_arrow = r.longest_arrow;
             m.stacked = r.stacked;
+            m.arrows = r.arrows;
         }
-        Family::Class => m.depth = class_depth(body),
-        Family::State => m.depth = state_depth(body),
-        Family::Sequence | Family::Unknown => {}
+        Family::Class => {
+            m.depth = class_depth(body);
+            m.arrows = arrows::measure(src, family);
+        }
+        Family::State => {
+            m.depth = state_depth(body);
+            m.arrows = arrows::measure(src, family);
+        }
+        Family::Sequence => m.arrows = arrows::measure(src, family),
+        Family::Unknown => {}
     }
     m
 }
@@ -768,19 +812,25 @@ fn keyword<'a>(line: &'a str, word: &str) -> Option<&'a str> {
 /// Whether a state-diagram line starts a multi-line note: `note right of <id>` or `note left of
 /// <id>` with no `:`. The pinned parser then reads the next lines as its text.
 fn opens_note_text(text: &str) -> bool {
-    let Some(rest) = keyword(text, "note") else {
-        return false;
-    };
+    state_note(text) == Some(true)
+}
+
+/// A state-diagram note line, as the pinned parser reads one (`try_parse_note`): `note right of
+/// <id>` or `note left of <id>`, then `: <text>` on the same line, or text on the next lines up
+/// to `end note`. Whether it is the multi-line kind, if it is a note.
+fn state_note(text: &str) -> Option<bool> {
     // the parser needs `note` and one space, then trims
-    if !text.as_bytes().get(4).is_some_and(|b| *b == b' ') {
-        return false;
+    if !text.as_bytes().get(..5)?.eq_ignore_ascii_case(b"note ") {
+        return None;
     }
-    let rest = rest.trim();
-    let Some(after) = keyword(rest, "right of").or_else(|| keyword(rest, "left of")) else {
-        return false;
-    };
-    let after = after.trim();
-    !after.is_empty() && !after.contains(':')
+    let rest = text[5..].trim();
+    let after = keyword(rest, "right of")
+        .or_else(|| keyword(rest, "left of"))?
+        .trim();
+    match after.find(':') {
+        Some(colon) => (!after[..colon].trim().is_empty()).then_some(false),
+        None => (!after.is_empty()).then_some(true),
+    }
 }
 
 fn trim(bytes: &[u8]) -> &[u8] {
@@ -1865,5 +1915,589 @@ mod tests {
             .next()
             .unwrap();
         assert_eq!(DRAWING_CRATE, format!("mmdflux {version}"));
+    }
+
+    /// The arrow cost of `src` (D-VACA9) and how many of its expanded arrows have a label, as
+    /// `admit`'s measure reads the drawing input. The flowchart's comes from its walk, the
+    /// others' from the line recognizer; both agree with `measure`.
+    fn cost(src: &str) -> (usize, usize) {
+        let family = Family::of(mmdflux::detect_diagram(src));
+        match family {
+            Family::Flowchart => {
+                let drawing = flowchart::normalize_subgraph_blanks(src);
+                let r = flowchart::read(&drawing);
+                assert_eq!(measure(&drawing, family).arrows, r.arrows, "{src}");
+                (r.arrows, r.labelled)
+            }
+            Family::Unknown => (0, 0),
+            family => {
+                let t = arrows::tally(src, family);
+                assert_eq!(measure(src, family).arrows, t.cost, "{src}");
+                (t.cost, t.labelled)
+            }
+        }
+    }
+
+    /// A flowchart of `n` plain arrows, one per line: each costs 1.
+    fn chain(n: usize) -> String {
+        let mut s = String::from("flowchart LR\n");
+        for i in 0..n {
+            s.push_str(&format!("A{i} --> A{}\n", i + 1));
+        }
+        s
+    }
+
+    /// What `admit` refuses `src` with, or None when it admits it.
+    fn refusal(src: &str) -> Option<Diagram> {
+        admit(src).err()
+    }
+
+    /// `render` and `admit` of `src`, each with guarded call 2 (the draw; call 1 detects) set
+    /// to panic: a source refused before its draw gives the same refusal from both.
+    fn undrawn(src: &str) -> (Diagram, Option<Diagram>) {
+        test_hook::panic_at(2);
+        let rendered = render(src);
+        test_hook::panic_at(2);
+        let admitted = refusal(src);
+        test_hook::panic_at(0);
+        (rendered, admitted)
+    }
+
+    /// rdb6 (D-VACA9, D-R7C3W): every connector form of the closed tables costs its rank span
+    /// (the pinned crate's `minlen`), once per expanded arrow, and a label marks the arrow.
+    /// The small sources also draw.
+    #[test]
+    fn rdb6_every_connector_form_is_costed() {
+        // (connector, span, labelled), between two flowchart nodes
+        let flow: [(&str, usize, bool); 55] = [
+            // solid: the dash run after the first dash; open, one less and at least one
+            ("-->", 1, false),
+            ("--->", 2, false),
+            ("---->", 3, false),
+            ("---", 1, false),
+            ("----", 2, false),
+            ("-----", 3, false),
+            ("<-->", 1, false),
+            ("<--", 1, false),
+            ("<---", 2, false),
+            ("x--x", 1, false),
+            ("o--o", 1, false),
+            ("--x", 1, false),
+            ("--o", 1, false),
+            ("x---", 2, false),
+            ("- -->", 2, false),
+            // thick: the equals run after the first equals sign
+            ("==>", 1, false),
+            ("===>", 2, false),
+            ("===", 1, false),
+            ("====", 2, false),
+            ("=====", 3, false),
+            ("<==>", 1, false),
+            ("x==x", 1, false),
+            ("<===", 2, false),
+            // dotted: the dot run, open or not
+            ("-.->", 1, false),
+            ("-..->", 2, false),
+            ("-...->", 3, false),
+            ("-.-", 1, false),
+            ("-..-", 2, false),
+            ("<-.->", 1, false),
+            ("o-.-o", 1, false),
+            ("- .. ->", 2, false),
+            // invisible: one
+            ("~~~", 1, false),
+            ("~~~~~", 1, false),
+            ("~ ~ ~", 1, false),
+            // a `|text|` label: the connector's own span
+            ("-->|t|", 1, true),
+            ("--->|t|", 2, true),
+            ("---|t|", 1, true),
+            ("----|t|", 2, true),
+            ("==>|t|", 1, true),
+            ("-..->|t|", 2, true),
+            ("~~~|t|", 1, true),
+            ("--> | t |", 1, true),
+            ("<-->|t|", 1, true),
+            // inline labels: the closing run's span
+            ("-- t -->", 1, true),
+            ("-- t --->", 2, true),
+            ("-- t ---", 1, true),
+            ("-- t ----", 2, true),
+            ("<-- t -->", 1, true),
+            ("== t ==>", 1, true),
+            ("== t ===>", 2, true),
+            ("== t ===", 1, true),
+            ("-. t .->", 1, true),
+            ("-. t ..->", 2, true),
+            ("-. t -..->", 2, true),
+            ("-. t .-", 1, true),
+        ];
+        for (connector, span, labelled) in flow {
+            let src = format!("flowchart LR\nA {connector} B\n");
+            assert_eq!(cost(&src), (span, usize::from(labelled)), "{src}");
+            assert!(matches!(render(&src), Diagram::Svg(_)), "{src}");
+        }
+        // chains: each arrow in a chain counts (D-R7C3W)
+        for (src, want) in [
+            ("flowchart LR\nA --> B --> C\n", (2, 0)),
+            ("flowchart LR\nA --> B ---> C\n", (3, 0)),
+            ("flowchart LR\nA -- x --> B -.-> C ==>|y| D\n", (3, 2)),
+            ("flowchart LR\nA--->B\n", (2, 0)),
+            ("graph TD\nA-->B;B==>C", (2, 0)),
+            ("flowchart LR\nA --> B\nB ---> C\nC -.-> A\n", (4, 0)),
+        ] {
+            assert_eq!(cost(src), want, "{src}");
+            assert!(matches!(render(src), Diagram::Svg(_)), "{src}");
+        }
+        // class: every left marker, line and right marker is one relation
+        for left in ["", "<|", "()", "*", "o", "<"] {
+            for line in ["--", ".."] {
+                for right in ["", "|>", "()", "*", "o", ">"] {
+                    let src = format!("classDiagram\nA {left}{line}{right} B\n");
+                    assert_eq!(cost(&src), (1, 0), "{src}");
+                    assert!(matches!(render(&src), Diagram::Svg(_)), "{src}");
+                }
+            }
+        }
+        for (src, want) in [
+            ("classDiagram\nA \"1\" --> \"many\" B\n", (1, 1)),
+            ("classDiagram\nA \"1\" --> B\n", (1, 1)),
+            ("classDiagram\nA --> \"*\" B\n", (1, 1)),
+            ("classDiagram\nA --> B : uses\n", (1, 1)),
+            ("classDiagram\nA --> B :\n", (1, 0)),
+            ("classDiagram\nA \"\" --> \" \" B\n", (1, 0)),
+            ("classDiagram\nA<|--B\n", (1, 0)),
+            ("classDiagram\n`A x` --> `B y`\n", (1, 0)),
+            ("classDiagram\nA --> B\nB ..> C\nC --* A\n", (3, 0)),
+        ] {
+            assert_eq!(cost(src), want, "{src}");
+            assert!(matches!(render(src), Diagram::Svg(_)), "{src}");
+        }
+        // not a relation: the id runs on through the dashes
+        assert_eq!(cost("classDiagram\nA-->B\n"), (0, 0));
+        // state: one transition per line, `[*]` ends too; no chains
+        for (src, want) in [
+            ("stateDiagram-v2\n[*] --> A\nA --> B\nB --> [*]\n", (3, 0)),
+            ("stateDiagram-v2\nA --> B : go\n", (1, 1)),
+            ("stateDiagram-v2\nA:::c --> B:::d : go\n", (1, 1)),
+            ("stateDiagram-v2\nA --> B :\n", (1, 0)),
+            ("stateDiagram-v2\nA --> B --> C\n", (1, 0)),
+            ("stateDiagram\nA --> B\n", (1, 0)),
+        ] {
+            assert_eq!(cost(src), want, "{src}");
+            assert!(matches!(render(src), Diagram::Svg(_)), "{src}");
+        }
+        // sequence: all eight forms, with and without activation markers and text
+        for form in ["-->>", "->>", "-->", "->", "--x", "-x", "--)", "-)"] {
+            for (to, text, labelled) in [
+                ("B", ": hi", true),
+                ("+B", ": hi", true),
+                ("B", ":", false),
+                ("B", "", false),
+            ] {
+                let src = format!("sequenceDiagram\nA{form}{to}{text}\n");
+                assert_eq!(cost(&src), (1, usize::from(labelled)), "{src}");
+                assert!(matches!(render(&src), Diagram::Svg(_)), "{src}");
+            }
+            let deactivates = format!("sequenceDiagram\nA->>+B: in\nB{form}-A: out\n");
+            assert_eq!(cost(&deactivates), (2, 2), "{deactivates}");
+            assert!(
+                matches!(render(&deactivates), Diagram::Svg(_)),
+                "{deactivates}"
+            );
+        }
+        // one message per line, the first form found
+        assert_eq!(cost("sequenceDiagram\nA->>B: x->>y\n"), (1, 1));
+        assert_eq!(cost("sequenceDiagram\nA-->>B-->>C\n"), (1, 0));
+    }
+
+    /// rdb6 (D-VACA9): a connector between two node groups costs once per pair of a source and
+    /// a target, as the pinned crate expands it before layout. Repeated ids count each time,
+    /// and the count saturates at `MAX_ARROWS + 1` without building the pairs.
+    #[test]
+    fn rdb6_groups_cost_expanded_arrows() {
+        for (src, want) in [
+            ("flowchart LR\nA & B --> C & D\n", (4, 0)),
+            ("flowchart LR\nA & B --> C & D --> E\n", (6, 0)),
+            ("flowchart LR\nA & A --> B & B\n", (4, 0)),
+            ("flowchart LR\nA & B -->|y| C\n", (2, 2)),
+            ("flowchart LR\nA & B -- y --> C & D\n", (4, 4)),
+            ("flowchart LR\nA & B ----> C & D\n", (12, 0)),
+            ("flowchart LR\nA & B ~~~ C\n", (2, 0)),
+            ("flowchart LR\nA & B <--> C\n", (2, 0)),
+            ("flowchart LR\nA:::x & B:::y --> C\n", (2, 0)),
+        ] {
+            assert_eq!(cost(src), want, "{src}");
+            assert!(matches!(render(src), Diagram::Svg(_)), "{src}");
+        }
+        let group = |name: &str, n: usize| {
+            (0..n)
+                .map(|i| format!("{name}{i}"))
+                .collect::<Vec<_>>()
+                .join(" & ")
+        };
+        // 15 by 15 passes N; 10 by 20 is N; a thousand by a thousand saturates too
+        let over = format!("flowchart LR\n{} --> {}\n", group("a", 15), group("b", 15));
+        let at = format!("flowchart LR\n{} --> {}\n", group("a", 10), group("b", 20));
+        let huge = format!(
+            "flowchart LR\n{} --> {} --> {}\n",
+            group("a", 1000),
+            group("b", 1000),
+            group("c", 1000)
+        );
+        assert!(huge.len() <= MAX_SOURCE_BYTES);
+        assert_eq!(cost(&over).0, MAX_ARROWS + 1);
+        assert_eq!(cost(&at).0, MAX_ARROWS);
+        assert_eq!(cost(&huge).0, MAX_ARROWS + 1);
+        for src in [&over, &huge] {
+            assert_eq!(undrawn(src), (over_arrows(), Some(over_arrows())), "{src}");
+        }
+    }
+
+    /// rdb6 (D-VACA9): text that only looks like a connector costs nothing: node labels,
+    /// titles, front matter, comments, class members and annotations, state notes, classes and
+    /// descriptions, and sequence titles, notes, boxes and message text. Only real connectors
+    /// cost.
+    #[test]
+    fn rdb6_labels_comments_and_members_add_no_arrows() {
+        for (src, want) in [
+            // flowchart: labels, titles, comments, front matter, keyword lines
+            (
+                "---\ntitle: A --> B\n---\nflowchart LR\nA[\"x --> y\"] --> B\n",
+                1,
+            ),
+            ("flowchart LR\nA[\"a\n-->\nb\"] --> B[a ==> b]\n", 1),
+            ("flowchart LR\nA(\"-->\") --> B{\"-.->\"}\n", 1),
+            ("flowchart LR\nA{{\"x ==> y\"}} --> B([\"~~~\"])\n", 1),
+            ("flowchart LR\n%% A --> B\nA --> B %% C --> D\n", 1),
+            (
+                "flowchart LR\nsubgraph S[\"a --> b\"]\nA --> B\nend\nsubgraph \"c --> d\"\nC\nend\n",
+                1,
+            ),
+            ("flowchart LR\nA -->|\"x --> y\"| B\n", 1),
+            ("flowchart LR\nA -- \"a ==> b\" --> B\n", 1),
+            (
+                "flowchart LR\nA --> B\nclick A \"x --> y\"\nstyle A fill:#f00\nclassDef c stroke:#333\nlinkStyle 0 stroke:#000\n",
+                1,
+            ),
+            ("flowchart LR\nA\nB\nC\n", 0),
+            // class: members, annotations, display labels, cardinalities, labels, comments
+            (
+                "---\ntitle: A --> B\n---\nclassDiagram\nclass A {\n  +go() --> B\n  A --> B\n  <<x --> y>>\n}\nA : +x --> y\n<<interface>> A\nclass B[\"x --> y\"]\nclass C <<a-->b>>\n%% A --> B\nA \"x-->y\" --> \"1\" B : a --> b\n",
+                1,
+            ),
+            (
+                "classDiagram\nnamespace N {\n  class A\n  A --> B\n}\ndirection LR\n",
+                1,
+            ),
+            // state: notes, classes, styles, descriptions, comments, declarations
+            (
+                "stateDiagram-v2\nnote right of A : x --> y\nnote left of A\n  x --> y\n  A --> B\nend note\nclassDef c fill:#f00,stroke:#000\nclassDef x-->y fill:#f00\nclass A,B x-->y\nstyle A fill:#f00\nA : x ==> y\nstate \"x ==> y\" as S\nclick A \"x --> y\"\n%% A --> B\nA --> B %% C --> D\n",
+                1,
+            ),
+            // sequence: titles, notes, boxes, participants, blocks, activation, message text
+            (
+                "sequenceDiagram\ntitle A->>B\nbox Aqua A->>B\nparticipant A as x->>y\nend\nactor C as c-->>d\nNote over A: x->>y\nNote right of A: x->>y\nloop x->>y\nA->>C: a->>b\nend\nalt a->>b\nC-->>A: c\nelse c->>d\nend\nautonumber\nactivate A\ndeactivate A\n%% A->>B\n",
+                2,
+            ),
+        ] {
+            assert_eq!(cost(src).0, want, "{src}");
+        }
+    }
+
+    /// rdb6 (D-VACA9, D-XM8MP): a source over the arrow bound is refused before the pinned
+    /// crate draws: guarded call 2 (the draw) is set to panic, and `admit` and `render` both
+    /// give the cost reason. An earlier refusal wins over it, and an unsupported header with a
+    /// hostile body stays unsupported.
+    #[test]
+    fn rdb6_over_budget_never_calls_the_drawing_library() {
+        let lines = |head: &str, n: usize, line: &dyn Fn(usize) -> String| {
+            let mut s = format!("{head}\n");
+            for i in 0..n {
+                s.push_str(&line(i));
+                s.push('\n');
+            }
+            s
+        };
+        let over = [
+            chain(MAX_ARROWS + 1),
+            lines("classDiagram", MAX_ARROWS + 1, &|i| {
+                format!("A{i} --> A{}", i + 1)
+            }),
+            lines("stateDiagram-v2", MAX_ARROWS + 1, &|i| {
+                format!("S{i} --> S{}", i + 1)
+            }),
+            lines("sequenceDiagram", MAX_ARROWS + 1, &|i| {
+                format!("A->>B: m{i}")
+            }),
+        ];
+        for src in &over {
+            assert_eq!(undrawn(src), (over_arrows(), Some(over_arrows())), "{src}");
+        }
+        // each earlier refusal, with arrows over the bound too
+        let many = chain(MAX_ARROWS + 1);
+        let arrows = &many["flowchart LR\n".len()..];
+        let nested = format!(
+            "flowchart TD\n{}{arrows}{}",
+            (0..33)
+                .map(|i| format!("subgraph S{i}\n"))
+                .collect::<String>(),
+            "end\n".repeat(33)
+        );
+        for (src, want) in [
+            (
+                format!("{many}{}", "A\n".repeat(MAX_STATEMENTS)),
+                invalid(OVER_STATEMENTS),
+            ),
+            (nested, invalid(OVER_DEPTH)),
+            (
+                format!("flowchart LR\nsubgraph S\n{arrows}"),
+                invalid(UNCLOSED),
+            ),
+            (
+                format!("{many}A {}> B\n", "-".repeat(256)),
+                invalid(OVER_ARROW),
+            ),
+            (
+                format!("{many}%% {}\n", "x".repeat(MAX_SOURCE_BYTES)),
+                invalid(OVER_BYTES),
+            ),
+            (
+                format!("pie\n{arrows}"),
+                Diagram::Unsupported {
+                    header: "pie".into(),
+                },
+            ),
+        ] {
+            assert_eq!(undrawn(&src), (want.clone(), Some(want)), "{}", &src[..80]);
+        }
+        // at the bound, the source is admitted
+        assert!(refusal(&chain(MAX_ARROWS)).is_none());
+    }
+
+    /// rdb6 (D-VACA9): the cost adds no rescan. Chains, memo targets reached again, groups,
+    /// failed inline labels and quoted connector text keep `dgm1_flowchart_walk_is_linear`'s
+    /// bound of 40 operations a byte. It counts work, never time.
+    #[test]
+    fn rdb6_arrow_cost_keeps_linear_walk_work() {
+        let fill = |head: &str, piece: &str, tail: &str| {
+            let n = (60000 - head.len() - tail.len()) / piece.len();
+            format!("{head}{}{tail}", piece.repeat(n))
+        };
+        let shared = |piece: &str, close: &str, rest: &str| {
+            let n = (60000 - 20 - close.len()) / (piece.len() + rest.len());
+            format!(
+                "flowchart LR\n{}{close}{}\n",
+                piece.repeat(n),
+                rest.repeat(n)
+            )
+        };
+        let cases = [
+            // chains, one statement and one per line
+            fill("flowchart LR\nA", " --> A", "\n"),
+            fill("flowchart LR\nA", " ---> A", "\n"),
+            fill("flowchart LR\nA", " -- x --> A", "\n"),
+            fill("flowchart LR\nA", " -.-> A", "\n"),
+            fill("flowchart LR\nA", " ==>|y| A", "\n"),
+            fill("flowchart LR\n", "A --> B\n", ""),
+            // groups, with products far past the bound
+            fill("flowchart LR\nA", " & A", " --> B\n"),
+            fill("flowchart LR\nA", " & A --> A", "\n"),
+            fill("flowchart LR\n", "A & B --> C & D\n", ""),
+            // memo targets reached again: titles read as nodes reach one chain
+            shared("subgraph S[(x]\n", "A[(z)]", " --> B"),
+            shared("subgraph S[(x]\n", "A[(z)]", " & B --> C"),
+            shared("subgraph S[\"x]\n", "A[\"z\"]", " -->|y| B"),
+            // failed inline labels and failed pipe labels
+            fill("flowchart LR\n", "A -- x ", "\n"),
+            fill("flowchart LR\n", "A == x ", "\n"),
+            fill("flowchart LR\nA", " -->|x", "\n"),
+            // quoted connector text
+            fill("flowchart LR\n", "A[\"-->\"] --> ", "B\n"),
+            fill("flowchart LR\n", "A -->|\"-->\"| ", "B\n"),
+            fill("flowchart LR\n", "A[\"x --> y", "\"]\n"),
+        ];
+        let mut over = Vec::new();
+        for src in &cases {
+            let (work, len) = flowchart::work(src);
+            if work > 40 * len {
+                over.push(format!(
+                    "{work} operations for {len} bytes: {:?} .. {:?}",
+                    &src[..60],
+                    &src[src.len() - 40..]
+                ));
+            }
+        }
+        assert!(over.is_empty(), "{over:#?}");
+        // the chains and groups are costed, saturated
+        for src in &cases[..9] {
+            assert_eq!(cost(src).0, MAX_ARROWS + 1, "{}", &src[..60]);
+        }
+    }
+
+    /// Lines for random flowcharts with every connector form, labels, chains and groups. No
+    /// `direction` (so no hidden arrows) and no arrow to a subgraph id (the pinned crate drops
+    /// an arrow to an empty subgraph).
+    const FLOW_PIECES: [&str; 30] = [
+        "N{n} --> M{n}\n",
+        "N{n} ---> M{n}\n",
+        "N{n} --- M{n}\n",
+        "N{n} ----- M{n}\n",
+        "N{n} <--> M{n}\n",
+        "N{n} x--o M{n}\n",
+        "N{n} ==> M{n}\n",
+        "N{n} ==== M{n}\n",
+        "N{n} -.-> M{n}\n",
+        "N{n} -...- M{n}\n",
+        "N{n} ~~~ M{n}\n",
+        "N{n} -->|t{n}| M{n}\n",
+        "N{n} ---|t| M{n}\n",
+        "N{n} -- t --> M{n}\n",
+        "N{n} -- t ---- M{n}\n",
+        "N{n} == t ===> M{n}\n",
+        "N{n} -. t ..-> M{n}\n",
+        "N{n} --> M{n} ---> P{n}\n",
+        "N{n} & M{n} --> P{n} & Q{n}\n",
+        "N{n} & N{n} -->|y| M{n} --> P{n}\n",
+        "N{n}[\"a --> b\"] --> M{n}(c)\n",
+        "N{n}; M{n} --> P{n}\n",
+        "subgraph S{n}\nN{n} --> M{n}\nend\n",
+        "subgraph S{n}[\"t --> u\"]\nN{n} -.-> M{n}\nend\n",
+        "%% N{n} --> M{n}\n",
+        "N{n} --> M{n} %% x --> y\n",
+        "N{n}\n",
+        "style N{n} fill:#f00\n",
+        "N{n} -->|\"x --> y\"| M{n}\n",
+        "\n",
+    ];
+
+    /// Lines for random class diagrams: relations with every marker, cardinalities and labels,
+    /// class bodies, members, annotations and comments.
+    const CLASS_PIECES: [&str; 24] = [
+        "A{n} --> B{n}\n",
+        "A{n} --> \"many\" B{n}\n",
+        "A{n} \"\" -- B{n}\n",
+        "A{n} <|-- B{n}\n",
+        "A{n} *-- B{n}\n",
+        "A{n} o-- B{n}\n",
+        "A{n} ..> B{n}\n",
+        "A{n} ..|> B{n}\n",
+        "A{n} <--> B{n}\n",
+        "A{n} -- B{n}\n",
+        "A{n} .. B{n}\n",
+        "A{n} \"1\" --> \"*\" B{n}\n",
+        "A{n} --> B{n} : uses\n",
+        "A{n} \"x\" <|-- B{n} : is\n",
+        "class C{n} {\n  +go() --> B{n}\n  A{n} --> B{n}\n}\n",
+        "class D{n}\n",
+        "A{n} : +field --> x\n",
+        "<<interface>> A{n}\n",
+        "%% A{n} --> B{n}\n",
+        "direction LR\n",
+        "namespace N{n} {\n  A{n} --> B{n}\n}\n",
+        "A{n}-->B{n}\n",
+        "x y z\n",
+        "\n",
+    ];
+
+    /// Lines for random state diagrams: transitions, `[*]` ends, labels, notes, classes,
+    /// descriptions, composite states and comments.
+    const STATE_PIECES: [&str; 18] = [
+        "A{n} --> B{n}\n",
+        "[*] --> A{n}\n",
+        "A{n} --> [*]\n",
+        "A{n} --> B{n} : go{n}\n",
+        "A{n}:::c --> B{n} : go\n",
+        "A{n} --> B{n} :\n",
+        "note right of A{n} : x --> y\n",
+        "note left of A{n}\n  x --> y\nend note\n",
+        "classDef c fill:#f00\n",
+        "class A{n} c\n",
+        "style A{n} fill:#0f0\n",
+        "A{n} : x ==> y\n",
+        "state \"x\" as S{n}\n",
+        "state C{n} {\n  X{n} --> Y{n}\n}\n",
+        "%% A{n} --> B{n}\n",
+        "A{n} --> B{n} %% C --> D\n",
+        "direction LR\n",
+        "\n",
+    ];
+
+    /// The cost and the labelled count of `src` as the pinned crate builds its edges: the sum
+    /// of their `minlen` in its layout document (a missing `minlen` reads as 1), and the edges
+    /// with a label, a head label or a tail label. The edges a state note or a concurrent
+    /// region adds are not connectors of the closed tables, so they are left out. None when
+    /// the pinned crate does not lay the source out.
+    fn pinned_cost(src: &str) -> Option<(usize, usize)> {
+        use mmdflux::graph::Stroke;
+        use mmdflux::payload::Diagram as Payload;
+        let json =
+            mmdflux::render_diagram(src, OutputFormat::Mmds, &RenderConfig::default()).ok()?;
+        let doc = mmdflux::mmds::parse_input(&json).ok()?;
+        let registry = mmdflux::builtins::default_registry();
+        let id = registry.detect(src)?;
+        let payload = registry.create(id)?.parse(src).ok()?.into_payload().ok()?;
+        let (graph, state) = match payload {
+            Payload::Flowchart(g) | Payload::Class(g) => (g, false),
+            Payload::State(g) => (g, true),
+            Payload::Sequence(_) => return None,
+        };
+        let added = |from: &str, to: &str, stroke: Stroke| {
+            state
+                && (from.contains("____note_")
+                    || to.contains("____note_")
+                    || stroke == Stroke::Invisible)
+        };
+        let minlen: usize = doc
+            .edges
+            .iter()
+            .filter(|e| !added(&e.source, &e.target, e.stroke))
+            .map(|e| e.minlen as usize)
+            .sum();
+        let some = |l: &Option<String>| l.as_deref().is_some_and(|t| !t.trim().is_empty());
+        let labelled = graph
+            .edges
+            .iter()
+            .filter(|e| !added(&e.from, &e.to, e.stroke))
+            .filter(|e| some(&e.label) || some(&e.head_label) || some(&e.tail_label))
+            .count();
+        Some((minlen, labelled))
+    }
+
+    /// rdb6 (D-VACA9, review M4): on random flowchart, class and state sources, the cost with
+    /// W = 1 is the sum of `minlen` over the edges the pinned crate lays out, and the labelled
+    /// count is its edges with a label. Sequence has no layout document; its table pins hold.
+    #[test]
+    fn rdb6_cost_matches_the_pinned_layout_input() {
+        assert_eq!(LABELLED_ARROW_WEIGHT, 1);
+        let mut seed: u64 = 0x5eed_a660;
+        let mut next = |n: u64| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        let families: [(&[&str], [&str; 2]); 3] = [
+            (&FLOW_PIECES, ["flowchart TD\n", "graph LR\n"]),
+            (&CLASS_PIECES, ["classDiagram\n", "classDiagram\n"]),
+            (&STATE_PIECES, ["stateDiagram-v2\n", "stateDiagram\n"]),
+        ];
+        for (pieces, headers) in families {
+            let mut compared = 0;
+            for case in 0..CASES {
+                let mut src = String::from(headers[case % 2]);
+                for n in 0..1 + next(24) {
+                    let piece = pieces[next(pieces.len() as u64) as usize];
+                    src.push_str(&piece.replace("{n}", &n.to_string()));
+                }
+                // the pinned crate's layout panics on some sources
+                let Ok(Some(want)) = quiet::catch(|| pinned_cost(&src)) else {
+                    continue;
+                };
+                compared += 1;
+                assert_eq!(cost(&src), want, "{src}");
+            }
+            assert!(compared > 500, "{}: compared {compared}", headers[0]);
+        }
     }
 }

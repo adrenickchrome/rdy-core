@@ -1396,3 +1396,158 @@ fn rdb1_blank_lines_after_subgraph_headers_draw() {
         assert_eq!(short(render(src)), invalid(UNCLOSED), "{src:?}");
     }
 }
+
+/// The arrow bound's refusal (D-VACA9), with N = 200 (founder ruling TASK-795).
+const OVER_ARROWS: &str =
+    "the source has over 200 arrows, counting a longer or labelled arrow as more than one";
+
+/// `head`, then one line per arrow `0..n`.
+fn arrow_lines(head: &str, n: usize, line: impl Fn(usize) -> String) -> String {
+    let mut s = format!("{head}\n");
+    for i in 0..n {
+        s.push_str(&line(i));
+        s.push('\n');
+    }
+    s
+}
+
+/// A plain flowchart chain of `n` arrows, one per line: each costs 1.
+fn plain_chain(n: usize) -> String {
+    arrow_lines("flowchart LR", n, |i| format!("A{i} --> A{}", i + 1))
+}
+
+/// Whether `src` draws.
+fn draws(src: &str) -> bool {
+    matches!(render(src), Diagram::Svg(_))
+}
+
+/// rdb6 (D-VACA9, D-R7C3W): a source whose arrows cost exactly N draws, and one that costs
+/// N + 1 is refused with the exact reason. A longer arrow costs its span; each family's chain
+/// reaches the bound; and the hidden arrows that stack separate subgraphs (D-438Y2, D-ZJVRT)
+/// count.
+#[test]
+fn rdb6_exact_bound_draws_and_next_is_refused() {
+    assert_eq!(rdy_diagram::MAX_ARROWS, 200);
+    let n = rdy_diagram::MAX_ARROWS;
+    // the plain chain
+    assert!(draws(&plain_chain(n)));
+    assert_eq!(render(&plain_chain(n + 1)), invalid(OVER_ARROWS));
+    // a `--->` chain: half as many arrows, each costs 2
+    let long = |extra: bool| {
+        let mut s = arrow_lines("flowchart LR", n / 2, |i| format!("A{i} ---> A{}", i + 1));
+        if extra {
+            s.push_str("Z --> A0\n");
+        }
+        s
+    };
+    assert!(draws(&long(false)));
+    assert_eq!(render(&long(true)), invalid(OVER_ARROWS));
+    // each line family's chain, inside the statement and byte bounds
+    let class = |k: usize| arrow_lines("classDiagram", k, |i| format!("C{i} --> C{}", i + 1));
+    let state = |k: usize| arrow_lines("stateDiagram-v2", k, |i| format!("S{i} --> S{}", i + 1));
+    let sequence = |k: usize| {
+        arrow_lines("sequenceDiagram", k, |i| {
+            if i % 2 == 0 {
+                "A->>B: go".to_string()
+            } else {
+                "B-->>A: back".to_string()
+            }
+        })
+    };
+    for family in [&class as &dyn Fn(usize) -> String, &state, &sequence] {
+        let at = family(n);
+        assert!(at.len() <= 65536 && at.lines().count() <= 2048);
+        assert!(draws(&at), "{at}");
+        assert_eq!(render(&family(n + 1)), invalid(OVER_ARROWS));
+    }
+    // four separate subgraphs that each set their own direction: 3 hidden arrows count
+    let four = |own: usize| {
+        let mut s = String::from("flowchart TB\n");
+        let mut left = own;
+        for p in 0..4 {
+            let k = left / (4 - p);
+            left -= k;
+            s.push_str(&format!("subgraph P{p}\ndirection LR\n"));
+            for i in 0..k {
+                s.push_str(&format!("p{p}n{i} --> p{p}n{}\n", i + 1));
+            }
+            s.push_str("end\n");
+        }
+        s
+    };
+    assert_eq!(render(&four(n - 2)), invalid(OVER_ARROWS));
+    assert!(draws(&four(n - 3)));
+    // without its own directions nothing is stacked, so N - 2 arrows draw
+    assert!(draws(&four(n - 2).replace("direction LR\n", "")));
+}
+
+/// rdb6 (D-VACA9): a labelled arrow costs its span times W, the labelled weight. With W = 1 a
+/// label costs exactly the span: N labelled arrows draw, and so does a mix of forms whose cost
+/// is N; one more is refused. Empty label text and class cardinalities are included.
+#[test]
+fn rdb6_label_weight_and_mixed_boundary_are_exact() {
+    assert_eq!(rdy_diagram::LABELLED_ARROW_WEIGHT, 1);
+    let n = rdy_diagram::MAX_ARROWS;
+    let w = rdy_diagram::LABELLED_ARROW_WEIGHT;
+    let labelled = |k: usize| arrow_lines("flowchart LR", k, |i| format!("A{i} -->|y| A{}", i + 1));
+    assert!(draws(&labelled(n / w)));
+    assert_eq!(render(&labelled(n / w + 1)), invalid(OVER_ARROWS));
+    // a mix: 40 plain, 25 labelled of span 2, 20 inline-labelled of span 3, 40 dotted, and
+    // 10 thick open runs of span 1 (one less than their run): 200
+    let mix = |extra: &str| {
+        let mut s = String::from("flowchart LR\n");
+        for i in 0..40 {
+            s.push_str(&format!("a{i} --> a{}\n", i + 1));
+        }
+        for i in 0..25 {
+            s.push_str(&format!("b{i} --->|y| b{}\n", i + 1));
+        }
+        for i in 0..20 {
+            s.push_str(&format!("c{i} -- y ----> c{}\n", i + 1));
+        }
+        for i in 0..40 {
+            s.push_str(&format!("d{i} -.-> d{}\n", i + 1));
+        }
+        for i in 0..10 {
+            s.push_str(&format!("e{i} === e{}\n", i + 1));
+        }
+        s.push_str(extra);
+        s
+    };
+    assert!(draws(&mix("")));
+    assert_eq!(render(&mix("z1 ~~~ z2\n")), invalid(OVER_ARROWS));
+    // class cardinalities and labels, empty and not, cost the span
+    let class = |k: usize| {
+        arrow_lines("classDiagram", k, |i| match i % 4 {
+            0 => format!("C{i} \"1\" --> \"*\" C{}", i + 1),
+            1 => format!("C{i} \"\" --> C{} : uses", i + 1),
+            2 => format!("C{i} --> C{} :", i + 1),
+            _ => format!("C{i} --> C{}", i + 1),
+        })
+    };
+    assert!(draws(&class(n)));
+    assert_eq!(render(&class(n + 1)), invalid(OVER_ARROWS));
+    // empty and nonempty transition labels and message text
+    let state = |k: usize| {
+        arrow_lines("stateDiagram-v2", k, |i| {
+            if i % 2 == 0 {
+                format!("S{i} --> S{} :", i + 1)
+            } else {
+                format!("S{i} --> S{} : go", i + 1)
+            }
+        })
+    };
+    assert!(draws(&state(n)));
+    assert_eq!(render(&state(n + 1)), invalid(OVER_ARROWS));
+    let sequence = |k: usize| {
+        arrow_lines("sequenceDiagram", k, |i| {
+            if i % 2 == 0 {
+                "A->>B:".to_string()
+            } else {
+                "B-->>A: back".to_string()
+            }
+        })
+    };
+    assert!(draws(&sequence(n)));
+    assert_eq!(render(&sequence(n + 1)), invalid(OVER_ARROWS));
+}

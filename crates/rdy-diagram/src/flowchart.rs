@@ -31,7 +31,15 @@
 //! that directly follow a subgraph header ([`normalize_subgraph_blanks`]), and the top-level
 //! subgraphs that hidden arrows may stack ([`Reading::stacked`]). Neither reaches the source a
 //! reader sees.
+//!
+//! It also gives the arrow cost (D-VACA9, [`Reading::arrows`]). A connector that links two node
+//! groups costs its rank span ([`span`]) once for each pair of a source and a target, as the
+//! pinned crate expands it before layout, times the label weight when it has a label. A
+//! connector is charged once, at its place, however many reads reach it. Every count saturates
+//! at `MAX_ARROWS + 1`, and no pair is ever built.
 
+use crate::ARROW_CAP;
+use crate::arrows::Tally;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -94,6 +102,12 @@ pub(crate) struct Reading {
     /// and no arrow completes outside every subgraph. `render` keeps the stacked drawing only
     /// when it removes an overlap and adds none.
     pub stacked: Vec<String>,
+    /// What the arrows cost (D-VACA9), the hidden arrows of `stacked` included, saturated at
+    /// `MAX_ARROWS + 1`.
+    pub arrows: usize,
+    /// How many expanded arrows have a label, for the parity pin.
+    #[cfg(test)]
+    pub labelled: usize,
 }
 
 /// Reads `src`, the diagram's source with any BOM removed and CRLF as LF, as the pinned
@@ -106,6 +120,11 @@ pub(crate) fn read(src: &str) -> Reading {
         Err(deepest) => (deepest.max(keyword_bound(text.as_bytes())), false),
     };
     let stacked = if whole { grammar.stacked() } else { Vec::new() };
+    // each hidden arrow is one invisible connector of span 1 (D-ZJVRT, O7)
+    let mut tally = grammar.tally;
+    if stacked.len() >= 2 {
+        tally.add(1, false, stacked.len() - 1);
+    }
     Reading {
         depth,
         #[cfg(test)]
@@ -113,6 +132,9 @@ pub(crate) fn read(src: &str) -> Reading {
         unclosed: grammar.reread,
         longest_arrow: grammar.longest_arrow,
         stacked,
+        arrows: tally.cost,
+        #[cfg(test)]
+        labelled: tally.labelled,
     }
 }
 
@@ -403,6 +425,18 @@ enum Link {
     Solid,
 }
 
+/// A connector's rank span, as the pinned compiler sets its `minlen` (mmdflux 2.6.1
+/// `compiler.rs:742-758`): the length of its run (the dashes after the first dash, the equals
+/// signs after the first equals sign, or the dots); a solid or thick connector with no head at
+/// either end is one less, and at least one.
+fn span(link: Link, run: usize, headed: bool) -> usize {
+    match link {
+        Link::Dotted => run,
+        Link::Thick | Link::Solid if headed => run,
+        Link::Thick | Link::Solid => run.saturating_sub(1).max(1),
+    }
+}
+
 /// What the statement at a place gives.
 enum Step {
     /// The statement's nesting, and where the next one starts.
@@ -484,6 +518,13 @@ struct Grammar<'a> {
     direction_read: bool,
     /// Where the id of the last subgraph spec read is, if it has one.
     header_id: Option<(u32, u32)>,
+    /// The rank span of the last connector read, and whether it has a label.
+    span: usize,
+    labelled: bool,
+    /// For each place, whether the connector that starts there is charged already.
+    charged: Vec<bool>,
+    /// What the charged connectors cost.
+    tally: Tally,
     #[cfg(test)]
     work: std::cell::Cell<usize>,
 }
@@ -568,6 +609,10 @@ impl<'a> Grammar<'a> {
             quoted_only: false,
             direction_read: false,
             header_id: None,
+            span: 1,
+            labelled: false,
+            charged: vec![false; n + 1],
+            tally: Tally::default(),
             #[cfg(test)]
             work: Default::default(),
         }
@@ -931,6 +976,10 @@ impl<'a> Grammar<'a> {
     /// `rest_end`.
     fn rest(&mut self) {
         let mut heads = std::mem::take(&mut self.heads);
+        // the connector that waits for its target group to end: its place, span and label, and
+        // the size of its source group; and the size of the group being read
+        let mut pending: Option<(usize, usize, bool, usize)> = None;
+        let mut group = 1usize;
         loop {
             self.tick();
             let head = self.i;
@@ -954,6 +1003,7 @@ impl<'a> Grammar<'a> {
                 self.ws();
                 self.node_head()
             } {
+                group = group.saturating_add(1).min(ARROW_CAP);
                 continue;
             }
             // else `edge_connector ~ node_group`
@@ -965,8 +1015,13 @@ impl<'a> Grammar<'a> {
                 if self.ctx == TOP {
                     self.crossed = true;
                 }
+                let (span, labelled) = (self.span, self.labelled);
                 self.ws();
                 if self.node_head() {
+                    // the connector links two read groups: the one before it is complete
+                    self.charge(pending, group);
+                    pending = Some((arrow, span, labelled, group));
+                    group = 1;
                     continue;
                 }
             } else if self.connector_start(arrow) {
@@ -976,10 +1031,25 @@ impl<'a> Grammar<'a> {
             self.i = node_end;
             break;
         }
+        self.charge(pending, group);
         for head in heads.drain(..) {
             self.rest_end[head as usize] = self.i as u32;
         }
         self.heads = heads;
+    }
+
+    /// Charges a connector that links two read node groups, `targets` being its target group's
+    /// size: its span (times the label weight) for each pair of a source and a target, once
+    /// for its place.
+    fn charge(&mut self, connector: Option<(usize, usize, bool, usize)>, targets: usize) {
+        let Some((at, span, labelled, sources)) = connector else {
+            return;
+        };
+        if std::mem::replace(&mut self.charged[at], true) {
+            return;
+        }
+        let pairs = sources.saturating_mul(targets).min(ARROW_CAP);
+        self.tally.add(span, labelled, pairs);
     }
 
     /// A node's head: `identifier ~ shape?`. Its id is kept for the stack check.
@@ -1114,12 +1184,15 @@ impl<'a> Grammar<'a> {
         }
         let before = self.i;
         self.ws();
-        if !self.edge_label() {
-            // a `|` that no label closes: the arrow it starts runs to the line end
-            if self.s.get(self.i) == Some(&b'|') {
-                self.longest_arrow = self.longest_arrow.max(self.line_end(start) - start);
+        match self.edge_label() {
+            Some(labelled) => self.labelled = labelled,
+            None => {
+                // a `|` that no label closes: the arrow it starts runs to the line end
+                if self.s.get(self.i) == Some(&b'|') {
+                    self.longest_arrow = self.longest_arrow.max(self.line_end(start) - start);
+                }
+                self.i = before;
             }
-            self.i = before;
         }
         true
     }
@@ -1210,7 +1283,7 @@ impl<'a> Grammar<'a> {
     /// A labelled link: its start (atomic), then a label on the same line up to the first
     /// place the link's end starts, then the end.
     fn labelled_link(&mut self, link: Link) -> bool {
-        self.arrow_left();
+        let left = self.arrow_left();
         let (first, second, refused): (u8, u8, &[u8]) = match link {
             Link::Dotted => (b'-', b'.', b".->xo"),
             Link::Thick => (b'=', b'=', b"=>xo"),
@@ -1238,25 +1311,64 @@ impl<'a> Grammar<'a> {
         match end {
             Some(end) if end > text && end < line_end => {
                 self.i = end;
-                self.link_end(link)
+                let Some((run, right)) = self.link_end(link) else {
+                    return false;
+                };
+                self.span = span(link, run, left || right);
+                self.labelled = !self.text[text..end].trim().is_empty();
+                true
             }
             _ => false,
         }
     }
 
-    /// A link's end, with the grammar's spaces between its parts and an optional arrow head.
-    fn link_end(&mut self, link: Link) -> bool {
-        match link {
+    /// A link's end, with the grammar's spaces between its parts and an optional arrow head:
+    /// the length of its run and whether it has the head.
+    fn link_end(&mut self, link: Link) -> Option<(usize, bool)> {
+        let run = match link {
             Link::Dotted => {
                 self.byte(b'-');
                 self.ws();
-                if !self.run(b'.') {
-                    return false;
+                let run = self.run(b'.');
+                self.ws();
+                if run == 0 || !self.byte(b'-') {
+                    return None;
+                }
+                run
+            }
+            Link::Thick | Link::Solid => {
+                let b = if matches!(link, Link::Thick) {
+                    b'='
+                } else {
+                    b'-'
+                };
+                if !self.byte(b) {
+                    return None;
                 }
                 self.ws();
+                self.run(b)
+            }
+        };
+        (run > 0).then(|| (run, self.arrow_right()))
+    }
+
+    /// An unlabelled link: dotted `-` `.`+ `-`, thick `=` `=`+, solid `-` `-`+, each with an
+    /// optional arrow head at both ends and the grammar's spaces between parts.
+    fn plain_link(&mut self, link: Link) -> bool {
+        let left = self.arrow_left();
+        self.ws();
+        let run = match link {
+            Link::Dotted => {
                 if !self.byte(b'-') {
                     return false;
                 }
+                self.ws();
+                let run = self.run(b'.');
+                self.ws();
+                if run == 0 || !self.byte(b'-') {
+                    return false;
+                }
+                run
             }
             Link::Thick | Link::Solid => {
                 let b = if matches!(link, Link::Thick) {
@@ -1268,51 +1380,19 @@ impl<'a> Grammar<'a> {
                     return false;
                 }
                 self.ws();
-                if !self.run(b) {
-                    return false;
-                }
+                self.run(b)
             }
+        };
+        if run == 0 {
+            return false;
         }
-        self.arrow_right();
+        let right = self.arrow_right();
+        self.span = span(link, run, left || right);
+        self.labelled = false;
         true
     }
 
-    /// An unlabelled link: dotted `-` `.`+ `-`, thick `=` `=`+, solid `-` `-`+, each with an
-    /// optional arrow head at both ends and the grammar's spaces between parts.
-    fn plain_link(&mut self, link: Link) -> bool {
-        self.arrow_left();
-        self.ws();
-        let ok = match link {
-            Link::Dotted => {
-                self.byte(b'-')
-                    && {
-                        self.ws();
-                        self.run(b'.')
-                    }
-                    && {
-                        self.ws();
-                        self.byte(b'-')
-                    }
-            }
-            Link::Thick | Link::Solid => {
-                let b = if matches!(link, Link::Thick) {
-                    b'='
-                } else {
-                    b'-'
-                };
-                self.byte(b) && {
-                    self.ws();
-                    self.run(b)
-                }
-            }
-        };
-        if ok {
-            self.arrow_right();
-        }
-        ok
-    }
-
-    /// `link_invisible = { "~" ~ "~" ~ "~"+ }`.
+    /// `link_invisible = { "~" ~ "~" ~ "~"+ }`: its span is one.
     fn invisible_link(&mut self) -> bool {
         for _ in 0..3 {
             self.ws();
@@ -1325,41 +1405,51 @@ impl<'a> Grammar<'a> {
             self.ws();
             if !self.byte(b'~') {
                 self.i = before;
+                self.span = 1;
+                self.labelled = false;
                 return true;
             }
         }
     }
 
-    /// `edge_label = { "|" ~ edge_label_text ~ "|" }`, its text not empty and across lines.
-    fn edge_label(&mut self) -> bool {
+    /// `edge_label = { "|" ~ edge_label_text ~ "|" }`, its text not empty and across lines:
+    /// whether its text has more than white space, if there is one.
+    fn edge_label(&mut self) -> Option<bool> {
         let start = self.i;
         if self.byte(b'|') {
             self.ws();
-            if let Some(end) = self.label_end(self.i, b"|") {
+            let text = self.i;
+            if let Some(end) = self.label_end(text, b"|") {
                 self.i = end + 1;
-                return true;
+                return Some(!self.text[text..end].trim().is_empty());
             }
         }
         self.i = start;
-        false
+        None
     }
 
     /// An optional `<`, `x` or `o` before a link; the walk keeps it, as the grammar does.
-    fn arrow_left(&mut self) {
+    /// Whether it is there.
+    fn arrow_left(&mut self) -> bool {
         self.tick();
-        if matches!(self.s.get(self.i), Some(b'<' | b'x' | b'o')) {
+        let head = matches!(self.s.get(self.i), Some(b'<' | b'x' | b'o'));
+        if head {
             self.i += 1;
         }
+        head
     }
 
-    /// An optional `>`, `x` or `o` after a link, after the grammar's spaces.
-    fn arrow_right(&mut self) {
+    /// An optional `>`, `x` or `o` after a link, after the grammar's spaces. Whether it is
+    /// there.
+    fn arrow_right(&mut self) -> bool {
         let before = self.i;
         self.ws();
         if matches!(self.s.get(self.i), Some(b'>' | b'x' | b'o')) {
             self.i += 1;
+            true
         } else {
             self.i = before;
+            false
         }
     }
 
@@ -1430,14 +1520,14 @@ impl<'a> Grammar<'a> {
         found
     }
 
-    /// One or more `b`.
-    fn run(&mut self, b: u8) -> bool {
+    /// A run of `b`: how many, none included.
+    fn run(&mut self, b: u8) -> usize {
         let start = self.i;
         while self.s.get(self.i) == Some(&b) {
             self.tick();
             self.i += 1;
         }
-        self.i > start
+        self.i - start
     }
 
     /// An ASCII word in any case, with nothing required after it.
