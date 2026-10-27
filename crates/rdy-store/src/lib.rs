@@ -6,6 +6,7 @@ pub mod check_holder;
 pub mod closure;
 pub mod codec;
 pub mod coord;
+pub mod diagram_cache;
 pub mod dump;
 pub mod dump_chain;
 pub mod dump_scan;
@@ -47,6 +48,7 @@ pub use check::{
     REAFFIRM_HOLD_LABEL, REAFFIRM_VIEW_PREFIX, StoreCheck, landing_field_rules,
     landing_reads_proposal_view, local_card_evidence_allowed, reaffirm_view,
 };
+pub use diagram_cache::{CachedDrawing, DiagramCache};
 pub use error::StoreError;
 #[doc(hidden)]
 pub use index::IndexDump;
@@ -58,9 +60,9 @@ pub use segment::SegmentReader;
 pub use store::OpenPolicy;
 pub use store::{
     BlobState, CATCH_UP_CHUNK, CHECKPOINT_FRAMES, CHECKPOINT_IDLE, INDEX_OPEN_SENTINEL,
-    MAX_BLOB_BYTES, NoticeCapture, OpenReport, Store, StoreLock, StoreReader,
+    LeftoverHookGuard, MAX_BLOB_BYTES, NoticeCapture, OpenReport, Store, StoreLock, StoreReader,
     capture_notices_for_tests, check_chunk_len, drop_unclean_for_tests, lock_error, notice,
-    unclean_closes_for_tests,
+    on_leftover_checked_for_tests, unclean_closes_for_tests,
 };
 mod state;
 pub use state::{OrderOnlyEdits, PreparedTag, ViewRecord, apply_op};

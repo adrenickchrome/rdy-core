@@ -6909,7 +6909,45 @@ pub fn renderer_10k() -> Vec<Measure> {
         "render_diagrams_10k first_doc: path={} copy_bytes={copy} sidebar_bytes={sidebar}",
         docs[0]
     );
+    // the diagram cache the build filled (D-XM8MP): a reported fact, never a gate
+    let rows = state.reader().diagram_cache().rows_for_tests();
+    drop(state);
+    drop(r);
+    let project = dir.path().join("p");
+    let (index_bytes, reopen_ms, r) = reopen_measured(&project);
+    // a full cache: 63 rows of 1 MiB payloads, 66,068,919 counted bytes, under the bound
+    let cache = r.read().reader().diagram_cache();
+    let payload = vec![b'x'; 1_048_576];
+    let mut value = vec![1u8];
+    value.extend_from_slice(&Hash::of(&payload).0);
+    value.extend_from_slice(&payload);
+    for i in 0..63u64 {
+        let mut key = vec![0xFF; 32];
+        key.extend_from_slice(&i.to_le_bytes());
+        cache.put_raw_for_tests(&key, &value);
+    }
+    let full_rows = cache.rows_for_tests();
+    drop(cache);
+    drop(r);
+    let (full_index_bytes, full_reopen_ms, r) = reopen_measured(&project);
+    drop(r);
+    eprintln!(
+        "render_diagrams_10k cache: rows={rows} index_bytes={index_bytes} reopen_ms={reopen_ms} full_rows={full_rows} full_index_bytes={full_index_bytes} full_reopen_ms={full_reopen_ms}"
+    );
     vec![measure]
+}
+
+/// The bytes of `project`'s index file, then the milliseconds of one open of the project, and
+/// the open project.
+fn reopen_measured(project: &std::path::Path) -> (u64, u128, Rdy) {
+    let index = project
+        .join(".rdy")
+        .join(rdy_store::layout::STORE_DIR)
+        .join("index.redb");
+    let bytes = std::fs::metadata(&index).expect("the index file").len();
+    let s = Instant::now();
+    let r = Rdy::open(project).expect("reopen the corpus");
+    (bytes, s.elapsed().as_millis(), r)
 }
 
 #[cfg(test)]

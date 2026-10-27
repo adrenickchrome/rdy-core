@@ -9,7 +9,7 @@ use crate::trail::Trail;
 use crate::{
     Mode, assets, changes, diagram, diagram_svg, home, nav, review, search, toc, trail, version,
 };
-use rdy_engine::{Materialized, VersionInfo, VersionPosition};
+use rdy_engine::{CachedDrawing, DiagramCache, Materialized, VersionInfo, VersionPosition};
 use rdy_graph::{EdgeKind, GoverningCache, Graph};
 use rdy_model::redaction::CONTENT_REMOVED;
 use rdy_model::{Block, BlockId, Hash, decision, tree};
@@ -384,11 +384,28 @@ pub enum Kind<'a> {
     ChangesSince(&'a changes::Summary),
 }
 
+/// The renderer's version, as the diagram cache keys a drawing (D-XM8MP).
+const RENDERER: &str = env!("CARGO_PKG_VERSION");
+
+/// The diagram cache's key of a drawing input `normalized` (an admitted source's
+/// [`diagram::Admitted::normalized`]): its BLAKE3 hash, the drawing crate's version, one 0x00
+/// byte, then the renderer's version (D-XM8MP).
+pub(crate) fn cache_key(normalized: &str) -> Vec<u8> {
+    let mut key = Hash::of(normalized.as_bytes()).0.to_vec();
+    key.extend_from_slice(diagram::DRAWING_CRATE.as_bytes());
+    key.push(0);
+    key.extend_from_slice(RENDERER.as_bytes());
+    key
+}
+
 /// The generated diagram files of one build (D-FY4VF, D-KAGB2, D-E8P8J): each drawing once, by
 /// the hash of its standalone bytes, and the build's diagram warnings in the order the pages and
-/// their blocks were built. It belongs to one build; nothing outlives it.
+/// their blocks were built. It belongs to one build; nothing outlives it but what it puts in the
+/// store's diagram cache (D-XM8MP), which it reads before it draws.
 #[derive(Default)]
 pub struct DiagramAssets {
+    /// The store's diagram cache; none for a build with no store.
+    cache: Option<DiagramCache>,
     /// Each resolved source drawn so far: the hash of its standalone file, or why it draws none.
     drawn: HashMap<String, Result<Hash, diagram::Diagram>>,
     /// The standalone SVG of each drawing, by the hash of its bytes.
@@ -411,6 +428,14 @@ enum DiagramShape {
 }
 
 impl DiagramAssets {
+    /// The assets of a build that reads and fills `cache`, the store's diagram cache.
+    pub(crate) fn with_cache(cache: Option<DiagramCache>) -> DiagramAssets {
+        DiagramAssets {
+            cache,
+            ..Default::default()
+        }
+    }
+
     /// The site-relative path of the file of the drawing whose standalone bytes hash to `h`.
     pub fn path(h: &Hash) -> String {
         format!("assets/diagrams/{h}.svg")
@@ -428,35 +453,94 @@ impl DiagramAssets {
     }
 
     /// What `source` (a Mermaid diagram's resolved plain source) draws: the hash of its
-    /// standalone file, else why it draws none. Each source is drawn once per build.
+    /// standalone file, else why it draws none. Each source is drawn once per build, and only
+    /// after its pre-draw refusals: a refused source is never a cache key. An admitted source
+    /// reads the store's diagram cache first; a hit skips drawing, and a miss draws and puts its
+    /// result (D-XM8MP). A row is what a miss computes, so the cache never changes the result.
     fn draw(&mut self, source: &str) -> Result<Hash, diagram::Diagram> {
         if let Some(d) = self.drawn.get(source) {
             return d.clone();
         }
-        // tests can give a source a drawing of their own (one near the SVG bound)
+        // tests can give a source a drawing of their own (one near the SVG bound); it neither
+        // reads nor writes the cache
         #[cfg(test)]
         let given = tests::DRAWN.with_borrow(|d| d.get(source).cloned());
         #[cfg(not(test))]
         let given: Option<String> = None;
-        let rendered = match given {
-            Some(svg) => diagram::Diagram::Svg(svg),
-            None => diagram::render(source),
-        };
-        let drawn = match rendered {
-            diagram::Diagram::Svg(svg) => match diagram_svg::standalone(&svg) {
-                Ok(file) => {
-                    let h = Hash::of(file.as_bytes());
-                    self.standalone.entry(h).or_insert(file);
-                    Ok(h)
+        let drawn = match given {
+            Some(svg) => self.keep(diagram::Diagram::Svg(svg)),
+            None => match diagram::admit(source) {
+                Err(why) => Err(why),
+                Ok(admitted) => {
+                    let key = self
+                        .cache
+                        .as_ref()
+                        .map(|_| cache_key(admitted.normalized()));
+                    let hit = self
+                        .cache
+                        .as_ref()
+                        .zip(key.as_deref())
+                        .and_then(|(c, k)| c.get(k));
+                    match hit {
+                        Some(row) => self.read_row(row),
+                        None => {
+                            let drawn = self.keep(admitted.draw());
+                            if let (Some(c), Some(k)) = (&self.cache, &key)
+                                && let Some(row) = self.row_of(&drawn)
+                            {
+                                c.put(k, &row);
+                            }
+                            drawn
+                        }
+                    }
                 }
+            },
+        };
+        self.drawn.insert(source.to_string(), drawn.clone());
+        drawn
+    }
+
+    /// The result of a drawing: the hash of its standalone file, which this build keeps, or
+    /// why it draws none.
+    fn keep(&mut self, rendered: diagram::Diagram) -> Result<Hash, diagram::Diagram> {
+        match rendered {
+            diagram::Diagram::Svg(svg) => match diagram_svg::standalone(&svg) {
+                Ok(file) => Ok(self.keep_file(file)),
                 Err(reason) => Err(diagram::Diagram::Failed {
                     reason: reason.to_string(),
                 }),
             },
             other => Err(other),
-        };
-        self.drawn.insert(source.to_string(), drawn.clone());
-        drawn
+        }
+    }
+
+    /// Keeps a standalone file and gives its hash.
+    fn keep_file(&mut self, file: String) -> Hash {
+        let h = Hash::of(file.as_bytes());
+        self.standalone.entry(h).or_insert(file);
+        h
+    }
+
+    /// The result a cache row holds, as a miss of its key gives it.
+    fn read_row(&mut self, row: CachedDrawing) -> Result<Hash, diagram::Diagram> {
+        match row {
+            CachedDrawing::File(file) => Ok(self.keep_file(file)),
+            CachedDrawing::Failed(reason) => Err(diagram::Diagram::Failed { reason }),
+            CachedDrawing::Invalid(reason) => Err(diagram::Diagram::Invalid { reason }),
+        }
+    }
+
+    /// The cache row of a drawing's result. An admitted source's drawing is never
+    /// `Unsupported`, and a drawn SVG is its standalone file here.
+    fn row_of(&self, drawn: &Result<Hash, diagram::Diagram>) -> Option<CachedDrawing> {
+        match drawn {
+            Ok(h) => self.standalone.get(h).cloned().map(CachedDrawing::File),
+            Err(diagram::Diagram::Failed { reason }) => Some(CachedDrawing::Failed(reason.clone())),
+            Err(diagram::Diagram::Invalid { reason }) => {
+                Some(CachedDrawing::Invalid(reason.clone()))
+            }
+            Err(_) => None,
+        }
     }
 
     /// The inline copy of drawing `h` for its `place` on a page (its places counted from zero).

@@ -18,11 +18,13 @@ mod prepare;
 pub mod print;
 #[cfg(feature = "probe")]
 pub mod probe;
-/// The feature-off probe: private, and `hit()` compiles to nothing.
+/// The feature-off probe: private, and `hit()` and `prepared()` compile to nothing.
 #[cfg(not(feature = "probe"))]
 mod probe {
     #[inline(always)]
     pub(crate) fn hit() {}
+    #[inline(always)]
+    pub(crate) fn prepared() {}
 }
 pub mod process;
 mod profile_live;
@@ -41,6 +43,15 @@ pub use not_found::{NotFoundKind, NotFoundPage};
 pub use one_page::{RenderedPage, render_publication_page};
 /// Diagrams drawn as SVG, behind the one pinned crate (D-FY4VF).
 pub use rdy_diagram as diagram;
+
+/// The diagram cache's key of `source`, a Mermaid diagram's resolved plain source (D-XM8MP):
+/// the key of its admitted drawing input; none when a pre-draw refusal refuses it.
+#[doc(hidden)]
+pub fn diagram_cache_key(source: &str) -> Option<Vec<u8>> {
+    diagram::admit(source)
+        .ok()
+        .map(|a| page::cache_key(a.normalized()))
+}
 
 use prepare::{Presentation, ProfilePresentation};
 use rdy_engine::publication::PublicationSource;
@@ -1458,6 +1469,7 @@ fn with_shared<R>(
         history,
         profile,
         menu_url,
+        diagram_cache,
         ..
     } = prepared;
     let m: &Materialized = &m;
@@ -1534,7 +1546,7 @@ fn with_shared<R>(
         headers: Default::default(),
         used_blobs: Default::default(),
         draw_diagrams: true,
-        diagrams: Default::default(),
+        diagrams: std::cell::RefCell::new(page::DiagramAssets::with_cache(diagram_cache)),
         governing: Default::default(),
         mode,
         inline_diffs,

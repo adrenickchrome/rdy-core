@@ -1027,7 +1027,11 @@ fn dgm1_flowchart_depth_reads_structure_only() {
         "B\n",
         "end\n",
     );
-    assert_eq!(short(render(&separated)), invalid(UNCLOSED), "{separated}");
+    assert_eq!(
+        short(render(&separated)),
+        invalid(OVER_DEPTH),
+        "{separated}"
+    );
     // keywords in an arrow's label: the depth bound comes first, so the arrow bound's reason
     // shows that they add no depth (ruling final: an arrow is over 256 bytes here)
     for src in [
@@ -1225,7 +1229,13 @@ fn dgm1_unclosed_subgraphs_and_long_arrows_are_refused() {
     ] {
         assert_eq!(arrow(256).len(), 256, "{form}");
         let src = |n: usize| format!("flowchart LR\nA {} B\n", arrow(n));
-        assert!(drawn(&render(&src(256))), "{form}: 256 bytes");
+        // Orchestrator ruling task-6, item 3 (2026-10-27): the 256-byte dotted and long forms
+        // span 250 and 254 ranks, over N = 200, so the arrow cost refuses them (D-VACA9)
+        if matches!(form, "dotted" | "long") {
+            assert_eq!(render(&src(256)), invalid(OVER_ARROWS), "{form}: 256 bytes");
+        } else {
+            assert!(drawn(&render(&src(256))), "{form}: 256 bytes");
+        }
         assert_eq!(
             short(render(&src(257))),
             invalid(OVER_ARROW),
@@ -1242,4 +1252,422 @@ fn dgm1_unclosed_subgraphs_and_long_arrows_are_refused() {
     // the same bytes in a node label are no arrow
     let label = format!("flowchart LR\nA[\"{}\"] --> B\n", ".".repeat(1000));
     assert!(drawn(&render(&label)), "dots in a node label");
+}
+
+/// rdb1 (D-R7C3W): an arrow that starts but has no end on its line counts from its start to the
+/// line end, in UTF-8 bytes. 256 bytes are never refused for their length; 257 are, in every
+/// form. A node label is no arrow, and a complete plain `--` before a long id is a complete arrow.
+#[test]
+fn rdb1_unended_arrow_lengths_use_the_line_end() {
+    let dotted = |n: usize| format!("-. {}", ".".repeat(n - 3));
+    let solid = |n: usize| format!("-{}", " ".repeat(n - 1));
+    let thick = |n: usize| format!("={}", " ".repeat(n - 1));
+    let invisible = |n: usize| format!("~~{}", " ".repeat(n - 2));
+    let piped = |n: usize| format!("-->|{}", "y".repeat(n - 4));
+    // a left head, with spaces before the run or with none
+    let left_spaced = |n: usize| format!("< -. {}", ".".repeat(n - 5));
+    let x_spaced = |n: usize| format!("x -{}", " ".repeat(n - 3));
+    let x_dotted = |n: usize| format!("x-. {}", ".".repeat(n - 4));
+    let o_dotted = |n: usize| format!("o-. {}", ".".repeat(n - 4));
+    // `é` is two bytes
+    let wide = |n: usize| format!("-->|{}{}", "y".repeat((n - 4) % 2), "é".repeat((n - 4) / 2));
+    for (form, arrow) in [
+        ("dotted", &dotted as &dyn Fn(usize) -> String),
+        ("solid", &solid),
+        ("thick", &thick),
+        ("invisible", &invisible),
+        ("piped", &piped),
+        ("wide", &wide),
+        ("left head, spaced", &left_spaced),
+        ("x head, spaced", &x_spaced),
+        ("x head", &x_dotted),
+        ("o head", &o_dotted),
+    ] {
+        for n in [256, 257] {
+            assert_eq!(arrow(n).len(), n, "{form}");
+        }
+        for end in ["\n", "\r\n", ""] {
+            let src = |n: usize| format!("flowchart LR\nA {}{end}", arrow(n));
+            assert_ne!(
+                short(render(&src(256))),
+                invalid(OVER_ARROW),
+                "{form}: 256 bytes, ending {end:?}"
+            );
+            assert_eq!(
+                short(render(&src(257))),
+                invalid(OVER_ARROW),
+                "{form}: 257 bytes, ending {end:?}"
+            );
+        }
+        // a later line is not part of the arrow
+        let next = format!("flowchart LR\nA {}\nB --> C\n", arrow(256));
+        assert_ne!(
+            short(render(&next)),
+            invalid(OVER_ARROW),
+            "{form}: next line"
+        );
+    }
+    // the same bytes in a node label are no arrow
+    let label = format!("flowchart LR\nA[\"{}\"] --> B\n", ".".repeat(1000));
+    assert!(drawn(&render(&label)), "dots in a node label");
+    // a complete plain `--` wins over the inline label it could start: the long id is its end
+    let long_id = format!("flowchart LR\nA -- {}\n", "B".repeat(300));
+    assert!(drawn(&render(&long_id)), "{:?}", short(render(&long_id)));
+    // an `x` or `o` that the identifier reads on from is a node, not a left head
+    for head in ["x", "o"] {
+        let node = format!("flowchart LR\nA {head}-ray[\"{}\"]\n", "y".repeat(300));
+        assert!(drawn(&render(&node)), "{head}: {:?}", short(render(&node)));
+    }
+    // complete arrows with an `x` or `o` head draw
+    for src in ["flowchart LR\nA x--> B\n", "flowchart LR\nA o--o B\n"] {
+        assert!(drawn(&render(src)), "{src:?}: {:?}", short(render(src)));
+    }
+}
+
+/// `flowchart TD`, one subgraph `header`, then `blanks` blank lines, then a body and `end`, with
+/// line ending `nl`.
+fn blank_after(header: &str, blank: &str, repeat: usize, nl: &str) -> String {
+    format!(
+        "flowchart TD{nl}{header}{nl}{}A --> B{nl}end{nl}",
+        format!("{blank}{nl}").repeat(repeat)
+    )
+}
+
+/// rdb1 (D-R7C3W): rdy drops each blank line that directly follows a subgraph header before it
+/// draws. Each source draws exactly what the same source without those lines draws.
+#[test]
+fn rdb1_blank_lines_after_subgraph_headers_draw() {
+    for header in [
+        "subgraph S",
+        "subgraph S[the title]",
+        "subgraph S \"the title\"",
+        "subgraph \"the title\"",
+        "X subgraph S",
+    ] {
+        for nl in ["\n", "\r\n", "\r"] {
+            let clean = svg(&blank_after(header, "", 0, nl));
+            for blank in ["", " ", "\t", " \t  "] {
+                for repeat in [1, 3] {
+                    let src = blank_after(header, blank, repeat, nl);
+                    assert!(
+                        render(&src) == Diagram::Svg(clean.clone()),
+                        "{src:?}: {:?}",
+                        short(render(&src))
+                    );
+                }
+            }
+        }
+    }
+    // a line that ends in CR CR LF keeps one CR LF once CRLF becomes LF: the whole line end goes
+    for (src, clean) in [
+        (
+            "flowchart TD\r\r\nsubgraph S\r\r\n\r\r\nA --> B\r\r\nend\r\r\n",
+            "flowchart TD\r\r\nsubgraph S\r\r\nA --> B\r\r\nend\r\r\n",
+        ),
+        (
+            "flowchart TD\r\r\nsubgraph S\r\r\n  \r\r\n\t\r\r\nA --> B\r\r\nend\r\r\n",
+            "flowchart TD\r\r\nsubgraph S\r\r\nA --> B\r\r\nend\r\r\n",
+        ),
+    ] {
+        assert!(
+            render(src) == Diagram::Svg(svg(clean)),
+            "{src:?}: {:?}",
+            short(render(src))
+        );
+    }
+    // a blank after a line the pinned crate drops before it parses
+    for dropped in ["%%{init: {}}%%", "accTitle: a title"] {
+        let src = format!("flowchart TD\nsubgraph S\n{dropped}\n\nA --> B\nend\n");
+        let clean = format!("flowchart TD\nsubgraph S\n{dropped}\nA --> B\nend\n");
+        assert!(render(&src) == Diagram::Svg(svg(&clean)), "{src:?}");
+    }
+    // closed nesting 32 deep draws; the blank lines add nothing
+    let nested = |blank: &str| {
+        nest(
+            "flowchart TD",
+            "",
+            32,
+            |i| format!("subgraph S{i}\n{blank}"),
+            "A --> B\n",
+            "end\n",
+        )
+    };
+    assert!(render(&nested("\n  \n")) == Diagram::Svg(svg(&nested(""))));
+    // a blank run at the end of the text in a subgraph that no `end` closes
+    for src in [
+        "flowchart TD\nsubgraph S\n\n  \n",
+        "flowchart TD\nsubgraph S\n\t ",
+        "flowchart TD\nsubgraph S\n\n",
+    ] {
+        assert_eq!(short(render(src)), invalid(UNCLOSED), "{src:?}");
+    }
+}
+
+/// The arrow bound's refusal (D-VACA9, D-NN3GQ), with N = 200 (D-0S2FW).
+const OVER_ARROWS: &str = "the source has over 200 arrows and groups, counting a longer or labelled arrow as more than one";
+
+/// `head`, then one line per arrow `0..n`.
+fn arrow_lines(head: &str, n: usize, line: impl Fn(usize) -> String) -> String {
+    let mut s = format!("{head}\n");
+    for i in 0..n {
+        s.push_str(&line(i));
+        s.push('\n');
+    }
+    s
+}
+
+/// A plain flowchart chain of `n` arrows, one per line: each costs 1.
+fn plain_chain(n: usize) -> String {
+    arrow_lines("flowchart LR", n, |i| format!("A{i} --> A{}", i + 1))
+}
+
+/// Whether `src` draws.
+fn draws(src: &str) -> bool {
+    matches!(render(src), Diagram::Svg(_))
+}
+
+/// rdb6 (D-VACA9, D-R7C3W): a source whose arrows cost exactly N draws, and one that costs
+/// N + 1 is refused with the exact reason. A longer arrow costs its span; each family's chain
+/// reaches the bound; and the hidden arrows that stack separate subgraphs (D-438Y2, D-ZJVRT)
+/// count.
+#[test]
+fn rdb6_exact_bound_draws_and_next_is_refused() {
+    assert_eq!(rdy_diagram::MAX_ARROWS, 200);
+    let n = rdy_diagram::MAX_ARROWS;
+    // the plain chain
+    assert!(draws(&plain_chain(n)));
+    assert_eq!(render(&plain_chain(n + 1)), invalid(OVER_ARROWS));
+    // a `--->` chain: half as many arrows, each costs 2
+    let long = |extra: bool| {
+        let mut s = arrow_lines("flowchart LR", n / 2, |i| format!("A{i} ---> A{}", i + 1));
+        if extra {
+            s.push_str("Z --> A0\n");
+        }
+        s
+    };
+    assert!(draws(&long(false)));
+    assert_eq!(render(&long(true)), invalid(OVER_ARROWS));
+    // each line family's chain, inside the statement and byte bounds
+    let class = |k: usize| arrow_lines("classDiagram", k, |i| format!("C{i} --> C{}", i + 1));
+    let state = |k: usize| arrow_lines("stateDiagram-v2", k, |i| format!("S{i} --> S{}", i + 1));
+    let sequence = |k: usize| {
+        arrow_lines("sequenceDiagram", k, |i| {
+            if i % 2 == 0 {
+                "A->>B: go".to_string()
+            } else {
+                "B-->>A: back".to_string()
+            }
+        })
+    };
+    for family in [&class as &dyn Fn(usize) -> String, &state, &sequence] {
+        let at = family(n);
+        assert!(at.len() <= 65536 && at.lines().count() <= 2048);
+        assert!(draws(&at), "{at}");
+        assert_eq!(render(&family(n + 1)), invalid(OVER_ARROWS));
+    }
+    // four separate subgraphs that each set their own direction: 3 hidden arrows and the 4
+    // subgraphs count
+    let four = |own: usize| {
+        let mut s = String::from("flowchart TB\n");
+        let mut left = own;
+        for p in 0..4 {
+            let k = left / (4 - p);
+            left -= k;
+            s.push_str(&format!("subgraph P{p}\ndirection LR\n"));
+            for i in 0..k {
+                s.push_str(&format!("p{p}n{i} --> p{p}n{}\n", i + 1));
+            }
+            s.push_str("end\n");
+        }
+        s
+    };
+    assert_eq!(render(&four(n - 6)), invalid(OVER_ARROWS));
+    assert!(draws(&four(n - 7)));
+    // without its own directions nothing is stacked: N - 4 arrows and the 4 subgraphs draw
+    assert!(draws(&four(n - 4).replace("direction LR\n", "")));
+    assert_eq!(
+        render(&four(n - 3).replace("direction LR\n", "")),
+        invalid(OVER_ARROWS)
+    );
+}
+
+/// rdb6 (D-VACA9): a labelled arrow costs its span times W, the labelled weight. With W = 1 a
+/// label costs exactly the span: N labelled arrows draw, and so does a mix of forms whose cost
+/// is N; one more is refused. Empty label text and class cardinalities are included.
+#[test]
+fn rdb6_label_weight_and_mixed_boundary_are_exact() {
+    assert_eq!(rdy_diagram::LABELLED_ARROW_WEIGHT, 1);
+    let n = rdy_diagram::MAX_ARROWS;
+    let w = rdy_diagram::LABELLED_ARROW_WEIGHT;
+    let labelled = |k: usize| arrow_lines("flowchart LR", k, |i| format!("A{i} -->|y| A{}", i + 1));
+    assert!(draws(&labelled(n / w)));
+    assert_eq!(render(&labelled(n / w + 1)), invalid(OVER_ARROWS));
+    // a mix: 40 plain, 25 labelled of span 2, 20 inline-labelled of span 3, 40 dotted, and
+    // 10 thick open runs of span 1 (one less than their run): 200
+    let mix = |extra: &str| {
+        let mut s = String::from("flowchart LR\n");
+        for i in 0..40 {
+            s.push_str(&format!("a{i} --> a{}\n", i + 1));
+        }
+        for i in 0..25 {
+            s.push_str(&format!("b{i} --->|y| b{}\n", i + 1));
+        }
+        for i in 0..20 {
+            s.push_str(&format!("c{i} -- y ----> c{}\n", i + 1));
+        }
+        for i in 0..40 {
+            s.push_str(&format!("d{i} -.-> d{}\n", i + 1));
+        }
+        for i in 0..10 {
+            s.push_str(&format!("e{i} === e{}\n", i + 1));
+        }
+        s.push_str(extra);
+        s
+    };
+    assert!(draws(&mix("")));
+    assert_eq!(render(&mix("z1 ~~~ z2\n")), invalid(OVER_ARROWS));
+    // class cardinalities and labels, empty and not, cost the span
+    let class = |k: usize| {
+        arrow_lines("classDiagram", k, |i| match i % 4 {
+            0 => format!("C{i} \"1\" --> \"*\" C{}", i + 1),
+            1 => format!("C{i} \"\" --> C{} : uses", i + 1),
+            2 => format!("C{i} --> C{} :", i + 1),
+            _ => format!("C{i} --> C{}", i + 1),
+        })
+    };
+    assert!(draws(&class(n)));
+    assert_eq!(render(&class(n + 1)), invalid(OVER_ARROWS));
+    // empty and nonempty transition labels and message text
+    let state = |k: usize| {
+        arrow_lines("stateDiagram-v2", k, |i| {
+            if i % 2 == 0 {
+                format!("S{i} --> S{} :", i + 1)
+            } else {
+                format!("S{i} --> S{} : go", i + 1)
+            }
+        })
+    };
+    assert!(draws(&state(n)));
+    assert_eq!(render(&state(n + 1)), invalid(OVER_ARROWS));
+    let sequence = |k: usize| {
+        arrow_lines("sequenceDiagram", k, |i| {
+            if i % 2 == 0 {
+                "A->>B:".to_string()
+            } else {
+                "B-->>A: back".to_string()
+            }
+        })
+    };
+    assert!(draws(&sequence(n)));
+    assert_eq!(render(&sequence(n + 1)), invalid(OVER_ARROWS));
+}
+
+/// rdb6 (D-NN3GQ, D-VACA9): each state note and each boundary between concurrent regions costs
+/// one, as the pinned crate builds an arrow for each before layout; the note's text adds
+/// nothing. A composite with k nonempty regions costs 1 + k + (k - 1) with its regions.
+#[test]
+fn rdb6_notes_and_region_boundaries_are_at_the_bound() {
+    let n = rdy_diagram::MAX_ARROWS;
+    // transitions, then notes
+    let notes = |t: usize, k: usize| {
+        let mut s = arrow_lines("stateDiagram-v2", t, |i| format!("S{i} --> S{}", i + 1));
+        for i in 0..k {
+            s.push_str(&format!("note right of S{i} : x --> y\n"));
+        }
+        s
+    };
+    assert!(draws(&notes(n - 1, 1)));
+    assert_eq!(render(&notes(n - 1, 2)), invalid(OVER_ARROWS));
+    // `t` transitions shared out over `k` regions of one composite: the composite, its k
+    // regions and their k - 1 boundaries cost 2k more
+    let regions = |t: usize, k: usize| {
+        let mut s = String::from("stateDiagram-v2\nstate C {\n");
+        let mut left = t;
+        for r in 0..k {
+            if r > 0 {
+                s.push_str("--\n");
+            }
+            let m = left / (k - r);
+            left -= m;
+            s.push_str(&format!("state R{r}\n"));
+            for i in 0..m {
+                s.push_str(&format!("R{r}_{i} --> R{r}_{}\n", i + 1));
+            }
+        }
+        s.push_str("}\n");
+        s
+    };
+    assert!(draws(&regions(n - 6, 3)));
+    assert_eq!(render(&regions(n - 5, 3)), invalid(OVER_ARROWS));
+    assert_eq!(render(&regions(n - 6, 4)), invalid(OVER_ARROWS));
+}
+
+/// rdb6 (D-NN3GQ): each flowchart subgraph, composite state, class namespace and concurrent
+/// region costs one, toward the same N as the arrows. With no arrow, a source of 200 groups
+/// draws and one of 201 is refused with the exact reason, in each kind; so is a mix of arrows
+/// and subgraphs.
+#[test]
+fn rdb6_groups_are_at_the_bound() {
+    let n = rdy_diagram::MAX_ARROWS;
+    let many = |head: &str, k: usize, one: &dyn Fn(usize) -> String| {
+        let mut s = format!("{head}\n");
+        for i in 0..k {
+            s.push_str(&one(i));
+        }
+        s
+    };
+    let subgraphs = |k: usize| {
+        many("flowchart LR", k, &|i| {
+            format!("subgraph G{i}\nn{i}\nend\n")
+        })
+    };
+    let composites = |k: usize| {
+        many("stateDiagram-v2", k, &|i| {
+            format!("state C{i} {{\nstate X{i}\n}}\n")
+        })
+    };
+    let namespaces = |k: usize| {
+        many("classDiagram", k, &|i| {
+            format!("namespace N{i} {{\nclass C{i}\n}}\n")
+        })
+    };
+    for kind in [
+        &subgraphs as &dyn Fn(usize) -> String,
+        &composites,
+        &namespaces,
+    ] {
+        let at = kind(n);
+        assert!(at.lines().count() <= 2048, "{at}");
+        assert!(draws(&at), "{at}");
+        assert_eq!(render(&kind(n + 1)), invalid(OVER_ARROWS), "{at}");
+    }
+    // one composite with k regions costs 2k; one more composite with a child makes it odd
+    let regions = |k: usize, extra: &str| {
+        format!(
+            "{}}}\n{extra}",
+            many("stateDiagram-v2\nstate C {", k, &|i| {
+                if i == 0 {
+                    format!("state R{i}\n")
+                } else {
+                    format!("--\nstate R{i}\n")
+                }
+            })
+        )
+    };
+    assert!(draws(&regions(n / 2, "")));
+    assert_eq!(
+        render(&regions(n / 2, "state D {\nstate Y\n}\n")),
+        invalid(OVER_ARROWS)
+    );
+    assert_eq!(render(&regions(n / 2 + 1, "")), invalid(OVER_ARROWS));
+    // a mix: 100 arrows and 100 subgraphs draw; 100 arrows and 101 subgraphs do not
+    let mix = |groups: usize| {
+        let mut s = plain_chain(100);
+        for i in 0..groups {
+            s.push_str(&format!("subgraph G{i}\nn{i}\nend\n"));
+        }
+        s
+    };
+    assert!(draws(&mix(100)));
+    assert_eq!(render(&mix(101)), invalid(OVER_ARROWS));
 }

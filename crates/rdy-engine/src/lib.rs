@@ -183,6 +183,7 @@ pub use pack_load::{
 pub use rdy_store::BlobState;
 pub use rdy_store::OpenReport;
 pub use rdy_store::fsutil::{sync_dir, write_durable};
+pub use rdy_store::{CachedDrawing, DiagramCache};
 /// The notice channel of the library crates: stderr, unless a test captures the notice it
 /// provokes ([`capture_notices_for_tests`]).
 pub use rdy_store::{NoticeCapture, capture_notices_for_tests, notice};

@@ -9,6 +9,11 @@ use std::collections::BTreeMap;
 /// The most entries a list shows; the rest are one "+N more" entry that leads to the folder page.
 const CAP: usize = 50;
 
+/// The most entries the added first-level lists hold in total on one page (D-RQ3X4).
+/// The number was measured on the bench on 2026-10-25 (10k docs): the largest page sidebar
+/// is 49,628 bytes at 79 and 50,445 at 80, and the bound is under 50,000.
+const ADDED_ENTRIES: usize = 79;
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Nav {
     pub groups: Vec<NavGroup>,
@@ -78,12 +83,15 @@ pub fn build(
         ..NavEntry::default()
     };
     let mut groups = vec![];
+    // the fill class of each group's own entries, in step with `groups`
+    let mut fills = vec![];
     let mut first = vec![plain("Home", "index.html")];
     first.extend(ctx.list(None, relative(from, "index.html")));
     groups.push(NavGroup {
         entries: first,
         ..NavGroup::default()
     });
+    fills.push(Fill::Rest);
     for folder in site.top_folders() {
         let Some(href) = site.page(&folder.id).map(|p| relative(from, &p)) else {
             continue;
@@ -94,6 +102,11 @@ pub fn build(
             change: review.and_then(|r| r.page_mark(&folder.id)),
             entries: ctx.list(Some(&folder.id), href.clone()),
             href: Some(href),
+        });
+        fills.push(if chain.first() == Some(&folder.id) {
+            Fill::Path
+        } else {
+            Fill::Rest
         });
     }
     let mut reference = vec![];
@@ -112,7 +125,9 @@ pub fn build(
             entries: reference,
             ..NavGroup::default()
         });
+        fills.push(Fill::Rest);
     }
+    cap_added(&mut groups, &fills, ADDED_ENTRIES);
     let removed = review
         .map(|r| {
             // a named profile's removed page reads as its old selected side titles it
@@ -121,6 +136,105 @@ pub fn build(
         })
         .unwrap_or_default();
     Nav { groups, removed }
+}
+
+/// Where a group's closed folders come in the fill of [`ADDED_ENTRIES`]: the group of the
+/// page's top-level folder, or any other group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fill {
+    Path,
+    Rest,
+}
+
+/// One closed folder's place in the fill order and the size of its list.
+struct Closed {
+    /// 0 for a closed folder in a `Path` group, 1 for one in a `Rest` group.
+    class: u8,
+    /// How many open entries hold it, plus one; 0 in a `Rest` group, where depth is not ranked.
+    level: usize,
+    /// The entries of its list, a "+N more" entry included.
+    size: usize,
+}
+
+/// Cuts the added first-level lists of `groups` so that the lists kept hold at most `limit`
+/// entries in total (D-RQ3X4). `fills[i]` is the [`Fill`] of group `i`'s own entries.
+///
+/// A closed folder is a folder entry that is neither the page nor on its path; its list is its
+/// children. The lists fill in this order: those in a `Path` group, the deepest level first,
+/// then those in a `Rest` group; sidebar order decides within a level. A list that does not fit
+/// is cut, and so is every closed folder after it in that order: the folder keeps its label and
+/// link and has no list. The open lists of the path and of the top-level groups never count and
+/// never change.
+fn cap_added(groups: &mut [NavGroup], fills: &[Fill], limit: usize) {
+    // `apply_cut` walks every group, so each group needs its fill (final review M4)
+    debug_assert_eq!(groups.len(), fills.len(), "one fill per group");
+    let mut closed = vec![];
+    for (g, &fill) in groups.iter().zip(fills) {
+        collect_closed(&g.entries, fill, 1, &mut closed);
+    }
+    // `closed` is in sidebar order; the sort is stable
+    let mut order: Vec<usize> = (0..closed.len()).collect();
+    order.sort_by_key(|&i| (closed[i].class, std::cmp::Reverse(closed[i].level)));
+    let mut cut = vec![false; closed.len()];
+    let mut total = 0usize;
+    let mut fits = true;
+    for &i in &order {
+        fits = fits && total.saturating_add(closed[i].size) <= limit;
+        if fits {
+            total += closed[i].size;
+        } else {
+            cut[i] = true;
+        }
+    }
+    if !cut.contains(&true) {
+        return;
+    }
+    let mut seq = 0;
+    for g in groups.iter_mut() {
+        apply_cut(&mut g.entries, &mut seq, &cut);
+    }
+}
+
+/// The closed folders of `entries` in sidebar order. `level` is the depth of `entries` below
+/// the group.
+fn collect_closed(entries: &[NavEntry], fill: Fill, level: usize, out: &mut Vec<Closed>) {
+    for e in entries {
+        if !e.folder {
+            continue;
+        }
+        if e.current || e.on_path {
+            collect_closed(&e.children, fill, level + 1, out);
+        } else {
+            let (class, level) = match fill {
+                Fill::Path => (0, level),
+                Fill::Rest => (1, 0),
+            };
+            out.push(Closed {
+                class,
+                level,
+                size: e.children.len(),
+            });
+        }
+    }
+}
+
+/// Turns each closed folder of `entries` that `cut` marks into a page link, walking in the
+/// order [`collect_closed`] lists them; `seq` counts the closed folders passed.
+fn apply_cut(entries: &mut [NavEntry], seq: &mut usize, cut: &[bool]) {
+    for e in entries {
+        if !e.folder {
+            continue;
+        }
+        if e.current || e.on_path {
+            apply_cut(&mut e.children, seq, cut);
+        } else {
+            if cut[*seq] {
+                e.folder = false;
+                e.children = vec![];
+            }
+            *seq += 1;
+        }
+    }
 }
 
 /// The shortest link from page `from` to page `to`, both site-relative: a sibling is its bare
@@ -329,5 +443,321 @@ mod tests {
         assert_eq!((l[0].label.as_str(), l[49].label.as_str()), ("e70", "e119"));
         let l = cap(entries(120, None), "f".into());
         assert_eq!(l[0].label, "e0");
+    }
+
+    /// A closed folder whose list holds `size` entries.
+    fn closed(label: &str, size: usize) -> NavEntry {
+        NavEntry {
+            label: label.into(),
+            href: format!("{label}.html"),
+            folder: true,
+            children: (0..size)
+                .map(|i| NavEntry {
+                    label: format!("{label}-{i}"),
+                    href: format!("{label}-{i}.html"),
+                    ..NavEntry::default()
+                })
+                .collect(),
+            ..NavEntry::default()
+        }
+    }
+
+    /// An open folder entry (`current` or on the path) with `children`.
+    fn open(label: &str, current: bool, children: Vec<NavEntry>) -> NavEntry {
+        NavEntry {
+            label: label.into(),
+            href: format!("{label}.html"),
+            current,
+            on_path: !current,
+            folder: true,
+            children,
+            ..NavEntry::default()
+        }
+    }
+
+    fn group(entries: Vec<NavEntry>) -> NavGroup {
+        NavGroup {
+            entries,
+            ..NavGroup::default()
+        }
+    }
+
+    fn find<'a>(groups: &'a [NavGroup], label: &str) -> &'a NavEntry {
+        fn walk<'a>(entries: &'a [NavEntry], label: &str) -> Option<&'a NavEntry> {
+            entries.iter().find_map(|e| {
+                (e.label == label)
+                    .then_some(e)
+                    .or_else(|| walk(&e.children, label))
+            })
+        }
+        groups
+            .iter()
+            .find_map(|g| walk(&g.entries, label))
+            .unwrap_or_else(|| panic!("no entry {label}"))
+    }
+
+    /// The labels of the closed folders that still hold a list, in sidebar order.
+    fn listed(groups: &[NavGroup], names: &[&str]) -> Vec<String> {
+        names
+            .iter()
+            .filter(|n| find(groups, n).folder)
+            .map(|n| n.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn rdb5_added_lists_fill_beside_the_path_then_rest() {
+        let build = || {
+            vec![
+                group(vec![NavEntry {
+                    label: "Home".into(),
+                    ..NavEntry::default()
+                }]),
+                group(vec![closed("R1", 4), closed("R2", 2)]),
+                group(vec![closed("A", 3)]),
+                group(vec![closed("R3", 5)]),
+            ]
+        };
+        let fills = [Fill::Rest, Fill::Rest, Fill::Path, Fill::Rest];
+        let names = ["R1", "R2", "A", "R3"];
+        let mut g = build();
+        cap_added(&mut g, &fills, 9);
+        assert_eq!(listed(&g, &names), ["R1", "R2", "A"]);
+        assert!(!find(&g, "R3").folder);
+        let mut g = build();
+        cap_added(&mut g, &fills, 6);
+        assert_eq!(listed(&g, &names), ["A"]);
+        let mut g = build();
+        cap_added(&mut g, &fills, 14);
+        assert_eq!(listed(&g, &names), names);
+    }
+
+    #[test]
+    fn rdb5_deeper_path_levels_fill_first() {
+        let build = || {
+            vec![
+                group(vec![
+                    closed("A", 3),
+                    open(
+                        "P",
+                        false,
+                        vec![closed("B", 4), open("Q", true, vec![closed("C", 5)])],
+                    ),
+                ]),
+                group(vec![closed("D", 1)]),
+            ]
+        };
+        let fills = [Fill::Path, Fill::Rest];
+        let names = ["A", "B", "C", "D"];
+        let mut g = build();
+        cap_added(&mut g, &fills, 12);
+        assert_eq!(listed(&g, &names), ["A", "B", "C"]);
+        let mut g = build();
+        cap_added(&mut g, &fills, 9);
+        assert_eq!(listed(&g, &names), ["B", "C"]);
+        let mut g = build();
+        cap_added(&mut g, &fills, 5);
+        assert_eq!(listed(&g, &names), ["C"]);
+        let mut g = build();
+        cap_added(&mut g, &fills, 13);
+        assert_eq!(listed(&g, &names), names);
+    }
+
+    #[test]
+    fn rdb5_a_list_past_the_cap_is_a_page_link() {
+        let mut marked = closed("Y", 5);
+        marked.change = Some(Mark::Edited);
+        marked.change_href = Some("changes.html#y".into());
+        let mut g = vec![group(vec![
+            closed("X", 3),
+            marked.clone(),
+            closed("Z", 0),
+            closed("W", 1),
+        ])];
+        cap_added(&mut g, &[Fill::Rest], 6);
+        let x = find(&g, "X");
+        assert!(x.folder);
+        assert_eq!(x.children.len(), 3);
+        let y = find(&g, "Y");
+        assert!(!y.folder);
+        assert!(y.children.is_empty());
+        assert_eq!(
+            (
+                y.label.as_str(),
+                y.href.as_str(),
+                y.change,
+                y.change_href.as_deref()
+            ),
+            ("Y", "Y.html", Some(Mark::Edited), Some("changes.html#y"))
+        );
+        assert!(!y.current && !y.on_path && y.more.is_none());
+        // every later closed folder is cut, an empty one and one that would fit included
+        for later in ["Z", "W"] {
+            let e = find(&g, later);
+            assert!(!e.folder && e.children.is_empty(), "{later}");
+            assert_eq!(e.href, format!("{later}.html"));
+        }
+    }
+
+    #[test]
+    fn rdb5_each_kept_list_keeps_fifty_and_more() {
+        let long = || {
+            let mut f = closed("L", 50);
+            f.children.push(more(53, "L.html".into()));
+            f
+        };
+        assert_eq!(long().children.len(), 51);
+        let mut g = vec![group(vec![long(), closed("S", 1)])];
+        cap_added(&mut g, &[Fill::Rest], 51);
+        let l = find(&g, "L");
+        assert!(l.folder);
+        assert_eq!(l.children.len(), 51);
+        assert_eq!(l.children[50].more, Some((3, "L.html".into())));
+        // the next list does not fit
+        assert!(!find(&g, "S").folder);
+        // a list over the limit is cut whole, never trimmed
+        let mut g = vec![group(vec![long()])];
+        cap_added(&mut g, &[Fill::Rest], 50);
+        let l = find(&g, "L");
+        assert!(!l.folder);
+        assert!(l.children.is_empty());
+    }
+
+    #[test]
+    fn rdb5_open_lists_never_count_or_cut() {
+        let plain = |n: usize| -> Vec<NavEntry> {
+            (0..n)
+                .map(|i| NavEntry {
+                    label: format!("d{i}"),
+                    href: format!("d{i}.html"),
+                    ..NavEntry::default()
+                })
+                .collect()
+        };
+        let mut g = vec![
+            group(vec![
+                open("P", false, plain(60)),
+                open("Q", true, plain(7)),
+                closed("K", 2),
+            ]),
+            group(vec![plain(1).remove(0), plain(1).remove(0)]),
+        ];
+        cap_added(&mut g, &[Fill::Path, Fill::Rest], 0);
+        assert_eq!(find(&g, "P").children.len(), 60);
+        assert!(find(&g, "P").folder);
+        assert_eq!(find(&g, "Q").children.len(), 7);
+        assert!(find(&g, "Q").folder);
+        assert_eq!((g[0].entries.len(), g[1].entries.len()), (3, 2));
+        // only a closed folder changes
+        let k = find(&g, "K");
+        assert!(!k.folder && k.children.is_empty());
+    }
+}
+
+/// The sidebars of a generated site, built through the one site build.
+#[cfg(test)]
+mod site_tests {
+    use super::*;
+    use crate::{Mode, NotFoundOut, Scope, Slots, build_site_from, prepare};
+
+    /// The page's navigation element, from its opening tag to its closing tag.
+    fn nav_of<'a>(html: &'a str, page: &str) -> &'a str {
+        let from = html
+            .find("<nav aria-label=\"Pages\">")
+            .unwrap_or_else(|| panic!("{page}: no navigation"));
+        let to = html[from..]
+            .find("</nav>")
+            .unwrap_or_else(|| panic!("{page}: navigation not closed"));
+        &html[from..from + to]
+    }
+
+    /// The closed folders of `nav`: the text of each from its `<details class="nav-fold">` to
+    /// the `</details>` that ends it (a closed folder holds page links only).
+    fn closed_folders(nav: &str) -> Vec<&str> {
+        const OPEN: &str = "<details class=\"nav-fold\">";
+        nav.match_indices(OPEN)
+            .map(|(i, _)| {
+                let end = nav[i..].find("</details>").expect("details closed");
+                &nav[i..i + end]
+            })
+            .collect()
+    }
+
+    /// The top-level groups of `nav`.
+    fn groups(nav: &str) -> Vec<&str> {
+        nav.split("<li class=\"nav-group\">").skip(1).collect()
+    }
+
+    #[test]
+    fn rdb5_a_large_site_holds_at_most_the_cap_per_page() {
+        // the tree size is fixed (it was ADDED_ENTRIES / 50 + 2 = 10 when the cap was 400); it stays above the cap
+        let k = 10;
+        let dir = tempfile::tempdir().expect("tempdir");
+        rdy_engine::testkit::generate_tree(dir.path(), 10 + 10 * k, 5, 1);
+        let r = rdy_engine::Rdy::open(dir.path()).expect("open");
+        let read = r.read();
+        let prepared = prepare::source(&read, &Scope::View("work".into()), prepare::Purpose::Site)
+            .expect("prepare");
+        let built = build_site_from(
+            prepared,
+            Mode::Static,
+            Slots::Notices,
+            None,
+            NotFoundOut::None,
+        )
+        .expect("build");
+        for page in [
+            "index.html",
+            "area-0/part-10/doc-0.html",
+            "area-9/part-19/doc-4.html",
+        ] {
+            let bytes = built
+                .site
+                .files
+                .get(page)
+                .unwrap_or_else(|| panic!("no {page}"));
+            let html = std::str::from_utf8(bytes).expect("utf-8");
+            let nav = nav_of(html, page);
+            assert!(!nav.contains("<script"), "{page}: script in the navigation");
+            let closed = closed_folders(nav);
+            let entries: usize = closed.iter().map(|c| c.matches("<li").count()).sum();
+            assert!(
+                entries <= ADDED_ENTRIES,
+                "{page}: {entries} added entries over {ADDED_ENTRIES}"
+            );
+            if page == "index.html" {
+                continue;
+            }
+            // the path's group holds the page link; its closed folders all hold their lists
+            let on_page: Vec<&str> = groups(nav)
+                .into_iter()
+                .filter(|g| g.contains("aria-current=\"page\""))
+                .collect();
+            assert_eq!(on_page.len(), 1, "{page}");
+            let own = closed_folders(on_page[0]);
+            assert!(own.len() >= 9, "{page}: {} closed folders", own.len());
+            for c in &own {
+                assert!(
+                    c.contains("<ul class=\"nav-sub\">"),
+                    "{page}: a path folder lost its list"
+                );
+            }
+            // another top-level group has a closed folder that the cap cut: a plain link to its folder page
+            const LINK: &str = "<li class=\"nav-item\"><a href=\"";
+            let plain = groups(nav)
+                .into_iter()
+                .filter(|g| !g.contains("aria-current=\"page\""))
+                .flat_map(|g| g.split(LINK).skip(1))
+                .any(|rest| {
+                    // a cut folder links to its folder page; a doc link ends in `doc-N.html`
+                    rest.split('"')
+                        .next()
+                        .is_some_and(|h| h.contains("part-") && h.ends_with("/index.html"))
+                });
+            assert!(
+                plain,
+                "{page}: no closed folder of another group is a page link"
+            );
+        }
     }
 }

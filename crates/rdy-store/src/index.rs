@@ -1,7 +1,10 @@
 use crate::error::{StoreError, db};
 use crate::segment::Location;
 use rdy_model::{BlockId, Hash};
-use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition, TableHandle};
+use redb::{
+    Database, Durability, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition,
+    TableHandle,
+};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -85,6 +88,13 @@ const PLAN_DEFERRALS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("plan
 /// A proposal version's hash (32 bytes) -> the hash of its bound (unsealed) plan version and that
 /// version's location: the first such version.
 const PLAN_PROPOSALS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("plan_proposals");
+/// A diagram's cache key (D-XM8MP; diagram_cache.rs) -> its drawing: tag, payload hash, payload. Derived from drawing, not from the log: a reindex starts it empty.
+const DIAGRAMS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("diagrams");
+/// The `meta` key that holds the diagram cache's counted bytes, 8 bytes little-endian.
+pub(crate) const DIAGRAM_COUNT_KEY: &str = "diagram_cache_bytes";
+/// The `meta` key set when an index applies a redaction apply and removed when it is built from
+/// the log's start (`Index::erase_due`).
+const ERASE_DUE_KEY: &str = "erase_due";
 /// The prefix of the refs [`OPEN_PROPOSALS`] mirrors.
 const OPEN_PREFIX: &str = "open/";
 
@@ -233,6 +243,121 @@ pub struct Index {
     /// Whether the active redaction mask may hold a row: false only while it is empty, so the
     /// reads of a store with no applied redaction never open its tables.
     redacted: AtomicBool,
+    /// The file to overwrite with zeros once the database is closed (`erase_on_close`).
+    /// Declared after `db`, so the database is closed, and has written all it writes, first.
+    eraser: Eraser,
+}
+
+/// An index file that a removal replaced (D-6H0ZX), to overwrite with zeros once the database
+/// is closed: an open handle on it, the second name that keeps it reachable until then
+/// (`index.redb.erase`), and the path it had. Its drop zeroes and syncs the file and then
+/// unlinks the second name, so no removed text that the index held, such as a drawing, outlives
+/// the removal in free disk space. A kill before that leaves the second name, and the next open
+/// zeroes and removes it.
+#[derive(Default)]
+struct Eraser(std::sync::Mutex<Option<Doomed>>);
+
+/// The file an [`Eraser`] zeroes.
+struct Doomed {
+    file: std::fs::File,
+    kept: std::path::PathBuf,
+    /// The file's identity: `kept` is unlinked only while it still names this file.
+    id: crate::fileid::FileId,
+    former: std::path::PathBuf,
+}
+
+/// A zeroing that failed: the file's former path, the name that still keeps it, and the error.
+struct EraseFailed {
+    former: std::path::PathBuf,
+    kept: std::path::PathBuf,
+    error: std::io::Error,
+}
+
+impl EraseFailed {
+    /// The one line the store logs for it (ruling task-7 item 2): a late zeroing has no caller
+    /// to tell.
+    fn line(&self) -> String {
+        format!(
+            "rdy: the replaced index file {} was not zeroed ({}); it is kept as {}, and the next open zeroes it",
+            self.former.display(),
+            self.error,
+            self.kept.display()
+        )
+    }
+}
+
+impl Eraser {
+    /// Zeroes and syncs the file now, if one is set, then unlinks its second name. A failed
+    /// zeroing keeps the name, so the next open zeroes the file. The name is unlinked only while
+    /// it still names this file: a reader can outlive its store, and an open in between zeroes
+    /// and removes the name, which a later removal can then take for its own old index
+    /// (ruling task-7 Round 3, N1). A name that names another file is left, and logged.
+    fn erase(&self) -> Result<(), EraseFailed> {
+        let taken = self.0.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let Some(d) = taken else {
+            return Ok(());
+        };
+        let failed = |error| EraseFailed {
+            former: d.former.clone(),
+            kept: d.kept.clone(),
+            error,
+        };
+        crate::fsutil::zero_open_file(&d.file, &d.former).map_err(failed)?;
+        match crate::fileid::FileId::lstat(&d.kept) {
+            Ok(id) if id == d.id => match std::fs::remove_file(&d.kept) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(failed(e)),
+                _ => {}
+            },
+            // an open removed the name after it zeroed the file: nothing is left to unlink
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Ok(_) => {
+                crate::notice(&format!(
+                    "rdy: {} no longer names the replaced index file {}, so it was left as it is",
+                    d.kept.display(),
+                    d.former.display()
+                ));
+                return Ok(());
+            }
+            Err(e) => {
+                crate::notice(&format!(
+                    "rdy: {} could not be checked ({e}), so it was left as it is; the replaced index file {} is zeroed",
+                    d.kept.display(),
+                    d.former.display()
+                ));
+                return Ok(());
+            }
+        }
+        if let Some(dir) = d.kept.parent() {
+            // the zeros are synced: a lost unlink only leaves a zeroed file for the next open
+            let _ = crate::fsutil::sync_dir(dir);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Eraser {
+    fn drop(&mut self) {
+        // a reader that outlived the removal closed the index last: nothing can be told of an
+        // error here, so the store logs it with the file's former path (ruling task-7 item 2)
+        if let Err(e) = self.erase() {
+            crate::notice(&e.line());
+        }
+    }
+}
+
+/// The suffix of the second name that keeps a replaced index file until it is zeroed:
+/// `index.redb.erase`, then `index.redb.erase-<n>` while that one is taken.
+pub(crate) const ERASE_SUFFIX: &str = ".erase";
+
+/// Whether `name` is a second name [`Index::erase_on_close`] gives an index file `index`.
+pub(crate) fn is_erase_name(index: &str, name: &str) -> bool {
+    name.strip_prefix(index)
+        .and_then(|rest| rest.strip_prefix(ERASE_SUFFIX))
+        .is_some_and(|n| {
+            n.is_empty()
+                || n.strip_prefix('-')
+                    .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+        })
 }
 
 /// An index opened with its integrity checked (see `Index::open_checked`).
@@ -244,8 +369,9 @@ pub struct CheckedIndex {
     pub repaired_at_open: bool,
 }
 
-/// Every table of an index as raw keys and values, for comparing two indexes (fsck2). `meta` is
-/// left out: it records how far the index has read, which a rebuild need not match.
+/// Every table of an index as raw keys and values, for comparing two indexes (fsck2). `meta` and
+/// `diagrams` are left out: `meta` records how far the index has read, and `diagrams` holds
+/// drawings, which a rebuild starts empty.
 #[doc(hidden)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct IndexDump {
@@ -902,6 +1028,9 @@ impl Index {
             w.open_table(PLAN_DECISIONS).map_err(db)?;
             w.open_table(PLAN_DEFERRALS).map_err(db)?;
             w.open_table(PLAN_PROPOSALS).map_err(db)?;
+            // an index written before the diagram cache gains its table empty: no refusal and
+            // no rebuild, since a drawing is never read as absent data
+            w.open_table(DIAGRAMS).map_err(db)?;
             let mut open = w.open_table(OPEN_PROPOSALS).map_err(db)?;
             if !had_open {
                 let refs = w.open_table(REFS).map_err(db)?;
@@ -925,6 +1054,7 @@ impl Index {
         Ok(Index {
             db: database,
             redacted: AtomicBool::new(redacted),
+            eraser: Eraser::default(),
         })
     }
 
@@ -987,6 +1117,8 @@ impl Index {
             let mut signatures: Option<redb::Table<'_, &'static [u8], &'static [u8]>> = None;
             // the plan tables only for a batch with a plan entry
             let mut plans: Option<PlanTables<'_>> = None;
+            // a redaction apply marks the index: its file may hold what the removal erases
+            let mut applied_removal = false;
             for e in entries {
                 match e {
                     IndexEntry::Object { kind, hash, loc } => {
@@ -1064,6 +1196,7 @@ impl Index {
                         request,
                         loc,
                     } => {
+                        applied_removal = true;
                         let t = match &mut redaction {
                             Some(t) => t,
                             None => redaction.insert(RedactionTables::open(&w)?),
@@ -1151,6 +1284,9 @@ impl Index {
                         }
                     }
                 }
+            }
+            if applied_removal {
+                meta.insert(ERASE_DUE_KEY, &[1u8][..]).map_err(db)?;
             }
             meta.insert("indexed_upto", &enc(&upto)[..]).map_err(db)?;
         }
@@ -1575,6 +1711,211 @@ impl Index {
         Ok(())
     }
 
+    /// Overwrites this index's file, which `path` names now, with zeros once the index is closed
+    /// (D-6H0ZX). A removal sets it on the index it replaces. The file first gets a second name,
+    /// `index.redb.erase` (or `index.redb.erase-<n>` while that is taken), and the directory is
+    /// synced, so the file stays reachable until it is zeroed: a kill before that leaves the
+    /// name, and the next open zeroes the file. A file with more than one link is not rdy's own
+    /// copy: it is not zeroed, the store logs it, and this returns false.
+    pub(crate) fn erase_on_close(&self, path: &Path) -> Result<bool, StoreError> {
+        let file =
+            crate::pio::open_no_follow(std::fs::OpenOptions::new().read(true).write(true), path)?;
+        let meta = file.metadata()?;
+        if !meta.is_file() {
+            return Err(StoreError::Io(std::io::Error::other(format!(
+                "{} is not a regular file",
+                path.display()
+            ))));
+        }
+        let links = crate::fileid::links(&meta);
+        if links != 1 {
+            crate::notice(&format!(
+                "rdy: the replaced index file {} has more than one link ({links}), so it was not zeroed",
+                path.display()
+            ));
+            return Ok(false);
+        }
+        let dir = path.parent().unwrap_or(Path::new("."));
+        let base = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("index.redb");
+        let id = crate::fileid::FileId::of(&meta);
+        let mut kept = None;
+        for n in 0u32.. {
+            let name = if n == 0 {
+                format!("{base}{ERASE_SUFFIX}")
+            } else {
+                format!("{base}{ERASE_SUFFIX}-{n}")
+            };
+            let at = dir.join(name);
+            match std::fs::hard_link(path, &at) {
+                Ok(()) => {
+                    kept = Some(at);
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        let kept = kept.expect("u32 suffixes exhausted");
+        // the name must reach the file the handle holds, never one swapped in since
+        if crate::fileid::FileId::lstat(&kept).ok() != Some(id) {
+            let _ = std::fs::remove_file(&kept);
+            return Err(StoreError::Io(std::io::Error::other(format!(
+                "{} changed while it was kept for zeroing",
+                path.display()
+            ))));
+        }
+        crate::fsutil::sync_dir(dir)?;
+        *self.eraser.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(Doomed {
+            file,
+            kept,
+            id,
+            former: path.to_path_buf(),
+        });
+        Ok(true)
+    }
+
+    /// Closes the index and then overwrites its file with zeros, if [`Index::erase_on_close`]
+    /// set one: the error of the zero write or its sync.
+    pub(crate) fn close_and_erase(self) -> Result<(), StoreError> {
+        let Index { db, eraser, .. } = self;
+        drop(db);
+        eraser.erase().map_err(|e| StoreError::Io(e.error))
+    }
+
+    /// Whether this index applied a redaction apply since it was built from the log's start
+    /// (`erase_due` in `meta`): its file may then hold text the removal erased, such as a cached
+    /// drawing (D-6H0ZX; ruling task-7 Round 2, F3).
+    pub(crate) fn erase_due(&self) -> Result<bool, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let meta = r.open_table(META).map_err(db)?;
+        Ok(meta.get(ERASE_DUE_KEY).map_err(db)?.is_some())
+    }
+
+    /// Removes the `erase_due` mark in a commit that is not durable: an index built from the
+    /// log's start holds nothing a removal erased. With `new_file` (a reindex's new index, whose
+    /// diagram table is empty), the diagram cache's count is set to 0 in the same commit. The
+    /// caller's next checkpoint keeps it.
+    pub(crate) fn clear_erase_due(&self, new_file: bool) -> Result<(), StoreError> {
+        let mut w = self.db.begin_write().map_err(db)?;
+        w.set_durability(Durability::None).map_err(db)?;
+        {
+            let mut meta = w.open_table(META).map_err(db)?;
+            meta.remove(ERASE_DUE_KEY).map_err(db)?;
+            if new_file {
+                meta.insert(DIAGRAM_COUNT_KEY, &0u64.to_le_bytes()[..])
+                    .map_err(db)?;
+            }
+        }
+        w.commit().map_err(db)?;
+        Ok(())
+    }
+
+    /// Drops the diagram table and its `meta` count in a durable commit, as an index written
+    /// before the diagram cache has neither (a test hook).
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub(crate) fn drop_diagram_table_for_tests(&self) -> Result<(), StoreError> {
+        let w = self.db.begin_write().map_err(db)?;
+        w.delete_table(DIAGRAMS).map_err(db)?;
+        w.open_table(META)
+            .map_err(db)?
+            .remove(DIAGRAM_COUNT_KEY)
+            .map_err(db)?;
+        w.commit().map_err(db)?;
+        Ok(())
+    }
+
+    /// Writes one raw `meta` value in a durable commit (a test hook).
+    #[cfg(test)]
+    pub(crate) fn set_meta_for_tests(&self, key: &str, value: &[u8]) -> Result<(), StoreError> {
+        let w = self.db.begin_write().map_err(db)?;
+        w.open_table(META)
+            .map_err(db)?
+            .insert(key, value)
+            .map_err(db)?;
+        w.commit().map_err(db)?;
+        Ok(())
+    }
+
+    /// The cached drawing under `key`, as stored (D-XM8MP; `diagram_cache` decodes it). One
+    /// read transaction.
+    pub(crate) fn diagram(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(DIAGRAMS).map_err(db)?;
+        Ok(t.get(key).map_err(db)?.map(|v| v.value().to_vec()))
+    }
+
+    /// Puts the drawing `value` under `key` in one commit that is not durable, as `apply` is
+    /// (D-XM8MP). The table holds at most `cap` counted bytes (key, value and 64 per row): a row
+    /// over `cap` alone stores nothing, and a put that would pass `cap`, or that finds a `meta`
+    /// count not 8 bytes long, first empties the table in the same commit. A replaced key's old
+    /// row is subtracted first; every sum saturates.
+    pub(crate) fn put_diagram(&self, key: &[u8], value: &[u8], cap: u64) -> Result<(), StoreError> {
+        let row = diagram_row_bytes(key, value);
+        if row > cap {
+            return Ok(());
+        }
+        let mut w = self.db.begin_write().map_err(db)?;
+        w.set_durability(Durability::None).map_err(db)?;
+        let kept = {
+            let meta = w.open_table(META).map_err(db)?;
+            let t = w.open_table(DIAGRAMS).map_err(db)?;
+            let old = t
+                .get(key)
+                .map_err(db)?
+                .map_or(0, |v| diagram_row_bytes(key, v.value()));
+            diagram_count(&meta)?
+                .map(|c| c.saturating_sub(old))
+                .filter(|base| base.saturating_add(row) <= cap)
+        };
+        let count = match kept {
+            Some(base) => base.saturating_add(row),
+            None => {
+                // full: the whole table goes, in this commit, never row by row
+                w.delete_table(DIAGRAMS).map_err(db)?;
+                row
+            }
+        };
+        {
+            let mut t = w.open_table(DIAGRAMS).map_err(db)?;
+            t.insert(key, value).map_err(db)?;
+            let mut meta = w.open_table(META).map_err(db)?;
+            meta.insert(DIAGRAM_COUNT_KEY, &count.to_le_bytes()[..])
+                .map_err(db)?;
+        }
+        w.commit().map_err(db)?;
+        Ok(())
+    }
+
+    /// The diagram cache's rows, and its `meta` count (None when the key is missing or not 8
+    /// bytes long).
+    pub(crate) fn diagram_counts(&self) -> Result<(usize, Option<u64>), StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let rows = r.open_table(DIAGRAMS).map_err(db)?.len().map_err(db)?;
+        let meta = r.open_table(META).map_err(db)?;
+        let count = diagram_count(&meta)?;
+        Ok((usize::try_from(rows).unwrap_or(usize::MAX), count))
+    }
+
+    /// Empties the diagram cache and sets its count to 0 in one durable commit (D-XM8MP, rule
+    /// 13a: an open after an unclean shutdown).
+    pub(crate) fn clear_diagrams(&self) -> Result<(), StoreError> {
+        let mut w = self.db.begin_write().map_err(db)?;
+        w.set_durability(Durability::Immediate).map_err(db)?;
+        w.delete_table(DIAGRAMS).map_err(db)?;
+        {
+            w.open_table(DIAGRAMS).map_err(db)?;
+            let mut meta = w.open_table(META).map_err(db)?;
+            meta.insert(DIAGRAM_COUNT_KEY, &0u64.to_le_bytes()[..])
+                .map_err(db)?;
+        }
+        w.commit().map_err(db)?;
+        Ok(())
+    }
+
     /// The open tensions: (id, the record that opened it), in id order.
     pub fn open_tensions(&self) -> Result<Vec<(Hash, Hash)>, StoreError> {
         self.open_rows(OPEN_TENSIONS, "open tension entry")
@@ -1983,4 +2324,22 @@ impl crate::Store {
     ) -> Result<(), StoreError> {
         self.index().set_landed_raw_for_tests(change, raw)
     }
+}
+
+/// The bytes a diagram row counts toward the cache's bound: its key, its value and 64.
+fn diagram_row_bytes(key: &[u8], value: &[u8]) -> u64 {
+    (key.len() as u64)
+        .saturating_add(value.len() as u64)
+        .saturating_add(64)
+}
+
+/// The diagram cache's `meta` count: None when the key is missing or not 8 bytes long.
+fn diagram_count(
+    meta: &impl ReadableTable<&'static str, &'static [u8]>,
+) -> Result<Option<u64>, StoreError> {
+    Ok(meta
+        .get(DIAGRAM_COUNT_KEY)
+        .map_err(db)?
+        .and_then(|v| <[u8; 8]>::try_from(v.value()).ok())
+        .map(u64::from_le_bytes))
 }

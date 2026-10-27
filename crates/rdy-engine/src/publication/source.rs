@@ -7,8 +7,8 @@ use crate::ReadState;
 use crate::error::RdyError;
 use rdy_model::Hash;
 use rdy_schema::Pack;
-use rdy_store::StoreError;
 use rdy_store::kinds::{self, BlobManifest};
+use rdy_store::{DiagramCache, StoreError};
 use std::ops::ControlFlow;
 
 /// What a publication reads besides the snapshot it selects from. The manifest, availability
@@ -31,6 +31,10 @@ pub trait PublicationSource {
     fn blob_available(&self, blob: &Hash) -> Result<bool, RdyError>;
     /// The bytes of blob `blob`.
     fn blob(&self, blob: &Hash) -> Result<Vec<u8>, RdyError>;
+    /// The store's diagram cache, when the source reads a store (D-XM8MP); none by default.
+    fn diagram_cache(&self) -> Option<DiagramCache> {
+        None
+    }
     /// The approved removal request that masks blob `blob`, the first one
     /// [`PublicationSource::visit_blob_redactions`] reports; None for a blob the source lacks or
     /// one no removal masks.
@@ -144,6 +148,10 @@ impl PublicationSource for ReadPublicationSource<'_> {
 
     fn blob(&self, blob: &Hash) -> Result<Vec<u8>, RdyError> {
         Ok(self.read.reader().get_blob(blob)?)
+    }
+
+    fn diagram_cache(&self) -> Option<DiagramCache> {
+        Some(self.read.reader().diagram_cache())
     }
 
     fn removed_blob(&self, blob: &Hash) -> Result<Option<Hash>, RdyError> {

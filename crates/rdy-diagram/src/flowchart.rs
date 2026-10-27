@@ -26,11 +26,45 @@
 //! The bound is the deepest nesting the grammar attempts: a body counts while it is read, also
 //! when no `end` closes it and its header is then read as nodes. When the grammar cannot read
 //! the text at all, the bound is also at least the keyword bound ([`keyword_bound`]).
+//!
+//! The same walk gives the two rewrites of the drawing input (D-R7C3W, D-438Y2): the blank lines
+//! that directly follow a subgraph header ([`normalize_subgraph_blanks`]), and the top-level
+//! subgraphs that hidden arrows may stack ([`Reading::stacked`]). Neither reaches the source a
+//! reader sees.
+//!
+//! It also gives the cost of the arrows and groups (D-VACA9, D-NN3GQ, [`Reading::arrows`]). A
+//! connector that links two node groups costs its rank span ([`span`]) once for each pair of a
+//! source and a target, as the pinned crate expands it before layout, times the label weight
+//! when it has a label. Each subgraph that closes costs one. A connector or a subgraph is
+//! charged once, at its place, however many reads reach it. Every count saturates at
+//! `MAX_ARROWS + 1`, and no pair is ever built.
+
+use crate::ARROW_CAP;
+use crate::arrows::Tally;
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 /// No entry yet.
 const NONE: u32 = u32::MAX;
 /// The statement or body that starts here cannot be read.
 const FAIL: u32 = u32::MAX - 1;
+/// The context of a place outside every subgraph.
+const TOP: u32 = u32::MAX;
+/// The most ids the walk keeps for the stack check; past it, nothing is stacked.
+const MAX_IDS: usize = 65536;
+/// The keywords that start a statement other than a node, which a hidden arrow's id must not
+/// be.
+const STATEMENT_KEYWORDS: [&[u8]; 8] = [
+    b"style",
+    b"classDef",
+    b"class",
+    b"click",
+    b"linkStyle",
+    b"direction",
+    b"subgraph",
+    b"end",
+];
 
 /// The deepest subgraph nesting the pinned flowchart grammar attempts in `src`, the diagram's
 /// source with any BOM removed and CRLF as LF.
@@ -58,32 +92,111 @@ pub(crate) struct Reading {
     /// nodes. The pinned parser keeps no memo, so it reads such a body again for each one.
     pub unclosed: bool,
     /// The longest arrow the walk read: its bytes from its first character through its head and
-    /// its `|label|`, with the label text of a labelled arrow between.
+    /// its `|label|`, with the label text of a labelled arrow between. An arrow that starts but
+    /// has no end on its line counts from its start to the line end, the line end excluded.
     pub longest_arrow: usize,
+    /// The ids of the top-level subgraphs, in source order, when the drawing input stacks them
+    /// with hidden arrows (D-438Y2); else empty. The grammar reads the whole text and every
+    /// subgraph closes; there are at least two top-level subgraphs; each sets its own direction
+    /// in its own body and has an id; no header at any depth has only a quoted title; and no id
+    /// is read both inside one top-level subgraph and inside another or outside every subgraph,
+    /// and no arrow completes outside every subgraph. `render` keeps the stacked drawing only
+    /// when it removes an overlap and adds none.
+    pub stacked: Vec<String>,
+    /// What the arrows and subgraphs cost (D-VACA9, D-NN3GQ), the hidden arrows of `stacked`
+    /// included, saturated at `MAX_ARROWS + 1`.
+    pub arrows: usize,
+    /// How many expanded arrows have a label, for the parity pin.
+    #[cfg(test)]
+    pub labelled: usize,
 }
 
 /// Reads `src`, the diagram's source with any BOM removed and CRLF as LF, as the pinned
 /// flowchart grammar reads it.
 pub(crate) fn read(src: &str) -> Reading {
-    let text = preprocess(crate::after_front_matter(src));
+    let text = preprocess(crate::after_front_matter(src), None);
     let mut grammar = Grammar::new(&text);
-    let (depth, _exact) = match grammar.flowchart() {
+    let (depth, whole) = match grammar.flowchart() {
         Ok(deepest) => (deepest, !grammar.reread),
         Err(deepest) => (deepest.max(keyword_bound(text.as_bytes())), false),
     };
+    let stacked = if whole { grammar.stacked() } else { Vec::new() };
+    // each hidden arrow is one invisible connector of span 1 (D-ZJVRT, O7)
+    let mut tally = grammar.tally;
+    if stacked.len() >= 2 {
+        tally.add(1, false, stacked.len() - 1);
+    }
     Reading {
         depth,
         #[cfg(test)]
-        exact: _exact,
+        exact: whole,
         unclosed: grammar.reread,
         longest_arrow: grammar.longest_arrow,
+        stacked,
+        arrows: tally.cost,
+        #[cfg(test)]
+        labelled: tally.labelled,
     }
+}
+
+/// `src`, the diagram's source with any BOM removed and CRLF as LF, without the blank lines that
+/// directly follow a subgraph header (D-R7C3W): borrowed when there are none.
+///
+/// The pinned grammar takes one line end after a header, so a blank line there leaves the
+/// subgraph open. A header is one the walk reads at a statement position. The lines it drops are
+/// the run of complete blank lines (spaces or tabs, then LF or a lone CR) that follows a header
+/// that ends with a line end, in the text the grammar parses, and a last line of spaces or tabs
+/// at the end of the text. They go at their places in `src`; the lines the pinned crate drops
+/// before it parses stay. A header that a `;` ends keeps the lines after it.
+pub(crate) fn normalize_subgraph_blanks(src: &str) -> Cow<'_, str> {
+    let body = crate::after_front_matter(src);
+    let base = src.len() - body.len();
+    // for each byte of the parsed text, its place in `body`
+    let mut map = Vec::with_capacity(body.len() + 1);
+    let text = preprocess(body, Some(&mut map));
+    let mut grammar = Grammar::new(&text);
+    grammar.drop_blanks = true;
+    let _ = grammar.flowchart();
+    let mut runs = std::mem::take(&mut grammar.dropped);
+    if runs.is_empty() {
+        return Cow::Borrowed(src);
+    }
+    runs.sort_unstable();
+    runs.dedup();
+    // the bytes of `src` to delete, as ranges in order; places only grow along the text
+    let bytes = src.as_bytes();
+    let mut cut: Vec<(usize, usize)> = Vec::new();
+    for (from, to) in runs {
+        for k in from..to {
+            let at = base + map[k as usize] as usize;
+            // an LF that joins lines stands for the line's whole end: a CR there is the CR of a
+            // CR LF that CR CR LF left, so both go
+            let len = if bytes[at..].starts_with(b"\r\n") {
+                2
+            } else {
+                1
+            };
+            match cut.last_mut() {
+                Some((_, end)) if *end >= at => *end = (*end).max(at + len),
+                _ => cut.push((at, at + len)),
+            }
+        }
+    }
+    let mut out = String::with_capacity(src.len());
+    let mut last = 0;
+    for (from, to) in cut {
+        // every deleted byte is a space, a tab or a line end
+        out.push_str(&src[last..from]);
+        last = to;
+    }
+    out.push_str(&src[last..]);
+    Cow::Owned(out)
 }
 
 /// The operations the walk takes on `src`, and the length of the text it walks.
 #[cfg(test)]
 pub(crate) fn work(src: &str) -> (usize, usize) {
-    let text = preprocess(crate::after_front_matter(src));
+    let text = preprocess(crate::after_front_matter(src), None);
     let mut grammar = Grammar::new(&text);
     let _ = grammar.flowchart();
     (grammar.work.get(), text.len())
@@ -93,10 +206,20 @@ pub(crate) fn work(src: &str) -> (usize, usize) {
 /// the header on, without `%%{...}%%` directives and without lines the grammar cannot start. A
 /// kept line starts with a letter, digit, `_` or `;`, or is blank, a `%%` comment or a keyword
 /// line. Kept lines are joined with LF.
-fn preprocess(input: &str) -> String {
+///
+/// With `map`, it also gets, for each byte of the text, its place in `input`: a kept line's
+/// bytes are its own, and the LF after a kept line is the line end that follows it in `input`.
+fn preprocess(input: &str, mut map: Option<&mut Vec<u32>>) -> String {
     let mut out = String::with_capacity(input.len());
     let mut header = false;
+    // where the last kept line ends in `input`
+    let mut kept_end = 0;
     for line in input.lines() {
+        // the line is a slice of `input`, so its place is its offset
+        let start = line.as_ptr() as usize - input.as_ptr() as usize;
+        let mut keep = |out: &mut String| {
+            push_line(out, line, start, &mut kept_end, map.as_deref_mut());
+        };
         let trimmed = line.trim();
         if trimmed.starts_with("%%{") && trimmed.ends_with("}%%") {
             continue;
@@ -105,12 +228,12 @@ fn preprocess(input: &str) -> String {
             let first = trimmed.split_whitespace().next().unwrap_or("");
             if first.eq_ignore_ascii_case("graph") || first.eq_ignore_ascii_case("flowchart") {
                 header = true;
-                push_line(&mut out, line);
+                keep(&mut out);
             }
             continue;
         }
         if trimmed.starts_with("%%") || trimmed.is_empty() || kept_keyword_line(trimmed) {
-            push_line(&mut out, line);
+            keep(&mut out);
             continue;
         }
         let lower = |n: usize| trimmed.as_bytes().get(..n).map(<[u8]>::to_ascii_lowercase);
@@ -119,20 +242,39 @@ fn preprocess(input: &str) -> String {
         }
         let first = trimmed.chars().next().unwrap_or(' ');
         if first.is_alphanumeric() || first == '_' || first == ';' {
-            push_line(&mut out, line);
+            keep(&mut out);
         }
     }
     if input.ends_with('\n') && !out.ends_with('\n') {
         out.push('\n');
+        if let Some(map) = map {
+            map.push(kept_end as u32);
+        }
     }
     out
 }
 
-fn push_line(out: &mut String, line: &str) {
-    if !out.is_empty() {
+/// Adds a kept line that starts at `start` in the input, after an LF when it is not the first.
+fn push_line(
+    out: &mut String,
+    line: &str,
+    start: usize,
+    kept_end: &mut usize,
+    map: Option<&mut Vec<u32>>,
+) {
+    let first = out.is_empty();
+    if !first {
         out.push('\n');
     }
     out.push_str(line);
+    if let Some(map) = map {
+        // the source is at most 65536 bytes, so every place fits in a u32
+        if !first {
+            map.push(*kept_end as u32);
+        }
+        map.extend(start as u32..(start + line.len()) as u32);
+    }
+    *kept_end = start + line.len();
 }
 
 /// A line the pinned crate keeps for its keyword, in any case.
@@ -284,6 +426,18 @@ enum Link {
     Solid,
 }
 
+/// A connector's rank span, as the pinned compiler sets its `minlen` (mmdflux 2.6.1
+/// `compiler.rs:742-758`): the length of its run (the dashes after the first dash, the equals
+/// signs after the first equals sign, or the dots); a solid or thick connector with no head at
+/// either end is one less, and at least one.
+fn span(link: Link, run: usize, headed: bool) -> usize {
+    match link {
+        Link::Dotted => run,
+        Link::Thick | Link::Solid if headed => run,
+        Link::Thick | Link::Solid => run.saturating_sub(1).max(1),
+    }
+}
+
 /// What the statement at a place gives.
 enum Step {
     /// The statement's nesting, and where the next one starts.
@@ -301,6 +455,16 @@ struct Loop {
     at: usize,
     /// Where its statements start in the walk's list of statements read.
     from: usize,
+    /// The top-level subgraph it is in, by index, or TOP.
+    ctx: u32,
+}
+
+/// A top-level subgraph, for the stack check.
+struct Top {
+    /// Where its header's id is, if it has one.
+    id: Option<(u32, u32)>,
+    /// Whether its own body holds a `direction` statement.
+    direction: bool,
 }
 
 struct Grammar<'a> {
@@ -335,6 +499,33 @@ struct Grammar<'a> {
     reread: bool,
     /// The longest arrow read so far, in bytes.
     longest_arrow: usize,
+    /// Whether a header that ends with a line end skips the blank lines after it, as the
+    /// drawing input has none ([`normalize_subgraph_blanks`]).
+    drop_blanks: bool,
+    /// The blank-line runs the headers skipped, as ranges of the text.
+    dropped: Vec<(u32, u32)>,
+    /// The stack check: the top-level subgraph the statement being read is in, or TOP.
+    ctx: u32,
+    /// The top-level subgraphs attempted, in order.
+    tops: Vec<Top>,
+    /// Each id a node's head reads and each subgraph id, with its context.
+    ids: Vec<(u32, u32, u32)>,
+    /// Whether an arrow completes outside every subgraph, or the id table is full.
+    crossed: bool,
+    /// Whether a header at any depth has only a quoted title. The pinned crate names such a
+    /// subgraph `subGraph<N>`, an id the walk does not see, so an arrow could reach it unseen.
+    quoted_only: bool,
+    /// Whether the statement just read is a `direction` statement.
+    direction_read: bool,
+    /// Where the id of the last subgraph spec read is, if it has one.
+    header_id: Option<(u32, u32)>,
+    /// The rank span of the last connector read, and whether it has a label.
+    span: usize,
+    labelled: bool,
+    /// For each place, whether the connector that starts there is charged already.
+    charged: Vec<bool>,
+    /// What the charged connectors cost.
+    tally: Tally,
     #[cfg(test)]
     work: std::cell::Cell<usize>,
 }
@@ -410,6 +601,19 @@ impl<'a> Grammar<'a> {
             heads: Vec::new(),
             reread: false,
             longest_arrow: 0,
+            drop_blanks: false,
+            dropped: Vec::new(),
+            ctx: TOP,
+            tops: Vec::new(),
+            ids: Vec::new(),
+            crossed: false,
+            quoted_only: false,
+            direction_read: false,
+            header_id: None,
+            span: 1,
+            labelled: false,
+            charged: vec![false; n + 1],
+            tally: Tally::default(),
             #[cfg(test)]
             work: Default::default(),
         }
@@ -427,12 +631,18 @@ impl<'a> Grammar<'a> {
             body: false,
             at: start,
             from: 0,
+            ctx: TOP,
         }];
         // the statements the loops have read so far, with their nesting
         let mut read: Vec<(u32, u32)> = Vec::new();
         loop {
             let top = loops.len() - 1;
-            let Loop { body, at, from } = loops[top];
+            let Loop {
+                body,
+                at,
+                from,
+                ctx,
+            } = loops[top];
             if !body && at == self.s.len() {
                 return Ok(deepest);
             }
@@ -453,19 +663,44 @@ impl<'a> Grammar<'a> {
                     continue;
                 }
             }
+            self.ctx = ctx;
+            self.direction_read = false;
             match self.step(at) {
                 Step::Next(next, nest) => {
+                    // a `direction` in a top-level subgraph's own body
+                    if top == 1
+                        && self.direction_read
+                        && let Some(t) = self.tops.get_mut(ctx as usize)
+                    {
+                        t.direction = true;
+                    }
                     read.push((at as u32, nest));
                     loops[top].at = next;
                     if !body {
                         deepest = deepest.max(nest as usize);
                     }
                 }
-                Step::Open(line) => loops.push(Loop {
-                    body: true,
-                    at: line,
-                    from: read.len(),
-                }),
+                Step::Open(line) => {
+                    // a top-level header opens a new context; a nested one stays in its own
+                    let ctx = if top == 0 {
+                        self.tops.push(Top {
+                            id: self.header_id,
+                            direction: false,
+                        });
+                        (self.tops.len() - 1) as u32
+                    } else {
+                        ctx
+                    };
+                    if let Some((start, end)) = self.header_id {
+                        self.record(start as usize, end as usize, ctx);
+                    }
+                    loops.push(Loop {
+                        body: true,
+                        at: line,
+                        from: read.len(),
+                        ctx,
+                    });
+                }
                 Step::Stuck(nest) if !body => return Err(deepest.max(nest as usize)),
                 Step::Stuck(nest) => {
                     self.finish(&mut read, from, at, FAIL, nest);
@@ -504,6 +739,9 @@ impl<'a> Grammar<'a> {
         let end = if self.s[at..].starts_with(b"%%") {
             Some(self.line_end(at))
         } else if let Some(body) = self.subgraph_header(at) {
+            if self.header_id.is_none() {
+                self.quoted_only = true;
+            }
             let body = self.skip_ws(body);
             match self.body_end[body] {
                 NONE => return Step::Open(body),
@@ -515,6 +753,9 @@ impl<'a> Grammar<'a> {
                 }
                 end => {
                     nest = self.body_max[body] + 1;
+                    // a subgraph that closes is a group (D-NN3GQ). The memo below keeps the
+                    // statement at `at`, so this runs once for its place, whatever reaches it.
+                    self.tally.add(1, false, 1);
                     Some(end as usize + 3)
                 }
             }
@@ -584,7 +825,8 @@ impl<'a> Grammar<'a> {
         matches!(self.s.get(self.i), None | Some(b'\n' | b'\r' | b';'))
     }
 
-    /// `subgraph_keyword ~ subgraph_spec ~ (NEWLINE | ";")` at `at`: where its body starts.
+    /// `subgraph_keyword ~ subgraph_spec ~ (NEWLINE | ";")` at `at`: where its body starts. With
+    /// `drop_blanks`, a header that ends with a line end also takes the blank lines after it.
     fn subgraph_header(&mut self, at: usize) -> Option<usize> {
         self.i = at;
         if !self.word(b"subgraph") {
@@ -595,15 +837,47 @@ impl<'a> Grammar<'a> {
             return None;
         }
         self.ws();
-        (self.newline().is_some() || self.byte(b';')).then_some(self.i)
+        if self.newline().is_some() {
+            if self.drop_blanks {
+                self.blank_run();
+            }
+            return Some(self.i);
+        }
+        self.byte(b';').then_some(self.i)
+    }
+
+    /// Moves past the complete blank lines at `self.i` (spaces or tabs, then a line end) and a
+    /// last line of spaces or tabs at the end of the text, and keeps them as a dropped run.
+    fn blank_run(&mut self) {
+        let from = self.i;
+        let mut end = from;
+        loop {
+            self.i = end;
+            self.ws();
+            if self.newline().is_some() {
+                end = self.i;
+            } else {
+                if self.i == self.s.len() {
+                    end = self.i;
+                }
+                break;
+            }
+        }
+        if end > from {
+            self.dropped.push((from as u32, end as u32));
+        }
+        self.i = end;
     }
 
     /// `subgraph_spec`: an id with a `[title]`, an id with a `"title"`, a `"title"`, or an id.
     fn subgraph_spec(&mut self) -> bool {
+        self.header_id = None;
+        let start = self.i;
         if !self.subgraph_id() {
             return self.quoted_title();
         }
         let after_id = self.i;
+        self.header_id = Some((start as u32, after_id as u32));
         self.ws();
         if self.byte(b'[') {
             self.ws();
@@ -669,6 +943,7 @@ impl<'a> Grammar<'a> {
             self.i += b"direction".len();
             self.ws();
             if DIRECTIONS.iter().any(|d| self.word(d)) {
+                self.direction_read = true;
                 return true;
             }
             self.i = start;
@@ -705,6 +980,10 @@ impl<'a> Grammar<'a> {
     /// `rest_end`.
     fn rest(&mut self) {
         let mut heads = std::mem::take(&mut self.heads);
+        // the connector that waits for its target group to end: its place, span and label, and
+        // the size of its source group; and the size of the group being read
+        let mut pending: Option<(usize, usize, bool, usize)> = None;
+        let mut group = 1usize;
         loop {
             self.tick();
             let head = self.i;
@@ -728,33 +1007,62 @@ impl<'a> Grammar<'a> {
                 self.ws();
                 self.node_head()
             } {
+                group = group.saturating_add(1).min(ARROW_CAP);
                 continue;
             }
             // else `edge_connector ~ node_group`
             self.i = node_end;
             self.ws();
             let arrow = self.i;
-            if self.edge_connector() && {
+            if self.edge_connector() {
                 self.longest_arrow = self.longest_arrow.max(self.i - arrow);
+                if self.ctx == TOP {
+                    self.crossed = true;
+                }
+                let (span, labelled) = (self.span, self.labelled);
                 self.ws();
-                self.node_head()
-            } {
-                continue;
+                if self.node_head() {
+                    // the connector links two read groups: the one before it is complete
+                    self.charge(pending, group);
+                    pending = Some((arrow, span, labelled, group));
+                    group = 1;
+                    continue;
+                }
+            } else if self.connector_start(arrow) {
+                // an arrow that starts but has no end: from its start to the line end
+                self.longest_arrow = self.longest_arrow.max(self.line_end(arrow) - arrow);
             }
             self.i = node_end;
             break;
         }
+        self.charge(pending, group);
         for head in heads.drain(..) {
             self.rest_end[head as usize] = self.i as u32;
         }
         self.heads = heads;
     }
 
-    /// A node's head: `identifier ~ shape?`.
+    /// Charges a connector that links two read node groups, `targets` being its target group's
+    /// size: its span (times the label weight) for each pair of a source and a target, once
+    /// for its place.
+    fn charge(&mut self, connector: Option<(usize, usize, bool, usize)>, targets: usize) {
+        let Some((at, span, labelled, sources)) = connector else {
+            return;
+        };
+        if std::mem::replace(&mut self.charged[at], true) {
+            return;
+        }
+        let pairs = sources.saturating_mul(targets).min(ARROW_CAP);
+        self.tally.add(span, labelled, pairs);
+    }
+
+    /// A node's head: `identifier ~ shape?`. Its id is kept for the stack check.
     fn node_head(&mut self) -> bool {
+        let start = self.i;
         if !self.identifier() {
             return false;
         }
+        self.record(start, self.i, self.ctx);
         let before = self.i;
         self.ws();
         if !self.shape() {
@@ -880,16 +1188,106 @@ impl<'a> Grammar<'a> {
         }
         let before = self.i;
         self.ws();
-        if !self.edge_label() {
-            self.i = before;
+        match self.edge_label() {
+            Some(labelled) => self.labelled = labelled,
+            None => {
+                // a `|` that no label closes: the arrow it starts runs to the line end
+                if self.s.get(self.i) == Some(&b'|') {
+                    self.longest_arrow = self.longest_arrow.max(self.line_end(start) - start);
+                }
+                self.i = before;
+            }
         }
         true
+    }
+
+    /// Whether a connector starts at `at`: an optional left head, then the grammar's spaces, then
+    /// a dash or an equals sign (a solid, dotted or thick start), or a tilde (an invisible start).
+    ///
+    /// An `x` or `o` is a left head only where the identifier rule stops after it: before a space
+    /// or tab, an equals sign, or a dash that `-`, `>` or `.` follows. Else the grammar reads it
+    /// as the start of a node id, such as `x-ray`.
+    fn connector_start(&self, at: usize) -> bool {
+        self.tick();
+        if self.s.get(at) == Some(&b'~') {
+            return true;
+        }
+        let head = match self.s.get(at) {
+            Some(b'<') => true,
+            Some(b'x' | b'o') => match self.s.get(at + 1) {
+                Some(b' ' | b'\t' | b'=') => true,
+                Some(b'-') => matches!(self.s.get(at + 2), Some(b'-' | b'>' | b'.')),
+                _ => false,
+            },
+            _ => false,
+        };
+        let mut k = at + usize::from(head);
+        while matches!(self.s.get(k), Some(b' ' | b'\t')) {
+            self.tick();
+            k += 1;
+        }
+        matches!(self.s.get(k), Some(b'-' | b'='))
+    }
+
+    /// Keeps an id read at `start..end` in context `ctx`, for the stack check.
+    fn record(&mut self, start: usize, end: usize, ctx: u32) {
+        if self.ids.len() == MAX_IDS {
+            self.crossed = true;
+        } else {
+            self.ids.push((start as u32, end as u32, ctx));
+        }
+    }
+
+    /// The top-level subgraph ids that hidden arrows may stack, after a walk that read the whole
+    /// text with every subgraph closed (see [`Reading::stacked`]); else empty.
+    fn stacked(&mut self) -> Vec<String> {
+        if self.crossed
+            || self.quoted_only
+            || self.tops.len() < 2
+            || !self.tops.iter().all(|t| t.direction)
+        {
+            return Vec::new();
+        }
+        let mut ids = Vec::with_capacity(self.tops.len());
+        for k in 0..self.tops.len() {
+            let id = self.tops[k].id;
+            match id {
+                Some((start, end)) if self.plain_id(start as usize, end as usize) => {
+                    ids.push((start as usize, end as usize));
+                }
+                _ => return Vec::new(),
+            }
+        }
+        // an id read in two contexts may join two subgraphs, or one to the top level
+        let mut seen: HashMap<&[u8], u32> = HashMap::with_capacity(self.ids.len());
+        for &(start, end, ctx) in &self.ids {
+            match seen.entry(&self.s[start as usize..end as usize]) {
+                Entry::Occupied(e) if *e.get() != ctx => return Vec::new(),
+                Entry::Occupied(_) => {}
+                Entry::Vacant(e) => {
+                    e.insert(ctx);
+                }
+            }
+        }
+        ids.into_iter()
+            .map(|(start, end)| self.text[start..end].to_string())
+            .collect()
+    }
+
+    /// Whether the subgraph id at `start..end` reads back as one node id at the start of a
+    /// hidden arrow's line: a whole identifier, and no keyword that starts another statement.
+    fn plain_id(&mut self, start: usize, end: usize) -> bool {
+        self.i = start;
+        if STATEMENT_KEYWORDS.iter().any(|kw| self.keyword_at(kw)) {
+            return false;
+        }
+        self.identifier() && self.i == end
     }
 
     /// A labelled link: its start (atomic), then a label on the same line up to the first
     /// place the link's end starts, then the end.
     fn labelled_link(&mut self, link: Link) -> bool {
-        self.arrow_left();
+        let left = self.arrow_left();
         let (first, second, refused): (u8, u8, &[u8]) = match link {
             Link::Dotted => (b'-', b'.', b".->xo"),
             Link::Thick => (b'=', b'=', b"=>xo"),
@@ -917,25 +1315,64 @@ impl<'a> Grammar<'a> {
         match end {
             Some(end) if end > text && end < line_end => {
                 self.i = end;
-                self.link_end(link)
+                let Some((run, right)) = self.link_end(link) else {
+                    return false;
+                };
+                self.span = span(link, run, left || right);
+                self.labelled = !self.text[text..end].trim().is_empty();
+                true
             }
             _ => false,
         }
     }
 
-    /// A link's end, with the grammar's spaces between its parts and an optional arrow head.
-    fn link_end(&mut self, link: Link) -> bool {
-        match link {
+    /// A link's end, with the grammar's spaces between its parts and an optional arrow head:
+    /// the length of its run and whether it has the head.
+    fn link_end(&mut self, link: Link) -> Option<(usize, bool)> {
+        let run = match link {
             Link::Dotted => {
                 self.byte(b'-');
                 self.ws();
-                if !self.run(b'.') {
-                    return false;
+                let run = self.run(b'.');
+                self.ws();
+                if run == 0 || !self.byte(b'-') {
+                    return None;
+                }
+                run
+            }
+            Link::Thick | Link::Solid => {
+                let b = if matches!(link, Link::Thick) {
+                    b'='
+                } else {
+                    b'-'
+                };
+                if !self.byte(b) {
+                    return None;
                 }
                 self.ws();
+                self.run(b)
+            }
+        };
+        (run > 0).then(|| (run, self.arrow_right()))
+    }
+
+    /// An unlabelled link: dotted `-` `.`+ `-`, thick `=` `=`+, solid `-` `-`+, each with an
+    /// optional arrow head at both ends and the grammar's spaces between parts.
+    fn plain_link(&mut self, link: Link) -> bool {
+        let left = self.arrow_left();
+        self.ws();
+        let run = match link {
+            Link::Dotted => {
                 if !self.byte(b'-') {
                     return false;
                 }
+                self.ws();
+                let run = self.run(b'.');
+                self.ws();
+                if run == 0 || !self.byte(b'-') {
+                    return false;
+                }
+                run
             }
             Link::Thick | Link::Solid => {
                 let b = if matches!(link, Link::Thick) {
@@ -947,51 +1384,19 @@ impl<'a> Grammar<'a> {
                     return false;
                 }
                 self.ws();
-                if !self.run(b) {
-                    return false;
-                }
+                self.run(b)
             }
+        };
+        if run == 0 {
+            return false;
         }
-        self.arrow_right();
+        let right = self.arrow_right();
+        self.span = span(link, run, left || right);
+        self.labelled = false;
         true
     }
 
-    /// An unlabelled link: dotted `-` `.`+ `-`, thick `=` `=`+, solid `-` `-`+, each with an
-    /// optional arrow head at both ends and the grammar's spaces between parts.
-    fn plain_link(&mut self, link: Link) -> bool {
-        self.arrow_left();
-        self.ws();
-        let ok = match link {
-            Link::Dotted => {
-                self.byte(b'-')
-                    && {
-                        self.ws();
-                        self.run(b'.')
-                    }
-                    && {
-                        self.ws();
-                        self.byte(b'-')
-                    }
-            }
-            Link::Thick | Link::Solid => {
-                let b = if matches!(link, Link::Thick) {
-                    b'='
-                } else {
-                    b'-'
-                };
-                self.byte(b) && {
-                    self.ws();
-                    self.run(b)
-                }
-            }
-        };
-        if ok {
-            self.arrow_right();
-        }
-        ok
-    }
-
-    /// `link_invisible = { "~" ~ "~" ~ "~"+ }`.
+    /// `link_invisible = { "~" ~ "~" ~ "~"+ }`: its span is one.
     fn invisible_link(&mut self) -> bool {
         for _ in 0..3 {
             self.ws();
@@ -1004,41 +1409,51 @@ impl<'a> Grammar<'a> {
             self.ws();
             if !self.byte(b'~') {
                 self.i = before;
+                self.span = 1;
+                self.labelled = false;
                 return true;
             }
         }
     }
 
-    /// `edge_label = { "|" ~ edge_label_text ~ "|" }`, its text not empty and across lines.
-    fn edge_label(&mut self) -> bool {
+    /// `edge_label = { "|" ~ edge_label_text ~ "|" }`, its text not empty and across lines:
+    /// whether its text has more than white space, if there is one.
+    fn edge_label(&mut self) -> Option<bool> {
         let start = self.i;
         if self.byte(b'|') {
             self.ws();
-            if let Some(end) = self.label_end(self.i, b"|") {
+            let text = self.i;
+            if let Some(end) = self.label_end(text, b"|") {
                 self.i = end + 1;
-                return true;
+                return Some(!self.text[text..end].trim().is_empty());
             }
         }
         self.i = start;
-        false
+        None
     }
 
     /// An optional `<`, `x` or `o` before a link; the walk keeps it, as the grammar does.
-    fn arrow_left(&mut self) {
+    /// Whether it is there.
+    fn arrow_left(&mut self) -> bool {
         self.tick();
-        if matches!(self.s.get(self.i), Some(b'<' | b'x' | b'o')) {
+        let head = matches!(self.s.get(self.i), Some(b'<' | b'x' | b'o'));
+        if head {
             self.i += 1;
         }
+        head
     }
 
-    /// An optional `>`, `x` or `o` after a link, after the grammar's spaces.
-    fn arrow_right(&mut self) {
+    /// An optional `>`, `x` or `o` after a link, after the grammar's spaces. Whether it is
+    /// there.
+    fn arrow_right(&mut self) -> bool {
         let before = self.i;
         self.ws();
         if matches!(self.s.get(self.i), Some(b'>' | b'x' | b'o')) {
             self.i += 1;
+            true
         } else {
             self.i = before;
+            false
         }
     }
 
@@ -1109,14 +1524,14 @@ impl<'a> Grammar<'a> {
         found
     }
 
-    /// One or more `b`.
-    fn run(&mut self, b: u8) -> bool {
+    /// A run of `b`: how many, none included.
+    fn run(&mut self, b: u8) -> usize {
         let start = self.i;
         while self.s.get(self.i) == Some(&b) {
             self.tick();
             self.i += 1;
         }
-        self.i > start
+        self.i - start
     }
 
     /// An ASCII word in any case, with nothing required after it.

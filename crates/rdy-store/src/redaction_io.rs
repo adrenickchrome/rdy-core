@@ -92,6 +92,8 @@ pub enum Failpoint {
     AfterSegmentSync,
     /// Before the rebuilt index replaces the old one.
     BeforeIndexPublish,
+    /// Right after the rebuilt index took the old one's name (not in [`Failpoint::ALL`]).
+    AfterIndexPublish,
 }
 
 impl Failpoint {
@@ -108,11 +110,15 @@ impl Failpoint {
             Failpoint::AfterZeroWrite => "after_zero_write",
             Failpoint::AfterSegmentSync => "after_segment_sync",
             Failpoint::BeforeIndexPublish => "before_index_publish",
+            Failpoint::AfterIndexPublish => "after_index_publish",
         }
     }
 
     pub fn parse(s: &str) -> Option<Failpoint> {
-        Failpoint::ALL.into_iter().find(|p| p.name() == s)
+        Failpoint::ALL
+            .into_iter()
+            .chain([Failpoint::AfterIndexPublish])
+            .find(|p| p.name() == s)
     }
 }
 
