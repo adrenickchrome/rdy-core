@@ -261,6 +261,8 @@ struct Eraser(std::sync::Mutex<Option<Doomed>>);
 struct Doomed {
     file: std::fs::File,
     kept: std::path::PathBuf,
+    /// The file's identity: `kept` is unlinked only while it still names this file.
+    id: crate::fileid::FileId,
     former: std::path::PathBuf,
 }
 
@@ -286,7 +288,10 @@ impl EraseFailed {
 
 impl Eraser {
     /// Zeroes and syncs the file now, if one is set, then unlinks its second name. A failed
-    /// zeroing keeps the name, so the next open zeroes the file.
+    /// zeroing keeps the name, so the next open zeroes the file. The name is unlinked only while
+    /// it still names this file: a reader can outlive its store, and an open in between zeroes
+    /// and removes the name, which a later removal can then take for its own old index
+    /// (ruling task-7 Round 3, N1). A name that names another file is left, and logged.
     fn erase(&self) -> Result<(), EraseFailed> {
         let taken = self.0.lock().unwrap_or_else(|e| e.into_inner()).take();
         let Some(d) = taken else {
@@ -298,9 +303,29 @@ impl Eraser {
             error,
         };
         crate::fsutil::zero_open_file(&d.file, &d.former).map_err(failed)?;
-        match std::fs::remove_file(&d.kept) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(failed(e)),
-            _ => {}
+        match crate::fileid::FileId::lstat(&d.kept) {
+            Ok(id) if id == d.id => match std::fs::remove_file(&d.kept) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(failed(e)),
+                _ => {}
+            },
+            // an open removed the name after it zeroed the file: nothing is left to unlink
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Ok(_) => {
+                crate::notice(&format!(
+                    "rdy: {} no longer names the replaced index file {}, so it was left as it is",
+                    d.kept.display(),
+                    d.former.display()
+                ));
+                return Ok(());
+            }
+            Err(e) => {
+                crate::notice(&format!(
+                    "rdy: {} could not be checked ({e}), so it was left as it is; the replaced index file {} is zeroed",
+                    d.kept.display(),
+                    d.former.display()
+                ));
+                return Ok(());
+            }
         }
         if let Some(dir) = d.kept.parent() {
             // the zeros are synced: a lost unlink only leaves a zeroed file for the next open
@@ -1731,6 +1756,7 @@ impl Index {
         *self.eraser.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(Doomed {
             file,
             kept,
+            id,
             former: path.to_path_buf(),
         });
         Ok(true)

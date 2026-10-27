@@ -505,6 +505,11 @@ fn rdb7_a_killed_removal_keeps_no_drawing() {
         {
             let s = Store::open(&l.prep).unwrap_or_else(|e| panic!("{point:?}: reopen: {e}"));
             assert!(s.open_report().unclean_shutdown, "{point:?}");
+            // ruling task-7 Round 3, N4: the reindex the mark triggers is this open's rebuild
+            assert!(
+                s.open_report().index_rebuilt,
+                "{point:?}: the report says so"
+            );
             let c = s.reader().diagram_cache();
             assert_eq!(c.rows_for_tests(), 0, "{point:?}: no row survives");
             assert_eq!(c.bytes_for_tests(), Some(0), "{point:?}");
@@ -717,4 +722,158 @@ fn rdb7_a_removal_zeroes_the_old_index() {
             );
         }
     }
+}
+
+/// rdb7 (ruling task-7 Round 3, N1; the re-review's probe D): a reader outlives its store's
+/// close, so the old index stays kept as `index.redb.erase`. The next open zeroes and removes
+/// that name, and a later removal's kept file takes it. When the first reader drops, its zeroing
+/// leaves the name it no longer owns, and logs one line: the later removal's file survives until
+/// its own zeroing runs.
+#[test]
+fn rdb7_a_late_eraser_leaves_a_name_it_no_longer_owns() {
+    let l = live_landing();
+    let erase = l.prep.join("index.redb.erase");
+    let mut s = Store::open(&l.prep).unwrap();
+    let reader = s.reader();
+    let items = decode_items(&std::fs::read(&l.items_file).unwrap());
+    s.seal_redaction_batch_for_tests(items).unwrap();
+    s.close().unwrap();
+    assert!(erase.exists(), "kept while the reader lives");
+    let s = Store::open(&l.prep).unwrap();
+    assert!(
+        !erase.exists(),
+        "the reopen zeroed and removed the kept name"
+    );
+    // a later removal's old index, kept under the same free name
+    let later = b"a later removal's old index".to_vec();
+    std::fs::write(&erase, &later).unwrap();
+    let capture = rdy_store::capture_notices_for_tests(&[&erase.display().to_string()]);
+    drop(reader);
+    let lines = capture.notices();
+    drop(capture);
+    assert!(erase.exists(), "the later removal's kept name survives");
+    assert_eq!(
+        std::fs::read(&erase).unwrap(),
+        later,
+        "and its file is untouched"
+    );
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    drop(s);
+    assert_eq!(files_with_secret(&l.prep), Vec::<PathBuf>::new());
+}
+
+/// A closed store at `<dir>/s` with a regular file left as `index.redb.erase`.
+fn store_with_leftover(dir: &Path) -> (PathBuf, PathBuf) {
+    let path = dir.join("s");
+    content(&path);
+    let erase = path.join("index.redb.erase");
+    std::fs::write(&erase, b"a kept index file").unwrap();
+    (path, erase)
+}
+
+/// rdb7 (ruling task-7 Round 3, N3): the open checks the leftover's links on the handle it
+/// zeroes through, not on the path: a file swapped in after the name was read, which has
+/// another link, is not zeroed, and the open logs it.
+#[test]
+fn rdb7_a_leftover_swapped_for_a_shared_file_is_not_zeroed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (path, erase) = store_with_leftover(dir.path());
+    let other = dir.path().join("other");
+    let text = b"not rdy's file".to_vec();
+    std::fs::write(&other, &text).unwrap();
+    let swap = dir.path().join("swap");
+    let swapped = std::sync::atomic::AtomicBool::new(false);
+    let (at, from) = (erase.clone(), other.clone());
+    let hook = rdy_store::on_leftover_checked_for_tests(move |p| {
+        if p == at && !swapped.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            std::fs::hard_link(&from, &swap).unwrap();
+            std::fs::rename(&swap, &at).unwrap();
+        }
+    });
+    let capture = rdy_store::capture_notices_for_tests(&[&erase.display().to_string()]);
+    let s = Store::open(&path);
+    let lines = capture.notices();
+    drop(capture);
+    drop(hook);
+    let s = s.unwrap_or_else(|e| panic!("open: {e}"));
+    assert_eq!(
+        std::fs::read(&other).unwrap(),
+        text,
+        "the shared file is not zeroed"
+    );
+    assert!(erase.exists(), "the name is left as it is");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    drop(s);
+}
+
+/// rdb7 (ruling task-7 Round 3, N5): an open that a leftover it cannot zero refuses names the
+/// leftover file in its error text.
+#[test]
+fn rdb7_an_open_refused_by_a_leftover_names_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let (path, erase) = store_with_leftover(dir.path());
+    let failing = rdy_store::fsutil::fail_zeroing_for_tests(&erase);
+    let opened = Store::open(&path);
+    drop(failing);
+    let Err(e) = opened else {
+        panic!("the open is refused");
+    };
+    let text = e.to_string();
+    assert!(text.contains(&erase.display().to_string()), "{text}");
+    assert!(text.contains("injected zeroing failure"), "{text}");
+}
+
+/// rdb7 (ruling task-7 Round 3, the mark at every open; D-6H0ZX): a copy of a cleanly closed
+/// store whose log holds a finished removal, with an index older than that removal (a copy or a
+/// restore). The open is clean, but its catch-up replays the removal's apply, so it runs the
+/// removal's reindex and reports the rebuild: no file of the copy holds the removed text, while
+/// it is open and after it closes.
+#[test]
+fn rdb7_a_copy_whose_log_replays_a_removal_keeps_no_drawing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    content(&path);
+    {
+        let mut s = Store::open(&path).unwrap();
+        let (key, value) = secret_row();
+        s.reader().diagram_cache().put_raw_for_tests(&key, &value);
+        s.checkpoint().unwrap();
+        s.close().unwrap();
+    }
+    let old_index = dir.path().join("old-index.redb");
+    std::fs::copy(path.join("index.redb"), &old_index).unwrap();
+    assert!(holds_secret(&std::fs::read(&old_index).unwrap()));
+    let f = authorized_batch_fixture(
+        &path,
+        &[spec(&path)],
+        &FixtureOptions::approved(Proof::local_human()),
+    );
+    // the open finishes the removal, and the store closes cleanly
+    Store::open(&path).unwrap().close().unwrap();
+    assert_eq!(files_with_secret(&path), Vec::<PathBuf>::new());
+    let copy = dir.path().join("copy");
+    copy_dir(&path, &copy);
+    std::fs::copy(&old_index, copy.join("index.redb")).unwrap();
+    {
+        let s = Store::open(&copy).unwrap();
+        assert_eq!(
+            files_with_secret(&copy),
+            Vec::<PathBuf>::new(),
+            "no file holds the removed text while the copy is open"
+        );
+        let report = s.open_report();
+        assert!(!report.unclean_shutdown, "a clean open");
+        assert!(report.index_rebuilt, "the mark's reindex is reported");
+        assert_eq!(s.reader().diagram_cache().rows_for_tests(), 0);
+        assert_eq!(
+            s.get_block(&secret().version_hash()).unwrap().redaction(),
+            Some(f.requests[0].request)
+        );
+        s.close().unwrap();
+    }
+    assert_eq!(
+        files_with_secret(&copy),
+        Vec::<PathBuf>::new(),
+        "no file holds the removed text after the close"
+    );
 }

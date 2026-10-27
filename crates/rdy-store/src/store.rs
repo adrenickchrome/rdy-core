@@ -302,7 +302,10 @@ fn rebuild_index(path: &Path, repaired: bool) -> Result<OpenedIndex, StoreError>
 /// failed zeroing left behind, then syncs `dir`. The caller holds the lock. A kill before the
 /// rename leaves `index.redb` on the same file: it is the old index too, and is zeroed (the open
 /// then rebuilds it from the log as damage). A name that is not a regular file, or a file with
-/// another link, is not rdy's own copy: it is left as it is, and logged.
+/// another link, is not rdy's own copy: it is left as it is, and logged. The links are read on
+/// the handle that zeroes, so a file swapped in after the name was read is judged too (ruling
+/// task-7 Round 3, N3). A leftover that cannot be zeroed or removed refuses the open, and the
+/// error names it (N5).
 fn erase_leftovers(dir: &Path) -> Result<(), StoreError> {
     let index = dir.join("index.redb");
     let mut removed = false;
@@ -315,21 +318,44 @@ fn erase_leftovers(dir: &Path) -> Result<(), StoreError> {
             continue;
         }
         let path = dir.join(&name);
-        let meta = std::fs::symlink_metadata(&path)?;
-        let links = crate::fileid::links(&meta);
-        let ours = meta.file_type().is_file()
-            && (links == 1 || (links == 2 && crate::fileid::same_file(&path, &index)));
-        if !ours {
+        let refused = |e: std::io::Error| {
+            StoreError::Io(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "{} is a replaced index file kept for zeroing, and it could not be zeroed and removed: {e}",
+                    path.display()
+                ),
+            ))
+        };
+        let not_ours = || {
             notice(&format!(
                 "rdy: {} is not a file rdy kept for zeroing, so it was left as it is",
                 path.display()
-            ));
+            ))
+        };
+        // a link, or a name that is not a regular file, is never opened
+        if !std::fs::symlink_metadata(&path)
+            .map_err(refused)?
+            .file_type()
+            .is_file()
+        {
+            not_ours();
             continue;
         }
-        let f = crate::pio::open_no_follow(OpenOptions::new().read(true).write(true), &path)?;
-        fsutil::zero_open_file(&f, &path)?;
+        leftover_checked(&path);
+        let f = crate::pio::open_no_follow(OpenOptions::new().read(true).write(true), &path)
+            .map_err(refused)?;
+        let meta = f.metadata().map_err(refused)?;
+        let links = crate::fileid::links(&meta);
+        let shared_with_index = links == 2
+            && crate::fileid::FileId::lstat(&index).ok() == Some(crate::fileid::FileId::of(&meta));
+        if !meta.is_file() || !(links == 1 || shared_with_index) {
+            not_ours();
+            continue;
+        }
+        fsutil::zero_open_file(&f, &path).map_err(refused)?;
         drop(f);
-        std::fs::remove_file(&path)?;
+        std::fs::remove_file(&path).map_err(refused)?;
         removed = true;
     }
     if removed {
@@ -343,6 +369,50 @@ fn remove_if_present(path: &Path) -> Result<(), StoreError> {
     match std::fs::remove_file(path) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
         _ => Ok(()),
+    }
+}
+
+/// Whether a reindex zeroes the index it replaces: a removal's always does, and so does one of an
+/// index whose `erase_due` mark is set (`due`).
+/// A mark that cannot be read counts as set: rdy zeroes rather than skips (ruling task-7 Round 3,
+/// N2).
+fn erase_old_due(erase_old: bool, due: Result<bool, StoreError>) -> bool {
+    erase_old || due.unwrap_or(true)
+}
+
+/// The test hook [`on_leftover_checked_for_tests`] sets.
+type LeftoverHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync>;
+
+static LEFTOVER_HOOK: Mutex<Option<LeftoverHook>> = Mutex::new(None);
+
+/// Test hook: while the returned guard lives, `erase_leftovers` calls `f` with each leftover's
+/// path after it reads the name and before it opens the file (any thread), so a test can swap
+/// the file in between.
+#[doc(hidden)]
+pub fn on_leftover_checked_for_tests(
+    f: impl Fn(&Path) + Send + Sync + 'static,
+) -> LeftoverHookGuard {
+    *LEFTOVER_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(f));
+    LeftoverHookGuard(())
+}
+
+/// The guard of [`on_leftover_checked_for_tests`]; dropping it removes the hook.
+#[doc(hidden)]
+pub struct LeftoverHookGuard(());
+
+impl Drop for LeftoverHookGuard {
+    fn drop(&mut self) {
+        *LEFTOVER_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+fn leftover_checked(path: &Path) {
+    let hook = LEFTOVER_HOOK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if let Some(f) = hook {
+        f(path);
     }
 }
 
@@ -1103,17 +1173,17 @@ impl Store {
         store.check_mode_against(store.creation)?;
         // an authorized removal finishes before any reader escapes this open
         store.finish_redactions_at_open()?;
-        // A kill can keep an index whose cached drawings a removal meant to erase. An unclean
-        // open whose index applied a removal since it was built (its catch-up replayed the
-        // apply) runs the removal's reindex: a new index, and the old file zeroed and synced
-        // before it goes (D-6H0ZX; ruling task-7 Round 2, F3). Any other unclean open empties
-        // the diagram cache in one durable commit (D-XM8MP rule 13a).
-        if store.report.unclean_shutdown {
-            if store.index().erase_due()? {
-                store.reindex_after_removal()?;
-            } else {
-                store.index().clear_diagrams()?;
-            }
+        // A kill, a copy or a restore can keep an index whose cached drawings a removal meant to
+        // erase. Any open, clean or unclean, whose index applied a removal since it was built
+        // (its catch-up replayed the apply) runs the removal's reindex: a new index, and the old
+        // file zeroed and synced before it goes, and the open reports the rebuild (D-6H0ZX;
+        // ruling task-7 Round 2, F3, and Round 3, N4 and the mark at every open). Any other
+        // unclean open empties the diagram cache in one durable commit (D-XM8MP rule 13a).
+        if store.index().erase_due()? {
+            store.reindex_after_removal()?;
+            store.report.index_rebuilt = true;
+        } else if store.report.unclean_shutdown {
+            store.index().clear_diagrams()?;
         }
         // Losing this file to a power loss only costs a needless rebuild, so it is not synced.
         // It is only ever created, never opened: an existing one (a kill's, or a link planted
@@ -1620,7 +1690,7 @@ impl Store {
             return Err(batch_open("first"));
         }
         // an index that applied a removal since it was built may hold what the removal erased
-        let erase_old = erase_old || self.index().erase_due().unwrap_or(false);
+        let erase_old = erase_old_due(erase_old, self.index().erase_due());
         let path = self.dir.join("index.redb");
         let tmp = self.dir.join(INDEX_TMP);
         // a leftover temp is an older failed rebuild; `Index::open` would reuse it
@@ -3832,6 +3902,19 @@ fn unchecked_put(kind: u8) -> StoreError {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// rdb7 (ruling task-7 Round 3, N2): a mark that cannot be read counts as set, so the reindex
+    /// zeroes the old index rather than skip it.
+    #[test]
+    fn rdb7_an_unreadable_erase_due_mark_zeroes_the_old_index() {
+        let unreadable = || Err(StoreError::Db("injected meta read failure".into()));
+        assert!(erase_old_due(false, unreadable()));
+        assert!(erase_old_due(true, unreadable()));
+        assert!(erase_old_due(false, Ok(true)));
+        assert!(!erase_old_due(false, Ok(false)));
+    }
+
     #[test]
     fn msw4_store_drop_never_uses_eprintln() {
         let src = include_str!("store.rs");
