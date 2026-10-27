@@ -3,7 +3,7 @@
 //! It draws generated Mermaid sources with the pinned drawing crate and times each draw. A
 //! source's cost is the sum over its expanded arrows of the arrow's rank span times its label
 //! weight W (1 for an unlabelled arrow). A closed protocol picks the largest arrow count N at
-//! which every source in a closed matrix draws in under two seconds.
+//! which every source in a closed matrix draws in under ten seconds.
 //!
 //! ```text
 //! arrow_bound scan                  run the whole protocol and print the report
@@ -12,7 +12,7 @@
 //!
 //! The report goes to stdout, one tab-separated row per draw. Exit 0: the scan selected N of at
 //! least 200, or the verify step passed. Exit 3: the selected N is under 200. Exit 1: no
-//! positive N passed, the 12-hour limit ended the run, or the verify step failed. Exit 2: bad
+//! positive N passed, the 48-hour limit ended the run, or the verify step failed. Exit 2: bad
 //! arguments.
 //!
 //! The example calls the pinned crate directly, so the normal render path's bounds cannot
@@ -39,9 +39,9 @@ const TOP: u32 = 8192;
 /// The repetitions of one draw.
 const REPS: usize = 3;
 /// A repetition at or over this many nanoseconds is unsafe.
-const SAFE_NS: u64 = 2_000_000_000;
+const SAFE_NS: u64 = 10_000_000_000;
 /// The run stops at the next draw boundary once this many nanoseconds have passed.
-const TWELVE_HOURS_NS: u64 = 12 * 3600 * 1_000_000_000;
+const STOP_NS: u64 = 48 * 3600 * 1_000_000_000;
 /// The largest argument value.
 const MAX_ARG: u32 = 65536;
 /// A selected N under this stops the run with exit 3.
@@ -62,7 +62,7 @@ const USAGE: &str = "usage: arrow_bound scan | verify <N> <weight>";
 const HEADER: &str = "phase\tshape\tstyle\tdirection\tpadding\tarrows\tlabelled\tspan\tweight\tbudget\tcost\tbytes\tstatements\tdepth\trepeat\telapsed_ns\tresult\tsvg_bytes";
 const UNDER_200: &str = "the arrow bound is under 200";
 const NO_POSITIVE: &str = "no positive arrow bound passed the measurement";
-const TIMED_OUT: &str = "the arrow bound measurement did not finish in 12 hours";
+const TIMED_OUT: &str = "the arrow bound measurement did not finish in 48 hours";
 
 // ---------------------------------------------------------------------------------------------
 // The matrix
@@ -1091,7 +1091,7 @@ fn rep_safe(rep: &Rep) -> bool {
 }
 
 /// Draws up to three times. The repetitions stop at the first one that is not safe: a result
-/// that is not `svg`, or a time of 2 s or more.
+/// that is not `svg`, or a time of 10 s or more.
 fn run_reps(clock: &mut dyn Clock, draw: &mut dyn FnMut() -> Attempt) -> Vec<Rep> {
     let mut reps = Vec::with_capacity(REPS);
     for _ in 0..REPS {
@@ -1267,7 +1267,7 @@ impl Drawn {
 /// The first two lines of a report: the plan and the column header.
 fn report_head(cases: usize) -> String {
     let draws = cases as u64 * LADDER.len() as u64 * REPS as u64;
-    format!("plan\t{cases}\t{draws}\t{}\n{HEADER}\n", draws * 2)
+    format!("plan\t{cases}\t{draws}\t{}\n{HEADER}\n", draws * 10)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1296,7 +1296,7 @@ enum Finish {
     Under(u32, u32),
     /// Nothing positive passed. Exit 1.
     NoPositive,
-    /// The 12 hours ran out. Exit 1.
+    /// The 48 hours ran out. Exit 1.
     TimedOut,
     /// The verify step failed at N. Exit 1.
     NotVerified(u32),
@@ -1399,9 +1399,9 @@ impl<'a> Search<'a> {
         Ok(())
     }
 
-    /// Stops at a draw boundary once 12 hours have passed.
+    /// Stops at a draw boundary once 48 hours have passed.
     fn boundary(&mut self) -> Result<(), Halt> {
-        if self.probe.elapsed() >= TWELVE_HOURS_NS {
+        if self.probe.elapsed() >= STOP_NS {
             return Err(Halt::TimedOut);
         }
         Ok(())
@@ -1747,7 +1747,7 @@ mod tests {
     use std::cell::Cell;
 
     const SAFE: u64 = 1_000_000;
-    const SLOW: u64 = 2_000_000_000;
+    const SLOW: u64 = 10_000_000_000;
     const HOUR: u64 = 3_600_000_000_000;
 
     fn case(shape: Shape, form: Form, dir: Dir, pad: Pad) -> Case {
@@ -2328,14 +2328,14 @@ mod tests {
     #[test]
     fn rdb3_protocol_selects_n_and_w() {
         let cases = enumerate();
-        // exactly 2,000,000,000 ns is unsafe; the repetitions stop at the first unsafe one
+        // exactly 10,000,000,000 ns is unsafe; the repetitions stop at the first unsafe one
         let time = Cell::new(0);
         for (script, reps, safe) in [
-            (vec![1_999_999_999; 3], 3, true),
+            (vec![9_999_999_999; 3], 3, true),
             (vec![SLOW], 1, false),
             (vec![SAFE, SLOW], 2, false),
             (vec![SAFE, SAFE, SLOW], 3, false),
-            (vec![SAFE, SAFE, 2_000_000_001], 3, false),
+            (vec![SAFE, SAFE, 10_000_000_001], 3, false),
         ] {
             time.set(0);
             let mut calls = 0;
@@ -2441,7 +2441,7 @@ mod tests {
             if budget > limit { SLOW } else { SAFE }
         });
         assert_eq!(finish, Finish::Selected(400, 4));
-        assert!(report.starts_with("plan\t2616\t125568\t251136\nphase\tshape\t"));
+        assert!(report.starts_with("plan\t2616\t125568\t1255680\nphase\tshape\t"));
         assert!(report.ends_with("selected\t400\t4\n"));
         assert!(report.contains("\nverify-library\t"));
         assert!(report.contains("\nverify-wrapper\t"));
@@ -2521,15 +2521,15 @@ mod tests {
         // nothing unsafe at all: the candidate is the top of the ladder, which needs no N + 1
         let (finish, _, _) = drive(Mode::Scan, |_, _, _, _, _| SAFE);
         assert_eq!(finish, Finish::Selected(8192, 1));
-        // the 12-hour stop: at the next draw boundary, with the rows so far
+        // the 48-hour stop: at the next draw boundary, with the rows so far
         let (finish, report, log) = drive(Mode::Scan, |_, _, _, _, _| HOUR);
         assert_eq!(finish, Finish::TimedOut);
         assert_eq!(
             log.len(),
-            12,
-            "one hour per draw, the thirteenth never starts"
+            48,
+            "one hour per draw, the forty-ninth never starts"
         );
-        assert_eq!(report.lines().count(), 2 + 12);
+        assert_eq!(report.lines().count(), 2 + 48);
         assert!(!report.contains("selected"));
         // verify mode: one pass, no lowering
         let (finish, report, log) = drive(Mode::Verify(300, 4), |_, at, budget, _, _| {
@@ -3054,7 +3054,7 @@ mod tests {
         let cases = enumerate().len();
         assert_eq!(
             report_head(cases),
-            "plan\t2616\t125568\t251136\nphase\tshape\tstyle\tdirection\tpadding\tarrows\tlabelled\tspan\tweight\tbudget\tcost\tbytes\tstatements\tdepth\trepeat\telapsed_ns\tresult\tsvg_bytes\n"
+            "plan\t2616\t125568\t1255680\nphase\tshape\tstyle\tdirection\tpadding\tarrows\tlabelled\tspan\tweight\tbudget\tcost\tbytes\tstatements\tdepth\trepeat\telapsed_ns\tresult\tsvg_bytes\n"
         );
         assert_eq!(cases as u64 * 16 * 3, 125568);
         assert_eq!(HEADER.split('\t').count(), 18);
@@ -3099,7 +3099,7 @@ mod tests {
         );
         assert_eq!(
             Finish::TimedOut.message().as_deref(),
-            Some("the arrow bound measurement did not finish in 12 hours")
+            Some("the arrow bound measurement did not finish in 48 hours")
         );
         assert_eq!(
             Finish::NotVerified(300).message().as_deref(),
