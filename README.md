@@ -35,17 +35,17 @@ The installer verifies SHA-256, installs to `~/.local/bin`, and asks before chan
 **macOS (Apple silicon):**
 
 ```sh
-curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.20.0/rdy-0.20.0-preview-aarch64-apple-darwin.tar.gz
-tar -xzf rdy-0.20.0-preview-aarch64-apple-darwin.tar.gz
-mkdir -p ~/.local/bin && mv rdy-0.20.0-preview-aarch64-apple-darwin/rdy ~/.local/bin/
+curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.25.0/rdy-0.25.0-preview-aarch64-apple-darwin.tar.gz
+tar -xzf rdy-0.25.0-preview-aarch64-apple-darwin.tar.gz
+mkdir -p ~/.local/bin && mv rdy-0.25.0-preview-aarch64-apple-darwin/rdy ~/.local/bin/
 ```
 
 **Linux (x86_64):**
 
 ```sh
-curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.20.0/rdy-0.20.0-preview-x86_64-unknown-linux-gnu.tar.gz
-tar -xzf rdy-0.20.0-preview-x86_64-unknown-linux-gnu.tar.gz
-mkdir -p ~/.local/bin && mv rdy-0.20.0-preview-x86_64-unknown-linux-gnu/rdy ~/.local/bin/
+curl -LO https://github.com/adrenickchrome/rdy-core/releases/download/v0.25.0/rdy-0.25.0-preview-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf rdy-0.25.0-preview-x86_64-unknown-linux-gnu.tar.gz
+mkdir -p ~/.local/bin && mv rdy-0.25.0-preview-x86_64-unknown-linux-gnu/rdy ~/.local/bin/
 ```
 
 If `~/.local/bin` is not on your PATH, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile. Then check:
@@ -54,7 +54,7 @@ If `~/.local/bin` is not on your PATH, add `export PATH="$HOME/.local/bin:$PATH"
 rdy --version
 ```
 
-It prints `rdy 0.20.0 (preview)`.
+It prints `rdy 0.25.0 (preview)`.
 
 On macOS, if you downloaded the archive in a browser instead of with curl, macOS may block the binary. Run `xattr -d com.apple.quarantine ~/.local/bin/rdy` once.
 
@@ -84,7 +84,7 @@ To check the signature of the download first, see "Verify the download" at the b
 
    The agent claims its own `agent:` actor, such as `agent:claude`, when it starts a session. The guide in step 3 tells it to. Approving stays with you: an agent cannot start an approver session over MCP.
 
-3. **Give your agent the guide.** Download `AGENTS.md` (or `CLAUDE.md`, the same text) from the [release page](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.20.0) into the project folder. It tells the agent how to work with rdy. The `AGENTS.md` in this repository is a different file, for people who work on rdy itself.
+3. **Give your agent the guide.** Download `AGENTS.md` (or `CLAUDE.md`, the same text) from the [release page](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.25.0) into the project folder. It tells the agent how to work with rdy. The `AGENTS.md` in this repository is a different file, for people who work on rdy itself.
 
 4. **Ask your agent for something real.** For example:
 
@@ -338,10 +338,10 @@ The preview has two archives: macOS arm64 and Linux amd64. The Linux archive is 
 
 | Platform | Target | Archive |
 |---|---|---|
-| macOS arm64 | `aarch64-apple-darwin` | [rdy-0.20.0-preview-aarch64-apple-darwin.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.20.0/rdy-0.20.0-preview-aarch64-apple-darwin.tar.gz) |
-| Linux amd64 | `x86_64-unknown-linux-gnu` | [rdy-0.20.0-preview-x86_64-unknown-linux-gnu.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.20.0/rdy-0.20.0-preview-x86_64-unknown-linux-gnu.tar.gz) |
+| macOS arm64 | `aarch64-apple-darwin` | [rdy-0.25.0-preview-aarch64-apple-darwin.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.25.0/rdy-0.25.0-preview-aarch64-apple-darwin.tar.gz) |
+| Linux amd64 | `x86_64-unknown-linux-gnu` | [rdy-0.25.0-preview-x86_64-unknown-linux-gnu.tar.gz](https://github.com/adrenickchrome/rdy-core/releases/download/v0.25.0/rdy-0.25.0-preview-x86_64-unknown-linux-gnu.tar.gz) |
 
-The release is [v0.20.0](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.20.0). It also holds [SHA256SUMS](https://github.com/adrenickchrome/rdy-core/releases/download/v0.20.0/SHA256SUMS) and [SHA256SUMS.sig](https://github.com/adrenickchrome/rdy-core/releases/download/v0.20.0/SHA256SUMS.sig).
+The release is [v0.25.0](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.25.0). It also holds [SHA256SUMS](https://github.com/adrenickchrome/rdy-core/releases/download/v0.25.0/SHA256SUMS) and [SHA256SUMS.sig](https://github.com/adrenickchrome/rdy-core/releases/download/v0.25.0/SHA256SUMS.sig).
 
 Download the archive for your platform, SHA256SUMS and SHA256SUMS.sig into one new directory.
 Check the signature with OpenSSH, then check the archive hash, before extraction or execution. The signed file is SHA256SUMS.
@@ -355,7 +355,7 @@ rdy-release namespaces="rdy-release-v1" sk-ssh-ed25519@openssh.com AAAAGnNrLXNza
 
 Fingerprint: SHA256:Baa52ZPJSzazbmd2KDEkzUM6OYTnl8mznJXsmnwvvJc.
 
-Compare this line and fingerprint with the ones in the [GitHub release notes](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.20.0). Use the key only when both match.
+Compare this line and fingerprint with the ones in the [GitHub release notes](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.25.0). Use the key only when both match.
 
 ### Install
 
@@ -366,11 +366,11 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIDiiQ0vO3dvG2AtbJYDwsshJl75kvbbnRDOCUdsjfrDRAAAAD3NzaDpyZHktcmVsZWFzZQ==' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.20.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.20.0-preview-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.20.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.20.0-preview-aarch64-apple-darwin/rdy' '/path/to/rdy-0.20.0/bin/rdy' &&
-'/path/to/rdy-0.20.0/bin/rdy' '--version'
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.25.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.25.0-preview-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.25.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.25.0-preview-aarch64-apple-darwin/rdy' '/path/to/rdy-0.25.0/bin/rdy' &&
+'/path/to/rdy-0.25.0/bin/rdy' '--version'
 ```
 
 On Linux amd64:
@@ -380,11 +380,11 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIDiiQ0vO3dvG2AtbJYDwsshJl75kvbbnRDOCUdsjfrDRAAAAD3NzaDpyZHktcmVsZWFzZQ==' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'sha256sum' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.20.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.20.0-preview-x86_64-unknown-linux-gnu.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.20.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.20.0-preview-x86_64-unknown-linux-gnu/rdy' '/path/to/rdy-0.20.0/bin/rdy' &&
-'/path/to/rdy-0.20.0/bin/rdy' '--version'
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.25.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.25.0-preview-x86_64-unknown-linux-gnu.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.25.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.25.0-preview-x86_64-unknown-linux-gnu/rdy' '/path/to/rdy-0.25.0/bin/rdy' &&
+'/path/to/rdy-0.25.0/bin/rdy' '--version'
 ```
 
 On macOS arm64, for an archive downloaded with a web browser:
@@ -396,16 +396,16 @@ cd '/path/to/download' &&
 'printf' '%s\n' 'rdy-release namespaces="rdy-release-v1" sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIDiiQ0vO3dvG2AtbJYDwsshJl75kvbbnRDOCUdsjfrDRAAAAD3NzaDpyZHktcmVsZWFzZQ==' > '/path/to/download/release-allowed-signers' &&
 'ssh-keygen' '-Y' 'verify' '-f' 'release-allowed-signers' '-I' 'rdy-release' '-n' 'rdy-release-v1' '-s' 'SHA256SUMS.sig' < '/path/to/download/SHA256SUMS' &&
 'shasum' '-a' '256' '-c' '--ignore-missing' 'SHA256SUMS' &&
-'xattr' '-d' 'com.apple.quarantine' '/path/to/download/rdy-0.20.0-preview-aarch64-apple-darwin.tar.gz' &&
-'mkdir' '/path/to/unpack' '/path/to/rdy-0.20.0' &&
-'tar' '-xzf' '/path/to/download/rdy-0.20.0-preview-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
-'mkdir' '-p' '/path/to/rdy-0.20.0/bin' &&
-'install' '-m' '755' '/path/to/unpack/rdy-0.20.0-preview-aarch64-apple-darwin/rdy' '/path/to/rdy-0.20.0/bin/rdy' &&
-'/path/to/rdy-0.20.0/bin/rdy' '--version'
+'xattr' '-d' 'com.apple.quarantine' '/path/to/download/rdy-0.25.0-preview-aarch64-apple-darwin.tar.gz' &&
+'mkdir' '/path/to/unpack' '/path/to/rdy-0.25.0' &&
+'tar' '-xzf' '/path/to/download/rdy-0.25.0-preview-aarch64-apple-darwin.tar.gz' '-C' '/path/to/unpack' &&
+'mkdir' '-p' '/path/to/rdy-0.25.0/bin' &&
+'install' '-m' '755' '/path/to/unpack/rdy-0.25.0-preview-aarch64-apple-darwin/rdy' '/path/to/rdy-0.25.0/bin/rdy' &&
+'/path/to/rdy-0.25.0/bin/rdy' '--version'
 ```
 
 Add the version's bin directory to PATH in this shell.
-Replace `<version-prefix>` with the version prefix, such as `/path/to/rdy-0.20.0`:
+Replace `<version-prefix>` with the version prefix, such as `/path/to/rdy-0.25.0`:
 
 ```sh
 export PATH="<version-prefix>/bin:$PATH"
