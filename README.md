@@ -17,7 +17,20 @@ This is a **preview**: things will change before Release 1. See "About this prev
 - **A live docs site.** `rdy site` gives you a local site that refreshes as changes land.
 - **Local and private.** Everything runs on your machine: no account, no hosted service, no model inside rdy.
 
-## Install (about a minute)
+## Install
+
+Quick to install, low friction to start: one command, no account required. Free and open source.
+
+On macOS (Apple Silicon) or Linux (x86_64):
+
+```sh
+curl -fsSL https://getrdy.dev/install.sh | sh
+```
+
+The installer verifies SHA-256, installs to `~/.local/bin`, and asks before changing your shell profile. [Read the script](https://getrdy.dev/install.sh). Open a new terminal afterward, or run the PATH command it prints.
+
+<details>
+<summary>Manual archive installation</summary>
 
 **macOS (Apple silicon):**
 
@@ -47,6 +60,8 @@ On macOS, if you downloaded the archive in a browser instead of with curl, macOS
 
 To check the signature of the download first, see "Verify the download" at the bottom. You do not need it to use rdy.
 
+</details>
+
 ## Try it: your first project
 
 1. **Make a project.**
@@ -58,7 +73,7 @@ To check the signature of the download first, see "Verify the download" at the b
 2. **Connect your agent.** For Claude Code:
 
    ```sh
-   claude mcp add rdy -- rdy mcp --project ~/my-project
+   claude mcp add rdy -- rdy mcp --project "$PWD"
    ```
 
    For another MCP client, add this server to its config (write the full path; most clients do not expand `~`):
@@ -67,11 +82,13 @@ To check the signature of the download first, see "Verify the download" at the b
    { "mcpServers": { "rdy": { "command": "rdy", "args": ["mcp", "--project", "/home/you/my-project"] } } }
    ```
 
+   The agent claims its own `agent:` actor, such as `agent:claude`, when it starts a session. The guide in step 3 tells it to. Approving stays with you: an agent cannot start an approver session over MCP.
+
 3. **Give your agent the guide.** Download `AGENTS.md` (or `CLAUDE.md`, the same text) from the [release page](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.20.0) into the project folder. It tells the agent how to work with rdy. The `AGENTS.md` in this repository is a different file, for people who work on rdy itself.
 
 4. **Ask your agent for something real.** For example:
 
-   > Start an rdy session as a writer. Create a doc "Payments" with a requirement "Refunds settle within 5 business days" and a decision explaining why. Then propose it.
+   > Start an rdy session in your own view, then read its overview. Help me design retention for an AI support assistant. Our intent is to keep only the customer data we need, for as short a time as we can, and be able to explain the choices. Start with a decision to delete raw conversations after 30 days and keep anonymised metrics for 2 years. Create the storage docs and link them to the decision. Propose the first design for my approval.
 
 5. **Review and approve it yourself.**
 
@@ -87,7 +104,7 @@ To check the signature of the download first, see "Verify the download" at the b
    rdy site
    ```
 
-   Open the link. Now ask your agent to change the decision, and watch rdy flag what the change affects before you approve it.
+   Open the link. Now ask your agent: “For EU customers, raw conversations must be deleted after 7 days. Keep the 30-day rule elsewhere and the 2-year metrics window.” The agent briefs on the decision and its connected docs, follows the consequences, and brings you the proposal to approve. The [getrdy.dev illustration](https://getrdy.dev/#demo) shows how that ripple can surface a separate backup-retention decision.
 
 ## Quick start
 
