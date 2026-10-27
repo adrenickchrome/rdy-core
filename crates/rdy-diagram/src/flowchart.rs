@@ -32,11 +32,12 @@
 //! subgraphs that hidden arrows may stack ([`Reading::stacked`]). Neither reaches the source a
 //! reader sees.
 //!
-//! It also gives the arrow cost (D-VACA9, [`Reading::arrows`]). A connector that links two node
-//! groups costs its rank span ([`span`]) once for each pair of a source and a target, as the
-//! pinned crate expands it before layout, times the label weight when it has a label. A
-//! connector is charged once, at its place, however many reads reach it. Every count saturates
-//! at `MAX_ARROWS + 1`, and no pair is ever built.
+//! It also gives the cost of the arrows and groups (D-VACA9, D-NN3GQ, [`Reading::arrows`]). A
+//! connector that links two node groups costs its rank span ([`span`]) once for each pair of a
+//! source and a target, as the pinned crate expands it before layout, times the label weight
+//! when it has a label. Each subgraph that closes costs one. A connector or a subgraph is
+//! charged once, at its place, however many reads reach it. Every count saturates at
+//! `MAX_ARROWS + 1`, and no pair is ever built.
 
 use crate::ARROW_CAP;
 use crate::arrows::Tally;
@@ -102,8 +103,8 @@ pub(crate) struct Reading {
     /// and no arrow completes outside every subgraph. `render` keeps the stacked drawing only
     /// when it removes an overlap and adds none.
     pub stacked: Vec<String>,
-    /// What the arrows cost (D-VACA9), the hidden arrows of `stacked` included, saturated at
-    /// `MAX_ARROWS + 1`.
+    /// What the arrows and subgraphs cost (D-VACA9, D-NN3GQ), the hidden arrows of `stacked`
+    /// included, saturated at `MAX_ARROWS + 1`.
     pub arrows: usize,
     /// How many expanded arrows have a label, for the parity pin.
     #[cfg(test)]
@@ -752,6 +753,9 @@ impl<'a> Grammar<'a> {
                 }
                 end => {
                     nest = self.body_max[body] + 1;
+                    // a subgraph that closes is a group (D-NN3GQ). The memo below keeps the
+                    // statement at `at`, so this runs once for its place, whatever reaches it.
+                    self.tally.add(1, false, 1);
                     Some(end as usize + 3)
                 }
             }

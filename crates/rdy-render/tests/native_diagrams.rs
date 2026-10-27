@@ -767,9 +767,8 @@ fn rdb1_stacked_fallback_keeps_original_source() {
     );
 }
 
-/// The arrow bound's refusal (D-VACA9), with N = 200 (founder ruling TASK-795).
-const OVER_ARROWS: &str =
-    "the source has over 200 arrows, counting a longer or labelled arrow as more than one";
+/// The arrow bound's refusal (D-VACA9, D-NN3GQ), with N = 200 (D-0S2FW).
+const OVER_ARROWS: &str = "the source has over 200 arrows and groups, counting a longer or labelled arrow as more than one";
 
 /// `head`, then one line per arrow `0..n`, each line ended with `nl`.
 fn arrow_source(head: &str, n: usize, nl: &str, line: impl Fn(usize) -> String) -> String {
@@ -788,10 +787,10 @@ fn at_bound() -> String {
     })
 }
 
-/// Cost N + 1, with CRLF line ends and a blank line after a subgraph header: 201 plain arrows
-/// in one subgraph.
+/// Cost N + 1, with CRLF line ends and a blank line after a subgraph header: 200 plain arrows
+/// in one subgraph, which costs one more (D-NN3GQ).
 fn over_bound() -> String {
-    let body = arrow_source("subgraph S", 201, "\r\n", |i| {
+    let body = arrow_source("subgraph S", 200, "\r\n", |i| {
         format!("B{i} --> B{}", i + 1)
     });
     format!(
@@ -918,7 +917,7 @@ fn rdb6_all_surfaces_share_the_bound_and_original_source() {
             .unwrap_or_else(|| panic!("no {title}"))
             .blocks
     };
-    let (code, caption) = print_order(doc("Over page"), "B200 --> B201", "Over the bound");
+    let (code, caption) = print_order(doc("Over page"), "B199 --> B200", "Over the bound");
     assert!(code < caption, "refused: the code block, then its caption");
     let (code, caption) = print_order(doc("Label page"), "L100 -->|y| L101", "Labelled");
     assert!(code < caption, "refused: the code block, then its caption");

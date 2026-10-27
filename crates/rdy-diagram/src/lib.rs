@@ -11,10 +11,13 @@
 //! pinned line parsers' rules. Two flowchart shapes inside those bounds would hold the pinned
 //! crate for minutes or hours, so they are refused too: a subgraph that no `end` closes (the
 //! grammar reads its body again, and nested ones multiply), and an arrow over 256 bytes (its run
-//! and its label; it spans one rank per dot or dash). The last refusal is the arrows' cost
-//! (D-VACA9): each arrow the source expands to costs its rank span, times a weight when it has a
-//! label, and a source whose arrows cost over [`MAX_ARROWS`] is not drawn. The flowchart walk
-//! gives the flowchart's cost, and a line recognizer (see `arrows`) the other families'.
+//! and its label; it spans one rank per dot or dash). The last refusal is the cost of the arrows
+//! and groups (D-VACA9, D-NN3GQ): each arrow the source expands to costs its rank span, times a
+//! weight when it has a label; each state note and each boundary between concurrent regions
+//! costs one, as the pinned crate builds an arrow for each; and each group (a flowchart
+//! subgraph, a composite state, a class namespace or a concurrent region) costs one. A source
+//! that costs over [`MAX_ARROWS`] is not drawn. The flowchart walk gives the flowchart's cost,
+//! and a line recognizer (see `arrows`) the other families'.
 //!
 //! The pinned crate draws from the drawing input, a copy of the source with three rewrites:
 //! CRLF becomes LF; in a flowchart, each blank line that directly follows a subgraph header goes
@@ -46,9 +49,11 @@ pub const MAX_DEPTH: usize = 32;
 pub const MAX_SVG_BYTES: usize = 4194304;
 /// The most bytes one flowchart arrow may have: its run (dots, dashes or equals) and its label.
 pub const MAX_ARROW_BYTES: usize = 256;
-/// The most arrows a drawn source may cost in total (D-VACA9, D-R7C3W; founder ruling TASK-795).
-/// Each arrow the source expands to costs its rank span (the pinned crate's `minlen`), times
-/// [`LABELLED_ARROW_WEIGHT`] when it has a label.
+/// The most a drawn source's arrows and groups may cost in total (D-VACA9, D-R7C3W, D-NN3GQ;
+/// fixed by D-0S2FW). Each arrow the source expands to costs its rank span (the pinned crate's
+/// `minlen`), times [`LABELLED_ARROW_WEIGHT`] when it has a label. Each state note, each
+/// boundary between concurrent regions and each group (a flowchart subgraph, a composite
+/// state, a class namespace or a concurrent region) costs one.
 pub const MAX_ARROWS: usize = 200;
 /// What a labelled arrow's rank span is multiplied by in the arrow cost (D-VACA9).
 pub const LABELLED_ARROW_WEIGHT: usize = 1;
@@ -234,7 +239,8 @@ pub fn admit(source: &str) -> Result<Admitted<'_>, Diagram> {
     if m.longest_arrow > MAX_ARROW_BYTES {
         return Err(invalid(OVER_ARROW));
     }
-    // the last pre-draw refusal (D-VACA9): what the source's arrows cost, hidden ones included
+    // the last pre-draw refusal (D-VACA9, D-NN3GQ): what the source's arrows and groups cost,
+    // hidden arrows included
     if m.arrows > MAX_ARROWS {
         return Err(over_arrows());
     }
@@ -395,11 +401,12 @@ fn invalid(reason: &str) -> Diagram {
     }
 }
 
-/// The refusal of a source whose arrows cost more than [`MAX_ARROWS`] (D-VACA9).
+/// The refusal of a source whose arrows and groups cost more than [`MAX_ARROWS`] (D-VACA9,
+/// D-NN3GQ).
 fn over_arrows() -> Diagram {
     Diagram::Invalid {
         reason: format!(
-            "the source has over {MAX_ARROWS} arrows, counting a longer or labelled arrow as more than one"
+            "the source has over {MAX_ARROWS} arrows and groups, counting a longer or labelled arrow as more than one"
         ),
     }
 }
@@ -503,12 +510,13 @@ struct Measure {
     longest_arrow: usize,
     /// The top-level flowchart subgraphs that hidden arrows stack, in order (see `flowchart`).
     stacked: Vec<String>,
-    /// What the arrows cost (D-VACA9), hidden arrows included, saturated at `MAX_ARROWS + 1`.
+    /// What the arrows and groups cost (D-VACA9, D-NN3GQ), hidden arrows, state notes, region
+    /// boundaries and groups included, saturated at `MAX_ARROWS + 1`.
     arrows: usize,
 }
 
-/// Counts the statements of `src` after front matter, its deepest nesting, what its arrows cost
-/// and, in a flowchart, whether a subgraph finds no `end` and its longest arrow. The other
+/// Counts the statements of `src` after front matter, its deepest nesting, what its arrows and
+/// groups cost and, in a flowchart, whether a subgraph finds no `end` and its longest arrow. The other
 /// families' pinned parsers read each line once, so an unclosed block is read once and costs
 /// nothing more.
 fn measure(src: &str, family: Family) -> Measure {
@@ -2154,10 +2162,139 @@ mod tests {
         }
     }
 
-    /// rdb6 (D-VACA9): text that only looks like a connector costs nothing: node labels,
-    /// titles, front matter, comments, class members and annotations, state notes, classes and
-    /// descriptions, and sequence titles, notes, boxes and message text. Only real connectors
-    /// cost.
+    /// rdb6 (D-NN3GQ, D-VACA9): each group costs one: a flowchart subgraph, a composite state,
+    /// a class namespace and a concurrent region; nested groups each count. Each state note that
+    /// the pinned parser accepts and each boundary between concurrent regions (the nonempty
+    /// regions of a composite, minus one) cost one too. A composite with k nonempty regions
+    /// costs 1 + k + (k - 1); one with no divider has one implicit region, which adds nothing.
+    /// Every count saturates at N + 1.
+    #[test]
+    fn rdb6_notes_regions_and_groups_cost_one_each() {
+        // `k` blocks one inside another, each opened with `open` and its own `{i}` id
+        let nested = |open: &str, close: &str, k: usize, inner: &str| {
+            let opens: String = (0..k)
+                .map(|i| open.replace("{i}", &i.to_string()))
+                .collect();
+            format!("{opens}{inner}{}", close.repeat(k))
+        };
+        let many = |head: &str, k: usize, one: &dyn Fn(usize) -> String| {
+            let mut s = String::from(head);
+            for i in 0..k {
+                s.push_str(&one(i));
+            }
+            s
+        };
+        let cases: Vec<(String, usize)> = vec![
+            // flowchart subgraphs: empty, with a node, with arrows, siblings, nested 8 deep
+            ("flowchart LR\nsubgraph A\nend\n".into(), 1),
+            ("flowchart LR\nsubgraph A[t]\nn\nend\n".into(), 1),
+            ("flowchart LR\nsubgraph \"t\"\nn --> m\nend\n".into(), 2),
+            ("flowchart LR\nsubgraph A\nn\nend\nsubgraph B\nn\nend\nsubgraph C\nend\n".into(), 3),
+            (
+                format!("flowchart TD\n{}", nested("subgraph S{i}\n", "end\n", 8, "n\n")),
+                8,
+            ),
+            (
+                format!("flowchart TD\n{}", nested("subgraph S{i}\n", "end\n", 8, "a --> b\n")),
+                9,
+            ),
+            // a subgraph keyword in a label or a comment is no group
+            ("flowchart LR\nA[\"subgraph X\"] --> B\n%% subgraph Y\n".into(), 1),
+            // class namespaces: empty, nested, unclosed; a bad name or a class body holds none
+            ("classDiagram\nnamespace N {\n}\n".into(), 1),
+            ("classDiagram\nnamespace N {\n  class A\n}\n".into(), 1),
+            ("classDiagram\nnamespace N {\n  namespace M {\n    class A\n  }\n}\n".into(), 2),
+            ("classDiagram\nnamespace N {\n  A --> B\n".into(), 2),
+            ("classDiagram\nnamespace a b {\n}\nnamespace {\n}\n".into(), 0),
+            ("classDiagram\nclass A {\n  namespace N {\n}\n".into(), 0),
+            (
+                format!("classDiagram\n{}", nested("namespace N{i} {\n", "}\n", 8, "class A\n")),
+                8,
+            ),
+            // state notes: single-line, multi-line, empty text; no state id is no note
+            ("stateDiagram-v2\nnote right of A : t\n".into(), 1),
+            ("stateDiagram-v2\nnote left of A :\n".into(), 1),
+            ("stateDiagram-v2\nNOTE RIGHT OF A\n  t\nend note\n".into(), 1),
+            ("stateDiagram-v2\nnote right of : t\nnote left of\nnote over A : t\n".into(), 0),
+            ("stateDiagram-v2\nstate C {\n  note right of A : t\n}\n".into(), 2),
+            // composite states: a child of any kind makes one; an empty body or one that only
+            // divides makes none
+            ("stateDiagram-v2\nstate C {\n  state A\n}\n".into(), 1),
+            ("stateDiagram-v2\nstate C {\n  A --> B\n}\n".into(), 2),
+            ("stateDiagram-v2\nstate C {\n  direction LR\n}\n".into(), 1),
+            ("stateDiagram-v2\nstate C {\n  classDef c fill:#f00\n}\n".into(), 1),
+            ("stateDiagram-v2\nstate C {\n}\nstate D {\n  --\n  --\n}\n".into(), 0),
+            ("stateDiagram-v2\nstate C {\n  x y z\n  direction XY\n  %% A --> B\n}\n".into(), 0),
+            ("stateDiagram-v2\nstate \"t\" as C {\n  state A\n}\n".into(), 1),
+            ("stateDiagram-v2\nstate C {\n  state D {\n    state A\n  }\n}\n".into(), 2),
+            (
+                format!(
+                    "stateDiagram-v2\n{}",
+                    nested("state C{i} {\n", "}\n", 8, "state A\n")
+                ),
+                8,
+            ),
+            // concurrent regions: k nonempty regions cost 2k with the composite
+            ("stateDiagram-v2\nstate C {\n  state A\n  --\n  state B\n}\n".into(), 4),
+            (
+                "stateDiagram-v2\nstate C {\n  state A\n  --\n  state B\n  --\n  state D\n}\n"
+                    .into(),
+                6,
+            ),
+            // a leading, trailing or repeated divider makes no region; one nonempty region
+            // with a divider is a region
+            ("stateDiagram-v2\nstate C {\n  --\n  state A\n}\n".into(), 2),
+            ("stateDiagram-v2\nstate C {\n  state A\n  --\n}\n".into(), 2),
+            (
+                "stateDiagram-v2\nstate C {\n  --\n  state A\n  --\n  --\n  state B\n  --\n}\n"
+                    .into(),
+                4,
+            ),
+            // a region of skipped lines and comments is empty
+            (
+                "stateDiagram-v2\nstate C {\n  state A\n  --\n  x y z\n  %% t\n  --\n  state B\n}\n"
+                    .into(),
+                4,
+            ),
+            // a divider at the top level, or in a note's text, makes no region
+            ("stateDiagram-v2\nstate A\n--\nstate B\n".into(), 0),
+            (
+                "stateDiagram-v2\nstate C {\n  state A\n  note right of A\n  --\n  end note\n}\n"
+                    .into(),
+                2,
+            ),
+            // regions nest: an inner composite is a statement of its own region
+            (
+                "stateDiagram-v2\nstate C {\n  state D {\n    A --> B\n    --\n    state E\n  }\n  --\n  F --> G\n}\n"
+                    .into(),
+                // C: 4 (two regions); D: 4 (two regions); two transitions
+                10,
+            ),
+            // groups and notes saturate
+            (many("flowchart LR\n", 1000, &|i| format!("subgraph S{i}\nend\n")), ARROW_CAP),
+            (many("classDiagram\n", 1000, &|i| format!("namespace N{i} {{\n}}\n")), ARROW_CAP),
+            (many("stateDiagram-v2\n", 1000, &|_| "note right of A : t\n".into()), ARROW_CAP),
+            (
+                many("stateDiagram-v2\nstate C {\n", 1000, &|i| format!("state A{i}\n--\n")),
+                ARROW_CAP,
+            ),
+        ];
+        for (src, want) in &cases {
+            assert_eq!(cost(src).0, *want, "{src}");
+            // below the cap, the pinned crate's layout input agrees
+            if *want < ARROW_CAP
+                && let Ok(Some((pinned, _))) = quiet::catch(|| pinned_cost(src))
+            {
+                assert_eq!(pinned, *want, "pinned: {src}");
+            }
+        }
+    }
+
+    /// rdb6 (D-VACA9, D-NN3GQ): text that only looks like a connector costs nothing: node
+    /// labels, titles, front matter, comments, class members and annotations, state note text,
+    /// classes and descriptions, and sequence titles, notes, boxes and message text. Only real
+    /// connectors cost, and each group and each state note costs one: a note's text adds
+    /// nothing.
     #[test]
     fn rdb6_labels_comments_and_members_add_no_arrows() {
         for (src, want) in [
@@ -2172,7 +2309,8 @@ mod tests {
             ("flowchart LR\n%% A --> B\nA --> B %% C --> D\n", 1),
             (
                 "flowchart LR\nsubgraph S[\"a --> b\"]\nA --> B\nend\nsubgraph \"c --> d\"\nC\nend\n",
-                1,
+                // one arrow and two subgraphs
+                3,
             ),
             ("flowchart LR\nA -->|\"x --> y\"| B\n", 1),
             ("flowchart LR\nA -- \"a ==> b\" --> B\n", 1),
@@ -2188,12 +2326,18 @@ mod tests {
             ),
             (
                 "classDiagram\nnamespace N {\n  class A\n  A --> B\n}\ndirection LR\n",
-                1,
+                // one relation and one namespace
+                2,
             ),
-            // state: notes, classes, styles, descriptions, comments, declarations
+            // state: note text, classes, styles, descriptions, comments, declarations; each of
+            // the two notes costs one, whatever its text holds
             (
                 "stateDiagram-v2\nnote right of A : x --> y\nnote left of A\n  x --> y\n  A --> B\nend note\nclassDef c fill:#f00,stroke:#000\nclassDef x-->y fill:#f00\nclass A,B x-->y\nstyle A fill:#f00\nA : x ==> y\nstate \"x ==> y\" as S\nclick A \"x --> y\"\n%% A --> B\nA --> B %% C --> D\n",
-                1,
+                3,
+            ),
+            (
+                "stateDiagram-v2\nnote right of A : -->\nnote left of A : x\nnote right of A\n  a --> b\n  c --> d\nend note\n",
+                3,
             ),
             // sequence: titles, notes, boxes, participants, blocks, activation, message text
             (
@@ -2229,6 +2373,16 @@ mod tests {
             }),
             lines("sequenceDiagram", MAX_ARROWS + 1, &|i| {
                 format!("A->>B: m{i}")
+            }),
+            // groups and notes with no arrow (D-NN3GQ)
+            lines("flowchart LR", MAX_ARROWS + 1, &|i| {
+                format!("subgraph G{i}\nn{i}\nend")
+            }),
+            lines("classDiagram", MAX_ARROWS + 1, &|i| {
+                format!("namespace N{i} {{\nclass C{i}\n}}")
+            }),
+            lines("stateDiagram-v2", MAX_ARROWS + 1, &|i| {
+                format!("note right of S{i} : n{i}")
             }),
         ];
         for src in &over {
@@ -2316,6 +2470,9 @@ mod tests {
             fill("flowchart LR\n", "A[\"-->\"] --> ", "B\n"),
             fill("flowchart LR\n", "A -->|\"-->\"| ", "B\n"),
             fill("flowchart LR\n", "A[\"x --> y", "\"]\n"),
+            // subgraphs, in a row and nested (D-NN3GQ)
+            fill("flowchart LR\n", "subgraph S\nA --> B\nend\n", ""),
+            fill("flowchart LR\n", "subgraph S\n", "A\n"),
         ];
         let mut over = Vec::new();
         for src in &cases {
@@ -2338,7 +2495,7 @@ mod tests {
     /// Lines for random flowcharts with every connector form, labels, chains and groups. No
     /// `direction` (so no hidden arrows) and no arrow to a subgraph id (the pinned crate drops
     /// an arrow to an empty subgraph).
-    const FLOW_PIECES: [&str; 30] = [
+    const FLOW_PIECES: [&str; 32] = [
         "N{n} --> M{n}\n",
         "N{n} ---> M{n}\n",
         "N{n} --- M{n}\n",
@@ -2363,6 +2520,8 @@ mod tests {
         "N{n}; M{n} --> P{n}\n",
         "subgraph S{n}\nN{n} --> M{n}\nend\n",
         "subgraph S{n}[\"t --> u\"]\nN{n} -.-> M{n}\nend\n",
+        "subgraph E{n}\nend\n",
+        "subgraph O{n}\nsubgraph I{n}\nN{n} --> M{n}\nend\nend\n",
         "%% N{n} --> M{n}\n",
         "N{n} --> M{n} %% x --> y\n",
         "N{n}\n",
@@ -2373,7 +2532,7 @@ mod tests {
 
     /// Lines for random class diagrams: relations with every marker, cardinalities and labels,
     /// class bodies, members, annotations and comments.
-    const CLASS_PIECES: [&str; 24] = [
+    const CLASS_PIECES: [&str; 26] = [
         "A{n} --> B{n}\n",
         "A{n} --> \"many\" B{n}\n",
         "A{n} \"\" -- B{n}\n",
@@ -2395,14 +2554,17 @@ mod tests {
         "%% A{n} --> B{n}\n",
         "direction LR\n",
         "namespace N{n} {\n  A{n} --> B{n}\n}\n",
+        "namespace E{n} {\n}\n",
+        "namespace O{n} {\n  namespace I{n} {\n    class C{n}\n  }\n}\n",
         "A{n}-->B{n}\n",
         "x y z\n",
         "\n",
     ];
 
     /// Lines for random state diagrams: transitions, `[*]` ends, labels, notes, classes,
-    /// descriptions, composite states and comments.
-    const STATE_PIECES: [&str; 18] = [
+    /// descriptions, composite states, concurrent regions and comments. Each region holds a
+    /// state, so the pinned crate links each pair of regions next to each other.
+    const STATE_PIECES: [&str; 24] = [
         "A{n} --> B{n}\n",
         "[*] --> A{n}\n",
         "A{n} --> [*]\n",
@@ -2417,19 +2579,24 @@ mod tests {
         "A{n} : x ==> y\n",
         "state \"x\" as S{n}\n",
         "state C{n} {\n  X{n} --> Y{n}\n}\n",
+        "state E{n} {\n}\n",
+        "state D{n} {\n  --\n}\n",
+        "state P{n} {\n  state Q{n} {\n    X{n} --> Y{n}\n  }\n}\n",
+        "state R{n} {\n  X{n} --> Y{n}\n  --\n  Z{n} --> W{n}\n}\n",
+        "state K{n} {\n  --\n  state X{n}\n  --\n  --\n  note right of Y{n} : t\n  Y{n} --> Z{n}\n  --\n  x y z\n  --\n  state W{n} {\n    U{n} --> V{n}\n    --\n    T{n}: t\n  }\n}\n",
+        "note right of A{n}\n  x\n  }\nend note\n",
         "%% A{n} --> B{n}\n",
         "A{n} --> B{n} %% C --> D\n",
         "direction LR\n",
         "\n",
     ];
 
-    /// The cost and the labelled count of `src` as the pinned crate builds its edges: the sum
-    /// of their `minlen` in its layout document (a missing `minlen` reads as 1), and the edges
-    /// with a label, a head label or a tail label. The edges a state note or a concurrent
-    /// region adds are not connectors of the closed tables, so they are left out. None when
-    /// the pinned crate does not lay the source out.
+    /// The cost and the labelled count of `src` as the pinned crate builds its layout input: the
+    /// sum of `minlen` over every edge of its layout document (a missing `minlen` reads as 1),
+    /// state notes' and concurrent regions' edges included, plus its subgraphs, regions included
+    /// (D-NN3GQ); and the edges with a label, a head label or a tail label. None when the
+    /// pinned crate does not lay the source out.
     fn pinned_cost(src: &str) -> Option<(usize, usize)> {
-        use mmdflux::graph::Stroke;
         use mmdflux::payload::Diagram as Payload;
         let json =
             mmdflux::render_diagram(src, OutputFormat::Mmds, &RenderConfig::default()).ok()?;
@@ -2437,36 +2604,24 @@ mod tests {
         let registry = mmdflux::builtins::default_registry();
         let id = registry.detect(src)?;
         let payload = registry.create(id)?.parse(src).ok()?.into_payload().ok()?;
-        let (graph, state) = match payload {
-            Payload::Flowchart(g) | Payload::Class(g) => (g, false),
-            Payload::State(g) => (g, true),
+        let graph = match payload {
+            Payload::Flowchart(g) | Payload::Class(g) | Payload::State(g) => g,
             Payload::Sequence(_) => return None,
         };
-        let added = |from: &str, to: &str, stroke: Stroke| {
-            state
-                && (from.contains("____note_")
-                    || to.contains("____note_")
-                    || stroke == Stroke::Invisible)
-        };
-        let minlen: usize = doc
-            .edges
-            .iter()
-            .filter(|e| !added(&e.source, &e.target, e.stroke))
-            .map(|e| e.minlen as usize)
-            .sum();
+        let minlen: usize = doc.edges.iter().map(|e| e.minlen as usize).sum();
         let some = |l: &Option<String>| l.as_deref().is_some_and(|t| !t.trim().is_empty());
         let labelled = graph
             .edges
             .iter()
-            .filter(|e| !added(&e.from, &e.to, e.stroke))
             .filter(|e| some(&e.label) || some(&e.head_label) || some(&e.tail_label))
             .count();
-        Some((minlen, labelled))
+        Some((minlen + doc.subgraphs.len(), labelled))
     }
 
-    /// rdb6 (D-VACA9, review M4): on random flowchart, class and state sources, the cost with
-    /// W = 1 is the sum of `minlen` over the edges the pinned crate lays out, and the labelled
-    /// count is its edges with a label. Sequence has no layout document; its table pins hold.
+    /// rdb6 (D-VACA9, D-NN3GQ, review M4): on random flowchart, class and state sources, the
+    /// cost with W = 1 is the sum of `minlen` over every edge the pinned crate lays out, notes'
+    /// and regions' edges included, plus its subgraphs; the labelled count is its edges with a
+    /// label. No edge is left out. Sequence has no layout document; its table pins hold.
     #[test]
     fn rdb6_cost_matches_the_pinned_layout_input() {
         assert_eq!(LABELLED_ARROW_WEIGHT, 1);

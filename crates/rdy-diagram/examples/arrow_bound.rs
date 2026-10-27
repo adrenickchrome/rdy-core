@@ -56,7 +56,8 @@ const LANDING_ARROWS: usize = 9000;
 /// The start of the reason the render path gives once it holds the arrow bound.
 const REASON_HEAD: &str = "the source has over ";
 /// The end of that reason.
-const REASON_TAIL: &str = " arrows, counting a longer or labelled arrow as more than one";
+const REASON_TAIL: &str =
+    " arrows and groups, counting a longer or labelled arrow as more than one";
 
 const USAGE: &str = "usage: arrow_bound scan | verify <N> <weight>";
 const HEADER: &str = "phase\tshape\tstyle\tdirection\tpadding\tarrows\tlabelled\tspan\tweight\tbudget\tcost\tbytes\tstatements\tdepth\trepeat\telapsed_ns\tresult\tsvg_bytes";
@@ -3110,7 +3111,7 @@ mod tests {
         }
         assert_eq!(
             bound_reason(300),
-            "the source has over 300 arrows, counting a longer or labelled arrow as more than one"
+            "the source has over 300 arrows and groups, counting a longer or labelled arrow as more than one"
         );
         assert_eq!(LADDER.len(), 16);
         assert_eq!(MAX_ARG, 65536);

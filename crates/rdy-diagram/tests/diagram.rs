@@ -1229,7 +1229,13 @@ fn dgm1_unclosed_subgraphs_and_long_arrows_are_refused() {
     ] {
         assert_eq!(arrow(256).len(), 256, "{form}");
         let src = |n: usize| format!("flowchart LR\nA {} B\n", arrow(n));
-        assert!(drawn(&render(&src(256))), "{form}: 256 bytes");
+        // Orchestrator ruling task-6, item 3 (2026-10-27): the 256-byte dotted and long forms
+        // span 250 and 254 ranks, over N = 200, so the arrow cost refuses them (D-VACA9)
+        if matches!(form, "dotted" | "long") {
+            assert_eq!(render(&src(256)), invalid(OVER_ARROWS), "{form}: 256 bytes");
+        } else {
+            assert!(drawn(&render(&src(256))), "{form}: 256 bytes");
+        }
         assert_eq!(
             short(render(&src(257))),
             invalid(OVER_ARROW),
@@ -1397,9 +1403,8 @@ fn rdb1_blank_lines_after_subgraph_headers_draw() {
     }
 }
 
-/// The arrow bound's refusal (D-VACA9), with N = 200 (founder ruling TASK-795).
-const OVER_ARROWS: &str =
-    "the source has over 200 arrows, counting a longer or labelled arrow as more than one";
+/// The arrow bound's refusal (D-VACA9, D-NN3GQ), with N = 200 (D-0S2FW).
+const OVER_ARROWS: &str = "the source has over 200 arrows and groups, counting a longer or labelled arrow as more than one";
 
 /// `head`, then one line per arrow `0..n`.
 fn arrow_lines(head: &str, n: usize, line: impl Fn(usize) -> String) -> String {
@@ -1460,7 +1465,8 @@ fn rdb6_exact_bound_draws_and_next_is_refused() {
         assert!(draws(&at), "{at}");
         assert_eq!(render(&family(n + 1)), invalid(OVER_ARROWS));
     }
-    // four separate subgraphs that each set their own direction: 3 hidden arrows count
+    // four separate subgraphs that each set their own direction: 3 hidden arrows and the 4
+    // subgraphs count
     let four = |own: usize| {
         let mut s = String::from("flowchart TB\n");
         let mut left = own;
@@ -1475,10 +1481,14 @@ fn rdb6_exact_bound_draws_and_next_is_refused() {
         }
         s
     };
-    assert_eq!(render(&four(n - 2)), invalid(OVER_ARROWS));
-    assert!(draws(&four(n - 3)));
-    // without its own directions nothing is stacked, so N - 2 arrows draw
-    assert!(draws(&four(n - 2).replace("direction LR\n", "")));
+    assert_eq!(render(&four(n - 6)), invalid(OVER_ARROWS));
+    assert!(draws(&four(n - 7)));
+    // without its own directions nothing is stacked: N - 4 arrows and the 4 subgraphs draw
+    assert!(draws(&four(n - 4).replace("direction LR\n", "")));
+    assert_eq!(
+        render(&four(n - 3).replace("direction LR\n", "")),
+        invalid(OVER_ARROWS)
+    );
 }
 
 /// rdb6 (D-VACA9): a labelled arrow costs its span times W, the labelled weight. With W = 1 a
@@ -1550,4 +1560,114 @@ fn rdb6_label_weight_and_mixed_boundary_are_exact() {
     };
     assert!(draws(&sequence(n)));
     assert_eq!(render(&sequence(n + 1)), invalid(OVER_ARROWS));
+}
+
+/// rdb6 (D-NN3GQ, D-VACA9): each state note and each boundary between concurrent regions costs
+/// one, as the pinned crate builds an arrow for each before layout; the note's text adds
+/// nothing. A composite with k nonempty regions costs 1 + k + (k - 1) with its regions.
+#[test]
+fn rdb6_notes_and_region_boundaries_are_at_the_bound() {
+    let n = rdy_diagram::MAX_ARROWS;
+    // transitions, then notes
+    let notes = |t: usize, k: usize| {
+        let mut s = arrow_lines("stateDiagram-v2", t, |i| format!("S{i} --> S{}", i + 1));
+        for i in 0..k {
+            s.push_str(&format!("note right of S{i} : x --> y\n"));
+        }
+        s
+    };
+    assert!(draws(&notes(n - 1, 1)));
+    assert_eq!(render(&notes(n - 1, 2)), invalid(OVER_ARROWS));
+    // `t` transitions shared out over `k` regions of one composite: the composite, its k
+    // regions and their k - 1 boundaries cost 2k more
+    let regions = |t: usize, k: usize| {
+        let mut s = String::from("stateDiagram-v2\nstate C {\n");
+        let mut left = t;
+        for r in 0..k {
+            if r > 0 {
+                s.push_str("--\n");
+            }
+            let m = left / (k - r);
+            left -= m;
+            s.push_str(&format!("state R{r}\n"));
+            for i in 0..m {
+                s.push_str(&format!("R{r}_{i} --> R{r}_{}\n", i + 1));
+            }
+        }
+        s.push_str("}\n");
+        s
+    };
+    assert!(draws(&regions(n - 6, 3)));
+    assert_eq!(render(&regions(n - 5, 3)), invalid(OVER_ARROWS));
+    assert_eq!(render(&regions(n - 6, 4)), invalid(OVER_ARROWS));
+}
+
+/// rdb6 (D-NN3GQ): each flowchart subgraph, composite state, class namespace and concurrent
+/// region costs one, toward the same N as the arrows. With no arrow, a source of 200 groups
+/// draws and one of 201 is refused with the exact reason, in each kind; so is a mix of arrows
+/// and subgraphs.
+#[test]
+fn rdb6_groups_are_at_the_bound() {
+    let n = rdy_diagram::MAX_ARROWS;
+    let many = |head: &str, k: usize, one: &dyn Fn(usize) -> String| {
+        let mut s = format!("{head}\n");
+        for i in 0..k {
+            s.push_str(&one(i));
+        }
+        s
+    };
+    let subgraphs = |k: usize| {
+        many("flowchart LR", k, &|i| {
+            format!("subgraph G{i}\nn{i}\nend\n")
+        })
+    };
+    let composites = |k: usize| {
+        many("stateDiagram-v2", k, &|i| {
+            format!("state C{i} {{\nstate X{i}\n}}\n")
+        })
+    };
+    let namespaces = |k: usize| {
+        many("classDiagram", k, &|i| {
+            format!("namespace N{i} {{\nclass C{i}\n}}\n")
+        })
+    };
+    for kind in [
+        &subgraphs as &dyn Fn(usize) -> String,
+        &composites,
+        &namespaces,
+    ] {
+        let at = kind(n);
+        assert!(at.lines().count() <= 2048, "{at}");
+        assert!(draws(&at), "{at}");
+        assert_eq!(render(&kind(n + 1)), invalid(OVER_ARROWS), "{at}");
+    }
+    // one composite with k regions costs 2k; one more composite with a child makes it odd
+    let regions = |k: usize, extra: &str| {
+        format!(
+            "{}}}\n{extra}",
+            many("stateDiagram-v2\nstate C {", k, &|i| {
+                if i == 0 {
+                    format!("state R{i}\n")
+                } else {
+                    format!("--\nstate R{i}\n")
+                }
+            })
+        )
+    };
+    assert!(draws(&regions(n / 2, "")));
+    assert_eq!(
+        render(&regions(n / 2, "state D {\nstate Y\n}\n")),
+        invalid(OVER_ARROWS)
+    );
+    assert_eq!(render(&regions(n / 2 + 1, "")), invalid(OVER_ARROWS));
+    // a mix: 100 arrows and 100 subgraphs draw; 100 arrows and 101 subgraphs do not
+    let mix = |groups: usize| {
+        let mut s = plain_chain(100);
+        for i in 0..groups {
+            s.push_str(&format!("subgraph G{i}\nn{i}\nend\n"));
+        }
+        s
+    };
+    assert!(draws(&mix(100)));
+    assert_eq!(render(&mix(101)), invalid(OVER_ARROWS));
 }

@@ -1,19 +1,23 @@
-//! The arrow cost of the line families: class, state and sequence (D-VACA9, D-R7C3W).
+//! The cost of the line families' arrows and groups: class, state and sequence (D-VACA9,
+//! D-R7C3W, D-NN3GQ).
 //!
 //! Their pinned parsers read one line at a time. This recognizer reads the lines the same way,
 //! with the same precedence of rules, and keeps only what costs: class relations, state
-//! transitions and sequence messages, each with whether it has a label. It builds no node,
-//! graph or tree: each line is a byte slice, read once, and the only state is a few counters.
-//! A line a parser skips costs nothing, and so does every line once a parser would stop with an
-//! error: the count never invents a syntax error. A relation, a transition and a message each
-//! have a rank span of one.
+//! transitions and sequence messages, each with whether it has a label; state notes; and the
+//! groups, class namespaces, composite states and concurrent regions, with the boundaries
+//! between regions. It builds no node, graph or tree: each line is a byte slice, read once, and
+//! the only state is a few counters and a fixed array of [`MAX_DEPTH`] block flags. A line a
+//! parser skips costs nothing, and so does every line once a parser would stop with an error:
+//! the count never invents a syntax error. A relation, a transition and a message each have a
+//! rank span of one, and so does the arrow the pinned crate adds for a note or between two
+//! regions. A group costs one.
 //!
 //! Where a parser lowercases a whole line before it matches a keyword, this recognizer matches
 //! ASCII case only. They differ only on a character whose lowercase is ASCII (the Kelvin sign),
 //! and there the recognizer counts at least as many arrows as the parser reads.
 
 use crate::{
-    ARROW_CAP, Family, LABELLED_ARROW_WEIGHT, after_front_matter, before_comment,
+    ARROW_CAP, Family, LABELLED_ARROW_WEIGHT, MAX_DEPTH, after_front_matter, before_comment,
     description_colon, is_state_description, is_state_transition, keyword, opens_state_block,
     state_note,
 };
@@ -42,7 +46,7 @@ impl Tally {
     }
 }
 
-/// What the arrows of `src`, a class, state or sequence drawing input, cost.
+/// What the arrows and groups of `src`, a class, state or sequence drawing input, cost.
 pub(crate) fn measure(src: &str, family: Family) -> usize {
     tally(src, family).cost
 }
@@ -95,7 +99,8 @@ fn after_header(src: &str, header: impl Fn(&str) -> bool) -> Option<impl Iterato
 
 /// The class parser's lines (`class/mod.rs`): outside a class body, in order, a direction, a
 /// namespace opening, a class declaration or body opening, a standalone annotation, a relation,
-/// an inline member; any other line is skipped. A body runs to the line `}`.
+/// an inline member; any other line is skipped. A body runs to the line `}`. Each namespace
+/// that opens is a group (D-NN3GQ): the parser keeps it whether a `}` closes it or not.
 fn class(src: &str, t: &mut Tally) {
     let header = |l: &str| starts_ci(l, "classdiagram").is_some();
     let Some(lines) = after_header(src, header) else {
@@ -115,8 +120,13 @@ fn class(src: &str, t: &mut Tally) {
             continue;
         }
         if let Some(rest) = keyword(text, "namespace")
-            && rest.trim().ends_with('{')
+            && let Some(name) = rest.trim().strip_suffix('{')
         {
+            // `namespace Name {` opens one when the whole name reads
+            let name = name.trim();
+            if class_name(name) == Some(name.len()) {
+                t.add(1, false, 1);
+            }
             continue;
         }
         if let Some(rest) = keyword(text, "class") {
@@ -227,7 +237,8 @@ fn class_connector(input: &str) -> Option<&str> {
 /// `}` closes a block (at the top level it ends the parse), a region divider, a discarded
 /// directive, a classDef, a style, a class apply, a note (a multi-line one runs to `end note`), a
 /// direction, a transition, a description, a state declaration (which opens a block when it ends
-/// with `{`). Only a transition costs.
+/// with `{`). A transition and a note cost one each, and so do the groups and boundaries that
+/// [`Block`] counts in each block.
 fn state(src: &str, t: &mut Tally) {
     let mut lines = after_front_matter(src).lines();
     for line in lines.by_ref() {
@@ -242,6 +253,15 @@ fn state(src: &str, t: &mut Tally) {
         break;
     }
     let mut depth: usize = 0;
+    // the open blocks, by depth; the top level, at 0, is no block
+    let mut blocks = [Block::default(); MAX_DEPTH + 1];
+    // a statement of the block at `depth`: the parser keeps it in the block's current region
+    let stated = |blocks: &mut [Block; MAX_DEPTH + 1], depth: usize, t: &mut Tally| {
+        if depth > 0 {
+            let groups = blocks.get_mut(depth).map_or(2, Block::statement);
+            t.add(1, false, groups);
+        }
+    };
     while let Some(line) = lines.next() {
         let text = before_comment(line.trim());
         if text.is_empty() {
@@ -254,34 +274,127 @@ fn state(src: &str, t: &mut Tally) {
             depth -= 1;
             continue;
         }
-        if text == "--" || discarded(text) || classdef(text) || style(text) || class_apply(text) {
+        if text == "--" {
+            if depth > 0 {
+                let groups = blocks.get_mut(depth).map_or(1, Block::divider);
+                t.add(1, false, groups);
+            }
             continue;
         }
-        match state_note(text) {
-            Some(true) => {
+        if discarded(text) {
+            continue;
+        }
+        if classdef(text) || style(text) || class_apply(text) {
+            stated(&mut blocks, depth, t);
+            continue;
+        }
+        if let Some(multi) = state_note(text) {
+            if multi {
                 for line in lines.by_ref() {
                     if before_comment(line.trim()).eq_ignore_ascii_case("end note") {
                         break;
                     }
                 }
-                continue;
             }
-            Some(false) => continue,
-            None => {}
+            // the pinned crate links each note to its state with an arrow (D-NN3GQ)
+            t.add(1, false, 1);
+            stated(&mut blocks, depth, t);
+            continue;
         }
-        if keyword(text, "direction").is_some() {
+        if let Some(rest) = keyword(text, "direction") {
+            if direction(rest) {
+                stated(&mut blocks, depth, t);
+            }
             continue;
         }
         if is_state_transition(text) {
             t.add(1, transition_labelled(text), 1);
+            stated(&mut blocks, depth, t);
             continue;
         }
         if starts_ci(text, "state ").is_none() && is_state_description(text) {
+            stated(&mut blocks, depth, t);
             continue;
         }
-        if opens_state_block(text) {
-            depth += 1;
+        if declares_state(text) {
+            // the declaration is a statement of the block it stands in, a composite or not
+            stated(&mut blocks, depth, t);
+            if opens_state_block(text) {
+                depth += 1;
+                if let Some(block) = blocks.get_mut(depth) {
+                    *block = Block::default();
+                }
+            }
         }
+    }
+}
+
+/// What a composite state's block has held so far, for its groups (D-NN3GQ). The pinned parser
+/// makes a block with no statement a plain state. One with statements and no `--` divider is a
+/// composite: one group, whose one region adds nothing. One with a divider splits into regions
+/// and drops the empty ones; with k nonempty regions it is the composite, k region groups and
+/// k - 1 boundaries, each costing one: 2k in all. The block charges these as they show, so it
+/// keeps three flags and no list.
+#[derive(Clone, Copy, Debug, Default)]
+struct Block {
+    /// A `--` divider has come.
+    divided: bool,
+    /// Some region has a statement.
+    filled: bool,
+    /// The region since the last divider has a statement.
+    region: bool,
+}
+
+impl Block {
+    /// A statement in the current region: what it adds. The block's first statement makes the
+    /// composite (1), and its region a group (1) when a divider came before it. A later region's
+    /// first statement adds that region and its boundary with the one before (2).
+    fn statement(&mut self) -> usize {
+        if self.region {
+            return 0;
+        }
+        self.region = true;
+        if self.filled {
+            return 2;
+        }
+        self.filled = true;
+        1 + usize::from(self.divided)
+    }
+
+    /// A `--` divider: what it adds. The first one makes the region before it a group (1), when
+    /// that region has a statement.
+    fn divider(&mut self) -> usize {
+        self.region = false;
+        if self.divided {
+            return 0;
+        }
+        self.divided = true;
+        usize::from(self.filled)
+    }
+}
+
+/// Whether `direction <rest>` names a direction, as the parser keeps it: the trimmed rest is
+/// `LR`, `RL`, `BT`, `TB` or `TD`, in any case.
+fn direction(rest: &str) -> bool {
+    let rest = rest.trim();
+    ["LR", "RL", "BT", "TB", "TD"]
+        .iter()
+        .any(|d| rest.eq_ignore_ascii_case(d))
+}
+
+/// Whether the parser reads `text`, which no earlier rule took, as a state declaration
+/// (`try_parse_state_decl`): `state`, then a quoted description that closes, or an id.
+fn declares_state(text: &str) -> bool {
+    let Some(rest) = keyword(text, "state") else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    match rest.strip_prefix('"') {
+        Some(quoted) => quoted.contains('"'),
+        None => rest
+            .split(|c: char| c.is_whitespace() || c == '{')
+            .next()
+            .is_some_and(|id| !id.is_empty()),
     }
 }
 
