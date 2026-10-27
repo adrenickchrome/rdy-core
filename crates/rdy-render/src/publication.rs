@@ -128,7 +128,9 @@ pub(crate) fn prepare_resolved(
     resolved.require_output()?;
     let blobs = selected_blobs(source, &resolved)?;
     let warning = resolved.references.warning();
-    prepare_selected(resolved, blobs, warning, inputs, tag_name, tag_redacted)
+    let mut prepared = prepare_selected(resolved, blobs, warning, inputs, tag_name, tag_redacted)?;
+    prepared.diagram_cache = source.diagram_cache();
+    Ok(prepared)
 }
 
 /// The selected preparation every profile output shares (D-0VCQ5, D-CWC91): `resolved` with the
@@ -204,6 +206,7 @@ pub(crate) fn prepare_selected(
             presentation: Presentation::Output,
         }),
         menu_url: None,
+        diagram_cache: None,
     })
 }
 
