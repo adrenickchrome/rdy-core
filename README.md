@@ -73,14 +73,16 @@ To check the signature of the download first, see "Verify the download" at the b
 2. **Connect your agent.** For Claude Code:
 
    ```sh
-   claude mcp add rdy -e RDY_ACTOR=agent:local/claude -- rdy mcp --project "$PWD"
+   claude mcp add rdy -- rdy mcp --project "$PWD"
    ```
 
    For another MCP client, add this server to its config (write the full path; most clients do not expand `~`):
 
    ```json
-   { "mcpServers": { "rdy": { "command": "rdy", "args": ["mcp", "--project", "/home/you/my-project"], "env": { "RDY_ACTOR": "agent:local/client" } } } }
+   { "mcpServers": { "rdy": { "command": "rdy", "args": ["mcp", "--project", "/home/you/my-project"] } } }
    ```
+
+   The agent claims its own `agent:` actor, such as `agent:claude`, when it starts a session. The guide in step 3 tells it to. Approving stays with you: an agent cannot start an approver session over MCP.
 
 3. **Give your agent the guide.** Download `AGENTS.md` (or `CLAUDE.md`, the same text) from the [release page](https://github.com/adrenickchrome/rdy-core/releases/tag/v0.20.0) into the project folder. It tells the agent how to work with rdy. The `AGENTS.md` in this repository is a different file, for people who work on rdy itself.
 
