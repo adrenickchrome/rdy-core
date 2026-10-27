@@ -166,6 +166,8 @@ struct Closed {
 /// link and has no list. The open lists of the path and of the top-level groups never count and
 /// never change.
 fn cap_added(groups: &mut [NavGroup], fills: &[Fill], limit: usize) {
+    // `apply_cut` walks every group, so each group needs its fill (final review M4)
+    debug_assert_eq!(groups.len(), fills.len(), "one fill per group");
     let mut closed = vec![];
     for (g, &fill) in groups.iter().zip(fills) {
         collect_closed(&g.entries, fill, 1, &mut closed);

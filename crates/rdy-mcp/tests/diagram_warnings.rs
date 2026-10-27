@@ -5,7 +5,7 @@ use rdy_mcp::tools::ERROR_ROWS;
 
 const INVALID: (&str, &str, &str) = (
     "W_DIAGRAM_INVALID",
-    "A Mermaid diagram does not parse, so the render shows it as its code block. The render never fails for it.",
+    "A Mermaid diagram does not parse, or is over one of rdy's size bounds, so the render shows it as its code block. The render never fails for it. The bounds limit the source's bytes, its statements, its nesting depth, the length of one arrow, and its arrows and groups. A longer or labelled arrow counts as more than one. A state note and each boundary between concurrent regions also count as one arrow. A smaller diagram, split into parts, or shorter arrows fix a bound.",
     "correct the diagram source",
 );
 const UNSUPPORTED: (&str, &str, &str) = (

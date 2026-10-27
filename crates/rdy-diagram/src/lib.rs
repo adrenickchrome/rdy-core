@@ -1008,12 +1008,21 @@ pub mod layout {
             return Err(format!("viewBox is not \"0 0 W H\": {view:?}"));
         }
         let size = (hundredths(parts[2])?, hundredths(parts[3])?);
-        let transforms = svg.matches("transform=").count();
-        if transforms != 1 {
-            return Err(format!("the SVG holds {transforms} transforms, not one"));
+        // only a tag's own text counts: a label whose text holds `transform=` is text between
+        // tags, where the SVG writes `<` as an entity (final review M6)
+        let mut transforms = Vec::new();
+        let mut from = 0;
+        while let Some(i) = svg[from..].find('<') {
+            let tag = tag_at(svg, from + i)?;
+            if tag.contains("transform=") {
+                transforms.push(from + i);
+            }
+            from += i + tag.len();
         }
-        let at = svg.find("transform=").unwrap_or(0);
-        let g = svg[..at].rfind('<').ok_or("a transform outside a tag")?;
+        let [g] = transforms[..] else {
+            let n = transforms.len();
+            return Err(format!("the SVG holds {n} transforms, not one"));
+        };
         let tag = tag_at(svg, g)?;
         let (dx, dy) = attr(tag, "transform")
             .and_then(|t| t.strip_prefix("translate("))
@@ -1721,6 +1730,43 @@ mod tests {
             layout::read(odd),
             Err("not a number with two decimals: \"10\"".to_string())
         );
+    }
+
+    /// rdb1 (final review M6): a label whose text holds `transform=` is not a second transform.
+    /// The geometry stays readable, so a stacked source keeps its overlap fix.
+    #[test]
+    fn rdb1_a_label_with_transform_text_keeps_the_stacked_choice() {
+        // hand-built: label text after the root translate, inside a cluster
+        let Diagram::Svg(svg) = drawn(&[("A", 0, 0, 10, 10)]) else {
+            unreachable!()
+        };
+        let svg = svg.replacen(
+            "</g></g></svg>",
+            "<text data-svg-role=\"graph-node-text\">a transform=&quot;x&quot; b</text></g></g></svg>",
+            1,
+        );
+        let l = layout::read(&svg).expect("readable with a transform= label");
+        assert_eq!(l.translate, (1000, -500));
+        assert_eq!(l.subgraphs.len(), 1);
+        // the pinned crate's own drawing: a subgraph title and a node label hold the text
+        let four = include_str!("../tests/fixtures/diagram/four-panels.mmd")
+            .replacen(
+                "subgraph P1[\"first\"]",
+                "subgraph P1[\"transform= first\"]",
+                1,
+            )
+            .replacen("p1a[\"A: first", "p1a[\"transform= A: first", 1);
+        assert!(four.contains("transform= first") && four.contains("transform= A"));
+        let Diagram::Svg(base) = base_svg(&four) else {
+            panic!("the base draws")
+        };
+        assert!(
+            base.matches("transform=").count() > 1,
+            "the label text is in the SVG"
+        );
+        assert!(!layout::overlap_set(&base).expect("readable").is_empty());
+        assert!(render(&four) == stacked_svg(&four));
+        assert!(render(&four) != base_svg(&four));
     }
 
     /// The variable that makes [`dgm1_guarded_panic_child`] run.
