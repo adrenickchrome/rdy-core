@@ -92,6 +92,9 @@ const PLAN_PROPOSALS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("plan
 const DIAGRAMS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("diagrams");
 /// The `meta` key that holds the diagram cache's counted bytes, 8 bytes little-endian.
 pub(crate) const DIAGRAM_COUNT_KEY: &str = "diagram_cache_bytes";
+/// The `meta` key set when an index applies a redaction apply and removed when it is built from
+/// the log's start (`Index::erase_due`).
+const ERASE_DUE_KEY: &str = "erase_due";
 /// The prefix of the refs [`OPEN_PROPOSALS`] mirrors.
 const OPEN_PREFIX: &str = "open/";
 
@@ -245,29 +248,91 @@ pub struct Index {
     eraser: Eraser,
 }
 
-/// An open handle on an index file that a removal replaced (D-6H0ZX), and the path it had: its
-/// drop overwrites the file with zeros and syncs it, so no removed text that the index held,
-/// such as a drawing, outlives the removal in free disk space.
+/// An index file that a removal replaced (D-6H0ZX), to overwrite with zeros once the database
+/// is closed: an open handle on it, the second name that keeps it reachable until then
+/// (`index.redb.erase`), and the path it had. Its drop zeroes and syncs the file and then
+/// unlinks the second name, so no removed text that the index held, such as a drawing, outlives
+/// the removal in free disk space. A kill before that leaves the second name, and the next open
+/// zeroes and removes it.
 #[derive(Default)]
-struct Eraser(std::sync::Mutex<Option<(std::fs::File, std::path::PathBuf)>>);
+struct Eraser(std::sync::Mutex<Option<Doomed>>);
+
+/// The file an [`Eraser`] zeroes.
+struct Doomed {
+    file: std::fs::File,
+    kept: std::path::PathBuf,
+    former: std::path::PathBuf,
+}
+
+/// A zeroing that failed: the file's former path, the name that still keeps it, and the error.
+struct EraseFailed {
+    former: std::path::PathBuf,
+    kept: std::path::PathBuf,
+    error: std::io::Error,
+}
+
+impl EraseFailed {
+    /// The one line the store logs for it (ruling task-7 item 2): a late zeroing has no caller
+    /// to tell.
+    fn line(&self) -> String {
+        format!(
+            "rdy: the replaced index file {} was not zeroed ({}); it is kept as {}, and the next open zeroes it",
+            self.former.display(),
+            self.error,
+            self.kept.display()
+        )
+    }
+}
 
 impl Eraser {
-    /// Zeroes the file now, if one is set; the error of its write or sync.
-    fn erase(&self) -> std::io::Result<()> {
+    /// Zeroes and syncs the file now, if one is set, then unlinks its second name. A failed
+    /// zeroing keeps the name, so the next open zeroes the file.
+    fn erase(&self) -> Result<(), EraseFailed> {
         let taken = self.0.lock().unwrap_or_else(|e| e.into_inner()).take();
-        match taken {
-            Some((f, path)) => crate::fsutil::zero_open_file(&f, &path),
-            None => Ok(()),
+        let Some(d) = taken else {
+            return Ok(());
+        };
+        let failed = |error| EraseFailed {
+            former: d.former.clone(),
+            kept: d.kept.clone(),
+            error,
+        };
+        crate::fsutil::zero_open_file(&d.file, &d.former).map_err(failed)?;
+        match std::fs::remove_file(&d.kept) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(failed(e)),
+            _ => {}
         }
+        if let Some(dir) = d.kept.parent() {
+            // the zeros are synced: a lost unlink only leaves a zeroed file for the next open
+            let _ = crate::fsutil::sync_dir(dir);
+        }
+        Ok(())
     }
 }
 
 impl Drop for Eraser {
     fn drop(&mut self) {
-        // a reader that outlived the removal closed the index last: nothing can report an error
-        // here, and the next open's checks read a damaged file as damage
-        let _ = self.erase();
+        // a reader that outlived the removal closed the index last: nothing can be told of an
+        // error here, so the store logs it with the file's former path (ruling task-7 item 2)
+        if let Err(e) = self.erase() {
+            crate::notice(&e.line());
+        }
     }
+}
+
+/// The suffix of the second name that keeps a replaced index file until it is zeroed:
+/// `index.redb.erase`, then `index.redb.erase-<n>` while that one is taken.
+pub(crate) const ERASE_SUFFIX: &str = ".erase";
+
+/// Whether `name` is a second name [`Index::erase_on_close`] gives an index file `index`.
+pub(crate) fn is_erase_name(index: &str, name: &str) -> bool {
+    name.strip_prefix(index)
+        .and_then(|rest| rest.strip_prefix(ERASE_SUFFIX))
+        .is_some_and(|n| {
+            n.is_empty()
+                || n.strip_prefix('-')
+                    .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+        })
 }
 
 /// An index opened with its integrity checked (see `Index::open_checked`).
@@ -1012,6 +1077,8 @@ impl Index {
             let mut signatures: Option<redb::Table<'_, &'static [u8], &'static [u8]>> = None;
             // the plan tables only for a batch with a plan entry
             let mut plans: Option<PlanTables<'_>> = None;
+            // a redaction apply marks the index: its file may hold what the removal erases
+            let mut applied_removal = false;
             for e in entries {
                 match e {
                     IndexEntry::Object { kind, hash, loc } => {
@@ -1089,6 +1156,7 @@ impl Index {
                         request,
                         loc,
                     } => {
+                        applied_removal = true;
                         let t = match &mut redaction {
                             Some(t) => t,
                             None => redaction.insert(RedactionTables::open(&w)?),
@@ -1176,6 +1244,9 @@ impl Index {
                         }
                     }
                 }
+            }
+            if applied_removal {
+                meta.insert(ERASE_DUE_KEY, &[1u8][..]).map_err(db)?;
             }
             meta.insert("indexed_upto", &enc(&upto)[..]).map_err(db)?;
         }
@@ -1600,10 +1671,69 @@ impl Index {
         Ok(())
     }
 
-    /// Overwrites this index's file with zeros once it is closed (D-6H0ZX), through `file`, an
-    /// open handle on it that `path` names now. A removal sets it on the index it replaces.
-    pub(crate) fn erase_on_close(&self, file: std::fs::File, path: &Path) {
-        *self.eraser.0.lock().unwrap_or_else(|e| e.into_inner()) = Some((file, path.to_path_buf()));
+    /// Overwrites this index's file, which `path` names now, with zeros once the index is closed
+    /// (D-6H0ZX). A removal sets it on the index it replaces. The file first gets a second name,
+    /// `index.redb.erase` (or `index.redb.erase-<n>` while that is taken), and the directory is
+    /// synced, so the file stays reachable until it is zeroed: a kill before that leaves the
+    /// name, and the next open zeroes the file. A file with more than one link is not rdy's own
+    /// copy: it is not zeroed, the store logs it, and this returns false.
+    pub(crate) fn erase_on_close(&self, path: &Path) -> Result<bool, StoreError> {
+        let file =
+            crate::pio::open_no_follow(std::fs::OpenOptions::new().read(true).write(true), path)?;
+        let meta = file.metadata()?;
+        if !meta.is_file() {
+            return Err(StoreError::Io(std::io::Error::other(format!(
+                "{} is not a regular file",
+                path.display()
+            ))));
+        }
+        let links = crate::fileid::links(&meta);
+        if links != 1 {
+            crate::notice(&format!(
+                "rdy: the replaced index file {} has more than one link ({links}), so it was not zeroed",
+                path.display()
+            ));
+            return Ok(false);
+        }
+        let dir = path.parent().unwrap_or(Path::new("."));
+        let base = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("index.redb");
+        let id = crate::fileid::FileId::of(&meta);
+        let mut kept = None;
+        for n in 0u32.. {
+            let name = if n == 0 {
+                format!("{base}{ERASE_SUFFIX}")
+            } else {
+                format!("{base}{ERASE_SUFFIX}-{n}")
+            };
+            let at = dir.join(name);
+            match std::fs::hard_link(path, &at) {
+                Ok(()) => {
+                    kept = Some(at);
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        let kept = kept.expect("u32 suffixes exhausted");
+        // the name must reach the file the handle holds, never one swapped in since
+        if crate::fileid::FileId::lstat(&kept).ok() != Some(id) {
+            let _ = std::fs::remove_file(&kept);
+            return Err(StoreError::Io(std::io::Error::other(format!(
+                "{} changed while it was kept for zeroing",
+                path.display()
+            ))));
+        }
+        crate::fsutil::sync_dir(dir)?;
+        *self.eraser.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(Doomed {
+            file,
+            kept,
+            former: path.to_path_buf(),
+        });
+        Ok(true)
     }
 
     /// Closes the index and then overwrites its file with zeros, if [`Index::erase_on_close`]
@@ -1611,7 +1741,35 @@ impl Index {
     pub(crate) fn close_and_erase(self) -> Result<(), StoreError> {
         let Index { db, eraser, .. } = self;
         drop(db);
-        Ok(eraser.erase()?)
+        eraser.erase().map_err(|e| StoreError::Io(e.error))
+    }
+
+    /// Whether this index applied a redaction apply since it was built from the log's start
+    /// (`erase_due` in `meta`): its file may then hold text the removal erased, such as a cached
+    /// drawing (D-6H0ZX; ruling task-7 Round 2, F3).
+    pub(crate) fn erase_due(&self) -> Result<bool, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let meta = r.open_table(META).map_err(db)?;
+        Ok(meta.get(ERASE_DUE_KEY).map_err(db)?.is_some())
+    }
+
+    /// Removes the `erase_due` mark in a commit that is not durable: an index built from the
+    /// log's start holds nothing a removal erased. With `new_file` (a reindex's new index, whose
+    /// diagram table is empty), the diagram cache's count is set to 0 in the same commit. The
+    /// caller's next checkpoint keeps it.
+    pub(crate) fn clear_erase_due(&self, new_file: bool) -> Result<(), StoreError> {
+        let mut w = self.db.begin_write().map_err(db)?;
+        w.set_durability(Durability::None).map_err(db)?;
+        {
+            let mut meta = w.open_table(META).map_err(db)?;
+            meta.remove(ERASE_DUE_KEY).map_err(db)?;
+            if new_file {
+                meta.insert(DIAGRAM_COUNT_KEY, &0u64.to_le_bytes()[..])
+                    .map_err(db)?;
+            }
+        }
+        w.commit().map_err(db)?;
+        Ok(())
     }
 
     /// Drops the diagram table and its `meta` count in a durable commit, as an index written

@@ -297,6 +297,47 @@ fn rebuild_index(path: &Path, repaired: bool) -> Result<OpenedIndex, StoreError>
     })
 }
 
+/// Zeroes, syncs and removes every replaced index file a removal kept by a second name
+/// (`index.redb.erase`, `index.redb.erase-<n>`; `Index::erase_on_close`) that a kill or a
+/// failed zeroing left behind, then syncs `dir`. The caller holds the lock. A kill before the
+/// rename leaves `index.redb` on the same file: it is the old index too, and is zeroed (the open
+/// then rebuilds it from the log as damage). A name that is not a regular file, or a file with
+/// another link, is not rdy's own copy: it is left as it is, and logged.
+fn erase_leftovers(dir: &Path) -> Result<(), StoreError> {
+    let index = dir.join("index.redb");
+    let mut removed = false;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !crate::index::is_erase_name("index.redb", &name) {
+            continue;
+        }
+        let path = dir.join(&name);
+        let meta = std::fs::symlink_metadata(&path)?;
+        let links = crate::fileid::links(&meta);
+        let ours = meta.file_type().is_file()
+            && (links == 1 || (links == 2 && crate::fileid::same_file(&path, &index)));
+        if !ours {
+            notice(&format!(
+                "rdy: {} is not a file rdy kept for zeroing, so it was left as it is",
+                path.display()
+            ));
+            continue;
+        }
+        let f = crate::pio::open_no_follow(OpenOptions::new().read(true).write(true), &path)?;
+        fsutil::zero_open_file(&f, &path)?;
+        drop(f);
+        std::fs::remove_file(&path)?;
+        removed = true;
+    }
+    if removed {
+        fsutil::sync_dir(dir)?;
+    }
+    Ok(())
+}
+
 /// Removes the file at `path`; a file that is not there is no error.
 fn remove_if_present(path: &Path) -> Result<(), StoreError> {
     match std::fs::remove_file(path) {
@@ -930,6 +971,9 @@ impl Store {
         // The lock is held, so no rebuild is running: remove it. This is best effort: a temp
         // that cannot be removed costs only disk space, and the next reindex tries again.
         let _ = remove_if_present(&dir.join(INDEX_TMP));
+        // a replaced index a kill (or a failed zeroing) left kept by name is zeroed and removed
+        // before anything else reads the store (D-6H0ZX)
+        erase_leftovers(dir)?;
         // the sentinel of a process that died with the store open
         let unclean = std::fs::symlink_metadata(dir.join(INDEX_OPEN_SENTINEL)).is_ok();
         // seg1: a gap in the segment numbers means acknowledged frames are missing
@@ -1059,10 +1103,17 @@ impl Store {
         store.check_mode_against(store.creation)?;
         // an authorized removal finishes before any reader escapes this open
         store.finish_redactions_at_open()?;
-        // a kill can keep an index whose cached drawings a removal meant to erase: an unclean
-        // open empties the diagram cache in one durable commit (D-XM8MP, D-6H0ZX)
+        // A kill can keep an index whose cached drawings a removal meant to erase. An unclean
+        // open whose index applied a removal since it was built (its catch-up replayed the
+        // apply) runs the removal's reindex: a new index, and the old file zeroed and synced
+        // before it goes (D-6H0ZX; ruling task-7 Round 2, F3). Any other unclean open empties
+        // the diagram cache in one durable commit (D-XM8MP rule 13a).
         if store.report.unclean_shutdown {
-            store.index().clear_diagrams()?;
+            if store.index().erase_due()? {
+                store.reindex_after_removal()?;
+            } else {
+                store.index().clear_diagrams()?;
+            }
         }
         // Losing this file to a power loss only costs a needless rebuild, so it is not synced.
         // It is only ever created, never opened: an existing one (a kill's, or a link planted
@@ -1484,6 +1535,10 @@ impl Store {
     fn replay_from(&mut self, from: Location, rules: RefRules) -> Result<CatchUp, StoreError> {
         let fail_after = self.faults.replay_after.take();
         let done = replay_into(&self.log, self.index(), from, fail_after, rules)?;
+        if from == ORIGIN {
+            // an empty index built from the log's start holds nothing a removal erased
+            self.index().clear_erase_due(false)?;
+        }
         // the replayed frames are in the log, not yet in the durable index
         self.checkpoint()?;
         Ok(done)
@@ -1511,24 +1566,22 @@ impl Store {
     }
 
     /// Makes `ix`, built in `tmp`, the store's index at `path`, and erases the index it replaces
-    /// (D-6H0ZX): the store's reader takes `ix`; the old index is closed and its file overwritten
-    /// with zeros and synced; then `tmp` is renamed over `path`. A reader cloned before that
-    /// still holds the old index zeroes it when it drops it, after the rename. A kill after the
-    /// zeros and before the rename leaves a zeroed `index.redb`, which the next open reads as
-    /// damage and rebuilds from the log.
+    /// (D-6H0ZX). The old file first gets a second name, `index.redb.erase`, and the directory is
+    /// synced (`Index::erase_on_close`). Then the store's reader takes `ix`. When no other reader
+    /// holds the old index, it is closed and its file overwritten with zeros and synced, and the
+    /// second name goes; only then is `tmp` renamed over `path`. A reader cloned before still
+    /// holds the old index: the rename comes first, and the file is zeroed through the kept
+    /// handle when the last holder drops it, while the second name keeps it reachable, so a
+    /// kill in between leaves the name and the next open zeroes the file. A kill after the zeros
+    /// and before the rename leaves a zeroed `index.redb`, which the next open reads as damage and
+    /// rebuilds from the log. An old file with more than one link is not zeroed (it is logged).
     fn publish_erasing(&mut self, path: &Path, tmp: &Path, ix: Index) -> Result<(), StoreError> {
-        let opened =
-            crate::pio::open_no_follow(std::fs::OpenOptions::new().read(true).write(true), path);
-        let old_file = match opened {
-            Ok(f) => f,
-            Err(e) => {
-                drop(ix);
-                let _ = remove_if_present(tmp);
-                return Err(e.into());
-            }
-        };
         let old = Arc::clone(&self.index);
-        old.erase_on_close(old_file, path);
+        if let Err(e) = old.erase_on_close(path) {
+            drop(ix);
+            let _ = remove_if_present(tmp);
+            return Err(e);
+        }
         let keep = (Arc::clone(&self.shared), Arc::clone(&self.tracking));
         self.set_index(keep, ix);
         // the store's reader held the only other handle: the old index closes and is zeroed now
@@ -1540,6 +1593,7 @@ impl Store {
         let renamed = std::fs::rename(tmp, path);
         erased?;
         renamed?;
+        crate::redaction_io::hit(crate::redaction_io::Failpoint::AfterIndexPublish)?;
         Ok(())
     }
 
@@ -1565,6 +1619,8 @@ impl Store {
         if self.open.is_some() {
             return Err(batch_open("first"));
         }
+        // an index that applied a removal since it was built may hold what the removal erased
+        let erase_old = erase_old || self.index().erase_due().unwrap_or(false);
         let path = self.dir.join("index.redb");
         let tmp = self.dir.join(INDEX_TMP);
         // a leftover temp is an older failed rebuild; `Index::open` would reuse it
@@ -1579,6 +1635,8 @@ impl Store {
                 fail_after,
                 RefRules::new(self.creation),
             )?;
+            // built from the log's start: it holds nothing a removal erased, and no drawing
+            ix.clear_erase_due(true)?;
             // durable before it becomes the index
             ix.checkpoint()?;
             crate::redaction_io::hit(crate::redaction_io::Failpoint::BeforeIndexPublish)?;
@@ -1863,6 +1921,18 @@ impl Store {
         // an open held batch is sealed first, so a write left open is kept
         let sealed = self.seal(vec![]);
         if self.open.is_some() || self.stale_index {
+            // A pending removal's index holds what the removal erases: it is kept by a second
+            // name, and zeroed and synced when the database below has closed onto it, before
+            // that last name goes (D-6H0ZX; ruling task-7 Round 2, F2).
+            if self.shared.pending.load(Ordering::Acquire) {
+                let path = self.dir.join("index.redb");
+                if let Err(e) = self.index().erase_on_close(&path) {
+                    notice(&format!(
+                        "rdy: the stale index file {} could not be kept for zeroing ({e}); it is removed without zeros",
+                        path.display()
+                    ));
+                }
+            }
             // The index holds entries of frames the log does not keep (a failed seal, or a batch
             // left open on a poisoned store), and a clean close of the database makes them
             // durable. So the file is removed first, and the removal is made durable; only then

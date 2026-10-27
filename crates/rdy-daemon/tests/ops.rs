@@ -522,6 +522,37 @@ fn rdb7_clean_quarantine_zeroes_damaged_indexes() {
     assert!(!damaged.exists());
 }
 
+/// rdb7 (ruling task-7 Round 2, F6): a damaged index with a second link is not zeroed, since the
+/// zeroing is for rdy's own index file only: it is skipped untouched, the store logs it, and the
+/// other link keeps its bytes.
+#[test]
+fn rdb7_clean_quarantine_skips_a_damaged_index_with_two_links() {
+    let d = tempfile::tempdir().unwrap();
+    let store = d.path().join(".rdy/store");
+    std::fs::create_dir_all(store.join("segments")).unwrap();
+    let damaged = store.join("index.redb.damaged-3");
+    let old = b"old index canary drawing ".repeat(1000);
+    std::fs::write(&damaged, &old).unwrap();
+    let other = d.path().join("other-link");
+    std::fs::hard_link(&damaged, &other).unwrap();
+    let capture = rdy_store::capture_notices_for_tests(&[&damaged.display().to_string()]);
+    let (c, zeroed) = rdy_store::fsutil::record_zeroed(|| clean_quarantine(d.path()));
+    let lines = capture.notices();
+    drop(capture);
+    assert!(c.removed.is_empty(), "{:?}", c.removed);
+    assert_eq!(c.skipped.len(), 1, "{:?}", c.skipped);
+    assert_eq!(c.skipped[0].0, "index.redb.damaged-3");
+    assert!(
+        c.skipped[0].1.contains("more than one link"),
+        "{:?}",
+        c.skipped
+    );
+    assert_eq!(zeroed, vec![]);
+    assert_eq!(std::fs::read(&damaged).unwrap(), old, "skipped untouched");
+    assert_eq!(std::fs::read(&other).unwrap(), old);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+}
+
 #[test]
 fn qclean1_clean_quarantine_removes_regular_quarantine_files_and_nothing_else() {
     let d = tempfile::tempdir().unwrap();

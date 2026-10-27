@@ -38,8 +38,10 @@ pub struct Cleaned {
 }
 
 /// Removes the quarantine files `quarantine(root)` names, in its order; a damaged index is
-/// overwritten with zeros and synced before it goes (D-6H0ZX). Only regular files are removed: a symlink or a directory carrying a quarantine name is skipped untouched (never
-/// followed, never recursed), and an error leaves the file in `skipped` with the error text.
+/// overwritten with zeros and synced before it goes (D-6H0ZX), and one with a second link is not
+/// rdy's own copy, so it is skipped untouched. Only regular files are removed: a symlink or a
+/// directory carrying a quarantine name is skipped untouched (never followed, never recursed),
+/// and an error leaves the file in `skipped` with the error text.
 /// Then each directory a file was removed from is fsynced, so a removal reported here survives a
 /// power loss; a directory whose fsync fails goes in `skipped` under its store-relative name
 /// (`.` for the store itself).

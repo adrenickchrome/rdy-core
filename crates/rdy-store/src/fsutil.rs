@@ -19,6 +19,33 @@ thread_local! {
     static ZEROED: RefCell<Option<Vec<ZeroedFile>>> = const { RefCell::new(None) };
 }
 
+/// The paths whose zeroing fails (see [`fail_zeroing_for_tests`]).
+static FAIL_ZEROING: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Test hook: while the returned guard lives, zeroing the file `path` names (or named) fails
+/// with an injected error, on any thread.
+#[doc(hidden)]
+pub fn fail_zeroing_for_tests(path: &Path) -> FailZeroing {
+    FAIL_ZEROING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(path.to_path_buf());
+    FailZeroing(path.to_path_buf())
+}
+
+/// The guard of [`fail_zeroing_for_tests`]; dropping it ends the failure.
+#[doc(hidden)]
+pub struct FailZeroing(PathBuf);
+
+impl Drop for FailZeroing {
+    fn drop(&mut self) {
+        let mut all = FAIL_ZEROING.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = all.iter().position(|p| *p == self.0) {
+            all.remove(i);
+        }
+    }
+}
+
 /// The zero write's chunk: one write covers at most this many bytes.
 const ZERO_CHUNK: u64 = 1 << 20;
 
@@ -52,20 +79,39 @@ pub fn record_zeroed<T>(f: impl FnOnce() -> T) -> (T, Vec<ZeroedFile>) {
 
 /// Overwrites the regular file at `path` with zeros over its whole length, then syncs it
 /// (D-6H0ZX). A link is never followed. It writes at most 1 MiB at a time, and as many bytes as
-/// the file held when it was opened.
+/// the file held when it was opened. A file with more than one link is not rdy's own copy: it is
+/// not zeroed, a [`crate::notice`] says so, and the error says why.
 pub fn zero_file(path: &Path) -> io::Result<()> {
     let f = pio::open_no_follow(OpenOptions::new().write(true).read(true), path)?;
-    if !f.metadata()?.is_file() {
+    let meta = f.metadata()?;
+    if !meta.is_file() {
         return Err(io::Error::other(format!(
             "{} is not a regular file",
             path.display()
         )));
+    }
+    let links = crate::fileid::links(&meta);
+    if links != 1 {
+        let why = format!(
+            "{} has more than one link ({links}), so it was not zeroed",
+            path.display()
+        );
+        crate::notice(&format!("rdy: {why}"));
+        return Err(io::Error::other(why));
     }
     zero_open_file(&f, path)
 }
 
 /// [`zero_file`] through `f`, an open handle on the file `path` names (or named).
 pub fn zero_open_file(f: &File, path: &Path) -> io::Result<()> {
+    if FAIL_ZEROING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|p| p == path)
+    {
+        return Err(io::Error::other("injected zeroing failure"));
+    }
     let len = f.metadata()?.len();
     let chunk = vec![0u8; len.min(ZERO_CHUNK) as usize];
     let mut at = 0u64;
