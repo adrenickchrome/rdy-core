@@ -19,7 +19,7 @@ This is a **preview**: things will change before Release 1. See "About this prev
 
 ## Install
 
-Quick to install, low friction to start: one command, no account, no sudo.
+Quick to install, low friction to start: one command, no account required. Free and open source.
 
 On macOS (Apple Silicon) or Linux (x86_64):
 
