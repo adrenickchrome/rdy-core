@@ -482,7 +482,7 @@ impl DiagramAssets {
                         .zip(key.as_deref())
                         .and_then(|(c, k)| c.get(k));
                     match hit {
-                        Some(row) => self.from_row(row),
+                        Some(row) => self.read_row(row),
                         None => {
                             let drawn = self.keep(admitted.draw());
                             if let (Some(c), Some(k)) = (&self.cache, &key)
@@ -522,7 +522,7 @@ impl DiagramAssets {
     }
 
     /// The result a cache row holds, as a miss of its key gives it.
-    fn from_row(&mut self, row: CachedDrawing) -> Result<Hash, diagram::Diagram> {
+    fn read_row(&mut self, row: CachedDrawing) -> Result<Hash, diagram::Diagram> {
         match row {
             CachedDrawing::File(file) => Ok(self.keep_file(file)),
             CachedDrawing::Failed(reason) => Err(diagram::Diagram::Failed { reason }),
