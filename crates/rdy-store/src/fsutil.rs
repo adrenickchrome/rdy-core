@@ -15,6 +15,96 @@ thread_local! {
     /// The private-write probe of this thread, if any (see
     /// [`with_private_write_probe_for_tests`]).
     static PROBE: RefCell<ProbeState> = const { RefCell::new(ProbeState::Off) };
+    /// The active zero recorder of this thread, if any (see [`record_zeroed`]).
+    static ZEROED: RefCell<Option<Vec<ZeroedFile>>> = const { RefCell::new(None) };
+}
+
+/// The zero write's chunk: one write covers at most this many bytes.
+const ZERO_CHUNK: u64 = 1 << 20;
+
+/// A file [`zero_file`] overwrote, as the zero recorder saw it just before its unlink.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ZeroedFile {
+    pub path: PathBuf,
+    pub len: u64,
+    /// Every byte of the file read zero.
+    pub all_zero: bool,
+}
+
+/// Runs `f` with a zero recorder turned on for this thread and returns its result with every
+/// file zeroed while it ran, in order, each read back after its sync. The recorder is turned off
+/// again even if `f` panics. Nested or concurrent recording is not supported.
+#[doc(hidden)]
+pub fn record_zeroed<T>(f: impl FnOnce() -> T) -> (T, Vec<ZeroedFile>) {
+    struct Off;
+    impl Drop for Off {
+        fn drop(&mut self) {
+            ZEROED.with(|r| *r.borrow_mut() = None);
+        }
+    }
+    ZEROED.with(|r| *r.borrow_mut() = Some(vec![]));
+    let _off = Off;
+    let out = f();
+    let zeroed = ZEROED.with(|r| r.borrow_mut().take().unwrap_or_default());
+    (out, zeroed)
+}
+
+/// Overwrites the regular file at `path` with zeros over its whole length, then syncs it
+/// (D-6H0ZX). A link is never followed. It writes at most 1 MiB at a time, and as many bytes as
+/// the file held when it was opened.
+pub fn zero_file(path: &Path) -> io::Result<()> {
+    let f = pio::open_no_follow(OpenOptions::new().write(true).read(true), path)?;
+    if !f.metadata()?.is_file() {
+        return Err(io::Error::other(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
+    zero_open_file(&f, path)
+}
+
+/// [`zero_file`] through `f`, an open handle on the file `path` names (or named).
+pub fn zero_open_file(f: &File, path: &Path) -> io::Result<()> {
+    let len = f.metadata()?.len();
+    let chunk = vec![0u8; len.min(ZERO_CHUNK) as usize];
+    let mut at = 0u64;
+    while at < len {
+        let n = (len - at).min(ZERO_CHUNK) as usize;
+        pio::write_all_at(f, &chunk[..n], at)?;
+        at += n as u64;
+    }
+    f.sync_all()?;
+    record(path);
+    ZEROED.with(|r| {
+        if let Some(v) = r.borrow_mut().as_mut() {
+            let mut all_zero = true;
+            let mut buf = vec![0u8; len.min(ZERO_CHUNK) as usize];
+            let mut at = 0u64;
+            while at < len {
+                let n = (len - at).min(ZERO_CHUNK) as usize;
+                if pio::read_exact_at(f, &mut buf[..n], at).is_err()
+                    || buf[..n].iter().any(|b| *b != 0)
+                {
+                    all_zero = false;
+                    break;
+                }
+                at += n as u64;
+            }
+            v.push(ZeroedFile {
+                path: path.to_path_buf(),
+                len,
+                all_zero,
+            });
+        }
+    });
+    Ok(())
+}
+
+/// [`zero_file`], then removes the file (D-6H0ZX: a damaged index is zeroed before it goes).
+pub fn zero_then_remove(path: &Path) -> io::Result<()> {
+    zero_file(path)?;
+    std::fs::remove_file(path)
 }
 
 /// A private-write probe, boxed.

@@ -4,6 +4,7 @@ mod check;
 pub mod check_holder;
 pub mod closure;
 pub mod coord;
+pub mod diagram_cache;
 pub mod dump;
 pub mod dump_chain;
 pub mod dump_scan;
@@ -44,6 +45,7 @@ pub use check::{
     REAFFIRM_HOLD_LABEL, REAFFIRM_VIEW_PREFIX, StoreCheck, landing_field_rules,
     landing_reads_proposal_view, local_card_evidence_allowed, reaffirm_view,
 };
+pub use diagram_cache::{CachedDrawing, DiagramCache};
 pub use error::StoreError;
 #[doc(hidden)]
 pub use index::IndexDump;

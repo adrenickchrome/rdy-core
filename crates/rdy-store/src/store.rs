@@ -1059,6 +1059,11 @@ impl Store {
         store.check_mode_against(store.creation)?;
         // an authorized removal finishes before any reader escapes this open
         store.finish_redactions_at_open()?;
+        // a kill can keep an index whose cached drawings a removal meant to erase: an unclean
+        // open empties the diagram cache in one durable commit (D-XM8MP, D-6H0ZX)
+        if store.report.unclean_shutdown {
+            store.index().clear_diagrams()?;
+        }
         // Losing this file to a power loss only costs a needless rebuild, so it is not synced.
         // It is only ever created, never opened: an existing one (a kill's, or a link planted
         // there) is left as it is, and nothing is followed or truncated.
@@ -1505,6 +1510,39 @@ impl Store {
         self.index().put_raw_producer_for_tests(key)
     }
 
+    /// Makes `ix`, built in `tmp`, the store's index at `path`, and erases the index it replaces
+    /// (D-6H0ZX): the store's reader takes `ix`; the old index is closed and its file overwritten
+    /// with zeros and synced; then `tmp` is renamed over `path`. A reader cloned before that
+    /// still holds the old index zeroes it when it drops it, after the rename. A kill after the
+    /// zeros and before the rename leaves a zeroed `index.redb`, which the next open reads as
+    /// damage and rebuilds from the log.
+    fn publish_erasing(&mut self, path: &Path, tmp: &Path, ix: Index) -> Result<(), StoreError> {
+        let opened =
+            crate::pio::open_no_follow(std::fs::OpenOptions::new().read(true).write(true), path);
+        let old_file = match opened {
+            Ok(f) => f,
+            Err(e) => {
+                drop(ix);
+                let _ = remove_if_present(tmp);
+                return Err(e.into());
+            }
+        };
+        let old = Arc::clone(&self.index);
+        old.erase_on_close(old_file, path);
+        let keep = (Arc::clone(&self.shared), Arc::clone(&self.tracking));
+        self.set_index(keep, ix);
+        // the store's reader held the only other handle: the old index closes and is zeroed now
+        let erased = match Arc::try_unwrap(old) {
+            Ok(old) => old.close_and_erase(),
+            Err(_) => Ok(()),
+        };
+        // the new index takes the name even when the zeros failed, so the old file is gone
+        let renamed = std::fs::rename(tmp, path);
+        erased?;
+        renamed?;
+        Ok(())
+    }
+
     /// Rebuilds the index from the log. The new index is built in `index.redb.tmp` and is renamed
     /// over `index.redb` only when it is complete and durable. A failure leaves the old index in
     /// place as the store's index, and removes the temp file. The store's reader then holds the
@@ -1512,6 +1550,18 @@ impl Store {
     /// file until that reader drops (Unix). A temp that a kill leaves behind is removed by the
     /// next open, which holds the lock.
     pub fn reindex(&mut self) -> Result<(), StoreError> {
+        self.reindex_with(false)
+    }
+
+    /// A removal's [`Store::reindex`] (D-6H0ZX): the replaced index file is overwritten with
+    /// zeros and synced before the new index takes its name, so no text the old index held (a
+    /// cached drawing) survives in free disk space. When a reader cloned before still holds the
+    /// old index, the file is zeroed when that reader drops it.
+    fn reindex_after_removal(&mut self) -> Result<(), StoreError> {
+        self.reindex_with(true)
+    }
+
+    fn reindex_with(&mut self, erase_old: bool) -> Result<(), StoreError> {
         if self.open.is_some() {
             return Err(batch_open("first"));
         }
@@ -1541,14 +1591,18 @@ impl Store {
                 return Err(e);
             }
         };
-        if let Err(e) = std::fs::rename(&tmp, &path) {
-            drop(ix);
-            let _ = remove_if_present(&tmp);
-            return Err(e.into());
+        if erase_old {
+            self.publish_erasing(&path, &tmp, ix)?;
+        } else {
+            if let Err(e) = std::fs::rename(&tmp, &path) {
+                drop(ix);
+                let _ = remove_if_present(&tmp);
+                return Err(e.into());
+            }
+            // the handle opened on the temp path keeps working after the rename
+            let keep = (Arc::clone(&self.shared), Arc::clone(&self.tracking));
+            self.set_index(keep, ix);
         }
-        // the handle opened on the temp path keeps working after the rename
-        let keep = (Arc::clone(&self.shared), Arc::clone(&self.tracking));
-        self.set_index(keep, ix);
         self.shared
             .sets
             .lock()
@@ -3161,7 +3215,7 @@ impl Store {
         }
         self.log.sync_segments(&affected)?;
         crate::redaction_io::hit(crate::redaction_io::Failpoint::AfterSegmentSync)?;
-        self.reindex()?;
+        self.reindex_after_removal()?;
         Ok((counts, true))
     }
 
@@ -3513,7 +3567,7 @@ impl Store {
         }
         let rebuilt = match self.finish_erasing(false) {
             Ok((_, true)) => Ok(()),
-            Ok((_, false)) => self.reindex(),
+            Ok((_, false)) => self.reindex_after_removal(),
             Err(e) => Err(e),
         };
         if rebuilt.is_err() {

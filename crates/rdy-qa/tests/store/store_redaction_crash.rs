@@ -348,3 +348,134 @@ fn rdx4_kills_complete_the_authorized_erase() {
 
 /// The erase buffer: one zero write covers at most this many bytes.
 const BUFFER: u64 = 65_536;
+
+/// A tag 1 diagram cache row whose payload is the secret's text, as the cache writes one.
+fn secret_row() -> (Vec<u8>, Vec<u8>) {
+    let mut key = vec![0xAB; 32];
+    key.extend_from_slice(b"mmdflux 2.6.1\0test");
+    let payload = secret().body.into_bytes();
+    let mut value = vec![1u8];
+    value.extend_from_slice(&Hash::of(&payload).0);
+    value.extend_from_slice(&payload);
+    (key, value)
+}
+
+/// rdb7 (D-XM8MP rule 13a, D-6H0ZX): a kill after the removal's segment sync, or before its new
+/// index is published, keeps the old index file; the next open sees the unclean shutdown and
+/// empties the diagram cache, so no drawing of the removed text survives.
+#[test]
+fn rdb7_a_killed_removal_keeps_no_drawing() {
+    for point in [Failpoint::AfterSegmentSync, Failpoint::BeforeIndexPublish] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s");
+        content(&path);
+        {
+            let mut s = Store::open(&path).unwrap();
+            let (key, value) = secret_row();
+            s.reader().diagram_cache().put_raw_for_tests(&key, &value);
+            assert_eq!(s.reader().diagram_cache().rows_for_tests(), 1);
+            s.checkpoint().unwrap();
+            s.close().unwrap();
+        }
+        // the live handle's landing, as rdx4_kills_complete_the_authorized_erase prepares it
+        let full_path = dir.path().join("full");
+        copy_dir(&path, &full_path);
+        let f = authorized_batch_fixture(
+            &full_path,
+            &[spec(&path)],
+            &FixtureOptions::approved(Proof::relayed_human()),
+        );
+        let spans = f.requests[0].draft.request.manifest.spans.clone();
+        let full = segment_bytes(&full_path);
+        let start = f.landing_start.unwrap();
+        let name = format!("seg-{:06}.log", start.segment);
+        let prep = dir.path().join("prep");
+        copy_dir(&full_path, &prep);
+        let seg = std::fs::OpenOptions::new()
+            .write(true)
+            .open(prep.join("segments").join(&name))
+            .unwrap();
+        seg.set_len(start.offset).unwrap();
+        drop(seg);
+        let items_file = dir.path().join("items");
+        std::fs::write(
+            &items_file,
+            encode_items(&items_from(&full[&name], start.offset)),
+        )
+        .unwrap();
+        {
+            let s = Store::open(&prep).unwrap();
+            assert_eq!(
+                s.reader().diagram_cache().rows_for_tests(),
+                1,
+                "{point:?}: the row is there before the kill"
+            );
+        }
+        kill_at(&prep, point, Some(&items_file), 1);
+        {
+            let s = Store::open(&prep).unwrap_or_else(|e| panic!("{point:?}: reopen: {e}"));
+            assert!(s.open_report().unclean_shutdown, "{point:?}");
+            let c = s.reader().diagram_cache();
+            assert_eq!(c.rows_for_tests(), 0, "{point:?}: no row survives");
+            assert_eq!(c.bytes_for_tests(), Some(0), "{point:?}");
+        }
+        assert_finished(
+            &prep,
+            f.landing,
+            f.requests[0].request,
+            &full,
+            &spans,
+            point,
+        );
+    }
+}
+
+/// rdb7 (D-6H0ZX): a removal overwrites the replaced index file with zeros, and syncs it, before
+/// the new index takes its name; the store keeps no copy of the removed text or its drawing.
+#[test]
+fn rdb7_a_removal_zeroes_the_old_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    content(&path);
+    {
+        let mut s = Store::open(&path).unwrap();
+        let (key, value) = secret_row();
+        s.reader().diagram_cache().put_raw_for_tests(&key, &value);
+        s.checkpoint().unwrap();
+        s.close().unwrap();
+    }
+    let index = path.join("index.redb");
+    let before = std::fs::metadata(&index).unwrap().len();
+    let f = authorized_batch_fixture(
+        &path,
+        &[spec(&path)],
+        &FixtureOptions::approved(Proof::local_human()),
+    );
+    // the open finishes the removal: its reindex replaces the old index
+    let (s, zeroed) = rdy_store::fsutil::record_zeroed(|| Store::open(&path).unwrap());
+    assert_eq!(zeroed.len(), 1, "{zeroed:?}");
+    assert_eq!(zeroed[0].path, index);
+    assert!(zeroed[0].len >= before, "{zeroed:?}");
+    assert!(zeroed[0].all_zero, "every byte is zero before the unlink");
+    assert_eq!(s.reader().diagram_cache().rows_for_tests(), 0);
+    assert_eq!(
+        s.get_block(&secret().version_hash()).unwrap().redaction(),
+        Some(f.requests[0].request)
+    );
+    s.close().unwrap();
+    // no file of the store holds the removed text
+    let secret = secret().body.into_bytes();
+    let mut files = vec![path.clone()];
+    while let Some(p) = files.pop() {
+        if p.is_dir() {
+            files.extend(std::fs::read_dir(&p).unwrap().map(|e| e.unwrap().path()));
+        } else {
+            let bytes = std::fs::read(&p).unwrap();
+            assert!(
+                !bytes.windows(secret.len()).any(|w| w == secret),
+                "{} holds the removed text",
+                p.display()
+            );
+        }
+    }
+}

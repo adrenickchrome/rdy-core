@@ -1,7 +1,10 @@
 use crate::error::{StoreError, db};
 use crate::segment::Location;
 use rdy_model::{BlockId, Hash};
-use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition, TableHandle};
+use redb::{
+    Database, Durability, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition,
+    TableHandle,
+};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -85,6 +88,10 @@ const PLAN_DEFERRALS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("plan
 /// A proposal version's hash (32 bytes) -> the hash of its bound (unsealed) plan version and that
 /// version's location: the first such version.
 const PLAN_PROPOSALS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("plan_proposals");
+/// A diagram's cache key (D-XM8MP; diagram_cache.rs) -> its drawing: tag, payload hash, payload. Derived from drawing, not from the log: a reindex starts it empty.
+const DIAGRAMS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("diagrams");
+/// The `meta` key that holds the diagram cache's counted bytes, 8 bytes little-endian.
+pub(crate) const DIAGRAM_COUNT_KEY: &str = "diagram_cache_bytes";
 /// The prefix of the refs [`OPEN_PROPOSALS`] mirrors.
 const OPEN_PREFIX: &str = "open/";
 
@@ -233,6 +240,34 @@ pub struct Index {
     /// Whether the active redaction mask may hold a row: false only while it is empty, so the
     /// reads of a store with no applied redaction never open its tables.
     redacted: AtomicBool,
+    /// The file to overwrite with zeros once the database is closed (`erase_on_close`).
+    /// Declared after `db`, so the database is closed, and has written all it writes, first.
+    eraser: Eraser,
+}
+
+/// An open handle on an index file that a removal replaced (D-6H0ZX), and the path it had: its
+/// drop overwrites the file with zeros and syncs it, so no removed text that the index held,
+/// such as a drawing, outlives the removal in free disk space.
+#[derive(Default)]
+struct Eraser(std::sync::Mutex<Option<(std::fs::File, std::path::PathBuf)>>);
+
+impl Eraser {
+    /// Zeroes the file now, if one is set; the error of its write or sync.
+    fn erase(&self) -> std::io::Result<()> {
+        let taken = self.0.lock().unwrap_or_else(|e| e.into_inner()).take();
+        match taken {
+            Some((f, path)) => crate::fsutil::zero_open_file(&f, &path),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for Eraser {
+    fn drop(&mut self) {
+        // a reader that outlived the removal closed the index last: nothing can report an error
+        // here, and the next open's checks read a damaged file as damage
+        let _ = self.erase();
+    }
 }
 
 /// An index opened with its integrity checked (see `Index::open_checked`).
@@ -244,8 +279,9 @@ pub struct CheckedIndex {
     pub repaired_at_open: bool,
 }
 
-/// Every table of an index as raw keys and values, for comparing two indexes (fsck2). `meta` is
-/// left out: it records how far the index has read, which a rebuild need not match.
+/// Every table of an index as raw keys and values, for comparing two indexes (fsck2). `meta` and
+/// `diagrams` are left out: `meta` records how far the index has read, and `diagrams` holds
+/// drawings, which a rebuild starts empty.
 #[doc(hidden)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct IndexDump {
@@ -887,6 +923,9 @@ impl Index {
             w.open_table(PLAN_DECISIONS).map_err(db)?;
             w.open_table(PLAN_DEFERRALS).map_err(db)?;
             w.open_table(PLAN_PROPOSALS).map_err(db)?;
+            // an index written before the diagram cache gains its table empty: no refusal and
+            // no rebuild, since a drawing is never read as absent data
+            w.open_table(DIAGRAMS).map_err(db)?;
             let mut open = w.open_table(OPEN_PROPOSALS).map_err(db)?;
             if !had_open {
                 let refs = w.open_table(REFS).map_err(db)?;
@@ -910,6 +949,7 @@ impl Index {
         Ok(Index {
             db: database,
             redacted: AtomicBool::new(redacted),
+            eraser: Eraser::default(),
         })
     }
 
@@ -1560,6 +1600,123 @@ impl Index {
         Ok(())
     }
 
+    /// Overwrites this index's file with zeros once it is closed (D-6H0ZX), through `file`, an
+    /// open handle on it that `path` names now. A removal sets it on the index it replaces.
+    pub(crate) fn erase_on_close(&self, file: std::fs::File, path: &Path) {
+        *self.eraser.0.lock().unwrap_or_else(|e| e.into_inner()) = Some((file, path.to_path_buf()));
+    }
+
+    /// Closes the index and then overwrites its file with zeros, if [`Index::erase_on_close`]
+    /// set one: the error of the zero write or its sync.
+    pub(crate) fn close_and_erase(self) -> Result<(), StoreError> {
+        let Index { db, eraser, .. } = self;
+        drop(db);
+        Ok(eraser.erase()?)
+    }
+
+    /// Drops the diagram table and its `meta` count in a durable commit, as an index written
+    /// before the diagram cache has neither (a test hook).
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub(crate) fn drop_diagram_table_for_tests(&self) -> Result<(), StoreError> {
+        let w = self.db.begin_write().map_err(db)?;
+        w.delete_table(DIAGRAMS).map_err(db)?;
+        w.open_table(META)
+            .map_err(db)?
+            .remove(DIAGRAM_COUNT_KEY)
+            .map_err(db)?;
+        w.commit().map_err(db)?;
+        Ok(())
+    }
+
+    /// Writes one raw `meta` value in a durable commit (a test hook).
+    #[cfg(test)]
+    pub(crate) fn set_meta_for_tests(&self, key: &str, value: &[u8]) -> Result<(), StoreError> {
+        let w = self.db.begin_write().map_err(db)?;
+        w.open_table(META)
+            .map_err(db)?
+            .insert(key, value)
+            .map_err(db)?;
+        w.commit().map_err(db)?;
+        Ok(())
+    }
+
+    /// The cached drawing under `key`, as stored (D-XM8MP; `diagram_cache` decodes it). One
+    /// read transaction.
+    pub(crate) fn diagram(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(DIAGRAMS).map_err(db)?;
+        Ok(t.get(key).map_err(db)?.map(|v| v.value().to_vec()))
+    }
+
+    /// Puts the drawing `value` under `key` in one commit that is not durable, as `apply` is
+    /// (D-XM8MP). The table holds at most `cap` counted bytes (key, value and 64 per row): a row
+    /// over `cap` alone stores nothing, and a put that would pass `cap`, or that finds a `meta`
+    /// count not 8 bytes long, first empties the table in the same commit. A replaced key's old
+    /// row is subtracted first; every sum saturates.
+    pub(crate) fn put_diagram(&self, key: &[u8], value: &[u8], cap: u64) -> Result<(), StoreError> {
+        let row = diagram_row_bytes(key, value);
+        if row > cap {
+            return Ok(());
+        }
+        let mut w = self.db.begin_write().map_err(db)?;
+        w.set_durability(Durability::None).map_err(db)?;
+        let kept = {
+            let meta = w.open_table(META).map_err(db)?;
+            let t = w.open_table(DIAGRAMS).map_err(db)?;
+            let old = t
+                .get(key)
+                .map_err(db)?
+                .map_or(0, |v| diagram_row_bytes(key, v.value()));
+            diagram_count(&meta)?
+                .map(|c| c.saturating_sub(old))
+                .filter(|base| base.saturating_add(row) <= cap)
+        };
+        let count = match kept {
+            Some(base) => base.saturating_add(row),
+            None => {
+                // full: the whole table goes, in this commit, never row by row
+                w.delete_table(DIAGRAMS).map_err(db)?;
+                row
+            }
+        };
+        {
+            let mut t = w.open_table(DIAGRAMS).map_err(db)?;
+            t.insert(key, value).map_err(db)?;
+            let mut meta = w.open_table(META).map_err(db)?;
+            meta.insert(DIAGRAM_COUNT_KEY, &count.to_le_bytes()[..])
+                .map_err(db)?;
+        }
+        w.commit().map_err(db)?;
+        Ok(())
+    }
+
+    /// The diagram cache's rows, and its `meta` count (None when the key is missing or not 8
+    /// bytes long).
+    pub(crate) fn diagram_counts(&self) -> Result<(usize, Option<u64>), StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let rows = r.open_table(DIAGRAMS).map_err(db)?.len().map_err(db)?;
+        let meta = r.open_table(META).map_err(db)?;
+        let count = diagram_count(&meta)?;
+        Ok((usize::try_from(rows).unwrap_or(usize::MAX), count))
+    }
+
+    /// Empties the diagram cache and sets its count to 0 in one durable commit (D-XM8MP, rule
+    /// 13a: an open after an unclean shutdown).
+    pub(crate) fn clear_diagrams(&self) -> Result<(), StoreError> {
+        let mut w = self.db.begin_write().map_err(db)?;
+        w.set_durability(Durability::Immediate).map_err(db)?;
+        w.delete_table(DIAGRAMS).map_err(db)?;
+        {
+            w.open_table(DIAGRAMS).map_err(db)?;
+            let mut meta = w.open_table(META).map_err(db)?;
+            meta.insert(DIAGRAM_COUNT_KEY, &0u64.to_le_bytes()[..])
+                .map_err(db)?;
+        }
+        w.commit().map_err(db)?;
+        Ok(())
+    }
+
     /// The open tensions: (id, the record that opened it), in id order.
     pub fn open_tensions(&self) -> Result<Vec<(Hash, Hash)>, StoreError> {
         self.open_rows(OPEN_TENSIONS, "open tension entry")
@@ -1968,4 +2125,22 @@ impl crate::Store {
     ) -> Result<(), StoreError> {
         self.index().set_landed_raw_for_tests(change, raw)
     }
+}
+
+/// The bytes a diagram row counts toward the cache's bound: its key, its value and 64.
+fn diagram_row_bytes(key: &[u8], value: &[u8]) -> u64 {
+    (key.len() as u64)
+        .saturating_add(value.len() as u64)
+        .saturating_add(64)
+}
+
+/// The diagram cache's `meta` count: None when the key is missing or not 8 bytes long.
+fn diagram_count(
+    meta: &impl ReadableTable<&'static str, &'static [u8]>,
+) -> Result<Option<u64>, StoreError> {
+    Ok(meta
+        .get(DIAGRAM_COUNT_KEY)
+        .map_err(db)?
+        .and_then(|v| <[u8; 8]>::try_from(v.value()).ok())
+        .map(u64::from_le_bytes))
 }

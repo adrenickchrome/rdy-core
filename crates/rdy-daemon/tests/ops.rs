@@ -495,6 +495,33 @@ fn cbrf1_edit_block_bounds_max_tokens_like_the_brief_op() {
     assert!(ok["change"].is_string(), "{ok}");
 }
 
+/// rdb7 (D-6H0ZX): `fsck --clean-quarantine` overwrites a damaged index with zeros and syncs it
+/// before it deletes it; a torn segment tail is removed as before.
+#[test]
+fn rdb7_clean_quarantine_zeroes_damaged_indexes() {
+    let d = tempfile::tempdir().unwrap();
+    let store = d.path().join(".rdy/store");
+    std::fs::create_dir_all(store.join("segments")).unwrap();
+    std::fs::write(store.join("segments/seg-00000001.log.torn-7"), b"torn").unwrap();
+    let damaged = store.join("index.redb.damaged-3");
+    let old = b"old index canary drawing ".repeat(100_000);
+    std::fs::write(&damaged, &old).unwrap();
+    let (c, zeroed) = rdy_store::fsutil::record_zeroed(|| clean_quarantine(d.path()));
+    assert_eq!(
+        c.removed,
+        vec![
+            "index.redb.damaged-3".to_string(),
+            "segments/seg-00000001.log.torn-7".to_string()
+        ]
+    );
+    assert!(c.skipped.is_empty(), "{:?}", c.skipped);
+    assert_eq!(zeroed.len(), 1, "{zeroed:?}");
+    assert_eq!(zeroed[0].path, damaged);
+    assert_eq!(zeroed[0].len, old.len() as u64);
+    assert!(zeroed[0].all_zero, "every byte is zero before the delete");
+    assert!(!damaged.exists());
+}
+
 #[test]
 fn qclean1_clean_quarantine_removes_regular_quarantine_files_and_nothing_else() {
     let d = tempfile::tempdir().unwrap();
