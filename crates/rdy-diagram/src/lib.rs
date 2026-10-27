@@ -42,6 +42,8 @@ pub const MAX_DEPTH: usize = 32;
 pub const MAX_SVG_BYTES: usize = 4194304;
 /// The most bytes one flowchart arrow may have: its run (dots, dashes or equals) and its label.
 pub const MAX_ARROW_BYTES: usize = 256;
+/// The pinned drawing crate and its version, as the diagram cache keys a drawing (D-XM8MP).
+pub const DRAWING_CRATE: &str = "mmdflux 2.6.1";
 
 const OVER_BYTES: &str = "the source is over 65536 bytes";
 const OVER_STATEMENTS: &str = "the source has over 2048 statements";
@@ -132,10 +134,30 @@ enum Family {
     Unknown,
 }
 
-/// Draws `source`, a diagram's resolved plain source, as SVG.
+/// Draws `source`, a diagram's resolved plain source, as SVG: its pre-draw refusals
+/// ([`admit`]), then its drawing ([`Admitted::draw`]).
 pub fn render(source: &str) -> Diagram {
+    match admit(source) {
+        Ok(a) => a.draw(),
+        Err(why) => why,
+    }
+}
+
+/// A source that passed every pre-draw refusal (D-XM8MP): its drawing input, ready to draw.
+pub struct Admitted<'a> {
+    /// The drawing input before any hidden arrow: owned when the CRLF or blank-line rule changed
+    /// the source, else borrowed from it.
+    drawing: Cow<'a, str>,
+    /// The top-level subgraphs that hidden arrows stack, in order (see `flowchart`).
+    stacked: Vec<String>,
+    /// The pinned crate's detection found no diagram type.
+    undetected: bool,
+}
+
+/// Every pre-draw refusal of `source`, in render's order; the source that passes, ready to draw.
+pub fn admit(source: &str) -> Result<Admitted<'_>, Diagram> {
     if source.len() > MAX_SOURCE_BYTES {
-        return invalid(OVER_BYTES);
+        return Err(invalid(OVER_BYTES));
     }
     let src = source.strip_prefix('\u{feff}').unwrap_or(source);
     // The pinned crate counts each front matter line as one byte longer than its text, which
@@ -146,21 +168,17 @@ pub fn render(source: &str) -> Diagram {
     } else {
         Cow::Borrowed(src)
     };
-    let src = src.as_ref();
     // MMDS JSON goes to the pinned crate's other frontend: rdy never sends it there
     if matches!(src.trim_start().as_bytes().first(), Some(b'{' | b'[')) {
-        return invalid(UNKNOWN);
+        return Err(invalid(UNKNOWN));
     }
-    let detected = match guarded(|| mmdflux::detect_diagram(src)) {
-        Ok(detected) => detected,
-        Err(failed) => return failed,
-    };
+    let detected = guarded(|| mmdflux::detect_diagram(&src))?;
     if detected.is_none()
-        && let Some(header) = undrawn_header(src)
+        && let Some(header) = undrawn_header(&src)
     {
-        return Diagram::Unsupported {
+        return Err(Diagram::Unsupported {
             header: header.to_string(),
-        };
+        });
     }
     let family = match detected {
         Some("flowchart") => Family::Flowchart,
@@ -169,33 +187,59 @@ pub fn render(source: &str) -> Diagram {
         Some("sequence") => Family::Sequence,
         _ => Family::Unknown,
     };
+    let undetected = detected.is_none();
     // the drawing input: the bounds and the pinned crate read it, and no fallback shows it
-    let drawing = match family {
-        Family::Flowchart => flowchart::normalize_subgraph_blanks(src),
-        _ => Cow::Borrowed(src),
+    let drawing = match (family, src) {
+        (Family::Flowchart, Cow::Borrowed(s)) => flowchart::normalize_subgraph_blanks(s),
+        (Family::Flowchart, Cow::Owned(s)) => {
+            let changed = match flowchart::normalize_subgraph_blanks(&s) {
+                Cow::Owned(n) => Some(n),
+                Cow::Borrowed(_) => None,
+            };
+            Cow::Owned(changed.unwrap_or(s))
+        }
+        (_, src) => src,
     };
     let m = measure(&drawing, family);
     // each hidden arrow is one more statement
     let hidden = m.stacked.len().saturating_sub(1);
     if m.statements + hidden > MAX_STATEMENTS {
-        return invalid(OVER_STATEMENTS);
+        return Err(invalid(OVER_STATEMENTS));
     }
     if m.depth > MAX_DEPTH {
-        return invalid(OVER_DEPTH);
+        return Err(invalid(OVER_DEPTH));
     }
     if m.unclosed {
-        return invalid(UNCLOSED);
+        return Err(invalid(UNCLOSED));
     }
     if m.longest_arrow > MAX_ARROW_BYTES {
-        return invalid(OVER_ARROW);
+        return Err(invalid(OVER_ARROW));
     }
-    let base = draw(&drawing, detected.is_none());
-    if m.stacked.len() < 2 {
-        return base;
+    Ok(Admitted {
+        drawing,
+        stacked: m.stacked,
+        undetected,
+    })
+}
+
+impl Admitted<'_> {
+    /// The drawing input before any hidden arrow: the source after the BOM removal, CRLF to LF
+    /// and, for the flowchart family, the blank-line rule. The diagram cache keys it.
+    pub fn normalized(&self) -> &str {
+        &self.drawing
     }
-    // a stacked source draws twice: as written, and with its hidden arrows (ruling task-1)
-    let stacked = draw(&stack(drawing, &m.stacked), false);
-    choose(base, stacked)
+
+    /// Draws the admitted source: the base draw, and for a stacked source the stacked draw and
+    /// the choice between them (D-ZJVRT). Never `Unsupported`.
+    pub fn draw(self) -> Diagram {
+        let base = draw(&self.drawing, self.undetected);
+        if self.stacked.len() < 2 {
+            return base;
+        }
+        // a stacked source draws twice: as written, and with its hidden arrows (ruling task-1)
+        let stacked = draw(&stack(self.drawing, &self.stacked), false);
+        choose(base, stacked)
+    }
 }
 
 /// Draws the drawing input `src` in one guarded call. `undetected` is whether the pinned
@@ -1688,5 +1732,138 @@ mod tests {
             2,
             "stderr:\n{stderr}"
         );
+    }
+
+    /// The drawn fixtures of `tests/diagram.rs` (its DRAWN list), and four-cases.
+    const RDB7_FIXTURES: [&str; 16] = [
+        include_str!("../tests/fixtures/diagram/loop.mmd"),
+        include_str!("../tests/fixtures/diagram/fan-in.mmd"),
+        include_str!("../tests/fixtures/diagram/round-trip.mmd"),
+        include_str!("../tests/fixtures/diagram/replay.mmd"),
+        include_str!("../tests/fixtures/diagram/four-panels.mmd"),
+        include_str!("../tests/fixtures/diagram/fan-out.mmd"),
+        include_str!("../tests/fixtures/diagram/chain.mmd"),
+        include_str!("../tests/fixtures/diagram/graph.mmd"),
+        include_str!("../tests/fixtures/diagram/class.mmd"),
+        include_str!("../tests/fixtures/diagram/sequence.mmd"),
+        include_str!("../tests/fixtures/diagram/state.mmd"),
+        include_str!("../tests/fixtures/diagram/labels.mmd"),
+        include_str!("../tests/fixtures/diagram/routing.mmd"),
+        include_str!("../tests/fixtures/diagram/diagonal-marker.mmd"),
+        include_str!("../tests/fixtures/diagram/document-wave.mmd"),
+        include_str!("../tests/fixtures/diagram/four-cases.mmd"),
+    ];
+
+    /// rdb7 (D-XM8MP): admission then drawing is render, for every drawn fixture and every
+    /// pre-draw refusal; a refused source gives the same `Diagram` from `admit`.
+    #[test]
+    fn rdb7_admit_then_draw_equals_render() {
+        for src in RDB7_FIXTURES {
+            let admitted = admit(src).map(Admitted::draw);
+            assert!(matches!(admitted, Ok(Diagram::Svg(_))), "{src}");
+            assert!(admitted == Ok(render(src)), "{src}");
+        }
+        // the refusals of dgm1_unclosed_subgraphs_and_long_arrows_are_refused
+        let mut refused: Vec<(String, Diagram)> = vec![];
+        for k in [16, 18, 20, 22] {
+            let src = format!(
+                "flowchart LR\n{}A\n",
+                (0..k)
+                    .map(|i| format!("subgraph U{i}\n"))
+                    .collect::<String>()
+            );
+            refused.push((src, invalid(UNCLOSED)));
+        }
+        for src in [
+            "flowchart LR\nsubgraph S\nA --> B\n",
+            "flowchart LR\nA --> B\nsubgraph S[\"x]\nC\n",
+            "graph TD\nsubgraph S\nsubgraph T\nA\nend\n",
+        ] {
+            refused.push((src.to_string(), invalid(UNCLOSED)));
+        }
+        for dots in [16000, 60000] {
+            refused.push((
+                format!("flowchart LR\nA -. x{}- B\n", ".".repeat(dots)),
+                invalid(OVER_ARROW),
+            ));
+        }
+        refused.push((
+            format!("flowchart LR\nA {}> B\n", "-".repeat(256)),
+            invalid(OVER_ARROW),
+        ));
+        // the byte, statement and depth bounds
+        refused.push((
+            format!("flowchart LR\n    A --> B\n%% {}\n", "x".repeat(65536)),
+            invalid(OVER_BYTES),
+        ));
+        refused.push((
+            format!("flowchart LR{}\n", "\nA".repeat(2048)),
+            invalid(OVER_STATEMENTS),
+        ));
+        refused.push((
+            format!(
+                "flowchart TD\n{}A --> B\n{}",
+                (0..33)
+                    .map(|i| format!("subgraph S{i}\n"))
+                    .collect::<String>(),
+                "end\n".repeat(33)
+            ),
+            invalid(OVER_DEPTH),
+        ));
+        // a family rdy does not draw, and the MMDS frontend
+        refused.push((
+            "pie\n  \"a\" : 1".to_string(),
+            Diagram::Unsupported {
+                header: "pie".to_string(),
+            },
+        ));
+        refused.push(("{\"a\": 1}".to_string(), invalid(UNKNOWN)));
+        for (src, want) in &refused {
+            assert_eq!(&render(src), want, "{src}");
+            match admit(src) {
+                Err(got) => assert_eq!(&got, want, "{src}"),
+                Ok(_) => panic!("admitted: {src}"),
+            }
+        }
+        // a parse failure after admission is the drawing's result, not a refusal
+        let bad = "flowchart LR\n A[";
+        assert!(matches!(render(bad), Diagram::Invalid { .. }));
+        assert_eq!(admit(bad).map(Admitted::draw), Ok(render(bad)));
+    }
+
+    /// rdb7 (D-XM8MP): `normalized` is the drawing input before any hidden arrow: the source
+    /// after the BOM, CRLF and (for a flowchart) blank-line rules.
+    #[test]
+    fn rdb7_normalized_is_the_drawing_input_before_hidden_arrows() {
+        let plain = "flowchart TB\nsubgraph S\nA --> B\nend\n";
+        let messy = "\u{feff}flowchart TB\r\nsubgraph S\r\n\r\nA --> B\r\nend\r\n";
+        let a = admit(plain).unwrap_or_else(|d| panic!("{d:?}"));
+        let b = admit(messy).unwrap_or_else(|d| panic!("{d:?}"));
+        assert_eq!(a.normalized(), plain);
+        assert_eq!(b.normalized(), plain);
+        let four = include_str!("../tests/fixtures/diagram/four-panels.mmd");
+        let f = admit(four).unwrap_or_else(|d| panic!("{d:?}"));
+        assert!(!f.normalized().contains("~~~"), "{}", f.normalized());
+        assert_eq!(f.normalized(), four);
+        // a class source keeps its blank lines
+        let class = "classDiagram\nclass A {\n\n  +x int\n}\n";
+        let c = admit(class).unwrap_or_else(|d| panic!("{d:?}"));
+        assert_eq!(c.normalized(), class);
+    }
+
+    /// rdb7 (D-XM8MP): the cache key names the pinned crate as the workspace pins it.
+    #[test]
+    fn rdb7_drawing_crate_names_the_pin() {
+        let manifest = include_str!("../../../Cargo.toml");
+        let line = manifest
+            .lines()
+            .find(|l| l.starts_with("mmdflux = { version = \"="))
+            .expect("the mmdflux pin");
+        let version = line
+            .trim_start_matches("mmdflux = { version = \"=")
+            .split('"')
+            .next()
+            .unwrap();
+        assert_eq!(DRAWING_CRATE, format!("mmdflux {version}"));
     }
 }
