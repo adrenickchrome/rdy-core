@@ -635,3 +635,353 @@ fn dgm6_profiles_never_emit_excluded_text() {
     }
     assert!(print.blobs.is_empty());
 }
+
+/// The page's Copy payload: the JSON in its one Copy template, as a browser reads its text.
+fn copy_payload(html: &str) -> Value {
+    let open = "<template data-copy-page hidden>";
+    let start = html.find(open).expect("a Copy template") + open.len();
+    let end = html[start..].find("</template>").unwrap() + start;
+    let text = html[start..end]
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&");
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"))
+}
+
+/// Every string in a JSON value, joined.
+fn strings(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Array(a) => a.iter().map(strings).collect(),
+        Value::Object(o) => o.values().map(strings).collect(),
+        _ => String::new(),
+    }
+}
+
+/// HTML text as the page escapes it.
+fn escaped(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// rdb1 (D-R7C3W): rdy draws from a rewritten copy of the source (CRLF as LF, no blank line
+/// after a subgraph header), and every fallback shows the author's own bytes. The refusal is the
+/// length reason, which the rewrite reaches: at the base this source was not closed.
+#[test]
+fn rdb1_normalized_fallback_keeps_original_source() {
+    let long = "y".repeat(300);
+    let refused =
+        format!("flowchart TD\r\nsubgraph S\r\n\r\nA --> B\r\nC -- {long} --> D\r\nend\r\n");
+    let valid = "flowchart TD\nsubgraph S\n\n  \nA[start] --> B[stop]\nend\n";
+    let (_d, r, ids) = project(Value::Array(diagram_doc(
+        "norm",
+        "Norm page",
+        &[("mermaid", "Long", &refused), ("mermaid", "Blank", valid)],
+    )));
+    let s = site(&r);
+    let html = page(&s.files, "norm.html");
+    let figs = figures(&html);
+    assert_eq!(figs.len(), 2, "{html}");
+    // the refused source: its code block holds the original bytes, CR and blank line kept
+    assert!(
+        figs[0].contains(&format!(
+            "<pre class=\"code\"><code class=\"language-mermaid\">{}</code></pre>",
+            escaped(&refused)
+        )),
+        "{:?}",
+        figs[0]
+    );
+    // and so does the page's Copy data
+    let copy = strings(&copy_payload(&html));
+    assert!(copy.contains(&refused), "{copy:?}");
+    // the valid blank-line diagram draws, with no warning
+    assert!(figs[1].contains("diagram-canvas"), "{}", figs[1]);
+    assert!(figs[1].contains(">start<") && figs[1].contains(">stop<"));
+    assert!(copy.contains(valid), "{copy:?}");
+    assert_eq!(
+        s.summary.warnings,
+        vec![format!(
+            "Norm page ({}): the Mermaid diagram does not parse: the source has an arrow over 256 bytes",
+            ids["$norm0"]
+        )]
+    );
+}
+
+/// rdb1 (D-438Y2): the hidden arrows that stack separate subgraphs are in the drawing input
+/// only. A four-panel source that is refused shows its own bytes, with no `~~~` line.
+#[test]
+fn rdb1_stacked_fallback_keeps_original_source() {
+    let four = include_str!("../../rdy-diagram/tests/fixtures/diagram/four-panels.mmd");
+    let refused = four.replacen(
+        "        direction LR\n",
+        &format!(
+            "        direction LR\n        z1 -- {} --> z2\n",
+            "y".repeat(300)
+        ),
+        1,
+    );
+    assert_ne!(refused, four);
+    let (_d, r, ids) = project(Value::Array(diagram_doc(
+        "stack",
+        "Stack page",
+        &[("mermaid", "Refused", &refused), ("mermaid", "Drawn", four)],
+    )));
+    let s = site(&r);
+    let html = page(&s.files, "stack.html");
+    let figs = figures(&html);
+    assert_eq!(figs.len(), 2, "{html}");
+    assert!(
+        figs[0].contains(&format!(
+            "<pre class=\"code\"><code class=\"language-mermaid\">{}</code></pre>",
+            escaped(&refused)
+        )),
+        "{:?}",
+        figs[0]
+    );
+    let copy = strings(&copy_payload(&html));
+    assert!(copy.contains(&refused), "{copy:?}");
+    // the drawn one's source under "Diagram source" is the author's too
+    assert!(figs[1].contains("diagram-canvas"), "{}", figs[1]);
+    assert!(figs[1].contains(&format!(
+        "<pre class=\"code\"><code>{}</code></pre>",
+        escaped(four)
+    )));
+    assert!(copy.contains(four), "{copy:?}");
+    for fig in &figs {
+        let source = &fig[fig.find("<pre class=\"code\">").unwrap()..];
+        assert!(!source.contains("~~~"), "{source}");
+    }
+    assert!(!copy.contains("~~~"), "{copy:?}");
+    assert_eq!(
+        s.summary.warnings,
+        vec![format!(
+            "Stack page ({}): the Mermaid diagram does not parse: the source has an arrow over 256 bytes",
+            ids["$stack0"]
+        )]
+    );
+}
+
+/// The arrow bound's refusal (D-VACA9, D-NN3GQ), with N = 200 (D-0S2FW).
+const OVER_ARROWS: &str = "the source has over 200 arrows and groups, counting a longer or labelled arrow as more than one";
+
+/// `head`, then one line per arrow `0..n`, each line ended with `nl`.
+fn arrow_source(head: &str, n: usize, nl: &str, line: impl Fn(usize) -> String) -> String {
+    let mut s = format!("{head}{nl}");
+    for i in 0..n {
+        s.push_str(&line(i));
+        s.push_str(nl);
+    }
+    s
+}
+
+/// Cost N: 200 plain arrows.
+fn at_bound() -> String {
+    arrow_source("flowchart LR", 200, "\n", |i| {
+        format!("A{i} --> A{}", i + 1)
+    })
+}
+
+/// Cost N + 1, with CRLF line ends and a blank line after a subgraph header: 200 plain arrows
+/// in one subgraph, which costs one more (D-NN3GQ).
+fn over_bound() -> String {
+    let body = arrow_source("subgraph S", 200, "\r\n", |i| {
+        format!("B{i} --> B{}", i + 1)
+    });
+    format!(
+        "flowchart TD\r\n{}end\r\n",
+        body.replacen("\r\n", "\r\n\r\n", 1)
+    )
+}
+
+/// Cost N + 1 with labels: 101 labelled arrows and 50 arrows of span 2.
+fn labelled_over() -> String {
+    let mut s = arrow_source("flowchart LR", 101, "\n", |i| {
+        format!("L{i} -->|y| L{}", i + 1)
+    });
+    for i in 0..50 {
+        s.push_str(&format!("M{i} ---> M{}\n", i + 1));
+    }
+    s
+}
+
+/// The fallback figure of a refused Mermaid source: its code block, then its caption.
+fn fallback(alt: &str, source: &str) -> String {
+    format!(
+        "<figure class=\"diagram\" data-lang=\"mermaid\"><p class=\"visually-hidden\">{alt}</p><div class=\"code-block\"><div class=\"code-head\"><span class=\"lang\">Mermaid</span><button type=\"button\" class=\"tool copy-code\" aria-label=\"Copy code\">Copy</button></div><pre class=\"code\"><code class=\"language-mermaid\">{}</code></pre></div><figcaption>{alt}</figcaption></figure>",
+        escaped(source)
+    )
+}
+
+/// Where a print doc's code block that holds `marker` and its caption `alt` stand.
+fn print_order(blocks: &[rdy_render::print::PBlock], marker: &str, alt: &str) -> (usize, usize) {
+    use rdy_render::print::PBlock;
+    let code = blocks
+        .iter()
+        .position(|b| matches!(b, PBlock::Code { text, .. } if text.contains(marker)))
+        .unwrap_or_else(|| panic!("no code with {marker}: {blocks:?}"));
+    let caption = blocks
+        .iter()
+        .position(|b| match b {
+            PBlock::Para { runs, .. } => {
+                runs.iter().map(|r| r.text.as_str()).collect::<String>() == alt
+            }
+            _ => false,
+        })
+        .unwrap_or_else(|| panic!("no caption {alt}: {blocks:?}"));
+    (code, caption)
+}
+
+/// rdb6 (D-VACA9, D-XM8MP, review M5): the full site, one full publication, one publication
+/// page and the print share the arrow bound, through `DiagramAssets::draw` and
+/// `rdy_diagram::admit`. A cost-N source draws; a cost-N+1 source and a labelled one over the
+/// bound show their own bytes, have no drawn file and warn once per block. The print shows
+/// sources and warns of none. A refused source is never a cache key.
+#[test]
+fn rdb6_all_surfaces_share_the_bound_and_original_source() {
+    let (at, over, label) = (at_bound(), over_bound(), labelled_over());
+    assert!(over.contains("subgraph S\r\n\r\nB0 --> B1\r\n"), "{over:?}");
+    let mut ops = diagram_doc("at", "At page", &[("mermaid", "At the bound", &at)]);
+    ops.extend(diagram_doc(
+        "label",
+        "Label page",
+        &[("mermaid", "Labelled", &label)],
+    ));
+    ops.extend(diagram_doc(
+        "over",
+        "Over page",
+        &[("mermaid", "Over the bound", &over)],
+    ));
+    let (_d, mut r, ids) = project(Value::Array(ops));
+    let want = vec![
+        format!(
+            "Label page ({}): the Mermaid diagram does not parse: {OVER_ARROWS}",
+            ids["$label0"]
+        ),
+        format!(
+            "Over page ({}): the Mermaid diagram does not parse: {OVER_ARROWS}",
+            ids["$over0"]
+        ),
+    ];
+    let refused = [
+        ("label.html", fallback("Labelled", &label)),
+        ("over.html", fallback("Over the bound", &over)),
+    ];
+    let check = |files: &BTreeMap<String, Vec<u8>>, surface: &str| {
+        for (path, figure) in &refused {
+            let html = page(files, path);
+            assert_eq!(figures(&html), [figure.as_str()], "{surface}: {path}");
+        }
+        let at_page = page(files, "at.html");
+        let figs = figures(&at_page);
+        assert_eq!(figs.len(), 1, "{surface}");
+        assert!(figs[0].contains("diagram-canvas"), "{surface}: {}", figs[0]);
+        assert_eq!(diagram_files(files).len(), 1, "{surface}");
+    };
+    // the full site, twice: the second build reads the cache
+    for _ in 0..2 {
+        let s = site(&r);
+        check(&s.files, "site");
+        assert_eq!(s.summary.warnings, want);
+    }
+    // one full publication
+    let landing = tag(&mut r);
+    let a = full(&r, landing, IMPLICIT_ORG);
+    check(&a.files, "publication");
+    assert_eq!(a.warnings, want);
+    // one publication page holds only its own page's warnings and files
+    for (path, warnings, files) in [
+        ("label.html", vec![want[0].clone()], 0),
+        ("over.html", vec![want[1].clone()], 0),
+        ("at.html", vec![], 1),
+    ] {
+        let p = one(&r, landing, IMPLICIT_ORG, path);
+        assert_eq!(p.warnings, warnings, "{path}");
+        assert_eq!(diagram_files(&p.assets).len(), files, "{path}");
+        assert_eq!(p.html, a.files[path], "{path}");
+    }
+    // the print: every diagram as its source; a refused one in the fallback shape (code, then
+    // caption), with no diagram warning
+    let print = rdy_render::print::build(&r.read(), &Scope::Canon).unwrap();
+    assert!(print.warnings.is_empty(), "{:?}", print.warnings);
+    let doc = |title: &str| {
+        &print
+            .docs
+            .iter()
+            .find(|d| d.title == title)
+            .unwrap_or_else(|| panic!("no {title}"))
+            .blocks
+    };
+    let (code, caption) = print_order(doc("Over page"), "B199 --> B200", "Over the bound");
+    assert!(code < caption, "refused: the code block, then its caption");
+    let (code, caption) = print_order(doc("Label page"), "L100 -->|y| L101", "Labelled");
+    assert!(code < caption, "refused: the code block, then its caption");
+    let (code, caption) = print_order(doc("At page"), "A199 --> A200", "At the bound");
+    assert!(caption < code, "drawn: the source after its caption");
+    // the cache: a refused source is never a key; the drawn one has its row
+    assert_eq!(rdy_render::diagram_cache_key(&over), None);
+    assert_eq!(rdy_render::diagram_cache_key(&label), None);
+    let key = rdy_render::diagram_cache_key(&at).expect("admitted");
+    assert!(r.read().reader().diagram_cache().get(&key).is_some());
+}
+
+/// The fenced Mermaid block in `text`: from its opening fence through its closing one.
+fn mermaid_fence(text: &str) -> &str {
+    let start = text
+        .find("```mermaid")
+        .unwrap_or_else(|| panic!("no fence: {text}"));
+    let close = text[start + 3..]
+        .find("\n```")
+        .unwrap_or_else(|| panic!("no closing fence: {text}"))
+        + start
+        + 3
+        + "\n```".len();
+    &text[start..close]
+}
+
+/// rdb6 (D-VACA9, D-R7C3W): the page's Copy data of a source over the arrow bound holds the
+/// author's own source once, CRLF and blank line kept, and no SVG. The Markdown export writer
+/// is the oracle: Copy's block is the export's block.
+#[test]
+fn rdb6_bound_fallback_keeps_copy_source() {
+    use rdy_render::print::md::{Layout, emit_files};
+    let over = over_bound();
+    let (_d, r, ids) = project(Value::Array(diagram_doc(
+        "over",
+        "Over page",
+        &[("mermaid", "Over the bound", &over)],
+    )));
+    let s = site(&r);
+    let html = page(&s.files, "over.html");
+    // the source is refused: its fallback, no drawn file, the cost warning
+    assert_eq!(figures(&html), [fallback("Over the bound", &over).as_str()]);
+    assert!(diagram_files(&s.files).is_empty());
+    assert_eq!(
+        s.summary.warnings,
+        [format!(
+            "Over page ({}): the Mermaid diagram does not parse: {OVER_ARROWS}",
+            ids["$over0"]
+        )]
+    );
+    let copy = strings(&copy_payload(&html));
+    assert_eq!(copy.matches(over.as_str()).count(), 1, "{copy:?}");
+    assert!(!copy.contains("<svg") && !copy.contains("svg"), "{copy:?}");
+    // the export of the same page
+    let print = rdy_render::print::build(&r.read(), &Scope::Canon).unwrap();
+    let mut export = None;
+    emit_files(&print, Layout::Plain, false, |path, data| {
+        if path == "over.md" {
+            export = Some(String::from_utf8(data.to_vec()).expect("utf-8"));
+        }
+        Ok(())
+    })
+    .expect("export");
+    let export = export.expect("over.md");
+    assert_eq!(mermaid_fence(&copy), mermaid_fence(&export));
+    assert_eq!(mermaid_fence(&export).matches(over.as_str()).count(), 1);
+}

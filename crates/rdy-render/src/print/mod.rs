@@ -357,6 +357,7 @@ pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
         history,
         profile,
         menu_url: _,
+        diagram_cache,
     } = prepared;
     let m: &rdy_engine::Materialized = &m;
     let mut site = Site::with_unavailable(
@@ -397,7 +398,7 @@ pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
         // a print draws no diagram, writes no file and warns of none; each diagram has the site's
         // shape less its drawing (ruling task-6)
         draw_diagrams: false,
-        diagrams: Default::default(),
+        diagrams: std::cell::RefCell::new(page::DiagramAssets::with_cache(diagram_cache)),
         governing: Default::default(),
         mode: Mode::Static,
         inline_diffs: Default::default(),

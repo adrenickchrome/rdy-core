@@ -2,7 +2,7 @@
 //!
 //! The renderer is built with and without the feature, so the test reads the declarations: a
 //! public `probe` module must sit behind `cfg(feature = "probe")`, and the feature-off stand-in
-//! must be private with a no-op `hit()` only.
+//! must be private with no-op `hit()` and `prepared()` only.
 
 fn lines(src: &str) -> Vec<&str> {
     src.lines().map(str::trim).collect()
@@ -41,6 +41,7 @@ fn hpb13_the_public_probe_module_exists_only_with_the_probe_feature() {
         "{stand_in}"
     );
     assert!(stand_in.contains("fn hit() {}"), "{stand_in}");
+    assert!(stand_in.contains("fn prepared() {}"), "{stand_in}");
 }
 
 #[test]

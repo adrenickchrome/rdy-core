@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 896.47 1529.50" style="max-width: 896.47px; background-color: #ffffff; --bg:#ffffff; --fg:#27272a; --line:#939395; --accent:#47474a; --muted:#a9a9aa; --surface:#f9f9f9; --border:#d4d4d4; --cluster-bkg:#f9f9f9; --note-fill:#f9f9f9;" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif" font-size="16.00">
+  <style>
+    svg {
+      --_text: var(--fg);
+      --_text-sec: color-mix(in srgb, var(--fg) 60%, var(--bg));
+      --_text-muted: var(--muted);
+      --_text-faint: color-mix(in srgb, var(--fg) 25%, var(--bg));
+      --_line: var(--line);
+      --_arrow: var(--accent);
+      --_node-fill: var(--surface);
+      --_node-stroke: var(--border);
+      --_group-fill: var(--bg);
+      --_cluster-bkg: var(--cluster-bkg);
+      --_note-fill: var(--note-fill);
+    }
+  </style>
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10.00 10.00" refX="5.00" refY="5.00" markerWidth="8.00" markerHeight="8.00" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M 0 0 L 10.00 5.00 L 0 10.00 z" fill="#47474a" data-svg-role="graph-marker-fill" style="fill:var(--_arrow);" />
+    </marker>
+  </defs>
+  <g transform="translate(259.53,-68.25)">
+    <g class="clusters">
+      <g class="cluster" id="C1" data-id="C1" data-look="classic">
+        <rect class="subgraph" x="-22.96" y="76.25" width="639.02" height="177.50" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" data-svg-role="graph-subgraph-rect" style="fill:var(--_cluster-bkg);stroke:var(--_node-stroke);" />
+        <text x="296.55" y="80.25" text-anchor="middle" dominant-baseline="hanging" fill="#27272a" data-svg-role="graph-subgraph-text" style="fill:var(--_text);">1. Push taken</text>
+      </g>
+      <g class="cluster" id="C2" data-id="C2" data-look="classic">
+        <rect class="subgraph" x="-29.61" y="452.25" width="658.55" height="177.50" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" data-svg-role="graph-subgraph-rect" style="fill:var(--_cluster-bkg);stroke:var(--_node-stroke);" />
+        <text x="299.66" y="456.25" text-anchor="middle" dominant-baseline="hanging" fill="#27272a" data-svg-role="graph-subgraph-text" style="fill:var(--_text);">2. Behind, so pull replays</text>
+      </g>
+      <g class="cluster" id="C3" data-id="C3" data-look="classic">
+        <rect class="subgraph" x="-251.53" y="947.00" width="862.52" height="148.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" data-svg-role="graph-subgraph-rect" style="fill:var(--_cluster-bkg);stroke:var(--_node-stroke);" />
+        <text x="179.73" y="951.00" text-anchor="middle" dominant-baseline="hanging" fill="#27272a" data-svg-role="graph-subgraph-text" style="fill:var(--_text);">3. Hub refuses, take the hub&apos;s canon</text>
+      </g>
+      <g class="cluster" id="C4" data-id="C4" data-look="classic">
+        <rect class="subgraph" x="-34.06" y="1412.25" width="657.65" height="177.50" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" data-svg-role="graph-subgraph-rect" style="fill:var(--_cluster-bkg);stroke:var(--_node-stroke);" />
+        <text x="294.77" y="1416.25" text-anchor="middle" dominant-baseline="hanging" fill="#27272a" data-svg-role="graph-subgraph-text" style="fill:var(--_text);">4. Force push, allowed by the hub&apos;s gate rules</text>
+      </g>
+    </g>
+    <g class="edgePaths">
+      <path d="M169.46,211.75 L402.04,211.75 Q407.04,211.75 407.04,206.75 L407.04,135.00 Q407.04,130.00 412.04,130.00 L435.55,130.00 Q440.55,130.00 440.55,135.00 L440.55,142.00" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" marker-end="url(#arrowhead)" />
+      <path d="M382.55,134.25 L589.19,134.25 Q593.06,134.25 593.06,138.12 L593.06,142.00" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" stroke-dasharray="2.00,4.00" marker-end="url(#arrowhead)" />
+      <path d="M115.65,587.75 L349.83,587.75 Q354.83,587.75 354.83,582.75 L354.83,499.00 Q354.83,494.00 359.83,494.00 L383.52,494.00 Q388.52,494.00 388.52,499.00 L388.52,506.00" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" marker-end="url(#arrowhead)" />
+      <path d="M330.52,510.25 L603.81,510.25 Q605.94,510.25 605.94,508.12 L605.94,506.00" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" stroke-dasharray="2.00,4.00" marker-end="url(#arrowhead)" />
+      <path d="M-96.48,1029.00 L75.03,1029.00" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" marker-end="url(#arrowhead)" />
+      <path d="M209.29,1029.00 L318.53,1029.00" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" marker-end="url(#arrowhead)" />
+      <path d="M121.00,1547.75 L346.36,1547.75 Q351.36,1547.75 351.36,1542.75 L351.36,1459.00 Q351.36,1454.00 356.36,1454.00 L379.07,1454.00 Q384.07,1454.00 384.07,1459.00 L384.07,1466.00" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" marker-end="url(#arrowhead)" />
+      <path d="M326.07,1470.25 L598.46,1470.25 Q600.59,1470.25 600.59,1468.12 L600.59,1466.00" stroke="#939395" stroke-width="1.00" fill="none" stroke-linecap="round" stroke-linejoin="round" data-svg-role="graph-edge-stroke" style="stroke:var(--_line);" stroke-dasharray="2.00,4.00" marker-end="url(#arrowhead)" />
+    </g>
+    <g class="nodes">
+      <g class="node default" id="c1h" data-id="c1h" data-look="classic">
+        <rect x="432.55" y="146.00" width="168.52" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="516.81" y="173.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">Hub: L1 L2 A B</text>
+      </g>
+      <g class="node default" id="c1l" data-id="c1l" data-look="classic">
+        <rect x="-7.96" y="184.75" width="177.41" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="80.75" y="211.75" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">Local: L1 L2 A B</text>
+      </g>
+      <g class="node default" id="c1o" data-id="c1o" data-look="classic">
+        <rect x="194.46" y="107.25" width="188.09" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="288.50" y="134.25" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">Hub before: L1 L2</text>
+      </g>
+      <g class="node default" id="c2h" data-id="c2h" data-look="classic">
+        <rect x="-14.61" y="560.75" width="130.26" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="50.52" y="587.75" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">Hub: L2 T</text>
+      </g>
+      <g class="node default" id="c2l" data-id="c2l" data-look="classic">
+        <rect x="140.65" y="483.25" width="189.87" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="235.58" y="510.25" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">Local before: L2 A</text>
+      </g>
+      <g class="node default" id="c2r" data-id="c2r" data-look="classic">
+        <rect x="380.52" y="510.00" width="233.42" height="78.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="497.23" y="537.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">Local: L2 T A&apos;</text>
+        <text x="497.23" y="561.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">A kept, marked replaced</text>
+      </g>
+      <g class="node default" id="c3h" data-id="c3h" data-look="classic">
+        <rect x="79.03" y="1002.00" width="130.26" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="144.16" y="1029.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">Hub: L2 T</text>
+      </g>
+      <g class="node default" id="c3l" data-id="c3l" data-look="classic">
+        <rect x="-236.53" y="1002.00" width="140.05" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="-166.50" y="1029.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">Local: L2 A</text>
+      </g>
+      <g class="node default" id="c3r" data-id="c3r" data-look="classic">
+        <rect x="322.53" y="978.00" width="273.46" height="102.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="459.26" y="1005.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">Local: L2 T</text>
+        <text x="459.26" y="1029.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">A kept, marked replaced</text>
+        <text x="459.26" y="1053.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">its changes can go into a view</text>
+      </g>
+      <g class="node default" id="c4h" data-id="c4h" data-look="classic">
+        <rect x="146.00" y="1443.25" width="180.07" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="236.03" y="1470.25" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">Hub before: L2 T</text>
+      </g>
+      <g class="node default" id="c4l" data-id="c4l" data-look="classic">
+        <rect x="-19.06" y="1520.75" width="140.05" height="54.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="50.97" y="1547.75" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">Local: L2 A</text>
+      </g>
+      <g class="node default" id="c4r" data-id="c4r" data-look="classic">
+        <rect x="376.07" y="1470.00" width="232.52" height="78.00" fill="#f9f9f9" stroke="#d4d4d4" stroke-width="1.00" stroke-linejoin="round" data-svg-role="graph-node-shape" style="fill:var(--_node-fill);stroke:var(--_node-stroke);" />
+        <text x="492.33" y="1497.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">Hub: L2 A</text>
+        <text x="492.33" y="1521.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-node-text" style="fill:var(--_text);">T kept, marked replaced</text>
+      </g>
+    </g>
+    <g class="edgeLabels">
+      <rect x="330.53" y="197.75" width="42.70" height="28.00" fill="#ffffff" data-svg-role="graph-edge-label-bg" style="fill:var(--bg);" />
+      <text x="351.88" y="211.75" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-edge-text" style="fill:var(--_text);">push</text>
+      <rect x="288.50" y="573.75" width="32.91" height="28.00" fill="#ffffff" data-svg-role="graph-edge-label-bg" style="fill:var(--bg);" />
+      <text x="304.96" y="587.75" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-edge-text" style="fill:var(--_text);">pull</text>
+      <rect x="-60.98" y="1015.00" width="100.51" height="28.00" fill="#ffffff" data-svg-role="graph-edge-label-bg" style="fill:var(--bg);" />
+      <text x="-10.72" y="1029.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-edge-text" style="fill:var(--_text);">push refused</text>
+      <rect x="244.79" y="1015.00" width="38.24" height="28.00" fill="#ffffff" data-svg-role="graph-edge-label-bg" style="fill:var(--bg);" />
+      <text x="263.91" y="1029.00" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-edge-text" style="fill:var(--_text);">take</text>
+      <rect x="264.05" y="1533.75" width="82.71" height="28.00" fill="#ffffff" data-svg-role="graph-edge-label-bg" style="fill:var(--bg);" />
+      <text x="305.41" y="1547.75" text-anchor="middle" dominant-baseline="middle" fill="#27272a" data-svg-role="graph-edge-text" style="fill:var(--_text);">force push</text>
+    </g>
+  </g>
+</svg>

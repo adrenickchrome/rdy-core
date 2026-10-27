@@ -95,6 +95,11 @@ pub fn change_stamp(meta: &std::fs::Metadata) -> ChangeStamp {
     ChangeStamp { ino, ctime }
 }
 
+/// How many links (names) the file in `meta` has: `st_nlink`.
+pub fn links(meta: &std::fs::Metadata) -> u64 {
+    os::links(meta)
+}
+
 /// The platform fields this module reads. Only this module names a platform's metadata.
 #[cfg(unix)]
 mod os {
@@ -108,6 +113,11 @@ mod os {
     /// `st_ino`, and `st_ctime` in seconds and nanoseconds.
     pub(super) fn ino_ctime(meta: &std::fs::Metadata) -> (u64, i64, i64) {
         (meta.ino(), meta.ctime(), meta.ctime_nsec())
+    }
+
+    /// `st_nlink`.
+    pub(super) fn links(meta: &std::fs::Metadata) -> u64 {
+        meta.nlink()
     }
 }
 
@@ -123,6 +133,10 @@ mod os {
     }
 
     pub(super) fn ino_ctime(_: &std::fs::Metadata) -> (u64, i64, i64) {
+        unreachable!("rdy_store::fileid has no implementation for this platform yet")
+    }
+
+    pub(super) fn links(_: &std::fs::Metadata) -> u64 {
         unreachable!("rdy_store::fileid has no implementation for this platform yet")
     }
 }

@@ -2587,7 +2587,8 @@ mod tests {
                 "{name}"
             );
         }
-        assert_eq!(converted, 15 + 11);
+        // 16 drawn fixtures: Task 1 added four-cases.svg (D-438Y2, A2)
+        assert_eq!(converted, 16 + 11);
     }
 
     /// Final review (fix round 2): the print admits a drawing exactly when the site's inline copy

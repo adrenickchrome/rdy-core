@@ -297,11 +297,122 @@ fn rebuild_index(path: &Path, repaired: bool) -> Result<OpenedIndex, StoreError>
     })
 }
 
+/// Zeroes, syncs and removes every replaced index file a removal kept by a second name
+/// (`index.redb.erase`, `index.redb.erase-<n>`; `Index::erase_on_close`) that a kill or a
+/// failed zeroing left behind, then syncs `dir`. The caller holds the lock. A kill before the
+/// rename leaves `index.redb` on the same file: it is the old index too, and is zeroed (the open
+/// then rebuilds it from the log as damage). A name that is not a regular file, or a file with
+/// another link, is not rdy's own copy: it is left as it is, and logged. The links are read on
+/// the handle that zeroes, so a file swapped in after the name was read is judged too (ruling
+/// task-7 Round 3, N3). A leftover that cannot be zeroed or removed refuses the open, and the
+/// error names it (N5).
+fn erase_leftovers(dir: &Path) -> Result<(), StoreError> {
+    let index = dir.join("index.redb");
+    let mut removed = false;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !crate::index::is_erase_name("index.redb", &name) {
+            continue;
+        }
+        let path = dir.join(&name);
+        let refused = |e: std::io::Error| {
+            StoreError::Io(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "{} is a replaced index file kept for zeroing, and it could not be zeroed and removed: {e}",
+                    path.display()
+                ),
+            ))
+        };
+        let not_ours = || {
+            notice(&format!(
+                "rdy: {} is not a file rdy kept for zeroing, so it was left as it is",
+                path.display()
+            ))
+        };
+        // a link, or a name that is not a regular file, is never opened
+        if !std::fs::symlink_metadata(&path)
+            .map_err(refused)?
+            .file_type()
+            .is_file()
+        {
+            not_ours();
+            continue;
+        }
+        leftover_checked(&path);
+        let f = crate::pio::open_no_follow(OpenOptions::new().read(true).write(true), &path)
+            .map_err(refused)?;
+        let meta = f.metadata().map_err(refused)?;
+        let links = crate::fileid::links(&meta);
+        let shared_with_index = links == 2
+            && crate::fileid::FileId::lstat(&index).ok() == Some(crate::fileid::FileId::of(&meta));
+        if !meta.is_file() || !(links == 1 || shared_with_index) {
+            not_ours();
+            continue;
+        }
+        fsutil::zero_open_file(&f, &path).map_err(refused)?;
+        drop(f);
+        std::fs::remove_file(&path).map_err(refused)?;
+        removed = true;
+    }
+    if removed {
+        fsutil::sync_dir(dir)?;
+    }
+    Ok(())
+}
+
 /// Removes the file at `path`; a file that is not there is no error.
 fn remove_if_present(path: &Path) -> Result<(), StoreError> {
     match std::fs::remove_file(path) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
         _ => Ok(()),
+    }
+}
+
+/// Whether a reindex zeroes the index it replaces: a removal's always does, and so does one of an
+/// index whose `erase_due` mark is set (`due`).
+/// A mark that cannot be read counts as set: rdy zeroes rather than skips (ruling task-7 Round 3,
+/// N2).
+fn erase_old_due(erase_old: bool, due: Result<bool, StoreError>) -> bool {
+    erase_old || due.unwrap_or(true)
+}
+
+/// The test hook [`on_leftover_checked_for_tests`] sets.
+type LeftoverHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync>;
+
+static LEFTOVER_HOOK: Mutex<Option<LeftoverHook>> = Mutex::new(None);
+
+/// Test hook: while the returned guard lives, `erase_leftovers` calls `f` with each leftover's
+/// path after it reads the name and before it opens the file (any thread), so a test can swap
+/// the file in between.
+#[doc(hidden)]
+pub fn on_leftover_checked_for_tests(
+    f: impl Fn(&Path) + Send + Sync + 'static,
+) -> LeftoverHookGuard {
+    *LEFTOVER_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(f));
+    LeftoverHookGuard(())
+}
+
+/// The guard of [`on_leftover_checked_for_tests`]; dropping it removes the hook.
+#[doc(hidden)]
+pub struct LeftoverHookGuard(());
+
+impl Drop for LeftoverHookGuard {
+    fn drop(&mut self) {
+        *LEFTOVER_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+fn leftover_checked(path: &Path) {
+    let hook = LEFTOVER_HOOK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if let Some(f) = hook {
+        f(path);
     }
 }
 
@@ -930,6 +1041,9 @@ impl Store {
         // The lock is held, so no rebuild is running: remove it. This is best effort: a temp
         // that cannot be removed costs only disk space, and the next reindex tries again.
         let _ = remove_if_present(&dir.join(INDEX_TMP));
+        // a replaced index a kill (or a failed zeroing) left kept by name is zeroed and removed
+        // before anything else reads the store (D-6H0ZX)
+        erase_leftovers(dir)?;
         // the sentinel of a process that died with the store open
         let unclean = std::fs::symlink_metadata(dir.join(INDEX_OPEN_SENTINEL)).is_ok();
         // seg1: a gap in the segment numbers means acknowledged frames are missing
@@ -1059,6 +1173,18 @@ impl Store {
         store.check_mode_against(store.creation)?;
         // an authorized removal finishes before any reader escapes this open
         store.finish_redactions_at_open()?;
+        // A kill, a copy or a restore can keep an index whose cached drawings a removal meant to
+        // erase. Any open, clean or unclean, whose index applied a removal since it was built
+        // (its catch-up replayed the apply) runs the removal's reindex: a new index, and the old
+        // file zeroed and synced before it goes, and the open reports the rebuild (D-6H0ZX;
+        // ruling task-7 Round 2, F3, and Round 3, N4 and the mark at every open). Any other
+        // unclean open empties the diagram cache in one durable commit (D-XM8MP rule 13a).
+        if store.index().erase_due()? {
+            store.reindex_after_removal()?;
+            store.report.index_rebuilt = true;
+        } else if store.report.unclean_shutdown {
+            store.index().clear_diagrams()?;
+        }
         // Losing this file to a power loss only costs a needless rebuild, so it is not synced.
         // It is only ever created, never opened: an existing one (a kill's, or a link planted
         // there) is left as it is, and nothing is followed or truncated.
@@ -1479,6 +1605,10 @@ impl Store {
     fn replay_from(&mut self, from: Location, rules: RefRules) -> Result<CatchUp, StoreError> {
         let fail_after = self.faults.replay_after.take();
         let done = replay_into(&self.log, self.index(), from, fail_after, rules)?;
+        if from == ORIGIN {
+            // an empty index built from the log's start holds nothing a removal erased
+            self.index().clear_erase_due(false)?;
+        }
         // the replayed frames are in the log, not yet in the durable index
         self.checkpoint()?;
         Ok(done)
@@ -1505,6 +1635,38 @@ impl Store {
         self.index().put_raw_producer_for_tests(key)
     }
 
+    /// Makes `ix`, built in `tmp`, the store's index at `path`, and erases the index it replaces
+    /// (D-6H0ZX). The old file first gets a second name, `index.redb.erase`, and the directory is
+    /// synced (`Index::erase_on_close`). Then the store's reader takes `ix`. When no other reader
+    /// holds the old index, it is closed and its file overwritten with zeros and synced, and the
+    /// second name goes; only then is `tmp` renamed over `path`. A reader cloned before still
+    /// holds the old index: the rename comes first, and the file is zeroed through the kept
+    /// handle when the last holder drops it, while the second name keeps it reachable, so a
+    /// kill in between leaves the name and the next open zeroes the file. A kill after the zeros
+    /// and before the rename leaves a zeroed `index.redb`, which the next open reads as damage and
+    /// rebuilds from the log. An old file with more than one link is not zeroed (it is logged).
+    fn publish_erasing(&mut self, path: &Path, tmp: &Path, ix: Index) -> Result<(), StoreError> {
+        let old = Arc::clone(&self.index);
+        if let Err(e) = old.erase_on_close(path) {
+            drop(ix);
+            let _ = remove_if_present(tmp);
+            return Err(e);
+        }
+        let keep = (Arc::clone(&self.shared), Arc::clone(&self.tracking));
+        self.set_index(keep, ix);
+        // the store's reader held the only other handle: the old index closes and is zeroed now
+        let erased = match Arc::try_unwrap(old) {
+            Ok(old) => old.close_and_erase(),
+            Err(_) => Ok(()),
+        };
+        // the new index takes the name even when the zeros failed, so the old file is gone
+        let renamed = std::fs::rename(tmp, path);
+        erased?;
+        renamed?;
+        crate::redaction_io::hit(crate::redaction_io::Failpoint::AfterIndexPublish)?;
+        Ok(())
+    }
+
     /// Rebuilds the index from the log. The new index is built in `index.redb.tmp` and is renamed
     /// over `index.redb` only when it is complete and durable. A failure leaves the old index in
     /// place as the store's index, and removes the temp file. The store's reader then holds the
@@ -1512,9 +1674,23 @@ impl Store {
     /// file until that reader drops (Unix). A temp that a kill leaves behind is removed by the
     /// next open, which holds the lock.
     pub fn reindex(&mut self) -> Result<(), StoreError> {
+        self.reindex_with(false)
+    }
+
+    /// A removal's [`Store::reindex`] (D-6H0ZX): the replaced index file is overwritten with
+    /// zeros and synced before the new index takes its name, so no text the old index held (a
+    /// cached drawing) survives in free disk space. When a reader cloned before still holds the
+    /// old index, the file is zeroed when that reader drops it.
+    fn reindex_after_removal(&mut self) -> Result<(), StoreError> {
+        self.reindex_with(true)
+    }
+
+    fn reindex_with(&mut self, erase_old: bool) -> Result<(), StoreError> {
         if self.open.is_some() {
             return Err(batch_open("first"));
         }
+        // an index that applied a removal since it was built may hold what the removal erased
+        let erase_old = erase_old_due(erase_old, self.index().erase_due());
         let path = self.dir.join("index.redb");
         let tmp = self.dir.join(INDEX_TMP);
         // a leftover temp is an older failed rebuild; `Index::open` would reuse it
@@ -1529,6 +1705,8 @@ impl Store {
                 fail_after,
                 RefRules::new(self.creation),
             )?;
+            // built from the log's start: it holds nothing a removal erased, and no drawing
+            ix.clear_erase_due(true)?;
             // durable before it becomes the index
             ix.checkpoint()?;
             crate::redaction_io::hit(crate::redaction_io::Failpoint::BeforeIndexPublish)?;
@@ -1541,14 +1719,18 @@ impl Store {
                 return Err(e);
             }
         };
-        if let Err(e) = std::fs::rename(&tmp, &path) {
-            drop(ix);
-            let _ = remove_if_present(&tmp);
-            return Err(e.into());
+        if erase_old {
+            self.publish_erasing(&path, &tmp, ix)?;
+        } else {
+            if let Err(e) = std::fs::rename(&tmp, &path) {
+                drop(ix);
+                let _ = remove_if_present(&tmp);
+                return Err(e.into());
+            }
+            // the handle opened on the temp path keeps working after the rename
+            let keep = (Arc::clone(&self.shared), Arc::clone(&self.tracking));
+            self.set_index(keep, ix);
         }
-        // the handle opened on the temp path keeps working after the rename
-        let keep = (Arc::clone(&self.shared), Arc::clone(&self.tracking));
-        self.set_index(keep, ix);
         self.shared
             .sets
             .lock()
@@ -1809,6 +1991,18 @@ impl Store {
         // an open held batch is sealed first, so a write left open is kept
         let sealed = self.seal(vec![]);
         if self.open.is_some() || self.stale_index {
+            // A pending removal's index holds what the removal erases: it is kept by a second
+            // name, and zeroed and synced when the database below has closed onto it, before
+            // that last name goes (D-6H0ZX; ruling task-7 Round 2, F2).
+            if self.shared.pending.load(Ordering::Acquire) {
+                let path = self.dir.join("index.redb");
+                if let Err(e) = self.index().erase_on_close(&path) {
+                    notice(&format!(
+                        "rdy: the stale index file {} could not be kept for zeroing ({e}); it is removed without zeros",
+                        path.display()
+                    ));
+                }
+            }
             // The index holds entries of frames the log does not keep (a failed seal, or a batch
             // left open on a poisoned store), and a clean close of the database makes them
             // durable. So the file is removed first, and the removal is made durable; only then
@@ -3161,7 +3355,7 @@ impl Store {
         }
         self.log.sync_segments(&affected)?;
         crate::redaction_io::hit(crate::redaction_io::Failpoint::AfterSegmentSync)?;
-        self.reindex()?;
+        self.reindex_after_removal()?;
         Ok((counts, true))
     }
 
@@ -3513,7 +3707,7 @@ impl Store {
         }
         let rebuilt = match self.finish_erasing(false) {
             Ok((_, true)) => Ok(()),
-            Ok((_, false)) => self.reindex(),
+            Ok((_, false)) => self.reindex_after_removal(),
             Err(e) => Err(e),
         };
         if rebuilt.is_err() {
@@ -3708,6 +3902,19 @@ fn unchecked_put(kind: u8) -> StoreError {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// rdb7 (ruling task-7 Round 3, N2): a mark that cannot be read counts as set, so the reindex
+    /// zeroes the old index rather than skip it.
+    #[test]
+    fn rdb7_an_unreadable_erase_due_mark_zeroes_the_old_index() {
+        let unreadable = || Err(StoreError::Db("injected meta read failure".into()));
+        assert!(erase_old_due(false, unreadable()));
+        assert!(erase_old_due(true, unreadable()));
+        assert!(erase_old_due(false, Ok(true)));
+        assert!(!erase_old_due(false, Ok(false)));
+    }
+
     #[test]
     fn msw4_store_drop_never_uses_eprintln() {
         let src = include_str!("store.rs");

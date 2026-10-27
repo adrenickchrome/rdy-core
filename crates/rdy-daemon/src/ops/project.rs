@@ -37,9 +37,11 @@ pub struct Cleaned {
     pub skipped: Vec<(String, String)>,
 }
 
-/// Removes the quarantine files `quarantine(root)` names, in its order. Only regular files are
-/// removed: a symlink or a directory carrying a quarantine name is skipped untouched (never
-/// followed, never recursed), and an error leaves the file in `skipped` with the error text.
+/// Removes the quarantine files `quarantine(root)` names, in its order; a damaged index is
+/// overwritten with zeros and synced before it goes (D-6H0ZX), and one with a second link is not
+/// rdy's own copy, so it is skipped untouched. Only regular files are removed: a symlink or a
+/// directory carrying a quarantine name is skipped untouched (never followed, never recursed),
+/// and an error leaves the file in `skipped` with the error text.
 /// Then each directory a file was removed from is fsynced, so a removal reported here survives a
 /// power loss; a directory whose fsync fails goes in `skipped` under its store-relative name
 /// (`.` for the store itself).
@@ -52,10 +54,13 @@ pub fn clean_quarantine(root: &Path) -> Cleaned {
         let result = std::fs::symlink_metadata(&path)
             .map_err(|e| e.to_string())
             .and_then(|m| {
-                if m.file_type().is_file() {
-                    std::fs::remove_file(&path).map_err(|e| e.to_string())
-                } else {
+                if !m.file_type().is_file() {
                     Err("not a regular file".to_string())
+                } else if name.starts_with("index.redb.damaged-") {
+                    // a damaged index may hold drawn text a removal erased (D-6H0ZX)
+                    rdy_store::fsutil::zero_then_remove(&path).map_err(|e| e.to_string())
+                } else {
+                    std::fs::remove_file(&path).map_err(|e| e.to_string())
                 }
             });
         match result {

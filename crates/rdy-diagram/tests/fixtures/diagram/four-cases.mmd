@@ -1,0 +1,21 @@
+flowchart TB
+    subgraph C1["1. Push taken"]
+        direction LR
+        c1l["Local: L1 L2 A B"] -- push --> c1h["Hub: L1 L2 A B"]
+        c1o["Hub before: L1 L2"] -.-> c1h
+    end
+    subgraph C2["2. Behind, so pull replays"]
+        direction LR
+        c2h["Hub: L2 T"] -- pull --> c2r["Local: L2 T A'<br/>A kept, marked replaced"]
+        c2l["Local before: L2 A"] -.-> c2r
+    end
+    subgraph C3["3. Hub refuses, take the hub's canon"]
+        direction LR
+        c3l["Local: L2 A"] -- "push refused" --> c3h["Hub: L2 T"]
+        c3h -- take --> c3r["Local: L2 T<br/>A kept, marked replaced<br/>its changes can go into a view"]
+    end
+    subgraph C4["4. Force push, allowed by the hub's gate rules"]
+        direction LR
+        c4l["Local: L2 A"] -- "force push" --> c4r["Hub: L2 A<br/>T kept, marked replaced"]
+        c4h["Hub before: L2 T"] -.-> c4r
+    end

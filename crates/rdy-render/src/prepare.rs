@@ -2,10 +2,13 @@
 //! boundary. The site and print builders receive a [`Prepared`] and never a source reader: no
 //! page, trail, home, search, agent-file or print module reads the store, its history or its
 //! tensions on its own.
+//! A preparation may hold the store's diagram cache, which gets and puts drawings by key and
+//! reads nothing else.
 use crate::site::Site;
 use crate::{changes, disagree, review, version};
 use rdy_engine::{
-    BlobState, E_REDACTED, Materialized, RdyError, ReadState, Scope, VersionInfo, VersionPosition,
+    BlobState, DiagramCache, E_REDACTED, Materialized, RdyError, ReadState, Scope, VersionInfo,
+    VersionPosition,
 };
 use rdy_graph::Graph;
 use rdy_model::redaction::BlockResidue;
@@ -25,6 +28,8 @@ pub(crate) enum Purpose {
 
 /// What an output reads of one scope, read before it builds anything. It holds no store reader,
 /// no closure that reads the store and no `ReadState`. Never kept across operations.
+/// A preparation may hold the store's diagram cache, which gets and puts drawings by key and
+/// reads nothing else.
 pub(crate) struct Prepared {
     /// The scope's blocks, each figure whose blob lost content read as removed
     /// ([`FigureBlobs::project`]).
@@ -56,6 +61,9 @@ pub(crate) struct Prepared {
     /// Where a live page's pill opens the menu (`SiteTarget::menu_url`); none for the source's
     /// default `/~versions/`. A static page never reads it.
     pub menu_url: Option<String>,
+    /// The store's diagram cache (D-XM8MP): get and put of drawings by key, nothing else; none
+    /// for a build with no store.
+    pub diagram_cache: Option<DiagramCache>,
 }
 
 /// What a named profile's output reads beyond its selected state (RULING F3, D-0VCQ5): whether
@@ -139,24 +147,8 @@ pub(crate) fn source(
     scope: &Scope,
     purpose: Purpose,
 ) -> Result<Prepared, RdyError> {
-    counted();
+    crate::probe::prepared();
     source_reading(rdy, scope, purpose, rdy)
-}
-
-thread_local! {
-    static PREPARATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-/// Counts one preparation of a source or a profile on this thread ([`preparations_for_tests`]).
-pub(crate) fn counted() {
-    PREPARATIONS.set(PREPARATIONS.get().wrapping_add(1));
-}
-
-/// Test hook: this thread's count of source and profile preparations so far. A test reads the
-/// difference over a call that runs on its thread.
-#[doc(hidden)]
-pub fn preparations_for_tests() -> u64 {
-    PREPARATIONS.get()
 }
 
 /// [`source`], reading the figure blobs through `reads`.
@@ -206,6 +198,7 @@ fn source_reading(
         history,
         profile: None,
         menu_url: None,
+        diagram_cache: Some(rdy.reader().diagram_cache()),
     })
 }
 
