@@ -88,7 +88,7 @@ To check the signature of the download first, see "Verify the download" at the b
 
 4. **Ask your agent for something real.** For example:
 
-   > Start an rdy session in your own view, then read its overview. Help me design Tally, a shopping-list app with no accounts. Create Sharing and Onboarding docs and link them to the decision. Propose the first design for my approval.
+   > Start an rdy session in your own view, then read its overview. Help me design retention for an AI support assistant. Our intent is to keep only the customer data we need, for as short a time as we can, and be able to explain the choices. Start with a decision to delete raw conversations after 30 days and keep anonymised metrics for 2 years. Create the storage docs and link them to the decision. Propose the first design for my approval.
 
 5. **Review and approve it yourself.**
 
@@ -104,7 +104,7 @@ To check the signature of the download first, see "Verify the download" at the b
    rdy site
    ```
 
-   Open the link. Now ask your agent: “Add guest mode. Anyone with the link can see the list and tick items, not edit them.” The agent briefs on Sharing, writes in its own view, handles the consequences for Onboarding, and brings you the proposal to approve. This is the same Tally example illustrated at [getrdy.dev](https://getrdy.dev/#demo).
+   Open the link. Now ask your agent: “For EU customers, raw conversations must be deleted after 7 days. Keep the 30-day rule elsewhere and the 2-year metrics window.” The agent briefs on the decision and its connected docs, follows the consequences, and brings you the proposal to approve. The [getrdy.dev illustration](https://getrdy.dev/#demo) shows how that ripple can surface a separate backup-retention decision.
 
 ## Quick start
 
