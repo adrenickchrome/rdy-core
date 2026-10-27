@@ -4,7 +4,6 @@ use crate::review::{Mark, Review};
 use crate::site::Site;
 use rdy_model::{Block, BlockId, tree};
 use serde::Serialize;
-use std::collections::BTreeMap;
 
 /// The most entries a list shows; the rest are one "+N more" entry that leads to the folder page.
 const CAP: usize = 50;
@@ -53,19 +52,10 @@ pub struct NavEntry {
     /// of the page (see [`Ctx::entry`]). Its children are one level down; the folders among them
     /// are ordinary page links. It opens by default when it is on the path to the page.
     pub folder: bool,
-    /// Where an Edited doc's word leads: its group on the change summary.
-    pub change_href: Option<String>,
 }
 
 /// The navigation as page `from` shows it, `current` being the block the page is for.
-/// `review_anchors` holds the change summary's anchor of each doc, by page path.
-pub fn build(
-    site: &Site,
-    current: Option<&BlockId>,
-    from: &str,
-    facts: SiteFacts,
-    review_anchors: &BTreeMap<String, String>,
-) -> Nav {
+pub fn build(site: &Site, current: Option<&BlockId>, from: &str, facts: SiteFacts) -> Nav {
     let review = facts.review;
     let chain = current.map(|c| site.chain(c)).unwrap_or_default();
     let ctx = Ctx {
@@ -74,7 +64,6 @@ pub fn build(
         current,
         chain: &chain,
         review,
-        review_anchors,
     };
     let plain = |label: &str, to: &str| NavEntry {
         label: label.to_string(),
@@ -264,8 +253,6 @@ struct Ctx<'a> {
     chain: &'a [BlockId],
     /// What a draft changes; none for canon and tags.
     review: Option<&'a Review>,
-    /// The change summary's anchor of each doc, by page path; empty without that summary.
-    review_anchors: &'a BTreeMap<String, String>,
 }
 
 impl Ctx<'_> {
@@ -301,19 +288,8 @@ impl Ctx<'_> {
             current,
             on_path,
             change,
-            change_href: self.change_href(b, change),
             ..NavEntry::default()
         }
-    }
-
-    /// Where the Edited word of a doc leads: its group on the change summary, when the build
-    /// writes that summary and the doc has a group.
-    fn change_href(&self, b: &Block, change: Option<Mark>) -> Option<String> {
-        if change != Some(Mark::Edited) || b.block_type == tree::FOLDER {
-            return None;
-        }
-        let anchor = self.review_anchors.get(&self.site.page(&b.id)?)?;
-        Some(format!("{}#{anchor}", relative(self.from, "changes.html")))
     }
 
     /// The first level of a folder off the path, cut to [`CAP`] from its start: page links only.
@@ -567,7 +543,6 @@ mod tests {
     fn rdb5_a_list_past_the_cap_is_a_page_link() {
         let mut marked = closed("Y", 5);
         marked.change = Some(Mark::Edited);
-        marked.change_href = Some("changes.html#y".into());
         let mut g = vec![group(vec![
             closed("X", 3),
             marked.clone(),
@@ -582,13 +557,8 @@ mod tests {
         assert!(!y.folder);
         assert!(y.children.is_empty());
         assert_eq!(
-            (
-                y.label.as_str(),
-                y.href.as_str(),
-                y.change,
-                y.change_href.as_deref()
-            ),
-            ("Y", "Y.html", Some(Mark::Edited), Some("changes.html#y"))
+            (y.label.as_str(), y.href.as_str(), y.change),
+            ("Y", "Y.html", Some(Mark::Edited))
         );
         assert!(!y.current && !y.on_path && y.more.is_none());
         // every later closed folder is cut, an empty one and one that would fit included

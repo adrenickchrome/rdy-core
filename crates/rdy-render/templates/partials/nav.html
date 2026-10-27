@@ -1,12 +1,12 @@
 {%- macro chg(e) -%}
-{%- if e.change -%}{%- if e.change_href -%}<a class="chg chg-label chg-{{ e.change }}" href="{{ e.change_href }}">{{ e.change | capitalize }}</a>{%- else -%}<span class="chg chg-label chg-{{ e.change }}">{{ e.change | capitalize }}</span>{%- endif -%}{%- endif -%}
+{%- if e.change %} <span class="chg chg-mark chg-{{ e.change }}"><span class="chg-dot" aria-hidden="true"></span>{{ e.change }}</span>{%- endif -%}
 {%- endmacro -%}
 {%- macro entries(list) -%}
 {%- for e in list -%}
 {%- if e.more -%}<li class="more"><a href="{{ e.more[1] }}">+{{ e.more[0] }} more</a></li>
 {%- elif e.folder -%}<li class="nav-item nav-folder{% if e.current %} is-active{% endif %}{% if e.on_path %} on-path{% endif %}"><a class="nav-go" href="{{ e.href }}" aria-label="Go to {{ e.label }}"{% if e.current %} aria-current="page"{% endif %}>↗</a><details class="nav-fold"{% if e.current or e.on_path %} open{% endif %}><summary>{{ e.label }}{{ chg(e) }}</summary>{% if e.children %}<ul class="nav-sub">{{ entries(e.children) }}</ul>{% endif %}</details></li>
-{%- else -%}<li class="nav-item{% if e.current %} is-active{% endif %}{% if e.on_path %} on-path{% endif %}"><a href="{{ e.href }}"{% if e.current %} aria-current="page"{% endif %}>{{ e.label }}</a>{{ chg(e) }}</li>
+{%- else -%}<li class="nav-item{% if e.current %} is-active{% endif %}{% if e.on_path %} on-path{% endif %}"><a href="{{ e.href }}"{% if e.current %} aria-current="page"{% endif %}>{{ e.label }}{{ chg(e) }}</a></li>
 {%- endif -%}
 {%- endfor -%}
 {%- endmacro -%}
-<ul class="nav-root">{% for g in nav.groups %}<li class="nav-group">{% if g.label and g.href %}<a class="nav-go" href="{{ g.href }}" aria-label="Go to {{ g.label }}"{% if g.current %} aria-current="page"{% endif %}>↗</a><details class="nav-fold nav-fold-group" open><summary><span class="nav-group-label">{{ g.label }}</span>{{ chg(g) }}</summary><ul>{{ entries(g.entries) }}</ul></details>{% else %}{% if g.label %}<span class="nav-group-label">{{ g.label }}</span>{{ chg(g) }}{% endif %}<ul>{{ entries(g.entries) }}</ul>{% endif %}</li>{% endfor %}{% if nav.removed %}<li class="nav-group chg"><span class="nav-group-label">Removed</span><ul>{% for l in nav.removed %}<li class="nav-item nav-removed">{{ l }}</li>{% endfor %}</ul></li>{% endif %}</ul>
+<ul class="nav-root">{% for g in nav.groups %}<li class="nav-group">{% if g.label and g.href %}<a class="nav-go" href="{{ g.href }}" aria-label="Go to {{ g.label }}"{% if g.current %} aria-current="page"{% endif %}>↗</a><details class="nav-fold nav-fold-group" open><summary><span class="nav-group-label">{{ g.label }}{{ chg(g) }}</span></summary><ul>{{ entries(g.entries) }}</ul></details>{% else %}{% if g.label %}<span class="nav-group-label">{{ g.label }}{{ chg(g) }}</span>{% endif %}<ul>{{ entries(g.entries) }}</ul>{% endif %}</li>{% endfor %}{% if nav.removed %}<li class="nav-group chg"><span class="nav-group-label">Removed</span><ul>{% for l in nav.removed %}<li class="nav-item nav-removed">{{ l }}</li>{% endfor %}</ul></li>{% endif %}</ul>

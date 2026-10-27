@@ -666,20 +666,23 @@ fn reserved(r: &mut Rdy) -> Scope {
 /// Re-taken for the final review's fix round 1 (M2): Cite skips a selection in the eyebrow, so
 /// only `js/copy.js` changed and only `assets/app.js` moved; with the old script the digests
 /// were the ones before.
+/// Re-taken for the review markers plan's Task 1 (D-NYCMF): the sidebar marker rules of
+/// `assets/site.css` moved, so every scope's digest moved; in a view, the sidebar's changed rows
+/// moved too. Canon and tag pages keep their bytes (`rvm1_canon_rows_keep_their_bytes`).
 #[test]
 fn ec3_the_site_build_is_unchanged() {
     const BASE: [(&str, &str); 3] = [
         (
             "canon",
-            "fa77ed9448725329640a60ab642c473720320d790a54ae05f324d15c2c7b95fc",
+            "fcc61e926dee0641dcc1967c7a00b9f0835550145f61310eeaebdf524fd2e9fa",
         ),
         (
             "view:editing",
-            "cb5e57fdca94ae6e9f0773c0049ae5c109796e66b1ff2b673bf3005fea245642",
+            "d542d06253b3d399df2c21b671f837ee17d3ff204d0488167a37be7023e491b3",
         ),
         (
             "view:reserved",
-            "b7b7a2960a1f89eee12842598db77134494199b0e24109c0fa9c549232b6c957",
+            "4ee310e4170a68ad706bccac2c815fc16459c1368cbe71c5a268cd5bcaf8bb5b",
         ),
     ];
     // the ids the corpus's generated pages and the reserved docs draw come from a seeded stream

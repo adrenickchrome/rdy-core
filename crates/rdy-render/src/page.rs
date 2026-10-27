@@ -72,9 +72,6 @@ pub struct Shared<'a> {
     /// The build writes `changes.html` (a review render whose path no doc owns); the review
     /// chip links it only then.
     pub changes_page: bool,
-    /// The anchor of each doc's group on `changes.html`, by the doc's site-relative page path:
-    /// the navigation's Edited word links there. Empty when the build writes no such summary.
-    pub review_anchors: BTreeMap<String, String>,
     /// The build writes `changes-since.html`; the landings chip links it only then.
     pub since_page: bool,
     /// A named profile's presentation (trail, chosen tag); none for a source output.
@@ -1154,7 +1151,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         nav: if redirect {
             nav::Nav::default()
         } else {
-            nav::build(site, current, &page_url, facts, &sh.review_anchors)
+            nav::build(site, current, &page_url, facts)
         },
         // the glossary's "On this page" names its groups, however few; a doc's lists its sections
         toc: match &body.glossary {

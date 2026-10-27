@@ -221,26 +221,29 @@ fn scopes() -> Vec<(&'static str, tempfile::TempDir, Rdy, Scope)> {
 /// Re-taken for the final review's fix round 1 (M2): Cite skips a selection in the eyebrow, so
 /// only `js/copy.js` changed and only `assets/app.js` moved; with the old script the digests
 /// were the ones before.
+/// Re-taken for the review markers plan's Task 1 (D-NYCMF): the sidebar marker rules of
+/// `assets/site.css` moved, so every scope's digest moved; in a view and a proposal, the
+/// sidebar's changed rows moved too. Canon and tag pages keep their bytes.
 const SITE_DIGESTS: [(&str, &str, &str); 4] = [
     (
         "canon",
-        "bbae9ac75832387e158ebad641d73f8f0235e094b8f61a5c10280e259f601ba2",
-        "af6eec76b57da276ccb35911cb74bdde8a082397d5aebbc8a3a7583573c7c491",
+        "0f44c997c43e1607457d62bc7f00b363c13b4d3366502071e2b657d6c515c2d6",
+        "bef43fb8129b88f45cc842fb40c3460b15a48b76f42716f0c8aa2183dd0b45e3",
     ),
     (
         "tag",
-        "39c97cbf37557dc08e114fc95183a1da703ebd1c556cc0337628fa04ea7d82ab",
-        "52ab5387f388940c542e2d38b963344d0a23dcfd14cc3300eec72d5c86900dcc",
+        "ff2d19fde29bc54b4234c17e47c941fb6ca5a640b73076d2179f2d032b252c52",
+        "3ce235f3048878c8b06d03e56f87d2ee230d33e59b480dbcaa5078254c99ca16",
     ),
     (
         "view",
-        "312ecd22e4500fd16a3fff0b283193ee5b7b94fcf39c3e50c9c5157966a952b4",
-        "bdd405ceb8474edaf151d925a37a11621a31ff98fd574cdad863d3e893ae03fe",
+        "7e53682d9086b023794ad02b1882868e018b126e767cabfd093087a6b768cda5",
+        "4133f80238c0a5a70affd620c9641ca0a3ecc34b1bf8c9ca041d5e2da2b2f66b",
     ),
     (
         "proposal",
-        "cee9fd5fe1b9808e0b4b17e142eefac9538eabf8039f7313a926c62e6d54a834",
-        "e09fcf47d99ba0d3a7d4caeb9f2f2cb9cf66a6fef01cd99c7dff96142dae84cb",
+        "54805ee2da10c8d54c1b5bcd3911003710efec90f79db5301b77a3e6fef5cef7",
+        "5e5eef28291db4e69e56a924b637396f52737d9d0f2fe0d7260721be80034409",
     ),
 ];
 

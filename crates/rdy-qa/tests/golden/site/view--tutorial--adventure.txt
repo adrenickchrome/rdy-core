@@ -12,13 +12,13 @@ chrome	-	Reviewing view · editing · by qa
 chrome	L	Pages
 chrome	L	Home
 chrome	L	Overview
-chrome	L	Edited
+chrome	L	edited
 chrome	-	↗
 chrome	L	Specification
 chrome	L	The match statement and its patterns
-chrome	L	Edited
+chrome	L	edited
 chrome	L	How a match runs
-chrome	L	Edited
+chrome	L	edited
 chrome	L	↗
 chrome	L	Depth 0
 chrome	L	Depth 1
@@ -29,7 +29,7 @@ chrome	L	Σημασιολογία
 chrome	-	↗
 chrome	L	Tutorial
 chrome	L	Pattern matching by example
-chrome	L	Edited
+chrome	L	edited
 chrome	-	↗
 chrome	L	Proposals
 chrome	L	Unused variable syntax

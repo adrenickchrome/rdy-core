@@ -714,6 +714,7 @@ fn sr5_a_pre_landing_proposal_keeps_its_name_and_count_after_a_first_landing() {
         header_of(&page)
     );
     assert!(!page.contains("chg-label"), "no review marks: {page}");
+    assert!(!page.contains("chg-mark"), "no review marks: {page}");
 }
 
 /// A tag name can be long (sr2 bounds it, not the header). Its pill shrinks and cuts its text

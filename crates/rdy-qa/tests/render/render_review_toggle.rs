@@ -53,6 +53,7 @@ fn rv1_a_draft_page_offers_show_changes_hidden_until_script_and_canon_and_tags_d
                 "show-changes",
                 "has-chg",
                 "chg-label",
+                "chg-mark",
                 "chg-removed",
                 "nav-removed",
                 "Changes in this view",

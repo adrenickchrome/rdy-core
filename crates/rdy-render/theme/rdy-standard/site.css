@@ -414,10 +414,9 @@ details.chg-removed { margin: 0.6rem 0; padding-inline-start: 0.75rem; border-in
 details.chg-removed > summary { cursor: pointer; color: var(--ink-soft); font-weight: 500; }
 .chg-old { margin-top: 0.4rem; color: var(--ink-soft); text-decoration: none; overflow-wrap: anywhere; }
 .nav-removed { padding: 0.3rem 0.6rem; color: var(--ink-soft); line-height: 1.4; overflow-wrap: anywhere; }
-.nav-group .chg-label, .nav-item .chg-label { margin-inline-start: 0.4rem; }
-/* the Edited word of the navigation leads to the doc's group on the change summary */
-a.chg-label { text-decoration: none; user-select: auto; -webkit-user-select: auto; }
-a.chg-label:hover { color: var(--accent-ink); text-decoration: underline; }
+/* a changed row's marker (D-NYCMF): a dot and a lowercase word inside the row; never a link of its own */
+.chg-mark { display: inline; margin-inline-start: 0.15rem; font-size: 0.75rem; font-weight: 400; letter-spacing: normal; text-transform: none; color: var(--ink-soft); white-space: nowrap; }
+.chg-dot { display: inline-block; width: 0.4rem; height: 0.4rem; margin-inline-end: 0.25rem; border-radius: 50%; background: var(--accent); vertical-align: 0.1em; }
 .changes { list-style: none; margin: 0 0 1rem; padding: 0; }
 .changes li { margin: 0 0 0.35rem; overflow-wrap: anywhere; }
 .changes .chg-label { margin-inline: 0.4rem; }

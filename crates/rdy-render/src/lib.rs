@@ -1521,12 +1521,6 @@ fn with_shared<R>(
     let local = profile
         .as_ref()
         .map(|_| publication::LocalTargets::of(&site));
-    // each doc's group on the finished change summary, for the navigation's Edited links
-    let review_anchors: BTreeMap<String, String> = changes_summary
-        .iter()
-        .flat_map(|c| &c.groups)
-        .filter_map(|g| Some((g.href.clone()?, g.anchor.clone())))
-        .collect();
     let sh = page::Shared {
         site: &site,
         m,
@@ -1551,7 +1545,6 @@ fn with_shared<R>(
         mode,
         inline_diffs,
         changes_page: changes_summary.is_some(),
-        review_anchors,
         since_page: since_summary.is_some(),
         profile: profile.as_ref(),
         local: local.as_ref(),

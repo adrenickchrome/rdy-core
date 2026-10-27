@@ -214,6 +214,7 @@ fn ls8_a_pre_landing_version_after_a_landing_renders_without_review() {
     let doc = rdy_qa::golden::html(out.path(), "proposed.html");
     assert!(!doc.contains("show-changes"), "{doc}");
     assert!(!doc.contains("chg-label"), "{doc}");
+    assert!(!doc.contains("chg-mark"), "{doc}");
     assert!(
         !out.path().join("landed.html").exists(),
         "the version still reads its own base"
