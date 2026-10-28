@@ -245,9 +245,9 @@ fn rvm1_only_the_current_row_is_highlighted() {
     let nav = pages_nav(&h);
     assert_eq!(nav.matches("is-active").count(), 1, "{nav}");
     assert!(
-        nav.contains(&format!(
+        nav.contains(
             "<li class=\"nav-item is-active\"><a href=\"intro.html\" aria-current=\"page\">Intro <span class=\"chg chg-mark chg-edited\">"
-        )),
+        ),
         "{nav}"
     );
     let text = std::fs::read_to_string(out.path().join("assets/site.css")).unwrap();
