@@ -1712,12 +1712,25 @@ fn last_batch_refs(s: &Store) -> Vec<String> {
         .collect()
 }
 
-/// The release that carries the registered features is the one whose rdy first reads them: the
-/// workspace version equals the version every registered feature requires. It fails until the
-/// release's version commit sets the workspace to that version.
+/// The release that carries the registered features is the one whose rdy first reads them, and
+/// every later release reads them too: the workspace version is at least the version every
+/// registered feature requires. It fails until the carrying release's version commit sets the
+/// workspace to that version. (Equality held only for 0.26.0; RVM's 0.27.0 found it.)
 #[test]
 fn ok4_merge_version_equals_feature_required_rdy() {
-    assert_eq!(env!("CARGO_PKG_VERSION"), FEATURE_REQUIRED_RDY);
+    let parse = |v: &str| -> (u64, u64, u64) {
+        let mut parts = v
+            .split('.')
+            .map(|p| p.parse::<u64>().expect("a numeric version part"));
+        let mut next = || parts.next().expect("three version parts");
+        (next(), next(), next())
+    };
+    assert!(
+        parse(env!("CARGO_PKG_VERSION")) >= parse(FEATURE_REQUIRED_RDY),
+        "workspace {} is older than the features' required rdy {}",
+        env!("CARGO_PKG_VERSION"),
+        FEATURE_REQUIRED_RDY
+    );
 }
 
 #[test]
