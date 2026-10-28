@@ -271,6 +271,12 @@ fn rvm1_only_the_current_row_is_highlighted() {
             Some("50%"),
             "{w}"
         );
+        // founder, 2026-10-28: a new marker's dot is green, as the New bar is
+        assert_eq!(
+            at(".chg-new .chg-dot", "background", w).as_deref(),
+            Some("var(--success)"),
+            "{w}"
+        );
         for p in ["text-decoration", "color", "display", "user-select"] {
             assert_eq!(at("a.chg-label", p, w), None, "{w} {p}");
         }
