@@ -139,6 +139,9 @@ pub struct Item {
     /// The heading text of a section, the name of what a definition defines.
     pub title: Option<String>,
     pub html: String,
+    /// The block shows as removed content (the notice). A removed term has no `<dt>`, so its
+    /// block holds its anchor.
+    pub removed: bool,
     /// The block's type is presentational: no marker, no "Why ?" trail.
     pub presentational: bool,
     pub trail: Trail,
@@ -1418,6 +1421,7 @@ fn doc_parts(
             } else {
                 html::block_html(b, &ctx)
             },
+            removed,
             presentational,
             // a named profile that does not permit the trail shows none: no markup, no data
             trail: if presentational || !sh.trail_on() {

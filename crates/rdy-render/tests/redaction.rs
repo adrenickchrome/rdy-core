@@ -1190,10 +1190,11 @@ fn rdx11_a_neutral_path_that_matches_a_sibling_refuses_and_keeps_the_last_site()
 }
 
 /// Ruling task-2: a draft replaces a figure's file and its alt text with a file that shares a
-/// chunk with another file; then a redaction removes that other file. The figure is not itself
-/// removed, but its file is (as `$fh` of the world), so it reads the notice. It is an Edited item
-/// of the draft's page, and its label in "Changes on this page" reads the notice too, never its
-/// alt text.
+/// chunk with another file; then a redaction removes that other file. The projection then marks
+/// the figure itself removed (its anchor is `content-removed`), so it reads the notice. It is an
+/// Edited item of the draft's page, and its label in "Changes on this page" reads the notice too,
+/// never its alt text. The pin guards the whole pipeline, from the projection to the group, not
+/// only the `shows_removed` branch of the group's label.
 #[test]
 fn rvm2_a_removed_items_label_in_the_changes_group_reads_the_notice() {
     let dir = tempfile::tempdir().unwrap();
@@ -1262,6 +1263,86 @@ fn rvm2_a_removed_items_label_in_the_changes_group_reads_the_notice() {
         "{g}"
     );
     assert!(!plan.contains(CANARY), "{plan}");
+}
+
+/// RVM final review M2: a term edited in a view, then that version removed. A term's anchor is on
+/// its `<dt>`, which the notice replaces, so a removed term's block holds its anchor: its entry
+/// in "Changes on this page" and its Copy link jump to an element that exists, and only one
+/// element holds that id.
+#[test]
+fn rvm2_a_removed_terms_entry_jumps_to_its_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let w = write(
+        &mut r,
+        "w1",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "plan", "title": "Plan", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "parent": "$d", "body": "Kept text."},
+            {"op": "create", "type": "term", "id": "$t", "parent": "$d", "fields": {"name": "Widget"}, "body": "A widget."}
+        ]),
+    );
+    let term = bid(&w.created["$t"]);
+    land(&mut r, "w1");
+    write(
+        &mut r,
+        "edit",
+        json!([{"op": "update", "id": term.to_string(), "body": "A widget, CANARY edited."}]),
+    );
+    let st = r.read();
+    let m = st
+        .materialized(&st.resolve_scope("view:edit").unwrap())
+        .unwrap();
+    let version = m.get(&term).unwrap().version_hash();
+    drop(st);
+    r.close().unwrap();
+    authorized_batch_fixture(
+        &dir.path().join(".rdy/store"),
+        &[RequestSpec::new(
+            "redact",
+            vec![RedactTarget::Version {
+                id: term.clone(),
+                version,
+            }],
+        )],
+        &FixtureOptions::approved(Proof::relayed_human()),
+    );
+
+    let r = Rdy::open(dir.path()).unwrap();
+    let plan = text(&site(&r.read(), "view:edit")["plan.html"]);
+    assert!(!plan.contains(CANARY), "{plan}");
+    let at = plan
+        .find("aria-label=\"Changes on this page\"")
+        .unwrap_or_else(|| panic!("the changes group: {plan}"));
+    let g = &plan[at..at + plan[at..].find("</nav>").unwrap()];
+    let entry = g
+        .split("<li><a class=\"toc-link toc-chg\" href=\"#")
+        .nth(1)
+        .unwrap_or_else(|| panic!("the term's entry: {g}"));
+    assert!(
+        entry.contains(&format!("edited</span> {CONTENT_REMOVED}</a>")),
+        "{entry}"
+    );
+    let href = &entry[..entry.find('"').unwrap()];
+    // the elements that hold the id, leaving out the id-anchor spans
+    let holders: Vec<&str> = plan
+        .match_indices(&format!(" id=\"{href}\""))
+        .map(|(i, _)| {
+            let s = plan[..i].rfind('<').unwrap();
+            &plan[s..s + plan[s..].find('>').unwrap()]
+        })
+        .filter(|tag| !tag.contains("id-anchor"))
+        .collect();
+    assert_eq!(holders.len(), 1, "#{href}: {holders:?}\n{plan}");
+    assert!(
+        holders[0].contains(&format!("data-rdy-block=\"{term}\"")),
+        "#{href} is the term's block: {}",
+        holders[0]
+    );
+    assert!(
+        plan.contains(&format!("data-href=\"#{href}\"")),
+        "the term's Copy link names its anchor: {plan}"
+    );
 }
 
 /// A draft replaces a figure's file and its alt text; then a redaction removes the old file. The
