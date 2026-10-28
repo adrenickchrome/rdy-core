@@ -197,6 +197,44 @@ fn ndh2_a_blank_parent_counts_as_none() {
     assert_eq!(r.decision_parent("work", Some("  ")).unwrap(), Some(reg));
 }
 
+/// `op` with `"parent": parent`.
+fn with_parent(mut op: serde_json::Value, parent: &str) -> serde_json::Value {
+    op["parent"] = json!(parent);
+    op
+}
+
+fn decision_op() -> serde_json::Value {
+    json!({"op": "create", "type": "decision", "id": "$d",
+        "fields": {"statement": "Retention follows the release.", "status": "proposed"}})
+}
+
+#[test]
+fn ndh2_rdy_write_a_blank_parent_counts_as_none() {
+    // the write path takes a blank parent as the CLI and rdy_decide do (D-X3136, FW-UX1)
+    let (_d, mut r) = project();
+    let (_e, mut h) = project();
+    let (_f, reg) = home(&mut h);
+    configure(&mut h, "decisions/register");
+    for blank in ["", "  "] {
+        for (op, ty) in [
+            (finding_op(), "finding"),
+            (source_op(), "source"),
+            (decision_op(), "decision"),
+        ] {
+            // no home: the project root
+            let w = write(&mut r, "work", json!([with_parent(op.clone(), blank)]))
+                .unwrap_or_else(|e| panic!("{ty} {blank:?}: {e}"));
+            let id = w.created.values().next().unwrap().clone();
+            assert_eq!(parent_of(&r, &id), None, "{ty} {blank:?}");
+            // a home: the home
+            let w = write(&mut h, "work", json!([with_parent(op, blank)]))
+                .unwrap_or_else(|e| panic!("{ty} {blank:?}: {e}"));
+            let id = w.created.values().next().unwrap().clone();
+            assert_eq!(parent_of(&h, &id), Some(reg.clone()), "{ty} {blank:?}");
+        }
+    }
+}
+
 /// A landed open question at the project root; returns its card ref (`<id>@<version>`).
 fn root_question(r: &mut Rdy) -> (String, String) {
     let w = write(

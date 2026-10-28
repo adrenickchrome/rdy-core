@@ -2795,13 +2795,14 @@ fn build_ops(
 }
 
 /// A create of a decision, a finding or a source with no parent goes to the decision home, or to the project root when the project names none (D-X3136).
+/// A parent that is empty or only spaces counts as none, as in `decision_parent`.
 fn home_supporting_parents(r: &Rdy, view: &str, ops: &mut [OpInput]) -> Result<(), RdyError> {
     let mut home: Option<Option<String>> = None;
     for op in ops {
         if let OpInput::Create {
             block_type, parent, ..
         } = op
-            && parent.is_none()
+            && parent.as_deref().is_none_or(|p| p.trim().is_empty())
             && (block_type == decision::DECISION
                 || block_type == supporting::FINDING
                 || block_type == supporting::SOURCE)
