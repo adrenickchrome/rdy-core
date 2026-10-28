@@ -672,8 +672,8 @@ fn cp10_open_noncode_items_warn_and_code_items_never_block() {
 
 /// The carried records no product path writes yet, in the log of `r`: kinds 25 to 28, Check
 /// subjects and the Pass, Concern and Fail verdicts, the Dispute, ResolveDispute and
-/// AcceptVerdict acts, and the new Change and LandingRecord fields. Returns how many frames of
-/// the guarded kinds it read.
+/// AcceptVerdict acts, and the new Change and LandingRecord fields (a change's `briefing` is
+/// written since rg1, D-ME2HD). Returns how many frames of the guarded kinds it read.
 fn future_records(r: &Rdy) -> (Vec<String>, usize) {
     use rdy_model::{Answer, AnswerAct, Change, LandingRecord, Review, ReviewSubject, Verdict};
     use rdy_store::codec::{decode_record, logical_kind};
@@ -718,7 +718,7 @@ fn future_records(r: &Rdy) -> (Vec<String>, usize) {
                     kinds::CHANGE => {
                         read += 1;
                         let c: Change = decode_record(raw, payload)?;
-                        if c.links.replayed_from.is_some() || c.links.briefing.is_some() {
+                        if c.links.replayed_from.is_some() {
                             found.push(what);
                         }
                     }
@@ -741,7 +741,7 @@ fn future_records(r: &Rdy) -> (Vec<String>, usize) {
 /// ok4: the product paths keep producing their existing acts. A propose with its bound plan, a
 /// plan answer, a person's approval, an ordinary write and an import write no record of kinds
 /// 25 to 28, no Check subject or new verdict, no Dispute, ResolveDispute or AcceptVerdict act,
-/// and leave every new carrier field None.
+/// and leave every new carrier field None but a change's `briefing`.
 #[test]
 fn ok4_product_paths_do_not_write_future_records() {
     let (d, mut r) = project();
