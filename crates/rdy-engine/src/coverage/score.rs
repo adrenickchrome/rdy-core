@@ -303,10 +303,10 @@ impl ReadState {
             if let Some(d) = &e.doc {
                 by_doc.entry(d).or_default().push(e);
             }
-            if !e.issues.is_empty() {
-                if let Some(p) = m.path_of(id) {
-                    paths.insert(id.to_string(), p);
-                }
+            if !e.issues.is_empty()
+                && let Some(p) = m.path_of(id)
+            {
+                paths.insert(id.to_string(), p);
             }
             if let Some(b) = m.get(id) {
                 for a in self.areas_in(&m, b) {
