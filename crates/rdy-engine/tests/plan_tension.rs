@@ -2,8 +2,11 @@
 //! a version is a change-plan item of kind `tension`, shown by the tension's own `tn-` id. The
 //! author answers it `confirm` or `dismiss` with a reason; `defer` does not answer it, and
 //! `dismiss` answers a tension item only. An answer keeps the tension's vkey as its cause, so it
-//! lapses when the tension changes. A tension open in flight but not in the version's landing
-//! form closes as `updated`; a reviewer's dismissal leaves no item.
+//! lapses when the tension changes. Every open advisory tension that involves the version needs
+//! that answer, an in-flight form too; a canon tension that the version's change resolves closes
+//! as `updated`; a reviewer's dismissal leaves no item. A landing computes the tension items on
+//! the version's recorded canon, so its seal holds what the propose showed, and a landing whose
+//! seal would hold an open tension item is not ready.
 //!
 //! The gate (`plan_issues`): open non-code items on stable content and open tension items are
 //! one `E_PLAN_OPEN`, counted over every item, past the summary cut; open non-code items on
@@ -17,8 +20,8 @@ use rdy_engine::plan::{
 };
 use rdy_engine::tensions::{Tension, TensionKind, tension_label};
 use rdy_engine::{
-    Coverage, E_BAD_INPUT, E_PLAN_ITEM, E_PLAN_OPEN, ProposalInfo, Rdy, RdyError, Scope, Session,
-    WriteRequest, WriteResult, parse_ops,
+    Coverage, E_BAD_INPUT, E_PLAN_ITEM, E_PLAN_OPEN, E_PROPOSAL_NOT_READY, ProposalInfo, Rdy,
+    RdyError, Scope, Session, WriteRequest, WriteResult, parse_ops,
 };
 use rdy_model::plan::{PlanAct, PlanKind, PlanOutcome};
 use rdy_model::{EditorialClass, Justification, Role};
@@ -613,64 +616,252 @@ fn plan_answers_head(r: &Rdy, view: &str) -> rdy_model::Hash {
     rdy_model::Hash(b.as_slice().try_into().expect("a 32-byte ref"))
 }
 
-#[test]
-fn rg5_a_tension_the_version_resolves_seals_as_updated() {
-    let mut fx = project();
-    // view b deprecates the legacy doc in flight; view a cites its claim
-    let legacy = fx.legacy.clone();
-    put(
-        &mut fx.r,
-        "b",
-        json!([{"op": "update", "id": legacy, "fields": {"lifecycle": "deprecated"}}]),
-    );
-    let lx = fx.lx.clone();
-    let n = fx.n.clone();
-    put(
-        &mut fx.r,
-        "a",
-        json!([{"op": "create", "type": "claim", "id": "$y", "parent": n, "body": format!("Y follows {{{{{lx}}}}}.")}]),
-    );
-    // the tension is open in flight (b's deprecation), and the version's landing form has none
-    assert!(deprecated_refs(&fx.r, "a").is_empty());
-    let st = fx.r.read();
-    let inflight: Vec<Arc<Tension>> = st
-        .tensions_of_changes(&st.included("a"))
+/// The change plan of a landing (its seal) or of a proposal version, as `change_plan` shows it.
+fn plan_of(r: &Rdy, query: PlanQuery) -> Value {
+    let p = r
+        .read()
+        .change_plan(
+            &PlanQuery {
+                max_tokens: Some(100_000),
+                ..query
+            },
+            "work",
+        )
+        .unwrap();
+    serde_json::to_value(p).unwrap()
+}
+
+fn sealed(r: &Rdy, landing: &str) -> Value {
+    plan_of(
+        r,
+        PlanQuery {
+            landing: Some(landing.to_string()),
+            ..Default::default()
+        },
+    )
+}
+
+fn version_plan(r: &Rdy, version: &str) -> Value {
+    plan_of(
+        r,
+        PlanQuery {
+            proposal: Some(version.to_string()),
+            ..Default::default()
+        },
+    )
+}
+
+/// The deprecated-reference tensions of `view`'s in-flight forms.
+fn inflight_refs(r: &Rdy, view: &str) -> Vec<Arc<Tension>> {
+    let st = r.read();
+    st.tensions_of_changes(&st.included(view))
         .unwrap()
         .into_iter()
         .filter(|t| t.kind == TensionKind::DeprecatedReference)
-        .collect();
-    drop(st);
-    assert_eq!(inflight.len(), 1, "{inflight:#?}");
-    let tn = tension_label(&inflight[0].id);
+        .collect()
+}
 
-    // the version's own plan closes it as updated
+/// View `b` deprecates the legacy doc; view `a` writes draft claim `$y` citing its claim `lx`.
+fn cite_legacy(fx: &mut Fx, view: &str) -> String {
+    let (lx, n) = (fx.lx.clone(), fx.n.clone());
+    let w = put(
+        &mut fx.r,
+        view,
+        json!([{"op": "create", "type": "claim", "id": "$y", "parent": n, "body": format!("Y follows {{{{{lx}}}}}.")}]),
+    );
+    w.created["$y"].clone()
+}
+
+fn deprecate_legacy(fx: &mut Fx, view: &str) {
+    let legacy = fx.legacy.clone();
+    put(
+        &mut fx.r,
+        view,
+        json!([{"op": "update", "id": legacy, "fields": {"lifecycle": "deprecated"}}]),
+    );
+}
+
+#[test]
+fn rg5_a_tension_the_version_resolves_seals_as_updated() {
+    let mut fx = project();
+    // canon holds a draft claim z that cites the deprecated claim x: a canon tension
+    let z = cite_deprecated(&mut fx, "c", "Z follows");
+    let tn_c = tension_label(&one_tension(&fx.r, "c").id);
+    answer(
+        &mut fx.r,
+        "c",
+        &tn_c,
+        PlanAct::Confirm,
+        Some("x still guides z for now"),
+    )
+    .unwrap();
+    land(&mut fx.r, "c");
+    let canon: Vec<Arc<Tension>> =
+        fx.r.read()
+            .canon_tensions()
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.kind == TensionKind::DeprecatedReference)
+            .collect();
+    assert_eq!(canon.len(), 1, "{canon:#?}");
+    let tn = tension_label(&canon[0].id);
+
+    // view a rewrites z so it no longer cites x: its landing form has no such tension
+    put(
+        &mut fx.r,
+        "a",
+        json!([{"op": "update", "id": z, "body": "Z follows the new rule."}]),
+    );
+    assert!(deprecated_refs(&fx.r, "a").is_empty());
+    assert!(inflight_refs(&fx.r, "a").is_empty());
+
+    // the version's plan closes the canon tension as updated: the author owes no answer
     let plan = whole(&fx.r, "a");
     let rows = rows_of_kind(&plan, "tension");
     assert_eq!(rows.len(), 1, "{plan:#}");
     assert_eq!(rows[0]["id"], tn);
+    assert_eq!(rows[0]["subject"], canon[0].id.to_string());
     assert_eq!(rows[0]["state"], "closed");
     assert_eq!(rows[0]["how"], "updated");
+    let info = propose(&mut fx.r, "a");
+    assert!(tension_items(&info.plan).is_empty(), "{:#?}", info.plan);
 
-    // the landing seals it as updated, and the manifest names plan_tension
-    assert!(!fx.r.store().features().has("plan_tension"));
-    let landing = land(&mut fx.r, "a");
-    let sealed =
-        fx.r.read()
-            .change_plan(
-                &PlanQuery {
-                    landing: Some(landing),
-                    max_tokens: Some(100_000),
-                    ..Default::default()
-                },
-                "work",
-            )
-            .unwrap();
-    let sealed = serde_json::to_value(sealed).unwrap();
-    let rows = rows_of_kind(&sealed, "tension");
-    assert_eq!(rows.len(), 1, "{sealed:#}");
+    // the landing seals it as updated
+    common::confirm_exceptions(&mut fx.r, &approver(), &info);
+    let landing = fx.r.land(&approver(), &info.id).unwrap();
+    let seal = sealed(&fx.r, &landing);
+    let rows = rows_of_kind(&seal, "tension");
+    assert_eq!(rows.len(), 1, "{seal:#}");
     assert_eq!(rows[0]["id"], tn);
     assert_eq!(rows[0]["outcome"], PlanOutcome::Updated.as_str());
     assert!(fx.r.store().features().has("plan_tension"));
+}
+
+#[test]
+fn rg5_an_in_flight_tension_needs_the_authors_answer() {
+    let mut fx = project();
+    // view b deprecates the legacy doc in flight; view a cites its claim
+    deprecate_legacy(&mut fx, "b");
+    cite_legacy(&mut fx, "a");
+    // the tension is open in flight (b's deprecation); the version's landing form has none
+    assert!(deprecated_refs(&fx.r, "a").is_empty());
+    let inflight = inflight_refs(&fx.r, "a");
+    assert_eq!(inflight.len(), 1, "{inflight:#?}");
+    let tn = tension_label(&inflight[0].id);
+
+    // it involves the version, so it is an item that waits for the author's answer
+    let plan = whole(&fx.r, "a");
+    let rows = rows_of_kind(&plan, "tension");
+    assert_eq!(rows.len(), 1, "{plan:#}");
+    assert_eq!(rows[0]["id"], tn);
+    assert_eq!(rows[0]["state"], "open");
+    assert!(rows[0].get("how").is_none(), "{plan:#}");
+    let info = propose(&mut fx.r, "a");
+    assert_eq!(tension_items(&info.plan).len(), 1, "{:#?}", info.plan);
+    let issues = plan_issues(&info.plan);
+    assert_eq!(codes(&issues), [E_PLAN_OPEN], "{issues:?}");
+    assert_eq!(issues[0].message, "1 change-plan items are open");
+
+    // after the author's confirm the version is ready, and the seal holds the confirm
+    answer(
+        &mut fx.r,
+        "a",
+        &tn,
+        PlanAct::Confirm,
+        Some("y keeps the legacy rule until b lands"),
+    )
+    .unwrap();
+    let info = propose(&mut fx.r, "a");
+    assert!(tension_items(&info.plan).is_empty(), "{:#?}", info.plan);
+    assert_eq!(plan_issues(&info.plan), vec![]);
+    common::confirm_exceptions(&mut fx.r, &approver(), &info);
+    let landing = fx.r.land(&approver(), &info.id).unwrap();
+    let seal = sealed(&fx.r, &landing);
+    let rows = rows_of_kind(&seal, "tension");
+    assert_eq!(rows.len(), 1, "{seal:#}");
+    assert_eq!(rows[0]["id"], tn);
+    assert_eq!(rows[0]["outcome"], PlanOutcome::Confirmed.as_str());
+}
+
+#[test]
+fn rg5_a_landing_seals_the_tension_set_the_propose_showed() {
+    let mut fx = project();
+    // view a writes a draft claim citing lx (not deprecated yet) and a draft edit, and proposes:
+    // no tension item
+    let da = fx.da.clone();
+    put(
+        &mut fx.r,
+        "a",
+        json!([{"op": "update", "id": da, "body": "Drafts stay open for 90 hours."}]),
+    );
+    let y = cite_legacy(&mut fx, "a");
+    let info = propose(&mut fx.r, "a");
+    assert!(tension_items(&info.plan).is_empty(), "{:#?}", info.plan);
+
+    // view b then deprecates the legacy doc and lands: it touches neither y nor lx
+    deprecate_legacy(&mut fx, "b");
+    land(&mut fx.r, "b");
+
+    // a's version keeps the tension items of its recorded canon: none
+    let plan = version_plan(&fx.r, &info.r#ref);
+    assert!(rows_of_kind(&plan, "tension").is_empty(), "{plan:#}");
+
+    // a lands, and its seal has no tension item
+    common::confirm_exceptions(&mut fx.r, &approver(), &info);
+    let landing =
+        fx.r.land(&approver(), &info.id)
+            .unwrap_or_else(|e| panic!("land a: {e} {:?}", e.issues));
+    let seal = sealed(&fx.r, &landing);
+    assert!(rows_of_kind(&seal, "tension").is_empty(), "{seal:#}");
+    assert_eq!(rows_of_kind(&seal, "update").len(), 1, "{seal:#}");
+
+    // the tension the later landing made is canon's now
+    let canon: Vec<Arc<Tension>> =
+        fx.r.read()
+            .canon_tensions()
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.kind == TensionKind::DeprecatedReference)
+            .collect();
+    assert_eq!(canon.len(), 1, "{canon:#?}");
+    assert!(
+        canon[0].blocks().iter().any(|b| b.to_string() == y),
+        "{canon:#?}"
+    );
+}
+
+/// A version whose seal would hold an unanswered tension item does not land (D-45RG6): the
+/// store has no open seal form for it, and the landing writes nothing.
+#[test]
+fn rg5_an_unanswered_tension_item_refuses_the_landing() {
+    let mut fx = project();
+    let da = fx.da.clone();
+    put(
+        &mut fx.r,
+        "a",
+        json!([{"op": "update", "id": da, "body": "Drafts stay open for 90 hours."}]),
+    );
+    cite_deprecated(&mut fx, "a", "Y follows");
+    let tn = tension_label(&one_tension(&fx.r, "a").id);
+    assert_eq!(rows_of_kind(&whole(&fx.r, "a"), "tension")[0]["id"], tn);
+    let info = propose(&mut fx.r, "a");
+    common::confirm_exceptions(&mut fx.r, &approver(), &info);
+    let seq = fx.r.read().seq();
+    let e = fx.r.land(&approver(), &info.id).unwrap_err();
+    assert_eq!(e.code, E_PROPOSAL_NOT_READY, "{e}");
+    assert_eq!(e.message, format!("{} is not ready: 1 issue", info.r#ref));
+    assert_eq!(
+        e.issues,
+        vec![Issue {
+            severity: Severity::Error,
+            code: E_PLAN_OPEN,
+            block: None,
+            message: "1 change-plan items are open".into(),
+            fix: E_PLAN_OPEN_FIX.into(),
+        }]
+    );
+    assert_eq!(fx.r.read().seq(), seq, "the refused landing wrote nothing");
+    assert!(!fx.r.store().features().has("plan_tension"));
 }
 
 #[test]
@@ -686,40 +877,4 @@ fn rg5_a_reviewer_dismissal_removes_the_item() {
     let info = propose(&mut fx.r, "a");
     assert!(tension_items(&info.plan).is_empty(), "{:#?}", info.plan);
     assert_eq!(plan_issues(&info.plan), vec![]);
-}
-
-/// New defect (found by the full run, `rdx10_redaction_moves_are_logged_in_the_authorizing_batch`):
-/// the store seals a tension item only as updated, confirmed or dismissed
-/// (`allowed_outcomes(Tension)`), so a landing that sealed an unanswered one as open wrote an
-/// invalid seal and failed. Until the readiness gate refuses such a version (E_PLAN_OPEN), its
-/// landing leaves the open tension item out of the seal.
-#[test]
-fn rg5_an_unanswered_tension_item_lands_out_of_the_seal() {
-    let mut fx = project();
-    let da = fx.da.clone();
-    put(
-        &mut fx.r,
-        "a",
-        json!([{"op": "update", "id": da, "body": "Drafts stay open for 90 hours."}]),
-    );
-    cite_deprecated(&mut fx, "a", "Y follows");
-    let tn = tension_label(&one_tension(&fx.r, "a").id);
-    assert_eq!(rows_of_kind(&whole(&fx.r, "a"), "tension")[0]["id"], tn);
-    let landing = land(&mut fx.r, "a");
-    let sealed =
-        fx.r.read()
-            .change_plan(
-                &PlanQuery {
-                    landing: Some(landing),
-                    max_tokens: Some(100_000),
-                    ..Default::default()
-                },
-                "work",
-            )
-            .unwrap();
-    let sealed = serde_json::to_value(sealed).unwrap();
-    assert!(rows_of_kind(&sealed, "tension").is_empty(), "{sealed:#}");
-    // the other items keep their seal
-    assert_eq!(rows_of_kind(&sealed, "update").len(), 1, "{sealed:#}");
-    assert!(!fx.r.store().features().has("plan_tension"));
 }

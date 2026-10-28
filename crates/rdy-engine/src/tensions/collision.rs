@@ -81,7 +81,7 @@ impl Detector for EditCollision {
                 let reader = cx.st.reader();
                 let owner = match cv {
                     Some(v) => Owner::Producer(reader.producer(&v)?),
-                    None => Owner::Deleter(reader.deleter_at(&b, cx.st.canon_head().as_ref())?),
+                    None => Owner::Deleter(reader.deleter_at(&b, cx.canon_head().as_ref())?),
                 };
                 for ch in &mut chains {
                     judge(cx, ch, &all, cv, &owner);

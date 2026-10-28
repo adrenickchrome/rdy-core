@@ -1,6 +1,6 @@
 //! The tension set of a published state: the canon part (memoised per canon build for the
 //! state's own detectors) and the in-flight part, built on first read.
-use super::index::{DetectCx, Write, Writes, canon_index_of};
+use super::index::{DetectCx, Write, Writes, canon_index_in, canon_index_of};
 use super::{DetectScope, Detector, SideRef, Tension, TensionStatus, tension_from, tension_label};
 use crate::error::*;
 use crate::gate::applied_ops;
@@ -1169,6 +1169,54 @@ impl ReadState {
         self.landing_tensions_applied(view, changes, &read, &applied)
     }
 
+    /// [`ReadState::landing_tensions`] of `changes` on the canon `canon_at` (a version's
+    /// recorded canon, D-ME2HD): the ops in the order their merge onto that canon applies them,
+    /// over canon as of it, so a landing since does not change them. On canon's head, the same
+    /// as `landing_tensions`; with no recorded canon (`None`) on a canon that has moved since,
+    /// canon as it is.
+    pub(crate) fn landing_tensions_at(
+        &self,
+        view: &str,
+        changes: &[Hash],
+        canon_at: Option<Hash>,
+    ) -> Result<Vec<Arc<Tension>>, RdyError> {
+        let Some(at) = canon_at.filter(|h| Some(*h) != self.canon_head()) else {
+            return self.landing_tensions(view, changes);
+        };
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
+        let reader = self.reader();
+        let read: Vec<Change> = changes
+            .iter()
+            .map(|c| reader.change(c))
+            .collect::<Result<_, _>>()?;
+        // the merge's order onto that canon, or the list order when it refuses (as on canon)
+        let applied: Vec<usize> = reader
+            .state_of(Some(at))
+            .and_then(|base| reader.merge_onto(Some(at), &base, &read))
+            .ok()
+            .filter(|merged| merged.conflicts.is_empty())
+            .map_or_else(
+                || (0..read.len()).collect(),
+                |merged| {
+                    merged
+                        .order
+                        .iter()
+                        .filter_map(|h| read.iter().position(|c| c.id() == *h))
+                        .collect()
+                },
+            );
+        self.landing_detect_in(
+            view,
+            changes,
+            &read,
+            &applied,
+            self.detectors,
+            &Scope::At(at),
+        )
+    }
+
     /// FW-JU1 in a view listing: the tensions of the kinds judged on the net change
     /// ([`super::judged_on_the_net_change`]) in their landing form over every change view `view`
     /// includes, which is what proposing the whole view lists. By id; none for a view with no
@@ -1245,15 +1293,29 @@ impl ReadState {
         applied: &[usize],
         detectors: &[&dyn Detector],
     ) -> Result<Vec<Arc<Tension>>, RdyError> {
+        self.landing_detect_in(view, changes, read, applied, detectors, &Scope::Canon)
+    }
+
+    /// [`ReadState::landing_detect`] onto the canon `canon` reads (canon, or canon as of a
+    /// landing): that canon is the run's canon throughout.
+    fn landing_detect_in(
+        &self,
+        view: &str,
+        changes: &[Hash],
+        read: &[Change],
+        applied: &[usize],
+        detectors: &[&dyn Detector],
+        canon: &Scope,
+    ) -> Result<Vec<Arc<Tension>>, RdyError> {
         if let Some(e) = &self.error {
             return Err(e.clone());
         }
         // the canon the landing would give: the ops in the order the merge applies the changes
         let ops = applied_ops(read, applied);
-        let canon_m = self.materialized(&Scope::Canon)?;
+        let canon_m = self.materialized(canon)?;
         let m = canon_m.with(&ops);
         let touched: BTreeSet<&BlockId> = ops.iter().map(Op::block_id).collect();
-        let g = self.graph(&Scope::Canon)?.with_changes(
+        let g = self.graph(canon)?.with_changes(
             touched.iter().filter_map(|b| canon_m.get(b)),
             touched.iter().filter_map(|b| m.get(b)),
         );
@@ -1272,7 +1334,8 @@ impl ReadState {
         let cx = DetectCx::landing(
             self,
             &writes,
-            canon_index_of(self)?,
+            canon_index_in(self, canon)?,
+            canon.clone(),
             Arc::new(m),
             Arc::new(g),
             touched.into_iter().cloned().collect(),

@@ -878,11 +878,17 @@ impl CanonIndex {
 
 /// Canon's index in `st`, memoised in canon's build.
 pub(crate) fn canon_index_of(st: &ReadState) -> Result<Arc<CanonIndex>, RdyError> {
-    let built = st.built(&Scope::Canon)?;
+    canon_index_in(st, &Scope::Canon)
+}
+
+/// The index of the canon `scope` reads (canon, or canon as of a landing), memoised in that
+/// scope's build.
+pub(crate) fn canon_index_in(st: &ReadState, scope: &Scope) -> Result<Arc<CanonIndex>, RdyError> {
+    let built = st.built(scope)?;
     if let Some(ix) = built.tension_index.get() {
         return Ok(Arc::clone(ix));
     }
-    let g = st.graph(&Scope::Canon)?;
+    let g = st.graph(scope)?;
     Ok(Arc::clone(built.tension_index.get_or_init(|| {
         Arc::new(CanonIndex::build(st.pack(), &built.m, &g))
     })))
@@ -941,6 +947,9 @@ pub struct DetectCx<'a> {
     /// A landing's run (tgat1): the canon its landing set would give, read where the in-flight
     /// scope is read otherwise.
     landing: Option<Landing>,
+    /// The canon this run reads as canon: the published canon, or, for a landing's run of a
+    /// version on the canon it recorded, canon as of that landing (D-ME2HD).
+    canon_scope: Scope,
     /// The entity lexicon of the scope this run reads (see [`DetectCx::lexicon`]); lazy.
     lexicon: OnceLock<Arc<Lexicon>>,
     /// The blocks this run's scope moved away from canon that may take part in restatement
@@ -964,6 +973,7 @@ impl<'a> DetectCx<'a> {
             canon,
             scope,
             landing: None,
+            canon_scope: Scope::Canon,
             lexicon: OnceLock::new(),
             moved: OnceLock::new(),
             held: RefCell::default(),
@@ -972,18 +982,29 @@ impl<'a> DetectCx<'a> {
 
     /// An in-flight run over a landing set (tgat1): `writes` are that set's writes, and `m` and
     /// `g` the canon its landing would give, read in place of the in-flight scope; `touched` are
-    /// the blocks the landing's ops write.
+    /// the blocks the landing's ops write. `canon_scope` is the canon the landing applies to
+    /// (`Scope::Canon`, or `Scope::At` a recorded canon), and `canon` its index.
     pub(crate) fn landing(
         st: &'a ReadState,
         writes: &'a Writes,
         canon: Arc<CanonIndex>,
+        canon_scope: Scope,
         m: Arc<Materialized>,
         g: Arc<Graph>,
         touched: BTreeSet<BlockId>,
     ) -> DetectCx<'a> {
         DetectCx {
             landing: Some(Landing { m, g, touched }),
+            canon_scope,
             ..DetectCx::new(st, writes, canon, DetectScope::Inflight)
+        }
+    }
+
+    /// The head of the canon this run reads as canon (see [`DetectCx::canon_m`]).
+    pub fn canon_head(&self) -> Option<Hash> {
+        match &self.canon_scope {
+            Scope::At(h) => Some(*h),
+            _ => self.st.canon_head(),
         }
     }
 
@@ -995,11 +1016,11 @@ impl<'a> DetectCx<'a> {
             return Ok(Arc::clone(l));
         }
         let l = match (&self.landing, self.scope) {
-            (_, DetectScope::Canon) => self.st.lexicon(&Scope::Canon)?,
+            (_, DetectScope::Canon) => self.st.lexicon(&self.canon_scope)?,
             // carried like the landing graph: canon's lexicon with the touched blocks swapped
             (Some(l), DetectScope::Inflight) => {
                 let canon_m = self.canon_m()?;
-                let canon_l = self.st.lexicon(&Scope::Canon)?;
+                let canon_l = self.st.lexicon(&self.canon_scope)?;
                 Arc::new(canon_l.with_changes(
                     l.touched.iter().filter_map(|b| canon_m.get(b)),
                     l.touched.iter().filter_map(|b| l.m.get(b)),
@@ -1147,8 +1168,9 @@ impl<'a> DetectCx<'a> {
         &self.canon
     }
 
+    /// The canon this run reads as canon: the published canon, or a landing's recorded canon.
     pub fn canon_m(&self) -> Result<Arc<Materialized>, RdyError> {
-        self.st.materialized(&Scope::Canon)
+        self.st.materialized(&self.canon_scope)
     }
 
     /// The in-flight materialization (a landing's run: the canon its landing would give). In the
@@ -1163,7 +1185,7 @@ impl<'a> DetectCx<'a> {
     }
 
     pub fn canon_graph(&self) -> Result<Arc<Graph>, RdyError> {
-        self.st.graph(&Scope::Canon)
+        self.st.graph(&self.canon_scope)
     }
 
     /// The in-flight graph (a landing's run: the graph of the canon its landing would give). In
@@ -1358,7 +1380,7 @@ impl<'a> DetectCx<'a> {
         match m.get(b) {
             Some(block) => Ok(self.st.areas_in(&m, block)),
             // the landing deletes b: canon's areas, or E_UNKNOWN_BLOCK
-            None => self.st.areas_of(&Scope::Canon, b),
+            None => self.st.areas_of(&self.canon_scope, b),
         }
     }
 }

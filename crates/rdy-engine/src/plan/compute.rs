@@ -7,7 +7,9 @@
 //! The code items come from the code index at the HEADs the caller captured (D-ERKCP): one per
 //! cause and anchored file, closed by a later commit, where "later" is Git reachability (O5).
 //! The tension items come from the open advisory tensions that involve the version (D-ME2HD,
-//! O21): one per tension, closed as updated when the version's landing form does not have it.
+//! D-45RG6, O21), on its recorded canon: those of its landing form there, and its in-flight
+//! forms, each open until the author answers it; and the canon tensions on blocks it writes that
+//! its landing form no longer has, which the version's change resolves (`updated`).
 use crate::brief::{FollowUp, effective_stable};
 use crate::code_evidence::{self, anchored_files, later_touch};
 use crate::code_index::{CodeRepo, code_repos};
@@ -15,7 +17,7 @@ use crate::consequence::{CONFLICT_FIX, NetState, PlanPair, conflict_message, ref
 use crate::error::{E_CONFLICT_UNRESOLVED, E_LIMIT};
 use crate::gate::{applied_ops, changes_of, prospective};
 use crate::lexicon::Lexicon;
-use crate::tensions::{Tension, TensionSeverity};
+use crate::tensions::{Tension, TensionSeverity, TensionStatus, judged_on_the_net_change};
 use crate::{Materialized, RdyError, ReadState, Scope};
 use rdy_graph::{DerivedStatus, Graph, edges_of};
 use rdy_model::decision::{DECISION, REFINES, REVOKES, SUPERSEDES};
@@ -77,6 +79,8 @@ pub struct ComputedPlan {
     /// The version re-affirms a decision: its `reaffirmed` metadata changes, or it closes a
     /// re-affirm item as re-affirmed. A landing that does seals, also with no item.
     pub reaffirms: bool,
+    /// The tensions of its tension items, by id.
+    pub(crate) tensions: Vec<Arc<Tension>>,
 }
 
 /// The acts that may answer an item of `kind` (tb-2ZED7); a computed close needs none.
@@ -116,24 +120,53 @@ pub(crate) struct Sides {
     pub(crate) tensions: VersionTensions,
 }
 
-/// The open advisory tensions that involve a version (D-ME2HD, O21): the advisory members of
-/// the queue's set (`pending::queue::open_tensions`: the landing form and the in-flight forms of
-/// its changes, not dismissed), by id, and the ids of the open tensions of its landing form.
+/// The advisory tensions of a version's tension items (D-ME2HD, D-45RG6, O21), each by id.
+/// `open`: the open tensions that involve the version, which the author answers: those of its
+/// landing form on its recorded canon, and its in-flight forms (as `pending::queue::open_tensions`
+/// reads them) less those that only a landing since its canon gives (the landing form on canon
+/// as it is now has them): such a tension is not the version's, and is canon's once it lands.
+/// `resolved`: the open canon tensions of its recorded canon on a block it writes that its
+/// landing form no longer has (no tension of the same kind on the same blocks): its change
+/// resolves them, and each closes as `updated`.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct VersionTensions {
     pub(crate) open: Vec<Arc<Tension>>,
-    pub(crate) landing: BTreeSet<Hash>,
+    pub(crate) resolved: Vec<Arc<Tension>>,
 }
 
-/// The [`VersionTensions`] of a version of `view` with changes `changes`. Only the changes the
-/// store holds are read: the key change a propose adds is not written yet, and has no tension
-/// set of its own. A tension read that fails gives no tension item: the propose reply reports
-/// that error as `tensions_error` and never fails on it (cc16), and a landing's own tension
-/// check refuses on it before any seal is written.
+/// The kind and the blocks of `t`: what one tension keeps when only a side's version moves.
+pub(crate) fn shape(t: &Tension) -> (crate::tensions::TensionKind, Vec<BlockId>) {
+    (t.kind, t.blocks())
+}
+
+/// The tensions of the tension items of a version of `view` with changes `changes` (read or
+/// not yet written) on canon's head, by id: those [`compute_changes`] reads.
+pub(crate) fn tension_set(
+    st: &ReadState,
+    view: &str,
+    changes: &[Change],
+) -> Result<Vec<Arc<Tension>>, RdyError> {
+    let sides = sides_of(st, changes, st.canon_head())?;
+    let ids: Vec<Hash> = changes.iter().map(Change::id).collect();
+    let t = version_tensions(st, view, &ids, st.canon_head(), &sides.base, &sides.written)?;
+    let mut all: Vec<Arc<Tension>> = t.open.into_iter().chain(t.resolved).collect();
+    all.sort_by_key(|t| t.id);
+    Ok(all)
+}
+
+/// The [`VersionTensions`] of a version of `view` with changes `changes` on canon `canon_at`,
+/// whose ops write `written`, with `base` the canon at `canon_at`. Only the changes the store
+/// holds are read: a key change not written yet has no tension set of its own. A tension read
+/// that fails gives no tension item: the propose reply reports that error as `tensions_error`
+/// and never fails on it (cc16), and a landing's own tension check refuses on it before any
+/// seal is written.
 fn version_tensions(
     st: &ReadState,
     view: &str,
     changes: &[Hash],
+    canon_at: Option<Hash>,
+    base: &NetState,
+    written: &BTreeSet<BlockId>,
 ) -> Result<VersionTensions, RdyError> {
     let reader = st.reader();
     let mut held = Vec::with_capacity(changes.len());
@@ -145,16 +178,61 @@ fn version_tensions(
     if held.is_empty() {
         return Ok(VersionTensions::default());
     }
-    let Ok((open, landing)) = crate::pending::queue::open_tension_forms(st, view, &held) else {
-        return Ok(VersionTensions::default());
+    Ok(tensions_of(st, view, &held, canon_at, base, written).unwrap_or_default())
+}
+
+/// The body of [`version_tensions`] for the held changes `held`.
+fn tensions_of(
+    st: &ReadState,
+    view: &str,
+    held: &[Hash],
+    canon_at: Option<Hash>,
+    base: &NetState,
+    written: &BTreeSet<BlockId>,
+) -> Result<VersionTensions, RdyError> {
+    let open_advisory = |t: &Tension| {
+        t.severity == TensionSeverity::Advisory && st.tension_status(t) == TensionStatus::Open
     };
-    Ok(VersionTensions {
-        open: open
-            .into_iter()
-            .filter(|t| t.severity == TensionSeverity::Advisory)
-            .collect(),
-        landing,
-    })
+    let landing = st.landing_tensions_at(view, held, canon_at)?;
+    // a landing since the recorded canon: the tensions the landing form has on canon as it is
+    let now: BTreeSet<Hash> = if canon_at == st.canon_head() {
+        landing.iter().map(|t| t.id).collect()
+    } else {
+        st.landing_tensions(view, held)?
+            .iter()
+            .map(|t| t.id)
+            .collect()
+    };
+    let mine = st.tensions_of_changes(held)?;
+    let mut seen = BTreeSet::new();
+    let mut open: Vec<Arc<Tension>> = landing
+        .iter()
+        .cloned()
+        .chain(
+            mine.into_iter()
+                .filter(|t| !judged_on_the_net_change(t.kind) && !now.contains(&t.id)),
+        )
+        .filter(|t| seen.insert(t.id) && open_advisory(t))
+        .collect();
+    open.sort_by_key(|t| t.id);
+    // the base form: canon's tensions on a block the version writes, read on its recorded canon
+    // (every involved version is that canon's), that its landing form no longer has
+    let shapes: BTreeSet<_> = landing.iter().map(|t| shape(t)).collect();
+    let mut resolved: Vec<Arc<Tension>> = st
+        .canon_tensions()?
+        .into_iter()
+        .filter(|t| {
+            t.involved.iter().any(|i| written.contains(&i.block))
+                && t.involved
+                    .iter()
+                    .all(|i| base.m.version_of(&i.block) == i.version)
+                && !shapes.contains(&shape(t))
+                && !seen.contains(&t.id)
+                && open_advisory(t)
+        })
+        .collect();
+    resolved.sort_by_key(|t| t.id);
+    Ok(VersionTensions { open, resolved })
 }
 
 /// One linked checkout: the version's HEAD and the chain's first HEAD, resolved (`None` is an
@@ -195,7 +273,7 @@ pub(crate) fn compute_changes(
 ) -> Result<ComputedPlan, RdyError> {
     let mut sides = sides_of(st, changes, canon_at)?;
     let ids: Vec<Hash> = changes.iter().map(Change::id).collect();
-    sides.tensions = version_tensions(st, view, &ids)?;
+    sides.tensions = version_tensions(st, view, &ids, canon_at, &sides.base, &sides.written)?;
     let code = code_sides(st, heads, first_heads)?;
     compute_in(st, &sides, code.as_deref(), MAX_PLAN_ITEMS)
 }
@@ -486,11 +564,25 @@ impl Closes<'_> {
     }
 }
 
-/// The close of the tension item of `t` (D-ME2HD): updated when the tension is no longer open in
-/// the version's landing form (`landing`, its open ids), so the version's change resolves it;
-/// else open until the author answers it.
-fn tension_close(t: &Tension, landing: &BTreeSet<Hash>) -> Option<PlanOutcome> {
-    (!landing.contains(&t.id)).then_some(PlanOutcome::Updated)
+/// The tension item of `tension` with the close `close` (O5); `None` for a tension that
+/// involves no block.
+pub(crate) fn tension_candidate(
+    tension: &Tension,
+    close: Option<PlanOutcome>,
+) -> Option<PlanCandidate> {
+    let cause = tension.blocks().into_iter().next()?;
+    let subject = tension.id.to_string();
+    Some(PlanCandidate {
+        id: item_hash(&cause, &subject, PlanKind::Tension),
+        kind: PlanKind::Tension,
+        subject,
+        cause,
+        edge: TENSION_EDGE.to_string(),
+        subject_hash: None,
+        cause_hash: tension.vkey,
+        close,
+        stable: false,
+    })
 }
 
 /// The kind of a judged pair: its follow-up, and a confirm on a retired cause is a rejustify. An
@@ -584,27 +676,19 @@ pub(crate) fn compute_in(
         )
     })?;
     // O5: a tension item's subject is the tension's id, its cause the tension's first involved
-    // block, and an answer keeps the tension's vkey, so it lapses when the tension changes
-    for tension in &sides.tensions.open {
-        let Some(cause) = tension.blocks().into_iter().next() else {
+    // block, and an answer keeps the tension's vkey, so it lapses when the tension changes. An
+    // open one waits for the author's answer (D-45RG6); one the version resolves is updated.
+    let open = sides.tensions.open.iter().map(|t| (t, None));
+    let resolved = sides
+        .tensions
+        .resolved
+        .iter()
+        .map(|t| (t, Some(PlanOutcome::Updated)));
+    for (tension, close) in open.chain(resolved) {
+        let Some(c) = tension_candidate(tension, close) else {
             continue;
         };
-        let subject = tension.id.to_string();
-        admit(
-            &mut items,
-            PlanCandidate {
-                id: item_hash(&cause, &subject, PlanKind::Tension),
-                kind: PlanKind::Tension,
-                subject,
-                cause,
-                edge: TENSION_EDGE.to_string(),
-                subject_hash: None,
-                cause_hash: tension.vkey,
-                close: tension_close(tension, &sides.tensions.landing),
-                stable: false,
-            },
-            limit,
-        )?;
+        admit(&mut items, c, limit)?;
     }
     let (code_files, code_unavailable) = match code {
         None => (0, true),
@@ -630,12 +714,21 @@ pub(crate) fn compute_in(
         .chain(acknowledged.iter().cloned())
         .chain(reaffirmed.iter().cloned())
         .collect();
+    let mut tensions: Vec<Arc<Tension>> = sides
+        .tensions
+        .open
+        .iter()
+        .chain(&sides.tensions.resolved)
+        .cloned()
+        .collect();
+    tensions.sort_by_key(|t| t.id);
     Ok(ComputedPlan {
         items: items.into_values().collect(),
         code_files,
         code_unavailable,
         decisions: decisions.into_iter().collect(),
         reaffirms: !acknowledged.is_empty() || !reaffirmed.is_empty(),
+        tensions,
     })
 }
 

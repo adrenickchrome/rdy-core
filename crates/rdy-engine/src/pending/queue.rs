@@ -1349,20 +1349,9 @@ impl Version {
 /// as `proposal_tensions` gathers them (a kind judged on the net change only in its landing
 /// form), not dismissed, by id.
 pub(super) fn open_tensions(st: &ReadState, p: &Proposal) -> Result<Vec<Arc<Tension>>, RdyError> {
-    Ok(open_tension_forms(st, &p.view, &p.changes)?.0)
-}
-
-/// [`open_tensions`] of a version of `view` with changes `changes`, with the ids of the open
-/// tensions of its landing form among them: the change plan's tension items read both (D-ME2HD).
-pub(crate) fn open_tension_forms(
-    st: &ReadState,
-    view: &str,
-    changes: &[Hash],
-) -> Result<(Vec<Arc<Tension>>, BTreeSet<Hash>), RdyError> {
     let net = |t: &Tension| crate::tensions::judged_on_the_net_change(t.kind);
-    let landing = st.landing_tensions(view, changes)?;
-    let landing_ids: BTreeSet<Hash> = landing.iter().map(|t| t.id).collect();
-    let mine = st.tensions_of_changes(changes)?;
+    let landing = st.landing_tensions(&p.view, &p.changes)?;
+    let mine = st.tensions_of_changes(&p.changes)?;
     let mut seen = BTreeSet::new();
     let mut out: Vec<Arc<Tension>> = landing
         .into_iter()
@@ -1370,12 +1359,7 @@ pub(crate) fn open_tension_forms(
         .filter(|t| seen.insert(t.id) && st.tension_status(t) == TensionStatus::Open)
         .collect();
     out.sort_by_key(|t| t.id);
-    let open_landing = out
-        .iter()
-        .map(|t| t.id)
-        .filter(|id| landing_ids.contains(id))
-        .collect();
-    Ok((out, open_landing))
+    Ok(out)
 }
 
 /// The exception kinds decision `b` carries, in the closed order, each with its detail. `live`

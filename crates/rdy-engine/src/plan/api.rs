@@ -71,7 +71,7 @@ const OUTCOMES: [PlanOutcome; 11] = [
 ];
 
 /// The prefix of a tension item's display id: the tension's own id (O5).
-const TENSION_DISPLAY_PREFIX: &str = "tn-";
+pub(crate) const TENSION_DISPLAY_PREFIX: &str = "tn-";
 
 /// The display id of an item: a tension item shows its tension's id, `tn-` and the first 12 hex
 /// of its subject (O5, `tension_label`); every other item `pi-` and 16 hex ([`item_display`]).
