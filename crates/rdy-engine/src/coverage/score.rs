@@ -278,15 +278,20 @@ impl ReadState {
         };
         let doc_path = |doc: &BlockId| m.path_of(doc).unwrap_or_default();
         // D-P3YD5: a block is under `u` by its own path, which is its doc's path, or the folder's
-        // for a block outside a doc; a block with no path is kept only with no filter
-        let kept = |id: &BlockId| match &under {
+        // for a block outside a doc; a block with no path is kept only with no filter. A folder
+        // is no content: it stays out of a filtered report, as before.
+        let kept = |id: &BlockId, e: &BlockEntry| match &under {
             None => true,
-            Some(u) => m
-                .path_of(id)
-                .is_some_and(|p| p == *u || p.starts_with(&format!("{u}/"))),
+            Some(u) => {
+                let folder =
+                    e.doc.is_none() && m.get(id).is_some_and(|b| b.block_type == tree::FOLDER);
+                !folder
+                    && m.path_of(id)
+                        .is_some_and(|p| p == *u || p.starts_with(&format!("{u}/")))
+            }
         };
         let entries: Vec<(&BlockId, &BlockEntry)> =
-            issues.blocks.iter().filter(|(id, _)| kept(id)).collect();
+            issues.blocks.iter().filter(|(id, e)| kept(id, e)).collect();
 
         let whole = rollup(&self.pack, entries.iter().map(|(_, e)| *e));
 
