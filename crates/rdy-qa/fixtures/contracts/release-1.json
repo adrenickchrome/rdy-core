@@ -12653,6 +12653,7 @@
       "PROFILE_PARENT_FIX": "\"set parent to a doc id\"",
       "PROJECT_FIX": "\"Propose the redaction of the listed targets again, and have a person approve it.\"",
       "REACH_CONFIRM_FIX": "\"a block it relies on changed: check that it still holds, and supersede it if not; no repin is needed\"",
+      "REACH_FIX": "\"split the work into smaller proposals\"",
       "READER_CANNOT_SIGN_FIX": "\"start a writer session for this act\"",
       "REAFFIRM_FIX": "\"if it still holds, re-affirm it with a reaffirm op; otherwise supersede it\"",
       "REDACTED_FIX": "\"Read the redaction details in the source history.\"",
