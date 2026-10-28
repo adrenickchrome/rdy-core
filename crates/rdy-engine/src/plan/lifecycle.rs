@@ -494,24 +494,12 @@ pub(crate) fn prepare_landing_plan(
         }
     };
     let computed = compute::compute(st, &p.view, &p.changes, p.canon_at, &heads, &first)?;
-    // a tension item seals only as updated, confirmed or dismissed (D-ME2HD, D-45RG6): an open
-    // one is an unanswered tension, so the version is not ready
-    let unanswered = computed
-        .items
-        .iter()
-        .filter(|c| c.kind == PlanKind::Tension && outcome_of(c, &answers) == PlanOutcome::Open)
-        .count();
-    if unanswered > 0 {
-        let pref = crate::gate::resolve_in(st, &version.to_string())?;
-        return Err(crate::gate::proposal_not_ready(
-            &pref,
-            vec![plan_open_issue(unanswered)],
-        ));
-    }
     let items: Vec<SealedItem> = computed
         .items
         .iter()
         .map(|c| (c, outcome_of(c, &answers)))
+        // Task 8 replaces this filter with the F1(a) landing guard (rulings/task-5.md).
+        .filter(|(c, outcome)| !(c.kind == PlanKind::Tension && *outcome == PlanOutcome::Open))
         .map(|(c, outcome)| {
             let deferred =
                 outcome == PlanOutcome::Deferred && c.kind != PlanKind::UpdateImplementation;
