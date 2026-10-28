@@ -236,6 +236,13 @@ fn ndh1_the_tree_export_leaves_out_blocks_outside_a_doc() {
     }
     let total = r.read().materialized(&Scope::Canon).unwrap().len();
     assert_eq!(summary.blocks, total - 3);
+    // authors.yaml names only the blocks the export holds, so rdy imports its own export
+    let authors = std::fs::read_to_string(dest.join("authors.yaml")).unwrap();
+    for id in c.outside() {
+        assert!(!authors.contains(id.as_str()), "authors.yaml holds {id}");
+    }
+    let (_dir3, mut fresh) = project();
+    fresh.import(&approver(), "import", &dest).unwrap();
 
     // every other block outside the tree is still refused, with the same words
     let (_dir2, mut r2) = project();

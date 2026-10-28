@@ -937,7 +937,13 @@ impl ReadState {
         // block's producing change, then the block id, so an import of rows with equal times
         // writes the authors in the order they wrote.
         if !matches!(scope, Scope::Inflight) {
-            let ids: Vec<BlockId> = m.iter().map(|b| b.id.clone()).collect();
+            // only the blocks the export holds: a block outside a doc gets no row (D-P3YD5),
+            // so an import of this export finds every row's block
+            let ids: Vec<BlockId> = m
+                .iter()
+                .filter(|b| !outside_a_doc(&m, b))
+                .map(|b| b.id.clone())
+                .collect();
             let mut located: Vec<(Location, BlockId, crate::history::HistoryEntry)> = self
                 .last_changes(scope, &ids)?
                 .into_iter()
