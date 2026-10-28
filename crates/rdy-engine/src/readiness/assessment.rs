@@ -12,7 +12,7 @@ use crate::coverage::{Confidence, CoverageIssue, Dimension, Level, Rollup};
 use crate::error::E_VALIDATION;
 use crate::pending::{Item, card_hash};
 use crate::plan::lifecycle::PlanSummary;
-use crate::tensions::{TensionInfo, TensionSeverity};
+use crate::tensions::{TensionInfo, TensionSeverity, TensionStatus};
 use rdy_model::assessment::{
     Assessment, AssessmentCard, AssessmentConfidence, AssessmentCounts, AssessmentCoverage,
     AssessmentException, AssessmentExceptionKind, AssessmentFacts, AssessmentIssue,
@@ -23,6 +23,7 @@ use rdy_model::assessment::{
 };
 use rdy_model::{BlockId, Hash};
 use rdy_schema::{Issue, Pack, Severity};
+use rdy_store::{codec, kinds};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The computation version of the record.
@@ -38,13 +39,15 @@ const CONFIG_DOMAIN: &[u8] = b"rdy-assessment-config-1\0";
 const PACK_DOMAIN: &[u8] = b"rdy-assessment-pack-1\0";
 /// What a cut text ends with.
 const CUT_MARK: &str = "...";
-/// The fix of a reach over [`MAX_ROWS`] (O9).
+/// The fix of a reach over [`MAX_ROWS`] and of a record too large to store (O9).
 const REACH_FIX: &str = "split the work into smaller proposals";
 
 /// What a ready version's readiness read: every input of the record, already computed.
 ///
 /// `pref` is the version (its hash is `pref.version`); the reach bound's issue names it. Each
-/// tension comes with its vkey, which [`TensionInfo`] does not carry. `answers` maps a tension's
+/// tension comes with its vkey and its status (`ReadState::tension_status`), which
+/// [`TensionInfo`] does not carry whole: its dismissal is left out when the review cannot be
+/// read, and the row's dismissal is the review all the same (O17). `answers` maps a tension's
 /// full id to the hash of the bound plan's answered item (`plan_hash`). The lists may come in
 /// any order and with duplicates.
 pub struct Inputs<'a> {
@@ -61,8 +64,9 @@ pub struct Inputs<'a> {
     /// Each decision and whether it is one_way.
     pub reversibility: Vec<(BlockId, bool)>,
     pub exceptions: Vec<(AssessmentExceptionKind, String)>,
-    /// The tensions of `ReadState::proposal_tensions`, in its order, each with its vkey.
-    pub tensions: &'a [(TensionInfo, Hash)],
+    /// The tensions of `ReadState::proposal_tensions`, in its order, each with its vkey and
+    /// its status.
+    pub tensions: &'a [(TensionInfo, Hash, TensionStatus)],
     /// The tensions `proposal_tensions` left out.
     pub tensions_omitted: usize,
     /// (tension id, item hash) for each tension item the bound plan answers.
@@ -105,6 +109,30 @@ pub(crate) fn reach_too_large(pref: &ProposalRef) -> Issue {
         message: format!("{pref} reaches more than {MAX_ROWS} blocks"),
         fix: REACH_FIX.to_string(),
     }
+}
+
+/// The issue of a version whose record the store's bounded decoder would refuse (O9).
+pub(crate) fn too_large(pref: &ProposalRef) -> Issue {
+    Issue {
+        severity: Severity::Error,
+        code: E_VALIDATION,
+        block: None,
+        message: format!("{pref} is too large to assess"),
+        fix: REACH_FIX.to_string(),
+    }
+}
+
+/// Whether the store can write `a` and read it back: its frame within one record
+/// (`codec::fits_latest`), and its body within the bounded decoder's limits, as the store's
+/// own assessment check reads it (`codec::split`, `codec::decode_bounded_split`).
+fn fits_the_store(a: &Assessment) -> bool {
+    if codec::fits_latest(kinds::ASSESSMENT, a).is_err() {
+        return false;
+    }
+    let (raw, payload) = codec::item_new(kinds::ASSESSMENT, a);
+    codec::split(raw, &payload)
+        .and_then(|o| codec::decode_bounded_split::<Assessment>(&o))
+        .is_ok()
 }
 
 /// `text` within [`MAX_TEXT_BYTES`]: a longer text keeps its first 4,093 bytes, cut back to a
@@ -296,14 +324,18 @@ fn facts_of(i: &Inputs<'_>) -> AssessmentFacts {
 }
 
 /// One tension row (O17), or `None` when its id does not parse (never for a row the engine
-/// listed).
+/// listed). Its status and dismissal come from `status`, the review a dismissed tension names
+/// even when [`TensionInfo`] could not read it.
 fn tension_row(
-    (t, vkey): &(TensionInfo, Hash),
+    (t, vkey, status): &(TensionInfo, Hash, TensionStatus),
     answers: &BTreeMap<Hash, Hash>,
     plan: Option<Hash>,
 ) -> Option<AssessmentTension> {
     let id: Hash = t.tension.parse().ok()?;
-    let dismissed = t.status == "dismissed";
+    let dismissal = match status {
+        TensionStatus::Dismissed(review) => Some(*review),
+        TensionStatus::Open => None,
+    };
     let blocks: BTreeSet<BlockId> = t
         .blocks
         .iter()
@@ -316,7 +348,7 @@ fn tension_row(
             TensionSeverity::Blocking => AssessmentSeverity::Blocking,
             TensionSeverity::Advisory => AssessmentSeverity::Advisory,
         },
-        status: if dismissed {
+        status: if dismissal.is_some() {
             AssessmentTensionStatus::Dismissed
         } else {
             AssessmentTensionStatus::Open
@@ -324,24 +356,21 @@ fn tension_row(
         answer: plan
             .zip(answers.get(&id))
             .map(|(plan, item)| AssessmentPlanAnswerRef { plan, item: *item }),
-        dismissal: t
-            .dismissal
-            .as_ref()
-            .filter(|_| dismissed)
-            .and_then(|d| d.review.parse().ok()),
+        dismissal,
         summary: cut_text(t.summary.clone()),
         blocks: blocks.into_iter().take(MAX_ROWS).collect(),
         vkey: *vkey,
     })
 }
 
-/// The record of a ready version (D-SDSV2). `Err` only for a reach over [`MAX_ROWS`] (O9); the
-/// result passes [`Assessment::validate`].
+/// The record of a ready version (D-SDSV2). Err only for O9's bounds: a reach over
+/// [`MAX_ROWS`], or a record the store's bounded decoder would refuse. The result passes
+/// [`Assessment::validate`].
 pub fn build(i: Inputs<'_>) -> Result<Assessment, Issue> {
     // reach (O18): what the version writes, what its plan items name, and the blocks of every
     // tension it lists
     let mut reach: BTreeSet<BlockId> = i.written.iter().chain(&i.plan_blocks).cloned().collect();
-    for (t, _) in i.tensions {
+    for (t, _, _) in i.tensions {
         reach.extend(t.blocks.iter().filter_map(|b| BlockId::parse(b).ok()));
     }
     if reach.len() > MAX_ROWS {
@@ -417,6 +446,10 @@ pub fn build(i: Inputs<'_>) -> Result<Assessment, Issue> {
         },
         issues: issue_rows(i.issues),
     };
+    // the per-list caps do not bound the whole record: check it as the store will
+    if !fits_the_store(&a) {
+        return Err(too_large(&i.pref));
+    }
     Ok(a)
 }
 
@@ -425,7 +458,9 @@ mod tests {
     use super::*;
     use crate::coverage::{CoverageIssue, Dimension, Dismissal, IssueCode, Level, Rollup};
     use crate::pending::{Fact, Item, ItemKind, card_hash};
-    use crate::tensions::{DismissalInfo, TensionInfo, TensionKind, TensionSeverity};
+    use crate::tensions::{
+        DismissalInfo, TensionInfo, TensionKind, TensionSeverity, TensionStatus,
+    };
     use rdy_model::assessment::{
         AssessmentCoverage, AssessmentExceptionKind, AssessmentLevel, AssessmentPage,
         AssessmentReversibility, AssessmentScoreChange, AssessmentScores, MAX_ROWS,
@@ -503,7 +538,7 @@ mod tests {
     }
 
     /// Tension `n` on `blocks`, with its vkey; dismissed by review `h(n + 50_000)` when asked.
-    fn tension(n: u32, blocks: &[&str], dismissed: bool) -> (TensionInfo, Hash) {
+    fn tension(n: u32, blocks: &[&str], dismissed: bool) -> (TensionInfo, Hash, TensionStatus) {
         let t = h(n);
         let info = TensionInfo {
             id: format!("tn-{}", t.short()),
@@ -529,7 +564,12 @@ mod tests {
             proposal: None,
             judged: None,
         };
-        (info, h(n + 100_000))
+        let status = if dismissed {
+            TensionStatus::Dismissed(h(n + 50_000))
+        } else {
+            TensionStatus::Open
+        };
+        (info, h(n + 100_000), status)
     }
 
     fn scores(n: u32) -> AssessmentScores {
@@ -560,7 +600,7 @@ mod tests {
         pack: Pack,
         plan: PlanSummary,
         card: Item,
-        tensions: Vec<(TensionInfo, Hash)>,
+        tensions: Vec<(TensionInfo, Hash, TensionStatus)>,
         answers: Vec<(Hash, Hash)>,
     }
 
@@ -730,6 +770,29 @@ mod tests {
     }
 
     #[test]
+    fn rg6_a_dismissed_row_whose_review_cannot_be_read_keeps_its_review() {
+        // the review's reason was redacted: `tension_info_bare` leaves the dismissal out, while
+        // the status still names the review (TensionStatus::Dismissed)
+        let mut f = fx();
+        let review = h(77);
+        let t = &mut f.tensions[1];
+        t.0.dismissal = None;
+        t.2 = TensionStatus::Dismissed(review);
+        let a = build(inputs(&f)).unwrap();
+        assert_eq!(a.validate(), Ok(()));
+        let row = a.tensions.iter().find(|t| t.id == h(1)).unwrap();
+        assert_eq!(row.status, AssessmentTensionStatus::Dismissed);
+        assert_eq!(row.dismissal, Some(review));
+        // the status decides, not the info's text: an open status is an open row
+        let mut g = fx();
+        g.tensions[1].2 = TensionStatus::Open;
+        let a = build(inputs(&g)).unwrap();
+        let row = a.tensions.iter().find(|t| t.id == h(1)).unwrap();
+        assert_eq!(row.status, AssessmentTensionStatus::Open);
+        assert_eq!(row.dismissal, None);
+    }
+
+    #[test]
     fn rg6_the_same_inputs_give_the_same_bytes() {
         let f = fx();
         let a = build(inputs(&f)).unwrap();
@@ -815,6 +878,54 @@ mod tests {
             format!("P-{}@2 reaches more than 100000 blocks", h(9_000).short())
         );
         assert_eq!(e.fix, "split the work into smaller proposals");
+    }
+
+    /// `n` unlinked_mention rows, one on each of `n` blocks, with a subject and a fix of the
+    /// engine's length (about 85 bytes).
+    fn mentions(n: usize) -> Vec<AssessmentIssue> {
+        (0..n)
+            .map(|k| AssessmentIssue {
+                block: nth("n", k),
+                dimension: "grounded".to_string(),
+                code: "unlinked_mention".to_string(),
+                subject: Some(nth("e", k).to_string()),
+                fix: format!(
+                    "link this mention to Payments service ({}), or dismiss it as a passing mention",
+                    nth("e", k)
+                ),
+                dismissal: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rg6_a_record_past_the_decoder_bound_is_not_ready() {
+        // within every per-list cap (O9), past the store's bounded decoder: reach and
+        // scope.blocks at 100,000 and 100,000 unlinked_mention rows
+        let f = fx();
+        let mut i = inputs(&f);
+        i.written = (0..MAX_ROWS - 6).map(|n| nth("w", n)).collect();
+        i.scope_blocks = (0..MAX_ROWS).map(|n| nth("n", n)).collect();
+        i.issues = mentions(MAX_ROWS);
+        let Err(e) = build(i) else {
+            panic!("a record past the decoder bound was built");
+        };
+        assert_eq!(e.severity, Severity::Error);
+        assert_eq!(e.code, crate::E_VALIDATION);
+        assert_eq!(e.block, None);
+        assert_eq!(
+            e.message,
+            format!("P-{}@2 is too large to assess", h(9_000).short())
+        );
+        assert_eq!(e.fix, "split the work into smaller proposals");
+        // half the blocks with the same issues fits: the check refuses only past the bound
+        let mut i = inputs(&f);
+        i.written = (0..MAX_ROWS / 2).map(|n| nth("w", n)).collect();
+        i.scope_blocks = (0..MAX_ROWS / 2).map(|n| nth("n", n)).collect();
+        i.issues = mentions(MAX_ROWS);
+        let a = build(i).unwrap();
+        assert_eq!(a.validate(), Ok(()));
+        assert_eq!(a.issues.len(), MAX_ROWS);
     }
 
     #[test]

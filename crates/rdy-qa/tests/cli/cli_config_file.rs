@@ -394,3 +394,24 @@ fn mfb1_init_refuses_a_store_without_rdy_yaml() {
         "the store is untouched"
     );
 }
+
+/// rg6: a pack whose version is empty is refused when it loads, in its file, so no record of
+/// the project ever names it (an assessment keeps a pack name and version of 1 to 256 bytes).
+#[test]
+fn rg6_rdy_status_refuses_a_pack_with_an_empty_version() {
+    let d = tempfile::tempdir().unwrap();
+    drop(Rdy::init(d.path(), "rdy-standard").unwrap());
+    let pack = d.path().join(".rdy/packs/team.yaml");
+    std::fs::create_dir_all(pack.parent().unwrap()).unwrap();
+    std::fs::write(&pack, "name: team\nversion: ''\nextends: rdy-standard\n").unwrap();
+    std::fs::write(d.path().join(PROJECT_FILE), "pack: team\n").unwrap();
+    let out = rdy_in(d.path(), &["--json", "status"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("E_CONFIG"), "{err}");
+    assert!(
+        err.contains(".rdy/packs/team.yaml: invalid pack: the pack version must be 1 to 256 bytes"),
+        "{err}"
+    );
+    assert!(err.contains("fix the pack file"), "{err}");
+}

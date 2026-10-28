@@ -2,6 +2,7 @@ use crate::glob::Glob;
 use crate::pack::*;
 use crate::publication;
 use crate::supporting;
+use rdy_model::assessment::MAX_PACK_BYTES;
 use rdy_model::decision as d;
 use rdy_model::tree;
 use std::collections::{BTreeMap, BTreeSet};
@@ -112,6 +113,18 @@ impl PackSet {
             .map_err(|e| SchemaError::Yaml(with_duplicate_line(&e, yaml)))?;
         let pack: Pack =
             serde_yaml_ng::from_str(yaml).map_err(|e| SchemaError::Yaml(e.to_string()))?;
+        // an assessment records the pack's name and version, each 1 to 256 bytes
+        // (`Assessment::validate`), so a pack outside them is refused here, in its file
+        if !(1..=MAX_PACK_BYTES).contains(&pack.name.len()) {
+            return Err(SchemaError::Invalid(
+                "the pack name must be 1 to 256 bytes".to_string(),
+            ));
+        }
+        if !(1..=MAX_PACK_BYTES).contains(&pack.version.len()) {
+            return Err(SchemaError::Invalid(
+                "the pack version must be 1 to 256 bytes".to_string(),
+            ));
+        }
         let name = pack.name.clone();
         if let Some(first) = self.sources.get(&name) {
             return Err(SchemaError::Duplicate {
@@ -688,4 +701,73 @@ fn check_areas(pack: &Pack) -> Result<(), SchemaError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pack_yaml(name: &str, version: &str) -> String {
+        format!("name: '{name}'\nversion: '{version}'\nextends: rdy-standard\n")
+    }
+
+    #[test]
+    fn rg6_a_pack_with_an_empty_version_is_refused() {
+        let mut s = PackSet::with_builtin();
+        let e = s
+            .add_yaml_from(&pack_yaml("team", ""), "team.yaml")
+            .expect_err("an empty version is refused");
+        assert_eq!(
+            e,
+            SchemaError::Invalid("the pack version must be 1 to 256 bytes".to_string())
+        );
+        assert_eq!(
+            e.to_string(),
+            "invalid pack: the pack version must be 1 to 256 bytes"
+        );
+        let e = s
+            .add_yaml_from(&pack_yaml("team", &"v".repeat(257)), "team.yaml")
+            .expect_err("a version over 256 bytes is refused");
+        assert_eq!(
+            e.to_string(),
+            "invalid pack: the pack version must be 1 to 256 bytes"
+        );
+        // nothing refused was added; 256 bytes is in bounds
+        assert_eq!(
+            s.resolve("team"),
+            Err(SchemaError::UnknownPack("team".into()))
+        );
+        s.add_yaml_from(&pack_yaml("team", &"v".repeat(256)), "team.yaml")
+            .expect("a version of 256 bytes is in bounds");
+        assert_eq!(s.resolve("team").unwrap().version, "v".repeat(256));
+        // the built-in pack is in bounds
+        let std = PackSet::with_builtin().resolve("rdy-standard").unwrap();
+        assert!((1..=256).contains(&std.name.len()));
+        assert!((1..=256).contains(&std.version.len()));
+    }
+
+    #[test]
+    fn rg6_a_pack_name_over_256_bytes_is_refused() {
+        let mut s = PackSet::with_builtin();
+        // 129 two-byte chars: 258 bytes, 129 chars
+        let long = "é".repeat(129);
+        let e = s
+            .add_yaml_from(&pack_yaml(&long, "1"), "long.yaml")
+            .expect_err("a name over 256 bytes is refused");
+        assert_eq!(
+            e.to_string(),
+            "invalid pack: the pack name must be 1 to 256 bytes"
+        );
+        let e = s
+            .add_yaml_from(&pack_yaml("", "1"), "empty.yaml")
+            .expect_err("an empty name is refused");
+        assert_eq!(
+            e,
+            SchemaError::Invalid("the pack name must be 1 to 256 bytes".to_string())
+        );
+        let name = "n".repeat(256);
+        s.add_yaml_from(&pack_yaml(&name, "1"), "max.yaml")
+            .expect("a name of 256 bytes is in bounds");
+        assert_eq!(s.resolve(&name).unwrap().name, name);
+    }
 }
