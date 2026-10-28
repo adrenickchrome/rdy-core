@@ -216,6 +216,7 @@ fn applied_with(extra: Value, targets: &[&str]) -> Applied {
             alt: None,
             relay: None,
             evidence: None,
+            assessment: None,
         })
         .unwrap();
     rdy.store_mut().set_held(true).unwrap();

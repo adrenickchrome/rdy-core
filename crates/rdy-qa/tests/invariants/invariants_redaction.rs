@@ -403,6 +403,7 @@ fn run_op(
                         alt: None,
                         relay: None,
                         evidence: None,
+                        assessment: None,
                     });
                     match res {
                         Ok(_) => {

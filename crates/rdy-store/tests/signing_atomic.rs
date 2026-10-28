@@ -79,6 +79,7 @@ fn req(p: Hash) -> LandRequest {
         alt: None,
         relay: None,
         evidence: None,
+        assessment: None,
     }
 }
 

@@ -1718,6 +1718,7 @@ fn land_request(p: Hash, accept: Option<Change>) -> rdy_store::LandRequest {
         alt: None,
         relay: None,
         evidence: None,
+        assessment: None,
     }
 }
 
@@ -2123,5 +2124,79 @@ fn cp3_fix1_impossible_kind_outcome_pairs_are_refused() {
         edited_upload(&b, tag, &format!("possible-{n}.rdysync"), |r, o| {
             replace_seal(r, o, b.seal, &x)
         });
+    }
+}
+
+/// A tension item of `outcome` whose subject is `subject`.
+fn tension_item(subject: &str, outcome: PlanOutcome) -> SealedItem {
+    SealedItem {
+        id: item_hash(&cause(), subject, PlanKind::Tension),
+        kind: PlanKind::Tension,
+        subject: subject.into(),
+        cause: cause(),
+        edge: "tension".into(),
+        outcome,
+        answer: None,
+    }
+}
+
+/// The landing of `answered_after_propose`'s version with a seal that holds only `item`: the
+/// typed landing composition's result, and on success the written landing.
+fn seal_with(item: SealedItem) -> (Store, Result<(), StoreError>, Hash, tempfile::TempDir) {
+    let (d, mut s, p, b, a) = answered_after_propose();
+    let mut prepared = s.prepare_land(land_request(p, None)).unwrap();
+    let mut x = seal_after(
+        b.id(),
+        a,
+        prepared.hash(),
+        prepared.landed_version(),
+        b.answers.clone(),
+    );
+    x.seal.as_mut().unwrap().items = vec![item];
+    let end = s.log_end();
+    let out = s.plan_landing(&mut prepared, None, Some(&x));
+    if out.is_ok() {
+        s.commit_land(prepared, &[]).unwrap();
+    } else {
+        assert_eq!(s.log_end(), end, "nothing written");
+    }
+    (s, out, x.id(), d)
+}
+
+/// O5: a sealed tension item's subject is the tension's id, 64 lower-case hex digits. The
+/// typed composition seals it, and fsck reads it as sound.
+#[test]
+fn rg2_a_sealed_tension_item_with_a_hex_subject_passes() {
+    let subject = Hash::of(b"a tension id").to_string();
+    assert_eq!(subject.len(), 64);
+    for outcome in [
+        PlanOutcome::Updated,
+        PlanOutcome::Confirmed,
+        PlanOutcome::Dismissed,
+    ] {
+        let (s, out, seal, _d) = seal_with(tension_item(&subject, outcome));
+        out.unwrap_or_else(|e| panic!("{outcome:?}: {e}"));
+        assert_eq!(
+            s.plan(&seal).unwrap().seal.unwrap().items[0].subject,
+            subject
+        );
+        s.check_objects()
+            .unwrap_or_else(|e| panic!("{outcome:?}: {e}"));
+    }
+}
+
+/// O5: a tension item whose subject is neither a block id nor 64 lower-case hex digits is
+/// `invalid seal`.
+#[test]
+fn rg2_a_sealed_tension_item_with_a_short_subject_is_refused() {
+    let hex = Hash::of(b"a tension id").to_string();
+    for subject in [hex[..63].to_string(), hex.to_uppercase(), format!("{hex}0")] {
+        let (_s, out, seal, _d) = seal_with(tension_item(&subject, PlanOutcome::Dismissed));
+        match out {
+            Err(StoreError::Refused(m)) => {
+                assert_eq!(m, format!("plan {seal}: invalid seal"), "{subject}")
+            }
+            other => panic!("{subject}: {other:?}"),
+        }
     }
 }

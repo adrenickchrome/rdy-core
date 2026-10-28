@@ -215,6 +215,7 @@ pub fn land_with_a_tie(r: &mut Rdy, view: &str) {
             alt: None,
             relay: None,
             evidence: None,
+            assessment: None,
         })
         .unwrap_or_else(|e| panic!("landing {view}: {e}"));
     r.invalidate();

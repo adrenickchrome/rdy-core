@@ -148,6 +148,7 @@ fn land_prepared(path: &Path, hook: impl Fn(&mut Draft) + 'static, encoding: u16
             alt: None,
             relay: None,
             evidence: None,
+            assessment: None,
         })
         .unwrap_err();
     assert_eq!(s.log_end(), end, "a refused landing writes nothing");
@@ -207,6 +208,7 @@ fn ok2_new_residue_with_a_fabricated_content_hash_is_refused() {
         alt: None,
         relay: None,
         evidence: None,
+        assessment: None,
     })
     .unwrap();
     drop(s);
@@ -292,6 +294,7 @@ fn ok2_old_residue_with_a_fabricated_content_hash_is_refused() {
         alt: None,
         relay: None,
         evidence: None,
+        assessment: None,
     })
     .unwrap();
     drop(s);

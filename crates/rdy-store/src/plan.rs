@@ -205,9 +205,17 @@ pub(crate) fn invalid_record(p: &Plan) -> Option<&'static str> {
         if !ascending(seal.items.iter().map(|i| i.id)) {
             return Some(UNSORTED_ITEMS);
         }
+        // a tension item's subject is the tension's id, 64 lower-case hex digits (O5)
+        let tension_id = |i: &rdy_model::plan::SealedItem| {
+            i.kind == PlanKind::Tension
+                && i.subject.len() == 64
+                && i.subject
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        };
         let item_ok = |i: &rdy_model::plan::SealedItem| {
             i.id == item_hash(&i.cause, &i.subject, i.kind)
-                && (code(i.kind) || BlockId::is_valid(&i.subject))
+                && (code(i.kind) || BlockId::is_valid(&i.subject) || tension_id(i))
                 && outcome_allowed(i.kind, i.outcome)
                 && (i.answer.is_none() || (i.outcome == PlanOutcome::Deferred && !code(i.kind)))
         };

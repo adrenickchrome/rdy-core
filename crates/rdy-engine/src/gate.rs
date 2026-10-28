@@ -2837,6 +2837,7 @@ impl Rdy {
             alt,
             relay: opts.relay,
             evidence,
+            assessment: None,
         }) {
             Ok(prepared) => prepared,
             Err(rdy_store::StoreError::ProposalMoved { latest, .. }) => {

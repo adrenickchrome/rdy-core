@@ -242,6 +242,7 @@ mod tests {
                     alt: None,
                     relay: None,
                     evidence: None,
+                    assessment: None,
                 })?;
                 rdy.store_mut().set_held(true)?;
                 rdy.invalidate();

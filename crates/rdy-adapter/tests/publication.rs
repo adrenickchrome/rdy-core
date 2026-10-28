@@ -553,6 +553,7 @@ fn ha6_a_redaction_after_a_publication_keeps_later_disclosure_reviews() {
             alt: None,
             relay: None,
             evidence: None,
+            assessment: None,
         })
         .unwrap();
     r.store_mut().set_held(true).unwrap();

@@ -108,6 +108,7 @@ fn request(proposal: Hash, approver: Provenance, relayed: bool) -> LandRequest {
         alt: None,
         relay: relayed.then(relay),
         evidence: relayed.then(card),
+        assessment: None,
     }
 }
 

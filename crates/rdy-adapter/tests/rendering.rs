@@ -114,6 +114,7 @@ fn remove(r: &mut Rdy, target: &str) {
             alt: None,
             relay: None,
             evidence: None,
+            assessment: None,
         })
         .unwrap();
     r.store_mut().set_held(true).unwrap();

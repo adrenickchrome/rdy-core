@@ -54,6 +54,7 @@ fn landed(s: &mut Store) -> Hash {
             alt: None,
             relay: None,
             evidence: None,
+            assessment: None,
         })
         .unwrap();
     s.commit_land(prepared, &[]).unwrap().landing

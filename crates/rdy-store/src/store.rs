@@ -669,6 +669,11 @@ fn frame_entries(
     match kind {
         kinds::CHANGE => {
             let change: Change = crate::codec::decode_split(&o)?;
+            // a change that records its writer's briefing (O3): the first one starts the rule
+            // that a stable change carries one
+            if change.links.briefing.is_some() {
+                out.push(IndexEntry::BriefedChange { at: loc });
+            }
             for op in &change.ops {
                 match op {
                     Op::Create { block } | Op::Update { block, .. } => {
@@ -733,6 +738,18 @@ fn frame_entries(
                 record: hash,
             }));
             out.extend(crate::plan::transition_entries(&rec, loc));
+        }
+        kinds::ASSESSMENT => {
+            // the bounded decoder: an assessment's lists may come from another store
+            let a: rdy_model::assessment::Assessment = crate::codec::decode_bounded_split(&o)
+                .map_err(|e| {
+                    crate::carried_records::refusal(&hash, kinds::ASSESSMENT, &e.to_string())
+                })?;
+            out.push(IndexEntry::AssessmentProposal {
+                proposal: a.proposal,
+                assessment: hash,
+                at: loc,
+            });
         }
         kinds::ANSWER => out.extend(crate::plan::answer_entries(hash, loc, payload, r)?),
         kinds::PLAN => out.extend(crate::plan::plan_entries(hash, loc, payload, r)?),

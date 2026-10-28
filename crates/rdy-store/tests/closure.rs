@@ -301,6 +301,7 @@ fn source() -> Src {
                 alt: None,
                 relay: None,
                 evidence: None,
+                assessment: None,
             },
             &move |l| l.assessment = Some(assessed),
         )
