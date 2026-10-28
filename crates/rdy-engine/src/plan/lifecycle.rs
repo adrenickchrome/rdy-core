@@ -365,8 +365,11 @@ pub(crate) fn prepare_landing_plan(
     let items: Vec<SealedItem> = computed
         .items
         .iter()
-        .map(|c| {
-            let outcome = outcome_of(c, &answers);
+        .map(|c| (c, outcome_of(c, &answers)))
+        // a tension item seals only as updated, confirmed or dismissed (D-ME2HD): an open one
+        // has no sealed form, so it stays out of the seal (the readiness gate refuses it)
+        .filter(|(c, outcome)| !(c.kind == PlanKind::Tension && *outcome == PlanOutcome::Open))
+        .map(|(c, outcome)| {
             let deferred =
                 outcome == PlanOutcome::Deferred && c.kind != PlanKind::UpdateImplementation;
             SealedItem {

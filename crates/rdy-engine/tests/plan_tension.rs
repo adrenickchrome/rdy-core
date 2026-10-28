@@ -687,3 +687,39 @@ fn rg5_a_reviewer_dismissal_removes_the_item() {
     assert!(tension_items(&info.plan).is_empty(), "{:#?}", info.plan);
     assert_eq!(plan_issues(&info.plan), vec![]);
 }
+
+/// New defect (found by the full run, `rdx10_redaction_moves_are_logged_in_the_authorizing_batch`):
+/// the store seals a tension item only as updated, confirmed or dismissed
+/// (`allowed_outcomes(Tension)`), so a landing that sealed an unanswered one as open wrote an
+/// invalid seal and failed. Until the readiness gate refuses such a version (E_PLAN_OPEN), its
+/// landing leaves the open tension item out of the seal.
+#[test]
+fn rg5_an_unanswered_tension_item_lands_out_of_the_seal() {
+    let mut fx = project();
+    let da = fx.da.clone();
+    put(
+        &mut fx.r,
+        "a",
+        json!([{"op": "update", "id": da, "body": "Drafts stay open for 90 hours."}]),
+    );
+    cite_deprecated(&mut fx, "a", "Y follows");
+    let tn = tension_label(&one_tension(&fx.r, "a").id);
+    assert_eq!(rows_of_kind(&whole(&fx.r, "a"), "tension")[0]["id"], tn);
+    let landing = land(&mut fx.r, "a");
+    let sealed =
+        fx.r.read()
+            .change_plan(
+                &PlanQuery {
+                    landing: Some(landing),
+                    max_tokens: Some(100_000),
+                    ..Default::default()
+                },
+                "work",
+            )
+            .unwrap();
+    let sealed = serde_json::to_value(sealed).unwrap();
+    assert!(rows_of_kind(&sealed, "tension").is_empty(), "{sealed:#}");
+    // the other items keep their seal
+    assert_eq!(rows_of_kind(&sealed, "update").len(), 1, "{sealed:#}");
+    assert!(!fx.r.store().features().has("plan_tension"));
+}
