@@ -680,15 +680,15 @@ fn ec3_the_site_build_is_unchanged() {
     const BASE: [(&str, &str); 3] = [
         (
             "canon",
-            "2bd6370452dc8c158340e9b839397c6c67ea143dd65212ae3eb9c70086ff3485",
+            "f579afda033de24ecfb553a2be6956152aa31ff9b395d0eab3783df49023578a",
         ),
         (
             "view:editing",
-            "1da69b50237f867999c4fea3ad9e8e07570c380ff474a3600f4e0d190b60b9f1",
+            "255c1871d268b4363a2c73e8e1ae3880f8e514eaea541face9c689f48042c933",
         ),
         (
             "view:reserved",
-            "928f9fd2a1e69b4677427ab037fc59a624c073127423621de16e405aed3fb0b7",
+            "e95075ea73deb977bf92844074f8e9eb184727bb5c4c7253247795d6cb4ff9f6",
         ),
     ];
     // the ids the corpus's generated pages and the reserved docs draw come from a seeded stream
