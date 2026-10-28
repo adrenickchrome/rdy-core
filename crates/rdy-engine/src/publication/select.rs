@@ -647,9 +647,11 @@ fn select(
 /// The tree check every retained set passes before any text is scanned, for a named profile and
 /// the implicit one alike. Every retained node's chain of parents reaches the top through
 /// retained nodes, with no missing parent and no loop; then every retained node sits where the
-/// tree allows: a doc or folder at the top or in a folder, and any other block in a doc or in
-/// another such block. With every chain rooted, the first tree node above other content is its
-/// home doc. Iterative, and each chain is walked once.
+/// tree allows: a doc or folder at the top or in a folder; a decision, a question, a finding or a
+/// source anywhere its chain is rooted, at the top and in a folder too (D-P3YD5,
+/// [`tree::may_sit_outside_a_doc`]); and any other block in a doc or in another such block. With
+/// every chain rooted, the first tree node above other content is its home doc or, for content
+/// under a block outside a doc, its folder or the top. Iterative, and each chain is walked once.
 ///
 /// `get` reads a block of the state; a selection reads its source state, a snapshot check its
 /// own blocks.
@@ -680,6 +682,8 @@ fn check_tree<'m>(
         };
         let placed = if tree::is_tree_type(&b.block_type) {
             parent.is_none_or(|p| p.block_type == tree::FOLDER)
+        } else if tree::may_sit_outside_a_doc(&b.block_type) {
+            true
         } else {
             parent.is_some_and(|p| p.block_type != tree::FOLDER)
         };

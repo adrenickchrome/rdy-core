@@ -4,6 +4,7 @@
 mod invariants;
 mod invariants_inbox;
 mod invariants_landing;
+mod invariants_outside_doc;
 mod invariants_redaction;
 mod invariants_reindex;
 mod invariants_wc;

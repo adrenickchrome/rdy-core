@@ -9,9 +9,19 @@ pub const NAME_MAX: usize = 64;
 /// being at depth 1. Keeps tree walks shallow and exported paths short.
 pub const MAX_FOLDER_DEPTH: usize = 32;
 
-/// Docs and folders have names and paths; every other block lives inside a doc.
+/// Docs and folders have names and paths. A decision, a question, a finding or a source may sit at the top level or in a folder ([`OUTSIDE_DOC_TYPES`]); every other block lives inside a doc.
 pub fn is_tree_type(block_type: &str) -> bool {
     block_type == DOC || block_type == FOLDER
+}
+
+/// The supporting types that may sit at the project root or directly in a folder (D-P3YD5,
+/// FW-F3): the four the engine adds to every pack. Every other block that is not a doc or a
+/// folder sits in a doc. A pack's own supporting type keeps its parent rule.
+pub const OUTSIDE_DOC_TYPES: [&str; 4] = ["decision", "question", "finding", "source"];
+
+/// Whether a block of `block_type` may sit at the project root or directly in a folder.
+pub fn may_sit_outside_a_doc(block_type: &str) -> bool {
+    OUTSIDE_DOC_TYPES.contains(&block_type)
 }
 
 /// Why `name` is not a valid folder or doc name, or None if it is.

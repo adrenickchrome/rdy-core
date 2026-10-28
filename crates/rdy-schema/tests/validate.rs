@@ -330,3 +330,125 @@ fn plc4_schema_names_fold_only_file_id_prefixes() {
         }
     }
 }
+
+/// ndh1: a valid block of each of the four engine supporting types (D-P3YD5, D-X3136).
+fn outside_doc_blocks(parent: Option<&str>) -> Vec<Block> {
+    let s = |v: &str| FieldValue::Str(v.into());
+    let mut decision = b("D-AAAAA", "decision", parent, "");
+    decision
+        .fields
+        .insert("statement".into(), s("Use one ledger."));
+    decision.fields.insert("status".into(), s("proposed"));
+    let mut question = b("Q-AAAAA", "question", parent, "");
+    question.fields.insert("prompt".into(), s("Which ledger?"));
+    let mut finding = b("F-AAAAA", "finding", parent, "");
+    finding.fields.insert("statement".into(), s("Tasks pass."));
+    finding.fields.insert(
+        "evidence".into(),
+        FieldValue::List(vec![FieldValue::Map(
+            [("quote".to_string(), s("they pass"))].into(),
+        )]),
+    );
+    let mut source = b("S-AAAAA", "source", parent, "");
+    source.fields.insert("title".into(), s("The spec"));
+    source.fields.insert("kind".into(), s("spec"));
+    source.fields.insert("locator".into(), s("docs/spec.md"));
+    vec![decision, question, finding, source]
+}
+
+#[test]
+fn ndh1_the_four_engine_supporting_types_may_sit_at_the_root_or_in_a_folder() {
+    let p = pack();
+    let folder = named("fd-AAAAA", "folder", None, "area");
+    for blk in outside_doc_blocks(None) {
+        let issues = validate_block(&p, &blk, None);
+        assert!(
+            issues.is_empty(),
+            "{} at the root: {issues:?}",
+            blk.block_type
+        );
+        assert!(!codes(&issues).contains(&"E_ORPHAN"));
+    }
+    for blk in outside_doc_blocks(Some("fd-AAAAA")) {
+        let issues = validate_block(&p, &blk, Some(&folder));
+        assert!(
+            issues.is_empty(),
+            "{} in a folder: {issues:?}",
+            blk.block_type
+        );
+        assert!(!codes(&issues).contains(&"E_CHILD_TYPE"));
+    }
+}
+
+#[test]
+fn ndh1_other_blocks_keep_their_parent_rules() {
+    let p = pack();
+    let folder = named("fd-AAAAA", "folder", None, "area");
+    let rule = |blk: &Block, parent: Option<&Block>, code: &str| -> Vec<(String, String)> {
+        validate_block(&p, blk, parent)
+            .into_iter()
+            .filter(|i| i.code == code)
+            .map(|i| (i.message, i.fix))
+            .collect()
+    };
+    let claim = || b("c-AAAAA", "claim", None, "x");
+    let rationale = || b("ra-AAAAA", "rationale", None, "x");
+    for (blk, ty) in [(claim(), "claim"), (rationale(), "rationale")] {
+        assert_eq!(
+            rule(&blk, None, "E_ORPHAN"),
+            vec![(
+                format!("{ty} must have a parent"),
+                "set parent to the section that should contain it".to_string()
+            )]
+        );
+        let mut held = blk.clone();
+        held.parent = Some(BlockId::parse("fd-AAAAA").unwrap());
+        assert_eq!(
+            rule(&held, Some(&folder), "E_CHILD_TYPE"),
+            vec![(
+                format!("a folder cannot contain a {ty}"),
+                "place it under a section (or another allowed parent type)".to_string()
+            )]
+        );
+    }
+    assert_eq!(
+        rule(
+            &b("pf-AAAAA", "publication_profile", None, ""),
+            None,
+            "E_ORPHAN"
+        ),
+        vec![(
+            "publication_profile must have a parent".to_string(),
+            "set parent to a doc id".to_string()
+        )]
+    );
+}
+
+#[test]
+fn ndh1_outside_doc_types_are_the_engine_supporting_types() {
+    use rdy_model::{decision, tree};
+    assert_eq!(
+        tree::OUTSIDE_DOC_TYPES,
+        [
+            decision::DECISION,
+            decision::QUESTION,
+            supporting::FINDING,
+            supporting::SOURCE
+        ]
+    );
+    let p = pack();
+    for ty in tree::OUTSIDE_DOC_TYPES {
+        assert_eq!(p.class_of(ty), TypeClass::Supporting, "{ty}");
+        assert!(tree::may_sit_outside_a_doc(ty), "{ty}");
+    }
+    for ty in [
+        "rationale",
+        "claim",
+        "prose",
+        "doc",
+        "folder",
+        "publication_profile",
+    ] {
+        assert!(!tree::may_sit_outside_a_doc(ty), "{ty}");
+    }
+}
