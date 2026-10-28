@@ -1854,10 +1854,10 @@ impl Rdy {
         Ok(change)
     }
 
-    /// Writes the key change (message `message`, from `rekey_change`) that gives each block in `re` its
-    /// re-derived key, as `Rdy::assign_keys` writes its keys: it briefs exactly those blocks,
-    /// cites that briefing, and marks the keys `key_auto`. The change commits and publishes in
-    /// its own batch (D-ME2HD, O1, O2).
+    /// Writes the key change (message `message`, from `rekey_change`) that gives each block in
+    /// `re` its re-derived key, as `Rdy::assign_keys` writes its keys: it briefs exactly those
+    /// blocks, cites that briefing, and marks the keys `key_auto`. The change commits and
+    /// publishes in its own batch (D-ME2HD, O1, O2).
     fn write_rekey(
         &mut self,
         s: &Session,
