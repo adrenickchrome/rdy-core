@@ -184,11 +184,12 @@ pub fn replay(
     Ok(out)
 }
 
-/// The kind and hash of a frame the record walker hands out, present or dropped.
+/// The logical kind and hash of a frame the record walker hands out, present or dropped: a
+/// frame of any encoding (`rdy_store::codec`).
 pub(crate) fn frame_kind(frame: &StoredFrame<'_>) -> (u8, Hash) {
     match *frame {
         StoredFrame::Present { kind, hash, .. } | StoredFrame::Dropped { kind, hash, .. } => {
-            (kind, hash)
+            (rdy_store::codec::logical_kind(kind), hash)
         }
     }
 }
@@ -201,12 +202,16 @@ pub fn events_for_batch(
 ) -> Result<Vec<Event>, RdyError> {
     let mut out = Vec::new();
     // the set a close in this batch belongs to: the batch's alternative set version, if any
-    let set = match frames.iter().find(|(k, _)| *k == kinds::ALT_SET) {
+    let set = match frames
+        .iter()
+        .find(|(k, _)| rdy_store::codec::logical_kind(*k) == kinds::ALT_SET)
+    {
         Some((_, h)) => Some(reader.alt_set(h)?.stable_id(*h)),
         None => None,
     };
     for &(kind, hash) in frames {
-        match kind {
+        // by the logical kind: a frame of any encoding (`rdy_store::codec`)
+        match rdy_store::codec::logical_kind(kind) {
             kinds::VIEW_OP => {
                 let op = reader.view_op(&hash)?;
                 let at_ms = op.at_ms;
@@ -317,8 +322,9 @@ pub fn events_for_batch(
                         actor: r.provenance.actor,
                         run: r.provenance.run,
                     },
-                    // a mention review (FW-CV4) is not a tension dismissal; no event names it yet
-                    ReviewSubject::Mention { .. } => continue,
+                    // a mention review (FW-CV4) is not a tension dismissal, and a check review is
+                    // carried with no event yet: no event names either
+                    ReviewSubject::Mention { .. } | ReviewSubject::Check { .. } => continue,
                 };
                 out.push(Event {
                     seq,
@@ -351,6 +357,9 @@ fn verdict_name(v: Verdict) -> &'static str {
         Verdict::Restore => "restore",
         Verdict::Tension => "tension",
         Verdict::NoTension => "no_tension",
+        Verdict::Pass => "pass",
+        Verdict::Concern => "concern",
+        Verdict::Fail => "fail",
     }
 }
 

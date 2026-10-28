@@ -51,24 +51,22 @@ impl Store {
     /// Writes an intent version and moves `intent/<stable>` to it, in one batch.
     pub fn put_intent(&mut self, i: &Intent) -> Result<Hash, StoreError> {
         self.put_versioned(
-            kinds::INTENT,
             INTENT_REF,
             "intent",
             i.stable,
             i.prev,
-            encode(i),
+            crate::codec::item_new(kinds::INTENT, i),
         )
     }
 
     /// Writes an alternative set version and moves `alt/<stable>` to it, in one batch.
     pub fn put_alt_set(&mut self, s: &AltSet) -> Result<Hash, StoreError> {
         self.put_versioned(
-            kinds::ALT_SET,
             ALT_REF,
             "alternative set",
             s.stable,
             s.prev,
-            encode(s),
+            crate::codec::item_new(kinds::ALT_SET, s),
         )
     }
 
@@ -83,10 +81,10 @@ impl Store {
         reason: &str,
         by: &Provenance,
     ) -> Result<AltWrite, StoreError> {
-        let bytes = encode(next);
+        let (kind, bytes) = crate::codec::item_new(kinds::ALT_SET, next);
         let id = Hash::of(&bytes);
         let name = self.chain_check(ALT_REF, "alternative set", next.stable, next.prev, id)?;
-        let mut items = vec![(kinds::ALT_SET, bytes)];
+        let mut items = vec![(kind, bytes)];
         let mut refs = vec![(name, id.0.to_vec())];
         let mut closed: Vec<String> = vec![];
         for view in close {
@@ -97,7 +95,7 @@ impl Store {
                 continue;
             }
             let (op, _, new_head) = self.close_part(view, &head, reason, by);
-            items.push((kinds::VIEW_OP, op));
+            items.push(op);
             refs.push((view_ref(view), encode(&new_head)));
             closed.push(view.clone());
         }
@@ -112,16 +110,15 @@ impl Store {
     /// Writes a version (`bytes`, of `kind`) and moves `<prefix><stable>` to it, in one batch.
     fn put_versioned(
         &mut self,
-        kind: u8,
         prefix: &str,
         what: &str,
         stable: Option<Hash>,
         prev: Option<Hash>,
-        bytes: Vec<u8>,
+        item: (u8, Vec<u8>),
     ) -> Result<Hash, StoreError> {
-        let id = Hash::of(&bytes);
+        let id = Hash::of(&item.1);
         let name = self.chain_check(prefix, what, stable, prev, id)?;
-        let mut items = vec![(kind, bytes)];
+        let mut items = vec![item];
         items.extend(self.ref_items_pub(vec![(name, id.0.to_vec())]));
         self.write(items)?;
         Ok(id)

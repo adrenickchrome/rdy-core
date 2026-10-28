@@ -65,7 +65,7 @@ fn objects(src: &Rdy, from: Location) -> Vec<(u8, Vec<u8>)> {
     let mut out = vec![];
     src.store()
         .for_each_frame_from(from, src.store().log_end(), |_, kind, _, payload, _| {
-            if COPIED.contains(&kind) {
+            if COPIED.contains(&rdy_store::codec::logical_kind(kind)) {
                 out.push((kind, payload.to_vec()));
             }
             Ok(())
@@ -171,9 +171,9 @@ fn hc4_adapter_matches_engine_and_never_reopens_holder() {
     // a consumer builds the whole summary from this crate's types
     let built = DumpSummary {
         out: Some(a.display().to_string()),
-        dump_format: 3,
+        dump_format: 4,
         kind: DumpKind::Increment,
-        store_format: inc.store_format,
+        store_format: inc.store_format.clone(),
         repo_id: repo,
         base: Location {
             segment: full.end.segment,

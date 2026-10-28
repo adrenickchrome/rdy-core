@@ -8,7 +8,9 @@ use crate::site::live::{LiveSite, spawn_site_worker};
 use crate::watch::PackWatch;
 use crate::writer::{Writer, WriterHandle};
 use arc_swap::ArcSwap;
-use rdy_engine::engine::{Engine, ExportRequest, RenderRequest, SiteFacts, SiteLink, WriteFn};
+use rdy_engine::engine::{
+    Engine, ExportRequest, ReadFn, RenderRequest, SiteFacts, SiteLink, WriteFn,
+};
 use rdy_engine::hub_publish::PublishRequest;
 use rdy_engine::semantic::lease::LeaseRegistry;
 use rdy_engine::site_target::SiteTarget;
@@ -185,6 +187,14 @@ impl Engine for DaemonEngine {
         self.0.writer.run(f)
     }
 
+    fn read_serialized(&self, f: ReadFn) -> Result<Value, RdyError> {
+        self.0.writer.read(f)
+    }
+
+    fn republish(&self) -> Result<(), RdyError> {
+        self.0.writer.republish()
+    }
+
     fn open_report(&self) -> OpenReport {
         self.0.open_report.clone()
     }
@@ -277,6 +287,16 @@ impl Engine for DaemonEngine {
             &self.0.root.join(&req.out),
             req.profile.as_deref(),
         )
+    }
+
+    /// `rdy_upgrade`: the connected project's facts from the published state, through the same
+    /// captured-state helper as the engine's default. It never calls the stop coordinator
+    /// (`crate::maintenance`): the daemon answering here is never stopped by its own result.
+    fn upgrade(
+        &self,
+        req: rdy_engine::maintenance::UpgradeRequest,
+    ) -> Result<rdy_engine::maintenance::UpgradeReport, RdyError> {
+        rdy_engine::maintenance::connected(&self.read(), req.dry_run)
     }
 
     /// `rdy_publish`: the publish helper's candidate upload, from one read state, off the

@@ -97,7 +97,7 @@ fn objects(src: &Rdy) -> Vec<(u8, Vec<u8>)> {
     let mut out = vec![];
     src.store()
         .for_each_frame_from(ORIGIN, src.store().log_end(), |_, kind, _, payload, _| {
-            if COPIED.contains(&kind) {
+            if COPIED.contains(&rdy_store::codec::logical_kind(kind)) {
                 out.push((kind, payload.to_vec()));
             }
             Ok(())
@@ -222,6 +222,9 @@ fn ha10_gate_facts_preserve_every_landing_field() {
             choice: Some("approve".into()),
             card_hash: Some(hs(8)),
         }),
+        assessment: None,
+        policy: None,
+        read_identity: None,
     };
     let dir = tempfile::tempdir().unwrap();
     let mut h = Rdy::create_holder(dir.path(), RepoId([1; 16])).unwrap();
@@ -514,6 +517,9 @@ fn link(n: u32, prev: Option<Hash>) -> LandingRecord {
         approved_version: None,
         rebased_from: vec![],
         evidence: None,
+        assessment: None,
+        policy: None,
+        read_identity: None,
     }
 }
 

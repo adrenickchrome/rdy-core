@@ -10,7 +10,7 @@ use rdy_model::*;
 use rdy_store::bounded::{self, RecordError};
 use rdy_store::dump::*;
 use rdy_store::dump_chain::*;
-use rdy_store::format::STORE_FORMAT;
+use rdy_store::format::LAST_SCALAR_STORE_FORMAT;
 use rdy_store::kinds;
 use rdy_store::segment::Location;
 use rdy_store::{Store, StoreError};
@@ -72,7 +72,7 @@ fn write(header: &DumpHeader, batches: &[DumpBatch], facts: RemovalFacts) -> Vec
 
 fn header(log_end: Location, chain: DumpChainHeader) -> DumpHeader {
     DumpHeader {
-        store_format: STORE_FORMAT,
+        store: rdy_store::format::DumpStore::Features(rdy_store::format::baseline_features()),
         log_end,
         rdy: "test".into(),
         chain: Some(chain),
@@ -91,6 +91,12 @@ fn set_record(bytes: &mut Vec<u8>, at: usize, payload: &[u8]) {
     out.extend_from_slice(payload);
     out.extend_from_slice(&bytes[at + HEAD + len..]);
     *bytes = out;
+}
+
+/// The bytes of a format-4 header record's payload with the baseline manifest and a 4-byte rdy
+/// text: the 175 fixed bytes, the manifest and the text.
+fn hlen() -> usize {
+    175 + rdy_store::format::baseline_features().to_json().len() + 4
 }
 
 /// The offset of the trailer record of a format-3 dump.
@@ -121,8 +127,13 @@ fn rolled_store() -> (tempfile::TempDir, Store, RepoId, Vec<DumpBatch>) {
 
 #[test]
 fn hc1_header_and_trailer_match_literal_bytes() {
-    assert_eq!(HEADER_FIXED, 175, "the fixed part of the format-3 header");
-    assert_eq!(TRAILER_LEN, 69, "the format-3 trailer payload");
+    assert_eq!(
+        HEADER_FIXED, 175,
+        "the fixed part of the format-3 and format-4 header"
+    );
+    assert_eq!(TRAILER_LEN, 69, "the format-3 and format-4 trailer payload");
+    let json = rdy_store::format::baseline_features().to_json();
+    let header_len = 175 + json.len() + 4;
     let repo = RepoId([0xA5; 16]);
     let full = header(
         at(2, 0x0102_0304_0506),
@@ -136,14 +147,16 @@ fn hc1_header_and_trailer_match_literal_bytes() {
         let w = DumpWriter::new(Vec::new(), &full).unwrap();
         w.finish(facts).unwrap()
     };
-    assert_eq!(&bytes[..12], b"RDYDUMP\n\x03\x00\x00\x00");
-    // the header record: 175 bytes and the rdy text
-    let p = &bytes[12 + HEAD..12 + HEAD + 179];
-    assert_eq!(&bytes[12..16], &179u32.to_le_bytes());
+    assert_eq!(&bytes[..12], b"RDYDUMP\n\x04\x00\x00\x00");
+    // the header record: 175 bytes, the manifest and the rdy text
+    let p = &bytes[12 + HEAD..12 + HEAD + header_len];
+    assert_eq!(&bytes[12..16], &(header_len as u32).to_le_bytes());
     assert_eq!(bytes[16], rec::HEADER);
     assert_eq!(&bytes[17..49], &Hash::of(p).0);
     let mut want = vec![0u8]; // kind: full
-    want.extend_from_slice(&18u32.to_le_bytes()); // the current store format
+    // the store's features: the manifest's length and canonical JSON
+    want.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    want.extend_from_slice(&json);
     want.extend_from_slice(&[0xA5; 16]);
     want.extend_from_slice(&[0u8; 12]); // base 0.0
     want.extend_from_slice(&[0u8; 48]); // base marker zero
@@ -160,14 +173,14 @@ fn hc1_header_and_trailer_match_literal_bytes() {
     // the trailer record: 106 bytes framed, 69 of payload
     let t = trailer_at(&bytes);
     assert_eq!(bytes.len() - t, 106);
-    assert_eq!(t, 12 + HEAD + 179, "the trailer follows the header");
+    assert_eq!(t, 12 + HEAD + header_len, "the trailer follows the header");
     assert_eq!(&bytes[t..t + 4], &69u32.to_le_bytes());
     assert_eq!(bytes[t + 4], rec::TRAILER);
     let tp = &bytes[t + HEAD..];
     assert_eq!(&bytes[t + 5..t + HEAD], &Hash::of(tp).0);
     // the digest covers the header record: kind, length and hash
     let mut link = vec![rec::HEADER];
-    link.extend_from_slice(&179u64.to_le_bytes());
+    link.extend_from_slice(&(header_len as u64).to_le_bytes());
     link.extend_from_slice(&Hash::of(p).0);
     let mut want = vec![];
     want.extend_from_slice(&0u64.to_le_bytes()); // batches
@@ -188,7 +201,7 @@ fn hc1_header_and_trailer_match_literal_bytes() {
     // an increment: kind 1 and its base facts, in field order
     let prev = ChainEnd {
         repo_id: repo,
-        store_format: STORE_FORMAT,
+        store_format: rdy_store::format::DumpStore::Features(rdy_store::format::baseline_features()),
         end: at(1, 0x0A0B),
         end_batch: marker(1, 0x0909, 2, 0x11),
         digest: Hash([0x22; 32]),
@@ -202,9 +215,10 @@ fn hc1_header_and_trailer_match_literal_bytes() {
         .finish(RemovalFacts::default())
         .unwrap()
         .0;
-    let p = &bytes[12 + HEAD..12 + HEAD + 179];
+    let p = &bytes[12 + HEAD..12 + HEAD + hlen()];
     let mut want = vec![1u8];
-    want.extend_from_slice(&18u32.to_le_bytes()); // the current store format
+    want.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    want.extend_from_slice(&json);
     want.extend_from_slice(&[0xA5; 16]);
     want.extend_from_slice(&1u32.to_le_bytes());
     want.extend_from_slice(&0x0A0Bu64.to_le_bytes());
@@ -233,7 +247,7 @@ fn hc1_header_and_trailer_match_literal_bytes() {
     // a kind byte of 2 to 255 does not parse, in the reader and the envelope
     for kind in 2..=255u8 {
         let mut b = bytes.clone();
-        let mut p = b[12 + HEAD..12 + HEAD + 179].to_vec();
+        let mut p = b[12 + HEAD..12 + HEAD + hlen()].to_vec();
         p[0] = kind;
         set_record(&mut b, 12, &p);
         let e = DumpReader::open(&b[..]).err().expect("refused");
@@ -250,7 +264,7 @@ fn hc1_header_and_trailer_match_literal_bytes() {
 
 #[test]
 fn hc1_released_pairs_keep_frozen_kind_sets() {
-    assert_eq!((DUMP_FORMAT, STORE_FORMAT), (3, 18));
+    assert_eq!((DUMP_FORMAT, LAST_SCALAR_STORE_FORMAT), (4, 18));
     assert_eq!(kinds::REDACTION_CARRIED, 23);
     assert_eq!(
         READS,
@@ -370,7 +384,7 @@ fn hc1_full_and_increment_boundaries_are_exact() {
     let base = batch_end(&batches[n - 2]).unwrap();
     let prev = ChainEnd {
         repo_id: repo,
-        store_format: STORE_FORMAT,
+        store_format: rdy_store::format::DumpStore::Features(rdy_store::format::baseline_features()),
         end: base,
         end_batch: BatchMarker::of(&batches[n - 2]),
         digest: Hash([9; 32]),
@@ -417,7 +431,7 @@ fn hc1_full_and_increment_boundaries_are_exact() {
     assert_eq!(base.segment + 1, batches[i].start.segment);
     let prev = ChainEnd {
         repo_id: repo,
-        store_format: STORE_FORMAT,
+        store_format: rdy_store::format::DumpStore::Features(rdy_store::format::baseline_features()),
         end: base,
         end_batch: BatchMarker::of(&batches[i - 1]),
         digest: Hash([9; 32]),
@@ -440,7 +454,7 @@ fn hc1_full_and_increment_boundaries_are_exact() {
     ] {
         let mut b = batches[i].clone();
         b.start = start;
-        let mut moved = prev;
+        let mut moved = prev.clone();
         moved.end = base;
         let h = header(
             batch_end(&b).unwrap(),
@@ -516,7 +530,7 @@ fn hc1_envelope_reads_only_header_and_trailer() {
         read: 0,
     };
     let (format, h, t, len) = read_envelope(&mut r).unwrap();
-    assert_eq!((format, len), (3, bytes.len() as u64));
+    assert_eq!((format, len), (4, bytes.len() as u64));
     assert_eq!(h, full);
     assert_eq!(
         t,
@@ -531,7 +545,7 @@ fn hc1_envelope_reads_only_header_and_trailer() {
     );
     assert_eq!(
         r.read,
-        12 + (HEAD + 179) as u64 + 106,
+        12 + (HEAD + hlen()) as u64 + 106,
         "prelude, header, trailer"
     );
     // a damaged trailer or header record is refused by its own hash
@@ -545,7 +559,7 @@ fn hc1_envelope_reads_only_header_and_trailer() {
     let e = read_envelope(&mut Cursor::new(&b)).unwrap_err();
     assert_eq!(damaged(e), "a record's hash does not match its bytes");
     // a file shorter than its envelope
-    let e = read_envelope(&mut Cursor::new(&bytes[..12 + HEAD + 179 + 50])).unwrap_err();
+    let e = read_envelope(&mut Cursor::new(&bytes[..12 + HEAD + hlen() + 50])).unwrap_err();
     assert_eq!(damaged(e), "the file ends before its trailer");
     // a last record that is not a trailer of its fixed length
     let mut b = bytes.clone();
@@ -572,7 +586,7 @@ fn hc1_large_lengths_flags_and_offsets_refuse() {
     h.rdy.push('r');
     let e = DumpWriter::new(Vec::new(), &h).err().expect("refused");
     assert_eq!(refused(e), "the header does not parse");
-    let mut p = bytes[12 + HEAD..12 + HEAD + 175 + 256].to_vec();
+    let mut p = bytes[12 + HEAD..12 + HEAD + hlen() - 4 + 256].to_vec();
     let n = p.len();
     p[n - 258..n - 256].copy_from_slice(&257u16.to_le_bytes());
     p.push(b'r');
@@ -584,8 +598,8 @@ fn hc1_large_lengths_flags_and_offsets_refuse() {
     );
     // a header payload one byte short or long
     let bytes = write(&empty, &[], none);
-    let p = bytes[12 + HEAD..12 + HEAD + 179].to_vec();
-    for p in [p[..178].to_vec(), [&p[..], &[0]].concat()] {
+    let p = bytes[12 + HEAD..12 + HEAD + hlen()].to_vec();
+    for p in [p[..hlen() - 1].to_vec(), [&p[..], &[0]].concat()] {
         let mut b = bytes.clone();
         set_record(&mut b, 12, &p);
         assert_eq!(
@@ -661,7 +675,9 @@ fn hc1_large_lengths_flags_and_offsets_refuse() {
     let inc = |b: &DumpBatch, end: Location| {
         let prev = ChainEnd {
             repo_id: repo,
-            store_format: STORE_FORMAT,
+            store_format: rdy_store::format::DumpStore::Features(
+                rdy_store::format::baseline_features(),
+            ),
             end: b.start,
             end_batch: marker(0, 0, 1, 7),
             digest: Hash([3; 32]),
@@ -939,12 +955,13 @@ fn hc1_carried_encoding_adds_no_existing_bytes() {
     // the chain facts in JSON: lowercase hashes, a 32-digit repo id, a lowercase kind
     let prev = ChainEnd {
         repo_id: RepoId([0xAB; 16]),
-        store_format: STORE_FORMAT,
+        store_format: rdy_store::format::DumpStore::Features(rdy_store::format::baseline_features()),
         end: at(1, 2),
         end_batch: marker(1, 0, 3, 0xCD),
         digest: Hash([0xEF; 32]),
     };
-    let j = serde_json::to_value(prev).unwrap();
+    let j = serde_json::to_value(&prev).unwrap();
+    assert_eq!(j["store_format"]["features"]["manifest_version"], 1);
     assert_eq!(j["repo_id"], "ab".repeat(16));
     assert_eq!(j["end_batch"]["digest"], "cd".repeat(32));
     assert_eq!(j["digest"], "ef".repeat(32));
@@ -991,7 +1008,7 @@ fn increment_of(base: Location, base_batch: BatchMarker, batches: &[DumpBatch]) 
     let last = batches.last().expect("a batch");
     let prev = ChainEnd {
         repo_id: RepoId([4; 16]),
-        store_format: STORE_FORMAT,
+        store_format: rdy_store::format::DumpStore::Features(rdy_store::format::baseline_features()),
         end: base,
         end_batch: base_batch,
         digest: Hash([8; 32]),
@@ -1406,7 +1423,7 @@ fn hc1_carried_records_are_decoded_within_bounds_on_read() {
     let over = carried_bytes("a".repeat(bounded::MAX_TEXT_BYTES + 1));
     let e = read_all(&forge_one(kinds::REDACTION_CARRIED, &over)).unwrap_err();
     assert!(
-        matches!(&e, StoreError::Dump { at, .. } if *at == (12 + HEAD + 179 + HEAD + 80) as u64),
+        matches!(&e, StoreError::Dump { at, .. } if *at == (12 + HEAD + hlen() + HEAD + 80) as u64),
         "blamed on the frame: {e:?}"
     );
     assert_eq!(damaged(e), "1048576 text bytes");
@@ -1456,7 +1473,7 @@ fn hc1_a_record_payload_holds_at_most_64_mib() {
     drop(b);
     // and the reader refuses its length before it reads the payload
     let forged = forge_one(kinds::BLOB_CHUNK, &over);
-    let frame_at = 12 + HEAD + 179 + HEAD + 80;
+    let frame_at = 12 + HEAD + hlen() + HEAD + 80;
     let e = read_all(&forged).unwrap_err();
     assert!(
         matches!(&e, StoreError::Dump { at, .. } if *at == frame_at as u64),

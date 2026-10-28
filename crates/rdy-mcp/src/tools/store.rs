@@ -1,5 +1,6 @@
 //! dl7: `rdy_dump` and `rdy_load` (D-FR0C4 F4, F6 and F7); ec12: `rdy_clone` (D-9QV85, D-D2NPN;
 //! O6); chained dumps and stopped loads (D-2FMRR, D-QF2HQ). Any session may call them. Relative paths resolve against the project directory.
+//! ok11: `rdy_upgrade` (D-WWAK7, D-KQ4CA, D-1HDVA) on the connected project only.
 use super::*;
 use rdy_engine::clone::{CloneSource, SourceKind, clone, source_kind};
 use rdy_engine::dump_error;
@@ -52,6 +53,13 @@ pub struct StreamCheckParams {
     pub file: String,
     /// Refuse a batch of another repo: 32 hex digits.
     pub repo_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpgradeParams {
+    /// true: inspect the upgrade without writes. Default false.
+    pub dry_run: Option<bool>,
 }
 
 /// `p` as given when absolute, else under the project directory `root` (`join` replaces the
@@ -165,4 +173,25 @@ pub fn rdy_stream_check(st: &mut McpState, p: StreamCheckParams) -> Result<Value
     })?;
     let report = check_batch(std::io::BufReader::new(file), repo)?;
     Ok(serde_json::to_value(report).expect("a report serializes"))
+}
+
+/// `rdy_upgrade` (D-WWAK7, D-1HDVA): the connected project's store upgrade facts, through the
+/// engine (`Engine::upgrade`), which reads one captured state: no steps, since a store opened
+/// normally is already upgraded, and the last `meta/upgrade` receipt. It takes no directory:
+/// another project is the CLI's `rdy upgrade <dir>`. Every role may dry-run; an apply needs a
+/// role that writes. It is no write closure: nothing here stops, opens or locks a store.
+pub fn rdy_upgrade(st: &mut McpState, p: UpgradeParams) -> Result<Value, RdyError> {
+    let s = session(st)?;
+    let dry_run = p.dry_run.unwrap_or(false);
+    if !dry_run && !s.role.can_write() {
+        return Err(RdyError::new(
+            rdy_engine::E_PERMISSION,
+            "role Reader cannot upgrade",
+            "start the session as a writer",
+        ));
+    }
+    let report = st
+        .engine
+        .upgrade(rdy_engine::maintenance::UpgradeRequest { dry_run })?;
+    Ok(rdy_engine::maintenance::report_json(&report))
 }

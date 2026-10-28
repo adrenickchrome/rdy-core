@@ -8,7 +8,7 @@ use rmcp::{model::CallToolResult, tool, tool_router};
 #[tool_router(router = views_router, vis = "pub(crate)")]
 impl RdyServer {
     #[tool(
-        description = "Create, fork, include, exclude, compare, list, show, close or undo views. Include, exclude, close and undo need ownership of the target view. Include, exclude and undo return the op's consequences, with conflict entries to resolve."
+        description = "Create, fork, include, exclude, replay, compare, list, show, close or undo views. Include, exclude, replay, close and undo need ownership of the target view. Include, exclude, replay and undo return the op's consequences, with conflict entries to resolve."
     )]
     async fn rdy_view(&self, Parameters(p): Parameters<view_tools::ViewParams>) -> CallToolResult {
         self.run("rdy_view", p, view_tools::rdy_view).await

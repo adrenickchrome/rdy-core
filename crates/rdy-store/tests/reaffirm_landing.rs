@@ -154,6 +154,9 @@ fn cp16_local_card_field_rule_is_shared() {
             approved_version: None,
             rebased_from: vec![],
             evidence: Some(e.clone()),
+            assessment: None,
+            policy: None,
+            read_identity: None,
         };
         let l = Hash::of(b"landing");
         let ruled = landing_field_rules::<StoreError>(&l, &rec, Some(view), &mut |_, _| Ok(true));

@@ -158,6 +158,8 @@ fn links(of: &str) -> ChangeLinks {
         alternative: alt(7, of),
         client_nonce: Some(t(&format!("{of}.client_nonce"))),
         imported_by: Some(actor_run(&format!("{of}.imported_by"))),
+        replayed_from: None,
+        briefing: None,
     }
 }
 
@@ -363,12 +365,27 @@ fn change_residue() -> ChangeResidue {
             alternative: alt(99, "residue.alt"),
             client_nonce: Some(t("residue.client_nonce")),
             imported_by: Some(actor_run("residue.imported_by")),
+            replayed_from: None,
+            briefing: None,
         },
+        source_encoding: 1,
     }
 }
 
 fn enc<T: Serialize>(v: &T) -> Vec<u8> {
     postcard::to_allocvec(v).unwrap()
+}
+
+/// `v` as a stored frame of logical kind `kind`, in that kind's latest encoding: its raw kind
+/// and payload.
+fn frame<T: Serialize + 'static>(kind: u8, v: &T) -> (u8, Vec<u8>) {
+    rdy_store::codec::item(kind, v).unwrap()
+}
+
+/// `refs_of` the frame of `v` as a stored object of logical kind `kind`.
+fn frame_refs<T: Serialize + 'static>(kind: u8, v: &T) -> Result<Vec<ObjectRef>, RecordError> {
+    let (raw, payload) = frame(kind, v);
+    refs_of(raw, &payload)
 }
 
 /// One sample record: its arm's name, kind, bytes and expected edges (in any order).
@@ -379,11 +396,13 @@ struct Sample {
     edges: Vec<ObjectRef>,
 }
 
-fn s<T: Serialize>(arm: &'static str, kind: u8, v: &T, edges: Vec<ObjectRef>) -> Sample {
+/// A sample of `v` as the frame of logical kind `kind`: its raw kind and payload.
+fn s<T: Serialize + 'static>(arm: &'static str, kind: u8, v: &T, edges: Vec<ObjectRef>) -> Sample {
+    let (kind, bytes) = frame(kind, v);
     Sample {
         arm,
         kind,
-        bytes: enc(v),
+        bytes,
         edges,
     }
 }
@@ -424,6 +443,7 @@ fn samples() -> Vec<Sample> {
         links: ChangeLinks::default(),
         justification: Some(Justification::Implements(vec![id("d-00003")])),
         ops: vec![],
+        read_identity: None,
         ..edit.clone()
     };
     let proposal = Proposal {
@@ -464,6 +484,9 @@ fn samples() -> Vec<Sample> {
             // the card shown: an identity
             card_hash: Some(h(28)),
         }),
+        assessment: None,
+        policy: None,
+        read_identity: None,
     };
     let snapshot = StateSnapshot {
         blocks: BTreeMap::from([(id("c-00001"), h(30)), (id("d-00003"), h(31))]),
@@ -853,6 +876,7 @@ fn samples() -> Vec<Sample> {
                 order: t("residue.order"),
                 content_hash: h(91),
                 frozen: true,
+                source_encoding: 0,
             }),
             vec![],
         ),
@@ -901,7 +925,255 @@ fn samples() -> Vec<Sample> {
         out.push(s("transition new suspect", TRANSITION, &record, edges));
     }
     out.extend(plan_samples());
+    out.extend(carried_samples());
     out
+}
+
+/// A plain provenance: no text marker (the carried samples' text is bounded by the decoder).
+fn plain_prov() -> Provenance {
+    Provenance {
+        actor: "agent:w".into(),
+        run: None,
+        role: Role::Writer,
+        at_ms: 5,
+    }
+}
+
+/// ok4: the carried shapes and the fields that name them, each with its edges. Pack, config,
+/// card, tension and case hashes and a briefing are identities, no edges. No text marker.
+fn carried_samples() -> Vec<Sample> {
+    use rdy_model::assessment::*;
+    let scores = AssessmentScores {
+        overall: 1,
+        grounded: 1,
+        consistent: 1,
+        current: 1,
+        connected: 1,
+        complete: 1,
+        governed: 1,
+    };
+    let issue = |dismissal: u8| AssessmentIssue {
+        block: id_of("b-00001"),
+        dimension: "grounded".into(),
+        code: "untied_content".into(),
+        subject: None,
+        fix: "f".into(),
+        dismissal: Some(h(dismissal)),
+    };
+    let assessment = Assessment {
+        proposal: h(130),
+        base: Some(h(131)),
+        method: 1,
+        pack: AssessmentPack {
+            name: "p".into(),
+            version: "1".into(),
+            digest: h(137),
+        },
+        config: h(138),
+        policy: Some(AssessedPolicy {
+            policy: Some(PolicyRef {
+                block: id_of("p-00001"),
+                version: h(132),
+            }),
+            verdict: PolicyVerdict::Accepts { rule: "r".into() },
+        }),
+        facts: AssessmentFacts {
+            changes: 0,
+            consequences: 0,
+            plan: AssessmentPlanCounts {
+                open: 0,
+                closed: 0,
+                deferred: 0,
+                by_kind: vec![],
+            },
+            supersedes: vec![],
+            reaffirms: vec![],
+            reversibility: vec![],
+            exceptions: vec![],
+        },
+        tensions: vec![AssessmentTension {
+            id: h(140),
+            kind: "fork".into(),
+            severity: AssessmentSeverity::Advisory,
+            status: AssessmentTensionStatus::Dismissed,
+            answer: Some(AssessmentPlanAnswerRef {
+                plan: h(133),
+                item: h(139),
+            }),
+            dismissal: Some(h(134)),
+            summary: "s".into(),
+            blocks: vec![],
+            vkey: h(141),
+        }],
+        tensions_omitted: 1,
+        suspects: vec![],
+        suspects_omitted: 2,
+        coverage: AssessmentCoverage {
+            pages: vec![],
+            corpus: AssessmentScoreChange {
+                before: scores.clone(),
+                after: scores,
+            },
+        },
+        confidence: AssessmentConfidence {
+            level: AssessmentLevel::Low,
+            reasons: vec![issue(136)],
+        },
+        reach: vec![],
+        card: AssessmentCard {
+            hash: h(139),
+            facts: vec![],
+        },
+        scope: AssessmentScope {
+            proposal: h(130),
+            blocks: vec![],
+        },
+        issues: vec![issue(135)],
+    };
+    let landing = LandingRecord {
+        proposal: h(160),
+        prev: None,
+        state: h(161),
+        approved_by: plain_prov(),
+        changes: vec![],
+        chosen: None,
+        checks: vec![],
+        assurance: Assurance::Policy,
+        relayed_by: None,
+        relay_evidence: None,
+        approved_version: None,
+        rebased_from: vec![],
+        evidence: None,
+        assessment: Some(h(150)),
+        policy: Some(PolicyRef {
+            block: id_of("p-00001"),
+            version: h(151),
+        }),
+        read_identity: None,
+    };
+    let replay = Change {
+        view: "work".into(),
+        ops: vec![],
+        deps: vec![h(162)],
+        provenance: plain_prov(),
+        justification: None,
+        message: String::new(),
+        links: ChangeLinks {
+            replayed_from: Some(h(152)),
+            briefing: Some(h(153)),
+            ..ChangeLinks::default()
+        },
+        read_identity: None,
+    };
+    let verdict = Answer {
+        item: format!("verdict:{}", h(149)),
+        act: AnswerAct::AcceptVerdict,
+        option: None,
+        label: None,
+        options: vec![],
+        card_hash: Some(h(154)),
+        targets: vec![],
+        person: plain_prov(),
+        relayed_by: None,
+        relay_evidence: None,
+        evidence_kind: None,
+        note: None,
+    };
+    vec![
+        s(
+            "assessment",
+            ASSESSMENT,
+            &assessment,
+            vec![
+                some(PROPOSAL, 130),
+                some(LANDING, 131),
+                some(BLOCK, 132),
+                some(PLAN, 133),
+                some(REVIEW, 134),
+                some(REVIEW, 135),
+                some(REVIEW, 136),
+            ],
+        ),
+        s(
+            "dispute",
+            DISPUTE,
+            &rdy_model::dispute::Dispute {
+                landing: h(142),
+                opened_by: plain_prov(),
+                reason: "r".into(),
+                at_ms: 1,
+            },
+            vec![some(LANDING, 142)],
+        ),
+        s(
+            "dispute resolution",
+            DISPUTE_RESOLUTION,
+            &rdy_model::dispute::DisputeResolution {
+                dispute: h(143),
+                outcome: rdy_model::dispute::DisputeOutcome::Upheld,
+                by: plain_prov(),
+                correction: Some(h(144)),
+            },
+            vec![some(DISPUTE, 143), some(LANDING, 144)],
+        ),
+        s(
+            "check request",
+            CHECK_REQUEST,
+            &rdy_model::check_request::CheckRequest {
+                check: "c".into(),
+                subject: rdy_model::check_request::CheckSubject {
+                    blocks: vec![id_of("b-00001")],
+                    change: Some(h(145)),
+                    version: Some(h(146)),
+                    code: None,
+                },
+                scope: "s".into(),
+                case_hash: h(147),
+                mode: rdy_model::check_request::CheckMode::Independent,
+                reason: None,
+                requested_by: plain_prov(),
+                relayed_by: None,
+                relay: None,
+            },
+            vec![some(CHANGE, 145), some(PROPOSAL, 146)],
+        ),
+        s(
+            "review check",
+            REVIEW,
+            &Review {
+                subject: ReviewSubject::Check { request: h(148) },
+                case_hash: Some(h(147)),
+                verdict: Verdict::Concern,
+                reason: "r".into(),
+                citations: vec![],
+                provenance: plain_prov(),
+            },
+            vec![some(CHECK_REQUEST, 148)],
+        ),
+        s(
+            "answer accept verdict",
+            ANSWER,
+            &verdict,
+            vec![some(REVIEW, 149)],
+        ),
+        s(
+            "landing assessed by policy",
+            LANDING,
+            &landing,
+            vec![
+                some(ASSESSMENT, 150),
+                some(BLOCK, 151),
+                some(PROPOSAL, 160),
+                some(SNAPSHOT, 161),
+            ],
+        ),
+        s(
+            "change replay",
+            CHANGE,
+            &replay,
+            vec![some(CHANGE, 152), some(CHANGE, 162)],
+        ),
+    ]
 }
 
 /// A plan version's sealed item: its identity, subject and cause are no edges; its accepting
@@ -1014,11 +1286,15 @@ fn ha1_refs_cover_every_assigned_object_kind() {
             sample.arm
         );
     }
-    let covered: BTreeSet<u8> = all.iter().map(|s| s.kind).collect();
+    let covered: BTreeSet<u8> = all
+        .iter()
+        .map(|s| rdy_store::codec::logical_kind(s.kind))
+        .collect();
+    // ok4: the four carried kinds, 25 to 28
     let assigned: BTreeSet<u8> = (1..=7)
         .chain([9, 10, 11, 13])
         .chain(15..=22)
-        .chain([24])
+        .chain(24..=28)
         .collect();
     assert_eq!(covered, assigned);
     assert_eq!(
@@ -1055,7 +1331,7 @@ fn ha1_refs_cover_every_assigned_object_kind() {
         ChangeLinks::default(),
         Justification::Implements(vec![]),
     );
-    assert_eq!(refs_of(CHANGE, &enc(&embeds)), Err(RecordError::Decode));
+    assert_eq!(frame_refs(CHANGE, &(embeds)), Err(RecordError::Decode));
     // A span names its object by a portable kind only.
     let mut r = redaction();
     r.manifest.spans[0].kind = 12;
@@ -1071,13 +1347,15 @@ fn ha1_identity_hashes_are_not_dependencies() {
     // and a hash spelled in report text.
     let identities: BTreeSet<Hash> = [
         250, 28, 35, 51, 61, 62, 63, 64, 65, 66, 67, 70, 73, 89, 90, 91, 92, 102,
+        // ok4: pack digest, config, card, tension id and vkey, case, briefing, verdict card
+        137, 138, 139, 140, 141, 147, 153, 154,
     ]
     .into_iter()
     .map(h)
     .collect();
     for sample in samples() {
-        let refs = refs_of(sample.kind, &sample.bytes).unwrap();
-        for r in &refs {
+        let edges = refs_of(sample.kind, &sample.bytes).unwrap();
+        for r in &edges {
             assert!(
                 !identities.contains(&r.hash),
                 "{}: identity {:?} became an edge",
@@ -1107,11 +1385,11 @@ fn ha1_identity_hashes_are_not_dependencies() {
     };
     assert_eq!(refs_of(ANSWER, &enc(&answer)), Ok(vec![any(4)]));
     // A change residue's own id is not a dependency of it.
-    let refs = refs_of(
+    let edges = frame_refs(
         REDACTION_RESIDUE,
-        &enc(&RedactionResidue::Change(change_residue())),
+        &RedactionResidue::Change(change_residue()),
     );
-    assert!(!refs.unwrap().iter().any(|r| r.hash == h(92)));
+    assert!(!edges.unwrap().iter().any(|r| r.hash == h(92)));
 }
 
 /// Every variant of `$ty`, listed through an exhaustive match: a new variant does not compile
@@ -1152,10 +1430,10 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
     let answer_edges = vec![any(36), any(37)];
     let acts = every!(AnswerAct: RejectProposal, Later, Confirm, RejectDecision, AnswerQuestion,
         Dismiss, Tag, ViewOwn, CloseStale, Propose, KeepSuspect, AcceptDeferrals, RefuseDeferrals,
-        RejectReaffirm);
+        RejectReaffirm, Dispute, ResolveDispute, AcceptVerdict);
     let roles = every!(Role: Reader, Writer, Reviewer, Approver);
     let evidence = every!(EvidenceKind: Elicited, Card, Text);
-    assert_eq!((acts.len(), roles.len(), evidence.len()), (14, 4, 3));
+    assert_eq!((acts.len(), roles.len(), evidence.len()), (17, 4, 3));
     for act in &acts {
         let a = answer(*act, Role::Approver, Some(EvidenceKind::Text));
         assert_eq!(
@@ -1164,6 +1442,19 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
             "{act:?}"
         );
     }
+    // ok4: an AcceptVerdict answer's item `verdict:<hex>` names its REVIEW, one more edge; an
+    // item of any other form names none
+    let mut verdict = answer(
+        AnswerAct::AcceptVerdict,
+        Role::Approver,
+        Some(EvidenceKind::Text),
+    );
+    verdict.item = format!("verdict:{}", h(38));
+    let mut want = answer_edges.clone();
+    want.push(some(REVIEW, 38));
+    assert_eq!(frame_refs(ANSWER, &verdict), Ok(sorted(want)));
+    verdict.act = AnswerAct::Confirm;
+    assert_eq!(frame_refs(ANSWER, &verdict), Ok(answer_edges.clone()));
     for role in &roles {
         let a = answer(AnswerAct::Confirm, *role, None);
         assert_eq!(
@@ -1201,6 +1492,9 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
             choice: None,
             card_hash: Some(h(28)),
         }),
+        assessment: None,
+        policy: None,
+        read_identity: None,
     };
     let landing_edges = vec![some(PROPOSAL, 20), some(SNAPSHOT, 22), some(CHANGE, 23)];
     let assurances = every!(Assurance: Policy, Relayed, Local);
@@ -1209,7 +1503,7 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
         for kind in &evidence {
             let l = landing(*assurance, *kind);
             assert_eq!(
-                refs_of(LANDING, &enc(&l)),
+                frame_refs(LANDING, &(l)),
                 Ok(sorted(landing_edges.clone())),
                 "{assurance:?} {kind:?}"
             );
@@ -1226,7 +1520,7 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
         };
         let c = change("change", vec![], ChangeLinks::default(), editorial.clone());
         assert_eq!(
-            refs_of(CHANGE, &enc(&c)),
+            frame_refs(CHANGE, &(c)),
             Ok(vec![some(CHANGE, 5)]),
             "{class:?}"
         );
@@ -1235,7 +1529,7 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
         residue.links = ChangeLinks::default();
         residue.justification = Some(editorial);
         assert_eq!(
-            refs_of(REDACTION_RESIDUE, &enc(&RedactionResidue::Change(residue))),
+            frame_refs(REDACTION_RESIDUE, &(RedactionResidue::Change(residue))),
             Ok(vec![some(CHANGE, 97)]),
             "residue {class:?}"
         );
@@ -1254,7 +1548,7 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
     }
     let c = change("change", vec![], ChangeLinks::default(), reflects.clone());
     assert_eq!(
-        refs_of(CHANGE, &enc(&c)),
+        frame_refs(CHANGE, &(c)),
         Ok(vec![some(CHANGE, 5)]),
         "reflects"
     );
@@ -1263,7 +1557,7 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
     residue.links = ChangeLinks::default();
     residue.justification = Some(reflects);
     assert_eq!(
-        refs_of(REDACTION_RESIDUE, &enc(&RedactionResidue::Change(residue))),
+        frame_refs(REDACTION_RESIDUE, &(RedactionResidue::Change(residue))),
         Ok(vec![some(CHANGE, 97)]),
         "residue reflects"
     );
@@ -1271,11 +1565,12 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
     // a request's reason class and its report rows
     let reasons = every!(ReasonClass: Secret, Personal, Legal, Retraction);
     let impacts = every!(ImpactKind: BlockVersion, Change, Landing, Tag, View, Proposal,
-        StateSnapshot, AuditText, Review, Tension, Answer);
+        StateSnapshot, AuditText, Review, Tension, Answer, Assessment, Dispute, DisputeResolution,
+        CheckRequest);
     let relations = every!(ImpactRelation: Removed, Embeds, References, Quotes);
     let copies = every!(CopyKind: Render, Export, Dump, Clone, Published, WorkingCopy);
     let statuses = every!(CopyStatus: Unknown);
-    let support = every!(AssessmentSupport: NotImplemented);
+    let support = every!(AssessmentSupport: NotImplemented, Carried);
     assert_eq!(
         (
             reasons.len(),
@@ -1285,7 +1580,7 @@ fn ha1_refs_cover_every_edge_free_enum_arm() {
             statuses.len(),
             support.len()
         ),
-        (4, 11, 4, 6, 1, 1)
+        (4, 15, 4, 6, 1, 2)
     );
     let request = |reason_class: ReasonClass, inside: Vec<ImpactRow>, outside: Vec<CopyRow>| {
         let mut r = redaction();
@@ -1350,9 +1645,12 @@ fn ha1_refs_are_sorted_and_unique() {
         approved_version: Some(h(1)),
         rebased_from: vec![h(9), h(8)],
         evidence: None,
+        assessment: None,
+        policy: None,
+        read_identity: None,
     };
     assert_eq!(
-        refs_of(LANDING, &enc(&landing)),
+        frame_refs(LANDING, &(landing)),
         Ok(vec![
             any(0),
             any(1),
@@ -1380,6 +1678,7 @@ fn ha1_refs_are_sorted_and_unique() {
             intent: Some(h(3)),
             ..ChangeLinks::default()
         },
+        read_identity: None,
         ..change(
             "change",
             vec![],
@@ -1387,9 +1686,9 @@ fn ha1_refs_are_sorted_and_unique() {
             Justification::Implements(vec![]),
         )
     };
-    let refs = refs_of(CHANGE, &enc(&edit)).unwrap();
+    let edges = frame_refs(CHANGE, &edit).unwrap();
     assert_eq!(
-        refs,
+        edges,
         vec![
             some(BLOCK, 9),
             some(CHANGE, 3),
@@ -1398,9 +1697,9 @@ fn ha1_refs_are_sorted_and_unique() {
         ]
     );
     for sample in samples() {
-        let refs = refs_of(sample.kind, &sample.bytes).unwrap();
+        let edges = refs_of(sample.kind, &sample.bytes).unwrap();
         assert!(
-            refs.windows(2).all(|w| w[0] < w[1]),
+            edges.windows(2).all(|w| w[0] < w[1]),
             "{}: not strictly ascending",
             sample.arm
         );
@@ -1478,7 +1777,8 @@ fn ha1_unknown_and_local_effect_kinds_are_refused() {
         frames: 1,
         digest: h(2),
     });
-    for kind in [0u8, 8, 12, 14, 23, 255] {
+    // 127, the highest logical kind, is the unassigned future kind (29 is reserved, D-FK58A)
+    for kind in [0u8, 8, 12, 14, 23, 127, 255] {
         for payload in [&tag, &ref_update, &commit, &vec![]] {
             assert_eq!(
                 refs_of(kind, payload),
@@ -1714,7 +2014,7 @@ fn cp3_plan_refs_are_typed_and_identity_hashes_are_not_edges() {
     let mut trailing = enc(&sealed);
     trailing.push(0);
     assert_eq!(refs_of(PLAN, &trailing), Err(RecordError::Decode));
-    // PLAN is a portable kind; kind 25 is not
+    // PLAN is a portable kind; kind 127, the highest logical kind, is not
     assert!(PORTABLE_KINDS.contains(&PLAN));
-    assert_eq!(refs_of(25, &enc(&sealed)), Err(RecordError::Kind));
+    assert_eq!(refs_of(127, &enc(&sealed)), Err(RecordError::Kind));
 }

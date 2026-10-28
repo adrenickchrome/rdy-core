@@ -95,6 +95,12 @@ fn project() -> (tempfile::TempDir, BlockId, BlockId) {
     )
 }
 
+/// The id of a new residue `r`: the hash of its frame in its kind's latest encoding, as an rdy of
+/// this version writes one (`rdy_store::codec`).
+fn residue_id(r: &RedactionResidue) -> Hash {
+    Hash::of(&rdy_store::codec::frame_latest(kinds::REDACTION_RESIDUE, enc(r)).1)
+}
+
 /// `value`'s record encoding, through the model's bounded encoder.
 fn enc<T: serde::Serialize>(value: &T) -> Vec<u8> {
     let mut buf = vec![0u8; 1 << 20];
@@ -136,8 +142,8 @@ fn frames_of(store: &Path, needle: &str) -> Frames {
                         RedactionResidue::Block(BlockResidue::of(&b)),
                     ));
                 }
-                if kind == kinds::CHANGE
-                    && let Ok(c) = rdy_store::bounded::decode::<Change>(payload)
+                if rdy_store::codec::logical_kind(kind) == kinds::CHANGE
+                    && let Ok(c) = rdy_store::codec::decode_bounded::<Change>(kind, payload)
                     && c.ops.iter().any(|op| match op {
                         Op::Create { block } | Op::Update { block, .. } => {
                             block.body.contains(needle)
@@ -185,7 +191,7 @@ fn record_of(f: &Frames, spec: Spec) -> RedactionCarried {
         kind,
         hash: x.1,
         len: x.2,
-        residue: Some(Hash::of(&enc(&x.3))),
+        residue: Some(residue_id(&x.3)),
         held,
     };
     let mut spans = vec![];
@@ -281,8 +287,10 @@ fn carry(dir: &Path, specs: &[Spec]) -> Vec<(Hash, RedactionCarried)> {
     }
     let only: Vec<RedactionCarried> = records.iter().map(|(_, r)| r.clone()).collect();
     i.append_carried(&residues, &only).unwrap();
-    i.upgrade(rdy_store::format::Format::CURRENT.store_format)
-        .unwrap();
+    i.upgrade(&rdy_store::format::DumpStore::Features(
+        rdy_store::format::baseline_features(),
+    ))
+    .unwrap();
     i.finish().unwrap();
     records
 }

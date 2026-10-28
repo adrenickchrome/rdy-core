@@ -2087,3 +2087,84 @@ fn sg5_the_checker_and_reindex_pass_at_the_end() {
 fn vw2_the_closed_table_lets_a_land_meet_e_view_closed() {
     assert!(allowed("land", "E_VIEW_CLOSED"));
 }
+
+/// Diagnosis pin (M3a Task 6, D-TX3KH; D-ME2HD keeps E_STALE_BASE at landing until M3b): a0 and
+/// a1 append a claim under one section from one base, so both claims hold one order key. a0
+/// proposes, then a1 proposes and edits its own claim again. a0 lands first; a1's version then
+/// needs a new order key for a claim its view changed after the proposal, and the landing is
+/// refused with the order-key E_STALE_BASE. a1 proposes again and that version lands.
+#[test]
+fn sg5_a_landing_whose_rekeyed_claim_changed_after_the_proposal_is_refused_then_lands() {
+    const SEED: u64 = 23;
+    let cfg = Config {
+        seed: SEED,
+        agents: 2,
+        steps: 8,
+        kill_at: None,
+    };
+    let read = |n| Act::Read {
+        target: Pick::Seed(n),
+    };
+    let create = || Act::Create {
+        area: "payments",
+        contra: None,
+    };
+    let mut a0 = vec![read(0); 8];
+    a0[0] = create();
+    a0[1] = Act::Propose;
+    let mut a1 = vec![read(1); 8];
+    a1[0] = create();
+    a1[2] = Act::Propose;
+    a1[3] = Act::Write {
+        target: Pick::Own(0),
+        stable: true,
+    };
+    a1[7] = Act::Propose;
+    // the person's act j runs after step 2(j + 1): it lands after steps 4, 6 and 8, and a1
+    // proposes again at step 7, after the landing due at step 6
+    let person = vec![
+        PersonAct::Tensions,
+        PersonAct::Land { relayed: true },
+        PersonAct::Land { relayed: true },
+        PersonAct::Land { relayed: true },
+    ];
+    let s = Script {
+        agents: vec![a0, a1],
+        person,
+        contra: vec![],
+    };
+    let o = match seeded(SEED, || run::run_script(&cfg, s)) {
+        Ok(o) => o,
+        Err(text) => panic!("{text}"),
+    };
+    let run = o.before_freeze();
+    let stale = run.iter().find(|e| {
+        e.act == "land"
+            && e.view.as_deref() == Some("a1")
+            && e.outcome == Met::Refused("E_STALE_BASE".into())
+    });
+    let stale = stale.unwrap_or_else(|| {
+        panic!(
+            "swarm seed {SEED}: a1's first version met no stale order key:\n{}",
+            lines(run)
+        )
+    });
+    assert!(
+        stale
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("needs a new order key")),
+        "{stale:#?}"
+    );
+    assert!(
+        run.iter()
+            .any(|e| e.act == "land" && e.view.as_deref() == Some("a1") && e.outcome == Met::Ok),
+        "swarm seed {SEED}: a1's later version did not land:\n{}",
+        lines(run)
+    );
+    assert!(
+        o.violations.is_empty(),
+        "swarm seed {SEED}: {:?}",
+        o.violations
+    );
+}

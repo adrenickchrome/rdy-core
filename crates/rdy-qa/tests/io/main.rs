@@ -17,6 +17,7 @@ mod io_dump_fixture_s16;
 mod io_dump_fixture_s17;
 mod io_dump_fixture_s18;
 mod io_dump_names;
+mod io_feature_fixture;
 mod io_imported_by;
 mod io_keys;
 mod io_link_keys;

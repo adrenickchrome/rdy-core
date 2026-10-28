@@ -243,13 +243,16 @@ fn kill1_a_refused_open_keeps_a_kills_sentinel() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
     let mut s = Store::create(&dir).unwrap();
-    // M2a1 (fmt2): the one format ref, set to another format, in place of min_reader. vop1 made
-    // 4 the current format, so the literal `4` this test held stopped being "another": the
-    // other format is derived from STORE_FORMAT so a later bump cannot do that again.
-    let other = (rdy_store::format::STORE_FORMAT + 1).to_string();
+    // the features ref, set to a manifest with a feature this rdy does not know, of class
+    // incompatible, in place of min_reader
+    let other = rdy_store::format::StoreFeatures::of(vec![rdy_store::format::StoreFeature {
+        name: "future_x".into(),
+        class: rdy_store::format::FeatureClass::Incompatible,
+        required_rdy: "99.0.0".into(),
+    }]);
     s.set_refs_unchecked_for_tests(vec![(
-        rdy_store::format::REF_STORE_FORMAT.into(),
-        other.into_bytes(),
+        rdy_store::format::REF_STORE_FEATURES.into(),
+        other.to_json(),
     )])
     .unwrap();
     let copy = base.path().join("copy");

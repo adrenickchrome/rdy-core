@@ -7,7 +7,7 @@ mod redaction_fixture;
 use rdy_model::redaction::RedactTarget;
 use rdy_model::*;
 use rdy_store::dump::{DumpBatch, Frame};
-use rdy_store::format::{FORMAT_FILE, Format, REF_STORE_FORMAT, STORE_FORMAT, encode_u32};
+use rdy_store::format::{FORMAT_FILE, REF_STORE_FEATURES, baseline_features};
 use rdy_store::holder::{HOLDER_MODE, REF_STORE_MODE, StoreMode, answer_tag_object_ref};
 use rdy_store::ingest::Ingest;
 use rdy_store::kinds::{self, RefUpdate, batch_digest};
@@ -106,7 +106,7 @@ fn raw_store(dir: &Path, refs: &[(&str, &[u8])]) {
     std::fs::create_dir(dir).unwrap();
     std::fs::create_dir(dir.join("segments")).unwrap();
     append_raw(dir, refs);
-    rdy_store::format::write_format_file(dir, Format::CURRENT).unwrap();
+    rdy_store::format::write_format_file(dir, &baseline_features()).unwrap();
 }
 
 fn decode_text<T>(r: Result<T, StoreError>) -> String {
@@ -213,13 +213,13 @@ fn ha4_holder_has_identity_and_no_canon() {
     assert_eq!(s.canon_head().unwrap(), None, "a holder has no canon");
     let refs = all_refs(&s);
     let names: Vec<&str> = refs.keys().map(String::as_str).collect();
-    assert_eq!(names, [REF_REPO_ID, REF_STORE_FORMAT, REF_STORE_MODE]);
+    assert_eq!(names, [REF_REPO_ID, REF_STORE_FEATURES, REF_STORE_MODE]);
     assert_eq!(refs[REF_STORE_MODE], b"holder");
     assert_eq!(HOLDER_MODE, b"holder");
-    assert_eq!(refs[REF_STORE_FORMAT], encode_u32(STORE_FORMAT));
+    assert_eq!(refs[REF_STORE_FEATURES], baseline_features().to_json());
     assert_eq!(
         rdy_store::format::read_format_file(&path).unwrap(),
-        Some(Format::CURRENT)
+        Some(baseline_features())
     );
     s.check_meta().unwrap();
     // the fresh holder owns the store lock
@@ -250,14 +250,13 @@ fn ha4_project_mode_is_the_absent_ref() {
     let (_d, path, s) = project();
     assert_eq!(s.mode().unwrap(), StoreMode::Project);
     assert_eq!(s.get_ref(REF_STORE_MODE).unwrap(), None);
-    // the first batch keeps its shape: the format (now 18) and the repo id, nothing more
+    // the first batch keeps its shape: the features and the repo id, nothing more
     let b = batches(&s);
     assert_eq!(b.len(), 1);
     let refs: Vec<RefUpdate> = b[0].1.iter().map(|(_, p)| ref_update(p)).collect();
     let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
-    assert_eq!(names, [REF_STORE_FORMAT, REF_REPO_ID]);
-    assert_eq!(refs[0].value, b"18");
-    assert_eq!(STORE_FORMAT, 18);
+    assert_eq!(names, [REF_STORE_FEATURES, REF_REPO_ID]);
+    assert_eq!(refs[0].value, baseline_features().to_json());
     s.check_meta().unwrap();
     drop(s);
     let s = Store::open(&path).unwrap();
@@ -273,7 +272,7 @@ fn ha4_bad_mode_and_holder_canon_fail_open_and_fsck() {
         raw_store(
             &path,
             &[
-                (REF_STORE_FORMAT, &encode_u32(STORE_FORMAT)),
+                (REF_STORE_FEATURES, &baseline_features().to_json()),
                 (REF_REPO_ID, &encode_repo_id(&id(1))),
                 (REF_STORE_MODE, bad),
             ],
@@ -405,12 +404,12 @@ fn ha4_holder_creation_is_one_durable_batch() {
         .map(|r| (r.name.as_str(), &r.value[..], r.at))
         .collect();
     let at = |offset| Location { segment: 0, offset };
-    let fmt = encode_u32(STORE_FORMAT);
+    let fmt = baseline_features().to_json();
     let rid = encode_repo_id(&id(7));
     assert_eq!(
         got,
         [
-            (REF_STORE_FORMAT, &fmt[..], at(0)),
+            (REF_STORE_FEATURES, &fmt[..], at(0)),
             (REF_REPO_ID, &rid[..], at(1)),
             (REF_STORE_MODE, &b"holder"[..], at(2)),
         ]

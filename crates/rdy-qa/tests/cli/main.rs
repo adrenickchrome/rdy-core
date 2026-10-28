@@ -58,4 +58,5 @@ mod cli_tag_relay;
 mod cli_techdocs;
 mod cli_tensions;
 mod cli_trace;
+mod cli_upgrade;
 mod cli_views;

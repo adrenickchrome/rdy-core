@@ -14,7 +14,7 @@ use rdy_store::transition::Transitions;
 use rdy_store::{Store, StoreError};
 use redaction_fixture::{
     Draft, FixtureOptions, ORIGIN, Proof, RequestSpec, authorized_batch_fixture, build_request,
-    enc, hash_of, relink, segment_bytes,
+    enc, relink, residue_frame, residue_id, segment_bytes,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -100,7 +100,8 @@ fn append_raw(path: &Path, frames: &[(u8, Vec<u8>)]) {
 fn raw_frames(s: &Store) -> Vec<(Location, u8, Hash)> {
     let mut out = vec![];
     s.for_each_frame_from(ORIGIN, s.log_end(), |loc, kind, hash, _, _| {
-        out.push((loc, kind, hash));
+        // by the logical kind (`rdy_store::codec`)
+        out.push((loc, rdy_store::codec::logical_kind(kind), hash));
         Ok(())
     })
     .unwrap();
@@ -198,6 +199,7 @@ fn rdx2_a_request_is_one_batch_and_removes_nothing() {
     let batch: Vec<u8> = s.last_batch().iter().map(|(k, _)| *k).collect();
     assert_eq!(
         batch,
+        // by logical kind (`Store::last_batch`)
         vec![
             kinds::REDACTION_RESIDUE,
             kinds::REDACTION_RESIDUE,
@@ -208,7 +210,7 @@ fn rdx2_a_request_is_one_batch_and_removes_nothing() {
         ],
         "residues, carrier, request and the view commit in one batch"
     );
-    let residue_ids: Vec<Hash> = d.residues.iter().map(hash_of).collect();
+    let residue_ids: Vec<Hash> = d.residues.iter().map(residue_id).collect();
     assert_eq!(s.last_batch()[0].1, residue_ids[0]);
     assert_eq!(s.last_batch()[1].1, residue_ids[1]);
     assert_eq!(s.last_batch()[2].1, d.carrier_id());
@@ -373,7 +375,7 @@ fn rdx2_every_embedded_block_occurrence_has_a_residue() {
             .iter()
             .filter_map(|s| s.residue)
             .collect();
-        bad.residues.retain(|r| named.contains(&hash_of(r)));
+        bad.residues.retain(|r| named.contains(&residue_id(r)));
         let e = s
             .prepare_redaction(&bad.carrier, &bad.request, &bad.residues)
             .unwrap_err();
@@ -506,13 +508,13 @@ fn rdx2_residue_validation_rejects_forged_identity() {
         b.version = Hash::of(b"another version");
     }
     let at = block_span(&x);
-    x.request.manifest.spans[at].residue = Some(hash_of(&x.residues[r]));
+    x.request.manifest.spans[at].residue = Some(residue_id(&x.residues[r]));
     cases.push(("block hash", x, at));
 
     let mut x = d.clone();
     let at = block_span(&x);
     let cr = change_residue(&x);
-    x.request.manifest.spans[at].residue = Some(hash_of(&x.residues[cr]));
+    x.request.manifest.spans[at].residue = Some(residue_id(&x.residues[cr]));
     cases.push(("residue kind", x, at));
 
     let mut x = d.clone();
@@ -757,7 +759,8 @@ fn rdx2_raw_reads_and_blob_reads_cannot_restore_content() {
                 assert_eq!(by, apply);
                 dropped.push(DropSpan {
                     place: place(loc),
-                    kind,
+                    // a span names its frame by the logical kind
+                    kind: rdy_store::codec::logical_kind(kind),
                     hash,
                     len,
                     residue,
@@ -791,7 +794,7 @@ fn rdx2_projected_or_erased_objects_cannot_be_written() {
             ),
         )
         .unwrap();
-    let ca_bytes = s.get_raw(&ca).unwrap().1;
+    let (ca_kind, ca_bytes) = s.get_raw(&ca).unwrap();
     let big: Vec<u8> = (0..MIB + 100).map(|i| (i % 249) as u8).collect();
     let x = s.put_blob(&big).unwrap();
     drop(s);
@@ -846,12 +849,14 @@ fn rdx2_projected_or_erased_objects_cannot_be_written() {
     assert!(p.is_projection());
     assert!(removed(req, s.commit_change(p, vec![])));
     let mut fake = change("work", vec![]);
-    fake.read_identity = Some(Hash::of(b"not a removed change"));
+    fake.read_identity = Some(ChangeReadIdentity::Redacted(Hash::of(
+        b"not a removed change",
+    )));
     assert!(projected(s.commit_change(fake, vec![])));
 
     // the erased hashes: the block, the change, the blob and its chunk, and a blob sharing it
     assert!(removed(req, s.write(vec![(BLOCK, enc(&a))])));
-    assert!(removed(req, s.write(vec![(CHANGE, ca_bytes)])));
+    assert!(removed(req, s.write(vec![(ca_kind, ca_bytes)])));
     assert!(removed(req, s.put_blob(&big)));
     assert!(removed(
         req,
@@ -994,10 +999,13 @@ fn rdx2_metadata_and_history_records_are_not_targets() {
             hash,
             payload,
         } = frame
-            && !is_removable(kind)
+            && !is_removable(rdy_store::codec::logical_kind(kind))
         {
-            seen.entry(kind)
-                .or_insert((loc, hash, payload.len() as u32));
+            seen.entry(rdy_store::codec::logical_kind(kind)).or_insert((
+                loc,
+                hash,
+                payload.len() as u32,
+            ));
         }
         Ok(())
     })
@@ -1268,7 +1276,7 @@ fn rdx2_seal_cannot_activate_an_unapproved_request() {
     let records = [
         (kinds::REDACTION_APPLY, enc(&apply)),
         (kinds::REDACTION, enc(&d.request)),
-        (kinds::REDACTION_RESIDUE, enc(&d.residues[0])),
+        residue_frame(&d.residues[0]),
     ];
     let av = a.version_hash();
 
@@ -1425,7 +1433,9 @@ fn rdx2_put_cannot_serialize_a_projection() {
     );
     assert!(projected(s.put(BLOCK, &forged)));
     let mut fake = change("work", vec![]);
-    fake.read_identity = Some(Hash::of(b"not a removed change"));
+    fake.read_identity = Some(ChangeReadIdentity::Redacted(Hash::of(
+        b"not a removed change",
+    )));
     assert!(projected(s.put(CHANGE, &fake)));
     assert_eq!(s.log_end(), end, "no refused put left a frame");
     // an ordinary block still puts
@@ -1491,7 +1501,9 @@ fn rdx2_put_checks_every_typed_block_and_change() {
     );
     assert!(projected(s.put(CHANGE, &Box::new(unmatched_op))));
     let mut fake = change("work", vec![]);
-    fake.read_identity = Some(Hash::of(b"not a removed change"));
+    fake.read_identity = Some(ChangeReadIdentity::Redacted(Hash::of(
+        b"not a removed change",
+    )));
     assert!(projected(s.put(CHANGE, &Box::new(fake))));
     // a value put cannot see into is refused for BLOCK and CHANGE, even when it is ordinary
     assert!(unchecked(s.put(BLOCK, &Wrapped(stub.clone()))));
@@ -1510,7 +1522,7 @@ fn rdx2_put_checks_every_typed_block_and_change() {
     assert_eq!(s.get_block(&hb).unwrap(), other);
     let c = change("work", vec![]);
     let hc = s.put(CHANGE, &Box::new(c.clone())).unwrap();
-    assert_eq!(hc, Hash::of(&enc(&c)));
+    assert_eq!(hc, c.id());
 }
 
 #[test]

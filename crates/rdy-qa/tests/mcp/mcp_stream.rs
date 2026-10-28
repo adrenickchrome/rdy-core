@@ -66,7 +66,12 @@ fn source() -> Source {
                 .0
         };
         let full = write(
-            &StreamHeader::tag_history(repo, tag, c.prerequisites.clone()),
+            &StreamHeader::tag_history(
+                rdy_store::format::baseline_features(),
+                repo,
+                tag,
+                c.prerequisites.clone(),
+            ),
             &c.records,
         );
         let leaves: Vec<ObjectKey> = c
@@ -74,9 +79,11 @@ fn source() -> Source {
             .iter()
             .copied()
             .filter(|k| {
-                refs_of(k.kind, &r.store().get_kind(k.kind, &k.hash).unwrap())
-                    .unwrap()
-                    .is_empty()
+                {
+                    // the frame's raw kind and stored bytes: a change is encoding 1
+                    let (raw, payload) = r.store().get_kind_raw(k.kind, &k.hash).unwrap();
+                    refs_of(raw, &payload).unwrap().is_empty()
+                }
             })
             .collect();
         assert!(leaves.iter().any(|k| k.kind == kinds::BLOCK));
@@ -85,7 +92,15 @@ fn source() -> Source {
             hash: tag,
         };
         assert!(!leaves.contains(&root));
-        let early = write(&StreamHeader::tag_history(repo, tag, vec![root]), &leaves);
+        let early = write(
+            &StreamHeader::tag_history(
+                rdy_store::format::baseline_features(),
+                repo,
+                tag,
+                vec![root],
+            ),
+            &leaves,
+        );
         (full, c.records, early, leaves)
     };
     r.close().unwrap();
@@ -391,6 +406,7 @@ fn ha15_hostile_batch_refuses_and_mcp_remains_alive() {
     let dir = src.s.dir.path();
     // a valid prelude and header, then a record frame that claims more than any record may hold
     let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
         RepoId([7; 16]),
         Hash([0x11; 32]),
         vec![ObjectKey {
@@ -417,7 +433,7 @@ fn ha15_hostile_batch_refuses_and_mcp_remains_alive() {
     let mut over_stream = head.clone();
     over_stream.extend(frame(u32::MAX, kinds::BLOCK));
     let mut over_header = b"RDYSYNC\n".to_vec();
-    over_header.extend_from_slice(&1u32.to_le_bytes());
+    over_header.extend_from_slice(&2u32.to_le_bytes());
     over_header.extend(frame(u32::MAX, 0xF0));
     // the first valid bytes of a real batch, then nothing: the input just ends
     let cut = src.full[..src.full.len() / 2].to_vec();
@@ -466,6 +482,7 @@ fn key(kind: u8, hash: Hash) -> ObjectKey {
 fn present<T: serde::Serialize>(kind: u8, value: &T) -> StreamRecord {
     let payload = postcard::to_allocvec(value).unwrap();
     StreamRecord::Present {
+        encoding: 0,
         key: key(kind, Hash::of(&payload)),
         payload,
     }
@@ -474,7 +491,12 @@ fn present<T: serde::Serialize>(kind: u8, value: &T) -> StreamRecord {
 /// `records` as one batch rooted at [`ROOT`] that lists `prerequisites` (sorted here).
 fn plb2_batch(mut prerequisites: Vec<ObjectKey>, records: &[StreamRecord]) -> Vec<u8> {
     prerequisites.sort();
-    let header = StreamHeader::tag_history(RepoId([7; 16]), ROOT, prerequisites);
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        RepoId([7; 16]),
+        ROOT,
+        prerequisites,
+    );
     let mut w = StreamWriter::new(Vec::new(), &header).unwrap();
     for r in records {
         w.record(r).unwrap();
@@ -493,9 +515,10 @@ struct Case {
     issue: String,
 }
 
-/// The frame offset of the first record after a header with `k` prerequisites.
+/// The frame offset of the first record after a header with `k` prerequisites and the baseline
+/// manifest (183 bytes, ok4).
 fn first_at(k: u64) -> u64 {
-    12 + 37 + 57 + 33 * k
+    12 + 37 + 57 + 183 + 33 * k
 }
 
 fn plb2_cases() -> Vec<Case> {
@@ -533,6 +556,7 @@ fn plb2_cases() -> Vec<Case> {
     let residue = key(kinds::REDACTION_RESIDUE, Hash([0x15; 32]));
     let dropped_block = key(kinds::BLOCK, Hash([0x32; 32]));
     let with_residue = StreamRecord::Dropped {
+        encoding: 0,
         key: dropped_block,
         original_len: 40,
         apply: apply.hash,
@@ -540,6 +564,7 @@ fn plb2_cases() -> Vec<Case> {
     };
     let chunk = key(kinds::BLOB_CHUNK, Hash([0x06; 32]));
     let dropped_chunk = StreamRecord::Dropped {
+        encoding: 0,
         key: chunk,
         original_len: 5,
         apply: apply.hash,

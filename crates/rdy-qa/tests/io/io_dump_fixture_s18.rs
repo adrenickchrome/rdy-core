@@ -26,7 +26,7 @@
 //! A later store format adds kinds and refs, never re-encodes (D-F0904): a load then appends one
 //! upgrade batch after the source log or the carried batch, and the checks allow exactly that
 //! batch.
-use crate::io_dump_fixture_s15::fixture;
+use crate::io_dump_fixture_s15::{first_start_logs_moves, fixture, without_moves};
 use rdy_engine::Rdy;
 use rdy_engine::dump_stop::DumpStop;
 use rdy_engine::load::{LoadSummary, load_chain};
@@ -35,7 +35,7 @@ use rdy_model::redaction::RedactionCarried;
 use rdy_qa::chain_fixture::{self, V18_KINDS};
 use rdy_qa::every_kind;
 use rdy_store::dump::{DUMP_FORMAT, DumpItem, DumpReader, read_envelope};
-use rdy_store::format::{REF_STORE_FORMAT, STORE_FORMAT, encode_u32};
+use rdy_store::format::{DumpStore, REF_STORE_FEATURES, baseline_features};
 use rdy_store::kinds;
 use rdy_store::redaction::StoredFrame;
 use rdy_store::segment::{Location, on_segment_write, seg_path};
@@ -125,38 +125,38 @@ const ORIGIN: Location = Location {
     segment: 0,
     offset: 0,
 };
-const SEGMENT_MAX: u64 = chain_fixture::SEGMENT_MAX;
+pub(crate) const SEGMENT_MAX: u64 = chain_fixture::SEGMENT_MAX;
 
-fn chain_files() -> Vec<PathBuf> {
+pub(crate) fn chain_files() -> Vec<PathBuf> {
     [CHAIN_FULL, CHAIN_1, CHAIN_2].map(fixture).to_vec()
 }
 
-fn holder_chain_files() -> Vec<PathBuf> {
+pub(crate) fn holder_chain_files() -> Vec<PathBuf> {
     [HOLDER_CHAIN_FULL, HOLDER_CHAIN_1, HOLDER_CHAIN_2]
         .map(fixture)
         .to_vec()
 }
 
-fn read_expect(name: &str) -> Value {
+pub(crate) fn read_expect(name: &str) -> Value {
     serde_json::from_str(&std::fs::read_to_string(fixture(name)).unwrap()).unwrap()
 }
 
-fn hex(b: &[u8]) -> String {
+pub(crate) fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-fn loc(l: Location) -> Value {
+pub(crate) fn loc(l: Location) -> Value {
     json!([l.segment, l.offset])
 }
 
-fn loc_of(v: &Value) -> Location {
+pub(crate) fn loc_of(v: &Value) -> Location {
     Location {
         segment: v[0].as_u64().unwrap().try_into().unwrap(),
         offset: v[1].as_u64().unwrap(),
     }
 }
 
-fn open(dir: &Path, holder: bool) -> Rdy {
+pub(crate) fn open(dir: &Path, holder: bool) -> Rdy {
     if holder {
         Rdy::open_holder(dir).unwrap()
     } else {
@@ -164,7 +164,7 @@ fn open(dir: &Path, holder: bool) -> Rdy {
     }
 }
 
-fn chain_load(files: &[PathBuf], to: &Path, stop: Option<&str>) -> LoadSummary {
+pub(crate) fn chain_load(files: &[PathBuf], to: &Path, stop: Option<&str>) -> LoadSummary {
     let stop = stop.map(|s| DumpStop::parse(s).unwrap());
     load_chain(files, to, stop.as_ref()).unwrap_or_else(|e| panic!("the load failed: {e:?}"))
 }
@@ -172,10 +172,19 @@ fn chain_load(files: &[PathBuf], to: &Path, stop: Option<&str>) -> LoadSummary {
 // ---------------------------------------------------------------------------------------------
 // facts
 
+/// A dump's store as the expect files write it: a scalar store format as its number, and a
+/// feature store as `{"features": <manifest>}`.
+pub(crate) fn store_json(s: &DumpStore) -> Value {
+    match s {
+        DumpStore::Legacy(n) => json!(n),
+        DumpStore::Features(m) => json!({ "features": m }),
+    }
+}
+
 /// What the dump file `p` holds, by its envelope and a whole read: its formats, chain facts,
 /// trailer, length, batch and frame counts, project file names, each batch's start and its
 /// dropped frames' count. Its own name is `name`.
-fn file_facts(name: &str, p: &Path) -> Value {
+pub(crate) fn file_facts(name: &str, p: &Path) -> Value {
     let mut f = std::fs::File::open(p).unwrap();
     let (format, header, trailer, len) = read_envelope(&mut f).unwrap();
     let (mut rd, _, _) = DumpReader::open(BufReader::new(std::fs::File::open(p).unwrap())).unwrap();
@@ -199,7 +208,7 @@ fn file_facts(name: &str, p: &Path) -> Value {
     json!({
         "name": name,
         "dump_format": format,
-        "store_format": header.store_format,
+        "store_format": store_json(&header.store),
         "rdy": header.rdy,
         "log_end": loc(header.log_end),
         "chain": header.chain,
@@ -222,7 +231,7 @@ fn file_facts(name: &str, p: &Path) -> Value {
 
 /// The blake3 of each segment file of the store under `project`, up to `end`: whole for the
 /// segments before `end`'s, the prefix before `end` for its own.
-fn segment_digests(project: &Path, end: Location) -> Value {
+pub(crate) fn segment_digests(project: &Path, end: Location) -> Value {
     let dir = project.join(".rdy/store/segments");
     let mut out = serde_json::Map::new();
     for seg in 0..=end.segment {
@@ -243,7 +252,7 @@ fn segment_digests(project: &Path, end: Location) -> Value {
 
 /// The bytes of the log of the store under `project` from `from` to `to`, in `from`'s segment;
 /// with no `to`, to the log's end, which must be in that segment.
-fn tail_bytes(project: &Path, from: Location, to: Option<Location>) -> Vec<u8> {
+pub(crate) fn tail_bytes(project: &Path, from: Location, to: Option<Location>) -> Vec<u8> {
     let dir = project.join(".rdy/store/segments");
     let bytes = std::fs::read(seg_path(&dir, from.segment)).unwrap();
     let start = usize::try_from(from.offset).unwrap();
@@ -270,7 +279,7 @@ fn tail_bytes(project: &Path, from: Location, to: Option<Location>) -> Vec<u8> {
 /// Every removal record and dropped frame of the log of `r` before `upto`: each dropped frame
 /// with its place, original kind, hash and length and the record that authorizes its absence,
 /// each request and apply with its place, and each carried record with its place and record.
-fn removal_facts(r: &Rdy, upto: Location) -> Value {
+pub(crate) fn removal_facts(r: &Rdy, upto: Location) -> Value {
     let (mut dropped, mut requests, mut applies, mut carried) = (vec![], vec![], vec![], vec![]);
     r.store()
         .reader()
@@ -319,7 +328,7 @@ fn removal_facts(r: &Rdy, upto: Location) -> Value {
 }
 
 /// A carried record at `at`: its hash, its record, and its zero spans' bytes.
-fn carried_facts(at: Location, hash: Hash, payload: &[u8]) -> Value {
+pub(crate) fn carried_facts(at: Location, hash: Hash, payload: &[u8]) -> Value {
     let record: RedactionCarried = rdy_store::bounded::decode(payload).unwrap();
     let zero: u64 = record
         .spans
@@ -336,7 +345,7 @@ fn carried_facts(at: Location, hash: Hash, payload: &[u8]) -> Value {
 }
 
 /// Canon's blocks of a project: each with its version and whether it reads as removed.
-fn canon_blocks(r: &Rdy) -> Value {
+pub(crate) fn canon_blocks(r: &Rdy) -> Value {
     let st = r.read();
     let Some(head) = st.canon_head() else {
         return Value::Null;
@@ -356,7 +365,7 @@ fn canon_blocks(r: &Rdy) -> Value {
 /// What a later rdy must read the same of the store `r`, up to `upto`, the end of the log it
 /// loaded (before any upgrade batch): its refs, kinds, landings, fsck, signatures, identity,
 /// views, each tag's projection, canon's blocks, the removal facts and the plan facts.
-fn store_facts(r: &Rdy, upto: Location) -> Value {
+pub(crate) fn store_facts(r: &Rdy, upto: Location) -> Value {
     json!({
         "facts": every_kind::facts(r),
         "identity": every_kind::identity_facts(r, Some(upto)),
@@ -366,6 +375,7 @@ fn store_facts(r: &Rdy, upto: Location) -> Value {
         "removals": removal_facts(r, upto),
         "plans": plan_facts(r, upto),
         "reflects": reflects_facts(r, upto),
+        "features": every_kind::feature_facts(r, upto),
     })
 }
 
@@ -375,7 +385,7 @@ fn store_facts(r: &Rdy, upto: Location) -> Value {
 /// authority basis `delegated` and a block with a `reflects` link (its place, id, type, version,
 /// pins, links and the fields that make it so); and every PLAN seal that names such a decision
 /// (its hash and the seal's decisions and items).
-fn reflects_facts(r: &Rdy, upto: Location) -> Value {
+pub(crate) fn reflects_facts(r: &Rdy, upto: Location) -> Value {
     let (mut changes, mut blocks, mut seals) = (vec![], vec![], vec![]);
     let mut delegated = BTreeSet::new();
     r.store()
@@ -389,9 +399,11 @@ fn reflects_facts(r: &Rdy, upto: Location) -> Value {
             else {
                 return Ok(());
             };
-            match kind {
+            match rdy_store::codec::logical_kind(kind) {
                 kinds::CHANGE => {
-                    let c: rdy_model::Change = rdy_store::bounded::decode(payload).unwrap();
+                    // of either encoding: the frame's raw kind names it
+                    let c: rdy_model::Change =
+                        rdy_store::codec::decode_record(kind, payload).unwrap();
                     if let Some(j @ rdy_model::Justification::Reflects { .. }) = &c.justification {
                         changes.push(json!({
                             "at": loc(at),
@@ -465,7 +477,7 @@ fn reflects_facts(r: &Rdy, upto: Location) -> Value {
 /// Every PLAN record of the log of `r` before `upto`, in log order: its place, hash, view,
 /// chain links, bound proposal, its seal's landing, version and decisions, and its answers' and
 /// items' acts and outcomes; and every row of the four plan tables, as stored (hex).
-fn plan_facts(r: &Rdy, upto: Location) -> Value {
+pub(crate) fn plan_facts(r: &Rdy, upto: Location) -> Value {
     let mut records = vec![];
     r.store()
         .reader()
@@ -513,10 +525,10 @@ fn plan_facts(r: &Rdy, upto: Location) -> Value {
 }
 
 /// A load's summary, without its target path and its file paths.
-fn summary_facts(s: &LoadSummary) -> Value {
+pub(crate) fn summary_facts(s: &LoadSummary) -> Value {
     json!({
         "dump_format": s.dump_format,
-        "store_format": s.store_format,
+        "store_format": store_json(&s.store_format),
         "batches": s.batches,
         "frames": s.frames,
         "files_written": s.files_written,
@@ -531,20 +543,20 @@ fn summary_facts(s: &LoadSummary) -> Value {
 }
 
 /// The end of the log `files` hold: the last file's header end.
-fn chain_end(files: &[PathBuf]) -> Location {
+pub(crate) fn chain_end(files: &[PathBuf]) -> Location {
     let mut f = std::fs::File::open(files.last().unwrap()).unwrap();
     read_envelope(&mut f).unwrap().1.log_end
 }
 
 /// A whole load of `files` into `to`: its summary, the loaded log's segment digests up to the
 /// source end, and the store's facts.
-fn whole_facts(files: &[PathBuf], to: &Path, holder: bool) -> Value {
+pub(crate) fn whole_facts(files: &[PathBuf], to: &Path, holder: bool) -> Value {
     let s = chain_load(files, to, None);
     whole_facts_of(&s, files, to, holder)
 }
 
 /// The facts of the whole load of `files` into `to` that gave `s`.
-fn whole_facts_of(s: &LoadSummary, files: &[PathBuf], to: &Path, holder: bool) -> Value {
+pub(crate) fn whole_facts_of(s: &LoadSummary, files: &[PathBuf], to: &Path, holder: bool) -> Value {
     let end = chain_end(files);
     let r = open(to, holder);
     let v = json!({
@@ -560,7 +572,7 @@ fn whole_facts_of(s: &LoadSummary, files: &[PathBuf], to: &Path, holder: bool) -
 /// A load of `files` stopped at `selector` into `to`: the selector, the summary, the bytes this rdy
 /// appended after the stop (the carried batch), the fsck warnings and the store's facts up to the
 /// carried batch's end.
-fn stop_facts(files: &[PathBuf], selector: &str, to: &Path, holder: bool) -> Value {
+pub(crate) fn stop_facts(files: &[PathBuf], selector: &str, to: &Path, holder: bool) -> Value {
     let s = chain_load(files, to, Some(selector));
     stop_facts_of(&s, selector, to, holder, None)
 }
@@ -569,7 +581,7 @@ fn stop_facts(files: &[PathBuf], selector: &str, to: &Path, holder: bool) -> Val
 /// the carried batch as the expect file pins it: the tail and the store's facts stop there, and
 /// any upgrade batch after it is checked apart (`upgrade_after`). With no `end` (the writer, of
 /// this rdy's own store format), the carried batch ends at the log's end.
-fn stop_facts_of(
+pub(crate) fn stop_facts_of(
     s: &LoadSummary,
     selector: &str,
     to: &Path,
@@ -598,7 +610,7 @@ fn stop_facts_of(
 
 /// The expect file of a chain: its files' facts, the whole load, the full dump alone, and the two
 /// fixed stops.
-fn chain_expect(
+pub(crate) fn chain_expect(
     files: &[PathBuf],
     names: [&str; 3],
     c: &chain_fixture::Chain,
@@ -617,7 +629,7 @@ fn chain_expect(
 
 /// The expect file of a standalone full fixture: its facts, the whole load, the stop the source
 /// chain was loaded at to build it, and its own stop before its later apply.
-fn standalone_expect(
+pub(crate) fn standalone_expect(
     file: &Path,
     name: &str,
     built_from: &str,
@@ -636,7 +648,7 @@ fn standalone_expect(
 }
 
 /// Creates `p` and writes `bytes` to it; refuses when `p` exists.
-fn write_new(p: &Path, bytes: &[u8]) {
+pub(crate) fn write_new(p: &Path, bytes: &[u8]) {
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -646,7 +658,7 @@ fn write_new(p: &Path, bytes: &[u8]) {
     f.sync_all().unwrap();
 }
 
-fn pretty(v: &Value) -> Vec<u8> {
+pub(crate) fn pretty(v: &Value) -> Vec<u8> {
     (serde_json::to_string_pretty(v).unwrap() + "\n").into_bytes()
 }
 
@@ -663,9 +675,9 @@ fn rf4_write_format18_fixtures_once() {
         );
     }
     assert_eq!(
-        (DUMP_FORMAT, STORE_FORMAT),
-        (3, 18),
-        "the v3-s18 fixtures hold dump format 3 and store format 18"
+        DUMP_FORMAT, 3,
+        "the v3-s18 fixtures hold dump format 3 and store format 18: this rdy writes another \
+         format, and a released set is never regenerated"
     );
     let scratch = tempfile::tempdir().unwrap();
     let out = build_members(scratch.path());
@@ -720,12 +732,14 @@ fn build_members(scratch: &Path) -> Vec<(&'static str, Vec<u8>)> {
 
 /// One frozen input of the pair `(3, 18)`: its files in order, their names, its expect file, its
 /// mode, its fixed stops, and the canaries that only removed payloads hold.
-struct Input {
-    names: &'static [&'static str],
-    expect: &'static str,
-    holder: bool,
-    stops: &'static [&'static str],
-    canaries: &'static [&'static [u8]],
+pub(crate) struct Input {
+    pub(crate) names: &'static [&'static str],
+    pub(crate) expect: &'static str,
+    pub(crate) holder: bool,
+    pub(crate) stops: &'static [&'static str],
+    pub(crate) canaries: &'static [&'static [u8]],
+    /// The canaries a chain's stops hold: the payloads that a removal after both stops takes.
+    pub(crate) held: &'static [&'static [u8]],
 }
 
 impl Input {
@@ -734,7 +748,7 @@ impl Input {
     }
 }
 
-const PROJECT_CANARIES: &[&[u8]] = &[
+pub(crate) const PROJECT_CANARIES: &[&[u8]] = &[
     chain_fixture::EARLY_CANARY.as_bytes(),
     chain_fixture::LATE_CANARY.as_bytes(),
     chain_fixture::BLOB_CANARY,
@@ -742,7 +756,16 @@ const PROJECT_CANARIES: &[&[u8]] = &[
     every_kind::CANARY_BODY.as_bytes(),
     every_kind::CANARY_FIELD.as_bytes(),
 ];
-const HOLDER_CANARIES: &[&[u8]] = &[
+pub(crate) const HOLDER_CANARIES: &[&[u8]] = &[
+    every_kind::HOLDER_CANARY.as_bytes(),
+    every_kind::HOLDER_BLOB,
+];
+/// The canaries a `(3, 18)` chain's stops hold: the early block and the blob (project), the
+/// holder's prose and blob; the late block, the standalone block and every earlier removal stay
+/// removed.
+pub(crate) const HELD: &[&[u8]] = &[
+    chain_fixture::EARLY_CANARY.as_bytes(),
+    chain_fixture::BLOB_CANARY,
     every_kind::HOLDER_CANARY.as_bytes(),
     every_kind::HOLDER_BLOB,
 ];
@@ -753,6 +776,7 @@ const PROJECT_CHAIN: Input = Input {
     holder: false,
     stops: &["held_stop", "missing_stop"],
     canaries: PROJECT_CANARIES,
+    held: HELD,
 };
 const HOLDER_CHAIN: Input = Input {
     names: &[HOLDER_CHAIN_FULL, HOLDER_CHAIN_1, HOLDER_CHAIN_2],
@@ -760,6 +784,7 @@ const HOLDER_CHAIN: Input = Input {
     holder: true,
     stops: &["held_stop", "missing_stop"],
     canaries: HOLDER_CANARIES,
+    held: HELD,
 };
 const PROJECT_FULL: Input = Input {
     names: &[FULL],
@@ -767,6 +792,7 @@ const PROJECT_FULL: Input = Input {
     holder: false,
     stops: &["missing_stop"],
     canaries: PROJECT_CANARIES,
+    held: HELD,
 };
 const HOLDER_FULL: Input = Input {
     names: &[HOLDER],
@@ -774,11 +800,12 @@ const HOLDER_FULL: Input = Input {
     holder: true,
     stops: &["missing_stop"],
     canaries: HOLDER_CANARIES,
+    held: HELD,
 };
 const INPUTS: [Input; 4] = [PROJECT_CHAIN, HOLDER_CHAIN, PROJECT_FULL, HOLDER_FULL];
 
 /// Each segment file of the store under `project`, by name.
-fn segs(project: &Path) -> BTreeMap<String, Vec<u8>> {
+pub(crate) fn segs(project: &Path) -> BTreeMap<String, Vec<u8>> {
     let mut out = BTreeMap::new();
     for e in std::fs::read_dir(project.join(".rdy/store/segments")).unwrap() {
         let e = e.unwrap();
@@ -790,17 +817,18 @@ fn segs(project: &Path) -> BTreeMap<String, Vec<u8>> {
     out
 }
 
-fn holds(project: &Path, needle: &[u8]) -> bool {
+pub(crate) fn holds(project: &Path, needle: &[u8]) -> bool {
     segs(project)
         .values()
         .any(|b| b.windows(needle.len()).any(|w| w == needle))
 }
 
 /// `want`, the facts of a store as the expect file pins them, as this rdy must read them: with
-/// this rdy's store format, and with the frames of `upgrade` upgrade batch data frames counted.
+/// the features ref its load's upgrade batch writes (the historical `meta/store_format` stays),
+/// and with the frames of `upgrade` upgrade batch data frames counted.
 fn as_read_now(want: &Value, upgrade: u64) -> Value {
     let mut want = want.clone();
-    want["facts"]["refs"][REF_STORE_FORMAT] = json!(hex(&encode_u32(STORE_FORMAT)));
+    want["facts"]["refs"][REF_STORE_FEATURES] = json!(hex(&baseline_features().to_json()));
     if upgrade > 0 {
         let n = &mut want["facts"]["objects"][kinds::REF_UPDATE.to_string()];
         *n = json!(n.as_u64().unwrap() + upgrade);
@@ -831,8 +859,11 @@ fn check_store(got: &Value, want: &Value, upgrade: u64, what: &str) {
         assert_eq!(got[member], want[member], "{what}: {member}");
     }
     for member in ["refs", "objects", "landings", "signatures", "fsck"] {
+        // the fsck's unlogged move count is analysis, checked by the first writable start
+        // (`first_start_logs_moves`)
         assert_eq!(
-            got["facts"][member], want["facts"][member],
+            without_moves(&got["facts"][member]),
+            without_moves(&want["facts"][member]),
             "{what}: {member}"
         );
     }
@@ -883,7 +914,7 @@ fn stopped(files: &[PathBuf], want: &Value, to: &Path, holder: bool, later: bool
 }
 
 /// The frames of the expect file's files: their sum.
-fn expect_frames(expect: &Value) -> Value {
+pub(crate) fn expect_frames(expect: &Value) -> Value {
     match expect.get("files") {
         Some(fs) => json!(
             fs.as_array()
@@ -898,7 +929,7 @@ fn expect_frames(expect: &Value) -> Value {
 
 /// A write observer for this thread that records whether any segment write held one of
 /// `needles`. Dropping the guard removes it.
-struct Watch(Rc<Cell<bool>>);
+pub(crate) struct Watch(pub(crate) Rc<Cell<bool>>);
 
 impl Drop for Watch {
     fn drop(&mut self) {
@@ -906,7 +937,7 @@ impl Drop for Watch {
     }
 }
 
-fn watch(needles: Vec<&'static [u8]>) -> Watch {
+pub(crate) fn watch(needles: Vec<&'static [u8]>) -> Watch {
     let seen = Rc::new(Cell::new(false));
     let s = seen.clone();
     on_segment_write(Some(Box::new(move |b: &[u8]| {
@@ -919,7 +950,7 @@ fn watch(needles: Vec<&'static [u8]>) -> Watch {
 }
 
 /// The carried records of a stop's appended batch, as the expect file pins them.
-fn tail_carried(stop: &Value) -> Vec<Value> {
+pub(crate) fn tail_carried(stop: &Value) -> Vec<Value> {
     let end = loc_of(&stop["position"]);
     stop["store"]["removals"]["carried"]
         .as_array()
@@ -930,7 +961,7 @@ fn tail_carried(stop: &Value) -> Vec<Value> {
         .collect()
 }
 
-fn helds(c: &Value) -> Vec<bool> {
+pub(crate) fn helds(c: &Value) -> Vec<bool> {
     c["record"]["spans"]
         .as_array()
         .unwrap()
@@ -941,20 +972,13 @@ fn helds(c: &Value) -> Vec<bool> {
 
 /// Whether the store at `stop` holds the payload with `canary`, as the expect file pins it: a
 /// held span of a carried record, or a payload no removal selected before the stop.
-fn stop_holds(stop: &Value, input: &Input, canary: &[u8]) -> bool {
-    // the early block and the blob are held at a chain's stops; the late block, the standalone
-    // block and every earlier removal stay removed
-    let held_in_chain: [&[u8]; 4] = [
-        chain_fixture::EARLY_CANARY.as_bytes(),
-        chain_fixture::BLOB_CANARY,
-        every_kind::HOLDER_CANARY.as_bytes(),
-        every_kind::HOLDER_BLOB,
-    ];
+pub(crate) fn stop_holds(stop: &Value, input: &Input, canary: &[u8]) -> bool {
+    // the input's held canaries are held at a chain's stops; every other one stays removed
     let chain = input.names.len() > 1;
     let all_zero = tail_carried(stop)
         .iter()
         .all(|c| helds(c).iter().all(|h| !*h));
-    chain && !all_zero && held_in_chain.contains(&canary)
+    chain && !all_zero && input.held.contains(&canary)
 }
 
 #[test]
@@ -1047,6 +1071,11 @@ fn rf4_format18_project_and_holder_load_with_every_hash() {
             tables,
             "{what}: a reindex rebuilds every table"
         );
+        // the first writable start logs the moves content-2 leaves, then the logged invariant
+        // holds
+        r.close().unwrap();
+        first_start_logs_moves(&to, input.holder, what);
+        let r = open(&to, input.holder);
         if input.holder {
             r.fsck().unwrap();
             r.close().unwrap();

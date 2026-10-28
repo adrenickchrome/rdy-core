@@ -30,7 +30,7 @@ use rdy_qa::every_kind;
 use rdy_qa::fixtures::{approver, land, write, writer};
 use rdy_qa::invariants::{check, check_all, frozen_report};
 use rdy_store::dump::DUMP_FORMAT;
-use rdy_store::format::STORE_FORMAT;
+use rdy_store::format::{DumpStore, baseline_features};
 use rdy_store::kinds;
 use rdy_store::redaction::StoredFrame;
 use rdy_store::segment::Location;
@@ -622,7 +622,10 @@ fn rdx15_approved_removal_survives_restart_reindex_dump_and_clone() {
                     let file = scratch.path().join(format!("s{seed}-{k}.rdydump"));
                     let r = Rdy::open(&at).unwrap();
                     let d = r.read().dump(&file).unwrap();
-                    assert_eq!((d.dump_format, d.store_format), (DUMP_FORMAT, STORE_FORMAT));
+                    assert_eq!(
+                        (d.dump_format, &d.store_format),
+                        (DUMP_FORMAT, &DumpStore::Features(baseline_features()))
+                    );
                     r.close().unwrap();
                     load(&file, &next).unwrap();
                     at = next;
@@ -880,9 +883,9 @@ fn rdx15_snapshots_are_references_and_assessment_support_is_absent() {
     );
     assert!(has(ImpactKind::Landing, &p.landing.to_string()));
     assert!(has(ImpactKind::Tag, "v1.0.0"));
-    assert_eq!(dry.assessment, AssessmentSupport::NotImplemented);
+    assert_eq!(dry.assessment, AssessmentSupport::Carried);
     let j = serde_json::to_value(&dry).unwrap();
-    assert_eq!(j["assessment"], "not_implemented");
+    assert_eq!(j["assessment"], "carried");
     assert!(
         !j.to_string().contains("score"),
         "the report holds no score: {j}"
@@ -914,9 +917,9 @@ fn rdx15_snapshots_are_references_and_assessment_support_is_absent() {
         p.landing.to_string(),
         "the tag names the same landing"
     );
-    // the request records the report-only references and no assessment
+    // the request records the report-only references and the carried-record scan status
     let req = reader.redaction_request(&res.redaction.unwrap()).unwrap();
-    assert_eq!(req.manifest.assessment, AssessmentSupport::NotImplemented);
+    assert_eq!(req.manifest.assessment, AssessmentSupport::Carried);
     assert!(
         req.manifest
             .inside
@@ -944,9 +947,10 @@ fn rdx15_snapshots_are_references_and_assessment_support_is_absent() {
     let st = p.r.read();
     st.reader()
         .for_each_record_from(ORIGIN, st.seq(), |_, f, _| {
-            seen.insert(match f {
+            // by logical kind: a frame of any encoding (`rdy_store::codec`)
+            seen.insert(rdy_store::codec::logical_kind(match f {
                 StoredFrame::Present { kind, .. } | StoredFrame::Dropped { kind, .. } => kind,
-            });
+            }));
             Ok(())
         })
         .unwrap();
@@ -1083,6 +1087,7 @@ fn rdx15_a_removed_frozen_decision_is_covered_not_compared() {
         prev: Some(head),
         state: Hash::of(&snap_bytes),
         changes: vec![],
+        read_identity: None,
         ..rec
     };
     let landing = postcard::to_allocvec(&forged).unwrap();

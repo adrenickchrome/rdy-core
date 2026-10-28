@@ -281,9 +281,53 @@ fn deep_warning(n: usize, levels: usize) -> RedactionWarning {
     }
 }
 
+/// What the references of the carried records need, read in the one pass over the log. The
+/// decoded records are not kept.
+#[derive(Default)]
+struct Carried {
+    /// The assessments that name a removed block or version.
+    assessments: Vec<Hash>,
+    /// Each dispute and the landing it disputes.
+    disputes: Vec<(Hash, Hash)>,
+    /// Each resolution, its dispute and its correction landing.
+    resolutions: Vec<(Hash, Hash, Option<Hash>)>,
+    requests: Vec<RequestFacts>,
+}
+
+/// A check request's subject, reduced to its references.
+struct RequestFacts {
+    hash: Hash,
+    /// Whether a block of its subject is a selected or referencing block.
+    on_block: bool,
+    change: Option<Hash>,
+    proposal: Option<Hash>,
+}
+
+/// Whether `a` names a block of the removal in its scope, reach, tensions, issues, confidence
+/// reasons or suspects (a block or its cause), or its policy version is a removed version.
+fn assessment_hits(
+    a: &rdy_model::assessment::Assessment,
+    versions: &HashSet<Hash>,
+    ids: &HashSet<&BlockId>,
+) -> bool {
+    let named = |b: &BlockId| ids.contains(b);
+    a.scope.blocks.iter().any(named)
+        || a.reach.iter().any(named)
+        || a.tensions.iter().any(|t| t.blocks.iter().any(named))
+        || a.issues.iter().any(|i| named(&i.block))
+        || a.confidence.reasons.iter().any(|i| named(&i.block))
+        || a.suspects
+            .iter()
+            .any(|s| named(&s.block) || named(&s.cause))
+        || a.policy
+            .as_ref()
+            .and_then(|p| p.policy.as_ref())
+            .is_some_and(|p| versions.contains(&p.version))
+}
+
 /// The impact kind whose ordinal is `n`.
 fn impact_kind(n: u8) -> ImpactKind {
-    const ALL: [ImpactKind; 11] = [
+    const ALL: [ImpactKind; 15] = [
         ImpactKind::BlockVersion,
         ImpactKind::Change,
         ImpactKind::Landing,
@@ -295,6 +339,10 @@ fn impact_kind(n: u8) -> ImpactKind {
         ImpactKind::Review,
         ImpactKind::Tension,
         ImpactKind::Answer,
+        ImpactKind::Assessment,
+        ImpactKind::Dispute,
+        ImpactKind::DisputeResolution,
+        ImpactKind::CheckRequest,
     ];
     ALL[usize::from(n)]
 }
@@ -384,6 +432,8 @@ fn review_blocks(r: &Review) -> Vec<&BlockId> {
             out.push(entity);
         }
         ReviewSubject::Pair { items, .. } => out.extend(items.iter().map(|i| &i.block)),
+        // a check review names its request, not a block
+        ReviewSubject::Check { .. } => {}
     }
     out
 }
@@ -776,7 +826,7 @@ pub(crate) fn compute_excluding(
             inside: vec![],
             outside: outside.clone(),
             quarantine: quarantine.clone(),
-            assessment: AssessmentSupport::NotImplemented,
+            assessment: super::current_support(),
         };
         return finish(
             Draft {
@@ -864,7 +914,12 @@ pub(crate) fn compute_excluding(
                     } else {
                         RedactionResidue::Change(ChangeResidue::of(&reader.change(&f.hash)?))
                     };
-                    let id = Hash::of(encode_into(&r, &mut buf).map_err(|_| over(limit::RECORD))?);
+                    // the residue's id is its frame's hash in the latest encoding, as the
+                    // store writes it (`rdy_store::codec`)
+                    let body = encode_into(&r, &mut buf).map_err(|_| over(limit::RECORD))?;
+                    let id = Hash::of(
+                        &rdy_store::codec::frame_latest(kinds::REDACTION_RESIDUE, body.to_vec()).1,
+                    );
                     residue_ids.insert(f.hash, id);
                     residues.push(r);
                     id
@@ -927,6 +982,8 @@ pub(crate) fn compute_excluding(
     let mut tensions: Vec<(Hash, SemanticTension)> = vec![];
     let mut answers: Vec<(Hash, Answer)> = vec![];
     let mut signatures: Vec<(Hash, Hash)> = vec![];
+    // the carried records, reduced to what their references need (no decoded record is kept)
+    let mut carried = Carried::default();
     let audit = ImpactKind::AuditText;
     for (i, f) in frames.iter().enumerate() {
         // the request's own batches are left out before the first-seen check, so the same
@@ -1057,6 +1114,38 @@ pub(crate) fn compute_excluding(
                 let r: RefUpdate = reader.get_typed(kinds::REF_UPDATE, &h)?;
                 quotes.scan(audit, &rec, false, &r.name)?;
             }
+            // the carried shapes (no writer yet): each whole typed record, which core reports
+            // and cannot erase
+            kinds::ASSESSMENT => {
+                let a: rdy_model::assessment::Assessment =
+                    reader.get_typed(kinds::ASSESSMENT, &h)?;
+                quotes.scan(ImpactKind::Assessment, &rec, false, &a)?;
+                if assessment_hits(&a, &versions, &affected_ids) {
+                    carried.assessments.push(h);
+                }
+            }
+            kinds::DISPUTE => {
+                let d: rdy_model::dispute::Dispute = reader.get_typed(kinds::DISPUTE, &h)?;
+                quotes.scan(ImpactKind::Dispute, &rec, false, &d)?;
+                carried.disputes.push((h, d.landing));
+            }
+            kinds::DISPUTE_RESOLUTION => {
+                let d: rdy_model::dispute::DisputeResolution =
+                    reader.get_typed(kinds::DISPUTE_RESOLUTION, &h)?;
+                quotes.scan(ImpactKind::DisputeResolution, &rec, false, &d)?;
+                carried.resolutions.push((h, d.dispute, d.correction));
+            }
+            kinds::CHECK_REQUEST => {
+                let c: rdy_model::check_request::CheckRequest =
+                    reader.get_typed(kinds::CHECK_REQUEST, &h)?;
+                quotes.scan(ImpactKind::CheckRequest, &rec, false, &c)?;
+                carried.requests.push(RequestFacts {
+                    hash: h,
+                    on_block: c.subject.blocks.iter().any(|b| affected_ids.contains(b)),
+                    change: c.subject.change,
+                    proposal: c.subject.version,
+                });
+            }
             kinds::PLAN => {
                 // the whole decoded version, as for an answer: the view, each answer's reason,
                 // each sealed item's subject and edge and every other stored text. A plan is an
@@ -1167,9 +1256,39 @@ pub(crate) fn compute_excluding(
             row(audit, h.to_string(), refs, false);
         }
     }
+    // the carried records: a dispute through its landing, a resolution through its dispute or
+    // its correction landing, a check request through its blocks, its change or its proposal
+    let mut affected_disputes: HashSet<Hash> = HashSet::new();
+    for (h, landing) in &carried.disputes {
+        if affected_landings.contains(landing) {
+            affected_disputes.insert(*h);
+            row(ImpactKind::Dispute, h.to_string(), refs, false);
+        }
+    }
+    for (h, dispute, correction) in &carried.resolutions {
+        if affected_disputes.contains(dispute)
+            || correction.is_some_and(|c| affected_landings.contains(&c))
+        {
+            row(ImpactKind::DisputeResolution, h.to_string(), refs, false);
+        }
+    }
+    for h in &carried.assessments {
+        row(ImpactKind::Assessment, h.to_string(), refs, false);
+    }
+    let mut affected_requests: HashSet<Hash> = HashSet::new();
+    for q in &carried.requests {
+        if q.on_block
+            || q.change.is_some_and(|c| hit(&c))
+            || q.proposal.is_some_and(|p| affected_proposals.contains(&p))
+        {
+            affected_requests.insert(q.hash);
+            row(ImpactKind::CheckRequest, q.hash.to_string(), refs, false);
+        }
+    }
     let mut affected_reviews: HashSet<Hash> = HashSet::new();
     for (h, r) in &reviews {
-        if review_blocks(r).iter().any(|b| affected_ids.contains(b)) {
+        let request = matches!(&r.subject, ReviewSubject::Check { request } if affected_requests.contains(request));
+        if request || review_blocks(r).iter().any(|b| affected_ids.contains(b)) {
             affected_reviews.insert(*h);
         }
     }
@@ -1260,7 +1379,7 @@ pub(crate) fn compute_excluding(
         inside,
         outside,
         quarantine,
-        assessment: AssessmentSupport::NotImplemented,
+        assessment: super::current_support(),
     };
     let drop_frames = u64::try_from(manifest.spans.len()).map_err(|_| over(limit::FRAMES))?;
     let prospective = prospective_hits(
@@ -1579,6 +1698,9 @@ mod tests {
             approved_version: None,
             rebased_from: vec![],
             evidence: None,
+            assessment: None,
+            policy: None,
+            read_identity: None,
         };
         let chain: BTreeMap<Hash, LandingRecord> = [
             (hx(10), landing(None)),

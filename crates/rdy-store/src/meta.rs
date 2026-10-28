@@ -1,10 +1,12 @@
-//! The project's metadata refs (store format 12): `meta/store_format`, `meta/repo_id` and
-//! `meta/origin`, and from store format 15 a holder's `meta/store_mode` (`crate::holder`). Only
-//! the store writes a `meta/` ref: a new store's first batch, a load's upgrade batch
-//! (`Ingest::upgrade`) and a clone's origin batch (`Store::put_origin`).
+//! The project's metadata refs: `meta/store_features` (the store's feature manifest,
+//! `crate::format`), `meta/upgrade` (the last store upgrade's receipt), a dump's historical
+//! `meta/store_format`, `meta/repo_id` and `meta/origin`, and a holder's `meta/store_mode`
+//! (`crate::holder`). Only the store writes a `meta/` ref: a new store's first batch, a feature's
+//! first use, a load's upgrade batch (`Ingest::upgrade`), the upgrade transaction and a clone's
+//! origin batch (`Store::put_origin`).
 use crate::Store;
 use crate::error::StoreError;
-use crate::format::REF_STORE_FORMAT;
+use crate::format::{REF_STORE_FEATURES, REF_STORE_FORMAT, REF_UPGRADE, StoreFeatures};
 use crate::holder::REF_STORE_MODE;
 use crate::store::{StoreReader, batch_open};
 use rdy_model::{Hash, RepoId};
@@ -23,7 +25,14 @@ pub const FIRST_REPO_ID_STORE_FORMAT: u32 = 12;
 const NO_REPO_ID: &str = "meta/repo_id is missing; load the project from a dump with this rdy";
 
 /// The meta refs this rdy knows (closed), in the order the fsck text names them.
-const KNOWN: [&str; 4] = [REF_STORE_FORMAT, REF_REPO_ID, REF_ORIGIN, REF_STORE_MODE];
+const KNOWN: [&str; 6] = [
+    REF_STORE_FEATURES,
+    REF_UPGRADE,
+    REF_STORE_FORMAT,
+    REF_REPO_ID,
+    REF_ORIGIN,
+    REF_STORE_MODE,
+];
 
 /// Where a clone came from (D-C8C70): the source's repo id, its newest version and its canon
 /// head when the clone was made. `fork`: the clone took a new repo id (D-DAGNB `forked_from`).
@@ -74,6 +83,15 @@ impl StoreReader {
             .transpose()
     }
 
+    /// The store's features: the log's `meta/store_features` manifest. A store with none, or an
+    /// invalid one, is refused (E_STORE_FORMAT).
+    pub fn store_features(&self) -> Result<StoreFeatures, StoreError> {
+        match self.get_ref(REF_STORE_FEATURES)? {
+            Some(v) => crate::format::decode_features(&v),
+            None => Err(crate::format::ManifestError("invalid JSON".into()).store_error()),
+        }
+    }
+
     /// Where this project was cloned from; None for a project that is not a clone. A value
     /// that does not decode is `StoreError::Decode`.
     pub fn origin(&self) -> Result<Option<Origin>, StoreError> {
@@ -82,8 +100,10 @@ impl StoreReader {
             .transpose()
     }
 
-    /// fsck (closed), checked in this order (O22): (1) no `meta/` ref other than the four, in
-    /// name order; (2) `meta/repo_id`, when present, holds 16 bytes; (3) `meta/repo_id` is present
+    /// fsck (closed), checked in this order (O22): (1) no `meta/` ref other than the six, in
+    /// name order; then `meta/store_features` holds a valid manifest and `meta/upgrade`, when
+    /// present, a valid receipt; (2) `meta/repo_id`, when present, holds 16 bytes; (3)
+    /// `meta/repo_id` is present
     /// (RULING F2: a load gives an older log one); (4) `meta/origin`, when present, decodes;
     /// (5) it names this repo id when `fork` is false and another one when it is true; (6) every
     /// ref of the indexed log meets the rules of the mode the log's first batch set, in log
@@ -94,9 +114,17 @@ impl StoreReader {
         for (name, _) in self.refs_with_prefix(META_REF)? {
             if !KNOWN.contains(&name.as_str()) {
                 return Err(bad(format!(
-                    "{name:?} is not a meta ref this rdy knows (meta/store_format, meta/repo_id, meta/origin, meta/store_mode)"
+                    "{name:?} is not a meta ref this rdy knows (meta/store_features, meta/upgrade, meta/store_format, meta/repo_id, meta/origin, meta/store_mode)"
                 )));
             }
+        }
+        if let Some(v) = self.get_ref(REF_STORE_FEATURES)? {
+            StoreFeatures::parse(&v)
+                .map_err(|e| bad(format!("meta/store_features is not a valid manifest: {e}")))?;
+        }
+        if let Some(v) = self.get_ref(REF_UPGRADE)? {
+            crate::format::UpgradeReceipt::parse(&v)
+                .map_err(|e| bad(format!("meta/upgrade is not a valid receipt: {e}")))?;
         }
         let Some(r) = self.repo_id()? else {
             return Err(bad(NO_REPO_ID));

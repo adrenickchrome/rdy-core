@@ -100,6 +100,89 @@ pub enum StoreError {
     /// A read projection (a stub or a residual change) offered to a writer (E_BAD_INPUT).
     #[error("A read projection cannot be written.")]
     ProjectedWrite,
+    /// A write to a store this rdy may only read (E_STORE_READ_ONLY): `feature` is the store's
+    /// first unknown read-only feature by name, and `required_rdy` the build it names.
+    #[error("store feature {feature} permits reads only")]
+    ReadOnly {
+        feature: String,
+        required_rdy: String,
+    },
+    /// A read-only open of a store with no lock file (E_STORE_READ_ONLY): the open never
+    /// creates one in the source store.
+    #[error("the read-only store has no lock file")]
+    ReadOnlyNoLock,
+    /// A store that needs an upgrade (planned steps, or a sealed upgrade not yet completed),
+    /// opened under a policy that does not upgrade it, or written before its completion
+    /// (E_STORE_FORMAT).
+    #[error("the store needs an upgrade before it can open")]
+    UpgradeRequired,
+    /// A store upgrade that failed (`crate::upgrade`); `backup` is the backup it kept, if any.
+    #[error("{}", upgrade_message(*failure, backup.as_deref()))]
+    Upgrade {
+        failure: UpgradeFailure,
+        backup: Option<PathBuf>,
+    },
+}
+
+/// Why a store upgrade failed (`crate::upgrade`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpgradeFailure {
+    /// The store changed after the upgrade was planned (E_UPGRADE_MOVED).
+    Moved,
+    /// The backup is incomplete or does not match the store (E_UPGRADE_BACKUP).
+    BackupMismatch,
+    /// The store holds a link or a special file, which no backup copies (E_UPGRADE_BACKUP).
+    BackupFileType,
+    /// The upgrade batch is durable, but the store check failed (E_UPGRADE_FAILED).
+    CheckFailed,
+    /// The upgrade batch is durable, but the engine's full fsck failed (E_UPGRADE_FAILED).
+    FsckFailed,
+    /// The backup would pass its file count or path length bound (E_LIMIT).
+    Limit,
+}
+
+impl UpgradeFailure {
+    /// The failure's message, without the backup.
+    pub fn message(self) -> &'static str {
+        match self {
+            UpgradeFailure::Moved => "the store changed after the upgrade was planned",
+            UpgradeFailure::BackupMismatch => {
+                "the upgrade backup is incomplete or does not match the store"
+            }
+            UpgradeFailure::BackupFileType => "the store contains a link or a special file",
+            UpgradeFailure::CheckFailed | UpgradeFailure::FsckFailed => {
+                "the upgrade batch is durable, but the store check failed"
+            }
+            UpgradeFailure::Limit => "the upgrade backup exceeds its file or path limit",
+        }
+    }
+
+    /// The failure's fix.
+    pub fn fix(self) -> &'static str {
+        match self {
+            UpgradeFailure::Moved => {
+                "run rdy_upgrade with dry_run true, or rdy upgrade --dry-run, then retry"
+            }
+            UpgradeFailure::BackupMismatch => "move the incomplete backup aside, then retry",
+            UpgradeFailure::BackupFileType => {
+                "remove the link or special file, then retry the upgrade"
+            }
+            UpgradeFailure::CheckFailed | UpgradeFailure::FsckFailed => {
+                "stop the daemon and restore the backup before retrying"
+            }
+            UpgradeFailure::Limit => "reduce the store's extra files, then retry",
+        }
+    }
+}
+
+/// The message of an upgrade failure: the failure's text, then `; backup: {name}` when a
+/// backup was kept, where `{name}` is the backup's file name (the receipt's `backup`), never
+/// a path.
+pub fn upgrade_message(failure: UpgradeFailure, backup: Option<&std::path::Path>) -> String {
+    match backup.and_then(|b| b.file_name()) {
+        Some(name) => format!("{}; backup: {}", failure.message(), name.to_string_lossy()),
+        None => failure.message().to_string(),
+    }
 }
 
 impl From<std::io::Error> for StoreError {

@@ -54,14 +54,14 @@
 //! [`MAX_INPUTS`]) and no vector sized from a declared count. Its maps grow by fallible
 //! reservation from the records it reads; a refused growth is `record allocation failed`.
 use crate::dump::{
-    self, BYTES_AFTER, DROPPED_LEN, DumpHeader, DumpReader, DumpTrailer, Frame, PRELUDE_LEN,
-    RecordHead, check_file_head, check_frame_head, check_last, check_trailer, damaged, drop_text,
-    header_of, link, parse_batch_record, parse_dropped, read_body, read_envelope, read_head,
-    read_prelude, rec, try_batch_digest, try_kinds_digest,
+    self, BYTES_AFTER, DumpHeader, DumpReader, DumpStore, DumpTrailer, Frame, FrameKinds,
+    PRELUDE_LEN, RecordHead, check_file_head, check_frame_head, check_last, check_trailer, damaged,
+    drop_text, dropped_len, header_of, link, parse_batch_record, parse_dropped_of, read_body,
+    read_envelope, read_head, read_prelude, rec, try_batch_digest, try_kinds_digest,
 };
 use crate::dump_chain::{BatchMarker, DumpKind, chain_text, follows};
 use crate::error::StoreError;
-use crate::format::{REF_STORE_FORMAT, decode_u32};
+use crate::format::{REF_STORE_FEATURES, REF_STORE_FORMAT, StoreFeatures, decode_u32};
 use crate::holder::{FirstBatch, REF_STORE_MODE, StoreMode};
 use crate::kinds::{self, BatchCommit};
 use crate::meta::{REF_REPO_ID, decode_repo_id};
@@ -74,7 +74,6 @@ use crate::redaction_io::{
     apply_record,
 };
 use crate::segment::{HEADER as FRAME_HEADER, Location};
-use crate::store::decode;
 use crate::stream_error::StreamError;
 use crate::sync_proof::{self, ObjectSource, PortableRemoval, RemovalObject};
 use crate::sync_stream::StreamRecord;
@@ -107,7 +106,12 @@ pub const BATCH_GAP: &str = "a batch does not follow the batch before it";
 const REF_NAME_READ: u64 = 128;
 
 /// The names of the refs the forward pass reads whole.
-const SCANNED_REFS: [&str; 3] = [REF_STORE_MODE, REF_REPO_ID, REF_STORE_FORMAT];
+const SCANNED_REFS: [&str; 4] = [
+    REF_STORE_MODE,
+    REF_REPO_ID,
+    REF_STORE_FORMAT,
+    REF_STORE_FEATURES,
+];
 
 /// Where a load stops, as the scanner matches it against the physical batches of a chain.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -148,8 +152,9 @@ pub enum ChainLink {
     LegacyStop { format: u32 },
     /// The file's repo is not the chain's.
     Repo { file: RepoId, chain: RepoId },
-    /// The file's store format is not the chain's.
-    StoreFormat { file: u32, chain: u32 },
+    /// The file's store (format or features) does not follow the store of the file before it
+    /// (`chain`): another scalar format, or a manifest that lost or changed a feature.
+    StoreFormat { file: DumpStore, chain: DumpStore },
     /// The file starts elsewhere than the end of the file before it.
     Position { start: Location, prev_end: Location },
     /// The file follows another batch than the last batch of the file before it.
@@ -340,8 +345,8 @@ impl ChainSource {
 }
 
 /// The link check of input `i` of `n` (O11's order within a link): its kind, its dump format,
-/// then against the chain (`first`) and the file before it (`prev`), its repo, store format,
-/// base, base marker and `prev` digest.
+/// then against the chain (`first`) and the file before it (`prev`), its repo, store (which
+/// follows `prev`'s), base, base marker and `prev` digest.
 fn check_link(
     i: usize,
     n: usize,
@@ -372,10 +377,13 @@ fn check_link(
             chain: head.repo_id,
         });
     }
-    if env.header.store_format != first.header.store_format {
+    // each file's store follows the store of the file before it: the same scalar format, or a
+    // manifest that only grew (each new feature by its first use, which `end_of_file` proves
+    // against the file's own log)
+    if !env.header.store.follows(&prev.header.store) {
         return Some(ChainLink::StoreFormat {
-            file: env.header.store_format,
-            chain: first.header.store_format,
+            file: env.header.store.clone(),
+            chain: prev.header.store.clone(),
         });
     }
     if chain.base != prev.header.log_end {
@@ -466,7 +474,7 @@ pub struct ScanPlan {
     residues: Vec<RedactionResidue>,
     carried: Vec<RedactionCarried>,
     planned: HashMap<(u32, u64), Planned>,
-    store_format: u32,
+    store: DumpStore,
 }
 
 impl ScanPlan {
@@ -490,12 +498,14 @@ impl ScanPlan {
         self.end
     }
 
-    /// The store format the retained prefix holds at the selected end: the value of its last
-    /// `meta/store_format` update before the end, or the chain's header format when the prefix
-    /// sets none. A prefix that stops before a source upgrade batch holds the older format, and
-    /// the load's own upgrade starts from it.
-    pub fn store_format(&self) -> u32 {
-        self.store_format
+    /// The store the retained prefix holds at the selected end. For a chain of a scalar store:
+    /// the value of its last `meta/store_format` update before the end, or the chain's header
+    /// format when the prefix sets none; a prefix that stops before a source upgrade batch holds
+    /// the older format, and the load's own upgrade starts from it. For a chain of a feature
+    /// store: the manifest of its last `meta/store_features` update before the end, or the
+    /// chain's header manifest when the prefix sets none.
+    pub fn store(&self) -> &DumpStore {
+        &self.store
     }
 
     /// Whether a stop selected the end (a stop at the chain's own end included).
@@ -558,7 +568,13 @@ impl ScanPlan {
     ) -> Result<FrameAction, StoreError> {
         match self.planned.get(&(place.segment, place.offset)) {
             None => Ok(FrameAction::Keep),
-            Some(p) if (p.kind, p.hash, p.len) == (kind, hash, len) => Ok(p.action),
+            // by the logical kind: a frame of any encoding (`crate::codec`)
+            Some(p)
+                if (crate::codec::logical_kind(p.kind), p.hash, p.len)
+                    == (crate::codec::logical_kind(kind), hash, len) =>
+            {
+                Ok(p.action)
+            }
             Some(_) => Err(damaged(0, drop_text::SPAN)),
         }
     }
@@ -643,7 +659,8 @@ struct Holder {
     first: HashMap<ObjectKey, (Rec, bool)>,
     copies: HashMap<ObjectKey, Vec<KeyCopy>>,
     approved: HashMap<ObjectKey, (RemovalObject, Hash)>,
-    residues: HashMap<Hash, RedactionResidue>,
+    /// The residues the approved tuples name, each with the encoding its frame records.
+    residues: crate::redaction_io::Residues,
     scanned: Scanned,
     over: Option<StoreError>,
     spans: u64,
@@ -722,6 +739,8 @@ fn read_checked(f: &File, file: usize, buf: &mut [u8], offset: u64) -> Result<()
 struct BatchAt {
     start: Location,
     file: usize,
+    /// The dump format of the input that holds it.
+    format: u32,
     record: u64,
     first: u64,
     marker: BatchMarker,
@@ -798,12 +817,14 @@ fn frame_of(
 ) -> Result<(FrameAt, u64, u64), StoreError> {
     let rlen = u32::from_le_bytes(h[0..4].try_into().expect("4 bytes"));
     let (kind, hash, len, dropped) = if h[4] == rec::DROPPED {
-        let mut d = [0u8; DROPPED_LEN];
-        if rlen as usize != DROPPED_LEN {
+        let want = dropped_len(batch.format);
+        let mut buf = [0u8; dump::ENCODED_DROPPED_LEN];
+        let d = &mut buf[..want];
+        if rlen as usize != want {
             return Err(damaged(head, drop_text::WRONG_LENGTH));
         }
-        read(&mut d, head + FRAME_HEADER)?;
-        let f = parse_dropped(&d).map_err(|what| damaged(head, what))?;
+        read(d, head + FRAME_HEADER)?;
+        let f = parse_dropped_of(batch.format, d).map_err(|what| damaged(head, what))?;
         (f.kind(), *f.hash(), f.original_len(), true)
     } else {
         (
@@ -951,22 +972,25 @@ fn zeros(len: u32, at: u64) -> Result<Vec<u8>, StoreError> {
 }
 
 impl RecordAccess for ChainAccess<'_, '_> {
-    fn has_frame(
+    fn frame_kind(
         &mut self,
         loc: Location,
         len: u32,
         kind: u8,
         hash: &Hash,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<Option<u8>, StoreError> {
+        let agrees = |(l, k, h): (u32, u8, Hash)| {
+            ((l, crate::codec::logical_kind(k), h) == (len, kind, *hash)).then_some(k)
+        };
         if let Some(d) = self.drops.get(&key(loc)) {
-            return Ok((d.len, d.kind, d.hash) == (len, kind, *hash));
+            return Ok(agrees((d.len, d.kind, d.hash)));
         }
         if let Some(r) = self.find(loc) {
-            return Ok((r.len, r.kind, r.hash) == (len, kind, *hash));
+            return Ok(agrees((r.len, r.kind, r.hash)));
         }
         Ok(self
             .frame_at(loc)?
-            .is_some_and(|f| (f.len, f.kind, f.hash) == (len, kind, *hash)))
+            .and_then(|f| agrees((f.len, f.kind, f.hash))))
     }
 
     fn record(
@@ -1165,7 +1189,14 @@ impl ObjectSource for ChainObjects<'_, '_> {
         }
         let got = match self.first.get(&k) {
             Some((r, false)) if r.len as usize <= MAX_RECORD_BYTES => match self.lookups.read(r) {
-                Ok(payload) => Some(StreamRecord::Present { key: k, payload }),
+                Ok(payload) => crate::codec::split(r.kind, &payload)
+                    .ok()
+                    .map(|o| o.version)
+                    .map(|encoding| StreamRecord::Present {
+                        key: k,
+                        encoding,
+                        payload,
+                    }),
                 Err(StoreError::Io(e)) => return Err(StreamError::io(None, 0, &e)),
                 Err(_) => None,
             },
@@ -1282,6 +1313,10 @@ struct Scan<'p> {
     /// The meta refs the log set so far: the repo id and the store format.
     repo_ref: Option<Vec<u8>>,
     format_ref: Option<Vec<u8>>,
+    features_ref: Option<Vec<u8>>,
+    /// Each `meta/store_features` update of the log: its record's place, its decoded value, and
+    /// its input and offset there.
+    features_updates: Vec<(Location, Option<StoreFeatures>, usize, u64)>,
     /// Each `meta/store_format` update of the log: its record's place, its decoded value, and
     /// its input and offset there.
     format_updates: Vec<(Location, Option<u32>, usize, u64)>,
@@ -1354,6 +1389,8 @@ pub fn scan(src: &mut ChainSource, stop: Option<StopMatch>) -> Result<ScanPlan, 
         repo_ref: None,
         format_ref: None,
         format_updates: Vec::new(),
+        features_ref: None,
+        features_updates: Vec::new(),
         collected: Collected::default(),
         recs: HashMap::new(),
         batch_landings: Vec::new(),
@@ -1407,7 +1444,7 @@ pub fn scan(src: &mut ChainSource, stop: Option<StopMatch>) -> Result<ScanPlan, 
         };
     }
     let (planned, carried, residues) = s.plan(end)?;
-    let store_format = s.format_at(end)?;
+    let store = s.store_at(end)?;
     let (landing, tag) = match (&stop, &s.landing, &s.tag) {
         (Some(StopMatch::LandingPrefix(_)), Candidate::One { hash, .. }, _) => (Some(*hash), None),
         (Some(StopMatch::TagName(n)), _, Candidate::One { landing, .. }) => {
@@ -1426,7 +1463,7 @@ pub fn scan(src: &mut ChainSource, stop: Option<StopMatch>) -> Result<ScanPlan, 
         residues,
         carried,
         planned,
-        store_format,
+        store,
     })
 }
 
@@ -1444,15 +1481,36 @@ impl<'p> Scan<'p> {
         ScanError::Input { file, source }
     }
 
-    /// The store format in force at `end` (a batch end): the last update of a record before it,
-    /// or the chain's header format without one. An update in force that does not decode is
-    /// damage at its record.
-    fn format_at(&self, end: Location) -> Result<u32, ScanError> {
-        match self.format_updates.iter().rev().find(|u| u.0 < end) {
-            None => Ok(self.envs[0].header.store_format),
-            Some((_, Some(v), _, _)) => Ok(*v),
-            Some((_, None, file, offset)) => {
-                Err(self.fail(*file, damaged(*offset, METADATA_MISMATCH)))
+    /// The store in force at `end` (a batch end): the last update of a record before it, or the
+    /// chain's header store without one; a chain of a scalar store reads its store format
+    /// updates, a chain of a feature store its features updates. An update in force that does
+    /// not decode is damage at its record.
+    fn store_at(&self, end: Location) -> Result<DumpStore, ScanError> {
+        match &self.envs[0].header.store {
+            DumpStore::Legacy(n) => match self.format_updates.iter().rev().find(|u| u.0 < end) {
+                None => Ok(DumpStore::Legacy(*n)),
+                Some((_, Some(v), _, _)) => Ok(DumpStore::Legacy(*v)),
+                Some((_, None, file, offset)) => {
+                    Err(self.fail(*file, damaged(*offset, METADATA_MISMATCH)))
+                }
+            },
+            DumpStore::Features(m) => {
+                match self.features_updates.iter().rev().find(|u| u.0 < end) {
+                    Some((_, Some(v), _, _)) => Ok(DumpStore::Features(v.clone())),
+                    Some((_, None, file, offset)) => {
+                        Err(self.fail(*file, damaged(*offset, METADATA_MISMATCH)))
+                    }
+                    // a prefix with no features ref that holds a scalar store format is that
+                    // store's log before its move to features (a moved released store): the
+                    // load upgrades it as it upgrades a released dump
+                    None => match self.format_updates.iter().rev().find(|u| u.0 < end) {
+                        Some((_, Some(v), _, _)) => Ok(DumpStore::Legacy(*v)),
+                        Some((_, None, file, offset)) => {
+                            Err(self.fail(*file, damaged(*offset, METADATA_MISMATCH)))
+                        }
+                        None => Ok(DumpStore::Features(m.clone())),
+                    },
+                }
             }
         }
     }
@@ -1635,6 +1693,7 @@ impl<'p> Scan<'p> {
         self.batches.at.push(BatchAt {
             start,
             file: i,
+            format: f.format,
             record: head.at,
             first: head.end(),
             marker: BatchMarker {
@@ -1643,7 +1702,7 @@ impl<'p> Scan<'p> {
                 digest,
             },
         });
-        let allowed = dump::frame_kinds(f.format, self.envs[i].header.store_format).unwrap_or(&[]);
+        let allowed = FrameKinds::of(f.format, &self.envs[i].header.store);
         let first_of_log = self.mode.is_none();
         self.batch_landings.clear();
         self.landing_hashes.clear();
@@ -1664,7 +1723,8 @@ impl<'p> Scan<'p> {
             };
             let (kind, hash, len) = if fh.kind == rec::DROPPED {
                 let p = read_body(r, &fh).map_err(|e| self.fail(i, e))?;
-                let frame = parse_dropped(&p).map_err(|what| self.fail(i, damaged(fh.at, what)))?;
+                let frame = parse_dropped_of(f.format, &p)
+                    .map_err(|what| self.fail(i, damaged(fh.at, what)))?;
                 let id = (frame.kind(), *frame.hash(), frame.original_len());
                 if self.mode == Some(StoreMode::Holder) || first_of_log {
                     let r = Rec {
@@ -1703,7 +1763,7 @@ impl<'p> Scan<'p> {
                     })?;
                 (fh.kind, fh.hash, len)
             };
-            if !allowed.contains(&kind) {
+            if !allowed.is_some_and(|a| a.allows(kind)) {
                 return Err(self.fail(i, damaged(fh.at, dump::cannot_stand(kind))));
             }
             push(&mut pairs, (kind, hash), i, fh.at)?;
@@ -1795,11 +1855,15 @@ impl<'p> Scan<'p> {
             self.holder_count(rec_, false)?;
         }
         let mut matched = (false, false);
+        // a residue of any encoding (`crate::codec`); the other removal records have encoding 0
+        let residue = crate::codec::logical_kind(fh.kind) == kinds::REDACTION_RESIDUE;
         match fh.kind {
-            kinds::REDACTION
-            | kinds::REDACTION_RESIDUE
-            | kinds::REDACTION_APPLY
-            | kinds::REDACTION_CARRIED => {
+            k if residue
+                || matches!(
+                    k,
+                    kinds::REDACTION | kinds::REDACTION_APPLY | kinds::REDACTION_CARRIED
+                ) =>
+            {
                 if fh.len > MAX_RECORD_BYTES as u64 {
                     // a removal record over the record bound is no record: a proof that needs
                     // it fails, and a carried one is refused as the reader refuses it
@@ -1821,7 +1885,7 @@ impl<'p> Scan<'p> {
                             .map_err(|_| alloc(i, fh.at))?;
                         self.note(at, rec_, i, fh.at)?;
                     }
-                    kinds::REDACTION_RESIDUE => {
+                    _ if residue => {
                         self.collected
                             .note_residue(at, fh.hash)
                             .map_err(|_| alloc(i, fh.at))?;
@@ -1890,12 +1954,21 @@ impl<'p> Scan<'p> {
                             fh.at,
                         )?;
                         self.format_ref = Some(u.value);
+                    } else if u.name == REF_STORE_FEATURES {
+                        push(
+                            &mut self.features_updates,
+                            (at, StoreFeatures::parse(&u.value).ok(), i, fh.at),
+                            i,
+                            fh.at,
+                        )?;
+                        self.features_ref = Some(u.value);
                     }
                 }
             }
             kinds::TAG if matches!(self.stop, Some(StopMatch::TagName(_))) => {
                 let p = read_body(r, fh).map_err(|e| self.fail(i, e))?;
-                if let (Some(StopMatch::TagName(name)), Ok(t)) = (self.stop, decode::<Tag>(&p))
+                if let (Some(StopMatch::TagName(name)), Ok(t)) =
+                    (self.stop, crate::codec::decode_record::<Tag>(fh.kind, &p))
                     && t.name == *name
                 {
                     self.tag.take(fh.hash, t.landing);
@@ -1903,7 +1976,7 @@ impl<'p> Scan<'p> {
                 }
             }
             _ => {
-                if fh.kind == kinds::LANDING {
+                if crate::codec::logical_kind(fh.kind) == kinds::LANDING {
                     push(&mut self.landing_hashes, (at, fh.hash), i, fh.at)?;
                     push(&mut self.batch_landings, (at, rec_), i, fh.at)?;
                     if let Some(StopMatch::LandingPrefix(prefix)) = self.stop
@@ -1913,7 +1986,7 @@ impl<'p> Scan<'p> {
                         matched.0 = true;
                     }
                 }
-                if (holder || first_of_log) && is_removable(fh.kind) {
+                if (holder || first_of_log) && is_removable(crate::codec::logical_kind(fh.kind)) {
                     push(events, Event::Copy { at, rec: rec_ }, i, fh.at)?;
                 }
                 self.skip(r, f, fh)?;
@@ -1982,8 +2055,9 @@ impl<'p> Scan<'p> {
         {
             self.holder.over = Some(e);
         }
+        // keyed by the logical kind: a frame of any encoding (`crate::codec`)
         let k = ObjectKey {
-            kind: r.kind,
+            kind: crate::codec::logical_kind(r.kind),
             hash: r.hash,
         };
         if self.holder.over.is_none()
@@ -2116,7 +2190,10 @@ impl<'p> Scan<'p> {
         if file.is_some_and(|f| f != d.file) || d.apply != authority {
             return Err(damaged(d.offset, drop_text::NO_AUTHORIZATION));
         }
-        if (d.kind, d.hash, d.len) != (identity.0, identity.1, identity.2) {
+        // the span names the frame by its logical kind (`crate::codec`)
+        if (crate::codec::logical_kind(d.kind), d.hash, d.len)
+            != (identity.0, identity.1, identity.2)
+        {
             return Err(damaged(d.offset, drop_text::SPAN));
         }
         if d.residue != identity.3 {
@@ -2239,7 +2316,7 @@ impl<'p> Scan<'p> {
             };
             let checked = sync_proof::check(&mut objects, hash);
             // the residues its tuples name, read once for this proof (from its cache)
-            let mut residues: Vec<(Hash, Option<RedactionResidue>)> = Vec::new();
+            let mut residues: Vec<(Hash, Option<(RedactionResidue, u16)>)> = Vec::new();
             if let Ok(removal) = &checked {
                 for t in removal.objects.values() {
                     let Some(r) = t.residue else { continue };
@@ -2253,9 +2330,17 @@ impl<'p> Scan<'p> {
                         hash: r,
                     };
                     let res = match objects.record(k) {
-                        Ok(Some(StreamRecord::Present { payload, .. })) => {
-                            crate::bounded::decode::<RedactionResidue>(&payload).ok()
-                        }
+                        Ok(Some(r @ StreamRecord::Present { .. })) => match &r {
+                            StreamRecord::Present {
+                                payload, encoding, ..
+                            } => crate::codec::decode_bounded::<RedactionResidue>(
+                                r.raw_kind(),
+                                payload,
+                            )
+                            .ok()
+                            .map(|res| (res, *encoding)),
+                            _ => None,
+                        },
                         _ => None,
                     };
                     residues
@@ -2328,8 +2413,9 @@ impl<'p> Scan<'p> {
         if self.mode != Some(StoreMode::Holder) || self.holder.over.is_some() {
             return Ok(());
         }
+        // keyed by the logical kind; the copy keeps its raw kind (`crate::codec`)
         let k = ObjectKey {
-            kind: r.kind,
+            kind: crate::codec::logical_kind(r.kind),
             hash: r.hash,
         };
         let c = KeyCopy {
@@ -2379,8 +2465,9 @@ impl<'p> Scan<'p> {
         } else {
             None
         };
+        // the residue proof reads the copy by its raw kind (`crate::redaction::residue_matches`)
         if !copy_fits(
-            k.kind,
+            c.rec.kind,
             c.rec.len,
             intact.as_deref(),
             &tuple,
@@ -2505,10 +2592,16 @@ impl<'p> Scan<'p> {
             .as_deref()
             .and_then(decode_repo_id)
             .is_some_and(|id| id == links.repo_id);
-        let format_ok = self
-            .format_ref
-            .as_deref()
-            .is_none_or(|v| decode_u32(v) == Some(env.header.store_format));
+        let format_ok = match &env.header.store {
+            DumpStore::Legacy(n) => self
+                .format_ref
+                .as_deref()
+                .is_none_or(|v| decode_u32(v) == Some(*n)),
+            DumpStore::Features(m) => self
+                .features_ref
+                .as_deref()
+                .is_none_or(|v| StoreFeatures::parse(v).is_ok_and(|f| f == *m)),
+        };
         if !repo_ok || !format_ok {
             self.proof_failed(f.file, damaged(PRELUDE_LEN, METADATA_MISMATCH));
             return;
@@ -2699,12 +2792,15 @@ impl<'p> Scan<'p> {
     }
 
     /// Reads and decodes record `r`.
-    fn read_typed<T: serde::de::DeserializeOwned>(&mut self, r: &Rec) -> Result<T, ScanError> {
+    fn read_typed<T: serde::de::DeserializeOwned + 'static>(
+        &mut self,
+        r: &Rec,
+    ) -> Result<T, ScanError> {
         let p = self.lookups.read(r).map_err(|source| ScanError::Input {
             file: r.file,
             source,
         })?;
-        decode::<T>(&p).map_err(|_| ScanError::Input {
+        crate::codec::decode_record::<T>(r.kind, &p).map_err(|_| ScanError::Input {
             file: r.file,
             source: damaged(r.offset, drop_text::NO_AUTHORIZATION),
         })
@@ -2985,7 +3081,7 @@ impl<'p> Scan<'p> {
                 self.holder
                     .approved
                     .get(&ObjectKey {
-                        kind: d.kind,
+                        kind: crate::codec::logical_kind(d.kind),
                         hash: d.hash,
                     })
                     .map(|(t, a)| (*a, t.residue))

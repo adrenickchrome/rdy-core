@@ -178,6 +178,7 @@ fn merge1_a_change_that_covers_canon_and_its_own_side_lands() {
     let resolved = block("b-00001", "resolved");
     let r = Change {
         deps: vec![c, p_id],
+        read_identity: None,
         ..change(
             "v",
             vec![Op::Update {
@@ -227,6 +228,7 @@ fn merge1_a_follow_up_to_an_edit_another_view_made_identically_depends_on_its_ow
         let same = block("b-00001", "same");
         let up = |view: &str, base: &Block, to: &Block, msg: String| Change {
             message: msg,
+            read_identity: None,
             ..change(
                 view,
                 vec![Op::Update {

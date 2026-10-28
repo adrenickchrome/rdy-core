@@ -633,6 +633,8 @@ fn orphan_landing(r: &mut Rdy) -> (Hash, BlockId) {
         .put(rdy_store::kinds::SNAPSHOT, &snapshot)
         .unwrap();
     let mut landing = r.store().landing(&head).unwrap();
+    // a forged record from a read: it no longer has the read's identity
+    landing.read_identity = None;
     landing.state = state;
     landing.prev = Some(head);
     let damaged = r

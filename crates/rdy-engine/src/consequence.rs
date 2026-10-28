@@ -14,7 +14,7 @@ use crate::lexicon::Lexicon;
 use crate::tensions::delta::on_change;
 use crate::tensions::{SideRef, Tension, tension_label};
 use crate::tensions::{TensionDelta, tension_delta};
-use crate::views::{UndoResult, ViewOpResult};
+use crate::views::{ReplayResult, UndoResult, ViewOpResult};
 use crate::{Materialized, Rdy, ReadState, Scope, now_ms};
 use rdy_graph::{
     DerivedStatus, Edge, EdgeKind, Graph, IMPACT_LINKS, SUSPECT_LINKS, Suspect, edges_of,
@@ -2381,6 +2381,16 @@ fn hashes<'a>(lists: impl IntoIterator<Item = &'a Vec<String>>) -> Option<Vec<Ha
 
 /// An include's or an exclude's effect: the batch is the view's new head op.
 pub(crate) fn op_effect(r: &ViewOpResult) -> Option<ViewOpEffect> {
+    Some(ViewOpEffect {
+        batch: r.head.parse().ok()?,
+        changes: hashes([&r.added, &r.added_deps, &r.removed, &r.cascaded])?,
+        full: false,
+    })
+}
+
+/// A replay's effect: the batch is the view's new head op (the one `Include`); the changes are
+/// every new change the replay stored.
+pub(crate) fn replay_effect(r: &ReplayResult) -> Option<ViewOpEffect> {
     Some(ViewOpEffect {
         batch: r.head.parse().ok()?,
         changes: hashes([&r.added, &r.added_deps, &r.removed, &r.cascaded])?,

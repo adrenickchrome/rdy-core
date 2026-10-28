@@ -23,7 +23,7 @@
 //! the plan facts: every PLAN record and every row of the four plan tables. A later store format
 //! adds kinds and refs, never re-encodes (D-F0904): a load then appends one upgrade batch after the
 //! source log or the carried batch, and the checks allow exactly that batch.
-use crate::io_dump_fixture_s15::fixture;
+use crate::io_dump_fixture_s15::{first_start_logs_moves, fixture, without_moves};
 use rdy_engine::Rdy;
 use rdy_engine::dump_stop::DumpStop;
 use rdy_engine::load::{LoadSummary, load_chain};
@@ -33,7 +33,9 @@ use rdy_model::{AnswerAct, Hash};
 use rdy_qa::chain_fixture::{self, V17_KINDS};
 use rdy_qa::every_kind;
 use rdy_store::dump::{DUMP_FORMAT, DumpItem, DumpReader, read_envelope};
-use rdy_store::format::{REF_STORE_FORMAT, STORE_FORMAT, encode_u32};
+use rdy_store::format::{
+    DumpStore, LAST_SCALAR_STORE_FORMAT, REF_STORE_FEATURES, baseline_features,
+};
 use rdy_store::kinds;
 use rdy_store::redaction::StoredFrame;
 use rdy_store::segment::{Location, on_segment_write, seg_path};
@@ -43,6 +45,28 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+
+/// The ref families of a store-format-17 project, frozen with the v3-s17 fixtures: the families
+/// of `every_kind::FAMILIES` when store format 17 was the last scalar format.
+const V17_FAMILIES: [&str; 17] = [
+    "meta/store_format",
+    "meta/repo_id",
+    "meta/origin",
+    "view/",
+    "tag/",
+    "intent/",
+    "alt/",
+    "dismiss/",
+    "mention/",
+    "pair/",
+    "semantic/",
+    "inbox/",
+    "canon",
+    "proposal/",
+    "answer/",
+    "pending/",
+    "plan/",
+];
 
 const FULL: &str = "v3-s17.rdydump";
 const FULL_EXPECT: &str = "v3-s17.expect.json";
@@ -197,7 +221,7 @@ fn file_facts(name: &str, p: &Path) -> Value {
     json!({
         "name": name,
         "dump_format": format,
-        "store_format": header.store_format,
+        "store_format": legacy(&header.store),
         "rdy": header.rdy,
         "log_end": loc(header.log_end),
         "chain": header.chain,
@@ -420,7 +444,7 @@ fn plan_facts(r: &Rdy, upto: Location) -> Value {
 fn summary_facts(s: &LoadSummary) -> Value {
     json!({
         "dump_format": s.dump_format,
-        "store_format": s.store_format,
+        "store_format": legacy(&s.store_format),
         "batches": s.batches,
         "frames": s.frames,
         "files_written": s.files_written,
@@ -567,7 +591,7 @@ fn cp3_write_format17_fixtures_once() {
         );
     }
     assert_eq!(
-        (DUMP_FORMAT, STORE_FORMAT),
+        (DUMP_FORMAT, LAST_SCALAR_STORE_FORMAT),
         (3, 17),
         "the v3-s17 fixtures hold dump format 3 and store format 17"
     );
@@ -704,7 +728,7 @@ fn holds(project: &Path, needle: &[u8]) -> bool {
 /// this rdy's store format, and with the frames of `upgrade` upgrade batch data frames counted.
 fn as_read_now(want: &Value, upgrade: u64) -> Value {
     let mut want = want.clone();
-    want["facts"]["refs"][REF_STORE_FORMAT] = json!(hex(&encode_u32(STORE_FORMAT)));
+    want["facts"]["refs"][REF_STORE_FEATURES] = json!(hex(&baseline_features().to_json()));
     if upgrade > 0 {
         let n = &mut want["facts"]["objects"][kinds::REF_UPDATE.to_string()];
         *n = json!(n.as_u64().unwrap() + upgrade);
@@ -734,8 +758,11 @@ fn check_store(got: &Value, want: &Value, upgrade: u64, what: &str) {
         assert_eq!(got[member], want[member], "{what}: {member}");
     }
     for member in ["refs", "objects", "landings", "signatures", "fsck"] {
+        // the fsck's unlogged move count is analysis, checked by the first writable start
+        // (`first_start_logs_moves`)
         assert_eq!(
-            got["facts"][member], want["facts"][member],
+            without_moves(&got["facts"][member]),
+            without_moves(&want["facts"][member]),
             "{what}: {member}"
         );
     }
@@ -942,6 +969,11 @@ fn cp3_format17_project_and_holder_load_with_every_hash() {
             tables,
             "{what}: a reindex rebuilds every table"
         );
+        // the first writable start logs the moves content-2 leaves, then the logged invariant
+        // holds
+        r.close().unwrap();
+        first_start_logs_moves(&to, input.holder, what);
+        let r = open(&to, input.holder);
         if input.holder {
             r.fsck().unwrap();
             r.close().unwrap();
@@ -1051,7 +1083,7 @@ fn cp3_format17_fixtures_cover_new_kinds_refs_and_acts() {
         let store = &read_expect(name)["whole"]["store"];
         let refs = store["facts"]["refs"].as_object().unwrap();
         assert!(refs.keys().any(|n| n.starts_with("plan/")), "{name}");
-        for family in every_kind::FAMILIES {
+        for family in V17_FAMILIES {
             assert!(
                 refs.keys().any(|n| n.starts_with(family)),
                 "{name}: {family}"
@@ -1208,5 +1240,13 @@ fn cp3_format17_chain_seal_resolves_an_earlier_file() {
             check_stop(&got, &want[name], upgrade, &format!("{expect}: {name}"));
             assert_eq!(got["store"]["plans"], want[name]["store"]["plans"]);
         }
+    }
+}
+
+/// The scalar store format of a released dump's header.
+fn legacy(s: &DumpStore) -> u32 {
+    match s {
+        DumpStore::Legacy(n) => *n,
+        DumpStore::Features(_) => panic!("a released pair holds a scalar store"),
     }
 }

@@ -67,6 +67,8 @@ pub struct ChangeSummary {
     /// The alternative set and member the change was written as.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alternative: Option<AltRef>,
+    /// The full hash of the change this one replays, or null for any other change.
+    pub replayed_from: Option<String>,
 }
 
 /// One op of a view's chain.
@@ -360,6 +362,7 @@ impl ReadState {
                 id: *id,
                 deps: &c.deps,
                 ops: &c.ops,
+                is_replay: c.links.replayed_from.is_some(),
             })
             .collect();
         let deleters =
@@ -376,11 +379,15 @@ impl ReadState {
                 producers.insert(*v, self.reader().producer(v)?);
             }
         }
+        let order_only = self
+            .reader()
+            .order_only_pairs(&bases[&entry.base], changes.iter().flat_map(|c| &c.ops));
         let n = merge_on_blocks(
             &bases[&entry.base],
             &input,
             &|v| producers.get(v).copied().flatten(),
             &|b| deleters.get(b).copied(),
+            &|v, op| order_only.holds(v, op),
             blocks,
         )
         .conflicts
@@ -542,6 +549,7 @@ impl ReadState {
                     set: alt_label(&a.set),
                     member: a.member,
                 }),
+                replayed_from: change.links.replayed_from.map(|h| h.to_string()),
             });
         }
         let head: Hash = info

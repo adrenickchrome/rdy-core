@@ -79,7 +79,7 @@ fn objects(src: &Rdy) -> Vec<(u8, Vec<u8>)> {
     let mut out = vec![];
     src.store()
         .for_each_frame_from(ORIGIN, src.store().log_end(), |_, kind, _, payload, _| {
-            if COPIED.contains(&kind) {
+            if COPIED.contains(&rdy_store::codec::logical_kind(kind)) {
                 out.push((kind, payload.to_vec()));
             }
             Ok(())
@@ -143,7 +143,7 @@ fn object_hashes(r: &Rdy) -> BTreeSet<Hash> {
     let mut out = BTreeSet::new();
     r.store()
         .for_each_frame_from(ORIGIN, r.store().log_end(), |_, kind, hash, _, _| {
-            if COPIED.contains(&kind) {
+            if COPIED.contains(&rdy_store::codec::logical_kind(kind)) {
                 out.insert(hash);
             }
             Ok(())
@@ -215,7 +215,10 @@ fn ha12_holder_dump_load_preserves_mode_identity_and_divergent_tags() {
     let dump = root.path().join("h.rdydump");
     let summary = src.read().dump(&dump).unwrap();
     assert!(summary.files.is_empty(), "{summary:?}");
-    assert_eq!(summary.store_format, rdy_store::format::STORE_FORMAT);
+    assert_eq!(
+        summary.store_format,
+        rdy_store::format::DumpStore::Features(rdy_store::format::baseline_features())
+    );
 
     let target = root.path().join("loaded");
     let loaded = load::load(&dump, &target).unwrap();

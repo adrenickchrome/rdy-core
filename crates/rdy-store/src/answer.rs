@@ -51,7 +51,8 @@
 //! `put_answer` refuses an answer that breaks a rule of the record with `StoreError::Refused`.
 use crate::error::StoreError;
 use crate::index::hash_from;
-use crate::store::{Frames, encode};
+use crate::object_refs::ObjectKey;
+use crate::store::Frames;
 use crate::{Store, StoreReader, kinds};
 use rdy_model::{Answer, AnswerAct, EvidenceKind, Hash};
 
@@ -218,7 +219,7 @@ impl Store {
         a: &Answer,
         extra: Vec<(u8, Vec<u8>)>,
     ) -> Result<(Hash, Frames), StoreError> {
-        let bytes = encode(a);
+        let (kind, bytes) = crate::codec::item_new(kinds::ANSWER, a);
         let id = Hash::of(&bytes);
         if let Some(rule) = invalid(a) {
             return Err(StoreError::Refused(damage(&id, rule)));
@@ -235,16 +236,59 @@ impl Store {
         let is_block = |t: &Hash| -> Result<bool, StoreError> {
             Ok(extra
                 .iter()
-                .any(|(k, p)| *k == kinds::BLOCK && Hash::of(p) == *t)
+                .any(|(k, p)| crate::codec::logical_kind(*k) == kinds::BLOCK && Hash::of(p) == *t)
                 || self.has_kind(kinds::BLOCK, t)?)
         };
         if let Some(rule) = invalid_targets(a, is_block)? {
             return Err(StoreError::Refused(damage(&id, rule)));
         }
+        // a carried act's item, targets and bindings (`crate::carried_records`), before a byte
+        // is written; its record is the store's (the batch's earlier frames are not read)
+        let key = ObjectKey {
+            kind: kinds::ANSWER,
+            hash: id,
+        };
+        if let Err(reason) = crate::carried_records::validate_local(kind, &bytes) {
+            return Err(crate::carried_records::refusal(&id, kinds::ANSWER, reason));
+        }
+        let mut source = PendingAnswer {
+            store: crate::carried_records::StoreObjects(self),
+            key,
+            body: &bytes,
+        };
+        if let Some(reason) = crate::carried_records::validate_refs(&mut source, key)? {
+            return Err(crate::carried_records::refusal(&id, kinds::ANSWER, reason));
+        }
+        if a.act == AnswerAct::AcceptVerdict
+            && let Some(r) = crate::carried_records::verdict_item(&a.item)
+            && !self.has_kind(kinds::REVIEW, &r)?
+        {
+            return Err(crate::carried_records::refusal(
+                &id,
+                kinds::ANSWER,
+                crate::carried_records::VERDICT_REVIEW,
+            ));
+        }
         let mut items = extra;
-        items.push((kinds::ANSWER, bytes));
+        items.push((kind, bytes));
         items.extend(self.ref_items_pub(vec![(ref_of(a), id.0.to_vec())]));
         Ok((id, items))
+    }
+}
+
+/// The store's objects and one answer not written yet, as the carried checks read them.
+struct PendingAnswer<'a> {
+    store: crate::carried_records::StoreObjects<'a>,
+    key: ObjectKey,
+    body: &'a [u8],
+}
+
+impl crate::carried_records::CarriedSource for PendingAnswer<'_> {
+    fn object(&mut self, key: ObjectKey) -> Result<Option<(u16, Vec<u8>)>, StoreError> {
+        if key == self.key {
+            return Ok(Some((0, self.body.to_vec())));
+        }
+        self.store.object(key)
     }
 }
 
@@ -318,7 +362,7 @@ impl StoreReader {
                 } => return Err(StoreError::corrupt_at(at)),
                 _ => return Ok(()),
             };
-            let a: Answer = postcard::from_bytes(payload)
+            let a: Answer = crate::codec::decode_record(kinds::ANSWER, payload)
                 .map_err(|_| StoreError::Decode(damage(&h, "it does not decode")))?;
             if let Some(rule) = invalid(&a) {
                 return Err(StoreError::Decode(damage(&h, rule)));
@@ -336,6 +380,20 @@ impl StoreReader {
             };
             if let Some(rule) = invalid_targets(&a, is_block)? {
                 return Err(StoreError::Decode(damage(&h, rule)));
+            }
+            // an accepted verdict's review is in the log before it, as a target is (O17)
+            if a.act == AnswerAct::AcceptVerdict
+                && let Some(r) = crate::carried_records::verdict_item(&a.item)
+                && !self
+                    .index()
+                    .typed(kinds::REVIEW, &r)?
+                    .is_some_and(|l| l < at)
+            {
+                return Err(crate::carried_records::refusal(
+                    &h,
+                    kinds::ANSWER,
+                    crate::carried_records::VERDICT_REVIEW,
+                ));
             }
             n += 1;
             Ok(())

@@ -15,7 +15,7 @@ use crate::E_DAEMON_GONE;
 use crate::daemon::log;
 use crate::notify::{INBOX_URI, InboxSubs, NotifyMsg, inbox_subs};
 use crate::shared::Shared;
-use rdy_engine::engine::WriteFn;
+use rdy_engine::engine::{ReadFn, WriteFn};
 use rdy_engine::{E_INTERNAL, Event, Rdy, RdyError, ReloadOutcome};
 use serde_json::Value;
 use std::any::Any;
@@ -36,6 +36,10 @@ type Reply<T> = SyncSender<Result<T, RdyError>>;
 
 enum Msg {
     Run(WriteFn, Reply<Value>),
+    /// A serialized read (`Engine::read_serialized`): no write gate, no reload, no seal.
+    Read(ReadFn, Reply<Value>),
+    /// A clean republish after a panic elsewhere (`Engine::republish`): no write gate.
+    Republish(Reply<()>),
     Reload(Reply<ReloadOutcome>),
     /// Logs what moved while no daemon ran (`Rdy::reconcile_transitions`); no reply.
     Reconcile,
@@ -420,17 +424,22 @@ impl Writer {
                     // publish, so a write that changes them and then fails its seal never decides
                     // it (ruling task-11.1)
                     self.forward();
-                    let out = match catch_unwind(AssertUnwindSafe(|| f(&mut rdy))) {
-                        Ok(out) => out,
-                        Err(p) => {
-                            // the caches may be half-updated: republish a clean state
-                            self.invalidate_after_panic(&mut rdy, "a write");
-                            Err(RdyError::new(
-                                E_INTERNAL,
-                                format!("internal error on the writer: {}", panic_text(&*p)),
-                                "this is a bug in rdy; the request may or may not have been applied: re-read before retrying",
-                            ))
-                        }
+                    // a read-only store (D-WWAK7) runs no write closure; the store's own gate
+                    // refuses its appends too
+                    let out = match rdy.ensure_writable() {
+                        Err(e) => Err(e),
+                        Ok(()) => match catch_unwind(AssertUnwindSafe(|| f(&mut rdy))) {
+                            Ok(out) => out,
+                            Err(p) => {
+                                // the caches may be half-updated: republish a clean state
+                                self.invalidate_after_panic(&mut rdy, "a write");
+                                Err(RdyError::new(
+                                    E_INTERNAL,
+                                    format!("internal error on the writer: {}", panic_text(&*p)),
+                                    "this is a bug in rdy; the request may or may not have been applied: re-read before retrying",
+                                ))
+                            }
+                        },
                     };
                     // a raw write that `f` left open is sealed, with its moves, before the reply
                     let sealed = self.seal_open(&mut rdy);
@@ -446,6 +455,45 @@ impl Writer {
                     // after the reply: the write's batches, one message each
                     self.forward();
                     self.log_transition_error(&rdy);
+                    published
+                }
+                Msg::Read(f, reply) => {
+                    self.retry_republish(&mut rdy);
+                    // a read writes nothing, so a read-only store (D-WWAK7) runs it: it passes
+                    // no write gate and seals no batch
+                    let out = match catch_unwind(AssertUnwindSafe(|| f(&rdy))) {
+                        Ok(out) => out,
+                        Err(p) => {
+                            self.invalidate_after_panic(&mut rdy, "a read");
+                            Err(RdyError::new(
+                                E_INTERNAL,
+                                format!("internal error on the writer: {}", panic_text(&*p)),
+                                "this is a bug in rdy; re-read before retrying",
+                            ))
+                        }
+                    };
+                    let published = self.publish(&rdy);
+                    let _ = reply.send(out);
+                    published
+                }
+                Msg::Republish(reply) => {
+                    let out = match catch_unwind(AssertUnwindSafe(|| rdy.invalidate())) {
+                        Ok(()) => {
+                            self.republish_pending = false;
+                            Ok(())
+                        }
+                        Err(p) => {
+                            // the next message retries it, as after a writer panic
+                            self.republish_pending = true;
+                            Err(RdyError::new(
+                                E_INTERNAL,
+                                format!("the clean republish panicked: {}", panic_text(&*p)),
+                                "this is a bug in rdy; re-read before retrying",
+                            ))
+                        }
+                    };
+                    let published = self.publish(&rdy);
+                    let _ = reply.send(out);
                     published
                 }
                 Msg::Reload(reply) => {
@@ -522,6 +570,22 @@ impl WriterHandle {
     pub fn run(&self, f: WriteFn) -> Result<Value, RdyError> {
         let (tx, rx) = mpsc::sync_channel(1);
         self.send(Msg::Run(f, tx))?;
+        rx.recv().map_err(|_| gone())?
+    }
+
+    /// Runs the read `f` on the writer, serialized with every write, and returns its result.
+    /// Blocks: call it from the blocking pool, never from an async task.
+    pub fn read(&self, f: ReadFn) -> Result<Value, RdyError> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.send(Msg::Read(f, tx))?;
+        rx.recv().map_err(|_| gone())?
+    }
+
+    /// Republishes a clean state from the store on the writer (`Rdy::invalidate`), once it has
+    /// published. Blocks: call it from the blocking pool.
+    pub fn republish(&self) -> Result<(), RdyError> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.send(Msg::Republish(tx))?;
         rx.recv().map_err(|_| gone())?
     }
 

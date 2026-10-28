@@ -4,16 +4,16 @@ use crate::dump::ids;
 use crate::error::RdyError;
 use crate::load::{open_dump, read_error};
 use rdy_model::{Hash, RepoId};
-use rdy_store::dump::{DUMP_FORMAT, DumpReader, READS};
+use rdy_store::dump::{DUMP_FORMAT, DumpReader, READS, READS_FEATURES};
 use rdy_store::dump_chain::{BatchMarker, DumpKind};
-use rdy_store::format::STORE_FORMAT;
+use rdy_store::format::{DumpStore, StoreFeatures, baseline_features};
 use rdy_store::segment::Location;
 use rdy_store::transition::hex;
 use serde::Serialize;
 use std::path::Path;
 
 /// The version of the sync stream format this rdy writes and reads.
-const STREAM_FORMAT: u32 = 1;
+const STREAM_FORMAT: u32 = rdy_store::sync_stream::STREAM_FORMAT;
 
 /// One `(dump format, store format)` pair a dump may hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -27,12 +27,15 @@ pub struct DumpPair {
 pub struct FormatFacts {
     /// This rdy's version.
     pub rdy: String,
-    /// The store format this rdy writes.
-    pub store: u32,
+    /// The features of a store this rdy creates.
+    pub store: StoreFeatures,
     /// The dump format this rdy writes.
     pub dump: u32,
-    /// The pairs a dump may hold that this rdy reads, in release order.
+    /// The released pairs of scalar stores a dump may hold that this rdy reads, in release
+    /// order.
     pub reads: Vec<DumpPair>,
+    /// The manifest grammars of a feature store's dump this rdy reads.
+    pub reads_features: Vec<u32>,
     /// The sync stream format.
     pub stream: u32,
 }
@@ -44,7 +47,9 @@ pub struct FormatFacts {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct DumpFormatFacts {
     pub dump: u32,
-    pub store: u32,
+    /// The dump's store: `{"legacy": <n>}` for a dump of a scalar store, `{"features": {...}}`
+    /// for dump format 4.
+    pub store: DumpStore,
     /// The version of the rdy that wrote the dump.
     pub rdy: String,
     /// Full or increment.
@@ -66,12 +71,13 @@ pub struct DumpFormatFacts {
 pub fn formats() -> FormatFacts {
     FormatFacts {
         rdy: env!("CARGO_PKG_VERSION").to_string(),
-        store: STORE_FORMAT,
+        store: baseline_features(),
         dump: DUMP_FORMAT,
         reads: READS
             .iter()
             .map(|&(dump, store)| DumpPair { dump, store })
             .collect(),
+        reads_features: READS_FEATURES.to_vec(),
         stream: STREAM_FORMAT,
     }
 }
@@ -86,7 +92,7 @@ pub fn inspect_dump(file: &Path) -> Result<DumpFormatFacts, RdyError> {
     let chain = header.chain;
     Ok(DumpFormatFacts {
         dump,
-        store: header.store_format,
+        store: header.store,
         rdy: header.rdy,
         kind: chain.map(|c| c.kind),
         repo_id: chain.map(|c| c.repo_id),

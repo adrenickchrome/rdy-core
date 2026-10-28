@@ -2,6 +2,10 @@
 //! postcard shape; a removed block or change keeps its recorded identity through a skipped read
 //! field, so every existing kind keeps its bytes and hashes.
 use rdy_model::decision::is_frozen;
+use rdy_model::encoding::{
+    EncodedIdentity, LegacyBlockResidueV0, LegacyChangeResidueV0, LegacyChangeV0,
+    LegacyRedactionResidueV0, encoded_hash,
+};
 use rdy_model::redaction::*;
 use rdy_model::*;
 use std::collections::BTreeMap;
@@ -9,7 +13,10 @@ use std::collections::BTreeMap;
 // Bytes and hashes recorded at BASE 192ace4 (before the redaction model existed).
 const BLOCK: &str = "07702d58595a3334086465636973696f6e0107732d5041523031016d06046c6973740401030161036d61700501016b0206016e020d046e6f6e6500026f6b0101057469746c6503094f6c64207469746c6509426f647920746578740107726566696e65730107642d41424331320101700107642d41424331326cc8677933df2f583de49ba1c77d836754fe84fe0d16d5d283fdd6bb89ae7d20";
 const BLOCKV: &str = "5c6c9c291c19d0d52e0fce6894883a83bcadc223d8296fbb33bc2ba6dcb8386e";
+/// The fixture block's historical content-1 hash, which [`content_1`] recomputes.
 const BLOCKC: &str = "1132b101e2ba2a08a9c359c3b78fdec71ed7b63612a6d41206f107829ef3fffa";
+/// The fixture block's content-2 hash: its order key is left out.
+const BLOCKC2: &str = "2affef9a69370fb1f2aa4b276e036cfb2005ba252b0399a85ecb054611f2c699";
 const CHANGE: &str = "04776f726b030007702d58595a3334086465636973696f6e0107732d5041523031016d06046c6973740401030161036d61700501016b0206016e020d046e6f6e6500026f6b0101057469746c6503094f6c64207469746c6509426f647920746578740107726566696e65730107642d41424331320101700107642d41424331326cc8677933df2f583de49ba1c77d836754fe84fe0d16d5d283fdd6bb89ae7d2001de8f3fcf327eb911b2c368e011e0ffdee22fed456b4f4508337018ba46a0639d07702d58595a3334086465636973696f6e0107732d5041523031016d06046c6973740401030161036d61700501016b0206016e020d046e6f6e6500026f6b0101057469746c6503094f6c64207469746c6509426f647920746578740107726566696e65730107642d41424331320101700107642d41424331326cc8677933df2f583de49ba1c77d836754fe84fe0d16d5d283fdd6bb89ae7d2002afae16e5c35fafc0bb2c5333310842c4b11e4d3946d9e09df5c194047375d47e07712d44454e393901f286bc69f76edf5946c3b4ef9035baeb30bb4568981070ea34026a2dc4528737076167656e743a61010272310180c0f2f5b46601010203776879036d736701f0877c0e1ab8f4c605052fb919df4dc8cb7ff4df5a9cd5e85e8796a5727533d901e672e5cd4b1892ec81b2f8b2ef2d451f0a7e3ba808d2211c045432f767de0d2e03616c7401016e010768756d616e3a6900";
 const CHANGEID: &str = "46bab620a169a77ae758d3fd09f08e44e1eecfa75cbca5ab32d413d3cea4581b";
 const OPS: [&str; 3] = [
@@ -17,6 +24,38 @@ const OPS: [&str; 3] = [
     "01de8f3fcf327eb911b2c368e011e0ffdee22fed456b4f4508337018ba46a0639d07702d58595a3334086465636973696f6e0107732d5041523031016d06046c6973740401030161036d61700501016b0206016e020d046e6f6e6500026f6b0101057469746c6503094f6c64207469746c6509426f647920746578740107726566696e65730107642d41424331320101700107642d41424331326cc8677933df2f583de49ba1c77d836754fe84fe0d16d5d283fdd6bb89ae7d20",
     "02afae16e5c35fafc0bb2c5333310842c4b11e4d3946d9e09df5c194047375d47e07712d44454e3939",
 ];
+
+/// The retired content-1 hash of `b` (domain `rdy-content-1\0`, with the order key; no tracking
+/// fields), recomputed here only to check the historical vector. No production path accepts it.
+fn content_1(b: &Block) -> Hash {
+    #[derive(serde::Serialize)]
+    struct Content1<'a> {
+        id: &'a BlockId,
+        block_type: &'a String,
+        parent: &'a Option<BlockId>,
+        order: &'a String,
+        fields: Vec<(&'a String, &'a FieldValue)>,
+        body: &'a String,
+        links: &'a BTreeMap<String, Vec<Link>>,
+    }
+    let content = Content1 {
+        id: &b.id,
+        block_type: &b.block_type,
+        parent: &b.parent,
+        order: &b.order,
+        fields: b
+            .fields
+            .iter()
+            .filter(|(k, _)| !["status", "decided_at", "lifecycle"].contains(&k.as_str()))
+            .filter(|(k, _)| !rdy_model::engine_fields::is_engine_field(k))
+            .collect(),
+        body: &b.body,
+        links: &b.links,
+    };
+    let mut bytes = b"rdy-content-1\0".to_vec();
+    bytes.extend(enc(&content));
+    Hash::of(&bytes)
+}
 
 fn unhex(s: &str) -> Vec<u8> {
     (0..s.len())
@@ -116,6 +155,8 @@ fn change() -> Change {
                 actor: "human:i".into(),
                 run: None,
             }),
+            replayed_from: None,
+            briefing: None,
         },
         read_identity: None,
     }
@@ -136,21 +177,45 @@ fn rdx1_old_objects_keep_their_bytes_and_hashes() {
     assert_eq!(decoded.read_identity, None);
     assert_eq!(enc(&decoded), block_bytes, "a block gained or lost a byte");
     assert_eq!(decoded.version_hash().to_string(), BLOCKV);
-    assert_eq!(decoded.content_hash().to_string(), BLOCKC);
+    assert_eq!(decoded.content_hash().to_string(), BLOCKC2);
+    assert_eq!(
+        content_1(&decoded).to_string(),
+        BLOCKC,
+        "the historical vector"
+    );
     assert_eq!(decoded.version_hash(), hash_of(&decoded));
 
+    // the change bytes are encoding 0: they decode only through the frozen shape, never into
+    // the larger current struct
     let change_bytes = unhex(CHANGE);
-    let decoded: Change = postcard::from_bytes(&change_bytes).unwrap();
+    assert!(postcard::from_bytes::<Change>(&change_bytes).is_err());
+    let frozen: LegacyChangeV0 = postcard::from_bytes(&change_bytes).unwrap();
+    assert_eq!(enc(&frozen), change_bytes, "a change gained or lost a byte");
+    assert_eq!(hash_of(&frozen).to_string(), CHANGEID);
+    let identity = EncodedIdentity {
+        hash: Hash::of(&change_bytes),
+        version: 0,
+    };
+    let decoded = frozen.into_current(identity);
     assert_eq!(decoded, change());
-    assert_eq!(decoded.read_identity, None);
-    assert!(!decoded.is_projection());
     assert_eq!(
-        enc(&decoded),
-        change_bytes,
-        "a change gained or lost a byte"
+        decoded.read_identity,
+        Some(ChangeReadIdentity::Stored(identity))
     );
+    assert!(!decoded.is_projection());
     assert_eq!(decoded.id().to_string(), CHANGEID);
-    assert_eq!(decoded.id(), hash_of(&decoded));
+    assert_eq!(
+        enc(&LegacyChangeV0::from_current(&decoded).unwrap()),
+        change_bytes,
+        "the reverse conversion gives the original bytes"
+    );
+    // the same change written anew is encoding 1: the old body, two absent options, and an id
+    // over the version prefix
+    let mut latest = change_bytes.clone();
+    latest.extend([0, 0]);
+    assert_eq!(enc(&change()), latest);
+    assert_eq!(change().id(), encoded_hash(1, &latest));
+    assert_ne!(change().id().to_string(), CHANGEID);
 
     for (op, fixture) in change().ops.iter().zip(OPS) {
         let bytes = unhex(fixture);
@@ -318,21 +383,37 @@ fn rdx1_records_have_fixed_field_and_variant_order() {
         order: "m".into(),
         content_hash: h(b"c"),
         frozen: true,
+        source_encoding: 0,
     });
-    roundtrip(
-        &block_residue,
-        &cat(&[
-            vec![0],
-            hb(&h(b"v")),
-            s("p-XYZ34"),
-            s("decision"),
-            vec![1],
-            s("s-PAR01"),
-            s("m"),
-            hb(&h(b"c")),
-            vec![1],
-        ]),
+    let block_v0 = cat(&[
+        vec![0],
+        hb(&h(b"v")),
+        s("p-XYZ34"),
+        s("decision"),
+        vec![1],
+        s("s-PAR01"),
+        s("m"),
+        hb(&h(b"c")),
+        vec![1],
+    ]);
+    // encoding 0, frozen: no source encoding
+    let frozen = LegacyRedactionResidueV0::Block(LegacyBlockResidueV0 {
+        version: h(b"v"),
+        id: x.clone(),
+        block_type: "decision".into(),
+        parent: Some(id("s-PAR01")),
+        order: "m".into(),
+        content_hash: h(b"c"),
+        frozen: true,
+    });
+    roundtrip(&frozen, &block_v0);
+    assert_eq!(frozen.clone().into_current(), block_residue);
+    assert_eq!(
+        LegacyRedactionResidueV0::from_current(&block_residue),
+        Some(frozen)
     );
+    // encoding 1, the latest: the source encoding last
+    roundtrip(&block_residue, &cat(&[block_v0, vec![0]]));
 
     // REDACTION_RESIDUE, change form: create, update, delete in that order.
     let change_residue = RedactionResidue::Change(ChangeResidue {
@@ -358,30 +439,56 @@ fn rdx1_records_have_fixed_field_and_variant_order() {
         justification: None,
         message: "m".into(),
         links: ChangeLinks::default(),
+        source_encoding: 1,
     });
+    let change_head = cat(&[
+        vec![1],
+        hb(&h(b"chg")),
+        s("work"),
+        vec![3, 0],
+        s("p-XYZ34"),
+        hb(&h(b"v1")),
+        vec![1],
+        hb(&h(b"v1")),
+        s("p-XYZ34"),
+        hb(&h(b"v2")),
+        vec![2],
+        hb(&h(b"v2")),
+        s("p-XYZ34"),
+        vec![1],
+        hb(&h(b"dep")),
+        pb,
+        vec![0],
+        s("m"),
+    ]);
+    // encoding 0, frozen: the four-option links, no source encoding
+    let RedactionResidue::Change(c) = &change_residue else {
+        unreachable!("a change residue")
+    };
+    let frozen = LegacyRedactionResidueV0::Change(LegacyChangeResidueV0 {
+        change: c.change,
+        view: c.view.clone(),
+        ops: c.ops.clone(),
+        deps: c.deps.clone(),
+        provenance: c.provenance.clone(),
+        justification: None,
+        message: "m".into(),
+        links: Default::default(),
+    });
+    roundtrip(&frozen, &cat(&[change_head.clone(), vec![0, 0, 0, 0]]));
+    assert_eq!(
+        LegacyRedactionResidueV0::from_current(&change_residue),
+        None,
+        "encoding 0 holds only an encoding-0 source"
+    );
+    let RedactionResidue::Change(from_v0) = frozen.into_current() else {
+        unreachable!("a change residue")
+    };
+    assert_eq!(from_v0.source_encoding, 0);
+    // encoding 1, the latest: six-option links, then the source encoding
     roundtrip(
         &change_residue,
-        &cat(&[
-            vec![1],
-            hb(&h(b"chg")),
-            s("work"),
-            vec![3, 0],
-            s("p-XYZ34"),
-            hb(&h(b"v1")),
-            vec![1],
-            hb(&h(b"v1")),
-            s("p-XYZ34"),
-            hb(&h(b"v2")),
-            vec![2],
-            hb(&h(b"v2")),
-            s("p-XYZ34"),
-            vec![1],
-            hb(&h(b"dep")),
-            pb,
-            vec![0],
-            s("m"),
-            vec![0, 0, 0, 0],
-        ]),
+        &cat(&[change_head, vec![0, 0, 0, 0, 0, 0], vec![1]]),
     );
 
     // The closed enums: declaration order is the variant index.
@@ -406,6 +513,10 @@ fn rdx1_records_have_fixed_field_and_variant_order() {
         ImpactKind::Review,
         ImpactKind::Tension,
         ImpactKind::Answer,
+        ImpactKind::Assessment,
+        ImpactKind::Dispute,
+        ImpactKind::DisputeResolution,
+        ImpactKind::CheckRequest,
     ];
     for (i, k) in kinds.iter().enumerate() {
         roundtrip(k, &[i as u8]);
@@ -420,6 +531,7 @@ fn rdx1_records_have_fixed_field_and_variant_order() {
         roundtrip(r, &[i as u8]);
     }
     roundtrip(&AssessmentSupport::NotImplemented, &[0]);
+    roundtrip(&AssessmentSupport::Carried, &[1]);
     roundtrip(&CopyStatus::Unknown, &[0]);
 }
 
@@ -518,10 +630,14 @@ fn rdx1_a_projection_keeps_its_recorded_identity() {
     assert_eq!(second, &other);
     assert_eq!(projected.clone().id(), c.id());
 
-    // A normal change keeps the existing algorithm.
+    // A normal change keeps the existing algorithm, in its latest encoding: the hash of the
+    // version prefix and its body. The fixture's encoding-0 id is the frozen body's hash.
     assert!(!c.is_projection());
-    assert_eq!(c.id(), hash_of(&c));
-    assert_eq!(change().id().to_string(), CHANGEID);
+    assert_eq!(c.id(), encoded_hash(1, &enc(&c)));
+    assert_eq!(
+        hash_of(&LegacyChangeV0::from_current(&change()).unwrap()).to_string(),
+        CHANGEID
+    );
 }
 
 #[test]
@@ -679,6 +795,17 @@ fn rdx1_human_readable_hashes_are_full_lowercase_hex() {
         serde_yaml_ng::from_str::<ChangeResidue>(&text).unwrap(),
         residue
     );
+    // the encoding-1 link options are full hex too
+    let mut replay = residue.clone();
+    replay.links.replayed_from = Some(h(b"source"));
+    replay.links.briefing = Some(h(b"briefing"));
+    let text = serde_yaml_ng::to_string(&replay).unwrap();
+    assert!(text.contains(&h(b"source").to_string()), "{text}");
+    assert!(text.contains(&h(b"briefing").to_string()), "{text}");
+    assert_eq!(
+        serde_yaml_ng::from_str::<ChangeResidue>(&text).unwrap(),
+        replay
+    );
 
     // The bounded encoder writes the same bytes as the allocating one, and refuses a short buffer.
     let mut buf = [0u8; 4096];
@@ -715,6 +842,24 @@ fn rdx1_residue_link_hashes_are_full_lowercase_hex() {
         links["imported_by"]["actor"],
         Value::String("human:i".into())
     );
+    assert_eq!(links["replayed_from"], Value::Null);
+    assert_eq!(links["briefing"], Value::Null);
+    let mut replay = residue.clone();
+    replay.links.replayed_from = Some(h(b"source"));
+    replay.links.briefing = Some(h(b"briefing"));
+    let v = serde_yaml_ng::to_value(&replay).unwrap();
+    assert_eq!(
+        v["links"]["replayed_from"],
+        Value::String(h(b"source").to_string())
+    );
+    assert_eq!(
+        v["links"]["briefing"],
+        Value::String(h(b"briefing").to_string())
+    );
+    assert_eq!(
+        serde_yaml_ng::from_value::<ChangeResidue>(v).unwrap(),
+        replay
+    );
     assert_eq!(
         serde_yaml_ng::from_value::<ChangeResidue>(value.clone()).unwrap(),
         residue
@@ -743,9 +888,9 @@ fn rdx1_residue_link_hashes_are_full_lowercase_hex() {
     short["links"]["intent"] = Value::String(intent.short());
     assert!(serde_yaml_ng::from_value::<ChangeResidue>(short).is_err());
 
-    // Postcard: the links keep ChangeLinks's own bytes, as the residue's last field.
+    // Postcard: the links keep ChangeLinks's own bytes, followed by the source encoding.
     let bytes = enc(&residue);
-    assert!(bytes.ends_with(&enc(&original.links)));
+    assert!(bytes.ends_with(&cat(&[enc(&original.links), enc(&residue.source_encoding)])));
     assert_eq!(
         postcard::from_bytes::<ChangeResidue>(&bytes).unwrap(),
         residue
@@ -782,11 +927,34 @@ fn rdx1_residue_links_omitted_intent_reads_as_none() {
         residue
     );
 
-    // Postcard still delegates to ChangeLinks's own bytes.
+    // Postcard still delegates to ChangeLinks's own bytes, then the source encoding.
     let bytes = enc(&residue);
-    assert!(bytes.ends_with(&enc(&ChangeLinks::default())));
+    assert!(bytes.ends_with(&cat(&[
+        enc(&ChangeLinks::default()),
+        enc(&residue.source_encoding)
+    ])));
     assert_eq!(
         postcard::from_bytes::<ChangeResidue>(&bytes).unwrap(),
         residue
     );
+}
+
+#[test]
+fn ok2_the_encoding_0_residue_derivation_is_the_historical_content_1_hash() {
+    // the one derivation an encoding-0 residue's proof check uses: the released content-1
+    // vector, and the independent legacy calculation of this file
+    let decoded: Block = postcard::from_bytes(&unhex(BLOCK)).unwrap();
+    let legacy = rdy_model::encoding::legacy_content_1_hash(&decoded);
+    assert_eq!(legacy.to_string(), BLOCKC);
+    assert_eq!(legacy, content_1(&decoded));
+    assert_ne!(
+        legacy,
+        decoded.content_hash(),
+        "content-2 leaves out the order key"
+    );
+    // the order key is in it: a move gives another content-1 hash
+    let mut moved = decoded.clone();
+    moved.order = "W".into();
+    assert_ne!(rdy_model::encoding::legacy_content_1_hash(&moved), legacy);
+    assert_eq!(moved.content_hash(), decoded.content_hash());
 }

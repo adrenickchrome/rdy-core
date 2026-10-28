@@ -66,6 +66,11 @@ fn trk1_tracking_fields_are_outside_the_content_hash() {
         "the ruling counts"
     );
     assert!(t.is_tracking("decision", "trigger") && !t.is_tracking("claim", "trigger"));
+    // ok2: a move within its parent keeps both content hashes
+    let mut moved = a.clone();
+    moved.order = "W".into();
+    assert_eq!(moved.content_hash_with(&t), a.content_hash_with(&t));
+    assert_eq!(moved.content_hash(), a.content_hash());
 }
 
 #[test]

@@ -21,6 +21,15 @@ pub enum ViewCmd {
     Fork { from: String, name: String },
     /// Include changes, and the changes they depend on, in a view.
     Include { view: String, changes: Vec<String> },
+    // `about` keeps the closing period, which a doc comment would drop
+    #[command(about = "Replay selected changes into your open view.")]
+    Replay {
+        /// The open view you own.
+        view: String,
+        /// The changes to replay, from any view.
+        #[arg(required = true, num_args = 1..)]
+        changes: Vec<String>,
+    },
     /// Take changes out of a view.
     Exclude {
         view: String,
@@ -117,6 +126,9 @@ pub fn args_of(cmd: &ViewCmd) -> Value {
         ViewCmd::Fork { from, name } => json!({"op": "fork", "from": from, "name": name}),
         ViewCmd::Include { view, changes } => {
             json!({"op": "include", "view": view, "changes": changes})
+        }
+        ViewCmd::Replay { view, changes } => {
+            json!({"op": "replay", "view": view, "changes": changes})
         }
         ViewCmd::Exclude {
             view,
@@ -404,13 +416,17 @@ fn show_text(v: &Value, all: bool) -> String {
             short(text(&c["id"])),
             text(&c["actor"]),
             if message.is_empty() { "-" } else { message },
-            if c["client_nonce"].is_string() {
+            // a replay's nonce is its own: only a working-copy commit is marked
+            if c["client_nonce"].is_string() && c["replayed_from"].is_null() {
                 " [wc]"
             } else {
                 ""
             },
             blocks_text(&blocks, all)
         ));
+        if let Some(source) = c["replayed_from"].as_str() {
+            out.push_str(&format!(" replayed from {}", short(source)));
+        }
     }
     out.push_str("\nconflicts:");
     out.push_str(&conflict_lines(&v["conflicts"], "  "));
@@ -469,8 +485,8 @@ pub fn render_view(cmd: &ViewCmd, reply: &Value) -> String {
 }
 
 /// The text of the `view` op's reply to a request of kind `op` (`create`, `fork`, `include`,
-/// `exclude`, `compare`, `list`, `show`, `close`, `own`, `resolve` or `undo`). Include, exclude and undo
-/// end with their consequences.
+/// `exclude`, `replay`, `compare`, `list`, `show`, `close`, `own`, `resolve` or `undo`). Include,
+/// exclude, replay and undo end with their consequences.
 pub fn render(op: &str, reply: &Value) -> String {
     match op {
         "create" | "fork" => head_line(reply),
@@ -483,6 +499,16 @@ pub fn render(op: &str, reply: &Value) -> String {
             if count(&reply["added_deps"]) > 0 {
                 out.push_str(&format!(" (+{} dependencies)", count(&reply["added_deps"])));
             }
+            out.push_str(&conflict_lines(&reply["conflicts"], ""));
+            out.push_str(&crate::brief_text::consequences_text(reply));
+            out
+        }
+        "replay" => {
+            let mut out = format!(
+                "replayed {} change(s) into {}",
+                count(&reply["replayed"]),
+                text(&reply["view"])
+            );
             out.push_str(&conflict_lines(&reply["conflicts"], ""));
             out.push_str(&crate::brief_text::consequences_text(reply));
             out
@@ -677,6 +703,33 @@ mod tests {
             let t = render(op, &reply);
             assert!(t.ends_with(want), "{op}: {t}");
         }
+    }
+
+    /// ok10: only a working-copy commit is marked `[wc]`. A replay carries a client nonce of
+    /// its own (`replay:<head>:<n>`) and is marked by its source instead.
+    #[test]
+    fn ok10_a_replayed_change_is_not_marked_as_a_working_copy_commit() {
+        let mut d = detail(1);
+        d["changes"] = json!([
+            {"id": "cd".repeat(32), "actor": "agent:a", "run": null, "at_ms": 1, "message": "",
+             "blocks": ["c-00001"], "client_nonce": format!("replay:{}:0", "ab".repeat(32)),
+             "replayed_from": "ef".repeat(32)},
+            {"id": "12".repeat(32), "actor": "human:qa", "run": null, "at_ms": 2,
+             "message": "from files", "blocks": ["c-00002"], "client_nonce": "n-1"}
+        ]);
+        let t = show_text(&d, false);
+        let line = |id: &str| {
+            t.lines()
+                .find(|l| l.starts_with(&format!("  {id}")))
+                .unwrap()
+        };
+        let replayed = line(&"cd".repeat(6));
+        assert!(!replayed.contains("[wc]"), "{replayed}");
+        assert!(
+            replayed.ends_with(&format!(" replayed from {}", "ef".repeat(6))),
+            "{replayed}"
+        );
+        assert!(line(&"12".repeat(6)).contains("from files [wc]"), "{t}");
     }
 
     /// Final-review fix round 1: a close op prints its reason, and `view ls --all` prints why

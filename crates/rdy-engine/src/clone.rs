@@ -214,8 +214,9 @@ fn from_file(
     fork: bool,
 ) -> Result<(LoadSummary, Origin, RepoId), RdyError> {
     let opened = open_stream(file, BufReader::new(open_dump(file)?))?;
-    let format = opened.header.store_format;
-    if format < FIRST_REPO_ID_STORE_FORMAT {
+    if let rdy_store::format::DumpStore::Legacy(format) = opened.header.store
+        && format < FIRST_REPO_ID_STORE_FORMAT
+    {
         let file = file.display();
         return Err(RdyError::new(
             E_DUMP,

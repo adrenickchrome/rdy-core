@@ -969,6 +969,8 @@ fn rf11_historical_scope_excludes_future_seals() {
     let l2 = raw_land(&mut r, &v2);
     // a landing on another chain, never canon's
     let mut off: LandingRecord = r.read().reader().landing(&l2).unwrap();
+    // a forged record from a read: it no longer has the read's identity
+    off.read_identity = None;
     off.prev = Some(l1);
     off.proposal = Hash([8; 32]);
     let lx = r.store_mut().put(kinds::LANDING, &off).unwrap();

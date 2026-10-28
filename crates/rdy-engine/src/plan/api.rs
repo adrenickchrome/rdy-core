@@ -561,7 +561,9 @@ pub(crate) fn live_rows(
                     } else {
                         let state = match a.act {
                             PlanAct::Defer => ItemState::Deferred,
-                            PlanAct::Confirm | PlanAct::Done => ItemState::Closed,
+                            PlanAct::Confirm | PlanAct::Done | PlanAct::Dismiss => {
+                                ItemState::Closed
+                            }
                         };
                         let row = AnswerRow {
                             act: a.act,

@@ -1,9 +1,13 @@
 pub mod answer;
+pub mod assessment;
 pub mod block;
 mod canon;
 mod change;
+pub mod check_request;
 mod coord;
 pub mod decision;
+pub mod dispute;
+pub mod encoding;
 pub mod engine_fields;
 pub mod entity;
 mod hash;
@@ -14,6 +18,7 @@ pub mod plan;
 pub mod redaction;
 pub mod repo_id;
 pub mod signature;
+mod strict;
 pub mod tree;
 mod value;
 
@@ -24,7 +29,8 @@ pub use canon::{
     StateSnapshot, Tag,
 };
 pub use change::{
-    AltChoice, Change, ChangeLinks, EditorialClass, Justification, Op, Provenance, Role,
+    AltChoice, Change, ChangeLinks, ChangeReadIdentity, EditorialClass, Justification, Op,
+    Provenance, Role,
 };
 pub use coord::{AltMember, AltSet, AltStatus, Intent, IntentStatus};
 pub use hash::Hash;

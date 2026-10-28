@@ -29,6 +29,7 @@ impl Review {
             ReviewSubject::Tension { vkey, .. } => Some(*vkey),
             ReviewSubject::Mention { .. } => None,
             ReviewSubject::Pair { .. } => None,
+            ReviewSubject::Check { .. } => None,
         }
     }
 }
@@ -50,6 +51,8 @@ pub enum ReviewSubject {
     Mention { block: BlockId, entity: BlockId },
     /// A candidate pair of blocks at given contents (plan M2e1): the pair key and the two items.
     Pair { key: Hash, items: Vec<PairItem> },
+    /// A check request's case (appended: index 3): the CHECK_REQUEST it answers.
+    Check { request: Hash },
 }
 
 /// The verdict of a review. Field order is format.
@@ -63,6 +66,12 @@ pub enum Verdict {
     Tension,
     /// The pair does not disagree.
     NoTension,
+    /// The check found nothing (appended: index 4).
+    Pass,
+    /// The check found something to look at (index 5).
+    Concern,
+    /// The check failed (index 6).
+    Fail,
 }
 
 /// A note on one block. Field order is format.

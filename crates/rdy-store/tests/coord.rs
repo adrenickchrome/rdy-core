@@ -54,7 +54,7 @@ fn set(views: &[&str]) -> AltSet {
 fn cfmt1_kinds_15_and_16_and_format_10() {
     assert_eq!(kinds::INTENT, 15);
     assert_eq!(kinds::ALT_SET, 16);
-    assert_eq!(rdy_store::format::STORE_FORMAT, 18);
+    assert_eq!(rdy_store::format::LAST_SCALAR_STORE_FORMAT, 18);
 }
 
 #[test]
@@ -145,6 +145,8 @@ fn cfmt1_fsck_counts_and_checks_coordination_objects() {
             }),
             client_nonce: None,
             imported_by: None,
+            replayed_from: None,
+            briefing: None,
         },
         read_identity: None,
     };

@@ -81,24 +81,44 @@ fn invalid(object: ObjectKey) -> StreamError {
     StreamError::bad_record(0, 0, Reason::InvalidRemovalProof).with_object(Some(object))
 }
 
-/// The present payload of `k`: a missing record is E_UNRESOLVED_REF; a dropped one, or one whose
-/// bytes are not its hash's, is no proof.
+/// The present body of `k` (its payload, less a versioned record's version, `crate::codec`): a
+/// missing record is E_UNRESOLVED_REF; a dropped one, or one whose bytes are not its hash's, is
+/// no proof.
 fn payload(source: &mut dyn ObjectSource, k: ObjectKey) -> Result<Vec<u8>, StreamError> {
+    versioned(source, k).map(|(body, _)| body)
+}
+
+/// The body of the record of `k` and the encoding its frame records.
+fn versioned(source: &mut dyn ObjectSource, k: ObjectKey) -> Result<(Vec<u8>, u16), StreamError> {
     match source.record(k)? {
         None => Err(StreamError::unresolved(0, 0, k)),
-        Some(StreamRecord::Present { payload, .. }) if Hash::of(&payload) == k.hash => Ok(payload),
+        Some(r @ StreamRecord::Present { .. }) => {
+            let StreamRecord::Present { payload, .. } = &r else {
+                unreachable!("a present record")
+            };
+            if Hash::of(payload) != k.hash {
+                return Err(invalid(k));
+            }
+            crate::codec::split(r.raw_kind(), payload)
+                .map(|o| (o.body.to_vec(), o.version))
+                .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(k)))
+        }
         Some(_) => Err(invalid(k)),
     }
 }
 
-/// The record of `k`, decoded within its bounds.
-fn typed<T: DeserializeOwned>(
+/// The record of `k`, decoded within its bounds in the encoding its frame records.
+fn typed<T: DeserializeOwned + 'static>(
     source: &mut dyn ObjectSource,
     k: ObjectKey,
 ) -> Result<T, StreamError> {
-    let p = payload(source, k)?;
-    bounded::decode(&p)
-        .map_err(|e: RecordError| StreamError::from_record(0, 0, &e).with_object(Some(k)))
+    let (body, version) = versioned(source, k)?;
+    crate::codec::decode_bounded_split(&crate::codec::ObjectBytes {
+        kind: k.kind,
+        version,
+        body: &body,
+    })
+    .map_err(|e: RecordError| StreamError::from_record(0, 0, &e).with_object(Some(k)))
 }
 
 /// Checks the removal that apply `apply` records against the records `source` holds, and returns
@@ -173,7 +193,7 @@ pub fn check(source: &mut dyn ObjectSource, apply: Hash) -> Result<PortableRemov
         let manifest: BlobManifest = typed(source, key(kinds::BLOB_MANIFEST, *b))?;
         chunks.extend(manifest.chunks);
     }
-    let mut residues: HashMap<Hash, RedactionResidue> = HashMap::new();
+    let mut residues: HashMap<Hash, (RedactionResidue, u16)> = HashMap::new();
     let mut objects: BTreeMap<ObjectKey, RemovalObject> = BTreeMap::new();
     for span in &m.spans {
         let k = key(span.kind, span.hash);
@@ -185,12 +205,22 @@ pub fn check(source: &mut dyn ObjectSource, apply: Hash) -> Result<PortableRemov
         match span.residue {
             Some(r) => {
                 if let HashEntry::Vacant(v) = residues.entry(r) {
-                    v.insert(typed(source, key(kinds::REDACTION_RESIDUE, r))?);
+                    let k = key(kinds::REDACTION_RESIDUE, r);
+                    let (body, encoding) = versioned(source, k)?;
+                    let res = crate::codec::decode_bounded_split(&crate::codec::ObjectBytes {
+                        kind: kinds::REDACTION_RESIDUE,
+                        version: encoding,
+                        body: &body,
+                    })
+                    .map_err(|e: RecordError| {
+                        StreamError::from_record(0, 0, &e).with_object(Some(k))
+                    })?;
+                    v.insert((res, encoding));
                 }
                 if !residue_fits(
                     span.kind,
                     &span.hash,
-                    &residues[&r],
+                    &residues[&r].0,
                     &versions,
                     &version_hashes,
                 ) {
@@ -220,12 +250,20 @@ pub fn check(source: &mut dyn ObjectSource, apply: Hash) -> Result<PortableRemov
     for (k, tuple) in &objects {
         match source.record(*k)? {
             None => {}
-            Some(StreamRecord::Present { payload, .. }) => {
+            Some(StreamRecord::Present {
+                payload,
+                encoding: frame_encoding,
+                ..
+            }) => {
+                let raw = crate::codec::raw_kind(k.kind, frame_encoding);
                 let fits = Hash::of(&payload) == k.hash
                     && payload.len() == tuple.len as usize
                     && match tuple.residue {
-                        Some(r) => residue_matches(k.kind, &payload, &residues[&r]),
-                        None => true,
+                        Some(r) => {
+                            let (res, encoding) = &residues[&r];
+                            residue_matches(raw, &payload, res, *encoding)
+                        }
+                        None => raw == k.kind,
                     };
                 if !fits {
                     return Err(invalid(*k));
@@ -238,7 +276,15 @@ pub fn check(source: &mut dyn ObjectSource, apply: Hash) -> Result<PortableRemov
             }) if original_len != tuple.len || residue != tuple.residue => {
                 return Err(invalid(*k));
             }
-            Some(StreamRecord::Dropped { .. }) => {}
+            // a dropped record keeps the encoding its residue records as the removed frame's
+            Some(StreamRecord::Dropped {
+                encoding, residue, ..
+            }) => {
+                let res = residue.map(|r| &residues[&r].0);
+                if !crate::stream_source::drop_encoding_agrees(encoding, res) {
+                    return Err(invalid(*k));
+                }
+            }
         }
     }
     Ok(PortableRemoval {

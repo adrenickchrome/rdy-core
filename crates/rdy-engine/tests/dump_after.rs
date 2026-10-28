@@ -197,8 +197,11 @@ fn hc4_increment_is_only_the_sealed_suffix() {
     let inc = st.dump_after(&full.chain_end(), &out).unwrap();
     assert_eq!(inc.out.as_deref(), Some(out.display().to_string().as_str()));
     assert_eq!(inc.kind, DumpKind::Increment);
-    assert_eq!(inc.dump_format, 3);
-    assert_eq!(inc.store_format, rdy_store::format::STORE_FORMAT);
+    assert_eq!(inc.dump_format, 4);
+    assert_eq!(
+        inc.store_format,
+        rdy_store::format::DumpStore::Features(rdy_store::format::baseline_features())
+    );
     assert_eq!(inc.repo_id, full.repo_id);
     assert_eq!(inc.base, full.end);
     assert_eq!(inc.end, st.seq());
@@ -206,7 +209,7 @@ fn hc4_increment_is_only_the_sealed_suffix() {
     assert_eq!(inc.bytes, std::fs::metadata(&out).unwrap().len());
 
     let (format, header, items, trailer) = read_all(&out);
-    assert_eq!(format, 3);
+    assert_eq!(format, 4);
     assert_eq!(header.log_end, st.seq());
     assert_eq!(
         header.chain,
@@ -333,9 +336,9 @@ fn hc4_no_suffix_returns_prior_end_without_any_file() {
             got,
             DumpSummary {
                 out: None,
-                dump_format: 3,
+                dump_format: 4,
                 kind: DumpKind::Increment,
-                store_format: full.store_format,
+                store_format: full.store_format.clone(),
                 repo_id: full.repo_id,
                 base: full.end,
                 end: full.end,
@@ -387,12 +390,12 @@ fn hc4_predecessor_checks_use_exact_errors() {
     // the repo, first of all
     let bad = ChainEnd {
         repo_id: other_repo,
-        store_format: 15,
+        store_format: rdy_store::format::DumpStore::Legacy(15),
         end: Location {
             segment: seq.segment + 1,
             offset: 1,
         },
-        ..prev
+        ..prev.clone()
     };
     check(
         expect_err(st.dump_after(&bad, &out)),
@@ -400,16 +403,19 @@ fn hc4_predecessor_checks_use_exact_errors() {
     );
     // then the store format
     let bad = ChainEnd {
-        store_format: 15,
+        store_format: rdy_store::format::DumpStore::Legacy(15),
         end: Location {
             segment: seq.segment + 1,
             offset: 1,
         },
-        ..prev
+        ..prev.clone()
     };
     check(
         expect_err(st.dump_after(&bad, &out)),
-        "previous dump is of store format 15, but this store is of store format 18".into(),
+        format!(
+            "previous dump is of store format 15, but this store is of store features {}",
+            String::from_utf8(rdy_store::format::baseline_features().to_json()).unwrap()
+        ),
     );
     // then an end past this state
     for past in [
@@ -422,7 +428,10 @@ fn hc4_predecessor_checks_use_exact_errors() {
             offset: 0,
         },
     ] {
-        let bad = ChainEnd { end: past, ..prev };
+        let bad = ChainEnd {
+            end: past,
+            ..prev.clone()
+        };
         check(
             expect_err(st.dump_after(&bad, &out)),
             format!(
@@ -456,7 +465,7 @@ fn hc4_predecessor_checks_use_exact_errors() {
     ] {
         let bad = ChainEnd {
             end: inside,
-            ..prev
+            ..prev.clone()
         };
         check(
             expect_err(st.dump_after(&bad, &out)),
@@ -471,7 +480,7 @@ fn hc4_predecessor_checks_use_exact_errors() {
     marker.digest = Hash([7; 32]);
     let bad = ChainEnd {
         end_batch: marker,
-        ..prev
+        ..prev.clone()
     };
     check(
         expect_err(st.dump_after(&bad, &out)),
@@ -484,7 +493,7 @@ fn hc4_predecessor_checks_use_exact_errors() {
     let earlier = batch_end(&batches[0]).unwrap();
     let bad = ChainEnd {
         end: earlier,
-        ..prev
+        ..prev.clone()
     };
     check(
         expect_err(st.dump_after(&bad, &out)),

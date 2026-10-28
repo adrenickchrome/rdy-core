@@ -95,7 +95,8 @@ fn objects(src: &Rdy, keep: &dyn Fn(u8, &Hash) -> bool) -> Vec<(u8, Vec<u8>)> {
             ORIGIN,
             src.store().log_end(),
             |_, kind, hash, payload, _| {
-                if COPIED.contains(&kind) && keep(kind, &hash) {
+                let logical = rdy_store::codec::logical_kind(kind);
+                if COPIED.contains(&logical) && keep(logical, &hash) {
                     out.push((kind, payload.to_vec()));
                 }
                 Ok(())
@@ -581,6 +582,9 @@ fn ha7_holder_accepts_unknown_source_block_types() {
                 approved_version: None,
                 rebased_from: vec![],
                 evidence: None,
+                assessment: None,
+                policy: None,
+                read_identity: None,
             },
         )
         .unwrap();
@@ -946,6 +950,9 @@ fn linear_holder(dir: &Path, n: usize) -> (Rdy, Vec<Hash>) {
                     approved_version: None,
                     rebased_from: vec![],
                     evidence: None,
+                    assessment: None,
+                    policy: None,
+                    read_identity: None,
                 },
             )
             .unwrap();
@@ -1100,6 +1107,9 @@ fn ha7_holder_fsck_refuses_a_snapshot_version_of_another_block() {
                 approved_version: None,
                 rebased_from: vec![],
                 evidence: None,
+                assessment: None,
+                policy: None,
+                read_identity: None,
             },
         )
         .unwrap();

@@ -18,9 +18,11 @@ fn make_dump_summary(dir: &Path) -> (std::path::PathBuf, rdy_engine::DumpSummary
 fn ha8_formats_match_current_constants_and_released_pairs() {
     let f = formats();
     assert_eq!(f.rdy, env!("CARGO_PKG_VERSION"));
-    assert_eq!(f.store, rdy_store::format::STORE_FORMAT);
+    assert_eq!(f.store, rdy_store::format::baseline_features());
     assert_eq!(f.dump, rdy_store::dump::DUMP_FORMAT);
-    assert_eq!(f.stream, 1);
+    assert_eq!(f.dump, 4);
+    assert_eq!(f.stream, 2);
+    assert_eq!(f.reads_features, [1]);
     let pairs: Vec<(u32, u32)> = f.reads.iter().map(|p| (p.dump, p.store)).collect();
     assert_eq!(
         pairs,
@@ -38,11 +40,19 @@ fn ha8_formats_match_current_constants_and_released_pairs() {
     );
     assert_eq!(pairs, rdy_store::dump::READS);
     assert_eq!(f.reads[0], DumpPair { dump: 1, store: 10 });
-    // the facts carry exactly these fields: no manifest or recipe key
+    // the facts carry exactly these fields: the store is the manifest a new store writes
     let v = serde_json::to_value(&f).unwrap();
     let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(|k| k.as_str()).collect();
     keys.sort();
-    assert_eq!(keys, ["dump", "rdy", "reads", "store", "stream"]);
+    assert_eq!(
+        keys,
+        ["dump", "rdy", "reads", "reads_features", "store", "stream"]
+    );
+    // ok4: the baseline names content-2 identity and object encodings
+    assert_eq!(
+        v["store"],
+        serde_json::to_value(rdy_store::format::baseline_features()).unwrap()
+    );
     let mut pair_keys: Vec<&str> = v["reads"][0]
         .as_object()
         .unwrap()
@@ -62,7 +72,7 @@ fn ha8_inspect_reads_only_the_dump_header() {
         facts,
         DumpFormatFacts {
             dump: rdy_store::dump::DUMP_FORMAT,
-            store: rdy_store::format::STORE_FORMAT,
+            store: rdy_store::format::DumpStore::Features(rdy_store::format::baseline_features()),
             rdy: env!("CARGO_PKG_VERSION").to_string(),
             kind: Some(DumpKind::Full),
             repo_id: Some(summary.repo_id),
@@ -77,6 +87,16 @@ fn ha8_inspect_reads_only_the_dump_header() {
         }
     );
 
+    // the store in JSON: the feature manifest
+    assert_eq!(
+        serde_json::to_value(&facts).unwrap()["store"],
+        serde_json::json!({"features": rdy_store::format::baseline_features()})
+    );
+    // a legacy dump's store in JSON: its number
+    assert_eq!(
+        serde_json::to_value(rdy_store::format::DumpStore::Legacy(18)).unwrap(),
+        serde_json::json!({"legacy": 18})
+    );
     // a valid header with an invalid body: the tail (batches and trailer) is destroyed
     let mut bytes = std::fs::read(&good).unwrap();
     let n = bytes.len();

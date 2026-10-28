@@ -2,6 +2,7 @@
 //! existing variants keep their discriminants and bytes, so every stored change keeps its hash.
 //! The literal encodings below were captured at the base (store format 17) before the variant
 //! was appended.
+use rdy_model::encoding::{EncodedIdentity, LegacyChangeV0, encoded_hash};
 use rdy_model::*;
 
 fn hex(b: &[u8]) -> String {
@@ -36,6 +37,8 @@ fn change(j: Option<Justification>) -> Change {
 
 const ENVELOPE_HEAD: &str = "04776f726b0102070707070707070707070707070707070707070707070707070707070707070707632d374b51324d010808080808080808080808080808080808080808080808080808080808080808076167656e743a6101027231018080e682b966";
 const ENVELOPE_TAIL: &str = "016d00000000";
+/// The latest encoding's tail: the links' two more absent options.
+const ENVELOPE_TAIL_V1: &str = "016d000000000000";
 
 fn editorial(class: EditorialClass) -> Justification {
     Justification::Editorial {
@@ -87,16 +90,32 @@ fn rf4_appended_variant_preserves_existing_bytes() {
         // the change envelope: Some(j) is 01 then j's bytes, None is 00
         let option = if j.is_some() { "01" } else { "00" };
         let c = change(j.clone());
-        let got = postcard::to_allocvec(&c).unwrap();
+        // encoding 0, frozen: the base bytes and hash
+        let v0 = LegacyChangeV0::from_current(&c).unwrap();
+        let got = postcard::to_allocvec(&v0).unwrap();
         assert_eq!(
             hex(&got),
             format!("{ENVELOPE_HEAD}{option}{bytes}{ENVELOPE_TAIL}"),
             "{j:?}"
         );
-        assert_eq!(c.id().to_string(), hash, "{j:?}");
-        let back: Change = postcard::from_bytes(&got).unwrap();
+        assert_eq!(Hash::of(&got).to_string(), hash, "{j:?}");
+        let back = postcard::from_bytes::<LegacyChangeV0>(&got)
+            .unwrap()
+            .into_current(EncodedIdentity {
+                hash: Hash::of(&got),
+                version: 0,
+            });
         assert_eq!(back, c);
         assert_eq!(back.id().to_string(), hash);
+        // encoding 1, the latest: the same justification bytes in the longer envelope
+        let got = postcard::to_allocvec(&c).unwrap();
+        assert_eq!(
+            hex(&got),
+            format!("{ENVELOPE_HEAD}{option}{bytes}{ENVELOPE_TAIL_V1}"),
+            "{j:?}"
+        );
+        assert_eq!(c.id(), encoded_hash(1, &got), "{j:?}");
+        assert_eq!(postcard::from_bytes::<Change>(&got).unwrap(), c);
     }
     // Reflects is discriminant 2: its sources in first-occurrence order, then the code flag
     let r = Justification::Reflects {
@@ -132,9 +151,14 @@ fn rf4_appended_variant_preserves_existing_bytes() {
     let got = postcard::to_allocvec(&c).unwrap();
     assert_eq!(
         hex(&got),
-        format!("{ENVELOPE_HEAD}01020207532d303030303207532d303030303101{ENVELOPE_TAIL}")
+        format!("{ENVELOPE_HEAD}01020207532d303030303207532d303030303101{ENVELOPE_TAIL_V1}")
     );
     assert_eq!(postcard::from_bytes::<Change>(&got).unwrap(), c);
+    let v0 = postcard::to_allocvec(&LegacyChangeV0::from_current(&c).unwrap()).unwrap();
+    assert_eq!(
+        hex(&v0),
+        format!("{ENVELOPE_HEAD}01020207532d303030303207532d303030303101{ENVELOPE_TAIL}")
+    );
     // an unassigned discriminant does not decode
     assert!(postcard::from_bytes::<Justification>(&[3, 0, 0]).is_err());
 }

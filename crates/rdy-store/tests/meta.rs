@@ -2,7 +2,9 @@
 //! store's first batch, `meta/origin`, the `set_refs` guard and the fsck rules.
 use rdy_model::Hash;
 use rdy_store::dump::{DumpItem, DumpReader, READS, frame_kinds, rec};
-use rdy_store::format::{REF_STORE_FORMAT, STORE_FORMAT, encode_u32};
+use rdy_store::format::{
+    DumpStore, REF_STORE_FEATURES, REF_STORE_FORMAT, REF_UPGRADE, baseline_features,
+};
 use rdy_store::kinds::{self, RefUpdate};
 use rdy_store::meta::{
     FIRST_REPO_ID_STORE_FORMAT, Origin, REF_ORIGIN, REF_REPO_ID, decode_origin, decode_repo_id,
@@ -51,8 +53,8 @@ fn ec1_a_new_store_writes_its_repo_id_in_its_first_batch() {
         })
         .collect();
     let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
-    assert_eq!(names, [REF_STORE_FORMAT, REF_REPO_ID]);
-    assert_eq!(refs[0].value, encode_u32(STORE_FORMAT));
+    assert_eq!(names, [REF_STORE_FEATURES, REF_REPO_ID]);
+    assert_eq!(refs[0].value, baseline_features().to_json());
     let id = s.reader().repo_id().unwrap().expect("a repo id");
     assert_eq!(refs[1].value, encode_repo_id(&id));
     assert_eq!(refs[1].value.len(), 16);
@@ -77,7 +79,14 @@ fn ec1_two_new_stores_get_different_repo_ids() {
 #[test]
 fn ec1_set_refs_refuses_every_meta_ref() {
     let (_d, mut s) = new_store();
-    for name in [REF_REPO_ID, REF_ORIGIN, REF_STORE_FORMAT, "meta/x"] {
+    for name in [
+        REF_REPO_ID,
+        REF_ORIGIN,
+        REF_STORE_FORMAT,
+        REF_STORE_FEATURES,
+        REF_UPGRADE,
+        "meta/x",
+    ] {
         let end = s.log_end();
         match s.set_refs(vec![(name.to_string(), vec![1; 16])]) {
             Err(StoreError::Decode(m)) => assert_eq!(
@@ -157,7 +166,7 @@ fn ec1_check_refuses_an_unknown_meta_ref() {
     .unwrap();
     assert_eq!(
         fsck_text(&s),
-        "\"meta/a\" is not a meta ref this rdy knows (meta/store_format, meta/repo_id, meta/origin, meta/store_mode)"
+        "\"meta/a\" is not a meta ref this rdy knows (meta/store_features, meta/upgrade, meta/store_format, meta/repo_id, meta/origin, meta/store_mode)"
     );
     // a good origin and repo id check clean
     let (_e, mut t) = new_store();
@@ -197,7 +206,7 @@ fn ec1_the_dump_reads_store_format_12_with_the_kinds_of_11() {
         .join("../rdy-qa/fixtures/dump/v1-s12.rdydump");
     let bytes = std::fs::read(path).unwrap();
     let (mut r, format, header) = DumpReader::open(&bytes[..]).unwrap();
-    assert_eq!((format, header.store_format), (1, 12));
+    assert_eq!((format, header.store), (1, DumpStore::Legacy(12)));
     let mut seen = std::collections::BTreeSet::new();
     while let Some(item) = r.next().unwrap() {
         if let DumpItem::Batch(b) = item {

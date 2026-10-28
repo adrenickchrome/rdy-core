@@ -5,11 +5,13 @@
 //! that `io_dump_fixture_s15.rs` dumps (`ha17_write_fixtures_once` writes both).
 //!
 //! These vectors pin the bytes of sync batch format 1 at store format 15. They add no promise
-//! that a later rdy reads them: a batch is read only by the rdy whose store format wrote it
-//! (p-6P4AY), so this rdy refuses them with E_STORE_FORMAT, and the tests pin that refusal. The
-//! fixture's bytes stay frozen. The tests read the same tag's batch that this rdy exports from the
-//! loaded holder dump: the fixture's records byte for byte, under a header of the current store
-//! format. A change of the encoding changes this file and its digests by a decision of its own.
+//! that a later rdy reads them: sync batch format 1 has no pre-release compatibility promise, so
+//! this rdy refuses them with E_STORE_FORMAT (`sync batch format 1 is not supported`), and the
+//! tests pin that refusal. The fixture's bytes stay frozen. The tests read the same tag's batch
+//! that this rdy exports from the loaded holder dump, in sync batch format 2: the fixture's
+//! present records byte for byte, each removed record's proof with its encoding (0) after its
+//! kind, under a header that names the store's feature manifest. The current format's own
+//! vectors are the `v2-f1-e0` set (`io_feature_fixture`).
 //!
 //! The test of the take splits that current batch at record boundaries into separate batches
 //! (common root and repo fields, their own prerequisites and trailers), checks each one alone,
@@ -23,7 +25,7 @@ use rdy_engine::stream_take::take;
 use rdy_model::Hash;
 use rdy_model::Tag;
 use rdy_qa::every_kind;
-use rdy_store::format::STORE_FORMAT;
+use rdy_store::format::{REF_STORE_FEATURES, baseline_features};
 use rdy_store::kinds;
 use rdy_store::object_refs::ObjectKey;
 use rdy_store::redaction::StoredFrame;
@@ -80,7 +82,7 @@ fn read_batch(batch: &[u8]) -> (StreamHeader, Vec<StreamRecord>, Value) {
 /// and for a placeholder its apply and residue.
 fn record_fact(r: &StreamRecord) -> Value {
     match r {
-        StreamRecord::Present { key, payload } => json!({
+        StreamRecord::Present { key, payload, .. } => json!({
             "kind": key.kind,
             "hash": key.hash.to_string(),
             "form": "present",
@@ -91,6 +93,7 @@ fn record_fact(r: &StreamRecord) -> Value {
             original_len,
             apply,
             residue,
+            ..
         } => json!({
             "kind": key.kind,
             "hash": key.hash.to_string(),
@@ -118,7 +121,7 @@ fn target_of(bytes: &[u8]) -> UploadTarget {
     let root = records
         .iter()
         .find_map(|r| match r {
-            StreamRecord::Present { key, payload } if *key == header.root() => Some(payload),
+            StreamRecord::Present { key, payload, .. } if *key == header.root() => Some(payload),
             _ => None,
         })
         .expect("the batch holds its root");
@@ -225,25 +228,43 @@ fn current_batch(dir: &Path) -> Vec<u8> {
     bytes
 }
 
-/// The frozen fixture is refused by this rdy, whose store format is another: the stream's store
-/// format must equal the reader's (p-6P4AY). The refusal names both formats.
+/// The frozen fixture is refused by this rdy: sync batch format 1 is not read.
 fn assert_old_format_refused(e_code: &str, message: &str) {
     assert_eq!(e_code, "E_STORE_FORMAT", "{message}");
-    assert_eq!(
-        message,
-        format!("stream store format 15 does not match {STORE_FORMAT}")
-    );
+    assert_eq!(message, "sync batch format 1 is not supported");
 }
 
-/// The facts the expect file states for the fixture, at this rdy's store format: the header's
-/// store format is the current one, and the trailer's digest (which covers the header record)
-/// is `digest`. Every record and count is the fixture's.
-fn current_facts(expect: &Value, digest: &str) -> Value {
+/// The facts the expect file states for the fixture, in this rdy's sync batch format: the header
+/// names stream format 2 and the store's features in place of store format 15, and the trailer's
+/// byte count and digest (which cover the header record and the longer removal proofs) are
+/// `bytes` and `digest`. Every record and the record count are the fixture's.
+fn current_facts(expect: &Value, bytes: u64, digest: &str) -> Value {
     let mut header = expect["header"].clone();
-    header["store_format"] = json!(STORE_FORMAT);
+    let h = header.as_object_mut().unwrap();
+    assert_eq!(h.remove("store_format"), Some(json!(15)));
+    h.insert("stream_format".into(), json!(STREAM_FORMAT));
+    h.insert("features".into(), json!(baseline_features()));
     let mut totals = expect["totals"].clone();
+    totals["bytes"] = json!(bytes);
     totals["digest"] = json!(digest);
     json!({"header": header, "records": expect["records"], "totals": totals})
+}
+
+/// The frames of a sync batch after its header, up to its trailer, as (kind, payload), read by
+/// their framing alone (a batch of another format included).
+fn raw_frames(bytes: &[u8]) -> Vec<(u8, Vec<u8>)> {
+    let mut at = 12 + 37 + u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let mut out = vec![];
+    while at < bytes.len() {
+        let len = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+        let kind = bytes[at + 4];
+        if kind == rec::TRAILER {
+            break;
+        }
+        out.push((kind, bytes[at + 37..at + 37 + len].to_vec()));
+        at += 37 + len;
+    }
+    out
 }
 
 #[test]
@@ -256,8 +277,12 @@ fn ha17_stream_fixture_has_exact_wire_bytes() {
     // the prelude: the magic and the stream format, little-endian
     assert_eq!(&bytes[..8], MAGIC);
     assert_eq!(&bytes[..8], b"RDYSYNC\n");
-    assert_eq!(STREAM_FORMAT, 1);
-    assert_eq!(bytes[8..12], 1u32.to_le_bytes());
+    assert_eq!(STREAM_FORMAT, 2);
+    assert_eq!(
+        bytes[8..12],
+        1u32.to_le_bytes(),
+        "the frozen batch is of format 1"
+    );
     // the header frame: its length, kind 0xF0 and the hash of its payload; the payload is the
     // store format, the repo id, purpose 0, the root TAG's hash and no prerequisite
     let len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
@@ -299,46 +324,45 @@ fn ha17_stream_fixture_has_exact_wire_bytes() {
     let e = check_batch(bytes.as_slice(), None).unwrap_err();
     assert_old_format_refused(e.code, &e.message);
 
-    // the export of the same tag from the loaded holder dump: the fixture's bytes at the current
-    // store format. Only the header's store format, so the header's hash and the trailer's
-    // digest, differ
+    // the export of the same tag from the loaded holder dump, in sync batch format 2: the
+    // fixture's present records byte for byte, each removal proof with its encoding after its
+    // kind, and a header that names the store's features
     let to = tempfile::tempdir().unwrap();
     let now = current_batch(to.path());
-    assert_eq!(now.len(), bytes.len());
+    assert_eq!(now[..8], bytes[..8], "the magic");
+    assert_eq!(now[8..12], 2u32.to_le_bytes());
+    let json = baseline_features().to_json();
+    let now_len = u32::from_le_bytes(now[12..16].try_into().unwrap()) as usize;
+    assert_eq!(now_len, len + json.len(), "the header names the manifest");
+    let now_header = &now[49..49 + now_len];
+    assert_eq!(now_header[..4], (json.len() as u32).to_le_bytes());
+    assert_eq!(now_header[4..4 + json.len()], json[..]);
     assert_eq!(
-        now[..16],
-        bytes[..16],
-        "the prelude and the header's length and kind"
-    );
-    let now_header = &now[49..49 + len];
-    assert_eq!(now_header[..4], STORE_FORMAT.to_le_bytes());
-    assert_eq!(
-        now_header[4..],
+        now_header[4 + json.len()..],
         payload[4..],
         "the repo, purpose, root and prerequisites"
     );
     assert_eq!(now[17..49], Hash::of(now_header).0);
-    assert_eq!(
-        now[49 + len..trailer_at],
-        bytes[49 + len..trailer_at],
-        "every record, byte for byte"
-    );
-    assert_eq!(
-        now[trailer_at..trailer_at + 5],
-        bytes[trailer_at..trailer_at + 5]
-    );
-    assert_eq!(
-        now[trailer_at + 37..trailer_at + 37 + 16],
-        bytes[trailer_at + 37..trailer_at + 37 + 16],
-        "the trailer's counts"
-    );
-    // read back: the expect file's header, records and totals at this store format
+    let (then_frames, now_frames) = (raw_frames(&bytes), raw_frames(&now));
+    assert_eq!(then_frames.len(), now_frames.len());
+    for ((tk, tp), (nk, np)) in then_frames.iter().zip(&now_frames) {
+        assert_eq!(tk, nk, "every record keeps its kind");
+        if *tk == rec::DROPPED {
+            assert_eq!(np.len(), tp.len() + 2);
+            assert_eq!(np[0], tp[0], "the logical kind");
+            assert_eq!(np[1..3], [0, 0], "encoding 0");
+            assert_eq!(np[3..], tp[1..], "the proof, byte for byte");
+        } else {
+            assert_eq!(np, tp, "a present record, byte for byte");
+        }
+    }
+    // read back: the expect file's header, records and totals in this sync batch format
     let (rh, records, totals) = read_batch(&now);
     let digest = totals["digest"].as_str().unwrap().to_string();
     assert_ne!(digest, expect["totals"]["digest"], "the header is covered");
     assert_eq!(
         stream_facts(&now),
-        current_facts(&expect, &digest),
+        current_facts(&expect, totals["bytes"].as_u64().unwrap(), &digest),
         "the header, every record and the totals"
     );
     // the placeholders keep their removed objects' identities: the prose's versions, the changes
@@ -375,11 +399,14 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// `v` with each batch report's digest removed: the digests cover each batch's header record,
-/// which names the store format.
+/// `v` with each batch report's digest and byte count removed: they cover each batch's header
+/// record, which names the store's format, and its removal proofs, whose length the sync batch
+/// format sets.
 fn without_batch_digests(mut v: Value) -> Value {
     for b in v["batches"].as_array_mut().unwrap() {
-        b.as_object_mut().unwrap().remove("digest");
+        let b = b.as_object_mut().unwrap();
+        b.remove("digest");
+        b.remove("bytes");
     }
     v
 }
@@ -408,15 +435,21 @@ fn ref_update_keys(r: &Rdy, name: &str) -> BTreeSet<String> {
 }
 
 /// What the take of the current batch into holder `h` reports and reads (`got`), in the expect
-/// file's terms at store format 15: each batch report's digest is removed (it covers the batch's
-/// header, which names the store format), and the holder's own `meta/store_format` ref, its value
-/// and the one ref update that writes it, which name the current format, are the expect file's.
-/// Everything else is compared as it is.
+/// file's terms at store format 15: each batch report's digest and byte count are removed (they
+/// cover the batch's header and its removal proofs), and the holder's own format ref, which a
+/// new holder writes as `meta/store_features`, and the one ref update that writes it, are the
+/// expect file's `meta/store_format` and its update. Everything else is compared as it is.
 fn at_current_format(h: &Rdy, mut got: Value) -> Value {
     let want = expect()["taken"].clone();
-    let refs = &mut got["holder"]["refs"]["meta/store_format"];
-    assert_eq!(*refs, json!(hex(STORE_FORMAT.to_string().as_bytes())));
-    *refs = want["holder"]["refs"]["meta/store_format"].clone();
+    let refs = got["holder"]["refs"].as_object_mut().unwrap();
+    assert_eq!(
+        refs.remove(REF_STORE_FEATURES),
+        Some(json!(hex(&baseline_features().to_json())))
+    );
+    refs.insert(
+        "meta/store_format".into(),
+        want["holder"]["refs"]["meta/store_format"].clone(),
+    );
     let keys = |v: &Value| -> BTreeSet<String> {
         v["holder"]["identity"]["keys"]
             .as_array()
@@ -428,10 +461,18 @@ fn at_current_format(h: &Rdy, mut got: Value) -> Value {
     let (now, then) = (keys(&got), keys(&want));
     let new: Vec<&String> = now.difference(&then).collect();
     let gone: Vec<&String> = then.difference(&now).collect();
-    assert_eq!((new.len(), gone.len()), (1, 1), "{new:?} {gone:?}");
+    // the holder's features ref update, and each later ref update, whose salt (the log end it
+    // was written at) moved with the longer first batch
+    assert_eq!(new.len(), gone.len(), "{new:?} {gone:?}");
+    let prefix = format!("{}:", kinds::REF_UPDATE);
     assert!(
-        ref_update_keys(h, "meta/store_format").contains(new[0]),
-        "the one other key is the holder's store format ref update: {new:?}"
+        new.iter().chain(&gone).all(|k| k.starts_with(&prefix)),
+        "only ref updates differ: {new:?} {gone:?}"
+    );
+    assert!(
+        new.iter()
+            .any(|k| ref_update_keys(h, REF_STORE_FEATURES).contains(*k)),
+        "the holder's features ref update is among them: {new:?}"
     );
     got["holder"]["identity"]["keys"] = want["holder"]["identity"]["keys"].clone();
     without_batch_digests(got)
@@ -471,7 +512,7 @@ fn ha17_split_batches_take_at_different_offsets() {
     // the same batch at the current store format: this rdy's own export of the tag
     let bytes = current_batch(&to.path().join("source"));
     let (header, records, _) = read_batch(&bytes);
-    assert_eq!(header.store_format, STORE_FORMAT);
+    assert_eq!(header.features, baseline_features());
     let parts = every_kind::split_batch(&bytes, PARTS);
     // separate valid batches: the common root and repo fields, their own prerequisites and their
     // own trailers; only the last one holds the root
@@ -480,10 +521,10 @@ fn ha17_split_batches_take_at_different_offsets() {
     for (i, p) in parts.iter().enumerate() {
         let (h, rs, totals) = read_batch(p);
         assert_eq!(
-            (h.stream_format, h.store_format, h.repo_id, h.purpose, h.tag),
+            (h.stream_format, &h.features, h.repo_id, h.purpose, h.tag),
             (
                 header.stream_format,
-                header.store_format,
+                &header.features,
                 header.repo_id,
                 header.purpose,
                 header.tag

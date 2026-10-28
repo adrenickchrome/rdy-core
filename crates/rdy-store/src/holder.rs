@@ -3,7 +3,8 @@
 //! has no such ref. The mode is set only in the store's first sealed batch, with its format and
 //! repo id (`Store::create_holder`), and never added, changed or removed later.
 //!
-//! A holder's refs are closed: `meta/store_format`, `meta/repo_id`, `meta/origin`, the creation's
+//! A holder's refs are closed: `meta/store_features`, `meta/upgrade`, a dump's historical
+//! `meta/store_format`, `meta/repo_id`, `meta/origin`, the creation's
 //! `meta/store_mode`, `tag/<name>` and (O11, ruling task-13) `answer/tag-object:<hash>`, which
 //! names the relay answer of the TAG object whose hash is `<hash>` (64 lowercase hex digits):
 //! an ANSWER of act `tag` and item `tag:<that tag's name>` whose targets are exactly that TAG
@@ -28,7 +29,7 @@
 //! its index stands, whether or not anything is left to replay; the replay then goes on with the
 //! walk's rules, so a batch that a failed catch-up left half indexed is judged whole again.
 use crate::error::StoreError;
-use crate::format::REF_STORE_FORMAT;
+use crate::format::{REF_STORE_FEATURES, REF_STORE_FORMAT, REF_UPGRADE};
 use crate::kinds::{self, RefUpdate};
 use crate::meta::{REF_ORIGIN, REF_REPO_ID};
 use crate::segment::{Holes, Location, SegmentReader};
@@ -125,9 +126,19 @@ pub fn decode_mode(value: Option<&[u8]>) -> Result<StoreMode, StoreError> {
     }
 }
 
+/// The mode of the closed store at `dir` (a store directory), read from its sealed log with no
+/// lock and no writer (`segment::sealed_ref_value`), before anything in it is opened or
+/// written: a caller that must know it first (an upgrade, which loads the project's config and
+/// pack before it writes). A store with no sealed mode ref is a project. Reads only.
+pub fn sealed_mode(dir: &std::path::Path) -> Result<StoreMode, StoreError> {
+    let value = crate::segment::sealed_ref_value(&dir.join("segments"), REF_STORE_MODE, 64)?;
+    decode_mode(value.as_deref())
+}
+
 /// Where a ref belongs, for a holder.
 enum Family<'a> {
-    /// `meta/store_format`, `meta/repo_id` or `meta/origin`.
+    /// `meta/store_features`, `meta/upgrade`, `meta/store_format`, `meta/repo_id` or
+    /// `meta/origin`.
     Meta,
     /// `meta/store_mode`: the creation's only.
     Mode,
@@ -140,7 +151,15 @@ enum Family<'a> {
 }
 
 fn family(name: &str) -> Family<'_> {
-    if name == REF_STORE_FORMAT || name == REF_REPO_ID || name == REF_ORIGIN {
+    if [
+        REF_STORE_FEATURES,
+        REF_UPGRADE,
+        REF_STORE_FORMAT,
+        REF_REPO_ID,
+        REF_ORIGIN,
+    ]
+    .contains(&name)
+    {
         Family::Meta
     } else if name == REF_STORE_MODE {
         Family::Mode
@@ -290,7 +309,7 @@ impl RefRules {
         match (kind, payload) {
             (kinds::REF_UPDATE, Some(p)) => self.on_ref_frame(self.creation.in_first(loc), p),
             (kinds::BATCH_COMMIT, _) => self.on_marker(),
-            (kinds::TAG, Some(p)) => {
+            (k, Some(p)) if crate::codec::logical_kind(k) == kinds::TAG => {
                 self.on_tag(p);
                 Ok(())
             }
@@ -379,8 +398,33 @@ pub(crate) enum RefWrite {
     Public,
     /// The take's crate-private write: a holder's `answer/tag-object:<hash>` beside its TAG.
     Take,
+    /// The upgrade transaction's commit (`Store::commit_upgrade_refs`): exactly the features
+    /// ref and the receipt ref, after the receipt's own checks.
+    Upgrade,
     /// The creation batch, and the test hook that forges refs: no ref rule.
     Unchecked,
+}
+
+/// Refuses a `meta/upgrade` write in `items` unless `how` is the upgrade transaction's own
+/// commit (or the unchecked creation and test hook): no public write or seal writes it.
+pub(crate) fn refuse_upgrade_writes(
+    items: &[(u8, Vec<u8>)],
+    how: RefWrite,
+) -> Result<(), StoreError> {
+    if matches!(how, RefWrite::Upgrade | RefWrite::Unchecked) {
+        return Ok(());
+    }
+    let upgrade = items
+        .iter()
+        .filter(|(k, _)| *k == kinds::REF_UPDATE)
+        .filter_map(|(_, p)| decode_ref(p))
+        .any(|u| u.name == REF_UPGRADE);
+    if upgrade {
+        return Err(StoreError::Refused(format!(
+            "only the store upgrade writes ref {REF_UPGRADE}"
+        )));
+    }
+    Ok(())
 }
 
 /// The ref rules of a write of `items` to a store of `mode`, before anything is appended. The
@@ -403,6 +447,16 @@ pub(crate) fn check_ref_writes(
             .filter(|(k, _)| *k == kinds::REF_UPDATE)
             .filter_map(|(_, p)| decode_ref(p))
     };
+    if how == RefWrite::Upgrade {
+        // the upgrade's own batch: the features ref and the receipt ref, nothing else
+        let names: Vec<String> = decoded().map(|u| u.name).collect();
+        if names != [REF_STORE_FEATURES, REF_UPGRADE] || items.len() != names.len() {
+            return Err(StoreError::Refused(
+                "the upgrade batch holds exactly the features and receipt refs".into(),
+            ));
+        }
+        return Ok(());
+    }
     if mode == StoreMode::Project {
         // a project's only rule: the mode ref is never written
         if decoded().any(|u| u.name == REF_STORE_MODE) {
@@ -423,7 +477,7 @@ pub(crate) fn check_ref_writes(
                 };
                 let beside = items
                     .iter()
-                    .any(|(k, p)| *k == kinds::TAG && Hash::of(p) == h);
+                    .any(|(k, p)| crate::codec::logical_kind(*k) == kinds::TAG && Hash::of(p) == h);
                 if how != RefWrite::Take || !(beside || has_tag(&h)?) {
                     return Err(cannot_write(&u.name));
                 }

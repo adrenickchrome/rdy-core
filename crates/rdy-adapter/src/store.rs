@@ -5,7 +5,10 @@ use rdy_engine::{
     RdyError, ReadState, parse_version,
 };
 use rdy_model::{Hash, RepoId, Tag};
+use rdy_store::OpenPolicy;
+use rdy_store::holder::StoreMode;
 use rdy_store::meta::Origin;
+use rdy_store::upgrade::UpgradeStep;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -25,11 +28,33 @@ pub struct StoreHandle {
 }
 
 impl StoreHandle {
-    /// Opens the project at `project`. A project that is open elsewhere is `E_LOCKED`; every
-    /// other open error passes through unchanged.
+    /// Opens the project at `project`. A project that is open elsewhere is `E_LOCKED`. A store
+    /// that needs an upgrade is `E_STORE_FORMAT` (`the store needs an upgrade before it can
+    /// open`), refused before any file changes: an open never upgrades (D-WWAK7), and the host
+    /// runs [`crate::maintenance::upgrade`] first. A store with an unknown read-only feature
+    /// opens for reads only. Every other open error passes through unchanged.
     pub fn open(project: &Path) -> Result<Self, RdyError> {
         Ok(StoreHandle {
-            local: Local::open(project)?,
+            local: Local::open_with_policy(project, OpenPolicy::RequireCurrent)?,
+        })
+    }
+
+    /// Test hook: [`StoreHandle::open`] or [`StoreHandle::open_holder`] (`mode`) with the
+    /// upgrade steps `registry` in place of this rdy's. It always requires a current store. No
+    /// product path reaches it.
+    #[doc(hidden)]
+    pub fn open_with_registry_for_tests(
+        root: &Path,
+        mode: StoreMode,
+        registry: &[UpgradeStep],
+    ) -> Result<Self, RdyError> {
+        Ok(StoreHandle {
+            local: Local::new(Rdy::open_with_registry_for_tests(
+                root,
+                mode,
+                OpenPolicy::RequireCurrent,
+                registry,
+            )?),
         })
     }
 
@@ -43,11 +68,16 @@ impl StoreHandle {
         })
     }
 
-    /// Opens the holder at `root` through the existing exclusive lock. A project store there is
-    /// refused (`this store is a project`); no config, pack or settings file is read.
+    /// Opens the holder at `root` through the existing exclusive lock, with the policy of
+    /// [`StoreHandle::open`]: a store that needs an upgrade is `E_STORE_FORMAT`, and an unknown
+    /// read-only feature gives a read-only handle. A project store there is refused (`this
+    /// store is a project`); no config, pack or settings file is read.
     pub fn open_holder(root: &Path) -> Result<Self, RdyError> {
         Ok(StoreHandle {
-            local: Local::new(Rdy::open_holder(root)?),
+            local: Local::new(Rdy::open_holder_with_policy(
+                root,
+                OpenPolicy::RequireCurrent,
+            )?),
         })
     }
 

@@ -621,7 +621,7 @@ fn rdx13_budgets_never_change_the_manifest() {
     assert_eq!(
         &lines[at + 1..],
         [
-            "Recorded assessments: not implemented.",
+            "Recorded assessments: scanned.",
             "Reason (legal): \"an order\"",
             warnings[0].as_str(),
             warnings[1].as_str(),

@@ -1,11 +1,14 @@
 //! The conflict-aware merge (merge1). Pure: it reads no store and does no I/O.
 //!
-//! Changes apply in "deps first, then change id" order. Each block is either clean (a version
+//! Changes apply in "deps first, then change id" order (a replay after the ordinary changes
+//! that do not wait for it). Each block is either clean (a version
 //! and the change that produced it) or conflicted (the failing op's base and the competing
 //! sides). A conflict is data, not an error; a change that depends on every side of a conflict
 //! resolves it. A block the base lacks reads as deleted by the change `deleter` names; when no
 //! change is known for that delete, no change can depend on it, so its side is never resolved. A
-//! create of a deleted id that does not depend on the delete conflicts with it.
+//! create of a deleted id that does not depend on the delete conflicts with it. A base version
+//! that differs from an op's base only by its order key (a landing's re-key, a key re-derive) is
+//! no conflict for that op (D-TX3KH): the op applies, so order never costs a person a conflict.
 use rdy_model::{BlockId, Hash, Op, StateSnapshot};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -18,6 +21,15 @@ pub struct MergeChange<'a> {
     pub id: Hash,
     pub deps: &'a [Hash],
     pub ops: &'a [Op],
+    /// Whether the change replays another (`ChangeLinks::replayed_from` is set). A replay
+    /// applies after the ordinary changes that do not wait for it. Its op on a clean block
+    /// follows the ordinary rules: an equal base applies, an equal result agrees whatever the
+    /// bases and whoever wrote the version (the op is already satisfied), a base version that
+    /// differs from its base only by its order key agrees as it does for any op, and anything
+    /// else conflicts. Its op on a conflicted block adds its side (none when a side already holds its
+    /// version) and keeps every side there: its deps never resolve a conflict (only an ordinary
+    /// write that covers every side does).
+    pub is_replay: bool,
 }
 
 /// One competing version of a conflicted block.
@@ -88,6 +100,8 @@ enum Slot {
     Clean {
         version: Option<Hash>,
         owner: Option<Hash>,
+        /// The version is the base snapshot's: no change of this merge wrote it yet.
+        from_base: bool,
     },
     Conflicted {
         base: Option<Hash>,
@@ -95,8 +109,11 @@ enum Slot {
     },
 }
 
-/// Deps first, then change id: Kahn's algorithm over the distinct input changes, its ready set
-/// ordered by id ascending; any nodes a cycle leaves unplaced follow in ascending id order.
+/// Deps first, then ordinary changes before replays, then change id: Kahn's algorithm over the
+/// distinct input changes, its ready set ordered by (replay, id) ascending, so a replay applies
+/// after every ordinary change that does not wait for one (the target it was replayed onto);
+/// any nodes a cycle leaves unplaced follow in ascending id order. Without replays the order is
+/// deps first, then change id.
 /// Returns each applied change's position in `changes` (its first, when listed twice).
 fn order(changes: &[MergeChange<'_>]) -> Vec<usize> {
     let mut index: HashMap<Hash, usize> = HashMap::with_capacity(changes.len());
@@ -109,6 +126,7 @@ fn order(changes: &[MergeChange<'_>]) -> Vec<usize> {
         }
     }
     let id = |i: usize| changes[nodes[i]].id;
+    let key = |i: usize| (changes[nodes[i]].is_replay, changes[nodes[i]].id);
     let mut indegree = vec![0usize; nodes.len()];
     let mut succ: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
     for (i, &at) in nodes.iter().enumerate() {
@@ -121,11 +139,11 @@ fn order(changes: &[MergeChange<'_>]) -> Vec<usize> {
             }
         }
     }
-    let mut ready: BinaryHeap<Reverse<(Hash, usize)>> = indegree
+    let mut ready: BinaryHeap<Reverse<((bool, Hash), usize)>> = indegree
         .iter()
         .enumerate()
         .filter(|(_, n)| **n == 0)
-        .map(|(i, _)| Reverse((id(i), i)))
+        .map(|(i, _)| Reverse((key(i), i)))
         .collect();
     let mut placed = vec![false; nodes.len()];
     let mut out = Vec::with_capacity(nodes.len());
@@ -135,7 +153,7 @@ fn order(changes: &[MergeChange<'_>]) -> Vec<usize> {
         for &s in &succ[i] {
             indegree[s] -= 1;
             if indegree[s] == 0 {
-                ready.push(Reverse((id(s), s)));
+                ready.push(Reverse((key(s), s)));
             }
         }
     }
@@ -149,14 +167,18 @@ fn order(changes: &[MergeChange<'_>]) -> Vec<usize> {
 
 /// Merges `changes` onto `base`. `producer` names the change that produced a base version, and
 /// `deleter` the change that deleted a block the base lacks, so that a side from the base can be
-/// depended on.
+/// depended on. `order_only(v, op)` says whether `op` is an order-only edit against base version
+/// `v` (`StoreReader::order_only_edit`): an update whose base differs from `v` only by its order
+/// key and whose new version keeps that base's parent and order key
+/// (`StoreReader::order_only_pairs` reads them).
 pub fn merge(
     base: &StateSnapshot,
     changes: &[MergeChange<'_>],
     producer: &dyn Fn(&Hash) -> Option<Hash>,
     deleter: &dyn Fn(&BlockId) -> Option<Hash>,
+    order_only: &dyn Fn(&Hash, &Op) -> bool,
 ) -> Merged {
-    merge_indexed(base, changes, producer, deleter).0
+    merge_indexed(base, changes, producer, deleter, order_only).0
 }
 
 /// `merge` restricted to `blocks`: the base holds only those blocks and each change only its ops
@@ -167,6 +189,7 @@ pub fn merge_on_blocks(
     changes: &[MergeChange<'_>],
     producer: &dyn Fn(&Hash) -> Option<Hash>,
     deleter: &dyn Fn(&BlockId) -> Option<Hash>,
+    order_only: &dyn Fn(&Hash, &Op) -> bool,
     blocks: &BTreeSet<BlockId>,
 ) -> Merged {
     let base = StateSnapshot {
@@ -192,9 +215,10 @@ pub fn merge_on_blocks(
             id: c.id,
             deps: c.deps,
             ops,
+            is_replay: c.is_replay,
         })
         .collect();
-    merge(&base, &changes, producer, deleter)
+    merge(&base, &changes, producer, deleter, order_only)
 }
 
 /// `merge`, with each entry of `Merged::order` also given as its position in `changes` (its
@@ -205,6 +229,7 @@ pub fn merge_indexed(
     changes: &[MergeChange<'_>],
     producer: &dyn Fn(&Hash) -> Option<Hash>,
     deleter: &dyn Fn(&BlockId) -> Option<Hash>,
+    order_only: &dyn Fn(&Hash, &Op) -> bool,
 ) -> (Merged, Vec<usize>) {
     let ordered = order(changes);
     let mut slots: BTreeMap<BlockId, Slot> = BTreeMap::new();
@@ -228,6 +253,7 @@ pub fn merge_indexed(
                         Some(v) => producer(&v),
                         None => deleter(block),
                     },
+                    from_base: true,
                 }
             });
             let expected = op.base();
@@ -240,14 +266,33 @@ pub fn merge_indexed(
                 version: new,
             };
             match slot {
-                Slot::Clean { version, owner }
-                    if *version == expected && (expected.is_some() || knows(owner)) =>
-                {
+                Slot::Clean {
+                    version,
+                    owner,
+                    from_base,
+                } if *version == expected && (expected.is_some() || knows(owner)) => {
                     *version = new;
                     *owner = Some(c.id);
+                    *from_base = false;
                 }
+                // ops that reach the block's version agree with it, whatever their bases and
+                // whoever the writers, replays included
                 Slot::Clean { version, .. } if *version == new => {}
-                Slot::Clean { version, owner } => {
+                // an edit against a canon side that differs from the op's base only by its order
+                // key (a landing's re-key, a key re-derive, a landed move) is no conflict: the op
+                // applies with its own version, and its own landing re-keys a tie it would make
+                // (D-TX3KH) or keeps canon's place (D-1FT5Y). A move, a parent change, a re-key
+                // or a delete against such a side still conflicts (final ruling round 4).
+                Slot::Clean {
+                    version,
+                    owner,
+                    from_base,
+                } if *from_base && version.is_some_and(|v| order_only(&v, op)) => {
+                    *version = new;
+                    *owner = Some(c.id);
+                    *from_base = false;
+                }
+                Slot::Clean { version, owner, .. } => {
                     let theirs = Side {
                         change: *owner,
                         version: *version,
@@ -257,10 +302,18 @@ pub fn merge_indexed(
                         sides: vec![theirs, mine],
                     };
                 }
+                // a replay adds its side, unless a side already holds its version: "v against
+                // v" never reaches a person
+                Slot::Conflicted { sides, .. } if c.is_replay => {
+                    if !sides.iter().any(|s| s.version == mine.version) {
+                        sides.push(mine);
+                    }
+                }
                 Slot::Conflicted { sides, .. } if sides.iter().all(settled) => {
                     *slot = Slot::Clean {
                         version: new,
                         owner: Some(c.id),
+                        from_base: false,
                     };
                 }
                 Slot::Conflicted { sides, .. } => {

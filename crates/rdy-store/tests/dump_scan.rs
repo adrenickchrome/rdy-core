@@ -17,7 +17,6 @@ use rdy_store::closure::{END_OF_LOG, StoreSource, closure, write_batch};
 use rdy_store::dump::*;
 use rdy_store::dump_chain::{BatchMarker, ChainEnd, DumpChainHeader, batch_end};
 use rdy_store::dump_scan::*;
-use rdy_store::format::STORE_FORMAT;
 use rdy_store::holder::StoreMode;
 use rdy_store::kinds;
 use rdy_store::segment::Location;
@@ -138,7 +137,7 @@ fn dump_at(s: &Store, prev: Option<&ChainEnd>, end: Location, files: &[(&str, &[
         Some(p) => (DumpChainHeader::after(p, end_batch), p.end),
     };
     let header = DumpHeader {
-        store_format: STORE_FORMAT,
+        store: rdy_store::format::DumpStore::Features(rdy_store::format::baseline_features()),
         log_end: end,
         rdy: "test".into(),
         chain: Some(chain),
@@ -167,7 +166,7 @@ fn end_of(bytes: &[u8]) -> ChainEnd {
     let c = h.chain.unwrap();
     ChainEnd {
         repo_id: c.repo_id,
-        store_format: h.store_format,
+        store_format: h.store,
         end: h.log_end,
         end_batch: c.end_batch,
         digest: t.digest,
@@ -267,12 +266,27 @@ fn patch_header(bytes: &[u8], from: usize, new: &[u8]) -> Vec<u8> {
     b
 }
 
-/// The offsets of a format-3 header payload's fields.
-const H_STORE: usize = 1;
-const H_REPO: usize = 5;
-const H_BASE: usize = 21;
-const H_BASE_BATCH: usize = 33;
-const H_PREV: usize = 81;
+/// The offsets of a format-4 header payload's fields, after its baseline manifest.
+const M: usize = 183;
+const H_STORE: usize = 5;
+const H_REPO: usize = 5 + M;
+const H_BASE: usize = 21 + M;
+const H_BASE_BATCH: usize = 33 + M;
+const H_PREV: usize = 81 + M;
+
+/// The header payload of the dump `bytes` with its manifest replaced by `json`, and the header
+/// record's hash: only its envelope stays readable.
+fn with_manifest(bytes: &[u8], json: &[u8]) -> Vec<u8> {
+    let mut b = bytes.to_vec();
+    let len = u32::from_le_bytes(b[12..16].try_into().unwrap()) as usize;
+    let p = b[12 + HEAD..12 + HEAD + len].to_vec();
+    let mut q = vec![p[0]];
+    q.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    q.extend_from_slice(json);
+    q.extend_from_slice(&p[5 + M..]);
+    set_record(&mut b, 12, &q);
+    b
+}
 
 /// The history of a project and its chain:
 ///
@@ -326,7 +340,7 @@ fn history() -> History {
             .unwrap(),
         *frames
             .iter()
-            .find(|f| f.kind == kinds::CHANGE && f.hash == c1)
+            .find(|f| rdy_store::codec::logical_kind(f.kind) == kinds::CHANGE && f.hash == c1)
             .unwrap(),
     ];
     let removal = remove(
@@ -508,17 +522,38 @@ fn hc5_every_link_field_is_checked_before_target_writes() {
         link_of(run(&with("both2", both), None).unwrap_err()).1,
         ChainLink::Position { .. }
     ));
-    // a store format no dump-format-3 pair reads is refused with the envelope itself
-    let e = run(
-        &with("store", patch_header(&i2, H_STORE, &15u32.to_le_bytes())),
-        None,
-    )
-    .unwrap_err();
+    // a manifest this rdy does not read is refused with the envelope itself
+    assert_eq!(rdy_store::format::baseline_features().to_json().len(), M);
+    let e = run(&with("store", patch_header(&i2, H_STORE + 20, b"2")), None).unwrap_err();
     let (file, _, what) = damage(e);
     assert_eq!(file, 2);
     assert_eq!(
         what,
-        "store format 15 in a dump of format 3 is not one this rdy reads"
+        "store feature manifest is invalid: unsupported manifest version"
+    );
+    // a manifest that is not the chain's is a broken link
+    let other = rdy_store::format::StoreFeatures::of(vec![rdy_store::format::StoreFeature {
+        name: "zz".into(),
+        class: rdy_store::format::FeatureClass::Compatible,
+        required_rdy: "1.0.0".into(),
+    }]);
+    assert_eq!(
+        link_of(
+            run(
+                &with("features", with_manifest(&i2, &other.to_json())),
+                None
+            )
+            .unwrap_err()
+        ),
+        (
+            2,
+            ChainLink::StoreFormat {
+                file: rdy_store::format::DumpStore::Features(other),
+                chain: rdy_store::format::DumpStore::Features(
+                    rdy_store::format::baseline_features()
+                ),
+            }
+        )
     );
     // and links come before any framing: a broken link of the third file wins over damage in
     // the second file's body
@@ -776,7 +811,7 @@ fn hc5_proof_lookups_use_recorded_offsets() {
     );
     let kinds_read: Vec<u8> = distinct
         .iter()
-        .map(|o| recs.iter().find(|x| x.offset == *o).unwrap().kind)
+        .map(|o| rdy_store::codec::logical_kind(recs.iter().find(|x| x.offset == *o).unwrap().kind))
         .collect();
     // the apply's landing, its request and its two distinct residues: nothing else
     let mut sorted = kinds_read.clone();
@@ -1060,7 +1095,7 @@ fn hc5_later_apply_distinguishes_held_and_missing_bytes() {
     let hashes: Vec<Hash> = held
         .residues()
         .iter()
-        .map(|r| Hash::of(&postcard::to_allocvec(r).unwrap()))
+        .map(carried_fixture::residue_hash)
         .collect();
     let mut sorted = hashes.clone();
     sorted.sort();
@@ -1174,7 +1209,7 @@ fn loaded(held: bool) -> Loaded {
         .unwrap();
     let cf = *all
         .iter()
-        .find(|f| f.kind == kinds::CHANGE && f.hash == cid)
+        .find(|f| rdy_store::codec::logical_kind(f.kind) == kinds::CHANGE && f.hash == cid)
         .unwrap();
     let residues = vec![block_residue(&secret), change_residue(&stored)];
     let mut spans = vec![
@@ -1324,7 +1359,12 @@ fn upload(path: &Path, tag: Hash, out: &Path) -> Vec<File> {
     let s = Store::open(path).unwrap();
     let r = s.reader();
     let c = closure(&r, tag, &BTreeSet::new()).unwrap();
-    let header = StreamHeader::tag_history(r.repo_id().unwrap().unwrap(), tag, c.prerequisites);
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        r.repo_id().unwrap().unwrap(),
+        tag,
+        c.prerequisites,
+    );
     let mut source = StoreSource {
         reader: &r,
         end: END_OF_LOG,
@@ -1493,7 +1533,7 @@ fn forged_drops(dir: &Path, drops: usize, len: u32) -> PathBuf {
     };
     let log_end = batch_end(&forged).unwrap();
     let header = DumpHeader {
-        store_format: STORE_FORMAT,
+        store: rdy_store::format::DumpStore::Features(rdy_store::format::baseline_features()),
         log_end,
         rdy: "test".into(),
         chain: Some(DumpChainHeader::full(
@@ -1618,7 +1658,7 @@ fn batch_of(start: Location, frames: Vec<Frame>) -> DumpBatch {
 fn increment(prev: &[u8], batches: Vec<DumpBatch>) -> Vec<u8> {
     let last = batches.last().unwrap();
     let header = DumpHeader {
-        store_format: STORE_FORMAT,
+        store: rdy_store::format::DumpStore::Features(rdy_store::format::baseline_features()),
         log_end: batch_end(last).unwrap(),
         rdy: "test".into(),
         chain: Some(DumpChainHeader::after(&end_of(prev), BatchMarker::of(last))),
@@ -1663,7 +1703,7 @@ fn payload_of(it: &Items, kind: u8, hash: Hash) -> Vec<u8> {
     it.batches
         .iter()
         .flat_map(|b| b.frames.iter())
-        .find(|f| f.kind() == kind && *f.hash() == hash)
+        .find(|f| rdy_store::codec::logical_kind(f.kind()) == kind && *f.hash() == hash)
         .and_then(|f| f.present_payload())
         .unwrap()
         .to_vec()
@@ -2035,7 +2075,7 @@ fn hc5_drop_named_by_its_earlier_carried_proof_loads() {
             ingest.batch(n, &b).unwrap();
         }
     }
-    ingest.upgrade(carried_fixture::store_format()).unwrap();
+    ingest.upgrade(&carried_fixture::store_format()).unwrap();
     ingest.finish().unwrap();
     // the loaded store names the apply as the copy's proof, and keeps the carried record
     let s = Store::open(&to).unwrap();
@@ -2152,7 +2192,11 @@ fn hc5_carried_records_keep_their_store_rules() {
     let f0 = h.bytes(&h.f0);
     let it = items(&f0);
     let c1 = h.secret_frames[1].hash;
-    let stored: Change = postcard::from_bytes(&payload_of(&it, kinds::CHANGE, c1)).unwrap();
+    let stored: Change = rdy_store::codec::decode_record(
+        rdy_store::codec::raw_kind(kinds::CHANGE, rdy_store::codec::latest(kinds::CHANGE)),
+        &payload_of(&it, kinds::CHANGE, c1),
+    )
+    .unwrap();
     let residues = vec![block_residue(&h.secret), change_residue(&stored)];
     let spans = vec![
         span(&h.secret_frames[0], Some(&residues[0]), true),
@@ -2226,7 +2270,11 @@ fn carried_flood(h: &History, n: usize) -> (Vec<PathBuf>, usize) {
     let f0 = h.bytes(&h.f0);
     let it = items(&f0);
     let c1 = h.secret_frames[1].hash;
-    let stored: Change = postcard::from_bytes(&payload_of(&it, kinds::CHANGE, c1)).unwrap();
+    let stored: Change = rdy_store::codec::decode_record(
+        rdy_store::codec::raw_kind(kinds::CHANGE, rdy_store::codec::latest(kinds::CHANGE)),
+        &payload_of(&it, kinds::CHANGE, c1),
+    )
+    .unwrap();
     let residues = vec![block_residue(&h.secret), change_residue(&stored)];
     let spans = vec![
         span(&h.secret_frames[0], Some(&residues[0]), true),

@@ -2004,6 +2004,8 @@ fn cp16_reaffirm_write_bound_counts_the_change_deps() {
     // change: its bytes without and with its deps
     let probe = write(&mut r, "probe", reaffirm_ops(&ids, &w.a, &vec![200; n])).unwrap();
     let mut ch: Change = r.store().change(&probe.change.parse().unwrap()).unwrap();
+    // a forged record from a read: it no longer has the read's identity
+    ch.read_identity = None;
     let with = postcard::to_allocvec(&ch).unwrap().len();
     ch.deps.clear();
     let without = postcard::to_allocvec(&ch).unwrap().len();
@@ -2062,7 +2064,9 @@ fn big_claims(parent: &str, n: usize, body: usize, extra: usize) -> Value {
 /// exactly at the bound, lands, and its tag exports.
 #[test]
 fn cp16_oversized_write_refuses_before_append() {
-    let max = rdy_store::bounded::MAX_RECORD_BYTES;
+    // the change's frame is its two-byte version prefix (encoding 1) and its body: the body's
+    // bound is the record bound less the prefix
+    let max = rdy_store::bounded::MAX_RECORD_BYTES - 2;
     let (_d, mut r) = project();
     let w = world(&mut r);
     let (n, body) = (17, 960_000);

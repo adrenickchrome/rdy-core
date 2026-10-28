@@ -125,6 +125,20 @@ fn dl7_rdy_dump_refuses_an_unknown_key() {
     assert!(message.contains("after"), "{message}");
 }
 
+/// ok11: `rdy_upgrade` takes `dry_run` and nothing else: a directory is an unknown parameter.
+#[test]
+fn ok11_rdy_upgrade_refuses_a_directory() {
+    let (code, message, _) = refusal::<UpgradeParams>("rdy_upgrade", json!({"dir": "x"}));
+    assert_eq!(code, "E_BAD_INPUT");
+    assert_eq!(message, "rdy_upgrade: unknown parameter \"dir\"");
+    let (code, message, _) =
+        refusal::<UpgradeParams>("rdy_upgrade", json!({"dry_run": true, "dir": "x"}));
+    assert_eq!(code, "E_BAD_INPUT");
+    assert_eq!(message, "rdy_upgrade: unknown parameter \"dir\"");
+    let (code, ..) = refusal::<UpgradeParams>("rdy_upgrade", json!({"dry_run": "yes"}));
+    assert_eq!(code, "E_BAD_INPUT");
+}
+
 /// ec12: `rdy_clone` takes `dir`, `file` and `fork` and nothing else.
 #[test]
 fn ec12_rdy_clone_refuses_an_unknown_key() {
@@ -373,7 +387,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
             checked.push(stringify!($t));
         )* };
     }
-    // The 59 `*Params` types, nested ones included (`EditorialParams`, `ReflectsParams`,
+    // The 60 `*Params` types, nested ones included (`EditorialParams`, `ReflectsParams`,
     // `AltMemberParams`, `AltPickParams`, `DismissParams`, `DecideParams`, `MentionParams`,
     // `AcceptAdviceParams`, `RelayParams`, `RecommendedParams`, `PlanAnswerParams`,
     // `OwnerParams`).
@@ -435,6 +449,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         TagsParams,
         TensionsParams,
         TraceParams,
+        UpgradeParams,
         ViewParams,
         WriteParams,
     );

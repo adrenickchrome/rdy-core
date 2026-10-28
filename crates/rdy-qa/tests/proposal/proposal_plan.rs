@@ -106,13 +106,13 @@ fn log_state(r: &Rdy) -> (Location, Vec<(String, Vec<u8>)>) {
     )
 }
 
-/// The kinds of the frames from `from` to the log end, markers included.
+/// The logical kinds of the frames from `from` to the log end, markers included.
 fn frames_from(r: &Rdy, from: Location) -> Vec<u8> {
     let mut out = vec![];
     r.store()
         .reader()
         .for_each_frame_from(from, r.store().log_end(), |_, kind, _, _, _| {
-            out.push(kind);
+            out.push(rdy_store::codec::logical_kind(kind));
             Ok(())
         })
         .unwrap();
@@ -668,4 +668,110 @@ fn cp10_open_noncode_items_warn_and_code_items_never_block() {
         .expect("open items never refuse");
     assert!(!l.landing.is_empty());
     r.fsck().unwrap();
+}
+
+/// The carried records no product path writes yet, in the log of `r`: kinds 25 to 28, Check
+/// subjects and the Pass, Concern and Fail verdicts, the Dispute, ResolveDispute and
+/// AcceptVerdict acts, and the new Change and LandingRecord fields. Returns how many frames of
+/// the guarded kinds it read.
+fn future_records(r: &Rdy) -> (Vec<String>, usize) {
+    use rdy_model::{Answer, AnswerAct, Change, LandingRecord, Review, ReviewSubject, Verdict};
+    use rdy_store::codec::{decode_record, logical_kind};
+    let mut found = vec![];
+    let mut read = 0;
+    r.store()
+        .reader()
+        .for_each_frame_from(
+            Location {
+                segment: 0,
+                offset: 0,
+            },
+            r.store().log_end(),
+            |_, raw, hash, payload, _| {
+                let what = format!("kind {} {hash}", logical_kind(raw));
+                match logical_kind(raw) {
+                    kinds::ASSESSMENT
+                    | kinds::DISPUTE
+                    | kinds::DISPUTE_RESOLUTION
+                    | kinds::CHECK_REQUEST => found.push(what),
+                    kinds::REVIEW => {
+                        read += 1;
+                        let v: Review = decode_record(raw, payload)?;
+                        if matches!(v.subject, ReviewSubject::Check { .. })
+                            || matches!(v.verdict, Verdict::Pass | Verdict::Concern | Verdict::Fail)
+                        {
+                            found.push(what);
+                        }
+                    }
+                    kinds::ANSWER => {
+                        read += 1;
+                        let a: Answer = decode_record(raw, payload)?;
+                        if matches!(
+                            a.act,
+                            AnswerAct::Dispute
+                                | AnswerAct::ResolveDispute
+                                | AnswerAct::AcceptVerdict
+                        ) {
+                            found.push(what);
+                        }
+                    }
+                    kinds::CHANGE => {
+                        read += 1;
+                        let c: Change = decode_record(raw, payload)?;
+                        if c.links.replayed_from.is_some() || c.links.briefing.is_some() {
+                            found.push(what);
+                        }
+                    }
+                    kinds::LANDING => {
+                        read += 1;
+                        let l: LandingRecord = decode_record(raw, payload)?;
+                        if l.assessment.is_some() || l.policy.is_some() {
+                            found.push(what);
+                        }
+                    }
+                    _ => {}
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+    (found, read)
+}
+
+/// ok4: the product paths keep producing their existing acts. A propose with its bound plan, a
+/// plan answer, a person's approval, an ordinary write and an import write no record of kinds
+/// 25 to 28, no Check subject or new verdict, no Dispute, ResolveDispute or AcceptVerdict act,
+/// and leave every new carrier field None.
+#[test]
+fn ok4_product_paths_do_not_write_future_records() {
+    let (d, mut r) = project();
+    let repo = linked_repo(d.path());
+    let (_s, a, b, _c, _p) = spec(&mut r);
+    commit(repo.path(), "f.rs", &format!("start\n\nImplements: {a}"));
+    edit(&mut r, "w", &a, "A holds 60 days.");
+    let confirm = pi(&a, &b, PlanKind::Confirm);
+    r.answer_plan(
+        &writer(),
+        "w",
+        &[ans(&confirm, PlanAct::Confirm, Some("B still holds"))],
+    )
+    .unwrap();
+    let p = propose(&mut r, "w", &[]).unwrap();
+    r.land(&approver(), &p.id).unwrap();
+    // an import of canon into a new project, proposed and landed
+    let out = tempfile::tempdir().unwrap();
+    let out = out.path().join("export");
+    r.read().export(&rdy_engine::Scope::Canon, &out).unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let mut imp = Rdy::init(other.path(), "rdy-standard").unwrap();
+    imp.import(&approver(), "import", &out).unwrap();
+    let pi = imp
+        .propose(&writer(), "import", "import", Some(TEST_SUMMARY))
+        .unwrap();
+    imp.land(&approver(), &pi.id).unwrap();
+    for (what, r) in [("project", &r), ("import", &imp)] {
+        let (found, read) = future_records(r);
+        assert!(found.is_empty(), "{what}: {found:?}");
+        assert!(read > 0, "{what}: the guard read the product records");
+    }
 }

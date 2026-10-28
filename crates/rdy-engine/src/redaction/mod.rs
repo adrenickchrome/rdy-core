@@ -21,8 +21,8 @@ use crate::error::{E_PERMISSION, RdyError};
 use crate::views::{Action, commit_claim};
 use crate::write::check_view_access;
 use crate::{Delta, Rdy, ReadState, Session};
-use rdy_model::redaction::{ReasonClass, RedactionWarning, carrier};
-use rdy_model::{Change, Hash, Redaction, hash_of};
+use rdy_model::redaction::{AssessmentSupport, ReasonClass, RedactionWarning, carrier};
+use rdy_model::{Change, Hash, Redaction};
 use rdy_store::StoreError;
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
@@ -172,6 +172,42 @@ impl Drop for LimitsGuard {
     }
 }
 
+thread_local! {
+    static SUPPORT: Cell<Option<AssessmentSupport>> = const { Cell::new(None) };
+}
+
+/// The status this build's reports give the recorded assessment kinds: `Carried`, as the scan
+/// reads them (a build with the `test-support` feature lets a test replace it for its thread).
+pub(crate) fn current_support() -> AssessmentSupport {
+    #[cfg(feature = "test-support")]
+    if let Some(s) = SUPPORT.with(Cell::get) {
+        return s;
+    }
+    AssessmentSupport::Carried
+}
+
+/// Tests only (the `test-support` feature, which no normal build enables): this thread's
+/// reports carry `support` as their assessment status until the guard drops, so a test can
+/// record a request as an earlier release did.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn override_assessment_support_for_tests(support: AssessmentSupport) -> SupportGuard {
+    SupportGuard(SUPPORT.with(|c| c.replace(Some(support))))
+}
+
+/// Restores the status [`override_assessment_support_for_tests`] replaced when dropped.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+#[must_use = "the status is replaced only while the guard lives"]
+pub struct SupportGuard(Option<AssessmentSupport>);
+
+#[cfg(feature = "test-support")]
+impl Drop for SupportGuard {
+    fn drop(&mut self) {
+        SUPPORT.with(|c| c.set(self.0));
+    }
+}
+
 /// The dry run of `input` against `st`: the complete report, nothing recorded. Any role may run
 /// it (a reader too).
 pub fn dry_run(st: &ReadState, input: &RedactInput) -> Result<RedactResult, RdyError> {
@@ -275,7 +311,7 @@ fn record(
     let provenance = session.provenance();
     let carrier = carrier(view.to_string(), vec![], provenance.clone());
     let request = Redaction {
-        carrier: hash_of(&carrier),
+        carrier: carrier.id(),
         actor: provenance,
         targets: parts.request_targets,
         reason_class: result.reason_class,

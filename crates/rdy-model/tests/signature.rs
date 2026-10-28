@@ -140,6 +140,9 @@ fn relay_landing() -> LandingRecord {
             choice: Some("Approve P-1@2".into()),
             card_hash: Some(h(9)),
         }),
+        assessment: None,
+        policy: None,
+        read_identity: None,
     }
 }
 
@@ -382,8 +385,10 @@ fn sig1_each_statement_has_one_exact_byte_vector() {
 fn sig1_evidence_hash_covers_the_two_stored_optional_fields() {
     let l = relay_landing();
     // The two fields are slices of the landing's own encoding, in field order: relay_evidence
-    // follows relayed_by, and evidence is the last field.
-    let full = enc(&l);
+    // follows relayed_by, and evidence is the last field of the encoding-0 body (encoding 1
+    // appends assessment and policy after it).
+    let full = enc(&rdy_model::encoding::LegacyLandingV0::from_current(&l).unwrap());
+    assert_eq!(enc(&l), [&full[..], &[0, 0]].concat());
     let head = enc(&(
         &l.proposal,
         &l.prev,
@@ -927,8 +932,18 @@ fn sig1_signature_adds_no_bytes_to_existing_kinds() {
     assert_eq!(hex(&enc(&p)), PROV_HEX);
     assert_eq!(Hash::of(&enc(&p)).to_string(), PROV_HASH);
     let l = relay_landing();
-    assert_eq!(hex(&enc(&l)), LANDING_HEX);
-    assert_eq!(l.id().to_string(), LANDING_HASH);
+    // encoding 0, frozen: the landing as the base wrote it
+    let v0 = rdy_model::encoding::LegacyLandingV0::from_current(&l).unwrap();
+    assert_eq!(hex(&enc(&v0)), LANDING_HEX);
+    assert_eq!(Hash::of(&enc(&v0)).to_string(), LANDING_HASH);
+    // encoding 1, the latest: the same body, no assessment and no policy, under the version
+    // prefix; a signature adds no byte to either
+    assert_eq!(hex(&enc(&l)), format!("{LANDING_HEX}0000"));
+    assert_eq!(
+        l.id(),
+        rdy_model::encoding::encoded_hash(1, &enc(&l)),
+        "the latest id"
+    );
     assert_eq!(hex(&enc(&tag())), TAG_HEX);
     assert_eq!(tag().id().to_string(), TAG_HASH);
     assert_eq!(hex(&enc(&answer())), ANSWER_HEX);

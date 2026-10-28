@@ -5,7 +5,7 @@
 //! decode. Nothing panics.
 use rdy_model::*;
 use rdy_store::bounded::{self, COLLECTION_ELEMENTS, RecordError};
-use rdy_store::format::STORE_FORMAT;
+use rdy_store::format::LAST_SCALAR_STORE_FORMAT;
 use rdy_store::kinds;
 use rdy_store::object_refs::ObjectKey;
 use rdy_store::stream_error::StreamError;
@@ -73,6 +73,7 @@ fn reflects() -> Justification {
 
 fn raw(kind: u8, payload: &[u8]) -> StreamRecord {
     StreamRecord::Present {
+        encoding: 0,
         key: ObjectKey {
             kind,
             hash: Hash::of(payload),
@@ -85,6 +86,7 @@ fn raw(kind: u8, payload: &[u8]) -> StreamRecord {
 fn batch(payload: &[u8]) -> Vec<u8> {
     let root = Hash([4; 32]);
     let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
         REPO,
         root,
         vec![ObjectKey {
@@ -98,7 +100,17 @@ fn batch(payload: &[u8]) -> Vec<u8> {
         &postcard::to_allocvec(&claim()).unwrap(),
     ))
     .unwrap();
-    w.record(&raw(kinds::CHANGE, payload)).unwrap();
+    // the change's frame in CHANGE's latest encoding: the version prefix, then the body
+    let (raw_kind, framed) = rdy_store::codec::frame_latest(kinds::CHANGE, payload.to_vec());
+    w.record(&StreamRecord::Present {
+        encoding: rdy_store::codec::split(raw_kind, &framed).unwrap().version,
+        key: ObjectKey {
+            kind: kinds::CHANGE,
+            hash: Hash::of(&framed),
+        },
+        payload: framed,
+    })
+    .unwrap();
     w.finish().unwrap().0
 }
 
@@ -126,7 +138,7 @@ fn stream_refusal(bytes: &[u8]) -> StreamError {
 
 #[test]
 fn rf4_hostile_reflects_decode_is_bounded() {
-    assert_eq!(STORE_FORMAT, 18);
+    assert_eq!(LAST_SCALAR_STORE_FORMAT, 18);
     let good = postcard::to_allocvec(&change(reflects())).unwrap();
     assert_eq!(
         bounded::decode::<Change>(&good).unwrap(),

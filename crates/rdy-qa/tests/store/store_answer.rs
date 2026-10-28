@@ -5,7 +5,9 @@
 use rdy_engine::{Rdy, load::load};
 use rdy_model::*;
 use rdy_store::dump::{DumpItem, DumpReader};
-use rdy_store::format::{REF_STORE_FORMAT, STORE_FORMAT, encode_u32};
+use rdy_store::format::{
+    DumpStore, REF_STORE_FEATURES, REF_STORE_FORMAT, baseline_features, encode_u32,
+};
 use rdy_store::kinds::{self, BlobManifest, RefUpdate};
 use rdy_store::meta::REF_REPO_ID;
 use rdy_store::transition::Transitions;
@@ -349,7 +351,10 @@ fn fixture_frames(
             out.extend(b.frames);
         }
     }
-    (out, h.log_end, h.store_format)
+    let DumpStore::Legacy(store_format) = h.store else {
+        panic!("{name}: a released pair holds a scalar store")
+    };
+    (out, h.log_end, store_format)
 }
 
 /// Decodes `payload` as `T` and encodes it again.
@@ -369,9 +374,10 @@ fn di1_no_existing_kind_changes_its_bytes() {
         let payload = payload.unwrap();
         let bytes = match f.kind() {
             kinds::BLOCK => again::<Block>(payload),
-            kinds::CHANGE => again::<Change>(payload),
+            // an encoding-0 change and landing keep their frozen shapes (object encoding 1)
+            kinds::CHANGE => again::<rdy_model::encoding::LegacyChangeV0>(payload),
             kinds::PROPOSAL => again::<Proposal>(payload),
-            kinds::LANDING => again::<LandingRecord>(payload),
+            kinds::LANDING => again::<rdy_model::encoding::LegacyLandingV0>(payload),
             kinds::SNAPSHOT => again::<StateSnapshot>(payload),
             // a chunk is raw bytes: no encoding to change
             kinds::BLOB_CHUNK => payload.to_vec(),
@@ -405,8 +411,7 @@ fn di1_no_existing_kind_changes_its_bytes() {
 }
 
 /// Guard beside `dl8_the_v1_fixture_loads_with_every_hash`: a load of the v1-s10 fixture into
-/// the current store format appends one `meta/store_format` batch and nothing else (FW-UP1,
-/// D-WWAK7).
+/// a feature store appends one `meta/store_features` batch and nothing else (FW-UP1, D-WWAK7).
 #[test]
 fn di1_a_v1_s10_dump_loads_into_the_current_store_format() {
     let to = tempfile::tempdir().unwrap();
@@ -429,8 +434,8 @@ fn di1_a_v1_s10_dump_loads_into_the_current_store_format() {
     assert_eq!(
         u,
         RefUpdate {
-            name: REF_STORE_FORMAT.into(),
-            value: encode_u32(STORE_FORMAT),
+            name: REF_STORE_FEATURES.into(),
+            value: baseline_features().to_json(),
             at: log_end,
         }
     );
@@ -449,7 +454,8 @@ fn di1_a_v1_s10_dump_loads_into_the_current_store_format() {
     assert_eq!(tail[2].0, kinds::BATCH_COMMIT);
     assert_eq!(
         reader.get_ref(REF_STORE_FORMAT).unwrap(),
-        Some(STORE_FORMAT.to_string().into_bytes())
+        Some(encode_u32(10)),
+        "the historical scalar ref stays"
     );
     for f in &frames {
         assert!(

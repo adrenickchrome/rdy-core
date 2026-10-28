@@ -405,7 +405,7 @@ fn id4_owner_input_rejects_old_shapes_without_writes() {
         "view: unknown field \"owner.rnu\"",
         "did you mean \"run\"? the fields are actor, run",
     );
-    let shape = "args for view: {op, name?, from?, base?, pin?, view?, views?, changes?, cascade?, a?, b?, all?, stale?, reason?, owner?: {actor, run?}, none?, target?, max_tokens?, relayed_by?, evidence?, question?, session_ref?}; own {name, owner?: {actor, run?}, none?, evidence, question?, session_ref?}";
+    let shape = "args for view: {op, name?, from?, base?, pin?, view?, views?, changes?, cascade?, a?, b?, all?, stale?, reason?, owner?: {actor, run?}, none?, target?, block?, landed?, max_tokens?, relayed_by?, evidence?, question?, session_ref?}; op is create, fork, include, exclude, replay, compare, list, show, close, own, resolve or undo; own {name, owner?: {actor, run?}, none?, evidence, question?, session_ref?}";
     for (o, message) in [
         (
             json!("agent:a/b"),

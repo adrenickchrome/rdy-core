@@ -205,6 +205,9 @@ fn kind1_an_asset_with_a_future_landings_bytes_does_not_hide_it() {
         approved_version: Some(p),
         rebased_from: vec![],
         evidence: None,
+        assessment: None,
+        policy: None,
+        read_identity: None,
     };
     upload(&mut st, &postcard::to_allocvec(&predicted).unwrap());
     drop(read);

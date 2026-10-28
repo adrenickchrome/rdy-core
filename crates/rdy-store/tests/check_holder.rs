@@ -113,6 +113,9 @@ fn land_state(
         approved_version: None,
         rebased_from: vec![],
         evidence: None,
+        assessment: None,
+        policy: None,
+        read_identity: None,
     };
     let mut rec = rec;
     edit(&mut rec);

@@ -17,7 +17,7 @@ use rdy_model::redaction::{RedactTarget, RedactionApply};
 use rdy_model::*;
 use rdy_store::dump::*;
 use rdy_store::dump_chain::{BatchMarker, DumpChainHeader, batch_end};
-use rdy_store::format::STORE_FORMAT;
+use rdy_store::format::{DumpStore, LAST_SCALAR_STORE_FORMAT as STORE_FORMAT, baseline_features};
 use rdy_store::ingest::Ingest;
 use rdy_store::kinds::{self, BLOB_CHUNK, BLOCK, CHANGE, batch_digest};
 use rdy_store::segment::Location;
@@ -278,7 +278,7 @@ fn header(batches: &[DumpBatch]) -> DumpHeader {
         None => (BatchMarker::ZERO.start, BatchMarker::ZERO),
     };
     DumpHeader {
-        store_format: STORE_FORMAT,
+        store: rdy_store::format::DumpStore::Features(rdy_store::format::baseline_features()),
         log_end,
         rdy: "test".into(),
         chain: Some(DumpChainHeader::full(RepoId([7; 16]), marker)),
@@ -319,7 +319,9 @@ fn ingest(to: &Path, batches: &[DumpBatch]) -> Result<rdy_store::ingest::IngestR
     for (n, b) in batches.iter().enumerate() {
         i.batch(n as u64 + 1, b)?;
     }
-    i.upgrade(STORE_FORMAT)?;
+    i.upgrade(&rdy_store::format::DumpStore::Features(
+        rdy_store::format::baseline_features(),
+    ))?;
     i.finish()
 }
 
@@ -380,6 +382,12 @@ fn batches_in(recs: &[(u8, Vec<u8>)]) -> Option<Vec<DumpBatch>> {
         let mut frames = vec![];
         for (k, p) in recs.get(i..i + n)? {
             frames.push(if *k == rec::DROPPED {
+                // a dump-4 record holds its encoding after the kind
+                let p = &if p.len() == 104 {
+                    [&p[..1], &p[3..]].concat()
+                } else {
+                    p.clone()
+                };
                 Frame::Dropped {
                     kind: p[0],
                     hash: Hash(p.get(1..33)?.try_into().ok()?),
@@ -444,8 +452,21 @@ fn reseal(recs: &mut [(u8, Vec<u8>)]) {
     recs[n].1 = p;
 }
 
-/// The 102 payload bytes of a `DROPPED` record.
+/// The 104 payload bytes of a dump-4 `DROPPED` record (encoding 0).
 fn dropped_bytes(kind: u8, hash: Hash, len: u32, apply: Hash, residue: Option<Hash>) -> Vec<u8> {
+    let mut p = legacy_dropped_bytes(kind, hash, len, apply, residue);
+    p.splice(1..1, [0u8, 0]);
+    p
+}
+
+/// The 102 payload bytes of a `DROPPED` record of dump formats 2 and 3.
+fn legacy_dropped_bytes(
+    kind: u8,
+    hash: Hash,
+    len: u32,
+    apply: Hash,
+    residue: Option<Hash>,
+) -> Vec<u8> {
     let mut p = vec![kind];
     p.extend_from_slice(&hash.0);
     p.extend_from_slice(&len.to_le_bytes());
@@ -481,7 +502,10 @@ fn rdx9_a_dropped_record_preserves_original_offsets_and_hashes() {
         .iter()
         .map(|(i, j)| &src.batches[*i].frames[*j])
         .collect();
-    let kinds_of: Vec<u8> = dropped.iter().map(|f| f.kind()).collect();
+    let kinds_of: Vec<u8> = dropped
+        .iter()
+        .map(|f| rdy_store::codec::logical_kind(f.kind()))
+        .collect();
     assert_eq!(kinds_of, [BLOCK, CHANGE, BLOB_CHUNK, BLOB_CHUNK]);
     for f in &dropped {
         assert!(f.present_payload().is_none());
@@ -503,7 +527,7 @@ fn rdx9_a_dropped_record_preserves_original_offsets_and_hashes() {
     );
     // the dump round-trips every original frame and holds no removed byte
     let bytes = src.dump();
-    assert!(bytes.starts_with(b"RDYDUMP\n\x03\x00\x00\x00"));
+    assert!(bytes.starts_with(b"RDYDUMP\n\x04\x00\x00\x00"));
     assert!(
         !bytes.windows(CANARY.len()).any(|w| w == CANARY),
         "the dump holds the removed block's body"
@@ -511,9 +535,12 @@ fn rdx9_a_dropped_record_preserves_original_offsets_and_hashes() {
     let recs = records(&bytes);
     let containers: Vec<&(u8, Vec<u8>)> = recs.iter().filter(|(k, _)| *k == rec::DROPPED).collect();
     assert_eq!(containers.len(), 4);
-    assert!(containers.iter().all(|(_, p)| p.len() == DROPPED_LEN));
+    assert!(containers.iter().all(|(_, p)| p.len() == DROPPED_LEN + 2));
     let (format, h, back) = read_dump(&bytes).unwrap();
-    assert_eq!((format, h.store_format), (DUMP_FORMAT, STORE_FORMAT));
+    assert_eq!(
+        (format, h.store),
+        (DUMP_FORMAT, DumpStore::Features(baseline_features()))
+    );
     assert_eq!(back, src.batches, "every frame, dropped ones included");
     // the load: every original position, marker and hash, byte for byte
     let to = src._dir.path().join("dst");
@@ -543,7 +570,8 @@ fn rdx9_a_dropped_record_preserves_original_offsets_and_hashes() {
     for (i, j) in src.dropped() {
         let f = &src.batches[i].frames[j];
         assert!(
-            t.has_kind(f.kind(), f.hash()).unwrap(),
+            t.has_kind(rdy_store::codec::logical_kind(f.kind()), f.hash())
+                .unwrap(),
             "{} stays",
             f.hash()
         );
@@ -568,7 +596,7 @@ fn rdx9_container_and_source_digests_cover_different_records() {
     for &i in &drops {
         // the container layer: any payload bit, with the record's hash left as it was
         let at = 12 + recs[..i].iter().map(|(_, p)| HEAD + p.len()).sum::<usize>();
-        for bit in 0..DROPPED_LEN * 8 {
+        for bit in 0..(DROPPED_LEN + 2) * 8 {
             let mut bad = good.clone();
             bad[at + HEAD + bit / 8] ^= 1 << (bit % 8);
             assert_eq!(
@@ -583,16 +611,20 @@ fn rdx9_container_and_source_digests_cover_different_records() {
         let other = if recs[i].1[0] == BLOCK { CHANGE } else { BLOCK };
         let mut r = recs.clone();
         r[i].1[0] = other;
-        r[i].1[69] = 1;
-        if r[i].1[70..].iter().all(|b| *b == 0) {
-            r[i].1[70] = 1;
+        // an encoding the other kind may have when removed: a block's is 0
+        if other == BLOCK {
+            r[i].1[1..3].copy_from_slice(&[0, 0]);
+        }
+        r[i].1[71] = 1;
+        if r[i].1[72..].iter().all(|b| *b == 0) {
+            r[i].1[72] = 1;
         }
         assert_eq!(
             what(read(&forge(DUMP_FORMAT, &r)).unwrap_err()),
             format!("batch {n} does not match its digest"),
             "record {i}: original kind"
         );
-        for byte in [1usize, 32] {
+        for byte in [3usize, 34] {
             let mut r = recs.clone();
             r[i].1[byte] ^= 1;
             assert_eq!(
@@ -602,10 +634,10 @@ fn rdx9_container_and_source_digests_cover_different_records() {
             );
         }
         // the original length, apply and residue: only the trailer covers the container record
-        for (byte, label) in [(33usize, "length"), (41, "apply"), (101, "residue")] {
+        for (byte, label) in [(35usize, "length"), (43, "apply"), (103, "residue")] {
             let mut r = recs.clone();
             r[i].1[byte] ^= 1;
-            if label == "residue" && r[i].1[69] == 0 {
+            if label == "residue" && r[i].1[71] == 0 {
                 continue; // a chunk names no residue
             }
             assert_eq!(
@@ -632,6 +664,8 @@ fn rdx9_container_and_source_digests_cover_different_records() {
         // a container that names a kind no redaction removes is refused on read
         let mut r = recs.clone();
         r[i].1[0] = kinds::PROPOSAL;
+        // with encoding 0, so the kind alone is what the reader refuses
+        r[i].1[1..3].copy_from_slice(&[0, 0]);
         assert_eq!(
             what(read(&forge(DUMP_FORMAT, &r)).unwrap_err()),
             INVALID_KIND
@@ -705,16 +739,20 @@ fn policy_batches(src: &Src) -> Vec<DumpBatch> {
     let frames = &mut bs[landing].frames;
     let li = frames
         .iter()
-        .position(|f| f.kind() == kinds::LANDING)
+        .position(|f| rdy_store::codec::logical_kind(f.kind()) == kinds::LANDING)
         .unwrap();
-    let mut l: LandingRecord = postcard::from_bytes(frames[li].present_payload().unwrap()).unwrap();
+    let mut l: LandingRecord =
+        rdy_store::codec::decode_record(frames[li].kind(), frames[li].present_payload().unwrap())
+            .unwrap();
+    // a forged record: no longer the read's identity
+    l.read_identity = None;
     l.assurance = Assurance::Policy;
     l.relayed_by = None;
     l.relay_evidence = None;
-    let lp = enc(&l);
+    let (lk, lp) = rdy_store::codec::item(kinds::LANDING, &l).unwrap();
     let lid = Hash::of(&lp);
     frames[li] = Frame::Present {
-        kind: kinds::LANDING,
+        kind: lk,
         hash: lid,
         payload: lp,
     };
@@ -768,7 +806,11 @@ fn drop_stream(
     apply: Hash,
     residue: Option<Hash>,
 ) -> Vec<u8> {
-    let drop = dropped_bytes(kind, hash, len, apply, residue);
+    let drop = if dump_format >= 4 {
+        dropped_bytes(kind, hash, len, apply, residue)
+    } else {
+        legacy_dropped_bytes(kind, hash, len, apply, residue)
+    };
     let mut h = vec![];
     if dump_format >= 3 {
         let batch = DumpBatch {
@@ -784,7 +826,14 @@ fn drop_stream(
         };
         let end = batch_end(&batch).unwrap();
         h.push(0); // a full dump
-        h.extend_from_slice(&store_format.to_le_bytes());
+        if dump_format >= 4 {
+            // dump format 4 names the store's features, not a format number
+            let json = baseline_features().to_json();
+            h.extend_from_slice(&(json.len() as u32).to_le_bytes());
+            h.extend_from_slice(&json);
+        } else {
+            h.extend_from_slice(&store_format.to_le_bytes());
+        }
         h.extend_from_slice(&[7u8; 16]);
         h.extend_from_slice(&[0u8; 12 + 48 + 32]); // origin base, zero marker, zero prev
         h.extend_from_slice(&end.segment.to_le_bytes());
@@ -895,11 +944,11 @@ fn rdx9_hostile_drop_lengths_and_counts_do_not_allocate_the_claim() {
         .position(|(k, p)| *k == rec::DROPPED && p[0] == BLOB_CHUNK)
         .unwrap();
     let bend: [(usize, ByteBend); 5] = [
-        (i, |p| p[69] = 2),
-        (i, |p| p[69] = 0xFF),
-        (i, |p| p[69] = 0),
-        (chunk, |p| p[69] = 1),
-        (chunk, |p| p[70] = 1),
+        (i, |p| p[71] = 2),
+        (i, |p| p[71] = 0xFF),
+        (i, |p| p[71] = 0),
+        (chunk, |p| p[71] = 1),
+        (chunk, |p| p[72] = 1),
     ];
     for (n, (k, b)) in bend.into_iter().enumerate() {
         let mut r = recs.clone();
@@ -1006,7 +1055,7 @@ fn hc1_a_dropped_frame_past_u64_max_overflows_in_format_3_only() {
 
 #[test]
 fn rdx9_current_output_uses_the_current_store_pair() {
-    assert_eq!((DUMP_FORMAT, STORE_FORMAT), (3, 18));
+    assert_eq!((DUMP_FORMAT, STORE_FORMAT), (4, 18));
     assert_eq!(
         READS,
         &[
@@ -1083,13 +1132,13 @@ fn rdx9_current_output_uses_the_current_store_pair() {
     // no downgrade writer: a header of an older store format is refused
     for sf in [10, 11, 12, 13, 14, 15] {
         let old = DumpHeader {
-            store_format: sf,
+            store: DumpStore::Legacy(sf),
             ..header(&[])
         };
         match DumpWriter::new(Vec::new(), &old) {
             Err(StoreError::Refused(m)) => assert_eq!(
                 m,
-                format!("store format {sf} in a dump of format 3 is not one this rdy reads")
+                format!("store format {sf} in a dump of format 4 is not one this rdy reads")
             ),
             Err(other) => panic!("store format {sf}: {other:?}"),
             Ok(_) => panic!("store format {sf} was taken"),
@@ -1098,9 +1147,12 @@ fn rdx9_current_output_uses_the_current_store_pair() {
     // what this rdy writes
     let src = source();
     let bytes = src.dump();
-    assert_eq!(&bytes[..12], b"RDYDUMP\n\x03\x00\x00\x00");
+    assert_eq!(&bytes[..12], b"RDYDUMP\n\x04\x00\x00\x00");
     let (format, h, _) = read_dump(&bytes).unwrap();
-    assert_eq!((format, h.store_format), (DUMP_FORMAT, STORE_FORMAT));
+    assert_eq!(
+        (format, h.store),
+        (DUMP_FORMAT, DumpStore::Features(baseline_features()))
+    );
 }
 
 /// The bytes of the log of the store directory `to`, in all its segments.
@@ -1212,7 +1264,12 @@ fn rdx9_a_drop_claim_is_bounded_before_it_is_written() {
         Hash::of(b"no such apply"),
         None,
     );
-    assert_eq!(stream.len(), 590);
+    // ok4: the baseline manifest is 183 bytes
+    assert_eq!(
+        stream.len(),
+        775,
+        "590 bytes in dump format 3, the manifest and the encoding"
+    );
     let (_, _, bs) = read_dump(&stream).unwrap();
     let to = dir.path().join("claim");
     let mut i = Ingest::create(&to).unwrap();
@@ -1223,7 +1280,10 @@ fn rdx9_a_drop_claim_is_bounded_before_it_is_written() {
         "{} bytes",
         log_bytes(&to)
     );
-    i.upgrade(STORE_FORMAT).unwrap();
+    i.upgrade(&rdy_store::format::DumpStore::Features(
+        rdy_store::format::baseline_features(),
+    ))
+    .unwrap();
     assert_eq!(what(i.finish().unwrap_err()), NO_AUTHORIZATION);
     assert!(no_store(&to));
 
@@ -1241,7 +1301,7 @@ fn rdx9_a_drop_claim_is_bounded_before_it_is_written() {
     };
     let e = read_dump(&over(FRAME_BOUND + 1)).unwrap_err();
     assert!(
-        matches!(&e, StoreError::Dump { at, .. } if *at == (12 + HEAD + 179 + HEAD + 80) as u64),
+        matches!(&e, StoreError::Dump { at, .. } if *at == (12 + HEAD + 179 + baseline_features().to_json().len() + HEAD + 80) as u64),
         "blamed on the dropped record: {e:?}"
     );
     assert_eq!(what(e), claim(FRAME_BOUND + 1));
@@ -1498,7 +1558,8 @@ fn with_drops(raw: &Raw, kinds_dropped: &[u8]) -> Vec<DumpBatch> {
         };
         let (_, i, j) = places.iter().find(|(l, ..)| *l == loc).unwrap();
         batches[*i].frames[*j] = Frame::Dropped {
-            kind: span.kind,
+            // the frame's raw kind: a change of the latest encoding is marked
+            kind: batches[*i].frames[*j].kind(),
             hash: span.hash,
             len: span.len,
             apply,

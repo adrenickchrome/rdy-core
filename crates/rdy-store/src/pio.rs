@@ -12,7 +12,9 @@
 //!   `create_private_at`, `create_private_dir_at`, `umask_keeps_0700_at`, `remove_file_at`,
 //!   `remove_dir_at`, `set_mode_at`, `rename_at`, `is_link_refusal`): each names one entry of a
 //!   directory handle, so a path that is changed after the handle was opened cannot redirect
-//!   it, and none follows a link at that entry; `is_empty_dir` lists a directory handle itself;
+//!   it, and none follows a link at that entry; `is_empty_dir` and `for_each_entry` list a
+//!   directory handle itself, and `entry_kind_at` reads an entry's kind without following or
+//!   opening it;
 //! - a child process that starts in an open directory (`start_in_dir`), for the same reason;
 //! - test fixtures: a file's mode bits and inode (`mode_of`, `inode`), any mode
 //!   (`permissions`, `set_mode`, `dir_mode`, `file_mode`), symbolic links (`symlink`) and a
@@ -344,6 +346,97 @@ pub fn is_empty_dir(dir: &File) -> io::Result<bool> {
     empty
 }
 
+/// Calls `f` with the name of each entry of the open directory `dir` but `.` and `..`, in the
+/// order the directory lists them. The listing goes through a new open of `dir` itself, as in
+/// [`is_empty_dir`], so no path is resolved again. A failed listing is an error, and so is the
+/// first error of `f`, which ends the listing.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub fn for_each_entry<E: From<io::Error>>(
+    dir: &File,
+    mut f: impl FnMut(&OsStr) -> Result<(), E>,
+) -> Result<(), E> {
+    use std::os::unix::io::IntoRawFd;
+    // SAFETY: as in `is_empty_dir`.
+    let fd = cvt(unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            c".".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    })?;
+    // SAFETY: `fd` is a new descriptor that nothing else owns.
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    // SAFETY: as in `is_empty_dir`.
+    let stream = unsafe { libc::fdopendir(owned.as_raw_fd()) };
+    if stream.is_null() {
+        return Err(io::Error::last_os_error().into());
+    }
+    let _ = owned.into_raw_fd();
+    let listed = loop {
+        // SAFETY: as in `is_empty_dir`.
+        let mut entry: libc::dirent = unsafe { std::mem::zeroed() };
+        let mut found: *mut libc::dirent = std::ptr::null_mut();
+        // SAFETY: as in `is_empty_dir`.
+        let r = unsafe { libc::readdir_r(stream, &mut entry, &mut found) };
+        if r != 0 {
+            break Err(io::Error::from_raw_os_error(r).into());
+        }
+        if found.is_null() {
+            break Ok(());
+        }
+        // SAFETY: as in `is_empty_dir`.
+        let name = unsafe { std::ffi::CStr::from_ptr((*found).d_name.as_ptr()) }.to_bytes();
+        if name == b"." || name == b".." {
+            continue;
+        }
+        if let Err(e) = f(OsStr::from_bytes(name)) {
+            break Err(e);
+        }
+    };
+    // SAFETY: the stream is open and is closed once, here.
+    unsafe { libc::closedir(stream) };
+    listed
+}
+
+/// The kind of a directory entry, as [`entry_kind_at`] reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryKind {
+    Dir,
+    File,
+    /// A symbolic link, never followed.
+    Link,
+    /// A socket, FIFO, device or any other kind of file.
+    Other,
+}
+
+/// The kind of the entry `name` of the open directory `dir`, from `fstatat` with
+/// `AT_SYMLINK_NOFOLLOW`: a link is reported as a link, and nothing is opened, so a FIFO or a
+/// device is never touched.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub fn entry_kind_at(dir: &File, name: &OsStr) -> io::Result<EntryKind> {
+    let name = entry_name(name)?;
+    // SAFETY: a `stat` is plain data; all zeros is a valid value for `fstatat` to fill.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: as in `create_private_dir_at`: an open descriptor and a live C string, and a
+    // whole `stat` to fill.
+    cvt(unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            &mut st,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    })?;
+    Ok(match st.st_mode & libc::S_IFMT {
+        libc::S_IFDIR => EntryKind::Dir,
+        libc::S_IFREG => EntryKind::File,
+        libc::S_IFLNK => EntryKind::Link,
+        _ => EntryKind::Other,
+    })
+}
+
 /// Whether `e`, from [`open_dir_at`] or [`open_read_at`], means that a link stands at the name,
 /// or something that is not a directory where a directory was opened (`ELOOP`, `ENOTDIR`).
 #[cfg(unix)]
@@ -405,14 +498,14 @@ fn cvt(r: libc::c_int) -> io::Result<libc::c_int> {
 }
 
 /// The permission bits of the file `meta` describes, with the set-id and sticky bits
-/// (mode & 0o7777). For test fixtures.
+/// (mode & 0o7777). For test fixtures and the upgrade backup's file modes.
 #[cfg(unix)]
 pub fn mode_of(meta: &Metadata) -> u32 {
     meta.permissions().mode() & 0o7777
 }
 
 /// Permissions of exactly `mode` (for example 0o644), for `fs::set_permissions` or a
-/// `tempfile::Builder`. For test fixtures.
+/// `tempfile::Builder`. For test fixtures and the upgrade backup's file modes.
 #[cfg(unix)]
 pub fn permissions(mode: u32) -> fs::Permissions {
     fs::Permissions::from_mode(mode)
@@ -639,5 +732,46 @@ mod tests {
             .unwrap();
         assert!(out.status.success());
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "0077");
+    }
+
+    #[test]
+    fn ok5_pio_lists_a_directory_handle_and_reads_entry_kinds_without_following() {
+        let d = tempfile::tempdir().unwrap();
+        fs::write(d.path().join("file"), b"x").unwrap();
+        fs::create_dir(d.path().join("dir")).unwrap();
+        symlink(d.path().join("file"), d.path().join("link")).unwrap();
+        let _socket = std::os::unix::net::UnixListener::bind(d.path().join("sock")).unwrap();
+        let dir = open_dir(d.path()).unwrap();
+        let mut names = vec![];
+        for_each_entry::<io::Error>(&dir, |n| {
+            names.push(n.to_os_string());
+            Ok(())
+        })
+        .unwrap();
+        names.sort();
+        assert_eq!(names, ["dir", "file", "link", "sock"]);
+        for (name, kind) in [
+            ("dir", EntryKind::Dir),
+            ("file", EntryKind::File),
+            ("link", EntryKind::Link),
+            ("sock", EntryKind::Other),
+        ] {
+            assert_eq!(entry_kind_at(&dir, name.as_ref()).unwrap(), kind, "{name}");
+        }
+        assert_eq!(
+            entry_kind_at(&dir, "gone".as_ref()).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        // the first error of the callback ends the listing and is returned
+        let mut seen = 0;
+        let e = for_each_entry(&dir, |_| {
+            seen += 1;
+            Err(io::Error::other("stop"))
+        })
+        .unwrap_err();
+        assert_eq!((seen, e.to_string()), (1, "stop".to_string()));
+        // an empty directory lists nothing
+        let empty = open_dir_at(&dir, "dir".as_ref()).unwrap();
+        for_each_entry::<io::Error>(&empty, |_| panic!("no entry")).unwrap();
     }
 }

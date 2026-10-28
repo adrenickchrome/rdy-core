@@ -235,7 +235,12 @@ fn split(r: &Rdy, tag: Hash, n: usize) -> Vec<Vec<u8>> {
             }
             needed.insert(root);
             needed.retain(|k| !mine.contains(k));
-            let header = StreamHeader::tag_history(repo(r), tag, needed.into_iter().collect());
+            let header = StreamHeader::tag_history(
+                rdy_store::format::baseline_features(),
+                repo(r),
+                tag,
+                needed.into_iter().collect(),
+            );
             closure::write_batch(&mut source, &header, &records, Vec::new())
                 .unwrap()
                 .0
@@ -740,6 +745,7 @@ fn ha13_take_rechecks_dependencies_after_batch_reports() {
             kinds::LANDING,
             &LandingRecord {
                 state: s,
+                read_identity: None,
                 ..rec.clone()
             },
         )
@@ -1459,6 +1465,7 @@ fn ha13_take_keeps_the_landing_and_chain_rules() {
                 relayed_by: None,
                 relay_evidence: None,
                 evidence: None,
+                read_identity: None,
                 ..rec.clone()
             },
         )
@@ -1470,6 +1477,7 @@ fn ha13_take_keeps_the_landing_and_chain_rules() {
             kinds::LANDING,
             &LandingRecord {
                 prev: Some(l),
+                read_identity: None,
                 ..rec.clone()
             },
         )
@@ -1560,6 +1568,7 @@ fn ha13_take_keeps_the_blob_chunk_lengths() {
                 kinds::LANDING,
                 &LandingRecord {
                     state: s,
+                    read_identity: None,
                     ..rec.clone()
                 },
             )

@@ -465,6 +465,18 @@ fn spec_target(op: &str) -> Option<String> {
         "mcp_stdio_oversized_line" => {
             "< 10 s: a 17 MiB request line sent and refused over `rdy mcp --no-daemon` (the old mcp2 bound)"
         }
+        "m3a_replay_1" | "m3a_replay_100" | "m3a_replay_1000" => {
+            "recorded, no spec target: replay of N source changes (one update each, half with a diverged target) into an owned view (D-EHC2C); reported, never enforced"
+        }
+        "m3a_landing_ties_1000" | "m3a_landing_ties_10000" => {
+            "recorded, no spec target: the landing of a view whose appended block ties with a landed one, re-keying its own block, under a parent of N blocks (D-TX3KH)"
+        }
+        "m3a_read_only_reindex_1000" | "m3a_read_only_reindex_10000" => {
+            "recorded, no spec target: the read-only open of a store of N blocks with no derived index, the private index built from the log (D-WWAK7)"
+        }
+        "m3a_upgrade_backup_1000" | "m3a_upgrade_backup_10000" => {
+            "recorded, no spec target: a store upgrade of N blocks with one metadata step: backup, batch, reindex, full fsck and the FORMAT mirror (D-WWAK7)"
+        }
         _ => return None,
     };
     Some(if large {
@@ -487,6 +499,9 @@ fn fsync_bound(op: &str) -> bool {
         || op.starts_with("plan_answer")
         || op.starts_with("plan_seal")
         || op.starts_with("reaffirm_")
+        || op.starts_with("m3a_replay_")
+        || op.starts_with("m3a_landing_")
+        || op.starts_with("m3a_upgrade_")
 }
 
 /// The verdicts of one run. The spec ceiling is checked first in every mode. In `Record` mode
@@ -4755,6 +4770,566 @@ fn tier_signatures(
     std::fs::remove_dir_all(&work).expect("remove the copy");
 }
 
+/// The nine operations Task 15 reports (D-TX3KH, D-EHC2C, D-WWAK7; tb-A4DAV). The replay sizes
+/// count source changes; the others count blocks. The 10,000-block operations also run in the
+/// large tier, under the `_50k` names.
+pub const M3A_OPS: [&str; 9] = [
+    "m3a_replay_1",
+    "m3a_replay_100",
+    "m3a_replay_1000",
+    "m3a_landing_ties_1000",
+    "m3a_landing_ties_10000",
+    "m3a_read_only_reindex_1000",
+    "m3a_read_only_reindex_10000",
+    "m3a_upgrade_backup_1000",
+    "m3a_upgrade_backup_10000",
+];
+
+/// The sizes one run of [`tier_m3a`] measures: replay source changes, and the blocks of the
+/// landing, read-only and upgrade fixtures.
+struct M3aSizes {
+    replay: &'static [usize],
+    blocks: &'static [usize],
+}
+
+/// The typical tier: all nine operations.
+const M3A_TYPICAL: M3aSizes = M3aSizes {
+    replay: &[1, 100, 1000],
+    blocks: &[1000, 10_000],
+};
+
+/// The large tier: the 10,000-block operations, under the `_50k` names. No new machine class.
+const M3A_LARGE: M3aSizes = M3aSizes {
+    replay: &[],
+    blocks: &[10_000],
+};
+
+/// Claims one fixture write creates or edits (a write holds at most this many ops).
+const M3A_BATCH: usize = 500;
+/// The view whose changes the replay fixtures replay, and the view they replay into.
+const M3A_SOURCE_VIEW: &str = "m3a-src";
+const M3A_TARGET_VIEW: &str = "m3a-tgt";
+/// The two views that append one claim each under the landing fixture's parent.
+const M3A_VIEW_A: &str = "m3a-a";
+const M3A_VIEW_B: &str = "m3a-b";
+/// The step id of the injected upgrade registry: one metadata step.
+const M3A_STEP: &str = "add_test";
+
+/// What one M3a operation printed beside its timing, for the first run of each: the fixture's
+/// blocks, the source changes and ops the operation worked on, the log bytes and the frames
+/// (retained objects) the project holds once the operation is done, and the operation's own
+/// checks. No timing is a fact, and no test compares one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct M3aFacts {
+    op: String,
+    blocks: usize,
+    sources: usize,
+    ops: usize,
+    bytes: u64,
+    objects: u64,
+    extra: Vec<(&'static str, u64)>,
+}
+
+impl M3aFacts {
+    #[cfg(test)]
+    fn extra(&self, key: &str) -> u64 {
+        self.extra
+            .iter()
+            .find(|(k, _)| *k == key)
+            .unwrap_or_else(|| panic!("{}: no fact {key}", self.op))
+            .1
+    }
+
+    fn print(&self) {
+        let extra: String = self
+            .extra
+            .iter()
+            .map(|(k, v)| format!(", {k} {v}"))
+            .collect();
+        eprintln!(
+            "{}: blocks {}, sources {}, ops {}, bytes {}, retained objects {}{extra}",
+            self.op, self.blocks, self.sources, self.ops, self.bytes, self.objects
+        );
+    }
+}
+
+/// A landed canon of one doc, one section and `claims.len()` claims under it, closed.
+struct M3aBase {
+    dir: std::path::PathBuf,
+    section: BlockId,
+    claims: Vec<BlockId>,
+}
+
+/// Builds the canon of `n` claims under `parent` and closes it. Outside every timer.
+fn m3a_base(parent: &std::path::Path, sfx: &str, n: usize) -> M3aBase {
+    let dir = parent.join(format!("m3a{sfx}-base-{n}"));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let mut r = Rdy::init(&dir, "rdy-standard").expect("init");
+    let w = write(
+        &mut r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "m3a", "title": "M3a", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}}
+        ]),
+    )
+    .expect("seed write");
+    let section = BlockId::parse(&w.created["$s"]).expect("section id");
+    let mut claims = Vec::with_capacity(n);
+    for first in (0..n).step_by(M3A_BATCH) {
+        let last = (first + M3A_BATCH).min(n);
+        let ops: Vec<serde_json::Value> = (first..last)
+            .map(|i| json!({"op": "create", "type": "claim", "parent": section.to_string(), "body": format!("Claim {i}.")}))
+            .collect();
+        let w = write(&mut r, "seed", serde_json::Value::Array(ops)).expect("claims write");
+        for k in 0..last - first {
+            claims.push(BlockId::parse(&w.created[&format!("op{k}")]).expect("claim id"));
+        }
+    }
+    land(&mut r, "seed").expect("land the canon");
+    r.close().expect("close");
+    M3aBase {
+        dir,
+        section,
+        claims,
+    }
+}
+
+/// The bytes of every file under `dir`.
+fn dir_bytes(dir: &std::path::Path) -> u64 {
+    std::fs::read_dir(dir)
+        .expect("read_dir")
+        .map(|e| {
+            let e = e.expect("entry");
+            let m = std::fs::symlink_metadata(e.path()).expect("metadata");
+            if m.is_dir() {
+                dir_bytes(&e.path())
+            } else {
+                m.len()
+            }
+        })
+        .sum()
+}
+
+/// Every file under `dir` with its length and content hash, in path order.
+fn dir_digest(dir: &std::path::Path) -> Vec<(std::path::PathBuf, u64, Hash)> {
+    let mut out = vec![];
+    for e in std::fs::read_dir(dir).expect("read_dir") {
+        let p = e.expect("entry").path();
+        if std::fs::symlink_metadata(&p).expect("metadata").is_dir() {
+            out.extend(dir_digest(&p));
+        } else {
+            let bytes = std::fs::read(&p).expect("read");
+            out.push((p, bytes.len() as u64, Hash::of(&bytes)));
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// `m3a_replay_<n>`: replays `n` source changes, each one update of its own claim, into a view of
+/// the same canon. Half the sources (every odd one) have a diverged target: the target view
+/// holds another body for their claim, so each of those replays records a conflict. The
+/// fixture's writes and every sample's copy stay outside the timer; `view_replay` alone is timed.
+fn m3a_replay(
+    out: &mut Vec<Measure>,
+    parent: &std::path::Path,
+    sfx: &str,
+    runs: usize,
+    base: &M3aBase,
+) -> M3aFacts {
+    let n = base.claims.len();
+    let op = format!("m3a_replay_{n}{sfx}");
+    let fx = parent.join(format!("m3a{sfx}-replay-{n}"));
+    copy_project(&base.dir, &fx);
+    let (sources, diverged) = {
+        let mut r = Rdy::open(&fx).expect("open the replay fixture");
+        r.view_create(&writer(), M3A_TARGET_VIEW, None, false)
+            .expect("create the target view");
+        let mut sources = Vec::with_capacity(n);
+        for (i, claim) in base.claims.iter().enumerate() {
+            let w = write(
+                &mut r,
+                M3A_SOURCE_VIEW,
+                json!([{"op": "update", "id": claim.to_string(), "body": format!("Replayed {i}.")}]),
+            )
+            .expect("source write");
+            sources.push(w.change);
+        }
+        let odd: Vec<(usize, &BlockId)> = base
+            .claims
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % 2 == 1)
+            .collect();
+        for chunk in odd.chunks(M3A_BATCH) {
+            let ops: Vec<serde_json::Value> = chunk
+                .iter()
+                .map(|(i, c)| json!({"op": "update", "id": c.to_string(), "body": format!("Diverged {i}.")}))
+                .collect();
+            write(&mut r, M3A_TARGET_VIEW, serde_json::Value::Array(ops)).expect("target write");
+        }
+        r.close().expect("close the fixture");
+        (sources, odd.len())
+    };
+    let want: BTreeSet<Hash> = sources
+        .iter()
+        .map(|s| s.parse().expect("change hash"))
+        .collect();
+    let mut facts = None;
+    out.push(measure_timed(&op, runs, |i| {
+        let work = parent.join(format!("m3a{sfx}-replay-{n}-run{i}"));
+        copy_project(&fx, &work);
+        let mut r = Rdy::open(&work).expect("open the copy");
+        r.reconcile_transitions().expect("reconcile");
+        let s = Instant::now();
+        let res = r
+            .view_replay(&writer(), M3A_TARGET_VIEW, &sources)
+            .expect("replay");
+        let took = s.elapsed();
+        let mapped: BTreeSet<Hash> = res
+            .replayed
+            .iter()
+            .map(|m| m.source.parse().expect("source hash"))
+            .collect();
+        let made: BTreeSet<Hash> = res
+            .replayed
+            .iter()
+            .map(|m| m.change.parse().expect("replayed hash"))
+            .collect();
+        assert_eq!(res.replayed.len(), n, "one mapping row per source");
+        assert_eq!(mapped, want, "every source is replayed once");
+        assert_eq!(made.len(), n, "each source has its own new change");
+        assert!(made.is_disjoint(&want), "a replay writes new changes");
+        assert_eq!(
+            res.conflicts.len(),
+            diverged,
+            "the diverged targets conflict"
+        );
+        if i == 0 {
+            let objects = scan_frame_count(&r);
+            drop(r);
+            facts = Some(M3aFacts {
+                op: op.clone(),
+                blocks: n,
+                sources: n,
+                ops: n,
+                bytes: segment_bytes(&work),
+                objects,
+                extra: vec![
+                    ("mapped", mapped.len() as u64),
+                    ("conflicts", res.conflicts.len() as u64),
+                ],
+            });
+        } else {
+            drop(r);
+        }
+        std::fs::remove_dir_all(&work).expect("remove the copy");
+        took
+    }));
+    std::fs::remove_dir_all(&fx).expect("remove the fixture");
+    let facts = facts.expect("one run");
+    facts.print();
+    facts
+}
+
+/// `m3a_landing_ties_<n>`: lands the second of two views that each appended one claim under a
+/// section of `n` claims from the same canon. The first view is landed and the second is
+/// proposed (with its exceptions confirmed) in the fixture; the second landing, which re-keys
+/// its own block, is the only timed call. Both blocks hold distinct order keys afterwards.
+fn m3a_landing(
+    out: &mut Vec<Measure>,
+    parent: &std::path::Path,
+    sfx: &str,
+    runs: usize,
+    base: &M3aBase,
+) -> M3aFacts {
+    let n = base.claims.len();
+    let op = format!("m3a_landing_ties_{n}{sfx}");
+    let fx = parent.join(format!("m3a{sfx}-landing-{n}"));
+    copy_project(&base.dir, &fx);
+    let section = base.section.to_string();
+    let (proposal, a, b, changes, first) = {
+        let mut r = Rdy::open(&fx).expect("open the landing fixture");
+        let mut ids = vec![];
+        for (view, body) in [
+            (M3A_VIEW_A, "Appended by A."),
+            (M3A_VIEW_B, "Appended by B."),
+        ] {
+            let w = write(
+                &mut r,
+                view,
+                json!([{"op": "create", "type": "claim", "parent": section, "body": body}]),
+            )
+            .expect("append write");
+            ids.push(BlockId::parse(&w.created["op0"]).expect("claim id"));
+        }
+        land(&mut r, M3A_VIEW_A).expect("land the first view");
+        let first = r
+            .read()
+            .block(&Scope::Canon, &ids[0])
+            .expect("the first claim")
+            .order;
+        let second = r
+            .read()
+            .block(&Scope::View(M3A_VIEW_B.into()), &ids[1])
+            .expect("the second claim")
+            .order;
+        assert_eq!(
+            first, second,
+            "the two appended blocks tie before the landing"
+        );
+        let p = r
+            .propose(
+                &writer(),
+                M3A_VIEW_B,
+                M3A_VIEW_B,
+                Some(crate::intake::TEST_SUMMARY),
+            )
+            .expect("propose the second view");
+        crate::intake::confirm_before_landing(&mut r, &approver(), &p);
+        r.close().expect("close the fixture");
+        (
+            p.id.clone(),
+            ids[0].clone(),
+            ids[1].clone(),
+            p.changes,
+            first,
+        )
+    };
+    let mut facts = None;
+    out.push(measure_timed(&op, runs, |i| {
+        let work = parent.join(format!("m3a{sfx}-landing-{n}-run{i}"));
+        copy_project(&fx, &work);
+        let mut r = Rdy::open(&work).expect("open the copy");
+        r.reconcile_transitions().expect("reconcile");
+        let s = Instant::now();
+        r.land(&approver(), &proposal)
+            .expect("land the second view");
+        let took = s.elapsed();
+        let key = |id: &BlockId| {
+            r.read()
+                .block(&Scope::Canon, id)
+                .expect("canon claim")
+                .order
+        };
+        let (ka, kb) = (key(&a), key(&b));
+        assert_eq!(ka, first, "the block landed first keeps its key");
+        assert_ne!(ka, kb, "the landing gave its own block a key of its own");
+        let distinct = BTreeSet::from([ka.clone(), kb.clone()]).len() as u64;
+        if i == 0 {
+            let objects = scan_frame_count(&r);
+            drop(r);
+            facts = Some(M3aFacts {
+                op: op.clone(),
+                blocks: n,
+                sources: changes,
+                ops: 1,
+                bytes: segment_bytes(&work),
+                objects,
+                extra: vec![("distinct_keys", distinct)],
+            });
+        } else {
+            drop(r);
+        }
+        std::fs::remove_dir_all(&work).expect("remove the copy");
+        took
+    }));
+    std::fs::remove_dir_all(&fx).expect("remove the fixture");
+    let facts = facts.expect("one run");
+    facts.print();
+    facts
+}
+
+/// `m3a_read_only_reindex_<n>`: the open of a read-only store of `n` claims whose derived index
+/// is missing, so the open reads the sealed log into a private index. The fixture keeps its
+/// regular lock file and one test read-only feature (activated by a blob, then unknown to this
+/// rdy). Only `Rdy::open` is timed; the store's files are checked unchanged afterwards.
+fn m3a_read_only(
+    out: &mut Vec<Measure>,
+    parent: &std::path::Path,
+    sfx: &str,
+    runs: usize,
+    base: &M3aBase,
+) -> M3aFacts {
+    let n = base.claims.len();
+    let op = format!("m3a_read_only_reindex_{n}{sfx}");
+    let fx = parent.join(format!("m3a{sfx}-readonly-{n}"));
+    copy_project(&base.dir, &fx);
+    {
+        let _known = rdy_engine::read_only_feature_for_tests();
+        let mut r = Rdy::open(&fx).expect("open the read-only fixture");
+        r.store_mut()
+            .put_blob(b"uses the read-only feature")
+            .expect("blob");
+        r.seal_open().expect("seal");
+        assert!(
+            r.store().features().has(rdy_store::format::TEST_FEATURE),
+            "the log uses the test feature"
+        );
+        r.close().expect("close the fixture");
+    }
+    let store = fx.join(".rdy").join("store");
+    std::fs::remove_file(store.join("index.redb")).expect("omit the derived index");
+    assert!(
+        std::fs::symlink_metadata(store.join("lock"))
+            .expect("the lock file stays")
+            .is_file(),
+        "the lock file is a regular file"
+    );
+    let mut facts = None;
+    out.push(measure_timed(&op, runs, |i| {
+        let work = parent.join(format!("m3a{sfx}-readonly-{n}-run{i}"));
+        copy_project(&fx, &work);
+        let dir = work.join(".rdy").join("store");
+        let before = dir_digest(&dir);
+        let s = Instant::now();
+        let r = Rdy::open(&work).expect("read-only open");
+        let took = s.elapsed();
+        assert!(
+            r.is_read_only(),
+            "the unknown feature makes the open read-only"
+        );
+        let unchanged = before == dir_digest(&dir);
+        assert!(unchanged, "the source store is unchanged");
+        if i == 0 {
+            let objects = scan_frame_count(&r);
+            facts = Some(M3aFacts {
+                op: op.clone(),
+                blocks: n,
+                sources: 0,
+                ops: 0,
+                bytes: segment_bytes(&work),
+                objects,
+                extra: vec![("source_bytes_unchanged", u64::from(unchanged))],
+            });
+        }
+        drop(r);
+        std::fs::remove_dir_all(&work).expect("remove the copy");
+        took
+    }));
+    std::fs::remove_dir_all(&fx).expect("remove the fixture");
+    let facts = facts.expect("one run");
+    facts.print();
+    facts
+}
+
+/// The registry of the upgrade fixtures: one metadata step that adds the injected test feature.
+fn m3a_registry() -> Vec<rdy_store::upgrade::UpgradeStep> {
+    use rdy_store::format::{
+        FeatureClass, StoreFeature, StoreFeatures, TEST_FEATURE, TEST_FEATURE_RDY,
+    };
+    vec![rdy_store::upgrade::UpgradeStep {
+        id: M3A_STEP.into(),
+        from: StoreFeatures::of(vec![]),
+        to: StoreFeatures::of(vec![StoreFeature {
+            name: TEST_FEATURE.into(),
+            class: FeatureClass::Incompatible,
+            required_rdy: TEST_FEATURE_RDY.into(),
+        }]),
+    }]
+}
+
+/// `m3a_upgrade_backup_<n>`: the store upgrade of a project of `n` claims through the engine's
+/// maintenance with the injected registry: one metadata step, the backup, the reindex, the full
+/// `Rdy::fsck` and the `FORMAT` mirror. The nonempty transaction is what is timed.
+fn m3a_upgrade(
+    out: &mut Vec<Measure>,
+    parent: &std::path::Path,
+    sfx: &str,
+    runs: usize,
+    base: &M3aBase,
+) -> M3aFacts {
+    use rdy_store::format::{FeatureClass, TEST_FEATURE, inject_test_feature};
+    let n = base.claims.len();
+    let op = format!("m3a_upgrade_backup_{n}{sfx}");
+    let fx = parent.join(format!("m3a{sfx}-upgrade-{n}"));
+    copy_project(&base.dir, &fx);
+    let registry = m3a_registry();
+    let _known = inject_test_feature(FeatureClass::Incompatible, rdy_store::kinds::INTENT);
+    let mut facts = None;
+    out.push(measure_timed(&op, runs, |i| {
+        let work = parent.join(format!("m3a{sfx}-upgrade-{n}-run{i}"));
+        copy_project(&fx, &work);
+        let s = Instant::now();
+        let report = rdy_engine::maintenance::run_with_registry_for_tests(&work, false, &registry)
+            .expect("upgrade");
+        let took = s.elapsed();
+        assert!(
+            report.changed && report.reindexed && report.checked,
+            "{report:?}"
+        );
+        assert_eq!(report.steps, [M3A_STEP.to_string()]);
+        assert!(report.batch.is_some(), "one upgrade batch");
+        let backup = report.backup.clone().expect("a backup");
+        assert!(backup.is_dir(), "the backup stays beside the store");
+        let receipt = report.receipt.as_ref().expect("one upgrade receipt");
+        assert_eq!(receipt.steps, [M3A_STEP.to_string()]);
+        let receipts = u64::from(report.receipt.is_some());
+        let mirror = rdy_store::format::read_format_file(&work.join(".rdy").join("store"))
+            .expect("read FORMAT")
+            .expect("FORMAT is published");
+        assert!(
+            mirror.has(TEST_FEATURE),
+            "the mirror holds the new manifest"
+        );
+        if i == 0 {
+            let r = Rdy::open(&work).expect("open the upgraded copy");
+            let objects = scan_frame_count(&r);
+            drop(r);
+            facts = Some(M3aFacts {
+                op: op.clone(),
+                blocks: n,
+                sources: report.steps.len(),
+                ops: 0,
+                bytes: segment_bytes(&work),
+                objects,
+                extra: vec![("receipts", receipts), ("backup_bytes", dir_bytes(&backup))],
+            });
+        }
+        std::fs::remove_dir_all(&work).expect("remove the copy");
+        took
+    }));
+    std::fs::remove_dir_all(&fx).expect("remove the fixture");
+    let facts = facts.expect("one run");
+    facts.print();
+    facts
+}
+
+/// The M3a operations (Task 15): replay, the landing's order-key re-key, the read-only reindex
+/// and the store upgrade, each on projects of their own under `parent` (they move nothing the
+/// other tiers measure). Replay runs at `sizes.replay` source changes and the others at
+/// `sizes.blocks` blocks; `sfx` names the tier (`""` or `_50k`). Reported only: no ceiling.
+fn tier_m3a(
+    out: &mut Vec<Measure>,
+    parent: &std::path::Path,
+    sfx: &str,
+    runs: usize,
+    sizes: &M3aSizes,
+) -> Vec<M3aFacts> {
+    let mut bases: BTreeMap<usize, M3aBase> = BTreeMap::new();
+    for &n in sizes.replay.iter().chain(sizes.blocks) {
+        bases.entry(n).or_insert_with(|| m3a_base(parent, sfx, n));
+    }
+    let mut facts = vec![];
+    for n in sizes.replay {
+        facts.push(m3a_replay(out, parent, sfx, runs, &bases[n]));
+    }
+    for n in sizes.blocks {
+        facts.push(m3a_landing(out, parent, sfx, runs, &bases[n]));
+    }
+    for n in sizes.blocks {
+        facts.push(m3a_read_only(out, parent, sfx, runs, &bases[n]));
+    }
+    for n in sizes.blocks {
+        facts.push(m3a_upgrade(out, parent, sfx, runs, &bases[n]));
+    }
+    for base in bases.values() {
+        std::fs::remove_dir_all(&base.dir).expect("remove the base");
+    }
+    facts
+}
+
 /// `diff_since`: the block and word diff from the tier's tag to canon, as the page of the changes
 /// since the tag reads it (`render` builds it among its pages). The tag's landing is found outside
 /// the timer. Only the 10k tier is tagged (F3).
@@ -5285,6 +5860,7 @@ pub fn run_workload() -> Vec<Measure> {
     drop(r);
     // on projects of their own: the records they add move nothing above
     tier_coord(&mut out, dir.path(), "", &TYPICAL_RUNS, COORD_N);
+    tier_m3a(&mut out, dir.path(), "", TYPICAL_RUNS.landing, &M3A_TYPICAL);
     // the large `rdy_write` last, on a reopened project: its 6,000 blocks move nothing above
     tier_mcp(&mut out, &proj);
     if crate::fixtures::deep() {
@@ -6004,6 +6580,9 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     );
     tier_reviews(&mut out, &mut r, sfx, &LARGE_RUNS, SPARSE_AREA_LARGE);
     tier_inbox(&mut out, &mut r, &fx, sfx, &LARGE_RUNS, 200);
+    drop(r);
+    // on projects of their own: the 10,000-block cases of the M3a operations
+    tier_m3a(&mut out, parent, sfx, LARGE_RUNS.landing, &M3A_LARGE);
     out
 }
 
@@ -7905,6 +8484,171 @@ mod tests {
             )
         );
         assert!(large.contains("tier_intake(&mut out, &mut r, sfx, LARGE_RUNS.view_ops);"));
+        at("tier_m3a(&mut out, dir.path(), \"\", TYPICAL_RUNS.landing, &M3A_TYPICAL);");
+        assert!(large.contains("tier_m3a(&mut out, parent, sfx, LARGE_RUNS.landing, &M3A_LARGE);"));
+    }
+
+    /// Task 15 (tb-A4DAV): the nine reported operations have their names, in the typical tier,
+    /// and the 10,000-block cases again in the large tier under the `_50k` suffix. Each states
+    /// a target text (recorded, none enforced), and the ones that write are fsync-bound.
+    #[test]
+    fn ok15_perf_names_are_complete() {
+        let mut names: Vec<String> = vec![];
+        for n in M3A_TYPICAL.replay {
+            names.push(format!("m3a_replay_{n}"));
+        }
+        for prefix in [
+            "m3a_landing_ties",
+            "m3a_read_only_reindex",
+            "m3a_upgrade_backup",
+        ] {
+            for n in M3A_TYPICAL.blocks {
+                names.push(format!("{prefix}_{n}"));
+            }
+        }
+        assert_eq!(
+            names, M3A_OPS,
+            "the typical tier measures the nine operations"
+        );
+        assert_eq!(
+            (M3A_LARGE.replay, M3A_LARGE.blocks),
+            (&[][..], &[10_000][..]),
+            "the large tier repeats the 10,000-block cases only"
+        );
+        for op in M3A_OPS {
+            let text = spec_target(op).unwrap_or_else(|| panic!("{op} has no target text"));
+            assert!(text.starts_with("recorded, no spec target"), "{op}: {text}");
+            assert_eq!(spec_ceiling_ms(op), None, "{op} has no ceiling");
+            let writes = !op.starts_with("m3a_read_only_");
+            assert_eq!(fsync_bound(op), writes, "{op}");
+            if op.ends_with("_10000") {
+                let large = spec_target(&format!("{op}{LARGE_SUFFIX}")).expect("a large target");
+                assert!(
+                    large.contains(&text) && large.contains(LARGE_TIER_NOTE),
+                    "{large}"
+                );
+            }
+        }
+        assert_eq!(
+            M3A_OPS.iter().collect::<BTreeSet<_>>().len(),
+            9,
+            "nine distinct names"
+        );
+    }
+
+    /// Task 15: the full-size typical tier runs all nine operations once each. Not part of the
+    /// fast gate: it builds canons of 10,000 claims. No timing is asserted.
+    #[test]
+    #[ignore = "builds the 10,000-claim fixtures; run with --ignored"]
+    fn ok15_full_size_m3a_ops_run() {
+        rdy_model::seed_ids_for_tests(0x6f6b_3136);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut out = vec![];
+        let facts = tier_m3a(&mut out, dir.path(), "", 1, &M3A_TYPICAL);
+        rdy_model::unseed_ids_for_tests();
+        let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(names, M3A_OPS);
+        assert_eq!(facts.len(), 9);
+        assert_eq!(
+            facts[2].extra("conflicts"),
+            500,
+            "half of 1000 sources conflict"
+        );
+        for m in &out {
+            eprintln!("{}: median {:.3} ms", m.op, m.median_ms);
+        }
+    }
+
+    /// Task 15: both runners call the M3a tier with their own sizes and sample counts.
+    #[test]
+    fn ok15_perf_workload_invokes_m3a_tiers() {
+        let src = include_str!("perf.rs");
+        let body = |head: &str| {
+            let from = src.find(head).unwrap_or_else(|| panic!("{head}"));
+            &src[from..from + src[from..].find("\n}\n").expect("its end")]
+        };
+        let typical = body("pub fn run_workload(");
+        assert_eq!(typical.matches("tier_m3a(").count(), 1);
+        assert!(
+            typical.contains(
+                "tier_m3a(&mut out, dir.path(), \"\", TYPICAL_RUNS.landing, &M3A_TYPICAL);"
+            )
+        );
+        let large = body("fn run_large_tier(");
+        assert_eq!(large.matches("tier_m3a(").count(), 1);
+        assert!(large.contains("tier_m3a(&mut out, parent, sfx, LARGE_RUNS.landing, &M3A_LARGE);"));
+    }
+
+    /// Task 15: reduced fixtures run each operation for real, with no timing assertion: the
+    /// replay maps every source to its own new change and conflicts on the diverged half, the
+    /// landing leaves two distinct order keys, the read-only open leaves every source byte as it
+    /// was, and the upgrade leaves one receipt and a backup. The large tier's names carry `_50k`.
+    #[test]
+    fn ok15_small_perf_fixtures_do_real_work() {
+        const SMALL: M3aSizes = M3aSizes {
+            replay: &[1, 4],
+            blocks: &[3],
+        };
+        rdy_model::seed_ids_for_tests(0x6f6b_3135);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut out = vec![];
+        let facts = tier_m3a(&mut out, dir.path(), "", 2, &SMALL);
+        let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "m3a_replay_1",
+                "m3a_replay_4",
+                "m3a_landing_ties_3",
+                "m3a_read_only_reindex_3",
+                "m3a_upgrade_backup_3"
+            ]
+        );
+        assert!(out.iter().all(|m| m.runs == 2 && m.median_ms >= 0.0));
+        for (f, n) in facts[..2].iter().zip([1, 4]) {
+            assert_eq!((f.sources, f.ops, f.blocks), (n, n, n), "{f:?}");
+            assert_eq!(
+                f.extra("mapped"),
+                n as u64,
+                "each source maps to a new change"
+            );
+            assert_eq!(
+                f.extra("conflicts"),
+                (n / 2) as u64,
+                "the diverged half conflicts"
+            );
+            assert!(f.bytes > 0 && f.objects > 0, "{f:?}");
+        }
+        assert_eq!(facts[2].extra("distinct_keys"), 2, "{:?}", facts[2]);
+        assert_eq!(
+            facts[3].extra("source_bytes_unchanged"),
+            1,
+            "{:?}",
+            facts[3]
+        );
+        assert!(facts[3].bytes > 0 && facts[3].objects > 0, "{:?}", facts[3]);
+        assert_eq!(facts[4].extra("receipts"), 1, "{:?}", facts[4]);
+        assert!(facts[4].extra("backup_bytes") > 0, "{:?}", facts[4]);
+        assert_eq!(facts[4].sources, 1, "one metadata step");
+        // the fixtures and their copies are gone
+        assert_eq!(std::fs::read_dir(dir.path()).expect("read_dir").count(), 0);
+        // the large tier's shape: the suffix on every name
+        let mut large = vec![];
+        let sizes = M3aSizes {
+            replay: &[],
+            blocks: &[3],
+        };
+        tier_m3a(&mut large, dir.path(), LARGE_SUFFIX, 2, &sizes);
+        let names: Vec<&str> = large.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "m3a_landing_ties_3_50k",
+                "m3a_read_only_reindex_3_50k",
+                "m3a_upgrade_backup_3_50k"
+            ]
+        );
+        rdy_model::unseed_ids_for_tests();
     }
 
     /// Final review M2 (minors item 34): `render_cold` renders on a fresh handle, so each run

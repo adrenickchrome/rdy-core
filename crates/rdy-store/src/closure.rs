@@ -21,7 +21,11 @@
 //!   holder requires it with the tag;
 //! - the REDACTION request whose carrier is a closure change;
 //! - the active REDACTION_APPLY of every request that names a closure block version, change,
-//!   blob manifest or chunk: a later removal proof, so a receiver can erase its own copies too.
+//!   blob manifest or chunk: a later removal proof, so a receiver can erase its own copies too;
+//! - every DISPUTE of a closure landing, and every DISPUTE_RESOLUTION of a closure dispute (its
+//!   correction landing follows through its own link);
+//! - every CHECK_REQUEST whose subject names a closure change or proposal version, and every
+//!   REVIEW whose subject is a closure check request.
 //!
 //! Each attachment's own links join the walk (an apply's request and its human landing, with
 //! that landing's history), and attachments are taken again until no new key appears: a key is
@@ -156,7 +160,8 @@ pub fn closure_before(
             .map(|k| k.hash)
             .filter(|h| !w.asked.contains(h))
             .collect();
-        if ask.is_empty() {
+        let carried = w.attach_carried()?;
+        if ask.is_empty() && !carried {
             break;
         }
         w.attach_answers(&ask)?;
@@ -191,7 +196,13 @@ pub fn closure_before(
     if prerequisites.len() > MAX_PREREQUISITES {
         return Err(StreamError::limit(None, 0, LIMIT_PREREQUISITES));
     }
-    let header = (HEADER_FIXED + prerequisites.len() * KEY_LEN) as u64;
+    // the header names the source store's features (sync format 2)
+    let manifest = reader
+        .store_features()
+        .map_err(|e| store_error(e, Some(root)))?
+        .to_json()
+        .len();
+    let header = (HEADER_FIXED + manifest + prerequisites.len() * KEY_LEN) as u64;
     let bytes =
         MAGIC.len() as u64 + 4 + FRAME_HEADER + header + body + FRAME_HEADER + TRAILER_LEN as u64;
     if bytes > MAX_STREAM_BYTES {
@@ -313,15 +324,32 @@ impl ObjectSource for StoreSource<'_> {
         };
         let err = |e| store_error(e, Some(key));
         if let Some(s) = self.reader.index().redaction_span_at(&loc).map_err(err)? {
+            // the removed frame's encoding, from the raw kind its header keeps
+            let raw = match self.reader.segments().header(loc) {
+                Ok(Some((_, raw, _))) => raw,
+                Ok(None) => return Err(err(StoreError::corrupt_at(loc))),
+                Err(e) => return Err(err(StoreError::Io(e))),
+            };
+            let encoding = crate::dump::dropped_encoding(raw).map_err(|_| {
+                StreamError::bad_record(0, 0, Reason::UnknownEncodingVersion).with_object(Some(key))
+            })?;
             return Ok(Some(StreamRecord::Dropped {
                 key,
+                encoding,
                 original_len: s.span.len,
                 apply: s.apply,
                 residue: s.span.residue,
             }));
         }
-        let payload = self.reader.get_kind(key.kind, &key.hash).map_err(err)?;
-        Ok(Some(StreamRecord::Present { key, payload }))
+        let (raw, payload) = self.reader.get_kind_raw(key.kind, &key.hash).map_err(err)?;
+        let encoding = crate::codec::split(raw, &payload)
+            .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(key)))?
+            .version;
+        Ok(Some(StreamRecord::Present {
+            key,
+            encoding,
+            payload,
+        }))
     }
 }
 
@@ -497,8 +525,8 @@ impl Walk<'_> {
     fn carried_refusal(&self, carried: Hash) -> StreamError {
         let reader = self.source.reader;
         let err = |e| store_error(e, Some(self.root));
-        let name = match reader.get_kind(kinds::TAG, &self.root.hash) {
-            Ok(payload) => match crate::bounded::decode::<Tag>(&payload) {
+        let name = match reader.get_kind_raw(kinds::TAG, &self.root.hash) {
+            Ok((raw, payload)) => match crate::codec::decode_bounded::<Tag>(raw, &payload) {
                 Ok(t) => t.name,
                 Err(e) => return StreamError::from_record(0, 0, &e).with_object(Some(self.root)),
             },
@@ -616,10 +644,13 @@ impl Walk<'_> {
             if w.seen.contains(&key) {
                 return Ok(());
             }
-            let Some(StreamRecord::Present { payload, .. }) = source.record(key)? else {
+            let Some(r @ StreamRecord::Present { .. }) = source.record(key)? else {
                 return Ok(());
             };
-            let a: Answer = crate::bounded::decode(&payload)
+            let StreamRecord::Present { payload, .. } = &r else {
+                unreachable!("a present record")
+            };
+            let a: Answer = crate::codec::decode_bounded(r.raw_kind(), payload)
                 .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(key)))?;
             if a.targets.iter().any(|t| ask.contains(t)) {
                 w.reach(key)?;
@@ -638,14 +669,105 @@ impl Walk<'_> {
         walked.map_err(|e| store_error(e, None))
     }
 
+    /// One pass over the carried shapes before the end: each DISPUTE of a closure landing, each
+    /// DISPUTE_RESOLUTION of a closure dispute, each CHECK_REQUEST whose subject names a closure
+    /// change or proposal version, and each REVIEW of a closure check request joins the walk.
+    /// Returns whether one joined.
+    fn attach_carried(&mut self) -> Result<bool, StreamError> {
+        let has = |w: &Self, kind: u8| w.nodes.keys().any(|k| k.kind == kind);
+        let mut joined = false;
+        let passes: [(u8, &[u8]); 4] = [
+            (kinds::DISPUTE, &[kinds::LANDING]),
+            (kinds::DISPUTE_RESOLUTION, &[kinds::DISPUTE]),
+            (kinds::CHECK_REQUEST, &[kinds::CHANGE, kinds::PROPOSAL]),
+            (kinds::REVIEW, &[kinds::CHECK_REQUEST]),
+        ];
+        for (kind, triggers) in passes {
+            if !triggers.iter().any(|t| has(self, *t)) {
+                continue;
+            }
+            let reader = self.source.reader;
+            let mut source = StoreSource {
+                reader,
+                end: self.source.end,
+            };
+            let mut found: Vec<ObjectKey> = vec![];
+            let mut failed: Option<StreamError> = None;
+            let nodes = &self.nodes;
+            let seen = &self.seen;
+            let mut visit = |h: Hash| -> Result<(), StreamError> {
+                let key = ObjectKey { kind, hash: h };
+                if seen.contains(&key) {
+                    return Ok(());
+                }
+                let Some(r @ StreamRecord::Present { .. }) = source.record(key)? else {
+                    return Ok(());
+                };
+                let StreamRecord::Present { payload, .. } = &r else {
+                    return Ok(());
+                };
+                let bad = |e: crate::bounded::RecordError| {
+                    StreamError::from_record(0, 0, &e).with_object(Some(key))
+                };
+                let held = |kind: u8, hash: Hash| nodes.contains_key(&ObjectKey { kind, hash });
+                let attach = match kind {
+                    kinds::DISPUTE => {
+                        let d: rdy_model::dispute::Dispute =
+                            crate::codec::decode_bounded(r.raw_kind(), payload).map_err(bad)?;
+                        held(kinds::LANDING, d.landing)
+                    }
+                    kinds::DISPUTE_RESOLUTION => {
+                        let d: rdy_model::dispute::DisputeResolution =
+                            crate::codec::decode_bounded(r.raw_kind(), payload).map_err(bad)?;
+                        held(kinds::DISPUTE, d.dispute)
+                    }
+                    kinds::CHECK_REQUEST => {
+                        let c: rdy_model::check_request::CheckRequest =
+                            crate::codec::decode_bounded(r.raw_kind(), payload).map_err(bad)?;
+                        c.subject.change.is_some_and(|h| held(kinds::CHANGE, h))
+                            || c.subject.version.is_some_and(|h| held(kinds::PROPOSAL, h))
+                    }
+                    _ => {
+                        let v: rdy_model::Review =
+                            crate::codec::decode_bounded(r.raw_kind(), payload).map_err(bad)?;
+                        matches!(v.subject, rdy_model::ReviewSubject::Check { request }
+                            if held(kinds::CHECK_REQUEST, request))
+                    }
+                };
+                if attach {
+                    found.push(key);
+                }
+                Ok(())
+            };
+            let walked = reader.for_each_object_of(kind, |h| {
+                visit(h).map_err(|e| {
+                    failed = Some(e);
+                    StoreError::Refused("the closure's carried pass stopped".into())
+                })
+            });
+            if let Some(e) = failed {
+                return Err(e);
+            }
+            walked.map_err(|e| store_error(e, None))?;
+            for key in found {
+                joined = true;
+                self.reach(key)?;
+            }
+        }
+        Ok(joined)
+    }
+
     /// The ANSWER that the ref `answer/tag:<root name>` names, when it has act Tag and that item
     /// and lies before the end (O11).
     fn relay_answer(&mut self) -> Result<Option<ObjectKey>, StreamError> {
         let root = self.root;
-        let Some(StreamRecord::Present { payload, .. }) = self.source.record(root)? else {
+        let Some(r @ StreamRecord::Present { .. }) = self.source.record(root)? else {
             return Ok(None);
         };
-        let tag: Tag = crate::bounded::decode(&payload)
+        let StreamRecord::Present { payload, .. } = &r else {
+            unreachable!("a present record")
+        };
+        let tag: Tag = crate::codec::decode_bounded(r.raw_kind(), payload)
             .map_err(|e| StreamError::from_record(0, 0, &e).with_object(Some(root)))?;
         let item = format!("tag:{}", tag.name);
         let Some((h, a)) = self

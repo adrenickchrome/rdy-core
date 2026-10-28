@@ -39,6 +39,15 @@ pub enum AnswerAct {
     RefuseDeferrals,
     /// The person rejects a re-affirmation.
     RejectReaffirm,
+    /// The person disputes a landing (appended: index 14). Item `dispute:<landing hex>`; its
+    /// one target is the DISPUTE. Carried only: no writer yet.
+    Dispute,
+    /// The person resolves a dispute (index 15). Item `resolve:<dispute hex>`; its one target
+    /// is the DISPUTE_RESOLUTION. Carried only: no writer yet.
+    ResolveDispute,
+    /// The person accepts a concern or fail check verdict (index 16). Item
+    /// `verdict:<review hex>`; no targets. Carried only: no writer yet.
+    AcceptVerdict,
 }
 
 impl AnswerAct {
@@ -59,6 +68,9 @@ impl AnswerAct {
             AnswerAct::AcceptDeferrals => "accept_deferrals",
             AnswerAct::RefuseDeferrals => "refuse_deferrals",
             AnswerAct::RejectReaffirm => "reject_reaffirm",
+            AnswerAct::Dispute => "dispute",
+            AnswerAct::ResolveDispute => "resolve_dispute",
+            AnswerAct::AcceptVerdict => "accept_verdict",
         }
     }
 }

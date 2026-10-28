@@ -16,7 +16,7 @@ use crate::{E_BAD_INPUT, E_LIMIT, PackFingerprint, Rdy, RdyError};
 use rdy_model::{Hash, RepoId};
 use rdy_store::check_holder::holder_check_limit;
 use rdy_store::holder::StoreMode;
-use rdy_store::{Store, StoreError, layout};
+use rdy_store::{OpenPolicy, Store, StoreError, layout};
 use std::path::Path;
 
 /// The pack a holder reads with: the built-in one, never a pack file.
@@ -105,11 +105,28 @@ impl Rdy {
     /// store is a project` otherwise). No config, pack or local settings file is read, whatever
     /// stands beside the store.
     pub fn open_holder(root: &Path) -> Result<Rdy, RdyError> {
-        let store = layout::open_project_store(&root.join(".rdy"))?;
+        Rdy::open_holder_with_policy(root, OpenPolicy::AutoUpgrade)
+    }
+
+    /// Opens the holder at `root` as [`Rdy::open_holder`] does, with upgrade policy `policy`
+    /// (see [`Rdy::open_with_policy`]).
+    pub fn open_holder_with_policy(root: &Path, policy: OpenPolicy) -> Result<Rdy, RdyError> {
+        Rdy::open_holder_with(root, policy, None)
+    }
+
+    /// [`Rdy::open_holder_with_policy`] with the upgrade steps `registry` (a test hook's).
+    pub(crate) fn open_holder_with(
+        root: &Path,
+        policy: OpenPolicy,
+        registry: Option<&[rdy_store::upgrade::UpgradeStep]>,
+    ) -> Result<Rdy, RdyError> {
+        let store = Rdy::open_store(&root.join(".rdy"), policy, registry)?;
         if store.mode()? != StoreMode::Holder {
             return Err(is_a_project());
         }
-        Rdy::from_store(root, store, holder_context()?)
+        let mut r = Rdy::from_store(root, store, holder_context()?)?;
+        r.complete_upgrade()?;
+        Ok(r)
     }
 
     /// Whether this handle's store is a holder. The mode is set at creation and never changes.

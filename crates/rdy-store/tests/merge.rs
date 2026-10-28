@@ -32,6 +32,7 @@ fn view(cs: &[Owned]) -> Vec<MergeChange<'_>> {
             id: c.id,
             deps: &c.deps,
             ops: &c.ops,
+            is_replay: false,
         })
         .collect()
 }
@@ -91,8 +92,20 @@ fn merge1_two_edits_from_one_base_are_one_conflict_whatever_the_order() {
         }],
     );
     let p = canon_producer(&base);
-    let ab = merge(&base, &view(&[a.clone(), b.clone()]), &p, &|_| None);
-    let ba = merge(&base, &view(&[b.clone(), a.clone()]), &p, &|_| None);
+    let ab = merge(
+        &base,
+        &view(&[a.clone(), b.clone()]),
+        &p,
+        &|_| None,
+        &|_, _| false,
+    );
+    let ba = merge(
+        &base,
+        &view(&[b.clone(), a.clone()]),
+        &p,
+        &|_| None,
+        &|_, _| false,
+    );
     assert_eq!(ab, ba);
     assert_eq!(ab.conflicts.len(), 1);
     let c = &ab.conflicts[0];
@@ -148,6 +161,7 @@ fn merge1_a_change_depending_on_every_side_resolves_the_conflict() {
         &view(std::slice::from_ref(&c)),
         &canon_producer(&base),
         &|_| None,
+        &|_, _| false,
     );
     assert_eq!(m.conflicts.len(), 1);
     assert!(
@@ -162,6 +176,7 @@ fn merge1_a_change_depending_on_every_side_resolves_the_conflict() {
         &view(&[r.clone(), c.clone()]),
         &canon_producer(&base),
         &|_| None,
+        &|_, _| false,
     );
     assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
     assert_eq!(m.state.blocks[&y.id], blk(1, "resolved").version_hash());
@@ -201,6 +216,7 @@ fn merge1_a_change_covering_one_side_replaces_it() {
         &view(&[a, b.clone(), a2.clone()]),
         &|_| None,
         &|_| None,
+        &|_, _| false,
     );
     assert_eq!(m.conflicts.len(), 1);
     let mut want = vec![
@@ -254,7 +270,13 @@ fn merge1_convergent_edits_and_deletes_are_not_conflicts() {
             id: blk(2, "").id,
         }],
     );
-    let m = merge(&base, &view(&[a, b, d1, d2]), &|_| None, &|_| None);
+    let m = merge(
+        &base,
+        &view(&[a, b, d1, d2]),
+        &|_| None,
+        &|_| None,
+        &|_, _| false,
+    );
     assert!(m.conflicts.is_empty());
     assert_eq!(m.state.blocks[&x0.id], blk(1, "same").version_hash());
     assert!(!m.state.blocks.contains_key(&blk(2, "").id));
@@ -265,7 +287,7 @@ fn merge1_two_creates_of_one_id_conflict_with_no_base() {
     let base = StateSnapshot::default();
     let a = owned("a", vec![], vec![Op::Create { block: blk(3, "a") }]);
     let b = owned("b", vec![], vec![Op::Create { block: blk(3, "b") }]);
-    let m = merge(&base, &view(&[a, b]), &|_| None, &|_| None);
+    let m = merge(&base, &view(&[a, b]), &|_| None, &|_| None, &|_, _| false);
     assert_eq!(m.conflicts.len(), 1);
     assert_eq!(m.conflicts[0].base, None);
     assert!(
@@ -308,11 +330,18 @@ fn merge1_delete_then_recreate_follows_the_deleter_dep_not_id_order() {
         &view(&[re.clone(), del.clone()]),
         &canon_producer(&base),
         &|_| None,
+        &|_, _| false,
     );
     assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
     assert_eq!(m.state.blocks[&x0.id], blk(1, "again").version_hash());
     re.deps.clear();
-    let m = merge(&base, &view(&[del, re]), &canon_producer(&base), &|_| None);
+    let m = merge(
+        &base,
+        &view(&[del, re]),
+        &canon_producer(&base),
+        &|_| None,
+        &|_, _| false,
+    );
     assert_eq!(
         m.conflicts.len(),
         1,
@@ -342,7 +371,13 @@ fn merge1_a_canon_delete_with_no_known_deleter_is_never_resolved() {
             block: blk(1, "b"),
         }],
     );
-    let m = merge(&base, &view(&[a, b.clone()]), &|_| None, &|_| None);
+    let m = merge(
+        &base,
+        &view(&[a, b.clone()]),
+        &|_| None,
+        &|_| None,
+        &|_, _| false,
+    );
     assert_eq!(m.conflicts.len(), 1, "{m:?}");
     assert_eq!(
         m.conflicts[0].sides,
@@ -392,6 +427,7 @@ fn merge1_a_canon_delete_side_names_its_deleter_and_only_a_dependent_resolves_it
         &view(&[a.clone(), b.clone()]),
         &|_| None,
         &canon_deleter(&base),
+        &|_, _| false,
     );
     assert_eq!(m.conflicts.len(), 1, "{m:?}");
     assert!(m.conflicts[0].sides.contains(&Side {
@@ -412,7 +448,13 @@ fn merge1_a_canon_delete_side_names_its_deleter_and_only_a_dependent_resolves_it
             block: blk(1, "kept"),
         }],
     );
-    let m = merge(&base, &view(&[a, b, r]), &|_| None, &canon_deleter(&base));
+    let m = merge(
+        &base,
+        &view(&[a, b, r]),
+        &|_| None,
+        &canon_deleter(&base),
+        &|_, _| false,
+    );
     assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
     assert_eq!(m.state.blocks[&x0.id], blk(1, "kept").version_hash());
 }
@@ -445,6 +487,7 @@ fn merge1_a_re_create_that_does_not_depend_on_canons_delete_conflicts_with_it() 
         &view(&[del.clone(), re.clone()]),
         &|_| None,
         &canon_deleter(&base),
+        &|_, _| false,
     );
     assert_eq!(m.conflicts.len(), 1, "{m:?}");
     assert_eq!(m.conflicts[0].base, None);
@@ -460,7 +503,13 @@ fn merge1_a_re_create_that_does_not_depend_on_canons_delete_conflicts_with_it() 
             block: blk(1, "again"),
         }],
     );
-    let m = merge(&base, &view(&[saw]), &|_| None, &canon_deleter(&base));
+    let m = merge(
+        &base,
+        &view(&[saw]),
+        &|_| None,
+        &canon_deleter(&base),
+        &|_, _| false,
+    );
     assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
     assert_eq!(m.state.blocks[&x0.id], blk(1, "again").version_hash());
 }
@@ -731,7 +780,7 @@ proptest! {
                 (Just(b), Just(cs).prop_shuffle(), Just(end))
             })
     ) {
-        let m = merge(&base, &view(&input), &canon_producer(&base), &|_| None);
+        let m = merge(&base, &view(&input), &canon_producer(&base), &|_| None, &|_, _| false);
         prop_assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
         prop_assert_eq!(m.state, end);
     }
@@ -741,11 +790,11 @@ proptest! {
         let (base, input) = build(&specs);
         let p = canon_producer(&base);
         prop_assert_eq!(
-            merge(&base, &view(&input), &p, &|_| None),
+            merge(&base, &view(&input), &p, &|_| None, &|_, _| false),
             reference(&base, &input, &p, &|_| None)
         );
         let d = canon_deleter(&base);
-        prop_assert_eq!(merge(&base, &view(&input), &p, &d), reference(&base, &input, &p, &d));
+        prop_assert_eq!(merge(&base, &view(&input), &p, &d, &|_, _| false), reference(&base, &input, &p, &d));
     }
 
     #[test]
@@ -756,7 +805,7 @@ proptest! {
         })
     ) {
         let p = canon_producer(&base);
-        prop_assert_eq!(merge(&base, &view(&a), &p, &|_| None), merge(&base, &view(&b), &p, &|_| None));
+        prop_assert_eq!(merge(&base, &view(&a), &p, &|_| None, &|_, _| false), merge(&base, &view(&b), &p, &|_| None, &|_, _| false));
     }
 }
 
@@ -780,7 +829,7 @@ fn merge1_seed_7ec9767_a_create_after_a_failed_update_of_an_absent_block_matches
     let (base, input) = build(&specs);
     let p = canon_producer(&base);
     assert_eq!(
-        merge(&base, &view(&input), &p, &|_| None),
+        merge(&base, &view(&input), &p, &|_| None, &|_, _| false),
         reference(&base, &input, &p, &|_| None)
     );
 }
@@ -809,8 +858,8 @@ fn merge1_merge_indexed_names_each_applied_change_by_its_first_input_position() 
     // b first, a listed twice, c last: a change listed twice counts at its first position
     let input = [b.clone(), a.clone(), c.clone(), a.clone()];
     let p = canon_producer(&base);
-    let (m, at) = merge_indexed(&base, &view(&input), &p, &|_| None);
-    assert_eq!(m, merge(&base, &view(&input), &p, &|_| None));
+    let (m, at) = merge_indexed(&base, &view(&input), &p, &|_| None, &|_, _| false);
+    assert_eq!(m, merge(&base, &view(&input), &p, &|_| None, &|_, _| false));
     assert_eq!(at.len(), m.order.len());
     for (k, id) in m.order.iter().enumerate() {
         assert_eq!(input[at[k]].id, *id, "position {k}");
@@ -825,11 +874,83 @@ proptest! {
     fn merge1_prop_merge_indexed_is_merge_with_input_positions(specs in arb_specs()) {
         let (base, input) = build(&specs);
         let p = canon_producer(&base);
-        let (m, at) = merge_indexed(&base, &view(&input), &p, &|_| None);
-        prop_assert_eq!(&m, &merge(&base, &view(&input), &p, &|_| None));
+        let (m, at) = merge_indexed(&base, &view(&input), &p, &|_| None, &|_, _| false);
+        prop_assert_eq!(&m, &merge(&base, &view(&input), &p, &|_| None, &|_, _| false));
         prop_assert_eq!(at.len(), m.order.len());
         for (k, id) in m.order.iter().enumerate() {
             prop_assert_eq!(input[at[k]].id, *id);
         }
     }
+}
+
+/// Final ruling 2 (round 2): a base version that differs from an op's base only by its order
+/// key is no conflict; the op applies with its own version. A version a change of the merge
+/// wrote, or one that differs in more than its order key, still conflicts.
+#[test]
+fn ok6_an_order_only_canon_side_is_no_conflict() {
+    let tied = blk(1, "q");
+    let mut rekeyed = tied.clone();
+    rekeyed.order = "W".into();
+    let base = base_with(std::slice::from_ref(&rekeyed));
+    let p = canon_producer(&base);
+    let edit = owned(
+        "w",
+        vec![],
+        vec![Op::Update {
+            base: tied.version_hash(),
+            block: blk(1, "q, as w reads it"),
+        }],
+    );
+    let order_only =
+        |v: &Hash, op: &Op| (*v, op.base()) == (rekeyed.version_hash(), Some(tied.version_hash()));
+    let m = merge(
+        &base,
+        &view(std::slice::from_ref(&edit)),
+        &p,
+        &|_| None,
+        &order_only,
+    );
+    assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+    assert_eq!(
+        m.state.blocks[&tied.id],
+        blk(1, "q, as w reads it").version_hash(),
+        "the op's own version, with its own key"
+    );
+    // without the order-only pair: the conflict as before
+    let m = merge(
+        &base,
+        &view(std::slice::from_ref(&edit)),
+        &p,
+        &|_| None,
+        &|_, _| false,
+    );
+    assert_eq!(m.conflicts.len(), 1);
+    // a side a change of this merge wrote is not canon's: it still conflicts
+    let mover = owned(
+        "a",
+        vec![Hash::of(CANON)],
+        vec![Op::Update {
+            base: rekeyed.version_hash(),
+            block: tied.clone(),
+        }],
+    );
+    let moved_back = blk(1, "q");
+    let other = owned(
+        "z",
+        vec![],
+        vec![Op::Update {
+            base: rekeyed.version_hash(),
+            block: blk(1, "z"),
+        }],
+    );
+    let all_pairs = |v: &Hash, op: &Op| op.base() != Some(*v);
+    let m = merge(&base, &view(&[mover, other]), &p, &|_| None, &all_pairs);
+    assert_eq!(m.conflicts.len(), 1, "{m:?}");
+    assert!(
+        m.conflicts[0]
+            .sides
+            .iter()
+            .any(|s| s.version == Some(moved_back.version_hash())),
+        "{m:?}"
+    );
 }

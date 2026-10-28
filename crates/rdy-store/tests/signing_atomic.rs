@@ -138,8 +138,9 @@ fn sig8_a_prepared_landing_writes_nothing_until_its_commit() {
     let lid = prepared.hash();
     assert_eq!(
         lid,
-        Hash::of(&postcard::to_allocvec(prepared.landing()).unwrap())
+        rdy_model::encoding::encoded_hash(1, &postcard::to_allocvec(prepared.landing()).unwrap())
     );
+    assert_eq!(lid, prepared.landing().id());
 
     let sigs = [
         sig(lid, StatementKind::Relay, 1),

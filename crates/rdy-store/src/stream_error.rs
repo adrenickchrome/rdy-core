@@ -31,7 +31,7 @@ pub const LIMIT_HISTORY_DEPTH: &str = "100000 history depth";
 /// The limit label of a header's prerequisites.
 pub const LIMIT_PREREQUISITES: &str = "100000 prerequisites";
 /// The limit label of a header's bytes.
-pub const LIMIT_HEADER_BYTES: &str = "3300057 header bytes";
+pub const LIMIT_HEADER_BYTES: &str = "3365593 header bytes";
 /// The limit label of the drops pending at once.
 pub const LIMIT_PENDING_DROPS: &str = "1000000 pending drops";
 /// The limit label of the dropped bytes pending at once.
@@ -48,6 +48,8 @@ pub enum Reason {
     UnknownKind,
     HashMismatch,
     RecordDoesNotDecode,
+    UnknownEncodingVersion,
+    NoncanonicalEncodingVersion,
     TrailingBytes,
     InvalidHeader,
     InvalidDroppedRecord,
@@ -72,6 +74,8 @@ impl Reason {
             Reason::UnknownKind => "unknown kind",
             Reason::HashMismatch => "hash mismatch",
             Reason::RecordDoesNotDecode => "record does not decode",
+            Reason::UnknownEncodingVersion => "unknown encoding version",
+            Reason::NoncanonicalEncodingVersion => "noncanonical encoding version",
             Reason::TrailingBytes => "trailing bytes",
             Reason::InvalidHeader => "invalid header",
             Reason::InvalidDroppedRecord => "invalid dropped record",
@@ -203,13 +207,26 @@ impl StreamError {
         )
     }
 
-    /// E_STORE_FORMAT: the stream's store format `actual` is not this build's `current`.
-    pub fn store_format(record: Option<u64>, offset: u64, actual: u32, current: u32) -> Self {
+    /// E_STORE_FORMAT: the stream's store refusal (`crate::format`): an unknown incompatible
+    /// feature, or an invalid manifest, with the refusal's own message and fix.
+    pub fn store_format(record: Option<u64>, offset: u64, refusal: &crate::StoreError) -> Self {
+        let (message, fix) = match refusal {
+            crate::StoreError::Format { message, fix } => (message.clone(), fix.as_str()),
+            other => (
+                other.to_string(),
+                "write the stream with the pinned rdy build",
+            ),
+        };
+        Self::new(E_STORE_FORMAT, message, fix, record, offset)
+    }
+
+    /// E_STORE_FORMAT: a sync batch of stream format 1, which this rdy no longer reads.
+    pub fn sync_format_one(offset: u64) -> Self {
         Self::new(
             E_STORE_FORMAT,
-            format!("stream store format {actual} does not match {current}"),
+            "sync batch format 1 is not supported".to_string(),
             "write the stream with the pinned rdy build",
-            record,
+            Some(0),
             offset,
         )
     }
@@ -268,12 +285,19 @@ impl StreamError {
 
     /// The stream error of record `record` at `offset` that failed its record check with `e`:
     /// `Kind` is an unknown kind, `Decode` a record that does not decode, `Limit` E_LIMIT with the
-    /// limit's bound and name.
+    /// limit's bound and name, and an encoding version its kind does not register, or a marked
+    /// version 0, its own bad record.
     pub fn from_record(record: u64, offset: u64, e: &RecordError) -> Self {
         match e {
             RecordError::Kind => Self::bad_record(record, offset, Reason::UnknownKind),
             RecordError::Decode => Self::bad_record(record, offset, Reason::RecordDoesNotDecode),
             RecordError::Limit { .. } => Self::limit(Some(record), offset, &e.to_string()),
+            RecordError::UnknownVersion => {
+                Self::bad_record(record, offset, Reason::UnknownEncodingVersion)
+            }
+            RecordError::NoncanonicalVersion => {
+                Self::bad_record(record, offset, Reason::NoncanonicalEncodingVersion)
+            }
         }
     }
 }
