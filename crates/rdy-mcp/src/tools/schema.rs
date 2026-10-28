@@ -49,7 +49,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
                 example["body"] = json!("…");
             }
             // rf5: a finding's and a source's example is a valid write, with no parent (the text
-            // guide says they go to the decision home)
+            // guide says they go to the decision home, or the project root)
             if let Some(fields) = supporting_example(&t) {
                 example = json!({"op": "create", "type": t, "fields": fields});
             }

@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 
 const FINDING_LINE: &str = "Finding: record what surfaced with rdy_write, type finding, statement and 1 to 20 evidence entries; cite it from a decision with depends_on";
-const TEXT_GUIDE: &str = "A finding records a statement and evidence. Each evidence entry is {quote, session_ref?, question?} or {source: \"{{S-…}}\"}. Each string has 1 to 2000 characters. A source names a release, commit or spec with title, kind and locator. Both types live only in the store. With no parent, they use the decision home.";
+const TEXT_GUIDE: &str = "A finding records a statement and evidence. Each evidence entry is {quote, session_ref?, question?} or {source: \"{{S-…}}\"}. Each string has 1 to 2000 characters. A source names a release, commit or spec with title, kind and locator. Both types live only in the store. With no parent, they use the decision home, or the project root when the project names none.";
 
 /// A served project whose canon holds the doc `register` (the decision home) and a source keyed
 /// REL-2 under it, and whose view `work` adds a proposed decision there. Returns (register,

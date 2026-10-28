@@ -12592,6 +12592,7 @@
       "CONFLICT_FIX": "\"write the block from the version you want (rdy_context lists the sides), or exclude one side's change\"",
       "CREDENTIALS_FIX": "\"remove the invalid credential file, then sign in again\"",
       "CREDENTIALS_MESSAGE": "\"the credential file is not a valid bounded mapping\"",
+      "DECISIONS_HOME_FIX": "\"set decisions.home in .rdy.yaml to the path, key or id of a doc or a folder that exists\"",
       "EDIT_CUT_FIX": "\"rdy checked only the first 16384 bytes. Check the rest of the block and update it if needed.\"",
       "EVIDENCE_FIX": "\"write evidence as a list of {quote, session_ref?, question?} or {source: \\\"{{S-…}}\\\"} entries\"",
       "EVIDENCE_MESSAGE": "\"field \\\"evidence\\\" must be a list of 1 to 20 evidence entries\"",
@@ -15778,7 +15779,7 @@
               ]
             },
             "parent": {
-              "description": "The doc or section to record the decision in (id, key or path). Omit to record it in the project's decision home (decisions.home).",
+              "description": "The doc, section or folder to record the decision in (id, key or path). Omit parent to record it in the decision home, or at the project root when the project names none.",
               "type": [
                 "string",
                 "null"
@@ -17191,7 +17192,7 @@
               ]
             },
             "parent": {
-              "description": "The doc or section to record the revoking decision in (id, key or path). Omit to record it in the project's decision home (decisions.home).",
+              "description": "The doc, section or folder to record the revoking decision in (id, key or path). Omit parent to record it in the decision home, or at the project root when the project names none.",
               "type": [
                 "string",
                 "null"
@@ -17649,7 +17650,7 @@
                   ]
                 },
                 "parent": {
-                  "description": "The doc or section to record the decision in (id, key or path). Omit to record it in the project's decision home (decisions.home).",
+                  "description": "The doc, section or folder to record the decision in (id, key or path). Omit parent to record it in the decision home, or at the project root when the project names none.",
                   "type": [
                     "string",
                     "null"

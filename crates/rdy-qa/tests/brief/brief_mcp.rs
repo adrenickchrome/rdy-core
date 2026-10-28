@@ -226,7 +226,7 @@ fn mbrf1_the_overview_names_the_project_and_the_schema_and_tools_document_the_ed
         "{i}"
     );
     assert!(
-        sch["text"].as_str().unwrap().contains("A finding records a statement and evidence. Each evidence entry is {quote, session_ref?, question?} or {source: \"{{S-…}}\"}. Each string has 1 to 2000 characters. A source names a release, commit or spec with title, kind and locator. Both types live only in the store. With no parent, they use the decision home."),
+        sch["text"].as_str().unwrap().contains("A finding records a statement and evidence. Each evidence entry is {quote, session_ref?, question?} or {source: \"{{S-…}}\"}. Each string has 1 to 2000 characters. A source names a release, commit or spec with title, kind and locator. Both types live only in the store. With no parent, they use the decision home, or the project root when the project names none."),
         "{sch}"
     );
     assert!(
@@ -406,7 +406,7 @@ fn plb1_schema_explains_the_decision_parent() {
         sch["text"]
             .as_str()
             .unwrap()
-            .contains("With no parent, they use the decision home."),
+            .contains("With no parent, they use the decision home, or the project root when the project names none."),
         "{sch}"
     );
     let rule = sch["decisions"]["rule"].as_str().unwrap();
@@ -420,7 +420,9 @@ fn plb1_schema_explains_the_decision_parent() {
     // op list gained the reaffirm op and repin's `code` key: only the description of its `ops`
     // parameter changed (351830b6). It is re-taken again when rdy_write gained the strict
     // `reflects: {sources?: [string], code?: true}` parameter and its guidance text (D-4WC6R):
-    // only the new `reflects` parameter changed (28ea7eb0). The other three are the base's.
+    // only the new `reflects` parameter changed (28ea7eb0). The other three are re-taken when their
+    // `parent` descriptions named a folder and the project root (D-P3YD5; the commit "feat(engine):
+    // with no parent and no decision home, a decision sits at the project root").
     let base: Vec<(String, String)> = [
         (
             "rdy_write",
@@ -428,15 +430,15 @@ fn plb1_schema_explains_the_decision_parent() {
         ),
         (
             "rdy_decide",
-            "54e7f89fd3f25ec09ddc3c5a4b683d22220a3bf350135fe368860819352ec06a",
+            "0b3befbb6412d1b97e7388dea302c8206bb1f65a8b28514ae2051968a427911b",
         ),
         (
             "rdy_supersede",
-            "efbf0ffddb57921583acf5b9062e079620b2a8ae8ec8b056658eb93af444ba10",
+            "4892eba948ff86127fc2e909375e328ccffd14b54bfbc340ae7247d85450bd57",
         ),
         (
             "rdy_revoke",
-            "14da91157f1a655f88561a1cb50995638cc6b900f1475eecb5bce4c81b99db60",
+            "cc79f5c823c89a3ae821e3d425790657ba50b9ccfba0962a234f23e33d30d60d",
         ),
     ]
     .iter()

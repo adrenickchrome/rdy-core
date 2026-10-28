@@ -10,8 +10,8 @@
 //! - It is written by the session that gave the answer, in that session's own view: the relaying
 //!   agent's view, or the person's `work` at the command line. No role is needed to answer (O12):
 //!   a reader session writes it as a writer.
-//! - Its parent is the doc `decisions.home` names when the project sets one, else the
-//!   question's parent.
+//! - Its parent is the doc or folder `decisions.home` names when the project sets one, else the
+//!   question's parent, which may be the project root.
 //!
 //! The decision is `proposed`; it lands with the view's next proposal. A write the view refuses
 //! refuses the answer, and nothing is written.
@@ -119,7 +119,9 @@ pub(crate) fn act(
         None => st.block(&Scope::Canon, &qid)?.parent.map(|p| p.to_string()),
     };
     drop(st);
-    let parent = r.decision_parent(&view, given.as_deref())?;
+    let parent = r
+        .decision_parent(&view, given.as_deref())?
+        .unwrap_or_default();
     let attested_by = match &by.relay {
         Some(relay) => {
             let agent = crate::identity::actor_run_text(&relay.by.actor, relay.by.run.as_deref());

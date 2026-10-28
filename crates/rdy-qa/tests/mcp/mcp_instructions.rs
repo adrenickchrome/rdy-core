@@ -63,7 +63,7 @@ const DI13_SENTENCES: [&str; 8] = [
     "Present a batch card from rdy_pending at the end of an iteration, then each exception on its own; show each option label word for word and never change the options, the recommendation or the version.",
     "Relay the person's answer with rdy_answer: pass the card_hash you showed, their words as evidence and your question; interrupt the person only for a blocking item.",
     "While coding, a change within the design is just code; a gap is a proposed decision plus the doc update; a contradiction is a finding plus a superseding decision, and you stop when it is blocking or one_way.",
-    "When you start a project or a new area, plan the tree first: folders by area, a doc type for each doc, decisions in the decision home, open questions as question blocks and terms in the glossary; show the person the plan before the first content write.",
+    "When you start a project or a new area, plan the tree first: folders by area, a doc type for each doc, decisions recorded with rdy_decide and no parent, open questions as question blocks and terms in the glossary; show the person the plan before the first content write.",
 ];
 
 fn di13_has(sentence: &str) {
@@ -112,5 +112,9 @@ fn di13_the_new_sentences_sit_after_the_inbox_line() {
     for (k, want) in DI13_SENTENCES.iter().enumerate() {
         assert_eq!(s[13 + k], *want, "index {}", 13 + k);
     }
-    assert!(s[21].starts_with("Record decisions in the project's decision home"));
+    assert!(s[21].starts_with("Record a decision with rdy_decide and no parent"));
+    // F1 (D-X3136): where a decision with no parent goes, and never a doc to hold decisions
+    assert!(rdy_mcp::server::INSTRUCTIONS.contains(
+        "Record a decision with rdy_decide and no parent: it goes to the decision home, or to the project root when the project names none; link content to it with decided_by, and never put a decision in a content doc or create a doc to hold decisions."
+    ));
 }
