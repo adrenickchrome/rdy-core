@@ -277,16 +277,16 @@ impl ReadState {
             }
         };
         let doc_path = |doc: &BlockId| m.path_of(doc).unwrap_or_default();
-        let kept = |e: &BlockEntry| match (&under, &e.doc) {
-            (None, _) => true,
-            (Some(u), Some(d)) => {
-                let p = doc_path(d);
-                p == *u || p.starts_with(&format!("{u}/"))
-            }
-            (Some(_), None) => false,
+        // D-P3YD5: a block is under `u` by its own path, which is its doc's path, or the folder's
+        // for a block outside a doc; a block with no path is kept only with no filter
+        let kept = |id: &BlockId| match &under {
+            None => true,
+            Some(u) => m
+                .path_of(id)
+                .is_some_and(|p| p == *u || p.starts_with(&format!("{u}/"))),
         };
         let entries: Vec<(&BlockId, &BlockEntry)> =
-            issues.blocks.iter().filter(|(_, e)| kept(e)).collect();
+            issues.blocks.iter().filter(|(id, _)| kept(id)).collect();
 
         let whole = rollup(&self.pack, entries.iter().map(|(_, e)| *e));
 
@@ -297,8 +297,10 @@ impl ReadState {
         for (id, e) in &entries {
             if let Some(d) = &e.doc {
                 by_doc.entry(d).or_default().push(e);
-                if !e.issues.is_empty() {
-                    paths.insert(id.to_string(), doc_path(d));
+            }
+            if !e.issues.is_empty() {
+                if let Some(p) = m.path_of(id) {
+                    paths.insert(id.to_string(), p);
                 }
             }
             if let Some(b) = m.get(id) {
