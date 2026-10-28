@@ -73,6 +73,7 @@ fn repr1_objects_read_back_in_their_kind_with_their_ids() {
             client_nonce: Some("n".into()),
             ..Default::default()
         },
+        read_identity: None,
         ..change(
             "work",
             vec![Op::Create {
@@ -157,9 +158,12 @@ fn repr1_a_landing_with_every_field_set_survives_the_store_and_a_reindex() {
             choice: Some("land".into()),
             card_hash: None,
         }),
+        assessment: None,
+        policy: None,
+        read_identity: None,
     };
     let lh = s
-        .write(vec![(kinds::LANDING, postcard::to_allocvec(&l).unwrap())])
+        .write(vec![rdy_store::codec::item(kinds::LANDING, &l).unwrap()])
         .unwrap()[0];
     assert_eq!(lh, l.id());
     assert_eq!(s.landing(&lh).unwrap(), l);

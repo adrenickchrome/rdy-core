@@ -11,11 +11,32 @@ use std::sync::{Arc, Mutex, MutexGuard};
 /// A write: runs against the project on the writer and returns its result as JSON.
 pub type WriteFn = Box<dyn FnOnce(&mut Rdy) -> Result<serde_json::Value, RdyError> + Send>;
 
+/// A serialized read ([`Engine::read_serialized`]): runs against the project, shared, on the
+/// writer, and returns its result as JSON.
+pub type ReadFn = Box<dyn FnOnce(&Rdy) -> Result<serde_json::Value, RdyError> + Send>;
+
 pub trait Engine: Send + Sync {
     /// The current published state. After `write` returns, it includes that write.
     fn read(&self) -> Arc<ReadState>;
     /// Runs `f` serialized with every other write and returns after the state is published.
     fn write(&self, f: WriteFn) -> Result<serde_json::Value, RdyError>;
+    /// Runs `f` serialized with every write, with a shared borrow of the project: a read of
+    /// what the published state does not reach (the store, `Rdy::fsck`) that no write
+    /// interleaves with. It writes nothing, so a read-only store (D-WWAK7) runs it too: it
+    /// passes no write gate and seals no batch. The default runs it as a write.
+    fn read_serialized(&self, f: ReadFn) -> Result<serde_json::Value, RdyError> {
+        self.write(Box::new(move |r| f(r)))
+    }
+    /// Republishes a clean state from the store (`Rdy::invalidate`), serialized with every
+    /// write: after a panic, the caches may be half-updated. It writes nothing to the store, so
+    /// a read-only store runs it too. The default runs it as a write.
+    fn republish(&self) -> Result<(), RdyError> {
+        self.write(Box::new(|r| {
+            r.invalidate();
+            Ok(serde_json::Value::Null)
+        }))
+        .map(|_| ())
+    }
     /// What opening the store did.
     fn open_report(&self) -> OpenReport;
     fn root(&self) -> PathBuf;
@@ -59,6 +80,17 @@ pub trait Engine: Send + Sync {
             "rdy_render runs in the daemon, and this session runs without one",
             "drop --no-daemon, or run rdy render --out <path>",
         ))
+    }
+    /// The connected project's store upgrade facts (`rdy_upgrade`, D-WWAK7, D-1HDVA): its
+    /// features, no steps (a normally opened store is already upgraded) and the last
+    /// `meta/upgrade` receipt, read from one captured state ([`crate::maintenance::connected`]).
+    /// An apply to a read-only store is `E_STORE_READ_ONLY`. It never opens, locks or stops the
+    /// store or a process, and never selects another project.
+    fn upgrade(
+        &self,
+        req: crate::maintenance::UpgradeRequest,
+    ) -> Result<crate::maintenance::UpgradeReport, RdyError> {
+        crate::maintenance::connected(&self.read(), req.dry_run)
     }
     /// Publishes a tag to a publish remote's hub site as a candidate (an output seam like
     /// [`Engine::render`]): the daemon runs the coordinator off its writer. An engine with no
@@ -444,6 +476,15 @@ impl Local {
         Ok(Local::new(Rdy::open(project)?))
     }
 
+    /// Opens `project` as [`Local::open`] does, with upgrade policy `policy`
+    /// ([`Rdy::open_with_policy`]).
+    pub fn open_with_policy(
+        project: &Path,
+        policy: rdy_store::OpenPolicy,
+    ) -> Result<Local, RdyError> {
+        Ok(Local::new(Rdy::open_with_policy(project, policy)?))
+    }
+
     /// A write that panicked may have left the caches half-updated: a poisoned lock is
     /// recovered with an `invalidate` (the state is republished from the store) and the poison
     /// is cleared, so the next lock pays nothing.
@@ -495,10 +536,24 @@ impl Engine for Local {
         self.lock().read()
     }
 
+    /// Runs `f` under the lock, as [`Local::inspect`] does: no write gate, no seal.
+    fn read_serialized(&self, f: ReadFn) -> Result<serde_json::Value, RdyError> {
+        f(&self.lock())
+    }
+
+    /// Republishes under the lock, as a poisoned lock's recovery does: no write gate.
+    fn republish(&self) -> Result<(), RdyError> {
+        self.lock().invalidate();
+        Ok(())
+    }
+
     /// Runs `f`, then seals the batch it left open (`seal_open`), with its moves. If `f`
     /// returned `Ok` and the seal fails, the seal's error is the write's.
     fn write(&self, f: WriteFn) -> Result<serde_json::Value, RdyError> {
         let mut r = self.lock();
+        // a read-only store runs no write closure (D-WWAK7): the store's own gate refuses its
+        // appends too
+        r.ensure_writable()?;
         let out = f(&mut r);
         let sealed = r.seal_open();
         match (out, sealed) {

@@ -616,10 +616,12 @@ fn ec5_a_dump_replaced_after_its_header_check_is_never_cloned_from_the_new_bytes
     for i in 0..300 {
         let to = scratch.path().join(format!("t{i}"));
         match clone(CloneSource::File(&src), &to, false) {
-            Ok(s) if s.load.store_format >= 12 && s.repo_id == good_id.to_string() => {}
+            Ok(s)
+                if !matches!(s.load.store_format, rdy_store::format::DumpStore::Legacy(n) if n < 12)
+                    && s.repo_id == good_id.to_string() => {}
             Ok(s) => {
                 outcome = Err(format!(
-                    "attempt {i}: cloned store format {} with repo id {}",
+                    "attempt {i}: cloned {} with repo id {}",
                     s.load.store_format, s.repo_id
                 ));
                 break;

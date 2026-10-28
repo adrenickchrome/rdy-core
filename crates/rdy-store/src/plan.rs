@@ -51,7 +51,7 @@ use crate::index::IndexEntry;
 use crate::kinds;
 use crate::redaction::StoredFrame;
 use crate::segment::{HEADER as FRAME_HEADER, Location};
-use crate::store::{Frames, StoreReader, encode};
+use crate::store::{Frames, StoreReader};
 use crate::transition::Transitions;
 use rdy_model::engine_fields::MAX_REASON_CHARS;
 use rdy_model::plan::{
@@ -133,7 +133,7 @@ pub fn decode_plan(payload: &[u8]) -> Result<Plan, RecordError> {
 /// Refuses a `PLAN` frame and a `plan/` ref among `items`: the public writers' rule.
 pub(crate) fn refuse_plan_writes(items: &[(u8, Vec<u8>)]) -> Result<(), StoreError> {
     for (kind, payload) in items {
-        if *kind == kinds::PLAN {
+        if crate::codec::logical_kind(*kind) == kinds::PLAN {
             return Err(StoreError::Refused(PLAN_WRITER_ONLY.into()));
         }
         if *kind == kinds::REF_UPDATE
@@ -176,7 +176,9 @@ pub(crate) fn invalid_record(p: &Plan) -> Option<&'static str> {
         || p.answers.len() > MAX_PLAN_ANSWERS
         || p.heads.len() > MAX_PLAN_HEADS
         || !p.answers.iter().all(|a| match a.act {
-            PlanAct::Confirm | PlanAct::Defer => a.reason.as_deref().is_some_and(valid_reason),
+            PlanAct::Confirm | PlanAct::Defer | PlanAct::Dismiss => {
+                a.reason.as_deref().is_some_and(valid_reason)
+            }
             PlanAct::Done => a.reason.is_none(),
         })
         || !p
@@ -241,8 +243,9 @@ pub(crate) enum Place {
 pub(crate) trait PlanLookup {
     /// Where the object of `kind` and hash `h` stands.
     fn place(&self, kind: u8, h: &Hash) -> Result<Place, StoreError>;
-    /// The payload of an object [`PlanLookup::place`] found.
-    fn read(&self, kind: u8, h: &Hash) -> Result<Vec<u8>, StoreError>;
+    /// The encoding and body of an object [`PlanLookup::place`] found: its payload, less a
+    /// versioned record's version (`crate::codec`).
+    fn read(&self, kind: u8, h: &Hash) -> Result<(u16, Vec<u8>), StoreError>;
     /// The latest plan version of `view` before this one, if any.
     fn latest(&self, view: &str) -> Result<Option<Hash>, StoreError>;
     /// The unsealed version bound to proposal `p` before this one, if any.
@@ -262,13 +265,20 @@ pub(crate) trait PlanLookup {
 }
 
 /// The typed record of `kind` that `look` reads; None when it does not decode.
-fn typed<T: serde::de::DeserializeOwned>(
+fn typed<T: serde::de::DeserializeOwned + 'static>(
     look: &dyn PlanLookup,
     kind: u8,
     h: &Hash,
 ) -> Result<Option<T>, StoreError> {
     match look.read(kind, h) {
-        Ok(p) => Ok(bounded::decode::<T>(&p).ok()),
+        Ok((version, body)) => Ok(crate::codec::decode_bounded_split::<T>(
+            &crate::codec::ObjectBytes {
+                kind,
+                version,
+                body: &body,
+            },
+        )
+        .ok()),
         Err(StoreError::Redacted { .. }) => Ok(None),
         Err(e) => Err(e),
     }
@@ -304,7 +314,7 @@ fn chain_ended(look: &dyn PlanLookup, head: &Plan) -> Result<bool, StoreError> {
         return Ok(true);
     }
     let read = |h: &Hash| -> Result<Option<Plan>, StoreError> {
-        look.read(kinds::PLAN, h).map(|b| decode_plan(&b).ok())
+        look.read(kinds::PLAN, h).map(|(_, b)| decode_plan(&b).ok())
     };
     match last_bound(head, &read)? {
         Some(v) => look.landed(&v),
@@ -346,7 +356,7 @@ fn approved_binding(look: &dyn PlanLookup, p: &Plan, q: &Plan) -> Result<Option<
         };
         let Some(next) = look
             .read(kinds::PLAN, &prev)
-            .map(|b| decode_plan(&b).ok())?
+            .map(|(_, b)| decode_plan(&b).ok())?
         else {
             return Ok(None);
         };
@@ -394,7 +404,7 @@ pub(crate) fn invalid_context(
             }
             let Some(q) = look
                 .read(kinds::PLAN, &prev)
-                .map(|b| decode_plan(&b).ok())?
+                .map(|(_, b)| decode_plan(&b).ok())?
             else {
                 return Ok(Some(INVALID_CHAIN));
             };
@@ -429,7 +439,9 @@ pub(crate) fn invalid_context(
         // proposal's seal names no chain at all
         None if p.seal.is_none() && !holder && !binds_after_unbound(look, p)? => {
             if let Some(l) = look.latest(&p.view)? {
-                let q = look.read(kinds::PLAN, &l).map(|b| decode_plan(&b).ok())?;
+                let q = look
+                    .read(kinds::PLAN, &l)
+                    .map(|(_, b)| decode_plan(&b).ok())?;
                 let ended = match q {
                     Some(q) => chain_ended(look, &q)?,
                     None => false,
@@ -564,10 +576,14 @@ impl Held for StoreReader {
 
     fn block_id_at(&self, loc: Location, v: &Hash) -> Result<Option<BlockId>, StoreError> {
         match self.segments().read_hashed(loc) {
-            Ok((kinds::BLOCK, found, payload)) if found == *v => {
-                Ok(crate::store::decode::<rdy_model::Block>(&payload)
-                    .ok()
-                    .map(|b| b.id))
+            Ok((raw, found, payload))
+                if found == *v && crate::codec::logical_kind(raw) == kinds::BLOCK =>
+            {
+                Ok(
+                    crate::codec::decode_record::<rdy_model::Block>(raw, &payload)
+                        .ok()
+                        .map(|b| b.id),
+                )
             }
             // a frame the walk did not hand out (a removed payload): its stub has the id
             _ => self.block_id(v),
@@ -668,10 +684,12 @@ pub(crate) fn entries(
     match kind {
         kinds::PLAN => plan_entries(hash, loc, payload, r),
         kinds::ANSWER => answer_entries(hash, loc, payload, r),
-        kinds::TRANSITION => Ok(match crate::store::decode::<Transitions>(payload) {
-            Ok(t) => transition_entries(&t, loc),
-            Err(_) => vec![],
-        }),
+        kinds::TRANSITION => Ok(
+            match crate::codec::decode_record::<Transitions>(kinds::TRANSITION, payload) {
+                Ok(t) => transition_entries(&t, loc),
+                Err(_) => vec![],
+            },
+        ),
         _ => Ok(vec![]),
     }
 }
@@ -742,7 +760,7 @@ pub(crate) fn answer_entries(
     payload: &[u8],
     r: &Resolver<'_>,
 ) -> Result<Vec<IndexEntry>, StoreError> {
-    let Ok(a) = crate::store::decode::<Answer>(payload) else {
+    let Ok(a) = crate::codec::decode_record::<Answer>(kinds::ANSWER, payload) else {
         return Ok(vec![]);
     };
     if a.act != AnswerAct::KeepSuspect || crate::answer::invalid(&a).is_some() {
@@ -801,19 +819,23 @@ struct WriteLookup<'a> {
 
 impl WriteLookup<'_> {
     /// The payload of `kind` and `h` among `items`.
-    fn item(&self, kind: u8, h: &Hash) -> Option<&[u8]> {
+    /// The body of the item of logical kind `kind` with hash `h`, as `crate::codec` splits it.
+    fn item(&self, kind: u8, h: &Hash) -> Option<(u16, &[u8])> {
         self.items
             .iter()
-            .find(|(k, p)| *k == kind && Hash::of(p) == *h)
-            .map(|(_, p)| &p[..])
+            .find(|(k, p)| crate::codec::logical_kind(*k) == kind && Hash::of(p) == *h)
+            .and_then(|(k, p)| crate::codec::split(*k, p).ok().map(|o| (o.version, o.body)))
     }
 
     /// The plans among `items`, in order.
     fn item_plans(&self) -> impl Iterator<Item = (Hash, Plan)> + '_ {
         self.items
             .iter()
-            .filter(|(k, _)| *k == kinds::PLAN)
-            .filter_map(|(_, p)| decode_plan(p).ok().map(|plan| (Hash::of(p), plan)))
+            .filter(|(k, _)| crate::codec::logical_kind(*k) == kinds::PLAN)
+            .filter_map(|(k, p)| {
+                let body = crate::codec::split(*k, p).ok()?.body;
+                decode_plan(body).ok().map(|plan| (Hash::of(p), plan))
+            })
     }
 }
 
@@ -823,7 +845,10 @@ impl PlanLookup for WriteLookup<'_> {
             return Ok(Place::Batch);
         }
         let open = self.store.open_batch().unwrap_or(&[]);
-        if open.iter().any(|(k, f)| *k == kind && f == h) {
+        if open
+            .iter()
+            .any(|(k, f)| crate::codec::logical_kind(*k) == kind && f == h)
+        {
             return Ok(Place::Batch);
         }
         Ok(if self.store.has_kind(kind, h)? {
@@ -833,10 +858,10 @@ impl PlanLookup for WriteLookup<'_> {
         })
     }
 
-    fn read(&self, kind: u8, h: &Hash) -> Result<Vec<u8>, StoreError> {
+    fn read(&self, kind: u8, h: &Hash) -> Result<(u16, Vec<u8>), StoreError> {
         match self.item(kind, h) {
-            Some(p) => Ok(p.to_vec()),
-            None => self.store.get_kind(kind, h),
+            Some((v, p)) => Ok((v, p.to_vec())),
+            None => self.store.get_versioned_body(kind, h),
         }
     }
 
@@ -883,8 +908,10 @@ impl PlanLookup for WriteLookup<'_> {
         Ok(self
             .items
             .iter()
-            .filter(|(k, _)| *k == kinds::LANDING)
-            .find(|(_, b)| bounded::decode::<LandingRecord>(b).is_ok_and(|l| l.proposal == *p))
+            .filter(|(k, _)| crate::codec::logical_kind(*k) == kinds::LANDING)
+            .find(|(k, b)| {
+                crate::codec::decode_bounded::<LandingRecord>(*k, b).is_ok_and(|l| l.proposal == *p)
+            })
             .map(|(_, b)| Hash::of(b)))
     }
 
@@ -893,13 +920,18 @@ impl PlanLookup for WriteLookup<'_> {
     }
 }
 
+/// The hash a plan version is stored under: its frame's, in the PLAN kind's latest encoding.
+pub(crate) fn plan_hash(plan: &Plan) -> Hash {
+    crate::codec::encode_new(kinds::PLAN, plan).hash()
+}
+
 impl Store {
     /// Writes the answer-only plan version `plan` and moves `plan/<view>` to it, in one batch
     /// (D-4JMPH). Returns its id. A version that binds a proposal or carries a seal is refused:
     /// only the proposal and landing composition writes those, beside their own records. A
     /// version that breaks a rule is refused (`plan <hash>: <reason>`), with nothing written.
     pub fn put_plan(&mut self, plan: &Plan) -> Result<Hash, StoreError> {
-        let id = plan.id();
+        let id = plan_hash(plan);
         if plan.seal.is_some() {
             return Err(refused(&id, INVALID_SEAL));
         }
@@ -920,7 +952,7 @@ impl Store {
         batch: &[(u8, Vec<u8>)],
     ) -> Result<(Hash, Frames), StoreError> {
         let id = self.check_plan(plan, batch)?;
-        let mut items = vec![(kinds::PLAN, encode(plan))];
+        let mut items = vec![crate::codec::item_new(kinds::PLAN, plan)];
         items.extend(self.ref_items_pub(vec![(plan_ref(&plan.view), id.0.to_vec())]));
         Ok((id, items))
     }
@@ -933,9 +965,12 @@ impl Store {
         plan: &Plan,
         batch: &[(u8, Vec<u8>)],
     ) -> Result<Hash, StoreError> {
-        let bytes = encode(plan);
-        let id = Hash::of(&bytes);
-        if decode_plan(&bytes).is_err() {
+        let frame = crate::codec::encode_new(kinds::PLAN, plan);
+        let id = frame.hash();
+        let body = crate::codec::split(frame.raw_kind(), &frame.payload)
+            .map_err(|e| StoreError::Decode(e.to_string()))?
+            .body;
+        if decode_plan(body).is_err() {
             return Err(refused(&id, INVALID_FIELDS));
         }
         if let Some(reason) = invalid_record(plan) {
@@ -1144,8 +1179,8 @@ impl PlanLookup for CheckLookup<'_> {
         })
     }
 
-    fn read(&self, kind: u8, h: &Hash) -> Result<Vec<u8>, StoreError> {
-        self.reader.get_kind(kind, h)
+    fn read(&self, kind: u8, h: &Hash) -> Result<(u16, Vec<u8>), StoreError> {
+        self.reader.get_versioned_body(kind, h)
     }
 
     fn latest(&self, view: &str) -> Result<Option<Hash>, StoreError> {
@@ -1184,7 +1219,11 @@ impl PlanLookup for CheckLookup<'_> {
         let lands = |l: &Hash| -> Result<bool, StoreError> {
             Ok(typed::<LandingRecord>(self, kinds::LANDING, l)?.is_some_and(|x| x.proposal == *p))
         };
-        for (_, l) in self.batch.iter().filter(|(k, _)| *k == kinds::LANDING) {
+        for (_, l) in self
+            .batch
+            .iter()
+            .filter(|(k, _)| crate::codec::logical_kind(*k) == kinds::LANDING)
+        {
             if lands(l)? {
                 return Ok(Some(*l));
             }
@@ -1243,6 +1282,9 @@ impl StoreReader {
                 } => (kind, hash, Some(payload)),
                 StoredFrame::Dropped { kind, hash, .. } => (kind, hash, None),
             };
+            // the frame's logical kind; a record's rules read its body
+            let raw = kind;
+            let kind = crate::codec::logical_kind(raw);
             if kind == kinds::BATCH_COMMIT {
                 batch.clear();
                 batch_start = next;
@@ -1252,6 +1294,15 @@ impl StoreReader {
             if batch.is_empty() {
                 batch_start = at;
             }
+            // a frame whose encoding does not split is the frame checks' to report; a PLAN's is
+            // its damage
+            let payload = match payload.map(|p| crate::codec::split(raw, p)) {
+                Some(Ok(o)) => Some(o.body),
+                Some(Err(_)) if kind == kinds::PLAN => {
+                    return Err(StoreError::Decode(damage(&hash, INVALID_FIELDS)));
+                }
+                Some(Err(_)) | None => None,
+            };
             if let Some(payload) = payload {
                 if matches!(kind, kinds::PLAN | kinds::ANSWER | kinds::TRANSITION) {
                     let es = match entries(kind, hash, at, payload, &r) {

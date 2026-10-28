@@ -8,18 +8,23 @@
 //! is every unassigned kind. A carried record's source request, apply and landing are no edge.
 use crate::bounded::{self, CHUNK_BYTES, MAX_CHUNK_BYTES, RecordError};
 use crate::kinds::{
-    self, ALT_SET, ANSWER, BLOB_CHUNK, BLOB_MANIFEST, BLOCK, BlobManifest, CHANGE, INTENT, LANDING,
-    PLAN, PROPOSAL, REDACTION, REDACTION_APPLY, REDACTION_RESIDUE, REVIEW, SIGNATURE, SNAPSHOT,
-    TAG, TENSION, TRANSITION, VIEW_OP,
+    self, ALT_SET, ANSWER, ASSESSMENT, BLOB_CHUNK, BLOB_MANIFEST, BLOCK, BlobManifest, CHANGE,
+    CHECK_REQUEST, DISPUTE, DISPUTE_RESOLUTION, INTENT, LANDING, PLAN, PROPOSAL, REDACTION,
+    REDACTION_APPLY, REDACTION_RESIDUE, REVIEW, SIGNATURE, SNAPSHOT, TAG, TENSION, TRANSITION,
+    VIEW_OP,
 };
 use crate::transition::{Cause, Side, Transitions, Why};
 use crate::view::{ViewOp, ViewOpKind};
+use rdy_model::assessment::Assessment;
+use rdy_model::check_request::CheckRequest;
+use rdy_model::dispute::{Dispute, DisputeResolution};
 use rdy_model::plan::Plan;
 use rdy_model::redaction::{RedactTarget, Redaction, RedactionApply, RedactionResidue, ResidualOp};
 use rdy_model::signature::Signature;
 use rdy_model::{
-    AltChoice, AltSet, AltStatus, Answer, Block, Change, ChangeLinks, FieldValue, Hash, Intent,
-    LandingRecord, Op, Proposal, Review, SemanticTension, StateSnapshot, Tag,
+    AltChoice, AltSet, AltStatus, Answer, AnswerAct, Block, Change, ChangeLinks, FieldValue, Hash,
+    Intent, LandingRecord, Op, Proposal, Review, ReviewSubject, SemanticTension, StateSnapshot,
+    Tag,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -27,7 +32,7 @@ use std::fmt;
 /// Every assigned portable object kind, ascending: what [`refs_of`] accepts and what a kind-None
 /// edge may resolve to. Kind 12 is unassigned; REF_UPDATE (8), BATCH_COMMIT (14) and
 /// REDACTION_CARRIED (23) are local.
-pub const PORTABLE_KINDS: [u8; 20] = [
+pub const PORTABLE_KINDS: [u8; 24] = [
     kinds::BLOCK,
     kinds::CHANGE,
     kinds::PROPOSAL,
@@ -48,6 +53,10 @@ pub const PORTABLE_KINDS: [u8; 20] = [
     kinds::REDACTION_RESIDUE,
     kinds::REDACTION_APPLY,
     kinds::PLAN,
+    kinds::ASSESSMENT,
+    kinds::DISPUTE,
+    kinds::DISPUTE_RESOLUTION,
+    kinds::CHECK_REQUEST,
 ];
 
 /// Whether `kind` is an assigned portable object kind.
@@ -82,16 +91,25 @@ pub struct ObjectRef {
     pub hash: Hash,
 }
 
-/// The objects the record of kind `kind` with bytes `payload` names, sorted by (kind, hash) with
-/// `None` first and without repeats. `Kind` for a kind that is not an assigned portable kind;
-/// `Decode` or `Limit` for bytes that are not exactly one bounded record of the kind.
+/// The objects the record of raw kind `kind` with stored bytes `payload` names, sorted by (kind,
+/// hash) with `None` first and without repeats. The frame is split first (`crate::codec`): its
+/// body, of any encoding its kind registers, is read as the current type. `Kind` for a kind that
+/// is not an assigned portable kind; `Decode` or `Limit` for bytes that are not exactly one
+/// bounded record of the kind; an encoding version refusal of the codec's own.
 pub fn refs_of(kind: u8, payload: &[u8]) -> Result<Vec<ObjectRef>, RecordError> {
+    if !is_portable(crate::codec::logical_kind(kind)) {
+        return Err(RecordError::Kind);
+    }
+    let split = crate::codec::split(kind, payload)?;
+    let (kind, payload) = (split.kind, split.body);
     let mut e = Edges(Vec::new());
     match kind {
         BLOCK => e.block(&bounded::decode::<Block>(payload)?)?,
-        CHANGE => e.change(&bounded::decode::<Change>(payload)?)?,
+        CHANGE => e.change(&crate::codec::decode_bounded_split::<Change>(&split)?)?,
         PROPOSAL => e.proposal(&bounded::decode::<Proposal>(payload)?),
-        LANDING => e.landing(&bounded::decode::<LandingRecord>(payload)?),
+        LANDING => e.landing(&crate::codec::decode_bounded_split::<LandingRecord>(
+            &split,
+        )?),
         SNAPSHOT => {
             let s = bounded::decode::<StateSnapshot>(payload)?;
             e.all(BLOCK, s.blocks.values());
@@ -106,11 +124,7 @@ pub fn refs_of(kind: u8, payload: &[u8]) -> Result<Vec<ObjectRef>, RecordError> 
             e.all(BLOB_CHUNK, &m.chunks);
         }
         TAG => e.one(LANDING, bounded::decode::<Tag>(payload)?.landing),
-        ANSWER => {
-            for h in bounded::decode::<Answer>(payload)?.targets {
-                e.any(h);
-            }
-        }
+        ANSWER => e.answer(&bounded::decode::<Answer>(payload)?),
         SIGNATURE => e.any(bounded::decode::<Signature>(payload)?.subject),
         VIEW_OP => e.view_op(&bounded::decode::<ViewOp>(payload)?),
         INTENT => {
@@ -120,7 +134,9 @@ pub fn refs_of(kind: u8, payload: &[u8]) -> Result<Vec<ObjectRef>, RecordError> 
         }
         ALT_SET => e.alt_set(&bounded::decode::<AltSet>(payload)?),
         REVIEW => {
-            bounded::decode::<Review>(payload)?;
+            if let ReviewSubject::Check { request } = bounded::decode::<Review>(payload)?.subject {
+                e.one(CHECK_REQUEST, request);
+            }
         }
         TENSION => {
             let t = bounded::decode::<SemanticTension>(payload)?;
@@ -129,13 +145,30 @@ pub fn refs_of(kind: u8, payload: &[u8]) -> Result<Vec<ObjectRef>, RecordError> 
         }
         TRANSITION => e.transitions(&bounded::decode::<Transitions>(payload)?),
         REDACTION => e.redaction(&bounded::decode::<Redaction>(payload)?)?,
-        REDACTION_RESIDUE => e.residue(&bounded::decode::<RedactionResidue>(payload)?),
+        REDACTION_RESIDUE => e.residue(&crate::codec::decode_bounded_split::<RedactionResidue>(
+            &split,
+        )?),
         REDACTION_APPLY => {
             let a = bounded::decode::<RedactionApply>(payload)?;
             e.one(REDACTION, a.request);
             e.one(LANDING, a.landing);
         }
         PLAN => e.plan(&crate::plan::decode_plan(payload)?),
+        ASSESSMENT => e.assessment(&crate::codec::decode_bounded_split::<Assessment>(&split)?),
+        DISPUTE => {
+            let d = crate::codec::decode_bounded_split::<Dispute>(&split)?;
+            e.one(LANDING, d.landing);
+        }
+        DISPUTE_RESOLUTION => {
+            let r = crate::codec::decode_bounded_split::<DisputeResolution>(&split)?;
+            e.one(DISPUTE, r.dispute);
+            e.opt(LANDING, r.correction);
+        }
+        CHECK_REQUEST => {
+            let r = crate::codec::decode_bounded_split::<CheckRequest>(&split)?;
+            e.opt(CHANGE, r.subject.change);
+            e.opt(PROPOSAL, r.subject.version);
+        }
         _ => return Err(RecordError::Kind),
     }
     let mut out = e.0;
@@ -176,9 +209,45 @@ impl Edges {
         self.opt(ALT_SET, choice.as_ref().map(|c| c.set));
     }
 
+    /// A change's links: its intent and alternative set, and the change it replays (a
+    /// reference, never one of its deps). The briefing is a token identity: no edge.
     fn links(&mut self, links: &ChangeLinks) {
         self.opt(INTENT, links.intent);
         self.alt(&links.alternative);
+        self.opt(CHANGE, links.replayed_from);
+    }
+
+    /// An answer's targets, of any kind; an AcceptVerdict answer's item names its REVIEW
+    /// (`verdict:<hex>`). An item that names no hash adds no edge: the answer's own rules
+    /// refuse it.
+    fn answer(&mut self, a: &Answer) {
+        for h in &a.targets {
+            self.any(*h);
+        }
+        if a.act == AnswerAct::AcceptVerdict
+            && let Some(h) = crate::carried_records::verdict_item(&a.item)
+        {
+            self.one(REVIEW, h);
+        }
+    }
+
+    /// An assessment's proposal (its scope names the same one), its base landing, its policy
+    /// block version, the plans its tension answers name, and the reviews its dismissals name.
+    /// Pack, config, card and tension hashes are content identities: no edge.
+    fn assessment(&mut self, a: &Assessment) {
+        self.one(PROPOSAL, a.proposal);
+        self.one(PROPOSAL, a.scope.proposal);
+        self.opt(LANDING, a.base);
+        if let Some(p) = a.policy.as_ref().and_then(|p| p.policy.as_ref()) {
+            self.one(BLOCK, p.version);
+        }
+        for t in &a.tensions {
+            self.opt(PLAN, t.answer.as_ref().map(|r| r.plan));
+            self.opt(REVIEW, t.dismissal);
+        }
+        for i in a.issues.iter().chain(&a.confidence.reasons) {
+            self.opt(REVIEW, i.dismissal);
+        }
     }
 
     /// A figure's `blob` field names its blob manifest. A present field that is not a full hash
@@ -227,6 +296,8 @@ impl Edges {
     }
 
     fn landing(&mut self, l: &LandingRecord) {
+        self.opt(ASSESSMENT, l.assessment);
+        self.opt(BLOCK, l.policy.as_ref().map(|p| p.version));
         self.one(PROPOSAL, l.proposal);
         self.opt(PROPOSAL, l.approved_version);
         self.opt(LANDING, l.prev);

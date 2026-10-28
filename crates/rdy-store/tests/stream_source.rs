@@ -5,7 +5,6 @@
 use rdy_model::signature::Signature;
 use rdy_model::*;
 use rdy_store::closure::{END_OF_LOG, StoreSource, closure, write_batch};
-use rdy_store::format::STORE_FORMAT;
 use rdy_store::kinds;
 use rdy_store::object_refs::ObjectKey;
 use rdy_store::stream_error::StreamError;
@@ -181,7 +180,12 @@ impl Src {
     fn batch_without(&self, known: &BTreeSet<ObjectKey>) -> Vec<u8> {
         let (_s, r) = self.reader();
         let c = closure(&r, self.tag, known).unwrap();
-        let header = StreamHeader::tag_history(self.repo, self.tag, c.prerequisites);
+        let header = StreamHeader::tag_history(
+            rdy_store::format::baseline_features(),
+            self.repo,
+            self.tag,
+            c.prerequisites,
+        );
         let mut source = StoreSource {
             reader: &r,
             end: END_OF_LOG,
@@ -201,7 +205,12 @@ impl Src {
         records: &BTreeMap<ObjectKey, StreamRecord>,
         order: &[ObjectKey],
     ) -> Vec<u8> {
-        let header = StreamHeader::tag_history(self.repo, self.tag, vec![]);
+        let header = StreamHeader::tag_history(
+            rdy_store::format::baseline_features(),
+            self.repo,
+            self.tag,
+            vec![],
+        );
         let mut source = records.clone();
         write_batch(&mut source, &header, order, Vec::new())
             .unwrap()
@@ -247,8 +256,10 @@ fn raw(
     frames: &[(u8, Vec<u8>)],
 ) -> Vec<u8> {
     let mut out = b"RDYSYNC\n".to_vec();
-    out.extend_from_slice(&1u32.to_le_bytes());
-    let mut header = STORE_FORMAT.to_le_bytes().to_vec();
+    out.extend_from_slice(&2u32.to_le_bytes());
+    let json = rdy_store::format::baseline_features().to_json();
+    let mut header = (json.len() as u32).to_le_bytes().to_vec();
+    header.extend_from_slice(&json);
     header.extend_from_slice(&repo.0);
     header.push(0);
     header.extend_from_slice(&root.0);
@@ -318,6 +329,7 @@ fn hpb5_checked_stream_refuses_what_a_take_refuses() {
     // an unused record: an object no link or attachment reaches
     let mut orphaned = records.clone();
     let stray = StreamRecord::Present {
+        encoding: 0,
         key: key(kinds::BLOB_CHUNK, Hash::of(b"stray chunk")),
         payload: b"stray chunk".to_vec(),
     };
@@ -395,12 +407,18 @@ fn hpb5_checked_stream_refuses_what_a_take_refuses() {
 fn hpb5_check_complete_reads_any_source() {
     let src = source();
     let (records, order) = src.records();
-    let header = StreamHeader::tag_history(src.repo, src.tag, vec![]);
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        src.repo,
+        src.tag,
+        vec![],
+    );
     let mut map = records.clone();
     let facts = check_complete(&mut map, std::slice::from_ref(&header), &order).unwrap();
     assert_eq!(facts, open(&src.batch()).unwrap());
     // a record the source holds that is not incoming is never required to be reached
     let held = StreamRecord::Present {
+        encoding: 0,
         key: key(kinds::BLOB_CHUNK, Hash::of(b"held chunk")),
         payload: b"held chunk".to_vec(),
     };
@@ -420,7 +438,12 @@ fn hpb5_check_complete_reads_any_source() {
     assert_eq!(e.object, Some(held.key()));
     // a prerequisite the source holds is met; one it lacks is missing
     let block_key = *order.iter().find(|k| k.kind == kinds::BLOCK).unwrap();
-    let with_pre = StreamHeader::tag_history(src.repo, src.tag, vec![block_key]);
+    let with_pre = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        src.repo,
+        src.tag,
+        vec![block_key],
+    );
     let rest: Vec<ObjectKey> = order.iter().filter(|k| **k != block_key).copied().collect();
     let got = check_complete(&mut map, std::slice::from_ref(&with_pre), &rest).unwrap();
     assert_eq!(got.objects, {

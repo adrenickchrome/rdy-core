@@ -94,7 +94,12 @@ fn repo(r: &Rdy) -> RepoId {
 fn batch_of(r: &Rdy, tag: Hash, known: &BTreeSet<ObjectKey>) -> (Vec<u8>, closure::Closure) {
     let reader = r.store().reader();
     let c = closure::closure(&reader, tag, known).unwrap();
-    let header = StreamHeader::tag_history(repo(r), tag, c.prerequisites.clone());
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        repo(r),
+        tag,
+        c.prerequisites.clone(),
+    );
     let bytes = written(r, &header, &c.records);
     (bytes, c)
 }
@@ -113,7 +118,13 @@ fn written(r: &Rdy, header: &StreamHeader, records: &[ObjectKey]) -> Vec<u8> {
 
 /// The original bytes of `key` in `r`.
 fn payload(r: &Rdy, key: ObjectKey) -> Vec<u8> {
-    r.store().get_kind(key.kind, &key.hash).unwrap()
+    r.store().get_kind_raw(key.kind, &key.hash).unwrap().1
+}
+
+/// `refs_of` the stored frame of `key`: its raw kind and payload.
+fn refs_of_stored(r: &Rdy, key: ObjectKey) -> Vec<rdy_store::object_refs::ObjectRef> {
+    let (raw, payload) = r.store().get_kind_raw(key.kind, &key.hash).unwrap();
+    refs_of(raw, &payload).unwrap()
 }
 
 /// What a check refused: its code, message and fix.
@@ -160,6 +171,7 @@ impl Encoder {
     fn record<T: serde::Serialize + 'static>(&mut self, kind: u8, value: &T) -> StreamRecord {
         let hash = self.store.put(kind, value).unwrap();
         StreamRecord::Present {
+            encoding: 0,
             key: ObjectKey { kind, hash },
             payload: self.store.get_kind(kind, &hash).unwrap(),
         }
@@ -181,7 +193,12 @@ fn crafted(records: &[StreamRecord], extra: &[ObjectKey]) -> Vec<u8> {
     pre.push(root());
     pre.sort();
     pre.dedup();
-    let header = StreamHeader::tag_history(RepoId([7; 16]), root().hash, pre);
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        RepoId([7; 16]),
+        root().hash,
+        pre,
+    );
     let mut w = StreamWriter::new(Vec::new(), &header).unwrap();
     for r in records {
         w.record(r).unwrap();
@@ -192,8 +209,9 @@ fn crafted(records: &[StreamRecord], extra: &[ObjectKey]) -> Vec<u8> {
 /// The prelude and header frame of a crafted batch with no prerequisite but the root.
 fn crafted_head() -> Vec<u8> {
     let b = crafted(&[], &[]);
-    // prelude 12 + header frame (37 + 57 + 33)
-    b[..12 + 37 + 57 + 33].to_vec()
+    // prelude 12 + header frame (37 + 57 + the manifest + 33)
+    let manifest = rdy_store::format::baseline_features().to_json().len();
+    b[..12 + 37 + 57 + manifest + 33].to_vec()
 }
 
 fn frame_head(len: u32, kind: u8, hash: &Hash) -> Vec<u8> {
@@ -364,12 +382,17 @@ fn ha9_keys_are_returned_in_wire_order() {
     let (leaves, rest): (Vec<ObjectKey>, Vec<ObjectKey>) = c
         .records
         .iter()
-        .partition(|k| refs_of(k.kind, &payload(&r, **k)).unwrap().is_empty());
+        .partition(|k| refs_of_stored(&r, **k).is_empty());
     assert!(leaves.len() >= 3, "{leaves:?}");
     let mut order: Vec<ObjectKey> = leaves.iter().rev().copied().collect();
     order.extend(rest);
     assert_ne!(order, c.records);
-    let header = StreamHeader::tag_history(repo(&r), tag, vec![]);
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        repo(&r),
+        tag,
+        vec![],
+    );
     let again = written(&r, &header, &order);
     let report2 = check_batch(again.as_slice(), None).unwrap();
     assert_eq!(report2.keys, order, "exactly the wire sequence");
@@ -466,12 +489,17 @@ fn ha9_batch_can_precede_root_and_dependencies() {
         .records
         .iter()
         .copied()
-        .filter(|k| refs_of(k.kind, &payload(&r, *k)).unwrap().is_empty())
+        .filter(|k| refs_of_stored(&r, *k).is_empty())
         .collect();
     assert!(leaves.iter().any(|k| k.kind == kinds::BLOCK));
     assert!(leaves.iter().any(|k| k.kind == kinds::BLOB_CHUNK));
     assert!(!leaves.contains(&root));
-    let header = StreamHeader::tag_history(repo(&r), tag, vec![root]);
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        repo(&r),
+        tag,
+        vec![root],
+    );
     let first = written(&r, &header, &leaves);
     let a = check_batch(first.as_slice(), Some(repo(&r))).unwrap();
     assert_eq!(a.keys, leaves);
@@ -497,7 +525,8 @@ fn ha9_batch_can_precede_root_and_dependencies() {
     // a batch that lists a prerequisite it does not need is not valid alone
     let mut extra = vec![root, *leaves.first().unwrap()];
     extra.sort();
-    let header = StreamHeader::tag_history(repo(&r), tag, extra);
+    let header =
+        StreamHeader::tag_history(rdy_store::format::baseline_features(), repo(&r), tag, extra);
     let bad = written(&r, &header, &leaves[1..]);
     let e = refused_as_store(&bad);
     let first = leaves.first().unwrap();
@@ -670,12 +699,12 @@ fn ha9_huge_lengths_and_deep_values_refuse_without_panics() {
 
     // a header that claims 4 GiB, and a record that does: refused by the claim alone
     let mut b = b"RDYSYNC\n".to_vec();
-    b.extend_from_slice(&1u32.to_le_bytes());
+    b.extend_from_slice(&2u32.to_le_bytes());
     b.extend(frame_head(u32::MAX, 0xF0, &Hash([0; 32])));
     let e = refused_as_store(&b);
     assert_eq!(
         (e.code, e.message.as_str()),
-        (E_LIMIT, "stream exceeds 3300057 header bytes")
+        (E_LIMIT, "stream exceeds 3365593 header bytes")
     );
     // the stream bound names no object; a record bound names the record's
     let zero = |kind: u8| format!("{kind}:{}", Hash([0; 32]));
@@ -769,7 +798,8 @@ fn ha9_huge_lengths_and_deep_values_refuse_without_panics() {
     sync_stream::check_batch(b.as_slice()).unwrap();
     let e = check_batch(b.as_slice(), None).unwrap_err();
     assert_eq!(refusal(&e), limit_text("blob", max, "bytes"));
-    let head_len = 12 + 37 + 57 + 33 * (65 + 1);
+    let head_len =
+        12 + 37 + 57 + rdy_store::format::baseline_features().to_json().len() + 33 * (65 + 1);
     assert_eq!(
         position(&e),
         format!("record 1 at byte {head_len}; object {key}")
@@ -808,7 +838,14 @@ fn ha9_huge_lengths_and_deep_values_refuse_without_panics() {
         kind: kinds::BLOB_MANIFEST,
         hash: Hash::of(&payload),
     };
-    let b = crafted(&[StreamRecord::Present { key, payload }], &[]);
+    let b = crafted(
+        &[StreamRecord::Present {
+            encoding: 0,
+            key,
+            payload,
+        }],
+        &[],
+    );
     sync_stream::check_batch(b.as_slice()).unwrap();
     let e = check_batch(b.as_slice(), None).unwrap_err();
     assert_eq!(

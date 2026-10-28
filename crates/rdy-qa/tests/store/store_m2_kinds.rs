@@ -5,7 +5,6 @@ use rdy_qa::inbox::on;
 use rdy_qa::invariants::check_all;
 use rdy_qa::reindex_check::reindex_reproduces;
 use rdy_store::StoreCheck;
-use rdy_store::format::STORE_FORMAT;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -106,12 +105,22 @@ fn sg6_a_store_of_the_next_format_is_refused_and_untouched() {
     let copy = tempfile::tempdir().unwrap();
     let project = copy.path().join("p");
     copy_tree(dir.path(), &project);
-    let next = STORE_FORMAT + 1;
-    std::fs::write(
-        project.join(".rdy/store/FORMAT"),
-        format!("rdy store format\nstore_format {next}\n"),
-    )
+    // a feature this rdy does not know, of class incompatible
+    let next = rdy_store::format::StoreFeatures::of(vec![rdy_store::format::StoreFeature {
+        name: "future_x".into(),
+        class: rdy_store::format::FeatureClass::Incompatible,
+        required_rdy: "99.0.0".into(),
+    }]);
+    // the log's features ref names it too: a FORMAT alone that lists more than its sealed log
+    // is a failed first use's leftover, and opens
+    let mut s = rdy_store::Store::open(&project.join(".rdy/store")).unwrap();
+    s.set_refs_unchecked_for_tests(vec![(
+        rdy_store::format::REF_STORE_FEATURES.into(),
+        next.to_json(),
+    )])
     .unwrap();
+    drop(s);
+    std::fs::write(project.join(".rdy/store/FEATURES"), next.to_text()).unwrap();
     let before = tree(&project);
     let e = Rdy::open(&project)
         .err()
@@ -128,8 +137,10 @@ fn dl3_the_every_kind_project_holds_every_kind_and_ref_family() {
     let r = Rdy::open(dir.path()).unwrap();
     let f = rdy_qa::every_kind::facts(&r);
     for k in rdy_qa::every_kind::V11_KINDS {
+        // the facts count frames by raw kind: a kind's frames of either encoding
+        let count = |raw: u8| f["objects"][raw.to_string()].as_u64().unwrap_or(0);
         assert!(
-            f["objects"][k.to_string()].as_u64().unwrap_or(0) >= 1,
+            count(k) + count(k | rdy_store::codec::VERSIONED) >= 1,
             "no frame of kind {k}: {f}"
         );
     }

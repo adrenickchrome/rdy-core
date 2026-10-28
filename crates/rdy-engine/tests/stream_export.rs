@@ -303,17 +303,29 @@ fn carry_canary(dir: &std::path::Path) -> Hash {
                     && holds(&b)
                 {
                     let res = RedactionResidue::Block(BlockResidue::of(&b));
-                    found.push((loc, kind, hash, payload.len() as u32, res));
+                    found.push((
+                        loc,
+                        rdy_store::codec::logical_kind(kind),
+                        hash,
+                        payload.len() as u32,
+                        res,
+                    ));
                 }
-                if kind == kinds::CHANGE
-                    && let Ok(c) = rdy_store::bounded::decode::<Change>(payload)
+                if rdy_store::codec::logical_kind(kind) == kinds::CHANGE
+                    && let Ok(c) = rdy_store::codec::decode_bounded::<Change>(kind, payload)
                     && c.ops.iter().any(|op| match op {
                         Op::Create { block } | Op::Update { block, .. } => holds(block),
                         Op::Delete { .. } => false,
                     })
                 {
                     let res = RedactionResidue::Change(ChangeResidue::of(&c));
-                    found.push((loc, kind, hash, payload.len() as u32, res));
+                    found.push((
+                        loc,
+                        rdy_store::codec::logical_kind(kind),
+                        hash,
+                        payload.len() as u32,
+                        res,
+                    ));
                 }
             }
             Ok(())
@@ -353,7 +365,10 @@ fn carry_canary(dir: &std::path::Path) -> Hash {
                 kind: *kind,
                 hash: *hash,
                 len: *len,
-                residue: Some(Hash::of(&enc(res))),
+                // named by its frame in the latest encoding, as an rdy of this version writes it
+                residue: Some(Hash::of(
+                    &rdy_store::codec::frame_latest(kinds::REDACTION_RESIDUE, enc(res)).1,
+                )),
                 held: false,
             })
             .collect(),
@@ -400,8 +415,10 @@ fn carry_canary(dir: &std::path::Path) -> Hash {
     }
     let residues: Vec<RedactionResidue> = found.into_iter().map(|f| f.4).collect();
     i.append_carried(&residues, &[rec]).unwrap();
-    i.upgrade(rdy_store::format::Format::CURRENT.store_format)
-        .unwrap();
+    i.upgrade(&rdy_store::format::DumpStore::Features(
+        rdy_store::format::baseline_features(),
+    ))
+    .unwrap();
     i.finish().unwrap();
     carried
 }

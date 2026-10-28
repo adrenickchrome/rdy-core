@@ -23,6 +23,8 @@ fn version_hash_is_deterministic_and_content_sensitive() {
     let mut moved = claim("x");
     moved.order = "W".into();
     assert_ne!(a.version_hash(), moved.version_hash());
+    // ok2: the content hash leaves out the order key
+    assert_eq!(a.content_hash(), moved.content_hash());
 }
 
 #[test]

@@ -26,7 +26,7 @@
 //! and each fixed stop's position, warnings and appended carried batch, byte for byte. A later
 //! store format adds kinds and refs, never re-encodes (D-F0904): a load then appends one upgrade
 //! batch after the source log or the carried batch, and the tests allow exactly that batch.
-use crate::io_dump_fixture_s15::fixture;
+use crate::io_dump_fixture_s15::{first_start_logs_moves, fixture, without_moves};
 use rdy_engine::dump_stop::DumpStop;
 use rdy_engine::load::{LoadSummary, load_chain};
 use rdy_engine::{Rdy, RdyError, WriteRequest};
@@ -35,7 +35,9 @@ use rdy_model::redaction::RedactionCarried;
 use rdy_qa::chain_fixture::{self, V16_KINDS};
 use rdy_qa::every_kind;
 use rdy_store::dump::{DUMP_FORMAT, DumpItem, DumpReader, read_envelope};
-use rdy_store::format::{REF_STORE_FORMAT, STORE_FORMAT, encode_u32};
+use rdy_store::format::{
+    DumpStore, LAST_SCALAR_STORE_FORMAT, REF_STORE_FEATURES, baseline_features,
+};
 use rdy_store::holder::{ANSWER_TAG_OBJECT_REF, REF_STORE_MODE};
 use rdy_store::kinds;
 use rdy_store::redaction::StoredFrame;
@@ -209,7 +211,7 @@ fn file_facts(name: &str, p: &Path) -> Value {
     json!({
         "name": name,
         "dump_format": format,
-        "store_format": header.store_format,
+        "store_format": legacy(&header.store),
         "rdy": header.rdy,
         "log_end": loc(header.log_end),
         "chain": header.chain,
@@ -381,7 +383,7 @@ fn store_facts(r: &Rdy, upto: Location) -> Value {
 fn summary_facts(s: &LoadSummary) -> Value {
     json!({
         "dump_format": s.dump_format,
-        "store_format": s.store_format,
+        "store_format": legacy(&s.store_format),
         "batches": s.batches,
         "frames": s.frames,
         "files_written": s.files_written,
@@ -527,7 +529,7 @@ fn hc9_write_format_three_fixtures_once() {
         );
     }
     assert_eq!(
-        (DUMP_FORMAT, STORE_FORMAT),
+        (DUMP_FORMAT, LAST_SCALAR_STORE_FORMAT),
         (3, 16),
         "the v3-s16 fixtures hold dump format 3 and store format 16"
     );
@@ -664,7 +666,7 @@ fn holds(project: &Path, needle: &[u8]) -> bool {
 /// this rdy's store format, and with the frames of `upgrade` upgrade batch data frames counted.
 fn as_read_now(want: &Value, upgrade: u64) -> Value {
     let mut want = want.clone();
-    want["facts"]["refs"][REF_STORE_FORMAT] = json!(hex(&encode_u32(STORE_FORMAT)));
+    want["facts"]["refs"][REF_STORE_FEATURES] = json!(hex(&baseline_features().to_json()));
     if upgrade > 0 {
         let n = &mut want["facts"]["objects"][kinds::REF_UPDATE.to_string()];
         *n = json!(n.as_u64().unwrap() + upgrade);
@@ -693,8 +695,11 @@ fn check_store(got: &Value, want: &Value, upgrade: u64, what: &str) {
         assert_eq!(got[member], want[member], "{what}: {member}");
     }
     for member in ["refs", "objects", "landings", "signatures", "fsck"] {
+        // the fsck's unlogged move count is analysis, checked by the first writable start
+        // (`first_start_logs_moves`)
         assert_eq!(
-            got["facts"][member], want["facts"][member],
+            without_moves(&got["facts"][member]),
+            without_moves(&want["facts"][member]),
             "{what}: {member}"
         );
     }
@@ -839,6 +844,11 @@ fn hc9_full_and_three_file_chains_load_whole() {
             }
         }
         assert_eq!(json!(frames), expect_frames(&expect), "{what}");
+        // the first writable start logs the moves content-2 leaves, then the logged invariant
+        // holds
+        r.close().unwrap();
+        first_start_logs_moves(&to, input.holder, what);
+        let r = open(&to, input.holder);
         if input.holder {
             r.fsck().unwrap();
             r.close().unwrap();
@@ -1110,13 +1120,17 @@ fn hc9_stopped_fixtures_redump_reload_and_reindex() {
             let again = d.path().join(format!("{}-{name}.rdydump", input.expect));
             r.read().dump(&again).unwrap();
             r.close().unwrap();
-            if !input.holder {
-                rdy_qa::reindex_check::reindex_reproduces(&a).unwrap_or_else(|v| panic!("{v:#?}"));
-            }
             let b = d.path().join(format!("{}-{name}-b", input.expect));
             let s = chain_load(std::slice::from_ref(&again), &b, None);
             assert!(s.warnings.is_empty(), "{what}: {:?}", s.warnings);
             assert_eq!(segs(&b), segs(&a), "{what}: the same log");
+            // the first writable start of each logs the moves content-2 leaves, then the logged
+            // invariant holds
+            let n = first_start_logs_moves(&a, input.holder, &what);
+            assert_eq!(first_start_logs_moves(&b, input.holder, &what), n, "{what}");
+            if !input.holder {
+                rdy_qa::reindex_check::reindex_reproduces(&a).unwrap_or_else(|v| panic!("{v:#?}"));
+            }
             // a later write of the store's own mode
             let mut r = open(&b, input.holder);
             if input.holder {
@@ -1143,15 +1157,9 @@ fn hc9_stopped_fixtures_redump_reload_and_reindex() {
 /// later one. When this rdy writes a later store format than 16, its load appended that batch
 /// already, and nothing is appended.
 fn as_a_later_rdy(dir: &Path, holder: bool) -> u32 {
-    if STORE_FORMAT != 16 {
-        return 16;
-    }
-    let mut r = open(dir, holder);
-    r.store_mut()
-        .set_refs_unchecked_for_tests(vec![(REF_STORE_FORMAT.into(), encode_u32(STORE_FORMAT))])
-        .unwrap();
-    r.close().unwrap();
-    15
+    // this rdy writes feature stores: its load appended that batch already
+    let _ = (dir, holder);
+    16
 }
 
 #[test]
@@ -1580,6 +1588,8 @@ fn hc9_invariants_accept_a_carried_removal_whose_request_is_not_held() {
         &to,
         Some(want["selector"].as_str().unwrap()),
     );
+    // the first writable start logs the moves content-2 leaves
+    first_start_logs_moves(&to, false, "held_stop");
     let carried = tail_carried(&want);
     let request: Hash = carried[1]["record"]["request"]
         .as_str()
@@ -1606,4 +1616,12 @@ fn hc9_invariants_accept_a_carried_removal_whose_request_is_not_held() {
     }
     rdy_qa::invariants::check_all(&r).unwrap_or_else(|v| panic!("{v:#?}"));
     r.close().unwrap();
+}
+
+/// The scalar store format of a released dump's header.
+fn legacy(s: &DumpStore) -> u32 {
+    match s {
+        DumpStore::Legacy(n) => *n,
+        DumpStore::Features(_) => panic!("a released pair holds a scalar store"),
+    }
 }

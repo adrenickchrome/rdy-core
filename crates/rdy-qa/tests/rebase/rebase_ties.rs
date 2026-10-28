@@ -1,19 +1,19 @@
 //! sg2: order keys under rebase (spec §15.3 `rebase`, D-8EH6E). Views that append under one
-//! parent from one base can end with equal order keys once they land; a tie is harmless when the
-//! order it gives is stable and a later insert still lands where it was asked. Every state
-//! passes the invariant checker, on canon and on each view. The ties that must hold are made on
-//! purpose with `land_with_a_tie` (or written raw), so they stay a tie whatever the engine's
-//! landing does.
+//! parent from one base give their blocks one key; a normal landing gives its own blocks keys of
+//! their own (D-TX3KH), so two normal landings never tie. A tie that canon already holds is
+//! harmless when the order it gives is stable and a later insert still lands where it was asked.
+//! Every state passes the invariant checker, on canon and on each view. The ties that must hold
+//! are made on purpose with `land_with_a_tie` (or written raw), which bypasses the engine's
+//! acceptance change, so they stay a tie.
 //!
-//! M2 does not re-key at landing (ruling task-2-round2), so ties stay possible and an `after` or
-//! `before` inside a tie uses the write's fallback: it re-keys the smaller side of the tied run.
-//! Known cost: the fallback writes siblings the agent did not touch, so another view's edit of a
-//! re-keyed sibling conflicts when both land
-//! (`sg2_an_insert_into_a_tie_conflicts_with_a_concurrent_edit_of_the_re_keyed_sibling` pins it);
-//! and since `order` is part of a block's content hash, a pin on a re-keyed sibling goes stale.
+//! An `after` or `before` inside such a historical tie uses the write's fallback: it re-keys the
+//! smaller side of the tied run.
+//! The fallback writes siblings the agent did not touch. Another view's edit of a re-keyed
+//! sibling still lands with no conflict, and the sibling keeps canon's key (D-50NRG, D-1FT5Y)
+//! (`ok6_an_insert_into_a_tie_keeps_a_concurrent_edit_of_the_re_keyed_sibling` pins it).
 //! In a stable doc, an unjustified insert also opens `unjustified_change` on the re-keyed sibling.
-//! The M3 intake item "Order-key ties and the content hash" (leave `order` out of the content
-//! hash at the next store format change, then re-key at landing) removes the cost.
+//! A block's content hash leaves out its order key, so a pin on a re-keyed sibling stays current
+//! (`ok2_an_insert_into_a_tie_keeps_the_re_keyed_siblings_pin` pins it).
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed, TestRunner};
 use rdy_engine::*;
@@ -58,7 +58,7 @@ fn seeded() -> (tempfile::TempDir, Rdy, String, String) {
 }
 
 #[test]
-fn sg2_two_views_appending_under_one_parent_land_with_a_tie_or_distinct_keys() {
+fn ok6_two_normal_landings_have_distinct_keys() {
     let (_d, mut r, section, base) = seeded();
     let a = append(&mut r, "a", &section, "from a");
     let b = append(&mut r, "b", &section, "from b");
@@ -80,6 +80,12 @@ fn sg2_two_views_appending_under_one_parent_land_with_a_tie_or_distinct_keys() {
         assert!(ids.contains(id), "{id} is missing from {ids:?}");
     }
     assert_eq!(ids[0], base, "the seeded claim stays first: {ids:?}");
+    let keys: std::collections::BTreeSet<String> = m
+        .children(Some(&section_id))
+        .iter()
+        .map(|c| c.order.clone())
+        .collect();
+    assert_eq!(keys.len(), 3, "the two landings have distinct keys");
 }
 
 #[test]
@@ -492,11 +498,12 @@ fn sg2_two_inserts_into_one_tie_in_one_write() {
 }
 
 #[test]
-fn sg2_an_insert_into_a_tie_conflicts_with_a_concurrent_edit_of_the_re_keyed_sibling() {
+fn ok6_an_insert_into_a_tie_keeps_a_concurrent_edit_of_the_re_keyed_sibling() {
     // The fallback for a tie in a state (parallel appends, an imported tree). The insert re-keys
-    // the smaller side of the run, which writes the sibling the agent did not touch; another
-    // view's edit of it then conflicts. This test pins that known cost (ruling task-2-round2):
-    // M2 keeps it; the M3 intake item "Order-key ties and the content hash" removes it.
+    // the smaller side of the run, which writes the sibling the agent did not touch. Another
+    // view's edit of it changes only its text, so it is no conflict: canon's version differs from
+    // the edit's base only by its order key (D-50NRG, D-1FT5Y; final ruling round 4). The edit
+    // lands with its own text and canon's key.
     let (_d, mut r, section, ids) = tied_run(2);
     let (x, y) = (ids[1].clone(), ids[2].clone());
     write_as(
@@ -515,19 +522,32 @@ fn sg2_an_insert_into_a_tie_conflicts_with_a_concurrent_edit_of_the_re_keyed_sib
     )
     .unwrap();
     land(&mut r, "c").expect("c lands");
+    let y_id = BlockId::parse(&y).unwrap();
+    let rekeyed = r.read().block(&canon(), &y_id).unwrap().order;
+    let canon_kids = |r: &Rdy| -> Vec<String> {
+        let st = r.read();
+        let m = st.materialized(&canon()).unwrap();
+        m.children(Some(&BlockId::parse(&section).unwrap()))
+            .iter()
+            .map(|c| c.id.to_string())
+            .collect()
+    };
+    let before = canon_kids(&r);
     let conflicts = r.read().conflicts(&Scope::View("d".into())).unwrap();
     assert_eq!(
         conflicts
             .iter()
             .map(|c| c.block.to_string())
             .collect::<Vec<_>>(),
-        vec![y.clone()],
-        "d's edit of {y} conflicts with c's re-key of it"
+        Vec::<String>::new(),
+        "d's edit of {y} is no conflict with c's re-key of it"
     );
-    assert!(
-        land(&mut r, "d").is_err(),
-        "d cannot land until the conflict on {y} is resolved"
-    );
+    land(&mut r, "d").expect("d lands: its edit of the re-keyed sibling is no conflict");
+    let landed = r.read().block(&canon(), &y_id).unwrap();
+    assert_eq!(landed.body, "y edited in d", "d's text survives");
+    assert_eq!(landed.order, rekeyed, "{y} keeps canon's key (c's re-key)");
+    assert_eq!(canon_kids(&r), before, "canon's order is kept");
+    all_valid(&r, &[], "after d lands");
 }
 
 // Ties written raw in one view (re-review of fix round 2): exact places, one op per block.
@@ -789,10 +809,9 @@ fn sg2_an_insert_into_a_tie_does_not_re_key_a_conflicted_sibling() {
 }
 
 #[test]
-fn sg2_an_insert_into_a_tie_makes_a_pin_on_the_re_keyed_sibling_suspect() {
-    // The second known cost of the fallback: `order` is part of the content hash a pin records,
-    // so a block that cites the re-keyed sibling turns suspect of it (the M3 intake item
-    // "Order-key ties and the content hash" removes this).
+fn ok2_an_insert_into_a_tie_keeps_the_re_keyed_siblings_pin() {
+    // The fallback re-keys a sibling the agent did not touch. The content hash a pin records
+    // leaves out the order key, so a block that cites the re-keyed sibling stays current.
     let (_d, mut r, section, ids) = tied_run(2);
     let (x, y) = (ids[1].clone(), ids[2].clone());
     let w = write_as(
@@ -824,7 +843,11 @@ fn sg2_an_insert_into_a_tie_makes_a_pin_on_the_re_keyed_sibling_suspect() {
         version_of(&r, &canon(), &y),
         "the insert after {x} re-keyed {y}"
     );
-    assert_eq!(suspects(&r, "c"), vec![(citer, y)]);
+    assert_eq!(
+        suspects(&r, "c"),
+        vec![],
+        "order alone makes nothing suspect: {citer} keeps its pin on {y}"
+    );
 }
 
 #[test]

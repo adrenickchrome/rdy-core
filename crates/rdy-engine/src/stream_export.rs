@@ -52,7 +52,12 @@ pub fn write(
     };
     let end = read.seq();
     let found = closure_before(reader, tag_hash, known, end).map_err(to_rdy)?;
-    let header = StreamHeader::tag_history(repo_id, tag_hash, found.prerequisites);
+    let header = StreamHeader::tag_history(
+        reader.store_features()?,
+        repo_id,
+        tag_hash,
+        found.prerequisites,
+    );
     let mut source = StoreSource { reader, end };
     let (_, totals) = write_batch(&mut source, &header, &found.records, out).map_err(to_rdy)?;
     read.ensure_current_epoch()?;

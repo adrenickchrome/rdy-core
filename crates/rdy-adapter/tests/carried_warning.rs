@@ -200,6 +200,12 @@ fn target(tag: &str, landing: Hash) -> UploadTarget {
     }
 }
 
+/// The id of a new residue `r`: the hash of its frame in its kind's latest encoding, as an rdy of
+/// this version writes one (`rdy_store::codec`).
+fn residue_id(r: &RedactionResidue) -> Hash {
+    Hash::of(&rdy_store::codec::frame_latest(kinds::REDACTION_RESIDUE, enc(r)).1)
+}
+
 /// `value`'s record encoding, through the model's bounded encoder.
 fn enc<T: serde::Serialize>(value: &T) -> Vec<u8> {
     let mut buf = vec![0u8; 1 << 20];
@@ -254,12 +260,13 @@ fn scan(store: &Path) -> Vec<Found> {
                             block: Some(b),
                         });
                     }
-                    if kind == kinds::CHANGE
-                        && let Ok(c) = rdy_store::bounded::decode::<Change>(payload)
+                    if rdy_store::codec::logical_kind(kind) == kinds::CHANGE
+                        && let Ok(c) = rdy_store::codec::decode_bounded::<Change>(kind, payload)
                     {
                         out.push(Found {
                             loc,
-                            kind,
+                            // a span names its frame by the logical kind
+                            kind: kinds::CHANGE,
                             hash,
                             len,
                             residue: RedactionResidue::Change(ChangeResidue::of(&c)),
@@ -334,7 +341,7 @@ fn carry(store: &Path, origin: &Origin, names: &[Names]) -> (Hash, RedactionCarr
             kind: f.kind,
             hash: f.hash,
             len: f.len,
-            residue: Some(Hash::of(&enc(&f.residue))),
+            residue: Some(residue_id(&f.residue)),
             held,
         });
     };
@@ -424,8 +431,10 @@ fn carry(store: &Path, origin: &Origin, names: &[Names]) -> (Hash, RedactionCarr
     }
     i.append_carried(&residues, std::slice::from_ref(&rec))
         .unwrap();
-    i.upgrade(rdy_store::format::Format::CURRENT.store_format)
-        .unwrap();
+    i.upgrade(&rdy_store::format::DumpStore::Features(
+        rdy_store::format::baseline_features(),
+    ))
+    .unwrap();
     i.finish().unwrap();
     (carried, rec)
 }

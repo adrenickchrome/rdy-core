@@ -15,7 +15,9 @@ use rdy_engine::{Rdy, load::load};
 use rdy_model::{AnswerAct, EvidenceKind};
 use rdy_qa::every_kind;
 use rdy_store::dump::{DumpBatch, DumpItem, DumpReader};
-use rdy_store::format::{REF_STORE_FORMAT, STORE_FORMAT, encode_u32};
+use rdy_store::format::{
+    DumpStore, LAST_SCALAR_STORE_FORMAT, REF_STORE_FEATURES, baseline_features,
+};
 use rdy_store::kinds::{self, RefUpdate};
 use rdy_store::meta::REF_REPO_ID;
 use rdy_store::segment::Location;
@@ -77,7 +79,7 @@ fn dump_batches(p: &Path) -> (Vec<DumpBatch>, Location, u32) {
             out.push(b);
         }
     }
-    (out, h.log_end, h.store_format)
+    (out, h.log_end, legacy(&h.store))
 }
 
 /// Each batch's start as `[segment, offset]`, in log order.
@@ -99,7 +101,10 @@ fn di2_write_the_v1_s11_fixture() {
         !dump.exists() && !expect.exists(),
         "the v1-s11 fixture is written once: never rewrite it (O29)"
     );
-    assert_eq!(STORE_FORMAT, 11, "the v1-s11 fixture holds store format 11");
+    assert_eq!(
+        LAST_SCALAR_STORE_FORMAT, 11,
+        "the v1-s11 fixture holds store format 11"
+    );
     std::fs::create_dir_all(dump.parent().unwrap()).unwrap();
     let src = every_kind::rolling_project(FIXTURE_SEGMENT_MAX);
     let r = Rdy::open(src.path()).unwrap();
@@ -132,7 +137,11 @@ fn di2_the_v1_s11_fixture_loads_with_every_hash() {
     let dir = to.path().join("p");
     let s = load(&fixture(DUMP), &dir).unwrap();
     assert_eq!(s.dump_format, 1);
-    assert_eq!(s.store_format, 11, "the fixture's store format");
+    assert_eq!(
+        s.store_format,
+        DumpStore::Legacy(11),
+        "the fixture's store format"
+    );
     let expect = expect();
     let (batches, log_end, fixture_format) = dump_batches(&fixture(DUMP));
     assert_eq!(fixture_format, 11);
@@ -145,7 +154,7 @@ fn di2_the_v1_s11_fixture_loads_with_every_hash() {
     // every ref holds its value, and no other ref exists; `meta/store_format` names this rdy's
     // store format (the upgrade batch sets it when the fixture's format is older)
     let mut want = expect["refs"].clone();
-    want[REF_STORE_FORMAT] = json!(hex(&encode_u32(STORE_FORMAT)));
+    want[REF_STORE_FEATURES] = json!(hex(&baseline_features().to_json()));
     // RULING F2 (Export and clone): a log with no repo id gets one in the upgrade batch.
     let repo_id = got["refs"][REF_REPO_ID]
         .as_str()
@@ -194,7 +203,7 @@ fn di2_the_v1_s11_fixture_loads_with_every_hash() {
             Ok(())
         })
         .unwrap();
-    if STORE_FORMAT == fixture_format {
+    if fixture_format > LAST_SCALAR_STORE_FORMAT {
         assert!(tail.is_empty(), "nothing past the fixture's log: {tail:?}");
     } else {
         assert_eq!(tail.len(), 3, "two ref frames and their marker: {tail:?}");
@@ -203,8 +212,8 @@ fn di2_the_v1_s11_fixture_loads_with_every_hash() {
         assert_eq!(
             u,
             RefUpdate {
-                name: REF_STORE_FORMAT.into(),
-                value: encode_u32(STORE_FORMAT),
+                name: REF_STORE_FEATURES.into(),
+                value: baseline_features().to_json(),
                 at: log_end,
             }
         );
@@ -237,6 +246,8 @@ fn di2_the_v1_s11_fixture_loads_with_every_hash() {
     // the reindex check opens the project itself, so the store lock is released first
     drop(reader);
     r.close().unwrap();
+    // the first writable start logs the moves content-2 leaves, then the logged invariant holds
+    crate::io_dump_fixture_s15::first_start_logs_moves(&dir, false, "v1-s11");
     rdy_qa::reindex_check::reindex_reproduces(&dir).unwrap_or_else(|v| panic!("{v:#?}"));
 }
 
@@ -318,4 +329,12 @@ fn di2_the_every_kind_project_writes_an_answer_of_each_family() {
         "an ANSWER frame for each answer: {f}"
     );
     r.close().unwrap();
+}
+
+/// The scalar store format of a released dump's header.
+fn legacy(s: &DumpStore) -> u32 {
+    match s {
+        DumpStore::Legacy(n) => *n,
+        DumpStore::Features(_) => panic!("a released pair holds a scalar store"),
+    }
 }

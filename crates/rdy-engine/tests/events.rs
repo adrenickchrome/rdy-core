@@ -229,6 +229,9 @@ fn orphan_landing(r: &mut Rdy, proposal: rdy_model::Hash) {
         approved_version: None,
         rebased_from: vec![],
         evidence: None,
+        assessment: None,
+        policy: None,
+        read_identity: None,
     };
     r.store_mut().put(kinds::LANDING, &rec).unwrap();
 }

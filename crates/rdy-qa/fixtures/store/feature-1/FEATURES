@@ -1,0 +1,2 @@
+rdy store features 1
+{"manifest_version":1,"features":[{"name":"assessment","class":"incompatible","required_rdy":"0.26.0"},{"name":"check_request","class":"incompatible","required_rdy":"0.26.0"},{"name":"content_hash_v2","class":"incompatible","required_rdy":"0.26.0"},{"name":"dispute","class":"incompatible","required_rdy":"0.26.0"},{"name":"object_encoding","class":"incompatible","required_rdy":"0.26.0"},{"name":"plan_tension","class":"incompatible","required_rdy":"0.26.0"},{"name":"view_replay","class":"incompatible","required_rdy":"0.26.0"}]}

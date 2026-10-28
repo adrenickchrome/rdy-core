@@ -159,6 +159,9 @@ fn fsck2_a_landing_with_every_new_field_set_checks_clean() {
             choice: None,
             card_hash: None,
         }),
+        assessment: None,
+        policy: None,
+        read_identity: None,
     };
     let lid = s
         .write(vec![(

@@ -1041,7 +1041,8 @@ fn rdx5_daemon_redact_reports_and_records() {
     assert_eq!(v["reason_class"], "secret");
     assert!(v["change"].is_null() && v["redaction"].is_null());
     assert_eq!(v["report"]["targets"], json!([{"all_versions": id}]));
-    assert_eq!(v["report"]["assessment"], "not_implemented");
+    // M3a Task 8 carries the redaction support, so the dry run's report says carried
+    assert_eq!(v["report"]["assessment"], "carried");
     assert_eq!(v["warnings"].as_array().unwrap().len(), 5);
     let result: rdy_engine::redaction::RedactResult = serde_json::from_value(json!({
         "dry_run": v["dry_run"], "reason_class": v["reason_class"], "reason": v["reason"],

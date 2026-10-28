@@ -75,6 +75,9 @@ pub fn allowed_acts(kind: PlanKind) -> &'static [PlanAct] {
         PlanKind::Update | PlanKind::Rejustify | PlanKind::Reaffirm => &[PlanAct::Defer],
         PlanKind::Confirm => &[PlanAct::Confirm, PlanAct::Defer],
         PlanKind::UpdateImplementation => &[PlanAct::Done, PlanAct::Defer],
+        // a tension item is carried only: no computed plan holds one, and no act answers it
+        // until its writer exists
+        PlanKind::Tension => &[],
     }
 }
 
@@ -379,6 +382,8 @@ impl Closes<'_> {
             return Some(PlanOutcome::Updated);
         };
         match kind {
+            // a carried tension item has no computed close
+            PlanKind::Tension => None,
             // the subject's content changed, or it is new
             PlanKind::Update => match before {
                 None => Some(PlanOutcome::Updated),
@@ -1849,6 +1854,7 @@ mod tests {
                     PlanAct::Confirm => PlanOutcome::Confirmed,
                     PlanAct::Done => PlanOutcome::Done,
                     PlanAct::Defer => PlanOutcome::Deferred,
+                    PlanAct::Dismiss => PlanOutcome::Dismissed,
                 };
                 assert!(outcome_allowed(kind, outcome), "{kind:?}/{outcome:?}");
             }

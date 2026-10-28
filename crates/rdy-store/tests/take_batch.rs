@@ -223,7 +223,12 @@ fn write(
     prerequisites: Vec<ObjectKey>,
     path: &Path,
 ) {
-    let header = StreamHeader::tag_history(*repo, tag, prerequisites);
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        *repo,
+        tag,
+        prerequisites,
+    );
     let mut source = StoreSource {
         reader: r,
         end: END_OF_LOG,
@@ -248,12 +253,18 @@ fn write_extra(
         source.insert(
             k,
             StreamRecord::Present {
+                encoding: 0,
                 key: k,
                 payload: payload.clone(),
             },
         );
     }
-    let header = StreamHeader::tag_history(*repo, tag, prerequisites);
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        *repo,
+        tag,
+        prerequisites,
+    );
     write_batch(&mut source, &header, &keys, File::create(path).unwrap()).unwrap();
 }
 
@@ -339,7 +350,7 @@ fn ha11_many_files_make_one_sealed_take() {
     let written: Vec<ObjectKey> = data
         .iter()
         .filter(|(_, k, _, _)| *k != kinds::REF_UPDATE)
-        .map(|(_, k, h, _)| key(*k, *h))
+        .map(|(_, k, h, _)| key(rdy_store::codec::logical_kind(*k), *h))
         .collect();
     assert_eq!(written, records);
     assert_eq!(h.get_ref("tag/v1").unwrap(), Some(src.tag.0.to_vec()));
@@ -893,7 +904,14 @@ fn ha11_changed_relay_answer_refuses_before_append() {
         records
             .into_iter()
             .map(|k| match source.record(k).unwrap().unwrap() {
-                StreamRecord::Present { payload, .. } => (k.kind, payload),
+                // the raw frame: its raw kind and payload
+                r @ StreamRecord::Present { .. } => {
+                    let raw = r.raw_kind();
+                    let StreamRecord::Present { payload, .. } = r else {
+                        unreachable!("a present record")
+                    };
+                    (raw, payload)
+                }
                 other => panic!("{other:?}"),
             })
             .collect()
@@ -1089,7 +1107,7 @@ fn carried_holder(
             held,
         ),
         span(
-            &find(&frames, kinds::CHANGE, Hash::of(&enc(&c))),
+            &find(&frames, kinds::CHANGE, c.id()),
             Some(&residues[1]),
             held,
         ),
@@ -1128,7 +1146,7 @@ fn proof_of(h: &Store, kind: u8, hash: Hash) -> Option<Hash> {
                 apply,
                 ..
             } = f
-                && (k, x) == (kind, hash)
+                && (rdy_store::codec::logical_kind(k), x) == (kind, hash)
             {
                 out = Some(apply);
             }
@@ -1144,7 +1162,7 @@ fn hc3_take_of_any_matching_apply_removes_held_payloads() {
     let removed = removed_copy(&src);
     let upload = upload_of(&src, &removed.path, src.tag, "removed");
     let alpha = src.alpha.version_hash();
-    let c = Hash::of(&enc(&alpha_change(&src)));
+    let c = alpha_change(&src).id();
     // the source's own apply removes the held payloads its carried record names
     let (path, rec) = carried_holder(&src, "own", removed.request, removed.apply, true, false);
     let mut h = Store::open(&path).unwrap();
@@ -1216,6 +1234,7 @@ fn forged_upload(src: &Src, removed: &Removed, proof: Hash, name: &str) -> (Path
             } => {
                 placeholder.get_or_insert(key);
                 StreamRecord::Dropped {
+                    encoding: 0,
                     key,
                     original_len,
                     apply: proof,
@@ -1231,7 +1250,12 @@ fn forged_upload(src: &Src, removed: &Removed, proof: Hash, name: &str) -> (Path
     let mut prerequisites = header.prerequisites.clone();
     prerequisites.push(key(kinds::REDACTION_APPLY, proof));
     prerequisites.sort();
-    let header = StreamHeader::tag_history(src.repo, src.tag, prerequisites);
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        src.repo,
+        src.tag,
+        prerequisites,
+    );
     let file = src.dir.path().join(format!("{name}.rdysync"));
     write_batch(&mut records, &header, &keys, File::create(&file).unwrap()).unwrap();
     (file, placeholder.expect("a placeholder"))
@@ -1290,4 +1314,351 @@ fn hc3_a_placeholder_naming_an_invalid_carried_record_is_refused() {
     assert_eq!(e.object, Some(placeholder));
     drop(h);
     assert_eq!(segment_bytes(&path), before);
+}
+
+/// A project whose one landing is tagged `v1` by a TAG written through `Store::put` (so in the
+/// TAG kind's latest encoding), and one batch file of the tag's whole closure whose header
+/// carries `features`. Returns the base directory, the project path, its repo, the landing, the
+/// tag and the batch file.
+fn put_tag_upload(
+    features: rdy_store::format::StoreFeatures,
+) -> (tempfile::TempDir, PathBuf, RepoId, Hash, Hash, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("src");
+    let mut s = Store::create(&path).unwrap();
+    let cid = s
+        .commit_to_view(
+            "work",
+            change(
+                "work",
+                vec![Op::Create {
+                    block: block("b-00001", "alpha"),
+                }],
+            ),
+        )
+        .unwrap();
+    let proposal = s
+        .propose_changes(
+            "work",
+            "first",
+            Some("the first version"),
+            prov("agent:w", Role::Writer),
+            vec![cid],
+            None,
+        )
+        .unwrap();
+    let landing = s
+        .land(&proposal, prov("human:alice", Role::Approver))
+        .unwrap();
+    let tag = s
+        .put(
+            kinds::TAG,
+            &Tag {
+                name: "v1".into(),
+                landing,
+                message: None,
+                tagged_by: prov("human:alice", Role::Approver),
+            },
+        )
+        .unwrap();
+    let repo = s.repo_id().unwrap().unwrap();
+    let r = s.reader();
+    let c = closure(&r, tag, &BTreeSet::new()).unwrap();
+    let file = dir.path().join("v1.rdysync");
+    let header = StreamHeader::tag_history(features, repo, tag, c.prerequisites);
+    let mut source = StoreSource {
+        reader: &r,
+        end: END_OF_LOG,
+    };
+    write_batch(
+        &mut source,
+        &header,
+        &c.records,
+        File::create(&file).unwrap(),
+    )
+    .unwrap();
+    drop((r, s));
+    (dir, path, repo, landing, tag, file)
+}
+
+fn manifest_of(s: &Store) -> rdy_store::format::StoreFeatures {
+    rdy_store::format::StoreFeatures::parse(
+        &s.get_ref(rdy_store::format::REF_STORE_FEATURES)
+            .unwrap()
+            .expect("the features ref"),
+    )
+    .unwrap()
+}
+
+#[test]
+fn ok1_a_versioned_frame_is_taken_with_its_raw_kind() {
+    use rdy_store::codec;
+    let _v1 = codec::test_encoding(kinds::TAG, 1);
+    let (dir, path, repo, landing, tag, file) =
+        put_tag_upload(rdy_store::format::baseline_features());
+    let (src_kind, src_payload) = Store::open(&path).unwrap().get_raw(&tag).unwrap();
+    assert_eq!(
+        src_kind,
+        kinds::TAG | codec::VERSIONED,
+        "the source's raw kind"
+    );
+    assert_eq!(&src_payload[..2], &[1, 0]);
+    let hpath = dir.path().join("h");
+    let mut h = Store::create_holder(&hpath, repo).unwrap();
+    let target = UploadTarget {
+        tag: "v1".into(),
+        landing,
+    };
+    take(&mut h, &open(&[file]), &target).unwrap();
+    // the holder keeps the frame's raw kind and exact bytes, and reads it as a TAG
+    let check = |h: &Store| {
+        assert_eq!(
+            h.get_raw(&tag).unwrap(),
+            (src_kind, src_payload.clone()),
+            "the raw frame as the source stored it"
+        );
+        let t: Tag = h.get_typed(kinds::TAG, &tag).unwrap();
+        assert_eq!((t.name.as_str(), t.landing), ("v1", landing));
+        assert_eq!(h.get_ref("tag/v1").unwrap(), Some(tag.0.to_vec()));
+        h.check_meta().unwrap();
+        h.check_holder().unwrap();
+    };
+    check(&h);
+    h.reindex().unwrap();
+    check(&h);
+    drop(h);
+    let h = Store::open(&hpath).unwrap();
+    check(&h);
+    assert!(h.verify().unwrap() > 0);
+}
+
+#[test]
+fn ok1_take_refuses_a_stream_this_holder_may_only_read() {
+    use rdy_store::format::{FeatureClass, StoreFeature, StoreFeatures};
+    let read_only = StoreFeatures::of(vec![StoreFeature {
+        name: "future_read_only".into(),
+        class: FeatureClass::ReadOnlyCompatible,
+        required_rdy: "99.0.0".into(),
+    }]);
+    let (dir, _path, repo, landing, _tag, file) = put_tag_upload(read_only);
+    let hpath = dir.path().join("h");
+    let mut h = Store::create_holder(&hpath, repo).unwrap();
+    let end = h.log_end();
+    let before = segment_bytes(&hpath);
+    let format_before = std::fs::read(hpath.join(rdy_store::format::FEATURES_FILE)).unwrap();
+    let target = UploadTarget {
+        tag: "v1".into(),
+        landing,
+    };
+    let e = stream_err(take(&mut h, &open(&[file]), &target).unwrap_err());
+    assert_eq!(
+        (e.code, e.message.as_str(), e.fix.as_str()),
+        (
+            "E_STORE_FORMAT",
+            "store feature future_read_only needs rdy 99.0.0",
+            "open the project with rdy 99.0.0 or later"
+        )
+    );
+    assert_eq!(h.log_end(), end, "nothing appended");
+    assert_eq!(manifest_of(&h), rdy_store::format::baseline_features());
+    drop(h);
+    assert_eq!(segment_bytes(&hpath), before);
+    assert_eq!(
+        std::fs::read(hpath.join(rdy_store::format::FEATURES_FILE)).unwrap(),
+        format_before
+    );
+}
+
+#[test]
+fn ok1_take_keeps_the_stream_features_and_activates_first_use() {
+    use rdy_store::format::{
+        FEATURES_FILE, FeatureClass, StoreFeature, StoreFeatures, TEST_FEATURE, inject_test_feature,
+    };
+    // an unknown compatible feature of the source, and the test feature that a TAG uses
+    let future = StoreFeature {
+        name: "zz_future".into(),
+        class: FeatureClass::Compatible,
+        required_rdy: "99.1.0".into(),
+    };
+    let _known = inject_test_feature(FeatureClass::Compatible, kinds::TAG);
+    let (dir, _path, repo, landing, tag, file) =
+        put_tag_upload(StoreFeatures::of(vec![future.clone()]));
+    let hpath = dir.path().join("h");
+    let mut h = Store::create_holder(&hpath, repo).unwrap();
+    let end = h.log_end();
+    let target = UploadTarget {
+        tag: "v1".into(),
+        landing,
+    };
+    let got = take(&mut h, &open(&[file]), &target).unwrap();
+    let want = rdy_store::format::baseline_features().merged(&[
+        StoreFeature {
+            name: TEST_FEATURE.into(),
+            class: FeatureClass::Compatible,
+            required_rdy: "99.0.0".into(),
+        },
+        future,
+    ]);
+    assert_eq!(
+        manifest_of(&h),
+        want,
+        "the stream's and the first use's features"
+    );
+    assert_eq!(h.features(), &want);
+    assert_eq!(
+        std::fs::read_to_string(hpath.join(FEATURES_FILE)).unwrap(),
+        want.to_text(),
+        "FORMAT mirrors the log"
+    );
+    // one sealed batch: the closure, the tag ref and the features ref
+    assert_eq!(markers_since(&h, end), 1);
+    assert_eq!(got.frames, got.new_objects + 2);
+    assert!(h.has_kind(kinds::TAG, &tag).unwrap());
+    h.check_meta().unwrap();
+    // a repeat activates nothing more
+    drop(h);
+    let h = Store::open(&hpath).unwrap();
+    assert_eq!(manifest_of(&h), want);
+}
+
+/// Fix round 3: a take whose batch is synced and whose index update then fails is rolled back
+/// only if the truncate works. When the truncate fails too, the marked batch stays in the log,
+/// so `FORMAT` keeps the manifest the take published and the holder reopens with it.
+#[test]
+fn ok1_a_take_that_cannot_roll_back_keeps_format() {
+    use rdy_store::format::{
+        FEATURES_FILE, FeatureClass, StoreFeature, StoreFeatures, TEST_FEATURE, inject_test_feature,
+    };
+    let future = StoreFeature {
+        name: "zz_future".into(),
+        class: FeatureClass::Compatible,
+        required_rdy: "99.1.0".into(),
+    };
+    let _known = inject_test_feature(FeatureClass::Compatible, kinds::TAG);
+    let (dir, _path, repo, landing, _tag, file) =
+        put_tag_upload(StoreFeatures::of(vec![future.clone()]));
+    let hpath = dir.path().join("h");
+    let mut h = Store::create_holder(&hpath, repo).unwrap();
+    let target = UploadTarget {
+        tag: "v1".into(),
+        landing,
+    };
+    let want = rdy_store::format::baseline_features().merged(&[
+        StoreFeature {
+            name: TEST_FEATURE.into(),
+            class: FeatureClass::Compatible,
+            required_rdy: "99.0.0".into(),
+        },
+        future,
+    ]);
+    h.fail_next_index_apply();
+    h.fail_next_rollback();
+    assert!(take(&mut h, &open(&[file]), &target).is_err());
+    assert_eq!(
+        std::fs::read_to_string(hpath.join(FEATURES_FILE)).unwrap(),
+        want.to_text(),
+        "FORMAT keeps the published manifest"
+    );
+    drop(h);
+    let h = Store::open(&hpath).expect("the holder reopens");
+    assert_eq!(manifest_of(&h), want, "the marked batch is the log's");
+    assert_eq!(h.features(), &want);
+}
+
+/// `n` unknown compatible features named `{prefix}000` on.
+fn unknown_features(prefix: &str, n: usize) -> Vec<rdy_store::format::StoreFeature> {
+    (0..n)
+        .map(|i| rdy_store::format::StoreFeature {
+            name: format!("{prefix}{i:03}"),
+            class: rdy_store::format::FeatureClass::Compatible,
+            required_rdy: "1.0.0".into(),
+        })
+        .collect()
+}
+
+/// D-WWAK7: the manifest a take would leave (the holder's, the stream header's and the take's
+/// first uses) keeps the manifest's bounds. A union of more than 256 features is refused before
+/// `FORMAT` or the log changes, whichever parts make it up; one that reaches the bound lands.
+#[test]
+fn ok1_take_refuses_a_merged_manifest_over_its_bounds() {
+    use rdy_store::format::{
+        FEATURES_FILE, FeatureClass, REF_STORE_FEATURES, inject_test_feature, write_format_file,
+    };
+    // the TAG of every upload first uses the test feature
+    let _known = inject_test_feature(FeatureClass::Compatible, kinds::TAG);
+    // (holder's unknown features, header's unknown features, refused): each manifest also
+    // names the two baseline features (ok4), and the take first uses the test feature, so the
+    // merged manifest holds 3 more than the two counts
+    let cases: Vec<(usize, usize, bool)> = vec![
+        (0, 254, true),   // a full header and the first use
+        (200, 54, true),  // the holder and the header
+        (253, 1, true),   // the holder, the header and the first use
+        (128, 126, true), // half and half, and the first use
+        (252, 1, false),  // exactly the bound
+        (0, 253, false),  // exactly the bound
+    ];
+    for (held, carried, refused) in cases {
+        let case = format!("holder {held}, header {carried}");
+        let header = rdy_store::format::baseline_features().merged(&unknown_features("h", carried));
+        let (dir, _path, repo, landing, tag, file) = put_tag_upload(header);
+        let hpath = dir.path().join("h");
+        let mut h = Store::create_holder(&hpath, repo).unwrap();
+        let mine = rdy_store::format::baseline_features().merged(&unknown_features("a", held));
+        if held > 0 {
+            h.set_refs_unchecked_for_tests(vec![(REF_STORE_FEATURES.into(), mine.to_json())])
+                .unwrap();
+            write_format_file(&hpath, &mine).unwrap();
+            drop(h);
+            h = Store::open(&hpath).unwrap();
+        }
+        assert_eq!(h.features(), &mine, "{case}");
+        let end = h.log_end();
+        let before = segment_bytes(&hpath);
+        let format_before = std::fs::read(hpath.join(FEATURES_FILE)).unwrap();
+        let target = UploadTarget {
+            tag: "v1".into(),
+            landing,
+        };
+        let got = take(&mut h, &open(&[file]), &target);
+        if !refused {
+            got.unwrap();
+            assert_eq!(manifest_of(&h).features.len(), 256, "{case}");
+            assert_eq!(h.features(), &manifest_of(&h), "{case}");
+            assert!(h.has_kind(kinds::TAG, &tag).unwrap(), "{case}");
+            drop(h);
+            Store::open(&hpath).unwrap().check_meta().unwrap();
+            continue;
+        }
+        let e = stream_err(got.unwrap_err());
+        assert_eq!(
+            (e.code, e.message.as_str(), e.fix.as_str()),
+            (
+                "E_STORE_FORMAT",
+                "store feature manifest is invalid: more than 256 features",
+                "restore the store from a backup"
+            ),
+            "{case}"
+        );
+        assert_eq!(h.log_end(), end, "{case}: nothing appended");
+        assert_eq!(h.features(), &mine, "{case}");
+        assert!(!h.has_kind(kinds::TAG, &tag).unwrap(), "{case}");
+        drop(h);
+        assert_eq!(segment_bytes(&hpath), before, "{case}");
+        assert_eq!(
+            std::fs::read(hpath.join(FEATURES_FILE)).unwrap(),
+            format_before,
+            "{case}"
+        );
+        let h = Store::open(&hpath).unwrap();
+        assert_eq!(manifest_of(&h), mine, "{case}");
+        h.check_meta().unwrap();
+    }
+}
+
+/// The batch markers of `h`'s log from `from` on.
+fn markers_since(h: &Store, from: rdy_store::segment::Location) -> usize {
+    log_frames(h)
+        .iter()
+        .filter(|(l, k, _, _)| *l >= from && *k == kinds::BATCH_COMMIT)
+        .count()
 }

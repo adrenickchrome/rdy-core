@@ -6,3 +6,5 @@ crates/rdy-qa/fixtures/dump/* -text
 crates/rdy-qa/fixtures/sync/* -text
 # The diagram goldens are compared byte for byte on every host.
 crates/rdy-diagram/tests/fixtures/** -text
+# The native store fixtures are pinned by the hash of their bytes: FORMAT and expect.json are text, so never convert line endings.
+crates/rdy-qa/fixtures/store/** -text

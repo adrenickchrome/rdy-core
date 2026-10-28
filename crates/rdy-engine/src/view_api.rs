@@ -2,7 +2,7 @@
 //! go through `write_typed` (they run on the engine's writer), include, exclude and undo through
 //! `view_op_and_report` (with their consequences); reads use one `engine.read()` snapshot.
 use crate::answer::relay::RelayInput;
-use crate::consequence::{op_effect, undo_effect, view_op_and_report};
+use crate::consequence::{op_effect, replay_effect, undo_effect, view_op_and_report};
 use crate::engine::{Engine, write_typed};
 use crate::error::*;
 use crate::{Session, now_ms};
@@ -44,7 +44,7 @@ pub struct ViewRequest {
     pub block: Option<String>,
     /// resolve: take the landed side (cf1, D-X4GMH); required, the one side resolve takes.
     pub landed: Option<bool>,
-    /// include, exclude and undo: cut the consequences to about this many tokens.
+    /// include, exclude, undo and replay: cut the consequences to about this many tokens.
     pub max_tokens: Option<usize>,
     /// own and close with stale: the person's words, quoted, when an agent relays the act.
     pub evidence: Option<String>,
@@ -59,6 +59,33 @@ pub struct ViewRequest {
 }
 
 impl ViewRequest {
+    /// The first field, in declaration order, that is set although replay does not take it.
+    fn replay_forbidden(&self) -> Option<&'static str> {
+        let set = [
+            ("name", self.name.is_some()),
+            ("from", self.from.is_some()),
+            ("base", self.base.is_some()),
+            ("pin", self.pin.is_some()),
+            ("views", self.views.is_some()),
+            ("cascade", self.cascade.is_some()),
+            ("a", self.a.is_some()),
+            ("b", self.b.is_some()),
+            ("all", self.all.is_some()),
+            ("stale", self.stale.is_some()),
+            ("reason", self.reason.is_some()),
+            ("owner", self.owner.is_some()),
+            ("none", self.none.is_some()),
+            ("target", self.target.is_some()),
+            ("block", self.block.is_some()),
+            ("landed", self.landed.is_some()),
+            ("evidence", self.evidence.is_some()),
+            ("question", self.question.is_some()),
+            ("session_ref", self.session_ref.is_some()),
+            ("relayed_by", self.relayed_by.is_some()),
+        ];
+        set.into_iter().find(|(_, on)| *on).map(|(name, _)| name)
+    }
+
     fn relay(&self) -> RelayInput {
         RelayInput {
             relayed_by: self.relayed_by.clone(),
@@ -95,6 +122,14 @@ pub fn run_view(
     default_view: &str,
     req: ViewRequest,
 ) -> Result<Value, RdyError> {
+    if req.op == "replay"
+        && let Some(field) = req.replay_forbidden()
+    {
+        return Err(needs(
+            &format!("replay does not take {field}"),
+            &format!("drop {field}, or use the view operation that takes it"),
+        ));
+    }
     let relays = req.relay() != RelayInput::default();
     let person_act = req.op == "own" || (req.op == "close" && req.stale.is_some());
     if relays && !person_act {
@@ -241,6 +276,15 @@ pub fn run_view(
             let view = view();
             write_typed(engine, move |r| r.view_resolve_landed(&s, &view, &block))
         }
+        "replay" => {
+            // an omitted or empty `changes` gets the engine's one refusal text
+            let changes = req.changes.clone().unwrap_or_default();
+            let view = view();
+            let v = view.clone();
+            view_op_and_report(engine, &v, req.max_tokens, replay_effect, move |r| {
+                r.view_replay(&s, &view, &changes)
+            })
+        }
         "undo" => {
             let (view, target, cascade) =
                 (view(), req.target.clone(), req.cascade.unwrap_or(false));
@@ -252,7 +296,7 @@ pub fn run_view(
         op => Err(RdyError::new(
             E_BAD_INPUT,
             format!("unknown view op {op:?}"),
-            "use create, fork, include, exclude, compare, list, show, close, own, resolve or undo",
+            "use create, fork, include, exclude, replay, compare, list, show, close, own, resolve or undo",
         )),
     }
 }

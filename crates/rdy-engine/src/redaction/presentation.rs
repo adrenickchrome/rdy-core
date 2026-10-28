@@ -8,7 +8,7 @@
 use super::RedactResult;
 use super::targets::{reason_class_name, selector_text};
 use crate::error::{E_BAD_INPUT, RdyError, redaction_budget};
-use rdy_model::redaction::{CopyKind, ImpactKind, ImpactRelation};
+use rdy_model::redaction::{AssessmentSupport, CopyKind, ImpactKind, ImpactRelation};
 
 /// The smallest output budget, in tokens (inclusive).
 pub const MIN_TOKENS: usize = 256;
@@ -23,8 +23,10 @@ pub const DRY_RUN_TITLE: &str = "Redaction dry run";
 pub const REQUEST_TITLE: &str = "Redaction request";
 /// The line that replaces the row sections when the whole report does not fit.
 pub const ROWS_OMITTED: &str = "The row list was omitted. Increase max_tokens to read it.";
-/// The assessment line: no assessment kind exists before M3b.
+/// The assessment line of a report made before the carried kinds existed.
 pub const ASSESSMENTS: &str = "Recorded assessments: not implemented.";
+/// The assessment line of a report that scans the carried assessment, dispute and check records.
+pub const ASSESSMENTS_CARRIED: &str = "Recorded assessments: scanned.";
 /// The result line of a dry run.
 pub const DRY_RUN_RESULT: &str = "No request was recorded.";
 /// The result line when every target was already removed.
@@ -65,6 +67,10 @@ pub fn kind_name(k: ImpactKind) -> &'static str {
         ImpactKind::Review => "review",
         ImpactKind::Tension => "tension",
         ImpactKind::Answer => "answer",
+        ImpactKind::Assessment => "assessment",
+        ImpactKind::Dispute => "dispute",
+        ImpactKind::DisputeResolution => "dispute_resolution",
+        ImpactKind::CheckRequest => "check_request",
     }
 }
 
@@ -168,7 +174,11 @@ pub fn report_text(result: &RedactResult, max_tokens: usize) -> Result<ReportTex
             .map(|n| format!("Quarantine: {} (possible copy; not erased).", json(n))),
     );
     let mut tail = vec![
-        ASSESSMENTS.to_string(),
+        match rep.assessment {
+            AssessmentSupport::NotImplemented => ASSESSMENTS,
+            AssessmentSupport::Carried => ASSESSMENTS_CARRIED,
+        }
+        .to_string(),
         format!(
             "Reason ({}): {}",
             reason_class_name(result.reason_class),

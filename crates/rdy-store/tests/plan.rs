@@ -450,7 +450,7 @@ fn frames(s: &Store, from: Location, to: Location) -> Vec<(u8, Hash)> {
     let mut out = vec![];
     s.reader()
         .for_each_frame_from(from, to, |_, kind, hash, _, _| {
-            out.push((kind, hash));
+            out.push((rdy_store::codec::logical_kind(kind), hash));
             Ok(())
         })
         .unwrap();
@@ -901,7 +901,12 @@ fn key(kind: u8, hash: Hash) -> ObjectKey {
 fn export(s: &Store, tag: Hash, end: Location, path: &std::path::Path) -> Vec<ObjectKey> {
     let r = s.reader();
     let c = closure_before(&r, tag, &BTreeSet::new(), end).unwrap();
-    let header = StreamHeader::tag_history(s.repo_id().unwrap().unwrap(), tag, vec![]);
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        s.repo_id().unwrap().unwrap(),
+        tag,
+        vec![],
+    );
     let mut source = StoreSource { reader: &r, end };
     write_batch(
         &mut source,
@@ -973,11 +978,13 @@ fn cp3_tag_closure_carries_its_seal_and_chain() {
     source.insert(
         k,
         rdy_store::sync_stream::StreamRecord::Present {
+            encoding: 0,
             key: k,
             payload: enc(&unsorted),
         },
     );
     let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
         s.repo_id().unwrap().unwrap(),
         tag,
         vec![key(kinds::TAG, tag)],
@@ -1430,7 +1437,12 @@ fn edited_upload(
 ) -> PathBuf {
     let (mut records, mut order) = closure_records(&b.s, tag);
     edit(&mut records, &mut order);
-    let header = StreamHeader::tag_history(b.s.repo_id().unwrap().unwrap(), tag, vec![]);
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        b.s.repo_id().unwrap().unwrap(),
+        tag,
+        vec![],
+    );
     let path = b.dir.path().join(name);
     write_batch(&mut records, &header, &order, File::create(&path).unwrap()).unwrap();
     check_batch(File::open(&path).unwrap()).unwrap();
@@ -1445,7 +1457,11 @@ fn present<T: serde::Serialize>(
     let k = key(kind, Hash::of(&payload));
     (
         k,
-        rdy_store::sync_stream::StreamRecord::Present { key: k, payload },
+        rdy_store::sync_stream::StreamRecord::Present {
+            encoding: 0,
+            key: k,
+            payload,
+        },
     )
 }
 
@@ -1815,7 +1831,12 @@ fn cp10_landing_plans_carry_the_approved_binding_after_later_answers() {
     let (mut records, mut order) = closure_records(&s, tag);
     replace_seal(&mut records, &mut order, sealed.id(), &forgetful);
     let bad = _d.path().join("forgetful.rdysync");
-    let header = StreamHeader::tag_history(s.repo_id().unwrap().unwrap(), tag, vec![]);
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        s.repo_id().unwrap().unwrap(),
+        tag,
+        vec![],
+    );
     write_batch(&mut records, &header, &order, File::create(&bad).unwrap()).unwrap();
     let rule = format!("plan {}: invalid chain", forgetful.id());
     let before = holder_state(&h);
@@ -2085,7 +2106,12 @@ fn cp3_fix1_impossible_kind_outcome_pairs_are_refused() {
         let (mut records, mut order) = closure_records(&b.s, tag);
         replace_seal(&mut records, &mut order, b.seal, &x);
         let path = b.dir.path().join(format!("outcome-{n}.rdysync"));
-        let header = StreamHeader::tag_history(b.s.repo_id().unwrap().unwrap(), tag, vec![]);
+        let header = StreamHeader::tag_history(
+            rdy_store::format::baseline_features(),
+            b.s.repo_id().unwrap().unwrap(),
+            tag,
+            vec![],
+        );
         write_batch(&mut records, &header, &order, File::create(&path).unwrap()).unwrap();
         let rule = format!("plan {}: invalid seal", x.id());
         refused_upload(&mut h, &b, &path, &rule, true);

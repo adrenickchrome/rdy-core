@@ -72,6 +72,13 @@ pub enum RecordError {
     /// `16777216 record bytes`.
     #[error("{maximum} {name}")]
     Limit { name: &'static str, maximum: u64 },
+    /// A versioned frame names an encoding version its kind does not register (`crate::codec`).
+    #[error("unknown encoding version")]
+    UnknownVersion,
+    /// A versioned frame names version 0, which only an unmarked frame may have
+    /// (`crate::codec`).
+    #[error("noncanonical encoding version")]
+    NoncanonicalVersion,
 }
 
 impl RecordError {
@@ -98,7 +105,7 @@ pub enum TryDecodeError {
 
 /// The first bound of every typed record: at most [`MAX_RECORD_BYTES`] encoded bytes, else the
 /// [`RECORD_BYTES`] limit. [`decode`], [`try_decode`], [`check`] and [`fits`] share it.
-fn record_len(len: usize) -> Result<(), RecordError> {
+pub(crate) fn record_len(len: usize) -> Result<(), RecordError> {
     if len > MAX_RECORD_BYTES {
         return Err(RecordError::limit(RECORD_BYTES, MAX_RECORD_BYTES));
     }

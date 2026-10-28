@@ -84,8 +84,8 @@ pub const WRITE_FIX: &str = "Write these blocks in smaller groups, one write for
 /// The fix of a landing whose acceptance change would exceed one record.
 pub const ACCEPT_FIX: &str = "Land these decisions in smaller groups: propose each group from a view of its own, then land it.";
 
-/// Refuses a change whose encoding would exceed one record ([`rdy_store::bounded::fits`], the
-/// store's own record bound): `E_LIMIT` `<what> exceeds 16777216 record bytes`, with `fix`.
+/// Refuses a change whose stored frame would exceed one record ([`rdy_store::codec::fits_latest`]:
+/// the store's own record bound over the version prefix and the body): `E_LIMIT` `<what> exceeds 16777216 record bytes`, with `fix`.
 /// `change` is the final change, its deps included, exactly as the store writes it. A change is
 /// one record, so a write, a landing's acceptance or a card answer that grows past it is refused
 /// before anything is written, never split, and never written past the bound a later read or
@@ -95,7 +95,8 @@ pub(crate) fn change_fits(
     what: &str,
     fix: &str,
 ) -> Result<(), RdyError> {
-    rdy_store::bounded::fits(change).map_err(|e| match e {
+    // the stored frame: the change's latest encoding, its version prefix included
+    rdy_store::codec::fits_latest(rdy_store::kinds::CHANGE, change).map_err(|e| match e {
         rdy_store::bounded::RecordError::Limit { .. } => {
             RdyError::new(E_LIMIT, format!("{what} exceeds {e}"), fix)
         }

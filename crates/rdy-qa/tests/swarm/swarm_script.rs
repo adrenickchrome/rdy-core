@@ -86,6 +86,8 @@ fn sg3_the_outcome_table_is_closed() {
     assert!(allowed("land", "E_PROPOSAL_NOT_READY"));
     assert!(!allowed("land", "E_BLOCKING_TENSION"));
     assert!(!allowed("land", "E_CONFLICT_UNRESOLVED"));
+    // D-ME2HD, M3a Task 6: a landing whose re-keyed block changed in its view after the proposal
+    assert!(allowed("land", "E_STALE_BASE"));
     assert!(allowed("write_no_brief", "E_BRIEF_REQUIRED"));
     assert!(!allowed("write_no_brief", "E_STALE_BASE"));
     assert!(!allowed("write", "E_INTERNAL"));

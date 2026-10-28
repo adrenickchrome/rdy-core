@@ -3,7 +3,9 @@
 //!
 //! ec2 (RULING F2): the upgrade batch of a log with no repo id gives it one.
 use rdy_store::dump::{DumpBatch, DumpItem, DumpReader, Frame};
-use rdy_store::format::{self, Format, REF_STORE_FORMAT, STORE_FORMAT, encode_u32};
+use rdy_store::format::{
+    self, DumpStore, REF_STORE_FEATURES, REF_STORE_FORMAT, baseline_features, encode_u32,
+};
 use rdy_store::ingest::Ingest;
 use rdy_store::kinds::{self, BatchCommit, RefUpdate};
 use rdy_store::meta::REF_REPO_ID;
@@ -73,8 +75,8 @@ fn dl4_an_ingested_log_is_the_source_log_byte_for_byte() {
     ingest(&to, &batches(&s)).unwrap();
     assert_eq!(segments(&to), segments(&base.path().join("src")));
     assert_eq!(
-        std::fs::read(to.join("FORMAT")).unwrap(),
-        std::fs::read(base.path().join("src/FORMAT")).unwrap()
+        std::fs::read(to.join("FEATURES")).unwrap(),
+        std::fs::read(base.path().join("src/FEATURES")).unwrap()
     );
 }
 
@@ -207,25 +209,21 @@ fn frames_after(s: &Store, from: Location) -> Vec<(u8, Vec<u8>)> {
 
 #[test]
 fn dl8_a_log_of_an_older_store_format_gets_one_upgrade_batch() {
-    // FW-UP1 in its smallest form: a log of an older store format keeps every byte, and one
-    // logged batch after it sets `meta/store_format` to this rdy's. The older number is forced:
-    // no older dump format exists yet.
+    // FW-UP1 in its smallest form: a log of a scalar store format (the frozen (2, 15) pair)
+    // keeps every byte, and one logged batch after it sets `meta/store_features` to the
+    // baseline features; its historical `meta/store_format` stays
     let base = tempfile::tempdir().unwrap();
-    let mut s = rolling_store(base.path());
-    let older = STORE_FORMAT - 1;
-    s.set_refs_unchecked_for_tests(vec![(REF_STORE_FORMAT.into(), encode_u32(older))])
-        .unwrap();
-    let (src_end, bs) = (s.log_end(), batches(&s));
-    let src = segments(&base.path().join("src"));
-    // without the upgrade batch, the log names the older format and an open refuses it
+    let (bs, src_end) = fixture_batches("v2-s15.rdydump");
+    // without the upgrade batch, the log names only the scalar format and an open refuses it
     let plain = base.path().join("plain");
     ingest(&plain, &bs).unwrap();
     let e = Store::open(&plain).err().expect("an older log is refused");
     assert!(
-        matches!(&e, StoreError::Format { message, .. } if message.contains(&format!("has store format {older}"))),
+        matches!(&e, StoreError::Format { message, .. } if message == "store format 15 predates feature-based stores"),
         "{e}"
     );
-    // with it, the store opens at this rdy's format
+    let src = segments(&plain);
+    // with it, the store opens as a feature store
     let to = base.path().join("dst");
     let mut i = Ingest::create(&to).unwrap();
     for (n, b) in bs.iter().enumerate() {
@@ -236,7 +234,10 @@ fn dl8_a_log_of_an_older_store_format_gets_one_upgrade_batch() {
         src_end,
         "the dump's batches end where the source ends"
     );
-    assert!(i.upgrade(older).unwrap(), "an upgrade batch is appended");
+    assert!(
+        i.upgrade(&DumpStore::Legacy(15)).unwrap(),
+        "an upgrade batch is appended"
+    );
     let report = i.finish().unwrap();
     assert_eq!(report.batches, bs.len() as u64, "the dump's batches only");
     assert!(
@@ -244,8 +245,8 @@ fn dl8_a_log_of_an_older_store_format_gets_one_upgrade_batch() {
         "the source log is kept byte for byte"
     );
     assert_eq!(
-        std::fs::read(to.join("FORMAT")).unwrap(),
-        Format::CURRENT.to_text().into_bytes()
+        std::fs::read(to.join("FEATURES")).unwrap(),
+        baseline_features().to_text().into_bytes()
     );
     let t = Store::open(&to).unwrap();
     assert_eq!(report.end, t.log_end());
@@ -256,15 +257,16 @@ fn dl8_a_log_of_an_older_store_format_gets_one_upgrade_batch() {
     assert_eq!(
         u,
         RefUpdate {
-            name: REF_STORE_FORMAT.into(),
-            value: encode_u32(STORE_FORMAT),
+            name: REF_STORE_FEATURES.into(),
+            value: baseline_features().to_json(),
             at: src_end,
         }
     );
     assert_eq!(after[1].0, kinds::BATCH_COMMIT);
     assert_eq!(
         t.reader().refs_with_prefix(REF_STORE_FORMAT).unwrap(),
-        vec![(REF_STORE_FORMAT.to_string(), encode_u32(STORE_FORMAT))]
+        vec![(REF_STORE_FORMAT.to_string(), encode_u32(15))],
+        "the historical scalar ref stays"
     );
 }
 
@@ -277,7 +279,11 @@ fn dl8_a_log_of_this_store_format_gets_no_upgrade_batch() {
     for (n, b) in batches(&s).iter().enumerate() {
         i.batch(n as u64, b).unwrap();
     }
-    assert!(!i.upgrade(STORE_FORMAT).unwrap(), "nothing is appended");
+    assert!(
+        !i.upgrade(&DumpStore::Features(baseline_features()))
+            .unwrap(),
+        "nothing is appended"
+    );
     assert_eq!(i.finish().unwrap().end, s.log_end());
     assert_eq!(segments(&to), segments(&base.path().join("src")));
 }
@@ -291,10 +297,9 @@ fn dl8_a_log_of_a_newer_store_format_is_refused() {
     for (n, b) in batches(&s).iter().enumerate() {
         i.batch(n as u64, b).unwrap();
     }
-    let newer = STORE_FORMAT + 1;
-    let e = i.upgrade(newer).unwrap_err();
+    let e = i.upgrade(&DumpStore::Legacy(19)).unwrap_err();
     assert!(
-        matches!(&e, StoreError::Dump { what, .. } if *what == format!("store format {newer} is newer than this rdy's store format {STORE_FORMAT}")),
+        matches!(&e, StoreError::Dump { what, .. } if what == "store format 19 is newer than the last scalar store format 18"),
         "{e}"
     );
     assert_eq!(i.end(), s.log_end(), "nothing is appended");
@@ -325,7 +330,10 @@ fn upgraded_s11(to: &Path) -> Location {
         i.batch(n as u64, b).unwrap();
     }
     assert_eq!(i.end(), log_end, "the fixture's batches end at its log end");
-    assert!(i.upgrade(11).unwrap(), "an upgrade batch is appended");
+    assert!(
+        i.upgrade(&DumpStore::Legacy(11)).unwrap(),
+        "an upgrade batch is appended"
+    );
     i.finish().unwrap();
     log_end
 }
@@ -341,8 +349,8 @@ fn ec2_an_upgrade_of_a_log_with_no_repo_id_writes_the_format_and_a_new_repo_id_i
     assert_eq!(after.len(), 3, "two ref frames and one marker: {after:?}");
     assert_eq!(after[0].0, kinds::REF_UPDATE);
     let f: RefUpdate = postcard::from_bytes(&after[0].1).unwrap();
-    assert_eq!(f.name, REF_STORE_FORMAT);
-    assert_eq!(f.value, encode_u32(STORE_FORMAT));
+    assert_eq!(f.name, REF_STORE_FEATURES);
+    assert_eq!(f.value, baseline_features().to_json());
     assert_eq!(after[1].0, kinds::REF_UPDATE);
     let r: RefUpdate = postcard::from_bytes(&after[1].1).unwrap();
     assert_eq!(r.name, REF_REPO_ID);
@@ -387,7 +395,7 @@ fn ec2_an_upgrade_of_a_log_that_has_a_repo_id_writes_only_the_format() {
     let base = tempfile::tempdir().unwrap();
     let mut s = rolling_store(base.path());
     let id = s.reader().get_ref(REF_REPO_ID).unwrap().expect("a repo id");
-    let older = STORE_FORMAT - 1;
+    let older = format::LAST_SCALAR_STORE_FORMAT;
     s.set_refs_unchecked_for_tests(vec![(REF_STORE_FORMAT.into(), encode_u32(older))])
         .unwrap();
     let (src_end, bs) = (s.log_end(), batches(&s));
@@ -396,7 +404,10 @@ fn ec2_an_upgrade_of_a_log_that_has_a_repo_id_writes_only_the_format() {
     for (n, b) in bs.iter().enumerate() {
         i.batch(n as u64, b).unwrap();
     }
-    assert!(i.upgrade(older).unwrap(), "an upgrade batch is appended");
+    assert!(
+        i.upgrade(&DumpStore::Legacy(older)).unwrap(),
+        "an upgrade batch is appended"
+    );
     i.finish().unwrap();
     let t = Store::open(&to).unwrap();
     let after = frames_after(&t, src_end);
@@ -405,8 +416,8 @@ fn ec2_an_upgrade_of_a_log_that_has_a_repo_id_writes_only_the_format() {
     assert_eq!(
         u,
         RefUpdate {
-            name: REF_STORE_FORMAT.into(),
-            value: encode_u32(STORE_FORMAT),
+            name: REF_STORE_FEATURES.into(),
+            value: baseline_features().to_json(),
             at: src_end,
         }
     );
@@ -417,9 +428,9 @@ fn ec2_an_upgrade_of_a_log_that_has_a_repo_id_writes_only_the_format() {
 
 #[test]
 fn ec2_check_refuses_a_store_with_no_repo_id() {
-    // The v1-s11 batches with no upgrade batch, the log's format forced to the current one by
-    // one hand-made batch of `meta/store_format` alone, and `FORMAT` forced to it: a current
-    // store format log with no repo id.
+    // The v1-s11 batches with no upgrade batch, the log's features forced to the baseline by
+    // one hand-made batch of `meta/store_features` alone, and `FORMAT` forced to them: a feature
+    // store log with no repo id.
     let base = tempfile::tempdir().unwrap();
     let to = base.path().join("dst");
     let (bs, log_end) = fixture_batches("v1-s11.rdydump");
@@ -428,8 +439,8 @@ fn ec2_check_refuses_a_store_with_no_repo_id() {
         i.batch(n as u64, b).unwrap();
     }
     let payload = postcard::to_allocvec(&RefUpdate {
-        name: REF_STORE_FORMAT.into(),
-        value: encode_u32(STORE_FORMAT),
+        name: REF_STORE_FEATURES.into(),
+        value: baseline_features().to_json(),
         at: log_end,
     })
     .unwrap();
@@ -445,13 +456,7 @@ fn ec2_check_refuses_a_store_with_no_repo_id() {
     };
     i.batch(bs.len() as u64, &forced).unwrap();
     i.finish().unwrap();
-    format::write_format_file(
-        &to,
-        Format {
-            store_format: STORE_FORMAT,
-        },
-    )
-    .unwrap();
+    format::write_format_file(&to, &baseline_features()).unwrap();
     let t = Store::open(&to).unwrap();
     assert_eq!(t.reader().get_ref(REF_REPO_ID).unwrap(), None);
     let e = t.check_objects().unwrap_err();

@@ -27,7 +27,7 @@ use rdy_store::take_batch::{BatchTaken, TagChoice, TakeError, UploadFacts, Uploa
 use rdy_store::{Store, StoreError};
 use redaction_fixture::{
     Fixture, FixtureOptions, ORIGIN, Proof, RequestSpec, authorized_batch_fixture, enc,
-    segment_bytes,
+    residue_frame, segment_bytes,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -124,7 +124,12 @@ fn upload(path: &Path, tag: Hash, out: &Path) -> Vec<File> {
     let s = Store::open(path).unwrap();
     let r = s.reader();
     let c = closure(&r, tag, &BTreeSet::new()).unwrap();
-    let header = StreamHeader::tag_history(r.repo_id().unwrap().unwrap(), tag, c.prerequisites);
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        r.repo_id().unwrap().unwrap(),
+        tag,
+        c.prerequisites,
+    );
     let mut source = StoreSource {
         reader: &r,
         end: END_OF_LOG,
@@ -158,9 +163,14 @@ fn frames(h: &Store) -> Vec<(Location, u8, Hash, bool)> {
     let mut out = vec![];
     h.reader()
         .for_each_record_from(ORIGIN, h.log_end(), |loc, f, _| {
+            // by the logical kind (`rdy_store::codec`)
             out.push(match f {
-                StoredFrame::Present { kind, hash, .. } => (loc, kind, hash, false),
-                StoredFrame::Dropped { kind, hash, .. } => (loc, kind, hash, true),
+                StoredFrame::Present { kind, hash, .. } => {
+                    (loc, rdy_store::codec::logical_kind(kind), hash, false)
+                }
+                StoredFrame::Dropped { kind, hash, .. } => {
+                    (loc, rdy_store::codec::logical_kind(kind), hash, true)
+                }
             });
             Ok(())
         })
@@ -307,12 +317,12 @@ fn ha11_all_local_copies_of_approved_tuples_are_removed() {
     let b = base(0);
     let h = Store::open(&b.holder).unwrap();
     let secret_bytes = h.get_raw(&b.secret.version_hash()).unwrap().1;
-    let change_bytes = h.get_kind(kinds::CHANGE, &b.change).unwrap();
+    let (change_kind, change_bytes) = h.get_kind_raw(kinds::CHANGE, &b.change).unwrap();
     drop(h);
     // a second physical copy of each removed object, in a later batch of the holder's log
     append_raw(
         &b.holder,
-        &[(kinds::BLOCK, secret_bytes), (kinds::CHANGE, change_bytes)],
+        &[(kinds::BLOCK, secret_bytes), (change_kind, change_bytes)],
     );
     let mut h = Store::open(&b.holder).unwrap();
     assert_eq!(copies(&h, b.secret_key()).len(), 2);
@@ -450,7 +460,7 @@ fn hc1_a_holder_dump_names_its_lowest_local_span() {
     assert_eq!(tally.resolved(&r, end).unwrap(), want, "the writer's facts");
     assert_eq!(tally.facts().unwrap(), want, "the file's facts");
     let header = DumpHeader {
-        store_format: rdy_store::format::STORE_FORMAT,
+        store: rdy_store::format::DumpStore::Features(rdy_store::format::baseline_features()),
         log_end: end,
         rdy: "test".into(),
         chain: Some(DumpChainHeader::full(
@@ -663,7 +673,11 @@ fn ha11_reindex_rebuilds_logical_authorization_without_maps() {
     for (n, batch) in batches.iter().enumerate() {
         ingest.batch(n as u64 + 1, batch).unwrap();
     }
-    ingest.upgrade(rdy_store::format::STORE_FORMAT).unwrap();
+    ingest
+        .upgrade(&rdy_store::format::DumpStore::Features(
+            rdy_store::format::baseline_features(),
+        ))
+        .unwrap();
     ingest.finish().unwrap();
     let l = Store::open(&loaded).unwrap();
     assert_eq!(reads(&l).0, want.0);
@@ -924,7 +938,7 @@ fn conflicting(b: &Base, name: &str, edit: SpanEdit) -> (Vec<File>, Hash, Items)
     let rid = Hash::of(&request_bytes);
     let mut landing = b.fixture.landing_record.clone().unwrap();
     landing.checks = vec![rid];
-    let landing_bytes = enc(&landing);
+    let (landing_kind, landing_bytes) = rdy_store::codec::item(kinds::LANDING, &landing).unwrap();
     let lid = Hash::of(&landing_bytes);
     let apply_bytes = enc(&RedactionApply {
         request: rid,
@@ -941,7 +955,7 @@ fn conflicting(b: &Base, name: &str, edit: SpanEdit) -> (Vec<File>, Hash, Items)
     let tid = Hash::of(&tag_bytes);
     records.extend([
         (kinds::REDACTION, request_bytes),
-        (kinds::LANDING, landing_bytes),
+        (landing_kind, landing_bytes),
         (kinds::REDACTION_APPLY, apply_bytes),
     ]);
     // the batch, ending with the tag; its prerequisites are every key a record names that the
@@ -956,7 +970,7 @@ fn conflicting(b: &Base, name: &str, edit: SpanEdit) -> (Vec<File>, Hash, Items)
         .collect();
     let in_batch: BTreeSet<ObjectKey> = present
         .iter()
-        .map(|(k, p)| key(*k, Hash::of(p)))
+        .map(|(k, p)| key(rdy_store::codec::logical_kind(*k), Hash::of(p)))
         .chain([secret])
         .collect();
     for (kind, payload) in &present {
@@ -981,11 +995,13 @@ fn conflicting(b: &Base, name: &str, edit: SpanEdit) -> (Vec<File>, Hash, Items)
         order.push(k);
         source.insert(k, r);
     };
+    // a record by its logical kind, with the encoding its raw frame kind gives
     let present_record = |kind: u8, payload: &Vec<u8>| {
-        let k = key(kind, Hash::of(payload));
+        let k = key(rdy_store::codec::logical_kind(kind), Hash::of(payload));
         (
             k,
             StreamRecord::Present {
+                encoding: rdy_store::codec::split(kind, payload).unwrap().version,
                 key: k,
                 payload: payload.clone(),
             },
@@ -998,6 +1014,7 @@ fn conflicting(b: &Base, name: &str, edit: SpanEdit) -> (Vec<File>, Hash, Items)
     put(
         secret,
         StreamRecord::Dropped {
+            encoding: 0,
             key: secret,
             original_len: len,
             apply: aid,
@@ -1009,7 +1026,12 @@ fn conflicting(b: &Base, name: &str, edit: SpanEdit) -> (Vec<File>, Hash, Items)
         put(k, r);
     }
     let repo = Store::open(&b.src).unwrap().repo_id().unwrap().unwrap();
-    let header = StreamHeader::tag_history(repo, tid, prerequisites.into_iter().collect());
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        repo,
+        tid,
+        prerequisites.into_iter().collect(),
+    );
     let out = b.dir.path().join(format!("{name}.rdysync"));
     write_batch(&mut source, &header, &order, File::create(&out).unwrap()).unwrap();
     (vec![File::open(&out).unwrap()], lid, records)
@@ -1026,9 +1048,9 @@ fn other_residue(s: &mut rdy_model::redaction::DropSpan) -> Items {
     let block = block("b-00001", CANARY);
     let mut res = rdy_model::redaction::BlockResidue::of(&block);
     res.order = "W".into();
-    let bytes = enc(&rdy_model::redaction::RedactionResidue::Block(res));
-    s.residue = Some(Hash::of(&bytes));
-    vec![(kinds::REDACTION_RESIDUE, bytes)]
+    let frame = residue_frame(&rdy_model::redaction::RedactionResidue::Block(res));
+    s.residue = Some(Hash::of(&frame.1));
+    vec![frame]
 }
 
 #[test]
@@ -1151,4 +1173,163 @@ fn ha11_complete_retry_fits_the_receiver_caps() {
         );
         assert_eq!(segment_bytes(&b.holder), before);
     }
+}
+
+/// The raw kind of every dropped frame of `k` in the store at `h`.
+fn dropped_raw_kinds(h: &Store, k: ObjectKey) -> Vec<(Location, u8)> {
+    let mut out = vec![];
+    h.reader()
+        .for_each_record_from(ORIGIN, h.log_end(), |loc, f, _| {
+            if let StoredFrame::Dropped { kind, hash, .. } = f
+                && key(rdy_store::codec::logical_kind(kind), hash) == k
+            {
+                out.push((loc, kind));
+            }
+            Ok(())
+        })
+        .unwrap();
+    out
+}
+
+/// The dropped record a store source gives for `k`: its encoding.
+fn dropped_encoding_of(path: &Path, k: ObjectKey) -> u16 {
+    let s = Store::open(path).unwrap();
+    let r = s.reader();
+    let mut source = StoreSource {
+        reader: &r,
+        end: END_OF_LOG,
+    };
+    match source.record(k).unwrap() {
+        Some(rdy_store::sync_stream::StreamRecord::Dropped { encoding, .. }) => encoding,
+        other => panic!("{k}: {other:?}"),
+    }
+}
+
+/// A store source whose dropped changes claim encoding 0, as an older writer wrote them.
+struct UnmarkedDrops<'a>(StoreSource<'a>);
+
+impl ObjectSource for UnmarkedDrops<'_> {
+    fn record(
+        &mut self,
+        key: ObjectKey,
+    ) -> Result<Option<rdy_store::sync_stream::StreamRecord>, StreamError> {
+        Ok(match self.0.record(key)? {
+            Some(rdy_store::sync_stream::StreamRecord::Dropped {
+                key,
+                original_len,
+                apply,
+                residue,
+                ..
+            }) => Some(rdy_store::sync_stream::StreamRecord::Dropped {
+                key,
+                encoding: 0,
+                original_len,
+                apply,
+                residue,
+            }),
+            other => other,
+        })
+    }
+}
+
+/// ok4: a removed change of encoding 1 keeps its encoding on the sync path. The project's
+/// frame, the stream's dropped record and the holder's frame all say encoding 1 (raw kind
+/// 0x82), as the residue's source encoding does; a re-export from the holder says it again. A
+/// dropped record that says another encoding than its residue, and a holder frame whose header
+/// lost its marker, are refused.
+#[test]
+fn ok4_a_removed_new_change_keeps_its_marker_through_a_take() {
+    let b = base(0);
+    let marked = rdy_store::codec::raw_kind(kinds::CHANGE, 1);
+    assert_eq!(marked, 0x82);
+    let project = Store::open(&b.src).unwrap();
+    let ours = dropped_raw_kinds(&project, b.change_key());
+    assert_eq!(ours.len(), 1);
+    assert_eq!(ours[0].1, marked, "the project's dropped change is marked");
+    drop(project);
+    assert_eq!(dropped_encoding_of(&b.src, b.change_key()), 1);
+    // a new holder takes v2, whose closure holds the change as a dropped record
+    let fresh = b.dir.path().join("fresh");
+    let repo = Store::open(&b.src).unwrap().repo_id().unwrap().unwrap();
+    let mut h = Store::create_holder(&fresh, repo).unwrap();
+    b.take_v2(&mut h).unwrap();
+    let held = dropped_raw_kinds(&h, b.change_key());
+    assert_eq!(held.len(), 1);
+    assert_eq!(
+        held[0].1, marked,
+        "the holder's dropped change keeps the marker"
+    );
+    h.reader().check_holder().unwrap();
+    drop(h);
+    assert_eq!(dropped_encoding_of(&fresh, b.change_key()), 1);
+    // a stream whose dropped change says encoding 0 is refused before a byte is written
+    let file = b.dir.path().join("unmarked.rdysync");
+    {
+        let s = Store::open(&b.src).unwrap();
+        let r = s.reader();
+        let c = closure(&r, b.v2.0, &BTreeSet::new()).unwrap();
+        let header = StreamHeader::tag_history(
+            rdy_store::format::baseline_features(),
+            repo,
+            b.v2.0,
+            c.prerequisites,
+        );
+        let mut source = UnmarkedDrops(StoreSource {
+            reader: &r,
+            end: END_OF_LOG,
+        });
+        write_batch(
+            &mut source,
+            &header,
+            &c.records,
+            File::create(&file).unwrap(),
+        )
+        .unwrap();
+    }
+    let other = b.dir.path().join("other");
+    let mut h = Store::create_holder(&other, repo).unwrap();
+    let before = segment_bytes(&other);
+    let e = match take(&mut h, &[File::open(&file).unwrap()], "v2", b.v2.1) {
+        Err(TakeError::Stream(e)) => e,
+        got => panic!("an unmarked drop of a marked change was taken: {got:?}"),
+    };
+    assert!(e.message.contains("invalid removal proof"), "{e:?}");
+    assert_eq!(segment_bytes(&other), before);
+    drop(h);
+    // a holder frame whose header lost its marker fails the holder's own checks
+    let (loc, _) = held[0];
+    let seg = fresh
+        .join("segments")
+        .join(format!("seg-{:06}.log", loc.segment));
+    let mut bytes = std::fs::read(&seg).unwrap();
+    assert_eq!(bytes[loc.offset as usize + 4], marked);
+    bytes[loc.offset as usize + 4] = kinds::CHANGE;
+    std::fs::write(&seg, bytes).unwrap();
+    let refused = Store::open(&fresh).and_then(|h| h.reader().check_holder().map(|_| ()));
+    assert!(
+        refused.is_err(),
+        "a dropped change frame without its marker is accepted"
+    );
+}
+
+/// ok4: one take of two files of the same tag, one that holds an encoding-1 change present and
+/// one that holds its approved removal, takes the change as its drop.
+#[test]
+fn ok4_a_present_new_change_and_its_removal_in_one_take() {
+    let b = base(0);
+    // `base` wrote v1's upload before the removal: the change is present in it
+    let first = File::open(b.dir.path().join("v1-first.rdysync")).unwrap();
+    let after = b.file(b.v1.0, "v1-after");
+    let repo = Store::open(&b.src).unwrap().repo_id().unwrap().unwrap();
+    let fresh = b.dir.path().join("fresh");
+    let mut h = Store::create_holder(&fresh, repo).unwrap();
+    let mut files = vec![first];
+    files.extend(after);
+    let got = take(&mut h, &files, "v1", b.v1.1).unwrap();
+    assert_eq!(got.redacted_objects, 2);
+    let held = dropped_raw_kinds(&h, b.change_key());
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].1, rdy_store::codec::raw_kind(kinds::CHANGE, 1));
+    assert!(!holds_canary(&fresh));
+    h.reader().check_holder().unwrap();
 }

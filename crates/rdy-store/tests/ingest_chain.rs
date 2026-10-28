@@ -8,7 +8,7 @@ use rdy_store::Store;
 use rdy_store::dump::*;
 use rdy_store::dump_chain::{BatchMarker, DumpChainHeader};
 use rdy_store::dump_scan::{ChainSource, ScanPlan, scan};
-use rdy_store::format::{REF_STORE_FORMAT, STORE_FORMAT, decode_u32};
+use rdy_store::format::{DumpStore, REF_STORE_FEATURES, baseline_features};
 use rdy_store::ingest::{Ingest, MAX_PENDING_DROPS, MAX_UNAUTHORIZED_BYTES};
 use rdy_store::kinds::{self, RefUpdate};
 use rdy_store::segment::Location;
@@ -44,7 +44,7 @@ fn full_dump(s: &Store) -> Vec<u8> {
     let end_batch = r.batch_marker_at(end).unwrap().unwrap_or(BatchMarker::ZERO);
     let repo = r.repo_id().unwrap().unwrap();
     let header = DumpHeader {
-        store_format: STORE_FORMAT,
+        store: rdy_store::format::DumpStore::Features(rdy_store::format::baseline_features()),
         log_end: end,
         rdy: "test".into(),
         chain: Some(DumpChainHeader::full(repo, end_batch)),
@@ -106,7 +106,7 @@ fn hc7_older_ingest_gets_one_upgrade_after_all_batches() {
     // chain would, and the one upgrade comes after the last of them
     let file = fixture("v2-s15.rdydump");
     let (format, header, batches) = batches_of(&file);
-    assert_eq!((format, header.store_format), (2, 15));
+    assert_eq!((format, &header.store), (2, &DumpStore::Legacy(15)));
     assert!(batches.len() >= 3, "the fixture holds batches");
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store");
@@ -132,14 +132,14 @@ fn hc7_older_ingest_gets_one_upgrade_after_all_batches() {
     }
     assert_eq!(ingest.end(), header.log_end);
     ingest.append_carried(&[], &[]).unwrap();
-    assert!(ingest.upgrade(header.store_format).unwrap());
+    assert!(ingest.upgrade(&header.store).unwrap());
     let report = ingest.finish().unwrap();
     assert_eq!(report.batches, batches.len() as u64);
     assert_eq!(
         report.frames,
         batches.iter().map(|b| b.frames.len() as u64).sum::<u64>()
     );
-    // the tail after the source log: exactly one batch, which names this rdy's store format
+    // the tail after the source log: exactly one batch, which names the baseline features
     let s = Store::open(&store).unwrap();
     let mut tail = vec![];
     s.reader()
@@ -158,8 +158,8 @@ fn hc7_older_ingest_gets_one_upgrade_after_all_batches() {
         })
         .collect();
     assert_eq!(refs.len(), 1, "the source holds its repo id: {refs:?}");
-    assert_eq!(refs[0].name, REF_STORE_FORMAT);
-    assert_eq!(decode_u32(&refs[0].value), Some(STORE_FORMAT));
+    assert_eq!(refs[0].name, REF_STORE_FEATURES);
+    assert_eq!(refs[0].value, baseline_features().to_json());
     assert_eq!(refs[0].at, header.log_end);
     // the source log is the store's prefix, byte for byte
     let mut source = vec![];

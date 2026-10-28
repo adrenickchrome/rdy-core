@@ -66,9 +66,12 @@ pub fn frames(signatures: &[Signature]) -> Result<Vec<(u8, Vec<u8>)>, StoreError
     out.try_reserve_exact(signatures.len())
         .map_err(|_| over(format_args!("{MAX_SIGNATURE} bytes")))?;
     for g in signatures {
-        let bytes = encode_bounded(g)?;
-        decode_new(&Hash::of(&bytes), &bytes)?;
-        out.push((kinds::SIGNATURE, bytes));
+        let body = encode_bounded(g)?;
+        let (kind, payload) = crate::codec::frame_latest(kinds::SIGNATURE, body);
+        let o =
+            crate::codec::split(kind, &payload).map_err(|_| invalid_record(&Hash::of(&payload)))?;
+        decode_new(&Hash::of(&payload), o.body)?;
+        out.push((kind, payload));
     }
     Ok(out)
 }
@@ -103,15 +106,19 @@ impl StoreReader {
     /// frames of `items` before it.
     pub(crate) fn check_new_signatures(&self, items: &[(u8, Vec<u8>)]) -> Result<(), StoreError> {
         for (i, (kind, payload)) in items.iter().enumerate() {
-            if *kind != kinds::SIGNATURE {
+            if crate::codec::logical_kind(*kind) != kinds::SIGNATURE {
                 continue;
             }
-            if payload.len() > MAX_SIGNATURE {
+            let body = crate::codec::split(*kind, payload)
+                .map_err(|_| invalid_record(&Hash::of(payload)))?
+                .body;
+            if body.len() > MAX_SIGNATURE {
                 return Err(over(format_args!("{MAX_SIGNATURE} bytes")));
             }
-            let g = decode_new(&Hash::of(payload), payload)?;
+            let g = decode_new(&Hash::of(payload), body)?;
             let earlier = items[..i].iter().any(|(k, p)| {
-                (*k == kinds::LANDING || *k == kinds::TAG) && Hash::of(p) == g.subject
+                matches!(crate::codec::logical_kind(*k), kinds::LANDING | kinds::TAG)
+                    && Hash::of(p) == g.subject
             });
             if !earlier
                 && !self.has_kind(kinds::LANDING, &g.subject)?

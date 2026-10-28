@@ -1,9 +1,11 @@
-//! Store format (plan M2.0 fmt1, plan M2a1 fmt2): one number, in the log and mirrored in FORMAT;
-//! a store of any other format is refused before anything is written; the store is .rdy/store.
+//! Store format (plan M2.0 fmt1, D-WWAK7): the feature manifest, in the log and mirrored in
+//! FORMAT; a store this rdy may not write is refused before anything is written; the store is
+//! .rdy/store.
 use rdy_engine::{Rdy, RdyError};
 use rdy_qa::fixtures::*;
 use rdy_store::format::{
-    FIRST_DUMP_STORE_FORMAT, REF_STORE_FORMAT, STORE_FORMAT, fix_for, move_with_dump,
+    FIRST_DUMP_STORE_FORMAT, FeatureClass, LAST_SCALAR_STORE_FORMAT, REF_STORE_FEATURES,
+    StoreFeature, StoreFeatures, baseline_features, check_features, fix_for, scalar_refusal,
 };
 use rdy_store::index::Index;
 use rdy_store::segment::SegmentLog;
@@ -12,11 +14,19 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 const RE_CREATE: &str = "re-create it with this rdy";
-const NEWER_RDY: &str = "a newer rdy wrote this store: open it with that rdy or a later one";
 
-/// The FORMAT text of this binary's format.
+/// The FEATURES text of a new store: the baseline features (its FORMAT is the two scalar lines).
 fn current_text() -> String {
-    format!("rdy store format\nstore_format {STORE_FORMAT}\n")
+    baseline_features().to_text()
+}
+
+/// A manifest with one unknown incompatible feature of required version 99.0.0.
+fn newer() -> StoreFeatures {
+    StoreFeatures::of(vec![StoreFeature {
+        name: "future_x".into(),
+        class: FeatureClass::Incompatible,
+        required_rdy: "99.0.0".into(),
+    }])
 }
 
 /// Every path under `dir` with its contents (None for directories).
@@ -41,11 +51,15 @@ fn fmt1_a_new_store_records_its_format_in_the_log_and_in_format() {
     let s = Store::create(&dir).unwrap();
     assert_eq!(
         std::fs::read_to_string(dir.join("FORMAT")).unwrap(),
+        "rdy store format\nstore_format 19\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("FEATURES")).unwrap(),
         current_text()
     );
     assert_eq!(
-        s.get_ref(REF_STORE_FORMAT).unwrap(),
-        Some(STORE_FORMAT.to_string().into_bytes())
+        s.get_ref(REF_STORE_FEATURES).unwrap(),
+        Some(baseline_features().to_json())
     );
     assert_eq!(s.verify().unwrap(), 2, "one format batch of two refs");
     drop(s);
@@ -62,11 +76,11 @@ fn fmt1_format_refs_survive_reindex() {
     s.put_blob(b"x").unwrap();
     s.reindex().unwrap();
     assert_eq!(
-        s.get_ref(REF_STORE_FORMAT).unwrap(),
-        Some(STORE_FORMAT.to_string().into_bytes())
+        s.get_ref(REF_STORE_FEATURES).unwrap(),
+        Some(baseline_features().to_json())
     );
     assert_eq!(
-        std::fs::read_to_string(dir.join("FORMAT")).unwrap(),
+        std::fs::read_to_string(dir.join("FEATURES")).unwrap(),
         current_text()
     );
 }
@@ -113,7 +127,7 @@ fn refused(dir: &Path, what: &str, fix: &str) -> RdyError {
     assert_eq!(
         e.message,
         format!(
-            "this store was written by a different rdy build: {} {what}, and this rdy uses store format {STORE_FORMAT}",
+            "this store was written by a different rdy build: {} {what}, and this rdy uses feature-based stores",
             dir.display()
         )
     );
@@ -121,19 +135,32 @@ fn refused(dir: &Path, what: &str, fix: &str) -> RdyError {
     e
 }
 
+/// The refusal of a store with an unknown incompatible feature: its required build.
+fn refused_by_feature(dir: &Path) {
+    let e = Store::open(dir).err().expect("a newer store is refused");
+    let e = RdyError::from(e);
+    assert_eq!(e.code, "E_STORE_FORMAT", "{e}");
+    assert_eq!(e.message, "store feature future_x needs rdy 99.0.0");
+    assert_eq!(e.fix, "open the project with rdy 99.0.0 or later");
+}
+
 #[test]
 fn fmt2_a_store_of_a_newer_format_is_refused_before_anything_is_opened() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    Store::create(&dir).unwrap().put_blob(b"x").unwrap();
-    let newer = STORE_FORMAT + 1;
-    std::fs::write(
-        dir.join("FORMAT"),
-        format!("rdy store format\nstore_format {newer}\n"),
-    )
+    let mut s = Store::create(&dir).unwrap();
+    s.put_blob(b"x").unwrap();
+    // a newer rdy's store: its log's features ref and its FORMAT both name the feature (a FORMAT
+    // alone that lists more than its sealed log is a failed first use's leftover, and opens)
+    s.set_refs_unchecked_for_tests(vec![(
+        rdy_store::format::REF_STORE_FEATURES.into(),
+        newer().to_json(),
+    )])
     .unwrap();
+    drop(s);
+    rdy_store::format::write_format_file(&dir, &newer()).unwrap();
     let before = tree(&dir);
-    refused(&dir, &format!("has store format {newer}"), NEWER_RDY);
+    refused_by_feature(&dir);
     assert_eq!(tree(&dir), before, "nothing under the store changed");
 }
 
@@ -162,22 +189,22 @@ fn fmt2_a_log_that_says_another_format_is_refused() {
     let dir = base.path().join("s");
     Store::create(&dir)
         .unwrap()
-        .set_refs_unchecked_for_tests(vec![(REF_STORE_FORMAT.into(), b"2".to_vec())])
+        .set_refs_unchecked_for_tests(vec![(REF_STORE_FEATURES.into(), newer().to_json())])
         .unwrap();
     let seg = std::fs::read(dir.join("segments/seg-000000.log")).unwrap();
-    refused(&dir, "has store format 2", RE_CREATE);
+    refused_by_feature(&dir);
     assert_eq!(
         std::fs::read(dir.join("segments/seg-000000.log")).unwrap(),
         seg
     );
     assert_eq!(
-        std::fs::read_to_string(dir.join("FORMAT")).unwrap(),
+        std::fs::read_to_string(dir.join("FEATURES")).unwrap(),
         current_text()
     );
 }
 
-/// A marked log with no format ref under a FORMAT that names the current format: the index is built to find that
-/// out; the log is untouched.
+/// A marked log with no features ref under a FORMAT that names the baseline features: the index
+/// is built to find that out; the log is untouched.
 #[test]
 fn fmt2_a_log_with_frames_and_no_store_format_is_refused() {
     let base = tempfile::tempdir().unwrap();
@@ -192,9 +219,9 @@ fn fmt2_a_log_with_frames_and_no_store_format_is_refused() {
         .unwrap();
         log.sync().unwrap();
     }
-    std::fs::write(dir.join("FORMAT"), current_text()).unwrap();
+    rdy_store::format::write_format_file(&dir, &baseline_features()).unwrap();
     let seg = std::fs::read(dir.join("segments/seg-000000.log")).unwrap();
-    refused(&dir, "has a log with no store format", RE_CREATE);
+    refused(&dir, "has a log with no store features", RE_CREATE);
     assert_eq!(
         std::fs::read(dir.join("segments/seg-000000.log")).unwrap(),
         seg
@@ -305,7 +332,7 @@ fn assert_refused_as_another_build(e: RdyError, store: &Path) {
     assert_eq!(
         e.message,
         format!(
-            "this store was written by a different rdy build: {} has no FORMAT file, and this rdy uses store format {STORE_FORMAT}",
+            "this store was written by a different rdy build: {} has no FORMAT file, and this rdy uses feature-based stores",
             store.display()
         )
     );
@@ -390,7 +417,7 @@ fn fmt3_a_directory_that_is_not_a_store_is_never_claimed() {
     assert!(tree(&empty).is_empty());
     drop(Store::create(&empty).unwrap());
     assert_eq!(
-        std::fs::read_to_string(empty.join("FORMAT")).unwrap(),
+        std::fs::read_to_string(empty.join("FEATURES")).unwrap(),
         current_text()
     );
     drop(Store::open(&empty).unwrap());
@@ -403,13 +430,13 @@ fn fmt3_init_on_a_fresh_path_makes_a_format_3_store_that_reopens() {
     drop(Rdy::init(&proj, "rdy-standard").unwrap());
     let store = proj.join(".rdy/store");
     assert_eq!(
-        std::fs::read_to_string(store.join("FORMAT")).unwrap(),
+        std::fs::read_to_string(store.join("FEATURES")).unwrap(),
         current_text()
     );
     let r = Rdy::open(&proj).unwrap();
     assert_eq!(
-        r.store().get_ref(REF_STORE_FORMAT).unwrap(),
-        Some(STORE_FORMAT.to_string().into_bytes())
+        r.store().get_ref(REF_STORE_FEATURES).unwrap(),
+        Some(baseline_features().to_json())
     );
 }
 
@@ -468,42 +495,58 @@ fn hd2_an_index_without_the_format_ref_is_rebuilt_at_open() {
         .unwrap();
     let s = Store::open(&dir).expect("open rebuilds the index");
     assert_eq!(
-        s.get_ref(REF_STORE_FORMAT).unwrap(),
-        Some(STORE_FORMAT.to_string().into_bytes())
+        s.get_ref(REF_STORE_FEATURES).unwrap(),
+        Some(baseline_features().to_json())
     );
     assert_eq!(s.get_blob(&h).unwrap(), b"x");
 }
 
 #[test]
 fn dl2_a_store_of_an_older_dumpable_format_says_dump_and_load() {
-    // a store of format 10 reaches this case at this release (11 is current)
-    let next = STORE_FORMAT + 1;
-    // final-round1 ruling 2: the fix names the format found, not "the rdy that wrote this store"
-    // (rdy 0.2.0 wrote format 10 and has no rdy dump)
-    assert_eq!(
-        fix_for(10, next),
-        "close every session on this project; with rdy 0.3.0 or a later rdy that reads store format 10, run rdy dump --out <file>, then rdy serve --stop; move .rdy/store aside; then run rdy load <file> . with this rdy"
-    );
-    assert_eq!(fix_for(FIRST_DUMP_STORE_FORMAT, next), move_with_dump("10"));
-    assert_eq!(
-        fix_for(STORE_FORMAT, next),
-        move_with_dump(&STORE_FORMAT.to_string())
-    );
+    // every dumpable scalar format, 10 to 18, predates feature-based stores and moves with dump
+    // and load
+    let fix = "dump with the rdy that wrote this store, then load into a directory with no store";
+    assert_eq!(fix_for(FIRST_DUMP_STORE_FORMAT), fix);
+    assert_eq!(fix_for(LAST_SCALAR_STORE_FORMAT), fix);
+    let dir = std::path::Path::new("/s");
+    for n in [10, 15, 18] {
+        match scalar_refusal(dir, n) {
+            StoreError::Format { message, fix: f } => {
+                assert_eq!(
+                    message,
+                    format!("store format {n} predates feature-based stores")
+                );
+                assert_eq!(f, fix);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    // a scalar format past the last one is no build's
+    match scalar_refusal(dir, LAST_SCALAR_STORE_FORMAT + 1) {
+        StoreError::Format { message, fix } => {
+            assert_eq!(message, "store format 19 is not supported");
+            assert_eq!(fix, "open the project with the rdy build that wrote it");
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]
 fn dl2_a_store_from_before_dump_says_re_create() {
     assert_eq!(
-        fix_for(FIRST_DUMP_STORE_FORMAT - 1, STORE_FORMAT + 1),
+        fix_for(FIRST_DUMP_STORE_FORMAT - 1),
         "re-create it with this rdy"
     );
-    assert_eq!(fix_for(2, STORE_FORMAT), "re-create it with this rdy");
+    assert_eq!(fix_for(2), "re-create it with this rdy");
 }
 
 #[test]
 fn dl2_a_store_of_a_newer_format_says_use_a_newer_rdy() {
-    assert_eq!(
-        fix_for(STORE_FORMAT + 1, STORE_FORMAT),
-        "a newer rdy wrote this store: open it with that rdy or a later one"
-    );
+    match check_features(&newer()) {
+        Err(StoreError::Format { message, fix }) => {
+            assert_eq!(message, "store feature future_x needs rdy 99.0.0");
+            assert_eq!(fix, "open the project with rdy 99.0.0 or later");
+        }
+        other => panic!("{other:?}"),
+    }
 }

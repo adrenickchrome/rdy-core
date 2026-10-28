@@ -15,6 +15,34 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
+/// Whether `a` and `b` are two versions of one block that differ only by their order key (a
+/// redacted projection never does: its read identity is its own).
+fn differs_only_in_order(a: &Block, b: &Block) -> bool {
+    a.order != b.order
+        && a.read_identity.is_none()
+        && b.read_identity.is_none()
+        && Block {
+            order: b.order.clone(),
+            ..a.clone()
+        } == *b
+}
+
+/// The order-only edits `StoreReader::order_only_pairs` found: (canon's version, op base, op's
+/// new version).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OrderOnlyEdits(BTreeSet<(Hash, Hash, Hash)>);
+
+impl OrderOnlyEdits {
+    /// Whether `op` is an order-only edit against canon's version `v` (`merge::merge`'s
+    /// `order_only`).
+    pub fn holds(&self, v: &Hash, op: &Op) -> bool {
+        match op {
+            Op::Update { base, block } => self.0.contains(&(*v, *base, block.version_hash())),
+            _ => false,
+        }
+    }
+}
+
 /// The frames of one view commit (`Store::commit_parts`): the changes' frames, then the view ops
 /// and the head ref, and each change's id with the position of its `CHANGE` frame in `changes`.
 pub(crate) struct CommitParts {
@@ -43,6 +71,12 @@ pub(crate) fn proposal_ref(stable: &Hash) -> String {
 /// The ref naming the stable id of view `view`'s open proposal (empty when it has none).
 pub(crate) fn open_ref(view: &str) -> String {
     format!("open/{view}")
+}
+
+/// The hash a proposal version is stored under: its frame's, in the PROPOSAL kind's latest
+/// encoding.
+fn proposal_hash(p: &Proposal) -> Hash {
+    crate::codec::encode_new(kinds::PROPOSAL, p).hash()
 }
 
 fn tag_ref(name: &str) -> String {
@@ -129,6 +163,50 @@ impl StoreReader {
         })
     }
 
+    /// The order-only edits of `ops` against `base` (`merge::merge`'s `order_only`): each update
+    /// whose base is not `base`'s version of its block and that `order_only_edit` accepts. A
+    /// version this cannot read makes no entry, so the merge keeps its conflict.
+    pub fn order_only_pairs<'a>(
+        &self,
+        base: &StateSnapshot,
+        ops: impl IntoIterator<Item = &'a Op>,
+    ) -> OrderOnlyEdits {
+        let mut seen: BTreeSet<(Hash, Hash, Hash)> = BTreeSet::new();
+        let mut out = BTreeSet::new();
+        for op in ops {
+            let Op::Update { base: e, block } = op else {
+                continue;
+            };
+            let Some(v) = base.blocks.get(&block.id) else {
+                continue;
+            };
+            let key = (*v, *e, block.version_hash());
+            if !seen.insert(key) {
+                continue;
+            }
+            if self.order_only_edit(v, e, block) {
+                out.insert(key);
+            }
+        }
+        OrderOnlyEdits(out)
+    }
+
+    /// Whether an update from version `e` to `new` is an order-only edit against canon's version
+    /// `v`: `v` differs from `e` only by its order key, and `new` keeps `e`'s parent and order key
+    /// (D-TX3KH, D-1FT5Y; final ruling round 4). A version this cannot read, or a redacted one,
+    /// never makes one. Only such an edit applies with no conflict, and only its landing keeps
+    /// canon's place: a move, a parent change or a re-key is a choice of its own. The merge, the
+    /// edit-collision detector and the landing all ask this.
+    pub fn order_only_edit(&self, v: &Hash, e: &Hash, new: &Block) -> bool {
+        v != e
+            && matches!(
+                (self.get_block(v), self.get_block(e)),
+                (Ok(a), Ok(b)) if differs_only_in_order(&a, &b)
+                    && new.parent == b.parent
+                    && new.order == b.order
+            )
+    }
+
     /// The state landing `landing` recorded; the empty state for None.
     pub fn state_of(&self, landing: Option<Hash>) -> Result<StateSnapshot, StoreError> {
         match landing {
@@ -181,6 +259,7 @@ impl StoreReader {
                 id: c.id(),
                 deps: &c.deps,
                 ops: &c.ops,
+                is_replay: c.links.replayed_from.is_some(),
             })
             .collect();
         let deleters = self.merge_deleters(
@@ -200,11 +279,13 @@ impl StoreReader {
                 producers.insert(*v, self.producer(v)?);
             }
         }
+        let order_only = self.order_only_pairs(base, changes.iter().flat_map(|c| &c.ops));
         Ok(merge_indexed(
             base,
             &input,
             &|v| producers.get(v).copied().flatten(),
             &|b| deleters.get(b).copied(),
+            &|v, op| order_only.holds(v, op),
         ))
     }
 
@@ -516,51 +597,63 @@ impl Store {
                     actor: p.actor.clone(),
                     run: p.run.clone(),
                 });
-                let create = encode(&view_op(
-                    None,
-                    ViewOpKind::Create {
-                        base,
-                        owner: first.clone(),
-                        pinned: false,
-                    },
-                ));
-                let id = Hash::of(&create);
-                views.push((kinds::VIEW_OP, create));
+                let create = crate::codec::item_new(
+                    kinds::VIEW_OP,
+                    &view_op(
+                        None,
+                        ViewOpKind::Create {
+                            base,
+                            owner: first.clone(),
+                            pinned: false,
+                        },
+                    ),
+                );
+                let id = Hash::of(&create.1);
+                views.push(create);
                 (id, base, 0, first, false)
             }
         };
         if catch_up && let Some(landing) = canon {
-            let rebase = encode(&view_op(
-                Some(prev),
-                ViewOpKind::Rebase {
-                    landing,
-                    dropped: vec![],
-                    remaining: vec![],
-                    conflicts: vec![],
-                },
-            ));
-            prev = Hash::of(&rebase);
+            let rebase = crate::codec::item_new(
+                kinds::VIEW_OP,
+                &view_op(
+                    Some(prev),
+                    ViewOpKind::Rebase {
+                        landing,
+                        dropped: vec![],
+                        remaining: vec![],
+                        conflicts: vec![],
+                    },
+                ),
+            );
+            prev = Hash::of(&rebase.1);
             base = canon;
-            views.push((kinds::VIEW_OP, rebase));
+            views.push(rebase);
         }
         if owner.is_none()
             && let Some(o) = claim
         {
-            let own = encode(&view_op(
-                Some(prev),
-                ViewOpKind::Own {
-                    owner: Some(o.clone()),
-                },
-            ));
-            prev = Hash::of(&own);
+            let own = crate::codec::item_new(
+                kinds::VIEW_OP,
+                &view_op(
+                    Some(prev),
+                    ViewOpKind::Own {
+                        owner: Some(o.clone()),
+                    },
+                ),
+            );
+            prev = Hash::of(&own.1);
             owner = Some(o);
-            views.push((kinds::VIEW_OP, own));
+            views.push(own);
         }
         // 5. one commit op per change, in order: one write's commits sit in a row in the log
         for (cid, _) in &placed {
-            let commit = encode(&view_op(Some(prev), ViewOpKind::Commit { change: *cid }));
-            prev = Hash::of(&commit);
-            views.push((kinds::VIEW_OP, commit));
+            let commit = crate::codec::item_new(
+                kinds::VIEW_OP,
+                &view_op(Some(prev), ViewOpKind::Commit { change: *cid }),
+            );
+            prev = Hash::of(&commit.1);
+            views.push(commit);
         }
         let new_head = ViewHead {
             head: prev,
@@ -672,7 +765,7 @@ impl Store {
         alternative: Option<AltChoice>,
     ) -> Result<Hash, StoreError> {
         let p = self.first_of(view, title, summary, by, changes, alternative)?;
-        let id = Hash::of(&encode(&p));
+        let id = proposal_hash(&p);
         self.write_version(&p, id)
     }
 
@@ -691,7 +784,7 @@ impl Store {
         a: Answer,
     ) -> Result<(Hash, Hash), StoreError> {
         let p = self.first_of(view, title, summary, by, changes, alternative)?;
-        let id = Hash::of(&encode(&p));
+        let id = proposal_hash(&p);
         self.write_version_answered(&p, id, a)
     }
 
@@ -778,7 +871,7 @@ impl Store {
             }
             None => {
                 let p = self.first_of(view, title, summary, by, changes, alternative)?;
-                let id = Hash::of(&encode(&p));
+                let id = proposal_hash(&p);
                 (p, id)
             }
         };
@@ -857,7 +950,8 @@ impl Store {
         let current = |id: &BlockId| canon.blocks.get(id).copied();
         let parts = self.commit_parts(view, vec![change], &current, &[], None, &by)?;
         let (cid, pos) = parts.placed[0];
-        let committed: Change = crate::store::decode(&parts.changes[pos].1)?;
+        let committed: Change =
+            crate::codec::decode_record(parts.changes[pos].0, &parts.changes[pos].1)?;
         // the view's Create op first, then the change, then its Commit op; the head ref is the
         // close's to write
         let mut ops = parts.views.into_iter();
@@ -879,7 +973,7 @@ impl Store {
             StoreError::Refused("the re-affirmation commit gave no view head".into())
         })?;
         let p = self.first_of(view, title, Some(summary), by, vec![cid], None)?;
-        let stable = Hash::of(&encode(&p));
+        let stable = proposal_hash(&p);
         let (version, frames) = self.version_items(&p, stable)?;
         items.extend(frames);
         Ok(PreparedProposal {
@@ -907,7 +1001,7 @@ impl Store {
         prepared: &mut PreparedProposal,
         plan: &Plan,
     ) -> Result<Hash, StoreError> {
-        let id = plan.id();
+        let id = crate::plan::plan_hash(plan);
         if plan.seal.is_some() {
             return Err(StoreError::Refused(crate::plan::damage(
                 &id,
@@ -1066,9 +1160,9 @@ impl Store {
         if p.changes.is_empty() {
             return Err(StoreError::EmptyProposal(p.view.clone()));
         }
-        let bytes = encode(p);
+        let (kind, bytes) = crate::codec::item_new(kinds::PROPOSAL, p);
         let id = Hash::of(&bytes);
-        let mut items = vec![(kinds::PROPOSAL, bytes)];
+        let mut items = vec![(kind, bytes)];
         items.extend(self.ref_items_pub(vec![
             (proposal_ref(&stable), id.0.to_vec()),
             (open_ref(&p.view), stable.0.to_vec()),
@@ -1154,9 +1248,9 @@ impl Store {
 
     /// The tag's id and the frames `put_tag` writes: the tag, then `tag/<name>` → its id.
     fn tag_items(&self, tag: &Tag) -> (Hash, Frames) {
-        let bytes = postcard::to_allocvec(tag).expect("encode tag");
+        let (kind, bytes) = crate::codec::item_new(kinds::TAG, tag);
         let id = Hash::of(&bytes);
-        let mut items = vec![(kinds::TAG, bytes)];
+        let mut items = vec![(kind, bytes)];
         items.extend(self.ref_items_pub(vec![(tag_ref(&tag.name), id.0.to_vec())]));
         (id, items)
     }

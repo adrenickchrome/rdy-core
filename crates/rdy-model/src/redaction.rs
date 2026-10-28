@@ -8,6 +8,7 @@
 //! ([`Block::read_identity`], [`Change::read_identity`]) that keeps its recorded version hash or
 //! change id. Projections are built only by the explicit constructors here; a normal constructor
 //! sets the identity to `None`.
+use crate::change::ChangeReadIdentity;
 use crate::decision::is_frozen;
 use crate::{Block, BlockId, Change, ChangeLinks, Hash, Justification, Op, Provenance};
 use serde::{Deserialize, Serialize};
@@ -165,6 +166,8 @@ pub struct BlockResidue {
     #[serde(with = "hex::one")]
     pub content_hash: Hash,
     pub frozen: bool,
+    /// The encoding of the removed BLOCK frame: always 0 in this registry.
+    pub source_encoding: u16,
 }
 
 /// One op of a change whose embedded blocks are named by version.
@@ -206,6 +209,8 @@ pub struct ChangeResidue {
     pub message: String,
     #[serde(with = "hex::links")]
     pub links: ChangeLinks,
+    /// The encoding of the removed CHANGE frame (0 or 1), not the residue's own encoding.
+    pub source_encoding: u16,
 }
 
 /// Whether the report can assess anything beyond the kind registry. Describes the registry, not
@@ -214,6 +219,8 @@ pub struct ChangeResidue {
 #[serde(rename_all = "snake_case")]
 pub enum AssessmentSupport {
     NotImplemented,
+    /// The registry scans stored assessment records (appended: index 1).
+    Carried,
 }
 
 /// The kind of record a report row names.
@@ -231,6 +238,10 @@ pub enum ImpactKind {
     Review,
     Tension,
     Answer,
+    Assessment,
+    Dispute,
+    DisputeResolution,
+    CheckRequest,
 }
 
 /// How a record relates to the removed content.
@@ -391,6 +402,7 @@ impl BlockResidue {
             order: block.order.clone(),
             content_hash: block.content_hash(),
             frozen: is_frozen(block),
+            source_encoding: 0,
         }
     }
 
@@ -412,9 +424,9 @@ impl BlockResidue {
 }
 
 impl Change {
-    /// Whether this change is the read projection of a residue.
+    /// Whether this change is the read projection of a residue. A stored read is not.
     pub fn is_projection(&self) -> bool {
-        self.read_identity.is_some()
+        matches!(self.read_identity, Some(ChangeReadIdentity::Redacted(_)))
     }
 }
 
@@ -449,6 +461,9 @@ impl ChangeResidue {
             justification: change.justification.clone(),
             message: change.message.clone(),
             links: change.links.clone(),
+            source_encoding: change
+                .stored_identity()
+                .map_or(crate::encoding::CHANGE_ENCODING, |i| i.version),
         }
     }
 
@@ -483,7 +498,7 @@ impl ChangeResidue {
             justification: self.justification.clone(),
             message: self.message.clone(),
             links: self.links.clone(),
-            read_identity: Some(self.change),
+            read_identity: Some(ChangeReadIdentity::Redacted(self.change)),
         })
     }
 }
@@ -625,6 +640,10 @@ mod hex {
             alternative: Option<AltOut<'a>>,
             client_nonce: &'a Option<String>,
             imported_by: &'a Option<ActorRun>,
+            #[serde(with = "super::opt")]
+            replayed_from: Option<Hash>,
+            #[serde(with = "super::opt")]
+            briefing: Option<Hash>,
         }
 
         #[derive(Serialize)]
@@ -645,6 +664,10 @@ mod hex {
             alternative: Option<AltIn>,
             client_nonce: Option<String>,
             imported_by: Option<ActorRun>,
+            #[serde(default, with = "super::opt")]
+            replayed_from: Option<Hash>,
+            #[serde(default, with = "super::opt")]
+            briefing: Option<Hash>,
         }
 
         #[derive(Deserialize)]
@@ -665,6 +688,8 @@ mod hex {
                     }),
                     client_nonce: &l.client_nonce,
                     imported_by: &l.imported_by,
+                    replayed_from: l.replayed_from,
+                    briefing: l.briefing,
                 }
                 .serialize(s)
             } else {
@@ -683,6 +708,8 @@ mod hex {
                     }),
                     client_nonce: l.client_nonce,
                     imported_by: l.imported_by,
+                    replayed_from: l.replayed_from,
+                    briefing: l.briefing,
                 })
             } else {
                 ChangeLinks::deserialize(d)

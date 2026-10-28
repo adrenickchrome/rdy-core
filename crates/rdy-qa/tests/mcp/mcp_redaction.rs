@@ -129,7 +129,7 @@ fn rdx12_chat_can_report_record_and_show_the_request() {
     assert_eq!(dry, daemon, "the tool and the daemon op give one reply");
     assert_eq!(dry["dry_run"], true);
     assert!(dry["change"].is_null() && dry["redaction"].is_null());
-    assert_eq!(dry["report"]["assessment"], "not_implemented");
+    assert_eq!(dry["report"]["assessment"], "carried");
     let text = dry["text"].as_str().unwrap();
     assert_eq!(
         text,

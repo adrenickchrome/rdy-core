@@ -911,14 +911,41 @@ pub fn changes_heading(previous: &str) -> String {
     format!("## What changed since {previous}")
 }
 
+/// The store a release writes: a scalar store of dump format and store format (every published
+/// release so far), or a feature store of a dump format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WrittenStore {
+    Scalar(u32, u32),
+    Features(u32),
+}
+
+impl From<(u32, u32)> for WrittenStore {
+    fn from((dump, store): (u32, u32)) -> WrittenStore {
+        WrittenStore::Scalar(dump, store)
+    }
+}
+
+/// What this rdy writes: a feature store, in its dump format.
+pub fn current_store() -> WrittenStore {
+    WrittenStore::Features(rdy_store::dump::DUMP_FORMAT)
+}
+
 /// The line that the changes part's Changes group must hold when the formats move from the
-/// previous release `previous` (dump format `pd`, store format `ps`) to `version` (`cd`, `cs`),
-/// or `None` when neither moves.
+/// previous release `previous` (dump format `pd`, store format `ps`) to `version` (`current`),
+/// or `None` when neither moves. A move from a scalar store to feature stores is O18's line.
 fn format_move_line(
     version: &str,
     (previous, pd, ps): (&str, u32, u32),
-    (cd, cs): (u32, u32),
+    current: impl Into<WrittenStore>,
 ) -> Option<String> {
+    let (cd, cs) = match current.into() {
+        WrittenStore::Scalar(cd, cs) => (cd, cs),
+        WrittenStore::Features(cd) => {
+            return Some(format!(
+                "- **Breaking: the store format moves from {ps} to feature-based stores (dump pair ({pd}, {ps}) to dump format {cd}).** rdy {version} refuses a store made by rdy {previous} with `E_STORE_FORMAT`. To move a project, run `rdy dump --out <file>` with rdy {previous}, then `rdy load <file> <dir>` with rdy {version}, into a directory with no store."
+            ));
+        }
+    };
     if (pd, ps) == (cd, cs) {
         return None;
     }
@@ -932,19 +959,12 @@ fn format_move_line(
     ))
 }
 
-/// The format move line of `version` against [`RELEASED`] and this rdy's dump and store
-/// formats, or `None` when neither moves. `Err` when no published release comes before
-/// `version`.
+/// The format move line of `version` against [`RELEASED`] and the store this rdy writes
+/// ([`current_store`]), or `None` when neither moves. `Err` when no published release comes
+/// before `version`.
 pub fn release_format_move_line(version: &str) -> Result<Option<String>, String> {
     let previous = previous_release(version, RELEASED).ok_or(MSG_INVALID_ARGUMENTS)?;
-    Ok(format_move_line(
-        version,
-        previous,
-        (
-            rdy_store::dump::DUMP_FORMAT,
-            rdy_store::format::STORE_FORMAT,
-        ),
-    ))
+    Ok(format_move_line(version, previous, current_store()))
 }
 
 /// Checks the changes part of release notes `text` (D-7PQEF): exactly one `heading` line; the
@@ -1192,14 +1212,7 @@ fn check_with(version: &str, text: &str, src: &Sources) -> Result<(), Refused> {
         .ok_or_else(|| refused(Kind::Arguments, "no earlier release"))?;
     let (mpl, _) = union_sources(src)?;
     check_notes(&notes_part(version, &mpl)?, text)?;
-    let line = format_move_line(
-        version,
-        previous,
-        (
-            rdy_store::dump::DUMP_FORMAT,
-            rdy_store::format::STORE_FORMAT,
-        ),
-    );
+    let line = format_move_line(version, previous, current_store());
     check_changes(&changes_heading(previous.0), line.as_deref(), text)
 }
 
@@ -2585,6 +2598,14 @@ mod tests {
             )
         );
         assert_eq!(format_move_line("0.21.0", ("0.20.0", 3, 18), (3, 18)), None);
+        // O18: from the last scalar store to feature-based stores
+        assert_eq!(
+            format_move_line("0.26.0", ("0.20.0", 3, 18), current_store()).as_deref(),
+            Some(
+                "- **Breaking: the store format moves from 18 to feature-based stores (dump pair (3, 18) to dump format 4).** rdy 0.26.0 refuses a store made by rdy 0.20.0 with `E_STORE_FORMAT`. To move a project, run `rdy dump --out <file>` with rdy 0.20.0, then `rdy load <file> <dir>` with rdy 0.26.0, into a directory with no store."
+            )
+        );
+        assert_eq!(current_store(), WrittenStore::Features(4));
 
         // The previous release: the newest published row before the version.
         let table = [("0.17.0", 3, 16), ("0.20.0", 3, 18)];
@@ -2672,7 +2693,10 @@ mod tests {
 
         // Notes without the format move line, or with it outside the Changes group, refuse.
         let no_line = good.replacen(&format!("{line}\n"), "", 1);
-        let edited = good.replacen(&line, &line.replace("16 to 18", "17 to 18"), 1);
+        // The edit names another previous store format; it must change the line whatever the
+        // current store is (a scalar pair or feature-based stores).
+        let edited = good.replacen(&line, &line.replace("from 16 to", "from 17 to"), 1);
+        assert_ne!(edited, good, "the edit changes the line");
         let in_fixes = good.replacen(&format!("{line}\n"), "", 1).replacen(
             "- A fix.\n",
             &format!("- A fix.\n{line}\n"),

@@ -492,3 +492,65 @@ fn msw2_an_unreadable_producer_fails_the_conflict_check_instead_of_settling_cano
         approved.map(|_| ())
     );
 }
+
+/// Final ruling round 3: a landing that keeps a landed move passes the landing audit and fsck.
+/// m moves c2 before c; w edits c2's body from canon; m lands, then w lands with c2 at canon's
+/// key. The audit finds no violation before w lands, nor in w's whole landing (its acceptance
+/// change too) on w's base; fsck reads the stored version.
+#[test]
+fn ok6_a_kept_move_passes_the_landing_audit_and_fsck() {
+    use rdy_qa::landing_audit::{Landed, audit, conflicts_at, landed_of};
+    let (_d, mut r) = project();
+    let (_doc, s, c) = seed_doc(&mut r, "seed");
+    let c2 = write(
+        &mut r,
+        "seed",
+        json!([{"op": "create", "type": "claim", "id": "$n", "parent": s, "body": "two"}]),
+    )
+    .unwrap()
+    .created["$n"]
+        .clone();
+    land(&mut r, "seed").unwrap();
+    let sm = as_agent("agent:m", "r1");
+    let sw = as_agent("agent:w", "r1");
+    write_as(
+        &mut r,
+        &sm,
+        "m",
+        json!([{"op": "move", "id": c2, "parent": s, "before": c}]),
+    )
+    .unwrap();
+    let v2 = version_of(&r, &Scope::Canon, &c2);
+    let ww = write_as(&mut r, &sw, "w", update(&c2, &v2, "two, as w reads it")).unwrap();
+    land(&mut r, "m").unwrap();
+    let before = r.read();
+    let base = before.effective_base("w");
+    let mine = Landed {
+        view: "w".into(),
+        changes: vec![ww.change.parse().unwrap()],
+        alternative: None,
+    };
+    assert!(
+        audit(&before, &mine).is_empty(),
+        "{:?}",
+        audit(&before, &mine)
+    );
+    drop(before);
+    let l = land(&mut r, "w").unwrap();
+    let landed = landed_of(&r, &l.parse().unwrap()).unwrap();
+    assert_eq!(landed.changes.len(), 2, "w's change and its acceptance");
+    let v = conflicts_at(&r.read(), &landed, base);
+    assert!(v.is_empty(), "{v:?}");
+    let kids: Vec<String> = r
+        .read()
+        .materialized(&Scope::Canon)
+        .unwrap()
+        .children(Some(&rdy_model::BlockId::parse(&s).unwrap()))
+        .iter()
+        .map(|b| b.id.to_string())
+        .collect();
+    assert_eq!(kids, vec![c2.clone(), c.clone()], "m's move stays");
+    assert_eq!(body_of(&r, &Scope::Canon, &c2), "two, as w reads it");
+    r.fsck().unwrap();
+    check(&r, &Scope::Canon).unwrap();
+}

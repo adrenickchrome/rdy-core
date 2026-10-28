@@ -30,6 +30,7 @@ pub use socket::MAX_SOCKET_PATH;
 pub mod client;
 #[doc(hidden)]
 pub mod lock;
+pub mod maintenance;
 pub mod spawn;
 
 pub use client::{

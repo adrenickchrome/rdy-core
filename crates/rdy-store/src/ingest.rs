@@ -9,10 +9,15 @@
 //! starts at offset 0 of the next segment. So a held batch that passed the soft segment limit in
 //! the source passes it here too.
 //!
-//! A dump of an older store format gets one more batch after its own: `upgrade` appends it, and
-//! it sets `meta/store_format` to this rdy's store format (FW-UP1, in its smallest form). Until
-//! M3a a store format change only adds kinds and refs (D-F0904), so no frame is re-encoded.
-//! A log of a store format before 12 has no repo id: the upgrade batch gives it one (RULING F2).
+//! A dump of a scalar store format (dump formats 1 to 3) gets one more batch after its own:
+//! `upgrade` appends it, and it sets `meta/store_features` to the baseline features
+//! (`crate::format::baseline_features`; FW-UP1, in its smallest form), merged with every feature
+//! the ingested records use (`crate::format::required_features`, their first use). The historical
+//! `meta/store_format` refs the dump holds stay as they are, and no frame is re-encoded
+//! (D-F0904). A log of a store format before 12 has no repo id: the upgrade batch gives it one
+//! (RULING F2). A dump of a feature store (dump format 4) gets no batch: its log holds its
+//! manifest, which the load keeps, unknown compatible features included. That manifest must name
+//! every feature the ingested records use; a dump that under-reports one is refused.
 //!
 //! A converter for another store format must remap every location inside a payload
 //! (`RefUpdate.at`, `InboxCursor.at`) if it changes the layout.
@@ -49,7 +54,7 @@ use crate::dump::{
 use crate::dump_chain::chain_text;
 use crate::dump_scan::{FrameAction, ScanPlan};
 use crate::error::StoreError;
-use crate::format::{self, Format};
+use crate::format::{self, DumpStore, StoreFeature, StoreFeatures};
 use crate::fsutil::sync_dir;
 use crate::holder::{FirstBatch, RefRules, StoreMode};
 use crate::kinds::{self, RefUpdate};
@@ -106,6 +111,13 @@ pub struct Ingest {
     carried_done: bool,
     /// Whether `upgrade` ran: the carried batch comes before it.
     upgraded: bool,
+    /// The value of the last `meta/store_features` ref an ingested frame set.
+    features_ref: Option<Vec<u8>>,
+    /// The features `upgrade` gave the store, which `finish` mirrors in `FORMAT`.
+    features: Option<StoreFeatures>,
+    /// The features the ingested records use (`format::required_features`, and
+    /// `object_encoding` for a dropped frame of a versioned encoding), each once.
+    used: Vec<StoreFeature>,
 }
 
 /// What an ingest wrote: the dump's batches and their data frames (an upgrade batch is not
@@ -135,6 +147,12 @@ fn names_carried(
                 && (s.kind, s.hash, s.len, s.residue) == identity
         })
     })
+}
+
+/// The refusal of a dump-4 load whose records use feature `name`, which its manifest does not
+/// name.
+pub fn feature_not_named(name: &str) -> String {
+    format!("the dump's records use feature {name}, which its manifest does not name")
 }
 
 fn dump_error(what: String) -> StoreError {
@@ -182,6 +200,9 @@ impl Ingest {
             has_carried: false,
             carried_done: false,
             upgraded: false,
+            features_ref: None,
+            features: None,
+            used: Vec::new(),
         })
     }
 
@@ -297,11 +318,17 @@ impl Ingest {
                 Frame::Present { kind, payload, .. } => {
                     let (_, hash) = self.log.append_unrolled(*kind, payload)?;
                     hashes.push(hash);
+                    self.uses(format::required_features(*kind, payload));
                     self.has_apply |= *kind == kinds::REDACTION_APPLY;
                     self.has_carried |= *kind == kinds::REDACTION_CARRIED;
-                    sets_repo_id |= *kind == kinds::REF_UPDATE
-                        && postcard::from_bytes::<RefUpdate>(payload)
-                            .is_ok_and(|u| u.name == REF_REPO_ID);
+                    if *kind == kinds::REF_UPDATE
+                        && let Ok(u) = postcard::from_bytes::<RefUpdate>(payload)
+                    {
+                        sets_repo_id |= u.name == REF_REPO_ID;
+                        if u.name == format::REF_STORE_FEATURES {
+                            self.features_ref = Some(u.value);
+                        }
+                    }
                 }
                 Frame::Dropped {
                     kind,
@@ -324,9 +351,15 @@ impl Ingest {
                     {
                         return Err(refused_allocation());
                     }
+                    // the header keeps the raw kind; the pending record names the logical kind,
+                    // as the authorization's holes do (`crate::codec`)
                     let loc = self.log.append_dropped(*kind, hash, *len)?;
+                    if *kind & crate::codec::VERSIONED != 0 {
+                        self.uses(vec![format::registered(format::FEATURE_OBJECT_ENCODING)]);
+                    }
+                    let logical = crate::codec::logical_kind(*kind);
                     self.pending.push(PendingDrop {
-                        record: dropped_payload(*kind, hash, *len, apply, residue.as_ref()),
+                        record: dropped_payload(logical, hash, *len, apply, residue.as_ref()),
                         loc,
                         released: false,
                     });
@@ -348,6 +381,15 @@ impl Ingest {
         self.batches += 1;
         self.frames += hashes.len() as u64;
         Ok(())
+    }
+
+    /// Notes features `f` as used by an ingested record.
+    fn uses(&mut self, f: Vec<StoreFeature>) {
+        for f in f {
+            if !self.used.iter().any(|u| u.name == f.name) {
+                self.used.push(f);
+            }
+        }
     }
 
     /// Judges batch `b`'s refs by the holder rules (`crate::holder::RefRules`) before it is
@@ -524,41 +566,64 @@ impl Ingest {
     }
 
     /// The logged upgrade step (FW-UP1, D-WWAK7, D-F0904), in its smallest form. `from` is the
-    /// store format of the dump's log. The cases (closed):
-    /// - `from` is this rdy's store format: nothing is appended (such a log holds its id);
-    /// - `from` is older: one batch is appended after the dump's batches. It holds the
-    ///   `REF_UPDATE` that sets `meta/store_format` to this rdy's store format, salted with the
-    ///   log end as every ref write is; then, when no ingested frame set `meta/repo_id`, the
+    /// store of the dump's log. The cases (closed):
+    /// - a feature store: nothing is appended, and the store keeps the manifest its log holds,
+    ///   which must be `from`'s (`dump metadata does not match its header` otherwise) and must
+    ///   name every feature the ingested records use (`format::required_features`;
+    ///   [`feature_not_named`] otherwise); a manifest this rdy may not write is refused;
+    /// - a scalar store format up to 18: one batch is appended after the dump's batches. It holds
+    ///   the `REF_UPDATE` that sets `meta/store_features` to the baseline features merged with
+    ///   every feature the ingested records use, salted with
+    ///   the log end as every ref write is; then, when no ingested frame set `meta/repo_id`, the
     ///   `REF_UPDATE` of `meta/repo_id` with a new repo id, salted with the log end plus one
-    ///   (RULING F2); then its marker. Every earlier byte is kept;
-    /// - `from` is newer: refused with `StoreError::Dump`, and nothing is appended.
+    ///   (RULING F2); then its marker. Every earlier byte is kept, the historical
+    ///   `meta/store_format` refs among them;
+    /// - a later scalar format: refused with `StoreError::Dump`, and nothing is appended.
     ///
     /// Returns whether it appended the batch. Call it once, after the last `batch` (and after
     /// `append_carried`, if it runs).
-    pub fn upgrade(&mut self, from: u32) -> Result<bool, StoreError> {
+    pub fn upgrade(&mut self, from: &DumpStore) -> Result<bool, StoreError> {
         self.upgrade_with(from, None)
     }
 
     /// [`Ingest::upgrade`] of a chain prefix: when no ingested frame set `meta/repo_id`, the
     /// upgrade batch sets `repo`, the id the chain's headers name, not a new one. A prefix
     /// that stops before the source's own upgrade batch is the same repo as the chain.
-    pub fn upgrade_in_repo(&mut self, from: u32, repo: RepoId) -> Result<bool, StoreError> {
+    pub fn upgrade_in_repo(&mut self, from: &DumpStore, repo: RepoId) -> Result<bool, StoreError> {
         self.upgrade_with(from, Some(repo))
     }
 
-    fn upgrade_with(&mut self, from: u32, repo: Option<RepoId>) -> Result<bool, StoreError> {
+    fn upgrade_with(&mut self, from: &DumpStore, repo: Option<RepoId>) -> Result<bool, StoreError> {
         self.upgraded = true;
-        let current = Format::CURRENT.store_format;
-        if from > current {
+        let from = match from {
+            DumpStore::Features(m) => {
+                format::check_writable(m)?;
+                if self
+                    .features_ref
+                    .as_ref()
+                    .is_some_and(|v| *v != m.to_json())
+                {
+                    return Err(dump_error(crate::dump_scan::METADATA_MISMATCH.into()));
+                }
+                // a valid dump's manifest names every feature its records use (D-1HDVA)
+                if let Some(f) = self.used.iter().find(|f| !m.has(&f.name)) {
+                    return Err(dump_error(feature_not_named(&f.name)));
+                }
+                self.features = Some(m.clone());
+                return Ok(false);
+            }
+            DumpStore::Legacy(n) => *n,
+        };
+        if from > format::LAST_SCALAR_STORE_FORMAT {
             return Err(dump_error(format!(
-                "store format {from} is newer than this rdy's store format {current}"
+                "store format {from} is newer than the last scalar store format {}",
+                format::LAST_SCALAR_STORE_FORMAT
             )));
         }
-        if from == current {
-            return Ok(false);
-        }
+        // the baseline, and every feature the ingested records use (their first use)
+        let features = format::baseline_features().merged(&self.used);
         let start = self.log.end();
-        let mut refs = vec![(format::REF_STORE_FORMAT, format::encode_u32(current))];
+        let mut refs = vec![(format::REF_STORE_FEATURES, features.to_json())];
         if !self.has_repo_id {
             refs.push((
                 REF_REPO_ID,
@@ -585,6 +650,7 @@ impl Ingest {
         let placed = self.log.append_frames(&frames, false)?;
         self.log
             .append_marker(start, placed.iter().map(|(_, h)| h))?;
+        self.features = Some(features);
         Ok(true)
     }
 
@@ -594,7 +660,9 @@ impl Ingest {
     /// `upgrade`, is `StoreError::Dump`; a refused call writes nothing and counts for nothing.
     /// The batch holds the residues of `residues` that the log does not hold yet, once each and
     /// sorted by residue hash, then `records` in the caller's order (its validated source-apply
-    /// order). Before a byte is written:
+    /// order). A residue is framed in the encoding whose frame hash a record names (a residue
+    /// written before content-2 keeps encoding 0), else in its kind's latest encoding. Before a
+    /// byte is written:
     ///
     /// - each record keeps its bounds (`redaction_carried::check_bounds`: more than 100,000
     ///   spans is `RedactionLimit` `100000 carried spans`, more than 16,777,216 encoded bytes
@@ -630,23 +698,50 @@ impl Ingest {
         let mut c = redaction_io::collect(self.log.readers())?;
         // the residues the log does not hold yet, once each, by residue hash, each within the
         // record bound
-        let mut missing: std::collections::BTreeMap<Hash, Vec<u8>> = Default::default();
+        let mut missing: std::collections::BTreeMap<Hash, (u8, Vec<u8>)> = Default::default();
         if !residues.is_empty() {
+            // the residue hashes the records name: each names its residue's source frame, whose
+            // hash covers the encoding that frame records (`crate::codec`)
+            let named: std::collections::HashSet<Hash> = records
+                .iter()
+                .flat_map(|r| r.spans.iter().filter_map(|s| s.residue))
+                .collect();
+            let latest = crate::codec::latest(kinds::REDACTION_RESIDUE);
             let mut buf = rdy_model::redaction::record_buffer().map_err(|_| record_too_big())?;
             for r in residues {
                 let bytes =
                     rdy_model::redaction::encode_into(r, &mut buf).map_err(|_| record_too_big())?;
-                let h = Hash::of(bytes);
+                // the residue's frame in the encoding whose hash a record names (an old
+                // residue keeps encoding 0, in its frozen shape), else in its kind's latest
+                // encoding
+                let frame_in = |v: u16| {
+                    let body = if v == latest {
+                        Some(bytes.to_vec())
+                    } else {
+                        crate::codec::residue_body(r, v)
+                    };
+                    body.map(|b| {
+                        crate::codec::frame(kinds::REDACTION_RESIDUE, v, b)
+                            .expect("a registered encoding of a residue frames")
+                    })
+                };
+                let frame = (0..latest)
+                    .filter_map(frame_in)
+                    .find(|f| named.contains(&Hash::of(&f.1)))
+                    .or_else(|| frame_in(latest))
+                    .expect("the latest encoding holds every residue");
+                let h = Hash::of(&frame.1);
                 if !c.residue_at.contains_key(&h) && !missing.contains_key(&h) {
-                    missing.insert(h, bytes.to_vec());
+                    missing.insert(h, frame);
                 }
             }
         }
-        let mut frames: Vec<(u8, Vec<u8>)> = missing
-            .into_values()
-            .map(|b| (kinds::REDACTION_RESIDUE, b))
-            .collect();
-        frames.extend(encoded.into_iter().map(|b| (kinds::REDACTION_CARRIED, b)));
+        let mut frames: Vec<(u8, Vec<u8>)> = missing.into_values().collect();
+        frames.extend(
+            encoded
+                .into_iter()
+                .map(|b| crate::codec::frame_latest(kinds::REDACTION_CARRIED, b)),
+        );
         let start = self.log.end();
         let after = c.push_batch(start, &frames)?;
         match self.mode {
@@ -668,13 +763,21 @@ impl Ingest {
     /// Checks every dropped frame's authorization against the complete log (see `batch`): a
     /// refusal is `StoreError::Dump`, and no `FORMAT` is written, so nothing opens the directory.
     /// Then makes the new log durable: one sync of the log, then of `segments/`. Then writes
-    /// `FORMAT` (this rdy's store format: `upgrade` made the log say it too) and syncs the store
-    /// directory. Writes no index.
+    /// `FORMAT`, the mirror of the features the log holds (`upgrade`'s; without `upgrade`, the
+    /// last features ref ingested, else the baseline), and syncs the store directory. Writes no
+    /// index.
     pub fn finish(mut self) -> Result<IngestReport, StoreError> {
         self.check_drops()?;
         self.log.sync()?;
         sync_dir(&self.dir.join(SEGMENTS_DIR))?;
-        format::write_format_file(&self.dir, Format::CURRENT)?;
+        let features = match self.features.take() {
+            Some(f) => f,
+            None => match &self.features_ref {
+                Some(v) => format::decode_features(v)?,
+                None => format::baseline_features(),
+            },
+        };
+        format::write_format_file(&self.dir, &features)?;
         sync_dir(&self.dir)?;
         Ok(IngestReport {
             batches: self.batches,

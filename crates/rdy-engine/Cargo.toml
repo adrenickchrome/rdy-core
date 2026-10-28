@@ -49,6 +49,8 @@ test-support = []
 [dev-dependencies]
 rdy-engine = { path = ".", features = ["test-support"] }
 rdy-graph.workspace = true
+# ok2: the content_order test recomputes the retired content-1 hash of old records
+postcard.workspace = true
 proptest.workspace = true
 criterion.workspace = true
 ed25519-dalek.workspace = true

@@ -82,7 +82,9 @@ fn wanted(
 
 /// The session's persisted subscription. It is written only when there is none, or when `areas`
 /// (if given) or the role differ. A new one starts at the head of the log. An area the pack
-/// lacks is refused with `E_BAD_INPUT`, which lists the pack's areas (D-TPZ0W).
+/// lacks is refused with `E_BAD_INPUT`, which lists the pack's areas (D-TPZ0W). A read-only
+/// store (D-WWAK7) writes nothing: the reply is the subscription the session would have, or the
+/// persisted one unchanged.
 pub fn subscribe(
     engine: &dyn Engine,
     s: &Session,
@@ -97,7 +99,14 @@ pub fn subscribe(
         None => None,
     };
     let persisted = st.reader().inbox(&s.actor, s.run.as_deref())?;
-    if wanted(persisted.clone(), s, areas.as_deref(), st.seq()).is_none() {
+    let want = wanted(persisted.clone(), s, areas.as_deref(), st.seq());
+    if st.reader().access() == rdy_store::format::StoreAccess::ReadOnly {
+        return Ok(match want {
+            Some(sub) => sub,
+            None => persisted.expect("an unchanged subscription is persisted"),
+        });
+    }
+    if want.is_none() {
         return Ok(persisted.expect("an unchanged subscription is persisted"));
     }
     let (session, given) = (s.clone(), areas);

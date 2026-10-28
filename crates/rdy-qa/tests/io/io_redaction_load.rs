@@ -16,7 +16,9 @@ use rdy_model::redaction::RedactTarget;
 use rdy_store::dump::{
     DUMP_FORMAT, DumpBatch, DumpItem, DumpReader, Frame, MAGIC, RemovalFacts, RemovalTally, rec,
 };
-use rdy_store::format::{REF_STORE_FORMAT, STORE_FORMAT, encode_u32};
+use rdy_store::format::{
+    DumpStore, REF_STORE_FEATURES, REF_STORE_FORMAT, baseline_features, encode_u32,
+};
 use rdy_store::kinds;
 use rdy_store::meta::Origin;
 use rdy_store::redaction::StoredFrame;
@@ -193,7 +195,9 @@ fn keeps_the_source(src: &Path, src_recs: &[Rec], to: &Path, what: &str) {
     assert_eq!(&got[..src_recs.len()], src_recs, "{what}: every record");
     for rec in src_recs.iter().filter(|r| r.kind != kinds::BATCH_COMMIT) {
         assert!(
-            r.store().has_kind(rec.kind, &rec.hash).unwrap(),
+            r.store()
+                .has_kind(rdy_store::codec::logical_kind(rec.kind), &rec.hash)
+                .unwrap(),
             "{what}: {} stays",
             rec.hash
         );
@@ -207,7 +211,10 @@ fn rdx9_a_redacted_project_round_trips_and_clones() {
     let a = Rdy::open(src.dir.path()).unwrap();
     let src_recs = records(&a);
     let absent: Vec<&Rec> = src_recs.iter().filter(|r| r.proof.is_err()).collect();
-    let mut kinds_absent: Vec<u8> = absent.iter().map(|r| r.kind).collect();
+    let mut kinds_absent: Vec<u8> = absent
+        .iter()
+        .map(|r| rdy_store::codec::logical_kind(r.kind))
+        .collect();
     kinds_absent.dedup();
     assert_eq!(
         kinds_absent,
@@ -228,7 +235,10 @@ fn rdx9_a_redacted_project_round_trips_and_clones() {
     let scratch = tempfile::tempdir().unwrap();
     let file = scratch.path().join("p.rdydump");
     let d = a.read().dump(&file).unwrap();
-    assert_eq!((d.dump_format, d.store_format), (DUMP_FORMAT, STORE_FORMAT));
+    assert_eq!(
+        (d.dump_format, d.store_format.clone()),
+        (DUMP_FORMAT, DumpStore::Features(baseline_features()))
+    );
     let bytes = std::fs::read(&file).unwrap();
     assert!(
         !bytes.windows(CANARY.len()).any(|w| w == CANARY.as_bytes()),
@@ -237,7 +247,10 @@ fn rdx9_a_redacted_project_round_trips_and_clones() {
     // load: the log byte for byte, the repo id kept, no origin
     let loaded = scratch.path().join("loaded");
     let s = load(&file, &loaded).unwrap();
-    assert_eq!((s.dump_format, s.store_format), (3, STORE_FORMAT));
+    assert_eq!(
+        (s.dump_format, s.store_format.clone()),
+        (4, DumpStore::Features(baseline_features()))
+    );
     assert_eq!(segments(&loaded), segments(src.dir.path()));
     keeps_the_source(src.dir.path(), &src_recs, &loaded, "load");
     let l = Rdy::open(&loaded).unwrap();
@@ -294,8 +307,13 @@ fn rdx9_all_released_dump_pairs_still_load() {
         let to = tempfile::tempdir().unwrap();
         let dir = to.path().join("p");
         let s = load(&fixture(name), &dir).unwrap();
-        assert_eq!((s.dump_format, s.store_format), (1, store_format), "{name}");
-        assert_eq!(s.fsck.unlogged_moves, 0, "{name}");
+        assert_eq!(
+            (s.dump_format, s.store_format.clone()),
+            (1, DumpStore::Legacy(store_format)),
+            "{name}"
+        );
+        // the load's unlogged moves are analysis: the first writable start logs exactly them
+        let unlogged = s.fsck.unlogged_moves;
         let (mut rd, _, _) = DumpReader::open(std::fs::File::open(fixture(name)).unwrap()).unwrap();
         let r = Rdy::open(&dir).unwrap();
         let mut n = 0;
@@ -316,11 +334,21 @@ fn rdx9_all_released_dump_pairs_still_load() {
         assert!(n > 0, "{name}");
         assert_eq!(
             r.store().get_ref(REF_STORE_FORMAT).unwrap(),
-            Some(encode_u32(STORE_FORMAT)),
-            "{name}: the upgrade batch names this rdy's store format"
+            Some(encode_u32(store_format)),
+            "{name}: the historical store format stays"
+        );
+        assert_eq!(
+            r.store().get_ref(REF_STORE_FEATURES).unwrap(),
+            Some(baseline_features().to_json()),
+            "{name}: the upgrade batch names the baseline features"
         );
         r.fsck().unwrap();
         r.close().unwrap();
+        assert_eq!(
+            crate::io_dump_fixture_s15::first_start_logs_moves(&dir, false, name),
+            unlogged,
+            "{name}"
+        );
         rdy_qa::reindex_check::reindex_reproduces(&dir)
             .unwrap_or_else(|v| panic!("{name}: {v:#?}"));
     }
@@ -452,12 +480,12 @@ fn rdx9_a_forged_drop_preserves_the_target() {
         ),
         (
             "residue",
-            |r, i, _| r[i].1[69] = 2,
+            |r, i, _| r[i].1[71] = 2,
             "dropped frame has an invalid residue",
         ),
         (
             "apply",
-            |r, i, _| r[i].1[37] ^= 1,
+            |r, i, _| r[i].1[39] ^= 1,
             "dropped frame has no valid authorization",
         ),
         (
@@ -529,7 +557,7 @@ fn rdx9_a_drop_claim_over_the_frame_bound_preserves_the_target() {
     let at = 12 + recs[..i].iter().map(|(_, p)| HEAD + p.len()).sum::<usize>();
     // the dropped block claims one byte more than any stored payload holds
     let mut r = recs.clone();
-    r[i].1[33..37].copy_from_slice(&(64u32 * 1024 * 1024 + 1).to_le_bytes());
+    r[i].1[35..39].copy_from_slice(&(64u32 * 1024 * 1024 + 1).to_le_bytes());
     let forged = scratch.path().join("claim.rdydump");
     std::fs::write(&forged, forge(&r)).unwrap();
     let to = scratch.path().join("to");
@@ -604,7 +632,7 @@ fn rdx9_fixture_generators_and_bytes_are_unchanged() {
             "FIXTURE_S11_BLAKE3",
             "EXPECT_S11_BLAKE3",
             "fn di2_write_the_v1_s11_fixture()",
-            Some("assert_eq!(STORE_FORMAT, 11"),
+            Some("LAST_SCALAR_STORE_FORMAT, 11,"),
         ),
         (
             include_str!("io_dump_fixture_s12.rs"),
@@ -612,7 +640,7 @@ fn rdx9_fixture_generators_and_bytes_are_unchanged() {
             "FIXTURE_BLAKE3",
             "EXPECT_BLAKE3",
             "fn ec13_write_the_v1_s12_fixture()",
-            Some("assert_eq!(STORE_FORMAT, 12"),
+            Some("LAST_SCALAR_STORE_FORMAT, 12,"),
         ),
     ];
     for (source, stem, dump_const, expect_const, generator, pinned) in guards {
@@ -641,6 +669,10 @@ fn rdx9_fixture_generators_and_bytes_are_unchanged() {
         // the frozen header: dump format 1 and its own store format
         let (_, format, h) = DumpReader::open(&dump[..]).unwrap();
         assert_eq!(format, 1, "{stem}");
-        assert_eq!(h.store_format.to_string(), stem[4..], "{stem}");
+        assert_eq!(
+            h.store,
+            DumpStore::Legacy(stem[4..].parse().unwrap()),
+            "{stem}"
+        );
     }
 }

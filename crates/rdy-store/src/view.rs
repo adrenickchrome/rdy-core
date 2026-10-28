@@ -10,7 +10,7 @@ use crate::merge::Conflict;
 use crate::state::view_ref;
 use crate::store::{Frames, encode};
 use crate::{Store, StoreReader};
-use rdy_model::{Answer, Hash, Provenance};
+use rdy_model::{Answer, Change, Hash, Op, Provenance};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -419,13 +419,25 @@ impl StoreReader {
                 .ok_or(StoreError::NotFound(*h))
         };
         let (la, lb) = (at(a)?, at(b)?);
-        let len = crate::segment::HEADER + encode(&self.view_op(a)?).len() as u64;
+        // the frame's stored length, whatever its encoding
+        let Some((payload, _, _)) = self.segments().header(la)? else {
+            return Err(StoreError::NotFound(*a));
+        };
+        let len = crate::segment::HEADER + u64::from(payload);
         Ok(la.segment == lb.segment && la.offset + len == lb.offset)
     }
 
     /// The ids of every op of view `name`'s chain that the index holds, in ascending hash order.
     pub fn view_op_ids(&self, name: &str) -> Result<Vec<Hash>, StoreError> {
         self.index().view_ops(name)
+    }
+
+    /// The refusal of a write that copies `change`: `Redacted` (naming the request) or
+    /// `ProjectedWrite` when it is a read projection or embeds a projected block version, as a
+    /// write of it would be refused. A replay checks its sources with it before it prepares
+    /// anything.
+    pub fn refuse_copy_of(&self, change: &Change) -> Result<(), StoreError> {
+        self.refuse_projection(change)
     }
 
     /// The landing that carried `change` into canon, if one has (lidx1).
@@ -652,7 +664,8 @@ impl Store {
             owner: owner.clone(),
             pinned,
         };
-        let bytes = encode(&view_op(name, None, create, by));
+        let (kind, bytes) =
+            crate::codec::item_new(kinds::VIEW_OP, &view_op(name, None, create, by));
         let head = ViewHead {
             head: Hash::of(&bytes),
             base,
@@ -662,7 +675,7 @@ impl Store {
             closed: false,
             last_write_ms: by.at_ms,
         };
-        let mut items = vec![(kinds::VIEW_OP, bytes)];
+        let mut items = vec![(kind, bytes)];
         items.extend(self.ref_items_pub(vec![(view_ref(name), encode(&head))]));
         self.write(items)?;
         Ok(head)
@@ -693,7 +706,7 @@ impl Store {
             changes: changes.clone(),
             owner: owner.clone(),
         };
-        let bytes = encode(&view_op(name, None, fork, by));
+        let (kind, bytes) = crate::codec::item_new(kinds::VIEW_OP, &view_op(name, None, fork, by));
         let mut head = ViewHead {
             head: Hash::of(&bytes),
             base: src.base,
@@ -703,7 +716,7 @@ impl Store {
             closed: false,
             last_write_ms: by.at_ms,
         };
-        let mut items = vec![(kinds::VIEW_OP, bytes)];
+        let mut items = vec![(kind, bytes)];
         let canon = self.canon_head()?;
         if let Some(landing) = canon
             && !src.pinned
@@ -747,9 +760,10 @@ impl Store {
                 remaining,
                 conflicts,
             };
-            let bytes = encode(&view_op(name, Some(head.head), rebase, by));
+            let (kind, bytes) =
+                crate::codec::item_new(kinds::VIEW_OP, &view_op(name, Some(head.head), rebase, by));
             head.head = Hash::of(&bytes);
-            items.push((kinds::VIEW_OP, bytes));
+            items.push((kind, bytes));
         }
         items.extend(self.ref_items_pub(vec![(view_ref(name), encode(&head))]));
         self.write(items)?;
@@ -893,10 +907,11 @@ impl Store {
             ) {
                 last_write = by.at_ms;
             }
-            let bytes = encode(&view_op(name, prev, op, by));
+            let (kind, bytes) =
+                crate::codec::item_new(kinds::VIEW_OP, &view_op(name, prev, op, by));
             prev = Some(Hash::of(&bytes));
             written.extend(prev);
-            items.push((kinds::VIEW_OP, bytes));
+            items.push((kind, bytes));
         }
         // 5. the new head, in the same write
         let new_head = ViewHead {
@@ -912,27 +927,103 @@ impl Store {
         Ok((items, new_head, written))
     }
 
+    /// Stores `changes`, each prepared by the caller as a replay (`links.replayed_from` set, its
+    /// deps final), and one `Include` of them all into view `name`, in one write: one batch, so
+    /// the `Include` is the one op that undoes the whole replay. The deps are kept as given, never
+    /// recomputed: each must name an earlier change of `changes` or a stored change. The view
+    /// must exist and be open. The float catch-up of `view_append` applies. Refused with nothing
+    /// written: no changes, a change that is no replay or that is a read projection (or embeds
+    /// one), the same change twice, and a dep the store lacks. Returns the `Include`'s id (the
+    /// view's new head) and the changes' ids, in order.
+    pub fn view_replay_prepared(
+        &mut self,
+        name: &str,
+        changes: &[Change],
+        by: &Provenance,
+    ) -> Result<(Hash, Vec<Hash>), StoreError> {
+        if changes.is_empty() {
+            return Err(StoreError::Decode(
+                "view_replay_prepared: no changes".into(),
+            ));
+        }
+        let head = self
+            .view_head(name)?
+            .ok_or_else(|| StoreError::UnknownView(name.to_string()))?;
+        if head.closed {
+            return Err(StoreError::ViewClosed(name.to_string()));
+        }
+        let mut items: Frames = vec![];
+        let mut ids: Vec<Hash> = vec![];
+        let mut seen: HashSet<Hash> = HashSet::new();
+        for change in changes {
+            self.refuse_projection(change)?;
+            if change.links.replayed_from.is_none() {
+                return Err(StoreError::Decode(
+                    "view_replay_prepared: a change is no replay".into(),
+                ));
+            }
+            for d in &change.deps {
+                if !seen.contains(d) && !self.has_kind(kinds::CHANGE, d)? {
+                    return Err(StoreError::NotFound(*d));
+                }
+            }
+            for op in &change.ops {
+                if let Op::Create { block } | Op::Update { block, .. } = op {
+                    items.push(crate::codec::item_new(kinds::BLOCK, block));
+                }
+            }
+            let item = crate::codec::item(kinds::CHANGE, change)?;
+            let id = Hash::of(&item.1);
+            if id != change.id() {
+                return Err(StoreError::Decode(format!(
+                    "view_replay_prepared: change {} encodes as {id}",
+                    change.id()
+                )));
+            }
+            if !seen.insert(id) {
+                return Err(StoreError::Decode(format!(
+                    "change {id} is committed twice in one write"
+                )));
+            }
+            ids.push(id);
+            items.push(item);
+        }
+        let (frames, new_head, _) = self.view_append_frames(
+            name,
+            vec![ViewOpKind::Include {
+                changes: ids.clone(),
+            }],
+            by,
+        )?;
+        items.extend(frames);
+        self.write(items)?;
+        Ok((new_head.head, ids))
+    }
+
     /// A `Close { reason }` op of view `name` after its head `prev_head`, for a caller's batch
-    /// (altw1): the op's bytes, its id and the closed head (everything else kept). Nothing is
-    /// written here.
+    /// (altw1): the op's frame (its raw kind and bytes), its id and the closed head (everything
+    /// else kept). Nothing is written here.
     pub(crate) fn close_part(
         &self,
         name: &str,
         prev_head: &ViewHead,
         reason: &str,
         by: &Provenance,
-    ) -> (Vec<u8>, Hash, ViewHead) {
+    ) -> ((u8, Vec<u8>), Hash, ViewHead) {
         let close = ViewOpKind::Close {
             reason: reason.to_string(),
         };
-        let bytes = encode(&view_op(name, Some(prev_head.head), close, by));
-        let id = Hash::of(&bytes);
+        let item = crate::codec::item_new(
+            kinds::VIEW_OP,
+            &view_op(name, Some(prev_head.head), close, by),
+        );
+        let id = Hash::of(&item.1);
         let head = ViewHead {
             head: id,
             closed: true,
             ..prev_head.clone()
         };
-        (bytes, id, head)
+        (item, id, head)
     }
 
     /// Whether `ops` hold an op that can add a change to view `name`: an `Include`, or an `Undo`

@@ -26,7 +26,14 @@ fn table() -> Vec<StreamError> {
         StreamError::truncated(Some(9), 4096),
         StreamError::purpose(None, 0, 2),
         StreamError::purpose(Some(0), 12, 9),
-        StreamError::store_format(Some(0), 12, 14, 15),
+        StreamError::store_format(
+            Some(0),
+            12,
+            &rdy_store::StoreError::Format {
+                message: "store feature x needs rdy 9.0.0".into(),
+                fix: "open the project with rdy 9.0.0 or later".into(),
+            },
+        ),
         StreamError::limit(None, 0, "1000000 object records"),
         StreamError::limit(Some(2), 55, "2147483648 total bytes").with_object(Some(key())),
         StreamError::allocation(Some(6), 1),

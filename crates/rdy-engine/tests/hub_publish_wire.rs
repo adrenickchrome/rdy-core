@@ -164,7 +164,7 @@ fn error_body(code: &str, message: &str, fix: &str, issues: &str, extra: &str) -
 
 fn state_reply(features: &str, profile: &str) -> String {
     format!(
-        r#"{{"canon":null,"repo_id":null,"rdy":"0.10.0","stream_read":[1],"stream_write":[1],"features":{features},"min_rdy":null,"batch_bytes":67108864,"batch_records":100000,"quarantine_seconds":86400,"profile":{profile},"audience":null,"artifact_bytes":201326592,"artifact_files":32000}}"#
+        r#"{{"canon":null,"repo_id":null,"rdy":"0.10.0","stream_read":[2],"stream_write":[2],"features":{features},"min_rdy":null,"batch_bytes":67108864,"batch_records":100000,"quarantine_seconds":86400,"profile":{profile},"audience":null,"artifact_bytes":201326592,"artifact_files":32000}}"#
     )
 }
 
@@ -424,7 +424,7 @@ fn hpb7_wire_fixtures_match_every_endpoint() {
     assert_eq!(
         req.body_text(),
         format!(
-            r#"{{"rdy":"{rdy}","stream_read":[1],"stream_write":[1],"actor":"agent:claude","run":"r7","site":"docs"}}"#
+            r#"{{"rdy":"{rdy}","stream_read":[2],"stream_write":[2],"actor":"agent:claude","run":"r7","site":"docs"}}"#
         )
     );
     assert_eq!(
@@ -433,8 +433,8 @@ fn hpb7_wire_fixtures_match_every_endpoint() {
             canon: None,
             repo_id: None,
             rdy: "0.10.0".into(),
-            stream_read: vec![1],
-            stream_write: vec![1],
+            stream_read: vec![2],
+            stream_write: vec![2],
             features: vec![
                 FeatureUse {
                     name: "blob_chunks".into(),
@@ -531,7 +531,8 @@ fn hpb7_wire_fixtures_match_every_endpoint() {
             &format!(r#""repo_id":"{}""#, "AB".repeat(16)),
         ),
         base.replace(r#""rdy":"0.10.0""#, r#""rdy":"ten""#),
-        base.replace(r#""stream_read":[1]"#, r#""stream_read":[2]"#),
+        // a hub that reads only sync format 1, which this rdy no longer writes
+        base.replace(r#""stream_read":[2]"#, r#""stream_read":[1]"#),
         base.replace(
             r#""profile":null"#,
             r#""profile":{"id":"PUB-0A1B2","version":"x"}"#,
@@ -1337,7 +1338,7 @@ fn hpb7_every_core_error_keeps_its_static_code() {
             declared.push(value.to_string());
         }
     }
-    assert_eq!(declared.len(), 102, "{declared:?}");
+    assert_eq!(declared.len(), 106, "{declared:?}");
     for code in [
         "E_STREAM_TRUNCATED",
         "E_STREAM_PURPOSE",
@@ -1879,8 +1880,8 @@ fn hpb7_debug_never_prints_untrusted_reply_text() {
             canon: None,
             repo_id: None,
             rdy: "0.10.0".into(),
-            stream_read: vec![1],
-            stream_write: vec![1],
+            stream_read: vec![2],
+            stream_write: vec![2],
             features: vec![FeatureUse {
                 name: token.into(),
                 class: FeatureClass::Compatible,

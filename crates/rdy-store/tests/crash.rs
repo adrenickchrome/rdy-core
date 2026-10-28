@@ -5,7 +5,7 @@
 //! one; the parent reopens the store and checks it recovered every acknowledged write, with the
 //! index caught up from the log rather than rebuilt.
 use rdy_model::Hash;
-use rdy_store::format::STORE_FORMAT;
+use rdy_store::format::{REF_STORE_FEATURES, baseline_features};
 use rdy_store::segment::{CrashPoint, Location};
 use rdy_store::transition::{Cause, Side, TensionMove, Transitions, Why};
 use rdy_store::{OpenReport, Store};
@@ -476,11 +476,7 @@ fn kill1_marker_shaped_bytes_in_a_torn_tail_are_quarantined_not_refused() {
 fn kill1_create_writes_format_before_anything_else() {
     let what = "a store holding only FORMAT";
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        dir.path().join("FORMAT"),
-        format!("rdy store format\nstore_format {STORE_FORMAT}\n"),
-    )
-    .unwrap();
+    rdy_store::format::write_format_file(dir.path(), &baseline_features()).unwrap();
     finished_format(dir.path(), &[], what);
 
     let torn = tempfile::tempdir().unwrap();
@@ -504,11 +500,7 @@ fn kill1_create_writes_format_before_anything_else() {
 fn empty_store(dir: &Path) {
     std::fs::create_dir_all(dir.join("segments")).unwrap();
     drop(rdy_store::index::Index::open(&dir.join("index.redb")).unwrap());
-    std::fs::write(
-        dir.join("FORMAT"),
-        format!("rdy store format\nstore_format {STORE_FORMAT}\n"),
-    )
-    .unwrap();
+    rdy_store::format::write_format_file(dir, &baseline_features()).unwrap();
 }
 
 /// Opens a store directory the way a crash left it and checks the open finished the format batch:
@@ -525,15 +517,15 @@ fn finished_format(dir: &Path, blobs: &[Vec<u8>], what: &str) {
         rdy_store::segment::log_has_marker(&segments).unwrap(),
         "{what}: no marker"
     );
-    // M2a1 (fmt2): one format number, `store_format N`, in place of log_format/min_reader
+    // the feature manifest (D-WWAK7), in place of a format number
     assert_eq!(
-        std::fs::read_to_string(dir.join("FORMAT")).unwrap(),
-        format!("rdy store format\nstore_format {STORE_FORMAT}\n"),
+        std::fs::read_to_string(dir.join("FEATURES")).unwrap(),
+        baseline_features().to_text(),
         "{what}"
     );
     assert_eq!(
-        s.get_ref("meta/store_format").unwrap(),
-        Some(STORE_FORMAT.to_string().into_bytes()),
+        s.get_ref(REF_STORE_FEATURES).unwrap(),
+        Some(baseline_features().to_json()),
         "{what}"
     );
     drop(s);

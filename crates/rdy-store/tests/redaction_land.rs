@@ -870,7 +870,9 @@ fn rdx7_every_physical_copy_must_be_covered() {
         record(&mut s, &spec);
         let payload = frame_of(&s, kind, hash).1;
         drop(s);
-        raw_append(&w.path, &[(kind, payload)]);
+        // the copy keeps the frame's raw kind: its kind's latest encoding
+        let raw = rdy_store::codec::raw_kind(kind, rdy_store::codec::latest(kind));
+        raw_append(&w.path, &[(raw, payload)]);
         let mut s = Store::open(&w.path).unwrap();
         assert_land_refuses(
             &mut s,
@@ -932,9 +934,9 @@ fn rdx7_apply_keeps_untargeted_blocks_reconstructible() {
             Op::Create { block: c.clone() },
         ],
     );
-    let c2_bytes = redaction_fixture::enc(&c2);
+    let (c2_kind, c2_bytes) = rdy_store::codec::item(kinds::CHANGE, &c2).unwrap();
     let c2_id = Hash::of(&c2_bytes);
-    let c2_at = raw_append(&w.path, &[(kinds::CHANGE, c2_bytes)]);
+    let c2_at = raw_append(&w.path, &[(c2_kind, c2_bytes)]);
     {
         let s = Store::open(&w.path).unwrap();
         assert!(!s.has_kind(BLOCK, &c.version_hash()).unwrap());
@@ -1050,7 +1052,13 @@ fn rdx7_held_apply_masks_nothing_before_seal() {
             change("other", vec![Op::Create { block: w.a.clone() }]),
         )
         .unwrap();
-        let open = s.open_batch().unwrap().to_vec();
+        // by the logical kind, as the logged batch reads it
+        let open: Vec<(u8, Hash)> = s
+            .open_batch()
+            .unwrap()
+            .iter()
+            .map(|(k, h)| (rdy_store::codec::logical_kind(*k), *h))
+            .collect();
         let e = s
             .land_atomic(request(p, person(Role::Approver), false))
             .unwrap_err();
@@ -1166,7 +1174,13 @@ fn rdx7_held_apply_seal_takes_only_its_transition() {
         s.set_held(true).unwrap();
         s.land_atomic(request(p, person(Role::Approver), false))
             .unwrap();
-        let open = s.open_batch().unwrap().to_vec();
+        // by the logical kind, as the logged batch reads it
+        let open: Vec<(u8, Hash)> = s
+            .open_batch()
+            .unwrap()
+            .iter()
+            .map(|(k, h)| (rdy_store::codec::logical_kind(*k), *h))
+            .collect();
         let (end, writes) = (s.log_end(), s.write_count());
         let e = s.seal(bad).unwrap_err();
         assert!(matches!(e, StoreError::Refused(_)), "{case}: {e:?}");
@@ -1308,4 +1322,167 @@ fn ha5_a_removal_landing_names_exactly_its_requests() {
         s.prepare_land_altered_for_tests(request(p, person(Role::Approver), false), &|_| {})
             .is_ok()
     );
+}
+
+/// D-WWAK7 with a held apply seal: the feature a held batch first uses is the store's from the
+/// seal's sync on. A refusal at the seal keeps the batch open with its feature listed; a failure
+/// after the sync (the removal is authorized) keeps the committed feature in `FORMAT`, so the
+/// next open reads the store and finishes the removal; a failure before the sync rolls both
+/// back.
+#[test]
+fn ok1_a_held_apply_seal_keeps_the_feature_it_first_uses() {
+    use rdy_store::format::{FeatureClass, TEST_FEATURE, inject_test_feature, read_format_file};
+    use rdy_store::redaction_io::{FailAction, Failpoint, arm_failpoint};
+    let _known = inject_test_feature(FeatureClass::Compatible, kinds::LANDING);
+    let transition = || {
+        Transitions {
+            at_ms: 60,
+            resolved: vec![],
+            opened: vec![],
+            gone: vec![],
+            new: vec![],
+        }
+        .frame()
+    };
+    // a held batch whose landing first uses the test feature and holds a redaction apply
+    let held = || {
+        let (w, mut s) = World::new();
+        record(&mut s, &w.secret("work"));
+        let p = s.propose("work", "Remove content", writer()).unwrap();
+        s.set_held(true).unwrap();
+        s.land_atomic(request(p, person(Role::Approver), false))
+            .unwrap();
+        assert!(!s.features().has(TEST_FEATURE), "not before the seal");
+        let ahead = read_format_file(&w.path).unwrap().unwrap();
+        assert!(ahead.has(TEST_FEATURE), "FORMAT lists the open batch's");
+        (w, s, ahead)
+    };
+    let mirror = |w: &World| read_format_file(&w.path).unwrap().unwrap();
+
+    // a refusal at the seal: the batch stays open and keeps its feature
+    {
+        let (w, mut s, ahead) = held();
+        let e = s.seal(vec![transition(), transition()]).unwrap_err();
+        assert!(matches!(e, StoreError::Refused(_)), "{e:?}");
+        assert!(s.open_batch().is_some(), "the batch is still open");
+        assert_eq!(mirror(&w), ahead, "FORMAT still lists the open batch's");
+        s.seal(vec![transition()]).unwrap();
+        assert!(s.features().has(TEST_FEATURE));
+        assert_eq!(&mirror(&w), s.features());
+        assert!(!on_disk(&w.path, SECRET), "erased by the seal");
+        drop(s);
+        let s = Store::open(&w.path).unwrap();
+        assert!(s.features().has(TEST_FEATURE));
+    }
+
+    // a failure after the sync: the feature is committed, and FORMAT keeps it
+    {
+        let (w, mut s, ahead) = held();
+        arm_failpoint(Some((Failpoint::AfterApplySync, FailAction::Fail)));
+        let e = s.seal(vec![transition()]).unwrap_err();
+        arm_failpoint(None);
+        assert!(matches!(e, StoreError::RedactionPending), "{e:?}");
+        assert_eq!(mirror(&w), ahead, "FORMAT keeps the committed feature");
+        drop(s);
+        let s = Store::open(&w.path).unwrap();
+        assert!(s.features().has(TEST_FEATURE));
+        assert_eq!(&mirror(&w), s.features());
+        assert!(!on_disk(&w.path, SECRET), "the open finished the removal");
+    }
+
+    // a failure before the sync: the batch and its feature roll back
+    {
+        let (w, mut s, _) = held();
+        let sealed = s.features().clone();
+        s.fail_next_append_after(10);
+        assert!(s.seal(vec![transition()]).is_err());
+        assert_eq!(mirror(&w), sealed, "FORMAT is the sealed log's again");
+        assert!(on_disk(&w.path, SECRET), "nothing erased");
+        drop(s);
+        let s = Store::open(&w.path).unwrap();
+        assert_eq!(s.features(), &sealed);
+        assert!(!s.features().has(TEST_FEATURE));
+    }
+}
+
+/// Fix round 3 (finding 3): a held apply seal whose sync fails and whose rollback then fails
+/// too has not rolled back. The batch, marker included, may stay in the log, so `FORMAT` keeps
+/// the manifest the batch published, and the next open judges by the log: a complete batch
+/// makes the feature the store's, and a torn one puts `FORMAT` back to the sealed log's.
+#[test]
+fn ok1_a_held_apply_seal_that_cannot_roll_back_keeps_format() {
+    use rdy_store::format::{FeatureClass, TEST_FEATURE, inject_test_feature, read_format_file};
+    let _known = inject_test_feature(FeatureClass::Compatible, kinds::LANDING);
+    let transition = || {
+        Transitions {
+            at_ms: 60,
+            resolved: vec![],
+            opened: vec![],
+            gone: vec![],
+            new: vec![],
+        }
+        .frame()
+    };
+    let held = || {
+        let (w, mut s) = World::new();
+        record(&mut s, &w.secret("work"));
+        let p = s.propose("work", "Remove content", writer()).unwrap();
+        s.set_held(true).unwrap();
+        s.land_atomic(request(p, person(Role::Approver), false))
+            .unwrap();
+        let ahead = read_format_file(&w.path).unwrap().unwrap();
+        assert!(ahead.has(TEST_FEATURE), "FORMAT lists the open batch's");
+        (w, s, ahead)
+    };
+    let mirror = |w: &World| read_format_file(&w.path).unwrap().unwrap();
+
+    // the marker is written whole, the sync fails and the truncate fails: the complete batch
+    // stays in the log, and FORMAT keeps its feature
+    {
+        let (w, mut s, ahead) = held();
+        s.fail_next_sync();
+        s.fail_next_rollback();
+        let e = s.seal(vec![transition()]).unwrap_err();
+        assert!(matches!(e, StoreError::Io(_)), "{e:?}");
+        assert_eq!(mirror(&w), ahead, "FORMAT keeps the published manifest");
+        assert!(s.put_blob(b"later").is_err(), "the store is poisoned");
+        drop(s);
+        let s = Store::open(&w.path).expect("the store reopens");
+        assert!(
+            s.features().has(TEST_FEATURE),
+            "the marked batch is the log's"
+        );
+        assert_eq!(&mirror(&w), s.features());
+        assert!(!on_disk(&w.path, SECRET), "the open finished the removal");
+    }
+
+    // the marker is torn and the truncate fails: FORMAT keeps the published manifest, and the
+    // open puts it back to the sealed log's
+    {
+        let (w, mut s, ahead) = held();
+        let sealed = s.features().clone();
+        s.fail_append_at_frame_for_tests(Some((1, 10)));
+        s.fail_next_rollback();
+        assert!(s.seal(vec![transition()]).is_err());
+        assert_eq!(mirror(&w), ahead, "FORMAT keeps the published manifest");
+        drop(s);
+        let s = Store::open(&w.path).expect("the store reopens");
+        assert_eq!(s.features(), &sealed);
+        assert_eq!(&mirror(&w), &sealed, "the open put FORMAT back");
+        assert!(on_disk(&w.path, SECRET), "nothing erased");
+    }
+
+    // an abandoned batch whose truncate fails: FORMAT keeps the published manifest, and the
+    // open puts it back to the sealed log's (the batch has no marker)
+    {
+        let (w, mut s, ahead) = held();
+        let sealed = s.features().clone();
+        s.fail_next_rollback();
+        s.abandon_open_batch();
+        assert_eq!(mirror(&w), ahead, "FORMAT keeps the published manifest");
+        drop(s);
+        let s = Store::open(&w.path).expect("the store reopens");
+        assert_eq!(s.features(), &sealed);
+        assert_eq!(&mirror(&w), &sealed, "the open put FORMAT back");
+    }
 }

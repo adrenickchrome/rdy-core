@@ -59,7 +59,12 @@ fn batches() -> Batches {
             .0
     };
     let full = write(
-        &StreamHeader::tag_history(repo, tag, c.prerequisites.clone()),
+        &StreamHeader::tag_history(
+            rdy_store::format::baseline_features(),
+            repo,
+            tag,
+            c.prerequisites.clone(),
+        ),
         &c.records,
     );
     let early_keys: Vec<ObjectKey> = c
@@ -67,9 +72,11 @@ fn batches() -> Batches {
         .iter()
         .copied()
         .filter(|k| {
-            refs_of(k.kind, &r.store().get_kind(k.kind, &k.hash).unwrap())
-                .unwrap()
-                .is_empty()
+            {
+                // the frame's raw kind and stored bytes: a change is encoding 1
+                let (raw, payload) = r.store().get_kind_raw(k.kind, &k.hash).unwrap();
+                refs_of(raw, &payload).unwrap().is_empty()
+            }
         })
         .collect();
     assert!(early_keys.iter().any(|k| k.kind == kinds::BLOCK));
@@ -79,7 +86,12 @@ fn batches() -> Batches {
     };
     assert!(!early_keys.contains(&root));
     let early = write(
-        &StreamHeader::tag_history(repo, tag, vec![root]),
+        &StreamHeader::tag_history(
+            rdy_store::format::baseline_features(),
+            repo,
+            tag,
+            vec![root],
+        ),
         &early_keys,
     );
     Batches {
@@ -368,6 +380,7 @@ fn two_prerequisite_batch() -> Vec<u8> {
     };
     let payload = postcard::to_allocvec(&snapshot).unwrap();
     let record = StreamRecord::Present {
+        encoding: 0,
         key: ObjectKey {
             kind: kinds::SNAPSHOT,
             hash: Hash::of(&payload),
@@ -385,7 +398,12 @@ fn two_prerequisite_batch() -> Vec<u8> {
             hash: root,
         },
     ];
-    let header = StreamHeader::tag_history(RepoId([7; 16]), root, prerequisites);
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        RepoId([7; 16]),
+        root,
+        prerequisites,
+    );
     let mut w = StreamWriter::new(Vec::new(), &header).unwrap();
     w.record(&record).unwrap();
     w.finish().unwrap().0

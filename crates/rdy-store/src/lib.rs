@@ -1,8 +1,10 @@
 pub mod answer;
 pub mod bounded;
+pub mod carried_records;
 mod check;
 pub mod check_holder;
 pub mod closure;
+pub mod codec;
 pub mod coord;
 pub mod diagram_cache;
 pub mod dump;
@@ -38,6 +40,7 @@ pub mod sync_proof;
 pub mod sync_stream;
 pub mod take_batch;
 pub mod transition;
+pub mod upgrade;
 pub mod view;
 
 pub use answer::{ANSWER_REF, PENDING_REF, answer_ref, snooze_ref};
@@ -54,6 +57,7 @@ pub use merge::{
     Conflict, MergeChange, Merged, Side, conflict_id, find_parent_cycle, merge, merge_on_blocks,
 };
 pub use segment::SegmentReader;
+pub use store::OpenPolicy;
 pub use store::{
     BlobState, CATCH_UP_CHUNK, CHECKPOINT_FRAMES, CHECKPOINT_IDLE, INDEX_OPEN_SENTINEL,
     LeftoverHookGuard, MAX_BLOB_BYTES, NoticeCapture, OpenReport, Store, StoreLock, StoreReader,
@@ -61,5 +65,5 @@ pub use store::{
     on_leftover_checked_for_tests, unclean_closes_for_tests,
 };
 mod state;
-pub use state::{PreparedTag, ViewRecord, apply_op};
+pub use state::{OrderOnlyEdits, PreparedTag, ViewRecord, apply_op};
 pub use view::{Owner, ResolvedOp, ViewHead, ViewOp, ViewOpKind};

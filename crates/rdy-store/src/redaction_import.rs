@@ -34,7 +34,8 @@ use crate::kinds;
 use crate::object_refs::ObjectKey;
 use crate::redaction::{limit, residue_matches};
 use crate::redaction_io::{
-    Applied, Authorization, Collected, FrameLog, LogAccess, SpanAuth, collect, read_record,
+    Applied, Authorization, Collected, FrameLog, LogAccess, Residues, SpanAuth, collect,
+    read_record,
 };
 use crate::segment::{self, HEADER, Hole, Holes, Location, header_at};
 use crate::stream_error::StreamError;
@@ -190,12 +191,24 @@ impl ObjectSource for LogSource<'_> {
             StoreError::Io(e) => StreamError::io(None, 0, &e),
             e => io(e),
         };
-        match self.log.header_at(loc).map_err(header_io)? {
-            Some((len, _, _)) if len as usize <= MAX_RECORD_BYTES => {}
+        let raw = match self.log.header_at(loc).map_err(header_io)? {
+            Some((len, raw, _))
+                if len as usize <= MAX_RECORD_BYTES
+                    && crate::codec::logical_kind(raw) == key.kind =>
+            {
+                raw
+            }
             _ => return Ok(None),
-        }
-        let payload = self.log.record(loc, key.kind, &key.hash).map_err(io)?;
-        Ok(payload.map(|payload| StreamRecord::Present { key, payload }))
+        };
+        let payload = self.log.record(loc, raw, &key.hash).map_err(io)?;
+        Ok(payload.and_then(|payload| {
+            let encoding = crate::codec::split(raw, &payload).ok()?.version;
+            Some(StreamRecord::Present {
+                key,
+                encoding,
+                payload,
+            })
+        }))
     }
 }
 
@@ -236,17 +249,16 @@ fn locate(
     let mut first: HashMap<ObjectKey, Location> = HashMap::new();
     log.walk(upto, &BTreeMap::new(), &mut |f| {
         scanned.add(f.len, caps)?;
-        if PROOF_KINDS.contains(&f.kind) {
+        // keyed by the logical kind: a frame of any encoding (`crate::codec`)
+        let kind = crate::codec::logical_kind(f.kind);
+        if PROOF_KINDS.contains(&kind) {
             first
                 .try_reserve(1)
                 .map_err(|_| StoreError::RedactionLimit {
                     limit: limit::FRAMES,
                 })?;
             first
-                .entry(ObjectKey {
-                    kind: f.kind,
-                    hash: f.hash,
-                })
+                .entry(ObjectKey { kind, hash: f.hash })
                 .or_insert(f.loc);
         }
         Ok(())
@@ -314,7 +326,7 @@ pub(crate) fn check_proved(
     upto: Location,
     applies: &[(Location, Hash)],
     removals: BTreeMap<Hash, PortableRemoval>,
-    residues: HashMap<Hash, RedactionResidue>,
+    residues: Residues,
 ) -> Result<(), StoreError> {
     let mut imported = Imported::of(removals);
     let caps = ReceiverCaps::current();
@@ -326,10 +338,10 @@ pub(crate) fn check_proved(
     let mut auth = Authorization {
         holes,
         spans,
-        residues,
         imported: Some(imported),
         ..Authorization::default()
     };
+    auth.keep_residues(residues)?;
     crate::redaction_carried::overlay(c, log, &mut auth, upto)
 }
 
@@ -363,7 +375,7 @@ fn derive(
     // 1. every apply by its links
     let mut applies: Vec<Applied> = Vec::with_capacity(frames.len());
     let mut imported = Imported::default();
-    let mut residues: HashMap<Hash, RedactionResidue> = HashMap::new();
+    let mut residues: Residues = HashMap::new();
     for a in &frames {
         let corrupt = || StoreError::corrupt_at(a.loc);
         let record = a.record.clone().ok_or_else(corrupt)?;
@@ -376,14 +388,20 @@ fn derive(
                     kind: kinds::REDACTION_RESIDUE,
                     hash: r,
                 };
-                let Some(StreamRecord::Present { payload, .. }) =
+                let Some(rec @ StreamRecord::Present { .. }) =
                     source.record(key).map_err(|e| proof_error(e, a.loc))?
                 else {
                     return Err(corrupt());
                 };
+                let StreamRecord::Present { payload, .. } = &rec else {
+                    unreachable!("a present record")
+                };
                 let res: RedactionResidue =
-                    crate::bounded::decode(&payload).map_err(|_| corrupt())?;
-                residues.insert(r, res);
+                    crate::codec::decode_bounded(rec.raw_kind(), payload).map_err(|_| corrupt())?;
+                let encoding = crate::codec::split(rec.raw_kind(), payload)
+                    .map_err(|_| corrupt())?
+                    .version;
+                residues.insert(r, (res, encoding));
             }
         }
         imported.removals.insert(a.hash, removal);
@@ -395,15 +413,16 @@ fn derive(
     }
     let placed: Vec<(Location, Hash)> = applies.iter().map(|a| (a.loc, a.hash)).collect();
     let (holes, spans) = derive_spans(log, upto, &placed, &mut imported, &residues, &caps)?;
-    Ok(Authorization {
+    let mut auth = Authorization {
         holes,
         spans,
-        residues,
         applies,
         requests,
         imported: Some(imported),
-        carried: vec![],
-    })
+        ..Authorization::default()
+    };
+    auth.keep_residues(residues)?;
+    Ok(auth)
 }
 
 /// Rules 2 and 3 (see the module docs) over every frame of `log` before `upto`, for the proved
@@ -415,7 +434,7 @@ fn derive_spans(
     upto: Location,
     applies: &[(Location, Hash)],
     imported: &mut Imported,
-    residues: &HashMap<Hash, RedactionResidue>,
+    residues: &Residues,
     caps: &ReceiverCaps,
 ) -> Result<(Holes, BTreeMap<Location, SpanAuth>), StoreError> {
     // 2. and 3. every copy of an approved tuple, and every uncovered embedding
@@ -444,8 +463,10 @@ fn derive_spans(
     let mut spans: BTreeMap<Location, SpanAuth> = BTreeMap::new();
     let mut spans_count = 0u64;
     log.walk(upto, &BTreeMap::new(), &mut |f| {
+        // keyed by the logical kind; `f.kind` stays the frame's raw kind for its decode
+        let logical = crate::codec::logical_kind(f.kind);
         let key = ObjectKey {
-            kind: f.kind,
+            kind: logical,
             hash: f.hash,
         };
         if let Some(by) = approved.get(&key) {
@@ -467,7 +488,7 @@ fn derive_spans(
             holes.insert(
                 f.loc,
                 Hole {
-                    kind: f.kind,
+                    kind: logical,
                     hash: f.hash,
                     len: f.len,
                 },
@@ -489,17 +510,17 @@ fn derive_spans(
                     .or_default()
                     .push(RedactedSpan {
                         loc: f.loc,
-                        kind: f.kind,
+                        kind: logical,
                         hash: f.hash,
                         len: f.len,
                         residue: r.objects[&key].residue,
                     });
             }
-        } else if f.kind == kinds::CHANGE
+        } else if crate::codec::logical_kind(f.kind) == kinds::CHANGE
             && !versions.is_empty()
             && f.len as usize <= MAX_RECORD_BYTES
             && let Some(p) = f.intact()?
-            && let Ok(change) = crate::store::decode::<Change>(&p)
+            && let Ok(change) = crate::codec::decode_record::<Change>(f.kind, &p)
             && embeds(&change, &versions)
         {
             // an intact copy of removed content that no approval covers
@@ -515,22 +536,28 @@ fn derive_spans(
 }
 
 /// Whether a local copy of an approved key (rule 2) is what its approved `tuple` says: its header
-/// keeps the tuple's length `len`, and its payload, when it is intact (`intact`), is what the
-/// tuple's residue records (`residue_matches`, the residue decoded in `residues`). An all-zero or
-/// partly zero payload is an erased or interrupted copy, and passes.
+/// keeps the tuple's length `len` and the raw kind of the residue's source encoding
+/// (`crate::redaction::marker_agrees`; a blob chunk's is unmarked), and its payload, when it is
+/// intact (`intact`), is what the tuple's residue records (`residue_matches`, the residue decoded
+/// in `residues`). An all-zero or partly zero payload is an erased or interrupted copy, and
+/// passes the payload rule.
 pub(crate) fn copy_fits(
     kind: u8,
     len: u32,
     intact: Option<&[u8]>,
     tuple: &crate::sync_proof::RemovalObject,
-    residues: &HashMap<Hash, RedactionResidue>,
+    residues: &Residues,
 ) -> bool {
+    let logical = crate::codec::logical_kind(kind);
     len == tuple.len
         && match (intact, tuple.residue) {
             (Some(p), Some(r)) => residues
                 .get(&r)
-                .is_some_and(|res| residue_matches(kind, p, res)),
-            _ => true,
+                .is_some_and(|(res, encoding)| residue_matches(kind, p, res, *encoding)),
+            (None, Some(r)) => residues
+                .get(&r)
+                .is_none_or(|(res, _)| crate::redaction::marker_agrees(kind, logical, Some(res))),
+            (_, None) => kind == logical,
         }
 }
 

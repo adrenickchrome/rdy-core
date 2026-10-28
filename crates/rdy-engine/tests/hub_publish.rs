@@ -3,7 +3,8 @@
 //! HA2a's settings and credentials, the typed wire, the history sender and the file sender over
 //! one tagged snapshot, and stores nothing. Every test injects the credential transport, the
 //! clock, the wire and the renderer; a real project and real sign-in file stand behind them.
-//! Barriers order the redaction race; nothing sleeps or measures time.
+//! Channels order the redaction race; nothing sleeps or measures time, and every wait of the
+//! race is bounded so a broken run fails the test instead of hanging it.
 //!
 //! Its 0600 credential fixtures in private config directories go through `rdy_store::pio`
 //! (FW-XP1 D-1RXEA).
@@ -43,9 +44,11 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::time::Duration;
 
 const ACCOUNT: &str = "acc_00000000000000000000000001";
 const HANDLE: &str = "test-person";
@@ -1251,6 +1254,99 @@ fn hpb14_each_request_uses_current_access_and_the_same_claim() {
     );
 }
 
+/// How long either side of the race harness waits for the other before it fails the test.
+const RACE_LIMIT: Duration = Duration::from_secs(120);
+
+/// What the publish thread tells the race harness.
+enum Race {
+    /// The run is held at the request.
+    Reached,
+    /// The run returned, or panicked.
+    Ended(Box<std::thread::Result<Result<PublishResult, RdyError>>>),
+}
+
+/// Runs the standard publish on its own thread and holds it at the first `during` request
+/// while `between` runs on this thread, then lets it go on, and returns the run's outcome.
+/// Every wait is bounded by [`RACE_LIMIT`], and a run that ends before `during` fails the test
+/// at once with its outcome, so a broken run cannot hold the test binary.
+fn hold_at(
+    e: &mut Env,
+    wire: &Arc<Wire>,
+    during: &'static str,
+    between: impl FnOnce(&mut Env),
+) -> Result<PublishResult, RdyError> {
+    let (events, seen) = mpsc::channel::<Race>();
+    let (go, resume) = mpsc::channel::<()>();
+    let reached = events.clone();
+    let mut held_once = false;
+    wire.on_step(move |step| {
+        if step == during && !held_once {
+            held_once = true;
+            reached
+                .send(Race::Reached)
+                .expect("the race harness waits for the held request");
+            match resume.recv_timeout(RACE_LIMIT) {
+                Ok(()) => {}
+                // the test failed while the run was held; it reports its own failure
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("held at {during}: the test stopped before it let the run go on")
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+                    "held at {during}: the test did not let the run go on within {RACE_LIMIT:?}"
+                ),
+            }
+        }
+    });
+    let read = e.r.read();
+    let (project, user_file) = (e.project.clone(), e.user_file.clone());
+    let wire = Arc::clone(wire);
+    // not a scoped thread: a run stuck past RACE_LIMIT must not hold the test at the scope's join
+    std::thread::spawn(move || {
+        let (api, clock) = (Api::default(), Clock::at(T0));
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+            PublishService::new(&project, &user_file, &api, &clock, &*wire).run(
+                read,
+                &agent(),
+                standard(),
+                &Renderer::default(),
+            )
+        }));
+        let _ = events.send(Race::Ended(Box::new(outcome)));
+    });
+    let next = |what: &str| {
+        seen.recv_timeout(RACE_LIMIT).unwrap_or_else(|e| {
+            panic!("held at {during}: no {what} within {RACE_LIMIT:?} ({e}); the run is stuck")
+        })
+    };
+    match next("held request") {
+        Race::Reached => {}
+        Race::Ended(outcome) => match *outcome {
+            Ok(outcome) => panic!("the run ended before it reached {during}: {outcome:?}"),
+            Err(p) => panic!(
+                "the run ended before it reached {during}: it panicked: {}",
+                panic_text(&*p)
+            ),
+        },
+    }
+    between(e);
+    go.send(()).expect("the held run waits to go on");
+    match next("end of the run") {
+        Race::Ended(outcome) => match *outcome {
+            Ok(outcome) => outcome,
+            Err(p) => panic::resume_unwind(p),
+        },
+        Race::Reached => unreachable!("the run is held once"),
+    }
+}
+
+/// The text of a panic payload.
+fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
+    p.downcast_ref::<String>()
+        .cloned()
+        .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_else(|| "a panic without text".into())
+}
+
 /// A redaction applied while the upload runs stops it before its next phase: no later request
 /// and no publish is sent, and no success is returned. A redaction that lands while the publish
 /// request is in flight returns no success either, though the hub answered with a valid
@@ -1260,39 +1356,9 @@ fn hpb14_each_request_uses_current_access_and_the_same_claim() {
 fn hpb14_redaction_between_phases_aborts_before_publish() {
     for during in ["objects", "file", "publish"] {
         let mut e = env();
-        let read = e.r.read();
-        let reached = Arc::new(Barrier::new(2));
-        let resume = Arc::new(Barrier::new(2));
-        let wire = Wire::new();
-        let (r1, r2) = (Arc::clone(&reached), Arc::clone(&resume));
-        let mut held_once = false;
-        wire.on_step(move |step| {
-            if step == during && !held_once {
-                held_once = true;
-                r1.wait();
-                r2.wait();
-            }
-        });
-        let (project, user_file) = (e.project.clone(), e.user_file.clone());
-        let api = Api::default();
-        let clock = Clock::at(T0);
+        let wire = Arc::new(Wire::new());
         let target = e.ids.b.to_string();
-        let outcome = std::thread::scope(|s| {
-            let wire = &wire;
-            let (api, clock) = (&api, &clock);
-            let h = s.spawn(move || {
-                PublishService::new(&project, &user_file, api, clock, wire).run(
-                    read,
-                    &agent(),
-                    standard(),
-                    &Renderer::default(),
-                )
-            });
-            reached.wait();
-            redact(&mut e.r, &[target]);
-            resume.wait();
-            h.join().unwrap()
-        });
+        let outcome = hold_at(&mut e, &wire, during, |e| redact(&mut e.r, &[target]));
         let err = outcome.expect_err(during);
         assert_eq!(err.code, E_REDACTED_STATE, "{during}: {err:?}");
         let steps = wire.steps();
@@ -1330,6 +1396,55 @@ fn hpb14_redaction_between_phases_aborts_before_publish() {
             _ => assert_eq!(steps.iter().filter(|s| **s == "file").count(), 1),
         }
     }
+}
+
+/// The race harness never outwaits a run that ends before the held request: it returns
+/// that outcome (a failed run here) at once, so a broken run fails the test and does not hold
+/// the test binary for hours (the M3a gate hangs).
+#[test]
+fn hpb14_the_race_harness_returns_when_the_run_ends_before_the_held_request() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut e = env();
+        let wire = Arc::new(Wire::new().failing("state", upstream_transport()));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            hold_at(&mut e, &wire, "objects", |_| {
+                panic!("the run never reached objects, so nothing runs between")
+            })
+        }));
+        let _ = tx.send(outcome.map(|o| o.map(|_| ()).map_err(|e| e.code)));
+    });
+    let outcome = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the race harness returns within 30 s when the run ends before the held request");
+    let refused = outcome.expect_err("hold_at reports a run that ended early as a panic");
+    let text = panic_text(&*refused);
+    assert!(
+        text.contains("ended before it reached objects") && text.contains(E_UPSTREAM_TRANSPORT),
+        "the panic names the held request and the run's outcome: {text}"
+    );
+}
+
+/// The race harness never outwaits a step between the held request and its release that fails:
+/// the held run is let go, and the failure (a panic of the redaction here) reaches the test at
+/// once. The M3a gates hung here when `redact` failed while the run was held.
+#[test]
+fn hpb14_the_race_harness_returns_when_the_step_between_fails() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut e = env();
+        let wire = Arc::new(Wire::new());
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            hold_at(&mut e, &wire, "objects", |_| panic!("the redaction failed"))
+        }));
+        let _ = tx.send(outcome.map(|o| o.map(|_| ()).map_err(|e| e.code)));
+    });
+    let outcome = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the race harness returns within 30 s when the step between fails");
+    let refused = outcome.expect_err("the failure of the step between reaches the test");
+    let text = panic_text(&*refused);
+    assert_eq!(text, "the redaction failed", "the step's own panic");
 }
 
 /// A lost publish reply, or a reply that breaks the candidate contract, may mean the candidate

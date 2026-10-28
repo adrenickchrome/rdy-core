@@ -419,13 +419,21 @@ pub fn presence(read: &ReadState, keys: &[ObjectKey]) -> Result<Vec<ObjectPresen
                     }
                 }
                 StoredFrame::Present { kind, hash, .. } => {
-                    let key = ObjectKey { kind, hash };
+                    // keyed by the logical kind: a frame of any encoding
+                    let key = ObjectKey {
+                        kind: rdy_store::codec::logical_kind(kind),
+                        hash,
+                    };
                     if seen.contains_key(&key) {
                         open.push((key, false));
                     }
                 }
                 StoredFrame::Dropped { kind, hash, .. } => {
-                    let key = ObjectKey { kind, hash };
+                    // keyed by the logical kind: a frame of any encoding
+                    let key = ObjectKey {
+                        kind: rdy_store::codec::logical_kind(kind),
+                        hash,
+                    };
                     if seen.contains_key(&key) {
                         open.push((key, true));
                     }
@@ -599,6 +607,9 @@ mod tests {
             approved_version: None,
             rebased_from: vec![],
             evidence: None,
+            assessment: None,
+            policy: None,
+            read_identity: None,
         }
     }
 

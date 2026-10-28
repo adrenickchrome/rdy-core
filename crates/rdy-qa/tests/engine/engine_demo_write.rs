@@ -396,8 +396,8 @@ fn df1_a_repin_from_a_conflict_side_and_a_repin_to_it_stay_refused() {
 }
 
 /// F5's guards: a move of t, or a re-key of t that a create placed on an order-key tie makes,
-/// changes t's content (`order` is in the content hash), so a repin to t in that write stays
-/// refused.
+/// keeps t's content (D-TX3KH: the order key is out of the content hash), so c's pin on t stays
+/// current and a repin to t in that write stays refused, as a repin that changes no pin.
 #[test]
 fn df1_a_move_or_a_rekey_and_a_repin_to_it_stay_refused() {
     let (_d, mut r) = project();
@@ -445,7 +445,9 @@ fn df1_a_move_or_a_rekey_and_a_repin_to_it_stay_refused() {
         ]),
     )
     .unwrap_err();
-    sus3_refusal(&e, &hi_id);
+    // D-TX3KH (ok2): a re-key or a move keeps the target's content, so c's pin on it stays
+    // current and the repin, which would change no pin, is refused as one
+    already_pinned(&e, &c, &hi_id);
     // a move of the target, then a repin to it
     let e = write(
         &mut r,
@@ -456,7 +458,17 @@ fn df1_a_move_or_a_rekey_and_a_repin_to_it_stay_refused() {
         ]),
     )
     .unwrap_err();
-    sus3_refusal(&e, &hi_id);
+    already_pinned(&e, &c, &hi_id);
+}
+
+/// The refusal of a repin by `c` to `t` that changes no pin (D-TX3KH: a move or a re-key of `t`
+/// keeps its content).
+fn already_pinned(e: &RdyError, c: &str, t: &BlockId) {
+    assert_eq!(e.code, "E_BAD_INPUT", "{e}");
+    assert_eq!(
+        e.message,
+        format!("{c} already pins the current version of {t}; nothing to repin")
+    );
 }
 
 const NOT_A_DECISION_FIX: &str = "name the decision (D-…), or give an editorial reason";

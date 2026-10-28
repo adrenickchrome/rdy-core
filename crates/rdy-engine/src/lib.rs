@@ -32,6 +32,7 @@ pub mod formats;
 mod fsck;
 mod gate;
 mod handle;
+pub use handle::{CompletionPhase, read_only_feature_for_tests, with_completion_hook_for_tests};
 mod history;
 pub mod history_facts;
 mod holder;
@@ -51,10 +52,12 @@ pub mod inflight;
 pub mod intent;
 mod io;
 mod keys;
+pub mod landing_order;
 pub mod lexicon;
 mod lint;
 pub mod load;
 pub mod load_chain;
+pub mod maintenance;
 mod materialize;
 pub mod mention_review;
 mod pack_load;
@@ -171,7 +174,7 @@ pub use write::{
 pub use config::{
     DEFAULT_LEASE_TTL_MINUTES, DEFAULT_PROPOSE_CHANGES, ProposeCadence, ServeConfig, serve_config,
 };
-pub use engine::{Engine, Local, WriteFn};
+pub use engine::{Engine, Local, ReadFn, WriteFn};
 pub use fsck::FsckReport;
 pub use pack_load::{
     FileStamp, PackFingerprint, ReloadOutcome, pack_fingerprint, pack_source_reads,

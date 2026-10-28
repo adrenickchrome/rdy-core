@@ -1,4 +1,4 @@
-//! mview1: `rdy_view` (create, fork, include, exclude, compare, list, show, close, own, resolve,
+//! mview1: `rdy_view` (create, fork, include, exclude, replay, compare, list, show, close, own, resolve,
 //! undo), the
 //! views paragraph of `rdy_schema`, and `rdy_log`. The request itself is run by
 //! `rdy_engine::view_api::run_view`, the dispatcher the daemon's `view` op shares.
@@ -22,7 +22,7 @@ pub struct OwnerParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ViewParams {
-    /// create, fork, include, exclude, compare, list, show, close, own, resolve, undo. own and close with stale are a person's acts: relay their words with evidence.
+    /// create, fork, include, exclude, replay, compare, list, show, close, own, resolve, undo. own and close with stale are a person's acts: relay their words with evidence.
     pub op: String,
     /// create and fork: the new view's name; close, own and show: the view.
     pub name: Option<String>,
@@ -32,11 +32,11 @@ pub struct ViewParams {
     pub base: Option<String>,
     /// create: pin the view to its base, so landings do not rebase it (default false).
     pub pin: Option<bool>,
-    /// include, exclude, resolve, undo, show: the view to act on (default: your own). You need to own it for include, exclude, resolve, close and undo.
+    /// include, exclude, replay, resolve, undo, show: the view to act on (default: your own). You need to own it for include, exclude, replay, resolve, close and undo.
     pub view: Option<String>,
     /// close: several views at once.
     pub views: Option<Vec<String>>,
-    /// include and exclude: the change ids. Include brings the changes' dependencies with them; exclude refuses while others depend on them unless cascade is true.
+    /// include, exclude and replay: the change ids. Include brings the changes' dependencies with them; exclude refuses while others depend on them unless cascade is true; replay (at least one) brings none.
     pub changes: Option<Vec<String>>,
     /// exclude and undo: also exclude the changes that depend on these (default false).
     pub cascade: Option<bool>,
@@ -66,7 +66,7 @@ pub struct ViewParams {
     pub question: Option<String>,
     /// own and close with stale: the chat session the person spoke in (default mcp).
     pub session_ref: Option<String>,
-    /// compare, list and show: cut the answer to about this many tokens; include, exclude and undo: the budget of the consequences.
+    /// compare, list and show: cut the answer to about this many tokens; include, exclude, replay and undo: the budget of the consequences.
     pub max_tokens: Option<usize>,
 }
 
@@ -83,7 +83,7 @@ pub struct LogParams {
 }
 
 /// `rdy_schema`'s paragraph on views.
-pub const SCHEMA_DOC: &str = "rdy_view {op, ...} works on views. Ops: create {name, base?, pin?}, fork {from, name}, include {changes, view?} (brings the changes' dependencies; a change that already landed is refused), exclude {changes, cascade?, view?}, compare {a?, b?} (default: your view against canon), list {all?, stale?}, show {view?}, close {name|views|stale, reason?, evidence?, question?, session_ref?}, own {name, owner?: {actor, run?}, none?, evidence, question?, session_ref?}, undo {view?, target?, cascade?}, resolve {block, landed: true, view?} (takes the landed side of a conflict on an accepted or rejected decision: the view reads canon's frozen version, and the change depends on every side); own and close with stale are a person's acts: relay their words with evidence (without it an MCP session gets E_PERMISSION); the act runs as the person, and the reply names relayed_by and the answer record. Every view op defaults to your own view. Ownership: an agent commits to, includes into, excludes from, undoes on, closes and proposes a view only if it owns it (the session that created it or first wrote to it); it never acts in work, the human's view, and with no view it writes to work-<actor>; include another session's changes into yours instead. A conflict is recorded, not an error: two sides changed one block, reads show the base version with a conflict (sides, changes, landings), and you resolve it by writing the block from the version you want (on an accepted or rejected decision, an edit is E_FROZEN; take the landed side with resolve); rdy_propose lists every conflict and marks the ones its version carries as blocking. Codes (each one's when and fix are in errors): E_VIEW_OWNER, E_VIEW_EXISTS, E_VIEW_CLOSED, E_HAS_DEPENDENTS, E_DEPS_MISSING, E_CONFLICT_UNRESOLVED, E_PROPOSAL_MOVED, E_UNDO_BLOCKED, E_UNDO_LANDING, E_NOTHING_TO_UNDO. include, exclude and undo return consequences (max_tokens bounds them); they take no brief.";
+pub const SCHEMA_DOC: &str = "rdy_view {op, ...} works on views. Ops: create {name, base?, pin?}, fork {from, name}, include {changes, view?} (brings the changes' dependencies; a change that already landed is refused), exclude {changes, cascade?, view?}, replay {changes, view?} (writes a new change for each listed change, from any view and landed or not, into your open view as one act that one undo removes; it brings no dependency; a block whose version differs from the change's base is recorded as a conflict), compare {a?, b?} (default: your view against canon), list {all?, stale?}, show {view?}, close {name|views|stale, reason?, evidence?, question?, session_ref?}, own {name, owner?: {actor, run?}, none?, evidence, question?, session_ref?}, undo {view?, target?, cascade?}, resolve {block, landed: true, view?} (takes the landed side of a conflict on an accepted or rejected decision: the view reads canon's frozen version, and the change depends on every side); own and close with stale are a person's acts: relay their words with evidence (without it an MCP session gets E_PERMISSION); the act runs as the person, and the reply names relayed_by and the answer record. Every view op defaults to your own view. Ownership: an agent commits to, includes into, excludes from, undoes on, closes and proposes a view only if it owns it (the session that created it or first wrote to it); it never acts in work, the human's view, and with no view it writes to work-<actor>; include another session's changes into yours instead. A conflict is recorded, not an error: two sides changed one block, reads show the base version with a conflict (sides, changes, landings), and you resolve it by writing the block from the version you want (on an accepted or rejected decision, an edit is E_FROZEN; take the landed side with resolve); rdy_propose lists every conflict and marks the ones its version carries as blocking. Codes (each one's when and fix are in errors): E_VIEW_OWNER, E_VIEW_EXISTS, E_VIEW_CLOSED, E_HAS_DEPENDENTS, E_DEPS_MISSING, E_CONFLICT_UNRESOLVED, E_PROPOSAL_MOVED, E_UNDO_BLOCKED, E_UNDO_LANDING, E_NOTHING_TO_UNDO. include, exclude, replay and undo return consequences (max_tokens bounds them); they take no brief.";
 
 /// `rdy_view`: builds the request field by field and runs it for the session.
 pub fn rdy_view(st: &mut McpState, p: ViewParams) -> Result<Value, RdyError> {

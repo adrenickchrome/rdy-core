@@ -257,7 +257,12 @@ fn rebatch(repo: RepoId, root: Hash, records: &[StreamRecord]) -> Vec<u8> {
         hash: root,
     });
     needed.retain(|k| !held.contains(k));
-    let header = StreamHeader::tag_history(repo, root, needed.into_iter().collect());
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        repo,
+        root,
+        needed.into_iter().collect(),
+    );
     let mut source: BTreeMap<ObjectKey, StreamRecord> =
         records.iter().map(|r| (r.key(), r.clone())).collect();
     let order: Vec<ObjectKey> = records.iter().map(StreamRecord::key).collect();
@@ -614,6 +619,7 @@ fn hpb5_full_validation_reuses_take_checks() {
     // an unused record
     let mut orphan = records.clone();
     orphan.push(StreamRecord::Present {
+        encoding: 0,
         key: ObjectKey {
             kind: kinds::BLOB_CHUNK,
             hash: Hash::of(b"stray"),
@@ -643,7 +649,7 @@ fn hpb5_full_validation_reuses_take_checks() {
     let root = records
         .iter()
         .find_map(|r| match r {
-            StreamRecord::Present { key, payload }
+            StreamRecord::Present { key, payload, .. }
                 if key.kind == kinds::TAG && key.hash == s.v1 =>
             {
                 Some(rdy_store::bounded::decode::<Tag>(payload).unwrap())
@@ -665,7 +671,7 @@ fn hpb5_full_validation_reuses_take_checks() {
         .filter(|r| r.key().hash != s.v1)
         .filter(|r| match r {
             // the old tag's relay answer and signatures name it
-            StreamRecord::Present { key, payload } if key.kind == kinds::ANSWER => {
+            StreamRecord::Present { key, payload, .. } if key.kind == kinds::ANSWER => {
                 !rdy_store::bounded::decode::<Answer>(payload)
                     .unwrap()
                     .targets
@@ -676,6 +682,7 @@ fn hpb5_full_validation_reuses_take_checks() {
         .cloned()
         .collect();
     retagged.push(StreamRecord::Present {
+        encoding: 0,
         key: renamed_key,
         payload: renamed_bytes,
     });
@@ -694,7 +701,7 @@ fn hpb5_full_validation_reuses_take_checks() {
     let canary = before
         .iter()
         .find_map(|r| match r {
-            StreamRecord::Present { key, payload }
+            StreamRecord::Present { key, payload, .. }
                 if key.kind == kinds::BLOCK && key.hash == s.canary_version =>
             {
                 Some(rdy_store::bounded::decode::<Block>(payload).unwrap())
@@ -713,10 +720,11 @@ fn hpb5_full_validation_reuses_take_checks() {
         links: ChangeLinks::default(),
         read_identity: None,
     };
-    let embedding_bytes = enc(&embedding);
+    // a change is written at its latest encoding: its frame payload holds the version
+    let embedding = rdy_store::codec::encode_new(kinds::CHANGE, &embedding);
     let embedding_key = ObjectKey {
         kind: kinds::CHANGE,
-        hash: Hash::of(&embedding_bytes),
+        hash: embedding.hash(),
     };
     let attach = Answer {
         item: "D-x@1".into(),
@@ -735,10 +743,12 @@ fn hpb5_full_validation_reuses_take_checks() {
     let attach_bytes = enc(&attach);
     let mut embedded = records.clone();
     embedded.push(StreamRecord::Present {
+        encoding: embedding.version,
         key: embedding_key,
-        payload: embedding_bytes,
+        payload: embedding.payload,
     });
     embedded.push(StreamRecord::Present {
+        encoding: 0,
         key: ObjectKey {
             kind: kinds::ANSWER,
             hash: Hash::of(&attach_bytes),
@@ -825,11 +835,13 @@ fn hpb5_render_source_refuses_missing_proofs_and_prerequisites() {
     let removal_landing = records
         .iter()
         .find_map(|r| match r {
-            StreamRecord::Present { key, payload } if key.kind == kinds::REDACTION_APPLY => Some(
-                rdy_store::bounded::decode::<rdy_model::redaction::RedactionApply>(payload)
-                    .unwrap()
-                    .landing,
-            ),
+            StreamRecord::Present { key, payload, .. } if key.kind == kinds::REDACTION_APPLY => {
+                Some(
+                    rdy_store::bounded::decode::<rdy_model::redaction::RedactionApply>(payload)
+                        .unwrap()
+                        .landing,
+                )
+            }
             _ => None,
         })
         .unwrap();
@@ -919,6 +931,7 @@ fn hpb5_render_source_refuses_missing_proofs_and_prerequisites() {
     // an orphan object
     let mut orphan = records.clone();
     let stray = StreamRecord::Present {
+        encoding: 0,
         key: ObjectKey {
             kind: kinds::BLOB_CHUNK,
             hash: Hash::of(b"stray"),
@@ -1000,6 +1013,9 @@ fn landing_rec(prev: Option<Hash>, changes: Vec<Hash>, n: u8) -> LandingRecord {
         approved_version: None,
         rebased_from: vec![],
         evidence: None,
+        assessment: None,
+        policy: None,
+        read_identity: None,
     }
 }
 
@@ -1142,6 +1158,7 @@ fn hpb5_tag_marker_matches_source_without_holder_canon() {
     // `a` points to a landing that is `b` only by name: re-link it to close the loop
     let a2 = LandingRecord {
         prev: Some(bh),
+        read_identity: None,
         ..h.landings[&ah].clone()
     };
     h.landings.insert(ah, a2);
@@ -1252,8 +1269,14 @@ fn hpb5_stream_limits_precede_payload_allocation() {
     let mut claim = good[..good.len()].to_vec();
     let start = {
         let mut b = b"RDYSYNC\n".to_vec();
-        b.extend_from_slice(&1u32.to_le_bytes());
-        let hp = 4 + 16 + 1 + 32 + 4 + header.prerequisites.len() * 33;
+        b.extend_from_slice(&2u32.to_le_bytes());
+        let hp = 4
+            + rdy_store::format::baseline_features().to_json().len()
+            + 16
+            + 1
+            + 32
+            + 4
+            + header.prerequisites.len() * 33;
         b.len() + 37 + hp
     };
     claim.truncate(start);
@@ -1300,7 +1323,7 @@ fn hpb5_stream_limits_precede_payload_allocation() {
     let root = records
         .iter()
         .find_map(|r| match r {
-            StreamRecord::Present { key, payload } if key.kind == kinds::TAG => {
+            StreamRecord::Present { key, payload, .. } if key.kind == kinds::TAG => {
                 Some(rdy_store::bounded::decode::<Tag>(payload).unwrap())
             }
             _ => None,
@@ -1323,6 +1346,7 @@ fn hpb5_stream_limits_precede_payload_allocation() {
             .cloned()
             .collect();
         recs.push(StreamRecord::Present {
+            encoding: 0,
             key: k,
             payload: bytes,
         });

@@ -329,6 +329,8 @@ fn pub12_implicit_outputs_refuse_a_stored_orphan_doc() {
         .put(rdy_store::kinds::SNAPSHOT, &snapshot)
         .unwrap();
     let mut landing = r.store().landing(&head).unwrap();
+    // a forged record from a read: it no longer has the read's identity
+    landing.read_identity = None;
     landing.state = state;
     landing.prev = Some(head);
     let damaged = r

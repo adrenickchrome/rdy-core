@@ -16,4 +16,5 @@ mod views_model;
 mod views_own;
 mod views_query;
 mod views_relayed;
+mod views_replay;
 mod views_undo;

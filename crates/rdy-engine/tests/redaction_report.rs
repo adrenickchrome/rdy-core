@@ -182,6 +182,7 @@ fn prov(actor: &str) -> Provenance {
 }
 
 /// Every frame from `from` to the log end: kind, hash, payload (None when dropped).
+/// Every frame from `from`: its logical kind, hash and payload (none when dropped).
 fn frames_from(r: &Rdy, from: Location) -> Vec<(u8, Hash, Option<Vec<u8>>)> {
     let mut out = vec![];
     r.read()
@@ -192,8 +193,14 @@ fn frames_from(r: &Rdy, from: Location) -> Vec<(u8, Hash, Option<Vec<u8>>)> {
                     kind,
                     hash,
                     payload,
-                } => (kind, hash, Some(payload.to_vec())),
-                StoredFrame::Dropped { kind, hash, .. } => (kind, hash, None),
+                } => (
+                    rdy_store::codec::logical_kind(kind),
+                    hash,
+                    Some(payload.to_vec()),
+                ),
+                StoredFrame::Dropped { kind, hash, .. } => {
+                    (rdy_store::codec::logical_kind(kind), hash, None)
+                }
             });
             Ok(())
         })
@@ -911,8 +918,8 @@ impl RowsOf for RedactionReport {
 #[test]
 fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
     let _clock = pin_clock(1_000_000);
-    // the registry equals the closed inventory: 1 to 11 and 13 to 24; 12 is unassigned
-    let expected: Vec<u8> = (1..=11).chain(13..=24).collect();
+    // the registry equals the closed inventory: 1 to 11 and 13 to 28; 12 is unassigned
+    let expected: Vec<u8> = (1..=11).chain(13..=28).collect();
     assert_eq!(ASSIGNED_KINDS.to_vec(), expected);
     assert_eq!(
         [
@@ -939,6 +946,10 @@ fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
             kinds::REDACTION_APPLY,
             kinds::REDACTION_CARRIED,
             kinds::PLAN,
+            kinds::ASSESSMENT,
+            kinds::DISPUTE,
+            kinds::DISPUTE_RESOLUTION,
+            kinds::CHECK_REQUEST,
         ],
         ASSIGNED_KINDS
     );
@@ -962,7 +973,11 @@ fn rdx5_all_current_kinds_have_an_explicit_text_policy() {
     // the change plan: every string of the decoded version
     assert_eq!(kinds::PLAN, 24);
     assert_eq!(text_policy(24), Some(TextPolicy::Strings));
-    for k in [0, 12, 25, 255] {
+    // the carried shapes: every string of each typed record
+    for k in 25..=28 {
+        assert_eq!(text_policy(k), Some(TextPolicy::Strings), "kind {k}");
+    }
+    for k in [0, 12, 127, 255] {
         assert_eq!(text_policy(k), None, "kind {k}");
     }
     // a literal quote case for each retained text type
@@ -1795,17 +1810,17 @@ fn rdx5_literal_quotes_are_candidates_not_automatic_targets() {
 }
 
 #[test]
-fn rdx5_assessment_support_is_explicitly_not_implemented() {
+fn ok8_assessment_support_is_carried() {
     let _clock = pin_clock(1_000_000);
     let p = base();
     let d =
         p.r.read()
             .redaction_report(&input(&[p.prose.to_string()], true))
             .unwrap();
-    // M3b adds the assessment kind; until then the report says so, with no count
-    assert_eq!(d.assessment, AssessmentSupport::NotImplemented);
+    // the reader scans the carried assessment records, with no count (an empty scan included)
+    assert_eq!(d.assessment, AssessmentSupport::Carried);
     let v = serde_json::to_value(&d).unwrap();
-    assert_eq!(v["assessment"], "not_implemented");
+    assert_eq!(v["assessment"], "carried");
     let keys: BTreeSet<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(
         keys,
@@ -1829,14 +1844,14 @@ fn rdx5_assessment_support_is_explicitly_not_implemented() {
     );
     let res = dry_run(&p.r.read(), &input(&[p.prose.to_string()], true)).unwrap();
     let text = report_text(&res, 4000).unwrap().text;
-    assert!(text.contains("\nRecorded assessments: not implemented.\n"));
-    // the base registry holds no assessment kind: every assigned kind has a policy, and a new
+    assert!(text.contains("\nRecorded assessments: scanned.\n"));
+    // every assigned kind has a policy, and a new
     // content-bearing kind without a visitor is refused, never read as absent
     require_text_policies(&ASSIGNED_KINDS).unwrap();
-    let e = require_text_policies(&[kinds::PLAN + 1]).unwrap_err();
+    let e = require_text_policies(&[127]).unwrap_err();
     assert_eq!(
         e.message,
-        "the redaction report has no text policy for object kind 25"
+        "the redaction report has no text policy for object kind 127"
     );
     assert!(require_text_policies(&[12]).is_err());
 }

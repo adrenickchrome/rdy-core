@@ -17,7 +17,7 @@ use rdy_model::redaction::{
 use rdy_model::{Block, Change, Hash, Provenance, Role};
 use rdy_store::dump::{DumpBatch, Frame};
 use rdy_store::error::StoreError;
-use rdy_store::format::Format;
+use rdy_store::format::{DumpStore, baseline_features};
 use rdy_store::ingest::{Ingest, IngestReport};
 use rdy_store::kinds;
 use rdy_store::redaction::StoredFrame;
@@ -34,8 +34,8 @@ const SEGMENT_MAX: u64 = 64 * 1024 * 1024;
 pub const HEADER: u64 = 4 + 1 + 32;
 
 /// This rdy's store format.
-pub fn store_format() -> u32 {
-    Format::CURRENT.store_format
+pub fn store_format() -> DumpStore {
+    DumpStore::Features(baseline_features())
 }
 
 /// The source request, apply and landing a carried record names; none of them is in any test
@@ -60,7 +60,7 @@ pub fn approver() -> Provenance {
     }
 }
 
-/// One frame of a log: where it is, its kind, its hash and its payload length.
+/// One frame of a log: where it is, its logical kind, its hash and its payload length.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Framed {
     pub loc: Location,
@@ -103,7 +103,7 @@ pub fn framed(reader: &StoreReader, end: Location) -> Vec<Framed> {
                 if kind != kinds::BATCH_COMMIT {
                     out.push(Framed {
                         loc,
-                        kind,
+                        kind: rdy_store::codec::logical_kind(kind),
                         hash,
                         len,
                     });
@@ -140,9 +140,14 @@ pub fn change_residue(c: &Change) -> RedactionResidue {
     RedactionResidue::Change(ChangeResidue::of(c))
 }
 
-/// The hash of a residue's encoding.
+/// The frame of a new residue `r` as the store writes one, in its kind's latest encoding.
+pub fn residue_frame(r: &RedactionResidue) -> (u8, Vec<u8>) {
+    rdy_store::codec::frame_latest(kinds::REDACTION_RESIDUE, postcard::to_allocvec(r).unwrap())
+}
+
+/// The hash of a new residue `r`: its frame's.
 pub fn residue_hash(r: &RedactionResidue) -> Hash {
-    Hash::of(&postcard::to_allocvec(r).unwrap())
+    Hash::of(&residue_frame(r).1)
 }
 
 /// The carried span of frame `f`, with `residue` and `held`.
@@ -233,7 +238,7 @@ pub fn ingest(
         i.batch(n as u64 + 1, b)?;
     }
     i.append_carried(residues, records)?;
-    i.upgrade(store_format())?;
+    i.upgrade(&store_format())?;
     i.finish()
 }
 
@@ -268,15 +273,12 @@ pub fn carried_frames(
     residues: &[RedactionResidue],
     records: &[RedactionCarried],
 ) -> Vec<(u8, Vec<u8>)> {
-    let mut by_hash: BTreeMap<Hash, Vec<u8>> = BTreeMap::new();
+    let mut by_hash: BTreeMap<Hash, (u8, Vec<u8>)> = BTreeMap::new();
     for r in residues {
-        let b = postcard::to_allocvec(r).unwrap();
-        by_hash.insert(Hash::of(&b), b);
+        let f = residue_frame(r);
+        by_hash.insert(Hash::of(&f.1), f);
     }
-    let mut out: Vec<(u8, Vec<u8>)> = by_hash
-        .into_values()
-        .map(|b| (kinds::REDACTION_RESIDUE, b))
-        .collect();
+    let mut out: Vec<(u8, Vec<u8>)> = by_hash.into_values().collect();
     out.extend(
         records
             .iter()

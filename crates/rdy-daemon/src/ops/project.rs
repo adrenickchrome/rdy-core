@@ -129,8 +129,11 @@ pub(super) fn reindex(cx: &OpContext) -> Result<Value, RdyError> {
 /// `fsck`; with `clean_quarantine`, a passing check then removes the quarantine files (the
 /// human's only: an agent is refused before the check runs). A failed check removes nothing.
 /// With `verbose`, a passing check adds `signature_states` (no trust file is read), read in the
-/// same write as the check: no other write can land between them, so the states are of exactly
-/// the records the check counted.
+/// same serialized read as the check: no write can land between them, so the states are of
+/// exactly the records the check counted. The check writes nothing to the store, so it runs on
+/// a read-only store (D-WWAK7) too: it is a serialized read, never a write. The cleanup does
+/// change the store, so it passes the write gate first: a read-only store refuses it with
+/// E_STORE_READ_ONLY, before the check runs, and keeps every file.
 pub(super) fn fsck(cx: &OpContext, a: FsckArgs) -> Result<Value, RdyError> {
     if a.clean_quarantine && !cx.session.is_human() {
         return Err(RdyError::new(
@@ -140,7 +143,13 @@ pub(super) fn fsck(cx: &OpContext, a: FsckArgs) -> Result<Value, RdyError> {
         ));
     }
     let verbose = a.verbose;
-    let mut v = cx.engine.write(Box::new(move |r| {
+    let clean = a.clean_quarantine;
+    let mut v = cx.engine.read_serialized(Box::new(move |r| {
+        // the cleanup removes files under the source store, so it passes the write gate: a
+        // read-only store (D-WWAK7) refuses it with E_STORE_READ_ONLY before the check runs
+        if clean {
+            r.ensure_writable()?;
+        }
         let mut v = to_json(&r.fsck()?);
         if verbose {
             v["signature_states"] = rdy_engine::signing_read::signature_states(&r.read())?;

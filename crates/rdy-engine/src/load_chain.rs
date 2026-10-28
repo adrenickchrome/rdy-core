@@ -27,6 +27,7 @@ use rdy_store::dump_scan::{
     ChainLink, ChainSource, Envelope, FileRole, METADATA_MISMATCH, ProjectFile, ScanError,
     ScanPlan, StopFailure, StopMatch, scan,
 };
+use rdy_store::format::DumpStore;
 use rdy_store::holder::StoreMode;
 use rdy_store::ingest::Ingest;
 use rdy_store::redaction::limit;
@@ -201,7 +202,12 @@ pub(crate) fn load_verified(plan: &ChainPlan, project: &Path) -> Result<LoadSumm
         Ok(LoadSummary {
             project: project.display().to_string(),
             dump_format: first.format,
-            store_format: first.header.store_format,
+            // a feature chain's manifest grows with first uses: the store the load holds is
+            // the one in force at its end
+            store_format: match scan.store() {
+                DumpStore::Features(_) => scan.store().clone(),
+                DumpStore::Legacy(_) => first.header.store.clone(),
+            },
             batches,
             frames,
             files_written: placed.written,
@@ -449,7 +455,7 @@ fn ingest_tail(
         .append_carried(scan.residues(), scan.carried())
         .map_err(|e| carried_target_error(loading, e))?;
     ingest
-        .upgrade_in_repo(scan.store_format(), chain_repo(scan))
+        .upgrade_in_repo(scan.store(), chain_repo(scan))
         .map_err(|e| target_error(loading, e))?;
     ingest.finish().map_err(|e| match e {
         StoreError::Dump { what, .. } => damaged(file, at, &what),
@@ -533,7 +539,7 @@ fn scan_error(files: &[PathBuf], e: ScanError) -> RdyError {
                     dump_error::load_repo_mismatch(path, &file, &chain)
                 }
                 ChainLink::StoreFormat { file, chain } => {
-                    dump_error::load_store_mismatch(path, file, chain)
+                    dump_error::load_store_mismatch(path, &file, &chain)
                 }
                 ChainLink::Position { start, prev_end } => dump_error::load_position_mismatch(
                     path,

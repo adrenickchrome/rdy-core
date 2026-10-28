@@ -3,7 +3,7 @@
 use rdy_model::Hash;
 use rdy_store::dump::*;
 use rdy_store::dump_chain::{BatchMarker, DumpChainHeader, batch_end};
-use rdy_store::format::STORE_FORMAT;
+use rdy_store::format::{DumpStore, baseline_features};
 use rdy_store::segment::Location;
 use rdy_store::{Store, StoreError};
 
@@ -29,7 +29,7 @@ fn header(s: &Store) -> DumpHeader {
     let r = s.reader();
     let marker = r.batch_marker_at(s.log_end()).unwrap().unwrap();
     DumpHeader {
-        store_format: STORE_FORMAT,
+        store: DumpStore::Features(baseline_features()),
         log_end: s.log_end(),
         rdy: "test".into(),
         chain: Some(DumpChainHeader::full(r.repo_id().unwrap().unwrap(), marker)),
@@ -117,11 +117,15 @@ fn dl1_a_stream_round_trips_header_files_and_batches() {
         (".rdyignore", b"*.draft.yaml\n"),
     ];
     let bytes = stream(&s, &batches, &files);
-    assert!(bytes.starts_with(b"RDYDUMP\n\x03\x00\x00\x00"));
+    assert!(bytes.starts_with(b"RDYDUMP\n\x04\x00\x00\x00"));
     let (mut r, format, h) = DumpReader::open(&bytes[..]).unwrap();
     assert_eq!(
-        (format, h.store_format, h.log_end),
-        (DUMP_FORMAT, STORE_FORMAT, s.log_end())
+        (format, h.store, h.log_end),
+        (
+            DUMP_FORMAT,
+            DumpStore::Features(baseline_features()),
+            s.log_end()
+        )
     );
     let mut got_files = vec![];
     let mut got_batches = vec![];
@@ -222,34 +226,28 @@ fn dl1_an_unknown_magic_or_format_is_refused() {
         damaged(read_all(&bad).unwrap_err()),
         "it does not start with RDYDUMP"
     );
-    let mut v4 = good.clone();
-    v4[8] = 4;
+    let mut v5 = good.clone();
+    v5[8] = 5;
     assert_eq!(
-        damaged(read_all(&v4).unwrap_err()),
-        "dump format 4 is not one this rdy reads"
+        damaged(read_all(&v5).unwrap_err()),
+        "dump format 5 is not one this rdy reads"
     );
-    // the writer refuses this header (dl1_a_writer_refuses_a_store_format_it_cannot_read), so
-    // the stream is forged: a batch-less dump whose header names the next store format (after
-    // the header's kind byte)
-    let mut recs = records(&stream(&s, &[], &[]));
-    recs[0].1[1..5].copy_from_slice(&(STORE_FORMAT + 1).to_le_bytes());
-    reseal(&mut recs);
-    let bytes = forge(&recs);
+    // no writer writes this header (dl1_a_writer_refuses_a_store_format_it_cannot_read), so
+    // the stream is forged: a batch-less dump of format 3 whose header names the next scalar
+    // store format
+    let bytes = forge_v3_after_last(&s);
     assert_eq!(
         damaged(read_all(&bytes).unwrap_err()),
-        format!(
-            "store format {} in a dump of format 3 is not one this rdy reads",
-            STORE_FORMAT + 1
-        )
+        "store format 19 in a dump of format 3 is not one this rdy reads"
     );
 }
 
 #[test]
 fn dl1_a_writer_refuses_a_store_format_it_cannot_read() {
     let (_b, s, _) = store_and_batches();
-    for store_format in [STORE_FORMAT + 1, FIRST_UNREAD_BELOW] {
+    for store_format in [18, 19, FIRST_UNREAD_BELOW] {
         let other = DumpHeader {
-            store_format,
+            store: DumpStore::Legacy(store_format),
             ..header(&s)
         };
         let e = DumpWriter::new(Vec::new(), &other)
@@ -258,7 +256,7 @@ fn dl1_a_writer_refuses_a_store_format_it_cannot_read() {
         assert_eq!(
             e.to_string(),
             StoreError::Refused(format!(
-                "store format {store_format} in a dump of format 3 is not one this rdy reads"
+                "store format {store_format} in a dump of format 4 is not one this rdy reads"
             ))
             .to_string()
         );
@@ -277,14 +275,11 @@ fn dl1_each_reader_refusal_has_its_kind() {
     bad[0] = b'X';
     assert_eq!(DumpRefusal::of(&what(&bad)), DumpRefusal::NotADump);
     assert_eq!(DumpRefusal::of(&what(&[])), DumpRefusal::NotADump);
-    let mut v4 = good.clone();
-    v4[8] = 4;
-    assert_eq!(DumpRefusal::of(&what(&v4)), DumpRefusal::FormatNotRead);
-    let mut recs = records(&stream(&s, &[], &[]));
-    recs[0].1[1..5].copy_from_slice(&(STORE_FORMAT + 1).to_le_bytes());
-    reseal(&mut recs);
+    let mut v5 = good.clone();
+    v5[8] = 5;
+    assert_eq!(DumpRefusal::of(&what(&v5)), DumpRefusal::FormatNotRead);
     assert_eq!(
-        DumpRefusal::of(&what(&forge(&recs))),
+        DumpRefusal::of(&what(&forge_v3_after_last(&s))),
         DumpRefusal::FormatNotRead
     );
     let mut flipped = good.clone();
@@ -375,6 +370,22 @@ fn records(good: &[u8]) -> Vec<(u8, Vec<u8>)> {
         out.push((good[at + 4], good[at + 37..at + 37 + len].to_vec()));
         at += 37 + len;
     }
+    out
+}
+
+/// A batch-less dump of format 3 of `s` whose header names store format 19, after the last
+/// scalar one: format 4's header with its manifest replaced by that number, resealed.
+fn forge_v3_after_last(s: &Store) -> Vec<u8> {
+    let mut recs = records(&stream(s, &[], &[]));
+    let m = baseline_features().to_json().len();
+    let p = recs[0].1.clone();
+    let mut h = vec![p[0]];
+    h.extend_from_slice(&19u32.to_le_bytes());
+    h.extend_from_slice(&p[5 + m..]);
+    recs[0].1 = h;
+    reseal(&mut recs);
+    let mut out = forge(&recs);
+    out[8] = 3;
     out
 }
 
@@ -581,13 +592,14 @@ fn dl1_a_flipped_frame_kind_is_refused() {
 fn dl1_an_unassigned_kind_is_refused() {
     let (_b, s, batches) = store_and_batches();
     assert_eq!(
-        frame_kinds(DUMP_FORMAT, STORE_FORMAT),
+        Some(rdy_store::dump::current_frame_kinds()),
         Some(
             &[
-                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+                26, 27, 28
             ][..]
         ),
-        "exactly the kinds store format 18 assigns (those of 17: 18 adds no kind)"
+        "exactly the kinds the latest store assigns (those of (3, 18) and the carried kinds)"
     );
     for (d, sf) in READS {
         assert!(frame_kinds(*d, *sf).is_some(), "({d}, {sf}) has its kinds");
@@ -602,8 +614,9 @@ fn dl1_an_unassigned_kind_is_refused() {
     let good = stream(&s, &batches, &[]);
     let recs = records(&good);
     let first = recs.iter().position(|(k, _)| *k < rec::HEADER).unwrap();
-    // 24 (the change plan) is the last assigned; 12 stays unassigned, and 25 is the next
-    for k in [12u8, 14, 25] {
+    // 28 (the check request) is the last assigned; 12 and 14 stay unassigned, and 127 is
+    // unassigned past every reserved kind (29 is reserved for a later record)
+    for k in [12u8, 14, 127] {
         // the reader
         let mut r = recs.clone();
         r[first].0 = k;

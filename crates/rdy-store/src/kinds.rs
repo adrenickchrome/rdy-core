@@ -49,6 +49,18 @@ pub const REDACTION_CARRIED: u8 = 23;
 /// One version of a change plan (`rdy_model::plan::Plan`, D-4JMPH): ref `plan/<view>` names the
 /// latest; a landing's sealed version shares its batch (`crate::plan`).
 pub const PLAN: u8 = 24;
+/// A version's readiness assessment (`rdy_model::assessment::Assessment`): a carried record, no
+/// writer yet. Its first encoding is 1.
+pub const ASSESSMENT: u8 = 25;
+/// A person's dispute of a landing (`rdy_model::dispute::Dispute`): a carried record, no writer
+/// yet. Its first encoding is 1.
+pub const DISPUTE: u8 = 26;
+/// How a dispute ended (`rdy_model::dispute::DisputeResolution`): a carried record, no writer
+/// yet. Its first encoding is 1.
+pub const DISPUTE_RESOLUTION: u8 = 27;
+/// A request for a check (`rdy_model::check_request::CheckRequest`); ref `check/<hash>` names
+/// it. A carried record, no writer yet. Its first encoding is 1.
+pub const CHECK_REQUEST: u8 = 28;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefUpdate {

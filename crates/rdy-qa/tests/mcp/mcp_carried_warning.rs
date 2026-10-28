@@ -59,8 +59,8 @@ fn carry(dir: &Path) {
                 {
                     target = Some((b.id.clone(), b.version_hash()));
                     RedactionResidue::Block(BlockResidue::of(&b))
-                } else if kind == kinds::CHANGE
-                    && let Ok(c) = rdy_store::bounded::decode::<Change>(payload)
+                } else if rdy_store::codec::logical_kind(kind) == kinds::CHANGE
+                    && let Ok(c) = rdy_store::codec::decode_bounded::<Change>(kind, payload)
                     && c.ops.iter().any(|op| match op {
                         Op::Create { block } | Op::Update { block, .. } => {
                             block.body.contains("ZEBRA-7731")
@@ -77,10 +77,14 @@ fn carry(dir: &Path) {
                         segment: loc.segment,
                         offset: loc.offset,
                     },
-                    kind,
+                    // a span names its frame by the logical kind
+                    kind: rdy_store::codec::logical_kind(kind),
                     hash,
                     len: payload.len() as u32,
-                    residue: Some(Hash::of(&enc(&residue))),
+                    // named by its frame in the latest encoding, as an rdy of this version writes it
+                    residue: Some(Hash::of(
+                        &rdy_store::codec::frame_latest(kinds::REDACTION_RESIDUE, enc(&residue)).1,
+                    )),
                     held: true,
                 });
                 residues.push(residue);
@@ -118,8 +122,10 @@ fn carry(dir: &Path) {
     }
     i.append_carried(&residues, std::slice::from_ref(&rec))
         .unwrap();
-    i.upgrade(rdy_store::format::Format::CURRENT.store_format)
-        .unwrap();
+    i.upgrade(&rdy_store::format::DumpStore::Features(
+        rdy_store::format::baseline_features(),
+    ))
+    .unwrap();
     i.finish().unwrap();
 }
 

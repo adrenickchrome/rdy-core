@@ -39,7 +39,7 @@ use crate::redaction::{
     residual_versions, residue_matches, targets_agree,
 };
 use crate::segment::{self, HEADER, Hole, Holes, Location, header_at};
-use crate::store::{decode, encode};
+use crate::store::encode;
 use rdy_model::redaction::{
     MAX_RECORD_BYTES, Redaction, RedactionApply, RedactionResidue, ResidualOp, record_buffer,
 };
@@ -193,6 +193,9 @@ pub(crate) struct Applied {
     pub(crate) record: RedactionApply,
 }
 
+/// Decoded residues by residue hash, each with the encoding its frame records.
+pub(crate) type Residues = HashMap<Hash, (RedactionResidue, u16)>;
+
 /// What a log's validated redaction applies authorize, derived from the log alone.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Authorization {
@@ -201,6 +204,9 @@ pub(crate) struct Authorization {
     pub(crate) spans: BTreeMap<Location, SpanAuth>,
     /// The residues the spans name, decoded.
     pub(crate) residues: HashMap<Hash, RedactionResidue>,
+    /// The encoding each residue's frame records, by residue hash: it decides the one derivation
+    /// the residue's proof check uses (`crate::redaction::residue_matches`).
+    pub(crate) residue_encodings: HashMap<Hash, u16>,
     /// The validated applies, in log order.
     pub(crate) applies: Vec<Applied>,
     /// Every sealed request frame inside the acknowledged log, in log order.
@@ -215,6 +221,42 @@ pub(crate) struct Authorization {
 }
 
 impl Authorization {
+    /// Keeps residue `h`, `res`, stored in encoding `encoding`, for the spans that name it; a
+    /// residue kept already stays as it is.
+    pub(crate) fn keep_residue(
+        &mut self,
+        h: Hash,
+        res: RedactionResidue,
+        encoding: u16,
+    ) -> Result<(), StoreError> {
+        if !self.residues.contains_key(&h) {
+            self.residues.try_reserve(1).map_err(|_| out_of_memory())?;
+            self.residue_encodings
+                .try_reserve(1)
+                .map_err(|_| out_of_memory())?;
+            self.residues.insert(h, res);
+            self.residue_encodings.insert(h, encoding);
+        }
+        Ok(())
+    }
+
+    /// Keeps every residue of `residues` (see [`Authorization::keep_residue`]).
+    pub(crate) fn keep_residues(&mut self, residues: Residues) -> Result<(), StoreError> {
+        for (h, (res, encoding)) in residues {
+            self.keep_residue(h, res, encoding)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the kept residue `h` is exactly the residue of the intact `payload` of a frame
+    /// of `kind`, under the encoding its frame records (`crate::redaction::residue_matches`).
+    pub(crate) fn residue_matches(&self, kind: u8, payload: &[u8], h: &Hash) -> bool {
+        match (self.residues.get(h), self.residue_encodings.get(h)) {
+            (Some(r), Some(e)) => residue_matches(kind, payload, r, *e),
+            _ => false,
+        }
+    }
+
     /// Whether an active redaction exists: a validated apply, or a span whose zeros a carried
     /// record accounts for.
     pub(crate) fn is_active(&self) -> bool {
@@ -263,6 +305,8 @@ impl Authorization {
         hash: Hash,
         loc: Location,
     ) -> Result<Vec<IndexEntry>, StoreError> {
+        // the logical kind, by the kind rule alone: the hole's bytes are not read
+        let kind = crate::codec::logical_kind(kind);
         let mut out = vec![IndexEntry::Object { kind, hash, loc }];
         if kind == kinds::CHANGE {
             let residue = self
@@ -560,7 +604,8 @@ impl Collected {
     ) -> Result<(), StoreError> {
         p.since.push((loc.offset, hash));
         let start = *p.start.get_or_insert(loc);
-        match kind {
+        // by the logical kind: a frame of any encoding (`crate::codec`)
+        match crate::codec::logical_kind(kind) {
             kinds::REDACTION_APPLY => p.applies.push(ApplyFrame {
                 loc,
                 hash,
@@ -632,7 +677,8 @@ pub(crate) fn apply_record(payload: &[u8]) -> Option<RedactionApply> {
     if payload.len() > MAX_RECORD_BYTES {
         return None;
     }
-    let record = decode::<RedactionApply>(payload).ok()?;
+    let record =
+        crate::codec::decode_record::<RedactionApply>(kinds::REDACTION_APPLY, payload).ok()?;
     (encode(&record) == payload).then_some(record)
 }
 
@@ -767,19 +813,59 @@ pub(crate) fn read_record(
     Ok((Hash::of(&payload) == *hash).then_some(payload))
 }
 
+/// The record of logical kind `kind` with hash `hash` at `loc`, of any encoding its kind
+/// registers, read and hash-checked through `access`: its raw kind and payload. None when the
+/// frame there is no such record.
+pub(crate) fn read_versioned(
+    access: &mut dyn RecordAccess,
+    loc: Location,
+    kind: u8,
+    hash: &Hash,
+) -> Result<Option<(u8, Vec<u8>)>, StoreError> {
+    for version in crate::codec::first(kind)..=crate::codec::latest(kind) {
+        let raw = crate::codec::raw_kind(kind, version);
+        if let Some(payload) = access.record(loc, raw, hash)? {
+            return Ok(Some((raw, payload)));
+        }
+    }
+    Ok(None)
+}
+
+/// The residue record with hash `hash` at `loc`, of any encoding its kind registers, read and
+/// hash-checked through `access`, and the encoding its frame records. None when the frame there
+/// is no residue of that hash; a residue that does not decode is `None` too.
+pub(crate) fn read_residue(
+    access: &mut dyn RecordAccess,
+    loc: Location,
+    hash: &Hash,
+) -> Result<Option<(RedactionResidue, u16)>, StoreError> {
+    for version in 0..=crate::codec::latest(kinds::REDACTION_RESIDUE) {
+        let raw = crate::codec::raw_kind(kinds::REDACTION_RESIDUE, version);
+        if let Some(payload) = access.record(loc, raw, hash)? {
+            return Ok(
+                crate::codec::decode_identified::<RedactionResidue>(raw, &payload)
+                    .ok()
+                    .map(|(r, id)| (r, id.version)),
+            );
+        }
+    }
+    Ok(None)
+}
+
 /// Where the apply validator reads the records it needs (the proof source seam): a frame's
 /// header by its place, and a record by its place, kind and hash. The log's segment files (with
 /// a batch not yet written) are one source ([`LogAccess`]); the files of a dump chain are another
 /// (`crate::dump_scan`). The validator's rules are the same over both.
 pub(crate) trait RecordAccess {
-    /// Whether a frame starts at `loc` whose header holds `len`, `kind` and `hash`.
-    fn has_frame(
+    /// The raw kind of the frame that starts at `loc` when its header holds `len`, logical kind
+    /// `kind` and `hash`; None when no such frame starts there.
+    fn frame_kind(
         &mut self,
         loc: Location,
         len: u32,
         kind: u8,
         hash: &Hash,
-    ) -> Result<bool, StoreError>;
+    ) -> Result<Option<u8>, StoreError>;
 
     /// The record of `kind` with hash `hash` at `loc`, read and hash-checked; None when the
     /// frame there is not that record or does not match its hash.
@@ -840,17 +926,19 @@ pub(crate) struct LogAccess<'a> {
 }
 
 impl RecordAccess for LogAccess<'_> {
-    fn has_frame(
+    fn frame_kind(
         &mut self,
         loc: Location,
         len: u32,
         kind: u8,
         hash: &Hash,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<Option<u8>, StoreError> {
         let Some(f) = self.readers.get(loc.segment as usize) else {
-            return Ok(false);
+            return Ok(None);
         };
-        Ok(header_at(f, loc.offset, f.metadata()?.len())? == Some((len, kind, *hash)))
+        Ok(header_at(f, loc.offset, f.metadata()?.len())?
+            .filter(|(l, k, h)| (*l, crate::codec::logical_kind(*k), h) == (len, kind, hash))
+            .map(|(_, k, _)| k))
     }
 
     fn record(
@@ -916,7 +1004,11 @@ fn request_of(
     let Some(payload) = access.record(*loc, kinds::REDACTION, &record.request)? else {
         return Ok(None);
     };
-    Ok(decode::<Redaction>(&payload).ok().map(|r| (*loc, r)))
+    Ok(
+        crate::codec::decode_record::<Redaction>(kinds::REDACTION, &payload)
+            .ok()
+            .map(|r| (*loc, r)),
+    )
 }
 
 /// The holes `applies` would authorize, by their requests' spans alone, unchecked: what the scan
@@ -1052,12 +1144,10 @@ impl Validator {
             .iter()
             .find(|(_, h)| *h == record.landing)
             .ok_or_else(at)?;
-        let landing: LandingRecord = decode(
-            &access
-                .record(*lloc, kinds::LANDING, &record.landing)?
-                .ok_or_else(at)?,
-        )
-        .map_err(|_| at())?;
+        let (raw, payload) =
+            read_versioned(access, *lloc, kinds::LANDING, &record.landing)?.ok_or_else(at)?;
+        let landing: LandingRecord =
+            crate::codec::decode_record(raw, &payload).map_err(|_| at())?;
         if !human_approval(&landing) {
             return Err(if pending_from.is_some_and(|p| a.loc >= p) {
                 StoreError::RedactionHuman
@@ -1075,7 +1165,7 @@ impl Validator {
             request.manifest.versions.iter().cloned().collect();
         let version_hashes: HashSet<Hash> = versions.iter().map(|(_, v)| *v).collect();
         // each distinct residue of this request is read once
-        let mut read: HashMap<Hash, RedactionResidue> = HashMap::new();
+        let mut read: HashMap<Hash, (RedactionResidue, u16)> = HashMap::new();
         let mut prev: Option<Location> = None;
         let mut spans = Vec::with_capacity(request.manifest.spans.len());
         for span in &request.manifest.spans {
@@ -1088,9 +1178,9 @@ impl Validator {
                 return Err(bad());
             }
             prev = Some(loc);
-            if !access.has_frame(loc, span.len, span.kind, &span.hash)? {
-                return Err(bad());
-            }
+            let raw = access
+                .frame_kind(loc, span.len, span.kind, &span.hash)?
+                .ok_or_else(bad)?;
             let residue = match span.kind {
                 kinds::BLOCK | kinds::CHANGE => {
                     let r = span.residue.ok_or_else(bad)?;
@@ -1102,23 +1192,20 @@ impl Validator {
                                 .get(&r)
                                 .filter(|l| **l < a.loc)
                                 .ok_or_else(bad)?;
-                            let res: RedactionResidue = decode(
-                                &access
-                                    .record(*rloc, kinds::REDACTION_RESIDUE, &r)?
-                                    .ok_or_else(bad)?,
-                            )
-                            .map_err(|_| bad())?;
+                            let res = read_residue(access, *rloc, &r)?.ok_or_else(bad)?;
                             read.insert(r, res.clone());
                             res
                         }
                     };
-                    if !residue_fits(span.kind, &span.hash, &res, &versions, &version_hashes) {
+                    if !residue_fits(span.kind, &span.hash, &res.0, &versions, &version_hashes)
+                        || !crate::redaction::marker_agrees(raw, span.kind, Some(&res.0))
+                    {
                         return Err(bad());
                     }
                     Some((r, res))
                 }
                 _ => {
-                    if span.residue.is_some() {
+                    if span.residue.is_some() || raw != span.kind {
                         return Err(bad());
                     }
                     None
@@ -1146,8 +1233,8 @@ impl Validator {
                             carried: false,
                         },
                     );
-                    if let Some((r, res)) = residue {
-                        auth.residues.insert(r, res);
+                    if let Some((r, (res, encoding))) = residue {
+                        auth.keep_residue(r, res, encoding)?;
                     }
                 }
             }
@@ -1373,11 +1460,11 @@ fn check_log(
         if auth.erasable(&f.loc) {
             at_frame.insert(f.loc);
         }
-        if f.kind == kinds::BLOB_MANIFEST
+        if crate::codec::logical_kind(f.kind) == kinds::BLOB_MANIFEST
             && blobs.contains(&f.hash)
             && !chunks_of.contains_key(&f.hash)
             && let Some(p) = f.intact()?
-            && let Ok(m) = decode::<BlobManifest>(&p)
+            && let Ok(m) = crate::codec::decode_record::<BlobManifest>(f.kind, &p)
         {
             chunks_of.insert(f.hash, m.chunks);
         }
@@ -1458,7 +1545,8 @@ fn check_log(
     };
     log.walk(upto, memory, &mut |f| {
         let hole = auth.erasable(&f.loc);
-        match f.kind {
+        // by the logical kind; `f.kind` stays the frame's raw kind for its decode
+        match crate::codec::logical_kind(f.kind) {
             kinds::BLOCK => {
                 if !selected_versions.contains(&f.hash)
                     && !kept_versions.contains(&f.hash)
@@ -1468,11 +1556,13 @@ fn check_log(
                 }
                 let id = match (hole, f.intact()?) {
                     (true, Some(p)) => {
-                        let r = residue_of(&f.loc).ok_or_else(|| StoreError::corrupt_at(f.loc))?;
-                        if !residue_matches(f.kind, &p, r) {
+                        let r = auth.spans[&f.loc]
+                            .residue
+                            .ok_or_else(|| StoreError::corrupt_at(f.loc))?;
+                        if !auth.residue_matches(f.kind, &p, &r) {
                             return Err(StoreError::corrupt_at(f.loc));
                         }
-                        decode::<Block>(&p)
+                        crate::codec::decode_record::<Block>(f.kind, &p)
                             .map_err(|_| StoreError::corrupt_at(f.loc))?
                             .id
                     }
@@ -1485,7 +1575,7 @@ fn check_log(
                             // an intact copy of selected content that no span lists
                             return Err(StoreError::corrupt_at(f.loc));
                         }
-                        match decode::<Block>(&p) {
+                        match crate::codec::decode_record::<Block>(f.kind, &p) {
                             Ok(b) => b.id,
                             Err(_) => return Ok(()),
                         }
@@ -1526,13 +1616,15 @@ fn check_log(
             kinds::CHANGE => {
                 if hole {
                     if let Some(p) = f.intact()? {
-                        let r = residue_of(&f.loc).ok_or_else(|| StoreError::corrupt_at(f.loc))?;
-                        if !residue_matches(f.kind, &p, r) {
+                        let r = auth.spans[&f.loc]
+                            .residue
+                            .ok_or_else(|| StoreError::corrupt_at(f.loc))?;
+                        if !auth.residue_matches(f.kind, &p, &r) {
                             return Err(StoreError::corrupt_at(f.loc));
                         }
                     }
                 } else if let Some(p) = f.intact()?
-                    && let Ok(c) = decode::<Change>(&p)
+                    && let Ok(c) = crate::codec::decode_record::<Change>(f.kind, &p)
                     && c.ops.iter().any(|op| match op {
                         Op::Create { block } | Op::Update { block, .. } => {
                             selected_versions.contains(&block.version_hash())

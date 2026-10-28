@@ -304,11 +304,13 @@ fn hc3_only_ingest_can_append_carried() {
         .collect();
     let mut residues: Vec<Hash> = src.residues().iter().map(residue_hash).collect();
     residues.sort();
+    // a residue of the latest encoding, by its logical kind
+    let raw = kinds::REDACTION_RESIDUE;
     assert_eq!(
         tail,
         vec![
-            (kinds::REDACTION_RESIDUE, residues[0]),
-            (kinds::REDACTION_RESIDUE, residues[1]),
+            (raw, residues[0]),
+            (raw, residues[1]),
             (kinds::REDACTION_CARRIED, carried_hash(&rec)),
         ]
     );
@@ -348,7 +350,7 @@ fn hc3_only_ingest_can_append_carried() {
     for (n, b) in batches.iter().enumerate() {
         i.batch(n as u64 + 1, b).unwrap();
     }
-    i.upgrade(store_format()).unwrap();
+    i.upgrade(&store_format()).unwrap();
     let end = i.end();
     assert!(matches!(
         i.append_carried(&src.residues(), &[rec]),
@@ -727,7 +729,7 @@ fn hc3_carried_corruption_table() {
 fn dump_header(repo: RepoId, batches: &[DumpBatch]) -> rdy_store::dump::DumpHeader {
     let last = batches.last().unwrap();
     rdy_store::dump::DumpHeader {
-        store_format: store_format(),
+        store: store_format(),
         log_end: batch_end(last).unwrap(),
         rdy: "test".into(),
         chain: Some(DumpChainHeader::full(repo, BatchMarker::of(last))),
@@ -786,7 +788,7 @@ fn hc3_dump_of_carried_store_loads_again() {
     for (n, b) in read.iter().enumerate() {
         i.batch(n as u64 + 1, b).unwrap();
     }
-    i.upgrade(store_format()).unwrap();
+    i.upgrade(&store_format()).unwrap();
     i.finish().unwrap();
     assert_eq!(log_bytes(&again), log_bytes(&to));
     let s = Store::open(&again).unwrap();
@@ -811,7 +813,7 @@ fn hc3_dump_of_carried_store_loads_again() {
     for (n, b) in forged.iter().enumerate() {
         i.batch(n as u64 + 1, b).unwrap();
     }
-    i.upgrade(store_format()).unwrap();
+    i.upgrade(&store_format()).unwrap();
     assert!(matches!(i.finish(), Err(StoreError::Dump { .. })));
 }
 
@@ -821,8 +823,12 @@ fn stream(
     tag: Hash,
 ) -> Result<Vec<u8>, rdy_store::stream_error::StreamError> {
     let c = closure(reader, tag, &Default::default())?;
-    let header =
-        StreamHeader::tag_history(reader.repo_id().unwrap().unwrap(), tag, c.prerequisites);
+    let header = StreamHeader::tag_history(
+        rdy_store::format::baseline_features(),
+        reader.repo_id().unwrap().unwrap(),
+        tag,
+        c.prerequisites,
+    );
     let mut source = StoreSource {
         reader,
         end: END_OF_LOG,
@@ -1019,7 +1025,7 @@ fn hc3_carried_bounds_refuse_before_append() {
     );
     i.append_carried(&[], std::slice::from_ref(&at_bound))
         .unwrap();
-    i.upgrade(store_format()).unwrap();
+    i.upgrade(&store_format()).unwrap();
     i.finish().unwrap();
     let s = Store::open(&to).unwrap();
     assert_eq!(s.reader().carried_counts(&at_bound).unwrap(), (100_000, 0));

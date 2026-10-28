@@ -801,6 +801,7 @@ pub(crate) fn blocking_conflicts(
             id: *id,
             deps: &c.deps,
             ops: &c.ops,
+            is_replay: c.links.replayed_from.is_some(),
         })
         .collect();
     let deleters = reader.merge_deleters(base.as_ref(), &state, &touched)?;
@@ -813,11 +814,13 @@ pub(crate) fn blocking_conflicts(
             producers.insert(*v, reader.producer(v)?);
         }
     }
+    let order_only = reader.order_only_pairs(&state, cs.iter().flat_map(|c| &c.ops));
     Ok(merge_on_blocks(
         &state,
         &input,
         &|v| producers.get(v).copied().flatten(),
         &|b| deleters.get(b).copied(),
+        &|v, op| order_only.holds(v, op),
         &touched,
     )
     .conflicts)
@@ -1487,6 +1490,25 @@ fn rekeyable_in(changes: &[Change], applied: &[usize], canon: &Materialized) -> 
             _ => None,
         })
         .collect()
+}
+
+/// The acceptance change's message: the phrases for the ops it holds (`accepts` decisions,
+/// gives new `keys`, gives new `order_keys`), in that order, joined as a list, then ` in {title}`.
+fn acceptance_message(accepts: bool, keys: bool, order_keys: bool, title: &str) -> String {
+    let what: Vec<&str> = [
+        (accepts, "accept decisions"),
+        (keys, "give new keys"),
+        (order_keys, "give new order keys"),
+    ]
+    .into_iter()
+    .filter_map(|(on, phrase)| on.then_some(phrase))
+    .collect();
+    let list = match what.as_slice() {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    format!("{list} in {title}")
 }
 
 /// The ops of the changes at `applied` (positions in `changes`), in applied order.
@@ -2685,6 +2707,65 @@ impl Rdy {
         if let Some(e) = stale.into_iter().next() {
             return Err(e);
         }
+        // D-TX3KH: a block this version places that would share its order key with a sibling
+        // gets a key of its own, in the acceptance change. Only the version's own placed blocks
+        // are re-keyed, each from its proposed version, which the view must still hold. A key
+        // folds into the block's acceptance or key update, so no two updates share a base.
+        let canon = st.materialized(&Scope::Canon)?;
+        // D-1FT5Y: a block whose op kept its base's order key, where canon's version differs
+        // from that base only by its key, lands with canon's key and the op's other fields. It
+        // is no placed block, and the re-key reads the candidate with canon's keys.
+        let kept = crate::landing_order::kept_places(st.reader(), &canon, &prospective, &ops)?;
+        let with_kept;
+        let candidate = if kept.is_empty() {
+            &prospective
+        } else {
+            let restored: Vec<Op> = kept
+                .iter()
+                .map(|(id, k)| {
+                    let b = prospective
+                        .get(id)
+                        .expect("a kept block is in the prospective canon");
+                    let mut at = b.clone();
+                    at.order = k.clone();
+                    Op::Update {
+                        base: b.version_hash(),
+                        block: at,
+                    }
+                })
+                .collect();
+            with_kept = prospective.with(&restored);
+            &with_kept
+        };
+        let mut placed = crate::landing_order::placed(&canon, &ops);
+        placed.retain(|id| !kept.contains_key(id));
+        let mut order_keys = crate::landing_order::rekeys(&canon, candidate, &vm, &placed)?;
+        order_keys.extend(kept);
+        for (id, k) in &order_keys {
+            let b = prospective
+                .get(id)
+                .expect("a re-keyed block is in the prospective canon");
+            if vm.get(id).map(|v| v.version_hash()) != Some(b.version_hash()) {
+                return Err(crate::landing_order::stale_error(id, &p.view));
+            }
+            let mut folded = false;
+            for op in &mut accept_ops {
+                if let Op::Update { block, .. } = op
+                    && block.id == *id
+                {
+                    block.order = k.clone();
+                    folded = true;
+                }
+            }
+            if !folded {
+                let mut rekeyed = b.clone();
+                rekeyed.order = k.clone();
+                accept_ops.push(Op::Update {
+                    base: b.version_hash(),
+                    block: rekeyed,
+                });
+            }
+        }
 
         // 3. dry run: validate the final change list before writing anything. The acceptance
         // carries the deps the store gives it when it commits it to the view (the view's own
@@ -2698,11 +2779,12 @@ impl Rdy {
                 deps: vec![],
                 provenance: s.provenance(),
                 justification: None,
-                message: match (accepts, re.is_empty()) {
-                    (_, true) => format!("accept decisions in {}", p.title),
-                    (0, false) => format!("give new keys in {}", p.title),
-                    _ => format!("accept decisions and give new keys in {}", p.title),
-                },
+                message: acceptance_message(
+                    accepts > 0,
+                    !re.is_empty(),
+                    !order_keys.is_empty(),
+                    &p.title,
+                ),
                 links: ChangeLinks::default(),
                 read_identity: None,
             };
