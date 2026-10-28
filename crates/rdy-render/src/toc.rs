@@ -70,11 +70,12 @@ pub(crate) fn change_label_html(text: &str) -> String {
     crate::escape(&change_label(text))
 }
 
-/// A change's label from coded text `coded` ([`crate::site::Site::label_coded`]), as
-/// [`Change::label`] holds it: cut to [`LABEL_MAX`] as the home card's summary is cut, escaped,
-/// each code span a `<code>` element (`home::summary_html`, ruling task-2).
-pub(crate) fn change_label_coded(coded: &str) -> String {
-    crate::home::summary_html(coded, LABEL_MAX)
+/// A change's label from characters with their code spans
+/// ([`crate::site::Site::label_coded`]), as [`Change::label`] holds it: cut to [`LABEL_MAX`] as
+/// the home card's summary is cut, escaped, each code span a `<code>` element
+/// (`home::summary_html`, ruling task-2).
+pub(crate) fn change_label_coded(chars: &[crate::changes::Ch]) -> String {
+    crate::home::summary_html_of(chars, LABEL_MAX)
 }
 
 /// One item of a doc page in page order, as the section words read it.
