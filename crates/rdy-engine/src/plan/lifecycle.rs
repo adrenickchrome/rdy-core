@@ -33,6 +33,7 @@ use super::api::{
 };
 use super::compute::{self, ComputedPlan};
 use crate::alt::AltPick;
+use crate::error::E_PLAN_OPEN;
 use crate::{RdyError, ReadState};
 use rdy_model::plan::{
     Plan, PlanAct, PlanAnswer, PlanHead, PlanKind, PlanOutcome, PlanSeal, SealedItem,
@@ -46,6 +47,8 @@ use std::collections::BTreeMap;
 pub const W_PLAN_OPEN: &str = "W_PLAN_OPEN";
 /// The fix of [`W_PLAN_OPEN`].
 pub const PLAN_OPEN_FIX: &str = "close or defer each item: rdy_plan / rdy plan";
+/// The fix of `E_PLAN_OPEN` (D-ME2HD).
+pub const PLAN_GATE_FIX: &str = "close or defer each item, and answer each tension item with confirm or dismiss: rdy_plan / rdy plan";
 /// The most open items a proposal's summary lists.
 pub const PLAN_SUMMARY_ITEMS: usize = 200;
 
@@ -82,7 +85,8 @@ fn is_zero(n: &usize) -> bool {
 
 /// The change plan a proposed version bound, as the propose reply shows it: the counts over
 /// every item, code items included, the code files, and the first [`PLAN_SUMMARY_ITEMS`] open
-/// items in full-hash order.
+/// items in full-hash order. `gated` and `advised` are what [`plan_issues`] reads, counted over
+/// every item before the cut; no reply shows them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PlanSummary {
     pub open: usize,
@@ -94,6 +98,12 @@ pub struct PlanSummary {
     /// The open items left out past [`PLAN_SUMMARY_ITEMS`].
     #[serde(skip_serializing_if = "is_zero")]
     pub items_omitted: usize,
+    /// The open non-code items on stable content, and the open tension items (D-FQ7AK, D-45RG6).
+    #[serde(skip)]
+    pub gated: usize,
+    /// The open non-code items on drafts that are not tension items.
+    #[serde(skip)]
+    pub advised: usize,
 }
 
 impl Default for PlanSummary {
@@ -106,6 +116,8 @@ impl Default for PlanSummary {
             code: PlanCode::default(),
             items: vec![],
             items_omitted: 0,
+            gated: 0,
+            advised: 0,
         }
     }
 }
@@ -145,10 +157,18 @@ fn assess(computed: &ComputedPlan, answers: &[PlanAnswer]) -> (PlanSummary, Vec<
     notes.sort_by_key(|(item, _)| *item);
     let mut open_items = vec![];
     let mut open_docs = 0usize;
+    let (mut gated, mut advised) = (0usize, 0usize);
     for row in rows {
         let PlanRow::Live(item) = row else { continue };
         if item.state != ItemState::Open {
             continue;
+        }
+        match item.kind {
+            // D-ERKCP: a code item never counts
+            PlanKind::UpdateImplementation => {}
+            PlanKind::Tension => gated += 1,
+            _ if item.stable => gated += 1,
+            _ => advised += 1,
         }
         if item.kind != PlanKind::UpdateImplementation {
             open_docs += 1;
@@ -168,6 +188,8 @@ fn assess(computed: &ComputedPlan, answers: &[PlanAnswer]) -> (PlanSummary, Vec<
         },
         items: open_items,
         items_omitted: omitted,
+        gated,
+        advised,
     };
     let mut warnings: Vec<Issue> = notes
         .into_iter()
@@ -189,6 +211,33 @@ fn assess(computed: &ComputedPlan, answers: &[PlanAnswer]) -> (PlanSummary, Vec<
         });
     }
     (summary, warnings)
+}
+
+/// The change-plan gate of `summary` (D-ME2HD, D-FQ7AK, D-45RG6): one [`E_PLAN_OPEN`] error that
+/// counts the open non-code items on stable content and the open tension items (`gated`), then
+/// one [`W_PLAN_OPEN`] warning that counts the other open non-code items, on drafts
+/// (`advised`). Each comes only when its count is above 0; a code item never counts (D-ERKCP).
+pub fn plan_issues(summary: &PlanSummary) -> Vec<Issue> {
+    let mut out = vec![];
+    if summary.gated > 0 {
+        out.push(Issue {
+            severity: Severity::Error,
+            code: E_PLAN_OPEN,
+            block: None,
+            message: format!("{} change-plan items are open", summary.gated),
+            fix: PLAN_GATE_FIX.into(),
+        });
+    }
+    if summary.advised > 0 {
+        out.push(Issue {
+            severity: Severity::Warning,
+            code: W_PLAN_OPEN,
+            block: None,
+            message: format!("{} change-plan items are open", summary.advised),
+            fix: PLAN_OPEN_FIX.into(),
+        });
+    }
+    out
 }
 
 /// Prepares the plan a propose of `view` binds (see the module docs), writing nothing; its new
@@ -219,7 +268,8 @@ pub(crate) fn prepare_proposal_plan(
     let first = chain.as_ref().map_or(&heads, |c| &c.first_heads);
     let (answers, summary, warnings) = match candidate {
         Some(changes) => {
-            let computed = compute::compute_changes(st, changes, st.canon_head(), &heads, first)?;
+            let computed =
+                compute::compute_changes(st, view, changes, st.canon_head(), &heads, first)?;
             let answers = prepare_plan_answers(st, by, view, &computed, prior, inputs)?;
             let (summary, warnings) = assess(&computed, &answers);
             (answers, summary, warnings)

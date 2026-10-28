@@ -426,6 +426,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "Propose the redaction of the listed targets again, and have a person approve it.",
     ),
     (
+        E_PLAN_OPEN,
+        "the version's change plan has open items on stable content or unanswered tension items",
+        "close or defer each item, and answer each tension item with confirm or dismiss: rdy_plan / rdy plan",
+    ),
+    (
         E_PLAN_ITEM,
         "<id> is not an item of the change plan for <scope>",
         "read the plan with rdy_plan / rdy plan and pass an item id it lists",

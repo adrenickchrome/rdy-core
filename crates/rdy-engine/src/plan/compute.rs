@@ -6,13 +6,16 @@
 //! (`ReadState::plan_pairs`), over the net state (D-NJ2SP): intermediate edits leave nothing.
 //! The code items come from the code index at the HEADs the caller captured (D-ERKCP): one per
 //! cause and anchored file, closed by a later commit, where "later" is Git reachability (O5).
-use crate::brief::FollowUp;
+//! The tension items come from the open advisory tensions that involve the version (D-ME2HD,
+//! O21): one per tension, closed as updated when the version's landing form does not have it.
+use crate::brief::{FollowUp, effective_stable};
 use crate::code_evidence::{self, anchored_files, later_touch};
 use crate::code_index::{CodeRepo, code_repos};
 use crate::consequence::{CONFLICT_FIX, NetState, PlanPair, conflict_message, refines_copied};
 use crate::error::{E_CONFLICT_UNRESOLVED, E_LIMIT};
 use crate::gate::{applied_ops, changes_of, prospective};
 use crate::lexicon::Lexicon;
+use crate::tensions::{Tension, TensionSeverity};
 use crate::{Materialized, RdyError, ReadState, Scope};
 use rdy_graph::{DerivedStatus, Graph, edges_of};
 use rdy_model::decision::{DECISION, REFINES, REVOKES, SUPERSEDES};
@@ -32,12 +35,16 @@ pub const DELETED_DOMAIN: &[u8] = b"rdy-plan-deleted\0";
 /// The edge of every code item.
 const CODE_EDGE: &str = "implements";
 
+/// The edge of every tension item.
+pub const TENSION_EDGE: &str = "tension";
+
 /// The fix of [`limit_error`].
 const LIMIT_FIX: &str = "split the change into smaller proposals";
 
-/// One computed plan item. `subject` is a block id, or `<configured repo>:<relative path>` for
-/// a code item. The hashes are the content hashes an answer keeps (O4): a deleted block's is
-/// [`deleted_identity`], and a code subject has none.
+/// One computed plan item. `subject` is a block id, `<configured repo>:<relative path>` for a
+/// code item, or the tension's full id (64 hex) for a tension item. The hashes are the content
+/// hashes an answer keeps (O4): a deleted block's is [`deleted_identity`], a code subject and a
+/// tension subject have none, and a tension item's cause hash is the tension's vkey (O5).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlanCandidate {
     /// [`item_hash`] of the cause, the subject and the kind.
@@ -50,6 +57,9 @@ pub struct PlanCandidate {
     pub cause_hash: Hash,
     /// The close the version itself makes (checked before any answer), or `None` while open.
     pub close: Option<PlanOutcome>,
+    /// Whether the subject is stable content: its effective lifecycle on the version's final
+    /// state, else on canon (a deleted subject). Never for a code or a tension item (D-FQ7AK).
+    pub stable: bool,
 }
 
 /// Every item of a version, sorted by full item hash, with the distinct code files they name.
@@ -75,9 +85,8 @@ pub fn allowed_acts(kind: PlanKind) -> &'static [PlanAct] {
         PlanKind::Update | PlanKind::Rejustify | PlanKind::Reaffirm => &[PlanAct::Defer],
         PlanKind::Confirm => &[PlanAct::Confirm, PlanAct::Defer],
         PlanKind::UpdateImplementation => &[PlanAct::Done, PlanAct::Defer],
-        // a tension item is carried only: no computed plan holds one, and no act answers it
-        // until its writer exists
-        PlanKind::Tension => &[],
+        // D-ME2HD: the author answers a tension item; defer does not answer it
+        PlanKind::Tension => &[PlanAct::Confirm, PlanAct::Dismiss],
     }
 }
 
@@ -98,12 +107,50 @@ pub(crate) fn limit_error(n: usize) -> RdyError {
     )
 }
 
-/// The two states a plan compares: the canon baseline, the version's final state on it, and the
-/// blocks the version's applied ops write.
+/// The two states a plan compares: the canon baseline, the version's final state on it, the
+/// blocks the version's applied ops write, and the tensions that involve the version.
 pub(crate) struct Sides {
     pub(crate) base: NetState,
     pub(crate) fin: NetState,
     pub(crate) written: BTreeSet<BlockId>,
+    pub(crate) tensions: VersionTensions,
+}
+
+/// The open advisory tensions that involve a version (D-ME2HD, O21): the advisory members of
+/// the queue's set (`pending::queue::open_tensions`: the landing form and the in-flight forms of
+/// its changes, not dismissed), by id, and the ids of the open tensions of its landing form.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct VersionTensions {
+    pub(crate) open: Vec<Arc<Tension>>,
+    pub(crate) landing: BTreeSet<Hash>,
+}
+
+/// The [`VersionTensions`] of a version of `view` with changes `changes`. Only the changes the
+/// store holds are read: the key change a propose adds is not written yet, and has no tension
+/// set of its own.
+fn version_tensions(
+    st: &ReadState,
+    view: &str,
+    changes: &[Hash],
+) -> Result<VersionTensions, RdyError> {
+    let reader = st.reader();
+    let mut held = Vec::with_capacity(changes.len());
+    for c in changes {
+        if reader.has(c)? {
+            held.push(*c);
+        }
+    }
+    if held.is_empty() {
+        return Ok(VersionTensions::default());
+    }
+    let (open, landing) = crate::pending::queue::open_tension_forms(st, view, &held)?;
+    Ok(VersionTensions {
+        open: open
+            .into_iter()
+            .filter(|t| t.severity == TensionSeverity::Advisory)
+            .collect(),
+        landing,
+    })
 }
 
 /// One linked checkout: the version's HEAD and the chain's first HEAD, resolved (`None` is an
@@ -122,26 +169,29 @@ pub(crate) struct CodeSide {
 /// [`limit_error`].
 pub(crate) fn compute(
     st: &ReadState,
-    _view: &str,
+    view: &str,
     changes: &[Hash],
     canon_at: Option<Hash>,
     heads: &[PlanHead],
     first_heads: &[PlanHead],
 ) -> Result<ComputedPlan, RdyError> {
     let changes = changes_of(st, changes)?;
-    compute_changes(st, &changes, canon_at, heads, first_heads)
+    compute_changes(st, view, &changes, canon_at, heads, first_heads)
 }
 
-/// [`compute`] of change values, read or not yet written: the propose binding computes the
-/// candidate with the key change rdy adds before anything is appended.
+/// [`compute`] of change values of a version of `view`, read or not yet written: the propose
+/// binding computes the candidate with the key change rdy adds before anything is appended.
 pub(crate) fn compute_changes(
     st: &ReadState,
+    view: &str,
     changes: &[Change],
     canon_at: Option<Hash>,
     heads: &[PlanHead],
     first_heads: &[PlanHead],
 ) -> Result<ComputedPlan, RdyError> {
-    let sides = sides_of(st, changes, canon_at)?;
+    let mut sides = sides_of(st, changes, canon_at)?;
+    let ids: Vec<Hash> = changes.iter().map(Change::id).collect();
+    sides.tensions = version_tensions(st, view, &ids)?;
     let code = code_sides(st, heads, first_heads)?;
     compute_in(st, &sides, code.as_deref(), MAX_PLAN_ITEMS)
 }
@@ -212,7 +262,12 @@ fn sides_of(st: &ReadState, changes: &[Change], canon_at: Option<Hash>) -> Resul
         g: Arc::new(g),
         names: Arc::new(names),
     };
-    Ok(Sides { base, fin, written })
+    Ok(Sides {
+        base,
+        fin,
+        written,
+        tensions: VersionTensions::default(),
+    })
 }
 
 /// The linked checkouts `heads` names, each with its first HEAD; `None` when none is linked.
@@ -382,7 +437,7 @@ impl Closes<'_> {
             return Some(PlanOutcome::Updated);
         };
         match kind {
-            // a carried tension item has no computed close
+            // a tension item is no pair: its close is [`tension_close`]
             PlanKind::Tension => None,
             // the subject's content changed, or it is new
             PlanKind::Update => match before {
@@ -425,6 +480,13 @@ impl Closes<'_> {
             PlanKind::UpdateImplementation => None,
         }
     }
+}
+
+/// The close of the tension item of `t` (D-ME2HD): updated when the tension is no longer open in
+/// the version's landing form (`landing`, its open ids), so the version's change resolves it;
+/// else open until the author answers it.
+fn tension_close(t: &Tension, landing: &BTreeSet<Hash>) -> Option<PlanOutcome> {
+    (!landing.contains(&t.id)).then_some(PlanOutcome::Updated)
 }
 
 /// The kind of a judged pair: its follow-up, and a confirm on a retired cause is a rejustify. An
@@ -475,6 +537,11 @@ pub(crate) fn compute_in(
             .map(|b| b.content_hash_with(&t))
             .unwrap_or_else(|| deleted_identity(id))
     };
+    // D-FQ7AK: the subject's lifecycle as the version leaves it; a deleted one's as canon has it
+    let stable_of = |id: &BlockId| match fin.m.get(id) {
+        Some(_) => effective_stable(&fin.m, Some(id)),
+        None => effective_stable(&base.m, Some(id)),
+    };
     let mut items: BTreeMap<Hash, PlanCandidate> = BTreeMap::new();
     // the decisions whose re-affirm item the version closes as re-affirmed: they re-affirm, for
     // the code closes as for the document
@@ -504,6 +571,7 @@ pub(crate) fn compute_in(
                 close,
                 subject_hash: Some(hash_or_deleted(&p.subject)),
                 cause_hash: hash_or_deleted(&p.cause),
+                stable: stable_of(&p.subject),
                 subject,
                 cause: p.cause,
                 edge: p.edge,
@@ -511,6 +579,29 @@ pub(crate) fn compute_in(
             limit,
         )
     })?;
+    // O5: a tension item's subject is the tension's id, its cause the tension's first involved
+    // block, and an answer keeps the tension's vkey, so it lapses when the tension changes
+    for tension in &sides.tensions.open {
+        let Some(cause) = tension.blocks().into_iter().next() else {
+            continue;
+        };
+        let subject = tension.id.to_string();
+        admit(
+            &mut items,
+            PlanCandidate {
+                id: item_hash(&cause, &subject, PlanKind::Tension),
+                kind: PlanKind::Tension,
+                subject,
+                cause,
+                edge: TENSION_EDGE.to_string(),
+                subject_hash: None,
+                cause_hash: tension.vkey,
+                close: tension_close(tension, &sides.tensions.landing),
+                stable: false,
+            },
+            limit,
+        )?;
+    }
     let (code_files, code_unavailable) = match code {
         None => (0, true),
         Some(code) => (
@@ -654,6 +745,7 @@ fn code_items(
                         subject_hash: None,
                         cause_hash: cause_hash(cause),
                         close: closed.then_some(PlanOutcome::Committed),
+                        stable: false,
                     },
                     limit,
                 )?;
@@ -817,7 +909,12 @@ mod tests {
             .map(|x| x.id.clone())
             .filter(|i| base.m.version_of(i) != fin.m.version_of(i))
             .collect();
-        Sides { base, fin, written }
+        Sides {
+            base,
+            fin,
+            written,
+            tensions: VersionTensions::default(),
+        }
     }
 
     fn sides(st: &ReadState, base: &[Block], fin: &[Block]) -> Sides {
@@ -1004,6 +1101,10 @@ mod tests {
         assert_eq!(
             allowed_acts(PlanKind::UpdateImplementation),
             [PlanAct::Done, PlanAct::Defer]
+        );
+        assert_eq!(
+            allowed_acts(PlanKind::Tension),
+            [PlanAct::Confirm, PlanAct::Dismiss]
         );
         let (_d, r) = project();
         let st = r.read();

@@ -45,17 +45,18 @@ pub const PLAN_DEFAULT_TOKENS: usize = crate::brief::BRIEF_DEFAULT_TOKENS;
 /// The largest budget a plan read takes, in tokens.
 pub const PLAN_MAX_TOKENS: usize = 100_000;
 
-/// The kinds, in their wire order (p-S33GZ).
-const KINDS: [PlanKind; 5] = [
+/// The kinds, in their wire order (p-S33GZ); the tension item is last (D-ME2HD).
+const KINDS: [PlanKind; 6] = [
     PlanKind::Update,
     PlanKind::Rejustify,
     PlanKind::Reaffirm,
     PlanKind::Confirm,
     PlanKind::UpdateImplementation,
+    PlanKind::Tension,
 ];
 
-/// The ten outcomes, in their wire order.
-const OUTCOMES: [PlanOutcome; 10] = [
+/// The eleven outcomes, in their wire order; `dismissed` is last (D-ME2HD).
+const OUTCOMES: [PlanOutcome; 11] = [
     PlanOutcome::Updated,
     PlanOutcome::Relinked,
     PlanOutcome::Repinned,
@@ -66,10 +67,26 @@ const OUTCOMES: [PlanOutcome; 10] = [
     PlanOutcome::Done,
     PlanOutcome::Deferred,
     PlanOutcome::Open,
+    PlanOutcome::Dismissed,
 ];
 
+/// The prefix of a tension item's display id: the tension's own id (O5).
+const TENSION_DISPLAY_PREFIX: &str = "tn-";
+
+/// The display id of an item: a tension item shows its tension's id, `tn-` and the first 12 hex
+/// of its subject (O5, `tension_label`); every other item `pi-` and 16 hex ([`item_display`]).
+fn item_label(kind: PlanKind, id: &Hash, subject: &str) -> String {
+    match kind {
+        PlanKind::Tension => format!(
+            "{TENSION_DISPLAY_PREFIX}{}",
+            subject.get(..12).unwrap_or(subject)
+        ),
+        _ => item_display(id),
+    }
+}
+
 /// One answer to a plan item, as `rdy_plan` and `rdy_propose` take it (p-JJNYH): `item` is a
-/// `pi-` id (a prefix of one) or a `cq-` consequence id.
+/// `pi-` id (a prefix of one), a tension item's `tn-` id or a `cq-` consequence id.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanAnswerInput {
@@ -119,7 +136,7 @@ pub struct AnswerRow {
 /// An item of a view's or a proposal version's plan.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct LiveItem {
-    /// `pi-` and 16 hex digits.
+    /// `pi-` and 16 hex digits; a tension item's `tn-` and 12 (O5).
     pub id: String,
     pub kind: PlanKind,
     pub subject: String,
@@ -131,6 +148,10 @@ pub struct LiveItem {
     pub how: Option<PlanOutcome>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answer: Option<AnswerRow>,
+    /// Whether the subject is stable content (D-FQ7AK): what the change-plan gate reads; no
+    /// reply shows it.
+    #[serde(skip)]
+    pub stable: bool,
 }
 
 /// An item as a landing sealed it.
@@ -175,8 +196,8 @@ pub struct StateCounts {
     pub deferred: usize,
 }
 
-/// The counts over every item (not one page): closed holds the computed closes, the confirmed
-/// and the done items; `by_kind` names all five kinds.
+/// The counts over every item (not one page): closed holds the computed closes, the confirmed,
+/// the dismissed and the done items; `by_kind` names all six kinds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PlanCounts {
     pub open: usize,
@@ -552,7 +573,7 @@ pub(crate) fn live_rows(
                                 code: W_PLAN_ANSWER_LAPSED.into(),
                                 message: format!(
                                     "the answer to {} lapsed: {block} changed",
-                                    item_display(&c.id)
+                                    item_label(c.kind, &c.id, &c.subject)
                                 ),
                                 fix: PLAN_ANSWER_LAPSED_FIX.into(),
                             },
@@ -577,7 +598,7 @@ pub(crate) fn live_rows(
         };
         counts.add(c.kind, state);
         rows.push(PlanRow::Live(LiveItem {
-            id: item_display(&c.id),
+            id: item_label(c.kind, &c.id, &c.subject),
             kind: c.kind,
             subject: c.subject.clone(),
             cause: c.cause.to_string(),
@@ -585,6 +606,7 @@ pub(crate) fn live_rows(
             state,
             how,
             answer,
+            stable: c.stable,
         }));
     }
     (rows, counts, notes)
@@ -601,7 +623,7 @@ fn sealed_state(o: PlanOutcome) -> ItemState {
 
 fn sealed_row(i: &SealedItem) -> PlanRow {
     PlanRow::Sealed(SealedRow {
-        id: item_display(&i.id),
+        id: item_label(i.kind, &i.id, &i.subject),
         kind: i.kind,
         subject: i.subject.clone(),
         cause: i.cause.to_string(),
@@ -823,9 +845,10 @@ fn not_an_item(text: &str, scope: &str) -> RdyError {
     )
 }
 
-/// The candidate `text` names in `computed`: a `pi-` prefix of exactly one item, or a `cq-` id
-/// of the view's current consequence report (`report` reads it on first use) whose subject,
-/// cause and kind match exactly one item. Anything else is `E_PLAN_ITEM`.
+/// The candidate `text` names in `computed`: a `pi-` prefix of exactly one item, a `tn-` id
+/// (12 to 64 hex) that starts the subject of exactly one tension item (O5), or a `cq-` id of the
+/// view's current consequence report (`report` reads it on first use) whose subject, cause and
+/// kind match exactly one item. Anything else is `E_PLAN_ITEM`.
 fn resolve_item<'c>(
     computed: &'c ComputedPlan,
     text: &str,
@@ -844,6 +867,19 @@ fn resolve_item<'c>(
         let mut found = items[start..]
             .iter()
             .take_while(|c| c.id.to_string().starts_with(hex));
+        return match (found.next(), found.next()) {
+            (Some(c), None) => Ok(c),
+            _ => Err(miss()),
+        };
+    }
+    if let Some(hex) = text.strip_prefix(TENSION_DISPLAY_PREFIX) {
+        if !(12..=64).contains(&hex.len()) || !hex.bytes().all(is_lower_hex) {
+            return Err(miss());
+        }
+        let mut found = computed
+            .items
+            .iter()
+            .filter(|c| c.kind == PlanKind::Tension && c.subject.starts_with(hex));
         return match (found.next(), found.next()) {
             (Some(c), None) => Ok(c),
             _ => Err(miss()),
@@ -919,8 +955,26 @@ pub(crate) fn prepare_plan_answers(
         let c = resolve_item(computed, &input.item, &scope, &report, &held)?;
         if fresh.contains_key(&c.id) {
             return Err(bad(
-                &format!("duplicate plan answer for {}", item_display(&c.id)),
+                &format!(
+                    "duplicate plan answer for {}",
+                    item_label(c.kind, &c.id, &c.subject)
+                ),
                 "answer each item once per call",
+            ));
+        }
+        // D-ME2HD: dismiss answers a tension item only, and defer does not answer one
+        if input.act == PlanAct::Dismiss && c.kind != PlanKind::Tension {
+            return Err(RdyError::new(
+                E_PLAN_ITEM,
+                "dismiss answers a tension item only",
+                "answer it with confirm, defer or done",
+            ));
+        }
+        if input.act == PlanAct::Defer && c.kind == PlanKind::Tension {
+            return Err(RdyError::new(
+                E_PLAN_ITEM,
+                "defer does not answer a tension item",
+                "answer it with confirm or dismiss, with a reason",
             ));
         }
         if !allowed_acts(c.kind).contains(&input.act) {
@@ -1025,6 +1079,7 @@ mod tests {
             subject_hash: Some(Hash([1; 32])),
             cause_hash: Hash([2; 32]),
             close: None,
+            stable: false,
         }
     }
 

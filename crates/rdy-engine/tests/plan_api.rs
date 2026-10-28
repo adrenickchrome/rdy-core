@@ -217,6 +217,7 @@ fn counts(open: usize, closed: usize, deferred: usize, by_kind: &[(&str, [usize;
         "rejustify",
         "update",
         "update_implementation",
+        "tension",
     ] {
         let [o, c, d] = by_kind
             .iter()
@@ -335,7 +336,7 @@ fn linked_repo(project: &Path) -> tempfile::TempDir {
 
 /// O17: every selector's reply has exactly scope, plan, items, counts, code and notes; a live
 /// item is {id, kind, subject, cause, edge, state}, a sealed one has outcome, a decision's rows
-/// are {landing, version, items, outcomes} newest first, and counts name all five kinds.
+/// are {landing, version, items, outcomes} newest first, and counts name all six kinds.
 #[test]
 fn cp8_all_four_selectors_have_closed_shapes() {
     let (_d, mut r) = project();
@@ -485,7 +486,7 @@ fn cp8_all_four_selectors_have_closed_shapes() {
                "counts": sealed_counts, "code": {"files": 1}, "notes": []})
     );
 
-    // a decision: its seals newest first, each with all ten outcomes counted
+    // a decision: its seals newest first, each with all eleven outcomes counted
     edit(&mut r, "w2", &s.c, "C stands firm.");
     let (version2, _) = raw_propose(&mut r, "w2");
     let l2 = raw_land(&mut r, &version2);
@@ -505,8 +506,9 @@ fn cp8_all_four_selectors_have_closed_shapes() {
     put_plan_frames(r.store_mut(), &seal2);
     r.invalidate();
     let outcomes = |deferred: usize, updated: usize, open: usize| {
-        json!({"committed": 0, "confirmed": 0, "deferred": deferred, "done": 0, "open": open,
-               "reaffirmed": 0, "relinked": 0, "repinned": 0, "retired": 0, "updated": updated})
+        json!({"committed": 0, "confirmed": 0, "deferred": deferred, "dismissed": 0, "done": 0,
+               "open": open, "reaffirmed": 0, "relinked": 0, "repinned": 0, "retired": 0,
+               "updated": updated})
     };
     let dq = PlanQuery {
         decision: Some(s.a.clone()),
