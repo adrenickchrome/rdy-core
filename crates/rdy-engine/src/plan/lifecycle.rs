@@ -17,7 +17,8 @@
 //! A landing computes the selected version's complete outcome before anything is appended,
 //! from its recorded canon, its recorded HEADs and its bound plan's answers (an answer the view
 //! recorded after the propose is not the version's): each item's computed close, else its valid
-//! answer (confirm is confirmed, done is done, defer is deferred), else open. An acceptance
+//! answer (confirm is confirmed, done is done, defer is deferred, dismiss is dismissed), else
+//! open. A tension item has no open seal form, so an open one stays out of the seal. An acceptance
 //! change gives the landing a final version: an already-bound version's final version binds a
 //! plan of its own in the landing's batch, with the approved candidate's answers, assessment
 //! and HEADs. The seal names the landing and the version that landed, and carries the approved
