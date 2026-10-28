@@ -129,6 +129,33 @@ fn rg3_rdy_session_lists_w_pack_severity() {
     );
 }
 
+/// Fix round 1 (O15): `rdy config --show-origin` prints `W_PACK_SEVERITY` in its own output,
+/// as it prints `W_CONFIG_UNKNOWN`, once, and not on stderr; a pack that leaves the severity
+/// alone prints none.
+#[test]
+fn rg3_rdy_config_show_origin_lists_w_pack_severity() {
+    let line = format!("warning W_PACK_SEVERITY: {WARNING}; {FIX}");
+    let s = rdy_qa::daemon::Served::new();
+    std::fs::write(s.dir.path().join(".rdy/packs/lax.yaml"), LAX_PACK).expect("pack");
+    std::fs::write(s.dir.path().join(".rdy.yaml"), "pack: lax\n").expect("config");
+    let out = s.rdy(&["config", "--show-origin"]);
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(
+        text.lines().filter(|l| *l == line).count(),
+        1,
+        "{text}\n--- stderr\n{err}"
+    );
+    assert!(!err.contains("W_PACK_SEVERITY"), "{err}");
+    // rdy-standard: no such line
+    let plain = rdy_qa::daemon::Served::new();
+    let out = plain.rdy(&["config", "--show-origin"]);
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(!text.contains("W_PACK_SEVERITY"), "{text}");
+}
+
 /// Guard (FW-JU1 net state): a later justified rewrite of the block in the view clears the
 /// tension, and the version lands.
 #[test]
