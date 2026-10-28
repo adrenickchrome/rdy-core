@@ -422,11 +422,14 @@ fn plb1_schema_explains_the_decision_parent() {
     // `reflects: {sources?: [string], code?: true}` parameter and its guidance text (D-4WC6R):
     // only the new `reflects` parameter changed (28ea7eb0). The other three are re-taken when their
     // `parent` descriptions named a folder and the project root (D-P3YD5; the commit "feat(engine):
-    // with no parent and no decision home, a decision sits at the project root").
+    // with no parent and no decision home, a decision sits at the project root"). rdy_write's is
+    // re-taken once more when its move text named every top-level block, as ruling final-round1
+    // item 2 gives it word for word: "a move without parent goes to the top level (docs, folders,
+    // decisions, questions, findings and sources)".
     let base: Vec<(String, String)> = [
         (
             "rdy_write",
-            "939ca40092529a835b5aa57d1a89e568305d731a78a103906320531aae83c9e0",
+            "0bf3a56e9c5e9a352b12f0697e912d5be11aa4fb25df70c5a9e8d6cf30be806f",
         ),
         (
             "rdy_decide",
