@@ -97,11 +97,14 @@ struct P {
 fn project() -> P {
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
-    let w = write_briefed(
-        &mut r,
-        &writer(),
-        "seed",
-        json!([
+    // the seed writes stable normative content, so it is justified: an unjustified change to
+    // stable content blocks its landing (D-ME2HD)
+    let w = r
+        .write_briefed(
+            &writer(),
+            WriteRequest {
+                view: "seed".into(),
+                ops: ops(json!([
             {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "spec", "title": "Spec", "doc_type": "overview", "lifecycle": "stable"}},
             {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Refunds"}},
             {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "Refunds take five days."},
@@ -115,10 +118,16 @@ fn project() -> P {
             }},
             {"op": "create", "type": "doc", "id": "$n", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}},
             {"op": "create", "type": "claim", "id": "$dc", "parent": "$n", "body": "A draft note."}
-        ]),
-        None,
-    )
-    .unwrap();
+        ])),
+                justification: Some(Justification::Editorial {
+                    class: EditorialClass::Clarify,
+                    reason: "seed the test world".into(),
+                }),
+                message: "write to seed".into(),
+            },
+            None,
+        )
+        .unwrap();
     land(&mut r, "seed");
     let id = |k: &str| w.created[k].clone();
     P {
