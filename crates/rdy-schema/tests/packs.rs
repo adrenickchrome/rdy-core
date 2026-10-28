@@ -187,9 +187,11 @@ fn doc_and_folder_are_injected_into_every_pack() {
     );
     let folder = &p.block_types["folder"];
     assert_eq!(folder.prefix, "fd");
+    // D-P3YD5, D-X3136 (ruling final item 3): a folder also takes the four types that may sit
+    // outside a doc
     assert_eq!(
         folder.children,
-        vec!["folder".to_string(), "doc".to_string()]
+        ["folder", "doc", "decision", "question", "finding", "source"]
     );
     assert_eq!(folder.body, BodyRule::Forbidden);
     assert!(folder.fields["name"].required && !folder.fields["title"].required);

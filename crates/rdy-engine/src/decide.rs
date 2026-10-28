@@ -8,6 +8,8 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct DecisionInput {
+    /// The parent's id, key or path; empty for the project root (D-P3YD5). The tools fill it from
+    /// [`Rdy::decision_parent`].
     pub parent: String,
     pub statement: String,
     /// The card's plain-words title (FW-I1).
@@ -136,21 +138,26 @@ fn fields_of(d: &DecisionInput) -> BTreeMap<String, Value> {
     f
 }
 
+/// Both fixes of a decision home that names no block, or neither a doc nor a folder (D-P3YD5).
+const DECISIONS_HOME_FIX: &str =
+    "set decisions.home in .rdy.yaml to the path, key or id of a doc or a folder that exists";
+
 impl Rdy {
-    /// The parent a decision is recorded under (FW-PR2): `given` as it is, else the doc that
-    /// `decisions.home` names in `view`. Fails with `E_BAD_INPUT` when there is neither, and with
-    /// `E_CONFIG` when the home names no block or a block that is not a doc.
-    pub fn decision_parent(&self, view: &str, given: Option<&str>) -> Result<String, RdyError> {
-        if let Some(p) = given {
-            return Ok(p.to_string());
+    /// The parent a decision is recorded under (FW-PR2, D-P3YD5): `given` as it is; else the doc or
+    /// folder that `decisions.home` names in `view`; else `None`, the project root. A `given` that is
+    /// empty or only spaces counts as none. `E_CONFIG` when the home names no block, or a block that
+    /// is neither a doc nor a folder.
+    pub fn decision_parent(
+        &self,
+        view: &str,
+        given: Option<&str>,
+    ) -> Result<Option<String>, RdyError> {
+        if let Some(p) = given.filter(|p| !p.trim().is_empty()) {
+            return Ok(Some(p.to_string()));
         }
         let st = self.read();
         let Some(home) = st.decisions_home() else {
-            return Err(RdyError::new(
-                E_BAD_INPUT,
-                "no parent given, and the project names no decision home",
-                "pass parent (the doc or section to record the decision in), or set decisions.home in .rdy.yaml to a doc's path, key or id",
-            ));
+            return Ok(None);
         };
         let scope = Scope::View(view.to_string());
         let named = st
@@ -163,20 +170,20 @@ impl Rdy {
                     "decisions.home {home:?} names no block in view {view}: {}",
                     e.message
                 ),
-                "set decisions.home in .rdy.yaml to an existing doc's path, key or id",
+                DECISIONS_HOME_FIX,
             )
         })?;
-        if block.block_type != "doc" {
+        if !rdy_model::tree::is_tree_type(&block.block_type) {
             return Err(RdyError::new(
                 E_CONFIG,
                 format!(
-                    "decisions.home {home:?} is a {}, not a doc",
+                    "decisions.home {home:?} is a {}, not a doc or a folder",
                     block.block_type
                 ),
-                "name a doc: a decision cannot sit directly in a folder yet",
+                DECISIONS_HOME_FIX,
             ));
         }
-        Ok(block.id.to_string())
+        Ok(Some(block.id.to_string()))
     }
 
     fn write_decision(
@@ -216,7 +223,8 @@ impl Rdy {
         let op = OpInput::Create {
             block_type: decision::DECISION.into(),
             id: Some("$decision".into()),
-            parent: Some(d.parent.clone()),
+            // an empty parent is the project root (D-P3YD5)
+            parent: (!d.parent.is_empty()).then(|| d.parent.clone()),
             after: None,
             before: None,
             fields: fields_of(&d),

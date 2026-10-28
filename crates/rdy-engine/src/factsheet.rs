@@ -398,16 +398,11 @@ impl ReadState {
     ) -> Result<Confidence, RdyError> {
         let issues = self.coverage_issues(scope)?;
         let hood = self.fact_sheet_neighbourhood(scope, id)?;
-        // the doc path of every block with an issue, for the closed order of the reasons
-        let mut paths: BTreeMap<String, String> = BTreeMap::new();
-        for b in &hood {
-            if let Some(entry) = issues.blocks.get(b)
-                && !entry.issues.is_empty()
-                && let Some(p) = entry.doc.as_ref().and_then(|d| m.path_of(d))
-            {
-                paths.insert(b.to_string(), p);
-            }
-        }
+        // the path of every block with an issue, for the closed order of the reasons
+        let paths = crate::coverage::issue_paths(
+            m,
+            hood.iter().filter_map(|b| Some((b, issues.blocks.get(b)?))),
+        );
         Ok(confidence_of(&issues, &hood, None, &paths))
     }
 }

@@ -1450,7 +1450,7 @@ fn pub9_publication_check_op_is_strict_read_only_and_open_to_every_role() {
 
 /// rf5 (D-Z8P09): new_finding and new_source are strict, create one block through the ordinary
 /// write in the bound view, and resolve each evidence source (an id, key or path) to a full
-/// reference. With no parent and no decision home, the write's own refusal stands.
+/// reference.
 #[test]
 fn rf5_new_finding_and_new_source_use_the_write_path() {
     let (d, e) = project();
@@ -1483,17 +1483,6 @@ fn rf5_new_finding_and_new_source_use_the_write_path() {
     assert_eq!(
         err.fix,
         "did you mean \"locator\"? the fields are title, kind, locator, version, parent, view"
-    );
-    // no parent and no home: the decision home's refusal
-    let err = dispatch(
-        &c,
-        "new_source",
-        json!({"title": "T", "kind": "release", "locator": "v2"}),
-    )
-    .unwrap_err();
-    assert_eq!(
-        err.message,
-        "no parent given, and the project names no decision home"
     );
     // an evidence source that names nothing is refused before the write
     let err = dispatch(
@@ -1535,6 +1524,28 @@ fn rf5_new_finding_and_new_source_use_the_write_path() {
     assert_eq!(sb.field_str("version"), Some("2.0"));
     // no file is written beside the project
     assert!(!d.path().join("register.yaml").exists());
+}
+
+/// ndh2 (D-P3YD5): with no parent and no decision home, new_source creates the source at the
+/// project root.
+#[test]
+fn ndh2_rdy_new_source_without_parent_or_home_sits_at_the_root() {
+    let (d, e) = project();
+    let s = human();
+    let c = cx(&e, &s, d.path());
+    let v = dispatch(
+        &c,
+        "new_source",
+        json!({"title": "Release 2", "kind": "release", "locator": "v2"}),
+    )
+    .unwrap();
+    let src = v["created"]["$source"].as_str().unwrap().to_string();
+    let st = e.read();
+    let b = st
+        .block(&Scope::View("work".into()), &src.parse().unwrap())
+        .unwrap();
+    assert_eq!(b.block_type, "source");
+    assert_eq!(b.parent, None);
 }
 
 /// rf5 fix round 1 (D-Z8P09): under a stable parent, new_finding and new_source brief the

@@ -11,7 +11,7 @@ pub(crate) struct CoverageArgs {
     /// canon (default), a view name, or tag:<version>.
     #[arg(long)]
     scope: Option<String>,
-    /// Only the docs at or under this path.
+    /// Only the blocks at or under this path. A block in a doc takes the doc's path; a block in a folder takes the folder's.
     path: Option<String>,
     /// The budget for the report; issues that do not fit are left out from the end.
     #[arg(long = "max-tokens")]

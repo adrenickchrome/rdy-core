@@ -11,7 +11,7 @@ use serde_json::Value;
 #[serde(deny_unknown_fields)]
 pub struct DecideParams {
     pub view: Option<String>,
-    /// The doc or section to record the decision in (id, key or path). Omit to record it in the project's decision home (decisions.home).
+    /// The doc, section or folder to record the decision in (id, key or path). Omit parent to record it in the decision home, or at the project root when the project names none.
     pub parent: Option<String>,
     pub statement: String,
     /// The card's plain-words title: what a person is asked to confirm, in 80 characters or fewer. A decision with no title gets a W_CARD_WORDS warning.
@@ -64,7 +64,7 @@ pub struct RevokeParams {
     pub view: Option<String>,
     pub target: String,
     pub reason: String,
-    /// The doc or section to record the revoking decision in (id, key or path). Omit to record it in the project's decision home (decisions.home).
+    /// The doc, section or folder to record the revoking decision in (id, key or path). Omit parent to record it in the decision home, or at the project root when the project names none.
     pub parent: Option<String>,
     /// The briefing token from rdy_brief. Required when the write touches stable content.
     pub brief: Option<String>,
@@ -87,7 +87,8 @@ fn decision_input(p: DecideParams) -> DecisionInput {
     .map(|(k, _)| k.to_string())
     .collect();
     DecisionInput {
-        // a placeholder: the tools overwrite it with the resolved parent (given, or the home)
+        // a placeholder: the tools overwrite it with the resolved parent (given, else the home,
+        // else empty for the project root)
         parent: p.parent.unwrap_or_default(),
         statement: p.statement,
         title: p.title,
@@ -126,7 +127,9 @@ pub fn rdy_decide(st: &mut McpState, p: DecideParams) -> Result<Value, RdyError>
     let mut input = decision_input(p);
     let v = view.clone();
     write_and_report(&*st.engine, &v, max_tokens, move |r| {
-        input.parent = r.decision_parent(&view, parent.as_deref())?;
+        input.parent = r
+            .decision_parent(&view, parent.as_deref())?
+            .unwrap_or_default();
         r.decide(&s, &view, input)
     })
     .map(|v| report_once(st, v))
@@ -143,7 +146,9 @@ pub fn rdy_supersede(st: &mut McpState, p: SupersedeParams) -> Result<Value, Rdy
     let (old, part) = (p.old, p.part);
     let v = view.clone();
     write_and_report(&*st.engine, &v, max_tokens, move |r| {
-        input.parent = r.decision_parent(&view, parent.as_deref())?;
+        input.parent = r
+            .decision_parent(&view, parent.as_deref())?
+            .unwrap_or_default();
         r.supersede(&s, &view, &old, part, input)
     })
     .map(|v| report_once(st, v))
@@ -156,7 +161,9 @@ pub fn rdy_revoke(st: &mut McpState, p: RevokeParams) -> Result<Value, RdyError>
     let (brief, max_tokens, intent, parent) = (p.brief, p.max_tokens, p.intent, p.parent.clone());
     let v = view.clone();
     write_and_report(&*st.engine, &v, max_tokens, move |r| {
-        let pid = r.decision_parent(&view, parent.as_deref())?;
+        let pid = r
+            .decision_parent(&view, parent.as_deref())?
+            .unwrap_or_default();
         r.revoke_with_intent(&s, &view, &p.target, &p.reason, &pid, brief, intent)
     })
     .map(|v| report_once(st, v))

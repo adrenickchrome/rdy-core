@@ -561,17 +561,6 @@ fn pub12_implicit_refuses_an_invalid_tree() {
                 blk("d-NEST1", "doc", Some("d-0VTER"), "nested"),
             ],
         ),
-        (
-            "decision with no home doc",
-            vec![
-                blk("fd-H0ME1", "folder", None, "homeless"),
-                blk("D-N0D0C", "decision", Some("fd-H0ME1"), "decision"),
-            ],
-        ),
-        (
-            "top-level decision",
-            vec![blk("D-T0P01", "decision", None, "top")],
-        ),
     ];
     for (label, extra) in cases {
         let mut blocks = valid.clone();
@@ -595,6 +584,39 @@ fn pub12_implicit_refuses_an_invalid_tree() {
         IMPLICIT,
     )
     .unwrap_err();
+    assert_err(&e, E_BAD_INPUT, INVALID_TREE.0, INVALID_TREE.1);
+}
+
+#[test]
+fn ndh1_the_tree_checks_accept_outside_doc_blocks_and_refuse_content_at_the_root() {
+    let (_dir, r) = project();
+    let st = r.read();
+    let valid = vec![
+        blk("fd-0KAY1", "folder", None, "ok"),
+        blk("d-0KAY2", "doc", Some("fd-0KAY1"), "okdoc"),
+        blk("s-0KAY3", "section", Some("d-0KAY2"), "oksec"),
+        blk("D-0KAY4", "decision", Some("s-0KAY3"), "okdec"),
+    ];
+    // a decision at the root, and a decision and a question in a folder (D-P3YD5); the
+    // question's id is `Q-F01D1`, since Crockford base32 has no `L`
+    let mut outside = valid.clone();
+    outside.extend([
+        blk("D-T0P01", "decision", None, "top"),
+        blk("fd-H0ME1", "folder", None, "home"),
+        blk("D-N0D0C", "decision", Some("fd-H0ME1"), "decision"),
+        blk("Q-F01D1", "question", Some("fd-H0ME1"), "question"),
+    ]);
+    let res = publication::resolve_in_for_tests(&st, &synth(outside.clone()), IMPLICIT).unwrap();
+    assert_eq!(res.entries.len(), outside.len());
+    let no_blob =
+        |_: &Hash| -> Result<Option<rdy_store::kinds::BlobManifest>, RdyError> { Ok(None) };
+    publication::check_snapshot_limits_for_tests(&outside, no_blob).unwrap();
+    // content at the root is still no tree
+    let mut loose = outside.clone();
+    loose.push(blk("p-H0ST3", "prose", None, "loose"));
+    let e = publication::resolve_in_for_tests(&st, &synth(loose.clone()), IMPLICIT).unwrap_err();
+    assert_err(&e, E_BAD_INPUT, INVALID_TREE.0, INVALID_TREE.1);
+    let e = publication::check_snapshot_limits_for_tests(&loose, no_blob).unwrap_err();
     assert_err(&e, E_BAD_INPUT, INVALID_TREE.0, INVALID_TREE.1);
 }
 

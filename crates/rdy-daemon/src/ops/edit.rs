@@ -157,12 +157,13 @@ pub(super) fn new_profile(cx: &OpContext, a: NewProfileArgs) -> Result<Value, Rd
 
 /// One ordinary `create` of `ty` with `fields` under the effective parent through the calling
 /// session's write, as `rdy_write` takes it, briefed as `reaffirm` and `repin` are: in one writer
-/// closure the parent is resolved (`parent`, else the decision home, with its refusals), its
-/// briefing fetched and registered, and the write run with that token, so the write's own
-/// briefing check passes under a stable parent and nothing moves between the three. Every other
-/// rule (the schema and the evidence check, consequences, role, view ownership) is the write
-/// path's own. A parent that names no block is not briefed, so the write gives its own refusal.
-/// No working-copy file is written: both types live only in the store.
+/// closure the parent is resolved (`parent`, else the decision home, with its refusals, else the
+/// project root), its briefing fetched and registered, and the write run with that token, so the
+/// write's own briefing check passes under a stable parent and nothing moves between the three.
+/// Every other rule (the schema and the evidence check, consequences, role, view ownership) is the
+/// write path's own. A parent that names no block is not briefed, so the write gives its own
+/// refusal; a create at the project root has no parent and needs no briefing (D-P3YD5). No
+/// working-copy file is written: both types live only in the store.
 fn create_supporting(
     cx: &OpContext,
     ty: &str,
@@ -180,19 +181,19 @@ fn create_supporting(
     let mut out = write_and_report(cx.engine, &v, None, move |r| {
         let parent = r.decision_parent(&view, parent.as_deref())?;
         let mut op = op;
-        op["parent"] = json!(parent);
-        let ops = rdy_engine::parse_ops(vec![op])?;
-        let scope = Scope::View(view.clone());
-        let token = match r.read().resolve_id(&scope, &parent) {
-            Ok(id) => {
+        let mut token = None;
+        if let Some(parent) = parent {
+            op["parent"] = json!(parent);
+            let scope = Scope::View(view.clone());
+            if let Ok(id) = r.read().resolve_id(&scope, &parent) {
                 let briefing =
                     r.read()
                         .brief_ids(&scope, &std::collections::BTreeSet::from([id]), None)?;
                 briefing.register(&briefs);
-                Some(briefing.base.token.clone())
+                token = Some(briefing.base.token.clone());
             }
-            Err(_) => None,
-        };
+        }
+        let ops = rdy_engine::parse_ops(vec![op])?;
         r.write_briefed(
             &s,
             rdy_engine::WriteRequest {

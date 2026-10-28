@@ -2,6 +2,6 @@
 {% block content %}
 <h1>Open questions</h1>
 {% for g in body.questions.groups %}<h2>{{ g.doc_title }}</h2>
-{% for q in g.questions %}<div class="callout callout-question" id="{{ q.anchor }}"><p><strong>Open question:</strong> {{ q.prompt|safe }}</p><p class="meta"><a href="{{ q.href }}">from {{ g.doc_title }}{% if q.section_title %} › {{ q.section_title }}{% endif %}</a></p></div>
+{% for q in g.questions %}<div class="callout callout-question" id="{{ q.anchor }}"><p><strong>Open question:</strong> {{ q.prompt|safe }}</p>{% if q.href %}<p class="meta"><a href="{{ q.href }}">from {{ g.doc_title }}{% if q.section_title %} › {{ q.section_title }}{% endif %}</a></p>{% endif %}</div>
 {% endfor %}{% endfor %}
 {% endblock %}

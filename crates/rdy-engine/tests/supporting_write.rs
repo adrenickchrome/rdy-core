@@ -1,6 +1,7 @@
 //! rf5 (D-Z8P09): findings and sources are written through the ordinary write path. A create of
-//! either type with no parent goes to the decision home, before the briefing check; evidence
-//! pins what it cites; a finding is never deleted, a source may be.
+//! either type with no parent goes to the decision home, or to the project root when the project
+//! names none, before the briefing check; evidence pins what it cites; a finding is never
+//! deleted, a source may be.
 use rdy_engine::brief::Coverage;
 use rdy_engine::*;
 use rdy_model::*;
@@ -102,18 +103,13 @@ fn same(a: &RdyError, b: &RdyError) {
 #[test]
 fn rf5_home_and_explicit_parent_match_decide() {
     let (_d, mut r, reg, s, _c) = setup();
-    // no home: the decision home's own refusal, word for word, and nothing is written
-    let seq = r.read().seq();
-    let want = r.decision_parent("work", None).unwrap_err();
-    assert_eq!(
-        want.message,
-        "no parent given, and the project names no decision home"
-    );
+    // no home: the creates sit at the project root
+    assert_eq!(r.decision_parent("work", None).unwrap(), None);
     for op in [finding_op(None), source_op(None)] {
-        let e = write(&mut r, json!([op]), None).unwrap_err();
-        same(&e, &want);
+        let w = write(&mut r, json!([op]), None).unwrap();
+        let id = w.created.values().next().unwrap().clone();
+        assert_eq!(block(&r, &id).parent, None);
     }
-    assert_eq!(r.read().seq(), seq);
     // a home that names nothing: its E_CONFIG
     configure(&mut r, "nowhere/at-all");
     let want = r.decision_parent("work", None).unwrap_err();
@@ -126,7 +122,7 @@ fn rf5_home_and_explicit_parent_match_decide() {
     let text = std::fs::read_to_string(&cfg).unwrap();
     std::fs::write(&cfg, text.replace("nowhere/at-all", "register")).unwrap();
     r.reload_pack().unwrap();
-    assert_eq!(r.decision_parent("work", None).unwrap(), reg);
+    assert_eq!(r.decision_parent("work", None).unwrap(), Some(reg.clone()));
     for (op, ty) in [(finding_op(None), "finding"), (source_op(None), "source")] {
         let e = write(&mut r, json!([op.clone()]), None).unwrap_err();
         assert_eq!(e.code, E_BRIEF_REQUIRED, "{e}");
@@ -175,7 +171,10 @@ fn rf5_home_and_explicit_parent_match_decide() {
         assert_eq!(got.parent.map(|p| p.to_string()), Some(reg.clone()));
     }
     // an explicit parent is kept, as rdy_decide keeps it
-    assert_eq!(r.decision_parent("work", Some(&s)).unwrap(), s);
+    assert_eq!(
+        r.decision_parent("work", Some(&s)).unwrap(),
+        Some(s.clone())
+    );
     let w = write(
         &mut r,
         json!([source_op(Some(&s)), finding_op(Some(&s))]),

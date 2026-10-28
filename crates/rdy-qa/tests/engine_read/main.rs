@@ -29,6 +29,7 @@ mod engine_intents;
 mod engine_lexicon;
 mod engine_links;
 mod engine_mention_reviews;
+mod engine_outside_doc;
 mod engine_pending;
 mod engine_pmap;
 mod engine_proposal_scope;

@@ -414,7 +414,8 @@ fn review(cmp: &Compare, dm: &Materialized, bm: &Materialized) -> Review {
             continue;
         }
         let tree_block = tree::is_tree_type(&b.block_type);
-        if !tree_block && doc_id(dm, &b.id).is_some_and(|d| new_docs.contains(d)) {
+        // a block outside a doc is on no page of the review site (D-P3YD5): it carries no mark
+        if !tree_block && doc_id(dm, &b.id).is_none_or(|d| new_docs.contains(d)) {
             continue;
         }
         rv.marks.insert(b.id.clone(), mark);
@@ -428,6 +429,7 @@ fn review(cmp: &Compare, dm: &Materialized, bm: &Materialized) -> Review {
         if let Some(b) = bm.get(&id)
             && visible(b)
             && !tree::is_tree_type(&b.block_type)
+            && doc_id(bm, &id).is_some()
         {
             gone.insert(id);
         }
@@ -436,6 +438,7 @@ fn review(cmp: &Compare, dm: &Materialized, bm: &Materialized) -> Review {
         if let Some(b) = bm.get(&id)
             && visible(b)
             && !tree::is_tree_type(&b.block_type)
+            && doc_id(bm, &id).is_some()
             && doc_id(bm, &id) != doc_id(dm, &id)
         {
             gone.insert(id);
@@ -892,5 +895,44 @@ mod tests {
         let rv = between_states(&state(&[&a, &f]), &state(&[&a_moved, &f]));
         assert_eq!(rv.page_mark(&a.id), Some(Mark::Edited));
         assert_eq!(changed(&rv), vec!["d-AAAAA".to_string()]);
+    }
+
+    /// ndh5 (D-P3YD5), rule 4: a block that sits outside a doc in the base is on no page there,
+    /// so deleting it or moving it (to the top level, into a folder, into a doc) leaves no
+    /// removed line and no count. A write cannot delete a question, so this reads two supplied
+    /// states.
+    #[test]
+    fn ndh5_a_deleted_or_moved_block_outside_a_doc_is_not_gone() {
+        let f = blk("f-AAAAA", tree::FOLDER, None, "a", "");
+        let d = blk("d-AAAAA", tree::DOC, Some("f-AAAAA"), "a", "");
+        let p = blk("p-AAAAA", "prose", Some("d-AAAAA"), "a", "Stays.");
+        let p_edited = blk("p-AAAAA", "prose", Some("d-AAAAA"), "a", "Stays, edited.");
+        let qr = blk("q-AAAAA", "question", None, "b", "Root question?");
+        let qf = blk(
+            "q-BBBBB",
+            "question",
+            Some("f-AAAAA"),
+            "b",
+            "Folder question?",
+        );
+        let qm = blk("q-CCCCC", "question", None, "c", "Moved in?");
+        let from = state(&[&f, &d, &p, &qr, &qf, &qm]);
+        // the root question is gone, the folder question moves to the top level, and the third
+        // moves into a folder
+        let qf_top = blk("q-BBBBB", "question", None, "b", "Folder question?");
+        let qm_in = blk("q-CCCCC", "question", Some("f-AAAAA"), "c", "Moved in?");
+        let guard = between_states(&from, &state(&[&f, &d, &p_edited, &qr, &qf, &qm]));
+        let rv = between_states(&from, &state(&[&f, &d, &p_edited, &qf_top, &qm_in]));
+        assert_eq!(changed(&rv), vec!["p-AAAAA".to_string()]);
+        assert_eq!(changed(&rv), changed(&guard));
+        assert_eq!(rv.changed_blocks(), 1);
+        assert!(rv.removed_in(&d.id).is_empty());
+        for b in [&qr, &qf, &qm] {
+            assert_eq!(rv.mark(&b.id), None, "{}", b.id);
+        }
+        assert_eq!(
+            rv.doc(&d.id).map(|c| (c.edited, c.new, c.removed)),
+            Some((1, 0, 0))
+        );
     }
 }

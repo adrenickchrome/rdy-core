@@ -12592,6 +12592,7 @@
       "CONFLICT_FIX": "\"write the block from the version you want (rdy_context lists the sides), or exclude one side's change\"",
       "CREDENTIALS_FIX": "\"remove the invalid credential file, then sign in again\"",
       "CREDENTIALS_MESSAGE": "\"the credential file is not a valid bounded mapping\"",
+      "DECISIONS_HOME_FIX": "\"set decisions.home in .rdy.yaml to the path, key or id of a doc or a folder that exists\"",
       "EDIT_CUT_FIX": "\"rdy checked only the first 16384 bytes. Check the rest of the block and update it if needed.\"",
       "EVIDENCE_FIX": "\"write evidence as a list of {quote, session_ref?, question?} or {source: \\\"{{S-…}}\\\"} entries\"",
       "EVIDENCE_MESSAGE": "\"field \\\"evidence\\\" must be a list of 1 to 20 evidence entries\"",
@@ -15648,7 +15649,7 @@
               ]
             },
             "path": {
-              "description": "Only the docs at or under this path (a doc, a folder or a block's path).",
+              "description": "Only the blocks at or under this path (a doc, a folder or a block's path). A block in a doc takes the doc's path; a block in a folder takes the folder's.",
               "type": [
                 "string",
                 "null"
@@ -15778,7 +15779,7 @@
               ]
             },
             "parent": {
-              "description": "The doc or section to record the decision in (id, key or path). Omit to record it in the project's decision home (decisions.home).",
+              "description": "The doc, section or folder to record the decision in (id, key or path). Omit parent to record it in the decision home, or at the project root when the project names none.",
               "type": [
                 "string",
                 "null"
@@ -17191,7 +17192,7 @@
               ]
             },
             "parent": {
-              "description": "The doc or section to record the revoking decision in (id, key or path). Omit to record it in the project's decision home (decisions.home).",
+              "description": "The doc, section or folder to record the revoking decision in (id, key or path). Omit parent to record it in the decision home, or at the project root when the project names none.",
               "type": [
                 "string",
                 "null"
@@ -17649,7 +17650,7 @@
                   ]
                 },
                 "parent": {
-                  "description": "The doc or section to record the decision in (id, key or path). Omit to record it in the project's decision home (decisions.home).",
+                  "description": "The doc, section or folder to record the decision in (id, key or path). Omit parent to record it in the decision home, or at the project root when the project names none.",
                   "type": [
                     "string",
                     "null"
@@ -18289,7 +18290,7 @@
               ]
             },
             "ops": {
-              "description": "Ops, each a JSON object (rdy_schema lists them under \"ops\"):\n{\"op\":\"create\",\"type\":<type>,\"id\":\"$name\"?,\"parent\":<id or path>?,\"after\":<sibling>?,\"before\":<sibling>?,\"fields\":{..}?,\"body\":\"..\"?,\"links\":{..}?}\n{\"op\":\"update\",\"id\":<id or path>,\"base\":<version>?,\"fields\":{..}?,\"unset\":[<field>]?,\"body\":\"..\"?,\"links\":{..}?,\"type\":<new type>?,\"move_to\":{\"parent\":<id or path>?,\"after\":<sibling>?,\"before\":<sibling>?}?} type changes a content block's type in place (same id); move_to moves it in the same op.\n{\"op\":\"move\",\"id\":<id or path>,\"base\":<version>?,\"parent\":<id or path>?,\"after\":<sibling>?,\"before\":<sibling>?}\n{\"op\":\"delete\",\"id\":<id or path>,\"base\":<version>?}\n{\"op\":\"rebalance\",\"parent\":<id or path>?}\n{\"op\":\"repin\",\"id\":<id or path>,\"base\":<version>?,\"targets\":[<id or path>]?,\"code\":<true>?} code: true also records the code state the block's reflects globs match now, and clears its code suspect; the block must declare reflects.\n{\"op\":\"reaffirm\",\"id\":<decision id>?,\"because\":<id or path>?,\"base\":<version>?,\"targets\":[<id or path>]?,\"reason\":<1 to 2000 characters>} Give id or because, not both: id re-affirms one suspect accepted decision, and because re-affirms every decision in the view that is suspect on that block. reason is required. targets limits the op to the suspects on those blocks (default: every current suspect). base goes with id only: it is the version of the decision you read, and the op is refused if the decision has moved. The decision keeps its ruling, body and links.\nlinks: {\"<kind>\": <target> | [<target>, …] | [{\"target\": \"<id, key or path>\", \"part\": \"<optional words>\"}]}, e.g. {\"decided_by\": [{\"target\": \"D-W2HXR\"}]}. An update replaces only the link kinds it names; \"<kind>\": [] removes that kind.\nafter puts a block behind a sibling and before ahead of one (before the first child makes it first); give one, or neither to append.\nrepin re-pins a block's references and links (all, or the targets named) to their current versions, after you've checked them: it clears \"changed\" suspects.\nIds, parents, afters, befores and link targets also take paths (wallets/transactions); a move without parent goes to the top level (docs and folders); rebalance re-keys a parent's children (frozen decisions stay put; in one write it must come before any other op on those children, and a child it re-keys can't be edited again in the same write).",
+              "description": "Ops, each a JSON object (rdy_schema lists them under \"ops\"):\n{\"op\":\"create\",\"type\":<type>,\"id\":\"$name\"?,\"parent\":<id or path>?,\"after\":<sibling>?,\"before\":<sibling>?,\"fields\":{..}?,\"body\":\"..\"?,\"links\":{..}?}\n{\"op\":\"update\",\"id\":<id or path>,\"base\":<version>?,\"fields\":{..}?,\"unset\":[<field>]?,\"body\":\"..\"?,\"links\":{..}?,\"type\":<new type>?,\"move_to\":{\"parent\":<id or path>?,\"after\":<sibling>?,\"before\":<sibling>?}?} type changes a content block's type in place (same id); move_to moves it in the same op.\n{\"op\":\"move\",\"id\":<id or path>,\"base\":<version>?,\"parent\":<id or path>?,\"after\":<sibling>?,\"before\":<sibling>?}\n{\"op\":\"delete\",\"id\":<id or path>,\"base\":<version>?}\n{\"op\":\"rebalance\",\"parent\":<id or path>?}\n{\"op\":\"repin\",\"id\":<id or path>,\"base\":<version>?,\"targets\":[<id or path>]?,\"code\":<true>?} code: true also records the code state the block's reflects globs match now, and clears its code suspect; the block must declare reflects.\n{\"op\":\"reaffirm\",\"id\":<decision id>?,\"because\":<id or path>?,\"base\":<version>?,\"targets\":[<id or path>]?,\"reason\":<1 to 2000 characters>} Give id or because, not both: id re-affirms one suspect accepted decision, and because re-affirms every decision in the view that is suspect on that block. reason is required. targets limits the op to the suspects on those blocks (default: every current suspect). base goes with id only: it is the version of the decision you read, and the op is refused if the decision has moved. The decision keeps its ruling, body and links.\nlinks: {\"<kind>\": <target> | [<target>, …] | [{\"target\": \"<id, key or path>\", \"part\": \"<optional words>\"}]}, e.g. {\"decided_by\": [{\"target\": \"D-W2HXR\"}]}. An update replaces only the link kinds it names; \"<kind>\": [] removes that kind.\nafter puts a block behind a sibling and before ahead of one (before the first child makes it first); give one, or neither to append.\nrepin re-pins a block's references and links (all, or the targets named) to their current versions, after you've checked them: it clears \"changed\" suspects.\nIds, parents, afters, befores and link targets also take paths (wallets/transactions); a move without parent goes to the top level (docs, folders, decisions, questions, findings and sources); rebalance re-keys a parent's children (frozen decisions stay put; in one write it must come before any other op on those children, and a child it re-keys can't be edited again in the same write).",
               "items": true,
               "type": "array"
             },
@@ -18750,7 +18751,11 @@
           "body": "forbidden",
           "children": [
             "folder",
-            "doc"
+            "doc",
+            "decision",
+            "question",
+            "finding",
+            "source"
           ],
           "class": null,
           "fields": {

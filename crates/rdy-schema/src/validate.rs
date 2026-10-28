@@ -345,6 +345,9 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
         }
     }
     let top_ok = tree::is_tree_type(&block.block_type);
+    // D-P3YD5, D-X3136: a decision, a question, a finding or a source may sit at the top level
+    // or directly in a folder; its other parents follow the pack
+    let outside_ok = tree::may_sit_outside_a_doc(&block.block_type);
     // a publication profile sits directly under a doc, whatever a pack lists
     let profile = block.block_type == publication::PROFILE_TYPE;
     match (parent, &block.parent) {
@@ -352,6 +355,8 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
             // docs and folders have paths: they sit only in folders, whatever a pack lists
             let allowed = if top_ok {
                 p.block_type == tree::FOLDER
+            } else if outside_ok && p.block_type == tree::FOLDER {
+                true
             } else if profile {
                 p.block_type == tree::DOC
             } else {
@@ -384,7 +389,7 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
                 block.id
             ),
         )),
-        (_, None) if top_ok => {}
+        (_, None) if top_ok || outside_ok => {}
         (_, None) => out.push(err(
             block,
             "E_ORPHAN",

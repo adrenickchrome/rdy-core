@@ -8,7 +8,7 @@ use rmcp::{model::CallToolResult, tool, tool_router};
 #[tool_router(router = decide_router, vis = "pub(crate)")]
 impl RdyServer {
     #[tool(
-        description = "Propose a decision (status proposed; accepted when its proposal lands). Omit parent to record it in the project's decision home. Cite brief: <token> from rdy_brief for stable content; the response lists the write's consequences."
+        description = "Propose a decision (status proposed; accepted when its proposal lands). Omit parent to record it in the decision home, or at the project root when the project names none. Cite brief: <token> from rdy_brief for stable content; the response lists the write's consequences."
     )]
     async fn rdy_decide(&self, Parameters(p): Parameters<DecideParams>) -> CallToolResult {
         self.run("rdy_decide", p, tools::rdy_decide).await
@@ -22,7 +22,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Propose revoking an existing decision. Omit parent to record it in the project's decision home. Cite brief: <token> from rdy_brief for stable content; the response lists the write's consequences."
+        description = "Propose revoking an existing decision. Omit parent to record it in the decision home, or at the project root when the project names none. Cite brief: <token> from rdy_brief for stable content; the response lists the write's consequences."
     )]
     async fn rdy_revoke(&self, Parameters(p): Parameters<RevokeParams>) -> CallToolResult {
         self.run("rdy_revoke", p, tools::rdy_revoke).await

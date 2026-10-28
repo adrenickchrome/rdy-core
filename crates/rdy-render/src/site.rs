@@ -109,6 +109,16 @@ pub struct GlossaryGroup {
     pub terms: Vec<BlockId>,
 }
 
+/// One group of the open-questions page for the questions that sit outside a doc (D-P3YD5): the
+/// questions of one folder, or of the project root, under the folder's label or the project's
+/// name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutsideQuestions {
+    /// The folder's label, or the project's name.
+    pub label: String,
+    pub questions: Vec<BlockId>,
+}
+
 /// The page the generated glossary owns: a top-level doc of this name has no place on the site.
 pub const GLOSSARY_NAME: &str = "glossary";
 
@@ -208,6 +218,9 @@ pub struct Site<'a> {
     pub open_questions: Vec<BlockId>,
     /// Those questions' anchors on `questions.html`.
     pub question_anchors: BTreeMap<BlockId, String>,
+    /// The open questions that sit outside a doc, by folder in tree order, then the project root;
+    /// they follow the doc questions in `open_questions`.
+    pub outside_questions: Vec<OutsideQuestions>,
     /// The entries of `disagreements.html`, in reading order of their docs; none when the render
     /// has no such page (FW-SW2). Filled by [`Site::set_disagreements`].
     pub disagreements: Vec<DisagreementGroup>,
@@ -409,6 +422,7 @@ impl<'a> Site<'a> {
             governs: BTreeMap::new(),
             open_questions: vec![],
             question_anchors: BTreeMap::new(),
+            outside_questions: vec![],
             disagreements: vec![],
             terms: vec![],
             term_anchors: BTreeMap::new(),
@@ -568,6 +582,7 @@ impl<'a> Site<'a> {
             .collect();
         let (mut open, mut question_anchors) = (vec![], BTreeMap::new());
         let mut taken = reserved_ids();
+        let mut outside_questions = vec![];
         // each term, with the top-level folder its doc sits under (none for a top-level doc)
         let mut terms: Vec<(&Block, Option<BlockId>)> = vec![];
         for doc in &self.order {
@@ -584,6 +599,34 @@ impl<'a> Site<'a> {
                 if b.block_type == "term" {
                     terms.push((*b, top.clone()));
                 }
+            }
+        }
+        // the open questions outside a doc (D-P3YD5): each folder's, in tree order, then the
+        // project root's. A group walks its folder's (or the root's) children depth-first,
+        // skipping docs and folders, so a doc's questions are never listed twice.
+        let folders = self
+            .tree
+            .iter()
+            .filter_map(|id| self.m.get(id))
+            .filter(|b| b.block_type == tree::FOLDER)
+            .map(|b| (Some(&b.id), self.label(b)))
+            .chain([(None, self.project.clone())]);
+        for (key, label) in folders {
+            let mut questions = vec![];
+            let mut stack: Vec<&Block> = self.m.children(key).into_iter().rev().collect();
+            while let Some(b) = stack.pop() {
+                if tree::is_tree_type(&b.block_type) {
+                    continue;
+                }
+                if b.block_type == decision::QUESTION && !answered.contains(&b.id) {
+                    open.push(b.id.clone());
+                    question_anchors.insert(b.id.clone(), unique(self.anchor_text(b), &mut taken));
+                    questions.push(b.id.clone());
+                }
+                stack.extend(self.m.children(Some(&b.id)).into_iter().rev());
+            }
+            if !questions.is_empty() {
+                outside_questions.push(OutsideQuestions { label, questions });
             }
         }
         // a top-level doc that gave way to the generated glossary has no page, but its terms are
@@ -635,6 +678,7 @@ impl<'a> Site<'a> {
         if !self.page_taken("questions.html") {
             self.open_questions = open;
             self.question_anchors = question_anchors;
+            self.outside_questions = outside_questions;
         }
         self.terms = groups.iter().flat_map(|g| g.terms.clone()).collect();
         self.term_anchors = term_anchors;

@@ -2794,22 +2794,24 @@ fn build_ops(
     ))
 }
 
-/// D-Z8P09: gives each create of a finding or a source in `ops` that names no parent the
-/// decision home of `view` (`Rdy::decision_parent`), with its refusals; an explicit parent is
-/// kept. The home is looked up once, and only when such a create exists.
+/// A create of a decision, a finding or a source with no parent goes to the decision home, or to the project root when the project names none (D-X3136).
+/// A parent that is empty or only spaces counts as none, as in `decision_parent`.
 fn home_supporting_parents(r: &Rdy, view: &str, ops: &mut [OpInput]) -> Result<(), RdyError> {
-    let mut home: Option<String> = None;
+    let mut home: Option<Option<String>> = None;
     for op in ops {
         if let OpInput::Create {
             block_type, parent, ..
         } = op
-            && parent.is_none()
-            && (block_type == supporting::FINDING || block_type == supporting::SOURCE)
+            && parent.as_deref().is_none_or(|p| p.trim().is_empty())
+            && (block_type == decision::DECISION
+                || block_type == supporting::FINDING
+                || block_type == supporting::SOURCE)
         {
+            // looked up once, with its refusals, and only when such a create exists
             if home.is_none() {
                 home = Some(r.decision_parent(view, None)?);
             }
-            *parent = home.clone();
+            *parent = home.clone().flatten();
         }
     }
     Ok(())
@@ -3422,8 +3424,9 @@ impl Rdy {
         let included = st.included(&req.view);
         let m = st.materialized(&scope)?;
         check_implements(&st, &scope, &m, req.justification.as_ref())?;
-        // D-Z8P09: a finding or a source created with no parent goes to the decision home, as a
-        // decision does; done before the briefing check, so the home is one of its subjects
+        // D-Z8P09, D-X3136: a decision, a finding or a source created with no parent goes to the
+        // decision home, or the project root; done before the briefing check, so the home is one
+        // of its subjects
         home_supporting_parents(self, &req.view, &mut req.ops)?;
         // D-EJBPD: what each reaffirm op selects, once, on the starting view, before the
         // briefing check (which must cover exactly those decisions) and before any op applies

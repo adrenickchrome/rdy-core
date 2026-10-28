@@ -1363,18 +1363,13 @@ impl ReadState {
         neighbourhood.extend(named.filter_map(|b| BlockId::parse(b).ok()));
         self.fill_entries(scope, &mut cov, &neighbourhood)?;
 
-        // the doc path of every block with an issue, for the closed order; one path per doc
-        let mut doc_paths: BTreeMap<&BlockId, Option<String>> = BTreeMap::new();
-        let mut paths: BTreeMap<String, String> = BTreeMap::new();
-        for id in &neighbourhood {
-            if let Some(e) = cov.get(id)
-                && !e.issues.is_empty()
-                && let Some(d) = e.doc.as_ref()
-                && let Some(p) = doc_paths.entry(d).or_insert_with(|| m.path_of(d))
-            {
-                paths.insert(id.to_string(), p.clone());
-            }
-        }
+        // the path of every block with an issue, for the closed order
+        let paths = crate::coverage::issue_paths(
+            &m,
+            neighbourhood
+                .iter()
+                .filter_map(|id| Some((id, cov.get(id)?))),
+        );
 
         let covered_docs: BTreeSet<BlockId> = ids
             .iter()

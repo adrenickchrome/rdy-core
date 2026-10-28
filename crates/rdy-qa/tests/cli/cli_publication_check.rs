@@ -136,7 +136,7 @@ fn pub9_cli_and_mcp_return_the_same_check_and_diff() {
     ]));
     assert_eq!(
         t,
-        "Publication profile site: warning.\n5 blocks in 2 docs and 1 folders.\nReferences outside selection: 2.\nProfile revision changed: no.\nDisclosure changes: 1 added docs, 0 removed docs, 0 changed docs, 0 changed folders, 0 attachment changes, 1 new references.\n"
+        "Publication profile site: warning.\n5 blocks in 2 docs and 1 folders.\nReferences outside selection: 2.\nProfile revision changed: no.\nDisclosure changes: 1 added docs, 0 removed docs, 0 changed docs, 0 changed folders, 0 changed blocks outside docs, 0 attachment changes, 1 new references.\n"
     );
     let t = stdout(&s.rdy(&["publication", "check", "--profile", "site"]));
     assert_eq!(t.lines().count(), 3, "{t}");

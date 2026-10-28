@@ -123,7 +123,8 @@ fn check_in(r: &Rdy, st: &ReadState, scope: &Scope) -> Result<(), Vec<Violation>
                 format!("{} folders deep", folders + own),
             ));
         }
-        // placement: docs and folders only at the top or under a folder; others under something
+        // placement: docs and folders only at the top or under a folder; a decision, a question,
+        // a finding or a source also at the top (D-P3YD5); others under something
         if tree::is_tree_type(&b.block_type) {
             if let Some(p) = parent
                 && p.block_type != tree::FOLDER
@@ -134,7 +135,7 @@ fn check_in(r: &Rdy, st: &ReadState, scope: &Scope) -> Result<(), Vec<Violation>
                     format!("a {} under a {}", b.block_type, p.block_type),
                 ));
             }
-        } else if b.parent.is_none() {
+        } else if b.parent.is_none() && !tree::may_sit_outside_a_doc(&b.block_type) {
             out.push(v(
                 "placement",
                 Some(&b.id),

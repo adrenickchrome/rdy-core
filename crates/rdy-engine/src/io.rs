@@ -251,6 +251,32 @@ pub struct ExportSummary {
     pub warnings: Vec<String>,
 }
 
+/// Whether `b` lies outside a doc (D-P3YD5): it is no doc or folder and has no doc; it or a
+/// block on its chain below the first folder may sit outside a doc
+/// ([`tree::may_sit_outside_a_doc`]); and its chain ends at the top or at a folder `m` holds.
+/// A chain that loops or names a missing parent is not outside a doc.
+fn outside_a_doc(m: &Materialized, b: &Block) -> bool {
+    if tree::is_tree_type(&b.block_type) || m.doc_of(&b.id).is_some() {
+        return false;
+    }
+    let mut free = false;
+    let mut cur = b;
+    for _ in 0..=m.len() {
+        if cur.block_type == tree::FOLDER {
+            return free;
+        }
+        free |= tree::may_sit_outside_a_doc(&cur.block_type);
+        let Some(pid) = &cur.parent else {
+            return free;
+        };
+        let Some(p) = m.get(pid) else {
+            return false;
+        };
+        cur = p;
+    }
+    false
+}
+
 /// Writes the folders and docs under `parent` into `dir`: a folder is a directory holding
 /// `_folder.yaml`, a doc is `<name>.yaml`. Neither file records the block's name or parent.
 fn export_level(
@@ -856,8 +882,14 @@ impl ReadState {
             &mut blobs,
             self.pack(),
         )?;
-        if summary.blocks != m.len() {
-            let missing = m.len() - summary.blocks.min(m.len());
+        // A block outside a doc lives only in the store, as in the working copy (D-P3YD5); the export leaves it out.
+        let missing = if summary.blocks >= m.len() {
+            0
+        } else {
+            let outside = m.iter().filter(|b| outside_a_doc(&m, b)).count();
+            m.len().saturating_sub(summary.blocks + outside)
+        };
+        if missing > 0 {
             return Err(RdyError::new(
                 E_IO,
                 format!(
@@ -905,7 +937,13 @@ impl ReadState {
         // block's producing change, then the block id, so an import of rows with equal times
         // writes the authors in the order they wrote.
         if !matches!(scope, Scope::Inflight) {
-            let ids: Vec<BlockId> = m.iter().map(|b| b.id.clone()).collect();
+            // only the blocks the export holds: a block outside a doc gets no row (D-P3YD5),
+            // so an import of this export finds every row's block
+            let ids: Vec<BlockId> = m
+                .iter()
+                .filter(|b| !outside_a_doc(&m, b))
+                .map(|b| b.id.clone())
+                .collect();
             let mut located: Vec<(Location, BlockId, crate::history::HistoryEntry)> = self
                 .last_changes(scope, &ids)?
                 .into_iter()

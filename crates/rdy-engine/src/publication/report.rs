@@ -186,6 +186,17 @@ fn disclosure_json(d: &DisclosureDiff) -> Value {
             })
         }),
     );
+    let changed_outside_docs = put(
+        "changed_outside_docs",
+        listed(&d.changed_outside_docs, |x| {
+            json!({
+                "id": x.id.to_string(),
+                "before_version": hash_or_null(x.before_version),
+                "after_version": hash_or_null(x.after_version),
+                "redacted": x.redacted,
+            })
+        }),
+    );
     let attachment = |x: &super::AttachmentEntry| {
         json!({
             "block": x.block.to_string(),
@@ -235,6 +246,7 @@ fn disclosure_json(d: &DisclosureDiff) -> Value {
         "removed_docs": removed_docs,
         "changed_docs": changed_docs,
         "changed_folders": changed_folders,
+        "changed_outside_docs": changed_outside_docs,
         "added_attachments": added_attachments,
         "removed_attachments": removed_attachments,
         "changed_attachments": changed_attachments,

@@ -52,8 +52,8 @@ pub(crate) enum NewCmd {
     },
     /// A finding: what surfaced, with its evidence. Each --question and --session belongs to
     /// the latest --quote before it; each --source (an id, key or path) is an entry of its own.
-    /// It lives only in the store, in the decision home unless --parent names a place. The chat
-    /// path is rdy_write.
+    /// It lives only in the store. Omit parent to record it in the decision home, or at the
+    /// project root when the project names none. The chat path is rdy_write.
     Finding {
         #[arg(long)]
         statement: String,
@@ -69,7 +69,8 @@ pub(crate) enum NewCmd {
         /// A source the finding cites: its id, key or path; repeat it for more.
         #[arg(long)]
         source: Vec<String>,
-        /// The doc or section to record it in (default: the decision home).
+        /// The doc, section or folder to record it in. Omit parent to record it in the decision
+        /// home, or at the project root when the project names none.
         #[arg(long)]
         parent: Option<String>,
         /// The view to write (default: the session's, `work` for the human).
@@ -79,8 +80,9 @@ pub(crate) enum NewCmd {
         #[arg(skip)]
         at: EvidenceAt,
     },
-    /// A source: a release, commit or spec that a finding cites. It lives only in the store, in
-    /// the decision home unless --parent names a place. The chat path is rdy_write.
+    /// A source: a release, commit or spec that a finding cites. It lives only in the store. Omit
+    /// parent to record it in the decision home, or at the project root when the project names
+    /// none. The chat path is rdy_write.
     Source {
         #[arg(long)]
         title: String,
@@ -92,7 +94,8 @@ pub(crate) enum NewCmd {
         locator: String,
         #[arg(long)]
         version: Option<String>,
-        /// The doc or section to record it in (default: the decision home).
+        /// The doc, section or folder to record it in. Omit parent to record it in the decision
+        /// home, or at the project root when the project names none.
         #[arg(long)]
         parent: Option<String>,
         /// The view to write (default: the session's, `work` for the human).

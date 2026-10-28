@@ -277,29 +277,30 @@ impl ReadState {
             }
         };
         let doc_path = |doc: &BlockId| m.path_of(doc).unwrap_or_default();
-        let kept = |e: &BlockEntry| match (&under, &e.doc) {
-            (None, _) => true,
-            (Some(u), Some(d)) => {
-                let p = doc_path(d);
-                p == *u || p.starts_with(&format!("{u}/"))
+        // D-P3YD5: a block is under `u` by its own path, which is its doc's path, or the folder's
+        // for a block outside a doc; a block with no path is kept only with no filter. A folder
+        // is no content: it stays out of a filtered report, as before.
+        let kept = |id: &BlockId, e: &BlockEntry| match &under {
+            None => true,
+            Some(u) => {
+                let folder =
+                    e.doc.is_none() && m.get(id).is_some_and(|b| b.block_type == tree::FOLDER);
+                !folder
+                    && m.path_of(id)
+                        .is_some_and(|p| p == *u || p.starts_with(&format!("{u}/")))
             }
-            (Some(_), None) => false,
         };
         let entries: Vec<(&BlockId, &BlockEntry)> =
-            issues.blocks.iter().filter(|(_, e)| kept(e)).collect();
+            issues.blocks.iter().filter(|(id, e)| kept(id, e)).collect();
 
         let whole = rollup(&self.pack, entries.iter().map(|(_, e)| *e));
 
         let mut by_doc: BTreeMap<&BlockId, Vec<&BlockEntry>> = BTreeMap::new();
         let mut by_area: BTreeMap<String, Vec<&BlockEntry>> = BTreeMap::new();
-        let mut paths: BTreeMap<String, String> = BTreeMap::new();
         let mut all: Vec<CoverageIssue> = vec![];
         for (id, e) in &entries {
             if let Some(d) = &e.doc {
                 by_doc.entry(d).or_default().push(e);
-                if !e.issues.is_empty() {
-                    paths.insert(id.to_string(), doc_path(d));
-                }
             }
             if let Some(b) = m.get(id) {
                 for a in self.areas_in(&m, b) {
@@ -308,6 +309,7 @@ impl ReadState {
             }
             all.extend(e.issues.iter().cloned());
         }
+        let paths = issue_paths(&m, entries.iter().copied());
         sort_issues(&mut all, &paths);
 
         let mut pages: Vec<PageScore> = by_doc

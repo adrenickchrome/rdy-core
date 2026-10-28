@@ -1245,15 +1245,12 @@ impl Version {
         candidate: Result<&CandidateCoverage, &RdyError>,
     ) -> Result<String, RdyError> {
         let issues = &candidate.map_err(Clone::clone)?.issues;
-        let mut paths = BTreeMap::new();
-        for id in &self.touched {
-            if let Some(e) = issues.blocks.get(id)
-                && !e.issues.is_empty()
-                && let Some(p) = e.doc.as_ref().and_then(|d| self.next.path_of(d))
-            {
-                paths.insert(id.to_string(), p);
-            }
-        }
+        let paths = crate::coverage::issue_paths(
+            &self.next,
+            self.touched
+                .iter()
+                .filter_map(|id| Some((id, issues.blocks.get(id)?))),
+        );
         let c = confidence_in(|b| issues.blocks.get(b), &self.touched, None, &paths);
         let level = name_of(&c.confidence);
         Ok(match c.reasons.first() {

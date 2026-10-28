@@ -1511,18 +1511,6 @@ fn pub4_hostile_selection_is_bounded() {
             &["d-0VTER"],
         );
     }
-    // a decision directly in a selected folder has no home doc
-    invalid(
-        vec![
-            named(blk("fd-H0ME1", "folder", None, "a"), "homeless"),
-            with_field(
-                blk("D-N0D0C", "decision", Some("fd-H0ME1"), "a"),
-                "statement",
-                s("No doc holds this."),
-            ),
-        ],
-        &["fd-H0ME1"],
-    );
 }
 
 #[test]
