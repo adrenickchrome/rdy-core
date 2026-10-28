@@ -440,7 +440,7 @@ fn cp10_invalid_plan_answer_does_not_commit_rekeys() {
     );
     assert_eq!(r.store().included("b").unwrap().len(), in_view);
     assert_eq!(plan_ref(&r, "b"), None);
-    // the same propose with no answer writes the key change, the version and its plan at once
+    // the same propose with no answer writes the key change first, then the version and its plan
     let start = r.store().log_end();
     let pb = propose(&mut r, "b", &[]).unwrap();
     assert_eq!(pb.keys.len(), 1, "{:?}", pb.keys);
@@ -451,8 +451,8 @@ fn cp10_invalid_plan_answer_does_not_commit_rekeys() {
             .iter()
             .filter(|k| **k == kinds::BATCH_COMMIT)
             .count(),
-        1,
-        "the key change is in the version's batch: {kinds_of:?}"
+        2,
+        "the key change has its own batch: {kinds_of:?}"
     );
     for k in [kinds::CHANGE, kinds::PROPOSAL, kinds::PLAN] {
         assert_eq!(
@@ -461,6 +461,16 @@ fn cp10_invalid_plan_answer_does_not_commit_rekeys() {
             "{kinds_of:?}"
         );
     }
+    let at = |k: u8| kinds_of.iter().position(|x| *x == k).unwrap();
+    let first_commit = at(kinds::BATCH_COMMIT);
+    assert!(
+        at(kinds::CHANGE) < first_commit,
+        "the first batch holds the key change: {kinds_of:?}"
+    );
+    assert!(
+        first_commit < at(kinds::PROPOSAL) && first_commit < at(kinds::PLAN),
+        "the second batch holds the version and its plan: {kinds_of:?}"
+    );
     let (_, plan) = bound(&r, &pb.id).unwrap();
     assert_eq!(plan.proposal, Some(h(&pb.id)));
     let stored = r.read().reader().proposal(&h(&pb.id)).unwrap();

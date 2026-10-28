@@ -12,7 +12,10 @@ use crate::views::{
     Action, BaseBlocks, ConflictInfo, conflict_infos, creators, landings_through, missing_parents,
     parse_change,
 };
-use crate::{Delta, Materialized, Rdy, ReadState, Scope, Session, rfc3339_now};
+use crate::{
+    Coverage, Delta, Materialized, OpInput, Rdy, ReadState, Scope, Session, WriteRequest,
+    WriteResult, rfc3339_now,
+};
 use rdy_model::{
     ActorRun, AltChoice, AltSet, AltStatus, Answer, AnswerAct, ApprovalEvidence, Block, BlockId,
     Change, ChangeLinks, EvidenceKind, FieldValue, Hash, LandingRecord, Op, Proposal, decision,
@@ -1851,6 +1854,60 @@ impl Rdy {
         Ok(change)
     }
 
+    /// Writes the key change (message `message`, from `rekey_change`) that gives each block in `re` its
+    /// re-derived key, as `Rdy::assign_keys` writes its keys: it briefs exactly those blocks,
+    /// cites that briefing, and marks the keys `key_auto`. The change commits and publishes in
+    /// its own batch (D-ME2HD, O1, O2).
+    fn write_rekey(
+        &mut self,
+        s: &Session,
+        view: &str,
+        message: String,
+        re: &[(BlockId, String)],
+        alternative: Option<AltChoice>,
+    ) -> Result<WriteResult, RdyError> {
+        let brief = self.read().brief(
+            &Scope::View(view.to_string()),
+            &Coverage {
+                ids: re.iter().map(|(id, _)| id.to_string()).collect(),
+                path: None,
+            },
+            None,
+        )?;
+        brief.register(&self.briefs);
+        let token = brief.base.token.clone();
+        let ops: Vec<OpInput> = re
+            .iter()
+            .map(|(id, k)| OpInput::Update {
+                id: id.to_string(),
+                base: None,
+                fields: BTreeMap::from([("key".to_string(), serde_json::Value::String(k.clone()))]),
+                unset: vec![],
+                body: None,
+                links: None,
+                block_type: None,
+                move_to: None,
+            })
+            .collect();
+        let ours: BTreeSet<BlockId> = re.iter().map(|(id, _)| id.clone()).collect();
+        self.write_marked(
+            s,
+            WriteRequest {
+                view: view.to_string(),
+                ops,
+                justification: None,
+                message,
+            },
+            ChangeLinks {
+                alternative,
+                ..ChangeLinks::default()
+            },
+            Some(&token),
+            &ours,
+            None,
+        )
+    }
+
     /// Proposes view `view`'s included changes (a new version of its open proposal, if any),
     /// with `summary` as `propose_subset` stores it.
     pub fn propose(
@@ -2034,7 +2091,7 @@ impl Rdy {
             ));
         }
         let subset = changes.is_some();
-        let ids: Vec<Hash> = match changes {
+        let mut ids: Vec<Hash> = match changes {
             None => included.as_ref().clone(),
             Some(list) => {
                 let in_view: BTreeSet<&Hash> = included.iter().collect();
@@ -2244,7 +2301,21 @@ impl Rdy {
             plan_answers,
         )?;
         issues.extend(plan.warnings.iter().cloned());
-        let count = ids.len() + usize::from(rekey.is_some());
+        // D-ME2HD (O1, O2): the key change rdy adds is written now, after every check above and
+        // before the version, in its own batch: readiness reads the tension sets of published
+        // changes, so the change is in the view before the version is read, and it records the
+        // briefing of the blocks it re-keys. The version lists it last, and only it besides the
+        // changes proposed.
+        let mut keys = BTreeMap::new();
+        if let Some((change, re)) = rekey.take() {
+            keys = re
+                .iter()
+                .map(|(id, k)| (id.to_string(), k.clone()))
+                .collect();
+            let written = self.write_rekey(s, view, change.message, &re, alternative.clone())?;
+            ids.push(parse_change(&written.change)?);
+        }
+        let count = ids.len();
         let chosen = alternative.as_ref().map(|a| AltRef {
             set: alt_label(&a.set),
             member: a.member.clone(),
@@ -2269,20 +2340,6 @@ impl Rdy {
             Some((_, latest)) => version_number(&st, latest)? + 1,
             None => 1,
         };
-        // the key change: the store gives it its deps again as it prepares its commit, checked
-        // against the view as it reads now
-        let vm = st.materialized(&Scope::View(view.to_string()))?;
-        let current = |id: &BlockId| vm.version_of(id);
-        let (rekey_change, keys) = match rekey {
-            Some((mut change, re)) => {
-                change.deps.clear();
-                let keys: BTreeMap<String, String> =
-                    re.into_iter().map(|(id, k)| (id.to_string(), k)).collect();
-                (Some(change), keys)
-            }
-            None => (None, BTreeMap::new()),
-        };
-        let rekey_ops = rekey_change.as_ref().map(|c| c.ops.clone());
         let to_rdy = |e: rdy_store::StoreError| {
             if answered {
                 crate::version::answer_write_error(e)
@@ -2300,7 +2357,7 @@ impl Rdy {
                 changes: ids,
                 alternative,
                 prev: open.map(|(_, latest)| latest),
-                rekey: rekey_change.map(|c| (c, &current as rdy_store::plan::ViewReads<'_>)),
+                rekey: None,
                 answer,
             })
             .map_err(to_rdy)?;
@@ -2308,19 +2365,9 @@ impl Rdy {
         let stable = prepared.stable();
         self.store
             .bind_plan(&mut prepared, &plan.plan(view, id, by))?;
-        let rekeyed = prepared.rekey();
-        drop(vm);
         let written = self.store.commit_propose(prepared)?;
         let answer = written.answer;
-        // one batch, published once: a key change moves the view, so its publish re-reads it
-        match (rekeyed, rekey_ops) {
-            (Some(change), Some(ops)) => self.publish(Delta::Commit {
-                view: view.to_string(),
-                change,
-                ops,
-            })?,
-            _ => self.publish(Delta::Seq)?,
-        }
+        self.publish(Delta::Seq)?;
         let stored = self.store.proposal(&id)?;
         let canon_at = stored.canon_at;
         // tgat1: the version's tensions, read after a re-key change (if any) was committed. The
