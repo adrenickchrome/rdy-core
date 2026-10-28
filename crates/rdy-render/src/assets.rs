@@ -56,6 +56,9 @@ pub fn files() -> Vec<(&'static str, Vec<u8>)> {
     out
 }
 
+/// The extension of a figure file whose media type has no extension of its own.
+pub(crate) const OTHER_EXTENSION: &str = "bin";
+
 /// The file extension of a figure's blob by its media type.
 pub fn extension(media_type: &str) -> &'static str {
     match media_type {
@@ -66,7 +69,7 @@ pub fn extension(media_type: &str) -> &'static str {
         "image/webp" => "webp",
         "application/pdf" => "pdf",
         "text/plain" => "txt",
-        _ => "bin",
+        _ => OTHER_EXTENSION,
     }
 }
 

@@ -868,8 +868,8 @@ pub fn build_publication(
     )?)
 }
 
-/// `E_BAD_INPUT`: a generated file whose media type rdy does not know (the manifest's own
-/// refusal).
+/// `E_BAD_INPUT`: a manifest entry whose media type core's rule does not give for its path (the
+/// manifest's own refusal).
 fn bad_manifest() -> RdyError {
     RdyError::new(
         E_BAD_INPUT,
@@ -894,11 +894,38 @@ fn generated_media_type(path: &str) -> Result<&'static str, RdyError> {
     })
 }
 
+/// Whether `name` is a hash as a site path names it: 64 lowercase hex digits.
+fn is_hash_name(name: &str) -> bool {
+    name.len() == 64 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// Whether `path` is a drawn diagram's file: `assets/diagrams/<64 lowercase hex>.svg`.
 fn is_diagram_file(path: &str) -> bool {
     path.strip_prefix("assets/diagrams/")
         .and_then(|name| name.strip_suffix(".svg"))
-        .is_some_and(|h| h.len() == 64 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+        .is_some_and(is_hash_name)
+}
+
+/// Checks the media type of one publication manifest entry with core's own rule, the rule a
+/// publication build writes it by (hub D-X0F6P). A generated file takes the type of its
+/// extension, and an SVG only at a drawn diagram's path. An author's figure file at
+/// `assets/<64 lowercase hex>.<ext>` keeps the type its source named, so `<ext>` is that type's
+/// extension, or `bin` for any type. It reads no file bytes. Any other entry gets the manifest's
+/// own refusal.
+pub fn check_publication_media_type(entry: &ManifestEntry) -> Result<(), RdyError> {
+    let stated = entry.media_type.as_str();
+    if generated_media_type(&entry.path).is_ok_and(|t| t == stated) {
+        return Ok(());
+    }
+    let author = entry
+        .path
+        .strip_prefix("assets/")
+        .and_then(|name| name.rsplit_once('.'))
+        .is_some_and(|(hash, ext)| {
+            is_hash_name(hash)
+                && (ext == assets::OTHER_EXTENSION || ext == assets::extension(stated))
+        });
+    if author { Ok(()) } else { Err(bad_manifest()) }
 }
 
 /// A media type without its parameters (`image/svg+xml; charset=utf-8` reads `image/svg+xml`).
@@ -2483,6 +2510,117 @@ mod label_tests {
             "image/svg+xml"
         );
         assert_eq!(without_parameters("image/png"), "image/png");
+    }
+
+    const RVM3_H: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn rvm3_entry(path: &str, media_type: &str) -> ManifestEntry {
+        ManifestEntry {
+            path: path.to_string(),
+            hash: Hash::of(b""),
+            media_type: media_type.to_string(),
+            size: 0,
+            notice_offset: None,
+        }
+    }
+
+    #[test]
+    fn rvm3_a_generated_entry_passes_only_with_the_type_of_its_path() {
+        let diagram = format!("assets/diagrams/{RVM3_H}.svg");
+        for (path, want) in [
+            ("index.html", "text/html"),
+            ("llms.txt", "text/plain"),
+            ("search-index.json", "application/json"),
+            ("assets/site.css", "text/css"),
+            ("assets/app.js", "application/javascript"),
+            ("assets/fonts/onest.woff2", "font/woff2"),
+            (diagram.as_str(), "image/svg+xml"),
+        ] {
+            check_publication_media_type(&rvm3_entry(path, want)).unwrap();
+            let other = if path == "index.html" {
+                "text/plain"
+            } else {
+                "text/html"
+            };
+            assert!(
+                check_publication_media_type(&rvm3_entry(path, other)).is_err(),
+                "{path} {other}"
+            );
+        }
+        for path in ["x.svg", "assets/x.svg", "assets/diagrams/a/b.svg"] {
+            assert!(
+                check_publication_media_type(&rvm3_entry(path, "image/svg+xml")).is_err(),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn rvm3_an_author_entry_passes_with_the_type_its_extension_names() {
+        for (ext, media) in [
+            ("png", "image/png"),
+            ("jpg", "image/jpeg"),
+            ("gif", "image/gif"),
+            ("svg", "image/svg+xml"),
+            ("webp", "image/webp"),
+            ("pdf", "application/pdf"),
+            ("txt", "text/plain"),
+            ("bin", "application/x-unknown"),
+            ("bin", "image/png"),
+        ] {
+            let path = format!("assets/{RVM3_H}.{ext}");
+            check_publication_media_type(&rvm3_entry(&path, media))
+                .unwrap_or_else(|e| panic!("{path} {media}: {}", e.message));
+        }
+        let upper = RVM3_H.to_uppercase();
+        let short = &RVM3_H[..63];
+        for (path, media) in [
+            (format!("assets/{RVM3_H}.png"), "image/jpeg"),
+            (format!("assets/{RVM3_H}.png"), "text/plain"),
+            (format!("assets/{RVM3_H}.svg"), "text/html"),
+            (format!("assets/{RVM3_H}.jpeg"), "image/jpeg"),
+            (format!("assets/{RVM3_H}.PNG"), "image/png"),
+            (format!("assets/{upper}.png"), "image/png"),
+            (format!("assets/{short}.png"), "image/png"),
+            (format!("assets/sub/{RVM3_H}.png"), "image/png"),
+            (format!("img/{RVM3_H}.png"), "image/png"),
+            (format!("assets/{RVM3_H}"), "image/png"),
+        ] {
+            assert!(
+                check_publication_media_type(&rvm3_entry(&path, media)).is_err(),
+                "{path} {media}"
+            );
+        }
+    }
+
+    #[test]
+    fn rvm3_a_refused_entry_gets_the_manifest_refusal() {
+        let got =
+            check_publication_media_type(&rvm3_entry(&format!("assets/{RVM3_H}.png"), "text/html"))
+                .unwrap_err();
+        assert_eq!(got.code, E_BAD_INPUT);
+        assert_eq!(got.message, "publication manifest is invalid");
+        assert_eq!(got.fix, "use unique relative paths and valid file metadata");
+        assert!(got.issues.is_empty());
+        let want = generated_media_type("README").unwrap_err();
+        assert_eq!(
+            (
+                got.code,
+                &got.message,
+                &got.fix,
+                &got.issues,
+                &got.corrected,
+                &got.briefing
+            ),
+            (
+                want.code,
+                &want.message,
+                &want.fix,
+                &want.issues,
+                &want.corrected,
+                &want.briefing
+            )
+        );
     }
 
     #[test]

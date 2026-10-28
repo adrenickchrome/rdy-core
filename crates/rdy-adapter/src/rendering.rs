@@ -8,6 +8,9 @@
 //! ([`Snapshot::write_render_request`]), or renders one page of a captured tag in the call
 //! ([`Snapshot::render_page`]). A project caller obtains explicit [`RenderInputs`] through
 //! `rdy_render::render_input::capture_inputs`; the holder adds no default.
+//! [`check_publication_media_type`] is core's rule for the media type of a manifest entry; a
+//! host checks each entry of an uploaded manifest with it and keeps no table of its own (hub
+//! D-X0F6P).
 
 use crate::store::Snapshot;
 use rdy_engine::publication::ReadPublicationSource;
@@ -21,6 +24,7 @@ pub use rdy_engine::publication_manifest::{Manifest, ManifestEntry, manifest_has
 pub use rdy_engine::render_inputs::RenderInputs;
 pub use rdy_render::PublicationArtifact;
 pub use rdy_render::RenderedPage;
+pub use rdy_render::check_publication_media_type;
 pub use rdy_render::process::read_artifact as read_render_artifact;
 pub use rdy_render::process::run as run_render_process;
 pub use rdy_render::process::{ProcessSummary, RenderFormat};
