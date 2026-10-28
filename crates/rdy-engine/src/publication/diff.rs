@@ -46,6 +46,18 @@ pub struct ChangedFolder {
     pub redacted: bool,
 }
 
+/// A retained block that is no doc or folder and sits in no selected doc (D-P3YD5: a decision at
+/// the project root or in a folder, or a block under one), whose version differs between the
+/// sides or that only one side retains. A side that does not retain it has None. `redacted` is
+/// true when a side that retains it holds a removed version of it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangedOutsideDoc {
+    pub id: BlockId,
+    pub before_version: Option<Hash>,
+    pub after_version: Option<Hash>,
+    pub redacted: bool,
+}
+
 /// An attachment both sides hold whose blob, home doc or availability differs. Only ids, hashes
 /// and booleans: never bytes, captions or source paths.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,9 +71,10 @@ pub struct ChangedAttachment {
     pub after_available: bool,
 }
 
-/// The comparison of two resolutions of one profile. Doc, folder and attachment arrays are
-/// sorted by id; `new_references` by (source, location, target, classification), each row
-/// carrying the positive occurrence delta, and `new_reference_count` is the sum of those deltas.
+/// The comparison of two resolutions of one profile. Doc, folder, outside-doc and attachment
+/// arrays are sorted by id; `new_references` by (source, location, target, classification),
+/// each row carrying the positive occurrence delta, and `new_reference_count` is the sum of
+/// those deltas.
 /// `redactions` is the sorted union of the removal requests both resolutions apply. It holds no
 /// timestamp, actor, artifact, record id or authorization status.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,6 +93,7 @@ pub struct DisclosureDiff {
     pub removed_docs: Vec<DocEntry>,
     pub changed_docs: Vec<ChangedDoc>,
     pub changed_folders: Vec<ChangedFolder>,
+    pub changed_outside_docs: Vec<ChangedOutsideDoc>,
     pub added_attachments: Vec<AttachmentEntry>,
     pub removed_attachments: Vec<AttachmentEntry>,
     pub changed_attachments: Vec<ChangedAttachment>,
@@ -159,6 +173,19 @@ fn folders<'r>(
         out.insert(&e.id, (e, path.clone(), *redacted));
     }
     Ok(out)
+}
+
+/// One side's retained blocks outside a doc: each entry whose block is no doc or folder and has
+/// no doc in the selected state (D-P3YD5), with whether that side holds a removed version of it.
+fn outside_docs(r: &Resolved) -> BTreeMap<&BlockId, (Hash, bool)> {
+    r.entries
+        .iter()
+        .filter_map(|e| {
+            let b = r.m.get(&e.id)?;
+            (!tree::is_tree_type(&b.block_type) && r.m.doc_of(&e.id).is_none())
+                .then(|| (&e.id, (e.version, b.is_redacted())))
+        })
+        .collect()
 }
 
 type RefKey<'a> = (&'a BlockId, &'a str, &'a str, Classification);
@@ -250,6 +277,30 @@ pub fn disclosure_diff(before: &Resolved, after: &Resolved) -> Result<Disclosure
         })
         .collect();
 
+    // blocks outside a doc, by id: own version
+    let b_outside = outside_docs(before);
+    let a_outside = outside_docs(after);
+    let outside_ids: BTreeSet<&BlockId> =
+        b_outside.keys().chain(a_outside.keys()).copied().collect();
+    let changed_outside_docs = outside_ids
+        .into_iter()
+        .filter_map(|id| {
+            let b = b_outside.get(id);
+            let a = a_outside.get(id);
+            if let (Some((bv, _)), Some((av, _))) = (b, a)
+                && bv == av
+            {
+                return None;
+            }
+            Some(ChangedOutsideDoc {
+                id: id.clone(),
+                before_version: b.map(|(v, _)| *v),
+                after_version: a.map(|(v, _)| *v),
+                redacted: b.is_some_and(|(_, r)| *r) || a.is_some_and(|(_, r)| *r),
+            })
+        })
+        .collect();
+
     // attachments, by block id
     let b_atts: BTreeMap<&BlockId, &AttachmentEntry> =
         before.attachments.iter().map(|a| (&a.block, a)).collect();
@@ -328,6 +379,7 @@ pub fn disclosure_diff(before: &Resolved, after: &Resolved) -> Result<Disclosure
         removed_docs,
         changed_docs,
         changed_folders,
+        changed_outside_docs,
         added_attachments,
         removed_attachments,
         changed_attachments,

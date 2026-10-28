@@ -209,7 +209,7 @@ fn pub9_reports_cap_rows_but_keep_full_counts() {
             assert_eq!(d[name].as_array().unwrap().len(), shown, "{n} {name}");
             assert_eq!(d["omitted"][name], left, "{n} {name}");
         }
-        assert_eq!(keys(&d["omitted"]).len(), 9, "{n}");
+        assert_eq!(keys(&d["omitted"]).len(), 10, "{n}");
         // no removal applies: an empty request list, none left out
         assert_eq!(d["redactions"], json!([]), "{n}");
         assert_eq!(d["omitted"]["redactions"], 0, "{n}");

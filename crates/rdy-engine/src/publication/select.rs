@@ -7,7 +7,7 @@ use super::source::{PublicationSource, ReadPublicationSource};
 use crate::error::*;
 use crate::materialize::Materialized;
 use crate::{ReadState, Scope};
-use rdy_graph::Graph;
+use rdy_graph::{GoverningCache, GoverningStatuses, Graph};
 use rdy_model::{Block, BlockId, Hash, StateSnapshot, tree};
 use rdy_schema::publication::{self as schema, Audience};
 use rdy_schema::{Issue, Pack, Severity};
@@ -596,12 +596,15 @@ fn retain(keep: &mut BTreeSet<BlockId>, id: &BlockId, l: &Limits) -> Result<bool
     Ok(true)
 }
 
-/// Steps 2 and 3: each selector's whole subtree, then each selector's ancestor folders, with
-/// the tree checked on the way up and then by [`check_tree`], all before any text is scanned.
-/// Iterative: a damaged store may nest deep or loop.
+/// Steps 2 and 3: each selector's whole subtree, then each selector's ancestor folders, then
+/// each decision with no doc that governs a block kept so far, with its whole subtree and
+/// without its folder (D-P3YD5), with the tree checked on the way up and then by
+/// [`check_tree`], all before any text is scanned. Iterative: a damaged store may nest deep or
+/// loop.
 fn select(
     m: &Materialized,
     selectors: &[BlockId],
+    pack: &Pack,
     l: &Limits,
 ) -> Result<BTreeSet<BlockId>, RdyError> {
     let mut keep = BTreeSet::new();
@@ -640,18 +643,68 @@ fn select(
             cur = p;
         }
     }
+    governing_outside_docs(m, pack, &mut keep, l)?;
     check_tree(&|id| m.get(id), &keep)?;
     Ok(keep)
 }
 
+/// D-P3YD5: each decision of `m` with no doc, not yet kept, in id order, that governs a block of
+/// `keep` as it stands on entry, by any route and whatever its status
+/// ([`Graph::governed_through`]), is kept with its whole subtree. Its folder is not.
+fn governing_outside_docs(
+    m: &Materialized,
+    pack: &Pack,
+    keep: &mut BTreeSet<BlockId>,
+    l: &Limits,
+) -> Result<(), RdyError> {
+    let candidates: Vec<&BlockId> = m
+        .iter()
+        .filter(|b| b.block_type == rdy_model::decision::DECISION && m.doc_of(&b.id).is_none())
+        .map(|b| &b.id)
+        .collect();
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let graph = Graph::build_with(m.iter(), Arc::new(pack.tracking()));
+    let mut cache = GoverningCache::default();
+    let selected = keep.clone();
+    let mut governing = vec![];
+    for d in candidates {
+        if selected.contains(d) {
+            continue;
+        }
+        let governed = graph.governed_through(
+            d,
+            GoverningStatuses::All,
+            |e| crate::query::is_entity_in(pack, m, e),
+            &mut cache,
+        );
+        if governed.iter().any(|g| selected.contains(g)) {
+            governing.push(d.clone());
+        }
+    }
+    for d in governing {
+        let mut stack = vec![d];
+        while let Some(id) = stack.pop() {
+            if !retain(keep, &id, l)? {
+                continue;
+            }
+            stack.extend(m.children(Some(&id)).iter().map(|c| c.id.clone()));
+        }
+    }
+    Ok(())
+}
+
 /// The tree check every retained set passes before any text is scanned, for a named profile and
 /// the implicit one alike. Every retained node's chain of parents reaches the top through
-/// retained nodes, with no missing parent and no loop; then every retained node sits where the
-/// tree allows: a doc or folder at the top or in a folder; a decision, a question, a finding or a
-/// source anywhere its chain is rooted, at the top and in a folder too (D-P3YD5,
-/// [`tree::may_sit_outside_a_doc`]); and any other block in a doc or in another such block. With
-/// every chain rooted, the first tree node above other content is its home doc or, for content
-/// under a block outside a doc, its folder or the top. Iterative, and each chain is walked once.
+/// retained nodes, with no missing parent and no loop, except that a decision, a question, a
+/// finding or a source kept without its folder (D-P3YD5) is rooted at that folder; then every
+/// retained node sits where the tree allows: a doc or folder at the top or in a folder; a
+/// decision, a question, a finding or a source anywhere its chain is rooted, at the top and in a
+/// folder too (D-P3YD5, [`tree::may_sit_outside_a_doc`]); and any other block in a doc or in
+/// another such block. With every chain rooted, the first tree node above other content is its
+/// home doc or, for content under a block outside a doc, its folder or the top. Iterative, and
+/// each chain is walked once.
 ///
 /// `get` reads a block of the state; a selection reads its source state, a snapshot check its
 /// own blocks.
@@ -667,8 +720,18 @@ fn check_tree<'m>(
             if !chain.insert(cur) {
                 return Err(invalid_tree());
             }
-            match &get(cur).ok_or_else(invalid_tree)?.parent {
-                Some(p) => cur = keep.get(p).ok_or_else(invalid_tree)?,
+            let b = get(cur).ok_or_else(invalid_tree)?;
+            match &b.parent {
+                Some(p) => match keep.get(p) {
+                    Some(p) => cur = p,
+                    // a block outside a doc kept without its folder (D-P3YD5) is rooted there
+                    None if tree::may_sit_outside_a_doc(&b.block_type)
+                        && get(p).is_some_and(|f| f.block_type == tree::FOLDER) =>
+                    {
+                        break;
+                    }
+                    None => return Err(invalid_tree()),
+                },
                 None => break,
             }
         }
@@ -898,7 +961,7 @@ fn resolve_in(
         Some(mut selectors) => {
             selectors.sort();
             selectors.dedup();
-            select(m, &selectors, l)?
+            select(m, &selectors, pack, l)?
         }
     };
 

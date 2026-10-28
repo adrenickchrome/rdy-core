@@ -88,11 +88,12 @@ fn check_text(v: &Value, asked: &str) -> String {
         .map(|n| full_count(d, n))
         .sum::<u64>();
         lines.push(format!(
-            "Disclosure changes: {} added docs, {} removed docs, {} changed docs, {} changed folders, {attachments} attachment changes, {} new references.",
+            "Disclosure changes: {} added docs, {} removed docs, {} changed docs, {} changed folders, {} changed blocks outside docs, {attachments} attachment changes, {} new references.",
             full_count(d, "added_docs"),
             full_count(d, "removed_docs"),
             full_count(d, "changed_docs"),
             full_count(d, "changed_folders"),
+            full_count(d, "changed_outside_docs"),
             num(&d["new_reference_count"]),
         ));
     }
@@ -164,7 +165,7 @@ mod tests {
         );
         assert_eq!(
             check_text(&report(true, 0), "site"),
-            "Publication profile site: warning.\n7 blocks in 2 docs and 1 folders.\nReferences outside selection: 3.\nProfile revision changed: yes.\nDisclosure changes: 1 added docs, 4 removed docs, 2 changed docs, 0 changed folders, 2 attachment changes, 5 new references.\nSome rows are omitted. Counts include every row."
+            "Publication profile site: warning.\n7 blocks in 2 docs and 1 folders.\nReferences outside selection: 3.\nProfile revision changed: yes.\nDisclosure changes: 1 added docs, 4 removed docs, 2 changed docs, 0 changed folders, 0 changed blocks outside docs, 2 attachment changes, 5 new references.\nSome rows are omitted. Counts include every row."
         );
         assert!(
             check_text(&report(false, 1), "site")
