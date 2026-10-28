@@ -1024,7 +1024,9 @@ impl ReadState {
     /// `supersedes`, `revokes` or `refines` link the version writes or removes is the change, not
     /// a dependency, so it gives no pair; the subject's other edges, and a lineage link it
     /// already held, still do. Then each reached target's governed blocks, judged as the reach
-    /// entries are. Each pair goes to `visit` in visit order as it is judged, and the first
+    /// entries are. A fully superseded decision's `affects` targets (in either state) are
+    /// judged the same way, with the old decision as the cause and `supersedes` as the edge
+    /// (D-B55PS); a revoke has none. Each pair goes to `visit` in visit order as it is judged, and the first
     /// error `visit` returns stops the walk: nothing is cut, and nothing is judged past a
     /// refusal.
     pub(crate) fn plan_pairs(
@@ -1189,6 +1191,72 @@ impl ReadState {
                     reach: true,
                 })?;
             }
+        }
+        // D-B55PS: a full supersede also reaches the old decision's `affects` targets, each as
+        // a reach of the old decision (the cause) judged as a part supersede's. A revoke does
+        // not. A target that is already one of the old decision's dependents is judged by the
+        // walk above, so it gets no second item
+        let mut affected: BTreeSet<(BlockId, BlockId, BlockId)> = BTreeSet::new();
+        for id in touched {
+            let Some(b) = fin.m.get(id).filter(|b| b.block_type == DECISION) else {
+                continue;
+            };
+            for l in b.links.get(SUPERSEDES).into_iter().flatten() {
+                if l.part.is_some() {
+                    continue;
+                }
+                for g in [&base.g, &fin.g] {
+                    for e in g.outgoing(&l.target) {
+                        if matches!(&e.kind, EdgeKind::Link(n) if n == AFFECTS) {
+                            affected.insert((b.id.clone(), l.target.clone(), e.to.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        for (decision, old, block) in affected {
+            if block == decision || block == old {
+                continue;
+            }
+            if matches!(
+                fin.g.status(&block),
+                Some(
+                    DerivedStatus::Rejected
+                        | DerivedStatus::Superseded { .. }
+                        | DerivedStatus::Revoked { .. }
+                )
+            ) {
+                continue;
+            }
+            if base
+                .g
+                .incoming(&old)
+                .iter()
+                .chain(fin.g.incoming(&old))
+                .any(|e| e.from == block && e.kind != EdgeKind::Contains && !own_lineage(e))
+            {
+                continue;
+            }
+            let Some((g, src)) = judged_as(&block) else {
+                continue;
+            };
+            count_plan_pair();
+            let on = suspect(&block, &old);
+            let Some(j) = cmp.judge(g, &block, src, &old, Lineage::Partial, on)? else {
+                continue;
+            };
+            visit(PlanPair {
+                suspect: on,
+                prior_suspect: false,
+                in_base: base.g.governed_by(&old).contains(&block),
+                subject: block,
+                cause: old,
+                edge: SUPERSEDES.to_string(),
+                follow: j.follow,
+                reached_decision: j.reached_decision,
+                retired: false,
+                reach: true,
+            })?;
         }
         Ok(())
     }
