@@ -699,3 +699,70 @@ fn report_lists_a_block_outside_docs() {
     );
     assert_eq!(d["omitted"]["changed_outside_docs"], json!(0), "{d}");
 }
+
+#[test]
+fn ndh4_a_decision_in_a_selected_doc_brings_its_outside_doc_targets() {
+    // ruling final-round2 item 2: rules 2 and 3 start from every kept decision, in a selected
+    // doc or not; a decision in the selected doc that depends_on a finding at the root keeps the
+    // finding, one hop, as a store-only entry
+    let (_dir, mut r) = project();
+    let w = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$admin", "fields": {"name": "admin", "title": "Admin", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$guide", "fields": {"name": "guide", "title": "Guide", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$guide", "fields": {"title": "S"}},
+            {"op": "create", "type": "claim", "parent": "$s", "body": "One claim."}
+        ]),
+    );
+    let (admin, guide, s) = (
+        w.created["$admin"].clone(),
+        w.created["$guide"].clone(),
+        w.created["$s"].clone(),
+    );
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "publication_profile", "parent": admin,
+            "fields": {"key": "pubsite", "title": "Site", "audience": "public", "select": [guide]}}]),
+    );
+    land(&mut r, "work");
+    r.tag(&session(Role::Approver), "v1.0.0", None, None)
+        .unwrap();
+    let w = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "finding", "id": "$f",
+             "fields": {"statement": "The release changed retention.", "evidence": [{"quote": "Retention is now seven days."}]}},
+            {"op": "create", "type": "decision", "id": "$dec", "parent": s,
+             "fields": {"statement": "A ruling in the guide.", "status": "proposed"},
+             "links": {"depends_on": [{"target": "$f"}]}}
+        ]),
+    );
+    let f = w.created["$f"].clone();
+    land(&mut r, "work");
+    let st = r.read();
+    let m = st.materialized(&Scope::Canon).unwrap();
+    assert_eq!(
+        m.get(&bid(&f)).unwrap().parent,
+        None,
+        "the finding sits at the root"
+    );
+
+    let v = publication::check(&st, "pubsite", None, Some("tag:v1.0.0")).unwrap();
+    assert_eq!(v["references"]["status"], json!("clear"), "{v}");
+    let entries = v["selection"]["entries"].as_array().unwrap();
+    let version = entries
+        .iter()
+        .find(|e| e["id"] == json!(f))
+        .unwrap_or_else(|| panic!("the finding is retained: {v}"))["version"]
+        .clone();
+    let d = &v["disclosure"];
+    assert_eq!(
+        d["changed_outside_docs"],
+        json!([{"id": f, "before_version": null, "after_version": version, "redacted": false}]),
+        "{d}"
+    );
+}

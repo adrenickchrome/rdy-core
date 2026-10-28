@@ -668,12 +668,14 @@ fn select(
 ///    decision kept through an entity the selection holds back is published but shows on no
 ///    trail (it over-reports in the comparison and the reference check, and discloses nothing
 ///    more than the decision itself).
-/// 2. Each decision that supersedes or revokes a kept decision with no doc is kept with its
-///    whole subtree, transitively, so the selected graph derives the status the source derives
-///    and a trail never shows a replaced or withdrawn ruling as current (ruling final item 1).
-/// 3. Each decision, question, finding or source that a kept decision with no doc links to
-///    through [`HOP_LINKS`] is kept on its own, one hop only, as the base kept such a target in
-///    the selected doc that held both (ruling final item 2). Its own links are scanned as usual.
+/// 2. Each decision with no doc that supersedes or revokes a kept decision, in a selected doc or
+///    not, is kept with its whole subtree, transitively, so the selected graph derives the
+///    status the source derives and a trail never shows a replaced or withdrawn ruling as
+///    current (ruling final item 1, ruling final-round2 items 1 and 2).
+/// 3. Each decision, question, finding or source with no doc that a kept decision, in a selected
+///    doc or not, links to through [`HOP_LINKS`] is kept on its own, one hop only, as the base
+///    kept such a target in the selected doc that held both (ruling final item 2, ruling
+///    final-round2 items 1 and 2). Its own links are scanned as usual.
 ///
 /// None of them brings its folder or any other ancestor outside a doc.
 fn governing_outside_docs(
@@ -687,7 +689,10 @@ fn governing_outside_docs(
         .filter(|b| b.block_type == rdy_model::decision::DECISION && m.doc_of(&b.id).is_none())
         .map(|b| &b.id)
         .collect();
-    if candidates.is_empty() {
+    if !m
+        .iter()
+        .any(|b| tree::may_sit_outside_a_doc(&b.block_type) && m.doc_of(&b.id).is_none())
+    {
         return Ok(());
     }
     let graph = Graph::build_with(m.iter(), Arc::new(pack.tracking()));
@@ -721,12 +726,17 @@ fn governing_outside_docs(
     for d in governing {
         retain_subtree(m, keep, d, l)?;
     }
-    // 2. the decisions that supersede or revoke a kept one, transitively
-    let mut todo: Vec<BlockId> = candidates
-        .iter()
-        .filter(|d| keep.contains(**d))
-        .map(|d| (*d).clone())
-        .collect();
+    // 2. the decisions with no doc that supersede or revoke a kept one, transitively
+    let kept_decisions = |keep: &BTreeSet<BlockId>| -> Vec<BlockId> {
+        keep.iter()
+            .filter(|d| {
+                m.get(d)
+                    .is_some_and(|b| b.block_type == rdy_model::decision::DECISION)
+            })
+            .cloned()
+            .collect()
+    };
+    let mut todo = kept_decisions(keep);
     while let Some(d) = todo.pop() {
         for e in graph.incoming(&d) {
             let EdgeKind::Link(n) = &e.kind else { continue };
@@ -739,14 +749,9 @@ fn governing_outside_docs(
             }
         }
     }
-    // 3. one hop from each kept decision with no doc
-    let kept: Vec<&BlockId> = candidates
-        .iter()
-        .filter(|d| keep.contains(**d))
-        .copied()
-        .collect();
-    for d in kept {
-        for e in graph.outgoing(d) {
+    // 3. one hop from each kept decision, in a selected doc or not
+    for d in kept_decisions(keep) {
+        for e in graph.outgoing(&d) {
             let EdgeKind::Link(n) = &e.kind else { continue };
             if HOP_LINKS.contains(&n.as_str())
                 && m.get(&e.to)
@@ -777,8 +782,8 @@ fn retain_subtree(
     Ok(())
 }
 
-/// The links of a kept decision with no doc whose targets outside a doc are kept with it, one
-/// hop (ruling final item 2).
+/// The links of a kept decision, in a selected doc or not, whose targets outside a doc are kept
+/// with it, one hop (ruling final item 2, ruling final-round2 item 2).
 const HOP_LINKS: [&str; 4] = [
     rdy_model::decision::ANSWERS,
     rdy_model::decision::DEPENDS_ON,
