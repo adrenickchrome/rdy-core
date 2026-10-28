@@ -55,6 +55,7 @@ use rdy_model::{BlockId, Change, Hash, Proposal, Provenance};
 use rdy_schema::{Issue, Severity};
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// Open non-code items of a proposed version (p-S3NTW); advisory until M3.
 pub const W_PLAN_OPEN: &str = "W_PLAN_OPEN";
@@ -339,22 +340,20 @@ fn carry_answers(
     inputs: &[PlanAnswerInput],
 ) -> Result<(Vec<PlanAnswer>, Vec<PlanAnswerInput>), RdyError> {
     let now: BTreeMap<Hash, &Tension> = computed.tensions.iter().map(|t| (t.id, &**t)).collect();
-    // each earlier tension that the plan no longer has: the one item of the same tension, or
-    // `None` when two match
-    let mut carried: BTreeMap<Hash, (Tension, Option<&Tension>)> = BTreeMap::new();
+    // each earlier tension that the plan no longer has, with the tensions of the same kind on
+    // the same blocks the plan has: it carries to the one such tension only
+    let mut carried: BTreeMap<Hash, (Arc<Tension>, Vec<&Tension>)> = BTreeMap::new();
     for t in compute::tension_set(before.st, view, before.changes)? {
         if now.contains_key(&t.id) {
             continue;
         }
-        let mut same = computed
+        let same: Vec<&Tension> = computed
             .tensions
             .iter()
-            .filter(|n| compute::shape(n) == compute::shape(&t));
-        let to = match (same.next(), same.next()) {
-            (Some(n), None) => Some(&**n),
-            _ => None,
-        };
-        carried.insert(t.id, ((*t).clone(), to));
+            .filter(|n| compute::shape(n) == compute::shape(&t))
+            .map(|n| &**n)
+            .collect();
+        carried.insert(t.id, (t, same));
     }
     if carried.is_empty() {
         return Ok((prior.to_vec(), inputs.to_vec()));
@@ -365,7 +364,7 @@ fn carry_answers(
     let mut answers: BTreeMap<Hash, PlanAnswer> =
         prior.iter().map(|a| (a.item, a.clone())).collect();
     for (from, to) in carried.values() {
-        let (Some(to), Some(old)) = (to, item_of(from)) else {
+        let ([to], Some(old)) = (to.as_slice(), item_of(from)) else {
             continue;
         };
         let Some(new) = item_of(to) else { continue };
@@ -403,12 +402,16 @@ fn carry_answers(
             .iter()
             .filter(|(id, _)| id.to_string().starts_with(hex));
         match (from.next(), from.next()) {
-            (Some((_, (_, Some(to)))), None) => out.push(PlanAnswerInput {
-                item: format!("{TENSION_DISPLAY_PREFIX}{}", to.id),
-                ..input.clone()
-            }),
-            // the tension matches two items: not carried, so the item stays open
-            (Some((_, (_, None))), None) => {}
+            (Some((_, (_, to))), None) => match to.as_slice() {
+                [to] => out.push(PlanAnswerInput {
+                    item: format!("{TENSION_DISPLAY_PREFIX}{}", to.id),
+                    ..input.clone()
+                }),
+                // no item: the unknown-item refusal names it
+                [] => out.push(input.clone()),
+                // two items: not carried, so each stays open
+                _ => {}
+            },
             _ => out.push(input.clone()),
         }
     }
@@ -720,7 +723,7 @@ mod tests {
             .unwrap();
             assert!(tension_ids(&pp).is_empty(), "{:#?}", pp.summary);
             assert_eq!(
-                serde_json::to_value(&pp.summary.by_kind["tension"]).unwrap(),
+                serde_json::to_value(pp.summary.by_kind["tension"]).unwrap(),
                 json!({"open": 0, "closed": 1, "deferred": 0})
             );
             assert_eq!(pp.answers.len(), 1, "{:#?}", pp.answers);
