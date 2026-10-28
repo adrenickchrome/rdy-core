@@ -250,6 +250,57 @@ fn ndh5_a_review_marks_no_block_outside_a_doc() {
     );
 }
 
+#[test]
+fn ndh5_a_review_counts_no_moved_block_outside_a_doc() {
+    let mut w = world();
+    let claim = w.id("$claim").to_string();
+    let qr = w.id("$qr").to_string();
+    let qf = w.id("$qf").to_string();
+    let area = w.id("$area").to_string();
+    // the guard: a view that only changes the claim
+    write(
+        &mut w.r,
+        "claim_only",
+        json!([{"op": "update", "id": claim, "body": "Keep every rule very short."}]),
+    )
+    .expect("the claim-only view");
+    // the view under test: the same claim change, the folder question moved to the root and
+    // the root question moved into the folder (none of them sits in a doc in the base or the
+    // draft). A write cannot delete a question; the review unit test covers a deleted block.
+    write(
+        &mut w.r,
+        "draft",
+        json!([
+            {"op": "update", "id": claim, "body": "Keep every rule very short."},
+            {"op": "move", "id": qf},
+            {"op": "move", "id": qr, "parent": area}
+        ]),
+    )
+    .expect("the draft view");
+    let base = site(&w, &Scope::View("claim_only".into()));
+    let out = site(&w, &Scope::View("draft".into()));
+
+    let changes = html(out.path(), "changes.html");
+    assert_eq!(
+        entry_ids(&changes),
+        std::slice::from_ref(&claim),
+        "{changes}"
+    );
+    assert_eq!(h2s(&changes), ["Guide"], "{changes}");
+    for text in ["Root question?", "Folder question?"] {
+        assert!(!changes.contains(text), "{text}: {changes}");
+    }
+    for id in [&qr, &qf] {
+        assert!(!changes.contains(id.as_str()), "{id}: {changes}");
+    }
+    assert_eq!(
+        lede(&changes),
+        lede(&html(base.path(), "changes.html")),
+        "the same number of changed blocks"
+    );
+    assert_eq!(lede(&changes), "1 change in 1 doc, not landed.");
+}
+
 /// Every file under `dir`, recursively, by its path under `dir`.
 fn files(dir: &Path) -> Vec<(String, String)> {
     let mut out = vec![];
