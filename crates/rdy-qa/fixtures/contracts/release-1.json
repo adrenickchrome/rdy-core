@@ -635,6 +635,11 @@
                   "deferred": "number",
                   "open": "number"
                 },
+                "tension": {
+                  "closed": "number",
+                  "deferred": "number",
+                  "open": "number"
+                },
                 "update": {
                   "closed": "number",
                   "deferred": "number",
@@ -701,6 +706,11 @@
                   "open": "number"
                 },
                 "rejustify": {
+                  "closed": "number",
+                  "deferred": "number",
+                  "open": "number"
+                },
+                "tension": {
                   "closed": "number",
                   "deferred": "number",
                   "open": "number"
@@ -11947,6 +11957,7 @@
       "E_PATH_CLASH": "\"E_PATH_CLASH\"",
       "E_PERMISSION": "\"E_PERMISSION\"",
       "E_PLAN_ITEM": "\"E_PLAN_ITEM\"",
+      "E_PLAN_OPEN": "\"E_PLAN_OPEN\"",
       "E_PROPOSAL_MOVED": "\"E_PROPOSAL_MOVED\"",
       "E_PROPOSAL_NOT_READY": "\"E_PROPOSAL_NOT_READY\"",
       "E_PUBLICATION_REFERENCE": "\"E_PUBLICATION_REFERENCE\"",
@@ -12507,6 +12518,11 @@
         "Propose the redaction of the listed targets again, and have a person approve it."
       ],
       [
+        "E_PLAN_OPEN",
+        "the version's change plan has open items on stable content or unanswered tension items",
+        "close or defer each item, and answer each tension item with confirm or dismiss: rdy_plan / rdy plan"
+      ],
+      [
         "E_PLAN_ITEM",
         "<id> is not an item of the change plan for <scope>",
         "read the plan with rdy_plan / rdy plan and pass an item id it lists"
@@ -12631,6 +12647,7 @@
       "PAGE_STALE_FIX": "\"the read, briefing or search moved; start again without a cursor\"",
       "PIN_CLASH_FIX": "\"use the pinned version, or read the bare id with a scope\"",
       "PLAN_ANSWER_LAPSED_FIX": "\"answer the item again\"",
+      "PLAN_GATE_FIX": "\"close or defer each item, and answer each tension item with confirm or dismiss: rdy_plan / rdy plan\"",
       "PLAN_ITEM_FIX": "\"read the plan with rdy_plan / rdy plan and pass an item id it lists\"",
       "PLAN_OPEN_FIX": "\"close or defer each item: rdy_plan / rdy plan\"",
       "PROFILE_PARENT_FIX": "\"set parent to a doc id\"",
@@ -13080,6 +13097,7 @@
       "E_DUMP_CHAIN",
       "E_LOAD_STOP",
       "W_STOP_BEFORE_REDACTION",
+      "E_PLAN_OPEN",
       "E_PLAN_ITEM",
       "E_DEFERRAL_OPEN",
       "W_PLAN_OPEN",
@@ -13732,6 +13750,11 @@
                 "deferred": "number",
                 "open": "number"
               },
+              "tension": {
+                "closed": "number",
+                "deferred": "number",
+                "open": "number"
+              },
               "update": {
                 "closed": "number",
                 "deferred": "number",
@@ -13799,6 +13822,11 @@
                 "deferred": "number",
                 "open": "number"
               },
+              "tension": {
+                "closed": "number",
+                "deferred": "number",
+                "open": "number"
+              },
               "update": {
                 "closed": "number",
                 "deferred": "number",
@@ -13816,7 +13844,16 @@
               "unavailable": "bool"
             },
             "deferred": "number",
-            "items": [],
+            "items": [
+              {
+                "cause": "string",
+                "edge": "string",
+                "id": "string",
+                "kind": "string",
+                "state": "string",
+                "subject": "string"
+              }
+            ],
             "open": "number"
           },
           "ref": "string",
@@ -13857,7 +13894,7 @@
           "version": "number",
           "warnings": [
             {
-              "block": "string",
+              "block": "null|string",
               "code": "string",
               "fix": "string",
               "message": "string",
@@ -14169,6 +14206,10 @@
               "when": "string"
             },
             "E_PLAN_ITEM": {
+              "fix": "string",
+              "when": "string"
+            },
+            "E_PLAN_OPEN": {
               "fix": "string",
               "when": "string"
             },

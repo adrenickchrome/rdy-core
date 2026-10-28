@@ -50,6 +50,11 @@
         "deferred": 0,
         "open": 0
       },
+      "tension": {
+        "closed": 0,
+        "deferred": 0,
+        "open": 1
+      },
       "update": {
         "closed": 0,
         "deferred": 0,
@@ -69,6 +74,14 @@
     "deferred": 0,
     "items": [
       {
+        "cause": "D-REKH0",
+        "edge": "tension",
+        "id": "tn-508395cf7e35",
+        "kind": "tension",
+        "state": "open",
+        "subject": "508395cf7e359a1ecf391bcfab92dde2b391cd169e1c98e647ab2b3e3e3cded2"
+      },
+      {
         "cause": "c-CFPE0",
         "edge": "references",
         "id": "pi-b1ac05f4f210a8a5",
@@ -77,7 +90,7 @@
         "subject": "c-WKHEZ"
       }
     ],
-    "open": 1
+    "open": 2
   },
   "ref": "P-77f7af288000@2",
   "stable": "77f7af28800016090912c6ae30cb8c006a79ae004ae3af1cd6fad3ed40c69b47",
@@ -267,7 +280,7 @@
       "block": null,
       "code": "W_PLAN_OPEN",
       "fix": "close or defer each item: rdy_plan / rdy plan",
-      "message": "1 change-plan items are open",
+      "message": "2 change-plan items are open",
       "severity": "warning"
     }
   ]

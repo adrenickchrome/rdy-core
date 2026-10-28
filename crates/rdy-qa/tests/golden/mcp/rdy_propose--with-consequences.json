@@ -49,6 +49,11 @@
         "deferred": 0,
         "open": 0
       },
+      "tension": {
+        "closed": 0,
+        "deferred": 0,
+        "open": 0
+      },
       "update": {
         "closed": 0,
         "deferred": 0,
