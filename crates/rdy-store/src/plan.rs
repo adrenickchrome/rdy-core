@@ -1262,8 +1262,9 @@ impl StoreReader {
     /// The fsck rules of the change plans (closed; see the module docs), in log order up to what
     /// the index holds: every PLAN decodes, keeps its own rules and its chain, bound proposal
     /// and seal; in a project, every view's latest plan is its `plan/<view>` ref and every
-    /// `plan/` ref names its view's latest plan; and the four plan tables hold exactly the rows
-    /// the log gives. Returns how many PLAN records the log holds.
+    /// `plan/` ref names its view's latest plan; the four plan tables hold exactly the rows the
+    /// log gives; and so do the assessment table and the first briefed change, in the same walk
+    /// (`check_readiness_rows`). Returns how many PLAN records the log holds.
     pub(crate) fn check_plans(&self) -> Result<usize, StoreError> {
         let holder = matches!(self.mode(), Ok(StoreMode::Holder));
         let upto = self.index().indexed_upto()?;
@@ -1282,17 +1283,23 @@ impl StoreReader {
         let mut rows: Vec<IndexEntry> = vec![];
         let mut r = Resolver::new(self);
         self.for_each_record_from(origin, upto, |at, frame, next| {
-            let (kind, hash, payload) = match frame {
+            let (kind, hash, payload, residue) = match frame {
                 StoredFrame::Present {
                     kind,
                     hash,
                     payload,
-                } => (kind, hash, Some(payload)),
-                StoredFrame::Dropped { kind, hash, .. } => (kind, hash, None),
+                } => (kind, hash, Some(payload), None),
+                StoredFrame::Dropped {
+                    kind,
+                    hash,
+                    residue,
+                    ..
+                } => (kind, hash, None, residue),
             };
             // the frame's logical kind; a record's rules read its body
             let raw = kind;
             let kind = crate::codec::logical_kind(raw);
+            rows.extend(self.readiness_entries(raw, hash, at, payload, residue)?);
             if kind == kinds::BATCH_COMMIT {
                 batch.clear();
                 batch_start = next;
@@ -1391,7 +1398,85 @@ impl StoreReader {
                 "the plan tables differ from the plan records; run rdy reindex".into(),
             ));
         }
+        self.check_readiness_rows(&want, upto)?;
         Ok(n)
+    }
+
+    /// The readiness rows (rg2) that the frame at `at` gives, as the index's own entries give
+    /// them (`crate::store::briefed_entry`, `crate::store::assessment_entry`): a CHANGE whose
+    /// links record a briefing, kept or removed (its residue keeps its links), and an
+    /// ASSESSMENT's version. A record that does not decode gives none here: the frame and
+    /// carried-record checks report it.
+    fn readiness_entries(
+        &self,
+        raw: u8,
+        hash: Hash,
+        at: Location,
+        payload: Option<&[u8]>,
+        residue: Option<Hash>,
+    ) -> Result<Vec<IndexEntry>, StoreError> {
+        let kind = crate::codec::logical_kind(raw);
+        if kind != kinds::CHANGE && kind != kinds::ASSESSMENT {
+            return Ok(vec![]);
+        }
+        let Some(payload) = payload else {
+            // a removed change keeps its links in its residue
+            let links = match residue {
+                Some(r) if kind == kinds::CHANGE => match self.residue(&r)? {
+                    rdy_model::RedactionResidue::Change(c) => Some(c.links),
+                    _ => None,
+                },
+                _ => None,
+            };
+            return Ok(links
+                .and_then(|l| crate::store::briefed_entry(&l, at))
+                .into_iter()
+                .collect());
+        };
+        let Ok(o) = crate::codec::split(raw, payload) else {
+            return Ok(vec![]);
+        };
+        Ok(match kind {
+            kinds::CHANGE => crate::codec::decode_split::<rdy_model::Change>(&o)
+                .ok()
+                .and_then(|c| crate::store::briefed_entry(&c.links, at))
+                .into_iter()
+                .collect(),
+            _ => crate::store::assessment_entry(hash, at, &o)
+                .ok()
+                .into_iter()
+                .collect(),
+        })
+    }
+
+    /// The assessment table and the first briefed change agree with `want`, the rows the log
+    /// before `upto` gives: the table's rows before `upto` are exactly `want`'s, and the first
+    /// briefed change is `want`'s (none in `want` allows only one at or after `upto`, a live
+    /// writer's). Otherwise `the assessment table differs from the assessment records; run rdy
+    /// reindex` or `the first briefed change differs from the change records; run rdy reindex`.
+    fn check_readiness_rows(
+        &self,
+        want: &crate::index::Index,
+        upto: Location,
+    ) -> Result<(), StoreError> {
+        let mut have = self.index().assessment_rows()?;
+        have.retain(|(_, at), _| *at < upto);
+        if have != want.assessment_rows()? {
+            return Err(StoreError::Decode(
+                "the assessment table differs from the assessment records; run rdy reindex".into(),
+            ));
+        }
+        let first = self.index().first_briefed_change()?;
+        let agrees = match want.first_briefed_change()? {
+            Some(w) => first == Some(w),
+            None => first.is_none_or(|at| at >= upto),
+        };
+        if !agrees {
+            return Err(StoreError::Decode(
+                "the first briefed change differs from the change records; run rdy reindex".into(),
+            ));
+        }
+        Ok(())
     }
 }
 

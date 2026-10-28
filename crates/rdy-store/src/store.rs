@@ -649,6 +649,32 @@ fn entries_for_frame(
     Ok(out)
 }
 
+/// The entry of a CHANGE at `at` whose links record its writer's briefing (O3): the first one
+/// starts the rule that a stable change carries one. None for a change that records none.
+pub(crate) fn briefed_entry(links: &rdy_model::ChangeLinks, at: Location) -> Option<IndexEntry> {
+    links
+        .briefing
+        .is_some()
+        .then_some(IndexEntry::BriefedChange { at })
+}
+
+/// The entry of the ASSESSMENT `hash` at `at`, split as `o`: the version it assesses. Its body
+/// is read with the bounded decoder (an assessment's lists may come from another store); one
+/// that does not decode is `record <hash> (kind 25): <reason>`.
+pub(crate) fn assessment_entry(
+    hash: Hash,
+    at: Location,
+    o: &crate::codec::ObjectBytes<'_>,
+) -> Result<IndexEntry, StoreError> {
+    let a: rdy_model::assessment::Assessment = crate::codec::decode_bounded_split(o)
+        .map_err(|e| crate::carried_records::refusal(&hash, kinds::ASSESSMENT, &e.to_string()))?;
+    Ok(IndexEntry::AssessmentProposal {
+        proposal: a.proposal,
+        assessment: hash,
+        at,
+    })
+}
+
 /// `entries_for_frame` before the frame is noted.
 fn frame_entries(
     kind: u8,
@@ -669,11 +695,7 @@ fn frame_entries(
     match kind {
         kinds::CHANGE => {
             let change: Change = crate::codec::decode_split(&o)?;
-            // a change that records its writer's briefing (O3): the first one starts the rule
-            // that a stable change carries one
-            if change.links.briefing.is_some() {
-                out.push(IndexEntry::BriefedChange { at: loc });
-            }
+            out.extend(briefed_entry(&change.links, loc));
             for op in &change.ops {
                 match op {
                     Op::Create { block } | Op::Update { block, .. } => {
@@ -739,18 +761,7 @@ fn frame_entries(
             }));
             out.extend(crate::plan::transition_entries(&rec, loc));
         }
-        kinds::ASSESSMENT => {
-            // the bounded decoder: an assessment's lists may come from another store
-            let a: rdy_model::assessment::Assessment = crate::codec::decode_bounded_split(&o)
-                .map_err(|e| {
-                    crate::carried_records::refusal(&hash, kinds::ASSESSMENT, &e.to_string())
-                })?;
-            out.push(IndexEntry::AssessmentProposal {
-                proposal: a.proposal,
-                assessment: hash,
-                at: loc,
-            });
-        }
+        kinds::ASSESSMENT => out.push(assessment_entry(hash, loc, &o)?),
         kinds::ANSWER => out.extend(crate::plan::answer_entries(hash, loc, payload, r)?),
         kinds::PLAN => out.extend(crate::plan::plan_entries(hash, loc, payload, r)?),
         _ => {}

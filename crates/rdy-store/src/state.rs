@@ -1024,16 +1024,22 @@ impl Store {
     }
 
     /// Adds `a`, the assessment of the prepared version, to its batch after the plan: the
-    /// ASSESSMENT frame (D-ME2HD: written in the propose batch). `a.proposal` must be the
-    /// prepared version and `a.validate()` must pass, as must the carried bindings it names
-    /// (`record <hash> (kind 25): <reason>`, `carried_records::refusal`). Writes nothing; one per
-    /// version batch. Returns its hash.
+    /// ASSESSMENT frame (D-ME2HD: written in the propose batch). A re-affirmation proposal takes
+    /// none (C7: `Refused`). `a.proposal` must be the prepared version and `a.validate()` must
+    /// pass, as must the carried bindings it names (`record <hash> (kind 25): <reason>`,
+    /// `carried_records::refusal`), and every object it names must be in the batch or the store
+    /// with its kind (`NotFound(<hash>)`): a plan its tension answers name is bound first. Writes
+    /// nothing; one per version batch. Returns its hash.
     pub fn bind_assessment(
         &self,
         prepared: &mut PreparedProposal,
         a: &Assessment,
     ) -> Result<Hash, StoreError> {
-        let (id, item) = self.assessment_item(a, &prepared.items)?;
+        if prepared.fresh.is_some() {
+            return Err(StoreError::Refused(REAFFIRM_WITH_LANDING.into()));
+        }
+        let item = crate::codec::item_new(kinds::ASSESSMENT, a);
+        let id = Hash::of(&item.1);
         if a.proposal != prepared.version || prepared.assessment.is_some() {
             return Err(crate::carried_records::refusal(
                 &id,
@@ -1041,32 +1047,34 @@ impl Store {
                 crate::carried_records::ASSESSMENT_PROPOSAL,
             ));
         }
+        self.check_assessment(a, &item, &prepared.items)?;
         prepared.items.push(item);
         prepared.assessment = Some(id);
         Ok(id)
     }
 
     /// Writes `a` in a batch of its own (RULING F1's fresh assessment), with the rules of
-    /// [`Store::bind_assessment`]. The version it assesses must be held (`NotFound` otherwise).
-    /// Returns its hash.
+    /// [`Store::bind_assessment`]: the version it assesses, like every object it names, must be
+    /// held (`NotFound` otherwise). Returns its hash.
     pub fn put_assessment(&mut self, a: &Assessment) -> Result<Hash, StoreError> {
-        let (id, item) = self.assessment_item(a, &[])?;
-        if !self.has_kind(kinds::PROPOSAL, &a.proposal)? {
-            return Err(StoreError::NotFound(a.proposal));
-        }
+        let item = crate::codec::item_new(kinds::ASSESSMENT, a);
+        let id = Hash::of(&item.1);
+        self.check_assessment(a, &item, &[])?;
         self.write_guarded(vec![item])?;
         Ok(id)
     }
 
-    /// The ASSESSMENT frame of `a` as the frame after `batch`, and its hash: its bounded
-    /// encoding, its own rules (`Assessment::validate`) and the bindings it names
+    /// Checks `item`, the ASSESSMENT frame of `a`, as the frame after `batch`: its bounded
+    /// encoding and its own rules (`Assessment::validate`), as `record <hash> (kind 25):
+    /// <reason>`; every object it names (`object_refs::refs_of`) in `batch` or the store with its
+    /// kind (`NotFound(<hash>)` for the first that is not); and the bindings it names
     /// (`carried_records::validate_refs`, reading `batch` before the store). Writes nothing.
-    fn assessment_item(
+    fn check_assessment(
         &self,
         a: &Assessment,
+        item: &(u8, Vec<u8>),
         batch: &[(u8, Vec<u8>)],
-    ) -> Result<(Hash, (u8, Vec<u8>)), StoreError> {
-        let item = crate::codec::item_new(kinds::ASSESSMENT, a);
+    ) -> Result<(), StoreError> {
         let id = Hash::of(&item.1);
         let refuse = |reason: &str| crate::carried_records::refusal(&id, kinds::ASSESSMENT, reason);
         // within the bounded decoder's limits, so every reader can read it back
@@ -1074,6 +1082,30 @@ impl Store {
         crate::codec::decode_bounded_split::<Assessment>(&split)
             .map_err(|e| refuse(&e.to_string()))?;
         a.validate().map_err(refuse)?;
+        // the objects it names are held, as an answer's target is (`answer.rs`): an object the
+        // carried bindings do not find passes them, and a landing that named the record would
+        // then give a closure that does not resolve
+        let edges =
+            crate::object_refs::refs_of(item.0, &item.1).map_err(|e| refuse(&e.to_string()))?;
+        // each batch frame hashed once, whatever the number of edges
+        let pending: std::collections::BTreeSet<(u8, Hash)> = batch
+            .iter()
+            .map(|(raw, payload)| (crate::codec::logical_kind(*raw), Hash::of(payload)))
+            .collect();
+        for edge in edges {
+            let in_batch = match edge.kind {
+                Some(k) => pending.contains(&(k, edge.hash)),
+                None => pending.iter().any(|(_, h)| *h == edge.hash),
+            };
+            let held = in_batch
+                || match edge.kind {
+                    Some(k) => self.has_kind(k, &edge.hash)?,
+                    None => self.has(&edge.hash)?,
+                };
+            if !held {
+                return Err(StoreError::NotFound(edge.hash));
+            }
+        }
         let key = crate::object_refs::ObjectKey {
             kind: kinds::ASSESSMENT,
             hash: id,
@@ -1081,12 +1113,12 @@ impl Store {
         let mut source = PendingFrames {
             store: crate::carried_records::StoreObjects(self),
             batch,
-            last: &item,
+            last: item,
         };
         if let Some(reason) = crate::carried_records::validate_refs(&mut source, key)? {
             return Err(refuse(reason));
         }
-        Ok((id, item))
+        Ok(())
     }
 
     /// Writes the proposal `prepared` holds in one batch (one write, so one marker): its key
@@ -1107,9 +1139,7 @@ impl Store {
         } = prepared;
         // a re-affirmation card's proposal is written only with its landing
         if fresh.is_some() {
-            return Err(StoreError::Refused(
-                "a re-affirmation proposal is written only with its landing".into(),
-            ));
+            return Err(StoreError::Refused(REAFFIRM_WITH_LANDING.into()));
         }
         crate::redaction::refuse_redaction_kinds(&items)?;
         let written = self.write_guarded(items)?;
@@ -1464,6 +1494,10 @@ pub struct Proposed {
     /// The assessment written in the batch, if one was bound.
     pub assessment: Option<Hash>,
 }
+
+/// The refusal of a re-affirmation card's proposal outside its landing (D-CQMA4): its commit
+/// ([`Store::commit_propose`]) and an assessment bound to it ([`Store::bind_assessment`]; C7).
+const REAFFIRM_WITH_LANDING: &str = "a re-affirmation proposal is written only with its landing";
 
 /// A proposal summary as stored: trimmed, and `None` when blank.
 fn clean_summary(summary: Option<&str>) -> Option<String> {

@@ -494,3 +494,257 @@ fn rg2_an_index_without_the_assessment_table_is_rebuilt() {
     );
     assert_eq!(s.index_dump_for_tests().unwrap(), dump);
 }
+
+/// A tension row whose answer names item `item` of plan `plan`, with an optional dismissal.
+fn tension(plan: Option<Hash>, dismissal: Option<Hash>) -> AssessmentTension {
+    AssessmentTension {
+        id: Hash([3; 32]),
+        kind: "fork".into(),
+        severity: AssessmentSeverity::Advisory,
+        status: AssessmentTensionStatus::Open,
+        answer: plan.map(|plan| AssessmentPlanAnswerRef {
+            plan,
+            item: Hash([4; 32]),
+        }),
+        dismissal,
+        summary: String::new(),
+        blocks: vec![],
+        vkey: Hash([5; 32]),
+    }
+}
+
+/// The unsealed plan of view `view` bound to version `v`, with no answers.
+fn bare_plan(view: &str, v: Hash) -> rdy_model::plan::Plan {
+    rdy_model::plan::Plan {
+        stable: None,
+        prev: None,
+        view: view.into(),
+        proposal: Some(v),
+        answers: vec![],
+        heads: vec![rdy_model::plan::PlanHead {
+            repo: "app".into(),
+            head: Some("a".repeat(40)),
+        }],
+        provenance: writer(),
+        seal: None,
+    }
+}
+
+#[test]
+fn rg2_an_assessment_bound_before_its_plan_is_refused() {
+    let d = tempfile::tempdir().unwrap();
+    let (_path, mut s) = store_with(d.path(), "work", "b-00001");
+    let end = s.log_end();
+    let mut prepared = s.prepare_propose(request(&s, "work")).unwrap();
+    let v = prepared.version();
+    let plan = bare_plan("work", v);
+    let a = Assessment {
+        tensions: vec![tension(Some(plan.id()), None)],
+        ..assessment(v, None, vec![id("b-00001")], "early")
+    };
+    // the plan its answer names is not in the batch yet: refused, nothing bound
+    match s.bind_assessment(&mut prepared, &a) {
+        Err(StoreError::NotFound(h)) => assert_eq!(h, plan.id()),
+        other => panic!("an assessment bound before its plan: {other:?}"),
+    }
+    s.bind_plan(&mut prepared, &plan).unwrap();
+    // with the plan bound, the answer it does not hold is the plan answer refusal
+    let ah = Hash::of(&rdy_store::codec::item_new(kinds::ASSESSMENT, &a).1);
+    match s.bind_assessment(&mut prepared, &a) {
+        Err(e) => assert_eq!(
+            e.to_string(),
+            carried::refusal(&ah, kinds::ASSESSMENT, carried::PLAN_ANSWER).to_string()
+        ),
+        Ok(h) => panic!("an answer the plan does not hold was bound: {h}"),
+    }
+    assert_eq!(s.log_end(), end, "nothing written");
+    let out = s.commit_propose(prepared).unwrap();
+    assert_eq!(out.assessment, None);
+    assert_eq!(s.assessment_of_proposal(&v, s.log_end()).unwrap(), None);
+    s.check_objects().unwrap();
+}
+
+#[test]
+fn rg2_an_assessment_naming_an_object_not_held_is_refused() {
+    let d = tempfile::tempdir().unwrap();
+    let (_path, mut s, v, _, _) = proposed_with_assessment(d.path());
+    let end = s.log_end();
+    let base = assessment(v, None, vec![id("b-00001")], "dangling");
+    let cases = [
+        (
+            "a tension answer's plan",
+            Hash([8; 32]),
+            Assessment {
+                tensions: vec![tension(Some(Hash([8; 32])), None)],
+                ..base.clone()
+            },
+        ),
+        (
+            "a tension dismissal's review",
+            Hash([6; 32]),
+            Assessment {
+                tensions: vec![tension(None, Some(Hash([6; 32])))],
+                ..base.clone()
+            },
+        ),
+        (
+            "the base landing",
+            Hash([2; 32]),
+            assessment(v, Some(Hash([2; 32])), vec![id("b-00001")], "dangling"),
+        ),
+    ];
+    for (what, missing, a) in cases {
+        match s.put_assessment(&a) {
+            Err(StoreError::NotFound(h)) => assert_eq!(h, missing, "{what}"),
+            other => panic!("{what} that is not held was written: {other:?}"),
+        }
+        // the next version's batch: the same refusal
+        let mut p = s
+            .prepare_propose(ProposeRequest {
+                title: "next",
+                prev: Some(v),
+                ..request(&s, "work")
+            })
+            .unwrap();
+        let a = Assessment {
+            proposal: p.version(),
+            scope: AssessmentScope {
+                proposal: p.version(),
+                blocks: a.scope.blocks.clone(),
+            },
+            ..a.clone()
+        };
+        match s.bind_assessment(&mut p, &a) {
+            Err(StoreError::NotFound(h)) => assert_eq!(h, missing, "{what}"),
+            other => panic!("{what} that is not held was bound: {other:?}"),
+        }
+        assert_eq!(s.log_end(), end, "{what}: nothing written");
+    }
+    s.check_objects().unwrap();
+}
+
+#[test]
+fn rg2_bind_assessment_refuses_a_reaffirmation_proposal() {
+    let d = tempfile::tempdir().unwrap();
+    let (_path, mut s) = store_with(d.path(), "first", "b-00001");
+    let p0 = s.prepare_propose(request(&s, "first")).unwrap();
+    let v0 = s.commit_propose(p0).unwrap().version;
+    s.land_atomic(LandRequest {
+        proposal: v0,
+        accept: None,
+        approver: approver(),
+        alt: None,
+        relay: None,
+        evidence: None,
+        assessment: None,
+    })
+    .unwrap();
+    let view = "reaffirm-000000000001";
+    let canon = s.canon_state().unwrap();
+    let current = *canon.blocks.get(&id("b-00001")).unwrap();
+    let mut prepared = s
+        .prepare_reaffirm_propose(rdy_store::plan::ReaffirmProposeRequest {
+            view,
+            canon_at: s.canon_head().unwrap(),
+            change: change(
+                view,
+                vec![Op::Update {
+                    base: current,
+                    block: block("b-00001", "the b-00001 claim, re-affirmed"),
+                }],
+                None,
+            ),
+            title: "re-affirm",
+            summary: "re-affirms a claim",
+            by: approver(),
+        })
+        .unwrap();
+    let before = format!("{prepared:?}");
+    let end = s.log_end();
+    let a = assessment(prepared.version(), None, vec![id("b-00001")], "reaffirm");
+    match s.bind_assessment(&mut prepared, &a) {
+        Err(StoreError::Refused(m)) => assert_eq!(
+            m,
+            "a re-affirmation proposal is written only with its landing"
+        ),
+        other => panic!("a re-affirmation proposal took an assessment: {other:?}"),
+    }
+    assert_eq!(format!("{prepared:?}"), before, "the batch is unchanged");
+    assert_eq!(s.log_end(), end);
+}
+
+/// A store whose log holds an assessment and a briefed change, closed, with its index file.
+fn closed_with_rows(dir: &Path) -> (PathBuf, Hash, Location) {
+    let (path, mut s, v, _, _) = proposed_with_assessment(dir);
+    let c = s
+        .commit_to_view("work", create("work", "b-00002", Some(Hash([1; 32]))))
+        .unwrap();
+    let at = frame_at(&s, kinds::CHANGE, c);
+    assert_eq!(s.first_briefed_change().unwrap(), Some(at));
+    s.check_objects().unwrap();
+    s.close().unwrap();
+    (path, v, at)
+}
+
+/// fsck refuses `s` with `text`; `rdy reindex` clears it.
+fn fsck_refuses_until_reindex(path: &Path, text: &str) -> Store {
+    let mut s = Store::open(path).unwrap();
+    assert!(!s.open_report().index_rebuilt, "the index opens as it is");
+    match s.check_objects() {
+        Err(StoreError::Decode(m)) => assert_eq!(m, text),
+        other => panic!("fsck passed a wrong index: {other:?}"),
+    }
+    s.reindex().unwrap();
+    s.check_objects().unwrap();
+    s
+}
+
+#[test]
+fn rg2_fsck_reports_a_missing_first_briefed_change() {
+    let d = tempfile::tempdir().unwrap();
+    let (path, _, at) = closed_with_rows(d.path());
+    {
+        let raw = redb::Database::create(path.join("index.redb")).unwrap();
+        let w = raw.begin_write().unwrap();
+        {
+            let def: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("meta");
+            let mut t = w.open_table(def).unwrap();
+            assert!(t.remove("first_briefed_change").unwrap().is_some());
+        }
+        w.commit().unwrap();
+    }
+    let s = fsck_refuses_until_reindex(
+        &path,
+        "the first briefed change differs from the change records; run rdy reindex",
+    );
+    assert_eq!(s.first_briefed_change().unwrap(), Some(at));
+}
+
+#[test]
+fn rg2_fsck_reports_missing_assessment_rows() {
+    let d = tempfile::tempdir().unwrap();
+    let (path, v, _) = closed_with_rows(d.path());
+    {
+        let raw = redb::Database::create(path.join("index.redb")).unwrap();
+        let w = raw.begin_write().unwrap();
+        {
+            let def: redb::TableDefinition<&[u8], &[u8]> =
+                redb::TableDefinition::new("assessment_proposals");
+            let mut t = w.open_table(def).unwrap();
+            let keys: Vec<Vec<u8>> = redb::ReadableTable::iter(&t)
+                .unwrap()
+                .map(|e| e.unwrap().0.value().to_vec())
+                .collect();
+            assert!(!keys.is_empty());
+            for k in keys {
+                t.remove(&k[..]).unwrap();
+            }
+        }
+        w.commit().unwrap();
+    }
+    let s = fsck_refuses_until_reindex(
+        &path,
+        "the assessment table differs from the assessment records; run rdy reindex",
+    );
+    assert!(s.assessment_of_proposal(&v, s.log_end()).unwrap().is_some());
+}

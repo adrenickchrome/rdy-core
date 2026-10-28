@@ -326,7 +326,7 @@ impl StoreReader {
     }
 
     /// The residue with hash `h`.
-    fn residue(&self, h: &Hash) -> Result<RedactionResidue, StoreError> {
+    pub(crate) fn residue(&self, h: &Hash) -> Result<RedactionResidue, StoreError> {
         self.get_typed(kinds::REDACTION_RESIDUE, h)
     }
 

@@ -318,9 +318,7 @@ impl Authorization {
                 return Err(StoreError::corrupt_at(loc));
             };
             // the residue keeps the change's links, so a removed briefed change keeps its place
-            if c.links.briefing.is_some() {
-                out.push(IndexEntry::BriefedChange { at: loc });
-            }
+            out.extend(crate::store::briefed_entry(&c.links, loc));
             for op in &c.ops {
                 match op {
                     ResidualOp::Create { version, .. } | ResidualOp::Update { version, .. } => out

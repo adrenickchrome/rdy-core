@@ -1606,6 +1606,26 @@ impl Index {
         }
     }
 
+    /// Every row of the assessment table, decoded: (version, the assessment's location) -> the
+    /// assessment.
+    pub(crate) fn assessment_rows(&self) -> Result<BTreeMap<(Hash, Location), Hash>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let mut out = BTreeMap::new();
+        for item in r
+            .open_table(ASSESSMENT_PROPOSALS)
+            .map_err(db)?
+            .iter()
+            .map_err(db)?
+        {
+            let (k, v) = item.map_err(db)?;
+            out.insert(
+                hash_at_from(k.value(), "assessment proposal key")?,
+                hash_from(v.value(), "assessment proposal entry")?,
+            );
+        }
+        Ok(out)
+    }
+
     /// The seals that name `decision`, each with its own location, in landing order.
     pub(crate) fn plan_decision_rows(
         &self,
