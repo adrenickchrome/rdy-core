@@ -966,6 +966,69 @@ impl<'a> Site<'a> {
         }
     }
 
+    /// [`Site::label`] as coded text ([`Site::plain_coded`]) when the label is the start of `b`'s
+    /// text (its summary words, from its statement, prompt, body, alt or caption), so that a code
+    /// span there stays code (ruling task-2). `None` when the label is a title, a name, a tree
+    /// name, a value, a code or diagram label, a figure's source text, the notice, or empty
+    /// (`Untitled`): [`Site::label`] then gives it. Uncut; an id-shaped word reads as `…`, as in
+    /// [`Site::label`].
+    pub(crate) fn label_coded(&self, b: &Block) -> Option<String> {
+        let tree = tree::is_tree_type(&b.block_type);
+        let said = b
+            .field_str("title")
+            .filter(|t| !t.is_empty())
+            .or_else(|| b.field_str("name").filter(|t| !t.is_empty() && !tree));
+        if is_profile(b)
+            || b.is_redacted()
+            || entity::value_text(b).is_some()
+            || said.is_some()
+            || tree
+            || matches!(b.block_type.as_str(), "code" | "diagram")
+        {
+            return None;
+        }
+        // the fields `summary_words` reads, in its order; an unresolved reference keeps its
+        // token, then every id-shaped word is `…`, as the label's summary reads it
+        let read = |text: &str, mode: RefMode, form: Form| {
+            self.plain_coded(text, mode, form, &|token| token.to_string())
+        };
+        let blank = |coded: &str| {
+            crate::changes::Decoder::default()
+                .read(coded)
+                .iter()
+                .all(|c| c.0.is_whitespace())
+        };
+        let fields: &[(&str, Form)] = &[
+            ("statement", Form::Spans),
+            ("prompt", Form::Spans),
+            ("name", Form::Label),
+            ("title", Form::Label),
+        ];
+        let words = if let Some((f, form)) = fields
+            .iter()
+            .find(|(f, _)| b.field_str(f).is_some_and(|s| !s.is_empty()))
+        {
+            read(b.field_str(f).unwrap_or(""), RefMode::Strict, *form)
+        } else {
+            let body = (!b.body.is_empty()).then(|| match b.block_type.as_str() {
+                // a figure's source is not Markdown: it holds no code span
+                "figure" => None,
+                _ => Some(read(&b.body, RefMode::for_body(&b.block_type), Form::Body)),
+            });
+            match body {
+                Some(None) => return None,
+                Some(Some(w)) if !blank(&w) => w,
+                _ => ["alt", "caption"]
+                    .iter()
+                    .find_map(|f| b.field_str(f).filter(|s| !s.trim().is_empty()))
+                    .map(|s| read(s, RefMode::Strict, Form::Label))
+                    .unwrap_or_default(),
+            }
+        };
+        let words = ID_INSIDE.replace_all(&words, "…").into_owned();
+        (!blank(&words)).then_some(words)
+    }
+
     /// `b`'s number among the blocks of its kind in its doc (see `numbers`); 1 when it has none.
     pub fn number(&self, b: &Block) -> usize {
         self.numbers.get(&b.id).copied().unwrap_or(1)

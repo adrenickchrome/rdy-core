@@ -241,6 +241,9 @@ figcaption { font-size: 0.84rem; color: var(--ink-soft); margin-top: 0.5rem; }
 .toc-link { display: block; padding: 0.2rem 0 0.2rem 0.75rem; border-left: 2px solid var(--line); color: var(--ink-soft); text-decoration: none; line-height: 1.4; overflow-wrap: anywhere; }
 .toc-link:hover { color: var(--ink); }
 .toc-link.is-active { border-left-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.toc-changes { margin: 0 0 1rem; }
+.toc-chg .chg-mark { margin-inline: 0 0.3rem; }
+.toc-link:not(.toc-chg) .chg-mark { margin-inline-start: 0.3rem; }
 /* == /toc == */
 
 /* == search == */

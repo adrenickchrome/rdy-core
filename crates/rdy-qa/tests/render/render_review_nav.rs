@@ -120,6 +120,8 @@ fn rv1_a_draft_with_nothing_a_reader_sees_changed_shows_no_marker() {
             "chg-removed",
             "nav-removed",
             "Changes in this view",
+            "toc-changes",
+            "id=\"Removed-",
         ] {
             assert!(!h.contains(m), "{} holds {m}", p.display());
         }

@@ -38,7 +38,7 @@
     {% if kind == "doc" and (pager.prev or pager.next) %}<nav class="pager" aria-label="Previous and next">{% include "partials/pager.html" %}</nav>{% endif %}
     <footer class="foot">{% block foot %}{% include "partials/colophon.html" %}{% endblock %}</footer>
   </main>
-  {% if toc and toc.entries %}<aside class="index"><details class="toc-fold" open><summary class="fold-summary">On this page</summary><nav aria-label="On this page">{% include "partials/toc.html" %}</nav></details></aside>{% endif %}
+  {% if toc and (toc.entries or toc.changes) %}<aside class="index{% if not toc.entries %} chg{% endif %}"><details class="toc-fold" open><summary class="fold-summary">On this page</summary>{% include "partials/toc.html" %}</details></aside>{% endif %}
 </div>
 <noscript><p class="noscript">{% block noscript %}{% if live %}Search and live updates need JavaScript.{% else %}Search needs JavaScript.{% endif %}{% endblock %} Everything else on this page works without it.</p></noscript>
 <script src="{{ root }}assets/app.js" defer></script>

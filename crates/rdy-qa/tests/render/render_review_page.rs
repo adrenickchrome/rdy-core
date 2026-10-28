@@ -35,8 +35,7 @@ fn block_with<'a>(h: &'a str, text: &str) -> &'a str {
 
 const EDITED: &str = "<span class=\"chg chg-label chg-edited\">Edited</span>";
 const NEW: &str = "<span class=\"chg chg-label chg-new\">New</span>";
-const REMOVED: &str =
-    "<details class=\"chg chg-removed\"><summary>Removed</summary><div class=\"chg-old\">";
+const REMOVED: &str = "<summary>Removed</summary><div class=\"chg-old\">";
 
 #[test]
 fn rv1_a_draft_page_bars_edited_and_new_blocks_and_marks_the_edited_lede() {
@@ -77,6 +76,12 @@ fn rv1_a_removed_block_is_a_collapsed_removed_line_where_it_was() {
     let a = article(&h);
     assert_eq!(a.matches(REMOVED).count(), 1);
     let at = a.find(REMOVED).unwrap();
+    // its anchor is the group's jump target (rvm2, O2)
+    assert!(
+        a[..at].ends_with("<details class=\"chg chg-removed\" id=\"Removed-1\">"),
+        "{}",
+        &a[at.saturating_sub(80)..at]
+    );
     let line = &a[at..at + a[at..].find("</details>").unwrap()];
     assert!(line.contains("Gone soon."), "{line}");
     assert!(

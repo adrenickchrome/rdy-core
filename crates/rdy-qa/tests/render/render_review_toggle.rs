@@ -58,6 +58,8 @@ fn rv1_a_draft_page_offers_show_changes_hidden_until_script_and_canon_and_tags_d
                 "nav-removed",
                 "Changes in this view",
                 "Changes in this proposal",
+                "toc-changes",
+                "id=\"Removed-",
             ] {
                 assert!(!h.contains(gone), "{scope:?} {p} holds {gone}");
             }

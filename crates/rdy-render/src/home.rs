@@ -233,7 +233,7 @@ fn coded(site: &Site, b: &Block) -> String {
 
 /// A card's summary as HTML from coded text `coded` ([`Site::plain_coded`]): cut as [`cut`] says,
 /// escaped, each code span in a `<code>` element, as on its page (ruling final-round1).
-fn summary_html(coded: &str, max: usize) -> String {
+pub(crate) fn summary_html(coded: &str, max: usize) -> String {
     let mut out = String::new();
     runs_html(&mut out, &cut(&Decoder::default().read(coded), max));
     out

@@ -669,20 +669,26 @@ fn reserved(r: &mut Rdy) -> Scope {
 /// Re-taken for the review markers plan's Task 1 (D-NYCMF): the sidebar marker rules of
 /// `assets/site.css` moved, so every scope's digest moved; in a view, the sidebar's changed rows
 /// moved too. Canon and tag pages keep their bytes (`rvm1_canon_rows_keep_their_bytes`).
+/// Re-taken for the review markers plan's Task 2 (D-NYCMF): the page index's marker rules of
+/// `assets/site.css` moved, so every scope's digest moved; in a view, the changed doc pages'
+/// index moved too. With the old stylesheet the canon digest is the one before.
+/// Re-taken for Task 2's fix round (ruling task-2): only the index marker rule of
+/// `assets/site.css` moved (`.toc-link:not(.toc-chg) .chg-mark`); with the old stylesheet every
+/// digest is the one before.
 #[test]
 fn ec3_the_site_build_is_unchanged() {
     const BASE: [(&str, &str); 3] = [
         (
             "canon",
-            "fcc61e926dee0641dcc1967c7a00b9f0835550145f61310eeaebdf524fd2e9fa",
+            "2bd6370452dc8c158340e9b839397c6c67ea143dd65212ae3eb9c70086ff3485",
         ),
         (
             "view:editing",
-            "d542d06253b3d399df2c21b671f837ee17d3ff204d0488167a37be7023e491b3",
+            "1da69b50237f867999c4fea3ad9e8e07570c380ff474a3600f4e0d190b60b9f1",
         ),
         (
             "view:reserved",
-            "4ee310e4170a68ad706bccac2c815fc16459c1368cbe71c5a268cd5bcaf8bb5b",
+            "928f9fd2a1e69b4677427ab037fc59a624c073127423621de16e405aed3fb0b7",
         ),
     ];
     // the ids the corpus's generated pages and the reserved docs draw come from a seeded stream

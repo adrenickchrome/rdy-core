@@ -224,26 +224,33 @@ fn scopes() -> Vec<(&'static str, tempfile::TempDir, Rdy, Scope)> {
 /// Re-taken for the review markers plan's Task 1 (D-NYCMF): the sidebar marker rules of
 /// `assets/site.css` moved, so every scope's digest moved; in a scope with review marks, the
 /// sidebar's changed rows moved too. Canon and tag pages keep their bytes.
+/// Re-taken for the review markers plan's Task 2 (D-NYCMF): the page index's marker rules of
+/// `assets/site.css` moved, so every scope's digest moved; in a view and a proposal, the changed
+/// doc pages' index moved too. With the old stylesheet the canon and tag digests are the ones
+/// before.
+/// Re-taken for Task 2's fix round (ruling task-2): only the index marker rule of
+/// `assets/site.css` moved (`.toc-link:not(.toc-chg) .chg-mark`); with the old stylesheet every
+/// digest is the one before.
 const SITE_DIGESTS: [(&str, &str, &str); 4] = [
     (
         "canon",
-        "0f44c997c43e1607457d62bc7f00b363c13b4d3366502071e2b657d6c515c2d6",
-        "bef43fb8129b88f45cc842fb40c3460b15a48b76f42716f0c8aa2183dd0b45e3",
+        "65226f6a02b833a5f5e3decb742a18c4c26c8b37b5c1ca50e5af3fa7863db677",
+        "4190f0e4220ebe5f63ec45114c7f35945ce09cef26951a69233968534aa69806",
     ),
     (
         "tag",
-        "ff2d19fde29bc54b4234c17e47c941fb6ca5a640b73076d2179f2d032b252c52",
-        "3ce235f3048878c8b06d03e56f87d2ee230d33e59b480dbcaa5078254c99ca16",
+        "74551ea6342d8eaabd066a7dcc0c96ba37d3c36328c58a754244912034ef7aeb",
+        "4d3edea62cf5d688a37d164b29ff277415950dca5a69fdd6500a098df860e7d6",
     ),
     (
         "view",
-        "7e53682d9086b023794ad02b1882868e018b126e767cabfd093087a6b768cda5",
-        "4133f80238c0a5a70affd620c9641ca0a3ecc34b1bf8c9ca041d5e2da2b2f66b",
+        "26f60d0d3cb864465833c6e6f62db789a114143b04205fec09c99ee2706bdc03",
+        "58197184a6b10a2545c2206ea68eea14452275b5fd0568a2cf1a54bf8432b346",
     ),
     (
         "proposal",
-        "54805ee2da10c8d54c1b5bcd3911003710efec90f79db5301b77a3e6fef5cef7",
-        "5e5eef28291db4e69e56a924b637396f52737d9d0f2fe0d7260721be80034409",
+        "c08f703f960dbc76ab6a4ac9fc5c370567d882576381cd6230a462c0b90b150f",
+        "a532c6f415a1870b3d4ee3bf2f684858f24cc566871b41a910a0b0cfd7f879e8",
     ),
 ];
 

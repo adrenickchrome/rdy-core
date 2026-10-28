@@ -178,6 +178,11 @@ pub struct TitleTools {
 #[derive(Clone, Debug, Serialize)]
 pub struct RemovedLine {
     pub html: String,
+    /// `Removed-<n>`, n from 1 in page order (O2).
+    pub anchor: String,
+    /// The label of its first removed block (rule 3), for the group only.
+    #[serde(skip)]
+    pub label: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1032,6 +1037,8 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
     };
     let mut body = Body::default();
     let mut items = vec![];
+    // a doc page's changes, for its index (O8: doc pages only)
+    let mut changes = vec![];
     let mut pager = Pager::default();
     let (mut title_tools, mut copy_page) = (None, None);
     match &kind {
@@ -1094,7 +1101,8 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         }
         Kind::Doc(id) => {
             let doc = sh.m.get(id).expect("a doc exists");
-            let (doc_body, mut built) = doc_parts(sh, doc, &page_url, &title);
+            let (doc_body, mut built, doc_changes) = doc_parts(sh, doc, &page_url, &title);
+            changes = doc_changes;
             if sh.draw_diagrams {
                 (title_tools, copy_page) = page_copy(
                     sh,
@@ -1154,8 +1162,10 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
             nav::build(site, current, &page_url, facts)
         },
         // the glossary's "On this page" names its groups, however few; a doc's lists its sections
+        // and, in a review render, its changes
         toc: match &body.glossary {
             Some(g) => toc::Toc {
+                changes: vec![],
                 entries: g
                     .groups
                     .iter()
@@ -1164,10 +1174,15 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
                         anchor: g.anchor.clone(),
                         depth: 1,
                         children: vec![],
+                        change: None,
                     })
                     .collect(),
             },
-            None => toc::build(&items),
+            None => toc::build(
+                &items,
+                body.doc.as_ref().map_or(0, |d| d.removed_end.len()),
+                changes,
+            ),
         },
         pager,
         search_href: rel(&page_url, "search-index.json"),
@@ -1279,7 +1294,15 @@ pub fn finish(sh: &Shared, ctx: &PageContext, index: &mut search::Index) {
 
 /// The doc's own part of the context and its blocks as items. Its diagrams are drawn here, in
 /// block order, before any template is rendered.
-fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec<Item>) {
+///
+/// In a review render it also gives the page's changes in page order, for the index's "Changes on
+/// this page" group (D-NYCMF, O4); otherwise none.
+fn doc_parts(
+    sh: &Shared,
+    doc: &Block,
+    page: &str,
+    title: &str,
+) -> (DocBody, Vec<Item>, Vec<toc::Change>) {
     let (m, site) = (sh.m, sh.site);
     let link = |id: &BlockId| sh.link(page, id);
     let local = |h: &str| sh.local_href(page, h);
@@ -1307,6 +1330,8 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
         removed_end: vec![],
     };
     let mut items = vec![];
+    // the group's label of each item that carries a word, beside `items`
+    let mut labels: Vec<Option<String>> = vec![];
     // each drawing's places on this page
     let places = RefCell::new(BTreeMap::new());
     let diagram = |b: &Block, source: &str| sh.diagram_view(b, source, title, page, &places);
@@ -1367,6 +1392,8 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
         // the heading or name as a reader reads it: its references as their labels; a removed
         // block's is the notice
         let removed = sh.shows_removed(b);
+        let change = sh.review.and_then(|r| r.mark(&b.id));
+        labels.push(change.map(|_| group_label(sh, site, b)));
         let titled = matches!(
             b.block_type.as_str(),
             "section" | "term" | "component" | "actor" | "interface" | "flow" | "value" | "entity"
@@ -1409,16 +1436,25 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
             },
             ref_head,
             ref_,
-            change: sh.review.and_then(|r| r.mark(&b.id)),
+            change,
             diff_html: edited_diff(sh, &b.id),
             removed_before: vec![],
             copy: None,
         });
     }
     // the removed lines: before the block they stood before, else at the doc's end
+    let old = sh.old_site.unwrap_or(site);
     for line in sh.review.map(|r| r.removed_in(&doc.id)).unwrap_or_default() {
         let html = RemovedLine {
             html: removed_html(sh, &line.blocks, page),
+            // given below, in page order
+            anchor: String::new(),
+            // read as a removed page's row reads its label; removed content is the notice
+            label: line
+                .blocks
+                .first()
+                .map(|b| group_label(sh, old, b))
+                .unwrap_or_default(),
         };
         let target = match &line.before {
             Some(b) if lede_block.is_some_and(|l| l.id == *b) => items.first_mut(),
@@ -1433,7 +1469,81 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
             None => doc_body.removed_end.push(html),
         }
     }
-    (doc_body, items)
+    // the Removed lines' anchors, in page order (O2)
+    let lines = items
+        .iter_mut()
+        .flat_map(|i| i.removed_before.iter_mut())
+        .chain(doc_body.removed_end.iter_mut());
+    for (n, line) in lines.enumerate() {
+        line.anchor = format!("Removed-{}", n + 1);
+    }
+    let changes = match sh.review {
+        Some(_) => page_changes(
+            &doc_body,
+            &items,
+            &labels,
+            lede_block.map(|l| group_label(sh, site, l)),
+        ),
+        None => vec![],
+    };
+    (doc_body, items, changes)
+}
+
+/// The group's label of `b` as `site` reads it, cut to [`toc::LABEL_MAX`], as escaped HTML: the
+/// notice when `b` reads as removed content (as its page shows it, [`Shared::shows_removed`]);
+/// else the start of its text with each code span as code when its label is that
+/// ([`Site::label_coded`], ruling task-2); else its label.
+fn group_label(sh: &Shared, site: &Site, b: &Block) -> String {
+    if sh.shows_removed(b) {
+        return toc::change_label_html(CONTENT_REMOVED);
+    }
+    match site.label_coded(b) {
+        Some(coded) => toc::change_label_coded(&coded),
+        None => toc::change_label_html(&site.label(b)),
+    }
+}
+
+/// The changes of a doc page in page order (rule 2, O4): the doc's own block, the lede, then each
+/// item's Removed lines and the item itself, then the Removed lines at the doc's end. `labels`
+/// holds each item's label beside `items`; `lede` the lede's label ([`group_label`]).
+fn page_changes(
+    body: &DocBody,
+    items: &[Item],
+    labels: &[Option<String>],
+    lede: Option<String>,
+) -> Vec<toc::Change> {
+    let removed = |line: &RemovedLine| toc::Change {
+        word: toc::Word::Removed,
+        label: line.label.clone(),
+        href: format!("#{}", line.anchor),
+    };
+    let mut out = vec![];
+    if let Some(m) = body.change {
+        out.push(toc::Change {
+            word: m.into(),
+            label: toc::change_label_html(&body.title),
+            href: "#main".into(),
+        });
+    }
+    if let (Some(m), Some(lede)) = (body.lede_change, lede) {
+        out.push(toc::Change {
+            word: m.into(),
+            label: lede,
+            href: format!("#{}", body.lede_anchor.as_deref().unwrap_or("main")),
+        });
+    }
+    for (item, label) in items.iter().zip(labels) {
+        out.extend(item.removed_before.iter().map(removed));
+        if let (Some(m), Some(label)) = (item.change, label) {
+            out.push(toc::Change {
+                word: m.into(),
+                label: label.clone(),
+                href: format!("#{}", item.anchor),
+            });
+        }
+    }
+    out.extend(body.removed_end.iter().map(removed));
+    out
 }
 
 /// A doc's lede: its first child when it is a prose of one paragraph (content directly in the

@@ -691,6 +691,7 @@ fn sr6_an_initial_proposal_agrees_on_menu_home_and_summary() {
     let doc = String::from_utf8_lossy(&site.files["proposed.html"]).to_string();
     assert!(!doc.contains("chg-label"), "{doc}");
     assert!(!doc.contains("chg-mark"), "{doc}");
+    assert!(!doc.contains("toc-changes"), "{doc}");
 }
 
 /// The review project with the view `retype` written by `ops`, and that view's site.
