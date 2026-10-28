@@ -178,6 +178,10 @@ const LAND_CODES: &[&str] = &[
     "E_ALT_CHOSEN",
     "E_ALREADY_LANDED",
     "E_VIEW_CLOSED",
+    // D-ME2HD keeps E_STALE_BASE among the landing's write checks until M3b; M3a Task 6
+    // (D-TX3KH) refuses a version whose block needs a new order key when its view changed or
+    // dropped that block after the proposal ("propose again"). The person re-queues it.
+    "E_STALE_BASE",
 ];
 const WC_CODES: &[&str] = &["E_WC_STALE", "E_WC_CONFLICT"];
 
