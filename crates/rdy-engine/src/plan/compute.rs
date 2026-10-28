@@ -127,7 +127,9 @@ pub(crate) struct VersionTensions {
 
 /// The [`VersionTensions`] of a version of `view` with changes `changes`. Only the changes the
 /// store holds are read: the key change a propose adds is not written yet, and has no tension
-/// set of its own.
+/// set of its own. A tension read that fails gives no tension item: the propose reply reports
+/// that error as `tensions_error` and never fails on it (cc16), and a landing's own tension
+/// check refuses on it before any seal is written.
 fn version_tensions(
     st: &ReadState,
     view: &str,
@@ -143,7 +145,9 @@ fn version_tensions(
     if held.is_empty() {
         return Ok(VersionTensions::default());
     }
-    let (open, landing) = crate::pending::queue::open_tension_forms(st, view, &held)?;
+    let Ok((open, landing)) = crate::pending::queue::open_tension_forms(st, view, &held) else {
+        return Ok(VersionTensions::default());
+    };
     Ok(VersionTensions {
         open: open
             .into_iter()
