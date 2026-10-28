@@ -204,7 +204,11 @@ fn ndh5_a_review_marks_no_block_outside_a_doc() {
     let out = site(&w, &Scope::View("draft".into()));
 
     let changes = html(out.path(), "changes.html");
-    assert_eq!(entry_ids(&changes), [claim.clone()], "{changes}");
+    assert_eq!(
+        entry_ids(&changes),
+        std::slice::from_ref(&claim),
+        "{changes}"
+    );
     assert_eq!(h2s(&changes), ["Guide"], "{changes}");
     assert!(!changes.contains("New root question?") && !changes.contains("New folder question?"));
     assert_eq!(
