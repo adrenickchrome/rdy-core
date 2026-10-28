@@ -234,23 +234,23 @@ fn scopes() -> Vec<(&'static str, tempfile::TempDir, Rdy, Scope)> {
 const SITE_DIGESTS: [(&str, &str, &str); 4] = [
     (
         "canon",
-        "65226f6a02b833a5f5e3decb742a18c4c26c8b37b5c1ca50e5af3fa7863db677",
-        "4190f0e4220ebe5f63ec45114c7f35945ce09cef26951a69233968534aa69806",
+        "64634170174de1c8b6ac0a2eeb829c0cac248854cc51cc180020246265ebd772",
+        "82e1d2bec683e8407e1d7b37d7c1c7c1d42a4551fb5b5136bd658c918c5f2631",
     ),
     (
         "tag",
-        "74551ea6342d8eaabd066a7dcc0c96ba37d3c36328c58a754244912034ef7aeb",
-        "4d3edea62cf5d688a37d164b29ff277415950dca5a69fdd6500a098df860e7d6",
+        "0595127f818757abbd854ef77bbe1e645ba7c94a669303111d015fb7104e6fbd",
+        "9040ee41a20845af2d091a0ffc27a64ca4f2dac499ba3013d529da3ea311cff6",
     ),
     (
         "view",
-        "26f60d0d3cb864465833c6e6f62db789a114143b04205fec09c99ee2706bdc03",
-        "58197184a6b10a2545c2206ea68eea14452275b5fd0568a2cf1a54bf8432b346",
+        "54d483ccc8930223c23fa8b50be30d942a9eedfeacac7945305eb2d8a43434c9",
+        "d609d9e11e6791766504287e51c78c07bf4890e3982f30e005ec0c0108eb9c15",
     ),
     (
         "proposal",
-        "c08f703f960dbc76ab6a4ac9fc5c370567d882576381cd6230a462c0b90b150f",
-        "a532c6f415a1870b3d4ee3bf2f684858f24cc566871b41a910a0b0cfd7f879e8",
+        "904c34a08315dadd00ff32fb85c08011c0c22d179ea2a28ff5ffa82ab35347e3",
+        "4d2dd03f691db6aa227c8838c5a538645ab0db450413054e6220587559eea9d3",
     ),
 ];
 
