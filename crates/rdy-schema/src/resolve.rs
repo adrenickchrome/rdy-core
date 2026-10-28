@@ -275,10 +275,16 @@ fn inject_engine_types(pack: &mut Pack) {
         def.traits = BTreeSet::from([Trait::Structural]);
         def.body = BodyRule::Forbidden;
     }
+    // a folder holds folders and docs, and the four types that may sit outside a doc
+    // (D-P3YD5, D-X3136), whatever a pack lists
     pack.block_types
         .get_mut(tree::FOLDER)
         .expect("forced above")
-        .children = vec![tree::FOLDER.to_string(), tree::DOC.to_string()];
+        .children = [tree::FOLDER, tree::DOC]
+        .into_iter()
+        .chain(tree::OUTSIDE_DOC_TYPES)
+        .map(str::to_string)
+        .collect();
     // A publication profile (D-KDFZ3): one closed definition, a direct child of a doc only.
     pack.block_types.insert(
         publication::PROFILE_TYPE.to_string(),

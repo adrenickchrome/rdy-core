@@ -18751,7 +18751,11 @@
           "body": "forbidden",
           "children": [
             "folder",
-            "doc"
+            "doc",
+            "decision",
+            "question",
+            "finding",
+            "source"
           ],
           "class": null,
           "fields": {

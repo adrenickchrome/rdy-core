@@ -130,10 +130,12 @@ mod tests {
             "disclosure": against.then(|| json!({
                 "profile_changed": true,
                 "added_docs": [{}], "removed_docs": [], "changed_docs": [{}, {}],
-                "changed_folders": [], "added_attachments": [{}], "removed_attachments": [],
+                "changed_folders": [], "changed_outside_docs": [{}, {}],
+                "added_attachments": [{}], "removed_attachments": [],
                 "changed_attachments": [{}],
                 "new_references": [], "new_reference_count": 5,
                 "omitted": {"added_docs": 0, "removed_docs": 4, "changed_docs": 0, "changed_folders": 0,
+                    "changed_outside_docs": 1,
                     "added_attachments": 0, "removed_attachments": 0, "changed_attachments": 0, "new_references": 0}
             })),
         })
@@ -165,7 +167,7 @@ mod tests {
         );
         assert_eq!(
             check_text(&report(true, 0), "site"),
-            "Publication profile site: warning.\n7 blocks in 2 docs and 1 folders.\nReferences outside selection: 3.\nProfile revision changed: yes.\nDisclosure changes: 1 added docs, 4 removed docs, 2 changed docs, 0 changed folders, 0 changed blocks outside docs, 2 attachment changes, 5 new references.\nSome rows are omitted. Counts include every row."
+            "Publication profile site: warning.\n7 blocks in 2 docs and 1 folders.\nReferences outside selection: 3.\nProfile revision changed: yes.\nDisclosure changes: 1 added docs, 4 removed docs, 2 changed docs, 0 changed folders, 3 changed blocks outside docs, 2 attachment changes, 5 new references.\nSome rows are omitted. Counts include every row."
         );
         assert!(
             check_text(&report(false, 1), "site")

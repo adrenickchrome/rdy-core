@@ -297,16 +297,10 @@ impl ReadState {
 
         let mut by_doc: BTreeMap<&BlockId, Vec<&BlockEntry>> = BTreeMap::new();
         let mut by_area: BTreeMap<String, Vec<&BlockEntry>> = BTreeMap::new();
-        let mut paths: BTreeMap<String, String> = BTreeMap::new();
         let mut all: Vec<CoverageIssue> = vec![];
         for (id, e) in &entries {
             if let Some(d) = &e.doc {
                 by_doc.entry(d).or_default().push(e);
-            }
-            if !e.issues.is_empty()
-                && let Some(p) = m.path_of(id)
-            {
-                paths.insert(id.to_string(), p);
             }
             if let Some(b) = m.get(id) {
                 for a in self.areas_in(&m, b) {
@@ -315,6 +309,7 @@ impl ReadState {
             }
             all.extend(e.issues.iter().cloned());
         }
+        let paths = issue_paths(&m, entries.iter().copied());
         sort_issues(&mut all, &paths);
 
         let mut pages: Vec<PageScore> = by_doc

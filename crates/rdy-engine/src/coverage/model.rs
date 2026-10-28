@@ -142,8 +142,35 @@ fn mentions_map<S: serde::Serializer>(
     s.collect_map(m.iter().map(|(k, v)| (k, v.iter().collect::<Vec<_>>())))
 }
 
-/// Sorts `issues` by the closed order: the path of the block's doc (from `paths`, by block id;
-/// empty when absent), the block id, the dimension, the code and the subject.
+/// The path each block with an issue sorts by in the closed order, by block id: the block's own
+/// path, which is its doc's path, or its folder's for a block outside a doc (D-P3YD5). A block
+/// with no path (at the top level, outside a doc) has no row and sorts as empty. One path is
+/// computed per doc. Every read that lists issues builds its map here, so the same issues sort
+/// the same way in each.
+pub(crate) fn issue_paths<'a>(
+    m: &crate::materialize::Materialized,
+    blocks: impl IntoIterator<Item = (&'a BlockId, &'a BlockEntry)>,
+) -> BTreeMap<String, String> {
+    let mut doc_paths: BTreeMap<&BlockId, Option<String>> = BTreeMap::new();
+    let mut paths = BTreeMap::new();
+    for (id, e) in blocks {
+        if e.issues.is_empty() {
+            continue;
+        }
+        let path = match &e.doc {
+            Some(d) => doc_paths.entry(d).or_insert_with(|| m.path_of(d)).clone(),
+            None => m.path_of(id),
+        };
+        if let Some(p) = path {
+            paths.insert(id.to_string(), p);
+        }
+    }
+    paths
+}
+
+/// Sorts `issues` by the closed order: the block's path (from `paths`, by block id, as
+/// [`issue_paths`] builds it; empty when absent), the block id, the dimension, the code and the
+/// subject.
 pub fn sort_issues(issues: &mut [CoverageIssue], paths: &BTreeMap<String, String>) {
     issues.sort_by(|a, b| issue_order(a, b, paths));
 }

@@ -17,11 +17,11 @@ pub use change::{CoverageChange, PageChange, coverage_change};
 pub(crate) use confidence::confidence_in;
 pub use confidence::*;
 pub use kinds::{KindCount, kinds_builds};
-pub(crate) use model::sort_issue_refs;
 pub use model::{
     BlockEntry, CoverageIssue, CoverageIssues, Dimension, Dismissal, IssueCode, Structural,
     sort_issues,
 };
+pub(crate) use model::{issue_paths, sort_issue_refs};
 pub use onboarding::*;
 pub(crate) use score::page_blocks;
 pub use score::{AreaScore, CoverageReport, PAGES_CAP, PageScore, Rollup, report_builds, rollup};

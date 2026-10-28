@@ -195,6 +195,13 @@ pub struct PublicationWarning {
 /// so a removal, which keeps a block's recorded version, keeps it, while `selection_hash` moves.
 /// `redactions` lists, sorted and once each, the approved removal requests this resolution
 /// applies: those of the selected blocks and of the selected attachments' manifests and chunks.
+///
+/// `removed_outside_docs` lists, in id order, the removed versions of blocks outside a doc that
+/// the source state holds and the selection does not keep (a named profile only; the implicit
+/// profile keeps every block). None of them is published or counted in the selection; the
+/// disclosure comparison reads them, so a block outside a doc that a baseline disclosed and that
+/// was removed since shows as a removal, never as a block that left the selection (ruling final
+/// item 4: a stub has no links, so it can no longer govern through its own `affects`).
 #[derive(Clone, Debug)]
 pub struct Resolved {
     pub profile: ResolvedProfile,
@@ -207,6 +214,7 @@ pub struct Resolved {
     pub selection_hash: Hash,
     pub selection_identity: Hash,
     pub redactions: Vec<Hash>,
+    pub removed_outside_docs: Vec<SelectionEntry>,
 }
 
 impl Resolved {
@@ -597,9 +605,9 @@ fn retain(keep: &mut BTreeSet<BlockId>, id: &BlockId, l: &Limits) -> Result<bool
 }
 
 /// Steps 2 and 3: each selector's whole subtree, then each selector's ancestor folders, then
-/// each decision with no doc that governs a block kept so far (or, removed, is linked by one),
-/// with its whole subtree and without its folder or any other ancestor outside a doc
-/// (D-P3YD5), with the tree checked on the way up and then by
+/// the decisions with no doc and the blocks they bring ([`governing_outside_docs`]), each
+/// without its folder or any other ancestor outside a doc (D-P3YD5), with the tree checked on
+/// the way up and then by
 /// [`check_tree`], all before any text is scanned. Iterative: a damaged store may nest deep or
 /// loop.
 fn select(
@@ -649,19 +657,32 @@ fn select(
     Ok(keep)
 }
 
-/// D-P3YD5: each decision of `m` with no doc, not yet kept, in id order, that governs a block of
-/// `keep` as it stands on entry, by any route and whatever its status
-/// ([`Graph::governed_through`]), is kept with its whole subtree. Its folder is not, nor any
-/// other ancestor outside a doc. A removed version (a stub) has no status, so it governs
-/// nothing; it is kept when a block of `keep` links to it through `decided_by`, `implements` or
-/// `affects`, as a removed decision in a selected doc is (ruling task-4 item 2).
+/// D-P3YD5, in three rules over the blocks of `m` with no doc, each kept with the selection
+/// bound:
+///
+/// 1. Each decision not yet kept, in id order, that governs a block of `keep` as it stands on
+///    entry, by any route and whatever its status ([`Graph::governed_through`]), is kept with
+///    its whole subtree. A removed version (a stub) has no status, so it governs nothing; it is
+///    kept when a block of `keep` links to it through [`STUB_LINKS`], as a removed decision in a
+///    selected doc is (ruling task-4 item 2). The routes are read in the source state, so a
+///    decision kept through an entity the selection holds back is published but shows on no
+///    trail (it over-reports in the comparison and the reference check, and discloses nothing
+///    more than the decision itself).
+/// 2. Each decision that supersedes or revokes a kept decision with no doc is kept with its
+///    whole subtree, transitively, so the selected graph derives the status the source derives
+///    and a trail never shows a replaced or withdrawn ruling as current (ruling final item 1).
+/// 3. Each decision, question, finding or source that a kept decision with no doc links to
+///    through [`HOP_LINKS`] is kept on its own, one hop only, as the base kept such a target in
+///    the selected doc that held both (ruling final item 2). Its own links are scanned as usual.
+///
+/// None of them brings its folder or any other ancestor outside a doc.
 fn governing_outside_docs(
     m: &Materialized,
     pack: &Pack,
     keep: &mut BTreeSet<BlockId>,
     l: &Limits,
 ) -> Result<(), RdyError> {
-    let candidates: Vec<&BlockId> = m
+    let candidates: BTreeSet<&BlockId> = m
         .iter()
         .filter(|b| b.block_type == rdy_model::decision::DECISION && m.doc_of(&b.id).is_none())
         .map(|b| &b.id)
@@ -673,7 +694,7 @@ fn governing_outside_docs(
     let mut cache = GoverningCache::default();
     let selected = keep.clone();
     let mut governing = vec![];
-    for d in candidates {
+    for &d in &candidates {
         if selected.contains(d) {
             continue;
         }
@@ -698,19 +719,78 @@ fn governing_outside_docs(
         }
     }
     for d in governing {
-        let mut stack = vec![d];
-        while let Some(id) = stack.pop() {
-            if !retain(keep, &id, l)? {
-                continue;
+        retain_subtree(m, keep, d, l)?;
+    }
+    // 2. the decisions that supersede or revoke a kept one, transitively
+    let mut todo: Vec<BlockId> = candidates
+        .iter()
+        .filter(|d| keep.contains(**d))
+        .map(|d| (*d).clone())
+        .collect();
+    while let Some(d) = todo.pop() {
+        for e in graph.incoming(&d) {
+            let EdgeKind::Link(n) = &e.kind else { continue };
+            if (n == rdy_model::decision::SUPERSEDES || n == rdy_model::decision::REVOKES)
+                && !keep.contains(&e.from)
+                && candidates.contains(&e.from)
+            {
+                retain_subtree(m, keep, e.from.clone(), l)?;
+                todo.push(e.from.clone());
             }
-            stack.extend(m.children(Some(&id)).iter().map(|c| c.id.clone()));
+        }
+    }
+    // 3. one hop from each kept decision with no doc
+    let kept: Vec<&BlockId> = candidates
+        .iter()
+        .filter(|d| keep.contains(**d))
+        .copied()
+        .collect();
+    for d in kept {
+        for e in graph.outgoing(d) {
+            let EdgeKind::Link(n) = &e.kind else { continue };
+            if HOP_LINKS.contains(&n.as_str())
+                && m.get(&e.to)
+                    .is_some_and(|t| tree::may_sit_outside_a_doc(&t.block_type))
+                && m.doc_of(&e.to).is_none()
+            {
+                retain(keep, &e.to, l)?;
+            }
         }
     }
     Ok(())
 }
 
+/// Keeps `id` and its whole subtree in `m`, each with the selection bound.
+fn retain_subtree(
+    m: &Materialized,
+    keep: &mut BTreeSet<BlockId>,
+    id: BlockId,
+    l: &Limits,
+) -> Result<(), RdyError> {
+    let mut stack = vec![id];
+    while let Some(id) = stack.pop() {
+        if !retain(keep, &id, l)? {
+            continue;
+        }
+        stack.extend(m.children(Some(&id)).iter().map(|c| c.id.clone()));
+    }
+    Ok(())
+}
+
+/// The links of a kept decision with no doc whose targets outside a doc are kept with it, one
+/// hop (ruling final item 2).
+const HOP_LINKS: [&str; 4] = [
+    rdy_model::decision::ANSWERS,
+    rdy_model::decision::DEPENDS_ON,
+    rdy_model::decision::SUPERSEDES,
+    rdy_model::decision::REVOKES,
+];
+
 /// The links through which a selected block keeps the removed version of a decision with no
-/// doc (ruling task-4 item 2).
+/// doc (ruling task-4 item 2). `affects` here is a selected block's own `affects` link to the
+/// decision; the decision's own `affects` is gone with its content, and the disclosure
+/// comparison shows that removal from the baseline's side
+/// ([`Resolved::removed_outside_docs`], ruling final item 4).
 const STUB_LINKS: [&str; 3] = [
     rdy_model::decision::DECIDED_BY,
     rdy_model::decision::IMPLEMENTS,
@@ -1025,6 +1105,22 @@ fn resolve_in(
         }
     };
 
+    // the removed versions outside a doc that the selection leaves out, for the comparison
+    let removed_outside_docs: Vec<SelectionEntry> = m
+        .iter()
+        .filter(|b| {
+            b.is_redacted()
+                && !keep.contains(&b.id)
+                && !tree::is_tree_type(&b.block_type)
+                && m.doc_of(&b.id).is_none()
+        })
+        .map(|b| SelectionEntry {
+            id: b.id.clone(),
+            version: m.version_of(&b.id).unwrap_or_else(|| b.version_hash()),
+            redaction: b.redaction(),
+        })
+        .collect();
+
     // 5. the selected state: cloned records, their source versions
     let versions = keep
         .iter()
@@ -1120,6 +1216,7 @@ fn resolve_in(
         selection_hash: Hash::of(&bytes),
         selection_identity,
         redactions: requests.into_sorted(),
+        removed_outside_docs,
     })
 }
 

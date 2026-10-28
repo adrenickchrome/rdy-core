@@ -86,13 +86,24 @@ fn synth(blocks: Vec<Block>) -> Materialized {
 
 /// The stub of a removed version of `id`.
 fn stub(id: &str, ty: &str, parent: Option<&str>, request: Hash) -> Block {
+    stub_of(
+        id,
+        ty,
+        parent,
+        Hash::of(format!("version of {id}").as_bytes()),
+        request,
+    )
+}
+
+/// The stub of the removed version `version` of `id`: a removal keeps the recorded version.
+fn stub_of(id: &str, ty: &str, parent: Option<&str>, version: Hash, request: Hash) -> Block {
     Block::redacted(
         bid(id),
         ty.into(),
         parent.map(bid),
         "m".into(),
         RedactedBlockIdentity {
-            version: Hash::of(format!("version of {id}").as_bytes()),
+            version,
             content_hash: Hash::of(format!("content of {id}").as_bytes()),
             frozen: false,
             request,
@@ -404,6 +415,197 @@ fn ndh4_the_disclosure_diff_lists_blocks_outside_docs() {
 
     // the report JSON holds the row, with its omitted count
     report_lists_a_block_outside_docs();
+}
+
+#[test]
+fn ndh4_the_disclosure_diff_shows_a_removed_decision_that_governed_through_its_own_affects() {
+    // ruling final item 4: a stub has no links, so a removed decision with no doc that governed
+    // a selected block only through its own `affects` is no longer kept; the comparison still
+    // shows that the block it disclosed before was removed, never that it left the selection.
+    // A removal keeps the recorded version, so the row is a removal at the same version.
+    let (_dir, r) = project();
+    let st = r.read();
+    let resolve =
+        |bs: Vec<Block>| publication::resolve_in_for_tests(&st, &synth(bs), "outside").unwrap();
+    let request = Hash::of(b"a request");
+    let affecting = |mut bs: Vec<Block>| {
+        for b in &mut bs {
+            if b.id == bid("D-R00T1") {
+                *b = link(b.clone(), "affects", "c-C7A1M");
+            }
+        }
+        bs
+    };
+    let removed = |mut bs: Vec<Block>, version: Hash| {
+        for b in &mut bs {
+            if b.id == bid("D-R00T1") {
+                *b = stub_of("D-R00T1", "decision", None, version, request);
+            }
+        }
+        bs
+    };
+    let before = resolve(affecting(blocks(&["d-GV1DE"], |c| c)));
+    let v = version_in(&before, "D-R00T1");
+    let after = resolve(removed(blocks(&["d-GV1DE"], |c| c), v));
+    assert!(!entry_ids(&after).contains(&bid("D-R00T1")));
+    let d = publication::disclosure_diff(&before, &after).unwrap();
+    assert_eq!(
+        d.changed_outside_docs,
+        vec![publication::ChangedOutsideDoc {
+            id: bid("D-R00T1"),
+            before_version: Some(v),
+            after_version: Some(v),
+            redacted: true,
+        }]
+    );
+    assert!(d.redactions.contains(&request), "{:?}", d.redactions);
+    // a stub that no baseline retained adds no row
+    let d = publication::disclosure_diff(&after, &after).unwrap();
+    assert!(
+        d.changed_outside_docs.is_empty(),
+        "{:?}",
+        d.changed_outside_docs
+    );
+
+    // a stub a selected block still links (ruling task-4 item 2) is kept at the same recorded
+    // version: the removal alone makes the row
+    let one = |c: Block| link(c, "decided_by", "D-R00T1");
+    let before = resolve(blocks(&["d-GV1DE"], one));
+    let v = version_in(&before, "D-R00T1");
+    let after = resolve(removed(blocks(&["d-GV1DE"], one), v));
+    assert_eq!(version_in(&after, "D-R00T1"), v);
+    let d = publication::disclosure_diff(&before, &after).unwrap();
+    assert_eq!(
+        d.changed_outside_docs,
+        vec![publication::ChangedOutsideDoc {
+            id: bid("D-R00T1"),
+            before_version: Some(v),
+            after_version: Some(v),
+            redacted: true,
+        }]
+    );
+}
+
+#[test]
+fn ndh4_a_kept_decision_with_no_doc_keeps_the_decisions_that_supersede_or_revoke_it() {
+    // ruling final item 1: every decision with no doc that supersedes or revokes a kept
+    // decision with no doc is kept too, transitively, with its subtree, so the selected graph
+    // gives the kept decision the status the source gives it
+    let (_dir, r) = project();
+    let st = r.read();
+    let mut bs = blocks(&["d-GV1DE"], governed);
+    bs.extend([
+        link(
+            decision("D-SXCC1", None, "A newer ruling."),
+            "supersedes",
+            "D-R00T1",
+        ),
+        link(
+            decision("D-SXCC2", Some("fd-AREA1"), "The newest ruling."),
+            "supersedes",
+            "D-SXCC1",
+        ),
+        with_body(
+            blk("ra-SXCC2", "rationale", Some("D-SXCC2"), "a"),
+            "Because it is newer.",
+        ),
+        link(
+            decision("D-RVK01", None, "Withdraw the folder ruling."),
+            "revokes",
+            "D-F01D1",
+        ),
+        // the decision it revokes governs nothing selected, so neither is kept
+        link(
+            decision("D-RVK02", None, "Withdraw the idle ruling."),
+            "revokes",
+            "D-0THR1",
+        ),
+        // a successor in a doc the profile does not select is not kept by this rule
+        named(blk("d-0THER", "doc", None, "d"), "other"),
+        link(
+            decision("D-1ND0C", Some("d-0THER"), "A ruling in a doc."),
+            "supersedes",
+            "D-R00T1",
+        ),
+    ]);
+    let res = publication::resolve_in_for_tests(&st, &synth(bs), "outside")
+        .unwrap_or_else(|e| panic!("resolve: {e}"));
+    let ids = entry_ids(&res);
+    for kept in [
+        "D-R00T1", "D-SXCC1", "D-SXCC2", "ra-SXCC2", "D-F01D1", "D-RVK01",
+    ] {
+        assert!(ids.contains(&bid(kept)), "{kept}: {ids:?}");
+    }
+    for left in ["D-RVK02", "D-0THR1", "D-1ND0C", "d-0THER", "fd-AREA1"] {
+        assert!(!ids.contains(&bid(left)), "{left}: {ids:?}");
+    }
+    assert!(res.references.rows.is_empty(), "{:?}", res.references.rows);
+}
+
+#[test]
+fn ndh4_a_kept_decision_with_no_doc_keeps_the_blocks_outside_docs_it_links() {
+    // ruling final item 2: one hop through answers, depends_on, supersedes or revokes, and only
+    // to a decision, a question, a finding or a source with no doc; the targets' own links are
+    // scanned as usual
+    let (_dir, r) = project();
+    let st = r.read();
+    let linked = |two_hops: bool| {
+        let mut bs = blocks(&["d-GV1DE"], |c| link(c, "decided_by", "D-R00T1"));
+        for b in &mut bs {
+            if b.id == bid("D-R00T1") {
+                let mut d = link(b.clone(), "answers", "Q-R00T1");
+                d = link(d, "depends_on", "F-R00T1");
+                d = link(d, "depends_on", "F-F01D1");
+                *b = link(d, "supersedes", "D-0THR1");
+            }
+        }
+        let finding = |id: &str, parent: Option<&str>| {
+            with_field(blk(id, "finding", parent, "e"), "statement", s("Seen."))
+        };
+        let f = finding("F-R00T1", None);
+        bs.extend([
+            profile_block("pf-PXB01", "d-ADM1N", "pub", "public", &["d-GV1DE"]),
+            with_field(
+                blk("Q-R00T1", "question", None, "f"),
+                "prompt",
+                s("Which ledger?"),
+            ),
+            if two_hops {
+                link(f, "depends_on", "S-R00T1")
+            } else {
+                f
+            },
+            finding("F-F01D1", Some("fd-AREA1")),
+            with_field(blk("S-R00T1", "source", None, "g"), "title", s("A source")),
+        ]);
+        synth(bs)
+    };
+    for profile in ["outside", "pub"] {
+        let res = publication::resolve_in_for_tests(&st, &linked(false), profile)
+            .unwrap_or_else(|e| panic!("resolve {profile}: {e}"));
+        let ids = entry_ids(&res);
+        for kept in ["D-R00T1", "Q-R00T1", "F-R00T1", "F-F01D1", "D-0THR1"] {
+            assert!(ids.contains(&bid(kept)), "{profile} {kept}: {ids:?}");
+        }
+        for left in ["fd-AREA1", "S-R00T1", "D-F01D1"] {
+            assert!(!ids.contains(&bid(left)), "{profile} {left}: {ids:?}");
+        }
+        assert!(res.references.rows.is_empty(), "{:?}", res.references.rows);
+        assert!(res.require_output().is_ok(), "{profile}");
+    }
+    // one hop only: a kept finding's own link to a source with no doc stays a row
+    let res = publication::resolve_in_for_tests(&st, &linked(true), "pub").unwrap();
+    assert!(!entry_ids(&res).contains(&bid("S-R00T1")));
+    assert_eq!(
+        res.references.rows,
+        vec![ReferenceRow {
+            source: bid("F-R00T1"),
+            location: "/links/depends_on/0".into(),
+            target: "S-R00T1".into(),
+            classification: Classification::Excluded,
+            occurrences: 1,
+        }]
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

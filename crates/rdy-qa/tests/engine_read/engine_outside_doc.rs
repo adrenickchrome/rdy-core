@@ -164,6 +164,16 @@ fn ndh3_path_filters_keep_a_block_under_the_folder() {
     let mut both = vec![ids["$qf"].clone(), ids["$qr"].clone()];
     both.sort();
     assert_eq!(open_questions(&whole), both);
+    // the folder block itself is no content: a filtered report leaves it out though its own
+    // path is `area`, as the base did (plan amendment, final fix round 1). A folder gets no
+    // coverage check, so neither report holds an issue on it.
+    for rep in [&under, &whole] {
+        assert!(
+            !rep.issues.iter().any(|i| i.block == ids["$f"]),
+            "{:?}",
+            rep.issues
+        );
+    }
     for rep in [&under, &whole] {
         for p in &rep.pages {
             for k in ["$dr", "$df", "$qr", "$qf"] {
@@ -191,6 +201,58 @@ fn ndh3_briefings_count_no_doc_for_them() {
     let pages = b.coverage.expect("coverage").pages;
     assert_eq!(pages.len(), 1, "{pages:?}");
     assert_eq!(pages[0].doc, ids["$g"]);
+    // `docs` holds the per-doc counts of a cut briefing only, so these are cut: the decision
+    // at the root that governs `$c` counts no doc, and the guide is listed once
+    let cut = |ks: &[&str]| r.read().brief(&Scope::Canon, &cov(ks), Some(1)).unwrap();
+    let b = cut(&["$dr", "$qr"]);
+    assert!(b.truncated, "the briefing is cut");
+    assert!(b.docs.is_empty(), "{:?}", b.docs);
+    let b = cut(&["$c"]);
+    assert!(b.truncated, "the briefing is cut");
+    let docs: Vec<&str> = b.docs.iter().map(|d| d.doc.as_str()).collect();
+    assert_eq!(docs, vec![ids["$g"].as_str()]);
+}
+
+#[test]
+fn ndh3_issues_sort_by_the_same_path_in_every_read() {
+    // the closed order keys an issue on its block's own path: its doc's path, or its folder's
+    // for a block outside a doc. A doc `aaa` sorts before the folder `area`, so its open
+    // question comes before `$qf`'s in the coverage report and the briefing alike.
+    let (_d, mut r, ids) = outside();
+    let w = write_as(&approver(), &mut r, "more", json!([
+        {"op": "create", "type": "doc", "id": "$a", "fields": {"name": "aaa", "title": "Aaa", "doc_type": "overview"}},
+        {"op": "create", "type": "section", "id": "$as", "parent": "$a", "fields": {"title": "Asks"}},
+        {"op": "create", "type": "question", "id": "$qa", "parent": "$as", "fields": {"prompt": "Doc question?"}}
+    ]))
+    .unwrap();
+    land(&mut r, "more").unwrap();
+    let qa = w.created["$qa"].clone();
+    let order = |issues: &[CoverageIssue]| -> Vec<String> {
+        issues
+            .iter()
+            .filter(|i| {
+                i.code == IssueCode::OpenQuestion && (i.block == qa || i.block == ids["$qf"])
+            })
+            .map(|i| i.block.clone())
+            .collect()
+    };
+    let want = vec![qa.clone(), ids["$qf"].clone()];
+    let st = r.read();
+    assert_eq!(
+        order(&st.coverage_report(&Scope::Canon, None).unwrap().issues),
+        want
+    );
+    let b = st
+        .brief(
+            &Scope::Canon,
+            &Coverage {
+                ids: vec![ids["$qf"].clone(), qa.clone()],
+                path: None,
+            },
+            None,
+        )
+        .unwrap();
+    assert_eq!(order(&b.coverage.expect("coverage").issues), want);
 }
 
 #[test]

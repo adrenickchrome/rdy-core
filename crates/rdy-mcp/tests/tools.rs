@@ -594,7 +594,11 @@ fn name_errors_carry_a_corrected_payload_and_schema_explains_names() {
     )
     .unwrap();
     assert!(s["name_rules"].as_str().unwrap().contains("ignoring case"));
-    assert_eq!(s["children"], json!(["folder", "doc"]));
+    // D-P3YD5, D-X3136 (ruling final item 3): the four types that may sit outside a doc
+    assert_eq!(
+        s["children"],
+        json!(["folder", "doc", "decision", "question", "finding", "source"])
+    );
     let all = rdy_schema(&mut st, serde_json::from_value(json!({})).unwrap()).unwrap();
     assert!(
         all["types"]
