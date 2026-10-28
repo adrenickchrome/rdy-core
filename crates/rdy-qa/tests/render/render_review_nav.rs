@@ -334,6 +334,14 @@ fn rvm1_folder_and_group_markers_sit_inside_their_row() {
         )),
         "{nav}"
     );
+    // the top-level folder has a page: its label and marker sit in the fold's summary
+    assert!(
+        nav.contains(&format!(
+            "<summary><span class=\"nav-group-label\">Added {}</span></summary>",
+            mark("new")
+        )),
+        "{nav}"
+    );
     assert!(
         nav.contains(&format!("<summary>Nested {}</summary>", mark("new"))),
         "{nav}"
@@ -344,8 +352,12 @@ fn rvm1_folder_and_group_markers_sit_inside_their_row() {
 fn rvm1_the_not_found_page_keeps_markers_and_no_summary_link() {
     let (_d, _r, _ids, out) = draft();
     let h = html(out.path(), "404.html");
-    assert!(h.contains(&format!("Intro {}</a>", mark("edited"))), "{h}");
-    assert!(!h.contains("changes.html#"), "{h}");
+    let nav = pages_nav(&h);
+    assert!(
+        nav.contains(&format!("Intro {}</a>", mark("edited"))),
+        "{nav}"
+    );
+    assert!(!nav.contains("changes.html#"), "{nav}");
 }
 
 #[test]
