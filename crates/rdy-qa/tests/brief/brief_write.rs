@@ -88,14 +88,17 @@ fn bwr1_two_agents_brief_the_same_block_one_writes_and_the_others_token_is_stale
         tx, ty,
         "the same blocks at the same versions brief to the same token"
     );
-    write_cited_as(
-        &mut r,
-        &x,
-        &x.default_view(),
-        upd(&s.a, "X's A."),
-        Some(&tx),
-    )
-    .unwrap();
+    // x rewords stable normative content: a clarification lands (D-ME2HD)
+    let req = WriteRequest {
+        view: x.default_view(),
+        ops: serde_json::from_value(upd(&s.a, "X's A.")).unwrap(),
+        justification: Some(rdy_model::Justification::Editorial {
+            class: rdy_model::EditorialClass::Clarify,
+            reason: "reword".into(),
+        }),
+        message: String::new(),
+    };
+    r.write_briefed(&x, req, Some(tx)).unwrap();
     land(&mut r, &x.default_view()).unwrap();
     let e = write_cited_as(
         &mut r,

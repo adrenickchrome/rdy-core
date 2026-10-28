@@ -1197,7 +1197,23 @@ fn coverage_hub(op: &str, runs: &Runs, describers: usize) -> Measure {
         json!({"op": "create", "type": "claim", "parent": "$s", "body": format!("Rule {k} holds."),
             "links": {"describes": [{"target": "$t"}]}})
     }));
-    let w = write(&mut r, "seed", serde_json::Value::Array(ops)).expect("the hub");
+    // the claims are stable normative content: the seed is justified, or it would not land
+    // (D-ME2HD)
+    let w = r
+        .write(
+            &writer(),
+            rdy_engine::WriteRequest {
+                view: "seed".into(),
+                ops: crate::fixtures::parse_test_ops(serde_json::Value::Array(ops))
+                    .expect("the hub's ops"),
+                justification: Some(rdy_model::Justification::Editorial {
+                    class: rdy_model::EditorialClass::Clarify,
+                    reason: "seed the hub".into(),
+                }),
+                message: String::new(),
+            },
+        )
+        .expect("the hub");
     land(&mut r, "seed").expect("land the hub");
     let term = w.created.get("$t").expect("the term").to_string();
     let hv = Scope::View("hv".into());

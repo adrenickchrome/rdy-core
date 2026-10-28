@@ -6,10 +6,31 @@ use rdy_qa::fixtures::*;
 use rdy_qa::mcp::McpClient;
 use serde_json::{Value, json};
 
+/// `rdy_qa::fixtures::write` with an editorial justification: the fixture writes stable normative content, and an
+/// unjustified change to stable content blocks its landing (D-ME2HD).
+fn clarified(
+    r: &mut rdy_engine::Rdy,
+    view: &str,
+    ops: serde_json::Value,
+) -> Result<rdy_engine::WriteResult, rdy_engine::RdyError> {
+    r.write(
+        &writer(),
+        rdy_engine::WriteRequest {
+            view: view.into(),
+            ops: parse_test_ops(ops)?,
+            justification: Some(rdy_model::Justification::Editorial {
+                class: rdy_model::EditorialClass::Clarify,
+                reason: "seed the test world".into(),
+            }),
+            message: String::new(),
+        },
+    )
+}
+
 /// Doc `rules` / section S (stable): claims "A needle is steel.", "A needle is thin.", "A pin is
 /// short."; landed. Returns their ids.
 fn rules(r: &mut Rdy) -> Vec<String> {
-    let w = write(r, "work", json!([
+    let w = clarified(r, "work", json!([
         {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "rules", "title": "Rules", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S", "lifecycle": "stable"}},
         {"op": "create", "type": "claim", "id": "$a", "parent": "$s", "body": "A needle is steel."},

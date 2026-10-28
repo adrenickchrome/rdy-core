@@ -4,9 +4,31 @@
 use rdy_engine::search::SearchFilters;
 use rdy_engine::*;
 use rdy_qa::fixtures::*;
-use rdy_qa::golden::write_as;
 use serde_json::json;
 use std::collections::BTreeMap;
+
+/// `rdy_qa::golden::write_as` with an editorial justification: the corpus writes stable normative
+/// content, and an unjustified change to stable content blocks its landing (D-ME2HD).
+fn clarified_as(
+    s: &Session,
+    r: &mut Rdy,
+    view: &str,
+    ops: serde_json::Value,
+) -> Result<WriteResult, RdyError> {
+    r.write(
+        s,
+        WriteRequest {
+            view: view.into(),
+            ops: serde_json::from_value(ops)
+                .map_err(|e| RdyError::new(E_BAD_INPUT, e.to_string(), "fix the test's ops"))?,
+            justification: Some(rdy_model::Justification::Editorial {
+                class: rdy_model::EditorialClass::Clarify,
+                reason: "seed the test corpus".into(),
+            }),
+            message: String::new(),
+        },
+    )
+}
 
 /// Folder guides / doc alpha / section A (stable): claim ac, code ak. Doc beta / section B
 /// (draft): claim bg, decision d (affects bg), rejected decision r, term t, claim bc (decided_by
@@ -15,7 +37,7 @@ use std::collections::BTreeMap;
 /// starts from its sheet, which holds t, bd and be; a filtered one keeps them as matches. Landed.
 /// Returns the ids by placeholder, and the landing id under "landing".
 fn corpus(r: &mut Rdy) -> BTreeMap<String, String> {
-    let w = write_as(&approver(), r, "work", json!([
+    let w = clarified_as(&approver(), r, "work", json!([
         {"op": "create", "type": "folder", "id": "$g", "fields": {"name": "guides", "title": "Guides"}},
         {"op": "create", "type": "doc", "id": "$a", "parent": "$g", "fields": {"name": "alpha", "title": "Alpha", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$as", "parent": "$a", "fields": {"title": "A", "lifecycle": "stable"}},

@@ -692,9 +692,14 @@ pub fn config_warnings(project: &Path, user_file: Option<&Path>) -> Vec<Issue> {
     effective_lenient(project, user_file).warnings
 }
 
-/// `config_warnings` over the environment's user config.
+/// `config_warnings` over the environment's user config, then the `W_PACK_SEVERITY` warnings of
+/// the project's pack (`pack_load::pack_severity_warnings`); a pack that fails to load adds none.
 pub fn config_warnings_for_env(project: &Path) -> Vec<Issue> {
-    config_warnings(project, user_file_from_env().as_deref())
+    let mut warnings = config_warnings(project, user_file_from_env().as_deref());
+    if let Ok(pack) = crate::pack_load::project_pack(project) {
+        warnings.extend(crate::pack_load::pack_severity_warnings(&pack));
+    }
+    warnings
 }
 
 /// The warnings of the user config at `user_file` alone, for a command that runs with no

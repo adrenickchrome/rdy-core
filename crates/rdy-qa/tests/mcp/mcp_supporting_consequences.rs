@@ -242,7 +242,8 @@ fn rf10_mcp_reports_missing_source_tension_and_followups() {
             &c1[..12]
         )
     );
-    assert_eq!(row["severity"], "advisory");
+    // blocking in stable content (D-ME2HD)
+    assert_eq!(row["severity"], "blocking");
 
     // rdy_view: undoing the delete resolves it; excluding C0 opens it again
     let undo = call(&mut st, rdy_view, json!({"op": "undo"}));

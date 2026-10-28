@@ -9,7 +9,7 @@ use rdy_qa::tensions::*;
 use serde_json::json;
 
 #[test]
-fn tunj1_an_unjustified_change_to_stable_normative_content_is_advisory_by_default() {
+fn tunj1_an_unjustified_change_to_stable_normative_content_is_blocking() {
     let (_d, mut r) = project();
     let s = stable_spec(&mut r);
     let tok = brief_of(&r, &Scope::Canon, &[&s.c]).base.token;
@@ -18,7 +18,7 @@ fn tunj1_an_unjustified_change_to_stable_normative_content_is_advisory_by_defaul
     assert_eq!(change_sides(&t), vec![change_of(&w)]);
     assert_eq!(
         (t.severity, t.overridden),
-        (TensionSeverity::Advisory, false)
+        (TensionSeverity::Blocking, false)
     );
     assert_eq!(t.blocks(), vec![s.c.clone()]);
 }
@@ -78,7 +78,13 @@ fn tunj1_landing_an_unjustified_change_resolves_it() {
     let s = stable_spec(&mut r);
     let tok = brief_of(&r, &Scope::Canon, &[&s.c]).base.token;
     write_cited_as(&mut r, &ag("a"), "a", upd(&s.c, "C changed."), Some(&tok)).unwrap();
-    one(&r, TensionKind::UnjustifiedChange);
+    let t = one(&r, TensionKind::UnjustifiedChange);
+    // blocking in stable content (D-ME2HD): it refuses the landing until a human dismisses it
+    assert_eq!(t.severity, TensionSeverity::Blocking);
+    let e = land(&mut r, "a").unwrap_err();
+    assert_eq!(e.code, rdy_engine::E_PROPOSAL_NOT_READY, "{e:#?}");
+    r.dismiss_tension(&writer(), &tension_label(&t.id), "a deliberate change")
+        .unwrap();
     land(&mut r, "a").unwrap();
     assert!(of_kind(&r, TensionKind::UnjustifiedChange).is_empty());
 }
@@ -198,7 +204,9 @@ fn msw21_a_dismissal_holds_until_the_view_rewrites_the_block() {
     let s = stable_spec(&mut r);
     put_j(&mut r, "a", upd(&s.c, "C changed."), None);
     let t = one(&r, TensionKind::UnjustifiedChange);
-    r.dismiss_tension(&ag("a"), &tension_label(&t.id), "a small fix")
+    // blocking in stable content (D-ME2HD): a human of another actor dismisses it
+    assert_eq!(t.severity, TensionSeverity::Blocking);
+    r.dismiss_tension(&writer(), &tension_label(&t.id), "a small fix")
         .unwrap();
     put_j(
         &mut r,

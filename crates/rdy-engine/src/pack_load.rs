@@ -4,7 +4,7 @@ use crate::config::{Config, parse_config, read_config};
 use crate::config_levels;
 use crate::handle::io;
 use crate::{Delta, E_CONFIG, Rdy, RdyError, ServeConfig};
-use rdy_schema::{AreaMatcher, Pack, PackSet};
+use rdy_schema::{AreaMatcher, Issue, Pack, PackSet, Severity, TensionKind, TensionSeverity};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -159,6 +159,30 @@ pub fn resolve_pack(project: &Path, name: &str) -> Result<Pack, RdyError> {
 pub fn project_pack(project: &Path) -> Result<Pack, RdyError> {
     let cfg = read_config(project)?;
     resolve_pack(project, &cfg.pack)
+}
+
+/// A pack lowers a tension kind that blocks in stable content (D-ME2HD); rdy keeps it blocking.
+pub const W_PACK_SEVERITY: &str = "W_PACK_SEVERITY";
+
+/// The `W_PACK_SEVERITY` warnings of `pack`: one per kind that blocks in stable content
+/// ([`TensionKind::blocks_in_stable`]) that the pack sets to advisory.
+pub fn pack_severity_warnings(pack: &Pack) -> Vec<Issue> {
+    TensionKind::ALL
+        .into_iter()
+        .filter(|k| {
+            k.blocks_in_stable() && pack.tensions.get(k) == Some(&TensionSeverity::Advisory)
+        })
+        .map(|k| Issue {
+            severity: Severity::Warning,
+            code: W_PACK_SEVERITY,
+            block: None,
+            message: format!(
+                "pack {} lowers {k} in stable content; rdy keeps it blocking",
+                pack.name
+            ),
+            fix: format!("remove the {k} severity from the pack"),
+        })
+        .collect()
 }
 
 /// The `.yaml` and `.yml` files of a packs directory, sorted; none if it does not exist.

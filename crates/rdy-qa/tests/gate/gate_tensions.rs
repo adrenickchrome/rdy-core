@@ -1001,7 +1001,14 @@ fn msw21_propose_judges_the_proposals_net_change() {
         "{:?}",
         sub.tensions
     );
-    assert!(sub.tensions.iter().all(|t| t.refuses == Some(false)));
+    // blocking in stable content (D-ME2HD): the subset's unjustified change refuses
+    assert!(
+        sub.tensions
+            .iter()
+            .all(|t| t.refuses == Some(t.kind == TensionKind::UnjustifiedChange)),
+        "{:?}",
+        sub.tensions
+    );
     let full = propose(&mut r, "a");
     assert!(sides(&full).is_empty(), "{:?}", full.tensions);
 }

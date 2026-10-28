@@ -12016,6 +12016,7 @@
       "W_DIAGRAM_FAILED": "\"W_DIAGRAM_FAILED\"",
       "W_DIAGRAM_INVALID": "\"W_DIAGRAM_INVALID\"",
       "W_DIAGRAM_UNSUPPORTED": "\"W_DIAGRAM_UNSUPPORTED\"",
+      "W_PACK_SEVERITY": "\"W_PACK_SEVERITY\"",
       "W_PLAN_ANSWER_LAPSED": "\"W_PLAN_ANSWER_LAPSED\"",
       "W_PLAN_OPEN": "\"W_PLAN_OPEN\"",
       "W_PUBLICATION_REFERENCE": "\"W_PUBLICATION_REFERENCE\"",
@@ -12174,6 +12175,11 @@
         "W_CONFIG_UNKNOWN",
         "a config file (.rdy/local.yaml, the project config or the user config) holds a key rdy does not know (such as a typo), or a known key in a file where rdy does not read it; the warning names the file it belongs in; rdy ignores the key; reported by rdy config --show-origin, rdy status, every CLI command and rdy_session",
         "fix the key's spelling (the fix names the nearest known key), move it to the file the warning names, or remove it"
+      ],
+      [
+        "W_PACK_SEVERITY",
+        "a pack lowers unjustified_change",
+        "remove the unjustified_change severity from the pack"
       ],
       [
         "W_UNAPPLIED_DECISION",
@@ -13008,6 +13014,7 @@
       "W_BRIEF_STALE",
       "E_PAGE_STALE",
       "W_CONFIG_UNKNOWN",
+      "W_PACK_SEVERITY",
       "W_UNAPPLIED_DECISION",
       "E_SITE",
       "W_SITE_LAN",
@@ -14378,6 +14385,10 @@
               "when": "string"
             },
             "W_DIAGRAM_UNSUPPORTED": {
+              "fix": "string",
+              "when": "string"
+            },
+            "W_PACK_SEVERITY": {
               "fix": "string",
               "when": "string"
             },
@@ -19289,7 +19300,7 @@
       ],
       [
         "unjustified_change",
-        "advisory",
+        "blocking",
         false
       ],
       [

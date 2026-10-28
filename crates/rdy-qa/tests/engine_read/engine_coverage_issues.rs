@@ -8,13 +8,34 @@ use rdy_qa::fixtures::*;
 use serde_json::json;
 use std::collections::BTreeMap;
 
+/// `rdy_qa::fixtures::write` with an editorial justification: the fixture writes stable normative content, and an
+/// unjustified change to stable content blocks its landing (D-ME2HD).
+fn clarified(
+    r: &mut rdy_engine::Rdy,
+    view: &str,
+    ops: serde_json::Value,
+) -> Result<rdy_engine::WriteResult, rdy_engine::RdyError> {
+    r.write(
+        &writer(),
+        rdy_engine::WriteRequest {
+            view: view.into(),
+            ops: parse_test_ops(ops)?,
+            justification: Some(rdy_model::Justification::Editorial {
+                class: rdy_model::EditorialClass::Clarify,
+                reason: "seed the test world".into(),
+            }),
+            message: String::new(),
+        },
+    )
+}
+
 /// Doc `ops` (overview: needs Summary and Goals; has Summary, stable, and Empty) holds term
 /// Ledger, claim c1 (names Ledger twice, unlinked, no decision), claim c2 (describes Ledger,
 /// decided_by d1), question q (unanswered), decision d1 (live, applied by c2), decision d2
 /// (live, nothing applies it), decision d3 (live, needs_content: false). Doc `lone` holds one
 /// prose block. Landed.
 fn world(r: &mut Rdy) -> BTreeMap<String, String> {
-    let w = write(r, "work", json!([
+    let w = clarified(r, "work", json!([
         {"op": "create", "type": "doc", "id": "$o", "fields": {"name": "ops", "title": "Ops", "doc_type": "overview"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$o", "fields": {"title": "Summary", "lifecycle": "stable"}},
         {"op": "create", "type": "section", "id": "$empty", "parent": "$o", "fields": {"title": "Empty"}},

@@ -133,22 +133,24 @@ fn sg1_a_blocking_tension_alone_is_flagged_and_a_dismissed_or_advisory_one_is_no
     );
     land(&mut r, "a").unwrap();
 
-    // the default pack: the same tension is advisory, and the audit does not flag it
+    // the default pack: the same tension is blocking in stable content too (D-ME2HD), so the
+    // audit flags it and the gate refuses
     let (_d2, mut r) = project();
     let s = stable_spec(&mut r);
     let tok = brief_of(&r, &Scope::Canon, &[&s.c]).base.token;
     let w = write_cited_as(&mut r, &ag("a"), "a", upd(&s.c, "C changed."), Some(&tok)).unwrap();
     assert_eq!(
         one(&r, TensionKind::UnjustifiedChange).severity,
-        TensionSeverity::Advisory
+        TensionSeverity::Blocking
     );
     let landed = Landed {
         view: "a".into(),
         changes: vec![change_of(&w)],
         alternative: None,
     };
-    assert!(audit(&r.read(), &landed).is_empty());
-    land(&mut r, "a").unwrap();
+    assert_eq!(rules(&audit(&r.read(), &landed)), vec!["blocking_landed"]);
+    let e = land(&mut r, "a").unwrap_err();
+    assert_not_ready(&r, &e, &refused_ref(&e), &[E_BLOCKING_TENSION]);
 }
 
 /// Fix round 1 (probe P2): the audit re-checks gconf1 on the landing's own changes, not on the
