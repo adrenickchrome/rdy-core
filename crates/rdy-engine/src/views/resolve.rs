@@ -3,7 +3,8 @@
 //! landing froze, which equals canon, so the decision does not change. The op commits one
 //! change that writes that version unchanged; the store makes it depend on every side, as any
 //! resolving write does (res1).
-//! The change briefs the block and records that briefing (D-ME2HD).
+//! The change briefs the block, in the view, or in canon when the view holds no version of it,
+//! and records that briefing (D-ME2HD).
 use super::{Action, check_view_op, commit_claim, no_view, strings};
 use crate::brief::Coverage;
 use crate::error::*;
@@ -90,9 +91,17 @@ impl Rdy {
         }
         check_landed_block(&self.pack, &m, &block)?;
         // D-ME2HD (O3): the change briefs the block it resolves and records that briefing, as
-        // rdy's own writes do (`assign_keys`, the daemon's repin)
+        // rdy's own writes do (`assign_keys`, the daemon's repin). A conflict with no base (a
+        // replayed create of a block canon holds) leaves the view with no version of the block:
+        // then canon is briefed, which holds the landed side (`landed_side`), the version the
+        // change writes
+        let brief_scope = if m.get(&id).is_some() {
+            scope.clone()
+        } else {
+            Scope::Canon
+        };
         let briefing = st.brief(
-            &scope,
+            &brief_scope,
             &Coverage {
                 ids: vec![id.to_string()],
                 path: None,

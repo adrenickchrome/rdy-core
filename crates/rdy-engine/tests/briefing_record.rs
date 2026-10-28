@@ -177,6 +177,34 @@ fn rg1_a_draft_write_with_an_unknown_token_records_none() {
 }
 
 #[test]
+fn rg1_a_draft_write_with_a_stale_token_records_none() {
+    let mut p = project();
+    p.r.view_create(&writer(), "work", None, false).unwrap();
+    let b = brief(&p.r, &Scope::View("work".into()), &[&p.dc]);
+    let first = write_briefed(
+        &mut p.r,
+        &writer(),
+        "work",
+        json!([{"op": "update", "id": p.dc, "body": "Another draft note."}]),
+        Some(&b.base.token),
+    )
+    .unwrap();
+    assert_eq!(briefing_of(&p.r, &first.change), Some(b.record.token));
+    // the registry still holds the token, but dc moved since the briefing: it is stale
+    assert!(p.r.briefs().get(&b.base.token).is_some());
+    let w = write_briefed(
+        &mut p.r,
+        &writer(),
+        "work",
+        json!([{"op": "update", "id": p.dc, "body": "A third draft note."}]),
+        Some(&b.base.token),
+    )
+    .unwrap();
+    assert!(w.warnings.iter().any(|i| i.code == W_BRIEF_STALE), "{w:?}");
+    assert_eq!(briefing_of(&p.r, &w.change), None);
+}
+
+#[test]
 fn rg1_a_decision_and_a_question_answer_record_the_token() {
     let mut p = project();
     // a decision under the stable section, briefed
@@ -233,35 +261,46 @@ fn rg1_a_decision_and_a_question_answer_record_the_token() {
     );
 }
 
-#[test]
-fn rg1_a_resolve_to_the_landed_side_records_a_token() {
-    let mut p = project();
-    let r = &mut p.r;
-    let (a, b) = (agent("agent:a"), agent("agent:b"));
+/// A landed stable decisions-log doc; returns its section's id.
+fn stable_log(r: &mut Rdy) -> String {
     let log = write_briefed(
         r,
         &writer(),
         "logs",
         json!([
-            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "log", "title": "Log", "doc_type": "decisions-log"}},
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "log", "title": "Log", "doc_type": "decisions-log", "lifecycle": "stable"}},
             {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Decisions"}}
         ]),
         None,
     )
     .unwrap();
     land(r, "logs");
-    let s = log.created["$s"].clone();
-    let d = write_briefed(
+    log.created["$s"].clone()
+}
+
+/// Agent `a` creates proposed decision D under section `s` in view `a`, briefed; returns D
+/// and the change that created it.
+fn create_decision(r: &mut Rdy, a: &Session, s: &str) -> (String, String) {
+    let b = brief(r, &Scope::Canon, &[s]);
+    let w = write_briefed(
         r,
-        &a,
+        a,
         "a",
         json!([{"op": "create", "type": "decision", "id": "$x", "parent": s,
             "fields": {"statement": "D", "status": "proposed"}}]),
-        None,
+        Some(&b.base.token),
     )
-    .unwrap()
-    .created["$x"]
-        .clone();
+    .unwrap();
+    (w.created["$x"].clone(), w.change)
+}
+
+#[test]
+fn rg1_a_resolve_to_the_landed_side_records_a_token() {
+    let mut p = project();
+    let r = &mut p.r;
+    let (a, b) = (agent("agent:a"), agent("agent:b"));
+    let s = stable_log(r);
+    let (d, _) = create_decision(r, &a, &s);
     let id = BlockId::parse(&d).unwrap();
     let vd = r
         .read()
@@ -270,18 +309,42 @@ fn rg1_a_resolve_to_the_landed_side_records_a_token() {
         .version_hash()
         .to_string();
     r.view_fork(&b, "a", "b").unwrap();
-    write_briefed(
-        r,
-        &b,
-        "b",
-        json!([{"op": "update", "id": d, "base": vd, "fields": {"statement": "D by b"}}]),
-        None,
-    )
-    .unwrap();
-    land(r, "a");
     let scope = Scope::View("b".into());
+    // D is stable content in view b: its update is refused unbriefed, and briefed there
+    let update = json!([{"op": "update", "id": d, "base": vd, "fields": {"statement": "D by b"}}]);
+    let e = write_briefed(r, &b, "b", update.clone(), None).unwrap_err();
+    assert_eq!(e.code, E_BRIEF_REQUIRED, "{e}");
+    let bb = brief(r, &scope, &[&d]);
+    write_briefed(r, &b, "b", update, Some(&bb.base.token)).unwrap();
+    land(r, "a");
     assert!(r.read().conflict_info(&scope, &id).unwrap().is_some());
     let res = r.view_resolve_landed(&b, "b", &d).unwrap();
+    assert!(briefing_of(r, &res.change).is_some(), "{res:?}");
+}
+
+#[test]
+fn rg1_a_resolve_after_a_replay_of_a_landed_create_records_a_token() {
+    let mut p = project();
+    let r = &mut p.r;
+    let (a, b) = (agent("agent:a"), agent("agent:b"));
+    let s = stable_log(r);
+    let (d, created) = create_decision(r, &a, &s);
+    let id = BlockId::parse(&d).unwrap();
+    land(r, "a");
+    // view b starts from canon, which already holds D; replaying a's create conflicts on D
+    // with no base, so view b holds no version of D
+    r.view_create(&b, "b", None, false).unwrap();
+    r.view_replay(&b, "b", std::slice::from_ref(&created))
+        .unwrap();
+    let scope = Scope::View("b".into());
+    let c = r.read().conflict_info(&scope, &id).unwrap();
+    assert!(c.is_some(), "a conflict on {d}");
+    let res = r.view_resolve_landed(&b, "b", &d).unwrap();
+    assert!(r.read().conflict_info(&scope, &id).unwrap().is_none());
+    // view b reads canon's version of D
+    let canon = r.read().block(&Scope::Canon, &id).unwrap().version_hash();
+    let view = r.read().block(&scope, &id).unwrap().version_hash();
+    assert_eq!((view, res.version.clone()), (canon, canon.to_string()));
     assert!(briefing_of(r, &res.change).is_some(), "{res:?}");
 }
 
