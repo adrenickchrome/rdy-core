@@ -222,7 +222,7 @@ fn scopes() -> Vec<(&'static str, tempfile::TempDir, Rdy, Scope)> {
 /// only `js/copy.js` changed and only `assets/app.js` moved; with the old script the digests
 /// were the ones before.
 /// Re-taken for the review markers plan's Task 1 (D-NYCMF): the sidebar marker rules of
-/// `assets/site.css` moved, so every scope's digest moved; in a view and a proposal, the
+/// `assets/site.css` moved, so every scope's digest moved; in a scope with review marks, the
 /// sidebar's changed rows moved too. Canon and tag pages keep their bytes.
 const SITE_DIGESTS: [(&str, &str, &str); 4] = [
     (
