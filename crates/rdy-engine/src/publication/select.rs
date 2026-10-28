@@ -7,7 +7,7 @@ use super::source::{PublicationSource, ReadPublicationSource};
 use crate::error::*;
 use crate::materialize::Materialized;
 use crate::{ReadState, Scope};
-use rdy_graph::{GoverningCache, GoverningStatuses, Graph};
+use rdy_graph::{EdgeKind, GoverningCache, GoverningStatuses, Graph};
 use rdy_model::{Block, BlockId, Hash, StateSnapshot, tree};
 use rdy_schema::publication::{self as schema, Audience};
 use rdy_schema::{Issue, Pack, Severity};
@@ -597,8 +597,9 @@ fn retain(keep: &mut BTreeSet<BlockId>, id: &BlockId, l: &Limits) -> Result<bool
 }
 
 /// Steps 2 and 3: each selector's whole subtree, then each selector's ancestor folders, then
-/// each decision with no doc that governs a block kept so far, with its whole subtree and
-/// without its folder (D-P3YD5), with the tree checked on the way up and then by
+/// each decision with no doc that governs a block kept so far (or, removed, is linked by one),
+/// with its whole subtree and without its folder or any other ancestor outside a doc
+/// (D-P3YD5), with the tree checked on the way up and then by
 /// [`check_tree`], all before any text is scanned. Iterative: a damaged store may nest deep or
 /// loop.
 fn select(
@@ -650,7 +651,10 @@ fn select(
 
 /// D-P3YD5: each decision of `m` with no doc, not yet kept, in id order, that governs a block of
 /// `keep` as it stands on entry, by any route and whatever its status
-/// ([`Graph::governed_through`]), is kept with its whole subtree. Its folder is not.
+/// ([`Graph::governed_through`]), is kept with its whole subtree. Its folder is not, nor any
+/// other ancestor outside a doc. A removed version (a stub) has no status, so it governs
+/// nothing; it is kept when a block of `keep` links to it through `decided_by`, `implements` or
+/// `affects`, as a removed decision in a selected doc is (ruling task-4 item 2).
 fn governing_outside_docs(
     m: &Materialized,
     pack: &Pack,
@@ -671,6 +675,16 @@ fn governing_outside_docs(
     let mut governing = vec![];
     for d in candidates {
         if selected.contains(d) {
+            continue;
+        }
+        if m.get(d).is_some_and(Block::is_redacted) {
+            let linked = graph.incoming(d).iter().any(|e| {
+                matches!(&e.kind, EdgeKind::Link(n) if STUB_LINKS.contains(&n.as_str()))
+                    && selected.contains(&e.from)
+            });
+            if linked {
+                governing.push(d.clone());
+            }
             continue;
         }
         let governed = graph.governed_through(
@@ -695,10 +709,20 @@ fn governing_outside_docs(
     Ok(())
 }
 
+/// The links through which a selected block keeps the removed version of a decision with no
+/// doc (ruling task-4 item 2).
+const STUB_LINKS: [&str; 3] = [
+    rdy_model::decision::DECIDED_BY,
+    rdy_model::decision::IMPLEMENTS,
+    rdy_model::decision::AFFECTS,
+];
+
 /// The tree check every retained set passes before any text is scanned, for a named profile and
 /// the implicit one alike. Every retained node's chain of parents reaches the top through
 /// retained nodes, with no missing parent and no loop, except that a decision, a question, a
-/// finding or a source kept without its folder (D-P3YD5) is rooted at that folder; then every
+/// finding or a source kept without its parent is rooted there when that parent sits outside a
+/// doc: a folder, or a block whose chain reaches a folder or the top before any doc (D-P3YD5,
+/// ruling task-4 item 1: a decision under a question at the root); then every
 /// retained node sits where the tree allows: a doc or folder at the top or in a folder; a
 /// decision, a question, a finding or a source anywhere its chain is rooted, at the top and in a
 /// folder too (D-P3YD5, [`tree::may_sit_outside_a_doc`]); and any other block in a doc or in
@@ -713,6 +737,7 @@ fn check_tree<'m>(
     keep: &BTreeSet<BlockId>,
 ) -> Result<(), RdyError> {
     let mut rooted: BTreeSet<&BlockId> = BTreeSet::new();
+    let mut outside: BTreeMap<&'m BlockId, bool> = BTreeMap::new();
     for id in keep {
         let mut chain: BTreeSet<&BlockId> = BTreeSet::new();
         let mut cur = id;
@@ -724,9 +749,10 @@ fn check_tree<'m>(
             match &b.parent {
                 Some(p) => match keep.get(p) {
                     Some(p) => cur = p,
-                    // a block outside a doc kept without its folder (D-P3YD5) is rooted there
+                    // a block outside a doc kept without its parent (D-P3YD5) is rooted there
+                    // when that parent sits outside a doc
                     None if tree::may_sit_outside_a_doc(&b.block_type)
-                        && get(p).is_some_and(|f| f.block_type == tree::FOLDER) =>
+                        && sits_outside_a_doc(get, p, &mut outside)? =>
                     {
                         break;
                     }
@@ -755,6 +781,40 @@ fn check_tree<'m>(
         }
     }
     Ok(())
+}
+
+/// Whether `id` sits outside a doc: it is a folder, or its chain of parents reaches a folder or
+/// the top before any doc. A missing block or a loop is an invalid tree. `memo` holds each block
+/// already decided, so each chain is walked once.
+fn sits_outside_a_doc<'m>(
+    get: &dyn Fn(&BlockId) -> Option<&'m Block>,
+    id: &BlockId,
+    memo: &mut BTreeMap<&'m BlockId, bool>,
+) -> Result<bool, RdyError> {
+    let mut chain: Vec<&'m BlockId> = vec![];
+    let mut seen: BTreeSet<&'m BlockId> = BTreeSet::new();
+    let mut b = get(id).ok_or_else(invalid_tree)?;
+    let found = loop {
+        if let Some(known) = memo.get(&b.id) {
+            break *known;
+        }
+        if !seen.insert(&b.id) {
+            return Err(invalid_tree());
+        }
+        chain.push(&b.id);
+        if b.block_type == tree::FOLDER {
+            break true;
+        }
+        if b.block_type == tree::DOC {
+            break false;
+        }
+        match &b.parent {
+            Some(p) => b = get(p).ok_or_else(invalid_tree)?,
+            None => break true,
+        }
+    };
+    memo.extend(chain.into_iter().map(|c| (c, found)));
+    Ok(found)
 }
 
 /// Step 6: one row per selected figure whose `blob` field is a hash, sorted by (home doc, block,

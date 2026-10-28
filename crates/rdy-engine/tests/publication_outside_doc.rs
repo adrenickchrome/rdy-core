@@ -1,10 +1,11 @@
 //! ndh4 (D-P3YD5, D-0VCQ5, D-KDFZ3): a profile publishes a decision with no doc when it selects a
 //! block that the decision governs, by any of the four governing routes, with the decision's
-//! whole subtree and without its folder. A decision in a selected folder is published with it.
-//! The disclosure comparison lists every retained block outside a doc whose version differs.
+//! whole subtree and without its folder or a question above it. A removed version is kept when
+//! a selected block links it. A decision in a selected folder is published with it. The
+//! disclosure comparison lists every retained block outside a doc whose version differs.
 mod common;
 
-use rdy_engine::publication::{self, Classification, IMPLICIT_ORG, ReferenceRow, Resolved};
+use rdy_engine::publication::{self, Classification, ReferenceRow, Resolved};
 use rdy_engine::*;
 use rdy_model::redaction::RedactedBlockIdentity;
 use rdy_model::*;
@@ -193,13 +194,15 @@ fn ndh4_a_decision_in_a_selected_folder_is_published_with_it() {
 fn ndh4_a_governed_decision_keeps_its_subtree_and_an_affects_route_counts() {
     let (_dir, r) = project();
     let st = r.read();
+    // t-TERM1 sits in a doc the profile does not select, so only the describes/affects route
+    // (the claim describes t-TERM1, D-R00T2 affects it) reaches a selected block
     let mut bs = blocks(&["d-GV1DE"], |c| link(c, "describes", "t-TERM1"));
     bs.extend([
+        named(blk("d-0THER", "doc", None, "d"), "other"),
         with_body(
-            named(blk("t-TERM1", "term", Some("s-GV1DE"), "b"), "ledger"),
+            named(blk("t-TERM1", "term", Some("d-0THER"), "b"), "ledger"),
             "A ledger.",
         ),
-        named(blk("d-0THER", "doc", None, "d"), "other"),
         with_body(
             named(blk("t-TERM2", "term", Some("d-0THER"), "a"), "wallet"),
             "A wallet.",
@@ -223,7 +226,7 @@ fn ndh4_a_governed_decision_keeps_its_subtree_and_an_affects_route_counts() {
     for kept in ["D-R00T2", "ra-RAT10"] {
         assert!(ids.contains(&bid(kept)), "{kept}: {ids:?}");
     }
-    for left in ["t-TERM2", "d-0THER", "D-R00T1", "D-F01D1"] {
+    for left in ["t-TERM1", "t-TERM2", "d-0THER", "D-R00T1", "D-F01D1"] {
         assert!(!ids.contains(&bid(left)), "{left}: {ids:?}");
     }
     assert!(
@@ -237,6 +240,91 @@ fn ndh4_a_governed_decision_keeps_its_subtree_and_an_affects_route_counts() {
         "{:?}",
         res.references.rows
     );
+}
+
+#[test]
+fn ndh4_a_governed_decision_under_a_root_question_is_published_without_it() {
+    // ruling task-4 item 1: a pack may let a question hold a decision; the decision has no doc,
+    // so a selected block it governs keeps it, and its chain is rooted at the question, which
+    // sits outside a doc and is not published
+    let (_dir, r) = project();
+    let st = r.read();
+    let mut bs = blocks(&["d-GV1DE"], |c| link(c, "decided_by", "D-QN0D1"));
+    bs.extend([
+        with_field(
+            blk("Q-R00T1", "question", None, "d"),
+            "prompt",
+            s("Which ledger?"),
+        ),
+        decision("D-QN0D1", Some("Q-R00T1"), "A ruling under a question."),
+        with_body(
+            blk("ra-QN0D1", "rationale", Some("D-QN0D1"), "a"),
+            "Because one ledger settles.",
+        ),
+    ]);
+    let res = publication::resolve_in_for_tests(&st, &synth(bs), "outside")
+        .unwrap_or_else(|e| panic!("resolve: {e}"));
+    let ids = entry_ids(&res);
+    for kept in ["D-QN0D1", "ra-QN0D1"] {
+        assert!(ids.contains(&bid(kept)), "{kept}: {ids:?}");
+    }
+    assert!(!ids.contains(&bid("Q-R00T1")), "{ids:?}");
+    assert!(res.references.rows.is_empty(), "{:?}", res.references.rows);
+}
+
+#[test]
+fn ndh4_a_question_in_a_doc_roots_no_chain() {
+    // guard: a decision under a question of an unselected doc has a doc, so rule 1 does not
+    // keep it, and the question does not count as outside a doc
+    let (_dir, r) = project();
+    let st = r.read();
+    let mut bs = blocks(&["d-GV1DE"], |c| link(c, "decided_by", "D-QN0D1"));
+    bs.extend([
+        named(blk("d-0THER", "doc", None, "d"), "other"),
+        with_field(
+            blk("Q-1NDC1", "question", Some("d-0THER"), "a"),
+            "prompt",
+            s("Which ledger?"),
+        ),
+        decision("D-QN0D1", Some("Q-1NDC1"), "A ruling in a doc's question."),
+    ]);
+    let res = publication::resolve_in_for_tests(&st, &synth(bs), "outside").unwrap();
+    let ids = entry_ids(&res);
+    for left in ["D-QN0D1", "Q-1NDC1", "d-0THER"] {
+        assert!(!ids.contains(&bid(left)), "{left}: {ids:?}");
+    }
+}
+
+#[test]
+fn ndh4_a_removed_decision_with_no_doc_is_kept_by_the_blocks_that_link_it() {
+    // ruling task-4 item 2: the stub of an outside-doc decision that a selected block links
+    // through decided_by or implements is kept, as a removed decision in a selected doc is; a
+    // stub nothing selected links is not
+    let (_dir, r) = project();
+    let st = r.read();
+    let req = Hash::of(b"a request");
+    let mut bs = blocks(&["d-GV1DE"], |c| {
+        link(link(c, "decided_by", "D-R00T1"), "implements", "D-F01D1")
+    });
+    for b in &mut bs {
+        if b.id == bid("D-R00T1") {
+            *b = stub("D-R00T1", "decision", None, req);
+        } else if b.id == bid("D-F01D1") {
+            *b = stub("D-F01D1", "decision", Some("fd-AREA1"), req);
+        } else if b.id == bid("D-0THR1") {
+            *b = stub("D-0THR1", "decision", None, req);
+        }
+    }
+    let res = publication::resolve_in_for_tests(&st, &synth(bs), "outside")
+        .unwrap_or_else(|e| panic!("resolve: {e}"));
+    let ids = entry_ids(&res);
+    for kept in ["D-R00T1", "D-F01D1"] {
+        assert!(ids.contains(&bid(kept)), "{kept}: {ids:?}");
+    }
+    for left in ["D-0THR1", "fd-AREA1"] {
+        assert!(!ids.contains(&bid(left)), "{left}: {ids:?}");
+    }
+    assert!(res.references.rows.is_empty(), "{:?}", res.references.rows);
 }
 
 #[test]
@@ -286,8 +374,8 @@ fn ndh4_the_disclosure_diff_lists_blocks_outside_docs() {
         }]
     );
 
-    // a removed version of D-R00T1 on the after side: a stub governs nothing, so both sides
-    // retain it through the implicit profile
+    // a removed version of D-R00T1 on the after side: the named profile keeps its stub, which
+    // the claim still links through decided_by (ruling task-4 item 2), so the row shows a removal
     let removed = |mut bs: Vec<Block>| {
         for b in &mut bs {
             if b.id == bid("D-R00T1") {
@@ -296,17 +384,22 @@ fn ndh4_the_disclosure_diff_lists_blocks_outside_docs() {
         }
         bs
     };
-    let full = resolve(blocks(&["d-GV1DE"], one), IMPLICIT_ORG);
-    let gone = resolve(removed(blocks(&["d-GV1DE"], one)), IMPLICIT_ORG);
-    let d = publication::disclosure_diff(&full, &gone).unwrap();
+    let gone = resolve(removed(blocks(&["d-GV1DE"], one)), "outside");
+    let d = publication::disclosure_diff(&after, &gone).unwrap();
     assert_eq!(
         d.changed_outside_docs,
         vec![publication::ChangedOutsideDoc {
             id: bid("D-R00T1"),
-            before_version: Some(version_in(&full, "D-R00T1")),
+            before_version: Some(version_in(&after, "D-R00T1")),
             after_version: Some(version_in(&gone, "D-R00T1")),
             redacted: true,
         }]
+    );
+    // the removal blocks no profile: the link points into the selection
+    assert!(
+        gone.references.rows.is_empty(),
+        "{:?}",
+        gone.references.rows
     );
 
     // the report JSON holds the row, with its omitted count
