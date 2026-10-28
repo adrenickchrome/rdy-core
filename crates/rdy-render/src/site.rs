@@ -1255,7 +1255,6 @@ impl<'a> Site<'a> {
     }
 }
 
-/// `s` with its first letter upper-cased.
 /// What [`Site::label`] calls a block, by the first rule that fits it (one rule for the label and
 /// its coded form, [`Site::label_coded`]).
 enum LabelFrom<'b> {
@@ -1359,6 +1358,7 @@ fn hide_ids(chars: &[Ch]) -> Vec<Ch> {
     out
 }
 
+/// `s` with its first letter upper-cased.
 fn upper_first(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
