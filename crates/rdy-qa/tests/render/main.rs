@@ -37,6 +37,7 @@ mod render_publication_prepare;
 mod render_publication_print;
 mod render_publication_site;
 mod render_publish;
+mod render_questions_outside_doc;
 mod render_reader_text;
 mod render_redaction;
 mod render_ref;

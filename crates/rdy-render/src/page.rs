@@ -264,6 +264,7 @@ pub struct QuestionRow {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct QuestionGroup {
+    /// The doc's title; for a question outside a doc, its folder's title or the project's name.
     pub doc_title: String,
     pub questions: Vec<QuestionRow>,
 }
@@ -1831,8 +1832,33 @@ fn tell_apart(built: Vec<(DisagreementLink, String)>) -> Vec<DisagreementLink> {
 fn questions_body(sh: &Shared, page: &str) -> QuestionsBody {
     let link = |id: &BlockId| sh.link(page, id);
     let local = |h: &str| sh.local_href(page, h);
+    // a row with no link to a doc and no section: a question outside a doc fills only the rest
+    let row = |b: &Block, href: String, section_title: String| QuestionRow {
+        anchor: sh
+            .site
+            .question_anchors
+            .get(&b.id)
+            .cloned()
+            .unwrap_or_default(),
+        // a removed question's prompt is the notice (D-3M81W): its stub has no prompt
+        prompt: match b.is_redacted() {
+            true => crate::escape(CONTENT_REMOVED),
+            false => inline::spans_html(
+                b.field_str("prompt").unwrap_or(""),
+                &Ctx {
+                    link: &link,
+                    doc_page: &sh.doc_page(page, &b.id),
+                    unavailable: sh.unavailable,
+                    local_link: sh.local_link(&local),
+                },
+            ),
+        },
+        href,
+        section_title,
+    };
     let mut groups: Vec<QuestionGroup> = vec![];
-    // `open_questions` is in reading order, so one doc's questions are together
+    // `open_questions` is in reading order, so one doc's questions are together; the questions
+    // outside a doc come after them, in `outside_questions`
     let mut last: Option<BlockId> = None;
     for id in &sh.site.open_questions {
         let Some(b) = sh.m.get(id) else { continue };
@@ -1845,29 +1871,7 @@ fn questions_body(sh: &Shared, page: &str) -> QuestionsBody {
             page: from.page,
             anchor: sh.site.anchors.get(id).cloned(),
         };
-        let row = QuestionRow {
-            anchor: sh
-                .site
-                .question_anchors
-                .get(id)
-                .cloned()
-                .unwrap_or_default(),
-            // a removed question's prompt is the notice (D-3M81W): its stub has no prompt
-            prompt: match b.is_redacted() {
-                true => crate::escape(CONTENT_REMOVED),
-                false => inline::spans_html(
-                    b.field_str("prompt").unwrap_or(""),
-                    &Ctx {
-                        link: &link,
-                        doc_page: &sh.doc_page(page, id),
-                        unavailable: sh.unavailable,
-                        local_link: sh.local_link(&local),
-                    },
-                ),
-            },
-            href: target.href_from(page),
-            section_title,
-        };
+        let row = row(b, target.href_from(page), section_title);
         if last.as_ref() != Some(&doc.id) {
             groups.push(QuestionGroup {
                 doc_title,
@@ -1877,6 +1881,20 @@ fn questions_body(sh: &Shared, page: &str) -> QuestionsBody {
         }
         if let Some(g) = groups.last_mut() {
             g.questions.push(row);
+        }
+    }
+    for g in &sh.site.outside_questions {
+        let questions: Vec<QuestionRow> = g
+            .questions
+            .iter()
+            .filter_map(|id| sh.m.get(id))
+            .map(|b| row(b, String::new(), String::new()))
+            .collect();
+        if !questions.is_empty() {
+            groups.push(QuestionGroup {
+                doc_title: g.label.clone(),
+                questions,
+            });
         }
     }
     QuestionsBody { groups }

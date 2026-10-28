@@ -414,7 +414,8 @@ fn review(cmp: &Compare, dm: &Materialized, bm: &Materialized) -> Review {
             continue;
         }
         let tree_block = tree::is_tree_type(&b.block_type);
-        if !tree_block && doc_id(dm, &b.id).is_some_and(|d| new_docs.contains(d)) {
+        // a block outside a doc is on no page of the review site (D-P3YD5): it carries no mark
+        if !tree_block && doc_id(dm, &b.id).is_none_or(|d| new_docs.contains(d)) {
             continue;
         }
         rv.marks.insert(b.id.clone(), mark);
@@ -428,6 +429,7 @@ fn review(cmp: &Compare, dm: &Materialized, bm: &Materialized) -> Review {
         if let Some(b) = bm.get(&id)
             && visible(b)
             && !tree::is_tree_type(&b.block_type)
+            && doc_id(bm, &id).is_some()
         {
             gone.insert(id);
         }
@@ -436,6 +438,7 @@ fn review(cmp: &Compare, dm: &Materialized, bm: &Materialized) -> Review {
         if let Some(b) = bm.get(&id)
             && visible(b)
             && !tree::is_tree_type(&b.block_type)
+            && doc_id(bm, &id).is_some()
             && doc_id(bm, &id) != doc_id(dm, &id)
         {
             gone.insert(id);
