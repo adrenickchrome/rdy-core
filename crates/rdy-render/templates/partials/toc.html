@@ -1,4 +1,7 @@
-{%- macro list(entries) -%}
-<ul>{% for e in entries %}<li><a class="toc-link" href="#{{ e.anchor }}">{{ e.label }}</a>{% if e.children %}{{ list(e.children) }}{% endif %}</li>{% endfor %}</ul>
+{%- macro mark(w) -%}
+<span class="chg chg-mark chg-{{ w }}"><span class="chg-dot" aria-hidden="true"></span>{{ w }}</span>
 {%- endmacro -%}
-<p class="toc-label">On this page</p>{{ list(toc.entries) }}
+{%- macro list(entries) -%}
+<ul>{% for e in entries %}<li><a class="toc-link" href="#{{ e.anchor }}">{{ e.label }}{% if e.change %} {{ mark(e.change) }}{% endif %}</a>{% if e.children %}{{ list(e.children) }}{% endif %}</li>{% endfor %}</ul>
+{%- endmacro -%}
+{% if toc.changes %}<nav class="chg toc-changes" aria-label="Changes on this page"><p class="toc-label">Changes on this page</p><ul>{% for c in toc.changes %}<li><a class="toc-link toc-chg" href="{{ c.href }}">{{ mark(c.word) }} {{ c.label|safe }}</a></li>{% endfor %}</ul></nav>{% endif %}{% if toc.entries %}<nav aria-label="On this page"><p class="toc-label">On this page</p>{{ list(toc.entries) }}</nav>{% endif %}

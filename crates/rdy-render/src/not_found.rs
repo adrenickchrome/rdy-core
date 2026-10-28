@@ -69,9 +69,6 @@ fn rooted_entries(base: &str, list: &mut [NavEntry]) {
         if let Some((_, href)) = &mut e.more {
             *href = rooted(base, href);
         }
-        if let Some(href) = &mut e.change_href {
-            *href = rooted(base, href);
-        }
         rooted_entries(base, &mut e.children);
     }
 }
@@ -87,7 +84,7 @@ fn navigation(sh: &page::Shared, base: &str) -> Nav {
         listed: sh.listed,
         old: sh.old_site,
     };
-    let mut nav = crate::nav::build(site, None, "index.html", facts, &sh.review_anchors);
+    let mut nav = crate::nav::build(site, None, "index.html", facts);
     for g in &mut nav.groups {
         g.current = false;
         if let Some(href) = &mut g.href {

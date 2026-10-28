@@ -879,3 +879,136 @@ fn dgm6_adapter_page_carries_generated_svg() {
     assert_eq!(full.files.get(path), Some(bytes));
     holder.close().unwrap();
 }
+
+/// rvm3 (TASK-823; hub D-X0F6P; D-WDKWQ, D-KDFZ3): a core publication of a page with figures of
+/// several media types and a drawn diagram, built as `dgm6_` builds its fixture.
+fn rvm3_artifact() -> (PublicationArtifact, BTreeMap<&'static str, Hash>) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("src");
+    std::fs::create_dir_all(&root).unwrap();
+    drop(Rdy::init(&root, "rdy-standard").unwrap());
+    let mut r = Rdy::open(&root).unwrap();
+    let mut blobs = BTreeMap::new();
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$pics", "fields": {"name": "pics", "title": "Pictures", "doc_type": "page"}}),
+    ];
+    let svg: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>";
+    for (key, bytes, media, alt) in [
+        (
+            "png",
+            b"\x89PNG\r\n\x1a\nrvm3 png".as_slice(),
+            "image/png",
+            "A png",
+        ),
+        ("svg", svg, "image/svg+xml", "An svg"),
+        (
+            "params",
+            b"rvm3 params".as_slice(),
+            "image/svg+xml; charset=utf-8",
+            "With parameters",
+        ),
+        (
+            "other",
+            b"rvm3 other".as_slice(),
+            "application/x-rvm3",
+            "Other",
+        ),
+    ] {
+        let blob = r.store_mut().put_blob(bytes).unwrap();
+        blobs.insert(key, blob);
+        ops.push(json!({"op": "create", "type": "figure", "parent": "$pics",
+            "fields": {"blob": blob.to_string(), "media_type": media, "alt": alt}}));
+    }
+    ops.push(json!({"op": "create", "type": "diagram", "parent": "$pics",
+        "fields": {"lang": "mermaid", "alt": "The flow"},
+        "body": "flowchart LR\n  subgraph S[first]\n    A[start] --> B[end]\n  end"}));
+    write(&mut r, Value::Array(ops));
+    land(&mut r, "first");
+    let v1 = tag(&mut r, "v1.0.0");
+    let l1 = r.store().read_tag(&v1).unwrap().landing;
+    let src = Source {
+        r,
+        profile: String::new(),
+        secret: String::new(),
+        v1,
+        l1,
+    };
+    let inputs = capture_inputs(&src.r.read(), &Scope::At(l1)).unwrap();
+    let art = src.site(IMPLICIT_ORG, &inputs);
+    (art, blobs)
+}
+
+fn rvm3_entry_at<'a>(art: &'a PublicationArtifact, path: &str) -> &'a ManifestEntry {
+    art.manifest
+        .files
+        .iter()
+        .find(|e| e.path == path)
+        .unwrap_or_else(|| panic!("{path} in {:?}", art.files.keys()))
+}
+
+/// Every entry of a core publication passes the rule the adapter re-exports.
+#[test]
+fn rvm3_every_entry_of_a_core_publication_passes_core_rule() {
+    let (art, blobs) = rvm3_artifact();
+    for e in &art.manifest.files {
+        rdy_adapter::rendering::check_publication_media_type(e)
+            .unwrap_or_else(|err| panic!("{} {}: {}", e.path, e.media_type, err.message));
+    }
+    for (key, ext, media) in [
+        ("png", "png", "image/png"),
+        ("svg", "svg", "image/svg+xml"),
+        ("params", "bin", "image/svg+xml"),
+        ("other", "bin", "application/x-rvm3"),
+    ] {
+        let e = rvm3_entry_at(&art, &format!("assets/{}.{ext}", blobs[key]));
+        assert_eq!(e.media_type, media, "{key}");
+    }
+    let drawn: Vec<&ManifestEntry> = art
+        .manifest
+        .files
+        .iter()
+        .filter(|e| e.path.starts_with("assets/diagrams/"))
+        .collect();
+    assert_eq!(drawn.len(), 1);
+    assert_eq!(drawn[0].media_type, "image/svg+xml");
+}
+
+/// A changed entry is refused with core's own manifest text.
+#[test]
+fn rvm3_a_changed_entry_is_refused_with_cores_text() {
+    let (art, blobs) = rvm3_artifact();
+    let png_path = format!("assets/{}.png", blobs["png"]);
+    let png = rvm3_entry_at(&art, &png_path).clone();
+    let index = rvm3_entry_at(&art, "index.html").clone();
+    let diagram = art
+        .manifest
+        .files
+        .iter()
+        .find(|e| e.path.starts_with("assets/diagrams/"))
+        .unwrap()
+        .clone();
+    let mut changed = Vec::new();
+    changed.push(ManifestEntry {
+        media_type: "text/html".into(),
+        ..png.clone()
+    });
+    changed.push(ManifestEntry {
+        media_type: "image/svg+xml".into(),
+        ..index
+    });
+    changed.push(ManifestEntry {
+        path: "pics.svg".into(),
+        ..diagram
+    });
+    changed.push(ManifestEntry {
+        path: format!("assets/{}.jpg", blobs["png"]),
+        ..png
+    });
+    for e in &changed {
+        let err = rdy_adapter::rendering::check_publication_media_type(e).unwrap_err();
+        assert_eq!(err.code, "E_BAD_INPUT", "{}", e.path);
+        assert_eq!(err.message, "publication manifest is invalid");
+        assert_eq!(err.fix, "use unique relative paths and valid file metadata");
+        assert!(err.issues.is_empty());
+    }
+}

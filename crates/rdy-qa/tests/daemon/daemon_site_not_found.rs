@@ -442,7 +442,9 @@ fn dgm11_every_live_scope_gets_its_own_404() {
                     assert!(!text(&r).contains(needle), "{what}: holds {needle:?}");
                 }
                 assert!(
-                    text(&r).contains(&format!(">{doc}<")),
+                    text(&r).contains(&format!(">{doc}<"))
+                        || text(&r)
+                            .contains(&format!(">{doc} <span class=\"chg chg-mark chg-edited\">")),
                     "{what}: the selected navigation of its own revision"
                 );
             } else {
@@ -451,7 +453,9 @@ fn dgm11_every_live_scope_gets_its_own_404() {
                     "{what}: the scope's navigation"
                 );
                 assert!(
-                    text(&r).contains(&format!(">{doc}<")),
+                    text(&r).contains(&format!(">{doc}<"))
+                        || text(&r)
+                            .contains(&format!(">{doc} <span class=\"chg chg-mark chg-edited\">")),
                     "{what}: the navigation of its own revision"
                 );
             }

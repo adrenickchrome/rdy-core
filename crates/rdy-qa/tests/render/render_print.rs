@@ -666,20 +666,29 @@ fn reserved(r: &mut Rdy) -> Scope {
 /// Re-taken for the final review's fix round 1 (M2): Cite skips a selection in the eyebrow, so
 /// only `js/copy.js` changed and only `assets/app.js` moved; with the old script the digests
 /// were the ones before.
+/// Re-taken for the review markers plan's Task 1 (D-NYCMF): the sidebar marker rules of
+/// `assets/site.css` moved, so every scope's digest moved; in a view, the sidebar's changed rows
+/// moved too. Canon and tag pages keep their bytes (`rvm1_canon_rows_keep_their_bytes`).
+/// Re-taken for the review markers plan's Task 2 (D-NYCMF): the page index's marker rules of
+/// `assets/site.css` moved, so every scope's digest moved; in a view, the changed doc pages'
+/// index moved too. With the old stylesheet the canon digest is the one before.
+/// Re-taken for Task 2's fix round (ruling task-2): only the index marker rule of
+/// `assets/site.css` moved (`.toc-link:not(.toc-chg) .chg-mark`); with the old stylesheet every
+/// digest is the one before.
 #[test]
 fn ec3_the_site_build_is_unchanged() {
     const BASE: [(&str, &str); 3] = [
         (
             "canon",
-            "fa77ed9448725329640a60ab642c473720320d790a54ae05f324d15c2c7b95fc",
+            "2bd6370452dc8c158340e9b839397c6c67ea143dd65212ae3eb9c70086ff3485",
         ),
         (
             "view:editing",
-            "cb5e57fdca94ae6e9f0773c0049ae5c109796e66b1ff2b673bf3005fea245642",
+            "1da69b50237f867999c4fea3ad9e8e07570c380ff474a3600f4e0d190b60b9f1",
         ),
         (
             "view:reserved",
-            "b7b7a2960a1f89eee12842598db77134494199b0e24109c0fa9c549232b6c957",
+            "928f9fd2a1e69b4677427ab037fc59a624c073127423621de16e405aed3fb0b7",
         ),
     ];
     // the ids the corpus's generated pages and the reserved docs draw come from a seeded stream

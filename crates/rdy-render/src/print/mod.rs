@@ -403,7 +403,6 @@ pub(crate) fn build_from(prepared: Prepared) -> Result<Print, RdyError> {
         mode: Mode::Static,
         inline_diffs: Default::default(),
         changes_page: false,
-        review_anchors: Default::default(),
         since_page: false,
         profile: profile.as_ref(),
         local: local.as_ref(),

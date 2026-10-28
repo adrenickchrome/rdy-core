@@ -30,22 +30,25 @@ fn rv1_the_navigation_marks_edited_and_new_docs_and_lists_removed_ones() {
             .and_then(|i| nav.get(i + 1))
             .cloned()
     };
-    assert_eq!(next("Intro").as_deref(), Some("Edited"), "{nav:?}");
-    assert_eq!(next("Fresh").as_deref(), Some("New"), "{nav:?}");
+    assert_eq!(next("Intro").as_deref(), Some("edited"), "{nav:?}");
+    assert_eq!(next("Fresh").as_deref(), Some("new"), "{nav:?}");
     assert!(
-        !matches!(next("Keep").as_deref(), Some("Edited" | "New")),
+        !matches!(next("Keep").as_deref(), Some("edited" | "new")),
         "{nav:?}"
     );
     assert_eq!(next("Removed").as_deref(), Some("Old guide"), "{nav:?}");
     assert!(h.contains("<li class=\"nav-item nav-removed\">Old guide</li>"));
     assert!(!h.contains("old.html"));
     assert!(h.contains("<li class=\"nav-group chg\"><span class=\"nav-group-label\">Removed</span><ul><li class=\"nav-item nav-removed\">Old guide</li>"));
-    // Edited leads to the doc's group on the change summary; the doc's own link stays
-    assert!(h.contains(
-        ">Intro</a><a class=\"chg chg-label chg-edited\" href=\"changes.html#intro\">Edited</a>"
-    ));
-    // New and Removed keep their forms
-    assert!(h.contains(">Fresh</a><span class=\"chg chg-label chg-new\">New</span>"));
+    // one row per changed doc: the marker sits inside the row's link (rvm1)
+    assert!(h.contains(&format!(
+        "<li class=\"nav-item\"><a href=\"intro.html\">Intro {}</a></li>",
+        mark("edited")
+    )));
+    assert!(h.contains(&format!(
+        "<li class=\"nav-item\"><a href=\"fresh.html\">Fresh {}</a></li>",
+        mark("new")
+    )));
 }
 
 #[test]
@@ -113,9 +116,12 @@ fn rv1_a_draft_with_nothing_a_reader_sees_changed_shows_no_marker() {
         for m in [
             "has-chg",
             "chg-label",
+            "chg-mark",
             "chg-removed",
             "nav-removed",
             "Changes in this view",
+            "toc-changes",
+            "id=\"Removed-",
         ] {
             assert!(!h.contains(m), "{} holds {m}", p.display());
         }
@@ -152,50 +158,25 @@ fn ls13_the_home_row_of_an_edited_doc_says_it_once_and_keeps_numbers_with_words(
     );
 }
 
-/// The target of `href` as a site-relative path, seen from the page at `from`.
-fn resolve(from: &str, href: &str) -> String {
-    let mut parts: Vec<&str> = from.split('/').collect();
-    parts.pop();
-    for p in href.split('/') {
-        match p {
-            ".." => {
-                parts.pop();
-            }
-            "." | "" => {}
-            p => parts.push(p),
-        }
-    }
-    parts.join("/")
+/// The marker of a changed row (D-NYCMF): a dot and a lowercase word, one element.
+fn mark(word: &str) -> String {
+    format!(
+        "<span class=\"chg chg-mark chg-{word}\"><span class=\"chg-dot\" aria-hidden=\"true\"></span>{word}</span>"
+    )
 }
 
-/// The `(doc link, Edited link)` pairs of the sidebar of a page: each Edited word that follows
-/// a doc's link.
-fn edited_links(h: &str) -> Vec<(String, Option<String>)> {
-    let nav = &h[h.find("<nav aria-label=\"Pages\">").unwrap()..h.find("</aside>").unwrap()];
-    nav.split("<li class=\"nav-item")
-        .skip(1)
-        .filter(|li| li.contains("chg-edited"))
-        .map(|li| {
-            let doc = li.split("<a href=\"").nth(1).unwrap();
-            let doc = doc[..doc.find('"').unwrap()].to_string();
-            let word = &li[li.find("chg chg-label chg-edited\"").unwrap()..];
-            let link = word
-                .contains("href=\"")
-                .then(|| word.split("href=\"").nth(1).unwrap())
-                .filter(|_| word.find("href=\"").unwrap() < word.find(">Edited<").unwrap())
-                .map(|l| l[..l.find('"').unwrap()].to_string());
-            (doc, link)
-        })
-        .collect()
+/// The Pages navigation of a page.
+fn pages_nav(h: &str) -> &str {
+    let a = h.find("<nav aria-label=\"Pages\">").expect("the Pages nav");
+    let b = h[a..].find("</nav>").expect("the nav ends");
+    &h[a..a + b + "</nav>".len()]
 }
 
-/// Task 8 of the renderer plan: the word Edited in the sidebar leads to the doc's group on the
-/// change summary, exactly as the summary itself names it, with duplicate titles and nested docs,
-/// and leads nowhere when an authored doc owns `changes.html`.
-#[test]
-fn dgm8_edited_marker_links_to_its_summary() {
+/// Three docs titled Guide at three depths, one calm doc, and a landed canon (the fixture of the
+/// change summary's anchors). Returns the project and the canon write's result.
+fn guides() -> (tempfile::TempDir, rdy_engine::Rdy, rdy_engine::WriteResult) {
     let _clock = fixture_clock();
-    let (_d, mut r) = tiny();
+    let (d, mut r) = tiny();
     let guide = |id: &str, parent: Option<&str>| {
         let mut d = json!({"op": "create", "type": "doc", "id": id, "fields": {"name": "guide", "title": "Guide", "doc_type": "overview"}});
         if let Some(p) = parent {
@@ -219,28 +200,105 @@ fn dgm8_edited_marker_links_to_its_summary() {
     ]))
     .unwrap();
     land(&mut r, "work").unwrap();
+    (d, r, canon)
+}
+
+#[test]
+fn rvm1_a_changed_doc_row_carries_one_marker_and_no_link() {
+    let (_d, _r, _ids, out) = draft();
+    let h = html(out.path(), "keep.html");
+    let nav = pages_nav(&h);
+    assert!(
+        nav.contains(&format!(
+            "<li class=\"nav-item\"><a href=\"intro.html\">Intro {}</a></li>",
+            mark("edited")
+        )),
+        "{nav}"
+    );
+    assert!(
+        nav.contains(&format!(
+            "<li class=\"nav-item\"><a href=\"fresh.html\">Fresh {}</a></li>",
+            mark("new")
+        )),
+        "{nav}"
+    );
+    for gone in ["chg-label", "<a class=\"chg", "changes.html"] {
+        assert!(!nav.contains(gone), "the nav holds {gone}: {nav}");
+    }
+    let mut marks = 0;
+    for m in nav.split("class=\"chg chg-mark").skip(1) {
+        // the marker ends at its second closing span: the dot's, then its own
+        let end = m
+            .match_indices("</span>")
+            .nth(1)
+            .expect("the marker ends")
+            .0;
+        let element = &m[..end];
+        assert!(!element.contains("<a"), "{element}");
+        marks += 1;
+    }
+    assert_eq!(marks, 2, "{nav}");
+}
+
+#[test]
+fn rvm1_only_the_current_row_is_highlighted() {
+    let (_d, _r, _ids, out) = draft();
+    let h = html(out.path(), "intro.html");
+    let nav = pages_nav(&h);
+    assert_eq!(nav.matches("is-active").count(), 1, "{nav}");
+    assert!(
+        nav.contains(
+            "<li class=\"nav-item is-active\"><a href=\"intro.html\" aria-current=\"page\">Intro <span class=\"chg chg-mark chg-edited\">"
+        ),
+        "{nav}"
+    );
+    let text = std::fs::read_to_string(out.path().join("assets/site.css")).unwrap();
+    let css = rdy_qa::site::parse_css(&text);
+    let at = |sel: &str, p: &str, w: u32| rdy_qa::site::cascaded(&css, sel, p, w);
+    for w in [360, 1280] {
+        let m = |p: &str| at(".chg-mark", p, w);
+        assert_eq!(m("color").as_deref(), Some("var(--ink-soft)"), "{w}");
+        assert_eq!(m("text-transform").as_deref(), Some("none"), "{w}");
+        assert_eq!(m("white-space").as_deref(), Some("nowrap"), "{w}");
+        assert_eq!(m("background"), None, "{w}");
+        assert_eq!(
+            at(".chg-dot", "background", w).as_deref(),
+            Some("var(--accent)"),
+            "{w}"
+        );
+        assert_eq!(
+            at(".chg-dot", "border-radius", w).as_deref(),
+            Some("50%"),
+            "{w}"
+        );
+        for p in ["text-decoration", "color", "display", "user-select"] {
+            assert_eq!(at("a.chg-label", p, w), None, "{w} {p}");
+        }
+    }
+    assert!(!text.contains("a.chg-label"));
+}
+
+#[test]
+fn rvm1_the_change_summary_gives_each_doc_its_own_anchor() {
+    let (_d, mut r, canon) = guides();
+    let _clock = fixture_clock();
     let id = |k: &str| canon.created[k].clone();
     write(&mut r, "w", json!([
         {"op": "update", "id": id("$p0"), "body": "Top text, edited."},
         {"op": "update", "id": id("$p1"), "body": "First text, edited."},
         {"op": "update", "id": id("$p2"), "body": "Second text, edited."},
         {"op": "create", "type": "doc", "id": "$nw", "fields": {"name": "fresh", "title": "Fresh", "doc_type": "overview"}},
-        prose("$pn", "$nw", "New text."),
+        {"op": "create", "type": "prose", "id": "$pn", "parent": "$nw", "body": "New text."},
     ]))
     .unwrap();
     let out = tempfile::tempdir().unwrap();
     rdy_render::render_site(&r.read(), &Scope::View("w".into()), out.path()).unwrap();
     let summary = html(out.path(), "changes.html");
-    let groups: Vec<(String, String)> = summary
+    let anchors: Vec<String> = summary
         .split("<h2 id=\"")
         .skip(1)
-        .map(|g| {
-            let anchor = g[..g.find('"').unwrap()].to_string();
-            let href = g.split("<a href=\"").nth(1).unwrap();
-            (anchor, href[..href.find('"').unwrap()].to_string())
-        })
+        .map(|g| g[..g.find('"').unwrap()].to_string())
         .collect();
-    let anchors: Vec<&String> = groups.iter().map(|g| &g.0).collect();
     assert_eq!(
         anchors
             .iter()
@@ -250,68 +308,72 @@ fn dgm8_edited_marker_links_to_its_summary() {
         "three docs titled Guide get three anchors: {anchors:?}"
     );
     assert_eq!(anchors.iter().filter(|a| a.starts_with("guide")).count(), 3);
-    // every page's sidebar: each Edited word leads to the group of the doc it follows
-    let mut seen = 0;
-    for page in [
-        "index.html",
-        "guide.html",
-        "one/guide.html",
-        "two/in/guide.html",
-        "calm.html",
-        "fresh.html",
-    ] {
-        let h = html(out.path(), page);
-        for (doc, link) in edited_links(&h) {
-            let link = link.unwrap_or_else(|| panic!("{page}: Edited after {doc} has no link"));
-            let (to, anchor) = link.split_once('#').expect("an anchor");
-            assert_eq!(resolve(page, to), "changes.html", "{page}: {link}");
-            let group = groups
-                .iter()
-                .find(|g| g.0 == anchor)
-                .unwrap_or_else(|| panic!("{page}: no group {anchor}"));
-            assert_eq!(
-                resolve("changes.html", &group.1),
-                resolve(page, &doc),
-                "{page}: {link} leads to another doc's group"
-            );
-            seen += 1;
-        }
-    }
-    assert_eq!(seen, 3 * 6, "three Edited docs in each of six sidebars");
-    // the doc's content link stays beside it, from a nested page too
-    let nested = html(out.path(), "two/in/guide.html");
-    assert!(
-        nested.contains("href=\"guide.html\" aria-current=\"page\">Guide</a><a class=\"chg chg-label chg-edited\" href=\"../../changes.html#guide-"),
-        "{nested}"
-    );
-    // New is a word and Calm has none
-    assert!(nested.contains(">Fresh</a><span class=\"chg chg-label chg-new\">New</span>"));
-    assert!(!nested.contains("chg-edited\" href=\"../../changes.html#calm"));
+}
 
-    // an authored top-level doc named changes owns the page: no summary, so no link
+#[test]
+fn rvm1_folder_and_group_markers_sit_inside_their_row() {
+    let (_d, mut r, canon) = guides();
+    let _clock = fixture_clock();
     write(&mut r, "w", json!([
-        {"op": "create", "type": "doc", "id": "$cd", "fields": {"name": "changes", "title": "Release notes", "doc_type": "overview"}},
-        prose("$pcd", "$cd", "What changed."),
+        {"op": "create", "type": "folder", "id": "$add", "fields": {"name": "added", "title": "Added"}},
+        {"op": "create", "type": "doc", "id": "$a1", "parent": "$add", "fields": {"name": "a1", "title": "A1", "doc_type": "overview"}},
+        {"op": "create", "type": "prose", "id": "$pa", "parent": "$a1", "body": "A text."},
+        {"op": "create", "type": "folder", "id": "$nest", "parent": canon.created["$two"].clone(), "fields": {"name": "nested", "title": "Nested"}},
+        {"op": "create", "type": "doc", "id": "$n1", "parent": "$nest", "fields": {"name": "n1", "title": "N1", "doc_type": "overview"}},
+        {"op": "create", "type": "prose", "id": "$pn1", "parent": "$n1", "body": "N text."},
     ]))
     .unwrap();
     let out = tempfile::tempdir().unwrap();
     rdy_render::render_site(&r.read(), &Scope::View("w".into()), out.path()).unwrap();
-    assert!(html(out.path(), "changes.html").contains("<h1>Release notes</h1>"));
-    let page = html(out.path(), "one/guide.html");
-    assert_eq!(edited_links(&page).len(), 3, "{page}");
-    for (doc, link) in edited_links(&page) {
-        assert_eq!(link, None, "Edited after {doc} leads nowhere");
-    }
+    let h = html(out.path(), "two/in/guide.html");
+    let nav = pages_nav(&h);
     assert!(
-        page.contains("chg chg-label chg-edited\">Edited</span>"),
-        "{page}"
+        nav.contains(&format!(
+            "<span class=\"nav-group-label\">Added {}</span>",
+            mark("new")
+        )),
+        "{nav}"
     );
-    assert!(!page.contains("changes.html#"), "{page}");
-    // the authored doc is an ordinary entry, and a New one
+    // the top-level folder has a page: its label and marker sit in the fold's summary
     assert!(
-        page.contains(
-            "changes.html\">Release notes</a><span class=\"chg chg-label chg-new\">New</span>"
-        ),
-        "{page}"
+        nav.contains(&format!(
+            "<summary><span class=\"nav-group-label\">Added {}</span></summary>",
+            mark("new")
+        )),
+        "{nav}"
+    );
+    assert!(
+        nav.contains(&format!("<summary>Nested {}</summary>", mark("new"))),
+        "{nav}"
+    );
+}
+
+#[test]
+fn rvm1_the_not_found_page_keeps_markers_and_no_summary_link() {
+    let (_d, _r, _ids, out) = draft();
+    let h = html(out.path(), "404.html");
+    let nav = pages_nav(&h);
+    assert!(
+        nav.contains(&format!("Intro {}</a>", mark("edited"))),
+        "{nav}"
+    );
+    assert!(!nav.contains("changes.html#"), "{nav}");
+}
+
+#[test]
+fn rvm1_canon_rows_keep_their_bytes() {
+    let (_d, r, _ids) = review_project();
+    let out = tempfile::tempdir().unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
+    for p in pages(out.path()) {
+        let h = std::fs::read_to_string(&p).unwrap();
+        for m in ["chg-mark", "chg-dot"] {
+            assert!(!h.contains(m), "{} holds {m}", p.display());
+        }
+    }
+    let h = html(out.path(), "keep.html");
+    assert_eq!(
+        pages_nav(&h),
+        "<nav aria-label=\"Pages\"><ul class=\"nav-root\"><li class=\"nav-group\"><ul><li class=\"nav-item\"><a href=\"index.html\">Home</a></li><li class=\"nav-item\"><a href=\"intro.html\">Intro</a></li><li class=\"nav-item is-active\"><a href=\"keep.html\" aria-current=\"page\">Keep</a></li><li class=\"nav-item\"><a href=\"old.html\">Old guide</a></li></ul></li></ul></nav>"
     );
 }

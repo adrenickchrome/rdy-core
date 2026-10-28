@@ -221,26 +221,36 @@ fn scopes() -> Vec<(&'static str, tempfile::TempDir, Rdy, Scope)> {
 /// Re-taken for the final review's fix round 1 (M2): Cite skips a selection in the eyebrow, so
 /// only `js/copy.js` changed and only `assets/app.js` moved; with the old script the digests
 /// were the ones before.
+/// Re-taken for the review markers plan's Task 1 (D-NYCMF): the sidebar marker rules of
+/// `assets/site.css` moved, so every scope's digest moved; in a scope with review marks, the
+/// sidebar's changed rows moved too. Canon and tag pages keep their bytes.
+/// Re-taken for the review markers plan's Task 2 (D-NYCMF): the page index's marker rules of
+/// `assets/site.css` moved, so every scope's digest moved; in a view and a proposal, the changed
+/// doc pages' index moved too. With the old stylesheet the canon and tag digests are the ones
+/// before.
+/// Re-taken for Task 2's fix round (ruling task-2): only the index marker rule of
+/// `assets/site.css` moved (`.toc-link:not(.toc-chg) .chg-mark`); with the old stylesheet every
+/// digest is the one before.
 const SITE_DIGESTS: [(&str, &str, &str); 4] = [
     (
         "canon",
-        "bbae9ac75832387e158ebad641d73f8f0235e094b8f61a5c10280e259f601ba2",
-        "af6eec76b57da276ccb35911cb74bdde8a082397d5aebbc8a3a7583573c7c491",
+        "65226f6a02b833a5f5e3decb742a18c4c26c8b37b5c1ca50e5af3fa7863db677",
+        "4190f0e4220ebe5f63ec45114c7f35945ce09cef26951a69233968534aa69806",
     ),
     (
         "tag",
-        "39c97cbf37557dc08e114fc95183a1da703ebd1c556cc0337628fa04ea7d82ab",
-        "52ab5387f388940c542e2d38b963344d0a23dcfd14cc3300eec72d5c86900dcc",
+        "74551ea6342d8eaabd066a7dcc0c96ba37d3c36328c58a754244912034ef7aeb",
+        "4d3edea62cf5d688a37d164b29ff277415950dca5a69fdd6500a098df860e7d6",
     ),
     (
         "view",
-        "312ecd22e4500fd16a3fff0b283193ee5b7b94fcf39c3e50c9c5157966a952b4",
-        "bdd405ceb8474edaf151d925a37a11621a31ff98fd574cdad863d3e893ae03fe",
+        "26f60d0d3cb864465833c6e6f62db789a114143b04205fec09c99ee2706bdc03",
+        "58197184a6b10a2545c2206ea68eea14452275b5fd0568a2cf1a54bf8432b346",
     ),
     (
         "proposal",
-        "cee9fd5fe1b9808e0b4b17e142eefac9538eabf8039f7313a926c62e6d54a834",
-        "e09fcf47d99ba0d3a7d4caeb9f2f2cb9cf66a6fef01cd99c7dff96142dae84cb",
+        "c08f703f960dbc76ab6a4ac9fc5c370567d882576381cd6230a462c0b90b150f",
+        "a532c6f415a1870b3d4ee3bf2f684858f24cc566871b41a910a0b0cfd7f879e8",
     ),
 ];
 
