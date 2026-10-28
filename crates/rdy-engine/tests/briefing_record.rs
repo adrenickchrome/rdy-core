@@ -299,7 +299,7 @@ fn rg1_a_replay_keeps_its_source_token() {
     .unwrap();
     p.r.view_create(&writer(), "t", None, false).unwrap();
     let res =
-        p.r.view_replay(&writer(), "t", &[w.change.clone()])
+        p.r.view_replay(&writer(), "t", std::slice::from_ref(&w.change))
             .unwrap();
     assert_eq!(res.replayed.len(), 1, "{res:?}");
     let replayed = &res.replayed[0].change;
