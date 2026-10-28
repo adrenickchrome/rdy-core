@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 pub struct CoverageParams {
     /// "canon", a view name (an existing view, or your session's), "tag:<version>", "landing:<id>" or "view:<name>". Defaults to the session view.
     pub scope: Option<String>,
-    /// Only the docs at or under this path (a doc, a folder or a block's path).
+    /// Only the blocks at or under this path (a doc, a folder or a block's path). A block in a doc takes the doc's path; a block in a folder takes the folder's.
     pub path: Option<String>,
     /// Cut the answer to about this many tokens (the issues list is shortened).
     pub max_tokens: Option<usize>,
