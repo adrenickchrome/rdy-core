@@ -3674,7 +3674,6 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_propose/ok/blocking",
     "mcp/rdy_propose/ok/conflicts",
     "mcp/rdy_propose/ok/consequences",
-    "mcp/rdy_propose/ok/plan/items",
     "mcp/rdy_review_next/ok/case/entities",
     "mcp/rdy_review_next/refused/issues",
     "mcp/rdy_review_submit/refused/issues",
