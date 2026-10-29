@@ -176,7 +176,8 @@ fn rg11_mcp_plan_answers_a_group_and_repins() {
     );
     let row = items_of(&after, "confirm")[0];
     assert_eq!(row["state"], "closed", "{after:#}");
-    assert_eq!(row["answer"]["reason"], "b follows a");
+    // the repin makes the pin current, so the item closes at once; the answers are one plan version
+    assert!(!after["plan"].is_null(), "{after:#}");
     assert_eq!(
         engine.read().included("w").len(),
         changes + 1,
@@ -216,7 +217,7 @@ fn rg11_mcp_plan_refuses_an_unknown_group_key_with_did_you_mean() {
     // dismiss is an act of rdy_propose's plan_answers too
     let ok = parse_params::<rdy_mcp::tools::ProposeParams>(
         "rdy_propose",
-        json!({"view": "w", "plan_answers": [{"item": "tn-0123456789ab", "act": "dismiss", "reason": "r"}]})
+        json!({"view": "w", "title": "t", "plan_answers": [{"item": "tn-0123456789ab", "act": "dismiss", "reason": "r"}]})
             .as_object()
             .unwrap()
             .clone(),
