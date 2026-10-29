@@ -42,8 +42,10 @@ use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-/// Where a candidate's change plan comes from.
+/// Where a candidate's change plan comes from. A candidate is built once per readiness run, so
+/// the plan in hand stays inline, as the interface gives it.
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum PlanSource {
     /// The plan the store binds to the version (`None`: a version with no bound plan, O19),
     /// read from the store.
