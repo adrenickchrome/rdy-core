@@ -685,6 +685,7 @@
             0
           ],
           "stdout": {
+            "assessment": "string",
             "blocking": [],
             "canon_at": "string",
             "changes": "number",
@@ -703,6 +704,7 @@
               ]
             },
             "id": "string",
+            "issues": [],
             "plan": {
               "by_kind": {
                 "confirm": {
@@ -745,6 +747,7 @@
               "items": [],
               "open": "number"
             },
+            "ready": "bool",
             "ref": "string",
             "stable": "string",
             "summary": "string",
@@ -11368,10 +11371,10 @@
     "scenario": {
       "conflicts": {
         "a": [
-          "ccda5208c25e4639f95163fb7ba8edc5dc9da57e544edd8ee9039de3a8d060a9"
+          "d31c17dae8c0ad358656fcf02af98d3d4d5214f5d8d7b5bab2a51c9e6dd7d9e4"
         ],
         "b": [
-          "caf508545a00d02585b53e1c534f1a606fabd7e6d2de9ee746f7c08b557284b7"
+          "1d42e298a93ac11f6d4998bb85857ca00c24ea7236a56fde1fcf2506447c17c6"
         ],
         "work": []
       },
@@ -11381,76 +11384,76 @@
           {
             "event": "tension_opened",
             "ids": [
-              "fdf83106f80fd907a07f9ecfb34a1d9f2a7e542fa82ea1c2845de15866091077",
-              "eef8868c6fee3e5999e6e327ad5afac1d7b365e08982a82189746916f8c9730b"
+              "26128692ed566a28d305dc2d3a2cb86d7e88a7ab6ef481115a429b33973512e4",
+              "37579917da30b6c6a43687d7325fbfa0452c3d28fd38260f6163b5cc5c764328"
             ],
-            "line": "tension fdf83106f80f opened on your change eef8868c6fee (edit_collision, blocking): a side changed (change 974b2c526653)"
+            "line": "tension 26128692ed56 opened on your change 37579917da30 (edit_collision, blocking): a side changed (change a25f71f51c56)"
           },
           {
             "event": "pending_added",
             "ids": [
-              "5f77ade583617487f92e1f64e0f3b5efb64aaf59f38b89b80d6f11a3f2c5ee15"
+              "8d5338801a3aa86f8ba2e6e7eb98353537c20beeadf4bfb07b6838b55ec8738e"
             ],
-            "line": "P-5f77ade58361@1 waits for an answer; read rdy_pending"
+            "line": "P-8d5338801a3a@1 waits for an answer; read rdy_pending"
           },
           {
             "event": "intent_posted",
             "ids": [
-              "1e443c9b5752f610f27e527991abf422e85a3c725690db38f86faeccfe310256"
+              "bf78977e9a9cf3ed840a4c97e0a5989d6465356d894d3d9bcd54754fc6f356e1"
             ],
-            "line": "agent:b posted intent 1e443c9b5752 on 1 blocks you are changing"
+            "line": "agent:b posted intent bf78977e9a9c on 1 blocks you are changing"
           },
           {
             "event": "tension_opened",
             "ids": [
-              "e71ee6199f1dd3e9a880e466349a7efe825a9a3c4ceb549d9ddd054c94247859",
-              "eef8868c6fee3e5999e6e327ad5afac1d7b365e08982a82189746916f8c9730b"
+              "4c8116c45adbf5d13867f05ae8ae44ada72b91fda2b870f2c83a2ed917b90b19",
+              "37579917da30b6c6a43687d7325fbfa0452c3d28fd38260f6163b5cc5c764328"
             ],
-            "line": "tension e71ee6199f1d opened on your change eef8868c6fee (edit_collision, blocking): a side changed (change a2729c46424e)"
+            "line": "tension 4c8116c45adb opened on your change 37579917da30 (edit_collision, blocking): a side changed (change 4feca551a83f)"
           },
           {
             "event": "pending_added",
             "ids": [
-              "18e617d69cfd695d965c850fe1f58571e3ade2e1bceeb8da54b5e092eeac4641"
+              "dc05d3b101a7a4e46b2531f5fd4ba48aa66d633eedc774039b45207852e03811"
             ],
-            "line": "P-18e617d69cfd@1 waits for an answer; read rdy_pending"
+            "line": "P-dc05d3b101a7@1 waits for an answer; read rdy_pending"
           },
           {
             "event": "landed",
             "ids": [
-              "b4a1c671059948c176e4594c8a456670cd4ba15cf058caa235ba9f7ec050db9b",
-              "18e617d69cfd695d965c850fe1f58571e3ade2e1bceeb8da54b5e092eeac4641"
+              "b97278e8eeda2862c3e78ad65d42c678c90b0a30352f53818f5a6376057df13c",
+              "dc05d3b101a7a4e46b2531f5fd4ba48aa66d633eedc774039b45207852e03811"
             ],
-            "line": "landing b4a1c6710599 of view work changed 1 blocks in your areas (payments)"
+            "line": "landing b97278e8eeda of view work changed 1 blocks in your areas (payments)"
           },
           {
             "event": "view_rebased",
             "ids": [
-              "b4a1c671059948c176e4594c8a456670cd4ba15cf058caa235ba9f7ec050db9b",
-              "ccda5208c25e4639f95163fb7ba8edc5dc9da57e544edd8ee9039de3a8d060a9"
+              "b97278e8eeda2862c3e78ad65d42c678c90b0a30352f53818f5a6376057df13c",
+              "d31c17dae8c0ad358656fcf02af98d3d4d5214f5d8d7b5bab2a51c9e6dd7d9e4"
             ],
-            "line": "your view a rebased onto landing b4a1c6710599 with 1 conflicts"
+            "line": "your view a rebased onto landing b97278e8eeda with 1 conflicts"
           },
           {
             "event": "tension_opened",
             "ids": [
-              "30a7a37bc43225ce1bd4b37c66b5e57b88e6b049fd2f7f89b96c0f8d9b03ef1b",
-              "eef8868c6fee3e5999e6e327ad5afac1d7b365e08982a82189746916f8c9730b"
+              "40e40e4244c8c3e65c934273a7ada41a82cc6c29e959303c8a1df9572f12e2e6",
+              "37579917da30b6c6a43687d7325fbfa0452c3d28fd38260f6163b5cc5c764328"
             ],
-            "line": "tension 30a7a37bc432 replaces e71ee6199f1d on your change eef8868c6fee (edit_collision, blocking): landing b4a1c6710599"
+            "line": "tension 40e40e4244c8 replaces 4c8116c45adb on your change 37579917da30 (edit_collision, blocking): landing b97278e8eeda"
           }
         ]
       },
       "logged_suspects": [],
       "logged_tensions": [
-        "tn-30a7a37bc432",
-        "tn-f1374be29be3",
-        "tn-fdf83106f80f"
+        "tn-0e859009bec9",
+        "tn-26128692ed56",
+        "tn-40e40e4244c8"
       ],
       "tensions": {
-        "tn-30a7a37bc432": "open",
-        "tn-f1374be29be3": "open",
-        "tn-fdf83106f80f": "open"
+        "tn-0e859009bec9": "open",
+        "tn-26128692ed56": "open",
+        "tn-40e40e4244c8": "open"
       },
       "transitions": 3
     },
@@ -13809,6 +13812,7 @@
       },
       "rdy_propose": {
         "ok": {
+          "assessment": "string",
           "blocking": [],
           "canon_at": "string",
           "changes": "number",
@@ -13827,6 +13831,7 @@
             ]
           },
           "id": "string",
+          "issues": [],
           "plan": {
             "by_kind": {
               "confirm": {
@@ -13878,6 +13883,7 @@
             ],
             "open": "number"
           },
+          "ready": "bool",
           "ref": "string",
           "stable": "string",
           "summary": "string",

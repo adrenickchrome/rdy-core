@@ -2430,7 +2430,24 @@ impl Rdy {
                     hash: plan_hash,
                 },
             };
-            crate::readiness::assess(&now, &c, now.require_up_to_date())?
+            // a read error never fails the reply (as `tensions_error`): the version is stored,
+            // not ready, with the error as its one issue
+            crate::readiness::assess(&now, &c, now.require_up_to_date()).unwrap_or_else(|e| {
+                crate::readiness::Assessed {
+                    readiness: crate::readiness::Readiness {
+                        issues: vec![Issue {
+                            severity: Severity::Error,
+                            code: e.code,
+                            block: None,
+                            message: e.message,
+                            fix: e.fix,
+                        }],
+                        summary: PlanSummary::default(),
+                        card: None,
+                    },
+                    assessment: None,
+                }
+            })
         };
         let assessment = match &assessed.assessment {
             Some(a) => Some(self.store.bind_assessment(&mut prepared, a)?),
