@@ -2589,12 +2589,32 @@ fn rg15_every_live_view_drains_through_the_gate() {
                 "the person's work version {r} is still in its queue"
             ));
         }
+        // what each version of `work` met, for a person to look at
+        if live.iter().any(|v| v == "work") {
+            for (k, e) in o.journal.iter().enumerate() {
+                let Some(pref) = e.block.as_deref().filter(|b| work.contains(b)) else {
+                    continue;
+                };
+                if matches!(e.act, "wc_propose" | "land" | "version_plan") {
+                    bad.push(format!(
+                        "work: entry {k} {} step {} {} {pref}: {:?} {}",
+                        e.actor,
+                        e.step,
+                        e.act,
+                        e.outcome,
+                        e.message.as_deref().unwrap_or("")
+                    ));
+                }
+            }
+            bad.push(format!("work: queued at the end {:?}", o.queued));
+        }
         drop(st);
         r.close().expect("close the drained copy");
-        assert!(
-            live.is_empty(),
-            "swarm seed {seed}: views neither landed nor closed after the drain: {live:?}"
-        );
+        if !live.is_empty() {
+            bad.push(format!(
+                "views neither landed nor closed after the drain: {live:?}"
+            ));
+        }
         assert!(bad.is_empty(), "swarm seed {seed}: {bad:#?}");
     });
     eprintln!(
