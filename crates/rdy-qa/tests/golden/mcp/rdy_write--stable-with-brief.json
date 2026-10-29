@@ -1,5 +1,5 @@
 {
-  "change": "308f5baaa5d09b8d64b503b3def7342d808c9cdea19318e30673d4426d7acbdf",
+  "change": "96807e8ed4ead9efd834f7529cdcc733d5baa7de1c3c564e7d430acb0d131445",
   "consequences": [
     {
       "because": {
@@ -9,9 +9,9 @@
       "block": "c-CFPE0",
       "fix": "resolve it with a change (rdy_tensions shows both sides), or ask a reviewer to dismiss it with rdy_resolve",
       "follow_up": "resolve",
-      "id": "cq-509188b2ee4e38a8",
+      "id": "cq-80a8343717afa312",
       "kind": "tension",
-      "tension": "tn-7500a1497e99"
+      "tension": "tn-4c7290c3eb2c"
     },
     {
       "because": {
@@ -24,7 +24,7 @@
       },
       "block": "c-WKHEZ",
       "follow_up": "confirm",
-      "id": "cq-8b6909a2c77f4128",
+      "id": "cq-88eac493867c1d2e",
       "kind": "suspect"
     }
   ],
@@ -48,7 +48,7 @@
         "blocks": [
           "c-CFPE0"
         ],
-        "id": "tn-7500a1497e99",
+        "id": "tn-4c7290c3eb2c",
         "kind": "unjustified_change",
         "overridden": true,
         "severity": "blocking",
@@ -61,17 +61,17 @@
                 "version": "f960e2ac81de4410669a4179c3671ceac66580639aa69f643e13d684cd4f9279"
               }
             ],
-            "change": "308f5baaa5d09b8d64b503b3def7342d808c9cdea19318e30673d4426d7acbdf",
+            "change": "96807e8ed4ead9efd834f7529cdcc733d5baa7de1c3c564e7d430acb0d131445",
             "run": "a",
-            "side": "308f5baaa5d09b8d64b503b3def7342d808c9cdea19318e30673d4426d7acbdf",
+            "side": "96807e8ed4ead9efd834f7529cdcc733d5baa7de1c3c564e7d430acb0d131445",
             "views": [
               "a"
             ]
           }
         ],
         "status": "open",
-        "summary": "change 308f5baaa5d0 edits stable normative block c-CFPE0 without a justification",
-        "tension": "7500a1497e9971751124a699f84b580bc028906f704f5b8bb71b7f179bb7c670"
+        "summary": "change 96807e8ed4ea edits stable normative block c-CFPE0 without a justification",
+        "tension": "4c7290c3eb2c408bb238c35e9ed624d1f1c30f669498e71706bc3e96c20f3841"
       }
     ]
   },

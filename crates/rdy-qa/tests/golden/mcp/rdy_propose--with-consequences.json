@@ -1,6 +1,7 @@
 {
+  "assessment": null,
   "blocking": [],
-  "canon_at": "9c45020c53cdcaea85b8e409650ec8c84174023cbfce64f2a01b241a8421250b",
+  "canon_at": "6998a4220fcd2b865c506ffb56fb0eb62c3ab749a9f06a7aa8ec2be8aec7c4d2",
   "changes": 1,
   "conflicts": [],
   "consequences": [
@@ -15,7 +16,7 @@
       },
       "block": "c-WKHEZ",
       "follow_up": "confirm",
-      "id": "cq-bcbd807f203f3968",
+      "id": "cq-b7bdc3c39f73e490",
       "kind": "suspect"
     }
   ],
@@ -31,7 +32,23 @@
       }
     ]
   },
-  "id": "8c73aeee29c416b423883af29364cb839217ee1d13cfb190ee42b55c9098eecc",
+  "id": "1336769c99c78ac7bbcf89f2069413cc5266ed3bda4163341a39c2fabfe4aff9",
+  "issues": [
+    {
+      "block": null,
+      "code": "E_BLOCKING_TENSION",
+      "fix": "resolve each with a change, repin the citation, or dismiss it (rdy resolve <tn-…> --dismiss <reason>; a reviewer of another actor or a human); rdy tensions --involving <change> lists them, a form only this landing gives with its proposal",
+      "message": "landing P-1336769c99c7@1 would put 2 blocking tension(s) into canon",
+      "severity": "error"
+    },
+    {
+      "block": null,
+      "code": "E_PLAN_OPEN",
+      "fix": "close or defer each item, and answer each tension item with confirm or dismiss: rdy_plan / rdy plan",
+      "message": "1 change-plan items are open",
+      "severity": "error"
+    }
+  ],
   "plan": {
     "by_kind": {
       "confirm": {
@@ -83,15 +100,16 @@
     ],
     "open": 1
   },
-  "ref": "P-8c73aeee29c4@1",
-  "stable": "8c73aeee29c416b423883af29364cb839217ee1d13cfb190ee42b55c9098eecc",
+  "ready": false,
+  "ref": "P-1336769c99c7@1",
+  "stable": "1336769c99c78ac7bbcf89f2069413cc5266ed3bda4163341a39c2fabfe4aff9",
   "summary": "Rewords A and C.",
   "tensions": [
     {
       "blocks": [
         "c-ZCQ17"
       ],
-      "id": "tn-71987fc31257",
+      "id": "tn-40cae1573d39",
       "kind": "unjustified_change",
       "overridden": true,
       "refuses": true,
@@ -105,9 +123,9 @@
               "version": "d7b9c3dfab68f6d221735204660a42a6ae0820c329a7c748f54591fd1a22748a"
             }
           ],
-          "change": "4caa2e6307aaacfac09d875f9cca93abf73fddf423115740b537c2445703b7f8",
+          "change": "ad11fc51a30ffbb910c13088516f3502cc1f59efb8c55d2561b180e1f91c73c5",
           "run": "b",
-          "side": "4caa2e6307aaacfac09d875f9cca93abf73fddf423115740b537c2445703b7f8",
+          "side": "ad11fc51a30ffbb910c13088516f3502cc1f59efb8c55d2561b180e1f91c73c5",
           "views": [
             "a",
             "b"
@@ -115,14 +133,14 @@
         }
       ],
       "status": "open",
-      "summary": "change 4caa2e6307aa edits stable normative block c-ZCQ17 without a justification",
-      "tension": "71987fc3125779485e06f0d70dfc0e46a03fa47bc0f62e7c09135a48b43b360b"
+      "summary": "change ad11fc51a30f edits stable normative block c-ZCQ17 without a justification",
+      "tension": "40cae1573d390cad1c22dbd829e999c1b6486cc1707f483a21222f3960b52e8a"
     },
     {
       "blocks": [
         "c-CFPE0"
       ],
-      "id": "tn-7ccda921aa2c",
+      "id": "tn-fafe4024d65c",
       "kind": "unjustified_change",
       "overridden": true,
       "refuses": true,
@@ -136,9 +154,9 @@
               "version": "c3504b10595379dc2945f07f74be32a5d559e27cde7154bc4c43820b8ff99d81"
             }
           ],
-          "change": "4caa2e6307aaacfac09d875f9cca93abf73fddf423115740b537c2445703b7f8",
+          "change": "ad11fc51a30ffbb910c13088516f3502cc1f59efb8c55d2561b180e1f91c73c5",
           "run": "b",
-          "side": "4caa2e6307aaacfac09d875f9cca93abf73fddf423115740b537c2445703b7f8",
+          "side": "ad11fc51a30ffbb910c13088516f3502cc1f59efb8c55d2561b180e1f91c73c5",
           "views": [
             "a",
             "b"
@@ -146,8 +164,8 @@
         }
       ],
       "status": "open",
-      "summary": "change 4caa2e6307aa edits stable normative block c-CFPE0 without a justification",
-      "tension": "7ccda921aa2cec3d675582634706c7def05a3f8ffe0aa8d70beea3d974466a6b"
+      "summary": "change ad11fc51a30f edits stable normative block c-CFPE0 without a justification",
+      "tension": "fafe4024d65c603504d028b75a282510e53d34acce4bccf968c514cba2a12932"
     },
     {
       "blocks": [
@@ -156,13 +174,13 @@
       "dismissal": {
         "actor": "agent:r",
         "at": "2025-10-09T08:53:20Z",
-        "at_ms": 1760000000067,
+        "at_ms": 1760000000071,
         "reason": "checked: b's wording is the newer one",
-        "review": "e3897484188a9f399d420d4546d8085f88d5b74c98c01602fcdbc57890b97a08",
+        "review": "b0ddb84cd234e53e8686aa4b5b83f712da5042a8f9a9e7da9d6b065f642548a6",
         "role": "reviewer",
         "run": "r"
       },
-      "id": "tn-fdd2215331b0",
+      "id": "tn-e92428692222",
       "kind": "edit_collision",
       "refuses": false,
       "severity": "blocking",
@@ -175,9 +193,9 @@
               "version": "f960e2ac81de4410669a4179c3671ceac66580639aa69f643e13d684cd4f9279"
             }
           ],
-          "change": "308f5baaa5d09b8d64b503b3def7342d808c9cdea19318e30673d4426d7acbdf",
+          "change": "96807e8ed4ead9efd834f7529cdcc733d5baa7de1c3c564e7d430acb0d131445",
           "run": "a",
-          "side": "308f5baaa5d09b8d64b503b3def7342d808c9cdea19318e30673d4426d7acbdf",
+          "side": "96807e8ed4ead9efd834f7529cdcc733d5baa7de1c3c564e7d430acb0d131445",
           "views": [
             "a",
             "a-fork"
@@ -191,9 +209,9 @@
               "version": "c3504b10595379dc2945f07f74be32a5d559e27cde7154bc4c43820b8ff99d81"
             }
           ],
-          "change": "4caa2e6307aaacfac09d875f9cca93abf73fddf423115740b537c2445703b7f8",
+          "change": "ad11fc51a30ffbb910c13088516f3502cc1f59efb8c55d2561b180e1f91c73c5",
           "run": "b",
-          "side": "4caa2e6307aaacfac09d875f9cca93abf73fddf423115740b537c2445703b7f8",
+          "side": "ad11fc51a30ffbb910c13088516f3502cc1f59efb8c55d2561b180e1f91c73c5",
           "views": [
             "a",
             "b"
@@ -202,7 +220,7 @@
       ],
       "status": "dismissed",
       "summary": "two changes edit c-CFPE0 from one base",
-      "tension": "fdd2215331b0623c2c303800de1329c97fd9567b0346813ba48f0f1df232ca58"
+      "tension": "e924286922228e75de2976c74dccd70e011e7f4dad0a546721e50735a713f036"
     }
   ],
   "title": "Fix A and C",

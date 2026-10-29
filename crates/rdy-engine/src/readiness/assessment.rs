@@ -167,13 +167,6 @@ pub(crate) fn cut_text(text: String) -> String {
 
 /// The seven scores of a rollup; no rollup (a doc absent on that side) gives seven 100s, and a
 /// dimension the rollup lacks reads 100 (O19).
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the propose caller (Task 10) fills Inputs with it"
-    )
-)]
 pub(crate) fn scores_of(r: Option<&Rollup>) -> AssessmentScores {
     let Some(r) = r else {
         return AssessmentScores {
@@ -199,13 +192,6 @@ pub(crate) fn scores_of(r: Option<&Rollup>) -> AssessmentScores {
 }
 
 /// A coverage issue as a record row. Its dismissal keeps the review only (O19).
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the propose caller (Task 10) fills Inputs with it"
-    )
-)]
 pub(crate) fn issue_of(i: &CoverageIssue) -> AssessmentIssue {
     let code = serde_json::to_value(i.code)
         .ok()
@@ -223,13 +209,6 @@ pub(crate) fn issue_of(i: &CoverageIssue) -> AssessmentIssue {
 
 /// A confidence as the record keeps it: its level, and its reasons as rows, sorted and
 /// distinct (O19).
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the propose caller (Task 10) fills Inputs with it"
-    )
-)]
 pub(crate) fn confidence_record(c: &Confidence) -> AssessmentConfidence {
     AssessmentConfidence {
         level: match c.confidence {

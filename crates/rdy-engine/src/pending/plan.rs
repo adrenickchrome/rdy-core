@@ -113,12 +113,16 @@ fn answer_wire<S: serde::Serializer>(a: &PlanAnswer, s: S) -> Result<S::Ok, S::E
 /// (none before store 17), the counts over every item, code items included, the deferred
 /// non-code items, the summary with the bound answers (`PlanSummary`, what the change-plan gate
 /// reads), and the blocks its items name (each subject that is a block, and each cause; O18).
+/// For the assessment (O17, O18): the (tension id, item) of each tension item a bound answer
+/// answers, and the (subject, cause) of each reaffirm and confirm item whose subject is a block.
 pub(crate) struct VersionPlan {
     pub(super) bound: Option<Hash>,
     pub(super) counts: PlanCounts,
     pub(super) deferrals: Vec<DeferralBinding>,
     pub(crate) summary: PlanSummary,
     pub(crate) blocks: BTreeSet<BlockId>,
+    pub(crate) tension_answers: Vec<(Hash, Hash)>,
+    pub(crate) suspect_items: Vec<(BlockId, BlockId)>,
 }
 
 /// The change plan of version `version` (record `p`), whose plan comes from `source`, its tension
@@ -155,6 +159,8 @@ pub(super) fn version_plan(
                 deferrals: vec![],
                 summary: summary_of(&computed, &[]),
                 blocks: blocks_of(&computed),
+                tension_answers: vec![],
+                suspect_items: suspect_items(&computed),
             });
         }
         PlanSource::Bound(Some(h)) => {
@@ -183,7 +189,43 @@ pub(super) fn version_plan(
         deferrals: deferrals(&computed, &plan.answers),
         summary: summary_of(&computed, &plan.answers),
         blocks: blocks_of(&computed),
+        tension_answers: tension_answers(&computed, &plan.answers),
+        suspect_items: suspect_items(&computed),
     })
+}
+
+/// The (tension id, item) of each tension item of `computed` that one of `answers` (sorted by
+/// item) answers: no computed close, and an answer that names the item with the tension's
+/// current vkey (O5, O17).
+fn tension_answers(computed: &ComputedPlan, answers: &[PlanAnswer]) -> Vec<(Hash, Hash)> {
+    let mut out = vec![];
+    for c in &computed.items {
+        if c.kind != PlanKind::Tension || c.close.is_some() {
+            continue;
+        }
+        let Ok(i) = answers.binary_search_by(|a| a.item.cmp(&c.id)) else {
+            continue;
+        };
+        let a = &answers[i];
+        if a.subject != c.subject_hash || a.cause != c.cause_hash {
+            continue;
+        }
+        if let Ok(id) = c.subject.parse::<Hash>() {
+            out.push((id, c.id));
+        }
+    }
+    out
+}
+
+/// The (subject, cause) of each reaffirm and confirm item of `computed` whose subject is a
+/// block: the items whose subject can be suspect (O18).
+fn suspect_items(computed: &ComputedPlan) -> Vec<(BlockId, BlockId)> {
+    computed
+        .items
+        .iter()
+        .filter(|c| matches!(c.kind, PlanKind::Reaffirm | PlanKind::Confirm))
+        .filter_map(|c| Some((BlockId::parse(&c.subject).ok()?, c.cause.clone())))
+        .collect()
 }
 
 /// The blocks the items of `computed` name: each subject that is a block id (never a code path

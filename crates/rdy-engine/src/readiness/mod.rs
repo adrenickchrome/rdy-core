@@ -36,6 +36,7 @@ use crate::pending::queue::{answered, deferrals_refused};
 use crate::plan::lifecycle::PlanSummary;
 use crate::{ReadState, Scope};
 use assessment::MAX_TENSION_ROWS;
+use rdy_model::assessment::Assessment;
 use rdy_model::plan::Plan;
 use rdy_model::{AnswerAct, BlockId, Change, Hash, Proposal};
 use rdy_schema::{Issue, Severity};
@@ -100,6 +101,32 @@ pub struct Readiness {
 /// The readiness of candidate `c` on `st` (see the module docs). It writes nothing.
 pub fn readiness(st: &ReadState, c: &Candidate) -> Result<Readiness, RdyError> {
     crate::pending::queue::readiness_of(st, c)
+}
+
+/// What [`assess`] found: the readiness of a candidate and, when it is ready, the assessment
+/// record it stores (D-SDSV2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Assessed {
+    pub readiness: Readiness,
+    /// None exactly when `readiness` has an issue.
+    pub assessment: Option<Assessment>,
+}
+
+/// [`readiness`] of candidate `c` on `st`, and for a ready candidate the assessment record
+/// ([`assessment::build`]) from the same read of the version, with the gate configuration
+/// `require_up_to_date` (O7): what a propose stores in the version's batch (D-ME2HD). A record
+/// the store would refuse (O9) makes the candidate not ready, with that one issue. It writes
+/// nothing.
+pub fn assess(
+    st: &ReadState,
+    c: &Candidate,
+    require_up_to_date: bool,
+) -> Result<Assessed, RdyError> {
+    let (readiness, assessment) = crate::pending::queue::assessed(st, c, require_up_to_date)?;
+    Ok(Assessed {
+        readiness,
+        assessment,
+    })
 }
 
 /// What the checks read of a version: the queue's version read reads it once.
@@ -206,90 +233,6 @@ pub(crate) fn reach(
 #[doc(hidden)]
 pub fn reach_for_tests(st: &ReadState, c: &Candidate) -> Result<BTreeSet<BlockId>, RdyError> {
     crate::pending::queue::reach_of(st, c)
-}
-
-/// Tests only, until the propose writes it (Task 10): the assessment a propose stores for
-/// ready candidate `c` (D-SDSV2), with O17's tension rows (`ReadState::proposal_tensions` with
-/// max 1,000, open and dismissed, each with its vkey and status), the version's card and plan,
-/// and empty coverage. Err `E_VALIDATION` for a candidate that is not ready.
-#[doc(hidden)]
-pub fn assessment_for_tests(
-    st: &ReadState,
-    c: &Candidate,
-) -> Result<rdy_model::assessment::Assessment, RdyError> {
-    use rdy_model::assessment::{
-        AssessmentConfidence, AssessmentCoverage, AssessmentLevel, AssessmentScoreChange,
-        AssessmentScores,
-    };
-    let r = readiness(st, c)?;
-    let Some(card) = r.card else {
-        return Err(RdyError::new(
-            E_VALIDATION,
-            format!("{} is not ready", c.pref),
-            "make it ready first",
-        ));
-    };
-    let listed = st.listed_tensions(&c.p.view, &c.p.changes, &BTreeSet::new(), None)?;
-    let mut cache = crate::tensions::info::InfoCache::default();
-    let rows: Vec<_> = listed
-        .iter()
-        .take(MAX_TENSION_ROWS)
-        .map(|(refuses, t)| {
-            let mut info = st.tension_info_with(t, &mut cache);
-            info.refuses = Some(*refuses);
-            (info, t.vkey, st.tension_status(t))
-        })
-        .collect();
-    let mut written = BTreeSet::new();
-    for h in &c.p.changes {
-        for op in st.reader().change(h)?.ops {
-            written.insert(op.block_id().clone());
-        }
-    }
-    let zero = AssessmentScores {
-        overall: 0,
-        grounded: 0,
-        consistent: 0,
-        current: 0,
-        connected: 0,
-        complete: 0,
-        governed: 0,
-    };
-    assessment::build(assessment::Inputs {
-        pref: c.pref,
-        base: c.p.canon_at,
-        pack: st.pack(),
-        require_up_to_date: false,
-        changes: c.p.changes.len(),
-        consequences: 0,
-        plan: &r.summary,
-        plan_hash: c.plan.hash(),
-        supersedes: vec![],
-        reaffirms: vec![],
-        reversibility: vec![],
-        exceptions: vec![],
-        tensions: &rows,
-        tensions_omitted: listed.len().saturating_sub(MAX_TENSION_ROWS),
-        answers: &[],
-        suspects: vec![],
-        written,
-        plan_blocks: BTreeSet::new(),
-        scope_blocks: BTreeSet::new(),
-        coverage: AssessmentCoverage {
-            pages: vec![],
-            corpus: AssessmentScoreChange {
-                before: zero.clone(),
-                after: zero,
-            },
-        },
-        confidence: AssessmentConfidence {
-            level: AssessmentLevel::High,
-            reasons: vec![],
-        },
-        issues: vec![],
-        card: &card,
-    })
-    .map_err(|i| RdyError::new(i.code, i.message, i.fix))
 }
 
 /// The later refusals (D-ME2HD "Later refusals"), from inputs that need no candidate build:

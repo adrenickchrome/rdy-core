@@ -123,8 +123,9 @@ pub(crate) fn propose(env: &Env, a: ProposeArgs) -> Result<(Value, String), Erro
 
 /// The propose reply as text: the proposal line, its summary and alternative, the blocking
 /// conflicts and the tensions, the consequences part (coverage included) with a `not worked
-/// out:` line for each part rdy could not read, the new keys, the warnings, and last the
-/// approve command.
+/// out:` line for each part rdy could not read, the new keys, the warnings, then its readiness
+/// (O20): `ready` and last the approve command, or `not ready: <n> issue(s)` and one line per
+/// issue, with no approve command.
 fn propose_text(v: &Value) -> String {
     let pref = text(&v["ref"]);
     let mut t = format!("proposal {pref} ({} changes)", num(&v["changes"]));
@@ -204,7 +205,23 @@ fn propose_text(v: &Value) -> String {
             text(&w["message"])
         ));
     }
-    t.push_str(&format!("\napprove with: rdy approve {pref}"));
+    // D-ME2HD (O20): a version that is not ready lists each issue and gets no approve command
+    if v["ready"] == true {
+        t.push_str("\nready");
+        t.push_str(&format!("\napprove with: rdy approve {pref}"));
+    } else {
+        let issues = v["issues"].as_array().map_or(&[][..], Vec::as_slice);
+        t.push_str(&format!("\nnot ready: {} issue(s)", issues.len()));
+        for i in issues {
+            t.push_str(&format!(
+                "\n  {} {}: {} (fix: {})",
+                text(&i["code"]),
+                i["block"].as_str().unwrap_or("-"),
+                text(&i["message"]),
+                text(&i["fix"])
+            ));
+        }
+    }
     t
 }
 
@@ -520,12 +537,13 @@ pi-00000000000000bb confirm c-CCCCC: open (c-AAAAA)"
             "\nchange plan: 0 open, 4 closed, 0 deferred"
         );
         // it sits after the consequences and before the approve line
-        let mut reply = json!({"ref": "P-1@1", "changes": 1, "consequences": []});
+        let mut reply = json!({"ref": "P-1@1", "changes": 1, "consequences": [],
+            "ready": true, "issues": []});
         reply["plan"] = none["plan"].clone();
         let t = propose_text(&reply);
         assert!(
             t.ends_with(
-                "\nchange plan: 0 open, 4 closed, 0 deferred\napprove with: rdy approve P-1@1"
+                "\nchange plan: 0 open, 4 closed, 0 deferred\nready\napprove with: rdy approve P-1@1"
             ),
             "{t}"
         );
@@ -1133,11 +1151,12 @@ pi-00000000000000bb confirm c-CCCCC: open (c-AAAAA)"
         let v = json!({
             "ref": "P-1@1", "changes": 1, "tensions": [],
             "tensions_error": "E_IO: tensions busy",
-            "coverage_error": "E_IO: tensions busy"
+            "coverage_error": "E_IO: tensions busy",
+            "ready": true, "issues": []
         });
         assert_eq!(
             propose_text(&v),
-            "proposal P-1@1 (1 changes)\nnot worked out: the tensions (E_IO: tensions busy)\nnot worked out: the coverage change (E_IO: tensions busy)\napprove with: rdy approve P-1@1"
+            "proposal P-1@1 (1 changes)\nnot worked out: the tensions (E_IO: tensions busy)\nnot worked out: the coverage change (E_IO: tensions busy)\nready\napprove with: rdy approve P-1@1"
         );
     }
 
@@ -1149,11 +1168,12 @@ pi-00000000000000bb confirm c-CCCCC: open (c-AAAAA)"
             "ref": "P-1@1", "changes": 1, "tensions": [],
             "warnings": [{"severity": "warning", "code": "W_UNAPPLIED_DECISION", "block": "d-1",
                 "message": "decision d-1 lands with no content that applies it",
-                "fix": "link the content that carries it with decided_by"}]
+                "fix": "link the content that carries it with decided_by"}],
+            "ready": true, "issues": []
         });
         assert_eq!(
             propose_text(&v),
-            "proposal P-1@1 (1 changes)\nwarning W_UNAPPLIED_DECISION: decision d-1 lands with no content that applies it\napprove with: rdy approve P-1@1"
+            "proposal P-1@1 (1 changes)\nwarning W_UNAPPLIED_DECISION: decision d-1 lands with no content that applies it\nready\napprove with: rdy approve P-1@1"
         );
     }
 
@@ -1172,21 +1192,23 @@ pi-00000000000000bb confirm c-CCCCC: open (c-AAAAA)"
                 {"id": "tn-cccccccccccc", "refuses": false, "status": "open", "judged": {"actor": "agent:r"}},
                 {"id": "tn-dddddddddddd", "refuses": false, "status": "dismissed",
                     "judged": {"actor": "agent:r", "advice": "y"}}
-            ]
+            ],
+            "ready": true, "issues": []
         });
         assert_eq!(
             propose_text(&v),
-            "proposal P-1@1 (1 changes)\ntensions: 6 (1 would refuse the landing: tn-bbbbbbbbbbbb)\nadvised to block: tn-aaaaaaaaaaaa by agent:r: it contradicts the gate rule\nand 2 more advised to block (rdy show P-1@1 lists them)\naccept the advice with: rdy resolve --accept P-1@1 --digest 0123456789ab\napprove with: rdy approve P-1@1"
+            "proposal P-1@1 (1 changes)\ntensions: 6 (1 would refuse the landing: tn-bbbbbbbbbbbb)\nadvised to block: tn-aaaaaaaaaaaa by agent:r: it contradicts the gate rule\nand 2 more advised to block (rdy show P-1@1 lists them)\naccept the advice with: rdy resolve --accept P-1@1 --digest 0123456789ab\nready\napprove with: rdy approve P-1@1"
         );
         // FR1 finding 3: a dismissed tension is not advised, so nothing asks to accept it
         let v = json!({
             "ref": "P-1@1", "changes": 1,
             "tensions": [{"id": "tn-dddddddddddd", "refuses": false, "status": "dismissed",
-                "judged": {"actor": "agent:r", "advice": "y"}}]
+                "judged": {"actor": "agent:r", "advice": "y"}}],
+            "ready": true, "issues": []
         });
         assert_eq!(
             propose_text(&v),
-            "proposal P-1@1 (1 changes)\ntensions: 1 (0 would refuse the landing)\napprove with: rdy approve P-1@1"
+            "proposal P-1@1 (1 changes)\ntensions: 1 (0 would refuse the landing)\nready\napprove with: rdy approve P-1@1"
         );
     }
 }

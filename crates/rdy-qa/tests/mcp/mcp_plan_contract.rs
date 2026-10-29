@@ -331,10 +331,20 @@ fn cp14_plan_and_propose_pages_keep_full_counts() {
             .any(|w| w["code"] == "W_PLAN_OPEN"),
         "{v:#}"
     );
+    let issue = plan_open_issue(&mut st, &v["ref"]);
+    assert_eq!(issue["message"], "7 change-plan items are open");
+    // rg10 (O20): the reply says it is not ready, with the queue's issue
     assert_eq!(
-        plan_open_issue(&mut st, &v["ref"])["message"],
-        "7 change-plan items are open"
+        (&v["ready"], &v["assessment"]),
+        (&json!(false), &Value::Null)
     );
+    let plan_open: Vec<&Value> = v["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["code"] == "E_PLAN_OPEN")
+        .collect();
+    assert_eq!(plan_open, [&issue], "{v:#}");
 
     // the same budget answers all seven in the propose, and the counts are still whole
     let every: Vec<Value> = whole["items"]
@@ -797,6 +807,18 @@ fn cp14_guidance_matches_the_engine_in_a_live_project() {
     let row = ERROR_ROWS.iter().find(|r| r.0 == "E_PLAN_OPEN").unwrap();
     assert_eq!(issue["message"], "3 change-plan items are open");
     assert_eq!(issue["fix"], row.2);
+    // rg10 (O20): the reply says it is not ready, with the queue's issue
+    assert_eq!(
+        (&v["ready"], &v["assessment"]),
+        (&json!(false), &Value::Null)
+    );
+    let plan_open: Vec<&Value> = v["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["code"] == "E_PLAN_OPEN")
+        .collect();
+    assert_eq!(plan_open, [&issue], "{v:#}");
 
     // the allowed-act matrix: confirm takes confirm and defer; reaffirm takes defer only
     for (item, act, ok) in [

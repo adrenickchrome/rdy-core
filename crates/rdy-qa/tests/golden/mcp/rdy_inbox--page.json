@@ -1,115 +1,115 @@
 {
-  "cursor": "0.31738.0",
+  "cursor": "0.39535.0",
   "entries": [
     {
       "event": "tension_opened",
       "ids": [
-        "7500a1497e9971751124a699f84b580bc028906f704f5b8bb71b7f179bb7c670",
-        "308f5baaa5d09b8d64b503b3def7342d808c9cdea19318e30673d4426d7acbdf"
+        "4c7290c3eb2c408bb238c35e9ed624d1f1c30f669498e71706bc3e96c20f3841",
+        "96807e8ed4ead9efd834f7529cdcc733d5baa7de1c3c564e7d430acb0d131445"
       ],
-      "line": "tension 7500a1497e99 opened on your change 308f5baaa5d0 (unjustified_change, blocking): a side changed (change 308f5baaa5d0)"
+      "line": "tension 4c7290c3eb2c opened on your change 96807e8ed4ea (unjustified_change, blocking): a side changed (change 96807e8ed4ea)"
     },
     {
       "event": "tension_opened",
       "ids": [
-        "fdd2215331b0623c2c303800de1329c97fd9567b0346813ba48f0f1df232ca58",
-        "308f5baaa5d09b8d64b503b3def7342d808c9cdea19318e30673d4426d7acbdf"
+        "e924286922228e75de2976c74dccd70e011e7f4dad0a546721e50735a713f036",
+        "96807e8ed4ead9efd834f7529cdcc733d5baa7de1c3c564e7d430acb0d131445"
       ],
-      "line": "tension fdd2215331b0 opened on your change 308f5baaa5d0 (edit_collision, blocking): a side changed (change 4caa2e6307aa)"
+      "line": "tension e92428692222 opened on your change 96807e8ed4ea (edit_collision, blocking): a side changed (change ad11fc51a30f)"
     },
     {
       "event": "tension_opened",
       "ids": [
-        "bfa39fd77ada749a219fff9905d1888f0b32008db192a6ae7c1971e578463cdd",
-        "308f5baaa5d09b8d64b503b3def7342d808c9cdea19318e30673d4426d7acbdf"
+        "7f5c73048bf73cc016b14cb1666badefee8ea5166ef24b0659c4a1f526959527",
+        "96807e8ed4ead9efd834f7529cdcc733d5baa7de1c3c564e7d430acb0d131445"
       ],
-      "line": "tension bfa39fd77ada opened on your change 308f5baaa5d0 (unjustified_change, blocking): a view changed (op c9f942e87139)"
+      "line": "tension 7f5c73048bf7 opened on your change 96807e8ed4ea (unjustified_change, blocking): a view changed (op cfe619658c89)"
     },
     {
       "event": "tension_resolved",
       "ids": [
-        "bfa39fd77ada749a219fff9905d1888f0b32008db192a6ae7c1971e578463cdd",
-        "78ca0049fe84b2e92c00427b7159a17cd4fcbb62af3a22d4c63072f46ca3b08a"
+        "7f5c73048bf73cc016b14cb1666badefee8ea5166ef24b0659c4a1f526959527",
+        "1eb3c1a5c1dfc03c435fa727343773c7459719d301412aa019683aefaff535ff"
       ],
-      "line": "tension bfa39fd77ada no longer involves your in-flight changes: a view changed (op 78ca0049fe84)"
+      "line": "tension 7f5c73048bf7 no longer involves your in-flight changes: a view changed (op 1eb3c1a5c1df)"
     },
     {
       "event": "tension_opened",
       "ids": [
-        "bfa39fd77ada749a219fff9905d1888f0b32008db192a6ae7c1971e578463cdd",
-        "308f5baaa5d09b8d64b503b3def7342d808c9cdea19318e30673d4426d7acbdf"
+        "7f5c73048bf73cc016b14cb1666badefee8ea5166ef24b0659c4a1f526959527",
+        "96807e8ed4ead9efd834f7529cdcc733d5baa7de1c3c564e7d430acb0d131445"
       ],
-      "line": "tension bfa39fd77ada opened on your change 308f5baaa5d0 (unjustified_change, blocking): a view changed (op 273ad8881341)"
+      "line": "tension 7f5c73048bf7 opened on your change 96807e8ed4ea (unjustified_change, blocking): a view changed (op c16e26150e35)"
     },
     {
       "event": "tension_opened",
       "ids": [
-        "2fc67204b7d0babb1dd212c7c39865d3ac2ffd72e5749a551c9ce29e294b0d55",
-        "cbdeff20c1cf0952449b9765f52acb5197538d28c2add2ec1e224e206b9d8a18"
+        "8d04a97dc61b005da7e77ed4d2c275075ff46def7320ce5a62ac5b0ad9ea7aa6",
+        "2d40fd037681e587d448f21ce5b20752f8ce0734dbc81a6e799c9c0d8a6f1675"
       ],
-      "line": "tension 2fc67204b7d0 opened on your change cbdeff20c1cf (edit_collision, blocking): a side changed (change cbdeff20c1cf)"
+      "line": "tension 8d04a97dc61b opened on your change 2d40fd037681 (edit_collision, blocking): a side changed (change 2d40fd037681)"
     },
     {
       "event": "tension_opened",
       "ids": [
-        "a80580fd35df9ce75903c847b065abace97edebea5cf615b66441a014b6c4acb",
-        "2f8076da276e251b96d3ffc91f855e7ed136d9e6e16f22c2828edd04b8e4bf7a",
-        "cbdeff20c1cf0952449b9765f52acb5197538d28c2add2ec1e224e206b9d8a18"
+        "7fb1cc757398c732cf492aa5da7bc5fede4874ade083ec40fafefa189eb6e9f5",
+        "d5fbee6b8e3ca5cab7c5f4307041eba8442f78e20b816c3d5b1c558bf9b00ca1"
       ],
-      "line": "tension a80580fd35df opened on your change 2f8076da276e (edit_collision, blocking): a side changed (change 2f8076da276e)"
+      "line": "tension 7fb1cc757398 opened on your change d5fbee6b8e3c (edit_collision, blocking): a side changed (change d5fbee6b8e3c)"
     },
     {
       "event": "tension_opened",
       "ids": [
-        "c401da0285796ca5f18a624d58d9117226904a8d07849414cd6f80304ada08f4",
-        "2f8076da276e251b96d3ffc91f855e7ed136d9e6e16f22c2828edd04b8e4bf7a"
+        "9df72fcaa8a5e0eff5988993a44ac8d9b32874f3a939df391bc94c2f3c82d7fb",
+        "2d40fd037681e587d448f21ce5b20752f8ce0734dbc81a6e799c9c0d8a6f1675",
+        "d5fbee6b8e3ca5cab7c5f4307041eba8442f78e20b816c3d5b1c558bf9b00ca1"
       ],
-      "line": "tension c401da028579 opened on your change 2f8076da276e (edit_collision, blocking): a side changed (change 2f8076da276e)"
+      "line": "tension 9df72fcaa8a5 opened on your change 2d40fd037681 (edit_collision, blocking): a side changed (change d5fbee6b8e3c)"
     },
     {
       "event": "alt_set_changed",
       "ids": [
-        "7240b6d4551541a68c81b175c60bfb70cb3ad60daf11f0e66187d7885efd9f42",
-        "7240b6d4551541a68c81b175c60bfb70cb3ad60daf11f0e66187d7885efd9f42"
+        "4806ab40e3e16c9ef84452380c593c57f375470e91235beb6e3cd667365bdfd1",
+        "4806ab40e3e16c9ef84452380c593c57f375470e91235beb6e3cd667365bdfd1"
       ],
-      "line": "alternative set 7240b6d45515 created (your view alt-x is a member)"
+      "line": "alternative set 4806ab40e3e1 created (your view alt-x is a member)"
     },
     {
       "event": "tension_resolved",
       "ids": [
-        "a80580fd35df9ce75903c847b065abace97edebea5cf615b66441a014b6c4acb",
-        "7240b6d4551541a68c81b175c60bfb70cb3ad60daf11f0e66187d7885efd9f42"
+        "9df72fcaa8a5e0eff5988993a44ac8d9b32874f3a939df391bc94c2f3c82d7fb",
+        "4806ab40e3e16c9ef84452380c593c57f375470e91235beb6e3cd667365bdfd1"
       ],
-      "line": "tension a80580fd35df no longer involves your in-flight changes: an alternative set changed (version 7240b6d45515)"
+      "line": "tension 9df72fcaa8a5 no longer involves your in-flight changes: an alternative set changed (version 4806ab40e3e1)"
     },
     {
       "event": "tension_dismissed",
       "ids": [
-        "fdd2215331b0623c2c303800de1329c97fd9567b0346813ba48f0f1df232ca58",
-        "e3897484188a9f399d420d4546d8085f88d5b74c98c01602fcdbc57890b97a08"
+        "e924286922228e75de2976c74dccd70e011e7f4dad0a546721e50735a713f036",
+        "b0ddb84cd234e53e8686aa4b5b83f712da5042a8f9a9e7da9d6b065f642548a6"
       ],
-      "line": "tension fdd2215331b0 dismissed by agent:r"
+      "line": "tension e92428692222 dismissed by agent:r"
     },
     {
       "event": "pending_added",
       "ids": [
-        "8c73aeee29c416b423883af29364cb839217ee1d13cfb190ee42b55c9098eecc"
+        "1336769c99c78ac7bbcf89f2069413cc5266ed3bda4163341a39c2fabfe4aff9"
       ],
-      "line": "P-8c73aeee29c4@1 waits for an answer; read rdy_pending"
+      "line": "P-1336769c99c7@1 waits for an answer; read rdy_pending"
     },
     {
       "event": "pending_added",
       "ids": [
-        "9e6ebf742eae94093e57f3609f00b8b7c66490fcc76bf97759198ea2386c3a38"
+        "cda9540b829a06de019259854a77b159a36808ceb478cf2a0521b9dfaf1f8ac6"
       ],
       "line": "new advice waits for an answer; read rdy_pending"
     },
     {
       "event": "pending_added",
       "ids": [
-        "6133f2fcecb44cc47a4684bd5983df8973900505954ce20b6db3e8d2f06c6ad1"
+        "8e8e791792e32d0a87487f000bbd50457cc9288df74d14d5db22d65f4126ab4a"
       ],
-      "line": "P-8c73aeee29c4@2 waits for an answer; read rdy_pending"
+      "line": "P-1336769c99c7@2 waits for an answer; read rdy_pending"
     }
   ],
   "more": false

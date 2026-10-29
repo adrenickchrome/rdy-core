@@ -107,6 +107,14 @@ pub struct ProposalInfo {
     /// The change plan the version bound, written in its batch (D-4JMPH): the counts over
     /// every item, the code files and the open items.
     pub plan: PlanSummary,
+    /// Whether the version is ready (D-ME2HD, D-3JZP4): it passed every readiness check, so it
+    /// has its assessment and its approval card. One that is not ready is stored with no card.
+    pub ready: bool,
+    /// The readiness issues, in the closed order of [`crate::readiness`]: empty when ready.
+    pub issues: Vec<Issue>,
+    /// The hash of the `ASSESSMENT` record written in the version's batch (D-SDSV2); none for a
+    /// version that is not ready.
+    pub assessment: Option<String>,
 }
 
 /// One view a landing rebased: how many of its changes dropped out (they landed) and how many
@@ -2068,8 +2076,10 @@ impl Rdy {
 
     /// The one propose writer (`propose_plan`), as `s`, with the person's relay when `s` is the
     /// person (`propose_plan_as`): every check, the version's candidate, its plan and its
-    /// answers are prepared first; then the key change rdy adds (if any), the version, the
-    /// relay's answer and the bound plan are written in one batch, and published once.
+    /// answers are checked first; then the key change rdy adds (if any) is written in its own
+    /// batch, and the plan computed again after it (O1); then readiness runs on the version,
+    /// and the version, the relay's answer, the bound plan and, for a ready version, its
+    /// assessment are written in one batch, and published once (D-ME2HD).
     fn propose_relayed(
         &mut self,
         s: &Session,
@@ -2308,7 +2318,9 @@ impl Rdy {
         }
         // the version's provenance, its plan's and its new answers' (one clock read)
         let by = s.provenance();
-        let plan = crate::plan::lifecycle::prepare_proposal_plan(
+        // ruling task-5 F3 (Amendment 1): the plan answers are checked first, against the plan
+        // before rdy's key change, writing nothing
+        let mut plan = crate::plan::lifecycle::prepare_proposal_plan(
             &st,
             &by,
             view,
@@ -2316,12 +2328,13 @@ impl Rdy {
             candidate.as_deref(),
             plan_answers,
         )?;
-        issues.extend(plan.warnings.iter().cloned());
         // D-ME2HD (O1, O2): the key change rdy adds is written now, after every check above and
         // before the version, in its own batch: readiness reads the tension sets of published
         // changes, so the change is in the view before the version is read, and it records the
         // briefing of the blocks it re-keys. The version lists it last, and only it besides the
-        // changes proposed.
+        // changes proposed. The plan the version binds is computed again after it, so its
+        // tension ids are the ones every later read of the version computes, with each answer to
+        // a tension the key change re-keyed carried to it (rulings task-5 F3, task-15 F2).
         let mut keys = BTreeMap::new();
         if let Some((change, re)) = rekey.take() {
             keys = re
@@ -2329,8 +2342,26 @@ impl Rdy {
                 .map(|(id, k)| (id.to_string(), k.clone()))
                 .collect();
             let written = self.write_rekey(s, view, change.message, &re, alternative.clone())?;
-            ids.push(parse_change(&written.change)?);
+            let key_change = parse_change(&written.change)?;
+            ids.push(key_change);
+            let after = self.read();
+            let mut keyed = changes.clone();
+            keyed.push(after.reader().change(&key_change)?);
+            let before = crate::plan::lifecycle::BeforeKeyChange {
+                st: &st,
+                changes: candidate.as_deref().unwrap_or_default(),
+            };
+            plan = crate::plan::lifecycle::prepare_proposal_plan_keyed(
+                &after,
+                Some(before),
+                &by,
+                view,
+                open.as_ref().map(|(_, latest)| latest),
+                Some(&keyed),
+                plan_answers,
+            )?;
         }
+        issues.extend(plan.warnings.iter().cloned());
         let count = ids.len();
         let chosen = alternative.as_ref().map(|a| AltRef {
             set: alt_label(&a.set),
@@ -2379,8 +2410,32 @@ impl Rdy {
             .map_err(to_rdy)?;
         let id = prepared.version();
         let stable = prepared.stable();
-        self.store
-            .bind_plan(&mut prepared, &plan.plan(view, id, by))?;
+        let pref = ProposalRef {
+            version: id,
+            stable,
+            n,
+        };
+        let bound = plan.plan(view, id, by);
+        let plan_hash = self.store.bind_plan(&mut prepared, &bound)?;
+        // D-ME2HD, D-3JZP4: readiness on the version this batch writes, with the plan it binds;
+        // a ready version's assessment joins the batch (D-SDSV2). One that is not ready is
+        // stored as it is, with no assessment.
+        let assessed = {
+            let now = self.read();
+            let c = crate::readiness::Candidate {
+                pref,
+                p: prepared.proposal().clone(),
+                plan: crate::readiness::PlanSource::InHand {
+                    plan: bound,
+                    hash: plan_hash,
+                },
+            };
+            crate::readiness::assess(&now, &c, now.require_up_to_date())?
+        };
+        let assessment = match &assessed.assessment {
+            Some(a) => Some(self.store.bind_assessment(&mut prepared, a)?),
+            None => None,
+        };
         let written = self.store.commit_propose(prepared)?;
         let answer = written.answer;
         self.publish(Delta::Seq)?;
@@ -2426,11 +2481,6 @@ impl Rdy {
                 (None, 0)
             }
         };
-        let pref = ProposalRef {
-            version: id,
-            stable,
-            n,
-        };
         Ok(ProposalInfo {
             id: id.to_string(),
             stable: stable.to_string(),
@@ -2454,6 +2504,9 @@ impl Rdy {
             relayed_by: relay.map(|r| r.by),
             answer: answer.map(|a| a.to_string()),
             plan: plan.summary,
+            ready: assessed.assessment.is_some(),
+            issues: assessed.readiness.issues,
+            assessment: assessment.map(|h| h.to_string()),
         })
     }
 

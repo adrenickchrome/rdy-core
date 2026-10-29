@@ -21,7 +21,7 @@ use rdy_graph::{
 };
 use rdy_model::Tracking;
 use rdy_model::decision::{AFFECTS, DECISION, REFINES, REVOKES, SUPERSEDES};
-use rdy_model::{Block, BlockId, Hash, Link, Op};
+use rdy_model::{Block, BlockId, Hash, Link, Op, Proposal};
 use rdy_store::StoreError;
 use serde::Serialize;
 use std::cell::{OnceCell, RefCell};
@@ -1536,6 +1536,17 @@ impl ReadState {
         max_tokens: Option<usize>,
     ) -> Result<Consequences, RdyError> {
         let p = self.reader().proposal(version)?;
+        self.landing_consequences_of(version, &p, max_tokens)
+    }
+
+    /// [`ReadState::landing_consequences`] of version `version` whose record is `p`, which the
+    /// store need not hold yet: a propose reads them before it writes the version (D-ME2HD).
+    pub(crate) fn landing_consequences_of(
+        &self,
+        version: &Hash,
+        p: &Proposal,
+        max_tokens: Option<usize>,
+    ) -> Result<Consequences, RdyError> {
         let changes = changes_of(self, &p.changes)?;
         let ops: Vec<Op> = changes.iter().flat_map(|c| c.ops.iter().cloned()).collect();
         let (touched, changed) = changed_by_ops(&ops);
@@ -1550,7 +1561,7 @@ impl ReadState {
         // O8: a landed version compares its landing's prev with the state it recorded, and reads
         // the graph, the dependents and their names as of that landing (a later landing changes
         // none of them); an unlanded one compares canon with canon and its changes
-        let (m, g, names, before) = if let Some(landing) = landed_as(self, &p)? {
+        let (m, g, names, before) = if let Some(landing) = landed_as(self, p)? {
             let at = Scope::At(landing);
             let prev = self.reader().landing(&landing)?.prev;
             let before = match prev {
