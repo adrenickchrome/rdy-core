@@ -7,6 +7,11 @@
 //! check; together they must exercise every act, ruling task-5.2), seeds 1, 2 and 3 in the deep
 //! gate (`RDY_QA_DEEP=1`). Every failure names its seed, so a person can run it again:
 //! `RDY_QA_SWARM_SEEDS=<seed>,...` runs only those seeds.
+//!
+//! rg15 (M3b, D-VF4RH, D-ME2HD): the run goes through the readiness gate. Each agent answers its
+//! view's change plan before it proposes, the person accepts a version's deferral card before the
+//! approve, every landing's version had no open item that gates or warns, and every stable change
+//! that lands records the briefing its writer read.
 use rdy_engine::inbox::read::parse_cursor;
 use rdy_engine::plan::{PlanQuery, allowed_acts};
 use rdy_engine::tensions::tension_label;
