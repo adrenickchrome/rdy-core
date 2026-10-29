@@ -219,6 +219,9 @@ struct Quotes<'a> {
     matcher: Option<(Matcher, Hits)>,
     levels: usize,
     found: BTreeMap<(u8, String, bool), BTreeSet<String>>,
+    /// The keys of `found` that are listed as quote rows but kept out of the manifest rows
+    /// (ruling task-10 Amendment 2).
+    unbound: BTreeSet<(u8, String, bool)>,
     deep: BTreeSet<(u8, String)>,
 }
 
@@ -236,8 +239,27 @@ impl<'a> Quotes<'a> {
             matcher,
             levels,
             found: BTreeMap::new(),
+            unbound: BTreeSet::new(),
             deep: BTreeSet::new(),
         })
+    }
+
+    /// [`Quotes::scan`] for a record the report lists and the manifest does not bind: its quote
+    /// rows are in the report, and no `inside` row for it enters the manifest that `report_hash`
+    /// binds.
+    fn scan_unbound<T: Serialize + ?Sized>(
+        &mut self,
+        kind: ImpactKind,
+        record: &str,
+        erasable: bool,
+        value: &T,
+    ) -> Result<(), RdyError> {
+        self.scan(kind, record, erasable, value)?;
+        let key = (kind as u8, record.to_string(), erasable);
+        if self.found.contains_key(&key) {
+            self.unbound.insert(key);
+        }
+        Ok(())
     }
 
     /// Scans every string of `value` for complete source strings; each match is a quote of the
@@ -1002,6 +1024,15 @@ pub(crate) fn compute_excluding(
         // the request's own batches are left out before the first-seen check, so the same
         // record in another batch still counts
         if own.as_ref().is_some_and(|o| o.holds(i)) {
+            // ruling task-10 Amendment 2 (2026-10-29, D-EPK1Z): an assessment the request's
+            // own batch wrote is still read for quotes (its card facts can quote a removed
+            // title or statement), and the report lists them. The record stays out of the
+            // manifest rows, so the request never stales at its own propose
+            if f.kind == kinds::ASSESSMENT {
+                let a: rdy_model::assessment::Assessment =
+                    reader.get_typed(kinds::ASSESSMENT, &f.hash)?;
+                quotes.scan_unbound(ImpactKind::Assessment, &f.hash.to_string(), false, &a)?;
+            }
             continue;
         }
         if !seen.insert((f.kind, f.hash)) {
@@ -1132,15 +1163,18 @@ pub(crate) fn compute_excluding(
             kinds::ASSESSMENT => {
                 let a: rdy_model::assessment::Assessment =
                     reader.get_typed(kinds::ASSESSMENT, &h)?;
-                // ruling task-10 A (2026-10-29): an assessment of a version that carries this
-                // request is left out, in any batch. It only names the blocks the version
-                // removes, and its rows are uneraseable references, so the landing erases nothing
-                // in it either way; with it, every removal would be stale at its own propose. An
-                // assessment of any other version that names a removed block stays in the report
+                // ruling task-10 A and Amendment 2 (2026-10-29): an assessment of a version that
+                // carries this request is read for quotes and listed, in any batch, but it is
+                // left out of the manifest: no `inside` row and no `carried.assessments` entry.
+                // It only names the blocks the version removes, and its rows are uneraseable
+                // references, so the landing erases nothing in it either way; bound, every
+                // removal would be stale at its own propose. An assessment of any other version
+                // that names a removed block stays in the report
                 if own
                     .as_ref()
                     .is_some_and(|o| o.versions.contains(&a.proposal))
                 {
+                    quotes.scan_unbound(ImpactKind::Assessment, &rec, false, &a)?;
                     continue;
                 }
                 quotes.scan(ImpactKind::Assessment, &rec, false, &a)?;
@@ -1371,12 +1405,15 @@ pub(crate) fn compute_excluding(
     }
     let mut quote_rows: Vec<QuoteRow> = vec![];
     for ((kind, record, erasable), texts) in quotes.found {
-        row(
-            impact_kind(kind),
-            record.clone(),
-            ImpactRelation::Quotes,
-            erasable,
-        );
+        // a listed record that is not bound has quote rows only (Amendment 2)
+        if !quotes.unbound.contains(&(kind, record.clone(), erasable)) {
+            row(
+                impact_kind(kind),
+                record.clone(),
+                ImpactRelation::Quotes,
+                erasable,
+            );
+        }
         for quote in texts {
             quote_rows.push(QuoteRow {
                 kind: impact_kind(kind),

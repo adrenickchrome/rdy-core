@@ -215,6 +215,9 @@ pub struct LandingRow {
     pub relayed_by: Option<RelayedByRow>,
     pub relay_evidence: Option<RelayEvidenceRow>,
     pub evidence: Option<EvidenceRow>,
+    /// The stored assessment of the approved version (D-ME2HD); `null` for a landing that holds
+    /// none (a re-affirmation card's landing, a host's `land_atomic` landing).
+    pub assessment: Option<String>,
     pub rebased_from: Vec<String>,
     /// When the landing was approved, RFC 3339 UTC.
     pub at: String,
@@ -3555,6 +3558,7 @@ impl ReadState {
                 choice: e.choice.clone(),
                 card_hash: e.card_hash.map(|h| h.to_string()),
             }),
+            assessment: rec.assessment.map(|h| h.to_string()),
             rebased_from: rec.rebased_from.iter().map(|h| h.to_string()).collect(),
             at: rfc3339(rec.approved_by.at_ms),
             at_ms: rec.approved_by.at_ms,

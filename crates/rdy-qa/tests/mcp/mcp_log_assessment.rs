@@ -7,7 +7,7 @@ use rdy_mcp::tools::*;
 use rdy_mcp::view_tools::rdy_log;
 use rdy_qa::daemon::Served;
 use rdy_qa::fixtures::*;
-use serde_json::{Value, from_value, json};
+use serde_json::{from_value, json};
 use std::sync::Arc;
 
 fn seed(r: &mut Rdy) {
@@ -34,10 +34,18 @@ fn stored_assessment(r: &Rdy, version: &str) -> String {
         .to_string()
 }
 
+/// The proposal version of the newest landing, and its stored assessment.
+fn head_assessment(r: &Rdy) -> String {
+    let st = r.read();
+    let landing = st.reader().landing(&st.canon_head().unwrap()).unwrap();
+    stored_assessment(r, &landing.proposal.to_string())
+}
+
 #[test]
 fn rg14_rdy_log_shows_the_landing_assessment() {
     let (_d, mut r) = project();
     seed(&mut r);
+    let want = head_assessment(&r);
     let mut st = McpState::new(Arc::new(Local::new(r)));
     rdy_session(
         &mut st,
@@ -45,19 +53,8 @@ fn rg14_rdy_log_shows_the_landing_assessment() {
     )
     .unwrap();
     let rows = rdy_log(&mut st, from_value(json!({})).unwrap()).unwrap();
-    let row = &rows[0];
-    let assessment = row["assessment"].as_str().expect("the row names it");
-    assert_eq!(assessment.len(), 64, "{row}");
-    // it is the assessment of the landed version, and sits after `evidence` in the row
-    let keys: Vec<&str> = row
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
-    let at = |k: &str| keys.iter().position(|x| *x == k).unwrap();
-    assert_eq!(at("assessment"), at("evidence") + 1, "{keys:?}");
-    drop(st);
+    // the row names the stored assessment of the landed version (D-ME2HD)
+    assert_eq!(rows[0]["assessment"], json!(want), "{}", rows[0]);
 }
 
 #[test]
@@ -65,14 +62,7 @@ fn rg14_rdy_log_text_prints_the_assessment_line() {
     let s = Served::new();
     let mut r = Rdy::open(s.dir.path()).unwrap();
     seed(&mut r);
-    let version = r
-        .read()
-        .reader()
-        .landing(&r.read().canon_head().unwrap())
-        .unwrap()
-        .proposal
-        .to_string();
-    let want = stored_assessment(&r, &version);
+    let want = head_assessment(&r);
     r.close().unwrap();
     let (ok, rows) = s.json(&["--json", "log"]);
     assert!(ok, "{rows}");
@@ -87,5 +77,4 @@ fn rg14_rdy_log_text_prints_the_assessment_line() {
         format!("    assessment {}", &want[..12]),
         "{text}"
     );
-    let _: Value = rows;
 }

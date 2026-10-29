@@ -485,10 +485,16 @@ fn sig9_verify_is_opt_in_and_unsigned_is_neutral() {
 
     // the plain text is unchanged; the verified text adds `signed: no` under each subject
     let text = stdout(&cli(d.path(), None, &["log"]));
-    let heads: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+    let heads: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with("    assessment "))
+        .collect();
     assert_eq!(heads.len(), 2, "{text}");
     let vtext = stdout(&cli(d.path(), None, &["log", "--verify"]));
-    let got: Vec<&str> = vtext.lines().filter(|l| !l.is_empty()).collect();
+    let got: Vec<&str> = vtext
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with("    assessment "))
+        .collect();
     assert_eq!(
         got,
         [
