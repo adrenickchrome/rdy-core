@@ -65,6 +65,7 @@ mod paths;
 pub mod pending;
 pub mod plan;
 pub mod policy;
+pub mod policy_verdict;
 pub mod proposal_show;
 pub mod publication;
 pub mod publication_manifest;
