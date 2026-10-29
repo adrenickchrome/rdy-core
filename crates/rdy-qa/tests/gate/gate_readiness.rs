@@ -30,6 +30,9 @@ struct World {
     s: BlockId,
     a: BlockId,
     x: BlockId,
+    /// The draft doc and its section.
+    n: BlockId,
+    t: BlockId,
 }
 
 fn world() -> World {
@@ -55,6 +58,8 @@ fn world() -> World {
         s: id("$s"),
         a: id("$a"),
         x: id("$x"),
+        n: id("$n"),
+        t: id("$t"),
         _dir: dir,
         r,
     }
@@ -192,7 +197,7 @@ fn rg8_a_stable_change_with_no_briefing_is_not_ready() {
     );
     assert_eq!(
         BRIEFING_FIX,
-        "write it again with a current briefing: rdy_brief, then rdy_write / rdy edit"
+        "exclude the change from the view, then brief the block and write it again"
     );
 }
 
@@ -439,4 +444,234 @@ fn rg8_answer_open_items_makes_a_stable_version_ready() {
     let seq = w.r.read().seq();
     assert!(answer_open_items(&mut w.r, &writer(), "c").is_empty());
     assert_eq!(w.r.read().seq(), seq);
+}
+
+/// The version `pref` is ready: the queue lists no `not_ready` row for it, and its approve item
+/// stands.
+fn assert_ready(r: &Rdy, pref: &str) {
+    let q = pending(r);
+    assert!(
+        q.not_ready.iter().all(|n| n.r#ref != pref),
+        "{pref}: {:#?}",
+        q.not_ready
+    );
+    assert!(q.items.iter().any(|i| i.r#ref == pref), "{pref}: {q:#?}");
+}
+
+/// The briefing change `change` records.
+fn briefing_of(r: &Rdy, change: &str) -> Option<Hash> {
+    r.read()
+        .reader()
+        .change(&change.parse().unwrap())
+        .unwrap()
+        .links
+        .briefing
+}
+
+/// Replays change `src` into a new view `view`: the replay.
+fn replay(r: &mut Rdy, view: &str, src: Hash) -> Hash {
+    r.view_create(&writer(), view, None, false).unwrap();
+    let res = r.view_replay(&writer(), view, &[src.to_string()]).unwrap();
+    assert_eq!(res.replayed.len(), 1, "{res:?}");
+    res.replayed[0].change.parse().unwrap()
+}
+
+/// Ruling task-8 F2: check 1 judges a change on the state it was written on. The version's own
+/// earlier change made section `s` a draft, so the later edit of `a` under it touches no stable
+/// content, as the write funnel judged it.
+#[test]
+fn rg8_a_block_the_version_made_draft_needs_no_briefing() {
+    let mut w = world();
+    let s = w.s.to_string();
+    let demote = put_j(
+        &mut w.r,
+        "v",
+        json!([{"op": "update", "id": s, "fields": {"lifecycle": "draft"}}]),
+        j_typo(),
+    );
+    assert!(briefing_of(&w.r, &demote.change).is_some());
+    let edit = put_j(&mut w.r, "v", upd(&w.a, "A holds 40 days."), j_typo());
+    assert_eq!(briefing_of(&w.r, &edit.change), None, "a is a draft in v");
+    answer_open_items(&mut w.r, &writer(), "v");
+    let p = propose(&mut w.r, "v");
+    assert_ready(&w.r, &p.r#ref);
+}
+
+/// Ruling task-8 F2: a block the version's own earlier change moved out of a stable doc is a
+/// draft for its later edit.
+#[test]
+fn rg8_a_block_moved_out_of_a_stable_doc_needs_no_briefing() {
+    let mut w = world();
+    let (a, t) = (w.a.to_string(), w.t.to_string());
+    let moved = put_j(
+        &mut w.r,
+        "v",
+        json!([{"op": "update", "id": a, "move_to": {"parent": t}}]),
+        j_typo(),
+    );
+    assert!(briefing_of(&w.r, &moved.change).is_some());
+    let edit = put_j(&mut w.r, "v", upd(&w.a, "A holds 40 days."), j_typo());
+    assert_eq!(briefing_of(&w.r, &edit.change), None, "a is a draft in v");
+    answer_open_items(&mut w.r, &writer(), "v");
+    let p = propose(&mut w.r, "v");
+    assert_ready(&w.r, &p.r#ref);
+}
+
+/// Ruling task-8 F2: a draft doc that canon makes stable after a change was written does not
+/// make that change need a briefing: the change is judged on the canon it was written on.
+#[test]
+fn rg8_a_doc_canon_made_stable_after_the_write_needs_no_briefing() {
+    let mut w = world();
+    // the store's first briefed change, in a view that stays in flight
+    put_j(&mut w.r, "z", upd(&w.a, "A holds 31 days."), j_typo());
+    let edit = put_j(&mut w.r, "v", upd(&w.x, "X holds twice."), j_typo());
+    assert_eq!(briefing_of(&w.r, &edit.change), None, "x is a draft");
+    // another view makes the notes doc stable, and lands
+    let n = w.n.to_string();
+    put_j(
+        &mut w.r,
+        "m",
+        json!([{"op": "update", "id": n, "fields": {"lifecycle": "stable"}}]),
+        j_typo(),
+    );
+    land(&mut w.r, "m").unwrap();
+    let h: Hash = edit.change.parse().unwrap();
+    assert!(w.r.read().included("v").contains(&h), "v keeps its change");
+    answer_open_items(&mut w.r, &writer(), "v");
+    let p = propose(&mut w.r, "v");
+    assert_ready(&w.r, &p.r#ref);
+}
+
+/// Ruling task-8 F2: the issue's fix names the way out (exclude the change, brief, write it
+/// again), and following it makes the version ready. The guidance row says it too.
+#[test]
+fn rg8_the_brief_required_fix_names_exclude() {
+    let mut w = world();
+    put_j(&mut w.r, "a", upd(&w.a, "A holds 31 days."), j_typo());
+    draft_change(&mut w, "b");
+    let raw = raw_update(&mut w.r, "b", &w.a, "A holds 32 days.", false);
+    answer_open_items(&mut w.r, &writer(), "b");
+    let p = propose(&mut w.r, "b");
+    let issues = not_ready(&w.r, &p.r#ref);
+    assert_eq!(codes(&issues), vec![E_BRIEF_REQUIRED], "{issues:#?}");
+    assert_eq!(
+        issues[0].fix,
+        "exclude the change from the view, then brief the block and write it again"
+    );
+    let row = rdy_mcp::tools::ERROR_ROWS
+        .iter()
+        .find(|(c, _, _)| *c == E_BRIEF_REQUIRED)
+        .unwrap();
+    assert_eq!(
+        row.2,
+        "retry with the token of the briefing the error carries\non a readiness issue: exclude the change (rdy_view exclude), rdy_brief the block, and write it again"
+    );
+    // the fix works
+    w.r.view_exclude(&ag("b"), "b", &[raw.to_string()], false)
+        .unwrap();
+    let again = put_j(&mut w.r, "b", upd(&w.a, "A holds 32 days."), j_typo());
+    assert!(briefing_of(&w.r, &again.change).is_some());
+    answer_open_items(&mut w.r, &writer(), "b");
+    let p = propose(&mut w.r, "b");
+    assert_ready(&w.r, &p.r#ref);
+}
+
+/// Ruling task-8 F3: exemption (d) follows `replayed_from` to the chain's root. R comes before
+/// the first briefed change (exempt by (c)); C1 replays R and C2 replays C1: both are exempt.
+#[test]
+fn rg8_a_replay_of_an_exempt_replay_is_exempt() {
+    let mut w = world();
+    draft_change(&mut w, "b");
+    let raw = raw_update(&mut w.r, "b", &w.a, "A holds 32 days.", false);
+    put_j(&mut w.r, "a", upd(&w.a, "A holds 31 days."), j_typo());
+    let c1 = replay(&mut w.r, "c", raw);
+    let c2 = replay(&mut w.r, "d", c1);
+    let st = w.r.read();
+    let reader = st.reader();
+    let first = reader.first_briefed_change().unwrap().unwrap();
+    assert!(reader.change_location(&raw).unwrap() < first);
+    assert!(reader.change_location(&c1).unwrap() > first);
+    assert_eq!(reader.change(&c2).unwrap().links.replayed_from, Some(c1));
+    assert_eq!(reader.change(&c1).unwrap().links.replayed_from, Some(raw));
+    drop(st);
+    for view in ["c", "d"] {
+        answer_open_items(&mut w.r, &writer(), view);
+        let p = propose(&mut w.r, view);
+        assert_ready(&w.r, &p.r#ref);
+    }
+}
+
+/// Ruling task-8 F3: exemption (d) follows at most 64 steps. C64's root is 64 steps away (exempt);
+/// C65's is 65 (not exempt: it needs a briefing). Each view but the last two gives its replay up,
+/// so the in-flight set stays small.
+#[test]
+fn rg8_a_replay_chain_past_64_is_not_exempt() {
+    let mut w = world();
+    draft_change(&mut w, "b");
+    let raw = raw_update(&mut w.r, "b", &w.a, "A holds 32 days.", false);
+    w.r.view_exclude(&ag("b"), "b", &[raw.to_string()], false)
+        .unwrap();
+    put_j(&mut w.r, "a", upd(&w.a, "A holds 31 days."), j_typo());
+    let mut src = raw;
+    for k in 1..=65 {
+        let next = replay(&mut w.r, &format!("r{k}"), src);
+        if (2..=64).contains(&k) {
+            let prev = format!("r{}", k - 1);
+            w.r.view_exclude(&writer(), &prev, &[src.to_string()], false)
+                .unwrap();
+        }
+        src = next;
+    }
+    answer_open_items(&mut w.r, &writer(), "r64");
+    let p64 = propose(&mut w.r, "r64");
+    assert_ready(&w.r, &p64.r#ref);
+    answer_open_items(&mut w.r, &writer(), "r65");
+    let p65 = propose(&mut w.r, "r65");
+    let issues = not_ready(&w.r, &p65.r#ref);
+    assert_eq!(codes(&issues), vec![E_BRIEF_REQUIRED], "{issues:#?}");
+    assert!(
+        issues[0]
+            .message
+            .starts_with(&format!("change {} ", src.short())),
+        "{issues:#?}"
+    );
+}
+
+/// Finding 4 (fix round 1): readiness reads the plan in hand, not the one the store binds. The
+/// author answers the version's open item on the view after the propose: the view's plan chain
+/// gets a head the version does not bind. On that plan in hand the version is ready; on the
+/// bound plan it is not.
+#[test]
+fn rg8_readiness_follows_an_in_hand_plan_the_store_does_not_bind() {
+    let mut w = world();
+    put_j(&mut w.r, "a", upd(&w.a, "A holds 31 days."), j_typo());
+    let open = propose(&mut w.r, "a");
+    let answers = answer_open_items(&mut w.r, &writer(), "a");
+    assert_eq!(answers.len(), 1, "{answers:#?}");
+    let pref = w.r.resolve_proposal(&open.r#ref).unwrap();
+    let st = w.r.read();
+    let record = st.reader().proposal(&pref.version).unwrap();
+    let stored = Candidate::stored(&st, pref, record.clone()).unwrap();
+    let PlanSource::Bound(Some(bound)) = stored.plan else {
+        panic!("{} binds a plan", open.r#ref)
+    };
+    let head = st.reader().get_ref("plan/a").unwrap().expect("a plan ref");
+    let head = Hash(head.as_slice().try_into().expect("a 32-byte ref"));
+    assert_ne!(head, bound, "the answer is a new plan version");
+    let in_hand = Candidate {
+        pref,
+        p: record,
+        plan: PlanSource::InHand {
+            plan: st.reader().plan(&head).unwrap(),
+            hash: head,
+        },
+    };
+    assert_eq!(readiness(&st, &stored).unwrap().issues, vec![plan_open(1)]);
+    let r = readiness(&st, &in_hand).unwrap();
+    assert!(r.issues.is_empty(), "{:#?}", r.issues);
+    assert_eq!(r.summary.open, 0, "{:#?}", r.summary);
+    assert_eq!(
+        r.card.map(|c| (c.kind, c.r#ref)),
+        Some((ItemKind::Approve, open.r#ref.clone()))
+    );
 }

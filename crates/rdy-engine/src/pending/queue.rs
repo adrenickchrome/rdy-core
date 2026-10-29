@@ -427,6 +427,19 @@ pub(crate) fn readiness_of(st: &ReadState, c: &Candidate) -> Result<Readiness, R
     Version::read_for(st, c, Removal::Read)?.readiness_with_card(st, now_ms())
 }
 
+/// Tests only ([`crate::readiness::reach_for_tests`]): the reach readiness's check 6 reads for
+/// candidate `c`.
+pub(crate) fn reach_of(st: &ReadState, c: &Candidate) -> Result<BTreeSet<BlockId>, RdyError> {
+    let v = Version::read_for(st, c, Removal::Skip)?;
+    let conflicted: BTreeSet<BlockId> =
+        crate::gate::blocking_conflicts(st, &v.p.view, &v.p.changes)?
+            .iter()
+            .map(|c| c.block.clone())
+            .collect();
+    crate::readiness::reach(st, &v.checked(), &conflicted)?
+        .map_err(|i| RdyError::new(i.code, i.message, i.fix))
+}
+
 /// The deferral card of version `pref` (whose record is `p`), answered or not, read from its
 /// bound plan alone: `None` for a version with no bound plan (O19), `Some(None)` for a bound
 /// version with no deferred non-code item. A bound version whose plan cannot be read is that
@@ -441,7 +454,7 @@ fn bound_deferral_item(
     let Some(bound) = st.reader().plan_of_proposal(&pref.version, st.seq())? else {
         return Ok(None);
     };
-    let plan = version_plan(st, p, &PlanSource::Bound(Some(bound)))?;
+    let plan = version_plan(st, &pref.version, p, &PlanSource::Bound(Some(bound)))?;
     Ok(Some(deferral_item(pref, &plan).map(|mut it| {
         raised_from(p, &mut it, now());
         it
@@ -817,7 +830,7 @@ impl Version {
             });
         }
         let plan_bound = c.plan.hash();
-        let plan = version_plan(st, &p, &c.plan);
+        let plan = version_plan(st, &pref.version, &p, &c.plan);
         Ok(Version {
             pref,
             p,
@@ -857,36 +870,37 @@ impl Version {
         }
     }
 
-    /// Every failed readiness check, one issue each, in the closed order of
-    /// [`crate::readiness`]: the one readiness, on this version as read.
-    fn readiness(&self, st: &ReadState) -> Result<Vec<Issue>, RdyError> {
+    /// What the readiness checks read of this version.
+    fn checked(&self) -> crate::readiness::Read<'_> {
         let (summary, plan_blocks) = match &self.plan {
             Ok(plan) => (Ok(&plan.summary), &plan.blocks),
             Err(e) => (Err(e), &self.no_blocks),
         };
-        crate::readiness::issues(
-            st,
-            &crate::readiness::Read {
-                pref: &self.pref,
-                p: &self.p,
-                changes: &self.changes,
-                plan_bound: self.plan_bound,
-                plan: summary,
-                plan_blocks,
-                written: &self.touched,
-                tensions: &self.tensions,
-                decisions: self
-                    .decisions
-                    .iter()
-                    .map(|d| (d.block.id.clone(), d.r#ref.clone()))
-                    .collect(),
-                reaffirms: self
-                    .reaffirms
-                    .iter()
-                    .map(|d| (d.block.id.clone(), d.r#ref.clone(), d.one_way))
-                    .collect(),
-            },
-        )
+        crate::readiness::Read {
+            pref: &self.pref,
+            p: &self.p,
+            changes: &self.changes,
+            plan_bound: self.plan_bound,
+            plan: summary,
+            plan_blocks,
+            written: &self.touched,
+            decisions: self
+                .decisions
+                .iter()
+                .map(|d| (d.block.id.clone(), d.r#ref.clone()))
+                .collect(),
+            reaffirms: self
+                .reaffirms
+                .iter()
+                .map(|d| (d.block.id.clone(), d.r#ref.clone(), d.one_way))
+                .collect(),
+        }
+    }
+
+    /// Every failed readiness check, one issue each, in the closed order of
+    /// [`crate::readiness`]: the one readiness, on this version as read.
+    fn readiness(&self, st: &ReadState) -> Result<Vec<Issue>, RdyError> {
+        crate::readiness::issues(st, &self.checked())
     }
 
     /// [`Version::readiness`] with the version's change plan summary and, when it is ready, its

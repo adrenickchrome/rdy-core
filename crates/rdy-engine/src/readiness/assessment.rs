@@ -100,6 +100,24 @@ pub fn pack_digest(pack: &Pack) -> Hash {
     Hash::of(&bytes)
 }
 
+/// The reach of version `pref` (O18), sorted: the blocks it writes (`written`), what its plan
+/// items name (`plan_blocks`), and the blocks of every tension row it lists, open and dismissed
+/// (`tension_blocks`, O17). Err: the O9 issue of a reach over [`MAX_ROWS`]. Readiness (check 6)
+/// and [`build`] both compute it here, over the same rows, so one check holds for both.
+pub(crate) fn reach(
+    pref: &ProposalRef,
+    written: &BTreeSet<BlockId>,
+    plan_blocks: &BTreeSet<BlockId>,
+    tension_blocks: impl IntoIterator<Item = BlockId>,
+) -> Result<BTreeSet<BlockId>, Issue> {
+    let mut reach: BTreeSet<BlockId> = written.iter().chain(plan_blocks).cloned().collect();
+    reach.extend(tension_blocks);
+    if reach.len() > MAX_ROWS {
+        return Err(reach_too_large(pref));
+    }
+    Ok(reach)
+}
+
 /// The issue of a version whose reach exceeds [`MAX_ROWS`] (O9).
 pub(crate) fn reach_too_large(pref: &ProposalRef) -> Issue {
     Issue {
@@ -369,13 +387,14 @@ fn tension_row(
 pub fn build(i: Inputs<'_>) -> Result<Assessment, Issue> {
     // reach (O18): what the version writes, what its plan items name, and the blocks of every
     // tension it lists
-    let mut reach: BTreeSet<BlockId> = i.written.iter().chain(&i.plan_blocks).cloned().collect();
-    for (t, _, _) in i.tensions {
-        reach.extend(t.blocks.iter().filter_map(|b| BlockId::parse(b).ok()));
-    }
-    if reach.len() > MAX_ROWS {
-        return Err(reach_too_large(&i.pref));
-    }
+    let reach = reach(
+        &i.pref,
+        &i.written,
+        &i.plan_blocks,
+        i.tensions
+            .iter()
+            .flat_map(|(t, _, _)| t.blocks.iter().filter_map(|b| BlockId::parse(b).ok())),
+    )?;
     // the caller's order ranks the rows (refusing first): the first MAX_TENSION_ROWS distinct
     // ones are kept, the rest counted
     let answers: BTreeMap<Hash, Hash> = i.answers.iter().copied().collect();

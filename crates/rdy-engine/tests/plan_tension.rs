@@ -878,3 +878,97 @@ fn rg5_a_reviewer_dismissal_removes_the_item() {
     assert!(tension_items(&info.plan).is_empty(), "{:#?}", info.plan);
     assert_eq!(plan_issues(&info.plan), vec![]);
 }
+
+/// The queue's `not_ready` row of version `pref`, if it has one, and whether its approve item
+/// stands.
+fn queue_state(r: &Rdy, pref: &str) -> (Option<Vec<Issue>>, bool) {
+    let q = r
+        .read()
+        .pending(&rdy_engine::pending::PendingQuery {
+            person: approver().actor.clone(),
+            session_ref: None,
+            max_tokens: rdy_engine::pending::CARD_MAX_TOKENS,
+        })
+        .unwrap();
+    let row = q
+        .not_ready
+        .into_iter()
+        .find(|n| n.r#ref == pref)
+        .map(|n| n.issues);
+    (row, q.items.iter().any(|i| i.r#ref == pref))
+}
+
+/// Ruling task-8 F1 (D-ME2HD, O12): a version's tension items are fixed when it is made: the
+/// tension rows of its stored assessment. A tension that another view's in-flight write creates
+/// after the propose is context only: the version stays ready in the queue, its
+/// `change_plan{proposal}` keeps its items, and its landing seals the items it answered. Until
+/// the propose writes the assessment itself (Task 10), the test stores the one it would write.
+#[test]
+fn rg8_a_later_in_flight_write_leaves_a_ready_version_ready() {
+    let mut fx = project();
+    // a cites the deprecated x (a tension item it answers) and the legacy claim lx (no tension)
+    cite_deprecated(&mut fx, "a", "Z follows");
+    let y = cite_legacy(&mut fx, "a");
+    let answered = common::answer_open_items(&mut fx.r, &writer(), "a");
+    assert_eq!(answered.len(), 1, "{answered:#?}");
+    let info = propose(&mut fx.r, "a");
+    assert_eq!(plan_issues(&info.plan), vec![]);
+    assert_eq!(queue_state(&fx.r, &info.r#ref), (None, true));
+    let pref = fx.r.resolve_proposal(&info.r#ref).unwrap();
+    let assessment = {
+        let st = fx.r.read();
+        let record = st.reader().proposal(&pref.version).unwrap();
+        let c = rdy_engine::readiness::Candidate::stored(&st, pref, record).unwrap();
+        rdy_engine::readiness::assessment_for_tests(&st, &c).unwrap()
+    };
+    assert_eq!(assessment.tensions.len(), 1, "{assessment:#?}");
+    fx.r.store_mut().put_assessment(&assessment).unwrap();
+    fx.r.invalidate();
+
+    // b deprecates the legacy doc in flight and does not land: a tension with a's claim y
+    deprecate_legacy(&mut fx, "b");
+    let later: Vec<Arc<Tension>> = inflight_refs(&fx.r, "a")
+        .into_iter()
+        .filter(|t| t.blocks().iter().any(|b| b.to_string() == y))
+        .collect();
+    assert_eq!(later.len(), 1, "{later:#?}");
+    let tn_later = tension_label(&later[0].id);
+
+    // the version is still ready, and its plan still has its one answered tension item
+    assert_eq!(queue_state(&fx.r, &info.r#ref), (None, true));
+    let plan = version_plan(&fx.r, &info.r#ref);
+    let rows = rows_of_kind(&plan, "tension");
+    assert_eq!(rows.len(), 1, "{plan:#}");
+    assert_ne!(rows[0]["id"], tn_later);
+    assert_eq!(rows[0]["state"], "closed", "{plan:#}");
+
+    // the landing seals the answered item and lands
+    common::confirm_exceptions(&mut fx.r, &approver(), &info);
+    let landing =
+        fx.r.land(&approver(), &info.id)
+            .unwrap_or_else(|e| panic!("land a: {e} {:?}", e.issues));
+    let seal = sealed(&fx.r, &landing);
+    let rows = rows_of_kind(&seal, "tension");
+    assert_eq!(rows.len(), 1, "{seal:#}");
+    assert_eq!(rows[0]["outcome"], PlanOutcome::Confirmed.as_str());
+}
+
+/// Finding 5 (fix round 1, O17, O18): readiness's reach reads every tension row the assessment
+/// lists, open and dismissed: a reviewer's dismissal leaves no plan item, but the dismissed
+/// tension's blocks stay in the reach.
+#[test]
+fn rg8_the_reach_holds_the_blocks_of_a_dismissed_tension() {
+    let mut fx = project();
+    cite_deprecated(&mut fx, "a", "Y follows");
+    let tn = tension_label(&one_tension(&fx.r, "a").id);
+    fx.r.dismiss_tension(&reviewer(), &tn, "Y cites it as history")
+        .unwrap();
+    let info = propose(&mut fx.r, "a");
+    let pref = fx.r.resolve_proposal(&info.r#ref).unwrap();
+    let st = fx.r.read();
+    let record = st.reader().proposal(&pref.version).unwrap();
+    let c = rdy_engine::readiness::Candidate::stored(&st, pref, record).unwrap();
+    let reach = rdy_engine::readiness::reach_for_tests(&st, &c).unwrap();
+    let x = rdy_model::BlockId::parse(&fx.x).unwrap();
+    assert!(reach.contains(&x), "{reach:?}");
+}

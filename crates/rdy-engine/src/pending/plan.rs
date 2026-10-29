@@ -121,22 +121,33 @@ pub(crate) struct VersionPlan {
     pub(crate) blocks: BTreeSet<BlockId>,
 }
 
-/// The change plan of version record `p`, whose plan comes from `source`: a bound version's
+/// The change plan of version `version` (record `p`), whose plan comes from `source`, its tension
+/// items those it was made with (ruling task-8 F1, [`compute::fixed_tensions`]): a bound version's
 /// from its recorded canon, changes and HEADs against its chain's first HEADs, with its bound
 /// plan's answers (an answer the view recorded after the propose is not the version's); an
 /// unbound one's (O19) from the HEADs captured once as both ends, with no answer and so no
 /// deferral.
 pub(super) fn version_plan(
     st: &ReadState,
+    version: &Hash,
     p: &Proposal,
     source: &PlanSource,
 ) -> Result<VersionPlan, RdyError> {
     let reader = st.reader();
+    let fixed = compute::fixed_tensions(st, version)?;
     let read;
     let (h, plan) = match source {
         PlanSource::Bound(None) => {
             let heads = capture_heads(st)?;
-            let computed = compute::compute(st, &p.view, &p.changes, p.canon_at, &heads, &heads)?;
+            let computed = compute::compute(
+                st,
+                &p.view,
+                &p.changes,
+                p.canon_at,
+                fixed.as_ref(),
+                &heads,
+                &heads,
+            )?;
             let (_, counts, _) = live_rows(&computed, &[]);
             return Ok(VersionPlan {
                 bound: None,
@@ -156,7 +167,15 @@ pub(super) fn version_plan(
         Some(s) => reader.plan(&s)?.heads,
         None => plan.heads.clone(),
     };
-    let computed = compute::compute(st, &p.view, &p.changes, p.canon_at, &plan.heads, &first)?;
+    let computed = compute::compute(
+        st,
+        &p.view,
+        &p.changes,
+        p.canon_at,
+        fixed.as_ref(),
+        &plan.heads,
+        &first,
+    )?;
     let (_, counts, _) = live_rows(&computed, &plan.answers);
     Ok(VersionPlan {
         bound: Some(h),

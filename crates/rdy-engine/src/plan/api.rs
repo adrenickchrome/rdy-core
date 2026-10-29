@@ -518,7 +518,7 @@ impl ViewPlan {
         let chain = live_chain(st, view)?;
         let first = chain.as_ref().map_or(&heads, |c| &c.first_heads);
         let changes = st.included(view);
-        let computed = compute::compute(st, view, &changes, st.canon_head(), &heads, first)?;
+        let computed = compute::compute(st, view, &changes, st.canon_head(), None, &heads, first)?;
         Ok(ViewPlan {
             computed,
             chain,
@@ -751,7 +751,16 @@ impl ReadState {
                 (heads.clone(), heads, vec![])
             }
         };
-        let computed = compute::compute(self, &p.view, &p.changes, p.canon_at, &heads, &first)?;
+        let fixed = compute::fixed_tensions(self, &pref.version)?;
+        let computed = compute::compute(
+            self,
+            &p.view,
+            &p.changes,
+            p.canon_at,
+            fixed.as_ref(),
+            &heads,
+            &first,
+        )?;
         Ok(reply(
             format!("proposal:{pref}"),
             bound,

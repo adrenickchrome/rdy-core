@@ -148,15 +148,26 @@ pub(crate) fn tension_set(
 ) -> Result<Vec<Arc<Tension>>, RdyError> {
     let sides = sides_of(st, changes, st.canon_head())?;
     let ids: Vec<Hash> = changes.iter().map(Change::id).collect();
-    let t = version_tensions(st, view, &ids, st.canon_head(), &sides.base, &sides.written)?;
+    let t = version_tensions(
+        st,
+        view,
+        &ids,
+        st.canon_head(),
+        None,
+        &sides.base,
+        &sides.written,
+    )?;
     let mut all: Vec<Arc<Tension>> = t.open.into_iter().chain(t.resolved).collect();
     all.sort_by_key(|t| t.id);
     Ok(all)
 }
 
 /// The [`VersionTensions`] of a version of `view` with changes `changes` on canon `canon_at`,
-/// whose ops write `written`, with `base` the canon at `canon_at`. Only the changes the store
-/// holds are read: a key change not written yet has no tension set of its own. A tension read
+/// whose ops write `written`, with `base` the canon at `canon_at`. `fixed` is the tension set
+/// the version was made with ([`fixed_tensions`]): its in-flight forms are those it lists, so a
+/// tension that a later write in another view gives is context only (ruling task-8 F1); `None`
+/// reads every in-flight form. Only the changes the store holds are read: a key change not
+/// written yet has no tension set of its own. A tension read
 /// that fails gives no tension item: the propose reply reports that error as `tensions_error`
 /// and never fails on it (cc16), and a landing's own tension check refuses on it before any
 /// seal is written.
@@ -165,6 +176,7 @@ fn version_tensions(
     view: &str,
     changes: &[Hash],
     canon_at: Option<Hash>,
+    fixed: Option<&BTreeSet<Hash>>,
     base: &NetState,
     written: &BTreeSet<BlockId>,
 ) -> Result<VersionTensions, RdyError> {
@@ -178,7 +190,7 @@ fn version_tensions(
     if held.is_empty() {
         return Ok(VersionTensions::default());
     }
-    Ok(tensions_of(st, view, &held, canon_at, base, written).unwrap_or_default())
+    Ok(tensions_of(st, view, &held, canon_at, fixed, base, written).unwrap_or_default())
 }
 
 /// The body of [`version_tensions`] for the held changes `held`.
@@ -187,6 +199,7 @@ fn tensions_of(
     view: &str,
     held: &[Hash],
     canon_at: Option<Hash>,
+    fixed: Option<&BTreeSet<Hash>>,
     base: &NetState,
     written: &BTreeSet<BlockId>,
 ) -> Result<VersionTensions, RdyError> {
@@ -208,10 +221,11 @@ fn tensions_of(
     let mut open: Vec<Arc<Tension>> = landing
         .iter()
         .cloned()
-        .chain(
-            mine.into_iter()
-                .filter(|t| !judged_on_the_net_change(t.kind) && !now.contains(&t.id)),
-        )
+        .chain(mine.into_iter().filter(|t| {
+            !judged_on_the_net_change(t.kind)
+                && !now.contains(&t.id)
+                && fixed.is_none_or(|f| f.contains(&t.id))
+        }))
         .filter(|t| seen.insert(t.id) && open_advisory(t))
         .collect();
     open.sort_by_key(|t| t.id);
@@ -244,7 +258,9 @@ pub(crate) struct CodeSide {
 }
 
 /// The complete plan items of `changes` (the selected changes of a version of `view`) on canon
-/// as of landing `canon_at` (`None`: the empty state), with code evidence at `heads` against the
+/// as of landing `canon_at` (`None`: the empty state), its in-flight tension items those of
+/// `fixed` ([`fixed_tensions`]; `None`: every in-flight form, as a view's live plan), with code
+/// evidence at `heads` against the
 /// chain's `first_heads`. A repo `first_heads` does not name uses its own HEAD as both ends. A
 /// pure read: no plan write and no clock; the caller captures the HEADs first. A version that
 /// does not apply on its baseline is the merge's refusal; past [`MAX_PLAN_ITEMS`] items,
@@ -254,11 +270,36 @@ pub(crate) fn compute(
     view: &str,
     changes: &[Hash],
     canon_at: Option<Hash>,
+    fixed: Option<&BTreeSet<Hash>>,
     heads: &[PlanHead],
     first_heads: &[PlanHead],
 ) -> Result<ComputedPlan, RdyError> {
     let changes = changes_of(st, changes)?;
-    compute_changes(st, view, &changes, canon_at, heads, first_heads)
+    compute_fixed(st, view, &changes, canon_at, fixed, heads, first_heads)
+}
+
+/// The tension set stored proposal version `version` was made with (ruling task-8 F1,
+/// D-ME2HD): the ids of the tension rows of its stored assessment (O17). After the propose, its
+/// change plan (the queue, every approval path, `change_plan{proposal}`, the landing's seal and
+/// guard) reads its in-flight tension items from that set, so a tension that a later write in
+/// another view gives is context only and a view edit after the proposal changes no readiness
+/// (O12). `None` for a version with no stored assessment: it reads every in-flight form.
+pub(crate) fn fixed_tensions(
+    st: &ReadState,
+    version: &Hash,
+) -> Result<Option<BTreeSet<Hash>>, RdyError> {
+    let reader = st.reader();
+    let Some(a) = reader.assessment_of_proposal(version, st.seq())? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        reader
+            .assessment(&a)?
+            .tensions
+            .iter()
+            .map(|t| t.id)
+            .collect(),
+    ))
 }
 
 /// [`compute`] of change values of a version of `view`, read or not yet written: the propose
@@ -271,9 +312,23 @@ pub(crate) fn compute_changes(
     heads: &[PlanHead],
     first_heads: &[PlanHead],
 ) -> Result<ComputedPlan, RdyError> {
+    compute_fixed(st, view, changes, canon_at, None, heads, first_heads)
+}
+
+/// [`compute_changes`] of a version made with the tension set `fixed` (see [`compute`]).
+fn compute_fixed(
+    st: &ReadState,
+    view: &str,
+    changes: &[Change],
+    canon_at: Option<Hash>,
+    fixed: Option<&BTreeSet<Hash>>,
+    heads: &[PlanHead],
+    first_heads: &[PlanHead],
+) -> Result<ComputedPlan, RdyError> {
     let mut sides = sides_of(st, changes, canon_at)?;
     let ids: Vec<Hash> = changes.iter().map(Change::id).collect();
-    sides.tensions = version_tensions(st, view, &ids, canon_at, &sides.base, &sides.written)?;
+    sides.tensions =
+        version_tensions(st, view, &ids, canon_at, fixed, &sides.base, &sides.written)?;
     let code = code_sides(st, heads, first_heads)?;
     compute_in(st, &sides, code.as_deref(), MAX_PLAN_ITEMS)
 }
@@ -1480,7 +1535,7 @@ mod tests {
         let of = |r: &Rdy, v: &str| {
             let st = r.read();
             let p = st.reader().proposal(&v.parse().unwrap()).unwrap();
-            compute(&st, "w", &p.changes, p.canon_at, &[], &[]).unwrap()
+            compute(&st, "w", &p.changes, p.canon_at, None, &[], &[]).unwrap()
         };
         let first = of(&r, &v1.id);
         let want = vec![
@@ -1529,11 +1584,11 @@ mod tests {
         )));
         let st = r.read();
         assert_eq!(*st.included("u"), changes);
-        let p = compute(&st, "u", &changes, st.canon_head(), &[], &[]).unwrap();
+        let p = compute(&st, "u", &changes, st.canon_head(), None, &[], &[]).unwrap();
         assert_eq!(rows(&p), vec![]);
         assert_eq!(p.code_files, 0);
         // the first edit alone owes the confirm
-        let p = compute(&st, "u", &changes[..1], st.canon_head(), &[], &[]).unwrap();
+        let p = compute(&st, "u", &changes[..1], st.canon_head(), None, &[], &[]).unwrap();
         assert_eq!(doc_items(&p).len(), 1, "{:#?}", rows(&p));
     }
 
@@ -1550,7 +1605,7 @@ mod tests {
             let p = st.reader().proposal(&v.id.parse().unwrap()).unwrap();
             (
                 p.canon_at,
-                compute(&st, "w", &p.changes, p.canon_at, &[], &[]).unwrap(),
+                compute(&st, "w", &p.changes, p.canon_at, None, &[], &[]).unwrap(),
             )
         };
         let (at, before) = of(&r);
@@ -1570,7 +1625,7 @@ mod tests {
         // on today's canon the version no longer applies; on its own it reads as it did
         let st = r.read();
         let p = st.reader().proposal(&v.id.parse().unwrap()).unwrap();
-        assert!(compute(&st, "w", &p.changes, st.canon_head(), &[], &[]).is_err());
+        assert!(compute(&st, "w", &p.changes, st.canon_head(), None, &[], &[]).is_err());
         assert_eq!(after, before);
     }
 
@@ -1587,12 +1642,12 @@ mod tests {
             json!([{"op": "repin", "id": b.to_string(), "targets": [a.to_string()]}]),
         ));
         let st = r.read();
-        let all = compute(&st, "w", &[edit, repin], st.canon_head(), &[], &[]).unwrap();
+        let all = compute(&st, "w", &[edit, repin], st.canon_head(), None, &[], &[]).unwrap();
         assert_eq!(
             close_of(&all, a.as_str(), b.as_str(), PlanKind::Confirm),
             Some(PlanOutcome::Repinned)
         );
-        let subset = compute(&st, "w", &[edit], st.canon_head(), &[], &[]).unwrap();
+        let subset = compute(&st, "w", &[edit], st.canon_head(), None, &[], &[]).unwrap();
         assert_eq!(
             close_of(&subset, a.as_str(), b.as_str(), PlanKind::Confirm),
             None
@@ -1907,7 +1962,7 @@ mod tests {
         };
         let at = |r: &Rdy, now: &str, first: &[PlanHead]| {
             let st = r.read();
-            compute(&st, "w", &changes, st.canon_head(), &head(now), first).unwrap()
+            compute(&st, "w", &changes, st.canon_head(), None, &head(now), first).unwrap()
         };
         let f =
             |p: &ComputedPlan| close_of(p, a.as_str(), "app:f.rs", PlanKind::UpdateImplementation);
@@ -1931,7 +1986,7 @@ mod tests {
         assert_eq!(f(&at(&r, &h5, &head(&h4))), Some(PlanOutcome::Committed));
         // no linked repo captured: code unavailable, no code item
         let st = r.read();
-        let p = compute(&st, "w", &changes, st.canon_head(), &[], &[]).unwrap();
+        let p = compute(&st, "w", &changes, st.canon_head(), None, &[], &[]).unwrap();
         assert!(p.code_unavailable);
         assert!(
             p.items
@@ -2146,7 +2201,7 @@ mod tests {
             json!([{"op": "delete", "id": b.to_string()}]),
         )));
         let st = r.read();
-        let p = compute(&st, "w", &changes, st.canon_head(), &[], &[]).unwrap();
+        let p = compute(&st, "w", &changes, st.canon_head(), None, &[], &[]).unwrap();
         assert_eq!(
             rows(&p),
             vec![(

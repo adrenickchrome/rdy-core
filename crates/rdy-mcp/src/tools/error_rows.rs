@@ -112,7 +112,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     (
         "E_BRIEF_REQUIRED",
         "a write touches stable content and cites no briefing, or one that does not cover the block",
-        "retry with the token of the briefing the error carries",
+        "retry with the token of the briefing the error carries\non a readiness issue: exclude the change (rdy_view exclude), rdy_brief the block, and write it again",
     ),
     (
         "E_BRIEF_STALE",

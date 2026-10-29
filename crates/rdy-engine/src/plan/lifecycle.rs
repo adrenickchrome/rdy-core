@@ -492,7 +492,18 @@ pub(crate) fn prepare_landing_plan(
             (None, vec![], heads.clone(), heads)
         }
     };
-    let computed = compute::compute(st, &p.view, &p.changes, p.canon_at, &heads, &first)?;
+    // the version's tension items are those it was made with (ruling task-8 F1): the seal and
+    // this guard read the set its readiness read
+    let fixed = compute::fixed_tensions(st, version)?;
+    let computed = compute::compute(
+        st,
+        &p.view,
+        &p.changes,
+        p.canon_at,
+        fixed.as_ref(),
+        &heads,
+        &first,
+    )?;
     // a tension item seals only as updated, confirmed or dismissed (D-ME2HD, D-45RG6): an open
     // one is an unanswered tension, so the version is not ready. Readiness refuses it first; this
     // stays as the guard (rulings/task-5.md F1(a))
@@ -732,5 +743,43 @@ mod tests {
             assert_eq!(a.act, PlanAct::Confirm);
             assert_eq!(a.reason.as_deref(), Some(reason));
         }
+    }
+    /// Rulings task-5 F1(a), Amendment 1 (fix round 1 of Task 8): the landing guard. A bound
+    /// version whose plan leaves a tension item open does not seal: `prepare_landing_plan`
+    /// itself refuses with `E_PROPOSAL_NOT_READY` and the item's `E_PLAN_OPEN` issue, and
+    /// writes nothing. Readiness refuses such a version first on every approval path, so only
+    /// this test reaches the guard.
+    #[test]
+    fn rg8_the_landing_guard_refuses_an_open_tension_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+        tension_of_a(&mut r);
+        let info = r
+            .propose(&writer(), "a", "a", Some("a cites the old rule"))
+            .unwrap();
+        let pref = r.resolve_proposal(&info.r#ref).unwrap();
+        let st = r.read();
+        let p = st.reader().proposal(&pref.version).unwrap();
+        assert!(
+            st.reader()
+                .plan_of_proposal(&pref.version, st.seq())
+                .unwrap()
+                .is_some(),
+            "a bound version"
+        );
+        let seq = st.seq();
+        let Err(e) = prepare_landing_plan(&st, &pref.version, &p, &writer().provenance(), None)
+        else {
+            panic!("the guard lets an open tension item into the seal");
+        };
+        assert_eq!(e.code, crate::error::E_PROPOSAL_NOT_READY, "{e}");
+        assert_eq!(e.message, format!("{} is not ready: 1 issue", info.r#ref));
+        assert_eq!(e.issues, vec![plan_open_issue(1)]);
+        assert_eq!(
+            (e.issues[0].code, e.issues[0].message.as_str()),
+            (crate::error::E_PLAN_OPEN, "1 change-plan items are open")
+        );
+        drop(st);
+        assert_eq!(r.read().seq(), seq, "the guard wrote nothing");
     }
 }

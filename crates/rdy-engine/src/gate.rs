@@ -713,13 +713,14 @@ pub(crate) fn open_proposals(st: &ReadState) -> Result<Vec<(ProposalRef, Proposa
 /// tensions whose blocks all carry the conflict (the conflict reports them, as
 /// `proposal_tensions` leaves them out). Check 3 is not made for it: the canon its landing would
 /// give depends on how the conflict is resolved, and the merge onto canon refuses for the same
-/// cause. A key rdy derives again at the landing (K1) is not a clash.
+/// cause. A key rdy derives again at the landing (K1) is not a clash. Beside the issues: the
+/// blocks that carry a blocking conflict (the `conflicted` of `proposal_tensions`).
 pub(crate) fn landing_readiness(
     st: &ReadState,
     pref: &ProposalRef,
     p: &Proposal,
     changes: &[Change],
-) -> Result<Vec<Issue>, RdyError> {
+) -> Result<(Vec<Issue>, BTreeSet<BlockId>), RdyError> {
     let as_issue = |e: RdyError| Issue {
         severity: Severity::Error,
         code: e.code,
@@ -746,7 +747,7 @@ pub(crate) fn landing_readiness(
         out.push(as_issue(blocking_tensions(pref, &refusing)));
     }
     if !conflicted.is_empty() {
-        return Ok(out);
+        return Ok((out, conflicted));
     }
     match prospective(st, changes, Some(&p.view)) {
         Ok((next, applied)) => {
@@ -777,7 +778,7 @@ pub(crate) fn landing_readiness(
         }
         Err(e) => return Err(e),
     }
-    Ok(out)
+    Ok((out, conflicted))
 }
 
 /// The conflicts the changes `changes` of view `view` carry on the blocks they write: their
@@ -927,6 +928,32 @@ impl ReadState {
         conflicted: &BTreeSet<BlockId>,
         max: usize,
     ) -> Result<(Vec<TensionInfo>, usize), RdyError> {
+        let listed = self.listed_tensions(view, changes, conflicted, None)?;
+        let omitted = listed.len().saturating_sub(max);
+        let mut cache = crate::tensions::info::InfoCache::default();
+        let out = listed
+            .into_iter()
+            .take(max)
+            .map(|(r, t)| {
+                let mut info = self.tension_info_with(&t, &mut cache);
+                info.refuses = Some(r);
+                info
+            })
+            .collect();
+        Ok((out, omitted))
+    }
+
+    /// The tensions [`ReadState::proposal_tensions`] lists, in its order, each with `refuses`,
+    /// none built: every one, uncut. With `fixed` (the tension set a stored version was made
+    /// with, `plan::compute::fixed_tensions`), an in-flight form it does not list is left out
+    /// (ruling task-8 F1): a later write's tension is context only.
+    pub(crate) fn listed_tensions(
+        &self,
+        view: &str,
+        changes: &[Hash],
+        conflicted: &BTreeSet<BlockId>,
+        fixed: Option<&BTreeSet<Hash>>,
+    ) -> Result<Vec<(bool, Arc<Tension>)>, RdyError> {
         let landing = self.landing_tensions(view, changes)?;
         let net = |t: &Tension| crate::tensions::judged_on_the_net_change(t.kind);
         let net_forms: Vec<Arc<Tension>> = landing.iter().filter(|t| net(t)).cloned().collect();
@@ -938,7 +965,7 @@ impl ReadState {
         let mine = self
             .tensions_of_changes(changes)?
             .into_iter()
-            .filter(|t| !net(t));
+            .filter(|t| !net(t) && fixed.is_none_or(|f| f.contains(&t.id)));
         let mut seen = BTreeSet::new();
         let mut listed = vec![];
         // a refusing tension is listed in its landing form; an in-flight form with another id
@@ -956,18 +983,7 @@ impl ReadState {
         // the order needs only the ids (hex in a fixed width sorts as the bytes do), so only the
         // listed ones are built
         listed.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
-        let omitted = listed.len().saturating_sub(max);
-        let mut cache = crate::tensions::info::InfoCache::default();
-        let out = listed
-            .into_iter()
-            .take(max)
-            .map(|(r, t)| {
-                let mut info = self.tension_info_with(&t, &mut cache);
-                info.refuses = Some(r);
-                info
-            })
-            .collect();
-        Ok((out, omitted))
+        Ok(listed)
     }
 }
 
