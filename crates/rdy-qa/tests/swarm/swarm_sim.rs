@@ -2319,6 +2319,7 @@ fn swarm_answer(kind: &str) -> Option<(&'static str, &'static str)> {
 #[test]
 fn rg15_agents_answer_each_gating_item_with_its_allowed_act() {
     let answered = std::cell::Cell::new(0usize);
+    let by_kind = std::cell::RefCell::new(BTreeMap::<String, usize>::new());
     each(|seed, o| {
         let mut bad = vec![];
         for e in &o.journal {
@@ -2362,6 +2363,10 @@ fn rg15_agents_answer_each_gating_item_with_its_allowed_act() {
             }
             if e.outcome == Met::Ok {
                 answered.set(answered.get() + sent.len());
+                for a in &sent {
+                    let kind = a["kind"].as_str().unwrap_or_default().to_string();
+                    *by_kind.borrow_mut().entry(kind).or_default() += 1;
+                }
             }
         }
         // each proposal an agent made in the run came after its read of the view's plan, in the
@@ -2382,7 +2387,11 @@ fn rg15_agents_answer_each_gating_item_with_its_allowed_act() {
         }
         assert!(bad.is_empty(), "swarm seed {seed}: {bad:#?}");
     });
-    eprintln!("rg15: {} plan items answered", answered.get());
+    eprintln!(
+        "rg15: {} plan items answered, by kind {:?}",
+        answered.get(),
+        by_kind.borrow()
+    );
     assert!(
         answered.get() > 0,
         "no seed answered a plan item: the check is vacuous"
@@ -2411,6 +2420,7 @@ fn gating_open(counts: &Value) -> Vec<String> {
 #[test]
 fn rg15_every_live_view_drains_through_the_gate() {
     let answered = std::cell::Cell::new(0usize);
+    let (deferred, accepted) = (std::cell::Cell::new(0usize), std::cell::Cell::new(0usize));
     each(|seed, o| {
         let mut bad = vec![];
         // the plan read before each landing of the run and the drain
@@ -2444,6 +2454,13 @@ fn rg15_every_live_view_drains_through_the_gate() {
                 }
             }
         }
+        accepted.set(
+            accepted.get()
+                + o.journal
+                    .iter()
+                    .filter(|e| e.act == "accept_deferrals" && e.outcome == Met::Ok)
+                    .count(),
+        );
         // the seals, from the drained store
         let (_keep, copy) = copy_of(&o.dir);
         let r = Rdy::open(&copy).expect("open the drained copy");
@@ -2472,7 +2489,11 @@ fn rg15_every_live_view_drains_through_the_gate() {
                         "{pref} sealed item {} deferred with no accepted deferral",
                         i["id"]
                     )),
-                    "confirmed" | "deferred" => answered.set(answered.get() + 1),
+                    "confirmed" => answered.set(answered.get() + 1),
+                    "deferred" => {
+                        answered.set(answered.get() + 1);
+                        deferred.set(deferred.get() + 1);
+                    }
                     _ => {}
                 }
             }
@@ -2499,7 +2520,12 @@ fn rg15_every_live_view_drains_through_the_gate() {
         );
         assert!(bad.is_empty(), "swarm seed {seed}: {bad:#?}");
     });
-    eprintln!("rg15: {} answered items sealed", answered.get());
+    eprintln!(
+        "rg15: {} answered items sealed, {} of them deferred; {} deferral cards accepted",
+        answered.get(),
+        deferred.get(),
+        accepted.get()
+    );
     assert!(
         answered.get() > 0,
         "no landing of any seed sealed an item an agent answered: the gate checked nothing"
