@@ -425,6 +425,9 @@ fn carry(store: &Path, origin: &Origin, names: &[Names]) -> (Hash, RedactionCarr
             Ok(())
         })
         .unwrap();
+    // the aside store's own features: a landing writes an assessment, so the `assessment`
+    // feature is active (ruling task-10 B, Amendment 1)
+    let features = s.features().clone();
     drop(s);
     let mut i = rdy_store::ingest::Ingest::create(store).unwrap();
     for (n, b) in batches.iter().enumerate() {
@@ -432,10 +435,8 @@ fn carry(store: &Path, origin: &Origin, names: &[Names]) -> (Hash, RedactionCarr
     }
     i.append_carried(&residues, std::slice::from_ref(&rec))
         .unwrap();
-    i.upgrade(&rdy_store::format::DumpStore::Features(
-        rdy_store::format::baseline_features(),
-    ))
-    .unwrap();
+    i.upgrade(&rdy_store::format::DumpStore::Features(features))
+        .unwrap();
     i.finish().unwrap();
     (carried, rec)
 }

@@ -30,7 +30,7 @@ use rdy_qa::every_kind;
 use rdy_qa::fixtures::{approver, land, write, writer};
 use rdy_qa::invariants::{check, check_all, frozen_report};
 use rdy_store::dump::DUMP_FORMAT;
-use rdy_store::format::{DumpStore, baseline_features};
+use rdy_store::format::DumpStore;
 use rdy_store::kinds;
 use rdy_store::redaction::StoredFrame;
 use rdy_store::segment::Location;
@@ -623,9 +623,14 @@ fn rdx15_approved_removal_survives_restart_reindex_dump_and_clone() {
                     let file = scratch.path().join(format!("s{seed}-{k}.rdydump"));
                     let r = Rdy::open(&at).unwrap();
                     let d = r.read().dump(&file).unwrap();
+                    // the store's own features: a landing writes an assessment, so the
+                    // `assessment` feature is active (ruling task-10 B, Amendment 1)
                     assert_eq!(
                         (d.dump_format, &d.store_format),
-                        (DUMP_FORMAT, &DumpStore::Features(baseline_features()))
+                        (
+                            DUMP_FORMAT,
+                            &DumpStore::Features(r.store().features().clone())
+                        )
                     );
                     r.close().unwrap();
                     load(&file, &next).unwrap();
@@ -939,10 +944,11 @@ fn rdx15_snapshots_are_references_and_assessment_support_is_absent() {
     assert_eq!(count_kind(&p.r, kinds::SNAPSHOT), snapshots_before);
     // D-4JMPH: every propose batch writes a plan version, and an item-ful landing writes a
     // sealed one, so the removal's
-    // propose and landing write PLAN (kind 24), a registry kind; still no assessment record
+    // propose and landing write PLAN (kind 24), a registry kind. A ready version's propose
+    // writes its ASSESSMENT (kind 25) in the propose batch (ruling task-10 B, Amendment 1)
     let known: BTreeSet<u8> = (1..=22)
         .filter(|k| *k != 11 && *k != 12)
-        .chain([kinds::PLAN])
+        .chain([kinds::PLAN, kinds::ASSESSMENT])
         .collect();
     let mut seen: BTreeSet<u8> = BTreeSet::new();
     let st = p.r.read();

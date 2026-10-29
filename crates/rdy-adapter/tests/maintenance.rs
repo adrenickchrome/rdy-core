@@ -262,13 +262,16 @@ fn rf4_adapter_formats_and_old_stream_refusal() {
     let repo = r.store().repo_id().unwrap().unwrap();
     let mut bytes = Vec::new();
     rdy_engine::stream_export::write(&r.read(), tag, &Default::default(), &mut bytes).unwrap();
+    // the stream names the store's own features: a landing writes an assessment, so the
+    // `assessment` feature is active (ruling task-10 B, Amendment 1)
+    let features = r.store().features().clone();
     r.close().unwrap();
     rdy_adapter::stream::check_batch(bytes.as_slice(), Some(repo)).unwrap();
     // the header frame follows the 12-byte prelude: 4 length bytes, the kind and the hash, then
     // its payload, which starts with the manifest's length and JSON
     let len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
     let payload = bytes[49..49 + len].to_vec();
-    let json = rdy_store::format::baseline_features().to_json();
+    let json = features.to_json();
     assert_eq!(payload[..4], (json.len() as u32).to_le_bytes());
     let newer = rdy_store::format::StoreFeatures::of(vec![rdy_store::format::StoreFeature {
         name: "zz_future".into(),
