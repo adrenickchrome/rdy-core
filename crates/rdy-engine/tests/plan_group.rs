@@ -1009,3 +1009,38 @@ fn rg9_a_refused_answer_leaves_no_repin_change() {
         )
     );
 }
+
+/// A group spec with a reason one past `MAX_REASON_CHARS` is refused with the reason text,
+/// whole, and writes nothing: no repin change, no plan version (tb-A4DAV).
+#[test]
+fn rg9_a_group_reason_over_the_limit_is_refused_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    repin_world(&mut r, "w");
+    let before = log_state(&r);
+    let changes = r.read().included("w").len();
+    let long = "x".repeat(rdy_model::engine_fields::MAX_REASON_CHARS + 1);
+    for repin in [false, true] {
+        let e = r
+            .answer_plan_specs(
+                &writer(),
+                "w",
+                &[spec_of(
+                    group(Some(PlanKind::Confirm), None),
+                    PlanAct::Confirm,
+                    Some(&long),
+                    repin,
+                )],
+            )
+            .unwrap_err();
+        expect_err(
+            e,
+            E_BAD_INPUT,
+            "confirm needs a reason of 1 to 2000 characters",
+            "give a reason of 1 to 2000 characters",
+        );
+        assert_eq!(r.read().included("w").len(), changes);
+        assert_eq!(log_state(&r), before);
+        assert_eq!(plan_ref(&r, "w"), None);
+    }
+}

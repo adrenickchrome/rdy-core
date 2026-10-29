@@ -959,16 +959,33 @@ fn full_item_id(c: &PlanCandidate) -> String {
     }
 }
 
+/// The refusal for a reason that is missing, empty or over `MAX_REASON_CHARS`.
+fn reason_refusal(act: PlanAct) -> RdyError {
+    bad(
+        &format!("{} needs a reason of 1 to 2000 characters", act.as_str()),
+        "give a reason of 1 to 2000 characters",
+    )
+}
+
 /// A trimmed reason of 1 to `MAX_REASON_CHARS` Unicode scalar values, or the refusal.
 fn reason_of(act: PlanAct, reason: Option<&str>) -> Result<String, RdyError> {
     let r = reason.map(str::trim).unwrap_or("");
     if !(1..=MAX_REASON_CHARS).contains(&r.chars().count()) {
-        return Err(bad(
-            &format!("{} needs a reason of 1 to 2000 characters", act.as_str()),
-            "give a reason of 1 to 2000 characters",
-        ));
+        return Err(reason_refusal(act));
     }
     Ok(r.to_string())
+}
+
+/// Refuses a reason over `MAX_REASON_CHARS` (trimmed) for an act that keeps one, with the text
+/// [`reason_of`] gives. It allocates nothing, so it runs on a spec before a group expands to
+/// one clone of the reason per matched item (tb-A4DAV). A missing or empty reason is left to
+/// `reason_of`, and done keeps no reason.
+fn check_spec_reason(act: PlanAct, reason: Option<&str>) -> Result<(), RdyError> {
+    match (act, reason) {
+        (PlanAct::Done, _) | (_, None) => Ok(()),
+        (act, Some(r)) if r.trim().chars().count() > MAX_REASON_CHARS => Err(reason_refusal(act)),
+        _ => Ok(()),
+    }
 }
 
 /// Validates the whole of `inputs` against `computed` (the plan of `view`'s scope) and returns
@@ -1165,6 +1182,8 @@ impl Rdy {
         let mut inputs: Vec<PlanAnswerInput> = Vec::with_capacity(specs.len());
         let mut to_repin: Vec<&PlanCandidate> = vec![];
         for s in specs {
+            // before any clone of the reason: a group copies it once per matched item
+            check_spec_reason(s.act, s.reason.as_deref())?;
             match (&s.item, &s.group) {
                 (Some(item), None) => {
                     check_expansion(inputs.len(), 1)?;
@@ -1276,6 +1295,30 @@ mod tests {
                 format!("change plan exceeds {MAX_PLAN_ANSWERS} plan answers")
             );
         }
+    }
+
+    /// A reason over `MAX_REASON_CHARS` is refused by the spec check, before a group expands to
+    /// one clone of it per matched item (tb-A4DAV). Done keeps no reason, so it is not checked;
+    /// a missing or empty reason is left to `reason_of`, after the group has expanded.
+    #[test]
+    fn rg9_an_over_long_reason_is_refused_before_expansion() {
+        let long = "x".repeat(MAX_REASON_CHARS + 1);
+        let padded = format!("  {}  ", "x".repeat(MAX_REASON_CHARS));
+        for act in [PlanAct::Confirm, PlanAct::Defer, PlanAct::Dismiss] {
+            let e = check_spec_reason(act, Some(&long)).unwrap_err();
+            let want = reason_of(act, Some(&long)).unwrap_err();
+            assert_eq!(
+                (e.code, e.message, e.fix),
+                (want.code, want.message, want.fix)
+            );
+            assert!(
+                check_spec_reason(act, Some(&padded)).is_ok(),
+                "trimmed length counts"
+            );
+            assert!(check_spec_reason(act, None).is_ok());
+            assert!(check_spec_reason(act, Some("")).is_ok());
+        }
+        assert!(check_spec_reason(PlanAct::Done, Some(&long)).is_ok());
     }
 
     fn cand(id: Hash) -> PlanCandidate {
