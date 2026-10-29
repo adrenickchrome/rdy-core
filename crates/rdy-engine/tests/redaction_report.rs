@@ -88,6 +88,17 @@ fn h(s: &str) -> Hash {
     s.parse().unwrap()
 }
 
+/// The assessment the propose of `version` wrote. A ready version's propose writes one, and a
+/// report names it when it names a removed block; no request carries these versions (ruling
+/// task-10 C).
+fn assessment_of(r: &Rdy, version: &str) -> Hash {
+    r.read()
+        .reader()
+        .assessment_of_proposal(&h(version), r.store().log_end())
+        .unwrap()
+        .expect("the propose wrote its assessment")
+}
+
 /// A project with a folder, a doc, a section, a prose block holding `SECRET` and a term, all in
 /// view `work`.
 struct P {
@@ -1572,6 +1583,12 @@ fn rdx5_report_names_landings_tags_views_proposals_and_snapshots() {
             row(ImpactKind::View, "work", refs, false),
             row(ImpactKind::Proposal, &pi.id, refs, false),
             row(ImpactKind::StateSnapshot, state, refs, false),
+            row(
+                ImpactKind::Assessment,
+                assessment_of(&p.r, &pi.id),
+                refs,
+                false
+            ),
         ]
     );
     assert!(d.quotes.is_empty());
@@ -1721,6 +1738,18 @@ fn rdx5_embedded_changes_and_shared_chunks_are_mandatory() {
         row(ImpactKind::Proposal, &py.id, refs, false),
         row(ImpactKind::StateSnapshot, state, refs, false),
         row(ImpactKind::StateSnapshot, state_y, refs, false),
+        row(
+            ImpactKind::Assessment,
+            assessment_of(&p.r, &pi.id),
+            refs,
+            false,
+        ),
+        row(
+            ImpactKind::Assessment,
+            assessment_of(&p.r, &py.id),
+            refs,
+            false,
+        ),
     ];
     expected.sort_by(|a, b| (a.kind as u8, &a.record).cmp(&(b.kind as u8, &b.record)));
     assert_eq!(

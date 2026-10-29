@@ -1049,13 +1049,26 @@ fn ok8_carrier_references_are_closed() {
         .filter(|r| kinds_of(r.kind))
         .cloned()
         .collect();
-    let want: Vec<ImpactRow> = c
+    let mut want: Vec<ImpactRow> = c
         .all
         .iter()
         .filter(|(_, _, _, hit)| *hit)
         .map(|(_, kind, hash, _)| row(*kind, hash, ImpactRelation::References, false))
         .collect();
     assert!(!want.is_empty());
+    // and the assessments the proposes of p1 and p2 wrote: each names the removed block in its
+    // scope, and no request carries those versions (ruling task-10 C)
+    for p in [f.p1, f.p2] {
+        let a =
+            f.r.read()
+                .reader()
+                .assessment_of_proposal(&p, f.r.store().log_end())
+                .unwrap()
+                .expect("the propose wrote its assessment");
+        let r = row(ImpactKind::Assessment, a, ImpactRelation::References, false);
+        assert!(got.contains(&r), "{p}: {r:?}");
+        want.push(r);
+    }
     for (name, kind, hash, hit) in &c.all {
         let r = row(*kind, hash, ImpactRelation::References, false);
         assert_eq!(got.contains(&r), *hit, "{name}: {r:?}");
