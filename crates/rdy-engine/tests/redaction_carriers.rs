@@ -1384,6 +1384,71 @@ fn ok8_a_request_recorded_before_carried_support_goes_stale() {
     let _ = &f.dir;
 }
 
+/// Records the removal of `f.target()` in view `view` and proposes it. Returns the version.
+fn propose_removal(f: &mut Refs, view: &str) -> Hash {
+    f.r.redact_in(&writer(), view, input(&f.target(), false))
+        .unwrap();
+    let pi =
+        f.r.propose(
+            &writer(),
+            view,
+            "Remove the code",
+            Some("Removes the leaked code."),
+        )
+        .unwrap();
+    h(&pi.id)
+}
+
+/// Ruling task-10 A (2026-10-29): the report of a recorded request leaves out the assessments of
+/// the version that carries it. That assessment only names the blocks the version removes, and
+/// its rows are uneraseable references, so the landing erases nothing in it either way. An
+/// assessment of the carrying version in a batch of its own never stales the request.
+#[test]
+fn rg10_the_carrying_versions_own_assessment_never_stales_its_request() {
+    let _clock = pin_clock(1_000_000);
+    let mut f = refs_project();
+    let version = propose_removal(&mut f, "redact");
+    let mut a = assessment(40, std::slice::from_ref(&f.prose));
+    a.proposal = version;
+    put(&mut f.r, kinds::ASSESSMENT, &a);
+    f.r.land(&approver(), &version.to_string()).unwrap();
+    assert!(
+        f.r.read()
+            .reader()
+            .redaction_of(kinds::BLOCK, &f.v1)
+            .unwrap()
+            .is_some(),
+        "the removal landed"
+    );
+    let _ = &f.dir;
+}
+
+/// Ruling task-10 A: an assessment of any other version that names the removed block is still a
+/// report row, so it stales a request recorded before it.
+#[test]
+fn rg10_another_versions_assessment_of_the_removed_block_is_a_report_row() {
+    let _clock = pin_clock(1_000_000);
+    let mut f = refs_project();
+    let version = propose_removal(&mut f, "redact");
+    let mut a = assessment(41, std::slice::from_ref(&f.prose));
+    a.proposal = f.p3;
+    let other = put(&mut f.r, kinds::ASSESSMENT, &a);
+    let d = dry(&f.r, &f.target());
+    assert!(
+        d.inside.contains(&row(
+            ImpactKind::Assessment,
+            other,
+            ImpactRelation::References,
+            false
+        )),
+        "{:?}",
+        d.inside
+    );
+    let e = f.r.land(&approver(), &version.to_string()).unwrap_err();
+    assert_eq!(e.code, E_REDACTION_STALE, "{e}");
+    let _ = &f.dir;
+}
+
 // ---------------------------------------------------------------------------------------------
 // bounds
 // ---------------------------------------------------------------------------------------------
