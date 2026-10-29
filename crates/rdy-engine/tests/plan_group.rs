@@ -1044,3 +1044,81 @@ fn rg9_a_group_reason_over_the_limit_is_refused_and_writes_nothing() {
         assert_eq!(plan_ref(&r, "w"), None);
     }
 }
+
+/// Runs git in `dir` with a fixed identity and no hooks; returns trimmed stdout.
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .current_dir(dir)
+        .args([
+            "-c",
+            "user.name=qa",
+            "-c",
+            "user.email=qa",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
+        .args(args)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A done group of `update_implementation` items keeps no reason, whatever its length
+/// (tb-A4DAV): a reason over `MAX_REASON_CHARS` on a done group is not refused, and no expanded
+/// answer holds one, so the group never carries N copies of it.
+#[test]
+fn rg9_a_done_group_keeps_no_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let w = world(&mut r, "w");
+    // a code file citing a: its item is an update_implementation item the view owes
+    let repo = tempfile::tempdir().unwrap();
+    git(repo.path(), &["init", "-q", "--initial-branch=main"]);
+    let mut cfg = std::fs::read_to_string(dir.path().join(".rdy.yaml")).unwrap_or_default();
+    cfg.push_str("code_repos: [app]\n");
+    std::fs::write(dir.path().join(".rdy.yaml"), cfg).unwrap();
+    std::fs::write(
+        dir.path().join(".rdy/local.yaml"),
+        format!(
+            "code_paths:\n  app: {}\n",
+            serde_json::to_string(&repo.path().display().to_string()).unwrap()
+        ),
+    )
+    .unwrap();
+    std::fs::write(repo.path().join("f.rs"), "fn f() {}\n").unwrap();
+    git(repo.path(), &["add", "-A"]);
+    let msg = format!("cite\n\nImplements: {}", w.a);
+    git(repo.path(), &["commit", "-q", "--no-verify", "-m", &msg]);
+    let item = pi(&w.a, "app:f.rs", PlanKind::UpdateImplementation);
+    assert_eq!(state_of(&r, "w", &item)["state"], "open");
+    let long = "x".repeat(rdy_model::engine_fields::MAX_REASON_CHARS + 1);
+    let h = r
+        .answer_plan_specs(
+            &writer(),
+            "w",
+            &[spec_of(
+                group(Some(PlanKind::UpdateImplementation), None),
+                PlanAct::Done,
+                Some(&long),
+                false,
+            )],
+        )
+        .unwrap();
+    let plan = plan_of(&r, &h);
+    assert_eq!(plan.answers.len(), 1);
+    for a in &plan.answers {
+        assert_eq!(a.act, PlanAct::Done);
+        assert_eq!(a.reason, None);
+    }
+}

@@ -988,6 +988,16 @@ fn check_spec_reason(act: PlanAct, reason: Option<&str>) -> Result<(), RdyError>
     }
 }
 
+/// The reason a spec passes on to an answer input: none for done, which keeps no reason
+/// (`prepare_plan_answers` drops it), so a done group never clones an unchecked reason once per
+/// matched item (tb-A4DAV).
+fn input_reason(act: PlanAct, reason: Option<&str>) -> Option<String> {
+    match act {
+        PlanAct::Done => None,
+        _ => reason.map(str::to_string),
+    }
+}
+
 /// Validates the whole of `inputs` against `computed` (the plan of `view`'s scope) and returns
 /// the cumulative answers: `prior` with each new answer added or replacing its item's, sorted by
 /// item. Nothing is written. Each item resolves to one full item; an item answered twice, an
@@ -1190,7 +1200,7 @@ impl Rdy {
                     inputs.push(PlanAnswerInput {
                         item: item.clone(),
                         act: s.act,
-                        reason: s.reason.clone(),
+                        reason: input_reason(s.act, s.reason.as_deref()),
                     });
                 }
                 (None, Some(g)) => {
@@ -1222,7 +1232,7 @@ impl Rdy {
                         inputs.push(PlanAnswerInput {
                             item: full_item_id(c),
                             act: s.act,
-                            reason: s.reason.clone(),
+                            reason: input_reason(s.act, s.reason.as_deref()),
                         });
                         if s.repin {
                             to_repin.push(c);
@@ -1319,6 +1329,20 @@ mod tests {
             assert!(check_spec_reason(act, Some("")).is_ok());
         }
         assert!(check_spec_reason(PlanAct::Done, Some(&long)).is_ok());
+    }
+
+    /// Done keeps no reason, so a spec for done passes none on to the answer input: a done
+    /// group of N items must not clone an unchecked reason N times (tb-A4DAV). Other acts pass
+    /// the reason on.
+    #[test]
+    fn rg9_done_passes_no_reason_to_an_answer_input() {
+        let long = "x".repeat(MAX_REASON_CHARS + 1);
+        assert_eq!(input_reason(PlanAct::Done, Some(&long)), None);
+        assert_eq!(input_reason(PlanAct::Done, None), None);
+        for act in [PlanAct::Confirm, PlanAct::Defer, PlanAct::Dismiss] {
+            assert_eq!(input_reason(act, Some("why")), Some("why".to_string()));
+            assert_eq!(input_reason(act, None), None);
+        }
     }
 
     fn cand(id: Hash) -> PlanCandidate {
