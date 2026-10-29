@@ -42,11 +42,11 @@ impl From<PlanActParam> for PlanAct {
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlanAnswerParams {
-    /// The item: a pi- id (a unique prefix of one is enough) or a cq- consequence id from the last write or proposal.
+    /// One item: a pi- id (a unique prefix of one is enough), a tn- id of a tension item or a cq- consequence id from the last write or proposal.
     pub item: String,
     /// confirm, defer, done or dismiss. Which acts an item takes depends on its kind.
     pub act: PlanActParam,
-    /// Why (1 to 2000 characters). Required for confirm and defer; done keeps none.
+    /// Why (1 to 2000 characters). Required for confirm, defer and dismiss; done keeps none.
     pub reason: Option<String>,
 }
 
