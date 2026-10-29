@@ -1271,14 +1271,14 @@ fn rg_final_a_stable_repin_group_with_a_justification_lands() {
 fn rg_final_a_stable_repin_group_without_a_justification_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
-    stable_world(&mut r, "w");
+    let (_, b) = stable_world(&mut r, "w");
     let before = log_state(&r);
     let changes = r.read().included("w").len();
     expect_err(
         r.answer_plan_specs(&writer(), "w", &[repin_spec(None, None, None)])
             .unwrap_err(),
         E_BAD_INPUT,
-        "a repin of stable content needs a justification",
+        &format!("the repin changes stable block {b}, so it needs a justification"),
         "pass implements, editorial or reflects, as rdy_write takes",
     );
     assert_eq!(log_state(&r), before);

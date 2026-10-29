@@ -167,8 +167,9 @@ fn rg11_cli_plan_with_no_item_and_no_group_exits_2() {
 }
 
 /// Canon: a stable doc `spec` with claim `a` and claim `b`, which cites `a`. The view `w` then
-/// makes a briefed, justified edit of `a`: a confirm item for `b` on stable content.
-fn stable_world(r: &mut Rdy, by: &Session) {
+/// makes a briefed, justified edit of `a`: a confirm item for `b` on stable content. Returns
+/// `b`'s id.
+fn stable_world(r: &mut Rdy, by: &Session) -> String {
     let clarify = || {
         Some(Justification::Editorial {
             class: EditorialClass::Clarify,
@@ -217,6 +218,7 @@ fn stable_world(r: &mut Rdy, by: &Session) {
         Some(brief.base.token.clone()),
     )
     .unwrap();
+    w.created["$b"].clone()
 }
 
 /// Ruling final F2 (FW-UX1 D-KQ4CA): `rdy plan confirm --repin` takes the repin change's
@@ -228,7 +230,7 @@ fn rg_final_cli_plan_repin_justification_matches_mcp() {
     // the CLI, on a served project
     let s = Served::new();
     let mut r = Rdy::open(s.dir.path()).unwrap();
-    stable_world(&mut r, &writer());
+    let b_cli = stable_world(&mut r, &writer());
     r.close().unwrap();
     let base = [
         "--json",
@@ -280,7 +282,7 @@ fn rg_final_cli_plan_repin_justification_matches_mcp() {
 
     // the tool, on a project of the same shape
     let (_dir, mut r) = project();
-    stable_world(&mut r, &as_agent("agent:qa", "w"));
+    let b_mcp = stable_world(&mut r, &as_agent("agent:qa", "w"));
     let engine = Arc::new(Local::new(r));
     let mut st = McpState::new(engine.clone());
     rdy_session(
@@ -305,13 +307,12 @@ fn rg_final_cli_plan_repin_justification_matches_mcp() {
         let e = rdy_plan(&mut st, serde_json::from_value(args).unwrap()).unwrap_err();
         mcp_refusals.push(json!([e.code, e.message, e.fix]));
     }
-    assert_eq!(cli_refusals, mcp_refusals);
-    assert_eq!(
-        mcp_refusals,
+    // the same refusals; the block named is each project's own `b` (TASK-933)
+    let expected = |b: &str| {
         vec![
             json!([
                 "E_BAD_INPUT",
-                "a repin of stable content needs a justification",
+                format!("the repin changes stable block {b}, so it needs a justification"),
                 "pass implements, editorial or reflects, as rdy_write takes"
             ]),
             json!([
@@ -320,7 +321,9 @@ fn rg_final_cli_plan_repin_justification_matches_mcp() {
                 "set repin to true, or remove the justification"
             ]),
         ]
-    );
+    };
+    assert_eq!(cli_refusals, expected(&b_cli));
+    assert_eq!(mcp_refusals, expected(&b_mcp));
     let via_mcp = rdy_plan(
         &mut st,
         serde_json::from_value(spec(json!({"repin": true, "editorial": editorial}))).unwrap(),

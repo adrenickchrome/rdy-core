@@ -141,15 +141,16 @@ impl PlanAnswerSpec {
     }
 }
 
-/// Whether a repin op of `ops` writes a block that is normative and stable, in the view state `m`
-/// or in canon: the tests the unjustified-change detector judges a write with (ruling final F2,
-/// D-ME2HD).
+/// The first block, in reading order, that a repin op of `ops` writes and that is normative and
+/// stable, in the view state `m` or in canon: the tests the unjustified-change detector judges a
+/// write with (ruling final F2, D-ME2HD; the block named, TASK-933).
 fn repins_stable_content(
     st: &ReadState,
     m: &crate::Materialized,
     ops: &[OpInput],
-) -> Result<bool, RdyError> {
+) -> Result<Option<BlockId>, RdyError> {
     let canon = st.materialized(&Scope::Canon)?;
+    let mut stable: BTreeSet<BlockId> = BTreeSet::new();
     for op in ops {
         let OpInput::Repin { id, .. } = op else {
             continue;
@@ -164,10 +165,16 @@ fn repins_stable_content(
             && (crate::brief::effective_stable(m, Some(&b))
                 || crate::brief::effective_stable(&canon, Some(&b)))
         {
-            return Ok(true);
+            stable.insert(b);
         }
     }
-    Ok(false)
+    // the first such block in reading order (TASK-933)
+    if stable.is_empty() {
+        return Ok(None);
+    }
+    Ok(crate::diff::reading_order(m)
+        .into_iter()
+        .find(|b| stable.contains(b)))
 }
 
 /// What a plan read names (p-92F5M): at most one of the four selectors (none: the session's
@@ -1354,9 +1361,12 @@ impl Rdy {
             let Some(j) = justifications[*n].take() else {
                 continue;
             };
-            if j.stored.is_none() && j.reflects.is_none() && repins_stable_content(&st, &m, &ops)? {
+            if j.stored.is_none()
+                && j.reflects.is_none()
+                && let Some(b) = repins_stable_content(&st, &m, &ops)?
+            {
                 return Err(bad(
-                    "a repin of stable content needs a justification",
+                    &format!("the repin changes stable block {b}, so it needs a justification"),
                     "pass implements, editorial or reflects, as rdy_write takes",
                 ));
             }
