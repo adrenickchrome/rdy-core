@@ -2425,6 +2425,8 @@ fn rg15_every_live_view_drains_through_the_gate() {
         let mut bad = vec![];
         // the plan read before each landing of the run and the drain
         let mut landed: BTreeMap<String, String> = BTreeMap::new();
+        // the landings with open items, for a person to look at
+        let mut look: Vec<(String, String)> = vec![];
         for (k, e) in o.journal.iter().enumerate() {
             let landing = match (e.act, &e.outcome, e.reply.as_ref()) {
                 ("land", Met::Ok, Some(r)) => r["landing"].as_str(),
@@ -2450,6 +2452,7 @@ fn rg15_every_live_view_drains_through_the_gate() {
                             "{} step {}: landed {pref} with open plan items {open:?}",
                             e.actor, e.step
                         ));
+                        look.push((l.to_string(), pref.to_string()));
                     }
                 }
             }
@@ -2497,6 +2500,61 @@ fn rg15_every_live_view_drains_through_the_gate() {
                     _ => {}
                 }
             }
+        }
+        // what a person reads of each landing with open items: the items its version's plan
+        // holds open now, what its agent answered last before it proposed, and whether rdy
+        // added a key change to the version
+        for (l, pref) in &look {
+            let q = PlanQuery {
+                proposal: Some(pref.clone()),
+                max_tokens: Some(100_000),
+                ..Default::default()
+            };
+            let open: Vec<String> = st
+                .change_plan(&q, "work")
+                .map(|p| serde_json::to_value(p).expect("a plan reply serializes"))
+                .map(|p| {
+                    p["items"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|i| i["state"] == "open")
+                        .map(|i| format!("{} {}", i["kind"], i["id"]))
+                        .collect()
+                })
+                .unwrap_or_else(|e| vec![format!("plan read: {e}")]);
+            let made = o.journal.iter().position(|x| {
+                x.act == "propose" && x.outcome == Met::Ok && x.block.as_deref() == Some(pref)
+            });
+            let asked: Vec<String> = made
+                .and_then(|k| {
+                    let view = o.journal[k].view.as_deref();
+                    o.journal[..k]
+                        .iter()
+                        .rev()
+                        .find(|x| x.act == "plan_answer" && x.view.as_deref() == view)
+                })
+                .and_then(|x| x.reply.as_ref())
+                .and_then(|r| r["answers"].as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .map(|a| format!("{} {}", a["kind"], a["item"]))
+                .collect();
+            let rekeyed = l
+                .parse::<Hash>()
+                .ok()
+                .and_then(|h| st.reader().landing(&h).ok())
+                .and_then(|rec| st.reader().proposal(&rec.proposal).ok())
+                .is_some_and(|p| {
+                    p.changes.iter().any(|c| {
+                        st.reader()
+                            .change(c)
+                            .is_ok_and(|c| c.message.starts_with("new keys rdy derived"))
+                    })
+                });
+            bad.push(format!(
+                "{pref}: open now {open:?}; answered before its propose {asked:?}; rdy key change {rekeyed}"
+            ));
         }
         // each agent view is closed or holds no change
         let mut live = vec![];
