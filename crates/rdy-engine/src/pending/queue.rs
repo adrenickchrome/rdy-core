@@ -661,7 +661,8 @@ fn accepted(st: &ReadState, item: &Item) -> Result<Option<Hash>, RdyError> {
 /// queue's cap hides it, and no other version's card is rendered, so another card's budget never
 /// refuses it. The item is the one the queue builds; a version that is not ready says why in its
 /// `why` line instead of `ready to land`. A card whose mandatory removal lines do not fit is
-/// `E_REDACTION_BUDGET` ([`render_checked`]). A direct approval shows this card before it lands.
+/// `E_REDACTION_BUDGET` ([`render_checked`]). A direct approval shows this card before it lands. Its
+/// facts are the stored assessment's, as the queue's are (O16).
 pub(crate) fn removal_item(
     st: &ReadState,
     pref: ProposalRef,
@@ -680,6 +681,11 @@ pub(crate) fn removal_item(
     }
     let v = Version::read(st, pref, p)?;
     let mut item = v.batch_item(st, now_ms());
+    // the item the queue builds draws its facts from the stored assessment (O16); a version with
+    // none (O10) shows the facts as read now
+    if let Some(facts) = stored_facts(st, &pref)? {
+        item.facts = facts;
+    }
     let issues = v.readiness(st)?;
     if !issues.is_empty() {
         let why: Vec<&str> = issues.iter().map(|i| i.message.as_str()).collect();
