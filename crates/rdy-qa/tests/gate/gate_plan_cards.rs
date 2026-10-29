@@ -1268,7 +1268,7 @@ fn cp12_seal_points_to_this_versions_acceptance() {
 /// no deferral card and no deferral hold. Proposed again, the version binds its view's chain, so
 /// its deferral card stands and its approval waits for the person's answer to it.
 #[test]
-fn cp12_unbound_proposal_is_not_ready_until_proposed_again() {
+fn cp12_unbound_proposal_is_not_ready_under_o10() {
     let (_d, mut r) = project();
     let s = spec(&mut r);
     edit(&mut r, "w", &s.a, "A holds 60 days.");
@@ -1307,6 +1307,12 @@ fn cp12_unbound_proposal_is_not_ready_until_proposed_again() {
         q.items.iter().all(|i| i.kind != ItemKind::Defer),
         "no deferral card"
     );
+    // O10: its approval refuses with the same issue, before any hold
+    let e = r
+        .land_with(&approver(), &pref, LandOptions::default())
+        .expect_err("not ready under O10");
+    assert_eq!(e.code, E_PROPOSAL_NOT_READY, "{e:#?}");
+    assert_eq!(e.issues, n.issues, "the O10 issue only");
     // proposed again: an assessed version, ready, with the chain's deferral card beside it
     let p = propose(
         &mut r,

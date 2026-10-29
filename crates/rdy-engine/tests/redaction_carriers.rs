@@ -1421,8 +1421,24 @@ fn rg10_the_carrying_versions_own_assessment_never_stales_its_request() {
     let _clock = pin_clock(1_000_000);
     let mut f = refs_project();
     let version = propose_removal(&mut f, "redact");
+    // the hand-made record keeps what freshness reads from the stored one (its base, pack, gate
+    // config and reach), so the landing reads it as fresh (ruling task-12 R2.5); it names the
+    // removed block in its other rows
+    let stored = {
+        let st = f.r.read();
+        let h = st
+            .reader()
+            .assessment_of_proposal(&version, st.seq())
+            .unwrap()
+            .expect("propose stored an assessment");
+        st.reader().assessment(&h).unwrap()
+    };
     let mut a = assessment(40, std::slice::from_ref(&f.prose));
     a.proposal = version;
+    a.base = stored.base;
+    a.pack = stored.pack;
+    a.config = stored.config;
+    a.reach = stored.reach;
     put(&mut f.r, kinds::ASSESSMENT, &a);
     f.r.land(&approver(), &version.to_string()).unwrap();
     assert!(

@@ -151,7 +151,7 @@ fn unbound(r: &mut Rdy, view: &str) -> (Hash, String) {
 /// O10 (Task 13, rg13): a version with no stored assessment is not ready, whatever else it
 /// holds. The queue lists it under `not_ready` with the O10 issue only and shows no card for it,
 /// and no exception or deferral card beside it. Its fix is to propose it again.
-fn assert_no_assessment(r: &Rdy, pref: &str) {
+fn assert_no_assessment(r: &mut Rdy, pref: &str) {
     let q = r
         .read()
         .pending(&rdy_engine::pending::PendingQuery {
@@ -181,6 +181,14 @@ fn assert_no_assessment(r: &Rdy, pref: &str) {
             .all(|i| i.r#ref != pref && i.batch.as_deref() != Some(pref)),
         "no card for {pref}: {q:#?}"
     );
+    // O10: its approval refuses with the same issue, and nothing lands
+    let head = r.read().canon_head();
+    let e = r
+        .land_with(&approver(), pref, LandOptions::default())
+        .expect_err("not ready under O10");
+    assert_eq!(e.code, rdy_engine::E_PROPOSAL_NOT_READY, "{e:#?}");
+    assert_eq!(e.issues, n.issues, "the O10 issue only");
+    assert_eq!(r.read().canon_head(), head);
 }
 
 fn pi(cause: &str, subject: &str, kind: PlanKind) -> String {
@@ -386,7 +394,7 @@ fn decision(
 /// `plan/<view>`. A zero-item version writes no plan once it is proposed again; an
 /// approval-generated final version binds a plan of its own and the seal names it.
 #[test]
-fn cp10_pre17_proposal_is_proposed_again_and_lands_sealed() {
+fn cp10_pre17_proposal_is_not_ready_under_o10() {
     let (d, mut r) = project();
     let repo = linked_repo(d.path());
     let s = spec(&mut r);
@@ -426,7 +434,7 @@ fn cp10_pre17_proposal_is_proposed_again_and_lands_sealed() {
         "the chain's defer is no answer of the version"
     );
     // O10: it has no stored assessment, so it is not ready and has no card
-    assert_no_assessment(&r, &pref);
+    assert_no_assessment(&mut r, &pref);
 
     // proposed again: the new version binds the chain, stores an assessment and is ready
     let p = propose(&mut r, "w", &[ans(&confirm, PlanAct::Defer, Some("later"))]);
@@ -477,7 +485,7 @@ fn cp10_pre17_proposal_is_proposed_again_and_lands_sealed() {
     let z = claim(&mut r, "z", &s.s, "Z stands alone.");
     assert!(!z.is_empty());
     let (_, zref) = unbound(&mut r, "z");
-    assert_no_assessment(&r, &zref);
+    assert_no_assessment(&mut r, &zref);
     let zp = propose(&mut r, "z", &[]);
     // the propose bound the view's plan; the landing seals nothing and writes no plan
     let (before, chain) = (plans_in(&r), plan_ref(&r, "z"));
@@ -499,7 +507,7 @@ fn cp10_pre17_proposal_is_proposed_again_and_lands_sealed() {
     )
     .unwrap();
     let (_, dvref) = unbound(&mut r, "dv");
-    assert_no_assessment(&r, &dvref);
+    assert_no_assessment(&mut r, &dvref);
     let dvp = propose(&mut r, "dv", &[]);
     let dl = land(&mut r, &dvp);
     let landing = r.read().reader().landing(&dl).unwrap();

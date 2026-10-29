@@ -407,6 +407,40 @@ fn parts(v: &Value) -> Value {
     json!({"code": v["code"], "message": v["message"], "fix": v["fix"], "issues": v["issues"]})
 }
 
+/// [`parts`] of the merge's final guard (O12) for a version whose readiness issue is the clash
+/// `issues[0]` (`E_VALIDATION`): the error itself, its issue under its own code.
+fn merge_refusal(issues: &[Issue]) -> Value {
+    let [i] = issues else {
+        panic!("one issue: {issues:#?}");
+    };
+    let block = i
+        .message
+        .split(' ')
+        .next()
+        .and_then(|b| BlockId::parse(b).ok());
+    let clash = Issue {
+        code: rdy_engine::E_PATH_CLASH,
+        block,
+        ..i.clone()
+    };
+    json!({
+        "code": E_VALIDATION,
+        "message": i.message,
+        "fix": i.fix,
+        "issues": serde_json::to_value([clash]).expect("issues"),
+    })
+}
+
+/// [`parts`] of the refusal of `pref` with `issues`: the pack version (`pack`) is refused by the
+/// merge's final guard ([`merge_refusal`]).
+fn expected_of(name: &str, pref: &str, issues: &[Issue]) -> Value {
+    if name == "pack" {
+        merge_refusal(issues)
+    } else {
+        expected(pref, issues)
+    }
+}
+
 /// [`parts`] of the refusal of `pref` with `issues`.
 fn expected(pref: &str, issues: &[Issue]) -> Value {
     json!({
@@ -429,7 +463,17 @@ fn id6_every_approval_path_refuses_a_version_that_is_not_ready() {
         let e = r
             .land_with(&approver(), pref, LandOptions::default())
             .unwrap_err();
-        assert_not_ready(&e, pref, &issues);
+        if name == "pack" {
+            // O12: folder-a's landing wrote no block of its reach, so freshness holds and the
+            // merge's final guard refuses with the queue's error
+            assert_eq!(
+                serde_json::to_value(&e).map(|v| parts(&v)).unwrap(),
+                merge_refusal(&issues),
+                "{e:#?}"
+            );
+        } else {
+            assert_not_ready(&e, pref, &issues);
+        }
         assert_eq!(log_end(&r), before, "{name}: a refusal writes nothing");
     }
     // the conflict comes first, then the blocking tension, each with the queue's texts
@@ -452,7 +496,12 @@ fn id6_cli_and_mcp_refuse_the_same_not_ready_version() {
         let want: Vec<(String, Value)> = made
             .all()
             .iter()
-            .map(|(_, pref)| (pref.to_string(), expected(pref, &queue_issues(&q, pref))))
+            .map(|(name, pref)| {
+                (
+                    pref.to_string(),
+                    expected_of(name, pref, &queue_issues(&q, pref)),
+                )
+            })
             .collect();
         (made, want)
     });
