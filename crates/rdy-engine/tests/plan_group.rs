@@ -193,14 +193,13 @@ fn state_of(r: &Rdy, view: &str, item: &str) -> Value {
             .unwrap(),
     )
     .unwrap();
-    let row = v["items"]
+    v["items"]
         .as_array()
         .unwrap()
         .iter()
         .find(|i| i["id"] == item)
         .unwrap_or_else(|| panic!("no item {item}: {v:#}"))
-        .clone();
-    row
+        .clone()
 }
 
 fn log_state(r: &Rdy) -> (rdy_engine::Location, Vec<(String, Vec<u8>)>) {
