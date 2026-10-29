@@ -18,8 +18,9 @@
 //!   judge the open review requests (at most `REVIEWS`). A change bound to a member that lost its
 //!   set is excluded with what depends on it: its dependents by deps, and a change that cites a
 //!   block such an excluded change created (FW-AL1: losers are discarded by design); the person
-//!   accepts advice it is shown through the relay (ruling task-5.4). A version that is not ready
-//!   for open change-plan items has its plan answered by its agent, which proposes again.
+//!   accepts advice it is shown through the relay (ruling task-5.4). The agent answers the
+//!   view's change plan before each propose, as in the run, and again for a version that is not
+//!   ready for open plan items (`E_PLAN_OPEN`).
 //! - Before every approve, of the run and of the drain, the person accepts the version's
 //!   deferral card when the queue lists one (D-AAQ9Z), and the relay reads the version's change
 //!   plan (`version_plan`), so a check sees what the gate read.
@@ -1312,6 +1313,8 @@ impl Drain {
             if let Some((set, member)) = self.alternative(v) {
                 args["alternatives"] = json!({"set": set, "chosen": member});
             }
+            // the agent answers its view's change plan first, as it does in the run
+            agent::answer_plan(self.agent(i), v);
             let link = self.agent(i);
             let mut e = link.entry("propose");
             e.view = Some(v.to_string());
@@ -1705,9 +1708,9 @@ impl Drain {
     /// its issues is a conflict, a blocking tension, open change-plan items (`E_PLAN_OPEN`) or a
     /// stable change with no briefing (`E_BRIEF_REQUIRED`): the conflicts first, when it has
     /// any; the tensions on a later round. Each `E_BRIEF_REQUIRED` issue's block is briefed and
-    /// written again with the token. Then, when an issue is `E_PLAN_OPEN` or the round wrote,
-    /// the agent answers the view's plan as it does before its own propose
-    /// (`agent::answer_plan`), so the next propose binds the answers. Any other issue code
+    /// written again with the token. An `E_PLAN_OPEN` issue: the agent answers the view's plan
+    /// as it does before its own propose (`agent::answer_plan`), and the next propose binds the
+    /// answers (every propose of the drain answers the plan first too). Any other issue code
     /// fails the run, as an outer `E_VALIDATION` did. The conflict and tension issues carry no
     /// block or tension id, so the drain reads them from the version (`pref`), the tensions its
     /// propose reply lists as refusing (`refusing`) and the view's listing, never from the
@@ -1731,24 +1734,20 @@ impl Drain {
                     self.no_rule(v, other, "land");
                 }
                 let has = |code: &str| codes.iter().any(|c| c == code);
-                let mut wrote = false;
                 if has("E_CONFLICT_UNRESOLVED") {
                     let version = self.version(i, v, pref, &r.code);
                     self.resolve_conflicts(i, v, &version, "E_CONFLICT_UNRESOLVED");
-                    wrote = true;
                 } else if has("E_BLOCKING_TENSION") {
                     let version = self.version(i, v, pref, &r.code);
                     self.resolve_tensions(i, v, &version, refusing, "E_BLOCKING_TENSION");
-                    wrote = true;
                 }
                 for x in issues.iter().filter(|x| x["code"] == "E_BRIEF_REQUIRED") {
                     let Some(b) = x["block"].as_str() else {
                         self.no_rule(v, "E_BRIEF_REQUIRED", "an issue with no block")
                     };
                     self.rebrief(i, v, b);
-                    wrote = true;
                 }
-                if wrote || has("E_PLAN_OPEN") {
+                if has("E_PLAN_OPEN") {
                     agent::answer_plan(self.agent(i), v);
                 }
             }
