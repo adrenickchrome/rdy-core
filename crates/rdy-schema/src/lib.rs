@@ -1,5 +1,6 @@
 mod glob;
 mod pack;
+pub mod policy;
 pub mod publication;
 mod resolve;
 pub mod supporting;

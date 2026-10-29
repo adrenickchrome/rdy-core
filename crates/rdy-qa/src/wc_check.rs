@@ -42,10 +42,11 @@ pub const STORE_ONLY_TARGET_TYPES: &[&str] = &["decision", "question", "finding"
 /// subtrees. The spec also lists reviews, tensions and intents as supporting; those are store
 /// records and not block types, so no export entry has them. The list is the oracle's own and
 /// names `rdy-standard`'s types: a pack that adds a supporting type needs it added here. D-Z8P09
-/// adds the engine's finding and source to every pack.
+/// adds the engine's finding and source to every pack, and D-ZWP7Q its authority policy.
 pub const SUPPORTING_TYPES: &[&str] = &[
     "decision",
     "publication_profile",
+    "authority_policy",
     "question",
     "rationale",
     "finding",

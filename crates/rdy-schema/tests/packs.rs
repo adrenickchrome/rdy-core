@@ -178,8 +178,14 @@ fn doc_and_folder_are_injected_into_every_pack() {
     let p = set.resolve(&name).unwrap();
     let doc = &p.block_types["doc"];
     assert_eq!(doc.prefix, "d");
-    // a bare doc holds only the engine's publication profile
-    assert_eq!(doc.children, vec!["publication_profile".to_string()]);
+    // a bare doc holds only the engine's publication profile and authority policy
+    assert_eq!(
+        doc.children,
+        vec![
+            "publication_profile".to_string(),
+            "authority_policy".to_string()
+        ]
+    );
     assert!(
         doc.fields["name"].required
             && doc.fields["title"].required
@@ -197,9 +203,10 @@ fn doc_and_folder_are_injected_into_every_pack() {
     assert!(folder.fields["name"].required && !folder.fields["title"].required);
     let std = PackSet::with_builtin().resolve("rdy-standard").unwrap();
     // a doc holds every content type directly, section first (the same list a section holds),
-    // then the publication profile
+    // then the publication profile and the authority policy
     let mut want = std.block_types["section"].children.clone();
     want.push("publication_profile".to_string());
+    want.push("authority_policy".to_string());
     assert_eq!(std.block_types["doc"].children, want);
     assert_eq!(std.block_types["doc"].children[0], "section");
     assert_eq!(std.default_doc_type.as_deref(), Some("overview"));
@@ -222,7 +229,8 @@ fn a_pack_keeps_its_doc_children_and_extra_fields_but_not_the_core() {
         vec![
             "section".to_string(),
             "note".to_string(),
-            "publication_profile".to_string()
+            "publication_profile".to_string(),
+            "authority_policy".to_string()
         ]
     );
 }

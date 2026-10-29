@@ -18444,6 +18444,38 @@
             "defines"
           ]
         },
+        "authority_policy": {
+          "body": "forbidden",
+          "children": [],
+          "class": "supporting",
+          "fields": {
+            "agent_may_accept": {
+              "kind": "list",
+              "required": false,
+              "values": []
+            },
+            "owners": {
+              "kind": "list",
+              "required": false,
+              "values": []
+            },
+            "require": {
+              "kind": "list",
+              "required": false,
+              "values": []
+            },
+            "roles": {
+              "kind": "map",
+              "required": false,
+              "values": []
+            }
+          },
+          "prefix": "ap",
+          "tracking": [],
+          "traits": [
+            "structural"
+          ]
+        },
         "claim": {
           "body": "required",
           "children": [],
@@ -18675,7 +18707,8 @@
             "question",
             "finding",
             "source",
-            "publication_profile"
+            "publication_profile",
+            "authority_policy"
           ],
           "class": null,
           "fields": {

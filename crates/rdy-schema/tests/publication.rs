@@ -158,10 +158,9 @@ fn pub1_profile_schema_is_closed_and_pack_independent() {
     assert_eq!(def.fields, want);
     assert_eq!(packs[0].type_for_prefix("pf"), Some(PROFILE));
 
-    // the doc holds the profile once, after its own children, in every pack
+    // the doc holds the profile once, in every pack
     for p in &packs {
         let children = &p.block_types["doc"].children;
-        assert_eq!(children.last().map(String::as_str), Some(PROFILE));
         assert_eq!(children.iter().filter(|c| *c == PROFILE).count(), 1);
     }
 

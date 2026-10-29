@@ -1,5 +1,6 @@
 use crate::glob::Glob;
 use crate::pack::*;
+use crate::policy;
 use crate::publication;
 use crate::supporting;
 use rdy_model::assessment::MAX_PACK_BYTES;
@@ -156,6 +157,12 @@ impl PackSet {
                 publication::PROFILE_TYPE
             )));
         }
+        if pack.block_types.contains_key(policy::POLICY_TYPE) {
+            return Err(SchemaError::Invalid(format!(
+                "{} is an engine type and cannot be declared by a pack",
+                policy::POLICY_TYPE
+            )));
+        }
         // D-4WC6R: the engine adds the reflects link kind to every pack
         if pack.link_types.contains(supporting::REFLECTS_LINK) {
             return Err(SchemaError::Invalid(format!(
@@ -310,6 +317,17 @@ fn inject_engine_types(pack: &mut Pack) {
         .children;
     doc_children.retain(|c| c != publication::PROFILE_TYPE);
     doc_children.push(publication::PROFILE_TYPE.to_string());
+    // The authority policy (D-ZWP7Q): one closed definition, a direct child of a doc only, placed
+    // after the profile.
+    pack.block_types
+        .insert(policy::POLICY_TYPE.to_string(), policy::type_def());
+    let doc_children = &mut pack
+        .block_types
+        .get_mut(tree::DOC)
+        .expect("forced above")
+        .children;
+    doc_children.retain(|c| c != policy::POLICY_TYPE);
+    doc_children.push(policy::POLICY_TYPE.to_string());
     let decision_core: BTreeMap<String, FieldDef> = [
         ("statement", f(FieldKind::Str, true, &[])),
         (
