@@ -3,9 +3,11 @@
 
 use super::*;
 use rdy_engine::engine::{Engine, with_writer_result};
+use rdy_engine::plan::api::PlanAnswerSpec;
+use rdy_engine::plan::group::PlanGroup;
 use rdy_engine::plan::{PLAN_DEFAULT_TOKENS, PlanAnswerInput, PlanQuery, check_plan_request, page};
 use rdy_engine::{E_INTERNAL, RdyError, Session};
-use rdy_model::plan::PlanAct;
+use rdy_model::plan::{PlanAct, PlanKind};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
@@ -21,6 +23,8 @@ pub enum PlanActParam {
     Defer,
     /// The work the item names is done.
     Done,
+    /// A tension item does not apply. Only a tension item takes it.
+    Dismiss,
 }
 
 impl From<PlanActParam> for PlanAct {
@@ -29,6 +33,7 @@ impl From<PlanActParam> for PlanAct {
             PlanActParam::Confirm => PlanAct::Confirm,
             PlanActParam::Defer => PlanAct::Defer,
             PlanActParam::Done => PlanAct::Done,
+            PlanActParam::Dismiss => PlanAct::Dismiss,
         }
     }
 }
@@ -39,7 +44,7 @@ impl From<PlanActParam> for PlanAct {
 pub struct PlanAnswerParams {
     /// The item: a pi- id (a unique prefix of one is enough) or a cq- consequence id from the last write or proposal.
     pub item: String,
-    /// confirm, defer or done. Which acts an item takes depends on its kind.
+    /// confirm, defer, done or dismiss. Which acts an item takes depends on its kind.
     pub act: PlanActParam,
     /// Why (1 to 2000 characters). Required for confirm and defer; done keeps none.
     pub reason: Option<String>,
@@ -55,6 +60,84 @@ impl From<PlanAnswerParams> for PlanAnswerInput {
     }
 }
 
+/// The kind of a plan item, as a group names it. The schema mirror of the model's `PlanKind`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanKindParam {
+    Update,
+    Rejustify,
+    Reaffirm,
+    Confirm,
+    UpdateImplementation,
+    Tension,
+}
+
+impl From<PlanKindParam> for PlanKind {
+    fn from(k: PlanKindParam) -> PlanKind {
+        match k {
+            PlanKindParam::Update => PlanKind::Update,
+            PlanKindParam::Rejustify => PlanKind::Rejustify,
+            PlanKindParam::Reaffirm => PlanKind::Reaffirm,
+            PlanKindParam::Confirm => PlanKind::Confirm,
+            PlanKindParam::UpdateImplementation => PlanKind::UpdateImplementation,
+            PlanKindParam::Tension => PlanKind::Tension,
+        }
+    }
+}
+
+/// A group of open plan items: every field it gives must match, and it gives at least one.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanGroupParams {
+    /// The item's kind: update, rejustify, reaffirm, confirm, update_implementation or tension.
+    pub kind: Option<PlanKindParam>,
+    /// update, reaffirm or confirm (a confirm item and a rejustify item).
+    pub follow_up: Option<String>,
+    /// The id of the doc that holds the item's subject in the version.
+    pub doc: Option<String>,
+    /// The item's edge.
+    pub edge: Option<String>,
+}
+
+impl From<PlanGroupParams> for PlanGroup {
+    fn from(g: PlanGroupParams) -> PlanGroup {
+        PlanGroup {
+            kind: g.kind.map(Into::into),
+            follow_up: g.follow_up,
+            doc: g.doc,
+            edge: g.edge,
+        }
+    }
+}
+
+/// One answer in `rdy_plan`: to one item, or to a group of the open items.
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanAnswerSpecParams {
+    /// One item: a pi- id (a unique prefix of one is enough), a tn- id of a tension item or a cq- consequence id. Give item or group, not both.
+    pub item: Option<String>,
+    /// Every open item that matches each field the group gives: {kind?, follow_up?, doc?, edge?}. The act answers all of them. Give item or group, not both.
+    pub group: Option<PlanGroupParams>,
+    /// confirm, defer, done or dismiss. Which acts an item takes depends on its kind.
+    pub act: PlanActParam,
+    /// Why (1 to 2000 characters). Required for confirm, defer and dismiss; done keeps none.
+    pub reason: Option<String>,
+    /// true with a confirm group: also repin each matched item's subject to its cause, in one change before the answers.
+    pub repin: Option<bool>,
+}
+
+impl From<PlanAnswerSpecParams> for PlanAnswerSpec {
+    fn from(a: PlanAnswerSpecParams) -> PlanAnswerSpec {
+        PlanAnswerSpec {
+            item: a.item,
+            group: a.group.map(Into::into),
+            act: a.act.into(),
+            reason: a.reason,
+            repin: a.repin.unwrap_or(false),
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlanParams {
@@ -66,8 +149,8 @@ pub struct PlanParams {
     pub landing: Option<String>,
     /// Read every seal that names this decision.
     pub decision: Option<String>,
-    /// Answer items of the view's plan. All the answers are checked first, and either all are recorded or none. The reply is the plan after them. Empty: a read.
-    pub answers: Option<Vec<PlanAnswerParams>>,
+    /// Answer items of the view's plan: each answer names an item, or a group of the open items. All the answers are checked first, and either all are recorded or none. The reply is the plan after them. Empty: a read.
+    pub answers: Option<Vec<PlanAnswerSpecParams>>,
     /// The budget for the reply; the items are cut to fit.
     pub max_tokens: Option<usize>,
     /// Continue a cut plan: its next cursor. Alone (max_tokens allowed).
@@ -90,11 +173,11 @@ pub fn run_plan(
     p: PlanParams,
 ) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
-    let answers: Vec<PlanAnswerInput> = p
+    let specs: Vec<PlanAnswerSpec> = p
         .answers
         .unwrap_or_default()
         .into_iter()
-        .map(PlanAnswerInput::from)
+        .map(PlanAnswerSpec::from)
         .collect();
     let view = p
         .view
@@ -107,14 +190,23 @@ pub fn run_plan(
         page: p.page,
         max_tokens: p.max_tokens,
     };
-    check_plan_request(&q, &answers)?;
-    if answers.is_empty() {
+    // the request rules look at the count only
+    let counted: Vec<PlanAnswerInput> = specs
+        .iter()
+        .map(|s| PlanAnswerInput {
+            item: String::new(),
+            act: s.act,
+            reason: None,
+        })
+        .collect();
+    check_plan_request(&q, &counted)?;
+    if specs.is_empty() {
         return serialize(&engine.read().change_plan(&q, default_view)?);
     }
     let view = q.view.unwrap_or_else(|| default_view.to_string());
     let s = session.clone();
     let full = with_writer_result(engine, move |r| {
-        r.answer_plan(&s, &view, &answers)?;
+        r.answer_plan_specs(&s, &view, &specs)?;
         r.read().view_plan(&view)
     })?;
     serialize(&page::first(

@@ -136,7 +136,7 @@ fn ids(items: &[&Value]) -> Vec<String> {
         .collect()
 }
 
-/// The five kind lines and the code line a read finishes with, from its JSON.
+/// The six kind lines and the code line a read finishes with, from its JSON.
 fn tail_lines(v: &Value) -> Vec<String> {
     let mut out: Vec<String> = [
         "update",
@@ -144,6 +144,7 @@ fn tail_lines(v: &Value) -> Vec<String> {
         "reaffirm",
         "confirm",
         "update_implementation",
+        "tension",
     ]
     .iter()
     .map(|k| {
