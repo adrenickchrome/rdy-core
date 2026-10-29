@@ -2935,3 +2935,67 @@ fn rg15_the_person_answers_the_work_plan_before_it_proposes() {
         assert_eq!(item["outcome"], "confirmed", "{seal}");
     }
 }
+
+/// rg12 (D-ME2HD, D-SDSV2; C7): from the store after each seed's run, every landing whose
+/// proposal is a proposed version names an assessment of the version it approved; a
+/// re-affirmation card's landing (its proposal is in a `reaffirm-` view) names none.
+#[test]
+fn rg12_every_landing_of_a_proposed_version_names_an_assessment() {
+    each(|seed, o| {
+        let (_keep, copy) = copy_of(&o.dir);
+        let r = Rdy::open(&copy).expect("open the drained copy");
+        let st = r.read();
+        let reader = st.reader();
+        let mut bad = vec![];
+        let (mut named, mut reaffirms) = (0, 0);
+        for (landing, rec) in reader.landings().expect("read canon's chain") {
+            let view = reader
+                .proposal(&rec.proposal)
+                .unwrap_or_else(|e| panic!("landing {landing}: its proposal: {e}"))
+                .view;
+            if view.starts_with(rdy_store::REAFFIRM_VIEW_PREFIX) {
+                reaffirms += 1;
+                if let Some(a) = rec.assessment {
+                    bad.push(format!(
+                        "re-affirmation landing {} names assessment {}",
+                        landing.short(),
+                        a.short()
+                    ));
+                }
+                continue;
+            }
+            let approved = rec.approved_version.unwrap_or(rec.proposal);
+            match rec.assessment {
+                None => bad.push(format!(
+                    "landing {} of view {view} names no assessment",
+                    landing.short()
+                )),
+                Some(a) => match reader.assessment(&a) {
+                    Ok(x) if x.proposal == approved => named += 1,
+                    Ok(x) => bad.push(format!(
+                        "landing {} names assessment {} of {}, not of {}",
+                        landing.short(),
+                        a.short(),
+                        x.proposal.short(),
+                        approved.short()
+                    )),
+                    Err(e) => bad.push(format!(
+                        "landing {}: assessment {}: {e}",
+                        landing.short(),
+                        a.short()
+                    )),
+                },
+            }
+        }
+        drop(st);
+        r.close().expect("close the drained copy");
+        assert!(
+            named > 0,
+            "swarm seed {seed}: no landing named an assessment"
+        );
+        assert!(
+            bad.is_empty(),
+            "swarm seed {seed} ({reaffirms} re-affirmation landings): {bad:#?}"
+        );
+    });
+}

@@ -5,6 +5,7 @@ mod gate_alts;
 mod gate_answer;
 mod gate_card_assessment;
 mod gate_exceptions;
+mod gate_freshness;
 mod gate_identity;
 mod gate_intake_e2e;
 mod gate_plan;
