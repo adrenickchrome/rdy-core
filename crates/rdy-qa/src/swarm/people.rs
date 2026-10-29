@@ -170,9 +170,6 @@ pub(crate) fn cli_in(link: &mut Link, act: &str, args: &[&str], relay: bool) -> 
     }
 }
 
-/// The budget of each card the person's queue read prints, so a card's hash is read whole.
-const CARD_ALL: &str = "100000";
-
 /// Before the person approves `pref` (D-AAQ9Z): when `rdy pending --json` lists the version's
 /// deferral card `defer:<pref>`, the person accepts it, `rdy answer defer:<pref> o1` (the
 /// `accept_deferrals` act), as `who` approves: relayed through `link` (the relaying agent names
@@ -184,12 +181,8 @@ pub(crate) fn accept_deferrals(link: &mut Link, who: &str, pref: &str, relayed: 
     let mut e = Entry::new(who, link.step, "pending", Outcome::Ok);
     e.epoch = link.epoch;
     e.block = Some(pref.to_string());
-    let res = cli_in(
-        link,
-        "pending",
-        &["pending", "--max-tokens", CARD_ALL],
-        relayed,
-    );
+    // a card's budget cuts its text, never its hash
+    let res = cli_in(link, "pending", &["pending"], relayed);
     let mut hash = None;
     let res = link.finish(e, "pending", res, |_, v| {
         hash = v["items"]

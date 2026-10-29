@@ -2589,3 +2589,155 @@ fn rg15_every_live_view_drains_through_the_gate() {
         "no landing of any seed sealed an item an agent answered: the gate checked nothing"
     );
 }
+
+/// rg15 (D-AAQ9Z), directed: no seed's agents defer an item (the swarm meets confirm and tension
+/// items only), so this pins the person's deferral path. Agent a0 lands a claim that cites seed
+/// claim c0, then edits c0: its claim gets a confirm item, which a0 defers. Before the relayed
+/// approve the person reads the queue (`pending`), accepts the version's deferral card
+/// (`accept_deferrals`), and the version lands with the item sealed deferred under that answer.
+#[test]
+fn rg15_the_person_accepts_a_deferral_card_before_the_approve() {
+    use rdy_qa::mcp::McpClient;
+    use rdy_qa::swarm::agent::KillGate;
+    use rdy_qa::swarm::journal::Journal;
+    use rdy_qa::swarm::people;
+    use rdy_qa::swarm::project;
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+    let cfg = Config {
+        seed: 31,
+        agents: 1,
+        steps: 4,
+        kill_at: None,
+    };
+    let p = project::build(&cfg);
+    let (j, g) = (Journal::new(), Arc::new(KillGate::new()));
+    let mut c = McpClient::start_proxy(&p.served);
+    c.call(
+        "rdy_session",
+        json!({"actor": "agent:a0", "run": "a0", "role": "writer", "areas": ["payments"]}),
+    )
+    .ok();
+    let (c0, section, decision) = (
+        p.seed.claims[0].clone(),
+        p.seed.sections[0].clone(),
+        p.seed.decisions[0].clone(),
+    );
+    let brief = |c: &mut McpClient, id: &str| -> (String, Value) {
+        let b = c.call("rdy_brief", json!({"ids": [id]})).ok();
+        (
+            b["base"]["token"].as_str().unwrap().to_string(),
+            b["base"]["blocks"][0]["version"].clone(),
+        )
+    };
+    // a0 answers each open item of its plan as an agent does, and defers a confirm item when
+    // `defer`; then it proposes, and the person lands the version through the relay
+    let land = |c: &mut McpClient, title: &str, defer: bool| {
+        let plan = c
+            .call("rdy_plan", json!({"view": "a0", "max_tokens": 100_000}))
+            .ok();
+        let mut deferred = 0;
+        let answers: Vec<Value> = plan["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|i| i["state"] == "open")
+            .filter_map(|i| {
+                let kind = i["kind"].as_str()?;
+                let (act, reason) = match swarm_answer(kind)? {
+                    _ if defer && kind == "confirm" => ("defer", "swarm: later"),
+                    answer => answer,
+                };
+                deferred += usize::from(act == "defer");
+                Some(json!({"item": i["id"], "act": act, "reason": reason}))
+            })
+            .collect();
+        if !answers.is_empty() {
+            c.call("rdy_plan", json!({"view": "a0", "answers": answers}))
+                .ok();
+        }
+        let v = c
+            .call(
+                "rdy_propose",
+                json!({"view": "a0", "title": title, "summary": title}),
+            )
+            .ok();
+        let pref = v["ref"].as_str().unwrap().to_string();
+        let queue = Arc::new(Mutex::new(vec![pref.clone()]));
+        people::spawn(
+            &p,
+            vec![PersonAct::Land { relayed: true }],
+            j.clone(),
+            queue.clone(),
+            g.clone(),
+        )
+        .join()
+        .unwrap_or_else(|e| panic!("the person panicked: {e:?}"));
+        (pref, queue, deferred)
+    };
+    // a0's claim cites c0, and lands
+    let (token, _) = brief(&mut c, &section);
+    let body = format!("Agent zero builds on {{{{{c0}}}}} in pass one.");
+    c.call(
+        "rdy_write",
+        json!({"ops": [{"op": "create", "type": "claim", "id": "$y", "parent": section,
+            "body": body}], "brief": token, "implements": [decision]}),
+    )
+    .ok();
+    let (first, queue, _) = land(&mut c, "a0 cites c0", false);
+    assert!(
+        queue.lock().unwrap().is_empty(),
+        "{first}: {:#?}",
+        j.entries()
+    );
+    // a0 edits c0: its claim gets a confirm item, which a0 defers
+    let (token, version) = brief(&mut c, &c0);
+    c.call(
+        "rdy_write",
+        json!({"ops": [{"op": "update", "id": c0, "base": version,
+            "body": "The ledger rule first holds, reworded."}],
+            "brief": token, "implements": [decision]}),
+    )
+    .ok();
+    let (pref, queue, deferred) = land(&mut c, "a0 rewords c0", true);
+    assert!(
+        deferred > 0,
+        "a0's edit of c0 gave its claim no confirm item to defer"
+    );
+    let entries = j.entries();
+    let of = |act: &str| -> Vec<&Entry> {
+        entries
+            .iter()
+            .filter(|e| e.act == act && e.block.as_deref() == Some(pref.as_str()))
+            .collect()
+    };
+    let (read, accepted, landed) = (of("pending"), of("accept_deferrals"), of("land"));
+    assert_eq!(read.len(), 1, "{entries:#?}");
+    assert_eq!(read[0].outcome, Met::Ok, "{:?}", read[0]);
+    assert_eq!(accepted.len(), 1, "{entries:#?}");
+    assert_eq!(accepted[0].outcome, Met::Ok, "{:?}", accepted[0]);
+    assert_eq!(accepted[0].actor, "agent:relay");
+    let answer = accepted[0].reply.as_ref().expect("the answer's reply");
+    assert_eq!(answer["act"], "accept_deferrals", "{answer}");
+    assert_eq!(landed.len(), 1, "{entries:#?}");
+    assert_eq!(landed[0].outcome, Met::Ok, "{:?}", landed[0]);
+    assert!(
+        queue.lock().unwrap().is_empty(),
+        "the landed ref left the queue"
+    );
+    // the seal holds the deferred item under the accepting answer
+    let l = landed[0].reply.as_ref().unwrap()["landing"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (ok, seal) = p.served.json(&["--json", "plan", "--landing", &l]);
+    assert!(ok, "{seal}");
+    let deferred: Vec<&Value> = seal["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["outcome"] == "deferred")
+        .collect();
+    assert!(!deferred.is_empty(), "{seal}");
+    assert!(deferred.iter().all(|i| i["answer"].is_string()), "{seal}");
+}
