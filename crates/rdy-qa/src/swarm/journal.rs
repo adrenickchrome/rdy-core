@@ -172,15 +172,16 @@ const PROPOSE_CODES: &[&str] = &[
 const LAND_CODES: &[&str] = &[
     "E_ALT_MEMBER",
     "E_PROPOSAL_MOVED",
-    // D-ME2HD: a conflict or a blocking tension is an issue of a version that is not ready
+    // D-ME2HD: a conflict, a blocking tension, an open plan item and a stable change with no
+    // briefing are issues of a version that is not ready
     "E_PROPOSAL_NOT_READY",
     "E_ALT_UNCHOSEN",
     "E_ALT_CHOSEN",
     "E_ALREADY_LANDED",
     "E_VIEW_CLOSED",
-    // D-ME2HD keeps E_STALE_BASE among the landing's write checks until M3b; M3a Task 6
-    // (D-TX3KH) refuses a version whose block needs a new order key when its view changed or
-    // dropped that block after the proposal ("propose again"). The person re-queues it.
+    // E_STALE_BASE stays among the landing's write checks (D-ME2HD, O12); M3a Task 6 (D-TX3KH)
+    // refuses a version whose block needs a new order key when its view changed or dropped
+    // that block after the proposal ("propose again"). The person re-queues it.
     "E_STALE_BASE",
 ];
 const WC_CODES: &[&str] = &["E_WC_STALE", "E_WC_CONFLICT"];
@@ -206,7 +207,9 @@ pub fn allowed(act: &str, code: &str) -> bool {
         "accept_advice" => &["E_PROPOSAL_MOVED"],
         "wc_checkout" | "wc_commit" | "wc_update" | "wc_propose" => WC_CODES,
         "inbox_resume" => &["E_BAD_INPUT"],
-        // intent, review_next, tensions, inbox, read, brief: no refusal is allowed.
+        // intent, review_next, tensions, inbox, read, brief, and the plan reads and answers,
+        // the queue read and the deferral acceptance around a landing (plan, plan_answer,
+        // version_plan, pending, accept_deferrals): no refusal is allowed.
         _ => &[],
     };
     codes.contains(&code)

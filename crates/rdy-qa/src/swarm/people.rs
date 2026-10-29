@@ -4,6 +4,8 @@
 //!
 //! - `rdy approve`, relayed (`--relayed-by agent:relay`, the path FW-B9 gives; no MCP tool
 //!   approves in M2) and, about one landing in five, direct (CLI parity);
+//! - before each approve, `rdy pending` and the answer that accepts the version's deferral card,
+//!   `rdy answer defer:<P-x@n> o1` (D-AAQ9Z), relayed or direct as the approve is;
 //! - the working copy: `rdy checkout`, `rdy add`, `rdy commit`, `rdy update`, and `rdy propose`
 //!   for the human's view `work`, which no agent may act in.
 //!
@@ -139,6 +141,94 @@ fn json_of(text: &str) -> Value {
         .unwrap_or_else(|_| Value::String(text.trim().to_string()))
 }
 
+/// `rdy --project <dir> --json <args>` on `link`'s project, as the person, or as the relaying
+/// agent (`RDY_ACTOR=agent:relay`, `RDY_RUN=chat`) when `relay`. A command the daemon died under,
+/// or could not start for, is `Lost`.
+pub(crate) fn cli_in(link: &mut Link, act: &str, args: &[&str], relay: bool) -> Res {
+    let mut all = vec!["--json"];
+    all.extend_from_slice(args);
+    let mut cmd = human_command(&link.at.dir, &link.at.env, &all);
+    if relay {
+        cmd.env("RDY_ACTOR", RELAY_ACTOR).env("RDY_RUN", RELAY_RUN);
+    }
+    let out = match output_within(&mut cmd, CLI_BUDGET) {
+        Ok(o) => o,
+        Err(e) => link.fail(act, &format!("hung: {e}")),
+    };
+    if out.status.success() {
+        return Res::Ok(json_of(&String::from_utf8_lossy(&out.stdout)));
+    }
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    let v = json_of(&err);
+    match v["code"].as_str() {
+        Some(code @ ("E_DAEMON_GONE" | "E_DAEMON_START")) => link.lost(act, code),
+        Some(code) => Res::Refused(
+            code.to_string(),
+            v["message"].as_str().unwrap_or_default().to_string(),
+        ),
+        None => link.fail(act, &format!("failed: {}", err.trim())),
+    }
+}
+
+/// The budget of each card the person's queue read prints, so a card's hash is read whole.
+const CARD_ALL: &str = "100000";
+
+/// Before the person approves `pref` (D-AAQ9Z): when `rdy pending --json` lists the version's
+/// deferral card `defer:<pref>`, the person accepts it, `rdy answer defer:<pref> o1` (the
+/// `accept_deferrals` act), as `who` approves: relayed through `link` (the relaying agent names
+/// itself, the card it showed and the person's words) or direct. The read is a `pending` entry
+/// and the answer an `accept_deferrals` entry, each naming `pref`; the answer's reply is the
+/// entry's. `false` when the daemon died under a call: the approve waits.
+pub(crate) fn accept_deferrals(link: &mut Link, who: &str, pref: &str, relayed: bool) -> bool {
+    let card = format!("defer:{pref}");
+    let mut e = Entry::new(who, link.step, "pending", Outcome::Ok);
+    e.epoch = link.epoch;
+    e.block = Some(pref.to_string());
+    let res = cli_in(
+        link,
+        "pending",
+        &["pending", "--max-tokens", CARD_ALL],
+        relayed,
+    );
+    let mut hash = None;
+    let res = link.finish(e, "pending", res, |_, v| {
+        hash = v["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|i| i["ref"] == card.as_str())
+            .and_then(|i| i["card_hash"].as_str())
+            .map(str::to_string);
+    });
+    if matches!(res, Res::Lost) {
+        return false;
+    }
+    let Some(hash) = hash else { return true };
+    let evidence = format!("Accept the deferrals of {pref}.");
+    let question = format!("Accept the deferred plan items of {pref}?");
+    let mut args: Vec<&str> = vec!["answer", card.as_str(), "o1", "--card", hash.as_str()];
+    if relayed {
+        args.extend([
+            "--relayed-by",
+            RELAY,
+            "--evidence",
+            evidence.as_str(),
+            "--question",
+            question.as_str(),
+            "--session",
+            "chat",
+        ]);
+    }
+    let mut e = Entry::new(who, link.step, "accept_deferrals", Outcome::Ok);
+    e.epoch = link.epoch;
+    e.block = Some(pref.to_string());
+    let res = cli_in(link, "accept_deferrals", &args, relayed);
+    let res = link.finish(e, "accept_deferrals", res, |en, v| {
+        en.reply = Some(v.clone())
+    });
+    !matches!(res, Res::Lost)
+}
+
 impl Person {
     fn act(&mut self, act: &PersonAct) {
         match act {
@@ -167,29 +257,7 @@ impl Person {
 
     /// `cli`, run as the relaying agent (`RDY_ACTOR=agent:relay`, `RDY_RUN=chat`) when `relay`.
     fn cli_as(&mut self, act: &str, args: &[&str], relay: bool) -> Res {
-        let mut all = vec!["--json"];
-        all.extend_from_slice(args);
-        let mut cmd = human_command(&self.link.at.dir, &self.link.at.env, &all);
-        if relay {
-            cmd.env("RDY_ACTOR", RELAY_ACTOR).env("RDY_RUN", RELAY_RUN);
-        }
-        let out = match output_within(&mut cmd, CLI_BUDGET) {
-            Ok(o) => o,
-            Err(e) => self.link.fail(act, &format!("hung: {e}")),
-        };
-        if out.status.success() {
-            return Res::Ok(json_of(&String::from_utf8_lossy(&out.stdout)));
-        }
-        let err = String::from_utf8_lossy(&out.stderr).into_owned();
-        let v = json_of(&err);
-        match v["code"].as_str() {
-            Some(code @ ("E_DAEMON_GONE" | "E_DAEMON_START")) => self.link.lost(act, code),
-            Some(code) => Res::Refused(
-                code.to_string(),
-                v["message"].as_str().unwrap_or_default().to_string(),
-            ),
-            None => self.link.fail(act, &format!("failed: {}", err.trim())),
-        }
+        cli_in(&mut self.link, act, args, relay)
     }
 
     // ---- landing ----
@@ -242,6 +310,14 @@ impl Person {
                 }
             },
         };
+        // the version's deferral card first (D-AAQ9Z): the approve waits for it
+        if !accept_deferrals(&mut self.link, who, &pref, relayed) {
+            self.queue
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(0, pref);
+            return;
+        }
         let evidence = format!("Approve {pref}.");
         let question = format!("Land {pref}?");
         let args: Vec<&str> = if relayed {
