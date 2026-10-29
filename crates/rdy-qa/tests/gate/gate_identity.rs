@@ -493,24 +493,29 @@ fn id6_cli_and_mcp_refuse_the_same_not_ready_version() {
     let (made, want) = with_rdy(&s, |r| {
         let (_, _, made) = not_ready_versions(r);
         let q = pending(r);
-        let want: Vec<(String, Value)> = made
+        // an approval of the version (rdy approve) lands through freshness, so the pack version
+        // meets the merge's final guard (O12); an answer names a card, and a version that is not
+        // ready has none, so every answer path refuses it as not ready, with the queue's issues
+        let want: Vec<(String, Value, Value)> = made
             .all()
             .iter()
             .map(|(name, pref)| {
+                let issues = queue_issues(&q, pref);
                 (
                     pref.to_string(),
-                    expected_of(name, pref, &queue_issues(&q, pref)),
+                    expected_of(name, pref, &issues),
+                    expected(pref, &issues),
                 )
             })
             .collect();
         (made, want)
     });
     let before = with_rdy(&s, |r| log_end(r));
-    for (pref, want) in &want {
+    for (pref, approve, want) in &want {
         // the person's rdy approve, through the daemon
         let (ok, e) = s.json(&["--json", "approve", pref]);
         assert!(!ok, "{e}");
-        assert_eq!(parts(&e), *want, "daemon rdy approve {pref}");
+        assert_eq!(parts(&e), *approve, "daemon rdy approve {pref}");
         // the person's rdy answer <ref> approve
         let (ok, e) = s.json(&["--json", "answer", pref, "approve"]);
         assert!(!ok, "{e}");
@@ -524,10 +529,10 @@ fn id6_cli_and_mcp_refuse_the_same_not_ready_version() {
     }
     // rdy approve without the daemon
     s.stop();
-    for (pref, want) in &want {
+    for (pref, approve, _) in &want {
         let (ok, e) = s.json(&["--json", "--no-daemon", "approve", pref]);
         assert!(!ok, "{e}");
-        assert_eq!(parts(&e), *want, "rdy --no-daemon approve {pref}");
+        assert_eq!(parts(&e), *approve, "rdy --no-daemon approve {pref}");
     }
     assert_eq!(
         with_rdy(&s, |r| log_end(r)),
@@ -538,7 +543,7 @@ fn id6_cli_and_mcp_refuse_the_same_not_ready_version() {
     let mut st = agent_state(Rdy::open(s.dir.path()).expect("open"));
     // rdy_session may record the session: read the published state after it
     let published = st.engine.read().seq();
-    for (pref, want) in &want {
+    for (pref, _, want) in &want {
         let e = rdy_answer(
             &mut st,
             serde_json::from_value(json!({
