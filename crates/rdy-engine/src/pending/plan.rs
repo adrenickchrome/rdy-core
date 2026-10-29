@@ -25,10 +25,13 @@ use super::reaffirm::ReaffirmMember;
 use crate::gate::ProposalRef;
 use crate::plan::api::{PlanCounts, capture_heads, live_rows};
 use crate::plan::compute::{self, ComputedPlan};
+use crate::plan::lifecycle::{PlanSummary, summary_of};
+use crate::readiness::PlanSource;
 use crate::{RdyError, ReadState};
 use rdy_model::plan::{PlanAct, PlanAnswer, PlanKind};
 use rdy_model::{BlockId, Hash, Proposal};
 use serde::Serialize;
+use std::collections::BTreeSet;
 
 /// The title of a deferral card is `Deferrals in P-x@n`; its why is this line.
 pub const DEFERRAL_WHY: &str = "these items stay open after this proposal lands";
@@ -106,35 +109,49 @@ fn answer_wire<S: serde::Serializer>(a: &PlanAnswer, s: S) -> Result<S::Ok, S::E
     .serialize(s)
 }
 
-/// A version's change plan as its cards read it: the plan its record binds (none before store
-/// 17), the counts over every item, code items included, and the deferred non-code items.
-pub(super) struct VersionPlan {
+/// A version's change plan as its cards and its readiness read it: the plan its record binds
+/// (none before store 17), the counts over every item, code items included, the deferred
+/// non-code items, the summary with the bound answers (`PlanSummary`, what the change-plan gate
+/// reads), and the blocks its items name (each subject that is a block, and each cause; O18).
+pub(crate) struct VersionPlan {
     pub(super) bound: Option<Hash>,
     pub(super) counts: PlanCounts,
     pub(super) deferrals: Vec<DeferralBinding>,
+    pub(crate) summary: PlanSummary,
+    pub(crate) blocks: BTreeSet<BlockId>,
 }
 
-/// The change plan of version record `p`, whose bound plan is `bound`: a bound version's from
-/// its recorded canon, changes and HEADs against its chain's first HEADs, with its bound plan's
-/// answers (an answer the view recorded after the propose is not the version's); an unbound
-/// one's (O19) from the HEADs captured once as both ends, with no answer and so no deferral.
+/// The change plan of version record `p`, whose plan comes from `source`: a bound version's
+/// from its recorded canon, changes and HEADs against its chain's first HEADs, with its bound
+/// plan's answers (an answer the view recorded after the propose is not the version's); an
+/// unbound one's (O19) from the HEADs captured once as both ends, with no answer and so no
+/// deferral.
 pub(super) fn version_plan(
     st: &ReadState,
     p: &Proposal,
-    bound: Option<Hash>,
+    source: &PlanSource,
 ) -> Result<VersionPlan, RdyError> {
     let reader = st.reader();
-    let Some(h) = bound else {
-        let heads = capture_heads(st)?;
-        let computed = compute::compute(st, &p.view, &p.changes, p.canon_at, &heads, &heads)?;
-        let (_, counts, _) = live_rows(&computed, &[]);
-        return Ok(VersionPlan {
-            bound: None,
-            counts,
-            deferrals: vec![],
-        });
+    let read;
+    let (h, plan) = match source {
+        PlanSource::Bound(None) => {
+            let heads = capture_heads(st)?;
+            let computed = compute::compute(st, &p.view, &p.changes, p.canon_at, &heads, &heads)?;
+            let (_, counts, _) = live_rows(&computed, &[]);
+            return Ok(VersionPlan {
+                bound: None,
+                counts,
+                deferrals: vec![],
+                summary: summary_of(&computed, &[]),
+                blocks: blocks_of(&computed),
+            });
+        }
+        PlanSource::Bound(Some(h)) => {
+            read = reader.plan(h)?;
+            (*h, &read)
+        }
+        PlanSource::InHand { plan, hash } => (*hash, plan),
     };
-    let plan = reader.plan(&h)?;
     let first = match plan.stable {
         Some(s) => reader.plan(&s)?.heads,
         None => plan.heads.clone(),
@@ -145,7 +162,24 @@ pub(super) fn version_plan(
         bound: Some(h),
         counts,
         deferrals: deferrals(&computed, &plan.answers),
+        summary: summary_of(&computed, &plan.answers),
+        blocks: blocks_of(&computed),
     })
+}
+
+/// The blocks the items of `computed` name: each subject that is a block id (never a code path
+/// or a tension id), and each cause (O18).
+fn blocks_of(computed: &ComputedPlan) -> BTreeSet<BlockId> {
+    let mut out = BTreeSet::new();
+    for c in &computed.items {
+        out.insert(c.cause.clone());
+        if !matches!(c.kind, PlanKind::UpdateImplementation | PlanKind::Tension)
+            && let Ok(b) = BlockId::parse(&c.subject)
+        {
+            out.insert(b);
+        }
+    }
+    out
 }
 
 /// The valid deferred non-code items of `computed` with `answers` (sorted by item), in full item

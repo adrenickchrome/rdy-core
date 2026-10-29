@@ -67,15 +67,19 @@
 //! ([`super::questions`], F7). A snooze hides an item for the chat session it was made in
 //! ([`super::snooze`], F4).
 //!
-//! # Readiness (D-3JZP4; plan "Readiness before M3b"; closed)
+//! # Readiness (D-3JZP4, D-ME2HD; closed)
 //!
-//! A version is ready when the landing's checks pass (no conflict on a block it writes, no
+//! The queue runs the one readiness ([`crate::readiness`]) on each latest open version, read
+//! once with its prospective canon: the landing's checks (no conflict on a block it writes, no
 //! blocking tension it would put into canon, no error in the canon it would give;
-//! `gate::landing_readiness`), it carries a summary, its bound plan can be read, and no decision
-//! or one_way re-affirmation of it was rejected and no deferral card of it refused (F1,
-//! D-AAQ9Z). A version that is not ready is no item: it is listed under `not_ready`, one issue
-//! per failed check, for the agent and never on a card. Every approval path (a direct approval,
-//! `rdy answer`, `rdy_answer` and `all_recommended`) refuses a version that is not ready with
+//! `gate::landing_readiness`), each change that touches stable content records a briefing
+//! (check 1, O3), it carries a summary, its bound plan can be read, its change plan has no open
+//! non-code item on stable content and no unanswered tension item (`E_PLAN_OPEN`, D-FQ7AK,
+//! D-45RG6), its reach is within its bound (O9), and no decision or one_way re-affirmation of it
+//! was rejected and no deferral card of it refused (the later refusals: F1, D-AAQ9Z). A version
+//! that is not ready is no item: it is listed under `not_ready`, one issue per failed check, for
+//! the agent and never on a card. Every approval path (a direct approval, `rdy answer`,
+//! `rdy_answer` and `all_recommended`) refuses a version that is not ready with
 //! `E_PROPOSAL_NOT_READY`, whose issues are these, in this order ([`approval_readiness`],
 //! D-ME2HD).
 //!
@@ -116,8 +120,9 @@ use super::tensions::tension_items;
 use crate::coverage::change::{candidate_build, candidate_change};
 use crate::coverage::{CandidateCoverage, confidence_in, lands_unapplied};
 use crate::error::{E_VALIDATION, RdyError, redaction_limit};
-use crate::gate::{ProposalRef, changes_of, landing_readiness, open_proposals};
+use crate::gate::{ProposalRef, changes_of, open_proposals};
 use crate::read_state::Built;
+use crate::readiness::{Candidate, PlanSource, Readiness};
 use crate::session::{now_ms, rfc3339};
 use crate::tensions::{Tension, TensionKind, TensionSeverity, TensionStatus, tension_label};
 use crate::{Materialized, ReadState, Scope};
@@ -280,12 +285,15 @@ impl ReadState {
             }
             let v = Version::read(self, *pref, p.clone())?;
             v.open_work(&mut work);
-            let issues = v.readiness(self)?;
-            if !issues.is_empty() {
-                not_ready.push(NotReady { r#ref: r, issues });
+            let ready = v.readiness_with_card(self, now)?;
+            let Some(card) = ready.card else {
+                not_ready.push(NotReady {
+                    r#ref: r,
+                    issues: ready.issues,
+                });
                 continue;
-            }
-            let mut items = vec![v.batch_item(self, now)];
+            };
+            let mut items = vec![card];
             for item in v.exception_items(now) {
                 if !answered(self, &item.r#ref, AnswerAct::Confirm)? {
                     items.push(item);
@@ -409,7 +417,14 @@ pub(crate) fn approval_readiness(
     pref: &ProposalRef,
     p: Proposal,
 ) -> Result<Vec<Issue>, RdyError> {
-    Version::read_for(st, *pref, p, Removal::Skip)?.readiness(st)
+    let c = Candidate::stored(st, *pref, p)?;
+    Version::read_for(st, &c, Removal::Skip)?.readiness(st)
+}
+
+/// The readiness of candidate `c` ([`crate::readiness::readiness`]): the version read once with
+/// its removal cards, the checks, and its `approve` item when it is ready, as the queue lists it.
+pub(crate) fn readiness_of(st: &ReadState, c: &Candidate) -> Result<Readiness, RdyError> {
+    Version::read_for(st, c, Removal::Read)?.readiness_with_card(st, now_ms())
 }
 
 /// The deferral card of version `pref` (whose record is `p`), answered or not, read from its
@@ -426,7 +441,7 @@ fn bound_deferral_item(
     let Some(bound) = st.reader().plan_of_proposal(&pref.version, st.seq())? else {
         return Ok(None);
     };
-    let plan = version_plan(st, p, Some(bound))?;
+    let plan = version_plan(st, p, &PlanSource::Bound(Some(bound)))?;
     Ok(Some(deferral_item(pref, &plan).map(|mut it| {
         raised_from(p, &mut it, now());
         it
@@ -461,7 +476,10 @@ pub(crate) fn deferral_card(st: &ReadState, r: &str) -> Result<Option<Item>, Rdy
 
 /// The issue of a deferral card of `pref` the person refused (D-AAQ9Z), if its latest answer
 /// refuses it: the version is not ready, and a refusal is never an acceptance.
-fn deferrals_refused(st: &ReadState, pref: &ProposalRef) -> Result<Option<Issue>, RdyError> {
+pub(crate) fn deferrals_refused(
+    st: &ReadState,
+    pref: &ProposalRef,
+) -> Result<Option<Issue>, RdyError> {
     if !answered(st, &defer_ref(pref), AnswerAct::RefuseDeferrals)? {
         return Ok(None);
     }
@@ -524,7 +542,7 @@ pub(crate) fn removal_item(
 }
 
 /// Whether the latest answer to `item` is of act `act`.
-pub(super) fn answered(st: &ReadState, item: &str, act: AnswerAct) -> Result<bool, RdyError> {
+pub(crate) fn answered(st: &ReadState, item: &str, act: AnswerAct) -> Result<bool, RdyError> {
     Ok(st
         .reader()
         .answer_of(item)?
@@ -706,8 +724,10 @@ struct Version {
     reaffirms: Vec<Reaffirmed>,
     /// The change plan the version's record binds (none before store 17, O19).
     plan_bound: Option<Hash>,
-    /// The version's change plan, as its cards read it.
+    /// The version's change plan, as its cards and its readiness read it.
     plan: Result<VersionPlan, RdyError>,
+    /// The plan blocks of a version whose change plan cannot be read: none.
+    no_blocks: BTreeSet<BlockId>,
 }
 
 /// Whether [`Version::read_for`] reads the removal cards of a version.
@@ -722,15 +742,14 @@ enum Removal {
 
 impl Version {
     fn read(st: &ReadState, pref: ProposalRef, p: Proposal) -> Result<Version, RdyError> {
-        Version::read_for(st, pref, p, Removal::Read)
+        Version::read_for(st, &Candidate::stored(st, pref, p)?, Removal::Read)
     }
 
-    fn read_for(
-        st: &ReadState,
-        pref: ProposalRef,
-        p: Proposal,
-        removal: Removal,
-    ) -> Result<Version, RdyError> {
+    /// Candidate `c` read once: its changes, its prospective canon, its decisions and
+    /// re-affirmations, its tensions, and its change plan from `c.plan` (the store's bound plan,
+    /// or one in hand that the store does not hold yet).
+    fn read_for(st: &ReadState, c: &Candidate, removal: Removal) -> Result<Version, RdyError> {
+        let (pref, p) = (c.pref, c.p.clone());
         let changes = changes_of(st, &p.changes)?;
         let touched: BTreeSet<BlockId> = changes
             .iter()
@@ -743,6 +762,7 @@ impl Version {
         };
         // canon's graph first, so the prospective canon carries it instead of building another
         let canon_g = st.graph(&Scope::Canon)?;
+        crate::readiness::count_candidate_build();
         let built = candidate_build(st, &changes)?;
         // canon's graph and lexicon carry to this build, and canon's structural layer when
         // it is built (`ReadState::pending` builds it first)
@@ -796,8 +816,8 @@ impl Version {
                 kinds,
             });
         }
-        let plan_bound = st.reader().plan_of_proposal(&pref.version, st.seq())?;
-        let plan = version_plan(st, &p, plan_bound);
+        let plan_bound = c.plan.hash();
+        let plan = version_plan(st, &p, &c.plan);
         Ok(Version {
             pref,
             p,
@@ -812,6 +832,7 @@ impl Version {
             reaffirms,
             plan_bound,
             plan,
+            no_blocks: BTreeSet::new(),
         })
     }
 
@@ -836,77 +857,52 @@ impl Version {
         }
     }
 
-    /// Every failed readiness check, one issue each (see the module docs).
+    /// Every failed readiness check, one issue each, in the closed order of
+    /// [`crate::readiness`]: the one readiness, on this version as read.
     fn readiness(&self, st: &ReadState) -> Result<Vec<Issue>, RdyError> {
-        let mut issues = landing_readiness(st, &self.pref, &self.p, &self.changes)?;
-        let summary = self.p.summary.as_deref().map(str::trim);
-        if summary.is_none_or(str::is_empty) {
-            issues.push(Issue {
-                severity: Severity::Error,
-                code: E_VALIDATION,
-                block: None,
-                message: format!("{} has no summary", self.r#ref()),
-                fix:
-                    "propose it again with a summary in plain words for the person who approves it"
-                        .into(),
-            });
-        }
-        // a bound version whose change plan cannot be read cannot show its deferrals; a version
-        // that fails another check (a conflict, say) says that first
-        if issues.is_empty()
-            && self.plan_bound.is_some()
-            && let Err(e) = &self.plan
-        {
-            issues.push(Issue {
-                severity: Severity::Error,
-                code: e.code,
-                block: None,
-                message: e.message.clone(),
-                fix: e.fix.clone(),
-            });
-        }
-        issues.extend(self.rejected(st)?);
-        Ok(issues)
+        let (summary, plan_blocks) = match &self.plan {
+            Ok(plan) => (Ok(&plan.summary), &plan.blocks),
+            Err(e) => (Err(e), &self.no_blocks),
+        };
+        crate::readiness::issues(
+            st,
+            &crate::readiness::Read {
+                pref: &self.pref,
+                p: &self.p,
+                changes: &self.changes,
+                plan_bound: self.plan_bound,
+                plan: summary,
+                plan_blocks,
+                written: &self.touched,
+                tensions: &self.tensions,
+                decisions: self
+                    .decisions
+                    .iter()
+                    .map(|d| (d.block.id.clone(), d.r#ref.clone()))
+                    .collect(),
+                reaffirms: self
+                    .reaffirms
+                    .iter()
+                    .map(|d| (d.block.id.clone(), d.r#ref.clone(), d.one_way))
+                    .collect(),
+            },
+        )
     }
 
-    /// F1: one issue for each proposed decision whose current version has a `reject_decision`
-    /// answer, exception or not; then a rejected one_way re-affirmation and refused deferrals.
-    /// Readiness gives them, so the queue and every approval path refuse them alike (D-ME2HD).
-    fn rejected(&self, st: &ReadState) -> Result<Vec<Issue>, RdyError> {
-        let mut issues = vec![];
-        for d in &self.decisions {
-            if answered(st, &d.r#ref, AnswerAct::RejectDecision)? {
-                let id = &d.block.id;
-                issues.push(Issue {
-                    severity: Severity::Error,
-                    code: E_VALIDATION,
-                    block: Some(id.clone()),
-                    message: format!("{id} was rejected; drop or revise it, then propose again"),
-                    fix: format!(
-                        "in view {}, drop or revise {id}, then propose again",
-                        self.p.view
-                    ),
-                });
-            }
-        }
-        // D-GV465: a re-affirmation of a one_way decision the person rejected
-        for d in self.reaffirms.iter().filter(|d| d.one_way) {
-            if answered(st, &d.r#ref, AnswerAct::RejectReaffirm)? {
-                let id = &d.block.id;
-                issues.push(Issue {
-                    severity: Severity::Error,
-                    code: E_VALIDATION,
-                    block: Some(id.clone()),
-                    message: format!("{id}'s re-affirmation was rejected"),
-                    fix: "drop the re-affirmation and propose again".into(),
-                });
-            }
-        }
-        // D-AAQ9Z: deferrals the person refused; never an acceptance
-        if self.plan_bound.is_some() {
-            issues.extend(deferrals_refused(st, &self.pref)?);
-        }
-        Ok(issues)
+    /// [`Version::readiness`] with the version's change plan summary and, when it is ready, its
+    /// `approve` item ([`Readiness`]).
+    fn readiness_with_card(&self, st: &ReadState, now: i64) -> Result<Readiness, RdyError> {
+        let issues = self.readiness(st)?;
+        let card = issues.is_empty().then(|| self.batch_item(st, now));
+        Ok(Readiness {
+            issues,
+            summary: self
+                .plan
+                .as_ref()
+                .map(|p| p.summary.clone())
+                .unwrap_or_default(),
+            card,
+        })
     }
 
     /// The version's deferral card (D-AAQ9Z), answered or not, with who raised it; none for a

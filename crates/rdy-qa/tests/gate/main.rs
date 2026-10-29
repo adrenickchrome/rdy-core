@@ -8,6 +8,7 @@ mod gate_identity;
 mod gate_intake_e2e;
 mod gate_plan;
 mod gate_plan_cards;
+mod gate_readiness;
 mod gate_reaffirm_cards;
 mod gate_semantic;
 mod gate_signing;

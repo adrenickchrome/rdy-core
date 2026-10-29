@@ -833,7 +833,6 @@ fn rg5_a_landing_seals_the_tension_set_the_propose_showed() {
 /// A version whose seal would hold an unanswered tension item does not land (D-45RG6): the
 /// store has no open seal form for it, and the landing writes nothing.
 #[test]
-#[ignore = "Task 8 turns on the landing guard"]
 fn rg5_an_unanswered_tension_item_refuses_the_landing() {
     let mut fx = project();
     let da = fx.da.clone();
@@ -862,39 +861,6 @@ fn rg5_an_unanswered_tension_item_refuses_the_landing() {
         }]
     );
     assert_eq!(fx.r.read().seq(), seq, "the refused landing wrote nothing");
-    assert!(!fx.r.store().features().has("plan_tension"));
-}
-
-/// Until Task 8 turns on the landing guard, a landing leaves an open tension item out of the
-/// seal: the store seals a tension item only as updated, confirmed or dismissed.
-#[test]
-fn rg5_an_unanswered_tension_item_lands_out_of_the_seal() {
-    let mut fx = project();
-    let da = fx.da.clone();
-    put(
-        &mut fx.r,
-        "a",
-        json!([{"op": "update", "id": da, "body": "Drafts stay open for 90 hours."}]),
-    );
-    cite_deprecated(&mut fx, "a", "Y follows");
-    let tn = tension_label(&one_tension(&fx.r, "a").id);
-    assert_eq!(rows_of_kind(&whole(&fx.r, "a"), "tension")[0]["id"], tn);
-    let landing = land(&mut fx.r, "a");
-    let sealed =
-        fx.r.read()
-            .change_plan(
-                &PlanQuery {
-                    landing: Some(landing),
-                    max_tokens: Some(100_000),
-                    ..Default::default()
-                },
-                "work",
-            )
-            .unwrap();
-    let sealed = serde_json::to_value(sealed).unwrap();
-    assert!(rows_of_kind(&sealed, "tension").is_empty(), "{sealed:#}");
-    // the other items keep their seal
-    assert_eq!(rows_of_kind(&sealed, "update").len(), 1, "{sealed:#}");
     assert!(!fx.r.store().features().has("plan_tension"));
 }
 

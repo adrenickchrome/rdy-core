@@ -57,7 +57,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-/// Open non-code items of a proposed version (p-S3NTW); advisory until M3.
+/// Open non-code items on drafts of a proposed version (p-S3NTW, D-FQ7AK): advice only.
 pub const W_PLAN_OPEN: &str = "W_PLAN_OPEN";
 /// The fix of [`W_PLAN_OPEN`].
 pub const PLAN_OPEN_FIX: &str = "close or defer each item: rdy_plan / rdy plan";
@@ -163,14 +163,20 @@ impl ProposalPlan {
     }
 }
 
+/// The summary of `computed` with `answers` ([`assess`] without its warnings): what readiness's
+/// change-plan gate reads ([`plan_issues`]).
+pub(crate) fn summary_of(computed: &ComputedPlan, answers: &[PlanAnswer]) -> PlanSummary {
+    assess(computed, answers).0
+}
+
 /// The summary and the warnings of `computed` with `answers`: the counts and open items of the
 /// read rows, a lapse warning per lapsed answer (by item), then [`W_PLAN_OPEN`] when an open
-/// item is not a code item.
+/// non-code item on a draft is not a tension item ([`plan_issues`]'s warning: the open items on
+/// stable content and the tension items are readiness's `E_PLAN_OPEN`, D-FQ7AK).
 fn assess(computed: &ComputedPlan, answers: &[PlanAnswer]) -> (PlanSummary, Vec<Issue>) {
     let (rows, counts, mut notes) = live_rows(computed, answers);
     notes.sort_by_key(|(item, _)| *item);
     let mut open_items = vec![];
-    let mut open_docs = 0usize;
     let (mut gated, mut advised) = (0usize, 0usize);
     for row in rows {
         let PlanRow::Live(item) = row else { continue };
@@ -183,9 +189,6 @@ fn assess(computed: &ComputedPlan, answers: &[PlanAnswer]) -> (PlanSummary, Vec<
             PlanKind::Tension => gated += 1,
             _ if item.stable => gated += 1,
             _ => advised += 1,
-        }
-        if item.kind != PlanKind::UpdateImplementation {
-            open_docs += 1;
         }
         open_items.push(item);
     }
@@ -215,15 +218,11 @@ fn assess(computed: &ComputedPlan, answers: &[PlanAnswer]) -> (PlanSummary, Vec<
             fix: n.fix,
         })
         .collect();
-    if open_docs > 0 {
-        warnings.push(Issue {
-            severity: Severity::Warning,
-            code: W_PLAN_OPEN,
-            block: None,
-            message: format!("{open_docs} change-plan items are open"),
-            fix: PLAN_OPEN_FIX.into(),
-        });
-    }
+    warnings.extend(
+        plan_issues(&summary)
+            .into_iter()
+            .filter(|i| i.severity == Severity::Warning),
+    );
     (summary, warnings)
 }
 
@@ -494,12 +493,25 @@ pub(crate) fn prepare_landing_plan(
         }
     };
     let computed = compute::compute(st, &p.view, &p.changes, p.canon_at, &heads, &first)?;
+    // a tension item seals only as updated, confirmed or dismissed (D-ME2HD, D-45RG6): an open
+    // one is an unanswered tension, so the version is not ready. Readiness refuses it first; this
+    // stays as the guard (rulings/task-5.md F1(a))
+    let unanswered = computed
+        .items
+        .iter()
+        .filter(|c| c.kind == PlanKind::Tension && outcome_of(c, &answers) == PlanOutcome::Open)
+        .count();
+    if unanswered > 0 {
+        let pref = crate::gate::resolve_in(st, &version.to_string())?;
+        return Err(crate::gate::proposal_not_ready(
+            &pref,
+            vec![plan_open_issue(unanswered)],
+        ));
+    }
     let items: Vec<SealedItem> = computed
         .items
         .iter()
         .map(|c| (c, outcome_of(c, &answers)))
-        // Task 8 replaces this filter with the F1(a) landing guard (rulings/task-5.md).
-        .filter(|(c, outcome)| !(c.kind == PlanKind::Tension && *outcome == PlanOutcome::Open))
         .map(|(c, outcome)| {
             let deferred =
                 outcome == PlanOutcome::Deferred && c.kind != PlanKind::UpdateImplementation;
