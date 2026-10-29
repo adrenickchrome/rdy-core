@@ -2535,6 +2535,46 @@
                   ]
                 },
                 {
+                  "action": "append",
+                  "id": "implements",
+                  "long": "implements",
+                  "num_args": "1",
+                  "value_names": [
+                    "IMPLEMENTS"
+                  ]
+                },
+                {
+                  "action": "append",
+                  "id": "editorial",
+                  "long": "editorial",
+                  "num_args": "2",
+                  "value_names": [
+                    "CLASS",
+                    "REASON"
+                  ]
+                },
+                {
+                  "action": "append",
+                  "id": "reflects",
+                  "long": "reflects",
+                  "num_args": "1",
+                  "value_names": [
+                    "SOURCE"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "id": "reflects_code",
+                  "long": "reflects-code",
+                  "num_args": "0",
+                  "value_names": [
+                    "REFLECTS_CODE"
+                  ]
+                },
+                {
                   "action": "set",
                   "id": "view",
                   "long": "view",
@@ -2592,10 +2632,14 @@
                   "args": [
                     "doc",
                     "edge",
+                    "editorial",
                     "follow_up",
+                    "implements",
                     "items",
                     "kind",
                     "reason",
+                    "reflects",
+                    "reflects_code",
                     "repin",
                     "view"
                   ],
@@ -2688,6 +2732,46 @@
                   ]
                 },
                 {
+                  "action": "append",
+                  "id": "implements",
+                  "long": "implements",
+                  "num_args": "1",
+                  "value_names": [
+                    "IMPLEMENTS"
+                  ]
+                },
+                {
+                  "action": "append",
+                  "id": "editorial",
+                  "long": "editorial",
+                  "num_args": "2",
+                  "value_names": [
+                    "CLASS",
+                    "REASON"
+                  ]
+                },
+                {
+                  "action": "append",
+                  "id": "reflects",
+                  "long": "reflects",
+                  "num_args": "1",
+                  "value_names": [
+                    "SOURCE"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "id": "reflects_code",
+                  "long": "reflects-code",
+                  "num_args": "0",
+                  "value_names": [
+                    "REFLECTS_CODE"
+                  ]
+                },
+                {
                   "action": "set",
                   "id": "view",
                   "long": "view",
@@ -2745,10 +2829,14 @@
                   "args": [
                     "doc",
                     "edge",
+                    "editorial",
                     "follow_up",
+                    "implements",
                     "items",
                     "kind",
                     "reason",
+                    "reflects",
+                    "reflects_code",
                     "repin",
                     "view"
                   ],
@@ -2841,6 +2929,46 @@
                   ]
                 },
                 {
+                  "action": "append",
+                  "id": "implements",
+                  "long": "implements",
+                  "num_args": "1",
+                  "value_names": [
+                    "IMPLEMENTS"
+                  ]
+                },
+                {
+                  "action": "append",
+                  "id": "editorial",
+                  "long": "editorial",
+                  "num_args": "2",
+                  "value_names": [
+                    "CLASS",
+                    "REASON"
+                  ]
+                },
+                {
+                  "action": "append",
+                  "id": "reflects",
+                  "long": "reflects",
+                  "num_args": "1",
+                  "value_names": [
+                    "SOURCE"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "id": "reflects_code",
+                  "long": "reflects-code",
+                  "num_args": "0",
+                  "value_names": [
+                    "REFLECTS_CODE"
+                  ]
+                },
+                {
                   "action": "set",
                   "id": "view",
                   "long": "view",
@@ -2898,10 +3026,14 @@
                   "args": [
                     "doc",
                     "edge",
+                    "editorial",
                     "follow_up",
+                    "implements",
                     "items",
                     "kind",
                     "reason",
+                    "reflects",
+                    "reflects_code",
                     "repin",
                     "view"
                   ],
@@ -2994,6 +3126,46 @@
                   ]
                 },
                 {
+                  "action": "append",
+                  "id": "implements",
+                  "long": "implements",
+                  "num_args": "1",
+                  "value_names": [
+                    "IMPLEMENTS"
+                  ]
+                },
+                {
+                  "action": "append",
+                  "id": "editorial",
+                  "long": "editorial",
+                  "num_args": "2",
+                  "value_names": [
+                    "CLASS",
+                    "REASON"
+                  ]
+                },
+                {
+                  "action": "append",
+                  "id": "reflects",
+                  "long": "reflects",
+                  "num_args": "1",
+                  "value_names": [
+                    "SOURCE"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "id": "reflects_code",
+                  "long": "reflects-code",
+                  "num_args": "0",
+                  "value_names": [
+                    "REFLECTS_CODE"
+                  ]
+                },
+                {
                   "action": "set",
                   "id": "view",
                   "long": "view",
@@ -3051,10 +3223,14 @@
                   "args": [
                     "doc",
                     "edge",
+                    "editorial",
                     "follow_up",
+                    "implements",
                     "items",
                     "kind",
                     "reason",
+                    "reflects",
+                    "reflects_code",
                     "repin",
                     "view"
                   ],
@@ -16779,6 +16955,37 @@
       "rdy_plan": {
         "input_schema": {
           "$defs": {
+            "EditorialParams": {
+              "additionalProperties": false,
+              "properties": {
+                "class": {
+                  "description": "typo, restructure or clarify.",
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "class",
+                "reason"
+              ],
+              "type": "object"
+            },
+            "OneOrMany": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              ],
+              "description": "llst1: one text, or a list of them."
+            },
             "PlanActParam": {
               "description": "What a plan item was done with. The schema mirror of the model's `PlanAct`, which keeps\n`schemars` out of the model crate.",
               "oneOf": [
@@ -16812,6 +17019,17 @@
                   "$ref": "#/$defs/PlanActParam",
                   "description": "confirm, defer, done or dismiss. Which acts an item takes depends on its kind."
                 },
+                "editorial": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/EditorialParams"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "With repin: the repin change is editorial, as rdy_write takes it."
+                },
                 "group": {
                   "anyOf": [
                     {
@@ -16822,6 +17040,17 @@
                     }
                   ],
                   "description": "Every open item that matches each field the group gives: {kind?, follow_up?, doc?, edge?}. The act answers all of them. Give item or group, not both."
+                },
+                "implements": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/OneOrMany"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "With repin: the decisions the repin change carries out, as rdy_write takes them: an id, key or path, or a list of them."
                 },
                 "item": {
                   "description": "One item: a pi- id (a unique prefix of one is enough), a tn- id of a tension item or a cq- consequence id. Give item or group, not both.",
@@ -16836,6 +17065,17 @@
                     "string",
                     "null"
                   ]
+                },
+                "reflects": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ReflectsParams"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "With repin: the sources the repin change follows, as rdy_write takes them. On stable content the repin needs one of implements, editorial or reflects."
                 },
                 "repin": {
                   "description": "true with a confirm group: also repin each matched item's subject to its cause, in one change before the answers.",
@@ -16900,6 +17140,30 @@
                 "tension"
               ],
               "type": "string"
+            },
+            "ReflectsParams": {
+              "additionalProperties": false,
+              "description": "rf8 (D-4WC6R, D-XC9B9): a write's `reflects` justification.",
+              "properties": {
+                "code": {
+                  "description": "true records the code state of each written block with reflects globs. Missing: false;\nfalse is refused.",
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "sources": {
+                  "description": "The sources (S-…) the change follows: an id, key or path each, or the $name of a source\ncreated in this write. Missing: none.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                }
+              },
+              "type": "object"
             }
           },
           "$schema": "https://json-schema.org/draft/2020-12/schema",

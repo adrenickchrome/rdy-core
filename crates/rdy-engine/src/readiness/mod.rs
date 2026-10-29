@@ -218,7 +218,12 @@ pub(crate) fn reach(
     conflicted: &BTreeSet<BlockId>,
 ) -> Result<Result<BTreeSet<BlockId>, Issue>, RdyError> {
     let fixed = crate::plan::compute::fixed_tensions(st, &r.pref.version)?;
-    let rows = st.listed_tensions(&r.p.view, &r.p.changes, conflicted, fixed.as_ref())?;
+    let rows = st.listed_tensions(
+        &r.p.view,
+        &r.p.changes,
+        conflicted,
+        fixed.as_ref().map(|f| &f.ids),
+    )?;
     Ok(assessment::reach(
         r.pref,
         r.written,

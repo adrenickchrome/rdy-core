@@ -97,6 +97,19 @@ pub(crate) struct AnswerArgs {
     /// With a confirm group: also repin each matched subject to its cause, in one change.
     #[arg(long, requires = "by_group")]
     repin: bool,
+    /// With --repin: a decision the repin change carries out (id, key or path); repeat for more.
+    #[arg(long)]
+    implements: Vec<String>,
+    /// With --repin: the repin change is editorial: its class (typo, restructure or clarify) and
+    /// the reason.
+    #[arg(long, num_args = 2, value_names = ["CLASS", "REASON"])]
+    editorial: Vec<String>,
+    /// With --repin: a source the repin change follows (id, key or path); repeat for more.
+    #[arg(long, value_name = "SOURCE")]
+    reflects: Vec<String>,
+    /// With --repin: record the code state of each repinned block with reflects globs.
+    #[arg(long)]
+    reflects_code: bool,
     /// The view whose plan is answered (default: the bound view, else your own).
     #[arg(long)]
     view: Option<String>,
@@ -179,16 +192,50 @@ pub(crate) fn plan(env: &Env, a: PlanArgs) -> Result<(Value, String), ErrorReply
         )
         .exit();
     }
+    // ruling final F2: the repin change's justification, as `rdy edit` and `rdy commit` take it;
+    // it goes on the group, else on each item, and the engine judges it as rdy_plan does
+    let mut justification = serde_json::Map::new();
+    if !a.implements.is_empty() {
+        justification.insert("implements".into(), json!(a.implements));
+    }
+    if let [class, reason] = a.editorial.as_slice() {
+        justification.insert(
+            "editorial".into(),
+            json!({"class": class, "reason": reason}),
+        );
+    }
+    if !a.reflects.is_empty() || a.reflects_code {
+        let mut r = serde_json::Map::new();
+        if !a.reflects.is_empty() {
+            r.insert("sources".into(), json!(a.reflects));
+        }
+        if a.reflects_code {
+            r.insert("code".into(), json!(true));
+        }
+        justification.insert("reflects".into(), Value::Object(r));
+    }
+    let justify = |spec: &mut Value| {
+        for (k, v) in &justification {
+            spec[k] = v.clone();
+        }
+    };
     let mut answers: Vec<Value> = a
         .items
         .iter()
-        .map(|item| json!({"item": item, "act": act, "reason": a.reason}))
+        .map(|item| {
+            let mut spec = json!({"item": item, "act": act, "reason": a.reason});
+            if group.is_empty() {
+                justify(&mut spec);
+            }
+            spec
+        })
         .collect();
     if !group.is_empty() {
         let mut spec = json!({"group": group, "act": act, "reason": a.reason});
         if a.repin {
             spec["repin"] = json!(true);
         }
+        justify(&mut spec);
         answers.push(spec);
     }
     let v = call(env, "plan", json!({"view": a.view, "answers": answers}))?;

@@ -1,9 +1,11 @@
 //! rdy_plan: read a change plan, or answer its items (D-4JMPH; reference/mcp-tools p-92F5M,
 //! p-CSBA7, p-JJNYH, p-PZX3T). The daemon's `plan` op runs the same function.
 
+use super::write::{EditorialParams, OneOrMany, ReflectsParams};
 use super::*;
+use rdy_engine::ReflectsArg;
 use rdy_engine::engine::{Engine, with_writer_result};
-use rdy_engine::plan::api::PlanAnswerSpec;
+use rdy_engine::plan::api::{EditorialArg, PlanAnswerSpec};
 use rdy_engine::plan::group::PlanGroup;
 use rdy_engine::plan::{PLAN_DEFAULT_TOKENS, PlanAnswerInput, PlanQuery, check_plan_request, page};
 use rdy_engine::{E_INTERNAL, RdyError, Session};
@@ -124,6 +126,12 @@ pub struct PlanAnswerSpecParams {
     pub reason: Option<String>,
     /// true with a confirm group: also repin each matched item's subject to its cause, in one change before the answers.
     pub repin: Option<bool>,
+    /// With repin: the decisions the repin change carries out, as rdy_write takes them: an id, key or path, or a list of them.
+    pub implements: Option<OneOrMany>,
+    /// With repin: the repin change is editorial, as rdy_write takes it.
+    pub editorial: Option<EditorialParams>,
+    /// With repin: the sources the repin change follows, as rdy_write takes them. On stable content the repin needs one of implements, editorial or reflects.
+    pub reflects: Option<ReflectsParams>,
 }
 
 impl From<PlanAnswerSpecParams> for PlanAnswerSpec {
@@ -134,6 +142,18 @@ impl From<PlanAnswerSpecParams> for PlanAnswerSpec {
             act: a.act.into(),
             reason: a.reason,
             repin: a.repin.unwrap_or(false),
+            implements: a.implements.map(|d| match d {
+                OneOrMany::One(t) => vec![t],
+                OneOrMany::Many(v) => v,
+            }),
+            editorial: a.editorial.map(|e| EditorialArg {
+                class: e.class,
+                reason: e.reason,
+            }),
+            reflects: a.reflects.map(|r| ReflectsArg {
+                sources: r.sources,
+                code: r.code,
+            }),
         }
     }
 }

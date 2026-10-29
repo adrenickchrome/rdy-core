@@ -1083,7 +1083,7 @@ impl Version {
             &self.p.view,
             &self.p.changes,
             &BTreeSet::new(),
-            fixed.as_ref(),
+            fixed.as_ref().map(|f| &f.ids),
         )?;
         let mut cache = crate::tensions::info::InfoCache::default();
         let rows: Vec<_> = listed

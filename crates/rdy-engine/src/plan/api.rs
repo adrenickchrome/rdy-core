@@ -99,7 +99,9 @@ pub struct PlanAnswerInput {
 
 /// One answer to a plan, as `rdy_plan` and `rdy plan` take it on the wire (D-ME2HD, O13, O14):
 /// it names one `item`, as [`PlanAnswerInput`] does, or a `group` of open items, one answer for
-/// each. `repin` goes with a `confirm` group only.
+/// each. `repin` goes with a `confirm` group only. With `repin`, the repin change takes the
+/// justification of `rdy_write` (ruling final F2): `implements`, `editorial` or `reflects`, at
+/// most one, checked by [`crate::parse_justification`]; a spec without `repin` takes none.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanAnswerSpec {
@@ -112,6 +114,60 @@ pub struct PlanAnswerSpec {
     pub reason: Option<String>,
     #[serde(default)]
     pub repin: bool,
+    /// The decisions the repin change carries out: ids, keys or paths.
+    #[serde(default)]
+    pub implements: Option<Vec<String>>,
+    /// The repin change is editorial: its class and reason.
+    #[serde(default)]
+    pub editorial: Option<EditorialArg>,
+    /// The repin change follows these sources, as `rdy_write`'s `reflects`.
+    #[serde(default)]
+    pub reflects: Option<crate::ReflectsArg>,
+}
+
+/// An `editorial` justification as `rdy_write` takes it: a class (typo, restructure or clarify)
+/// and a reason.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EditorialArg {
+    pub class: String,
+    pub reason: String,
+}
+
+impl PlanAnswerSpec {
+    /// Whether the spec gives a justification of its own.
+    fn justified(&self) -> bool {
+        self.implements.is_some() || self.editorial.is_some() || self.reflects.is_some()
+    }
+}
+
+/// Whether a repin op of `ops` writes a block that is normative and stable, in the view state `m`
+/// or in canon: the tests the unjustified-change detector judges a write with (ruling final F2,
+/// D-ME2HD).
+fn repins_stable_content(
+    st: &ReadState,
+    m: &crate::Materialized,
+    ops: &[OpInput],
+) -> Result<bool, RdyError> {
+    let canon = st.materialized(&Scope::Canon)?;
+    for op in ops {
+        let OpInput::Repin { id, .. } = op else {
+            continue;
+        };
+        let Ok(b) = BlockId::parse(id) else {
+            continue;
+        };
+        let Some(block) = m.get(&b) else {
+            continue;
+        };
+        if crate::tensions::index::is_normative(st.pack(), block)
+            && (crate::brief::effective_stable(m, Some(&b))
+                || crate::brief::effective_stable(&canon, Some(&b)))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// What a plan read names (p-92F5M): at most one of the four selectors (none: the session's
@@ -1141,8 +1197,10 @@ impl Rdy {
     /// is written. The whole request is validated first: a group that matches nothing, or that
     /// holds an item the act does not answer, is refused with nothing written. With `repin` on
     /// a confirm group, rdy first writes one change to the view, one repin op per matched
-    /// subject block whose pin is not current, self-briefed like the daemon's repin; then it
-    /// records the answers in one plan version. Returns that version's id.
+    /// subject block whose pin is not current, self-briefed like the daemon's repin, with the
+    /// group's justification (ruling final F2: one change per repin group; a repin of stable
+    /// normative content with none is refused before anything is written); then it records the
+    /// answers in one plan version. Returns that version's id.
     pub fn answer_plan_specs(
         &mut self,
         session: &Session,
@@ -1175,8 +1233,32 @@ impl Rdy {
                 ));
             }
         }
+        for s in specs {
+            if !s.repin && s.justified() {
+                return Err(bad(
+                    "a justification goes with repin",
+                    "set repin to true, or remove the justification",
+                ));
+            }
+        }
         let st = self.read();
         crate::write::check_view_access(&st, view, session, crate::views::Action::Include)?;
+        // each repin group's justification, by rdy_write's rule and with its errors
+        let view_scope = Scope::View(view.to_string());
+        let mut justifications = Vec::with_capacity(specs.len());
+        for s in specs {
+            justifications.push(if s.repin {
+                Some(crate::parse_justification(
+                    &st,
+                    &view_scope,
+                    s.implements.clone(),
+                    s.editorial.clone().map(|e| (e.class, e.reason)),
+                    s.reflects.clone(),
+                )?)
+            } else {
+                None
+            });
+        }
         let vp = ViewPlan::read(&st, view)?;
         let (rows, _, _) = live_rows(&vp.computed, vp.prior());
         let open: BTreeSet<Hash> = vp
@@ -1190,8 +1272,9 @@ impl Rdy {
         let m = st.materialized(&Scope::View(view.to_string()))?;
         let scope = format!("view:{view}");
         let mut inputs: Vec<PlanAnswerInput> = Vec::with_capacity(specs.len());
-        let mut to_repin: Vec<&PlanCandidate> = vec![];
-        for s in specs {
+        // the items each repin group matched, by spec
+        let mut to_repin: Vec<(usize, Vec<&PlanCandidate>)> = vec![];
+        for (n, s) in specs.iter().enumerate() {
             // before any clone of the reason: a group copies it once per matched item
             check_spec_reason(s.act, s.reason.as_deref())?;
             match (&s.item, &s.group) {
@@ -1228,15 +1311,15 @@ impl Rdy {
                             "narrow the group, or answer those items one by one",
                         ));
                     }
+                    if s.repin {
+                        to_repin.push((n, matched.clone()));
+                    }
                     for c in matched {
                         inputs.push(PlanAnswerInput {
                             item: full_item_id(c),
                             act: s.act,
                             reason: input_reason(s.act, s.reason.as_deref()),
                         });
-                        if s.repin {
-                            to_repin.push(c);
-                        }
                     }
                 }
                 _ => unreachable!("checked above"),
@@ -1251,31 +1334,56 @@ impl Rdy {
             vp.prior(),
             &inputs,
         )?;
-        let ops = group::repin_ops(&m, self.store.tracking(), &to_repin);
-        if !ops.is_empty() {
-            let ids: BTreeSet<BlockId> = ops
-                .iter()
-                .filter_map(|op| match op {
-                    OpInput::Repin { id, .. } => BlockId::parse(id).ok(),
-                    _ => None,
-                })
+        // one repin change per repin group, each with that group's justification; a block an
+        // earlier group repins is not repinned again. Every change is judged before any is
+        // written (ruling final F2): a repin of stable normative content needs a justification
+        let op_block = |op: &OpInput| match op {
+            OpInput::Repin { id, .. } => BlockId::parse(id).ok(),
+            _ => None,
+        };
+        let mut repinned: BTreeSet<BlockId> = BTreeSet::new();
+        let mut writes: Vec<(Vec<OpInput>, crate::ParsedJustification)> = vec![];
+        for (n, items) in &to_repin {
+            let ops: Vec<OpInput> = group::repin_ops(&m, self.store.tracking(), items)
+                .into_iter()
+                .filter(|op| op_block(op).is_none_or(|b| repinned.insert(b)))
                 .collect();
-            let briefing = st.brief_ids(&Scope::View(view.to_string()), &ids, None)?;
+            if ops.is_empty() {
+                continue;
+            }
+            let Some(j) = justifications[*n].take() else {
+                continue;
+            };
+            if j.stored.is_none() && j.reflects.is_none() && repins_stable_content(&st, &m, &ops)? {
+                return Err(bad(
+                    "a repin of stable content needs a justification",
+                    "pass implements, editorial or reflects, as rdy_write takes",
+                ));
+            }
+            writes.push((ops, j));
+        }
+        drop((st, m));
+        for (ops, j) in writes {
+            let ids: BTreeSet<BlockId> = ops.iter().filter_map(op_block).collect();
+            let briefing = self.read().brief_ids(&view_scope, &ids, None)?;
             briefing.register(&self.briefs);
             let token = briefing.base.token.clone();
-            drop((st, m));
-            self.write_briefed(
-                session,
-                WriteRequest {
-                    view: view.to_string(),
-                    ops,
-                    justification: None,
-                    message: String::new(),
-                },
-                Some(token),
-            )?;
-        } else {
-            drop((st, m));
+            let req = WriteRequest {
+                view: view.to_string(),
+                ops,
+                justification: j.stored,
+                message: String::new(),
+            };
+            match j.reflects {
+                Some(reflects) => self.write_reflecting(
+                    session,
+                    req,
+                    reflects,
+                    rdy_model::ChangeLinks::default(),
+                    Some(&token),
+                )?,
+                None => self.write_briefed(session, req, Some(token))?,
+            };
         }
         self.answer_plan(session, view, &inputs)
     }

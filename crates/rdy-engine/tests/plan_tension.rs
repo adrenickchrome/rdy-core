@@ -1075,3 +1075,68 @@ fn rg5_an_answer_survives_a_k1_rekey() {
         "{seal:#}"
     );
 }
+
+/// Ruling final F1 (D-ME2HD, O12): a frozen proposal plan keeps every tension item it was bound
+/// with. View `b` deprecates the legacy doc in flight; view `a` cites its claim and confirms the
+/// in-flight tension, then proposes. `b` then excludes its change, so the live tension is gone:
+/// the version's `change_plan{proposal}` still holds the confirmed item, and the landing seals it
+/// as `confirmed`.
+#[test]
+fn rg_final_a_bound_tension_item_survives_an_exclusion() {
+    let mut fx = project();
+    let legacy = fx.legacy.clone();
+    let b_change = put(
+        &mut fx.r,
+        "b",
+        json!([{"op": "update", "id": legacy, "fields": {"lifecycle": "deprecated"}}]),
+    )
+    .change;
+    cite_legacy(&mut fx, "a");
+    let inflight = inflight_refs(&fx.r, "a");
+    assert_eq!(inflight.len(), 1, "{inflight:#?}");
+    let tn = tension_label(&inflight[0].id);
+    answer(
+        &mut fx.r,
+        "a",
+        &tn,
+        PlanAct::Confirm,
+        Some("y keeps the legacy rule until b lands"),
+    )
+    .unwrap();
+    let info = propose(&mut fx.r, "a");
+    assert!(info.ready, "{:#?}", info.issues);
+    let before = version_plan(&fx.r, &info.r#ref);
+    let rows = rows_of_kind(&before, "tension");
+    assert_eq!(rows.len(), 1, "{before:#}");
+    assert_eq!(rows[0]["id"], tn);
+    assert_eq!(rows[0]["state"], "closed", "{before:#}");
+
+    // b excludes its change: the in-flight tension is gone
+    fx.r.view_exclude(&writer(), "b", &[b_change], false)
+        .unwrap_or_else(|e| panic!("exclude b's change: {e}"));
+    assert!(inflight_refs(&fx.r, "a").is_empty());
+
+    // the frozen plan keeps the bound item and its answer
+    let after = version_plan(&fx.r, &info.r#ref);
+    assert_eq!(after["plan"], before["plan"], "{after:#}");
+    let rows = rows_of_kind(&after, "tension");
+    assert_eq!(rows.len(), 1, "{after:#}");
+    assert_eq!(rows[0]["id"], tn);
+    assert_eq!(rows[0]["state"], "closed", "{after:#}");
+    assert_eq!(after["counts"], before["counts"], "{after:#}");
+
+    // the landing seals it as confirmed
+    common::confirm_exceptions(&mut fx.r, &approver(), &info);
+    let landing =
+        fx.r.land(&approver(), &info.id)
+            .unwrap_or_else(|e| panic!("land a: {e} {:?}", e.issues));
+    let seal = sealed(&fx.r, &landing);
+    let rows = rows_of_kind(&seal, "tension");
+    assert_eq!(rows.len(), 1, "{seal:#}");
+    assert_eq!(rows[0]["id"], tn);
+    assert_eq!(
+        rows[0]["outcome"],
+        PlanOutcome::Confirmed.as_str(),
+        "{seal:#}"
+    );
+}

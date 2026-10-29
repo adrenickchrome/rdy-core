@@ -1,10 +1,10 @@
 //! rg11 (FW-UX1 D-KQ4CA; D-ME2HD "The CLI takes the same group fields and `repin` as flags of
 //! `rdy plan`"): `rdy plan dismiss`, the group flags and `--repin` build the answers `rdy_plan`
 //! takes, and the daemon runs the one function the tool runs.
-use rdy_engine::Rdy;
-use rdy_engine::Session;
 use rdy_engine::engine::Local;
-use rdy_mcp::tools::{McpState, rdy_plan, rdy_session};
+use rdy_engine::{Coverage, Rdy, Scope, Session, WriteRequest, parse_ops};
+use rdy_mcp::tools::{McpState, rdy_plan, rdy_propose, rdy_session};
+use rdy_model::{EditorialClass, Justification};
 use rdy_qa::daemon::Served;
 use rdy_qa::edit_loop::write_cited_as;
 use rdy_qa::fixtures::{as_agent, land, project, write, writer};
@@ -164,4 +164,175 @@ fn rg11_cli_plan_with_no_item_and_no_group_exits_2() {
     // a refused request wrote nothing
     let (_, v) = s.json(&["--json", "plan", "--view", "w"]);
     assert!(v["plan"].is_null(), "{v:#}");
+}
+
+/// Canon: a stable doc `spec` with claim `a` and claim `b`, which cites `a`. The view `w` then
+/// makes a briefed, justified edit of `a`: a confirm item for `b` on stable content.
+fn stable_world(r: &mut Rdy, by: &Session) {
+    let clarify = || {
+        Some(Justification::Editorial {
+            class: EditorialClass::Clarify,
+            reason: "the rule moved".into(),
+        })
+    };
+    let ops = |v: Value| parse_ops(v.as_array().unwrap().clone()).unwrap();
+    let w = r
+        .write(
+            &writer(),
+            WriteRequest {
+                view: "seed".into(),
+                ops: ops(json!([
+                    {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "spec", "title": "Spec", "doc_type": "page", "lifecycle": "stable"}},
+                    {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}},
+                    {"op": "create", "type": "claim", "id": "$a", "parent": "$s", "body": "A holds 30 days."},
+                    {"op": "create", "type": "claim", "id": "$b", "parent": "$s", "body": "B builds on {{$a}}."}
+                ])),
+                justification: clarify(),
+                message: String::new(),
+            },
+        )
+        .unwrap();
+    land(r, "seed").unwrap();
+    let a = w.created["$a"].clone();
+    let brief = r
+        .read()
+        .brief(
+            &Scope::Canon,
+            &Coverage {
+                ids: vec![a.clone()],
+                path: None,
+            },
+            None,
+        )
+        .unwrap();
+    brief.register(&r.briefs());
+    r.write_briefed(
+        by,
+        WriteRequest {
+            view: "w".into(),
+            ops: ops(json!([{"op": "update", "id": a, "body": "A holds 60 days."}])),
+            justification: clarify(),
+            message: String::new(),
+        },
+        Some(brief.base.token.clone()),
+    )
+    .unwrap();
+}
+
+/// Ruling final F2 (FW-UX1 D-KQ4CA): `rdy plan confirm --repin` takes the repin change's
+/// justification as `rdy_plan` does, and both give the same refusals and the same plan: a stable
+/// repin with no justification, and a justification without `--repin`, are refused; with
+/// `--editorial` the repin lands its justification and the proposal is ready.
+#[test]
+fn rg_final_cli_plan_repin_justification_matches_mcp() {
+    // the CLI, on a served project
+    let s = Served::new();
+    let mut r = Rdy::open(s.dir.path()).unwrap();
+    stable_world(&mut r, &writer());
+    r.close().unwrap();
+    let base = [
+        "--json",
+        "plan",
+        "confirm",
+        "--kind",
+        "confirm",
+        "--reason",
+        "b follows a",
+        "--view",
+        "w",
+    ];
+    let with = |extra: &[&str]| -> Vec<String> {
+        base.iter()
+            .chain(extra)
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
+    };
+    let editorial = ["--editorial", "clarify", "b pins a's new text"];
+    let mut cli_refusals = vec![];
+    for args in [with(&["--repin"]), with(&editorial)] {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let (ok, v) = s.json(&args);
+        assert!(!ok, "{args:?}: {v}");
+        cli_refusals.push(json!([v["code"], v["message"], v["fix"]]));
+    }
+    let (_, untouched) = s.json(&["--json", "plan", "--view", "w"]);
+    assert!(
+        untouched["plan"].is_null(),
+        "nothing written: {untouched:#}"
+    );
+    let args = with(&[&["--repin"][..], &editorial[..]].concat());
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = s.rdy(&args[1..]);
+    assert!(out.status.success(), "{out:?}");
+    let (_, via_cli) = s.json(&["--json", "plan", "--view", "w"]);
+    assert_eq!(via_cli["counts"]["open"], 0, "{via_cli:#}");
+    let (ok, proposed) = s.json(&[
+        "--json",
+        "propose",
+        "--title",
+        "w",
+        "--summary",
+        "a moves to 60 days",
+        "--view",
+        "w",
+    ]);
+    assert!(ok, "{proposed}");
+
+    // the tool, on a project of the same shape
+    let (_dir, mut r) = project();
+    stable_world(&mut r, &as_agent("agent:qa", "w"));
+    let engine = Arc::new(Local::new(r));
+    let mut st = McpState::new(engine.clone());
+    rdy_session(
+        &mut st,
+        serde_json::from_value(json!({"actor": "agent:qa", "role": "writer", "run": "w"})).unwrap(),
+    )
+    .unwrap();
+    let group = json!({"group": {"kind": "confirm"}, "act": "confirm", "reason": "b follows a"});
+    let spec = |extra: Value| {
+        let mut g = group.clone();
+        for (k, v) in extra.as_object().unwrap() {
+            g[k] = v.clone();
+        }
+        json!({"view": "w", "answers": [g]})
+    };
+    let editorial = json!({"class": "clarify", "reason": "b pins a's new text"});
+    let mut mcp_refusals = vec![];
+    for args in [
+        spec(json!({"repin": true})),
+        spec(json!({"editorial": editorial})),
+    ] {
+        let e = rdy_plan(&mut st, serde_json::from_value(args).unwrap()).unwrap_err();
+        mcp_refusals.push(json!([e.code, e.message, e.fix]));
+    }
+    assert_eq!(cli_refusals, mcp_refusals);
+    assert_eq!(
+        mcp_refusals,
+        vec![
+            json!([
+                "E_BAD_INPUT",
+                "a repin of stable content needs a justification",
+                "pass implements, editorial or reflects, as rdy_write takes"
+            ]),
+            json!([
+                "E_BAD_INPUT",
+                "a justification goes with repin",
+                "set repin to true, or remove the justification"
+            ]),
+        ]
+    );
+    let via_mcp = rdy_plan(
+        &mut st,
+        serde_json::from_value(spec(json!({"repin": true, "editorial": editorial}))).unwrap(),
+    )
+    .unwrap_or_else(|e| panic!("rdy_plan: {e}"));
+    assert_eq!(shape(&via_cli), shape(&via_mcp));
+    let proposed_mcp = rdy_propose(
+        &mut st,
+        serde_json::from_value(json!({"view": "w", "title": "w", "summary": "a moves to 60 days"}))
+            .unwrap(),
+    )
+    .unwrap_or_else(|e| panic!("rdy_propose: {e}"));
+    assert_eq!(proposed["ready"], json!(true), "{proposed:#}");
+    assert_eq!(proposed_mcp["ready"], json!(true), "{proposed_mcp:#}");
 }

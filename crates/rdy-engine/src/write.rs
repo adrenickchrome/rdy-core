@@ -336,7 +336,7 @@ impl ReflectsInput {
 
 /// The raw `reflects` object as a boundary receives it: `{sources?, code?}`, with no other key.
 /// Missing sources are none, missing code is false; an explicit false is refused ([`Self::input`]).
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReflectsArg {
     #[serde(default)]
