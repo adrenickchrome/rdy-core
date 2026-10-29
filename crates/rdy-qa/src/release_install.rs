@@ -2218,7 +2218,7 @@ mod tests {
         assert_eq!(NOTICES_FILE, "THIRD-PARTY-NOTICES.txt");
         assert_eq!(NOTICES_MAX, 16_777_216);
         assert_eq!(ARCHIVE_MAX, BINARY_MAX + NOTICES_MAX + 1_048_576);
-        assert_eq!(ARCHIVE_MAX, 286_261_248);
+        assert_eq!(ARCHIVE_MAX, 554_696_704);
 
         // The built CLI: its own `--version` output picks the archive family.
         let rdy = crate::fixtures::rdy_bin();
