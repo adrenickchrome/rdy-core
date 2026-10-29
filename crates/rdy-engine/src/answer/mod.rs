@@ -346,7 +346,7 @@ impl Rdy {
         note: Option<String>,
     ) -> Result<AnswerStep, RdyError> {
         let bound = match bind(&self.read(), person, r, shown, by.relay.is_some(), pick)? {
-            Binding::Bound(b) => b,
+            Binding::Bound(b) => *b,
             // RULING F1: the person saw another card of the approval; when the landing's
             // freshness check fails, its refusal (with the fresh card) passes through
             Binding::ShownMoved(e) => {
@@ -452,7 +452,7 @@ fn note_of(note: Option<String>) -> Result<Option<String>, RdyError> {
 
 /// What [`bind`] found for an item ref.
 enum Binding {
-    Bound(Bound),
+    Bound(Box<Bound>),
     /// An approve card of the ref stands, but none with the hash shown: the refusal it gets
     /// when the landing's freshness check passes (`E_PROPOSAL_MOVED`, with the queue's card).
     ShownMoved(RdyError),
@@ -550,11 +550,11 @@ fn bind(
             })?
             .clone(),
     };
-    Ok(Binding::Bound(Bound {
+    Ok(Binding::Bound(Box::new(Bound {
         item: item.clone(),
         option,
         card_hash,
-    }))
+    })))
 }
 
 /// Whether `r` is an item ref (O3, closed): `P-<id>@<n>` (an approval), `<block id>@<version

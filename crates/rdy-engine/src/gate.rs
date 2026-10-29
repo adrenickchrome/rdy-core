@@ -2744,20 +2744,21 @@ impl Rdy {
         .with_corrected(serde_json::json!({ "card": card_of(&card) })))
     }
 
-    /// The landing's freshness checks of the proposal version `proposal` names, before an
-    /// approval of a card whose hash is not the one shown (`answer::bind`): the latest version,
-    /// `reviews.require_up_to_date`, and the stored assessment ([`Rdy::fresh_assessment`]).
-    /// A failed check writes what its refusal says (a fresh assessment, RULING F1) and nothing
-    /// else.
+    /// The freshness of the stored assessment of the proposal version `proposal` names
+    /// ([`Rdy::fresh_assessment`]), before an approval of a card whose hash is not the one shown
+    /// (`answer::bind`). A failed check writes what its refusal says (a fresh assessment, RULING
+    /// F1) and nothing else. A version that is not the latest, or whose base moved under
+    /// `reviews.require_up_to_date`, gets no fresh card (F1's limit): Ok, and the caller's own
+    /// refusal stands.
     pub(crate) fn check_fresh(&mut self, proposal: &str) -> Result<(), RdyError> {
         let st = self.read();
         let pref = resolve_in(&st, proposal)?;
         let p = st.reader().proposal(&pref.version)?;
-        let latest = latest_version(&st, &pref.stable)?;
-        if latest != pref.version {
-            return Err(moved(&st, &pref, &latest, &p.view)?);
+        if latest_version(&st, &pref.stable)? != pref.version
+            || Self::check_base_moved(&st, &pref, &p, &LandOptions::default()).is_err()
+        {
+            return Ok(());
         }
-        Self::check_base_moved(&st, &pref, &p, &LandOptions::default())?;
         self.fresh_assessment(&st, &pref, &p).map(|_| ())
     }
 
@@ -2795,7 +2796,9 @@ impl Rdy {
 
     /// Every check of `land_with` and the complete landing it would write, under the writer and
     /// without writing anything: the acceptance work, the frames and the landing record, with
-    /// every clock value it uses already read. [`Rdy::commit_landing`] writes it.
+    /// every clock value it uses already read. [`Rdy::commit_landing`] writes it. One refusal
+    /// writes: a failed freshness check of a version that is ready now writes its fresh
+    /// assessment, in a batch of its own (RULING F1, [`Rdy::moved_fresh`]).
     pub(crate) fn prepare_landing(
         &mut self,
         s: &Session,
