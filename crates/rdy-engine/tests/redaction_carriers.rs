@@ -1478,6 +1478,105 @@ fn rg10_another_versions_assessment_of_the_removed_block_is_a_report_row() {
     let _ = &f.dir;
 }
 
+/// The statement of the decision whose removal the rg14 fixtures report. The card of a version
+/// that writes the decision quotes it (`Decisions: 1 new: <id> "<title>"`, n-1ZB18).
+const STATEMENT: &str = "Refunds above 500 need the ZEBRA-7731 sign-off";
+
+/// A draft view `work` holding a doc, a section and a decision with [`STATEMENT`]. Returns the
+/// project, the decision and its version.
+fn decision_project() -> (tempfile::TempDir, Rdy, BlockId, Hash) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let w = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "design", "title": "Design"}},
+            {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"title": "Doc", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Part"}}
+        ]),
+    );
+    let d = r
+        .decide(
+            &writer(),
+            "work",
+            rdy_engine::DecisionInput {
+                parent: w.created["$s"].clone(),
+                statement: STATEMENT.into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let decision = id(&d.created["$decision"]);
+    let v = version(&r, &decision);
+    (dir, r, decision, v)
+}
+
+/// The assessment the store holds for proposal version `version`.
+fn stored_assessment(r: &Rdy, version: &str) -> Hash {
+    let st = r.read();
+    st.reader()
+        .assessment_of_proposal(&h(version), st.seq())
+        .unwrap()
+        .expect("the propose stored an assessment")
+}
+
+/// D-EPK1Z, n-1ZB18 (task 14): a stored assessment's card fact quotes a decision's title, so a
+/// removal of the decision reports the assessment as a quote row that core cannot erase.
+#[test]
+fn rg14_a_redaction_reports_a_written_assessment_that_quotes_removed_text() {
+    let _clock = pin_clock(1_000_000);
+    let (_dir, mut r, decision, v) = decision_project();
+    let pi = r
+        .propose(
+            &writer(),
+            "work",
+            "Decide refunds",
+            Some("Adds the refunds decision."),
+        )
+        .unwrap();
+    let a = stored_assessment(&r, &pi.id);
+    // the premise: the stored card quotes the statement
+    let stored = r.read().reader().assessment(&a).unwrap();
+    assert!(
+        stored.card.facts.iter().any(|f| f.contains(STATEMENT)),
+        "{:?}",
+        stored.card.facts
+    );
+    let target = vec![format!("{decision}@{v}")];
+    let res = dry_run(&r.read(), &input(&target, true)).unwrap();
+    let rows: Vec<_> = res
+        .report
+        .quotes
+        .iter()
+        .filter(|q| q.kind == ImpactKind::Assessment)
+        .collect();
+    assert_eq!(rows.len(), 1, "{:?}", res.report.quotes);
+    assert_eq!(
+        (
+            rows[0].record.as_str(),
+            rows[0].quote.as_str(),
+            rows[0].erasable
+        ),
+        (a.to_string().as_str(), STATEMENT, false)
+    );
+    let text = report_text(&res, 8000).unwrap().text;
+    assert!(
+        text.contains(&format!(
+            "\nassessment: {a}: {} (erasable: false).\n",
+            serde_json::to_string(STATEMENT).unwrap()
+        )),
+        "{text}"
+    );
+    // the assessment is a reference row too, and nothing of it is dropped
+    assert!(res.report.inside.contains(&row(
+        ImpactKind::Assessment,
+        a,
+        ImpactRelation::Quotes,
+        false
+    )));
+}
+
 // ---------------------------------------------------------------------------------------------
 // bounds
 // ---------------------------------------------------------------------------------------------

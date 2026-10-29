@@ -24,6 +24,7 @@ mod mcp_intake;
 mod mcp_intents;
 mod mcp_landing_tree;
 mod mcp_log;
+mod mcp_log_assessment;
 mod mcp_mentions;
 mod mcp_params;
 mod mcp_people;

@@ -1741,4 +1741,122 @@ mod tests {
         let e = landing_history(&looped, &HashSet::new()).unwrap_err();
         assert_eq!(e.message, "The redaction reference graph has a cycle.");
     }
+
+    /// Ruling task-10 Amendment 2 (D-EPK1Z, n-1ZB18): the version that carries a removal request
+    /// stores an assessment whose card fact quotes the removed decision. The approval-time report
+    /// lists that quote, uneraseable, and still binds the hash the request recorded.
+    #[test]
+    fn rg14_the_carriers_own_assessment_quotes_are_listed_and_do_not_stale_the_request() {
+        use crate::{DecisionInput, Rdy, Scope, Session, WriteRequest};
+        use rdy_model::Role;
+        const STATEMENT: &str = "Refunds above 500 need the ZEBRA-7731 sign-off";
+        let _clock = crate::pin_clock(1_000_000);
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let s = Session::human("human:t".into(), Role::Writer).unwrap();
+        let w = r
+            .write(
+                &s,
+                WriteRequest {
+                    view: "work".into(),
+                    ops: serde_json::from_value(serde_json::json!([
+                        {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "design", "title": "Design"}},
+                        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"title": "Doc", "doc_type": "page"}},
+                        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Part"}}
+                    ]))
+                    .unwrap(),
+                    justification: None,
+                    message: String::new(),
+                },
+            )
+            .unwrap();
+        let d = r
+            .decide(
+                &s,
+                "work",
+                DecisionInput {
+                    parent: w.created["$s"].clone(),
+                    statement: STATEMENT.into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let decision = BlockId::parse(&d.created["$decision"]).unwrap();
+        let v = r
+            .read()
+            .block(&Scope::View("work".into()), &decision)
+            .unwrap()
+            .version_hash();
+        // the request rides on the version that also writes the decision
+        let recorded = r
+            .redact_in(
+                &s,
+                "work",
+                RedactInput {
+                    targets: vec![format!("{decision}@{v}")],
+                    reason_class: "secret".into(),
+                    reason: "a leaked code".into(),
+                    dry_run: false,
+                },
+            )
+            .unwrap();
+        let (request, carrier) = (recorded.redaction.unwrap(), recorded.change.unwrap());
+        let pi = r
+            .propose(&s, "work", "Remove the decision", Some("Removes the code."))
+            .unwrap();
+        let st = r.read();
+        let version: Hash = pi.id.parse().unwrap();
+        let a = st
+            .reader()
+            .assessment_of_proposal(&version, st.seq())
+            .unwrap()
+            .expect("propose stored an assessment");
+        let stored = st.reader().assessment(&a).unwrap();
+        assert!(
+            stored.card.facts.iter().any(|f| f.contains(STATEMENT)),
+            "{:?}",
+            stored.card.facts
+        );
+        // the request is not stale at its approval ...
+        crate::redaction::check_fresh(&st, &request, &[]).unwrap();
+        // ... and the approval-time report lists the quote without binding it
+        let rec = st.reader().redaction_request(&request).unwrap();
+        let input = RedactInput {
+            targets: rec.targets.iter().map(selector_text).collect(),
+            reason_class: super::super::targets::reason_class_name(rec.reason_class).to_string(),
+            reason: rec.reason.clone(),
+            dry_run: false,
+        };
+        let own = Own { carrier, request };
+        let full = compute_excluding(&st, &input, &[], Some(&own), &[]).unwrap();
+        let rows: Vec<&QuoteRow> = full
+            .report
+            .quotes
+            .iter()
+            .filter(|q| q.kind == ImpactKind::Assessment)
+            .collect();
+        assert_eq!(rows.len(), 1, "{:?}", full.report.quotes);
+        assert_eq!(
+            (
+                rows[0].record.as_str(),
+                rows[0].quote.as_str(),
+                rows[0].erasable
+            ),
+            (a.to_string().as_str(), STATEMENT, false)
+        );
+        assert!(
+            !full
+                .report
+                .inside
+                .iter()
+                .any(|i| i.kind == ImpactKind::Assessment),
+            "{:?}",
+            full.report.inside
+        );
+        let mut buf = buffer(limits().record).unwrap();
+        assert_eq!(
+            full.report.report_hash,
+            rec.manifest.report_hash(&mut buf).unwrap()
+        );
+    }
 }
