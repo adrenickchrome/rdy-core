@@ -2,18 +2,19 @@
 //! `rdy plan`"): `rdy plan dismiss`, the group flags and `--repin` build the answers `rdy_plan`
 //! takes, and the daemon runs the one function the tool runs.
 use rdy_engine::Rdy;
+use rdy_engine::Session;
 use rdy_engine::engine::Local;
 use rdy_mcp::tools::{McpState, rdy_plan, rdy_session};
 use rdy_qa::daemon::Served;
-use rdy_qa::edit_loop::write_cited;
-use rdy_qa::fixtures::{land, project, write};
+use rdy_qa::edit_loop::write_cited_as;
+use rdy_qa::fixtures::{as_agent, land, project, write, writer};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
 /// Canon: draft doc `notes` with claim `a` and claim `b`, which cites `a`; doc `old`, deprecated,
 /// with claim `x`. The view `w` then edits `a` (a confirm item for `b`) and adds claim `y` that
 /// cites `x` (a tension item).
-fn world(r: &mut Rdy) {
+fn world(r: &mut Rdy, by: &Session) {
     let w = write(r, "seed", json!([
         {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "notes", "title": "Notes", "doc_type": "page"}},
         {"op": "create", "type": "section", "id": "$n", "parent": "$d", "fields": {"title": "Rules"}},
@@ -26,8 +27,9 @@ fn world(r: &mut Rdy) {
     .unwrap();
     land(r, "seed").unwrap();
     let get = |k: &str| w.created[k].clone();
-    write_cited(
+    write_cited_as(
         r,
+        by,
         "w",
         json!([
             {"op": "update", "id": get("$a"), "body": "A holds 60 days."},
@@ -75,7 +77,7 @@ fn rg11_cli_plan_dismiss_and_group_flags_match_mcp() {
     // the CLI, on a served project
     let s = Served::new();
     let mut r = Rdy::open(s.dir.path()).unwrap();
-    world(&mut r);
+    world(&mut r, &writer());
     r.close().unwrap();
     let (_, read) = s.json(&["--json", "plan", "--view", "w"]);
     let tn = items_of(&read, "tension")[0]["id"]
@@ -113,12 +115,12 @@ fn rg11_cli_plan_dismiss_and_group_flags_match_mcp() {
 
     // the tool, on a project of the same shape
     let (_dir, mut r) = project();
-    world(&mut r);
+    world(&mut r, &as_agent("agent:qa", "w"));
     let engine = Arc::new(Local::new(r));
     let mut st = McpState::new(engine.clone());
     rdy_session(
         &mut st,
-        serde_json::from_value(json!({"actor": "human:qa", "role": "writer"})).unwrap(),
+        serde_json::from_value(json!({"actor": "agent:qa", "role": "writer", "run": "w"})).unwrap(),
     )
     .unwrap();
     let mut run = |args: Value| {
@@ -145,7 +147,7 @@ fn rg11_cli_plan_dismiss_and_group_flags_match_mcp() {
 fn rg11_cli_plan_with_no_item_and_no_group_exits_2() {
     let s = Served::new();
     let mut r = Rdy::open(s.dir.path()).unwrap();
-    world(&mut r);
+    world(&mut r, &writer());
     r.close().unwrap();
     for act in ["confirm", "defer", "done", "dismiss"] {
         let out = s.rdy(&["plan", act, "--reason", "x", "--view", "w"]);
