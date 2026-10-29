@@ -446,7 +446,6 @@ fn di12_rdy_answer_relays_from_an_agent_session() {
     // there, and the error lists what it did and carries the fresh card
     let both = [ready[2].clone(), ready[3].clone()];
     let (hc, hd) = (hash_of(&both[0]), hash_of(&both[1]));
-    eprintln!("EVID before c: {}", item(&queue(&s), &both[1])["card"].as_str().unwrap().lines().filter(|l| l.contains("Base")).collect::<String>());
     let (ok, e) = s.json_as(
         agent,
         run,
@@ -466,8 +465,6 @@ fn di12_rdy_answer_relays_from_an_agent_session() {
             "do what you recommend",
         ],
     );
-    eprintln!("EVID after: ok={ok} {}", item(&queue(&s), &both[1])["card"].as_str().map(|c| c.lines().filter(|l| l.contains("Base")).collect::<String>()).unwrap_or_default());
-    eprintln!("EVID hash same: {}", hash_of(&both[1]) == hd);
     assert!(!ok);
     assert_eq!(e["code"], "E_PROPOSAL_MOVED", "{e}");
     let done = e["corrected"]["done"].as_array().expect("what was done");
