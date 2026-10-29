@@ -83,6 +83,15 @@
 //! `E_PROPOSAL_NOT_READY`, whose issues are these, in this order ([`approval_readiness`],
 //! D-ME2HD).
 //!
+//! # The approve card (D-ME2HD, D-45RG6, O16)
+//!
+//! A ready version's `approve` item takes its facts from the assessment propose stored, so a
+//! later change to a live fact (the base moving, say) leaves the card as the person was shown it.
+//! Its options stay live. A ready version with no stored assessment is not ready: it is listed
+//! under `not_ready` with the one issue of O10. The Tensions fact lists each advisory tension
+//! with the answer of the bound plan (`(confirm: <reason>)`, `(dismiss: <reason>)` or `(no
+//! answer)`).
+//!
 //! # Answers (O23)
 //!
 //! The queue reads the answers (`answer/<item>`): a `reject_proposal` answer to `P-x@n` takes the
@@ -123,6 +132,7 @@ use crate::error::{E_VALIDATION, RdyError, redaction_limit};
 use crate::gate::{ProposalRef, changes_of, open_proposals};
 use crate::plan::lifecycle::PlanSummary;
 use crate::read_state::Built;
+use crate::readiness::assessment::cut_text;
 use crate::readiness::{Candidate, PlanSource, Readiness};
 use crate::session::{now_ms, rfc3339};
 use crate::tensions::{Tension, TensionKind, TensionSeverity, TensionStatus, tension_label};
@@ -130,7 +140,7 @@ use crate::{Materialized, ReadState, Scope};
 use rdy_graph::{DerivedStatus, Graph};
 use rdy_model::assessment::{
     Assessment, AssessmentCoverage, AssessmentExceptionKind, AssessmentIssue, AssessmentPage,
-    AssessmentScoreChange,
+    AssessmentScoreChange, MAX_TEXT_BYTES,
 };
 use rdy_model::decision::{self, DEPENDS_ON, DecisionStatus, REVOKES, SUPERSEDES};
 use rdy_model::engine_fields::reaffirmed_causes;
@@ -291,13 +301,25 @@ impl ReadState {
             let v = Version::read(self, *pref, p.clone())?;
             v.open_work(&mut work);
             let ready = v.readiness_with_card(self, now)?;
-            let Some(card) = ready.card else {
+            let Some(mut card) = ready.card else {
                 not_ready.push(NotReady {
                     r#ref: r,
                     issues: ready.issues,
                 });
                 continue;
             };
+            // D-ME2HD, O16: the approve card is drawn from the stored assessment, its facts as
+            // propose showed them; a ready version with none is not ready (O10, C2)
+            match stored_facts(self, &v.pref)? {
+                Some(facts) => card.facts = facts,
+                None => {
+                    not_ready.push(NotReady {
+                        issues: vec![no_assessment(&r)],
+                        r#ref: r,
+                    });
+                    continue;
+                }
+            }
             let mut items = vec![card];
             for item in v.exception_items(now) {
                 if !answered(self, &item.r#ref, AnswerAct::Confirm)? {
@@ -409,6 +431,45 @@ pub(crate) fn approval_holds(
         deferral,
         accepted: accepted_by,
     })
+}
+
+/// The facts of the approve card version `pref` stored in its assessment (O16): each line
+/// `<name>: <value>` split at its first `: `, in the card's order; none when the version has no
+/// stored assessment.
+fn stored_facts(st: &ReadState, pref: &ProposalRef) -> Result<Option<Vec<Fact>>, RdyError> {
+    let reader = st.reader();
+    let Some(h) = reader.assessment_of_proposal(&pref.version, st.seq())? else {
+        return Ok(None);
+    };
+    let facts = reader
+        .assessment(&h)?
+        .card
+        .facts
+        .into_iter()
+        .map(|line| match line.split_once(": ") {
+            Some((name, value)) => Fact {
+                name: name.to_string().into(),
+                value: value.to_string(),
+            },
+            None => Fact {
+                name: line.into(),
+                value: String::new(),
+            },
+        })
+        .collect();
+    Ok(Some(facts))
+}
+
+/// The issue of a version whose readiness passes and that has no stored assessment (O10): one
+/// proposed before assessments, or one that was not ready when it was proposed.
+fn no_assessment(pref: &str) -> Issue {
+    Issue {
+        severity: Severity::Error,
+        code: E_VALIDATION,
+        block: None,
+        message: format!("{pref} has no stored assessment"),
+        fix: "propose it again: rdy_propose / rdy propose".into(),
+    }
 }
 
 /// The readiness issues of version `pref` (record `p`), in the queue's order: the issues the
@@ -1335,7 +1396,8 @@ impl Version {
                 });
         let mut tensions = format!("{blocking} blocking, {advisory} advisory");
         if advisory > 0 {
-            tensions.push_str(", answers not recorded yet");
+            tensions.push_str(": ");
+            tensions.push_str(&self.advisory_rows());
         }
         let exceptions = self.exception_count();
         let base = match self.p.canon_at {
@@ -1386,6 +1448,44 @@ impl Version {
                 },
             ),
         ]
+    }
+
+    /// D-45RG6: one row for each advisory tension of the version, in tension id order, joined
+    /// by `; `: `<tn-id> <kind>: <summary> (<confirm|dismiss>: <reason>)`, or `(no answer)`.
+    /// The answer is the bound plan's answer to the tension's item; a plan that cannot be read
+    /// answers nothing. The rows stop once the fact passes [`MAX_TEXT_BYTES`] and the text is cut
+    /// as O9 says, so a version with many tensions builds no unbounded string.
+    fn advisory_rows(&self) -> String {
+        let acts = self.plan.as_ref().ok().map(|p| &p.tension_acts);
+        let answer_of = |t: &Tension| -> Option<String> {
+            let (_, act, reason) = acts?.iter().find(|(id, _, _)| *id == t.id)?;
+            Some(format!(
+                "{}: {}",
+                act.as_str(),
+                reason.as_deref().unwrap_or("")
+            ))
+        };
+        let mut out = String::new();
+        for t in self
+            .tensions
+            .iter()
+            .filter(|t| t.severity == TensionSeverity::Advisory)
+        {
+            if out.len() > MAX_TEXT_BYTES {
+                break;
+            }
+            if !out.is_empty() {
+                out.push_str("; ");
+            }
+            let answer = answer_of(t).unwrap_or_else(|| "no answer".to_string());
+            out.push_str(&format!(
+                "{} {}: {} ({answer})",
+                tension_label(&t.id),
+                t.kind.name(),
+                t.summary
+            ));
+        }
+        cut_text(out)
     }
 
     /// rf9 (TASK-507 (3)): the claim of each justification of the version's changes, in the

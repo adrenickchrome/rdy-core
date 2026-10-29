@@ -3,6 +3,7 @@
 //! (`tlay1_` checks). Keep the list sorted.
 mod gate_alts;
 mod gate_answer;
+mod gate_card_assessment;
 mod gate_exceptions;
 mod gate_identity;
 mod gate_intake_e2e;

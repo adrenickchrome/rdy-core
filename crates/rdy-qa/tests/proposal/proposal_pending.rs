@@ -478,7 +478,11 @@ fn di5_the_card_facts_come_from_the_store() {
         fact(i, "Base"),
         format!("canon at {}, current", head.short())
     );
-    assert!(fact(i, "Tensions").ends_with("advisory, answers not recorded yet"));
+    // D-45RG6: the advisory tension shows its answer, the one `batch_project` recorded before the
+    // propose (`OPEN_ITEM_REASON`, act confirm)
+    let tensions = fact(i, "Tensions");
+    assert!(tensions.contains(" advisory: tn-"), "{tensions}");
+    assert!(tensions.ends_with("(confirm: test: checked)"), "{tensions}");
     put(
         &mut r,
         "elsewhere",
@@ -487,9 +491,10 @@ fn di5_the_card_facts_come_from_the_store() {
     );
     rdy_qa::fixtures::land(&mut r, "elsewhere").unwrap();
     let q = pending(&r);
+    // D-ME2HD: the card is the stored assessment's, so the Base fact stays as propose showed it
     assert_eq!(
         fact(item(&q, &b.r#ref), "Base"),
-        format!("canon at {}, moved", head.short())
+        format!("canon at {}, current", head.short())
     );
 }
 

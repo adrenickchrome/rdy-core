@@ -122,6 +122,8 @@ pub(crate) struct VersionPlan {
     pub(crate) summary: PlanSummary,
     pub(crate) blocks: BTreeSet<BlockId>,
     pub(crate) tension_answers: Vec<(Hash, Hash)>,
+    /// The act and reason of each answer in `tension_answers`, by tension id (D-45RG6).
+    pub(crate) tension_acts: Vec<(Hash, PlanAct, Option<String>)>,
     pub(crate) suspect_items: Vec<(BlockId, BlockId)>,
 }
 
@@ -160,6 +162,7 @@ pub(super) fn version_plan(
                 summary: summary_of(&computed, &[]),
                 blocks: blocks_of(&computed),
                 tension_answers: vec![],
+                tension_acts: vec![],
                 suspect_items: suspect_items(&computed),
             });
         }
@@ -190,6 +193,7 @@ pub(super) fn version_plan(
         summary: summary_of(&computed, &plan.answers),
         blocks: blocks_of(&computed),
         tension_answers: tension_answers(&computed, &plan.answers),
+        tension_acts: tension_acts(&computed, &plan.answers),
         suspect_items: suspect_items(&computed),
     })
 }
@@ -215,6 +219,20 @@ fn tension_answers(computed: &ComputedPlan, answers: &[PlanAnswer]) -> Vec<(Hash
         }
     }
     out
+}
+
+/// The (tension id, act, reason) of each answer [`tension_answers`] finds.
+fn tension_acts(
+    computed: &ComputedPlan,
+    answers: &[PlanAnswer],
+) -> Vec<(Hash, PlanAct, Option<String>)> {
+    tension_answers(computed, answers)
+        .into_iter()
+        .filter_map(|(id, item)| {
+            let i = answers.binary_search_by(|a| a.item.cmp(&item)).ok()?;
+            Some((id, answers[i].act, answers[i].reason.clone()))
+        })
+        .collect()
 }
 
 /// The (subject, cause) of each reaffirm and confirm item of `computed` whose subject is a
