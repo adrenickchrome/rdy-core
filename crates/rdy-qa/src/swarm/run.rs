@@ -160,8 +160,8 @@ fn canon_blocking(link: &mut Link) -> Option<Value> {
 
 /// Before landing `pref`: the relay reads the proposal's view, the view's effective base,
 /// canon's blocking tensions and the version's change plan (a `version_plan` entry naming `pref`,
-/// whose reply holds the plan's `counts`: what the gate reads). `None` when the daemon died under
-/// a read.
+/// whose reply holds the plan's `counts`: what the gate reads; a version that conflicts with
+/// canon has none, and the landing refuses it). `None` when the daemon died under a read.
 pub(crate) fn before_land(link: &mut Link, pref: &str) -> Option<Before> {
     let (mut view, mut advised) = (None, None);
     let mut e = link.entry("read");
@@ -201,7 +201,7 @@ pub(crate) fn before_land(link: &mut Link, pref: &str) -> Option<Before> {
     let res = link.exec(e, "version_plan", "rdy_plan", args, |en, v| {
         en.reply = Some(json!({"counts": v["counts"]}));
     });
-    if !matches!(res, Res::Ok(_)) {
+    if matches!(res, Res::Lost) {
         return None;
     }
     Some(Before {

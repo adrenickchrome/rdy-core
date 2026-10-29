@@ -477,8 +477,9 @@ pub(crate) fn plan_answer_for(kind: &str) -> Option<(&'static str, &'static str)
 /// `rdy_plan` call, by its kind (`plan_answer_for`). It reads the plan whole first: one `plan`
 /// entry per page, naming the view. The answers are one `plan_answer` entry naming the view,
 /// whose reply lists each answer with its item's kind (`{answers: [{item, kind, act, reason}]}`).
-/// With nothing to answer it makes no second call. A call the kill cuts ends it: the version
-/// proposed next may be not ready, and the drain answers its plan then.
+/// With nothing to answer it makes no second call. A view whose changes conflict with canon has
+/// no plan (the read's `E_STALE_BASE`, a row of the table), and a call the kill cuts ends it too:
+/// the version proposed next is not ready, and the drain answers its plan once it resolves it.
 pub(crate) fn answer_plan(link: &mut Link, view: &str) {
     let mut open: Vec<(String, String)> = vec![];
     let mut args = json!({"view": view, "max_tokens": PLAN_ALL});
