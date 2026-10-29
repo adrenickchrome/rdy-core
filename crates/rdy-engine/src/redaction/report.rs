@@ -601,6 +601,7 @@ impl Own {
             .map_err(|_| over(limit::FRAMES))?;
         let mut open: Option<Location> = None;
         let mut own: BTreeSet<Location> = BTreeSet::new();
+        let mut versions: HashSet<Hash> = HashSet::new();
         for f in frames {
             let start = *open.get_or_insert(f.loc);
             starts.push(start);
@@ -611,10 +612,16 @@ impl Own {
                 && match f.kind {
                     kinds::CHANGE => f.hash == self.carrier,
                     kinds::REDACTION => f.hash == self.request,
-                    kinds::PROPOSAL => reader
-                        .get_typed::<Proposal>(kinds::PROPOSAL, &f.hash)?
-                        .changes
-                        .contains(&self.carrier),
+                    kinds::PROPOSAL => {
+                        let carries = reader
+                            .get_typed::<Proposal>(kinds::PROPOSAL, &f.hash)?
+                            .changes
+                            .contains(&self.carrier);
+                        if carries {
+                            versions.insert(f.hash);
+                        }
+                        carries
+                    }
                     kinds::VIEW_OP => matches!(
                         reader.get_typed::<ViewOp>(kinds::VIEW_OP, &f.hash)?.op,
                         ViewOpKind::Commit { change } if change == self.carrier
@@ -625,7 +632,11 @@ impl Own {
                 own.insert(start);
             }
         }
-        Ok(OwnBatches { starts, own })
+        Ok(OwnBatches {
+            starts,
+            own,
+            versions,
+        })
     }
 }
 
@@ -633,6 +644,8 @@ impl Own {
 struct OwnBatches {
     starts: Vec<Location>,
     own: BTreeSet<Location>,
+    /// The proposal versions that hold the carrier: the versions that carry the request.
+    versions: HashSet<Hash>,
 }
 
 impl OwnBatches {
@@ -1119,6 +1132,17 @@ pub(crate) fn compute_excluding(
             kinds::ASSESSMENT => {
                 let a: rdy_model::assessment::Assessment =
                     reader.get_typed(kinds::ASSESSMENT, &h)?;
+                // ruling task-10 A (2026-10-29): an assessment of a version that carries this
+                // request is left out, in any batch. It only names the blocks the version
+                // removes, and its rows are uneraseable references, so the landing erases nothing
+                // in it either way; with it, every removal would be stale at its own propose. An
+                // assessment of any other version that names a removed block stays in the report
+                if own
+                    .as_ref()
+                    .is_some_and(|o| o.versions.contains(&a.proposal))
+                {
+                    continue;
+                }
                 quotes.scan(ImpactKind::Assessment, &rec, false, &a)?;
                 if assessment_hits(&a, &versions, &affected_ids) {
                     carried.assessments.push(h);
