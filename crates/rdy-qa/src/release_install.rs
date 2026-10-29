@@ -39,8 +39,9 @@ pub const APACHE_FILE: &str = "LICENSE-APACHE";
 pub const NOTE_FILE: &str = "PREVIEW.txt";
 /// The third-party notices' file name in each archive.
 pub const NOTICES_FILE: &str = "THIRD-PARTY-NOTICES.txt";
-/// The largest binary packaged: 256 MiB.
-pub const BINARY_MAX: u64 = 268_435_456;
+/// The largest binary packaged: 512 MiB. A fixed bound by judgement: the debug binary that the
+/// package tests stage passed 256 MiB in M3b (320 MB); a release binary is far below either.
+pub const BINARY_MAX: u64 = 536_870_912;
 /// The largest license file packaged: 64 KiB.
 pub const LICENSE_MAX: u64 = 65_536;
 /// The largest third-party notices file packaged: 16 MiB.
@@ -2217,7 +2218,7 @@ mod tests {
         assert_eq!(NOTICES_FILE, "THIRD-PARTY-NOTICES.txt");
         assert_eq!(NOTICES_MAX, 16_777_216);
         assert_eq!(ARCHIVE_MAX, BINARY_MAX + NOTICES_MAX + 1_048_576);
-        assert_eq!(ARCHIVE_MAX, 286_261_248);
+        assert_eq!(ARCHIVE_MAX, 554_696_704);
 
         // The built CLI: its own `--version` output picks the archive family.
         let rdy = crate::fixtures::rdy_bin();
