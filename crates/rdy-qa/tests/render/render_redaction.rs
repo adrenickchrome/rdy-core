@@ -472,8 +472,20 @@ fn canaries_only_in_selected_payloads(dir: &Path, req: &Redaction, picture: &[u8
         .iter()
         .map(|s| (s.kind, s.hash))
         .collect();
+    // an ASSESSMENT record the report lists as not erasable may hold one, by hash (ruling
+    // task-10 Amendment 1, item 4)
+    let kept: BTreeSet<Hash> = req
+        .manifest
+        .inside
+        .iter()
+        .filter(|r| r.kind == ImpactKind::Assessment && !r.erasable)
+        .map(|r| r.record.parse().unwrap())
+        .collect();
     let frames = frames_on_disk(dir);
     for (name, start, end, kind, hash) in &frames {
+        if rdy_store::codec::logical_kind(*kind) == kinds::ASSESSMENT && kept.contains(hash) {
+            continue;
+        }
         let bytes = std::fs::read(dir.join(".rdy/store/segments").join(name)).unwrap();
         let payload = &bytes[*start..*end];
         for needle in SELECTED.iter().map(|c| c.as_bytes()).chain([picture]) {
