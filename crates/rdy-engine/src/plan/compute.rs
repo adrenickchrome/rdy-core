@@ -147,6 +147,9 @@ pub(crate) struct FixedTensions {
     /// subject the row's id, its cause the row's first block, its cause hash the row's vkey. The
     /// bound answer still answers it when the live tension is gone (ruling final F1).
     pub(crate) bound: Vec<PlanCandidate>,
+    /// The rows `bound` comes from, as stored: a fresh assessment keeps each one the live set no
+    /// longer lists (`readiness::assessment::Inputs::carried`).
+    pub(crate) rows: Vec<rdy_model::assessment::AssessmentTension>,
 }
 
 /// The kind and the blocks of `t`: what one tension keeps when only a side's version moves.
@@ -316,7 +319,7 @@ pub(crate) fn fixed_tensions(
         return Ok(None);
     };
     let rows = reader.assessment(&a)?.tensions;
-    let mut bound = vec![];
+    let (mut bound, mut kept) = (vec![], vec![]);
     for row in &rows {
         let (Some(answer), Some(cause)) = (&row.answer, row.blocks.first()) else {
             continue;
@@ -338,10 +341,12 @@ pub(crate) fn fixed_tensions(
             close: None,
             stable: false,
         });
+        kept.push(row.clone());
     }
     Ok(Some(FixedTensions {
         ids: rows.iter().map(|t| t.id).collect(),
         bound,
+        rows: kept,
     }))
 }
 

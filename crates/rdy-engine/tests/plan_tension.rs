@@ -1140,3 +1140,63 @@ fn rg_final_a_bound_tension_item_survives_an_exclusion() {
         "{seal:#}"
     );
 }
+
+/// Ruling final F1: the bound item also survives the fresh assessment an approval stores when the
+/// version moved (O11). After the exclusion the pack changes: the approval refuses with
+/// `E_PROPOSAL_MOVED` and stores a fresh assessment, and the next approval lands with the bound
+/// item sealed as `confirmed`.
+#[test]
+fn rg_final_a_bound_tension_item_survives_a_fresh_assessment() {
+    let mut fx = project();
+    let legacy = fx.legacy.clone();
+    let b_change = put(
+        &mut fx.r,
+        "b",
+        json!([{"op": "update", "id": legacy, "fields": {"lifecycle": "deprecated"}}]),
+    )
+    .change;
+    cite_legacy(&mut fx, "a");
+    let tn = tension_label(&inflight_refs(&fx.r, "a")[0].id);
+    answer(
+        &mut fx.r,
+        "a",
+        &tn,
+        PlanAct::Confirm,
+        Some("y keeps the legacy rule until b lands"),
+    )
+    .unwrap();
+    let info = propose(&mut fx.r, "a");
+    assert!(info.ready, "{:#?}", info.issues);
+    fx.r.view_exclude(&writer(), "b", &[b_change], false)
+        .unwrap_or_else(|e| panic!("exclude b's change: {e}"));
+
+    // the pack changes: the approval stores a fresh assessment
+    let dir = fx._dir.path();
+    std::fs::write(
+        dir.join(".rdy/packs/other.yaml"),
+        "name: other\nversion: \"1\"\nextends: rdy-standard\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join(".rdy.yaml"), "pack: other\n").unwrap();
+    fx.r.reload_pack().unwrap();
+    common::confirm_exceptions(&mut fx.r, &approver(), &info);
+    let e = fx.r.land(&approver(), &info.id).unwrap_err();
+    assert_eq!(e.code, rdy_engine::E_PROPOSAL_MOVED, "{e} {:?}", e.issues);
+    let plan = version_plan(&fx.r, &info.r#ref);
+    let rows = rows_of_kind(&plan, "tension");
+    assert_eq!(rows.len(), 1, "{plan:#}");
+    assert_eq!(rows[0]["state"], "closed", "{plan:#}");
+
+    let landing =
+        fx.r.land(&approver(), &info.id)
+            .unwrap_or_else(|e| panic!("land a: {e} {:?}", e.issues));
+    let seal = sealed(&fx.r, &landing);
+    let rows = rows_of_kind(&seal, "tension");
+    assert_eq!(rows.len(), 1, "{seal:#}");
+    assert_eq!(rows[0]["id"], tn);
+    assert_eq!(
+        rows[0]["outcome"],
+        PlanOutcome::Confirmed.as_str(),
+        "{seal:#}"
+    );
+}

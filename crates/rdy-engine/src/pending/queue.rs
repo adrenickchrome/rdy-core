@@ -1217,6 +1217,7 @@ impl Version {
             tensions: &rows,
             tensions_omitted: listed.len().saturating_sub(MAX_TENSION_ROWS),
             answers: &answers,
+            carried: fixed.as_ref().map_or(&[], |f| f.rows.as_slice()),
             suspects,
             written: self.touched.clone(),
             plan_blocks,

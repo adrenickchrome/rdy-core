@@ -71,6 +71,10 @@ pub struct Inputs<'a> {
     pub tensions_omitted: usize,
     /// (tension id, item hash) for each tension item the bound plan answers.
     pub answers: &'a [(Hash, Hash)],
+    /// The rows of the version's earlier assessment that name a bound answer
+    /// (`plan::compute::FixedTensions::rows`): one that `tensions` no longer lists is kept, with
+    /// its answer from `answers`, so a fresh record never drops a bound item (ruling final F1).
+    pub carried: &'a [AssessmentTension],
     /// (suspect block, cause).
     pub suspects: Vec<(BlockId, BlockId)>,
     pub written: BTreeSet<BlockId>,
@@ -391,6 +395,27 @@ pub fn build(i: Inputs<'_>) -> Result<Assessment, Issue> {
             _ => cut += 1,
         }
     }
+    // ruling final F1: a bound row the live set no longer lists keeps its place, while the bound
+    // plan still answers its item
+    for row in i.carried {
+        if tensions.contains_key(&row.id) {
+            continue;
+        }
+        let Some(answer) = i
+            .plan_hash
+            .zip(answers.get(&row.id))
+            .map(|(plan, item)| AssessmentPlanAnswerRef { plan, item: *item })
+        else {
+            continue;
+        };
+        if tensions.len() < MAX_TENSION_ROWS {
+            let mut row = row.clone();
+            row.answer = Some(answer);
+            tensions.insert(row.id, row);
+        } else {
+            cut += 1;
+        }
+    }
     let tensions_omitted = count(i.tensions_omitted).saturating_add(count(cut));
     let suspects: BTreeSet<(BlockId, BlockId)> = i.suspects.iter().cloned().collect();
     let suspects_omitted = count(suspects.len().saturating_sub(MAX_SUSPECT_ROWS));
@@ -640,6 +665,7 @@ mod tests {
             tensions: &f.tensions,
             tensions_omitted: 0,
             answers: &f.answers,
+            carried: &[],
             suspects: vec![
                 (id("n-00009"), id("d-0000A")),
                 (id("n-00008"), id("d-0000A")),
