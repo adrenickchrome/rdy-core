@@ -494,43 +494,38 @@ mod tests {
             v
         };
         assert_eq!(accepted(&run(vec![open.clone()], &base())), "open");
-        let cases: Vec<(Box<dyn Fn(&mut VerdictInputs)>, &str)> = vec![
+        let cases: Vec<(fn(&mut VerdictInputs), &str)> = vec![
+            (|v| v.redaction = true, "it carries a redaction request"),
             (
-                Box::new(|v| v.redaction = true),
-                "it carries a redaction request",
-            ),
-            (
-                Box::new(|v| v.changes_policy = true),
+                |v| v.changes_policy = true,
                 "it changes the authority policy",
             ),
             (
-                Box::new(|v| v.exceptions = vec![(ExceptionKind::OneWay, "D-DDDDD".to_string())]),
+                |v| v.exceptions = vec![(ExceptionKind::OneWay, "D-DDDDD".to_string())],
                 "it has the exception one_way on D-DDDDD",
             ),
             (
-                Box::new(|v| v.exceptions = vec![(ExceptionKind::Against, "D-EEEEE".to_string())]),
+                |v| v.exceptions = vec![(ExceptionKind::Against, "D-EEEEE".to_string())],
                 "it has the exception against on D-EEEEE",
             ),
             (
-                Box::new(|v| {
-                    v.exceptions = vec![(ExceptionKind::ReaffirmOneWay, "D-EEEEE".to_string())]
-                }),
+                |v| v.exceptions = vec![(ExceptionKind::ReaffirmOneWay, "D-EEEEE".to_string())],
                 "it has the exception reaffirm_one_way on D-EEEEE",
             ),
             (
-                Box::new(|v| v.noncode_deferrals = 2),
+                |v| v.noncode_deferrals = 2,
                 "it defers 2 items that are not code items",
             ),
             (
-                Box::new(|v| v.decisions[0].basis = Some("direct_ruling".to_string())),
+                |v| v.decisions[0].basis = Some("direct_ruling".to_string()),
                 "decision D-DDDDD has basis direct_ruling",
             ),
             (
-                Box::new(|v| v.decisions[0].basis = Some("recorded_ruling".to_string())),
+                |v| v.decisions[0].basis = Some("recorded_ruling".to_string()),
                 "decision D-DDDDD has basis recorded_ruling",
             ),
             (
-                Box::new(|v| v.stable_docs = vec![id("d-SSSSS")]),
+                |v| v.stable_docs = vec![id("d-SSSSS")],
                 "it makes doc d-SSSSS stable",
             ),
         ];
