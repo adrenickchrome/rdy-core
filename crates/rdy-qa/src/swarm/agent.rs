@@ -78,7 +78,14 @@ pub const REVIEW_BATCH: usize = 16;
 /// It also holds the landing turn: an act that decides from a read of the agent's view (a
 /// precondition, ruling task-4.1) holds a read turn from that read to its call, and the person's
 /// `rdy approve` holds the write turn, so canon never moves between an agent's read and the call
-/// that relies on it. Every other call races freely.
+/// that relies on it.
+///
+/// And it holds the plan turn: an agent that answers its change plan holds it alone, from the
+/// plan read to the answers (`plan_turn`), and every other act of an actor that can change a
+/// tension holds a shared turn (`act_turn`), so no item the read listed changes before the
+/// answers name it (D-ME2HD: a tension item's id moves with its sides). A landing needs none: an
+/// agent answers inside its propose, which holds the read turn. An actor takes the landing turn
+/// before the plan turn, never the other way. Every other call races freely.
 #[derive(Default)]
 pub struct KillGate {
     epoch: Mutex<u32>,
@@ -87,6 +94,7 @@ pub struct KillGate {
     /// Set by the run just before it kills the daemon (`killing`).
     killing: AtomicBool,
     turn: RwLock<()>,
+    plan: RwLock<()>,
 }
 
 impl KillGate {
@@ -128,6 +136,18 @@ impl KillGate {
     /// An agent's turn for an act that decides from a read: no landing runs while it is held.
     pub fn read_turn(&self) -> RwLockReadGuard<'_, ()> {
         self.turn.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// An agent's turn to answer its change plan: no other act that can change a tension runs
+    /// while it is held.
+    pub fn plan_turn(&self) -> RwLockWriteGuard<'_, ()> {
+        self.plan.write().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// An actor's turn for an act that can change a tension: no plan is answered while it is
+    /// held.
+    pub fn act_turn(&self) -> RwLockReadGuard<'_, ()> {
+        self.plan.read().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The daemon was killed and may start again: the generation moves to its next number and
@@ -477,10 +497,15 @@ pub(crate) fn plan_answer_for(kind: &str) -> Option<(&'static str, &'static str)
 /// `rdy_plan` call, by its kind (`plan_answer_for`). It reads the plan whole first: one `plan`
 /// entry per page, naming the view. The answers are one `plan_answer` entry naming the view,
 /// whose reply lists each answer with its item's kind (`{answers: [{item, kind, act, reason}]}`).
-/// With nothing to answer it makes no second call. A view whose changes conflict with canon has
-/// no plan (the read's `E_STALE_BASE`, a row of the table), and a call the kill cuts ends it too:
-/// the version proposed next is not ready, and the drain answers its plan once it resolves it.
+/// It holds the plan turn throughout (`KillGate::plan_turn`), so the items it read are the items
+/// it answers. With nothing to answer it makes no second call. A view whose changes conflict
+/// with canon has no plan (the read's `E_STALE_BASE`, a row of the table), and a call the kill
+/// cuts ends it too: the version proposed next is not ready, and the drain answers its plan once
+/// it resolves it.
 pub(crate) fn answer_plan(link: &mut Link, view: &str) {
+    // from the read to the answers, no other act changes a tension (`KillGate::plan_turn`)
+    let gate = link.gate.clone();
+    let _turn = gate.plan_turn();
     let mut open: Vec<(String, String)> = vec![];
     let mut args = json!({"view": view, "max_tokens": PLAN_ALL});
     loop {
@@ -867,6 +892,8 @@ impl Agent {
         );
         let gate = self.link.gate.clone();
         let _turn = reads_first.then(|| gate.read_turn());
+        // a propose answers the plan in its own turn first, then takes this one for its call
+        let _act = (!matches!(act, Act::Propose)).then(|| gate.act_turn());
         match act {
             Act::Brief { target } => self.brief_act(target),
             Act::Write { target, stable } => self.write_act(target, *stable),
@@ -1705,6 +1732,9 @@ impl Agent {
         if !closed {
             answer_plan(&mut self.link, &view);
         }
+        // the propose's own call can change a tension (a key change rdy adds)
+        let gate = self.link.gate.clone();
+        let _act = gate.act_turn();
         let title = format!("{view} step {}", self.link.step);
         let mut args = json!({"title": title, "summary": title, "view": view});
         if contra.is_none()

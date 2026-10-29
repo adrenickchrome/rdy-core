@@ -224,6 +224,10 @@ pub(crate) fn accept_deferrals(link: &mut Link, who: &str, pref: &str, relayed: 
 
 impl Person {
     fn act(&mut self, act: &PersonAct) {
+        // an act that can change a tension waits while an agent answers its plan; a landing
+        // holds the landing turn instead, which every plan answer waits for (`KillGate`)
+        let gate = self.link.gate.clone();
+        let _act = (!matches!(act, PersonAct::Land { .. })).then(|| gate.act_turn());
         match act {
             PersonAct::Land { relayed } => self.land(*relayed),
             PersonAct::Dismiss => self.dismiss(),
