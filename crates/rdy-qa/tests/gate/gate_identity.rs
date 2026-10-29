@@ -775,7 +775,7 @@ fn id6_holds_and_preconditions_keep_their_codes() {
     // a moved base: strict refuses any landing since; any approval refuses a landing that
     // wrote a block the version writes
     put(&mut r, "stale", upd(&spec.b, "B as stale has it."));
-    let stale = propose(&mut r, "stale", None);
+    let stale = propose(&mut r, "stale", Some(SUMMARY));
     put(&mut r, "edit-b", upd(&spec.b, "B as edit-b has it."));
     land(&mut r, "edit-b").expect("land edit-b");
     let e = land_err(&mut r, &approver(), &made.bare, true);
@@ -783,7 +783,7 @@ fn id6_holds_and_preconditions_keep_their_codes() {
     assert!(e.message.contains("landing(s) since"), "{e:#?}");
     let e = land_err(&mut r, &approver(), &stale, false);
     assert_eq!(e.code, E_PROPOSAL_MOVED, "{e:#?}");
-    assert!(e.message.contains("after it was proposed"), "{e:#?}");
+    assert!(e.message.contains("after its assessment"), "{e:#?}");
     // on a ready version: the exception hold, then the deferral hold
     write(
         &mut r,

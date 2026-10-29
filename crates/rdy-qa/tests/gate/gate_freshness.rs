@@ -15,16 +15,17 @@ use rdy_engine::readiness::{
     Candidate, candidate_builds_for_tests, readiness, readiness_calls_for_tests,
 };
 use rdy_engine::{
-    DecisionInput, E_CONFLICT_UNRESOLVED, E_PROPOSAL_MOVED, E_PROPOSAL_NOT_READY, E_VALIDATION,
-    LandInfo, LandOptions, ProposalInfo, Rdy, RdyError, ReloadOutcome, Scope,
+    DecisionInput, E_BLOCKING_TENSION, E_CONFLICT_UNRESOLVED, E_PROPOSAL_MOVED,
+    E_PROPOSAL_NOT_READY, E_VALIDATION, LandInfo, LandOptions, ProposalInfo, Rdy, RdyError,
+    ReloadOutcome,
 };
 use rdy_mcp::tools::{McpState, rdy_answer, rdy_session};
 use rdy_model::assessment::Assessment;
-use rdy_model::{BlockId, Change, ChangeLinks, Hash, LandingRecord, Op};
+use rdy_model::{BlockId, Hash, LandingRecord};
 use rdy_qa::fixtures::{approver, land, write, writer};
 use rdy_qa::intake::{PERSON, TEST_SUMMARY, confirm_before_landing, decide_in};
 use rdy_qa::packs::use_pack;
-use rdy_qa::tensions::{j_typo, put_j, upd};
+use rdy_qa::tensions::{j_typo, put, put_j, upd};
 use rdy_schema::{Issue, Severity};
 use rdy_store::kinds;
 use rdy_store::segment::Location;
@@ -231,7 +232,7 @@ fn rg12_a_landing_in_reach_refuses_with_a_fresh_card() {
     assert_eq!(w.r.read().canon_head(), head, "nothing landed");
     assert_eq!(
         kinds_from(&w.r, from),
-        vec![kinds::ASSESSMENT],
+        vec![kinds::ASSESSMENT, kinds::BATCH_COMMIT],
         "the fresh assessment, in a batch of its own"
     );
     // the next approval lands and names the fresh assessment
@@ -547,47 +548,27 @@ fn rg12_an_approval_of_a_version_with_no_assessment_is_not_ready() {
 #[test]
 fn rg12_a_ready_version_with_no_assessment_gets_the_o10_issue() {
     let mut w = world();
-    let v0 = w.r.read().block(&Scope::Canon, &w.x).unwrap();
-    // b edits x; a landing edits x too, so b's version carries a conflict when it is proposed
-    put_j(&mut w.r, "b", upd(&w.x, "X as b has it."), j_typo());
-    land_edit(&mut w.r, "e", &w.x, "X as e has it.");
-    let p = propose(&mut w.r, "b", Some(TEST_SUMMARY));
-    assert!(!p.ready, "{p:#?}");
-    assert!(stored(&w.r, &p.id).is_none(), "not ready: no assessment");
-    // a landing puts x back as b's change found it: the conflict is gone
-    let base =
-        w.r.read()
-            .block(&Scope::Canon, &w.x)
-            .unwrap()
-            .version_hash();
-    w.r.store_mut()
-        .commit_to_view(
-            "f",
-            Change {
-                view: "f".into(),
-                ops: vec![Op::Update {
-                    base,
-                    block: v0.clone(),
-                }],
-                deps: vec![],
-                provenance: writer().provenance(),
-                justification: j_typo(),
-                message: "x back".into(),
-                links: ChangeLinks::default(),
-                read_identity: None,
-            },
-        )
-        .expect("the revert");
-    w.r.invalidate();
-    land(&mut w.r, "f").unwrap();
-    assert_eq!(
-        w.r.read()
-            .block(&Scope::Canon, &w.x)
-            .unwrap()
-            .version_hash(),
-        v0.version_hash()
+    let r = &mut w.r;
+    // b cites x; an edit of x lands, so b's version carries a blocking premise shift when it
+    // is proposed
+    put_j(
+        r,
+        "b",
+        json!([{"op": "create", "type": "claim", "parent": w.t.to_string(),
+                "body": format!("Z builds on {{{{{}}}}}.", w.x)}]),
+        j_typo(),
     );
-    let e = approve(&mut w.r, &p).unwrap_err();
+    land_edit(r, "e", &w.x, "X holds now.");
+    let p = propose(r, "b", Some(TEST_SUMMARY));
+    assert_eq!(
+        p.issues.iter().map(|i| i.code).collect::<Vec<_>>(),
+        vec![E_BLOCKING_TENSION],
+        "{p:#?}"
+    );
+    assert!(stored(r, &p.id).is_none(), "not ready: no assessment");
+    // a landing puts x back as b read it: the tension is gone, and the version is ready now
+    land_edit(r, "f", &w.x, "X holds.");
+    let e = approve(r, &p).unwrap_err();
     assert_eq!(e.code, E_PROPOSAL_NOT_READY, "{e:#?}");
     assert_eq!(
         e.issues,

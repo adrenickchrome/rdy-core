@@ -33,7 +33,9 @@
 //!   version only. A decision version proposed in two views stands beside each batch with the
 //!   same ref and its own card, so a `card_hash` picks the card of that ref with that hash. When
 //!   no card of the ref has the hash given: `E_PROPOSAL_MOVED` for an `approve` item,
-//!   `E_ITEM_MOVED` for the others.
+//!   `E_ITEM_MOVED` for the others. For an `approve` item the landing's freshness check runs
+//!   first (D-WQVGT, RULING F1): its `E_PROPOSAL_MOVED` passes through with its `corrected`
+//!   (the fresh card, `{"card": ...}`, or the fresh readiness issues and no card).
 //! - The option is one of the item's option ids, or `E_BAD_INPUT`.
 //!
 //! Each refusal of a moved item carries the item's fresh card, when the queue has one, in
@@ -343,7 +345,17 @@ impl Rdy {
         shown: Option<&str>,
         note: Option<String>,
     ) -> Result<AnswerStep, RdyError> {
-        let bound = bind(&self.read(), person, r, shown, by.relay.is_some(), pick)?;
+        let bound = match bind(&self.read(), person, r, shown, by.relay.is_some(), pick)? {
+            Binding::Bound(b) => b,
+            // RULING F1: the person saw another card of the approval; when the landing's
+            // freshness check fails, its refusal (with the fresh card) passes through
+            Binding::ShownMoved(e) => {
+                return Err(match self.check_fresh(r) {
+                    Err(f) if f.code == E_PROPOSAL_MOVED => f,
+                    _ => e,
+                });
+            }
+        };
         match (bound.item.kind, bound.option.id.as_str()) {
             (_, "later") | (ItemKind::Approve | ItemKind::Confirm | ItemKind::Defer, _) => {
                 batch::act(self, &by.who, by.relay.clone(), by.kind, bound, note)
@@ -438,6 +450,14 @@ fn note_of(note: Option<String>) -> Result<Option<String>, RdyError> {
     Ok(Some(note))
 }
 
+/// What [`bind`] found for an item ref.
+enum Binding {
+    Bound(Bound),
+    /// An approve card of the ref stands, but none with the hash shown: the refusal it gets
+    /// when the landing's freshness check passes (`E_PROPOSAL_MOVED`, with the queue's card).
+    ShownMoved(RdyError),
+}
+
 /// The item `r` of `person`'s queue, bound (see the module docs).
 fn bind(
     st: &ReadState,
@@ -446,7 +466,7 @@ fn bind(
     shown: Option<&str>,
     relayed: bool,
     pick: Pick<'_>,
-) -> Result<Bound, RdyError> {
+) -> Result<Binding, RdyError> {
     if !is_item_ref(r) {
         return Err(RdyError::new(
             E_BAD_INPUT,
@@ -493,14 +513,12 @@ fn bind(
         None => first,
         Some(h) => match cards.iter().find(|i| i.card_hash == h) {
             Some(item) => item,
-            None => {
-                let code = if first.kind == ItemKind::Approve {
-                    E_PROPOSAL_MOVED
-                } else {
-                    E_ITEM_MOVED
-                };
-                return Err(changed(code, r).with_corrected(card_of(first)));
+            None if first.kind == ItemKind::Approve => {
+                return Ok(Binding::ShownMoved(
+                    changed(E_PROPOSAL_MOVED, r).with_corrected(card_of(first)),
+                ));
             }
+            None => return Err(changed(E_ITEM_MOVED, r).with_corrected(card_of(first))),
         },
     };
     let option = match pick {
@@ -532,11 +550,11 @@ fn bind(
             })?
             .clone(),
     };
-    Ok(Bound {
+    Ok(Binding::Bound(Bound {
         item: item.clone(),
         option,
         card_hash,
-    })
+    }))
 }
 
 /// Whether `r` is an item ref (O3, closed): `P-<id>@<n>` (an approval), `<block id>@<version

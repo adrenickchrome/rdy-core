@@ -6,6 +6,7 @@ use crate::error::*;
 use crate::pending::queue::{approval_holds, approval_readiness};
 use crate::pending::{Item, PlanCardBinding};
 use crate::plan::lifecycle::{PlanSummary, ProposePlanRequest};
+use crate::readiness::assessment::{config_digest, pack_digest};
 use crate::session::rfc3339;
 use crate::tensions::{SideRef, Tension, TensionInfo, TensionSeverity, TensionStatus};
 use crate::views::{
@@ -1011,6 +1012,61 @@ pub(crate) fn proposal_not_ready(pref: &ProposalRef, issues: Vec<Issue>) -> RdyE
     );
     e.issues = issues;
     e
+}
+
+/// O10: the issue of a version whose readiness passes but that has no stored assessment.
+pub(crate) fn no_stored_assessment(pref: &ProposalRef) -> Issue {
+    Issue {
+        severity: Severity::Error,
+        code: E_VALIDATION,
+        block: None,
+        message: format!("{pref} has no stored assessment"),
+        fix: "propose it again: rdy_propose / rdy propose".into(),
+    }
+}
+
+/// The fix of a failed freshness check whose fresh readiness fails too (O11).
+const O11_FIX: &str = "fix each issue and propose again: rdy_propose / rdy propose";
+
+/// The decisions the later refusals read (I8, I-c), from the ops of `changes` alone, in the
+/// order the merge applies them: for each decision block, its last `Create` or `Update` op
+/// (none when a later op deletes it). A block whose status is `proposed` is a proposed
+/// decision, `(id, <id>@<short of its version>)`; any other whose `reaffirmed_causes` against
+/// canon's version is not empty is a re-affirmed decision, `(id, ref, one_way)`.
+#[allow(clippy::type_complexity)]
+fn own_decisions(
+    st: &ReadState,
+    changes: &[Change],
+) -> Result<(Vec<(BlockId, String)>, Vec<(BlockId, String, bool)>), RdyError> {
+    let applied = st.landing_order(changes);
+    let mut last: BTreeMap<BlockId, Option<Block>> = BTreeMap::new();
+    for op in applied_ops(changes, &applied) {
+        match op {
+            Op::Create { block } | Op::Update { block, .. }
+                if block.block_type == decision::DECISION =>
+            {
+                last.insert(block.id.clone(), Some(block));
+            }
+            op => {
+                if let Some(b) = last.get_mut(op.block_id()) {
+                    *b = None;
+                }
+            }
+        }
+    }
+    let canon = st.materialized(&Scope::Canon)?;
+    let (mut decisions, mut reaffirms) = (vec![], vec![]);
+    for (id, b) in last {
+        let Some(b) = b else { continue };
+        let r = format!("{id}@{}", b.version_hash().short());
+        if decision::status(&b) == Some(decision::DecisionStatus::Proposed) {
+            decisions.push((id, r));
+        } else if !rdy_model::engine_fields::reaffirmed_causes(canon.get(&id), &b).is_empty() {
+            let one_way = b.field_str("reversibility") == Some("one_way");
+            reaffirms.push((id, r, one_way));
+        }
+    }
+    Ok((decisions, reaffirms))
 }
 
 /// F2 (D-DKJS5): the refusal of an approval while exceptions of `pref` have no confirm answer. It
@@ -2533,102 +2589,176 @@ impl Rdy {
         resolve_in(&self.read(), text)
     }
 
-    /// FW-HB1: the landings since version `p` was proposed (`p.canon_at`). With none, or none
-    /// that wrote a block the version writes, the approval stands (the gate then validates the
-    /// version on the current canon); `strict` or `reviews.require_up_to_date` refuse any.
-    fn check_base_moved(
-        &self,
+    /// The landings of canon's chain since `base`, head first: every landing when `base` is none
+    /// or not on the chain.
+    fn landings_since(
         st: &ReadState,
-        pref: &ProposalRef,
-        p: &Proposal,
-        changes: &[Change],
-        opts: &LandOptions,
-    ) -> Result<(), RdyError> {
-        // head first, up to the landing the version was proposed on (every landing when that is
-        // none, or not on canon's chain)
-        let mut intervening = vec![];
+        base: Option<Hash>,
+    ) -> Result<Vec<(Hash, LandingRecord)>, RdyError> {
+        let mut since = vec![];
         let mut cur = st.canon_head();
         while let Some(h) = cur {
-            if Some(h) == p.canon_at {
+            if Some(h) == base {
                 break;
             }
             let rec = st.reader().landing(&h)?;
             cur = rec.prev;
-            intervening.push((h, rec));
+            since.push((h, rec));
         }
+        Ok(since)
+    }
+
+    /// FW-HB1 and RULING F1's limit (I7): `strict` or `reviews.require_up_to_date` refuse any
+    /// landing since version `p` was proposed (`p.canon_at`), with today's texts and no fresh
+    /// card.
+    fn check_base_moved(
+        st: &ReadState,
+        pref: &ProposalRef,
+        p: &Proposal,
+        opts: &LandOptions,
+    ) -> Result<(), RdyError> {
+        if !opts.strict && !st.require_up_to_date() {
+            return Ok(());
+        }
+        let intervening = Self::landings_since(st, p.canon_at)?;
         if intervening.is_empty() {
             return Ok(());
         }
-        let since = || {
-            format!(
-                "proposal {pref} moved: canon has {} landing(s) since it was proposed ({})",
-                intervening.len(),
-                intervening
-                    .iter()
-                    .map(|(h, _)| h.short())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        };
+        let since = format!(
+            "proposal {pref} moved: canon has {} landing(s) since it was proposed ({})",
+            intervening.len(),
+            intervening
+                .iter()
+                .map(|(h, _)| h.short())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         if opts.strict {
             return Err(RdyError::new(
                 E_PROPOSAL_MOVED,
-                since(),
+                since,
                 "approve without --strict to accept a clean rebase, or ask its author to propose again on the current canon",
             ));
         }
-        if st.require_up_to_date() {
-            return Err(RdyError::new(
-                E_PROPOSAL_MOVED,
-                since(),
-                format!(
-                    "this project requires proposals on the current canon (reviews.require_up_to_date): its author must propose again (rdy propose --view {}); then approve the new version",
-                    p.view
-                ),
-            ));
-        }
-        let touched: BTreeSet<&BlockId> = changes
-            .iter()
-            .flat_map(|c| c.ops.iter().map(Op::block_id))
-            .collect();
-        for (l, rec) in intervening.iter().rev() {
+        Err(RdyError::new(
+            E_PROPOSAL_MOVED,
+            since,
+            format!(
+                "this project requires proposals on the current canon (reviews.require_up_to_date): its author must propose again (rdy propose --view {}); then approve the new version",
+                p.view
+            ),
+        ))
+    }
+
+    /// D-WQVGT, D-ME2HD "Freshness-only landing": the stored assessment of version `pref`
+    /// (record `p`) still holds. It reads the assessment and the landings since its base, and
+    /// computes nothing for the approver. A version with no stored assessment is not ready: its
+    /// readiness issues, or the O10 issue when it has none. A landing since the assessment's base
+    /// that wrote a block of its `reach`, then a pack, then a gate config other than the
+    /// assessment's, refuses with `E_PROPOSAL_MOVED` and a fresh card ([`Rdy::moved_fresh`],
+    /// RULING F1). Returns the assessment's hash.
+    fn fresh_assessment(
+        &mut self,
+        st: &ReadState,
+        pref: &ProposalRef,
+        p: &Proposal,
+    ) -> Result<Hash, RdyError> {
+        let Some(h) = st
+            .reader()
+            .assessment_of_proposal(&pref.version, st.seq())?
+        else {
+            // O10: the one readiness, on the plan the store binds to the version
+            let mut issues = approval_readiness(st, pref, p.clone())?;
+            if issues.is_empty() {
+                issues.push(no_stored_assessment(pref));
+            }
+            return Err(proposal_not_ready(pref, issues));
+        };
+        let a = st.reader().assessment(&h)?;
+        let reach: BTreeSet<&BlockId> = a.reach.iter().collect();
+        for (l, rec) in Self::landings_since(st, a.base)?.iter().rev() {
             let mut hit = BTreeSet::new();
             for c in &rec.changes {
                 for op in &st.reader().change(c)?.ops {
-                    if touched.contains(op.block_id()) {
-                        hit.insert(op.block_id().clone());
+                    if reach.contains(op.block_id()) {
+                        hit.insert(op.block_id().to_string());
                     }
                 }
             }
-            if hit.is_empty() {
-                continue;
-            }
-            let ids = hit.iter().map(|b| b.to_string()).collect::<Vec<_>>();
-            let mut e = RdyError::new(
-                E_PROPOSAL_MOVED,
-                format!(
-                    "proposal {pref} moved: landing {} changed {} after it was proposed",
+            if !hit.is_empty() {
+                let ids: Vec<String> = hit.into_iter().collect();
+                let message = format!(
+                    "proposal {pref} moved: landing {} changed {} after its assessment",
                     l.short(),
                     ids.join(", ")
-                ),
-                format!(
-                    "the proposal is stale: its author must update the changed blocks in view {view} (rdy view show {view} lists its conflicts) and propose again (rdy propose --view {view}); then approve the new version",
-                    view = p.view
-                ),
-            );
-            e.issues = hit
-                .into_iter()
-                .map(|id| Issue {
-                    severity: Severity::Error,
-                    code: E_PROPOSAL_MOVED,
-                    message: format!("{id} changed in landing {}", l.short()),
-                    fix: "propose again".into(),
-                    block: Some(id),
-                })
-                .collect();
-            return Err(e);
+                );
+                return Err(self.moved_fresh(st, pref, p, message)?);
+            }
         }
-        Ok(())
+        if pack_digest(st.pack()) != a.pack.digest {
+            let message = format!("proposal {pref} moved: the pack changed after its assessment");
+            return Err(self.moved_fresh(st, pref, p, message)?);
+        }
+        if config_digest(st.require_up_to_date()) != a.config {
+            let message =
+                format!("proposal {pref} moved: the gate config changed after its assessment");
+            return Err(self.moved_fresh(st, pref, p, message)?);
+        }
+        Ok(h)
+    }
+
+    /// RULING F1: the refusal of a failed freshness check of version `pref` (record `p`), with
+    /// `message`. rdy computes the version's readiness again on `st`. A ready version gets a
+    /// fresh `ASSESSMENT` on canon's head, written in a batch of its own and published, and the
+    /// refusal carries its card in `corrected` (`{"card": ...}`, the shape [`card_of`] gives);
+    /// the next approval binds that assessment. A version that is not ready now gets its fresh
+    /// readiness issues and no card (O11).
+    fn moved_fresh(
+        &mut self,
+        st: &ReadState,
+        pref: &ProposalRef,
+        p: &Proposal,
+        message: String,
+    ) -> Result<RdyError, RdyError> {
+        let c = crate::readiness::Candidate::stored(st, *pref, p.clone())?;
+        let assessed = crate::readiness::assess(st, &c, st.require_up_to_date())?;
+        let (Some(mut a), Some(mut card)) = (assessed.assessment, assessed.readiness.card) else {
+            let mut e = RdyError::new(E_PROPOSAL_MOVED, message, O11_FIX);
+            e.issues = assessed.readiness.issues;
+            return Ok(e);
+        };
+        // the fresh record assesses the version on the canon it was computed on, so the next
+        // approval's freshness reads the landings after it
+        a.base = st.canon_head();
+        card.card = crate::pending::render_checked(&card, crate::pending::CARD_DEFAULT_TOKENS)?;
+        card.card_hash = crate::pending::card_hash(&card).to_string();
+        self.store
+            .put_assessment(&a)
+            .map_err(crate::answer::internal)?;
+        self.publish(Delta::Seq)?;
+        Ok(RdyError::new(
+            E_PROPOSAL_MOVED,
+            message,
+            format!("review the fresh card in corrected and approve {pref} again"),
+        )
+        .with_corrected(serde_json::json!({ "card": card_of(&card) })))
+    }
+
+    /// The landing's freshness checks of the proposal version `proposal` names, before an
+    /// approval of a card whose hash is not the one shown (`answer::bind`): the latest version,
+    /// `reviews.require_up_to_date`, and the stored assessment ([`Rdy::fresh_assessment`]).
+    /// A failed check writes what its refusal says (a fresh assessment, RULING F1) and nothing
+    /// else.
+    pub(crate) fn check_fresh(&mut self, proposal: &str) -> Result<(), RdyError> {
+        let st = self.read();
+        let pref = resolve_in(&st, proposal)?;
+        let p = st.reader().proposal(&pref.version)?;
+        let latest = latest_version(&st, &pref.stable)?;
+        if latest != pref.version {
+            return Err(moved(&st, &pref, &latest, &p.view)?);
+        }
+        Self::check_base_moved(&st, &pref, &p, &LandOptions::default())?;
+        self.fresh_assessment(&st, &pref, &p).map(|_| ())
     }
 
     /// Whether the proposal version `proposal` names carries a content removal request. Any
@@ -2727,15 +2857,23 @@ impl Rdy {
         });
         let changes = changes_of(&st, &p.changes)?;
         linked_alts(&st, &p.view, p.alternative.as_ref(), &p.changes, &changes)?;
-        // FW-HB1: canon may have moved since the version was proposed
-        self.check_base_moved(&st, &pref, &p, &changes, &opts)?;
-        // D-ME2HD: every approval path refuses a version that is not ready, with the queue's
-        // readiness issues in the queue's order (gconf1's conflicts on the blocks the version's
-        // own changes write, tgat1's blocking tensions, the prospective canon, the summary, the
-        // bound plan, and F1's rejected decisions and re-affirmations and refused deferrals)
-        let ready = approval_readiness(&st, &pref, p.clone())?;
-        if !ready.is_empty() {
-            return Err(proposal_not_ready(&pref, ready));
+        // FW-HB1, RULING F1's limit: --strict and reviews.require_up_to_date refuse any landing
+        // since the version was proposed
+        Self::check_base_moved(&st, &pref, &p, &opts)?;
+        // D-WQVGT, D-ME2HD: freshness only, against the version's stored assessment: its reach,
+        // the pack and the gate config (a failed check gives a fresh card, RULING F1)
+        let assessment = self.fresh_assessment(&st, &pref, &p)?;
+        // D-ME2HD "Later refusals", built with no candidate (I8): a rejected decision or one_way
+        // re-affirmation, refused deferrals
+        let (decisions, reaffirms) = own_decisions(&st, &changes)?;
+        let bound = st
+            .reader()
+            .plan_of_proposal(&pref.version, st.seq())?
+            .is_some();
+        let later =
+            crate::readiness::later_refusals(&st, &pref, &p.view, &decisions, &reaffirms, bound)?;
+        if !later.is_empty() {
+            return Err(proposal_not_ready(&pref, later));
         }
         // the ops fold in the order the merge applies the changes (deps first), not the list
         // order: a version can list a delete before the creation it depends on
@@ -2970,7 +3108,7 @@ impl Rdy {
             alt,
             relay: opts.relay,
             evidence,
-            assessment: None,
+            assessment: Some(assessment),
         }) {
             Ok(prepared) => prepared,
             Err(rdy_store::StoreError::ProposalMoved { latest, .. }) => {
