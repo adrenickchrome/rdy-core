@@ -83,6 +83,15 @@
 //! `E_PROPOSAL_NOT_READY`, whose issues are these, in this order ([`approval_readiness`],
 //! D-ME2HD).
 //!
+//! # The approve card (D-ME2HD, D-45RG6, O16)
+//!
+//! A ready version's `approve` item takes its facts from the assessment propose stored, so a
+//! later change to a live fact (the base moving, say) leaves the card as the person was shown it.
+//! Its options stay live. A ready version with no stored assessment is not ready: it is listed
+//! under `not_ready` with the one issue of O10. The Tensions fact lists each advisory tension
+//! with the answer of the bound plan (`(confirm: <reason>)`, `(dismiss: <reason>)` or `(no
+//! answer)`).
+//!
 //! # Answers (O23)
 //!
 //! The queue reads the answers (`answer/<item>`): a `reject_proposal` answer to `P-x@n` takes the
@@ -121,12 +130,18 @@ use crate::coverage::change::{candidate_build, candidate_change};
 use crate::coverage::{CandidateCoverage, confidence_in, lands_unapplied};
 use crate::error::{E_VALIDATION, RdyError, redaction_limit};
 use crate::gate::{ProposalRef, changes_of, open_proposals};
+use crate::plan::lifecycle::PlanSummary;
 use crate::read_state::Built;
+use crate::readiness::assessment::cut_text;
 use crate::readiness::{Candidate, PlanSource, Readiness};
 use crate::session::{now_ms, rfc3339};
 use crate::tensions::{Tension, TensionKind, TensionSeverity, TensionStatus, tension_label};
 use crate::{Materialized, ReadState, Scope};
 use rdy_graph::{DerivedStatus, Graph};
+use rdy_model::assessment::{
+    Assessment, AssessmentCoverage, AssessmentExceptionKind, AssessmentIssue, AssessmentPage,
+    AssessmentScoreChange, MAX_TEXT_BYTES,
+};
 use rdy_model::decision::{self, DEPENDS_ON, DecisionStatus, REVOKES, SUPERSEDES};
 use rdy_model::engine_fields::reaffirmed_causes;
 use rdy_model::redaction::record_buffer;
@@ -286,13 +301,26 @@ impl ReadState {
             let v = Version::read(self, *pref, p.clone())?;
             v.open_work(&mut work);
             let ready = v.readiness_with_card(self, now)?;
-            let Some(card) = ready.card else {
+            let Some(mut card) = ready.card else {
                 not_ready.push(NotReady {
                     r#ref: r,
                     issues: ready.issues,
                 });
                 continue;
             };
+            // D-ME2HD, O16: the approve card is drawn from the stored assessment, its facts as
+            // propose showed them, except Base, which stays live (I-d); a ready version with no
+            // stored assessment is not ready (O10, C2)
+            match stored_facts(self, &v)? {
+                Some(facts) => card.facts = facts,
+                None => {
+                    not_ready.push(NotReady {
+                        issues: vec![crate::gate::no_stored_assessment(pref)],
+                        r#ref: r,
+                    });
+                    continue;
+                }
+            }
             let mut items = vec![card];
             for item in v.exception_items(now) {
                 if !answered(self, &item.r#ref, AnswerAct::Confirm)? {
@@ -406,12 +434,43 @@ pub(crate) fn approval_holds(
     })
 }
 
+/// The facts of the approve card version `v` stored in its assessment (O16): each line
+/// `<name>: <value>` split at its first `: `, in the card's order; none when the version has no
+/// stored assessment. The Base fact is the exception: it stays live (I-d), read now against the
+/// canon head, so a landing after propose shows `moved` and moves the card's hash.
+fn stored_facts(st: &ReadState, v: &Version) -> Result<Option<Vec<Fact>>, RdyError> {
+    let reader = st.reader();
+    let Some(h) = reader.assessment_of_proposal(&v.pref.version, st.seq())? else {
+        return Ok(None);
+    };
+    let live_base = v.base_fact(st);
+    let facts = reader
+        .assessment(&h)?
+        .card
+        .facts
+        .into_iter()
+        .map(|line| match line.split_once(": ") {
+            Some((name, _)) if name == BASE_FACT => live_base.clone(),
+            Some((name, value)) => Fact {
+                name: name.to_string().into(),
+                value: value.to_string(),
+            },
+            None => Fact {
+                name: line.into(),
+                value: String::new(),
+            },
+        })
+        .collect();
+    Ok(Some(facts))
+}
+
 /// The readiness issues of version `pref` (record `p`), in the queue's order: the issues the
 /// queue lists under `not_ready` for it. Empty when the version is ready. Every approval path
 /// refuses a version that is not ready with them (D-ME2HD, [`crate::gate::proposal_not_ready`]).
 /// It is the queue's one readiness ([`Version::readiness`]) on the same published state. The
 /// version is read without its removal cards: readiness never reads them, and the landing's own
 /// freshness check computes each removal report once.
+#[cfg(test)]
 pub(crate) fn approval_readiness(
     st: &ReadState,
     pref: &ProposalRef,
@@ -425,6 +484,79 @@ pub(crate) fn approval_readiness(
 /// its removal cards, the checks, and its `approve` item when it is ready, as the queue lists it.
 pub(crate) fn readiness_of(st: &ReadState, c: &Candidate) -> Result<Readiness, RdyError> {
     Version::read_for(st, c, Removal::Read)?.readiness_with_card(st, now_ms())
+}
+
+/// The readiness of candidate `c` and, when it is ready, its assessment
+/// ([`crate::readiness::assess`]): the version read once with its removal cards, the checks, and
+/// for a ready version its `approve` item and the record built from what that read gave
+/// (D-SDSV2). A record the store would refuse (O9) is the version's one issue: it is not ready.
+pub(crate) fn assessed(
+    st: &ReadState,
+    c: &Candidate,
+    require_up_to_date: bool,
+) -> Result<(Readiness, Option<Assessment>), RdyError> {
+    let v = Version::read_for(st, c, Removal::Read)?;
+    let issues = v.readiness(st)?;
+    let summary = v
+        .plan
+        .as_ref()
+        .map(|p| p.summary.clone())
+        .unwrap_or_default();
+    if !issues.is_empty() {
+        let r = Readiness {
+            issues,
+            summary,
+            card: None,
+        };
+        return Ok((r, None));
+    }
+    let candidate = st.candidate_coverage(&v.built, &v.p.changes);
+    let consequences = v.consequence_count(st);
+    let card = v.batch_item_with(
+        st,
+        now_ms(),
+        candidate.as_ref(),
+        consequences.as_ref().copied(),
+    );
+    let built = v.assessment(
+        st,
+        c,
+        &card,
+        &summary,
+        &candidate?,
+        consequences?,
+        require_up_to_date,
+    )?;
+    Ok(match built {
+        Ok(a) => (
+            Readiness {
+                issues,
+                summary,
+                card: Some(card),
+            },
+            Some(a),
+        ),
+        Err(issue) => (
+            Readiness {
+                issues: vec![issue],
+                summary,
+                card: None,
+            },
+            None,
+        ),
+    })
+}
+
+/// The record kind of an exception kind.
+fn exception_record(k: ExceptionKind) -> AssessmentExceptionKind {
+    match k {
+        ExceptionKind::Against => AssessmentExceptionKind::Against,
+        ExceptionKind::OneWay => AssessmentExceptionKind::OneWay,
+        ExceptionKind::Unapplied => AssessmentExceptionKind::Unapplied,
+        ExceptionKind::NotRecommended => AssessmentExceptionKind::NotRecommended,
+        ExceptionKind::BlockingTension => AssessmentExceptionKind::BlockingTension,
+        ExceptionKind::ReaffirmOneWay => AssessmentExceptionKind::ReaffirmOneWay,
+    }
 }
 
 /// Tests only ([`crate::readiness::reach_for_tests`]): the reach readiness's check 6 reads for
@@ -522,7 +654,8 @@ fn accepted(st: &ReadState, item: &Item) -> Result<Option<Hash>, RdyError> {
 /// queue's cap hides it, and no other version's card is rendered, so another card's budget never
 /// refuses it. The item is the one the queue builds; a version that is not ready says why in its
 /// `why` line instead of `ready to land`. A card whose mandatory removal lines do not fit is
-/// `E_REDACTION_BUDGET` ([`render_checked`]). A direct approval shows this card before it lands.
+/// `E_REDACTION_BUDGET` ([`render_checked`]). A direct approval shows this card before it lands. Its
+/// facts are the stored assessment's, as the queue's are (O16).
 pub(crate) fn removal_item(
     st: &ReadState,
     pref: ProposalRef,
@@ -541,6 +674,11 @@ pub(crate) fn removal_item(
     }
     let v = Version::read(st, pref, p)?;
     let mut item = v.batch_item(st, now_ms());
+    // the item the queue builds draws its facts from the stored assessment (O16); a version with
+    // none (O10) shows the facts as read now
+    if let Some(facts) = stored_facts(st, &v)? {
+        item.facts = facts;
+    }
     let issues = v.readiness(st)?;
     if !issues.is_empty() {
         let why: Vec<&str> = issues.iter().map(|i| i.message.as_str()).collect();
@@ -919,6 +1057,178 @@ impl Version {
         })
     }
 
+    /// The assessment of this version, which is ready (D-SDSV2, O16 to O19), from what its read
+    /// gave: `card` its `approve` item, `summary` its change plan, `candidate` the coverage of the
+    /// canon it would give and `consequences` their count. Err in the inner result: the O9 issue
+    /// of a record too large to store.
+    #[allow(clippy::too_many_arguments)]
+    fn assessment(
+        &self,
+        st: &ReadState,
+        c: &Candidate,
+        card: &Item,
+        summary: &PlanSummary,
+        candidate: &CandidateCoverage,
+        consequences: usize,
+        require_up_to_date: bool,
+    ) -> Result<Result<Assessment, Issue>, RdyError> {
+        use crate::readiness::assessment::{
+            self as record, MAX_TENSION_ROWS, confidence_record, issue_of, scores_of,
+        };
+        let pack = st.pack();
+        // O17: the tension rows the version lists, open and dismissed, the first 1,000; a ready
+        // version has no blocking conflict, so none is left out for one
+        let fixed = crate::plan::compute::fixed_tensions(st, &self.pref.version)?;
+        let listed = st.listed_tensions(
+            &self.p.view,
+            &self.p.changes,
+            &BTreeSet::new(),
+            fixed.as_ref().map(|f| &f.ids),
+        )?;
+        let mut cache = crate::tensions::info::InfoCache::default();
+        let rows: Vec<_> = listed
+            .iter()
+            .take(MAX_TENSION_ROWS)
+            .map(|(refuses, t)| {
+                let mut info = st.tension_info_with(t, &mut cache);
+                info.refuses = Some(*refuses);
+                (info, t.vkey, st.tension_status(t))
+            })
+            .collect();
+        let none = (vec![], vec![], BTreeSet::new());
+        let (answers, items, plan_blocks) = match &self.plan {
+            Ok(p) => (
+                p.tension_answers.clone(),
+                p.suspect_items.clone(),
+                p.blocks.clone(),
+            ),
+            Err(_) => none,
+        };
+        // the facts: every decision's supersede targets, every re-affirmed decision (one_way
+        // ones too, ruling I-c), each decision's reversibility, and each exception
+        let supersedes: Vec<BlockId> = self
+            .decisions
+            .iter()
+            .flat_map(|d| d.block.links.get(SUPERSEDES).into_iter().flatten())
+            .map(|l| l.target.clone())
+            .collect();
+        let reaffirms: Vec<BlockId> = self.reaffirms.iter().map(|d| d.block.id.clone()).collect();
+        let mut reversibility: Vec<(BlockId, bool)> = self
+            .decisions
+            .iter()
+            .map(|d| {
+                let one_way = d.block.field_str("reversibility") == Some("one_way");
+                (d.block.id.clone(), one_way)
+            })
+            .collect();
+        reversibility.extend(
+            self.reaffirms
+                .iter()
+                .map(|d| (d.block.id.clone(), d.one_way)),
+        );
+        let mut exceptions: Vec<(AssessmentExceptionKind, String)> = self
+            .decisions
+            .iter()
+            .flat_map(|d| {
+                d.kinds
+                    .iter()
+                    .map(|(k, _)| (exception_record(*k), d.r#ref.clone()))
+            })
+            .collect();
+        exceptions.extend(
+            self.reaffirms
+                .iter()
+                .filter(|d| d.one_way)
+                .map(|d| (AssessmentExceptionKind::ReaffirmOneWay, d.r#ref.clone())),
+        );
+        // O18: the suspects among the reaffirm and confirm items, read in the canon the version
+        // would give; the scope: the blocks of each doc it touches there, and each block it
+        // writes that is in no doc
+        let suspect = |b: &BlockId| {
+            candidate.issues.blocks.get(b).is_some_and(|e| {
+                e.issues
+                    .iter()
+                    .any(|i| i.code == crate::coverage::IssueCode::OpenSuspect)
+            })
+        };
+        let suspects: Vec<(BlockId, BlockId)> =
+            items.into_iter().filter(|(b, _)| suspect(b)).collect();
+        let canon = st.materialized(&Scope::Canon)?;
+        let docs = self.docs(Some(&canon));
+        let mut scope_blocks: BTreeSet<BlockId> = docs
+            .iter()
+            .flat_map(|d| crate::coverage::page_blocks(&self.next, d))
+            .collect();
+        scope_blocks.extend(
+            self.touched
+                .iter()
+                .filter(|id| self.next.doc_of(id).is_none() && canon.doc_of(id).is_none())
+                .cloned(),
+        );
+        // O19: the pages before and after, the corpus, the confidence and the scope's issues
+        let doc_refs: BTreeSet<&BlockId> = docs.iter().collect();
+        let before = st.doc_rollups(&Scope::Canon, &doc_refs)?;
+        let after = crate::coverage::rollups_of(pack, &self.next, &candidate.issues, &doc_refs);
+        let pages = docs
+            .iter()
+            .map(|d| AssessmentPage {
+                doc: d.clone(),
+                before: scores_of(before.get(d)),
+                after: scores_of(after.get(d)),
+            })
+            .collect();
+        let corpus = AssessmentScoreChange {
+            before: scores_of(Some(&*st.scope_rollup(&Scope::Canon)?)),
+            after: scores_of(Some(&crate::coverage::rollup(
+                pack,
+                candidate.issues.blocks.values(),
+            ))),
+        };
+        let paths = crate::coverage::issue_paths(
+            &self.next,
+            self.touched
+                .iter()
+                .filter_map(|id| Some((id, candidate.issues.blocks.get(id)?))),
+        );
+        let confidence = confidence_in(
+            |b| candidate.issues.blocks.get(b),
+            &self.touched,
+            None,
+            &paths,
+        );
+        let issues: Vec<AssessmentIssue> = scope_blocks
+            .iter()
+            .filter_map(|b| candidate.issues.blocks.get(b))
+            .flat_map(|e| e.issues.iter().map(issue_of))
+            .collect();
+        Ok(record::build(record::Inputs {
+            pref: self.pref,
+            base: self.p.canon_at,
+            pack,
+            require_up_to_date,
+            changes: self.p.changes.len(),
+            consequences,
+            plan: summary,
+            plan_hash: c.plan.hash(),
+            supersedes,
+            reaffirms,
+            reversibility,
+            exceptions,
+            tensions: &rows,
+            tensions_omitted: listed.len().saturating_sub(MAX_TENSION_ROWS),
+            answers: &answers,
+            carried: fixed.as_ref().map_or(&[], |f| f.rows.as_slice()),
+            suspects,
+            written: self.touched.clone(),
+            plan_blocks,
+            scope_blocks,
+            coverage: AssessmentCoverage { pages, corpus },
+            confidence: confidence_record(&confidence),
+            issues,
+            card,
+        }))
+    }
+
     /// The version's deferral card (D-AAQ9Z), answered or not, with who raised it; none for a
     /// version with no bound plan, no deferred non-code item, or a plan that cannot be read.
     fn deferral_item(&self, now: i64) -> Option<Item> {
@@ -943,6 +1253,20 @@ impl Version {
 
     /// The version's `approve` item.
     fn batch_item(&self, st: &ReadState, now: i64) -> Item {
+        let candidate = st.candidate_coverage(&self.built, &self.p.changes);
+        let consequences = self.consequence_count(st);
+        self.batch_item_with(st, now, candidate.as_ref(), consequences.as_ref().copied())
+    }
+
+    /// [`Version::batch_item`] with the coverage of the canon the version would give
+    /// (`candidate`) and the count of its consequences, each worked out once by the caller.
+    fn batch_item_with(
+        &self,
+        st: &ReadState,
+        now: i64,
+        candidate: Result<&CandidateCoverage, &RdyError>,
+        consequences: Result<usize, &RdyError>,
+    ) -> Item {
         let r = self.r#ref();
         let members: Vec<&Decision> = self
             .decisions
@@ -966,7 +1290,7 @@ impl Version {
         it.why = format!("ready to land: {} changes", self.p.changes.len());
         it.summary = summary;
         it.summary_by = Some(self.p.provenance.actor.clone());
-        it.facts = self.facts(st);
+        it.facts = self.facts(st, candidate, consequences);
         it.members = members
             .iter()
             .map(|d| format!("{}  {}", d.block.id, d.title()))
@@ -999,19 +1323,30 @@ impl Version {
         it
     }
 
-    /// The batch card's facts, in the closed order of O6.
-    fn facts(&self, st: &ReadState) -> Vec<Fact> {
-        let canon = st.materialized(&Scope::Canon).ok();
-        let docs: BTreeSet<&BlockId> = self
-            .touched
+    /// The docs the version touches: the doc of each block it writes, in the canon it would
+    /// give, else in canon (a deleted block).
+    fn docs(&self, canon: Option<&Materialized>) -> BTreeSet<BlockId> {
+        self.touched
             .iter()
             .filter_map(|id| {
                 self.next
                     .doc_of(id)
-                    .or_else(|| canon.as_ref().and_then(|c| c.doc_of(id)))
-                    .map(|d| &d.id)
+                    .or_else(|| canon.and_then(|c| c.doc_of(id)))
+                    .map(|d| d.id.clone())
             })
-            .collect();
+            .collect()
+    }
+
+    /// The batch card's facts, in the closed order of O6, with the coverage of the canon the
+    /// version would give (`candidate`) and the count of its consequences.
+    fn facts(
+        &self,
+        st: &ReadState,
+        candidate: Result<&CandidateCoverage, &RdyError>,
+        consequences: Result<usize, &RdyError>,
+    ) -> Vec<Fact> {
+        let canon = st.materialized(&Scope::Canon).ok();
+        let docs = self.docs(canon.as_deref());
         let decisions = if self.decisions.is_empty() {
             "none".to_string()
         } else {
@@ -1061,19 +1396,10 @@ impl Version {
                 });
         let mut tensions = format!("{blocking} blocking, {advisory} advisory");
         if advisory > 0 {
-            tensions.push_str(", answers not recorded yet");
+            tensions.push_str(": ");
+            tensions.push_str(&self.advisory_rows());
         }
         let exceptions = self.exception_count();
-        let base = match self.p.canon_at {
-            Some(h) => h.short(),
-            None => "the start".to_string(),
-        };
-        let moved = if self.p.canon_at == st.canon_head() {
-            "current"
-        } else {
-            "moved"
-        };
-        let candidate = st.candidate_coverage(&self.built, &self.p.changes);
         let fact = |name: &'static str, value: String| Fact {
             name: name.into(),
             value,
@@ -1092,18 +1418,19 @@ impl Version {
             fact("Supersedes", supersedes),
             fact(REAFFIRMS_FACT, reaffirms),
             fact("Reversibility", self.reversibility()),
-            fact("Consequences", worked_out(self.consequences(st))),
+            fact(
+                "Consequences",
+                worked_out(
+                    consequences
+                        .map(|n| format!("{n} returned"))
+                        .map_err(Clone::clone),
+                ),
+            ),
             fact("Change plan", worked_out(plan)),
             fact("Tensions", tensions),
-            fact(
-                "Coverage",
-                worked_out(self.coverage(st, candidate.as_ref())),
-            ),
-            fact(
-                "Confidence",
-                worked_out(self.confidence(candidate.as_ref())),
-            ),
-            fact("Base", format!("canon at {base}, {moved}")),
+            fact("Coverage", worked_out(self.coverage(st, candidate))),
+            fact("Confidence", worked_out(self.confidence(candidate))),
+            self.base_fact(st),
             fact(
                 "Exceptions",
                 match exceptions {
@@ -1112,6 +1439,62 @@ impl Version {
                 },
             ),
         ]
+    }
+
+    /// The Base fact: the canon the version was proposed on, and whether canon is still there.
+    /// It is always read live, on the approve card and in the stored facts (I-d).
+    fn base_fact(&self, st: &ReadState) -> Fact {
+        let base = match self.p.canon_at {
+            Some(h) => h.short(),
+            None => "the start".to_string(),
+        };
+        let moved = if self.p.canon_at == st.canon_head() {
+            "current"
+        } else {
+            "moved"
+        };
+        Fact {
+            name: BASE_FACT.into(),
+            value: format!("canon at {base}, {moved}"),
+        }
+    }
+
+    /// D-45RG6: one row for each advisory tension of the version, in tension id order, joined
+    /// by `; `: `<tn-id> <kind>: <summary> (<confirm|dismiss>: <reason>)`, or `(no answer)`.
+    /// The answer is the bound plan's answer to the tension's item; a plan that cannot be read
+    /// answers nothing. The rows stop once the fact passes [`MAX_TEXT_BYTES`] and the text is cut
+    /// as O9 says, so a version with many tensions builds no unbounded string.
+    fn advisory_rows(&self) -> String {
+        let acts = self.plan.as_ref().ok().map(|p| &p.tension_acts);
+        let answer_of = |t: &Tension| -> Option<String> {
+            let (_, act, reason) = acts?.iter().find(|(id, _, _)| *id == t.id)?;
+            Some(format!(
+                "{}: {}",
+                act.as_str(),
+                reason.as_deref().unwrap_or("")
+            ))
+        };
+        let mut out = String::new();
+        for t in self
+            .tensions
+            .iter()
+            .filter(|t| t.severity == TensionSeverity::Advisory)
+        {
+            if out.len() > MAX_TEXT_BYTES {
+                break;
+            }
+            if !out.is_empty() {
+                out.push_str("; ");
+            }
+            let answer = answer_of(t).unwrap_or_else(|| "no answer".to_string());
+            out.push_str(&format!(
+                "{} {}: {} ({answer})",
+                tension_label(&t.id),
+                t.kind.name(),
+                t.summary
+            ));
+        }
+        cut_text(out)
     }
 
     /// rf9 (TASK-507 (3)): the claim of each justification of the version's changes, in the
@@ -1224,10 +1607,11 @@ impl Version {
         }
     }
 
-    /// D-NJ2SP: the consequences of landing the version, computed on its final state.
-    fn consequences(&self, st: &ReadState) -> Result<String, RdyError> {
-        let c = st.landing_consequences(&self.pref.version, None)?;
-        Ok(format!("{} returned", c.items.len()))
+    /// D-NJ2SP: how many consequences landing the version returns, computed on its final state,
+    /// from its record (a propose reads them before the store holds the version).
+    fn consequence_count(&self, st: &ReadState) -> Result<usize, RdyError> {
+        let c = st.landing_consequences_of(&self.pref.version, &self.p, None)?;
+        Ok(c.items.len())
     }
 
     /// D-C6HHV: canon's coverage against that of the canon the version would give
@@ -1494,6 +1878,9 @@ pub const APPROVE_REASON_CARDS: &str =
 /// The name of the batch fact that gives the claim of the version's justifications (rf9,
 /// TASK-507 (3)); it follows Changes.
 pub const JUSTIFICATION_FACT: &str = "Justification";
+/// The name of the batch fact that gives the canon the version was proposed on; it is the one
+/// fact the approve card reads live, not from the stored assessment (I-d).
+const BASE_FACT: &str = "Base";
 /// The name of the exception fact of a superseding decision that lists the findings it depends
 /// on (rf9, TASK-507 (3)); it follows the exception-kind facts.
 pub const FINDINGS_FACT: &str = "Findings";

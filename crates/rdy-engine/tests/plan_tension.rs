@@ -901,8 +901,8 @@ fn queue_state(r: &Rdy, pref: &str) -> (Option<Vec<Issue>>, bool) {
 /// Ruling task-8 F1 (D-ME2HD, O12): a version's tension items are fixed when it is made: the
 /// tension rows of its stored assessment. A tension that another view's in-flight write creates
 /// after the propose is context only: the version stays ready in the queue, its
-/// `change_plan{proposal}` keeps its items, and its landing seals the items it answered. Until
-/// the propose writes the assessment itself (Task 10), the test stores the one it would write.
+/// `change_plan{proposal}` keeps its items, and its landing seals the items it answered. The
+/// propose writes the assessment (Task 10).
 #[test]
 fn rg8_a_later_in_flight_write_leaves_a_ready_version_ready() {
     let mut fx = project();
@@ -915,15 +915,18 @@ fn rg8_a_later_in_flight_write_leaves_a_ready_version_ready() {
     assert_eq!(plan_issues(&info.plan), vec![]);
     assert_eq!(queue_state(&fx.r, &info.r#ref), (None, true));
     let pref = fx.r.resolve_proposal(&info.r#ref).unwrap();
+    // the propose stored the version's assessment, with its one tension row
     let assessment = {
         let st = fx.r.read();
-        let record = st.reader().proposal(&pref.version).unwrap();
-        let c = rdy_engine::readiness::Candidate::stored(&st, pref, record).unwrap();
-        rdy_engine::readiness::assessment_for_tests(&st, &c).unwrap()
+        let a = st
+            .reader()
+            .assessment_of_proposal(&pref.version, st.seq())
+            .unwrap()
+            .expect("the propose stores the assessment");
+        assert_eq!(info.assessment, Some(a.to_string()));
+        st.reader().assessment(&a).unwrap()
     };
     assert_eq!(assessment.tensions.len(), 1, "{assessment:#?}");
-    fx.r.store_mut().put_assessment(&assessment).unwrap();
-    fx.r.invalidate();
 
     // b deprecates the legacy doc in flight and does not land: a tension with a's claim y
     deprecate_legacy(&mut fx, "b");
@@ -971,4 +974,229 @@ fn rg8_the_reach_holds_the_blocks_of_a_dismissed_tension() {
     let reach = rdy_engine::readiness::reach_for_tests(&st, &c).unwrap();
     let x = rdy_model::BlockId::parse(&fx.x).unwrap();
     assert!(reach.contains(&x), "{reach:?}");
+}
+
+/// Rulings task-5 F3, Amendment 1 (the P2 sequence; built with Task 10): view `b` creates a
+/// deprecated doc whose derived key canon's doc holds, and a draft claim that cites it: one
+/// advisory tension with the doc as a side. The author confirms that tension's item on the view,
+/// then proposes. rdy's key change (K1) gives the doc a new key, so the tension has a new id in
+/// the version; the confirm carries to it. The reply shows the item closed, `change_plan
+/// {proposal}` agrees, and the landing seals the confirm.
+#[test]
+fn rg5_an_answer_survives_a_k1_rekey() {
+    let mut fx = project();
+    let n = fx.n.clone();
+    // both docs are created before either lands, so both derive one key
+    fx.r.new_doc(
+        &writer(),
+        "c",
+        "engineering-handbook/onboarding/overview",
+        None,
+        Some("O"),
+    )
+    .unwrap();
+    let w =
+        fx.r.new_doc(
+            &writer(),
+            "b",
+            "product-handbook/onboarding/overview",
+            None,
+            Some("O"),
+        )
+        .unwrap();
+    let d = w.created["$doc"].clone();
+    put(
+        &mut fx.r,
+        "b",
+        json!([{"op": "update", "id": d, "fields": {"lifecycle": "deprecated"}}]),
+    );
+    land(&mut fx.r, "c");
+    put(
+        &mut fx.r,
+        "b",
+        json!([{"op": "create", "type": "claim", "id": "$y", "parent": n, "body": format!("Y follows {{{{{d}}}}}.")}]),
+    );
+    let before: Vec<Arc<Tension>> = deprecated_refs(&fx.r, "b")
+        .into_iter()
+        .filter(|t| t.blocks().iter().any(|b| b.to_string() == d))
+        .collect();
+    assert_eq!(before.len(), 1, "{before:#?}");
+    let tn = tension_label(&before[0].id);
+    answer(
+        &mut fx.r,
+        "b",
+        &tn,
+        PlanAct::Confirm,
+        Some("Y cites D as history"),
+    )
+    .unwrap();
+
+    let info = propose(&mut fx.r, "b");
+    assert_eq!(info.keys.len(), 1, "rdy re-keys the doc: {:?}", info.keys);
+    assert!(info.keys.contains_key(&d), "{:?}", info.keys);
+    // the version's tension has a new id, and the confirm answers it
+    let after: Vec<Arc<Tension>> = deprecated_refs(&fx.r, "b")
+        .into_iter()
+        .filter(|t| t.blocks().iter().any(|b| b.to_string() == d))
+        .collect();
+    assert_eq!(after.len(), 1, "{after:#?}");
+    assert_ne!(after[0].id, before[0].id, "K1 gives the tension a new id");
+    assert_eq!(
+        serde_json::to_value(info.plan.by_kind["tension"]).unwrap(),
+        json!({"open": 0, "closed": 1, "deferred": 0}),
+        "{:#?}",
+        info.plan
+    );
+    assert!(
+        plan_issues(&info.plan)
+            .iter()
+            .all(|i| i.severity != Severity::Error),
+        "{:#?}",
+        info.plan
+    );
+    assert!(info.ready, "{:#?}", info.issues);
+    let plan = version_plan(&fx.r, &info.r#ref);
+    let rows = rows_of_kind(&plan, "tension");
+    assert_eq!(rows.len(), 1, "{plan:#}");
+    assert_eq!(rows[0]["id"], tension_label(&after[0].id), "{plan:#}");
+    assert_eq!(rows[0]["state"], "closed", "{plan:#}");
+    assert_eq!(queue_state(&fx.r, &info.r#ref), (None, true));
+
+    common::confirm_exceptions(&mut fx.r, &approver(), &info);
+    let landing =
+        fx.r.land(&approver(), &info.id)
+            .unwrap_or_else(|e| panic!("land b: {e} {:?}", e.issues));
+    let seal = sealed(&fx.r, &landing);
+    let rows = rows_of_kind(&seal, "tension");
+    assert_eq!(rows.len(), 1, "{seal:#}");
+    assert_eq!(
+        rows[0]["outcome"],
+        PlanOutcome::Confirmed.as_str(),
+        "{seal:#}"
+    );
+}
+
+/// Ruling final F1 (D-ME2HD, O12): a frozen proposal plan keeps every tension item it was bound
+/// with. View `b` deprecates the legacy doc in flight; view `a` cites its claim and confirms the
+/// in-flight tension, then proposes. `b` then excludes its change, so the live tension is gone:
+/// the version's `change_plan{proposal}` still holds the confirmed item, and the landing seals it
+/// as `confirmed`.
+#[test]
+fn rg_final_a_bound_tension_item_survives_an_exclusion() {
+    let mut fx = project();
+    let legacy = fx.legacy.clone();
+    let b_change = put(
+        &mut fx.r,
+        "b",
+        json!([{"op": "update", "id": legacy, "fields": {"lifecycle": "deprecated"}}]),
+    )
+    .change;
+    cite_legacy(&mut fx, "a");
+    let inflight = inflight_refs(&fx.r, "a");
+    assert_eq!(inflight.len(), 1, "{inflight:#?}");
+    let tn = tension_label(&inflight[0].id);
+    answer(
+        &mut fx.r,
+        "a",
+        &tn,
+        PlanAct::Confirm,
+        Some("y keeps the legacy rule until b lands"),
+    )
+    .unwrap();
+    let info = propose(&mut fx.r, "a");
+    assert!(info.ready, "{:#?}", info.issues);
+    let before = version_plan(&fx.r, &info.r#ref);
+    let rows = rows_of_kind(&before, "tension");
+    assert_eq!(rows.len(), 1, "{before:#}");
+    assert_eq!(rows[0]["id"], tn);
+    assert_eq!(rows[0]["state"], "closed", "{before:#}");
+
+    // b excludes its change: the in-flight tension is gone
+    fx.r.view_exclude(&writer(), "b", &[b_change], false)
+        .unwrap_or_else(|e| panic!("exclude b's change: {e}"));
+    assert!(inflight_refs(&fx.r, "a").is_empty());
+
+    // the frozen plan keeps the bound item and its answer
+    let after = version_plan(&fx.r, &info.r#ref);
+    assert_eq!(after["plan"], before["plan"], "{after:#}");
+    let rows = rows_of_kind(&after, "tension");
+    assert_eq!(rows.len(), 1, "{after:#}");
+    assert_eq!(rows[0]["id"], tn);
+    assert_eq!(rows[0]["state"], "closed", "{after:#}");
+    assert_eq!(after["counts"], before["counts"], "{after:#}");
+
+    // the landing seals it as confirmed
+    common::confirm_exceptions(&mut fx.r, &approver(), &info);
+    let landing =
+        fx.r.land(&approver(), &info.id)
+            .unwrap_or_else(|e| panic!("land a: {e} {:?}", e.issues));
+    let seal = sealed(&fx.r, &landing);
+    let rows = rows_of_kind(&seal, "tension");
+    assert_eq!(rows.len(), 1, "{seal:#}");
+    assert_eq!(rows[0]["id"], tn);
+    assert_eq!(
+        rows[0]["outcome"],
+        PlanOutcome::Confirmed.as_str(),
+        "{seal:#}"
+    );
+}
+
+/// Ruling final F1: the bound item also survives the fresh assessment an approval stores when the
+/// version moved (O11). After the exclusion the pack changes: the approval refuses with
+/// `E_PROPOSAL_MOVED` and stores a fresh assessment, and the next approval lands with the bound
+/// item sealed as `confirmed`.
+#[test]
+fn rg_final_a_bound_tension_item_survives_a_fresh_assessment() {
+    let mut fx = project();
+    let legacy = fx.legacy.clone();
+    let b_change = put(
+        &mut fx.r,
+        "b",
+        json!([{"op": "update", "id": legacy, "fields": {"lifecycle": "deprecated"}}]),
+    )
+    .change;
+    cite_legacy(&mut fx, "a");
+    let tn = tension_label(&inflight_refs(&fx.r, "a")[0].id);
+    answer(
+        &mut fx.r,
+        "a",
+        &tn,
+        PlanAct::Confirm,
+        Some("y keeps the legacy rule until b lands"),
+    )
+    .unwrap();
+    let info = propose(&mut fx.r, "a");
+    assert!(info.ready, "{:#?}", info.issues);
+    fx.r.view_exclude(&writer(), "b", &[b_change], false)
+        .unwrap_or_else(|e| panic!("exclude b's change: {e}"));
+
+    // the pack changes: the approval stores a fresh assessment
+    let dir = fx._dir.path();
+    std::fs::write(
+        dir.join(".rdy/packs/other.yaml"),
+        "name: other\nversion: \"1\"\nextends: rdy-standard\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join(".rdy.yaml"), "pack: other\n").unwrap();
+    fx.r.reload_pack().unwrap();
+    common::confirm_exceptions(&mut fx.r, &approver(), &info);
+    let e = fx.r.land(&approver(), &info.id).unwrap_err();
+    assert_eq!(e.code, rdy_engine::E_PROPOSAL_MOVED, "{e} {:?}", e.issues);
+    let plan = version_plan(&fx.r, &info.r#ref);
+    let rows = rows_of_kind(&plan, "tension");
+    assert_eq!(rows.len(), 1, "{plan:#}");
+    assert_eq!(rows[0]["state"], "closed", "{plan:#}");
+
+    let landing =
+        fx.r.land(&approver(), &info.id)
+            .unwrap_or_else(|e| panic!("land a: {e} {:?}", e.issues));
+    let seal = sealed(&fx.r, &landing);
+    let rows = rows_of_kind(&seal, "tension");
+    assert_eq!(rows.len(), 1, "{seal:#}");
+    assert_eq!(rows[0]["id"], tn);
+    assert_eq!(
+        rows[0]["outcome"],
+        PlanOutcome::Confirmed.as_str(),
+        "{seal:#}"
+    );
 }

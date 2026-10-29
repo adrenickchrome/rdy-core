@@ -59,8 +59,9 @@ fn land_tag(r: &mut Rdy, id: Option<&str>, body: &str, name: &str) -> String {
 }
 
 fn objects(src: &Rdy) -> Vec<(u8, Vec<u8>)> {
-    const COPIED: [u8; 8] = [
+    const COPIED: [u8; 9] = [
         kinds::BLOCK,
+        kinds::ASSESSMENT,
         kinds::CHANGE,
         kinds::PROPOSAL,
         kinds::LANDING,
@@ -199,7 +200,8 @@ fn ha12_format_calls_need_no_store() {
         (seen.dump, &seen.store),
         (
             facts.dump,
-            &maintenance::DumpStore::Features(facts.store.clone())
+            // the holder took landings, and each names its assessment
+            &maintenance::DumpStore::Features(and_assessment(facts.store.clone()))
         )
     );
     assert_eq!(seen.rdy, facts.rdy);
@@ -262,13 +264,16 @@ fn rf4_adapter_formats_and_old_stream_refusal() {
     let repo = r.store().repo_id().unwrap().unwrap();
     let mut bytes = Vec::new();
     rdy_engine::stream_export::write(&r.read(), tag, &Default::default(), &mut bytes).unwrap();
+    // the stream names the store's own features: a landing writes an assessment, so the
+    // `assessment` feature is active (ruling task-10 B, Amendment 1)
+    let features = r.store().features().clone();
     r.close().unwrap();
     rdy_adapter::stream::check_batch(bytes.as_slice(), Some(repo)).unwrap();
     // the header frame follows the 12-byte prelude: 4 length bytes, the kind and the hash, then
     // its payload, which starts with the manifest's length and JSON
     let len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
     let payload = bytes[49..49 + len].to_vec();
-    let json = rdy_store::format::baseline_features().to_json();
+    let json = features.to_json();
     assert_eq!(payload[..4], (json.len() as u32).to_le_bytes());
     let newer = rdy_store::format::StoreFeatures::of(vec![rdy_store::format::StoreFeature {
         name: "zz_future".into(),
@@ -374,4 +379,15 @@ fn ok12_upgrade_receipt_type_is_reachable_through_the_adapter() {
     let from_plan: &Option<maintenance::UpgradeReceipt> = &plan.receipt;
     let from_report: &Option<rdy_adapter::UpgradeReceipt> = &report.receipt;
     assert!(from_plan.is_none() && from_report.is_none());
+}
+
+/// `features` and the `assessment` store feature.
+fn and_assessment(features: rdy_store::format::StoreFeatures) -> rdy_store::format::StoreFeatures {
+    let mut f = features.features;
+    f.extend(
+        rdy_store::format::registered_features()
+            .into_iter()
+            .filter(|x| x.name == rdy_store::format::FEATURE_ASSESSMENT),
+    );
+    rdy_store::format::StoreFeatures::of(f)
 }

@@ -1707,7 +1707,9 @@ impl Drain {
         Some(Refusal { code, body })
     }
 
-    /// The closed table of resolutions (ledger O5). Anything outside it fails the run. A
+    /// The closed table of resolutions (ledger O5). Anything outside it fails the run. An
+    /// `E_PROPOSAL_MOVED` with a fresh card (RULING F1) is approved again once; one with no
+    /// card leaves the next round to propose again. A
     /// version that is not ready (`E_PROPOSAL_NOT_READY`, D-ME2HD) is resolved only when each of
     /// its issues is a conflict, a blocking tension, open change-plan items (`E_PLAN_OPEN`) or a
     /// stable change with no briefing (`E_BRIEF_REQUIRED`): the conflicts first, when it has
@@ -1722,6 +1724,19 @@ impl Drain {
     fn resolve(&mut self, i: usize, v: &str, pref: &str, refusing: &BTreeSet<String>, r: &Refusal) {
         let issues: Vec<Value> = r.body["issues"].as_array().cloned().unwrap_or_default();
         match r.code.as_str() {
+            // RULING F1: a failed freshness check with a fresh card in `corrected`; the person
+            // approves the fresh card once, through the same `rdy approve`. A second fresh card
+            // in a row fails the run; any other refusal of it is resolved as its own
+            "E_PROPOSAL_MOVED" if r.body["corrected"]["card"].is_object() => {
+                if let Some(again) = self.land(v, pref) {
+                    if again.code == "E_PROPOSAL_MOVED"
+                        && again.body["corrected"]["card"].is_object()
+                    {
+                        self.no_rule(v, &again.code, "a second fresh card");
+                    }
+                    self.resolve(i, v, pref, refusing, &again);
+                }
+            }
             "E_PROPOSAL_MOVED" => {}
             "E_PROPOSAL_NOT_READY" => {
                 let codes: Vec<String> = issues

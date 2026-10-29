@@ -9,16 +9,17 @@ use rdy_daemon::ErrorReply;
 use serde_json::{Value, json};
 
 /// The kinds of a plan item, in the order a read lists them.
-const KINDS: [&str; 5] = [
+const KINDS: [&str; 6] = [
     "update",
     "rejustify",
     "reaffirm",
     "confirm",
     "update_implementation",
+    "tension",
 ];
 
 /// The outcomes of a sealed item, in the order a read lists them.
-const OUTCOMES: [&str; 10] = [
+const OUTCOMES: [&str; 11] = [
     "updated",
     "relinked",
     "repinned",
@@ -29,7 +30,11 @@ const OUTCOMES: [&str; 10] = [
     "done",
     "deferred",
     "open",
+    "dismissed",
 ];
+
+/// The usage refusal of an answer that names no item and no group.
+const NO_ITEM_NO_GROUP: &str = "name an item, or a group with --kind, --follow-up, --doc or --edge";
 
 #[derive(clap::Args)]
 #[command(args_conflicts_with_subcommands = true)]
@@ -65,16 +70,46 @@ enum AnswerCmd {
     Defer(AnswerArgs),
     /// The work the item names is done. A reason is not kept.
     Done(AnswerArgs),
+    /// Dismiss a tension item, with a reason.
+    Dismiss(AnswerArgs),
 }
 
 #[derive(clap::Args)]
+#[command(group(clap::ArgGroup::new("by_group").multiple(true).args(["kind", "follow_up", "doc", "edge"])))]
 pub(crate) struct AnswerArgs {
-    /// The items: pi-<hex> ids (a unique prefix is enough) or cq- ids.
-    #[arg(required = true)]
+    /// The items: pi-<hex> ids (a unique prefix is enough), tn- ids or cq- ids.
     items: Vec<String>,
     /// Why (1 to 2000 characters).
     #[arg(long)]
     reason: Option<String>,
+    /// Answer every open item of this kind (update, rejustify, reaffirm, confirm, update_implementation or tension).
+    #[arg(long)]
+    kind: Option<String>,
+    /// Answer every open item of this follow-up: update, reaffirm or confirm.
+    #[arg(long = "follow-up")]
+    follow_up: Option<String>,
+    /// Answer every open item whose subject is in this doc.
+    #[arg(long)]
+    doc: Option<String>,
+    /// Answer every open item with this edge.
+    #[arg(long)]
+    edge: Option<String>,
+    /// With a confirm group: also repin each matched subject to its cause, in one change.
+    #[arg(long, requires = "by_group")]
+    repin: bool,
+    /// With --repin: a decision the repin change carries out (id, key or path); repeat for more.
+    #[arg(long)]
+    implements: Vec<String>,
+    /// With --repin: the repin change is editorial: its class (typo, restructure or clarify) and
+    /// the reason.
+    #[arg(long, num_args = 2, value_names = ["CLASS", "REASON"])]
+    editorial: Vec<String>,
+    /// With --repin: a source the repin change follows (id, key or path); repeat for more.
+    #[arg(long, value_name = "SOURCE")]
+    reflects: Vec<String>,
+    /// With --repin: record the code state of each repinned block with reflects globs.
+    #[arg(long)]
+    reflects_code: bool,
     /// The view whose plan is answered (default: the bound view, else your own).
     #[arg(long)]
     view: Option<String>,
@@ -137,20 +172,82 @@ pub(crate) fn plan(env: &Env, a: PlanArgs) -> Result<(Value, String), ErrorReply
         AnswerCmd::Confirm(a) => ("confirm", a),
         AnswerCmd::Defer(a) => ("defer", a),
         AnswerCmd::Done(a) => ("done", a),
+        AnswerCmd::Dismiss(a) => ("dismiss", a),
     };
-    let answers: Vec<Value> = a
+    let mut group = serde_json::Map::new();
+    for (key, value) in [
+        ("kind", &a.kind),
+        ("follow_up", &a.follow_up),
+        ("doc", &a.doc),
+        ("edge", &a.edge),
+    ] {
+        if let Some(v) = value {
+            group.insert(key.into(), json!(v));
+        }
+    }
+    if a.items.is_empty() && group.is_empty() {
+        clap::Error::raw(
+            clap::error::ErrorKind::MissingRequiredArgument,
+            NO_ITEM_NO_GROUP,
+        )
+        .exit();
+    }
+    // ruling final F2: the repin change's justification, as `rdy edit` and `rdy commit` take it;
+    // it goes on the group, else on each item, and the engine judges it as rdy_plan does
+    let mut justification = serde_json::Map::new();
+    if !a.implements.is_empty() {
+        justification.insert("implements".into(), json!(a.implements));
+    }
+    if let [class, reason] = a.editorial.as_slice() {
+        justification.insert(
+            "editorial".into(),
+            json!({"class": class, "reason": reason}),
+        );
+    }
+    if !a.reflects.is_empty() || a.reflects_code {
+        let mut r = serde_json::Map::new();
+        if !a.reflects.is_empty() {
+            r.insert("sources".into(), json!(a.reflects));
+        }
+        if a.reflects_code {
+            r.insert("code".into(), json!(true));
+        }
+        justification.insert("reflects".into(), Value::Object(r));
+    }
+    let justify = |spec: &mut Value| {
+        for (k, v) in &justification {
+            spec[k] = v.clone();
+        }
+    };
+    let mut answers: Vec<Value> = a
         .items
         .iter()
-        .map(|item| json!({"item": item, "act": act, "reason": a.reason}))
+        .map(|item| {
+            let mut spec = json!({"item": item, "act": act, "reason": a.reason});
+            if group.is_empty() {
+                justify(&mut spec);
+            }
+            spec
+        })
         .collect();
+    if !group.is_empty() {
+        let mut spec = json!({"group": group, "act": act, "reason": a.reason});
+        if a.repin {
+            spec["repin"] = json!(true);
+        }
+        justify(&mut spec);
+        answers.push(spec);
+    }
     let v = call(env, "plan", json!({"view": a.view, "answers": answers}))?;
-    let t = a
+    let mut lines: Vec<String> = a
         .items
         .iter()
         .map(|item| format!("answered {item}: {act}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    Ok((v, t))
+        .collect();
+    if !group.is_empty() {
+        lines.push(format!("answered group: {act}"));
+    }
+    Ok((v, lines.join("\n")))
 }
 
 pub(crate) fn reaffirm(env: &Env, a: ReaffirmArgs) -> Result<(Value, String), ErrorReply> {
@@ -283,7 +380,7 @@ pub(crate) fn plan_text(v: &Value) -> String {
 mod tests {
     use super::*;
 
-    /// O17: the rows, the five kind lines in enum order, the code line and the cursor.
+    /// O17: the rows, the six kind lines in enum order, the code line and the cursor.
     #[test]
     fn cp11_plan_text_has_the_closed_lines() {
         let item = |id: &str, kind: &str, answer: Value| {
@@ -305,7 +402,8 @@ mod tests {
                 "rejustify": {"open": 0, "closed": 0, "deferred": 0},
                 "reaffirm": {"open": 0, "closed": 0, "deferred": 0},
                 "confirm": {"open": 4, "closed": 5, "deferred": 6},
-                "update_implementation": {"open": 0, "closed": 0, "deferred": 0}}},
+                "update_implementation": {"open": 0, "closed": 0, "deferred": 0},
+                "tension": {"open": 0, "closed": 0, "deferred": 0}}},
             "code": {"files": 7},
             "notes": [],
             "next": "plan1:2:00:view:w",
@@ -321,6 +419,7 @@ rejustify: 0 open, 0 closed, 0 deferred\n\
 reaffirm: 0 open, 0 closed, 0 deferred\n\
 confirm: 4 open, 5 closed, 6 deferred\n\
 update_implementation: 0 open, 0 closed, 0 deferred\n\
+tension: 0 open, 0 closed, 0 deferred\n\
 code: 7 files\n\
 next: plan1:2:00:view:w"
         );

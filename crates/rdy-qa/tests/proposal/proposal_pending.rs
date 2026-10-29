@@ -478,7 +478,11 @@ fn di5_the_card_facts_come_from_the_store() {
         fact(i, "Base"),
         format!("canon at {}, current", head.short())
     );
-    assert!(fact(i, "Tensions").ends_with("advisory, answers not recorded yet"));
+    // D-45RG6: the advisory tension shows its answer, the one `batch_project` recorded before the
+    // propose (`OPEN_ITEM_REASON`, act confirm)
+    let tensions = fact(i, "Tensions");
+    assert!(tensions.contains(" advisory: tn-"), "{tensions}");
+    assert!(tensions.ends_with("(confirm: test: checked)"), "{tensions}");
     put(
         &mut r,
         "elsewhere",

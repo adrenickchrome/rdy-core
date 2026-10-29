@@ -128,10 +128,28 @@ pub(crate) struct Sides {
 /// `resolved`: the open canon tensions of its recorded canon on a block it writes that its
 /// landing form no longer has (no tension of the same kind on the same blocks): its change
 /// resolves them, and each closes as `updated`.
+/// `bound`: the tension items a stored proposal version's propose bound an answer to
+/// ([`FixedTensions::bound`]), rebuilt from its records, so a later exclusion, landing or status
+/// change of the other side never removes one (ruling final F1).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct VersionTensions {
     pub(crate) open: Vec<Arc<Tension>>,
     pub(crate) resolved: Vec<Arc<Tension>>,
+    pub(crate) bound: Vec<PlanCandidate>,
+}
+
+/// The tension set a stored proposal version was made with ([`fixed_tensions`]).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FixedTensions {
+    /// The ids of the tension rows of its stored assessment (O17).
+    pub(crate) ids: BTreeSet<Hash>,
+    /// The tension item of each row that names a bound answer, rebuilt from the row alone: its
+    /// subject the row's id, its cause the row's first block, its cause hash the row's vkey. The
+    /// bound answer still answers it when the live tension is gone (ruling final F1).
+    pub(crate) bound: Vec<PlanCandidate>,
+    /// The rows `bound` comes from, as stored: a fresh assessment keeps each one the live set no
+    /// longer lists (`readiness::assessment::Inputs::carried`).
+    pub(crate) rows: Vec<rdy_model::assessment::AssessmentTension>,
 }
 
 /// The kind and the blocks of `t`: what one tension keeps when only a side's version moves.
@@ -176,7 +194,7 @@ fn version_tensions(
     view: &str,
     changes: &[Hash],
     canon_at: Option<Hash>,
-    fixed: Option<&BTreeSet<Hash>>,
+    fixed: Option<&FixedTensions>,
     base: &NetState,
     written: &BTreeSet<BlockId>,
 ) -> Result<VersionTensions, RdyError> {
@@ -190,7 +208,8 @@ fn version_tensions(
     if held.is_empty() {
         return Ok(VersionTensions::default());
     }
-    Ok(tensions_of(st, view, &held, canon_at, fixed, base, written).unwrap_or_default())
+    let ids = fixed.map(|f| &f.ids);
+    Ok(tensions_of(st, view, &held, canon_at, ids, base, written).unwrap_or_default())
 }
 
 /// The body of [`version_tensions`] for the held changes `held`.
@@ -246,7 +265,11 @@ fn tensions_of(
         })
         .collect();
     resolved.sort_by_key(|t| t.id);
-    Ok(VersionTensions { open, resolved })
+    Ok(VersionTensions {
+        open,
+        resolved,
+        bound: vec![],
+    })
 }
 
 /// One linked checkout: the version's HEAD and the chain's first HEAD, resolved (`None` is an
@@ -270,7 +293,7 @@ pub(crate) fn compute(
     view: &str,
     changes: &[Hash],
     canon_at: Option<Hash>,
-    fixed: Option<&BTreeSet<Hash>>,
+    fixed: Option<&FixedTensions>,
     heads: &[PlanHead],
     first_heads: &[PlanHead],
 ) -> Result<ComputedPlan, RdyError> {
@@ -283,23 +306,48 @@ pub(crate) fn compute(
 /// change plan (the queue, every approval path, `change_plan{proposal}`, the landing's seal and
 /// guard) reads its in-flight tension items from that set, so a tension that a later write in
 /// another view gives is context only and a view edit after the proposal changes no readiness
-/// (O12). `None` for a version with no stored assessment: it reads every in-flight form.
+/// (O12). A frozen plan keeps every tension item it was bound with (ruling final F1): each row
+/// that names a bound answer gives its item ([`FixedTensions::bound`]), whatever the live tension
+/// set holds later. `None` for a version with no stored assessment: it reads every in-flight
+/// form.
 pub(crate) fn fixed_tensions(
     st: &ReadState,
     version: &Hash,
-) -> Result<Option<BTreeSet<Hash>>, RdyError> {
+) -> Result<Option<FixedTensions>, RdyError> {
     let reader = st.reader();
     let Some(a) = reader.assessment_of_proposal(version, st.seq())? else {
         return Ok(None);
     };
-    Ok(Some(
-        reader
-            .assessment(&a)?
-            .tensions
-            .iter()
-            .map(|t| t.id)
-            .collect(),
-    ))
+    let rows = reader.assessment(&a)?.tensions;
+    let (mut bound, mut kept) = (vec![], vec![]);
+    for row in &rows {
+        let (Some(answer), Some(cause)) = (&row.answer, row.blocks.first()) else {
+            continue;
+        };
+        let subject = row.id.to_string();
+        let id = item_hash(cause, &subject, PlanKind::Tension);
+        // a row whose answer names another item is no record of this one
+        if answer.item != id {
+            continue;
+        }
+        bound.push(PlanCandidate {
+            id,
+            kind: PlanKind::Tension,
+            subject,
+            cause: cause.clone(),
+            edge: TENSION_EDGE.to_string(),
+            subject_hash: None,
+            cause_hash: row.vkey,
+            close: None,
+            stable: false,
+        });
+        kept.push(row.clone());
+    }
+    Ok(Some(FixedTensions {
+        ids: rows.iter().map(|t| t.id).collect(),
+        bound,
+        rows: kept,
+    }))
 }
 
 /// [`compute`] of change values of a version of `view`, read or not yet written: the propose
@@ -321,7 +369,7 @@ fn compute_fixed(
     view: &str,
     changes: &[Change],
     canon_at: Option<Hash>,
-    fixed: Option<&BTreeSet<Hash>>,
+    fixed: Option<&FixedTensions>,
     heads: &[PlanHead],
     first_heads: &[PlanHead],
 ) -> Result<ComputedPlan, RdyError> {
@@ -329,6 +377,7 @@ fn compute_fixed(
     let ids: Vec<Hash> = changes.iter().map(Change::id).collect();
     sides.tensions =
         version_tensions(st, view, &ids, canon_at, fixed, &sides.base, &sides.written)?;
+    sides.tensions.bound = fixed.map(|f| f.bound.clone()).unwrap_or_default();
     let code = code_sides(st, heads, first_heads)?;
     compute_in(st, &sides, code.as_deref(), MAX_PLAN_ITEMS)
 }
@@ -769,6 +818,13 @@ pub(crate) fn compute_in(
             continue;
         };
         admit(&mut items, c, limit)?;
+    }
+    // ruling final F1: a bound item the live set no longer gives stays, open until its bound
+    // answer closes it; one the live set gives keeps the live item and its close
+    for c in &sides.tensions.bound {
+        if !items.contains_key(&c.id) {
+            admit(&mut items, c.clone(), limit)?;
+        }
     }
     let (code_files, code_unavailable) = match code {
         None => (0, true),

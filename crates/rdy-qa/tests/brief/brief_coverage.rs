@@ -509,6 +509,10 @@ fn perf4_a_cold_briefing_works_out_its_own_blocks_only() {
     let docs = rdy_engine::testkit::generate_tree(dir.path(), 3, 4, 10);
     let mut r = Rdy::open(dir.path()).unwrap();
     land(&mut r, "work").unwrap();
+    // the ready propose works out coverage for the assessment it stores (ruling task-10
+    // Amendment 1, item 3), so the briefing is cold only in a fresh open
+    r.close().unwrap();
+    let r = Rdy::open(dir.path()).unwrap();
     let total = r.read().materialized(&Scope::Canon).unwrap().len();
     let before = rdy_engine::coverage::local_entries();
     let b = r

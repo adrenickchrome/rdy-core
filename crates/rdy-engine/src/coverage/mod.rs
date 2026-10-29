@@ -23,8 +23,8 @@ pub use model::{
 };
 pub(crate) use model::{issue_paths, sort_issue_refs};
 pub use onboarding::*;
-pub(crate) use score::page_blocks;
 pub use score::{AreaScore, CoverageReport, PAGES_CAP, PageScore, Rollup, report_builds, rollup};
+pub(crate) use score::{page_blocks, rollups_of};
 pub(crate) use state::{CandidateCoverage, CoverageMemo};
 pub use state::{
     CoverageSummary, coverage_error_text, issues_rebuilt_for_tests, local_entries,

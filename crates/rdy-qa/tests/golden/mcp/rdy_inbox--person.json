@@ -1,49 +1,49 @@
 {
-  "cursor": "0.31738.0",
+  "cursor": "0.39740.0",
   "entries": [
     {
       "event": "intent_posted",
       "ids": [
-        "9cb0d0dc5ad656e4270b2382e39043073bb5377f0e5129fd3fe7981e87d12a3d"
+        "2e88955e2d842cee885ee90eaedf551ea5b7a8f8a007728861a72b7280410443"
       ],
-      "line": "agent:a posted intent 9cb0d0dc5ad6 on area payments"
+      "line": "agent:a posted intent 2e88955e2d84 on area payments"
     },
     {
       "event": "tension_opened",
       "ids": [
-        "2fc67204b7d0babb1dd212c7c39865d3ac2ffd72e5749a551c9ce29e294b0d55",
-        "2937373135870a5c12c0961a1c4ad24b973cff2dc990d84184cf2f06a6038dd1"
+        "8d04a97dc61b005da7e77ed4d2c275075ff46def7320ce5a62ac5b0ad9ea7aa6",
+        "6587b5fcea60040723ef6f326a43e593671b39dd577459c596f622f92bfdbb7c"
       ],
-      "line": "tension 2fc67204b7d0 opened on your change 293737313587 (edit_collision, blocking): a side changed (change cbdeff20c1cf)"
+      "line": "tension 8d04a97dc61b opened on your change 6587b5fcea60 (edit_collision, blocking): a side changed (change 2d40fd037681)"
     },
     {
       "event": "tension_opened",
       "ids": [
-        "c401da0285796ca5f18a624d58d9117226904a8d07849414cd6f80304ada08f4",
-        "2937373135870a5c12c0961a1c4ad24b973cff2dc990d84184cf2f06a6038dd1"
+        "7fb1cc757398c732cf492aa5da7bc5fede4874ade083ec40fafefa189eb6e9f5",
+        "6587b5fcea60040723ef6f326a43e593671b39dd577459c596f622f92bfdbb7c"
       ],
-      "line": "tension c401da028579 opened on your change 293737313587 (edit_collision, blocking): a side changed (change 2f8076da276e)"
+      "line": "tension 7fb1cc757398 opened on your change 6587b5fcea60 (edit_collision, blocking): a side changed (change d5fbee6b8e3c)"
     },
     {
       "event": "pending_added",
       "ids": [
-        "8c73aeee29c416b423883af29364cb839217ee1d13cfb190ee42b55c9098eecc"
+        "cacdda6787ba4212b2ba310069bbf1a28173c97712843f8e441c8870e5d8199c"
       ],
-      "line": "P-8c73aeee29c4@1 waits for an answer; read rdy_pending"
+      "line": "P-cacdda6787ba@1 waits for an answer; read rdy_pending"
     },
     {
       "event": "pending_added",
       "ids": [
-        "9e6ebf742eae94093e57f3609f00b8b7c66490fcc76bf97759198ea2386c3a38"
+        "2066318c5286c4f00e1cb01a6fa2f7188621c4f6039e880e8162cd09ea867e47"
       ],
       "line": "new advice waits for an answer; read rdy_pending"
     },
     {
       "event": "pending_added",
       "ids": [
-        "6133f2fcecb44cc47a4684bd5983df8973900505954ce20b6db3e8d2f06c6ad1"
+        "6a4501daae33288e9259b5ba841da1a102887f02a28a8f3264251757cbc91b94"
       ],
-      "line": "P-8c73aeee29c4@2 waits for an answer; read rdy_pending"
+      "line": "P-cacdda6787ba@2 waits for an answer; read rdy_pending"
     }
   ],
   "more": false,

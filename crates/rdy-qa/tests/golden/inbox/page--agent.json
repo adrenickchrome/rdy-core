@@ -1,66 +1,66 @@
 {
-  "cursor": "0.18125.0",
+  "cursor": "0.25872.0",
   "entries": [
     {
       "event": "tension_opened",
       "ids": [
-        "d4e17b59a58867bfbf312ab0ae36b8058c71b2be43488f678b42d80652a8cb8a",
-        "a0a20b9d7cf13336e08ed67dd17ca42a5cc1767e75ee096a2cd3d6b14991cc52"
+        "7a600b64592f60002797c83dcc046992e53b21c3269717156e294d005e6b708b",
+        "2efc20d1e3fd38179973d9fbedf4727321db175e658f9dd34a6dce32caf43040"
       ],
-      "line": "tension d4e17b59a588 opened on your change a0a20b9d7cf1 (edit_collision, blocking): a side changed (change 8430559140f4)"
+      "line": "tension 7a600b64592f opened on your change 2efc20d1e3fd (edit_collision, blocking): a side changed (change e6dfb4115f8d)"
     },
     {
       "event": "pending_added",
       "ids": [
-        "c01d473b080f73f3ab06e13cdcbdc0f985568f45b4764ff0a1360d45f6e9467e"
+        "2433b8aca94a95f470aaf7c7f79533bab954c4f65c13128e00763d5fb02265ec"
       ],
-      "line": "P-c01d473b080f@1 waits for an answer; read rdy_pending"
+      "line": "P-2433b8aca94a@1 waits for an answer; read rdy_pending"
     },
     {
       "event": "intent_posted",
       "ids": [
-        "e6d149772c917dea7bd9f75cd491b0e54d8b13d753a0c52b1767abd1b3e5897a"
+        "8f311d0f9f671cb5d1614de15813ff43adf5658468b1e4250cfe2c57536f3aa4"
       ],
-      "line": "agent:b posted intent e6d149772c91 on 1 blocks you are changing"
+      "line": "agent:b posted intent 8f311d0f9f67 on 1 blocks you are changing"
     },
     {
       "event": "tension_opened",
       "ids": [
-        "0148aef6daee4ffd0c5371bb26d68006e51cc84965a62deccc9a694ae4f7299a",
-        "a0a20b9d7cf13336e08ed67dd17ca42a5cc1767e75ee096a2cd3d6b14991cc52"
+        "c2ee3f30f301850723cf3701f3b64c0e1d56b87e5c7a2d405b27e89374cbc7d9",
+        "2efc20d1e3fd38179973d9fbedf4727321db175e658f9dd34a6dce32caf43040"
       ],
-      "line": "tension 0148aef6daee opened on your change a0a20b9d7cf1 (edit_collision, blocking): a side changed (change 045f519968a5)"
+      "line": "tension c2ee3f30f301 opened on your change 2efc20d1e3fd (edit_collision, blocking): a side changed (change bbbcd65200ce)"
     },
     {
       "event": "pending_added",
       "ids": [
-        "4cf5f61785af4dfb7e3d9a5eb34ab3e59e8b56fa8b7f68b6e84c24135f8001da"
+        "e182679aa7f4f96386e469c6d3ecbd6217453d6ea62bb38b5b8a156278905279"
       ],
-      "line": "P-4cf5f61785af@1 waits for an answer; read rdy_pending"
+      "line": "P-e182679aa7f4@1 waits for an answer; read rdy_pending"
     },
     {
       "event": "landed",
       "ids": [
-        "8e762e74369f605c416051cb870d3c4af24fa7225919f6312eb0f65fef6ff98d",
-        "4cf5f61785af4dfb7e3d9a5eb34ab3e59e8b56fa8b7f68b6e84c24135f8001da"
+        "7e9c9777a3111a25085badc32ab9d1147f2d79bdfe43f1a63e9c74b5066563ec",
+        "e182679aa7f4f96386e469c6d3ecbd6217453d6ea62bb38b5b8a156278905279"
       ],
-      "line": "landing 8e762e74369f of view work changed 1 blocks in your areas (payments)"
+      "line": "landing 7e9c9777a311 of view work changed 1 blocks in your areas (payments)"
     },
     {
       "event": "view_rebased",
       "ids": [
-        "8e762e74369f605c416051cb870d3c4af24fa7225919f6312eb0f65fef6ff98d",
-        "55aaba204127ef8ee2cf8ce582048bd469a43f047ec1dc28553598a1a9d5762c"
+        "7e9c9777a3111a25085badc32ab9d1147f2d79bdfe43f1a63e9c74b5066563ec",
+        "bce2a3c98b506c9a23307517914f1779fb6df62c52f29ab08c43070f9feec506"
       ],
-      "line": "your view a rebased onto landing 8e762e74369f with 1 conflicts"
+      "line": "your view a rebased onto landing 7e9c9777a311 with 1 conflicts"
     },
     {
       "event": "tension_opened",
       "ids": [
-        "e160a7ad99f250d7623f577a166f9bcaf049c5f15f81b619cfd42674ea7badba",
-        "a0a20b9d7cf13336e08ed67dd17ca42a5cc1767e75ee096a2cd3d6b14991cc52"
+        "8b5a5637f2b1184d8f1f8c74d4290e9c766aa9dd9ac13f98c20cd34c432be498",
+        "2efc20d1e3fd38179973d9fbedf4727321db175e658f9dd34a6dce32caf43040"
       ],
-      "line": "tension e160a7ad99f2 replaces 0148aef6daee on your change a0a20b9d7cf1 (edit_collision, blocking): landing 8e762e74369f"
+      "line": "tension 8b5a5637f2b1 replaces c2ee3f30f301 on your change 2efc20d1e3fd (edit_collision, blocking): landing 7e9c9777a311"
     }
   ],
   "more": false

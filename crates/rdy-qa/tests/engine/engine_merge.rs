@@ -35,7 +35,7 @@ fn merge1_a_proposal_made_before_another_landing_on_its_blocks_is_moved_at_land(
     )
     .unwrap();
     let pa = r.propose(&writer(), "a", "a", Some(TEST_SUMMARY)).unwrap();
-    let pb = r.propose(&writer(), "b", "b", None).unwrap();
+    let pb = r.propose(&writer(), "b", "b", Some(TEST_SUMMARY)).unwrap();
     r.land(&approver(), &pa.id).unwrap();
     let head = r.store().canon_head().unwrap();
     let e = r.land(&approver(), &pb.id).unwrap_err();

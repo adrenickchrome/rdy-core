@@ -150,7 +150,7 @@ pub struct Diff {
 
 /// The depth-first reading order of `m`: each block, then its children in order. Blocks no root
 /// reaches follow, in id order, so every block has a place.
-fn reading_order(m: &Materialized) -> Vec<BlockId> {
+pub(crate) fn reading_order(m: &Materialized) -> Vec<BlockId> {
     let mut out = Vec::with_capacity(m.len());
     let mut seen: BTreeSet<BlockId> = BTreeSet::new();
     // an explicit stack: deep trees never overflow the call stack

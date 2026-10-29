@@ -51,8 +51,17 @@ fn registry() -> Vec<UpgradeStep> {
     }]
 }
 
-fn upgraded() -> StoreFeatures {
-    baseline_features().merged(&[test_feature()])
+/// `from` with the test feature: a store's own features after the one step.
+fn upgraded_from(from: &StoreFeatures) -> StoreFeatures {
+    from.merged(&[test_feature()])
+}
+
+/// The store's own features, read from its mirror. A store that holds a landing has the
+/// `assessment` feature, which its propose activates (ruling task-10 B, Amendment 1).
+fn features_of(root: &Path) -> StoreFeatures {
+    read_format_file(&store_dir(root))
+        .unwrap()
+        .expect("the store has a feature manifest")
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -306,6 +315,7 @@ fn ok12_handle_open_never_runs_an_upgrade() {
     let h = base.path().join("h");
     project(&p);
     holder(&h, &source(&base.path().join("src")), 1);
+    let (pf, hf) = (features_of(&p), features_of(&h));
     let before = tree(base.path());
 
     // planned steps: both opens refuse before any backup, append or mirror
@@ -340,12 +350,12 @@ fn ok12_handle_open_never_runs_an_upgrade() {
         Vec::<String>::new(),
         "nothing was written"
     );
-    assert_eq!(format_text(&p), baseline_features().to_text());
+    assert_eq!(format_text(&p), pf.to_text());
     assert_eq!(upgrade_batches(&p), 1);
     assert_eq!(upgrade_batches(&h), 1);
 
     // the explicit call completes it with no second batch, and the opens then succeed
-    for root in [&p, &h] {
+    for (root, from) in [(&p, &pf), (&h, &hf)] {
         let plan = maintenance::inspect_store(root).unwrap();
         assert!(plan.pending_check && plan.steps.is_empty(), "{plan:?}");
         let report = maintenance::upgrade(root, false).unwrap();
@@ -353,8 +363,8 @@ fn ok12_handle_open_never_runs_an_upgrade() {
             report.changed && report.checked && !report.pending,
             "{report:?}"
         );
-        assert_eq!(report.to, upgraded());
-        assert_eq!(format_text(root), upgraded().to_text());
+        assert_eq!(report.to, upgraded_from(from));
+        assert_eq!(format_text(root), upgraded_from(from).to_text());
         assert_eq!(upgrade_batches(root), 1);
     }
     StoreHandle::open(&p).unwrap().close().unwrap();
@@ -368,6 +378,7 @@ fn ok12_explicit_maintenance_preserves_holder_identity() {
     let root = base.path().join("h");
     let src = source(&base.path().join("src"));
     holder(&root, &src, 2);
+    let from = features_of(&root);
 
     // what the holder is, before maintenance
     let h = StoreHandle::open_holder(&root).unwrap();
@@ -401,7 +412,7 @@ fn ok12_explicit_maintenance_preserves_holder_identity() {
     assert_eq!(planned.steps, ["add_test"]);
     assert_eq!(
         (planned.from.clone(), planned.to.clone()),
-        (baseline_features(), upgraded())
+        (from.clone(), upgraded_from(&from))
     );
     let dry = maintenance::upgrade_with_registry_for_tests(&root, true, &registry()).unwrap();
     assert!(dry.dry_run && !dry.changed && !dry.checked, "{dry:?}");
@@ -422,11 +433,11 @@ fn ok12_explicit_maintenance_preserves_holder_identity() {
     assert_eq!(done.steps, ["add_test"]);
     assert_eq!(
         (done.from.clone(), done.to.clone()),
-        (baseline_features(), upgraded())
+        (from.clone(), upgraded_from(&from))
     );
     assert!(done.batch.is_some());
     assert!(done.backup.as_ref().is_some_and(|b| b.exists()), "{done:?}");
-    assert_eq!(format_text(&root), upgraded().to_text());
+    assert_eq!(format_text(&root), upgraded_from(&from).to_text());
     assert_eq!(upgrade_batches(&root), 1);
 
     // acknowledged log bytes are kept: each old segment is a prefix of the new one
@@ -474,6 +485,7 @@ fn ok12_held_snapshot_blocks_maintenance_until_released() {
     let base = tempfile::tempdir().unwrap();
     let root = base.path().join("h");
     holder(&root, &source(&base.path().join("src")), 1);
+    let from = features_of(&root);
     let locked = |root: &Path| {
         err(maintenance::upgrade_with_registry_for_tests(
             root,
@@ -541,7 +553,7 @@ fn ok12_held_snapshot_blocks_maintenance_until_released() {
         "nothing was written"
     );
     assert_eq!(upgrade_batches(&root), 0);
-    assert_eq!(format_text(&root), baseline_features().to_text());
+    assert_eq!(format_text(&root), from.to_text());
     assert!(
         backups(&root).is_empty(),
         "the refusal came before the backup"
@@ -553,7 +565,7 @@ fn ok12_held_snapshot_blocks_maintenance_until_released() {
     // released: the call runs
     let done = maintenance::upgrade_with_registry_for_tests(&root, false, &registry()).unwrap();
     assert!(done.changed && done.checked, "{done:?}");
-    assert_eq!(format_text(&root), upgraded().to_text());
+    assert_eq!(format_text(&root), upgraded_from(&from).to_text());
     assert_eq!(upgrade_batches(&root), 1);
     assert_eq!(backups(&root).len(), 1);
 }
@@ -669,7 +681,7 @@ fn ok12_format_facts_are_shared_with_core() {
     assert_eq!(seen, rdy_engine::formats::inspect_dump(&dump).unwrap());
     assert_eq!(
         seen.store,
-        maintenance::DumpStore::Features(baseline_features())
+        maintenance::DumpStore::Features(features_of(&root))
     );
 
     // the plan and the report are core's helpers' values: one shape, one JSON
@@ -677,7 +689,7 @@ fn ok12_format_facts_are_shared_with_core() {
     let core_plan = rdy_engine::maintenance::plan(&root).unwrap();
     assert_eq!(plan, core_plan);
     assert!(plan.steps.is_empty() && !plan.requires_upgrade && !plan.pending_check);
-    assert_eq!(plan.from, baseline_features());
+    assert_eq!(plan.from, features_of(&root));
     for dry_run in [true, false] {
         let report: maintenance::UpgradeReport = maintenance::upgrade(&root, dry_run).unwrap();
         let core = rdy_engine::maintenance::run(&root, dry_run).unwrap();

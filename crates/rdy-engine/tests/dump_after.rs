@@ -198,9 +198,11 @@ fn hc4_increment_is_only_the_sealed_suffix() {
     assert_eq!(inc.out.as_deref(), Some(out.display().to_string().as_str()));
     assert_eq!(inc.kind, DumpKind::Increment);
     assert_eq!(inc.dump_format, 4);
+    // the store's own features: a landing writes an assessment, so the `assessment` feature is
+    // active (ruling task-10 B)
     assert_eq!(
         inc.store_format,
-        rdy_store::format::DumpStore::Features(rdy_store::format::baseline_features())
+        rdy_store::format::DumpStore::Features(r.store().features().clone())
     );
     assert_eq!(inc.repo_id, full.repo_id);
     assert_eq!(inc.base, full.end);
@@ -414,7 +416,8 @@ fn hc4_predecessor_checks_use_exact_errors() {
         expect_err(st.dump_after(&bad, &out)),
         format!(
             "previous dump is of store format 15, but this store is of store features {}",
-            String::from_utf8(rdy_store::format::baseline_features().to_json()).unwrap()
+            // the store's own features (ruling task-10 B)
+            String::from_utf8(r.store().features().to_json()).unwrap()
         ),
     );
     // then an end past this state

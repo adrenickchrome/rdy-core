@@ -17,7 +17,8 @@
 //! tension id from before that change is carried to the item of the same tension (the same kind
 //! on the same blocks), with its act and reason; an input that names no item after the carry is
 //! the unknown-item refusal, and one whose tension matches two items is not carried, so the item
-//! stays open.
+//! stays open. A recorded answer is copied, not moved: the earlier answer stays in the version's
+//! cumulative answers, naming no item.
 //!
 //! # Land
 //!
@@ -358,8 +359,11 @@ fn carry_answers(
         return Ok((prior.to_vec(), inputs.to_vec()));
     }
     let item_of = |t: &Tension| compute::tension_candidate(t, None);
-    // the view's recorded answers: one that names an earlier item with its tension's vkey moves
-    // to the later item, unless that item has an answer already
+    // the view's recorded answers: one that names an earlier item with its tension's vkey is
+    // copied to the later item, unless that item has an answer already. The earlier answer
+    // stays: a chain's answers are cumulative, so the version that continues the chain keeps
+    // each answer its predecessor holds (the store's chain rule); it names no item now, so it
+    // closes nothing
     let mut answers: BTreeMap<Hash, PlanAnswer> =
         prior.iter().map(|a| (a.item, a.clone())).collect();
     for (from, to) in carried.values() {
@@ -375,7 +379,6 @@ fn carry_answers(
             .filter(|a| a.cause == from.vkey)
             .cloned()
         {
-            answers.remove(&old.id);
             answers.insert(
                 new.id,
                 PlanAnswer {
@@ -737,8 +740,14 @@ mod tests {
                 serde_json::to_value(pp.summary.by_kind["tension"]).unwrap(),
                 json!({"open": 0, "closed": 1, "deferred": 0})
             );
-            assert_eq!(pp.answers.len(), 1, "{:#?}", pp.answers);
-            let a = &pp.answers[0];
+            // the earlier answer stays beside the carried one (a chain's answers are
+            // cumulative); it names no item now
+            assert_eq!(pp.answers.len(), 2, "{:#?}", pp.answers);
+            let a = pp
+                .answers
+                .iter()
+                .find(|a| a.item == item.id)
+                .expect("the carried answer");
             assert_eq!((a.item, a.cause), (item.id, later[0].vkey));
             assert_eq!(a.act, PlanAct::Confirm);
             assert_eq!(a.reason.as_deref(), Some(reason));

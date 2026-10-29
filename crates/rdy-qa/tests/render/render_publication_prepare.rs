@@ -260,6 +260,12 @@ const SITE_DIGESTS: [(&str, &str, &str); 4] = [
 /// proposal's were re-taken for object encoding 1: its scope text is `proposal:<hash>`, and the
 /// version's hash follows its changes' encoding-1 ids; the other scopes kept their bytes.
 /// Re-taken after the reference period rule (ruling task-7): an automatic label drops its final period before an authored period; only that text moved.
+/// The proposal's re-taken for the propose's assessment record (ruling task-10 Amendment 1, item
+/// 5): the earlier landing names its assessment, so canon's head and the version's hash move,
+/// and only the `proposal:<hash>` scope text changed; the other scopes kept their bytes.
+/// The proposal's re-taken again when a landing names its assessment (ruling task-12 R2.3): the
+/// landing record and canon's head move, so the version's hash does; only that scope's text
+/// changed.
 const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "canon",
@@ -294,11 +300,11 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "proposal",
         [
-            "d29b9083db2b584eea1b739ead3c077220909f4d68aacf93f635a76c269ad905",
-            "9d078b6ed8c45b53332ee406b85f2a2c9fb45504451141c7779bf823cf136753",
-            "5830f62d21c5799969dda4facf903aca5c9eddad929a9050f78aca1d16223557",
-            "deea59b2cb7e1c4ea1dcb74038f1f2ac133b279afae6b091aa0de1c49ef2357c",
-            "26148e3a62f57f443ae2faf73e097940e30ac98b60fc5b1c2fc4557511acc576",
+            "ea9f61f2606c8bc41a5fbaadf7db2a5715a03600de2571b3be788118ecfa39e0",
+            "c2de849a812b0c360e00bf6f010e72b87b688f0226bd8a92c043d30e2b258794",
+            "e7a7176f0c91c8aad9c194f062985d7d42f718cc6b949d8d4ca3e7b19d16f912",
+            "7cd490c647215d3b741079c9109c7bb418936217cb3b9f32e6ff3088d09d01ef",
+            "93b9ff25a84dc4009a88b49328058fc68724c5abfe9855b9edd7cef5c0101962",
         ],
     ),
 ];

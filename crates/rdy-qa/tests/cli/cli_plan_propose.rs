@@ -151,6 +151,16 @@ fn cp14_cli_plan_then_propose_uses_recorded_answers() {
         open[0]["message"], "3 change-plan items are open",
         "{row:#}"
     );
+    // rg10 (O20): the reply says it is not ready, with the queue's issue
+    assert_eq!(first["ready"], false, "{first:#}");
+    assert_eq!(first["assessment"], Value::Null, "{first:#}");
+    let plan_open: Vec<&Value> = first["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["code"] == "E_PLAN_OPEN")
+        .collect();
+    assert_eq!(plan_open, open, "{first:#}");
 
     // rdy plan records the answers; the next propose binds them
     let out = s.rdy_as(

@@ -150,6 +150,18 @@ fn kind1_an_asset_with_a_future_proposals_bytes_does_not_hide_it() {
             .unwrap();
         // a write outside the engine must be followed by invalidate() (snap1 precondition)
         r.invalidate();
+        // O10: the assessment propose writes, so the version is ready
+        let pref = r.resolve_proposal(&p.to_string())?;
+        let st = r.read();
+        let v = st.reader().proposal(&p)?;
+        let c = rdy_engine::readiness::Candidate::stored(&st, pref, v)?;
+        let got = rdy_engine::readiness::assess(&st, &c, st.require_up_to_date())?;
+        let a = got
+            .assessment
+            .unwrap_or_else(|| panic!("not ready: {:#?}", got.readiness.issues));
+        drop(st);
+        r.store_mut().put_assessment(&a).unwrap();
+        r.invalidate();
         Ok(json!(p.to_string()))
     })
     .as_str()

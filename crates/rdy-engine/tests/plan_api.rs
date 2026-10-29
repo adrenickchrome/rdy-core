@@ -1784,6 +1784,22 @@ fn cp8_input_limits_have_exact_text() {
     );
 }
 
+/// O10: the assessment propose writes for the ready `version`; a version the store writes alone
+/// has none, and its approval is not ready.
+fn assess(r: &mut Rdy, version: Hash) {
+    let pref = r.resolve_proposal(&version.to_string()).unwrap();
+    let st = r.read();
+    let p = st.reader().proposal(&version).unwrap();
+    let c = rdy_engine::readiness::Candidate::stored(&st, pref, p).unwrap();
+    let got = rdy_engine::readiness::assess(&st, &c, st.require_up_to_date()).unwrap();
+    let a = got
+        .assessment
+        .unwrap_or_else(|| panic!("not ready: {:#?}", got.readiness.issues));
+    drop(st);
+    r.store_mut().put_assessment(&a).unwrap();
+    r.invalidate();
+}
+
 /// Fix round 1: a retained state reads the plan as it was published. A later answer and a later
 /// landing move neither its plan ref nor its chain's landing status: the plan ref is captured
 /// with the state, and a landing counts only when its frame lies before the state's sequence.
@@ -1835,6 +1851,7 @@ fn cp8_retained_reads_keep_their_plan_across_answers_and_landings() {
     };
     let bh = put_plan_frames(r.store_mut(), &bound);
     r.invalidate();
+    assess(&mut r, version);
     let captured = r.read();
     let before = read_at(&captured);
     assert_eq!(before["plan"], bh.to_string());
@@ -1897,6 +1914,7 @@ fn cp8_answer_only_successors_keep_the_last_bound_proposal() {
     };
     let bh = put_plan_frames(r.store_mut(), &bound);
     r.invalidate();
+    assess(&mut r, version);
     r.fsck().unwrap();
     let pv = plan(
         &r,

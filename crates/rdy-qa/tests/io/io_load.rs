@@ -114,16 +114,21 @@ fn dl6_the_loaded_index_is_a_reindex() {
 
 #[test]
 fn dl6_a_load_runs_fsck_and_reports_it() {
-    let (_src, scratch, file) = dumped();
+    let (src, scratch, file) = dumped();
+    // the source store's own features: a landing writes an assessment, so the `assessment`
+    // feature is active (ruling task-10 B, Amendment 1)
+    let features = {
+        let r = Rdy::open(src.path()).unwrap();
+        let f = r.store().features().clone();
+        r.close().unwrap();
+        f
+    };
     let s = load(&file, &scratch.path().join("new")).unwrap();
     assert_eq!(s.fsck.unlogged_moves, 0);
     assert!(s.landings >= 3 && s.tags >= 1 && s.views >= 3, "{s:?}");
     assert_eq!(
         (s.dump_format, s.store_format.clone()),
-        (
-            4,
-            rdy_store::format::DumpStore::Features(rdy_store::format::baseline_features())
-        )
+        (4, rdy_store::format::DumpStore::Features(features))
     );
 }
 

@@ -680,10 +680,12 @@ fn cp10_open_noncode_items_warn_and_code_items_never_block() {
     r.fsck().unwrap();
 }
 
-/// The carried records no product path writes yet, in the log of `r`: kinds 25 to 28, Check
+/// The carried records no product path writes yet, in the log of `r`: kinds 26 to 28, Check
 /// subjects and the Pass, Concern and Fail verdicts, the Dispute, ResolveDispute and
-/// AcceptVerdict acts, and the new Change and LandingRecord fields (a change's `briefing` is
-/// written since rg1, D-ME2HD). Returns how many frames of the guarded kinds it read.
+/// AcceptVerdict acts, a change's `replayed_from` and a landing's `policy`. A change records its
+/// briefing (rg1), a propose writes `ASSESSMENT` records (kind 25, rg10) and a landing names its
+/// assessment (rg12, D-ME2HD); `policy` and the other carriers stay unwritten. Returns how many
+/// frames of the guarded kinds it read.
 fn future_records(r: &Rdy) -> (Vec<String>, usize) {
     use rdy_model::{Answer, AnswerAct, Change, LandingRecord, Review, ReviewSubject, Verdict};
     use rdy_store::codec::{decode_record, logical_kind};
@@ -700,10 +702,9 @@ fn future_records(r: &Rdy) -> (Vec<String>, usize) {
             |_, raw, hash, payload, _| {
                 let what = format!("kind {} {hash}", logical_kind(raw));
                 match logical_kind(raw) {
-                    kinds::ASSESSMENT
-                    | kinds::DISPUTE
-                    | kinds::DISPUTE_RESOLUTION
-                    | kinds::CHECK_REQUEST => found.push(what),
+                    kinds::DISPUTE | kinds::DISPUTE_RESOLUTION | kinds::CHECK_REQUEST => {
+                        found.push(what)
+                    }
                     kinds::REVIEW => {
                         read += 1;
                         let v: Review = decode_record(raw, payload)?;
@@ -735,7 +736,7 @@ fn future_records(r: &Rdy) -> (Vec<String>, usize) {
                     kinds::LANDING => {
                         read += 1;
                         let l: LandingRecord = decode_record(raw, payload)?;
-                        if l.assessment.is_some() || l.policy.is_some() {
+                        if l.policy.is_some() {
                             found.push(what);
                         }
                     }
@@ -750,8 +751,10 @@ fn future_records(r: &Rdy) -> (Vec<String>, usize) {
 
 /// ok4: the product paths keep producing their existing acts. A propose with its bound plan, a
 /// plan answer, a person's approval, an ordinary write and an import write no record of kinds
-/// 25 to 28, no Check subject or new verdict, no Dispute, ResolveDispute or AcceptVerdict act,
-/// and leave every new carrier field None but a change's `briefing`.
+/// 26 to 28, no Check subject or new verdict, no Dispute, ResolveDispute or AcceptVerdict act,
+/// and leave a landing's `policy` and the other new carriers None. A change records its
+/// briefing (rg1), a propose writes the version's `ASSESSMENT` (rg10) and a landing names its
+/// assessment (rg12).
 #[test]
 fn ok4_product_paths_do_not_write_future_records() {
     let (d, mut r) = project();

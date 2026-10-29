@@ -60,6 +60,31 @@ fn assert_not_ready(r: &Rdy, e: &RdyError, pref: &str, codes: &[&str]) {
     );
 }
 
+/// O11 (RULING F1): a landing since `pref`'s assessment wrote a block of its reach, and its
+/// fresh readiness fails: `E_PROPOSAL_MOVED` with the fresh issues, exactly the queue's, and no
+/// fresh card.
+fn assert_moved_not_ready(r: &Rdy, e: &RdyError, pref: &str, codes: &[&str]) {
+    let issues = not_ready_issues(r, pref);
+    assert_eq!(e.code, E_PROPOSAL_MOVED, "{e:?}");
+    assert!(
+        e.message
+            .starts_with(&format!("proposal {pref} moved: landing "))
+            && e.message.ends_with(" after its assessment"),
+        "{e:?}"
+    );
+    assert_eq!(
+        e.fix,
+        "fix each issue and propose again: rdy_propose / rdy propose"
+    );
+    assert!(e.corrected.is_none(), "{e:?}");
+    assert_eq!(e.issues, issues);
+    assert_eq!(
+        issues.iter().map(|i| i.code).collect::<Vec<_>>(),
+        codes,
+        "{issues:#?}"
+    );
+}
+
 fn setup() -> (tempfile::TempDir, Rdy, String) {
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
@@ -471,10 +496,10 @@ fn land_refuses_orphans_and_dangling_refs_when_canon_moved_after_propose() {
     r.land(&founder(), &p1.id).unwrap();
     let head = r.store().canon_head().unwrap();
     // tgat1: the claim still cites the deleted term, a blocking tension; the gate's validation
-    // refuses the orphan too. D-ME2HD: both are readiness issues of one refusal, in the queue's
-    // order
+    // refuses the orphan too. D-ME2HD, O11: p1's landing wrote a block of p2's reach, so the
+    // freshness check fails, and both are issues of p2's fresh readiness, in the queue's order
     let e = r.land(&founder(), &p2.id).unwrap_err();
-    assert_not_ready(&r, &e, &p2.r#ref, &[E_BLOCKING_TENSION, E_VALIDATION]);
+    assert_moved_not_ready(&r, &e, &p2.r#ref, &[E_BLOCKING_TENSION, E_VALIDATION]);
     let blocking: Vec<String> = r
         .read()
         .tensions()
@@ -491,7 +516,7 @@ fn land_refuses_orphans_and_dangling_refs_when_canon_moved_after_propose() {
     // once a human dismisses the tension, the orphan alone refuses; the validation's first error
     // names it
     let e = r.land(&founder(), &p2.id).unwrap_err();
-    assert_not_ready(&r, &e, &p2.r#ref, &[E_VALIDATION]);
+    assert_moved_not_ready(&r, &e, &p2.r#ref, &[E_VALIDATION]);
     let m = &e.issues[0].message;
     assert!(
         m.starts_with("c-")
@@ -610,13 +635,22 @@ fn deleting_a_parent_that_gained_a_moved_child_in_canon_is_refused() {
         .unwrap();
     r.land(&founder(), &p2.id).unwrap();
     let head = r.store().canon_head().unwrap();
-    // D-ME2HD: the validation's first error is the readiness issue; it names the orphan
+    // O12: p2's landing wrote no block of p1's reach, so freshness holds and the merge's final
+    // guard refuses; its validation error names the orphan, as the readiness issue does
     let e = r.land(&founder(), &p1.id).unwrap_err();
-    assert_not_ready(&r, &e, &p1.r#ref, &[E_VALIDATION]);
+    assert_eq!(e.code, E_VALIDATION, "{e:?}");
     assert_eq!(
-        e.issues[0].message,
+        e.message,
         format!("{c} has parent {s}, which this proposal deletes"),
         "{e:?}"
+    );
+    assert_eq!(
+        not_ready_issues(&r, &p1.r#ref)
+            .iter()
+            .map(|i| (i.code, i.message.as_str()))
+            .collect::<Vec<_>>(),
+        [(E_VALIDATION, e.message.as_str())],
+        "the queue lists the same error"
     );
     assert_eq!(r.store().canon_head().unwrap(), head);
 }

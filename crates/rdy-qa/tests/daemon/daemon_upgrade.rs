@@ -55,11 +55,30 @@ fn assessment() -> StoreFeature {
 
 /// One step: from any manifest to one with `assessment`.
 fn registry() -> Vec<UpgradeStep> {
+    registry_of(assessment())
+}
+
+/// One step: from any manifest to one with `feature`.
+fn registry_of(feature: StoreFeature) -> Vec<UpgradeStep> {
     vec![UpgradeStep {
-        id: "add_assessment".into(),
+        id: format!("add_{}", feature.name),
         from: StoreFeatures::of(vec![]),
-        to: StoreFeatures::of(vec![assessment()]),
+        to: StoreFeatures::of(vec![feature]),
     }]
+}
+
+/// The first registered feature the store at `root` does not name: `assessment` for a project
+/// that has proposed nothing. A landing's propose activates `assessment`, so a landed fixture's
+/// step adds the next one (ruling task-10 B, Amendment 1: the step reads the fixture's own
+/// features).
+fn missing_feature(root: &Path) -> StoreFeature {
+    let own = rdy_store::format::read_format_file(&store_dir(root))
+        .unwrap()
+        .expect("the store has a feature manifest");
+    registered_features()
+        .into_iter()
+        .find(|f| !own.has(&f.name))
+        .expect("a registered feature the store lacks")
 }
 
 fn upgraded() -> StoreFeatures {
@@ -155,12 +174,13 @@ fn land_a_doc(root: &Path) -> Hash {
 /// store check, before the engine ever runs (a kill there).
 fn make_pending(root: &Path) {
     let dir = store_dir(root);
+    let steps = registry_of(missing_feature(root));
     let stop = upgrade::with_hook_for_tests(
         |p| match p {
             upgrade::Phase::Checked => Err(std::io::Error::other("stopped after the check")),
             _ => Ok(()),
         },
-        || Store::open_with_registry_for_tests(&dir, OpenPolicy::AutoUpgrade, &registry()),
+        || Store::open_with_registry_for_tests(&dir, OpenPolicy::AutoUpgrade, &steps),
     );
     assert!(stop.is_err());
     let plan = upgrade::inspect(&dir).unwrap();

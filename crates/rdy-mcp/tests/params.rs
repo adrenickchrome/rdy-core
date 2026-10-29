@@ -387,9 +387,10 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
             checked.push(stringify!($t));
         )* };
     }
-    // The 60 `*Params` types, nested ones included (`EditorialParams`, `ReflectsParams`,
+    // The 62 `*Params` types, nested ones included (`EditorialParams`, `ReflectsParams`,
     // `AltMemberParams`, `AltPickParams`, `DismissParams`, `DecideParams`, `MentionParams`,
     // `AcceptAdviceParams`, `RelayParams`, `RecommendedParams`, `PlanAnswerParams`,
+    // `PlanAnswerSpecParams`, `PlanGroupParams`,
     // `OwnerParams`).
     check!(
         AcceptAdviceParams,
@@ -422,6 +423,8 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         OwnerParams,
         PendingParams,
         PlanAnswerParams,
+        PlanAnswerSpecParams,
+        PlanGroupParams,
         PlanParams,
         ProposeParams,
         PublicationCheckParams,
@@ -1780,4 +1783,22 @@ async fn rf2_old_findings_is_refused_before_write() {
     assert!(!err, "{sub}");
     assert_eq!(sub["severity"], "advisory");
     assert_ne!(log_end(&engine), before, "the valid request is recorded");
+}
+
+#[test]
+fn rg11_propose_plan_answers_schema_names_tn_ids_and_the_dismiss_reason() {
+    let schema = rmcp::handler::server::common::schema_for_input::<ProposeParams>().unwrap();
+    let text = serde_json::to_string(&*schema).unwrap();
+    assert!(
+        text.contains("a tn- id of a tension item"),
+        "plan_answers item doc must name tn- ids: {text}"
+    );
+    assert!(
+        text.contains("Required for confirm, defer and dismiss"),
+        "plan_answers reason doc must require a reason for dismiss: {text}"
+    );
+    assert!(
+        !text.contains("Required for confirm and defer"),
+        "the old reason wording is gone: {text}"
+    );
 }

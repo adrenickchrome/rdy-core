@@ -407,6 +407,40 @@ fn parts(v: &Value) -> Value {
     json!({"code": v["code"], "message": v["message"], "fix": v["fix"], "issues": v["issues"]})
 }
 
+/// [`parts`] of the merge's final guard (O12) for a version whose readiness issue is the clash
+/// `issues[0]` (`E_VALIDATION`): the error itself, its issue under its own code.
+fn merge_refusal(issues: &[Issue]) -> Value {
+    let [i] = issues else {
+        panic!("one issue: {issues:#?}");
+    };
+    let block = i
+        .message
+        .split(' ')
+        .next()
+        .and_then(|b| BlockId::parse(b).ok());
+    let clash = Issue {
+        code: rdy_engine::E_PATH_CLASH,
+        block,
+        ..i.clone()
+    };
+    json!({
+        "code": E_VALIDATION,
+        "message": i.message,
+        "fix": i.fix,
+        "issues": serde_json::to_value([clash]).expect("issues"),
+    })
+}
+
+/// [`parts`] of the refusal of `pref` with `issues`: the pack version (`pack`) is refused by the
+/// merge's final guard ([`merge_refusal`]).
+fn expected_of(name: &str, pref: &str, issues: &[Issue]) -> Value {
+    if name == "pack" {
+        merge_refusal(issues)
+    } else {
+        expected(pref, issues)
+    }
+}
+
 /// [`parts`] of the refusal of `pref` with `issues`.
 fn expected(pref: &str, issues: &[Issue]) -> Value {
     json!({
@@ -429,7 +463,17 @@ fn id6_every_approval_path_refuses_a_version_that_is_not_ready() {
         let e = r
             .land_with(&approver(), pref, LandOptions::default())
             .unwrap_err();
-        assert_not_ready(&e, pref, &issues);
+        if name == "pack" {
+            // O12: folder-a's landing wrote no block of its reach, so freshness holds and the
+            // merge's final guard refuses with the queue's error
+            assert_eq!(
+                serde_json::to_value(&e).map(|v| parts(&v)).unwrap(),
+                merge_refusal(&issues),
+                "{e:#?}"
+            );
+        } else {
+            assert_not_ready(&e, pref, &issues);
+        }
         assert_eq!(log_end(&r), before, "{name}: a refusal writes nothing");
     }
     // the conflict comes first, then the blocking tension, each with the queue's texts
@@ -449,19 +493,29 @@ fn id6_cli_and_mcp_refuse_the_same_not_ready_version() {
     let (made, want) = with_rdy(&s, |r| {
         let (_, _, made) = not_ready_versions(r);
         let q = pending(r);
-        let want: Vec<(String, Value)> = made
+        // an approval of the version (rdy approve) lands through freshness, so the pack version
+        // meets the merge's final guard (O12); an answer names a card, and a version that is not
+        // ready has none, so every answer path refuses it as not ready, with the queue's issues
+        let want: Vec<(String, Value, Value)> = made
             .all()
             .iter()
-            .map(|(_, pref)| (pref.to_string(), expected(pref, &queue_issues(&q, pref))))
+            .map(|(name, pref)| {
+                let issues = queue_issues(&q, pref);
+                (
+                    pref.to_string(),
+                    expected_of(name, pref, &issues),
+                    expected(pref, &issues),
+                )
+            })
             .collect();
         (made, want)
     });
     let before = with_rdy(&s, |r| log_end(r));
-    for (pref, want) in &want {
+    for (pref, approve, want) in &want {
         // the person's rdy approve, through the daemon
         let (ok, e) = s.json(&["--json", "approve", pref]);
         assert!(!ok, "{e}");
-        assert_eq!(parts(&e), *want, "daemon rdy approve {pref}");
+        assert_eq!(parts(&e), *approve, "daemon rdy approve {pref}");
         // the person's rdy answer <ref> approve
         let (ok, e) = s.json(&["--json", "answer", pref, "approve"]);
         assert!(!ok, "{e}");
@@ -475,10 +529,10 @@ fn id6_cli_and_mcp_refuse_the_same_not_ready_version() {
     }
     // rdy approve without the daemon
     s.stop();
-    for (pref, want) in &want {
+    for (pref, approve, _) in &want {
         let (ok, e) = s.json(&["--json", "--no-daemon", "approve", pref]);
         assert!(!ok, "{e}");
-        assert_eq!(parts(&e), *want, "rdy --no-daemon approve {pref}");
+        assert_eq!(parts(&e), *approve, "rdy --no-daemon approve {pref}");
     }
     assert_eq!(
         with_rdy(&s, |r| log_end(r)),
@@ -489,7 +543,7 @@ fn id6_cli_and_mcp_refuse_the_same_not_ready_version() {
     let mut st = agent_state(Rdy::open(s.dir.path()).expect("open"));
     // rdy_session may record the session: read the published state after it
     let published = st.engine.read().seq();
-    for (pref, want) in &want {
+    for (pref, _, want) in &want {
         let e = rdy_answer(
             &mut st,
             serde_json::from_value(json!({
@@ -775,7 +829,7 @@ fn id6_holds_and_preconditions_keep_their_codes() {
     // a moved base: strict refuses any landing since; any approval refuses a landing that
     // wrote a block the version writes
     put(&mut r, "stale", upd(&spec.b, "B as stale has it."));
-    let stale = propose(&mut r, "stale", None);
+    let stale = propose(&mut r, "stale", Some(SUMMARY));
     put(&mut r, "edit-b", upd(&spec.b, "B as edit-b has it."));
     land(&mut r, "edit-b").expect("land edit-b");
     let e = land_err(&mut r, &approver(), &made.bare, true);
@@ -783,7 +837,7 @@ fn id6_holds_and_preconditions_keep_their_codes() {
     assert!(e.message.contains("landing(s) since"), "{e:#?}");
     let e = land_err(&mut r, &approver(), &stale, false);
     assert_eq!(e.code, E_PROPOSAL_MOVED, "{e:#?}");
-    assert!(e.message.contains("after it was proposed"), "{e:#?}");
+    assert!(e.message.contains("after its assessment"), "{e:#?}");
     // on a ready version: the exception hold, then the deferral hold
     write(
         &mut r,

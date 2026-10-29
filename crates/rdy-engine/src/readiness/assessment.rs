@@ -71,6 +71,10 @@ pub struct Inputs<'a> {
     pub tensions_omitted: usize,
     /// (tension id, item hash) for each tension item the bound plan answers.
     pub answers: &'a [(Hash, Hash)],
+    /// The rows of the version's earlier assessment that name a bound answer
+    /// (`plan::compute::FixedTensions::rows`): one that `tensions` no longer lists is kept, with
+    /// its answer from `answers`, so a fresh record never drops a bound item (ruling final F1).
+    pub carried: &'a [AssessmentTension],
     /// (suspect block, cause).
     pub suspects: Vec<(BlockId, BlockId)>,
     pub written: BTreeSet<BlockId>,
@@ -167,13 +171,6 @@ pub(crate) fn cut_text(text: String) -> String {
 
 /// The seven scores of a rollup; no rollup (a doc absent on that side) gives seven 100s, and a
 /// dimension the rollup lacks reads 100 (O19).
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the propose caller (Task 10) fills Inputs with it"
-    )
-)]
 pub(crate) fn scores_of(r: Option<&Rollup>) -> AssessmentScores {
     let Some(r) = r else {
         return AssessmentScores {
@@ -199,13 +196,6 @@ pub(crate) fn scores_of(r: Option<&Rollup>) -> AssessmentScores {
 }
 
 /// A coverage issue as a record row. Its dismissal keeps the review only (O19).
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the propose caller (Task 10) fills Inputs with it"
-    )
-)]
 pub(crate) fn issue_of(i: &CoverageIssue) -> AssessmentIssue {
     let code = serde_json::to_value(i.code)
         .ok()
@@ -223,13 +213,6 @@ pub(crate) fn issue_of(i: &CoverageIssue) -> AssessmentIssue {
 
 /// A confidence as the record keeps it: its level, and its reasons as rows, sorted and
 /// distinct (O19).
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the propose caller (Task 10) fills Inputs with it"
-    )
-)]
 pub(crate) fn confidence_record(c: &Confidence) -> AssessmentConfidence {
     AssessmentConfidence {
         level: match c.confidence {
@@ -410,6 +393,27 @@ pub fn build(i: Inputs<'_>) -> Result<Assessment, Issue> {
                 tensions.insert(row.id, row);
             }
             _ => cut += 1,
+        }
+    }
+    // ruling final F1: a bound row the live set no longer lists keeps its place, while the bound
+    // plan still answers its item
+    for row in i.carried {
+        if tensions.contains_key(&row.id) {
+            continue;
+        }
+        let Some(answer) = i
+            .plan_hash
+            .zip(answers.get(&row.id))
+            .map(|(plan, item)| AssessmentPlanAnswerRef { plan, item: *item })
+        else {
+            continue;
+        };
+        if tensions.len() < MAX_TENSION_ROWS {
+            let mut row = row.clone();
+            row.answer = Some(answer);
+            tensions.insert(row.id, row);
+        } else {
+            cut += 1;
         }
     }
     let tensions_omitted = count(i.tensions_omitted).saturating_add(count(cut));
@@ -661,6 +665,7 @@ mod tests {
             tensions: &f.tensions,
             tensions_omitted: 0,
             answers: &f.answers,
+            carried: &[],
             suspects: vec![
                 (id("n-00009"), id("d-0000A")),
                 (id("n-00008"), id("d-0000A")),

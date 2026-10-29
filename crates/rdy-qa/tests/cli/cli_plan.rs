@@ -136,7 +136,7 @@ fn ids(items: &[&Value]) -> Vec<String> {
         .collect()
 }
 
-/// The five kind lines and the code line a read finishes with, from its JSON.
+/// The six kind lines and the code line a read finishes with, from its JSON.
 fn tail_lines(v: &Value) -> Vec<String> {
     let mut out: Vec<String> = [
         "update",
@@ -144,6 +144,7 @@ fn tail_lines(v: &Value) -> Vec<String> {
         "reaffirm",
         "confirm",
         "update_implementation",
+        "tension",
     ]
     .iter()
     .map(|k| {
@@ -242,7 +243,7 @@ fn cp11_cli_plan_text_and_json_match_engine() {
     let confirm = items_of(&v, "confirm");
     assert_eq!(confirm[0]["subject"], f.b.as_str(), "{v:#}");
     assert_eq!(confirm[0]["cause"], f.a.as_str(), "{v:#}");
-    assert_eq!(lines.len(), items.len() + 6, "{text}");
+    assert_eq!(lines.len(), items.len() + 7, "{text}");
     assert_eq!(&lines[items.len()..], tail_lines(&v).as_slice(), "{text}");
 
     // a cut read prints its cursor last, and the cursor continues it; the pages together are the

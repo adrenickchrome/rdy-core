@@ -385,6 +385,9 @@ fn hc7_whole_chain_preserves_the_source_log() {
     land(&mut r);
     let i2 = d.path().join("i2.rdydump");
     let s2 = r.read().dump_after(&s1.chain_end(), &i2).unwrap();
+    // the source store's own features: a landing writes an assessment, so the `assessment`
+    // feature is active (ruling task-10 B)
+    let features = r.store().features().clone();
     r.close().unwrap();
 
     let to = d.path().join("to");
@@ -394,7 +397,7 @@ fn hc7_whole_chain_preserves_the_source_log() {
     assert_eq!(s.dump_format, 4);
     assert_eq!(
         s.store_format,
-        rdy_store::format::DumpStore::Features(rdy_store::format::baseline_features())
+        rdy_store::format::DumpStore::Features(features)
     );
     let source = batches(&root, ORIGIN, None);
     assert_eq!(s.batches, source.len() as u64);

@@ -1136,6 +1136,12 @@ fn sig8_moved_canon_discards_the_first_signature() {
 const SECRET: &str = "The launch code is ZEBRA-7731.";
 
 fn removal_project() -> (Proj, String, String) {
+    removal_project_after(|_| {})
+}
+
+/// [`removal_project`], with `before` run after the secret lands and before the request is
+/// recorded: what it writes is in the request's report.
+fn removal_project_after(before: impl FnOnce(&Proj)) -> (Proj, String, String) {
     let p = project();
     let section = p.section.clone();
     let prose = on(&p.e, move |r| {
@@ -1156,6 +1162,7 @@ fn removal_project() -> (Proj, String, String) {
         r.land(&approver(), &prop.id).unwrap();
         w.created["$p"].clone()
     });
+    before(&p);
     let target = prose.clone();
     let id = on(&p.e, move |r| {
         r.redact_in(
@@ -1723,13 +1730,15 @@ fn sig8_recommended_answers_preserve_order_and_removal_prescan() {
         "the item after the refusal is still waiting"
     );
 
-    // a list that holds a removal writes nothing, wherever the removal stands
-    let (p, removal, _) = removal_project();
+    // a list that holds a removal writes nothing, wherever the removal stands. The ordinary
+    // proposal is made before the request is recorded: its assessment names the secret, so one
+    // made after it would stale the request (D-6B1W1; ruling task-10 Amendment 1, item 1)
+    let mut ordinary = String::new();
+    let (p, removal, _) = removal_project_after(|p| ordinary = p.proposal().1);
     p.config("auto", Some(person_ed()), Some(agent_ed()));
     let removal_ref = on(&p.e, move |r| {
         r.resolve_proposal(&removal).unwrap().to_string()
     });
-    let ordinary = p.proposal().1;
     let hashes = vec![card_hash(&p.e, &ordinary), "0".repeat(64)];
     let end = p.log_end();
     let agent = FakeAgent::new(&[person_ed(), agent_ed()]);
@@ -1748,6 +1757,24 @@ fn sig8_recommended_answers_preserve_order_and_removal_prescan() {
     assert_eq!(e.code, E_REDACTION_HUMAN, "{e}");
     assert_eq!(p.log_end(), end, "nothing is answered or landed");
     assert_eq!(agent.calls(), 0);
+}
+
+/// A proposal made after a removal request writes an assessment that names the removed block: a
+/// new carrier, so the request's report changes and the request is stale (D-6B1W1; ruling
+/// task-10 Amendment 1, item 1).
+#[test]
+fn rg10_a_proposal_after_the_request_makes_the_request_stale() {
+    let (p, _, _) = removal_project();
+    let _ = p.proposal();
+    let e =
+        p.e.read()
+            .pending(&PendingQuery {
+                person: PERSON.into(),
+                session_ref: None,
+                max_tokens: CARD_MAX_TOKENS,
+            })
+            .unwrap_err();
+    assert_eq!(e.code, E_REDACTION_STALE, "{e}");
 }
 
 #[test]

@@ -64,8 +64,20 @@ fn fork(r: &Rdy, root: &Path, name: &str) -> Rdy {
     Rdy::open(&dir).unwrap()
 }
 
-const COPIED: [u8; 8] = [
+/// `features` and the `assessment` store feature.
+fn and_assessment(features: rdy_store::format::StoreFeatures) -> rdy_store::format::StoreFeatures {
+    let mut f = features.features;
+    f.extend(
+        rdy_store::format::registered_features()
+            .into_iter()
+            .filter(|x| x.name == rdy_store::format::FEATURE_ASSESSMENT),
+    );
+    rdy_store::format::StoreFeatures::of(f)
+}
+
+const COPIED: [u8; 9] = [
     kinds::BLOCK,
+    kinds::ASSESSMENT,
     kinds::CHANGE,
     kinds::PROPOSAL,
     kinds::LANDING,
@@ -217,7 +229,10 @@ fn ha12_holder_dump_load_preserves_mode_identity_and_divergent_tags() {
     assert!(summary.files.is_empty(), "{summary:?}");
     assert_eq!(
         summary.store_format,
-        rdy_store::format::DumpStore::Features(rdy_store::format::baseline_features())
+        // the holder took landings, and each names its assessment
+        rdy_store::format::DumpStore::Features(and_assessment(
+            rdy_store::format::baseline_features()
+        ))
     );
 
     let target = root.path().join("loaded");

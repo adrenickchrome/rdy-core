@@ -28,25 +28,10 @@
           "blocks": [
             "c-TWVHA"
           ],
-          "id": "tn-2fc67204b7d0",
+          "id": "tn-8d04a97dc61b",
           "kind": "edit_collision",
           "severity": "blocking",
           "sides": [
-            {
-              "actor": "human:qa",
-              "blocks": [
-                {
-                  "block": "c-TWVHA",
-                  "version": "4cd060ea3b0e142744a4935c7c0e92930fdfb68dae9097235a0bc849228daaf4"
-                }
-              ],
-              "change": "2937373135870a5c12c0961a1c4ad24b973cff2dc990d84184cf2f06a6038dd1",
-              "run": "cli",
-              "side": "2937373135870a5c12c0961a1c4ad24b973cff2dc990d84184cf2f06a6038dd1",
-              "views": [
-                "work"
-              ]
-            },
             {
               "actor": "agent:a",
               "blocks": [
@@ -55,17 +40,32 @@
                   "version": "e3c4ea16c472675bb7741ccc73eb7f276afd15762e38b2652f8d1106fe709f46"
                 }
               ],
-              "change": "cbdeff20c1cf0952449b9765f52acb5197538d28c2add2ec1e224e206b9d8a18",
+              "change": "2d40fd037681e587d448f21ce5b20752f8ce0734dbc81a6e799c9c0d8a6f1675",
               "run": "a",
-              "side": "cbdeff20c1cf0952449b9765f52acb5197538d28c2add2ec1e224e206b9d8a18",
+              "side": "2d40fd037681e587d448f21ce5b20752f8ce0734dbc81a6e799c9c0d8a6f1675",
               "views": [
                 "alt-x"
+              ]
+            },
+            {
+              "actor": "human:qa",
+              "blocks": [
+                {
+                  "block": "c-TWVHA",
+                  "version": "4cd060ea3b0e142744a4935c7c0e92930fdfb68dae9097235a0bc849228daaf4"
+                }
+              ],
+              "change": "6587b5fcea60040723ef6f326a43e593671b39dd577459c596f622f92bfdbb7c",
+              "run": "cli",
+              "side": "6587b5fcea60040723ef6f326a43e593671b39dd577459c596f622f92bfdbb7c",
+              "views": [
+                "work"
               ]
             }
           ],
           "status": "open",
           "summary": "two changes edit c-TWVHA from one base",
-          "tension": "2fc67204b7d0babb1dd212c7c39865d3ac2ffd72e5749a551c9ce29e294b0d55"
+          "tension": "8d04a97dc61b005da7e77ed4d2c275075ff46def7320ce5a62ac5b0ad9ea7aa6"
         }
       ],
       "view": "alt-x"
@@ -98,7 +98,7 @@
           "blocks": [
             "c-TWVHA"
           ],
-          "id": "tn-c401da028579",
+          "id": "tn-7fb1cc757398",
           "kind": "edit_collision",
           "severity": "blocking",
           "sides": [
@@ -110,9 +110,9 @@
                   "version": "4cd060ea3b0e142744a4935c7c0e92930fdfb68dae9097235a0bc849228daaf4"
                 }
               ],
-              "change": "2937373135870a5c12c0961a1c4ad24b973cff2dc990d84184cf2f06a6038dd1",
+              "change": "6587b5fcea60040723ef6f326a43e593671b39dd577459c596f622f92bfdbb7c",
               "run": "cli",
-              "side": "2937373135870a5c12c0961a1c4ad24b973cff2dc990d84184cf2f06a6038dd1",
+              "side": "6587b5fcea60040723ef6f326a43e593671b39dd577459c596f622f92bfdbb7c",
               "views": [
                 "work"
               ]
@@ -125,9 +125,9 @@
                   "version": "c3eebd3ee9e9f343fb1f5835d548bec1b83ab42934bd33ed7e71e796dc2fab8f"
                 }
               ],
-              "change": "2f8076da276e251b96d3ffc91f855e7ed136d9e6e16f22c2828edd04b8e4bf7a",
+              "change": "d5fbee6b8e3ca5cab7c5f4307041eba8442f78e20b816c3d5b1c558bf9b00ca1",
               "run": "a",
-              "side": "2f8076da276e251b96d3ffc91f855e7ed136d9e6e16f22c2828edd04b8e4bf7a",
+              "side": "d5fbee6b8e3ca5cab7c5f4307041eba8442f78e20b816c3d5b1c558bf9b00ca1",
               "views": [
                 "alt-y"
               ]
@@ -135,7 +135,7 @@
           ],
           "status": "open",
           "summary": "two changes edit c-TWVHA from one base",
-          "tension": "c401da0285796ca5f18a624d58d9117226904a8d07849414cd6f80304ada08f4"
+          "tension": "7fb1cc757398c732cf492aa5da7bc5fede4874ade083ec40fafefa189eb6e9f5"
         }
       ],
       "view": "alt-y"
@@ -151,7 +151,7 @@
       "actor": "agent:a",
       "run": "a"
     },
-    "id": "as-7240b6d45515",
+    "id": "as-4806ab40e3e1",
     "members": [
       {
         "changes": 1,
@@ -176,9 +176,9 @@
     ],
     "prev": null,
     "question": null,
-    "set": "7240b6d4551541a68c81b175c60bfb70cb3ad60daf11f0e66187d7885efd9f42",
+    "set": "4806ab40e3e16c9ef84452380c593c57f375470e91235beb6e3cd667365bdfd1",
     "status": "open",
     "title": "Fee wording",
-    "version": "7240b6d4551541a68c81b175c60bfb70cb3ad60daf11f0e66187d7885efd9f42"
+    "version": "4806ab40e3e16c9ef84452380c593c57f375470e91235beb6e3cd667365bdfd1"
   }
 }

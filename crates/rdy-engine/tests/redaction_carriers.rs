@@ -1049,13 +1049,26 @@ fn ok8_carrier_references_are_closed() {
         .filter(|r| kinds_of(r.kind))
         .cloned()
         .collect();
-    let want: Vec<ImpactRow> = c
+    let mut want: Vec<ImpactRow> = c
         .all
         .iter()
         .filter(|(_, _, _, hit)| *hit)
         .map(|(_, kind, hash, _)| row(*kind, hash, ImpactRelation::References, false))
         .collect();
     assert!(!want.is_empty());
+    // and the assessments the proposes of p1 and p2 wrote: each names the removed block in its
+    // scope, and no request carries those versions (ruling task-10 C)
+    for p in [f.p1, f.p2] {
+        let a =
+            f.r.read()
+                .reader()
+                .assessment_of_proposal(&p, f.r.store().log_end())
+                .unwrap()
+                .expect("the propose wrote its assessment");
+        let r = row(ImpactKind::Assessment, a, ImpactRelation::References, false);
+        assert!(got.contains(&r), "{p}: {r:?}");
+        want.push(r);
+    }
     for (name, kind, hash, hit) in &c.all {
         let r = row(*kind, hash, ImpactRelation::References, false);
         assert_eq!(got.contains(&r), *hit, "{name}: {r:?}");
@@ -1382,6 +1395,186 @@ fn ok8_a_request_recorded_before_carried_support_goes_stale() {
             .is_some()
     );
     let _ = &f.dir;
+}
+
+/// Records the removal of `f.target()` in view `view` and proposes it. Returns the version.
+fn propose_removal(f: &mut Refs, view: &str) -> Hash {
+    f.r.redact_in(&writer(), view, input(&f.target(), false))
+        .unwrap();
+    let pi =
+        f.r.propose(
+            &writer(),
+            view,
+            "Remove the code",
+            Some("Removes the leaked code."),
+        )
+        .unwrap();
+    h(&pi.id)
+}
+
+/// Ruling task-10 A (2026-10-29): the report of a recorded request leaves out the assessments of
+/// the version that carries it. That assessment only names the blocks the version removes, and
+/// its rows are uneraseable references, so the landing erases nothing in it either way. An
+/// assessment of the carrying version in a batch of its own never stales the request.
+#[test]
+fn rg10_the_carrying_versions_own_assessment_never_stales_its_request() {
+    let _clock = pin_clock(1_000_000);
+    let mut f = refs_project();
+    let version = propose_removal(&mut f, "redact");
+    // the hand-made record keeps what freshness reads from the stored one (its base, pack, gate
+    // config and reach), so the landing reads it as fresh (ruling task-12 R2.5); it names the
+    // removed block in its other rows
+    let stored = {
+        let st = f.r.read();
+        let h = st
+            .reader()
+            .assessment_of_proposal(&version, st.seq())
+            .unwrap()
+            .expect("propose stored an assessment");
+        st.reader().assessment(&h).unwrap()
+    };
+    let mut a = assessment(40, std::slice::from_ref(&f.prose));
+    a.proposal = version;
+    a.base = stored.base;
+    a.pack = stored.pack;
+    a.config = stored.config;
+    a.reach = stored.reach;
+    put(&mut f.r, kinds::ASSESSMENT, &a);
+    f.r.land(&approver(), &version.to_string()).unwrap();
+    assert!(
+        f.r.read()
+            .reader()
+            .redaction_of(kinds::BLOCK, &f.v1)
+            .unwrap()
+            .is_some(),
+        "the removal landed"
+    );
+    let _ = &f.dir;
+}
+
+/// Ruling task-10 A: an assessment of any other version that names the removed block is still a
+/// report row, so it stales a request recorded before it.
+#[test]
+fn rg10_another_versions_assessment_of_the_removed_block_is_a_report_row() {
+    let _clock = pin_clock(1_000_000);
+    let mut f = refs_project();
+    let version = propose_removal(&mut f, "redact");
+    let mut a = assessment(41, std::slice::from_ref(&f.prose));
+    a.proposal = f.p3;
+    let other = put(&mut f.r, kinds::ASSESSMENT, &a);
+    let d = dry(&f.r, &f.target());
+    assert!(
+        d.inside.contains(&row(
+            ImpactKind::Assessment,
+            other,
+            ImpactRelation::References,
+            false
+        )),
+        "{:?}",
+        d.inside
+    );
+    let e = f.r.land(&approver(), &version.to_string()).unwrap_err();
+    assert_eq!(e.code, E_REDACTION_STALE, "{e}");
+    let _ = &f.dir;
+}
+
+/// The statement of the decision whose removal the rg14 fixtures report. The card of a version
+/// that writes the decision quotes it (`Decisions: 1 new: <id> "<title>"`, n-1ZB18).
+const STATEMENT: &str = "Refunds above 500 need the ZEBRA-7731 sign-off";
+
+/// A draft view `work` holding a doc, a section and a decision with [`STATEMENT`]. Returns the
+/// project, the decision and its version.
+fn decision_project() -> (tempfile::TempDir, Rdy, BlockId, Hash) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let w = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "design", "title": "Design"}},
+            {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"title": "Doc", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Part"}}
+        ]),
+    );
+    let d = r
+        .decide(
+            &writer(),
+            "work",
+            rdy_engine::DecisionInput {
+                parent: w.created["$s"].clone(),
+                statement: STATEMENT.into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let decision = id(&d.created["$decision"]);
+    let v = version(&r, &decision);
+    (dir, r, decision, v)
+}
+
+/// The assessment the store holds for proposal version `version`.
+fn stored_assessment(r: &Rdy, version: &str) -> Hash {
+    let st = r.read();
+    st.reader()
+        .assessment_of_proposal(&h(version), st.seq())
+        .unwrap()
+        .expect("the propose stored an assessment")
+}
+
+/// D-EPK1Z, n-1ZB18 (task 14): a stored assessment's card fact quotes a decision's title, so a
+/// removal of the decision reports the assessment as a quote row that core cannot erase.
+#[test]
+fn rg14_a_redaction_reports_a_written_assessment_that_quotes_removed_text() {
+    let _clock = pin_clock(1_000_000);
+    let (_dir, mut r, decision, v) = decision_project();
+    let pi = r
+        .propose(
+            &writer(),
+            "work",
+            "Decide refunds",
+            Some("Adds the refunds decision."),
+        )
+        .unwrap();
+    let a = stored_assessment(&r, &pi.id);
+    // the premise: the stored card quotes the statement
+    let stored = r.read().reader().assessment(&a).unwrap();
+    assert!(
+        stored.card.facts.iter().any(|f| f.contains(STATEMENT)),
+        "{:?}",
+        stored.card.facts
+    );
+    let target = vec![format!("{decision}@{v}")];
+    let res = dry_run(&r.read(), &input(&target, true)).unwrap();
+    let rows: Vec<_> = res
+        .report
+        .quotes
+        .iter()
+        .filter(|q| q.kind == ImpactKind::Assessment)
+        .collect();
+    assert_eq!(rows.len(), 1, "{:?}", res.report.quotes);
+    assert_eq!(
+        (
+            rows[0].record.as_str(),
+            rows[0].quote.as_str(),
+            rows[0].erasable
+        ),
+        (a.to_string().as_str(), STATEMENT, false)
+    );
+    let text = report_text(&res, 8000).unwrap().text;
+    assert!(
+        text.contains(&format!(
+            "\nassessment: {a}: {} (erasable: false).\n",
+            serde_json::to_string(STATEMENT).unwrap()
+        )),
+        "{text}"
+    );
+    // the assessment is a reference row too, and nothing of it is dropped
+    assert!(res.report.inside.contains(&row(
+        ImpactKind::Assessment,
+        a,
+        ImpactRelation::Quotes,
+        false
+    )));
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -4,7 +4,7 @@
 //! one change of repin ops, then the answers.
 mod common;
 
-use rdy_engine::plan::api::PlanAnswerSpec;
+use rdy_engine::plan::api::{EditorialArg, PlanAnswerSpec};
 use rdy_engine::plan::group::PlanGroup;
 use rdy_engine::plan::{PlanAnswerInput, PlanQuery};
 use rdy_engine::{
@@ -12,7 +12,7 @@ use rdy_engine::{
     WriteRequest, WriteResult, parse_ops,
 };
 use rdy_model::plan::{Plan, PlanAct, PlanKind, item_display, item_hash};
-use rdy_model::{BlockId, Hash, Role};
+use rdy_model::{BlockId, EditorialClass, Hash, Justification, Role};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
@@ -265,6 +265,9 @@ fn spec_of(g: PlanGroup, act: PlanAct, reason: Option<&str>, repin: bool) -> Pla
         act,
         reason: reason.map(str::to_string),
         repin,
+        implements: None,
+        editorial: None,
+        reflects: None,
     }
 }
 
@@ -275,6 +278,9 @@ fn item_spec(item: &str, act: PlanAct, reason: Option<&str>) -> PlanAnswerSpec {
         act,
         reason: reason.map(str::to_string),
         repin: false,
+        implements: None,
+        editorial: None,
+        reflects: None,
     }
 }
 
@@ -643,6 +649,9 @@ fn rg9_an_answer_with_item_and_group_is_bad_input() {
         act: PlanAct::Defer,
         reason: Some("x".into()),
         repin: false,
+        implements: None,
+        editorial: None,
+        reflects: None,
     };
     for bad in [both, neither] {
         expect_err(
@@ -1131,4 +1140,224 @@ fn rg9_a_done_group_keeps_no_reason() {
         assert_eq!(a.act, PlanAct::Done);
         assert_eq!(a.reason, None);
     }
+}
+
+/// Canon: a stable doc `spec` with claims a ("A holds 30 days.") and b, which cites a. The view
+/// `view` makes a briefed, justified edit of a: b owes a confirm item on stable content.
+fn stable_world(r: &mut Rdy, view: &str) -> (String, String) {
+    let clarify = || {
+        Some(Justification::Editorial {
+            class: EditorialClass::Clarify,
+            reason: "the rule moved".into(),
+        })
+    };
+    let w = r
+        .write(
+            &writer(),
+            WriteRequest {
+                view: "seed".into(),
+                ops: parse_ops(
+                    json!([
+                        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "spec", "title": "Spec", "doc_type": "page", "lifecycle": "stable"}},
+                        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}},
+                        {"op": "create", "type": "claim", "id": "$a", "parent": "$s", "body": "A holds 30 days."},
+                        {"op": "create", "type": "claim", "id": "$b", "parent": "$s", "body": "B builds on {{$a}}."}
+                    ])
+                    .as_array()
+                    .unwrap()
+                    .clone(),
+                )
+                .unwrap(),
+                justification: clarify(),
+                message: String::new(),
+            },
+        )
+        .unwrap();
+    land(r, "seed");
+    let (a, b) = (w.created["$a"].clone(), w.created["$b"].clone());
+    let brief = r
+        .read()
+        .brief(
+            &Scope::Canon,
+            &rdy_engine::Coverage {
+                ids: vec![a.clone()],
+                path: None,
+            },
+            None,
+        )
+        .unwrap();
+    brief.register(&r.briefs());
+    r.write_briefed(
+        &writer(),
+        WriteRequest {
+            view: view.into(),
+            ops: parse_ops(vec![
+                json!({"op": "update", "id": a, "body": "A holds 60 days."}),
+            ])
+            .unwrap(),
+            justification: clarify(),
+            message: String::new(),
+        },
+        Some(brief.base.token.clone()),
+    )
+    .unwrap();
+    (a, b)
+}
+
+/// A confirm group that repins, with justification `j`: (implements, editorial, reflects).
+fn repin_spec(
+    implements: Option<Vec<String>>,
+    editorial: Option<EditorialArg>,
+    reflects: Option<rdy_engine::ReflectsArg>,
+) -> PlanAnswerSpec {
+    PlanAnswerSpec {
+        implements,
+        editorial,
+        reflects,
+        ..spec_of(
+            group(Some(PlanKind::Confirm), None),
+            PlanAct::Confirm,
+            Some("b still follows a"),
+            true,
+        )
+    }
+}
+
+fn clarify_arg() -> EditorialArg {
+    EditorialArg {
+        class: "clarify".into(),
+        reason: "b pins a's new text".into(),
+    }
+}
+
+/// Ruling final F2 (D-ME2HD, D-MPJM0): a repin group on stable content takes the justification
+/// of `rdy_write`. rdy records it on the repin change, so the version is ready, and it lands.
+#[test]
+fn rg_final_a_stable_repin_group_with_a_justification_lands() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let (a, b) = stable_world(&mut r, "w");
+    let changes = r.read().included("w").len();
+    r.answer_plan_specs(
+        &writer(),
+        "w",
+        &[repin_spec(None, Some(clarify_arg()), None)],
+    )
+    .unwrap();
+    let included = r.read().included("w");
+    assert_eq!(included.len(), changes + 1, "one repin change");
+    let change = r.store().change(included.last().unwrap()).unwrap();
+    assert_eq!(
+        change.justification,
+        Some(Justification::Editorial {
+            class: EditorialClass::Clarify,
+            reason: "b pins a's new text".into(),
+        })
+    );
+    let row = state_of(&r, "w", &pi(&a, &b, PlanKind::Confirm));
+    assert_eq!(row["state"], "closed", "{row}");
+    let p = r
+        .propose(&writer(), "w", "w", Some(common::TEST_SUMMARY))
+        .unwrap();
+    assert!(p.ready, "{:#?}", p.issues);
+    common::confirm_exceptions(&mut r, &approver(), &p);
+    r.land(&approver(), &p.id)
+        .unwrap_or_else(|e| panic!("land w: {e} {:?}", e.issues));
+}
+
+/// Ruling final F2: with no justification, a repin of stable normative content is refused before
+/// anything is written: no repin change and no plan version.
+#[test]
+fn rg_final_a_stable_repin_group_without_a_justification_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let (_, b) = stable_world(&mut r, "w");
+    let before = log_state(&r);
+    let changes = r.read().included("w").len();
+    expect_err(
+        r.answer_plan_specs(&writer(), "w", &[repin_spec(None, None, None)])
+            .unwrap_err(),
+        E_BAD_INPUT,
+        &format!("the repin changes stable block {b}, so it needs a justification"),
+        "pass implements, editorial or reflects, as rdy_write takes",
+    );
+    assert_eq!(log_state(&r), before);
+    assert_eq!(r.read().included("w").len(), changes);
+    assert_eq!(plan_ref(&r, "w"), None);
+    // the justification rules are rdy_write's
+    expect_err(
+        r.answer_plan_specs(
+            &writer(),
+            "w",
+            &[repin_spec(Some(vec![]), Some(clarify_arg()), None)],
+        )
+        .unwrap_err(),
+        E_BAD_INPUT,
+        &rdy_engine::one_justification_error().message,
+        &rdy_engine::one_justification_error().fix,
+    );
+    expect_err(
+        r.answer_plan_specs(&writer(), "w", &[repin_spec(Some(vec![]), None, None)])
+            .unwrap_err(),
+        E_BAD_INPUT,
+        "implements is empty",
+        "name the decision this change carries out, or leave implements out",
+    );
+    assert_eq!(log_state(&r), before);
+}
+
+/// Ruling final F2: a repin of draft content needs no justification, as today.
+#[test]
+fn rg_final_a_draft_repin_group_needs_no_justification() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let w = repin_world(&mut r, "w");
+    let changes = r.read().included("w").len();
+    r.answer_plan_specs(&writer(), "w", &[repin_spec(None, None, None)])
+        .unwrap();
+    let included = r.read().included("w");
+    assert_eq!(included.len(), changes + 1, "one repin change");
+    let change = r.store().change(included.last().unwrap()).unwrap();
+    assert_eq!(change.justification, None);
+    let row = state_of(&r, "w", &pi(&w.a, &w.b, PlanKind::Confirm));
+    assert_eq!(row["state"], "closed", "{row}");
+}
+
+/// Ruling final F2: a justification goes with `repin: true`; without it the answer is refused
+/// whole and nothing is written.
+#[test]
+fn rg_final_a_justification_without_repin_is_bad_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let w = world(&mut r, "w");
+    let before = log_state(&r);
+    let unpinned = |s: PlanAnswerSpec| PlanAnswerSpec { repin: false, ..s };
+    for bad in [
+        unpinned(repin_spec(None, Some(clarify_arg()), None)),
+        unpinned(repin_spec(Some(vec![w.d1.clone()]), None, None)),
+        unpinned(repin_spec(
+            None,
+            None,
+            Some(rdy_engine::ReflectsArg {
+                sources: None,
+                code: Some(true),
+            }),
+        )),
+        PlanAnswerSpec {
+            editorial: Some(clarify_arg()),
+            ..item_spec(
+                &pi(&w.a, &w.b, PlanKind::Confirm),
+                PlanAct::Confirm,
+                Some("x"),
+            )
+        },
+    ] {
+        expect_err(
+            r.answer_plan_specs(&writer(), "w", &[bad]).unwrap_err(),
+            E_BAD_INPUT,
+            "a justification goes with repin",
+            "set repin to true, or remove the justification",
+        );
+    }
+    assert_eq!(log_state(&r), before);
 }
