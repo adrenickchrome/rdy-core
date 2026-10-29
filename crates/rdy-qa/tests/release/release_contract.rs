@@ -1641,6 +1641,7 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
     ("new profile", "needs a publication profile"),
     ("new source", "needs a source file"),
     ("plan defer", "needs an open plan item"),
+    ("plan dismiss", "needs an open plan item"),
     ("plan done", "needs an open plan item"),
     ("publication", "needs a publication profile"),
     ("publish", "uploads a site to a host"),
