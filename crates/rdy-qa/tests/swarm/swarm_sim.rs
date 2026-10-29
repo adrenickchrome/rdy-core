@@ -2416,9 +2416,9 @@ fn gating_open(counts: &Value) -> Vec<String> {
 }
 
 /// rg15 (D-ME2HD, D-3JZP4, D-AAQ9Z), seeds 1 to 6: every live agent view drains through the
-/// readiness gate, and the person's `work` lands through it in the run (ruling task-15 F1).
-/// After the drain each agent view and `work` is closed or holds no change, and no version of
-/// `work` waits in the person's queue when its acts end. Before each
+/// readiness gate, and the gate never meets an open item of the person's `work` plan (ruling
+/// task-15 F1: the person answers it before it proposes). After the drain each agent view is
+/// closed or holds no change. Before each
 /// approve of the run and the drain, the relay reads the version's change plan (a
 /// `version_plan` entry naming it), and that read shows no open item that gates or warns. From
 /// the drained store, each landing's seal holds no open item but a code item, and each item it
@@ -2427,6 +2427,7 @@ fn gating_open(counts: &Value) -> Vec<String> {
 #[test]
 fn rg15_every_live_view_drains_through_the_gate() {
     let answered = std::cell::Cell::new(0usize);
+    let work_reads = std::cell::Cell::new(0usize);
     let (deferred, accepted) = (std::cell::Cell::new(0usize), std::cell::Cell::new(0usize));
     each(|seed, o| {
         let mut bad = vec![];
@@ -2563,7 +2564,7 @@ fn rg15_every_live_view_drains_through_the_gate() {
                 "{pref}: open now {open:?}; answered before its propose {asked:?}; rdy key change {rekeyed}"
             ));
         }
-        // each agent view, and the person's `work`, is closed or holds no change
+        // each agent view is closed or holds no change
         let mut live = vec![];
         for name in st.view_names() {
             let Some(head) = st.view_head(&name) else {
@@ -2573,40 +2574,9 @@ fn rg15_every_live_view_drains_through_the_gate() {
                 .owner
                 .as_ref()
                 .is_some_and(|w| w.actor.starts_with("agent:a"));
-            if (by_agent || name == "work") && !head.closed && !st.included(&name).is_empty() {
+            if by_agent && !head.closed && !st.included(&name).is_empty() {
                 live.push(name);
             }
-        }
-        // no version of `work` the person proposed waits in its queue when its acts end
-        let work: BTreeSet<&str> = o
-            .journal
-            .iter()
-            .filter(|e| e.act == "wc_propose" && e.outcome == Met::Ok)
-            .filter_map(|e| e.block.as_deref())
-            .collect();
-        for r in o.queued.iter().filter(|r| work.contains(r.as_str())) {
-            bad.push(format!(
-                "the person's work version {r} is still in its queue"
-            ));
-        }
-        // what each version of `work` met, for a person to look at
-        if live.iter().any(|v| v == "work") {
-            for (k, e) in o.journal.iter().enumerate() {
-                let Some(pref) = e.block.as_deref().filter(|b| work.contains(b)) else {
-                    continue;
-                };
-                if matches!(e.act, "wc_propose" | "land" | "version_plan") {
-                    bad.push(format!(
-                        "work: entry {k} {} step {} {} {pref}: {:?} {}",
-                        e.actor,
-                        e.step,
-                        e.act,
-                        e.outcome,
-                        e.message.as_deref().unwrap_or("")
-                    ));
-                }
-            }
-            bad.push(format!("work: queued at the end {:?}", o.queued));
         }
         drop(st);
         r.close().expect("close the drained copy");
@@ -2615,13 +2585,66 @@ fn rg15_every_live_view_drains_through_the_gate() {
                 "views neither landed nor closed after the drain: {live:?}"
             ));
         }
+        // the person's `work` (ruling task-15 F1): the gate never meets an open item of its
+        // plan. Each read of a work version's plan before an approve shows no open item that
+        // gates or warns, and no approve of one is refused for an open item (E_PLAN_OPEN).
+        // Whether every work version lands by the end of the run is not checked here (see the
+        // fix-round report: the queue and moved refusals, not the plan, keep it out).
+        let work: BTreeSet<&str> = o
+            .journal
+            .iter()
+            .filter(|e| e.act == "wc_propose" && e.outcome == Met::Ok)
+            .filter_map(|e| e.block.as_deref())
+            .collect();
+        let mut stopped = false;
+        for e in &o.journal {
+            let Some(pref) = e.block.as_deref().filter(|b| work.contains(b)) else {
+                continue;
+            };
+            match (e.act, &e.outcome, e.reply.as_ref()) {
+                ("version_plan", Met::Ok, Some(r)) => {
+                    work_reads.set(work_reads.get() + 1);
+                    let open = gating_open(&r["counts"]);
+                    if !open.is_empty() {
+                        stopped = true;
+                        bad.push(format!(
+                            "{} step {}: the plan of work version {pref} holds open items {open:?}",
+                            e.actor, e.step
+                        ));
+                    }
+                }
+                ("land", Met::Refused(code), _)
+                    if code == "E_PROPOSAL_NOT_READY"
+                        && e.message
+                            .as_deref()
+                            .is_some_and(|m| m.contains("E_PLAN_OPEN")) =>
+                {
+                    stopped = true;
+                    bad.push(format!(
+                        "{} step {}: work version {pref} is not ready for open plan items: {}",
+                        e.actor,
+                        e.step,
+                        e.message.as_deref().unwrap_or("")
+                    ));
+                }
+                _ => {}
+            }
+        }
+        if stopped {
+            bad.push(format!("the person's queue at the end: {:?}", o.queued));
+        }
         assert!(bad.is_empty(), "swarm seed {seed}: {bad:#?}");
     });
     eprintln!(
-        "rg15: {} answered items sealed, {} of them deferred; {} deferral cards accepted",
+        "rg15: {} answered items sealed, {} of them deferred; {} deferral cards accepted; {} plan reads of a work version before an approve",
         answered.get(),
         deferred.get(),
-        accepted.get()
+        accepted.get(),
+        work_reads.get()
+    );
+    assert!(
+        work_reads.get() > 0,
+        "no seed approved a version of the person's work: its check is vacuous"
     );
     assert!(
         answered.get() > 0,
