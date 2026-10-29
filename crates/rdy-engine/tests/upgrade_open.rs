@@ -62,7 +62,13 @@ fn registry() -> Vec<UpgradeStep> {
 }
 
 fn upgraded() -> StoreFeatures {
-    baseline_features().merged(&[test_feature()])
+    upgraded_from(&baseline_features())
+}
+
+/// `from` with the test feature: a project's own features after the one step. A project that
+/// landed a proposal has the `assessment` feature too (ruling task-10 B).
+fn upgraded_from(from: &StoreFeatures) -> StoreFeatures {
+    from.merged(&[test_feature()])
 }
 
 fn session(role: Role) -> Session {
@@ -96,6 +102,12 @@ fn write_doc(r: &mut Rdy, view: &str, title: &str) {
 
 /// A closed project with one landed doc; returns its base, root and the landing.
 fn project() -> (tempfile::TempDir, PathBuf, Hash) {
+    let (base, root, landing, _) = project_with_features();
+    (base, root, landing)
+}
+
+/// [`project`], with the store's own features as it closed.
+fn project_with_features() -> (tempfile::TempDir, PathBuf, Hash, StoreFeatures) {
     let base = tempfile::tempdir().unwrap();
     let root = base.path().join("p");
     std::fs::create_dir(&root).unwrap();
@@ -109,8 +121,9 @@ fn project() -> (tempfile::TempDir, PathBuf, Hash) {
         .unwrap()
         .parse()
         .unwrap();
+    let features = r.store().features().clone();
     r.close().unwrap();
-    (base, root, landing)
+    (base, root, landing, features)
 }
 
 fn store_dir(root: &Path) -> PathBuf {
@@ -204,7 +217,7 @@ fn assert_needs_upgrade(e: &RdyError) {
 #[test]
 fn ok9_require_current_never_upgrades() {
     let _f = known();
-    let (base, root, _) = project();
+    let (base, root, _, from) = project_with_features();
     let before = tree(base.path());
     // planned steps: refused before any backup, append or mirror
     let e = Rdy::open_with_registry_for_tests(
@@ -246,9 +259,9 @@ fn ok9_require_current_never_upgrades() {
     // the default policy completes it: fsck, then the mirror, with no second batch
     let r = Rdy::open(&root).unwrap();
     assert!(!r.store().upgrade_pending());
-    assert_eq!(r.store().features(), &upgraded());
+    assert_eq!(r.store().features(), &upgraded_from(&from));
     r.close().unwrap();
-    assert_eq!(format_text(&root), upgraded().to_text());
+    assert_eq!(format_text(&root), upgraded_from(&from).to_text());
     assert_eq!(upgrade_batches(&root), 1);
     // now current: RequireCurrent opens it
     Rdy::open_with_policy(&root, OpenPolicy::RequireCurrent)
@@ -260,7 +273,7 @@ fn ok9_require_current_never_upgrades() {
 #[test]
 fn ok9_auto_open_resumes_the_one_upgrade_batch() {
     let _f = known();
-    let (_base, root, _) = project();
+    let (_base, root, _, from) = project_with_features();
     let old = format_text(&root);
     // a stop before the full fsck, then one after it and before the mirror's publication
     for stop in [CompletionPhase::BeforeFsck, CompletionPhase::Checked] {
@@ -290,8 +303,8 @@ fn ok9_auto_open_resumes_the_one_upgrade_batch() {
         ]
     );
     assert!(!r.store().upgrade_pending());
-    assert_eq!(r.store().features(), &upgraded());
-    assert_eq!(format_text(&root), upgraded().to_text());
+    assert_eq!(r.store().features(), &upgraded_from(&from));
+    assert_eq!(format_text(&root), upgraded_from(&from).to_text());
     assert_eq!(upgrade_batches(&root), 1);
     assert_eq!(backups(&root).len(), 1);
     // the completed store writes again
@@ -303,11 +316,11 @@ fn ok9_auto_open_resumes_the_one_upgrade_batch() {
     assert!(seen.is_empty(), "{seen:?}");
     assert_eq!(upgrade_batches(&root), 1);
     // a fresh project upgrades and completes in its first open
-    let (_base, fresh, _) = project();
+    let (_base, fresh, _, from) = project_with_features();
     let (seen, out) = phases(None, || open_auto(&fresh));
     out.unwrap().close().unwrap();
     assert_eq!(seen.len(), 3);
-    assert_eq!(format_text(&fresh), upgraded().to_text());
+    assert_eq!(format_text(&fresh), upgraded_from(&from).to_text());
     assert_eq!(upgrade_batches(&fresh), 1);
 }
 
