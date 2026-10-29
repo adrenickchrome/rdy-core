@@ -59,8 +59,9 @@ fn land_tag(r: &mut Rdy, id: Option<&str>, body: &str, name: &str) -> String {
 }
 
 fn objects(src: &Rdy) -> Vec<(u8, Vec<u8>)> {
-    const COPIED: [u8; 8] = [
+    const COPIED: [u8; 9] = [
         kinds::BLOCK,
+        kinds::ASSESSMENT,
         kinds::CHANGE,
         kinds::PROPOSAL,
         kinds::LANDING,
@@ -199,7 +200,8 @@ fn ha12_format_calls_need_no_store() {
         (seen.dump, &seen.store),
         (
             facts.dump,
-            &maintenance::DumpStore::Features(facts.store.clone())
+            // the holder took landings, and each names its assessment
+            &maintenance::DumpStore::Features(and_assessment(facts.store.clone()))
         )
     );
     assert_eq!(seen.rdy, facts.rdy);
@@ -377,4 +379,15 @@ fn ok12_upgrade_receipt_type_is_reachable_through_the_adapter() {
     let from_plan: &Option<maintenance::UpgradeReceipt> = &plan.receipt;
     let from_report: &Option<rdy_adapter::UpgradeReceipt> = &report.receipt;
     assert!(from_plan.is_none() && from_report.is_none());
+}
+
+/// `features` and the `assessment` store feature.
+fn and_assessment(features: rdy_store::format::StoreFeatures) -> rdy_store::format::StoreFeatures {
+    let mut f = features.features;
+    f.extend(
+        rdy_store::format::registered_features()
+            .into_iter()
+            .filter(|x| x.name == rdy_store::format::FEATURE_ASSESSMENT),
+    );
+    rdy_store::format::StoreFeatures::of(f)
 }

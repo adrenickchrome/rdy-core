@@ -10,8 +10,7 @@ use rdy_engine::{
 use rdy_model::signature::Signature;
 use rdy_model::{Hash, Provenance, Role, Tag};
 use rdy_store::format::{
-    FEATURES_FILE, FeatureClass, StoreFeature, StoreFeatures, TEST_FEATURE, baseline_features,
-    inject_test_feature,
+    FEATURES_FILE, FeatureClass, StoreFeature, StoreFeatures, TEST_FEATURE, inject_test_feature,
 };
 use rdy_store::holder::StoreMode;
 use rdy_store::upgrade::{self, UpgradeStep};
@@ -59,10 +58,6 @@ fn registry() -> Vec<UpgradeStep> {
         from: StoreFeatures::of(vec![]),
         to: StoreFeatures::of(vec![test_feature()]),
     }]
-}
-
-fn upgraded() -> StoreFeatures {
-    upgraded_from(&baseline_features())
 }
 
 /// `from` with the test feature: a project's own features after the one step. A project that
@@ -445,6 +440,7 @@ fn ok9_holder_completion_runs_the_holder_fsck() {
     // the tag's history, as a holder takes it: every copied object, then the tag's ref
     let copied = [
         kinds::BLOCK,
+        kinds::ASSESSMENT,
         kinds::CHANGE,
         kinds::PROPOSAL,
         kinds::LANDING,
@@ -482,6 +478,8 @@ fn ok9_holder_completion_runs_the_holder_fsck() {
     h.store_mut().write(items).unwrap();
     h.store_mut().set_refs(refs).unwrap();
     h.seal_open().unwrap();
+    // the holder's own features: it took the landings, and each names its assessment
+    let from = h.store().features().clone();
     h.close().unwrap();
     make_pending(&holder);
     let (seen, out) = phases(None, || {
@@ -508,6 +506,6 @@ fn ok9_holder_completion_runs_the_holder_fsck() {
         "the holder's fsck checks its tag"
     );
     h.close().unwrap();
-    assert_eq!(format_text(&holder), upgraded().to_text());
+    assert_eq!(format_text(&holder), upgraded_from(&from).to_text());
     assert_eq!(upgrade_batches(&holder), 1);
 }
