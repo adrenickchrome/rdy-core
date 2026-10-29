@@ -1263,8 +1263,9 @@ impl StoreReader {
     /// the index holds: every PLAN decodes, keeps its own rules and its chain, bound proposal
     /// and seal; in a project, every view's latest plan is its `plan/<view>` ref and every
     /// `plan/` ref names its view's latest plan; the four plan tables hold exactly the rows the
-    /// log gives; and so do the assessment table and the first briefed change, in the same walk
-    /// (`check_readiness_rows`). Returns how many PLAN records the log holds.
+    /// log gives; and so do the assessment table and the first briefed change
+    /// (`check_readiness_rows`) and the two dispute tables (`check_dispute_rows`), in the same
+    /// walk. Returns how many PLAN records the log holds.
     pub(crate) fn check_plans(&self) -> Result<usize, StoreError> {
         let holder = matches!(self.mode(), Ok(StoreMode::Holder));
         let upto = self.index().indexed_upto()?;
@@ -1399,13 +1400,16 @@ impl StoreReader {
             ));
         }
         self.check_readiness_rows(&want, upto)?;
+        self.check_dispute_rows(&want, upto)?;
         Ok(n)
     }
 
-    /// The readiness rows (rg2) that the frame at `at` gives, as the index's own entries give
-    /// them (`crate::store::briefed_entry`, `crate::store::assessment_entry`): a CHANGE whose
-    /// links record a briefing, kept or removed (its residue keeps its links), and an
-    /// ASSESSMENT's version. A record that does not decode gives none here: the frame and
+    /// The readiness rows (rg2) and the dispute rows (ap2) that the frame at `at` gives, as the
+    /// index's own entries give them (`crate::store::briefed_entry`,
+    /// `crate::store::assessment_entry`, `crate::store::dispute_entry`,
+    /// `crate::store::resolution_entry`): a CHANGE whose links record a briefing, kept or removed
+    /// (its residue keeps its links), an ASSESSMENT's version, a DISPUTE's landing and a
+    /// DISPUTE_RESOLUTION's dispute. A record that does not decode gives none here: the frame and
     /// carried-record checks report it.
     fn readiness_entries(
         &self,
@@ -1416,7 +1420,10 @@ impl StoreReader {
         residue: Option<Hash>,
     ) -> Result<Vec<IndexEntry>, StoreError> {
         let kind = crate::codec::logical_kind(raw);
-        if kind != kinds::CHANGE && kind != kinds::ASSESSMENT {
+        if !matches!(
+            kind,
+            kinds::CHANGE | kinds::ASSESSMENT | kinds::DISPUTE | kinds::DISPUTE_RESOLUTION
+        ) {
             return Ok(vec![]);
         }
         let Some(payload) = payload else {
@@ -1442,11 +1449,35 @@ impl StoreReader {
                 .and_then(|c| crate::store::briefed_entry(&c.links, at))
                 .into_iter()
                 .collect(),
+            kinds::DISPUTE => crate::store::dispute_entry(hash, at, &o)
+                .ok()
+                .into_iter()
+                .collect(),
+            kinds::DISPUTE_RESOLUTION => crate::store::resolution_entry(hash, at, &o)
+                .ok()
+                .into_iter()
+                .collect(),
             _ => crate::store::assessment_entry(hash, at, &o)
                 .ok()
                 .into_iter()
                 .collect(),
         })
+    }
+
+    /// The two dispute tables agree with `want`, the rows the log before `upto` gives: the
+    /// tables' rows before `upto` are exactly `want`'s. Otherwise `the dispute tables differ from
+    /// the dispute records; run rdy reindex`.
+    fn check_dispute_rows(
+        &self,
+        want: &crate::index::Index,
+        upto: Location,
+    ) -> Result<(), StoreError> {
+        if self.index().dispute_rows()?.before(upto) != want.dispute_rows()? {
+            return Err(StoreError::Decode(
+                "the dispute tables differ from the dispute records; run rdy reindex".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// The assessment table and the first briefed change agree with `want`, the rows the log

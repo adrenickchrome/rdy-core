@@ -14,6 +14,7 @@ use crate::redaction::PreparedRedactionApply;
 use crate::state::{PreparedProposal, open_ref, proposal_ref, view_ref};
 use crate::store::encode;
 use crate::view::{ViewHead, ViewOp, ViewOpKind, decode_head};
+use rdy_model::assessment::PolicyRef;
 use rdy_model::plan::Plan;
 use rdy_model::signature::Signature;
 use rdy_model::{
@@ -191,6 +192,50 @@ impl Store {
         alter: &dyn Fn(&mut LandingRecord),
     ) -> Result<PreparedLanding, StoreError> {
         self.land_frames(LandBase::Stored, req, alter)
+    }
+
+    /// [`Store::prepare_land`] for a policy landing (D-ZWP7Q): `req.relay` and `req.evidence`
+    /// None and `req.assessment` Some, else `Refused("a policy landing has no relay, no
+    /// evidence, and an assessment")`. The record gets assurance `Policy` and `policy`, with the
+    /// approver's (the agent's) provenance. The policy block version must be held (`NotFound`)
+    /// and be a version of `policy.block` (the carried bindings: `record <landing> (kind 4):
+    /// policy block id differs`). Writes nothing; [`Store::commit_land`] writes it.
+    pub fn prepare_land_by_policy(
+        &self,
+        req: LandRequest,
+        policy: PolicyRef,
+    ) -> Result<PreparedLanding, StoreError> {
+        if req.relay.is_some() || req.evidence.is_some() || req.assessment.is_none() {
+            return Err(StoreError::Refused(
+                "a policy landing has no relay, no evidence, and an assessment".into(),
+            ));
+        }
+        if !self.has_kind(kinds::BLOCK, &policy.version)? {
+            return Err(StoreError::NotFound(policy.version));
+        }
+        let prepared = self.prepare_land_with(req, &|l| {
+            l.assurance = Assurance::Policy;
+            l.policy = Some(policy.clone());
+        })?;
+        // the carried rules of the final record: its fields, then its policy block and its
+        // assessment (`prepare_land` checked the assessment before the policy was set)
+        let refuse =
+            |reason| crate::carried_records::refusal(&prepared.hash, kinds::LANDING, reason);
+        crate::carried_records::landing_local(&prepared.landing).map_err(refuse)?;
+        let frame = crate::codec::item(kinds::LANDING, &prepared.landing)?;
+        let key = crate::object_refs::ObjectKey {
+            kind: kinds::LANDING,
+            hash: prepared.hash,
+        };
+        let mut source = crate::state::PendingFrames {
+            store: crate::carried_records::StoreObjects(self),
+            batch: &prepared.items,
+            last: &frame,
+        };
+        if let Some(reason) = crate::carried_records::validate_refs(&mut source, key)? {
+            return Err(refuse(reason));
+        }
+        Ok(prepared)
     }
 
     /// The landing of a re-affirmation card (D-CQMA4, D-EJBPD), prepared without writing

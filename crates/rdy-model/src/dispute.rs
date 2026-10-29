@@ -65,3 +65,95 @@ impl DisputeResolution {
         Ok(())
     }
 }
+
+/// The dispute state of a landing (O22): derived from its disputes and their resolutions, never
+/// stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DisputeState {
+    None,
+    Open,
+    Upheld,
+    Dismissed,
+}
+
+impl DisputeState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DisputeState::None => "none",
+            DisputeState::Open => "open",
+            DisputeState::Upheld => "upheld",
+            DisputeState::Dismissed => "dismissed",
+        }
+    }
+}
+
+/// O22: each dispute's resolution outcome, None while it is open. `open` when a dispute has no
+/// resolution; else `upheld` when any resolution is upheld; else `dismissed` when any is
+/// dismissed; else `none` (no dispute, or every one withdrawn).
+pub fn landing_state(outcomes: impl IntoIterator<Item = Option<DisputeOutcome>>) -> DisputeState {
+    let (mut open, mut upheld, mut dismissed) = (false, false, false);
+    for o in outcomes {
+        match o {
+            None => open = true,
+            Some(DisputeOutcome::Upheld) => upheld = true,
+            Some(DisputeOutcome::Dismissed) => dismissed = true,
+            Some(DisputeOutcome::Withdrawn) => {}
+        }
+    }
+    if open {
+        DisputeState::Open
+    } else if upheld {
+        DisputeState::Upheld
+    } else if dismissed {
+        DisputeState::Dismissed
+    } else {
+        DisputeState::None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use DisputeOutcome::*;
+
+    #[test]
+    fn ap2_landing_state_follows_o22() {
+        let state = |o: &[Option<DisputeOutcome>]| landing_state(o.iter().copied());
+        // no dispute, or every one withdrawn
+        assert_eq!(state(&[]), DisputeState::None);
+        assert_eq!(
+            state(&[Some(Withdrawn), Some(Withdrawn)]),
+            DisputeState::None
+        );
+        // open over upheld over dismissed, in any order
+        assert_eq!(state(&[None]), DisputeState::Open);
+        assert_eq!(
+            state(&[Some(Upheld), Some(Dismissed), None, Some(Withdrawn)]),
+            DisputeState::Open
+        );
+        assert_eq!(
+            state(&[Some(Dismissed), Some(Upheld), Some(Withdrawn)]),
+            DisputeState::Upheld
+        );
+        assert_eq!(
+            state(&[Some(Withdrawn), Some(Dismissed)]),
+            DisputeState::Dismissed
+        );
+        // the wire names
+        let names: Vec<&str> = [
+            DisputeState::None,
+            DisputeState::Open,
+            DisputeState::Upheld,
+            DisputeState::Dismissed,
+        ]
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+        assert_eq!(names, ["none", "open", "upheld", "dismissed"]);
+        assert_eq!(
+            serde_yaml_ng::to_string(&DisputeState::Dismissed).unwrap(),
+            "dismissed\n"
+        );
+    }
+}

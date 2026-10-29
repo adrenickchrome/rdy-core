@@ -1,8 +1,11 @@
-//! Carried records (D-AYYD8, QD1): the stored shapes that have no writer yet. ASSESSMENT,
-//! DISPUTE, DISPUTE_RESOLUTION and CHECK_REQUEST, a Check REVIEW and its three verdicts, the
-//! Dispute, ResolveDispute and AcceptVerdict answers, a landing's `assessment` and `policy`, and a
-//! tension plan item. The store, a dump, a sync batch and a take carry them byte for byte; no
-//! product path writes one.
+//! Carried records (D-AYYD8, QD1): the stored shapes that reached the store before their writers.
+//! ASSESSMENT, DISPUTE, DISPUTE_RESOLUTION and CHECK_REQUEST, a Check REVIEW and its three
+//! verdicts, the Dispute, ResolveDispute and AcceptVerdict answers, a landing's `assessment` and
+//! `policy`, and a tension plan item. The store, a dump, a sync batch and a take carry them byte
+//! for byte. The writers so far: `Store::put_assessment` and `Store::bind_assessment` (an
+//! ASSESSMENT), `Store::put_dispute` and `Store::put_dispute_resolution` (a DISPUTE or a
+//! DISPUTE_RESOLUTION, and its Dispute or ResolveDispute answer), and
+//! `Store::prepare_land_by_policy` (a landing's `policy`). No product path writes the others.
 //!
 //! The one rule set every reader of outside or stored bytes applies (the project's and the
 //! holder's fsck, a checked stream and a take, a load and a reindex):
@@ -243,9 +246,11 @@ fn answer_local(a: &Answer) -> Result<(), &'static str> {
     }
 }
 
-/// A landing that names a policy is a policy landing with no relay. The reverse is not required
-/// yet: an older policy-assurance landing has no policy field. One of the landing field rules
-/// (`crate::check::landing_field_rules`), which every landing check applies.
+/// A landing that names a policy is a policy landing with no relay. One of the landing field
+/// rules (`crate::check::landing_field_rules`), which every landing check applies. The reverse
+/// (O25: a policy landing of encoding 1 or more names its policy) is fsck's alone
+/// (`StoreReader::check_landing_fields`): an encoding-0 landing has no policy field, and a take
+/// and a load do not run it.
 pub(crate) fn landing_local(l: &LandingRecord) -> Result<(), &'static str> {
     if l.policy.is_some()
         && (l.assurance != Assurance::Policy
