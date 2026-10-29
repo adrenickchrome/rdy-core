@@ -32,6 +32,7 @@
         "pack": "checks a pack file; the schema_packs row covers it",
         "plan confirm": "needs an open plan item",
         "plan defer": "needs an open plan item",
+        "plan dismiss": "needs an open plan item",
         "plan done": "needs an open plan item",
         "publication": "needs a publication profile",
         "publish": "uploads a site to a host",
@@ -2458,7 +2459,6 @@
                   "index": 1,
                   "num_args": "1..",
                   "positional": true,
-                  "required": true,
                   "value_names": [
                     "ITEMS"
                   ]
@@ -2470,6 +2470,54 @@
                   "num_args": "1",
                   "value_names": [
                     "REASON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "kind",
+                  "long": "kind",
+                  "num_args": "1",
+                  "value_names": [
+                    "KIND"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "follow_up",
+                  "long": "follow-up",
+                  "num_args": "1",
+                  "value_names": [
+                    "FOLLOW_UP"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "doc",
+                  "long": "doc",
+                  "num_args": "1",
+                  "value_names": [
+                    "DOC"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "edge",
+                  "long": "edge",
+                  "num_args": "1",
+                  "value_names": [
+                    "EDGE"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "id": "repin",
+                  "long": "repin",
+                  "num_args": "0",
+                  "value_names": [
+                    "REPIN"
                   ]
                 },
                 {
@@ -2528,11 +2576,27 @@
               "groups": [
                 {
                   "args": [
+                    "doc",
+                    "edge",
+                    "follow_up",
                     "items",
+                    "kind",
                     "reason",
+                    "repin",
                     "view"
                   ],
                   "id": "AnswerArgs",
+                  "multiple": true,
+                  "required": false
+                },
+                {
+                  "args": [
+                    "doc",
+                    "edge",
+                    "follow_up",
+                    "kind"
+                  ],
+                  "id": "by_group",
                   "multiple": true,
                   "required": false
                 }
@@ -2548,7 +2612,6 @@
                   "index": 1,
                   "num_args": "1..",
                   "positional": true,
-                  "required": true,
                   "value_names": [
                     "ITEMS"
                   ]
@@ -2560,6 +2623,54 @@
                   "num_args": "1",
                   "value_names": [
                     "REASON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "kind",
+                  "long": "kind",
+                  "num_args": "1",
+                  "value_names": [
+                    "KIND"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "follow_up",
+                  "long": "follow-up",
+                  "num_args": "1",
+                  "value_names": [
+                    "FOLLOW_UP"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "doc",
+                  "long": "doc",
+                  "num_args": "1",
+                  "value_names": [
+                    "DOC"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "edge",
+                  "long": "edge",
+                  "num_args": "1",
+                  "value_names": [
+                    "EDGE"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "id": "repin",
+                  "long": "repin",
+                  "num_args": "0",
+                  "value_names": [
+                    "REPIN"
                   ]
                 },
                 {
@@ -2618,11 +2729,27 @@
               "groups": [
                 {
                   "args": [
+                    "doc",
+                    "edge",
+                    "follow_up",
                     "items",
+                    "kind",
                     "reason",
+                    "repin",
                     "view"
                   ],
                   "id": "AnswerArgs",
+                  "multiple": true,
+                  "required": false
+                },
+                {
+                  "args": [
+                    "doc",
+                    "edge",
+                    "follow_up",
+                    "kind"
+                  ],
+                  "id": "by_group",
                   "multiple": true,
                   "required": false
                 }
@@ -2638,7 +2765,6 @@
                   "index": 1,
                   "num_args": "1..",
                   "positional": true,
-                  "required": true,
                   "value_names": [
                     "ITEMS"
                   ]
@@ -2650,6 +2776,54 @@
                   "num_args": "1",
                   "value_names": [
                     "REASON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "kind",
+                  "long": "kind",
+                  "num_args": "1",
+                  "value_names": [
+                    "KIND"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "follow_up",
+                  "long": "follow-up",
+                  "num_args": "1",
+                  "value_names": [
+                    "FOLLOW_UP"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "doc",
+                  "long": "doc",
+                  "num_args": "1",
+                  "value_names": [
+                    "DOC"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "edge",
+                  "long": "edge",
+                  "num_args": "1",
+                  "value_names": [
+                    "EDGE"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "id": "repin",
+                  "long": "repin",
+                  "num_args": "0",
+                  "value_names": [
+                    "REPIN"
                   ]
                 },
                 {
@@ -2708,16 +2882,185 @@
               "groups": [
                 {
                   "args": [
+                    "doc",
+                    "edge",
+                    "follow_up",
                     "items",
+                    "kind",
                     "reason",
+                    "repin",
                     "view"
                   ],
                   "id": "AnswerArgs",
                   "multiple": true,
                   "required": false
+                },
+                {
+                  "args": [
+                    "doc",
+                    "edge",
+                    "follow_up",
+                    "kind"
+                  ],
+                  "id": "by_group",
+                  "multiple": true,
+                  "required": false
                 }
               ],
               "name": "done",
+              "subcommands": []
+            },
+            {
+              "args": [
+                {
+                  "action": "append",
+                  "id": "items",
+                  "index": 1,
+                  "num_args": "1..",
+                  "positional": true,
+                  "value_names": [
+                    "ITEMS"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "reason",
+                  "long": "reason",
+                  "num_args": "1",
+                  "value_names": [
+                    "REASON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "kind",
+                  "long": "kind",
+                  "num_args": "1",
+                  "value_names": [
+                    "KIND"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "follow_up",
+                  "long": "follow-up",
+                  "num_args": "1",
+                  "value_names": [
+                    "FOLLOW_UP"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "doc",
+                  "long": "doc",
+                  "num_args": "1",
+                  "value_names": [
+                    "DOC"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "edge",
+                  "long": "edge",
+                  "num_args": "1",
+                  "value_names": [
+                    "EDGE"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "id": "repin",
+                  "long": "repin",
+                  "num_args": "0",
+                  "value_names": [
+                    "REPIN"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "view",
+                  "long": "view",
+                  "num_args": "1",
+                  "value_names": [
+                    "VIEW"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [
+                    "doc",
+                    "edge",
+                    "follow_up",
+                    "items",
+                    "kind",
+                    "reason",
+                    "repin",
+                    "view"
+                  ],
+                  "id": "AnswerArgs",
+                  "multiple": true,
+                  "required": false
+                },
+                {
+                  "args": [
+                    "doc",
+                    "edge",
+                    "follow_up",
+                    "kind"
+                  ],
+                  "id": "by_group",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "dismiss",
               "subcommands": []
             }
           ]
@@ -16435,43 +16778,119 @@
                   "const": "done",
                   "description": "The work the item names is done.",
                   "type": "string"
+                },
+                {
+                  "const": "dismiss",
+                  "description": "A tension item does not apply. Only a tension item takes it.",
+                  "type": "string"
                 }
               ]
             },
-            "PlanAnswerParams": {
+            "PlanAnswerSpecParams": {
               "additionalProperties": false,
-              "description": "One answer to a plan item.",
+              "description": "One answer in `rdy_plan`: to one item, or to a group of the open items.",
               "properties": {
                 "act": {
                   "$ref": "#/$defs/PlanActParam",
-                  "description": "confirm, defer or done. Which acts an item takes depends on its kind."
+                  "description": "confirm, defer, done or dismiss. Which acts an item takes depends on its kind."
+                },
+                "group": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/PlanGroupParams"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Every open item that matches each field the group gives: {kind?, follow_up?, doc?, edge?}. The act answers all of them. Give item or group, not both."
                 },
                 "item": {
-                  "description": "The item: a pi- id (a unique prefix of one is enough) or a cq- consequence id from the last write or proposal.",
-                  "type": "string"
-                },
-                "reason": {
-                  "description": "Why (1 to 2000 characters). Required for confirm and defer; done keeps none.",
+                  "description": "One item: a pi- id (a unique prefix of one is enough), a tn- id of a tension item or a cq- consequence id. Give item or group, not both.",
                   "type": [
                     "string",
+                    "null"
+                  ]
+                },
+                "reason": {
+                  "description": "Why (1 to 2000 characters). Required for confirm, defer and dismiss; done keeps none.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "repin": {
+                  "description": "true with a confirm group: also repin each matched item's subject to its cause, in one change before the answers.",
+                  "type": [
+                    "boolean",
                     "null"
                   ]
                 }
               },
               "required": [
-                "act",
-                "item"
+                "act"
               ],
               "type": "object"
+            },
+            "PlanGroupParams": {
+              "additionalProperties": false,
+              "description": "A group of open plan items: every field it gives must match, and it gives at least one.",
+              "properties": {
+                "doc": {
+                  "description": "The id of the doc that holds the item's subject in the version.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "edge": {
+                  "description": "The item's edge.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "follow_up": {
+                  "description": "update, reaffirm or confirm (a confirm item and a rejustify item).",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/PlanKindParam"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "The item's kind: update, rejustify, reaffirm, confirm, update_implementation or tension."
+                }
+              },
+              "type": "object"
+            },
+            "PlanKindParam": {
+              "description": "The kind of a plan item, as a group names it. The schema mirror of the model's `PlanKind`.",
+              "enum": [
+                "update",
+                "rejustify",
+                "reaffirm",
+                "confirm",
+                "update_implementation",
+                "tension"
+              ],
+              "type": "string"
             }
           },
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "properties": {
             "answers": {
-              "description": "Answer items of the view's plan. All the answers are checked first, and either all are recorded or none. The reply is the plan after them. Empty: a read.",
+              "description": "Answer items of the view's plan: each answer names an item, or a group of the open items. All the answers are checked first, and either all are recorded or none. The reply is the plan after them. Empty: a read.",
               "items": {
-                "$ref": "#/$defs/PlanAnswerParams"
+                "$ref": "#/$defs/PlanAnswerSpecParams"
               },
               "type": [
                 "array",
@@ -16565,6 +16984,11 @@
                   "const": "done",
                   "description": "The work the item names is done.",
                   "type": "string"
+                },
+                {
+                  "const": "dismiss",
+                  "description": "A tension item does not apply. Only a tension item takes it.",
+                  "type": "string"
                 }
               ]
             },
@@ -16574,7 +16998,7 @@
               "properties": {
                 "act": {
                   "$ref": "#/$defs/PlanActParam",
-                  "description": "confirm, defer or done. Which acts an item takes depends on its kind."
+                  "description": "confirm, defer, done or dismiss. Which acts an item takes depends on its kind."
                 },
                 "item": {
                   "description": "The item: a pi- id (a unique prefix of one is enough) or a cq- consequence id from the last write or proposal.",
