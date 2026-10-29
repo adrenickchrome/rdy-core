@@ -420,6 +420,9 @@ mod tests {
         }
     }
 
+    /// One change to a version, as a never-list case makes it.
+    type Alter = fn(&mut VerdictInputs);
+
     fn run(rules: Vec<Rule>, i: &VerdictInputs) -> AssessedPolicy {
         let p = pref();
         let f = fields(rules);
@@ -494,7 +497,7 @@ mod tests {
             v
         };
         assert_eq!(accepted(&run(vec![open.clone()], &base())), "open");
-        let cases: Vec<(fn(&mut VerdictInputs), &str)> = vec![
+        let cases: Vec<(Alter, &str)> = vec![
             (|v| v.redaction = true, "it carries a redaction request"),
             (
                 |v| v.changes_policy = true,
