@@ -4,10 +4,13 @@
 //!
 //! - `rdy approve`, relayed (`--relayed-by agent:relay`, the path FW-B9 gives; no MCP tool
 //!   approves in M2) and, about one landing in five, direct (CLI parity);
-//! - before each approve, `rdy pending` and the answer that accepts the version's deferral card,
-//!   `rdy answer defer:<P-x@n> o1` (D-AAQ9Z), relayed or direct as the approve is;
-//! - the working copy: `rdy checkout`, `rdy add`, `rdy commit`, `rdy update`, and `rdy propose`
-//!   for the human's view `work`, which no agent may act in.
+//! - before a direct approve, `rdy pending` and the answer that accepts the version's deferral
+//!   card, `rdy answer defer:<P-x@n> o1` (D-AAQ9Z, CLI parity; before a relayed approve the
+//!   relay reads the queue with `rdy_pending` and relays the answer with `rdy_answer`);
+//! - the working copy: `rdy checkout`, `rdy add`, `rdy commit`, `rdy update`, and, for the
+//!   human's view `work`, which no agent may act in, `rdy plan --view work` and the answers to
+//!   its open items, `rdy plan confirm|defer <items> --reason <why> --view work` (ruling task-15
+//!   F1), then `rdy propose`.
 //!
 //! The person lands the proposal at the front of a shared queue (the run orders it). A proposal
 //! made before its view joined an alternative set it drops, and journals the drop as a skipped
@@ -15,7 +18,7 @@
 //! relay carry the actor `agent:relay`; those of a direct command carry `human:qa`, the human
 //! the project's user config names.
 use super::agent::{
-    KINDS, KillGate, Link, Pace, Res, Where, advised_labels, inbox_labels, labels_of, spell,
+    self, KINDS, KillGate, Link, Pace, Res, Where, advised_labels, inbox_labels, labels_of, spell,
 };
 use super::journal::{Entry, Journal, Outcome, Skip};
 use super::project::{CLAIMS_PER_AREA, DOC_PATHS, SeedBlocks, SwarmProject};
@@ -24,6 +27,7 @@ use super::script::PersonAct;
 use crate::daemon::human_command;
 use crate::fixtures::output_within;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
@@ -170,19 +174,32 @@ pub(crate) fn cli_in(link: &mut Link, act: &str, args: &[&str], relay: bool) -> 
     }
 }
 
-/// Before the person approves `pref` (D-AAQ9Z): when `rdy pending --json` lists the version's
-/// deferral card `defer:<pref>`, the person accepts it, `rdy answer defer:<pref> o1` (the
-/// `accept_deferrals` act), as `who` approves: relayed through `link` (the relaying agent names
-/// itself, the card it showed and the person's words) or direct. The read is a `pending` entry
-/// and the answer an `accept_deferrals` entry, each naming `pref`; the answer's reply is the
-/// entry's. `false` when the daemon died under a call: the approve waits.
+/// Before the person approves `pref` (D-AAQ9Z): when the queue lists the version's deferral card
+/// `defer:<pref>`, the person accepts it with option `o1` (the `accept_deferrals` act), as `who`
+/// approves. Relayed, the relaying agent reads the queue with `rdy_pending` and relays the
+/// answer with `rdy_answer` through `link`, naming the card it showed, the person's words and
+/// the chat session (FW-UX1: every act with a tool goes through it). Direct, the person runs
+/// `rdy pending` and `rdy answer defer:<pref> o1` (CLI parity). The read is a `pending` entry
+/// whose reply is `{via}`, the tool or command that read it; the answer an `accept_deferrals`
+/// entry whose reply is `{via, answer}`, with the answer's reply; each names `pref`. `false`
+/// when the daemon died under a call: the approve waits.
 pub(crate) fn accept_deferrals(link: &mut Link, who: &str, pref: &str, relayed: bool) -> bool {
     let card = format!("defer:{pref}");
     let mut e = Entry::new(who, link.step, "pending", Outcome::Ok);
     e.epoch = link.epoch;
     e.block = Some(pref.to_string());
+    let via = if relayed {
+        "rdy_pending"
+    } else {
+        "rdy pending"
+    };
+    e.reply = Some(json!({ "via": via }));
     // a card's budget cuts its text, never its hash
-    let res = cli_in(link, "pending", &["pending"], relayed);
+    let res = if relayed {
+        link.raw("pending", "rdy_pending", json!({"session_ref": RELAY_RUN}))
+    } else {
+        cli_in(link, "pending", &["pending"], false)
+    };
     let mut hash = None;
     let res = link.finish(e, "pending", res, |_, v| {
         hash = v["items"]
@@ -197,27 +214,22 @@ pub(crate) fn accept_deferrals(link: &mut Link, who: &str, pref: &str, relayed: 
         return false;
     }
     let Some(hash) = hash else { return true };
-    let evidence = format!("Accept the deferrals of {pref}.");
-    let question = format!("Accept the deferred plan items of {pref}?");
-    let mut args: Vec<&str> = vec!["answer", card.as_str(), "o1", "--card", hash.as_str()];
-    if relayed {
-        args.extend([
-            "--relayed-by",
-            RELAY,
-            "--evidence",
-            evidence.as_str(),
-            "--question",
-            question.as_str(),
-            "--session",
-            "chat",
-        ]);
-    }
     let mut e = Entry::new(who, link.step, "accept_deferrals", Outcome::Ok);
     e.epoch = link.epoch;
     e.block = Some(pref.to_string());
-    let res = cli_in(link, "accept_deferrals", &args, relayed);
+    let (via, res) = if relayed {
+        let args = json!({"ref": card, "option": "o1", "card_hash": hash,
+            "evidence": format!("Accept the deferrals of {pref}."),
+            "question": format!("Accept the deferred plan items of {pref}?"),
+            "session_ref": RELAY_RUN});
+        let res = link.raw("accept_deferrals", "rdy_answer", args);
+        ("rdy_answer", res)
+    } else {
+        let args = ["answer", card.as_str(), "o1", "--card", hash.as_str()];
+        ("rdy answer", cli_in(link, "accept_deferrals", &args, false))
+    };
     let res = link.finish(e, "accept_deferrals", res, |en, v| {
-        en.reply = Some(v.clone())
+        en.reply = Some(json!({"via": via, "answer": v}));
     });
     !matches!(res, Res::Lost)
 }
@@ -225,9 +237,11 @@ pub(crate) fn accept_deferrals(link: &mut Link, who: &str, pref: &str, relayed: 
 impl Person {
     fn act(&mut self, act: &PersonAct) {
         // an act that can change a tension waits while an agent answers its plan; a landing
-        // holds the landing turn instead, which every plan answer waits for (`KillGate`)
+        // holds the landing turn instead, which every plan answer waits for (`KillGate`); a
+        // working-copy edit answers a plan itself, so it takes its turns step by step
         let gate = self.link.gate.clone();
-        let _act = (!matches!(act, PersonAct::Land { .. })).then(|| gate.act_turn());
+        let _act =
+            (!matches!(act, PersonAct::Land { .. } | PersonAct::WcEdit)).then(|| gate.act_turn());
         match act {
             PersonAct::Land { relayed } => self.land(*relayed),
             PersonAct::Dismiss => self.dismiss(),
@@ -614,8 +628,96 @@ impl Person {
     }
 
     /// Edits one claim in the working copy, stages the file and commits. On `E_WC_STALE` it runs
-    /// `rdy update` once and tries the commit once more.
+    /// `rdy update` once and tries the commit once more. Then it answers the open items of
+    /// `work`'s change plan (`answer_work_plan`) and proposes `work`.
     fn wc_edit(&mut self) {
+        let gate = self.link.gate.clone();
+        {
+            let _act = gate.act_turn();
+            if !self.wc_commit() {
+                return;
+            }
+        }
+        self.answer_work_plan();
+        // the propose's own call can change a tension (a key change rdy adds)
+        let _act = gate.act_turn();
+        self.wc_propose();
+    }
+
+    /// The person's answers to `work`'s change plan (ruling task-15 F1: the CLI fallback path,
+    /// FW-UX1), as an agent answers its own (`agent::answer_plan`): it reads the plan whole with
+    /// `rdy plan --view work` (one `plan` entry per page, naming the view), then answers each open
+    /// item that gates or warns by its kind (`agent::plan_answer_for`), one
+    /// `rdy plan confirm|defer <items> --reason <why> --view work` for each act and reason (the
+    /// command takes one of each), one `plan_answer` entry each, whose reply lists its answers
+    /// (`{answers: [{item, kind, act, reason}]}`). It holds the plan turn throughout
+    /// (`KillGate::plan_turn`). A view whose changes conflict with canon has no plan (the
+    /// read's `E_CONFLICT_UNRESOLVED`), and a call the kill cuts ends it: the version proposed
+    /// next is not ready, and the person's approve re-queues it.
+    fn answer_work_plan(&mut self) {
+        let gate = self.link.gate.clone();
+        let _turn = gate.plan_turn();
+        let all = agent::PLAN_ALL.to_string();
+        let mut page: Option<String> = None;
+        let mut open: Vec<(String, String)> = vec![];
+        loop {
+            let mut args = vec!["plan", "--max-tokens", all.as_str()];
+            match &page {
+                Some(next) => args.extend(["--page", next.as_str()]),
+                None => args.extend(["--view", "work"]),
+            }
+            let mut read = None;
+            let res = self.cli("plan", &args);
+            let mut e = self.entry(HUMAN, "plan");
+            e.view = Some("work".to_string());
+            self.link.finish(e, "plan", res, |en, v| {
+                en.reply = Some(json!({"counts": v["counts"]}));
+                read = Some(v.clone());
+            });
+            let Some(read) = read else { return };
+            for i in read["items"].as_array().into_iter().flatten() {
+                if i["state"] == "open"
+                    && let (Some(id), Some(kind)) = (i["id"].as_str(), i["kind"].as_str())
+                {
+                    open.push((id.to_string(), kind.to_string()));
+                }
+            }
+            match read["next"].as_str() {
+                Some(next) => page = Some(next.to_string()),
+                None => break,
+            }
+        }
+        // one command for each act and reason, in a fixed order
+        let mut groups: BTreeMap<(&str, &str), Vec<(String, String)>> = BTreeMap::new();
+        for (item, kind) in open {
+            if let Some(answer) = agent::plan_answer_for(&kind) {
+                groups.entry(answer).or_default().push((item, kind));
+            }
+        }
+        for ((act, reason), items) in groups {
+            let mut args = vec!["plan", act];
+            args.extend(items.iter().map(|(item, _)| item.as_str()));
+            args.extend(["--reason", reason, "--view", "work"]);
+            let sent: Vec<Value> = items
+                .iter()
+                .map(|(item, kind)| json!({"item": item, "kind": kind, "act": act, "reason": reason}))
+                .collect();
+            let mut e = self.entry(HUMAN, "plan_answer");
+            e.view = Some("work".to_string());
+            // the entry names what it sent, refused or not
+            e.reply = Some(json!({ "answers": sent }));
+            let res = self.cli("plan_answer", &args);
+            if !matches!(
+                self.link.finish(e, "plan_answer", res, |_, _| {}),
+                Res::Ok(_)
+            ) {
+                return;
+            }
+        }
+    }
+
+    /// The edit and the commit of `wc_edit`: `true` when the commit was made.
+    fn wc_commit(&mut self) -> bool {
         let step = self.link.step;
         let area = step % DOC_PATHS.len();
         let claim = self.seed.claims
@@ -628,13 +730,13 @@ impl Person {
         if !self.checked_out {
             match self.wc("wc_checkout", &["checkout", "work"], |_, _| {}) {
                 Res::Ok(_) => self.checked_out = true,
-                _ => return,
+                _ => return false,
             }
         }
         for attempt in 0..2 {
             self.edit_file(&rel, &claim, &body);
             if !self.stage(&rel) {
-                return;
+                return false;
             }
             let res = self.wc(
                 "wc_commit",
@@ -646,18 +748,24 @@ impl Person {
                 },
             );
             match res {
-                Res::Ok(_) => break,
+                Res::Ok(_) => return true,
                 Res::Refused(code, _) if code == "E_WC_STALE" && attempt == 0 => {
                     // the view moved under the checkout: update, take the store's version of a
                     // file that changed on both sides, and make the edit again
                     match self.wc("wc_update", &["update"], |_, _| {}) {
                         Res::Ok(v) => self.take_theirs(&v),
-                        _ => return,
+                        _ => return false,
                     }
                 }
-                _ => return,
+                _ => return false,
             }
         }
+        false
+    }
+
+    /// `rdy propose --view work`, with a summary; the version joins the person's queue.
+    fn wc_propose(&mut self) {
+        let step = self.link.step;
         let title = format!("person edit {step}");
         let mut made = None;
         let res = self.wc(

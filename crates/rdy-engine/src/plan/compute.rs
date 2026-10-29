@@ -14,7 +14,7 @@ use crate::brief::{FollowUp, effective_stable};
 use crate::code_evidence::{self, anchored_files, later_touch};
 use crate::code_index::{CodeRepo, code_repos};
 use crate::consequence::{CONFLICT_FIX, NetState, PlanPair, conflict_message, refines_copied};
-use crate::error::{E_CONFLICT_UNRESOLVED, E_LIMIT};
+use crate::error::{E_ALREADY_EXISTS, E_CONFLICT_UNRESOLVED, E_LIMIT, E_STALE_BASE};
 use crate::gate::{applied_ops, changes_of, prospective};
 use crate::lexicon::Lexicon;
 use crate::tensions::{Tension, TensionSeverity, TensionStatus, judged_on_the_net_change};
@@ -361,24 +361,49 @@ fn sides_of(st: &ReadState, changes: &[Change], canon_at: Option<Hash>) -> Resul
             }
         }
     };
+    // a conflict with canon is one refusal on both branches: a plan read is no write, so it never
+    // gives the write's E_STALE_BASE (ruling task-15 F3)
+    let refuse = |ids: Vec<String>| -> Result<(), RdyError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        Err(RdyError::new(
+            E_CONFLICT_UNRESOLVED,
+            conflict_message(&ids),
+            CONFLICT_FIX,
+        ))
+    };
+    let conflicted = |canon_at: Option<Hash>| -> Result<Vec<String>, RdyError> {
+        let reader = st.reader();
+        let merged = reader.merge_onto(canon_at, &reader.state_of(canon_at)?, changes)?;
+        Ok(merged
+            .conflicts
+            .iter()
+            .map(|c| c.block.to_string())
+            .collect())
+    };
     let (m, ops) = if canon_at == st.canon_head() {
-        let (next, applied) = prospective(st, changes, None)?;
+        let (next, applied) = match prospective(st, changes, None) {
+            Ok(x) => x,
+            // the merge's conflict refusals (`merge_checked`) name one block: the refusal names
+            // every conflicted one, as the merge branch does
+            Err(e) if [E_STALE_BASE, E_ALREADY_EXISTS].contains(&e.code) => {
+                refuse(conflicted(canon_at)?)?;
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        };
         (next, applied_ops(changes, &applied))
     } else {
         let reader = st.reader();
         let merged = reader.merge_onto(canon_at, &reader.state_of(canon_at)?, changes)?;
-        if !merged.conflicts.is_empty() {
-            let ids: Vec<String> = merged
+        refuse(
+            merged
                 .conflicts
                 .iter()
                 .map(|c| c.block.to_string())
-                .collect();
-            return Err(RdyError::new(
-                E_CONFLICT_UNRESOLVED,
-                conflict_message(&ids),
-                CONFLICT_FIX,
-            ));
-        }
+                .collect(),
+        )?;
         let applied: Vec<usize> = merged
             .order
             .iter()

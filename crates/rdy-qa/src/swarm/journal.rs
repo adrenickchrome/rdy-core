@@ -208,11 +208,10 @@ pub fn allowed(act: &str, code: &str) -> bool {
         "wc_checkout" | "wc_commit" | "wc_update" | "wc_propose" => WC_CODES,
         "inbox_resume" => &["E_BAD_INPUT"],
         // a view or a version whose changes conflict with canon has no change plan until the
-        // conflict is resolved: the read of the view refuses with the write's E_STALE_BASE, that
-        // of a version on an earlier canon with E_CONFLICT_UNRESOLVED (the propose binds no plan
-        // then, and the landing refuses the version as not ready)
-        "plan" => &["E_STALE_BASE"],
-        "version_plan" => &["E_STALE_BASE", "E_CONFLICT_UNRESOLVED"],
+        // conflict is resolved: its read refuses with E_CONFLICT_UNRESOLVED, never with a
+        // write's E_STALE_BASE (ruling task-15 F3; the propose binds no plan then, and the
+        // landing refuses the version as not ready)
+        "plan" | "version_plan" => &["E_CONFLICT_UNRESOLVED"],
         // intent, review_next, tensions, inbox, read, brief, and the plan answers, the queue
         // read and the deferral acceptance (plan_answer, pending, accept_deferrals): no refusal
         // is allowed.

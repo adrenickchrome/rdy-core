@@ -104,6 +104,8 @@ pub struct Outcome {
     pub served: Served,
     /// What the run's landing checks found.
     pub violations: Vec<String>,
+    /// The person's queue when its acts ended: the proposals it never landed, oldest first.
+    pub queued: Vec<String>,
     /// Holds `frozen`.
     _frozen_dir: tempfile::TempDir,
 }
@@ -559,6 +561,7 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
         .map(|h| h.join().unwrap_or_else(|e| resume_unwind(e)))
         .collect();
     person.join().unwrap_or_else(|e| resume_unwind(e));
+    let queued = queue.lock().unwrap_or_else(PoisonError::into_inner).clone();
 
     // the freeze: no actor runs
     journal.record(Entry::new(MARKER, cfg.steps, FREEZE, Met::Ok));
@@ -627,6 +630,7 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
         dir: at.dir,
         served,
         violations,
+        queued,
         _frozen_dir: frozen_dir,
     }
 }

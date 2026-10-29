@@ -2040,3 +2040,50 @@ fn cp8_fix1_a_plan_write_reads_only_its_own_views_refs() {
     assert_eq!(reads() - at, all as u64);
     assert_eq!(whole(&r, "w3")["plan"], h.to_string());
 }
+
+/// rg15 (ruling task-15 F3): a plan read of a view whose changes conflict with canon refuses
+/// with the conflict's code, message and fix, as the read of a version on an earlier canon does;
+/// no plan read refuses with the write's `E_STALE_BASE`. Views x and y edit claim a from one
+/// base, and y lands: the read of x's view, the read of x's version proposed on canon's head
+/// after that, and an answer to x's plan each refuse alike.
+#[test]
+fn rg15_a_plan_read_of_a_conflicting_view_refuses_with_the_conflict_code() {
+    let (_d, mut r) = project();
+    let s = spec(&mut r);
+    edit(&mut r, "x", &s.a, "A holds 31 days.");
+    edit(&mut r, "y", &s.a, "A holds 32 days.");
+    land(&mut r, "y");
+    let message = format!(
+        "no consequences while {} is in conflict. Write it from the version you want (rdy_context lists the sides), then propose again.",
+        s.a
+    );
+    let fix = "write the block from the version you want (rdy_context lists the sides), or exclude one side's change";
+    let on_head = plan_of(&r, &view_q("x")).unwrap_err();
+    expect_err(on_head, "E_CONFLICT_UNRESOLVED", &message, fix);
+    // an answer to the view's plan reads the same plan, and refuses the same way
+    let refused = r
+        .answer_plan(
+            &writer(),
+            "x",
+            &[ans(
+                &pi(&s.a, &s.b, PlanKind::Confirm),
+                PlanAct::Confirm,
+                Some("holds"),
+            )],
+        )
+        .unwrap_err();
+    expect_err(refused, "E_CONFLICT_UNRESOLVED", &message, fix);
+    // the version proposed now records canon's head, and its plan read refuses alike
+    let px = r
+        .propose(&writer(), "x", "x", Some(common::TEST_SUMMARY))
+        .unwrap();
+    let version = plan_of(
+        &r,
+        &PlanQuery {
+            proposal: Some(px.r#ref.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    expect_err(version, "E_CONFLICT_UNRESOLVED", &message, fix);
+}

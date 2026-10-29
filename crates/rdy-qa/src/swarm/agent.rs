@@ -478,7 +478,7 @@ fn persisted_after(
 }
 
 /// The budget of a whole plan read (`PLAN_MAX_TOKENS`); a cut read goes on with its `next`.
-const PLAN_ALL: usize = 100_000;
+pub(crate) const PLAN_ALL: usize = 100_000;
 
 /// The act and the reason an agent answers an open plan item of `kind` with (D-ME2HD; the acts
 /// `allowed_acts` gives each kind, `plan/compute.rs`): `confirm` for a confirm item, `defer` for
@@ -499,9 +499,9 @@ pub(crate) fn plan_answer_for(kind: &str) -> Option<(&'static str, &'static str)
 /// whose reply lists each answer with its item's kind (`{answers: [{item, kind, act, reason}]}`).
 /// It holds the plan turn throughout (`KillGate::plan_turn`), so the items it read are the items
 /// it answers. With nothing to answer it makes no second call. A view whose changes conflict
-/// with canon has no plan (the read's `E_STALE_BASE`, a row of the table), and a call the kill
-/// cuts ends it too: the version proposed next is not ready, and the drain answers its plan once
-/// it resolves it.
+/// with canon has no plan (the read's `E_CONFLICT_UNRESOLVED`, a row of the table), and a call
+/// the kill cuts ends it too: the version proposed next is not ready, and the drain answers its
+/// plan once it resolves it.
 pub(crate) fn answer_plan(link: &mut Link, view: &str) {
     // from the read to the answers, no other act changes a tension (`KillGate::plan_turn`)
     let gate = link.gate.clone();

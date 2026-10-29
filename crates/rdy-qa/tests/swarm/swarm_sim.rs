@@ -2416,7 +2416,9 @@ fn gating_open(counts: &Value) -> Vec<String> {
 }
 
 /// rg15 (D-ME2HD, D-3JZP4, D-AAQ9Z), seeds 1 to 6: every live agent view drains through the
-/// readiness gate. After the drain each agent view is closed or holds no change. Before each
+/// readiness gate, and the person's `work` lands through it in the run (ruling task-15 F1).
+/// After the drain each agent view and `work` is closed or holds no change, and no version of
+/// `work` waits in the person's queue when its acts end. Before each
 /// approve of the run and the drain, the relay reads the version's change plan (a
 /// `version_plan` entry naming it), and that read shows no open item that gates or warns. From
 /// the drained store, each landing's seal holds no open item but a code item, and each item it
@@ -2561,7 +2563,7 @@ fn rg15_every_live_view_drains_through_the_gate() {
                 "{pref}: open now {open:?}; answered before its propose {asked:?}; rdy key change {rekeyed}"
             ));
         }
-        // each agent view is closed or holds no change
+        // each agent view, and the person's `work`, is closed or holds no change
         let mut live = vec![];
         for name in st.view_names() {
             let Some(head) = st.view_head(&name) else {
@@ -2571,9 +2573,21 @@ fn rg15_every_live_view_drains_through_the_gate() {
                 .owner
                 .as_ref()
                 .is_some_and(|w| w.actor.starts_with("agent:a"));
-            if by_agent && !head.closed && !st.included(&name).is_empty() {
+            if (by_agent || name == "work") && !head.closed && !st.included(&name).is_empty() {
                 live.push(name);
             }
+        }
+        // no version of `work` the person proposed waits in its queue when its acts end
+        let work: BTreeSet<&str> = o
+            .journal
+            .iter()
+            .filter(|e| e.act == "wc_propose" && e.outcome == Met::Ok)
+            .filter_map(|e| e.block.as_deref())
+            .collect();
+        for r in o.queued.iter().filter(|r| work.contains(r.as_str())) {
+            bad.push(format!(
+                "the person's work version {r} is still in its queue"
+            ));
         }
         drop(st);
         r.close().expect("close the drained copy");
@@ -2598,8 +2612,9 @@ fn rg15_every_live_view_drains_through_the_gate() {
 /// rg15 (D-AAQ9Z), directed: no seed's agents defer an item (the swarm meets confirm and tension
 /// items only), so this pins the person's deferral path. Agent a0 lands a claim that cites seed
 /// claim c0, then edits c0: its claim gets a confirm item, which a0 defers. Before the relayed
-/// approve the person reads the queue (`pending`), accepts the version's deferral card
-/// (`accept_deferrals`), and the version lands with the item sealed deferred under that answer.
+/// approve the relay reads the queue (`pending`, through `rdy_pending`), relays the person's
+/// acceptance of the version's deferral card (`accept_deferrals`, through `rdy_answer`), and the
+/// version lands with the item sealed deferred under that answer.
 #[test]
 fn rg15_the_person_accepts_a_deferral_card_before_the_approve() {
     use rdy_qa::mcp::McpClient;
@@ -2719,11 +2734,19 @@ fn rg15_the_person_accepts_a_deferral_card_before_the_approve() {
     let (read, accepted, landed) = (of("pending"), of("accept_deferrals"), of("land"));
     assert_eq!(read.len(), 1, "{entries:#?}");
     assert_eq!(read[0].outcome, Met::Ok, "{:?}", read[0]);
+    // the relay reads the queue and relays the answer through the tools (FW-UX1, D-VF4RH)
+    assert_eq!(
+        read[0].reply,
+        Some(json!({"via": "rdy_pending"})),
+        "{:?}",
+        read[0]
+    );
     assert_eq!(accepted.len(), 1, "{entries:#?}");
     assert_eq!(accepted[0].outcome, Met::Ok, "{:?}", accepted[0]);
     assert_eq!(accepted[0].actor, "agent:relay");
     let answer = accepted[0].reply.as_ref().expect("the answer's reply");
-    assert_eq!(answer["act"], "accept_deferrals", "{answer}");
+    assert_eq!(answer["via"], "rdy_answer", "{answer}");
+    assert_eq!(answer["answer"]["act"], "accept_deferrals", "{answer}");
     assert_eq!(landed.len(), 1, "{entries:#?}");
     assert_eq!(landed[0].outcome, Met::Ok, "{:?}", landed[0]);
     assert!(
@@ -2745,4 +2768,127 @@ fn rg15_the_person_accepts_a_deferral_card_before_the_approve() {
         .collect();
     assert!(!deferred.is_empty(), "{seal}");
     assert!(deferred.iter().all(|i| i["answer"].is_string()), "{seal}");
+}
+
+/// rg15 (ruling task-15 F1, D-ME2HD), directed: the person answers its own view's change plan
+/// through the CLI before it proposes `work`. Agent a0 lands a claim that cites seed claim c0;
+/// the person's working-copy edit at step 0 rewords c0, so `work` gets a confirm item on a0's
+/// claim. The person reads the plan (`rdy plan --view work`), confirms the item
+/// (`rdy plan confirm`), proposes, and its next act lands the version with the item sealed
+/// confirmed under that answer; nothing is left in its queue.
+#[test]
+fn rg15_the_person_answers_the_work_plan_before_it_proposes() {
+    use rdy_qa::mcp::McpClient;
+    use rdy_qa::swarm::agent::KillGate;
+    use rdy_qa::swarm::journal::Journal;
+    use rdy_qa::swarm::people;
+    use rdy_qa::swarm::project;
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+    let cfg = Config {
+        seed: 32,
+        agents: 1,
+        steps: 4,
+        kill_at: None,
+    };
+    let p = project::build(&cfg);
+    let (j, g) = (Journal::new(), Arc::new(KillGate::new()));
+    let mut c = McpClient::start_proxy(&p.served);
+    c.call(
+        "rdy_session",
+        json!({"actor": "agent:a0", "run": "a0", "role": "writer", "areas": ["payments"]}),
+    )
+    .ok();
+    let (c0, section, decision) = (
+        p.seed.claims[0].clone(),
+        p.seed.sections[0].clone(),
+        p.seed.decisions[0].clone(),
+    );
+    // a0's claim cites c0, and the person lands it
+    let b = c.call("rdy_brief", json!({"ids": [section]})).ok();
+    let token = b["base"]["token"].as_str().unwrap().to_string();
+    let body = format!("Agent zero builds on {{{{{c0}}}}} in pass one.");
+    c.call(
+        "rdy_write",
+        json!({"ops": [{"op": "create", "type": "claim", "id": "$y", "parent": section,
+            "body": body}], "brief": token, "implements": [decision]}),
+    )
+    .ok();
+    let v = c
+        .call(
+            "rdy_propose",
+            json!({"view": "a0", "title": "a0 cites c0", "summary": "a0 cites c0"}),
+        )
+        .ok();
+    let first = v["ref"].as_str().unwrap().to_string();
+    let queue = Arc::new(Mutex::new(vec![first.clone()]));
+    let person = |acts: Vec<PersonAct>| {
+        people::spawn(&p, acts, j.clone(), queue.clone(), g.clone())
+            .join()
+            .unwrap_or_else(|e| panic!("the person panicked: {e:?}"));
+    };
+    person(vec![PersonAct::Land { relayed: true }]);
+    assert!(
+        queue.lock().unwrap().is_empty(),
+        "{first}: {:#?}",
+        j.entries()
+    );
+    // the person rewords c0 in `work` (its edit at step 0), answers the plan, proposes and lands
+    person(vec![PersonAct::WcEdit, PersonAct::Land { relayed: true }]);
+    let entries = j.entries();
+    let work = |act: &str| -> Vec<&Entry> {
+        entries
+            .iter()
+            .filter(|e| e.act == act && e.view.as_deref() == Some("work"))
+            .collect()
+    };
+    let (read, answered, proposed) = (work("plan"), work("plan_answer"), work("wc_propose"));
+    assert!(!read.is_empty(), "{entries:#?}");
+    assert!(
+        read.iter()
+            .all(|e| e.actor == "human:qa" && e.outcome == Met::Ok),
+        "{read:#?}"
+    );
+    assert_eq!(answered.len(), 1, "{entries:#?}");
+    assert_eq!(answered[0].actor, "human:qa");
+    assert_eq!(answered[0].outcome, Met::Ok, "{:?}", answered[0]);
+    let sent = answered[0].reply.as_ref().unwrap()["answers"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(
+        sent.iter().any(|a| a["kind"] == "confirm"
+            && a["act"] == "confirm"
+            && a["reason"] == "swarm: checked"),
+        "{sent:#?}"
+    );
+    assert_eq!(proposed.len(), 1, "{entries:#?}");
+    assert_eq!(proposed[0].outcome, Met::Ok, "{:?}", proposed[0]);
+    // the answers come before the propose
+    let at = |e: &Entry| entries.iter().position(|x| x == e).unwrap();
+    assert!(at(answered[0]) < at(proposed[0]), "{entries:#?}");
+    let pref = proposed[0].block.clone().expect("the work version");
+    let landed: Vec<&Entry> = entries
+        .iter()
+        .filter(|e| e.act == "land" && e.block.as_deref() == Some(pref.as_str()))
+        .collect();
+    assert_eq!(landed.len(), 1, "{entries:#?}");
+    assert_eq!(landed[0].outcome, Met::Ok, "{:?}", landed[0]);
+    assert!(queue.lock().unwrap().is_empty(), "{:?}", queue.lock());
+    // the seal holds each answered item confirmed
+    let l = landed[0].reply.as_ref().unwrap()["landing"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (ok, seal) = p.served.json(&["--json", "plan", "--landing", &l]);
+    assert!(ok, "{seal}");
+    for a in &sent {
+        let item = seal["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == a["item"])
+            .unwrap_or_else(|| panic!("{} is not in the seal: {seal}", a["item"]));
+        assert_eq!(item["outcome"], "confirmed", "{seal}");
+    }
 }
