@@ -319,6 +319,16 @@ fn explicit_version(text: &str) -> bool {
     crate::is_proposal_ref(text) && text.contains('@')
 }
 
+/// The refusal of an expansion past the bound: `have` answers built, `add` more to come. Group
+/// expansion calls it before it builds the answers, so a hostile request is an error, not an
+/// allocation of specs times matched items (tb-A4DAV).
+fn check_expansion(have: usize, add: usize) -> Result<(), RdyError> {
+    if have.saturating_add(add) > MAX_PLAN_ANSWERS {
+        return Err(answers_limit());
+    }
+    Ok(())
+}
+
 fn bad(message: &str, fix: &str) -> RdyError {
     RdyError::new(E_BAD_INPUT, message, fix)
 }
@@ -1156,13 +1166,17 @@ impl Rdy {
         let mut to_repin: Vec<&PlanCandidate> = vec![];
         for s in specs {
             match (&s.item, &s.group) {
-                (Some(item), None) => inputs.push(PlanAnswerInput {
-                    item: item.clone(),
-                    act: s.act,
-                    reason: s.reason.clone(),
-                }),
+                (Some(item), None) => {
+                    check_expansion(inputs.len(), 1)?;
+                    inputs.push(PlanAnswerInput {
+                        item: item.clone(),
+                        act: s.act,
+                        reason: s.reason.clone(),
+                    });
+                }
                 (None, Some(g)) => {
                     let matched = g.expand(&vp.computed, &open, &m, &scope)?;
+                    check_expansion(inputs.len(), matched.len())?;
                     let refused: Vec<String> = matched
                         .iter()
                         .filter(|c| !allowed_acts(c.kind).contains(&s.act))
@@ -1242,6 +1256,27 @@ impl Rdy {
 mod tests {
     use super::*;
     use rdy_model::Role;
+
+    /// O13: a group expands to at most `MAX_PLAN_ANSWERS` answers in all, checked before the
+    /// answers are built (tb-A4DAV). The bound itself fits; one past it is `E_LIMIT`.
+    #[test]
+    fn rg9_expansion_is_bounded_before_it_is_built() {
+        assert!(check_expansion(0, MAX_PLAN_ANSWERS).is_ok());
+        assert!(check_expansion(MAX_PLAN_ANSWERS - 1, 1).is_ok());
+        assert!(check_expansion(MAX_PLAN_ANSWERS, 0).is_ok());
+        for (have, add) in [
+            (0, MAX_PLAN_ANSWERS + 1),
+            (MAX_PLAN_ANSWERS, 1),
+            (usize::MAX, 2),
+        ] {
+            let e = check_expansion(have, add).unwrap_err();
+            assert_eq!(e.code, E_LIMIT, "{have} + {add}");
+            assert_eq!(
+                e.message,
+                format!("change plan exceeds {MAX_PLAN_ANSWERS} plan answers")
+            );
+        }
+    }
 
     fn cand(id: Hash) -> PlanCandidate {
         PlanCandidate {

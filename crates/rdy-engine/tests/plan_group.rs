@@ -14,6 +14,7 @@ use rdy_engine::{
 use rdy_model::plan::{Plan, PlanAct, PlanKind, item_display, item_hash};
 use rdy_model::{BlockId, Hash, Role};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 
 fn writer() -> Session {
     Session::human("human:qa".into(), Role::Writer).unwrap()
@@ -132,6 +133,116 @@ fn world(r: &mut Rdy, view: &str) -> World {
         p: get("$p"),
         q: w2.created["$q"].clone(),
         d1,
+    }
+}
+
+/// Canon: doc `spec` with section `Rules` and claims a, c, x, and b which cites a and c; an
+/// accepted decision dx that affects x, and an accepted decision dz that decides claim z. The
+/// view `view` edits a and c, supersedes dx in full, and adds a decision dr that refines dz. So
+/// it owes confirm items: b for a and for c (two causes of one block, each stale); x for dx (a
+/// reach through `affects`, which x does not cite); z for dz (a reach through `refines`, which z
+/// cites with a pin that is current).
+struct RepinWorld {
+    a: String,
+    c: String,
+    b: String,
+    x: String,
+    z: String,
+    dx: String,
+    dz: String,
+}
+
+fn repin_world(r: &mut Rdy, view: &str) -> RepinWorld {
+    let w = put(
+        r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "spec", "title": "Spec", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}},
+            {"op": "create", "type": "claim", "id": "$a", "parent": "$s", "body": "A holds 30 days."},
+            {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "C stands."},
+            {"op": "create", "type": "claim", "id": "$x", "parent": "$s", "body": "X stands."},
+            {"op": "create", "type": "claim", "id": "$b", "parent": "$s", "body": "B builds on {{$a}} and {{$c}}."}
+        ]),
+    );
+    let get = |k: &str| w.created[k].clone();
+    let (sec, a, c, x) = (get("$s"), get("$a"), get("$c"), get("$x"));
+    let dx = r
+        .decide(
+            &writer(),
+            "seed",
+            DecisionInput {
+                parent: sec.clone(),
+                statement: "Keep X".into(),
+                affects: vec![x.clone()],
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .created["$decision"]
+        .clone();
+    let dz = r
+        .decide(
+            &writer(),
+            "seed",
+            DecisionInput {
+                parent: sec.clone(),
+                statement: "Keep Z".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .created["$decision"]
+        .clone();
+    land(r, "seed");
+    let z = put(
+        r,
+        "seed2",
+        json!([{"op": "create", "type": "claim", "id": "$z", "parent": sec, "body": "Z follows.",
+                "links": {"decided_by": [{"target": dz}]}}]),
+    )
+    .created["$z"]
+        .clone();
+    land(r, "seed2");
+    put(
+        r,
+        view,
+        json!([
+            {"op": "update", "id": a, "body": "A holds 60 days."},
+            {"op": "update", "id": c, "body": "C stands firm."}
+        ]),
+    );
+    r.supersede(
+        &writer(),
+        view,
+        &dx,
+        None,
+        DecisionInput {
+            parent: sec.clone(),
+            statement: "Keep X, differently".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    r.decide(
+        &writer(),
+        view,
+        DecisionInput {
+            parent: sec,
+            statement: "Keep Z in short".into(),
+            refines: vec![dz.clone()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    RepinWorld {
+        a,
+        c,
+        b: get("$b"),
+        x,
+        z,
+        dx,
+        dz,
     }
 }
 
@@ -626,22 +737,6 @@ fn rg9_a_repin_group_writes_one_change() {
         let row = state_of(&r, "w", &pi(&w.a, s, PlanKind::Confirm));
         assert_eq!(row["state"], "closed", "{row}");
     }
-    // a refused answer after the repin is not the case: the answers were checked before the write
-    let before = log_state(&r);
-    let e = r
-        .answer_plan_specs(
-            &writer(),
-            "w",
-            &[spec_of(
-                group(Some(PlanKind::Confirm), None),
-                PlanAct::Confirm,
-                Some("x"),
-                true,
-            )],
-        )
-        .unwrap_err();
-    assert_eq!(e.code, E_PLAN_ITEM, "{e}");
-    assert_eq!(log_state(&r), before);
 }
 
 /// O14: a repin goes with a confirm group; the refusal writes nothing, not even a repin.
@@ -785,4 +880,132 @@ fn rg9_an_item_spec_answers_as_plan_answer_input_does() {
     assert_eq!(key(&x), key(&y));
     assert_eq!((x.prev, x.stable, x.heads), (y.prev, y.stable, y.heads));
     assert_eq!((x.view.as_str(), y.view.as_str()), ("one", "two"));
+}
+
+/// Which confirm items the view owes, as (cause, subject) display ids with state; a probe of the
+/// fixture that the repin tests rely on.
+#[test]
+fn rg9_repin_world_owes_the_items_the_repin_tests_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let w = repin_world(&mut r, "w");
+    for (cause, subject, edge) in [
+        (&w.a, &w.b, "references"),
+        (&w.c, &w.b, "references"),
+        (&w.dx, &w.x, "supersedes"),
+        (&w.dz, &w.z, "refines"),
+    ] {
+        let row = state_of(&r, "w", &pi(cause, subject, PlanKind::Confirm));
+        assert_eq!(
+            (&row["state"], &row["edge"]),
+            (&json!("open"), &json!(edge)),
+            "{row}"
+        );
+    }
+}
+
+/// O14: the repin change is self-briefed, holds one op per subject block with one target per
+/// stale cause, and skips an item whose subject does not cite its cause (the `affects` reach of
+/// a full supersede) and an item whose pin is current (the `refines` reach). Those two still get
+/// their answers.
+#[test]
+fn rg9_a_repin_group_changes_only_stale_cited_pins() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let w = repin_world(&mut r, "w");
+    let pin_of = |r: &Rdy, block: &str, cause: &str| -> Option<Hash> {
+        let st = r.read();
+        let m = st.materialized(&Scope::View("w".into())).unwrap();
+        m.get(&id(block)).unwrap().pins.get(&id(cause)).copied()
+    };
+    let tracking = r.store().tracking().clone();
+    let current = |r: &Rdy, block: &str| -> Hash {
+        let st = r.read();
+        let m = st.materialized(&Scope::View("w".into())).unwrap();
+        m.get(&id(block)).unwrap().content_hash_with(&tracking)
+    };
+    // the z pin on dz is current already; x holds no pin on dx and does not cite it
+    assert_eq!(pin_of(&r, &w.z, &w.dz), Some(current(&r, &w.dz)));
+    assert_eq!(pin_of(&r, &w.x, &w.dx), None);
+    for cause in [&w.a, &w.c] {
+        assert_ne!(pin_of(&r, &w.b, cause), Some(current(&r, cause)));
+    }
+    let changes = r.read().included("w").len();
+    let h = r
+        .answer_plan_specs(
+            &writer(),
+            "w",
+            &[spec_of(
+                group(Some(PlanKind::Confirm), None),
+                PlanAct::Confirm,
+                Some("repinned in bulk"),
+                true,
+            )],
+        )
+        .unwrap();
+    let included = r.read().included("w");
+    assert_eq!(included.len(), changes + 1, "one change");
+    let change = r.store().change(included.last().unwrap()).unwrap();
+    // self-briefed, as the daemon's repin is
+    assert!(change.links.briefing.is_some(), "{:?}", change.links);
+    // one op, for b, whose block now pins both causes at their current version
+    assert_eq!(change.ops.len(), 1, "{:?}", change.ops);
+    assert_eq!(change.ops[0].block_id().to_string(), w.b);
+    for cause in [&w.a, &w.c] {
+        assert_eq!(
+            pin_of(&r, &w.b, cause),
+            Some(current(&r, cause)),
+            "b pins {cause}"
+        );
+    }
+    // no pin moved for x or z
+    assert_eq!(pin_of(&r, &w.z, &w.dz), Some(current(&r, &w.dz)));
+    assert_eq!(pin_of(&r, &w.x, &w.dx), None);
+    // every matched item has its answer, the skipped ones too
+    let answered: BTreeSet<Hash> = plan_of(&r, &h).answers.iter().map(|a| a.item).collect();
+    for (cause, subject) in [(&w.a, &w.b), (&w.c, &w.b), (&w.dx, &w.x), (&w.dz, &w.z)] {
+        assert!(
+            answered.contains(&item_hash(&id(cause), subject, PlanKind::Confirm)),
+            "no answer for {cause} -> {subject}"
+        );
+    }
+}
+
+/// O14: the answers are checked before the repin is written. A group that matches open confirm
+/// items and holds an answer the check refuses (a confirm needs a reason) leaves the log as it
+/// was: no repin change, no plan version.
+#[test]
+fn rg9_a_refused_answer_leaves_no_repin_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let w = repin_world(&mut r, "w");
+    let before = log_state(&r);
+    let changes = r.read().included("w").len();
+    let e = r
+        .answer_plan_specs(
+            &writer(),
+            "w",
+            &[spec_of(
+                group(Some(PlanKind::Confirm), None),
+                PlanAct::Confirm,
+                None,
+                true,
+            )],
+        )
+        .unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT, "{e}");
+    assert_eq!(r.read().included("w").len(), changes);
+    assert_eq!(log_state(&r), before);
+    assert_eq!(plan_ref(&r, "w"), None);
+    // the stale pins of b are still stale
+    let st = r.read();
+    let m = st.materialized(&Scope::View("w".into())).unwrap();
+    assert_ne!(
+        m.get(&id(&w.b)).unwrap().pins.get(&id(&w.a)).copied(),
+        Some(
+            m.get(&id(&w.a))
+                .unwrap()
+                .content_hash_with(r.store().tracking())
+        )
+    );
 }
