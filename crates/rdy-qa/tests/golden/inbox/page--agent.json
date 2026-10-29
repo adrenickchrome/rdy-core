@@ -1,5 +1,5 @@
 {
-  "cursor": "0.25738.0",
+  "cursor": "0.25872.0",
   "entries": [
     {
       "event": "tension_opened",
@@ -12,9 +12,9 @@
     {
       "event": "pending_added",
       "ids": [
-        "b528ede6159124d5bdb161ca4a764f133816675926041e4edd6735b2b080aff8"
+        "2433b8aca94a95f470aaf7c7f79533bab954c4f65c13128e00763d5fb02265ec"
       ],
-      "line": "P-b528ede61591@1 waits for an answer; read rdy_pending"
+      "line": "P-2433b8aca94a@1 waits for an answer; read rdy_pending"
     },
     {
       "event": "intent_posted",
@@ -34,33 +34,33 @@
     {
       "event": "pending_added",
       "ids": [
-        "d3df9eef2305b01b98f2dde1d41bdc1a8c60039ee9c6635d1db2d276d773e19d"
+        "e182679aa7f4f96386e469c6d3ecbd6217453d6ea62bb38b5b8a156278905279"
       ],
-      "line": "P-d3df9eef2305@1 waits for an answer; read rdy_pending"
+      "line": "P-e182679aa7f4@1 waits for an answer; read rdy_pending"
     },
     {
       "event": "landed",
       "ids": [
-        "3e93922e90dd98861d08797417bee6fbd34a9626fa2a958589bce2b5c4fb7b76",
-        "d3df9eef2305b01b98f2dde1d41bdc1a8c60039ee9c6635d1db2d276d773e19d"
+        "7e9c9777a3111a25085badc32ab9d1147f2d79bdfe43f1a63e9c74b5066563ec",
+        "e182679aa7f4f96386e469c6d3ecbd6217453d6ea62bb38b5b8a156278905279"
       ],
-      "line": "landing 3e93922e90dd of view work changed 1 blocks in your areas (payments)"
+      "line": "landing 7e9c9777a311 of view work changed 1 blocks in your areas (payments)"
     },
     {
       "event": "view_rebased",
       "ids": [
-        "3e93922e90dd98861d08797417bee6fbd34a9626fa2a958589bce2b5c4fb7b76",
+        "7e9c9777a3111a25085badc32ab9d1147f2d79bdfe43f1a63e9c74b5066563ec",
         "bce2a3c98b506c9a23307517914f1779fb6df62c52f29ab08c43070f9feec506"
       ],
-      "line": "your view a rebased onto landing 3e93922e90dd with 1 conflicts"
+      "line": "your view a rebased onto landing 7e9c9777a311 with 1 conflicts"
     },
     {
       "event": "tension_opened",
       "ids": [
-        "d9444d4868d284d7f3052b3a53ea0ac4f5d3912b952716bd90e11d63f8a81a2b",
+        "8b5a5637f2b1184d8f1f8c74d4290e9c766aa9dd9ac13f98c20cd34c432be498",
         "2efc20d1e3fd38179973d9fbedf4727321db175e658f9dd34a6dce32caf43040"
       ],
-      "line": "tension d9444d4868d2 replaces c2ee3f30f301 on your change 2efc20d1e3fd (edit_collision, blocking): landing 3e93922e90dd"
+      "line": "tension 8b5a5637f2b1 replaces c2ee3f30f301 on your change 2efc20d1e3fd (edit_collision, blocking): landing 7e9c9777a311"
     }
   ],
   "more": false

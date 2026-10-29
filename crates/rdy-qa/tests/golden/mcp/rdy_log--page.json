@@ -1,16 +1,16 @@
 [
   {
-    "approved": "P-10f352567330@1",
+    "approved": "P-43c33c5c992c@1",
     "approved_by": "human:qa",
-    "approved_version": "10f352567330fb7fa8653270e6b0a34c3c5718b5b14ccc91f561098861a7bac0",
+    "approved_version": "43c33c5c992c67b33fe5f4e5901076f92408cdcff11473b814f4f50ca0bc3841",
     "assurance": "local",
     "at": "2025-10-09T08:53:20Z",
     "at_ms": 1760000000033,
     "changes": 1,
     "evidence": null,
-    "landing": "6998a4220fcd2b865c506ffb56fb0eb62c3ab749a9f06a7aa8ec2be8aec7c4d2",
-    "prev": "9617c49ba11797f7376530f20e2c2cc9cfcff99ecdb3627692a9502ecbd4eb61",
-    "proposal": "10f352567330fb7fa8653270e6b0a34c3c5718b5b14ccc91f561098861a7bac0",
+    "landing": "46cdaac7d96ca57f68bccc6149aad66d5c8130294ace80e8ac92bfeb32d6c702",
+    "prev": "89bab68f3ff363d81c380ac5f02d614a91db359fb9876a6a77e7a492be7f9de5",
+    "proposal": "43c33c5c992c67b33fe5f4e5901076f92408cdcff11473b814f4f50ca0bc3841",
     "proposed_by": {
       "actor": "human:qa",
       "run": "cli"
@@ -23,17 +23,17 @@
     "title": "work"
   },
   {
-    "approved": "P-1a56b30baf6b@1",
+    "approved": "P-9e6c1be4502f@1",
     "approved_by": "human:qa",
-    "approved_version": "1a56b30baf6b0bbeeac9b67247a64c1a97fc967e70892f3fc9dcebf3c56a94d6",
+    "approved_version": "9e6c1be4502f6ee0c57ad946e4ebeacf40273f95e4ec6c3e0173a344d7b9340b",
     "assurance": "local",
     "at": "2025-10-09T08:53:20Z",
     "at_ms": 1760000000026,
     "changes": 2,
     "evidence": null,
-    "landing": "9617c49ba11797f7376530f20e2c2cc9cfcff99ecdb3627692a9502ecbd4eb61",
-    "prev": "3cf57a9077e2d13f79f77da95bcc19e7dd80f1e188c4c38c9567493e1af14b5e",
-    "proposal": "1a56b30baf6b0bbeeac9b67247a64c1a97fc967e70892f3fc9dcebf3c56a94d6",
+    "landing": "89bab68f3ff363d81c380ac5f02d614a91db359fb9876a6a77e7a492be7f9de5",
+    "prev": "612ebfadb8d3faa10e6bf3a34e9787fb95e53a354fab1156c9e7600271458a43",
+    "proposal": "9e6c1be4502f6ee0c57ad946e4ebeacf40273f95e4ec6c3e0173a344d7b9340b",
     "proposed_by": {
       "actor": "human:qa",
       "run": "cli"
@@ -46,17 +46,17 @@
     "title": "work"
   },
   {
-    "approved": "P-3f63155e9052@1",
+    "approved": "P-881bf6cdc026@1",
     "approved_by": "human:qa",
-    "approved_version": "3f63155e9052533510ff188ae9a868c1c9ba2be0e8f420c9d61da9d9d92834b3",
+    "approved_version": "881bf6cdc0260e9529649418fce40750718cb9d79a59df0df77f0f890a024621",
     "assurance": "local",
     "at": "2025-10-09T08:53:20Z",
     "at_ms": 1760000000020,
     "changes": 1,
     "evidence": null,
-    "landing": "3cf57a9077e2d13f79f77da95bcc19e7dd80f1e188c4c38c9567493e1af14b5e",
-    "prev": "51e8114f6c6f1e728123c2676afcfd72342e379202f0f0cb76a7d7f7d0138cd2",
-    "proposal": "3f63155e9052533510ff188ae9a868c1c9ba2be0e8f420c9d61da9d9d92834b3",
+    "landing": "612ebfadb8d3faa10e6bf3a34e9787fb95e53a354fab1156c9e7600271458a43",
+    "prev": "296a3feea213316e3d9645e5026ad41ab739fbbb8db73fa2e6f6a24c9b03446d",
+    "proposal": "881bf6cdc0260e9529649418fce40750718cb9d79a59df0df77f0f890a024621",
     "proposed_by": {
       "actor": "human:qa",
       "run": "cli"

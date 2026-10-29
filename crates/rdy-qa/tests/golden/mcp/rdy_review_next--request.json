@@ -9,7 +9,7 @@
           "Rules"
         ],
         "id": "D-REKH0",
-        "side": "canon@51e8114f6c6f1e728123c2676afcfd72342e379202f0f0cb76a7d7f7d0138cd2",
+        "side": "canon@296a3feea213316e3d9645e5026ad41ab739fbbb8db73fa2e6f6a24c9b03446d",
         "text": [
           {
             "field": "statement",
@@ -53,7 +53,7 @@
       ]
     }
   },
-  "case_hash": "951263022959bf81193f29847d1f81c049a9190649a1c864b520aed331a8b8cf",
+  "case_hash": "e1c09515b9a711b382654ed725773dfa57925b1965de53f74f36efad241b1c60",
   "kind": "tension",
   "lease_expires_at": "2025-10-09T09:03:20Z",
   "request": "rq-fa03f79641a2"

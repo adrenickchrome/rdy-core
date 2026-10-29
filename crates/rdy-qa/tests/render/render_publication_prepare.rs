@@ -263,6 +263,9 @@ const SITE_DIGESTS: [(&str, &str, &str); 4] = [
 /// The proposal's re-taken for the propose's assessment record (ruling task-10 Amendment 1, item
 /// 5): the earlier landing names its assessment, so canon's head and the version's hash move,
 /// and only the `proposal:<hash>` scope text changed; the other scopes kept their bytes.
+/// The proposal's re-taken again when a landing names its assessment (ruling task-12 R2.3): the
+/// landing record and canon's head move, so the version's hash does; only that scope's text
+/// changed.
 const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "canon",
@@ -297,11 +300,11 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "proposal",
         [
-            "3ad9bf1049d0627424c55d0de3c3356552db3a99fdb098c8d272e3d1282703a5",
-            "8f7e10d3d913a26236d3b0388baaae058b40452c0a48824ab42e215ac710324b",
-            "8e20798443dfc2d69afc15e2f8293f58ce64ddab68331e7635100b9b999cfe75",
-            "4379964db89203c4ade355d9bbfc31a71a2ea26093a5603d4079cf5022a7f9a7",
-            "d122c484a00c191aaf4c2492ef58f47ee06710c5fbe90944c4993251775893aa",
+            "ea9f61f2606c8bc41a5fbaadf7db2a5715a03600de2571b3be788118ecfa39e0",
+            "c2de849a812b0c360e00bf6f010e72b87b688f0226bd8a92c043d30e2b258794",
+            "e7a7176f0c91c8aad9c194f062985d7d42f718cc6b949d8d4ca3e7b19d16f912",
+            "7cd490c647215d3b741079c9109c7bb418936217cb3b9f32e6ff3088d09d01ef",
+            "93b9ff25a84dc4009a88b49328058fc68724c5abfe9855b9edd7cef5c0101962",
         ],
     ),
 ];
