@@ -766,10 +766,11 @@ fn cc11_fix2_carried_issues_equal_a_full_build_through_tensions_and_suspects() {
     }
     read_all(&r);
 
-    // a landing: canon's layer is carried
+    // a landing: canon's layer is carried. Its ready propose builds the candidate once for the
+    // assessment it stores (ruling task-10 Amendment 1, item 3): one build, never more
     let before = state_layer_builds();
     land(&mut r, "c").unwrap();
-    check(&r, &[&canon], before, "a landing");
+    check(&r, &[&canon], before + 1, "a landing");
     read_all(&r);
 
     // a duplicate in view a
@@ -963,10 +964,12 @@ fn cc11_fix3_a_suspect_the_structural_carry_misses_is_carried() {
     let p = r
         .propose(&writer(), "sup", "sup", Some(rdy_qa::intake::TEST_SUMMARY))
         .unwrap();
+    // the write builds nothing in full; the ready propose builds its candidate once for the
+    // assessment it stores (ruling task-10 Amendment 1, item 3): one build, never more
     assert_eq!(
         (state_layer_builds(), structural_builds()),
-        (layers, structural),
-        "the write and the proposal build nothing in full"
+        (layers + 1, structural),
+        "the write builds nothing in full, the proposal one candidate"
     );
     // F2: the person confirms the exception (the supersede) first. The queue they read builds
     // the prospective canon in full; the landing's own carry is measured from here.
