@@ -14,13 +14,14 @@
 //! code items. With no live chain, the HEADs captured for the read are both ends; a read alone
 //! never fixes a baseline.
 use super::compute::{self, ComputedPlan, PlanCandidate, allowed_acts};
+use super::group::{self, PlanGroup};
 use super::page;
 use crate::brief::is_lower_hex;
 use crate::code_index::{check_top, code_repos, head_of};
 use crate::consequence::Consequences;
 use crate::error::{E_BAD_INPUT, E_LIMIT, E_PERMISSION, E_PLAN_ITEM};
 use crate::history::{Author, role_str};
-use crate::{Delta, Rdy, RdyError, ReadState, Scope, Session};
+use crate::{Delta, OpInput, Rdy, RdyError, ReadState, Scope, Session, WriteRequest};
 use rdy_model::engine_fields::MAX_REASON_CHARS;
 use rdy_model::plan::{
     ITEM_DISPLAY_PREFIX, MAX_PLAN_ANSWERS, Plan, PlanAct, PlanAnswer, PlanHead, PlanKind,
@@ -31,7 +32,7 @@ use rdy_store::plan::PLAN_REF;
 use rdy_store::{StoreReader, kinds};
 use serde::{Deserialize, Serialize};
 use std::cell::OnceCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A recorded answer whose subject or cause changed after it (p-5TZ28).
 pub const W_PLAN_ANSWER_LAPSED: &str = "W_PLAN_ANSWER_LAPSED";
@@ -94,6 +95,23 @@ pub struct PlanAnswerInput {
     pub act: PlanAct,
     #[serde(default)]
     pub reason: Option<String>,
+}
+
+/// One answer to a plan, as `rdy_plan` and `rdy plan` take it on the wire (D-ME2HD, O13, O14):
+/// it names one `item`, as [`PlanAnswerInput`] does, or a `group` of open items, one answer for
+/// each. `repin` goes with a `confirm` group only.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanAnswerSpec {
+    #[serde(default)]
+    pub item: Option<String>,
+    #[serde(default)]
+    pub group: Option<PlanGroup>,
+    pub act: PlanAct,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub repin: bool,
 }
 
 /// What a plan read names (p-92F5M): at most one of the four selectors (none: the session's
@@ -922,6 +940,15 @@ fn resolve_item<'c>(
     }
 }
 
+/// The id of `c` in full, as [`resolve_item`] takes it: `pi-` and 64 hex, or a tension item's
+/// `tn-` and its tension's 64 hex.
+fn full_item_id(c: &PlanCandidate) -> String {
+    match c.kind {
+        PlanKind::Tension => format!("{TENSION_DISPLAY_PREFIX}{}", c.subject),
+        _ => format!("{ITEM_DISPLAY_PREFIX}{}", c.id),
+    }
+}
+
 /// A trimmed reason of 1 to `MAX_REASON_CHARS` Unicode scalar values, or the refusal.
 fn reason_of(act: PlanAct, reason: Option<&str>) -> Result<String, RdyError> {
     let r = reason.map(str::trim).unwrap_or("");
@@ -1070,6 +1097,144 @@ impl Rdy {
         let id = self.store.put_plan(&plan)?;
         self.publish(Delta::Seq)?;
         Ok(id)
+    }
+
+    /// [`Rdy::answer_plan`] for answers as the wire gives them (O13, O14): each spec names one
+    /// item or a group of the open items, which expands to one answer per item before anything
+    /// is written. The whole request is validated first: a group that matches nothing, or that
+    /// holds an item the act does not answer, is refused with nothing written. With `repin` on
+    /// a confirm group, rdy first writes one change to the view, one repin op per matched
+    /// subject block whose pin is not current, self-briefed like the daemon's repin; then it
+    /// records the answers in one plan version. Returns that version's id.
+    pub fn answer_plan_specs(
+        &mut self,
+        session: &Session,
+        view: &str,
+        specs: &[PlanAnswerSpec],
+    ) -> Result<Hash, RdyError> {
+        if !session.role.can_write() {
+            return Err(RdyError::new(
+                E_PERMISSION,
+                format!("role {:?} cannot write", session.role),
+                "start the session as a writer",
+            ));
+        }
+        if specs.len() > MAX_PLAN_ANSWERS {
+            return Err(answers_limit());
+        }
+        for s in specs {
+            if s.item.is_some() == s.group.is_some() {
+                return Err(bad(
+                    "an answer names one of item and group",
+                    "pass item for one item, or group for many",
+                ));
+            }
+        }
+        for s in specs {
+            if s.repin && !(s.act == PlanAct::Confirm && s.group.is_some()) {
+                return Err(bad(
+                    "repin goes with a confirm group",
+                    "set act to confirm and pass a group",
+                ));
+            }
+        }
+        let st = self.read();
+        crate::write::check_view_access(&st, view, session, crate::views::Action::Include)?;
+        let vp = ViewPlan::read(&st, view)?;
+        let (rows, _, _) = live_rows(&vp.computed, vp.prior());
+        let open: BTreeSet<Hash> = vp
+            .computed
+            .items
+            .iter()
+            .zip(&rows)
+            .filter(|(_, row)| matches!(row, PlanRow::Live(l) if l.state == ItemState::Open))
+            .map(|(c, _)| c.id)
+            .collect();
+        let m = st.materialized(&Scope::View(view.to_string()))?;
+        let scope = format!("view:{view}");
+        let mut inputs: Vec<PlanAnswerInput> = Vec::with_capacity(specs.len());
+        let mut to_repin: Vec<&PlanCandidate> = vec![];
+        for s in specs {
+            match (&s.item, &s.group) {
+                (Some(item), None) => inputs.push(PlanAnswerInput {
+                    item: item.clone(),
+                    act: s.act,
+                    reason: s.reason.clone(),
+                }),
+                (None, Some(g)) => {
+                    let matched = g.expand(&vp.computed, &open, &m, &scope)?;
+                    let refused: Vec<String> = matched
+                        .iter()
+                        .filter(|c| !allowed_acts(c.kind).contains(&s.act))
+                        .map(|c| item_label(c.kind, &c.id, &c.subject))
+                        .collect();
+                    if !refused.is_empty() {
+                        return Err(RdyError::new(
+                            E_PLAN_ITEM,
+                            format!(
+                                "{} does not answer {} items of the group: {}",
+                                s.act.as_str(),
+                                refused.len(),
+                                refused
+                                    .iter()
+                                    .take(5)
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                            "narrow the group, or answer those items one by one",
+                        ));
+                    }
+                    for c in matched {
+                        inputs.push(PlanAnswerInput {
+                            item: full_item_id(c),
+                            act: s.act,
+                            reason: s.reason.clone(),
+                        });
+                        if s.repin {
+                            to_repin.push(c);
+                        }
+                    }
+                }
+                _ => unreachable!("checked above"),
+            }
+        }
+        // the answers are checked now, so a refusal leaves the repin unwritten
+        prepare_plan_answers(
+            &st,
+            &session.provenance(),
+            view,
+            &vp.computed,
+            vp.prior(),
+            &inputs,
+        )?;
+        let ops = group::repin_ops(&m, self.store.tracking(), &to_repin);
+        if !ops.is_empty() {
+            let ids: BTreeSet<BlockId> = ops
+                .iter()
+                .filter_map(|op| match op {
+                    OpInput::Repin { id, .. } => BlockId::parse(id).ok(),
+                    _ => None,
+                })
+                .collect();
+            let briefing = st.brief_ids(&Scope::View(view.to_string()), &ids, None)?;
+            briefing.register(&self.briefs);
+            let token = briefing.base.token.clone();
+            drop((st, m));
+            self.write_briefed(
+                session,
+                WriteRequest {
+                    view: view.to_string(),
+                    ops,
+                    justification: None,
+                    message: String::new(),
+                },
+                Some(token),
+            )?;
+        } else {
+            drop((st, m));
+        }
+        self.answer_plan(session, view, &inputs)
     }
 }
 
