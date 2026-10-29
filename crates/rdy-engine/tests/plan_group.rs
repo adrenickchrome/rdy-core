@@ -930,6 +930,16 @@ fn rg9_a_repin_group_changes_only_stale_cited_pins() {
     for cause in [&w.a, &w.c] {
         assert_ne!(pin_of(&r, &w.b, cause), Some(current(&r, cause)));
     }
+    // the superseded dx still materializes, so x/dx hits the 'subject does not cite its cause'
+    // skip, not the 'cause gone' one
+    {
+        let st = r.read();
+        let m = st.materialized(&Scope::View("w".into())).unwrap();
+        assert!(
+            m.get(&id(&w.dx)).is_some(),
+            "superseded dx still materializes"
+        );
+    }
     let changes = r.read().included("w").len();
     let h = r
         .answer_plan_specs(
