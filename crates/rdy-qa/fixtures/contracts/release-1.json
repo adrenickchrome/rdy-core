@@ -657,6 +657,16 @@
             },
             "items": [
               {
+                "answer?": {
+                  "act": "string",
+                  "by": {
+                    "actor": "string",
+                    "at_ms": "number",
+                    "role": "string",
+                    "run": "string"
+                  },
+                  "reason": "string"
+                },
                 "cause": "string",
                 "edge": "string",
                 "id": "string",
@@ -12604,6 +12614,7 @@
       "BAD_URL_FIX": "\"use an HTTPS address without credentials, a query or a fragment\"",
       "BAD_URL_MESSAGE": "\"the hub address is not an HTTPS URL\"",
       "BLOCKED_FIX": "\"Include the target docs or remove these references. Run the publication check again.\"",
+      "BRIEFING_FIX": "\"write it again with a current briefing: rdy_brief, then rdy_write / rdy edit\"",
       "CARD_CHANGE_FIX": "\"Re-affirm these decisions in smaller groups with the reaffirm write op, then answer the card again.\"",
       "CARRIED_WARNING_BUDGET_FIX": "\"Increase max_tokens, or run rdy fsck for the complete warning list.\"",
       "CARRIER_MESSAGE": "\"Request content removal.\"",
@@ -13773,6 +13784,16 @@
           },
           "items": [
             {
+              "answer?": {
+                "act": "string",
+                "by": {
+                  "actor": "string",
+                  "at_ms": "number",
+                  "role": "string",
+                  "run": "string"
+                },
+                "reason": "string"
+              },
               "cause": "string",
               "edge": "string",
               "id": "string",
