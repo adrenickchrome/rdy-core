@@ -192,6 +192,8 @@ fn se11_a_landed_semantic_tension_stays_in_canon() {
     let s = spec_doc(&mut r);
     put(&mut r, "a", upd(&s.c, "C contradicts B."));
     judge(&mut r, false);
+    // O23: the advisory semantic tension is a tension item, answered before the propose
+    rdy_qa::intake::answer_open_items(&mut r, &writer(), "a");
     let p = propose(&mut r, "a");
     approve(&mut r, &p).unwrap();
     let set = r.read().tensions().unwrap();

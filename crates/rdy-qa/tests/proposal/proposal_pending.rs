@@ -280,6 +280,8 @@ fn di5_each_exception_kind_stands_beside_the_batch() {
         },
     );
     put(&mut r, "other", upd(&b.spec.a, "A as other has it."));
+    // O23: the new tension items are answered before the propose binds the plan
+    rdy_qa::intake::answer_open_items(&mut r, &rdy_qa::fixtures::writer(), BATCH_VIEW);
     let (r, report) = propose_reported(d.path(), r, BATCH_VIEW, BATCH_TITLE, Some(BATCH_SUMMARY));
     let pref = report["ref"].as_str().unwrap().to_string();
     let q = pending(&r);

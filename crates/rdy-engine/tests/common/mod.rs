@@ -5,7 +5,10 @@
 use rdy_engine::answer::AnswerRequest;
 use rdy_engine::answer::relay::RelayInput;
 use rdy_engine::pending::{CARD_MAX_TOKENS, ItemKind, PendingQuery};
+use rdy_engine::plan::api::{ItemState, PlanAnswerInput, PlanRow};
+use rdy_engine::plan::compute::allowed_acts;
 use rdy_engine::{ProposalInfo, Rdy, Session};
+use rdy_model::plan::{MAX_PLAN_ANSWERS, PlanAct, PlanKind};
 
 /// The one summary a test gives a version that lands a proposed decision.
 pub const TEST_SUMMARY: &str = "test summary";
@@ -43,4 +46,41 @@ pub fn confirm_exceptions(r: &mut Rdy, s: &Session, p: &ProposalInfo) {
         )
         .unwrap_or_else(|e| panic!("confirm {item}: {e}"));
     }
+}
+
+/// O23 (as `rdy_qa::intake::answer_open_items`): answers each open item of view `view`'s change
+/// plan that readiness gates, as session `s`, before a propose binds the plan: each open tension
+/// item `confirm`, and each open non-code item on stable content by its first allowed act, with
+/// the reason `test: checked`. It writes nothing when no such item is open.
+#[allow(dead_code)]
+pub fn answer_open_items(r: &mut Rdy, s: &Session, view: &str) -> Vec<PlanAnswerInput> {
+    let Ok(reply) = r.read().view_plan(view) else {
+        return vec![];
+    };
+    let inputs: Vec<PlanAnswerInput> = reply
+        .items
+        .iter()
+        .filter_map(|row| {
+            let PlanRow::Live(i) = row else { return None };
+            if i.state != ItemState::Open {
+                return None;
+            }
+            let act = match i.kind {
+                PlanKind::Tension => PlanAct::Confirm,
+                PlanKind::UpdateImplementation => return None,
+                kind if i.stable => *allowed_acts(kind).first()?,
+                _ => return None,
+            };
+            Some(PlanAnswerInput {
+                item: i.id.clone(),
+                act,
+                reason: Some("test: checked".into()),
+            })
+        })
+        .collect();
+    for chunk in inputs.chunks(MAX_PLAN_ANSWERS) {
+        r.answer_plan(s, view, chunk)
+            .unwrap_or_else(|e| panic!("answer the open items of {view}: {e}"));
+    }
+    inputs
 }

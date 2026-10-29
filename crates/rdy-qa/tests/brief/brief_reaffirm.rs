@@ -274,6 +274,8 @@ fn cp5_content_edit_with_no_justification_still_refuses_when_blocking() {
         Some(&ta),
     )
     .unwrap();
+    // O23: the plan items are answered, so the refusal is the unjustified change alone
+    rdy_qa::intake::answer_open_items(&mut r, &writer(), "bad");
     let p = r
         .propose(&writer(), "bad", "bad", Some(TEST_SUMMARY))
         .unwrap();

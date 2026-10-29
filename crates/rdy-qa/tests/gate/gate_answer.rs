@@ -1031,6 +1031,8 @@ fn di7_a_decision_in_two_batches_binds_to_the_card_shown() {
     let (dir, mut r, b) = batch_project();
     r.view_fork(&ag("batch2"), rdy_qa::intake::BATCH_VIEW, "batch2")
         .expect("fork the batch view");
+    // O23: the fork's plan answers its own items before its propose
+    rdy_qa::intake::answer_open_items(&mut r, &rdy_qa::fixtures::writer(), "batch2");
     let (mut r, report) = rdy_qa::intake::propose_reported(
         dir.path(),
         r,

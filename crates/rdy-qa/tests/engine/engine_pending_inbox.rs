@@ -318,7 +318,15 @@ fn di11_an_advised_entry_names_no_proposal() {
     assert_ne!(ids[0], p.id, "{ids:?}");
     assert_eq!(line, ADVICE_LINE);
     assert!(!line.contains("P-"), "the line names no proposal: {line}");
+    // O23: the advised tension is a tension item that came after the propose, so the author
+    // answers it and proposes again (the new version is its own entry)
+    rdy_qa::intake::answer_open_items(&mut r, &rdy_qa::fixtures::writer(), "v1");
+    let p = r
+        .propose_subset(&ag("v1"), "v1", "Guests", None, Some(TEST_SUMMARY))
+        .unwrap();
+    let before = pending_added(&r, &sub);
+    assert_eq!(before[0], first, "{before:?}");
     // landing the proposal changes nothing: the review id is immutable
     r.land(&approver(), &p.id).expect("land");
-    assert_eq!(pending_added(&r, &sub), vec![first]);
+    assert_eq!(pending_added(&r, &sub), before);
 }

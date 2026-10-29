@@ -424,6 +424,8 @@ fn two_advised() -> (tempfile::TempDir, Rdy, Batch, String) {
         "agent:r",
         true,
     );
+    // O23: the new tension item is answered before the propose binds the plan
+    rdy_qa::intake::answer_open_items(&mut r, &rdy_qa::fixtures::writer(), BATCH_VIEW);
     let (r, report) = propose_reported(dir.path(), r, BATCH_VIEW, BATCH_TITLE, Some(BATCH_SUMMARY));
     let b = Batch {
         r#ref: report["ref"].as_str().unwrap().to_string(),
@@ -559,6 +561,8 @@ fn di8_dismissing_advice_whose_tensions_share_a_vkey_writes_one_review_a_vkey() 
         "agent:r",
         true,
     );
+    // O23: the tension items are answered before the propose binds the plan
+    rdy_qa::intake::answer_open_items(&mut r, &rdy_qa::fixtures::writer(), "a");
     let (mut r, report) = propose_reported(dir.path(), r, "a", "a", Some(BATCH_SUMMARY));
     let advice = format!("advice:{}", report["ref"].as_str().unwrap());
     let card = item(&queue(&r), &advice);

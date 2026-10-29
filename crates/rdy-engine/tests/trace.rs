@@ -588,6 +588,8 @@ fn rf11_trace_uses_governing_routes_and_keeps_sources_separate() {
             block: stable,
         }],
     );
+    // O23: the plan items are answered before the propose binds the plan
+    common::answer_open_items(&mut r, &writer(), "work");
     land(&mut r, "work", "Ledger rules");
     // a proposed decision and a stable claim it decides, in an open view
     let (pp, kp) = (nid("D", 900), nid("c", 900));

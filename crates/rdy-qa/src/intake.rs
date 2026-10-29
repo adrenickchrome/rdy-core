@@ -453,13 +453,14 @@ pub const OPEN_ITEM_REASON: &str = "test: checked";
 /// version's): each open tension item `confirm`, and each open non-code item on stable content
 /// by its first allowed act (a confirm item `confirm`; an update, rejustify or reaffirm item
 /// `defer`), each with the reason [`OPEN_ITEM_REASON`]. Items on drafts and code items stay open:
-/// they never gate. It writes nothing when no such item is open, and otherwise one plan version
-/// for each `MAX_PLAN_ANSWERS` answers. Returns the answers.
+/// they never gate. It writes nothing when no such item is open or the plan cannot be read, and
+/// otherwise one plan version for each `MAX_PLAN_ANSWERS` answers. Returns the answers.
 pub fn answer_open_items(r: &mut Rdy, s: &Session, view: &str) -> Vec<PlanAnswerInput> {
-    let reply = r
-        .read()
-        .view_plan(view)
-        .unwrap_or_else(|e| panic!("the change plan of {view}: {e}"));
+    // a view whose plan cannot be read (a stale base, a conflict) has no item to answer: its
+    // propose or landing reports the error
+    let Ok(reply) = r.read().view_plan(view) else {
+        return vec![];
+    };
     let inputs: Vec<PlanAnswerInput> = reply
         .items
         .iter()

@@ -782,7 +782,8 @@ fn cp14_guidance_matches_the_engine_in_a_live_project() {
     assert_eq!(e.fix, row.2);
 
     // E_PLAN_OPEN: the items are on stable content, so the version is not ready and no
-    // W_PLAN_OPEN warns; the issue is the row's message with <n> filled in, and its fix
+    // W_PLAN_OPEN warns; the issue counts the three items and has the row's fix (the row's
+    // second column says when the code comes, not the message)
     let v = rdy_propose(&mut st, p(json!({"title": "open"}))).unwrap();
     assert!(
         !v["warnings"]
@@ -794,7 +795,7 @@ fn cp14_guidance_matches_the_engine_in_a_live_project() {
     );
     let issue = plan_open_issue(&mut st, &v["ref"]);
     let row = ERROR_ROWS.iter().find(|r| r.0 == "E_PLAN_OPEN").unwrap();
-    assert_eq!(issue["message"], row.1.replace("<n>", "3"));
+    assert_eq!(issue["message"], "3 change-plan items are open");
     assert_eq!(issue["fix"], row.2);
 
     // the allowed-act matrix: confirm takes confirm and defer; reaffirm takes defer only

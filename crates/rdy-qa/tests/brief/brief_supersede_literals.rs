@@ -172,6 +172,8 @@ fn propose_and_land(e: &Local, view: &str) -> (Value, Value) {
     let inner = Arc::clone(&slot);
     let v = view.to_string();
     let p = propose_and_report(e, None, move |r| {
+        // O23: the plan items are answered before the propose binds the plan
+        rdy_qa::intake::answer_open_items(r, &writer(), &v);
         let summary = summary_for(r, &v);
         let p = r.propose(&writer(), &v, &v, summary)?;
         *inner.lock().unwrap() = Some(p.clone());

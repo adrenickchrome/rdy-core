@@ -958,6 +958,8 @@ fn cc11_fix3_a_suspect_the_structural_carry_misses_is_carried() {
         "links": {"supersedes": [{"target": c["$d1"]}]}}]),
     )
     .unwrap();
+    // O23: the plan items are answered before the propose binds the plan
+    rdy_qa::intake::answer_open_items(&mut r, &writer(), "sup");
     let p = r
         .propose(&writer(), "sup", "sup", Some(rdy_qa::intake::TEST_SUMMARY))
         .unwrap();
