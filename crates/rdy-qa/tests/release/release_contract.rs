@@ -1771,6 +1771,11 @@ fn cli_runtime() -> Value {
             advice["card_hash"].as_str().unwrap(),
         ],
     );
+    // RULING F1: the release pack was set after the batch was proposed, so the first approval
+    // refuses with a fresh card (`E_PROPOSAL_MOVED`); the person reviews it and approves again
+    let moved = p("approve", &["approve", &proposal]);
+    assert_eq!(moved["code"], "E_PROPOSAL_MOVED", "{moved}");
+    assert!(moved["corrected"]["card"].is_object(), "{moved}");
     p("approve", &["approve", &proposal]);
     p("tag", &["tag", "v1.1.0", "-m", "Second"]);
     p("log", &["log", "--limit", "2"]);
