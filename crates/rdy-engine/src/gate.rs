@@ -1097,7 +1097,7 @@ fn deferrals_open(pref: &ProposalRef, card: &Item, n: usize) -> RdyError {
 /// `E_BLOCKING_TENSION` for the refusing tensions of version `pref`: one issue per tension. The
 /// fix names what resolves each refusing kind ([`crate::tensions::resolve_hint`]), each distinct
 /// hint once, in the order the tensions come.
-fn blocking_tensions(pref: &ProposalRef, refusing: &[TensionInfo]) -> RdyError {
+pub(crate) fn blocking_tensions(pref: &ProposalRef, refusing: &[TensionInfo]) -> RdyError {
     let mut hints: Vec<&str> = vec![];
     for t in refusing {
         let h = crate::tensions::resolve_hint(t.kind);
@@ -2868,14 +2868,17 @@ impl Rdy {
         // the pack and the gate config (a failed check gives a fresh card, RULING F1)
         let assessment = self.fresh_assessment(&st, &pref, &p)?;
         // D-ME2HD "Later refusals", built with no candidate (I8): a rejected decision or one_way
-        // re-affirmation, refused deferrals
+        // re-affirmation, refused deferrals, an advice accepted after the assessment
         let (decisions, reaffirms) = own_decisions(&st, &changes)?;
         let bound = st
             .reader()
             .plan_of_proposal(&pref.version, st.seq())?
             .is_some();
-        let later =
+        let mut later =
             crate::readiness::later_refusals(&st, &pref, &p.view, &decisions, &reaffirms, bound)?;
+        // ruling task-12 R1 (D-WMCFW): an advice accepted after the assessment blocks
+        let record = st.reader().assessment(&assessment)?;
+        later.extend(crate::readiness::accepted_advice(&st, &pref, &p, &record)?);
         if !later.is_empty() {
             return Err(proposal_not_ready(&pref, later));
         }

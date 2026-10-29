@@ -315,7 +315,7 @@ impl ReadState {
                 Some(facts) => card.facts = facts,
                 None => {
                     not_ready.push(NotReady {
-                        issues: vec![no_assessment(&r)],
+                        issues: vec![crate::gate::no_stored_assessment(pref)],
                         r#ref: r,
                     });
                     continue;
@@ -462,18 +462,6 @@ fn stored_facts(st: &ReadState, v: &Version) -> Result<Option<Vec<Fact>>, RdyErr
         })
         .collect();
     Ok(Some(facts))
-}
-
-/// The issue of a version whose readiness passes and that has no stored assessment (O10): one
-/// proposed before assessments, or one that was not ready when it was proposed.
-fn no_assessment(pref: &str) -> Issue {
-    Issue {
-        severity: Severity::Error,
-        code: E_VALIDATION,
-        block: None,
-        message: format!("{pref} has no stored assessment"),
-        fix: "propose it again: rdy_propose / rdy propose".into(),
-    }
 }
 
 /// The readiness issues of version `pref` (record `p`), in the queue's order: the issues the

@@ -14,6 +14,7 @@ use rdy_engine::readiness::assessment::{config_digest, pack_digest};
 use rdy_engine::readiness::{
     Candidate, candidate_builds_for_tests, readiness, readiness_calls_for_tests,
 };
+use rdy_engine::tensions::api::AcceptRequest;
 use rdy_engine::{
     DecisionInput, E_BLOCKING_TENSION, E_CONFLICT_UNRESOLVED, E_PROPOSAL_MOVED,
     E_PROPOSAL_NOT_READY, E_VALIDATION, LandInfo, LandOptions, ProposalInfo, Rdy, RdyError,
@@ -452,6 +453,49 @@ fn rg12_a_later_refusal_is_not_ready() {
         }]
     );
     assert_eq!((calls, builds), (0, 0), "built with no candidate (I8)");
+}
+
+/// Ruling task-12 R1 (D-WMCFW, D-ME2HD, D-JQD5X): a person's acceptance of a reviewer's advice
+/// on a tension of the version, written after its assessment, is a later refusal. The approval
+/// refuses with `E_PROPOSAL_NOT_READY` and one `E_BLOCKING_TENSION` issue per accepted tension,
+/// read with no candidate, and nothing lands.
+#[test]
+fn rg12_an_accepted_advice_after_propose_is_a_later_refusal() {
+    let (_d, mut r, b) = rdy_qa::intake::batch_project();
+    let version = b.report["id"].as_str().unwrap().to_string();
+    assert!(
+        stored(&r, &version).is_some(),
+        "the ready version has its assessment"
+    );
+    let accepted = r
+        .accept_advice(
+            &writer(),
+            PERSON,
+            AcceptRequest {
+                proposal: b.r#ref.clone(),
+                advised_digest: b.report["advised_digest"].as_str().unwrap().into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .accepted;
+    assert!(!accepted.is_empty());
+    let head = r.read().canon_head();
+    let (res, calls, builds) = counted_land(&mut r, &b.r#ref);
+    let e = res.unwrap_err();
+    assert_eq!(e.code, E_PROPOSAL_NOT_READY, "{e:#?}");
+    assert_eq!(e.issues.len(), accepted.len(), "{:#?}", e.issues);
+    for (issue, row) in e.issues.iter().zip(&accepted) {
+        assert_eq!(issue.code, E_BLOCKING_TENSION, "{issue:#?}");
+        assert!(
+            issue.message.starts_with(&format!("{} semantic: ", row.id)),
+            "{issue:#?}"
+        );
+        assert!(issue.fix.contains(&row.id), "{issue:#?}");
+        assert!(issue.block.is_some(), "{issue:#?}");
+    }
+    assert_eq!((calls, builds), (0, 0), "built with no candidate (I8)");
+    assert_eq!(r.read().canon_head(), head, "nothing landed");
 }
 
 #[test]

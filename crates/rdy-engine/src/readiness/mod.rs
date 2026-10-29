@@ -22,7 +22,8 @@
 //!    never an issue;
 //! 6. a version whose reach exceeds `MAX_ROWS` (O9);
 //! 7. the later refusals ([`later_refusals`]): a rejected decision, a rejected one_way
-//!    re-affirmation, refused deferrals.
+//!    re-affirmation, refused deferrals. The landing adds a fourth, which only an assessment
+//!    can date: an advice accepted after it ([`accepted_advice`], ruling task-12 R1).
 //!
 //! Readiness never adds the issue of a version with no stored assessment (O10).
 
@@ -276,6 +277,94 @@ pub fn later_refusals(
         issues.extend(deferrals_refused(st, pref)?);
     }
     Ok(issues)
+}
+
+/// Ruling task-12 R1 (D-WMCFW, D-ME2HD, D-JQD5X): the later refusal of an accepted advice. A
+/// person's acceptance (`accept_advice`) makes a semantic tension block until a side's content
+/// changes. One written after assessment `a` of version `pref` (record `p`) refuses its approval:
+/// one `E_BLOCKING_TENSION` issue per accepted tension, with the landing check's issue text and
+/// fix. It reads the semantic tension versions alone, with no candidate: an accepted pair is one
+/// whose open record blocks and whose advisory form the assessment lists as an open advisory
+/// tension (before the acceptance, the version was ready with it advisory). Empty when nothing
+/// was accepted since.
+pub fn accepted_advice(
+    st: &ReadState,
+    pref: &ProposalRef,
+    p: &Proposal,
+    a: &Assessment,
+) -> Result<Vec<Issue>, RdyError> {
+    use crate::tensions::{Involved, SideRef, TensionKind, TensionSeverity, tension_vkey};
+    use rdy_model::assessment::{AssessmentSeverity, AssessmentTensionStatus};
+    let sem = st.semantic();
+    if !sem.has_tensions() {
+        return Ok(vec![]);
+    }
+    let advisory: BTreeSet<Hash> = a
+        .tensions
+        .iter()
+        .filter(|t| {
+            t.kind == TensionKind::Semantic.name()
+                && t.severity == AssessmentSeverity::Advisory
+                && t.status == AssessmentTensionStatus::Open
+        })
+        .map(|t| t.vkey)
+        .collect();
+    if advisory.is_empty() {
+        return Ok(vec![]);
+    }
+    // the advisory vkey of each blocking pair: the vkey reads each item's block and content only
+    let accepted: Vec<_> = sem
+        .tensions()
+        .filter(|o| o.record.blocking)
+        .filter(|o| {
+            let involved: Vec<Involved> = o
+                .record
+                .items
+                .iter()
+                .map(|i| Involved {
+                    side: SideRef::Canon { landing: None },
+                    block: i.block.clone(),
+                    version: None,
+                    content: Some(i.content),
+                })
+                .collect();
+            advisory.contains(&tension_vkey(
+                TensionKind::Semantic,
+                TensionSeverity::Advisory,
+                &involved,
+            ))
+        })
+        .collect();
+    if accepted.is_empty() {
+        return Ok(vec![]);
+    }
+    // each accepted pair's blocking form that holds a change of the version, as the landing
+    // check names it
+    let set = st.tensions()?;
+    let mut cache = crate::tensions::info::InfoCache::default();
+    let mut refusing = vec![];
+    for o in accepted {
+        let Some(item) = o.record.items.first() else {
+            continue;
+        };
+        let forms: Vec<_> = set
+            .involving_block(&item.block)
+            .into_iter()
+            .filter(|t| {
+                crate::tensions::semantic::pair_of(t) == Some(o.record.key)
+                    && t.severity == TensionSeverity::Blocking
+            })
+            .collect();
+        let own = forms.iter().find(|t| {
+            t.sides
+                .iter()
+                .any(|s| matches!(s, SideRef::Change(c) if p.changes.contains(c)))
+        });
+        if let Some(t) = own.or(forms.first()) {
+            refusing.push(st.tension_info_with(t, &mut cache));
+        }
+    }
+    Ok(crate::gate::blocking_tensions(pref, &refusing).issues)
 }
 
 /// The scope of the canon a version recorded (`canon_at`): `None` for the empty canon; canon's
