@@ -142,12 +142,42 @@ fn rg13_the_approve_card_facts_are_the_stored_facts() {
     let before = approve_item(&w.r, &p.r#ref);
     assert_eq!(lines(&before), a.card.facts);
     assert!(fact(&before, "Base").ends_with(", current"), "{before:#?}");
-    // canon moves on: a live Base fact would now say `moved`
+    // canon moves on: the Base fact is live (I-d) and says `moved`; every other fact is as stored
     land_elsewhere(&mut w);
     let after = approve_item(&w.r, &p.r#ref);
-    assert_eq!(lines(&after), a.card.facts, "the facts stay as stored");
-    assert!(fact(&after, "Base").ends_with(", current"), "{after:#?}");
-    assert_eq!(after.facts, before.facts);
+    assert!(fact(&after, "Base").ends_with(", moved"), "{after:#?}");
+    let others = |i: &Item| -> Vec<String> {
+        i.facts
+            .iter()
+            .filter(|f| f.name != "Base")
+            .map(|f| format!("{}: {}", f.name, f.value))
+            .collect()
+    };
+    let stored_others: Vec<String> = a
+        .card
+        .facts
+        .iter()
+        .filter(|l| !l.starts_with("Base: "))
+        .cloned()
+        .collect();
+    assert_eq!(
+        others(&after),
+        stored_others,
+        "the other facts stay as stored"
+    );
+    assert_eq!(
+        after
+            .facts
+            .iter()
+            .map(|f| f.name.to_string())
+            .collect::<Vec<_>>(),
+        before
+            .facts
+            .iter()
+            .map(|f| f.name.to_string())
+            .collect::<Vec<_>>(),
+        "the order of the facts is the stored one"
+    );
 }
 
 /// The ids of the advisory tensions `p` reports, as `(tn id, kind, summary)` in tension id order.
@@ -278,19 +308,21 @@ fn rg13_the_card_hash_binds_the_shown_card() {
     put_j(&mut w.r, "a", upd(&w.x, "X holds in a."), j_typo());
     let p = propose(&mut w.r, "a");
     let shown = approve_item(&w.r, &p.r#ref);
+    // the card's hash is the one the person was shown while nothing moves
+    assert_eq!(approve_item(&w.r, &p.r#ref).card_hash, shown.card_hash);
     land_elsewhere(&mut w);
-    // the card is as stored, so its hash is the one the person was shown
+    // the Base fact moved, so the card and its hash moved; the shown hash is refused
     let now = approve_item(&w.r, &p.r#ref);
-    assert_eq!(now.card_hash, shown.card_hash);
+    assert_ne!(now.card_hash, shown.card_hash);
     let head = w.r.read().canon_head();
-    let done =
+    let answer = |w: &mut World, hash: &str| {
         w.r.answer(
             &agent(),
             PERSON,
             AnswerRequest {
                 r#ref: p.r#ref.clone(),
                 option: "approve".into(),
-                card_hash: Some(shown.card_hash.clone()),
+                card_hash: Some(hash.to_string()),
                 note: None,
                 relay: RelayInput {
                     relayed_by: None,
@@ -302,7 +334,16 @@ fn rg13_the_card_hash_binds_the_shown_card() {
                 brief: None,
             },
         )
-        .unwrap();
+    };
+    let err = answer(&mut w, &shown.card_hash).unwrap_err();
+    assert_eq!(err.code, rdy_engine::E_PROPOSAL_MOVED, "{err:?}");
+    assert_eq!(
+        w.r.read().canon_head(),
+        head,
+        "the refused approval landed nothing"
+    );
+    // the newly shown hash lands
+    let done = answer(&mut w, &now.card_hash).unwrap();
     assert_eq!(done.act, "approve");
     assert_ne!(w.r.read().canon_head(), head, "the approval landed");
 }

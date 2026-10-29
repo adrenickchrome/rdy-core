@@ -1263,10 +1263,12 @@ fn cp12_seal_points_to_this_versions_acceptance() {
     r.fsck().unwrap();
 }
 
-/// O19, p-AEYTC: a version proposed before store 17 has no bound plan: no deferral card, no
-/// deferral hold and the store-16 readiness, whatever its view's chain holds.
+/// O19, p-AEYTC, O10: a version proposed before store 17 has no bound plan and no stored
+/// assessment, so it is not ready: the queue lists it with the O10 issue only, no approve card,
+/// no deferral card and no deferral hold. Proposed again, the version binds its view's chain, so
+/// its deferral card stands and its approval waits for the person's answer to it.
 #[test]
-fn cp12_unbound_proposal_keeps_store16_readiness() {
+fn cp12_unbound_proposal_is_not_ready_until_proposed_again() {
     let (_d, mut r) = project();
     let s = spec(&mut r);
     edit(&mut r, "w", &s.a, "A holds 60 days.");
@@ -1285,42 +1287,47 @@ fn cp12_unbound_proposal_keeps_store16_readiness() {
     r.invalidate();
     let pref = format!("P-{}@1", v.short());
     let q = queue(&r);
-    assert!(
-        q.not_ready.iter().all(|n| n.r#ref != pref),
-        "{:#?}",
-        q.not_ready
+    let n = q
+        .not_ready
+        .iter()
+        .find(|n| n.r#ref == pref)
+        .unwrap_or_else(|| panic!("{pref} is not ready: {:#?}", q.not_ready));
+    assert_eq!(n.issues.len(), 1, "the O10 issue only: {:#?}", n.issues);
+    assert_eq!(n.issues[0].code, E_VALIDATION);
+    assert_eq!(
+        n.issues[0].message,
+        format!("{pref} has no stored assessment")
     );
-    assert!(q.items.iter().any(|i| i.r#ref == pref), "ready");
+    assert_eq!(
+        n.issues[0].fix,
+        "propose it again: rdy_propose / rdy propose"
+    );
+    assert!(q.items.iter().all(|i| i.r#ref != pref), "no approve card");
     assert!(
         q.items.iter().all(|i| i.kind != ItemKind::Defer),
         "no deferral card"
     );
-    let i = item_of(&r, &pref).unwrap();
-    assert_eq!(
-        i.options[0].recommended.as_ref().unwrap().reason(),
-        APPROVE_REASON
+    // proposed again: an assessed version, ready, with the chain's deferral card beside it
+    let p = propose(
+        &mut r,
+        "w",
+        &[defer(&pi(&s.a, &s.b, PlanKind::Confirm), "b waits")],
     );
-    let l = h(&r
-        .land_with(&approver(), &pref, LandOptions::default())
-        .expect("no deferral hold")
-        .landing);
-    let st = r.read();
-    let sh = st
-        .reader()
-        .plan_of_landing(&l, log_end(&r))
-        .unwrap()
-        .unwrap();
-    let sealed = st.reader().plan(&sh).unwrap();
-    assert!(sealed.answers.is_empty());
+    let q = queue(&r);
     assert!(
-        sealed
-            .seal
-            .as_ref()
-            .unwrap()
-            .items
-            .iter()
-            .all(|i| i.answer.is_none() && i.outcome != PlanOutcome::Deferred)
+        q.not_ready.iter().all(|n| n.r#ref != p.r#ref),
+        "{:#?}",
+        q.not_ready
     );
+    assert!(item_of(&r, &p.r#ref).is_some(), "the new version is ready");
+    assert!(
+        q.items.iter().any(|i| i.kind == ItemKind::Defer),
+        "the deferral card of the new version"
+    );
+    let e = r
+        .land_with(&approver(), &p.id, LandOptions::default())
+        .expect_err("the deferral hold");
+    assert_eq!(e.code, E_DEFERRAL_OPEN, "{e}");
 }
 
 /// A list of recommended answers that names a deferral card is refused before any answer: the

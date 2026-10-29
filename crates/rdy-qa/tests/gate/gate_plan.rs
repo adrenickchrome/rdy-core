@@ -2,8 +2,8 @@
 //! a landing seals its version's change plan in its own batch, after the landing and before its
 //! signatures: every item with its outcome, the decisions it names, the cumulative answers and
 //! the recorded HEADs. An acceptance version binds a plan of its own; a landing with no item and
-//! no re-affirmation writes no seal; a version proposed before store 17 lands under the store-16
-//! rules with a seal that names no earlier chain version. A failure at any frame, or a writer
+//! no re-affirmation writes no seal; a version proposed before store 17 has no stored assessment, so it is
+//! proposed again before it lands (O10). A failure at any frame, or a writer
 //! that moves during signing, leaves no half.
 use rdy_engine::engine::{Local, with_writer_result};
 use rdy_engine::plan::{PlanAnswerInput, PlanQuery, ProposePlanRequest};
@@ -135,7 +135,8 @@ fn accept_deferrals(r: &mut Rdy, pref: &str) -> Hash {
     h(info.answer.as_deref().unwrap())
 }
 
-/// A version of `view` as a store-16 engine wrote it: the raw proposal writer, no plan.
+/// A version of `view` as a store-16 engine wrote it: the raw proposal writer, no plan and no
+/// assessment.
 fn unbound(r: &mut Rdy, view: &str) -> (Hash, String) {
     let by = writer().provenance();
     let changes = r.store().included(view).unwrap().as_ref().clone();
@@ -145,6 +146,41 @@ fn unbound(r: &mut Rdy, view: &str) -> (Hash, String) {
         .unwrap();
     r.invalidate();
     (v, format!("P-{}@1", v.short()))
+}
+
+/// O10 (Task 13, rg13): a version with no stored assessment is not ready, whatever else it
+/// holds. The queue lists it under `not_ready` with the O10 issue only and shows no card for it,
+/// and no exception or deferral card beside it. Its fix is to propose it again.
+fn assert_no_assessment(r: &Rdy, pref: &str) {
+    let q = r
+        .read()
+        .pending(&rdy_engine::pending::PendingQuery {
+            person: PERSON.into(),
+            session_ref: None,
+            max_tokens: rdy_engine::pending::CARD_MAX_TOKENS,
+        })
+        .unwrap();
+    let n = q
+        .not_ready
+        .iter()
+        .find(|n| n.r#ref == pref)
+        .unwrap_or_else(|| panic!("{pref} is not ready: {q:#?}"));
+    assert_eq!(n.issues.len(), 1, "the O10 issue only: {:#?}", n.issues);
+    assert_eq!(n.issues[0].code, rdy_engine::E_VALIDATION);
+    assert_eq!(
+        n.issues[0].message,
+        format!("{pref} has no stored assessment")
+    );
+    assert_eq!(
+        n.issues[0].fix,
+        "propose it again: rdy_propose / rdy propose"
+    );
+    assert!(
+        q.items
+            .iter()
+            .all(|i| i.r#ref != pref && i.batch.as_deref() != Some(pref)),
+        "no card for {pref}: {q:#?}"
+    );
 }
 
 fn pi(cause: &str, subject: &str, kind: PlanKind) -> String {
@@ -342,14 +378,15 @@ fn decision(
 
 // ---- tests ----
 
-/// O19, p-AEYTC: a version proposed before store 17 reads with plan null and its computed items,
-/// with no answer and no plan warning, lands under the store-16 rules, and its seal names no
-/// earlier chain version (not the view's answer-only chain either), has no answers, the HEADs
-/// captured once as both ends, each item's computed close else open and no answer pointer, and
-/// becomes `plan/<view>`. A zero-item version writes no plan; an approval-generated final
-/// version binds none and the seal names it.
+/// O19, p-AEYTC, O10: a version proposed before store 17 reads with plan null and its computed
+/// items, with no answer and no plan warning. It has no stored assessment, so it is not ready: the
+/// queue lists it with the O10 issue only and shows no card for it (rg13). Proposed again, the
+/// version binds the view's chain and stores an assessment; it lands with a seal that has the
+/// HEADs captured once as both ends, each item's computed close else open, and becomes
+/// `plan/<view>`. A zero-item version writes no plan once it is proposed again; an
+/// approval-generated final version binds a plan of its own and the seal names it.
 #[test]
-fn cp10_pre17_proposal_lands_under_store16_rules() {
+fn cp10_pre17_proposal_is_proposed_again_and_lands_sealed() {
     let (d, mut r) = project();
     let repo = linked_repo(d.path());
     let s = spec(&mut r);
@@ -367,13 +404,12 @@ fn cp10_pre17_proposal_lands_under_store16_rules() {
     );
     // an answer-only chain in the view, then the store-16 version
     let confirm = pi(&s.a, &s.b, PlanKind::Confirm);
-    let chain = r
-        .answer_plan(
-            &writer(),
-            "w",
-            &[ans(&confirm, PlanAct::Defer, Some("later"))],
-        )
-        .unwrap();
+    r.answer_plan(
+        &writer(),
+        "w",
+        &[ans(&confirm, PlanAct::Defer, Some("later"))],
+    )
+    .unwrap();
     let (old, pref) = unbound(&mut r, "w");
     let read = read_plan(&r, proposal_q(&pref));
     assert_eq!(read["plan"], Value::Null);
@@ -389,23 +425,23 @@ fn cp10_pre17_proposal_lands_under_store16_rules() {
         row["state"], "open",
         "the chain's defer is no answer of the version"
     );
+    // O10: it has no stored assessment, so it is not ready and has no card
+    assert_no_assessment(&r, &pref);
 
-    confirm_exceptions(&mut r, &approver(), &pref);
+    // proposed again: the new version binds the chain, stores an assessment and is ready
+    let p = propose(&mut r, "w", &[ans(&confirm, PlanAct::Defer, Some("later"))]);
+    assert_ne!(p.r#ref, pref);
+    let new = h(&p.id);
+    assert!(bound(&r, &new).is_some(), "the new version binds a plan");
+    accept_deferrals(&mut r, &p.r#ref);
+    confirm_exceptions(&mut r, &approver(), &p.r#ref);
     let start = r.store().log_end();
-    let l = land_now(&mut r, &old.to_string());
+    let l = land_now(&mut r, &p.id);
     let (sh, sealed) = seal(&r, &l).expect("an item: the landing seals");
-    assert_eq!(
-        (sealed.stable, sealed.prev),
-        (None, None),
-        "no earlier chain version"
-    );
-    assert_ne!(sealed.prev, Some(chain));
-    assert!(sealed.answers.is_empty());
+    assert_eq!(sealed.proposal, Some(new));
     assert_eq!(sealed.heads, heads_at(&h1), "the HEADs captured once");
-    assert_eq!(sealed.proposal, Some(old));
     let x = sealed.seal.as_ref().unwrap();
-    assert_eq!((x.landing, x.version), (l, old));
-    assert!(x.items.iter().all(|i| i.answer.is_none()));
+    assert_eq!((x.landing, x.version), (l, new));
     assert_eq!(
         outcome(&sealed, &s.a, &s.p, PlanKind::Update),
         PlanOutcome::Updated,
@@ -413,12 +449,13 @@ fn cp10_pre17_proposal_lands_under_store16_rules() {
     );
     assert_eq!(
         outcome(&sealed, &s.a, &s.b, PlanKind::Confirm),
-        PlanOutcome::Open,
-        "else open"
+        PlanOutcome::Deferred,
+        "the chain's defer is the version's answer"
     );
     assert_eq!(
         outcome(&sealed, &s.a, "app:f.rs", PlanKind::UpdateImplementation),
-        PlanOutcome::Open
+        PlanOutcome::Open,
+        "else open"
     );
     assert_eq!(
         plan_ref(&r, "w"),
@@ -436,17 +473,20 @@ fn cp10_pre17_proposal_lands_under_store16_rules() {
         "one batch: {kinds_of:?}"
     );
 
-    // a zero-item version writes no plan
+    // a zero-item version: not ready until it is proposed again, and then its landing writes no plan
     let z = claim(&mut r, "z", &s.s, "Z stands alone.");
     assert!(!z.is_empty());
-    let (zv, zref) = unbound(&mut r, "z");
-    let before = plans_in(&r);
-    let zl = land_version(&mut r, &zref, &zv.to_string());
+    let (_, zref) = unbound(&mut r, "z");
+    assert_no_assessment(&r, &zref);
+    let zp = propose(&mut r, "z", &[]);
+    // the propose bound the view's plan; the landing seals nothing and writes no plan
+    let (before, chain) = (plans_in(&r), plan_ref(&r, "z"));
+    let zl = land(&mut r, &zp);
     assert!(seal(&r, &zl).is_none());
     assert_eq!(plans_in(&r), before);
-    assert_eq!(plan_ref(&r, "z"), None);
+    assert_eq!(plan_ref(&r, "z"), chain);
 
-    // an approval-generated final version: the seal names it, and nothing binds it
+    // an approval-generated final version: the seal names it, and it binds a plan of its own
     edit(&mut r, "dv", &s.c, "C stands firm.");
     r.decide(
         &writer(),
@@ -458,22 +498,23 @@ fn cp10_pre17_proposal_lands_under_store16_rules() {
         },
     )
     .unwrap();
-    let (dvv, dvref) = unbound(&mut r, "dv");
-    let dl = land_version(&mut r, &dvref, &dvv.to_string());
+    let (_, dvref) = unbound(&mut r, "dv");
+    assert_no_assessment(&r, &dvref);
+    let dvp = propose(&mut r, "dv", &[]);
+    let dl = land(&mut r, &dvp);
     let landing = r.read().reader().landing(&dl).unwrap();
     assert_ne!(
-        landing.proposal, dvv,
+        landing.proposal,
+        h(&dvp.id),
         "the acceptance wrote a final version"
     );
     let (_, dsealed) = seal(&r, &dl).expect("b's confirm on c: a seal");
     assert_eq!(dsealed.proposal, Some(landing.proposal));
     assert_eq!(dsealed.seal.as_ref().unwrap().version, landing.proposal);
-    assert_eq!((dsealed.stable, dsealed.prev), (None, None));
     assert!(
-        bound(&r, &landing.proposal).is_none(),
-        "no synthesized binding"
+        bound(&r, &landing.proposal).is_some(),
+        "the acceptance version binds a plan of its own"
     );
-    assert!(bound(&r, &dvv).is_none());
     r.fsck().unwrap();
 }
 

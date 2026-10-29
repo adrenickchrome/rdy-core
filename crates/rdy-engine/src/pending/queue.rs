@@ -309,8 +309,9 @@ impl ReadState {
                 continue;
             };
             // D-ME2HD, O16: the approve card is drawn from the stored assessment, its facts as
-            // propose showed them; a ready version with none is not ready (O10, C2)
-            match stored_facts(self, &v.pref)? {
+            // propose showed them, except Base, which stays live (I-d); a ready version with no
+            // stored assessment is not ready (O10, C2)
+            match stored_facts(self, &v)? {
                 Some(facts) => card.facts = facts,
                 None => {
                     not_ready.push(NotReady {
@@ -433,20 +434,23 @@ pub(crate) fn approval_holds(
     })
 }
 
-/// The facts of the approve card version `pref` stored in its assessment (O16): each line
+/// The facts of the approve card version `v` stored in its assessment (O16): each line
 /// `<name>: <value>` split at its first `: `, in the card's order; none when the version has no
-/// stored assessment.
-fn stored_facts(st: &ReadState, pref: &ProposalRef) -> Result<Option<Vec<Fact>>, RdyError> {
+/// stored assessment. The Base fact is the exception: it stays live (I-d), read now against the
+/// canon head, so a landing after propose shows `moved` and moves the card's hash.
+fn stored_facts(st: &ReadState, v: &Version) -> Result<Option<Vec<Fact>>, RdyError> {
     let reader = st.reader();
-    let Some(h) = reader.assessment_of_proposal(&pref.version, st.seq())? else {
+    let Some(h) = reader.assessment_of_proposal(&v.pref.version, st.seq())? else {
         return Ok(None);
     };
+    let live_base = v.base_fact(st);
     let facts = reader
         .assessment(&h)?
         .card
         .facts
         .into_iter()
         .map(|line| match line.split_once(": ") {
+            Some((name, _)) if name == BASE_FACT => live_base.clone(),
             Some((name, value)) => Fact {
                 name: name.to_string().into(),
                 value: value.to_string(),
@@ -683,7 +687,7 @@ pub(crate) fn removal_item(
     let mut item = v.batch_item(st, now_ms());
     // the item the queue builds draws its facts from the stored assessment (O16); a version with
     // none (O10) shows the facts as read now
-    if let Some(facts) = stored_facts(st, &pref)? {
+    if let Some(facts) = stored_facts(st, &v)? {
         item.facts = facts;
     }
     let issues = v.readiness(st)?;
@@ -1406,15 +1410,6 @@ impl Version {
             tensions.push_str(&self.advisory_rows());
         }
         let exceptions = self.exception_count();
-        let base = match self.p.canon_at {
-            Some(h) => h.short(),
-            None => "the start".to_string(),
-        };
-        let moved = if self.p.canon_at == st.canon_head() {
-            "current"
-        } else {
-            "moved"
-        };
         let fact = |name: &'static str, value: String| Fact {
             name: name.into(),
             value,
@@ -1445,7 +1440,7 @@ impl Version {
             fact("Tensions", tensions),
             fact("Coverage", worked_out(self.coverage(st, candidate))),
             fact("Confidence", worked_out(self.confidence(candidate))),
-            fact("Base", format!("canon at {base}, {moved}")),
+            self.base_fact(st),
             fact(
                 "Exceptions",
                 match exceptions {
@@ -1454,6 +1449,24 @@ impl Version {
                 },
             ),
         ]
+    }
+
+    /// The Base fact: the canon the version was proposed on, and whether canon is still there.
+    /// It is always read live, on the approve card and in the stored facts (I-d).
+    fn base_fact(&self, st: &ReadState) -> Fact {
+        let base = match self.p.canon_at {
+            Some(h) => h.short(),
+            None => "the start".to_string(),
+        };
+        let moved = if self.p.canon_at == st.canon_head() {
+            "current"
+        } else {
+            "moved"
+        };
+        Fact {
+            name: BASE_FACT.into(),
+            value: format!("canon at {base}, {moved}"),
+        }
     }
 
     /// D-45RG6: one row for each advisory tension of the version, in tension id order, joined
@@ -1875,6 +1888,9 @@ pub const APPROVE_REASON_CARDS: &str =
 /// The name of the batch fact that gives the claim of the version's justifications (rf9,
 /// TASK-507 (3)); it follows Changes.
 pub const JUSTIFICATION_FACT: &str = "Justification";
+/// The name of the batch fact that gives the canon the version was proposed on; it is the one
+/// fact the approve card reads live, not from the stored assessment (I-d).
+const BASE_FACT: &str = "Base";
 /// The name of the exception fact of a superseding decision that lists the findings it depends
 /// on (rf9, TASK-507 (3)); it follows the exception-kind facts.
 pub const FINDINGS_FACT: &str = "Findings";

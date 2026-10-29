@@ -491,10 +491,9 @@ fn di5_the_card_facts_come_from_the_store() {
     );
     rdy_qa::fixtures::land(&mut r, "elsewhere").unwrap();
     let q = pending(&r);
-    // D-ME2HD: the card is the stored assessment's, so the Base fact stays as propose showed it
     assert_eq!(
         fact(item(&q, &b.r#ref), "Base"),
-        format!("canon at {}, current", head.short())
+        format!("canon at {}, moved", head.short())
     );
 }
 
