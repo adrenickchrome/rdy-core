@@ -84,8 +84,21 @@
         },
         "approve": {
           "exits": [
-            0
+            0,
+            1
           ],
+          "stderr": {
+            "code": "string",
+            "corrected": {
+              "card": {
+                "card": "string",
+                "card_hash": "string",
+                "ref": "string"
+              }
+            },
+            "fix": "string",
+            "message": "string"
+          },
           "stdout": {
             "approved": "string",
             "assurance": "string",
@@ -11735,9 +11748,9 @@
           {
             "event": "pending_added",
             "ids": [
-              "8d5338801a3aa86f8ba2e6e7eb98353537c20beeadf4bfb07b6838b55ec8738e"
+              "948ce6cf92b85b16dfa6d0b520396f535a3a84c13e377bc7cf2a344e486c487e"
             ],
-            "line": "P-8d5338801a3a@1 waits for an answer; read rdy_pending"
+            "line": "P-948ce6cf92b8@1 waits for an answer; read rdy_pending"
           },
           {
             "event": "intent_posted",
@@ -11757,46 +11770,46 @@
           {
             "event": "pending_added",
             "ids": [
-              "dc05d3b101a7a4e46b2531f5fd4ba48aa66d633eedc774039b45207852e03811"
+              "3a6e97c6c2e098400f310fdcf44bcd761dc4ab48ecc1a554eab17a527614f477"
             ],
-            "line": "P-dc05d3b101a7@1 waits for an answer; read rdy_pending"
+            "line": "P-3a6e97c6c2e0@1 waits for an answer; read rdy_pending"
           },
           {
             "event": "landed",
             "ids": [
-              "b97278e8eeda2862c3e78ad65d42c678c90b0a30352f53818f5a6376057df13c",
-              "dc05d3b101a7a4e46b2531f5fd4ba48aa66d633eedc774039b45207852e03811"
+              "5d6f34eb6ab8839d2e98c086ede8281163af2612823429b343438fb1db72c182",
+              "3a6e97c6c2e098400f310fdcf44bcd761dc4ab48ecc1a554eab17a527614f477"
             ],
-            "line": "landing b97278e8eeda of view work changed 1 blocks in your areas (payments)"
+            "line": "landing 5d6f34eb6ab8 of view work changed 1 blocks in your areas (payments)"
           },
           {
             "event": "view_rebased",
             "ids": [
-              "b97278e8eeda2862c3e78ad65d42c678c90b0a30352f53818f5a6376057df13c",
+              "5d6f34eb6ab8839d2e98c086ede8281163af2612823429b343438fb1db72c182",
               "d31c17dae8c0ad358656fcf02af98d3d4d5214f5d8d7b5bab2a51c9e6dd7d9e4"
             ],
-            "line": "your view a rebased onto landing b97278e8eeda with 1 conflicts"
+            "line": "your view a rebased onto landing 5d6f34eb6ab8 with 1 conflicts"
           },
           {
             "event": "tension_opened",
             "ids": [
-              "40e40e4244c8c3e65c934273a7ada41a82cc6c29e959303c8a1df9572f12e2e6",
+              "617638da05934cf876447f336419c010cd65abf4fc0ca88dce8c48fa8acc2f2d",
               "37579917da30b6c6a43687d7325fbfa0452c3d28fd38260f6163b5cc5c764328"
             ],
-            "line": "tension 40e40e4244c8 replaces 4c8116c45adb on your change 37579917da30 (edit_collision, blocking): landing b97278e8eeda"
+            "line": "tension 617638da0593 replaces 4c8116c45adb on your change 37579917da30 (edit_collision, blocking): landing 5d6f34eb6ab8"
           }
         ]
       },
       "logged_suspects": [],
       "logged_tensions": [
-        "tn-0e859009bec9",
+        "tn-0df3803f2a8f",
         "tn-26128692ed56",
-        "tn-40e40e4244c8"
+        "tn-617638da0593"
       ],
       "tensions": {
-        "tn-0e859009bec9": "open",
+        "tn-0df3803f2a8f": "open",
         "tn-26128692ed56": "open",
-        "tn-40e40e4244c8": "open"
+        "tn-617638da0593": "open"
       },
       "transitions": 3
     },
@@ -12998,6 +13011,7 @@
       "NO_LATER_FIX": "\"answer with another option; Later is a chat act, relayed with rdy_answer\"",
       "NO_USER_FILE_FIX": "\"set XDG_CONFIG_HOME or HOME before signing in\"",
       "NO_USER_FILE_MESSAGE": "\"the user config path is not available\"",
+      "O11_FIX": "\"fix each issue and propose again: rdy_propose / rdy propose\"",
       "OP_FIX": "\"each op needs \\\"op\\\" (rdy_schema lists them under \\\"ops\\\"); create needs \\\"type\\\"\"",
       "OWNER_RUN_FIX": "\"pass the run with --run\"",
       "PAGE_MESSAGE": "\"There is no page at this address. It may have moved, or the link may be wrong.\"",
@@ -13529,9 +13543,11 @@
         "refused": {
           "code": "string",
           "corrected": {
-            "card": "string",
-            "card_hash": "string",
-            "ref": "string"
+            "card": {
+              "card": "string",
+              "card_hash": "string",
+              "ref": "string"
+            }
           },
           "fix": "string",
           "issues": [],
