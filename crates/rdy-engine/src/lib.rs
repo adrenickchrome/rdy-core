@@ -64,6 +64,7 @@ mod pack_load;
 mod paths;
 pub mod pending;
 pub mod plan;
+pub mod policy;
 pub mod proposal_show;
 pub mod publication;
 pub mod publication_manifest;
