@@ -25,7 +25,7 @@ use rdy_model::{BlockId, Hash, LandingRecord};
 use rdy_qa::fixtures::{approver, land, write, writer};
 use rdy_qa::intake::{PERSON, TEST_SUMMARY, confirm_before_landing, decide_in};
 use rdy_qa::packs::use_pack;
-use rdy_qa::tensions::{j_typo, put, put_j, upd};
+use rdy_qa::tensions::{j_typo, put_j, upd};
 use rdy_schema::{Issue, Severity};
 use rdy_store::kinds;
 use rdy_store::segment::Location;

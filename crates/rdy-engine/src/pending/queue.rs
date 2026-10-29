@@ -482,6 +482,7 @@ fn no_assessment(pref: &str) -> Issue {
 /// It is the queue's one readiness ([`Version::readiness`]) on the same published state. The
 /// version is read without its removal cards: readiness never reads them, and the landing's own
 /// freshness check computes each removal report once.
+#[cfg(test)]
 pub(crate) fn approval_readiness(
     st: &ReadState,
     pref: &ProposalRef,

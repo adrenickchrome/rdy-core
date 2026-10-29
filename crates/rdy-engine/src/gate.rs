@@ -3,7 +3,7 @@ use crate::answer::card_of;
 use crate::answer::relay::{RelayInput, relayed};
 use crate::coord_graph::AltRef;
 use crate::error::*;
-use crate::pending::queue::{approval_holds, approval_readiness};
+use crate::pending::queue::approval_holds;
 use crate::pending::{Item, PlanCardBinding};
 use crate::plan::lifecycle::{PlanSummary, ProposePlanRequest};
 use crate::readiness::assessment::{config_digest, pack_digest};
@@ -998,7 +998,7 @@ impl ReadState {
 
 /// D-ME2HD: the refusal of an approval of version `pref`, which is not ready. Its issues are the
 /// version's readiness issues, in the queue's order, each with its own code and fix
-/// ([`crate::pending::queue::approval_readiness`]); none is added, dropped, merged or re-worded.
+/// ([`crate::readiness::readiness`]); none is added, dropped, merged or re-worded.
 /// The message counts them (one issue reads `1 issue`, more read `<n> issues`; TASK-548). No card.
 pub(crate) fn proposal_not_ready(pref: &ProposalRef, issues: Vec<Issue>) -> RdyError {
     let mut e = RdyError::new(
@@ -2668,7 +2668,8 @@ impl Rdy {
             .assessment_of_proposal(&pref.version, st.seq())?
         else {
             // O10: the one readiness, on the plan the store binds to the version
-            let mut issues = approval_readiness(st, pref, p.clone())?;
+            let c = crate::readiness::Candidate::stored(st, *pref, p.clone())?;
+            let mut issues = crate::readiness::readiness(st, &c)?.issues;
             if issues.is_empty() {
                 issues.push(no_stored_assessment(pref));
             }
