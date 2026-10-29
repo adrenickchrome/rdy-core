@@ -9,7 +9,7 @@
           "Rules"
         ],
         "id": "D-FXQB6",
-        "side": "canon@ecc6ee254c159439786ce622505ba2e464a5b8c66c2f02572f96d3961811ecc0",
+        "side": "canon@cf0b32b0376a4ecc1b98ba094d7c3ccce812e565c38f5594dd099a0faf2a7454",
         "text": [
           {
             "field": "statement",
@@ -27,7 +27,7 @@
           "Rules"
         ],
         "id": "c-G07JH",
-        "side": "5c9ce78fc63635c6f67fdfc7f2ed748b153c59589b81ea04c4c28561b7383b83",
+        "side": "5f17269e51af795cbc88d19e3401c19b8afe55301289a27437612e6ef74cd298",
         "text": [
           {
             "field": "body",
@@ -53,5 +53,5 @@
       ]
     }
   },
-  "case_hash": "5743ed70e785c45848cde088ed917ebdf6c51e42a4e35f09fc3f63a15c8bdc3e"
+  "case_hash": "433740b6df32bfeb33f71a55be589d96c7c7297e9df2a3d2c8e777512f41059a"
 }
