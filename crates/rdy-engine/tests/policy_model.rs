@@ -639,7 +639,7 @@ fn ap4_owner_names_the_owners_of_the_first_owned_block() {
             owner("payments/cards", &["human:carl", "team:cards"]),
         ],
     );
-    let mut blocks = vec![&t["visa_claim"], &t["login_claim"]];
+    let mut blocks = [&t["visa_claim"], &t["login_claim"]];
     blocks.sort();
     // the first covered block in block id order that has an entry names the owners
     let first = blocks[0];
