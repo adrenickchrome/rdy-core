@@ -3,10 +3,12 @@
 //!
 //! # The one readiness function (D-ME2HD "Readiness, one pure function run at propose")
 //!
-//! [`readiness`] is the only readiness. The queue, every approval path and the propose run its
-//! checks; no path keeps its own copy of one. A version that fails is not ready (D-3JZP4): rdy
-//! lists each issue with its fix, raises no approval request (its [`Readiness::card`] is none),
-//! and refuses an approval of it with `E_PROPOSAL_NOT_READY` and these issues.
+//! [`readiness`] is the only readiness. The queue and every approval path run its checks on the
+//! version as the queue reads it, once; no path keeps its own copy of one. A version that fails
+//! is not ready (D-3JZP4): rdy lists each issue with its fix, raises no approval request (its
+//! [`Readiness::card`] is none), and refuses an approval of it with `E_PROPOSAL_NOT_READY` and
+//! these issues. A candidate's plan is the one the store binds to it, or a plan in hand that the
+//! store does not hold yet ([`PlanSource`]); both give the same readiness.
 //!
 //! The issues come in this closed order:
 //! 1. the landing's checks (`gate::landing_readiness`): a conflict on a block it writes, a
