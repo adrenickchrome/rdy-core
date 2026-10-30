@@ -244,7 +244,7 @@ fn ap1_the_key_must_be_authority_policy() {
     set(&mut p, "key", s("my-policy"));
     assert_eq!(
         only(&pack, &p),
-        issue("E_FIELD_KIND", "key", "key must be authority-policy")
+        issue("E_FIELD_KIND", "key", "must be authority-policy")
     );
     p.fields.remove("key");
     assert_eq!(
