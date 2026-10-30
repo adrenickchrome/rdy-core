@@ -146,6 +146,9 @@ pub(crate) struct ProposalPlan {
     heads: Vec<PlanHead>,
     pub(crate) summary: PlanSummary,
     pub(crate) warnings: Vec<Issue>,
+    /// The plan computed for the candidate, for readiness on the same state (none with no
+    /// candidate).
+    pub(crate) computed: Option<compute::CarriedPlan>,
 }
 
 impl ProposalPlan {
@@ -306,7 +309,7 @@ pub(crate) fn prepare_proposal_plan_keyed(
     let (stable, prev) = chain.as_ref().map_or((None, None), |c| c.next_links());
     let prior: &[PlanAnswer] = chain.as_ref().map_or(&[], |c| &c.plan.answers);
     let first = chain.as_ref().map_or(&heads, |c| &c.first_heads);
-    let (answers, summary, warnings) = match candidate {
+    let (answers, summary, warnings, computed) = match candidate {
         Some(changes) => {
             let computed =
                 compute::compute_changes(st, view, changes, st.canon_head(), &heads, first)?;
@@ -316,9 +319,18 @@ pub(crate) fn prepare_proposal_plan_keyed(
             };
             let answers = prepare_plan_answers(st, by, view, &computed, &prior, &inputs)?;
             let (summary, warnings) = assess(&computed, &answers);
-            (answers, summary, warnings)
+            let carried = compute::CarriedPlan::of(
+                st,
+                view,
+                changes,
+                st.canon_head(),
+                &heads,
+                first,
+                computed,
+            );
+            (answers, summary, warnings, Some(carried))
         }
-        None => (prior.to_vec(), PlanSummary::default(), vec![]),
+        None => (prior.to_vec(), PlanSummary::default(), vec![], None),
     };
     Ok(ProposalPlan {
         stable,
@@ -327,6 +339,7 @@ pub(crate) fn prepare_proposal_plan_keyed(
         heads,
         summary,
         warnings,
+        computed,
     })
 }
 

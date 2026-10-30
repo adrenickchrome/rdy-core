@@ -83,6 +83,69 @@ pub struct ComputedPlan {
     pub(crate) tensions: Vec<Arc<Tension>>,
 }
 
+/// A plan [`compute_changes`] gave a propose, with what that compute read: the state it ran on
+/// and its inputs. The propose carries it to readiness (`readiness::PlanSource::InHand`), whose
+/// plan read uses it in place of computing the same plan again ([`CarriedPlan::on`]).
+#[derive(Clone, Debug)]
+pub struct CarriedPlan {
+    /// The id of the state it ran on (`ReadState::memo`).
+    state: u64,
+    view: String,
+    changes: Vec<Hash>,
+    canon_at: Option<Hash>,
+    heads: Vec<PlanHead>,
+    first_heads: Vec<PlanHead>,
+    plan: Arc<ComputedPlan>,
+}
+
+impl CarriedPlan {
+    /// `plan`, which [`compute_changes`] gave on `st` for these inputs.
+    pub(crate) fn of(
+        st: &ReadState,
+        view: &str,
+        changes: &[Change],
+        canon_at: Option<Hash>,
+        heads: &[PlanHead],
+        first_heads: &[PlanHead],
+        plan: ComputedPlan,
+    ) -> CarriedPlan {
+        CarriedPlan {
+            state: st.memo.id,
+            view: view.to_string(),
+            changes: changes.iter().map(Change::id).collect(),
+            canon_at,
+            heads: heads.to_vec(),
+            first_heads: first_heads.to_vec(),
+            plan: Arc::new(plan),
+        }
+    }
+
+    /// The carried plan, when [`compute`] of these inputs on `st` computes the same plan: the
+    /// same state, no fixed tension set (a version with no stored assessment, as
+    /// [`compute_changes`] reads), and the same view, changes, canon and HEADs. None otherwise:
+    /// the caller computes it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn on(
+        &self,
+        st: &ReadState,
+        view: &str,
+        changes: &[Hash],
+        canon_at: Option<Hash>,
+        fixed: Option<&FixedTensions>,
+        heads: &[PlanHead],
+        first_heads: &[PlanHead],
+    ) -> Option<&ComputedPlan> {
+        let same = self.state == st.memo.id
+            && fixed.is_none()
+            && self.view == view
+            && self.changes == changes
+            && self.canon_at == canon_at
+            && self.heads == heads
+            && self.first_heads == first_heads;
+        same.then_some(&*self.plan)
+    }
+}
+
 /// The acts that may answer an item of `kind` (tb-2ZED7); a computed close needs none.
 pub fn allowed_acts(kind: PlanKind) -> &'static [PlanAct] {
     match kind {
@@ -373,6 +436,7 @@ fn compute_fixed(
     heads: &[PlanHead],
     first_heads: &[PlanHead],
 ) -> Result<ComputedPlan, RdyError> {
+    PLAN_COMPUTES.with(|n| n.set(n.get() + 1));
     let mut sides = sides_of(st, changes, canon_at)?;
     let ids: Vec<Hash> = changes.iter().map(Change::id).collect();
     sides.tensions =
@@ -380,6 +444,18 @@ fn compute_fixed(
     sides.tensions.bound = fixed.map(|f| f.bound.clone()).unwrap_or_default();
     let code = code_sides(st, heads, first_heads)?;
     compute_in(st, &sides, code.as_deref(), MAX_PLAN_ITEMS)
+}
+
+thread_local! {
+    /// This thread's plan computes (see `plan_computes_for_tests`).
+    static PLAN_COMPUTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Tests only: this thread's plan computes so far (each run of [`compute`] or
+/// [`compute_changes`]). A test reads the difference over a call.
+#[doc(hidden)]
+pub fn plan_computes_for_tests() -> u64 {
+    PLAN_COMPUTES.with(std::cell::Cell::get)
 }
 
 /// The baseline of `canon_at` and `changes` applied on it. On canon's head the gate's own
