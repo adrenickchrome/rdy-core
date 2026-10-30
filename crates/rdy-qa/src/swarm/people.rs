@@ -17,6 +17,14 @@
 //! `land` (`Skip::ProposedBeforeSet`) that names the proposal. Journal entries of the
 //! relay carry the actor `agent:relay`; those of a direct command carry `human:qa`, the human
 //! the project's user config names.
+//!
+//! ap13 (D-ZWP7Q "Disputes"): on a seeded draw of 1 in 8 of its steps (`dispute_draw`), after the
+//! step's act, the person resolves `dismissed` one dispute it opened on an earlier step, if one is
+//! open (`rdy dispute resolve`), and opens a dispute on a landing drawn from the seed's landings
+//! and those the journal names (`rdy dispute open`). Both are direct commands of the person:
+//! `dispute_open` entries name the landing in `block`, `dispute_resolve` entries the dispute, and
+//! each `reply` is the command's. A queued proposal that an agent already landed under the
+//! policy (an `Ok` `land` entry names it) leaves the queue unlanded.
 use super::agent::{
     self, KINDS, KillGate, Link, Pace, Res, Where, advised_labels, inbox_labels, labels_of, spell,
 };
@@ -86,6 +94,7 @@ pub(crate) fn spawn_with(
 ) -> JoinHandle<()> {
     let at = Where::of(p);
     let seed = p.seed.clone();
+    let seed_landings = p.seed_landings.clone();
     std::thread::spawn(move || {
         let link = Link::connect(at, "agent:relay", "chat", "reviewer", None, journal, gate);
         let mut person = Person {
@@ -94,6 +103,8 @@ pub(crate) fn spawn_with(
             queue,
             checked_out: false,
             hooks,
+            seed_landings,
+            disputes: Vec::new(),
         };
         for (step, act) in acts.iter().enumerate() {
             if let Some(pace) = &person.hooks.pace {
@@ -101,6 +112,7 @@ pub(crate) fn spawn_with(
             }
             person.link.step = step;
             person.act(act);
+            person.disputes();
             if let Some(done) = &person.hooks.done {
                 done.fetch_add(1, Ordering::SeqCst);
             }
@@ -115,6 +127,27 @@ struct Person {
     /// Whether `rdy checkout work` has run.
     checked_out: bool,
     hooks: Hooks,
+    /// The landings that seeded the project: a dispute may name one.
+    seed_landings: Vec<String>,
+    /// The disputes the person opened and has not resolved, each with the step that opened it.
+    disputes: Vec<(String, usize)>,
+}
+
+/// The salt of the dispute draw.
+const DISPUTE: u64 = 0x6469_7370_7574_6500;
+
+/// ap13: whether the person's step `step` of the run with `seed` makes its dispute acts: a seeded
+/// draw of 1 in 8.
+pub fn dispute_draw(seed: u64, step: usize) -> bool {
+    agent::drawn(seed, DISPUTE, step as u64, 8)
+}
+
+/// Whether an `Ok` `land` entry names proposal `pref`: an agent landed it under the policy, or the
+/// person did.
+fn landed_already(entries: &[Entry], pref: &str) -> bool {
+    entries
+        .iter()
+        .any(|x| x.act == "land" && x.outcome == Outcome::Ok && x.block.as_deref() == Some(pref))
 }
 
 /// Whether queued proposal `pref` was made before its view joined an alternative set (ruling
@@ -234,6 +267,67 @@ pub(crate) fn accept_deferrals(link: &mut Link, who: &str, pref: &str, relayed: 
     !matches!(res, Res::Lost)
 }
 
+/// Whether proposal `pref` landed, as `link`'s actor reads it (`rdy_read`), journaled as a
+/// `land_found` entry that names the proposal, the view and the base `before` read. When it
+/// landed with a landing no entry names yet, the entry's reply names the landing, and with
+/// `watch` (the run's) the reads after a landing run on `before`: a landing whose reply the kill
+/// cut is audited too. A read the kill cuts is made again on the restarted daemon (the link has
+/// reconnected; a second loss fails the run), so `before` stays the read made before the
+/// landing. A landing an entry names already (a version that landed with a later version's
+/// landing, `E_ALREADY_LANDED`) is not named again: its base is the one read before it.
+/// After `E_ALREADY_LANDED` (`refused`), `before` was read after the landing: a landing no
+/// entry names then would be audited on the wrong base, so the run fails.
+pub(crate) fn found_in(
+    link: &mut Link,
+    watch: Option<&Watch>,
+    pref: &str,
+    before: run::Before,
+    refused: bool,
+) -> bool {
+    let (e, res) = loop {
+        let mut e = link.entry(run::LAND_FOUND);
+        e.block = Some(pref.to_string());
+        e.view = Some(before.view.clone());
+        e.base.clone_from(&before.base);
+        let res = link.raw(run::LAND_FOUND, "rdy_read", json!({"id": pref}));
+        if !matches!(res, Res::Lost) {
+            break (e, res);
+        }
+        // journaled `Lost`; the link waits for the restart and reconnects
+        link.finish(e, run::LAND_FOUND, res, |_, _| {});
+    };
+    let landing = match &res {
+        Res::Ok(v) if v["proposal"]["state"] == "landed" => {
+            v["proposal"]["landing"].as_str().map(str::to_string)
+        }
+        _ => None,
+    };
+    let named = landing.as_deref().is_some_and(|l| {
+        link.journal.entries().iter().any(|x| {
+            ((x.act == "land" && x.outcome == Outcome::Ok) || x.act == run::LAND_FOUND)
+                && x.reply.as_ref().is_some_and(|r| r["landing"] == l)
+        })
+    });
+    if let (Some(l), false, true) = (&landing, named, refused) {
+        link.fail(
+            run::LAND_FOUND,
+            &format!(
+                "found {pref} landed with landing {l}, which no entry names: the reads before it came after it"
+            ),
+        );
+    }
+    link.finish(e, run::LAND_FOUND, res, |en, _| {
+        if let (Some(l), false) = (&landing, named) {
+            en.reply = Some(json!({"landing": l}));
+        }
+    });
+    let Some(l) = landing else { return false };
+    if !named && let Some(w) = watch {
+        run::after_land(link, w, before, &json!({"landing": l}));
+    }
+    true
+}
+
 impl Person {
     fn act(&mut self, act: &PersonAct) {
         // an act that can change a tension waits while an agent answers its plan; a landing
@@ -287,6 +381,8 @@ impl Person {
             };
             match r {
                 // made before its view joined a set: dropped, and the drop is journaled
+                // an agent landed it under the policy (ap13): it leaves the queue
+                Some(r) if landed_already(&self.link.journal.entries(), &r) => {}
                 Some(r) if proposed_before_set(&self.link.journal.entries(), &r) => {
                     let mut d = self.entry(who, "land");
                     d.outcome = Outcome::Skipped;
@@ -382,61 +478,64 @@ impl Person {
         }
     }
 
-    /// Whether proposal `pref` landed, as the relay reads it (`rdy_read`), journaled as a
-    /// `land_found` entry that names the proposal, the view and the base `before` read. When it
-    /// landed with a landing no entry names yet, the entry's reply names the landing, and with the
-    /// run's hooks the reads after a landing run on `before`: a landing whose reply the kill cut
-    /// is audited too. A read the kill cuts is made again on the restarted daemon (the link has
-    /// reconnected; a second loss fails the run), so `before` stays the read made before the
-    /// landing. A landing an entry names already (a version that landed with a later version's
-    /// landing, `E_ALREADY_LANDED`) is not named again: its base is the one read before it.
-    /// After `E_ALREADY_LANDED` (`refused`), `before` was read after the landing: a landing no
-    /// entry names then would be audited on the wrong base, so the run fails.
+    /// `found_in` on the relay's link, with the run's hooks.
     fn found(&mut self, pref: &str, before: run::Before, refused: bool) -> bool {
-        let (e, res) = loop {
-            let mut e = self.entry("agent:relay", run::LAND_FOUND);
-            e.block = Some(pref.to_string());
-            e.view = Some(before.view.clone());
-            e.base.clone_from(&before.base);
-            let res = self
-                .link
-                .raw(run::LAND_FOUND, "rdy_read", json!({"id": pref}));
-            if !matches!(res, Res::Lost) {
-                break (e, res);
-            }
-            // journaled `Lost`; the link waits for the restart and reconnects
-            self.link.finish(e, run::LAND_FOUND, res, |_, _| {});
-        };
-        let landing = match &res {
-            Res::Ok(v) if v["proposal"]["state"] == "landed" => {
-                v["proposal"]["landing"].as_str().map(str::to_string)
-            }
-            _ => None,
-        };
-        let named = landing.as_deref().is_some_and(|l| {
-            self.link.journal.entries().iter().any(|x| {
-                ((x.act == "land" && x.outcome == Outcome::Ok) || x.act == run::LAND_FOUND)
-                    && x.reply.as_ref().is_some_and(|r| r["landing"] == l)
-            })
-        });
-        if let (Some(l), false, true) = (&landing, named, refused) {
-            self.link.fail(
-                run::LAND_FOUND,
-                &format!(
-                    "found {pref} landed with landing {l}, which no entry names: the reads before it came after it"
-                ),
-            );
+        let watch = self.hooks.watch.clone();
+        found_in(&mut self.link, watch.as_ref(), pref, before, refused)
+    }
+
+    // ---- disputes (ap13) ----
+
+    /// On a drawn step (`dispute_draw`): resolves `dismissed` the oldest dispute the person opened
+    /// on an earlier step, if one is open, then opens a dispute on a landing drawn from the seed's
+    /// landings and the journal's. Both are the person's direct commands. A dispute shows and
+    /// never blocks (D-ZWP7Q), so neither takes a turn.
+    fn disputes(&mut self) {
+        let step = self.link.step;
+        if !dispute_draw(self.link.at.seed, step) {
+            return;
         }
-        self.link.finish(e, run::LAND_FOUND, res, |en, _| {
-            if let (Some(l), false) = (&landing, named) {
-                en.reply = Some(json!({"landing": l}));
-            }
-        });
-        let Some(l) = landing else { return false };
-        if !named && let Some(w) = self.hooks.watch.clone() {
-            run::after_land(&mut self.link, &w, before, &json!({"landing": l}));
+        if let Some(at) = self.disputes.iter().position(|(_, s)| *s < step) {
+            let (id, _) = self.disputes.remove(at);
+            let mut e = self.entry(HUMAN, "dispute_resolve");
+            e.block = Some(id.clone());
+            let args = ["dispute", "resolve", id.as_str(), "--outcome", "dismissed"];
+            let res = self.cli("dispute_resolve", &args);
+            self.link.finish(e, "dispute_resolve", res, |en, v| {
+                en.reply = Some(v.clone());
+            });
         }
-        true
+        let mut landings = self.seed_landings.clone();
+        for x in self.link.journal.entries() {
+            let landed = (x.act == "land" && x.outcome == Outcome::Ok) || x.act == run::LAND_FOUND;
+            if let Some(l) = x.reply.as_ref().and_then(|r| r["landing"].as_str())
+                && landed
+                && !landings.iter().any(|y| y == l)
+            {
+                landings.push(l.to_string());
+            }
+        }
+        let pick = agent::seeded(self.link.at.seed, DISPUTE ^ 1, step as u64) as usize;
+        let landing = landings[pick % landings.len()].clone();
+        let reason = format!("The person disputes this landing at step {}.", spell(step));
+        let mut e = self.entry(HUMAN, "dispute_open");
+        e.block = Some(landing.clone());
+        let args = [
+            "dispute",
+            "open",
+            landing.as_str(),
+            "--reason",
+            reason.as_str(),
+        ];
+        let res = self.cli("dispute_open", &args);
+        let mut opened = None;
+        self.link.finish(e, "dispute_open", res, |en, v| {
+            en.reply = Some(v.clone());
+            opened = v["dispute"]["id"].as_str().map(str::to_string);
+        });
+        if let Some(id) = opened {
+            self.disputes.push((id, step));
+        }
     }
 
     // ---- through the relay ----
@@ -899,6 +998,8 @@ mod tests {
             queue: queue.clone(),
             checked_out: false,
             hooks: Hooks::default(),
+            seed_landings: p.seed_landings.clone(),
+            disputes: Vec::new(),
         };
         person.land(true);
         let lands: Vec<Entry> = journal
@@ -969,6 +1070,8 @@ mod tests {
             queue: Queue::default(),
             checked_out: false,
             hooks,
+            seed_landings: p.seed_landings.clone(),
+            disputes: Vec::new(),
         };
         // not landed yet: nothing is found
         let before = run::before_land(&mut person.link, &pref).expect("the reads before");
@@ -1057,6 +1160,8 @@ mod tests {
             queue: Queue::default(),
             checked_out: false,
             hooks,
+            seed_landings: p.seed_landings.clone(),
+            disputes: Vec::new(),
         };
         let before = run::before_land(&mut person.link, &pref).expect("the reads before");
         let (ok, landed) = p.served.json(&["--json", "approve", &pref]);
@@ -1144,6 +1249,8 @@ mod tests {
             queue: Queue::default(),
             checked_out: false,
             hooks,
+            seed_landings: p.seed_landings.clone(),
+            disputes: Vec::new(),
         };
         let (ok, landed) = p.served.json(&["--json", "approve", &pref]);
         assert!(ok, "{landed}");

@@ -34,8 +34,17 @@
 //!   with its advice, apart from the agent's other work, and no alternative set closes it.
 //! - A `ReviewNext` act judges up to `REVIEW_BATCH` free requests, one `review_next` and one
 //!   `review_submit` entry each, so the reviewers keep up with the queue in a run.
+//! - ap13 (D-ZWP7Q): an `Ok` `propose` entry's `reply` also holds the reply's `policy` and the
+//!   `changes` the call named (null: the whole view). On a seeded draw of 1 in 4 of its proposes
+//!   (`scratch_only_draw`), an agent proposes only its scratch changes. When the reply's verdict
+//!   accepts, the agent lands the version itself with `rdy_land`, after its propose's turns and
+//!   in the landing turn: the reads a person's landing makes (`run::before_land`), then a `land`
+//!   entry of the agent that names the proposal, the view and the base, whose `reply` is the
+//!   `rdy_land` reply, then the reads after it (`run::after_land`). A landing whose reply the
+//!   kill cut is found and audited as the person's is (`people::found_in`).
 use super::journal::{Entry, InboxRead, Journal, Outcome, Skip, allowed};
 use super::project::{SeedBlocks, SwarmProject};
+use super::run::{self, Watch};
 use super::script::{AREAS, Act, Config, Pick, SEED_BLOCKS};
 use crate::mcp::{McpClient, Reply};
 use serde_json::{Value, json};
@@ -244,6 +253,9 @@ pub(crate) struct Link {
     pub step: usize,
     /// Set when the actor reconnected after a kill and has not yet been told.
     recovered: bool,
+    /// The whole error object of the last call the daemon refused (its `issues`, `corrected`):
+    /// the drain resolves an agent's refused `rdy_land` from it.
+    pub last_error: Option<Value>,
 }
 
 /// The text of a caught panic.
@@ -279,6 +291,7 @@ impl Link {
             client,
             step: 0,
             recovered: false,
+            last_error: None,
         }
     }
 
@@ -341,10 +354,14 @@ impl Link {
         let started = Instant::now();
         match catch_unwind(AssertUnwindSafe(|| c.call_within(tool, args, CALL_BUDGET))) {
             Ok(Reply::Ok(v)) => Res::Ok(v),
-            Ok(Reply::ToolError(v)) => Res::Refused(
-                v["code"].as_str().unwrap_or("?").to_string(),
-                v["message"].as_str().unwrap_or("").to_string(),
-            ),
+            Ok(Reply::ToolError(v)) => {
+                let res = Res::Refused(
+                    v["code"].as_str().unwrap_or("?").to_string(),
+                    v["message"].as_str().unwrap_or("").to_string(),
+                );
+                self.last_error = Some(v);
+                res
+            }
             Ok(Reply::RpcError(e)) => {
                 let gone = e["data"]["code"] == "E_DAEMON_GONE"
                     || e["message"]
@@ -622,11 +639,16 @@ pub(crate) fn spell(mut n: usize) -> String {
 /// A seeded draw of 1 in `one_in`: a pure function of the run's seed, a salt that names the draw,
 /// and the draw's index `n` (SplitMix64 of the three). The interleaving never changes it.
 pub(crate) fn drawn(seed: u64, salt: u64, n: u64, one_in: u64) -> bool {
+    seeded(seed, salt, n) % one_in.max(1) == 0
+}
+
+/// The seeded number behind `drawn`: SplitMix64 of the seed, the salt and the index.
+pub(crate) fn seeded(seed: u64, salt: u64, n: u64) -> u64 {
     let mut z = (seed ^ salt).wrapping_add(n.wrapping_mul(0x9e37_79b9_7f4a_7c15));
     z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    (z ^ (z >> 31)) % one_in.max(1) == 0
+    z ^ (z >> 31)
 }
 
 /// The salt of the scratch-only draw.
@@ -636,6 +658,11 @@ const SCRATCH_ONLY: u64 = 0x7363_7261_7463_6800;
 /// scratch changes: a seeded draw of 1 in 4.
 pub fn scratch_only_draw(seed: u64, i: usize, n: usize) -> bool {
     drawn(seed, SCRATCH_ONLY ^ ((i as u64) << 32), n as u64, 4)
+}
+
+/// ap13: the justification of every scratch write: an editorial `clarify`.
+fn scratch_editorial() -> Value {
+    json!({"class": "clarify", "reason": "swarm: scratch note"})
 }
 
 /// The text of a claim that agent `name` writes in pass `pass` to cite `target`: each agent's
@@ -729,6 +756,13 @@ struct Agent {
     wrote: bool,
     /// The prose of the scratch doc and the change that made it.
     scratch: Option<(String, String)>,
+    /// Every change the agent's scratch writes made, oldest first. Each depends on the one before
+    /// it (it updates the prose that one wrote) and on no other change.
+    scratch_changes: Vec<String>,
+    /// How many `Propose` acts the agent has started: the index of `scratch_only_draw`.
+    proposes: usize,
+    /// Where the violations of the agent's own landings go (the run's landing checks).
+    watch: Option<Watch>,
     alt_set: Option<String>,
     /// The views of this agent's marked claims that it has not yet proposed, oldest first.
     contra_views: Vec<String>,
@@ -747,14 +781,23 @@ pub fn spawn(
     journal: Journal,
     gate: Arc<KillGate>,
 ) -> JoinHandle<AgentReport> {
-    spawn_paced(p, cfg, i, acts, journal, gate, None)
+    spawn_paced(p, cfg, i, acts, journal, gate, AgentHooks::default())
 }
 
 /// A wait before each step of an actor, given the step: it returns when the step may run.
 pub(crate) type Pace = Arc<dyn Fn(usize) + Send + Sync>;
 
-/// `spawn`, with a wait before each step (`pace`): a run keeps its agents within a step of
-/// each other (sg5), so a reviewer still runs when a writer creates the claim it judges.
+/// What a run adds to an agent (sg5): a wait before each step, and where the violations of the
+/// agent's own landings go (ap13).
+#[derive(Clone, Default)]
+pub(crate) struct AgentHooks {
+    pub pace: Option<Pace>,
+    pub watch: Option<Watch>,
+}
+
+/// `spawn`, with the run's `hooks`: a wait before each step (a run keeps its agents within a
+/// step of each other, sg5, so a reviewer still runs when a writer creates the claim it judges)
+/// and the run's landing checks.
 pub(crate) fn spawn_paced(
     p: &SwarmProject,
     cfg: &Config,
@@ -762,7 +805,7 @@ pub(crate) fn spawn_paced(
     acts: Vec<Act>,
     journal: Journal,
     gate: Arc<KillGate>,
-    pace: Option<Pace>,
+    hooks: AgentHooks,
 ) -> JoinHandle<AgentReport> {
     let at = Where::of(p);
     let seed = p.seed.clone();
@@ -785,9 +828,10 @@ pub(crate) fn spawn_paced(
             gate,
         );
         let mut a = Agent::new(link, i, seed);
+        a.watch = hooks.watch;
         a.start_inbox();
         for (step, act) in acts.iter().enumerate() {
-            if let Some(pace) = &pace {
+            if let Some(pace) = &hooks.pace {
                 pace(step);
             }
             a.link.step = step;
@@ -828,6 +872,9 @@ impl Agent {
             mine: BTreeSet::new(),
             wrote: false,
             scratch: None,
+            scratch_changes: Vec::new(),
+            proposes: 0,
+            watch: None,
             alt_set: None,
             contra_views: Vec::new(),
             forks: 0,
@@ -910,9 +957,10 @@ impl Agent {
                 | Act::Tensions
         );
         let gate = self.link.gate.clone();
-        let _turn = reads_first.then(|| gate.read_turn());
+        let turn = reads_first.then(|| gate.read_turn());
         // a propose answers the plan in its own turn first, then takes this one for its call
-        let _act = (!matches!(act, Act::Propose)).then(|| gate.act_turn());
+        let act_turn = (!matches!(act, Act::Propose)).then(|| gate.act_turn());
+        let mut accepted = None;
         match act {
             Act::Brief { target } => self.brief_act(target),
             Act::Write { target, stable } => self.write_act(target, *stable),
@@ -928,11 +976,57 @@ impl Agent {
             Act::Undo => self.undo(),
             Act::Intent { area } => self.intent(area),
             Act::AltCreate { with } => self.alt_create(*with),
-            Act::Propose => self.propose(),
+            Act::Propose => accepted = self.propose(),
             Act::ReviewNext => self.review_next(),
             Act::Tensions => self.tensions(),
             Act::Inbox { ack } => self.inbox(*ack),
             Act::Read { target } => self.read_act(target),
+        }
+        // a version the policy accepts the agent lands in the landing turn, which waits for
+        // every read turn: its own ends first
+        drop(act_turn);
+        drop(turn);
+        if let Some(pref) = accepted {
+            self.land_by_policy(&pref);
+        }
+    }
+
+    /// ap13 (D-ZWP7Q "The agent's landing act"): the agent lands `pref`, a version whose propose
+    /// reply's verdict accepts, with `rdy_land`. It holds the landing turn throughout, as the
+    /// person's approve does, and makes the person's reads around it (`run::before_land`,
+    /// `run::after_land`). A version with advice a person has not accepted it leaves to the
+    /// person's queue: only a person accepts advice. A refusal is checked against the table's
+    /// `land` row. A landing whose reply the kill cut is found and audited (`people::found_in`).
+    fn land_by_policy(&mut self, pref: &str) {
+        let gate = self.link.gate.clone();
+        let _turn = gate.landing_turn();
+        let Some(before) = run::before_land(&mut self.link, pref) else {
+            return;
+        };
+        if before.advised.is_some() {
+            return;
+        }
+        let mut e = self.link.entry("land");
+        e.block = Some(pref.to_string());
+        e.view = Some(before.view.clone());
+        e.base.clone_from(&before.base);
+        let res = self
+            .link
+            .raw("land", "rdy_land", json!({ "proposal": pref }));
+        let res = self
+            .link
+            .finish(e, "land", res, |en, v| en.reply = Some(v.clone()));
+        match res {
+            Res::Ok(v) => {
+                if let Some(w) = &self.watch {
+                    run::after_land(&mut self.link, w, before, &v);
+                }
+            }
+            // the link has reconnected: whether it landed is read on the restarted daemon
+            Res::Lost => {
+                super::people::found_in(&mut self.link, self.watch.as_ref(), pref, before, false);
+            }
+            Res::Refused(..) => {}
         }
     }
 
@@ -1200,7 +1294,8 @@ impl Agent {
     }
 
     /// A write to content that is not stable: the agent's own scratch doc, created at the first
-    /// such write and updated after.
+    /// such write and updated after. Both writes are editorial (`scratch_editorial`, ap13), so
+    /// the policy's rule `swarm-drafts` can accept a version of them.
     fn scratch_write(&mut self) {
         let mut e = self.view_entry("write");
         e.stable = false;
@@ -1214,18 +1309,18 @@ impl Agent {
                     {"op": "create", "type": "prose", "id": "$p", "parent": "$d", "body": body}
                 ]);
                 let mut made = None;
-                let res = self
-                    .link
-                    .exec(e, "write", "rdy_write", json!({"ops": ops}), |en, v| {
-                        en.change = v["change"].as_str().map(str::to_string);
-                        en.block = v["created"]["$p"].as_str().map(str::to_string);
-                        en.seen = labels_of(&v["on_change"]["tensions"]);
-                        made = en.block.clone().zip(en.change.clone());
-                    });
+                let args = json!({"ops": ops, "editorial": scratch_editorial()});
+                let res = self.link.exec(e, "write", "rdy_write", args, |en, v| {
+                    en.change = v["change"].as_str().map(str::to_string);
+                    en.block = v["created"]["$p"].as_str().map(str::to_string);
+                    en.seen = labels_of(&v["on_change"]["tensions"]);
+                    made = en.block.clone().zip(en.change.clone());
+                });
                 if matches!(res, Res::Ok(_)) {
                     self.wrote = true;
                     if let Some((_, change)) = &made {
                         self.mine.insert(change.clone());
+                        self.scratch_changes.push(change.clone());
                     }
                     self.scratch = made;
                 }
@@ -1244,7 +1339,12 @@ impl Agent {
                 }
                 e.block = Some(id.clone());
                 let ops = json!([{"op": "update", "id": id, "body": body}]);
-                self.write_call(e, "write", json!({"ops": ops}));
+                let args = json!({"ops": ops, "editorial": scratch_editorial()});
+                if let Res::Ok(v) = self.write_call(e, "write", args)
+                    && let Some(c) = v["change"].as_str()
+                {
+                    self.scratch_changes.push(c.to_string());
+                }
             }
         }
     }
@@ -1724,28 +1824,39 @@ impl Agent {
 
     /// Proposes the oldest view of a marked claim not yet proposed, else the agent's view. A live
     /// view's change plan is answered first (`answer_plan`), so the version binds the answers.
-    fn propose(&mut self) {
-        let (contra, view, closed) = loop {
+    ///
+    /// ap13: on a seeded draw of 1 in 4 of its proposes (`scratch_only_draw`), a propose of the
+    /// agent's own view that chooses no member names only the scratch changes the view holds
+    /// (`rdy_propose {changes}`): they depend on each other and on no other change. With none, it
+    /// proposes the whole view. Returns the version when the reply's verdict accepts it: the
+    /// agent then lands it (`land_by_policy`).
+    fn propose(&mut self) -> Option<String> {
+        let n = self.proposes;
+        self.proposes += 1;
+        let (contra, view, closed, held) = loop {
             let contra = self.contra_views.first().cloned();
             let view = contra.clone().unwrap_or_else(|| self.view.clone());
-            let (nothing, closed) = match self.show(&view) {
-                Shown::Lost => return,
-                Shown::Missing => (true, false),
+            let (held, closed) = match self.show(&view) {
+                Shown::Lost => return None,
+                Shown::Missing => (Vec::new(), false),
                 Shown::View {
                     closed: false,
                     changes,
                     ..
-                } => (changes.is_empty(), false),
+                } => (changes, false),
                 // a closed view is refused by the call, and the table allows that refusal
-                Shown::View { .. } => (false, true),
+                Shown::View { changes, .. } => (changes, true),
             };
-            match (nothing, &contra) {
-                (false, _) => break (contra, view, closed),
+            match (held.is_empty() && !closed, &contra) {
+                (false, _) => break (contra, view, closed, held),
                 // a marked claim the kill cut never made its view: the agent's own view is next
                 (true, Some(_)) => {
                     self.contra_views.remove(0);
                 }
-                (true, None) => return self.skip("propose", Skip::NothingToPropose),
+                (true, None) => {
+                    self.skip("propose", Skip::NothingToPropose);
+                    return None;
+                }
             }
         };
         if !closed {
@@ -1761,30 +1872,49 @@ impl Agent {
         {
             args["alternatives"] = json!({"set": set, "chosen": self.view});
         }
+        let scratch: Vec<String> = held
+            .iter()
+            .filter(|c| self.scratch_changes.contains(c))
+            .cloned()
+            .collect();
+        let only_scratch = contra.is_none()
+            && !closed
+            && self.alt_set.is_none()
+            && !scratch.is_empty()
+            && scratch_only_draw(self.link.at.seed, self.i, n);
+        if only_scratch {
+            args["changes"] = json!(scratch);
+        }
         for attempt in 0..2 {
             let mut e = self.view_entry("propose");
             e.view = Some(view.clone());
             let mut made = None;
-            // the entry names the choice it made (null: none), which the person reads
+            let mut accepts = false;
+            // the entry names the choice it made (null: none), which the person reads, the
+            // changes it named (null: the whole view) and the policy's verdict
             let chose = args["alternatives"].clone();
+            let named = args["changes"].clone();
             let res = self
                 .link
                 .exec(e, "propose", "rdy_propose", args.clone(), |en, v| {
                     en.block = v["ref"].as_str().map(str::to_string);
                     en.seen = labels_of(&v["tensions"]);
-                    en.reply = Some(json!({"alternatives": chose}));
+                    en.reply = Some(json!({"alternatives": chose, "changes": named,
+                        "policy": v["policy"]}));
                     made = en.block.clone();
+                    accepts = v["policy"]["verdict"] == "accepts";
                 });
             match res {
                 Res::Ok(_) => {
-                    if let Some(r) = made
-                        && !self.report.proposals.contains(&r)
+                    if let Some(r) = &made
+                        && !self.report.proposals.contains(r)
                     {
-                        self.report.proposals.push(r);
+                        self.report.proposals.push(r.clone());
                     }
                     if contra.is_some() {
                         self.contra_views.remove(0);
                     }
+                    return made.filter(|_| accepts);
                 }
                 // the view is a member of a set: the refusal names it, and the agent chooses
                 Res::Refused(code, message)
@@ -1811,8 +1941,9 @@ impl Agent {
                 }
                 _ => {}
             }
-            return;
+            return None;
         }
+        None
     }
 
     /// Judges up to `REVIEW_BATCH` free review requests: each a `rdy_review_next` and a
