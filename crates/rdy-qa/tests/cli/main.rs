@@ -28,6 +28,7 @@ mod cli_output;
 mod cli_plan;
 mod cli_plan_group;
 mod cli_plan_propose;
+mod cli_policy_verify;
 mod cli_preview_docs;
 mod cli_proposal;
 mod cli_publication_check;

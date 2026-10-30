@@ -9,15 +9,16 @@
 
 use crate::allowed_signers::{AllowedSigners, read_allowed_signers};
 use crate::config_levels::{SIGNING_AGENT_KEY, SIGNING_KEY, effective, user_file_from_env};
+use crate::pending::reaffirm::landing_of_version;
 use crate::read_state::ReadState;
 use crate::signature_check::{
-    Lineage, PRESENCE_ABSENT, SIGNED_INVALID, STATEMENT_FOREIGN_REPO, STATEMENT_MISMATCH,
-    SignatureCheck,
+    Lineage, PRESENCE_ABSENT, SIGNED_INVALID, SIGNED_VALID, STATEMENT_FOREIGN_REPO,
+    STATEMENT_MISMATCH, SignatureCheck,
 };
 use crate::signing_config::{SignMode, SigningConfig};
 use crate::signing_crypto::{SigningAgent, blob_fingerprint, blob_type, key_fingerprint};
 use crate::{E_INTERNAL, E_SIG_INVALID, RdyError, signing_selector};
-use rdy_model::Hash;
+use rdy_model::{Assurance, Hash};
 use rdy_store::StoreError;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
@@ -196,11 +197,71 @@ fn row_tags(row: &Value) -> Vec<String> {
         .collect()
 }
 
+/// The `policy_check.signed` state of a landing that holds no signature check (O24).
+const POLICY_SIGNED_NO: &str = "no";
+
+/// The members a verified row or fsck state of a policy landing adds (D-DKAMT, O24): `signed:
+/// "policy"`, `policy: {block, version}` (the policy version that accepted the landing) and
+/// `policy_check: {landing, signed}`. `landing` is the landing that carried the policy version
+/// ([`landing_of_version`]: one index read), `null` when none did; `signed` is its checks' state.
+/// `signed` is `valid` when one of that landing's checks is valid, `invalid` when it has checks
+/// and none is, `no` when it has none. A row whose assurance is not `policy`, or whose record
+/// names no policy (fsck refuses it), adds nothing. The checks are the report's own, on its lineage.
+fn policy_members(
+    lineage: &Lineage,
+    row: &Value,
+    trust: Option<&AllowedSigners>,
+) -> Result<Option<[(&'static str, Value); 3]>, RdyError> {
+    if row["assurance"].as_str() != Some(Assurance::Policy.as_str()) {
+        return Ok(None);
+    }
+    let state = lineage.state();
+    let landing: Hash = row["landing"]
+        .as_str()
+        .unwrap_or_default()
+        .parse()
+        .map_err(|_| {
+            RdyError::from(StoreError::Decode(
+                "log row landing is not a hash".to_string(),
+            ))
+        })?;
+    let Some(policy) = state.reader().landing(&landing)?.policy else {
+        return Ok(None);
+    };
+    let holder = landing_of_version(state, &policy.version)?;
+    let signed = match holder {
+        None => POLICY_SIGNED_NO,
+        Some(h) => {
+            let checks = lineage.checks(&h, trust)?;
+            if checks.iter().any(|c| c.signed == SIGNED_VALID) {
+                SIGNED_VALID
+            } else if checks.is_empty() {
+                POLICY_SIGNED_NO
+            } else {
+                SIGNED_INVALID
+            }
+        }
+    };
+    Ok(Some([
+        ("signed", json!("policy")),
+        (
+            "policy",
+            json!({"block": policy.block.to_string(), "version": policy.version.to_string()}),
+        ),
+        (
+            "policy_check",
+            json!({"landing": holder.map(|h| h.to_string()), "signed": signed}),
+        ),
+    ]))
+}
+
 /// `rdy log --verify` / `rdy_log {verify: true}`: the log page `log_page` gives, in its order
 /// and with its fields, each row with `signatures` (the landing's checks) and `tag_signatures`
 /// (`{<tag name>: [check]}` for every tag the row lists, unsigned ones included). `trust` is the
 /// parsed allowed-signers data of the call, used by every check. No agent and no hub is asked.
-/// An invalid signature is data here: the read succeeds.
+/// An invalid signature is data here: the read succeeds. A row whose assurance is `policy` adds
+/// `signed: "policy"`, `policy` (`{block, version}`) and `policy_check` (`{landing, signed}`):
+/// see [`policy_members`].
 pub fn verified_log(
     state: &ReadState,
     since: Option<&str>,
@@ -222,15 +283,19 @@ pub fn verified_log(
         let landing = row["landing"].as_str().unwrap_or_default().to_string();
         let (signatures, tag_signatures) =
             subject_reports(&lineage, &landing, &row_tags(row), trust)?;
+        let policy = policy_members(&lineage, row, trust)?;
         row["signatures"] = signatures;
         row["tag_signatures"] = tag_signatures;
+        for (key, value) in policy.into_iter().flatten() {
+            row[key] = value;
+        }
     }
     Ok(Value::Array(rows))
 }
 
 /// The `signature_states` of a verbose fsck: every current canon landing in log order, each
 /// `{landing, signatures, tag_signatures}`, unsigned ones included. Checked as fsck checks, with
-/// no trust file.
+/// no trust file. A policy landing's state adds the same members as its verified log row.
 pub fn signature_states(state: &ReadState) -> Result<Value, RdyError> {
     let rows = serde_json::to_value(state.log_rows()?).map_err(|e| {
         RdyError::new(
@@ -245,11 +310,15 @@ pub fn signature_states(state: &ReadState) -> Result<Value, RdyError> {
         let landing = row["landing"].as_str().unwrap_or_default().to_string();
         let (signatures, tag_signatures) =
             subject_reports(&lineage, &landing, &row_tags(row), None)?;
-        out.push(json!({
+        let mut state = json!({
             "landing": landing,
             "signatures": signatures,
             "tag_signatures": tag_signatures,
-        }));
+        });
+        for (key, value) in policy_members(&lineage, row, None)?.into_iter().flatten() {
+            state[key] = value;
+        }
+        out.push(state);
     }
     Ok(Value::Array(out))
 }
@@ -310,11 +379,53 @@ pub fn signature_lines(checks: &Value, indent: usize) -> Vec<String> {
         .collect()
 }
 
+/// The lines of a policy landing (O24), in place of `signed: no`: `    signed: policy`, then
+/// `    policy <ap-id>@<short> landed in <short>: signed <state>`, or `    policy
+/// <ap-id>@<short>: no landing holds it` when no landing carried the policy version. Empty for
+/// any other row.
+fn policy_lines(row: &Value) -> Vec<String> {
+    if row["signed"].as_str() != Some("policy") {
+        return vec![];
+    }
+    let short = |v: &Value| {
+        v.as_str()
+            .unwrap_or("unknown")
+            .chars()
+            .take(12)
+            .collect::<String>()
+    };
+    let who = format!(
+        "policy {}@{}",
+        row["policy"]["block"].as_str().unwrap_or("unknown"),
+        short(&row["policy"]["version"])
+    );
+    let check = &row["policy_check"];
+    let second = match check["landing"].as_str() {
+        Some(_) => format!(
+            "    {who} landed in {}: signed {}",
+            short(&check["landing"]),
+            check["signed"].as_str().unwrap_or("unknown")
+        ),
+        None => format!("    {who}: no landing holds it"),
+    };
+    vec!["    signed: policy".to_string(), second]
+}
+
+fn has_checks(checks: &Value) -> bool {
+    checks.as_array().is_some_and(|c| !c.is_empty())
+}
+
 /// The verification lines under one verified row (a log row or an fsck state): the landing's
-/// signatures at four spaces, then each tag by name, `tag <name>:` at four spaces and its
+/// signatures at four spaces (a policy landing prints [`policy_lines`] in place of `signed: no`), then each tag by name, `tag <name>:` at four spaces and its
 /// signatures at eight.
 pub fn verified_lines(row: &Value) -> Vec<String> {
-    let mut out = signature_lines(&row["signatures"], 4);
+    let policy = policy_lines(row);
+    let mut out = if policy.is_empty() || has_checks(&row["signatures"]) {
+        signature_lines(&row["signatures"], 4)
+    } else {
+        vec![]
+    };
+    out.extend(policy);
     let mut tags: Vec<(&String, &Value)> = row["tag_signatures"]
         .as_object()
         .into_iter()
