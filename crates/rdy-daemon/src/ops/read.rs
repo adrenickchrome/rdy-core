@@ -1,6 +1,7 @@
 //! The read ops: status, show, ls, log, impact, trace, suspects, tags and block.
 use super::*;
 use rdy_engine::engine::open_report_json;
+use rdy_engine::show::ShowTarget;
 use rdy_engine::{E_BAD_INPUT, HISTORY_MAX, RdyError, Scope, block_to_yaml};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -160,18 +161,30 @@ pub(super) fn status(cx: &OpContext) -> Result<Value, RdyError> {
 
 pub(super) fn show(cx: &OpContext, a: ShowArgs) -> Result<Value, RdyError> {
     let st = cx.engine.read();
-    // pshow1: `P-<id>@<n>` is a proposal version, never a block; scope does not apply to it.
-    // A full hash names a proposal version too, as an approval reads it (rdx13: `rdy approve`
-    // reads the version's removal card here, by any spelling the approval takes)
-    if rdy_engine::is_proposal_ref(&a.id) || a.id.parse::<rdy_model::Hash>().is_ok() {
-        if a.blame {
-            return Err(RdyError::new(
-                E_BAD_INPUT,
-                "blame applies to blocks, not proposals",
-                "drop --blame to read the proposal version, or pass a block id",
-            ));
+    // pshow1, dq7: `P-<id>@<n>`, a proposal version's hash or a landing (O13). Scope does not
+    // apply to either. Anything else is a block.
+    match st.show_target(&a.id)? {
+        ShowTarget::Proposal(id) => {
+            if a.blame {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    "blame applies to blocks, not proposals",
+                    "drop --blame to read the proposal version, or pass a block id",
+                ));
+            }
+            return Ok(json!({"proposal": to_json(&st.proposal_show(&id)?)}));
         }
-        return Ok(json!({"proposal": to_json(&st.proposal_show(&a.id)?)}));
+        ShowTarget::Landing(id) => {
+            if a.blame {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    "blame applies to blocks, not landings",
+                    "drop --blame to read the landing, or pass a block id",
+                ));
+            }
+            return Ok(to_json(&st.landing_show(&id, None, None)?));
+        }
+        ShowTarget::Block => {}
     }
     // refv1: `id@version` or a ref line reads under that version; a clashing scope is refused
     let target = rdy_model::reference::parse_target(&a.id)

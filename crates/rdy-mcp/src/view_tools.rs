@@ -80,6 +80,10 @@ pub struct LogParams {
     pub max_tokens: Option<usize>,
     /// true: check every signature offline; each row adds signatures and tag_signatures (default false).
     pub verify: Option<bool>,
+    /// A landing id, landing:<id> or tag:<version>: read that landing's row and its change list.
+    pub landing: Option<String>,
+    /// With landing: next from the previous page.
+    pub page: Option<String>,
 }
 
 /// `rdy_schema`'s paragraph on views.
@@ -146,6 +150,16 @@ pub fn rdy_view(st: &mut McpState, p: ViewParams) -> Result<Value, RdyError> {
 pub fn rdy_log(st: &mut McpState, p: LogParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
+    if let Some(text) = &p.landing {
+        return landing_log(st, text, &p);
+    }
+    if p.page.is_some() {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "page continues one landing's change list",
+            "pass landing with page",
+        ));
+    }
     if p.verify == Some(true) {
         let trust = rdy_engine::signing_read::configured_trust(&st.engine.root())?;
         let rows = rdy_engine::signing_read::verified_log(
@@ -165,6 +179,48 @@ pub fn rdy_log(st: &mut McpState, p: LogParams) -> Result<Value, RdyError> {
         )
     })?;
     Ok(budget(rows, p.max_tokens))
+}
+
+/// `rdy_log {landing}` (O15): one landing's row and its compact change list. The row is never cut;
+/// the engine fits the whole reply to `max_tokens` (default 4,000).
+fn landing_log(st: &McpState, text: &str, p: &LogParams) -> Result<Value, RdyError> {
+    if p.since.is_some() || p.limit.is_some() || p.verify == Some(true) {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "landing takes no since, limit or verify",
+            "drop since, limit and verify, or drop landing to page the log",
+        ));
+    }
+    let st_ = st.engine.read();
+    let id = if text.starts_with("tag:") {
+        match st_.resolve_scope(text)? {
+            Scope::At(h) => h,
+            _ => {
+                return Err(RdyError::new(
+                    E_INTERNAL,
+                    format!("{text:?} did not resolve to a landing"),
+                    "report this as a bug in rdy",
+                ));
+            }
+        }
+    } else {
+        st_.resolve_landing(text.strip_prefix("landing:").unwrap_or(text))?
+    };
+    let shown = st_.landing_show(
+        &id,
+        p.page.as_deref(),
+        Some(
+            p.max_tokens
+                .unwrap_or(rdy_engine::diff_request::DIFF_DEFAULT_TOKENS),
+        ),
+    )?;
+    serde_json::to_value(shown).map_err(|e| {
+        RdyError::new(
+            E_INTERNAL,
+            format!("the landing did not serialize: {e}"),
+            "report this as a bug in rdy",
+        )
+    })
 }
 
 /// The budget of a verified log: `budget` cuts whole rows only, so no signature report is ever

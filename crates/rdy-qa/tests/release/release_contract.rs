@@ -1728,6 +1728,9 @@ fn cli_runtime() -> Value {
         ("impact", vec!["impact", &a]),
         ("trace", vec!["trace", &a]),
         ("search", vec!["search", "holds"]),
+        ("diff", vec!["diff", "batch"]),
+        ("q", vec!["q", "type = claim"]),
+        ("show landing", vec!["show", "tag:v1.0.0"]),
         ("brief", vec!["brief", &a]),
         ("plan", vec!["plan", "--proposal", &proposal]),
         ("config", vec!["config"]),
@@ -2014,6 +2017,8 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
         ("rdy_impact", json!({"id": a})),
         ("rdy_trace", json!({"id": a})),
         ("rdy_search", json!({"query": "holds"})),
+        ("rdy_diff", json!({"from": "batch"})),
+        ("rdy_query", json!({"filter": "type = claim"})),
         ("rdy_brief", json!({"ids": [a]})),
         ("rdy_view", json!({"op": "list"})),
         ("rdy_view", json!({"op": "show", "name": "batch"})),
@@ -2031,6 +2036,15 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
         };
         mcp_probe(seen, &mut w, tool, &label, args);
     }
+    // a landing's row and its change list (O15): a label of its own, since the object would
+    // merge with the log's array
+    mcp_probe(
+        seen,
+        &mut w,
+        "rdy_log",
+        "rdy_log landing",
+        json!({"landing": "tag:v1.0.0"}),
+    );
     let tension = b_tension(&ok_of(&mcp_probe(
         seen,
         &mut w,
@@ -3618,6 +3632,9 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/brief/stdout/will_go_stale[]/states",
     "cli/coverage/stdout/kinds",
     "cli/coverage/stdout/similar_kinds",
+    "cli/diff/stdout/entries[]/fields",
+    "cli/diff/stdout/entries[]/links",
+    "cli/diff/stdout/entries[]/repinned",
     "cli/fsck/stdout/open_report/quarantined",
     "cli/fsck/stdout/quarantine",
     "cli/inbox/stdout/entries",
@@ -3645,6 +3662,11 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/propose/stdout/warnings",
     "cli/remote list/stdout/remotes",
     "cli/remote list/stdout/warnings",
+    "cli/show landing/stdout/diff/entries[]/fields",
+    "cli/show landing/stdout/diff/entries[]/links",
+    "cli/show landing/stdout/diff/entries[]/repinned",
+    "cli/show landing/stdout/landing/dispute/disputes",
+    "cli/show landing/stdout/landing/rebased_from",
     "cli/show/stdout/suspects",
     "cli/status/stdout/coverage/kinds",
     "cli/status/stdout/coverage/similar_kinds",
@@ -3690,6 +3712,14 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_decide/ok/related_decisions",
     "mcp/rdy_decide/ok/suggestions",
     "mcp/rdy_decide/ok/warnings",
+    "mcp/rdy_diff/ok/entries[]/fields",
+    "mcp/rdy_diff/ok/entries[]/links",
+    "mcp/rdy_diff/ok/entries[]/repinned",
+    "mcp/rdy_log landing/ok/diff/entries[]/fields",
+    "mcp/rdy_log landing/ok/diff/entries[]/links",
+    "mcp/rdy_log landing/ok/diff/entries[]/repinned",
+    "mcp/rdy_log landing/ok/landing/dispute/disputes",
+    "mcp/rdy_log landing/ok/landing/rebased_from",
     "mcp/rdy_log/ok[]/dispute/disputes",
     "mcp/rdy_log/ok[]/rebased_from",
     "mcp/rdy_overview/ok/coverage/kinds",

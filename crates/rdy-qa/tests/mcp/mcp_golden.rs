@@ -154,7 +154,7 @@ fn check_case_text_matches_read(st: &mut McpState, request: &Value) {
 
 /// Runs the scripted session and returns its replies. The human's name is fixed in the project's
 /// local config, so the person's inbox does not carry the user name of the machine.
-fn run_session() -> Vec<(String, String)> {
+pub(crate) fn run_session() -> Vec<(String, String)> {
     rdy_model::seed_ids_for_tests(0x4D47_0007);
     let _unseed = Unseed;
     let _clock = pin_clock(1_760_000_000_000);
@@ -405,6 +405,23 @@ fn run_session() -> Vec<(String, String)> {
 
     // canon's log, coverage of the spec, and the two inbox pages
     out.ok("rdy_log--page", rdy_log(&mut a, p(json!({"limit": 3}))));
+    // the diff of the session's view, the detail of one doc against canon, and a filter (dq7)
+    let view = a.view.clone();
+    out.ok("rdy_diff--view", rdy_diff(&mut a, p(json!({"from": view}))));
+    out.ok(
+        "rdy_diff--detail-doc",
+        rdy_diff(
+            &mut a,
+            p(json!({"from": "canon", "to": view, "doc": "spec", "detail": true})),
+        ),
+    );
+    out.ok(
+        "rdy_query--filter",
+        rdy_query(
+            &mut a,
+            p(json!({"filter": "type = decision and status = live", "scope": "canon"})),
+        ),
+    );
     out.ok(
         "rdy_coverage--doc",
         rdy_coverage(&mut a, p(json!({"scope": "canon", "path": "spec"}))),
@@ -474,6 +491,28 @@ fn sg7_a_golden_mismatch_names_the_first_differing_line() {
         "  line 2: golden \"  \\\"a\\\": 1\"\n  line 2: reply  \"  \\\"a\\\": 2\""
     );
     assert!(first_difference("a\nb", "a").contains("line 2: reply  \"<end>\""));
+}
+
+/// dq7: the replies of the scripted session whose name starts with `prefix` match their goldens.
+pub(crate) fn check_goldens(prefix: &str) {
+    if blessing() {
+        // the sg7 test is rewriting the goldens at this moment
+        return;
+    }
+    let all = run_session();
+    let mut checked = 0;
+    for (name, text) in all.iter().filter(|(n, _)| n.starts_with(prefix)) {
+        let want = std::fs::read_to_string(golden_dir().join(format!("{name}.json")))
+            .unwrap_or_else(|_| panic!("{name}: no golden file"));
+        assert_eq!(
+            &want,
+            text,
+            "{name}: the reply changed from the golden\n{}",
+            first_difference(&want, text)
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "no reply of the session starts with {prefix}");
 }
 
 #[test]

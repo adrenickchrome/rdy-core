@@ -1,0 +1,50 @@
+{
+  "counts": {
+    "added": 0,
+    "moved": 0,
+    "removed": 0,
+    "updated": 1
+  },
+  "entries": [
+    {
+      "block_type": "claim",
+      "body": [
+        {
+          "op": "same",
+          "text": "C "
+        },
+        {
+          "op": "del",
+          "text": "stands alone"
+        },
+        {
+          "op": "add",
+          "text": "contradicts B"
+        },
+        {
+          "op": "same",
+          "text": "."
+        }
+      ],
+      "change": "updated",
+      "doc": "d-TNT6J",
+      "fields": [],
+      "from_version": "3e4880a825e7ac810529cc9e7bb1c09f63668b0396816dfd25d8b0d0ca8b2119",
+      "id": "c-ZCQ17",
+      "links": [],
+      "path": null,
+      "repinned": [],
+      "summary": "C contradicts B.",
+      "to_version": "d7b9c3dfab68f6d221735204660a42a6ae0820c329a7c748f54591fd1a22748a"
+    }
+  ],
+  "from": {
+    "kind": "canon",
+    "landing": "39a10fe4c2ffe9312dd9d1ff614d604bd72cad5e3cc2fbde46e948c62ddcdb80"
+  },
+  "root": "d-TNT6J",
+  "to": {
+    "kind": "view",
+    "name": "a"
+  }
+}

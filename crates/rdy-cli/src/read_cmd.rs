@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 #[derive(clap::Args)]
 pub(crate) struct ShowArgs {
-    /// An id or a path such as wallets/transactions; `id@version` or a ref line `[id@version] …` reads under that version.
+    /// An id or a path such as wallets/transactions; `id@version` or a ref line `[id@version] …` reads under that version. P-<id>@<n> shows a proposal version. A landing id (the full hash or at least 6 hex characters), landing:<id> or tag:<version> shows that landing.
     id: String,
     /// canon (the default), an existing view's name, tag:<version>, landing:<id>, proposal:P-<id>@<n> or view:<name>.
     #[arg(long)]
@@ -323,6 +323,14 @@ fn warning_lines_with_targets(warnings: &Value, carried: &Value) -> String {
 }
 
 fn show_text(v: &Value) -> String {
+    if v["landing"].is_object() {
+        // dq7: a landing's row, then its change list
+        return format!(
+            "{}\n{}",
+            log_text(&json!([v["landing"]])).trim_end_matches('\n'),
+            crate::diff_text::diff_text(&v["diff"], false)
+        );
+    }
     if v["proposal"].is_object() {
         // the printer ends every output with a newline; proposal_text already does
         return rdy_engine::proposal_text(&v["proposal"])

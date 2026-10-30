@@ -110,8 +110,9 @@ pub const E_DEFERRAL_OPEN: &str = "E_DEFERRAL_OPEN";
 /// A version's change plan has open items on stable content or unanswered tension items
 /// (D-ME2HD, D-FQ7AK): a readiness issue, never a refusal of its own.
 pub const E_PLAN_OPEN: &str = "E_PLAN_OPEN";
-/// The fix of every `E_PAGE_STALE`, for a briefing, read and search cursor alike.
-pub const PAGE_STALE_FIX: &str = "the read, briefing or search moved; start again without a cursor";
+/// The fix of every `E_PAGE_STALE`, for a briefing, read, search, diff and query cursor alike.
+pub const PAGE_STALE_FIX: &str =
+    "the read, briefing, search, diff or query moved; start again without a cursor";
 
 /// A redaction target that is not a block id, `id@full-version-hash` or `blob:full-manifest-hash`,
 /// or that names nothing removable (plan Redaction). Built by [`redaction_target`].

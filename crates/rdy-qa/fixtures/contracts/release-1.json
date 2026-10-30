@@ -306,6 +306,42 @@
             "similar_kinds": []
           }
         },
+        "diff": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "counts": {
+              "added": "number",
+              "moved": "number",
+              "removed": "number",
+              "updated": "number"
+            },
+            "entries": [
+              {
+                "block_type": "string",
+                "change": "string",
+                "doc": "string",
+                "fields": [],
+                "from_version": "null",
+                "id": "string",
+                "links": [],
+                "path": "null",
+                "repinned": [],
+                "summary": "string",
+                "to_version": "string"
+              }
+            ],
+            "from": {
+              "kind": "string",
+              "landing": "string"
+            },
+            "to": {
+              "kind": "string",
+              "name": "string"
+            }
+          }
+        },
         "fsck": {
           "exits": [
             0
@@ -790,6 +826,22 @@
             "warnings": []
           }
         },
+        "q": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "matches": [
+              {
+                "block_type": "string",
+                "id": "string",
+                "path": "string",
+                "summary": "string"
+              }
+            ],
+            "total": "number"
+          }
+        },
         "remote list": {
           "exits": [
             0
@@ -932,6 +984,74 @@
             "status_words": "null",
             "suspects": [],
             "version": "string"
+          }
+        },
+        "show landing": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "diff": {
+              "counts": {
+                "added": "number",
+                "moved": "number",
+                "removed": "number",
+                "updated": "number"
+              },
+              "entries": [
+                {
+                  "block_type": "string",
+                  "change": "string",
+                  "doc": "string",
+                  "fields": [],
+                  "from_version": "null",
+                  "id": "string",
+                  "links": [],
+                  "path": "null|string",
+                  "repinned": [],
+                  "summary": "string",
+                  "to_version": "string"
+                }
+              ],
+              "from": {
+                "kind": "string"
+              },
+              "to": {
+                "kind": "string",
+                "landing": "string"
+              }
+            },
+            "landing": {
+              "approved": "string",
+              "approved_by": "string",
+              "approved_version": "string",
+              "assessment": "string",
+              "assurance": "string",
+              "at": "string",
+              "at_ms": "number",
+              "changes": "number",
+              "dispute": {
+                "disputes": [],
+                "state": "string"
+              },
+              "evidence": "null",
+              "landing": "string",
+              "policy": "null",
+              "prev": "null",
+              "proposal": "string",
+              "proposed_by": {
+                "actor": "string",
+                "run": "string"
+              },
+              "rebased_from": [],
+              "relay_evidence": "null",
+              "relayed_by": "null",
+              "summary": "string",
+              "tags": [
+                "string"
+              ],
+              "title": "string"
+            }
           }
         },
         "status": {
@@ -2304,6 +2424,190 @@
             }
           ],
           "name": "search",
+          "subcommands": []
+        },
+        {
+          "args": [
+            {
+              "action": "set",
+              "id": "from",
+              "index": 1,
+              "num_args": "1",
+              "positional": true,
+              "required": true,
+              "value_names": [
+                "FROM"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "to",
+              "index": 2,
+              "num_args": "1",
+              "positional": true,
+              "value_names": [
+                "TO"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "doc",
+              "long": "doc",
+              "num_args": "1",
+              "value_names": [
+                "DOC"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "id": "detail",
+              "long": "detail",
+              "num_args": "0",
+              "value_names": [
+                "DETAIL"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "set",
+              "global": true,
+              "id": "project",
+              "long": "project",
+              "num_args": "1",
+              "value_names": [
+                "PROJECT"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "no_daemon",
+              "long": "no-daemon",
+              "num_args": "0",
+              "value_names": [
+                "NO_DAEMON"
+              ]
+            },
+            {
+              "action": "help",
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "short": "h"
+            }
+          ],
+          "groups": [
+            {
+              "args": [
+                "detail",
+                "doc",
+                "from",
+                "to"
+              ],
+              "id": "DiffArgs",
+              "multiple": true,
+              "required": false
+            }
+          ],
+          "name": "diff",
+          "subcommands": []
+        },
+        {
+          "args": [
+            {
+              "action": "set",
+              "id": "filter",
+              "index": 1,
+              "num_args": "1",
+              "positional": true,
+              "required": true,
+              "value_names": [
+                "FILTER"
+              ]
+            },
+            {
+              "action": "set",
+              "id": "scope",
+              "long": "scope",
+              "num_args": "1",
+              "value_names": [
+                "SCOPE"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "set",
+              "global": true,
+              "id": "project",
+              "long": "project",
+              "num_args": "1",
+              "value_names": [
+                "PROJECT"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "no_daemon",
+              "long": "no-daemon",
+              "num_args": "0",
+              "value_names": [
+                "NO_DAEMON"
+              ]
+            },
+            {
+              "action": "help",
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "short": "h"
+            }
+          ],
+          "groups": [
+            {
+              "args": [
+                "filter",
+                "scope"
+              ],
+              "id": "QArgs",
+              "multiple": true,
+              "required": false
+            }
+          ],
+          "name": "q",
           "subcommands": []
         },
         {
@@ -13369,7 +13673,7 @@
       [
         "E_PAGE_STALE",
         "a page cursor (the next of a cut rdy_brief, rdy_read or rdy_search) is unknown to this session, or what it pages (a briefing, a read or a search) moved since its first page, or the search query differs",
-        "the read, briefing or search moved; start again without a cursor"
+        "the read, briefing, search, diff or query moved; start again without a cursor"
       ],
       [
         "W_CONFIG_UNKNOWN",
@@ -13820,6 +14124,7 @@
       "EVIDENCE_FIX": "\"write evidence as a list of {quote, session_ref?, question?} or {source: \\\"{{S-…}}\\\"} entries\"",
       "EVIDENCE_MESSAGE": "\"field \\\"evidence\\\" must be a list of 1 to 20 evidence entries\"",
       "EXPORT_CHAIN_FIX": "\"follow the newest file of this store's chain, or start a new chain with rdy dump\"",
+      "FILTER_FIX": "\"read the filter guide in rdy_schema, or run rdy q --help\"",
       "GONE_FIX": "\"check rdy status; a write may or may not have committed; it is not retried\"",
       "HAS_POLICY_FIX": "\"change it with rdy_write / rdy edit, with implements a decision\"",
       "HELD_BY_READER_FIX": "\"release the earlier read state, then try again\"",
@@ -13848,7 +14153,7 @@
       "OP_FIX": "\"each op needs \\\"op\\\" (rdy_schema lists them under \\\"ops\\\"); create needs \\\"type\\\"\"",
       "OWNER_RUN_FIX": "\"pass the run with --run\"",
       "PAGE_MESSAGE": "\"There is no page at this address. It may have moved, or the link may be wrong.\"",
-      "PAGE_STALE_FIX": "\"the read, briefing or search moved; start again without a cursor\"",
+      "PAGE_STALE_FIX": "\"the read, briefing, search, diff or query moved; start again without a cursor\"",
       "PIN_CLASH_FIX": "\"use the pinned version, or read the bare id with a scope\"",
       "PLAN_ANSWER_LAPSED_FIX": "\"answer the item again\"",
       "PLAN_GATE_FIX": "\"close or defer each item, and answer each tension item with confirm or dismiss: rdy_plan / rdy plan\"",
@@ -13885,6 +14190,7 @@
       "REVOKE_CONFIRM_FIX": "\"this block states no value of the decision. Check that it still holds, then remove each listed link or point it elsewhere.\"",
       "REVOKE_CUT_FIX": "\"rdy checked only the first 16384 bytes. Check the rest, then remove each listed link or point it elsewhere.\"",
       "REVOKE_UPDATE_FIX": "\"update the block for the removed values. Remove each listed link or point it elsewhere.\"",
+      "ROOT_FIX": "\"name a doc or folder that one side holds: rdy_search / rdy search\"",
       "RUN_FIX": "\"use 1 to 64 letters, digits, -, _ or ., with a letter or digit at each end; not none, work, canon, inflight or reaffirm-\\u{2026}\"",
       "SCOPE_MESSAGE": "\"This link names a version, view, proposal or profile that is not on the site now. A view or proposal leaves the site when its work lands or stops.\"",
       "SETTINGS_FIX": "\"fix the config syntax, duplicate keys or aliases\"",
@@ -14658,6 +14964,39 @@
           "warnings_repeated": "number"
         }
       },
+      "rdy_diff": {
+        "ok": {
+          "counts": {
+            "added": "number",
+            "moved": "number",
+            "removed": "number",
+            "updated": "number"
+          },
+          "entries": [
+            {
+              "block_type": "string",
+              "change": "string",
+              "doc": "string",
+              "fields": [],
+              "from_version": "null",
+              "id": "string",
+              "links": [],
+              "path": "null",
+              "repinned": [],
+              "summary": "string",
+              "to_version": "string"
+            }
+          ],
+          "from": {
+            "kind": "string",
+            "landing": "string"
+          },
+          "to": {
+            "kind": "string",
+            "name": "string"
+          }
+        }
+      },
       "rdy_impact": {
         "ok": {
           "by_area": {
@@ -14829,6 +15168,71 @@
             "title": "string"
           }
         ]
+      },
+      "rdy_log landing": {
+        "ok": {
+          "diff": {
+            "counts": {
+              "added": "number",
+              "moved": "number",
+              "removed": "number",
+              "updated": "number"
+            },
+            "entries": [
+              {
+                "block_type": "string",
+                "change": "string",
+                "doc": "string",
+                "fields": [],
+                "from_version": "null",
+                "id": "string",
+                "links": [],
+                "path": "null|string",
+                "repinned": [],
+                "summary": "string",
+                "to_version": "string"
+              }
+            ],
+            "from": {
+              "kind": "string"
+            },
+            "to": {
+              "kind": "string",
+              "landing": "string"
+            }
+          },
+          "landing": {
+            "approved": "string",
+            "approved_by": "string",
+            "approved_version": "string",
+            "assessment": "string",
+            "assurance": "string",
+            "at": "string",
+            "at_ms": "number",
+            "changes": "number",
+            "dispute": {
+              "disputes": [],
+              "state": "string"
+            },
+            "evidence": "null",
+            "landing": "string",
+            "policy": "null",
+            "prev": "null",
+            "proposal": "string",
+            "proposed_by": {
+              "actor": "string",
+              "run": "string"
+            },
+            "rebased_from": [],
+            "relay_evidence": "null",
+            "relayed_by": "null",
+            "summary": "string",
+            "tags": [
+              "string"
+            ],
+            "title": "string"
+          }
+        }
       },
       "rdy_overview": {
         "ok": {
@@ -15142,6 +15546,19 @@
           ]
         }
       },
+      "rdy_query": {
+        "ok": {
+          "matches": [
+            {
+              "block_type": "string",
+              "id": "string",
+              "path": "string",
+              "summary": "string"
+            }
+          ],
+          "total": "number"
+        }
+      },
       "rdy_read": {
         "ok": {
           "format": "string",
@@ -15321,6 +15738,7 @@
             "home": "null",
             "rule": "string"
           },
+          "diff?": "string",
           "doc_types?": [
             {
               "doc_type": "string",
@@ -15765,6 +16183,7 @@
             "type": "string"
           },
           "fields?": {},
+          "filter?": "string",
           "inbox?": "string",
           "intents?": "string",
           "limits?": {
@@ -16403,6 +16822,7 @@
       "rdy_context",
       "rdy_coverage",
       "rdy_decide",
+      "rdy_diff",
       "rdy_dispute",
       "rdy_dump",
       "rdy_export",
@@ -16423,6 +16843,7 @@
       "rdy_propose",
       "rdy_publication_check",
       "rdy_publish",
+      "rdy_query",
       "rdy_read",
       "rdy_redact",
       "rdy_remote",
@@ -17163,6 +17584,59 @@
           "type": "object"
         }
       },
+      "rdy_diff": {
+        "input_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "detail": {
+              "description": "Add field values and word-level body diffs (default false).",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "doc": {
+              "description": "Limit both sides to one doc or folder: an id, a key or a path.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "from": {
+              "description": "The older scope: canon, a view name, view:<name>, tag:<version>, landing:<id>, proposal:P-<id>@<n> or inflight. Alone, rdy supplies the other side.",
+              "type": "string"
+            },
+            "max_tokens": {
+              "description": "The budget of the reply, at most 100000 (default 4000).",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "page": {
+              "description": "next from the previous page, with the same request.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "description": "The newer scope, in the same forms.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "from"
+          ],
+          "type": "object"
+        }
+      },
       "rdy_dispute": {
         "input_schema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -17659,6 +18133,13 @@
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "properties": {
+            "landing": {
+              "description": "A landing id, landing:<id> or tag:<version>: read that landing's row and its change list.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "limit": {
               "description": "At most this many landings, newest first.",
               "format": "uint",
@@ -17673,6 +18154,13 @@
               "minimum": 0,
               "type": [
                 "integer",
+                "null"
+              ]
+            },
+            "page": {
+              "description": "With landing: next from the previous page.",
+              "type": [
+                "string",
                 "null"
               ]
             },
@@ -18286,6 +18774,45 @@
             "site",
             "tag",
             "to"
+          ],
+          "type": "object"
+        }
+      },
+      "rdy_query": {
+        "input_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "filter": {
+              "description": "The filter expression; rdy_schema's filter gives the grammar.",
+              "type": "string"
+            },
+            "max_tokens": {
+              "description": "The budget of the reply, at most 100000 (default 4000).",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "page": {
+              "description": "next from the previous page, with the same filter and scope.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "scope": {
+              "description": "\"canon\", a view name, \"view:<name>\", \"tag:<version>\", \"landing:<id>\", \"proposal:P-<id>@<n>\" or \"inflight\". Defaults to the session view.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "filter"
           ],
           "type": "object"
         }
