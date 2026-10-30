@@ -44,6 +44,7 @@ mod engine_search_mentions;
 mod engine_search_results;
 mod engine_search_tensions;
 mod engine_semantic_state;
+mod engine_show_target;
 mod engine_snapshot_threads;
 mod engine_snapshots;
 mod engine_suggestions;

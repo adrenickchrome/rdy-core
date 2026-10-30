@@ -87,6 +87,7 @@ pub mod search;
 pub mod section;
 pub mod semantic;
 mod session;
+pub mod show;
 pub mod signature_check;
 pub mod signing_act;
 pub mod signing_config;
