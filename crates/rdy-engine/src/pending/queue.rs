@@ -1675,16 +1675,16 @@ impl Version {
         it
     }
 
-    /// The docs the version touches: the doc of each block it writes, in the canon it would
-    /// give, else in canon (a deleted block).
+    /// The docs the version touches: for each block it writes, its doc in the canon it would give
+    /// and its doc in canon. A move between pages touches both pages (O17: the source page's
+    /// gate score is compared too); a deleted block has only its doc in canon.
     fn docs(&self, canon: Option<&Materialized>) -> BTreeSet<BlockId> {
         self.touched
             .iter()
-            .filter_map(|id| {
-                self.next
-                    .doc_of(id)
-                    .or_else(|| canon.and_then(|c| c.doc_of(id)))
-                    .map(|d| d.id.clone())
+            .flat_map(|id| {
+                let after = self.next.doc_of(id).map(|d| d.id.clone());
+                let before = canon.and_then(|c| c.doc_of(id)).map(|d| d.id.clone());
+                after.into_iter().chain(before)
             })
             .collect()
     }

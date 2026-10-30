@@ -14,6 +14,7 @@ use rdy_qa::intake::{TEST_SUMMARY, answer_open_items};
 use rdy_qa::tensions::{ag, j_typo, put_j};
 use rdy_schema::{Issue, Severity};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 
 /// Canon: a draft doc `notes` with a section `s` and a claim `x`, landed with the gate off; then
 /// the project's `coverage.gate` is `gate`.
@@ -279,4 +280,95 @@ fn ap8_a_new_page_is_compared_in_the_corpus_only() {
     assert!(!p.ready);
     assert_eq!(p.issues, vec![lowered(&w, &p, None, "the corpus")]);
     assert_eq!(gate_issues(&p).len(), 1);
+}
+
+/// Canon: page `notes` with a section `s` of two claims and a section with an open question,
+/// and page `more` (returned) with a section holding an open question; landed with the gate off,
+/// then the project's `coverage.gate` is `gate`. View `a1` moves `s` to `more`, so `notes` keeps
+/// only its question and its gate score falls, `more` gains the claims, and the corpus holds the
+/// same blocks.
+fn moved(gate: &str) -> (World, BlockId) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let seed = r
+        .write(
+            &writer(),
+            WriteRequest {
+                view: "seed".into(),
+                ops: parse_test_ops(json!([
+                    {"op": "create", "type": "doc", "id": "$n", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}},
+                    {"op": "create", "type": "section", "id": "$s", "parent": "$n", "fields": {"title": "Ideas"}},
+                    {"op": "create", "type": "claim", "parent": "$s", "body": "X holds."},
+                    {"op": "create", "type": "claim", "parent": "$s", "body": "Y holds."},
+                    {"op": "create", "type": "section", "id": "$o", "parent": "$n", "fields": {"title": "Open"}},
+                    {"op": "create", "type": "question", "parent": "$o", "fields": {"prompt": "Is X enough?"}},
+                    {"op": "create", "type": "doc", "id": "$m", "fields": {"name": "more", "title": "More", "doc_type": "overview"}},
+                    {"op": "create", "type": "section", "id": "$t", "parent": "$m", "fields": {"title": "Later"}},
+                    {"op": "create", "type": "question", "parent": "$t", "fields": {"prompt": "Is more enough?"}}
+                ]))
+                .unwrap(),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .unwrap();
+    land(&mut r, "seed").unwrap();
+    r.close().unwrap();
+    std::fs::write(
+        dir.path().join(".rdy.yaml"),
+        format!("pack: rdy-standard\ncoverage:\n  gate: {gate}\n"),
+    )
+    .unwrap();
+    let mut w = World {
+        notes: id(&seed.created["$n"]),
+        s: id(&seed.created["$s"]),
+        r: Rdy::open(dir.path()).unwrap(),
+        _dir: dir,
+    };
+    let more = id(&seed.created["$m"]);
+    let ops = json!([{"op": "move", "id": w.s.to_string(), "parent": more.to_string()}]);
+    put(&mut w, ops);
+    (w, more)
+}
+
+#[test]
+fn ap8_a_move_that_lowers_only_the_source_page_is_refused() {
+    // fix round 1: the source page is a page the version touches (its block's doc in canon), so
+    // the gate compares it
+    let (mut w, more) = moved("no_lower");
+    let p = propose(&mut w);
+    let view = Scope::View("a1".into());
+    assert!(gate_score(&w.r, &Scope::Canon, Some(&more)) < gate_score(&w.r, &view, Some(&more)));
+    assert_eq!(
+        gate_score(&w.r, &Scope::Canon, None),
+        gate_score(&w.r, &view, None)
+    );
+    assert!(!p.ready, "{:?}", p.issues);
+    let notes = w.notes.clone();
+    assert_eq!(p.issues, vec![lowered(&w, &p, Some(&notes), "notes")]);
+}
+
+#[test]
+fn ap8_a_moves_stored_assessment_holds_the_source_and_target_pages() {
+    // fix round 1: the stored coverage pages are the same pages the gate compares
+    let (mut w, more) = moved("off");
+    let p = propose(&mut w);
+    assert!(p.ready, "{:?}", p.issues);
+    let st = w.r.read();
+    let v: Hash = p.id.parse().unwrap();
+    let h = st
+        .reader()
+        .assessment_of_proposal(&v, st.seq())
+        .unwrap()
+        .expect("a stored assessment");
+    let a = st.reader().assessment(&h).unwrap();
+    let pages: BTreeSet<&BlockId> = a.coverage.pages.iter().map(|pg| &pg.doc).collect();
+    assert_eq!(pages, BTreeSet::from([&w.notes, &more]));
+    let notes = a
+        .coverage
+        .pages
+        .iter()
+        .find(|pg| pg.doc == w.notes)
+        .unwrap();
+    assert!(notes.after.overall < notes.before.overall, "{:?}", notes);
 }
