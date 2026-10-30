@@ -857,6 +857,17 @@ mod tests {
         });
         let err = site_reply(&gone, None, Some("guide"), true).unwrap_err();
         assert_eq!(err.code, E_NOT_FOUND, "{err:?}");
+        // the rebuild after the landing logs the line on its own task: wait for it, so a shutdown
+        // on a loaded machine does not cancel that build first
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while !log
+            .lines()
+            .iter()
+            .any(|l| l.contains("canon no longer holds"))
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         w.sh.shutdown().unwrap();
         drop(rt);
         // the listener's lines, the render warnings of the builds that held the glossary doc,
