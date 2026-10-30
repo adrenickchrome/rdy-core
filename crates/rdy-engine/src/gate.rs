@@ -2491,7 +2491,7 @@ impl Rdy {
             };
             // a read error never fails the reply (as `tensions_error`): the version is stored,
             // not ready, with the error as its one issue
-            crate::readiness::assess(&now, &c, now.require_up_to_date()).unwrap_or_else(|e| {
+            crate::readiness::assess(&now, &c, &now.gate_config()).unwrap_or_else(|e| {
                 crate::readiness::Assessed {
                     readiness: crate::readiness::Readiness {
                         issues: vec![Issue {
@@ -2703,7 +2703,7 @@ impl Rdy {
             let message = format!("proposal {pref} moved: the pack changed after its assessment");
             return Err(self.moved_fresh(st, pref, p, message)?);
         }
-        if config_digest(st.require_up_to_date()) != a.config {
+        if config_digest(&st.gate_config()) != a.config {
             let message =
                 format!("proposal {pref} moved: the gate config changed after its assessment");
             return Err(self.moved_fresh(st, pref, p, message)?);
@@ -2725,7 +2725,7 @@ impl Rdy {
         message: String,
     ) -> Result<RdyError, RdyError> {
         let c = crate::readiness::Candidate::stored(st, *pref, p.clone())?;
-        let assessed = crate::readiness::assess(st, &c, st.require_up_to_date())?;
+        let assessed = crate::readiness::assess(st, &c, &st.gate_config())?;
         let (Some(mut a), Some(mut card)) = (assessed.assessment, assessed.readiness.card) else {
             let mut e = RdyError::new(E_PROPOSAL_MOVED, message, O11_FIX);
             e.issues = assessed.readiness.issues;

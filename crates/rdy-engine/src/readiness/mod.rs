@@ -115,15 +115,15 @@ pub struct Assessed {
 
 /// [`readiness`] of candidate `c` on `st`, and for a ready candidate the assessment record
 /// ([`assessment::build`]) from the same read of the version, with the gate configuration
-/// `require_up_to_date` (O7): what a propose stores in the version's batch (D-ME2HD). A record
+/// `gate` (O7, O18): what a propose stores in the version's batch (D-ME2HD). A record
 /// the store would refuse (O9) makes the candidate not ready, with that one issue. It writes
 /// nothing.
 pub fn assess(
     st: &ReadState,
     c: &Candidate,
-    require_up_to_date: bool,
+    gate: &assessment::GateConfig,
 ) -> Result<Assessed, RdyError> {
-    let (readiness, assessment) = crate::pending::queue::assessed(st, c, require_up_to_date)?;
+    let (readiness, assessment) = crate::pending::queue::assessed(st, c, gate)?;
     Ok(Assessed {
         readiness,
         assessment,

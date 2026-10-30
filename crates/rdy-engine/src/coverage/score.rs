@@ -8,7 +8,7 @@ use super::state::memo_label;
 use crate::error::E_NOT_FOUND;
 use crate::paths::resolve_in;
 use crate::{RdyError, ReadState, Scope};
-use rdy_model::{BlockId, tree};
+use rdy_model::{BlockId, decision, tree};
 use rdy_schema::Pack;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -114,6 +114,34 @@ pub fn rollup<'a>(pack: &Pack, entries: impl Iterator<Item = &'a BlockEntry>) ->
     let mut sums = RollupSums::new(pack);
     for e in entries {
         sums.add(e);
+    }
+    sums.rollup(pack)
+}
+
+/// The gate score of `entries` (O17, `coverage.gate`): [`rollup`] with each `ungrounded` issue
+/// left out and the Governed checks of every block that is not a decision in `m` set to 0, so
+/// only unapplied decisions count in Governed. A block `m` does not hold is not a decision.
+pub fn gate_rollup<'a>(
+    pack: &Pack,
+    m: &crate::Materialized,
+    entries: impl Iterator<Item = (&'a BlockId, &'a BlockEntry)>,
+) -> Rollup {
+    let governed = dim_index(Dimension::Governed);
+    let mut sums = RollupSums::new(pack);
+    for (id, e) in entries {
+        let is_decision = m
+            .get(id)
+            .is_some_and(|b| b.block_type == decision::DECISION);
+        if is_decision && !e.issues.iter().any(|x| x.code == IssueCode::Ungrounded) {
+            sums.add(e);
+            continue;
+        }
+        let mut gated = e.clone();
+        gated.issues.retain(|x| x.code != IssueCode::Ungrounded);
+        if !is_decision {
+            gated.checks[governed] = 0;
+        }
+        sums.add(&gated);
     }
     sums.rollup(pack)
 }
@@ -346,5 +374,125 @@ impl ReadState {
             kinds,
             similar_kinds,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rdy_model::Block;
+    use rdy_schema::PackSet;
+
+    fn pack() -> Pack {
+        PackSet::with_builtin().resolve("rdy-standard").unwrap()
+    }
+
+    fn id(s: &str) -> BlockId {
+        BlockId::parse(s).unwrap()
+    }
+
+    fn block(s: &str, block_type: &str) -> Block {
+        Block {
+            id: id(s),
+            block_type: block_type.to_string(),
+            parent: None,
+            order: "a".to_string(),
+            fields: BTreeMap::new(),
+            body: String::new(),
+            links: BTreeMap::new(),
+            pins: BTreeMap::new(),
+            read_identity: None,
+        }
+    }
+
+    /// A state with decision d-0000A and note n-00001 (both unattached).
+    fn state() -> crate::Materialized {
+        crate::Materialized::default().with(&[
+            rdy_model::Op::Create {
+                block: block("d-0000A", decision::DECISION),
+            },
+            rdy_model::Op::Create {
+                block: block("n-00001", "note"),
+            },
+        ])
+    }
+
+    fn entry(checks: &[(Dimension, u32)], issues: Vec<CoverageIssue>) -> BlockEntry {
+        let mut e = BlockEntry {
+            doc: None,
+            checks: [0; 6],
+            issues,
+        };
+        for (d, n) in checks {
+            e.checks[dim_index(*d)] = *n;
+        }
+        e
+    }
+
+    fn issue(block: &str, code: IssueCode) -> CoverageIssue {
+        CoverageIssue::new(&id(block), code, None, String::new())
+    }
+
+    #[test]
+    fn ap3_gate_rollup_leaves_out_ungrounded() {
+        let (p, m) = (pack(), state());
+        let (n, d) = (id("n-00001"), id("d-0000A"));
+        // a normative note that is not governed, and a clean decision
+        let note = entry(
+            &[(Dimension::Grounded, 1), (Dimension::Governed, 1)],
+            vec![issue("n-00001", IssueCode::Ungrounded)],
+        );
+        let decision = entry(&[(Dimension::Governed, 1)], vec![]);
+        let plain = rollup(&p, [&note, &decision].into_iter());
+        assert_eq!(plain.dimensions[&Dimension::Governed], 50);
+        let gate = gate_rollup(&p, &m, [(&n, &note), (&d, &decision)].into_iter());
+        assert_eq!(gate.dimensions[&Dimension::Governed], 100);
+        assert_ne!(gate, plain);
+        // the same as a rollup over entries that never had the check or the issue
+        let bare = entry(&[(Dimension::Grounded, 1)], vec![]);
+        assert_eq!(gate, rollup(&p, [&bare, &decision].into_iter()));
+        // a note alone has no Governed check at all
+        let alone = gate_rollup(&p, &m, [(&n, &note)].into_iter());
+        assert!(!alone.dimensions.contains_key(&Dimension::Governed));
+    }
+
+    #[test]
+    fn ap3_gate_rollup_keeps_unapplied_decisions() {
+        let (p, m) = (pack(), state());
+        let (n, d) = (id("n-00001"), id("d-0000A"));
+        let decision = entry(
+            &[(Dimension::Governed, 1)],
+            vec![issue("d-0000A", IssueCode::UnappliedDecision)],
+        );
+        let note = entry(
+            &[(Dimension::Governed, 1)],
+            vec![issue("n-00001", IssueCode::Ungrounded)],
+        );
+        let gate = gate_rollup(&p, &m, [(&d, &decision), (&n, &note)].into_iter());
+        // the unapplied decision still costs its check; the note adds none
+        assert_eq!(gate.dimensions[&Dimension::Governed], 0);
+        assert_eq!(gate, rollup(&p, [&decision].into_iter()));
+    }
+
+    #[test]
+    fn ap3_gate_rollup_equals_rollup_with_no_governed_issue() {
+        let (p, m) = (pack(), state());
+        let (n, d) = (id("n-00001"), id("d-0000A"));
+        // no Governed issue, and the only Governed check is a decision's
+        let note = entry(
+            &[(Dimension::Grounded, 2), (Dimension::Complete, 1)],
+            vec![issue("n-00001", IssueCode::UntiedContent)],
+        );
+        let decision = entry(
+            &[(Dimension::Governed, 1), (Dimension::Complete, 1)],
+            vec![],
+        );
+        let gate = gate_rollup(&p, &m, [(&n, &note), (&d, &decision)].into_iter());
+        assert_eq!(gate, rollup(&p, [&note, &decision].into_iter()));
+        // no entry at all
+        assert_eq!(
+            gate_rollup(&p, &m, std::iter::empty()),
+            rollup(&p, std::iter::empty())
+        );
     }
 }

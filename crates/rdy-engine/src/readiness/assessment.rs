@@ -7,12 +7,12 @@
 //! keeps ids, hashes, counts and computed texts; it copies no block body. Only the card's facts
 //! and the tension summaries hold text, and both are computed texts.
 
-use crate::ProposalRef;
 use crate::coverage::{Confidence, CoverageIssue, Dimension, Level, Rollup};
 use crate::error::E_VALIDATION;
 use crate::pending::{Item, card_hash};
 use crate::plan::lifecycle::PlanSummary;
 use crate::tensions::{TensionInfo, TensionSeverity, TensionStatus};
+use crate::{CoverageGate, ProposalRef};
 use rdy_model::assessment::{
     Assessment, AssessmentCard, AssessmentConfidence, AssessmentCounts, AssessmentCoverage,
     AssessmentException, AssessmentExceptionKind, AssessmentFacts, AssessmentIssue,
@@ -42,6 +42,14 @@ const CUT_MARK: &str = "...";
 /// The fix of a reach over [`MAX_ROWS`] and of a record too large to store (O9).
 const REACH_FIX: &str = "split the work into smaller proposals";
 
+/// The gate settings a readiness read takes, and the config digest follows (O18):
+/// `reviews.require_up_to_date` and `coverage.gate`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GateConfig {
+    pub require_up_to_date: bool,
+    pub coverage_gate: CoverageGate,
+}
+
 /// What a ready version's readiness read: every input of the record, already computed.
 ///
 /// `pref` is the version (its hash is `pref.version`); the reach bound's issue names it. Each
@@ -54,7 +62,7 @@ pub struct Inputs<'a> {
     pub pref: ProposalRef,
     pub base: Option<Hash>,
     pub pack: &'a Pack,
-    pub require_up_to_date: bool,
+    pub gate: GateConfig,
     pub changes: usize,
     pub consequences: usize,
     pub plan: &'a PlanSummary,
@@ -87,9 +95,14 @@ pub struct Inputs<'a> {
     pub card: &'a Item,
 }
 
-/// The digest of the configuration the readiness read (O7).
-pub fn config_digest(require_up_to_date: bool) -> Hash {
-    let json = serde_json::json!({ "require_up_to_date": require_up_to_date });
+/// The digest of the configuration the readiness read (O7, O18): the domain, then the JSON
+/// `{"coverage_gate": "off" | "no_lower", "require_up_to_date": <bool>}` with its keys in this
+/// order.
+pub fn config_digest(gate: &GateConfig) -> Hash {
+    let json = serde_json::json!({
+        "coverage_gate": gate.coverage_gate.as_str(),
+        "require_up_to_date": gate.require_up_to_date,
+    });
     let mut bytes = CONFIG_DOMAIN.to_vec();
     bytes.extend_from_slice(json.to_string().as_bytes());
     Hash::of(&bytes)
@@ -442,7 +455,7 @@ pub fn build(i: Inputs<'_>) -> Result<Assessment, Issue> {
             version: i.pack.version.clone(),
             digest: pack_digest(i.pack),
         },
-        config: config_digest(i.require_up_to_date),
+        config: config_digest(&i.gate),
         policy: None,
         facts: facts_of(&i),
         tensions: tensions.into_values().collect(),
@@ -514,6 +527,14 @@ mod tests {
 
     fn pack() -> Pack {
         PackSet::with_builtin().resolve("rdy-standard").unwrap()
+    }
+
+    /// The gate settings with `coverage.gate` off.
+    fn off(require_up_to_date: bool) -> GateConfig {
+        GateConfig {
+            require_up_to_date,
+            coverage_gate: CoverageGate::Off,
+        }
     }
 
     fn pref() -> ProposalRef {
@@ -647,7 +668,10 @@ mod tests {
             pref: pref(),
             base: Some(h(8_000)),
             pack: &f.pack,
-            require_up_to_date: false,
+            gate: GateConfig {
+                require_up_to_date: false,
+                coverage_gate: CoverageGate::Off,
+            },
             changes: 3,
             consequences: 2,
             plan: &f.plan,
@@ -725,7 +749,7 @@ mod tests {
         assert_eq!(a.pack.name, f.pack.name);
         assert_eq!(a.pack.version, f.pack.version);
         assert_eq!(a.pack.digest, pack_digest(&f.pack));
-        assert_eq!(a.config, config_digest(false));
+        assert_eq!(a.config, config_digest(&off(false)));
         assert_eq!(a.policy, None);
         assert_eq!((a.facts.changes, a.facts.consequences), (3, 2));
         assert_eq!(a.facts.supersedes, ids(&["d-0000A", "d-0000B"]));
@@ -994,14 +1018,33 @@ mod tests {
 
     #[test]
     fn rg6_config_digest_changes_with_require_up_to_date() {
-        assert_ne!(config_digest(true), config_digest(false));
+        assert_ne!(config_digest(&off(true)), config_digest(&off(false)));
         assert_eq!(
-            config_digest(true),
-            Hash::of(b"rdy-assessment-config-1\0{\"require_up_to_date\":true}")
+            config_digest(&off(true)),
+            Hash::of(
+                b"rdy-assessment-config-1\0{\"coverage_gate\":\"off\",\"require_up_to_date\":true}"
+            )
         );
         assert_eq!(
-            config_digest(false),
-            Hash::of(b"rdy-assessment-config-1\0{\"require_up_to_date\":false}")
+            config_digest(&off(false)),
+            Hash::of(
+                b"rdy-assessment-config-1\0{\"coverage_gate\":\"off\",\"require_up_to_date\":false}"
+            )
+        );
+    }
+
+    #[test]
+    fn ap3_config_digest_moves_with_the_coverage_gate() {
+        let no_lower = GateConfig {
+            require_up_to_date: false,
+            coverage_gate: CoverageGate::NoLower,
+        };
+        assert_ne!(config_digest(&no_lower), config_digest(&off(false)));
+        assert_eq!(
+            config_digest(&no_lower),
+            Hash::of(
+                b"rdy-assessment-config-1\0{\"coverage_gate\":\"no_lower\",\"require_up_to_date\":false}"
+            )
         );
     }
 

@@ -337,6 +337,7 @@ impl Rdy {
         let require_up_to_date = cfg.require_up_to_date();
         let idle_days = cfg.idle_days();
         let coverage_target = cfg.coverage_target();
+        let coverage_gate = cfg.coverage_gate();
         let (propose_cadence, propose_changes) = (cfg.propose_cadence(), cfg.propose_changes());
         let decisions_home = cfg.decisions_home();
         let site_base_path = cfg.site.base_path.clone();
@@ -356,6 +357,7 @@ impl Rdy {
             require_up_to_date,
             idle_days,
             coverage_target,
+            coverage_gate,
             propose_cadence,
             propose_changes,
             decisions_home,

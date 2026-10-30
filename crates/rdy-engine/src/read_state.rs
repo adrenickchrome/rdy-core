@@ -669,6 +669,8 @@ pub struct ReadState {
     pub(crate) idle_days: u32,
     /// `coverage.target` in `.rdy.yaml` (default 80), read by a full publish.
     pub(crate) coverage_target: u32,
+    /// `coverage.gate` in `.rdy.yaml` (default `off`), read by a full publish (D-ZWP7Q).
+    pub(crate) coverage_gate: crate::CoverageGate,
     /// `propose.cadence` (default `break`), read by a full publish (FW-PC1).
     pub(crate) propose_cadence: crate::ProposeCadence,
     /// `propose.changes` (default 10), read by a full publish (FW-PC1).
@@ -790,6 +792,21 @@ impl ReadState {
     /// read when this state was published.
     pub fn coverage_target(&self) -> u32 {
         self.coverage_target
+    }
+
+    /// What the coverage gate does (`coverage.gate`), as the config read when this state was
+    /// published.
+    pub fn coverage_gate(&self) -> crate::CoverageGate {
+        self.coverage_gate
+    }
+
+    /// The gate settings a readiness read takes and the assessment's config digest follows
+    /// (O18): `reviews.require_up_to_date` and `coverage.gate`.
+    pub fn gate_config(&self) -> crate::readiness::assessment::GateConfig {
+        crate::readiness::assessment::GateConfig {
+            require_up_to_date: self.require_up_to_date,
+            coverage_gate: self.coverage_gate,
+        }
     }
 
     /// When an agent proposes (`propose.cadence`), as the config read when this state was

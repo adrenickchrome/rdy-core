@@ -1791,7 +1791,7 @@ fn assess(r: &mut Rdy, version: Hash) {
     let st = r.read();
     let p = st.reader().proposal(&version).unwrap();
     let c = rdy_engine::readiness::Candidate::stored(&st, pref, p).unwrap();
-    let got = rdy_engine::readiness::assess(&st, &c, st.require_up_to_date()).unwrap();
+    let got = rdy_engine::readiness::assess(&st, &c, &st.gate_config()).unwrap();
     let a = got
         .assessment
         .unwrap_or_else(|| panic!("not ready: {:#?}", got.readiness.issues));

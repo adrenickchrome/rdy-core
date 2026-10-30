@@ -96,6 +96,39 @@ pub const DEFAULT_PROPOSE_CHANGES: u32 = 10;
 pub(crate) struct CoverageConfig {
     #[serde(default = "default_coverage_target")]
     target: u32,
+    /// `coverage.gate` (D-ZWP7Q): `off` or `no_lower`. A word outside the list never gets here:
+    /// the levels drop it with a warning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gate: Option<String>,
+}
+
+/// What the coverage gate does (`coverage.gate`, D-ZWP7Q): `off` (the default) leaves coverage
+/// out of acceptance; `no_lower` refuses a version that lowers the gate score of a page it
+/// touches, or of the corpus.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CoverageGate {
+    /// No gate: the default.
+    #[default]
+    Off,
+    /// A version may not lower the gate score of a page or of the corpus.
+    NoLower,
+}
+
+impl CoverageGate {
+    /// The word the config uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CoverageGate::Off => "off",
+            CoverageGate::NoLower => "no_lower",
+        }
+    }
+
+    /// The gate a config word names; `None` for any other word.
+    fn parse(word: &str) -> Option<CoverageGate> {
+        [CoverageGate::Off, CoverageGate::NoLower]
+            .into_iter()
+            .find(|g| g.as_str() == word)
+    }
 }
 
 /// `coverage.target` when the config does not set it (a value outside 0 to 100 is dropped with a
@@ -279,6 +312,16 @@ impl Config {
         self.coverage
             .as_ref()
             .map_or(DEFAULT_COVERAGE_TARGET, |c| c.target)
+    }
+
+    /// `coverage.gate`; `off` when unset (an unknown word never gets here: the levels drop it
+    /// with a warning).
+    pub(crate) fn coverage_gate(&self) -> CoverageGate {
+        self.coverage
+            .as_ref()
+            .and_then(|c| c.gate.as_deref())
+            .and_then(CoverageGate::parse)
+            .unwrap_or_default()
     }
 
     /// `propose.cadence`; `break` when unset (an unknown word never gets here: the levels drop it

@@ -175,7 +175,8 @@ pub use write::{
 };
 
 pub use config::{
-    DEFAULT_LEASE_TTL_MINUTES, DEFAULT_PROPOSE_CHANGES, ProposeCadence, ServeConfig, serve_config,
+    CoverageGate, DEFAULT_LEASE_TTL_MINUTES, DEFAULT_PROPOSE_CHANGES, ProposeCadence, ServeConfig,
+    serve_config,
 };
 pub use engine::{Engine, Local, ReadFn, WriteFn};
 pub use fsck::FsckReport;

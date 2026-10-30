@@ -10,13 +10,13 @@
 use rdy_engine::answer::AnswerRequest;
 use rdy_engine::engine::{Engine, Local, with_writer_result};
 use rdy_engine::pending::{CARD_MAX_TOKENS, ExceptionKind, Item, ItemKind, PendingQuery};
-use rdy_engine::readiness::assessment::{config_digest, pack_digest};
+use rdy_engine::readiness::assessment::{GateConfig, config_digest, pack_digest};
 use rdy_engine::readiness::{
     Candidate, candidate_builds_for_tests, readiness, readiness_calls_for_tests,
 };
 use rdy_engine::tensions::api::AcceptRequest;
 use rdy_engine::{
-    DecisionInput, E_BLOCKING_TENSION, E_CONFLICT_UNRESOLVED, E_PROPOSAL_MOVED,
+    CoverageGate, DecisionInput, E_BLOCKING_TENSION, E_CONFLICT_UNRESOLVED, E_PROPOSAL_MOVED,
     E_PROPOSAL_NOT_READY, E_VALIDATION, LandInfo, LandOptions, ProposalInfo, Rdy, RdyError,
     ReloadOutcome,
 };
@@ -268,12 +268,20 @@ fn rg12_a_pack_change_refuses_with_a_fresh_card() {
     assert_eq!(head_record(&w.r).assessment, Some(fresh));
 }
 
+/// The gate settings with `coverage.gate` off and the given `reviews.require_up_to_date`.
+fn gate(require_up_to_date: bool) -> GateConfig {
+    GateConfig {
+        require_up_to_date,
+        coverage_gate: CoverageGate::Off,
+    }
+}
+
 #[test]
 fn rg12_a_config_change_refuses_with_a_fresh_card() {
     let mut w = world();
     let p = ready_a(&mut w);
     let (_, first) = stored(&w.r, &p.id).unwrap();
-    assert_eq!(first.config, config_digest(false));
+    assert_eq!(first.config, config_digest(&gate(false)));
     let cfg = w.dir.path().join(".rdy.yaml");
     let text = std::fs::read_to_string(&cfg).unwrap();
     std::fs::write(
@@ -292,7 +300,7 @@ fn rg12_a_config_change_refuses_with_a_fresh_card() {
     );
     let fresh = assert_fresh_card(&w.r, &e, &p, &message);
     let a = w.r.read().reader().assessment(&fresh).unwrap();
-    assert_eq!(a.config, config_digest(true));
+    assert_eq!(a.config, config_digest(&gate(true)));
     approve(&mut w.r, &p).expect("the next approval lands");
     assert_eq!(head_record(&w.r).assessment, Some(fresh));
 }

@@ -493,7 +493,7 @@ pub(crate) fn readiness_of(st: &ReadState, c: &Candidate) -> Result<Readiness, R
 pub(crate) fn assessed(
     st: &ReadState,
     c: &Candidate,
-    require_up_to_date: bool,
+    gate: &crate::readiness::assessment::GateConfig,
 ) -> Result<(Readiness, Option<Assessment>), RdyError> {
     let v = Version::read_for(st, c, Removal::Read)?;
     let issues = v.readiness(st)?;
@@ -518,15 +518,7 @@ pub(crate) fn assessed(
         candidate.as_ref(),
         consequences.as_ref().copied(),
     );
-    let built = v.assessment(
-        st,
-        c,
-        &card,
-        &summary,
-        &candidate?,
-        consequences?,
-        require_up_to_date,
-    )?;
+    let built = v.assessment(st, c, &card, &summary, &candidate?, consequences?, gate)?;
     Ok(match built {
         Ok(a) => (
             Readiness {
@@ -1070,7 +1062,7 @@ impl Version {
         summary: &PlanSummary,
         candidate: &CandidateCoverage,
         consequences: usize,
-        require_up_to_date: bool,
+        gate: &crate::readiness::assessment::GateConfig,
     ) -> Result<Result<Assessment, Issue>, RdyError> {
         use crate::readiness::assessment::{
             self as record, MAX_TENSION_ROWS, confidence_record, issue_of, scores_of,
@@ -1205,7 +1197,7 @@ impl Version {
             pref: self.pref,
             base: self.p.canon_at,
             pack,
-            require_up_to_date,
+            gate: *gate,
             changes: self.p.changes.len(),
             consequences,
             plan: summary,

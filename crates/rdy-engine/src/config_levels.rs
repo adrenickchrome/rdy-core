@@ -209,6 +209,9 @@ impl Ty {
 /// The choices of `propose.cadence` (FW-PC1), in the order the docs give them.
 pub const PROPOSE_CADENCES: &[&str] = &["break", "task", "changes", "asked"];
 
+/// The choices of `coverage.gate` (D-ZWP7Q), in the order the docs give them.
+pub const COVERAGE_GATES: &[&str] = &["off", "no_lower"];
+
 /// `choices` as a message names them: `a, b or c`.
 fn choice_list(choices: &[&str]) -> String {
     match choices {
@@ -283,6 +286,12 @@ pub const KEY_LEVELS: &[KeyRule] = &[
         levels: PROJECT_ONLY,
         ty: Ty::Percent,
         default: Some("80"),
+    },
+    KeyRule {
+        key: "coverage.gate",
+        levels: PROJECT_ONLY,
+        ty: Ty::Choice(COVERAGE_GATES),
+        default: Some("off"),
     },
     KeyRule {
         key: "views.idle_days",
