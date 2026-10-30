@@ -215,7 +215,7 @@ fn ap5_an_agent_relays_a_dispute_with_an_answer() {
     assert_eq!(a.item, format!("dispute:{landing}"));
     assert_eq!(
         a.targets.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
-        [id.clone()]
+        [id.as_str()]
     );
     assert_eq!(a.person.actor, "human:qa");
     assert_eq!(a.evidence_kind, Some(EvidenceKind::Text));
