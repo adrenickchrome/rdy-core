@@ -126,7 +126,7 @@ impl ReadState {
     /// The onboarding path of `scope` against the project's target. `E_BAD_INPUT` for a past
     /// landing (`coverage_scope`).
     pub fn onboarding(&self, scope: &Scope) -> Result<Onboarding, RdyError> {
-        let found = self.coverage_issues(scope)?;
+        let found = self.display_coverage_issues(scope)?;
         let corpus = rollup(&self.pack, found.blocks.values());
         let issues: Vec<CoverageIssue> = found
             .blocks

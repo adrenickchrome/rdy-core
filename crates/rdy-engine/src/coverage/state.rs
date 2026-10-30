@@ -369,6 +369,24 @@ impl ReadState {
     /// sorting any of them. Memoised per state and scope. `E_BAD_INPUT` for a past landing.
     pub fn coverage_summary(&self, scope: &Scope) -> Result<Arc<CoverageSummary>, RdyError> {
         let scope = &self.coverage_scope(scope)?;
+        let intrinsic = self.intrinsic_summary(scope)?;
+        // ck3: a source fact moves the displayed numbers only, never the memoised ones
+        let shown = self.display_coverage_issues(scope)?;
+        if Arc::ptr_eq(&shown, &self.memoised(scope)?.issues) {
+            return Ok(intrinsic);
+        }
+        let whole = super::score::rollup(&self.pack, shown.blocks.values());
+        Ok(Arc::new(CoverageSummary {
+            score: whole.score,
+            dimensions: whole.dimensions,
+            issues_total: shown.blocks.values().map(|e| e.issues.len()).sum(),
+            kinds: intrinsic.kinds.clone(),
+            similar_kinds: intrinsic.similar_kinds.clone(),
+        }))
+    }
+
+    /// The summary of the memoised (intrinsic) issues of `scope`, a scope `coverage_scope` gave.
+    fn intrinsic_summary(&self, scope: &Scope) -> Result<Arc<CoverageSummary>, RdyError> {
         let memo = self.memoised(scope)?;
         if let Some(s) = memo.summary.get() {
             return Ok(Arc::clone(s));
@@ -821,11 +839,21 @@ pub(crate) struct ScopedEntries {
     /// What the batches worked out so far share, for the scope (by memo label) they read:
     /// the tensions it counts and the entry context's memo, built once per briefing.
     shared: Option<(String, Arc<Counted>, CxMemo)>,
+    /// ck3: the displayed entries of the blocks that cite a source, with the source facts read.
+    display: crate::source_exists::DisplayOverlay,
 }
 
 impl ScopedEntries {
     /// The entry of block `id`: memoised, or worked out by [`ReadState::fill_entries`].
     pub(crate) fn get(&self, id: &BlockId) -> Option<&BlockEntry> {
+        if let Some(shown) = self.display.get(id) {
+            return Some(shown);
+        }
+        self.intrinsic(id)
+    }
+
+    /// The entry of block `id` before the source facts are added.
+    fn intrinsic(&self, id: &BlockId) -> Option<&BlockEntry> {
         match &self.memo {
             Some(m) => m.blocks.get(id),
             None => self.local.get(id).and_then(Option::as_deref),
@@ -843,7 +871,25 @@ impl ReadState {
             memo: self.coverage_issues_if_cheap(scope)?,
             local: BTreeMap::new(),
             shared: None,
+            display: Default::default(),
         })
+    }
+
+    /// [`ReadState::fill_entries`], then the displayed entries of `ids` (ck3): each block that
+    /// cites a source gets the source's passing check or `source_not_found` issue. A briefing
+    /// shows these; nothing that gates reads them.
+    pub(crate) fn fill_display_entries<'a>(
+        &self,
+        scope: &Scope,
+        entries: &mut ScopedEntries,
+        ids: impl IntoIterator<Item = &'a BlockId> + Clone,
+    ) -> Result<(), RdyError> {
+        self.fill_entries(scope, entries, ids.clone())?;
+        let scope = &self.coverage_scope(scope)?;
+        let mut display = std::mem::take(&mut entries.display);
+        let shown = display.overlay(self, scope, ids, |id| entries.intrinsic(id).cloned());
+        entries.display = display;
+        shown
     }
 
     /// Works out the entries of `ids` that `entries` does not hold yet, when it reads no memo:

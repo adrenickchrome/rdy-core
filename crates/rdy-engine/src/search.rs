@@ -405,7 +405,7 @@ impl ReadState {
         let (issues, coverage_error) = if past {
             (None, None)
         } else {
-            match self.coverage_issues(scope) {
+            match self.display_coverage_issues(scope) {
                 Ok(i) => (Some(i), None),
                 Err(e) => (None, Some(coverage_error_text(&e))),
             }

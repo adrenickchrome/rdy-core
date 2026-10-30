@@ -396,7 +396,7 @@ impl ReadState {
         id: &BlockId,
         m: &Materialized,
     ) -> Result<Confidence, RdyError> {
-        let issues = self.coverage_issues(scope)?;
+        let issues = self.display_coverage_issues(scope)?;
         let hood = self.fact_sheet_neighbourhood(scope, id)?;
         // the path of every block with an issue, for the closed order of the reasons
         let paths = crate::coverage::issue_paths(

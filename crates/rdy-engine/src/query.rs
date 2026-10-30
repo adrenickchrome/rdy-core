@@ -71,6 +71,10 @@ pub struct Context {
     /// whose content stays.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redaction: Option<RedactionRef>,
+    /// ck3 (D-JQD5X): for a source, whether its release or commit exists in a linked local
+    /// checkout (`found`, `missing` or `unchecked`); absent for every other block type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub existence: Option<crate::source_exists::SourceExistence>,
 }
 
 /// rdx6: the redaction a source block reply names, as `{"id": "<request hash>"}`.
@@ -389,6 +393,7 @@ impl ReadState {
             redaction: block
                 .redaction()
                 .map(|h| RedactionRef { id: h.to_string() }),
+            existence: self.source_existence_of(&block),
         })
     }
 

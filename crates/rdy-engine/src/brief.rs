@@ -501,6 +501,9 @@ pub struct BriefSource {
     pub kind: String,
     pub title: String,
     pub blocks: Vec<String>,
+    /// ck3 (D-JQD5X): whether the source's release or commit exists in a linked local checkout:
+    /// a read-time fact of this machine, in no token and no assessment.
+    pub existence: crate::source_exists::SourceExistence,
 }
 
 /// rf9 (D-Z8P09): a finding that a covered decision (`for`) depends on directly, with its
@@ -1351,7 +1354,7 @@ impl ReadState {
     ) -> Result<BriefCoverage, RdyError> {
         let mut cov = self.scoped_entries(scope)?;
         let m = self.materialized(scope)?;
-        self.fill_entries(scope, &mut cov, ids)?;
+        self.fill_display_entries(scope, &mut cov, ids)?;
         let rolled = rollup(self.pack(), ids.iter().filter_map(|id| cov.get(id)));
 
         let mut neighbourhood = ids.clone();
@@ -1361,7 +1364,7 @@ impl ReadState {
             .chain(dependents.iter().map(|d| &d.block))
             .chain(will_go_stale.iter().map(|w| &w.block));
         neighbourhood.extend(named.filter_map(|b| BlockId::parse(b).ok()));
-        self.fill_entries(scope, &mut cov, &neighbourhood)?;
+        self.fill_display_entries(scope, &mut cov, &neighbourhood)?;
 
         // the path of every block with an issue, for the closed order
         let paths = crate::coverage::issue_paths(
@@ -1378,7 +1381,7 @@ impl ReadState {
         let mut pages: Vec<PageScore> = vec![];
         for d in &covered_docs {
             let blocks = page_blocks(&m, d);
-            self.fill_entries(scope, &mut cov, &blocks)?;
+            self.fill_display_entries(scope, &mut cov, &blocks)?;
             let mut entries = blocks.iter().filter_map(|id| cov.get(id)).peekable();
             if entries.peek().is_none() {
                 continue;
@@ -1658,7 +1661,15 @@ impl ReadState {
         }
         let covered: Vec<BlockId> = ids.iter().cloned().collect();
         let suspects = self.suspect_rows(scope, structural, Some(&covered))?;
-        let (sources, findings, findings_omitted, finding_counts) = supporting_rows(&g, &m, ids);
+        let (mut sources, findings, findings_omitted, finding_counts) =
+            supporting_rows(&g, &m, ids);
+        // ck3: the sources' local existence, read now and never recorded
+        let mut probe = crate::source_exists::SourceProbe::new(self.root());
+        for s in &mut sources {
+            if let Some(b) = BlockId::parse(&s.source).ok().and_then(|id| m.get(&id)) {
+                s.existence = probe.existence_of(b);
+            }
+        }
         debug_assert!(
             sources
                 .iter()
@@ -1814,6 +1825,7 @@ fn supporting_rows(
                 title: text(b, "title"),
                 source: source.to_string(),
                 blocks: blocks.iter().map(ToString::to_string).collect(),
+                existence: crate::source_exists::SourceExistence::Unchecked,
             })
         })
         .collect();
