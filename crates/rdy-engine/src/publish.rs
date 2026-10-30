@@ -97,6 +97,7 @@ impl Rdy {
                     semantic: Arc::clone(&prev.semantic),
                     lease_ttl_ms: prev.lease_ttl_ms,
                     coverage_memo: Default::default(),
+                    memo: Default::default(),
                     detectors: self.detectors,
                     error: Some(e.clone()),
                 }));
@@ -596,6 +597,7 @@ impl Rdy {
             semantic,
             lease_ttl_ms,
             coverage_memo,
+            memo: Default::default(),
             detectors: self.detectors,
             error: None,
         })
@@ -902,6 +904,7 @@ impl Rdy {
             semantic,
             lease_ttl_ms: i64::from(cfg.lease_ttl_minutes()) * 60_000,
             coverage_memo: crate::coverage::CoverageMemo::default(),
+            memo: Default::default(),
             detectors: self.detectors,
             error: None,
         })
@@ -1045,6 +1048,7 @@ impl Rdy {
             semantic: Arc::default(),
             lease_ttl_ms: prev.lease_ttl_ms,
             coverage_memo: Default::default(),
+            memo: Default::default(),
             detectors: self.detectors,
             error: Some(e),
         }));

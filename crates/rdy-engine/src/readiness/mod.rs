@@ -53,7 +53,13 @@ pub enum PlanSource {
     /// read from the store.
     Bound(Option<Hash>),
     /// A plan the store does not hold yet (a propose binds it in its own batch), and its hash.
-    InHand { plan: Plan, hash: Hash },
+    /// `computed`: the change plan the propose computed for the version, which the plan read
+    /// uses on the same state with the same inputs (none: the read computes it).
+    InHand {
+        plan: Plan,
+        hash: Hash,
+        computed: Option<crate::plan::compute::CarriedPlan>,
+    },
 }
 
 impl PlanSource {

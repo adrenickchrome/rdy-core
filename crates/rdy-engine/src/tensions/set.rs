@@ -4,6 +4,7 @@ use super::index::{DetectCx, Write, Writes, canon_index_in, canon_index_of};
 use super::{DetectScope, Detector, SideRef, Tension, TensionStatus, tension_from, tension_label};
 use crate::error::*;
 use crate::gate::applied_ops;
+use crate::read_state::memo::LandingKey;
 use crate::views::clip;
 use crate::{InflightSet, RdyError, ReadState, Scope};
 use imbl::ordmap::DiffItem;
@@ -471,6 +472,19 @@ thread_local! {
 #[doc(hidden)]
 pub fn canon_part_runs() -> u64 {
     CANON_RUNS.with(std::cell::Cell::get)
+}
+
+thread_local! {
+    /// This thread's landing detections (see `landing_detections_for_tests`).
+    static LANDING_DETECTIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Tests only: this thread's landing detections so far (each run of the detectors over the
+/// canon a proposal's landing would give, `ReadState::landing_tensions` and its forms). A test
+/// reads the difference over a call.
+#[doc(hidden)]
+pub fn landing_detections_for_tests() -> u64 {
+    LANDING_DETECTIONS.with(std::cell::Cell::get)
 }
 
 /// This thread's count of full tension-set builds so far (a state's set built without a
@@ -1236,11 +1250,23 @@ impl ReadState {
     }
 
     /// The order the landing of `read` applies its changes in: the merge's onto canon, or the
-    /// list order when the merge refuses (the gate reports that refusal itself).
+    /// list order when the merge refuses (the gate reports that refusal itself). The merge's
+    /// order is memoised on the state by the changes' ids; a refusal is not.
     pub(crate) fn landing_order(&self, read: &[Change]) -> Vec<usize> {
-        self.canon_snapshot()
+        let ids: Vec<Hash> = read.iter().map(Change::id).collect();
+        if let Some(at) = self.memo.order.get(&ids) {
+            return at.to_vec();
+        }
+        match self
+            .canon_snapshot()
             .and_then(|canon| Ok(self.reader().merge_checked(&canon, read)?))
-            .map_or_else(|_| (0..read.len()).collect(), |(_, at)| at)
+        {
+            Ok((_, at)) => {
+                self.memo.order.put(ids, Arc::new(at.clone()));
+                at
+            }
+            Err(_) => (0..read.len()).collect(),
+        }
     }
 
     /// The landing form ([`ReadState::landing_tensions`]) of the stored kinds' tensions
@@ -1297,7 +1323,8 @@ impl ReadState {
     }
 
     /// [`ReadState::landing_detect`] onto the canon `canon` reads (canon, or canon as of a
-    /// landing): that canon is the run's canon throughout.
+    /// landing): that canon is the run's canon throughout. A run of the state's own detectors
+    /// is memoised on the state, keyed by every other input ([`LandingKey`]).
     fn landing_detect_in(
         &self,
         view: &str,
@@ -1310,6 +1337,36 @@ impl ReadState {
         if let Some(e) = &self.error {
             return Err(e.clone());
         }
+        let own = std::ptr::addr_eq(detectors.as_ptr(), self.detectors.as_ptr())
+            && detectors.len() == self.detectors.len();
+        if !own {
+            return self.landing_run(view, changes, read, applied, detectors, canon);
+        }
+        let key = LandingKey {
+            view: view.to_string(),
+            changes: changes.to_vec(),
+            read: read.iter().map(Change::id).collect(),
+            applied: applied.to_vec(),
+            canon: canon.clone(),
+        };
+        let found = self.memo.landing.get_or_try(key, || {
+            self.landing_run(view, changes, read, applied, detectors, canon)
+                .map(Arc::new)
+        })?;
+        Ok(found.to_vec())
+    }
+
+    /// The body of [`ReadState::landing_detect_in`]: one run of `detectors`.
+    fn landing_run(
+        &self,
+        view: &str,
+        changes: &[Hash],
+        read: &[Change],
+        applied: &[usize],
+        detectors: &[&dyn Detector],
+        canon: &Scope,
+    ) -> Result<Vec<Arc<Tension>>, RdyError> {
+        LANDING_DETECTIONS.with(|n| n.set(n.get() + 1));
         // the canon the landing would give: the ops in the order the merge applies the changes
         let ops = applied_ops(read, applied);
         let canon_m = self.materialized(canon)?;
