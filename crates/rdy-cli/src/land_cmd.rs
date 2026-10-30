@@ -324,7 +324,7 @@ fn approve_on(
         None
     };
     let bound = match &spelling {
-        Some(s) => Some(bound_version(op, &proposal, s)?),
+        Some(s) => bound_version(op, &proposal, s)?,
         None => None,
     };
     let card = bound.as_ref().and_then(|b| b.card.clone());
@@ -394,8 +394,21 @@ struct Bound {
 /// [`canonical_proposal_ref`] of `proposal`, which resolves to the same version) and its removal
 /// card. A version whose card cannot be read is refused with that error: the approval never
 /// runs without the card it must show.
-fn bound_version(op: &mut OpFn<'_>, proposal: &str, spelling: &str) -> Result<Bound, ErrorReply> {
-    let v = op("show", json!({"id": spelling}))?;
+///
+/// None when the hash names no proposal version: `show` also reads a landing, and refuses a hash
+/// that is neither. The approval then refuses it in its own words (dq7).
+fn bound_version(
+    op: &mut OpFn<'_>,
+    proposal: &str,
+    spelling: &str,
+) -> Result<Option<Bound>, ErrorReply> {
+    let v = match op("show", json!({"id": spelling})) {
+        Err(e) if e.code == E_BAD_INPUT && spelling.parse::<Hash>().is_ok() => return Ok(None),
+        other => other?,
+    };
+    if v.get("proposal").is_none() {
+        return Ok(None);
+    }
     let p = &v["proposal"];
     if let Some(e) = p.get("removal_card_error") {
         return Err(ErrorReply::new(
@@ -412,10 +425,10 @@ fn bound_version(op: &mut OpFn<'_>, proposal: &str, spelling: &str) -> Result<Bo
             "report this as a bug in rdy",
         ));
     }
-    Ok(Bound {
+    Ok(Some(Bound {
         version: version.to_string(),
         card: p.get("removal_card").cloned(),
-    })
+    }))
 }
 
 /// `rdy land` (D-ZWP7Q, O14): an agent session lands a version the authority policy accepts,
