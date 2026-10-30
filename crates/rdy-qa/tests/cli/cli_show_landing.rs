@@ -139,7 +139,7 @@ fn dq7_a_proposal_version_still_shows_as_before() {
         ]),
     )
     .unwrap();
-    let summary = rdy_qa::intake::summary_for(&mut r, "prop");
+    let summary = rdy_qa::intake::summary_for(&r, "prop");
     let p = r.propose(&writer(), "prop", "Prop", summary).unwrap();
     let pref = r.resolve_proposal(&p.id).unwrap();
     let (name, version) = (pref.to_string(), pref.version.to_string());

@@ -236,7 +236,7 @@ fn dq7_rdy_diff_labels_a_proposal_as_a_scope() {
         ]),
     )
     .unwrap();
-    let summary = rdy_qa::intake::summary_for(&mut r, "prop");
+    let summary = rdy_qa::intake::summary_for(&r, "prop");
     let p = r.propose(&writer(), "prop", "Prop", summary).unwrap();
     let pref = r.resolve_proposal(&p.id).unwrap().to_string();
     r.close().unwrap();
