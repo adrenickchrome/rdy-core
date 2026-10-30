@@ -13,7 +13,8 @@
 //!   copied to `frozen`.
 //! - The drain (collision liveness, ledger O5): every live agent view with changes, oldest first
 //!   (the member views of a set still open come first, so the set is chosen before a view holding
-//!   a change bound to a member proposes), is proposed by its agent and landed by the person,
+//!   a change bound to a member proposes), is proposed by its agent and landed by the person, or
+//!   by its agent with `rdy_land` when the propose reply's verdict accepts it (ap13, D-ZWP7Q),
 //!   through a closed table of resolutions, never a dismissal. Before the views, the reviewers
 //!   judge the open review requests (at most `REVIEWS`). A change bound to a member that lost its
 //!   set is excluded with what depends on it: its dependents by deps, and a change that cites a
@@ -25,7 +26,8 @@
 //!   deferral card when the queue lists one (D-AAQ9Z), and the relay reads the version's change
 //!   plan (`version_plan`), so a check sees what the gate read.
 //!
-//! Around every landing the relay reads canon's blocking tensions before and after (ledger O2);
+//! Around every landing the lander's session (the relay, or the agent that lands under the policy)
+//! reads canon's blocking tensions before and after (ledger O2);
 //! a landing whose reply the kill cut is found by a read and audited the same way. The person
 //! lands on a cadence and the agents wait for the person's acts due before each step (ruling
 //! task-5.2), and the person's approve and the agents' acts that decide from a read take turns
@@ -217,8 +219,8 @@ pub(crate) fn before_land(link: &mut Link, pref: &str) -> Option<Before> {
 
 /// After a landing (`reply`, the `rdy approve` reply): the relay reads canon's blocking tensions
 /// again, and each one the landing put into canon is a violation. A read the kill cuts is made
-/// again on the restarted daemon: only the person lands, and it holds its landing turn, so canon
-/// has not moved. A second loss fails the run (the check is never left out).
+/// again on the restarted daemon: whoever lands (the person, or an agent under the policy) holds
+/// the landing turn, so canon has not moved. A second loss fails the run (the check is never left out).
 pub(crate) fn after_land(link: &mut Link, watch: &Watch, before: Before, reply: &Value) {
     let after = match canon_blocking(link) {
         Some(after) => after,

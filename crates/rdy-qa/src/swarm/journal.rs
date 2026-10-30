@@ -72,8 +72,8 @@ pub struct Entry {
     pub seen: Vec<String>,
     /// Set for an inbox read.
     pub inbox: Option<InboxRead>,
-    /// The reply a check reads: for `land`, the `rdy --json approve` reply (its `assurance`,
-    /// `landing` and `chosen`).
+    /// The reply a check reads: for `land`, the `rdy --json approve` reply or an agent's `rdy_land`
+    /// reply (its `assurance`, `landing` and `chosen`).
     pub reply: Option<serde_json::Value>,
     /// Set on a `Skipped` entry that found nothing to do (see [`Skip`]).
     pub skip: Option<Skip>,

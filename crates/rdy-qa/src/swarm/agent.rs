@@ -639,7 +639,7 @@ pub(crate) fn spell(mut n: usize) -> String {
 /// A seeded draw of 1 in `one_in`: a pure function of the run's seed, a salt that names the draw,
 /// and the draw's index `n` (SplitMix64 of the three). The interleaving never changes it.
 pub(crate) fn drawn(seed: u64, salt: u64, n: u64, one_in: u64) -> bool {
-    seeded(seed, salt, n) % one_in.max(1) == 0
+    seeded(seed, salt, n).is_multiple_of(one_in.max(1))
 }
 
 /// The seeded number behind `drawn`: SplitMix64 of the seed, the salt and the index.
@@ -756,8 +756,9 @@ struct Agent {
     wrote: bool,
     /// The prose of the scratch doc and the change that made it.
     scratch: Option<(String, String)>,
-    /// Every change the agent's scratch writes made, oldest first. Each depends on the one before
-    /// it (it updates the prose that one wrote) and on no other change.
+    /// Every change the agent's scratch writes made, oldest first. An update depends on the
+    /// change before it, which wrote the prose it updates, and on no other change; a create
+    /// depends on nothing. So those a view holds are closed under dependencies.
     scratch_changes: Vec<String>,
     /// How many `Propose` acts the agent has started: the index of `scratch_only_draw`.
     proposes: usize,

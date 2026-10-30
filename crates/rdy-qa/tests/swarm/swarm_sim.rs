@@ -3228,8 +3228,19 @@ fn ap13_seeds_land_under_the_policy_and_by_a_person() {
                 .map(|e| format!("{} step {} {}", e.actor, e.step, e.act))
                 .collect::<Vec<_>>()
         };
+        let scratch_only = o
+            .before_freeze()
+            .iter()
+            .filter(|e| e.act == "propose" && e.outcome == Met::Ok)
+            .filter(|e| e.reply.as_ref().is_some_and(|r| r["changes"].is_array()))
+            .count();
+        let in_the_run = o
+            .before_freeze()
+            .iter()
+            .filter(|e| e.act == "land" && e.outcome == Met::Ok && e.actor.starts_with("agent:a"))
+            .count();
         eprintln!(
-            "ap13 swarm seed {seed}: {policy} policy landings, {person} approvals, {} disputes opened, {} resolved, E_POLICY_HUMAN {:?}, E_PERMISSION {:?}",
+            "ap13 swarm seed {seed}: {policy} policy landings ({in_the_run} before the freeze), {person} approvals, {scratch_only} scratch-only proposes, {} disputes opened, {} resolved, E_POLICY_HUMAN {:?}, E_PERMISSION {:?}",
             ok("dispute_open"),
             ok("dispute_resolve"),
             met("E_POLICY_HUMAN"),
@@ -3274,15 +3285,18 @@ fn ap13_disputes_never_block_the_drain() {
             live.is_empty(),
             "swarm seed {seed}: views neither landed nor closed after the drain: {live:?}"
         );
-        let journaled = o
-            .journal
-            .iter()
-            .filter(|e| e.act == "dispute_open" && e.outcome == Met::Ok)
-            .count();
-        assert_eq!(
-            journaled,
-            disputes.len(),
-            "swarm seed {seed}: the journal's acknowledged opens and the store's disputes"
+        // an open the kill cut may or may not have reached the log
+        let opens = |met: Met| {
+            o.journal
+                .iter()
+                .filter(|e| e.act == "dispute_open" && e.outcome == met)
+                .count()
+        };
+        let (acknowledged, cut) = (opens(Met::Ok), opens(Met::Lost));
+        assert!(
+            (acknowledged..=acknowledged + cut).contains(&disputes.len()),
+            "swarm seed {seed}: {acknowledged} acknowledged opens, {cut} cut by the kill, {} disputes in the store",
+            disputes.len()
         );
         // a landing after the first open dispute: the dispute blocked nothing
         if let Some(first) = o
