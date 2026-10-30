@@ -513,10 +513,7 @@ fn dq5_has_holds_for_present_members() {
     );
     assert!(!has("fields.tags").contains(w.id("gamma")));
     assert!(has("fields.meta").contains(w.id("alpha")));
-    let scores = coverage_scores(
-        r.read().pack(),
-        &*r.read().coverage_issues(&work()).unwrap(),
-    );
+    let scores = coverage_scores(r.read().pack(), &r.read().coverage_issues(&work()).unwrap());
     assert_eq!(has("coverage"), scores.keys().cloned().collect());
 }
 
@@ -757,7 +754,7 @@ fn dq5_matches_agrees_with_query_for_every_block() {
         .map(|s| s.block)
         .collect();
     let tensions = st.open_tension_blocks(now_ms()).unwrap();
-    let coverage = coverage_scores(st.pack(), &*st.coverage_issues(&scope).unwrap());
+    let coverage = coverage_scores(st.pack(), &st.coverage_issues(&scope).unwrap());
     let ctx = FilterContext::from_parts(FilterInputs {
         pack: st.pack(),
         m: &m,

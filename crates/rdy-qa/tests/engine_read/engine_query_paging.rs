@@ -99,7 +99,7 @@ fn dq5_a_query_page_is_whole_exactly_when_it_fits() {
     let cut = page(&r, PROSE, None, exact - 1);
     if let Ok(cut) = &cut {
         assert!(cut.next.is_some());
-        assert!(tokens(cut) <= exact - 1);
+        assert!(tokens(cut) < exact);
     }
 }
 
