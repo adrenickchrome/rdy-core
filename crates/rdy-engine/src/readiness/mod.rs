@@ -298,12 +298,14 @@ pub fn accepted_advice(
     p: &Proposal,
     a: &Assessment,
 ) -> Result<Vec<Issue>, RdyError> {
+    use crate::tensions::info::TensionStatus;
     use crate::tensions::{Involved, SideRef, TensionKind, TensionSeverity, tension_vkey};
     use rdy_model::assessment::{AssessmentSeverity, AssessmentTensionStatus};
     let sem = st.semantic();
     if !sem.has_tensions() {
         return Ok(vec![]);
     }
+    // the advisory vkeys the assessment lists open: a pair accepted after it was assessed
     let advisory: BTreeSet<Hash> = a
         .tensions
         .iter()
@@ -314,14 +316,37 @@ pub fn accepted_advice(
         })
         .map(|t| t.vkey)
         .collect();
-    if advisory.is_empty() {
-        return Ok(vec![]);
-    }
-    // the advisory vkey of each blocking pair: the vkey reads each item's block and content only
-    let accepted: Vec<_> = sem
-        .tensions()
-        .filter(|o| o.record.blocking)
-        .filter(|o| {
+    let set = st.tensions()?;
+    let mut cache = crate::tensions::info::InfoCache::default();
+    let mut refusing = vec![];
+    for o in sem.tensions().filter(|o| o.record.blocking) {
+        let Some(item) = o.record.items.first() else {
+            continue;
+        };
+        let forms: Vec<_> = set
+            .involving_block(&item.block)
+            .into_iter()
+            .filter(|t| {
+                crate::tensions::semantic::pair_of(t) == Some(o.record.key)
+                    && t.severity == TensionSeverity::Blocking
+            })
+            .collect();
+        // the version's own landing form, open: what check 3 refuses. A ready assessment had
+        // none (check 3), so one now was accepted after the assessment, whether the assessment
+        // listed the pair (advisory) or a verdict opened it later (ruling task-12 R1: "any
+        // tension of the version, written after its assessment")
+        let own = forms.iter().find(|t| {
+            st.tension_status(t) == TensionStatus::Open
+                && t.sides
+                    .iter()
+                    .any(|s| matches!(s, SideRef::Change(c) if p.changes.contains(c)))
+                && t.sides.iter().all(|s| match s {
+                    SideRef::Canon { .. } => true,
+                    SideRef::Change(c) => p.changes.contains(c),
+                    SideRef::Intent { .. } => false,
+                })
+        });
+        let listed = || {
             let involved: Vec<Involved> = o
                 .record
                 .items
@@ -338,34 +363,13 @@ pub fn accepted_advice(
                 TensionSeverity::Advisory,
                 &involved,
             ))
-        })
-        .collect();
-    if accepted.is_empty() {
-        return Ok(vec![]);
-    }
-    // each accepted pair's blocking form that holds a change of the version, as the landing
-    // check names it
-    let set = st.tensions()?;
-    let mut cache = crate::tensions::info::InfoCache::default();
-    let mut refusing = vec![];
-    for o in accepted {
-        let Some(item) = o.record.items.first() else {
-            continue;
         };
-        let forms: Vec<_> = set
-            .involving_block(&item.block)
-            .into_iter()
-            .filter(|t| {
-                crate::tensions::semantic::pair_of(t) == Some(o.record.key)
-                    && t.severity == TensionSeverity::Blocking
-            })
-            .collect();
-        let own = forms.iter().find(|t| {
-            t.sides
-                .iter()
-                .any(|s| matches!(s, SideRef::Change(c) if p.changes.contains(c)))
-        });
-        if let Some(t) = own.or(forms.first()) {
+        let form = match own {
+            Some(t) => Some(t),
+            None if listed() => forms.first(),
+            None => None,
+        };
+        if let Some(t) = form {
             refusing.push(st.tension_info_with(t, &mut cache));
         }
     }
