@@ -47,15 +47,20 @@ impl ReadState {
         if self.areas.is_empty() {
             return Vec::new();
         }
-        let mut out = BTreeSet::new();
-        add_path_areas(&self.areas, m, &block.id, &mut out);
-        if block.block_type == DECISION {
-            for link in block.links.get(AFFECTS).into_iter().flatten() {
-                add_path_areas(&self.areas, m, &link.target, &mut out);
-            }
-        }
-        out.into_iter().collect()
+        block_areas(&self.areas, m, block)
     }
+}
+
+/// The areas `block` is in, in its materialization `m`: ascending, deduplicated.
+pub(crate) fn block_areas(matcher: &AreaMatcher, m: &Materialized, block: &Block) -> Vec<String> {
+    let mut out = BTreeSet::new();
+    add_path_areas(matcher, m, &block.id, &mut out);
+    if block.block_type == DECISION {
+        for link in block.links.get(AFFECTS).into_iter().flatten() {
+            add_path_areas(matcher, m, &link.target, &mut out);
+        }
+    }
+    out.into_iter().collect()
 }
 
 /// How many of `items` are in each area; areas with no item are absent.

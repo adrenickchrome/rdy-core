@@ -31,6 +31,7 @@ pub mod engine;
 mod error;
 pub mod events;
 pub mod factsheet;
+pub mod filter;
 pub mod formats;
 mod fsck;
 mod gate;
