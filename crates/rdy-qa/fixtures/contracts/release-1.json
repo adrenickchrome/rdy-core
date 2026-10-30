@@ -35,6 +35,7 @@
         "plan defer": "needs an open plan item",
         "plan dismiss": "needs an open plan item",
         "plan done": "needs an open plan item",
+        "policy": "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
         "publication": "needs a publication profile",
         "publish": "uploads a site to a host",
         "reaffirm": "needs a suspect decision; the write op of the same name is an MCP write",
@@ -4272,6 +4273,144 @@
                 }
               ],
               "name": "list",
+              "subcommands": []
+            }
+          ]
+        },
+        {
+          "args": [
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "set",
+              "global": true,
+              "id": "project",
+              "long": "project",
+              "num_args": "1",
+              "value_names": [
+                "PROJECT"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "no_daemon",
+              "long": "no-daemon",
+              "num_args": "0",
+              "value_names": [
+                "NO_DAEMON"
+              ]
+            },
+            {
+              "action": "help",
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "short": "h"
+            }
+          ],
+          "groups": [
+            {
+              "args": [],
+              "id": "Policy",
+              "multiple": true,
+              "required": false
+            }
+          ],
+          "name": "policy",
+          "subcommand_required": true,
+          "subcommands": [
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "id": "doc",
+                  "long": "doc",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "DOC"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "view",
+                  "long": "view",
+                  "num_args": "1",
+                  "value_names": [
+                    "VIEW"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [
+                    "doc",
+                    "view"
+                  ],
+                  "id": "Init",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "init",
               "subcommands": []
             }
           ]
@@ -13598,6 +13737,7 @@
       "EVIDENCE_MESSAGE": "\"field \\\"evidence\\\" must be a list of 1 to 20 evidence entries\"",
       "EXPORT_CHAIN_FIX": "\"follow the newest file of this store's chain, or start a new chain with rdy dump\"",
       "GONE_FIX": "\"check rdy status; a write may or may not have committed; it is not retried\"",
+      "HAS_POLICY_FIX": "\"change it with rdy_write / rdy edit, with implements a decision\"",
       "HELD_BY_READER_FIX": "\"release the earlier read state, then try again\"",
       "HOLDER_FIX": "\"Ask the uploader to send the removal again, and take the upload that carries it.\"",
       "HOLDER_LOAD_REDACTION_LIMIT_FIX": "\"Keep the dump chain and the holder it came from. This rdy cannot load this chain.\"",
@@ -13613,6 +13753,7 @@
       "LOAD_CHAIN_FIX": "\"pass the full dump, then each increment in chain order\"",
       "LOST_FIX": "\"run rdy status: it finishes the commit if the store recorded it\"",
       "MCP_HUMAN_CLAIM_FIX": "\"claim your own agent: actor, and relay the person's words with rdy_answer\"",
+      "NAME_DOC_FIX": "\"pass doc: rdy_policy {op: \\\"init\\\", doc} / rdy policy init --doc <doc>\"",
       "NO_AGENT_FIX": "\"check SSH_AUTH_SOCK and the configured key, then try again\"",
       "NO_CODE_FIX": "\"set code_paths, then repin it with code: true\"",
       "NO_LAN_ADDRESS_FIX": "\"connect this machine to a private network, then run rdy serve --stop; or set serve.site_lan to false\"",
@@ -16139,6 +16280,7 @@
       "rdy_key_retire": "changes the signing key",
       "rdy_key_revoke": "changes the signing key",
       "rdy_load": "replaces a project from a dump; the dump_load row covers it",
+      "rdy_policy": "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
       "rdy_publication_check": "needs a publication profile",
       "rdy_publish": "uploads a site to a host",
       "rdy_redact": "destroys content; no dry run is probed",
@@ -16178,6 +16320,7 @@
       "rdy_overview",
       "rdy_pending",
       "rdy_plan",
+      "rdy_policy",
       "rdy_propose",
       "rdy_publication_check",
       "rdy_publish",
@@ -17757,6 +17900,36 @@
               ]
             }
           },
+          "type": "object"
+        }
+      },
+      "rdy_policy": {
+        "input_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "doc": {
+              "description": "init: the doc that holds the policy block (path, key or id). Required: a folder or no doc is refused.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "description": "init: starts the authority policy. It is the only op.",
+              "type": "string"
+            },
+            "view": {
+              "description": "init: the view to write in and propose (default: the session's own view).",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "op"
+          ],
           "type": "object"
         }
       },

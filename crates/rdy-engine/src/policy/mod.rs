@@ -1,5 +1,6 @@
 //! ap4 (D-ZWP7Q, D-TF78H): the live authority policy, its owners and the policy role an item
 //! needs. Pure reads over the scope a caller passes: every caller passes canon at its head.
+pub mod init;
 pub mod owners;
 pub mod roles;
 

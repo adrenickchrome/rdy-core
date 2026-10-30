@@ -11,6 +11,7 @@ mod inbox;
 mod instructions;
 mod intake;
 mod intent;
+mod policy;
 mod propose;
 mod read;
 mod remote;
@@ -176,7 +177,7 @@ impl RdyServer {
 
     /// The tool router of each family (`server/<family>.rs`), once. `new` registers their sum;
     /// a new family adds one line here.
-    fn family_routers() -> [ToolRouter<Self>; 25] {
+    fn family_routers() -> [ToolRouter<Self>; 26] {
         [
             Self::session_router(),
             Self::read_router(),
@@ -187,6 +188,7 @@ impl RdyServer {
             Self::write_router(),
             Self::decide_router(),
             Self::dispute_router(),
+            Self::policy_router(),
             Self::propose_router(),
             Self::asset_router(),
             Self::views_router(),
@@ -1542,8 +1544,9 @@ mod tests {
     fn mrt1_every_tool_is_in_exactly_one_family_router() {
         let families = RdyServer::family_routers();
         // sig9: the signing family follows the store family; hsa9: it holds the three hub key
-        // tools too (ap5: the dispute family after decide moves both one place on)
-        let mut signing: Vec<String> = families[22]
+        // tools too (ap5: the dispute family after decide moves both one place on; ap9: the
+        // policy family after dispute moves both one more)
+        let mut signing: Vec<String> = families[23]
             .list_all()
             .into_iter()
             .map(|t| t.name.to_string())
@@ -1560,14 +1563,14 @@ mod tests {
             ]
         );
         assert!(
-            families[21]
+            families[22]
                 .list_all()
                 .iter()
                 .any(|t| t.name == "rdy_clone"),
             "the store family precedes the signing family"
         );
         // hsa9: the remote family is the last, after auth; hpb15: it holds rdy_publish too
-        let mut remote: Vec<String> = families[24]
+        let mut remote: Vec<String> = families[25]
             .list_all()
             .into_iter()
             .map(|t| t.name.to_string())

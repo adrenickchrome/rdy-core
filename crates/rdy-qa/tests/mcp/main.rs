@@ -32,6 +32,7 @@ mod mcp_people;
 mod mcp_plan;
 mod mcp_plan_contract;
 mod mcp_plan_group;
+mod mcp_policy_init;
 mod mcp_pool;
 mod mcp_proposal;
 mod mcp_proxy;

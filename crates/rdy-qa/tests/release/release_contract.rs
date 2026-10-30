@@ -1647,6 +1647,10 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
     ("plan defer", "needs an open plan item"),
     ("plan dismiss", "needs an open plan item"),
     ("plan done", "needs an open plan item"),
+    (
+        "policy",
+        "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
+    ),
     ("publication", "needs a publication profile"),
     ("publish", "uploads a site to a host"),
     (
@@ -1904,6 +1908,10 @@ const MCP_NOT_CAPTURED: &[(&str, &str)] = &[
     (
         "rdy_load",
         "replaces a project from a dump; the dump_load row covers it",
+    ),
+    (
+        "rdy_policy",
+        "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
     ),
     ("rdy_publication_check", "needs a publication profile"),
     ("rdy_publish", "uploads a site to a host"),
