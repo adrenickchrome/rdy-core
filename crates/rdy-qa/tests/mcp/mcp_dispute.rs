@@ -125,6 +125,11 @@ fn resolve_local(
     })
 }
 
+fn sorted(mut v: Vec<String>) -> Vec<String> {
+    v.sort();
+    v
+}
+
 fn ids(list: &Value) -> Vec<String> {
     list["disputes"]
         .as_array()
@@ -487,16 +492,26 @@ fn ap5_list_filters_by_landing_and_open() {
         .to_string();
     resolve_local(&st, "human:qa", &d1, DisputeOutcome::Upheld, None).unwrap();
     let all = dispute(&mut st, json!({"op": "list"})).unwrap();
+    // two opens can share a millisecond, and then the id decides: the order itself is pinned by
+    // the unit test ap5_a_list_keeps_the_oldest_rows_and_counts_the_rest
     assert_eq!(
-        ids(&all),
-        [d1.as_str(), d2.as_str(), d3.as_str()],
-        "oldest first: {all}"
+        sorted(ids(&all)),
+        sorted(vec![d1.clone(), d2.clone(), d3.clone()]),
+        "{all}"
     );
     assert_eq!(all["omitted"], 0);
     let on_l1 = dispute(&mut st, json!({"op": "list", "landing": l1})).unwrap();
-    assert_eq!(ids(&on_l1), [d1.as_str(), d3.as_str()], "{on_l1}");
+    assert_eq!(
+        sorted(ids(&on_l1)),
+        sorted(vec![d1.clone(), d3.clone()]),
+        "{on_l1}"
+    );
     let open = dispute(&mut st, json!({"op": "list", "open": true})).unwrap();
-    assert_eq!(ids(&open), [d2.as_str(), d3.as_str()], "{open}");
+    assert_eq!(
+        sorted(ids(&open)),
+        sorted(vec![d2.clone(), d3.clone()]),
+        "{open}"
+    );
     let both = dispute(
         &mut st,
         json!({"op": "list", "landing": &l1[..8], "open": true}),
@@ -504,7 +519,16 @@ fn ap5_list_filters_by_landing_and_open() {
     .unwrap();
     assert_eq!(ids(&both), [d3.as_str()], "{both}");
     assert_eq!(both["disputes"][0]["state"], "open");
-    assert_eq!(all["disputes"][0]["state"], "upheld");
+    let row = |id: &str| {
+        all["disputes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(row(&d1)["state"], "upheld");
 }
 
 #[test]
@@ -524,12 +548,13 @@ fn ap5_a_landing_may_hold_two_open_disputes() {
         json!({"op": "list", "landing": landing, "open": true}),
     )
     .unwrap();
-    let reasons: Vec<&str> = list["disputes"]
+    let mut reasons: Vec<&str> = list["disputes"]
         .as_array()
         .unwrap()
         .iter()
         .map(|d| d["reason"].as_str().unwrap())
         .collect();
+    reasons.sort_unstable();
     assert_eq!(reasons, ["first", "second"], "{list}");
 }
 
