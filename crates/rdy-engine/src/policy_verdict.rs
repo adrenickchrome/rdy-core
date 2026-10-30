@@ -173,10 +173,14 @@ fn never_list(i: &VerdictInputs, view: &Sorted<'_>) -> Vec<String> {
         }
     }
     if i.noncode_deferrals > 0 {
-        out.push(format!(
-            "it defers {} items that are not code items",
-            i.noncode_deferrals
-        ));
+        out.push(if i.noncode_deferrals == 1 {
+            "it defers 1 item that is not a code item".to_string()
+        } else {
+            format!(
+                "it defers {} items that are not code items",
+                i.noncode_deferrals
+            )
+        });
     }
     for d in &view.decisions {
         if let Some(basis) = d.basis.as_deref()
@@ -564,7 +568,7 @@ mod tests {
                 "it changes the authority policy",
                 "it has the exception unapplied on D-DDDDD",
                 "it has the exception blocking_tension on t-XXXXX",
-                "it defers 1 items that are not code items",
+                "it defers 1 item that is not a code item",
                 "decision D-CCCCC has basis recorded_ruling",
                 "decision D-DDDDD has basis direct_ruling",
                 "it makes doc d-SSSSS stable",
