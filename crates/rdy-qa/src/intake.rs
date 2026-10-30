@@ -9,6 +9,8 @@ use rdy_engine::answer::{AnswerInfo, AnswerRequest};
 use rdy_engine::consequence::propose_and_report;
 use rdy_engine::engine::Engine;
 use rdy_engine::pending::{CARD_MAX_TOKENS, ItemKind, Pending, PendingQuery};
+use rdy_engine::plan::api::{ItemState, PlanAnswerInput, PlanRow};
+use rdy_engine::plan::compute::allowed_acts;
 use rdy_engine::{
     DecisionInput, E_PROPOSAL_NOT_READY, Local, ProposalInfo, Rdy, RdyError, Scope, Session,
 };
@@ -234,6 +236,8 @@ pub fn batch_project() -> (tempfile::TempDir, Rdy, Batch) {
         "$q",
     );
     verdict_on(&mut r, &Scope::Inflight, &advised, &spec.c, "agent:r", true);
+    // O23: the advised tension is a tension item, which the author answers before the propose
+    answer_open_items(&mut r, &writer(), v);
     let (r, report) = propose_reported(dir.path(), r, v, BATCH_TITLE, Some(BATCH_SUMMARY));
     let r#ref = report["ref"].as_str().expect("ref").to_string();
     let batch = Batch {
@@ -429,13 +433,115 @@ pub fn summary_for(_r: &Rdy, _view: &str) -> Option<&'static str> {
     Some(TEST_SUMMARY)
 }
 
-/// The sweep rule of F2 (D-DKJS5) before a landing of version `p`: when it writes a decision,
-/// the human session `s` confirms each exception beside it ([`confirm_exceptions`]).
+/// The sweep rule of F2 (D-DKJS5) before a landing of version `p`: the human session `s`
+/// accepts the version's deferral card when one stands (D-AAQ9Z, the hold `E_DEFERRAL_OPEN`;
+/// [`accept_deferrals`]), then, when the version writes a decision, confirms each exception
+/// beside it ([`confirm_exceptions`]).
 pub fn confirm_before_landing(r: &mut Rdy, s: &Session, p: &ProposalInfo) -> Vec<AnswerInfo> {
+    accept_deferrals(r, s, &p.id, &p.r#ref);
     if !writes_decision(r, &p.id) {
         return vec![];
     }
     confirm_exceptions(r, s, &p.r#ref)
+}
+
+/// The reason [`answer_open_items`] gives each answer.
+pub const OPEN_ITEM_REASON: &str = "test: checked";
+
+/// O23: answers each open item of view `view`'s change plan that readiness gates, as session
+/// `s`, before a propose binds the plan (an answer recorded after the propose is not the
+/// version's): each open tension item `confirm`, and each open non-code item on stable content
+/// by its first allowed act (a confirm item `confirm`; an update, rejustify or reaffirm item
+/// `defer`), each with the reason [`OPEN_ITEM_REASON`]. Items on drafts and code items stay open:
+/// they never gate. It writes nothing when no such item is open or the plan cannot be read, and
+/// otherwise one plan version for each `MAX_PLAN_ANSWERS` answers. Returns the answers.
+pub fn answer_open_items(r: &mut Rdy, s: &Session, view: &str) -> Vec<PlanAnswerInput> {
+    // a view whose plan cannot be read (a stale base, a conflict) has no item to answer: its
+    // propose or landing reports the error
+    let Ok(reply) = r.read().view_plan(view) else {
+        return vec![];
+    };
+    let inputs: Vec<PlanAnswerInput> = reply
+        .items
+        .iter()
+        .filter_map(|row| {
+            let PlanRow::Live(i) = row else { return None };
+            if i.state != ItemState::Open {
+                return None;
+            }
+            let act = match i.kind {
+                PlanKind::Tension => PlanAct::Confirm,
+                PlanKind::UpdateImplementation => return None,
+                kind if i.stable => *allowed_acts(kind).first()?,
+                _ => return None,
+            };
+            Some(PlanAnswerInput {
+                item: i.id.clone(),
+                act,
+                reason: Some(OPEN_ITEM_REASON.into()),
+            })
+        })
+        .collect();
+    for chunk in inputs.chunks(plan::MAX_PLAN_ANSWERS) {
+        r.answer_plan(s, view, chunk)
+            .unwrap_or_else(|e| panic!("answer the open items of {view}: {e}"));
+    }
+    inputs
+}
+
+/// Accepts the deferral card of version `id` (`P-x@n` `pref`) as the human session `s`, for
+/// [`PERSON`], when one stands: its bound plan defers an item and the queue holds the card
+/// (`r.answer` of `defer:<pref>`, option `o1`, the `accept_deferrals` act). Returns its answer.
+pub fn accept_deferrals(r: &mut Rdy, s: &Session, id: &str, pref: &str) -> Option<AnswerInfo> {
+    let h: Hash = id.parse().unwrap_or_else(|e| panic!("version {id}: {e}"));
+    let defers = {
+        let st = r.read();
+        let bound = st
+            .reader()
+            .plan_of_proposal(&h, st.seq())
+            .unwrap_or_else(|e| panic!("the bound plan of {pref}: {e}"));
+        match bound {
+            Some(b) => st
+                .reader()
+                .plan(&b)
+                .unwrap_or_else(|e| panic!("the bound plan of {pref}: {e}"))
+                .answers
+                .iter()
+                .any(|a| a.act == PlanAct::Defer),
+            None => false,
+        }
+    };
+    if !defers {
+        return None;
+    }
+    let card = format!("defer:{pref}");
+    let q = r
+        .read()
+        .pending(&PendingQuery {
+            person: s.actor.clone(),
+            session_ref: None,
+            max_tokens: CARD_MAX_TOKENS,
+        })
+        .expect("pending");
+    if !q
+        .items
+        .iter()
+        .any(|i| i.kind == ItemKind::Defer && i.r#ref == card)
+    {
+        return None;
+    }
+    let info = r
+        .answer(
+            s,
+            PERSON,
+            AnswerRequest {
+                r#ref: card.clone(),
+                option: "o1".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("accept {card}: {e}"));
+    Some(info)
 }
 
 /// [`confirm_exceptions`] through engine `e` (a `Local`, as the MCP and daemon paths hold one),

@@ -2146,6 +2146,17 @@ fn subjects<'a>(
     out
 }
 
+/// The stable subjects of `ops` against `m`, in op order, each once: the blocks [`check`] asks
+/// a briefing to cover. Readiness check 1 reads it (O3); `ops` hold no reaffirm op.
+pub(crate) fn stable_subjects(pack: &Pack, m: &Materialized, ops: &[OpInput]) -> Vec<BlockId> {
+    let mut seen = BTreeSet::new();
+    subjects(pack, m, ops, &crate::reaffirm::Selection::default())
+        .into_iter()
+        .filter(|s| s.stable && seen.insert(s.target.clone()))
+        .map(|s| s.target)
+        .collect()
+}
+
 fn joined(ids: &BTreeSet<BlockId>) -> String {
     ids.iter()
         .map(ToString::to_string)

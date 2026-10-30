@@ -188,10 +188,13 @@ pub fn frozen_conflict(r: &mut Rdy) -> (String, String, String) {
     (d, s, cc)
 }
 
-/// Proposes `view` as a writer with a summary ([`summary_for`](crate::intake::summary_for):
-/// readiness needs one, D-ME2HD), confirms each exception as the approver (F2) and lands it as
-/// the approver; returns the landing id.
+/// Answers the open items of `view`'s change plan that readiness gates
+/// ([`answer_open_items`](crate::intake::answer_open_items), O23), proposes `view` as a writer
+/// with a summary ([`summary_for`](crate::intake::summary_for): readiness needs one, D-ME2HD),
+/// accepts its deferrals and confirms each exception as the approver (F2) and lands it as the
+/// approver; returns the landing id.
 pub fn land(r: &mut Rdy, view: &str) -> Result<String, RdyError> {
+    crate::intake::answer_open_items(r, &writer(), view);
     let summary = crate::intake::summary_for(r, view);
     let p = r.propose(&writer(), view, view, summary)?;
     crate::intake::confirm_before_landing(r, &approver(), &p);
@@ -215,6 +218,7 @@ pub fn land_with_a_tie(r: &mut Rdy, view: &str) {
             alt: None,
             relay: None,
             evidence: None,
+            assessment: None,
         })
         .unwrap_or_else(|e| panic!("landing {view}: {e}"));
     r.invalidate();

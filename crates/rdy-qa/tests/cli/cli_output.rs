@@ -188,7 +188,11 @@ fn relay1_propose_text_names_the_ref_the_approver_approves() {
     )
     .unwrap();
     r.close().unwrap();
-    let (ok, text, err) = rdy(&s, &["propose", "--title", "t"]);
+    // a version that is not ready prints no approve line (rg10, O20): it has a summary
+    let (ok, text, err) = rdy(
+        &s,
+        &["propose", "--title", "t", "--summary", "test summary"],
+    );
     assert!(ok, "{err}");
     let lines: Vec<&str> = text.lines().collect();
     // cc16 (FW-CH3) prints the proposal's coverage between the two lines this test pins

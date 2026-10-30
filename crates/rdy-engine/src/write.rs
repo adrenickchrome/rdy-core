@@ -336,7 +336,7 @@ impl ReflectsInput {
 
 /// The raw `reflects` object as a boundary receives it: `{sources?, code?}`, with no other key.
 /// Missing sources are none, missing code is false; an explicit false is refused ([`Self::input`]).
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReflectsArg {
     #[serde(default)]
@@ -3440,6 +3440,17 @@ impl Rdy {
             &selection,
             brief,
         )?;
+        // D-ME2HD (O4): the change records the briefing it cited, when the registry holds it
+        // and the check did not find it stale; a draft write citing an unknown or stale one
+        // records none
+        if let Some(t) = brief
+            && !brief_warnings
+                .iter()
+                .any(|w| w.code == crate::brief::W_BRIEF_STALE)
+            && let Some(rec) = self.briefs.get(t)
+        {
+            links.briefing = Some(rec.token);
+        }
         let reaffirmable = |id: &BlockId| crate::reaffirm::reaffirmable(&st, &scope, id);
         let (mut ops, created, touched, names, keys, reaffirmed, code_repins, reflected) =
             build_ops(

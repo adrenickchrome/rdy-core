@@ -398,7 +398,7 @@ fn plb1_schema_explains_the_decision_parent() {
     assert_eq!(
         sch["errors"]["E_BRIEF_REQUIRED"],
         json!({"when": "a write touches stable content and cites no briefing, or one that does not cover the block",
-            "fix": "retry with the token of the briefing the error carries"})
+            "fix": "retry with the token of the briefing the error carries\non a readiness issue: exclude the change (rdy_view exclude), rdy_brief the block, and write it again"})
     );
     // rf5: a finding or a source with no parent uses the decision home too, and the decision
     // guidance carries the delegated and time fixes

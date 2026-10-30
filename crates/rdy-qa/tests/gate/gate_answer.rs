@@ -451,9 +451,36 @@ fn di7_a_local_approval_at_the_cli_records_local() {
 
 #[test]
 fn di7_a_moved_card_refuses_and_returns_the_fresh_card() {
-    let (_d, mut r, m) = ready_and_not_ready();
-    let shown = item(&pending(&r), &m.ready.r#ref);
-    // canon moves on: another view lands, so the card's Base line reads "moved"
+    // ruling task-12 R3 (p-ST0E9, D-ME2HD): the card moves by a landing in the version's reach,
+    // not by Base. Canon: claim y builds on claim x; the version edits x, so y is in its reach
+    let (_d, mut r) = rdy_qa::fixtures::project();
+    let w = rdy_qa::tensions::put_j(
+        &mut r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$n", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$t", "parent": "$n", "fields": {"title": "Ideas"}},
+            {"op": "create", "type": "claim", "id": "$x", "parent": "$t", "body": "X holds."},
+            {"op": "create", "type": "claim", "id": "$y", "parent": "$t", "body": "Y builds on {{$x}}."}
+        ]),
+        rdy_qa::tensions::j_typo(),
+    );
+    land(&mut r, "seed").expect("land seed");
+    let (x, y) = (w.created["$x"].clone(), w.created["$y"].clone());
+    let edit = |r: &mut Rdy, view: &str, id: &str, body: &str| {
+        rdy_qa::tensions::put_j(
+            r,
+            view,
+            rdy_qa::tensions::upd(&id.parse().unwrap(), body),
+            rdy_qa::tensions::j_typo(),
+        );
+    };
+    edit(&mut r, "a", &x, "X holds twice.");
+    let p = r
+        .propose(&rdy_qa::fixtures::writer(), "a", "a", Some(TEST_SUMMARY))
+        .expect("propose a");
+    assert!(p.ready, "{:#?}", p.issues);
+    // an unrelated landing first, so the card's Base line reads "moved" before it is shown
     put(
         &mut r,
         "other",
@@ -461,8 +488,12 @@ fn di7_a_moved_card_refuses_and_returns_the_fresh_card() {
                 "fields": {"name": "other", "title": "Other", "doc_type": "overview"}}]),
     );
     land(&mut r, "other").expect("land other");
-    let fresh = item(&pending(&r), &m.ready.r#ref);
-    assert_ne!(fresh.card_hash, shown.card_hash);
+    let shown = item(&pending(&r), &p.r#ref);
+    // a landing in its reach: the card the queue shows is the same, and the approval is refused
+    // at landing by freshness, with the fresh card
+    edit(&mut r, "l", &y, &format!("Y builds on {{{{{x}}}}} twice."));
+    let l: Hash = land(&mut r, "l").expect("land l").parse().unwrap();
+    assert_eq!(item(&pending(&r), &p.r#ref).card_hash, shown.card_hash);
     let before = landings(&r);
     let e = r
         .answer(
@@ -479,10 +510,22 @@ fn di7_a_moved_card_refuses_and_returns_the_fresh_card() {
     refused(
         &e,
         E_PROPOSAL_MOVED,
-        &format!("{} changed since it was shown", shown.r#ref),
+        &format!(
+            "proposal {} moved: landing {} changed {y} after its assessment",
+            p.r#ref,
+            l.short()
+        ),
     );
-    assert_eq!(e.fix, "show the person the fresh card and ask again");
-    assert_eq!(e.corrected, Some(card_json(&fresh)));
+    assert_eq!(
+        e.fix,
+        format!(
+            "review the fresh card in corrected and approve {} again",
+            p.r#ref
+        )
+    );
+    let fresh = item(&pending(&r), &p.r#ref);
+    assert_ne!(fresh.card_hash, shown.card_hash);
+    assert_eq!(e.corrected, Some(json!({"card": card_json(&fresh)})));
     assert_eq!(landings(&r), before, "nothing landed");
     // the fresh card's hash binds
     let info = r
@@ -1031,6 +1074,8 @@ fn di7_a_decision_in_two_batches_binds_to_the_card_shown() {
     let (dir, mut r, b) = batch_project();
     r.view_fork(&ag("batch2"), rdy_qa::intake::BATCH_VIEW, "batch2")
         .expect("fork the batch view");
+    // O23: the fork's plan answers its own items before its propose
+    rdy_qa::intake::answer_open_items(&mut r, &rdy_qa::fixtures::writer(), "batch2");
     let (mut r, report) = rdy_qa::intake::propose_reported(
         dir.path(),
         r,

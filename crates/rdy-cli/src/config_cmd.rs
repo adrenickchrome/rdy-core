@@ -2,7 +2,7 @@
 //! the order of `KEY_LEVELS`; `code_paths` shows one row per repo, each with the level it comes
 //! from (F1). Runs in this process: it reads files and needs no daemon.
 use crate::ErrorReply;
-use rdy_engine::config_levels::{inspect, user_file_from_env};
+use rdy_engine::config_levels::{inspect, pack_warnings, user_file_from_env};
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -21,7 +21,9 @@ pub fn run(project: &Path, show_origin: bool) -> Result<(Value, String), ErrorRe
         lines.push(line);
     }
     if show_origin {
-        for w in &eff.warnings {
+        // the config warnings, then the pack's (O15): the warnings every other command prints
+        // on stderr
+        for w in eff.warnings.iter().chain(&pack_warnings(project)) {
             lines.push(format!("warning {}: {}; {}", w.code, w.message, w.fix));
         }
     }

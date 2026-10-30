@@ -278,7 +278,6 @@ impl TensionKind {
     pub fn default_severity(&self) -> TensionSeverity {
         match self {
             TensionKind::AreaOverlap
-            | TensionKind::UnjustifiedChange
             | TensionKind::DeprecatedReference
             | TensionKind::RestatementDrift
             | TensionKind::Semantic => TensionSeverity::Advisory,
@@ -294,6 +293,13 @@ impl TensionKind {
             self,
             TensionKind::DuplicateDefinition | TensionKind::ValueDisagreement
         )
+    }
+
+    /// Whether a tension of this kind is blocking in stable content whatever the pack says
+    /// (D-ME2HD): a pack that lowers it gets `W_PACK_SEVERITY` when it loads. True for
+    /// `unjustified_change` only.
+    pub fn blocks_in_stable(&self) -> bool {
+        matches!(self, TensionKind::UnjustifiedChange)
     }
 }
 

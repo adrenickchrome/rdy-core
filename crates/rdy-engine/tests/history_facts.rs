@@ -81,8 +81,9 @@ fn fork(r: &Rdy, root: &Path, name: &str) -> Rdy {
 }
 
 /// The kinds a copy carries into a holder: what a tag's history reaches.
-const COPIED: [u8; 8] = [
+const COPIED: [u8; 9] = [
     kinds::BLOCK,
+    kinds::ASSESSMENT,
     kinds::CHANGE,
     kinds::PROPOSAL,
     kinds::LANDING,
@@ -175,6 +176,7 @@ fn remove(r: &mut Rdy, target: String) {
             alt: None,
             relay: None,
             evidence: None,
+            assessment: None,
         })
         .unwrap();
     r.store_mut().set_held(true).unwrap();

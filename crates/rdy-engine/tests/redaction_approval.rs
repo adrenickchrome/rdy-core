@@ -684,6 +684,38 @@ fn rdx10_redaction_moves_are_logged_in_the_authorizing_batch() {
         ]),
     );
     let twin = id(&w.created["$t"]);
+    // rg5 (D-45RG6): the duplicate definition is an advisory tension of the version, so its
+    // author answers it before the version lands
+    let tension_items: Vec<String> = {
+        let plan =
+            p.r.read()
+                .change_plan(
+                    &plan::PlanQuery {
+                        view: Some("work".into()),
+                        max_tokens: Some(100_000),
+                        ..Default::default()
+                    },
+                    "work",
+                )
+                .unwrap();
+        serde_json::to_value(plan).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| i["kind"] == "tension")
+            .map(|i| i["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(tension_items.len(), 1, "{tension_items:?}");
+    let answers: Vec<plan::PlanAnswerInput> = tension_items
+        .into_iter()
+        .map(|item| plan::PlanAnswerInput {
+            item,
+            act: rdy_model::plan::PlanAct::Confirm,
+            reason: Some("the redaction removes the twin".into()),
+        })
+        .collect();
+    p.r.answer_plan(&writer(), "work", &answers).unwrap();
     let base =
         p.r.propose(&writer(), "work", "Glossary", Some("test summary"))
             .unwrap();

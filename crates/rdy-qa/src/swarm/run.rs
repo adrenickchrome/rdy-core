@@ -18,7 +18,12 @@
 //!   judge the open review requests (at most `REVIEWS`). A change bound to a member that lost its
 //!   set is excluded with what depends on it: its dependents by deps, and a change that cites a
 //!   block such an excluded change created (FW-AL1: losers are discarded by design); the person
-//!   accepts advice it is shown through the relay (ruling task-5.4).
+//!   accepts advice it is shown through the relay (ruling task-5.4). The agent answers the
+//!   view's change plan before each propose, as in the run, and again for a version that is not
+//!   ready for open plan items (`E_PLAN_OPEN`).
+//! - Before every approve, of the run and of the drain, the person accepts the version's
+//!   deferral card when the queue lists one (D-AAQ9Z), and the relay reads the version's change
+//!   plan (`version_plan`), so a check sees what the gate read.
 //!
 //! Around every landing the relay reads canon's blocking tensions before and after (ledger O2);
 //! a landing whose reply the kill cut is found by a read and audited the same way. The person
@@ -99,6 +104,8 @@ pub struct Outcome {
     pub served: Served,
     /// What the run's landing checks found.
     pub violations: Vec<String>,
+    /// The person's queue when its acts ended: the proposals it never landed, oldest first.
+    pub queued: Vec<String>,
     /// Holds `frozen`.
     _frozen_dir: tempfile::TempDir,
 }
@@ -154,8 +161,10 @@ fn canon_blocking(link: &mut Link) -> Option<Value> {
     Some(v)
 }
 
-/// Before landing `pref`: the relay reads the proposal's view, the view's effective base and
-/// canon's blocking tensions. `None` when the daemon died under a read.
+/// Before landing `pref`: the relay reads the proposal's view, the view's effective base,
+/// canon's blocking tensions and the version's change plan (a `version_plan` entry naming `pref`,
+/// whose reply holds the plan's `counts`: what the gate reads; a version that conflicts with
+/// canon has none, and the landing refuses it). `None` when the daemon died under a read.
 pub(crate) fn before_land(link: &mut Link, pref: &str) -> Option<Before> {
     let (mut view, mut advised) = (None, None);
     let mut e = link.entry("read");
@@ -189,6 +198,15 @@ pub(crate) fn before_land(link: &mut Link, pref: &str) -> Option<Before> {
         return None;
     }
     let canon = canon_blocking(link)?;
+    let mut e = link.entry("version_plan");
+    e.block = Some(pref.to_string());
+    let args = json!({"proposal": pref, "max_tokens": ALL});
+    let res = link.exec(e, "version_plan", "rdy_plan", args, |en, v| {
+        en.reply = Some(json!({"counts": v["counts"]}));
+    });
+    if matches!(res, Res::Lost) {
+        return None;
+    }
     Some(Before {
         view,
         base,
@@ -543,6 +561,7 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
         .map(|h| h.join().unwrap_or_else(|e| resume_unwind(e)))
         .collect();
     person.join().unwrap_or_else(|e| resume_unwind(e));
+    let queued = queue.lock().unwrap_or_else(PoisonError::into_inner).clone();
 
     // the freeze: no actor runs
     journal.record(Entry::new(MARKER, cfg.steps, FREEZE, Met::Ok));
@@ -611,6 +630,7 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
         dir: at.dir,
         served,
         violations,
+        queued,
         _frozen_dir: frozen_dir,
     }
 }
@@ -1061,6 +1081,14 @@ fn row_fits(row: &Value, kind: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The issue codes of a version that is not ready that the drain resolves (`Drain::resolve`).
+const RESOLVED_ISSUES: [&str; 4] = [
+    "E_CONFLICT_UNRESOLVED",
+    "E_BLOCKING_TENSION",
+    "E_PLAN_OPEN",
+    "E_BRIEF_REQUIRED",
+];
+
 /// A refusal of the gate: its code and the JSON `rdy approve` printed.
 struct Refusal {
     code: String,
@@ -1289,6 +1317,8 @@ impl Drain {
             if let Some((set, member)) = self.alternative(v) {
                 args["alternatives"] = json!({"set": set, "chosen": member});
             }
+            // the agent answers its view's change plan first, as it does in the run
+            agent::answer_plan(self.agent(i), v);
             let link = self.agent(i);
             let mut e = link.entry("propose");
             e.view = Some(v.to_string());
@@ -1621,6 +1651,10 @@ impl Drain {
         if let Some(digest) = before.advised.take() {
             self.accept(pref, &digest);
         }
+        // the version's deferral card, as the person accepts it in the run (D-AAQ9Z)
+        if !people::accept_deferrals(&mut self.relay, "agent:relay", pref, true) {
+            link_fail(&self.cfg, v, "accept_deferrals");
+        }
         let mut e = self.relay.entry("land");
         e.block = Some(pref.to_string());
         e.view = Some(before.view.clone());
@@ -1673,16 +1707,36 @@ impl Drain {
         Some(Refusal { code, body })
     }
 
-    /// The closed table of resolutions (ledger O5). Anything outside it fails the run. A
+    /// The closed table of resolutions (ledger O5). Anything outside it fails the run. An
+    /// `E_PROPOSAL_MOVED` with a fresh card (RULING F1) is approved again once; one with no
+    /// card leaves the next round to propose again. A
     /// version that is not ready (`E_PROPOSAL_NOT_READY`, D-ME2HD) is resolved only when each of
-    /// its issues is a conflict or a blocking tension: the conflicts first, when it has any; the
-    /// tensions on a later round. Any other issue code fails the run, as an outer
-    /// `E_VALIDATION` did. The cause issues carry no block or tension id, so the drain reads them
-    /// from the version (`pref`), the tensions its propose reply lists as refusing (`refusing`)
-    /// and the view's listing, never from the issues' text.
+    /// its issues is a conflict, a blocking tension, open change-plan items (`E_PLAN_OPEN`) or a
+    /// stable change with no briefing (`E_BRIEF_REQUIRED`): the conflicts first, when it has
+    /// any; the tensions on a later round. Each `E_BRIEF_REQUIRED` issue's block is briefed and
+    /// written again with the token. An `E_PLAN_OPEN` issue: the agent answers the view's plan
+    /// as it does before its own propose (`agent::answer_plan`), and the next propose binds the
+    /// answers (every propose of the drain answers the plan first too). Any other issue code
+    /// fails the run, as an outer `E_VALIDATION` did. The conflict and tension issues carry no
+    /// block or tension id, so the drain reads them from the version (`pref`), the tensions its
+    /// propose reply lists as refusing (`refusing`) and the view's listing, never from the
+    /// issues' text.
     fn resolve(&mut self, i: usize, v: &str, pref: &str, refusing: &BTreeSet<String>, r: &Refusal) {
         let issues: Vec<Value> = r.body["issues"].as_array().cloned().unwrap_or_default();
         match r.code.as_str() {
+            // RULING F1: a failed freshness check with a fresh card in `corrected`; the person
+            // approves the fresh card once, through the same `rdy approve`. A second fresh card
+            // in a row fails the run; any other refusal of it is resolved as its own
+            "E_PROPOSAL_MOVED" if r.body["corrected"]["card"].is_object() => {
+                if let Some(again) = self.land(v, pref) {
+                    if again.code == "E_PROPOSAL_MOVED"
+                        && again.body["corrected"]["card"].is_object()
+                    {
+                        self.no_rule(v, &again.code, "a second fresh card");
+                    }
+                    self.resolve(i, v, pref, refusing, &again);
+                }
+            }
             "E_PROPOSAL_MOVED" => {}
             "E_PROPOSAL_NOT_READY" => {
                 let codes: Vec<String> = issues
@@ -1694,19 +1748,47 @@ impl Drain {
                 }
                 if let Some(other) = codes
                     .iter()
-                    .find(|c| *c != "E_CONFLICT_UNRESOLVED" && *c != "E_BLOCKING_TENSION")
+                    .find(|c| !RESOLVED_ISSUES.contains(&c.as_str()))
                 {
                     self.no_rule(v, other, "land");
                 }
-                let version = self.version(i, v, pref, &r.code);
-                if codes.iter().any(|c| c == "E_CONFLICT_UNRESOLVED") {
+                let has = |code: &str| codes.iter().any(|c| c == code);
+                if has("E_CONFLICT_UNRESOLVED") {
+                    let version = self.version(i, v, pref, &r.code);
                     self.resolve_conflicts(i, v, &version, "E_CONFLICT_UNRESOLVED");
-                } else {
+                } else if has("E_BLOCKING_TENSION") {
+                    let version = self.version(i, v, pref, &r.code);
                     self.resolve_tensions(i, v, &version, refusing, "E_BLOCKING_TENSION");
+                }
+                for x in issues.iter().filter(|x| x["code"] == "E_BRIEF_REQUIRED") {
+                    let Some(b) = x["block"].as_str() else {
+                        self.no_rule(v, "E_BRIEF_REQUIRED", "an issue with no block")
+                    };
+                    self.rebrief(i, v, b);
+                }
+                if has("E_PLAN_OPEN") {
+                    agent::answer_plan(self.agent(i), v);
                 }
             }
             other => self.no_rule(v, other, "land"),
         }
+    }
+
+    /// A stable change of view `v` that records no briefing (`E_BRIEF_REQUIRED`, D-VF4RH, O3):
+    /// agent `i` briefs its block `b` in `v` and writes the block again with that token, its
+    /// body as `v` holds it, on the version the briefing gives.
+    fn rebrief(&mut self, i: usize, v: &str, b: &str) {
+        let body = self.body(i, b, v);
+        let ops = json!([{"op": "update", "id": b, "body": body}]);
+        self.write(
+            i,
+            v,
+            b,
+            ops,
+            "write",
+            "E_BRIEF_REQUIRED",
+            "a change with no briefing",
+        );
     }
 
     /// Version `pref` as agent `i` reads it (`rdy_read`, whole): its `proposal`. A cut reply

@@ -464,6 +464,10 @@ fn log_text(v: &Value) -> String {
             out.push_str(&line);
             out.push('\n');
         }
+        // D-ME2HD: the assessment the landing recorded (none for a re-affirmation landing)
+        if let Some(a) = row["assessment"].as_str() {
+            out.push_str(&format!("    assessment {}\n", hash_short(a)));
+        }
         let from: Vec<&str> = row["rebased_from"]
             .as_array()
             .into_iter()

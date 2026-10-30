@@ -53,12 +53,22 @@ fn project() -> (tempfile::TempDir, Rdy) {
 }
 
 fn put(r: &mut Rdy, view: &str, ops: Value) -> BTreeMap<String, String> {
+    put_j(r, view, ops, None)
+}
+
+/// `put` with `justification` on the write.
+fn put_j(
+    r: &mut Rdy,
+    view: &str,
+    ops: Value,
+    justification: Option<Justification>,
+) -> BTreeMap<String, String> {
     r.write(
         &writer(),
         WriteRequest {
             view: view.into(),
             ops: parse_ops(ops.as_array().unwrap().clone()).unwrap(),
-            justification: None,
+            justification,
             message: format!("write to {view}"),
         },
     )
@@ -508,7 +518,8 @@ fn rf11_trace_walks_lineage_premises_and_answers_once() {
 #[test]
 fn rf11_trace_uses_governing_routes_and_keeps_sources_separate() {
     let (_dir, mut r) = project();
-    let w = put(
+    // the section turns stable below, so its normative content is a justified write (D-ME2HD)
+    let w = put_j(
         &mut r,
         "work",
         json!([
@@ -532,6 +543,10 @@ fn rf11_trace_uses_governing_routes_and_keeps_sources_separate() {
             {"op": "create", "type": "claim", "id": "$kn", "parent": "$s", "body": "Nothing grounds this."},
             {"op": "create", "type": "claim", "id": "$kdr", "parent": "$draft", "body": "Draft words."}
         ]),
+        Some(Justification::Editorial {
+            class: EditorialClass::Clarify,
+            reason: "write the ledger rules".into(),
+        }),
     );
     // Y also affects K_y: one row, by the better route (implements)
     put(
@@ -573,6 +588,8 @@ fn rf11_trace_uses_governing_routes_and_keeps_sources_separate() {
             block: stable,
         }],
     );
+    // O23: the plan items are answered before the propose binds the plan
+    common::answer_open_items(&mut r, &writer(), "work");
     land(&mut r, "work", "Ledger rules");
     // a proposed decision and a stable claim it decides, in an open view
     let (pp, kp) = (nid("D", 900), nid("c", 900));

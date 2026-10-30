@@ -112,7 +112,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     (
         "E_BRIEF_REQUIRED",
         "a write touches stable content and cites no briefing, or one that does not cover the block",
-        "retry with the token of the briefing the error carries",
+        "retry with the token of the briefing the error carries\non a readiness issue: exclude the change (rdy_view exclude), rdy_brief the block, and write it again",
     ),
     (
         "E_BRIEF_STALE",
@@ -133,6 +133,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "W_CONFIG_UNKNOWN",
         "a config file (.rdy/local.yaml, the project config or the user config) holds a key rdy does not know (such as a typo), or a known key in a file where rdy does not read it; the warning names the file it belongs in; rdy ignores the key; reported by rdy config --show-origin, rdy status, every CLI command and rdy_session",
         "fix the key's spelling (the fix names the nearest known key), move it to the file the warning names, or remove it",
+    ),
+    (
+        "W_PACK_SEVERITY",
+        "a pack lowers unjustified_change",
+        "remove the unjustified_change severity from the pack",
     ),
     (
         "W_UNAPPLIED_DECISION",
@@ -419,6 +424,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         rdy_engine::carried_warning::W_STOP_BEFORE_REDACTION,
         "This store stops before redaction apply {apply} of its source, approved by {actor} at landing {landing}. It holds {held} removed payloads again, and {removed} stay removed.",
         "Propose the redaction of the listed targets again, and have a person approve it.",
+    ),
+    (
+        E_PLAN_OPEN,
+        "the version's change plan has open items on stable content or unanswered tension items",
+        "close or defer each item, and answer each tension item with confirm or dismiss: rdy_plan / rdy plan",
     ),
     (
         E_PLAN_ITEM,

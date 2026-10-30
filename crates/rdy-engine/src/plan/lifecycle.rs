@@ -12,12 +12,24 @@
 //! Its answers are cumulative and keep their own authors and content identities. The reply's
 //! [`PlanSummary`] and warnings come from that same assessment.
 //!
+//! When rdy's key change (K1) is written before the plan is computed (O1), the plan's tension
+//! ids are the ones every later plan of the version reads. An answer the author gave to a
+//! tension id from before that change is carried to the item of the same tension (the same kind
+//! on the same blocks), with its act and reason; an input that names no item after the carry is
+//! the unknown-item refusal, and one whose tension matches two items is not carried, so the item
+//! stays open. A recorded answer is copied, not moved: the earlier answer stays in the version's
+//! cumulative answers, naming no item.
+//!
 //! # Land
 //!
 //! A landing computes the selected version's complete outcome before anything is appended,
 //! from its recorded canon, its recorded HEADs and its bound plan's answers (an answer the view
 //! recorded after the propose is not the version's): each item's computed close, else its valid
-//! answer (confirm is confirmed, done is done, defer is deferred), else open. An acceptance
+//! answer (confirm is confirmed, done is done, defer is deferred, dismiss is dismissed), else
+//! open. Its tension items are those of its recorded canon too, so the seal holds the tension
+//! items the propose showed. A tension item has no open seal form (D-45RG6): a landing whose
+//! seal would hold an open one is not ready (`E_PROPOSAL_NOT_READY` with its `E_PLAN_OPEN`
+//! issue), and writes nothing. An acceptance
 //! change gives the landing a final version: an already-bound version's final version binds a
 //! plan of its own in the landing's batch, with the approved candidate's answers, assessment
 //! and HEADs. The seal names the landing and the version that landed, and carries the approved
@@ -29,10 +41,13 @@
 //! answer pointer; each item is its computed close, else open. Its final version binds no plan.
 use super::api::{
     ItemState, LiveItem, PlanAnswerInput, PlanCode, PlanCounts, PlanRow, StateCounts,
-    W_PLAN_ANSWER_LAPSED, capture_heads, live_chain, live_rows, prepare_plan_answers,
+    TENSION_DISPLAY_PREFIX, W_PLAN_ANSWER_LAPSED, capture_heads, live_chain, live_rows,
+    prepare_plan_answers,
 };
 use super::compute::{self, ComputedPlan};
 use crate::alt::AltPick;
+use crate::error::E_PLAN_OPEN;
+use crate::tensions::Tension;
 use crate::{RdyError, ReadState};
 use rdy_model::plan::{
     Plan, PlanAct, PlanAnswer, PlanHead, PlanKind, PlanOutcome, PlanSeal, SealedItem,
@@ -41,11 +56,14 @@ use rdy_model::{BlockId, Change, Hash, Proposal, Provenance};
 use rdy_schema::{Issue, Severity};
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-/// Open non-code items of a proposed version (p-S3NTW); advisory until M3.
+/// Open non-code items on drafts of a proposed version (p-S3NTW, D-FQ7AK): advice only.
 pub const W_PLAN_OPEN: &str = "W_PLAN_OPEN";
 /// The fix of [`W_PLAN_OPEN`].
 pub const PLAN_OPEN_FIX: &str = "close or defer each item: rdy_plan / rdy plan";
+/// The fix of `E_PLAN_OPEN` (D-ME2HD).
+pub const PLAN_GATE_FIX: &str = "close or defer each item, and answer each tension item with confirm or dismiss: rdy_plan / rdy plan";
 /// The most open items a proposal's summary lists.
 pub const PLAN_SUMMARY_ITEMS: usize = 200;
 
@@ -82,7 +100,8 @@ fn is_zero(n: &usize) -> bool {
 
 /// The change plan a proposed version bound, as the propose reply shows it: the counts over
 /// every item, code items included, the code files, and the first [`PLAN_SUMMARY_ITEMS`] open
-/// items in full-hash order.
+/// items in full-hash order. `gated` and `advised` are what [`plan_issues`] reads, counted over
+/// every item before the cut; no reply shows them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PlanSummary {
     pub open: usize,
@@ -94,6 +113,12 @@ pub struct PlanSummary {
     /// The open items left out past [`PLAN_SUMMARY_ITEMS`].
     #[serde(skip_serializing_if = "is_zero")]
     pub items_omitted: usize,
+    /// The open non-code items on stable content, and the open tension items (D-FQ7AK, D-45RG6).
+    #[serde(skip)]
+    pub gated: usize,
+    /// The open non-code items on drafts that are not tension items.
+    #[serde(skip)]
+    pub advised: usize,
 }
 
 impl Default for PlanSummary {
@@ -106,6 +131,8 @@ impl Default for PlanSummary {
             code: PlanCode::default(),
             items: vec![],
             items_omitted: 0,
+            gated: 0,
+            advised: 0,
         }
     }
 }
@@ -119,6 +146,9 @@ pub(crate) struct ProposalPlan {
     heads: Vec<PlanHead>,
     pub(crate) summary: PlanSummary,
     pub(crate) warnings: Vec<Issue>,
+    /// The plan computed for the candidate, for readiness on the same state (none with no
+    /// candidate).
+    pub(crate) computed: Option<compute::CarriedPlan>,
 }
 
 impl ProposalPlan {
@@ -137,21 +167,32 @@ impl ProposalPlan {
     }
 }
 
+/// The summary of `computed` with `answers` ([`assess`] without its warnings): what readiness's
+/// change-plan gate reads ([`plan_issues`]).
+pub(crate) fn summary_of(computed: &ComputedPlan, answers: &[PlanAnswer]) -> PlanSummary {
+    assess(computed, answers).0
+}
+
 /// The summary and the warnings of `computed` with `answers`: the counts and open items of the
 /// read rows, a lapse warning per lapsed answer (by item), then [`W_PLAN_OPEN`] when an open
-/// item is not a code item.
+/// non-code item on a draft is not a tension item ([`plan_issues`]'s warning: the open items on
+/// stable content and the tension items are readiness's `E_PLAN_OPEN`, D-FQ7AK).
 fn assess(computed: &ComputedPlan, answers: &[PlanAnswer]) -> (PlanSummary, Vec<Issue>) {
     let (rows, counts, mut notes) = live_rows(computed, answers);
     notes.sort_by_key(|(item, _)| *item);
     let mut open_items = vec![];
-    let mut open_docs = 0usize;
+    let (mut gated, mut advised) = (0usize, 0usize);
     for row in rows {
         let PlanRow::Live(item) = row else { continue };
         if item.state != ItemState::Open {
             continue;
         }
-        if item.kind != PlanKind::UpdateImplementation {
-            open_docs += 1;
+        match item.kind {
+            // D-ERKCP: a code item never counts
+            PlanKind::UpdateImplementation => {}
+            PlanKind::Tension => gated += 1,
+            _ if item.stable => gated += 1,
+            _ => advised += 1,
         }
         open_items.push(item);
     }
@@ -168,6 +209,8 @@ fn assess(computed: &ComputedPlan, answers: &[PlanAnswer]) -> (PlanSummary, Vec<
         },
         items: open_items,
         items_omitted: omitted,
+        gated,
+        advised,
     };
     let mut warnings: Vec<Issue> = notes
         .into_iter()
@@ -179,16 +222,44 @@ fn assess(computed: &ComputedPlan, answers: &[PlanAnswer]) -> (PlanSummary, Vec<
             fix: n.fix,
         })
         .collect();
-    if open_docs > 0 {
-        warnings.push(Issue {
+    warnings.extend(
+        plan_issues(&summary)
+            .into_iter()
+            .filter(|i| i.severity == Severity::Warning),
+    );
+    (summary, warnings)
+}
+
+/// The change-plan gate of `summary` (D-ME2HD, D-FQ7AK, D-45RG6): one [`E_PLAN_OPEN`] error that
+/// counts the open non-code items on stable content and the open tension items (`gated`), then
+/// one [`W_PLAN_OPEN`] warning that counts the other open non-code items, on drafts
+/// (`advised`). Each comes only when its count is above 0; a code item never counts (D-ERKCP).
+pub fn plan_issues(summary: &PlanSummary) -> Vec<Issue> {
+    let mut out = vec![];
+    if summary.gated > 0 {
+        out.push(plan_open_issue(summary.gated));
+    }
+    if summary.advised > 0 {
+        out.push(Issue {
             severity: Severity::Warning,
             code: W_PLAN_OPEN,
             block: None,
-            message: format!("{open_docs} change-plan items are open"),
+            message: format!("{} change-plan items are open", summary.advised),
             fix: PLAN_OPEN_FIX.into(),
         });
     }
-    (summary, warnings)
+    out
+}
+
+/// The [`E_PLAN_OPEN`] issue for `n` gated items.
+fn plan_open_issue(n: usize) -> Issue {
+    Issue {
+        severity: Severity::Error,
+        code: E_PLAN_OPEN,
+        block: None,
+        message: format!("{n} change-plan items are open"),
+        fix: PLAN_GATE_FIX.into(),
+    }
 }
 
 /// Prepares the plan a propose of `view` binds (see the module docs), writing nothing; its new
@@ -208,6 +279,27 @@ pub(crate) fn prepare_proposal_plan(
     candidate: Option<&[Change]>,
     inputs: &[PlanAnswerInput],
 ) -> Result<ProposalPlan, RdyError> {
+    prepare_proposal_plan_keyed(st, None, by, view, follows, candidate, inputs)
+}
+
+/// The state and the changes of a version before rdy's key change was written: the tension ids
+/// its author saw and answered (see the module docs).
+pub(crate) struct BeforeKeyChange<'a> {
+    pub(crate) st: &'a ReadState,
+    pub(crate) changes: &'a [Change],
+}
+
+/// [`prepare_proposal_plan`] on `st`, where rdy's key change is written and in `candidate`,
+/// with the answers to the tension items of `before` carried (see the module docs).
+pub(crate) fn prepare_proposal_plan_keyed(
+    st: &ReadState,
+    before: Option<BeforeKeyChange<'_>>,
+    by: &Provenance,
+    view: &str,
+    follows: Option<&Hash>,
+    candidate: Option<&[Change]>,
+    inputs: &[PlanAnswerInput],
+) -> Result<ProposalPlan, RdyError> {
     let heads = capture_heads(st)?;
     let unbound = match follows {
         Some(v) => st.reader().plan_of_proposal(v, st.seq())?.is_none(),
@@ -217,14 +309,28 @@ pub(crate) fn prepare_proposal_plan(
     let (stable, prev) = chain.as_ref().map_or((None, None), |c| c.next_links());
     let prior: &[PlanAnswer] = chain.as_ref().map_or(&[], |c| &c.plan.answers);
     let first = chain.as_ref().map_or(&heads, |c| &c.first_heads);
-    let (answers, summary, warnings) = match candidate {
+    let (answers, summary, warnings, computed) = match candidate {
         Some(changes) => {
-            let computed = compute::compute_changes(st, changes, st.canon_head(), &heads, first)?;
-            let answers = prepare_plan_answers(st, by, view, &computed, prior, inputs)?;
+            let computed =
+                compute::compute_changes(st, view, changes, st.canon_head(), &heads, first)?;
+            let (prior, inputs) = match &before {
+                Some(b) => carry_answers(b, view, &computed, prior, inputs)?,
+                None => (prior.to_vec(), inputs.to_vec()),
+            };
+            let answers = prepare_plan_answers(st, by, view, &computed, &prior, &inputs)?;
             let (summary, warnings) = assess(&computed, &answers);
-            (answers, summary, warnings)
+            let carried = compute::CarriedPlan::of(
+                st,
+                view,
+                changes,
+                st.canon_head(),
+                &heads,
+                first,
+                computed,
+            );
+            (answers, summary, warnings, Some(carried))
         }
-        None => (prior.to_vec(), PlanSummary::default(), vec![]),
+        None => (prior.to_vec(), PlanSummary::default(), vec![], None),
     };
     Ok(ProposalPlan {
         stable,
@@ -233,7 +339,98 @@ pub(crate) fn prepare_proposal_plan(
         heads,
         summary,
         warnings,
+        computed,
     })
+}
+
+/// `prior` and `inputs` with each answer to a tension item of `before` that `computed` has
+/// under another id carried to it (see the module docs).
+fn carry_answers(
+    before: &BeforeKeyChange<'_>,
+    view: &str,
+    computed: &ComputedPlan,
+    prior: &[PlanAnswer],
+    inputs: &[PlanAnswerInput],
+) -> Result<(Vec<PlanAnswer>, Vec<PlanAnswerInput>), RdyError> {
+    let now: BTreeMap<Hash, &Tension> = computed.tensions.iter().map(|t| (t.id, &**t)).collect();
+    // each earlier tension that the plan no longer has, with the tensions of the same kind on
+    // the same blocks the plan has: it carries to the one such tension only
+    let mut carried: BTreeMap<Hash, (Arc<Tension>, Vec<&Tension>)> = BTreeMap::new();
+    for t in compute::tension_set(before.st, view, before.changes)? {
+        if now.contains_key(&t.id) {
+            continue;
+        }
+        let same: Vec<&Tension> = computed
+            .tensions
+            .iter()
+            .filter(|n| compute::shape(n) == compute::shape(&t))
+            .map(|n| &**n)
+            .collect();
+        carried.insert(t.id, (t, same));
+    }
+    if carried.is_empty() {
+        return Ok((prior.to_vec(), inputs.to_vec()));
+    }
+    let item_of = |t: &Tension| compute::tension_candidate(t, None);
+    // the view's recorded answers: one that names an earlier item with its tension's vkey is
+    // copied to the later item, unless that item has an answer already. The earlier answer
+    // stays: a chain's answers are cumulative, so the version that continues the chain keeps
+    // each answer its predecessor holds (the store's chain rule); it names no item now, so it
+    // closes nothing
+    let mut answers: BTreeMap<Hash, PlanAnswer> =
+        prior.iter().map(|a| (a.item, a.clone())).collect();
+    for (from, to) in carried.values() {
+        let ([to], Some(old)) = (to.as_slice(), item_of(from)) else {
+            continue;
+        };
+        let Some(new) = item_of(to) else { continue };
+        if answers.contains_key(&new.id) {
+            continue;
+        }
+        if let Some(a) = answers
+            .get(&old.id)
+            .filter(|a| a.cause == from.vkey)
+            .cloned()
+        {
+            answers.insert(
+                new.id,
+                PlanAnswer {
+                    item: new.id,
+                    cause: new.cause_hash,
+                    ..a
+                },
+            );
+        }
+    }
+    // the request's answers: a tn- id that names no item now but one earlier tension
+    let mut out = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let Some(hex) = input
+            .item
+            .strip_prefix(TENSION_DISPLAY_PREFIX)
+            .filter(|h| !now.keys().any(|id| id.to_string().starts_with(*h)))
+        else {
+            out.push(input.clone());
+            continue;
+        };
+        let mut from = carried
+            .iter()
+            .filter(|(id, _)| id.to_string().starts_with(hex));
+        match (from.next(), from.next()) {
+            (Some((_, (_, to))), None) => match to.as_slice() {
+                [to] => out.push(PlanAnswerInput {
+                    item: format!("{TENSION_DISPLAY_PREFIX}{}", to.id),
+                    ..input.clone()
+                }),
+                // no item: the unknown-item refusal names it
+                [] => out.push(input.clone()),
+                // two items: not carried, so each stays open
+                _ => {}
+            },
+            _ => out.push(input.clone()),
+        }
+    }
+    Ok((answers.into_values().collect(), out))
 }
 
 /// What a landing seals, computed before anything is appended (see the module docs).
@@ -311,12 +508,38 @@ pub(crate) fn prepare_landing_plan(
             (None, vec![], heads.clone(), heads)
         }
     };
-    let computed = compute::compute(st, &p.view, &p.changes, p.canon_at, &heads, &first)?;
+    // the version's tension items are those it was made with (ruling task-8 F1): the seal and
+    // this guard read the set its readiness read
+    let fixed = compute::fixed_tensions(st, version)?;
+    let computed = compute::compute(
+        st,
+        &p.view,
+        &p.changes,
+        p.canon_at,
+        fixed.as_ref(),
+        &heads,
+        &first,
+    )?;
+    // a tension item seals only as updated, confirmed or dismissed (D-ME2HD, D-45RG6): an open
+    // one is an unanswered tension, so the version is not ready. Readiness refuses it first; this
+    // stays as the guard (rulings/task-5.md F1(a))
+    let unanswered = computed
+        .items
+        .iter()
+        .filter(|c| c.kind == PlanKind::Tension && outcome_of(c, &answers) == PlanOutcome::Open)
+        .count();
+    if unanswered > 0 {
+        let pref = crate::gate::resolve_in(st, &version.to_string())?;
+        return Err(crate::gate::proposal_not_ready(
+            &pref,
+            vec![plan_open_issue(unanswered)],
+        ));
+    }
     let items: Vec<SealedItem> = computed
         .items
         .iter()
-        .map(|c| {
-            let outcome = outcome_of(c, &answers);
+        .map(|c| (c, outcome_of(c, &answers)))
+        .map(|(c, outcome)| {
             let deferred =
                 outcome == PlanOutcome::Deferred && c.kind != PlanKind::UpdateImplementation;
             SealedItem {
@@ -390,5 +613,195 @@ impl LandingPlan {
             }),
         };
         (bound, Some(seal))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::E_PLAN_ITEM;
+    use crate::gate::changes_of;
+    use crate::{Rdy, Session, WriteRequest, WriteResult, parse_ops};
+    use rdy_model::Role;
+    use serde_json::{Value, json};
+
+    fn writer() -> Session {
+        Session::human("human:qa".into(), Role::Writer).unwrap()
+    }
+
+    fn put(r: &mut Rdy, view: &str, ops: Value) -> WriteResult {
+        r.write(
+            &writer(),
+            WriteRequest {
+                view: view.into(),
+                ops: parse_ops(ops.as_array().unwrap().clone()).unwrap(),
+                justification: None,
+                message: format!("write to {view}"),
+            },
+        )
+        .unwrap_or_else(|e| panic!("write to {view}: {e}"))
+    }
+
+    /// View `a`: a deprecated doc with claim `x`, and a draft claim `y` citing it (one advisory
+    /// tension of the version). Returns `x`.
+    fn tension_of_a(r: &mut Rdy) -> String {
+        let w = put(
+            r,
+            "a",
+            json!([
+                {"op": "create", "type": "doc", "id": "$o", "fields": {"name": "old", "title": "Old", "doc_type": "overview", "lifecycle": "deprecated"}},
+                {"op": "create", "type": "section", "id": "$s", "parent": "$o", "fields": {"title": "Old rules"}},
+                {"op": "create", "type": "claim", "id": "$x", "parent": "$s", "body": "X is the old rule."},
+                {"op": "create", "type": "doc", "id": "$n", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}},
+                {"op": "create", "type": "section", "id": "$t", "parent": "$n", "fields": {"title": "Drafts"}}
+            ]),
+        );
+        let (x, t) = (w.created["$x"].clone(), w.created["$t"].clone());
+        put(
+            r,
+            "a",
+            json!([{"op": "create", "type": "claim", "id": "$y", "parent": t, "body": format!("Y follows {{{{{x}}}}}.")}]),
+        );
+        x
+    }
+
+    fn tension_ids(p: &ProposalPlan) -> Vec<String> {
+        p.summary
+            .items
+            .iter()
+            .filter(|i| i.kind == PlanKind::Tension)
+            .map(|i| i.id.clone())
+            .collect()
+    }
+
+    /// Rulings task-5 F3 (O1): with rdy's key change written before the plan, an answer to the
+    /// tension id the author saw before it moves to the item of the same tension, from the
+    /// view's recorded answers and from the request, with its act and reason.
+    #[test]
+    fn rg5_a_tension_answer_carries_across_the_key_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let x = tension_of_a(&mut r);
+        let by = writer().provenance();
+        let st = r.read();
+        let pre_changes = changes_of(&st, &st.included("a")).unwrap();
+        let pre = prepare_proposal_plan(&st, &by, "a", None, Some(&pre_changes), &[]).unwrap();
+        drop(st);
+        let ids = tension_ids(&pre);
+        assert_eq!(ids.len(), 1, "{:#?}", pre.summary);
+        let tn = ids[0].clone();
+        // the author answers it on the view
+        let confirm = |reason: &str| {
+            [PlanAnswerInput {
+                item: tn.clone(),
+                act: PlanAct::Confirm,
+                reason: Some(reason.into()),
+            }]
+        };
+        r.answer_plan(&writer(), "a", &confirm("x still guides y"))
+            .unwrap();
+        let before = r.read();
+
+        // the key change: x, a side of the tension, gets a new key, as rdy's K1 writes it
+        put(
+            &mut r,
+            "a",
+            json!([{"op": "update", "id": x, "fields": {"key": "old.x-2"}}]),
+        );
+        let after = r.read();
+        let changes = changes_of(&after, &after.included("a")).unwrap();
+        // the tension has a new id now: the recorded answer no longer answers it, and the
+        // earlier id names no item
+        let plain = prepare_proposal_plan(&after, &by, "a", None, Some(&changes), &[]).unwrap();
+        let post = tension_ids(&plain);
+        assert_eq!(post.len(), 1, "{:#?}", plain.summary);
+        assert_ne!(post[0], tn);
+        let Err(e) =
+            prepare_proposal_plan(&after, &by, "a", None, Some(&changes), &confirm("again"))
+        else {
+            panic!("the earlier id names an item");
+        };
+        assert_eq!(e.code, E_PLAN_ITEM, "{e}");
+        let later = compute::tension_set(&after, "a", &changes).unwrap();
+        assert_eq!(later.len(), 1);
+        let item = compute::tension_candidate(&later[0], None).unwrap();
+
+        // carried: the recorded answer, then the request's, each closes the later item
+        let before_key = || BeforeKeyChange {
+            st: &before,
+            changes: &pre_changes,
+        };
+        for (inputs, reason) in [
+            (vec![], "x still guides y"),
+            (
+                confirm("x guides y until it goes").to_vec(),
+                "x guides y until it goes",
+            ),
+        ] {
+            let pp = prepare_proposal_plan_keyed(
+                &after,
+                Some(before_key()),
+                &by,
+                "a",
+                None,
+                Some(&changes),
+                &inputs,
+            )
+            .unwrap();
+            assert!(tension_ids(&pp).is_empty(), "{:#?}", pp.summary);
+            assert_eq!(
+                serde_json::to_value(pp.summary.by_kind["tension"]).unwrap(),
+                json!({"open": 0, "closed": 1, "deferred": 0})
+            );
+            // the earlier answer stays beside the carried one (a chain's answers are
+            // cumulative); it names no item now
+            assert_eq!(pp.answers.len(), 2, "{:#?}", pp.answers);
+            let a = pp
+                .answers
+                .iter()
+                .find(|a| a.item == item.id)
+                .expect("the carried answer");
+            assert_eq!((a.item, a.cause), (item.id, later[0].vkey));
+            assert_eq!(a.act, PlanAct::Confirm);
+            assert_eq!(a.reason.as_deref(), Some(reason));
+        }
+    }
+    /// Rulings task-5 F1(a), Amendment 1 (fix round 1 of Task 8): the landing guard. A bound
+    /// version whose plan leaves a tension item open does not seal: `prepare_landing_plan`
+    /// itself refuses with `E_PROPOSAL_NOT_READY` and the item's `E_PLAN_OPEN` issue, and
+    /// writes nothing. Readiness refuses such a version first on every approval path, so only
+    /// this test reaches the guard.
+    #[test]
+    fn rg8_the_landing_guard_refuses_an_open_tension_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+        tension_of_a(&mut r);
+        let info = r
+            .propose(&writer(), "a", "a", Some("a cites the old rule"))
+            .unwrap();
+        let pref = r.resolve_proposal(&info.r#ref).unwrap();
+        let st = r.read();
+        let p = st.reader().proposal(&pref.version).unwrap();
+        assert!(
+            st.reader()
+                .plan_of_proposal(&pref.version, st.seq())
+                .unwrap()
+                .is_some(),
+            "a bound version"
+        );
+        let seq = st.seq();
+        let Err(e) = prepare_landing_plan(&st, &pref.version, &p, &writer().provenance(), None)
+        else {
+            panic!("the guard lets an open tension item into the seal");
+        };
+        assert_eq!(e.code, crate::error::E_PROPOSAL_NOT_READY, "{e}");
+        assert_eq!(e.message, format!("{} is not ready: 1 issue", info.r#ref));
+        assert_eq!(e.issues, vec![plan_open_issue(1)]);
+        assert_eq!(
+            (e.issues[0].code, e.issues[0].message.as_str()),
+            (crate::error::E_PLAN_OPEN, "1 change-plan items are open")
+        );
+        drop(st);
+        assert_eq!(r.read().seq(), seq, "the guard wrote nothing");
     }
 }

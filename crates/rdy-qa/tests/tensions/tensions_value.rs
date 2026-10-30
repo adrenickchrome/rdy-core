@@ -15,7 +15,8 @@ fn world() -> (
     rdy_model::BlockId,
 ) {
     let (d, mut r) = project();
-    let w = put(
+    // the seed creates stable normative content: a justified write (D-ME2HD)
+    let w = put_j(
         &mut r,
         "seed",
         json!([
@@ -24,6 +25,10 @@ fn world() -> (
             {"op": "create", "type": "section", "id": "$n", "parent": "$d", "fields": {"title": "Notes", "lifecycle": "draft"}},
             {"op": "create", "type": "value", "id": "$v", "parent": "$s", "fields": {"name": "Retry limit", "value": "5", "unit": "s"}}
         ]),
+        Some(rdy_model::Justification::Editorial {
+            class: rdy_model::EditorialClass::Clarify,
+            reason: "seed the test world".into(),
+        }),
     );
     land(&mut r, "seed").unwrap();
     (

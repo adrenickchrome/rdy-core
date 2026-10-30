@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EditorialParams {
     /// typo, restructure or clarify.
@@ -16,7 +16,7 @@ pub struct EditorialParams {
 }
 
 /// rf8 (D-4WC6R, D-XC9B9): a write's `reflects` justification.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReflectsParams {
     /// The sources (S-…) the change follows: an id, key or path each, or the $name of a source
@@ -28,7 +28,7 @@ pub struct ReflectsParams {
 }
 
 /// llst1: one text, or a list of them.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum OneOrMany {
     One(String),

@@ -1,13 +1,13 @@
 //! sg1: the landing audit re-checks what the gate refuses, from public data.
 use rdy_engine::alt::AltMemberInput;
-use rdy_engine::tensions::{TensionKind, TensionSeverity, tension_label};
+use rdy_engine::tensions::{SideRef, TensionKind, TensionSeverity, tension_label};
 use rdy_engine::*;
-use rdy_qa::edit_loop::{brief_of, stable_spec, write_cited_as};
+use rdy_qa::edit_loop::{brief_of, spec_doc, stable_spec, write_cited_as};
 use rdy_qa::fixtures::*;
 use rdy_qa::intake::{TEST_SUMMARY, assert_not_ready, refused_ref};
 use rdy_qa::landing_audit::{Landed, audit, landed_of};
 use rdy_qa::packs::qa_project;
-use rdy_qa::tensions::{ag, change_of, of_kind, one, put, upd};
+use rdy_qa::tensions::{ag, change_of, cite, of_kind, one, put, upd};
 use serde_json::json;
 
 fn rules(v: &[rdy_qa::invariants::Violation]) -> Vec<&'static str> {
@@ -133,22 +133,72 @@ fn sg1_a_blocking_tension_alone_is_flagged_and_a_dismissed_or_advisory_one_is_no
     );
     land(&mut r, "a").unwrap();
 
-    // the default pack: the same tension is advisory, and the audit does not flag it
+    // the default pack: the same tension is blocking in stable content too (D-ME2HD), so the
+    // audit flags it and the gate refuses
     let (_d2, mut r) = project();
     let s = stable_spec(&mut r);
     let tok = brief_of(&r, &Scope::Canon, &[&s.c]).base.token;
     let w = write_cited_as(&mut r, &ag("a"), "a", upd(&s.c, "C changed."), Some(&tok)).unwrap();
     assert_eq!(
         one(&r, TensionKind::UnjustifiedChange).severity,
-        TensionSeverity::Advisory
+        TensionSeverity::Blocking
     );
     let landed = Landed {
         view: "a".into(),
         changes: vec![change_of(&w)],
         alternative: None,
     };
-    assert!(audit(&r.read(), &landed).is_empty());
-    land(&mut r, "a").unwrap();
+    assert_eq!(rules(&audit(&r.read(), &landed)), vec!["blocking_landed"]);
+    let e = land(&mut r, "a").unwrap_err();
+    assert_not_ready(&r, &e, &refused_ref(&e), &[E_BLOCKING_TENSION]);
+
+    // task 3 fix round 1: an advisory tension (a deprecated reference stays advisory under
+    // rdy-standard) with every side in canon or the landing: the audit does not flag it, and
+    // the landing lands
+    let (_d3, mut r) = project();
+    let s = spec_doc(&mut r);
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": s.section.to_string(),
+        "fields": {"lifecycle": "deprecated"}}]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let w = put(&mut r, "b", cite(&s.section, &s.c));
+    assert_eq!(
+        one(&r, TensionKind::DeprecatedReference).severity,
+        TensionSeverity::Advisory
+    );
+    let mine = change_of(&w);
+    let landed = Landed {
+        view: "b".into(),
+        changes: vec![mine],
+        alternative: None,
+    };
+    let before = r.read();
+    let advisory_all_in = before
+        .landing_tensions("b", &landed.changes)
+        .unwrap()
+        .into_iter()
+        .filter(|t| {
+            t.severity == TensionSeverity::Advisory
+                && t.sides.iter().all(|s| match s {
+                    SideRef::Canon { .. } => true,
+                    SideRef::Change(h) => *h == mine,
+                    SideRef::Intent { .. } => false,
+                })
+        })
+        .count();
+    assert!(
+        advisory_all_in >= 1,
+        "precondition: an advisory tension with every side in canon or the landing"
+    );
+    assert!(
+        audit(&before, &landed).is_empty(),
+        "an advisory tension never refuses"
+    );
+    land(&mut r, "b").unwrap();
 }
 
 /// Fix round 1 (probe P2): the audit re-checks gconf1 on the landing's own changes, not on the

@@ -235,9 +235,12 @@ fn rdx9_a_redacted_project_round_trips_and_clones() {
     let scratch = tempfile::tempdir().unwrap();
     let file = scratch.path().join("p.rdydump");
     let d = a.read().dump(&file).unwrap();
+    // the store's own features: a landing writes an assessment, so the `assessment` feature is
+    // active (ruling task-10 B, Amendment 1)
+    let features = a.store().features().clone();
     assert_eq!(
         (d.dump_format, d.store_format.clone()),
-        (DUMP_FORMAT, DumpStore::Features(baseline_features()))
+        (DUMP_FORMAT, DumpStore::Features(features.clone()))
     );
     let bytes = std::fs::read(&file).unwrap();
     assert!(
@@ -249,7 +252,7 @@ fn rdx9_a_redacted_project_round_trips_and_clones() {
     let s = load(&file, &loaded).unwrap();
     assert_eq!(
         (s.dump_format, s.store_format.clone()),
-        (4, DumpStore::Features(baseline_features()))
+        (4, DumpStore::Features(features))
     );
     assert_eq!(segments(&loaded), segments(src.dir.path()));
     keeps_the_source(src.dir.path(), &src_recs, &loaded, "load");

@@ -124,6 +124,7 @@ fn cp16_local_card_field_rule_is_shared() {
             alt: None,
             relay: None,
             evidence: Some(e.clone()),
+            assessment: None,
         });
         match (allowed, prepared) {
             (true, Ok(p)) => {

@@ -1641,6 +1641,7 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
     ("new profile", "needs a publication profile"),
     ("new source", "needs a source file"),
     ("plan defer", "needs an open plan item"),
+    ("plan dismiss", "needs an open plan item"),
     ("plan done", "needs an open plan item"),
     ("publication", "needs a publication profile"),
     ("publish", "uploads a site to a host"),
@@ -1770,6 +1771,11 @@ fn cli_runtime() -> Value {
             advice["card_hash"].as_str().unwrap(),
         ],
     );
+    // RULING F1: the release pack was set after the batch was proposed, so the first approval
+    // refuses with a fresh card (`E_PROPOSAL_MOVED`); the person reviews it and approves again
+    let moved = p("approve", &["approve", &proposal]);
+    assert_eq!(moved["code"], "E_PROPOSAL_MOVED", "{moved}");
+    assert!(moved["corrected"]["card"].is_object(), "{moved}");
     p("approve", &["approve", &proposal]);
     p("tag", &["tag", "v1.1.0", "-m", "Second"]);
     p("log", &["log", "--limit", "2"]);
@@ -3617,6 +3623,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/propose/stdout/blocking",
     "cli/propose/stdout/conflicts",
     "cli/propose/stdout/consequences",
+    "cli/propose/stdout/issues",
     "cli/propose/stdout/plan/items",
     "cli/propose/stdout/tensions",
     "cli/propose/stdout/warnings",
@@ -3674,7 +3681,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_propose/ok/blocking",
     "mcp/rdy_propose/ok/conflicts",
     "mcp/rdy_propose/ok/consequences",
-    "mcp/rdy_propose/ok/plan/items",
+    "mcp/rdy_propose/ok/issues",
     "mcp/rdy_review_next/ok/case/entities",
     "mcp/rdy_review_next/refused/issues",
     "mcp/rdy_review_submit/refused/issues",

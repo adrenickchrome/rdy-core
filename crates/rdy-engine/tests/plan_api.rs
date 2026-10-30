@@ -217,6 +217,7 @@ fn counts(open: usize, closed: usize, deferred: usize, by_kind: &[(&str, [usize;
         "rejustify",
         "update",
         "update_implementation",
+        "tension",
     ] {
         let [o, c, d] = by_kind
             .iter()
@@ -335,7 +336,7 @@ fn linked_repo(project: &Path) -> tempfile::TempDir {
 
 /// O17: every selector's reply has exactly scope, plan, items, counts, code and notes; a live
 /// item is {id, kind, subject, cause, edge, state}, a sealed one has outcome, a decision's rows
-/// are {landing, version, items, outcomes} newest first, and counts name all five kinds.
+/// are {landing, version, items, outcomes} newest first, and counts name all six kinds.
 #[test]
 fn cp8_all_four_selectors_have_closed_shapes() {
     let (_d, mut r) = project();
@@ -485,7 +486,7 @@ fn cp8_all_four_selectors_have_closed_shapes() {
                "counts": sealed_counts, "code": {"files": 1}, "notes": []})
     );
 
-    // a decision: its seals newest first, each with all ten outcomes counted
+    // a decision: its seals newest first, each with all eleven outcomes counted
     edit(&mut r, "w2", &s.c, "C stands firm.");
     let (version2, _) = raw_propose(&mut r, "w2");
     let l2 = raw_land(&mut r, &version2);
@@ -505,8 +506,9 @@ fn cp8_all_four_selectors_have_closed_shapes() {
     put_plan_frames(r.store_mut(), &seal2);
     r.invalidate();
     let outcomes = |deferred: usize, updated: usize, open: usize| {
-        json!({"committed": 0, "confirmed": 0, "deferred": deferred, "done": 0, "open": open,
-               "reaffirmed": 0, "relinked": 0, "repinned": 0, "retired": 0, "updated": updated})
+        json!({"committed": 0, "confirmed": 0, "deferred": deferred, "dismissed": 0, "done": 0,
+               "open": open, "reaffirmed": 0, "relinked": 0, "repinned": 0, "retired": 0,
+               "updated": updated})
     };
     let dq = PlanQuery {
         decision: Some(s.a.clone()),
@@ -1782,6 +1784,22 @@ fn cp8_input_limits_have_exact_text() {
     );
 }
 
+/// O10: the assessment propose writes for the ready `version`; a version the store writes alone
+/// has none, and its approval is not ready.
+fn assess(r: &mut Rdy, version: Hash) {
+    let pref = r.resolve_proposal(&version.to_string()).unwrap();
+    let st = r.read();
+    let p = st.reader().proposal(&version).unwrap();
+    let c = rdy_engine::readiness::Candidate::stored(&st, pref, p).unwrap();
+    let got = rdy_engine::readiness::assess(&st, &c, st.require_up_to_date()).unwrap();
+    let a = got
+        .assessment
+        .unwrap_or_else(|| panic!("not ready: {:#?}", got.readiness.issues));
+    drop(st);
+    r.store_mut().put_assessment(&a).unwrap();
+    r.invalidate();
+}
+
 /// Fix round 1: a retained state reads the plan as it was published. A later answer and a later
 /// landing move neither its plan ref nor its chain's landing status: the plan ref is captured
 /// with the state, and a landing counts only when its frame lies before the state's sequence.
@@ -1833,6 +1851,7 @@ fn cp8_retained_reads_keep_their_plan_across_answers_and_landings() {
     };
     let bh = put_plan_frames(r.store_mut(), &bound);
     r.invalidate();
+    assess(&mut r, version);
     let captured = r.read();
     let before = read_at(&captured);
     assert_eq!(before["plan"], bh.to_string());
@@ -1895,6 +1914,7 @@ fn cp8_answer_only_successors_keep_the_last_bound_proposal() {
     };
     let bh = put_plan_frames(r.store_mut(), &bound);
     r.invalidate();
+    assess(&mut r, version);
     r.fsck().unwrap();
     let pv = plan(
         &r,
@@ -2037,4 +2057,51 @@ fn cp8_fix1_a_plan_write_reads_only_its_own_views_refs() {
     let _ = r.read();
     assert_eq!(reads() - at, all as u64);
     assert_eq!(whole(&r, "w3")["plan"], h.to_string());
+}
+
+/// rg15 (ruling task-15 F3): a plan read of a view whose changes conflict with canon refuses
+/// with the conflict's code, message and fix, as the read of a version on an earlier canon does;
+/// no plan read refuses with the write's `E_STALE_BASE`. Views x and y edit claim a from one
+/// base, and y lands: the read of x's view, the read of x's version proposed on canon's head
+/// after that, and an answer to x's plan each refuse alike.
+#[test]
+fn rg15_a_plan_read_of_a_conflicting_view_refuses_with_the_conflict_code() {
+    let (_d, mut r) = project();
+    let s = spec(&mut r);
+    edit(&mut r, "x", &s.a, "A holds 31 days.");
+    edit(&mut r, "y", &s.a, "A holds 32 days.");
+    land(&mut r, "y");
+    let message = format!(
+        "no consequences while {} is in conflict. Write it from the version you want (rdy_context lists the sides), then propose again.",
+        s.a
+    );
+    let fix = "write the block from the version you want (rdy_context lists the sides), or exclude one side's change";
+    let on_head = plan_of(&r, &view_q("x")).unwrap_err();
+    expect_err(on_head, "E_CONFLICT_UNRESOLVED", &message, fix);
+    // an answer to the view's plan reads the same plan, and refuses the same way
+    let refused = r
+        .answer_plan(
+            &writer(),
+            "x",
+            &[ans(
+                &pi(&s.a, &s.b, PlanKind::Confirm),
+                PlanAct::Confirm,
+                Some("holds"),
+            )],
+        )
+        .unwrap_err();
+    expect_err(refused, "E_CONFLICT_UNRESOLVED", &message, fix);
+    // the version proposed now records canon's head, and its plan read refuses alike
+    let px = r
+        .propose(&writer(), "x", "x", Some(common::TEST_SUMMARY))
+        .unwrap();
+    let version = plan_of(
+        &r,
+        &PlanQuery {
+            proposal: Some(px.r#ref.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    expect_err(version, "E_CONFLICT_UNRESOLVED", &message, fix);
 }

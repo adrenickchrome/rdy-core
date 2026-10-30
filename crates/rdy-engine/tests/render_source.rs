@@ -115,6 +115,7 @@ fn remove(r: &mut Rdy, targets: &[String]) {
             alt: None,
             relay: None,
             evidence: None,
+            assessment: None,
         })
         .unwrap();
     r.store_mut().set_held(true).unwrap();
@@ -1270,13 +1271,9 @@ fn hpb5_stream_limits_precede_payload_allocation() {
     let start = {
         let mut b = b"RDYSYNC\n".to_vec();
         b.extend_from_slice(&2u32.to_le_bytes());
-        let hp = 4
-            + rdy_store::format::baseline_features().to_json().len()
-            + 16
-            + 1
-            + 32
-            + 4
-            + header.prerequisites.len() * 33;
+        // the source store's own manifest, as the header holds it (ruling task-10 B)
+        let hp =
+            4 + header.features.to_json().len() + 16 + 1 + 32 + 4 + header.prerequisites.len() * 33;
         b.len() + 37 + hp
     };
     claim.truncate(start);

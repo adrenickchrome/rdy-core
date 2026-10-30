@@ -146,6 +146,7 @@ fn pver1_landing_an_older_version_is_proposal_moved_and_writes_nothing() {
             alt: None,
             relay: None,
             evidence: None,
+            assessment: None,
         })
         .unwrap_err();
     assert!(
@@ -161,6 +162,7 @@ fn pver1_landing_an_older_version_is_proposal_moved_and_writes_nothing() {
             alt: None,
             relay: None,
             evidence: None,
+            assessment: None,
         })
         .unwrap();
     let l = s.landing(&out.landing).unwrap();
@@ -211,6 +213,7 @@ fn pver1_a_relayed_landing_records_the_relay_and_assurance_relayed() {
                 choice: None,
                 card_hash: None,
             }),
+            assessment: None,
         })
         .unwrap();
     let l = s.landing(&out.landing).unwrap();
@@ -252,6 +255,7 @@ fn evk1_an_elicited_approval_is_local_and_a_relay_needs_a_relay_kind() {
         alt: None,
         relay,
         evidence,
+        assessment: None,
     };
     let end = s.log_end();
     let e = s.land_atomic(req(Some(relay.clone()), None)).unwrap_err();

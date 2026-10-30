@@ -28,10 +28,20 @@ fn with_w() -> (tempfile::TempDir, Rdy, Spec) {
     (d, r, s)
 }
 
-/// Lands an update of `id` from view `o`, briefed in canon.
+/// Lands an update of `id` from view `o`, briefed in canon. The update rewords stable normative
+/// content, so it is justified as a clarification (D-ME2HD).
 fn land_update(r: &mut Rdy, id: &BlockId, body: &str) {
     let t = brief_of(r, &Scope::Canon, &[id]).base.token;
-    write_cited(r, "o", upd(id, body), Some(&t)).unwrap();
+    let req = WriteRequest {
+        view: "o".into(),
+        ops: serde_json::from_value(upd(id, body)).unwrap(),
+        justification: Some(rdy_model::Justification::Editorial {
+            class: rdy_model::EditorialClass::Clarify,
+            reason: "reword".into(),
+        }),
+        message: String::new(),
+    };
+    r.write_briefed(&writer(), req, Some(t)).unwrap();
     land(r, "o").unwrap();
 }
 

@@ -35,9 +35,13 @@ use std::sync::Mutex;
 
 const CANARY: &str = "ZEBRA-7731";
 const ACCESS: &str = "rdyh_a_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd2F6gYf";
-/// The bytes of a batch with no object record and one prerequisite: prelude 12, header frame
-/// 37 + 57 + 183 (the baseline manifest, ok4) + 33, trailer frame 37 + 48.
-const EMPTY_BATCH: u64 = 407;
+/// The bytes of a batch with no object record and one prerequisite, from a store of `features`:
+/// prelude 12, header frame 37 + 57 + the manifest (183 for the baseline one, ok4) + 33, trailer
+/// frame 37 + 48. A landing writes an assessment, so a project's own manifest also names the
+/// `assessment` feature (ruling task-10 B).
+fn empty_batch(features: &rdy_store::format::StoreFeatures) -> u64 {
+    12 + 37 + 57 + features.to_json().len() as u64 + 33 + 37 + 48
+}
 const WIDE: BatchLimits = BatchLimits {
     bytes: 2_147_483_648,
     records: 1_000_000,
@@ -149,6 +153,7 @@ fn remove(r: &mut Rdy, target: &str) {
             alt: None,
             relay: None,
             evidence: None,
+            assessment: None,
         })
         .unwrap();
     r.store_mut().set_held(true).unwrap();
@@ -812,19 +817,20 @@ fn hpb11_all_known_still_sends_one_valid_empty_batch() {
     assert_eq!(held.len(), keys.len());
     let hub = FakeHub::new(held);
     let push = PushId::new();
+    let empty = empty_batch(r.store().features());
     let (sent, asked) = send(&mut history, &hub, &push, WIDE);
     assert_eq!(
         sent.unwrap(),
         HistorySent {
             batches: 1,
             records: 0,
-            bytes: EMPTY_BATCH,
+            bytes: empty,
         }
     );
     assert_eq!(asked, 2, "one known step and one objects step");
     let bodies = hub.bodies();
     assert_eq!(bodies.len(), 1);
-    assert_eq!(bodies[0].len() as u64, EMPTY_BATCH);
+    assert_eq!(bodies[0].len() as u64, empty);
     let report = check_batch(&bodies[0][..]).unwrap();
     assert!(report.keys.is_empty());
     assert_eq!(report.records, 0);
@@ -855,7 +861,7 @@ fn hpb11_all_known_still_sends_one_valid_empty_batch() {
         &hub,
         &push,
         BatchLimits {
-            bytes: EMPTY_BATCH - 1,
+            bytes: empty - 1,
             records: 1,
         },
     )
@@ -1051,7 +1057,7 @@ fn hpb11_batch_limits_count_framing_and_fail_without_publish() {
     }
 
     // the smallest byte limit that sends: one record alone fills its batch exactly
-    let (mut low, mut high) = (EMPTY_BATCH, total);
+    let (mut low, mut high) = (empty_batch(r.store().features()), total);
     while low < high {
         let mid = (low + high) / 2;
         let limits = BatchLimits {

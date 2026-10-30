@@ -280,6 +280,8 @@ fn di5_each_exception_kind_stands_beside_the_batch() {
         },
     );
     put(&mut r, "other", upd(&b.spec.a, "A as other has it."));
+    // O23: the new tension items are answered before the propose binds the plan
+    rdy_qa::intake::answer_open_items(&mut r, &rdy_qa::fixtures::writer(), BATCH_VIEW);
     let (r, report) = propose_reported(d.path(), r, BATCH_VIEW, BATCH_TITLE, Some(BATCH_SUMMARY));
     let pref = report["ref"].as_str().unwrap().to_string();
     let q = pending(&r);
@@ -476,7 +478,11 @@ fn di5_the_card_facts_come_from_the_store() {
         fact(i, "Base"),
         format!("canon at {}, current", head.short())
     );
-    assert!(fact(i, "Tensions").ends_with("advisory, answers not recorded yet"));
+    // D-45RG6: the advisory tension shows its answer, the one `batch_project` recorded before the
+    // propose (`OPEN_ITEM_REASON`, act confirm)
+    let tensions = fact(i, "Tensions");
+    assert!(tensions.contains(" advisory: tn-"), "{tensions}");
+    assert!(tensions.ends_with("(confirm: test: checked)"), "{tensions}");
     put(
         &mut r,
         "elsewhere",

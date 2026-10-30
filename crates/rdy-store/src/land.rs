@@ -43,7 +43,8 @@ pub struct AltLanding {
 
 /// What to land: the proposal version the approver named, an optional acceptance change to add to
 /// it, the approver, the alternative chosen (if any), the relay that carried the approval (if
-/// any) and how the approval was obtained (if recorded).
+/// any), how the approval was obtained (if recorded) and the stored assessment of the approved
+/// version the landing records (D-SDSV2; if any).
 #[derive(Clone, Debug)]
 pub struct LandRequest {
     pub proposal: Hash,
@@ -52,6 +53,7 @@ pub struct LandRequest {
     pub alt: Option<AltLanding>,
     pub relay: Option<Relay>,
     pub evidence: Option<ApprovalEvidence>,
+    pub assessment: Option<Hash>,
 }
 
 /// One view a landing rebased: the changes that dropped out of it (they landed) and the conflicts
@@ -220,6 +222,7 @@ impl Store {
             alt: None,
             relay,
             evidence,
+            assessment: None,
         };
         self.land_frames(LandBase::Fresh(Box::new(prepared)), req, &|_| {})
     }
@@ -410,10 +413,34 @@ impl Store {
             approved_version: Some(req.proposal),
             rebased_from: vec![],
             evidence: req.evidence,
-            assessment: None,
+            assessment: req.assessment,
             policy: None,
             read_identity: None,
         };
+        // the assessment it names: held, of the approved version and on an ancestor of the
+        // canon it lands on (the carried bindings, `carried_records::validate_refs`)
+        if let Some(h) = landing.assessment {
+            if !self.has_kind(kinds::ASSESSMENT, &h)? {
+                return Err(StoreError::NotFound(h));
+            }
+            let frame = crate::codec::item(kinds::LANDING, &landing)?;
+            let key = crate::object_refs::ObjectKey {
+                kind: kinds::LANDING,
+                hash: Hash::of(&frame.1),
+            };
+            let mut source = crate::state::PendingFrames {
+                store: crate::carried_records::StoreObjects(self),
+                batch: &items,
+                last: &frame,
+            };
+            if let Some(reason) = crate::carried_records::validate_refs(&mut source, key)? {
+                return Err(crate::carried_records::refusal(
+                    &key.hash,
+                    kinds::LANDING,
+                    reason,
+                ));
+            }
+        }
         alter(&mut landing);
         // 6a. the redaction applies of the carriers it lands, checked before anything is written
         let applies =

@@ -2,11 +2,13 @@
 //! record. The stored review layout stays as it was.
 use rdy_engine::engine::Local;
 use rdy_engine::pending::PendingQuery;
+use rdy_engine::plan::api::{ItemState, PlanAnswerInput, PlanRow};
 use rdy_engine::semantic::case::case_hash;
 use rdy_engine::semantic::submit::{CitationRequest, ReviewSubmitRequest};
 use rdy_engine::tensions::api::{TensionsRequest, run_tensions};
 use rdy_engine::{Engine, OpInput, Rdy, Session, W_REDACTION_QUOTES_MESSAGE, WriteRequest};
 use rdy_model::Role;
+use rdy_model::plan::{PlanAct, PlanKind};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
@@ -75,6 +77,27 @@ fn rf2_citations_reach_every_review_reply() {
         .unwrap();
     let reply = serde_json::to_string(&info).unwrap();
     assert!(!reply.contains("findings"), "{reply}");
+    // O23 (D-45RG6): the advised tension is a tension item; its author answers it before the
+    // propose binds the plan
+    let open: Vec<PlanAnswerInput> = r
+        .read()
+        .view_plan("a")
+        .unwrap()
+        .items
+        .iter()
+        .filter_map(|row| match row {
+            PlanRow::Live(i) if i.kind == PlanKind::Tension && i.state == ItemState::Open => {
+                Some(PlanAnswerInput {
+                    item: i.id.clone(),
+                    act: PlanAct::Confirm,
+                    reason: Some("test: checked".into()),
+                })
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(open.len(), 1, "{open:?}");
+    r.answer_plan(&w, "a", &open).unwrap();
     // proposal show
     let p = r
         .propose(&w, "a", "a", Some("Two claims that disagree."))

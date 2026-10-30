@@ -8,12 +8,15 @@
 //!   entry of act `brief`, and a second write after `E_BRIEF_STALE` is a second entry.
 //! - A write names the change it made in `change`, the block it wrote or created in `block`,
 //!   and, for an update, the version it was made from in `base`.
-//! - `propose`, `land` and `accept_advice` name the proposal ref `P-x@n` in `block`; an `Ok`
-//!   `propose` entry's `reply` is `{alternatives}`, the choice it made (null: none). `alt_create`
-//!   names the agent's view in `view` and the other member's view in `block`. An `Ok` `include`
-//!   entry's `reply` is `{included: [<change>]}`. A `land` the person skips because the
-//!   proposal was made before its view's set names that proposal too. `dismiss` names
-//!   the tension label in `block`. No other act puts anything but a block there.
+//! - Before a `propose` of a live view the agent answers its change plan (`answer_plan`): a
+//!   `plan` entry per page read and one `plan_answer` entry, each naming the view in `view`.
+//! - `propose`, `land`, `accept_advice`, `version_plan`, `pending` and `accept_deferrals` name
+//!   the proposal ref `P-x@n` in `block`; an `Ok` `propose` entry's `reply` is
+//!   `{alternatives}`, the choice it made (null: none). `alt_create` names the agent's view in
+//!   `view` and the other member's view in `block`. An `Ok` `include` entry's `reply` is
+//!   `{included: [<change>]}`. A `land` the person skips because the proposal was made before
+//!   its view's set names that proposal too. `dismiss` names the tension label in `block`. No
+//!   other act puts anything but a block there.
 //! - A pick that resolves to nothing is journaled `Skipped` after a read of a seed block. An act
 //!   that finds nothing to do is journaled `Skipped` with a `Skip` reason and no call of its own
 //!   (ruling task-4.1): `propose`, `repin`, `include`, `exclude` and `write_no_brief` read the
@@ -75,7 +78,14 @@ pub const REVIEW_BATCH: usize = 16;
 /// It also holds the landing turn: an act that decides from a read of the agent's view (a
 /// precondition, ruling task-4.1) holds a read turn from that read to its call, and the person's
 /// `rdy approve` holds the write turn, so canon never moves between an agent's read and the call
-/// that relies on it. Every other call races freely.
+/// that relies on it.
+///
+/// And it holds the plan turn: an agent that answers its change plan holds it alone, from the
+/// plan read to the answers (`plan_turn`), and every other act of an actor that can change a
+/// tension holds a shared turn (`act_turn`), so no item the read listed changes before the
+/// answers name it (D-ME2HD: a tension item's id moves with its sides). A landing needs none: an
+/// agent answers inside its propose, which holds the read turn. An actor takes the landing turn
+/// before the plan turn, never the other way. Every other call races freely.
 #[derive(Default)]
 pub struct KillGate {
     epoch: Mutex<u32>,
@@ -84,6 +94,7 @@ pub struct KillGate {
     /// Set by the run just before it kills the daemon (`killing`).
     killing: AtomicBool,
     turn: RwLock<()>,
+    plan: RwLock<()>,
 }
 
 impl KillGate {
@@ -125,6 +136,18 @@ impl KillGate {
     /// An agent's turn for an act that decides from a read: no landing runs while it is held.
     pub fn read_turn(&self) -> RwLockReadGuard<'_, ()> {
         self.turn.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// An agent's turn to answer its change plan: no other act that can change a tension runs
+    /// while it is held.
+    pub fn plan_turn(&self) -> RwLockWriteGuard<'_, ()> {
+        self.plan.write().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// An actor's turn for an act that can change a tension: no plan is answered while it is
+    /// held.
+    pub fn act_turn(&self) -> RwLockReadGuard<'_, ()> {
+        self.plan.read().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The daemon was killed and may start again: the generation moves to its next number and
@@ -452,6 +475,85 @@ fn persisted_after(
         Res::Lost if ack => None,
         _ => old,
     }
+}
+
+/// The budget of a whole plan read (`PLAN_MAX_TOKENS`); a cut read goes on with its `next`.
+pub(crate) const PLAN_ALL: usize = 100_000;
+
+/// The act and the reason an agent answers an open plan item of `kind` with (D-ME2HD; the acts
+/// `allowed_acts` gives each kind, `plan/compute.rs`): `confirm` for a confirm item, `defer` for
+/// an update, a rejustify and a re-affirm item, `confirm` for a tension item. `None` for a code
+/// item (`update_implementation`): it never gates, so it stays open.
+pub(crate) fn plan_answer_for(kind: &str) -> Option<(&'static str, &'static str)> {
+    match kind {
+        "confirm" => Some(("confirm", "swarm: checked")),
+        "update" | "rejustify" | "reaffirm" => Some(("defer", "swarm: later")),
+        "tension" => Some(("confirm", "swarm: accepted")),
+        _ => None,
+    }
+}
+
+/// Answers each open item of `view`'s change plan that gates or warns (D-ME2HD, D-45RG6), in one
+/// `rdy_plan` call, by its kind (`plan_answer_for`). It reads the plan whole first: one `plan`
+/// entry per page, naming the view. The answers are one `plan_answer` entry naming the view,
+/// whose reply lists each answer with its item's kind (`{answers: [{item, kind, act, reason}]}`).
+/// It holds the plan turn throughout (`KillGate::plan_turn`), so the items it read are the items
+/// it answers. With nothing to answer it makes no second call. A view whose changes conflict
+/// with canon has no plan (the read's `E_CONFLICT_UNRESOLVED`, a row of the table), and a call
+/// the kill cuts ends it too: the version proposed next is not ready, and the drain answers its
+/// plan once it resolves it.
+pub(crate) fn answer_plan(link: &mut Link, view: &str) {
+    // from the read to the answers, no other act changes a tension (`KillGate::plan_turn`)
+    let gate = link.gate.clone();
+    let _turn = gate.plan_turn();
+    let mut open: Vec<(String, String)> = vec![];
+    let mut args = json!({"view": view, "max_tokens": PLAN_ALL});
+    loop {
+        let mut e = link.entry("plan");
+        e.view = Some(view.to_string());
+        let mut page = None;
+        link.exec(e, "plan", "rdy_plan", args, |en, v| {
+            en.reply = Some(json!({"counts": v["counts"]}));
+            page = Some(v.clone());
+        });
+        let Some(page) = page else { return };
+        for i in page["items"].as_array().into_iter().flatten() {
+            if i["state"] == "open"
+                && let (Some(id), Some(kind)) = (i["id"].as_str(), i["kind"].as_str())
+            {
+                open.push((id.to_string(), kind.to_string()));
+            }
+        }
+        match page["next"].as_str() {
+            Some(next) => args = json!({"page": next, "max_tokens": PLAN_ALL}),
+            None => break,
+        }
+    }
+    let sent: Vec<Value> = open
+        .iter()
+        .filter_map(|(item, kind)| {
+            let (act, reason) = plan_answer_for(kind)?;
+            Some(json!({"item": item, "kind": kind, "act": act, "reason": reason}))
+        })
+        .collect();
+    if sent.is_empty() {
+        return;
+    }
+    let answers: Vec<Value> = sent
+        .iter()
+        .map(|a| json!({"item": a["item"], "act": a["act"], "reason": a["reason"]}))
+        .collect();
+    let mut e = link.entry("plan_answer");
+    e.view = Some(view.to_string());
+    // the entry names what it sent, refused or not
+    e.reply = Some(json!({ "answers": sent }));
+    link.exec(
+        e,
+        "plan_answer",
+        "rdy_plan",
+        json!({"view": view, "answers": answers, "max_tokens": PLAN_ALL}),
+        |_, _| {},
+    );
 }
 
 /// The tension labels of a proposal's advised entries (`rdy_read P-x@n`'s `proposal.advised`):
@@ -790,6 +892,8 @@ impl Agent {
         );
         let gate = self.link.gate.clone();
         let _turn = reads_first.then(|| gate.read_turn());
+        // a propose answers the plan in its own turn first, then takes this one for its call
+        let _act = (!matches!(act, Act::Propose)).then(|| gate.act_turn());
         match act {
             Act::Brief { target } => self.brief_act(target),
             Act::Write { target, stable } => self.write_act(target, *stable),
@@ -1599,24 +1703,25 @@ impl Agent {
         }
     }
 
-    /// Proposes the oldest view of a marked claim not yet proposed, else the agent's view.
+    /// Proposes the oldest view of a marked claim not yet proposed, else the agent's view. A live
+    /// view's change plan is answered first (`answer_plan`), so the version binds the answers.
     fn propose(&mut self) {
-        let (contra, view) = loop {
+        let (contra, view, closed) = loop {
             let contra = self.contra_views.first().cloned();
             let view = contra.clone().unwrap_or_else(|| self.view.clone());
-            let nothing = match self.show(&view) {
+            let (nothing, closed) = match self.show(&view) {
                 Shown::Lost => return,
-                Shown::Missing => true,
+                Shown::Missing => (true, false),
                 Shown::View {
                     closed: false,
                     changes,
                     ..
-                } => changes.is_empty(),
+                } => (changes.is_empty(), false),
                 // a closed view is refused by the call, and the table allows that refusal
-                Shown::View { .. } => false,
+                Shown::View { .. } => (false, true),
             };
             match (nothing, &contra) {
-                (false, _) => break (contra, view),
+                (false, _) => break (contra, view, closed),
                 // a marked claim the kill cut never made its view: the agent's own view is next
                 (true, Some(_)) => {
                     self.contra_views.remove(0);
@@ -1624,6 +1729,12 @@ impl Agent {
                 (true, None) => return self.skip("propose", Skip::NothingToPropose),
             }
         };
+        if !closed {
+            answer_plan(&mut self.link, &view);
+        }
+        // the propose's own call can change a tension (a key change rdy adds)
+        let gate = self.link.gate.clone();
+        let _act = gate.act_turn();
         let title = format!("{view} step {}", self.link.step);
         let mut args = json!({"title": title, "summary": title, "view": view});
         if contra.is_none()

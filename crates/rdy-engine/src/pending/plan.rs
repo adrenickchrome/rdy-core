@@ -25,10 +25,13 @@ use super::reaffirm::ReaffirmMember;
 use crate::gate::ProposalRef;
 use crate::plan::api::{PlanCounts, capture_heads, live_rows};
 use crate::plan::compute::{self, ComputedPlan};
+use crate::plan::lifecycle::{PlanSummary, summary_of};
+use crate::readiness::PlanSource;
 use crate::{RdyError, ReadState};
 use rdy_model::plan::{PlanAct, PlanAnswer, PlanKind};
 use rdy_model::{BlockId, Hash, Proposal};
 use serde::Serialize;
+use std::collections::BTreeSet;
 
 /// The title of a deferral card is `Deferrals in P-x@n`; its why is this line.
 pub const DEFERRAL_WHY: &str = "these items stay open after this proposal lands";
@@ -106,46 +109,178 @@ fn answer_wire<S: serde::Serializer>(a: &PlanAnswer, s: S) -> Result<S::Ok, S::E
     .serialize(s)
 }
 
-/// A version's change plan as its cards read it: the plan its record binds (none before store
-/// 17), the counts over every item, code items included, and the deferred non-code items.
-pub(super) struct VersionPlan {
+/// A version's change plan as its cards and its readiness read it: the plan its record binds
+/// (none before store 17), the counts over every item, code items included, the deferred
+/// non-code items, the summary with the bound answers (`PlanSummary`, what the change-plan gate
+/// reads), and the blocks its items name (each subject that is a block, and each cause; O18).
+/// For the assessment (O17, O18): the (tension id, item) of each tension item a bound answer
+/// answers, and the (subject, cause) of each reaffirm and confirm item whose subject is a block.
+pub(crate) struct VersionPlan {
     pub(super) bound: Option<Hash>,
     pub(super) counts: PlanCounts,
     pub(super) deferrals: Vec<DeferralBinding>,
+    pub(crate) summary: PlanSummary,
+    pub(crate) blocks: BTreeSet<BlockId>,
+    pub(crate) tension_answers: Vec<(Hash, Hash)>,
+    /// The act and reason of each answer in `tension_answers`, by tension id (D-45RG6).
+    pub(crate) tension_acts: Vec<(Hash, PlanAct, Option<String>)>,
+    pub(crate) suspect_items: Vec<(BlockId, BlockId)>,
 }
 
-/// The change plan of version record `p`, whose bound plan is `bound`: a bound version's from
-/// its recorded canon, changes and HEADs against its chain's first HEADs, with its bound plan's
-/// answers (an answer the view recorded after the propose is not the version's); an unbound
-/// one's (O19) from the HEADs captured once as both ends, with no answer and so no deferral.
+/// The change plan of version `version` (record `p`), whose plan comes from `source`, its tension
+/// items those it was made with (ruling task-8 F1, [`compute::fixed_tensions`]): a bound version's
+/// from its recorded canon, changes and HEADs against its chain's first HEADs, with its bound
+/// plan's answers (an answer the view recorded after the propose is not the version's); an
+/// unbound one's (O19) from the HEADs captured once as both ends, with no answer and so no
+/// deferral.
 pub(super) fn version_plan(
     st: &ReadState,
+    version: &Hash,
     p: &Proposal,
-    bound: Option<Hash>,
+    source: &PlanSource,
 ) -> Result<VersionPlan, RdyError> {
     let reader = st.reader();
-    let Some(h) = bound else {
-        let heads = capture_heads(st)?;
-        let computed = compute::compute(st, &p.view, &p.changes, p.canon_at, &heads, &heads)?;
-        let (_, counts, _) = live_rows(&computed, &[]);
-        return Ok(VersionPlan {
-            bound: None,
-            counts,
-            deferrals: vec![],
-        });
+    let fixed = compute::fixed_tensions(st, version)?;
+    let read;
+    let (h, plan, carried) = match source {
+        PlanSource::Bound(None) => {
+            let heads = capture_heads(st)?;
+            let computed = compute::compute(
+                st,
+                &p.view,
+                &p.changes,
+                p.canon_at,
+                fixed.as_ref(),
+                &heads,
+                &heads,
+            )?;
+            let (_, counts, _) = live_rows(&computed, &[]);
+            return Ok(VersionPlan {
+                bound: None,
+                counts,
+                deferrals: vec![],
+                summary: summary_of(&computed, &[]),
+                blocks: blocks_of(&computed),
+                tension_answers: vec![],
+                tension_acts: vec![],
+                suspect_items: suspect_items(&computed),
+            });
+        }
+        PlanSource::Bound(Some(h)) => {
+            read = reader.plan(h)?;
+            (*h, &read, None)
+        }
+        PlanSource::InHand {
+            plan,
+            hash,
+            computed,
+        } => (*hash, plan, computed.as_ref()),
     };
-    let plan = reader.plan(&h)?;
     let first = match plan.stable {
         Some(s) => reader.plan(&s)?.heads,
         None => plan.heads.clone(),
     };
-    let computed = compute::compute(st, &p.view, &p.changes, p.canon_at, &plan.heads, &first)?;
-    let (_, counts, _) = live_rows(&computed, &plan.answers);
+    // the plan the propose computed for these inputs on this state, else computed now
+    let fresh;
+    let computed = match carried.and_then(|c| {
+        c.on(
+            st,
+            &p.view,
+            &p.changes,
+            p.canon_at,
+            fixed.as_ref(),
+            &plan.heads,
+            &first,
+        )
+    }) {
+        Some(c) => c,
+        None => {
+            fresh = compute::compute(
+                st,
+                &p.view,
+                &p.changes,
+                p.canon_at,
+                fixed.as_ref(),
+                &plan.heads,
+                &first,
+            )?;
+            &fresh
+        }
+    };
+    let (_, counts, _) = live_rows(computed, &plan.answers);
     Ok(VersionPlan {
         bound: Some(h),
         counts,
-        deferrals: deferrals(&computed, &plan.answers),
+        deferrals: deferrals(computed, &plan.answers),
+        summary: summary_of(computed, &plan.answers),
+        blocks: blocks_of(computed),
+        tension_answers: tension_answers(computed, &plan.answers),
+        tension_acts: tension_acts(computed, &plan.answers),
+        suspect_items: suspect_items(computed),
     })
+}
+
+/// The (tension id, item) of each tension item of `computed` that one of `answers` (sorted by
+/// item) answers: no computed close, and an answer that names the item with the tension's
+/// current vkey (O5, O17).
+fn tension_answers(computed: &ComputedPlan, answers: &[PlanAnswer]) -> Vec<(Hash, Hash)> {
+    let mut out = vec![];
+    for c in &computed.items {
+        if c.kind != PlanKind::Tension || c.close.is_some() {
+            continue;
+        }
+        let Ok(i) = answers.binary_search_by(|a| a.item.cmp(&c.id)) else {
+            continue;
+        };
+        let a = &answers[i];
+        if a.subject != c.subject_hash || a.cause != c.cause_hash {
+            continue;
+        }
+        if let Ok(id) = c.subject.parse::<Hash>() {
+            out.push((id, c.id));
+        }
+    }
+    out
+}
+
+/// The (tension id, act, reason) of each answer [`tension_answers`] finds.
+fn tension_acts(
+    computed: &ComputedPlan,
+    answers: &[PlanAnswer],
+) -> Vec<(Hash, PlanAct, Option<String>)> {
+    tension_answers(computed, answers)
+        .into_iter()
+        .filter_map(|(id, item)| {
+            let i = answers.binary_search_by(|a| a.item.cmp(&item)).ok()?;
+            Some((id, answers[i].act, answers[i].reason.clone()))
+        })
+        .collect()
+}
+
+/// The (subject, cause) of each reaffirm and confirm item of `computed` whose subject is a
+/// block: the items whose subject can be suspect (O18).
+fn suspect_items(computed: &ComputedPlan) -> Vec<(BlockId, BlockId)> {
+    computed
+        .items
+        .iter()
+        .filter(|c| matches!(c.kind, PlanKind::Reaffirm | PlanKind::Confirm))
+        .filter_map(|c| Some((BlockId::parse(&c.subject).ok()?, c.cause.clone())))
+        .collect()
+}
+
+/// The blocks the items of `computed` name: each subject that is a block id (never a code path
+/// or a tension id), and each cause (O18).
+fn blocks_of(computed: &ComputedPlan) -> BTreeSet<BlockId> {
+    let mut out = BTreeSet::new();
+    for c in &computed.items {
+        out.insert(c.cause.clone());
+        if !matches!(c.kind, PlanKind::UpdateImplementation | PlanKind::Tension)
+            && let Ok(b) = BlockId::parse(&c.subject)
+        {
+            out.insert(b);
+        }
+    }
+    out
 }
 
 /// The valid deferred non-code items of `computed` with `answers` (sorted by item), in full item

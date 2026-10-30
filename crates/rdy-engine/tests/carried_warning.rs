@@ -271,6 +271,9 @@ fn carry(dir: &Path, specs: &[Spec]) -> Vec<(Hash, RedactionCarried)> {
             Ok(())
         })
         .unwrap();
+    // the aside store's own features: a landing writes an assessment, so the `assessment`
+    // feature is active (ruling task-10 B)
+    let features = s.features().clone();
     drop(s);
     let mut i = rdy_store::ingest::Ingest::create(&store).unwrap();
     for (n, b) in batches.iter().enumerate() {
@@ -287,10 +290,8 @@ fn carry(dir: &Path, specs: &[Spec]) -> Vec<(Hash, RedactionCarried)> {
     }
     let only: Vec<RedactionCarried> = records.iter().map(|(_, r)| r.clone()).collect();
     i.append_carried(&residues, &only).unwrap();
-    i.upgrade(&rdy_store::format::DumpStore::Features(
-        rdy_store::format::baseline_features(),
-    ))
-    .unwrap();
+    i.upgrade(&rdy_store::format::DumpStore::Features(features))
+        .unwrap();
     i.finish().unwrap();
     records
 }

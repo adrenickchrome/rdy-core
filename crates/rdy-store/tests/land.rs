@@ -83,6 +83,7 @@ fn atom1_a_landing_with_an_acceptance_is_one_write_and_its_records_agree() {
             alt: None,
             relay: None,
             evidence: None,
+            assessment: None,
         })
         .unwrap();
     assert_eq!(s.write_count(), writes + 1, "one batch");

@@ -168,6 +168,8 @@ fn tgat1_advisory_tensions_never_refuse() {
         one(&r, TensionKind::DuplicateDefinition).severity,
         TensionSeverity::Advisory
     );
+    // D-45RG6: an advisory tension needs the author's answer, never a refusal of its own
+    rdy_qa::intake::answer_open_items(&mut r, &writer(), "a");
     let pa = propose(&mut r, "a");
     approve(&mut r, &pa).unwrap();
 }
@@ -737,6 +739,8 @@ fn tgat1_a_landing_only_form_is_listed_with_its_proposal() {
     let t2 = tok(&r);
     let wb = write_cited_as(&mut r, &ag("b"), "b", term(&s.section, "fee"), Some(&t2)).unwrap();
     let cb = change_of(&wb);
+    // O23: the plan items are answered, so the refusal is the blocking tension alone
+    rdy_qa::intake::answer_open_items(&mut r, &writer(), "b");
     let pb = propose(&mut r, "b");
     let refusing: Vec<String> = pb
         .tensions
@@ -1001,7 +1005,14 @@ fn msw21_propose_judges_the_proposals_net_change() {
         "{:?}",
         sub.tensions
     );
-    assert!(sub.tensions.iter().all(|t| t.refuses == Some(false)));
+    // blocking in stable content (D-ME2HD): the subset's unjustified change refuses
+    assert!(
+        sub.tensions
+            .iter()
+            .all(|t| t.refuses == Some(t.kind == TensionKind::UnjustifiedChange)),
+        "{:?}",
+        sub.tensions
+    );
     let full = propose(&mut r, "a");
     assert!(sides(&full).is_empty(), "{:?}", full.tensions);
 }

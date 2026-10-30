@@ -416,6 +416,30 @@ fn on_disk(dir: &Path, needle: &[u8]) -> bool {
         .any(|e| find(&std::fs::read(e.unwrap().path()).unwrap(), needle, 0).is_some())
 }
 
+/// The frames on disk whose payload holds `needle`, as (logical kind, hash).
+fn frames_holding(dir: &Path, needle: &[u8]) -> Vec<(u8, Hash)> {
+    let mut out = vec![];
+    for (name, start, end, kind, hash) in frames_on_disk(dir) {
+        let bytes = std::fs::read(dir.join(".rdy/store/segments").join(&name)).unwrap();
+        if find(&bytes[start..end], needle, 0).is_some() {
+            out.push((rdy_store::codec::logical_kind(kind), hash));
+        }
+    }
+    out
+}
+
+/// The ASSESSMENT records a request's report lists as `erasable: false`, by hash (ruling
+/// task-10 Amendment 1, item 4: a selected canary may stay in exactly these records' bytes).
+fn kept_assessments(report: &Value) -> BTreeSet<Hash> {
+    report["inside"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["kind"] == "assessment" && r["erasable"] == false)
+        .map(|r| r["record"].as_str().unwrap().parse().unwrap())
+        .collect()
+}
+
 /// Each frame of each segment file: (file, payload start, payload end, kind, hash).
 fn frames_on_disk(dir: &Path) -> Vec<(String, usize, usize, u8, Hash)> {
     let mut out = vec![];
@@ -448,8 +472,20 @@ fn canaries_only_in_selected_payloads(dir: &Path, req: &Redaction, picture: &[u8
         .iter()
         .map(|s| (s.kind, s.hash))
         .collect();
+    // an ASSESSMENT record the report lists as not erasable may hold one, by hash (ruling
+    // task-10 Amendment 1, item 4)
+    let kept: BTreeSet<Hash> = req
+        .manifest
+        .inside
+        .iter()
+        .filter(|r| r.kind == ImpactKind::Assessment && !r.erasable)
+        .map(|r| r.record.parse().unwrap())
+        .collect();
     let frames = frames_on_disk(dir);
     for (name, start, end, kind, hash) in &frames {
+        if rdy_store::codec::logical_kind(*kind) == kinds::ASSESSMENT && kept.contains(hash) {
+            continue;
+        }
         let bytes = std::fs::read(dir.join(".rdy/store/segments").join(name)).unwrap();
         let payload = &bytes[*start..*end];
         for needle in SELECTED.iter().map(|c| c.as_bytes()).chain([picture]) {
@@ -1174,9 +1210,17 @@ fn rdx15_no_selected_canary_reaches_a_new_output() {
         shapes.push(shape(&rec));
         cards.push(card_shape(&item));
 
-        // after: every selected payload left the disk; the retained audit quotes still read
+        // after: every selected payload left the disk, except in the bytes of an ASSESSMENT
+        // record the report lists as not erasable (D-EPK1Z; ruling task-10 Amendment 1, item
+        // 4). The exemption is exactly those records, by hash; the retained audit quotes still
+        // read
+        let kept = kept_assessments(&rec["report"]);
         for c in SELECTED {
-            assert!(!on_disk(s.dir.path(), c.as_bytes()), "{adapter}: {c} left");
+            let held: Vec<(u8, Hash)> = frames_holding(s.dir.path(), c.as_bytes())
+                .into_iter()
+                .filter(|(k, h)| !(*k == kinds::ASSESSMENT && kept.contains(h)))
+                .collect();
+            assert!(held.is_empty(), "{adapter}: {c} left in {held:?}");
         }
         assert!(
             on_disk(s.dir.path(), AUDIT.as_bytes()),

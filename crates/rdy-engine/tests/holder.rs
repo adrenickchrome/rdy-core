@@ -76,8 +76,9 @@ fn fork(r: &Rdy, root: &Path, name: &str) -> Rdy {
 }
 
 /// The kinds a copy carries into a holder: what a tag's history reaches.
-const COPIED: [u8; 8] = [
+const COPIED: [u8; 9] = [
     kinds::BLOCK,
+    kinds::ASSESSMENT,
     kinds::CHANGE,
     kinds::PROPOSAL,
     kinds::LANDING,

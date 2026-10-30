@@ -26,7 +26,7 @@ fn tens1_the_kinds_have_the_spec_defaults_and_wire_names() {
         (PremiseShift, "premise_shift", Blocking),
         (AreaOverlap, "area_overlap", Advisory),
         (DuplicateDefinition, "duplicate_definition", Blocking),
-        (UnjustifiedChange, "unjustified_change", Advisory),
+        (UnjustifiedChange, "unjustified_change", Blocking),
         (DeprecatedReference, "deprecated_reference", Advisory),
         (ValueDisagreement, "value_disagreement", Blocking),
         (RestatementDrift, "restatement_drift", Advisory),
@@ -65,7 +65,7 @@ fn tens1_a_pack_without_the_section_has_only_defaults() {
     let t = p.tension_table();
     assert_eq!(t.len(), 10);
     assert_eq!(t[0], (EditCollision, Blocking, false));
-    assert_eq!(t[5], (UnjustifiedChange, Advisory, false));
+    assert_eq!(t[5], (UnjustifiedChange, Blocking, false));
 }
 
 #[test]

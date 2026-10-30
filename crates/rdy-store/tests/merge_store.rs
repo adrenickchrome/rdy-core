@@ -452,6 +452,7 @@ fn msw4_land(s: &mut Store, p: rdy_model::Hash) -> Result<rdy_store::LandOutcome
         alt: None,
         relay: None,
         evidence: None,
+        assessment: None,
     })
 }
 

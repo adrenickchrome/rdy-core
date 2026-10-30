@@ -330,6 +330,7 @@ fn land_altered(s: &mut Store, proposal: Hash, alter: &dyn Fn(&mut LandingRecord
         alt: None,
         relay: None,
         evidence: None,
+        assessment: None,
     };
     let prepared = s.prepare_land_altered_for_tests(req, alter).unwrap();
     s.commit_land(prepared, &[]).unwrap().landing

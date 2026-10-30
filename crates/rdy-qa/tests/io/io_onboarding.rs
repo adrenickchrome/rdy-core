@@ -8,11 +8,32 @@ use serde_json::{Value, json};
 use std::io::Write;
 use std::path::Path;
 
+/// `rdy_qa::fixtures::write` with an editorial justification: the fixture writes stable normative
+/// content, and an unjustified change to stable content blocks its landing (D-ME2HD).
+fn clarified(
+    r: &mut rdy_engine::Rdy,
+    view: &str,
+    ops: serde_json::Value,
+) -> Result<rdy_engine::WriteResult, rdy_engine::RdyError> {
+    r.write(
+        &writer(),
+        rdy_engine::WriteRequest {
+            view: view.into(),
+            ops: parse_test_ops(ops)?,
+            justification: Some(rdy_model::Justification::Editorial {
+                class: rdy_model::EditorialClass::Clarify,
+                reason: "seed the test world".into(),
+            }),
+            message: String::new(),
+        },
+    )
+}
+
 /// A format-2 tree: two pages that link to each other (so Connected is full), a term `Ledger`
 /// and three claims that name it without a link, in a stable section (so Governed counts too).
 fn fixture_tree_with_unlinked_terms() -> tempfile::TempDir {
     let (_p, mut r) = project();
-    write(
+    clarified(
         &mut r,
         "work",
         json!([

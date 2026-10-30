@@ -5,6 +5,7 @@ use crate::merge::{Conflict, MergeChange, Merged, merge_indexed};
 use crate::store::{Frames, encode};
 use crate::view::{Owner, ViewHead, ViewOp, ViewOpKind};
 use crate::{Store, StoreReader};
+use rdy_model::assessment::Assessment;
 use rdy_model::plan::Plan;
 use rdy_model::signature::Signature;
 use rdy_model::{
@@ -897,6 +898,7 @@ impl Store {
             rekey: rekeyed,
             answer,
             plan: None,
+            assessment: None,
             fresh: None,
         })
     }
@@ -984,6 +986,7 @@ impl Store {
             rekey: None,
             answer: None,
             plan: None,
+            assessment: None,
             fresh: Some(FreshView {
                 head,
                 change: committed,
@@ -1020,8 +1023,107 @@ impl Store {
         Ok(id)
     }
 
+    /// Adds `a`, the assessment of the prepared version, to its batch after the plan: the
+    /// ASSESSMENT frame (D-ME2HD: written in the propose batch). A re-affirmation proposal takes
+    /// none (C7: `Refused`). `a.proposal` must be the prepared version and `a.validate()` must
+    /// pass, as must the carried bindings it names (`record <hash> (kind 25): <reason>`,
+    /// `carried_records::refusal`), and every object it names must be in the batch or the store
+    /// with its kind (`NotFound(<hash>)`): a plan its tension answers name is bound first. Writes
+    /// nothing; one per version batch. Returns its hash.
+    pub fn bind_assessment(
+        &self,
+        prepared: &mut PreparedProposal,
+        a: &Assessment,
+    ) -> Result<Hash, StoreError> {
+        if prepared.fresh.is_some() {
+            return Err(StoreError::Refused(REAFFIRM_WITH_LANDING.into()));
+        }
+        let item = crate::codec::item_new(kinds::ASSESSMENT, a);
+        let id = Hash::of(&item.1);
+        if a.proposal != prepared.version || prepared.assessment.is_some() {
+            return Err(crate::carried_records::refusal(
+                &id,
+                kinds::ASSESSMENT,
+                crate::carried_records::ASSESSMENT_PROPOSAL,
+            ));
+        }
+        self.check_assessment(a, &item, &prepared.items)?;
+        prepared.items.push(item);
+        prepared.assessment = Some(id);
+        Ok(id)
+    }
+
+    /// Writes `a` in a batch of its own (RULING F1's fresh assessment), with the rules of
+    /// [`Store::bind_assessment`]: the version it assesses, like every object it names, must be
+    /// held (`NotFound` otherwise). Returns its hash.
+    pub fn put_assessment(&mut self, a: &Assessment) -> Result<Hash, StoreError> {
+        let item = crate::codec::item_new(kinds::ASSESSMENT, a);
+        let id = Hash::of(&item.1);
+        self.check_assessment(a, &item, &[])?;
+        self.write_guarded(vec![item])?;
+        Ok(id)
+    }
+
+    /// Checks `item`, the ASSESSMENT frame of `a`, as the frame after `batch`: its bounded
+    /// encoding and its own rules (`Assessment::validate`), as `record <hash> (kind 25):
+    /// <reason>`; every object it names (`object_refs::refs_of`) in `batch` or the store with its
+    /// kind (`NotFound(<hash>)` for the first that is not); and the bindings it names
+    /// (`carried_records::validate_refs`, reading `batch` before the store). Writes nothing.
+    fn check_assessment(
+        &self,
+        a: &Assessment,
+        item: &(u8, Vec<u8>),
+        batch: &[(u8, Vec<u8>)],
+    ) -> Result<(), StoreError> {
+        let id = Hash::of(&item.1);
+        let refuse = |reason: &str| crate::carried_records::refusal(&id, kinds::ASSESSMENT, reason);
+        // within the bounded decoder's limits, so every reader can read it back
+        let split = crate::codec::split(item.0, &item.1).map_err(|e| refuse(&e.to_string()))?;
+        crate::codec::decode_bounded_split::<Assessment>(&split)
+            .map_err(|e| refuse(&e.to_string()))?;
+        a.validate().map_err(refuse)?;
+        // the objects it names are held, as an answer's target is (`answer.rs`): an object the
+        // carried bindings do not find passes them, and a landing that named the record would
+        // then give a closure that does not resolve
+        let edges =
+            crate::object_refs::refs_of(item.0, &item.1).map_err(|e| refuse(&e.to_string()))?;
+        // each batch frame hashed once, whatever the number of edges
+        let pending: std::collections::BTreeSet<(u8, Hash)> = batch
+            .iter()
+            .map(|(raw, payload)| (crate::codec::logical_kind(*raw), Hash::of(payload)))
+            .collect();
+        for edge in edges {
+            let in_batch = match edge.kind {
+                Some(k) => pending.contains(&(k, edge.hash)),
+                None => pending.iter().any(|(_, h)| *h == edge.hash),
+            };
+            let held = in_batch
+                || match edge.kind {
+                    Some(k) => self.has_kind(k, &edge.hash)?,
+                    None => self.has(&edge.hash)?,
+                };
+            if !held {
+                return Err(StoreError::NotFound(edge.hash));
+            }
+        }
+        let key = crate::object_refs::ObjectKey {
+            kind: kinds::ASSESSMENT,
+            hash: id,
+        };
+        let mut source = PendingFrames {
+            store: crate::carried_records::StoreObjects(self),
+            batch,
+            last: item,
+        };
+        if let Some(reason) = crate::carried_records::validate_refs(&mut source, key)? {
+            return Err(refuse(reason));
+        }
+        Ok(())
+    }
+
     /// Writes the proposal `prepared` holds in one batch (one write, so one marker): its key
-    /// change, the version, the relay's answer and the bound plan. A failed write writes nothing.
+    /// change, the version, the relay's answer, the bound plan and the bound assessment. A
+    /// failed write writes nothing.
     /// Returns what it wrote.
     pub fn commit_propose(&mut self, prepared: PreparedProposal) -> Result<Proposed, StoreError> {
         let PreparedProposal {
@@ -1031,14 +1133,13 @@ impl Store {
             rekey,
             answer,
             plan,
+            assessment,
             fresh,
             ..
         } = prepared;
         // a re-affirmation card's proposal is written only with its landing
         if fresh.is_some() {
-            return Err(StoreError::Refused(
-                "a re-affirmation proposal is written only with its landing".into(),
-            ));
+            return Err(StoreError::Refused(REAFFIRM_WITH_LANDING.into()));
         }
         crate::redaction::refuse_redaction_kinds(&items)?;
         let written = self.write_guarded(items)?;
@@ -1056,6 +1157,7 @@ impl Store {
             rekey: rekey.map(|(c, _)| c),
             answer,
             plan,
+            assessment,
         })
     }
 
@@ -1181,6 +1283,7 @@ impl Store {
                 alt: None,
                 relay: None,
                 evidence: None,
+                assessment: None,
             })?
             .landing)
     }
@@ -1346,6 +1449,8 @@ pub struct PreparedProposal {
     rekey: Option<(Hash, usize)>,
     answer: Option<Hash>,
     pub(crate) plan: Option<Hash>,
+    /// The bound assessment ([`Store::bind_assessment`]); none until one is bound.
+    pub(crate) assessment: Option<Hash>,
     /// The fresh internal view of a re-affirmation card's proposal; none for every other.
     pub(crate) fresh: Option<FreshView>,
 }
@@ -1386,7 +1491,13 @@ pub struct Proposed {
     pub rekey: Option<Hash>,
     pub answer: Option<Hash>,
     pub plan: Option<Hash>,
+    /// The assessment written in the batch, if one was bound.
+    pub assessment: Option<Hash>,
 }
+
+/// The refusal of a re-affirmation card's proposal outside its landing (D-CQMA4): its commit
+/// ([`Store::commit_propose`]) and an assessment bound to it ([`Store::bind_assessment`]; C7).
+const REAFFIRM_WITH_LANDING: &str = "a re-affirmation proposal is written only with its landing";
 
 /// A proposal summary as stored: trimmed, and `None` when blank.
 fn clean_summary(summary: Option<&str>) -> Option<String> {
@@ -1394,4 +1505,53 @@ fn clean_summary(summary: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+}
+
+/// The store's objects, the frames of a batch not written yet and one more frame after them, as
+/// the carried checks read them: the batch's frames first.
+pub(crate) struct PendingFrames<'a> {
+    pub(crate) store: crate::carried_records::StoreObjects<'a>,
+    pub(crate) batch: &'a [(u8, Vec<u8>)],
+    pub(crate) last: &'a (u8, Vec<u8>),
+}
+
+impl crate::carried_records::CarriedSource for PendingFrames<'_> {
+    fn object(
+        &mut self,
+        key: crate::object_refs::ObjectKey,
+    ) -> Result<Option<(u16, Vec<u8>)>, StoreError> {
+        let pending = self.batch.iter().chain(std::iter::once(self.last));
+        for (raw, payload) in pending {
+            if crate::codec::logical_kind(*raw) == key.kind && Hash::of(payload) == key.hash {
+                return Ok(crate::codec::split(*raw, payload)
+                    .ok()
+                    .map(|o| (o.version, o.body.to_vec())));
+            }
+        }
+        self.store.object(key)
+    }
+}
+
+impl StoreReader {
+    /// The assessment `h`, decoded; an object of another kind with that hash is named as what it
+    /// is.
+    pub fn assessment(&self, h: &Hash) -> Result<Assessment, StoreError> {
+        self.get_named(kinds::ASSESSMENT, "assessment", h)
+    }
+
+    /// The newest ASSESSMENT whose `proposal` is `version` and whose frame lies before `end` (a
+    /// captured log end): a later one replaces an earlier one.
+    pub fn assessment_of_proposal(
+        &self,
+        version: &Hash,
+        end: crate::segment::Location,
+    ) -> Result<Option<Hash>, StoreError> {
+        self.index().assessment_proposal(version, end)
+    }
+
+    /// The location of the log's first CHANGE whose links record a briefing (O3); none while
+    /// no change records one.
+    pub fn first_briefed_change(&self) -> Result<Option<crate::segment::Location>, StoreError> {
+        self.index().first_briefed_change()
+    }
 }

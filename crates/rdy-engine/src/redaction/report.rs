@@ -219,6 +219,9 @@ struct Quotes<'a> {
     matcher: Option<(Matcher, Hits)>,
     levels: usize,
     found: BTreeMap<(u8, String, bool), BTreeSet<String>>,
+    /// The keys of `found` that are listed as quote rows but kept out of the manifest rows
+    /// (ruling task-10 Amendment 2).
+    unbound: BTreeSet<(u8, String, bool)>,
     deep: BTreeSet<(u8, String)>,
 }
 
@@ -236,8 +239,27 @@ impl<'a> Quotes<'a> {
             matcher,
             levels,
             found: BTreeMap::new(),
+            unbound: BTreeSet::new(),
             deep: BTreeSet::new(),
         })
+    }
+
+    /// [`Quotes::scan`] for a record the report lists and the manifest does not bind: its quote
+    /// rows are in the report, and no `inside` row for it enters the manifest that `report_hash`
+    /// binds.
+    fn scan_unbound<T: Serialize + ?Sized>(
+        &mut self,
+        kind: ImpactKind,
+        record: &str,
+        erasable: bool,
+        value: &T,
+    ) -> Result<(), RdyError> {
+        self.scan(kind, record, erasable, value)?;
+        let key = (kind as u8, record.to_string(), erasable);
+        if self.found.contains_key(&key) {
+            self.unbound.insert(key);
+        }
+        Ok(())
     }
 
     /// Scans every string of `value` for complete source strings; each match is a quote of the
@@ -601,6 +623,7 @@ impl Own {
             .map_err(|_| over(limit::FRAMES))?;
         let mut open: Option<Location> = None;
         let mut own: BTreeSet<Location> = BTreeSet::new();
+        let mut versions: HashSet<Hash> = HashSet::new();
         for f in frames {
             let start = *open.get_or_insert(f.loc);
             starts.push(start);
@@ -611,10 +634,16 @@ impl Own {
                 && match f.kind {
                     kinds::CHANGE => f.hash == self.carrier,
                     kinds::REDACTION => f.hash == self.request,
-                    kinds::PROPOSAL => reader
-                        .get_typed::<Proposal>(kinds::PROPOSAL, &f.hash)?
-                        .changes
-                        .contains(&self.carrier),
+                    kinds::PROPOSAL => {
+                        let carries = reader
+                            .get_typed::<Proposal>(kinds::PROPOSAL, &f.hash)?
+                            .changes
+                            .contains(&self.carrier);
+                        if carries {
+                            versions.insert(f.hash);
+                        }
+                        carries
+                    }
                     kinds::VIEW_OP => matches!(
                         reader.get_typed::<ViewOp>(kinds::VIEW_OP, &f.hash)?.op,
                         ViewOpKind::Commit { change } if change == self.carrier
@@ -625,7 +654,11 @@ impl Own {
                 own.insert(start);
             }
         }
-        Ok(OwnBatches { starts, own })
+        Ok(OwnBatches {
+            starts,
+            own,
+            versions,
+        })
     }
 }
 
@@ -633,6 +666,8 @@ impl Own {
 struct OwnBatches {
     starts: Vec<Location>,
     own: BTreeSet<Location>,
+    /// The proposal versions that hold the carrier: the versions that carry the request.
+    versions: HashSet<Hash>,
 }
 
 impl OwnBatches {
@@ -989,6 +1024,15 @@ pub(crate) fn compute_excluding(
         // the request's own batches are left out before the first-seen check, so the same
         // record in another batch still counts
         if own.as_ref().is_some_and(|o| o.holds(i)) {
+            // ruling task-10 Amendment 2 (2026-10-29, D-EPK1Z): an assessment the request's
+            // own batch wrote is still read for quotes (its card facts can quote a removed
+            // title or statement), and the report lists them. The record stays out of the
+            // manifest rows, so the request never stales at its own propose
+            if f.kind == kinds::ASSESSMENT {
+                let a: rdy_model::assessment::Assessment =
+                    reader.get_typed(kinds::ASSESSMENT, &f.hash)?;
+                quotes.scan_unbound(ImpactKind::Assessment, &f.hash.to_string(), false, &a)?;
+            }
             continue;
         }
         if !seen.insert((f.kind, f.hash)) {
@@ -1119,6 +1163,20 @@ pub(crate) fn compute_excluding(
             kinds::ASSESSMENT => {
                 let a: rdy_model::assessment::Assessment =
                     reader.get_typed(kinds::ASSESSMENT, &h)?;
+                // ruling task-10 A and Amendment 2 (2026-10-29): an assessment of a version that
+                // carries this request is read for quotes and listed, in any batch, but it is
+                // left out of the manifest: no `inside` row and no `carried.assessments` entry.
+                // It only names the blocks the version removes, and its rows are uneraseable
+                // references, so the landing erases nothing in it either way; bound, every
+                // removal would be stale at its own propose. An assessment of any other version
+                // that names a removed block stays in the report
+                if own
+                    .as_ref()
+                    .is_some_and(|o| o.versions.contains(&a.proposal))
+                {
+                    quotes.scan_unbound(ImpactKind::Assessment, &rec, false, &a)?;
+                    continue;
+                }
                 quotes.scan(ImpactKind::Assessment, &rec, false, &a)?;
                 if assessment_hits(&a, &versions, &affected_ids) {
                     carried.assessments.push(h);
@@ -1347,12 +1405,15 @@ pub(crate) fn compute_excluding(
     }
     let mut quote_rows: Vec<QuoteRow> = vec![];
     for ((kind, record, erasable), texts) in quotes.found {
-        row(
-            impact_kind(kind),
-            record.clone(),
-            ImpactRelation::Quotes,
-            erasable,
-        );
+        // a listed record that is not bound has quote rows only (Amendment 2)
+        if !quotes.unbound.contains(&(kind, record.clone(), erasable)) {
+            row(
+                impact_kind(kind),
+                record.clone(),
+                ImpactRelation::Quotes,
+                erasable,
+            );
+        }
         for quote in texts {
             quote_rows.push(QuoteRow {
                 kind: impact_kind(kind),
@@ -1716,5 +1777,123 @@ mod tests {
         looped.insert(hx(10), landing(Some(hx(12))));
         let e = landing_history(&looped, &HashSet::new()).unwrap_err();
         assert_eq!(e.message, "The redaction reference graph has a cycle.");
+    }
+
+    /// Ruling task-10 Amendment 2 (D-EPK1Z, n-1ZB18): the version that carries a removal request
+    /// stores an assessment whose card fact quotes the removed decision. The approval-time report
+    /// lists that quote, uneraseable, and still binds the hash the request recorded.
+    #[test]
+    fn rg14_the_carriers_own_assessment_quotes_are_listed_and_do_not_stale_the_request() {
+        use crate::{DecisionInput, Rdy, Scope, Session, WriteRequest};
+        use rdy_model::Role;
+        const STATEMENT: &str = "Refunds above 500 need the ZEBRA-7731 sign-off";
+        let _clock = crate::pin_clock(1_000_000);
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let s = Session::human("human:t".into(), Role::Writer).unwrap();
+        let w = r
+            .write(
+                &s,
+                WriteRequest {
+                    view: "work".into(),
+                    ops: serde_json::from_value(serde_json::json!([
+                        {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "design", "title": "Design"}},
+                        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"title": "Doc", "doc_type": "page"}},
+                        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Part"}}
+                    ]))
+                    .unwrap(),
+                    justification: None,
+                    message: String::new(),
+                },
+            )
+            .unwrap();
+        let d = r
+            .decide(
+                &s,
+                "work",
+                DecisionInput {
+                    parent: w.created["$s"].clone(),
+                    statement: STATEMENT.into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let decision = BlockId::parse(&d.created["$decision"]).unwrap();
+        let v = r
+            .read()
+            .block(&Scope::View("work".into()), &decision)
+            .unwrap()
+            .version_hash();
+        // the request rides on the version that also writes the decision
+        let recorded = r
+            .redact_in(
+                &s,
+                "work",
+                RedactInput {
+                    targets: vec![format!("{decision}@{v}")],
+                    reason_class: "secret".into(),
+                    reason: "a leaked code".into(),
+                    dry_run: false,
+                },
+            )
+            .unwrap();
+        let (request, carrier) = (recorded.redaction.unwrap(), recorded.change.unwrap());
+        let pi = r
+            .propose(&s, "work", "Remove the decision", Some("Removes the code."))
+            .unwrap();
+        let st = r.read();
+        let version: Hash = pi.id.parse().unwrap();
+        let a = st
+            .reader()
+            .assessment_of_proposal(&version, st.seq())
+            .unwrap()
+            .expect("propose stored an assessment");
+        let stored = st.reader().assessment(&a).unwrap();
+        assert!(
+            stored.card.facts.iter().any(|f| f.contains(STATEMENT)),
+            "{:?}",
+            stored.card.facts
+        );
+        // the request is not stale at its approval ...
+        crate::redaction::check_fresh(&st, &request, &[]).unwrap();
+        // ... and the approval-time report lists the quote without binding it
+        let rec = st.reader().redaction_request(&request).unwrap();
+        let input = RedactInput {
+            targets: rec.targets.iter().map(selector_text).collect(),
+            reason_class: super::super::targets::reason_class_name(rec.reason_class).to_string(),
+            reason: rec.reason.clone(),
+            dry_run: false,
+        };
+        let own = Own { carrier, request };
+        let full = compute_excluding(&st, &input, &[], Some(&own), &[]).unwrap();
+        let rows: Vec<&QuoteRow> = full
+            .report
+            .quotes
+            .iter()
+            .filter(|q| q.kind == ImpactKind::Assessment)
+            .collect();
+        assert_eq!(rows.len(), 1, "{:?}", full.report.quotes);
+        assert_eq!(
+            (
+                rows[0].record.as_str(),
+                rows[0].quote.as_str(),
+                rows[0].erasable
+            ),
+            (a.to_string().as_str(), STATEMENT, false)
+        );
+        assert!(
+            !full
+                .report
+                .inside
+                .iter()
+                .any(|i| i.kind == ImpactKind::Assessment),
+            "{:?}",
+            full.report.inside
+        );
+        let mut buf = buffer(limits().record).unwrap();
+        assert_eq!(
+            full.report.report_hash,
+            rec.manifest.report_hash(&mut buf).unwrap()
+        );
     }
 }

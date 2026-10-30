@@ -1,7 +1,8 @@
 {
-  "advised_digest": "e783d7e70352",
+  "advised_digest": "f474359b11af",
+  "assessment": null,
   "blocking": [],
-  "canon_at": "bf145aef0b62e33df39dfd06914c154bf4bec9cfe6bb66ee02601b3ad54cd514",
+  "canon_at": "46cdaac7d96ca57f68bccc6149aad66d5c8130294ace80e8ac92bfeb32d6c702",
   "changes": 1,
   "conflicts": [],
   "consequences": [
@@ -16,7 +17,7 @@
       },
       "block": "c-WKHEZ",
       "follow_up": "confirm",
-      "id": "cq-06abf0e10b11a0d0",
+      "id": "cq-3d67d464058fcd47",
       "kind": "suspect"
     }
   ],
@@ -32,7 +33,23 @@
       }
     ]
   },
-  "id": "b2a836d7cfb30a09ad568fb536f5507ccd1e0514a6fd41c7c5913ed18c826c2b",
+  "id": "6a4501daae33288e9259b5ba841da1a102887f02a28a8f3264251757cbc91b94",
+  "issues": [
+    {
+      "block": null,
+      "code": "E_BLOCKING_TENSION",
+      "fix": "resolve each with a change, repin the citation, or dismiss it (rdy resolve <tn-…> --dismiss <reason>; a reviewer of another actor or a human); rdy tensions --involving <change> lists them, a form only this landing gives with its proposal",
+      "message": "landing P-cacdda6787ba@2 would put 2 blocking tension(s) into canon",
+      "severity": "error"
+    },
+    {
+      "block": null,
+      "code": "E_PLAN_OPEN",
+      "fix": "close or defer each item, and answer each tension item with confirm or dismiss: rdy_plan / rdy plan",
+      "message": "2 change-plan items are open",
+      "severity": "error"
+    }
+  ],
   "plan": {
     "by_kind": {
       "confirm": {
@@ -49,6 +66,11 @@
         "closed": 0,
         "deferred": 0,
         "open": 0
+      },
+      "tension": {
+        "closed": 0,
+        "deferred": 0,
+        "open": 1
       },
       "update": {
         "closed": 0,
@@ -75,50 +97,28 @@
         "kind": "confirm",
         "state": "open",
         "subject": "c-WKHEZ"
+      },
+      {
+        "cause": "D-REKH0",
+        "edge": "tension",
+        "id": "tn-0bafbb0359d9",
+        "kind": "tension",
+        "state": "open",
+        "subject": "0bafbb0359d9b792a1f6d07e3982335ac54ad759a807ad5e8cdf77b74e90716c"
       }
     ],
-    "open": 1
+    "open": 2
   },
-  "ref": "P-25c95cb28827@2",
-  "stable": "25c95cb28827286b1fefb6b4753c485bc5e91ade537abe9596db62bf1eb9f684",
+  "ready": false,
+  "ref": "P-cacdda6787ba@2",
+  "stable": "cacdda6787ba4212b2ba310069bbf1a28173c97712843f8e441c8870e5d8199c",
   "summary": "Rewords A and C.",
   "tensions": [
     {
       "blocks": [
-        "c-CFPE0"
-      ],
-      "id": "tn-602a9e0133cf",
-      "kind": "unjustified_change",
-      "overridden": true,
-      "refuses": true,
-      "severity": "blocking",
-      "sides": [
-        {
-          "actor": "agent:b",
-          "blocks": [
-            {
-              "block": "c-CFPE0",
-              "version": "c3504b10595379dc2945f07f74be32a5d559e27cde7154bc4c43820b8ff99d81"
-            }
-          ],
-          "change": "22ece7bddcd1850f4ba0f33a9b558761481c6ed666e8db77240f69920a80a03f",
-          "run": "b",
-          "side": "22ece7bddcd1850f4ba0f33a9b558761481c6ed666e8db77240f69920a80a03f",
-          "views": [
-            "a",
-            "b"
-          ]
-        }
-      ],
-      "status": "open",
-      "summary": "change 22ece7bddcd1 edits stable normative block c-CFPE0 without a justification",
-      "tension": "602a9e0133cf8ffe887e6cba6818af3e9ba33b7e352e2239910e781023da28ea"
-    },
-    {
-      "blocks": [
         "c-ZCQ17"
       ],
-      "id": "tn-70cfdae9ad10",
+      "id": "tn-40cae1573d39",
       "kind": "unjustified_change",
       "overridden": true,
       "refuses": true,
@@ -132,9 +132,9 @@
               "version": "d7b9c3dfab68f6d221735204660a42a6ae0820c329a7c748f54591fd1a22748a"
             }
           ],
-          "change": "22ece7bddcd1850f4ba0f33a9b558761481c6ed666e8db77240f69920a80a03f",
+          "change": "ad11fc51a30ffbb910c13088516f3502cc1f59efb8c55d2561b180e1f91c73c5",
           "run": "b",
-          "side": "22ece7bddcd1850f4ba0f33a9b558761481c6ed666e8db77240f69920a80a03f",
+          "side": "ad11fc51a30ffbb910c13088516f3502cc1f59efb8c55d2561b180e1f91c73c5",
           "views": [
             "a",
             "b"
@@ -142,25 +142,17 @@
         }
       ],
       "status": "open",
-      "summary": "change 22ece7bddcd1 edits stable normative block c-ZCQ17 without a justification",
-      "tension": "70cfdae9ad10542b56d527e8fa24e86fef7aab393ffea805fb8cc7f68608e286"
+      "summary": "change ad11fc51a30f edits stable normative block c-ZCQ17 without a justification",
+      "tension": "40cae1573d390cad1c22dbd829e999c1b6486cc1707f483a21222f3960b52e8a"
     },
     {
       "blocks": [
         "c-CFPE0"
       ],
-      "dismissal": {
-        "actor": "agent:r",
-        "at": "2025-10-09T08:53:20Z",
-        "at_ms": 1760000000065,
-        "reason": "checked: b's wording is the newer one",
-        "review": "155ac1b770bf51c1a08d4244b7321cc824dd27557e45c13040266c6cff745e09",
-        "role": "reviewer",
-        "run": "r"
-      },
-      "id": "tn-06aba8bfc9fe",
-      "kind": "edit_collision",
-      "refuses": false,
+      "id": "tn-fafe4024d65c",
+      "kind": "unjustified_change",
+      "overridden": true,
+      "refuses": true,
       "severity": "blocking",
       "sides": [
         {
@@ -171,41 +163,25 @@
               "version": "c3504b10595379dc2945f07f74be32a5d559e27cde7154bc4c43820b8ff99d81"
             }
           ],
-          "change": "22ece7bddcd1850f4ba0f33a9b558761481c6ed666e8db77240f69920a80a03f",
+          "change": "ad11fc51a30ffbb910c13088516f3502cc1f59efb8c55d2561b180e1f91c73c5",
           "run": "b",
-          "side": "22ece7bddcd1850f4ba0f33a9b558761481c6ed666e8db77240f69920a80a03f",
+          "side": "ad11fc51a30ffbb910c13088516f3502cc1f59efb8c55d2561b180e1f91c73c5",
           "views": [
             "a",
             "b"
           ]
-        },
-        {
-          "actor": "agent:a",
-          "blocks": [
-            {
-              "block": "c-CFPE0",
-              "version": "f960e2ac81de4410669a4179c3671ceac66580639aa69f643e13d684cd4f9279"
-            }
-          ],
-          "change": "7fe334bf2b2708ed71d761d47c8f84afd866c8f005598d9505007efa7ef6a21a",
-          "run": "a",
-          "side": "7fe334bf2b2708ed71d761d47c8f84afd866c8f005598d9505007efa7ef6a21a",
-          "views": [
-            "a",
-            "a-fork"
-          ]
         }
       ],
-      "status": "dismissed",
-      "summary": "two changes edit c-CFPE0 from one base",
-      "tension": "06aba8bfc9fef4c86f0c68030e3bd350920a2096f05498c84d6805c8102e70d9"
+      "status": "open",
+      "summary": "change ad11fc51a30f edits stable normative block c-CFPE0 without a justification",
+      "tension": "fafe4024d65c603504d028b75a282510e53d34acce4bccf968c514cba2a12932"
     },
     {
       "blocks": [
         "D-REKH0",
         "c-ZCQ17"
       ],
-      "id": "tn-22db9cad287c",
+      "id": "tn-0bafbb0359d9",
       "judged": {
         "actor": "agent:r",
         "advice": "it contradicts the gate rule",
@@ -215,7 +191,7 @@
             "note": "these two cannot both hold"
           }
         ],
-        "review": "80a288a5446f84ce548669037d6fffb116d54f3cd34c9b7119c6d51fcea711de",
+        "review": "2066318c5286c4f00e1cb01a6fa2f7188621c4f6039e880e8162cd09ea867e47",
         "run": "r"
       },
       "kind": "semantic",
@@ -230,9 +206,9 @@
               "version": "d7b9c3dfab68f6d221735204660a42a6ae0820c329a7c748f54591fd1a22748a"
             }
           ],
-          "change": "22ece7bddcd1850f4ba0f33a9b558761481c6ed666e8db77240f69920a80a03f",
+          "change": "ad11fc51a30ffbb910c13088516f3502cc1f59efb8c55d2561b180e1f91c73c5",
           "run": "b",
-          "side": "22ece7bddcd1850f4ba0f33a9b558761481c6ed666e8db77240f69920a80a03f",
+          "side": "ad11fc51a30ffbb910c13088516f3502cc1f59efb8c55d2561b180e1f91c73c5",
           "views": [
             "a",
             "b"
@@ -249,26 +225,73 @@
               "version": "c13764b268a703255fcd6ffa737299a9fe7308938958bcc12790928f3fe3854e"
             }
           ],
-          "landing": "e283d9dbca580c525cb7ded48483cab3653928aa7d843654fa43c0ce7e5ef261",
+          "landing": "296a3feea213316e3d9645e5026ad41ab739fbbb8db73fa2e6f6a24c9b03446d",
           "run": "cli",
-          "side": "canon@e283d9dbca580c525cb7ded48483cab3653928aa7d843654fa43c0ce7e5ef261",
+          "side": "canon@296a3feea213316e3d9645e5026ad41ab739fbbb8db73fa2e6f6a24c9b03446d",
           "views": []
         }
       ],
       "status": "open",
       "summary": "a reviewer judged that D-REKH0 and c-ZCQ17 disagree",
-      "tension": "22db9cad287c22f959f44b55987feae3b874d924e09012709cdfa29301d3fbbe"
+      "tension": "0bafbb0359d9b792a1f6d07e3982335ac54ad759a807ad5e8cdf77b74e90716c"
+    },
+    {
+      "blocks": [
+        "c-CFPE0"
+      ],
+      "dismissal": {
+        "actor": "agent:r",
+        "at": "2025-10-09T08:53:20Z",
+        "at_ms": 1760000000071,
+        "reason": "checked: b's wording is the newer one",
+        "review": "b0ddb84cd234e53e8686aa4b5b83f712da5042a8f9a9e7da9d6b065f642548a6",
+        "role": "reviewer",
+        "run": "r"
+      },
+      "id": "tn-e92428692222",
+      "kind": "edit_collision",
+      "refuses": false,
+      "severity": "blocking",
+      "sides": [
+        {
+          "actor": "agent:a",
+          "blocks": [
+            {
+              "block": "c-CFPE0",
+              "version": "f960e2ac81de4410669a4179c3671ceac66580639aa69f643e13d684cd4f9279"
+            }
+          ],
+          "change": "96807e8ed4ead9efd834f7529cdcc733d5baa7de1c3c564e7d430acb0d131445",
+          "run": "a",
+          "side": "96807e8ed4ead9efd834f7529cdcc733d5baa7de1c3c564e7d430acb0d131445",
+          "views": [
+            "a",
+            "a-fork"
+          ]
+        },
+        {
+          "actor": "agent:b",
+          "blocks": [
+            {
+              "block": "c-CFPE0",
+              "version": "c3504b10595379dc2945f07f74be32a5d559e27cde7154bc4c43820b8ff99d81"
+            }
+          ],
+          "change": "ad11fc51a30ffbb910c13088516f3502cc1f59efb8c55d2561b180e1f91c73c5",
+          "run": "b",
+          "side": "ad11fc51a30ffbb910c13088516f3502cc1f59efb8c55d2561b180e1f91c73c5",
+          "views": [
+            "a",
+            "b"
+          ]
+        }
+      ],
+      "status": "dismissed",
+      "summary": "two changes edit c-CFPE0 from one base",
+      "tension": "e924286922228e75de2976c74dccd70e011e7f4dad0a546721e50735a713f036"
     }
   ],
   "title": "Fix A and C",
   "version": 2,
-  "warnings": [
-    {
-      "block": null,
-      "code": "W_PLAN_OPEN",
-      "fix": "close or defer each item: rdy_plan / rdy plan",
-      "message": "1 change-plan items are open",
-      "severity": "warning"
-    }
-  ]
+  "warnings": []
 }

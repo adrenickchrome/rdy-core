@@ -717,6 +717,8 @@ fn older_author_export(out: &Path, ops: serde_json::Value) {
         )
         .unwrap();
     }
+    // O23: the plan items are answered before the propose binds the plan
+    rdy_qa::intake::answer_open_items(&mut r, &a, "va");
     let p = r.propose(&a, "va", "a", Some(TEST_SUMMARY)).unwrap();
     r.land(&founder(), &p.id).unwrap();
     let b = sess("agent:b", Some("r2"), Role::Writer);

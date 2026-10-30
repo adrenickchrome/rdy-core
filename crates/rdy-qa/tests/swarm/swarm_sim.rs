@@ -7,10 +7,16 @@
 //! check; together they must exercise every act, ruling task-5.2), seeds 1, 2 and 3 in the deep
 //! gate (`RDY_QA_DEEP=1`). Every failure names its seed, so a person can run it again:
 //! `RDY_QA_SWARM_SEEDS=<seed>,...` runs only those seeds.
+//!
+//! rg15 (M3b, D-VF4RH, D-ME2HD): the run goes through the readiness gate. Each agent answers its
+//! view's change plan before it proposes, the person accepts a version's deferral card before the
+//! approve, every landing's version had no open item that gates or warns, and every stable change
+//! that lands records the briefing its writer read.
 use rdy_engine::inbox::read::parse_cursor;
+use rdy_engine::plan::{PlanQuery, allowed_acts};
 use rdy_engine::tensions::tension_label;
-use rdy_engine::{EventKind, Rdy, ReadState, Scope};
-use rdy_model::{BlockId, Hash};
+use rdy_engine::{EventKind, Materialized, Rdy, ReadState, Scope};
+use rdy_model::{BlockId, Change, Hash, Op, PlanKind};
 use rdy_qa::fixtures::deep;
 use rdy_qa::invariants::check_all;
 use rdy_qa::landing_audit::{alt_unchosen, chosen_members, conflicts_at, landed_of};
@@ -2088,7 +2094,7 @@ fn vw2_the_closed_table_lets_a_land_meet_e_view_closed() {
     assert!(allowed("land", "E_VIEW_CLOSED"));
 }
 
-/// Diagnosis pin (M3a Task 6, D-TX3KH; D-ME2HD keeps E_STALE_BASE at landing until M3b): a0 and
+/// Diagnosis pin (M3a Task 6, D-TX3KH; D-ME2HD and O12 keep E_STALE_BASE at landing): a0 and
 /// a1 append a claim under one section from one base, so both claims hold one order key. a0
 /// proposes, then a1 proposes and edits its own claim again. a0 lands first; a1's version then
 /// needs a new order key for a claim its view changed after the proposal, and the landing is
@@ -2167,4 +2173,829 @@ fn sg5_a_landing_whose_rekeyed_claim_changed_after_the_proposal_is_refused_then_
         "swarm seed {SEED}: {:?}",
         o.violations
     );
+}
+
+/// The blocks of `c`'s ops that are stable content on `m` (the canon its version recorded), as a
+/// write's briefing check names its subjects (O3 (a)): a create's parent, or the nearest block
+/// above it that `m` holds when the parent is made in the same change; an update's or a delete's
+/// own block. A subject `m` does not hold is skipped, and so is one of a presentational type.
+fn stable_subjects(st: &ReadState, m: &Materialized, c: &Change) -> Vec<String> {
+    let made: BTreeMap<&BlockId, Option<&BlockId>> = c
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Create { block } => Some((&block.id, block.parent.as_ref())),
+            _ => None,
+        })
+        .collect();
+    let mut out: Vec<String> = c
+        .ops
+        .iter()
+        .filter_map(|op| {
+            let id = match op {
+                Op::Create { block } => {
+                    let mut at = block.parent.as_ref()?;
+                    // a parent made in this change hangs from the block above it
+                    for _ in 0..made.len() {
+                        match made.get(at) {
+                            Some(up) => at = (*up)?,
+                            None => break,
+                        }
+                    }
+                    at
+                }
+                Op::Update { block, .. } => &block.id,
+                Op::Delete { id, .. } => id,
+            };
+            let b = m.get(id)?;
+            (!st.pack().is_presentational(&b.block_type) && stable_on(m, id))
+                .then(|| id.to_string())
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Whether the `lifecycle` of `id` on `m`, or that of its nearest ancestor with one, is `stable`.
+fn stable_on(m: &Materialized, id: &BlockId) -> bool {
+    let mut cur = m.get(id);
+    for _ in 0..=m.len() {
+        let Some(b) = cur else { return false };
+        if let Some(l) = b.fields.get("lifecycle").and_then(|v| v.as_str()) {
+            return l == "stable";
+        }
+        cur = b.parent.as_ref().and_then(|p| m.get(p));
+    }
+    false
+}
+
+/// rg15 (D-VF4RH, D-ME2HD item 1, O3): from the drained store, each change that a landing of the
+/// run or the drain put into canon, and that touches stable content on canon at its version's
+/// `canon_at`, records the briefing its writer read. O3's exemptions: (a) a change that touches
+/// no stable content (`stable_subjects`); (b) a change `rdy import` wrote; (d) a replay of one.
+/// (c), a change before the store's first briefed change, holds only for the seed: its second
+/// landing lands the first briefed change, and every landing after the seed's lands changes
+/// written later, so the seed's landings are the ones left out.
+#[test]
+fn rg15_every_landed_stable_change_records_a_briefing() {
+    let checked = std::cell::Cell::new(0usize);
+    each(|seed, o| {
+        let (_keep, copy) = copy_of(&o.dir);
+        let r = Rdy::open(&copy).expect("open the drained copy");
+        let st = r.read();
+        let reader = st.reader();
+        let seeded: BTreeSet<&str> = o.seed_landings.iter().map(String::as_str).collect();
+        let imported = |c: &Change| c.links.imported_by.is_some();
+        let mut canon: BTreeMap<Hash, std::sync::Arc<Materialized>> = BTreeMap::new();
+        let mut unbriefed = vec![];
+        for (l, rec) in reader.landings().expect("read canon's chain") {
+            if seeded.contains(l.to_string().as_str()) {
+                continue;
+            }
+            let p = reader
+                .proposal(&rec.proposal)
+                .unwrap_or_else(|e| panic!("swarm seed {seed}: the version of {l}: {e}"));
+            // the empty canon holds no stable content
+            let Some(at) = p.canon_at else { continue };
+            let m = canon
+                .entry(at)
+                .or_insert_with(|| {
+                    st.materialized(&Scope::At(at))
+                        .unwrap_or_else(|e| panic!("swarm seed {seed}: canon at {at}: {e}"))
+                })
+                .clone();
+            for h in &rec.changes {
+                let c = reader
+                    .change(h)
+                    .unwrap_or_else(|e| panic!("swarm seed {seed}: change {h}: {e}"));
+                if imported(&c) {
+                    continue;
+                }
+                if let Some(src) = c.links.replayed_from
+                    && reader.change(&src).is_ok_and(|s| imported(&s))
+                {
+                    continue;
+                }
+                let stable = stable_subjects(&st, &m, &c);
+                if stable.is_empty() {
+                    continue;
+                }
+                checked.set(checked.get() + 1);
+                if c.links.briefing.is_none() {
+                    unbriefed.push(format!(
+                        "landing {} change {} touches {stable:?}",
+                        l.short(),
+                        h.short()
+                    ));
+                }
+            }
+        }
+        drop(st);
+        r.close().expect("close the drained copy");
+        assert!(
+            unbriefed.is_empty(),
+            "swarm seed {seed}: landed changes on stable content with no briefing: {unbriefed:#?}"
+        );
+    });
+    eprintln!("rg15: {} landed changes on stable content", checked.get());
+    assert!(
+        checked.get() > 0,
+        "no landing of any seed put a change on stable content into canon: the check is vacuous"
+    );
+}
+
+/// The act and the reason the swarm answers an open plan item of `kind` with (D-ME2HD,
+/// `allowed_acts`): `None` for a code item, which never gates and stays open.
+fn swarm_answer(kind: &str) -> Option<(&'static str, &'static str)> {
+    match kind {
+        "confirm" => Some(("confirm", "swarm: checked")),
+        "update" | "rejustify" | "reaffirm" => Some(("defer", "swarm: later")),
+        "tension" => Some(("confirm", "swarm: accepted")),
+        _ => None,
+    }
+}
+
+/// rg15 (D-ME2HD, D-45RG6): every agent reads its view's change plan before it proposes, and
+/// answers each open item that gates or warns, in one `rdy_plan` call, with the act its kind
+/// allows (`allowed_acts`): `confirm` for a confirm and a tension item, `defer` for an update, a
+/// rejustify and a re-affirm item; a code item stays open. No `rdy_plan` call of the run or the
+/// drain is refused with `E_PLAN_ITEM`, and some seed answers an item.
+#[test]
+fn rg15_agents_answer_each_gating_item_with_its_allowed_act() {
+    let answered = std::cell::Cell::new(0usize);
+    let by_kind = std::cell::RefCell::new(BTreeMap::<String, usize>::new());
+    each(|seed, o| {
+        let mut bad = vec![];
+        for e in &o.journal {
+            if matches!(e.act, "plan" | "plan_answer")
+                && e.outcome == Met::Refused("E_PLAN_ITEM".into())
+            {
+                bad.push(format!(
+                    "{} step {} {}: E_PLAN_ITEM: {}",
+                    e.actor,
+                    e.step,
+                    e.act,
+                    e.message.as_deref().unwrap_or("")
+                ));
+            }
+            if e.act != "plan_answer" {
+                continue;
+            }
+            let sent = e
+                .reply
+                .as_ref()
+                .and_then(|r| r["answers"].as_array().cloned())
+                .unwrap_or_default();
+            if sent.is_empty() {
+                bad.push(format!(
+                    "{} step {}: a plan_answer that names no answer",
+                    e.actor, e.step
+                ));
+            }
+            for a in &sent {
+                let kind = a["kind"].as_str().unwrap_or_default();
+                let act = a["act"].as_str().unwrap_or_default();
+                let reason = a["reason"].as_str().unwrap_or_default();
+                let allows = serde_json::from_value::<PlanKind>(Value::from(kind))
+                    .is_ok_and(|k| allowed_acts(k).iter().any(|x| x.as_str() == act));
+                if !allows || swarm_answer(kind) != Some((act, reason)) {
+                    bad.push(format!(
+                        "{} step {}: item {} of kind {kind} answered {act} ({reason})",
+                        e.actor, e.step, a["item"]
+                    ));
+                }
+            }
+            if e.outcome == Met::Ok {
+                answered.set(answered.get() + sent.len());
+                for a in &sent {
+                    let kind = a["kind"].as_str().unwrap_or_default().to_string();
+                    *by_kind.borrow_mut().entry(kind).or_default() += 1;
+                }
+            }
+        }
+        // each proposal an agent made in the run came after its read of the view's plan, in the
+        // same step
+        for (k, e) in o.before_freeze().iter().enumerate() {
+            if e.act != "propose" || e.outcome != Met::Ok || !e.actor.starts_with("agent:a") {
+                continue;
+            }
+            let read = o.before_freeze()[..k].iter().rev().any(|x| {
+                x.actor == e.actor && x.step == e.step && x.act == "plan" && x.view == e.view
+            });
+            if !read {
+                bad.push(format!(
+                    "{} step {}: proposed {:?} with no read of its plan first",
+                    e.actor, e.step, e.view
+                ));
+            }
+        }
+        assert!(bad.is_empty(), "swarm seed {seed}: {bad:#?}");
+    });
+    eprintln!(
+        "rg15: {} plan items answered, by kind {:?}",
+        answered.get(),
+        by_kind.borrow()
+    );
+    assert!(
+        answered.get() > 0,
+        "no seed answered a plan item: the check is vacuous"
+    );
+}
+
+/// The open items of a plan read's `counts.by_kind` that gate or warn: every kind but the code
+/// items (`update_implementation`, which never gate).
+fn gating_open(counts: &Value) -> Vec<String> {
+    counts["by_kind"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(k, c)| k.as_str() != "update_implementation" && c["open"] != 0)
+        .map(|(k, c)| format!("{k}: {}", c["open"]))
+        .collect()
+}
+
+/// rg15 (D-ME2HD, D-3JZP4, D-AAQ9Z), seeds 1 to 6: every live agent view drains through the
+/// readiness gate, and the gate never meets an open item of the person's `work` plan (ruling
+/// task-15 F1: the person answers it before it proposes). After the drain each agent view is
+/// closed or holds no change. Before each
+/// approve of the run and the drain, the relay reads the version's change plan (a
+/// `version_plan` entry naming it), and that read shows no open item that gates or warns. From
+/// the drained store, each landing's seal holds no open item but a code item, and each item it
+/// seals as deferred names the answer that accepted the deferral. Some seed lands an item an
+/// agent answered.
+#[test]
+fn rg15_every_live_view_drains_through_the_gate() {
+    let answered = std::cell::Cell::new(0usize);
+    let work_reads = std::cell::Cell::new(0usize);
+    let (deferred, accepted) = (std::cell::Cell::new(0usize), std::cell::Cell::new(0usize));
+    each(|seed, o| {
+        let mut bad = vec![];
+        // the plan read before each landing of the run and the drain
+        let mut landed: BTreeMap<String, String> = BTreeMap::new();
+        // the landings with open items, for a person to look at
+        let mut look: Vec<(String, String)> = vec![];
+        for (k, e) in o.journal.iter().enumerate() {
+            let landing = match (e.act, &e.outcome, e.reply.as_ref()) {
+                ("land", Met::Ok, Some(r)) => r["landing"].as_str(),
+                (run::LAND_FOUND, _, Some(r)) => r["landing"].as_str(),
+                _ => None,
+            };
+            let (Some(l), Some(pref)) = (landing, e.block.as_deref()) else {
+                continue;
+            };
+            landed.insert(l.to_string(), pref.to_string());
+            let read = o.journal[..k].iter().rev().find(|x| {
+                x.act == "version_plan" && x.outcome == Met::Ok && x.block.as_deref() == Some(pref)
+            });
+            match read.and_then(|x| x.reply.as_ref()) {
+                None => bad.push(format!(
+                    "{} step {}: landed {pref} with no read of its plan first",
+                    e.actor, e.step
+                )),
+                Some(r) => {
+                    let open = gating_open(&r["counts"]);
+                    if !open.is_empty() {
+                        bad.push(format!(
+                            "{} step {}: landed {pref} with open plan items {open:?}",
+                            e.actor, e.step
+                        ));
+                        look.push((l.to_string(), pref.to_string()));
+                    }
+                }
+            }
+        }
+        accepted.set(
+            accepted.get()
+                + o.journal
+                    .iter()
+                    .filter(|e| e.act == "accept_deferrals" && e.outcome == Met::Ok)
+                    .count(),
+        );
+        // the seals, from the drained store
+        let (_keep, copy) = copy_of(&o.dir);
+        let r = Rdy::open(&copy).expect("open the drained copy");
+        let st = r.read();
+        for (l, pref) in &landed {
+            let q = PlanQuery {
+                landing: Some(l.clone()),
+                max_tokens: Some(100_000),
+                ..Default::default()
+            };
+            let seal = st
+                .change_plan(&q, "work")
+                .map(|p| serde_json::to_value(p).expect("a plan reply serializes"))
+                .unwrap_or_else(|e| panic!("swarm seed {seed}: the seal of {l}: {e}"));
+            for i in seal["items"].as_array().into_iter().flatten() {
+                let (kind, outcome) = (
+                    i["kind"].as_str().unwrap_or_default(),
+                    i["outcome"].as_str().unwrap_or_default(),
+                );
+                if kind == "update_implementation" {
+                    continue;
+                }
+                match outcome {
+                    "open" => bad.push(format!("{pref} sealed item {} open", i["id"])),
+                    "deferred" if i["answer"].is_null() => bad.push(format!(
+                        "{pref} sealed item {} deferred with no accepted deferral",
+                        i["id"]
+                    )),
+                    "confirmed" => answered.set(answered.get() + 1),
+                    "deferred" => {
+                        answered.set(answered.get() + 1);
+                        deferred.set(deferred.get() + 1);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // what a person reads of each landing with open items: the items its version's plan
+        // holds open now, what its agent answered last before it proposed, and whether rdy
+        // added a key change to the version
+        for (l, pref) in &look {
+            let q = PlanQuery {
+                proposal: Some(pref.clone()),
+                max_tokens: Some(100_000),
+                ..Default::default()
+            };
+            let open: Vec<String> = st
+                .change_plan(&q, "work")
+                .map(|p| serde_json::to_value(p).expect("a plan reply serializes"))
+                .map(|p| {
+                    p["items"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|i| i["state"] == "open")
+                        .map(|i| format!("{} {}", i["kind"], i["id"]))
+                        .collect()
+                })
+                .unwrap_or_else(|e| vec![format!("plan read: {e}")]);
+            let made = o.journal.iter().position(|x| {
+                x.act == "propose" && x.outcome == Met::Ok && x.block.as_deref() == Some(pref)
+            });
+            let asked: Vec<String> = made
+                .and_then(|k| {
+                    let view = o.journal[k].view.as_deref();
+                    o.journal[..k]
+                        .iter()
+                        .rev()
+                        .find(|x| x.act == "plan_answer" && x.view.as_deref() == view)
+                })
+                .and_then(|x| x.reply.as_ref())
+                .and_then(|r| r["answers"].as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .map(|a| format!("{} {}", a["kind"], a["item"]))
+                .collect();
+            let rekeyed = l
+                .parse::<Hash>()
+                .ok()
+                .and_then(|h| st.reader().landing(&h).ok())
+                .and_then(|rec| st.reader().proposal(&rec.proposal).ok())
+                .is_some_and(|p| {
+                    p.changes.iter().any(|c| {
+                        st.reader()
+                            .change(c)
+                            .is_ok_and(|c| c.message.starts_with("new keys rdy derived"))
+                    })
+                });
+            bad.push(format!(
+                "{pref}: open now {open:?}; answered before its propose {asked:?}; rdy key change {rekeyed}"
+            ));
+        }
+        // each agent view is closed or holds no change
+        let mut live = vec![];
+        for name in st.view_names() {
+            let Some(head) = st.view_head(&name) else {
+                continue;
+            };
+            let by_agent = head
+                .owner
+                .as_ref()
+                .is_some_and(|w| w.actor.starts_with("agent:a"));
+            if by_agent && !head.closed && !st.included(&name).is_empty() {
+                live.push(name);
+            }
+        }
+        drop(st);
+        r.close().expect("close the drained copy");
+        if !live.is_empty() {
+            bad.push(format!(
+                "views neither landed nor closed after the drain: {live:?}"
+            ));
+        }
+        // the person's `work` (ruling task-15 F1): the gate never meets an open item of its
+        // plan. Each read of a work version's plan before an approve shows no open item that
+        // gates or warns, and no approve of one is refused for an open item (E_PLAN_OPEN).
+        // Whether every work version lands by the end of the run is not checked here (see the
+        // fix-round report: the queue and moved refusals, not the plan, keep it out).
+        let work: BTreeSet<&str> = o
+            .journal
+            .iter()
+            .filter(|e| e.act == "wc_propose" && e.outcome == Met::Ok)
+            .filter_map(|e| e.block.as_deref())
+            .collect();
+        let mut stopped = false;
+        for e in &o.journal {
+            let Some(pref) = e.block.as_deref().filter(|b| work.contains(b)) else {
+                continue;
+            };
+            match (e.act, &e.outcome, e.reply.as_ref()) {
+                ("version_plan", Met::Ok, Some(r)) => {
+                    work_reads.set(work_reads.get() + 1);
+                    let open = gating_open(&r["counts"]);
+                    if !open.is_empty() {
+                        stopped = true;
+                        bad.push(format!(
+                            "{} step {}: the plan of work version {pref} holds open items {open:?}",
+                            e.actor, e.step
+                        ));
+                    }
+                }
+                ("land", Met::Refused(code), _)
+                    if code == "E_PROPOSAL_NOT_READY"
+                        && e.message
+                            .as_deref()
+                            .is_some_and(|m| m.contains("E_PLAN_OPEN")) =>
+                {
+                    stopped = true;
+                    bad.push(format!(
+                        "{} step {}: work version {pref} is not ready for open plan items: {}",
+                        e.actor,
+                        e.step,
+                        e.message.as_deref().unwrap_or("")
+                    ));
+                }
+                _ => {}
+            }
+        }
+        if stopped {
+            bad.push(format!("the person's queue at the end: {:?}", o.queued));
+        }
+        assert!(bad.is_empty(), "swarm seed {seed}: {bad:#?}");
+    });
+    eprintln!(
+        "rg15: {} answered items sealed, {} of them deferred; {} deferral cards accepted; {} plan reads of a work version before an approve",
+        answered.get(),
+        deferred.get(),
+        accepted.get(),
+        work_reads.get()
+    );
+    assert!(
+        work_reads.get() > 0,
+        "no seed approved a version of the person's work: its check is vacuous"
+    );
+    assert!(
+        answered.get() > 0,
+        "no landing of any seed sealed an item an agent answered: the gate checked nothing"
+    );
+}
+
+/// rg15 (D-AAQ9Z), directed: no seed's agents defer an item (the swarm meets confirm and tension
+/// items only), so this pins the person's deferral path. Agent a0 lands a claim that cites seed
+/// claim c0, then edits c0: its claim gets a confirm item, which a0 defers. Before the relayed
+/// approve the relay reads the queue (`pending`, through `rdy_pending`), relays the person's
+/// acceptance of the version's deferral card (`accept_deferrals`, through `rdy_answer`), and the
+/// version lands with the item sealed deferred under that answer.
+#[test]
+fn rg15_the_person_accepts_a_deferral_card_before_the_approve() {
+    use rdy_qa::mcp::McpClient;
+    use rdy_qa::swarm::agent::KillGate;
+    use rdy_qa::swarm::journal::Journal;
+    use rdy_qa::swarm::people;
+    use rdy_qa::swarm::project;
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+    let cfg = Config {
+        seed: 31,
+        agents: 1,
+        steps: 4,
+        kill_at: None,
+    };
+    let p = project::build(&cfg);
+    let (j, g) = (Journal::new(), Arc::new(KillGate::new()));
+    let mut c = McpClient::start_proxy(&p.served);
+    c.call(
+        "rdy_session",
+        json!({"actor": "agent:a0", "run": "a0", "role": "writer", "areas": ["payments"]}),
+    )
+    .ok();
+    let (c0, section, decision) = (
+        p.seed.claims[0].clone(),
+        p.seed.sections[0].clone(),
+        p.seed.decisions[0].clone(),
+    );
+    let brief = |c: &mut McpClient, id: &str| -> (String, Value) {
+        let b = c.call("rdy_brief", json!({"ids": [id]})).ok();
+        (
+            b["base"]["token"].as_str().unwrap().to_string(),
+            b["base"]["blocks"][0]["version"].clone(),
+        )
+    };
+    // a0 answers each open item of its plan as an agent does, and defers a confirm item when
+    // `defer`; then it proposes, and the person lands the version through the relay
+    let land = |c: &mut McpClient, title: &str, defer: bool| {
+        let plan = c
+            .call("rdy_plan", json!({"view": "a0", "max_tokens": 100_000}))
+            .ok();
+        let mut deferred = 0;
+        let answers: Vec<Value> = plan["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|i| i["state"] == "open")
+            .filter_map(|i| {
+                let kind = i["kind"].as_str()?;
+                let (act, reason) = match swarm_answer(kind)? {
+                    _ if defer && kind == "confirm" => ("defer", "swarm: later"),
+                    answer => answer,
+                };
+                deferred += usize::from(act == "defer");
+                Some(json!({"item": i["id"], "act": act, "reason": reason}))
+            })
+            .collect();
+        if !answers.is_empty() {
+            c.call("rdy_plan", json!({"view": "a0", "answers": answers}))
+                .ok();
+        }
+        let v = c
+            .call(
+                "rdy_propose",
+                json!({"view": "a0", "title": title, "summary": title}),
+            )
+            .ok();
+        let pref = v["ref"].as_str().unwrap().to_string();
+        let queue = Arc::new(Mutex::new(vec![pref.clone()]));
+        people::spawn(
+            &p,
+            vec![PersonAct::Land { relayed: true }],
+            j.clone(),
+            queue.clone(),
+            g.clone(),
+        )
+        .join()
+        .unwrap_or_else(|e| panic!("the person panicked: {e:?}"));
+        (pref, queue, deferred)
+    };
+    // a0's claim cites c0, and lands
+    let (token, _) = brief(&mut c, &section);
+    let body = format!("Agent zero builds on {{{{{c0}}}}} in pass one.");
+    c.call(
+        "rdy_write",
+        json!({"ops": [{"op": "create", "type": "claim", "id": "$y", "parent": section,
+            "body": body}], "brief": token, "implements": [decision]}),
+    )
+    .ok();
+    let (first, queue, _) = land(&mut c, "a0 cites c0", false);
+    assert!(
+        queue.lock().unwrap().is_empty(),
+        "{first}: {:#?}",
+        j.entries()
+    );
+    // a0 edits c0: its claim gets a confirm item, which a0 defers
+    let (token, version) = brief(&mut c, &c0);
+    c.call(
+        "rdy_write",
+        json!({"ops": [{"op": "update", "id": c0, "base": version,
+            "body": "The ledger rule first holds, reworded."}],
+            "brief": token, "implements": [decision]}),
+    )
+    .ok();
+    let (pref, queue, deferred) = land(&mut c, "a0 rewords c0", true);
+    assert!(
+        deferred > 0,
+        "a0's edit of c0 gave its claim no confirm item to defer"
+    );
+    let entries = j.entries();
+    let of = |act: &str| -> Vec<&Entry> {
+        entries
+            .iter()
+            .filter(|e| e.act == act && e.block.as_deref() == Some(pref.as_str()))
+            .collect()
+    };
+    let (read, accepted, landed) = (of("pending"), of("accept_deferrals"), of("land"));
+    assert_eq!(read.len(), 1, "{entries:#?}");
+    assert_eq!(read[0].outcome, Met::Ok, "{:?}", read[0]);
+    // the relay reads the queue and relays the answer through the tools (FW-UX1, D-VF4RH)
+    assert_eq!(
+        read[0].reply,
+        Some(json!({"via": "rdy_pending"})),
+        "{:?}",
+        read[0]
+    );
+    assert_eq!(accepted.len(), 1, "{entries:#?}");
+    assert_eq!(accepted[0].outcome, Met::Ok, "{:?}", accepted[0]);
+    assert_eq!(accepted[0].actor, "agent:relay");
+    let answer = accepted[0].reply.as_ref().expect("the answer's reply");
+    assert_eq!(answer["via"], "rdy_answer", "{answer}");
+    assert_eq!(answer["answer"]["act"], "accept_deferrals", "{answer}");
+    assert_eq!(landed.len(), 1, "{entries:#?}");
+    assert_eq!(landed[0].outcome, Met::Ok, "{:?}", landed[0]);
+    assert!(
+        queue.lock().unwrap().is_empty(),
+        "the landed ref left the queue"
+    );
+    // the seal holds the deferred item under the accepting answer
+    let l = landed[0].reply.as_ref().unwrap()["landing"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (ok, seal) = p.served.json(&["--json", "plan", "--landing", &l]);
+    assert!(ok, "{seal}");
+    let deferred: Vec<&Value> = seal["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["outcome"] == "deferred")
+        .collect();
+    assert!(!deferred.is_empty(), "{seal}");
+    assert!(deferred.iter().all(|i| i["answer"].is_string()), "{seal}");
+}
+
+/// rg15 (ruling task-15 F1, D-ME2HD), directed: the person answers its own view's change plan
+/// through the CLI before it proposes `work`. Agent a0 lands a claim that cites seed claim c0;
+/// the person's working-copy edit at step 0 rewords c0, so `work` gets a confirm item on a0's
+/// claim. The person reads the plan (`rdy plan --view work`), confirms the item
+/// (`rdy plan confirm`), proposes, and its next act lands the version with the item sealed
+/// confirmed under that answer; nothing is left in its queue.
+#[test]
+fn rg15_the_person_answers_the_work_plan_before_it_proposes() {
+    use rdy_qa::mcp::McpClient;
+    use rdy_qa::swarm::agent::KillGate;
+    use rdy_qa::swarm::journal::Journal;
+    use rdy_qa::swarm::people;
+    use rdy_qa::swarm::project;
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+    let cfg = Config {
+        seed: 32,
+        agents: 1,
+        steps: 4,
+        kill_at: None,
+    };
+    let p = project::build(&cfg);
+    let (j, g) = (Journal::new(), Arc::new(KillGate::new()));
+    let mut c = McpClient::start_proxy(&p.served);
+    c.call(
+        "rdy_session",
+        json!({"actor": "agent:a0", "run": "a0", "role": "writer", "areas": ["payments"]}),
+    )
+    .ok();
+    let (c0, section, decision) = (
+        p.seed.claims[0].clone(),
+        p.seed.sections[0].clone(),
+        p.seed.decisions[0].clone(),
+    );
+    // a0's claim cites c0, and the person lands it
+    let b = c.call("rdy_brief", json!({"ids": [section]})).ok();
+    let token = b["base"]["token"].as_str().unwrap().to_string();
+    let body = format!("Agent zero builds on {{{{{c0}}}}} in pass one.");
+    c.call(
+        "rdy_write",
+        json!({"ops": [{"op": "create", "type": "claim", "id": "$y", "parent": section,
+            "body": body}], "brief": token, "implements": [decision]}),
+    )
+    .ok();
+    let v = c
+        .call(
+            "rdy_propose",
+            json!({"view": "a0", "title": "a0 cites c0", "summary": "a0 cites c0"}),
+        )
+        .ok();
+    let first = v["ref"].as_str().unwrap().to_string();
+    let queue = Arc::new(Mutex::new(vec![first.clone()]));
+    let person = |acts: Vec<PersonAct>| {
+        people::spawn(&p, acts, j.clone(), queue.clone(), g.clone())
+            .join()
+            .unwrap_or_else(|e| panic!("the person panicked: {e:?}"));
+    };
+    person(vec![PersonAct::Land { relayed: true }]);
+    assert!(
+        queue.lock().unwrap().is_empty(),
+        "{first}: {:#?}",
+        j.entries()
+    );
+    // the person rewords c0 in `work` (its edit at step 0), answers the plan, proposes and lands
+    person(vec![PersonAct::WcEdit, PersonAct::Land { relayed: true }]);
+    let entries = j.entries();
+    let work = |act: &str| -> Vec<&Entry> {
+        entries
+            .iter()
+            .filter(|e| e.act == act && e.view.as_deref() == Some("work"))
+            .collect()
+    };
+    let (read, answered, proposed) = (work("plan"), work("plan_answer"), work("wc_propose"));
+    assert!(!read.is_empty(), "{entries:#?}");
+    assert!(
+        read.iter()
+            .all(|e| e.actor == "human:qa" && e.outcome == Met::Ok),
+        "{read:#?}"
+    );
+    assert_eq!(answered.len(), 1, "{entries:#?}");
+    assert_eq!(answered[0].actor, "human:qa");
+    assert_eq!(answered[0].outcome, Met::Ok, "{:?}", answered[0]);
+    let sent = answered[0].reply.as_ref().unwrap()["answers"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(
+        sent.iter().any(|a| a["kind"] == "confirm"
+            && a["act"] == "confirm"
+            && a["reason"] == "swarm: checked"),
+        "{sent:#?}"
+    );
+    assert_eq!(proposed.len(), 1, "{entries:#?}");
+    assert_eq!(proposed[0].outcome, Met::Ok, "{:?}", proposed[0]);
+    // the answers come before the propose
+    let at = |e: &Entry| entries.iter().position(|x| x == e).unwrap();
+    assert!(at(answered[0]) < at(proposed[0]), "{entries:#?}");
+    let pref = proposed[0].block.clone().expect("the work version");
+    let landed: Vec<&Entry> = entries
+        .iter()
+        .filter(|e| e.act == "land" && e.block.as_deref() == Some(pref.as_str()))
+        .collect();
+    assert_eq!(landed.len(), 1, "{entries:#?}");
+    assert_eq!(landed[0].outcome, Met::Ok, "{:?}", landed[0]);
+    assert!(queue.lock().unwrap().is_empty(), "{:?}", queue.lock());
+    // the seal holds each answered item confirmed
+    let l = landed[0].reply.as_ref().unwrap()["landing"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (ok, seal) = p.served.json(&["--json", "plan", "--landing", &l]);
+    assert!(ok, "{seal}");
+    for a in &sent {
+        let item = seal["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == a["item"])
+            .unwrap_or_else(|| panic!("{} is not in the seal: {seal}", a["item"]));
+        assert_eq!(item["outcome"], "confirmed", "{seal}");
+    }
+}
+
+/// rg12 (D-ME2HD, D-SDSV2; C7): from the store after each seed's run, every landing whose
+/// proposal is a proposed version names an assessment of the version it approved; a
+/// re-affirmation card's landing (its proposal is in a `reaffirm-` view) names none.
+#[test]
+fn rg12_every_landing_of_a_proposed_version_names_an_assessment() {
+    each(|seed, o| {
+        let (_keep, copy) = copy_of(&o.dir);
+        let r = Rdy::open(&copy).expect("open the drained copy");
+        let st = r.read();
+        let reader = st.reader();
+        let mut bad = vec![];
+        let (mut named, mut reaffirms) = (0, 0);
+        for (landing, rec) in reader.landings().expect("read canon's chain") {
+            let view = reader
+                .proposal(&rec.proposal)
+                .unwrap_or_else(|e| panic!("landing {landing}: its proposal: {e}"))
+                .view;
+            if view.starts_with(rdy_store::REAFFIRM_VIEW_PREFIX) {
+                reaffirms += 1;
+                if let Some(a) = rec.assessment {
+                    bad.push(format!(
+                        "re-affirmation landing {} names assessment {}",
+                        landing.short(),
+                        a.short()
+                    ));
+                }
+                continue;
+            }
+            let approved = rec.approved_version.unwrap_or(rec.proposal);
+            match rec.assessment {
+                None => bad.push(format!(
+                    "landing {} of view {view} names no assessment",
+                    landing.short()
+                )),
+                Some(a) => match reader.assessment(&a) {
+                    Ok(x) if x.proposal == approved => named += 1,
+                    Ok(x) => bad.push(format!(
+                        "landing {} names assessment {} of {}, not of {}",
+                        landing.short(),
+                        a.short(),
+                        x.proposal.short(),
+                        approved.short()
+                    )),
+                    Err(e) => bad.push(format!(
+                        "landing {}: assessment {}: {e}",
+                        landing.short(),
+                        a.short()
+                    )),
+                },
+            }
+        }
+        drop(st);
+        r.close().expect("close the drained copy");
+        assert!(
+            named > 0,
+            "swarm seed {seed}: no landing named an assessment"
+        );
+        assert!(
+            bad.is_empty(),
+            "swarm seed {seed} ({reaffirms} re-affirmation landings): {bad:#?}"
+        );
+    });
 }

@@ -18,6 +18,7 @@ mod tensions_relayed;
 mod tensions_semantic;
 mod tensions_semantic_golden;
 mod tensions_unjustified;
+mod tensions_unjustified_stable;
 mod tensions_value;
 mod tensions_verdicts;
 mod tensions_views_carry;

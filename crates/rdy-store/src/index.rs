@@ -88,6 +88,14 @@ const PLAN_DEFERRALS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("plan
 /// A proposal version's hash (32 bytes) -> the hash of its bound (unsealed) plan version and that
 /// version's location: the first such version.
 const PLAN_PROPOSALS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("plan_proposals");
+/// A proposal version's hash (32 bytes), then an ASSESSMENT's location (`loc_key`) -> that
+/// assessment's hash (D-ME2HD): every assessment of every version, in log order, so the newest
+/// before any log end is one range read.
+const ASSESSMENT_PROPOSALS: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("assessment_proposals");
+/// The `meta` key that holds the location (`loc_key`) of the log's first CHANGE whose links
+/// record a briefing; absent while no such change is indexed.
+const FIRST_BRIEFED_CHANGE_KEY: &str = "first_briefed_change";
 /// A diagram's cache key (D-XM8MP; diagram_cache.rs) -> its drawing: tag, payload hash, payload. Derived from drawing, not from the log: a reindex starts it empty.
 const DIAGRAMS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("diagrams");
 /// The `meta` key that holds the diagram cache's counted bytes, 8 bytes little-endian.
@@ -182,6 +190,16 @@ pub enum IndexEntry {
     PlanProposal {
         proposal: Hash,
         plan: Hash,
+        at: Location,
+    },
+    /// ASSESSMENT `assessment`, at `at`, assesses proposal version `proposal`; every one is kept.
+    AssessmentProposal {
+        proposal: Hash,
+        assessment: Hash,
+        at: Location,
+    },
+    /// A CHANGE at `at` records a briefing in its links; the first such location is kept.
+    BriefedChange {
         at: Location,
     },
     /// `source` accepts deferring `block`'s work owed to `cause`: it replaces the pair's row.
@@ -397,6 +415,9 @@ pub struct IndexDump {
     pub plan_decisions: BTreeMap<Vec<u8>, Vec<u8>>,
     pub plan_deferrals: BTreeMap<Vec<u8>, Vec<u8>>,
     pub plan_proposals: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub assessment_proposals: BTreeMap<Vec<u8>, Vec<u8>>,
+    /// The `meta` value of the first briefed change's location, if any.
+    pub first_briefed_change: Option<Vec<u8>>,
 }
 
 fn dump_table(
@@ -503,6 +524,12 @@ fn hash_at_from(v: &[u8], what: &str) -> Result<(Hash, Location), StoreError> {
         )));
     }
     Ok((hash_from(&v[..32], what)?, loc_from(&v[32..], what)?))
+}
+
+/// The `assessment_proposals` key of an assessment of `version` at `at`: the version's hash,
+/// then the location (`loc_key`), so a version's rows sort in log order.
+fn version_at_key(version: &Hash, at: &Location) -> [u8; 44] {
+    hash_at_value(version, at)
 }
 
 /// The `plan_deferrals` key of (`block`, `cause`): the block id, a 0x00 byte, the cause id.
@@ -1002,6 +1029,13 @@ impl Index {
                 "the index has no plan tables; it is rebuilt from the log".into(),
             ));
         }
+        // likewise for the assessment table: no assessment, and no first briefed change, is ever
+        // read as absent
+        if has(OBJECTS.name()) && !has(ASSESSMENT_PROPOSALS.name()) {
+            return Err(StoreError::Db(
+                "the index has no assessment table; it is rebuilt from the log".into(),
+            ));
+        }
         // an index written before the open-proposal table existed gets it filled from its refs,
         // once, in this commit
         let had_open = has(OPEN_PROPOSALS.name());
@@ -1028,6 +1062,7 @@ impl Index {
             w.open_table(PLAN_DECISIONS).map_err(db)?;
             w.open_table(PLAN_DEFERRALS).map_err(db)?;
             w.open_table(PLAN_PROPOSALS).map_err(db)?;
+            w.open_table(ASSESSMENT_PROPOSALS).map_err(db)?;
             // an index written before the diagram cache gains its table empty: no refusal and
             // no rebuild, since a drawing is never read as absent data
             w.open_table(DIAGRAMS).map_err(db)?;
@@ -1115,8 +1150,10 @@ impl Index {
             // signature table only for a batch with a signature
             let mut redaction: Option<RedactionTables<'_>> = None;
             let mut signatures: Option<redb::Table<'_, &'static [u8], &'static [u8]>> = None;
-            // the plan tables only for a batch with a plan entry
+            // the plan tables only for a batch with a plan entry, and the assessment table only
+            // for a batch with an assessment
             let mut plans: Option<PlanTables<'_>> = None;
+            let mut assessments: Option<redb::Table<'_, &'static [u8], &'static [u8]>> = None;
             // a redaction apply marks the index: its file may hold what the removal erases
             let mut applied_removal = false;
             for e in entries {
@@ -1257,6 +1294,27 @@ impl Index {
                         let t = &mut plans.as_mut().expect("opened")[3];
                         if t.get(&proposal.0[..]).map_err(db)?.is_none() {
                             t.insert(&proposal.0[..], &hash_at_value(plan, at)[..])
+                                .map_err(db)?;
+                        }
+                    }
+                    IndexEntry::AssessmentProposal {
+                        proposal,
+                        assessment,
+                        at,
+                    } => {
+                        let t = match &mut assessments {
+                            Some(t) => t,
+                            None => {
+                                assessments.insert(w.open_table(ASSESSMENT_PROPOSALS).map_err(db)?)
+                            }
+                        };
+                        t.insert(&version_at_key(proposal, at)[..], &assessment.0[..])
+                            .map_err(db)?;
+                    }
+                    IndexEntry::BriefedChange { at } => {
+                        // the log is indexed in order, so the first one kept is the lowest
+                        if meta.get(FIRST_BRIEFED_CHANGE_KEY).map_err(db)?.is_none() {
+                            meta.insert(FIRST_BRIEFED_CHANGE_KEY, &enc(at)[..])
                                 .map_err(db)?;
                         }
                     }
@@ -1480,6 +1538,13 @@ impl Index {
             plan_decisions: dump_table(&r, PLAN_DECISIONS)?,
             plan_deferrals: dump_table(&r, PLAN_DEFERRALS)?,
             plan_proposals: dump_table(&r, PLAN_PROPOSALS)?,
+            assessment_proposals: dump_table(&r, ASSESSMENT_PROPOSALS)?,
+            first_briefed_change: r
+                .open_table(META)
+                .map_err(db)?
+                .get(FIRST_BRIEFED_CHANGE_KEY)
+                .map_err(db)?
+                .map(|v| v.value().to_vec()),
         })
     }
 
@@ -1504,6 +1569,61 @@ impl Index {
             Some(v) => Ok(Some(hash_at_from(v.value(), "plan proposal entry")?)),
             None => Ok(None),
         }
+    }
+
+    /// The newest assessment of proposal version `proposal` whose frame lies before `end`.
+    pub(crate) fn assessment_proposal(
+        &self,
+        proposal: &Hash,
+        end: Location,
+    ) -> Result<Option<Hash>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(ASSESSMENT_PROPOSALS).map_err(db)?;
+        let from = version_at_key(
+            proposal,
+            &Location {
+                segment: 0,
+                offset: 0,
+            },
+        );
+        let to = version_at_key(proposal, &end);
+        match t.range(&from[..]..&to[..]).map_err(db)?.next_back() {
+            Some(item) => {
+                let (_, v) = item.map_err(db)?;
+                Ok(Some(hash_from(v.value(), "assessment proposal entry")?))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// The location of the log's first CHANGE whose links record a briefing, if one is indexed.
+    pub(crate) fn first_briefed_change(&self) -> Result<Option<Location>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(META).map_err(db)?;
+        match t.get(FIRST_BRIEFED_CHANGE_KEY).map_err(db)? {
+            Some(v) => Ok(Some(dec(v.value())?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Every row of the assessment table, decoded: (version, the assessment's location) -> the
+    /// assessment.
+    pub(crate) fn assessment_rows(&self) -> Result<BTreeMap<(Hash, Location), Hash>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let mut out = BTreeMap::new();
+        for item in r
+            .open_table(ASSESSMENT_PROPOSALS)
+            .map_err(db)?
+            .iter()
+            .map_err(db)?
+        {
+            let (k, v) = item.map_err(db)?;
+            out.insert(
+                hash_at_from(k.value(), "assessment proposal key")?,
+                hash_from(v.value(), "assessment proposal entry")?,
+            );
+        }
+        Ok(out)
     }
 
     /// The seals that name `decision`, each with its own location, in landing order.

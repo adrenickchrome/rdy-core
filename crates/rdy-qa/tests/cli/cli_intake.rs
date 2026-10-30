@@ -441,16 +441,17 @@ fn di12_rdy_answer_relays_from_an_agent_session() {
     let ev = row.evidence.as_ref().unwrap();
     assert_eq!(ev.kind, "card");
     assert_eq!(ev.card_hash.as_deref(), Some(a_hash.as_str()));
-    // --all-recommended: each item its recommended option, each bound to its own card. The
-    // first approval moves canon, so the second card the person saw is stale: the call stops
-    // there, and the error lists what it did and carries the fresh card
+    // --all-recommended: each item its recommended option, each bound to its own card. Ruling
+    // task-12 R3 (p-ST0E9, D-ME2HD): the card hash binds the card shown, and freshness judges a
+    // landing by the version's reach. Here the data gives the second case: ready[2]'s landing
+    // writes only its own new claim, which is not in ready[3]'s reach, and ready[3]'s card is
+    // unchanged by it (its Base read `moved` already), so the second approval binds and lands
     let both = [ready[2].clone(), ready[3].clone()];
     let (hc, hd) = (hash_of(&both[0]), hash_of(&both[1]));
-    let (ok, e) = s.json_as(
+    let (ok, out) = text(&s.rdy_as(
         agent,
         run,
         &[
-            "--json",
             "answer",
             "--all-recommended",
             &both[0],
@@ -464,24 +465,22 @@ fn di12_rdy_answer_relays_from_an_agent_session() {
             "--evidence",
             "do what you recommend",
         ],
-    );
-    assert!(!ok);
-    assert_eq!(e["code"], "E_PROPOSAL_MOVED", "{e}");
-    let done = e["corrected"]["done"].as_array().expect("what was done");
-    assert_eq!(done.len(), 1, "{e}");
-    assert_eq!(
-        (done[0]["ref"].as_str(), done[0]["act"].as_str()),
-        (Some(both[0].as_str()), Some("approve")),
-        "{e}"
-    );
-    assert_eq!(e["corrected"]["ref"], both[1].as_str(), "{e}");
-    assert_eq!(landings(&s), base + 2);
+    ));
+    assert!(ok, "{out}");
+    for r in &both {
+        assert!(
+            out.lines()
+                .any(|l| l.starts_with(&format!("answered {r}: "))),
+            "{out}"
+        );
+    }
+    assert_eq!(landings(&s), base + 3);
     // a person's own --all-recommended binds to the versions, and lands what is left
-    let (ok, out) = text(&s.rdy(&["answer", "--all-recommended", &ready[1], &both[1]]));
+    let (ok, out) = text(&s.rdy(&["answer", "--all-recommended", &ready[1]]));
     assert!(ok, "{out}");
     assert_eq!(
         out.lines().filter(|l| l.starts_with("answered ")).count(),
-        2,
+        1,
         "{out}"
     );
     assert_eq!(landings(&s), base + 4);

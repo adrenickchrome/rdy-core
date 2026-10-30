@@ -232,7 +232,7 @@ fn hb1_a_landing_on_the_versions_blocks_moves_the_proposal() {
     let sb = as_agent("agent:b", "r1");
     write_as(&mut r, &sa, "a", update(&c, &v, "a's")).unwrap();
     write_as(&mut r, &sb, "b", update(&c, &v, "b's")).unwrap();
-    let pa = r.propose(&sa, "a", "a", None).unwrap();
+    let pa = r.propose(&sa, "a", "a", Some(TEST_SUMMARY)).unwrap();
     let pb = r.propose(&sb, "b", "b", Some(TEST_SUMMARY)).unwrap();
     let lb = r.land_report(&approver(), &pb.r#ref).unwrap();
     let landings = r.read().landings().unwrap().len();

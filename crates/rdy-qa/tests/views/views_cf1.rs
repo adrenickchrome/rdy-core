@@ -84,6 +84,7 @@ fn cf1_a_frozen_side_that_did_not_land_is_refused_with_e_frozen() {
                 alt: None,
                 relay: None,
                 evidence: None,
+                assessment: None,
             })
             .unwrap();
         r.invalidate();

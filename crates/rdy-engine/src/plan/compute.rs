@@ -6,13 +6,18 @@
 //! (`ReadState::plan_pairs`), over the net state (D-NJ2SP): intermediate edits leave nothing.
 //! The code items come from the code index at the HEADs the caller captured (D-ERKCP): one per
 //! cause and anchored file, closed by a later commit, where "later" is Git reachability (O5).
-use crate::brief::FollowUp;
+//! The tension items come from the open advisory tensions that involve the version (D-ME2HD,
+//! D-45RG6, O21), on its recorded canon: those of its landing form there, and its in-flight
+//! forms, each open until the author answers it; and the canon tensions on blocks it writes that
+//! its landing form no longer has, which the version's change resolves (`updated`).
+use crate::brief::{FollowUp, effective_stable};
 use crate::code_evidence::{self, anchored_files, later_touch};
 use crate::code_index::{CodeRepo, code_repos};
 use crate::consequence::{CONFLICT_FIX, NetState, PlanPair, conflict_message, refines_copied};
-use crate::error::{E_CONFLICT_UNRESOLVED, E_LIMIT};
+use crate::error::{E_ALREADY_EXISTS, E_CONFLICT_UNRESOLVED, E_LIMIT, E_STALE_BASE};
 use crate::gate::{applied_ops, changes_of, prospective};
 use crate::lexicon::Lexicon;
+use crate::tensions::{Tension, TensionSeverity, TensionStatus, judged_on_the_net_change};
 use crate::{Materialized, RdyError, ReadState, Scope};
 use rdy_graph::{DerivedStatus, Graph, edges_of};
 use rdy_model::decision::{DECISION, REFINES, REVOKES, SUPERSEDES};
@@ -32,12 +37,16 @@ pub const DELETED_DOMAIN: &[u8] = b"rdy-plan-deleted\0";
 /// The edge of every code item.
 const CODE_EDGE: &str = "implements";
 
+/// The edge of every tension item.
+pub const TENSION_EDGE: &str = "tension";
+
 /// The fix of [`limit_error`].
 const LIMIT_FIX: &str = "split the change into smaller proposals";
 
-/// One computed plan item. `subject` is a block id, or `<configured repo>:<relative path>` for
-/// a code item. The hashes are the content hashes an answer keeps (O4): a deleted block's is
-/// [`deleted_identity`], and a code subject has none.
+/// One computed plan item. `subject` is a block id, `<configured repo>:<relative path>` for a
+/// code item, or the tension's full id (64 hex) for a tension item. The hashes are the content
+/// hashes an answer keeps (O4): a deleted block's is [`deleted_identity`], a code subject and a
+/// tension subject have none, and a tension item's cause hash is the tension's vkey (O5).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlanCandidate {
     /// [`item_hash`] of the cause, the subject and the kind.
@@ -50,6 +59,9 @@ pub struct PlanCandidate {
     pub cause_hash: Hash,
     /// The close the version itself makes (checked before any answer), or `None` while open.
     pub close: Option<PlanOutcome>,
+    /// Whether the subject is stable content: its effective lifecycle on the version's final
+    /// state, else on canon (a deleted subject). Never for a code or a tension item (D-FQ7AK).
+    pub stable: bool,
 }
 
 /// Every item of a version, sorted by full item hash, with the distinct code files they name.
@@ -67,6 +79,71 @@ pub struct ComputedPlan {
     /// The version re-affirms a decision: its `reaffirmed` metadata changes, or it closes a
     /// re-affirm item as re-affirmed. A landing that does seals, also with no item.
     pub reaffirms: bool,
+    /// The tensions of its tension items, by id.
+    pub(crate) tensions: Vec<Arc<Tension>>,
+}
+
+/// A plan [`compute_changes`] gave a propose, with what that compute read: the state it ran on
+/// and its inputs. The propose carries it to readiness (`readiness::PlanSource::InHand`), whose
+/// plan read uses it in place of computing the same plan again ([`CarriedPlan::on`]).
+#[derive(Clone, Debug)]
+pub struct CarriedPlan {
+    /// The id of the state it ran on (`ReadState::memo`).
+    state: u64,
+    view: String,
+    changes: Vec<Hash>,
+    canon_at: Option<Hash>,
+    heads: Vec<PlanHead>,
+    first_heads: Vec<PlanHead>,
+    plan: Arc<ComputedPlan>,
+}
+
+impl CarriedPlan {
+    /// `plan`, which [`compute_changes`] gave on `st` for these inputs.
+    pub(crate) fn of(
+        st: &ReadState,
+        view: &str,
+        changes: &[Change],
+        canon_at: Option<Hash>,
+        heads: &[PlanHead],
+        first_heads: &[PlanHead],
+        plan: ComputedPlan,
+    ) -> CarriedPlan {
+        CarriedPlan {
+            state: st.memo.id,
+            view: view.to_string(),
+            changes: changes.iter().map(Change::id).collect(),
+            canon_at,
+            heads: heads.to_vec(),
+            first_heads: first_heads.to_vec(),
+            plan: Arc::new(plan),
+        }
+    }
+
+    /// The carried plan, when [`compute`] of these inputs on `st` computes the same plan: the
+    /// same state, no fixed tension set (a version with no stored assessment, as
+    /// [`compute_changes`] reads), and the same view, changes, canon and HEADs. None otherwise:
+    /// the caller computes it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn on(
+        &self,
+        st: &ReadState,
+        view: &str,
+        changes: &[Hash],
+        canon_at: Option<Hash>,
+        fixed: Option<&FixedTensions>,
+        heads: &[PlanHead],
+        first_heads: &[PlanHead],
+    ) -> Option<&ComputedPlan> {
+        let same = self.state == st.memo.id
+            && fixed.is_none()
+            && self.view == view
+            && self.changes == changes
+            && self.canon_at == canon_at
+            && self.heads == heads
+            && self.first_heads == first_heads;
+        same.then_some(&*self.plan)
+    }
 }
 
 /// The acts that may answer an item of `kind` (tb-2ZED7); a computed close needs none.
@@ -75,9 +152,8 @@ pub fn allowed_acts(kind: PlanKind) -> &'static [PlanAct] {
         PlanKind::Update | PlanKind::Rejustify | PlanKind::Reaffirm => &[PlanAct::Defer],
         PlanKind::Confirm => &[PlanAct::Confirm, PlanAct::Defer],
         PlanKind::UpdateImplementation => &[PlanAct::Done, PlanAct::Defer],
-        // a tension item is carried only: no computed plan holds one, and no act answers it
-        // until its writer exists
-        PlanKind::Tension => &[],
+        // D-ME2HD: the author answers a tension item; defer does not answer it
+        PlanKind::Tension => &[PlanAct::Confirm, PlanAct::Dismiss],
     }
 }
 
@@ -98,12 +174,165 @@ pub(crate) fn limit_error(n: usize) -> RdyError {
     )
 }
 
-/// The two states a plan compares: the canon baseline, the version's final state on it, and the
-/// blocks the version's applied ops write.
+/// The two states a plan compares: the canon baseline, the version's final state on it, the
+/// blocks the version's applied ops write, and the tensions that involve the version.
 pub(crate) struct Sides {
     pub(crate) base: NetState,
     pub(crate) fin: NetState,
     pub(crate) written: BTreeSet<BlockId>,
+    pub(crate) tensions: VersionTensions,
+}
+
+/// The advisory tensions of a version's tension items (D-ME2HD, D-45RG6, O21), each by id.
+/// `open`: the open tensions that involve the version, which the author answers: those of its
+/// landing form on its recorded canon, and its in-flight forms (as `pending::queue::open_tensions`
+/// reads them) less those that only a landing since its canon gives (the landing form on canon
+/// as it is now has them): such a tension is not the version's, and is canon's once it lands.
+/// `resolved`: the open canon tensions of its recorded canon on a block it writes that its
+/// landing form no longer has (no tension of the same kind on the same blocks): its change
+/// resolves them, and each closes as `updated`.
+/// `bound`: the tension items a stored proposal version's propose bound an answer to
+/// ([`FixedTensions::bound`]), rebuilt from its records, so a later exclusion, landing or status
+/// change of the other side never removes one (ruling final F1).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct VersionTensions {
+    pub(crate) open: Vec<Arc<Tension>>,
+    pub(crate) resolved: Vec<Arc<Tension>>,
+    pub(crate) bound: Vec<PlanCandidate>,
+}
+
+/// The tension set a stored proposal version was made with ([`fixed_tensions`]).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FixedTensions {
+    /// The ids of the tension rows of its stored assessment (O17).
+    pub(crate) ids: BTreeSet<Hash>,
+    /// The tension item of each row that names a bound answer, rebuilt from the row alone: its
+    /// subject the row's id, its cause the row's first block, its cause hash the row's vkey. The
+    /// bound answer still answers it when the live tension is gone (ruling final F1).
+    pub(crate) bound: Vec<PlanCandidate>,
+    /// The rows `bound` comes from, as stored: a fresh assessment keeps each one the live set no
+    /// longer lists (`readiness::assessment::Inputs::carried`).
+    pub(crate) rows: Vec<rdy_model::assessment::AssessmentTension>,
+}
+
+/// The kind and the blocks of `t`: what one tension keeps when only a side's version moves.
+pub(crate) fn shape(t: &Tension) -> (crate::tensions::TensionKind, Vec<BlockId>) {
+    (t.kind, t.blocks())
+}
+
+/// The tensions of the tension items of a version of `view` with changes `changes` (read or
+/// not yet written) on canon's head, by id: those [`compute_changes`] reads.
+pub(crate) fn tension_set(
+    st: &ReadState,
+    view: &str,
+    changes: &[Change],
+) -> Result<Vec<Arc<Tension>>, RdyError> {
+    let sides = sides_of(st, changes, st.canon_head())?;
+    let ids: Vec<Hash> = changes.iter().map(Change::id).collect();
+    let t = version_tensions(
+        st,
+        view,
+        &ids,
+        st.canon_head(),
+        None,
+        &sides.base,
+        &sides.written,
+    )?;
+    let mut all: Vec<Arc<Tension>> = t.open.into_iter().chain(t.resolved).collect();
+    all.sort_by_key(|t| t.id);
+    Ok(all)
+}
+
+/// The [`VersionTensions`] of a version of `view` with changes `changes` on canon `canon_at`,
+/// whose ops write `written`, with `base` the canon at `canon_at`. `fixed` is the tension set
+/// the version was made with ([`fixed_tensions`]): its in-flight forms are those it lists, so a
+/// tension that a later write in another view gives is context only (ruling task-8 F1); `None`
+/// reads every in-flight form. Only the changes the store holds are read: a key change not
+/// written yet has no tension set of its own. A tension read
+/// that fails gives no tension item: the propose reply reports that error as `tensions_error`
+/// and never fails on it (cc16), and a landing's own tension check refuses on it before any
+/// seal is written.
+fn version_tensions(
+    st: &ReadState,
+    view: &str,
+    changes: &[Hash],
+    canon_at: Option<Hash>,
+    fixed: Option<&FixedTensions>,
+    base: &NetState,
+    written: &BTreeSet<BlockId>,
+) -> Result<VersionTensions, RdyError> {
+    let reader = st.reader();
+    let mut held = Vec::with_capacity(changes.len());
+    for c in changes {
+        if reader.has(c)? {
+            held.push(*c);
+        }
+    }
+    if held.is_empty() {
+        return Ok(VersionTensions::default());
+    }
+    let ids = fixed.map(|f| &f.ids);
+    Ok(tensions_of(st, view, &held, canon_at, ids, base, written).unwrap_or_default())
+}
+
+/// The body of [`version_tensions`] for the held changes `held`.
+fn tensions_of(
+    st: &ReadState,
+    view: &str,
+    held: &[Hash],
+    canon_at: Option<Hash>,
+    fixed: Option<&BTreeSet<Hash>>,
+    base: &NetState,
+    written: &BTreeSet<BlockId>,
+) -> Result<VersionTensions, RdyError> {
+    let open_advisory = |t: &Tension| {
+        t.severity == TensionSeverity::Advisory && st.tension_status(t) == TensionStatus::Open
+    };
+    let landing = st.landing_tensions_at(view, held, canon_at)?;
+    // a landing since the recorded canon: the tensions the landing form has on canon as it is
+    let now: BTreeSet<Hash> = if canon_at == st.canon_head() {
+        landing.iter().map(|t| t.id).collect()
+    } else {
+        st.landing_tensions(view, held)?
+            .iter()
+            .map(|t| t.id)
+            .collect()
+    };
+    let mine = st.tensions_of_changes(held)?;
+    let mut seen = BTreeSet::new();
+    let mut open: Vec<Arc<Tension>> = landing
+        .iter()
+        .cloned()
+        .chain(mine.into_iter().filter(|t| {
+            !judged_on_the_net_change(t.kind)
+                && !now.contains(&t.id)
+                && fixed.is_none_or(|f| f.contains(&t.id))
+        }))
+        .filter(|t| seen.insert(t.id) && open_advisory(t))
+        .collect();
+    open.sort_by_key(|t| t.id);
+    // the base form: canon's tensions on a block the version writes, read on its recorded canon
+    // (every involved version is that canon's), that its landing form no longer has
+    let shapes: BTreeSet<_> = landing.iter().map(|t| shape(t)).collect();
+    let mut resolved: Vec<Arc<Tension>> = st
+        .canon_tensions()?
+        .into_iter()
+        .filter(|t| {
+            t.involved.iter().any(|i| written.contains(&i.block))
+                && t.involved
+                    .iter()
+                    .all(|i| base.m.version_of(&i.block) == i.version)
+                && !shapes.contains(&shape(t))
+                && !seen.contains(&t.id)
+                && open_advisory(t)
+        })
+        .collect();
+    resolved.sort_by_key(|t| t.id);
+    Ok(VersionTensions {
+        open,
+        resolved,
+        bound: vec![],
+    })
 }
 
 /// One linked checkout: the version's HEAD and the chain's first HEAD, resolved (`None` is an
@@ -115,35 +344,118 @@ pub(crate) struct CodeSide {
 }
 
 /// The complete plan items of `changes` (the selected changes of a version of `view`) on canon
-/// as of landing `canon_at` (`None`: the empty state), with code evidence at `heads` against the
+/// as of landing `canon_at` (`None`: the empty state), its in-flight tension items those of
+/// `fixed` ([`fixed_tensions`]; `None`: every in-flight form, as a view's live plan), with code
+/// evidence at `heads` against the
 /// chain's `first_heads`. A repo `first_heads` does not name uses its own HEAD as both ends. A
 /// pure read: no plan write and no clock; the caller captures the HEADs first. A version that
 /// does not apply on its baseline is the merge's refusal; past [`MAX_PLAN_ITEMS`] items,
 /// [`limit_error`].
 pub(crate) fn compute(
     st: &ReadState,
-    _view: &str,
+    view: &str,
     changes: &[Hash],
     canon_at: Option<Hash>,
+    fixed: Option<&FixedTensions>,
     heads: &[PlanHead],
     first_heads: &[PlanHead],
 ) -> Result<ComputedPlan, RdyError> {
     let changes = changes_of(st, changes)?;
-    compute_changes(st, &changes, canon_at, heads, first_heads)
+    compute_fixed(st, view, &changes, canon_at, fixed, heads, first_heads)
 }
 
-/// [`compute`] of change values, read or not yet written: the propose binding computes the
-/// candidate with the key change rdy adds before anything is appended.
+/// The tension set stored proposal version `version` was made with (ruling task-8 F1,
+/// D-ME2HD): the ids of the tension rows of its stored assessment (O17). After the propose, its
+/// change plan (the queue, every approval path, `change_plan{proposal}`, the landing's seal and
+/// guard) reads its in-flight tension items from that set, so a tension that a later write in
+/// another view gives is context only and a view edit after the proposal changes no readiness
+/// (O12). A frozen plan keeps every tension item it was bound with (ruling final F1): each row
+/// that names a bound answer gives its item ([`FixedTensions::bound`]), whatever the live tension
+/// set holds later. `None` for a version with no stored assessment: it reads every in-flight
+/// form.
+pub(crate) fn fixed_tensions(
+    st: &ReadState,
+    version: &Hash,
+) -> Result<Option<FixedTensions>, RdyError> {
+    let reader = st.reader();
+    let Some(a) = reader.assessment_of_proposal(version, st.seq())? else {
+        return Ok(None);
+    };
+    let rows = reader.assessment(&a)?.tensions;
+    let (mut bound, mut kept) = (vec![], vec![]);
+    for row in &rows {
+        let (Some(answer), Some(cause)) = (&row.answer, row.blocks.first()) else {
+            continue;
+        };
+        let subject = row.id.to_string();
+        let id = item_hash(cause, &subject, PlanKind::Tension);
+        // a row whose answer names another item is no record of this one
+        if answer.item != id {
+            continue;
+        }
+        bound.push(PlanCandidate {
+            id,
+            kind: PlanKind::Tension,
+            subject,
+            cause: cause.clone(),
+            edge: TENSION_EDGE.to_string(),
+            subject_hash: None,
+            cause_hash: row.vkey,
+            close: None,
+            stable: false,
+        });
+        kept.push(row.clone());
+    }
+    Ok(Some(FixedTensions {
+        ids: rows.iter().map(|t| t.id).collect(),
+        bound,
+        rows: kept,
+    }))
+}
+
+/// [`compute`] of change values of a version of `view`, read or not yet written: the propose
+/// binding computes the candidate with the key change rdy adds before anything is appended.
 pub(crate) fn compute_changes(
     st: &ReadState,
+    view: &str,
     changes: &[Change],
     canon_at: Option<Hash>,
     heads: &[PlanHead],
     first_heads: &[PlanHead],
 ) -> Result<ComputedPlan, RdyError> {
-    let sides = sides_of(st, changes, canon_at)?;
+    compute_fixed(st, view, changes, canon_at, None, heads, first_heads)
+}
+
+/// [`compute_changes`] of a version made with the tension set `fixed` (see [`compute`]).
+fn compute_fixed(
+    st: &ReadState,
+    view: &str,
+    changes: &[Change],
+    canon_at: Option<Hash>,
+    fixed: Option<&FixedTensions>,
+    heads: &[PlanHead],
+    first_heads: &[PlanHead],
+) -> Result<ComputedPlan, RdyError> {
+    PLAN_COMPUTES.with(|n| n.set(n.get() + 1));
+    let mut sides = sides_of(st, changes, canon_at)?;
+    let ids: Vec<Hash> = changes.iter().map(Change::id).collect();
+    sides.tensions =
+        version_tensions(st, view, &ids, canon_at, fixed, &sides.base, &sides.written)?;
+    sides.tensions.bound = fixed.map(|f| f.bound.clone()).unwrap_or_default();
     let code = code_sides(st, heads, first_heads)?;
     compute_in(st, &sides, code.as_deref(), MAX_PLAN_ITEMS)
+}
+
+thread_local! {
+    /// This thread's plan computes (see `plan_computes_for_tests`).
+    static PLAN_COMPUTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Tests only: this thread's plan computes so far (each run of [`compute`] or
+/// [`compute_changes`]). A test reads the difference over a call.
+#[doc(hidden)]
+pub fn plan_computes_for_tests() -> u64 {
+    PLAN_COMPUTES.with(std::cell::Cell::get)
 }
 
 /// The baseline of `canon_at` and `changes` applied on it. On canon's head the gate's own
@@ -174,24 +486,49 @@ fn sides_of(st: &ReadState, changes: &[Change], canon_at: Option<Hash>) -> Resul
             }
         }
     };
+    // a conflict with canon is one refusal on both branches: a plan read is no write, so it never
+    // gives the write's E_STALE_BASE (ruling task-15 F3)
+    let refuse = |ids: Vec<String>| -> Result<(), RdyError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        Err(RdyError::new(
+            E_CONFLICT_UNRESOLVED,
+            conflict_message(&ids),
+            CONFLICT_FIX,
+        ))
+    };
+    let conflicted = |canon_at: Option<Hash>| -> Result<Vec<String>, RdyError> {
+        let reader = st.reader();
+        let merged = reader.merge_onto(canon_at, &reader.state_of(canon_at)?, changes)?;
+        Ok(merged
+            .conflicts
+            .iter()
+            .map(|c| c.block.to_string())
+            .collect())
+    };
     let (m, ops) = if canon_at == st.canon_head() {
-        let (next, applied) = prospective(st, changes, None)?;
+        let (next, applied) = match prospective(st, changes, None) {
+            Ok(x) => x,
+            // the merge's conflict refusals (`merge_checked`) name one block: the refusal names
+            // every conflicted one, as the merge branch does
+            Err(e) if [E_STALE_BASE, E_ALREADY_EXISTS].contains(&e.code) => {
+                refuse(conflicted(canon_at)?)?;
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        };
         (next, applied_ops(changes, &applied))
     } else {
         let reader = st.reader();
         let merged = reader.merge_onto(canon_at, &reader.state_of(canon_at)?, changes)?;
-        if !merged.conflicts.is_empty() {
-            let ids: Vec<String> = merged
+        refuse(
+            merged
                 .conflicts
                 .iter()
                 .map(|c| c.block.to_string())
-                .collect();
-            return Err(RdyError::new(
-                E_CONFLICT_UNRESOLVED,
-                conflict_message(&ids),
-                CONFLICT_FIX,
-            ));
-        }
+                .collect(),
+        )?;
         let applied: Vec<usize> = merged
             .order
             .iter()
@@ -212,7 +549,12 @@ fn sides_of(st: &ReadState, changes: &[Change], canon_at: Option<Hash>) -> Resul
         g: Arc::new(g),
         names: Arc::new(names),
     };
-    Ok(Sides { base, fin, written })
+    Ok(Sides {
+        base,
+        fin,
+        written,
+        tensions: VersionTensions::default(),
+    })
 }
 
 /// The linked checkouts `heads` names, each with its first HEAD; `None` when none is linked.
@@ -382,7 +724,7 @@ impl Closes<'_> {
             return Some(PlanOutcome::Updated);
         };
         match kind {
-            // a carried tension item has no computed close
+            // a tension item is no pair: its close is [`tension_close`]
             PlanKind::Tension => None,
             // the subject's content changed, or it is new
             PlanKind::Update => match before {
@@ -425,6 +767,27 @@ impl Closes<'_> {
             PlanKind::UpdateImplementation => None,
         }
     }
+}
+
+/// The tension item of `tension` with the close `close` (O5); `None` for a tension that
+/// involves no block.
+pub(crate) fn tension_candidate(
+    tension: &Tension,
+    close: Option<PlanOutcome>,
+) -> Option<PlanCandidate> {
+    let cause = tension.blocks().into_iter().next()?;
+    let subject = tension.id.to_string();
+    Some(PlanCandidate {
+        id: item_hash(&cause, &subject, PlanKind::Tension),
+        kind: PlanKind::Tension,
+        subject,
+        cause,
+        edge: TENSION_EDGE.to_string(),
+        subject_hash: None,
+        cause_hash: tension.vkey,
+        close,
+        stable: false,
+    })
 }
 
 /// The kind of a judged pair: its follow-up, and a confirm on a retired cause is a rejustify. An
@@ -475,6 +838,11 @@ pub(crate) fn compute_in(
             .map(|b| b.content_hash_with(&t))
             .unwrap_or_else(|| deleted_identity(id))
     };
+    // D-FQ7AK: the subject's lifecycle as the version leaves it; a deleted one's as canon has it
+    let stable_of = |id: &BlockId| match fin.m.get(id) {
+        Some(_) => effective_stable(&fin.m, Some(id)),
+        None => effective_stable(&base.m, Some(id)),
+    };
     let mut items: BTreeMap<Hash, PlanCandidate> = BTreeMap::new();
     // the decisions whose re-affirm item the version closes as re-affirmed: they re-affirm, for
     // the code closes as for the document
@@ -504,6 +872,7 @@ pub(crate) fn compute_in(
                 close,
                 subject_hash: Some(hash_or_deleted(&p.subject)),
                 cause_hash: hash_or_deleted(&p.cause),
+                stable: stable_of(&p.subject),
                 subject,
                 cause: p.cause,
                 edge: p.edge,
@@ -511,6 +880,28 @@ pub(crate) fn compute_in(
             limit,
         )
     })?;
+    // O5: a tension item's subject is the tension's id, its cause the tension's first involved
+    // block, and an answer keeps the tension's vkey, so it lapses when the tension changes. An
+    // open one waits for the author's answer (D-45RG6); one the version resolves is updated.
+    let open = sides.tensions.open.iter().map(|t| (t, None));
+    let resolved = sides
+        .tensions
+        .resolved
+        .iter()
+        .map(|t| (t, Some(PlanOutcome::Updated)));
+    for (tension, close) in open.chain(resolved) {
+        let Some(c) = tension_candidate(tension, close) else {
+            continue;
+        };
+        admit(&mut items, c, limit)?;
+    }
+    // ruling final F1: a bound item the live set no longer gives stays, open until its bound
+    // answer closes it; one the live set gives keeps the live item and its close
+    for c in &sides.tensions.bound {
+        if !items.contains_key(&c.id) {
+            admit(&mut items, c.clone(), limit)?;
+        }
+    }
     let (code_files, code_unavailable) = match code {
         None => (0, true),
         Some(code) => (
@@ -535,12 +926,21 @@ pub(crate) fn compute_in(
         .chain(acknowledged.iter().cloned())
         .chain(reaffirmed.iter().cloned())
         .collect();
+    let mut tensions: Vec<Arc<Tension>> = sides
+        .tensions
+        .open
+        .iter()
+        .chain(&sides.tensions.resolved)
+        .cloned()
+        .collect();
+    tensions.sort_by_key(|t| t.id);
     Ok(ComputedPlan {
         items: items.into_values().collect(),
         code_files,
         code_unavailable,
         decisions: decisions.into_iter().collect(),
         reaffirms: !acknowledged.is_empty() || !reaffirmed.is_empty(),
+        tensions,
     })
 }
 
@@ -654,6 +1054,7 @@ fn code_items(
                         subject_hash: None,
                         cause_hash: cause_hash(cause),
                         close: closed.then_some(PlanOutcome::Committed),
+                        stable: false,
                     },
                     limit,
                 )?;
@@ -817,7 +1218,12 @@ mod tests {
             .map(|x| x.id.clone())
             .filter(|i| base.m.version_of(i) != fin.m.version_of(i))
             .collect();
-        Sides { base, fin, written }
+        Sides {
+            base,
+            fin,
+            written,
+            tensions: VersionTensions::default(),
+        }
     }
 
     fn sides(st: &ReadState, base: &[Block], fin: &[Block]) -> Sides {
@@ -1004,6 +1410,10 @@ mod tests {
         assert_eq!(
             allowed_acts(PlanKind::UpdateImplementation),
             [PlanAct::Done, PlanAct::Defer]
+        );
+        assert_eq!(
+            allowed_acts(PlanKind::Tension),
+            [PlanAct::Confirm, PlanAct::Dismiss]
         );
         let (_d, r) = project();
         let st = r.read();
@@ -1282,7 +1692,7 @@ mod tests {
         let of = |r: &Rdy, v: &str| {
             let st = r.read();
             let p = st.reader().proposal(&v.parse().unwrap()).unwrap();
-            compute(&st, "w", &p.changes, p.canon_at, &[], &[]).unwrap()
+            compute(&st, "w", &p.changes, p.canon_at, None, &[], &[]).unwrap()
         };
         let first = of(&r, &v1.id);
         let want = vec![
@@ -1331,11 +1741,11 @@ mod tests {
         )));
         let st = r.read();
         assert_eq!(*st.included("u"), changes);
-        let p = compute(&st, "u", &changes, st.canon_head(), &[], &[]).unwrap();
+        let p = compute(&st, "u", &changes, st.canon_head(), None, &[], &[]).unwrap();
         assert_eq!(rows(&p), vec![]);
         assert_eq!(p.code_files, 0);
         // the first edit alone owes the confirm
-        let p = compute(&st, "u", &changes[..1], st.canon_head(), &[], &[]).unwrap();
+        let p = compute(&st, "u", &changes[..1], st.canon_head(), None, &[], &[]).unwrap();
         assert_eq!(doc_items(&p).len(), 1, "{:#?}", rows(&p));
     }
 
@@ -1352,7 +1762,7 @@ mod tests {
             let p = st.reader().proposal(&v.id.parse().unwrap()).unwrap();
             (
                 p.canon_at,
-                compute(&st, "w", &p.changes, p.canon_at, &[], &[]).unwrap(),
+                compute(&st, "w", &p.changes, p.canon_at, None, &[], &[]).unwrap(),
             )
         };
         let (at, before) = of(&r);
@@ -1372,7 +1782,7 @@ mod tests {
         // on today's canon the version no longer applies; on its own it reads as it did
         let st = r.read();
         let p = st.reader().proposal(&v.id.parse().unwrap()).unwrap();
-        assert!(compute(&st, "w", &p.changes, st.canon_head(), &[], &[]).is_err());
+        assert!(compute(&st, "w", &p.changes, st.canon_head(), None, &[], &[]).is_err());
         assert_eq!(after, before);
     }
 
@@ -1389,12 +1799,12 @@ mod tests {
             json!([{"op": "repin", "id": b.to_string(), "targets": [a.to_string()]}]),
         ));
         let st = r.read();
-        let all = compute(&st, "w", &[edit, repin], st.canon_head(), &[], &[]).unwrap();
+        let all = compute(&st, "w", &[edit, repin], st.canon_head(), None, &[], &[]).unwrap();
         assert_eq!(
             close_of(&all, a.as_str(), b.as_str(), PlanKind::Confirm),
             Some(PlanOutcome::Repinned)
         );
-        let subset = compute(&st, "w", &[edit], st.canon_head(), &[], &[]).unwrap();
+        let subset = compute(&st, "w", &[edit], st.canon_head(), None, &[], &[]).unwrap();
         assert_eq!(
             close_of(&subset, a.as_str(), b.as_str(), PlanKind::Confirm),
             None
@@ -1709,7 +2119,7 @@ mod tests {
         };
         let at = |r: &Rdy, now: &str, first: &[PlanHead]| {
             let st = r.read();
-            compute(&st, "w", &changes, st.canon_head(), &head(now), first).unwrap()
+            compute(&st, "w", &changes, st.canon_head(), None, &head(now), first).unwrap()
         };
         let f =
             |p: &ComputedPlan| close_of(p, a.as_str(), "app:f.rs", PlanKind::UpdateImplementation);
@@ -1733,7 +2143,7 @@ mod tests {
         assert_eq!(f(&at(&r, &h5, &head(&h4))), Some(PlanOutcome::Committed));
         // no linked repo captured: code unavailable, no code item
         let st = r.read();
-        let p = compute(&st, "w", &changes, st.canon_head(), &[], &[]).unwrap();
+        let p = compute(&st, "w", &changes, st.canon_head(), None, &[], &[]).unwrap();
         assert!(p.code_unavailable);
         assert!(
             p.items
@@ -1948,7 +2358,7 @@ mod tests {
             json!([{"op": "delete", "id": b.to_string()}]),
         )));
         let st = r.read();
-        let p = compute(&st, "w", &changes, st.canon_head(), &[], &[]).unwrap();
+        let p = compute(&st, "w", &changes, st.canon_head(), None, &[], &[]).unwrap();
         assert_eq!(
             rows(&p),
             vec![(

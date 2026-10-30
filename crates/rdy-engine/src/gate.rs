@@ -3,16 +3,20 @@ use crate::answer::card_of;
 use crate::answer::relay::{RelayInput, relayed};
 use crate::coord_graph::AltRef;
 use crate::error::*;
-use crate::pending::queue::{approval_holds, approval_readiness};
+use crate::pending::queue::approval_holds;
 use crate::pending::{Item, PlanCardBinding};
 use crate::plan::lifecycle::{PlanSummary, ProposePlanRequest};
+use crate::readiness::assessment::{config_digest, pack_digest};
 use crate::session::rfc3339;
 use crate::tensions::{SideRef, Tension, TensionInfo, TensionSeverity, TensionStatus};
 use crate::views::{
     Action, BaseBlocks, ConflictInfo, conflict_infos, creators, landings_through, missing_parents,
     parse_change,
 };
-use crate::{Delta, Materialized, Rdy, ReadState, Scope, Session, rfc3339_now};
+use crate::{
+    Coverage, Delta, Materialized, OpInput, Rdy, ReadState, Scope, Session, WriteRequest,
+    WriteResult, rfc3339_now,
+};
 use rdy_model::{
     ActorRun, AltChoice, AltSet, AltStatus, Answer, AnswerAct, ApprovalEvidence, Block, BlockId,
     Change, ChangeLinks, EvidenceKind, FieldValue, Hash, LandingRecord, Op, Proposal, decision,
@@ -104,6 +108,14 @@ pub struct ProposalInfo {
     /// The change plan the version bound, written in its batch (D-4JMPH): the counts over
     /// every item, the code files and the open items.
     pub plan: PlanSummary,
+    /// Whether the version is ready (D-ME2HD, D-3JZP4): it passed every readiness check, so it
+    /// has its assessment and its approval card. One that is not ready is stored with no card.
+    pub ready: bool,
+    /// The readiness issues, in the closed order of [`crate::readiness`]: empty when ready.
+    pub issues: Vec<Issue>,
+    /// The hash of the `ASSESSMENT` record written in the version's batch (D-SDSV2); none for a
+    /// version that is not ready.
+    pub assessment: Option<String>,
 }
 
 /// One view a landing rebased: how many of its changes dropped out (they landed) and how many
@@ -203,6 +215,9 @@ pub struct LandingRow {
     pub relayed_by: Option<RelayedByRow>,
     pub relay_evidence: Option<RelayEvidenceRow>,
     pub evidence: Option<EvidenceRow>,
+    /// The stored assessment of the approved version (D-ME2HD); `null` for a landing that holds
+    /// none (a re-affirmation card's landing, a host's `land_atomic` landing).
+    pub assessment: Option<String>,
     pub rebased_from: Vec<String>,
     /// When the landing was approved, RFC 3339 UTC.
     pub at: String,
@@ -710,13 +725,14 @@ pub(crate) fn open_proposals(st: &ReadState) -> Result<Vec<(ProposalRef, Proposa
 /// tensions whose blocks all carry the conflict (the conflict reports them, as
 /// `proposal_tensions` leaves them out). Check 3 is not made for it: the canon its landing would
 /// give depends on how the conflict is resolved, and the merge onto canon refuses for the same
-/// cause. A key rdy derives again at the landing (K1) is not a clash.
+/// cause. A key rdy derives again at the landing (K1) is not a clash. Beside the issues: the
+/// blocks that carry a blocking conflict (the `conflicted` of `proposal_tensions`).
 pub(crate) fn landing_readiness(
     st: &ReadState,
     pref: &ProposalRef,
     p: &Proposal,
     changes: &[Change],
-) -> Result<Vec<Issue>, RdyError> {
+) -> Result<(Vec<Issue>, BTreeSet<BlockId>), RdyError> {
     let as_issue = |e: RdyError| Issue {
         severity: Severity::Error,
         code: e.code,
@@ -743,7 +759,7 @@ pub(crate) fn landing_readiness(
         out.push(as_issue(blocking_tensions(pref, &refusing)));
     }
     if !conflicted.is_empty() {
-        return Ok(out);
+        return Ok((out, conflicted));
     }
     match prospective(st, changes, Some(&p.view)) {
         Ok((next, applied)) => {
@@ -754,7 +770,7 @@ pub(crate) fn landing_readiness(
                     .into_iter()
                     .map(|(id, _)| id)
                     .collect();
-            let issues = Rdy::issues_in(st, changes, &next, &applied)?;
+            let issues = prospective_issues_of(st, changes)?;
             let first = issues.iter().find(|i| {
                 i.severity == Severity::Error
                     && !(i.code == E_KEY_CLASH
@@ -774,7 +790,7 @@ pub(crate) fn landing_readiness(
         }
         Err(e) => return Err(e),
     }
-    Ok(out)
+    Ok((out, conflicted))
 }
 
 /// The conflicts the changes `changes` of view `view` carry on the blocks they write: their
@@ -924,6 +940,32 @@ impl ReadState {
         conflicted: &BTreeSet<BlockId>,
         max: usize,
     ) -> Result<(Vec<TensionInfo>, usize), RdyError> {
+        let listed = self.listed_tensions(view, changes, conflicted, None)?;
+        let omitted = listed.len().saturating_sub(max);
+        let mut cache = crate::tensions::info::InfoCache::default();
+        let out = listed
+            .into_iter()
+            .take(max)
+            .map(|(r, t)| {
+                let mut info = self.tension_info_with(&t, &mut cache);
+                info.refuses = Some(r);
+                info
+            })
+            .collect();
+        Ok((out, omitted))
+    }
+
+    /// The tensions [`ReadState::proposal_tensions`] lists, in its order, each with `refuses`,
+    /// none built: every one, uncut. With `fixed` (the tension set a stored version was made
+    /// with, `plan::compute::fixed_tensions`), an in-flight form it does not list is left out
+    /// (ruling task-8 F1): a later write's tension is context only.
+    pub(crate) fn listed_tensions(
+        &self,
+        view: &str,
+        changes: &[Hash],
+        conflicted: &BTreeSet<BlockId>,
+        fixed: Option<&BTreeSet<Hash>>,
+    ) -> Result<Vec<(bool, Arc<Tension>)>, RdyError> {
         let landing = self.landing_tensions(view, changes)?;
         let net = |t: &Tension| crate::tensions::judged_on_the_net_change(t.kind);
         let net_forms: Vec<Arc<Tension>> = landing.iter().filter(|t| net(t)).cloned().collect();
@@ -935,7 +977,7 @@ impl ReadState {
         let mine = self
             .tensions_of_changes(changes)?
             .into_iter()
-            .filter(|t| !net(t));
+            .filter(|t| !net(t) && fixed.is_none_or(|f| f.contains(&t.id)));
         let mut seen = BTreeSet::new();
         let mut listed = vec![];
         // a refusing tension is listed in its landing form; an in-flight form with another id
@@ -953,24 +995,13 @@ impl ReadState {
         // the order needs only the ids (hex in a fixed width sorts as the bytes do), so only the
         // listed ones are built
         listed.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
-        let omitted = listed.len().saturating_sub(max);
-        let mut cache = crate::tensions::info::InfoCache::default();
-        let out = listed
-            .into_iter()
-            .take(max)
-            .map(|(r, t)| {
-                let mut info = self.tension_info_with(&t, &mut cache);
-                info.refuses = Some(r);
-                info
-            })
-            .collect();
-        Ok((out, omitted))
+        Ok(listed)
     }
 }
 
 /// D-ME2HD: the refusal of an approval of version `pref`, which is not ready. Its issues are the
 /// version's readiness issues, in the queue's order, each with its own code and fix
-/// ([`crate::pending::queue::approval_readiness`]); none is added, dropped, merged or re-worded.
+/// ([`crate::readiness::readiness`]); none is added, dropped, merged or re-worded.
 /// The message counts them (one issue reads `1 issue`, more read `<n> issues`; TASK-548). No card.
 pub(crate) fn proposal_not_ready(pref: &ProposalRef, issues: Vec<Issue>) -> RdyError {
     let mut e = RdyError::new(
@@ -984,6 +1015,61 @@ pub(crate) fn proposal_not_ready(pref: &ProposalRef, issues: Vec<Issue>) -> RdyE
     );
     e.issues = issues;
     e
+}
+
+/// O10: the issue of a version whose readiness passes but that has no stored assessment.
+pub(crate) fn no_stored_assessment(pref: &ProposalRef) -> Issue {
+    Issue {
+        severity: Severity::Error,
+        code: E_VALIDATION,
+        block: None,
+        message: format!("{pref} has no stored assessment"),
+        fix: "propose it again: rdy_propose / rdy propose".into(),
+    }
+}
+
+/// The fix of a failed freshness check whose fresh readiness fails too (O11).
+const O11_FIX: &str = "fix each issue and propose again: rdy_propose / rdy propose";
+
+/// The decisions the later refusals read (I8, I-c), from the ops of `changes` alone, in the
+/// order the merge applies them: for each decision block, its last `Create` or `Update` op
+/// (none when a later op deletes it). A block whose status is `proposed` is a proposed
+/// decision, `(id, <id>@<short of its version>)`; any other whose `reaffirmed_causes` against
+/// canon's version is not empty is a re-affirmed decision, `(id, ref, one_way)`.
+#[allow(clippy::type_complexity)]
+fn own_decisions(
+    st: &ReadState,
+    changes: &[Change],
+) -> Result<(Vec<(BlockId, String)>, Vec<(BlockId, String, bool)>), RdyError> {
+    let applied = st.landing_order(changes);
+    let mut last: BTreeMap<BlockId, Option<Block>> = BTreeMap::new();
+    for op in applied_ops(changes, &applied) {
+        match op {
+            Op::Create { block } | Op::Update { block, .. }
+                if block.block_type == decision::DECISION =>
+            {
+                last.insert(block.id.clone(), Some(block));
+            }
+            op => {
+                if let Some(b) = last.get_mut(op.block_id()) {
+                    *b = None;
+                }
+            }
+        }
+    }
+    let canon = st.materialized(&Scope::Canon)?;
+    let (mut decisions, mut reaffirms) = (vec![], vec![]);
+    for (id, b) in last {
+        let Some(b) = b else { continue };
+        let r = format!("{id}@{}", b.version_hash().short());
+        if decision::status(&b) == Some(decision::DecisionStatus::Proposed) {
+            decisions.push((id, r));
+        } else if !rdy_model::engine_fields::reaffirmed_causes(canon.get(&id), &b).is_empty() {
+            let one_way = b.field_str("reversibility") == Some("one_way");
+            reaffirms.push((id, r, one_way));
+        }
+    }
+    Ok((decisions, reaffirms))
 }
 
 /// F2 (D-DKJS5): the refusal of an approval while exceptions of `pref` have no confirm answer. It
@@ -1014,7 +1100,7 @@ fn deferrals_open(pref: &ProposalRef, card: &Item, n: usize) -> RdyError {
 /// `E_BLOCKING_TENSION` for the refusing tensions of version `pref`: one issue per tension. The
 /// fix names what resolves each refusing kind ([`crate::tensions::resolve_hint`]), each distinct
 /// hint once, in the order the tensions come.
-fn blocking_tensions(pref: &ProposalRef, refusing: &[TensionInfo]) -> RdyError {
+pub(crate) fn blocking_tensions(pref: &ProposalRef, refusing: &[TensionInfo]) -> RdyError {
     let mut hints: Vec<&str> = vec![];
     for t in refusing {
         let h = crate::tensions::resolve_hint(t.kind);
@@ -1451,23 +1537,50 @@ fn decisions_written(
 /// The canon that would result from landing `changes` on `st`'s canon, and each applied change's
 /// position in `changes`, in applied order. The merge surfaces E_STALE_BASE, E_ALREADY_EXISTS and
 /// E_FROZEN early; on the approve path (`approving`, the version's view) they are worded for the
-/// approver.
+/// approver. The order and the canon are memoised on `st` by the changes' ids (a refusal is
+/// not, so each caller words its own).
 pub(crate) fn prospective(
     st: &ReadState,
     changes: &[Change],
     approving: Option<&str>,
 ) -> Result<(Materialized, Vec<usize>), RdyError> {
-    let reader = st.reader();
-    let (_, applied) = reader
-        .merge_checked(&*st.canon_snapshot()?, changes)
-        .map_err(|e| match approving {
-            Some(view) => approver_stale(e, view),
-            None => e.into(),
-        })?;
-    let next = st
-        .materialized(&Scope::Canon)?
-        .with(&applied_ops(changes, &applied));
-    Ok((next, applied))
+    let ids: Vec<Hash> = changes.iter().map(Change::id).collect();
+    let applied = match st.memo.order.get(&ids) {
+        Some(at) => at,
+        None => {
+            let (_, applied) = st
+                .reader()
+                .merge_checked(&*st.canon_snapshot()?, changes)
+                .map_err(|e| match approving {
+                    Some(view) => approver_stale(e, view),
+                    None => e.into(),
+                })?;
+            let at = Arc::new(applied);
+            st.memo.order.put(ids.clone(), Arc::clone(&at));
+            at
+        }
+    };
+    let next = st.memo.prospective.get_or_try(ids, || {
+        Ok::<_, RdyError>(Arc::new(
+            st.materialized(&Scope::Canon)?
+                .with(&applied_ops(changes, &applied)),
+        ))
+    })?;
+    Ok((Materialized::clone(&next), applied.to_vec()))
+}
+
+/// The issues ([`Rdy::issues_in`]) of the canon [`prospective`] gives for `changes` on `st`,
+/// memoised on `st` by the changes' ids: on one state the ids fix that canon and its order.
+pub(crate) fn prospective_issues_of(
+    st: &ReadState,
+    changes: &[Change],
+) -> Result<Vec<Issue>, RdyError> {
+    let ids: Vec<Hash> = changes.iter().map(Change::id).collect();
+    let issues = st.memo.issues.get_or_try(ids, || {
+        let (next, applied) = prospective(st, changes, None)?;
+        Rdy::issues_in(st, changes, &next, &applied).map(Arc::new)
+    })?;
+    Ok(issues.to_vec())
 }
 
 /// The ids whose key rdy may derive again when `changes` (the changes at `applied`) land on
@@ -1529,8 +1642,8 @@ impl Rdy {
         changes: &[Change],
         approving: Option<&str>,
     ) -> Result<(Vec<Issue>, Vec<usize>), RdyError> {
-        let (next, applied) = prospective(st, changes, approving)?;
-        Ok((Self::issues_in(st, changes, &next, &applied)?, applied))
+        let (_, applied) = prospective(st, changes, approving)?;
+        Ok((prospective_issues_of(st, changes)?, applied))
     }
 
     /// The issues of `next`, the canon that landing `changes` (applied at `applied`) would give.
@@ -1851,6 +1964,60 @@ impl Rdy {
         Ok(change)
     }
 
+    /// Writes the key change (message `message`, from `rekey_change`) that gives each block in
+    /// `re` its re-derived key, as `Rdy::assign_keys` writes its keys: it briefs exactly those
+    /// blocks, cites that briefing, and marks the keys `key_auto`. The change commits and
+    /// publishes in its own batch (D-ME2HD, O1, O2).
+    fn write_rekey(
+        &mut self,
+        s: &Session,
+        view: &str,
+        message: String,
+        re: &[(BlockId, String)],
+        alternative: Option<AltChoice>,
+    ) -> Result<WriteResult, RdyError> {
+        let brief = self.read().brief(
+            &Scope::View(view.to_string()),
+            &Coverage {
+                ids: re.iter().map(|(id, _)| id.to_string()).collect(),
+                path: None,
+            },
+            None,
+        )?;
+        brief.register(&self.briefs);
+        let token = brief.base.token.clone();
+        let ops: Vec<OpInput> = re
+            .iter()
+            .map(|(id, k)| OpInput::Update {
+                id: id.to_string(),
+                base: None,
+                fields: BTreeMap::from([("key".to_string(), serde_json::Value::String(k.clone()))]),
+                unset: vec![],
+                body: None,
+                links: None,
+                block_type: None,
+                move_to: None,
+            })
+            .collect();
+        let ours: BTreeSet<BlockId> = re.iter().map(|(id, _)| id.clone()).collect();
+        self.write_marked(
+            s,
+            WriteRequest {
+                view: view.to_string(),
+                ops,
+                justification: None,
+                message,
+            },
+            ChangeLinks {
+                alternative,
+                ..ChangeLinks::default()
+            },
+            Some(&token),
+            &ours,
+            None,
+        )
+    }
+
     /// Proposes view `view`'s included changes (a new version of its open proposal, if any),
     /// with `summary` as `propose_subset` stores it.
     pub fn propose(
@@ -1995,8 +2162,10 @@ impl Rdy {
 
     /// The one propose writer (`propose_plan`), as `s`, with the person's relay when `s` is the
     /// person (`propose_plan_as`): every check, the version's candidate, its plan and its
-    /// answers are prepared first; then the key change rdy adds (if any), the version, the
-    /// relay's answer and the bound plan are written in one batch, and published once.
+    /// answers are checked first; then the key change rdy adds (if any) is written in its own
+    /// batch, and the plan computed again after it (O1); then readiness runs on the version,
+    /// and the version, the relay's answer, the bound plan and, for a ready version, its
+    /// assessment are written in one batch, and published once (D-ME2HD).
     fn propose_relayed(
         &mut self,
         s: &Session,
@@ -2034,7 +2203,7 @@ impl Rdy {
             ));
         }
         let subset = changes.is_some();
-        let ids: Vec<Hash> = match changes {
+        let mut ids: Vec<Hash> = match changes {
             None => included.as_ref().clone(),
             Some(list) => {
                 let in_view: BTreeSet<&Hash> = included.iter().collect();
@@ -2181,7 +2350,7 @@ impl Rdy {
                 &vm,
             );
             if re.is_empty() {
-                issues = Self::issues_in(&st, &changes, &next, &applied)?;
+                issues = prospective_issues_of(&st, &changes)?;
             } else {
                 let mut change = self.rekey_change(&st, s, view, &re, &ids)?;
                 // alts1: a change in a member view of an open set records the set, as a write does
@@ -2235,7 +2404,9 @@ impl Rdy {
         }
         // the version's provenance, its plan's and its new answers' (one clock read)
         let by = s.provenance();
-        let plan = crate::plan::lifecycle::prepare_proposal_plan(
+        // ruling task-5 F3 (Amendment 1): the plan answers are checked first, against the plan
+        // before rdy's key change, writing nothing
+        let mut plan = crate::plan::lifecycle::prepare_proposal_plan(
             &st,
             &by,
             view,
@@ -2243,8 +2414,41 @@ impl Rdy {
             candidate.as_deref(),
             plan_answers,
         )?;
+        // D-ME2HD (O1, O2): the key change rdy adds is written now, after every check above and
+        // before the version, in its own batch: readiness reads the tension sets of published
+        // changes, so the change is in the view before the version is read, and it records the
+        // briefing of the blocks it re-keys. The version lists it last, and only it besides the
+        // changes proposed. The plan the version binds is computed again after it, so its
+        // tension ids are the ones every later read of the version computes, with each answer to
+        // a tension the key change re-keyed carried to it (rulings task-5 F3, task-15 F2).
+        let mut keys = BTreeMap::new();
+        if let Some((change, re)) = rekey.take() {
+            keys = re
+                .iter()
+                .map(|(id, k)| (id.to_string(), k.clone()))
+                .collect();
+            let written = self.write_rekey(s, view, change.message, &re, alternative.clone())?;
+            let key_change = parse_change(&written.change)?;
+            ids.push(key_change);
+            let after = self.read();
+            let mut keyed = changes.clone();
+            keyed.push(after.reader().change(&key_change)?);
+            let before = crate::plan::lifecycle::BeforeKeyChange {
+                st: &st,
+                changes: candidate.as_deref().unwrap_or_default(),
+            };
+            plan = crate::plan::lifecycle::prepare_proposal_plan_keyed(
+                &after,
+                Some(before),
+                &by,
+                view,
+                open.as_ref().map(|(_, latest)| latest),
+                Some(&keyed),
+                plan_answers,
+            )?;
+        }
         issues.extend(plan.warnings.iter().cloned());
-        let count = ids.len() + usize::from(rekey.is_some());
+        let count = ids.len();
         let chosen = alternative.as_ref().map(|a| AltRef {
             set: alt_label(&a.set),
             member: a.member.clone(),
@@ -2269,20 +2473,6 @@ impl Rdy {
             Some((_, latest)) => version_number(&st, latest)? + 1,
             None => 1,
         };
-        // the key change: the store gives it its deps again as it prepares its commit, checked
-        // against the view as it reads now
-        let vm = st.materialized(&Scope::View(view.to_string()))?;
-        let current = |id: &BlockId| vm.version_of(id);
-        let (rekey_change, keys) = match rekey {
-            Some((mut change, re)) => {
-                change.deps.clear();
-                let keys: BTreeMap<String, String> =
-                    re.into_iter().map(|(id, k)| (id.to_string(), k)).collect();
-                (Some(change), keys)
-            }
-            None => (None, BTreeMap::new()),
-        };
-        let rekey_ops = rekey_change.as_ref().map(|c| c.ops.clone());
         let to_rdy = |e: rdy_store::StoreError| {
             if answered {
                 crate::version::answer_write_error(e)
@@ -2300,27 +2490,59 @@ impl Rdy {
                 changes: ids,
                 alternative,
                 prev: open.map(|(_, latest)| latest),
-                rekey: rekey_change.map(|c| (c, &current as rdy_store::plan::ViewReads<'_>)),
+                rekey: None,
                 answer,
             })
             .map_err(to_rdy)?;
         let id = prepared.version();
         let stable = prepared.stable();
-        self.store
-            .bind_plan(&mut prepared, &plan.plan(view, id, by))?;
-        let rekeyed = prepared.rekey();
-        drop(vm);
+        let pref = ProposalRef {
+            version: id,
+            stable,
+            n,
+        };
+        let bound = plan.plan(view, id, by);
+        let plan_hash = self.store.bind_plan(&mut prepared, &bound)?;
+        // D-ME2HD, D-3JZP4: readiness on the version this batch writes, with the plan it binds;
+        // a ready version's assessment joins the batch (D-SDSV2). One that is not ready is
+        // stored as it is, with no assessment.
+        let assessed = {
+            let now = self.read();
+            let c = crate::readiness::Candidate {
+                pref,
+                p: prepared.proposal().clone(),
+                plan: crate::readiness::PlanSource::InHand {
+                    plan: bound,
+                    hash: plan_hash,
+                    computed: plan.computed.take(),
+                },
+            };
+            // a read error never fails the reply (as `tensions_error`): the version is stored,
+            // not ready, with the error as its one issue
+            crate::readiness::assess(&now, &c, now.require_up_to_date()).unwrap_or_else(|e| {
+                crate::readiness::Assessed {
+                    readiness: crate::readiness::Readiness {
+                        issues: vec![Issue {
+                            severity: Severity::Error,
+                            code: e.code,
+                            block: None,
+                            message: e.message,
+                            fix: e.fix,
+                        }],
+                        summary: PlanSummary::default(),
+                        card: None,
+                    },
+                    assessment: None,
+                }
+            })
+        };
+        let assessment = match &assessed.assessment {
+            Some(a) => Some(self.store.bind_assessment(&mut prepared, a)?),
+            None => None,
+        };
         let written = self.store.commit_propose(prepared)?;
         let answer = written.answer;
-        // one batch, published once: a key change moves the view, so its publish re-reads it
-        match (rekeyed, rekey_ops) {
-            (Some(change), Some(ops)) => self.publish(Delta::Commit {
-                view: view.to_string(),
-                change,
-                ops,
-            })?,
-            _ => self.publish(Delta::Seq)?,
-        }
+        self.publish(Delta::Seq)?;
         let stored = self.store.proposal(&id)?;
         let canon_at = stored.canon_at;
         // tgat1: the version's tensions, read after a re-key change (if any) was committed. The
@@ -2363,11 +2585,6 @@ impl Rdy {
                 (None, 0)
             }
         };
-        let pref = ProposalRef {
-            version: id,
-            stable,
-            n,
-        };
         Ok(ProposalInfo {
             id: id.to_string(),
             stable: stable.to_string(),
@@ -2391,6 +2608,9 @@ impl Rdy {
             relayed_by: relay.map(|r| r.by),
             answer: answer.map(|a| a.to_string()),
             plan: plan.summary,
+            ready: assessed.assessment.is_some(),
+            issues: assessed.readiness.issues,
+            assessment: assessment.map(|h| h.to_string()),
         })
     }
 
@@ -2400,102 +2620,178 @@ impl Rdy {
         resolve_in(&self.read(), text)
     }
 
-    /// FW-HB1: the landings since version `p` was proposed (`p.canon_at`). With none, or none
-    /// that wrote a block the version writes, the approval stands (the gate then validates the
-    /// version on the current canon); `strict` or `reviews.require_up_to_date` refuse any.
-    fn check_base_moved(
-        &self,
+    /// The landings of canon's chain since `base`, head first: every landing when `base` is none
+    /// or not on the chain.
+    fn landings_since(
         st: &ReadState,
-        pref: &ProposalRef,
-        p: &Proposal,
-        changes: &[Change],
-        opts: &LandOptions,
-    ) -> Result<(), RdyError> {
-        // head first, up to the landing the version was proposed on (every landing when that is
-        // none, or not on canon's chain)
-        let mut intervening = vec![];
+        base: Option<Hash>,
+    ) -> Result<Vec<(Hash, LandingRecord)>, RdyError> {
+        let mut since = vec![];
         let mut cur = st.canon_head();
         while let Some(h) = cur {
-            if Some(h) == p.canon_at {
+            if Some(h) == base {
                 break;
             }
             let rec = st.reader().landing(&h)?;
             cur = rec.prev;
-            intervening.push((h, rec));
+            since.push((h, rec));
         }
+        Ok(since)
+    }
+
+    /// FW-HB1 and RULING F1's limit (I7): `strict` or `reviews.require_up_to_date` refuse any
+    /// landing since version `p` was proposed (`p.canon_at`), with today's texts and no fresh
+    /// card.
+    fn check_base_moved(
+        st: &ReadState,
+        pref: &ProposalRef,
+        p: &Proposal,
+        opts: &LandOptions,
+    ) -> Result<(), RdyError> {
+        if !opts.strict && !st.require_up_to_date() {
+            return Ok(());
+        }
+        let intervening = Self::landings_since(st, p.canon_at)?;
         if intervening.is_empty() {
             return Ok(());
         }
-        let since = || {
-            format!(
-                "proposal {pref} moved: canon has {} landing(s) since it was proposed ({})",
-                intervening.len(),
-                intervening
-                    .iter()
-                    .map(|(h, _)| h.short())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        };
+        let since = format!(
+            "proposal {pref} moved: canon has {} landing(s) since it was proposed ({})",
+            intervening.len(),
+            intervening
+                .iter()
+                .map(|(h, _)| h.short())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         if opts.strict {
             return Err(RdyError::new(
                 E_PROPOSAL_MOVED,
-                since(),
+                since,
                 "approve without --strict to accept a clean rebase, or ask its author to propose again on the current canon",
             ));
         }
-        if st.require_up_to_date() {
-            return Err(RdyError::new(
-                E_PROPOSAL_MOVED,
-                since(),
-                format!(
-                    "this project requires proposals on the current canon (reviews.require_up_to_date): its author must propose again (rdy propose --view {}); then approve the new version",
-                    p.view
-                ),
-            ));
-        }
-        let touched: BTreeSet<&BlockId> = changes
-            .iter()
-            .flat_map(|c| c.ops.iter().map(Op::block_id))
-            .collect();
-        for (l, rec) in intervening.iter().rev() {
+        Err(RdyError::new(
+            E_PROPOSAL_MOVED,
+            since,
+            format!(
+                "this project requires proposals on the current canon (reviews.require_up_to_date): its author must propose again (rdy propose --view {}); then approve the new version",
+                p.view
+            ),
+        ))
+    }
+
+    /// D-WQVGT, D-ME2HD "Freshness-only landing": the stored assessment of version `pref`
+    /// (record `p`) still holds. It reads the assessment and the landings since its base, and
+    /// computes nothing for the approver. A version with no stored assessment is not ready: its
+    /// readiness issues, or the O10 issue when it has none. A landing since the assessment's base
+    /// that wrote a block of its `reach`, then a pack, then a gate config other than the
+    /// assessment's, refuses with `E_PROPOSAL_MOVED` and a fresh card ([`Rdy::moved_fresh`],
+    /// RULING F1). Returns the assessment's hash.
+    fn fresh_assessment(
+        &mut self,
+        st: &ReadState,
+        pref: &ProposalRef,
+        p: &Proposal,
+    ) -> Result<Hash, RdyError> {
+        let Some(h) = st
+            .reader()
+            .assessment_of_proposal(&pref.version, st.seq())?
+        else {
+            // O10: the one readiness, on the plan the store binds to the version
+            let c = crate::readiness::Candidate::stored(st, *pref, p.clone())?;
+            let mut issues = crate::readiness::readiness(st, &c)?.issues;
+            if issues.is_empty() {
+                issues.push(no_stored_assessment(pref));
+            }
+            return Err(proposal_not_ready(pref, issues));
+        };
+        let a = st.reader().assessment(&h)?;
+        let reach: BTreeSet<&BlockId> = a.reach.iter().collect();
+        for (l, rec) in Self::landings_since(st, a.base)?.iter().rev() {
             let mut hit = BTreeSet::new();
             for c in &rec.changes {
                 for op in &st.reader().change(c)?.ops {
-                    if touched.contains(op.block_id()) {
-                        hit.insert(op.block_id().clone());
+                    if reach.contains(op.block_id()) {
+                        hit.insert(op.block_id().to_string());
                     }
                 }
             }
-            if hit.is_empty() {
-                continue;
-            }
-            let ids = hit.iter().map(|b| b.to_string()).collect::<Vec<_>>();
-            let mut e = RdyError::new(
-                E_PROPOSAL_MOVED,
-                format!(
-                    "proposal {pref} moved: landing {} changed {} after it was proposed",
+            if !hit.is_empty() {
+                let ids: Vec<String> = hit.into_iter().collect();
+                let message = format!(
+                    "proposal {pref} moved: landing {} changed {} after its assessment",
                     l.short(),
                     ids.join(", ")
-                ),
-                format!(
-                    "the proposal is stale: its author must update the changed blocks in view {view} (rdy view show {view} lists its conflicts) and propose again (rdy propose --view {view}); then approve the new version",
-                    view = p.view
-                ),
-            );
-            e.issues = hit
-                .into_iter()
-                .map(|id| Issue {
-                    severity: Severity::Error,
-                    code: E_PROPOSAL_MOVED,
-                    message: format!("{id} changed in landing {}", l.short()),
-                    fix: "propose again".into(),
-                    block: Some(id),
-                })
-                .collect();
-            return Err(e);
+                );
+                return Err(self.moved_fresh(st, pref, p, message)?);
+            }
         }
-        Ok(())
+        if pack_digest(st.pack()) != a.pack.digest {
+            let message = format!("proposal {pref} moved: the pack changed after its assessment");
+            return Err(self.moved_fresh(st, pref, p, message)?);
+        }
+        if config_digest(st.require_up_to_date()) != a.config {
+            let message =
+                format!("proposal {pref} moved: the gate config changed after its assessment");
+            return Err(self.moved_fresh(st, pref, p, message)?);
+        }
+        Ok(h)
+    }
+
+    /// RULING F1: the refusal of a failed freshness check of version `pref` (record `p`), with
+    /// `message`. rdy computes the version's readiness again on `st`. A ready version gets a
+    /// fresh `ASSESSMENT` on canon's head, written in a batch of its own and published, and the
+    /// refusal carries its card in `corrected` (`{"card": ...}`, the shape [`card_of`] gives);
+    /// the next approval binds that assessment. A version that is not ready now gets its fresh
+    /// readiness issues and no card (O11).
+    fn moved_fresh(
+        &mut self,
+        st: &ReadState,
+        pref: &ProposalRef,
+        p: &Proposal,
+        message: String,
+    ) -> Result<RdyError, RdyError> {
+        let c = crate::readiness::Candidate::stored(st, *pref, p.clone())?;
+        let assessed = crate::readiness::assess(st, &c, st.require_up_to_date())?;
+        let (Some(mut a), Some(mut card)) = (assessed.assessment, assessed.readiness.card) else {
+            let mut e = RdyError::new(E_PROPOSAL_MOVED, message, O11_FIX);
+            e.issues = assessed.readiness.issues;
+            return Ok(e);
+        };
+        // the fresh record assesses the version on the canon it was computed on, so the next
+        // approval's freshness reads the landings after it
+        a.base = st.canon_head();
+        card.card = crate::pending::render_checked(&card, crate::pending::CARD_DEFAULT_TOKENS)?;
+        card.card_hash = crate::pending::card_hash(&card).to_string();
+        self.store
+            .put_assessment(&a)
+            .map_err(crate::answer::internal)?;
+        self.publish(Delta::Seq)?;
+        Ok(RdyError::new(
+            E_PROPOSAL_MOVED,
+            message,
+            format!("review the fresh card in corrected and approve {pref} again"),
+        )
+        .with_corrected(serde_json::json!({ "card": card_of(&card) })))
+    }
+
+    /// The freshness of the stored assessment of the proposal version `proposal` names
+    /// ([`Rdy::fresh_assessment`]), before an approval of a card whose hash is not the one shown
+    /// (`answer::bind`). A failed check writes what its refusal says (a fresh assessment, RULING
+    /// F1) and nothing else. A version that is not the latest, or whose base moved under
+    /// `reviews.require_up_to_date`, gets no fresh card (F1's limit): Ok, and the caller's own
+    /// refusal stands.
+    pub(crate) fn check_fresh(&mut self, proposal: &str) -> Result<(), RdyError> {
+        let st = self.read();
+        let pref = resolve_in(&st, proposal)?;
+        let p = st.reader().proposal(&pref.version)?;
+        if latest_version(&st, &pref.stable)? != pref.version
+            || Self::check_base_moved(&st, &pref, &p, &LandOptions::default()).is_err()
+        {
+            return Ok(());
+        }
+        self.fresh_assessment(&st, &pref, &p).map(|_| ())
     }
 
     /// Whether the proposal version `proposal` names carries a content removal request. Any
@@ -2532,7 +2828,9 @@ impl Rdy {
 
     /// Every check of `land_with` and the complete landing it would write, under the writer and
     /// without writing anything: the acceptance work, the frames and the landing record, with
-    /// every clock value it uses already read. [`Rdy::commit_landing`] writes it.
+    /// every clock value it uses already read. [`Rdy::commit_landing`] writes it. One refusal
+    /// writes: a failed freshness check of a version that is ready now writes its fresh
+    /// assessment, in a batch of its own (RULING F1, [`Rdy::moved_fresh`]).
     pub(crate) fn prepare_landing(
         &mut self,
         s: &Session,
@@ -2594,15 +2892,26 @@ impl Rdy {
         });
         let changes = changes_of(&st, &p.changes)?;
         linked_alts(&st, &p.view, p.alternative.as_ref(), &p.changes, &changes)?;
-        // FW-HB1: canon may have moved since the version was proposed
-        self.check_base_moved(&st, &pref, &p, &changes, &opts)?;
-        // D-ME2HD: every approval path refuses a version that is not ready, with the queue's
-        // readiness issues in the queue's order (gconf1's conflicts on the blocks the version's
-        // own changes write, tgat1's blocking tensions, the prospective canon, the summary, the
-        // bound plan, and F1's rejected decisions and re-affirmations and refused deferrals)
-        let ready = approval_readiness(&st, &pref, p.clone())?;
-        if !ready.is_empty() {
-            return Err(proposal_not_ready(&pref, ready));
+        // FW-HB1, RULING F1's limit: --strict and reviews.require_up_to_date refuse any landing
+        // since the version was proposed
+        Self::check_base_moved(&st, &pref, &p, &opts)?;
+        // D-WQVGT, D-ME2HD: freshness only, against the version's stored assessment: its reach,
+        // the pack and the gate config (a failed check gives a fresh card, RULING F1)
+        let assessment = self.fresh_assessment(&st, &pref, &p)?;
+        // D-ME2HD "Later refusals", built with no candidate (I8): a rejected decision or one_way
+        // re-affirmation, refused deferrals, an advice accepted after the assessment
+        let (decisions, reaffirms) = own_decisions(&st, &changes)?;
+        let bound = st
+            .reader()
+            .plan_of_proposal(&pref.version, st.seq())?
+            .is_some();
+        let mut later =
+            crate::readiness::later_refusals(&st, &pref, &p.view, &decisions, &reaffirms, bound)?;
+        // ruling task-12 R1 (D-WMCFW): an advice accepted after the assessment blocks
+        let record = st.reader().assessment(&assessment)?;
+        later.extend(crate::readiness::accepted_advice(&st, &pref, &p, &record)?);
+        if !later.is_empty() {
+            return Err(proposal_not_ready(&pref, later));
         }
         // the ops fold in the order the merge applies the changes (deps first), not the list
         // order: a version can list a delete before the creation it depends on
@@ -2837,6 +3146,7 @@ impl Rdy {
             alt,
             relay: opts.relay,
             evidence,
+            assessment: Some(assessment),
         }) {
             Ok(prepared) => prepared,
             Err(rdy_store::StoreError::ProposalMoved { latest, .. }) => {
@@ -3276,6 +3586,7 @@ impl ReadState {
                 choice: e.choice.clone(),
                 card_hash: e.card_hash.map(|h| h.to_string()),
             }),
+            assessment: rec.assessment.map(|h| h.to_string()),
             rebased_from: rec.rebased_from.iter().map(|h| h.to_string()).collect(),
             at: rfc3339(rec.approved_by.at_ms),
             at_ms: rec.approved_by.at_ms,

@@ -6,10 +6,31 @@ use rdy_qa::tensions::{j_typo, put_j, try_put_j};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
+/// `rdy_qa::fixtures::write` with an editorial justification: the fixture writes stable normative content, and an
+/// unjustified change to stable content blocks its landing (D-ME2HD).
+fn clarified(
+    r: &mut rdy_engine::Rdy,
+    view: &str,
+    ops: serde_json::Value,
+) -> Result<rdy_engine::WriteResult, rdy_engine::RdyError> {
+    r.write(
+        &writer(),
+        rdy_engine::WriteRequest {
+            view: view.into(),
+            ops: parse_test_ops(ops)?,
+            justification: Some(rdy_model::Justification::Editorial {
+                class: rdy_model::EditorialClass::Clarify,
+                reason: "seed the test world".into(),
+            }),
+            message: String::new(),
+        },
+    )
+}
+
 /// Doc `ops` (overview, with a stable Summary section) holds term Ledger, claim c1 (names Ledger,
 /// not linked) and claim c2 (describes Ledger). Landed.
 fn world(r: &mut Rdy) -> BTreeMap<String, String> {
-    let w = write(r, "work", json!([
+    let w = clarified(r, "work", json!([
         {"op": "create", "type": "doc", "id": "$o", "fields": {"name": "ops", "title": "Ops", "doc_type": "overview"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$o", "fields": {"title": "Summary", "lifecycle": "stable"}},
         {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Ledger"}, "body": "Holds balances."},
@@ -276,7 +297,11 @@ fn claim_and_bare_docs(r: &mut Rdy, c: &BTreeMap<String, String>, v: &str) -> St
         json!([{"op": "create", "type": "claim", "parent": c["$s"],
                 "body": "Balances are read from the Ledger.",
                 "links": {"describes": [{"target": c["$t"]}]}}]),
-        None,
+        // a new claim in stable content: justified, so the version is ready (D-ME2HD)
+        Some(rdy_model::Justification::Editorial {
+            class: rdy_model::EditorialClass::Clarify,
+            reason: "read balances from the Ledger".into(),
+        }),
     );
     let docs: Vec<Value> = (0..20)
         .map(|k| {

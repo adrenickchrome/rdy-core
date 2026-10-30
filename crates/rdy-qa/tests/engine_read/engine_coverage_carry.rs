@@ -13,6 +13,27 @@ use rdy_qa::tensions::{j_typo, try_put_j};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// `rdy_qa::fixtures::write` with an editorial justification: the fixture writes stable normative content, and an
+/// unjustified change to stable content blocks its landing (D-ME2HD).
+fn clarified(
+    r: &mut rdy_engine::Rdy,
+    view: &str,
+    ops: serde_json::Value,
+) -> Result<rdy_engine::WriteResult, rdy_engine::RdyError> {
+    r.write(
+        &writer(),
+        rdy_engine::WriteRequest {
+            view: view.into(),
+            ops: parse_test_ops(ops)?,
+            justification: Some(rdy_model::Justification::Editorial {
+                class: rdy_model::EditorialClass::Clarify,
+                reason: "seed the test world".into(),
+            }),
+            message: String::new(),
+        },
+    )
+}
+
 /// Every write of this file goes through `put_j` with `j_typo()`, so stable content takes it;
 /// the agent is named after the view. An op the engine refuses is an error, never a panic.
 fn write(r: &mut Rdy, view: &str, ops: Value) -> Result<WriteResult, RdyError> {
@@ -25,7 +46,7 @@ fn write(r: &mut Rdy, view: &str, ops: Value) -> Result<WriteResult, RdyError> {
 /// d1 (live, applied by c2), decision d2 (live, nothing applies it), decision d3 (live,
 /// needs_content: false). Doc `lone` holds one prose block. Landed.
 fn cc6_world(r: &mut Rdy) -> BTreeMap<String, String> {
-    let w = rdy_qa::fixtures::write(r, "work", json!([
+    let w = clarified(r, "work", json!([
         {"op": "create", "type": "doc", "id": "$o", "fields": {"name": "ops", "title": "Ops", "doc_type": "overview"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$o", "fields": {"title": "Summary", "lifecycle": "stable"}},
         {"op": "create", "type": "section", "id": "$empty", "parent": "$o", "fields": {"title": "Empty"}},
@@ -745,10 +766,11 @@ fn cc11_fix2_carried_issues_equal_a_full_build_through_tensions_and_suspects() {
     }
     read_all(&r);
 
-    // a landing: canon's layer is carried
+    // a landing: canon's layer is carried. Its ready propose builds the candidate once for the
+    // assessment it stores (ruling task-10 Amendment 1, item 3): one build, never more
     let before = state_layer_builds();
     land(&mut r, "c").unwrap();
-    check(&r, &[&canon], before, "a landing");
+    check(&r, &[&canon], before + 1, "a landing");
     read_all(&r);
 
     // a duplicate in view a
@@ -937,13 +959,17 @@ fn cc11_fix3_a_suspect_the_structural_carry_misses_is_carried() {
         "links": {"supersedes": [{"target": c["$d1"]}]}}]),
     )
     .unwrap();
+    // O23: the plan items are answered before the propose binds the plan
+    rdy_qa::intake::answer_open_items(&mut r, &writer(), "sup");
     let p = r
         .propose(&writer(), "sup", "sup", Some(rdy_qa::intake::TEST_SUMMARY))
         .unwrap();
+    // the write builds nothing in full; the ready propose builds its candidate once for the
+    // assessment it stores (ruling task-10 Amendment 1, item 3): one build, never more
     assert_eq!(
         (state_layer_builds(), structural_builds()),
-        (layers, structural),
-        "the write and the proposal build nothing in full"
+        (layers + 1, structural),
+        "the write builds nothing in full, the proposal one candidate"
     );
     // F2: the person confirms the exception (the supersede) first. The queue they read builds
     // the prospective canon in full; the landing's own carry is measured from here.

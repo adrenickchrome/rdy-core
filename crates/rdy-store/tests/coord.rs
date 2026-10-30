@@ -308,6 +308,7 @@ fn altw1_landing_a_member_chooses_it_and_closes_the_others() {
             }),
             relay: None,
             evidence: None,
+            assessment: None,
         })
         .unwrap();
     assert_eq!(out.closed, vec!["b".to_string()]);
@@ -376,6 +377,7 @@ fn altw1_a_set_that_moved_refuses_the_landing_and_writes_nothing() {
             }),
             relay: None,
             evidence: None,
+            assessment: None,
         })
         .unwrap_err();
     assert!(e.to_string().contains("moved or is no longer open"), "{e}");

@@ -148,6 +148,7 @@ fn remove(r: &mut Rdy, target: &str) {
             alt: None,
             relay: None,
             evidence: None,
+            assessment: None,
         })
         .unwrap();
     r.store_mut().set_held(true).unwrap();
@@ -385,7 +386,9 @@ fn ha13_all_batch_files_take_in_one_marker() {
     // the closure, its removal and the tag: one batch
     assert_eq!(markers(&h), before + 1);
     assert_eq!(got.records_taken, keys.len() as u64);
-    assert_eq!(got.frames_written, keys.len() as u64 + 1);
+    // the records, the tag, and the `meta/store_features` ref of the first ASSESSMENT (the
+    // landings name their assessments)
+    assert_eq!(got.frames_written, keys.len() as u64 + 2);
     assert!(got.redacted_objects >= 1, "{got:?}");
     assert_eq!(
         (

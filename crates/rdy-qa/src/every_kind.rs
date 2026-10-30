@@ -2507,6 +2507,7 @@ pub fn add_carried_fixture_records(r: &mut Rdy) -> CarriedFixture {
         alt: None,
         relay: None,
         evidence: None,
+        assessment: None,
     };
     let prepared = r
         .store()

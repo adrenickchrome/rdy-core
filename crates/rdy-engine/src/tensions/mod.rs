@@ -215,10 +215,13 @@ pub fn tension_label(id: &Hash) -> String {
 
 /// The severity of what `f` reports under `pack`, and whether the pack set it. A kind that
 /// softens in draft is advisory when the pack leaves it at its default and the content involved
-/// is not stable.
+/// is not stable. A kind that blocks in stable content is blocking there whatever the pack says
+/// (D-ME2HD); `overridden` stays the pack's flag.
 pub fn severity_of(pack: &Pack, f: &Found) -> (TensionSeverity, bool) {
     let (severity, overridden) = pack.tension_severity(f.kind);
-    if !overridden && f.kind.softens_in_draft() && !f.stable {
+    if f.kind.blocks_in_stable() && f.stable {
+        (TensionSeverity::Blocking, overridden)
+    } else if !overridden && f.kind.softens_in_draft() && !f.stable {
         (TensionSeverity::Advisory, false)
     } else {
         (severity, overridden)

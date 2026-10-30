@@ -4,6 +4,7 @@
 //! the propose binding and the landing write them, through the plan writers.
 pub mod api;
 pub mod compute;
+pub mod group;
 pub mod lifecycle;
 pub mod page;
 

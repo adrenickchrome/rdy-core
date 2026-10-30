@@ -67,7 +67,12 @@ pub(crate) fn print_error(e: &ErrorReply, as_json: bool) {
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .chain(corrected.get("card").map(|_| corrected));
+            // a fresh card (RULING F1) is an item: its text is `corrected.card.card`
+            .chain(
+                corrected
+                    .get("card")
+                    .map(|c| if c.is_object() { c } else { corrected }),
+            );
         for c in cards {
             if let Some(card) = c.get("card").and_then(Value::as_str) {
                 let _ = writeln!(out, "\n{card}");

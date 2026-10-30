@@ -14,13 +14,14 @@
 //! code items. With no live chain, the HEADs captured for the read are both ends; a read alone
 //! never fixes a baseline.
 use super::compute::{self, ComputedPlan, PlanCandidate, allowed_acts};
+use super::group::{self, PlanGroup};
 use super::page;
 use crate::brief::is_lower_hex;
 use crate::code_index::{check_top, code_repos, head_of};
 use crate::consequence::Consequences;
 use crate::error::{E_BAD_INPUT, E_LIMIT, E_PERMISSION, E_PLAN_ITEM};
 use crate::history::{Author, role_str};
-use crate::{Delta, Rdy, RdyError, ReadState, Scope, Session};
+use crate::{Delta, OpInput, Rdy, RdyError, ReadState, Scope, Session, WriteRequest};
 use rdy_model::engine_fields::MAX_REASON_CHARS;
 use rdy_model::plan::{
     ITEM_DISPLAY_PREFIX, MAX_PLAN_ANSWERS, Plan, PlanAct, PlanAnswer, PlanHead, PlanKind,
@@ -31,7 +32,7 @@ use rdy_store::plan::PLAN_REF;
 use rdy_store::{StoreReader, kinds};
 use serde::{Deserialize, Serialize};
 use std::cell::OnceCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A recorded answer whose subject or cause changed after it (p-5TZ28).
 pub const W_PLAN_ANSWER_LAPSED: &str = "W_PLAN_ANSWER_LAPSED";
@@ -45,17 +46,18 @@ pub const PLAN_DEFAULT_TOKENS: usize = crate::brief::BRIEF_DEFAULT_TOKENS;
 /// The largest budget a plan read takes, in tokens.
 pub const PLAN_MAX_TOKENS: usize = 100_000;
 
-/// The kinds, in their wire order (p-S33GZ).
-const KINDS: [PlanKind; 5] = [
+/// The kinds, in their wire order (p-S33GZ); the tension item is last (D-ME2HD).
+const KINDS: [PlanKind; 6] = [
     PlanKind::Update,
     PlanKind::Rejustify,
     PlanKind::Reaffirm,
     PlanKind::Confirm,
     PlanKind::UpdateImplementation,
+    PlanKind::Tension,
 ];
 
-/// The ten outcomes, in their wire order.
-const OUTCOMES: [PlanOutcome; 10] = [
+/// The eleven outcomes, in their wire order; `dismissed` is last (D-ME2HD).
+const OUTCOMES: [PlanOutcome; 11] = [
     PlanOutcome::Updated,
     PlanOutcome::Relinked,
     PlanOutcome::Repinned,
@@ -66,10 +68,26 @@ const OUTCOMES: [PlanOutcome; 10] = [
     PlanOutcome::Done,
     PlanOutcome::Deferred,
     PlanOutcome::Open,
+    PlanOutcome::Dismissed,
 ];
 
+/// The prefix of a tension item's display id: the tension's own id (O5).
+pub(crate) const TENSION_DISPLAY_PREFIX: &str = "tn-";
+
+/// The display id of an item: a tension item shows its tension's id, `tn-` and the first 12 hex
+/// of its subject (O5, `tension_label`); every other item `pi-` and 16 hex ([`item_display`]).
+fn item_label(kind: PlanKind, id: &Hash, subject: &str) -> String {
+    match kind {
+        PlanKind::Tension => format!(
+            "{TENSION_DISPLAY_PREFIX}{}",
+            subject.get(..12).unwrap_or(subject)
+        ),
+        _ => item_display(id),
+    }
+}
+
 /// One answer to a plan item, as `rdy_plan` and `rdy_propose` take it (p-JJNYH): `item` is a
-/// `pi-` id (a prefix of one) or a `cq-` consequence id.
+/// `pi-` id (a prefix of one), a tension item's `tn-` id or a `cq-` consequence id.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanAnswerInput {
@@ -77,6 +95,86 @@ pub struct PlanAnswerInput {
     pub act: PlanAct,
     #[serde(default)]
     pub reason: Option<String>,
+}
+
+/// One answer to a plan, as `rdy_plan` and `rdy plan` take it on the wire (D-ME2HD, O13, O14):
+/// it names one `item`, as [`PlanAnswerInput`] does, or a `group` of open items, one answer for
+/// each. `repin` goes with a `confirm` group only. With `repin`, the repin change takes the
+/// justification of `rdy_write` (ruling final F2): `implements`, `editorial` or `reflects`, at
+/// most one, checked by [`crate::parse_justification`]; a spec without `repin` takes none.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanAnswerSpec {
+    #[serde(default)]
+    pub item: Option<String>,
+    #[serde(default)]
+    pub group: Option<PlanGroup>,
+    pub act: PlanAct,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub repin: bool,
+    /// The decisions the repin change carries out: ids, keys or paths.
+    #[serde(default)]
+    pub implements: Option<Vec<String>>,
+    /// The repin change is editorial: its class and reason.
+    #[serde(default)]
+    pub editorial: Option<EditorialArg>,
+    /// The repin change follows these sources, as `rdy_write`'s `reflects`.
+    #[serde(default)]
+    pub reflects: Option<crate::ReflectsArg>,
+}
+
+/// An `editorial` justification as `rdy_write` takes it: a class (typo, restructure or clarify)
+/// and a reason.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EditorialArg {
+    pub class: String,
+    pub reason: String,
+}
+
+impl PlanAnswerSpec {
+    /// Whether the spec gives a justification of its own.
+    fn justified(&self) -> bool {
+        self.implements.is_some() || self.editorial.is_some() || self.reflects.is_some()
+    }
+}
+
+/// The first block, in reading order, that a repin op of `ops` writes and that is normative and
+/// stable, in the view state `m` or in canon: the tests the unjustified-change detector judges a
+/// write with (ruling final F2, D-ME2HD; the block named, TASK-933).
+fn repins_stable_content(
+    st: &ReadState,
+    m: &crate::Materialized,
+    ops: &[OpInput],
+) -> Result<Option<BlockId>, RdyError> {
+    let canon = st.materialized(&Scope::Canon)?;
+    let mut stable: BTreeSet<BlockId> = BTreeSet::new();
+    for op in ops {
+        let OpInput::Repin { id, .. } = op else {
+            continue;
+        };
+        let Ok(b) = BlockId::parse(id) else {
+            continue;
+        };
+        let Some(block) = m.get(&b) else {
+            continue;
+        };
+        if crate::tensions::index::is_normative(st.pack(), block)
+            && (crate::brief::effective_stable(m, Some(&b))
+                || crate::brief::effective_stable(&canon, Some(&b)))
+        {
+            stable.insert(b);
+        }
+    }
+    // the first such block in reading order (TASK-933)
+    if stable.is_empty() {
+        return Ok(None);
+    }
+    Ok(crate::diff::reading_order(m)
+        .into_iter()
+        .find(|b| stable.contains(b)))
 }
 
 /// What a plan read names (p-92F5M): at most one of the four selectors (none: the session's
@@ -119,7 +217,7 @@ pub struct AnswerRow {
 /// An item of a view's or a proposal version's plan.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct LiveItem {
-    /// `pi-` and 16 hex digits.
+    /// `pi-` and 16 hex digits; a tension item's `tn-` and 12 (O5).
     pub id: String,
     pub kind: PlanKind,
     pub subject: String,
@@ -131,6 +229,10 @@ pub struct LiveItem {
     pub how: Option<PlanOutcome>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answer: Option<AnswerRow>,
+    /// Whether the subject is stable content (D-FQ7AK): what the change-plan gate reads; no
+    /// reply shows it.
+    #[serde(skip)]
+    pub stable: bool,
 }
 
 /// An item as a landing sealed it.
@@ -175,8 +277,8 @@ pub struct StateCounts {
     pub deferred: usize,
 }
 
-/// The counts over every item (not one page): closed holds the computed closes, the confirmed
-/// and the done items; `by_kind` names all five kinds.
+/// The counts over every item (not one page): closed holds the computed closes, the confirmed,
+/// the dismissed and the done items; `by_kind` names all six kinds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PlanCounts {
     pub open: usize,
@@ -278,6 +380,16 @@ impl Selector {
 /// `P-`, hex digits, `@` and a version number: a proposal version named explicitly.
 fn explicit_version(text: &str) -> bool {
     crate::is_proposal_ref(text) && text.contains('@')
+}
+
+/// The refusal of an expansion past the bound: `have` answers built, `add` more to come. Group
+/// expansion calls it before it builds the answers, so a hostile request is an error, not an
+/// allocation of specs times matched items (tb-A4DAV).
+fn check_expansion(have: usize, add: usize) -> Result<(), RdyError> {
+    if have.saturating_add(add) > MAX_PLAN_ANSWERS {
+        return Err(answers_limit());
+    }
+    Ok(())
 }
 
 fn bad(message: &str, fix: &str) -> RdyError {
@@ -497,7 +609,7 @@ impl ViewPlan {
         let chain = live_chain(st, view)?;
         let first = chain.as_ref().map_or(&heads, |c| &c.first_heads);
         let changes = st.included(view);
-        let computed = compute::compute(st, view, &changes, st.canon_head(), &heads, first)?;
+        let computed = compute::compute(st, view, &changes, st.canon_head(), None, &heads, first)?;
         Ok(ViewPlan {
             computed,
             chain,
@@ -552,7 +664,7 @@ pub(crate) fn live_rows(
                                 code: W_PLAN_ANSWER_LAPSED.into(),
                                 message: format!(
                                     "the answer to {} lapsed: {block} changed",
-                                    item_display(&c.id)
+                                    item_label(c.kind, &c.id, &c.subject)
                                 ),
                                 fix: PLAN_ANSWER_LAPSED_FIX.into(),
                             },
@@ -577,7 +689,7 @@ pub(crate) fn live_rows(
         };
         counts.add(c.kind, state);
         rows.push(PlanRow::Live(LiveItem {
-            id: item_display(&c.id),
+            id: item_label(c.kind, &c.id, &c.subject),
             kind: c.kind,
             subject: c.subject.clone(),
             cause: c.cause.to_string(),
@@ -585,6 +697,7 @@ pub(crate) fn live_rows(
             state,
             how,
             answer,
+            stable: c.stable,
         }));
     }
     (rows, counts, notes)
@@ -601,7 +714,7 @@ fn sealed_state(o: PlanOutcome) -> ItemState {
 
 fn sealed_row(i: &SealedItem) -> PlanRow {
     PlanRow::Sealed(SealedRow {
-        id: item_display(&i.id),
+        id: item_label(i.kind, &i.id, &i.subject),
         kind: i.kind,
         subject: i.subject.clone(),
         cause: i.cause.to_string(),
@@ -729,7 +842,16 @@ impl ReadState {
                 (heads.clone(), heads, vec![])
             }
         };
-        let computed = compute::compute(self, &p.view, &p.changes, p.canon_at, &heads, &first)?;
+        let fixed = compute::fixed_tensions(self, &pref.version)?;
+        let computed = compute::compute(
+            self,
+            &p.view,
+            &p.changes,
+            p.canon_at,
+            fixed.as_ref(),
+            &heads,
+            &first,
+        )?;
         Ok(reply(
             format!("proposal:{pref}"),
             bound,
@@ -823,9 +945,10 @@ fn not_an_item(text: &str, scope: &str) -> RdyError {
     )
 }
 
-/// The candidate `text` names in `computed`: a `pi-` prefix of exactly one item, or a `cq-` id
-/// of the view's current consequence report (`report` reads it on first use) whose subject,
-/// cause and kind match exactly one item. Anything else is `E_PLAN_ITEM`.
+/// The candidate `text` names in `computed`: a `pi-` prefix of exactly one item, a `tn-` id
+/// (12 to 64 hex) that starts the subject of exactly one tension item (O5), or a `cq-` id of the
+/// view's current consequence report (`report` reads it on first use) whose subject, cause and
+/// kind match exactly one item. Anything else is `E_PLAN_ITEM`.
 fn resolve_item<'c>(
     computed: &'c ComputedPlan,
     text: &str,
@@ -844,6 +967,19 @@ fn resolve_item<'c>(
         let mut found = items[start..]
             .iter()
             .take_while(|c| c.id.to_string().starts_with(hex));
+        return match (found.next(), found.next()) {
+            (Some(c), None) => Ok(c),
+            _ => Err(miss()),
+        };
+    }
+    if let Some(hex) = text.strip_prefix(TENSION_DISPLAY_PREFIX) {
+        if !(12..=64).contains(&hex.len()) || !hex.bytes().all(is_lower_hex) {
+            return Err(miss());
+        }
+        let mut found = computed
+            .items
+            .iter()
+            .filter(|c| c.kind == PlanKind::Tension && c.subject.starts_with(hex));
         return match (found.next(), found.next()) {
             (Some(c), None) => Ok(c),
             _ => Err(miss()),
@@ -877,16 +1013,52 @@ fn resolve_item<'c>(
     }
 }
 
+/// The id of `c` in full, as [`resolve_item`] takes it: `pi-` and 64 hex, or a tension item's
+/// `tn-` and its tension's 64 hex.
+fn full_item_id(c: &PlanCandidate) -> String {
+    match c.kind {
+        PlanKind::Tension => format!("{TENSION_DISPLAY_PREFIX}{}", c.subject),
+        _ => format!("{ITEM_DISPLAY_PREFIX}{}", c.id),
+    }
+}
+
+/// The refusal for a reason that is missing, empty or over `MAX_REASON_CHARS`.
+fn reason_refusal(act: PlanAct) -> RdyError {
+    bad(
+        &format!("{} needs a reason of 1 to 2000 characters", act.as_str()),
+        "give a reason of 1 to 2000 characters",
+    )
+}
+
 /// A trimmed reason of 1 to `MAX_REASON_CHARS` Unicode scalar values, or the refusal.
 fn reason_of(act: PlanAct, reason: Option<&str>) -> Result<String, RdyError> {
     let r = reason.map(str::trim).unwrap_or("");
     if !(1..=MAX_REASON_CHARS).contains(&r.chars().count()) {
-        return Err(bad(
-            &format!("{} needs a reason of 1 to 2000 characters", act.as_str()),
-            "give a reason of 1 to 2000 characters",
-        ));
+        return Err(reason_refusal(act));
     }
     Ok(r.to_string())
+}
+
+/// Refuses a reason over `MAX_REASON_CHARS` (trimmed) for an act that keeps one, with the text
+/// [`reason_of`] gives. It allocates nothing, so it runs on a spec before a group expands to
+/// one clone of the reason per matched item (tb-A4DAV). A missing or empty reason is left to
+/// `reason_of`, and done keeps no reason.
+fn check_spec_reason(act: PlanAct, reason: Option<&str>) -> Result<(), RdyError> {
+    match (act, reason) {
+        (PlanAct::Done, _) | (_, None) => Ok(()),
+        (act, Some(r)) if r.trim().chars().count() > MAX_REASON_CHARS => Err(reason_refusal(act)),
+        _ => Ok(()),
+    }
+}
+
+/// The reason a spec passes on to an answer input: none for done, which keeps no reason
+/// (`prepare_plan_answers` drops it), so a done group never clones an unchecked reason once per
+/// matched item (tb-A4DAV).
+fn input_reason(act: PlanAct, reason: Option<&str>) -> Option<String> {
+    match act {
+        PlanAct::Done => None,
+        _ => reason.map(str::to_string),
+    }
 }
 
 /// Validates the whole of `inputs` against `computed` (the plan of `view`'s scope) and returns
@@ -919,8 +1091,26 @@ pub(crate) fn prepare_plan_answers(
         let c = resolve_item(computed, &input.item, &scope, &report, &held)?;
         if fresh.contains_key(&c.id) {
             return Err(bad(
-                &format!("duplicate plan answer for {}", item_display(&c.id)),
+                &format!(
+                    "duplicate plan answer for {}",
+                    item_label(c.kind, &c.id, &c.subject)
+                ),
                 "answer each item once per call",
+            ));
+        }
+        // D-ME2HD: dismiss answers a tension item only, and defer does not answer one
+        if input.act == PlanAct::Dismiss && c.kind != PlanKind::Tension {
+            return Err(RdyError::new(
+                E_PLAN_ITEM,
+                "dismiss answers a tension item only",
+                "answer it with confirm, defer or done",
+            ));
+        }
+        if input.act == PlanAct::Defer && c.kind == PlanKind::Tension {
+            return Err(RdyError::new(
+                E_PLAN_ITEM,
+                "defer does not answer a tension item",
+                "answer it with confirm or dismiss, with a reason",
             ));
         }
         if !allowed_acts(c.kind).contains(&input.act) {
@@ -1008,12 +1198,270 @@ impl Rdy {
         self.publish(Delta::Seq)?;
         Ok(id)
     }
+
+    /// [`Rdy::answer_plan`] for answers as the wire gives them (O13, O14): each spec names one
+    /// item or a group of the open items, which expands to one answer per item before anything
+    /// is written. The whole request is validated first: a group that matches nothing, or that
+    /// holds an item the act does not answer, is refused with nothing written. With `repin` on
+    /// a confirm group, rdy first writes one change to the view, one repin op per matched
+    /// subject block whose pin is not current, self-briefed like the daemon's repin, with the
+    /// group's justification (ruling final F2: one change per repin group; a repin of stable
+    /// normative content with none is refused before anything is written); then it records the
+    /// answers in one plan version. Returns that version's id.
+    pub fn answer_plan_specs(
+        &mut self,
+        session: &Session,
+        view: &str,
+        specs: &[PlanAnswerSpec],
+    ) -> Result<Hash, RdyError> {
+        if !session.role.can_write() {
+            return Err(RdyError::new(
+                E_PERMISSION,
+                format!("role {:?} cannot write", session.role),
+                "start the session as a writer",
+            ));
+        }
+        if specs.len() > MAX_PLAN_ANSWERS {
+            return Err(answers_limit());
+        }
+        for s in specs {
+            if s.item.is_some() == s.group.is_some() {
+                return Err(bad(
+                    "an answer names one of item and group",
+                    "pass item for one item, or group for many",
+                ));
+            }
+        }
+        for s in specs {
+            if s.repin && !(s.act == PlanAct::Confirm && s.group.is_some()) {
+                return Err(bad(
+                    "repin goes with a confirm group",
+                    "set act to confirm and pass a group",
+                ));
+            }
+        }
+        for s in specs {
+            if !s.repin && s.justified() {
+                return Err(bad(
+                    "a justification goes with repin",
+                    "set repin to true, or remove the justification",
+                ));
+            }
+        }
+        let st = self.read();
+        crate::write::check_view_access(&st, view, session, crate::views::Action::Include)?;
+        // each repin group's justification, by rdy_write's rule and with its errors
+        let view_scope = Scope::View(view.to_string());
+        let mut justifications = Vec::with_capacity(specs.len());
+        for s in specs {
+            justifications.push(if s.repin {
+                Some(crate::parse_justification(
+                    &st,
+                    &view_scope,
+                    s.implements.clone(),
+                    s.editorial.clone().map(|e| (e.class, e.reason)),
+                    s.reflects.clone(),
+                )?)
+            } else {
+                None
+            });
+        }
+        let vp = ViewPlan::read(&st, view)?;
+        let (rows, _, _) = live_rows(&vp.computed, vp.prior());
+        let open: BTreeSet<Hash> = vp
+            .computed
+            .items
+            .iter()
+            .zip(&rows)
+            .filter(|(_, row)| matches!(row, PlanRow::Live(l) if l.state == ItemState::Open))
+            .map(|(c, _)| c.id)
+            .collect();
+        let m = st.materialized(&Scope::View(view.to_string()))?;
+        let scope = format!("view:{view}");
+        let mut inputs: Vec<PlanAnswerInput> = Vec::with_capacity(specs.len());
+        // the items each repin group matched, by spec
+        let mut to_repin: Vec<(usize, Vec<&PlanCandidate>)> = vec![];
+        for (n, s) in specs.iter().enumerate() {
+            // before any clone of the reason: a group copies it once per matched item
+            check_spec_reason(s.act, s.reason.as_deref())?;
+            match (&s.item, &s.group) {
+                (Some(item), None) => {
+                    check_expansion(inputs.len(), 1)?;
+                    inputs.push(PlanAnswerInput {
+                        item: item.clone(),
+                        act: s.act,
+                        reason: input_reason(s.act, s.reason.as_deref()),
+                    });
+                }
+                (None, Some(g)) => {
+                    let matched = g.expand(&vp.computed, &open, &m, &scope)?;
+                    check_expansion(inputs.len(), matched.len())?;
+                    let refused: Vec<String> = matched
+                        .iter()
+                        .filter(|c| !allowed_acts(c.kind).contains(&s.act))
+                        .map(|c| item_label(c.kind, &c.id, &c.subject))
+                        .collect();
+                    if !refused.is_empty() {
+                        return Err(RdyError::new(
+                            E_PLAN_ITEM,
+                            format!(
+                                "{} does not answer {} items of the group: {}",
+                                s.act.as_str(),
+                                refused.len(),
+                                refused
+                                    .iter()
+                                    .take(5)
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                            "narrow the group, or answer those items one by one",
+                        ));
+                    }
+                    if s.repin {
+                        to_repin.push((n, matched.clone()));
+                    }
+                    for c in matched {
+                        inputs.push(PlanAnswerInput {
+                            item: full_item_id(c),
+                            act: s.act,
+                            reason: input_reason(s.act, s.reason.as_deref()),
+                        });
+                    }
+                }
+                _ => unreachable!("checked above"),
+            }
+        }
+        // the answers are checked now, so a refusal leaves the repin unwritten
+        prepare_plan_answers(
+            &st,
+            &session.provenance(),
+            view,
+            &vp.computed,
+            vp.prior(),
+            &inputs,
+        )?;
+        // one repin change per repin group, each with that group's justification; a block an
+        // earlier group repins is not repinned again. Every change is judged before any is
+        // written (ruling final F2): a repin of stable normative content needs a justification
+        let op_block = |op: &OpInput| match op {
+            OpInput::Repin { id, .. } => BlockId::parse(id).ok(),
+            _ => None,
+        };
+        let mut repinned: BTreeSet<BlockId> = BTreeSet::new();
+        let mut writes: Vec<(Vec<OpInput>, crate::ParsedJustification)> = vec![];
+        for (n, items) in &to_repin {
+            let ops: Vec<OpInput> = group::repin_ops(&m, self.store.tracking(), items)
+                .into_iter()
+                .filter(|op| op_block(op).is_none_or(|b| repinned.insert(b)))
+                .collect();
+            if ops.is_empty() {
+                continue;
+            }
+            let Some(j) = justifications[*n].take() else {
+                continue;
+            };
+            if j.stored.is_none()
+                && j.reflects.is_none()
+                && let Some(b) = repins_stable_content(&st, &m, &ops)?
+            {
+                return Err(bad(
+                    &format!("the repin changes stable block {b}, so it needs a justification"),
+                    "pass implements, editorial or reflects, as rdy_write takes",
+                ));
+            }
+            writes.push((ops, j));
+        }
+        drop((st, m));
+        for (ops, j) in writes {
+            let ids: BTreeSet<BlockId> = ops.iter().filter_map(op_block).collect();
+            let briefing = self.read().brief_ids(&view_scope, &ids, None)?;
+            briefing.register(&self.briefs);
+            let token = briefing.base.token.clone();
+            let req = WriteRequest {
+                view: view.to_string(),
+                ops,
+                justification: j.stored,
+                message: String::new(),
+            };
+            match j.reflects {
+                Some(reflects) => self.write_reflecting(
+                    session,
+                    req,
+                    reflects,
+                    rdy_model::ChangeLinks::default(),
+                    Some(&token),
+                )?,
+                None => self.write_briefed(session, req, Some(token))?,
+            };
+        }
+        self.answer_plan(session, view, &inputs)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rdy_model::Role;
+
+    /// O13: a group expands to at most `MAX_PLAN_ANSWERS` answers in all, checked before the
+    /// answers are built (tb-A4DAV). The bound itself fits; one past it is `E_LIMIT`.
+    #[test]
+    fn rg9_expansion_is_bounded_before_it_is_built() {
+        assert!(check_expansion(0, MAX_PLAN_ANSWERS).is_ok());
+        assert!(check_expansion(MAX_PLAN_ANSWERS - 1, 1).is_ok());
+        assert!(check_expansion(MAX_PLAN_ANSWERS, 0).is_ok());
+        for (have, add) in [
+            (0, MAX_PLAN_ANSWERS + 1),
+            (MAX_PLAN_ANSWERS, 1),
+            (usize::MAX, 2),
+        ] {
+            let e = check_expansion(have, add).unwrap_err();
+            assert_eq!(e.code, E_LIMIT, "{have} + {add}");
+            assert_eq!(
+                e.message,
+                format!("change plan exceeds {MAX_PLAN_ANSWERS} plan answers")
+            );
+        }
+    }
+
+    /// A reason over `MAX_REASON_CHARS` is refused by the spec check, before a group expands to
+    /// one clone of it per matched item (tb-A4DAV). Done keeps no reason, so it is not checked;
+    /// a missing or empty reason is left to `reason_of`, after the group has expanded.
+    #[test]
+    fn rg9_an_over_long_reason_is_refused_before_expansion() {
+        let long = "x".repeat(MAX_REASON_CHARS + 1);
+        let padded = format!("  {}  ", "x".repeat(MAX_REASON_CHARS));
+        for act in [PlanAct::Confirm, PlanAct::Defer, PlanAct::Dismiss] {
+            let e = check_spec_reason(act, Some(&long)).unwrap_err();
+            let want = reason_of(act, Some(&long)).unwrap_err();
+            assert_eq!(
+                (e.code, e.message, e.fix),
+                (want.code, want.message, want.fix)
+            );
+            assert!(
+                check_spec_reason(act, Some(&padded)).is_ok(),
+                "trimmed length counts"
+            );
+            assert!(check_spec_reason(act, None).is_ok());
+            assert!(check_spec_reason(act, Some("")).is_ok());
+        }
+        assert!(check_spec_reason(PlanAct::Done, Some(&long)).is_ok());
+    }
+
+    /// Done keeps no reason, so a spec for done passes none on to the answer input: a done
+    /// group of N items must not clone an unchecked reason N times (tb-A4DAV). Other acts pass
+    /// the reason on.
+    #[test]
+    fn rg9_done_passes_no_reason_to_an_answer_input() {
+        let long = "x".repeat(MAX_REASON_CHARS + 1);
+        assert_eq!(input_reason(PlanAct::Done, Some(&long)), None);
+        assert_eq!(input_reason(PlanAct::Done, None), None);
+        for act in [PlanAct::Confirm, PlanAct::Defer, PlanAct::Dismiss] {
+            assert_eq!(input_reason(act, Some("why")), Some("why".to_string()));
+            assert_eq!(input_reason(act, None), None);
+        }
+    }
 
     fn cand(id: Hash) -> PlanCandidate {
         PlanCandidate {
@@ -1025,6 +1473,7 @@ mod tests {
             subject_hash: Some(Hash([1; 32])),
             cause_hash: Hash([2; 32]),
             close: None,
+            stable: false,
         }
     }
 

@@ -3,7 +3,7 @@
 //! hangs a write.
 use rdy_engine::*;
 use rdy_qa::fixtures::*;
-use rdy_qa::intake::{TEST_SUMMARY, assert_not_ready};
+use rdy_qa::intake::TEST_SUMMARY;
 use serde_json::json;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -114,11 +114,21 @@ fn cyc1_a_landing_that_would_make_canon_cyclic_is_refused() {
     write(&mut r, "y", mv(&b, &a)).unwrap();
     land(&mut r, "y").unwrap();
     let canon = r.read().canon_head();
-    // the gate's own check of the prospective canon refuses it: its first error is the
-    // readiness issue (D-ME2HD), and it names the cycle
+    // O12: y's landing wrote no block of x's reach, so freshness holds and the merge's final
+    // guard refuses with its validation error; the queue's readiness issue is the same error,
+    // and it names the cycle
     let e = r.land(&approver(), &px.id).unwrap_err();
-    let issues = assert_not_ready(&r, &e, &px.r#ref, &[E_VALIDATION]);
-    let m = &issues[0].message;
+    assert_eq!(e.code, E_VALIDATION, "{e:?}");
+    let issues = rdy_qa::intake::not_ready_issues(&r, &px.r#ref);
+    assert_eq!(
+        issues
+            .iter()
+            .map(|i| (i.code, i.message.as_str()))
+            .collect::<Vec<_>>(),
+        [(E_VALIDATION, e.message.as_str())],
+        "{issues:#?}"
+    );
+    let m = &e.message;
     assert!(
         (m.starts_with(&a) || m.starts_with(&b))
             && m.ends_with(" would be inside itself: its parents loop back to it"),

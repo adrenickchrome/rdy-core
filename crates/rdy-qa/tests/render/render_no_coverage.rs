@@ -4,12 +4,33 @@ use rdy_qa::fixtures::*;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
+/// `rdy_qa::fixtures::write` with an editorial justification: the fixture writes stable normative content, and an
+/// unjustified change to stable content blocks its landing (D-ME2HD).
+fn clarified(
+    r: &mut rdy_engine::Rdy,
+    view: &str,
+    ops: serde_json::Value,
+) -> Result<rdy_engine::WriteResult, rdy_engine::RdyError> {
+    r.write(
+        &writer(),
+        rdy_engine::WriteRequest {
+            view: view.into(),
+            ops: parse_test_ops(ops)?,
+            justification: Some(rdy_model::Justification::Editorial {
+                class: rdy_model::EditorialClass::Clarify,
+                reason: "seed the test world".into(),
+            }),
+            message: String::new(),
+        },
+    )
+}
+
 /// A landed world with coverage issues of several kinds: a doc missing its required sections,
 /// an empty section, an unlinked mention, an open question and decisions nothing applies; then
 /// (final review M8) an open duplicate in canon, a pinned citation whose target changed (an open
 /// suspect), and view `gone`, which deletes that target (a dangling reference).
 fn world(r: &mut Rdy) {
-    write(r, "work", json!([
+    clarified(r, "work", json!([
         {"op": "create", "type": "doc", "id": "$o", "fields": {"name": "ops", "title": "Ops", "doc_type": "overview"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$o", "fields": {"title": "Summary", "lifecycle": "stable"}},
         {"op": "create", "type": "section", "id": "$empty", "parent": "$o", "fields": {"title": "Empty"}},

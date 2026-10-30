@@ -198,6 +198,7 @@ fn land_raw(r: &mut Rdy, v: &str) {
             alt: None,
             relay: None,
             evidence: None,
+            assessment: None,
         })
         .unwrap();
     r.invalidate();

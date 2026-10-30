@@ -163,6 +163,7 @@ mod fixture {
                 alt: None,
                 relay: None,
                 evidence: None,
+                assessment: None,
             })
             .unwrap();
         r.store_mut().set_held(true).unwrap();
@@ -475,6 +476,18 @@ use rdy_adapter::stream::ObjectKey;
 use rdy_adapter::{Hash, StoreHandle};
 use std::collections::BTreeSet;
 
+/// `features` and the `assessment` store feature: a holder that takes a landing takes the
+/// assessment it names, so its store uses the feature.
+fn and_assessment(features: rdy_store::format::StoreFeatures) -> rdy_store::format::StoreFeatures {
+    let mut f = features.features;
+    f.extend(
+        rdy_store::format::registered_features()
+            .into_iter()
+            .filter(|x| x.name == rdy_store::format::FEATURE_ASSESSMENT),
+    );
+    rdy_store::format::StoreFeatures::of(f)
+}
+
 #[test]
 fn ha16_hub_contract_resumes_with_persistent_batch_files() {
     let _clock = rdy_engine::pin_clock(1_000_000);
@@ -680,7 +693,7 @@ fn ha16_hub_contract_resumes_with_persistent_batch_files() {
         (formats.dump, formats.store),
         (
             writes.dump,
-            maintenance::DumpStore::Features(writes.store.clone())
+            maintenance::DumpStore::Features(and_assessment(writes.store.clone()))
         )
     );
     let copy = dir.path().join("copy");
@@ -744,7 +757,9 @@ fn rf4_hub_contract_takes_a_reflects_history() {
         (seen.dump, seen.store),
         (
             4,
-            maintenance::DumpStore::Features(rdy_store::format::baseline_features())
+            maintenance::DumpStore::Features(
+                and_assessment(rdy_store::format::baseline_features())
+            )
         )
     );
     let copy = dir.path().join("reflects-copy");

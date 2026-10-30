@@ -119,19 +119,48 @@ fn cp14_cli_plan_then_propose_uses_recorded_answers() {
     );
     assert!(!out.status.success(), "{out:?}");
 
-    // a plain propose binds the plan with three open items and says so
+    // a plain propose binds the plan with three open items; they are on stable content, so the
+    // version is not ready (E_PLAN_OPEN) and no W_PLAN_OPEN warns
     let (ok, first) = json_as(&["--json", "propose", "--title", "Change", "--view", "w"]);
     assert!(ok, "{first}");
     assert_eq!(first["plan"]["open"], 3, "{first:#}");
     assert_eq!(first["plan"]["closed"], 0, "{first:#}");
     assert!(
-        first["warnings"]
+        !first["warnings"]
             .as_array()
-            .unwrap()
-            .iter()
-            .any(|w| w["code"] == "W_PLAN_OPEN" && w["message"] == "3 change-plan items are open"),
+            .map(|w| w.iter().any(|w| w["code"] == "W_PLAN_OPEN"))
+            .unwrap_or(false),
         "{first:#}"
     );
+    let (ok, queue) = s.json(&["--json", "pending"]);
+    assert!(ok, "{queue}");
+    let row = queue["not_ready"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["ref"] == first["ref"])
+        .unwrap_or_else(|| panic!("{} is not ready: {queue:#}", first["ref"]));
+    let open: Vec<&Value> = row["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["code"] == "E_PLAN_OPEN")
+        .collect();
+    assert_eq!(open.len(), 1, "{row:#}");
+    assert_eq!(
+        open[0]["message"], "3 change-plan items are open",
+        "{row:#}"
+    );
+    // rg10 (O20): the reply says it is not ready, with the queue's issue
+    assert_eq!(first["ready"], false, "{first:#}");
+    assert_eq!(first["assessment"], Value::Null, "{first:#}");
+    let plan_open: Vec<&Value> = first["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["code"] == "E_PLAN_OPEN")
+        .collect();
+    assert_eq!(plan_open, open, "{first:#}");
 
     // rdy plan records the answers; the next propose binds them
     let out = s.rdy_as(

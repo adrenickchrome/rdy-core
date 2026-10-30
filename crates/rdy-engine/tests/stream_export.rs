@@ -94,6 +94,7 @@ fn remove(r: &mut Rdy, target: String) {
             alt: None,
             relay: None,
             evidence: None,
+            assessment: None,
         })
         .unwrap();
     r.store_mut().set_held(true).unwrap();
@@ -408,6 +409,9 @@ fn carry_canary(dir: &std::path::Path) -> Hash {
     })
     .unwrap();
     drop(r);
+    // the source store's own features: a landing writes an assessment, so the `assessment`
+    // feature is active (ruling task-10 B)
+    let features = s.features().clone();
     drop(s);
     let mut i = rdy_store::ingest::Ingest::create(&store).unwrap();
     for (n, b) in batches.iter().enumerate() {
@@ -415,10 +419,8 @@ fn carry_canary(dir: &std::path::Path) -> Hash {
     }
     let residues: Vec<RedactionResidue> = found.into_iter().map(|f| f.4).collect();
     i.append_carried(&residues, &[rec]).unwrap();
-    i.upgrade(&rdy_store::format::DumpStore::Features(
-        rdy_store::format::baseline_features(),
-    ))
-    .unwrap();
+    i.upgrade(&rdy_store::format::DumpStore::Features(features))
+        .unwrap();
     i.finish().unwrap();
     carried
 }

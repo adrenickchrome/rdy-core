@@ -440,7 +440,7 @@ fn cp10_invalid_plan_answer_does_not_commit_rekeys() {
     );
     assert_eq!(r.store().included("b").unwrap().len(), in_view);
     assert_eq!(plan_ref(&r, "b"), None);
-    // the same propose with no answer writes the key change, the version and its plan at once
+    // the same propose with no answer writes the key change first, then the version and its plan
     let start = r.store().log_end();
     let pb = propose(&mut r, "b", &[]).unwrap();
     assert_eq!(pb.keys.len(), 1, "{:?}", pb.keys);
@@ -451,8 +451,8 @@ fn cp10_invalid_plan_answer_does_not_commit_rekeys() {
             .iter()
             .filter(|k| **k == kinds::BATCH_COMMIT)
             .count(),
-        1,
-        "the key change is in the version's batch: {kinds_of:?}"
+        2,
+        "the key change has its own batch: {kinds_of:?}"
     );
     for k in [kinds::CHANGE, kinds::PROPOSAL, kinds::PLAN] {
         assert_eq!(
@@ -461,6 +461,16 @@ fn cp10_invalid_plan_answer_does_not_commit_rekeys() {
             "{kinds_of:?}"
         );
     }
+    let at = |k: u8| kinds_of.iter().position(|x| *x == k).unwrap();
+    let first_commit = at(kinds::BATCH_COMMIT);
+    assert!(
+        at(kinds::CHANGE) < first_commit,
+        "the first batch holds the key change: {kinds_of:?}"
+    );
+    assert!(
+        first_commit < at(kinds::PROPOSAL) && first_commit < at(kinds::PLAN),
+        "the second batch holds the version and its plan: {kinds_of:?}"
+    );
     let (_, plan) = bound(&r, &pb.id).unwrap();
     assert_eq!(plan.proposal, Some(h(&pb.id)));
     let stored = r.read().reader().proposal(&h(&pb.id)).unwrap();
@@ -670,10 +680,12 @@ fn cp10_open_noncode_items_warn_and_code_items_never_block() {
     r.fsck().unwrap();
 }
 
-/// The carried records no product path writes yet, in the log of `r`: kinds 25 to 28, Check
+/// The carried records no product path writes yet, in the log of `r`: kinds 26 to 28, Check
 /// subjects and the Pass, Concern and Fail verdicts, the Dispute, ResolveDispute and
-/// AcceptVerdict acts, and the new Change and LandingRecord fields. Returns how many frames of
-/// the guarded kinds it read.
+/// AcceptVerdict acts, a change's `replayed_from` and a landing's `policy`. A change records its
+/// briefing (rg1), a propose writes `ASSESSMENT` records (kind 25, rg10) and a landing names its
+/// assessment (rg12, D-ME2HD); `policy` and the other carriers stay unwritten. Returns how many
+/// frames of the guarded kinds it read.
 fn future_records(r: &Rdy) -> (Vec<String>, usize) {
     use rdy_model::{Answer, AnswerAct, Change, LandingRecord, Review, ReviewSubject, Verdict};
     use rdy_store::codec::{decode_record, logical_kind};
@@ -690,10 +702,9 @@ fn future_records(r: &Rdy) -> (Vec<String>, usize) {
             |_, raw, hash, payload, _| {
                 let what = format!("kind {} {hash}", logical_kind(raw));
                 match logical_kind(raw) {
-                    kinds::ASSESSMENT
-                    | kinds::DISPUTE
-                    | kinds::DISPUTE_RESOLUTION
-                    | kinds::CHECK_REQUEST => found.push(what),
+                    kinds::DISPUTE | kinds::DISPUTE_RESOLUTION | kinds::CHECK_REQUEST => {
+                        found.push(what)
+                    }
                     kinds::REVIEW => {
                         read += 1;
                         let v: Review = decode_record(raw, payload)?;
@@ -718,14 +729,14 @@ fn future_records(r: &Rdy) -> (Vec<String>, usize) {
                     kinds::CHANGE => {
                         read += 1;
                         let c: Change = decode_record(raw, payload)?;
-                        if c.links.replayed_from.is_some() || c.links.briefing.is_some() {
+                        if c.links.replayed_from.is_some() {
                             found.push(what);
                         }
                     }
                     kinds::LANDING => {
                         read += 1;
                         let l: LandingRecord = decode_record(raw, payload)?;
-                        if l.assessment.is_some() || l.policy.is_some() {
+                        if l.policy.is_some() {
                             found.push(what);
                         }
                     }
@@ -740,8 +751,10 @@ fn future_records(r: &Rdy) -> (Vec<String>, usize) {
 
 /// ok4: the product paths keep producing their existing acts. A propose with its bound plan, a
 /// plan answer, a person's approval, an ordinary write and an import write no record of kinds
-/// 25 to 28, no Check subject or new verdict, no Dispute, ResolveDispute or AcceptVerdict act,
-/// and leave every new carrier field None.
+/// 26 to 28, no Check subject or new verdict, no Dispute, ResolveDispute or AcceptVerdict act,
+/// and leave a landing's `policy` and the other new carriers None. A change records its
+/// briefing (rg1), a propose writes the version's `ASSESSMENT` (rg10) and a landing names its
+/// assessment (rg12).
 #[test]
 fn ok4_product_paths_do_not_write_future_records() {
     let (d, mut r) = project();

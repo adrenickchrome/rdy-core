@@ -99,6 +99,32 @@ fn agent_state(engine: &Arc<Local>, actor: &str, run: &str) -> McpState {
     st
 }
 
+/// Makes `human:qa` the project's person (`.rdy/local.yaml`), whom `rdy_pending` asks for.
+fn person_is_qa(dir: &std::path::Path) {
+    std::fs::write(dir.join(".rdy/local.yaml"), "actor: human:qa\n").unwrap();
+}
+
+/// The one `E_PLAN_OPEN` issue `rdy_pending` lists under `not_ready` for version `pref` (D-FQ7AK:
+/// open items on stable content make the version not ready).
+fn plan_open_issue(st: &mut McpState, pref: &Value) -> Value {
+    let q = rdy_mcp::tools::rdy_pending(st, p(json!({}))).unwrap();
+    let row = q["not_ready"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["ref"] == *pref)
+        .unwrap_or_else(|| panic!("{pref} is not ready: {q:#}"))
+        .clone();
+    let open: Vec<&Value> = row["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["code"] == "E_PLAN_OPEN")
+        .collect();
+    assert_eq!(open.len(), 1, "{row:#}");
+    open[0].clone()
+}
+
 /// The log end, as text: refused requests must leave it as it was.
 fn log_end(st: &McpState) -> String {
     st.engine
@@ -283,7 +309,8 @@ fn cp14_propose_answers_are_atomic_over_mcp() {
 
 #[test]
 fn cp14_plan_and_propose_pages_keep_full_counts() {
-    let (_dir, mut r) = project();
+    let (dir, mut r) = project();
+    person_is_qa(dir.path());
     fx(&mut r, 6, "w", &as_agent("agent:qa", "w"));
     let engine = Arc::new(Local::new(r));
     let mut st = agent_state(&engine, "agent:qa", "w");
@@ -295,14 +322,29 @@ fn cp14_plan_and_propose_pages_keep_full_counts() {
     assert_eq!(v["plan"]["open"], 7, "{v:#}");
     assert_eq!(v["plan"]["by_kind"]["reaffirm"]["open"], 6, "{v:#}");
     assert_eq!(v["plan"]["items"].as_array().unwrap().len(), 7, "{v:#}");
+    // the items are on stable content: the version is not ready (E_PLAN_OPEN), no warning
     assert!(
-        v["warnings"]
+        !v["warnings"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|w| w["code"] == "W_PLAN_OPEN" && w["message"] == "7 change-plan items are open"),
+            .any(|w| w["code"] == "W_PLAN_OPEN"),
         "{v:#}"
     );
+    let issue = plan_open_issue(&mut st, &v["ref"]);
+    assert_eq!(issue["message"], "7 change-plan items are open");
+    // rg10 (O20): the reply says it is not ready, with the queue's issue
+    assert_eq!(
+        (&v["ready"], &v["assessment"]),
+        (&json!(false), &Value::Null)
+    );
+    let plan_open: Vec<&Value> = v["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["code"] == "E_PLAN_OPEN")
+        .collect();
+    assert_eq!(plan_open, [&issue], "{v:#}");
 
     // the same budget answers all seven in the propose, and the counts are still whole
     let every: Vec<Value> = whole["items"]
@@ -727,6 +769,7 @@ fn cp14_guidance_and_error_rows_match_the_live_contract() {
 #[test]
 fn cp14_guidance_matches_the_engine_in_a_live_project() {
     let (dir, mut r) = project();
+    person_is_qa(dir.path());
     fx(&mut r, 2, "w", &as_agent("agent:qa", "w"));
     let engine = Arc::new(Local::new(r));
     let mut st = agent_state(&engine, "agent:qa", "w");
@@ -748,17 +791,34 @@ fn cp14_guidance_matches_the_engine_in_a_live_project() {
     let row = ERROR_ROWS.iter().find(|r| r.0 == "E_PLAN_ITEM").unwrap();
     assert_eq!(e.fix, row.2);
 
-    // W_PLAN_OPEN: the row's message with <n> filled in, and its fix
+    // E_PLAN_OPEN: the items are on stable content, so the version is not ready and no
+    // W_PLAN_OPEN warns; the issue counts the three items and has the row's fix (the row's
+    // second column says when the code comes, not the message)
     let v = rdy_propose(&mut st, p(json!({"title": "open"}))).unwrap();
-    let w = v["warnings"]
+    assert!(
+        !v["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["code"] == "W_PLAN_OPEN"),
+        "{v:#}"
+    );
+    let issue = plan_open_issue(&mut st, &v["ref"]);
+    let row = ERROR_ROWS.iter().find(|r| r.0 == "E_PLAN_OPEN").unwrap();
+    assert_eq!(issue["message"], "3 change-plan items are open");
+    assert_eq!(issue["fix"], row.2);
+    // rg10 (O20): the reply says it is not ready, with the queue's issue
+    assert_eq!(
+        (&v["ready"], &v["assessment"]),
+        (&json!(false), &Value::Null)
+    );
+    let plan_open: Vec<&Value> = v["issues"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|w| w["code"] == "W_PLAN_OPEN")
-        .unwrap_or_else(|| panic!("{v:#}"));
-    let row = ERROR_ROWS.iter().find(|r| r.0 == "W_PLAN_OPEN").unwrap();
-    assert_eq!(w["message"], row.1.replace("<n>", "3"));
-    assert_eq!(w["fix"], row.2);
+        .filter(|i| i["code"] == "E_PLAN_OPEN")
+        .collect();
+    assert_eq!(plan_open, [&issue], "{v:#}");
 
     // the allowed-act matrix: confirm takes confirm and defer; reaffirm takes defer only
     for (item, act, ok) in [

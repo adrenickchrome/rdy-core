@@ -80,6 +80,7 @@ fn land(s: &mut Store, view: &str) -> rdy_store::LandOutcome {
         alt: None,
         relay: None,
         evidence: None,
+        assessment: None,
     })
     .unwrap()
 }
@@ -374,6 +375,7 @@ fn reb1_an_index_failure_during_a_landing_with_rebases_writes_nothing() {
             alt: None,
             relay: None,
             evidence: None,
+            assessment: None,
         })
         .unwrap_err();
     assert!(matches!(e, StoreError::Db(_)), "{e}");
@@ -473,6 +475,7 @@ fn reb1_canon_side_names_the_acceptance_change_when_another_view_wrote_the_same_
             alt: None,
             relay: None,
             evidence: None,
+            assessment: None,
         })
         .unwrap();
     let aid = out.accept.unwrap();

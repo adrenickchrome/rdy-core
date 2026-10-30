@@ -32,6 +32,7 @@
         "pack": "checks a pack file; the schema_packs row covers it",
         "plan confirm": "needs an open plan item",
         "plan defer": "needs an open plan item",
+        "plan dismiss": "needs an open plan item",
         "plan done": "needs an open plan item",
         "publication": "needs a publication profile",
         "publish": "uploads a site to a host",
@@ -83,8 +84,21 @@
         },
         "approve": {
           "exits": [
-            0
+            0,
+            1
           ],
+          "stderr": {
+            "code": "string",
+            "corrected": {
+              "card": {
+                "card": "string",
+                "card_hash": "string",
+                "ref": "string"
+              }
+            },
+            "fix": "string",
+            "message": "string"
+          },
           "stdout": {
             "approved": "string",
             "assurance": "string",
@@ -450,6 +464,7 @@
               "approved": "string",
               "approved_by": "string",
               "approved_version": "string",
+              "assessment": "string",
               "assurance": "string",
               "at": "string",
               "at_ms": "number",
@@ -635,6 +650,11 @@
                   "deferred": "number",
                   "open": "number"
                 },
+                "tension": {
+                  "closed": "number",
+                  "deferred": "number",
+                  "open": "number"
+                },
                 "update": {
                   "closed": "number",
                   "deferred": "number",
@@ -652,6 +672,16 @@
             },
             "items": [
               {
+                "answer?": {
+                  "act": "string",
+                  "by": {
+                    "actor": "string",
+                    "at_ms": "number",
+                    "role": "string",
+                    "run": "string"
+                  },
+                  "reason": "string"
+                },
                 "cause": "string",
                 "edge": "string",
                 "id": "string",
@@ -670,6 +700,7 @@
             0
           ],
           "stdout": {
+            "assessment": "string",
             "blocking": [],
             "canon_at": "string",
             "changes": "number",
@@ -688,6 +719,7 @@
               ]
             },
             "id": "string",
+            "issues": [],
             "plan": {
               "by_kind": {
                 "confirm": {
@@ -701,6 +733,11 @@
                   "open": "number"
                 },
                 "rejustify": {
+                  "closed": "number",
+                  "deferred": "number",
+                  "open": "number"
+                },
+                "tension": {
                   "closed": "number",
                   "deferred": "number",
                   "open": "number"
@@ -725,6 +762,7 @@
               "items": [],
               "open": "number"
             },
+            "ready": "bool",
             "ref": "string",
             "stable": "string",
             "summary": "string",
@@ -2435,7 +2473,6 @@
                   "index": 1,
                   "num_args": "1..",
                   "positional": true,
-                  "required": true,
                   "value_names": [
                     "ITEMS"
                   ]
@@ -2447,6 +2484,94 @@
                   "num_args": "1",
                   "value_names": [
                     "REASON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "kind",
+                  "long": "kind",
+                  "num_args": "1",
+                  "value_names": [
+                    "KIND"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "follow_up",
+                  "long": "follow-up",
+                  "num_args": "1",
+                  "value_names": [
+                    "FOLLOW_UP"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "doc",
+                  "long": "doc",
+                  "num_args": "1",
+                  "value_names": [
+                    "DOC"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "edge",
+                  "long": "edge",
+                  "num_args": "1",
+                  "value_names": [
+                    "EDGE"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "id": "repin",
+                  "long": "repin",
+                  "num_args": "0",
+                  "value_names": [
+                    "REPIN"
+                  ]
+                },
+                {
+                  "action": "append",
+                  "id": "implements",
+                  "long": "implements",
+                  "num_args": "1",
+                  "value_names": [
+                    "IMPLEMENTS"
+                  ]
+                },
+                {
+                  "action": "append",
+                  "id": "editorial",
+                  "long": "editorial",
+                  "num_args": "2",
+                  "value_names": [
+                    "CLASS",
+                    "REASON"
+                  ]
+                },
+                {
+                  "action": "append",
+                  "id": "reflects",
+                  "long": "reflects",
+                  "num_args": "1",
+                  "value_names": [
+                    "SOURCE"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "id": "reflects_code",
+                  "long": "reflects-code",
+                  "num_args": "0",
+                  "value_names": [
+                    "REFLECTS_CODE"
                   ]
                 },
                 {
@@ -2505,11 +2630,31 @@
               "groups": [
                 {
                   "args": [
+                    "doc",
+                    "edge",
+                    "editorial",
+                    "follow_up",
+                    "implements",
                     "items",
+                    "kind",
                     "reason",
+                    "reflects",
+                    "reflects_code",
+                    "repin",
                     "view"
                   ],
                   "id": "AnswerArgs",
+                  "multiple": true,
+                  "required": false
+                },
+                {
+                  "args": [
+                    "doc",
+                    "edge",
+                    "follow_up",
+                    "kind"
+                  ],
+                  "id": "by_group",
                   "multiple": true,
                   "required": false
                 }
@@ -2525,7 +2670,6 @@
                   "index": 1,
                   "num_args": "1..",
                   "positional": true,
-                  "required": true,
                   "value_names": [
                     "ITEMS"
                   ]
@@ -2537,6 +2681,94 @@
                   "num_args": "1",
                   "value_names": [
                     "REASON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "kind",
+                  "long": "kind",
+                  "num_args": "1",
+                  "value_names": [
+                    "KIND"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "follow_up",
+                  "long": "follow-up",
+                  "num_args": "1",
+                  "value_names": [
+                    "FOLLOW_UP"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "doc",
+                  "long": "doc",
+                  "num_args": "1",
+                  "value_names": [
+                    "DOC"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "edge",
+                  "long": "edge",
+                  "num_args": "1",
+                  "value_names": [
+                    "EDGE"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "id": "repin",
+                  "long": "repin",
+                  "num_args": "0",
+                  "value_names": [
+                    "REPIN"
+                  ]
+                },
+                {
+                  "action": "append",
+                  "id": "implements",
+                  "long": "implements",
+                  "num_args": "1",
+                  "value_names": [
+                    "IMPLEMENTS"
+                  ]
+                },
+                {
+                  "action": "append",
+                  "id": "editorial",
+                  "long": "editorial",
+                  "num_args": "2",
+                  "value_names": [
+                    "CLASS",
+                    "REASON"
+                  ]
+                },
+                {
+                  "action": "append",
+                  "id": "reflects",
+                  "long": "reflects",
+                  "num_args": "1",
+                  "value_names": [
+                    "SOURCE"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "id": "reflects_code",
+                  "long": "reflects-code",
+                  "num_args": "0",
+                  "value_names": [
+                    "REFLECTS_CODE"
                   ]
                 },
                 {
@@ -2595,11 +2827,31 @@
               "groups": [
                 {
                   "args": [
+                    "doc",
+                    "edge",
+                    "editorial",
+                    "follow_up",
+                    "implements",
                     "items",
+                    "kind",
                     "reason",
+                    "reflects",
+                    "reflects_code",
+                    "repin",
                     "view"
                   ],
                   "id": "AnswerArgs",
+                  "multiple": true,
+                  "required": false
+                },
+                {
+                  "args": [
+                    "doc",
+                    "edge",
+                    "follow_up",
+                    "kind"
+                  ],
+                  "id": "by_group",
                   "multiple": true,
                   "required": false
                 }
@@ -2615,7 +2867,6 @@
                   "index": 1,
                   "num_args": "1..",
                   "positional": true,
-                  "required": true,
                   "value_names": [
                     "ITEMS"
                   ]
@@ -2627,6 +2878,94 @@
                   "num_args": "1",
                   "value_names": [
                     "REASON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "kind",
+                  "long": "kind",
+                  "num_args": "1",
+                  "value_names": [
+                    "KIND"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "follow_up",
+                  "long": "follow-up",
+                  "num_args": "1",
+                  "value_names": [
+                    "FOLLOW_UP"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "doc",
+                  "long": "doc",
+                  "num_args": "1",
+                  "value_names": [
+                    "DOC"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "edge",
+                  "long": "edge",
+                  "num_args": "1",
+                  "value_names": [
+                    "EDGE"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "id": "repin",
+                  "long": "repin",
+                  "num_args": "0",
+                  "value_names": [
+                    "REPIN"
+                  ]
+                },
+                {
+                  "action": "append",
+                  "id": "implements",
+                  "long": "implements",
+                  "num_args": "1",
+                  "value_names": [
+                    "IMPLEMENTS"
+                  ]
+                },
+                {
+                  "action": "append",
+                  "id": "editorial",
+                  "long": "editorial",
+                  "num_args": "2",
+                  "value_names": [
+                    "CLASS",
+                    "REASON"
+                  ]
+                },
+                {
+                  "action": "append",
+                  "id": "reflects",
+                  "long": "reflects",
+                  "num_args": "1",
+                  "value_names": [
+                    "SOURCE"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "id": "reflects_code",
+                  "long": "reflects-code",
+                  "num_args": "0",
+                  "value_names": [
+                    "REFLECTS_CODE"
                   ]
                 },
                 {
@@ -2685,16 +3024,233 @@
               "groups": [
                 {
                   "args": [
+                    "doc",
+                    "edge",
+                    "editorial",
+                    "follow_up",
+                    "implements",
                     "items",
+                    "kind",
                     "reason",
+                    "reflects",
+                    "reflects_code",
+                    "repin",
                     "view"
                   ],
                   "id": "AnswerArgs",
                   "multiple": true,
                   "required": false
+                },
+                {
+                  "args": [
+                    "doc",
+                    "edge",
+                    "follow_up",
+                    "kind"
+                  ],
+                  "id": "by_group",
+                  "multiple": true,
+                  "required": false
                 }
               ],
               "name": "done",
+              "subcommands": []
+            },
+            {
+              "args": [
+                {
+                  "action": "append",
+                  "id": "items",
+                  "index": 1,
+                  "num_args": "1..",
+                  "positional": true,
+                  "value_names": [
+                    "ITEMS"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "reason",
+                  "long": "reason",
+                  "num_args": "1",
+                  "value_names": [
+                    "REASON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "kind",
+                  "long": "kind",
+                  "num_args": "1",
+                  "value_names": [
+                    "KIND"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "follow_up",
+                  "long": "follow-up",
+                  "num_args": "1",
+                  "value_names": [
+                    "FOLLOW_UP"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "doc",
+                  "long": "doc",
+                  "num_args": "1",
+                  "value_names": [
+                    "DOC"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "edge",
+                  "long": "edge",
+                  "num_args": "1",
+                  "value_names": [
+                    "EDGE"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "id": "repin",
+                  "long": "repin",
+                  "num_args": "0",
+                  "value_names": [
+                    "REPIN"
+                  ]
+                },
+                {
+                  "action": "append",
+                  "id": "implements",
+                  "long": "implements",
+                  "num_args": "1",
+                  "value_names": [
+                    "IMPLEMENTS"
+                  ]
+                },
+                {
+                  "action": "append",
+                  "id": "editorial",
+                  "long": "editorial",
+                  "num_args": "2",
+                  "value_names": [
+                    "CLASS",
+                    "REASON"
+                  ]
+                },
+                {
+                  "action": "append",
+                  "id": "reflects",
+                  "long": "reflects",
+                  "num_args": "1",
+                  "value_names": [
+                    "SOURCE"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "id": "reflects_code",
+                  "long": "reflects-code",
+                  "num_args": "0",
+                  "value_names": [
+                    "REFLECTS_CODE"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "view",
+                  "long": "view",
+                  "num_args": "1",
+                  "value_names": [
+                    "VIEW"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [
+                    "doc",
+                    "edge",
+                    "editorial",
+                    "follow_up",
+                    "implements",
+                    "items",
+                    "kind",
+                    "reason",
+                    "reflects",
+                    "reflects_code",
+                    "repin",
+                    "view"
+                  ],
+                  "id": "AnswerArgs",
+                  "multiple": true,
+                  "required": false
+                },
+                {
+                  "args": [
+                    "doc",
+                    "edge",
+                    "follow_up",
+                    "kind"
+                  ],
+                  "id": "by_group",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "dismiss",
               "subcommands": []
             }
           ]
@@ -11348,10 +11904,10 @@
     "scenario": {
       "conflicts": {
         "a": [
-          "ccda5208c25e4639f95163fb7ba8edc5dc9da57e544edd8ee9039de3a8d060a9"
+          "d31c17dae8c0ad358656fcf02af98d3d4d5214f5d8d7b5bab2a51c9e6dd7d9e4"
         ],
         "b": [
-          "caf508545a00d02585b53e1c534f1a606fabd7e6d2de9ee746f7c08b557284b7"
+          "1d42e298a93ac11f6d4998bb85857ca00c24ea7236a56fde1fcf2506447c17c6"
         ],
         "work": []
       },
@@ -11361,76 +11917,76 @@
           {
             "event": "tension_opened",
             "ids": [
-              "fdf83106f80fd907a07f9ecfb34a1d9f2a7e542fa82ea1c2845de15866091077",
-              "eef8868c6fee3e5999e6e327ad5afac1d7b365e08982a82189746916f8c9730b"
+              "26128692ed566a28d305dc2d3a2cb86d7e88a7ab6ef481115a429b33973512e4",
+              "37579917da30b6c6a43687d7325fbfa0452c3d28fd38260f6163b5cc5c764328"
             ],
-            "line": "tension fdf83106f80f opened on your change eef8868c6fee (edit_collision, blocking): a side changed (change 974b2c526653)"
+            "line": "tension 26128692ed56 opened on your change 37579917da30 (edit_collision, blocking): a side changed (change a25f71f51c56)"
           },
           {
             "event": "pending_added",
             "ids": [
-              "5f77ade583617487f92e1f64e0f3b5efb64aaf59f38b89b80d6f11a3f2c5ee15"
+              "948ce6cf92b85b16dfa6d0b520396f535a3a84c13e377bc7cf2a344e486c487e"
             ],
-            "line": "P-5f77ade58361@1 waits for an answer; read rdy_pending"
+            "line": "P-948ce6cf92b8@1 waits for an answer; read rdy_pending"
           },
           {
             "event": "intent_posted",
             "ids": [
-              "1e443c9b5752f610f27e527991abf422e85a3c725690db38f86faeccfe310256"
+              "bf78977e9a9cf3ed840a4c97e0a5989d6465356d894d3d9bcd54754fc6f356e1"
             ],
-            "line": "agent:b posted intent 1e443c9b5752 on 1 blocks you are changing"
+            "line": "agent:b posted intent bf78977e9a9c on 1 blocks you are changing"
           },
           {
             "event": "tension_opened",
             "ids": [
-              "e71ee6199f1dd3e9a880e466349a7efe825a9a3c4ceb549d9ddd054c94247859",
-              "eef8868c6fee3e5999e6e327ad5afac1d7b365e08982a82189746916f8c9730b"
+              "4c8116c45adbf5d13867f05ae8ae44ada72b91fda2b870f2c83a2ed917b90b19",
+              "37579917da30b6c6a43687d7325fbfa0452c3d28fd38260f6163b5cc5c764328"
             ],
-            "line": "tension e71ee6199f1d opened on your change eef8868c6fee (edit_collision, blocking): a side changed (change a2729c46424e)"
+            "line": "tension 4c8116c45adb opened on your change 37579917da30 (edit_collision, blocking): a side changed (change 4feca551a83f)"
           },
           {
             "event": "pending_added",
             "ids": [
-              "18e617d69cfd695d965c850fe1f58571e3ade2e1bceeb8da54b5e092eeac4641"
+              "3a6e97c6c2e098400f310fdcf44bcd761dc4ab48ecc1a554eab17a527614f477"
             ],
-            "line": "P-18e617d69cfd@1 waits for an answer; read rdy_pending"
+            "line": "P-3a6e97c6c2e0@1 waits for an answer; read rdy_pending"
           },
           {
             "event": "landed",
             "ids": [
-              "b4a1c671059948c176e4594c8a456670cd4ba15cf058caa235ba9f7ec050db9b",
-              "18e617d69cfd695d965c850fe1f58571e3ade2e1bceeb8da54b5e092eeac4641"
+              "5d6f34eb6ab8839d2e98c086ede8281163af2612823429b343438fb1db72c182",
+              "3a6e97c6c2e098400f310fdcf44bcd761dc4ab48ecc1a554eab17a527614f477"
             ],
-            "line": "landing b4a1c6710599 of view work changed 1 blocks in your areas (payments)"
+            "line": "landing 5d6f34eb6ab8 of view work changed 1 blocks in your areas (payments)"
           },
           {
             "event": "view_rebased",
             "ids": [
-              "b4a1c671059948c176e4594c8a456670cd4ba15cf058caa235ba9f7ec050db9b",
-              "ccda5208c25e4639f95163fb7ba8edc5dc9da57e544edd8ee9039de3a8d060a9"
+              "5d6f34eb6ab8839d2e98c086ede8281163af2612823429b343438fb1db72c182",
+              "d31c17dae8c0ad358656fcf02af98d3d4d5214f5d8d7b5bab2a51c9e6dd7d9e4"
             ],
-            "line": "your view a rebased onto landing b4a1c6710599 with 1 conflicts"
+            "line": "your view a rebased onto landing 5d6f34eb6ab8 with 1 conflicts"
           },
           {
             "event": "tension_opened",
             "ids": [
-              "30a7a37bc43225ce1bd4b37c66b5e57b88e6b049fd2f7f89b96c0f8d9b03ef1b",
-              "eef8868c6fee3e5999e6e327ad5afac1d7b365e08982a82189746916f8c9730b"
+              "617638da05934cf876447f336419c010cd65abf4fc0ca88dce8c48fa8acc2f2d",
+              "37579917da30b6c6a43687d7325fbfa0452c3d28fd38260f6163b5cc5c764328"
             ],
-            "line": "tension 30a7a37bc432 replaces e71ee6199f1d on your change eef8868c6fee (edit_collision, blocking): landing b4a1c6710599"
+            "line": "tension 617638da0593 replaces 4c8116c45adb on your change 37579917da30 (edit_collision, blocking): landing 5d6f34eb6ab8"
           }
         ]
       },
       "logged_suspects": [],
       "logged_tensions": [
-        "tn-30a7a37bc432",
-        "tn-f1374be29be3",
-        "tn-fdf83106f80f"
+        "tn-0df3803f2a8f",
+        "tn-26128692ed56",
+        "tn-617638da0593"
       ],
       "tensions": {
-        "tn-30a7a37bc432": "open",
-        "tn-f1374be29be3": "open",
-        "tn-fdf83106f80f": "open"
+        "tn-0df3803f2a8f": "open",
+        "tn-26128692ed56": "open",
+        "tn-617638da0593": "open"
       },
       "transitions": 3
     },
@@ -11947,6 +12503,7 @@
       "E_PATH_CLASH": "\"E_PATH_CLASH\"",
       "E_PERMISSION": "\"E_PERMISSION\"",
       "E_PLAN_ITEM": "\"E_PLAN_ITEM\"",
+      "E_PLAN_OPEN": "\"E_PLAN_OPEN\"",
       "E_PROPOSAL_MOVED": "\"E_PROPOSAL_MOVED\"",
       "E_PROPOSAL_NOT_READY": "\"E_PROPOSAL_NOT_READY\"",
       "E_PUBLICATION_REFERENCE": "\"E_PUBLICATION_REFERENCE\"",
@@ -12016,6 +12573,7 @@
       "W_DIAGRAM_FAILED": "\"W_DIAGRAM_FAILED\"",
       "W_DIAGRAM_INVALID": "\"W_DIAGRAM_INVALID\"",
       "W_DIAGRAM_UNSUPPORTED": "\"W_DIAGRAM_UNSUPPORTED\"",
+      "W_PACK_SEVERITY": "\"W_PACK_SEVERITY\"",
       "W_PLAN_ANSWER_LAPSED": "\"W_PLAN_ANSWER_LAPSED\"",
       "W_PLAN_OPEN": "\"W_PLAN_OPEN\"",
       "W_PUBLICATION_REFERENCE": "\"W_PUBLICATION_REFERENCE\"",
@@ -12153,7 +12711,7 @@
       [
         "E_BRIEF_REQUIRED",
         "a write touches stable content and cites no briefing, or one that does not cover the block",
-        "retry with the token of the briefing the error carries"
+        "retry with the token of the briefing the error carries\non a readiness issue: exclude the change (rdy_view exclude), rdy_brief the block, and write it again"
       ],
       [
         "E_BRIEF_STALE",
@@ -12174,6 +12732,11 @@
         "W_CONFIG_UNKNOWN",
         "a config file (.rdy/local.yaml, the project config or the user config) holds a key rdy does not know (such as a typo), or a known key in a file where rdy does not read it; the warning names the file it belongs in; rdy ignores the key; reported by rdy config --show-origin, rdy status, every CLI command and rdy_session",
         "fix the key's spelling (the fix names the nearest known key), move it to the file the warning names, or remove it"
+      ],
+      [
+        "W_PACK_SEVERITY",
+        "a pack lowers unjustified_change",
+        "remove the unjustified_change severity from the pack"
       ],
       [
         "W_UNAPPLIED_DECISION",
@@ -12501,6 +13064,11 @@
         "Propose the redaction of the listed targets again, and have a person approve it."
       ],
       [
+        "E_PLAN_OPEN",
+        "the version's change plan has open items on stable content or unanswered tension items",
+        "close or defer each item, and answer each tension item with confirm or dismiss: rdy_plan / rdy plan"
+      ],
+      [
         "E_PLAN_ITEM",
         "<id> is not an item of the change plan for <scope>",
         "read the plan with rdy_plan / rdy plan and pass an item id it lists"
@@ -12582,6 +13150,7 @@
       "BAD_URL_FIX": "\"use an HTTPS address without credentials, a query or a fragment\"",
       "BAD_URL_MESSAGE": "\"the hub address is not an HTTPS URL\"",
       "BLOCKED_FIX": "\"Include the target docs or remove these references. Run the publication check again.\"",
+      "BRIEFING_FIX": "\"exclude the change from the view, then brief the block and write it again\"",
       "CARD_CHANGE_FIX": "\"Re-affirm these decisions in smaller groups with the reaffirm write op, then answer the card again.\"",
       "CARRIED_WARNING_BUDGET_FIX": "\"Increase max_tokens, or run rdy fsck for the complete warning list.\"",
       "CARRIER_MESSAGE": "\"Request content removal.\"",
@@ -12619,17 +13188,20 @@
       "NO_LATER_FIX": "\"answer with another option; Later is a chat act, relayed with rdy_answer\"",
       "NO_USER_FILE_FIX": "\"set XDG_CONFIG_HOME or HOME before signing in\"",
       "NO_USER_FILE_MESSAGE": "\"the user config path is not available\"",
+      "O11_FIX": "\"fix each issue and propose again: rdy_propose / rdy propose\"",
       "OP_FIX": "\"each op needs \\\"op\\\" (rdy_schema lists them under \\\"ops\\\"); create needs \\\"type\\\"\"",
       "OWNER_RUN_FIX": "\"pass the run with --run\"",
       "PAGE_MESSAGE": "\"There is no page at this address. It may have moved, or the link may be wrong.\"",
       "PAGE_STALE_FIX": "\"the read, briefing or search moved; start again without a cursor\"",
       "PIN_CLASH_FIX": "\"use the pinned version, or read the bare id with a scope\"",
       "PLAN_ANSWER_LAPSED_FIX": "\"answer the item again\"",
+      "PLAN_GATE_FIX": "\"close or defer each item, and answer each tension item with confirm or dismiss: rdy_plan / rdy plan\"",
       "PLAN_ITEM_FIX": "\"read the plan with rdy_plan / rdy plan and pass an item id it lists\"",
       "PLAN_OPEN_FIX": "\"close or defer each item: rdy_plan / rdy plan\"",
       "PROFILE_PARENT_FIX": "\"set parent to a doc id\"",
       "PROJECT_FIX": "\"Propose the redaction of the listed targets again, and have a person approve it.\"",
       "REACH_CONFIRM_FIX": "\"a block it relies on changed: check that it still holds, and supersede it if not; no repin is needed\"",
+      "REACH_FIX": "\"split the work into smaller proposals\"",
       "READER_CANNOT_SIGN_FIX": "\"start a writer session for this act\"",
       "REAFFIRM_FIX": "\"if it still holds, re-affirm it with a reaffirm op; otherwise supersede it\"",
       "REDACTED_FIX": "\"Read the redaction details in the source history.\"",
@@ -13008,6 +13580,7 @@
       "W_BRIEF_STALE",
       "E_PAGE_STALE",
       "W_CONFIG_UNKNOWN",
+      "W_PACK_SEVERITY",
       "W_UNAPPLIED_DECISION",
       "E_SITE",
       "W_SITE_LAN",
@@ -13073,6 +13646,7 @@
       "E_DUMP_CHAIN",
       "E_LOAD_STOP",
       "W_STOP_BEFORE_REDACTION",
+      "E_PLAN_OPEN",
       "E_PLAN_ITEM",
       "E_DEFERRAL_OPEN",
       "W_PLAN_OPEN",
@@ -13146,9 +13720,11 @@
         "refused": {
           "code": "string",
           "corrected": {
-            "card": "string",
-            "card_hash": "string",
-            "ref": "string"
+            "card": {
+              "card": "string",
+              "card_hash": "string",
+              "ref": "string"
+            }
           },
           "fix": "string",
           "issues": [],
@@ -13546,6 +14122,7 @@
             "approved": "string",
             "approved_by": "string",
             "approved_version": "string",
+            "assessment": "string",
             "assurance": "string",
             "at": "string",
             "at_ms": "number",
@@ -13725,6 +14302,11 @@
                 "deferred": "number",
                 "open": "number"
               },
+              "tension": {
+                "closed": "number",
+                "deferred": "number",
+                "open": "number"
+              },
               "update": {
                 "closed": "number",
                 "deferred": "number",
@@ -13742,6 +14324,16 @@
           },
           "items": [
             {
+              "answer?": {
+                "act": "string",
+                "by": {
+                  "actor": "string",
+                  "at_ms": "number",
+                  "role": "string",
+                  "run": "string"
+                },
+                "reason": "string"
+              },
               "cause": "string",
               "edge": "string",
               "id": "string",
@@ -13757,6 +14349,7 @@
       },
       "rdy_propose": {
         "ok": {
+          "assessment": "string",
           "blocking": [],
           "canon_at": "string",
           "changes": "number",
@@ -13775,6 +14368,7 @@
             ]
           },
           "id": "string",
+          "issues": [],
           "plan": {
             "by_kind": {
               "confirm": {
@@ -13788,6 +14382,11 @@
                 "open": "number"
               },
               "rejustify": {
+                "closed": "number",
+                "deferred": "number",
+                "open": "number"
+              },
+              "tension": {
                 "closed": "number",
                 "deferred": "number",
                 "open": "number"
@@ -13809,9 +14408,19 @@
               "unavailable": "bool"
             },
             "deferred": "number",
-            "items": [],
+            "items": [
+              {
+                "cause": "string",
+                "edge": "string",
+                "id": "string",
+                "kind": "string",
+                "state": "string",
+                "subject": "string"
+              }
+            ],
             "open": "number"
           },
+          "ready": "bool",
           "ref": "string",
           "stable": "string",
           "summary": "string",
@@ -13850,7 +14459,7 @@
           "version": "number",
           "warnings": [
             {
-              "block": "string",
+              "block": "null|string",
               "code": "string",
               "fix": "string",
               "message": "string",
@@ -14165,6 +14774,10 @@
               "fix": "string",
               "when": "string"
             },
+            "E_PLAN_OPEN": {
+              "fix": "string",
+              "when": "string"
+            },
             "E_PROPOSAL_MOVED": {
               "fix": "string",
               "when": "string"
@@ -14378,6 +14991,10 @@
               "when": "string"
             },
             "W_DIAGRAM_UNSUPPORTED": {
+              "fix": "string",
+              "when": "string"
+            },
+            "W_PACK_SEVERITY": {
               "fix": "string",
               "when": "string"
             },
@@ -16338,6 +16955,37 @@
       "rdy_plan": {
         "input_schema": {
           "$defs": {
+            "EditorialParams": {
+              "additionalProperties": false,
+              "properties": {
+                "class": {
+                  "description": "typo, restructure or clarify.",
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "class",
+                "reason"
+              ],
+              "type": "object"
+            },
+            "OneOrMany": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              ],
+              "description": "llst1: one text, or a list of them."
+            },
             "PlanActParam": {
               "description": "What a plan item was done with. The schema mirror of the model's `PlanAct`, which keeps\n`schemars` out of the model crate.",
               "oneOf": [
@@ -16355,33 +17003,166 @@
                   "const": "done",
                   "description": "The work the item names is done.",
                   "type": "string"
+                },
+                {
+                  "const": "dismiss",
+                  "description": "A tension item does not apply. Only a tension item takes it.",
+                  "type": "string"
                 }
               ]
             },
-            "PlanAnswerParams": {
+            "PlanAnswerSpecParams": {
               "additionalProperties": false,
-              "description": "One answer to a plan item.",
+              "description": "One answer in `rdy_plan`: to one item, or to a group of the open items.",
               "properties": {
                 "act": {
                   "$ref": "#/$defs/PlanActParam",
-                  "description": "confirm, defer or done. Which acts an item takes depends on its kind."
+                  "description": "confirm, defer, done or dismiss. Which acts an item takes depends on its kind."
+                },
+                "editorial": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/EditorialParams"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "With repin: the repin change is editorial, as rdy_write takes it."
+                },
+                "group": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/PlanGroupParams"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Every open item that matches each field the group gives: {kind?, follow_up?, doc?, edge?}. The act answers all of them. Give item or group, not both."
+                },
+                "implements": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/OneOrMany"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "With repin: the decisions the repin change carries out, as rdy_write takes them: an id, key or path, or a list of them."
                 },
                 "item": {
-                  "description": "The item: a pi- id (a unique prefix of one is enough) or a cq- consequence id from the last write or proposal.",
-                  "type": "string"
-                },
-                "reason": {
-                  "description": "Why (1 to 2000 characters). Required for confirm and defer; done keeps none.",
+                  "description": "One item: a pi- id (a unique prefix of one is enough), a tn- id of a tension item or a cq- consequence id. Give item or group, not both.",
                   "type": [
                     "string",
+                    "null"
+                  ]
+                },
+                "reason": {
+                  "description": "Why (1 to 2000 characters). Required for confirm, defer and dismiss; done keeps none.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "reflects": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ReflectsParams"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "With repin: the sources the repin change follows, as rdy_write takes them. On stable content the repin needs one of implements, editorial or reflects."
+                },
+                "repin": {
+                  "description": "true with a confirm group: also repin each matched item's subject to its cause, in one change before the answers.",
+                  "type": [
+                    "boolean",
                     "null"
                   ]
                 }
               },
               "required": [
-                "act",
-                "item"
+                "act"
               ],
+              "type": "object"
+            },
+            "PlanGroupParams": {
+              "additionalProperties": false,
+              "description": "A group of open plan items: every field it gives must match, and it gives at least one.",
+              "properties": {
+                "doc": {
+                  "description": "The id of the doc that holds the item's subject in the version.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "edge": {
+                  "description": "The item's edge.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "follow_up": {
+                  "description": "update, reaffirm or confirm (a confirm item and a rejustify item).",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/PlanKindParam"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "The item's kind: update, rejustify, reaffirm, confirm, update_implementation or tension."
+                }
+              },
+              "type": "object"
+            },
+            "PlanKindParam": {
+              "description": "The kind of a plan item, as a group names it. The schema mirror of the model's `PlanKind`.",
+              "enum": [
+                "update",
+                "rejustify",
+                "reaffirm",
+                "confirm",
+                "update_implementation",
+                "tension"
+              ],
+              "type": "string"
+            },
+            "ReflectsParams": {
+              "additionalProperties": false,
+              "description": "rf8 (D-4WC6R, D-XC9B9): a write's `reflects` justification.",
+              "properties": {
+                "code": {
+                  "description": "true records the code state of each written block with reflects globs. Missing: false;\nfalse is refused.",
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "sources": {
+                  "description": "The sources (S-…) the change follows: an id, key or path each, or the $name of a source\ncreated in this write. Missing: none.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                }
+              },
               "type": "object"
             }
           },
@@ -16389,9 +17170,9 @@
           "additionalProperties": false,
           "properties": {
             "answers": {
-              "description": "Answer items of the view's plan. All the answers are checked first, and either all are recorded or none. The reply is the plan after them. Empty: a read.",
+              "description": "Answer items of the view's plan: each answer names an item, or a group of the open items. All the answers are checked first, and either all are recorded or none. The reply is the plan after them. Empty: a read.",
               "items": {
-                "$ref": "#/$defs/PlanAnswerParams"
+                "$ref": "#/$defs/PlanAnswerSpecParams"
               },
               "type": [
                 "array",
@@ -16485,6 +17266,11 @@
                   "const": "done",
                   "description": "The work the item names is done.",
                   "type": "string"
+                },
+                {
+                  "const": "dismiss",
+                  "description": "A tension item does not apply. Only a tension item takes it.",
+                  "type": "string"
                 }
               ]
             },
@@ -16494,14 +17280,14 @@
               "properties": {
                 "act": {
                   "$ref": "#/$defs/PlanActParam",
-                  "description": "confirm, defer or done. Which acts an item takes depends on its kind."
+                  "description": "confirm, defer, done or dismiss. Which acts an item takes depends on its kind."
                 },
                 "item": {
-                  "description": "The item: a pi- id (a unique prefix of one is enough) or a cq- consequence id from the last write or proposal.",
+                  "description": "One item: a pi- id (a unique prefix of one is enough), a tn- id of a tension item or a cq- consequence id from the last write or proposal.",
                   "type": "string"
                 },
                 "reason": {
-                  "description": "Why (1 to 2000 characters). Required for confirm and defer; done keeps none.",
+                  "description": "Why (1 to 2000 characters). Required for confirm, defer and dismiss; done keeps none.",
                   "type": [
                     "string",
                     "null"
@@ -19289,7 +20075,7 @@
       ],
       [
         "unjustified_change",
-        "advisory",
+        "blocking",
         false
       ],
       [
