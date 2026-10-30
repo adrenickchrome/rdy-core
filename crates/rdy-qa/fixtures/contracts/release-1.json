@@ -11720,6 +11720,14 @@
         "type": "Percent"
       },
       {
+        "default": "off",
+        "key": "coverage.gate",
+        "levels": [
+          "project"
+        ],
+        "type": "Choice([\"off\", \"no_lower\"])"
+      },
+      {
         "default": "14",
         "key": "views.idle_days",
         "levels": [
