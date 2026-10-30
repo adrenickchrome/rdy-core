@@ -376,7 +376,7 @@ fn dq2_a_wrapped_reply_fits_its_budget_exactly() {
     assert!(cut.diff.entries.len() < full.diff.entries.len());
     assert!(!cut.diff.entries.is_empty());
     assert_eq!(serde_json::to_value(&cut.landing).unwrap(), row);
-    assert!(len(&cut) / 4 <= max - 1);
+    assert!(len(&cut) / 4 < max);
 }
 
 #[test]
