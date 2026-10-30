@@ -300,11 +300,11 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "proposal",
         [
-            "03df9dca5790c0f1e7bb6dc96b2c0dfb8c41ef274813b3e82a4f6f1610342905",
-            "c0ea6d5e41043c2de5f4a808660ce37389ffe53e6e8290a5af716e2fa6ed37d7",
-            "e726b4b091453925ff3aaa55f2bf2b41c501604b76459d0e7db55094bcb47399",
-            "eab86d2b202822227c59db8879983a49e59123eef86a86b68aca859a19a7b2ae",
-            "3a90c78b1b4fbcc6e616560898bbaae31de82cf1e595a52295de41dd4ffe1f8c",
+            "3acad4c4dc86a752c308e919a6d2836f43c1ebc5cbeb1c4e58f5151e733d57ef",
+            "47340a3e7fb5b03f3e114a64bbc890d3e3b5ed18bfb003d90afeff8165519947",
+            "97e54a27ca63a7ff4e2c3240fe84cf6f07268a5f24f79a0b0eaeedcebc29efca",
+            "a6a626daaf126a348f2c1af2218934e6939c2518fea728503bb4ddc6c3e1ed3e",
+            "142379e6075f0fdd561201218103a7486fcf5b49b388928ab72a0c0e8a38cf8e",
         ],
     ),
 ];

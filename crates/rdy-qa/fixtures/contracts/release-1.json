@@ -763,6 +763,16 @@
               "items": [],
               "open": "number"
             },
+            "policy": {
+              "block": "null",
+              "reasons": [
+                "string"
+              ],
+              "role": "null",
+              "rule": "null",
+              "verdict": "string",
+              "version": "null"
+            },
             "ready": "bool",
             "ref": "string",
             "stable": "string",
@@ -12333,9 +12343,9 @@
           {
             "event": "pending_added",
             "ids": [
-              "c3b5434bf2a4ed3f6469ba8e307d149e8b6e65d05f288344767993e473cb137d"
+              "57bb025384132ebabb1e2f7ec4a0bbe7acc4d4774b16a2a00bfcecf22a93731c"
             ],
-            "line": "P-c3b5434bf2a4@1 waits for an answer; read rdy_pending"
+            "line": "P-57bb02538413@1 waits for an answer; read rdy_pending"
           },
           {
             "event": "intent_posted",
@@ -12355,46 +12365,46 @@
           {
             "event": "pending_added",
             "ids": [
-              "f7d46ee81db921e6762c3ceb5a68692694d8506a240c480035214007fd82c91d"
+              "e22ec58c0fd9fa1c0dbdc0f73a5e27e4ecc3b1a21c308f31ba2a4985faa1e4d0"
             ],
-            "line": "P-f7d46ee81db9@1 waits for an answer; read rdy_pending"
+            "line": "P-e22ec58c0fd9@1 waits for an answer; read rdy_pending"
           },
           {
             "event": "landed",
             "ids": [
-              "29c4c31535cae3c2b6d6dc278bb11e10d9971115fc7f5c049c8a8d7e63a456eb",
-              "f7d46ee81db921e6762c3ceb5a68692694d8506a240c480035214007fd82c91d"
+              "11564a65a18e2fc97460a8e44c4a9115801ac60213d7daf0b047024099dbaf19",
+              "e22ec58c0fd9fa1c0dbdc0f73a5e27e4ecc3b1a21c308f31ba2a4985faa1e4d0"
             ],
-            "line": "landing 29c4c31535ca of view work changed 1 blocks in your areas (payments)"
+            "line": "landing 11564a65a18e of view work changed 1 blocks in your areas (payments)"
           },
           {
             "event": "view_rebased",
             "ids": [
-              "29c4c31535cae3c2b6d6dc278bb11e10d9971115fc7f5c049c8a8d7e63a456eb",
+              "11564a65a18e2fc97460a8e44c4a9115801ac60213d7daf0b047024099dbaf19",
               "d31c17dae8c0ad358656fcf02af98d3d4d5214f5d8d7b5bab2a51c9e6dd7d9e4"
             ],
-            "line": "your view a rebased onto landing 29c4c31535ca with 1 conflicts"
+            "line": "your view a rebased onto landing 11564a65a18e with 1 conflicts"
           },
           {
             "event": "tension_opened",
             "ids": [
-              "3c1e026cc1d8ca980d104332e5414e379a268aac2c47eab95b6e72c7c4984de1",
+              "041b8f6ef16638de42b6555a3acd31b891f1f101da7d10d6ce429b5505ab11ff",
               "37579917da30b6c6a43687d7325fbfa0452c3d28fd38260f6163b5cc5c764328"
             ],
-            "line": "tension 3c1e026cc1d8 replaces 4c8116c45adb on your change 37579917da30 (edit_collision, blocking): landing 29c4c31535ca"
+            "line": "tension 041b8f6ef166 replaces 4c8116c45adb on your change 37579917da30 (edit_collision, blocking): landing 11564a65a18e"
           }
         ]
       },
       "logged_suspects": [],
       "logged_tensions": [
-        "tn-26128692ed56",
-        "tn-3c1e026cc1d8",
-        "tn-e1086442d58c"
+        "tn-041b8f6ef166",
+        "tn-1e8ff0b046e2",
+        "tn-26128692ed56"
       ],
       "tensions": {
-        "tn-26128692ed56": "open",
-        "tn-3c1e026cc1d8": "open",
-        "tn-e1086442d58c": "open"
+        "tn-041b8f6ef166": "open",
+        "tn-1e8ff0b046e2": "open",
+        "tn-26128692ed56": "open"
       },
       "transitions": 3
     },
@@ -12879,6 +12889,7 @@
       "E_BRIEF_STALE": "\"E_BRIEF_STALE\"",
       "E_CONFIG": "\"E_CONFIG\"",
       "E_CONFLICT_UNRESOLVED": "\"E_CONFLICT_UNRESOLVED\"",
+      "E_COVERAGE_LOWERED": "\"E_COVERAGE_LOWERED\"",
       "E_DAEMON_GONE": "\"E_DAEMON_GONE\"",
       "E_DAEMON_START": "\"E_DAEMON_START\"",
       "E_DAEMON_VERSION": "\"E_DAEMON_VERSION\"",
@@ -12912,6 +12923,7 @@
       "E_PERMISSION": "\"E_PERMISSION\"",
       "E_PLAN_ITEM": "\"E_PLAN_ITEM\"",
       "E_PLAN_OPEN": "\"E_PLAN_OPEN\"",
+      "E_POLICY_HUMAN": "\"E_POLICY_HUMAN\"",
       "E_PROPOSAL_MOVED": "\"E_PROPOSAL_MOVED\"",
       "E_PROPOSAL_NOT_READY": "\"E_PROPOSAL_NOT_READY\"",
       "E_PUBLICATION_REFERENCE": "\"E_PUBLICATION_REFERENCE\"",
@@ -13477,6 +13489,16 @@
         "close or defer each item, and answer each tension item with confirm or dismiss: rdy_plan / rdy plan"
       ],
       [
+        "E_POLICY_HUMAN",
+        "the authority policy needs a person for the version",
+        "show the card to the person and relay their answer: rdy_pending, then rdy_answer"
+      ],
+      [
+        "E_COVERAGE_LOWERED",
+        "the version lowers a page's or the corpus's coverage",
+        "see what lowered it with rdy_coverage / rdy coverage, then tie the new content to what it describes"
+      ],
+      [
         "E_PLAN_ITEM",
         "<id> is not an item of the change plan for <scope>",
         "read the plan with rdy_plan / rdy plan and pass an item id it lists"
@@ -13567,6 +13589,7 @@
       "CODE_KEPT_FIX": "\"check the block against its code, then repin it with code: true\"",
       "CONFIG_LIMIT_FIX": "\"reduce the config file to the stated limit\"",
       "CONFLICT_FIX": "\"write the block from the version you want (rdy_context lists the sides), or exclude one side's change\"",
+      "COVERAGE_LOWERED_FIX": "\"see what lowered it with rdy_coverage / rdy coverage, then tie the new content to what it describes\"",
       "CREDENTIALS_FIX": "\"remove the invalid credential file, then sign in again\"",
       "CREDENTIALS_MESSAGE": "\"the credential file is not a valid bounded mapping\"",
       "DECISIONS_HOME_FIX": "\"set decisions.home in .rdy.yaml to the path, key or id of a doc or a folder that exists\"",
@@ -13606,6 +13629,7 @@
       "PLAN_GATE_FIX": "\"close or defer each item, and answer each tension item with confirm or dismiss: rdy_plan / rdy plan\"",
       "PLAN_ITEM_FIX": "\"read the plan with rdy_plan / rdy plan and pass an item id it lists\"",
       "PLAN_OPEN_FIX": "\"close or defer each item: rdy_plan / rdy plan\"",
+      "POLICY_HUMAN_FIX": "\"show the card to the person and relay their answer: rdy_pending, then rdy_answer\"",
       "PROFILE_PARENT_FIX": "\"set parent to a doc id\"",
       "PROJECT_FIX": "\"Propose the redaction of the listed targets again, and have a person approve it.\"",
       "REACH_CONFIRM_FIX": "\"a block it relies on changed: check that it still holds, and supersede it if not; no repin is needed\"",
@@ -14055,6 +14079,8 @@
       "E_LOAD_STOP",
       "W_STOP_BEFORE_REDACTION",
       "E_PLAN_OPEN",
+      "E_POLICY_HUMAN",
+      "E_COVERAGE_LOWERED",
       "E_PLAN_ITEM",
       "E_DEFERRAL_OPEN",
       "W_PLAN_OPEN",
@@ -14828,6 +14854,16 @@
             ],
             "open": "number"
           },
+          "policy": {
+            "block": "null",
+            "reasons": [
+              "string"
+            ],
+            "role": "null",
+            "rule": "null",
+            "verdict": "string",
+            "version": "null"
+          },
           "ready": "bool",
           "ref": "string",
           "stable": "string",
@@ -15110,6 +15146,10 @@
               "fix": "string",
               "when": "string"
             },
+            "E_COVERAGE_LOWERED": {
+              "fix": "string",
+              "when": "string"
+            },
             "E_DAEMON_GONE": {
               "fix": "string",
               "when": "string"
@@ -15183,6 +15223,10 @@
               "when": "string"
             },
             "E_PLAN_OPEN": {
+              "fix": "string",
+              "when": "string"
+            },
+            "E_POLICY_HUMAN": {
               "fix": "string",
               "when": "string"
             },
