@@ -240,11 +240,7 @@ fn ck4_diff_reads_only_anchored_committed_files() {
     git(dir, &["config", "diff.evil.command", &evil]);
     git(dir, &["config", "diff.evil.textconv", &evil]);
     git(dir, &["config", "diff.external", &evil]);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    rdy_store::pio::set_mode(&script, 0o755).unwrap();
     write(dir, ".gitattributes", b"*.rs diff=evil\n");
     write(dir, "src/kept.rs", b"one\nTWO\n");
     write(dir, "other.rs", b"other changed\n");
