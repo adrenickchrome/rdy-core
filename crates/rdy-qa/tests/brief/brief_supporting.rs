@@ -204,12 +204,13 @@ fn rf9_brief_lists_sources_and_finding_premises_once() {
         (
             fx.s1.to_string(),
             json!({"source": fx.s1.to_string(), "kind": "release", "title": "Release 1",
-                   "blocks": sorted(vec![fx.x.to_string(), fx.y.to_string()])}),
+                   "blocks": sorted(vec![fx.x.to_string(), fx.y.to_string()]),
+                   "existence": "unchecked"}),
         ),
         (
             fx.s2.to_string(),
             json!({"source": fx.s2.to_string(), "kind": "spec", "title": "Spec 2",
-                   "blocks": [fx.x.to_string()]}),
+                   "blocks": [fx.x.to_string()], "existence": "unchecked"}),
         ),
     ];
     rows.sort_by(|a, b| a.0.cmp(&b.0));

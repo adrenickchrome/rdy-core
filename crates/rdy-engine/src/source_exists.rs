@@ -381,7 +381,7 @@ impl ReadState {
         })
     }
 
-    /// The existence of the one source block `id` of `scope` (a source context shows it).
+    /// The existence of the source block `block`, none for another type (a source context shows it).
     pub(crate) fn source_existence_of(&self, block: &Block) -> Option<SourceExistence> {
         (block.block_type == SOURCE).then(|| SourceProbe::new(self.root()).existence_of(block))
     }
