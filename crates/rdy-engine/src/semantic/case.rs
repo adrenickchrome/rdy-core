@@ -211,7 +211,7 @@ fn block_of_item(cx: &DetectCx<'_>, item: &Item, label: &str) -> Result<Arc<Bloc
 
 /// The path of `b`'s doc in `m` (`""` when it has none) and its headings: the doc's title, then
 /// the title of each ancestor below the doc that has one, from the top down to `b`'s parent.
-fn headings_of(m: &Materialized, b: &Block) -> (String, Vec<String>) {
+pub(crate) fn headings_of(m: &Materialized, b: &Block) -> (String, Vec<String>) {
     let mut titles = vec![];
     let mut doc = String::new();
     let mut cur = b.parent.as_ref().and_then(|p| m.get(p));
