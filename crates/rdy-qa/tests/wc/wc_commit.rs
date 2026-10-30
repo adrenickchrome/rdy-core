@@ -866,3 +866,139 @@ fn hd8_a_misspelt_folder_key_keeps_its_line_and_did_you_mean() {
         .unwrap_or_else(|| panic!("{v}"));
     assert_eq!(u["hint"], fix, "{v}");
 }
+
+/// A block created with an empty list of a store-only kind, which the store keeps (an update's
+/// empty list removes the kind, a create's does not). The checkout must not name that kind
+/// (p-3WFME: a store-only kind is never named by a file), or a clean checkout cannot commit.
+/// `seeded` gives the claim a real `decided_by`, which stays hidden.
+fn with_empty_decided_by(s: &Served, parent: &str) -> String {
+    let w = store_write(
+        s,
+        "work",
+        json!([{"op": "create", "type": "prose", "id": "$e", "parent": parent, "body": "Empty.", "links": {"decided_by": []}}]),
+    );
+    let id = w.created["$e"].clone();
+    assert!(
+        store_block(s, "work", &id).links["decided_by"].is_empty(),
+        "the store holds the empty list"
+    );
+    id
+}
+
+#[test]
+fn wcso1_a_clean_checkout_with_store_only_links_commits_with_no_change() {
+    let (s, seed) = seeded();
+    let id = with_empty_decided_by(&s, &seed.notes);
+    ok(&s, &["checkout"]);
+    for file in ["notes.yaml", "guides/intro.yaml"] {
+        assert!(!read(&s, file).contains("decided_by"), "{}", read(&s, file));
+    }
+    let (okk, v) = json(&s, &["check"]);
+    assert!(okk, "{v}");
+    let (okk, v) = json(&s, &["commit", "-m", "x"]);
+    assert!(
+        !okk && v["code"] == E_BAD_INPUT && v["message"] == "nothing staged",
+        "{v}"
+    );
+    let before = store_block(&s, "work", &id);
+    // a file that matches its checkout does not stage: the commit is still the no-op
+    ok(&s, &["add", "notes.yaml", "guides/intro.yaml"]);
+    let (okk, v) = json(&s, &["commit", "-m", "x"]);
+    assert!(
+        !okk && v["code"] == E_BAD_INPUT && v["message"] == "nothing staged",
+        "{v}"
+    );
+    let after = store_block(&s, "work", &id);
+    assert_eq!(before.version_hash(), after.version_hash());
+    assert_eq!(
+        store_block(&s, "work", &seed.claim).links["decided_by"][0]
+            .target
+            .to_string(),
+        seed.decision,
+        "the real link stays"
+    );
+}
+
+#[test]
+fn wcso1_an_edit_of_a_block_with_an_empty_store_only_kind_commits() {
+    let (s, seed) = seeded();
+    let id = with_empty_decided_by(&s, &seed.notes);
+    ok(&s, &["checkout"]);
+    set_body(&s, "notes.yaml", &id, "Edited.");
+    ok(&s, &["add", "notes.yaml"]);
+    ok(&s, &["commit", "-m", "edit the block"]);
+    let b = store_block(&s, "work", &id);
+    assert_eq!(b.body, "Edited.");
+    assert!(b.links["decided_by"].is_empty(), "{:?}", b.links);
+}
+
+/// The refusal of a `decided_by` line a person put in `file`, in today's text.
+fn refuses_decided_by(s: &Served, file: &str) {
+    ok(s, &["add", file]);
+    let (okk, v) = json(s, &["commit", "-m", "x"]);
+    assert!(!okk && v["code"] == E_WC_INVALID, "{v}");
+    let d = v["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["code"] == E_WC_STORE_ONLY && d["file"] == file)
+        .unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(d["message"], "decided_by is a store-only link kind", "{v}");
+}
+
+#[test]
+fn wcso1_adding_a_decided_by_line_still_refuses() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    let links =
+        serde_yaml_ng::to_value(json!({"decided_by": [{"target": seed.decision}]})).unwrap();
+    edit(&s, "notes.yaml", |l| {
+        let n = l
+            .iter_mut()
+            .find(|e| e["id"].as_str() == Some(seed.note.as_str()))
+            .unwrap();
+        n.as_mapping_mut().unwrap().insert("links".into(), links);
+    });
+    refuses_decided_by(&s, "notes.yaml");
+}
+
+#[test]
+fn wcso1_adding_an_empty_decided_by_line_still_refuses() {
+    let (s, seed) = seeded();
+    let id = with_empty_decided_by(&s, &seed.notes);
+    ok(&s, &["checkout"]);
+    let links = serde_yaml_ng::to_value(json!({"decided_by": []})).unwrap();
+    edit(&s, "notes.yaml", |l| {
+        let n = l
+            .iter_mut()
+            .find(|e| e["id"].as_str() == Some(id.as_str()))
+            .unwrap();
+        n.as_mapping_mut().unwrap().insert("links".into(), links);
+    });
+    refuses_decided_by(&s, "notes.yaml");
+}
+
+#[test]
+fn wcso1_changing_a_decided_by_target_still_refuses() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    let links = serde_yaml_ng::to_value(json!({"decided_by": [{"target": seed.note}]})).unwrap();
+    edit(&s, "guides/intro.yaml", |l| {
+        let c = l
+            .iter_mut()
+            .find(|e| e["id"].as_str() == Some(seed.claim.as_str()))
+            .unwrap();
+        c["links"]
+            .as_mapping_mut()
+            .unwrap()
+            .insert("decided_by".into(), links["decided_by"].clone());
+    });
+    refuses_decided_by(&s, "guides/intro.yaml");
+    assert_eq!(
+        store_block(&s, "work", &seed.claim).links["decided_by"][0]
+            .target
+            .to_string(),
+        seed.decision,
+        "the store keeps its link"
+    );
+}
