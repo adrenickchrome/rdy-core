@@ -1737,3 +1737,7 @@ payload of each page, and one SVG drawing for each diagram. The ten figures shar
 No time is recorded here. The first timing is the bench's, taken on the final integrated commit.
 
 Deep gate (bench): <orchestrator fills in>
+
+## rdy_diff (M3f, information)
+
+`dq2: canon against landing at 59460 blocks, 100 entries: 397 ms` (bench, 2026-10-30). M3f: rdy_diff runs this engine call on every page. The run lands 60,000 blocks because a first landing of 90,000 stores no assessment today (the test keeps its 100k name).

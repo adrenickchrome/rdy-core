@@ -2,7 +2,7 @@
 
 use crate::params::Parameters;
 use crate::server::RdyServer;
-use crate::tools::{self, IdParams, ScopeParams, TraceParams};
+use crate::tools::{self, DiffParams, IdParams, ScopeParams, TraceParams};
 use rmcp::{model::CallToolResult, tool, tool_router};
 
 #[tool_router(router = graph_router, vis = "pub(crate)")]
@@ -26,6 +26,13 @@ impl RdyServer {
     )]
     async fn rdy_trace(&self, Parameters(p): Parameters<TraceParams>) -> CallToolResult {
         self.run("rdy_trace", p, tools::rdy_trace).await
+    }
+
+    #[tool(
+        description = "Compare two scopes block by block, older to newer. With only from, rdy supplies the other side: a view diffs from its base landing, tag: or landing: diffs to canon, canon diffs from its previous landing, and proposal:P-x@n diffs from the version's base. inflight needs both sides. doc limits both sides to one doc or folder; a block that moved in or out shows as added or removed, with moved naming the other side; the blocks under it show as added or removed without moved. Compact by default: ids, paths, change kinds, summaries and changed field names. detail: true adds field values and word-level body diffs. max_tokens defaults to 4000. A cut drops body pieces first, then field values, then entries from the end; counts are never cut, omitted counts what left, and next, passed as page, reads the rest. rdy_schema's diff documents the shape."
+    )]
+    async fn rdy_diff(&self, Parameters(p): Parameters<DiffParams>) -> CallToolResult {
+        self.run("rdy_diff", p, tools::rdy_diff).await
     }
 
     #[tool(

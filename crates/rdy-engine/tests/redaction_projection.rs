@@ -251,7 +251,7 @@ fn rdx3_history_and_materialization_never_hash_the_stub() {
     assert_eq!(eb.from_version, Some(b1.version_hash()));
     assert_eq!(eb.to_version, Some(b2.version_hash()));
     assert_eq!(eb.change, DiffChange::Updated);
-    assert!(eb.body.is_none() && eb.fields.is_empty() && eb.links.is_none());
+    assert!(eb.body.is_none() && eb.fields.is_empty() && eb.links.is_empty());
     let ea = step.entries.iter().find(|e| e.id == a1.id).unwrap();
     assert_eq!(ea.from_version, Some(a1.version_hash()));
     assert!(ea.body.is_some());

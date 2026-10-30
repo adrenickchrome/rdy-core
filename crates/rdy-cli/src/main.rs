@@ -16,6 +16,8 @@ mod conn;
 #[cfg(test)]
 mod contract;
 mod coverage_cmd;
+mod diff_cmd;
+mod diff_text;
 mod dispute_cmd;
 mod dump_cmd;
 mod edit_cmd;
@@ -92,6 +94,11 @@ enum Cmd {
     Brief(brief_cmd::BriefArgs),
     /// Find text in blocks: a literal (or, with --regex, a pattern) in every block's body and string fields.
     Search(search_cmd::SearchArgs),
+    /// Compare two scopes block by block, older to newer. With one scope, rdy supplies the other side. The chat path is rdy_diff.
+    Diff(diff_cmd::DiffArgs),
+    /// Filter blocks with an expression, such as type = decision and status = live. The chat path is rdy_query.
+    #[command(long_about = diff_cmd::q_long_about())]
+    Q(diff_cmd::QArgs),
     /// List the suspects in a scope (default canon), as rdy_suspects does.
     Suspects(read_cmd::SuspectsArgs),
     /// Read a change plan, or answer its items: rdy plan [--view <view> | --proposal <P-x@n> | --landing <hash> | --decision <id>], or rdy plan confirm|defer|done <item>... [--reason <text>]. The answers are recorded together or not at all. The chat path is rdy_plan.
@@ -269,6 +276,8 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Trace(a) => read_cmd::trace(env, a),
         Cmd::Brief(a) => brief_cmd::brief(env, a),
         Cmd::Search(a) => search_cmd::search(env, a),
+        Cmd::Diff(a) => diff_cmd::diff(env, a),
+        Cmd::Q(a) => diff_cmd::q(env, a),
         Cmd::Suspects(a) => read_cmd::suspects(env, a),
         Cmd::Plan(a) => plan_cmd::plan(env, a),
         Cmd::Reaffirm(a) => plan_cmd::reaffirm(env, a),

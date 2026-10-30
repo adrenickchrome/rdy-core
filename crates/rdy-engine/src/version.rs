@@ -823,11 +823,16 @@ impl ReadState {
     /// A landing in canon's chain, by full hash or unique prefix of at least 6 hex characters.
     /// In a holder, which has no canon, a landing in the chain of one of its tags.
     pub fn resolve_landing(&self, text: &str) -> Result<Hash, RdyError> {
+        match_prefix(&self.landing_ids()?, text)
+    }
+
+    /// The landings a landing id can name: canon's chain, head first. In a holder, which has no
+    /// canon, the landings in the chains of its tags.
+    pub(crate) fn landing_ids(&self) -> Result<Vec<Hash>, RdyError> {
         if self.canon_head.is_none() && self.reader.mode()? == StoreMode::Holder {
-            return match_prefix(&self.tag_landings()?, text);
+            return self.tag_landings();
         }
-        let chain: Vec<Hash> = self.landings()?.into_iter().map(|(h, _)| h).collect();
-        match_prefix(&chain, text)
+        Ok(self.landings()?.into_iter().map(|(h, _)| h).collect())
     }
 
     /// The distinct landings of every tag's chain, in hash order: a holder's landings.

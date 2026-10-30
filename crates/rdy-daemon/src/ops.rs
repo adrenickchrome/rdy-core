@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 mod brief;
 mod clone;
+mod diff;
 mod dispute;
 mod dump;
 mod edit;
@@ -41,6 +42,7 @@ mod wc;
 
 use brief::brief;
 use clone::clone;
+use diff::{diff, query};
 use dispute::dispute;
 use dump::dump;
 use edit::{edit_block, keys_assign, new_doc, new_finding, new_folder, new_profile, new_source};
@@ -110,6 +112,8 @@ pub const OPS: &[&str] = &[
     "block",
     "brief",
     "search",
+    "diff",
+    "query",
     "render",
     "publication_check",
     "export",
@@ -416,6 +420,8 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
                 "{query, regex?, ignore_case?, scope?, max_tokens?, page?, types?, traits?, path?, lifecycle?, changed_since?, exclude_history?, governed_by?, describes?, linked_to?, mentions?, suspect?, tension?, coverage_below?, sort?}",
             )?,
         ),
+        "diff" => diff(cx, parse(op, args, "{from, to?, doc?, detail?}")?),
+        "query" => query(cx, parse(op, args, "{filter, scope?}")?),
         "render" => render(cx, parse(op, args, "{out, scope?, profile?}")?),
         "publication_check" => {
             publication_check(cx, parse(op, args, "{profile, scope?, against?}")?)

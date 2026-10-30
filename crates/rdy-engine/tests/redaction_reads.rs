@@ -498,7 +498,7 @@ fn rdx6_source_reads_name_the_redaction_without_source_text() {
             .unwrap_or_else(|| panic!("{id} in {d}"))
             .clone()
     };
-    let hash = |h: &Hash| serde_json::to_value(h).unwrap();
+    let hash = |h: &Hash| json!(h.to_string());
     for id in [&w.removed, &w.section] {
         let e = of(&diff, id);
         assert_eq!(e["change"], "added", "{e}");
@@ -510,7 +510,7 @@ fn rdx6_source_reads_name_the_redaction_without_source_text() {
             "{e}"
         );
         assert_eq!(e["fields"], json!([]), "{e}");
-        assert_eq!(e["links"], Value::Null, "{e}");
+        assert_eq!(e["links"], json!([]), "{e}");
     }
     let e = of(&diff, &w.sibling);
     assert_eq!(

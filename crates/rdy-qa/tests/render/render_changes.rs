@@ -189,7 +189,7 @@ fn sr6_the_since_page_lists_the_changes_since_the_tag() {
         let something = e.change != DiffChange::Updated
             || e.body.is_some()
             || !e.fields.is_empty()
-            || e.links.is_some()
+            || !e.links.is_empty()
             || e.type_change.is_some()
             || e.moved.is_some();
         if !(visible && something) {

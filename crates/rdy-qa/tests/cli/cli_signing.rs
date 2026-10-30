@@ -405,7 +405,7 @@ fn sig9_all_new_inputs_refuse_unknown_keys() {
     let e = parse_params::<LogParams>("rdy_log", p(json!({"verfy": true})));
     assert_eq!(
         refusal(e.unwrap_err()).2,
-        "did you mean \"verify\"? the parameters here are limit, max_tokens, since, verify"
+        "did you mean \"verify\"? the parameters here are landing, limit, max_tokens, page, since, verify"
     );
     let e = parse_params::<LogParams>("rdy_log", p(json!({"verify": "yes"})));
     assert_eq!(

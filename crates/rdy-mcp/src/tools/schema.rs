@@ -102,6 +102,8 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
                 "brief": BRIEF_DOC,
                 "consequences": CONSEQUENCES_DOC,
                 "signing": SIGNING_DOC,
+                "diff": rdy_engine::diff_request::DIFF_DOC,
+                "filter": rdy_schema::filter::FILTER_GUIDE,
             }))
         }
     }

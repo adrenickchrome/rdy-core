@@ -1,3 +1,4 @@
+pub mod filter;
 mod glob;
 mod pack;
 pub mod policy;

@@ -3,6 +3,7 @@
 use crate::params::Parameters;
 use crate::search_tools::{self, SearchParams};
 use crate::server::RdyServer;
+use crate::tools;
 use rmcp::{model::CallToolResult, tool, tool_router};
 
 #[tool_router(router = search_router, vis = "pub(crate)")]
@@ -12,5 +13,12 @@ impl RdyServer {
     )]
     async fn rdy_search(&self, Parameters(p): Parameters<SearchParams>) -> CallToolResult {
         self.run("rdy_search", p, search_tools::rdy_search).await
+    }
+
+    #[tool(
+        description = "Filter blocks with an expression, such as type = decision and status = live. Returns matches {id, block_type, path, summary} in reading order, and total. scope defaults to your session's view. max_tokens defaults to 4000; a cut result carries next: pass it as page with the same filter and scope. rdy_schema's filter gives the grammar. A parse error names the column. rdy_search finds text; rdy_query selects by fields and links."
+    )]
+    async fn rdy_query(&self, Parameters(p): Parameters<tools::QueryParams>) -> CallToolResult {
+        self.run("rdy_query", p, tools::rdy_query).await
     }
 }

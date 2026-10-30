@@ -258,7 +258,7 @@ pub struct LandingRow {
 }
 
 /// A 32-byte ref value as a hash.
-fn ref_hash(bytes: &[u8], what: &str) -> Result<Hash, RdyError> {
+pub(crate) fn ref_hash(bytes: &[u8], what: &str) -> Result<Hash, RdyError> {
     <[u8; 32]>::try_from(bytes)
         .map(Hash)
         .map_err(|_| rdy_store::StoreError::Decode(format!("{what} is not a hash")).into())
@@ -3820,6 +3820,36 @@ impl ReadState {
             rows.push(self.landing_row(id, &rec, tags)?);
         }
         Ok(rows)
+    }
+
+    /// The landing `id` as `rdy log` shows it: its record from canon's chain and its tags
+    /// (the row `log_page` gives). A hash that is not on canon's chain is `match_prefix`'s
+    /// `no landing in canon's history matches` refusal.
+    pub fn log_row(&self, id: &Hash) -> Result<LandingRow, RdyError> {
+        let mut found = None;
+        for item in self.landing_walk() {
+            let (h, rec) = item?;
+            if h == *id {
+                found = Some(rec);
+                break;
+            }
+        }
+        let Some(rec) = found else {
+            // no candidates: the refusal's own words
+            return Err(crate::version::match_prefix(&[], &id.to_string())
+                .err()
+                .unwrap_or_else(|| {
+                    RdyError::new(E_INTERNAL, "an empty list matched", "report this bug")
+                }));
+        };
+        let name = id.to_string();
+        let tags = self
+            .versions()?
+            .into_iter()
+            .filter(|v| v.landing == name)
+            .map(|v| v.name)
+            .collect();
+        self.landing_row(*id, &rec, tags)
     }
 
     fn landing_row(
