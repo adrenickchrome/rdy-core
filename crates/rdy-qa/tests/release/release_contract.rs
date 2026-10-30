@@ -1611,6 +1611,10 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
         "commit",
         "working copy: the working_copy row records its replies",
     ),
+    (
+        "dispute",
+        "a person's act on a landing; cli_dispute pins its replies and lines",
+    ),
     ("dump", "writes a file; the dump_load row covers the bytes"),
     (
         "edit",
@@ -1882,6 +1886,10 @@ const MCP_NOT_CAPTURED: &[(&str, &str)] = &[
     ("rdy_asset", "stores a file"),
     ("rdy_auth", "signs in to a hosted service"),
     ("rdy_clone", "writes a second project to disk"),
+    (
+        "rdy_dispute",
+        "a person's act on a landing; mcp_dispute pins its replies",
+    ),
     (
         "rdy_dump",
         "writes a file; the dump_load row covers the bytes",
@@ -3161,16 +3169,16 @@ fn ok14_reindex_preserves_release_derived_identities() {
     );
 }
 
+/// The carried records that still have no product writer. ap5 (D-ZWP7Q "Disputes") builds the
+/// dispute writers, `rdy_dispute` and `rdy dispute`: a dispute, its resolution and their
+/// Dispute and ResolveDispute answers are no longer future records.
 #[test]
 fn ok14_future_record_writers_remain_absent() {
     let fixture = read_fixture();
-    // the MCP tools: no name or parameter writes an assessment, a dispute, a resolution or a
-    // check request, and no review or answer parameter accepts the carried values
+    // the MCP tools: no name or parameter writes an assessment or a check request, and no
+    // review or answer parameter accepts the carried values
     let forbidden_words = [
         "assessment",
-        "dispute",
-        "resolution",
-        "resolve_dispute",
         "check_request",
         "accept_verdict",
         "check_verdict",
@@ -3185,12 +3193,7 @@ fn ok14_future_record_writers_remain_absent() {
         }
         // a writer's parameter schema may not accept the carried values
         let schema = t["input_schema"].to_string().to_lowercase();
-        for w in [
-            "dispute",
-            "resolve_dispute",
-            "accept_verdict",
-            "check_request",
-        ] {
+        for w in ["accept_verdict", "check_request"] {
             assert!(
                 !schema.contains(&format!("\"{w}\"")),
                 "tool {name} accepts the future act {w}"
@@ -3245,11 +3248,7 @@ fn ok14_future_record_writers_remain_absent() {
     }
     // the product answer path: no product code constructs the carried acts. The source of each
     // writer crate is scanned outside its test modules.
-    let acts = [
-        "AnswerAct::Dispute",
-        "AnswerAct::ResolveDispute",
-        "AnswerAct::AcceptVerdict",
-    ];
+    let acts = ["AnswerAct::AcceptVerdict"];
     let verdicts = [
         "Verdict::Pass",
         "Verdict::Concern",
@@ -3275,7 +3274,7 @@ fn ok14_future_record_writers_remain_absent() {
     }
     let mut offenders = vec![];
     // the string forms of the carried acts: no product code names them either
-    let literals = ["\"resolve_dispute\"", "\"accept_verdict\""];
+    let literals = ["\"accept_verdict\""];
     let needles: Vec<&str> = acts.iter().chain(verdicts.iter()).copied().collect();
     for f in files {
         let rel = f

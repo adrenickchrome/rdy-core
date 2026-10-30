@@ -14,6 +14,7 @@
         "checkout": "working copy: the working_copy row records its replies",
         "clone": "writes a second project; the dump_load row covers the bytes",
         "commit": "working copy: the working_copy row records its replies",
+        "dispute": "a person's act on a landing; cli_dispute pins its replies and lines",
         "dump": "writes a file; the dump_load row covers the bytes",
         "edit": "working copy: the working_copy row records its replies",
         "export": "writes a file tree; the markdown_exports row covers it",
@@ -3865,6 +3866,405 @@
           ],
           "name": "approve",
           "subcommands": []
+        },
+        {
+          "args": [
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "set",
+              "global": true,
+              "id": "project",
+              "long": "project",
+              "num_args": "1",
+              "value_names": [
+                "PROJECT"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "no_daemon",
+              "long": "no-daemon",
+              "num_args": "0",
+              "value_names": [
+                "NO_DAEMON"
+              ]
+            },
+            {
+              "action": "help",
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "short": "h"
+            }
+          ],
+          "groups": [
+            {
+              "args": [],
+              "id": "Dispute",
+              "multiple": true,
+              "required": false
+            }
+          ],
+          "name": "dispute",
+          "subcommand_required": true,
+          "subcommands": [
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "id": "landing",
+                  "index": 1,
+                  "num_args": "1",
+                  "positional": true,
+                  "required": true,
+                  "value_names": [
+                    "LANDING"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "reason",
+                  "long": "reason",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "REASON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "evidence",
+                  "long": "evidence",
+                  "num_args": "1",
+                  "value_names": [
+                    "WORDS"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "relayed_by",
+                  "long": "relayed-by",
+                  "num_args": "1",
+                  "value_names": [
+                    "ACTOR"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "question",
+                  "long": "question",
+                  "num_args": "1",
+                  "value_names": [
+                    "TEXT"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "session_ref",
+                  "long": "session",
+                  "num_args": "1",
+                  "value_names": [
+                    "REF"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [],
+                  "id": "Open",
+                  "multiple": true,
+                  "required": false
+                },
+                {
+                  "args": [
+                    "evidence",
+                    "question",
+                    "relayed_by",
+                    "session_ref"
+                  ],
+                  "id": "RelayFlags",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "open",
+              "subcommands": []
+            },
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "id": "dispute",
+                  "index": 1,
+                  "num_args": "1",
+                  "positional": true,
+                  "required": true,
+                  "value_names": [
+                    "DISPUTE"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "outcome",
+                  "long": "outcome",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "OUTCOME"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "correction",
+                  "long": "correction",
+                  "num_args": "1",
+                  "value_names": [
+                    "LANDING"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "evidence",
+                  "long": "evidence",
+                  "num_args": "1",
+                  "value_names": [
+                    "WORDS"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "relayed_by",
+                  "long": "relayed-by",
+                  "num_args": "1",
+                  "value_names": [
+                    "ACTOR"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "question",
+                  "long": "question",
+                  "num_args": "1",
+                  "value_names": [
+                    "TEXT"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "session_ref",
+                  "long": "session",
+                  "num_args": "1",
+                  "value_names": [
+                    "REF"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [],
+                  "id": "Resolve",
+                  "multiple": true,
+                  "required": false
+                },
+                {
+                  "args": [
+                    "evidence",
+                    "question",
+                    "relayed_by",
+                    "session_ref"
+                  ],
+                  "id": "RelayFlags",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "resolve",
+              "subcommands": []
+            },
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "id": "landing",
+                  "long": "landing",
+                  "num_args": "1",
+                  "value_names": [
+                    "LANDING"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "id": "open",
+                  "long": "open",
+                  "num_args": "0",
+                  "value_names": [
+                    "OPEN"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [
+                    "landing",
+                    "open"
+                  ],
+                  "id": "List",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "list",
+              "subcommands": []
+            }
+          ]
         },
         {
           "args": [
@@ -15688,6 +16088,7 @@
       "rdy_asset": "stores a file",
       "rdy_auth": "signs in to a hosted service",
       "rdy_clone": "writes a second project to disk",
+      "rdy_dispute": "a person's act on a landing; mcp_dispute pins its replies",
       "rdy_dump": "writes a file; the dump_load row covers the bytes",
       "rdy_export": "writes a file tree; the markdown_exports row covers it",
       "rdy_key_bind": "changes the signing key",
@@ -15718,6 +16119,7 @@
       "rdy_context",
       "rdy_coverage",
       "rdy_decide",
+      "rdy_dispute",
       "rdy_dump",
       "rdy_export",
       "rdy_impact",
@@ -16471,6 +16873,85 @@
           },
           "required": [
             "statement"
+          ],
+          "type": "object"
+        }
+      },
+      "rdy_dispute": {
+        "input_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "correction": {
+              "description": "resolve, upheld only: the landing that corrects the disputed one.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dispute": {
+              "description": "resolve: the dispute (its id or a prefix of 6 or more).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "evidence": {
+              "description": "open and resolve: the person's words, quoted. Without them an agent session is refused (E_PERMISSION).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "landing": {
+              "description": "open: the landing to dispute; list: only this landing's disputes (a hash or a prefix of 6 or more).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "description": "open, resolve or list. open and resolve are a person's acts: relay their words with evidence.",
+              "type": "string"
+            },
+            "open": {
+              "description": "list: only the open disputes (default false).",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "outcome": {
+              "description": "resolve: upheld, dismissed or withdrawn. Only the person who opened the dispute withdraws it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "question": {
+              "description": "open and resolve: the question the person answered.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reason": {
+              "description": "open: why the landing is wrong, 1 to 2000 characters.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_ref": {
+              "description": "open and resolve: the chat session the person spoke in (default mcp).",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "op"
           ],
           "type": "object"
         }

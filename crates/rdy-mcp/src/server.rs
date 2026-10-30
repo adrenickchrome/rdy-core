@@ -4,6 +4,7 @@ mod auth;
 mod brief;
 mod coverage;
 mod decide;
+mod dispute;
 mod entity;
 mod graph;
 mod inbox;
@@ -175,7 +176,7 @@ impl RdyServer {
 
     /// The tool router of each family (`server/<family>.rs`), once. `new` registers their sum;
     /// a new family adds one line here.
-    fn family_routers() -> [ToolRouter<Self>; 24] {
+    fn family_routers() -> [ToolRouter<Self>; 25] {
         [
             Self::session_router(),
             Self::read_router(),
@@ -185,6 +186,7 @@ impl RdyServer {
             Self::search_router(),
             Self::write_router(),
             Self::decide_router(),
+            Self::dispute_router(),
             Self::propose_router(),
             Self::asset_router(),
             Self::views_router(),

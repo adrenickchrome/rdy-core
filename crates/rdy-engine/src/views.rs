@@ -16,7 +16,7 @@ use serde::Serialize;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-mod own;
+pub(crate) mod own;
 mod replay;
 mod resolve;
 mod undo;

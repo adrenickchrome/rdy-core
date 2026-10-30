@@ -21,6 +21,7 @@ mod decide;
 pub mod decision_fields;
 pub mod did_you_mean;
 pub mod diff;
+pub mod dispute;
 pub mod dump;
 pub mod dump_error;
 pub mod dump_stop;

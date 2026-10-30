@@ -10,6 +10,7 @@ mod cli_config;
 mod cli_config_file;
 mod cli_coverage;
 mod cli_daemon;
+mod cli_dispute;
 mod cli_dump;
 mod cli_dump_chain;
 mod cli_entities;
