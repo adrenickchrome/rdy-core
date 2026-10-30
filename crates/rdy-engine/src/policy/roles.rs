@@ -2,6 +2,7 @@
 //! role is a named group of people in the authority policy, not a session role. These are the only
 //! role rules: routing, the approval check and the verdict's `role` call them.
 use super::owners::owner_entry;
+use crate::error::{E_PERMISSION, RdyError};
 use crate::pending::ItemKind;
 use crate::{Materialized, ReadState};
 use rdy_model::BlockId;
@@ -110,4 +111,15 @@ pub fn holds(role: &RequiredRole, person: &str) -> bool {
     role.members()
         .iter()
         .any(|m| m.starts_with("team:") || m.as_str() == person)
+}
+
+/// D-TF78H: the refusal of an approval or an answer to item `r` by `person`, who does not hold
+/// `role`.
+pub fn outside_role(person: &str, role: &RequiredRole, r: &str) -> RdyError {
+    let label = role.label();
+    RdyError::new(
+        E_PERMISSION,
+        format!("{person} is not in the policy role {label} for {r}"),
+        format!("ask a person in the policy role {label}, or relay their answer"),
+    )
 }

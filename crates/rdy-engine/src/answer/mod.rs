@@ -37,6 +37,9 @@
 //!   first (D-WQVGT, RULING F1): its `E_PROPOSAL_MOVED` passes through with its `corrected`
 //!   (the fresh card, `{"card": ...}`, or the fresh readiness issues and no card).
 //! - The option is one of the item's option ids, or `E_BAD_INPUT`.
+//! - The item's required policy role (O10, under the live policy) holds `person`, or
+//!   `E_PERMISSION`, `<person> is not in the policy role <role> for <ref>` (D-TF78H). A Later
+//!   answer is never refused; an approval meets the same check in its landing.
 //!
 //! Each refusal of a moved item carries the item's fresh card, when the queue has one, in
 //! `corrected` as `{"ref", "card_hash", "card"}` (O21).
@@ -64,9 +67,10 @@ use crate::gate::{
     withdrawn_error,
 };
 use crate::pending::PendingQuery;
-use crate::pending::queue::{Eligible, deferral_card};
+use crate::pending::queue::{Eligible, deferral_card, deferral_role};
 use crate::pending::reaffirm::REAFFIRM_REF_PREFIX;
 use crate::pending::{CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, Item, ItemKind, ItemOption};
+use crate::policy::roles::{holds, outside_role};
 use crate::proposal_show::is_proposal_ref;
 use crate::tensions::set::tension_hex;
 use crate::{Rdy, ReadState, Session};
@@ -480,6 +484,7 @@ fn bind(
         max_tokens: CARD_MAX_TOKENS,
     })?;
     let mut cards = q.items_of(r)?;
+    let in_queue = !cards.is_empty();
     // D-AAQ9Z: an explicit deferral ref of the current version binds its card outside the ready
     // queue too, so a refused card takes a later answer (the latest answer wins)
     if cards.is_empty()
@@ -550,6 +555,20 @@ fn bind(
             })?
             .clone(),
     };
+    // D-TF78H, O10: an answer from a person outside the item's required policy role is refused,
+    // except Later; an approval meets the same check in its landing (`prepare_landing`)
+    if option.id != "later" && !(item.kind == ItemKind::Approve && option.id == "approve") {
+        let role = if in_queue {
+            q.role_of(item).cloned()
+        } else {
+            deferral_role(st, item)?
+        };
+        if let Some(role) = role
+            && !holds(&role, person)
+        {
+            return Err(outside_role(person, &role, &item.r#ref));
+        }
+    }
     Ok(Binding::Bound(Box::new(Bound {
         item: item.clone(),
         option,

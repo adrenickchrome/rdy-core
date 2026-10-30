@@ -67,6 +67,14 @@
 //! ([`super::questions`], F7). A snooze hides an item for the chat session it was made in
 //! ([`super::snooze`], F4).
 //!
+//! # Routing (D-TF78H, O10, O11)
+//!
+//! Under a live policy whose fields read, each item gets its required policy role where it is
+//! made ([`crate::policy::roles::required_role`]). The queue and its counts for a person leave
+//! out each item whose role does not hold that person, after a snooze. An answer still binds
+//! every item ([`Eligible::role_of`]), and it refuses a person outside the role. With no policy,
+//! or none that applies, nothing is left out.
+//!
 //! # Readiness (D-3JZP4, D-ME2HD; closed)
 //!
 //! The queue runs the one readiness ([`crate::readiness`]) on each latest open version, read
@@ -121,7 +129,7 @@ use super::card::{
     CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, REMOVAL_IRREVERSIBLE, card_hash, render_checked,
 };
 use super::item::{ExceptionKind, Fact, Item, ItemKind, ItemOption, Recommended, RemovalCard, age};
-use super::plan::{VersionPlan, defer_ref, deferral_item, version_plan};
+use super::plan::{PlanCardBinding, VersionPlan, defer_ref, deferral_item, version_plan};
 use super::questions::question_items;
 use super::reaffirm::{OpenWork, reaffirm_items};
 use super::snooze::hide_snoozed;
@@ -131,7 +139,7 @@ use crate::coverage::{CandidateCoverage, confidence_in, lands_unapplied};
 use crate::error::{E_VALIDATION, RdyError, redaction_limit};
 use crate::gate::{ProposalRef, changes_of, open_proposals};
 use crate::plan::lifecycle::PlanSummary;
-use crate::policy::roles::ItemFacts;
+use crate::policy::roles::{ItemFacts, RequiredRole, holds, required_role};
 use crate::policy_verdict::{ChangeFacts, VerdictInputs, WrittenBlock, WrittenDecision};
 use crate::read_state::Built;
 use crate::readiness::assessment::cut_text;
@@ -148,7 +156,7 @@ use rdy_model::decision::{self, DEPENDS_ON, DecisionStatus, REVOKES, SUPERSEDES}
 use rdy_model::engine_fields::reaffirmed_causes;
 use rdy_model::redaction::record_buffer;
 use rdy_model::{AnswerAct, Block, BlockId, Change, Hash, Justification, Op, Proposal};
-use rdy_schema::policy::{JustificationKind, POLICY_TYPE};
+use rdy_schema::policy::{JustificationKind, POLICY_TYPE, PolicyFields};
 use rdy_schema::{Issue, Severity, supporting};
 use rdy_store::redaction::limit;
 use serde::Serialize;
@@ -200,8 +208,8 @@ pub struct NotReady {
 }
 
 /// How many items wait for a person: every item the queue holds, past [`PENDING_ITEMS_MAX`]
-/// too, less those a snooze hides (final review fix round 1, R6: the session's summary counts
-/// the queue, not its first page).
+/// too, less those a snooze hides and those routed to other people (final review fix round 1,
+/// R6: the session's summary counts the queue, not its first page).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct PendingCounts {
     pub items: usize,
@@ -213,6 +221,26 @@ pub struct PendingCounts {
 pub(crate) struct Eligible {
     groups: Vec<Group>,
     pub not_ready: Vec<NotReady>,
+    /// The policy role each item needs, by [`role_key`] (O10): only the items whose role is
+    /// `Some`, and none with no live policy or one whose fields do not read.
+    roles: Roles,
+}
+
+/// The policy role of each item of a queue that needs one, by [`role_key`].
+type Roles = BTreeMap<(String, Option<String>), RequiredRole>;
+
+/// An item's key in [`Roles`]: its ref and its batch. A decision version beside two batches has
+/// two items of one ref, each with its own batch.
+fn role_key(i: &Item) -> (String, Option<String>) {
+    (i.r#ref.clone(), i.batch.clone())
+}
+
+/// Whether `person` may see item `i` (D-TF78H): its required role holds the person, or it needs
+/// none.
+fn routed(roles: &Roles, i: &Item, person: &str) -> bool {
+    roles
+        .get(&role_key(i))
+        .is_none_or(|role| holds(role, person))
 }
 
 impl Eligible {
@@ -237,6 +265,11 @@ impl Eligible {
     fn items(&self) -> impl Iterator<Item = &Item> {
         self.groups.iter().flat_map(|g| &g.items)
     }
+
+    /// The policy role item `i` of this queue needs (O10), if any.
+    pub(crate) fn role_of(&self, i: &Item) -> Option<&RequiredRole> {
+        self.roles.get(&role_key(i))
+    }
 }
 
 impl ReadState {
@@ -251,6 +284,12 @@ impl ReadState {
         for g in e.groups {
             let (shown, hidden) = hide_snoozed(self, q, g.items);
             snoozed += hidden;
+            // D-TF78H: the items whose required policy role does not hold the person are not
+            // theirs
+            let shown: Vec<Item> = shown
+                .into_iter()
+                .filter(|i| routed(&e.roles, i, &q.person))
+                .collect();
             if shown.is_empty() {
                 continue;
             }
@@ -271,14 +310,17 @@ impl ReadState {
     }
 
     /// How many items of the queue for `q` wait, and how many of them block: the whole queue,
-    /// past the cap too, less what a snooze hides ([`PendingCounts`]). It renders no card.
+    /// past the cap too, less what a snooze hides and what is routed to other people
+    /// ([`PendingCounts`]). It renders no card.
     pub fn pending_counts(&self, q: &PendingQuery) -> Result<PendingCounts, RdyError> {
         let e = self.eligible(q)?;
         let mut c = PendingCounts::default();
         for g in e.groups {
             let (shown, _) = hide_snoozed(self, q, g.items);
-            c.items += shown.len();
-            c.blocking += shown.iter().filter(|i| i.blocking).count();
+            for i in shown.iter().filter(|i| routed(&e.roles, i, &q.person)) {
+                c.items += 1;
+                c.blocking += usize::from(i.blocking);
+            }
         }
         Ok(c)
     }
@@ -290,6 +332,7 @@ impl ReadState {
         let mut groups: Vec<Group> = vec![];
         let mut not_ready = vec![];
         let mut work = OpenWork::default();
+        let mut routing = Routing::read(self)?;
         let open = open_proposals(self)?;
         if !open.is_empty() {
             // canon's coverage and lexicon first: each version's build carries its structural
@@ -325,9 +368,15 @@ impl ReadState {
                     continue;
                 }
             }
+            if let Some(rt) = routing.as_mut() {
+                rt.note(self, &card, v.approve_facts());
+            }
             let mut items = vec![card];
             for item in v.exception_items(now) {
                 if !answered(self, &item.r#ref, AnswerAct::Confirm)? {
+                    if let Some(rt) = routing.as_mut() {
+                        rt.note(self, &item, v.confirm_facts(&item));
+                    }
                     items.push(item);
                 }
             }
@@ -335,21 +384,44 @@ impl ReadState {
             if let Some(item) = v.deferral_item(now)
                 && accepted(self, &item)?.is_none()
             {
+                if let Some(rt) = routing.as_mut() {
+                    rt.note(self, &item, v.defer_facts());
+                }
                 items.push(item);
+            }
+            if let Some(rt) = routing.as_mut() {
+                rt.batches
+                    .insert(r.clone(), (v.writes_decision(), Arc::clone(&v.next)));
             }
             groups.push(Group { items });
         }
         // D-CQMA4: each re-affirmation card is a group of its own
         for item in reaffirm_items(self, &work, now)? {
+            if let Some(rt) = routing.as_mut() {
+                let facts = rt.reaffirm_facts(&item);
+                rt.note(self, &item, facts);
+            }
             groups.push(Group { items: vec![item] });
         }
         // the items that stand beside a batch go into its group, after its exceptions; the
         // others are groups of one
         let batches: Vec<Item> = groups.iter().map(|g| g.items[0].clone()).collect();
+        let questions = question_items(self, q)?.into_iter().map(|i| {
+            // O10: an answer item covers its question block, which its ref names
+            let block = i
+                .r#ref
+                .split_once('@')
+                .and_then(|(id, _)| BlockId::parse(id).ok());
+            (i, block.into_iter().collect())
+        });
         let others = tension_items(self, &open, &batches)?
             .into_iter()
-            .chain(question_items(self, q)?);
-        for item in others {
+            .chain(questions);
+        for (item, blocks) in others {
+            if let Some(rt) = routing.as_mut() {
+                let facts = rt.other_facts(&item, blocks);
+                rt.note(self, &item, facts);
+            }
             let group = item
                 .batch
                 .as_deref()
@@ -360,8 +432,125 @@ impl ReadState {
             }
         }
         groups.sort_by_cached_key(Group::key);
-        Ok(Eligible { groups, not_ready })
+        Ok(Eligible {
+            groups,
+            not_ready,
+            roles: routing.map(|rt| rt.roles).unwrap_or_default(),
+        })
     }
+}
+
+/// The live policy's routing of one queue (O10, D-TF78H): the policy's fields, canon at its head
+/// (which the role rules read), the role of each item noted so far, and for each ready batch
+/// whether its version writes a decision and the canon it would give.
+struct Routing {
+    canon: Arc<Materialized>,
+    fields: PolicyFields,
+    roles: Roles,
+    batches: BTreeMap<String, (bool, Arc<Materialized>)>,
+}
+
+impl Routing {
+    /// The routing under the live policy (the policy block of canon at its head); none with no
+    /// policy, or one whose fields do not read: then nothing routes.
+    fn read(st: &ReadState) -> Result<Option<Routing>, RdyError> {
+        policy_of(st).map(|p| {
+            p.map(|(canon, fields)| Routing {
+                canon,
+                fields,
+                roles: Roles::new(),
+                batches: BTreeMap::new(),
+            })
+        })
+    }
+
+    /// Notes the role of item `i`, whose facts are `facts` (O10), when it needs one.
+    fn note(&mut self, st: &ReadState, i: &Item, facts: ItemFacts) {
+        if let Some(role) = required_role(st, &self.canon, &self.fields, &facts) {
+            self.roles.insert(role_key(i), role);
+        }
+    }
+
+    /// The facts of re-affirmation card `i` (O10): its member decisions; `one_way` when one of
+    /// them is declared `one_way` in canon. It belongs to no version.
+    fn reaffirm_facts(&self, i: &Item) -> ItemFacts {
+        let blocks: Vec<BlockId> = match &i.plan_binding {
+            Some(PlanCardBinding::Reaffirm { members, .. }) => {
+                members.iter().map(|m| m.id.clone()).collect()
+            }
+            _ => vec![],
+        };
+        ItemFacts {
+            kind: i.kind,
+            one_way: one_way_among(&self.canon, &blocks),
+            blocks,
+            decision: false,
+        }
+    }
+
+    /// The facts of a `resolve` or `answer` item `i` that covers `blocks` (O10). An advice item
+    /// belongs to its batch's version: `one_way` reads the canon that version would give, and
+    /// `decision` whether it writes a decision. Any other belongs to no version: `one_way` reads
+    /// canon.
+    fn other_facts(&self, i: &Item, blocks: Vec<BlockId>) -> ItemFacts {
+        let (decision, m) = match i.batch.as_ref().and_then(|b| self.batches.get(b)) {
+            Some((decision, next)) => (*decision, &**next),
+            None => (false, &*self.canon),
+        };
+        ItemFacts {
+            kind: i.kind,
+            one_way: one_way_among(m, &blocks),
+            blocks,
+            decision,
+        }
+    }
+}
+
+/// The live policy's fields and canon at its head: none with no policy block in canon, or one
+/// whose fields do not read (then no role applies).
+fn policy_of(st: &ReadState) -> Result<Option<(Arc<Materialized>, PolicyFields)>, RdyError> {
+    let canon = st.materialized(&Scope::Canon)?;
+    let fields = crate::policy::live_policy(st, &canon).and_then(|l| l.fields);
+    Ok(fields.map(|f| (canon, f)))
+}
+
+/// Whether one of `blocks` is a decision of `m` declared `one_way`.
+fn one_way_among(m: &Materialized, blocks: &[BlockId]) -> bool {
+    blocks.iter().any(|id| {
+        m.get(id).is_some_and(|b| {
+            b.block_type == decision::DECISION && b.field_str("reversibility") == Some("one_way")
+        })
+    })
+}
+
+/// The policy role the `approve` item of version `pref` (record `p`) needs (O10, D-TF78H), under
+/// the live policy: none with no policy, or none that applies. Every approval of the version
+/// meets it in its landing.
+pub(crate) fn approve_role(
+    st: &ReadState,
+    pref: &ProposalRef,
+    p: &Proposal,
+) -> Result<Option<RequiredRole>, RdyError> {
+    let Some((canon, fields)) = policy_of(st)? else {
+        return Ok(None);
+    };
+    let v = Version::read_for(st, &Candidate::stored(st, *pref, p.clone())?, Removal::Skip)?;
+    Ok(required_role(st, &canon, &fields, &v.approve_facts()))
+}
+
+/// The policy role a deferral card `i` needs (O10), when the card is bound outside the queue
+/// ([`deferral_card`]): none with no policy, or none that applies.
+pub(crate) fn deferral_role(st: &ReadState, i: &Item) -> Result<Option<RequiredRole>, RdyError> {
+    let Some((canon, fields)) = policy_of(st)? else {
+        return Ok(None);
+    };
+    let Some(batch) = i.batch.as_deref() else {
+        return Ok(None);
+    };
+    let pref = crate::gate::resolve_in(st, batch)?;
+    let p = st.reader().proposal(&pref.version)?;
+    let v = Version::read_for(st, &Candidate::stored(st, pref, p)?, Removal::Skip)?;
+    Ok(required_role(st, &canon, &fields, &v.defer_facts()))
 }
 
 /// What holds version `pref` back from landing (F2, D-AAQ9Z), read once for the landing. A
@@ -1270,9 +1459,7 @@ impl Version {
         let role = live
             .as_ref()
             .and_then(|l| l.fields.as_ref())
-            .and_then(|f| {
-                crate::policy::roles::required_role(st, &canon, f, &self.approve_facts(&inputs))
-            })
+            .and_then(|f| crate::policy::roles::required_role(st, &canon, f, &self.approve_facts()))
             .map(|r| r.label());
         let reference = live.as_ref().map(|l| l.reference());
         let policy = live
@@ -1390,18 +1577,60 @@ impl Version {
 
     /// The facts of the version's `approve` item that the policy's `require` entries match on
     /// (O10): the blocks it writes, whether a decision it writes or re-affirms is `one_way`, and
-    /// whether it writes a decision. `inputs` is the version's [`VerdictInputs`].
-    fn approve_facts(&self, inputs: &VerdictInputs) -> ItemFacts {
-        let one_way = inputs
-            .decisions
-            .iter()
-            .any(|d| d.reversibility.as_deref() == Some("one_way"))
+    /// whether it writes a decision (O7, [`Version::written_decisions`]).
+    fn approve_facts(&self) -> ItemFacts {
+        let one_way = self
+            .written_decisions()
+            .any(|b| b.field_str("reversibility") == Some("one_way"))
             || self.reaffirms.iter().any(|d| d.one_way);
         ItemFacts {
             kind: ItemKind::Approve,
             blocks: self.touched.iter().cloned().collect(),
             one_way,
-            decision: !inputs.decisions.is_empty(),
+            decision: self.writes_decision(),
+        }
+    }
+
+    /// Whether the version writes a decision (O7).
+    fn writes_decision(&self) -> bool {
+        self.written_decisions().next().is_some()
+    }
+
+    /// The facts of the version's `confirm` item `i` (O10): the blocks the version writes;
+    /// `one_way` when the decision the item confirms is declared `one_way` in the canon the
+    /// version would give; the version writes a decision.
+    fn confirm_facts(&self, i: &Item) -> ItemFacts {
+        let decided: Vec<BlockId> = i
+            .r#ref
+            .split_once('@')
+            .and_then(|(id, _)| BlockId::parse(id).ok())
+            .into_iter()
+            .collect();
+        ItemFacts {
+            kind: ItemKind::Confirm,
+            blocks: self.touched.iter().cloned().collect(),
+            one_way: one_way_among(&self.next, &decided),
+            decision: self.writes_decision(),
+        }
+    }
+
+    /// The facts of the version's deferral card (O10): the subjects of the deferred items that
+    /// are blocks; `one_way` when one of them is a decision declared `one_way` in the canon the
+    /// version would give; whether the version writes a decision.
+    fn defer_facts(&self) -> ItemFacts {
+        let blocks: Vec<BlockId> = match &self.plan {
+            Ok(plan) => plan
+                .deferrals
+                .iter()
+                .filter_map(|d| BlockId::parse(&d.subject).ok())
+                .collect(),
+            Err(_) => vec![],
+        };
+        ItemFacts {
+            kind: ItemKind::Defer,
+            one_way: one_way_among(&self.next, &blocks),
+            blocks,
+            decision: self.writes_decision(),
         }
     }
 

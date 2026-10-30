@@ -3161,6 +3161,18 @@ impl Rdy {
             matches!(op, Op::Create { block } | Op::Update { block, .. }
                 if block.block_type == decision::DECISION)
         });
+        // D-TF78H, O10: the approve item's required policy role holds the approving person: the
+        // session's actor, who is the person a relay names
+        if lander == Lander::Approver
+            && let Some(role) = crate::pending::queue::approve_role(&st, &pref, &p)?
+            && !crate::policy::roles::holds(&role, &s.actor)
+        {
+            return Err(crate::policy::roles::outside_role(
+                &s.actor,
+                &role,
+                &pref.to_string(),
+            ));
+        }
         let holds = approval_holds(&st, &pref, decides)?;
         if !holds.open.is_empty() {
             return Err(exceptions_open(&pref, &holds.open));
