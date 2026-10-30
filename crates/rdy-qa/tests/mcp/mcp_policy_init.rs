@@ -12,7 +12,7 @@ use rdy_mcp::tools::{McpState, rdy_policy, rdy_session};
 use rdy_model::{BlockId, Hash, Justification};
 use rdy_qa::daemon::Served;
 use rdy_qa::fixtures::*;
-use rdy_qa::intake::{TEST_SUMMARY, confirm_before_landing};
+use rdy_qa::intake::confirm_before_landing;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -313,7 +313,6 @@ fn ap9_cli_policy_init_matches_mcp() {
         lines[4].starts_with("approve with: rdy approve P-"),
         "{text}"
     );
-    let _ = TEST_SUMMARY;
 }
 
 #[test]
