@@ -235,6 +235,7 @@ impl PackSet {
             out.duplicate_text_min_words = child.duplicate_text_min_words;
         }
         out.areas.extend(child.areas);
+        out.rules.extend(child.rules);
         if let Some(c) = child.coverage {
             let o = out.coverage.get_or_insert_with(CoverageSettings::default);
             o.weights.extend(c.weights);
@@ -370,6 +371,11 @@ fn inject_engine_types(pack: &mut Pack) {
             f(FieldKind::Enum, false, &["confirm", "reject"]),
         ),
         ("recommend_reason", f(FieldKind::Str, false, &[])),
+        // How the team knows the decision is kept (D-JQD5X): part of the ruling's frozen content.
+        (
+            crate::validate::CONFIRMATION_FIELD,
+            f(FieldKind::Str, false, &[]),
+        ),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
@@ -635,6 +641,8 @@ fn check(pack: &Pack) -> Result<(), SchemaError> {
     }
     check_areas(pack)?;
     check_coverage(pack)?;
+    // after the engine types and links exist: the filters read them
+    crate::rules::compile_rules(pack).map_err(SchemaError::Invalid)?;
     Ok(())
 }
 

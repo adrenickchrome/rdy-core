@@ -168,6 +168,10 @@ pub struct Pack {
     /// How the pack weights the coverage dimensions and its two coverage numbers.
     #[serde(default)]
     pub coverage: Option<CoverageSettings>,
+    /// Deterministic checks over blocks (D-JQD5X): a child's rules follow its parent's. Compiled
+    /// by [`crate::compile_rules`]; an empty list stays out of the pack's serialized form.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<crate::rules::Rule>,
 }
 
 /// The six dimensions a coverage score measures, in report order.
