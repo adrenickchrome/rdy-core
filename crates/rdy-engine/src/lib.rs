@@ -17,6 +17,7 @@ pub mod consequence;
 pub mod consequence_literals;
 pub mod coord_graph;
 pub mod coverage;
+mod cursor;
 mod decide;
 pub mod decision_fields;
 pub mod did_you_mean;
@@ -123,7 +124,7 @@ pub use brief::{
 pub use carried_warning::{CarriedTargetIssue, CarriedWarning};
 pub use coverage::{CoverageIssue, CoverageIssues, IssueCode};
 pub use decide::DecisionInput;
-pub use diff::{Diff, DiffChange, DiffEntry};
+pub use diff::{Diff, DiffChange, DiffEntry, LinkChange, StatusChange};
 pub use dump::DumpSummary;
 pub use error::*;
 pub use events::{Event, EventKind, Events};

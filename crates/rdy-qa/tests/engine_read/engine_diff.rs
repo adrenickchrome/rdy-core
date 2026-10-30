@@ -2,7 +2,7 @@
 //! reading order of the newer scope, with word pieces for each changed body.
 use std::collections::BTreeSet;
 
-use rdy_engine::diff::{Diff, DiffChange, DiffCounts, DiffEntry, FieldChange, FromTo};
+use rdy_engine::diff::{Diff, DiffChange, DiffCounts, DiffEntry, FieldChange, FromTo, LinkChange};
 use rdy_engine::worddiff::{Op, Piece};
 use rdy_engine::{Materialized, Rdy, Scope};
 use rdy_model::BlockId;
@@ -372,7 +372,7 @@ fn sr4_custom_fields_named_like_structure_diff_as_fields() {
         assert_eq!(e.fields, vec![old_to_new(name)], "{name}");
         assert_eq!(e.moved, None, "{name}");
         assert_eq!(e.body, None, "{name}");
-        assert_eq!(e.links, None, "{name}");
+        assert!(e.links.is_empty(), "{name}");
         assert_eq!(e.type_change, None, "{name}");
         assert_eq!(
             diff.counts,
@@ -418,17 +418,20 @@ fn sr4_custom_field_and_real_move_together() {
     assert!(moved.reordered_only);
     assert_eq!(moved.from_parent.as_ref(), Some(&s));
     assert_eq!(moved.to_parent.as_ref(), Some(&s));
-    assert_eq!(e.links, None);
+    assert!(e.links.is_empty());
     // the custom `links` is a field; the real link list is the entry's own `links`
     let e = entry(&diff, &b);
     assert_eq!(e.change, DiffChange::Updated);
     assert_eq!(e.fields, vec![old_to_new("links")]);
     assert_eq!(e.moved, None);
-    let links = e.links.as_ref().expect("the real link change is reported");
-    assert_eq!(links.from, json!({}));
-    assert!(
-        links.to.to_string().contains(&thing.to_string()),
-        "{links:?}"
+    assert_eq!(
+        e.links,
+        vec![LinkChange {
+            rel: "describes".to_string(),
+            added: vec![thing.clone()],
+            removed: vec![],
+        }],
+        "the real link change is reported"
     );
     assert_eq!(
         diff.counts,
@@ -630,7 +633,7 @@ fn sr4_appending_the_last_block_to_its_parent_is_no_move() {
     assert_eq!(e.change, DiffChange::Updated);
     assert!(e.fields.is_empty(), "{:?}", e.fields);
     assert_eq!(e.body, None);
-    assert_eq!(e.links, None);
+    assert!(e.links.is_empty());
     assert_eq!(e.type_change, None);
 }
 
