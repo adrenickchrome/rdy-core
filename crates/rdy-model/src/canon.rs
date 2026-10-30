@@ -46,7 +46,8 @@ pub struct LandingRecord {
     pub approved_by: Provenance,
     pub changes: Vec<Hash>,
     pub chosen: Option<AltChoice>,
-    /// Ids of check-result objects; always empty in M2.
+    /// The redaction requests this landing applies, sorted and distinct. Check verdicts are
+    /// separate REVIEW records.
     pub checks: Vec<Hash>,
     pub assurance: Assurance,
     pub relayed_by: Option<ActorRun>,
