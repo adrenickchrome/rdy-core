@@ -316,6 +316,10 @@ impl Projector<'_> {
             let (hide, keep): (Vec<_>, Vec<_>) = std::mem::take(list)
                 .into_iter()
                 .partition(|l| all || self.store_only_target(&l.target));
+            // a file never names a store-only kind (p-3WFME), even one whose stored list is empty
+            if keep.is_empty() && (all || !hide.is_empty()) {
+                emptied.push(kind.clone());
+            }
             if !hide.is_empty() {
                 hidden.insert(
                     kind.clone(),
@@ -326,9 +330,6 @@ impl Projector<'_> {
                         })
                         .collect(),
                 );
-                if keep.is_empty() {
-                    emptied.push(kind.clone());
-                }
             }
             *list = keep;
         }
