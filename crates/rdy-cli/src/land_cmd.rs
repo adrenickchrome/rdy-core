@@ -1217,6 +1217,30 @@ pi-00000000000000bb confirm c-CCCCC: open (c-AAAAA)"
         );
     }
 
+    /// ap11 (O14): `rdy land` prints the landing as `rdy approve` does, with the assurance line
+    /// after the landing line; `rdy approve` prints none.
+    #[test]
+    fn ap11_land_text_prints_the_assurance_after_the_landing() {
+        let v = json!({
+            "landing": "a".repeat(64), "approved": "P-123456789abc@1", "version": "b".repeat(64),
+            "title": "Typo", "summary": "Fixes a typo.", "changes": 1, "assurance": "policy",
+            "warnings": [], "rebased": [], "signatures": []
+        });
+        let landed = format!("landed {} (P-123456789abc@1)", hash_short(&"a".repeat(64)));
+        assert_eq!(
+            land_text(&v),
+            format!(
+                "approving P-123456789abc@1: Typo (1 change(s))\nsummary: Fixes a typo.\n{landed}\nassurance policy"
+            )
+        );
+        assert_eq!(
+            approve_text(&v),
+            format!(
+                "approving P-123456789abc@1: Typo (1 change(s))\nsummary: Fixes a typo.\n{landed}"
+            )
+        );
+    }
+
     /// ap8 (D-ZWP7Q, O13): a ready version prints its verdict as the card's `Policy` fact after
     /// `ready`, and the land command before the approve command when the policy accepts it.
     #[test]

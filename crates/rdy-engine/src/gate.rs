@@ -1011,10 +1011,6 @@ impl ReadState {
     }
 }
 
-/// D-ME2HD: the refusal of an approval of version `pref`, which is not ready. Its issues are the
-/// version's readiness issues, in the queue's order, each with its own code and fix
-/// ([`crate::readiness::readiness`]); none is added, dropped, merged or re-worded.
-/// The message counts them (one issue reads `1 issue`, more read `<n> issues`; TASK-548). No card.
 /// `E_POLICY_HUMAN` for version `pref` with `reasons` (O14).
 fn policy_human(pref: &ProposalRef, reasons: &[String]) -> RdyError {
     RdyError::new(
@@ -1178,6 +1174,10 @@ pub fn run_land(
     Ok(v)
 }
 
+/// D-ME2HD: the refusal of an approval of version `pref`, which is not ready. Its issues are the
+/// version's readiness issues, in the queue's order, each with its own code and fix
+/// ([`crate::readiness::readiness`]); none is added, dropped, merged or re-worded.
+/// The message counts them (one issue reads `1 issue`, more read `<n> issues`; TASK-548). No card.
 pub(crate) fn proposal_not_ready(pref: &ProposalRef, issues: Vec<Issue>) -> RdyError {
     let mut e = RdyError::new(
         E_PROPOSAL_NOT_READY,
