@@ -369,13 +369,13 @@ impl ReadState {
                 }
             }
             if let Some(rt) = routing.as_mut() {
-                rt.note(self, &card, v.approve_facts());
+                rt.note(self, &card, Some(&v.next), v.approve_facts());
             }
             let mut items = vec![card];
             for item in v.exception_items(now) {
                 if !answered(self, &item.r#ref, AnswerAct::Confirm)? {
                     if let Some(rt) = routing.as_mut() {
-                        rt.note(self, &item, v.confirm_facts(&item));
+                        rt.note(self, &item, None, v.confirm_facts(&item));
                     }
                     items.push(item);
                 }
@@ -385,7 +385,7 @@ impl ReadState {
                 && accepted(self, &item)?.is_none()
             {
                 if let Some(rt) = routing.as_mut() {
-                    rt.note(self, &item, v.defer_facts());
+                    rt.note(self, &item, None, v.defer_facts());
                 }
                 items.push(item);
             }
@@ -399,7 +399,7 @@ impl ReadState {
         for item in reaffirm_items(self, &work, now)? {
             if let Some(rt) = routing.as_mut() {
                 let facts = rt.reaffirm_facts(&item);
-                rt.note(self, &item, facts);
+                rt.note(self, &item, None, facts);
             }
             groups.push(Group { items: vec![item] });
         }
@@ -420,7 +420,7 @@ impl ReadState {
         for (item, blocks) in others {
             if let Some(rt) = routing.as_mut() {
                 let facts = rt.other_facts(&item, blocks);
-                rt.note(self, &item, facts);
+                rt.note(self, &item, None, facts);
             }
             let group = item
                 .batch
@@ -441,7 +441,7 @@ impl ReadState {
 }
 
 /// The live policy's routing of one queue (O10, D-TF78H): the policy's fields, canon at its head
-/// (which the role rules read), the role of each item noted so far, and for each ready batch
+/// (where the policy lives), the role of each item noted so far, and for each ready batch
 /// whether its version writes a decision and the canon it would give.
 struct Routing {
     canon: Arc<Materialized>,
@@ -464,9 +464,16 @@ impl Routing {
         })
     }
 
-    /// Notes the role of item `i`, whose facts are `facts` (O10), when it needs one.
-    fn note(&mut self, st: &ReadState, i: &Item, facts: ItemFacts) {
-        if let Some(role) = required_role(st, &self.canon, &self.fields, &facts) {
+    /// Notes the role of item `i`, whose facts are `facts` (O10), when it needs one. `prospective`:
+    /// the version's candidate, for its `approve` item only ([`required_role`]).
+    fn note(
+        &mut self,
+        st: &ReadState,
+        i: &Item,
+        prospective: Option<&Materialized>,
+        facts: ItemFacts,
+    ) {
+        if let Some(role) = required_role(st, &self.canon, prospective, &self.fields, &facts) {
             self.roles.insert(role_key(i), role);
         }
     }
@@ -535,7 +542,13 @@ pub(crate) fn approve_role(
         return Ok(None);
     };
     let v = Version::read_for(st, &Candidate::stored(st, *pref, p.clone())?, Removal::Skip)?;
-    Ok(required_role(st, &canon, &fields, &v.approve_facts()))
+    Ok(required_role(
+        st,
+        &canon,
+        Some(&v.next),
+        &fields,
+        &v.approve_facts(),
+    ))
 }
 
 /// The policy role a deferral card `i` needs (O10), when the card is bound outside the queue
@@ -550,7 +563,7 @@ pub(crate) fn deferral_role(st: &ReadState, i: &Item) -> Result<Option<RequiredR
     let pref = crate::gate::resolve_in(st, batch)?;
     let p = st.reader().proposal(&pref.version)?;
     let v = Version::read_for(st, &Candidate::stored(st, pref, p)?, Removal::Skip)?;
-    Ok(required_role(st, &canon, &fields, &v.defer_facts()))
+    Ok(required_role(st, &canon, None, &fields, &v.defer_facts()))
 }
 
 /// What holds version `pref` back from landing (F2, D-AAQ9Z), read once for the landing. A
@@ -1459,7 +1472,15 @@ impl Version {
         let role = live
             .as_ref()
             .and_then(|l| l.fields.as_ref())
-            .and_then(|f| crate::policy::roles::required_role(st, &canon, f, &self.approve_facts()))
+            .and_then(|f| {
+                crate::policy::roles::required_role(
+                    st,
+                    &canon,
+                    Some(&self.next),
+                    f,
+                    &self.approve_facts(),
+                )
+            })
             .map(|r| r.label());
         let reference = live.as_ref().map(|l| l.reference());
         let policy = live

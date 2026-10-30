@@ -333,7 +333,7 @@ fn ap4_a_policy_that_no_longer_validates_reads_with_no_fields() {
         assert_eq!(
             live.fields
                 .as_ref()
-                .and_then(|p| required_role(&st, &canon, p, &facts)),
+                .and_then(|p| required_role(&st, &canon, None, p, &facts)),
             None,
             "{kind:?}: no role applies under a policy that does not validate"
         );
@@ -495,12 +495,12 @@ fn ap4_the_first_matching_require_entry_names_the_role() {
     );
     let decides = item(ItemKind::Approve, &[&t["visa_claim"]], false, true);
     assert_eq!(
-        required_role(&st, &m, &p, &decides),
+        required_role(&st, &m, None, &p, &decides),
         Some(role("deciders", &["human:bob"]))
     );
     let edits = item(ItemKind::Approve, &[&t["visa_claim"]], false, false);
     assert_eq!(
-        required_role(&st, &m, &p, &edits),
+        required_role(&st, &m, None, &p, &edits),
         Some(role("everyone", &["human:cat"]))
     );
     // listed the other way round, `any` matches first
@@ -512,14 +512,14 @@ fn ap4_the_first_matching_require_entry_names_the_role() {
         vec![],
     );
     assert_eq!(
-        required_role(&st, &m, &p, &decides),
+        required_role(&st, &m, None, &p, &decides),
         Some(role("everyone", &["human:cat"]))
     );
     // no entry matches
     let p = fields(vec![req(When::Deferral, Some("approvers"))], vec![]);
-    assert_eq!(required_role(&st, &m, &p, &decides), None);
+    assert_eq!(required_role(&st, &m, None, &p, &decides), None);
     let p = fields(vec![], vec![]);
-    assert_eq!(required_role(&st, &m, &p, &decides), None);
+    assert_eq!(required_role(&st, &m, None, &p, &decides), None);
     // deferral and reaffirm match their item kinds only
     let p = fields(
         vec![
@@ -532,6 +532,7 @@ fn ap4_the_first_matching_require_entry_names_the_role() {
         required_role(
             &st,
             &m,
+            None,
             &p,
             &item(ItemKind::Defer, &[&t["fees_claim"]], false, false)
         ),
@@ -541,6 +542,7 @@ fn ap4_the_first_matching_require_entry_names_the_role() {
         required_role(
             &st,
             &m,
+            None,
             &p,
             &item(ItemKind::Reaffirm, &[&t["fees_claim"]], false, false)
         ),
@@ -550,6 +552,7 @@ fn ap4_the_first_matching_require_entry_names_the_role() {
         required_role(
             &st,
             &m,
+            None,
             &p,
             &item(ItemKind::Approve, &[&t["fees_claim"]], false, false)
         ),
@@ -573,17 +576,17 @@ fn ap4_one_way_matches_a_reaffirmed_one_way_decision() {
     // a reaffirm item whose member decision is one_way: it writes no decision
     let reaffirm = item(ItemKind::Reaffirm, &[&t["fees_claim"]], true, false);
     assert_eq!(
-        required_role(&st, &m, &p, &reaffirm),
+        required_role(&st, &m, None, &p, &reaffirm),
         Some(role("deciders", &["human:bob"]))
     );
     let approve = item(ItemKind::Approve, &[&t["fees_claim"]], true, true);
     assert_eq!(
-        required_role(&st, &m, &p, &approve),
+        required_role(&st, &m, None, &p, &approve),
         Some(role("deciders", &["human:bob"]))
     );
     let two_way = item(ItemKind::Reaffirm, &[&t["fees_claim"]], false, false);
     assert_eq!(
-        required_role(&st, &m, &p, &two_way),
+        required_role(&st, &m, None, &p, &two_way),
         Some(role("everyone", &["human:cat"]))
     );
 }
@@ -605,6 +608,7 @@ fn ap4_area_matches_a_covered_block_in_the_area() {
         required_role(
             &st,
             &m,
+            None,
             &p,
             &item(ItemKind::Approve, &[&t["login_claim"]], false, false)
         ),
@@ -615,6 +619,7 @@ fn ap4_area_matches_a_covered_block_in_the_area() {
         required_role(
             &st,
             &m,
+            None,
             &p,
             &item(
                 ItemKind::Approve,
@@ -637,6 +642,7 @@ fn ap4_area_matches_a_covered_block_in_the_area() {
         required_role(
             &st,
             &m,
+            None,
             &p,
             &item(ItemKind::Approve, &[&doc, &id("c-ZZZZZ")], false, false)
         ),
@@ -675,7 +681,7 @@ fn ap4_owner_names_the_owners_of_the_first_owned_block() {
     for order in [[blocks[1], blocks[0]], [blocks[0], blocks[1]]] {
         let both = item(ItemKind::Approve, &order, false, false);
         assert_eq!(
-            required_role(&st, &m, &p, &both),
+            required_role(&st, &m, None, &p, &both),
             Some(expected.clone()),
             "the item's block order does not matter"
         );
@@ -694,7 +700,7 @@ fn ap4_owner_names_the_owners_of_the_first_owned_block() {
         false,
         false,
     );
-    let got = required_role(&st, &m, &p, &one).unwrap();
+    let got = required_role(&st, &m, None, &p, &one).unwrap();
     assert_eq!(
         got,
         RequiredRole::Owners {
@@ -706,7 +712,7 @@ fn ap4_owner_names_the_owners_of_the_first_owned_block() {
     // no covered block has an entry: `owner` does not match, and `any` does
     let none = item(ItemKind::Approve, &[&t["fees_claim"]], false, false);
     assert_eq!(
-        required_role(&st, &m, &p, &none),
+        required_role(&st, &m, None, &p, &none),
         Some(role("everyone", &["human:cat"]))
     );
     assert_eq!(role("everyone", &["human:cat"]).label(), "everyone");

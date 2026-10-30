@@ -8,15 +8,19 @@ use rdy_engine::answer::relay::RelayInput;
 use rdy_engine::engine::Local;
 use rdy_engine::pending::{CARD_MAX_TOKENS, Item, ItemKind, Pending, PendingQuery};
 use rdy_engine::plan::{PlanAnswerInput, ProposePlanRequest};
+use rdy_engine::policy::live_policy;
 use rdy_engine::{
-    DecisionInput, E_PERMISSION, LandOptions, ProposalInfo, Rdy, RdyError, Session, WriteRequest,
+    DecisionInput, E_PERMISSION, LandOptions, ProposalInfo, Rdy, RdyError, Scope, Session,
+    WriteRequest,
 };
 use rdy_mcp::tools::{McpState, rdy_answer, rdy_session};
+use rdy_model::assessment::PolicyVerdict;
 use rdy_model::plan::{PlanAct, PlanKind, item_display, item_hash};
 use rdy_model::{BlockId, Justification, Role};
 use rdy_qa::daemon::Served;
 use rdy_qa::fixtures::{approver, land, parse_test_ops, project, write, writer};
 use rdy_qa::intake::{PERSON, TEST_SUMMARY, confirm_exceptions};
+use rdy_qa::packs::use_pack;
 use rdy_qa::tensions::ag;
 use rdy_store::segment::Location;
 use serde_json::{Value, json};
@@ -695,4 +699,251 @@ fn ap12_a_confirm_or_a_rejection_outside_the_role_is_e_permission() {
     assert_eq!(log_end(&r), before, "a refused answer writes nothing");
     let v = relayed(&mut r, BOSS, &confirm, "confirm").expect("the person in the role confirms");
     assert_eq!(v["act"], "confirm", "{v}");
+}
+
+// ---- the covered blocks: read in canon and in the prospective canon ----
+
+/// A policy whose one entry needs the owners, and the owner entries `path` to [`BOSS`].
+fn owned_by_boss(paths: &[&str]) -> Value {
+    let owners: Vec<Value> = paths
+        .iter()
+        .map(|p| json!({"path": p, "owners": [BOSS]}))
+        .collect();
+    policy(
+        json!({"approvers": [PERSON]}),
+        json!([{"when": "owner"}]),
+        json!(owners),
+    )
+}
+
+/// [`PERSON`] does not see `p` and its landing is refused with role `role`; [`BOSS`]
+/// sees it and lands it.
+fn needs_boss(r: &mut Rdy, p: &ProposalInfo, role: &str) {
+    assert!(
+        !refs(&queue_for(r, PERSON)).contains(&p.r#ref),
+        "{:#?}",
+        refs(&queue_for(r, PERSON))
+    );
+    assert!(refs(&queue_for(r, BOSS)).contains(&p.r#ref));
+    let e = land_err(r, &approver(), &p.r#ref);
+    outside(&e, PERSON, role, &p.r#ref);
+    r.land_with(&boss(), &p.r#ref, LandOptions::default())
+        .unwrap_or_else(|e| panic!("the person in {role} lands {}: {e}", p.r#ref));
+}
+
+/// A new claim under section `s`, proposed from view `view`.
+fn new_claim(r: &mut Rdy, s: &str, view: &str) -> ProposalInfo {
+    write(
+        r,
+        view,
+        json!([{"op": "create", "type": "claim", "id": "$n", "parent": s, "body": "N stands."}]),
+    )
+    .unwrap_or_else(|e| panic!("create in {view}: {e}"));
+    propose(r, view, &[])
+}
+
+/// Lands folder `name` with doc `<name>-doc`, section and a claim, and gives (section, claim).
+fn folder_doc(r: &mut Rdy, name: &str) -> (String, String) {
+    let w = write(
+        r,
+        name,
+        json!([
+            {"op": "create", "type": "folder", "id": "$f", "fields": {"name": name}},
+            {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"name": format!("{name}-doc"), "title": name, "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Body"}},
+            {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "It stands."}
+        ]),
+    )
+    .unwrap_or_else(|e| panic!("write {name}: {e}"));
+    land(r, name).unwrap_or_else(|e| panic!("land {name}: {e}"));
+    (w.created["$s"].clone(), w.created["$c"].clone())
+}
+
+/// Proposes moving `block` under `parent` from view `view`.
+fn moved(r: &mut Rdy, block: &str, parent: &str, view: &str) -> ProposalInfo {
+    write(
+        r,
+        view,
+        json!([{"op": "move", "id": block, "parent": parent}]),
+    )
+    .unwrap_or_else(|e| panic!("move in {view}: {e}"));
+    propose(r, view, &[])
+}
+
+/// The ruling's reproduction: a new claim under an owned doc needs the doc's owner, though canon
+/// does not hold it.
+#[test]
+fn ap12_a_new_block_under_an_owned_doc_needs_its_owner() {
+    let (_d, mut r) = project();
+    let w = world(&mut r);
+    land_policy(&mut r, owned_by_boss(&["spec"]));
+    let p = new_claim(&mut r, &w.s, "n1");
+    needs_boss(&mut r, &p, "owners of spec");
+}
+
+/// The same with `when: area:spec`: the new claim is in the area in the prospective canon, while
+/// a claim elsewhere is not.
+#[test]
+fn ap12_a_new_block_in_an_area_needs_the_area_role() {
+    let (d, r) = project();
+    drop(r);
+    use_pack(
+        d.path(),
+        "team",
+        "name: team\nversion: \"1\"\nextends: rdy-standard\nareas:\n  spec:\n    paths: [spec, spec/**]\n",
+        "",
+    );
+    let mut r = Rdy::open(d.path()).unwrap();
+    let w = world(&mut r);
+    land_policy(&mut r, one_role("area:spec", &[BOSS]));
+    let (other, _) = folder_doc(&mut r, "other");
+    let free = new_claim(&mut r, &other, "n0");
+    assert!(refs(&queue_for(&r, PERSON)).contains(&free.r#ref));
+    let p = new_claim(&mut r, &w.s, "n1");
+    needs_boss(&mut r, &p, "approvers");
+}
+
+/// An owner path that names a doc this version creates resolves in the prospective canon.
+#[test]
+fn ap12_an_owner_path_the_version_creates_resolves_in_the_prospective_canon() {
+    let (_d, mut r) = project();
+    world(&mut r);
+    land_policy(&mut r, owned_by_boss(&["plans"]));
+    write(
+        &mut r,
+        "n1",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "plans", "title": "Plans", "doc_type": "page"}},
+            {"op": "create", "type": "claim", "id": "$c", "parent": "$d", "body": "P stands."}
+        ]),
+    )
+    .unwrap();
+    let p = propose(&mut r, "n1", &[]);
+    needs_boss(&mut r, &p, "owners of plans");
+}
+
+/// An edit of a block in canon routes by its canon owner, as before.
+#[test]
+fn ap12_an_existing_block_keeps_its_canon_owner() {
+    let (_d, mut r) = project();
+    let w = world(&mut r);
+    land_policy(&mut r, owned_by_boss(&["spec"]));
+    let p = edit_version(&mut r, &w, "e1");
+    needs_boss(&mut r, &p, "owners of spec");
+}
+
+/// A move out of an owned folder keeps its owner through canon, a move into one takes its owner
+/// through the prospective canon, and between two the canon owner wins.
+#[test]
+fn ap12_a_move_is_covered_at_both_ends() {
+    let (_d, mut r) = project();
+    world(&mut r);
+    let (free_s, _) = folder_doc(&mut r, "free");
+    let (owned_s, owned_c) = folder_doc(&mut r, "owned");
+    let (_, free_c) = folder_doc(&mut r, "loose");
+    let (held_s, _) = folder_doc(&mut r, "held");
+    land_policy(&mut r, owned_by_boss(&["owned", "held"]));
+    let out = moved(&mut r, &owned_c, &free_s, "m1");
+    needs_boss(&mut r, &out, "owners of owned");
+    let into = moved(&mut r, &free_c, &owned_s, "m2");
+    needs_boss(&mut r, &into, "owners of owned");
+    // m2 landed, so this claim is in `owned` in canon: canon's owner wins over `held`
+    let across = moved(&mut r, &free_c, &held_s, "m3");
+    needs_boss(&mut r, &across, "owners of owned");
+}
+
+/// A deleted block is absent from the prospective canon: its owner reads in canon.
+#[test]
+fn ap12_a_deleted_block_keeps_its_owner() {
+    let (_d, mut r) = project();
+    let w = world(&mut r);
+    land_policy(&mut r, owned_by_boss(&["spec"]));
+    write(&mut r, "x1", json!([{"op": "delete", "id": w.c}])).unwrap();
+    let p = propose(&mut r, "x1", &[]);
+    needs_boss(&mut r, &p, "owners of spec");
+}
+
+/// The policy reads from canon only: a version that adds its person to `owners` in its own edit
+/// of the policy still routes by canon's owners.
+#[test]
+fn ap12_a_version_cannot_change_its_own_approvers() {
+    let (_d, mut r) = project();
+    world(&mut r);
+    land_policy(&mut r, owned_by_boss(&["rules"]));
+    let st = r.read();
+    let canon = st.materialized(&Scope::Canon).unwrap();
+    let block = live_policy(&st, &canon).unwrap().block;
+    let doc = canon.get(&block).unwrap().parent.clone().unwrap();
+    drop(st);
+    let dec = write(
+        &mut r,
+        "own",
+        json!([{"op": "create", "type": "decision", "id": "$dec", "parent": doc.to_string(),
+                "fields": {"statement": "Widen the owners", "status": "proposed", "needs_content": false}}]),
+    )
+    .unwrap();
+    let mut widened = owned_by_boss(&["rules"]);
+    widened["owners"][0]["owners"] = json!([BOSS, PERSON]);
+    r.write(
+        &writer(),
+        WriteRequest {
+            view: "own".into(),
+            ops: parse_test_ops(
+                json!([{"op": "update", "id": block.to_string(), "fields": widened}]),
+            )
+            .unwrap(),
+            justification: Some(Justification::Implements(vec![id(&dec.created["$dec"])])),
+            message: String::new(),
+        },
+    )
+    .unwrap();
+    let p = propose(&mut r, "own", &[]);
+    assert_eq!(
+        p.policy.as_ref().and_then(|a| a.role.as_deref()),
+        Some("owners of rules")
+    );
+    assert!(!refs(&queue_for(&r, PERSON)).contains(&p.r#ref));
+    assert!(refs(&queue_for(&r, BOSS)).contains(&p.r#ref));
+    let e = land_err(&mut r, &approver(), &p.r#ref);
+    outside(&e, PERSON, "owners of rules", &p.r#ref);
+}
+
+/// One version, one role: the queue row, the refusal and the stored assessment's label name the
+/// same role, for a new block.
+#[test]
+fn ap12_the_route_the_check_and_the_label_agree() {
+    let (_d, mut r) = project();
+    let w = world(&mut r);
+    land_policy(&mut r, owned_by_boss(&["spec"]));
+    let p = new_claim(&mut r, &w.s, "n1");
+    let label = "owners of spec";
+    // the stored assessment's label, and as the reply and the card give it
+    let st = r.read();
+    let version = p.id.parse().unwrap();
+    let h = st
+        .reader()
+        .assessment_of_proposal(&version, st.seq())
+        .unwrap()
+        .expect("a ready version stores an assessment");
+    match st.reader().assessment(&h).unwrap().policy.unwrap().verdict {
+        PolicyVerdict::NeedsPerson { role, .. } => assert_eq!(role.as_deref(), Some(label)),
+        v => panic!("{v:?}"),
+    }
+    drop(st);
+    assert_eq!(
+        p.policy.as_ref().and_then(|a| a.role.as_deref()),
+        Some(label)
+    );
+    let policy_fact = item_for(&r, BOSS, &p.r#ref)
+        .facts
+        .into_iter()
+        .find(|f| f.name == "Policy")
+        .expect("the Policy fact")
+        .value;
+    assert!(policy_fact.contains(label), "{policy_fact}");
+    // the queue row: the people of that role see it, others do not
+    assert!(!refs(&queue_for(&r, PERSON)).contains(&p.r#ref));
+    // the refusal
+    let e = land_err(&mut r, &approver(), &p.r#ref);
+    outside(&e, PERSON, label, &p.r#ref);
 }

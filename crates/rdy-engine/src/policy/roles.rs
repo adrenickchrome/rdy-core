@@ -44,17 +44,26 @@ impl RequiredRole {
     }
 }
 
-/// The owners of the most specific entry of the first covered block, in block id order, that has
-/// one.
-fn owners(m: &Materialized, p: &PolicyFields, blocks: &[BlockId]) -> Option<RequiredRole> {
+/// The owners of the first covered block, in block id order, that has an entry. A block's entry
+/// reads in `canon`, else in `prospective`: a block in canon keeps its canon owner, a new block
+/// takes its owner from where it lands, and a block moved into an owned place with no canon entry
+/// takes that place's owner.
+fn owners(
+    canon: &Materialized,
+    prospective: Option<&Materialized>,
+    p: &PolicyFields,
+    blocks: &[BlockId],
+) -> Option<RequiredRole> {
     let mut sorted: Vec<&BlockId> = blocks.iter().collect();
     sorted.sort();
     sorted.dedup();
     sorted.into_iter().find_map(|b| {
-        owner_entry(m, p, b).map(|e| RequiredRole::Owners {
-            path: e.path.clone(),
-            members: e.owners.clone(),
-        })
+        owner_entry(canon, p, b)
+            .or_else(|| prospective.and_then(|m| owner_entry(m, p, b)))
+            .map(|e| RequiredRole::Owners {
+                path: e.path.clone(),
+                members: e.owners.clone(),
+            })
     })
 }
 
@@ -74,9 +83,15 @@ fn in_area(st: &ReadState, m: &Materialized, item: &ItemFacts, area: &str) -> bo
 /// `<a>`; `deferral` for a `defer` item; `reaffirm` for a `reaffirm` item; `owner` when a covered
 /// block has an owner entry; `any` always. `p` is a valid policy's fields, so every named role
 /// exists; an entry naming no role of `roles` names a role with no member.
+///
+/// `p` is always canon's live policy: a version cannot change who approves it. The covered blocks
+/// read in both states: `canon`, and `prospective`, the candidate already built for a version's
+/// `approve` item. `prospective` is None for every other item, and then canon alone decides. A
+/// block is in an area when it is in that area in either state.
 pub fn required_role(
     st: &ReadState,
-    m: &Materialized,
+    canon: &Materialized,
+    prospective: Option<&Materialized>,
     p: &PolicyFields,
     item: &ItemFacts,
 ) -> Option<RequiredRole> {
@@ -84,11 +99,14 @@ pub fn required_role(
         let matched = match &entry.when {
             When::OneWay => item.one_way,
             When::Decision => item.decision,
-            When::Area(area) => in_area(st, m, item, area),
+            When::Area(area) => {
+                in_area(st, canon, item, area)
+                    || prospective.is_some_and(|m| in_area(st, m, item, area))
+            }
             When::Deferral => item.kind == ItemKind::Defer,
             When::Reaffirm => item.kind == ItemKind::Reaffirm,
             When::Owner => {
-                if let Some(found) = owners(m, p, &item.blocks) {
+                if let Some(found) = owners(canon, prospective, p, &item.blocks) {
                     return Some(found);
                 }
                 false

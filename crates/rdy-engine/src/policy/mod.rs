@@ -1,5 +1,7 @@
 //! ap4 (D-ZWP7Q, D-TF78H): the live authority policy, its owners and the policy role an item
-//! needs. Pure reads over the scope a caller passes: every caller passes canon at its head.
+//! needs. Pure reads over the state a caller passes. The policy itself is always canon's at its
+//! head; the blocks an item covers read in canon and, for a version's `approve` item, in its
+//! prospective canon ([`roles::required_role`]).
 pub mod init;
 pub mod owners;
 pub mod roles;
