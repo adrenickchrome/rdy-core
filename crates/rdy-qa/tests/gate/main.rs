@@ -4,12 +4,14 @@
 mod gate_alts;
 mod gate_answer;
 mod gate_card_assessment;
+mod gate_coverage_lowered;
 mod gate_exceptions;
 mod gate_freshness;
 mod gate_identity;
 mod gate_intake_e2e;
 mod gate_plan;
 mod gate_plan_cards;
+mod gate_policy_verdict;
 mod gate_readiness;
 mod gate_reaffirm_cards;
 mod gate_semantic;

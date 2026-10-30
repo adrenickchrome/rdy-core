@@ -116,6 +116,9 @@ pub struct ProposalInfo {
     /// The hash of the `ASSESSMENT` record written in the version's batch (D-SDSV2); none for a
     /// version that is not ready.
     pub assessment: Option<String>,
+    /// The authority policy's verdict the assessment stores (D-ZWP7Q, O13); null for a version
+    /// that is not ready.
+    pub policy: Option<crate::readiness::ProposalPolicy>,
 }
 
 /// One view a landing rebased: how many of its changes dropped out (they landed) and how many
@@ -2531,6 +2534,7 @@ impl Rdy {
                         }],
                         summary: PlanSummary::default(),
                         card: None,
+                        policy: None,
                     },
                     assessment: None,
                 }
@@ -2611,6 +2615,11 @@ impl Rdy {
             ready: assessed.assessment.is_some(),
             issues: assessed.readiness.issues,
             assessment: assessment.map(|h| h.to_string()),
+            policy: assessed
+                .assessment
+                .as_ref()
+                .and_then(|a| a.policy.as_ref())
+                .map(crate::readiness::ProposalPolicy::from),
         })
     }
 

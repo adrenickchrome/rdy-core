@@ -128,6 +128,7 @@ fn di5_a_ready_proposal_is_one_batch_card() {
             "Confidence",
             "Base",
             "Exceptions",
+            "Policy",
         ]
     );
     let opts: Vec<(&str, &str)> = i

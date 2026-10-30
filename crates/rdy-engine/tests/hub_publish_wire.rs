@@ -1338,7 +1338,7 @@ fn hpb7_every_core_error_keeps_its_static_code() {
             declared.push(value.to_string());
         }
     }
-    assert_eq!(declared.len(), 107, "{declared:?}");
+    assert_eq!(declared.len(), 109, "{declared:?}");
     for code in [
         "E_STREAM_TRUNCATED",
         "E_STREAM_PURPOSE",

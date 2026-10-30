@@ -14,12 +14,12 @@ use crate::plan::lifecycle::PlanSummary;
 use crate::tensions::{TensionInfo, TensionSeverity, TensionStatus};
 use crate::{CoverageGate, ProposalRef};
 use rdy_model::assessment::{
-    Assessment, AssessmentCard, AssessmentConfidence, AssessmentCounts, AssessmentCoverage,
-    AssessmentException, AssessmentExceptionKind, AssessmentFacts, AssessmentIssue,
-    AssessmentLevel, AssessmentPack, AssessmentPlanAnswerRef, AssessmentPlanCounts,
-    AssessmentReversal, AssessmentReversibility, AssessmentScope, AssessmentScores,
-    AssessmentSeverity, AssessmentSuspect, AssessmentTension, AssessmentTensionStatus, MAX_ROWS,
-    MAX_TEXT_BYTES,
+    AssessedPolicy, Assessment, AssessmentCard, AssessmentConfidence, AssessmentCounts,
+    AssessmentCoverage, AssessmentException, AssessmentExceptionKind, AssessmentFacts,
+    AssessmentIssue, AssessmentLevel, AssessmentPack, AssessmentPlanAnswerRef,
+    AssessmentPlanCounts, AssessmentReversal, AssessmentReversibility, AssessmentScope,
+    AssessmentScores, AssessmentSeverity, AssessmentSuspect, AssessmentTension,
+    AssessmentTensionStatus, MAX_ROWS, MAX_TEXT_BYTES,
 };
 use rdy_model::{BlockId, Hash};
 use rdy_schema::{Issue, Pack, Severity};
@@ -93,6 +93,8 @@ pub struct Inputs<'a> {
     pub issues: Vec<AssessmentIssue>,
     /// The approve item the card presented.
     pub card: &'a Item,
+    /// The authority policy's verdict on the version (D-ZWP7Q, `policy_verdict::verdict`).
+    pub policy: Option<AssessedPolicy>,
 }
 
 /// The digest of the configuration the readiness read (O7, O18): the domain, then the JSON
@@ -456,7 +458,7 @@ pub fn build(i: Inputs<'_>) -> Result<Assessment, Issue> {
             digest: pack_digest(i.pack),
         },
         config: config_digest(&i.gate),
-        policy: None,
+        policy: i.policy.clone(),
         facts: facts_of(&i),
         tensions: tensions.into_values().collect(),
         tensions_omitted,
@@ -730,6 +732,7 @@ mod tests {
                 issue("n-00005", "untied_content", "tie it"),
             ],
             card: &f.card,
+            policy: None,
         }
     }
 

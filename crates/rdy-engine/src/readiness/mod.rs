@@ -23,7 +23,17 @@
 //! 6. a version whose reach exceeds `MAX_ROWS` (O9);
 //! 7. the later refusals ([`later_refusals`]): a rejected decision, a rejected one_way
 //!    re-affirmation, refused deferrals. The landing adds a fourth, which only an assessment
-//!    can date: an advice accepted after it ([`accepted_advice`], ruling task-12 R1).
+//!    can date: an advice accepted after it ([`accepted_advice`], ruling task-12 R1);
+//! 8. the policy change rule (O19, D-ZWP7Q): one `E_VALIDATION` issue for each
+//!    `authority_policy` block the version creates, updates or deletes whose last change in the
+//!    version does not implement a decision of the prospective canon;
+//! 9. the coverage gate (O17, D-ZWP7Q, D-WB22B, D-T5S9A): with `coverage.gate: no_lower`, one
+//!    `E_COVERAGE_LOWERED` issue for each page the version lowers, in doc id order, then one
+//!    for the corpus.
+//!
+//! A ready version also gets the authority policy's verdict ([`Readiness::policy`],
+//! `policy_verdict::verdict`), under the live policy: the policy block in canon at its head,
+//! never the candidate's or a view's.
 //!
 //! Readiness never adds the issue of a version with no stored assessment (O10).
 
@@ -38,9 +48,11 @@ use crate::plan::lifecycle::PlanSummary;
 use crate::{ReadState, Scope};
 use assessment::MAX_TENSION_ROWS;
 use rdy_model::assessment::Assessment;
+use rdy_model::assessment::{AssessedPolicy, PolicyVerdict};
 use rdy_model::plan::Plan;
 use rdy_model::{AnswerAct, BlockId, Change, Hash, Proposal};
 use rdy_schema::{Issue, Severity};
+use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::collections::BTreeSet;
 
@@ -103,6 +115,82 @@ pub struct Readiness {
     /// The version's `approve` item as the queue builds it, its card not rendered yet, when the
     /// version is ready; none when it is not.
     pub card: Option<Item>,
+    /// The authority policy's verdict on the version (D-ZWP7Q), when it is ready; none when it
+    /// is not.
+    pub policy: Option<AssessedPolicy>,
+}
+
+/// `rdy_propose`'s `policy` (O13): the verdict a ready version's assessment stores, as the reply
+/// gives it. `block` and `version` are the live policy's (none with no policy); `rule` names the
+/// accepting rule; `role` the people the version needs; `reasons` why it needs them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProposalPolicy {
+    pub block: Option<String>,
+    pub version: Option<String>,
+    /// `accepts` or `needs_person`.
+    pub verdict: String,
+    pub rule: Option<String>,
+    pub role: Option<String>,
+    pub reasons: Vec<String>,
+}
+
+/// The verdict word of an accepting verdict.
+pub const ACCEPTS: &str = "accepts";
+/// The verdict word of a verdict that needs a person.
+pub const NEEDS_PERSON: &str = "needs_person";
+
+impl From<&AssessedPolicy> for ProposalPolicy {
+    fn from(a: &AssessedPolicy) -> ProposalPolicy {
+        let (verdict, rule, role, reasons) = match &a.verdict {
+            PolicyVerdict::Accepts { rule } => (ACCEPTS, Some(rule.clone()), None, vec![]),
+            PolicyVerdict::NeedsPerson { role, reasons } => {
+                (NEEDS_PERSON, None, role.clone(), reasons.clone())
+            }
+        };
+        ProposalPolicy {
+            block: a.policy.as_ref().map(|p| p.block.to_string()),
+            version: a.policy.as_ref().map(|p| p.version.to_string()),
+            verdict: verdict.to_string(),
+            rule,
+            role,
+            reasons,
+        }
+    }
+}
+
+impl ProposalPolicy {
+    /// Whether the policy accepts the version.
+    pub fn accepts(&self) -> bool {
+        self.verdict == ACCEPTS
+    }
+
+    /// The card's `Policy` fact value (O9), as `policy_verdict::fact_value` gives it from the
+    /// stored verdict. None when the reply's block or version does not read.
+    pub fn fact_value(&self) -> Option<String> {
+        let policy = match (&self.block, &self.version) {
+            (Some(b), Some(v)) => Some(rdy_model::assessment::PolicyRef {
+                block: BlockId::parse(b).ok()?,
+                version: v.parse().ok()?,
+            }),
+            (None, None) => None,
+            _ => return None,
+        };
+        let verdict = match self.verdict.as_str() {
+            ACCEPTS => PolicyVerdict::Accepts {
+                rule: self.rule.clone()?,
+            },
+            NEEDS_PERSON => PolicyVerdict::NeedsPerson {
+                role: self.role.clone(),
+                reasons: self.reasons.clone(),
+            },
+            _ => return None,
+        };
+        Some(crate::policy_verdict::fact_value(&AssessedPolicy {
+            policy,
+            verdict,
+        }))
+    }
 }
 
 /// The readiness of candidate `c` on `st` (see the module docs). It writes nothing.
@@ -153,11 +241,30 @@ pub(crate) struct Read<'a> {
     pub(crate) decisions: Vec<(BlockId, String)>,
     /// (id, ref, one_way) of each re-affirmed decision.
     pub(crate) reaffirms: Vec<(BlockId, String, bool)>,
+    /// O19: each `authority_policy` block the version creates, updates or deletes, in id order,
+    /// with the short hash of the last change of the version that writes it and whether that
+    /// change implements a decision of the prospective canon.
+    pub(crate) policy_changes: &'a [PolicyChange],
+}
+
+/// O19: an `authority_policy` block a version writes, and the last change that writes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PolicyChange {
+    pub(crate) block: BlockId,
+    /// The short hash of the last change of the version that writes `block`.
+    pub(crate) short: String,
+    /// Whether that change is `implements` with at least one decision of the prospective canon.
+    pub(crate) implements: bool,
 }
 
 /// The checks of readiness over what `r` read, in the closed order (module docs): the issues
-/// of [`readiness`].
-pub(crate) fn issues(st: &ReadState, r: &Read<'_>) -> Result<Vec<Issue>, RdyError> {
+/// of [`readiness`]. `lowered` gives check 9's issues; it runs only under `coverage.gate:
+/// no_lower`.
+pub(crate) fn issues(
+    st: &ReadState,
+    r: &Read<'_>,
+    lowered: impl FnOnce() -> Vec<Issue>,
+) -> Result<Vec<Issue>, RdyError> {
     READINESS_CALLS.with(|n| n.set(n.get() + 1));
     // 1. the landing's checks
     let (mut issues, conflicted) = crate::gate::landing_readiness(st, r.pref, r.p, r.changes)?;
@@ -210,7 +317,51 @@ pub(crate) fn issues(st: &ReadState, r: &Read<'_>) -> Result<Vec<Issue>, RdyErro
         &r.reaffirms,
         r.plan_bound.is_some(),
     )?);
+    // 8. the policy change rule (O19)
+    issues.extend(policy_change_issues(r.policy_changes));
+    // 9. the coverage gate (O17)
+    if st.coverage_gate() == crate::CoverageGate::NoLower {
+        issues.extend(lowered());
+    }
     Ok(issues)
+}
+
+/// O19 (D-ZWP7Q "A change to it needs `implements` a decision"): one issue for each policy block
+/// whose last change in the version implements no decision of the prospective canon. A later
+/// write cannot change an earlier change's justification, so only the last change counts.
+pub(crate) fn policy_change_issues(changes: &[PolicyChange]) -> Vec<Issue> {
+    changes
+        .iter()
+        .filter(|c| !c.implements)
+        .map(|c| Issue {
+            severity: Severity::Error,
+            code: E_VALIDATION,
+            block: Some(c.block.clone()),
+            message: format!(
+                "change {} changes the authority policy and implements no decision",
+                c.short
+            ),
+            fix: "write it again with implements: the decision that changes the policy".into(),
+        })
+        .collect()
+}
+
+/// O17: the `E_COVERAGE_LOWERED` issue of version `pref` lowering `what` (a doc path, or `the
+/// corpus`) from `before` to `after` percent; `block` the page's doc, none for the corpus.
+pub(crate) fn coverage_lowered(
+    pref: &ProposalRef,
+    block: Option<BlockId>,
+    what: &str,
+    before: u32,
+    after: u32,
+) -> Issue {
+    Issue {
+        severity: Severity::Error,
+        code: crate::error::E_COVERAGE_LOWERED,
+        block,
+        message: format!("{pref} lowers coverage of {what} from {before}% to {after}%"),
+        fix: crate::error::COVERAGE_LOWERED_FIX.into(),
+    }
 }
 
 /// The reach of what `r` read (O18), as [`assessment::build`] computes it

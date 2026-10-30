@@ -21,7 +21,7 @@ pub use model::{
     BlockEntry, CoverageIssue, CoverageIssues, Dimension, Dismissal, IssueCode, Structural,
     sort_issues,
 };
-pub(crate) use model::{issue_paths, sort_issue_refs};
+pub(crate) use model::{fix_unapplied_decision, issue_paths, sort_issue_refs};
 pub use onboarding::*;
 pub use score::{
     AreaScore, CoverageReport, PAGES_CAP, PageScore, Rollup, gate_rollup, report_builds, rollup,
