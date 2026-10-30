@@ -947,3 +947,215 @@ fn ap12_the_route_the_check_and_the_label_agree() {
     let e = land_err(&mut r, &approver(), &p.r#ref);
     outside(&e, PERSON, label, &p.r#ref);
 }
+
+// ---- a card bound to a version routes as that version (final review, F1) ----
+
+/// A person outside every role of these tests, as the final review named them.
+const REVIEWER: &str = "human:reviewer";
+
+/// The final review's sequence: a card of a version names the role of that version. The new
+/// `one_way` decision under an owned doc is not in canon, yet its confirmation needs the doc's
+/// owner, as the version's approval does. The outsider neither sees it nor confirms it, relayed
+/// or not, and the owner confirms it and lands.
+#[test]
+fn ap12_a_new_decisions_confirmation_needs_its_owner() {
+    let (_d, mut r) = project();
+    let seed = write(
+        &mut r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "notes", "title": "Notes", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Body"}}
+        ]),
+    )
+    .unwrap();
+    land(&mut r, "seed").unwrap();
+    land_policy(&mut r, owned_by_boss(&["notes"]));
+    r.decide(
+        &writer(),
+        "d1",
+        DecisionInput {
+            parent: seed.created["$s"].clone(),
+            statement: "Adopt the one way".into(),
+            reversibility: Some("one_way".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let p = propose(&mut r, "d1", &[]);
+    let confirm = queue_for(&r, BOSS)
+        .items
+        .into_iter()
+        .find(|i| i.kind == ItemKind::Confirm && i.batch.as_deref() == Some(p.r#ref.as_str()))
+        .expect("the owner sees the confirmation beside the batch");
+    let label = "owners of notes";
+    let theirs = refs(&queue_for(&r, REVIEWER));
+    assert!(
+        !theirs.contains(&p.r#ref) && !theirs.contains(&confirm.r#ref),
+        "{theirs:#?}"
+    );
+    let before = log_end(&r);
+    let e = relayed(&mut r, REVIEWER, &confirm, "confirm").unwrap_err();
+    outside(&e, REVIEWER, label, &confirm.r#ref);
+    let e = r
+        .answer(
+            &person(REVIEWER),
+            REVIEWER,
+            AnswerRequest {
+                r#ref: confirm.r#ref.clone(),
+                option: "confirm".into(),
+                ..AnswerRequest::default()
+            },
+        )
+        .unwrap_err();
+    outside(&e, REVIEWER, label, &confirm.r#ref);
+    assert_eq!(log_end(&r), before, "a refused answer writes nothing");
+    let e = land_err(&mut r, &person(REVIEWER), &p.r#ref);
+    outside(&e, REVIEWER, label, &p.r#ref);
+    // the confirmation stays open: the owner must give it before the landing
+    let e = land_err(&mut r, &boss(), &p.r#ref);
+    assert_eq!(e.code, "E_EXCEPTION_OPEN", "{e}");
+    let v = relayed(&mut r, BOSS, &confirm, "confirm").expect("the owner confirms");
+    assert_eq!(v["act"], "confirm", "{v}");
+    r.land_with(&boss(), &p.r#ref, LandOptions::default())
+        .unwrap_or_else(|e| panic!("the owner lands {}: {e}", p.r#ref));
+}
+
+/// A deferral card names the role of its version: a subject that the version moves into an owned
+/// folder needs that folder's owner, in the queue, on the card's answer and on a refused card,
+/// which binds outside the queue.
+#[test]
+fn ap12_a_defer_card_routes_as_its_version() {
+    let (_d, mut r) = project();
+    let w = world(&mut r);
+    let (vault, _) = folder_doc(&mut r, "vault");
+    land_policy(&mut r, owned_by_boss(&["vault"]));
+    edit(&mut r, "w", &w.a, "A holds 60 days.");
+    write(
+        &mut r,
+        "w",
+        json!([{"op": "move", "id": w.b, "parent": vault}]),
+    )
+    .unwrap();
+    let p = propose(
+        &mut r,
+        "w",
+        &[
+            defer(&pi(&w.a, &w.b, PlanKind::Confirm), "b waits for the review"),
+            defer(
+                &pi(&w.a, &w.q, PlanKind::Confirm),
+                "q waits for the rewrite",
+            ),
+        ],
+    );
+    let dr = format!("defer:{}", p.r#ref);
+    let label = "owners of vault";
+    let card = item_for(&r, BOSS, &dr);
+    assert!(
+        !refs(&queue_for(&r, PERSON)).contains(&dr),
+        "{:#?}",
+        refs(&queue_for(&r, PERSON))
+    );
+    let before = log_end(&r);
+    let e = relayed(&mut r, PERSON, &card, "o1").unwrap_err();
+    outside(&e, PERSON, label, &dr);
+    assert_eq!(log_end(&r), before, "a refused answer writes nothing");
+    // a refused card leaves the queue and binds on its explicit ref, with the same role
+    let v = relayed(&mut r, BOSS, &card, "o2").expect("the owner refuses");
+    assert_eq!(v["act"], "refuse_deferrals", "{v}");
+    let before = log_end(&r);
+    let e = relayed(&mut r, PERSON, &card, "o1").unwrap_err();
+    outside(&e, PERSON, label, &dr);
+    assert_eq!(log_end(&r), before, "a refused answer writes nothing");
+    let v = relayed(&mut r, BOSS, &card, "o1").expect("the owner accepts later");
+    assert_eq!(v["act"], "accept_deferrals", "{v}");
+}
+
+/// An advice card is bound to its batch's version: a new block of the version that the advised
+/// tension covers takes its owner from where it lands.
+#[test]
+fn ap12_an_advice_card_routes_as_its_version() {
+    let (_d, mut r) = project();
+    let w = world(&mut r);
+    let (_, free) = folder_doc(&mut r, "free");
+    land_policy(&mut r, owned_by_boss(&["spec"]));
+    let n = write(
+        &mut r,
+        "n1",
+        json!([{"op": "create", "type": "claim", "id": "$n", "parent": w.s, "body": "N stands."}]),
+    )
+    .unwrap()
+    .created["$n"]
+        .clone();
+    rdy_qa::intake::verdict_on(
+        &mut r,
+        &Scope::Inflight,
+        &id(&n),
+        &id(&free),
+        "agent:r",
+        true,
+    );
+    rdy_qa::intake::answer_open_items(&mut r, &writer(), "n1");
+    let p = propose(&mut r, "n1", &[]);
+    let advice = format!("advice:{}", p.r#ref);
+    let card = item_for(&r, BOSS, &advice);
+    assert!(
+        !refs(&queue_for(&r, PERSON)).contains(&advice),
+        "{:#?}",
+        refs(&queue_for(&r, PERSON))
+    );
+    let before = log_end(&r);
+    let e = relayed(&mut r, PERSON, &card, "dismiss").unwrap_err();
+    outside(&e, PERSON, "owners of spec", &advice);
+    assert_eq!(log_end(&r), before, "a refused answer writes nothing");
+}
+
+/// Pins existing behaviour: a re-affirmation card on a block change is bound to no version, so
+/// canon decides. An open version that moves its member decision's section into an owned folder
+/// does not route the card to that folder's owner.
+#[test]
+fn ap12_a_reaffirm_card_keeps_canon() {
+    let (_d, mut r) = project();
+    let w = world(&mut r);
+    r.decide(
+        &writer(),
+        "dec",
+        DecisionInput {
+            parent: w.s.clone(),
+            statement: "A stays short".into(),
+            depends_on: vec![w.a.clone()],
+            reversibility: Some("two_way".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    land(&mut r, "dec").unwrap();
+    let (vault, _) = folder_doc(&mut r, "vault");
+    land_policy(&mut r, owned_by_boss(&["vault"]));
+    edit(&mut r, "chg", &w.a, "A holds 45 days.");
+    land(&mut r, "chg").expect("nothing in spec is owned");
+    let p = moved(&mut r, &w.s, &vault, "mv");
+    let card = queue_for(&r, BOSS)
+        .items
+        .into_iter()
+        .find(|i| i.kind == ItemKind::Reaffirm)
+        .expect("a re-affirmation card");
+    let theirs = refs(&queue_for(&r, PERSON));
+    assert!(theirs.contains(&card.r#ref), "{theirs:#?}");
+    // the version itself routes by its candidate
+    assert!(!theirs.contains(&p.r#ref), "{theirs:#?}");
+    let v = r
+        .answer(
+            &approver(),
+            PERSON,
+            AnswerRequest {
+                r#ref: card.r#ref.clone(),
+                option: "o2".into(),
+                note: Some("Not now.".into()),
+                ..AnswerRequest::default()
+            },
+        )
+        .map(|i| serde_json::to_value(i).unwrap())
+        .expect("no role applies: canon has no owner entry for the member");
+    assert_eq!(v["ref"], card.r#ref.as_str(), "{v}");
+}

@@ -70,10 +70,11 @@
 //! # Routing (D-TF78H, O10, O11)
 //!
 //! Under a live policy whose fields read, each item gets its required policy role where it is
-//! made ([`crate::policy::roles::required_role`]). The queue and its counts for a person leave
-//! out each item whose role does not hold that person, after a snooze. An answer still binds
-//! every item ([`Eligible::role_of`]), and it refuses a person outside the role. With no policy,
-//! or none that applies, nothing is left out.
+//! made ([`crate::policy::roles::required_role`]). An item bound to a version routes by that
+//! version's candidate, so the version's approve item and its cards name one role. The queue and
+//! its counts for a person leave out each item whose role does not hold that person, after a
+//! snooze. An answer still binds every item ([`Eligible::role_of`]), and it refuses a person
+//! outside the role. With no policy, or none that applies, nothing is left out.
 //!
 //! # Readiness (D-3JZP4, D-ME2HD; closed)
 //!
@@ -375,7 +376,7 @@ impl ReadState {
             for item in v.exception_items(now) {
                 if !answered(self, &item.r#ref, AnswerAct::Confirm)? {
                     if let Some(rt) = routing.as_mut() {
-                        rt.note(self, &item, None, v.confirm_facts(&item));
+                        rt.note(self, &item, Some(&v.next), v.confirm_facts(&item));
                     }
                     items.push(item);
                 }
@@ -385,7 +386,7 @@ impl ReadState {
                 && accepted(self, &item)?.is_none()
             {
                 if let Some(rt) = routing.as_mut() {
-                    rt.note(self, &item, None, v.defer_facts());
+                    rt.note(self, &item, Some(&v.next), v.defer_facts());
                 }
                 items.push(item);
             }
@@ -420,7 +421,8 @@ impl ReadState {
         for (item, blocks) in others {
             if let Some(rt) = routing.as_mut() {
                 let facts = rt.other_facts(&item, blocks);
-                rt.note(self, &item, None, facts);
+                let candidate = rt.candidate_of(&item);
+                rt.note(self, &item, candidate.as_deref(), facts);
             }
             let group = item
                 .batch
@@ -465,7 +467,7 @@ impl Routing {
     }
 
     /// Notes the role of item `i`, whose facts are `facts` (O10), when it needs one. `prospective`:
-    /// the version's candidate, for its `approve` item only ([`required_role`]).
+    /// the version's candidate, for every item bound to a version ([`required_role`]).
     fn note(
         &mut self,
         st: &ReadState,
@@ -493,6 +495,12 @@ impl Routing {
             blocks,
             decision: false,
         }
+    }
+
+    /// The candidate of the ready version item `i` stands beside, if any: an advice item's.
+    fn candidate_of(&self, i: &Item) -> Option<Arc<Materialized>> {
+        let (_, next) = self.batches.get(i.batch.as_ref()?)?;
+        Some(Arc::clone(next))
     }
 
     /// The facts of a `resolve` or `answer` item `i` that covers `blocks` (O10). An advice item
@@ -563,7 +571,13 @@ pub(crate) fn deferral_role(st: &ReadState, i: &Item) -> Result<Option<RequiredR
     let pref = crate::gate::resolve_in(st, batch)?;
     let p = st.reader().proposal(&pref.version)?;
     let v = Version::read_for(st, &Candidate::stored(st, pref, p)?, Removal::Skip)?;
-    Ok(required_role(st, &canon, None, &fields, &v.defer_facts()))
+    Ok(required_role(
+        st,
+        &canon,
+        Some(&v.next),
+        &fields,
+        &v.defer_facts(),
+    ))
 }
 
 /// What holds version `pref` back from landing (F2, D-AAQ9Z), read once for the landing. A

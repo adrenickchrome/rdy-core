@@ -85,9 +85,11 @@ fn in_area(st: &ReadState, m: &Materialized, item: &ItemFacts, area: &str) -> bo
 /// exists; an entry naming no role of `roles` names a role with no member.
 ///
 /// `p` is always canon's live policy: a version cannot change who approves it. The covered blocks
-/// read in both states: `canon`, and `prospective`, the candidate already built for a version's
-/// `approve` item. `prospective` is None for every other item, and then canon alone decides. A
-/// block is in an area when it is in that area in either state.
+/// read in both states: `canon`, and `prospective`, the candidate already built for the version
+/// an item is bound to (its `approve` item, a `confirm`, a `defer` or an advice card).
+/// `prospective` is None for an item bound to no version, such as a `reaffirm` card on a block
+/// change, and then canon alone decides. A block is in an area when it is in that area in either
+/// state.
 pub fn required_role(
     st: &ReadState,
     canon: &Materialized,
