@@ -52,11 +52,12 @@
 //!    only one side holds is not listed: it came with a new or removed link or reference. An added
 //!    or a removed block has none.
 //! 10. **The root.** [`diff_states_under`] cuts each side to the root's subtree, and treats each
-//!     cut as the state. A block under the root on both sides whose version differs follows rule
-//!     1. A block under it on one side only is added or removed. When the other side holds that
-//!     block outside the root and its own parent differs between the sides, it is the block that
-//!     moved: `moved` names both parents and paths, with `reordered_only: false`. A block under
-//!     it, whose parent is the same on both sides, has no `moved`. Rule 5 reads the two cuts.
+//!     cut as the state. Rule 1 gives the entry of a block under the root on both sides whose
+//!     version differs. A block under it on one side only is added or removed. When the other side
+//!     holds that block outside the root and its own parent differs between the sides, it is the
+//!     block that moved: `moved` names both parents and paths, with `reordered_only: false`. A
+//!     block under it, whose parent is the same on both sides, has no `moved`. Rule 5 reads the
+//!     two cuts.
 //! 11. **The status pass.** [`add_decision_status`], which only the diff request runs. For each
 //!     decision on both sides (inside the root on both sides, when a root is set) whose derived
 //!     status tag differs, `decision_status` holds the two tags. A decision with no entry (a
