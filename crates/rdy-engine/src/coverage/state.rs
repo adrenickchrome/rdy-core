@@ -853,7 +853,7 @@ impl ScopedEntries {
     }
 
     /// The entry of block `id` before the source facts are added.
-    fn intrinsic(&self, id: &BlockId) -> Option<&BlockEntry> {
+    pub(crate) fn intrinsic(&self, id: &BlockId) -> Option<&BlockEntry> {
         match &self.memo {
             Some(m) => m.blocks.get(id),
             None => self.local.get(id).and_then(Option::as_deref),

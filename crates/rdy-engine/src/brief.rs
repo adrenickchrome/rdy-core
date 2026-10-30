@@ -1417,7 +1417,8 @@ impl ReadState {
             pages_omitted,
             issues: listed,
             issues_omitted,
-            confidence: confidence_in(|b| cov.get(b), &neighbourhood, None, &paths),
+            // ck3: a source fact is a displayed issue only; confidence reads the intrinsic entries
+            confidence: confidence_in(|b| cov.intrinsic(b), &neighbourhood, None, &paths),
         })
     }
 

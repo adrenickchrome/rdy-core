@@ -627,3 +627,81 @@ fn ck3_checkout_changes_leave_gate_and_assessment_identical() {
     git(app.path(), &["tag", "-d", "v7"]);
     r.land(&approver(), &p.id).unwrap();
 }
+
+#[test]
+fn ck3_source_facts_change_no_confidence() {
+    let (dir, mut r, id) = project();
+    let (app, _) = checkout();
+    link(dir.path(), &[("app", app.path())]);
+    let ids = sources(&mut r, &id["$s"], &[("release", "v7".into())]);
+    let e = write(
+        &mut r,
+        json!([{"op": "create", "type": "entity", "id": "$e", "parent": id["$s"],
+            "fields": {"name": "Retention"}}]),
+    );
+    write(
+        &mut r,
+        json!([{"op": "update", "id": id["$c"],
+            "links": {"describes": [e.created["$e"]], "reflects": [ids[0]]}}]),
+    );
+    let entity = bid(&e.created["$e"]);
+    let claim = bid(&id["$c"]);
+    // what every read surface says about confidence, with the reasons
+    let surfaces = |r: &Rdy| {
+        let st = r.read();
+        let brief = st
+            .brief(
+                &work(),
+                &Coverage {
+                    ids: vec![id["$c"].clone()],
+                    path: None,
+                },
+                Some(100_000),
+            )
+            .unwrap();
+        let brief_conf = serde_json::to_value(brief.coverage.unwrap().confidence).unwrap();
+        let sheet = st
+            .fact_sheet(&work(), &entity, rdy_engine::lexicon::NameKind::Name)
+            .unwrap();
+        let sheet_conf = serde_json::to_value(sheet.confidence).unwrap();
+        let found = st
+            .search(
+                &work(),
+                &SearchQuery {
+                    text: "thirty".into(),
+                    ..Default::default()
+                },
+                None,
+                Some(100_000),
+            )
+            .unwrap();
+        let hit = found.matches.iter().find(|m| m.id == claim.to_string());
+        let hit_conf = hit.map(|m| m.confidence);
+        assert!(hit_conf.is_some(), "the search hit carries a level");
+        (brief_conf, sheet_conf, hit_conf)
+    };
+    let missing = surfaces(&r);
+    let shown_missing = r.read().display_coverage_issues(&work()).unwrap();
+    assert!(
+        shown_missing
+            .blocks
+            .get(&claim)
+            .unwrap()
+            .issues
+            .iter()
+            .any(|i| i.code == IssueCode::SourceNotFound),
+        "the display does carry the missing source"
+    );
+    git(app.path(), &["tag", "v7"]);
+    let found = surfaces(&r);
+    assert_eq!(
+        missing, found,
+        "confidence and its reasons do not read the checkout"
+    );
+    for v in [&missing.0, &missing.1] {
+        assert!(
+            !v.to_string().contains("source_not_found"),
+            "no source issue is a reason: {v}"
+        );
+    }
+}
