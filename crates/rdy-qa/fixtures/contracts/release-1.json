@@ -25,6 +25,7 @@
         "key retire": "changes the signing key",
         "key revoke": "changes the signing key",
         "keys": "assigns keys to people",
+        "land": "needs an authority policy that accepts the version; gate_policy_land pins its replies",
         "load": "replaces a project from a dump; the dump_load row covers it",
         "mcp": "starts the MCP server; the mcp row covers it",
         "new finding": "needs a finding pack",
@@ -3876,6 +3877,76 @@
             }
           ],
           "name": "approve",
+          "subcommands": []
+        },
+        {
+          "args": [
+            {
+              "action": "set",
+              "id": "proposal",
+              "index": 1,
+              "num_args": "1",
+              "positional": true,
+              "required": true,
+              "value_names": [
+                "PROPOSAL"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "set",
+              "global": true,
+              "id": "project",
+              "long": "project",
+              "num_args": "1",
+              "value_names": [
+                "PROJECT"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "no_daemon",
+              "long": "no-daemon",
+              "num_args": "0",
+              "value_names": [
+                "NO_DAEMON"
+              ]
+            },
+            {
+              "action": "help",
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "short": "h"
+            }
+          ],
+          "groups": [
+            {
+              "args": [
+                "proposal"
+              ],
+              "id": "LandArgs",
+              "multiple": true,
+              "required": false
+            }
+          ],
+          "name": "land",
           "subcommands": []
         },
         {
@@ -16279,6 +16350,7 @@
       "rdy_key_bind": "changes the signing key",
       "rdy_key_retire": "changes the signing key",
       "rdy_key_revoke": "changes the signing key",
+      "rdy_land": "needs an authority policy that accepts the version; gate_policy_land pins its replies",
       "rdy_load": "replaces a project from a dump; the dump_load row covers it",
       "rdy_policy": "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
       "rdy_publication_check": "needs a publication profile",
@@ -16315,6 +16387,7 @@
       "rdy_key_retire",
       "rdy_key_revoke",
       "rdy_key_show",
+      "rdy_land",
       "rdy_load",
       "rdy_log",
       "rdy_overview",
@@ -17498,6 +17571,22 @@
         "input_schema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
+          "type": "object"
+        }
+      },
+      "rdy_land": {
+        "input_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "proposal": {
+              "description": "The proposal version to land: P-<id>@<n> as rdy_propose reports it, P-<id> (its latest version) or a version hash.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "proposal"
+          ],
           "type": "object"
         }
       },
