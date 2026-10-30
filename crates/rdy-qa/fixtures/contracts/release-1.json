@@ -472,8 +472,13 @@
               "at": "string",
               "at_ms": "number",
               "changes": "number",
+              "dispute": {
+                "disputes": [],
+                "state": "string"
+              },
               "evidence": "null",
               "landing": "string",
+              "policy": "null",
               "prev": "null|string",
               "proposal": "string",
               "proposed_by": {
@@ -1122,6 +1127,10 @@
                     "role": "string",
                     "run": "string"
                   },
+                  "dispute": {
+                    "disputes": [],
+                    "state": "string"
+                  },
                   "id": "string",
                   "proposal": "string",
                   "title": "string"
@@ -1164,6 +1173,10 @@
                 "at_ms": "number",
                 "role": "string",
                 "run": "string"
+              },
+              "dispute": {
+                "disputes": [],
+                "state": "string"
               },
               "id": "string",
               "proposal": "string",
@@ -14773,6 +14786,10 @@
             "at": "string",
             "at_ms": "number",
             "changes": "number",
+            "dispute": {
+              "disputes": [],
+              "state": "string"
+            },
             "evidence": {
               "|null": {
                 "card_hash": "string",
@@ -14784,6 +14801,7 @@
               }
             },
             "landing": "string",
+            "policy": "null",
             "prev": "null|string",
             "proposal": "string",
             "proposed_by": {
@@ -16035,6 +16053,10 @@
                   "role": "string",
                   "run": "string"
                 },
+                "dispute": {
+                  "disputes": [],
+                  "state": "string"
+                },
                 "id": "string",
                 "proposal": "string",
                 "title": "string"
@@ -16087,6 +16109,10 @@
               "at_ms": "number",
               "role": "string",
               "run": "string"
+            },
+            "dispute": {
+              "disputes": [],
+              "state": "string"
             },
             "id": "string",
             "proposal": "string",

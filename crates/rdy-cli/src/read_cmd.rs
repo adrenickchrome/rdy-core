@@ -468,6 +468,20 @@ fn log_text(v: &Value) -> String {
         if let Some(a) = row["assessment"].as_str() {
             out.push_str(&format!("    assessment {}\n", hash_short(a)));
         }
+        // O23: the policy version a policy landing was accepted under
+        if row["policy"].is_object() {
+            out.push_str(&format!(
+                "    policy {}@{}\n",
+                text(&row["policy"]["block"]),
+                hash_short(text(&row["policy"]["version"]))
+            ));
+        }
+        // D-ZWP7Q: the dispute state of the landing, when it has one (O22)
+        let state = text(&row["dispute"]["state"]);
+        if !state.is_empty() && state != "none" {
+            let n = row["dispute"]["disputes"].as_array().map_or(0, Vec::len);
+            out.push_str(&format!("    dispute {state}: {n}\n"));
+        }
         let from: Vec<&str> = row["rebased_from"]
             .as_array()
             .into_iter()
@@ -692,6 +706,30 @@ mod tests {
         let mut plain = row.clone();
         plain.as_object_mut().unwrap().remove("chosen");
         assert!(!log_text(&json!([plain])).contains("chose"));
+    }
+
+    /// ap7 (O23, D-ZWP7Q): `rdy log` prints the policy line right after the assessment line, then
+    /// the dispute line when the state is not `none`.
+    #[test]
+    fn ap7_log_text_prints_the_policy_and_dispute_lines() {
+        let row = json!({"landing": "ab".repeat(32), "at": "2026-10-07T00:00:00Z", "title": "x",
+            "proposed_by": {"actor": "agent:a"}, "approved_by": "agent:a",
+            "assessment": "cd".repeat(32),
+            "policy": {"block": "ap-00001", "version": "ef".repeat(32)},
+            "dispute": {"state": "open", "disputes": ["12".repeat(32), "34".repeat(32)]}});
+        let t = log_text(&json!([row]));
+        let want = format!(
+            "    assessment {}\n    policy ap-00001@{}\n    dispute open: 2\n",
+            "cd".repeat(6),
+            "ef".repeat(6)
+        );
+        assert!(t.contains(&want), "{t}");
+        // no policy and no dispute: neither line
+        let mut plain = row.clone();
+        plain["policy"] = json!(null);
+        plain["dispute"] = json!({"state": "none", "disputes": []});
+        let t = log_text(&json!([plain]));
+        assert!(!t.contains("policy") && !t.contains("dispute"), "{t}");
     }
 
     /// Final-review fix round 1: `rdy show --scope inflight` prints the in-flight changes that

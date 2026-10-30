@@ -343,6 +343,8 @@ fn logj1_log_text_shows_the_version_and_the_relay_and_tags_json_carries_the_tag_
         "relay_evidence",
         "evidence",
         "assessment",
+        "policy",
+        "dispute",
         "rebased_from",
         "at",
         "at_ms",

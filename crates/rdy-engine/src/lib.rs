@@ -127,7 +127,7 @@ pub use dump::DumpSummary;
 pub use error::*;
 pub use events::{Event, EventKind, Events};
 pub use gate::{
-    LandInfo, LandOptions, LandingRow, PROPOSAL_TENSIONS_MAX, ProposalInfo, ProposalRef,
+    LandInfo, LandOptions, LandingRow, PROPOSAL_TENSIONS_MAX, PolicyRow, ProposalInfo, ProposalRef,
     RebasedInfo, RelayedByRow, run_land,
 };
 pub use history::{

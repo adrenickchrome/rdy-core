@@ -2,8 +2,9 @@
 //! DISPUTE, DISPUTE_RESOLUTION and CHECK_REQUEST, and a Check REVIEW of each of the three
 //! verdicts, are taken into a holder, held by a captured read snapshot, written in a dump and a
 //! stream, and reopened, with every stored byte and full hash as the source wrote them. The
-//! landing that names the assessment keeps its appended fields. The adapter adds no assessment or
-//! dispute query and no writer: a record is read only as an object of a tag's history.
+//! landing that names the assessment keeps its appended fields. The adapter adds no assessment
+//! query and no writer. Its one dispute query is `Snapshot::disputes` (ap7, `tests/disputes.rs`);
+//! any other record is read only as an object of a tag's history.
 //!
 //! The source is a bare store built through the store's own writers (no product path writes one
 //! of these records); it is closed before any adapter handle opens a holder.

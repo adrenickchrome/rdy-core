@@ -43,6 +43,14 @@ fn evidence_lines(landing: &Value, out: &mut Vec<String>) {
     }
 }
 
+/// ` (dispute <state>)` when the landing `l` has a dispute (D-ZWP7Q), else nothing.
+fn dispute_suffix(l: &Value) -> String {
+    match text(&l["dispute"]["state"]) {
+        "" | "none" => String::new(),
+        state => format!(" (dispute {state})"),
+    }
+}
+
 /// The lines of one decision: its head, its other fields (detail), its edges and its acceptance.
 fn decision_lines(d: &Value, edges: &[&Value], detail: bool, out: &mut Vec<String>) {
     let mut head = format!(
@@ -92,10 +100,11 @@ fn decision_lines(d: &Value, edges: &[&Value], detail: bool, out: &mut Vec<Strin
     let acc = &d["accepted_in"];
     if acc.is_object() {
         out.push(format!(
-            "  accepted in {} {} by {}",
+            "  accepted in {} {} by {}{}",
             hash_short(text(&acc["id"])),
             text(&acc["proposal"]),
-            text(&acc["approved_by"])
+            text(&acc["approved_by"]),
+            dispute_suffix(acc)
         ));
         if acc["relayed_by"].is_object() {
             out.push(format!("  relayed by {}", who(&acc["relayed_by"])));
@@ -183,11 +192,12 @@ pub(crate) fn trace_text(v: &Value, detail: bool) -> String {
     let intro = &v["introduced"];
     if intro.is_object() {
         out.push(format!(
-            "introduced: {} {} \"{}\" by {}",
+            "introduced: {} {} \"{}\" by {}{}",
             hash_short(text(&intro["id"])),
             text(&intro["proposal"]),
             text(&intro["title"]),
-            who(&intro["author"])
+            who(&intro["author"]),
+            dispute_suffix(intro)
         ));
         if detail {
             evidence_lines(intro, &mut out);
@@ -360,6 +370,39 @@ mod tests {
             lines(&v, false)
                 .contains(&"introduced: fedcba987654 P-def@1 \"First\" by agent:a".to_string())
         );
+    }
+
+    /// ap7 (D-ZWP7Q): a landing with a dispute reads ` (dispute <state>)` at the end of its
+    /// introduced and accepted-in lines; `none` prints nothing.
+    #[test]
+    fn ap7_trace_text_prints_the_dispute_state_of_a_landing() {
+        let landing = |state: &str| {
+            json!({"id": "0123456789abcdef0123", "proposal": "P-abc@2", "title": "T",
+                "approved_by": "human:nick", "assurance": "local",
+                "dispute": {"state": state, "disputes": []},
+                "author": {"actor": "agent:a", "run": null, "role": "writer", "at_ms": 1}})
+        };
+        let mut v = base();
+        v["decisions"] = json!([{"id": "D-1", "depth": 0, "status": "live", "statement": "One.",
+            "plans": {}, "accepted_in": landing("upheld")}]);
+        v["introduced"] = landing("open");
+        let l = lines(&v, false);
+        assert!(
+            l.contains(
+                &"  accepted in 0123456789ab P-abc@2 by human:nick (dispute upheld)".to_string()
+            ),
+            "{l:?}"
+        );
+        assert!(
+            l.contains(
+                &"introduced: 0123456789ab P-abc@2 \"T\" by agent:a (dispute open)".to_string()
+            ),
+            "{l:?}"
+        );
+        v["decisions"][0]["accepted_in"] = landing("none");
+        v["introduced"] = landing("none");
+        let l = lines(&v, false);
+        assert!(l.iter().all(|x| !x.contains("dispute")), "{l:?}");
     }
 
     #[test]

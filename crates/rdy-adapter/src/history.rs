@@ -14,8 +14,9 @@ use rdy_engine::history_facts;
 use rdy_model::Hash;
 
 pub use rdy_engine::history_facts::{
-    BlockOp, BlockWrite, LandingFacts, ObjectPresence, SignatureFact,
+    BlockOp, BlockWrite, DisputeFacts, LandingFacts, ObjectPresence, SignatureFact,
 };
+pub use rdy_model::dispute::{Dispute, DisputeOutcome, DisputeResolution};
 pub use rdy_model::signature::Signature;
 pub use rdy_model::{
     ActorRun, AltChoice, ApprovalEvidence, Assurance, EvidenceKind, LandingRecord, Provenance,
@@ -51,6 +52,14 @@ impl Snapshot {
     /// hashes. All the hashes are found in one walk of the captured histories.
     pub fn landings(&self, hashes: &[Hash]) -> Result<Vec<LandingFacts>, RdyError> {
         history_facts::landings(self.read_state(), &self.history_heads(), hashes)
+    }
+
+    /// Every dispute of each landing of `landings`, with its resolution (O26): in input order,
+    /// each landing's disputes oldest first. A repeated landing counts once. The snapshot reads
+    /// the disputes it captured; a landing with no dispute gives no row. The input counts before
+    /// its repeats collapse: at most 100000 landings, else `E_LIMIT`.
+    pub fn disputes(&self, landings: &[Hash]) -> Result<Vec<DisputeFacts>, RdyError> {
+        history_facts::disputes(self.read_state(), landings)
     }
 
     /// The captured canon history, newest landing first. Empty before the first landing, and

@@ -16,6 +16,7 @@ use crate::brief::{budget_bytes, effective_stable};
 use crate::error::{E_BAD_INPUT, E_LIMIT, E_UNKNOWN_BLOCK, RdyError};
 use crate::gate::{ProposalRef, version_number};
 use crate::history::{Author, Carried, ChainWrites, chain_writes};
+use crate::history_facts::{LandingDispute, landing_dispute};
 use crate::query::{is_entity_in, summary_in};
 use crate::tensions::index::is_normative;
 use crate::{Materialized, ReadState, Scope};
@@ -237,6 +238,8 @@ pub struct LandingTrace {
     pub title: String,
     pub approved_by: String,
     pub assurance: String,
+    /// The landing's dispute state and the ids of its disputes, oldest first (D-ZWP7Q, O22).
+    pub dispute: LandingDispute,
     pub author: Author,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relayed_by: Option<ActorRun>,
@@ -763,6 +766,7 @@ fn landing_trace(st: &ReadState, c: &Carried, detail: bool) -> Result<LandingTra
         title,
         approved_by: rec.approved_by.actor,
         assurance: rec.assurance.as_str().into(),
+        dispute: landing_dispute(st, &c.landing)?,
         author: c.author.clone(),
         relayed_by: rec.relayed_by,
         imported_by: c.imported_by.clone(),

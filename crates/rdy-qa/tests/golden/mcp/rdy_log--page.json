@@ -8,8 +8,13 @@
     "at": "2025-10-09T08:53:20Z",
     "at_ms": 1760000000033,
     "changes": 1,
+    "dispute": {
+      "disputes": [],
+      "state": "none"
+    },
     "evidence": null,
     "landing": "39a10fe4c2ffe9312dd9d1ff614d604bd72cad5e3cc2fbde46e948c62ddcdb80",
+    "policy": null,
     "prev": "95df045ef4bff2643dc024884b9355319809aa19286b511799357b589f61d6ef",
     "proposal": "6c298105b5ea852730acf5821ca875012e51be56625da28ee50fb53e7ca7d061",
     "proposed_by": {
@@ -32,8 +37,13 @@
     "at": "2025-10-09T08:53:20Z",
     "at_ms": 1760000000026,
     "changes": 2,
+    "dispute": {
+      "disputes": [],
+      "state": "none"
+    },
     "evidence": null,
     "landing": "95df045ef4bff2643dc024884b9355319809aa19286b511799357b589f61d6ef",
+    "policy": null,
     "prev": "27214339c183569d3e5dbbddb84aa5e541da259f91463d7f35a2fffc059aac6a",
     "proposal": "321ceb0bfa07371c69dac2e273f6735b12888aa9a827f1191fa3157cbf73a2e7",
     "proposed_by": {
@@ -56,8 +66,13 @@
     "at": "2025-10-09T08:53:20Z",
     "at_ms": 1760000000020,
     "changes": 1,
+    "dispute": {
+      "disputes": [],
+      "state": "none"
+    },
     "evidence": null,
     "landing": "27214339c183569d3e5dbbddb84aa5e541da259f91463d7f35a2fffc059aac6a",
+    "policy": null,
     "prev": "dcb3344bfb9f457efc63769d4623939bb1239c6a4a72e2322beff93cfe2c8c8b",
     "proposal": "208256920b7cc7002d61eae6d8f7e9ee5e0b29814a3a5efe714eeabc97d30c05",
     "proposed_by": {

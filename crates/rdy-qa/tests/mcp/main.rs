@@ -11,6 +11,7 @@ mod mcp_compact;
 mod mcp_coverage;
 mod mcp_decision_home;
 mod mcp_dispute;
+mod mcp_dispute_reads;
 mod mcp_dump;
 mod mcp_dump_chain;
 mod mcp_export;

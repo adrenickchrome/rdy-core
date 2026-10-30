@@ -3,6 +3,7 @@ use crate::answer::card_of;
 use crate::answer::relay::{RelayInput, relayed};
 use crate::coord_graph::AltRef;
 use crate::error::*;
+use crate::history_facts::{LandingDispute, landing_dispute};
 use crate::pending::queue::approval_holds;
 use crate::pending::{Item, PlanCardBinding};
 use crate::plan::lifecycle::{PlanSummary, ProposePlanRequest};
@@ -204,6 +205,15 @@ pub struct EvidenceRow {
     pub card_hash: Option<String>,
 }
 
+/// The policy block version a policy landing names (O23).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PolicyRow {
+    /// The policy block's id.
+    pub block: String,
+    /// The block version's full hash.
+    pub version: String,
+}
+
 /// One landing as `rdy log` shows it (H3-C5). Every key is always present, in this order; a
 /// member that does not apply is `null`, except `chosen`, which only a landing that chose an
 /// alternative has (altg1). Not a stored type: the record is postcard.
@@ -230,6 +240,12 @@ pub struct LandingRow {
     /// The stored assessment of the approved version (D-ME2HD); `null` for a landing that holds
     /// none (a re-affirmation card's landing, a host's `land_atomic` landing).
     pub assessment: Option<String>,
+    /// The policy block version a policy landing was accepted under (O23); `null` for any other
+    /// landing.
+    pub policy: Option<PolicyRow>,
+    /// The landing's dispute state and the ids of its disputes, oldest first (D-ZWP7Q, O22).
+    /// A landing with no dispute reads `{"state": "none", "disputes": []}`.
+    pub dispute: LandingDispute,
     pub rebased_from: Vec<String>,
     /// When the landing was approved, RFC 3339 UTC.
     pub at: String,
@@ -3847,6 +3863,11 @@ impl ReadState {
                 card_hash: e.card_hash.map(|h| h.to_string()),
             }),
             assessment: rec.assessment.map(|h| h.to_string()),
+            policy: rec.policy.as_ref().map(|p| PolicyRow {
+                block: p.block.to_string(),
+                version: p.version.to_string(),
+            }),
+            dispute: landing_dispute(self, &id)?,
             rebased_from: rec.rebased_from.iter().map(|h| h.to_string()).collect(),
             at: rfc3339(rec.approved_by.at_ms),
             at_ms: rec.approved_by.at_ms,
