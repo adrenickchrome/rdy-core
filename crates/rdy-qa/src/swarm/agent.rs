@@ -619,6 +619,25 @@ pub(crate) fn spell(mut n: usize) -> String {
     out.iter().rev().collect()
 }
 
+/// A seeded draw of 1 in `one_in`: a pure function of the run's seed, a salt that names the draw,
+/// and the draw's index `n` (SplitMix64 of the three). The interleaving never changes it.
+pub(crate) fn drawn(seed: u64, salt: u64, n: u64, one_in: u64) -> bool {
+    let mut z = (seed ^ salt).wrapping_add(n.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    (z ^ (z >> 31)) % one_in.max(1) == 0
+}
+
+/// The salt of the scratch-only draw.
+const SCRATCH_ONLY: u64 = 0x7363_7261_7463_6800;
+
+/// ap13: whether agent `i`'s propose number `n` (from 0) of the run with `seed` proposes only its
+/// scratch changes: a seeded draw of 1 in 4.
+pub fn scratch_only_draw(seed: u64, i: usize, n: usize) -> bool {
+    drawn(seed, SCRATCH_ONLY ^ ((i as u64) << 32), n as u64, 4)
+}
+
 /// The text of a claim that agent `name` writes in pass `pass` to cite `target`: each agent's
 /// own words, so two citations of one block never share a normative text (a
 /// `duplicate_definition`).

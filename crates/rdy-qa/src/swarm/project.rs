@@ -11,6 +11,11 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+/// The rule of the swarm's authority policy (D-ZWP7Q): an agent `agent:a<i>` lands a version of
+/// draft content whose every change implements a decision or is editorial, that records no
+/// decision, with at most 20 blocks and 20 plan items.
+pub const SWARM_RULE: &str = "swarm-drafts";
+
 /// The name of a swarm process's parent directory under `/tmp`, before its pid.
 const PARENT_PREFIX: &str = "rdysw-";
 

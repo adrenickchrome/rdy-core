@@ -2999,3 +2999,338 @@ fn rg12_every_landing_of_a_proposed_version_names_an_assessment() {
         );
     });
 }
+
+/// ap13 (D-ZWP7Q, D-TF78H, D-DDSBJ): the authority policy of a swarm project, as its store holds
+/// it now: the policy block and its versions, each with the landing that put it into canon.
+fn policy_versions(st: &ReadState) -> (BlockId, BTreeMap<String, Hash>) {
+    let canon = st.materialized(&Scope::Canon).expect("canon");
+    let live = rdy_engine::policy::live_policy(st, &canon).expect("the swarm project's policy");
+    let history = st
+        .history(&Scope::Canon, &live.block, 100)
+        .expect("the policy's history");
+    let by_landing = history
+        .entries
+        .iter()
+        .filter_map(|e| {
+            let landing = e.landing.as_ref()?.id.clone();
+            Some((landing, e.version.parse().ok()?))
+        })
+        .collect();
+    (live.block, by_landing)
+}
+
+/// What a landing of a seed's run is: by the authority policy, or by a person (local or relayed).
+fn landing_counts(o: &Outcome) -> (usize, usize) {
+    let (_keep, copy) = copy_of(&o.dir);
+    let r = Rdy::open(&copy).expect("open the drained copy");
+    let st = r.read();
+    let (mut policy, mut person) = (0, 0);
+    for (landing, rec) in st.reader().landings().expect("read canon's chain") {
+        if o.seed_landings.contains(&landing.to_string()) {
+            continue;
+        }
+        match rec.assurance {
+            rdy_model::Assurance::Policy => policy += 1,
+            rdy_model::Assurance::Local | rdy_model::Assurance::Relayed => person += 1,
+        }
+    }
+    drop(st);
+    r.close().expect("close the drained copy");
+    (policy, person)
+}
+
+/// ap13: one agent, one scratch write and one stable write, and a propose that the seeded draw
+/// makes scratch-only (`rdy_propose {changes}`): the version holds the scratch change alone, the
+/// propose reply's verdict accepts it under rule `swarm-drafts`, and the agent lands it with
+/// `rdy_land` (`assurance: policy`).
+#[test]
+fn ap13_a_scratch_only_version_is_accepted_under_swarm_drafts() {
+    use rdy_qa::swarm::{agent, journal::Journal, project};
+    let seed = (1..1_000)
+        .find(|s| agent::scratch_only_draw(*s, 0, 0))
+        .expect("a seed whose first propose of a0 is scratch-only");
+    let cfg = Config {
+        seed,
+        agents: 2,
+        steps: 12,
+        kill_at: None,
+    };
+    let p = project::build(&cfg);
+    let j = Journal::new();
+    let acts = vec![
+        Act::Write {
+            target: Pick::Seed(0),
+            stable: false,
+        },
+        Act::Write {
+            target: Pick::Seed(0),
+            stable: true,
+        },
+        Act::Propose,
+    ];
+    agent::spawn(
+        &p,
+        &cfg,
+        0,
+        acts,
+        j.clone(),
+        std::sync::Arc::new(agent::KillGate::new()),
+    )
+    .join()
+    .unwrap_or_else(|e| panic!("agent a0 panicked: {e:?}"));
+    let entries = j.entries();
+    let all = || format!("{entries:#?}");
+    let change_of = |stable: bool| {
+        entries
+            .iter()
+            .find(|e| e.act == "write" && e.stable == stable && e.outcome == Met::Ok)
+            .and_then(|e| e.change.clone())
+            .unwrap_or_else(|| panic!("a write with stable {stable}: {}", all()))
+    };
+    let (scratch, stable) = (change_of(false), change_of(true));
+    let propose = entries
+        .iter()
+        .find(|e| e.act == "propose" && e.outcome == Met::Ok)
+        .unwrap_or_else(|| panic!("an acknowledged propose: {}", all()));
+    let reply = propose.reply.clone().expect("a propose reply");
+    assert_eq!(reply["changes"], serde_json::json!([scratch]), "{reply:#}");
+    assert!(!reply["changes"].to_string().contains(&stable), "{reply:#}");
+    assert_eq!(reply["policy"]["verdict"], "accepts", "{reply:#}");
+    assert_eq!(reply["policy"]["rule"], project::SWARM_RULE, "{reply:#}");
+    let landed = entries
+        .iter()
+        .find(|e| e.act == "land" && e.actor == "agent:a0")
+        .unwrap_or_else(|| panic!("a0 lands its version: {}", all()));
+    assert_eq!(landed.outcome, Met::Ok, "{}", all());
+    assert_eq!(landed.block, propose.block);
+    let land = landed.reply.as_ref().expect("the rdy_land reply");
+    assert_eq!(land["assurance"], "policy", "{land:#}");
+}
+
+/// ap13 (D-ZWP7Q "The agent's landing act"): from the drained store, every policy landing of a
+/// seed's run names the policy version that was live when it landed (the last one a landing
+/// before it put into canon) and an assessment of its version whose verdict accepts under that
+/// policy; it records no relay; and its changes write no decision and no block in stable content.
+/// Each seed lands at least one.
+#[test]
+fn ap13_every_policy_landing_is_in_policy() {
+    each(|seed, o| {
+        let (_keep, copy) = copy_of(&o.dir);
+        let r = Rdy::open(&copy).expect("open the drained copy");
+        let st = r.read();
+        let reader = st.reader();
+        let canon = st.materialized(&Scope::Canon).expect("canon");
+        let (block, versions) = policy_versions(&st);
+        let mut chain = reader.landings().expect("read canon's chain");
+        chain.reverse();
+        let mut live: Option<Hash> = None;
+        let (mut count, mut bad) = (0, vec![]);
+        for (landing, rec) in &chain {
+            let at = landing.short();
+            if rec.assurance == rdy_model::Assurance::Policy {
+                count += 1;
+                let want = live.map(|version| rdy_model::assessment::PolicyRef {
+                    block: block.clone(),
+                    version,
+                });
+                if rec.policy != want {
+                    bad.push(format!(
+                        "landing {at} names policy {:?}, not the live {want:?}",
+                        rec.policy
+                    ));
+                }
+                if rec.relayed_by.is_some() || rec.relay_evidence.is_some() {
+                    bad.push(format!("landing {at} records a relay"));
+                }
+                let approved = rec.approved_version.unwrap_or(rec.proposal);
+                match rec.assessment.map(|a| reader.assessment(&a)) {
+                    Some(Ok(a)) => {
+                        if a.proposal != approved {
+                            bad.push(format!(
+                                "landing {at}: its assessment is of another version"
+                            ));
+                        }
+                        let accepts = a.policy.as_ref().is_some_and(|p| {
+                            p.policy == rec.policy
+                                && matches!(
+                                    p.verdict,
+                                    rdy_model::assessment::PolicyVerdict::Accepts { .. }
+                                )
+                        });
+                        if !accepts {
+                            bad.push(format!(
+                                "landing {at}: its assessment's verdict is {:?}",
+                                a.policy
+                            ));
+                        }
+                    }
+                    Some(Err(e)) => bad.push(format!("landing {at}: its assessment: {e}")),
+                    None => bad.push(format!("landing {at} names no assessment")),
+                }
+                for c in &rec.changes {
+                    let change = reader.change(c).expect("a landed change");
+                    for op in &change.ops {
+                        let decision = match op {
+                            Op::Create { block } | Op::Update { block, .. } => {
+                                block.block_type == "decision"
+                            }
+                            Op::Delete { id, .. } => {
+                                canon.get(id).is_some_and(|b| b.block_type == "decision")
+                            }
+                        };
+                        if decision {
+                            bad.push(format!(
+                                "landing {at}: change {} writes decision {}",
+                                c.short(),
+                                op.block_id()
+                            ));
+                        }
+                    }
+                    let stable = stable_subjects(&st, &canon, &change);
+                    if !stable.is_empty() {
+                        bad.push(format!(
+                            "landing {at}: change {} writes stable content {stable:?}",
+                            c.short()
+                        ));
+                    }
+                }
+            }
+            if let Some(v) = versions.get(&landing.to_string()) {
+                live = Some(*v);
+            }
+        }
+        drop(st);
+        r.close().expect("close the drained copy");
+        eprintln!("ap13 swarm seed {seed}: {count} policy landings");
+        assert!(count >= 1, "swarm seed {seed}: no policy landing");
+        assert!(bad.is_empty(), "swarm seed {seed}: {bad:#?}");
+    });
+}
+
+/// ap13 (D-ZWP7Q): each seed lands under the policy (an agent's `rdy_land`) and by a person's
+/// approval (local or relayed). The counts a person reads with --nocapture: the landings of each
+/// kind, the disputes opened and resolved, and each `E_POLICY_HUMAN` and `E_PERMISSION` the
+/// journal saw.
+#[test]
+fn ap13_seeds_land_under_the_policy_and_by_a_person() {
+    each(|seed, o| {
+        let (policy, person) = landing_counts(o);
+        let ok = |act: &str| {
+            o.journal
+                .iter()
+                .filter(|e| e.act == act && e.outcome == Met::Ok)
+                .count()
+        };
+        let met = |code: &str| {
+            o.journal
+                .iter()
+                .filter(|e| e.outcome == Met::Refused(code.to_string()))
+                .map(|e| format!("{} step {} {}", e.actor, e.step, e.act))
+                .collect::<Vec<_>>()
+        };
+        eprintln!(
+            "ap13 swarm seed {seed}: {policy} policy landings, {person} approvals, {} disputes opened, {} resolved, E_POLICY_HUMAN {:?}, E_PERMISSION {:?}",
+            ok("dispute_open"),
+            ok("dispute_resolve"),
+            met("E_POLICY_HUMAN"),
+            met("E_PERMISSION")
+        );
+        assert!(policy >= 1, "swarm seed {seed}: no policy landing");
+        assert!(person >= 1, "swarm seed {seed}: no person's approval");
+    });
+}
+
+/// ap13 (D-ZWP7Q "Disputes": a dispute shows and never blocks): the person opens disputes in the
+/// run, a landing follows an open dispute, and every live agent view still drains. The seeds
+/// together open at least one dispute.
+#[test]
+fn ap13_disputes_never_block_the_drain() {
+    let opened = std::cell::Cell::new(0usize);
+    each(|seed, o| {
+        let (_keep, copy) = copy_of(&o.dir);
+        let r = Rdy::open(&copy).expect("open the drained copy");
+        let st = r.read();
+        let (disputes, _) = st
+            .reader()
+            .all_disputes(st.seq(), usize::MAX)
+            .expect("read the disputes");
+        let mut live = vec![];
+        for name in st.view_names() {
+            let Some(head) = st.view_head(&name) else {
+                continue;
+            };
+            let by_agent = head
+                .owner
+                .as_ref()
+                .is_some_and(|w| w.actor.starts_with("agent:a"));
+            if by_agent && !head.closed && !st.included(&name).is_empty() {
+                live.push(name);
+            }
+        }
+        drop(st);
+        r.close().expect("close the drained copy");
+        opened.set(opened.get() + disputes.len());
+        assert!(
+            live.is_empty(),
+            "swarm seed {seed}: views neither landed nor closed after the drain: {live:?}"
+        );
+        let journaled = o
+            .journal
+            .iter()
+            .filter(|e| e.act == "dispute_open" && e.outcome == Met::Ok)
+            .count();
+        assert_eq!(
+            journaled,
+            disputes.len(),
+            "swarm seed {seed}: the journal's acknowledged opens and the store's disputes"
+        );
+        // a landing after the first open dispute: the dispute blocked nothing
+        if let Some(first) = o
+            .journal
+            .iter()
+            .position(|e| e.act == "dispute_open" && e.outcome == Met::Ok)
+        {
+            let after = o.journal[first..]
+                .iter()
+                .any(|e| e.act == "land" && e.outcome == Met::Ok);
+            assert!(
+                after,
+                "swarm seed {seed}: no landing after the first dispute opened"
+            );
+        }
+    });
+    assert!(opened.get() > 0, "no seed opened a dispute");
+}
+
+/// ap13 (guard): `rdy fsck` passes on each drained project, and every landing the journal
+/// acknowledged (an `Ok` `land` entry, or a `land_found` entry that names one) is in canon's
+/// chain, the policy landings of agents among them.
+#[test]
+fn ap13_every_acknowledged_landing_passes_fsck() {
+    each(|seed, o| {
+        let (ok, fsck) = oracle::fsck(&o.dir, &o.served.env_pairs());
+        assert!(ok, "swarm seed {seed}: rdy fsck failed: {fsck}");
+        let (_keep, copy) = copy_of(&o.dir);
+        let r = Rdy::open(&copy).expect("open the drained copy");
+        let chain: BTreeSet<String> = r
+            .read()
+            .reader()
+            .landings()
+            .expect("read canon's chain")
+            .into_iter()
+            .map(|(h, _)| h.to_string())
+            .collect();
+        r.close().expect("close the drained copy");
+        let missing: Vec<String> = o
+            .landings
+            .iter()
+            .filter(|l| !chain.contains(*l))
+            .cloned()
+            .collect();
+        assert!(!o.landings.is_empty(), "swarm seed {seed}: no landing");
+        assert!(
+            missing.is_empty(),
+            "swarm seed {seed}: acknowledged landings not in canon: {missing:?}"
+        );
+    });
+}
