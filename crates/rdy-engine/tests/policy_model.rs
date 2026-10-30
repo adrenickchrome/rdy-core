@@ -92,16 +92,34 @@ fn policy_json(require: Value, owners: Value) -> Value {
     })
 }
 
-/// Writes a doc `rules` with a policy block under it, in `work`; returns (doc, policy).
+/// Writes a doc `rules` with a decision and a policy block under it, in `work`; the policy's
+/// change implements the decision, as a change to the policy must (ap8, O19). Returns (doc,
+/// policy).
 fn write_policy(r: &mut Rdy, fields: Value) -> (BlockId, BlockId) {
     let res = write(
         r,
         json!([
             {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "rules", "title": "Rules", "doc_type": "page"}},
-            {"op": "create", "type": "authority_policy", "id": "$p", "parent": "$d", "fields": fields}
+            {"op": "create", "type": "decision", "id": "$dec", "parent": "$d", "fields": {"statement": "Adopt the policy", "status": "proposed", "needs_content": false}}
         ]),
     );
-    (id(&res.created["$d"]), id(&res.created["$p"]))
+    let doc = id(&res.created["$d"]);
+    let decision = id(&res.created["$dec"]);
+    let res = r
+        .write(
+            &writer(),
+            WriteRequest {
+                view: "work".into(),
+                ops: serde_json::from_value(json!([
+                    {"op": "create", "type": "authority_policy", "id": "$p", "parent": doc.to_string(), "fields": fields}
+                ]))
+                .unwrap(),
+                justification: Some(Justification::Implements(vec![decision])),
+                message: "write the policy".into(),
+            },
+        )
+        .unwrap();
+    (doc, id(&res.created["$p"]))
 }
 
 fn canon_policy(r: &Rdy) -> Option<LivePolicy> {
