@@ -7,7 +7,8 @@ use super::catalogue::AgentCheck;
 use super::code::{self, CodeSource};
 use crate::lexicon::is_tie;
 use crate::query::{governing_ids, is_entity_in};
-use crate::{E_UNKNOWN_BLOCK, Materialized, RdyError, Scope};
+use crate::related::{RelatedDecision, related_in};
+use crate::{E_UNKNOWN_BLOCK, Materialized, RdyError};
 use rdy_graph::{EdgeKind, GoverningCache, GoverningStatuses, Graph};
 use rdy_model::check_request::CheckSubject;
 use rdy_model::decision::{
@@ -70,6 +71,19 @@ fn one_block<'a>(
 
 fn graph_of(inputs: CaseInputs<'_>, m: &Materialized) -> Graph {
     Graph::build_with(m.iter(), Arc::new(inputs.st.pack().tracking()))
+}
+
+/// The related rows of decision `id` in the case's `after` state, and the count the cap dropped.
+/// A relation another view holds is not in that state, so it cannot change this case.
+fn related_of(inputs: CaseInputs<'_>, id: &BlockId) -> (Vec<RelatedDecision>, usize) {
+    let pack = inputs.st.pack();
+    let is_entity_type = |t: &str| {
+        pack.block_types
+            .get(t)
+            .is_some_and(|t| t.traits.contains(&Trait::Defines))
+    };
+    let g = graph_of(inputs, inputs.after);
+    related_in(inputs.after, &g, &is_entity_type, std::slice::from_ref(id))
 }
 
 fn primary<'a>(
@@ -150,9 +164,7 @@ pub(super) fn contradiction_pairs(
             if d.block_type != DECISION {
                 return Err(wrong_subject(check, &id.to_string(), &d.block_type));
             }
-            let (rows, dropped) = inputs
-                .st
-                .related_decisions(&Scope::Inflight, std::slice::from_ref(id))?;
+            let (rows, dropped) = related_of(inputs, id);
             let mut seen = BTreeSet::new();
             let mut pairs = vec![];
             for row in rows {
@@ -411,9 +423,7 @@ pub(super) fn decision_review(
             rows.push(primary("finding", &f.id, None, Some(f), Selection::Shown));
         }
     }
-    let (related, _) = inputs
-        .st
-        .related_decisions(&Scope::Inflight, std::slice::from_ref(&d.id))?;
+    let (related, _) = related_of(inputs, &d.id);
     for r in related {
         visited.visit()?;
         if let Ok(id) = BlockId::parse(&r.decision)

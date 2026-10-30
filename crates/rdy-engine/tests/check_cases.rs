@@ -545,6 +545,192 @@ fn ck4_contradiction_related_pairs_keep_order_and_cap() {
     assert_eq!(omitted, 0);
 }
 
+/// Commits `ops` straight to `view`.
+fn raw_ops(r: &mut Rdy, view: &str, ops: Vec<Op>) {
+    let s = Session::human("human:t".into(), Role::Writer).unwrap();
+    r.store_mut()
+        .commit_to_view(
+            view,
+            Change {
+                view: view.into(),
+                ops,
+                deps: vec![],
+                provenance: s.provenance(),
+                justification: None,
+                message: "raw".into(),
+                links: ChangeLinks::default(),
+                read_identity: None,
+            },
+        )
+        .expect("raw commit");
+    r.invalidate();
+}
+
+/// The decision review and contradiction cases of D-REVW0 in `view`: the hash and rows of the
+/// review, and each pair's blocks and hash with the count left out.
+#[allow(clippy::type_complexity)]
+fn scoped_cases(
+    r: &Rdy,
+    view: &str,
+) -> (
+    Hash,
+    Vec<(String, String)>,
+    Vec<(Vec<BlockId>, Hash)>,
+    usize,
+) {
+    let st = r.read();
+    let m = st.materialized(&Scope::View(view.into())).unwrap();
+    let subject = subject_blocks(&["D-REVW0"]);
+    let review = build(&st, AgentCheck::DecisionReview, &subject, &m, &m, &[]).unwrap();
+    let (cases, omitted) = contradiction_cases(
+        &subject,
+        CaseInputs {
+            st: &st,
+            before: &m,
+            after: &m,
+            changes: &[],
+        },
+    )
+    .unwrap();
+    (
+        review.hash,
+        rows_of(&review.case),
+        cases
+            .into_iter()
+            .map(|c| (c.subject_blocks, c.hash))
+            .collect(),
+        omitted,
+    )
+}
+
+#[test]
+fn ck4_related_rows_read_the_supplied_state() {
+    let (_d, mut r) = project();
+    let mut blocks = doc_and_section();
+    blocks.extend([
+        link(
+            reviewed("proposed", "The body.", "Founder"),
+            "refines",
+            "D-REKA0",
+        ),
+        finding(),
+        decision("D-REKA0", Some("s-SEC00"), "accepted"),
+        decision("D-0THER", Some("s-SEC00"), "proposed"),
+    ]);
+    raw_commit(&mut r, blocks);
+    let scoped = scoped_cases(&r, "w");
+    let related = |rows: &[(String, String)]| -> Vec<String> {
+        rows.iter()
+            .filter(|(_, role)| role == "related")
+            .map(|(i, _)| i.clone())
+            .collect()
+    };
+    assert_eq!(related(&scoped.1), ["D-REKA0"]);
+    assert_eq!(scoped.2.len(), 1);
+
+    // another view relates D-0THER to the subject: an incoming link, written on D-0THER
+    r.view_fork(&agent("f"), "w", "f").unwrap();
+    let st = r.read();
+    let m = st.materialized(&Scope::View("f".into())).unwrap();
+    let incoming = link(m.get(&id("D-0THER")).unwrap().clone(), "refines", "D-REVW0");
+    let op = update(&m, incoming);
+    drop(st);
+    raw_ops(&mut r, "f", vec![op]);
+    let st = r.read();
+    let (rows, _) = st
+        .related_decisions(&Scope::Inflight, &[id("D-REVW0")])
+        .unwrap();
+    assert!(
+        rows.iter().any(|x| x.decision == "D-0THER"),
+        "the in-flight scope holds the fork's link"
+    );
+    drop(st);
+    assert_eq!(
+        scoped_cases(&r, "w"),
+        scoped,
+        "another view's incoming link leaves the scoped cases unchanged"
+    );
+    let forked = scoped_cases(&r, "f");
+    assert_eq!(
+        related(&forked.1),
+        ["D-REKA0", "D-0THER"],
+        "the view that holds the link sees it"
+    );
+    assert_ne!(forked.0, scoped.0);
+    assert_eq!(forked.2.len(), 2);
+
+    // another view relates the subject itself: an outgoing link, written on D-REVW0
+    r.view_fork(&agent("g"), "w", "g").unwrap();
+    let st = r.read();
+    let m = st.materialized(&Scope::View("g".into())).unwrap();
+    let outgoing = link(
+        m.get(&id("D-REVW0")).unwrap().clone(),
+        "supersedes",
+        "D-0THER",
+    );
+    let op = update(&m, outgoing);
+    drop(st);
+    raw_ops(&mut r, "g", vec![op]);
+    assert_eq!(
+        scoped_cases(&r, "w"),
+        scoped,
+        "another view's outgoing link leaves the scoped cases unchanged"
+    );
+
+    // a state no view holds, such as a proposal's candidate, reads its own relations
+    let st = r.read();
+    let w = st.materialized(&Scope::View("w".into())).unwrap();
+    let extra = decision("D-CAND0", Some("s-SEC00"), "accepted");
+    let tied = link(w.get(&id("D-REVW0")).unwrap().clone(), "refines", "D-CAND0");
+    let candidate = w.with(&[Op::Create { block: extra }, update(&w, tied)]);
+    let got = build(
+        &st,
+        AgentCheck::DecisionReview,
+        &subject_blocks(&["D-REVW0"]),
+        &w,
+        &candidate,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(related(&rows_of(&got.case)), ["D-CAND0", "D-REKA0"]);
+}
+
+/// A pair held in canon stays one case when another view edits a block of the pair.
+#[test]
+fn ck4_canon_pair_survives_another_views_edit() {
+    let (_d, mut r) = project();
+    let w = put(
+        &mut r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$doc", "fields": {"name": "spec", "title": "Spec", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "Rules"}},
+            {"op": "create", "type": "claim", "id": "$a", "parent": "$s", "body": "A holds."},
+            {"op": "create", "type": "claim", "id": "$b", "parent": "$s", "after": "$a", "body": "B stands."}
+        ]),
+    );
+    let p = r
+        .propose(&agent("seed"), "seed", "seed", Some(common::TEST_SUMMARY))
+        .unwrap();
+    common::confirm_exceptions(&mut r, &person(), &p);
+    r.land(&person(), &p.id).unwrap();
+    let (a, b) = (w.created["$a"].clone(), w.created["$b"].clone());
+    r.view_create(&agent("w2"), "w2", None, false).unwrap();
+    let subject = subject_blocks(&[&a, &b]);
+    let scoped = |r: &Rdy| {
+        let st = r.read();
+        let m = st.materialized(&Scope::View("w2".into())).unwrap();
+        build(&st, AgentCheck::Contradiction, &subject, &m, &m, &[]).map(|c| c.hash)
+    };
+    let before = scoped(&r).unwrap();
+    put(
+        &mut r,
+        "f",
+        json!([{"op": "update", "id": b, "body": "B stands, mostly."}]),
+    );
+    assert_eq!(scoped(&r).unwrap(), before);
+}
+
 /// Canon: a section; claims a, b, c, g (decided by the live D-GVRN0), x (to delete); and z, which
 /// no selected change writes.
 fn fold_world() -> Materialized {

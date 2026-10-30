@@ -114,6 +114,23 @@ impl ReadState {
         pair_now_in(&cx, pair)
     }
 
+    /// The canon items of `pair` when canon holds both blocks at those contents, whatever an open
+    /// view writes to them. A check's case reads one state, so another view's edit of a block
+    /// does not take a canon pair away; [`Self::pair_now`] keeps its rule for derived requests.
+    pub fn pair_in_canon(&self, pair: &[(BlockId, Hash)]) -> Result<Option<Vec<Item>>, RdyError> {
+        let [(a, ca), (b, cb)] = pair else {
+            return Ok(None);
+        };
+        let set = self.tensions()?;
+        let cx = DetectCx::new(
+            self,
+            set.writes(),
+            canon_index_of(self)?,
+            DetectScope::Inflight,
+        );
+        canon_pair(&cx, (a, *ca), (b, *cb))
+    }
+
     /// The best rule that holds now between `a` and `b` in the in-flight scope, or `None` when
     /// none holds or a block is absent, deprecated or does not take part.
     pub fn pair_rule(&self, a: &BlockId, b: &BlockId) -> Result<Option<Rule>, RdyError> {
@@ -263,7 +280,16 @@ fn pair_now_in(cx: &DetectCx<'_>, pair: &[(BlockId, Hash)]) -> Result<Option<Vec
     if !cx.writes.on(a).is_empty() || !cx.writes.on(b).is_empty() {
         return Ok(None);
     }
-    match (canon_item(cx, a, *ca)?, canon_item(cx, b, *cb)?) {
+    canon_pair(cx, (a, *ca), (b, *cb))
+}
+
+/// The sorted canon items of two blocks, or `None` unless canon holds both at those contents.
+fn canon_pair(
+    cx: &DetectCx<'_>,
+    a: (&BlockId, Hash),
+    b: (&BlockId, Hash),
+) -> Result<Option<Vec<Item>>, RdyError> {
+    match (canon_item(cx, a.0, a.1)?, canon_item(cx, b.0, b.1)?) {
         (Some(x), Some(y)) => {
             let mut items = vec![x, y];
             items.sort();

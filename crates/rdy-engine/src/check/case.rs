@@ -113,8 +113,12 @@ fn pair_case(
             .ok_or_else(|| recipes::unknown(id))
     };
     let pair = [(a.clone(), content(a)?), (b.clone(), content(b)?)];
-    let Some(items) = st.pair_now(&pair)? else {
-        return Ok(None);
+    let items = match st.pair_now(&pair)? {
+        Some(items) => items,
+        None => match st.pair_in_canon(&pair)? {
+            Some(items) => items,
+            None => return Ok(None),
+        },
     };
     let key = pair_key(
         &items
