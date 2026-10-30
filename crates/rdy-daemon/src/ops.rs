@@ -45,7 +45,7 @@ use dispute::dispute;
 use dump::dump;
 use edit::{edit_block, keys_assign, new_doc, new_finding, new_folder, new_profile, new_source};
 use intake::{answer, pending};
-use land::{approve, propose, tag};
+use land::{approve, land, propose, tag};
 use plan::{plan, reaffirm, repin};
 use policy::policy;
 pub use project::{Cleaned, clean_quarantine, quarantine};
@@ -126,6 +126,7 @@ pub const OPS: &[&str] = &[
     "edit_block",
     "propose",
     "approve",
+    "land",
     "dispute",
     "policy",
     "tag",
@@ -474,6 +475,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
                 "{proposal, relayed_by?, evidence?, question?, session_ref?, strict?}",
             )?,
         ),
+        "land" => land(cx, parse(op, args, "{proposal}")?),
         "dispute" => dispute(
             cx,
             parse(

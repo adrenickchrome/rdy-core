@@ -107,6 +107,8 @@ enum Cmd {
     Redact(redact_cmd::RedactArgs),
     /// Approve a proposal version: P-<id>@<n>, P-<id> (its latest version) or a version hash.
     Approve(land_cmd::ApproveArgs),
+    /// Land a ready version that the authority policy accepts, as an agent session. A person approves with rdy approve. The chat path is rdy_land
+    Land(land_cmd::LandArgs),
     /// Open, resolve and list disputes of landings. A person's act: an agent session relays it with the person's words (--relayed-by and --evidence). The chat path is rdy_dispute
     Dispute {
         #[command(subcommand)]
@@ -274,6 +276,7 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Propose(a) => land_cmd::propose(env, a),
         Cmd::Redact(a) => redact_cmd::redact(env, a),
         Cmd::Approve(a) => land_cmd::approve(env, a, as_json),
+        Cmd::Land(a) => land_cmd::land(env, a),
         Cmd::Dispute { cmd } => dispute_cmd::dispute(env, cmd),
         Cmd::Policy { cmd } => policy_cmd::policy(env, cmd),
         Cmd::View { cmd } => view_cmd::view(env, cmd),

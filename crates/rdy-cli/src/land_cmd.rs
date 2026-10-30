@@ -61,6 +61,12 @@ pub(crate) struct ApproveArgs {
 }
 
 #[derive(clap::Args)]
+pub(crate) struct LandArgs {
+    /// The version to land: P-<id>@<n>, P-<id> (its latest version) or a version hash.
+    proposal: String,
+}
+
+#[derive(clap::Args)]
 pub(crate) struct TagArgs {
     version: String,
     #[arg(long)]
@@ -412,9 +418,28 @@ fn bound_version(op: &mut OpFn<'_>, proposal: &str, spelling: &str) -> Result<Bo
     })
 }
 
+/// `rdy land` (D-ZWP7Q, O14): an agent session lands a version the authority policy accepts,
+/// through the daemon's `land` op. The text is the approval's, with the assurance.
+pub(crate) fn land(env: &Env, a: LandArgs) -> Result<(Value, String), ErrorReply> {
+    let v = call(env, "land", json!({"proposal": a.proposal}))?;
+    let t = land_text(&v);
+    Ok((v, t))
+}
+
+/// The landing lines of `rdy land`: [`approve_text`]'s, with `assurance <assurance>` after the
+/// landing line.
+fn land_text(v: &Value) -> String {
+    landing_text(v, true)
+}
+
 /// The landing lines of an approval, from its reply: the proposal, its summary, the landing,
 /// the relay, the chosen alternative, the consequences, the rebases, new keys and warnings.
 pub(crate) fn approve_text(v: &Value) -> String {
+    landing_text(v, false)
+}
+
+/// [`approve_text`], with the `assurance` line after the landing when `assurance` is set.
+fn landing_text(v: &Value, assurance: bool) -> String {
     let approved = text(&v["approved"]);
     let mut t = format!(
         "approving {approved}: {} ({} change(s))",
@@ -429,6 +454,9 @@ pub(crate) fn approve_text(v: &Value) -> String {
         hash_short(text(&v["landing"]))
     ));
     t.push_str(&relayed_by_text(v));
+    if assurance {
+        t.push_str(&format!("\nassurance {}", text(&v["assurance"])));
+    }
     if let Some(member) = v["chosen"]["member"].as_str() {
         t.push_str(&format!(
             "\nchose {member} of {}",

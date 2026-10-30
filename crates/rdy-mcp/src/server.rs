@@ -11,6 +11,7 @@ mod inbox;
 mod instructions;
 mod intake;
 mod intent;
+mod land;
 mod policy;
 mod propose;
 mod read;
@@ -177,7 +178,7 @@ impl RdyServer {
 
     /// The tool router of each family (`server/<family>.rs`), once. `new` registers their sum;
     /// a new family adds one line here.
-    fn family_routers() -> [ToolRouter<Self>; 26] {
+    fn family_routers() -> [ToolRouter<Self>; 27] {
         [
             Self::session_router(),
             Self::read_router(),
@@ -190,6 +191,7 @@ impl RdyServer {
             Self::dispute_router(),
             Self::policy_router(),
             Self::propose_router(),
+            Self::land_router(),
             Self::asset_router(),
             Self::views_router(),
             Self::entity_router(),
@@ -1545,8 +1547,9 @@ mod tests {
         let families = RdyServer::family_routers();
         // sig9: the signing family follows the store family; hsa9: it holds the three hub key
         // tools too (ap5: the dispute family after decide moves both one place on; ap9: the
-        // policy family after dispute moves both one more)
-        let mut signing: Vec<String> = families[23]
+        // policy family after dispute moves both one more; ap11: the land family after propose
+        // moves both one more)
+        let mut signing: Vec<String> = families[24]
             .list_all()
             .into_iter()
             .map(|t| t.name.to_string())
@@ -1563,14 +1566,14 @@ mod tests {
             ]
         );
         assert!(
-            families[22]
+            families[23]
                 .list_all()
                 .iter()
                 .any(|t| t.name == "rdy_clone"),
             "the store family precedes the signing family"
         );
         // hsa9: the remote family is the last, after auth; hpb15: it holds rdy_publish too
-        let mut remote: Vec<String> = families[25]
+        let mut remote: Vec<String> = families[26]
             .list_all()
             .into_iter()
             .map(|t| t.name.to_string())

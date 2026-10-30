@@ -11,6 +11,7 @@ mod gate_identity;
 mod gate_intake_e2e;
 mod gate_plan;
 mod gate_plan_cards;
+mod gate_policy_land;
 mod gate_policy_verdict;
 mod gate_readiness;
 mod gate_reaffirm_cards;

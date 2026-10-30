@@ -128,7 +128,7 @@ pub use error::*;
 pub use events::{Event, EventKind, Events};
 pub use gate::{
     LandInfo, LandOptions, LandingRow, PROPOSAL_TENSIONS_MAX, ProposalInfo, ProposalRef,
-    RebasedInfo, RelayedByRow,
+    RebasedInfo, RelayedByRow, run_land,
 };
 pub use history::{
     Author, HISTORY_MAX, History, HistoryEntry, JustificationInfo, LandingRef, canon_step_reads,

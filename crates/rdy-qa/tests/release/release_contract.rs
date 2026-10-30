@@ -1635,6 +1635,10 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
     ("key revoke", "changes the signing key"),
     ("keys", "assigns keys to people"),
     (
+        "land",
+        "needs an authority policy that accepts the version; gate_policy_land pins its replies",
+    ),
+    (
         "load",
         "replaces a project from a dump; the dump_load row covers it",
     ),
@@ -1905,6 +1909,10 @@ const MCP_NOT_CAPTURED: &[(&str, &str)] = &[
     ("rdy_key_bind", "changes the signing key"),
     ("rdy_key_retire", "changes the signing key"),
     ("rdy_key_revoke", "changes the signing key"),
+    (
+        "rdy_land",
+        "needs an authority policy that accepts the version; gate_policy_land pins its replies",
+    ),
     (
         "rdy_load",
         "replaces a project from a dump; the dump_load row covers it",
