@@ -169,9 +169,14 @@ fn dq7_a_proposal_version_still_shows_as_before() {
 /// `rdy approve` reads the version through `show`, which also reads a landing since dq7: a landing
 /// hash is refused by the approval in its own words, not as an internal error.
 #[test]
-fn dq7_approving_a_landing_hash_is_not_found() {
+fn dq7_approving_a_landing_hash_is_not_a_proposal() {
     let w = world();
-    let err = stderr(&w.s, &["approve", &w.l1]);
-    assert!(err.starts_with("error E_NOT_FOUND"), "{err}");
+    assert_eq!(
+        stderr(&w.s, &["approve", &w.l1]),
+        format!(
+            "error E_BAD_INPUT: {} is not a proposal\nfix: pass the id returned by rdy_propose",
+            w.l1
+        )
+    );
     w.s.stop();
 }
