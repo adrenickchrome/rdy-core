@@ -805,7 +805,7 @@ fn read(pack: &Pack, block: &Block, out: &mut Vec<Issue>) -> Option<PolicyFields
             ok = false;
         }
         Some(FieldValue::Str(k)) if k != POLICY_KEY => {
-            r.kind("key", "key must be authority-policy");
+            r.kind("key", "must be authority-policy");
             ok = false;
         }
         Some(FieldValue::Str(_)) => {}
