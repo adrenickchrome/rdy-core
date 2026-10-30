@@ -13,6 +13,8 @@ mod engine_coverage_score;
 mod engine_demo_summary;
 mod engine_diff;
 mod engine_diff_fields;
+mod engine_diff_paging;
+mod engine_diff_request;
 mod engine_entity_search;
 mod engine_events;
 mod engine_governing;
