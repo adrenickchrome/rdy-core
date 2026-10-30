@@ -20,11 +20,13 @@ use std::path::{Path, PathBuf};
 
 mod brief;
 mod clone;
+mod dispute;
 mod dump;
 mod edit;
 mod intake;
 mod land;
 mod plan;
+mod policy;
 mod project;
 mod publication;
 pub(crate) mod publish;
@@ -39,11 +41,13 @@ mod wc;
 
 use brief::brief;
 use clone::clone;
+use dispute::dispute;
 use dump::dump;
 use edit::{edit_block, keys_assign, new_doc, new_finding, new_folder, new_profile, new_source};
 use intake::{answer, pending};
-use land::{approve, propose, tag};
+use land::{approve, land, propose, tag};
 use plan::{plan, reaffirm, repin};
+use policy::policy;
 pub use project::{Cleaned, clean_quarantine, quarantine};
 use project::{check, fsck, reindex};
 use publication::publication_check;
@@ -122,6 +126,9 @@ pub const OPS: &[&str] = &[
     "edit_block",
     "propose",
     "approve",
+    "land",
+    "dispute",
+    "policy",
     "tag",
     "import",
     "reindex",
@@ -468,6 +475,16 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
                 "{proposal, relayed_by?, evidence?, question?, session_ref?, strict?}",
             )?,
         ),
+        "land" => land(cx, parse(op, args, "{proposal}")?),
+        "dispute" => dispute(
+            cx,
+            parse(
+                op,
+                args,
+                "{op, landing?, dispute?, reason?, outcome?, correction?, open?, relayed_by?, evidence?, question?, session_ref?}",
+            )?,
+        ),
+        "policy" => policy(cx, parse(op, args, "{op, doc?, view?}")?),
         "tag" => tag(
             cx,
             parse(

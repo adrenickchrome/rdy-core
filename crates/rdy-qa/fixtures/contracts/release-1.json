@@ -14,6 +14,7 @@
         "checkout": "working copy: the working_copy row records its replies",
         "clone": "writes a second project; the dump_load row covers the bytes",
         "commit": "working copy: the working_copy row records its replies",
+        "dispute": "a person's act on a landing; cli_dispute pins its replies and lines",
         "dump": "writes a file; the dump_load row covers the bytes",
         "edit": "working copy: the working_copy row records its replies",
         "export": "writes a file tree; the markdown_exports row covers it",
@@ -24,6 +25,7 @@
         "key retire": "changes the signing key",
         "key revoke": "changes the signing key",
         "keys": "assigns keys to people",
+        "land": "needs an authority policy that accepts the version; gate_policy_land pins its replies",
         "load": "replaces a project from a dump; the dump_load row covers it",
         "mcp": "starts the MCP server; the mcp row covers it",
         "new finding": "needs a finding pack",
@@ -34,6 +36,7 @@
         "plan defer": "needs an open plan item",
         "plan dismiss": "needs an open plan item",
         "plan done": "needs an open plan item",
+        "policy": "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
         "publication": "needs a publication profile",
         "publish": "uploads a site to a host",
         "reaffirm": "needs a suspect decision; the write op of the same name is an MCP write",
@@ -469,8 +472,13 @@
               "at": "string",
               "at_ms": "number",
               "changes": "number",
+              "dispute": {
+                "disputes": [],
+                "state": "string"
+              },
               "evidence": "null",
               "landing": "string",
+              "policy": "null",
               "prev": "null|string",
               "proposal": "string",
               "proposed_by": {
@@ -761,6 +769,16 @@
               "deferred": "number",
               "items": [],
               "open": "number"
+            },
+            "policy": {
+              "block": "null",
+              "reasons": [
+                "string"
+              ],
+              "role": "null",
+              "rule": "null",
+              "verdict": "string",
+              "version": "null"
             },
             "ready": "bool",
             "ref": "string",
@@ -1109,6 +1127,10 @@
                     "role": "string",
                     "run": "string"
                   },
+                  "dispute": {
+                    "disputes": [],
+                    "state": "string"
+                  },
                   "id": "string",
                   "proposal": "string",
                   "title": "string"
@@ -1151,6 +1173,10 @@
                 "at_ms": "number",
                 "role": "string",
                 "run": "string"
+              },
+              "dispute": {
+                "disputes": [],
+                "state": "string"
               },
               "id": "string",
               "proposal": "string",
@@ -3865,6 +3891,613 @@
           ],
           "name": "approve",
           "subcommands": []
+        },
+        {
+          "args": [
+            {
+              "action": "set",
+              "id": "proposal",
+              "index": 1,
+              "num_args": "1",
+              "positional": true,
+              "required": true,
+              "value_names": [
+                "PROPOSAL"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "set",
+              "global": true,
+              "id": "project",
+              "long": "project",
+              "num_args": "1",
+              "value_names": [
+                "PROJECT"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "no_daemon",
+              "long": "no-daemon",
+              "num_args": "0",
+              "value_names": [
+                "NO_DAEMON"
+              ]
+            },
+            {
+              "action": "help",
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "short": "h"
+            }
+          ],
+          "groups": [
+            {
+              "args": [
+                "proposal"
+              ],
+              "id": "LandArgs",
+              "multiple": true,
+              "required": false
+            }
+          ],
+          "name": "land",
+          "subcommands": []
+        },
+        {
+          "args": [
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "set",
+              "global": true,
+              "id": "project",
+              "long": "project",
+              "num_args": "1",
+              "value_names": [
+                "PROJECT"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "no_daemon",
+              "long": "no-daemon",
+              "num_args": "0",
+              "value_names": [
+                "NO_DAEMON"
+              ]
+            },
+            {
+              "action": "help",
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "short": "h"
+            }
+          ],
+          "groups": [
+            {
+              "args": [],
+              "id": "Dispute",
+              "multiple": true,
+              "required": false
+            }
+          ],
+          "name": "dispute",
+          "subcommand_required": true,
+          "subcommands": [
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "id": "landing",
+                  "index": 1,
+                  "num_args": "1",
+                  "positional": true,
+                  "required": true,
+                  "value_names": [
+                    "LANDING"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "reason",
+                  "long": "reason",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "REASON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "evidence",
+                  "long": "evidence",
+                  "num_args": "1",
+                  "value_names": [
+                    "WORDS"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "relayed_by",
+                  "long": "relayed-by",
+                  "num_args": "1",
+                  "value_names": [
+                    "ACTOR"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "question",
+                  "long": "question",
+                  "num_args": "1",
+                  "value_names": [
+                    "TEXT"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "session_ref",
+                  "long": "session",
+                  "num_args": "1",
+                  "value_names": [
+                    "REF"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [],
+                  "id": "Open",
+                  "multiple": true,
+                  "required": false
+                },
+                {
+                  "args": [
+                    "evidence",
+                    "question",
+                    "relayed_by",
+                    "session_ref"
+                  ],
+                  "id": "RelayFlags",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "open",
+              "subcommands": []
+            },
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "id": "dispute",
+                  "index": 1,
+                  "num_args": "1",
+                  "positional": true,
+                  "required": true,
+                  "value_names": [
+                    "DISPUTE"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "outcome",
+                  "long": "outcome",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "OUTCOME"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "correction",
+                  "long": "correction",
+                  "num_args": "1",
+                  "value_names": [
+                    "LANDING"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "evidence",
+                  "long": "evidence",
+                  "num_args": "1",
+                  "value_names": [
+                    "WORDS"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "relayed_by",
+                  "long": "relayed-by",
+                  "num_args": "1",
+                  "value_names": [
+                    "ACTOR"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "question",
+                  "long": "question",
+                  "num_args": "1",
+                  "value_names": [
+                    "TEXT"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "session_ref",
+                  "long": "session",
+                  "num_args": "1",
+                  "value_names": [
+                    "REF"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [],
+                  "id": "Resolve",
+                  "multiple": true,
+                  "required": false
+                },
+                {
+                  "args": [
+                    "evidence",
+                    "question",
+                    "relayed_by",
+                    "session_ref"
+                  ],
+                  "id": "RelayFlags",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "resolve",
+              "subcommands": []
+            },
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "id": "landing",
+                  "long": "landing",
+                  "num_args": "1",
+                  "value_names": [
+                    "LANDING"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "id": "open",
+                  "long": "open",
+                  "num_args": "0",
+                  "value_names": [
+                    "OPEN"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [
+                    "landing",
+                    "open"
+                  ],
+                  "id": "List",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "list",
+              "subcommands": []
+            }
+          ]
+        },
+        {
+          "args": [
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "set",
+              "global": true,
+              "id": "project",
+              "long": "project",
+              "num_args": "1",
+              "value_names": [
+                "PROJECT"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "no_daemon",
+              "long": "no-daemon",
+              "num_args": "0",
+              "value_names": [
+                "NO_DAEMON"
+              ]
+            },
+            {
+              "action": "help",
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "short": "h"
+            }
+          ],
+          "groups": [
+            {
+              "args": [],
+              "id": "Policy",
+              "multiple": true,
+              "required": false
+            }
+          ],
+          "name": "policy",
+          "subcommand_required": true,
+          "subcommands": [
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "id": "doc",
+                  "long": "doc",
+                  "num_args": "1",
+                  "required": true,
+                  "value_names": [
+                    "DOC"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "view",
+                  "long": "view",
+                  "num_args": "1",
+                  "value_names": [
+                    "VIEW"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [
+                    "doc",
+                    "view"
+                  ],
+                  "id": "Init",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "init",
+              "subcommands": []
+            }
+          ]
         },
         {
           "args": [
@@ -11720,6 +12353,14 @@
         "type": "Percent"
       },
       {
+        "default": "off",
+        "key": "coverage.gate",
+        "levels": [
+          "project"
+        ],
+        "type": "Choice([\"off\", \"no_lower\"])"
+      },
+      {
         "default": "14",
         "key": "views.idle_days",
         "levels": [
@@ -11925,9 +12566,9 @@
           {
             "event": "pending_added",
             "ids": [
-              "948ce6cf92b85b16dfa6d0b520396f535a3a84c13e377bc7cf2a344e486c487e"
+              "57bb025384132ebabb1e2f7ec4a0bbe7acc4d4774b16a2a00bfcecf22a93731c"
             ],
-            "line": "P-948ce6cf92b8@1 waits for an answer; read rdy_pending"
+            "line": "P-57bb02538413@1 waits for an answer; read rdy_pending"
           },
           {
             "event": "intent_posted",
@@ -11947,46 +12588,46 @@
           {
             "event": "pending_added",
             "ids": [
-              "3a6e97c6c2e098400f310fdcf44bcd761dc4ab48ecc1a554eab17a527614f477"
+              "e22ec58c0fd9fa1c0dbdc0f73a5e27e4ecc3b1a21c308f31ba2a4985faa1e4d0"
             ],
-            "line": "P-3a6e97c6c2e0@1 waits for an answer; read rdy_pending"
+            "line": "P-e22ec58c0fd9@1 waits for an answer; read rdy_pending"
           },
           {
             "event": "landed",
             "ids": [
-              "5d6f34eb6ab8839d2e98c086ede8281163af2612823429b343438fb1db72c182",
-              "3a6e97c6c2e098400f310fdcf44bcd761dc4ab48ecc1a554eab17a527614f477"
+              "11564a65a18e2fc97460a8e44c4a9115801ac60213d7daf0b047024099dbaf19",
+              "e22ec58c0fd9fa1c0dbdc0f73a5e27e4ecc3b1a21c308f31ba2a4985faa1e4d0"
             ],
-            "line": "landing 5d6f34eb6ab8 of view work changed 1 blocks in your areas (payments)"
+            "line": "landing 11564a65a18e of view work changed 1 blocks in your areas (payments)"
           },
           {
             "event": "view_rebased",
             "ids": [
-              "5d6f34eb6ab8839d2e98c086ede8281163af2612823429b343438fb1db72c182",
+              "11564a65a18e2fc97460a8e44c4a9115801ac60213d7daf0b047024099dbaf19",
               "d31c17dae8c0ad358656fcf02af98d3d4d5214f5d8d7b5bab2a51c9e6dd7d9e4"
             ],
-            "line": "your view a rebased onto landing 5d6f34eb6ab8 with 1 conflicts"
+            "line": "your view a rebased onto landing 11564a65a18e with 1 conflicts"
           },
           {
             "event": "tension_opened",
             "ids": [
-              "617638da05934cf876447f336419c010cd65abf4fc0ca88dce8c48fa8acc2f2d",
+              "041b8f6ef16638de42b6555a3acd31b891f1f101da7d10d6ce429b5505ab11ff",
               "37579917da30b6c6a43687d7325fbfa0452c3d28fd38260f6163b5cc5c764328"
             ],
-            "line": "tension 617638da0593 replaces 4c8116c45adb on your change 37579917da30 (edit_collision, blocking): landing 5d6f34eb6ab8"
+            "line": "tension 041b8f6ef166 replaces 4c8116c45adb on your change 37579917da30 (edit_collision, blocking): landing 11564a65a18e"
           }
         ]
       },
       "logged_suspects": [],
       "logged_tensions": [
-        "tn-0df3803f2a8f",
-        "tn-26128692ed56",
-        "tn-617638da0593"
+        "tn-041b8f6ef166",
+        "tn-1e8ff0b046e2",
+        "tn-26128692ed56"
       ],
       "tensions": {
-        "tn-0df3803f2a8f": "open",
-        "tn-26128692ed56": "open",
-        "tn-617638da0593": "open"
+        "tn-041b8f6ef166": "open",
+        "tn-1e8ff0b046e2": "open",
+        "tn-26128692ed56": "open"
       },
       "transitions": 3
     },
@@ -12471,6 +13112,7 @@
       "E_BRIEF_STALE": "\"E_BRIEF_STALE\"",
       "E_CONFIG": "\"E_CONFIG\"",
       "E_CONFLICT_UNRESOLVED": "\"E_CONFLICT_UNRESOLVED\"",
+      "E_COVERAGE_LOWERED": "\"E_COVERAGE_LOWERED\"",
       "E_DAEMON_GONE": "\"E_DAEMON_GONE\"",
       "E_DAEMON_START": "\"E_DAEMON_START\"",
       "E_DAEMON_VERSION": "\"E_DAEMON_VERSION\"",
@@ -12504,6 +13146,7 @@
       "E_PERMISSION": "\"E_PERMISSION\"",
       "E_PLAN_ITEM": "\"E_PLAN_ITEM\"",
       "E_PLAN_OPEN": "\"E_PLAN_OPEN\"",
+      "E_POLICY_HUMAN": "\"E_POLICY_HUMAN\"",
       "E_PROPOSAL_MOVED": "\"E_PROPOSAL_MOVED\"",
       "E_PROPOSAL_NOT_READY": "\"E_PROPOSAL_NOT_READY\"",
       "E_PUBLICATION_REFERENCE": "\"E_PUBLICATION_REFERENCE\"",
@@ -13069,6 +13712,16 @@
         "close or defer each item, and answer each tension item with confirm or dismiss: rdy_plan / rdy plan"
       ],
       [
+        "E_POLICY_HUMAN",
+        "the authority policy needs a person for the version",
+        "show the card to the person and relay their answer: rdy_pending, then rdy_answer"
+      ],
+      [
+        "E_COVERAGE_LOWERED",
+        "the version lowers a page's or the corpus's coverage",
+        "see what lowered it with rdy_coverage / rdy coverage, then tie the new content to what it describes"
+      ],
+      [
         "E_PLAN_ITEM",
         "<id> is not an item of the change plan for <scope>",
         "read the plan with rdy_plan / rdy plan and pass an item id it lists"
@@ -13159,6 +13812,7 @@
       "CODE_KEPT_FIX": "\"check the block against its code, then repin it with code: true\"",
       "CONFIG_LIMIT_FIX": "\"reduce the config file to the stated limit\"",
       "CONFLICT_FIX": "\"write the block from the version you want (rdy_context lists the sides), or exclude one side's change\"",
+      "COVERAGE_LOWERED_FIX": "\"see what lowered it with rdy_coverage / rdy coverage, then tie the new content to what it describes\"",
       "CREDENTIALS_FIX": "\"remove the invalid credential file, then sign in again\"",
       "CREDENTIALS_MESSAGE": "\"the credential file is not a valid bounded mapping\"",
       "DECISIONS_HOME_FIX": "\"set decisions.home in .rdy.yaml to the path, key or id of a doc or a folder that exists\"",
@@ -13167,6 +13821,7 @@
       "EVIDENCE_MESSAGE": "\"field \\\"evidence\\\" must be a list of 1 to 20 evidence entries\"",
       "EXPORT_CHAIN_FIX": "\"follow the newest file of this store's chain, or start a new chain with rdy dump\"",
       "GONE_FIX": "\"check rdy status; a write may or may not have committed; it is not retried\"",
+      "HAS_POLICY_FIX": "\"change it with rdy_write / rdy edit, with implements a decision\"",
       "HELD_BY_READER_FIX": "\"release the earlier read state, then try again\"",
       "HOLDER_FIX": "\"Ask the uploader to send the removal again, and take the upload that carries it.\"",
       "HOLDER_LOAD_REDACTION_LIMIT_FIX": "\"Keep the dump chain and the holder it came from. This rdy cannot load this chain.\"",
@@ -13182,6 +13837,7 @@
       "LOAD_CHAIN_FIX": "\"pass the full dump, then each increment in chain order\"",
       "LOST_FIX": "\"run rdy status: it finishes the commit if the store recorded it\"",
       "MCP_HUMAN_CLAIM_FIX": "\"claim your own agent: actor, and relay the person's words with rdy_answer\"",
+      "NAME_DOC_FIX": "\"pass doc: rdy_policy {op: \\\"init\\\", doc} / rdy policy init --doc <doc>\"",
       "NO_AGENT_FIX": "\"check SSH_AUTH_SOCK and the configured key, then try again\"",
       "NO_CODE_FIX": "\"set code_paths, then repin it with code: true\"",
       "NO_LAN_ADDRESS_FIX": "\"connect this machine to a private network, then run rdy serve --stop; or set serve.site_lan to false\"",
@@ -13198,6 +13854,7 @@
       "PLAN_GATE_FIX": "\"close or defer each item, and answer each tension item with confirm or dismiss: rdy_plan / rdy plan\"",
       "PLAN_ITEM_FIX": "\"read the plan with rdy_plan / rdy plan and pass an item id it lists\"",
       "PLAN_OPEN_FIX": "\"close or defer each item: rdy_plan / rdy plan\"",
+      "POLICY_HUMAN_FIX": "\"show the card to the person and relay their answer: rdy_pending, then rdy_answer\"",
       "PROFILE_PARENT_FIX": "\"set parent to a doc id\"",
       "PROJECT_FIX": "\"Propose the redaction of the listed targets again, and have a person approve it.\"",
       "REACH_CONFIRM_FIX": "\"a block it relies on changed: check that it still holds, and supersede it if not; no repin is needed\"",
@@ -13647,6 +14304,8 @@
       "E_LOAD_STOP",
       "W_STOP_BEFORE_REDACTION",
       "E_PLAN_OPEN",
+      "E_POLICY_HUMAN",
+      "E_COVERAGE_LOWERED",
       "E_PLAN_ITEM",
       "E_DEFERRAL_OPEN",
       "W_PLAN_OPEN",
@@ -14127,6 +14786,10 @@
             "at": "string",
             "at_ms": "number",
             "changes": "number",
+            "dispute": {
+              "disputes": [],
+              "state": "string"
+            },
             "evidence": {
               "|null": {
                 "card_hash": "string",
@@ -14138,6 +14801,7 @@
               }
             },
             "landing": "string",
+            "policy": "null",
             "prev": "null|string",
             "proposal": "string",
             "proposed_by": {
@@ -14419,6 +15083,16 @@
               }
             ],
             "open": "number"
+          },
+          "policy": {
+            "block": "null",
+            "reasons": [
+              "string"
+            ],
+            "role": "null",
+            "rule": "null",
+            "verdict": "string",
+            "version": "null"
           },
           "ready": "bool",
           "ref": "string",
@@ -14702,6 +15376,10 @@
               "fix": "string",
               "when": "string"
             },
+            "E_COVERAGE_LOWERED": {
+              "fix": "string",
+              "when": "string"
+            },
             "E_DAEMON_GONE": {
               "fix": "string",
               "when": "string"
@@ -14775,6 +15453,10 @@
               "when": "string"
             },
             "E_PLAN_OPEN": {
+              "fix": "string",
+              "when": "string"
+            },
+            "E_POLICY_HUMAN": {
               "fix": "string",
               "when": "string"
             },
@@ -15371,6 +16053,10 @@
                   "role": "string",
                   "run": "string"
                 },
+                "dispute": {
+                  "disputes": [],
+                  "state": "string"
+                },
                 "id": "string",
                 "proposal": "string",
                 "title": "string"
@@ -15423,6 +16109,10 @@
               "at_ms": "number",
               "role": "string",
               "run": "string"
+            },
+            "dispute": {
+              "disputes": [],
+              "state": "string"
             },
             "id": "string",
             "proposal": "string",
@@ -15680,12 +16370,15 @@
       "rdy_asset": "stores a file",
       "rdy_auth": "signs in to a hosted service",
       "rdy_clone": "writes a second project to disk",
+      "rdy_dispute": "a person's act on a landing; mcp_dispute pins its replies",
       "rdy_dump": "writes a file; the dump_load row covers the bytes",
       "rdy_export": "writes a file tree; the markdown_exports row covers it",
       "rdy_key_bind": "changes the signing key",
       "rdy_key_retire": "changes the signing key",
       "rdy_key_revoke": "changes the signing key",
+      "rdy_land": "needs an authority policy that accepts the version; gate_policy_land pins its replies",
       "rdy_load": "replaces a project from a dump; the dump_load row covers it",
+      "rdy_policy": "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
       "rdy_publication_check": "needs a publication profile",
       "rdy_publish": "uploads a site to a host",
       "rdy_redact": "destroys content; no dry run is probed",
@@ -15710,6 +16403,7 @@
       "rdy_context",
       "rdy_coverage",
       "rdy_decide",
+      "rdy_dispute",
       "rdy_dump",
       "rdy_export",
       "rdy_impact",
@@ -15719,11 +16413,13 @@
       "rdy_key_retire",
       "rdy_key_revoke",
       "rdy_key_show",
+      "rdy_land",
       "rdy_load",
       "rdy_log",
       "rdy_overview",
       "rdy_pending",
       "rdy_plan",
+      "rdy_policy",
       "rdy_propose",
       "rdy_publication_check",
       "rdy_publish",
@@ -16467,6 +17163,85 @@
           "type": "object"
         }
       },
+      "rdy_dispute": {
+        "input_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "correction": {
+              "description": "resolve, upheld only: the landing that corrects the disputed one.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dispute": {
+              "description": "resolve: the dispute (its id or a prefix of 6 or more).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "evidence": {
+              "description": "open and resolve: the person's words, quoted. Without them an agent session is refused (E_PERMISSION).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "landing": {
+              "description": "open: the landing to dispute; list: only this landing's disputes (a hash or a prefix of 6 or more).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "description": "open, resolve or list. open and resolve are a person's acts: relay their words with evidence.",
+              "type": "string"
+            },
+            "open": {
+              "description": "list: only the open disputes (default false).",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "outcome": {
+              "description": "resolve: upheld, dismissed or withdrawn. Only the person who opened the dispute withdraws it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "question": {
+              "description": "open and resolve: the question the person answered.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reason": {
+              "description": "open: why the landing is wrong, 1 to 2000 characters.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_ref": {
+              "description": "open and resolve: the chat session the person spoke in (default mcp).",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "op"
+          ],
+          "type": "object"
+        }
+      },
       "rdy_dump": {
         "input_schema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -16822,6 +17597,22 @@
         "input_schema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
+          "type": "object"
+        }
+      },
+      "rdy_land": {
+        "input_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "proposal": {
+              "description": "The proposal version to land: P-<id>@<n> as rdy_propose reports it, P-<id> (its latest version) or a version hash.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "proposal"
+          ],
           "type": "object"
         }
       },
@@ -17224,6 +18015,36 @@
               ]
             }
           },
+          "type": "object"
+        }
+      },
+      "rdy_policy": {
+        "input_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "doc": {
+              "description": "init: the doc that holds the policy block (path, key or id). Required: a folder or no doc is refused.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "description": "init: starts the authority policy. It is the only op.",
+              "type": "string"
+            },
+            "view": {
+              "description": "init: the view to write in and propose (default: the session's own view).",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "op"
+          ],
           "type": "object"
         }
       },
@@ -19156,6 +19977,38 @@
             "defines"
           ]
         },
+        "authority_policy": {
+          "body": "forbidden",
+          "children": [],
+          "class": "supporting",
+          "fields": {
+            "agent_may_accept": {
+              "kind": "list",
+              "required": false,
+              "values": []
+            },
+            "owners": {
+              "kind": "list",
+              "required": false,
+              "values": []
+            },
+            "require": {
+              "kind": "list",
+              "required": false,
+              "values": []
+            },
+            "roles": {
+              "kind": "map",
+              "required": false,
+              "values": []
+            }
+          },
+          "prefix": "ap",
+          "tracking": [],
+          "traits": [
+            "structural"
+          ]
+        },
         "claim": {
           "body": "required",
           "children": [],
@@ -19387,7 +20240,8 @@
             "question",
             "finding",
             "source",
-            "publication_profile"
+            "publication_profile",
+            "authority_policy"
           ],
           "class": null,
           "fields": {

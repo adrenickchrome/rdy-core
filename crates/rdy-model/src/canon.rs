@@ -60,7 +60,8 @@ pub struct LandingRecord {
     /// The ASSESSMENT of the approved version (encoding 1). None from every product writer.
     pub assessment: Option<Hash>,
     /// The authority policy block version that accepted the landing (encoding 1). Set only with
-    /// assurance `policy` and no relay. None from every product writer.
+    /// assurance `policy` and no relay. Set only by the policy landing writer
+    /// (`Store::prepare_land_by_policy`); None from every other product writer.
     pub policy: Option<PolicyRef>,
     /// The identity of a stored read: never serialized, `None` on every new landing. A caller
     /// that edits a stored read clears it first.

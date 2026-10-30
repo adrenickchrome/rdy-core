@@ -16,6 +16,7 @@ mod conn;
 #[cfg(test)]
 mod contract;
 mod coverage_cmd;
+mod dispute_cmd;
 mod dump_cmd;
 mod edit_cmd;
 mod history_text;
@@ -25,6 +26,7 @@ mod intent_cmd;
 mod land_cmd;
 mod output;
 mod plan_cmd;
+mod policy_cmd;
 mod project_cmd;
 mod publication_cmd;
 mod publish_cmd;
@@ -105,6 +107,18 @@ enum Cmd {
     Redact(redact_cmd::RedactArgs),
     /// Approve a proposal version: P-<id>@<n>, P-<id> (its latest version) or a version hash.
     Approve(land_cmd::ApproveArgs),
+    /// Land a ready version that the authority policy accepts, as an agent session. A person approves with rdy approve. The chat path is rdy_land
+    Land(land_cmd::LandArgs),
+    /// Open, resolve and list disputes of landings. A person's act: an agent session relays it with the person's words (--relayed-by and --evidence). The chat path is rdy_dispute
+    Dispute {
+        #[command(subcommand)]
+        cmd: dispute_cmd::DisputeCmd,
+    },
+    /// Start the authority policy: write a proposed decision and the policy block under the doc, then propose them for a person to approve. The chat path is rdy_policy
+    Policy {
+        #[command(subcommand)]
+        cmd: policy_cmd::PolicyCmd,
+    },
     /// Create, fork, include, replay, exclude, resolve, compare, list, show, close and hand over
     /// views.
     View {
@@ -262,6 +276,9 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Propose(a) => land_cmd::propose(env, a),
         Cmd::Redact(a) => redact_cmd::redact(env, a),
         Cmd::Approve(a) => land_cmd::approve(env, a, as_json),
+        Cmd::Land(a) => land_cmd::land(env, a),
+        Cmd::Dispute { cmd } => dispute_cmd::dispute(env, cmd),
+        Cmd::Policy { cmd } => policy_cmd::policy(env, cmd),
         Cmd::View { cmd } => view_cmd::view(env, cmd),
         Cmd::Alt { cmd } => alt_cmd::alt(env, cmd),
         Cmd::Intent { cmd } => intent_cmd::intent(env, cmd),

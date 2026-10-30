@@ -431,6 +431,16 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "close or defer each item, and answer each tension item with confirm or dismiss: rdy_plan / rdy plan",
     ),
     (
+        E_POLICY_HUMAN,
+        "the authority policy needs a person for the version",
+        POLICY_HUMAN_FIX,
+    ),
+    (
+        E_COVERAGE_LOWERED,
+        "the version lowers a page's or the corpus's coverage",
+        COVERAGE_LOWERED_FIX,
+    ),
+    (
         E_PLAN_ITEM,
         "<id> is not an item of the change plan for <scope>",
         "read the plan with rdy_plan / rdy plan and pass an item id it lists",

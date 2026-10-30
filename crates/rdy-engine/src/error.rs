@@ -71,6 +71,11 @@ pub const E_PROPOSAL_MOVED: &str = "E_PROPOSAL_MOVED";
 pub const E_EXCEPTION_OPEN: &str = "E_EXCEPTION_OPEN";
 /// A proposal version fails readiness; each reason is an issue with its own code and fix.
 pub const E_PROPOSAL_NOT_READY: &str = "E_PROPOSAL_NOT_READY";
+/// The authority policy needs a person for the version: `rdy_land` refuses it (D-ZWP7Q).
+pub const E_POLICY_HUMAN: &str = "E_POLICY_HUMAN";
+/// The version lowers a page's or the corpus's coverage under `coverage.gate: no_lower`: a
+/// readiness issue (D-ZWP7Q, D-WB22B, D-T5S9A).
+pub const E_COVERAGE_LOWERED: &str = "E_COVERAGE_LOWERED";
 /// An answer names a queue item that changed or left the queue since its card was shown;
 /// `corrected` holds the fresh card when the item has one.
 pub const E_ITEM_MOVED: &str = "E_ITEM_MOVED";
@@ -155,6 +160,11 @@ pub const REDACTION_STALE_FIX: &str =
 /// The fix of `E_REDACTION_HUMAN`.
 pub const REDACTION_HUMAN_FIX: &str =
     "Show the redaction card and relay the person's answer, or approve from the CLI as a human.";
+/// The fix of `E_POLICY_HUMAN` (D-ZWP7Q, O14).
+pub const POLICY_HUMAN_FIX: &str =
+    "show the card to the person and relay their answer: rdy_pending, then rdy_answer";
+/// The fix of `E_COVERAGE_LOWERED` (D-ZWP7Q, O17).
+pub const COVERAGE_LOWERED_FIX: &str = "see what lowered it with rdy_coverage / rdy coverage, then tie the new content to what it describes";
 /// The fix of `E_REDACTION_PENDING`.
 pub const REDACTION_PENDING_FIX: &str =
     "Close the project and reopen it to finish the removal. Do not delete the log.";
@@ -1056,7 +1066,7 @@ pub fn upstream_signout_local() -> Issue {
 
 /// Every error code the engine defines: each `E_*` constant of this module and the briefing's
 /// two. It is the engine's whole static error set, not one feature's subset.
-const CORE_ERROR_CODES: [&str; 107] = [
+const CORE_ERROR_CODES: [&str; 109] = [
     E_LOCKED,
     E_HELD_BY_READER,
     E_NO_PROJECT,
@@ -1099,6 +1109,8 @@ const CORE_ERROR_CODES: [&str; 107] = [
     E_PROPOSAL_MOVED,
     E_EXCEPTION_OPEN,
     E_PROPOSAL_NOT_READY,
+    E_POLICY_HUMAN,
+    E_COVERAGE_LOWERED,
     E_ITEM_MOVED,
     E_HAS_DEPENDENTS,
     E_DEPS_MISSING,

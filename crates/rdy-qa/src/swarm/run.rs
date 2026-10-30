@@ -13,7 +13,8 @@
 //!   copied to `frozen`.
 //! - The drain (collision liveness, ledger O5): every live agent view with changes, oldest first
 //!   (the member views of a set still open come first, so the set is chosen before a view holding
-//!   a change bound to a member proposes), is proposed by its agent and landed by the person,
+//!   a change bound to a member proposes), is proposed by its agent and landed by the person, or
+//!   by its agent with `rdy_land` when the propose reply's verdict accepts it (ap13, D-ZWP7Q),
 //!   through a closed table of resolutions, never a dismissal. Before the views, the reviewers
 //!   judge the open review requests (at most `REVIEWS`). A change bound to a member that lost its
 //!   set is excluded with what depends on it: its dependents by deps, and a change that cites a
@@ -25,14 +26,15 @@
 //!   deferral card when the queue lists one (D-AAQ9Z), and the relay reads the version's change
 //!   plan (`version_plan`), so a check sees what the gate read.
 //!
-//! Around every landing the relay reads canon's blocking tensions before and after (ledger O2);
+//! Around every landing the lander's session (the relay, or the agent that lands under the policy)
+//! reads canon's blocking tensions before and after (ledger O2);
 //! a landing whose reply the kill cut is found by a read and audited the same way. The person
 //! lands on a cadence and the agents wait for the person's acts due before each step (ruling
 //! task-5.2), and the person's approve and the agents' acts that decide from a read take turns
 //! (`KillGate::landing_turn`).
 //! The journal holds two markers of the actor `run`: `freeze` and `drain`.
 use super::agent::{
-    self, AgentReport, KINDS, KillGate, Link, Pace, Res, Where, inbox_labels, labels_of,
+    self, AgentHooks, AgentReport, KINDS, KillGate, Link, Pace, Res, Where, inbox_labels, labels_of,
 };
 use super::journal::{Entry, InboxRead, Journal, Outcome as Met};
 use super::oracle::{self, copy_tree};
@@ -141,7 +143,7 @@ pub(crate) struct Before {
     /// The view's effective base: the landing it read on.
     pub base: Option<String>,
     /// The proposal's `advised_digest` when a reviewer's advice on it is not yet accepted.
-    advised: Option<String>,
+    pub advised: Option<String>,
     /// Canon's blocking tensions.
     canon: Value,
 }
@@ -217,8 +219,8 @@ pub(crate) fn before_land(link: &mut Link, pref: &str) -> Option<Before> {
 
 /// After a landing (`reply`, the `rdy approve` reply): the relay reads canon's blocking tensions
 /// again, and each one the landing put into canon is a violation. A read the kill cuts is made
-/// again on the restarted daemon: only the person lands, and it holds its landing turn, so canon
-/// has not moved. A second loss fails the run (the check is never left out).
+/// again on the restarted daemon: whoever lands (the person, or an agent under the policy) holds
+/// the landing turn, so canon has not moved. A second loss fails the run (the check is never left out).
 pub(crate) fn after_land(link: &mut Link, watch: &Watch, before: Before, reply: &Value) {
     let after = match canon_blocking(link) {
         Some(after) => after,
@@ -486,7 +488,10 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
         .iter()
         .enumerate()
         .map(|(i, acts)| {
-            let pace = Some(agent_pacer(cfg, &progress, &person_done, s.person.len()));
+            let hooks = AgentHooks {
+                pace: Some(agent_pacer(cfg, &progress, &person_done, s.person.len())),
+                watch: Some(watch.clone()),
+            };
             agent::spawn_paced(
                 &p,
                 cfg,
@@ -494,7 +499,7 @@ fn run_with(cfg: &Config, s: Script, journal: &Journal) -> Outcome {
                 acts.clone(),
                 journal.clone(),
                 gate.clone(),
-                pace,
+                hooks,
             )
         })
         .collect();
@@ -1048,9 +1053,9 @@ fn settle_order(set: &Value, bound: &str, order: &[String], busy: &[String]) -> 
 
 /// What the drain's propose came to.
 enum Proposed {
-    /// The proposal's ref, and the tensions its reply lists as refusing its landing (`refuses`),
-    /// by label.
-    Ref(String, BTreeSet<String>),
+    /// The proposal's ref, the tensions its reply lists as refusing its landing (`refuses`), by
+    /// label, and whether the reply's policy verdict accepts the version (ap13).
+    Ref(String, BTreeSet<String>, bool),
     /// The view holds nothing more.
     Empty,
     /// The drain settled an open set first: the view proposes again.
@@ -1187,12 +1192,17 @@ impl Drain {
             if shown["head"]["closed"] == true || empty {
                 return;
             }
-            let (pref, refusing) = match self.propose(i, v, round, &shown) {
-                Proposed::Ref(pref, refusing) => (pref, refusing),
+            let (pref, refusing, accepts) = match self.propose(i, v, round, &shown) {
+                Proposed::Ref(pref, refusing, accepts) => (pref, refusing, accepts),
                 Proposed::Empty => return,
                 Proposed::Again => continue,
             };
-            match self.land(v, &pref) {
+            let landed = if accepts {
+                self.land_by_policy(i, v, &pref)
+            } else {
+                self.land(v, &pref)
+            };
+            match landed {
                 None => return,
                 Some(r) => {
                     last.clone_from(&r.code);
@@ -1324,11 +1334,13 @@ impl Drain {
             e.view = Some(v.to_string());
             let res = link.raw("propose", "rdy_propose", args);
             let mut refusing = BTreeSet::new();
+            let mut accepts = false;
             match &res {
                 Res::Ok(r) => {
                     e.block = r["ref"].as_str().map(str::to_string);
                     e.seen = labels_of(&r["tensions"]);
                     refusing = refusing_of(&r["tensions"]);
+                    accepts = r["policy"]["verdict"] == "accepts";
                 }
                 Res::Refused(code, message) => {
                     e.outcome = Met::Refused(code.clone());
@@ -1339,7 +1351,7 @@ impl Drain {
             let made = e.block.clone();
             link.journal.record(e);
             match (res, made) {
-                (Res::Ok(_), Some(p)) => return Proposed::Ref(p, refusing),
+                (Res::Ok(_), Some(p)) => return Proposed::Ref(p, refusing, accepts),
                 (Res::Refused(code, message), _)
                     if code == "E_ALT_MEMBER" || code == "E_ALT_CHOSEN" =>
                 {
@@ -1641,6 +1653,51 @@ impl Drain {
         if matches!(res, Res::Lost) {
             link_fail(&self.cfg, pref, "accept_advice");
         }
+    }
+
+    /// ap13 (D-ZWP7Q): agent `i` lands `pref`, a version whose propose reply's verdict accepts,
+    /// with `rdy_land`, after the reads a person's landing makes (`before_land`) and with the
+    /// reads after it (`after_land`); the `land` entry is the agent's. `None` when it landed; else
+    /// the refusal, with the whole error object, for the table of resolutions. An `E_POLICY_HUMAN`
+    /// falls back to the person's approval, once (`land`). So does a version with advice the
+    /// person has not accepted: only a person accepts advice.
+    fn land_by_policy(&mut self, i: usize, v: &str, pref: &str) -> Option<Refusal> {
+        let (cfg, watch) = (self.cfg, self.watch.clone());
+        let link = self.agent(i);
+        let before = before_land(link, pref).unwrap_or_else(|| link_fail(&cfg, v, "land"));
+        if before.advised.is_some() {
+            return self.land(v, pref);
+        }
+        let mut e = link.entry("land");
+        e.block = Some(pref.to_string());
+        e.view = Some(before.view.clone());
+        e.base.clone_from(&before.base);
+        let res = link.raw("land", "rdy_land", json!({ "proposal": pref }));
+        let (code, body) = match res {
+            Res::Ok(body) => {
+                e.reply = Some(body.clone());
+                link.journal.record(e);
+                after_land(link, &watch, before, &body);
+                return None;
+            }
+            Res::Refused(code, message) => {
+                let body = link
+                    .last_error
+                    .clone()
+                    .unwrap_or_else(|| json!({"code": code, "message": message}));
+                (code, body)
+            }
+            Res::Lost => link_fail(&cfg, v, "land"),
+        };
+        e.outcome = Met::Refused(code.clone());
+        e.message = body["message"].as_str().map(str::to_string);
+        e.reply = Some(body.clone());
+        link.journal.record(e);
+        self.said = body.to_string();
+        if code == "E_POLICY_HUMAN" {
+            return self.land(v, pref);
+        }
+        Some(Refusal { code, body })
     }
 
     /// The person lands `pref` through the relay. `None` when it landed; else the refusal. Advice

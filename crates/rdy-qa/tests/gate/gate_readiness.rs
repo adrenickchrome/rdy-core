@@ -727,7 +727,7 @@ fn rgperf_readiness_on_one_state_is_the_same_on_each_read() {
         .collect();
     // what a read gives, less the card's clock reads
     let read = |c: &Candidate| {
-        let a = assess(&st, c, st.require_up_to_date()).unwrap();
+        let a = assess(&st, c, &st.gate_config()).unwrap();
         let card = a
             .readiness
             .card

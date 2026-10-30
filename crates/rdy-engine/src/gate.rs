@@ -3,6 +3,7 @@ use crate::answer::card_of;
 use crate::answer::relay::{RelayInput, relayed};
 use crate::coord_graph::AltRef;
 use crate::error::*;
+use crate::history_facts::{LandingDispute, landing_dispute};
 use crate::pending::queue::approval_holds;
 use crate::pending::{Item, PlanCardBinding};
 use crate::plan::lifecycle::{PlanSummary, ProposePlanRequest};
@@ -116,6 +117,9 @@ pub struct ProposalInfo {
     /// The hash of the `ASSESSMENT` record written in the version's batch (D-SDSV2); none for a
     /// version that is not ready.
     pub assessment: Option<String>,
+    /// The authority policy's verdict the assessment stores (D-ZWP7Q, O13); null for a version
+    /// that is not ready.
+    pub policy: Option<crate::readiness::ProposalPolicy>,
 }
 
 /// One view a landing rebased: how many of its changes dropped out (they landed) and how many
@@ -138,7 +142,8 @@ pub struct LandInfo {
     pub title: String,
     pub summary: Option<String>,
     pub changes: usize,
-    /// `local`, or `relayed` when an agent relayed the human's approval (FW-B9).
+    /// `local`, or `relayed` when an agent relayed the human's approval (FW-B9), or `policy` when
+    /// an agent landed a version the authority policy accepts (`rdy_land`, D-ZWP7Q).
     pub assurance: String,
     pub warnings: Vec<Issue>,
     pub rebased: Vec<RebasedInfo>,
@@ -167,6 +172,14 @@ pub struct LandOptions {
     pub evidence: Option<ApprovalEvidence>,
 }
 
+/// Who lands a version (D-ZWP7Q "The agent's landing act"): a person's approval, or an agent
+/// session under the authority policy (`rdy_land`), whose acceptance replaces the approval.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Lander {
+    Approver,
+    Policy,
+}
+
 /// Who relayed an approval, as shown in a landing row.
 #[derive(Clone, Debug, Serialize)]
 pub struct RelayedByRow {
@@ -190,6 +203,15 @@ pub struct EvidenceRow {
     pub options: Option<Vec<String>>,
     pub choice: Option<String>,
     pub card_hash: Option<String>,
+}
+
+/// The policy block version a policy landing names (O23).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PolicyRow {
+    /// The policy block's id.
+    pub block: String,
+    /// The block version's full hash.
+    pub version: String,
 }
 
 /// One landing as `rdy log` shows it (H3-C5). Every key is always present, in this order; a
@@ -218,6 +240,12 @@ pub struct LandingRow {
     /// The stored assessment of the approved version (D-ME2HD); `null` for a landing that holds
     /// none (a re-affirmation card's landing, a host's `land_atomic` landing).
     pub assessment: Option<String>,
+    /// The policy block version a policy landing was accepted under (O23); `null` for any other
+    /// landing.
+    pub policy: Option<PolicyRow>,
+    /// The landing's dispute state and the ids of its disputes, oldest first (D-ZWP7Q, O22).
+    /// A landing with no dispute reads `{"state": "none", "disputes": []}`.
+    pub dispute: LandingDispute,
     pub rebased_from: Vec<String>,
     /// When the landing was approved, RFC 3339 UTC.
     pub at: String,
@@ -997,6 +1025,169 @@ impl ReadState {
         listed.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
         Ok(listed)
     }
+}
+
+/// `E_POLICY_HUMAN` for version `pref` with `reasons` (O14).
+fn policy_human(pref: &ProposalRef, reasons: &[String]) -> RdyError {
+    RdyError::new(
+        E_POLICY_HUMAN,
+        format!(
+            "the authority policy needs a person for {pref}: {}",
+            reasons.join("; ")
+        ),
+        POLICY_HUMAN_FIX,
+    )
+}
+
+/// O14, O6: `rdy_land` reads the verdict assessment `a` stored for version `pref` and computes
+/// none. A version the policy does not accept (or an assessment with no verdict) is
+/// `E_POLICY_HUMAN` with its reasons; one it accepts needs the session's actor to match the
+/// accepting rule's `actors`, else `E_POLICY_HUMAN` naming the actor. Returns the live policy's
+/// ref, which freshness (O16 (1)) has checked is the assessment's.
+fn policy_acceptance(
+    st: &ReadState,
+    pref: &ProposalRef,
+    s: &Session,
+    a: &rdy_model::assessment::Assessment,
+) -> Result<rdy_model::assessment::PolicyRef, RdyError> {
+    use rdy_model::assessment::PolicyVerdict;
+    let rule = match a.policy.as_ref().map(|p| &p.verdict) {
+        Some(PolicyVerdict::Accepts { rule }) => rule,
+        Some(PolicyVerdict::NeedsPerson { reasons, .. }) => {
+            return Err(policy_human(pref, reasons));
+        }
+        None => {
+            return Err(policy_human(
+                pref,
+                &[crate::policy_verdict::NO_POLICY.to_string()],
+            ));
+        }
+    };
+    let canon = st.materialized(&Scope::Canon)?;
+    let bug = || {
+        RdyError::new(
+            E_INTERNAL,
+            format!(
+                "the stored verdict of {pref} names rule {rule}, which the live authority policy does not hold"
+            ),
+            "report this as a bug in rdy",
+        )
+    };
+    let live = crate::policy::live_policy(st, &canon).ok_or_else(bug)?;
+    let accepting = live
+        .fields
+        .as_ref()
+        .and_then(|f| f.rules.iter().find(|r| &r.name == rule))
+        .ok_or_else(bug)?;
+    if !accepting
+        .actors
+        .iter()
+        .any(|pattern| rdy_schema::policy::pattern_matches(pattern, &s.actor))
+    {
+        return Err(policy_human(
+            pref,
+            &[format!(
+                "actor {} matches none of rule {}'s actors",
+                s.actor, accepting.name
+            )],
+        ));
+    }
+    Ok(live.reference())
+}
+
+/// M3c O16's freshness checks of version `pref` (record `p`) against its assessment `a`, after
+/// M3b's: the message of the first that fails, or None. `since` is the landings since `a.base`,
+/// newest first. (1) The live policy (canon's at its head) is not the one `a` was judged under.
+/// (2) Under `coverage.gate: no_lower`, a landing since the base wrote a block of one of `a`'s
+/// pages (the page's blocks in canon now), oldest landing first, then the pages in `a`'s order.
+/// (3) For [`Lander::Policy`] only, under an accepting rule with `lifecycle: draft`: a block
+/// the version writes is in stable content in canon now, in id order.
+fn policy_moved(
+    st: &ReadState,
+    pref: &ProposalRef,
+    p: &Proposal,
+    a: &rdy_model::assessment::Assessment,
+    since: &[(Hash, LandingRecord)],
+    lander: Lander,
+) -> Result<Option<String>, RdyError> {
+    let canon = st.materialized(&Scope::Canon)?;
+    let live = crate::policy::live_policy(st, &canon);
+    let assessed = a.policy.as_ref().and_then(|ap| ap.policy.clone());
+    if live.as_ref().map(crate::policy::LivePolicy::reference) != assessed {
+        return Ok(Some(format!(
+            "proposal {pref} moved: the authority policy changed after its assessment"
+        )));
+    }
+    if st.coverage_gate() == crate::CoverageGate::NoLower && !since.is_empty() {
+        let pages: Vec<(&BlockId, BTreeSet<BlockId>)> = a
+            .coverage
+            .pages
+            .iter()
+            .map(|g| {
+                let blocks = crate::coverage::page_blocks(&canon, &g.doc);
+                (&g.doc, blocks.into_iter().collect())
+            })
+            .collect();
+        for (l, rec) in since.iter().rev() {
+            let mut written = BTreeSet::new();
+            for c in &rec.changes {
+                for op in &st.reader().change(c)?.ops {
+                    written.insert(op.block_id().clone());
+                }
+            }
+            if let Some((doc, _)) = pages
+                .iter()
+                .find(|(_, blocks)| blocks.iter().any(|b| written.contains(b)))
+            {
+                let path = canon.path_of(doc).unwrap_or_else(|| doc.to_string());
+                return Ok(Some(format!(
+                    "proposal {pref} moved: landing {} changed page {path} after its assessment",
+                    l.short()
+                )));
+            }
+        }
+    }
+    if lander == Lander::Policy
+        && let Some(rdy_model::assessment::PolicyVerdict::Accepts { rule }) =
+            a.policy.as_ref().map(|ap| &ap.verdict)
+        && live
+            .as_ref()
+            .and_then(|l| l.fields.as_ref())
+            .and_then(|f| f.rules.iter().find(|r| &r.name == rule))
+            .is_some_and(|r| r.lifecycle == rdy_schema::policy::Lifecycle::Draft)
+    {
+        let mut written = BTreeSet::new();
+        for c in &p.changes {
+            for op in &st.reader().change(c)?.ops {
+                written.insert(op.block_id().clone());
+            }
+        }
+        if let Some(id) = written
+            .iter()
+            .find(|id| crate::brief::effective_stable(&canon, Some(id)))
+        {
+            return Ok(Some(format!(
+                "proposal {pref} moved: block {id} is in stable content now"
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// `rdy_land` and the daemon's `land` op (D-ZWP7Q, O14): [`Rdy::land_by_policy`] for session
+/// `s`, under the writer. The reply is the approval's: the `LandInfo`, `signatures` (always
+/// empty: a policy landing is never signed, D-DKAMT) and the consequences of the version it
+/// landed.
+pub fn run_land(
+    engine: &dyn crate::engine::Engine,
+    s: &Session,
+    proposal: String,
+) -> Result<serde_json::Value, RdyError> {
+    let s = s.clone();
+    let mut v = crate::engine::write_typed(engine, move |r| r.land_by_policy(&s, &proposal))?;
+    v["signatures"] = serde_json::json!([]);
+    crate::consequence::report_approval(engine, &mut v);
+    Ok(v)
 }
 
 /// D-ME2HD: the refusal of an approval of version `pref`, which is not ready. Its issues are the
@@ -2519,7 +2710,7 @@ impl Rdy {
             };
             // a read error never fails the reply (as `tensions_error`): the version is stored,
             // not ready, with the error as its one issue
-            crate::readiness::assess(&now, &c, now.require_up_to_date()).unwrap_or_else(|e| {
+            crate::readiness::assess(&now, &c, &now.gate_config()).unwrap_or_else(|e| {
                 crate::readiness::Assessed {
                     readiness: crate::readiness::Readiness {
                         issues: vec![Issue {
@@ -2531,6 +2722,7 @@ impl Rdy {
                         }],
                         summary: PlanSummary::default(),
                         card: None,
+                        policy: None,
                     },
                     assessment: None,
                 }
@@ -2611,6 +2803,11 @@ impl Rdy {
             ready: assessed.assessment.is_some(),
             issues: assessed.readiness.issues,
             assessment: assessment.map(|h| h.to_string()),
+            policy: assessed
+                .assessment
+                .as_ref()
+                .and_then(|a| a.policy.as_ref())
+                .map(crate::readiness::ProposalPolicy::from),
         })
     }
 
@@ -2687,12 +2884,17 @@ impl Rdy {
     /// readiness issues, or the O10 issue when it has none. A landing since the assessment's base
     /// that wrote a block of its `reach`, then a pack, then a gate config other than the
     /// assessment's, refuses with `E_PROPOSAL_MOVED` and a fresh card ([`Rdy::moved_fresh`],
-    /// RULING F1). Returns the assessment's hash.
+    /// RULING F1). M3c O16 adds, for every lander: (1) a live policy other than the assessment's;
+    /// (2) under `coverage.gate: no_lower`, a landing since the base that wrote a block of one of
+    /// the assessment's pages; and for [`Lander::Policy`] only: (3) under an accepting rule with
+    /// `lifecycle: draft`, a written block in stable content in canon now. Each refuses the same
+    /// way. Returns the assessment's hash.
     fn fresh_assessment(
         &mut self,
         st: &ReadState,
         pref: &ProposalRef,
         p: &Proposal,
+        lander: Lander,
     ) -> Result<Hash, RdyError> {
         let Some(h) = st
             .reader()
@@ -2708,7 +2910,8 @@ impl Rdy {
         };
         let a = st.reader().assessment(&h)?;
         let reach: BTreeSet<&BlockId> = a.reach.iter().collect();
-        for (l, rec) in Self::landings_since(st, a.base)?.iter().rev() {
+        let since = Self::landings_since(st, a.base)?;
+        for (l, rec) in since.iter().rev() {
             let mut hit = BTreeSet::new();
             for c in &rec.changes {
                 for op in &st.reader().change(c)?.ops {
@@ -2731,9 +2934,12 @@ impl Rdy {
             let message = format!("proposal {pref} moved: the pack changed after its assessment");
             return Err(self.moved_fresh(st, pref, p, message)?);
         }
-        if config_digest(st.require_up_to_date()) != a.config {
+        if config_digest(&st.gate_config()) != a.config {
             let message =
                 format!("proposal {pref} moved: the gate config changed after its assessment");
+            return Err(self.moved_fresh(st, pref, p, message)?);
+        }
+        if let Some(message) = policy_moved(st, pref, p, &a, &since, lander)? {
             return Err(self.moved_fresh(st, pref, p, message)?);
         }
         Ok(h)
@@ -2753,7 +2959,7 @@ impl Rdy {
         message: String,
     ) -> Result<RdyError, RdyError> {
         let c = crate::readiness::Candidate::stored(st, *pref, p.clone())?;
-        let assessed = crate::readiness::assess(st, &c, st.require_up_to_date())?;
+        let assessed = crate::readiness::assess(st, &c, &st.gate_config())?;
         let (Some(mut a), Some(mut card)) = (assessed.assessment, assessed.readiness.card) else {
             let mut e = RdyError::new(E_PROPOSAL_MOVED, message, O11_FIX);
             e.issues = assessed.readiness.issues;
@@ -2791,7 +2997,8 @@ impl Rdy {
         {
             return Ok(());
         }
-        self.fresh_assessment(&st, &pref, &p).map(|_| ())
+        self.fresh_assessment(&st, &pref, &p, Lander::Approver)
+            .map(|_| ())
     }
 
     /// Whether the proposal version `proposal` names carries a content removal request. Any
@@ -2826,6 +3033,18 @@ impl Rdy {
         self.commit_landing(prepared, &[])
     }
 
+    /// `rdy_land` (D-ZWP7Q "The agent's landing act", O14): an agent session of role writer or
+    /// reviewer lands the version `proposal` names when its stored verdict accepts it and the
+    /// session's actor matches the accepting rule's `actors` (O6). Every check of an approval
+    /// runs in its order, with the policy's acceptance in place of the approver's role. The
+    /// landing records `assurance: policy`, the live policy version and the assessment, with no
+    /// relay ([`rdy_store::Store::prepare_land_by_policy`]); it is never signed (D-DKAMT).
+    pub fn land_by_policy(&mut self, s: &Session, proposal: &str) -> Result<LandInfo, RdyError> {
+        let prepared =
+            self.prepare_landing_as(s, proposal, LandOptions::default(), Lander::Policy)?;
+        self.commit_landing(prepared, &[])
+    }
+
     /// Every check of `land_with` and the complete landing it would write, under the writer and
     /// without writing anything: the acceptance work, the frames and the landing record, with
     /// every clock value it uses already read. [`Rdy::commit_landing`] writes it. One refusal
@@ -2837,16 +3056,50 @@ impl Rdy {
         proposal: &str,
         opts: LandOptions,
     ) -> Result<PreparedApproval, RdyError> {
-        if !s.role.can_land() {
-            // D-CC90E: an agent that asks to land a content removal is told who must approve it
-            if !s.is_human() && self.carries_removal(proposal) {
-                return Err(rdy_store::StoreError::RedactionHuman.into());
+        self.prepare_landing_as(s, proposal, opts, Lander::Approver)
+    }
+
+    /// [`Rdy::prepare_landing`] by `lander`. [`Lander::Policy`] takes O14's session checks in
+    /// place of the approver's role, adds O16's draft check to freshness, and after the holds
+    /// reads the stored verdict (O14) and the lander's actor (O6).
+    pub(crate) fn prepare_landing_as(
+        &mut self,
+        s: &Session,
+        proposal: &str,
+        opts: LandOptions,
+        lander: Lander,
+    ) -> Result<PreparedApproval, RdyError> {
+        match lander {
+            Lander::Approver if !s.role.can_land() => {
+                // D-CC90E: an agent that asks to land a content removal is told who must approve
+                // it
+                if !s.is_human() && self.carries_removal(proposal) {
+                    return Err(rdy_store::StoreError::RedactionHuman.into());
+                }
+                return Err(RdyError::new(
+                    E_PERMISSION,
+                    format!("role {:?} cannot land proposals", s.role),
+                    "ask an approver to land it",
+                ));
             }
-            return Err(RdyError::new(
-                E_PERMISSION,
-                format!("role {:?} cannot land proposals", s.role),
-                "ask an approver to land it",
-            ));
+            Lander::Approver => {}
+            // O14: the policy's acceptance replaces the approval, for an agent session of role
+            // writer or reviewer only
+            Lander::Policy if s.is_human() => {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    "rdy land is for agent sessions; a person approves",
+                    "approve with rdy approve",
+                ));
+            }
+            Lander::Policy if !s.role.can_write() => {
+                return Err(RdyError::new(
+                    E_PERMISSION,
+                    format!("role {:?} cannot land proposals", s.role),
+                    "start the session as a writer",
+                ));
+            }
+            Lander::Policy => {}
         }
         let st = self.read();
         let pref = resolve_in(&st, proposal)?;
@@ -2897,7 +3150,7 @@ impl Rdy {
         Self::check_base_moved(&st, &pref, &p, &opts)?;
         // D-WQVGT, D-ME2HD: freshness only, against the version's stored assessment: its reach,
         // the pack and the gate config (a failed check gives a fresh card, RULING F1)
-        let assessment = self.fresh_assessment(&st, &pref, &p)?;
+        let assessment = self.fresh_assessment(&st, &pref, &p, lander)?;
         // D-ME2HD "Later refusals", built with no candidate (I8): a rejected decision or one_way
         // re-affirmation, refused deferrals, an advice accepted after the assessment
         let (decisions, reaffirms) = own_decisions(&st, &changes)?;
@@ -2924,6 +3177,18 @@ impl Rdy {
             matches!(op, Op::Create { block } | Op::Update { block, .. }
                 if block.block_type == decision::DECISION)
         });
+        // D-TF78H, O10: the approve item's required policy role holds the approving person: the
+        // session's actor, who is the person a relay names
+        if lander == Lander::Approver
+            && let Some(role) = crate::pending::queue::approve_role(&st, &pref, &p)?
+            && !crate::policy::roles::holds(&role, &s.actor)
+        {
+            return Err(crate::policy::roles::outside_role(
+                &s.actor,
+                &role,
+                &pref.to_string(),
+            ));
+        }
         let holds = approval_holds(&st, &pref, decides)?;
         if !holds.open.is_empty() {
             return Err(exceptions_open(&pref, &holds.open));
@@ -2931,6 +3196,12 @@ impl Rdy {
         if let Some((card, n)) = &holds.deferral {
             return Err(deferrals_open(&pref, card, *n));
         }
+        // O14, O6: the stored verdict, then the lander's actor; the live policy the landing
+        // records
+        let policy = match lander {
+            Lander::Approver => None,
+            Lander::Policy => Some(policy_acceptance(&st, &pref, s, &record)?),
+        };
 
         // 1. prospective canon: canon + the proposal's own changes
         let ops = applied_ops(&changes, &applied);
@@ -3139,7 +3410,7 @@ impl Rdy {
 
         // 4. prepare the one write (atom1): the acceptance change, the final proposal version,
         // the snapshot, the landing, the view's rebase and the refs. Nothing is written yet.
-        let mut store = match self.store.prepare_land(LandRequest {
+        let req = LandRequest {
             proposal: pid,
             accept: accept.clone(),
             approver,
@@ -3147,7 +3418,12 @@ impl Rdy {
             relay: opts.relay,
             evidence,
             assessment: Some(assessment),
-        }) {
+        };
+        let prepared = match policy {
+            None => self.store.prepare_land(req),
+            Some(policy) => self.store.prepare_land_by_policy(req, policy),
+        };
+        let mut store = match prepared {
             Ok(prepared) => prepared,
             Err(rdy_store::StoreError::ProposalMoved { latest, .. }) => {
                 return Err(moved(&st, &pref, &latest, &p.view)?);
@@ -3587,6 +3863,11 @@ impl ReadState {
                 card_hash: e.card_hash.map(|h| h.to_string()),
             }),
             assessment: rec.assessment.map(|h| h.to_string()),
+            policy: rec.policy.as_ref().map(|p| PolicyRow {
+                block: p.block.to_string(),
+                version: p.version.to_string(),
+            }),
+            dispute: landing_dispute(self, &id)?,
             rebased_from: rec.rebased_from.iter().map(|h| h.to_string()).collect(),
             at: rfc3339(rec.approved_by.at_ms),
             at_ms: rec.approved_by.at_ms,

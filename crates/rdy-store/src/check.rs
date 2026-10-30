@@ -643,6 +643,10 @@ impl StoreReader {
     /// ([`landing_field_rules`] over this store). The view of the landed proposal is read only
     /// for a local landing with card evidence ([`landing_reads_proposal_view`]); a proposal the
     /// store does not hold gives none, and its reference is the typed checks' to report.
+    ///
+    /// Then the reverse of the policy rule (O25): a landing read at encoding 1 or more with
+    /// `assurance: policy` names its policy, else `landing <l>: assurance is policy but it names
+    /// no policy`. An encoding-0 landing has no `policy` field. A take and a load do not run it.
     pub(crate) fn check_landing_fields(
         &self,
         l: &Hash,
@@ -656,7 +660,16 @@ impl StoreReader {
             };
         landing_field_rules(l, rec, view.as_deref(), &mut |kind, h| {
             self.has_kind(kind, h)
-        })
+        })?;
+        if rec.assurance == Assurance::Policy
+            && rec.policy.is_none()
+            && rec.read_identity.is_none_or(|i| i.version >= 1)
+        {
+            return Err(bad(format!(
+                "landing {l}: assurance is policy but it names no policy"
+            )));
+        }
+        Ok(())
     }
 
     /// A change that the check follows, or None when it is not stored (its absence is reported

@@ -1611,6 +1611,10 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
         "commit",
         "working copy: the working_copy row records its replies",
     ),
+    (
+        "dispute",
+        "a person's act on a landing; cli_dispute pins its replies and lines",
+    ),
     ("dump", "writes a file; the dump_load row covers the bytes"),
     (
         "edit",
@@ -1631,6 +1635,10 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
     ("key revoke", "changes the signing key"),
     ("keys", "assigns keys to people"),
     (
+        "land",
+        "needs an authority policy that accepts the version; gate_policy_land pins its replies",
+    ),
+    (
         "load",
         "replaces a project from a dump; the dump_load row covers it",
     ),
@@ -1643,6 +1651,10 @@ const CLI_NOT_CAPTURED: &[(&str, &str)] = &[
     ("plan defer", "needs an open plan item"),
     ("plan dismiss", "needs an open plan item"),
     ("plan done", "needs an open plan item"),
+    (
+        "policy",
+        "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
+    ),
     ("publication", "needs a publication profile"),
     ("publish", "uploads a site to a host"),
     (
@@ -1883,6 +1895,10 @@ const MCP_NOT_CAPTURED: &[(&str, &str)] = &[
     ("rdy_auth", "signs in to a hosted service"),
     ("rdy_clone", "writes a second project to disk"),
     (
+        "rdy_dispute",
+        "a person's act on a landing; mcp_dispute pins its replies",
+    ),
+    (
         "rdy_dump",
         "writes a file; the dump_load row covers the bytes",
     ),
@@ -1894,8 +1910,16 @@ const MCP_NOT_CAPTURED: &[(&str, &str)] = &[
     ("rdy_key_retire", "changes the signing key"),
     ("rdy_key_revoke", "changes the signing key"),
     (
+        "rdy_land",
+        "needs an authority policy that accepts the version; gate_policy_land pins its replies",
+    ),
+    (
         "rdy_load",
         "replaces a project from a dump; the dump_load row covers it",
+    ),
+    (
+        "rdy_policy",
+        "writes a decision and a policy block and proposes them; mcp_policy_init pins its replies",
     ),
     ("rdy_publication_check", "needs a publication profile"),
     ("rdy_publish", "uploads a site to a host"),
@@ -3161,16 +3185,16 @@ fn ok14_reindex_preserves_release_derived_identities() {
     );
 }
 
+/// The carried records that still have no product writer. ap5 (D-ZWP7Q "Disputes") builds the
+/// dispute writers, `rdy_dispute` and `rdy dispute`: a dispute, its resolution and their
+/// Dispute and ResolveDispute answers are no longer future records.
 #[test]
 fn ok14_future_record_writers_remain_absent() {
     let fixture = read_fixture();
-    // the MCP tools: no name or parameter writes an assessment, a dispute, a resolution or a
-    // check request, and no review or answer parameter accepts the carried values
+    // the MCP tools: no name or parameter writes an assessment or a check request, and no
+    // review or answer parameter accepts the carried values
     let forbidden_words = [
         "assessment",
-        "dispute",
-        "resolution",
-        "resolve_dispute",
         "check_request",
         "accept_verdict",
         "check_verdict",
@@ -3185,12 +3209,7 @@ fn ok14_future_record_writers_remain_absent() {
         }
         // a writer's parameter schema may not accept the carried values
         let schema = t["input_schema"].to_string().to_lowercase();
-        for w in [
-            "dispute",
-            "resolve_dispute",
-            "accept_verdict",
-            "check_request",
-        ] {
+        for w in ["accept_verdict", "check_request"] {
             assert!(
                 !schema.contains(&format!("\"{w}\"")),
                 "tool {name} accepts the future act {w}"
@@ -3245,11 +3264,7 @@ fn ok14_future_record_writers_remain_absent() {
     }
     // the product answer path: no product code constructs the carried acts. The source of each
     // writer crate is scanned outside its test modules.
-    let acts = [
-        "AnswerAct::Dispute",
-        "AnswerAct::ResolveDispute",
-        "AnswerAct::AcceptVerdict",
-    ];
+    let acts = ["AnswerAct::AcceptVerdict"];
     let verdicts = [
         "Verdict::Pass",
         "Verdict::Concern",
@@ -3275,7 +3290,7 @@ fn ok14_future_record_writers_remain_absent() {
     }
     let mut offenders = vec![];
     // the string forms of the carried acts: no product code names them either
-    let literals = ["\"resolve_dispute\"", "\"accept_verdict\""];
+    let literals = ["\"accept_verdict\""];
     let needles: Vec<&str> = acts.iter().chain(verdicts.iter()).copied().collect();
     for f in files {
         let rel = f
@@ -3606,6 +3621,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/fsck/stdout/open_report/quarantined",
     "cli/fsck/stdout/quarantine",
     "cli/inbox/stdout/entries",
+    "cli/log/stdout[]/dispute/disputes",
     "cli/log/stdout[]/rebased_from",
     "cli/new doc/stdout/consequences",
     "cli/new doc/stdout/on_change/resolved",
@@ -3636,8 +3652,10 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/status/stdout/quarantine",
     "cli/status/stdout/warnings",
     "cli/tag/stdout/signatures",
+    "cli/trace/stdout/decisions[]/accepted_in/dispute/disputes",
     "cli/trace/stdout/edges",
     "cli/trace/stdout/frontier",
+    "cli/trace/stdout/introduced/dispute/disputes",
     "cli/trace/stdout/premises",
     "cli/trace/stdout/questions",
     "cli/trace/stdout/sources",
@@ -3672,6 +3690,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_decide/ok/related_decisions",
     "mcp/rdy_decide/ok/suggestions",
     "mcp/rdy_decide/ok/warnings",
+    "mcp/rdy_log/ok[]/dispute/disputes",
     "mcp/rdy_log/ok[]/rebased_from",
     "mcp/rdy_overview/ok/coverage/kinds",
     "mcp/rdy_overview/ok/coverage/similar_kinds",
@@ -3696,7 +3715,9 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_supersede/ok/suggestions",
     "mcp/rdy_supersede/ok/warnings",
     "mcp/rdy_tag/ok/signatures",
+    "mcp/rdy_trace/ok/decisions[]/accepted_in?/dispute/disputes",
     "mcp/rdy_trace/ok/frontier",
+    "mcp/rdy_trace/ok/introduced/dispute/disputes",
     "mcp/rdy_trace/ok/premises",
     "mcp/rdy_trace/ok/questions",
     "mcp/rdy_trace/ok/sources",

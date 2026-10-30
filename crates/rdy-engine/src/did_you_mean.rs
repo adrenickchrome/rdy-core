@@ -2,44 +2,7 @@
 //! of known names, and the parse of serde's unknown-field errors into rdy's refusal.
 use crate::error::{E_BAD_INPUT, RdyError};
 
-/// The Levenshtein distance between `a` and `b`, over chars.
-pub fn edit_distance(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
-    let mut row: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.chars().enumerate() {
-        let mut prev = row[0];
-        row[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            let cur = row[j + 1];
-            row[j + 1] = (prev + usize::from(ca != *cb)).min(row[j] + 1).min(cur + 1);
-            prev = cur;
-        }
-    }
-    row[b.len()]
-}
-
-/// The closed rule: the entry of `known` within 2 edits of `word` (smallest distance first, then
-/// the first in `known`); else the first entry where one string is a prefix of the other and the
-/// shorter has at least 3 characters; else nothing.
-pub fn nearest<'a>(word: &str, known: &[&'a str]) -> Option<&'a str> {
-    let close = known
-        .iter()
-        .enumerate()
-        .map(|(i, k)| (edit_distance(word, k), i, *k))
-        .filter(|(d, _, _)| *d <= 2)
-        .min()
-        .map(|(_, _, k)| k);
-    close.or_else(|| {
-        known.iter().copied().find(|k| {
-            let (short, long) = if k.chars().count() <= word.chars().count() {
-                (*k, word)
-            } else {
-                (word, *k)
-            };
-            short.chars().count() >= 3 && long.starts_with(short)
-        })
-    })
-}
+pub use rdy_model::did_you_mean::{edit_distance, nearest};
 
 /// The names between backticks in `s`, in order.
 fn ticked(s: &str) -> Option<Vec<String>> {

@@ -33,6 +33,8 @@ pub const INSTRUCTION_SENTENCES: &[&str] = &[
     "Write responses carry suggestions (links to the entities your text names, new entities for literals that recur): accept the right ones with one rdy_accept call; they never block.",
     "Fact sheets, search hits and briefings carry a confidence level: act on high; on medium or low, widen the search, fix the coverage issues you can, or ask the person before you act.",
     "Link every entity a normative statement names, and elsewhere the entities a block is about; dismiss a passing mention of an everyday word with rdy_resolve (mention, dismiss).",
+    // O27 (M3c): the agent's landing act
+    "When rdy_propose reports policy accepts, land with rdy_land; else show the card to the person.",
 ];
 
 /// What the server tells a host about rdy: [`INSTRUCTION_SENTENCES`] joined with one space.
@@ -85,6 +87,14 @@ mod tests {
     #[test]
     fn isen1_the_sentences_join_to_the_instructions() {
         assert_eq!(INSTRUCTIONS, INSTRUCTION_SENTENCES.join(" "));
+    }
+
+    #[test]
+    fn ap11_the_instructions_name_rdy_land() {
+        // O27: one element at the end
+        let s = "When rdy_propose reports policy accepts, land with rdy_land; else show the card to the person.";
+        assert!(INSTRUCTIONS.contains(s), "{INSTRUCTIONS}");
+        assert_eq!(INSTRUCTION_SENTENCES.last(), Some(&s));
     }
 
     #[test]

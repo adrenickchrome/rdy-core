@@ -1076,6 +1076,7 @@ fn cp12_batch_facts_and_recommendation_reasons_are_exact() {
             "Confidence",
             "Base",
             "Exceptions",
+            "Policy",
         ]
     );
     assert_eq!(fact(&i, "Re-affirms"), "none");

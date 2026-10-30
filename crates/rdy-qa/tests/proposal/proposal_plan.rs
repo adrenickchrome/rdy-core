@@ -749,12 +749,13 @@ fn future_records(r: &Rdy) -> (Vec<String>, usize) {
     (found, read)
 }
 
-/// ok4: the product paths keep producing their existing acts. A propose with its bound plan, a
-/// plan answer, a person's approval, an ordinary write and an import write no record of kinds
-/// 26 to 28, no Check subject or new verdict, no Dispute, ResolveDispute or AcceptVerdict act,
-/// and leave a landing's `policy` and the other new carriers None. A change records its
-/// briefing (rg1), a propose writes the version's `ASSESSMENT` (rg10) and a landing names its
-/// assessment (rg12).
+/// ok4: the product paths this test runs keep producing their existing acts. A propose with its
+/// bound plan, a plan answer, a person's approval, an ordinary write and an import write no
+/// record of kinds 26 to 28, no Check subject or new verdict, no Dispute, ResolveDispute or
+/// AcceptVerdict act, and leave a landing's `policy` and the other new carriers None. A change
+/// records its briefing (rg1), a propose writes the version's `ASSESSMENT` (rg10) and a landing
+/// names its assessment (rg12). M3c adds the writers of disputes (`rdy_dispute`, ap5) and of
+/// policy landings (`rdy_land` under a policy, ap11); this flow runs neither.
 #[test]
 fn ok4_product_paths_do_not_write_future_records() {
     let (d, mut r) = project();

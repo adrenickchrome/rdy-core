@@ -93,6 +93,14 @@ const PLAN_PROPOSALS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("plan
 /// before any log end is one range read.
 const ASSESSMENT_PROPOSALS: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("assessment_proposals");
+/// A landing's hash (32 bytes), then a DISPUTE's location (`loc_key`) -> that dispute's hash
+/// (D-ZWP7Q): every dispute of every landing, in log order, so a landing's disputes before any
+/// log end are one range read.
+const DISPUTE_LANDINGS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dispute_landings");
+/// A dispute's hash (32 bytes), then a DISPUTE_RESOLUTION's location (`loc_key`) -> that
+/// resolution's hash: every resolution of every dispute, in log order.
+const DISPUTE_RESOLUTIONS: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("dispute_resolutions");
 /// The `meta` key that holds the location (`loc_key`) of the log's first CHANGE whose links
 /// record a briefing; absent while no such change is indexed.
 const FIRST_BRIEFED_CHANGE_KEY: &str = "first_briefed_change";
@@ -105,6 +113,24 @@ pub(crate) const DIAGRAM_COUNT_KEY: &str = "diagram_cache_bytes";
 const ERASE_DUE_KEY: &str = "erase_due";
 /// The prefix of the refs [`OPEN_PROPOSALS`] mirrors.
 const OPEN_PREFIX: &str = "open/";
+
+/// The rows of the two dispute tables, decoded ([`Index::dispute_rows`]).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct DisputeRows {
+    /// (landing, the dispute's location) -> the dispute
+    pub(crate) disputes: BTreeMap<(Hash, Location), Hash>,
+    /// (dispute, the resolution's location) -> the resolution
+    pub(crate) resolutions: BTreeMap<(Hash, Location), Hash>,
+}
+
+impl DisputeRows {
+    /// These rows with every row whose record lies at or after `upto` left out.
+    pub(crate) fn before(mut self, upto: Location) -> DisputeRows {
+        self.disputes.retain(|(_, at), _| *at < upto);
+        self.resolutions.retain(|(_, at), _| *at < upto);
+        self
+    }
+}
 
 pub enum IndexEntry {
     /// An object frame: indexed by (kind, hash), and by hash alone if it is the first frame
@@ -196,6 +222,18 @@ pub enum IndexEntry {
     AssessmentProposal {
         proposal: Hash,
         assessment: Hash,
+        at: Location,
+    },
+    /// DISPUTE `dispute`, at `at`, disputes landing `landing`; every one is kept.
+    DisputeLanding {
+        landing: Hash,
+        dispute: Hash,
+        at: Location,
+    },
+    /// DISPUTE_RESOLUTION `resolution`, at `at`, resolves dispute `dispute`; every one is kept.
+    DisputeResolved {
+        dispute: Hash,
+        resolution: Hash,
         at: Location,
     },
     /// A CHANGE at `at` records a briefing in its links; the first such location is kept.
@@ -416,6 +454,8 @@ pub struct IndexDump {
     pub plan_deferrals: BTreeMap<Vec<u8>, Vec<u8>>,
     pub plan_proposals: BTreeMap<Vec<u8>, Vec<u8>>,
     pub assessment_proposals: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub dispute_landings: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub dispute_resolutions: BTreeMap<Vec<u8>, Vec<u8>>,
     /// The `meta` value of the first briefed change's location, if any.
     pub first_briefed_change: Option<Vec<u8>>,
 }
@@ -1036,6 +1076,16 @@ impl Index {
                 "the index has no assessment table; it is rebuilt from the log".into(),
             ));
         }
+        // likewise for the dispute tables: no dispute, and no resolution, is ever read as absent
+        if has(OBJECTS.name())
+            && [&DISPUTE_LANDINGS, &DISPUTE_RESOLUTIONS]
+                .iter()
+                .any(|t| !has(t.name()))
+        {
+            return Err(StoreError::Db(
+                "the index has no dispute tables; it is rebuilt from the log".into(),
+            ));
+        }
         // an index written before the open-proposal table existed gets it filled from its refs,
         // once, in this commit
         let had_open = has(OPEN_PROPOSALS.name());
@@ -1063,6 +1113,8 @@ impl Index {
             w.open_table(PLAN_DEFERRALS).map_err(db)?;
             w.open_table(PLAN_PROPOSALS).map_err(db)?;
             w.open_table(ASSESSMENT_PROPOSALS).map_err(db)?;
+            w.open_table(DISPUTE_LANDINGS).map_err(db)?;
+            w.open_table(DISPUTE_RESOLUTIONS).map_err(db)?;
             // an index written before the diagram cache gains its table empty: no refusal and
             // no rebuild, since a drawing is never read as absent data
             w.open_table(DIAGRAMS).map_err(db)?;
@@ -1154,6 +1206,9 @@ impl Index {
             // for a batch with an assessment
             let mut plans: Option<PlanTables<'_>> = None;
             let mut assessments: Option<redb::Table<'_, &'static [u8], &'static [u8]>> = None;
+            // and the dispute tables only for a batch with a dispute or a resolution
+            let mut disputes: Option<redb::Table<'_, &'static [u8], &'static [u8]>> = None;
+            let mut resolutions: Option<redb::Table<'_, &'static [u8], &'static [u8]>> = None;
             // a redaction apply marks the index: its file may hold what the removal erases
             let mut applied_removal = false;
             for e in entries {
@@ -1309,6 +1364,32 @@ impl Index {
                             }
                         };
                         t.insert(&version_at_key(proposal, at)[..], &assessment.0[..])
+                            .map_err(db)?;
+                    }
+                    IndexEntry::DisputeLanding {
+                        landing,
+                        dispute,
+                        at,
+                    } => {
+                        let t = match &mut disputes {
+                            Some(t) => t,
+                            None => disputes.insert(w.open_table(DISPUTE_LANDINGS).map_err(db)?),
+                        };
+                        t.insert(&hash_at_value(landing, at)[..], &dispute.0[..])
+                            .map_err(db)?;
+                    }
+                    IndexEntry::DisputeResolved {
+                        dispute,
+                        resolution,
+                        at,
+                    } => {
+                        let t = match &mut resolutions {
+                            Some(t) => t,
+                            None => {
+                                resolutions.insert(w.open_table(DISPUTE_RESOLUTIONS).map_err(db)?)
+                            }
+                        };
+                        t.insert(&hash_at_value(dispute, at)[..], &resolution.0[..])
                             .map_err(db)?;
                     }
                     IndexEntry::BriefedChange { at } => {
@@ -1539,6 +1620,8 @@ impl Index {
             plan_deferrals: dump_table(&r, PLAN_DEFERRALS)?,
             plan_proposals: dump_table(&r, PLAN_PROPOSALS)?,
             assessment_proposals: dump_table(&r, ASSESSMENT_PROPOSALS)?,
+            dispute_landings: dump_table(&r, DISPUTE_LANDINGS)?,
+            dispute_resolutions: dump_table(&r, DISPUTE_RESOLUTIONS)?,
             first_briefed_change: r
                 .open_table(META)
                 .map_err(db)?
@@ -1594,6 +1677,114 @@ impl Index {
             }
             None => Ok(None),
         }
+    }
+
+    /// The rows of `def` keyed by `subject` (a hash, then a location) whose location lies before
+    /// `end`, in log order: each row's value hash. At most `max` are read.
+    fn rows_of(
+        &self,
+        def: TableDefinition<&'static [u8], &'static [u8]>,
+        subject: &Hash,
+        end: Location,
+        max: usize,
+        what: &str,
+    ) -> Result<Vec<Hash>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(def).map_err(db)?;
+        let from = hash_at_value(
+            subject,
+            &Location {
+                segment: 0,
+                offset: 0,
+            },
+        );
+        let to = hash_at_value(subject, &end);
+        let mut out = vec![];
+        for item in t.range(&from[..]..&to[..]).map_err(db)?.take(max) {
+            let (_, v) = item.map_err(db)?;
+            out.push(hash_from(v.value(), what)?);
+        }
+        Ok(out)
+    }
+
+    /// The disputes of `landing` whose frames lie before `end`, in log order.
+    pub(crate) fn landing_disputes(
+        &self,
+        landing: &Hash,
+        end: Location,
+    ) -> Result<Vec<Hash>, StoreError> {
+        self.rows_of(
+            DISPUTE_LANDINGS,
+            landing,
+            end,
+            usize::MAX,
+            "dispute landing entry",
+        )
+    }
+
+    /// The first resolution of `dispute` whose frame lies before `end`.
+    pub(crate) fn dispute_resolution(
+        &self,
+        dispute: &Hash,
+        end: Location,
+    ) -> Result<Option<Hash>, StoreError> {
+        Ok(self
+            .rows_of(
+                DISPUTE_RESOLUTIONS,
+                dispute,
+                end,
+                1,
+                "dispute resolution entry",
+            )?
+            .pop())
+    }
+
+    /// The first `max` disputes whose frames lie before `end`, in log order, and how many more
+    /// there are: one read of the dispute table, holding at most `max` rows.
+    pub(crate) fn disputes_before(
+        &self,
+        end: Location,
+        max: usize,
+    ) -> Result<(Vec<Hash>, usize), StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let mut kept: BTreeMap<Location, Hash> = BTreeMap::new();
+        let mut omitted = 0usize;
+        for item in r
+            .open_table(DISPUTE_LANDINGS)
+            .map_err(db)?
+            .iter()
+            .map_err(db)?
+        {
+            let (k, v) = item.map_err(db)?;
+            let (_, at) = hash_at_from(k.value(), "dispute landing key")?;
+            if at >= end {
+                continue;
+            }
+            kept.insert(at, hash_from(v.value(), "dispute landing entry")?);
+            if kept.len() > max {
+                kept.pop_last();
+                omitted += 1;
+            }
+        }
+        Ok((kept.into_values().collect(), omitted))
+    }
+
+    /// Every row of the two dispute tables, decoded: (landing, the dispute's location) -> the
+    /// dispute, and (dispute, the resolution's location) -> the resolution.
+    pub(crate) fn dispute_rows(&self) -> Result<DisputeRows, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let rows = |def: TableDefinition<&'static [u8], &'static [u8]>, what: &str| {
+            let mut out = BTreeMap::new();
+            for item in r.open_table(def).map_err(db)?.iter().map_err(db)? {
+                let (k, v) = item.map_err(db)?;
+                out.insert(hash_at_from(k.value(), what)?, hash_from(v.value(), what)?);
+            }
+            Ok::<_, StoreError>(out)
+        };
+        Ok(DisputeRows {
+            disputes: rows(DISPUTE_LANDINGS, "dispute landing entry")?,
+            resolutions: rows(DISPUTE_RESOLUTIONS, "dispute resolution entry")?,
+        })
     }
 
     /// The location of the log's first CHANGE whose links record a briefing, if one is indexed.

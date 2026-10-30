@@ -185,11 +185,14 @@ fn rf1_children_and_optional_extensions_are_closed() {
         }
         let at = |t: &str| children.iter().position(|c| c == t).unwrap();
         assert!(at("decision") < at("finding") && at("finding") < at("source"));
-        // the publication profile still closes a doc's list
+        // a doc's list holds the publication profile once
         if parent == "doc" {
             assert_eq!(
-                children.last().map(String::as_str),
-                Some("publication_profile")
+                children
+                    .iter()
+                    .filter(|c| *c == "publication_profile")
+                    .count(),
+                1
             );
         }
     }
@@ -201,12 +204,12 @@ fn rf1_children_and_optional_extensions_are_closed() {
     );
     assert_eq!(
         p.block_types["doc"].children,
-        vec!["chapter", "memo", "publication_profile"],
+        vec!["chapter", "memo", "publication_profile", "authority_policy"],
         "a parent without decision gains neither"
     );
     assert_eq!(
         bare().block_types["doc"].children,
-        vec!["publication_profile"]
+        vec!["publication_profile", "authority_policy"]
     );
     for pack in [bare(), custom()] {
         for (name, t) in &pack.block_types {

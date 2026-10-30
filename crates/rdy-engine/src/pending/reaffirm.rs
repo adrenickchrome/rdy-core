@@ -260,7 +260,7 @@ fn cause_block(
 }
 
 /// The landing that last wrote block version `v` into canon, if any.
-fn landing_of_version(st: &ReadState, v: &Hash) -> Result<Option<Hash>, RdyError> {
+pub(crate) fn landing_of_version(st: &ReadState, v: &Hash) -> Result<Option<Hash>, RdyError> {
     let reader = st.reader();
     let producers = reader.producers(v)?;
     let Some(change) = reader.producer_at(&producers, st.canon_head().as_ref())? else {

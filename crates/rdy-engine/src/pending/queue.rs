@@ -67,6 +67,15 @@
 //! ([`super::questions`], F7). A snooze hides an item for the chat session it was made in
 //! ([`super::snooze`], F4).
 //!
+//! # Routing (D-TF78H, O10, O11)
+//!
+//! Under a live policy whose fields read, each item gets its required policy role where it is
+//! made ([`crate::policy::roles::required_role`]). An item bound to a version routes by that
+//! version's candidate, so the version's approve item and its cards name one role. The queue and
+//! its counts for a person leave out each item whose role does not hold that person, after a
+//! snooze. An answer still binds every item ([`Eligible::role_of`]), and it refuses a person
+//! outside the role. With no policy, or none that applies, nothing is left out.
+//!
 //! # Readiness (D-3JZP4, D-ME2HD; closed)
 //!
 //! The queue runs the one readiness ([`crate::readiness`]) on each latest open version, read
@@ -121,7 +130,7 @@ use super::card::{
     CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, REMOVAL_IRREVERSIBLE, card_hash, render_checked,
 };
 use super::item::{ExceptionKind, Fact, Item, ItemKind, ItemOption, Recommended, RemovalCard, age};
-use super::plan::{VersionPlan, defer_ref, deferral_item, version_plan};
+use super::plan::{PlanCardBinding, VersionPlan, defer_ref, deferral_item, version_plan};
 use super::questions::question_items;
 use super::reaffirm::{OpenWork, reaffirm_items};
 use super::snooze::hide_snoozed;
@@ -131,24 +140,28 @@ use crate::coverage::{CandidateCoverage, confidence_in, lands_unapplied};
 use crate::error::{E_VALIDATION, RdyError, redaction_limit};
 use crate::gate::{ProposalRef, changes_of, open_proposals};
 use crate::plan::lifecycle::PlanSummary;
+use crate::policy::roles::{ItemFacts, RequiredRole, holds, required_role};
+use crate::policy_verdict::{ChangeFacts, VerdictInputs, WrittenBlock, WrittenDecision};
 use crate::read_state::Built;
 use crate::readiness::assessment::cut_text;
-use crate::readiness::{Candidate, PlanSource, Readiness};
+use crate::readiness::{Candidate, PlanSource, PolicyChange, Readiness};
 use crate::session::{now_ms, rfc3339};
 use crate::tensions::{Tension, TensionKind, TensionSeverity, TensionStatus, tension_label};
 use crate::{Materialized, ReadState, Scope};
 use rdy_graph::{DerivedStatus, Graph};
 use rdy_model::assessment::{
-    Assessment, AssessmentCoverage, AssessmentExceptionKind, AssessmentIssue, AssessmentPage,
-    AssessmentScoreChange, MAX_TEXT_BYTES,
+    AssessedPolicy, Assessment, AssessmentCoverage, AssessmentExceptionKind, AssessmentIssue,
+    AssessmentPage, AssessmentScoreChange, MAX_TEXT_BYTES,
 };
 use rdy_model::decision::{self, DEPENDS_ON, DecisionStatus, REVOKES, SUPERSEDES};
 use rdy_model::engine_fields::reaffirmed_causes;
 use rdy_model::redaction::record_buffer;
 use rdy_model::{AnswerAct, Block, BlockId, Change, Hash, Justification, Op, Proposal};
+use rdy_schema::policy::{JustificationKind, POLICY_TYPE, PolicyFields};
 use rdy_schema::{Issue, Severity, supporting};
 use rdy_store::redaction::limit;
 use serde::Serialize;
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -196,8 +209,8 @@ pub struct NotReady {
 }
 
 /// How many items wait for a person: every item the queue holds, past [`PENDING_ITEMS_MAX`]
-/// too, less those a snooze hides (final review fix round 1, R6: the session's summary counts
-/// the queue, not its first page).
+/// too, less those a snooze hides and those routed to other people (final review fix round 1,
+/// R6: the session's summary counts the queue, not its first page).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct PendingCounts {
     pub items: usize,
@@ -209,6 +222,26 @@ pub struct PendingCounts {
 pub(crate) struct Eligible {
     groups: Vec<Group>,
     pub not_ready: Vec<NotReady>,
+    /// The policy role each item needs, by [`role_key`] (O10): only the items whose role is
+    /// `Some`, and none with no live policy or one whose fields do not read.
+    roles: Roles,
+}
+
+/// The policy role of each item of a queue that needs one, by [`role_key`].
+type Roles = BTreeMap<(String, Option<String>), RequiredRole>;
+
+/// An item's key in [`Roles`]: its ref and its batch. A decision version beside two batches has
+/// two items of one ref, each with its own batch.
+fn role_key(i: &Item) -> (String, Option<String>) {
+    (i.r#ref.clone(), i.batch.clone())
+}
+
+/// Whether `person` may see item `i` (D-TF78H): its required role holds the person, or it needs
+/// none.
+fn routed(roles: &Roles, i: &Item, person: &str) -> bool {
+    roles
+        .get(&role_key(i))
+        .is_none_or(|role| holds(role, person))
 }
 
 impl Eligible {
@@ -233,6 +266,11 @@ impl Eligible {
     fn items(&self) -> impl Iterator<Item = &Item> {
         self.groups.iter().flat_map(|g| &g.items)
     }
+
+    /// The policy role item `i` of this queue needs (O10), if any.
+    pub(crate) fn role_of(&self, i: &Item) -> Option<&RequiredRole> {
+        self.roles.get(&role_key(i))
+    }
 }
 
 impl ReadState {
@@ -247,6 +285,12 @@ impl ReadState {
         for g in e.groups {
             let (shown, hidden) = hide_snoozed(self, q, g.items);
             snoozed += hidden;
+            // D-TF78H: the items whose required policy role does not hold the person are not
+            // theirs
+            let shown: Vec<Item> = shown
+                .into_iter()
+                .filter(|i| routed(&e.roles, i, &q.person))
+                .collect();
             if shown.is_empty() {
                 continue;
             }
@@ -267,14 +311,17 @@ impl ReadState {
     }
 
     /// How many items of the queue for `q` wait, and how many of them block: the whole queue,
-    /// past the cap too, less what a snooze hides ([`PendingCounts`]). It renders no card.
+    /// past the cap too, less what a snooze hides and what is routed to other people
+    /// ([`PendingCounts`]). It renders no card.
     pub fn pending_counts(&self, q: &PendingQuery) -> Result<PendingCounts, RdyError> {
         let e = self.eligible(q)?;
         let mut c = PendingCounts::default();
         for g in e.groups {
             let (shown, _) = hide_snoozed(self, q, g.items);
-            c.items += shown.len();
-            c.blocking += shown.iter().filter(|i| i.blocking).count();
+            for i in shown.iter().filter(|i| routed(&e.roles, i, &q.person)) {
+                c.items += 1;
+                c.blocking += usize::from(i.blocking);
+            }
         }
         Ok(c)
     }
@@ -286,6 +333,7 @@ impl ReadState {
         let mut groups: Vec<Group> = vec![];
         let mut not_ready = vec![];
         let mut work = OpenWork::default();
+        let mut routing = Routing::read(self)?;
         let open = open_proposals(self)?;
         if !open.is_empty() {
             // canon's coverage and lexicon first: each version's build carries its structural
@@ -321,9 +369,15 @@ impl ReadState {
                     continue;
                 }
             }
+            if let Some(rt) = routing.as_mut() {
+                rt.note(self, &card, Some(&v.next), v.approve_facts());
+            }
             let mut items = vec![card];
             for item in v.exception_items(now) {
                 if !answered(self, &item.r#ref, AnswerAct::Confirm)? {
+                    if let Some(rt) = routing.as_mut() {
+                        rt.note(self, &item, Some(&v.next), v.confirm_facts(&item));
+                    }
                     items.push(item);
                 }
             }
@@ -331,21 +385,45 @@ impl ReadState {
             if let Some(item) = v.deferral_item(now)
                 && accepted(self, &item)?.is_none()
             {
+                if let Some(rt) = routing.as_mut() {
+                    rt.note(self, &item, Some(&v.next), v.defer_facts());
+                }
                 items.push(item);
+            }
+            if let Some(rt) = routing.as_mut() {
+                rt.batches
+                    .insert(r.clone(), (v.writes_decision(), Arc::clone(&v.next)));
             }
             groups.push(Group { items });
         }
         // D-CQMA4: each re-affirmation card is a group of its own
         for item in reaffirm_items(self, &work, now)? {
+            if let Some(rt) = routing.as_mut() {
+                let facts = rt.reaffirm_facts(&item);
+                rt.note(self, &item, None, facts);
+            }
             groups.push(Group { items: vec![item] });
         }
         // the items that stand beside a batch go into its group, after its exceptions; the
         // others are groups of one
         let batches: Vec<Item> = groups.iter().map(|g| g.items[0].clone()).collect();
+        let questions = question_items(self, q)?.into_iter().map(|i| {
+            // O10: an answer item covers its question block, which its ref names
+            let block = i
+                .r#ref
+                .split_once('@')
+                .and_then(|(id, _)| BlockId::parse(id).ok());
+            (i, block.into_iter().collect())
+        });
         let others = tension_items(self, &open, &batches)?
             .into_iter()
-            .chain(question_items(self, q)?);
-        for item in others {
+            .chain(questions);
+        for (item, blocks) in others {
+            if let Some(rt) = routing.as_mut() {
+                let facts = rt.other_facts(&item, blocks);
+                let candidate = rt.candidate_of(&item);
+                rt.note(self, &item, candidate.as_deref(), facts);
+            }
             let group = item
                 .batch
                 .as_deref()
@@ -356,8 +434,150 @@ impl ReadState {
             }
         }
         groups.sort_by_cached_key(Group::key);
-        Ok(Eligible { groups, not_ready })
+        Ok(Eligible {
+            groups,
+            not_ready,
+            roles: routing.map(|rt| rt.roles).unwrap_or_default(),
+        })
     }
+}
+
+/// The live policy's routing of one queue (O10, D-TF78H): the policy's fields, canon at its head
+/// (where the policy lives), the role of each item noted so far, and for each ready batch
+/// whether its version writes a decision and the canon it would give.
+struct Routing {
+    canon: Arc<Materialized>,
+    fields: PolicyFields,
+    roles: Roles,
+    batches: BTreeMap<String, (bool, Arc<Materialized>)>,
+}
+
+impl Routing {
+    /// The routing under the live policy (the policy block of canon at its head); none with no
+    /// policy, or one whose fields do not read: then nothing routes.
+    fn read(st: &ReadState) -> Result<Option<Routing>, RdyError> {
+        policy_of(st).map(|p| {
+            p.map(|(canon, fields)| Routing {
+                canon,
+                fields,
+                roles: Roles::new(),
+                batches: BTreeMap::new(),
+            })
+        })
+    }
+
+    /// Notes the role of item `i`, whose facts are `facts` (O10), when it needs one. `prospective`:
+    /// the version's candidate, for every item bound to a version ([`required_role`]).
+    fn note(
+        &mut self,
+        st: &ReadState,
+        i: &Item,
+        prospective: Option<&Materialized>,
+        facts: ItemFacts,
+    ) {
+        if let Some(role) = required_role(st, &self.canon, prospective, &self.fields, &facts) {
+            self.roles.insert(role_key(i), role);
+        }
+    }
+
+    /// The facts of re-affirmation card `i` (O10): its member decisions; `one_way` when one of
+    /// them is declared `one_way` in canon. It belongs to no version.
+    fn reaffirm_facts(&self, i: &Item) -> ItemFacts {
+        let blocks: Vec<BlockId> = match &i.plan_binding {
+            Some(PlanCardBinding::Reaffirm { members, .. }) => {
+                members.iter().map(|m| m.id.clone()).collect()
+            }
+            _ => vec![],
+        };
+        ItemFacts {
+            kind: i.kind,
+            one_way: one_way_among(&self.canon, &blocks),
+            blocks,
+            decision: false,
+        }
+    }
+
+    /// The candidate of the ready version item `i` stands beside, if any: an advice item's.
+    fn candidate_of(&self, i: &Item) -> Option<Arc<Materialized>> {
+        let (_, next) = self.batches.get(i.batch.as_ref()?)?;
+        Some(Arc::clone(next))
+    }
+
+    /// The facts of a `resolve` or `answer` item `i` that covers `blocks` (O10). An advice item
+    /// belongs to its batch's version: `one_way` reads the canon that version would give, and
+    /// `decision` whether it writes a decision. Any other belongs to no version: `one_way` reads
+    /// canon.
+    fn other_facts(&self, i: &Item, blocks: Vec<BlockId>) -> ItemFacts {
+        let (decision, m) = match i.batch.as_ref().and_then(|b| self.batches.get(b)) {
+            Some((decision, next)) => (*decision, &**next),
+            None => (false, &*self.canon),
+        };
+        ItemFacts {
+            kind: i.kind,
+            one_way: one_way_among(m, &blocks),
+            blocks,
+            decision,
+        }
+    }
+}
+
+/// The live policy's fields and canon at its head: none with no policy block in canon, or one
+/// whose fields do not read (then no role applies).
+fn policy_of(st: &ReadState) -> Result<Option<(Arc<Materialized>, PolicyFields)>, RdyError> {
+    let canon = st.materialized(&Scope::Canon)?;
+    let fields = crate::policy::live_policy(st, &canon).and_then(|l| l.fields);
+    Ok(fields.map(|f| (canon, f)))
+}
+
+/// Whether one of `blocks` is a decision of `m` declared `one_way`.
+fn one_way_among(m: &Materialized, blocks: &[BlockId]) -> bool {
+    blocks.iter().any(|id| {
+        m.get(id).is_some_and(|b| {
+            b.block_type == decision::DECISION && b.field_str("reversibility") == Some("one_way")
+        })
+    })
+}
+
+/// The policy role the `approve` item of version `pref` (record `p`) needs (O10, D-TF78H), under
+/// the live policy: none with no policy, or none that applies. Every approval of the version
+/// meets it in its landing.
+pub(crate) fn approve_role(
+    st: &ReadState,
+    pref: &ProposalRef,
+    p: &Proposal,
+) -> Result<Option<RequiredRole>, RdyError> {
+    let Some((canon, fields)) = policy_of(st)? else {
+        return Ok(None);
+    };
+    let v = Version::read_for(st, &Candidate::stored(st, *pref, p.clone())?, Removal::Skip)?;
+    Ok(required_role(
+        st,
+        &canon,
+        Some(&v.next),
+        &fields,
+        &v.approve_facts(),
+    ))
+}
+
+/// The policy role a deferral card `i` needs (O10), when the card is bound outside the queue
+/// ([`deferral_card`]): none with no policy, or none that applies.
+pub(crate) fn deferral_role(st: &ReadState, i: &Item) -> Result<Option<RequiredRole>, RdyError> {
+    let Some((canon, fields)) = policy_of(st)? else {
+        return Ok(None);
+    };
+    let Some(batch) = i.batch.as_deref() else {
+        return Ok(None);
+    };
+    let pref = crate::gate::resolve_in(st, batch)?;
+    let p = st.reader().proposal(&pref.version)?;
+    let v = Version::read_for(st, &Candidate::stored(st, pref, p)?, Removal::Skip)?;
+    Ok(required_role(
+        st,
+        &canon,
+        Some(&v.next),
+        &fields,
+        &v.defer_facts(),
+    ))
 }
 
 /// What holds version `pref` back from landing (F2, D-AAQ9Z), read once for the landing. A
@@ -493,7 +713,7 @@ pub(crate) fn readiness_of(st: &ReadState, c: &Candidate) -> Result<Readiness, R
 pub(crate) fn assessed(
     st: &ReadState,
     c: &Candidate,
-    require_up_to_date: bool,
+    gate: &crate::readiness::assessment::GateConfig,
 ) -> Result<(Readiness, Option<Assessment>), RdyError> {
     let v = Version::read_for(st, c, Removal::Read)?;
     let issues = v.readiness(st)?;
@@ -507,25 +727,30 @@ pub(crate) fn assessed(
             issues,
             summary,
             card: None,
+            policy: None,
         };
         return Ok((r, None));
     }
-    let candidate = st.candidate_coverage(&v.built, &v.p.changes);
+    // the verdict comes before the card, which shows it as its `Policy` fact
+    let policy = v.policy(st)?;
+    let candidate = v.candidate(st);
     let consequences = v.consequence_count(st);
     let card = v.batch_item_with(
         st,
         now_ms(),
-        candidate.as_ref(),
+        candidate,
         consequences.as_ref().copied(),
+        Some(&policy),
     );
     let built = v.assessment(
         st,
         c,
         &card,
         &summary,
-        &candidate?,
+        candidate.map_err(Clone::clone)?,
         consequences?,
-        require_up_to_date,
+        gate,
+        &policy,
     )?;
     Ok(match built {
         Ok(a) => (
@@ -533,6 +758,7 @@ pub(crate) fn assessed(
                 issues,
                 summary,
                 card: Some(card),
+                policy: Some(policy),
             },
             Some(a),
         ),
@@ -541,10 +767,61 @@ pub(crate) fn assessed(
                 issues: vec![issue],
                 summary,
                 card: None,
+                policy: None,
             },
             None,
         ),
     })
+}
+
+/// The gate score (O17) of page `doc` in `m`, its blocks scored by `entry`; none when no block of
+/// the page is scored.
+fn page_gate_score<'e>(
+    pack: &rdy_schema::Pack,
+    m: &Materialized,
+    doc: &BlockId,
+    entry: impl Fn(&BlockId) -> Option<&'e crate::coverage::BlockEntry>,
+) -> Option<u32> {
+    let blocks = crate::coverage::page_blocks(m, doc);
+    let entries: Vec<(&BlockId, &crate::coverage::BlockEntry)> = blocks
+        .iter()
+        .filter_map(|id| Some((id, entry(id)?)))
+        .collect();
+    (!entries.is_empty()).then(|| crate::coverage::gate_rollup(pack, m, entries.into_iter()).score)
+}
+
+/// O19: each `authority_policy` block that `changes` (whose hashes are `hashes`, in the version's
+/// order) create, update or delete, in id order, with the last change that writes it and whether
+/// that change is `implements` with at least one decision of `next`, the prospective canon. A
+/// deleted block's type is read in `canon`.
+fn policy_changes(
+    hashes: &[Hash],
+    changes: &[Change],
+    canon: &Materialized,
+    next: &Materialized,
+) -> Vec<PolicyChange> {
+    let mut last: BTreeMap<BlockId, (Hash, &Change)> = BTreeMap::new();
+    for (h, c) in hashes.iter().zip(changes) {
+        for op in &c.ops {
+            let policy = match op {
+                Op::Create { block } | Op::Update { block, .. } => block.block_type == POLICY_TYPE,
+                Op::Delete { id, .. } => canon.get(id).is_some_and(|b| b.block_type == POLICY_TYPE),
+            };
+            if policy {
+                last.insert(op.block_id().clone(), (*h, c));
+            }
+        }
+    }
+    last.into_iter()
+        .map(|(block, (h, c))| PolicyChange {
+            block,
+            short: h.short(),
+            implements: matches!(&c.justification, Some(Justification::Implements(ids))
+            if ids.iter().any(|d| {
+                next.get(d).is_some_and(|b| b.block_type == decision::DECISION)
+            })),
+        })
+        .collect()
 }
 
 /// The record kind of an exception kind.
@@ -673,7 +950,7 @@ pub(crate) fn removal_item(
         return Ok(None);
     }
     let v = Version::read(st, pref, p)?;
-    let mut item = v.batch_item(st, now_ms());
+    let mut item = v.batch_item(st, now_ms(), None);
     // the item the queue builds draws its facts from the stored assessment (O16); a version with
     // none (O10) shows the facts as read now
     if let Some(facts) = stored_facts(st, &v)? {
@@ -879,6 +1156,10 @@ struct Version {
     plan: Result<VersionPlan, RdyError>,
     /// The plan blocks of a version whose change plan cannot be read: none.
     no_blocks: BTreeSet<BlockId>,
+    /// O19: each authority_policy block the version writes, with the last change that writes it.
+    policy_changes: Vec<PolicyChange>,
+    /// The coverage of the canon the version would give, worked out once on first use.
+    candidate: OnceCell<Result<CandidateCoverage, RdyError>>,
 }
 
 /// Whether [`Version::read_for`] reads the removal cards of a version.
@@ -969,6 +1250,7 @@ impl Version {
         }
         let plan_bound = c.plan.hash();
         let plan = version_plan(st, &pref.version, &p, &c.plan);
+        let policy_changes = policy_changes(&p.changes, &changes, &canon, &next);
         Ok(Version {
             pref,
             p,
@@ -984,6 +1266,8 @@ impl Version {
             plan_bound,
             plan,
             no_blocks: BTreeSet::new(),
+            policy_changes,
+            candidate: OnceCell::new(),
         })
     }
 
@@ -1032,20 +1316,26 @@ impl Version {
                 .iter()
                 .map(|d| (d.block.id.clone(), d.r#ref.clone(), d.one_way))
                 .collect(),
+            policy_changes: &self.policy_changes,
         }
     }
 
     /// Every failed readiness check, one issue each, in the closed order of
     /// [`crate::readiness`]: the one readiness, on this version as read.
     fn readiness(&self, st: &ReadState) -> Result<Vec<Issue>, RdyError> {
-        crate::readiness::issues(st, &self.checked())
+        crate::readiness::issues(st, &self.checked(), || self.lowered(st))
     }
 
-    /// [`Version::readiness`] with the version's change plan summary and, when it is ready, its
-    /// `approve` item ([`Readiness`]).
+    /// [`Version::readiness`] with the version's change plan summary and, when it is ready, the
+    /// policy's verdict and its `approve` item ([`Readiness`]).
     fn readiness_with_card(&self, st: &ReadState, now: i64) -> Result<Readiness, RdyError> {
         let issues = self.readiness(st)?;
-        let card = issues.is_empty().then(|| self.batch_item(st, now));
+        let policy = if issues.is_empty() {
+            Some(self.policy(st)?)
+        } else {
+            None
+        };
+        let card = policy.as_ref().map(|v| self.batch_item(st, now, Some(v)));
         Ok(Readiness {
             issues,
             summary: self
@@ -1054,7 +1344,329 @@ impl Version {
                 .map(|p| p.summary.clone())
                 .unwrap_or_default(),
             card,
+            policy,
         })
+    }
+
+    /// The coverage of the canon the version would give, worked out once.
+    fn candidate(&self, st: &ReadState) -> Result<&CandidateCoverage, &RdyError> {
+        self.candidate
+            .get_or_init(|| st.candidate_coverage(&self.built, &self.p.changes))
+            .as_ref()
+    }
+
+    /// Readiness check 9 (O17, D-ZWP7Q, D-WB22B, D-T5S9A): under `coverage.gate: no_lower`, one
+    /// `E_COVERAGE_LOWERED` issue for each page whose gate score the version lowers, in doc id
+    /// order, then one for the corpus. A page is each doc the version touches that has blocks in
+    /// canon, scored before (canon) and after (the canon the version would give); a new page
+    /// counts in the corpus only. The canon the version would give holds its proposed decisions
+    /// as proposed; a landing accepts them, so each one no content carries (its `unapplied`
+    /// exception) counts after as the landing gives it: with its Governed check and its
+    /// `unapplied_decision` issue (D-T5S9A: an opted-in project cannot land a decision that no
+    /// content carries). A coverage read error is the one issue: the gate cannot pass what it
+    /// cannot read.
+    fn lowered(&self, st: &ReadState) -> Vec<Issue> {
+        let read_error = |e: &RdyError| Issue {
+            severity: Severity::Error,
+            code: e.code,
+            block: None,
+            message: e.message.clone(),
+            fix: e.fix.clone(),
+        };
+        let candidate = match self.candidate(st) {
+            Ok(c) => c,
+            Err(e) => return vec![read_error(e)],
+        };
+        let (canon, before) = match (
+            st.materialized(&Scope::Canon),
+            st.coverage_issues(&Scope::Canon),
+        ) {
+            (Ok(m), Ok(i)) => (m, i),
+            (Err(e), _) | (_, Err(e)) => return vec![read_error(&e)],
+        };
+        let pack = st.pack();
+        let landed = self.landed_unapplied(candidate);
+        let mut out = vec![];
+        for d in self.docs(Some(&canon)) {
+            let Some(was) = page_gate_score(pack, &canon, &d, |id| before.blocks.get(id)) else {
+                continue;
+            };
+            let now = page_gate_score(pack, &self.next, &d, |id| {
+                landed.get(id).or_else(|| candidate.issues.blocks.get(id))
+            })
+            .unwrap_or(was);
+            if now < was {
+                let path = self
+                    .next
+                    .path_of(&d)
+                    .or_else(|| canon.path_of(&d))
+                    .unwrap_or_else(|| d.to_string());
+                out.push(crate::readiness::coverage_lowered(
+                    &self.pref,
+                    Some(d),
+                    &path,
+                    was,
+                    now,
+                ));
+            }
+        }
+        let was = crate::coverage::gate_rollup(pack, &canon, before.blocks.iter()).score;
+        let entries = candidate
+            .issues
+            .blocks
+            .iter()
+            .filter(|(id, _)| !landed.contains_key(*id))
+            .chain(landed.iter());
+        let now = crate::coverage::gate_rollup(pack, &self.next, entries).score;
+        if now < was {
+            out.push(crate::readiness::coverage_lowered(
+                &self.pref,
+                None,
+                "the corpus",
+                was,
+                now,
+            ));
+        }
+        out
+    }
+
+    /// D-T5S9A: the coverage entry, as the landing gives it, of each proposed decision of the
+    /// version that no content carries (its `unapplied` exception, `lands_unapplied`): its
+    /// entry in `candidate` with one Governed check and its `unapplied_decision` issue.
+    fn landed_unapplied(
+        &self,
+        candidate: &CandidateCoverage,
+    ) -> BTreeMap<BlockId, crate::coverage::BlockEntry> {
+        use crate::coverage::{BlockEntry, CoverageIssue, Dimension, IssueCode};
+        let governed = Dimension::ALL
+            .iter()
+            .position(|d| *d == Dimension::Governed)
+            .expect("Governed is a dimension");
+        self.decisions
+            .iter()
+            .filter(|d| d.kinds.iter().any(|(k, _)| *k == ExceptionKind::Unapplied))
+            .map(|d| {
+                let id = &d.block.id;
+                let mut e =
+                    candidate
+                        .issues
+                        .blocks
+                        .get(id)
+                        .cloned()
+                        .unwrap_or_else(|| BlockEntry {
+                            doc: self.next.doc_of(id).map(|b| b.id.clone()),
+                            checks: [0; 6],
+                            issues: vec![],
+                        });
+                if !e
+                    .issues
+                    .iter()
+                    .any(|i| i.code == IssueCode::UnappliedDecision)
+                {
+                    e.checks[governed] = e.checks[governed].max(1);
+                    e.issues.push(CoverageIssue::new(
+                        id,
+                        IssueCode::UnappliedDecision,
+                        None,
+                        crate::coverage::fix_unapplied_decision(id),
+                    ));
+                }
+                (id.clone(), e)
+            })
+            .collect()
+    }
+
+    /// The authority policy's verdict on this version (D-ZWP7Q, O8): `policy_verdict::verdict`
+    /// under the live policy, the policy block in canon at its head, with the required role of
+    /// the version's `approve` item (O10) when the policy's fields read.
+    fn policy(&self, st: &ReadState) -> Result<AssessedPolicy, RdyError> {
+        let canon = st.materialized(&Scope::Canon)?;
+        let live = crate::policy::live_policy(st, &canon);
+        let inputs = self.verdict_inputs(st, &canon)?;
+        let role = live
+            .as_ref()
+            .and_then(|l| l.fields.as_ref())
+            .and_then(|f| {
+                crate::policy::roles::required_role(
+                    st,
+                    &canon,
+                    Some(&self.next),
+                    f,
+                    &self.approve_facts(),
+                )
+            })
+            .map(|r| r.label());
+        let reference = live.as_ref().map(|l| l.reference());
+        let policy = live
+            .as_ref()
+            .zip(reference.as_ref())
+            .map(|(l, r)| (r, l.fields.as_ref()));
+        Ok(crate::policy_verdict::verdict(policy, &inputs, role))
+    }
+
+    /// What the verdict reads of this version (closed): its proposer, its changes in
+    /// order, each block it writes (a deleted one read in canon) with its areas and whether it is
+    /// in stable content in canon or the prospective canon, each decision it writes (O7), its
+    /// exceptions in the facts' order, whether a change carries a removal request, whether it
+    /// writes the policy, its deferred non-code items, the docs it makes stable, and its change
+    /// plan's items.
+    fn verdict_inputs(
+        &self,
+        st: &ReadState,
+        canon: &Materialized,
+    ) -> Result<VerdictInputs, RdyError> {
+        let changes = self
+            .p
+            .changes
+            .iter()
+            .zip(&self.changes)
+            .map(|(h, c)| ChangeFacts {
+                short: h.short(),
+                author: c.provenance.actor.clone(),
+                justification: c.justification.as_ref().map(|j| match j {
+                    Justification::Implements(_) => JustificationKind::Implements,
+                    Justification::Editorial { .. } => JustificationKind::Editorial,
+                    Justification::Reflects { .. } => JustificationKind::Reflects,
+                }),
+            })
+            .collect();
+        let blocks = self
+            .touched
+            .iter()
+            .map(|id| {
+                let (m, b) = match self.next.get(id) {
+                    Some(b) => (&*self.next, Some(b)),
+                    None => (canon, canon.get(id)),
+                };
+                WrittenBlock {
+                    id: id.clone(),
+                    areas: b.map(|b| st.areas_in(m, b)).unwrap_or_default(),
+                    stable: crate::brief::effective_stable(canon, Some(id))
+                        || crate::brief::effective_stable(&self.next, Some(id)),
+                }
+            })
+            .collect();
+        let decisions = self
+            .written_decisions()
+            .map(|b| WrittenDecision {
+                id: b.id.clone(),
+                basis: b.field_str("authority_basis").map(str::to_string),
+                reversibility: b.field_str("reversibility").map(str::to_string),
+                attested_by: b.field_str("attested_by").map(str::to_string),
+                areas: st.areas_in(&self.next, b),
+            })
+            .collect();
+        let mut exceptions: Vec<(ExceptionKind, String)> = self
+            .decisions
+            .iter()
+            .flat_map(|d| d.kinds.iter().map(|(k, _)| (*k, d.r#ref.clone())))
+            .collect();
+        exceptions.extend(
+            self.reaffirms
+                .iter()
+                .filter(|d| d.one_way)
+                .map(|d| (ExceptionKind::ReaffirmOneWay, d.r#ref.clone())),
+        );
+        let redaction = !crate::redaction::requests_carried(st, &self.p.changes)?.is_empty();
+        let (noncode_deferrals, plan_items) = match &self.plan {
+            Ok(plan) => (
+                if plan.bound.is_some() {
+                    plan.deferrals.len()
+                } else {
+                    0
+                },
+                plan.counts.open + plan.counts.closed + plan.counts.deferred,
+            ),
+            Err(_) => (0, 0),
+        };
+        let stable_docs = self
+            .docs(Some(canon))
+            .into_iter()
+            .filter(|d| {
+                crate::brief::effective_stable(&self.next, Some(d))
+                    && !crate::brief::effective_stable(canon, Some(d))
+            })
+            .collect();
+        Ok(VerdictInputs {
+            proposer: self.p.provenance.actor.clone(),
+            changes,
+            blocks,
+            decisions,
+            exceptions,
+            redaction,
+            changes_policy: !self.policy_changes.is_empty(),
+            noncode_deferrals,
+            stable_docs,
+            plan_items,
+        })
+    }
+
+    /// O7: every decision block the version creates or updates, read in the prospective canon,
+    /// in id order. A tracking edit counts.
+    fn written_decisions(&self) -> impl Iterator<Item = &Block> {
+        self.touched
+            .iter()
+            .filter_map(|id| self.next.get(id))
+            .filter(|b| b.block_type == decision::DECISION)
+    }
+
+    /// The facts of the version's `approve` item that the policy's `require` entries match on
+    /// (O10): the blocks it writes, whether a decision it writes or re-affirms is `one_way`, and
+    /// whether it writes a decision (O7, [`Version::written_decisions`]).
+    fn approve_facts(&self) -> ItemFacts {
+        let one_way = self
+            .written_decisions()
+            .any(|b| b.field_str("reversibility") == Some("one_way"))
+            || self.reaffirms.iter().any(|d| d.one_way);
+        ItemFacts {
+            kind: ItemKind::Approve,
+            blocks: self.touched.iter().cloned().collect(),
+            one_way,
+            decision: self.writes_decision(),
+        }
+    }
+
+    /// Whether the version writes a decision (O7).
+    fn writes_decision(&self) -> bool {
+        self.written_decisions().next().is_some()
+    }
+
+    /// The facts of the version's `confirm` item `i` (O10): the blocks the version writes;
+    /// `one_way` when the decision the item confirms is declared `one_way` in the canon the
+    /// version would give; the version writes a decision.
+    fn confirm_facts(&self, i: &Item) -> ItemFacts {
+        let decided: Vec<BlockId> = i
+            .r#ref
+            .split_once('@')
+            .and_then(|(id, _)| BlockId::parse(id).ok())
+            .into_iter()
+            .collect();
+        ItemFacts {
+            kind: ItemKind::Confirm,
+            blocks: self.touched.iter().cloned().collect(),
+            one_way: one_way_among(&self.next, &decided),
+            decision: self.writes_decision(),
+        }
+    }
+
+    /// The facts of the version's deferral card (O10): the subjects of the deferred items that
+    /// are blocks; `one_way` when one of them is a decision declared `one_way` in the canon the
+    /// version would give; whether the version writes a decision.
+    fn defer_facts(&self) -> ItemFacts {
+        let blocks: Vec<BlockId> = match &self.plan {
+            Ok(plan) => plan
+                .deferrals
+                .iter()
+                .filter_map(|d| BlockId::parse(&d.subject).ok())
+                .collect(),
+            Err(_) => vec![],
+        };
+        ItemFacts {
+            kind: ItemKind::Defer,
+            one_way: one_way_among(&self.next, &blocks),
+            blocks,
+            decision: self.writes_decision(),
+        }
     }
 
     /// The assessment of this version, which is ready (D-SDSV2, O16 to O19), from what its read
@@ -1070,7 +1682,8 @@ impl Version {
         summary: &PlanSummary,
         candidate: &CandidateCoverage,
         consequences: usize,
-        require_up_to_date: bool,
+        gate: &crate::readiness::assessment::GateConfig,
+        policy: &AssessedPolicy,
     ) -> Result<Result<Assessment, Issue>, RdyError> {
         use crate::readiness::assessment::{
             self as record, MAX_TENSION_ROWS, confidence_record, issue_of, scores_of,
@@ -1205,7 +1818,7 @@ impl Version {
             pref: self.pref,
             base: self.p.canon_at,
             pack,
-            require_up_to_date,
+            gate: *gate,
             changes: self.p.changes.len(),
             consequences,
             plan: summary,
@@ -1226,6 +1839,7 @@ impl Version {
             confidence: confidence_record(&confidence),
             issues,
             card,
+            policy: Some(policy.clone()),
         }))
     }
 
@@ -1251,11 +1865,12 @@ impl Version {
         raised_from(&self.p, it, now);
     }
 
-    /// The version's `approve` item.
-    fn batch_item(&self, st: &ReadState, now: i64) -> Item {
-        let candidate = st.candidate_coverage(&self.built, &self.p.changes);
+    /// The version's `approve` item, with the policy's verdict `policy` as its `Policy` fact
+    /// when one is given (a ready version).
+    fn batch_item(&self, st: &ReadState, now: i64, policy: Option<&AssessedPolicy>) -> Item {
+        let candidate = self.candidate(st);
         let consequences = self.consequence_count(st);
-        self.batch_item_with(st, now, candidate.as_ref(), consequences.as_ref().copied())
+        self.batch_item_with(st, now, candidate, consequences.as_ref().copied(), policy)
     }
 
     /// [`Version::batch_item`] with the coverage of the canon the version would give
@@ -1266,6 +1881,7 @@ impl Version {
         now: i64,
         candidate: Result<&CandidateCoverage, &RdyError>,
         consequences: Result<usize, &RdyError>,
+        policy: Option<&AssessedPolicy>,
     ) -> Item {
         let r = self.r#ref();
         let members: Vec<&Decision> = self
@@ -1290,7 +1906,7 @@ impl Version {
         it.why = format!("ready to land: {} changes", self.p.changes.len());
         it.summary = summary;
         it.summary_by = Some(self.p.provenance.actor.clone());
-        it.facts = self.facts(st, candidate, consequences);
+        it.facts = self.facts(st, candidate, consequences, policy);
         it.members = members
             .iter()
             .map(|d| format!("{}  {}", d.block.id, d.title()))
@@ -1323,27 +1939,29 @@ impl Version {
         it
     }
 
-    /// The docs the version touches: the doc of each block it writes, in the canon it would
-    /// give, else in canon (a deleted block).
+    /// The docs the version touches: for each block it writes, its doc in the canon it would give
+    /// and its doc in canon. A move between pages touches both pages (O17: the source page's
+    /// gate score is compared too); a deleted block has only its doc in canon.
     fn docs(&self, canon: Option<&Materialized>) -> BTreeSet<BlockId> {
         self.touched
             .iter()
-            .filter_map(|id| {
-                self.next
-                    .doc_of(id)
-                    .or_else(|| canon.and_then(|c| c.doc_of(id)))
-                    .map(|d| d.id.clone())
+            .flat_map(|id| {
+                let after = self.next.doc_of(id).map(|d| d.id.clone());
+                let before = canon.and_then(|c| c.doc_of(id)).map(|d| d.id.clone());
+                after.into_iter().chain(before)
             })
             .collect()
     }
 
     /// The batch card's facts, in the closed order of O6, with the coverage of the canon the
-    /// version would give (`candidate`) and the count of its consequences.
+    /// version would give (`candidate`) and the count of its consequences. A ready version's
+    /// verdict (`policy`) follows Exceptions as the fact `Policy` (D-ZWP7Q, O9).
     fn facts(
         &self,
         st: &ReadState,
         candidate: Result<&CandidateCoverage, &RdyError>,
         consequences: Result<usize, &RdyError>,
+        policy: Option<&AssessedPolicy>,
     ) -> Vec<Fact> {
         let canon = st.materialized(&Scope::Canon).ok();
         let docs = self.docs(canon.as_deref());
@@ -1404,7 +2022,7 @@ impl Version {
             name: name.into(),
             value,
         };
-        vec![
+        let mut facts = vec![
             fact(
                 "Changes",
                 format!(
@@ -1438,7 +2056,11 @@ impl Version {
                     n => n.to_string(),
                 },
             ),
-        ]
+        ];
+        if let Some(policy) = policy {
+            facts.push(fact(POLICY_FACT, crate::policy_verdict::fact_value(policy)));
+        }
+        facts
     }
 
     /// The Base fact: the canon the version was proposed on, and whether canon is still there.
@@ -1878,6 +2500,9 @@ pub const APPROVE_REASON_CARDS: &str =
 /// The name of the batch fact that gives the claim of the version's justifications (rf9,
 /// TASK-507 (3)); it follows Changes.
 pub const JUSTIFICATION_FACT: &str = "Justification";
+/// The name of the batch fact that gives the authority policy's verdict (D-ZWP7Q, O9); it
+/// follows Exceptions.
+pub const POLICY_FACT: &str = "Policy";
 /// The name of the batch fact that gives the canon the version was proposed on; it is the one
 /// fact the approve card reads live, not from the stored assessment (I-d).
 const BASE_FACT: &str = "Base";

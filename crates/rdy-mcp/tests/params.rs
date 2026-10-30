@@ -387,7 +387,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
             checked.push(stringify!($t));
         )* };
     }
-    // The 62 `*Params` types, nested ones included (`EditorialParams`, `ReflectsParams`,
+    // The 65 `*Params` types, nested ones included (`EditorialParams`, `ReflectsParams`,
     // `AltMemberParams`, `AltPickParams`, `DismissParams`, `DecideParams`, `MentionParams`,
     // `AcceptAdviceParams`, `RelayParams`, `RecommendedParams`, `PlanAnswerParams`,
     // `PlanAnswerSpecParams`, `PlanGroupParams`,
@@ -406,6 +406,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         CoverageParams,
         DecideParams,
         DismissParams,
+        DisputeParams,
         DumpParams,
         EditorialParams,
         ExportParams,
@@ -417,6 +418,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         KeyRetireParams,
         KeyRevokeParams,
         KeyShowParams,
+        LandParams,
         LoadParams,
         LogParams,
         MentionParams,
@@ -426,6 +428,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         PlanAnswerSpecParams,
         PlanGroupParams,
         PlanParams,
+        PolicyParams,
         ProposeParams,
         PublicationCheckParams,
         PublishParams,

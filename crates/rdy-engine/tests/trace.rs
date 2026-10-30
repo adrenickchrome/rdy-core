@@ -806,7 +806,7 @@ fn rf11_introduction_and_acceptance_are_older_than_history_page() {
     assert_eq!(
         v["introduced"],
         json!({"id": l1.to_string(), "proposal": ref1, "title": "First", "approved_by": FOUNDER,
-               "assurance": "local",
+               "assurance": "local", "dispute": {"state": "none", "disputes": []},
                "author": {"actor": WRITER, "run": "run-1", "role": "writer", "at_ms": v["introduced"]["author"]["at_ms"]}})
     );
     // the oldest accepted version: D1's acceptance change in the first landing

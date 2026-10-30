@@ -72,8 +72,8 @@ pub struct Entry {
     pub seen: Vec<String>,
     /// Set for an inbox read.
     pub inbox: Option<InboxRead>,
-    /// The reply a check reads: for `land`, the `rdy --json approve` reply (its `assurance`,
-    /// `landing` and `chosen`).
+    /// The reply a check reads: for `land`, the `rdy --json approve` reply or an agent's `rdy_land`
+    /// reply (its `assurance`, `landing` and `chosen`).
     pub reply: Option<serde_json::Value>,
     /// Set on a `Skipped` entry that found nothing to do (see [`Skip`]).
     pub skip: Option<Skip>,
@@ -183,6 +183,9 @@ const LAND_CODES: &[&str] = &[
     // refuses a version whose block needs a new order key when its view changed or dropped
     // that block after the proposal ("propose again"). The person re-queues it.
     "E_STALE_BASE",
+    // ap13 (D-ZWP7Q): an agent's `rdy_land` of a version whose stored verdict needs a person;
+    // the drain falls back to the person's approval once
+    "E_POLICY_HUMAN",
 ];
 const WC_CODES: &[&str] = &["E_WC_STALE", "E_WC_CONFLICT"];
 

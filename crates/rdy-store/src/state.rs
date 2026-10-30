@@ -1047,7 +1047,7 @@ impl Store {
                 crate::carried_records::ASSESSMENT_PROPOSAL,
             ));
         }
-        self.check_assessment(a, &item, &prepared.items)?;
+        self.check_carried::<Assessment>(&item, &prepared.items)?;
         prepared.items.push(item);
         prepared.assessment = Some(id);
         Ok(id)
@@ -1059,29 +1059,30 @@ impl Store {
     pub fn put_assessment(&mut self, a: &Assessment) -> Result<Hash, StoreError> {
         let item = crate::codec::item_new(kinds::ASSESSMENT, a);
         let id = Hash::of(&item.1);
-        self.check_assessment(a, &item, &[])?;
+        self.check_carried::<Assessment>(&item, &[])?;
         self.write_guarded(vec![item])?;
         Ok(id)
     }
 
-    /// Checks `item`, the ASSESSMENT frame of `a`, as the frame after `batch`: its bounded
-    /// encoding and its own rules (`Assessment::validate`), as `record <hash> (kind 25):
-    /// <reason>`; every object it names (`object_refs::refs_of`) in `batch` or the store with its
-    /// kind (`NotFound(<hash>)` for the first that is not); and the bindings it names
-    /// (`carried_records::validate_refs`, reading `batch` before the store). Writes nothing.
-    fn check_assessment(
+    /// Checks `item`, a carried record's frame (an ASSESSMENT, a DISPUTE or a
+    /// DISPUTE_RESOLUTION, decoded as a `T`), as the frame after `batch`: its bounded encoding and
+    /// its own rules (`carried_records::validate_local`: `Assessment::validate`,
+    /// `Dispute::validate`), as `record <hash> (kind <kind>): <reason>`; every object it names
+    /// (`object_refs::refs_of`) in `batch` or the store with its kind (`NotFound(<hash>)` for the
+    /// first that is not); and the bindings it names (`carried_records::validate_refs`, reading
+    /// `batch` before the store). Writes nothing.
+    pub(crate) fn check_carried<T: serde::de::DeserializeOwned + 'static>(
         &self,
-        a: &Assessment,
         item: &(u8, Vec<u8>),
         batch: &[(u8, Vec<u8>)],
     ) -> Result<(), StoreError> {
         let id = Hash::of(&item.1);
-        let refuse = |reason: &str| crate::carried_records::refusal(&id, kinds::ASSESSMENT, reason);
+        let kind = crate::codec::logical_kind(item.0);
+        let refuse = |reason: &str| crate::carried_records::refusal(&id, kind, reason);
         // within the bounded decoder's limits, so every reader can read it back
         let split = crate::codec::split(item.0, &item.1).map_err(|e| refuse(&e.to_string()))?;
-        crate::codec::decode_bounded_split::<Assessment>(&split)
-            .map_err(|e| refuse(&e.to_string()))?;
-        a.validate().map_err(refuse)?;
+        crate::codec::decode_bounded_split::<T>(&split).map_err(|e| refuse(&e.to_string()))?;
+        crate::carried_records::validate_local(item.0, &item.1).map_err(refuse)?;
         // the objects it names are held, as an answer's target is (`answer.rs`): an object the
         // carried bindings do not find passes them, and a landing that named the record would
         // then give a closure that does not resolve
@@ -1106,10 +1107,7 @@ impl Store {
                 return Err(StoreError::NotFound(edge.hash));
             }
         }
-        let key = crate::object_refs::ObjectKey {
-            kind: kinds::ASSESSMENT,
-            hash: id,
-        };
+        let key = crate::object_refs::ObjectKey { kind, hash: id };
         let mut source = PendingFrames {
             store: crate::carried_records::StoreObjects(self),
             batch,
@@ -1547,6 +1545,36 @@ impl StoreReader {
         end: crate::segment::Location,
     ) -> Result<Option<Hash>, StoreError> {
         self.index().assessment_proposal(version, end)
+    }
+
+    /// The DISPUTEs of `landing` whose frames lie before `end` (a captured log end), in log
+    /// order (D-ZWP7Q): one keyed range read of the dispute table.
+    pub fn disputes_of(
+        &self,
+        landing: &Hash,
+        end: crate::segment::Location,
+    ) -> Result<Vec<Hash>, StoreError> {
+        self.index().landing_disputes(landing, end)
+    }
+
+    /// The DISPUTE_RESOLUTION of `dispute` whose frame lies before `end`: the first in log order.
+    /// None while the dispute is open.
+    pub fn resolution_of(
+        &self,
+        dispute: &Hash,
+        end: crate::segment::Location,
+    ) -> Result<Option<Hash>, StoreError> {
+        self.index().dispute_resolution(dispute, end)
+    }
+
+    /// The first `max` DISPUTEs whose frames lie before `end`, in log order, and how many more
+    /// there are (omitted).
+    pub fn all_disputes(
+        &self,
+        end: crate::segment::Location,
+        max: usize,
+    ) -> Result<(Vec<Hash>, usize), StoreError> {
+        self.index().disputes_before(end, max)
     }
 
     /// The location of the log's first CHANGE whose links record a briefing (O3); none while

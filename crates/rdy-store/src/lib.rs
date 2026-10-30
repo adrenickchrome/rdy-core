@@ -7,6 +7,7 @@ pub mod closure;
 pub mod codec;
 pub mod coord;
 pub mod diagram_cache;
+mod dispute;
 pub mod dump;
 pub mod dump_chain;
 pub mod dump_scan;

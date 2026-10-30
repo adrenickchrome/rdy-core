@@ -3,13 +3,19 @@
 use super::script::{AREAS, Config};
 use crate::daemon::Served;
 use crate::edit_loop::{brief_of, write_cited};
-use crate::fixtures::{land, write, writer};
+use crate::fixtures::{land, parse_test_ops, write, writer};
 use crate::packs::{QA_PACK_YAML, use_pack};
 use crate::platform;
-use rdy_engine::{DecisionInput, Rdy, Scope};
+use rdy_engine::{DecisionInput, Rdy, Scope, WriteRequest};
+use rdy_model::Justification;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+/// The rule of the swarm's authority policy (D-ZWP7Q): an agent `agent:a<i>` lands a version of
+/// draft content whose every change implements a decision or is editorial, that records no
+/// decision, with at most 20 blocks and 20 plan items.
+pub const SWARM_RULE: &str = "swarm-drafts";
 
 /// The name of a swarm process's parent directory under `/tmp`, before its pid.
 const PARENT_PREFIX: &str = "rdysw-";
@@ -105,7 +111,8 @@ pub const DOC_PATHS: [&str; 3] = ["wallets/ledger", "identity/accounts", "terms/
 const CLAIM_WORDS: [&str; CLAIMS_PER_AREA] = ["first", "second", "third", "fourth"];
 
 /// Builds the project: pack `rdy-qa`, then for each area a folder and a stable doc holding one
-/// section with four claims, one accepted decision and one term, landed in one landing.
+/// section with four claims, one accepted decision and one term, landed in one landing. Then the
+/// authority policy under the first doc, with its one rule `SWARM_RULE` (`authority_policy`).
 pub fn build(cfg: &Config) -> SwarmProject {
     let served = Served::new_in(run_parent());
     use_pack(
@@ -190,6 +197,7 @@ pub fn build(cfg: &Config) -> SwarmProject {
         .collect();
     write_cited(&mut r, "work", Value::Array(ops), Some(&brief)).expect("make the docs stable");
     land(&mut r, "work").expect("land the stable docs");
+    authority_policy(&mut r, &seed.docs[0]);
     let mut seed_landings: Vec<String> = r
         .read()
         .reader()
@@ -206,6 +214,55 @@ pub fn build(cfg: &Config) -> SwarmProject {
         run_seed: cfg.seed,
         seed_landings,
     }
+}
+
+/// The person starts the authority policy under `doc` (`rdy policy init --doc <doc>`: the engine
+/// call the `policy` op makes) and approves it; then writes the one rule `SWARM_RULE`, which
+/// implements a new decision, and approves that too. Both land from view `work`.
+fn authority_policy(r: &mut Rdy, doc: &str) {
+    let init = r
+        .policy_init(&writer(), Some(doc), Some("work"))
+        .expect("rdy policy init");
+    land(r, "work").expect("land the authority policy");
+    let decided = r
+        .decide(
+            &writer(),
+            "work",
+            DecisionInput {
+                parent: String::new(),
+                statement: "Agents land their draft notes under the authority policy".into(),
+                reversibility: Some("two_way".into()),
+                ..Default::default()
+            },
+        )
+        .expect("decide the swarm rule");
+    let decision = rdy_model::BlockId::parse(&decided.created["$decision"]).expect("a decision id");
+    let policy = rdy_model::BlockId::parse(&init.policy).expect("a policy id");
+    let token = brief_of(r, &Scope::View("work".into()), &[&policy])
+        .base
+        .token;
+    let rule = json!({
+        "name": SWARM_RULE,
+        "actors": ["agent:a*"],
+        "lifecycle": "draft",
+        "justifications": ["implements", "editorial"],
+        "decisions": "none",
+        "max_blocks": 20,
+        "max_items": 20
+    });
+    let ops = json!([{"op": "update", "id": init.policy, "fields": {"agent_may_accept": [rule]}}]);
+    r.write_briefed(
+        &writer(),
+        WriteRequest {
+            view: "work".into(),
+            ops: parse_test_ops(ops).expect("the rule's ops"),
+            justification: Some(Justification::Implements(vec![decision])),
+            message: format!("add the rule {SWARM_RULE}"),
+        },
+        Some(token),
+    )
+    .expect("write the swarm rule");
+    land(r, "work").expect("land the swarm rule");
 }
 
 #[cfg(test)]

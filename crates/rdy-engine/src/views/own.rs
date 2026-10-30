@@ -42,11 +42,11 @@ pub struct OwnInfo {
 }
 
 /// The fix of a refusal of a human act by an agent session.
-const RELAY_FIX: &str = "relay the person's words with evidence";
+pub(crate) const RELAY_FIX: &str = "relay the person's words with evidence";
 
 /// Whether `relay` holds nothing: an act with no relay input runs as the session itself, under
 /// today's rule. A `question` or `session_ref` alone is case 5 of the table.
-fn no_relay(relay: &RelayInput) -> Result<bool, RdyError> {
+pub(crate) fn no_relay(relay: &RelayInput) -> Result<bool, RdyError> {
     if relay.evidence.is_some() || relay.relayed_by.is_some() {
         return Ok(false);
     }
@@ -62,7 +62,13 @@ fn no_relay(relay: &RelayInput) -> Result<bool, RdyError> {
 }
 
 /// The answer of a relayed view act: `item`, the act, and the person's words (evidence `text`).
-fn answer_of(item: String, act: AnswerAct, who: &Session, relay: rdy_store::Relay) -> Answer {
+/// A relayed dispute act uses it too (`crate::dispute`).
+pub(crate) fn answer_of(
+    item: String,
+    act: AnswerAct,
+    who: &Session,
+    relay: rdy_store::Relay,
+) -> Answer {
     Answer {
         item,
         act,

@@ -1,4 +1,4 @@
-//! The landing ops: propose, approve and tag.
+//! The landing ops: propose, approve, land and tag.
 use super::*;
 use rdy_engine::consequence::propose_and_report;
 use rdy_engine::plan::{PlanAnswerInput, PlanQuery, ProposePlanRequest, check_plan_request};
@@ -137,6 +137,18 @@ pub(super) fn approve(cx: &OpContext, a: ApproveArgs) -> Result<Value, RdyError>
         v["relayed_by"] = json!(by);
     }
     Ok(v)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct LandArgs {
+    proposal: String,
+}
+
+/// `rdy land` (D-ZWP7Q, O14): an agent session lands a version the authority policy accepts.
+/// The request runs through `rdy_engine::run_land`, the runner `rdy_land` shares.
+pub(super) fn land(cx: &OpContext, a: LandArgs) -> Result<Value, RdyError> {
+    rdy_engine::run_land(cx.engine, cx.session, a.proposal)
 }
 
 /// A tag. With no relay flags, as before: a human session tags, an agent session is refused

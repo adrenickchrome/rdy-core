@@ -675,6 +675,41 @@ pub(crate) fn assessment_entry(
     })
 }
 
+/// The entry of the DISPUTE `hash` at `at`, split as `o`: the landing it disputes. Its body is
+/// read with the bounded decoder (a dispute may come from another store); one that does not
+/// decode is `record <hash> (kind 26): <reason>`.
+pub(crate) fn dispute_entry(
+    hash: Hash,
+    at: Location,
+    o: &crate::codec::ObjectBytes<'_>,
+) -> Result<IndexEntry, StoreError> {
+    let d: rdy_model::dispute::Dispute = crate::codec::decode_bounded_split(o)
+        .map_err(|e| crate::carried_records::refusal(&hash, kinds::DISPUTE, &e.to_string()))?;
+    Ok(IndexEntry::DisputeLanding {
+        landing: d.landing,
+        dispute: hash,
+        at,
+    })
+}
+
+/// The entry of the DISPUTE_RESOLUTION `hash` at `at`, split as `o`: the dispute it resolves,
+/// read as [`dispute_entry`] reads a dispute (`record <hash> (kind 27): <reason>`).
+pub(crate) fn resolution_entry(
+    hash: Hash,
+    at: Location,
+    o: &crate::codec::ObjectBytes<'_>,
+) -> Result<IndexEntry, StoreError> {
+    let r: rdy_model::dispute::DisputeResolution =
+        crate::codec::decode_bounded_split(o).map_err(|e| {
+            crate::carried_records::refusal(&hash, kinds::DISPUTE_RESOLUTION, &e.to_string())
+        })?;
+    Ok(IndexEntry::DisputeResolved {
+        dispute: r.dispute,
+        resolution: hash,
+        at,
+    })
+}
+
 /// `entries_for_frame` before the frame is noted.
 fn frame_entries(
     kind: u8,
@@ -762,6 +797,8 @@ fn frame_entries(
             out.extend(crate::plan::transition_entries(&rec, loc));
         }
         kinds::ASSESSMENT => out.push(assessment_entry(hash, loc, &o)?),
+        kinds::DISPUTE => out.push(dispute_entry(hash, loc, &o)?),
+        kinds::DISPUTE_RESOLUTION => out.push(resolution_entry(hash, loc, &o)?),
         kinds::ANSWER => out.extend(crate::plan::answer_entries(hash, loc, payload, r)?),
         kinds::PLAN => out.extend(crate::plan::plan_entries(hash, loc, payload, r)?),
         _ => {}

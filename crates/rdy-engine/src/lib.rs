@@ -21,6 +21,7 @@ mod decide;
 pub mod decision_fields;
 pub mod did_you_mean;
 pub mod diff;
+pub mod dispute;
 pub mod dump;
 pub mod dump_error;
 pub mod dump_stop;
@@ -64,6 +65,8 @@ mod pack_load;
 mod paths;
 pub mod pending;
 pub mod plan;
+pub mod policy;
+pub mod policy_verdict;
 pub mod proposal_show;
 pub mod publication;
 pub mod publication_manifest;
@@ -124,8 +127,8 @@ pub use dump::DumpSummary;
 pub use error::*;
 pub use events::{Event, EventKind, Events};
 pub use gate::{
-    LandInfo, LandOptions, LandingRow, PROPOSAL_TENSIONS_MAX, ProposalInfo, ProposalRef,
-    RebasedInfo, RelayedByRow,
+    LandInfo, LandOptions, LandingRow, PROPOSAL_TENSIONS_MAX, PolicyRow, ProposalInfo, ProposalRef,
+    RebasedInfo, RelayedByRow, run_land,
 };
 pub use history::{
     Author, HISTORY_MAX, History, HistoryEntry, JustificationInfo, LandingRef, canon_step_reads,
@@ -173,7 +176,8 @@ pub use write::{
 };
 
 pub use config::{
-    DEFAULT_LEASE_TTL_MINUTES, DEFAULT_PROPOSE_CHANGES, ProposeCadence, ServeConfig, serve_config,
+    CoverageGate, DEFAULT_LEASE_TTL_MINUTES, DEFAULT_PROPOSE_CHANGES, ProposeCadence, ServeConfig,
+    serve_config,
 };
 pub use engine::{Engine, Local, ReadFn, WriteFn};
 pub use fsck::FsckReport;

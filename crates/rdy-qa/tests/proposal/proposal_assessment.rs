@@ -340,10 +340,12 @@ fn rg10_cli_propose_prints_readiness() {
     let lines: Vec<&str> = text.lines().collect();
     let pref = lines[0].split_whitespace().nth(1).unwrap().to_string();
     let n = lines.len();
+    // ap8 (O13): the policy's verdict follows `ready`; with no policy it needs a person
     assert_eq!(
-        lines[n - 2..],
+        lines[n - 3..],
         [
             "ready",
+            "policy: needs a person: no authority policy is set",
             format!("approve with: rdy approve {pref}").as_str()
         ],
         "{text}"

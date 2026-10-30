@@ -33,19 +33,20 @@ use crate::error::RdyError;
 use crate::gate::ProposalRef;
 use crate::session::{now_ms, rfc3339};
 use crate::tensions::{Tension, TensionSeverity, tension_label};
-use rdy_model::{AnswerAct, Proposal};
-use std::collections::BTreeMap;
+use rdy_model::{AnswerAct, BlockId, Proposal};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// The `resolve` items of the queue: the advice item of each batch in `batches` (the ready
-/// `approve` items), then the item of each blocking tension. An advice item names its batch in
+/// `approve` items), then the item of each blocking tension, each with the blocks of its
+/// tensions in id order (the blocks the item covers, O10). An advice item names its batch in
 /// `batch`, and copies who raised the batch and when. `open` is the open proposals the queue read ([`crate::gate::open_proposals`]), shared so
 /// the queue reads them once.
 pub(crate) fn tension_items(
     st: &ReadState,
     open: &[(ProposalRef, Proposal)],
     batches: &[Item],
-) -> Result<Vec<Item>, RdyError> {
+) -> Result<Vec<(Item, Vec<BlockId>)>, RdyError> {
     let now = now_ms();
     let mut out = vec![];
     for batch in batches {
@@ -61,14 +62,20 @@ pub(crate) fn tension_items(
     Ok(out)
 }
 
-/// The `advice:P-x@n` item of `batch`, if its version has advised tensions no one accepted.
-fn advice_item(st: &ReadState, batch: &Item, p: &Proposal) -> Result<Option<Item>, RdyError> {
+/// The `advice:P-x@n` item of `batch`, if its version has advised tensions no one accepted,
+/// with the blocks of those tensions.
+fn advice_item(
+    st: &ReadState,
+    batch: &Item,
+    p: &Proposal,
+) -> Result<Option<(Item, Vec<BlockId>)>, RdyError> {
     let advised = st.advised_of(&p.view, &p.changes)?;
     let mut open: Vec<_> = advised.iter().filter(|a| !a.open.record.blocking).collect();
     if open.is_empty() {
         return Ok(None);
     }
     open.sort_by_key(|a| a.tension.id);
+    let blocks: BTreeSet<BlockId> = open.iter().flat_map(|a| a.tension.blocks()).collect();
     let r = &batch.r#ref;
     let n = open.len();
     let title = if n == 1 {
@@ -112,7 +119,7 @@ fn advice_item(st: &ReadState, batch: &Item, p: &Proposal) -> Result<Option<Item
     it.raised_by.clone_from(&batch.raised_by);
     it.raised_at.clone_from(&batch.raised_at);
     it.age.clone_from(&batch.age);
-    Ok(Some(it))
+    Ok(Some((it, blocks.into_iter().collect())))
 }
 
 /// One blocking tension and the versions it involves, in ref order.
@@ -124,12 +131,12 @@ struct Blocking {
 }
 
 /// The `resolve` item of each open blocking tension of an open proposal's latest version, in
-/// tension-id order.
+/// tension-id order, with the tension's blocks.
 fn blocking_items(
     st: &ReadState,
     open: &[(ProposalRef, Proposal)],
     now: i64,
-) -> Result<Vec<Item>, RdyError> {
+) -> Result<Vec<(Item, Vec<BlockId>)>, RdyError> {
     let mut found: BTreeMap<rdy_model::Hash, Blocking> = BTreeMap::new();
     for (pref, p) in open {
         let r = pref.to_string();
@@ -153,7 +160,7 @@ fn blocking_items(
     }
     Ok(found
         .into_values()
-        .map(|b| blocking_item(&b, now))
+        .map(|b| (blocking_item(&b, now), b.tension.blocks()))
         .collect())
 }
 

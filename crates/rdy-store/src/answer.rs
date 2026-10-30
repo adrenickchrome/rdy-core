@@ -243,7 +243,8 @@ impl Store {
             return Err(StoreError::Refused(damage(&id, rule)));
         }
         // a carried act's item, targets and bindings (`crate::carried_records`), before a byte
-        // is written; its record is the store's (the batch's earlier frames are not read)
+        // is written; its record is read from `extra` before the store (a dispute writer's
+        // record is in the same batch, `crate::dispute`)
         let key = ObjectKey {
             kind: kinds::ANSWER,
             hash: id,
@@ -251,14 +252,16 @@ impl Store {
         if let Err(reason) = crate::carried_records::validate_local(kind, &bytes) {
             return Err(crate::carried_records::refusal(&id, kinds::ANSWER, reason));
         }
-        let mut source = PendingAnswer {
+        let frame = (kind, bytes);
+        let mut source = crate::state::PendingFrames {
             store: crate::carried_records::StoreObjects(self),
-            key,
-            body: &bytes,
+            batch: &extra,
+            last: &frame,
         };
         if let Some(reason) = crate::carried_records::validate_refs(&mut source, key)? {
             return Err(crate::carried_records::refusal(&id, kinds::ANSWER, reason));
         }
+        let (kind, bytes) = frame;
         if a.act == AnswerAct::AcceptVerdict
             && let Some(r) = crate::carried_records::verdict_item(&a.item)
             && !self.has_kind(kinds::REVIEW, &r)?
@@ -273,22 +276,6 @@ impl Store {
         items.push((kind, bytes));
         items.extend(self.ref_items_pub(vec![(ref_of(a), id.0.to_vec())]));
         Ok((id, items))
-    }
-}
-
-/// The store's objects and one answer not written yet, as the carried checks read them.
-struct PendingAnswer<'a> {
-    store: crate::carried_records::StoreObjects<'a>,
-    key: ObjectKey,
-    body: &'a [u8],
-}
-
-impl crate::carried_records::CarriedSource for PendingAnswer<'_> {
-    fn object(&mut self, key: ObjectKey) -> Result<Option<(u16, Vec<u8>)>, StoreError> {
-        if key == self.key {
-            return Ok(Some((0, self.body.to_vec())));
-        }
-        self.store.object(key)
     }
 }
 

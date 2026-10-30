@@ -14,6 +14,7 @@ use crate::error::{E_BAD_INPUT, E_LIMIT, E_NOT_FOUND, RdyError};
 use crate::read_state::ReadState;
 use crate::signature_check::state_signatures;
 use crate::stream_error::{Reason, StreamError, to_rdy};
+use rdy_model::dispute::{Dispute, DisputeResolution, DisputeState, landing_state};
 use rdy_model::signature::{Signature, parse_statement};
 use rdy_model::{BlockId, Hash, LandingRecord, Op};
 use rdy_store::StoreError;
@@ -22,6 +23,7 @@ use rdy_store::object_refs::ObjectKey;
 use rdy_store::redaction::StoredFrame;
 use rdy_store::segment::Location;
 use rdy_store::sync_stream::is_sync_kind;
+use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
 
 /// The most landings one history walk visits.
@@ -80,6 +82,23 @@ pub struct LandingFacts {
     pub record: LandingRecord,
     pub blocks: Vec<BlockWrite>,
     pub signatures: Vec<SignatureFact>,
+}
+
+/// One dispute of a landing as recorded, with its resolution when it has one (O26): the dispute's
+/// hash and record, and the resolution's hash and record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisputeFacts {
+    pub hash: Hash,
+    pub record: Dispute,
+    pub resolution: Option<(Hash, DisputeResolution)>,
+}
+
+/// The dispute state of a landing as `rdy log` and `rdy trace` show it (D-ZWP7Q, O22): the state
+/// and the full id of every dispute of the landing, oldest first.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct LandingDispute {
+    pub state: DisputeState,
+    pub disputes: Vec<String>,
 }
 
 /// Whether the log holds one stored object, by exact kind and hash. A removed object counts as
@@ -343,6 +362,76 @@ fn landings_by(
     let mut out = Vec::with_capacity(order.len());
     for h in order {
         out.push(facts(read, h)?);
+    }
+    before_last_check();
+    read.ensure_current_epoch()?;
+    Ok(out)
+}
+
+/// The disputes of `landing` with their resolutions, oldest first (`at_ms`, then id), as `read`
+/// holds them at its log end.
+fn disputes_of_landing(read: &ReadState, landing: &Hash) -> Result<Vec<DisputeFacts>, RdyError> {
+    let reader = read.reader();
+    let mut out = Vec::new();
+    for hash in reader.disputes_of(landing, read.seq())? {
+        let record: Dispute = reader.get_typed(kinds::DISPUTE, &hash)?;
+        let resolution = match reader.resolution_of(&hash, read.seq())? {
+            Some(r) => {
+                let record: DisputeResolution = reader.get_typed(kinds::DISPUTE_RESOLUTION, &r)?;
+                Some((r, record))
+            }
+            None => None,
+        };
+        out.push(DisputeFacts {
+            hash,
+            record,
+            resolution,
+        });
+    }
+    out.sort_by_key(|d| (d.record.at_ms, d.hash));
+    Ok(out)
+}
+
+/// O22: the dispute state of `landing`, and the ids of its disputes, oldest first. It is derived
+/// from the disputes and their resolutions, never stored. `rdy log` and `rdy trace` read it
+/// through here.
+pub(crate) fn dispute_state(
+    st: &ReadState,
+    landing: &Hash,
+) -> Result<(DisputeState, Vec<Hash>), RdyError> {
+    let rows = disputes_of_landing(st, landing)?;
+    let state = landing_state(
+        rows.iter()
+            .map(|d| d.resolution.as_ref().map(|(_, r)| r.outcome)),
+    );
+    Ok((state, rows.iter().map(|d| d.hash).collect()))
+}
+
+/// [`dispute_state`] as the `dispute` member of a log row or a trace landing.
+pub(crate) fn landing_dispute(st: &ReadState, landing: &Hash) -> Result<LandingDispute, RdyError> {
+    let (state, ids) = dispute_state(st, landing)?;
+    Ok(LandingDispute {
+        state,
+        disputes: ids.iter().map(Hash::to_string).collect(),
+    })
+}
+
+/// Every dispute of each landing of `landings`, with its resolution (O26): in input order, each
+/// landing's disputes oldest first. A repeated landing counts once, where it first occurs. The
+/// input counts before its repeats collapse, and more than [`MAX_KEYS`] landings is `E_LIMIT`
+/// before anything is read, as [`landings`] has it. A landing with no dispute, or none the store
+/// holds, gives no row.
+pub fn disputes(read: &ReadState, landings: &[Hash]) -> Result<Vec<DisputeFacts>, RdyError> {
+    if landings.len() > MAX_KEYS {
+        return Err(landings_limit());
+    }
+    read.ensure_current_epoch()?;
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for l in landings {
+        if seen.insert(*l) {
+            out.extend(disputes_of_landing(read, l)?);
+        }
     }
     before_last_check();
     read.ensure_current_epoch()?;

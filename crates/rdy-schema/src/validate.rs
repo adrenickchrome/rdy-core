@@ -1,5 +1,6 @@
 use crate::glob::Glob;
 use crate::pack::{BodyRule, FieldKind, Pack, TypeClass};
+use crate::policy;
 use crate::publication;
 use crate::supporting;
 use rdy_model::{Block, BlockId, FieldValue, RefMode, ref_spans};
@@ -348,8 +349,11 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
     // D-P3YD5, D-X3136: a decision, a question, a finding or a source may sit at the top level
     // or directly in a folder; its other parents follow the pack
     let outside_ok = tree::may_sit_outside_a_doc(&block.block_type);
-    // a publication profile sits directly under a doc, whatever a pack lists
+    // a publication profile sits directly under a doc, whatever a pack lists, and so does the
+    // authority policy (D-ZWP7Q)
     let profile = block.block_type == publication::PROFILE_TYPE;
+    let is_policy = block.block_type == policy::POLICY_TYPE;
+    let doc_only = profile || is_policy;
     match (parent, &block.parent) {
         (Some(p), Some(_)) => {
             // docs and folders have paths: they sit only in folders, whatever a pack lists
@@ -357,7 +361,7 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
                 p.block_type == tree::FOLDER
             } else if outside_ok && p.block_type == tree::FOLDER {
                 true
-            } else if profile {
+            } else if doc_only {
                 p.block_type == tree::DOC
             } else {
                 pack.block_types
@@ -372,7 +376,7 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
                     format!("a {} cannot contain a {}", p.block_type, block.block_type),
                     if top_ok {
                         "put it at the top level or inside a folder".into()
-                    } else if profile {
+                    } else if doc_only {
                         PROFILE_PARENT_FIX.into()
                     } else {
                         "place it under a section (or another allowed parent type)".into()
@@ -394,7 +398,7 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
             block,
             "E_ORPHAN",
             format!("{} must have a parent", block.block_type),
-            if profile {
+            if doc_only {
                 PROFILE_PARENT_FIX.into()
             } else {
                 "set parent to the section that should contain it".into()
@@ -456,6 +460,9 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
     }
     if profile && !projection {
         publication::check_values(block, &mut out);
+    }
+    if is_policy && !projection {
+        policy::check_values(pack, block, &mut out);
     }
     out
 }
