@@ -142,7 +142,7 @@ pub(super) fn version_plan(
     let reader = st.reader();
     let fixed = compute::fixed_tensions(st, version)?;
     let read;
-    let (h, plan) = match source {
+    let (h, plan, carried) = match source {
         PlanSource::Bound(None) => {
             let heads = capture_heads(st)?;
             let computed = compute::compute(
@@ -168,33 +168,55 @@ pub(super) fn version_plan(
         }
         PlanSource::Bound(Some(h)) => {
             read = reader.plan(h)?;
-            (*h, &read)
+            (*h, &read, None)
         }
-        PlanSource::InHand { plan, hash } => (*hash, plan),
+        PlanSource::InHand {
+            plan,
+            hash,
+            computed,
+        } => (*hash, plan, computed.as_ref()),
     };
     let first = match plan.stable {
         Some(s) => reader.plan(&s)?.heads,
         None => plan.heads.clone(),
     };
-    let computed = compute::compute(
-        st,
-        &p.view,
-        &p.changes,
-        p.canon_at,
-        fixed.as_ref(),
-        &plan.heads,
-        &first,
-    )?;
-    let (_, counts, _) = live_rows(&computed, &plan.answers);
+    // the plan the propose computed for these inputs on this state, else computed now
+    let fresh;
+    let computed = match carried.and_then(|c| {
+        c.on(
+            st,
+            &p.view,
+            &p.changes,
+            p.canon_at,
+            fixed.as_ref(),
+            &plan.heads,
+            &first,
+        )
+    }) {
+        Some(c) => c,
+        None => {
+            fresh = compute::compute(
+                st,
+                &p.view,
+                &p.changes,
+                p.canon_at,
+                fixed.as_ref(),
+                &plan.heads,
+                &first,
+            )?;
+            &fresh
+        }
+    };
+    let (_, counts, _) = live_rows(computed, &plan.answers);
     Ok(VersionPlan {
         bound: Some(h),
         counts,
-        deferrals: deferrals(&computed, &plan.answers),
-        summary: summary_of(&computed, &plan.answers),
-        blocks: blocks_of(&computed),
-        tension_answers: tension_answers(&computed, &plan.answers),
-        tension_acts: tension_acts(&computed, &plan.answers),
-        suspect_items: suspect_items(&computed),
+        deferrals: deferrals(computed, &plan.answers),
+        summary: summary_of(computed, &plan.answers),
+        blocks: blocks_of(computed),
+        tension_answers: tension_answers(computed, &plan.answers),
+        tension_acts: tension_acts(computed, &plan.answers),
+        suspect_items: suspect_items(computed),
     })
 }
 

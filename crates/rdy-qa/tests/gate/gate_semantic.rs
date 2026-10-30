@@ -212,3 +212,48 @@ fn se11_a_landed_semantic_tension_stays_in_canon() {
     approve(&mut r, &p).unwrap();
     assert_eq!(one(&r, TensionKind::Semantic).id, t.id, "still there");
 }
+
+/// Deep swarm seed 1 (745217ec): a reviewer opens a semantic tension on a ready version after
+/// its propose, advising that it block, and a person accepts that advice on the version. Ruling
+/// task-12 R1: an accepted advice on any tension of the version, written after its assessment,
+/// is a later refusal. The landing must refuse, or it puts the accepted tension into canon.
+#[test]
+fn rg12_an_advice_accepted_on_a_tension_opened_after_propose_is_a_later_refusal() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.c, "C contradicts B."));
+    let p = propose(&mut r, "a");
+    assert!(p.ready, "ready before any verdict: {:#?}", p.issues);
+    judge(&mut r, true);
+    let digest = r
+        .read()
+        .proposal_show(&p.r#ref)
+        .unwrap()
+        .advised_digest
+        .expect("the verdict's advice shows on the version");
+    let accepted = r
+        .accept_advice(
+            &writer(),
+            "human:qa",
+            AcceptRequest {
+                proposal: p.r#ref.clone(),
+                advised_digest: digest,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .accepted;
+    assert!(!accepted.is_empty());
+    let head = r.read().canon_head();
+    let e = approve(&mut r, &p).expect_err("the accepted tension refuses the landing");
+    assert_eq!(e.code, E_PROPOSAL_NOT_READY, "{e:#?}");
+    assert_eq!(e.issues.len(), accepted.len(), "{:#?}", e.issues);
+    for (issue, row) in e.issues.iter().zip(&accepted) {
+        assert_eq!(issue.code, E_BLOCKING_TENSION, "{issue:#?}");
+        assert!(
+            issue.message.starts_with(&format!("{} semantic: ", row.id)),
+            "{issue:#?}"
+        );
+    }
+    assert_eq!(r.read().canon_head(), head, "nothing landed");
+}

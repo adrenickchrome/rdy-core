@@ -770,7 +770,7 @@ pub(crate) fn landing_readiness(
                     .into_iter()
                     .map(|(id, _)| id)
                     .collect();
-            let issues = Rdy::issues_in(st, changes, &next, &applied)?;
+            let issues = prospective_issues_of(st, changes)?;
             let first = issues.iter().find(|i| {
                 i.severity == Severity::Error
                     && !(i.code == E_KEY_CLASH
@@ -1537,23 +1537,50 @@ fn decisions_written(
 /// The canon that would result from landing `changes` on `st`'s canon, and each applied change's
 /// position in `changes`, in applied order. The merge surfaces E_STALE_BASE, E_ALREADY_EXISTS and
 /// E_FROZEN early; on the approve path (`approving`, the version's view) they are worded for the
-/// approver.
+/// approver. The order and the canon are memoised on `st` by the changes' ids (a refusal is
+/// not, so each caller words its own).
 pub(crate) fn prospective(
     st: &ReadState,
     changes: &[Change],
     approving: Option<&str>,
 ) -> Result<(Materialized, Vec<usize>), RdyError> {
-    let reader = st.reader();
-    let (_, applied) = reader
-        .merge_checked(&*st.canon_snapshot()?, changes)
-        .map_err(|e| match approving {
-            Some(view) => approver_stale(e, view),
-            None => e.into(),
-        })?;
-    let next = st
-        .materialized(&Scope::Canon)?
-        .with(&applied_ops(changes, &applied));
-    Ok((next, applied))
+    let ids: Vec<Hash> = changes.iter().map(Change::id).collect();
+    let applied = match st.memo.order.get(&ids) {
+        Some(at) => at,
+        None => {
+            let (_, applied) = st
+                .reader()
+                .merge_checked(&*st.canon_snapshot()?, changes)
+                .map_err(|e| match approving {
+                    Some(view) => approver_stale(e, view),
+                    None => e.into(),
+                })?;
+            let at = Arc::new(applied);
+            st.memo.order.put(ids.clone(), Arc::clone(&at));
+            at
+        }
+    };
+    let next = st.memo.prospective.get_or_try(ids, || {
+        Ok::<_, RdyError>(Arc::new(
+            st.materialized(&Scope::Canon)?
+                .with(&applied_ops(changes, &applied)),
+        ))
+    })?;
+    Ok((Materialized::clone(&next), applied.to_vec()))
+}
+
+/// The issues ([`Rdy::issues_in`]) of the canon [`prospective`] gives for `changes` on `st`,
+/// memoised on `st` by the changes' ids: on one state the ids fix that canon and its order.
+pub(crate) fn prospective_issues_of(
+    st: &ReadState,
+    changes: &[Change],
+) -> Result<Vec<Issue>, RdyError> {
+    let ids: Vec<Hash> = changes.iter().map(Change::id).collect();
+    let issues = st.memo.issues.get_or_try(ids, || {
+        let (next, applied) = prospective(st, changes, None)?;
+        Rdy::issues_in(st, changes, &next, &applied).map(Arc::new)
+    })?;
+    Ok(issues.to_vec())
 }
 
 /// The ids whose key rdy may derive again when `changes` (the changes at `applied`) land on
@@ -1615,8 +1642,8 @@ impl Rdy {
         changes: &[Change],
         approving: Option<&str>,
     ) -> Result<(Vec<Issue>, Vec<usize>), RdyError> {
-        let (next, applied) = prospective(st, changes, approving)?;
-        Ok((Self::issues_in(st, changes, &next, &applied)?, applied))
+        let (_, applied) = prospective(st, changes, approving)?;
+        Ok((prospective_issues_of(st, changes)?, applied))
     }
 
     /// The issues of `next`, the canon that landing `changes` (applied at `applied`) would give.
@@ -2323,7 +2350,7 @@ impl Rdy {
                 &vm,
             );
             if re.is_empty() {
-                issues = Self::issues_in(&st, &changes, &next, &applied)?;
+                issues = prospective_issues_of(&st, &changes)?;
             } else {
                 let mut change = self.rekey_change(&st, s, view, &re, &ids)?;
                 // alts1: a change in a member view of an open set records the set, as a write does
@@ -2487,6 +2514,7 @@ impl Rdy {
                 plan: crate::readiness::PlanSource::InHand {
                     plan: bound,
                     hash: plan_hash,
+                    computed: plan.computed.take(),
                 },
             };
             // a read error never fails the reply (as `tensions_error`): the version is stored,

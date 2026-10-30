@@ -23,6 +23,8 @@ use rdy_store::{Conflict, Merged, StoreReader, ViewHead};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 
+pub(crate) mod memo;
+
 /// What a write changed, so that `Rdy::publish` re-reads only that and carries the rest over.
 #[derive(Clone, Debug)]
 pub enum Delta {
@@ -716,6 +718,8 @@ pub struct ReadState {
     pub(crate) lease_ttl_ms: i64,
     /// The coverage issues of the scopes read in this state (FW-CH1), memoised; never carried.
     pub(crate) coverage_memo: CoverageMemo,
+    /// The gate's landing reads on this state ([`memo`]), memoised; never carried.
+    pub(crate) memo: memo::ReadMemo,
     /// The tension detectors: the registry, unless a test set others.
     pub(crate) detectors: &'static [&'static dyn Detector],
     /// A `Full` publish that failed to read the heads: every read of this state returns it.

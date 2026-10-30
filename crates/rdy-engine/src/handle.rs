@@ -378,6 +378,7 @@ impl Rdy {
             semantic: Arc::default(),
             lease_ttl_ms,
             coverage_memo: Default::default(),
+            memo: Default::default(),
             detectors: &tensions::DETECTORS,
             error: None,
         });

@@ -6,11 +6,13 @@
 //! before the first briefed change or `rdy import` wrote it.
 use rdy_engine::brief::E_BRIEF_REQUIRED;
 use rdy_engine::pending::{CARD_MAX_TOKENS, ItemKind, Pending, PendingQuery};
+use rdy_engine::plan::compute::plan_computes_for_tests;
 use rdy_engine::plan::lifecycle::{PLAN_GATE_FIX, PLAN_OPEN_FIX, W_PLAN_OPEN};
 use rdy_engine::readiness::check::BRIEFING_FIX;
 use rdy_engine::readiness::{
-    Candidate, PlanSource, candidate_builds_for_tests, readiness, readiness_calls_for_tests,
+    Candidate, PlanSource, assess, candidate_builds_for_tests, readiness, readiness_calls_for_tests,
 };
+use rdy_engine::tensions::set::landing_detections_for_tests;
 use rdy_engine::{
     DecisionInput, E_BLOCKING_TENSION, E_PLAN_OPEN, E_PROPOSAL_NOT_READY, ProposalInfo, Rdy, Scope,
 };
@@ -357,6 +359,7 @@ fn rg8_readiness_on_an_in_hand_plan_equals_readiness_on_the_stored_one() {
             plan: PlanSource::InHand {
                 plan: st.reader().plan(&h).unwrap(),
                 hash: h,
+                computed: None,
             },
         };
         let (calls, builds) = (readiness_calls_for_tests(), candidate_builds_for_tests());
@@ -664,6 +667,7 @@ fn rg8_readiness_follows_an_in_hand_plan_the_store_does_not_bind() {
         plan: PlanSource::InHand {
             plan: st.reader().plan(&head).unwrap(),
             hash: head,
+            computed: None,
         },
     };
     assert_eq!(readiness(&st, &stored).unwrap().issues, vec![plan_open(1)]);
@@ -674,4 +678,76 @@ fn rg8_readiness_follows_an_in_hand_plan_the_store_does_not_bind() {
         r.card.map(|c| (c.kind, c.r#ref)),
         Some((ItemKind::Approve, open.r#ref.clone()))
     );
+}
+
+/// rgperf (speed only, D-ME2HD): a propose computes its change plan once and runs the landing
+/// detection of its changes once on its state. Readiness reads the plan the propose computed
+/// for the version it binds, and the landing reads the propose made, on the same state; the
+/// reply reads the tensions again on the state the propose publishes.
+#[test]
+fn rgperf_a_propose_computes_its_plan_and_its_landing_once() {
+    let mut w = world();
+    // a not-ready version (an open stable item), and a ready one
+    put_j(&mut w.r, "a", upd(&w.a, "A holds 31 days."), j_typo());
+    draft_change(&mut w, "b");
+    for view in ["a", "b"] {
+        let (plans, landings) = (plan_computes_for_tests(), landing_detections_for_tests());
+        propose(&mut w.r, view);
+        assert_eq!(
+            plan_computes_for_tests() - plans,
+            1,
+            "plan computes of {view}"
+        );
+        assert_eq!(
+            landing_detections_for_tests() - landings,
+            2,
+            "landing detections of {view}"
+        );
+    }
+}
+
+/// rgperf (speed only): the readiness and the assessment of a version on one state are the same
+/// on each read, whichever version was read before on that state. The state's memos of the
+/// landing reads give each version its own result.
+#[test]
+fn rgperf_readiness_on_one_state_is_the_same_on_each_read() {
+    let mut w = world();
+    put_j(&mut w.r, "a", upd(&w.a, "A holds 31 days."), j_typo());
+    let open = propose(&mut w.r, "a");
+    draft_change(&mut w, "b");
+    let ready = propose(&mut w.r, "b");
+    let st = w.r.read();
+    let candidates: Vec<Candidate> = [&open, &ready]
+        .iter()
+        .map(|p| {
+            let pref = w.r.resolve_proposal(&p.r#ref).unwrap();
+            let record = st.reader().proposal(&pref.version).unwrap();
+            Candidate::stored(&st, pref, record).unwrap()
+        })
+        .collect();
+    // what a read gives, less the card's clock reads
+    let read = |c: &Candidate| {
+        let a = assess(&st, c, st.require_up_to_date()).unwrap();
+        let card = a
+            .readiness
+            .card
+            .as_ref()
+            .map(|i| (i.r#ref.clone(), i.title.clone(), i.facts.clone()));
+        let r = readiness(&st, c).unwrap();
+        (
+            a.readiness.issues,
+            a.readiness.summary,
+            card,
+            a.assessment,
+            r.issues,
+            r.summary,
+        )
+    };
+    let first: Vec<_> = candidates.iter().map(read).collect();
+    let mut again: Vec<_> = candidates.iter().rev().map(read).collect();
+    again.reverse();
+    assert_eq!(first, again);
+    assert_eq!(first[0].0, vec![plan_open(1)]);
+    assert!(first[1].0.is_empty(), "{:#?}", first[1].0);
+    assert!(first[0].3.is_none() && first[1].3.is_some());
 }
