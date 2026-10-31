@@ -536,7 +536,7 @@ fn rf4_hostile_reflects_stream_leaves_holder_unchanged() {
         // the take refuses it the same way and appends nothing
         let path = dir.path().join(format!("{name}.rdysync"));
         std::fs::write(&path, &hostile).unwrap();
-        let mut h = StoreHandle::open_holder(&root).unwrap();
+        let h = StoreHandle::open_holder(&root).unwrap();
         let t = h
             .take(
                 &[std::fs::File::open(&path).unwrap()],

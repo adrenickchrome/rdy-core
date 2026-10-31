@@ -155,7 +155,7 @@ fn nb3_adapter_carries_everyday_as_an_ordinary_field() {
 
     // take: the same generic record reaches a holder
     let id = r.store().repo_id().unwrap().unwrap();
-    let mut handle = StoreHandle::create_holder(&dir.path().join("hub"), id).unwrap();
+    let handle = StoreHandle::create_holder(&dir.path().join("hub"), id).unwrap();
     handle
         .take(
             &upload(dir.path(), "u1", &export(&r, v1)),

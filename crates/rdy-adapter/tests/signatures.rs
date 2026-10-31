@@ -321,7 +321,7 @@ fn sig6_adapter_and_core_return_identical_reports() {
     let root = dir.path().join("holder");
     let path = dir.path().join("up.rdysync");
     std::fs::write(&path, &batch).unwrap();
-    let mut h = StoreHandle::create_holder(&root, repo).unwrap();
+    let h = StoreHandle::create_holder(&root, repo).unwrap();
     h.take(
         &[std::fs::File::open(&path).unwrap()],
         rdy_adapter::take::UploadTarget {
@@ -457,7 +457,7 @@ fn ha16_check_context_refuses_a_stale_snapshot() {
     holder.close().unwrap();
     r.close().unwrap();
 
-    let mut handle = StoreHandle::open_holder(&dir.path().join("holder")).unwrap();
+    let handle = StoreHandle::open_holder(&dir.path().join("holder")).unwrap();
     let before = handle.snapshot().unwrap();
     let (g, _) = vector(false);
     let g = Signature { subject: l1, ..g };
@@ -496,7 +496,7 @@ fn ha16_check_context_keeps_the_snapshot_log_end() {
     let path = dir.path().join("up.rdysync");
     std::fs::write(&path, &batch).unwrap();
 
-    let mut handle = StoreHandle::create_holder(&dir.path().join("holder"), repo).unwrap();
+    let handle = StoreHandle::create_holder(&dir.path().join("holder"), repo).unwrap();
     let before = handle.snapshot().unwrap();
     let (g, _) = vector(false);
     let tag_sig = Signature { subject: t, ..g };

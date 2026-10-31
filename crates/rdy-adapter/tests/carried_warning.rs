@@ -481,7 +481,7 @@ fn fixture_from(names: &[Names], real: bool) -> Fixture {
     r.close().unwrap();
     // a holder that took the history before the removal
     let holder = dir.path().join("holder");
-    let mut h = StoreHandle::create_holder(&holder, id).unwrap();
+    let h = StoreHandle::create_holder(&holder, id).unwrap();
     h.take(
         &upload(dir.path(), "up1", &export1),
         target("v1.0.0", land1),
@@ -556,7 +556,7 @@ fn hc6_holder_take_of_the_source_apply_ends_the_warning() {
         "the upload holds the source's own apply"
     );
     assert!(carries(&f.export2, &f.record.landing));
-    let mut h = StoreHandle::open_holder(&f.holder).unwrap();
+    let h = StoreHandle::open_holder(&f.holder).unwrap();
     let before = h.redaction_warnings().unwrap();
     assert_eq!(before.len(), 1);
     assert_eq!(before[0].apply, f.record.apply);
@@ -584,7 +584,7 @@ fn hc6_holder_take_of_another_approved_apply_ends_the_warning() {
         !carries(&f.export2, &f.record.apply),
         "the upload does not hold the apply that the record names"
     );
-    let mut h = StoreHandle::open_holder(&f.holder).unwrap();
+    let h = StoreHandle::open_holder(&f.holder).unwrap();
     assert_eq!(h.redaction_warnings().unwrap().len(), 1);
     h.take(
         &upload(f.dir.path(), "up2", &f.export2),
@@ -599,7 +599,7 @@ fn hc6_holder_take_of_another_approved_apply_ends_the_warning() {
 #[test]
 fn hc6_holder_partial_take_lowers_the_held_count() {
     let f = fixture(&[Names::Secret { held: true }, Names::Other { held: true }]);
-    let mut h = StoreHandle::open_holder(&f.holder).unwrap();
+    let h = StoreHandle::open_holder(&f.holder).unwrap();
     let before = h.redaction_warnings().unwrap();
     assert_eq!(before.len(), 1);
     assert!(

@@ -437,7 +437,7 @@ fn hpb17_empty_holder_resolves_an_upload_only_profile() {
     let s = src(&dir.path().join("src"));
     let l1 = landing_of(&s.r, s.v1);
     let root = dir.path().join("holder");
-    let mut h = StoreHandle::create_holder(&root, repo(&s.r)).unwrap();
+    let h = StoreHandle::create_holder(&root, repo(&s.r)).unwrap();
     let seen = Seen::default();
     let press = s.press.to_string();
     let got = taken(h.take_publication(
@@ -516,7 +516,7 @@ fn hpb17_mixed_holder_and_upload_resolve_the_pinned_revision() {
         landing_of(&s.r, v3),
     );
     let root = dir.path().join("holder");
-    let mut h = StoreHandle::create_holder(&root, repo(&s.r)).unwrap();
+    let h = StoreHandle::create_holder(&root, repo(&s.r)).unwrap();
     h.take(
         &files(dir.path(), "v1", &[&export(&s.r, s.v1)]),
         upload("v1.0.0", l1),
@@ -587,7 +587,7 @@ fn hpb17_existing_equivalent_tag_supplies_surviving_facts() {
     let l = landing_of(&a, ta);
     assert_eq!(landing_of(&b, tb), l);
     let root = dir.path().join("holder");
-    let mut h = StoreHandle::create_holder(&root, repo(&a)).unwrap();
+    let h = StoreHandle::create_holder(&root, repo(&a)).unwrap();
     h.take(
         &files(dir.path(), "a", &[&export(&a, ta)]),
         upload("v1.2.0", l),
@@ -642,7 +642,7 @@ fn hpb17_explicit_and_implicit_facts_equal_profiles_after_take() {
             .collect::<Vec<_>>()
     };
     let root = dir.path().join("holder");
-    let mut h = StoreHandle::create_holder(&root, repo(&s.r)).unwrap();
+    let h = StoreHandle::create_holder(&root, repo(&s.r)).unwrap();
     let seen = Seen::default();
     let mut facts = Vec::new();
     for selector in [
@@ -714,7 +714,7 @@ fn hpb17_missing_profile_is_a_host_verdict() {
         .find(|id| m.get(&BlockId::parse(id).unwrap()).is_none())
         .unwrap();
     let root = dir.path().join("holder");
-    let mut h = StoreHandle::create_holder(&root, repo(&s.r)).unwrap();
+    let h = StoreHandle::create_holder(&root, repo(&s.r)).unwrap();
     let before = state(&root, &h);
 
     // the verdict sees no profile, and its own typed refusal comes back unchanged
@@ -780,7 +780,7 @@ fn hpb17_core_refusals_precede_the_verdict() {
             .collect::<Vec<_>>()
     };
     let root = dir.path().join("holder");
-    let mut h = StoreHandle::create_holder(&root, repo(&s.r)).unwrap();
+    let h = StoreHandle::create_holder(&root, repo(&s.r)).unwrap();
     let before = state(&root, &h);
     let seen = Seen::default();
 
@@ -897,7 +897,7 @@ fn hpb17_org_reference_warning_reaches_the_verdict() {
     let s = src(&dir.path().join("src"));
     let l1 = landing_of(&s.r, s.v1);
     let root = dir.path().join("holder");
-    let mut h = StoreHandle::create_holder(&root, repo(&s.r)).unwrap();
+    let h = StoreHandle::create_holder(&root, repo(&s.r)).unwrap();
     let seen = Seen::default();
     let site = s.site.to_string();
     let got = taken(h.take_publication(
@@ -945,7 +945,7 @@ fn hpb17_holder_and_upload_removals_shape_the_same_facts() {
 
     // a removal the holder already holds shapes an upload made before it
     let one = dir.path().join("one");
-    let mut h = StoreHandle::create_holder(&one, repo(&s.r)).unwrap();
+    let h = StoreHandle::create_holder(&one, repo(&s.r)).unwrap();
     h.take(&files(dir.path(), "v2", &[&v2_bytes]), upload("v2.0.0", l2))
         .unwrap();
     let seen = Seen::default();
@@ -963,7 +963,7 @@ fn hpb17_holder_and_upload_removals_shape_the_same_facts() {
 
     // approvals that arrive in the upload shape the facts the same way
     let two = dir.path().join("two");
-    let mut h = StoreHandle::create_holder(&two, repo(&s.r)).unwrap();
+    let h = StoreHandle::create_holder(&two, repo(&s.r)).unwrap();
     let got = taken(h.take_publication(
         &files(dir.path(), "v3", &[&export(&s.r, v3)]),
         target("v3.0.0", l3, &site),
@@ -1042,7 +1042,7 @@ fn hpb17_a_dropped_shared_chunk_shapes_the_facts() {
 
     // the approval arrives in the upload
     let one = dir.path().join("one");
-    let mut h = StoreHandle::create_holder(&one, repo(&r)).unwrap();
+    let h = StoreHandle::create_holder(&one, repo(&r)).unwrap();
     let seen = Seen::default();
     let got = taken(h.take_publication(
         &files(dir.path(), "v2", &[&export(&r, v2)]),
@@ -1055,7 +1055,7 @@ fn hpb17_a_dropped_shared_chunk_shapes_the_facts() {
 
     // the holder holds the removal already, and the upload was made before it
     let two = dir.path().join("two");
-    let mut h = StoreHandle::create_holder(&two, repo(&r)).unwrap();
+    let h = StoreHandle::create_holder(&two, repo(&r)).unwrap();
     h.take(
         &files(dir.path(), "v2b", &[&export(&r, v2)]),
         upload("v2.0.0", l2),
@@ -1091,7 +1091,7 @@ fn hpb17_verdict_rejection_and_panic_leave_the_holder_reusable() {
             .collect::<Vec<_>>()
     };
     let root = dir.path().join("holder");
-    let mut h = StoreHandle::create_holder(&root, repo(&s.r)).unwrap();
+    let h = StoreHandle::create_holder(&root, repo(&s.r)).unwrap();
     h.take(
         &files(dir.path(), "v1", &[&before_v1]),
         upload("v1.0.0", l1),
@@ -1162,7 +1162,7 @@ fn hpb17_complete_retry_calls_the_verdict_once_and_writes_nothing() {
             .collect::<Vec<_>>()
     };
     let root = dir.path().join("holder");
-    let mut h = StoreHandle::create_holder(&root, repo(&s.r)).unwrap();
+    let h = StoreHandle::create_holder(&root, repo(&s.r)).unwrap();
     let seen = Seen::default();
     let first = taken(h.take_publication(&open(), target("v1.0.0", l1, &site), seen.pass()));
     assert_eq!(seen.calls(), 1);
@@ -1185,4 +1185,62 @@ fn hpb17_complete_retry_calls_the_verdict_once_and_writes_nothing() {
         assert_eq!(state(&root, &h), after_first);
     }
     h.close().unwrap();
+}
+
+#[test]
+fn hpb17_publication_take_and_dump_share_one_handle_across_threads() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = src(&dir.path().join("src"));
+    let l1 = landing_of(&s.r, s.v1);
+    let site = s.site.to_string();
+    let up = files(dir.path(), "up", &[&export(&s.r, s.v1)]);
+    let h = Arc::new(StoreHandle::create_holder(&dir.path().join("holder"), repo(&s.r)).unwrap());
+    let gate = Arc::new(std::sync::Barrier::new(2));
+    let taker = {
+        let (h, gate) = (h.clone(), gate.clone());
+        std::thread::spawn(move || {
+            gate.wait();
+            let seen = Seen::default();
+            taken(h.take_publication(&up, target("v1.0.0", l1, &site), seen.pass()))
+        })
+    };
+    let reader = {
+        let (h, gate) = (h.clone(), gate.clone());
+        let out = dir.path().join("live.rdydump");
+        std::thread::spawn(move || {
+            gate.wait();
+            h.dump(&out).unwrap();
+            let seen = h.snapshot().unwrap().tags().unwrap().len();
+            (out, seen)
+        })
+    };
+    let first = taker.join().unwrap();
+    assert!(!first.outcome.unchanged);
+    let (dump, seen) = reader.join().unwrap();
+    assert!(seen <= 1);
+
+    let loaded = dir.path().join("loaded");
+    rdy_adapter::maintenance::load(&dump, &loaded).unwrap();
+    let copy = StoreHandle::open_holder(&loaded).unwrap();
+    let names: Vec<String> = copy
+        .snapshot()
+        .unwrap()
+        .tags()
+        .unwrap()
+        .into_iter()
+        .map(|(_, t)| t.name)
+        .collect();
+    assert!(names.is_empty() || names == ["v1.0.0"], "{names:?}");
+    copy.close().unwrap();
+
+    let names: Vec<String> = h
+        .snapshot()
+        .unwrap()
+        .tags()
+        .unwrap()
+        .into_iter()
+        .map(|(_, t)| t.name)
+        .collect();
+    assert_eq!(names, ["v1.0.0"]);
+    Arc::into_inner(h).unwrap().close().unwrap();
 }

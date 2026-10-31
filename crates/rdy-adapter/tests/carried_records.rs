@@ -552,7 +552,7 @@ fn ok12_carriers_survive_holder_take_and_snapshot() {
 
     // the take: every carried record comes in its stored bytes, and no project ref with them
     let root = base.join("holder");
-    let mut h = StoreHandle::create_holder(&root, c.repo).unwrap();
+    let h = StoreHandle::create_holder(&root, c.repo).unwrap();
     let (name, path, v1_keys) = &files[0];
     h.take(&[File::open(path).unwrap()], c.target(name))
         .unwrap();
