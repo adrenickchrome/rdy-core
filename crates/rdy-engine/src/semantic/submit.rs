@@ -186,8 +186,11 @@ pub struct FoundRequest {
 #[derive(Clone, Debug)]
 pub enum ResolvedRequest {
     Derived(FoundRequest),
-    Check(FoundCheck),
+    Check(Box<FoundCheck>),
 }
+
+/// A derived request a prefix matches: its key and its pair, as (block, content).
+type Match = (Hash, Vec<(BlockId, Hash)>);
 
 /// The ambiguity refusal: `given` names `n` requests.
 fn ambiguous(given: &str, n: usize) -> RdyError {
@@ -207,8 +210,8 @@ impl ReadState {
         leases: &LeaseRegistry,
         hex: &str,
         now: i64,
-    ) -> Result<Vec<(Hash, Vec<(BlockId, Hash)>)>, RdyError> {
-        let mut found: Vec<(Hash, Vec<(BlockId, Hash)>)> = leases
+    ) -> Result<Vec<Match>, RdyError> {
+        let mut found: Vec<Match> = leases
             .with_prefix(hex, now)
             .into_iter()
             .filter(|(_, l)| !l.pair.is_empty())
@@ -284,7 +287,9 @@ impl ReadState {
         if n > 1 {
             return Err(ambiguous(&c.req.request, n));
         }
-        Ok(ResolvedRequest::Check(self.found_check(durable[0])?))
+        Ok(ResolvedRequest::Check(Box::new(
+            self.found_check(durable[0])?,
+        )))
     }
 }
 
@@ -461,7 +466,7 @@ impl Rdy {
     ) -> Result<SubmitInfo, RdyError> {
         match found {
             ResolvedRequest::Derived(f) => self.submit_found(c, f),
-            ResolvedRequest::Check(f) => self.submit_check(c, f),
+            ResolvedRequest::Check(f) => self.submit_check(c, *f),
         }
     }
 
