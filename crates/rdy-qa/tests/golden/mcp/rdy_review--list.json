@@ -1,0 +1,64 @@
+{
+  "omitted": 0,
+  "requests": [
+    {
+      "case_hash": "7f08ad223e2f70982cd58eaae0e2966914263c145825a265cd7db99ee3b9f88d",
+      "check": "decision_review",
+      "mode": "independent",
+      "reason": "Check the basis.",
+      "request": "rq-81102fc355da47bff9be68884d46b4ab2c6569be12cc31290efccb1b54f663c4",
+      "requested_by": {
+        "actor": "agent:a",
+        "run": "a"
+      },
+      "scope": "a",
+      "status": "answered",
+      "subject": {
+        "blocks": [
+          "D-86V7Q"
+        ],
+        "change": null,
+        "code": null,
+        "version": null
+      },
+      "verdicts": [
+        {
+          "actor": "agent:r",
+          "case_hash": "7f08ad223e2f70982cd58eaae0e2966914263c145825a265cd7db99ee3b9f88d",
+          "citations": [
+            {
+              "block": "D-86V7Q",
+              "note": "the basis names no measure"
+            }
+          ],
+          "reason": "The decision names no measure.",
+          "review": "1dfc51b25024f476f859c818f93bd4b3b725d1bee5df071755799da09f462be5",
+          "run": "r",
+          "verdict": "concern"
+        }
+      ]
+    },
+    {
+      "case_hash": "7f08ad223e2f70982cd58eaae0e2966914263c145825a265cd7db99ee3b9f88d",
+      "check": "decision_review",
+      "mode": "author",
+      "reason": null,
+      "request": "rq-e38029f890317ae6558af5d85fc6b541e9887bd19e1ea1aa744a0722ed51c29b",
+      "requested_by": {
+        "actor": "agent:a",
+        "run": "a"
+      },
+      "scope": "a",
+      "status": "open",
+      "subject": {
+        "blocks": [
+          "D-86V7Q"
+        ],
+        "change": null,
+        "code": null,
+        "version": null
+      },
+      "verdicts": []
+    }
+  ]
+}

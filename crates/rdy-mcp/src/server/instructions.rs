@@ -35,6 +35,8 @@ pub const INSTRUCTION_SENTENCES: &[&str] = &[
     "Link every entity a normative statement names, and elsewhere the entities a block is about; dismiss a passing mention of an everyday word with rdy_resolve (mention, dismiss).",
     // O27 (M3c): the agent's landing act
     "When rdy_propose reports policy accepts, land with rdy_land; else show the card to the person.",
+    // ck8 (D-JQD5X): the authoring checks
+    "Run an authoring check only when the author or a person asks. Show its verdict on the current approval card before relaying a person's answer.",
 ];
 
 /// What the server tells a host about rdy: [`INSTRUCTION_SENTENCES`] joined with one space.
@@ -91,10 +93,11 @@ mod tests {
 
     #[test]
     fn ap11_the_instructions_name_rdy_land() {
-        // O27: one element at the end
+        // O27: one element, directly before ck8's authoring-check sentence at the end
         let s = "When rdy_propose reports policy accepts, land with rdy_land; else show the card to the person.";
         assert!(INSTRUCTIONS.contains(s), "{INSTRUCTIONS}");
-        assert_eq!(INSTRUCTION_SENTENCES.last(), Some(&s));
+        let at = INSTRUCTION_SENTENCES.len() - 2;
+        assert_eq!(INSTRUCTION_SENTENCES.get(at), Some(&s));
     }
 
     #[test]

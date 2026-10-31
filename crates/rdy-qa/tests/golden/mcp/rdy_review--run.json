@@ -1,0 +1,91 @@
+{
+  "case": {
+    "blocks": [
+      {
+        "after": {
+          "text": [
+            {
+              "field": "statement",
+              "text": "Cache the reads"
+            }
+          ],
+          "version": "461c2e506e3000515d3402273d68f6b0babaf6ea2ea9dbc591742a075c8d13ae"
+        },
+        "before": null,
+        "doc": null,
+        "headings": [],
+        "id": "D-86V7Q",
+        "role": "subject",
+        "type": "decision"
+      }
+    ],
+    "code": [],
+    "inputs_hash": "a7dc19f854da6fa334aecb0d2c3c2e1f23de37a8463ac61c06c9ee41a938e239",
+    "kind": "decision_review",
+    "omitted": {
+      "blocks": 0,
+      "code_bytes": 0,
+      "code_files": 0,
+      "text_bytes": 0
+    },
+    "question": "Do the decision, its options, basis and premises support one another? Cite each concern.",
+    "schema": {
+      "citations": "0 to 20 {block, note} entries; concern and fail need at least one; each note has 1 to 2000 characters",
+      "reason": "concern and fail need 1 to 2000 characters; pass may omit it",
+      "verdict": [
+        "pass",
+        "concern",
+        "fail"
+      ]
+    }
+  },
+  "case_hash": "7f08ad223e2f70982cd58eaae0e2966914263c145825a265cd7db99ee3b9f88d",
+  "omitted": 0,
+  "request": "rq-e38029f890317ae6558af5d85fc6b541e9887bd19e1ea1aa744a0722ed51c29b",
+  "requests": [
+    {
+      "case": {
+        "blocks": [
+          {
+            "after": {
+              "text": [
+                {
+                  "field": "statement",
+                  "text": "Cache the reads"
+                }
+              ],
+              "version": "461c2e506e3000515d3402273d68f6b0babaf6ea2ea9dbc591742a075c8d13ae"
+            },
+            "before": null,
+            "doc": null,
+            "headings": [],
+            "id": "D-86V7Q",
+            "role": "subject",
+            "type": "decision"
+          }
+        ],
+        "code": [],
+        "inputs_hash": "a7dc19f854da6fa334aecb0d2c3c2e1f23de37a8463ac61c06c9ee41a938e239",
+        "kind": "decision_review",
+        "omitted": {
+          "blocks": 0,
+          "code_bytes": 0,
+          "code_files": 0,
+          "text_bytes": 0
+        },
+        "question": "Do the decision, its options, basis and premises support one another? Cite each concern.",
+        "schema": {
+          "citations": "0 to 20 {block, note} entries; concern and fail need at least one; each note has 1 to 2000 characters",
+          "reason": "concern and fail need 1 to 2000 characters; pass may omit it",
+          "verdict": [
+            "pass",
+            "concern",
+            "fail"
+          ]
+        }
+      },
+      "case_hash": "7f08ad223e2f70982cd58eaae0e2966914263c145825a265cd7db99ee3b9f88d",
+      "request": "rq-e38029f890317ae6558af5d85fc6b541e9887bd19e1ea1aa744a0722ed51c29b"
+    }
+  ]
+}

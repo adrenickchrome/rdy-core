@@ -35,8 +35,8 @@ fn sinst1_instructions_name_reading_before_editing_and_partial_supersession() {
 #[test]
 fn cc18_the_instructions_carry_confidence_and_linking() {
     let s = rdy_mcp::server::INSTRUCTION_SENTENCES;
-    // ap11: O27's rdy_land sentence follows them, last
-    let n = s.len() - 1;
+    // ap11: O27's rdy_land sentence follows them, and ck8's authoring-check sentence is last
+    let n = s.len() - 2;
     assert_eq!(
         s[n - 2],
         "Fact sheets, search hits and briefings carry a confidence level: act on high; on medium or low, widen the search, fix the coverage issues you can, or ask the person before you act."
@@ -108,8 +108,8 @@ fn di13_the_instructions_plan_structure_first() {
 #[test]
 fn di13_the_new_sentences_sit_after_the_inbox_line() {
     let s = rdy_mcp::server::INSTRUCTION_SENTENCES;
-    // ap11: O27 adds the rdy_land sentence at the end
-    assert_eq!(s.len(), 27);
+    // ap11: O27 adds the rdy_land sentence; ck8 adds the authoring-check sentence after it
+    assert_eq!(s.len(), 28);
     assert!(s[12].starts_with("Read rdy_inbox at session start"));
     for (k, want) in DI13_SENTENCES.iter().enumerate() {
         assert_eq!(s[13 + k], *want, "index {}", 13 + k);

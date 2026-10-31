@@ -1427,7 +1427,9 @@ struct Rich {
 }
 
 /// The pack of the probes: one area, so the coverage areas hold an entry.
-const RICH_PACK: &str = "name: rdy-release\nversion: \"1\"\nextends: rdy-standard\nareas:\n  spec:\n    description: the spec doc\n    paths: [spec, spec/**]\n";
+/// One advisory rule that only a note can fail, so one probe write carries a failure row in
+/// `on_change.checks` and no other probe meets it (ck8, D-JQD5X).
+const RICH_PACK: &str = "name: rdy-release\nversion: \"1\"\nextends: rdy-standard\nareas:\n  spec:\n    description: the spec doc\n    paths: [spec, spec/**]\nrules:\n  - name: notes-are-claims\n    select: type = note\n    require: type = claim\n    severity: advisory\n    message: a note is not a claim\n    fix: write it as a claim\n";
 
 fn rich_project() -> Rich {
     use rdy_qa::tensions::{put, upd};
@@ -2374,6 +2376,135 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
         json!({"kind": "mention"}),
     );
     mcp_probe(seen, &mut rv, "rdy_tensions", "rdy_tensions", json!({}));
+    drop(rv);
+    // the check surfaces (ck8, D-JQD5X): a writer writes a note that the pack rule flags, so
+    // its on_change carries a failure row, records a proposed decision, runs a check on it and
+    // asks for an independent review; a reviewer answers it, and the writer answers its own
+    // run. These calls come last, so the tension probes above do not meet the new view. One
+    // server holds the project at a time, so each session ends before the next starts.
+    let mut ck = McpClient::start(dir);
+    mcp_probe(
+        seen,
+        &mut ck,
+        "rdy_session",
+        "rdy_session",
+        session("chk", "writer"),
+    );
+    let note = ok_of(&mcp_briefed(
+        seen,
+        &mut ck,
+        "rdy_write",
+        "rdy_write",
+        json!({"ops": [
+            {"op": "create", "type": "note", "id": "$k", "parent": section, "body": "Checks are authoring tools."}
+        ]}),
+        std::slice::from_ref(&section),
+        "chk",
+    ));
+    assert!(
+        note["on_change"]["checks"][0]["rule"] == "notes-are-claims",
+        "the note fails the pack rule in on_change.checks: {note}"
+    );
+    // the decision is written without a probe: the other views' decisions pin that reply's shape,
+    // and this one would only fill their empty arrays
+    let briefed_ids = vec![c.clone(), section.clone()];
+    let mut decide = json!({
+        "statement": "Checks never gate", "title": "Checks never gate",
+        "why": "A person decides whether a check gates",
+        "reversibility": "two_way", "affects": [c], "parent": section,
+    });
+    let mut proposed = ck.call("rdy_decide", decide.clone());
+    if matches!(proposed.code(), Some("E_BRIEF_REQUIRED" | "E_BRIEF_STALE")) {
+        let brief = ck
+            .call("rdy_brief", json!({"ids": briefed_ids, "scope": "chk"}))
+            .ok();
+        decide["brief"] = brief["base"]["token"].clone();
+        proposed = ck.call("rdy_decide", decide);
+    }
+    let proposed = proposed.ok();
+    let subject = proposed["created"]["$decision"]
+        .as_str()
+        .expect("the decision was recorded")
+        .to_string();
+    mcp_probe(
+        seen,
+        &mut ck,
+        "rdy_review",
+        "rdy_review checks",
+        json!({"op": "checks"}),
+    );
+    let run = ok_of(&mcp_probe(
+        seen,
+        &mut ck,
+        "rdy_review",
+        "rdy_review run",
+        json!({"op": "run", "check": "decision_review", "subject": subject}),
+    ));
+    mcp_probe(
+        seen,
+        &mut ck,
+        "rdy_review",
+        "rdy_review request",
+        json!({"op": "request", "check": "decision_review", "subject": subject,
+               "reason": "Check the basis."}),
+    );
+
+    drop(ck);
+    // the independent request: a concern with its reason and citations. Each verdict has a label
+    // of its own, so the tension probes above keep their shapes.
+    let mut rv = McpClient::start(dir);
+    mcp_probe(
+        seen,
+        &mut rv,
+        "rdy_session",
+        "rdy_session",
+        session("rev", "reviewer"),
+    );
+    let next = ok_of(&mcp_probe(
+        seen,
+        &mut rv,
+        "rdy_review_next",
+        "rdy_review_next decision_review",
+        json!({"kind": "decision_review"}),
+    ));
+    assert!(
+        next["request"].is_string(),
+        "the independent request is queued: {next}"
+    );
+    mcp_probe(
+        seen,
+        &mut rv,
+        "rdy_review_submit",
+        "rdy_review_submit concern",
+        json!({"request": next["request"], "case_hash": next["case_hash"], "verdict": "concern",
+               "citations": [{"block": subject, "note": "the basis names no measure"}],
+               "reason": "The decision names no measure."}),
+    );
+    drop(rv);
+    // the author's own run: a pass; then both requests are answered, and the list shows each verdict
+    let mut ck = McpClient::start(dir);
+    mcp_probe(
+        seen,
+        &mut ck,
+        "rdy_session",
+        "rdy_session",
+        session("chk", "writer"),
+    );
+    mcp_probe(
+        seen,
+        &mut ck,
+        "rdy_review_submit",
+        "rdy_review_submit pass",
+        json!({"request": run["request"], "case_hash": run["case_hash"], "verdict": "pass"}),
+    );
+    mcp_probe(
+        seen,
+        &mut ck,
+        "rdy_review",
+        "rdy_review list",
+        json!({"op": "list"}),
+    );
+    drop(ck);
     let _ = (doc, a);
 }
 
@@ -3292,6 +3423,139 @@ fn ck6_m3d_carriers_keep_their_wire_shapes() {
     );
 }
 
+/// ck8 (D-JQD5X): the contract holds the check surfaces with populated replies: the tool and its
+/// closed schema, the catalogue, a run, a request, the list with both verdicts, the two verdict
+/// replies, and a `change` reply whose `on_change.checks` holds a failure row. Every field of
+/// the earlier replies stays.
+#[test]
+fn ck8_wire_contract_adds_check_surfaces() {
+    let fixture = read_fixture();
+    let mcp = &fixture["mcp"];
+    // the tool is listed, and its schema is closed: `op` is required, the rest optional
+    assert!(
+        mcp["tool_names"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("rdy_review"))
+    );
+    let schema = &mcp["tools"]["rdy_review"]["input_schema"];
+    assert_eq!(schema["additionalProperties"], json!(false));
+    assert_eq!(schema["required"], json!(["op"]));
+    let mut props: Vec<&str> = schema["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    props.sort_unstable();
+    assert_eq!(
+        props,
+        [
+            "check",
+            "evidence",
+            "op",
+            "open",
+            "question",
+            "reason",
+            "session_ref",
+            "subject"
+        ]
+    );
+    let r = &mcp["result_fields"];
+    // the catalogue
+    assert_eq!(
+        r["rdy_review checks"]["ok"],
+        json!({"checks": [{"name": "string", "subject": "string", "verdicts": ["string"]}]})
+    );
+    // a run and a request: the first request, its case and every request
+    for label in ["rdy_review run", "rdy_review request"] {
+        let ok = &r[label]["ok"];
+        for key in ["request", "case_hash"] {
+            assert_eq!(ok[key], json!("string"), "{label} {key}");
+        }
+        assert_eq!(ok["omitted"], json!("number"), "{label}");
+        assert_eq!(ok["case"]["kind"], json!("string"), "{label}");
+        assert_eq!(
+            ok["requests"][0]["request"],
+            json!("string"),
+            "{label} requests"
+        );
+        assert_eq!(ok["requests"][0]["case_hash"], json!("string"), "{label}");
+        assert!(ok["requests"][0]["case"].is_object(), "{label}");
+    }
+    // the list: a row holds every key, with a populated verdict
+    let row = &r["rdy_review list"]["ok"]["requests"][0];
+    for key in [
+        "request",
+        "check",
+        "scope",
+        "mode",
+        "case_hash",
+        "status",
+        "reason",
+    ] {
+        assert!(row[key].is_string() || row[key].is_object(), "{key}: {row}");
+    }
+    assert_eq!(row["subject"]["blocks"], json!(["string"]));
+    assert_eq!(row["requested_by"]["actor"], json!("string"));
+    let verdict = &row["verdicts"][0];
+    for key in ["review", "verdict", "actor", "run", "case_hash"] {
+        assert!(verdict[key].is_string(), "{key}: {verdict}");
+    }
+    // the pass has no reason and the concern has one
+    assert_eq!(verdict["reason"], json!("null|string"), "{verdict}");
+    assert_eq!(verdict["citations"][0]["block"], json!("string"));
+    assert_eq!(verdict["citations"][0]["note"], json!("string"));
+    assert_eq!(r["rdy_review list"]["ok"]["omitted"], json!("number"));
+    // the two verdict replies and the claim of an independent request
+    for label in ["rdy_review_submit concern", "rdy_review_submit pass"] {
+        assert_eq!(
+            r[label]["ok"],
+            json!({"request": "string", "review": "string", "verdict": "string"}),
+            "{label}"
+        );
+    }
+    let next = &r["rdy_review_next decision_review"]["ok"];
+    assert_eq!(next["kind"], json!("string"));
+    assert!(next["case"]["blocks"][0]["id"].is_string());
+    // the change reply: a failure row with every key
+    assert_eq!(
+        r["rdy_write"]["ok"]["on_change"]["checks"],
+        json!([{"rule": "string", "code": "string", "block": "string", "message": "string", "fix": "string"}])
+    );
+    // every earlier field stays
+    for (tool, fields) in [
+        (
+            "rdy_review_next",
+            &["case", "case_hash", "kind", "lease_expires_at", "request"][..],
+        ),
+        ("rdy_review_submit", &["request", "review", "verdict"][..]),
+        (
+            "rdy_write",
+            &["change", "consequences", "coverage", "created", "on_change"][..],
+        ),
+    ] {
+        for field in fields {
+            assert!(
+                !r[tool]["ok"][*field].is_null(),
+                "{tool} lost its field {field}"
+            );
+        }
+    }
+    for field in ["resolved", "tensions"] {
+        assert!(
+            !r["rdy_write"]["ok"]["on_change"][field].is_null(),
+            "on_change lost {field}"
+        );
+    }
+    assert!(
+        r["rdy_review_submit"]["refusal_codes"]
+            .as_array()
+            .is_some_and(|c| !c.is_empty()),
+        "the tension verdict keeps its refusals"
+    );
+}
+
 /// A source with a test hook early in a struct, a test module declaration, and product code
 /// after both: a scan that stops at the first `#[cfg(test)]` never sees the lines below them.
 const PLANTED: &str = r#"
@@ -3582,7 +3846,8 @@ fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
 /// frames, upgrade steps, lineage, stale states, code files) or because the one call that fills
 /// them is not worth its set-up (a conflict, a moved block, a plan note). The list is explicit
 /// so that coverage is not claimed for them: a new empty array fails the test, and a path that
-/// fills up must leave the list.
+/// fills up must leave the list. ck8: a case of a check that reads no linked checkout holds no
+/// code, and an agent check is in no stage (`rdy_schema` lists its stages as an empty array).
 const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/approve/stdout/consequences[]/because/values",
     "cli/approve/stdout/signatures",
@@ -3699,6 +3964,11 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_propose/ok/conflicts",
     "mcp/rdy_propose/ok/consequences",
     "mcp/rdy_propose/ok/issues",
+    "mcp/rdy_review request/ok/case/code",
+    "mcp/rdy_review request/ok/requests[]/case/code",
+    "mcp/rdy_review run/ok/case/code",
+    "mcp/rdy_review run/ok/requests[]/case/code",
+    "mcp/rdy_review_next decision_review/ok/case/code",
     "mcp/rdy_review_next/ok/case/entities",
     "mcp/rdy_review_next/refused/issues",
     "mcp/rdy_review_submit/refused/issues",
@@ -3707,6 +3977,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_revoke/ok/on_change/resolved",
     "mcp/rdy_revoke/ok/on_change/tensions",
     "mcp/rdy_revoke/ok/suggestions",
+    "mcp/rdy_schema/ok/checks?/agent[]/stages",
     "mcp/rdy_schema/ok/children?",
     "mcp/rdy_supersede/ok/consequences",
     "mcp/rdy_supersede/ok/on_change/checks",
@@ -3728,7 +3999,6 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_view compare/ok/moved",
     "mcp/rdy_view show/ok/conflicts",
     "mcp/rdy_view undo/refused/issues",
-    "mcp/rdy_write/ok/on_change/checks",
     "mcp/rdy_write/ok/on_change/resolved",
     "mcp/rdy_write/ok/suggestions",
 ];

@@ -46,7 +46,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         "E_REVIEW_INVALID",
-        "rdy_review_submit: the verdict fails its schema (a verdict other than tension or no_tension, a citation on another block, an empty or over-long note, a tension with no citation, more than 20 citations, a severity other than advisory or blocking, advice on a no_tension, advice to block without a reason)",
+        "rdy_review_submit: the verdict fails its schema (a verdict other than tension or no_tension, a citation on another block, an empty or over-long note, a tension with no citation, more than 20 citations, a severity other than advisory or blocking, advice on a no_tension, advice to block without a reason). Check verdicts take pass, concern or fail; concern and fail need a reason and citations.",
         "send the corrected payload",
     ),
     (
@@ -93,6 +93,21 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "E_ALT_CHOSEN",
         "a proposal carries a change of a member that lost a chosen set, and records no decision that supersedes or refines the choice",
         "land it with a decision that supersedes or refines the choice decision (rdy_supersede, or rdy_decide with refines)",
+    ),
+    (
+        "E_ALT_DECISION",
+        "a choice has no unique proposed decision for its considered options",
+        "answer the set's question with one decision, or create exactly one decision: rdy_decide / rdy new decision",
+    ),
+    (
+        "E_RULE_CHECK",
+        "a blocking pack rule fails on stable content: propose makes it a readiness issue, and a change reports it in on_change without refusing",
+        "follow the rule's fix, then propose again",
+    ),
+    (
+        "W_RULE_CHECK",
+        "an advisory pack rule fails, or a blocking rule fails outside stable content",
+        "follow the rule's fix",
     ),
     (
         "E_DAEMON_START",

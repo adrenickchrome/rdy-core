@@ -13598,7 +13598,7 @@
       ],
       [
         "E_REVIEW_INVALID",
-        "rdy_review_submit: the verdict fails its schema (a verdict other than tension or no_tension, a citation on another block, an empty or over-long note, a tension with no citation, more than 20 citations, a severity other than advisory or blocking, advice on a no_tension, advice to block without a reason)",
+        "rdy_review_submit: the verdict fails its schema (a verdict other than tension or no_tension, a citation on another block, an empty or over-long note, a tension with no citation, more than 20 citations, a severity other than advisory or blocking, advice on a no_tension, advice to block without a reason). Check verdicts take pass, concern or fail; concern and fail need a reason and citations.",
         "send the corrected payload"
       ],
       [
@@ -13645,6 +13645,21 @@
         "E_ALT_CHOSEN",
         "a proposal carries a change of a member that lost a chosen set, and records no decision that supersedes or refines the choice",
         "land it with a decision that supersedes or refines the choice decision (rdy_supersede, or rdy_decide with refines)"
+      ],
+      [
+        "E_ALT_DECISION",
+        "a choice has no unique proposed decision for its considered options",
+        "answer the set's question with one decision, or create exactly one decision: rdy_decide / rdy new decision"
+      ],
+      [
+        "E_RULE_CHECK",
+        "a blocking pack rule fails on stable content: propose makes it a readiness issue, and a change reports it in on_change without refusing",
+        "follow the rule's fix, then propose again"
+      ],
+      [
+        "W_RULE_CHECK",
+        "an advisory pack rule fails, or a blocking rule fails outside stable content",
+        "follow the rule's fix"
       ],
       [
         "E_DAEMON_START",
@@ -14541,6 +14556,9 @@
       "E_ALT_UNCHOSEN",
       "E_ALT_MEMBER",
       "E_ALT_CHOSEN",
+      "E_ALT_DECISION",
+      "E_RULE_CHECK",
+      "W_RULE_CHECK",
       "E_DAEMON_START",
       "E_DAEMON_VERSION",
       "E_DAEMON_GONE",
@@ -15583,6 +15601,249 @@
           "tension": "string"
         }
       },
+      "rdy_review checks": {
+        "ok": {
+          "checks": [
+            {
+              "name": "string",
+              "subject": "string",
+              "verdicts": [
+                "string"
+              ]
+            }
+          ]
+        }
+      },
+      "rdy_review list": {
+        "ok": {
+          "omitted": "number",
+          "requests": [
+            {
+              "case_hash": "string",
+              "check": "string",
+              "mode": "string",
+              "reason": "null|string",
+              "request": "string",
+              "requested_by": {
+                "actor": "string",
+                "run": "string"
+              },
+              "scope": "string",
+              "status": "string",
+              "subject": {
+                "blocks": [
+                  "string"
+                ],
+                "change": "null",
+                "code": "null",
+                "version": "null"
+              },
+              "verdicts": [
+                {
+                  "actor": "string",
+                  "case_hash": "string",
+                  "citations": [
+                    {
+                      "block": "string",
+                      "note": "string"
+                    }
+                  ],
+                  "reason": "null|string",
+                  "review": "string",
+                  "run": "string",
+                  "verdict": "string"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "rdy_review request": {
+        "ok": {
+          "case": {
+            "blocks": [
+              {
+                "after": {
+                  "text": [
+                    {
+                      "field": "string",
+                      "text": "string"
+                    }
+                  ],
+                  "version": "string"
+                },
+                "before": "null",
+                "doc": "string",
+                "headings": [
+                  "string"
+                ],
+                "id": "string",
+                "role": "string",
+                "type": "string"
+              }
+            ],
+            "code": [],
+            "inputs_hash": "string",
+            "kind": "string",
+            "omitted": {
+              "blocks": "number",
+              "code_bytes": "number",
+              "code_files": "number",
+              "text_bytes": "number"
+            },
+            "question": "string",
+            "schema": {
+              "citations": "string",
+              "reason": "string",
+              "verdict": [
+                "string"
+              ]
+            }
+          },
+          "case_hash": "string",
+          "omitted": "number",
+          "request": "string",
+          "requests": [
+            {
+              "case": {
+                "blocks": [
+                  {
+                    "after": {
+                      "text": [
+                        {
+                          "field": "string",
+                          "text": "string"
+                        }
+                      ],
+                      "version": "string"
+                    },
+                    "before": "null",
+                    "doc": "string",
+                    "headings": [
+                      "string"
+                    ],
+                    "id": "string",
+                    "role": "string",
+                    "type": "string"
+                  }
+                ],
+                "code": [],
+                "inputs_hash": "string",
+                "kind": "string",
+                "omitted": {
+                  "blocks": "number",
+                  "code_bytes": "number",
+                  "code_files": "number",
+                  "text_bytes": "number"
+                },
+                "question": "string",
+                "schema": {
+                  "citations": "string",
+                  "reason": "string",
+                  "verdict": [
+                    "string"
+                  ]
+                }
+              },
+              "case_hash": "string",
+              "request": "string"
+            }
+          ]
+        }
+      },
+      "rdy_review run": {
+        "ok": {
+          "case": {
+            "blocks": [
+              {
+                "after": {
+                  "text": [
+                    {
+                      "field": "string",
+                      "text": "string"
+                    }
+                  ],
+                  "version": "string"
+                },
+                "before": "null",
+                "doc": "string",
+                "headings": [
+                  "string"
+                ],
+                "id": "string",
+                "role": "string",
+                "type": "string"
+              }
+            ],
+            "code": [],
+            "inputs_hash": "string",
+            "kind": "string",
+            "omitted": {
+              "blocks": "number",
+              "code_bytes": "number",
+              "code_files": "number",
+              "text_bytes": "number"
+            },
+            "question": "string",
+            "schema": {
+              "citations": "string",
+              "reason": "string",
+              "verdict": [
+                "string"
+              ]
+            }
+          },
+          "case_hash": "string",
+          "omitted": "number",
+          "request": "string",
+          "requests": [
+            {
+              "case": {
+                "blocks": [
+                  {
+                    "after": {
+                      "text": [
+                        {
+                          "field": "string",
+                          "text": "string"
+                        }
+                      ],
+                      "version": "string"
+                    },
+                    "before": "null",
+                    "doc": "string",
+                    "headings": [
+                      "string"
+                    ],
+                    "id": "string",
+                    "role": "string",
+                    "type": "string"
+                  }
+                ],
+                "code": [],
+                "inputs_hash": "string",
+                "kind": "string",
+                "omitted": {
+                  "blocks": "number",
+                  "code_bytes": "number",
+                  "code_files": "number",
+                  "text_bytes": "number"
+                },
+                "question": "string",
+                "schema": {
+                  "citations": "string",
+                  "reason": "string",
+                  "verdict": [
+                    "string"
+                  ]
+                }
+              },
+              "case_hash": "string",
+              "request": "string"
+            }
+          ]
+        }
+      },
       "rdy_review_next": {
         "ok": {
           "case": {
@@ -15639,6 +15900,54 @@
           "message": "string"
         }
       },
+      "rdy_review_next decision_review": {
+        "ok": {
+          "case": {
+            "blocks": [
+              {
+                "after": {
+                  "text": [
+                    {
+                      "field": "string",
+                      "text": "string"
+                    }
+                  ],
+                  "version": "string"
+                },
+                "before": "null",
+                "doc": "string",
+                "headings": [
+                  "string"
+                ],
+                "id": "string",
+                "role": "string",
+                "type": "string"
+              }
+            ],
+            "code": [],
+            "inputs_hash": "string",
+            "kind": "string",
+            "omitted": {
+              "blocks": "number",
+              "code_bytes": "number",
+              "code_files": "number",
+              "text_bytes": "number"
+            },
+            "question": "string",
+            "schema": {
+              "citations": "string",
+              "reason": "string",
+              "verdict": [
+                "string"
+              ]
+            }
+          },
+          "case_hash": "string",
+          "kind": "string",
+          "lease_expires_at": "string",
+          "request": "string"
+        }
+      },
       "rdy_review_submit": {
         "ok": {
           "advice?": "string",
@@ -15657,6 +15966,20 @@
           "fix": "string",
           "issues": [],
           "message": "string"
+        }
+      },
+      "rdy_review_submit concern": {
+        "ok": {
+          "request": "string",
+          "review": "string",
+          "verdict": "string"
+        }
+      },
+      "rdy_review_submit pass": {
+        "ok": {
+          "request": "string",
+          "review": "string",
+          "verdict": "string"
         }
       },
       "rdy_revoke": {
@@ -15739,6 +16062,34 @@
             ],
             "rule": "string"
           },
+          "checks?": {
+            "agent": [
+              {
+                "name": "string",
+                "stages": [],
+                "subject": "string",
+                "verdicts": [
+                  "string"
+                ]
+              }
+            ],
+            "rules": {
+              "default_severity": "string",
+              "grammar": "string",
+              "max": "number",
+              "severity": [
+                "string"
+              ]
+            },
+            "stages": [
+              {
+                "name": "string",
+                "stages": [
+                  "string"
+                ]
+              }
+            ]
+          },
           "children?": [],
           "class?": "string",
           "consequences?": "string",
@@ -15771,6 +16122,10 @@
               "when": "string"
             },
             "E_ALT_CHOSEN": {
+              "fix": "string",
+              "when": "string"
+            },
+            "E_ALT_DECISION": {
               "fix": "string",
               "when": "string"
             },
@@ -15955,6 +16310,10 @@
               "when": "string"
             },
             "E_REVIEW_STALE": {
+              "fix": "string",
+              "when": "string"
+            },
+            "E_RULE_CHECK": {
               "fix": "string",
               "when": "string"
             },
@@ -16143,6 +16502,10 @@
               "when": "string"
             },
             "W_REFLECTS_NO_CODE": {
+              "fix": "string",
+              "when": "string"
+            },
+            "W_RULE_CHECK": {
               "fix": "string",
               "when": "string"
             },
@@ -16744,10 +17107,19 @@
             ]
           },
           "created": {
+            "$k?": "string",
             "$n?": "string"
           },
           "on_change": {
-            "checks": [],
+            "checks": [
+              {
+                "block": "string",
+                "code": "string",
+                "fix": "string",
+                "message": "string",
+                "rule": "string"
+              }
+            ],
             "resolved": [],
             "tensions": [
               {
@@ -16859,6 +17231,7 @@
       "rdy_remote",
       "rdy_render",
       "rdy_resolve",
+      "rdy_review",
       "rdy_review_next",
       "rdy_review_submit",
       "rdy_revoke",
@@ -19221,13 +19594,107 @@
           "type": "object"
         }
       },
+      "rdy_review": {
+        "input_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "check": {
+              "description": "run and request: the check's name, as checks lists it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "evidence": {
+              "description": "request: the person's words, quoted. Pass them when you request a review for a person.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "description": "checks, run, request or list. checks lists the catalogue; run writes an author-run request and returns its case; request asks for an independent review; list shows requests and verdicts.",
+              "type": "string"
+            },
+            "open": {
+              "description": "list: only the open requests (default false).",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "question": {
+              "description": "request: the question the person answered.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reason": {
+              "description": "request: why the review is wanted, 1 to 2000 characters.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_ref": {
+              "description": "request: the chat session the person spoke in (default mcp).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subject": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "type": "array"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "decision": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "decision"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "run and request need it; list filters by it. One block id, key or path, a change hash or P-x@n; a pair of two block ids; or {decision, code} for diff_contradicts, with code <repo>@<from>..<to>."
+            }
+          },
+          "required": [
+            "op"
+          ],
+          "type": "object"
+        }
+      },
       "rdy_review_next": {
         "input_schema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "properties": {
             "kind": {
-              "description": "The review kind: tension (the only kind until M3).",
+              "description": "The review kind: tension, a check's name (rdy_review {op: \"checks\"} lists them), or any.",
               "type": "string"
             }
           },
@@ -19244,7 +19711,7 @@
               "additionalProperties": false,
               "properties": {
                 "block": {
-                  "description": "One of the two block ids of the case.",
+                  "description": "One of the block ids of the case.",
                   "type": "string"
                 },
                 "note": {
@@ -19267,7 +19734,7 @@
               "type": "string"
             },
             "citations": {
-              "description": "What disagrees: {block, note} per block that takes part; a tension needs 1 to 20.",
+              "description": "What disagrees: {block, note} per block that takes part; a tension, a concern and a fail need 1 to 20.",
               "items": {
                 "$ref": "#/$defs/CitationParams"
               },
@@ -19277,7 +19744,7 @@
               ]
             },
             "reason": {
-              "description": "With severity blocking: why the tension should block, 1 to 2000 characters.",
+              "description": "With severity blocking: why the tension should block. A concern or fail: what the check found. 1 to 2000 characters.",
               "type": [
                 "string",
                 "null"
@@ -19295,7 +19762,7 @@
               ]
             },
             "verdict": {
-              "description": "tension or no_tension.",
+              "description": "tension or no_tension for a contradiction; pass, concern or fail for another check.",
               "type": "string"
             }
           },

@@ -43,6 +43,9 @@ fn erow1_every_view_brief_and_daemon_code_has_a_row() {
         E_PROPOSAL_NOT_READY,
         E_ITEM_MOVED,
         rdy_engine::card_words::W_CARD_WORDS,
+        E_ALT_DECISION,
+        E_RULE_CHECK,
+        W_RULE_CHECK,
     ] {
         let (when, fix) = row(code);
         assert!(!when.is_empty() && !fix.is_empty(), "{code}");
