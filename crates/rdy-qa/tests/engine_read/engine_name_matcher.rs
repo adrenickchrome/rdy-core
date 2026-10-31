@@ -471,6 +471,16 @@ fn entity(id: &str, name: &str, aliases: &[&str], everyday: Option<bool>) -> Blo
     b
 }
 
+/// (name, block id, the block after the step: None deletes it, the mentions of the unlinked
+/// claim, the mentions of the linked claim)
+type Step = (
+    &'static str,
+    &'static str,
+    Option<Block>,
+    Vec<(String, String)>,
+    Vec<(String, String)>,
+);
+
 #[test]
 fn nb1_lexicon_carry_matches_rebuild_after_everyday_and_alias_edits() {
     let pack = PackSet::with_builtin().resolve("rdy-standard").unwrap();
@@ -516,13 +526,7 @@ fn nb1_lexicon_carry_matches_rebuild_after_everyday_and_alias_edits() {
         vec![pair("en-AAAAA", "stores"), pair("en-BBBBB", "books")]
     );
     // (step, block id, the block after it: None deletes it, the mentions of the two claims)
-    let steps: Vec<(
-        &str,
-        &str,
-        Option<Block>,
-        Vec<(String, String)>,
-        Vec<(String, String)>,
-    )> = vec![
+    let steps: Vec<Step> = vec![
         (
             "everyday true",
             "en-AAAAA",
