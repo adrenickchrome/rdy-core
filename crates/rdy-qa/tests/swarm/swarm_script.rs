@@ -718,3 +718,60 @@ fn ds1_scripts_hold_the_forced_include_sequence() {
             .all(|acts| !acts.iter().any(&forced))
     );
 }
+
+/// nb10 (M3e): answering the neighbor items by a group needs no new act, no new refusal row and
+/// no new random draw. The act names, a script's reproducibility and the closed table of
+/// refusals are those of M3d: the plan answers still allow no refusal.
+#[test]
+fn nb10_swarm_grouping_needs_no_new_act_or_outcome() {
+    assert_eq!(Act::ALL_NAMES.len(), 22);
+    assert_eq!(
+        Act::ALL_NAMES,
+        [
+            "brief",
+            "write",
+            "write_no_brief",
+            "write_stale",
+            "create",
+            "collide",
+            "cite",
+            "repin",
+            "fork",
+            "include",
+            "exclude",
+            "undo",
+            "intent",
+            "alt_create",
+            "propose",
+            "review_next",
+            "tensions",
+            "inbox",
+            "read",
+            "check_run",
+            "check_request",
+            "check_submit",
+        ]
+    );
+    for seed in [1, 7, 20] {
+        for cfg in [Config::fast(seed), Config::deep(seed)] {
+            assert_eq!(
+                format!("{:?}", script(&cfg)),
+                format!("{:?}", script(&cfg)),
+                "seed {seed}"
+            );
+        }
+    }
+    // the plan answers, grouped or by id, and the plan reads meet only what they met before
+    for code in [
+        "E_PLAN_ITEM",
+        "E_PLAN_OPEN",
+        "E_BAD_INPUT",
+        "E_LIMIT",
+        "E_STALE_BASE",
+    ] {
+        assert!(!allowed("plan_answer", code), "plan_answer allows {code}");
+    }
+    assert!(allowed("plan", "E_CONFLICT_UNRESOLVED"));
+    assert!(!allowed("plan", "E_PLAN_ITEM"));
+    assert!(!allowed("version_plan", "E_PLAN_ITEM"));
+}

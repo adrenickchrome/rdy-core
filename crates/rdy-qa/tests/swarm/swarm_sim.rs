@@ -3921,3 +3921,390 @@ fn ck10_restart_keeps_requests_and_holds() {
         );
     });
 }
+
+// ---- nb10 (M3e, D-YXBXH, D-ME2HD, D-NJ2SP): one grouped answer for the displayed neighbor items ----
+
+/// The ids a journal value lists, in order.
+fn nb10_ids(v: &Value) -> Vec<String> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|x| x.as_str().map(str::to_string))
+        .collect()
+}
+
+/// The open neighbor items with a confirm follow-up (`edge` neighbor, kind confirm or rejustify)
+/// that the plan reads of the `plan_answer` entry at `at` showed. Those are the `plan` entries of
+/// the same actor and view right before it, one per page; the actor makes no other call between
+/// the read and the answers (`KillGate::plan_turn`).
+fn nb10_displayed(entries: &[Entry], at: usize) -> Vec<String> {
+    let me = &entries[at];
+    let mut shown: Vec<Vec<String>> = vec![];
+    for e in entries[..at].iter().rev().filter(|x| x.actor == me.actor) {
+        if e.act != "plan" || e.view != me.view {
+            break;
+        }
+        let rows = e.reply.as_ref().and_then(|r| r["items"].as_array());
+        shown.push(
+            rows.into_iter()
+                .flatten()
+                .filter(|i| {
+                    i["state"] == "open"
+                        && i["edge"] == "neighbor"
+                        && matches!(i["kind"].as_str(), Some("confirm" | "rejustify"))
+                })
+                .filter_map(|i| i["id"].as_str().map(str::to_string))
+                .collect(),
+        );
+    }
+    shown.into_iter().rev().flatten().collect()
+}
+
+/// The checks of one grouped `plan_answer` entry (the one at `at`): it names the neighbor group,
+/// its items are exactly the displayed ones, none twice, the reply returned exactly them, and
+/// the answers it lists are those items once each with the group's act and reason, and no id
+/// twice. Returns the group's items.
+fn nb10_group_call(entries: &[Entry], at: usize) -> Vec<String> {
+    let e = &entries[at];
+    let who = format!("{} step {} {:?}", e.actor, e.step, e.view);
+    let reply = e
+        .reply
+        .as_ref()
+        .expect("a plan_answer entry names its answers");
+    let group = &reply["group"];
+    assert_eq!(group["edge"], "neighbor", "{who}: {reply}");
+    assert_eq!(group["follow_up"], "confirm", "{who}: {reply}");
+    let items = nb10_ids(&group["items"]);
+    let shown = nb10_displayed(entries, at);
+    assert!(!items.is_empty(), "{who}: an empty group is never sent");
+    let unique: BTreeSet<&String> = items.iter().collect();
+    assert_eq!(unique.len(), items.len(), "{who}: a repeated id: {items:?}");
+    assert_eq!(
+        unique,
+        shown.iter().collect::<BTreeSet<_>>(),
+        "{who}: the group is not the displayed neighbor items"
+    );
+    assert_eq!(
+        nb10_ids(&group["returned"]).iter().collect::<BTreeSet<_>>(),
+        unique,
+        "{who}: the reply returned other answers than the group"
+    );
+    let answers = reply["answers"].as_array().expect("answers");
+    let named: Vec<&str> = answers.iter().filter_map(|a| a["item"].as_str()).collect();
+    assert_eq!(
+        named.iter().collect::<BTreeSet<_>>().len(),
+        named.len(),
+        "{who}: an item answered twice: {named:?}"
+    );
+    for id in &items {
+        let a = answers
+            .iter()
+            .find(|a| a["item"] == id.as_str())
+            .unwrap_or_else(|| panic!("{who}: {id} is not among the answers"));
+        assert_eq!(a["act"], "confirm", "{who}: {a}");
+        assert_eq!(a["reason"], "swarm: checked", "{who}: {a}");
+    }
+    items
+}
+
+/// nb10: an agent's one `rdy_plan` call answers the neighbor items its plan read displayed with
+/// one group `{edge: neighbor, follow_up: confirm}`. Agent a0 briefs, writes a stable claim and
+/// proposes: its plan holds the claim's section neighbors. The group is exactly the displayed
+/// neighbor items, no id twice, and the reply returned exactly them.
+#[test]
+fn nb10_swarm_agent_groups_only_displayed_neighbor_confirms() {
+    const SEED: u64 = 41;
+    let cfg = Config {
+        seed: SEED,
+        agents: 2,
+        steps: 8,
+        kill_at: None,
+    };
+    let read = |n| Act::Read {
+        target: Pick::Seed(n),
+    };
+    let mut a0 = vec![read(0); 8];
+    a0[0] = Act::Brief {
+        target: Pick::Seed(0),
+    };
+    a0[1] = Act::Write {
+        target: Pick::Seed(0),
+        stable: true,
+    };
+    a0[2] = Act::Propose;
+    let s = Script {
+        agents: vec![a0, vec![read(1); 8]],
+        person: vec![
+            PersonAct::Tensions,
+            PersonAct::Land { relayed: true },
+            PersonAct::Land { relayed: true },
+            PersonAct::Land { relayed: true },
+        ],
+        contra: vec![],
+    };
+    let o = match seeded(SEED, || run::run_script(&cfg, s)) {
+        Ok(o) => o,
+        Err(text) => panic!("{text}"),
+    };
+    let run = o.before_freeze();
+    let calls: Vec<usize> = (0..run.len())
+        .filter(|&k| run[k].act == "plan_answer" && run[k].actor == "agent:a0")
+        .collect();
+    assert_eq!(calls.len(), 1, "swarm seed {SEED}:\n{}", lines(run));
+    assert_eq!(run[calls[0]].outcome, Met::Ok, "{:?}", run[calls[0]]);
+    let items = nb10_group_call(run, calls[0]);
+    assert!(
+        items.len() >= 3,
+        "swarm seed {SEED}: the claim's three section neighbors: {items:?}"
+    );
+    // every item of the call is a neighbor item or an item of an existing kind: the group is
+    // the only way a neighbor item is answered
+    let reply = run[calls[0]].reply.as_ref().unwrap();
+    assert!(
+        reply["answers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| items.contains(&a["item"].as_str().unwrap().to_string())
+                || a["kind"] != "confirm"
+                || a["reason"] == "swarm: checked"),
+        "{reply}"
+    );
+    assert!(
+        o.violations.is_empty(),
+        "swarm seed {SEED}: {:?}",
+        o.violations
+    );
+}
+
+/// nb10: the person's CLI fallback sends the same group, `rdy plan confirm --edge neighbor
+/// --follow-up confirm --reason "swarm: checked" --view work`, and receives the same membership.
+/// The person rewords a seed claim in `work` and answers its plan before it proposes.
+#[test]
+fn nb10_swarm_person_uses_the_same_neighbor_group() {
+    use rdy_qa::swarm::agent::KillGate;
+    use rdy_qa::swarm::journal::Journal;
+    use rdy_qa::swarm::people;
+    use rdy_qa::swarm::project;
+    use std::sync::{Arc, Mutex};
+    let cfg = Config {
+        seed: 42,
+        agents: 1,
+        steps: 4,
+        kill_at: None,
+    };
+    let p = project::build(&cfg);
+    let (j, g) = (Journal::new(), Arc::new(KillGate::new()));
+    let queue = Arc::new(Mutex::new(vec![]));
+    people::spawn(&p, vec![PersonAct::WcEdit], j.clone(), queue, g)
+        .join()
+        .unwrap_or_else(|e| panic!("the person panicked: {e:?}"));
+    let entries = j.entries();
+    let calls: Vec<usize> = (0..entries.len())
+        .filter(|&k| entries[k].act == "plan_answer" && entries[k].view.as_deref() == Some("work"))
+        .collect();
+    assert!(!calls.is_empty(), "{}", lines(&entries));
+    let grouped: Vec<usize> = calls
+        .iter()
+        .copied()
+        .filter(|&k| {
+            entries[k]
+                .reply
+                .as_ref()
+                .is_some_and(|r| r.get("group").is_some())
+        })
+        .collect();
+    assert_eq!(
+        grouped.len(),
+        1,
+        "one command carries the group:\n{}",
+        lines(&entries)
+    );
+    let k = grouped[0];
+    assert_eq!(entries[k].actor, "human:qa");
+    assert_eq!(entries[k].outcome, Met::Ok, "{:?}", entries[k]);
+    let items = nb10_group_call(&entries, k);
+    assert!(items.len() >= 3, "{items:?}");
+    // the person answers the neighbor items by the group alone, in the same command as its other
+    // confirm items of that reason, and no id twice across the commands
+    let mut all: Vec<String> = vec![];
+    for &c in &calls {
+        let reply = entries[c].reply.as_ref().unwrap();
+        all.extend(nb10_ids(&Value::Array(
+            reply["answers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a["item"].clone())
+                .collect(),
+        )));
+    }
+    assert_eq!(
+        all.iter().collect::<BTreeSet<_>>().len(),
+        all.len(),
+        "an item answered twice: {all:?}"
+    );
+}
+
+/// nb10: a neighbor update item (an entity neighbor that states a removed literal) still defers
+/// with `swarm: later`; a declared item and a tension item keep the acts of their kinds; a code
+/// item stays open; a neighbor confirm item joins the group and is not answered by id.
+#[test]
+fn nb10_entity_update_and_declared_items_keep_their_acts() {
+    use rdy_qa::swarm::agent::{PlanRow, split_plan_answers};
+    let row = |id: &str, kind: &str, edge: &str| PlanRow {
+        id: id.into(),
+        kind: kind.into(),
+        edge: edge.into(),
+    };
+    let open = [
+        row("pi-1", "confirm", "neighbor"),
+        row("pi-2", "update", "neighbor"),
+        row("pi-3", "confirm", "references"),
+        row("pi-4", "update", "references"),
+        row("pi-5", "reaffirm", "decision"),
+        row("tn-6", "tension", "tension"),
+        row("pi-7", "update_implementation", "describes"),
+        row("pi-8", "confirm", "neighbor"),
+        row("pi-9", "rejustify", "neighbor"),
+        row("pi-a", "rejustify", "implements"),
+    ];
+    let split = split_plan_answers(&open);
+    // the group follows the engine's: edge neighbor and follow_up confirm (kind confirm or
+    // rejustify)
+    assert_eq!(split.group, ["pi-1", "pi-8", "pi-9"]);
+    let by_id: Vec<(&str, &str, &str)> = split
+        .explicit
+        .iter()
+        .map(|a| (a.item.as_str(), a.act, a.reason))
+        .collect();
+    assert_eq!(
+        by_id,
+        [
+            ("pi-2", "defer", "swarm: later"),
+            ("pi-3", "confirm", "swarm: checked"),
+            ("pi-4", "defer", "swarm: later"),
+            ("pi-5", "defer", "swarm: later"),
+            ("tn-6", "confirm", "swarm: accepted"),
+            ("pi-a", "defer", "swarm: later"),
+        ]
+    );
+    // nothing displayed in the group: no group is sent
+    assert!(
+        split_plan_answers(&[row("pi-2", "update", "neighbor")])
+            .group
+            .is_empty()
+    );
+}
+
+/// nb10: a kill and a reconnect keep the neighbor answers. Two agents each write a stable claim
+/// and propose; the run kills the daemon once, at the existing seam (`Config::kill_at`), and the
+/// drain lands what is left. Each acknowledged grouped answer is a group of the displayed items,
+/// and the seal of the landing of its view names each of those items as confirmed, and no sealed
+/// neighbor item is open. No timer is asserted.
+#[test]
+fn nb10_kill_and_reconnect_preserve_neighbor_answers() {
+    const SEED: u64 = 43;
+    let cfg = Config {
+        seed: SEED,
+        agents: 2,
+        steps: 10,
+        kill_at: Some(4),
+    };
+    let read = |n| Act::Read {
+        target: Pick::Seed(n),
+    };
+    let acts = |n| {
+        let mut a = vec![read(n); 10];
+        a[0] = Act::Brief {
+            target: Pick::Seed(n),
+        };
+        a[1] = Act::Write {
+            target: Pick::Seed(n),
+            stable: true,
+        };
+        a[2] = Act::Propose;
+        a
+    };
+    let s = Script {
+        agents: vec![acts(0), acts(1)],
+        person: vec![
+            PersonAct::Tensions,
+            PersonAct::Land { relayed: true },
+            PersonAct::Land { relayed: true },
+            PersonAct::Land { relayed: true },
+            PersonAct::Land { relayed: true },
+        ],
+        contra: vec![],
+    };
+    let o = match seeded(SEED, || run::run_script(&cfg, s)) {
+        Ok(o) => o,
+        Err(text) => panic!("{text}"),
+    };
+    assert!(
+        o.journal.iter().any(|e| e.epoch == 1),
+        "swarm seed {SEED}: the daemon never restarted"
+    );
+    let (_keep, copy) = copy_of(&o.dir);
+    let r = Rdy::open(&copy).expect("open the drained copy");
+    let st = r.read();
+    let mut checked = 0;
+    for (at, e) in o.journal.iter().enumerate() {
+        if e.act != "plan_answer"
+            || e.outcome != Met::Ok
+            || e.reply.as_ref().is_none_or(|r| r.get("group").is_none())
+        {
+            continue;
+        }
+        let items = nb10_group_call(&o.journal, at);
+        // the first proposal of the view after the answers, and its landing
+        let pref = o.journal[at..]
+            .iter()
+            .find(|x| x.act == "propose" && x.outcome == Met::Ok && x.view == e.view)
+            .and_then(|x| x.block.clone())
+            .unwrap_or_else(|| panic!("swarm seed {SEED}: no proposal after {e:?}"));
+        let landing = o
+            .journal
+            .iter()
+            .filter(|x| (x.act == "land" && x.outcome == Met::Ok) || x.act == run::LAND_FOUND)
+            .find(|x| x.block.as_deref() == Some(pref.as_str()))
+            .and_then(|x| x.reply.as_ref()?["landing"].as_str().map(str::to_string))
+            .unwrap_or_else(|| {
+                panic!(
+                    "swarm seed {SEED}: {pref} never landed:\n{}",
+                    lines(&o.journal)
+                )
+            });
+        let q = PlanQuery {
+            landing: Some(landing),
+            max_tokens: Some(100_000),
+            ..Default::default()
+        };
+        let seal = st
+            .change_plan(&q, "work")
+            .map(|p| serde_json::to_value(p).expect("a plan reply serializes"))
+            .unwrap_or_else(|err| panic!("swarm seed {SEED}: the seal of {pref}: {err}"));
+        let rows = seal["items"].as_array().cloned().unwrap_or_default();
+        for id in &items {
+            let row = rows
+                .iter()
+                .find(|i| i["id"] == id.as_str())
+                .unwrap_or_else(|| panic!("swarm seed {SEED}: the seal of {pref} lacks {id}"));
+            assert_eq!(row["outcome"], "confirmed", "swarm seed {SEED}: {row}");
+        }
+        assert!(
+            rows.iter()
+                .filter(|i| i["edge"] == "neighbor")
+                .all(|i| i["outcome"] != "open"),
+            "swarm seed {SEED}: an open neighbor item sealed in {pref}"
+        );
+        checked += 1;
+    }
+    drop(st);
+    r.close().expect("close the drained copy");
+    assert!(
+        checked > 0,
+        "swarm seed {SEED}: no grouped answer was acknowledged: the check is vacuous:\n{}",
+        lines(&o.journal)
+    );
+}
