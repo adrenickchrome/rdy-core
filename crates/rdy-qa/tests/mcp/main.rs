@@ -32,6 +32,7 @@ mod mcp_log;
 mod mcp_log_assessment;
 mod mcp_log_landing;
 mod mcp_mentions;
+mod mcp_neighbors_plan;
 mod mcp_params;
 mod mcp_people;
 mod mcp_plan;

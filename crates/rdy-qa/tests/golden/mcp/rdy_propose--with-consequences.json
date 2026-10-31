@@ -45,7 +45,7 @@
       "block": null,
       "code": "E_PLAN_OPEN",
       "fix": "close or defer each item, and answer each tension item with confirm or dismiss: rdy_plan / rdy plan",
-      "message": "1 change-plan items are open",
+      "message": "2 change-plan items are open",
       "severity": "error"
     }
   ],
@@ -54,7 +54,7 @@
       "confirm": {
         "closed": 0,
         "deferred": 0,
-        "open": 1
+        "open": 2
       },
       "reaffirm": {
         "closed": 0,
@@ -90,6 +90,14 @@
     "deferred": 0,
     "items": [
       {
+        "cause": "c-ZCQ17",
+        "edge": "neighbor",
+        "id": "pi-0531965229c2d49d",
+        "kind": "confirm",
+        "state": "open",
+        "subject": "c-WKHEZ"
+      },
+      {
         "cause": "c-CFPE0",
         "edge": "references",
         "id": "pi-b1ac05f4f210a8a5",
@@ -98,7 +106,7 @@
         "subject": "c-WKHEZ"
       }
     ],
-    "open": 1
+    "open": 2
   },
   "policy": null,
   "ready": false,

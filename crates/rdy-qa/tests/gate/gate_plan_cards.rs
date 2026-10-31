@@ -509,6 +509,10 @@ fn cp12_deferral_card_lists_only_valid_noncode_deferrals() {
     let batch = item_of(&r, &p.r#ref).unwrap();
     let plan_fact = fact(&batch, "Change plan");
     assert!(plan_fact.ends_with(", 3 deferred"), "{plan_fact}");
+    // nb8: open are b's lapsed item on c and the six neighbor confirms the three edited claims
+    // give their unchanged siblings (z after a; q and z after c; b, q and z after p); p's update
+    // is closed
+    assert_eq!(plan_fact, "7 open, 1 closed, 3 deferred");
 }
 
 /// D-AAQ9Z: every approval path refuses the version with `E_DEFERRAL_OPEN` until its card has an
@@ -1089,7 +1093,8 @@ fn cp12_batch_facts_and_recommendation_reasons_are_exact() {
         ]
     );
     assert_eq!(fact(&i, "Re-affirms"), "none");
-    assert_eq!(fact(&i, "Change plan"), "0 open, 0 closed, 0 deferred");
+    // nb8: z's text changed, so its five unchanged section neighbors confirm (drafts: advice)
+    assert_eq!(fact(&i, "Change plan"), "5 open, 0 closed, 0 deferred");
     assert_eq!(
         i.options[0].recommended.as_ref().unwrap().reason(),
         APPROVE_REASON

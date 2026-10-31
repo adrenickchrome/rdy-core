@@ -13,7 +13,9 @@
 use crate::brief::{FollowUp, effective_stable};
 use crate::code_evidence::{self, anchored_files, later_touch};
 use crate::code_index::{CodeRepo, code_repos};
-use crate::consequence::{CONFLICT_FIX, NetState, PlanPair, conflict_message, refines_copied};
+use crate::consequence::{
+    CONFLICT_FIX, NEIGHBOR_EDGE, NetState, PlanPair, conflict_message, refines_copied,
+};
 use crate::error::{E_ALREADY_EXISTS, E_CONFLICT_UNRESOLVED, E_LIMIT, E_STALE_BASE};
 use crate::gate::{applied_ops, changes_of, prospective};
 use crate::lexicon::Lexicon;
@@ -654,7 +656,8 @@ fn reaffirmed_for<'b>(b: &'b Block, target: &BlockId) -> Option<&'b FieldValue> 
     }
 }
 
-/// Adds `c` to `items` once per item id: a repeat keeps the least edge name, and is closed only
+/// Adds `c` to `items` once per item id: a repeat keeps the least edge by
+/// [`edge_precedence`] (a declared edge before `neighbor`, then by name), and is closed only
 /// when both are (a reach and an edge to the same cause agree). A new item past `limit` is the
 /// whole plan's refusal.
 fn admit(
@@ -663,7 +666,7 @@ fn admit(
     limit: usize,
 ) -> Result<(), RdyError> {
     if let Some(had) = items.get_mut(&c.id) {
-        if c.edge < had.edge {
+        if edge_precedence(&c.edge) < edge_precedence(&had.edge) {
             had.edge = c.edge;
         }
         had.close = had.close.and(c.close);
@@ -674,6 +677,12 @@ fn admit(
     }
     items.insert(c.id, c);
     Ok(())
+}
+
+/// The order in which one item's edges win (TASK-978 O3): a declared relation wins over
+/// `neighbor` even where the names sort the other way, then the least name.
+fn edge_precedence(edge: &str) -> (bool, &str) {
+    (edge == NEIGHBOR_EDGE, edge)
 }
 
 /// What the closes of one plan read: both states, the changed blocks and, built on first use,
@@ -855,8 +864,8 @@ pub(crate) fn compute_in(
         };
         // a link the version wrote to a block it changed, with no suspect: written against the
         // final state, it owes nothing (D-NJ2SP). A reach is no such link: it always needs a
-        // reasoned confirm (p-0HXT0)
-        if kind == PlanKind::Confirm && !p.reach && !p.in_base && !p.suspect {
+        // reasoned confirm (p-0HXT0), and a neighbor needs no link at all (D-YXBXH)
+        if kind == PlanKind::Confirm && !p.reach && !p.in_base && !p.suspect && !p.neighbor {
             return Ok(());
         }
         let close = closes.close(kind, &p);

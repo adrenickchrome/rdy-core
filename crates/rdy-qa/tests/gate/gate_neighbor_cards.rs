@@ -6,13 +6,16 @@
 use crate::gate_check_verdicts::{REASON, meaning_verdict};
 use rdy_engine::answer::AnswerRequest;
 use rdy_engine::answer::relay::RelayInput;
+use rdy_engine::consequence::NEIGHBOR_EDGE;
 use rdy_engine::engine::Local;
 use rdy_engine::neighbors::neighbors_in;
 use rdy_engine::pending::{Item, ItemKind, Pending, PendingQuery, card_hash};
+use rdy_engine::plan::PlanRow;
 use rdy_engine::{
     DecisionInput, E_ITEM_MOVED, Engine, ProposalInfo, Rdy, ReadState, Scope, Session,
 };
 use rdy_model::assessment::Assessment;
+use rdy_model::plan::PlanKind;
 use rdy_model::{BlockId, Hash, Role};
 use rdy_qa::fixtures::{land, writer};
 use rdy_qa::intake::{PERSON, TEST_SUMMARY, decide_in};
@@ -356,6 +359,28 @@ fn nb11_everyday_removes_only_unlinked_card_inference() {
     );
     // the neighbor query reads ties: the flag moves none of its rows
     assert_eq!(ends(&w.r), neighbors_before);
+    // nb8: explicit ties keep their neighbor items too: a text edit of cl1 asks each section
+    // neighbor to confirm in the net plan
+    put(&mut w.r, "nb8", upd(&w.cl1, "Entries stay longer."));
+    let reply = w.r.read().view_plan("nb8").unwrap();
+    let items: BTreeSet<(String, String, PlanKind)> = reply
+        .items
+        .iter()
+        .filter_map(|row| match row {
+            PlanRow::Live(i) if i.edge == NEIGHBOR_EDGE => {
+                Some((i.cause.clone(), i.subject.clone(), i.kind))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        items,
+        BTreeSet::from([
+            (w.cl1.to_string(), w.cl2.to_string(), PlanKind::Confirm),
+            (w.cl1.to_string(), w.x.to_string(), PlanKind::Confirm),
+        ]),
+        "{reply:#?}"
+    );
 }
 
 #[test]

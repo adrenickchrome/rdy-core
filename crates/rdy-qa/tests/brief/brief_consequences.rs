@@ -98,7 +98,27 @@ fn csq1_updating_a_referenced_block_asks_its_normative_referrer_to_confirm() {
         c.items.iter().all(|x| x.block != s.a.to_string()),
         "the changed block itself is not listed"
     );
-    assert!(c.items.iter().all(|x| x.block != s.c.to_string()));
+    // nb8 (D-YXBXH): C shares A's section with no edge to it, so it is a section neighbor
+    let c_entry = entry(&c, &s.c);
+    assert_eq!(
+        (c_entry.kind, c_entry.follow_up),
+        (ConsequenceKind::Dependent, FollowUp::Confirm)
+    );
+    assert_eq!(
+        c_entry.because,
+        Because {
+            edge: NEIGHBOR_EDGE.into(),
+            changed: s.a.to_string(),
+            edges: Some(vec![NEIGHBOR_EDGE.into()]),
+            values: Some(vec![]),
+            values_omitted: 0,
+        }
+    );
+    assert_eq!(c_entry.fix.as_deref(), Some(NEIGHBOR_SECTION_FIX));
+    assert_eq!(
+        c_entry.id,
+        consequence_id(&res.change.parse().unwrap(), "dependent", &s.c)
+    );
 }
 
 #[test]
@@ -242,13 +262,20 @@ fn csq1_a_cut_keeps_counts() {
     write(&mut r, "w", json!(ops)).unwrap();
     let res = update_a(&mut r, &s);
     let full = after(&r, &res.change);
-    assert_eq!(full.items.len(), 61, "B and the sixty referrers");
+    // nb8: C, A's unlinked section neighbor, comes after the declared entries
+    assert_eq!(
+        full.items.len(),
+        62,
+        "B, the sixty referrers and the neighbor C"
+    );
+    assert_eq!(full.items[61].block, s.c.to_string());
+    assert_eq!(full.items[61].because.edge, NEIGHBOR_EDGE);
     let cut = r
         .read()
         .consequences(&w(), &res.change.parse().unwrap(), Some(200))
         .unwrap();
-    assert!(cut.items.len() < 61);
-    assert_eq!(cut.items.len() + cut.omitted.values().sum::<usize>(), 61);
+    assert!(cut.items.len() < 62);
+    assert_eq!(cut.items.len() + cut.omitted.values().sum::<usize>(), 62);
     assert_eq!(
         cut.items[..],
         full.items[..cut.items.len()],
@@ -256,17 +283,69 @@ fn csq1_a_cut_keeps_counts() {
     );
 }
 
+/// TASK-978 X2: blocks created in an empty section have no consequences; a block created beside
+/// existing siblings asks each unchanged one to confirm.
 #[test]
 fn csq1_a_stream_of_new_blocks_has_no_consequences() {
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);
+    // an empty section first, landed in canon; then a stream of new blocks in it
+    let empty = write(
+        &mut r,
+        "e",
+        json!([{"op": "create", "type": "section", "id": "$e", "parent": s.doc.to_string(),
+            "fields": {"title": "Empty"}}]),
+    )
+    .unwrap();
+    let empty = empty.created["$e"].clone();
+    land(&mut r, "e").unwrap();
     let res = write(
         &mut r,
         "w",
-        json!([{"op": "create", "type": "claim", "parent": s.section.to_string(), "body": "New."}]),
+        json!([
+            {"op": "create", "type": "claim", "parent": empty, "body": "New."},
+            {"op": "create", "type": "claim", "parent": empty, "body": "Newer."}
+        ]),
     )
     .unwrap();
     assert_eq!(after(&r, &res.change), Consequences::default());
+
+    // a new block beside A, B and C: each existing sibling confirms (D is supporting)
+    let res = write(
+        &mut r,
+        "w",
+        json!([{"op": "create", "type": "claim", "id": "$n", "parent": s.section.to_string(),
+            "body": "New."}]),
+    )
+    .unwrap();
+    let n = res.created["$n"].clone();
+    let c = after(&r, &res.change);
+    let change: Hash = res.change.parse().unwrap();
+    let mut want: Vec<&BlockId> = vec![&s.a, &s.b, &s.c];
+    want.sort();
+    assert_eq!(
+        c.items.iter().map(|x| x.block.as_str()).collect::<Vec<_>>(),
+        want.iter().map(|b| b.as_str()).collect::<Vec<_>>()
+    );
+    for (x, b) in c.items.iter().zip(&want) {
+        assert_eq!(x.id, consequence_id(&change, "dependent", b));
+        assert_eq!(
+            (x.kind, x.follow_up),
+            (ConsequenceKind::Dependent, FollowUp::Confirm)
+        );
+        assert_eq!(
+            x.because,
+            Because {
+                edge: NEIGHBOR_EDGE.into(),
+                changed: n.clone(),
+                edges: Some(vec![NEIGHBOR_EDGE.into()]),
+                values: None,
+                values_omitted: 0,
+            }
+        );
+        assert_eq!(x.fix.as_deref(), Some(NEIGHBOR_SECTION_FIX));
+        assert!(x.matched.is_empty());
+    }
 }
 
 #[test]

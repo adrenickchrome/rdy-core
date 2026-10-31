@@ -30,7 +30,7 @@ use rdy_model::entity::{
     MAX_NAME_WORDS, VALUE, code_literal_spans, lines_at, source_field, value_text, visit_leaves,
     visit_text_sources, words,
 };
-use rdy_model::{Block, BlockId, RefMode, RefSpan, ref_spans};
+use rdy_model::{Block, BlockId, RefMode, RefSpan, Tracking, ref_spans};
 use rdy_schema::Pack;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -73,12 +73,12 @@ struct Literal {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct LiteralSet(Vec<Literal>);
 
-#[cfg(test)]
 impl LiteralSet {
     pub(crate) fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.0.len()
     }
@@ -188,6 +188,33 @@ pub(crate) fn states(
         .take(MAX_SHOWN)
         .collect();
     (out, ev.cut)
+}
+
+/// TASK-978 I1: whether `new` changes `old`'s text. A write changes a content block's text when
+/// a string leaf of its text fields changes, with each reference compared as its token and its
+/// display label (the stored leaf, before any rendering). Enum fields and store-only metadata
+/// (the [`visit_text_sources`] metadata fields and the pack's tracking fields) take no part. For
+/// a type whose body the text helpers skip (`code`), the stored body counts too. A move, an
+/// order change, a repin, a links-only edit, a lifecycle change or a tracking-field edit leaves
+/// the text equal.
+pub(crate) fn text_changed(pack: &Pack, t: &Tracking, old: &Block, new: &Block) -> bool {
+    text_leaves(pack, t, old) != text_leaves(pack, t, new)
+}
+
+/// The ordered (source name, stored leaf) pairs [`text_changed`] compares.
+fn text_leaves(pack: &Pack, t: &Tracking, b: &Block) -> Vec<(String, String)> {
+    let mut out = vec![];
+    visit_text_sources(b, &mut |name, text, _| {
+        let field = source_field(name);
+        if !is_enum_field(pack, &b.block_type, field) && !t.is_tracking(&b.block_type, field) {
+            out.push((name.to_string(), text.to_string()));
+        }
+        ControlFlow::Continue(())
+    });
+    if RefMode::for_body(&b.block_type) != RefMode::Strict {
+        out.push(("body".to_string(), b.body.clone()));
+    }
+    out
 }
 
 /// Literals in first-occurrence order, each identity once with its first spelling.

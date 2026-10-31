@@ -284,6 +284,20 @@ fn frames_from(r: &Rdy, from: Location) -> Vec<u8> {
 }
 
 fn outcome(p: &Plan, cause: &str, subject: &str, kind: PlanKind) -> PlanOutcome {
+    sealed_item(p, cause, subject, kind).outcome
+}
+
+/// The edge a seal keeps for one item.
+fn sealed_edge(p: &Plan, cause: &str, subject: &str, kind: PlanKind) -> String {
+    sealed_item(p, cause, subject, kind).edge.clone()
+}
+
+fn sealed_item<'p>(
+    p: &'p Plan,
+    cause: &str,
+    subject: &str,
+    kind: PlanKind,
+) -> &'p rdy_model::plan::SealedItem {
     let want = item_hash(&id(cause), subject, kind);
     p.seal
         .as_ref()
@@ -292,7 +306,6 @@ fn outcome(p: &Plan, cause: &str, subject: &str, kind: PlanKind) -> PlanOutcome 
         .iter()
         .find(|i| i.id == want)
         .unwrap_or_else(|| panic!("no sealed item {}: {p:#?}", item_display(&want)))
-        .outcome
 }
 
 // ---- git ----
@@ -736,6 +749,28 @@ fn cp10_landing_seals_all_outcomes_and_named_decisions() {
             kind.as_str()
         );
     }
+    // nb8: the neighbor items are sealed with their edge. c confirms after a and after p; q, a
+    // referrer of a, has a neighbor confirm beside its declared update; b2 confirms after p.
+    // Where a neighbor and a declared relation give one item, the declared edge stays.
+    for (cause, subject) in [(&s.a, &s.c), (&s.p, &s.c), (&s.a, &q), (&s.p, &b2)] {
+        assert_eq!(
+            outcome(&sealed, cause, subject, PlanKind::Confirm),
+            PlanOutcome::Open,
+            "{cause} on {subject}"
+        );
+        assert_eq!(
+            sealed_edge(&sealed, cause, subject, PlanKind::Confirm),
+            "neighbor"
+        );
+    }
+    assert_eq!(
+        sealed_edge(&sealed, &s.a, &s.b, PlanKind::Confirm),
+        "references"
+    );
+    assert_eq!(
+        sealed_edge(&sealed, &s.a, &b2, PlanKind::Confirm),
+        "references"
+    );
     // Task 12: the deferred document item points to the version's acceptance; no other does
     for i in &x.items {
         let want = (i.outcome == PlanOutcome::Deferred).then_some(accepted);
@@ -924,6 +959,18 @@ fn cp10_landing_seals_the_approved_versions_bound_answers() {
             PlanOutcome::Open,
             "{acceptance}: the later defer is no answer of the version"
         );
+        // nb8: the unanswered neighbor confirms of c and p are sealed open, with their edge
+        for subject in [&s.c, &s.p] {
+            assert_eq!(
+                outcome(&sealed, &s.a, subject, PlanKind::Confirm),
+                PlanOutcome::Open,
+                "{acceptance}: {subject}"
+            );
+            assert_eq!(
+                sealed_edge(&sealed, &s.a, subject, PlanKind::Confirm),
+                "neighbor"
+            );
+        }
         if acceptance {
             let (fh, fplan) = bound(&r, &fin).expect("the final version binds its plan");
             assert_eq!(fplan.answers, bplan.answers, "the final binding's answers");
@@ -1166,6 +1213,19 @@ fn cp10_sealed_reads_ignore_later_canon_and_code() {
         .unwrap()
         .clone();
     assert_eq!(row["outcome"], "open");
+    // nb8: the sealed neighbor item reads as recorded, edge and outcome, whatever canon did
+    let neighbor = pi(&s.a, &s.c, PlanKind::Confirm);
+    let row = read["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == neighbor)
+        .unwrap_or_else(|| panic!("{read:#}"))
+        .clone();
+    assert_eq!(
+        (row["edge"].clone(), row["outcome"].clone()),
+        (json!("neighbor"), json!("open"))
+    );
 }
 
 /// O16: the prepared plan is part of the prepared approval: a writer that moves while the agent

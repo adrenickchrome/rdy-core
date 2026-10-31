@@ -10,6 +10,7 @@ mod brief_entities;
 mod brief_inflight;
 mod brief_intents;
 mod brief_mcp;
+mod brief_neighbor_consequences;
 mod brief_paging;
 mod brief_reach;
 mod brief_reaffirm;
