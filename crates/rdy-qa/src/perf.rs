@@ -2796,8 +2796,9 @@ fn tier_coord(out: &mut Vec<Measure>, parent: &std::path::Path, sfx: &str, runs:
 /// for w, whose winner view wrote `n / 20` (at least 5) changes after the set was created, in a
 /// fresh small project. The last `sets / 10` (at least 1) sets are heavy: before the set was
 /// created, their loser view wrote the same number of new claims (bound to it: a long pre-set
-/// chain); a third member j<i> joined with `alt_add` holding as many of its own (the joiner reads);
-/// and the winner recorded a choice decision. They come last, so few landings rebase their views.
+/// chain); a third member j<i> joined with `alt_add` holding as many of its own (the joiner reads).
+/// They come last, so few landings rebase their views. Every winner records a choice decision
+/// (O17, D-JQD5X).
 /// `open_chosen_alts_100` reopens the project: `CoordHeads::read` derives every chosen set's
 /// bindings from history (each member's walk from its head back to the set's creation, and the
 /// set built there). `propose_chosen_alts_100` proposes a view of the same number of changes plus
@@ -2868,8 +2869,10 @@ fn tier_coord_chosen(
         for k in 0..chain {
             edit(&mut r, &w, format!("Winner {i}.{k}."));
         }
-        let decision = is_heavy.then(|| {
-            r.decide(
+        // O17 (D-JQD5X): every choosing version creates the decision of its considered
+        // options; a heavy set's is the one a later proposal refines
+        let made = r
+            .decide(
                 &writer(),
                 &w,
                 rdy_engine::DecisionInput {
@@ -2880,8 +2883,8 @@ fn tier_coord_chosen(
             )
             .expect("a choice decision")
             .created["$decision"]
-                .clone()
-        });
+            .clone();
+        let decision = is_heavy.then_some(made);
         let pick = rdy_engine::alt::AltPick {
             set: set.id.clone(),
             chosen: "w".into(),

@@ -6,7 +6,7 @@ use rdy_engine::alt::*;
 use rdy_engine::tensions::api::AcceptRequest;
 use rdy_engine::*;
 use rdy_qa::fixtures::*;
-use rdy_qa::intake::{BATCH_VIEW, TEST_SUMMARY, batch_project};
+use rdy_qa::intake::{BATCH_VIEW, TEST_SUMMARY, batch_project, confirm_before_landing};
 use rdy_qa::tensions::ag;
 use serde_json::json;
 
@@ -152,6 +152,26 @@ fn setup(r: &mut Rdy) -> String {
 fn vw2_a_losing_members_version_is_refused_with_e_view_closed() {
     let (_d, mut r) = project();
     let set = setup(&mut r);
+    // O17 (D-JQD5X): the choosing version creates the decision of its considered options
+    let section = {
+        let st = r.read();
+        let m = st.materialized(&Scope::Canon).unwrap();
+        m.iter()
+            .find(|b| b.block_type == "section")
+            .unwrap()
+            .id
+            .to_string()
+    };
+    r.decide(
+        &writer(),
+        "a",
+        DecisionInput {
+            parent: section,
+            statement: "Choose view a".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let pa = r
         .propose_with(
             &writer(),
@@ -165,6 +185,7 @@ fn vw2_a_losing_members_version_is_refused_with_e_view_closed() {
     let pb = r
         .propose_with(&writer(), "b", "y", None, None, Some(&pick(&set, "y")))
         .unwrap();
+    confirm_before_landing(&mut r, &approver(), &pa);
     r.land(&approver(), &pa.id).unwrap();
     let e = r.land(&approver(), &pb.id).unwrap_err();
     assert_eq!(

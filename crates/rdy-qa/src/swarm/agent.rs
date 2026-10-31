@@ -765,6 +765,8 @@ struct Agent {
     /// Where the violations of the agent's own landings go (the run's landing checks).
     watch: Option<Watch>,
     alt_set: Option<String>,
+    /// The sets this agent recorded a choice decision for in its own view (O17, D-JQD5X).
+    alt_decided: BTreeSet<String>,
     /// The views of this agent's marked claims that it has not yet proposed, oldest first.
     contra_views: Vec<String>,
     forks: usize,
@@ -877,6 +879,7 @@ impl Agent {
             proposes: 0,
             watch: None,
             alt_set: None,
+            alt_decided: BTreeSet::new(),
             contra_views: Vec::new(),
             forks: 0,
             counter: 0,
@@ -1869,8 +1872,9 @@ impl Agent {
         let title = format!("{view} step {}", self.link.step);
         let mut args = json!({"title": title, "summary": title, "view": view});
         if contra.is_none()
-            && let Some(set) = &self.alt_set
+            && let Some(set) = self.alt_set.clone()
         {
+            self.choice_decision(&set);
             args["alternatives"] = json!({"set": set, "chosen": self.view});
         }
         let scratch: Vec<String> = held
@@ -1922,6 +1926,7 @@ impl Agent {
                     if code == "E_ALT_UNCHOSEN" && attempt == 0 && contra.is_none() =>
                 {
                     if let Some(set) = set_in(&message) {
+                        self.choice_decision(&set);
                         args["alternatives"] = json!({"set": set, "chosen": self.view});
                         self.alt_set = Some(set);
                         continue;
@@ -1945,6 +1950,26 @@ impl Agent {
             return None;
         }
         None
+    }
+
+    /// O17 (D-JQD5X, D-8GR43): a choosing version creates the decision of its considered
+    /// options. Before its first choice in set `set`, the agent records one proposed decision in
+    /// its own view, under its area's section: a decision that needs no content, so it carries
+    /// no exception card. Choice-fixture construction only, journaled as a `create`.
+    fn choice_decision(&mut self, set: &str) {
+        if !self.alt_decided.insert(set.to_string()) {
+            return;
+        }
+        let k = self.i % AREAS.len();
+        let section = self.seed.sections[k].clone();
+        let ops = json!([{"op": "create", "type": "decision", "id": "$n", "parent": section,
+            "fields": {"statement": format!("Agent {} chooses its member of {set}", self.name()),
+                       "status": "proposed", "needs_content": false}}]);
+        let e = self.view_entry("create");
+        let res = self.briefed_write(e, "create", &[section], ops, k, true);
+        if !matches!(res, Res::Ok(_)) {
+            self.alt_decided.remove(set);
+        }
     }
 
     /// Judges up to `REVIEW_BATCH` free review requests: each a `rdy_review_next` and a

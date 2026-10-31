@@ -2175,6 +2175,59 @@ fn attach_on_change(
     }
 }
 
+/// D-JQD5X, the change stage: writes the pack rule rows of a write or view op into its reply's
+/// `on_change`, after the tension reply is built, as `checks` (always, `[]` included) and, when
+/// a cut left rows out, `checks_omitted`. A report that cannot be read gives `checks: []` and
+/// `checks_error`; the write stands, and a tension read error does not hide the rows. No row
+/// refuses anything.
+fn attach_checks(v: &mut serde_json::Value, r: Result<crate::check::RuleScan, RdyError>) {
+    let Some(on) = v.get_mut("on_change").filter(|o| o.is_object()) else {
+        return;
+    };
+    match r {
+        Ok(scan) => {
+            on["checks"] =
+                serde_json::to_value(scan.rows()).expect("rule rows serialize: strings only");
+            if scan.omitted() > 0 {
+                on["checks_omitted"] = scan.omitted().into();
+            }
+        }
+        Err(e) => {
+            on["checks"] = serde_json::json!([]);
+            on["checks_error"] = format!("{}: {}", e.code, e.message).into();
+        }
+    }
+}
+
+/// The change stage's rule checks of `changes` (their written blocks, read in `after`) in
+/// `view`, from `before` to `after` ([`crate::check::rules::change_checks`]).
+fn change_rule_checks(
+    before: &ReadState,
+    after: &ReadState,
+    view: &str,
+    changes: &[Hash],
+    full: bool,
+) -> Result<crate::check::RuleScan, RdyError> {
+    // a pack with no rules reads nothing
+    if after.pack().rules.is_empty() {
+        return crate::check::rules::change_checks(before, after, view, &BTreeSet::new(), false);
+    }
+    let mut written = BTreeSet::new();
+    if !full {
+        for h in changes {
+            written.extend(
+                after
+                    .reader()
+                    .change(h)?
+                    .ops
+                    .iter()
+                    .map(|o| o.block_id().clone()),
+            );
+        }
+    }
+    crate::check::rules::change_checks(before, after, view, &written, full)
+}
+
 /// `write_typed`, then the write's consequences read from the state it published: on success
 /// `consequences` is always present (with `consequences_omitted` when a cut dropped some, or
 /// `consequences_error` when they could not be read; the write stands), then `intents` when other
@@ -2279,6 +2332,7 @@ fn report<T: Serialize + 'static>(
         let r =
             tension_delta(b, a, Some(&changes)).and_then(|d| on_change(b, a, view, max_tokens, &d));
         attach_on_change(&mut v, r);
+        attach_checks(&mut v, change_rule_checks(b, a, view, &changes, false));
         attach_coverage(&mut v, b, a, &scope, &changes);
     }
     match engine.read().suggestions_of(&scope, &changes) {
@@ -2529,6 +2583,10 @@ pub fn view_op_and_report<T: Serialize + 'static>(
             attach_on_change(&mut v, Err(err));
         }
     }
+    attach_checks(
+        &mut v,
+        change_rule_checks(&before, &after, view, &e.changes, full),
+    );
     Ok(v)
 }
 

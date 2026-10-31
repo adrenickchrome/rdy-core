@@ -87,6 +87,7 @@ fn altg1_landing_a_member_closes_the_other_open_members_and_chooses() {
     let (_d, mut r) = project();
     let set = setup(&mut r);
     r.view_close(&writer(), &["c".into()], "by hand").unwrap();
+    choice_decision(&mut r, "a");
     let p = r
         .propose_with(
             &writer(),
@@ -97,6 +98,7 @@ fn altg1_landing_a_member_closes_the_other_open_members_and_chooses() {
             Some(&pick(&set, "x")),
         )
         .unwrap();
+    confirm_before_landing(&mut r, &approver(), &p);
     r.land(&approver(), &p.id).unwrap();
     let rows = r.read().log_rows().unwrap();
     assert_eq!(rows[0].chosen.as_ref().unwrap().set, set);
@@ -123,6 +125,7 @@ fn altg1_landing_a_member_closes_the_other_open_members_and_chooses() {
 fn altg1_land_reports_chosen_and_closed() {
     let (_d, mut r) = project();
     let set = setup(&mut r);
+    choice_decision(&mut r, "b");
     let p = r
         .propose_with(
             &writer(),
@@ -133,6 +136,7 @@ fn altg1_land_reports_chosen_and_closed() {
             Some(&pick(&set, "y")),
         )
         .unwrap();
+    confirm_before_landing(&mut r, &approver(), &p);
     let info = r.land_report(&approver(), &p.id).unwrap();
     assert_eq!(info.chosen.as_ref().unwrap().member, "b");
     assert_eq!(info.closed, vec!["a".to_string(), "c".to_string()]);
@@ -144,6 +148,7 @@ fn altg1_land_reports_chosen_and_closed() {
 fn altg1_land_rechecks_the_set_at_approval() {
     let (_d, mut r) = project();
     let set = setup(&mut r);
+    choice_decision(&mut r, "a");
     let pa = r
         .propose_with(
             &writer(),
@@ -157,6 +162,7 @@ fn altg1_land_rechecks_the_set_at_approval() {
     let pb = r
         .propose_with(&writer(), "b", "y", None, None, Some(&pick(&set, "y")))
         .unwrap();
+    confirm_before_landing(&mut r, &approver(), &pa);
     r.land(&approver(), &pa.id).unwrap();
     let e = r.land(&approver(), &pb.id).unwrap_err();
     assert_eq!(
@@ -208,6 +214,33 @@ fn two_claims(r: &mut Rdy) -> String {
     section
 }
 
+/// O17 (D-JQD5X, D-8GR43): a choosing landing writes its considered options into a decision the
+/// version creates. Writes a proposed decision into member view `view`, under canon's first
+/// section; its id.
+fn choice_decision(r: &mut Rdy, view: &str) -> String {
+    let section = {
+        let st = r.read();
+        let m = st.materialized(&Scope::Canon).unwrap();
+        m.iter()
+            .find(|b| b.block_type == "section")
+            .expect("a section in canon")
+            .id
+            .to_string()
+    };
+    r.decide(
+        &writer(),
+        view,
+        DecisionInput {
+            parent: section,
+            statement: format!("Choose view {view}"),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .created["$decision"]
+        .clone()
+}
+
 fn canon_bodies(r: &Rdy) -> Vec<String> {
     let st = r.read();
     let m = st.materialized(&Scope::Canon).unwrap();
@@ -227,6 +260,7 @@ fn altg1_a_proposal_from_before_the_set_cannot_land_once_another_member_is_chose
         r.land(&approver(), &pb.id).unwrap_err().code,
         E_ALT_UNCHOSEN
     );
+    choice_decision(&mut r, "a");
     let pa = r
         .propose_with(
             &writer(),
@@ -237,6 +271,7 @@ fn altg1_a_proposal_from_before_the_set_cannot_land_once_another_member_is_chose
             Some(&pick(&set, "x")),
         )
         .unwrap();
+    confirm_before_landing(&mut r, &approver(), &pa);
     r.land(&approver(), &pa.id).unwrap();
     let e = r.land(&approver(), &pb.id).unwrap_err();
     assert_eq!(e.code, E_VIEW_CLOSED, "{}", e.message);
@@ -318,6 +353,7 @@ fn altg1_a_members_change_lands_only_from_its_own_view_with_its_pick() {
         .unwrap_err();
     assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
     // from its own view with its own pick it proposes and lands
+    choice_decision(&mut r, "b");
     let pb = r
         .propose_with(
             &writer(),
@@ -328,6 +364,7 @@ fn altg1_a_members_change_lands_only_from_its_own_view_with_its_pick() {
             Some(&pick(&set, "y")),
         )
         .unwrap();
+    confirm_before_landing(&mut r, &approver(), &pb);
     r.land(&approver(), &pb.id).unwrap();
     assert!(canon_bodies(&r).iter().any(|b| b == "alt B2"));
 }
@@ -340,6 +377,7 @@ fn altg1_a_reopened_member_view_the_set_did_not_choose_cannot_propose() {
         .alt_create(&writer(), "T", None, &[m("x", "a"), m("y", "b")])
         .unwrap()
         .id;
+    choice_decision(&mut r, "a");
     let pa = r
         .propose_with(
             &writer(),
@@ -350,6 +388,7 @@ fn altg1_a_reopened_member_view_the_set_did_not_choose_cannot_propose() {
             Some(&pick(&set, "x")),
         )
         .unwrap();
+    confirm_before_landing(&mut r, &approver(), &pa);
     r.land(&approver(), &pa.id).unwrap();
     assert!(r.read().view_head("b").unwrap().closed);
     let u = r.undo(&writer(), "b", None, false).unwrap();
@@ -372,6 +411,7 @@ fn altg1_a_close_reason_shows_in_view_show_and_view_ls() {
     let (_d, mut r) = project();
     let set = setup(&mut r);
     r.view_close(&writer(), &["c".into()], "by hand").unwrap();
+    choice_decision(&mut r, "a");
     let p = r
         .propose_with(
             &writer(),
@@ -382,6 +422,7 @@ fn altg1_a_close_reason_shows_in_view_show_and_view_ls() {
             Some(&pick(&set, "x")),
         )
         .unwrap();
+    confirm_before_landing(&mut r, &approver(), &p);
     r.land(&approver(), &p.id).unwrap();
     let st = r.read();
     let b = st.view_show("b").unwrap();
@@ -415,6 +456,7 @@ fn altg1_a_lost_member_cannot_propose_under_a_later_set_or_a_pick() {
         .alt_create(&writer(), "T", None, &[m("x", "a"), m("y", "b")])
         .unwrap()
         .id;
+    choice_decision(&mut r, "a");
     let pa = r
         .propose_with(
             &writer(),
@@ -425,6 +467,7 @@ fn altg1_a_lost_member_cannot_propose_under_a_later_set_or_a_pick() {
             Some(&pick(&set, "x")),
         )
         .unwrap();
+    confirm_before_landing(&mut r, &approver(), &pa);
     r.land(&approver(), &pa.id).unwrap();
     assert!(r.undo(&writer(), "b", None, false).unwrap().reopened);
     // a pick on the chosen set: the fix is the outside view, not "propose without alternatives"
@@ -455,6 +498,7 @@ fn altg1_a_lost_member_cannot_propose_under_a_later_set_or_a_pick() {
     );
     assert!(e.fix.contains("outside the set"), "{}", e.fix);
     // the later set's other member still proposes and lands
+    choice_decision(&mut r, "d");
     let pd = r
         .propose_with(
             &writer(),
@@ -465,6 +509,7 @@ fn altg1_a_lost_member_cannot_propose_under_a_later_set_or_a_pick() {
             Some(&pick(&later, "q")),
         )
         .unwrap();
+    confirm_before_landing(&mut r, &approver(), &pd);
     r.land(&approver(), &pd.id).unwrap();
     assert!(canon_bodies(&r).iter().any(|b| b == "alt D"));
 }
@@ -523,6 +568,7 @@ fn msw2_a_pre_set_change_two_members_hold_is_common_ground() {
         .alt_create(&writer(), "T", None, &[m("x", "a"), m("y", "b")])
         .unwrap()
         .id;
+    choice_decision(&mut r, "a");
     let p = r
         .propose_with(
             &writer(),
@@ -533,6 +579,7 @@ fn msw2_a_pre_set_change_two_members_hold_is_common_ground() {
             Some(&pick(&set, "x")),
         )
         .unwrap();
+    confirm_before_landing(&mut r, &approver(), &p);
     r.land(&approver(), &p.id).unwrap();
     let bodies = canon_bodies(&r);
     assert!(
@@ -1012,14 +1059,16 @@ fn msw20_an_abandoned_set_binds_nothing() {
     );
 }
 
-/// RULING Q1: a choice that created no decision releases a loser only with a new decision.
+/// O17 (D-JQD5X, D-8GR43): a version that chooses and names no decision for its considered
+/// options is not ready: `E_ALT_DECISION` in readiness item 6, and its landing is refused. The
+/// set stays open and no member closes.
 #[test]
-fn msw20_a_choice_with_no_decision_releases_a_losers_change_only_with_a_new_decision() {
+fn ck5_a_choice_with_no_decision_is_not_ready() {
     let (_d, mut r) = project();
     let (_doc, section, _claim) = seed_doc(&mut r, "seed");
     land(&mut r, "seed").unwrap();
     claim_in(&mut r, "a", &section, "alt A");
-    let b = claim_in(&mut r, "b", &section, "alt B");
+    claim_in(&mut r, "b", &section, "alt B");
     let set = r
         .alt_create(&writer(), "T", None, &[m("x", "a"), m("y", "b")])
         .unwrap()
@@ -1034,37 +1083,31 @@ fn msw20_a_choice_with_no_decision_releases_a_losers_change_only_with_a_new_deci
             Some(&pick(&set, "x")),
         )
         .unwrap();
-    let landing = r.land(&approver(), &p.id).unwrap();
-    r.view_include(&writer(), "d", std::slice::from_ref(&b))
-        .unwrap();
-    let e = r.propose(&writer(), "d", "d", None).unwrap_err();
-    assert_eq!(e.code, E_ALT_CHOSEN, "{}", e.message);
+    assert!(!p.ready, "{:#?}", p.issues);
+    let alt: Vec<_> = p
+        .issues
+        .iter()
+        .filter(|i| i.code == E_ALT_DECISION)
+        .collect();
+    assert_eq!(alt.len(), 1, "{:#?}", p.issues);
     assert_eq!(
-        e.message,
+        alt[0].message,
         format!(
-            "change {} belongs to member y, which lost set {set} (chosen by landing {}, which recorded no decision)",
-            short(&b),
-            short(&landing)
+            "{} chooses in {set} but names no decision for the considered options",
+            p.r#ref
         )
     );
     assert_eq!(
-        e.fix,
-        "land it with a new decision that records the revisit"
+        alt[0].fix,
+        "answer the set's question with one decision, or create exactly one decision: rdy_decide / rdy new decision"
     );
-    r.decide(
-        &writer(),
-        "d",
-        DecisionInput {
-            parent: section.clone(),
-            statement: "Take B too".into(),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    let p = r.propose(&writer(), "d", "d", Some(TEST_SUMMARY)).unwrap();
-    confirm_before_landing(&mut r, &approver(), &p);
-    r.land(&approver(), &p.id).unwrap();
-    assert!(canon_bodies(&r).iter().any(|x| x == "alt B"));
+    let e = r.land(&approver(), &p.id).unwrap_err();
+    assert_eq!(e.code, E_PROPOSAL_NOT_READY, "{e}");
+    assert!(e.issues.iter().any(|i| i.code == E_ALT_DECISION), "{e:#?}");
+    let s = r.read().resolve_alt(&set).unwrap().2;
+    assert_eq!(s.status, rdy_model::AltStatus::Open);
+    assert!(!r.read().view_head("b").unwrap().closed);
+    assert!(!canon_bodies(&r).iter().any(|x| x == "alt A"));
 }
 
 #[test]
@@ -1119,11 +1162,12 @@ fn msw20_alt_remove_on_a_chosen_set_is_refused_so_losers_stay_bound() {
     assert!(e.message.contains("member y"), "{}", e.message);
 }
 
-/// msw20 fix round 1 (Group 8 ruling, Q1): when the choice recorded no decision, only a decision
-/// the proposal creates in a change that is not itself bound to a loser releases it. The loser's
-/// own decision, written in its member view after the set was created, never does.
+/// O17 (D-JQD5X, D-8GR43): a losing member's own decision is never the choice's decision. The
+/// choosing version names none of its own, so it is not ready; with its own decision it lands,
+/// and the loser's decision, written in its member view after the set was created, still never
+/// releases the loser's change.
 #[test]
-fn msw20_a_losers_own_decision_does_not_release_it_when_the_choice_recorded_none() {
+fn ck5_a_choice_cannot_use_a_losers_decision() {
     let (_d, mut r) = project();
     let (_doc, section, _claim) = seed_doc(&mut r, "seed");
     land(&mut r, "seed").unwrap();
@@ -1155,6 +1199,25 @@ fn msw20_a_losers_own_decision_does_not_release_it_when_the_choice_recorded_none
             Some(&pick(&set, "x")),
         )
         .unwrap();
+    assert!(!p.ready, "{:#?}", p.issues);
+    assert!(
+        p.issues.iter().any(|i| i.code == E_ALT_DECISION),
+        "{:#?}",
+        p.issues
+    );
+    let dec = choice_decision(&mut r, "a");
+    let p = r
+        .propose_with(
+            &writer(),
+            "a",
+            "x",
+            None,
+            Some(TEST_SUMMARY),
+            Some(&pick(&set, "x")),
+        )
+        .unwrap();
+    assert!(p.ready, "{:#?}", p.issues);
+    confirm_before_landing(&mut r, &approver(), &p);
     r.land(&approver(), &p.id).unwrap();
     r.view_include(&writer(), "d", &[b, use_b]).unwrap();
     let e = r
@@ -1163,6 +1226,7 @@ fn msw20_a_losers_own_decision_does_not_release_it_when_the_choice_recorded_none
         .unwrap_err();
     assert_eq!(e.code, E_ALT_CHOSEN, "{}", e.message);
     assert!(e.message.contains("member y"), "{}", e.message);
+    assert!(e.message.contains(&dec), "{}", e.message);
     let bodies = canon_bodies(&r);
     assert!(!bodies.iter().any(|x| x == "alt B"), "{bodies:?}");
 }
@@ -1212,6 +1276,7 @@ block_types:
         .alt_create(&writer(), "T", None, &[m("x", "a"), m("y", "b")])
         .unwrap()
         .id;
+    let dec = choice_decision(&mut r, "a");
     let p = r
         .propose_with(
             &writer(),
@@ -1222,6 +1287,7 @@ block_types:
             Some(&pick(&set, "x")),
         )
         .unwrap();
+    confirm_before_landing(&mut r, &approver(), &p);
     r.land(&approver(), &p.id).unwrap();
     r.view_include(&writer(), "d", std::slice::from_ref(&b))
         .unwrap();
@@ -1247,7 +1313,7 @@ block_types:
         .unwrap_err();
     assert_eq!(e.code, E_ALT_CHOSEN, "{}", e.message);
     assert!(
-        e.message.contains("which recorded no decision"),
+        e.message.contains(&format!("(chosen by {dec})")),
         "{}",
         e.message
     );
@@ -1419,6 +1485,7 @@ fn msw20_a_losers_own_refine_of_the_choice_decision_does_not_release_it() {
 fn vw1_a_losing_members_version_reads_withdrawn_after_the_choosing_landing() {
     let (_d, mut r) = project();
     let set = setup(&mut r);
+    choice_decision(&mut r, "a");
     let pa = r
         .propose_with(
             &writer(),
@@ -1432,6 +1499,7 @@ fn vw1_a_losing_members_version_reads_withdrawn_after_the_choosing_landing() {
     let pb = r
         .propose_with(&writer(), "b", "y", None, None, Some(&pick(&set, "y")))
         .unwrap();
+    confirm_before_landing(&mut r, &approver(), &pa);
     r.land(&approver(), &pa.id).unwrap();
     let s = r.read().proposal_show(&pb.r#ref).unwrap();
     assert_eq!(s.state, "withdrawn");

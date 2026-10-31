@@ -69,6 +69,7 @@
   ],
   "kind": "exclude",
   "on_change": {
+    "checks": [],
     "resolved": [],
     "tensions": [
       {

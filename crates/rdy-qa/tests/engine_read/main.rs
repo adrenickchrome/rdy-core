@@ -5,6 +5,7 @@
 //! (`tlay1_` checks). Keep the list sorted.
 mod engine_areas;
 mod engine_before;
+mod engine_check_stages;
 mod engine_confidence;
 mod engine_coord;
 mod engine_coverage_carry;

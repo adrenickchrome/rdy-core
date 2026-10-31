@@ -579,6 +579,7 @@
               "<id>": "string"
             },
             "on_change": {
+              "checks": [],
               "resolved": [],
               "tensions": []
             },
@@ -606,6 +607,7 @@
               "<id>": "string"
             },
             "on_change": {
+              "checks": [],
               "resolved": [],
               "tensions": []
             },
@@ -1325,6 +1327,7 @@
             "included": [],
             "kind": "string",
             "on_change": {
+              "checks": [],
               "resolved": [],
               "tensions": []
             },
@@ -13405,6 +13408,7 @@
       "E_ALREADY_EXISTS": "\"E_ALREADY_EXISTS\"",
       "E_ALREADY_LANDED": "\"E_ALREADY_LANDED\"",
       "E_ALT_CHOSEN": "\"E_ALT_CHOSEN\"",
+      "E_ALT_DECISION": "\"E_ALT_DECISION\"",
       "E_ALT_MEMBER": "\"E_ALT_MEMBER\"",
       "E_ALT_UNCHOSEN": "\"E_ALT_UNCHOSEN\"",
       "E_BAD_INPUT": "\"E_BAD_INPUT\"",
@@ -13470,6 +13474,7 @@
       "E_RESERVED_VIEW": "\"E_RESERVED_VIEW\"",
       "E_REVIEW_INVALID": "\"E_REVIEW_INVALID\"",
       "E_REVIEW_STALE": "\"E_REVIEW_STALE\"",
+      "E_RULE_CHECK": "\"E_RULE_CHECK\"",
       "E_SELF_REVIEW": "\"E_SELF_REVIEW\"",
       "E_SIGNING_KEY_MISSING": "\"E_SIGNING_KEY_MISSING\"",
       "E_SIGNING_KEY_TYPE": "\"E_SIGNING_KEY_TYPE\"",
@@ -13531,6 +13536,7 @@
       "W_REDACTION_REUSE": "\"W_REDACTION_REUSE\"",
       "W_REDACTION_SECRET": "\"W_REDACTION_SECRET\"",
       "W_REFLECTS_NO_CODE": "\"W_REFLECTS_NO_CODE\"",
+      "W_RULE_CHECK": "\"W_RULE_CHECK\"",
       "W_SIGNING_FAILED": "\"W_SIGNING_FAILED\"",
       "W_SIG_UNKNOWN_KEY": "\"W_SIG_UNKNOWN_KEY\"",
       "W_SITE_LAN": "\"W_SITE_LAN\"",
@@ -14955,6 +14961,7 @@
             "$decision": "string"
           },
           "on_change": {
+            "checks": [],
             "resolved": [],
             "tensions": []
           },
@@ -15672,6 +15679,7 @@
             "$decision": "string"
           },
           "on_change": {
+            "checks": [],
             "resolved": [],
             "tensions": []
           },
@@ -16342,6 +16350,7 @@
             ]
           },
           "on_change": {
+            "checks": [],
             "resolved": [],
             "tensions": []
           },
@@ -16738,6 +16747,7 @@
             "$n?": "string"
           },
           "on_change": {
+            "checks": [],
             "resolved": [],
             "tensions": [
               {

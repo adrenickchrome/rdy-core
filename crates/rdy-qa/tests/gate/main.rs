@@ -4,6 +4,7 @@
 mod gate_alts;
 mod gate_answer;
 mod gate_card_assessment;
+mod gate_considered_options;
 mod gate_coverage_lowered;
 mod gate_exceptions;
 mod gate_freshness;
@@ -16,6 +17,7 @@ mod gate_policy_roles;
 mod gate_policy_verdict;
 mod gate_readiness;
 mod gate_reaffirm_cards;
+mod gate_rule_checks;
 mod gate_semantic;
 mod gate_signing;
 mod gate_tensions;

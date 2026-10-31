@@ -1321,6 +1321,8 @@ impl Drain {
             .collect();
         // each dangling reference is repaired once: a second refusal for it fails the run
         let mut repaired: BTreeSet<(String, String)> = BTreeSet::new();
+        // O17: a choice with no decision is answered once
+        let mut decided = false;
         loop {
             let title = format!("{v} drain round {round}");
             let mut args = json!({"view": v, "title": title, "summary": title});
@@ -1351,6 +1353,25 @@ impl Drain {
             let made = e.block.clone();
             link.journal.record(e);
             match (res, made) {
+                // O17 (D-JQD5X): a choosing version that names no decision for its considered
+                // options is not ready: the agent records one proposed decision in the view and
+                // proposes again (choice-fixture construction)
+                (Res::Ok(r), Some(_)) if !decided && names_no_decision(&r) => {
+                    decided = true;
+                    let section = self.seed.sections[0].clone();
+                    let ops = json!([{"op": "create", "type": "decision", "parent": section,
+                        "fields": {"statement": format!("View {v} chooses its member"),
+                                   "status": "proposed", "needs_content": false}}]);
+                    self.write(
+                        i,
+                        v,
+                        &section,
+                        ops,
+                        "create",
+                        "E_ALT_DECISION",
+                        "a choice with no decision",
+                    );
+                }
                 (Res::Ok(_), Some(p)) => return Proposed::Ref(p, refusing, accepts),
                 (Res::Refused(code, message), _)
                     if code == "E_ALT_MEMBER" || code == "E_ALT_CHOSEN" =>
@@ -2155,6 +2176,15 @@ impl Drain {
             Res::Lost => link_fail(&self.cfg, v, act),
         }
     }
+}
+
+/// Whether a propose reply is not ready with `E_ALT_DECISION` (O17).
+fn names_no_decision(reply: &Value) -> bool {
+    reply["issues"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|i| i["code"] == "E_ALT_DECISION")
 }
 
 /// A lost daemon in the drain, which runs after the restart.
