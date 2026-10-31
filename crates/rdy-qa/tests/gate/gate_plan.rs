@@ -89,6 +89,28 @@ fn claim(r: &mut Rdy, view: &str, section: &str, body: &str) -> String {
         .clone()
 }
 
+/// A claim alone in a new section of the doc that holds `section`, both created in `view`: a
+/// block with no earlier neighbor, so its version owes no plan item (nb8, TASK-978 X2).
+fn alone(r: &mut Rdy, view: &str, section: &str) -> String {
+    let doc = r
+        .read()
+        .block(&rdy_engine::Scope::Canon, &id(section))
+        .unwrap()
+        .parent
+        .unwrap();
+    write(
+        r,
+        view,
+        json!([
+            {"op": "create", "type": "section", "id": "$n", "parent": doc.to_string(), "fields": {"title": "Alone"}},
+            {"op": "create", "type": "claim", "id": "$x", "parent": "$n", "body": "Z stands alone."}
+        ]),
+    )
+    .unwrap_or_else(|e| panic!("alone in {view}: {e}"))
+    .created["$x"]
+        .clone()
+}
+
 /// Proposes `view` with a summary (a version that lands a decision is approved through a card).
 fn propose(r: &mut Rdy, view: &str, answers: &[PlanAnswerInput]) -> ProposalInfo {
     r.propose_plan(
@@ -495,7 +517,7 @@ fn cp10_pre17_proposal_is_not_ready_under_o10() {
     );
 
     // a zero-item version: not ready until it is proposed again, and then its landing writes no plan
-    let z = claim(&mut r, "z", &s.s, "Z stands alone.");
+    let z = alone(&mut r, "z", &s.s);
     assert!(!z.is_empty());
     let (_, zref) = unbound(&mut r, "z");
     assert_no_assessment(&mut r, &zref);
@@ -992,7 +1014,7 @@ fn cp10_landing_seals_the_approved_versions_bound_answers() {
 fn cp10_empty_landing_has_no_seal_but_reaffirm_only_does() {
     let (_d, mut r) = project();
     let s = spec(&mut r);
-    claim(&mut r, "z", &s.s, "Z stands alone.");
+    alone(&mut r, "z", &s.s);
     let pz = propose(&mut r, "z", &[]);
     let (zb, _) = bound(&r, &h(&pz.id)).unwrap();
     assert_eq!((pz.plan.open, pz.plan.closed, pz.plan.deferred), (0, 0, 0));

@@ -771,7 +771,8 @@ fn cp12_code_deferrals_never_hold_a_landing() {
         q.items
     );
     let batch = item_of(&r, &p.r#ref).unwrap();
-    assert_eq!(fact(&batch, "Change plan"), "0 open, 0 closed, 1 deferred");
+    // nb8: z's five unchanged section neighbors confirm; on drafts they stay open advice
+    assert_eq!(fact(&batch, "Change plan"), "5 open, 0 closed, 1 deferred");
     let l = h(&r.land(&approver(), &p.id).expect("lands"));
     let st = r.read();
     let sh = st
@@ -781,10 +782,26 @@ fn cp12_code_deferrals_never_hold_a_landing() {
         .unwrap();
     let sealed = st.reader().plan(&sh).unwrap();
     let items = &sealed.seal.as_ref().unwrap().items;
-    assert_eq!(items.len(), 1, "{items:#?}");
+    assert_eq!(items.len(), 6, "{items:#?}");
+    let code_items: Vec<_> = items
+        .iter()
+        .filter(|i| i.kind == PlanKind::UpdateImplementation)
+        .collect();
+    assert_eq!(code_items.len(), 1, "{items:#?}");
     assert_eq!(
-        (items[0].kind, items[0].outcome, items[0].answer),
-        (PlanKind::UpdateImplementation, PlanOutcome::Deferred, None)
+        (code_items[0].outcome, code_items[0].answer),
+        (PlanOutcome::Deferred, None)
+    );
+    // the neighbor confirms are sealed open, with no answer pointer
+    assert!(
+        items
+            .iter()
+            .filter(|i| i.kind != PlanKind::UpdateImplementation)
+            .all(|i| i.kind == PlanKind::Confirm
+                && i.edge == "neighbor"
+                && i.outcome == PlanOutcome::Open
+                && i.answer.is_none()),
+        "{items:#?}"
     );
 }
 
