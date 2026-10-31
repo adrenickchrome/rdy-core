@@ -3348,3 +3348,548 @@ fn ap13_every_acknowledged_landing_passes_fsck() {
         );
     });
 }
+
+// ---- ck10: check acts in the swarm (D-JQD5X, D-ME2HD; system/quality-gate tb-A4DAV) ----
+
+/// A directed rig for the check tests: a project with two writers (agents 0 and 1) and two
+/// reviewers (agents 2 and 3), one journal, one queue for the person, and a gate. Each step runs
+/// one actor's acts to their end before the next starts: a join is the barrier, never a sleep.
+struct CheckRig {
+    p: rdy_qa::swarm::project::SwarmProject,
+    cfg: Config,
+    j: rdy_qa::swarm::journal::Journal,
+    g: std::sync::Arc<rdy_qa::swarm::agent::KillGate>,
+    queue: rdy_qa::swarm::people::Queue,
+}
+
+impl CheckRig {
+    fn new(seed: u64, gate: rdy_qa::swarm::agent::KillGate) -> CheckRig {
+        let cfg = Config {
+            seed,
+            agents: 4,
+            steps: 2,
+            kill_at: None,
+        };
+        CheckRig {
+            p: rdy_qa::swarm::project::build(&cfg),
+            cfg,
+            j: rdy_qa::swarm::journal::Journal::new(),
+            g: std::sync::Arc::new(gate),
+            queue: rdy_qa::swarm::people::Queue::default(),
+        }
+    }
+
+    /// Agent `i` runs `acts` to the end; returns the proposals it made.
+    fn agent(&self, i: usize, acts: Vec<Act>) -> Vec<String> {
+        rdy_qa::swarm::agent::spawn(&self.p, &self.cfg, i, acts, self.j.clone(), self.g.clone())
+            .join()
+            .unwrap_or_else(|e| panic!("agent {i} panicked: {}", panic_text(&*e)))
+            .proposals
+    }
+
+    /// The person runs `acts` to the end, with `queued` as its queue.
+    fn person(&self, acts: Vec<PersonAct>, queued: &[String]) {
+        *self.queue.lock().unwrap() = queued.to_vec();
+        rdy_qa::swarm::people::spawn(
+            &self.p,
+            acts,
+            self.j.clone(),
+            self.queue.clone(),
+            self.g.clone(),
+        )
+        .join()
+        .unwrap_or_else(|e| panic!("the person panicked: {}", panic_text(&*e)));
+    }
+
+    /// The last entry of `act`.
+    fn last(&self, act: &str) -> Entry {
+        self.j
+            .entries()
+            .into_iter()
+            .rev()
+            .find(|e| e.act == act)
+            .unwrap_or_else(|| panic!("no {act} entry: {}", lines(&self.j.entries())))
+    }
+
+    /// Stops the daemon and waits for it to exit (a hang guard, not a speed check).
+    fn stop(&self) {
+        self.p.served.stop();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while self.p.served.daemon_pid().is_some() {
+            assert!(std::time::Instant::now() < end, "the daemon did not stop");
+            std::thread::yield_now();
+        }
+    }
+
+    fn dir(&self) -> &std::path::Path {
+        self.p.served.dir.path()
+    }
+}
+
+/// The request, the concern on it and the version of a directed hold sequence: agent 0 makes
+/// and proposes its check view and requests an independent review of the version; reviewer 3
+/// submits the deterministic concern.
+fn hold_request(rig: &CheckRig) -> (String, String) {
+    use rdy_qa::swarm::script::HoldStep;
+    let made = rig.agent(
+        0,
+        vec![Act::CheckRequest {
+            hold: Some(HoldStep::Request),
+        }],
+    );
+    let v1 = made.first().cloned().expect("the check view's version");
+    let asked = rig.last("check_request");
+    assert_eq!(asked.outcome, Met::Ok, "{asked:?}");
+    let facts = asked.check.clone().expect("the request's facts");
+    assert_eq!(facts.version.as_deref(), Some(v1.as_str()), "{facts:?}");
+    assert!(
+        facts
+            .request
+            .as_deref()
+            .is_some_and(|r| r.starts_with("rq-"))
+    );
+    assert!(facts.case_hash.is_some(), "{facts:?}");
+    rig.agent(3, vec![Act::CheckSubmit]);
+    let concern = rig.last("check_submit");
+    assert_eq!(concern.outcome, Met::Ok, "{concern:?}");
+    assert_eq!(concern.actor, "agent:a3", "another actor reviews");
+    let c = concern.check.clone().expect("the verdict's facts");
+    assert_eq!(c.request, facts.request, "the reviewer claimed the request");
+    assert_eq!(c.verdict.as_deref(), Some("concern"));
+    (v1, c.review.expect("the review"))
+}
+
+/// The versions `rig`'s journal names, and the stored check records of its project.
+fn rig_checks(rig: &CheckRig) -> (BTreeSet<String>, rdy_qa::swarm::oracle::StoredChecks) {
+    let versions = oracle::proposed_versions(&rig.j.entries());
+    let stored = oracle::stored_checks(rig.dir(), &versions);
+    (versions, stored)
+}
+
+/// The full hash of version `pref`, as the project at `dir` resolves it.
+fn version_hash(dir: &std::path::Path, pref: &str) -> String {
+    let (_keep, copy) = copy_of(dir);
+    let r = Rdy::open(&copy).expect("open a copy");
+    let h = r
+        .resolve_proposal(pref)
+        .expect("resolve")
+        .version
+        .to_string();
+    r.close().expect("close the copy");
+    h
+}
+
+/// ck10: a person's accepted verdict holds its version and never lands with it, in every order
+/// of approval, acceptance and a new version; the journal and the stored oracle agree, with no
+/// sleep (a join orders each step). Then the same oracle holds at the end of every seed's run.
+///
+/// - accept, then approve: the approval is refused (`E_PROPOSAL_NOT_READY`); a new version holds
+///   nothing and lands;
+/// - approve, then accept: the version lands, and no card is left to accept;
+/// - a new version, then accept: the new version holds the same case, so its card shows the
+///   verdict and the acceptance binds the new version; a further version inherits no hold and
+///   lands.
+#[test]
+fn ck10_swarm_never_lands_an_accepted_current_verdict() {
+    use rdy_qa::swarm::journal::Skip;
+    use rdy_qa::swarm::script::HoldStep;
+    let new_version = || Act::CheckRequest {
+        hold: Some(HoldStep::NewVersion),
+    };
+    let land = PersonAct::Land { relayed: true };
+
+    // accept, then approve, then a new version
+    let rig = CheckRig::new(101, rdy_qa::swarm::agent::KillGate::new());
+    let (v1, review) = hold_request(&rig);
+    rig.person(vec![PersonAct::AcceptCheckVerdict], &[]);
+    let accepted = rig.last("accept_check_verdict");
+    assert_eq!(accepted.outcome, Met::Ok, "{accepted:?}");
+    let facts = accepted.check.clone().unwrap();
+    let h1 = version_hash(rig.dir(), &v1);
+    assert_eq!(
+        facts.answer.as_deref(),
+        Some(format!("accept_verdict:{review}:{h1}").as_str())
+    );
+    assert_eq!(facts.review.as_deref(), Some(review.as_str()));
+    assert_eq!(facts.version.as_deref(), Some(v1.as_str()));
+    rig.person(vec![land.clone()], std::slice::from_ref(&v1));
+    let refused = rig.last("land");
+    assert_eq!(
+        refused.outcome,
+        Met::Refused("E_PROPOSAL_NOT_READY".into()),
+        "{refused:?}"
+    );
+    let v2 = rig.agent(0, vec![new_version()])[0].clone();
+    assert_ne!(v2, v1);
+    rig.person(vec![land.clone()], std::slice::from_ref(&v2));
+    assert_eq!(rig.last("land").outcome, Met::Ok, "{:?}", rig.last("land"));
+    rig.stop();
+    let (_, stored) = rig_checks(&rig);
+    let h2 = version_hash(rig.dir(), &v2);
+    assert_eq!(
+        stored.accepted,
+        BTreeSet::from([format!("accept_verdict:{review}:{h1}")])
+    );
+    assert_eq!(stored.holds[&h1], BTreeSet::from([review.clone()]));
+    assert!(
+        stored.holds[&h2].is_empty(),
+        "the new version inherits no hold"
+    );
+    assert!(!stored.landed.contains(&h1) && stored.landed.contains(&h2));
+    let v = oracle::check_violations_of(&rig.j.entries(), &stored);
+    assert!(v.is_empty(), "{v:#?}");
+
+    // approve, then accept
+    let rig = CheckRig::new(102, rdy_qa::swarm::agent::KillGate::new());
+    let (v1, _) = hold_request(&rig);
+    rig.person(vec![land.clone()], std::slice::from_ref(&v1));
+    assert_eq!(rig.last("land").outcome, Met::Ok, "{:?}", rig.last("land"));
+    rig.person(vec![PersonAct::AcceptCheckVerdict], &[]);
+    let none = rig.last("accept_check_verdict");
+    assert_eq!(
+        (none.outcome.clone(), none.skip),
+        (Met::Skipped, Some(Skip::NoVerdictToAccept)),
+        "{none:?}"
+    );
+    rig.stop();
+    let (_, stored) = rig_checks(&rig);
+    assert!(stored.accepted.is_empty(), "{stored:?}");
+    assert!(stored.landed.contains(&version_hash(rig.dir(), &v1)));
+    let v = oracle::check_violations_of(&rig.j.entries(), &stored);
+    assert!(v.is_empty(), "{v:#?}");
+
+    // a new version, then accept, then approve: the new version holds the same case, so its card
+    // shows the verdict, and the acceptance binds that version; it holds that version only, and a
+    // further version lands
+    let rig = CheckRig::new(103, rdy_qa::swarm::agent::KillGate::new());
+    let (v1, review) = hold_request(&rig);
+    let v2 = rig.agent(0, vec![new_version()])[0].clone();
+    assert_ne!(v2, v1);
+    rig.person(vec![PersonAct::AcceptCheckVerdict], &[]);
+    let accepted = rig.last("accept_check_verdict");
+    assert_eq!(accepted.outcome, Met::Ok, "{accepted:?}");
+    let (h1, h2) = (version_hash(rig.dir(), &v1), version_hash(rig.dir(), &v2));
+    assert_eq!(
+        accepted.check.as_ref().unwrap().answer.as_deref(),
+        Some(format!("accept_verdict:{review}:{h2}").as_str())
+    );
+    rig.person(vec![land.clone()], std::slice::from_ref(&v2));
+    assert_eq!(
+        rig.last("land").outcome,
+        Met::Refused("E_PROPOSAL_NOT_READY".into())
+    );
+    let v3 = rig.agent(0, vec![new_version()])[0].clone();
+    rig.person(vec![land.clone()], std::slice::from_ref(&v3));
+    assert_eq!(rig.last("land").outcome, Met::Ok, "{:?}", rig.last("land"));
+    rig.stop();
+    let (_, stored) = rig_checks(&rig);
+    let h3 = version_hash(rig.dir(), &v3);
+    assert_eq!(
+        stored.accepted,
+        BTreeSet::from([format!("accept_verdict:{review}:{h2}")])
+    );
+    assert!(
+        stored.holds[&h1].is_empty(),
+        "an older version gains no hold"
+    );
+    assert_eq!(stored.holds[&h2], BTreeSet::from([review.clone()]));
+    assert!(
+        stored.holds[&h3].is_empty(),
+        "the new version inherits no hold"
+    );
+    assert!(!stored.landed.contains(&h2) && stored.landed.contains(&h3));
+    let v = oracle::check_violations_of(&rig.j.entries(), &stored);
+    assert!(v.is_empty(), "{v:#?}");
+
+    // every seed's run: the stored oracle at the drained end agrees with the journal
+    each(|seed, o| {
+        let stored = oracle::stored_checks(&o.dir, &oracle::proposed_versions(&o.journal));
+        let held = stored.holds.values().filter(|h| !h.is_empty()).count();
+        // the evidence a person reads with --nocapture
+        eprintln!(
+            "swarm seed {seed}: {} check requests, {} check verdicts, {} accepted, {held} held versions",
+            stored.requests.len(),
+            stored.reviews.len(),
+            stored.accepted.len()
+        );
+        let v = oracle::check_violations_of(&o.journal, &stored);
+        assert!(v.is_empty(), "swarm seed {seed}: {v:#?}");
+    });
+}
+
+/// The `issues` (code, message) of a `propose` entry's reply.
+fn propose_issues(e: &Entry, key: &str) -> Vec<(String, String)> {
+    e.reply.as_ref().map_or(vec![], |r| {
+        r[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|i| {
+                (
+                    i["code"].as_str().unwrap_or_default().to_string(),
+                    i["message"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect()
+    })
+}
+
+/// ck10: the child pack's blocking rule `check-fixture-key` on a stable claim refuses its version
+/// until a real write repairs the claim; the repaired version lands; the same claim in a draft
+/// doc is only a warning and blocks nothing. Then, at every landing of every seed's run, canon
+/// holds each rule fixture checked, and each forced failing version was not ready with
+/// `E_RULE_CHECK`.
+#[test]
+fn ck10_swarm_repairs_blocking_rules_before_landing() {
+    use rdy_qa::swarm::project::{FIXTURE_KEY, FIXTURE_MESSAGE};
+    use rdy_qa::swarm::script::RuleStep;
+    let land = PersonAct::Land { relayed: true };
+    let rig = CheckRig::new(104, rdy_qa::swarm::agent::KillGate::new());
+    // the fixture's write is in the rule view, not the agent's own: an undo after it finds
+    // nothing of its own to undo (it read no view; before the fix it undid view a0, which no
+    // write had made, and met E_NOT_FOUND)
+    let v1 = rig.agent(
+        0,
+        vec![
+            Act::CheckRun {
+                rule: Some(RuleStep::Fail),
+            },
+            Act::Undo,
+        ],
+    )[0]
+    .clone();
+    assert_eq!(
+        rig.last("undo").outcome,
+        Met::Skipped,
+        "{:?}",
+        rig.last("undo")
+    );
+    let made = rig.last("check_run");
+    let c = made.block.clone().expect("the fixture claim");
+    let proposed = rig.last("propose");
+    assert_eq!(
+        proposed.reply.as_ref().unwrap()["ready"],
+        false,
+        "{proposed:?}"
+    );
+    let issues = propose_issues(&proposed, "issues");
+    let want = (
+        "E_RULE_CHECK".to_string(),
+        format!("rule check-fixture-key fails on {c}: {FIXTURE_MESSAGE}"),
+    );
+    assert!(issues.contains(&want), "{issues:#?}");
+    rig.person(vec![land.clone()], std::slice::from_ref(&v1));
+    assert_eq!(
+        rig.last("land").outcome,
+        Met::Refused("E_PROPOSAL_NOT_READY".into())
+    );
+    let v2 = rig.agent(
+        0,
+        vec![Act::CheckRun {
+            rule: Some(RuleStep::Repair),
+        }],
+    )[0]
+    .clone();
+    assert_ne!(v2, v1);
+    let repaired = rig.last("propose");
+    assert_eq!(
+        repaired.reply.as_ref().unwrap()["ready"],
+        true,
+        "{repaired:?}"
+    );
+    assert!(propose_issues(&repaired, "issues").is_empty());
+    rig.person(vec![land.clone()], std::slice::from_ref(&v2));
+    assert_eq!(rig.last("land").outcome, Met::Ok, "{:?}", rig.last("land"));
+    rig.stop();
+    let (_, stored) = rig_checks(&rig);
+    assert!(stored.unchecked.is_empty(), "{:?}", stored.unchecked);
+    {
+        let (_keep, copy) = copy_of(rig.dir());
+        let r = Rdy::open(&copy).unwrap();
+        let st = r.read();
+        let b = st.block(&rdy_engine::Scope::Canon, &BlockId::parse(&c).unwrap());
+        let b = b.expect("the fixture landed");
+        assert_eq!(b.field_str("key"), Some(FIXTURE_KEY));
+        assert_eq!(
+            b.fields.get("checked"),
+            Some(&rdy_model::FieldValue::Bool(true))
+        );
+    }
+
+    // a draft doc's fixture: a warning, never a block
+    let rig = CheckRig::new(105, rdy_qa::swarm::agent::KillGate::new());
+    let mut a = rdy_qa::mcp::McpClient::start_proxy(&rig.p.served);
+    a.call(
+        "rdy_session",
+        serde_json::json!({"actor": "agent:a0", "run": "a0", "role": "writer"}),
+    )
+    .ok();
+    let wrote = a
+        .call(
+            "rdy_write",
+            serde_json::json!({"view": "a0", "editorial": {"class": "clarify", "reason": "a draft"},
+            "ops": [
+                {"op": "create", "type": "doc", "id": "$d",
+                 "fields": {"name": "draft-fixture", "title": "Draft", "doc_type": "overview"}},
+                {"op": "create", "type": "claim", "id": "$c", "parent": "$d",
+                 "body": "A draft keeps the check fixture.", "fields": {"key": FIXTURE_KEY}}
+            ]}),
+        )
+        .ok();
+    let dc = wrote["created"]["$c"].as_str().unwrap().to_string();
+    let warned: Vec<&str> = wrote["on_change"]["checks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r["code"].as_str())
+        .collect();
+    assert_eq!(warned, ["W_RULE_CHECK"], "{wrote:#}");
+    let p = a
+        .call(
+            "rdy_propose",
+            serde_json::json!({"view": "a0", "title": "draft", "summary": "A draft fixture."}),
+        )
+        .ok();
+    assert_eq!(p["ready"], true, "{p:#}");
+    let warnings: Vec<(String, String)> = p["warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|w| w["code"] == "W_RULE_CHECK")
+        .map(|w| {
+            (
+                w["code"].as_str().unwrap().to_string(),
+                w["message"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        warnings,
+        [(
+            "W_RULE_CHECK".to_string(),
+            format!("rule check-fixture-key fails on {dc}: {FIXTURE_MESSAGE}")
+        )]
+    );
+    drop(a);
+    rig.stop();
+
+    // every seed's run
+    each(|seed, o| {
+        let stored = oracle::stored_checks(&o.dir, &BTreeSet::new());
+        assert!(
+            stored.unchecked.is_empty(),
+            "swarm seed {seed}: {:?}",
+            stored.unchecked
+        );
+        // the run's own proposes of a rule view record their readiness (the drain's do not)
+        for e in o.before_freeze().iter().filter(|e| {
+            e.act == "propose"
+                && e.outcome == Met::Ok
+                && e.view.as_deref().is_some_and(|v| v.ends_with("-rule"))
+        }) {
+            let ready = e.reply.as_ref().is_some_and(|r| r["ready"] == true);
+            let blocked = propose_issues(e, "issues")
+                .iter()
+                .any(|(code, _)| code == "E_RULE_CHECK");
+            // a version of the rule view is ready exactly when no blocking rule fails on it
+            assert_eq!(
+                ready, !blocked,
+                "swarm seed {seed}: {} step {}: {:?}",
+                e.actor, e.step, e.reply
+            );
+        }
+    });
+}
+
+/// ck10: a kill and a restart drop the leases only. A reviewer leases a check request; the daemon
+/// is killed and restarted; another reviewer claims the same request and submits; the person
+/// accepts the verdict, which holds its version. fsck passes, and a reindex rebuilds the same
+/// requests, verdicts, acceptances and holds. Then, for every seed's run (which kills its daemon
+/// once): every acknowledged request and verdict is stored, fsck passes, and the frozen and
+/// drained projects rebuild the same check facts after a reindex.
+#[test]
+fn ck10_restart_keeps_requests_and_holds() {
+    use rdy_qa::swarm::script::HoldStep;
+    let rig = CheckRig::new(106, rdy_qa::swarm::agent::KillGate::with_kill());
+    let made = rig.agent(
+        0,
+        vec![Act::CheckRequest {
+            hold: Some(HoldStep::Request),
+        }],
+    );
+    let v1 = made[0].clone();
+    let rq = rig.last("check_request").check.unwrap().request.unwrap();
+    // reviewer 2 leases the request and never answers it
+    let mut r2 = rdy_qa::mcp::McpClient::start_proxy(&rig.p.served);
+    r2.call(
+        "rdy_session",
+        serde_json::json!({"actor": "agent:a2", "run": "a2", "role": "reviewer"}),
+    )
+    .ok();
+    let leased = r2
+        .call(
+            "rdy_review_next",
+            serde_json::json!({"kind": "meaning_preservation"}),
+        )
+        .ok();
+    assert_eq!(leased["request"], rq.as_str(), "{leased:#}");
+    // while the lease holds, nobody else may claim it
+    rig.agent(3, vec![Act::CheckSubmit]);
+    assert_eq!(
+        rig.last("check_submit").skip,
+        Some(rdy_qa::swarm::journal::Skip::NoCheckRequest)
+    );
+    // the kill and the restart: the lease is gone, the request stays
+    rig.g.killing();
+    rig.p.served.kill9();
+    rig.g.restarted();
+    drop(r2);
+    rig.agent(3, vec![Act::CheckSubmit]);
+    let submitted = rig.last("check_submit");
+    assert_eq!(submitted.outcome, Met::Ok, "{submitted:?}");
+    assert_eq!(
+        submitted.check.as_ref().unwrap().request.as_deref(),
+        Some(rq.as_str())
+    );
+    rig.person(vec![PersonAct::AcceptCheckVerdict], &[]);
+    assert_eq!(rig.last("accept_check_verdict").outcome, Met::Ok);
+    rig.stop();
+    let (versions, stored) = rig_checks(&rig);
+    let h1 = version_hash(rig.dir(), &v1);
+    assert!(stored.requests.contains_key(&rq), "{stored:?}");
+    assert_eq!(stored.holds[&h1].len(), 1, "{stored:?}");
+    let v = oracle::check_violations_of(&rig.j.entries(), &stored);
+    assert!(v.is_empty(), "{v:#?}");
+    assert_eq!(
+        oracle::stored_checks_reindexed(rig.dir(), &versions),
+        stored,
+        "a reindex rebuilds the same check facts"
+    );
+    let (ok, fsck) = oracle::fsck(rig.dir(), &rig.p.served.env_pairs());
+    assert!(ok, "rdy fsck failed: {fsck}");
+
+    each(|seed, o| {
+        let versions = oracle::proposed_versions(&o.journal);
+        for (what, dir) in [("frozen", &o.frozen), ("drained", &o.dir)] {
+            let stored = oracle::stored_checks(dir, &versions);
+            assert_eq!(
+                oracle::stored_checks_reindexed(dir, &versions),
+                stored,
+                "swarm seed {seed}: the {what} project's check facts after a reindex"
+            );
+        }
+        // the frozen copy holds every request and verdict acknowledged before the freeze, those
+        // before the kill included
+        let stored = oracle::stored_checks(&o.frozen, &versions);
+        let lost: Vec<String> = oracle::check_violations_of(o.before_freeze(), &stored)
+            .into_iter()
+            .filter(|v| v.contains("is not stored"))
+            .collect();
+        assert!(lost.is_empty(), "swarm seed {seed}: {lost:#?}");
+        let (ok, fsck) = oracle::fsck(&o.frozen, &o.served.env_pairs());
+        assert!(
+            ok,
+            "swarm seed {seed}: rdy fsck of the frozen copy failed: {fsck}"
+        );
+    });
+}

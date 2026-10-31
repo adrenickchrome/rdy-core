@@ -465,6 +465,18 @@ fn spec_target(op: &str) -> Option<String> {
         "mcp_stdio_oversized_line" => {
             "< 10 s: a 17 MiB request line sent and refused over `rdy mcp --no-daemon` (the old mcp2 bound)"
         }
+        "check_rules_change" => {
+            "no spec target: a write of one claim with 20 one-link neighbours under 16 pack rules over a 10k project, its report and on_change checks included (reported; no ceiling)"
+        }
+        "check_rules_propose" => {
+            "no spec target: propose a 100-block change set of a 10k project, one full scan of 16 pack rules (reported; no ceiling)"
+        }
+        "check_request_case" => {
+            "no spec target: one meaning_preservation case of 20 editorial blocks and its durable request (reported; no ceiling)"
+        }
+        "check_queue" => {
+            "no spec target: list the open requests and claim the one eligible independent request among 1,000 durable requests, 500 answered (reported; no ceiling)"
+        }
         "m3a_replay_1" | "m3a_replay_100" | "m3a_replay_1000" => {
             "recorded, no spec target: replay of N source changes (one update each, half with a diverged target) into an owned view (D-EHC2C); reported, never enforced"
         }
@@ -5668,6 +5680,291 @@ fn tier_cold_open(out: &mut Vec<Measure>, proj: &std::path::Path, sfx: &str, run
 /// The fixed workload: a ~10k-block tree project (ids seeded, so it is identical every run),
 /// timed op by op; with `RDY_QA_DEEP=1`, then the same ops on a ~50k-block project under the
 /// `_50k` names. Takes a few minutes in release (every write fsyncs).
+/// The four check ops (D-JQD5X), in their order: reported with no ceiling and no baseline entry
+/// (D-PACK3). They show what a person's ordinary use costs; they tune no fixed cap.
+pub const CK10_OPS: [&str; 4] = [
+    "check_rules_change",
+    "check_rules_propose",
+    "check_request_case",
+    "check_queue",
+];
+
+/// How many pack rules the check ops' project holds.
+const CHECK_RULES: usize = 16;
+/// How many claims reference the edited claim of `check_rules_change`.
+const CHECK_NEIGHBOURS: usize = 20;
+/// The blocks of `check_rules_propose`'s change set.
+const CHECK_PROPOSE_BLOCKS: usize = 100;
+/// The editorial blocks of `check_request_case`'s case.
+const CHECK_CASE_BLOCKS: usize = 20;
+/// The durable requests of `check_queue`, and how many of them are answered.
+const CHECK_QUEUE_REQUESTS: usize = 1_000;
+const CHECK_QUEUE_ANSWERED: usize = 500;
+
+/// The pack of the check ops: `rdy-standard` with a `checked` field on claims and
+/// `CHECK_RULES` advisory rules that every block passes, over four selections.
+fn check_pack() -> String {
+    let selects = [
+        "type = claim",
+        "type = section",
+        "type = doc",
+        "trait = normative",
+    ];
+    let requires = ["not fields.checked = false", "not lifecycle = deprecated"];
+    let rules: String = (0..CHECK_RULES)
+        .map(|k| {
+            format!(
+                "  - name: rule-{k}\n    select: {}\n    require: {}\n    message: rule {k} fails\n    fix: repair rule {k}\n",
+                selects[k % selects.len()],
+                requires[k % requires.len()]
+            )
+        })
+        .collect();
+    format!(
+        "name: perf-checks\nversion: \"1\"\nextends: rdy-standard\nblock_types:\n  claim:\n    prefix: c\n    traits: [normative, describes]\n    body: required\n    fields:\n      checked: {{ kind: bool }}\nrules:\n{rules}"
+    )
+}
+
+/// The facts of the check ops' fixtures, reported beside the timings and asserted by the unit
+/// test (never a duration).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckFixture {
+    /// Blocks in canon.
+    pub blocks: usize,
+    /// Pack rules.
+    pub rules: usize,
+    /// Durable requests, answered requests, and the requests the reviewer may claim.
+    pub requests: usize,
+    pub answered: usize,
+    pub eligible: usize,
+}
+
+/// The check ops' queue (`check_queue`): agent `agent:a` creates `CHECK_QUEUE_REQUESTS` proposed
+/// decisions in view `a` in one write; it runs `decision_review` on all but one (author-run
+/// requests, which only it may answer) and answers the first `CHECK_QUEUE_ANSWERED` with a pass;
+/// it requests an independent review of the last. So a reviewer finds exactly one eligible
+/// request. Returns the engine, the reviewer's session and the fixture's counts.
+fn check_queue_fixture(
+    r: Rdy,
+    section: &BlockId,
+) -> (rdy_engine::engine::Local, Session, CheckFixture) {
+    use rdy_engine::check::api::{ReviewRequest, run_review};
+    use rdy_engine::semantic::api::run_review_submit;
+    use rdy_engine::semantic::submit::ReviewSubmitRequest;
+    let a = crate::fixtures::agent("agent:a", Some("a"));
+    let mut r = r;
+    let ops: Vec<_> = (0..CHECK_QUEUE_REQUESTS)
+        .map(|k| {
+            json!({"op": "create", "type": "decision", "id": format!("$d{k}"), "parent": section.to_string(),
+                "fields": {"statement": format!("Queue decision {k}"), "status": "proposed", "needs_content": false}})
+        })
+        .collect();
+    let made = crate::fixtures::write_as(&mut r, &a, "a", json!(ops)).expect("the decisions");
+    let decisions: Vec<String> = (0..CHECK_QUEUE_REQUESTS)
+        .map(|k| made.created[&format!("$d{k}")].clone())
+        .collect();
+    let engine = rdy_engine::engine::Local::new(r);
+    let mut answered = 0;
+    for (k, d) in decisions.iter().enumerate() {
+        let last = k + 1 == CHECK_QUEUE_REQUESTS;
+        let req = if last {
+            json!({"op": "request", "check": "decision_review", "subject": d})
+        } else {
+            json!({"op": "run", "check": "decision_review", "subject": d})
+        };
+        let req = ReviewRequest::from_value(req).expect("a request");
+        let v = run_review(&engine, &a, "human:perf", false, None, req).expect("a request");
+        if !last && answered < CHECK_QUEUE_ANSWERED {
+            let pass: ReviewSubmitRequest = serde_json::from_value(
+                json!({"request": v["request"], "case_hash": v["case_hash"], "verdict": "pass"}),
+            )
+            .expect("a pass");
+            run_review_submit(&engine, &a, pass).expect("the author's pass");
+            answered += 1;
+        }
+    }
+    let reviewer =
+        Session::agent("agent:r".into(), Some("r".into()), Role::Reviewer).expect("a reviewer");
+    let st = rdy_engine::engine::Engine::read(&engine);
+    let mut requests = 0;
+    let mut answers = 0;
+    st.reader()
+        .for_each_check_request(st.seq(), |_, _| {
+            requests += 1;
+            Ok(())
+        })
+        .expect("the requests");
+    st.reader()
+        .for_each_check_review(st.seq(), |_, _| {
+            answers += 1;
+            Ok(())
+        })
+        .expect("the verdicts");
+    let blocks = st.materialized(&Scope::Canon).expect("canon").len();
+    drop(st);
+    // the reviewer's eligible requests: claimed one by one, then every lease released
+    let owner = 7;
+    let mut eligible = 0;
+    while claim_next(&engine, &reviewer, owner).is_some() {
+        eligible += 1;
+    }
+    rdy_engine::engine::Engine::leases(&engine).release_owner(owner);
+    (
+        engine,
+        reviewer,
+        CheckFixture {
+            blocks,
+            rules: 0,
+            requests,
+            answered: answers,
+            eligible,
+        },
+    )
+}
+
+/// `rdy_review_next {kind: decision_review}` for `reviewer` as lease owner `owner`: the request it
+/// claimed, if any.
+fn claim_next(
+    engine: &rdy_engine::engine::Local,
+    reviewer: &Session,
+    owner: u64,
+) -> Option<String> {
+    use rdy_engine::semantic::api::{ReviewNextRequest, run_review_next};
+    let v = run_review_next(
+        engine,
+        reviewer,
+        owner,
+        ReviewNextRequest {
+            kind: "decision_review".into(),
+        },
+    )
+    .expect("review next");
+    v["request"].as_str().map(str::to_string)
+}
+
+/// The check ops (D-JQD5X), all reported with no ceiling (`CK10_OPS`). Each runs on a project of
+/// its own under `parent`: a 10k project with the `CHECK_RULES` rules for the two rule ops, a
+/// small project for the case and the queue. Returns the rule project's fixture facts.
+fn tier_checks(out: &mut Vec<Measure>, parent: &std::path::Path, runs: &Runs) -> CheckFixture {
+    use rdy_engine::check::api::{ReviewRequest, run_review};
+    // 10 folders x 10 docs x 97 claims, as the workload's project, with the rules
+    let proj = parent.join("checks");
+    std::fs::create_dir_all(&proj).expect("mkdir");
+    let docs = testkit::generate_tree(&proj, 10, 10, 97);
+    crate::packs::use_pack(&proj, "perf-checks", &check_pack(), "");
+    let mut r = Rdy::open(&proj).expect("open the check project");
+    land(&mut r, "work").expect("land work");
+    let fx = fixture(&r, &docs);
+    let section = fx.section.to_string();
+    // the edited claim and its one-link neighbours, in canon
+    let target = fx.claim.to_string();
+    let ops: Vec<_> = (0..CHECK_NEIGHBOURS)
+        .map(|k| json!({"op": "create", "type": "claim", "parent": section, "body": format!("Neighbour {k} builds on {{{{{target}}}}}.")}))
+        .collect();
+    write(&mut r, "work", json!(ops)).expect("the neighbours");
+    land(&mut r, "work").expect("land the neighbours");
+    let blocks = r.read().materialized(&Scope::Canon).expect("canon").len();
+    let engine = rdy_engine::engine::Local::new(r);
+    // check_rules_change: the write and its report, on_change checks included
+    let b = crate::fixtures::agent("agent:b", Some("rb"));
+    out.push(measure(CK10_OPS[0], runs.write, |i| {
+        let v = reported_write(&engine, &b, "rb", &fx.claim, format!("Edited {i}."));
+        assert!(v["on_change"]["checks"].is_array(), "the checks: {v}");
+    }));
+    // check_rules_propose: a fresh view of 100 creates per run, written outside the timer
+    out.push(measure_timed(CK10_OPS[1], runs.view_ops, |i| {
+        let view = format!("cp{i}");
+        let ops: Vec<_> = (0..CHECK_PROPOSE_BLOCKS)
+            .map(|k| json!({"op": "create", "type": "claim", "parent": section, "body": format!("Proposed {i} claim {k}.")}))
+            .collect();
+        let v = view.clone();
+        write_typed(&engine, move |r| write(r, &v, json!(ops))).expect("the change set");
+        let s = Instant::now();
+        let p = write_typed(&engine, move |r| {
+            r.propose(&writer(), &view, &view, Some(crate::intake::TEST_SUMMARY))
+        })
+        .expect("propose");
+        let took = s.elapsed();
+        std::hint::black_box(p);
+        took
+    }));
+    drop(engine);
+
+    // check_request_case: one change of 20 editorial blocks per run, written outside the timer
+    let (case_proj, mut r, cfx) = coord_project(parent, "check-case");
+    let a = crate::fixtures::agent("agent:a", Some("a"));
+    let changes: Vec<String> = (0..runs.write)
+        .map(|i| {
+            let ops: Vec<_> = (0..CHECK_CASE_BLOCKS)
+                .map(|k| json!({"op": "create", "type": "claim", "parent": cfx.section.to_string(), "body": format!("Case {i} words rule {k} plainly.")}))
+                .collect();
+            let w = r
+                .write(
+                    &a,
+                    rdy_engine::WriteRequest {
+                        view: "a".into(),
+                        ops: crate::fixtures::parse_test_ops(json!(ops)).expect("ops"),
+                        justification: Some(rdy_model::Justification::Editorial {
+                            class: rdy_model::EditorialClass::Clarify,
+                            reason: "a plainer wording".into(),
+                        }),
+                        message: String::new(),
+                    },
+                )
+                .expect("the editorial change");
+            w.change
+        })
+        .collect();
+    let engine = rdy_engine::engine::Local::new(r);
+    out.push(measure(CK10_OPS[2], runs.write, |i| {
+        let req = ReviewRequest::from_value(
+            json!({"op": "run", "check": "meaning_preservation", "subject": changes[i]}),
+        )
+        .expect("a run");
+        let v = run_review(&engine, &a, "human:perf", false, None, req).expect("the run");
+        assert_eq!(
+            v["case"]["blocks"].as_array().map(Vec::len),
+            Some(CHECK_CASE_BLOCKS),
+            "the case: {v}"
+        );
+    }));
+    drop(engine);
+    drop(case_proj);
+
+    // check_queue: the reviewer lists the open requests and claims the one eligible request;
+    // the lease is released outside the timer
+    let (_queue_proj, r, qfx) = coord_project(parent, "check-queue");
+    let (engine, reviewer, queue) = check_queue_fixture(r, &qfx.section);
+    let owner = 11;
+    out.push(measure_timed(CK10_OPS[3], runs.read, |_| {
+        let s = Instant::now();
+        let list = run_review(
+            &engine,
+            &reviewer,
+            "human:perf",
+            false,
+            None,
+            ReviewRequest::from_value(json!({"op": "list", "open": true})).expect("a list"),
+        )
+        .expect("the list");
+        let got = claim_next(&engine, &reviewer, owner);
+        let took = s.elapsed();
+        assert!(got.is_some(), "the eligible request");
+        std::hint::black_box(list);
+        rdy_engine::engine::Engine::leases(&engine).release_owner(owner);
+        took
+    }));
+    eprintln!(
+        "check ops: {blocks} blocks, {CHECK_RULES} rules; queue {} requests, {} answered, {} eligible",
+        queue.requests, queue.answered, queue.eligible
+    );
+    CheckFixture {
+        blocks,
+        rules: CHECK_RULES,
+        ..queue
+    }
+}
+
 pub fn run_workload() -> Vec<Measure> {
     rdy_model::seed_ids_for_tests(0x7064_6566);
     let dir = tempfile::tempdir().expect("tempdir");
@@ -5815,6 +6112,8 @@ pub fn run_workload() -> Vec<Measure> {
     tier_publication(&mut out, &proj, dir.path(), 5);
     tier_publication_costs(&mut out, &proj, dir.path(), "", 5);
     tier_signatures(&mut out, &proj, dir.path(), "", SIGNATURE_RUNS);
+    // on projects of their own: the check ops (D-JQD5X), reported
+    tier_checks(&mut out, dir.path(), &TYPICAL_RUNS);
     tier_change_plan(&mut out, &proj, dir.path(), "", &TYPICAL_RUNS, 5, PLAN_N);
     // Cold open with a lagging index: the project is closed, so put the old index back over the
     // current one (outside the timer); open then catches it up from the log.
@@ -7899,6 +8198,60 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// ck10 (D-JQD5X, D-PACK3): the four check ops are reported under their exact names, with no
+    /// ceiling and no baseline entry, and the queue's fixture builder makes the intended state:
+    /// 1,000 durable requests, 500 answered, one eligible independent request for a reviewer.
+    /// The test asserts counts, never a duration.
+    #[test]
+    fn ck10_perf_registry_reports_four_check_ops() {
+        assert_eq!(
+            CK10_OPS,
+            [
+                "check_rules_change",
+                "check_rules_propose",
+                "check_request_case",
+                "check_queue"
+            ]
+        );
+        let baseline: serde_json::Value =
+            serde_json::from_str(include_str!("../qa-baseline.json")).expect("the baseline parses");
+        for op in CK10_OPS {
+            assert_eq!(spec_ceiling_ms(op), None, "{op} has a ceiling");
+            let target = spec_target(op).unwrap_or_else(|| panic!("{op} has no target"));
+            assert!(target.starts_with("no spec target: "), "{target}");
+            assert!(target.ends_with("(reported; no ceiling)"), "{target}");
+            for class in baseline["classes"].as_object().expect("classes").values() {
+                assert!(class["ops"].get(op).is_none(), "{op} is not baselined");
+            }
+            // with no baseline entry, a recorded run of it passes and a compared one is named
+            let rec = compare(None, &[m(op, 1.0)], Mode::Record);
+            assert_eq!((rec[0].status, rec[0].pass), (Status::Recorded, true));
+        }
+        // the queue's fixture
+        rdy_model::seed_ids_for_tests(0x636b_3130);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_proj, r, fx) = coord_project(dir.path(), "check-queue");
+        let (engine, reviewer, queue) = check_queue_fixture(r, &fx.section);
+        rdy_model::unseed_ids_for_tests();
+        assert_eq!(
+            (queue.requests, queue.answered, queue.eligible),
+            (CHECK_QUEUE_REQUESTS, CHECK_QUEUE_ANSWERED, 1),
+            "{queue:?}"
+        );
+        assert_eq!((CHECK_QUEUE_REQUESTS, CHECK_QUEUE_ANSWERED), (1_000, 500));
+        // the leases were released: the eligible request is claimable again, and only it
+        assert!(claim_next(&engine, &reviewer, 3).is_some());
+        assert!(claim_next(&engine, &reviewer, 3).is_none());
+        // the rule project's pack holds the 16 rules and parses
+        let pack = check_pack();
+        assert_eq!(pack.matches("\n  - name: rule-").count(), CHECK_RULES);
+        assert_eq!(CHECK_RULES, 16);
+        let (d, r) = crate::fixtures::project();
+        drop(r);
+        crate::packs::use_pack(d.path(), "perf-checks", &pack, "");
+        Rdy::open(d.path()).expect("the pack with its rules loads");
     }
 
     const SIG10_OPS: [&str; 3] = ["signature_check", "signature_check_sk", "signature_lookup"];

@@ -1,6 +1,9 @@
 //! sg3: a swarm script is a pure function of its seed; it covers every act; outcomes are a closed table.
 use rdy_qa::swarm::journal::{Outcome, allowed};
-use rdy_qa::swarm::script::{Act, Config, PersonAct, direct_land_at, script};
+use rdy_qa::swarm::script::{
+    Act, CHECK_MIN_STEPS, Config, HoldStep, PersonAct, RuleStep, check_plan, direct_land_at,
+    reviewer_weights, script, writer_weights,
+};
 use std::collections::BTreeSet;
 
 fn names(acts: &[Act]) -> BTreeSet<&'static str> {
@@ -49,8 +52,28 @@ fn sg3_every_agent_script_has_the_required_acts() {
             "wc_edit",
             "inbox_ack",
             "tensions",
+            "accept_check_verdict",
         ] {
             assert!(p.contains(need), "seed {seed}: the person lacks {need}");
+        }
+        // D-JQD5X: the check acts, writers' and a reviewer's
+        let all: BTreeSet<&str> = s.agents.iter().flat_map(|a| names(a)).collect();
+        for need in ["check_run", "check_request", "check_submit"] {
+            assert!(all.contains(need), "seed {seed}: no agent holds {need}");
+        }
+        for (i, acts) in s.agents.iter().enumerate() {
+            let n = names(acts);
+            if Config::fast(seed).is_reviewer(i) {
+                assert!(
+                    !n.contains("check_run") && !n.contains("check_request"),
+                    "seed {seed}: reviewer {i} must not run or request a check"
+                );
+            } else {
+                assert!(
+                    !n.contains("check_submit"),
+                    "seed {seed}: writer {i} must not claim a check"
+                );
+            }
         }
         assert!(
             !s.contra.is_empty(),
@@ -68,6 +91,9 @@ fn sg3_the_union_of_scripts_covers_every_act() {
         }
     }
     assert_eq!(all, Act::ALL_NAMES.iter().copied().collect::<BTreeSet<_>>());
+    for act in ["check_run", "check_request", "check_submit"] {
+        assert!(all.contains(act), "no script holds {act}");
+    }
 }
 
 #[test]
@@ -97,6 +123,15 @@ fn sg3_the_outcome_table_is_closed() {
     assert!(allowed("review_submit", "E_REVIEW_STALE"));
     assert!(allowed("inbox_resume", "E_BAD_INPUT"));
     assert!(!allowed("inbox", "E_BAD_INPUT"));
+    // D-JQD5X: a verdict on a case that changed after its lease is stale; a run or a request
+    // names a subject its view holds, so it meets no refusal; the card can move under an
+    // acceptance
+    assert!(allowed("check_submit", "E_REVIEW_STALE"));
+    assert!(!allowed("check_submit", "E_SELF_REVIEW"));
+    assert!(!allowed("check_run", "E_BAD_INPUT"));
+    assert!(!allowed("check_request", "E_BAD_INPUT"));
+    assert!(allowed("accept_check_verdict", "E_PROPOSAL_MOVED"));
+    assert!(!allowed("accept_check_verdict", "E_BAD_INPUT"));
     assert_eq!(
         format!("{:?}", Outcome::Refused("E_X".into())),
         "Refused(\"E_X\")"
@@ -259,8 +294,155 @@ fn sg3_the_person_lands_on_a_cadence_and_ends_by_accepting_advice() {
         assert_eq!(p[p.len() - 2], PersonAct::AcceptAdvice, "seed {}", cfg.seed);
         assert_eq!(p[p.len() - 1].name(), "land", "seed {}", cfg.seed);
         let names: BTreeSet<_> = p[..p.len() - 2].iter().map(PersonAct::name).collect();
-        assert_eq!(names.len(), 6, "seed {}: {names:?}", cfg.seed);
+        // the forced check verdict acceptance (D-JQD5X) is the one more kind, in the scripts
+        // that hold the forced check sequences (the fast and deep tiers)
+        let forced = usize::from(check_plan(&cfg).is_some());
+        assert_eq!(names.len(), 6 + forced, "seed {}: {names:?}", cfg.seed);
     }
+}
+
+/// ck10 (D-JQD5X, D-ME2HD; system/quality-gate tb-A4DAV): a script is still a pure function of
+/// its seed, and holds the check acts. Every fast and deep script holds one forced rule
+/// failure and repair (`CheckRun` with a rule step, by one writer, in that order) and one
+/// request, concern, person acceptance and new version, ordered by the run's step indexes and
+/// pacing: the reviewer's step waits until the writer has finished its request, the person's act
+/// until the reviewer has finished its concern, the new version until the person has acted. The
+/// reviewer is a reviewer, so never the writer. Each check act weighs 1 and every older weight
+/// keeps its value. The fast script stays 40 steps with its kill window.
+#[test]
+fn ck10_scripts_include_check_and_person_acts() {
+    // the same seed gives the same script, forced acts included
+    assert_eq!(
+        format!("{:?}", script(&Config::fast(7))),
+        format!("{:?}", script(&Config::fast(7)))
+    );
+    assert_eq!(check_plan(&Config::fast(7)), check_plan(&Config::fast(7)));
+    // the run's pacing: person act j waits for step (j + 1) * steps / len
+    let due = |j: usize, steps: usize, len: usize| ((j + 1) * steps / len).min(steps);
+    for seed in 1..=20 {
+        for cfg in [Config::fast(seed), Config::deep(seed)] {
+            let s = script(&cfg);
+            let ctx = format!("seed {seed} steps {}", cfg.steps);
+            let p = check_plan(&cfg).unwrap_or_else(|| panic!("{ctx}: no forced checks"));
+            assert!(!cfg.is_reviewer(p.rule_agent), "{ctx}: {p:?}");
+            assert!(!cfg.is_reviewer(p.hold_agent), "{ctx}: {p:?}");
+            assert!(cfg.is_reviewer(p.reviewer), "{ctx}: {p:?}");
+            assert_ne!(p.reviewer, p.hold_agent, "{ctx}: another actor reviews");
+            let at = |agent: usize, step: usize| &s.agents[agent][step];
+            assert_eq!(
+                at(p.rule_agent, p.rule_fail),
+                &Act::CheckRun {
+                    rule: Some(RuleStep::Fail)
+                },
+                "{ctx}"
+            );
+            assert_eq!(
+                at(p.rule_agent, p.rule_repair),
+                &Act::CheckRun {
+                    rule: Some(RuleStep::Repair)
+                },
+                "{ctx}"
+            );
+            assert!(p.rule_fail < p.rule_repair, "{ctx}: {p:?}");
+            assert_eq!(
+                at(p.hold_agent, p.request),
+                &Act::CheckRequest {
+                    hold: Some(HoldStep::Request)
+                },
+                "{ctx}"
+            );
+            assert_eq!(at(p.reviewer, p.submit), &Act::CheckSubmit, "{ctx}");
+            assert_eq!(
+                at(p.hold_agent, p.new_version),
+                &Act::CheckRequest {
+                    hold: Some(HoldStep::NewVersion)
+                },
+                "{ctx}"
+            );
+            let len = s.person.len();
+            assert_eq!(s.person[p.accept], PersonAct::AcceptCheckVerdict, "{ctx}");
+            assert_eq!(p.accept % 2, 1, "{ctx}: not a landing act");
+            assert!(p.accept < len - 2, "{ctx}: before the tail");
+            // the order, by step indexes and barriers alone
+            assert!(p.submit >= p.request + 2, "{ctx}: {p:?}");
+            assert!(due(p.accept, cfg.steps, len) > p.submit, "{ctx}: {p:?}");
+            assert!(
+                p.new_version > due(p.accept, cfg.steps, len),
+                "{ctx}: {p:?}"
+            );
+            // each forced sequence once: only the forced acts carry a step
+            let forced: usize = s
+                .agents
+                .iter()
+                .flatten()
+                .filter(|a| {
+                    matches!(
+                        a,
+                        Act::CheckRun { rule: Some(_) } | Act::CheckRequest { hold: Some(_) }
+                    )
+                })
+                .count();
+            assert_eq!(forced, 4, "{ctx}");
+            let accepts = s
+                .person
+                .iter()
+                .filter(|a| **a == PersonAct::AcceptCheckVerdict)
+                .count();
+            assert_eq!(accepts, 1, "{ctx}");
+        }
+        // the fast script keeps its length and its kill window
+        let cfg = Config::fast(seed);
+        assert!(script(&cfg).agents.iter().all(|a| a.len() == 40));
+        assert!((10..30).contains(&cfg.kill_at.unwrap()));
+    }
+    // a script too short for them holds no forced checks
+    for steps in [24, 30, CHECK_MIN_STEPS - 1] {
+        let cfg = Config {
+            seed: 3,
+            agents: 8,
+            steps,
+            kill_at: None,
+        };
+        assert_eq!(check_plan(&cfg), None, "{steps} steps");
+        assert!(!script(&cfg).person.contains(&PersonAct::AcceptCheckVerdict));
+    }
+    // each check act weighs 1; the older weights keep their values
+    assert_eq!(
+        writer_weights(),
+        [
+            ("brief", 5),
+            ("write", 18),
+            ("write_no_brief", 3),
+            ("write_stale", 3),
+            ("create", 8),
+            ("collide", 6),
+            ("cite", 6),
+            ("repin", 3),
+            ("fork", 3),
+            ("include", 3),
+            ("exclude", 2),
+            ("undo", 3),
+            ("intent", 3),
+            ("alt_create", 3),
+            ("propose", 8),
+            ("tensions", 5),
+            ("inbox", 5),
+            ("read", 10),
+            ("check_run", 1),
+            ("check_request", 1),
+        ]
+    );
+    assert_eq!(
+        reviewer_weights(),
+        [
+            ("brief", 5),
+            ("review_next", 40),
+            ("inbox", 10),
+            ("tensions", 10),
+            ("read", 10),
+            ("check_submit", 1),
+        ]
+    );
 }
 
 /// Fix round 2 (ruling task-5-round1.1): the generator draws `AltCreate` and `Include` as Task 3

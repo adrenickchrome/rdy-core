@@ -21,7 +21,10 @@
 //!   block such an excluded change created (FW-AL1: losers are discarded by design); the person
 //!   accepts advice it is shown through the relay (ruling task-5.4). The agent answers the
 //!   view's change plan before each propose, as in the run, and again for a version that is not
-//!   ready for open plan items (`E_PLAN_OPEN`).
+//!   ready for open plan items (`E_PLAN_OPEN`). A stable claim that fails the pack's blocking rule
+//!   (`E_RULE_CHECK`) the agent repairs with a real write; a version held by a check verdict a
+//!   person accepted (`E_VALIDATION`, `held_by_verdict`) the next round replaces with a new
+//!   version. The drain never accepts or answers a verdict.
 //! - Before every approve, of the run and of the drain, the person accepts the version's
 //!   deferral card when the queue lists one (D-AAQ9Z), and the relay reads the version's change
 //!   plan (`version_plan`), so a check sees what the gate read.
@@ -1087,12 +1090,25 @@ fn row_fits(row: &Value, kind: &str) -> Result<(), String> {
 }
 
 /// The issue codes of a version that is not ready that the drain resolves (`Drain::resolve`).
-const RESOLVED_ISSUES: [&str; 4] = [
+/// `E_VALIDATION` only as a check verdict a person accepted as blocking (`held_by_verdict`).
+const RESOLVED_ISSUES: [&str; 6] = [
     "E_CONFLICT_UNRESOLVED",
     "E_BLOCKING_TENSION",
     "E_PLAN_OPEN",
     "E_BRIEF_REQUIRED",
+    "E_RULE_CHECK",
+    "E_VALIDATION",
 ];
+
+/// Whether `issue` is a check verdict a person accepted as blocking for its version (D-JQD5X QD2):
+/// `<check> verdict <review> is accepted as blocking for <P-x@n>`. The hold ends with a new
+/// version, which the drain's next round proposes; the drain never accepts or answers a verdict.
+pub fn held_by_verdict(issue: &Value) -> bool {
+    issue["code"] == "E_VALIDATION"
+        && issue["message"].as_str().is_some_and(|m| {
+            m.contains(" verdict ") && m.contains(" is accepted as blocking for P-")
+        })
+}
 
 /// A refusal of the gate: its code and the JSON `rdy approve` printed.
 struct Refusal {
@@ -1830,6 +1846,15 @@ impl Drain {
                 {
                     self.no_rule(v, other, "land");
                 }
+                // an E_VALIDATION is resolved only as an accepted verdict's hold: the next round
+                // makes a new version, which inherits no hold
+                if let Some(x) = issues
+                    .iter()
+                    .find(|x| x["code"] == "E_VALIDATION" && !held_by_verdict(x))
+                {
+                    self.said = x.to_string();
+                    self.no_rule(v, "E_VALIDATION", "land");
+                }
                 let has = |code: &str| codes.iter().any(|c| c == code);
                 if has("E_CONFLICT_UNRESOLVED") {
                     let version = self.version(i, v, pref, &r.code);
@@ -1846,6 +1871,23 @@ impl Drain {
                 }
                 if has("E_PLAN_OPEN") {
                     agent::answer_plan(self.agent(i), v);
+                }
+                // a stable claim that fails the blocking rule: the agent repairs it with a real
+                // write, `checked: true` (the rule's fix), and the next round proposes again
+                for x in issues.iter().filter(|x| x["code"] == "E_RULE_CHECK") {
+                    let Some(b) = x["block"].as_str() else {
+                        self.no_rule(v, "E_RULE_CHECK", "an issue with no block")
+                    };
+                    let ops = json!([{"op": "update", "id": b, "fields": {"checked": true}}]);
+                    self.write(
+                        i,
+                        v,
+                        b,
+                        ops,
+                        "repair_rule",
+                        "E_RULE_CHECK",
+                        "a blocking rule",
+                    );
                 }
             }
             other => self.no_rule(v, other, "land"),

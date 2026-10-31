@@ -42,10 +42,18 @@
 //!   entry of the agent that names the proposal, the view and the base, whose `reply` is the
 //!   `rdy_land` reply, then the reads after it (`run::after_land`). A landing whose reply the
 //!   kill cut is found and audited as the person's is (`people::found_in`).
-use super::journal::{Entry, InboxRead, Journal, Outcome, Skip, allowed};
-use super::project::{SeedBlocks, SwarmProject};
+//! - D-JQD5X: a check act's entries carry `Entry::check` (`CheckFacts`): the check, the request,
+//!   the case hash, the review, the verdict and the version, each when the reply gave it. A run is
+//!   a `check_run` entry and the author's own pass a `check_submit` entry of the author; a request
+//!   is a `check_request` entry; a reviewer's claim is a `review_next` entry and its concern a
+//!   `check_submit` entry. The forced rule fixture writes in view `a<i>-rule` (`check_run`
+//!   entries naming the claim), the forced hold sequence in view `a<i>-ck` (a `create` entry);
+//!   both propose with `propose` entries whose reply holds the version's readiness
+//!   (`{ready, issues, warnings}`). A check act that finds no subject is `Skipped`.
+use super::journal::{CheckFacts, Entry, InboxRead, Journal, Outcome, Skip, allowed};
+use super::project::{FIXTURE_KEY, FIXTURE_RULE, SeedBlocks, SwarmProject};
 use super::run::{self, Watch};
-use super::script::{AREAS, Act, Config, Pick, SEED_BLOCKS};
+use super::script::{AREAS, Act, CHECK_REASON, Config, HoldStep, Pick, RuleStep, SEED_BLOCKS};
 use crate::mcp::{McpClient, Reply};
 use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
@@ -959,11 +967,18 @@ impl Agent {
                 | Act::Write { stable: false, .. }
                 | Act::AltCreate { .. }
                 | Act::Tensions
+                | Act::CheckRun { .. }
+                | Act::CheckRequest { .. }
         );
         let gate = self.link.gate.clone();
         let turn = reads_first.then(|| gate.read_turn());
-        // a propose answers the plan in its own turn first, then takes this one for its call
-        let act_turn = (!matches!(act, Act::Propose)).then(|| gate.act_turn());
+        // a propose answers the plan in its own turn first, then takes this one for its call; so
+        // does a forced check step, which proposes
+        let proposes = matches!(
+            act,
+            Act::Propose | Act::CheckRun { rule: Some(_) } | Act::CheckRequest { hold: Some(_) }
+        );
+        let act_turn = (!proposes).then(|| gate.act_turn());
         let mut accepted = None;
         match act {
             Act::Brief { target } => self.brief_act(target),
@@ -985,6 +1000,11 @@ impl Agent {
             Act::Tensions => self.tensions(),
             Act::Inbox { ack } => self.inbox(*ack),
             Act::Read { target } => self.read_act(target),
+            Act::CheckRun { rule: None } => self.check_run(),
+            Act::CheckRun { rule: Some(step) } => self.rule_fixture(*step),
+            Act::CheckRequest { hold: None } => self.check_request(),
+            Act::CheckRequest { hold: Some(step) } => self.hold_step(*step),
+            Act::CheckSubmit => self.check_submit(),
         }
         // a version the policy accepts the agent lands in the landing turn, which waits for
         // every read turn: its own ends first
@@ -1194,19 +1214,40 @@ impl Agent {
     /// write makes) briefs canon and writes in that view.
     fn briefed_write(
         &mut self,
-        mut entry: Entry,
+        entry: Entry,
         rules: &'static str,
         ids: &[String],
         ops: Value,
         area: usize,
         retry: bool,
     ) -> Res {
-        entry.stable = true;
-        let mut tries = 0;
         // a marked claim's own view does not exist before its write, which makes it from canon:
         // the briefing reads canon
+        let scope = entry
+            .view
+            .clone()
+            .filter(|v| *v != self.view)
+            .map(|_| "canon".to_string());
+        let implements = ("implements", json!([self.decision(area)]));
+        self.briefed_write_with(entry, rules, ids, ops, retry, scope.as_deref(), implements)
+    }
+
+    /// `briefed_write`, briefing in `scope` (the session's view when `None`) and justifying the
+    /// write with `justify` (`implements` and its decisions, or `editorial` and its class).
+    #[allow(clippy::too_many_arguments)]
+    fn briefed_write_with(
+        &mut self,
+        mut entry: Entry,
+        rules: &'static str,
+        ids: &[String],
+        ops: Value,
+        retry: bool,
+        scope: Option<&str>,
+        justify: (&str, Value),
+    ) -> Res {
+        entry.stable = true;
+        let mut tries = 0;
         let other = entry.view.clone().filter(|v| *v != self.view);
-        let scope = other.as_ref().map(|_| "canon");
         loop {
             let Some((token, blocks)) = self.brief_in(ids, scope) else {
                 return Res::Lost;
@@ -1222,7 +1263,8 @@ impl Agent {
                 }
             }
             entry.brief = Some(token.clone());
-            let mut args = json!({"ops": ops, "brief": token, "implements": [self.decision(area)]});
+            let mut args = json!({"ops": ops, "brief": token});
+            args[justify.0] = justify.1.clone();
             if let Some(v) = &other {
                 args["view"] = json!(v);
             }
@@ -2120,6 +2162,365 @@ impl Agent {
         e.block = Some(t.id.clone());
         self.link
             .exec(e, "read", "rdy_read", json!({"id": t.id}), |_, _| {});
+    }
+}
+
+/// The view of agent `i`'s rule fixture (`RuleStep`).
+pub fn rule_view(i: usize) -> String {
+    format!("a{i}-rule")
+}
+
+/// The view of agent `i`'s hold sequence (`HoldStep`).
+pub fn check_view(i: usize) -> String {
+    format!("a{i}-ck")
+}
+
+/// The note of every scripted check citation.
+const CHECK_NOTE: &str = "a person should read this block";
+
+/// The check facts a `rdy_review` run or request reply gives (`request`, `case_hash`).
+fn request_facts(check: &str, v: &Value, version: Option<&str>) -> CheckFacts {
+    CheckFacts {
+        check: Some(check.to_string()),
+        request: v["request"].as_str().map(str::to_string),
+        case_hash: v["case_hash"].as_str().map(str::to_string),
+        version: version.map(str::to_string),
+        ..CheckFacts::default()
+    }
+}
+
+/// The arguments of the deterministic concern on a leased check case (D-JQD5X): one citation, of
+/// the first block the case shows, and the reason `CHECK_REASON`. `None` when the case shows no
+/// block.
+pub(crate) fn concern_args(leased: &Value) -> Option<Value> {
+    let block = leased["case"]["blocks"]
+        .as_array()?
+        .iter()
+        .find_map(|b| b["id"].as_str())?;
+    Some(json!({
+        "request": leased["request"],
+        "case_hash": leased["case_hash"],
+        "verdict": "concern",
+        "citations": [{"block": block, "note": CHECK_NOTE}],
+        "reason": CHECK_REASON,
+    }))
+}
+
+impl Agent {
+    /// The changes view `view` holds; `None` when the daemon died under the read or the view is
+    /// closed. A view nobody wrote in holds none.
+    fn held_in(&mut self, view: &str) -> Option<Vec<String>> {
+        match self.show(view) {
+            Shown::Lost | Shown::View { closed: true, .. } => None,
+            Shown::Missing => Some(vec![]),
+            Shown::View { changes, .. } => Some(changes),
+        }
+    }
+
+    /// The agent's newest editorial change that its view still holds (a scratch write).
+    fn editorial_subject(&self, held: &[String]) -> Option<String> {
+        self.scratch_changes
+            .iter()
+            .rev()
+            .find(|c| held.contains(c))
+            .cloned()
+    }
+
+    /// The agent's newest proposed decision that its view still holds: a choice decision it
+    /// created (`choice_decision`, a `create` entry naming a `D-` block).
+    fn decision_subject(&self, held: &[String]) -> Option<String> {
+        self.link
+            .journal
+            .entries()
+            .into_iter()
+            .rev()
+            .filter(|e| e.actor == self.link.actor && e.act == "create" && e.outcome == Outcome::Ok)
+            .filter(|e| e.change.as_ref().is_some_and(|c| held.contains(c)))
+            .find_map(|e| e.block.filter(|b| b.starts_with("D-")))
+    }
+
+    /// `CheckRun` with no rule step (D-JQD5X): the author runs `decision_review` on its newest
+    /// proposed decision, else `meaning_preservation` on its newest editorial change, and
+    /// answers its own request with a `pass` that carries no reason and no citations. The run is
+    /// a `check_run` entry, the pass a `check_submit` entry of the author; both name the request.
+    fn check_run(&mut self) {
+        let view = self.view.clone();
+        let Some(held) = self.held_in(&view) else {
+            return self.skip("check_run", Skip::NothingToCheck);
+        };
+        let (check, subject) = match self.decision_subject(&held) {
+            Some(d) => ("decision_review", d),
+            None => match self.editorial_subject(&held) {
+                Some(c) => ("meaning_preservation", c),
+                None => return self.skip("check_run", Skip::NothingToCheck),
+            },
+        };
+        let mut e = self.view_entry("check_run");
+        e.block = Some(subject.clone());
+        let mut facts = None;
+        let args = json!({"op": "run", "check": check, "subject": subject});
+        let res = self.link.exec(e, "check_run", "rdy_review", args, |en, v| {
+            let f = request_facts(check, v, None);
+            facts = Some(f.clone());
+            en.check = Some(f);
+        });
+        let (Res::Ok(_), Some(f)) = (res, facts) else {
+            return;
+        };
+        let mut e = self.view_entry("check_submit");
+        e.block = Some(subject);
+        let args = json!({"request": f.request, "case_hash": f.case_hash, "verdict": "pass"});
+        self.link
+            .exec(e, "check_submit", "rdy_review_submit", args, |en, v| {
+                en.check = Some(CheckFacts {
+                    review: v["review"].as_str().map(str::to_string),
+                    verdict: v["verdict"].as_str().map(str::to_string),
+                    ..f
+                });
+            });
+    }
+
+    /// `CheckRequest` with no hold step: the agent requests an independent `meaning_preservation`
+    /// review of its newest editorial change (a `check_request` entry naming the request).
+    fn check_request(&mut self) {
+        let view = self.view.clone();
+        let subject = self
+            .held_in(&view)
+            .and_then(|held| self.editorial_subject(&held));
+        let Some(subject) = subject else {
+            return self.skip("check_request", Skip::NothingToCheck);
+        };
+        let check = "meaning_preservation";
+        let mut e = self.view_entry("check_request");
+        e.block = Some(subject.clone());
+        let args = json!({"op": "request", "check": check, "subject": subject});
+        self.link
+            .exec(e, "check_request", "rdy_review", args, |en, v| {
+                en.check = Some(request_facts(check, v, None));
+            });
+    }
+
+    /// `CheckSubmit`: the reviewer claims the next free independent request of
+    /// `meaning_preservation`, else of `decision_review`, and submits the deterministic concern
+    /// (`concern_args`). The claim is a `review_next` entry; the verdict a `check_submit` entry
+    /// naming the request, its case hash and the review.
+    fn check_submit(&mut self) {
+        for check in ["meaning_preservation", "decision_review"] {
+            let e = self.link.entry("review_next");
+            let mut leased = None;
+            let res = self.link.exec(
+                e,
+                "review_next",
+                "rdy_review_next",
+                json!({ "kind": check }),
+                |_, v| {
+                    if v["request"].is_string() {
+                        leased = Some(v.clone());
+                    }
+                },
+            );
+            if matches!(res, Res::Lost) {
+                return;
+            }
+            let Some(leased) = leased else { continue };
+            let Some(args) = concern_args(&leased) else {
+                self.link.fail(
+                    "check_submit",
+                    &format!("got a case with no block: {leased}"),
+                );
+            };
+            let mut e = self.link.entry("check_submit");
+            e.block = leased["case"]["blocks"][0]["id"]
+                .as_str()
+                .map(str::to_string);
+            let facts = CheckFacts {
+                check: Some(check.to_string()),
+                request: leased["request"].as_str().map(str::to_string),
+                case_hash: leased["case_hash"].as_str().map(str::to_string),
+                ..CheckFacts::default()
+            };
+            e.check = Some(facts.clone());
+            self.link
+                .exec(e, "check_submit", "rdy_review_submit", args, |en, v| {
+                    en.check = Some(CheckFacts {
+                        review: v["review"].as_str().map(str::to_string),
+                        verdict: v["verdict"].as_str().map(str::to_string),
+                        ..facts
+                    });
+                });
+            return;
+        }
+        self.skip("check_submit", Skip::NoCheckRequest);
+    }
+
+    /// Proposes `view` (`answer_plan` first, as `propose` does), journaled as a `propose` entry
+    /// naming the view and the version; its reply holds the readiness the person and the checks
+    /// read (`{ready, issues, warnings}`, codes only). Returns the version.
+    fn propose_view(&mut self, view: &str) -> Option<String> {
+        answer_plan(&mut self.link, view);
+        let gate = self.link.gate.clone();
+        let _act = gate.act_turn();
+        let title = format!("{view} step {}", self.link.step);
+        let mut e = self.view_entry("propose");
+        e.view = Some(view.to_string());
+        let mut made = None;
+        let args = json!({"title": title, "summary": title, "view": view});
+        self.link
+            .exec(e, "propose", "rdy_propose", args, |en, v| {
+                en.block = v["ref"].as_str().map(str::to_string);
+                en.seen = labels_of(&v["tensions"]);
+                let codes = |k: &str| -> Vec<Value> {
+                    v[k].as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|i| json!({"code": i["code"], "block": i["block"], "message": i["message"]}))
+                        .collect()
+                };
+                en.reply = Some(json!({"alternatives": null, "changes": null,
+                    "policy": v["policy"], "ready": v["ready"],
+                    "issues": codes("issues"), "warnings": codes("warnings")}));
+                made = en.block.clone();
+            });
+        if let Some(r) = &made
+            && !self.report.proposals.contains(r)
+        {
+            self.report.proposals.push(r.clone());
+        }
+        made
+    }
+
+    /// The forced rule fixture (D-JQD5X, the child pack's `check-fixture-key`).
+    ///
+    /// `Fail`: in view `a<i>-rule`, under the stable seed section of the agent's area, the agent
+    /// creates a claim keyed `check-fixture` with no `checked` field (a `check_run` entry naming
+    /// the claim), then proposes the view: the version is not ready (`E_RULE_CHECK`).
+    ///
+    /// `Repair`: the agent sets `checked: true` on that claim with a briefed write in the view (a
+    /// `check_run` entry), then proposes the view again: the new version is ready. With no
+    /// fixture claim in the view, it finds nothing to check.
+    fn rule_fixture(&mut self, step: RuleStep) {
+        let view = rule_view(self.i);
+        let k = self.i % AREAS.len();
+        // a write in the rule view is not a write in the agent's own view: what the agent's own
+        // acts read (`wrote`, `mine`) stays as it was
+        let own = (self.wrote, self.mine.clone());
+        let res = match step {
+            RuleStep::Fail => {
+                let section = self.seed.sections[k].clone();
+                let ops = json!([{"op": "create", "type": "claim", "id": "$x", "parent": section,
+                    "body": format!("Agent {} keeps the check fixture.", self.name()),
+                    "fields": {"key": FIXTURE_KEY}}]);
+                let mut e = self.link.entry("check_run");
+                e.view = Some(view.clone());
+                e.check = Some(CheckFacts {
+                    check: Some(FIXTURE_RULE.to_string()),
+                    ..CheckFacts::default()
+                });
+                let gate = self.link.gate.clone();
+                let _act = gate.act_turn();
+                let res = self.briefed_write(e, "create", &[section], ops, k, true);
+                self.report.views.insert(view.clone());
+                res
+            }
+            RuleStep::Repair => {
+                let fixture = self
+                    .link
+                    .journal
+                    .entries()
+                    .into_iter()
+                    .rev()
+                    .filter(|e| e.actor == self.link.actor && e.act == "check_run")
+                    .filter(|e| e.outcome == Outcome::Ok && e.view.as_deref() == Some(&view))
+                    .find_map(|e| e.block);
+                let held = self.held_in(&view).unwrap_or_default();
+                let Some(c) = fixture.filter(|_| !held.is_empty()) else {
+                    return self.skip("check_run", Skip::NothingToCheck);
+                };
+                let ops = json!([{"op": "update", "id": c, "fields": {"checked": true}}]);
+                let mut e = self.link.entry("check_run");
+                e.view = Some(view.clone());
+                e.block = Some(c.clone());
+                e.check = Some(CheckFacts {
+                    check: Some(FIXTURE_RULE.to_string()),
+                    ..CheckFacts::default()
+                });
+                let gate = self.link.gate.clone();
+                let _act = gate.act_turn();
+                let implements = ("implements", json!([self.decision(k)]));
+                self.briefed_write_with(e, "write", &[c], ops, true, Some(&view), implements)
+            }
+        };
+        (self.wrote, self.mine) = own;
+        if matches!(res, Res::Ok(_)) {
+            self.propose_view(&view);
+        }
+    }
+
+    /// The forced hold sequence (D-JQD5X QD2).
+    ///
+    /// `Request`: in view `a<i>-ck`, under the stable seed section of the agent's area, the agent
+    /// creates an editorial claim (a `create` entry), proposes the view, and requests an
+    /// independent `meaning_preservation` review of that version (a `check_request` entry naming
+    /// the request, its case hash and the version). Stable content keeps the policy from landing
+    /// it, so the version waits for the person.
+    ///
+    /// `NewVersion`: the agent proposes the view again, when it still holds changes: a new
+    /// version, which inherits no hold.
+    fn hold_step(&mut self, step: HoldStep) {
+        let view = check_view(self.i);
+        match step {
+            HoldStep::Request => {
+                let k = self.i % AREAS.len();
+                let section = self.seed.sections[k].clone();
+                let ops = json!([{"op": "create", "type": "claim", "id": "$e", "parent": section,
+                    "body": format!("Agent {} words the settlement rule plainly.", self.name())}]);
+                let mut e = self.link.entry("create");
+                e.view = Some(view.clone());
+                let editorial = (
+                    "editorial",
+                    json!({"class": "clarify", "reason": "swarm: a plainer wording"}),
+                );
+                // a write in the check view is not a write in the agent's own view
+                let own = (self.wrote, self.mine.clone());
+                let res = {
+                    let gate = self.link.gate.clone();
+                    let _act = gate.act_turn();
+                    self.briefed_write_with(
+                        e,
+                        "create",
+                        &[section],
+                        ops,
+                        true,
+                        Some("canon"),
+                        editorial,
+                    )
+                };
+                (self.wrote, self.mine) = own;
+                self.report.views.insert(view.clone());
+                if !matches!(res, Res::Ok(_)) {
+                    return;
+                }
+                let Some(pref) = self.propose_view(&view) else {
+                    return;
+                };
+                let check = "meaning_preservation";
+                let mut e = self.link.entry("check_request");
+                e.view = Some(view);
+                e.block = Some(pref.clone());
+                let args = json!({"op": "request", "check": check, "subject": pref});
+                self.link
+                    .exec(e, "check_request", "rdy_review", args, |en, v| {
+                        en.check = Some(request_facts(check, v, Some(&pref)));
+                    });
+            }
+            HoldStep::NewVersion => {
+                let held = self.held_in(&view).unwrap_or_default();
+                if held.is_empty() {
+                    return self.skip("check_request", Skip::NothingToCheck);
+                }
+                self.propose_view(&view);
+            }
+        }
     }
 }
 
