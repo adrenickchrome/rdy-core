@@ -69,6 +69,17 @@ fn erow1_every_view_brief_and_daemon_code_has_a_row() {
     );
     // one fix for every E_PAGE_STALE, briefing cursor and read cursor alike
     assert_eq!(row(E_PAGE_STALE).1, PAGE_STALE_FIX);
+    // its when row names every paging tool (TASK-957, P-674963be4de2@1)
+    for tool in [
+        "rdy_brief",
+        "rdy_read",
+        "rdy_search",
+        "rdy_diff",
+        "rdy_query",
+        "rdy_log",
+    ] {
+        assert!(row(E_PAGE_STALE).0.contains(tool), "{tool}");
+    }
     let (_, fix) = row("W_SKELETON_MISSING");
     assert!(fix.contains("add the section"), "{fix}");
     let codes: Vec<&str> = ERROR_ROWS.iter().map(|(c, _, _)| *c).collect();

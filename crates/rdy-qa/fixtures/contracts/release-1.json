@@ -14480,7 +14480,7 @@
       ],
       [
         "E_PAGE_STALE",
-        "a page cursor (the next of a cut rdy_brief, rdy_read or rdy_search) is unknown to this session, or what it pages (a briefing, a read or a search) moved since its first page, or the search query differs",
+        "a page cursor (the next of a cut rdy_brief, rdy_read, rdy_search, rdy_diff, rdy_query or rdy_log with landing) is unknown to this session, or what it pages (a briefing, a read, a search, a diff, a query or a landing's diff) moved since its first page, or the request differs (the search query, the filter and scope, or the diff's sides)",
         "the read, briefing, search, diff or query moved; start again without a cursor"
       ],
       [
