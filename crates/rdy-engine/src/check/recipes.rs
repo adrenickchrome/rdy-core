@@ -15,7 +15,7 @@ use rdy_model::decision::{
     self, DECIDED_BY, DECISION, DEPENDS_ON, DecisionStatus, IMPLEMENTS, REFINES, REVOKES,
     SUPERSEDES,
 };
-use rdy_model::{Block, BlockId, Justification};
+use rdy_model::{Block, BlockId, Hash, Justification, Op};
 use rdy_schema::{Trait, supporting};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -219,12 +219,16 @@ fn selected(
 struct Fold<'a> {
     order: Vec<BlockId>,
     last: BTreeMap<BlockId, &'a Justification>,
+    /// Each written block's version before the selected changes' first write of it and after
+    /// their last: the net the selected changes make by themselves, whatever the view did since.
+    ends: BTreeMap<BlockId, (Option<Hash>, Option<Hash>)>,
 }
 
 fn fold<'a>(inputs: CaseInputs<'a>, visited: &mut Visited) -> Result<Fold<'a>, RdyError> {
     let mut order = vec![];
     let mut seen = BTreeSet::new();
     let mut last = BTreeMap::new();
+    let mut ends: BTreeMap<BlockId, (Option<Hash>, Option<Hash>)> = BTreeMap::new();
     for i in inputs.st.landing_order(inputs.changes) {
         let change = &inputs.changes[i];
         for op in &change.ops {
@@ -233,18 +237,35 @@ fn fold<'a>(inputs: CaseInputs<'a>, visited: &mut Visited) -> Result<Fold<'a>, R
                 visited.visit()?;
                 order.push(id.clone());
             }
+            let written = match op {
+                Op::Create { block } | Op::Update { block, .. } => Some(block.version_hash()),
+                Op::Delete { .. } => None,
+            };
+            ends.entry(id.clone())
+                .and_modify(|e| e.1 = written)
+                .or_insert((op.base(), written));
             if let Some(j) = &change.justification {
                 last.insert(id.clone(), j);
             }
         }
     }
-    Ok(Fold { order, last })
+    Ok(Fold { order, last, ends })
 }
 
-/// The net before and after of `id`; `None` when the selected changes leave it as it was.
-fn net<'a>(inputs: CaseInputs<'a>, id: &BlockId) -> Option<(Option<&'a Block>, Option<&'a Block>)> {
-    (inputs.before.version_of(id) != inputs.after.version_of(id))
-        .then(|| (inputs.before.get(id), inputs.after.get(id)))
+/// The before and after rows of `id`; `None` when the selected changes by themselves leave it as
+/// they found it (a write they undo is net zero, whatever later view edits do to it), or when
+/// neither state shows it. Membership reads the selected changes only; the rows show the states.
+fn net<'a>(
+    inputs: CaseInputs<'a>,
+    folded: &Fold<'_>,
+    id: &BlockId,
+) -> Option<(Option<&'a Block>, Option<&'a Block>)> {
+    let (first, last) = folded.ends.get(id)?;
+    if first == last {
+        return None;
+    }
+    let rows = (inputs.before.get(id), inputs.after.get(id));
+    (rows.0.is_some() || rows.1.is_some()).then_some(rows)
 }
 
 pub(super) fn meaning(s: &CheckSubject, inputs: CaseInputs<'_>) -> Result<BuiltCase, RdyError> {
@@ -258,7 +279,7 @@ pub(super) fn meaning(s: &CheckSubject, inputs: CaseInputs<'_>) -> Result<BuiltC
         if !matches!(folded.last.get(id), Some(Justification::Editorial { .. })) {
             continue;
         }
-        if let Some((before, after)) = net(inputs, id) {
+        if let Some((before, after)) = net(inputs, &folded, id) {
             rows.push(primary("subject", id, before, after, Selection::Shown));
             subject_blocks.push(id.clone());
         }
@@ -343,7 +364,7 @@ pub(super) fn fidelity(s: &CheckSubject, inputs: CaseInputs<'_>) -> Result<Built
         let Some(Justification::Implements(list)) = folded.last.get(id) else {
             continue;
         };
-        if net(inputs, id).is_none() {
+        if net(inputs, &folded, id).is_none() {
             continue;
         }
         subject_blocks.push(id.clone());
@@ -373,7 +394,7 @@ pub(super) fn fidelity(s: &CheckSubject, inputs: CaseInputs<'_>) -> Result<Built
             rows.push(primary("decision", d, b, None, Selection::Decision));
         }
         for id in under.get(d).into_iter().flatten() {
-            if let Some((before, after)) = net(inputs, id) {
+            if let Some((before, after)) = net(inputs, &folded, id) {
                 rows.push(primary("subject", id, before, after, Selection::Shown));
             }
         }
@@ -522,7 +543,7 @@ pub(super) fn prose(s: &CheckSubject, inputs: CaseInputs<'_>) -> Result<BuiltCas
     let written: BTreeSet<&BlockId> = folded
         .order
         .iter()
-        .filter(|id| net(inputs, id).is_some())
+        .filter(|id| net(inputs, &folded, id).is_some())
         .collect();
     // the new decisions, and the name a refusal gives the subject when its prose is empty
     let (news, who, kind): (Vec<&Block>, String, String) = if let Some(v) = &s.version {

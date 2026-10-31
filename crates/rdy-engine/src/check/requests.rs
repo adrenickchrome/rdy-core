@@ -272,15 +272,45 @@ pub(crate) fn block_authors(
     Ok(out)
 }
 
-/// The first of `blocks` whose text `actor` wrote in `m`.
+/// The actors who wrote primary block `id` of the case `h` reads: its text authors in the
+/// judged state; for a block that state no longer holds (the subject deletes it), the actors of
+/// the selected changes that delete it and the text authors of the before version the case
+/// shows.
+pub(crate) fn subject_authors(
+    st: &ReadState,
+    h: &Holder,
+    id: &BlockId,
+) -> Result<Vec<String>, RdyError> {
+    if h.after.get(id).is_some() {
+        return block_authors(st, &h.after, id);
+    }
+    let mut out: Vec<String> = vec![];
+    for c in &h.changes {
+        let deletes = c
+            .ops
+            .iter()
+            .any(|op| matches!(op, rdy_model::Op::Delete { id: d, .. } if d == id));
+        if deletes && !out.contains(&c.provenance.actor) {
+            out.push(c.provenance.actor.clone());
+        }
+    }
+    for a in block_authors(st, &h.before, id)? {
+        if !out.contains(&a) {
+            out.push(a);
+        }
+    }
+    Ok(out)
+}
+
+/// The first of `blocks` whose text `actor` wrote, as [`subject_authors`] reads it.
 pub(crate) fn authored_block(
     st: &ReadState,
-    m: &Materialized,
+    h: &Holder,
     blocks: &[BlockId],
     actor: &str,
 ) -> Result<Option<BlockId>, RdyError> {
     for b in blocks {
-        if block_authors(st, m, b)?.iter().any(|a| a == actor) {
+        if subject_authors(st, h, b)?.iter().any(|a| a == actor) {
             return Ok(Some(b.clone()));
         }
     }
@@ -514,7 +544,7 @@ pub(crate) fn next_durable(
             Rebuilt::Built(c) if c.hash == r.case_hash => c,
             _ => return Ok(true),
         };
-        if authored_block(st, holder.after(), &r.subject.blocks, actor)?.is_some() {
+        if authored_block(st, &holder, &r.subject.blocks, actor)?.is_some() {
             return Ok(true);
         }
         found = Some((h, r, case));

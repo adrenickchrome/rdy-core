@@ -372,7 +372,7 @@ fn own_work(
     let Some(h) = holder(st, label, named)? else {
         return Ok(false);
     };
-    Ok(authored_block(st, h.after(), &blocks, actor)?.is_some())
+    Ok(authored_block(st, &h, &blocks, actor)?.is_some())
 }
 
 /// A request's reason, trimmed: 1 to 2000 characters and at most 8000 bytes.

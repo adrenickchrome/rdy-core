@@ -261,7 +261,7 @@ impl Rdy {
         if record.mode == CheckMode::Independent {
             let h = holder(&st, &record.scope, &record.subject)?
                 .ok_or_else(|| case_changed(&label, record.mode))?;
-            if let Some(b) = authored_block(&st, h.after(), &record.subject.blocks, &s.actor)? {
+            if let Some(b) = authored_block(&st, &h, &record.subject.blocks, &s.actor)? {
                 return Err(self_review(&s.actor, &b, &label));
             }
         }

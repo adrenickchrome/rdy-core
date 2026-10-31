@@ -1461,3 +1461,118 @@ fn ck6_new_verdicts_do_not_change_readiness_policy_or_coverage() {
         assert_eq!(facts(&w.e), before, "after a {verdict}");
     }
 }
+
+/// Fix round 1 (review finding 1): a proposal's case reads only the net changes its own selected
+/// changes make. A block those changes edit and restore stays out of the case when a later view
+/// edit, which is not in the version, changes it again.
+#[test]
+fn ck6_version_case_keeps_its_own_net_blocks() {
+    let w = world();
+    let a = ag("a");
+    let (aw, cw) = (w.s.a.clone(), w.s.c.clone());
+    with(&w.e, move |r| {
+        put_j(r, "a", upd(&aw, "A holds!"), j_typo());
+        put_j(r, "a", upd(&aw, "A holds."), j_typo());
+        put_j(r, "a", upd(&cw, "C stands alone!"), j_typo())
+    });
+    let version = rdy_engine::engine::with_writer_result(&w.e, move |r| {
+        r.propose(&ag("a"), "a", "a", Some(TEST_SUMMARY))
+    })
+    .unwrap();
+    let first = request_on(&w, &a, "meaning_preservation", json!(version.r#ref));
+    assert_eq!(
+        record(&w.e, &first["request"]).subject.blocks,
+        vec![w.s.c.clone()]
+    );
+    // a later edit of A in the view, not in the version
+    let aw = w.s.a.clone();
+    with(&w.e, move |r| {
+        put_j(r, "a", upd(&aw, "A holds!!"), j_typo())
+    });
+    let row = |label: &Value| -> Value {
+        list(&w.e, &reader(), json!({}))["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["request"] == *label)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(row(&first["request"])["status"], "open");
+    let again = request_on(&w, &a, "meaning_preservation", json!(version.r#ref));
+    assert_eq!(
+        record(&w.e, &again["request"]).subject.blocks,
+        vec![w.s.c.clone()]
+    );
+    assert_eq!(again["case_hash"], first["case_hash"]);
+    let ids: Vec<&Value> = again["case"]["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| &b["id"])
+        .collect();
+    assert!(
+        !ids.contains(&&json!(w.s.a.to_string())),
+        "{}",
+        again["case"]
+    );
+}
+
+/// Fix round 1 (review finding 2): the authors of a primary block the subject deletes are read
+/// from the deletion and the displayed before version, so another run of the author cannot claim
+/// or judge the request.
+#[test]
+fn ck6_deleted_subject_keeps_its_authors() {
+    let (_dir, mut r) = project();
+    let s = spec_doc(&mut r);
+    let made = put(
+        &mut r,
+        "a",
+        json!([{"op": "create", "type": "claim", "id": "$x", "parent": s.section.to_string(),
+                "body": "X is short-lived."}]),
+    );
+    let x = created(&made, "$x");
+    land(&mut r, "a").unwrap();
+    let gone = change_of(&put_j(
+        &mut r,
+        "a",
+        json!([{"op": "delete", "id": x.to_string()}]),
+        j_typo(),
+    ));
+    let e = Local::new(r);
+    let q = ok(
+        &e,
+        &ag("a"),
+        json!({"op": "request", "check": "meaning_preservation", "subject": gone.to_string()}),
+    );
+    let (rq, ch) = (
+        q["request"].as_str().unwrap().to_string(),
+        q["case_hash"].as_str().unwrap().to_string(),
+    );
+    assert_eq!(record(&e, &q["request"]).subject.blocks, vec![x.clone()]);
+    // another run of agent:a neither claims nor judges it
+    let same = reviewer("agent:a", "b");
+    let seq = e.read().seq();
+    assert_eq!(
+        refusal(submit(&e, &same, &rq, &ch, "pass", &[], None)),
+        (
+            E_SELF_REVIEW,
+            format!(
+                "actor agent:a wrote block {x} of {rq}; another run of the same actor is not independent"
+            ),
+            "a reviewer of another actor judges it".into()
+        )
+    );
+    assert_eq!(e.read().seq(), seq, "a refusal appends nothing");
+    assert_eq!(
+        next(&e, &same, 7, "meaning_preservation").unwrap()["request"],
+        Value::Null
+    );
+    // a reviewer of another actor claims and judges it
+    let other = reviewer("agent:r", "r");
+    assert_eq!(
+        next(&e, &other, 8, "meaning_preservation").unwrap()["request"],
+        rq.as_str()
+    );
+    submit(&e, &other, &rq, &ch, "pass", &[], None).unwrap();
+}
