@@ -106,6 +106,8 @@ struct ReaderShared {
     frames_read: AtomicU64,
     /// Ref entries read by `refs_with_prefix` and `open_proposal_refs` (a test hook).
     refs_read: AtomicU64,
+    /// Walks of the typed table by `for_each_object_of` (a test hook).
+    kind_walks: AtomicU64,
     /// Log frames read by `visit_carried` (a test hook).
     carried_frames_read: AtomicU64,
     /// The redaction epoch of this store family: zero at open; it advances once per newly synced
@@ -1544,6 +1546,7 @@ impl Store {
                 sets: Mutex::new(HashMap::new()),
                 frames_read: AtomicU64::new(0),
                 refs_read: AtomicU64::new(0),
+                kind_walks: AtomicU64::new(0),
                 carried_frames_read: AtomicU64::new(0),
                 epoch: Arc::new(AtomicU64::new(0)),
                 poisoned: AtomicBool::new(false),
@@ -1713,6 +1716,7 @@ impl Store {
                 sets: Mutex::new(HashMap::new()),
                 frames_read: AtomicU64::new(0),
                 refs_read: AtomicU64::new(0),
+                kind_walks: AtomicU64::new(0),
                 carried_frames_read: AtomicU64::new(0),
                 epoch: Arc::new(AtomicU64::new(0)),
                 poisoned: AtomicBool::new(false),
@@ -1997,6 +2001,16 @@ impl Store {
     /// The features the log's latest `meta/store_features` ref holds.
     pub fn features(&self) -> &StoreFeatures {
         &self.features
+    }
+
+    /// Whether feature `name` is active for every frame the log holds now: the sealed features,
+    /// or the open held batch's when one of its writes activated one (they only add). A record
+    /// that needs a feature (`format::required_features`) is in the log only when it is.
+    pub fn has_feature_now(&self, name: &str) -> bool {
+        self.held_features
+            .as_ref()
+            .unwrap_or(&self.features)
+            .has(name)
     }
 
     /// The upgrade transaction's commit (D-WWAK7): exactly the features ref (`features`) and the
@@ -3588,6 +3602,13 @@ impl StoreReader {
         self.shared.refs_read.load(Ordering::Relaxed)
     }
 
+    /// Walks of the whole typed table by [`StoreReader::for_each_object_of`] so far, by every
+    /// reader of this store (a test hook).
+    #[doc(hidden)]
+    pub fn kind_walks(&self) -> u64 {
+        self.shared.kind_walks.load(Ordering::Relaxed)
+    }
+
     /// How many refs start with `prefix`, without reading their values.
     pub fn count_refs(&self, prefix: &str) -> Result<usize, StoreError> {
         self.index().count_refs(prefix)
@@ -3955,7 +3976,19 @@ impl StoreReader {
         kind: u8,
         f: impl FnMut(Hash) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
+        self.shared.kind_walks.fetch_add(1, Ordering::Relaxed);
         self.index().for_each_object_of(kind, f)
+    }
+
+    /// [`StoreReader::for_each_object_of`] for the objects of `kind` whose hash's lower-case hex
+    /// starts with `hex`, from a range of the index (no walk of every object).
+    pub fn for_each_object_of_with_prefix(
+        &self,
+        kind: u8,
+        hex: &str,
+        f: impl FnMut(Hash) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        self.index().for_each_object_of_with_prefix(kind, hex, f)
     }
 
     /// The changes with an op that deletes `block`, ascending.

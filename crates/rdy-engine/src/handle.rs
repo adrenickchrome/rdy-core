@@ -345,6 +345,7 @@ impl Rdy {
         // a placeholder until the first publish below, which replaces all of it
         let state = ArcSwap::from_pointee(ReadState {
             seq: store.log_end(),
+            check_records: crate::read_state::check_records(&store),
             canon_head: None,
             canon: Arc::new(Entry::new(None, None, None, Arc::new(vec![]))),
             views: imbl::HashMap::new(),

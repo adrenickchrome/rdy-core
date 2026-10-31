@@ -647,6 +647,103 @@ fn ck2_captured_read_excludes_later_records() {
     assert_eq!(seen, 1);
 }
 
+/// The prefix read names exactly the requests of a full walk whose hex starts with the prefix,
+/// at every prefix length, odd or even, and keeps the walk's captured end: it is a range of the
+/// index, so its cost does not grow with the store (perf: review_submit_1k).
+#[test]
+fn ckperf1_a_prefix_read_names_what_the_full_walk_names() {
+    let p = project();
+    let mut s = p.open();
+    let early: Vec<Hash> = s
+        .put_check_requests(&(1..=12).map(|n| p.request(n)).collect::<Vec<_>>())
+        .unwrap();
+    let old = s.log_end();
+    let later = s.put_check_request(&p.request(13)).unwrap();
+    let now = s.log_end();
+    let r = s.reader();
+    let by_prefix = |end: Location, hex: &str| {
+        let mut out = vec![];
+        r.for_each_check_request_with_prefix(end, hex, |h, _| {
+            out.push(h);
+            Ok(())
+        })
+        .unwrap();
+        out
+    };
+    for end in [old, now] {
+        let walked = requests(&r, end);
+        for h in early.iter().chain([&later]) {
+            let hex = h.to_string();
+            for len in [0, 1, 2, 3, 6, 7, 12, 13, 63, 64] {
+                let prefix = &hex[..len];
+                let want: Vec<Hash> = walked
+                    .iter()
+                    .filter(|w| w.to_string().starts_with(prefix))
+                    .copied()
+                    .collect();
+                assert_eq!(by_prefix(end, prefix), want, "prefix {prefix:?}");
+            }
+        }
+    }
+    assert_eq!(by_prefix(old, &later.to_string()), []);
+    assert_eq!(by_prefix(now, &later.to_string()), [later]);
+    // a prefix that is not lower-case hex, or too long, names nothing, as in the walk
+    let upper = later.to_string()[..12].to_ascii_uppercase();
+    assert_eq!(by_prefix(now, &upper), []);
+    assert_eq!(by_prefix(now, &format!("{later}0")), []);
+    // another kind's object with the prefix is not a request
+    assert_eq!(by_prefix(now, &p.version.to_string()), []);
+    // an error of the visitor stops the read and comes back
+    let stopped = r.for_each_check_request_with_prefix(now, "", |_, _| {
+        Err(StoreError::Refused("stop".into()))
+    });
+    assert_eq!(refused(stopped.unwrap_err()), "stop");
+}
+
+/// ckperf2 (perf ruling, Option A): the engine reads "no check record" from the store's
+/// `check_request` feature. Each of the three check records activates it in the batch that first
+/// writes it (a store writes a Check review only of a request it holds, and an AcceptVerdict
+/// answer only of such a review, so each record's own frame is checked too). Once on, it stays
+/// on after a reopen and a load, and the walk still finds the request.
+#[test]
+fn ckperf2_each_check_record_turns_the_feature_on_and_the_walk_still_finds_it() {
+    let p = project();
+    let mut s = p.open();
+    assert!(!s.has_feature_now(CHECK_REQUEST_FEATURE));
+    // whether a new item's frame activates the feature
+    let uses = |(raw, payload): (u8, Vec<u8>)| {
+        format::required_features(raw, &payload)
+            .iter()
+            .any(|f| f.name == CHECK_REQUEST_FEATURE)
+    };
+    let req = p.request(1);
+    let q = id_of(kinds::CHECK_REQUEST, &req);
+    let review = verdict_review(q, case(1), Verdict::Concern, &p.block);
+    let answer = verdict_answer(id_of(kinds::REVIEW, &review), "P-a@1");
+    assert!(uses(codec::item_new(kinds::CHECK_REQUEST, &req)));
+    assert!(uses(codec::item_new(kinds::REVIEW, &review)));
+    assert!(uses(codec::item_new(kinds::ANSWER, &answer)));
+    // the first request turns it on in its own batch
+    let before = s.log_end();
+    assert_eq!(s.put_check_request(&req).unwrap(), q);
+    assert!(s.has_feature_now(CHECK_REQUEST_FEATURE));
+    assert_eq!(requests(&s.reader(), before), []);
+    assert_eq!(requests(&s.reader(), s.log_end()), [q]);
+    s.put_check_review(&review).unwrap();
+    s.put_answer(&answer).unwrap();
+    assert!(s.has_feature_now(CHECK_REQUEST_FEATURE));
+    drop(s);
+    // a reopen and a load read it from the log
+    let s = p.open();
+    assert!(s.has_feature_now(CHECK_REQUEST_FEATURE));
+    assert_eq!(requests(&s.reader(), s.log_end()), [q]);
+    drop(s);
+    let to = tempfile::tempdir().unwrap();
+    let loaded = load(&p.path, &to.path().join("loaded"));
+    assert!(loaded.has_feature_now(CHECK_REQUEST_FEATURE));
+    assert_eq!(requests(&loaded.reader(), loaded.log_end()), [q]);
+}
+
 #[test]
 fn ck2_verdict_answers_keep_each_version_in_history() {
     let p = project();

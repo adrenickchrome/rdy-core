@@ -136,6 +136,18 @@ impl StoreReader {
         self.for_each_record_before(kinds::CHECK_REQUEST, end, f)
     }
 
+    /// [`StoreReader::for_each_check_request`] for the requests whose hash's lower-case hex
+    /// starts with `hex`: a range of the index, so its cost does not grow with the store.
+    pub fn for_each_check_request_with_prefix(
+        &self,
+        end: Location,
+        hex: &str,
+        mut f: impl FnMut(Hash, CheckRequest) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        let kind = kinds::CHECK_REQUEST;
+        self.for_each_object_of_with_prefix(kind, hex, |h| self.visit_before(kind, h, end, &mut f))
+    }
+
     /// Calls `f` with every Check review the log held before `end`, whatever request it names.
     pub fn for_each_check_review(
         &self,
@@ -175,15 +187,25 @@ impl StoreReader {
         end: Location,
         mut f: impl FnMut(Hash, T) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
-        self.for_each_object_of(kind, |h| {
-            if !self.has_kind_before(kind, &h, end)? {
-                return Ok(());
-            }
-            match self.get_typed::<T>(kind, &h) {
-                Ok(v) => f(h, v),
-                Err(StoreError::Redacted { .. }) => Ok(()),
-                Err(e) => Err(e),
-            }
-        })
+        self.for_each_object_of(kind, |h| self.visit_before(kind, h, end, &mut f))
+    }
+
+    /// Calls `f` with object `h` of `kind`, decoded, when the log held it before `end` and no
+    /// redaction removed it.
+    fn visit_before<T: DeserializeOwned + 'static>(
+        &self,
+        kind: u8,
+        h: Hash,
+        end: Location,
+        f: &mut impl FnMut(Hash, T) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        if !self.has_kind_before(kind, &h, end)? {
+            return Ok(());
+        }
+        match self.get_typed::<T>(kind, &h) {
+            Ok(v) => f(h, v),
+            Err(StoreError::Redacted { .. }) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 }

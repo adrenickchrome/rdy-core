@@ -106,14 +106,19 @@ fn with<T: serde::Serialize + 'static>(e: &Local, f: impl FnOnce(&mut Rdy) -> T 
 }
 
 /// A project whose canon holds the spec doc, and agent:a's proposed decision `p` in view `a`.
+/// The clock stays pinned while the world lives: a check request is content-addressed, so two
+/// asks of one subject in the same millisecond are one stored request (the deep gate met this
+/// twice on the bench); a pinned clock gives every ask its own stamp.
 struct World {
     dir: tempfile::TempDir,
     e: Local,
     s: Spec,
     p: BlockId,
+    _clock: rdy_engine::PinnedClock,
 }
 
 fn world() -> World {
+    let clock = pin_clock(now_ms());
     let (dir, mut r) = project();
     let s = spec_doc(&mut r);
     let p = try_decide_in(&mut r, "a", &s.section, "Cache the reads").unwrap();
@@ -122,6 +127,7 @@ fn world() -> World {
         e: Local::new(r),
         s,
         p,
+        _clock: clock,
     }
 }
 
@@ -520,7 +526,8 @@ fn ck6_contradiction_fans_out_and_keeps_pair_semantics() {
     );
     assert_eq!(w.e.read().seq(), seq);
 
-    // a canon-only pair: the person runs it on their own blocks and answers it
+    // a canon-only pair: the person runs it on their own blocks and answers it (the world's
+    // pinned clock gives the two runs below two stamps)
     let (ca, cc) = (w.s.a.to_string(), w.s.c.to_string());
     let canon = run_on(&w, &writer(), "contradiction", json!([ca, cc]));
     let rq = canon["request"].as_str().unwrap().to_string();
@@ -541,6 +548,7 @@ fn ck6_contradiction_fans_out_and_keeps_pair_semantics() {
     // precedence holds: a later no_tension on the settled pair is stale
     let again = run_on(&w, &writer(), "contradiction", json!([cc, ca]));
     assert_eq!(again["case_hash"], canon["case_hash"]);
+    assert_ne!(again["request"], canon["request"], "two runs, two requests");
     let (code, msg, fix) = refusal(submit(
         &w.e,
         &writer(),
@@ -1599,4 +1607,61 @@ fn ck6_deleted_subject_keeps_its_authors() {
         rq.as_str()
     );
     submit(&e, &other, &rq, &ch, "pass", &[], None).unwrap();
+}
+
+/// ckperf2 (perf ruling, Option A): a store with no check record answers "no check request"
+/// from its `check_request` feature, with no walk of its objects, and readiness reads no walk
+/// either. Once a first request is written the feature is on and the walk finds it, after a
+/// restart and after a dump and load too.
+#[test]
+fn ckperf2_no_check_record_skips_the_walk_and_a_first_request_is_found() {
+    use rdy_engine::check::any_check_request_for_tests;
+    let w = world();
+    let a = ag("a");
+    let cw = w.s.c.clone();
+    with(&w.e, move |r| {
+        put_j(r, "a", upd(&cw, "C stands alone!"), j_typo())
+    });
+    let version = rdy_engine::engine::with_writer_result(&w.e, move |r| {
+        r.propose(&ag("a"), "a", "a", Some(TEST_SUMMARY))
+    })
+    .unwrap();
+    // (any request, walks of that answer, walks of the version's readiness)
+    let probe = |e: &Local| -> (bool, u64, u64) {
+        let st = e.read();
+        let w0 = st.reader().kind_walks();
+        let any = any_check_request_for_tests(&st).unwrap();
+        let w1 = st.reader().kind_walks();
+        let v: Hash = version.id.parse().unwrap();
+        let pref = e.inspect(|r| r.resolve_proposal(&version.id)).unwrap();
+        let c = Candidate::stored(&st, pref, st.reader().proposal(&v).unwrap()).unwrap();
+        readiness(&st, &c).unwrap();
+        (any, w1 - w0, st.reader().kind_walks() - w1)
+    };
+    assert_eq!(probe(&w.e), (false, 0, 0), "no check record: no walk");
+    let q = request_on(&w, &a, "meaning_preservation", json!(version.r#ref));
+    let (any, walks, readiness_walks) = probe(&w.e);
+    assert!(any, "the first request is found");
+    assert_eq!(walks, 1, "the feature is on: the walk decides");
+    assert!(readiness_walks > 0, "readiness reads the verdicts again");
+    // a restart reads the feature from the log
+    let dir = w.dir.path().to_path_buf();
+    let World { dir: keep, e, .. } = w;
+    e.close().unwrap();
+    let e = Local::open(&dir).unwrap();
+    assert!(probe(&e).0, "after a restart");
+    assert_eq!(
+        list(&e, &reader(), json!({}))["requests"][0]["request"],
+        q["request"]
+    );
+    // a dump and load carries it
+    let scratch = tempfile::tempdir().unwrap();
+    let file = scratch.path().join("p.rdydump");
+    e.read().dump(&file).unwrap();
+    e.close().unwrap();
+    let to = scratch.path().join("loaded");
+    rdy_engine::load::load(&file, &to).unwrap();
+    let loaded = Local::open(&to).unwrap();
+    assert!(probe(&loaded).0, "after a dump and load");
+    drop(keep);
 }

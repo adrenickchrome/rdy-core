@@ -22,4 +22,6 @@ pub use code::{parse_code_range, resolve_code_range};
 pub use options::{ConsideredOptions, LandingProjection, considered_options, landing_projection};
 pub use rules::{RuleIssue, RuleScan, evaluate_rules};
 pub use stages::{DeterministicCheck, STAGE_CHECKS, Stage, StageCheck};
-pub use verdicts::{MatchingVerdict, accepted_verdict_issues, matching_verdicts};
+pub use verdicts::{
+    MatchingVerdict, accepted_verdict_issues, any_check_request_for_tests, matching_verdicts,
+};

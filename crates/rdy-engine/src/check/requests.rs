@@ -385,18 +385,18 @@ pub(crate) fn for_each_request(
 }
 
 /// The durable requests whose full hex starts with `hex` (12 to 64 lowercase hex digits; a
-/// shorter prefix names none), in hash order.
+/// shorter prefix names none), in hash order. A range of the index: every submit runs it, a
+/// derived request's too, so it reads only the requests the prefix names.
 pub(crate) fn durable_matches(st: &ReadState, hex: &str) -> Result<Vec<Hash>, RdyError> {
     if hex.len() < MIN_DURABLE_HEX {
         return Ok(vec![]);
     }
     let mut out = vec![];
-    for_each_request(st, |h, _| {
-        if h.to_string().starts_with(hex) {
+    st.reader()
+        .for_each_check_request_with_prefix(st.seq(), hex, |h, _| {
             out.push(h);
-        }
-        Ok(true)
-    })?;
+            Ok(())
+        })?;
     Ok(out)
 }
 

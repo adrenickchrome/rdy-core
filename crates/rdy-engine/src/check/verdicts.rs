@@ -261,8 +261,13 @@ impl VersionState {
 }
 
 /// Whether the log held any check request at `st`'s captured end: with none it holds no Check
-/// review and no AcceptVerdict answer either.
+/// review and no AcceptVerdict answer either. A store without the `check_request` feature holds
+/// none of the three, so no walk is needed; with it, the walk decides (it reads every object of
+/// the store, [`rdy_store::StoreReader::for_each_object_of`]).
 fn any_request(st: &ReadState) -> Result<bool, RdyError> {
+    if !st.check_records {
+        return Ok(false);
+    }
     let reader = st.reader();
     let end = st.seq();
     let mut found = false;
@@ -278,6 +283,12 @@ fn any_request(st: &ReadState) -> Result<bool, RdyError> {
     }
     walked.map_err(RdyError::from)?;
     Ok(false)
+}
+
+/// Tests only: [`any_request`] on `st`.
+#[doc(hidden)]
+pub fn any_check_request_for_tests(st: &ReadState) -> Result<bool, RdyError> {
+    any_request(st)
 }
 
 /// Runs `walk`, whose callback may fail with an engine error, as one engine result.
