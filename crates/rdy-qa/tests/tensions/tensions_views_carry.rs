@@ -279,6 +279,9 @@ fn ibperf2_a_landing_carries_the_set() {
 
 #[test]
 fn ibperf2_a_carry_unfiles_only_the_keys_of_the_blocks_it_writes() {
+    // seeded ids: a random id of view b's batch can equal one of view a's flight (about 0.2% of
+    // runs; seed 152 does), a create/create the commit never carries (`Rdy::writes_fresh`)
+    rdy_model::seed_ids_for_tests(0x4942_5032);
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);
     // a flight big enough that a 200-claim commit carries
@@ -305,6 +308,7 @@ fn ibperf2_a_carry_unfiles_only_the_keys_of_the_blocks_it_writes() {
         "{walked} keys walked for {n} blocks"
     );
     same_as_rebuilt(&r).unwrap();
+    rdy_model::unseed_ids_for_tests();
 }
 
 #[test]
