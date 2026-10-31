@@ -47,7 +47,7 @@ fn bsrch1_a_literal_finds_lines_in_bodies_fields_and_code_in_reading_order() {
             "query": "rdy init", "regex": false, "ignore_case": false, "total": 3,
             "totals": {"docs": [{"path": "guide", "hits": 3}], "types": {"code": 1, "flow": 1, "prose": 1}},
             "matches": [
-                {"id": p, "type": "prose", "path": "guide", "lines": [{"field": "body", "line": 2, "text": "Run rdy init to start."}], "coverage": 75, "issues": 1, "confidence": "low"},
+                {"id": p, "type": "prose", "path": "guide", "lines": [{"field": "body", "line": 2, "text": "Run rdy init to start."}], "coverage": 80, "issues": 1, "confidence": "low"},
                 {"id": c, "type": "code", "path": "guide", "lines": [{"field": "body", "line": 1, "text": "rdy init"}], "coverage": 75, "issues": 1, "confidence": "low"},
                 {"id": f, "type": "flow", "path": "guide", "lines": [{"field": "steps[0]", "line": 1, "text": "Run rdy init"}], "coverage": 75, "issues": 1, "confidence": "low"}
             ]
