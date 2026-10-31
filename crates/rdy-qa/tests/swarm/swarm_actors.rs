@@ -939,3 +939,103 @@ fn sg4_a_lost_daemon_after_the_restart_fails_with_the_seed() {
         "no second Lost is journaled"
     );
 }
+
+// ---- O17 (D-JQD5X): a choosing version holds its choice decision ----
+
+/// O17 with ap13: agent a0 holds a scratch change, and the seeded draw makes its first propose
+/// scratch-only (`rdy_propose {changes}`), but its view is a member of an open set that another
+/// agent made. The propose is refused with `E_ALT_UNCHOSEN`; a0 records its choice decision and
+/// proposes again, choosing. A choosing version names the whole view: a list of the scratch
+/// changes leaves the decision out, and that version is not ready (`E_ALT_DECISION`). So the
+/// choosing version is ready: its reply carries the policy's verdict, which a not-ready version
+/// never has.
+#[test]
+fn sg4_a_choice_after_a_scratch_only_draw_holds_its_decision() {
+    let seed = (1..1_000)
+        .find(|s| agent::scratch_only_draw(*s, 0, 0))
+        .expect("a seed whose first propose of a0 is scratch-only");
+    let cfg = Config {
+        seed,
+        agents: 2,
+        steps: 12,
+        kill_at: None,
+    };
+    let p = project::build(&cfg);
+    let (j, g) = (Journal::new(), Arc::new(KillGate::new()));
+    // view a1 exists before the set names it
+    run(
+        &p,
+        &cfg,
+        1,
+        vec![Act::Write {
+            target: Pick::Seed(1),
+            stable: false,
+        }],
+        &j,
+        &g,
+    );
+    // a0's propose answers its change plan in the plan turn before its call: while this act
+    // turn is held, the call waits, so the set exists before it
+    let hold = g.act_turn();
+    let a0 = agent::spawn(
+        &p,
+        &cfg,
+        0,
+        vec![
+            Act::Write {
+                target: Pick::Seed(0),
+                stable: false,
+            },
+            Act::Propose,
+        ],
+        j.clone(),
+        g.clone(),
+    );
+    wait_for(&j, "a0's scratch write", |es| {
+        es.iter()
+            .any(|e| e.actor == "agent:a0" && e.act == "write" && e.outcome == Outcome::Ok)
+    });
+    let mut a1 = McpClient::start_proxy(&p.served);
+    a1.call(
+        "rdy_session",
+        json!({"actor": "agent:a1", "run": "a1", "role": "writer"}),
+    )
+    .ok();
+    let set = a1
+        .call(
+            "rdy_alternatives",
+            json!({"op": "create", "title": "which rule wins", "members": [
+                {"label": "a0", "view": "a0"}, {"label": "a1", "view": "a1"}]}),
+        )
+        .ok();
+    let set = set["set"]["id"].as_str().expect("the set's id").to_string();
+    drop(hold);
+    a0.join()
+        .unwrap_or_else(|e| panic!("agent a0 panicked: {e:?}"));
+    let all = || format!("{:#?}", j.entries());
+    let proposes = of(&j, "agent:a0", "propose");
+    assert_eq!(proposes.len(), 2, "{}", all());
+    assert_eq!(
+        proposes[0].outcome,
+        Outcome::Refused("E_ALT_UNCHOSEN".into()),
+        "{}",
+        all()
+    );
+    // the first attempt was the scratch-only draw: the seed draws it, a0 holds a scratch change
+    // and knew no set
+    let decided = of(&j, "agent:a0", "create");
+    assert_eq!(decided.len(), 1, "the choice decision: {}", all());
+    assert_eq!(decided[0].outcome, Outcome::Ok, "{}", all());
+    let choice = &proposes[1];
+    assert_eq!(choice.outcome, Outcome::Ok, "{}", all());
+    let reply = choice.reply.as_ref().expect("the choosing propose's reply");
+    assert_eq!(
+        reply["alternatives"],
+        json!({"set": set, "chosen": "a0"}),
+        "{reply:#}"
+    );
+    assert!(
+        reply["policy"]["verdict"].is_string(),
+        "the choosing version is not ready: {reply:#}"
+    );
+}
