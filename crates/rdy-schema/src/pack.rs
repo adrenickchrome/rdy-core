@@ -223,8 +223,9 @@ pub struct CoverageSettings {
     #[serde(default)]
     pub drift_threshold: Option<u32>,
     /// The most docs one level may hold directly before Complete flags it, 1 to 100000
-    /// (default 8).
-    #[serde(default)]
+    /// (default 8). Left out of the pack's JSON when unset, so a pack that never sets it keeps
+    /// its digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_docs_per_level: Option<u32>,
 }
 

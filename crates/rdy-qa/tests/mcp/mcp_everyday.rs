@@ -89,13 +89,19 @@ fn nb3_mcp_writes_and_reads_everyday_through_the_gate() {
         "rdy_write",
         json!({"ops": [{"op": "update", "id": entity, "fields": {"everyday": "yes"}}], "brief": t}),
     );
-    assert_eq!(bad.code(), Some("E_FIELD_KIND"), "{bad:?}");
+    assert_eq!(bad.code(), Some("E_VALIDATION"), "{bad:?}");
+    assert!(format!("{bad:?}").contains("E_FIELD_KIND"), "{bad:?}");
     let typo = c.call(
         "rdy_write",
         json!({"ops": [{"op": "update", "id": entity, "fields": {"everydy": true}}], "brief": t}),
     );
-    assert_eq!(typo.code(), Some("E_FIELD_UNKNOWN"), "{typo:?}");
-    assert!(format!("{typo:?}").contains("everyday"), "{typo:?}");
+    assert_eq!(typo.code(), Some("E_VALIDATION"), "{typo:?}");
+    let text = format!("{typo:?}");
+    assert!(text.contains("E_FIELD_UNKNOWN"), "{text}");
+    assert!(
+        text.contains("use one of:") && text.contains("everyday"),
+        "{text}"
+    );
 
     // a normative defining type: the flag is a change like any other, so it needs the normal
     // justification, and an editorial one clears it
