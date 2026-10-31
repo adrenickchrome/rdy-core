@@ -565,6 +565,49 @@ fn approve_now(e: &dyn Engine, p: &ProposalInfo) -> AnswerInfo {
         .unwrap_or_else(|err| panic!("approve {}: {err:#?}", p.r#ref))
 }
 
+/// A request reply's label and case hash.
+fn label_hash(q: &Value) -> (String, String) {
+    (
+        q["request"].as_str().expect("a request").to_string(),
+        q["case_hash"].as_str().unwrap().to_string(),
+    )
+}
+
+/// One side of a case row: its version and its body text.
+type Side = Option<(String, String)>;
+
+/// The before and after sides of block `id`'s row in `case`.
+fn x_sides(case: &Value, id: &BlockId) -> (Side, Side) {
+    let row = case["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == id.to_string())
+        .unwrap_or_else(|| panic!("a row of {id}: {case}"));
+    let side = |v: &Value| -> Side {
+        if v.is_null() {
+            return None;
+        }
+        let body = v["text"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["field"] == "body")
+            .map(|t| t["text"].as_str().unwrap().to_string())
+            .unwrap_or_default();
+        Some((v["version"].as_str().unwrap().to_string(), body))
+    };
+    (side(&row["before"]), side(&row["after"]))
+}
+
+/// The sides `before` and `after`, as [`x_sides`] reads them.
+fn sides(before: (Hash, &str), after: (Hash, &str)) -> (Side, Side) {
+    (
+        Some((before.0.to_string(), before.1.to_string())),
+        Some((after.0.to_string(), after.1.to_string())),
+    )
+}
+
 // ---------------------------------------------------------------- tests
 
 /// O13: all seven checks other than contradiction, with both modes, show after every stored
@@ -992,18 +1035,55 @@ fn ck7_only_matching_selected_cases_show() {
         .collect();
     shown.sort();
     assert_eq!(shown, both, "an unproposed overwrite of the same block");
-    // a subset of the reviewed change, chosen after an overwrite it excludes
+    // a subset of the reviewed change, chosen after an overwrite it excludes (final review F1:
+    // every case shows the selected changes' own versions, and a change shows its immediate
+    // preimage)
     let k = notes();
+    let x_in = |scope: rdy_engine::Scope| k.e.read().materialized(&scope).unwrap().version_of(&k.x);
+    let v0 = x_in(rdy_engine::Scope::Canon).unwrap();
     let c1 = write_in(&k.e, "a1", upd(&k.x, "X holds, now."), j_typo())
         .change
         .clone();
-    let on_c1 = {
-        let q = ask(&k.e, &a1, "meaning_preservation", json!(c1), false);
-        answer_request(&k.e, &reviewer(), &q, "fail", &k.x)
-    };
+    let v1 = x_in(rdy_engine::Scope::View("a1".into())).unwrap();
+    let q1 = review_op(
+        &k.e,
+        &a1,
+        json!({"op": "request", "check": "meaning_preservation", "subject": c1}),
+    );
+    assert_eq!(
+        x_sides(&q1["case"], &k.x),
+        sides((v0, "X holds."), (v1, "X holds, now.")),
+        "{}",
+        q1["case"]
+    );
+    let on_c1 = answer_request(&k.e, &reviewer(), &label_hash(&q1), "fail", &k.x);
     let c2 = write_in(&k.e, "a1", upd(&k.x, "X holds, later."), j_typo())
         .change
         .clone();
+    let v2 = x_in(rdy_engine::Scope::View("a1".into())).unwrap();
+    // the later change's before side is the earlier change's text, not canon's
+    let q2 = review_op(
+        &k.e,
+        &a1,
+        json!({"op": "request", "check": "meaning_preservation", "subject": c2}),
+    );
+    assert_eq!(
+        x_sides(&q2["case"], &k.x),
+        sides((v1, "X holds, now."), (v2, "X holds, later.")),
+        "{}",
+        q2["case"]
+    );
+    // the earlier change's case ignores the later write: the same case as before it
+    let again_c1 = review_op(
+        &k.e,
+        &a1,
+        json!({"op": "request", "check": "meaning_preservation", "subject": c1}),
+    );
+    assert_eq!(
+        again_c1["case_hash"], q1["case_hash"],
+        "{}",
+        again_c1["case"]
+    );
     let only_c1 = {
         let c1 = c1.clone();
         on(&k.e, move |r| {
@@ -1017,7 +1097,29 @@ fn ck7_only_matching_selected_cases_show() {
         vec![on_c1.clone()],
         "the excluded overwrite of the same block"
     );
-    // the overwrite proposed too: the net text is another case
+    // the version's case shows the text it lands, never the excluded overwrite, and its pass
+    // shows on its card
+    let qv = review_op(
+        &k.e,
+        &a1,
+        json!({"op": "request", "check": "meaning_preservation", "subject": only_c1.r#ref}),
+    );
+    assert_eq!(
+        x_sides(&qv["case"], &k.x),
+        sides((v0, "X holds."), (v1, "X holds, now.")),
+        "{}",
+        qv["case"]
+    );
+    let on_only = answer_request(&k.e, &reviewer(), &label_hash(&qv), "pass", &k.x);
+    let mut shown = vec![on_c1.clone(), on_only.clone()];
+    shown.sort();
+    assert_eq!(
+        reviews(&approve_card(&k.e, &only_c1.r#ref)),
+        shown,
+        "the version's own pass"
+    );
+    // the overwrite proposed too: the version's net text is another case, while the earlier
+    // change's own case is unchanged
     let with_c2 = {
         let (c1, c2) = (c1.clone(), c2.clone());
         on(&k.e, move |r| {
@@ -1025,9 +1127,21 @@ fn ck7_only_matching_selected_cases_show() {
         })
         .unwrap()
     };
-    assert!(
-        approve_card(&k.e, &with_c2.r#ref).check_verdicts.is_empty(),
-        "the proposed overwrite changes the case"
+    assert_eq!(
+        reviews(&approve_card(&k.e, &with_c2.r#ref)),
+        vec![on_c1.clone()],
+        "the proposed overwrite changes the version's case only"
+    );
+    let qw = review_op(
+        &k.e,
+        &a1,
+        json!({"op": "request", "check": "meaning_preservation", "subject": with_c2.r#ref}),
+    );
+    assert_eq!(
+        x_sides(&qw["case"], &k.x),
+        sides((v0, "X holds."), (v2, "X holds, later.")),
+        "{}",
+        qw["case"]
     );
     drop((n.dir, m.dir, k.dir));
 }

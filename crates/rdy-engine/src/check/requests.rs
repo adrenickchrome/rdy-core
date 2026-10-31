@@ -13,7 +13,7 @@ use crate::{
     E_BAD_INPUT, E_CONFIG, E_IO, E_LIMIT, E_UNKNOWN_BLOCK, Materialized, RdyError, ReadState, Scope,
 };
 use rdy_model::check_request::{CheckMode, CheckRequest, CheckSubject};
-use rdy_model::{BlockId, Change, Hash, Review, ReviewSubject, Verdict};
+use rdy_model::{BlockId, Change, Hash, Op, Proposal, Review, ReviewSubject, Verdict};
 use rdy_store::StoreError;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -49,9 +49,9 @@ pub(crate) enum Rebuilt {
 
 /// The states one case reads, owned: what [`CaseInputs`] borrows.
 pub(crate) struct Holder {
-    before: Arc<Materialized>,
-    after: Arc<Materialized>,
-    changes: Vec<Change>,
+    pub(super) before: Arc<Materialized>,
+    pub(super) after: Arc<Materialized>,
+    pub(super) changes: Vec<Change>,
 }
 
 impl Holder {
@@ -97,10 +97,56 @@ fn at_base(st: &ReadState, base: Option<Hash>) -> Result<Arc<Materialized>, RdyE
     }
 }
 
+/// The states a proposal version's cases read: canon at its base, its candidate (that canon
+/// plus its selected changes, never its view, so a view write the version excludes or nobody
+/// proposed is never shown) and its selected changes, in the version's order. Request creation,
+/// freshness and the card's matching all read this one candidate.
+pub(crate) fn version_holder(
+    st: &ReadState,
+    version: &Hash,
+    p: &Proposal,
+) -> Result<Holder, RdyError> {
+    let reader = st.reader();
+    let mut changes = Vec::with_capacity(p.changes.len());
+    for c in &p.changes {
+        changes.push(reader.change(c)?);
+    }
+    Ok(Holder {
+        before: at_base(st, p.canon_at)?,
+        after: st.materialized(&Scope::Proposal(*version))?,
+        changes,
+    })
+}
+
+/// The states change `changes[at]` reads among `changes` on `base`: the state just before it
+/// (`base` with every change the landing order applies ahead of it) and just after it, with that
+/// change alone. A change's before side is therefore its immediate preimage, and a change
+/// ordered after it is never shown.
+pub(crate) fn change_holder(
+    st: &ReadState,
+    base: &Materialized,
+    changes: &[Change],
+    at: usize,
+) -> Holder {
+    let ahead: Vec<Op> = st
+        .landing_order(changes)
+        .into_iter()
+        .take_while(|&i| i != at)
+        .flat_map(|i| changes[i].ops.iter().cloned())
+        .collect();
+    let before = Arc::new(base.with(&ahead));
+    let after = Arc::new(before.with(&changes[at].ops));
+    Holder {
+        before,
+        after,
+        changes: vec![changes[at].clone()],
+    }
+}
+
 /// The states the case of `subject` (as a request stores it) reads now. A block subject reads
-/// its scope; a change reads its view against the view's base, with that change only; a proposal
-/// version reads its view (else the version itself) against its base, with its own changes.
-/// `None` when the scope's view is gone.
+/// its scope; a change reads its view's base with the view's changes ahead of it, and itself
+/// ([`change_holder`]); a proposal version reads its candidate against its base
+/// ([`version_holder`]). `None` when the scope's or the change's view is gone.
 pub(crate) fn holder(
     st: &ReadState,
     scope: &str,
@@ -109,33 +155,24 @@ pub(crate) fn holder(
     let reader = st.reader();
     if let Some(v) = &subject.version {
         let p = st.proposal_version(v)?;
-        let after = if st.has_view(&p.view) {
-            st.materialized(&Scope::View(p.view.clone()))?
-        } else {
-            st.materialized(&Scope::Proposal(*v))?
-        };
-        let mut changes = Vec::with_capacity(p.changes.len());
-        for c in &p.changes {
-            changes.push(reader.change(c)?);
-        }
-        return Ok(Some(Holder {
-            before: at_base(st, p.canon_at)?,
-            after,
-            changes,
-        }));
+        return Ok(Some(version_holder(st, v, &p)?));
     }
     if let Some(c) = &subject.change {
         let change = reader.change(c)?;
         if !st.has_view(&change.view) {
             return Ok(None);
         }
-        let before = at_base(st, st.effective_base(&change.view))?;
-        let after = st.materialized(&Scope::View(change.view.clone()))?;
-        return Ok(Some(Holder {
-            before,
-            after,
-            changes: vec![change],
-        }));
+        let base = at_base(st, st.effective_base(&change.view))?;
+        let included = st.included(&change.view);
+        let Some(at) = included.iter().position(|h| h == c) else {
+            // a change its view no longer includes reads on the view's base alone
+            return Ok(Some(change_holder(st, &base, &[change], 0)));
+        };
+        let mut changes = Vec::with_capacity(included.len());
+        for h in included.iter() {
+            changes.push(reader.change(h)?);
+        }
+        return Ok(Some(change_holder(st, &base, &changes, at)));
     }
     let s = scope_of(scope);
     if let Scope::View(v) = &s

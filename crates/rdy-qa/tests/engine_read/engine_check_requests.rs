@@ -1484,10 +1484,29 @@ fn ck6_version_case_keeps_its_own_net_blocks() {
         record(&w.e, &first["request"]).subject.blocks,
         vec![w.s.c.clone()]
     );
-    // a later edit of A in the view, not in the version
-    let aw = w.s.a.clone();
+    // final review F1: the case shows the version's own text and versions
+    let c_in = |scope: Scope| w.e.read().materialized(&scope).unwrap().version_of(&w.s.c);
+    let c_sides = |case: &Value| -> (Value, Value) {
+        let row = case["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["id"] == w.s.c.to_string())
+            .cloned()
+            .unwrap_or_else(|| panic!("a row of C: {case}"));
+        (row["before"].clone(), row["after"].clone())
+    };
+    let side = |v: Option<Hash>, text: &str| json!({"version": v.unwrap().to_string(), "text": [{"field": "body", "text": text}]});
+    let want = (
+        side(c_in(Scope::Canon), "C stands alone."),
+        side(c_in(Scope::View("a".into())), "C stands alone!"),
+    );
+    assert_eq!(c_sides(&first["case"]), want, "{}", first["case"]);
+    // later edits of A and C in the view, not in the version
+    let (aw, cw) = (w.s.a.clone(), w.s.c.clone());
     with(&w.e, move |r| {
-        put_j(r, "a", upd(&aw, "A holds!!"), j_typo())
+        put_j(r, "a", upd(&aw, "A holds!!"), j_typo());
+        put_j(r, "a", upd(&cw, "C stands alone!!"), j_typo())
     });
     let row = |label: &Value| -> Value {
         list(&w.e, &reader(), json!({}))["requests"]
@@ -1504,7 +1523,12 @@ fn ck6_version_case_keeps_its_own_net_blocks() {
         record(&w.e, &again["request"]).subject.blocks,
         vec![w.s.c.clone()]
     );
-    assert_eq!(again["case_hash"], first["case_hash"]);
+    assert_eq!(again["case_hash"], first["case_hash"], "{}", again["case"]);
+    assert_eq!(
+        c_sides(&again["case"]),
+        want,
+        "the excluded later edit of C"
+    );
     let ids: Vec<&Value> = again["case"]["blocks"]
         .as_array()
         .unwrap()

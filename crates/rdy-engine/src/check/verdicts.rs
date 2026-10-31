@@ -10,7 +10,8 @@
 //! selected changes, never the view's later or excluded writes), and the complete case hash must
 //! equal the request's:
 //! - a version subject builds the same recipe on this version;
-//! - a change subject needs that change among the version's selected changes;
+//! - a change subject needs that change among the version's selected changes, and reads its
+//!   immediate preimage among them, as its request read it among its view's changes;
 //! - a block subject needs a selected change that writes the block, or, for `prose_drift`, a
 //!   written decision that supersedes, revokes or refines it.
 //!
@@ -25,14 +26,15 @@
 //! recorded case is classified with [`case_freshness`] on the same candidate: a matching or
 //! unavailable case keeps the hold; only a changed case ends it. A view edit nobody proposed
 //! changes no candidate, so it never ends a hold. A new version never inherits a hold.
-use super::case::CaseInputs;
 use super::catalogue::AgentCheck;
-use super::requests::{CaseFreshness, case_freshness, verdict_word};
+use super::requests::{
+    CaseFreshness, Holder, case_freshness, change_holder, verdict_word, version_holder,
+};
 use crate::gate::ProposalRef;
-use crate::{E_LIMIT, E_VALIDATION, Materialized, RdyError, ReadState, Scope};
+use crate::{E_LIMIT, E_VALIDATION, RdyError, ReadState};
 use rdy_model::check_request::{CheckMode, CheckRequest};
 use rdy_model::decision::{DECISION, REFINES, REVOKES, SUPERSEDES};
-use rdy_model::{BlockId, Change, Hash, Op, Proposal, Review, ReviewSubject, Verdict};
+use rdy_model::{BlockId, Hash, Op, Proposal, Review, ReviewSubject, Verdict};
 use rdy_schema::{Issue, Severity};
 use rdy_store::{StoreError, kinds};
 use serde::Serialize;
@@ -147,14 +149,14 @@ pub fn parse_accept_option(option: &str) -> Option<(Hash, Hash)> {
     Some((review.parse().ok()?, version.parse().ok()?))
 }
 
-/// The state one version's cases read: its base canon, its candidate and its selected changes,
-/// in the version's order. The candidate is the version itself (canon at its base plus its
-/// selected changes), never its view: a view write the version excludes or nobody proposed
-/// changes neither which verdicts match the version nor the holds accepted for it.
+/// The state one version's cases read ([`version_holder`]): its base canon, its candidate and
+/// its selected changes, in the version's order. The candidate is the version itself (canon at
+/// its base plus its selected changes), never its view: a view write the version excludes or
+/// nobody proposed changes neither which verdicts match the version nor the holds accepted for
+/// it. Request creation and freshness read the same candidate, so a version request's case
+/// matches its own card.
 struct VersionState {
-    before: Arc<Materialized>,
-    after: Arc<Materialized>,
-    changes: Vec<Change>,
+    held: Holder,
     /// The selected changes' hashes, in the version's order.
     hashes: Vec<Hash>,
     /// The blocks the selected changes write.
@@ -163,24 +165,14 @@ struct VersionState {
 
 impl VersionState {
     fn read(st: &ReadState, pref: &ProposalRef, p: &Proposal) -> Result<VersionState, RdyError> {
-        let after = st.materialized(&Scope::Proposal(pref.version))?;
-        let before = match p.canon_at {
-            Some(h) => st.materialized(&Scope::At(h))?,
-            None => Arc::new(Materialized::default()),
-        };
-        let reader = st.reader();
-        let mut changes = Vec::with_capacity(p.changes.len());
-        for c in &p.changes {
-            changes.push(reader.change(c)?);
-        }
-        let written = changes
+        let held = version_holder(st, &pref.version, p)?;
+        let written = held
+            .changes
             .iter()
             .flat_map(|c| c.ops.iter().map(|op| op.block_id().clone()))
             .collect();
         Ok(VersionState {
-            before,
-            after,
-            changes,
+            held,
             hashes: p.changes.clone(),
             written,
         })
@@ -188,40 +180,45 @@ impl VersionState {
 
     /// Whether a selected change writes a decision that supersedes, revokes or refines `d`.
     fn relates(&self, d: &BlockId) -> bool {
-        self.changes.iter().flat_map(|c| &c.ops).any(|op| match op {
-            Op::Create { block } | Op::Update { block, .. } => {
-                block.block_type == DECISION
-                    && [SUPERSEDES, REVOKES, REFINES].iter().any(|name| {
-                        block
-                            .links
-                            .get(*name)
-                            .is_some_and(|ls| ls.iter().any(|l| &l.target == d))
-                    })
-            }
-            Op::Delete { .. } => false,
-        })
+        self.held
+            .changes
+            .iter()
+            .flat_map(|c| &c.ops)
+            .any(|op| match op {
+                Op::Create { block } | Op::Update { block, .. } => {
+                    block.block_type == DECISION
+                        && [SUPERSEDES, REVOKES, REFINES].iter().any(|name| {
+                            block
+                                .links
+                                .get(*name)
+                                .is_some_and(|ls| ls.iter().any(|l| &l.target == d))
+                        })
+                }
+                Op::Delete { .. } => false,
+            })
     }
 
-    /// The request `r` as its recipe builds on this version, and the inputs it reads; `None`
-    /// when `related` asks for a subject this version names and it names none (module docs).
-    fn on_version<'a>(
-        &'a self,
-        st: &'a ReadState,
+    /// The request `r` as its recipe builds on this version, and the states it reads; `None`
+    /// when `related` asks for a subject this version names and it names none (module docs). A
+    /// change subject reads its immediate preimage among the selected changes
+    /// ([`change_holder`]), as its request read it in its view.
+    fn on_version(
+        &self,
+        st: &ReadState,
         pref: &ProposalRef,
         r: &CheckRequest,
         related: bool,
-    ) -> Option<(CheckRequest, CaseInputs<'a>)> {
+    ) -> Option<(CheckRequest, Holder)> {
         let mut built = r.clone();
         if r.subject.version.is_some() {
             built.subject.version = Some(pref.version);
             built.subject.blocks.clear();
             return Some((
                 built,
-                CaseInputs {
-                    st,
-                    before: &self.before,
-                    after: &self.after,
-                    changes: &self.changes,
+                Holder {
+                    before: Arc::clone(&self.held.before),
+                    after: Arc::clone(&self.held.after),
+                    changes: self.held.changes.clone(),
                 },
             ));
         }
@@ -229,12 +226,7 @@ impl VersionState {
             let at = self.hashes.iter().position(|x| x == c)?;
             return Some((
                 built,
-                CaseInputs {
-                    st,
-                    before: &self.before,
-                    after: &self.after,
-                    changes: &self.changes[at..=at],
-                },
+                change_holder(st, &self.held.before, &self.held.changes, at),
             ));
         }
         if related {
@@ -250,11 +242,10 @@ impl VersionState {
         }
         Some((
             built,
-            CaseInputs {
-                st,
-                before: &self.after,
-                after: &self.after,
-                changes: &[],
+            Holder {
+                before: Arc::clone(&self.held.after),
+                after: Arc::clone(&self.held.after),
+                changes: vec![],
             },
         ))
     }
@@ -419,10 +410,10 @@ fn matching_request(
     if q.check == AgentCheck::Contradiction.spec().name {
         return Ok(None);
     }
-    let Some((built, inputs)) = state.on_version(st, pref, &q, true) else {
+    let Some((built, states)) = state.on_version(st, pref, &q, true) else {
         return Ok(None);
     };
-    Ok(match case_freshness(&built, inputs)? {
+    Ok(match case_freshness(&built, states.inputs(st))? {
         CaseFreshness::Matching => Some(q),
         CaseFreshness::Changed | CaseFreshness::Unavailable => None,
     })
@@ -467,10 +458,10 @@ pub fn accepted_verdict_issues(
         if let Some(case) = r.case_hash {
             q.case_hash = case;
         }
-        let Some((built, inputs)) = state.on_version(st, pref, &q, false) else {
+        let Some((built, states)) = state.on_version(st, pref, &q, false) else {
             continue;
         };
-        match case_freshness(&built, inputs)? {
+        match case_freshness(&built, states.inputs(st))? {
             CaseFreshness::Changed => {}
             CaseFreshness::Matching | CaseFreshness::Unavailable => {
                 held.push((rank(&q.check), review, q.check));
