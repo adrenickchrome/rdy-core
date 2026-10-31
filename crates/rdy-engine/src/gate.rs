@@ -3035,6 +3035,8 @@ impl Rdy {
         // the fresh record assesses the version on the canon it was computed on, so the next
         // approval's freshness reads the landings after it
         a.base = st.canon_head();
+        // D-JQD5X, O13: the fresh card shown is the stored card plus the live verdict lines
+        crate::pending::queue::show_verdicts(st, pref, p, &mut card)?;
         card.card = crate::pending::render_checked(&card, crate::pending::CARD_DEFAULT_TOKENS)?;
         card.card_hash = crate::pending::card_hash(&card).to_string();
         self.store
@@ -3230,8 +3232,36 @@ impl Rdy {
         // ruling task-12 R1 (D-WMCFW): an advice accepted after the assessment blocks
         let record = st.reader().assessment(&assessment)?;
         later.extend(crate::readiness::accepted_advice(&st, &pref, &p, &record)?);
+        // D-JQD5X, D-HAG73: the fifth, a check verdict a person accepted as blocking for this
+        // version, for every lander; no policy acceptance passes it
+        later.extend(crate::check::verdicts::accepted_verdict_issues(
+            &st, &pref, &p,
+        )?);
         if !later.is_empty() {
             return Err(proposal_not_ready(&pref, later));
+        }
+        // D-JQD5X, O13: a direct approval with the card as evidence binds the card shown, its
+        // verdict lines too: a card that gained a verdict since is refused with the fresh card
+        if lander == Lander::Approver
+            && let Some(ApprovalEvidence {
+                kind: EvidenceKind::Card,
+                card_hash: Some(shown),
+                ..
+            }) = &evidence
+        {
+            let verdicts = crate::check::verdicts::matching_verdicts(&st, &pref, &p)?;
+            if !verdicts.is_empty()
+                && let Some(card) =
+                    crate::pending::queue::shown_approve_item(&st, &pref, &p, verdicts)?
+                && card.card_hash != shown.to_string()
+            {
+                return Err(RdyError::new(
+                    E_PROPOSAL_MOVED,
+                    format!("{pref} changed since it was shown"),
+                    "show the person the fresh card and ask again",
+                )
+                .with_corrected(card_of(&card)));
+            }
         }
         // the ops fold in the order the merge applies the changes (deps first), not the list
         // order: a version can list a delete before the creation it depends on

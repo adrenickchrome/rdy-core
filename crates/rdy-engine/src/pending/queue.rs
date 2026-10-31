@@ -101,6 +101,11 @@
 //! with the answer of the bound plan (`(confirm: <reason>)`, `(dismiss: <reason>)` or `(no
 //! answer)`).
 //!
+//! The card shown is that stored card plus the live check verdict lines (D-JQD5X, O13,
+//! [`show_verdicts`]): after every stored fact, one line for each Check review whose case
+//! matches the version now, and one acceptance option for each concern and fail before Reject
+//! and Later. A new verdict moves the card's hash; it never changes the stored record.
+//!
 //! # Answers (O23)
 //!
 //! The queue reads the answers (`answer/<item>`): a `reject_proposal` answer to `P-x@n` takes the
@@ -369,6 +374,8 @@ impl ReadState {
                     continue;
                 }
             }
+            // D-JQD5X, O13: the card shown is the stored card plus the live verdict lines
+            show_verdicts(self, &v.pref, &v.p, &mut card)?;
             if let Some(rt) = routing.as_mut() {
                 rt.note(self, &card, Some(&v.next), v.approve_facts());
             }
@@ -684,6 +691,82 @@ fn stored_facts(st: &ReadState, v: &Version) -> Result<Option<Vec<Fact>>, RdyErr
     Ok(Some(facts))
 }
 
+/// O13 (D-JQD5X): the approve card `item` of version `pref` (record `p`) as the person is shown
+/// it: after every stored fact, one line for each check verdict whose case matches the version
+/// now ([`crate::check::verdicts::matching_verdicts`]), each row's complete metadata in
+/// `check_verdicts`, and before Reject and Later one acceptance option for each concern and fail,
+/// never recommended. The stored assessment is not touched. A card past the verdict limits is
+/// `E_LIMIT`.
+pub(crate) fn show_verdicts(
+    st: &ReadState,
+    pref: &ProposalRef,
+    p: &Proposal,
+    item: &mut Item,
+) -> Result<(), RdyError> {
+    let verdicts = crate::check::verdicts::matching_verdicts(st, pref, p)?;
+    with_verdicts(item, pref, verdicts)
+}
+
+/// [`show_verdicts`] with the verdicts already read.
+fn with_verdicts(
+    item: &mut Item,
+    pref: &ProposalRef,
+    verdicts: Vec<crate::check::verdicts::MatchingVerdict>,
+) -> Result<(), RdyError> {
+    use crate::check::verdicts::ACCEPT_CONSEQUENCE;
+    if verdicts.is_empty() {
+        return Ok(());
+    }
+    item.facts
+        .try_reserve(verdicts.len())
+        .map_err(|_| crate::check::verdicts::too_many(pref))?;
+    item.facts.extend(verdicts.iter().map(|v| Fact {
+        name: v.fact_name().into(),
+        value: v.fact_value(),
+    }));
+    let accept: Vec<ItemOption> = verdicts
+        .iter()
+        .filter(|v| v.acceptable())
+        .map(|v| {
+            option(
+                &v.accept_option(&pref.version),
+                &v.accept_label(),
+                ACCEPT_CONSEQUENCE,
+                None,
+            )
+        })
+        .collect();
+    let at = item
+        .options
+        .iter()
+        .position(|o| o.id == "reject" || o.id == "later")
+        .unwrap_or(item.options.len());
+    item.options.splice(at..at, accept);
+    item.check_verdicts = verdicts;
+    Ok(())
+}
+
+/// The `approve` item of version `pref` (record `p`) as the queue shows it, its card whole, with
+/// `verdicts` (its matching check verdicts, already read): none when the version is not ready or
+/// has no stored assessment. A direct approval with the card as evidence compares its hash.
+pub(crate) fn shown_approve_item(
+    st: &ReadState,
+    pref: &ProposalRef,
+    p: &Proposal,
+    verdicts: Vec<crate::check::verdicts::MatchingVerdict>,
+) -> Result<Option<Item>, RdyError> {
+    let v = Version::read(st, *pref, p.clone())?;
+    let Some(mut card) = v.readiness_with_card(st, now_ms())?.card else {
+        return Ok(None);
+    };
+    let Some(facts) = stored_facts(st, &v)? else {
+        return Ok(None);
+    };
+    card.facts = facts;
+    with_verdicts(&mut card, pref, verdicts)?;
+    finish(card, CARD_MAX_TOKENS).map(Some)
+}
+
 /// The readiness issues of version `pref` (record `p`), in the queue's order: the issues the
 /// queue lists under `not_ready` for it. Empty when the version is ready. Every approval path
 /// refuses a version that is not ready with them (D-ME2HD, [`crate::gate::proposal_not_ready`]).
@@ -964,6 +1047,7 @@ pub(crate) fn removal_item(
     if let Some(facts) = stored_facts(st, &v)? {
         item.facts = facts;
     }
+    show_verdicts(st, &v.pref, &v.p, &mut item)?;
     let issues = v.readiness(st)?;
     if !issues.is_empty() {
         let why: Vec<&str> = issues.iter().map(|i| i.message.as_str()).collect();
@@ -2747,6 +2831,7 @@ pub(super) fn item(kind: ItemKind, r#ref: &str, title: &str) -> Item {
         removal: None,
         removal_reports: BTreeMap::new(),
         plan_binding: None,
+        check_verdicts: vec![],
     }
 }
 

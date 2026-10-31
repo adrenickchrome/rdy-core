@@ -46,6 +46,10 @@
 //!
 //! # Acts
 //!
+//! An acceptance option of an approve card (`accept_verdict:<review>:<version>`, D-JQD5X O14)
+//! is in [`verdict`]: one `ANSWER` `accept_verdict`, and the version is not ready while the
+//! accepted case holds.
+//!
 //! The batch acts, and Later on any item, are in [`batch`]. An approval lands through `land_with`
 //! and writes no `ANSWER`; every other batch act writes one `ANSWER` record in a batch of its
 //! own. The answer to a question is in [`question`]: a proposed decision, then its `ANSWER`;
@@ -60,6 +64,7 @@ pub mod question;
 pub mod reaffirm;
 pub mod relay;
 pub mod resolve;
+pub mod verdict;
 
 use crate::error::{E_BAD_INPUT, E_ITEM_MOVED, E_PROPOSAL_MOVED, RdyError};
 use crate::gate::{
@@ -360,6 +365,10 @@ impl Rdy {
                 });
             }
         };
+        // D-JQD5X, O14: an acceptance option of an approve card, before the batch acts
+        if bound.item.kind == ItemKind::Approve && verdict::is_accept(&bound.option.id) {
+            return verdict::act(self, by, bound, note).map(|i| AnswerStep::Done(Box::new(i)));
+        }
         match (bound.item.kind, bound.option.id.as_str()) {
             (_, "later") | (ItemKind::Approve | ItemKind::Confirm | ItemKind::Defer, _) => {
                 batch::act(self, &by.who, by.relay.clone(), by.kind, bound, note)

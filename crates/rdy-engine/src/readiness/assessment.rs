@@ -597,6 +597,7 @@ mod tests {
             removal: None,
             removal_reports: BTreeMap::new(),
             plan_binding: None,
+            check_verdicts: vec![],
         }
     }
 

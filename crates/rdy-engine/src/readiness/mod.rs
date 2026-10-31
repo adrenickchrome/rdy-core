@@ -26,8 +26,11 @@
 //! 6. a version whose reach exceeds `MAX_ROWS` (O9), or whose rules widen it past that bound
 //!    ("too large to assess", D-DSPMW);
 //! 7. the later refusals ([`later_refusals`]): a rejected decision, a rejected one_way
-//!    re-affirmation, refused deferrals. The landing adds a fourth, which only an assessment
-//!    can date: an advice accepted after it ([`accepted_advice`], ruling task-12 R1);
+//!    re-affirmation, refused deferrals; then each check verdict a person accepted as blocking
+//!    for this version whose case still holds or cannot be read now
+//!    ([`crate::check::verdicts::accepted_verdict_issues`], D-JQD5X, D-HAG73). The landing adds
+//!    one more, which only an assessment can date: an advice accepted after it
+//!    ([`accepted_advice`], ruling task-12 R1);
 //! 8. the policy change rule (O19, D-ZWP7Q): one `E_VALIDATION` issue for each
 //!    `authority_policy` block the version creates, updates or deletes whose last change in the
 //!    version does not implement a decision of the prospective canon;
@@ -323,7 +326,7 @@ pub(crate) fn issues(
     if let Err(issue) = reach(st, r, &conflicted)? {
         issues.push(issue);
     }
-    // 7. the later refusals
+    // 7. the later refusals, then the verdicts a person accepted as blocking for this version
     issues.extend(later_refusals(
         st,
         r.pref,
@@ -331,6 +334,9 @@ pub(crate) fn issues(
         &r.decisions,
         &r.reaffirms,
         r.plan_bound.is_some(),
+    )?);
+    issues.extend(crate::check::verdicts::accepted_verdict_issues(
+        st, r.pref, r.p,
     )?);
     // 8. the policy change rule (O19)
     issues.extend(policy_change_issues(r.policy_changes));

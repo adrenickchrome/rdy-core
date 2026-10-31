@@ -655,6 +655,7 @@ pi-00000000000000bb confirm c-CCCCC: open (c-AAAAA)"
             }]),
             removal_reports: BTreeMap::from([(report, vec![])]),
             plan_binding: None,
+            check_verdicts: vec![],
         };
         item.card = render_checked(&item, CARD_MAX_TOKENS).unwrap();
         item.card_hash = card_hash(&item).to_string();
