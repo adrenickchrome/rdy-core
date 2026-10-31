@@ -506,7 +506,10 @@ fn nb9_mcp_daemon_and_local_created_receipts_agree() {
     // the CLI wrappers through the daemon: rdy new (a create), rdy import (every author's blocks)
     let (ok, v) = s.json(&["--json", "new", "doc", "fresh", "--title", "Fresh"]);
     assert!(ok, "{v}");
-    assert_eq!(v["briefing"]["covers"], 1, "{v}");
+    // the doc and its skeleton sections
+    let made = v["created"].as_object().unwrap().len();
+    assert!(made > 1, "{v}");
+    assert_eq!(v["briefing"]["covers"], made, "{v}");
     assert!(is_token(v["briefing"]["token"].as_str().unwrap()), "{v}");
     s.stop();
     let out = s.dir.path().join("export");
