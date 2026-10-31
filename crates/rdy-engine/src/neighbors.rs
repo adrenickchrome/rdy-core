@@ -451,7 +451,7 @@ mod tests {
             ..wide(100)
         };
         let (rows, _) = Walk::new(&m, &g, &p, lim)
-            .run(&covered(&[src.clone()]))
+            .run(&covered(std::slice::from_ref(&src)))
             .unwrap();
         assert_eq!(rows.len(), 3);
         let (m, g) = scope(local(5, 0));
@@ -490,7 +490,7 @@ mod tests {
         };
         let (m, g) = scope(tied_apart(3));
         let (rows, _) = Walk::new(&m, &g, &p, lim)
-            .run(&covered(&[src.clone()]))
+            .run(&covered(std::slice::from_ref(&src)))
             .unwrap();
         assert_eq!(rows.len(), 2, "the source and two entity neighbors");
         let (m, g) = scope(tied_apart(4));
@@ -539,7 +539,7 @@ mod tests {
         };
         let (m, g) = scope(local(4, 0));
         let (rows, _) = Walk::new(&m, &g, &p, lim)
-            .run(&covered(&[src.clone()]))
+            .run(&covered(std::slice::from_ref(&src)))
             .unwrap();
         assert_eq!(rows.len(), 3);
         let (m, g) = scope(local(5, 0));
@@ -595,12 +595,12 @@ mod tests {
         // a 100,000-row construction at the fixed bounds: one source with 100,000 siblings
         // passes with every row; one more sibling refuses with the exact section text
         let (m, g) = scope(local(100_001, 0));
-        let rows = neighbors_in(&m, &g, &p, &covered(&[src.clone()])).unwrap();
+        let rows = neighbors_in(&m, &g, &p, &covered(std::slice::from_ref(&src))).unwrap();
         assert_eq!(rows.len(), 100_000);
         assert_eq!(rows[0].block, "c-00001");
         assert_eq!(rows[99_999].block, nid("c", 100_000).to_string());
         let (m, g) = scope(local(100_002, 0));
-        let e = neighbors_in(&m, &g, &p, &covered(&[src.clone()])).unwrap_err();
+        let e = neighbors_in(&m, &g, &p, &covered(std::slice::from_ref(&src))).unwrap_err();
         assert_eq!(
             (e.code, e.message.as_str(), e.fix.as_str()),
             (
