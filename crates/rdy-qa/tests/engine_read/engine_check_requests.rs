@@ -520,7 +520,10 @@ fn ck6_contradiction_fans_out_and_keeps_pair_semantics() {
     );
     assert_eq!(w.e.read().seq(), seq);
 
-    // a canon-only pair: the person runs it on their own blocks and answers it
+    // a canon-only pair: the person runs it on their own blocks and answers it. The clock is
+    // pinned: two runs of one pair in the same millisecond are one stored request (a request is
+    // content-addressed and its blocks are sorted), so the two requests below need two stamps.
+    let _clock = pin_clock(now_ms());
     let (ca, cc) = (w.s.a.to_string(), w.s.c.to_string());
     let canon = run_on(&w, &writer(), "contradiction", json!([ca, cc]));
     let rq = canon["request"].as_str().unwrap().to_string();
@@ -541,6 +544,7 @@ fn ck6_contradiction_fans_out_and_keeps_pair_semantics() {
     // precedence holds: a later no_tension on the settled pair is stale
     let again = run_on(&w, &writer(), "contradiction", json!([cc, ca]));
     assert_eq!(again["case_hash"], canon["case_hash"]);
+    assert_ne!(again["request"], canon["request"], "two runs, two requests");
     let (code, msg, fix) = refusal(submit(
         &w.e,
         &writer(),
