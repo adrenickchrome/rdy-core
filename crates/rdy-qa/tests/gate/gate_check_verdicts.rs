@@ -1641,7 +1641,7 @@ fn fill_text(n: &Notes, p: &ProposalInfo, rq: Hash, case: Hash, target: usize) {
     let mut left = target - row;
     let mut lens = vec![];
     while left > 0 {
-        let len = if left >= row + fixed + 1 {
+        let len = if left > row + fixed {
             // a full row, leaving room for at least one more
             8000.min(left - fixed - (fixed + 1))
         } else {
