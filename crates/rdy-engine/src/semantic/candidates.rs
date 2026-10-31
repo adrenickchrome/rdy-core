@@ -273,8 +273,23 @@ impl ReadState {
                 }
             }
         }
-        let _ = (limits, index);
-        Ok(b.out)
+        let visits = if !b.full() && !subjects.is_empty() && has_cross_change(writes, change) {
+            if index.is_none() {
+                *index = Some(CrossIndex::build(self, writes, sides, *limits)?);
+            }
+            let idx = index.as_ref().expect("the index was just built");
+            b.cross(idx, *limits, &subjects)?
+        } else {
+            0
+        };
+        let out = b.out;
+        #[cfg(test)]
+        {
+            cross.last_visits = visits;
+        }
+        #[cfg(not(test))]
+        let _ = visits;
+        Ok(out)
     }
 }
 
@@ -628,10 +643,129 @@ fn pair_now_in(
             return Ok(Some(items));
         }
     }
+    if let Some(items) = cross_form(cx, sides, (a, *ca, &on_a), (b, *cb, &on_b))? {
+        return Ok(Some(items));
+    }
     if !cx.writes.on(a).is_empty() || !cx.writes.on(b).is_empty() {
         return Ok(None);
     }
     canon_pair(cx, (a, *ca), (b, *cb))
+}
+
+/// One block of a pair at a content, with its live writes at that content.
+type AtContent<'w> = (&'w BlockId, Hash, &'w [Arc<Write>]);
+
+/// The cross-view form of a pair (nb5, see [`ReadState::pair_now`]): the first two live writes,
+/// by the change ids in block order, of changes that share no view, each eligible in its own
+/// view, whose blocks a tie rule joins. Section and area never make this form.
+fn cross_form(
+    cx: &DetectCx<'_>,
+    sides: &SideScopes,
+    x: AtContent<'_>,
+    y: AtContent<'_>,
+) -> Result<Option<Vec<Item>>, RdyError> {
+    if x.0 == y.0 {
+        return Ok(None);
+    }
+    let (x, y) = if x.0 < y.0 { (x, y) } else { (y, x) };
+    let st = cx.st;
+    for wx in x.2 {
+        for wy in y.2 {
+            if wx.change == wy.change || cx.writes.common_view(&wx.change, &wy.change) {
+                continue;
+            }
+            let (Some(bx), Some(by)) = (wx.new.as_deref(), wy.new.as_deref()) else {
+                continue;
+            };
+            let (Some(sx), Some(sy)) = (
+                sides.of_write(st, cx.writes, wx)?,
+                sides.of_write(st, cx.writes, wy)?,
+            ) else {
+                continue;
+            };
+            if !side_eligible(st, &sx, bx)? || !side_eligible(st, &sy, by)? {
+                continue;
+            }
+            let mut tied = false;
+            for rule in Rule::TIES {
+                if exact_holds(st, rule, (bx, &sx), (by, &sy))? {
+                    tied = true;
+                    break;
+                }
+            }
+            if !tied {
+                continue;
+            }
+            if let (Some(ix), Some(iy)) = (write_item(wx, x.1), write_item(wy, y.1)) {
+                let mut items = vec![ix, iy];
+                items.sort();
+                return Ok(Some(items));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Whether some in-flight change other than `change` shares no view with it.
+fn has_cross_change(writes: &Writes, change: &Hash) -> bool {
+    let Some(f) = writes.change(change) else {
+        return false;
+    };
+    writes
+        .changes()
+        .any(|g| g.id != *change && !g.views.iter().any(|v| f.views.contains(v)))
+}
+
+/// The pair key of two blocks at two contents.
+fn key_of(pair: &[(BlockId, Hash); 2]) -> Hash {
+    pair_key(
+        &pair
+            .clone()
+            .map(|(block, content)| PairItem { block, content }),
+    )
+}
+
+impl CrossIndex {
+    /// The indexes over every live write of `writes`, each visited once: refused before any
+    /// index is built when there are more than `limits.writes`, deletes included.
+    fn build(
+        st: &ReadState,
+        writes: &Writes,
+        sides: &SideScopes,
+        limits: CrossLimits,
+    ) -> Result<CrossIndex, RdyError> {
+        if writes.live().take(limits.writes.saturating_add(1)).count() > limits.writes {
+            return Err(limits.writes_error());
+        }
+        let mut idx = CrossIndex::default();
+        for w in writes.live() {
+            CROSS_VIEW_INDEX_VISITS.with(|n| n.set(n.get() + 1));
+            let Some(b) = w.new.as_deref() else {
+                continue;
+            };
+            let Some(at) = sides.of_write(st, writes, w)? else {
+                continue;
+            };
+            let entities = at.entities(st, b)?;
+            for e in edges_of(b) {
+                if premise_edge(&e) {
+                    idx.premise_in.entry(e.to).or_default().push(Arc::clone(w));
+                }
+            }
+            for t in described(b) {
+                idx.describes.entry(t).or_default().push(Arc::clone(w));
+            }
+            for e in &entities {
+                idx.entities
+                    .entry(e.clone())
+                    .or_default()
+                    .push(Arc::clone(w));
+            }
+            idx.facts
+                .insert((w.change, w.block.clone()), WriteFacts { at, entities });
+        }
+        Ok(idx)
+    }
 }
 
 /// The sorted canon items of two blocks, or `None` unless canon holds both at those contents.
@@ -904,6 +1038,130 @@ impl Builder<'_, '_> {
             self.offer(rule, s, &x)?;
         }
         Ok(())
+    }
+
+    /// Phase 2 (nb5): the pairs of each subject with live writes of changes that share no view
+    /// with this change, by the tie rules, while there is room. Each examined incidence (rule,
+    /// subject, other live write) counts toward `limits.visits`, before any filter. Returns the
+    /// count.
+    fn cross(
+        &mut self,
+        idx: &CrossIndex,
+        limits: CrossLimits,
+        subjects: &[Subject],
+    ) -> Result<usize, RdyError> {
+        let cx = &self.ctx.cx;
+        let (st, writes) = (cx.st, cx.writes);
+        let mut keys: BTreeSet<Hash> = self.out.iter().map(|q| q.key).collect();
+        let mut visits = 0usize;
+        for rule in Rule::TIES {
+            for s in subjects {
+                if self.full() {
+                    return Ok(visits);
+                }
+                let Some(mine) = idx.facts.get(&(self.change, s.block.id.clone())) else {
+                    continue;
+                };
+                if !side_eligible(st, &mine.at, &s.block)? {
+                    continue;
+                }
+                let mut found: Vec<Arc<Write>> = vec![];
+                let mut visit = |o: &Arc<Write>| -> Result<(), RdyError> {
+                    visits += 1;
+                    if visits > limits.visits {
+                        return Err(limits.visits_error());
+                    }
+                    found.push(Arc::clone(o));
+                    Ok(())
+                };
+                match rule {
+                    Rule::Premise => {
+                        for e in edges_of(&s.block) {
+                            if premise_edge(&e) {
+                                for o in writes.on(&e.to).iter().filter(|o| o.live) {
+                                    visit(o)?;
+                                }
+                            }
+                        }
+                        for o in idx.premise_in.get(&s.block.id).into_iter().flatten() {
+                            visit(o)?;
+                        }
+                    }
+                    Rule::Describes => {
+                        for t in described(&s.block) {
+                            for o in idx.describes.get(&t).into_iter().flatten() {
+                                visit(o)?;
+                            }
+                        }
+                    }
+                    Rule::Entity => {
+                        for e in &mine.entities {
+                            for o in idx.entities.get(e).into_iter().flatten() {
+                                visit(o)?;
+                            }
+                        }
+                    }
+                    Rule::Section | Rule::Area => {}
+                }
+                let home = mine.at.m.doc_of(&s.block.id).map(|d| d.id.clone());
+                let mut ranked = vec![];
+                for o in found {
+                    if o.change == self.change
+                        || o.block == s.block.id
+                        || writes.common_view(&self.change, &o.change)
+                    {
+                        continue;
+                    }
+                    let (Some(ob), Some(theirs)) = (
+                        o.new.as_deref(),
+                        idx.facts.get(&(o.change, o.block.clone())),
+                    ) else {
+                        continue;
+                    };
+                    if !side_eligible(st, &theirs.at, ob)? {
+                        continue;
+                    }
+                    let doc = theirs.at.m.doc_of(&o.block).map(|d| d.id.clone());
+                    let away = doc.is_none() || doc != home;
+                    let path = doc
+                        .and_then(|d| theirs.at.m.path_of(&d))
+                        .unwrap_or_default();
+                    ranked.push(((away, path, o.block.clone(), o.change), o));
+                }
+                ranked.sort_by(|x, y| x.0.cmp(&y.0));
+                ranked.dedup_by(|x, y| x.0 == y.0);
+                for (_, o) in ranked {
+                    if self.full() {
+                        return Ok(visits);
+                    }
+                    let Some(ob) = o.new.as_deref() else {
+                        continue;
+                    };
+                    let pair = [
+                        (s.block.id.clone(), s.content),
+                        (o.block.clone(), cx.content_of(ob)),
+                    ];
+                    let key = key_of(&pair);
+                    if keys.contains(&key) {
+                        continue;
+                    }
+                    let Some(items) = pair_now_in(cx, self.sides, &pair)? else {
+                        continue;
+                    };
+                    if !items.iter().any(|i| matches!(i.side, SideRef::Change(_))) {
+                        continue;
+                    }
+                    keys.insert(key);
+                    self.out.push(Request {
+                        key,
+                        items,
+                        rule,
+                        change: self.change,
+                    });
+                }
+            }
+        }
+        Ok(visits)
     }
 
     fn premise(&mut self, s: &Subject) -> Result<(), RdyError> {

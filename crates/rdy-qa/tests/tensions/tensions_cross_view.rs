@@ -531,7 +531,7 @@ fn nb5_everyday_and_deprecated_cross_view_sides_are_filtered() {
         ]),
     )
     .unwrap();
-    let (store, sec) = (created(&w, "$t"), created(&w, "$s"));
+    let (store, sec, doc) = (created(&w, "$t"), created(&w, "$s"), created(&w, "$d"));
     land(&mut r, "seed").unwrap();
     let new = |r: &mut Rdy, v: &str, body: String, fields: Value| {
         let ops = json!([{"op": "create", "type": "claim", "id": "$x", "parent": sec.to_string(),
@@ -567,13 +567,18 @@ fn nb5_everyday_and_deprecated_cross_view_sides_are_filtered() {
         let q = with_key(&qs, k).unwrap_or_else(|| panic!("linked everyday pairs: {qs:#?}"));
         assert_eq!(q.rule, Rule::Entity);
     }
-    // a deprecated side never enters, as subject or as other
-    let (_, ce) = new(
+    // a deprecated side never enters, as subject or as other: view e's claim is in a
+    // deprecated section
+    let w = put(
         &mut r,
         "e",
-        "The ledger is final.".into(),
-        json!({"lifecycle": "deprecated"}),
+        json!([
+            {"op": "create", "type": "section", "id": "$old", "parent": doc.to_string(),
+             "fields": {"title": "Old", "lifecycle": "deprecated"}},
+            {"op": "create", "type": "claim", "id": "$x", "parent": "$old", "body": "The ledger is final."}
+        ]),
     );
+    let ce = change_of(&w);
     let (w2, cf) = new(&mut r, "f", "A ledger grows.".into(), json!({}));
     assert!(
         !reqs(&r, &ce).iter().any(two_changes),
@@ -721,11 +726,11 @@ fn subject(ids: &[&BlockId]) -> CheckSubject {
     }
 }
 
-/// The canon pair's items, and the contradiction case of A and B as view c holds them.
+/// The canon pair's items, and the contradiction case of A and B as view work holds them.
 fn scope_local(st: &ReadState, s: &Spec) -> (Option<Vec<Item>>, Value, Hash) {
     let tracking = st.reader().tracking();
     let canon = st.materialized(&Scope::Canon).unwrap();
-    let in_c = st.materialized(&view("c")).unwrap();
+    let in_work = st.materialized(&view("work")).unwrap();
     let c = |id: &BlockId| canon.get(id).unwrap().content_hash_with(tracking);
     let items = st
         .pair_in_canon(&[(s.a.clone(), c(&s.a)), (s.b.clone(), c(&s.b))])
@@ -736,7 +741,7 @@ fn scope_local(st: &ReadState, s: &Spec) -> (Option<Vec<Item>>, Value, Hash) {
         CaseInputs {
             st,
             before: &canon,
-            after: &in_c,
+            after: &in_work,
             changes: &[],
         },
     )
@@ -748,17 +753,18 @@ fn scope_local(st: &ReadState, s: &Spec) -> (Option<Vec<Item>>, Value, Hash) {
 fn nb5_m3d_canon_case_stays_scope_local() {
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);
-    // view c exists and touches neither A nor B
-    put(
+    // the person's view work, where checks resolve, is open and touches neither A nor B
+    write(
         &mut r,
-        "c",
-        json!([{"op": "create", "type": "doc", "id": "$d", "fields": {"name": "c-notes", "title": "C notes", "doc_type": "page"}}]),
-    );
+        "work",
+        json!([{"op": "create", "type": "doc", "id": "$d", "fields": {"name": "notes", "title": "Notes", "doc_type": "page"}}]),
+    )
+    .unwrap();
     let before = scope_local(&r.read(), &s);
     assert!(before.0.is_some(), "canon holds the pair");
     assert_eq!(before.1["rule"], "premise", "{:#}", before.1);
     let e = Local::new(r);
-    let c = ag("c");
+    let c = writer();
     let run = rdy_engine::check::api::run_review(
         &e,
         &c,
@@ -775,7 +781,11 @@ fn nb5_m3d_canon_case_stays_scope_local() {
         run["request"].as_str().unwrap().to_string(),
         run["case_hash"].as_str().unwrap().to_string(),
     );
-    assert_eq!(h, before.2.to_string(), "the run's case is view c's case");
+    assert_eq!(
+        h,
+        before.2.to_string(),
+        "the run's case is view work's case"
+    );
     // an unrelated view writes B without its premise: neither check path moves
     let b = s.b.clone();
     write_typed(&e, move |r| {
