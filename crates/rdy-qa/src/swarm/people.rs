@@ -889,20 +889,48 @@ impl Person {
             // the entry names what it sent, refused or not
             e.reply = Some(agent::answers_reply(ids, &explicit));
             let res = self.cli("plan_answer", &args);
-            let mut mismatch = None;
-            let outcome = self.link.finish(e, "plan_answer", res, |en, v| {
-                if ids.is_empty() {
-                    return;
+            // the rest of the reply's pages, under the same plan turn: the group is compared
+            // with every page of what the command returned
+            let mut returned = None;
+            let mut cut_by_kill = false;
+            if let (Res::Ok(first), false) = (&res, ids.is_empty()) {
+                let fetched = agent::follow_pages(first, |next| {
+                    let args = ["plan", "--page", next, "--max-tokens", all.as_str()];
+                    match self.cli("plan_answer", &args) {
+                        Res::Ok(v) => Some(v),
+                        Res::Lost => {
+                            cut_by_kill = true;
+                            None
+                        }
+                        Res::Refused(code, message) => self
+                            .link
+                            .fail("plan_answer", &format!("got {code}: {message}")),
+                    }
+                });
+                match fetched {
+                    Err(text) => self.link.fail("plan_answer", &text),
+                    Ok(None) => {}
+                    Ok(Some(pages)) => {
+                        returned = Some(agent::group_returned(&pages, ids, &read.checked));
+                    }
                 }
-                match agent::group_returned(v, ids, &read.checked) {
-                    Ok(returned) => {
+            }
+            let mut mismatch = None;
+            let outcome = self
+                .link
+                .finish(e, "plan_answer", res, |en, _| match returned {
+                    Some(Ok(done)) => {
                         if let Some(reply) = en.reply.as_mut() {
-                            reply["group"]["returned"] = json!(returned);
+                            reply["group"]["returned"] = json!(done);
                         }
                     }
-                    Err(text) => mismatch = Some(text),
-                }
-            });
+                    Some(Err(text)) => mismatch = Some(text),
+                    None => {}
+                });
+            if cut_by_kill {
+                // the answers were acknowledged and the daemon died under the rest of the reply
+                self.link.recover();
+            }
             if let Some(text) = mismatch {
                 self.link.fail("plan_answer", &text);
             }

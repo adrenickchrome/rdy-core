@@ -4197,6 +4197,80 @@ fn nb10_entity_update_and_declared_items_keep_their_acts() {
     );
 }
 
+/// nb10 (fix round 1): a group answer whose reply is cut to pages is read whole under the plan
+/// turn and compared on every page. A reply the cursor cuts is followed to its last page; ids on
+/// later pages count; a missing id, an extra id and a repeated id are each refused, whichever
+/// page they are on; a page that cannot be read leaves no check; a cursor that comes round again
+/// is refused.
+#[test]
+fn nb10_paginated_group_reply_is_compared_whole() {
+    use rdy_qa::swarm::agent::{follow_pages, group_returned};
+    use serde_json::json;
+    let item = |id: &str| {
+        json!({"id": id, "kind": "confirm", "edge": "neighbor", "state": "closed",
+               "answer": {"act": "confirm", "reason": "swarm: checked"}})
+    };
+    let page = |ids: &[&str], next: Option<&str>| {
+        let mut p = json!({"items": ids.iter().map(|i| item(i)).collect::<Vec<_>>()});
+        if let Some(n) = next {
+            p["next"] = json!(n);
+        }
+        p
+    };
+    let group: Vec<String> = ["pi-1", "pi-2", "pi-3"].map(String::from).to_vec();
+    let before = BTreeSet::new();
+    // the pages of the reply: the cursor on each leads to the next
+    let pages = [
+        page(&["pi-1"], Some("c1")),
+        page(&["pi-2"], Some("c2")),
+        page(&["pi-3"], None),
+    ];
+    let fetch_from = |pages: Vec<Value>| {
+        let asked = std::cell::RefCell::new(vec![]);
+        let read = follow_pages(&pages[0], |c| {
+            asked.borrow_mut().push(c.to_string());
+            let n: usize = c[1..].parse().unwrap();
+            pages.get(n).cloned()
+        });
+        (read, asked.into_inner())
+    };
+    let (read, asked) = fetch_from(pages.to_vec());
+    assert_eq!(asked, ["c1", "c2"], "every cursor is followed once");
+    let whole = read.unwrap().expect("every page was read");
+    assert_eq!(whole.len(), 3);
+    assert_eq!(group_returned(&whole, &group, &before).unwrap(), group);
+    // a reply that holds only the first page and still has a cursor is not the whole group
+    assert!(group_returned(&whole[..1], &group, &before).is_err());
+    // an id missing from the last page, an id outside the group on a later page, and a repeat
+    for (label, last) in [
+        ("missing", page(&[], None)),
+        ("extra", page(&["pi-3", "pi-9"], None)),
+        ("repeat", page(&["pi-3", "pi-1"], None)),
+    ] {
+        let (read, _) = fetch_from(vec![pages[0].clone(), page(&["pi-2"], Some("c2")), last]);
+        let whole = read.unwrap().unwrap();
+        let err = group_returned(&whole, &group, &before).expect_err(label);
+        assert!(err.contains("3 page(s)"), "{label}: {err}");
+    }
+    // an id the swarm held before the call is not an answer of this call
+    let held: BTreeSet<String> = ["pi-0".to_string()].into();
+    let with_held = [
+        page(&["pi-0", "pi-1"], Some("c1")),
+        page(&["pi-2", "pi-3"], None),
+    ];
+    assert_eq!(
+        group_returned(&with_held, &group, &held).unwrap(),
+        group,
+        "ids held before are left out"
+    );
+    // a page that cannot be read: no pages, so no check
+    let first = page(&["pi-1"], Some("c1"));
+    assert_eq!(follow_pages(&first, |_| None).unwrap(), None);
+    // a cursor that comes round again would never end
+    let looped = page(&["pi-1"], Some("c1"));
+    assert!(follow_pages(&looped, |_| Some(page(&["pi-2"], Some("c1")))).is_err());
+}
+
 /// nb10: a kill and a reconnect keep the neighbor answers. Two agents each write a stable claim
 /// and propose; the run kills the daemon once, at the existing seam (`Config::kill_at`), and the
 /// drain lands what is left. Each acknowledged grouped answer is a group of the displayed items,

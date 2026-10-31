@@ -629,20 +629,41 @@ fn is_checked(i: &Value) -> bool {
         && i["answer"]["reason"] == GROUP_REASON
 }
 
+/// The pages of an answer reply, whole: `first` and every page its `next` cursor leads to,
+/// fetched with `fetch` (a `rdy_plan {page}` call, `rdy plan --page`), in order. `Ok(None)` when
+/// `fetch` gave no page (the call was lost to the kill or refused, and the caller has judged it);
+/// the error is a cursor that comes round again, which would never end.
+pub fn follow_pages(
+    first: &Value,
+    mut fetch: impl FnMut(&str) -> Option<Value>,
+) -> Result<Option<Vec<Value>>, String> {
+    let mut pages = vec![first.clone()];
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    while let Some(next) = pages[pages.len() - 1]["next"].as_str().map(str::to_string) {
+        if !seen.insert(next.clone()) {
+            return Err(format!("the answer reply's cursor {next} came round again"));
+        }
+        match fetch(&next) {
+            Some(page) => pages.push(page),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(pages))
+}
+
 /// The ids a group answer returned, and the refusal text when they are not exactly the group.
-/// `reply` is the plan the answers left (`rdy_plan`'s reply, `rdy --json plan`'s): its neighbor
-/// confirm items that carry the group's answer, less those `before` the call already held. A
-/// reply cut to a page (`next`) shows only some of them, so it may hold fewer than the group but
-/// never an id outside it. The ids come in plan order.
+/// `pages` are the whole plan the answers left (`follow_pages` over `rdy_plan`'s reply or `rdy
+/// --json plan`'s): the neighbor confirm items that carry the group's answer, less those `before`
+/// the call already held. They must be exactly the group: every id once, none missing and none
+/// outside it, on any page. The ids come in plan order.
 pub fn group_returned(
-    reply: &Value,
+    pages: &[Value],
     group: &[String],
     before: &BTreeSet<String>,
 ) -> Result<Vec<String>, String> {
-    let returned: Vec<String> = reply["items"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    let returned: Vec<String> = pages
+        .iter()
+        .flat_map(|p| p["items"].as_array().into_iter().flatten())
         .filter(|i| is_checked(i))
         .filter_map(|i| i["id"].as_str())
         .filter(|id| !before.contains(*id))
@@ -650,12 +671,10 @@ pub fn group_returned(
         .collect();
     let shown: BTreeSet<&String> = group.iter().collect();
     let got: BTreeSet<&String> = returned.iter().collect();
-    let cut = reply["next"].is_string();
-    let stray = got.difference(&shown).count() > 0;
-    let missing = shown.difference(&got).count() > 0;
-    if stray || (missing && !cut) || got.len() != returned.len() {
+    if got != shown || got.len() != returned.len() || shown.len() != group.len() {
         return Err(format!(
-            "the group answered {returned:?}, and the plan showed {group:?}"
+            "the group answered {returned:?} over {} page(s), and the plan showed {group:?}",
+            pages.len()
         ));
     }
     Ok(returned)
@@ -751,26 +770,48 @@ pub(crate) fn answer_plan(link: &mut Link, view: &str) {
     e.reply = Some(answers_reply(&split.group, &split.explicit));
     let group = split.group.clone();
     let before = read.checked.clone();
-    let mut mismatch = None;
-    link.exec(
-        e,
-        "plan_answer",
-        "rdy_plan",
-        json!({"view": view, "answers": specs, "max_tokens": PLAN_ALL}),
-        |en, v| {
-            if group.is_empty() {
-                return;
-            }
-            match group_returned(v, &group, &before) {
-                Ok(returned) => {
-                    if let Some(reply) = en.reply.as_mut() {
-                        reply["group"]["returned"] = json!(returned);
+    let args = json!({"view": view, "answers": specs, "max_tokens": PLAN_ALL});
+    // the answers and the rest of their reply's pages, under the same plan turn: the group is
+    // compared with every page of what the call returned
+    let res = link.raw("plan_answer", "rdy_plan", args);
+    let mut returned = None;
+    let mut cut_by_kill = false;
+    if let Res::Ok(first) = &res {
+        if !group.is_empty() {
+            let fetched = follow_pages(first, |next| {
+                let args = json!({"page": next, "max_tokens": PLAN_ALL});
+                match link.raw("plan_answer", "rdy_plan", args) {
+                    Res::Ok(v) => Some(v),
+                    Res::Lost => {
+                        cut_by_kill = true;
+                        None
+                    }
+                    Res::Refused(code, message) => {
+                        link.fail("plan_answer", &format!("got {code}: {message}"))
                     }
                 }
-                Err(text) => mismatch = Some(text),
+            });
+            match fetched {
+                Err(text) => link.fail("plan_answer", &text),
+                Ok(None) => {}
+                Ok(Some(pages)) => returned = Some(group_returned(&pages, &group, &before)),
             }
-        },
-    );
+        }
+    }
+    let mut mismatch = None;
+    link.finish(e, "plan_answer", res, |en, _| match returned {
+        Some(Ok(ids)) => {
+            if let Some(reply) = en.reply.as_mut() {
+                reply["group"]["returned"] = json!(ids);
+            }
+        }
+        Some(Err(text)) => mismatch = Some(text),
+        None => {}
+    });
+    if cut_by_kill {
+        // the answers were acknowledged and the daemon died under the rest of their reply
+        link.recover();
+    }
     if let Some(text) = mismatch {
         link.fail("plan_answer", &text);
     }
