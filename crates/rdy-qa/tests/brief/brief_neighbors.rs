@@ -460,11 +460,15 @@ fn nb7_neighbors_do_not_expand_coverage_or_confidence() {
     assert_eq!(after.covers, before.covers);
     assert_eq!(after.record.recorded, before.record.recorded);
     assert_eq!(after.base.token, before.base.token);
-    assert_eq!(
+    // the covered block's score, issues, confidence and reasons are as before (the page's own
+    // score counts every block on the page, the new one too)
+    let (a, b) = (
         serde_json::to_value(&after.coverage).unwrap(),
         serde_json::to_value(&before.coverage).unwrap(),
-        "confidence and reasons as before"
     );
+    for k in ["score", "dimensions", "issues", "confidence", "reasons"] {
+        assert_eq!(a[k], b[k], "{k} as before");
+    }
 }
 
 #[test]

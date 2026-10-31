@@ -200,13 +200,15 @@ fn nb9_receipt_covers_creates_not_dependencies_or_updates() {
             .is_none()
     );
 
-    // a direct write to a dependency needs its own coverage: make D stable, then cite the receipt
-    let td = brief_of(&r, &view("w"), &[&dep_id]).base.token;
+    // a direct write to a dependency needs its own coverage: make D's section stable, then
+    // cite the receipt
+    let ds = BlockId::parse(&dw.created["$ds"]).unwrap();
+    let tds = brief_of(&r, &view("w"), &[&ds]).base.token;
     write_cited(
         &mut r,
         "w",
-        json!([{"op": "update", "id": dep, "fields": {"lifecycle": "stable"}}]),
-        Some(&td),
+        json!([{"op": "update", "id": ds.to_string(), "fields": {"lifecycle": "stable"}}]),
+        Some(&tds),
     )
     .unwrap();
     let e = write_cited(
@@ -217,7 +219,15 @@ fn nb9_receipt_covers_creates_not_dependencies_or_updates() {
     )
     .unwrap_err();
     assert_eq!(e.code, E_BRIEF_REQUIRED, "{e}");
-    // the dependency changed (its lifecycle): the receipt is stale for the created block
+    // with its own briefing D changes: the receipt is stale for the created block
+    let td = brief_of(&r, &view("w"), &[&dep_id]).base.token;
+    write_cited(
+        &mut r,
+        "w",
+        json!([{"op": "update", "id": dep, "body": "D holds, edited."}]),
+        Some(&td),
+    )
+    .unwrap();
     let e = write_cited(
         &mut r,
         "w",
@@ -469,7 +479,7 @@ fn mcp_receipts(c: &mut McpClient, sp: &Spec, run: &str) {
     let d = c
         .call(
             "rdy_decide",
-            json!({"brief": ts, "decision": {"parent": sp.section.to_string(), "statement": "New rule holds"}}),
+            json!({"brief": ts, "parent": sp.section.to_string(), "statement": "New rule holds"}),
         )
         .ok();
     assert_eq!(d["briefing"]["covers"], 1, "{d}");
