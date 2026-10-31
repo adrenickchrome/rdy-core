@@ -232,10 +232,13 @@ fn rf9_superseding_card_carries_findings() {
         text(&ordered[1])
     );
     let card1 = exception(&r, &p, &d1);
-    // after the existing exception-kind facts, as the last one
+    // after the existing exception-kind facts, as the last of them; the related decisions fact
+    // (nb11) follows it
+    let names: Vec<&str> = card1.facts.iter().map(|f| f.name.as_ref()).collect();
     assert_eq!(
-        card1.facts.last().map(|f| f.name.as_ref()),
-        Some("Findings")
+        names[names.len() - 2..],
+        ["Findings", "Related decisions"],
+        "{names:?}"
     );
     assert_eq!(
         fact(&card1, "Findings"),
