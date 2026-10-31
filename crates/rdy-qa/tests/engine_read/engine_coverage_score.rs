@@ -61,6 +61,7 @@ fn entry(checks: [u32; 6], issues: Vec<(Dimension, bool)>) -> BlockEntry {
                 actor: "agent:a".into(),
                 reason: "x".into(),
             }),
+            text: None,
         })
         .collect();
     BlockEntry {

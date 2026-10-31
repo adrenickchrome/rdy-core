@@ -179,6 +179,19 @@ fn cc6_each_dimension_counts_its_checks() {
         0,
         "needs_content: false leaves Governed out"
     );
+    // nb4 (D-YXBXH, p-9A81E): a prose block has one Complete check, passed unless it is a
+    // question written as prose
+    let st = r.read();
+    let m = st.materialized(&Scope::Canon).unwrap();
+    let prose = m
+        .children(Some(&BlockId::parse(&c["$l"]).unwrap()))
+        .into_iter()
+        .find(|b| b.block_type == "prose")
+        .unwrap()
+        .id
+        .to_string();
+    assert_eq!(checks(&prose), [1, 1, 1, 1, 1, 0]);
+    assert_eq!(codes(&i, &prose), vec![IssueCode::UntiedContent]);
 }
 
 /// guard (D-JV4QB, first sentence; already true at the base): fails before the change only by
@@ -194,6 +207,33 @@ fn cc6_a_block_names_an_entity_once_however_often() {
         .filter(|x| x.code == IssueCode::UnlinkedMention)
         .count();
     assert_eq!(n, 1, "c1 names Ledger twice: one check, one issue");
+    // nb4 (D-YXBXH): the one issue names the first match
+    let issue = i.blocks[&BlockId::parse(&c["$c1"]).unwrap()]
+        .issues
+        .iter()
+        .find(|x| x.code == IssueCode::UnlinkedMention)
+        .unwrap()
+        .clone();
+    assert_eq!(
+        issue,
+        rdy_engine::coverage::CoverageIssue {
+            block: c["$c1"].clone(),
+            dimension: Dimension::Grounded,
+            code: IssueCode::UnlinkedMention,
+            subject: Some(c["$t"].clone()),
+            fix: format!(
+                "link this mention to Ledger ({}), or dismiss it as a passing mention",
+                c["$t"]
+            ),
+            dismissed: None,
+            text: Some(rdy_engine::lexicon::MentionText {
+                field: "body".into(),
+                line: 1,
+                span: [4, 10],
+                words: "Ledger".into(),
+            }),
+        }
+    );
 }
 
 #[test]
@@ -318,6 +358,35 @@ fn cc6_fix_texts_are_exact() {
             "link {} to the decision that governs it, with decided_by or implements, or justify its next change with reflects; rdy_trace shows the landing that introduced it",
             c["$c1"]
         )
+    );
+    // nb4 (D-YXBXH): a crowded level and a question written as prose, in a view
+    let mut ops: Vec<serde_json::Value> = (0..7)
+        .map(|n| json!({"op": "create", "type": "doc", "fields": {"name": format!("more{n}"), "title": "More", "doc_type": "page"}}))
+        .collect();
+    ops.push(json!({"op": "create", "type": "prose", "id": "$ask", "parent": c["$l"], "body": "Who owns refunds?"}));
+    let w = write(&mut r, "nb4", serde_json::Value::Array(ops))
+        .unwrap()
+        .created;
+    let v = r
+        .read()
+        .coverage_issues(&Scope::View("nb4".into()))
+        .unwrap();
+    let vfix = |id: &str, code: IssueCode| {
+        v.blocks[&BlockId::parse(id).unwrap()]
+            .issues
+            .iter()
+            .find(|x| x.code == code)
+            .unwrap()
+            .fix
+            .clone()
+    };
+    assert_eq!(
+        vfix(&c["$o"], IssueCode::CrowdedLevel),
+        "group the docs of the top level into folders"
+    );
+    assert_eq!(
+        vfix(&w["$ask"], IssueCode::QuestionAsProse),
+        format!("change the type of {} to question", w["$ask"])
     );
 }
 

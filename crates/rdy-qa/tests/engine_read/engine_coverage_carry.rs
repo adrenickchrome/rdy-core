@@ -361,6 +361,9 @@ fn random_op(
     let sec = pick(&sections, seed, &c["$s"]);
     let term = c["$t"].clone();
     match seed % 15 {
+        // nb4: every other prose is a question written as prose
+        0 if step.is_multiple_of(2) => json!([{"op": "create", "type": "prose", "parent": sec,
+                     "body": format!("Does the Ledger grow at step {step}?")}]),
         0 => json!([{"op": "create", "type": "prose", "parent": sec,
                      "body": format!("The Ledger grows at step {step}.")}]),
         1 => json!([{"op": "create", "type": "claim", "parent": sec,
@@ -542,6 +545,30 @@ fn perf3_a_named_new_doc_carries() {
         ])),
     );
     carries(&mut r, None);
+    // nb4 (D-YXBXH): a named new doc that makes its level crowded carries too, and every sibling
+    // doc's entry changes with it (the top level holds ops, lone and second: five more is eight)
+    carries(
+        &mut r,
+        Some(Value::Array(
+            (0..5)
+                .map(|n| json!({"op": "create", "type": "doc", "fields": {"name": format!("more{n}"), "title": "More", "doc_type": "page"}}))
+                .collect(),
+        )),
+    );
+    let crowded = |r: &Rdy| {
+        r.read().coverage_issues(&v).unwrap().blocks[&BlockId::parse(&c["$l"]).unwrap()]
+            .issues
+            .iter()
+            .any(|i| i.code == IssueCode::CrowdedLevel)
+    };
+    assert!(!crowded(&r), "eight docs at the top level");
+    carries(
+        &mut r,
+        Some(
+            json!([{"op": "create", "type": "doc", "fields": {"name": "ninth", "title": "Ninth", "doc_type": "page"}}]),
+        ),
+    );
+    assert!(crowded(&r), "a sibling made before the ninth doc");
 }
 
 /// perf3 review: a named doc created beside a nameless one (an M1 doc without a stored name,
@@ -712,12 +739,20 @@ fn cc11_fix2_a_write_carries_the_coverage_issues() {
     write(
         &mut r,
         "next",
-        json!([{"op": "create", "type": "prose", "parent": c["$s"], "body": "And one more."}]),
+        json!([{"op": "create", "type": "prose", "parent": c["$s"], "body": "And one more?"}]),
     )
     .unwrap();
     r.read().coverage_issues(&v).unwrap();
     r.read().coverage_summary(&Scope::Canon).unwrap();
     assert_eq!(state_layer_builds(), before, "carried, not built in full");
+    // nb4: the carried issues hold the new Complete issue and the mention's text
+    assert!(has_issue(&r, &v, IssueCode::QuestionAsProse));
+    assert!(
+        r.read().coverage_issues(&v).unwrap().blocks[&BlockId::parse(&c["$c1"]).unwrap()]
+            .issues
+            .iter()
+            .any(|i| i.code == IssueCode::UnlinkedMention && i.text.is_some())
+    );
     same_issues(&r, &v);
     same_issues(&r, &Scope::Canon);
 }

@@ -1424,6 +1424,8 @@ fn signatures_row() -> Value {
 struct Rich {
     dir: tempfile::TempDir,
     batch: rdy_qa::intake::Batch,
+    /// nb4: a prose block with a located unlinked mention, so a briefing of it lists the text.
+    mention: String,
 }
 
 /// The pack of the probes: one area, so the coverage areas hold an entry.
@@ -1451,13 +1453,38 @@ fn rich_project() -> Rich {
     )
     .expect("edit A");
     rdy_qa::fixtures::land(&mut r, "s").expect("land the edit");
+    // nb4 (D-YXBXH): nine more docs at the top level (a crowded level), and in one of them a
+    // prose block that is one question and names a term it is not linked to (a located
+    // unlinked mention)
+    let mut ops: Vec<Value> = vec![];
+    for n in 0..9 {
+        ops.push(json!({"op": "create", "type": "doc", "id": format!("$c{n}"),
+            "fields": {"name": format!("crowd-{n}"), "title": format!("Crowd {n}"), "doc_type": "page"}}));
+    }
+    ops.push(
+        json!({"op": "create", "type": "term", "parent": "$c0", "fields": {"name": "Ledger"},
+        "body": "Holds balances."}),
+    );
+    ops.push(
+        json!({"op": "create", "type": "prose", "id": "$ask", "parent": "$c0",
+        "body": "Who keeps the Ledger?"}),
+    );
+    let mention = rdy_qa::fixtures::write(&mut r, "crowd", Value::Array(ops))
+        .expect("write the crowd")
+        .created["$ask"]
+        .clone();
+    rdy_qa::fixtures::land(&mut r, "crowd").expect("land the crowd");
     // a view that gives the reviewers a request
     put(&mut r, "a", upd(&batch.spec.c, "C contradicts B."));
     r.close().expect("close");
     rdy_qa::packs::use_pack(dir.path(), "rdy-release", RICH_PACK, "");
     std::fs::write(dir.path().join(".rdy/local.yaml"), "actor: human:qa\n").expect("the person");
     rdy_model::unseed_ids_for_tests();
-    Rich { dir, batch }
+    Rich {
+        dir,
+        batch,
+        mention,
+    }
 }
 
 /// What the probes saw, by label: for each, the merged shape of every success and of every
@@ -1906,6 +1933,7 @@ fn cli_runtime() -> Value {
         ("q", vec!["q", "type = claim"]),
         ("show landing", vec!["show", "tag:v1.0.0"]),
         ("brief", vec!["brief", &a]),
+        ("brief", vec!["brief", &rich.mention]),
         ("plan", vec!["plan", "--proposal", &proposal]),
         ("config", vec!["config"]),
         ("view ls", vec!["view", "ls"]),
@@ -2195,6 +2223,7 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
         ("rdy_diff", json!({"from": "batch"})),
         ("rdy_query", json!({"filter": "type = claim"})),
         ("rdy_brief", json!({"ids": [a]})),
+        ("rdy_brief", json!({"ids": [rich.mention.clone()]})),
         ("rdy_view", json!({"op": "list"})),
         ("rdy_view", json!({"op": "show", "name": "batch"})),
         (

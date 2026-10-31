@@ -7,14 +7,15 @@
 use crate::Materialized;
 use rdy_graph::{EdgeKind, Graph, edges_of};
 use rdy_model::entity::{
-    aliases, code_literals, phrase, phrase_keys, shown_sources, source_field, text_sources,
-    visit_phrases, words,
+    aliases, code_literals, lines_at, phrase, phrase_keys, shown_sources, source_field,
+    text_sources, visit_phrases, visit_text_sources, words,
 };
 use rdy_model::{Block, BlockId, FieldValue, decision};
 use rdy_schema::{FieldKind, Pack, Trait};
 use serde::Serialize;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 thread_local! {
@@ -51,6 +52,26 @@ pub struct Mention {
     pub entity: String,
     pub field: String,
     pub text: String,
+}
+
+/// nb4 (D-YXBXH, O5): where a mention's words are, in the stored text of the source leaf that
+/// holds them: the leaf (`body`, a field, `name[i]` or `name.key`), the one-based line of the
+/// match's first byte, the zero-based half-open UTF-8 byte range of the match on that line
+/// (cut at the line's end for a match that goes on to the next line), and the matched words
+/// exactly as stored.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct MentionText {
+    pub field: String,
+    pub line: usize,
+    pub span: [usize; 2],
+    pub words: String,
+}
+
+/// A [`Mention`] with its [`MentionText`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocatedMention {
+    pub mention: Mention,
+    pub text: MentionText,
 }
 
 /// The field that makes an entity everyday: only the boolean `true` does.
@@ -202,7 +223,40 @@ impl Lexicon {
 
     /// The entities `b`'s text names by name or alias (never by key), one mention per entity,
     /// the first found, reading `text_in` in order. An entity never mentions itself.
+    /// [`Lexicon::mentions_located`] without where the words are.
     pub fn mentions(&self, b: &Block) -> Vec<Mention> {
+        self.first_mentions(b).into_iter().map(|(m, _)| m).collect()
+    }
+
+    /// [`Lexicon::mentions`], each with where its words are in `b`'s stored text (nb4,
+    /// D-YXBXH): the source leaf, the one-based line of the match's first byte, the match's
+    /// byte range on that line (cut at the line's end when the match goes on), and the words as
+    /// stored. The scan reads the text with each reference blanked to the same bytes, so the
+    /// positions are those of the stored text.
+    pub fn mentions_located(&self, b: &Block) -> Vec<LocatedMention> {
+        let found = self.first_mentions(b);
+        if found.is_empty() {
+            return vec![];
+        }
+        // the stored leaves that hold a first match, read once more without a scan
+        let mut out: Vec<Option<LocatedMention>> = vec![None; found.len()];
+        visit_text_sources(b, &mut |name, stored, _| {
+            for (slot, (m, range)) in out.iter_mut().zip(&found) {
+                if slot.is_none() && m.field == name {
+                    *slot = Some(LocatedMention {
+                        mention: m.clone(),
+                        text: located(name, stored, range.clone()),
+                    });
+                }
+            }
+            ControlFlow::Continue(())
+        });
+        out.into_iter().flatten().collect()
+    }
+
+    /// The scan of [`Lexicon::mentions`]: each entity's first mention, with the byte range of
+    /// its words in its source's text.
+    fn first_mentions(&self, b: &Block) -> Vec<(Mention, std::ops::Range<usize>)> {
         // no name to find: the text is not read
         if self.phrases.is_empty() {
             return vec![];
@@ -214,11 +268,14 @@ impl Lexicon {
             self.visit_mention_spans(&text, &source, &mut |id, range| {
                 if !seen.contains(id) {
                     seen.insert(id.clone());
-                    out.push(Mention {
-                        entity: id.to_string(),
-                        field: field.clone(),
-                        text: text[range].to_string(),
-                    });
+                    out.push((
+                        Mention {
+                            entity: id.to_string(),
+                            field: field.clone(),
+                            text: text[range.clone()].to_string(),
+                        },
+                        range,
+                    ));
                 }
             });
         }
@@ -494,6 +551,30 @@ impl Lexicon {
                 }
             }
         }
+    }
+}
+
+/// Where the words at `range` of `stored`, the stored text of leaf `field`, are: the one-based
+/// line of `range.start`, the range on that line (its end cut at the line's end, before any
+/// `\r\n` or `\n`), and the words as stored.
+fn located(field: &str, stored: &str, range: std::ops::Range<usize>) -> MentionText {
+    let mut line = 1;
+    let mut start = 0;
+    let mut content = stored.len();
+    for (n, (at, text)) in lines_at(stored).enumerate() {
+        if at > range.start {
+            break;
+        }
+        line = n + 1;
+        start = at;
+        content = at + text.len();
+    }
+    let words = stored.get(range.clone()).unwrap_or_default().to_string();
+    MentionText {
+        field: field.to_string(),
+        line,
+        span: [range.start - start, range.end.min(content) - start],
+        words,
     }
 }
 

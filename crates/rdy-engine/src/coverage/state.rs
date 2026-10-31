@@ -522,11 +522,14 @@ impl ReadState {
                 .lexicon
                 .get_or_init(|| Arc::new(Lexicon::build(&self.pack, m.iter()))),
         );
-        let structural = Arc::clone(
-            built
-                .structural
-                .get_or_init(|| Arc::new(structural_in(&m, &g, &lex, &self.pack))),
-        );
+        // nb4: the layer is built whole before it is kept; a refused build keeps nothing
+        let structural = match built.structural.get() {
+            Some(s) => Arc::clone(s),
+            None => {
+                let s = Arc::new(structural_in(&m, &g, &lex, &self.pack)?);
+                Arc::clone(built.structural.get_or_init(|| s))
+            }
+        };
         let canon = self.memo_entry(&Scope::Canon, false)?;
         let inputs = Inputs::assemble(
             self,
@@ -945,7 +948,7 @@ impl ReadState {
         let mut suspects: Vec<Suspect> = vec![];
         for id in &new {
             LOCAL_ENTRIES.with(|c| c.set(c.get() + 1));
-            if let Some((entry, _)) = entry_of(&cx, id) {
+            if let Some((entry, _)) = entry_of(&cx, id)? {
                 blocks.insert(id.clone(), entry);
                 // as `Inputs::of` keeps them: no presentational source, no absent target
                 suspects.extend(g.suspects_of(id).into_iter().filter(|s| {

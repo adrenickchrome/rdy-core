@@ -1,9 +1,10 @@
 //! The structural layer of coverage (FW-CH1, FW-CV1): the Grounded, Connected, Complete and
 //! Governed checks and issues of each scored block. Each block's entry reads only local graph
-//! queries, so a carry can recompute any one block. The layer is a function of the scope's
+//! queries and its doc's level, so a carry can recompute any one block. The layer is a function of the scope's
 //! build and the pack, memoised on the build.
 use super::model::*;
 use crate::brief::effective_stable;
+use crate::error::E_LIMIT;
 use crate::lexicon::{Lexicon, is_content, is_tie, link_kind_for, linked_from_outside, tied};
 use crate::query::is_entity_in;
 use crate::tensions::index::{is_deprecated, is_normative};
@@ -34,6 +35,28 @@ pub fn governed_scans() -> u64 {
     GOVERNED_SCANS.with(Cell::get)
 }
 
+/// nb4: the most docs one level may hold directly before a coverage read refuses (`E_LIMIT`).
+pub(crate) const MAX_LEVEL_DOCS: usize = 100_000;
+/// nb4: the most tree entries the level counts of one structural build, carry or briefing's
+/// local entries visit before a coverage read refuses (`E_LIMIT`).
+pub(crate) const MAX_STRUCTURE_ENTRIES: usize = 1_000_000;
+
+/// The work guards of the level counts: the most docs one level holds directly, and the most
+/// tree entries one context visits.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Limits {
+    pub docs: usize,
+    pub entries: usize,
+}
+
+impl Limits {
+    /// The fixed guards: [`MAX_LEVEL_DOCS`] and [`MAX_STRUCTURE_ENTRIES`].
+    pub(crate) const FIXED: Limits = Limits {
+        docs: MAX_LEVEL_DOCS,
+        entries: MAX_STRUCTURE_ENTRIES,
+    };
+}
+
 /// What one block's structural entry reads, with what its entries share, memoised per entity
 /// for the life of the context (one build or one carry).
 pub(crate) struct EntryCx<'a> {
@@ -46,6 +69,12 @@ pub(crate) struct EntryCx<'a> {
     /// rf6: the decisions that affect each entity read so far, for the graph's governing
     /// routes: scanned once per context, not once per block that describes it (final review I1).
     governing: RefCell<GoverningCache>,
+    /// nb4: how many docs each level read so far holds directly, by parent (`None`: the top
+    /// level), counted once per context.
+    levels: RefCell<HashMap<Option<BlockId>, usize>>,
+    /// nb4: how many tree entries the level counts visited.
+    visited: Cell<usize>,
+    limits: Limits,
 }
 
 /// What an [`EntryCx`] memoised, kept between contexts on the same scope of the same state
@@ -54,6 +83,8 @@ pub(crate) struct EntryCx<'a> {
 pub(crate) struct CxMemo {
     deprecated: HashMap<BlockId, bool>,
     governing: GoverningCache,
+    levels: HashMap<Option<BlockId>, usize>,
+    visited: usize,
 }
 
 impl<'a> EntryCx<'a> {
@@ -82,7 +113,17 @@ impl<'a> EntryCx<'a> {
             pack,
             deprecated: RefCell::new(memo.deprecated),
             governing: RefCell::new(memo.governing),
+            levels: RefCell::new(memo.levels),
+            visited: Cell::new(memo.visited),
+            limits: Limits::FIXED,
         }
+    }
+
+    /// This context with work guards `limits` in place of the fixed ones.
+    #[cfg(test)]
+    pub(crate) fn with_limits(mut self, limits: Limits) -> EntryCx<'a> {
+        self.limits = limits;
+        self
     }
 
     /// What this context memoised, for the next context on the same scope of the same state.
@@ -90,7 +131,27 @@ impl<'a> EntryCx<'a> {
         CxMemo {
             deprecated: self.deprecated.into_inner(),
             governing: self.governing.into_inner(),
+            levels: self.levels.into_inner(),
+            visited: self.visited.get(),
         }
+    }
+
+    /// nb4: how many docs the level under `parent` (`None`: the top level) holds directly,
+    /// counted once per context. `E_LIMIT` past the level or structure guard.
+    fn level_docs(&self, parent: Option<&BlockId>) -> Result<usize, RdyError> {
+        let key = parent.cloned();
+        if let Some(n) = self.levels.borrow().get(&key) {
+            return Ok(*n);
+        }
+        let n = count_docs(
+            self.m.children(parent).into_iter(),
+            &self.visited,
+            self.limits,
+            parent,
+            &|p| self.m.path_of(p).unwrap_or_default(),
+        )?;
+        self.levels.borrow_mut().insert(key, n);
+        Ok(n)
     }
 
     /// rf6: whether a live decision governs `id` by one of the graph's four routes. Counts the
@@ -122,6 +183,71 @@ impl<'a> EntryCx<'a> {
         self.deprecated.borrow_mut().insert(entity.clone(), d);
         d
     }
+}
+
+/// nb4: the docs among `children`, the entries of the level under `parent` (`None`: the top
+/// level, else a folder whose path `path` gives), each child counted in `visited`. `E_LIMIT` at
+/// the first doc past `limits.docs` or the first entry past `limits.entries`; nothing is
+/// collected.
+fn count_docs<'b>(
+    children: impl Iterator<Item = &'b Block>,
+    visited: &Cell<usize>,
+    limits: Limits,
+    parent: Option<&BlockId>,
+    path: &dyn Fn(&BlockId) -> String,
+) -> Result<usize, RdyError> {
+    let mut docs = 0;
+    for c in children {
+        let seen = visited.get() + 1;
+        if seen > limits.entries {
+            return Err(RdyError::new(
+                E_LIMIT,
+                format!("coverage structure exceeds {} tree entries", limits.entries),
+                "split the project into smaller projects",
+            ));
+        }
+        visited.set(seen);
+        if c.block_type == tree::DOC {
+            docs += 1;
+            if docs > limits.docs {
+                let (subject, folder) = level_names(parent, path);
+                return Err(RdyError::new(
+                    E_LIMIT,
+                    format!("coverage level {subject} exceeds {} docs", limits.docs),
+                    fix_crowded_level(&folder),
+                ));
+            }
+        }
+    }
+    Ok(docs)
+}
+
+/// How a level is named (O6): its subject and messages give the folder's path, or `/` for the
+/// top level; its fixes give the folder's path, or `the top level`.
+fn level_names(parent: Option<&BlockId>, path: &dyn Fn(&BlockId) -> String) -> (String, String) {
+    match parent {
+        Some(p) => {
+            let path = path(p);
+            (path.clone(), path)
+        }
+        None => ("/".to_string(), "the top level".to_string()),
+    }
+}
+
+/// nb4 (D-YXBXH, O6): whether `body`, trimmed, is one question: nonempty, ending in `?`, with no
+/// earlier `.`, `!` or `?` that Unicode whitespace follows.
+fn is_one_question(body: &str) -> bool {
+    let t = body.trim();
+    let Some(head) = t.strip_suffix('?') else {
+        return false;
+    };
+    let mut chars = head.chars().peekable();
+    while let Some(c) = chars.next() {
+        if matches!(c, '.' | '!' | '?') && chars.peek().is_some_and(|n| n.is_whitespace()) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Whether `id` is a live decision: accepted and not wholly superseded or revoked.
@@ -258,11 +384,20 @@ pub(crate) fn named_in(pack: &Pack, lex: &Lexicon, b: &Block) -> Vec<BlockId> {
 /// One block's structural entry and the entities its text names, by the closed table (ledger
 /// Q2): `None` for a block that is absent or presentational (not scored). Reads only local
 /// queries: the block's own edges, its children, its doc's subtree for `unlinked_doc`, the
-/// incoming edges of the entities it describes, and the blocks its `reflects` links name.
-pub(crate) fn entry_of(cx: &EntryCx<'_>, id: &BlockId) -> Option<(BlockEntry, Vec<BlockId>)> {
-    let b = cx.m.get(id)?;
+/// incoming edges of the entities it describes, the blocks its `reflects` links name, and (nb4)
+/// a doc's level, counted once per context.
+///
+/// nb4: `E_LIMIT` when a doc's level, or the levels this context counted, pass a work guard
+/// ([`MAX_LEVEL_DOCS`], [`MAX_STRUCTURE_ENTRIES`]).
+pub(crate) fn entry_of(
+    cx: &EntryCx<'_>,
+    id: &BlockId,
+) -> Result<Option<(BlockEntry, Vec<BlockId>)>, RdyError> {
+    let Some(b) = cx.m.get(id) else {
+        return Ok(None);
+    };
     if cx.pack.is_presentational(&b.block_type) {
-        return None;
+        return Ok(None);
     }
     let mut e = BlockEntry {
         doc: cx.m.doc_of(id).map(|d| d.id.clone()),
@@ -286,7 +421,8 @@ pub(crate) fn entry_of(cx: &EntryCx<'_>, id: &BlockId) -> Option<(BlockEntry, Ve
     // every scored block's mentions are listed (a fact sheet's neighbourhood); only a block
     // that can link has a Grounded check per mention
     let can_link = link_kind_for(cx.pack, b).is_some();
-    for mention in cx.lex.mentions(b) {
+    for located in cx.lex.mentions_located(b) {
+        let mention = &located.mention;
         let Ok(entity) = BlockId::parse(&mention.entity) else {
             continue;
         };
@@ -301,12 +437,14 @@ pub(crate) fn entry_of(cx: &EntryCx<'_>, id: &BlockId) -> Option<(BlockEntry, Ve
                         .and_then(|t| t.field_str("name"))
                         .unwrap_or(&mention.text)
                         .to_string();
-                e.issues.push(CoverageIssue::new(
+                let mut issue = CoverageIssue::new(
                     id,
                     IssueCode::UnlinkedMention,
                     Some(entity.to_string()),
                     fix_unlinked_mention(&name, &entity),
-                ));
+                );
+                issue.text = Some(located.text.clone());
+                e.issues.push(issue);
             }
         }
         named.push(entity);
@@ -351,6 +489,17 @@ pub(crate) fn entry_of(cx: &EntryCx<'_>, id: &BlockId) -> Option<(BlockEntry, Ve
     // Complete
     if b.block_type == tree::DOC {
         e.check(Dimension::Complete);
+        // nb4: the doc's level holds too many docs directly; the same check
+        if cx.level_docs(b.parent.as_ref())? > cx.pack.max_docs_per_level() as usize {
+            let (subject, folder) =
+                level_names(b.parent.as_ref(), &|p| cx.m.path_of(p).unwrap_or_default());
+            e.issues.push(CoverageIssue::new(
+                id,
+                IssueCode::CrowdedLevel,
+                Some(subject),
+                fix_crowded_level(&folder),
+            ));
+        }
         for title in missing_sections(cx, b) {
             let fix = fix_missing_section(&title);
             e.issues.push(CoverageIssue::new(
@@ -374,6 +523,17 @@ pub(crate) fn entry_of(cx: &EntryCx<'_>, id: &BlockId) -> Option<(BlockEntry, Ve
                 IssueCode::StubSection,
                 Some(title),
                 fix,
+            ));
+        }
+    } else if b.block_type == PROSE || b.block_type == NOTE {
+        // nb4: a prose or note block that is one question
+        e.check(Dimension::Complete);
+        if is_one_question(&b.body) {
+            e.issues.push(CoverageIssue::new(
+                id,
+                IssueCode::QuestionAsProse,
+                None,
+                fix_question_as_prose(id),
             ));
         }
     } else if b.block_type == decision::QUESTION {
@@ -418,8 +578,12 @@ pub(crate) fn entry_of(cx: &EntryCx<'_>, id: &BlockId) -> Option<(BlockEntry, Ve
     }
 
     sort_issues(&mut e.issues, &BTreeMap::new());
-    Some((e, named))
+    Ok(Some((e, named)))
 }
+
+/// The types whose body a question written as prose can be.
+const PROSE: &str = "prose";
+const NOTE: &str = "note";
 
 /// The structural layer of `scope`: [`entry_of`] for every block. A full build: counted by
 /// [`structural_builds`].
@@ -427,18 +591,28 @@ pub(crate) fn structural_of(st: &ReadState, scope: &Scope) -> Result<Structural,
     let m = st.materialized(scope)?;
     let g = st.graph(scope)?;
     let lex = st.lexicon(scope)?;
-    Ok(structural_in(&m, &g, &lex, st.pack()))
+    structural_in(&m, &g, &lex, st.pack())
 }
 
 /// The structural layer of materialization `m`, whose graph is `g` and whose lexicon is `lex`,
 /// built in full (what [`structural_of`] builds for a scope). Counted by [`structural_builds`].
-pub(crate) fn structural_in(m: &Materialized, g: &Graph, lex: &Lexicon, pack: &Pack) -> Structural {
+/// `E_LIMIT` past a work guard: no layer at all, never part of one.
+pub(crate) fn structural_in(
+    m: &Materialized,
+    g: &Graph,
+    lex: &Lexicon,
+    pack: &Pack,
+) -> Result<Structural, RdyError> {
     STRUCTURAL_BUILDS.with(|c| c.set(c.get() + 1));
-    let cx = EntryCx::new(m, g, lex, pack);
+    build_layer(&EntryCx::new(m, g, lex, pack))
+}
+
+/// [`entry_of`] for every block of `cx`'s materialization.
+fn build_layer(cx: &EntryCx<'_>) -> Result<Structural, RdyError> {
     let mut blocks: BTreeMap<BlockId, BlockEntry> = BTreeMap::new();
     let mut mentions: BTreeMap<BlockId, BTreeSet<BlockId>> = BTreeMap::new();
-    for b in m.iter() {
-        let Some((entry, named)) = entry_of(&cx, &b.id) else {
+    for b in cx.m.iter() {
+        let Some((entry, named)) = entry_of(cx, &b.id)? else {
             continue;
         };
         for entity in named {
@@ -446,13 +620,13 @@ pub(crate) fn structural_in(m: &Materialized, g: &Graph, lex: &Lexicon, pack: &P
         }
         blocks.insert(b.id.clone(), entry);
     }
-    Structural {
+    Ok(Structural {
         blocks: blocks.into_iter().collect(),
         mentions: mentions
             .into_iter()
             .map(|(k, v)| (k, v.into_iter().collect::<imbl::OrdSet<BlockId>>()))
             .collect(),
-    }
+    })
 }
 
 /// Test hook: a full structural build of `scope` that ignores the memo.
@@ -468,4 +642,169 @@ pub fn structural_for_tests(
     scope: &Scope,
 ) -> Result<std::sync::Arc<Structural>, RdyError> {
     st.structural(&st.coverage_scope(scope)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rdy_schema::PackSet;
+
+    fn pack() -> Pack {
+        PackSet::with_builtin().resolve("rdy-standard").unwrap()
+    }
+
+    fn block(id: &str, block_type: &str, parent: Option<&str>, name: &str) -> Block {
+        let mut fields = BTreeMap::new();
+        if !name.is_empty() {
+            fields.insert("name".to_string(), FieldValue::Str(name.to_string()));
+            fields.insert("title".to_string(), FieldValue::Str(name.to_string()));
+        }
+        Block {
+            id: BlockId::parse(id).unwrap(),
+            block_type: block_type.to_string(),
+            parent: parent.map(|p| BlockId::parse(p).unwrap()),
+            order: id.to_string(),
+            fields,
+            body: String::new(),
+            links: BTreeMap::new(),
+            pins: BTreeMap::new(),
+            read_identity: None,
+        }
+    }
+
+    /// A doc id with body `n` (Crockford digits only).
+    fn doc_id(n: usize) -> String {
+        format!("d-{n:05}")
+    }
+
+    /// Folder `f-AREA0` holding `in_folder` docs, and `at_top` docs at the top level.
+    fn state(at_top: usize, in_folder: usize) -> Materialized {
+        let mut ops = vec![rdy_model::Op::Create {
+            block: block("f-AREA0", tree::FOLDER, None, "area"),
+        }];
+        for i in 0..at_top + in_folder {
+            let parent = (i >= at_top).then_some("f-AREA0");
+            let id = doc_id(i);
+            ops.push(rdy_model::Op::Create {
+                block: block(&id, tree::DOC, parent, &format!("doc{i}")),
+            });
+        }
+        Materialized::default().with(&ops)
+    }
+
+    /// The layer of `m` built with the level and structure limits `limits`.
+    fn build(m: &Materialized, limits: Limits) -> Result<Structural, RdyError> {
+        let p = pack();
+        let g = Graph::build_from(m.iter());
+        let lex = Lexicon::build(&p, m.iter());
+        let cx = EntryCx::new(m, &g, &lex, &p).with_limits(limits);
+        build_layer(&cx)
+    }
+
+    #[test]
+    fn nb4_structure_bounds_fail_without_partial_scores() {
+        // the fixed bounds
+        assert_eq!(MAX_LEVEL_DOCS, 100_000);
+        assert_eq!(MAX_STRUCTURE_ENTRIES, 1_000_000);
+        let fixed = Limits::FIXED;
+        assert_eq!((fixed.docs, fixed.entries), (100_000, 1_000_000));
+
+        // the counter at each fixed bound, over that many entries without a copy of any
+        let doc = block("d-00000", tree::DOC, None, "doc");
+        let folder = block("f-00000", tree::FOLDER, None, "area");
+        let visited = Cell::new(0);
+        let n = count_docs(
+            std::iter::repeat_n(&doc, 100_000),
+            &visited,
+            fixed,
+            None,
+            &|_| "area".to_string(),
+        )
+        .unwrap();
+        assert_eq!(n, 100_000, "at the level bound");
+        let visited = Cell::new(0);
+        let e = count_docs(
+            std::iter::repeat_n(&doc, 100_001),
+            &visited,
+            fixed,
+            None,
+            &|_| "area".to_string(),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, crate::error::E_LIMIT);
+        assert_eq!(e.message, "coverage level / exceeds 100000 docs");
+        assert_eq!(e.fix, "group the docs of the top level into folders");
+        assert_eq!(visited.get(), 100_001, "it stops at the first excess");
+        let at = BlockId::parse("f-00000").unwrap();
+        let e = count_docs(
+            std::iter::repeat_n(&doc, 100_001),
+            &Cell::new(0),
+            fixed,
+            Some(&at),
+            &|_| "area/sub".to_string(),
+        )
+        .unwrap_err();
+        assert_eq!(e.message, "coverage level area/sub exceeds 100000 docs");
+        assert_eq!(e.fix, "group the docs of area/sub into folders");
+        // entries that are no docs count toward the structure bound only
+        let visited = Cell::new(0);
+        let n = count_docs(
+            std::iter::repeat_n(&folder, 1_000_000),
+            &visited,
+            fixed,
+            None,
+            &|_| String::new(),
+        )
+        .unwrap();
+        assert_eq!((n, visited.get()), (0, 1_000_000), "at the structure bound");
+        let e = count_docs(std::iter::once(&folder), &visited, fixed, None, &|_| {
+            String::new()
+        })
+        .unwrap_err();
+        assert_eq!(e.code, crate::error::E_LIMIT);
+        assert_eq!(e.message, "coverage structure exceeds 1000000 tree entries");
+        assert_eq!(e.fix, "split the project into smaller projects");
+
+        // a build that passes a bound fails whole: no partial layer, no score
+        let m = state(3, 4);
+        let ok = build(
+            &m,
+            Limits {
+                docs: 4,
+                entries: 8,
+            },
+        )
+        .unwrap();
+        assert_eq!(ok.blocks.len(), 8, "the folder and seven docs");
+        let e = build(
+            &m,
+            Limits {
+                docs: 3,
+                entries: 8,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e.message, "coverage level area exceeds 3 docs");
+        assert_eq!(e.fix, "group the docs of area into folders");
+        let e = build(
+            &m,
+            Limits {
+                docs: 4,
+                entries: 7,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e.message, "coverage structure exceeds 7 tree entries");
+        let m = state(4, 0);
+        let e = build(
+            &m,
+            Limits {
+                docs: 3,
+                entries: 100,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e.message, "coverage level / exceeds 3 docs");
+        assert_eq!(e.fix, "group the docs of the top level into folders");
+    }
 }

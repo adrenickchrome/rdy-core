@@ -191,6 +191,7 @@
             "coverage": {
               "confidence": "string",
               "dimensions": {
+                "complete?": "number",
                 "connected": "number",
                 "consistent": "number",
                 "current": "number",
@@ -202,7 +203,15 @@
                   "code": "string",
                   "dimension": "string",
                   "fix": "string",
-                  "subject": "null"
+                  "subject": "null|string",
+                  "text?": {
+                    "field": "string",
+                    "line": "number",
+                    "span": [
+                      "number"
+                    ],
+                    "words": "string"
+                  }
                 }
               ],
               "pages": [
@@ -218,7 +227,15 @@
                   "code": "string",
                   "dimension": "string",
                   "fix": "string",
-                  "subject": "null|string"
+                  "subject": "null|string",
+                  "text?": {
+                    "field": "string",
+                    "line": "number",
+                    "span": [
+                      "number"
+                    ],
+                    "words": "string"
+                  }
                 }
               ],
               "score": "number"
@@ -300,7 +317,15 @@
                 "code": "string",
                 "dimension": "string",
                 "fix": "string",
-                "subject": "null|string"
+                "subject": "null|string",
+                "text?": {
+                  "field": "string",
+                  "line": "number",
+                  "span": [
+                    "number"
+                  ],
+                  "words": "string"
+                }
               }
             ],
             "issues_total": "number",
@@ -15523,6 +15548,7 @@
           "coverage": {
             "confidence": "string",
             "dimensions": {
+              "complete?": "number",
               "connected": "number",
               "consistent": "number",
               "current": "number",
@@ -15534,7 +15560,15 @@
                 "code": "string",
                 "dimension": "string",
                 "fix": "string",
-                "subject": "null"
+                "subject": "null|string",
+                "text?": {
+                  "field": "string",
+                  "line": "number",
+                  "span": [
+                    "number"
+                  ],
+                  "words": "string"
+                }
               }
             ],
             "pages": [
@@ -15550,7 +15584,15 @@
                 "code": "string",
                 "dimension": "string",
                 "fix": "string",
-                "subject": "null|string"
+                "subject": "null|string",
+                "text?": {
+                  "field": "string",
+                  "line": "number",
+                  "span": [
+                    "number"
+                  ],
+                  "words": "string"
+                }
               }
             ],
             "score": "number"
@@ -15704,7 +15746,15 @@
                 "review": "string"
               },
               "fix": "string",
-              "subject": "null|string"
+              "subject": "null|string",
+              "text?": {
+                "field": "string",
+                "line": "number",
+                "span": [
+                  "number"
+                ],
+                "words": "string"
+              }
             }
           ],
           "issues_total": "number",

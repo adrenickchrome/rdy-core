@@ -3,7 +3,7 @@
 //! that can change entries the dirty set does not reach gives up, and the next read rebuilds.
 use super::model::Structural;
 use super::structural::{EntryCx, entry_of, named_in};
-use crate::lexicon::Lexicon;
+use crate::lexicon::{EVERYDAY, Lexicon};
 use crate::tensions::index::is_deprecated;
 use crate::{Materialized, RdyError, ReadState, Scope};
 use rdy_graph::{EdgeKind, Graph, edges_of};
@@ -25,11 +25,13 @@ pub fn carried_entries() -> u64 {
 /// `prev`, the structural layer of `old` (whose graph is `old_g`), carried across `ops` to
 /// `new`, whose graph is `g` and whose lexicon is `lex`: equal to a rebuild. `None` when the ops
 /// can change entries the dirty set does not reach (the next read rebuilds): an entity created,
-/// deleted or renamed; a lifecycle change or a move of a block that has children; a block
-/// deleted with children left; a doc's `doc_type` changed; a doc or a folder deleted, renamed or
-/// moved, or created without a stored name or beside a nameless one (it changes the paths of
-/// docs other than itself). With the layer, the blocks whose entries it recomputed (every other
-/// entry is `prev`'s).
+/// deleted, renamed or made everyday or not; a lifecycle change or a move of a block that has
+/// children; a block deleted with children left; a doc's `doc_type` changed; a doc or a folder
+/// deleted, renamed or moved, or created without a stored name or beside a nameless one (it
+/// changes the paths of docs other than itself). A doc that carries recomputes every doc of its
+/// level (nb4: `crowded_level`). `None` too when an entry is refused (`E_LIMIT`): the next required
+/// read rebuilds and gives the error. With the layer, the blocks whose entries it recomputed
+/// (every other entry is `prev`'s).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn carry(
     prev: &Structural,
@@ -65,6 +67,15 @@ pub(crate) fn carry(
             // 1. the block, its parent and its doc, before and after
             if let Some(p) = &x.parent {
                 dirty.insert(p.clone());
+            }
+            // nb4: a doc that comes, goes or moves changes its levels' counts, so each doc of its
+            // level before and after (`crowded_level`)
+            if x.block_type == tree::DOC {
+                for sibling in new.children(x.parent.as_ref()) {
+                    if sibling.block_type == tree::DOC {
+                        dirty.insert(sibling.id.clone());
+                    }
+                }
             }
             docs_above(m, id, &mut dirty);
             // 2. each target of an outgoing edge, old or new, and that target's doc
@@ -114,7 +125,7 @@ pub(crate) fn carry(
         }
     }
     for id in &dirty {
-        match entry_of(&cx, id) {
+        match entry_of(&cx, id).ok()? {
             Some((entry, named)) => {
                 if touched.contains(id) {
                     for entity in named {
@@ -164,7 +175,8 @@ fn gives_up<'a>(
     };
     // an entity created, deleted or renamed: the mentions of every block can change, and so
     // can the fix of every unlinked mention, which names the raw name (a rename that keeps the
-    // phrase, "Ledger" to "LEDGER", finds the same mentions but changes those fixes)
+    // phrase, "Ledger" to "LEDGER", finds the same mentions but changes those fixes); nb4: and
+    // an entity made everyday or not, whose unlinked mentions come or go in every block
     let entity = |x: Option<&'a Block>| x.filter(|x| lex.is_entity_type(&x.block_type));
     match (entity(a), entity(b)) {
         (None, None) => {}
@@ -207,10 +219,15 @@ fn gives_up<'a>(
     }
 }
 
-/// The raw `name` and `aliases` fields of entity `b`, as written: its mentions are found by
-/// their phrases, and an unlinked mention's fix names the raw name.
-fn raw_names(b: &Block) -> (Option<&FieldValue>, Option<&FieldValue>) {
-    (b.fields.get("name"), b.fields.get(entity::ALIASES))
+/// The raw `name` and `aliases` fields of entity `b`, as written, and whether it is everyday:
+/// its mentions are found by their phrases, an unlinked mention's fix names the raw name, and
+/// only linked mentions of an everyday entity count (nb4).
+fn raw_names(b: &Block) -> (Option<&FieldValue>, Option<&FieldValue>, bool) {
+    (
+        b.fields.get("name"),
+        b.fields.get(entity::ALIASES),
+        b.fields.get(EVERYDAY) == Some(&FieldValue::Bool(true)),
+    )
 }
 
 /// Adds `id` (when it is a doc) and every doc above it in `m`.
