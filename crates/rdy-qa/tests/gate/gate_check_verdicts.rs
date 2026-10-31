@@ -968,7 +968,68 @@ fn ck7_only_matching_selected_cases_show() {
     std::fs::write(&blob_object, saved).unwrap();
     git(&repo, &["checkout", "--", "cache.rs"]);
     assert_eq!(approve_card(&e, &p.r#ref).card_hash, card.card_hash);
-    drop(n.dir);
+
+    // the same block written again: the case reads the version's selected changes, never a
+    // view edit of that block nobody proposed or a later overwrite that the subset excludes
+    let m = notes();
+    let c1 = write_in(&m.e, "a1", upd(&m.x, "X holds, now."), j_typo())
+        .change
+        .clone();
+    let on_c1 = {
+        let q = ask(&m.e, &a1, "meaning_preservation", json!(c1), false);
+        answer_request(&m.e, &reviewer(), &q, "fail", &m.x)
+    };
+    let whole = propose_in(&m.e, "a1");
+    let on_whole = meaning_verdict(&m.e, &a1, &whole.r#ref, "fail", &m.x);
+    let mut both = vec![on_c1.clone(), on_whole.clone()];
+    both.sort();
+    assert_eq!(reviews(&approve_card(&m.e, &whole.r#ref)), both);
+    // an overwrite of x in the view, not proposed
+    write_in(&m.e, "a1", upd(&m.x, "X holds, later."), j_typo());
+    let mut shown: Vec<String> = shown_of(&m.e, &whole)
+        .iter()
+        .map(|v| v.review.to_string())
+        .collect();
+    shown.sort();
+    assert_eq!(shown, both, "an unproposed overwrite of the same block");
+    // a subset of the reviewed change, chosen after an overwrite it excludes
+    let k = notes();
+    let c1 = write_in(&k.e, "a1", upd(&k.x, "X holds, now."), j_typo())
+        .change
+        .clone();
+    let on_c1 = {
+        let q = ask(&k.e, &a1, "meaning_preservation", json!(c1), false);
+        answer_request(&k.e, &reviewer(), &q, "fail", &k.x)
+    };
+    let c2 = write_in(&k.e, "a1", upd(&k.x, "X holds, later."), j_typo())
+        .change
+        .clone();
+    let only_c1 = {
+        let c1 = c1.clone();
+        on(&k.e, move |r| {
+            r.propose_subset(&ag("a1"), "a1", "a1", Some(&[c1]), Some(TEST_SUMMARY))
+        })
+        .unwrap()
+    };
+    assert!(only_c1.ready, "{:#?}", only_c1.issues);
+    assert_eq!(
+        reviews(&approve_card(&k.e, &only_c1.r#ref)),
+        vec![on_c1.clone()],
+        "the excluded overwrite of the same block"
+    );
+    // the overwrite proposed too: the net text is another case
+    let with_c2 = {
+        let (c1, c2) = (c1.clone(), c2.clone());
+        on(&k.e, move |r| {
+            r.propose_subset(&ag("a1"), "a1", "a1", Some(&[c1, c2]), Some(TEST_SUMMARY))
+        })
+        .unwrap()
+    };
+    assert!(
+        approve_card(&k.e, &with_c2.r#ref).check_verdicts.is_empty(),
+        "the proposed overwrite changes the case"
+    );
+    drop((n.dir, m.dir, k.dir));
 }
 
 /// O13: a verdict moves the card's hash, so every person's approval bound to the card shown
@@ -1228,6 +1289,14 @@ fn ck7_acceptance_blocks_every_lander_and_pending() {
     let done = local(&w.e, &p.r#ref, &accept_id(&review, &p)).unwrap();
     assert_eq!(done.act, "accept_verdict");
     let want = vec![held("meaning_preservation", &review, &p.r#ref)];
+    // the author writes the held block again and proposes nothing: the version, and so its
+    // case and its hold, stay as they were
+    typo(&w.e, "a1", &w.x, "X holds, fixed.");
+    assert_eq!(
+        held_of(&w.e, &p),
+        want,
+        "an unproposed edit of the held block"
+    );
     let head = w.e.read().canon_head();
     let r1 = p.r#ref.clone();
     assert_eq!(
@@ -1259,6 +1328,16 @@ fn ck7_acceptance_blocks_every_lander_and_pending() {
         "the policy"
     );
     assert_eq!(w.e.read().canon_head(), head, "nothing landed");
+    assert_eq!(
+        w.e.read()
+            .materialized(&rdy_engine::Scope::Canon)
+            .unwrap()
+            .get(&w.x)
+            .unwrap()
+            .body,
+        "X holds.",
+        "the blocked text is not canon"
+    );
     assert!(!has_card(&w.e, &p.r#ref));
     assert_eq!(not_ready(&w.e, &p.r#ref), Some(want));
 }
@@ -1367,9 +1446,18 @@ fn ck7_changed_case_ends_only_the_check_hold() {
                 "body": "Guest readers need no account, ever."}]),
         None,
     );
-    assert!(
-        held_of(&e, first.clone()).is_empty(),
-        "the changed case ends the hold"
+    // the view edit alone is no new version: the first version's case and hold stay
+    assert_eq!(
+        held_of(&e, first.clone()),
+        vec![held("decision_review", &review, &first.r#ref)],
+        "an unproposed edit keeps the hold"
+    );
+    let r1 = first.r#ref.clone();
+    let issues = not_ready_issues(on(&e, move |r| r.land_report(&approver(), &r1)));
+    assert_eq!(
+        issues.last(),
+        Some(&held("decision_review", &review, &first.r#ref)),
+        "{issues:#?}"
     );
     let view = rdy_qa::intake::BATCH_VIEW.to_string();
     let second = on(&e, move |r| {

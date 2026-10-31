@@ -6,8 +6,9 @@
 //! # Matching (O13)
 //!
 //! [`matching_verdicts`] streams every Check review the log held at the state's captured end.
-//! Each request's recipe is built again on the version's own selected net state, and the
-//! complete case hash must equal the request's:
+//! Each request's recipe is built again on the version's candidate (canon at its base plus its
+//! selected changes, never the view's later or excluded writes), and the complete case hash must
+//! equal the request's:
 //! - a version subject builds the same recipe on this version;
 //! - a change subject needs that change among the version's selected changes;
 //! - a block subject needs a selected change that writes the block, or, for `prose_drift`, a
@@ -21,8 +22,9 @@
 //! [`accepted_verdict_issues`] reads every AcceptVerdict answer at the captured end, never the
 //! latest-answer ref, so two versions that accept one review keep both holds. An answer counts
 //! when its structured option names its own review and this version's full hash. The review's
-//! recorded case is classified with [`case_freshness`]: a matching or unavailable case keeps the
-//! hold; only a changed case ends it. A new version never inherits a hold.
+//! recorded case is classified with [`case_freshness`] on the same candidate: a matching or
+//! unavailable case keeps the hold; only a changed case ends it. A view edit nobody proposed
+//! changes no candidate, so it never ends a hold. A new version never inherits a hold.
 use super::case::CaseInputs;
 use super::catalogue::AgentCheck;
 use super::requests::{CaseFreshness, case_freshness, verdict_word};
@@ -145,9 +147,10 @@ pub fn parse_accept_option(option: &str) -> Option<(Hash, Hash)> {
     Some((review.parse().ok()?, version.parse().ok()?))
 }
 
-/// The state one version's cases read: its base canon, the state it judges and its selected
-/// changes, in the version's order. The judged state is the version's view while it exists,
-/// else the version itself, as a version request's case reads it.
+/// The state one version's cases read: its base canon, its candidate and its selected changes,
+/// in the version's order. The candidate is the version itself (canon at its base plus its
+/// selected changes), never its view: a view write the version excludes or nobody proposed
+/// changes neither which verdicts match the version nor the holds accepted for it.
 struct VersionState {
     before: Arc<Materialized>,
     after: Arc<Materialized>,
@@ -160,11 +163,7 @@ struct VersionState {
 
 impl VersionState {
     fn read(st: &ReadState, pref: &ProposalRef, p: &Proposal) -> Result<VersionState, RdyError> {
-        let after = if st.has_view(&p.view) {
-            st.materialized(&Scope::View(p.view.clone()))?
-        } else {
-            st.materialized(&Scope::Proposal(pref.version))?
-        };
+        let after = st.materialized(&Scope::Proposal(pref.version))?;
         let before = match p.canon_at {
             Some(h) => st.materialized(&Scope::At(h))?,
             None => Arc::new(Materialized::default()),
