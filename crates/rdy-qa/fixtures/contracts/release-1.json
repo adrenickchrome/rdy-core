@@ -13660,9 +13660,9 @@
           {
             "event": "pending_added",
             "ids": [
-              "fc9b7a243b12e4db46560b1107328b265b801864af2d6dd76a37b43042c8bc18"
+              "94b5a3035f4b86550d1f05339474d2de8e406c5e23112bc9468b0d557494e2e2"
             ],
-            "line": "P-fc9b7a243b12@1 waits for an answer; read rdy_pending"
+            "line": "P-94b5a3035f4b@1 waits for an answer; read rdy_pending"
           },
           {
             "event": "intent_posted",
@@ -13682,46 +13682,46 @@
           {
             "event": "pending_added",
             "ids": [
-              "e0a30b1809c0daf44281bb9e8cc0673e0c68b9000aa75d1470729438efc6dc1c"
+              "c54666e956118b8ccfcc18b250993d1a338a011ac077f2c81af7575510134990"
             ],
-            "line": "P-e0a30b1809c0@1 waits for an answer; read rdy_pending"
+            "line": "P-c54666e95611@1 waits for an answer; read rdy_pending"
           },
           {
             "event": "landed",
             "ids": [
-              "0d154863866409cee3e92070472957a69402a0d3cd9ee069f9a832ac74e8771f",
-              "e0a30b1809c0daf44281bb9e8cc0673e0c68b9000aa75d1470729438efc6dc1c"
+              "23675ed5bfd99c8579da2e35a8e0017b5b77db254a0c1e3b53a8b7cf8096c933",
+              "c54666e956118b8ccfcc18b250993d1a338a011ac077f2c81af7575510134990"
             ],
-            "line": "landing 0d1548638664 of view work changed 1 blocks in your areas (payments)"
+            "line": "landing 23675ed5bfd9 of view work changed 1 blocks in your areas (payments)"
           },
           {
             "event": "view_rebased",
             "ids": [
-              "0d154863866409cee3e92070472957a69402a0d3cd9ee069f9a832ac74e8771f",
+              "23675ed5bfd99c8579da2e35a8e0017b5b77db254a0c1e3b53a8b7cf8096c933",
               "d31c17dae8c0ad358656fcf02af98d3d4d5214f5d8d7b5bab2a51c9e6dd7d9e4"
             ],
-            "line": "your view a rebased onto landing 0d1548638664 with 1 conflicts"
+            "line": "your view a rebased onto landing 23675ed5bfd9 with 1 conflicts"
           },
           {
             "event": "tension_opened",
             "ids": [
-              "ada8087282734ebd472f3a35c6ce39b505af50e37edc5812c88454ba69cac6c0",
+              "746f68e665ed732ed064746d8c4ddc2053a173f22574201e36837aaa1bb6fd58",
               "37579917da30b6c6a43687d7325fbfa0452c3d28fd38260f6163b5cc5c764328"
             ],
-            "line": "tension ada808728273 replaces 4c8116c45adb on your change 37579917da30 (edit_collision, blocking): landing 0d1548638664"
+            "line": "tension 746f68e665ed replaces 4c8116c45adb on your change 37579917da30 (edit_collision, blocking): landing 23675ed5bfd9"
           }
         ]
       },
       "logged_suspects": [],
       "logged_tensions": [
         "tn-26128692ed56",
-        "tn-ada808728273",
-        "tn-de935bd1a3c3"
+        "tn-746f68e665ed",
+        "tn-872be00095d8"
       ],
       "tensions": {
         "tn-26128692ed56": "open",
-        "tn-ada808728273": "open",
-        "tn-de935bd1a3c3": "open"
+        "tn-746f68e665ed": "open",
+        "tn-872be00095d8": "open"
       },
       "transitions": 3
     },
