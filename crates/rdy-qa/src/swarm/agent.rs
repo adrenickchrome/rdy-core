@@ -9,7 +9,11 @@
 //! - A write names the change it made in `change`, the block it wrote or created in `block`,
 //!   and, for an update, the version it was made from in `base`.
 //! - Before a `propose` of a live view the agent answers its change plan (`answer_plan`): a
-//!   `plan` entry per page read and one `plan_answer` entry, each naming the view in `view`.
+//!   `plan` entry per page read (its `reply` holds the counts and a row `{id, kind, edge, state}`
+//!   for each item the page showed) and one `plan_answer` entry, each naming the view in `view`.
+//!   The call answers the open neighbor items with a confirm follow-up by one group (M3e, nb10:
+//!   D-YXBXH); the entry's `reply.group` holds `{edge, follow_up, items, returned}` and
+//!   `reply.answers` lists every answer the call names, each item once.
 //! - `propose`, `land`, `accept_advice`, `version_plan`, `pending` and `accept_deferrals` name
 //!   the proposal ref `P-x@n` in `block`; an `Ok` `propose` entry's `reply` is
 //!   `{alternatives}`, the choice it made (null: none). `alt_create` names the agent's view in
