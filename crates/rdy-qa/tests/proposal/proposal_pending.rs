@@ -118,6 +118,7 @@ fn di5_a_ready_proposal_is_one_batch_card() {
             "Changes",
             "Justification",
             "Decisions",
+            "Related decisions",
             "Supersedes",
             "Re-affirms",
             "Reversibility",

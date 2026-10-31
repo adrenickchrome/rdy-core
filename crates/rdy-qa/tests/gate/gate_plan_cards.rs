@@ -1121,6 +1121,11 @@ fn cp12_batch_facts_and_recommendation_reasons_are_exact() {
     .unwrap();
     let ra = propose(&mut r, "ra", &[]);
     let i = item_of(&r, &ra.r#ref).unwrap();
+    // nb11: a batch that writes a decision lists its related decisions: none here, after Decisions
+    let n: Vec<String> = i.facts.iter().map(|f| f.name.to_string()).collect();
+    let at = n.iter().position(|x| x == "Decisions").unwrap();
+    assert_eq!(&n[at + 1..at + 3], ["Related decisions", "Supersedes"]);
+    assert_eq!(fact(&i, "Related decisions"), "none");
     let each: Vec<String> = ds.iter().map(|d| format!("{d} (after {})", s.c)).collect();
     assert_eq!(
         fact(&i, "Re-affirms"),

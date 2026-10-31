@@ -45,6 +45,7 @@ mod engine_proposal_scope;
 mod engine_proposal_show;
 mod engine_query_paging;
 mod engine_related;
+mod engine_related_text;
 mod engine_review_queue;
 mod engine_scope;
 mod engine_search;

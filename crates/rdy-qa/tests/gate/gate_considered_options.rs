@@ -309,11 +309,12 @@ fn ck5_considered_options_follow_decisions_and_bind_the_set() {
     let n = names(&facts);
     let at = n.iter().position(|x| *x == "Decisions").unwrap();
     assert_eq!(
-        &n[at..at + 4],
+        &n[at..at + 5],
         &[
             "Decisions",
             "Considered options",
             "Alternative set",
+            "Related decisions",
             "Supersedes"
         ],
         "{facts:#?}"

@@ -144,12 +144,15 @@ use crate::coverage::change::{candidate_build, candidate_change};
 use crate::coverage::{CandidateCoverage, confidence_in, lands_unapplied};
 use crate::error::{E_VALIDATION, RdyError, redaction_limit};
 use crate::gate::{ProposalRef, changes_of, open_proposals};
+use crate::lexicon::Lexicon;
 use crate::plan::lifecycle::PlanSummary;
 use crate::policy::roles::{ItemFacts, RequiredRole, holds, required_role};
 use crate::policy_verdict::{ChangeFacts, VerdictInputs, WrittenBlock, WrittenDecision};
+use crate::query::summary_in;
 use crate::read_state::Built;
 use crate::readiness::assessment::cut_text;
 use crate::readiness::{Candidate, PlanSource, PolicyChange, Readiness};
+use crate::related::RELATED_CAP;
 use crate::session::{now_ms, rfc3339};
 use crate::tensions::{Tension, TensionKind, TensionSeverity, TensionStatus, tension_label};
 use crate::{Materialized, ReadState, Scope};
@@ -380,7 +383,7 @@ impl ReadState {
                 rt.note(self, &card, Some(&v.next), v.approve_facts());
             }
             let mut items = vec![card];
-            for item in v.exception_items(now) {
+            for item in v.exception_items(self, now) {
                 if !answered(self, &item.r#ref, AnswerAct::Confirm)? {
                     if let Some(rt) = routing.as_mut() {
                         rt.note(self, &item, Some(&v.next), v.confirm_facts(&item));
@@ -627,7 +630,7 @@ pub(crate) fn approval_holds(
         {
             return Err(e.clone());
         }
-        for item in v.exception_items(now) {
+        for item in v.exception_items(st, now) {
             if answered(st, &item.r#ref, AnswerAct::Confirm)? {
                 continue;
             }
@@ -2376,6 +2379,10 @@ impl Version {
             facts.push(fact(CONSIDERED_OPTIONS_FACT, c.fact_value()));
             facts.push(fact(ALTERNATIVE_SET_FACT, c.set_value()));
         }
+        // nb11 (D-YXBXH, O10): the related decisions of the decisions it writes, after the
+        // facts of Decisions (the considered options follow it) and before Supersedes
+        let ids: Vec<BlockId> = self.decisions.iter().map(|d| d.block.id.clone()).collect();
+        facts.extend(self.related_facts(st, &ids));
         facts.extend([
             fact("Supersedes", supersedes),
             fact(REAFFIRMS_FACT, reaffirms),
@@ -2391,7 +2398,7 @@ impl Version {
             fact("Change plan", worked_out(plan)),
             fact("Tensions", tensions),
             fact("Coverage", worked_out(self.coverage(st, candidate))),
-            fact("Confidence", worked_out(self.confidence(candidate))),
+            bounded_fact("Confidence", worked_out(self.confidence(candidate))),
             self.base_fact(st),
             fact(
                 "Exceptions",
@@ -2421,6 +2428,82 @@ impl Version {
             facts.push(fact(POLICY_FACT, crate::policy_verdict::fact_value(policy)));
         }
         facts
+    }
+
+    /// nb11 (D-YXBXH, O10, D-ME2HD): the one `Related decisions` fact of the decisions `ids` (none
+    /// for no decisions): the related list a briefing of them gives, read in the proposal's
+    /// candidate at the canon it was proposed on (this version's own build while canon is still
+    /// there, else the proposal's scope), cut to one cap of 20 rows. The value is
+    /// `{n} listed, {m} omitted: {row}; {row}`, each row `{for} {relation} {decision} [{status}]
+    /// via {via}: {summary}`, or `none`; the whole fact is cut as every stored fact is, so the
+    /// counts lead. A list that cannot be read is `not worked out ({code})`.
+    fn related_facts(&self, st: &ReadState, ids: &[BlockId]) -> Vec<Fact> {
+        if ids.is_empty() {
+            return vec![];
+        }
+        let mut anchors: Vec<BlockId> = ids.to_vec();
+        anchors.sort();
+        anchors.dedup();
+        let value = self.related_value(st, &anchors);
+        vec![bounded_fact(RELATED_FACT, worked_out(value))]
+    }
+
+    fn related_value(&self, st: &ReadState, anchors: &[BlockId]) -> Result<String, RdyError> {
+        let (m, g, lex) = if self.p.canon_at == st.canon_head() {
+            let m = Arc::clone(&self.built.m);
+            let g = Arc::clone(self.built.graph.get_or_init(|| {
+                Arc::new(Graph::build_with(
+                    self.built.m.iter(),
+                    Arc::clone(st.reader().tracking()),
+                ))
+            }));
+            let lex = Arc::clone(
+                self.built
+                    .lexicon
+                    .get_or_init(|| Arc::new(Lexicon::build(st.pack(), self.built.m.iter()))),
+            );
+            (m, g, lex)
+        } else {
+            let scope = Scope::Proposal(self.pref.version);
+            (
+                st.materialized(&scope)?,
+                st.graph(&scope)?,
+                st.lexicon(&scope)?,
+            )
+        };
+        let (mut rows, mut omitted) = crate::related::related_in(&m, &g, &lex, anchors)?;
+        // one cap in all, as a briefing of these decisions has
+        if rows.len() > RELATED_CAP {
+            omitted += rows.len() - RELATED_CAP;
+            rows.truncate(RELATED_CAP);
+        }
+        if rows.is_empty() {
+            return Ok("none".to_string());
+        }
+        let listed: Vec<String> = rows
+            .iter()
+            .map(|r| {
+                let summary = BlockId::parse(&r.decision)
+                    .ok()
+                    .and_then(|id| m.get(&id))
+                    .map(|b| summary_in(b, &m))
+                    .unwrap_or_default();
+                format!(
+                    "{} {} {} [{}] via {}: {}",
+                    r.for_decision,
+                    r.relation,
+                    r.decision,
+                    r.status,
+                    r.via.word(),
+                    summary
+                )
+            })
+            .collect();
+        Ok(format!(
+            "{} listed, {omitted} omitted: {}",
+            rows.len(),
+            listed.join("; ")
+        ))
     }
 
     /// The Base fact: the canon the version was proposed on, and whether canon is still there.
@@ -2631,12 +2714,23 @@ impl Version {
         let level = name_of(&c.confidence);
         Ok(match c.reasons.first() {
             None => level,
-            Some(r) => format!("{level}: {} on {}", name_of(&r.code), r.block),
+            Some(r) => {
+                let mut line = format!("{level}: {} on {}", name_of(&r.code), r.block);
+                // nb11 (D-YXBXH): an unlinked mention names its words, JSON-quoted so a line
+                // break shows escaped
+                if r.code == crate::coverage::IssueCode::UnlinkedMention
+                    && let Some(t) = &r.text
+                {
+                    let words = serde_json::to_string(&t.words).unwrap_or_default();
+                    line.push_str(&format!(" ({words})"));
+                }
+                line
+            }
         })
     }
 
     /// The `confirm` items of the version's exceptions, by ref, answered or not.
-    fn exception_items(&self, now: i64) -> Vec<Item> {
+    fn exception_items(&self, st: &ReadState, now: i64) -> Vec<Item> {
         let r = self.r#ref();
         let mut out: Vec<Item> = self
             .decisions
@@ -2662,6 +2756,9 @@ impl Version {
                         value: self.findings(&d.block),
                     });
                 }
+                // nb11 (D-YXBXH, O10): the decision's related decisions, before the verdict lines
+                it.facts
+                    .extend(self.related_facts(st, std::slice::from_ref(&d.block.id)));
                 let reason = text(&d.block, "recommend_reason")
                     .unwrap_or_default()
                     .to_string();
@@ -2872,6 +2969,8 @@ use crate::check::options::{ALTERNATIVE_SET_FACT, CONSIDERED_OPTIONS_FACT};
 /// The name of the batch fact that gives the canon the version was proposed on; it is the one
 /// fact the approve card reads live, not from the stored assessment (I-d).
 const BASE_FACT: &str = "Base";
+/// nb11: the fact that lists the related decisions of a card's decisions.
+pub const RELATED_FACT: &str = "Related decisions";
 /// The name of the exception fact of a superseding decision that lists the findings it depends
 /// on (rf9, TASK-507 (3)); it follows the exception-kind facts.
 pub const FINDINGS_FACT: &str = "Findings";
@@ -2912,6 +3011,21 @@ fn count(n: usize, word: &str) -> String {
         format!("1 {word}")
     } else {
         format!("{n} {word}s")
+    }
+}
+
+/// A fact whose `{name}: {value}` line is cut as every stored fact is (`cut_text`, 4,096 bytes
+/// with the name and separator), so the shown fact is the stored one and its hash binds the cut
+/// text.
+fn bounded_fact(name: &'static str, value: String) -> Fact {
+    let line = cut_text(format!("{name}: {value}"));
+    let value = match line.split_once(": ") {
+        Some((_, v)) => v.to_string(),
+        None => String::new(),
+    };
+    Fact {
+        name: name.into(),
+        value,
     }
 }
 

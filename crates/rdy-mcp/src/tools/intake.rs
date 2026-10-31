@@ -88,7 +88,9 @@ pub fn evidence_kind(kind: Option<&str>) -> Result<Option<EvidenceKind>, RdyErro
 }
 
 /// `rdy_pending`: the person's queue, each item with its card and the card's hash. A session is
-/// required; no role.
+/// required; no role. A card that shows decisions lists their related decisions, and says whether
+/// a link or the text relates each one. An unlinked-mention confidence reason names the matched
+/// words. Relay those facts with the card.
 pub fn rdy_pending(st: &mut McpState, p: PendingParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;

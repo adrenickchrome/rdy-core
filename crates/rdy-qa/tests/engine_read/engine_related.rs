@@ -63,6 +63,13 @@ fn related(r: &Rdy, id: &str) -> Value {
     serde_json::to_value(rel).unwrap()
 }
 
+/// The `via` of every row: a lineage link or a tie at both ends is a `link`.
+fn assert_all_link(v: &Value) {
+    for x in v.as_array().unwrap() {
+        assert_eq!(x["via"], "link", "{x}");
+    }
+}
+
 fn pairs(v: &Value) -> Vec<(String, String)> {
     v.as_array()
         .unwrap()
@@ -83,8 +90,8 @@ fn rdec1_a_decision_lists_its_neighbours_both_ways_and_decisions_on_the_same_ent
     assert_eq!(
         related(&r, &w.d),
         json!([
-            {"for": w.d, "decision": w.b, "status": "live", "statement": "Corrections are new entries", "relation": "refines"},
-            {"for": w.d, "decision": w.a, "status": "live", "statement": "The ledger is append-only", "relation": "same_entity", "entities": [w.e]}
+            {"for": w.d, "decision": w.b, "status": "live", "statement": "Corrections are new entries", "relation": "refines", "via": "link"},
+            {"for": w.d, "decision": w.a, "status": "live", "statement": "The ledger is append-only", "relation": "same_entity", "via": "link", "entities": [w.e]}
         ])
     );
     assert_eq!(
@@ -132,6 +139,8 @@ fn rdec1_revokes_is_a_neighbour_and_neighbours_show_any_status() {
     let rel = related(&r, &rv);
     assert_eq!(pairs(&rel), vec![(w.a.clone(), "revokes".into())]);
     assert_eq!(rel[0]["status"], "revoked");
+    assert_all_link(&rel);
+    assert_all_link(&related(&r, &w.a));
     let x = r
         .supersede(
             &writer(),
@@ -188,6 +197,7 @@ fn rdec1_a_decision_that_references_an_entity_shares_it() {
         .created["$decision"]
         .clone();
     land(&mut r, "work").unwrap();
+    assert_all_link(&related(&r, &y));
     let mut got = pairs(&related(&r, &y));
     got.sort();
     let mut want = vec![
@@ -240,6 +250,11 @@ fn rdec1_a_proposed_decision_on_the_same_entity_is_related() {
     assert_eq!(
         got, want,
         "same_entity entries come by decision id; a proposed decision counts (FW-EN5a)"
+    );
+    assert!(
+        rel.iter()
+            .all(|x| x.via == rdy_engine::related::RelatedVia::Link),
+        "{rel:?}"
     );
     assert!(
         pairs(&related(&r, &w.a)).iter().all(|(d, _)| *d != p),
