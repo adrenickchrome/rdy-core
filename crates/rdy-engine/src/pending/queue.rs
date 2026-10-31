@@ -1515,26 +1515,15 @@ impl Version {
     }
 
     /// The blocks of the projected candidate's open tensions (review fix L6/I7), what a rule's
-    /// `tension` reads at propose: each open all-canon tension that involves no seed of the
-    /// version's changes (a block they write, or a target their decisions supersede or revoke),
-    /// which the landing leaves standing, and the version's own open tensions, whose landing form
-    /// re-judges every tension around a seed. Readiness's own tension list stays
-    /// [`Version::tensions`], the version's alone.
+    /// `tension` reads at propose: [`ReadState::candidate_tensions`], the open tensions of the
+    /// canon this version's landing would give, surviving canon groups included. Readiness's
+    /// own tension list stays [`Version::tensions`], the version's alone.
     fn candidate_tension_blocks(&self, st: &ReadState) -> Result<BTreeSet<BlockId>, RdyError> {
-        let mut seeds = BTreeSet::new();
-        for c in &self.p.changes {
-            seeds.extend(crate::tensions::set::seeds_of(st, c)?);
-        }
-        let mut out: BTreeSet<BlockId> = self.tensions.iter().flat_map(|t| t.blocks()).collect();
-        for t in st.canon_tensions()? {
-            let blocks = t.blocks();
-            if st.tension_status(&t) == TensionStatus::Open
-                && !blocks.iter().any(|b| seeds.contains(b))
-            {
-                out.extend(blocks);
-            }
-        }
-        Ok(out)
+        Ok(st
+            .candidate_tensions(&self.p.view, &self.p.changes)?
+            .iter()
+            .flat_map(|t| t.blocks())
+            .collect())
     }
 
     /// What the readiness checks read of this version, with its landing projection's facts and

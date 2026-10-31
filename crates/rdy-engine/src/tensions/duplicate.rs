@@ -217,8 +217,8 @@ impl Detector for DuplicateDefinition {
             if group.len() < 2 {
                 continue;
             }
-            let anchored = cx.scope() == DetectScope::Canon
-                || group.iter().any(|m| matches!(m.side, SideRef::Change(_)));
+            let anchored =
+                cx.canon_groups() || group.iter().any(|m| matches!(m.side, SideRef::Change(_)));
             if !anchored {
                 continue;
             }

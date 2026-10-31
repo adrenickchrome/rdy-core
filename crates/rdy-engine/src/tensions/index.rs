@@ -958,6 +958,8 @@ pub struct DetectCx<'a> {
     /// By judged view, the sources its changes cite that the view holds (see
     /// [`DetectCx::held_sources`]): built on first use, once per view, for this run only.
     held: RefCell<BTreeMap<String, Arc<BTreeSet<BlockId>>>>,
+    /// A candidate's landing run (review fix L6/I7, see [`DetectCx::with_canon_groups`]).
+    canon_groups: bool,
 }
 
 impl<'a> DetectCx<'a> {
@@ -977,7 +979,23 @@ impl<'a> DetectCx<'a> {
             lexicon: OnceLock::new(),
             moved: OnceLock::new(),
             held: RefCell::default(),
+            canon_groups: false,
         }
+    }
+
+    /// This landing run as a candidate's (review fix L6/I7): it also reports a group of canon
+    /// blocks only that the canon the landing would give holds (a group that lost a written
+    /// member keeps the rest), as a canon run of that canon would. Read by the group kinds
+    /// whose canon form runs around seeds ([`super::Detector::canon_seeded`]).
+    pub(crate) fn with_canon_groups(mut self) -> DetectCx<'a> {
+        self.canon_groups = true;
+        self
+    }
+
+    /// Whether this run reports groups of canon blocks only (see
+    /// [`DetectCx::with_canon_groups`]): always in the canon scope.
+    pub fn canon_groups(&self) -> bool {
+        self.scope == DetectScope::Canon || self.canon_groups
     }
 
     /// An in-flight run over a landing set (tgat1): `writes` are that set's writes, and `m` and

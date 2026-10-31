@@ -747,6 +747,79 @@ fn ck5_rules_see_canon_tensions_the_version_leaves() {
 }
 
 #[test]
+fn ck5_rules_see_the_surviving_pair_of_a_rewritten_group() {
+    // review fix round 2 (L6/I7): three duplicate claims in canon, one rewritten by the
+    // version. The canon group tension involves the rewritten claim, but the landing still
+    // leaves the other two duplicated: the candidate's tensions hold that surviving pair, so a
+    // blocking rule on tension fails on both of them and not on the rewritten claim.
+    let calm = rule("calm-claims", "type = claim", "tension = false", "blocking");
+    let (_d, mut r) = ck5_project(&calm, "");
+    let seeded = put_j(
+        &mut r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Ideas"}},
+            {"op": "create", "type": "claim", "id": "$a", "parent": "$s", "body": "Every invoice is paid within thirty days."},
+            {"op": "create", "type": "claim", "id": "$b", "parent": "$s", "body": "Every invoice is paid within thirty days."},
+            {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "Every invoice is paid within thirty days."}
+        ]),
+        j_typo(),
+    );
+    land(&mut r, "seed").unwrap();
+    let doc = seeded.created["$d"].clone();
+    let [a, b, c] = ["$a", "$b", "$c"].map(|k| seeded.created[k].clone());
+    let canon_in_tension = |r: &Rdy| -> BTreeSet<String> {
+        r.read()
+            .query(&Scope::Canon, "type = claim and tension = true")
+            .unwrap()
+            .matches
+            .into_iter()
+            .map(|m| m.id)
+            .collect()
+    };
+    assert_eq!(
+        canon_in_tension(&r),
+        BTreeSet::from([a.clone(), b.clone(), c.clone()])
+    );
+    let rewrite = json!({"op": "update", "id": c, "body": "Each invoice settles in a month."});
+    // the version makes the doc stable and rewrites c: a and b still fail, c does not
+    put_j(
+        &mut r,
+        "v",
+        json!([
+            {"op": "update", "id": doc, "fields": {"name": "notes", "title": "Notes", "doc_type": "overview", "lifecycle": "stable"}},
+            rewrite.clone()
+        ]),
+        j_typo(),
+    );
+    let p = propose_as(&mut r, "v");
+    assert!(!p.ready, "{:#?}", p.issues);
+    let failing: BTreeSet<String> = rule_issues(&p)
+        .iter()
+        .map(|i| i.block.as_ref().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        failing,
+        BTreeSet::from([a.clone(), b.clone()]),
+        "{:#?}",
+        p.issues
+    );
+    for i in rule_issues(&p) {
+        let blk = i.block.as_ref().unwrap();
+        assert_eq!(
+            i.message,
+            format!("rule calm-claims fails on {blk}: calm-claims message")
+        );
+    }
+    // independently of readiness: land the same rewrite on its own (the doc stays draft, so
+    // the rule only warns) and M3f's canon query gives exactly the surviving pair
+    put_j(&mut r, "w", json!([rewrite]), j_typo());
+    land(&mut r, "w").unwrap();
+    assert_eq!(canon_in_tension(&r), BTreeSet::from([a, b]));
+}
+
+#[test]
 fn ck5_rule_warning_is_stored_before_policy() {
     let all = rule("ok-claims", "type = claim", "fields.ok = true", "advisory");
     let (_d, mut r, _ss, ds) = stable_and_draft(&all, "");
