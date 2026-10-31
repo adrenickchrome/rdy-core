@@ -206,13 +206,7 @@ fn propose_text(v: &Value) -> String {
     t.push_str(&plan_text(v));
     t.push_str(&new_keys_text(v));
     // D-2YCVK: the propose report warns (W_UNAPPLIED_DECISION), as approve prints its warnings
-    for w in v["warnings"].as_array().into_iter().flatten() {
-        t.push_str(&format!(
-            "\nwarning {}: {}",
-            text(&w["code"]),
-            text(&w["message"])
-        ));
-    }
+    t.push_str(&warning_lines(&v["warnings"]));
     // D-ME2HD (O20): a version that is not ready lists each issue and gets no approve command
     if v["ready"] == true {
         t.push_str("\nready");
@@ -496,12 +490,30 @@ fn landing_text(v: &Value, assurance: bool) -> String {
         }
     }
     t.push_str(&new_keys_text(v));
-    for w in v["warnings"].as_array().into_iter().flatten() {
-        t.push_str(&format!(
-            "\nwarning {}: {}",
-            text(&w["code"]),
-            text(&w["message"])
-        ));
+    t.push_str(&warning_lines(&v["warnings"]));
+    t
+}
+
+/// One `warning <code>: <message>` line for each warning. A rule warning (`W_RULE_CHECK`, ck9,
+/// D-JQD5X) carries text its pack's author wrote: it goes through the briefing's one-line
+/// sanitizer, and its fix follows on a line of its own as `  fix: <fix>`.
+fn warning_lines(warnings: &Value) -> String {
+    let mut t = String::new();
+    for w in warnings.as_array().into_iter().flatten() {
+        if text(&w["code"]) == "W_RULE_CHECK" {
+            t.push_str(&format!(
+                "\nwarning {}: {}\n  fix: {}",
+                text(&w["code"]),
+                brief_text::one_line(text(&w["message"])),
+                brief_text::one_line(text(&w["fix"]))
+            ));
+        } else {
+            t.push_str(&format!(
+                "\nwarning {}: {}",
+                text(&w["code"]),
+                text(&w["message"])
+            ));
+        }
     }
     t
 }
@@ -1228,6 +1240,35 @@ pi-00000000000000bb confirm c-CCCCC: open (c-AAAAA)"
         assert_eq!(
             propose_text(&v),
             "proposal P-1@1 (1 changes)\nwarning W_UNAPPLIED_DECISION: decision d-1 lands with no content that applies it\nready\npolicy: needs a person: no authority policy is set\napprove with: rdy approve P-1@1"
+        );
+    }
+
+    /// ck9 (D-JQD5X): a rule warning prints its fix on the next line, through the one-line
+    /// sanitizer, in the propose and the approve text; every other warning prints as before.
+    #[test]
+    fn ck9_rule_warnings_print_their_fix_on_the_next_line() {
+        let rule = json!({"severity": "warning", "code": "W_RULE_CHECK", "block": "c-1",
+            "message": "rule owned fails on c-1: no\u{1b}[31m owner", "fix": "name\nan owner"});
+        let other = json!({"severity": "warning", "code": "W_UNAPPLIED_DECISION", "block": "d-1",
+            "message": "decision d-1 lands with no content that applies it", "fix": "link it"});
+        let v = json!({
+            "ref": "P-1@1", "changes": 1, "tensions": [], "warnings": [rule.clone(), other.clone()],
+            "ready": true, "issues": [], "policy": {"block": null, "version": null, "verdict": "needs_person", "rule": null, "role": null, "reasons": ["no authority policy is set"]}
+        });
+        assert_eq!(
+            propose_text(&v),
+            "proposal P-1@1 (1 changes)\nwarning W_RULE_CHECK: rule owned fails on c-1: no [31m owner\n  fix: name an owner\nwarning W_UNAPPLIED_DECISION: decision d-1 lands with no content that applies it\nready\npolicy: needs a person: no authority policy is set\napprove with: rdy approve P-1@1"
+        );
+        let landed = json!({
+            "landing": "a".repeat(64), "approved": "P-1@1", "title": "T", "changes": 1,
+            "warnings": [rule, other], "rebased": [], "signatures": []
+        });
+        assert!(
+            approve_text(&landed).ends_with(
+                "\nwarning W_RULE_CHECK: rule owned fails on c-1: no [31m owner\n  fix: name an owner\nwarning W_UNAPPLIED_DECISION: decision d-1 lands with no content that applies it"
+            ),
+            "{}",
+            approve_text(&landed)
         );
     }
 

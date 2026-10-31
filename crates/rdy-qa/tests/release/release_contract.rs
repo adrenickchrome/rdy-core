@@ -1585,6 +1585,178 @@ fn cli_probe(
     }
 }
 
+/// `cli_probe` for agent `actor` (run `run`): the command line of an agent session.
+fn agent_cli_probe(
+    seen: &mut Seen,
+    dir: &Path,
+    env: &[(String, String)],
+    (actor, run): (&str, &str),
+    label: &str,
+    args: &[&str],
+) -> Value {
+    let mut a = vec!["--json"];
+    a.extend_from_slice(args);
+    let mut cmd = Command::new(rdy_bin());
+    cmd.args(["--no-daemon", "--project"])
+        .arg(dir)
+        .args(&a)
+        .envs(env.iter().map(|(k, v)| (k, v)))
+        .env("RDY_ACTOR", actor)
+        .env("RDY_RUN", run)
+        .current_dir(dir);
+    let o = output_within(&mut cmd, Duration::from_secs(120)).expect("run rdy");
+    let code = o.status.code().unwrap_or(-1);
+    seen.add_to_set(label, "exits", json!(code));
+    let (out, err) = (
+        String::from_utf8_lossy(&o.stdout).into_owned(),
+        String::from_utf8_lossy(&o.stderr).into_owned(),
+    );
+    let (slot, body) = if out.trim().is_empty() {
+        ("stderr", err.trim())
+    } else {
+        ("stdout", out.trim())
+    };
+    match serde_json::from_str::<Value>(body) {
+        Ok(v) => {
+            seen.note(label, slot, shape(&v));
+            v
+        }
+        Err(_) => {
+            seen.note(label, &format!("{slot}_text"), json!("string"));
+            Value::Null
+        }
+    }
+}
+
+/// ck9 (D-JQD5X): the approval loop of a check, through the command line. An agent's typo edit
+/// of claim A is proposed; the agent runs a check and asks for an independent one; a reviewer
+/// answers the request with a concern and the author answers its own run with a pass; the list
+/// shows both verdicts, the person's card carries them with the acceptance option, and the
+/// person accepts the concern as blocking. The card and the queue merge into the `pending` shape
+/// (the verdict rows, the acceptance option and the held version are additions); the other replies
+/// have labels of their own. One process holds the project at a time: each MCP session ends before the
+/// next command.
+fn check_loop(seen: &mut Seen, dir: &Path, env: &[(String, String)], a: &BlockId) {
+    use rdy_qa::mcp::McpClient;
+    use rdy_qa::tensions::{ag, j_typo, put_j, upd};
+    let author = ("agent:chk9", "chk9");
+    let (pref, version) = {
+        let mut r = rdy_engine::Rdy::open(dir).expect("open the probe project");
+        put_j(&mut r, "chk9", upd(a, "A holds, now at length!"), j_typo());
+        let p = r
+            .propose(&ag("chk9"), "chk9", "Typo in A", Some("Fixes a typo in A."))
+            .expect("propose the typo edit");
+        assert!(p.ready, "the typo edit is ready: {:#?}", p.issues);
+        r.close().expect("close");
+        (p.r#ref, p.id)
+    };
+    let cli = |seen: &mut Seen, who, label: &str, args: &[&str]| {
+        agent_cli_probe(seen, dir, env, who, label, args)
+    };
+    cli(seen, author, "review checks", &["review", "checks"]);
+    let run = cli(
+        seen,
+        author,
+        "review run",
+        &["review", "run", "meaning_preservation", &pref],
+    );
+    assert!(run["request"].is_string(), "the author's run: {run}");
+    let asked = cli(
+        seen,
+        author,
+        "review request",
+        &[
+            "review",
+            "request",
+            "meaning_preservation",
+            &pref,
+            "--reason",
+            "Does the edit keep the meaning?",
+        ],
+    );
+    assert!(
+        asked["request"].is_string(),
+        "the independent request: {asked}"
+    );
+    // the reviewer claims the independent request and answers it with a concern
+    let session =
+        |actor: &str, run: &str, role: &str| json!({"actor": actor, "run": run, "role": role});
+    let mut rv = McpClient::start(dir);
+    rv.call("rdy_session", session("agent:rev9", "rev9", "reviewer"))
+        .ok();
+    let next = rv
+        .call("rdy_review_next", json!({"kind": "meaning_preservation"}))
+        .ok();
+    assert_eq!(next["request"], asked["request"], "{next}");
+    rv.call(
+        "rdy_review_submit",
+        json!({"request": next["request"], "case_hash": next["case_hash"], "verdict": "concern",
+               "citations": [{"block": a.to_string(), "note": "the text moved"}],
+               "reason": "The edit changes more than a typo."}),
+    )
+    .ok();
+    drop(rv);
+    // the author answers its own run with a pass
+    let mut w = McpClient::start(dir);
+    w.call("rdy_session", session("agent:chk9", "chk9", "writer"))
+        .ok();
+    w.call(
+        "rdy_review_submit",
+        json!({"request": run["request"], "case_hash": run["case_hash"], "verdict": "pass"}),
+    )
+    .ok();
+    drop(w);
+    cli(seen, author, "review list", &["review", "list"]);
+    // the person's card carries both verdicts and an acceptance option
+    let queue = cli_probe(seen, dir, env, "pending", &["pending"]);
+    let card = queue["items"]
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|i| i["ref"] == pref.as_str() && i["kind"] == "approve")
+        })
+        .cloned()
+        .expect("the version's approve card");
+    let accept = card["check_verdicts"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|r| r["verdict"] == "concern"))
+        .map(|r| format!("accept_verdict:{}:{version}", r["review"].as_str().unwrap()))
+        .expect("the concern is on the card");
+    assert!(
+        card["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["id"] == accept.as_str()),
+        "{card}"
+    );
+    // the person accepts it as blocking; every lander then refuses the version
+    let accepted = cli_probe(
+        seen,
+        dir,
+        env,
+        "answer accept_verdict",
+        &[
+            "answer",
+            &pref,
+            &accept,
+            "--card",
+            card["card_hash"].as_str().unwrap(),
+        ],
+    );
+    assert_eq!(accepted["act"], "accept_verdict", "{accepted}");
+    let refused = cli_probe(seen, dir, env, "approve held", &["approve", &pref]);
+    assert_eq!(refused["code"], "E_PROPOSAL_NOT_READY", "{refused}");
+    let held = cli_probe(seen, dir, env, "pending", &["pending"]);
+    assert!(
+        held["not_ready"]
+            .as_array()
+            .is_some_and(|n| n.iter().any(|n| n["ref"] == pref.as_str())),
+        "{held}"
+    );
+}
+
 // ---- cli ----
 
 /// The commands the runtime probes do not run, by path (a top-level name stands for the command
@@ -1852,6 +2024,7 @@ fn cli_runtime() -> Value {
     }
     p("undo", &["undo"]);
     p("inbox", &["inbox"]);
+    check_loop(&mut seen, dir, &env, &b.spec.a);
     let (code, out, _) = rdy_in(dir, &env, &["--version"]);
     let version = out.trim().replace(env!("CARGO_PKG_VERSION"), "<version>");
     drop(cfg);
@@ -3556,6 +3729,362 @@ fn ck8_wire_contract_adds_check_surfaces() {
     );
 }
 
+/// The top-level commands of the contract before ck9, in order: every one stays.
+const COMMANDS_BEFORE_CK9: [&str; 64] = [
+    "init",
+    "status",
+    "show",
+    "log",
+    "impact",
+    "trace",
+    "brief",
+    "search",
+    "diff",
+    "q",
+    "suspects",
+    "plan",
+    "reaffirm",
+    "repin",
+    "propose",
+    "redact",
+    "approve",
+    "land",
+    "dispute",
+    "policy",
+    "view",
+    "alt",
+    "intent",
+    "tensions",
+    "resolve",
+    "inbox",
+    "pending",
+    "answer",
+    "coverage",
+    "undo",
+    "tag",
+    "tags",
+    "new",
+    "publication",
+    "publish",
+    "ls",
+    "edit",
+    "site",
+    "render",
+    "export",
+    "import",
+    "dump",
+    "load",
+    "clone",
+    "reindex",
+    "fsck",
+    "upgrade",
+    "mcp",
+    "check",
+    "pack",
+    "keys",
+    "sign",
+    "key",
+    "render-stream",
+    "stream",
+    "serve",
+    "config",
+    "remote",
+    "auth",
+    "checkout",
+    "add",
+    "commit",
+    "update",
+    "worktree",
+];
+
+/// The ids of a command's own arguments: those the global flags and `help` do not make.
+fn own_args(cmd: &Value) -> Vec<String> {
+    cmd["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["global"] != json!(true) && a["id"] != "help")
+        .map(|a| a["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// The keys of a shape object, sorted, with the mark of an optional key left off.
+fn shape_keys(v: &Value) -> Vec<String> {
+    let mut k: Vec<String> = v
+        .as_object()
+        .unwrap_or_else(|| panic!("an object shape: {v}"))
+        .keys()
+        .map(|k| k.trim_end_matches('?').to_string())
+        .collect();
+    k.sort();
+    k
+}
+
+/// ck9 (D-JQD5X, D-WMCFW): the contract holds the command line of the checks and the complete
+/// approval loop with populated replies: the `review` tree with its closed grammar, the four
+/// commands' replies (a run, a request, the catalogue and a list with both verdicts), the person's
+/// card with its verdict rows and acceptance option, the AcceptVerdict answer, and the refusal
+/// and the queue row that the accepted verdict makes. Every earlier command and reply key stays.
+#[test]
+fn ck9_release_probes_cover_nonempty_checks_and_acceptance() {
+    let fixture = read_fixture();
+    let tree = &fixture["cli"]["tree"];
+    let top: Vec<&str> = tree["subcommands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    // the earlier commands, in order, and the new one
+    let earlier: Vec<&str> = top.iter().copied().filter(|n| *n != "review").collect();
+    assert_eq!(earlier, COMMANDS_BEFORE_CK9);
+    let review = tree["subcommands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "review")
+        .expect("the review command");
+    assert_eq!(review["subcommand_required"], json!(true));
+    let subs: Vec<&str> = review["subcommands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        subs,
+        ["checks", "run", "request", "list"],
+        "no submit and no accept"
+    );
+    let sub = |name: &str| {
+        review["subcommands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap()
+    };
+    assert!(own_args(sub("checks")).is_empty());
+    // one subject, or two values: the third is clap's refusal
+    for name in ["run", "request"] {
+        let positional: Vec<(&str, u64, bool)> = sub(name)["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["positional"] == json!(true))
+            .map(|a| {
+                (
+                    a["id"].as_str().unwrap(),
+                    a["index"].as_u64().unwrap(),
+                    a["required"] == json!(true),
+                )
+            })
+            .collect();
+        assert_eq!(
+            positional,
+            [
+                ("check", 1, true),
+                ("subject", 2, true),
+                ("second", 3, false)
+            ],
+            "{name}"
+        );
+    }
+    assert_eq!(own_args(sub("run")), ["check", "subject", "second"]);
+    // the relay flags are the answer's, with no run: the run comes from the session
+    assert_eq!(
+        own_args(sub("request")),
+        [
+            "check",
+            "subject",
+            "second",
+            "reason",
+            "relayed_by",
+            "evidence",
+            "question",
+            "session_ref"
+        ]
+    );
+    let longs: Vec<&str> = sub("request")["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["long"].as_str())
+        .collect();
+    for flag in ["reason", "relayed-by", "evidence", "question", "session"] {
+        assert!(longs.contains(&flag), "{flag}: {longs:?}");
+    }
+    assert!(longs.iter().all(|l| !l.contains("run")), "{longs:?}");
+    assert_eq!(own_args(sub("list")), ["subject", "open"]);
+
+    // the replies, populated
+    let probes = &fixture["cli"]["runtime"]["probes"];
+    let stdout = |label: &str| &probes[label]["stdout"];
+    assert_eq!(
+        stdout("review checks"),
+        &json!({"checks": [{"name": "string", "subject": "string", "verdicts": ["string"]}]})
+    );
+    for label in ["review run", "review request"] {
+        let ok = stdout(label);
+        assert_eq!(
+            shape_keys(ok),
+            ["case", "case_hash", "omitted", "request", "requests"]
+        );
+        assert_eq!(ok["case"]["kind"], json!("string"), "{label}");
+        assert_eq!(
+            shape_keys(&ok["requests"][0]),
+            ["case", "case_hash", "request"],
+            "{label}"
+        );
+        assert_eq!(probes[label]["exits"], json!([0]), "{label}");
+    }
+    let row = &stdout("review list")["requests"][0];
+    assert_eq!(
+        shape_keys(row),
+        [
+            "case_hash",
+            "check",
+            "mode",
+            "reason",
+            "request",
+            "requested_by",
+            "scope",
+            "status",
+            "subject",
+            "verdicts"
+        ]
+    );
+    assert_eq!(
+        shape_keys(&row["verdicts"][0]),
+        [
+            "actor",
+            "case_hash",
+            "citations",
+            "reason",
+            "review",
+            "run",
+            "verdict"
+        ]
+    );
+    assert_eq!(
+        row["verdicts"][0]["citations"][0],
+        json!({"block": "string", "note": "string"})
+    );
+    assert_eq!(
+        row["verdicts"][0]["reason"],
+        json!("null|string"),
+        "a pass and a concern"
+    );
+
+    // the person's card: the verdict rows after the stored facts, and the options of the card
+    let item = &stdout("pending")["items"][0];
+    let rows = &item["check_verdicts?"];
+    assert_eq!(
+        shape_keys(&rows[0]),
+        [
+            "actor",
+            "case_hash",
+            "check",
+            "citations",
+            "mode",
+            "reason",
+            "request",
+            "review",
+            "run",
+            "verdict"
+        ]
+    );
+    assert_eq!(
+        rows[0]["citations"][0],
+        json!({"block": "string", "note": "string"})
+    );
+    assert_eq!(
+        shape_keys(&item["options"][0]),
+        ["consequences", "id", "label", "reason", "recommended"]
+    );
+    // the AcceptVerdict answer, and what it makes: a refusal with issues and a queue row
+    let accepted = stdout("answer accept_verdict");
+    assert_eq!(
+        shape_keys(accepted),
+        [
+            "act",
+            "answer",
+            "assurance",
+            "label",
+            "landing",
+            "next",
+            "option",
+            "ref",
+            "relayed_by"
+        ]
+    );
+    assert_eq!(probes["answer accept_verdict"]["exits"], json!([0]));
+    assert_eq!(probes["approve held"]["exits"], json!([1]));
+    assert_eq!(
+        probes["approve held"]["stderr"]["issues"][0],
+        json!({"block": "null", "code": "string", "fix": "string", "message": "string", "severity": "string"})
+    );
+    let not_ready = &stdout("pending")["not_ready"][0];
+    assert_eq!(shape_keys(not_ready), ["issues", "ref"]);
+    assert_eq!(not_ready["issues"][0]["message"], json!("string"));
+
+    // every reply key of the earlier probes stays: the queue, its items and options, and the
+    // answer, as the contract held them before ck9
+    assert_eq!(
+        shape_keys(&stdout("pending")),
+        ["items", "not_ready", "omitted", "snoozed"]
+    );
+    let old_item = [
+        "age",
+        "batch",
+        "blocking",
+        "card",
+        "card_hash",
+        "exception",
+        "facts",
+        "kind",
+        "members",
+        "options",
+        "raised_at",
+        "raised_by",
+        "ref",
+        "summary",
+        "summary_by",
+        "title",
+        "why",
+    ];
+    let have = shape_keys(item);
+    for key in old_item {
+        assert!(
+            have.iter().any(|k| k == key),
+            "a pending item lost {key}: {have:?}"
+        );
+    }
+    assert_eq!(
+        have.len(),
+        old_item.len() + 1,
+        "check_verdicts is the one addition: {have:?}"
+    );
+    let answer = stdout("answer");
+    for key in [
+        "act",
+        "answer",
+        "assurance",
+        "label",
+        "landing",
+        "next",
+        "option",
+        "ref",
+        "relayed_by",
+    ] {
+        assert!(!answer[key].is_null(), "an answer lost {key}");
+    }
+    assert_eq!(
+        shape_keys(&probes["answer"]["stderr"]),
+        ["code", "fix", "message"]
+    );
+}
+
 /// A source with a test hook early in a struct, a test module declaration, and product code
 /// after both: a scan that stops at the first `#[cfg(test)]` never sees the lines below them.
 const PLANTED: &str = r#"
@@ -3848,6 +4377,8 @@ fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
 /// so that coverage is not claimed for them: a new empty array fails the test, and a path that
 /// fills up must leave the list. ck8: a case of a check that reads no linked checkout holds no
 /// code, and an agent check is in no stage (`rdy_schema` lists its stages as an empty array).
+/// ck9: the command line's run and request hold no code for the same reason, and the held
+/// version's card fills `cli/pending/stdout/not_ready`, which leaves the list.
 const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/approve/stdout/consequences[]/because/values",
     "cli/approve/stdout/signatures",
@@ -3882,7 +4413,6 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/new folder/stdout/on_change/tensions",
     "cli/new folder/stdout/suggestions",
     "cli/new folder/stdout/warnings",
-    "cli/pending/stdout/not_ready",
     "cli/plan/stdout/notes",
     "cli/propose/stdout/blocking",
     "cli/propose/stdout/conflicts",
@@ -3893,6 +4423,10 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/propose/stdout/warnings",
     "cli/remote list/stdout/remotes",
     "cli/remote list/stdout/warnings",
+    "cli/review request/stdout/case/code",
+    "cli/review request/stdout/requests[]/case/code",
+    "cli/review run/stdout/case/code",
+    "cli/review run/stdout/requests[]/case/code",
     "cli/show landing/stdout/diff/entries[]/fields",
     "cli/show landing/stdout/diff/entries[]/links",
     "cli/show landing/stdout/diff/entries[]/repinned",

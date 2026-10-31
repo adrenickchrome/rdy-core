@@ -682,8 +682,11 @@ fn rf9_cli_brief_uses_the_same_rows() {
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
     let t = text(&claim.to_string());
-    // every control character and line separator becomes a space
-    let want = format!("sources:\n  {src} release: Release [31m 1 # hostile ({claim})\n");
+    // every control character and line separator becomes a space; ck9 (D-JQD5X): the line ends
+    // with the source's existence, here `unchecked` because no checkout is linked
+    let want = format!(
+        "sources:\n  {src} release: Release [31m 1 # hostile ({claim}); source unchecked\n"
+    );
     assert!(t.contains(&want), "{t:?}\nwant {want:?}");
     assert!(!t.contains("findings:"), "no empty heading: {t}");
     let t = text(&dec.to_string());

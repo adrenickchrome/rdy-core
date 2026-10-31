@@ -85,6 +85,22 @@
             "relayed_by": "null"
           }
         },
+        "answer accept_verdict": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "act": "string",
+            "answer": "string",
+            "assurance": "string",
+            "label": "string",
+            "landing": "null",
+            "next": "null",
+            "option": "string",
+            "ref": "string",
+            "relayed_by": "null"
+          }
+        },
         "approve": {
           "exits": [
             0,
@@ -136,6 +152,25 @@
             "title": "string",
             "version": "string",
             "warnings": []
+          }
+        },
+        "approve held": {
+          "exits": [
+            1
+          ],
+          "stderr": {
+            "code": "string",
+            "fix": "string",
+            "issues": [
+              {
+                "block": "null",
+                "code": "string",
+                "fix": "string",
+                "message": "string",
+                "severity": "string"
+              }
+            ],
+            "message": "string"
           }
         },
         "brief": {
@@ -634,6 +669,25 @@
                 "blocking": "bool",
                 "card": "string",
                 "card_hash": "string",
+                "check_verdicts?": [
+                  {
+                    "actor": "string",
+                    "case_hash": "string",
+                    "check": "string",
+                    "citations": [
+                      {
+                        "block": "string",
+                        "note": "string"
+                      }
+                    ],
+                    "mode": "string",
+                    "reason": "string",
+                    "request": "string",
+                    "review": "string",
+                    "run": "string",
+                    "verdict": "string"
+                  }
+                ],
                 "exception": "null|string",
                 "facts": [
                   {
@@ -665,7 +719,20 @@
                 "why": "string"
               }
             ],
-            "not_ready": [],
+            "not_ready": [
+              {
+                "issues": [
+                  {
+                    "block": "null",
+                    "code": "string",
+                    "fix": "string",
+                    "message": "string",
+                    "severity": "string"
+                  }
+                ],
+                "ref": "string"
+              }
+            ],
             "omitted": "number",
             "snoozed": "number"
           }
@@ -861,6 +928,301 @@
             "code": "string",
             "fix": "string",
             "message": "string"
+          }
+        },
+        "review checks": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "checks": [
+              {
+                "name": "string",
+                "subject": "string",
+                "verdicts": [
+                  "string"
+                ]
+              }
+            ]
+          }
+        },
+        "review list": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "omitted": "number",
+            "requests": [
+              {
+                "case_hash": "string",
+                "check": "string",
+                "mode": "string",
+                "reason": "null|string",
+                "request": "string",
+                "requested_by": {
+                  "actor": "string",
+                  "run": "string"
+                },
+                "scope": "string",
+                "status": "string",
+                "subject": {
+                  "blocks": [
+                    "string"
+                  ],
+                  "change": "null",
+                  "code": "null",
+                  "version": "string"
+                },
+                "verdicts": [
+                  {
+                    "actor": "string",
+                    "case_hash": "string",
+                    "citations": [
+                      {
+                        "block": "string",
+                        "note": "string"
+                      }
+                    ],
+                    "reason": "null|string",
+                    "review": "string",
+                    "run": "string",
+                    "verdict": "string"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "review request": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "case": {
+              "blocks": [
+                {
+                  "after": {
+                    "text": [
+                      {
+                        "field": "string",
+                        "text": "string"
+                      }
+                    ],
+                    "version": "string"
+                  },
+                  "before": {
+                    "|null": {
+                      "text": [
+                        {
+                          "field": "string",
+                          "text": "string"
+                        }
+                      ],
+                      "version": "string"
+                    }
+                  },
+                  "doc": "string",
+                  "headings": [
+                    "string"
+                  ],
+                  "id": "string",
+                  "role": "string",
+                  "type": "string"
+                }
+              ],
+              "code": [],
+              "inputs_hash": "string",
+              "kind": "string",
+              "omitted": {
+                "blocks": "number",
+                "code_bytes": "number",
+                "code_files": "number",
+                "text_bytes": "number"
+              },
+              "question": "string",
+              "schema": {
+                "citations": "string",
+                "reason": "string",
+                "verdict": [
+                  "string"
+                ]
+              }
+            },
+            "case_hash": "string",
+            "omitted": "number",
+            "request": "string",
+            "requests": [
+              {
+                "case": {
+                  "blocks": [
+                    {
+                      "after": {
+                        "text": [
+                          {
+                            "field": "string",
+                            "text": "string"
+                          }
+                        ],
+                        "version": "string"
+                      },
+                      "before": {
+                        "|null": {
+                          "text": [
+                            {
+                              "field": "string",
+                              "text": "string"
+                            }
+                          ],
+                          "version": "string"
+                        }
+                      },
+                      "doc": "string",
+                      "headings": [
+                        "string"
+                      ],
+                      "id": "string",
+                      "role": "string",
+                      "type": "string"
+                    }
+                  ],
+                  "code": [],
+                  "inputs_hash": "string",
+                  "kind": "string",
+                  "omitted": {
+                    "blocks": "number",
+                    "code_bytes": "number",
+                    "code_files": "number",
+                    "text_bytes": "number"
+                  },
+                  "question": "string",
+                  "schema": {
+                    "citations": "string",
+                    "reason": "string",
+                    "verdict": [
+                      "string"
+                    ]
+                  }
+                },
+                "case_hash": "string",
+                "request": "string"
+              }
+            ]
+          }
+        },
+        "review run": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "case": {
+              "blocks": [
+                {
+                  "after": {
+                    "text": [
+                      {
+                        "field": "string",
+                        "text": "string"
+                      }
+                    ],
+                    "version": "string"
+                  },
+                  "before": {
+                    "|null": {
+                      "text": [
+                        {
+                          "field": "string",
+                          "text": "string"
+                        }
+                      ],
+                      "version": "string"
+                    }
+                  },
+                  "doc": "string",
+                  "headings": [
+                    "string"
+                  ],
+                  "id": "string",
+                  "role": "string",
+                  "type": "string"
+                }
+              ],
+              "code": [],
+              "inputs_hash": "string",
+              "kind": "string",
+              "omitted": {
+                "blocks": "number",
+                "code_bytes": "number",
+                "code_files": "number",
+                "text_bytes": "number"
+              },
+              "question": "string",
+              "schema": {
+                "citations": "string",
+                "reason": "string",
+                "verdict": [
+                  "string"
+                ]
+              }
+            },
+            "case_hash": "string",
+            "omitted": "number",
+            "request": "string",
+            "requests": [
+              {
+                "case": {
+                  "blocks": [
+                    {
+                      "after": {
+                        "text": [
+                          {
+                            "field": "string",
+                            "text": "string"
+                          }
+                        ],
+                        "version": "string"
+                      },
+                      "before": {
+                        "|null": {
+                          "text": [
+                            {
+                              "field": "string",
+                              "text": "string"
+                            }
+                          ],
+                          "version": "string"
+                        }
+                      },
+                      "doc": "string",
+                      "headings": [
+                        "string"
+                      ],
+                      "id": "string",
+                      "role": "string",
+                      "type": "string"
+                    }
+                  ],
+                  "code": [],
+                  "inputs_hash": "string",
+                  "kind": "string",
+                  "omitted": {
+                    "blocks": "number",
+                    "code_bytes": "number",
+                    "code_files": "number",
+                    "text_bytes": "number"
+                  },
+                  "question": "string",
+                  "schema": {
+                    "citations": "string",
+                    "reason": "string",
+                    "verdict": [
+                      "string"
+                    ]
+                  }
+                },
+                "case_hash": "string",
+                "request": "string"
+              }
+            ]
           }
         },
         "search": {
@@ -7309,6 +7671,431 @@
           ],
           "name": "inbox",
           "subcommands": []
+        },
+        {
+          "args": [
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "set",
+              "global": true,
+              "id": "project",
+              "long": "project",
+              "num_args": "1",
+              "value_names": [
+                "PROJECT"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "no_daemon",
+              "long": "no-daemon",
+              "num_args": "0",
+              "value_names": [
+                "NO_DAEMON"
+              ]
+            },
+            {
+              "action": "help",
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "short": "h"
+            }
+          ],
+          "groups": [
+            {
+              "args": [],
+              "id": "Review",
+              "multiple": true,
+              "required": false
+            }
+          ],
+          "name": "review",
+          "subcommand_required": true,
+          "subcommands": [
+            {
+              "args": [
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "name": "checks",
+              "subcommands": []
+            },
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "id": "check",
+                  "index": 1,
+                  "num_args": "1",
+                  "positional": true,
+                  "required": true,
+                  "value_names": [
+                    "CHECK"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "subject",
+                  "index": 2,
+                  "num_args": "1",
+                  "positional": true,
+                  "required": true,
+                  "value_names": [
+                    "SUBJECT"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "second",
+                  "index": 3,
+                  "num_args": "1",
+                  "positional": true,
+                  "value_names": [
+                    "SECOND"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [
+                    "check",
+                    "second",
+                    "subject"
+                  ],
+                  "id": "RunArgs",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "run",
+              "subcommands": []
+            },
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "id": "check",
+                  "index": 1,
+                  "num_args": "1",
+                  "positional": true,
+                  "required": true,
+                  "value_names": [
+                    "CHECK"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "subject",
+                  "index": 2,
+                  "num_args": "1",
+                  "positional": true,
+                  "required": true,
+                  "value_names": [
+                    "SUBJECT"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "second",
+                  "index": 3,
+                  "num_args": "1",
+                  "positional": true,
+                  "value_names": [
+                    "SECOND"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "reason",
+                  "long": "reason",
+                  "num_args": "1",
+                  "value_names": [
+                    "REASON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "relayed_by",
+                  "long": "relayed-by",
+                  "num_args": "1",
+                  "value_names": [
+                    "ACTOR"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "evidence",
+                  "long": "evidence",
+                  "num_args": "1",
+                  "value_names": [
+                    "EVIDENCE"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "question",
+                  "long": "question",
+                  "num_args": "1",
+                  "value_names": [
+                    "QUESTION"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "id": "session_ref",
+                  "long": "session",
+                  "num_args": "1",
+                  "value_names": [
+                    "REF"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [
+                    "check",
+                    "evidence",
+                    "question",
+                    "reason",
+                    "relayed_by",
+                    "second",
+                    "session_ref",
+                    "subject"
+                  ],
+                  "id": "RequestArgs",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "request",
+              "subcommands": []
+            },
+            {
+              "args": [
+                {
+                  "action": "set",
+                  "id": "subject",
+                  "long": "subject",
+                  "num_args": "1",
+                  "value_names": [
+                    "SUBJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "id": "open",
+                  "long": "open",
+                  "num_args": "0",
+                  "value_names": [
+                    "OPEN"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "json",
+                  "long": "json",
+                  "num_args": "0",
+                  "value_names": [
+                    "JSON"
+                  ]
+                },
+                {
+                  "action": "set",
+                  "global": true,
+                  "id": "project",
+                  "long": "project",
+                  "num_args": "1",
+                  "value_names": [
+                    "PROJECT"
+                  ]
+                },
+                {
+                  "action": "set_true",
+                  "defaults": [
+                    "false"
+                  ],
+                  "global": true,
+                  "id": "no_daemon",
+                  "long": "no-daemon",
+                  "num_args": "0",
+                  "value_names": [
+                    "NO_DAEMON"
+                  ]
+                },
+                {
+                  "action": "help",
+                  "id": "help",
+                  "long": "help",
+                  "num_args": "0",
+                  "short": "h"
+                }
+              ],
+              "groups": [
+                {
+                  "args": [
+                    "open",
+                    "subject"
+                  ],
+                  "id": "ListArgs",
+                  "multiple": true,
+                  "required": false
+                }
+              ],
+              "name": "list",
+              "subcommands": []
+            }
+          ]
         },
         {
           "args": [
@@ -14106,6 +14893,7 @@
       "rdy_engine::RdyError"
     ],
     "templates": {
+      "ACCEPTED_FIX": "\"change the cited blocks, then propose again: rdy_write / rdy edit\"",
       "ACCEPT_FIX": "\"Land these decisions in smaller groups: propose each group from a view of its own, then land it.\"",
       "ACTOR_FIX": "\"use human:<name>, agent:<name>, agent:<handle>/<name> or ci:<repo_id>/<name>\"",
       "ACTOR_UNBOUND_FIX": "\"set an actor in the hub's human, agent or ci form, then try again\"",

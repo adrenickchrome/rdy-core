@@ -36,6 +36,7 @@ mod read_cmd;
 mod redact_cmd;
 mod remote_cmd;
 mod render_stream_cmd;
+mod review_cmd;
 mod search_cmd;
 mod serve_cmd;
 mod signing_cmd;
@@ -151,6 +152,14 @@ enum Cmd {
     Resolve(tension_cmd::ResolveArgs),
     /// Print your inbox: the events and tension moves since your cursor. The first call starts it; --ack moves your cursor past the entries shown. The chat path is rdy_inbox.
     Inbox(inbox_cmd::InboxArgs),
+    // the about is given in full: a doc comment would lose its closing period
+    #[command(
+        about = "List, run or request authoring checks, and list their requests and verdicts. Checks inform the approval card."
+    )]
+    Review {
+        #[command(subcommand)]
+        cmd: review_cmd::ReviewCmd,
+    },
     /// Print what waits for the person: the cards of the "needs you" queue, then the versions that are not ready. The chat path is rdy_pending.
     Pending(intake_cmd::PendingArgs),
     /// Answer one card of the queue: rdy answer <ref> <option> [--card <hash>], or rdy answer --all-recommended <ref>... A person answers as themselves; an agent only by relaying the person's words (--relayed-by with --evidence). The CLI has no Later. The chat path is rdy_answer.
@@ -294,6 +303,7 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Tensions(a) => tension_cmd::tensions(env, a),
         Cmd::Resolve(a) => tension_cmd::resolve(env, a),
         Cmd::Inbox(a) => inbox_cmd::inbox(env, a),
+        Cmd::Review { cmd } => review_cmd::review(env, cmd),
         Cmd::Pending(a) => intake_cmd::pending(env, a),
         Cmd::Answer(a) => intake_cmd::answer(env, a),
         Cmd::Coverage(a) => coverage_cmd::coverage(env, a),

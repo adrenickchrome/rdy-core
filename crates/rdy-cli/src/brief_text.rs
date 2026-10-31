@@ -11,7 +11,7 @@ fn s<'a>(v: &'a Value, key: &str) -> &'a str {
 /// `text` on one line: every control character, and the Unicode line and paragraph separators,
 /// becomes a space. libyaml breaks lines at `\r`, `\n`, NEL, U+2028 and U+2029, and a break would
 /// end a `#` comment, so free text (titles, view names, statements) cannot leak into the YAML.
-fn one_line(text: &str) -> String {
+pub(crate) fn one_line(text: &str) -> String {
     text.chars()
         .map(|c| {
             if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
@@ -63,7 +63,8 @@ fn related_line(r: &Value) -> String {
     )
 }
 
-/// rf9: one source: `<source> <kind>: <title> (<blocks joined by ", ">)`.
+/// rf9: one source: `<source> <kind>: <title> (<blocks joined by ", ">)`; ck9 (D-JQD5X) appends
+/// `; source <found|missing|unchecked>` when the briefing carries the machine-local existence.
 fn source_line(x: &Value) -> String {
     let blocks: Vec<&str> = x["blocks"]
         .as_array()
@@ -71,13 +72,17 @@ fn source_line(x: &Value) -> String {
         .flatten()
         .filter_map(Value::as_str)
         .collect();
-    format!(
+    let mut line = format!(
         "{} {}: {} ({})",
         s(x, "source"),
         s(x, "kind"),
         s(x, "title"),
         blocks.join(", ")
-    )
+    );
+    if let Some(state) = x["existence"].as_str() {
+        line.push_str(&format!("; source {state}"));
+    }
+    line
 }
 
 /// rf9: one finding row: `<for> depends on <finding>: <statement>`.
@@ -665,6 +670,18 @@ fn on_change_part(reply: &Value) -> String {
             .collect();
         t.push_str(&format!("\ntensions resolved: {}", list.join(", ")));
     }
+    // ck9 (D-JQD5X, the change stage): each rule row, then why the rows could not be read
+    for row in change["checks"].as_array().map_or(&[][..], |a| a) {
+        t.push_str(&format!(
+            "\n{}: {}\n  fix: {}",
+            one_line(s(row, "code")),
+            one_line(s(row, "message")),
+            one_line(s(row, "fix"))
+        ));
+    }
+    if let Some(e) = change["checks_error"].as_str() {
+        t.push_str(&format!("\ncheck results unavailable: {}", one_line(e)));
+    }
     t
 }
 
@@ -882,7 +899,11 @@ mod tests {
             "on_change": {
                 "tensions": [{"id": "tn-0123456789ab", "kind": "premise_shift", "severity": "blocking",
                     "summary": "c-BBBBB changed; c-AAAAA still cites it"}],
-                "resolved": [{"id": "tn-ffffffffffff", "kind": "edit_collision"}]
+                "resolved": [{"id": "tn-ffffffffffff", "kind": "edit_collision"}],
+                "checks": [{"rule": "owned", "code": "W_RULE_CHECK", "block": "c-AAAAA",
+                    "message": "rule owned fails on c-AAAAA: no owner\u{1b}[31m named", "fix": "name an owner"},
+                    {"rule": "sized", "code": "W_RULE_CHECK", "block": "c-BBBBB",
+                    "message": "rule sized fails on c-BBBBB: too long", "fix": "cut it"}]
             }
         });
         let t = consequences_text(&reply);
@@ -895,8 +916,22 @@ mod tests {
             t.contains("tensions resolved: tn-ffffffffffff (edit_collision)"),
             "{t}"
         );
-        let quiet =
-            serde_json::json!({"consequences": [], "on_change": {"tensions": [], "resolved": []}});
+        // ck9: each check row is `<code>: <message>` with its fix on the next line, after the
+        // tension changes; terminal controls in rule text become spaces
+        assert!(
+            t.ends_with(
+                "tensions resolved: tn-ffffffffffff (edit_collision)\nW_RULE_CHECK: rule owned fails on c-AAAAA: no owner [31m named\n  fix: name an owner\nW_RULE_CHECK: rule sized fails on c-BBBBB: too long\n  fix: cut it"
+            ),
+            "{t}"
+        );
+        let unread = serde_json::json!({"consequences": [], "on_change": {"tensions": [],
+            "resolved": [], "checks": [], "checks_error": "E_IO: rules busy"}});
+        assert_eq!(
+            consequences_text(&unread),
+            "\ncheck results unavailable: E_IO: rules busy"
+        );
+        let quiet = serde_json::json!({"consequences": [], "on_change": {"tensions": [],
+            "resolved": [], "checks": []}});
         assert_eq!(consequences_text(&quiet), "");
         let collapsed = serde_json::json!({"consequences": [], "on_change": {"tensions": [],
             "resolved": [], "collapsed": {"duplicate_definition": 10, "area_overlap": 2}}});
@@ -1132,14 +1167,14 @@ mod tests {
     fn rf9_the_header_lists_sources_and_findings_and_no_empty_heading() {
         let b = json!({
             "governs": [], "dependents": [], "will_go_stale": [], "suspects": [],
-            "sources": [{"source": "S-1", "kind": "release", "title": "Release\u{1b}[31m 1\u{2028}# x", "blocks": ["c-1", "c-2"]}],
+            "sources": [{"source": "S-1", "kind": "release", "title": "Release\u{1b}[31m 1\u{2028}# x", "blocks": ["c-1", "c-2"], "existence": "found"}],
             "findings": [{"for": "D-1", "finding": "F-1", "statement": "Found.\n# y\u{85}z"}],
             "findings_omitted": 3,
             "base": {"token": "t", "blocks": []}
         });
         let h = header(&b);
         assert!(
-            h.contains("# open suspects:\n#   (none)\n# sources:\n#   S-1 release: Release [31m 1 # x (c-1, c-2)\n"),
+            h.contains("# open suspects:\n#   (none)\n# sources:\n#   S-1 release: Release [31m 1 # x (c-1, c-2); source found\n"),
             "{h:?}"
         );
         assert!(
@@ -1148,8 +1183,26 @@ mod tests {
         );
         let p = plain(&b);
         assert!(
-            p.contains("sources:\n  S-1 release: Release [31m 1 # x (c-1, c-2)\nfindings:\n  D-1 depends on F-1: Found. # y z\n"),
+            p.contains("sources:\n  S-1 release: Release [31m 1 # x (c-1, c-2); source found\nfindings:\n  D-1 depends on F-1: Found. # y z\n"),
             "{p:?}"
+        );
+        // ck9: each existence state appends its own suffix; a source with no `existence` key (the
+        // formatter's older input shape) keeps the old line
+        let states = header(&json!({
+            "governs": [], "dependents": [], "will_go_stale": [], "suspects": [],
+            "sources": [
+                {"source": "S-1", "kind": "release", "title": "T1", "blocks": ["c-1"], "existence": "found"},
+                {"source": "S-2", "kind": "commit", "title": "T2", "blocks": [], "existence": "missing"},
+                {"source": "S-3", "kind": "spec", "title": "T3", "blocks": ["c-3"], "existence": "unchecked"},
+                {"source": "S-4", "kind": "spec", "title": "T4", "blocks": ["c-4"]}
+            ],
+            "base": {"token": "t", "blocks": []}
+        }));
+        assert!(
+            states.contains(
+                "# sources:\n#   S-1 release: T1 (c-1); source found\n#   S-2 commit: T2 (); source missing\n#   S-3 spec: T3 (c-3); source unchecked\n#   S-4 spec: T4 (c-4)\n"
+            ),
+            "{states:?}"
         );
         let quiet = header(
             &json!({"governs": [], "dependents": [], "will_go_stale": [], "suspects": [], "sources": [], "findings": [], "base": {"token": "t", "blocks": []}}),
