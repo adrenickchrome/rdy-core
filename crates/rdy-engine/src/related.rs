@@ -321,7 +321,7 @@ fn related_with(
             for e in g.outgoing(x) {
                 if matches!(&e.kind, EdgeKind::Link(n) if n == link) && is_decision(&e.to) {
                     rows.entry((2 * i, e.to.clone())).or_insert(Found {
-                        relation: *forward,
+                        relation: forward,
                         via: RelatedVia::Link,
                         entities: vec![],
                     });
@@ -330,7 +330,7 @@ fn related_with(
             for e in g.incoming(x) {
                 if matches!(&e.kind, EdgeKind::Link(n) if n == link) && is_decision(&e.from) {
                     rows.entry((2 * i + 1, e.from.clone())).or_insert(Found {
-                        relation: *backward,
+                        relation: backward,
                         via: RelatedVia::Link,
                         entities: vec![],
                     });
