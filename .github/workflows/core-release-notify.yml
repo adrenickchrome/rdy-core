@@ -1,0 +1,61 @@
+# Tell the website a release is published, so it can prepare its installer update.
+# Inactive until activation: the job runs only when the repository variable RDY_WEB_DISPATCH_ENABLED is 'true',
+# set after the founder approves the separate rdy-web dispatcher App and its key (RDY_WEB_DISPATCH_APP_ID,
+# RDY_WEB_DISPATCH_APP_PRIVATE_KEY). Until then every published release skips it.
+# Releases are published with a person's token, so `release: published` fires; a release published with
+# GITHUB_TOKEN would not trigger this workflow.
+# No checkout, build, signing, upload or release change. The website verifies the release itself.
+name: Notify website of published core release
+on:
+  release:
+    types: [published]
+permissions: {}
+concurrency:
+  group: website-notify-${{ github.event.release.id }}
+  cancel-in-progress: false
+jobs:
+  notify:
+    if: github.repository_id == '1403751388' && github.event.release.draft == false && vars.RDY_WEB_DISPATCH_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Validate event and prepare exact dispatch
+        env:
+          EXPECTED_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          event = json.loads(pathlib.Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+          repo, release = event['repository'], event['release']
+          assert repo['id'] == 1403751388 and repo['full_name'] == 'adrenickchrome/rdy-core'
+          assert event['action'] == 'published'
+          assert release['draft'] is False and release['published_at']
+          assert type(release['id']) is int and release['id'] > 0
+          assert re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', release['tag_name'])
+          commit = os.environ['EXPECTED_SOURCE_COMMIT']
+          assert re.fullmatch(r'[0-9a-f]{40}', commit)
+          payload = {'ref': 'main', 'inputs': {
+              'release_id': str(release['id']),
+              'tag_name': release['tag_name'],
+              'source_commit': commit}}
+          path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'website-dispatch.json'
+          path.write_text(json.dumps(payload) + '\n')
+          PY
+      - name: Create repository-scoped dispatch token
+        id: token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2, checked 2026-10-31
+        with:
+          app-id: ${{ vars.RDY_WEB_DISPATCH_APP_ID }}
+          private-key: ${{ secrets.RDY_WEB_DISPATCH_APP_PRIVATE_KEY }}
+          owner: rdyhq
+          repositories: rdy-web
+          permission-actions: write
+      - name: Dispatch private website preparation
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          gh api --method POST \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            repos/rdyhq/rdy-web/actions/workflows/core-release-update.yml/dispatches \
+            --input "$RUNNER_TEMP/website-dispatch.json"
