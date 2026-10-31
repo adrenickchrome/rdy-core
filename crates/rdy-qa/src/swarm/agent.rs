@@ -776,26 +776,26 @@ pub(crate) fn answer_plan(link: &mut Link, view: &str) {
     let res = link.raw("plan_answer", "rdy_plan", args);
     let mut returned = None;
     let mut cut_by_kill = false;
-    if let Res::Ok(first) = &res {
-        if !group.is_empty() {
-            let fetched = follow_pages(first, |next| {
-                let args = json!({"page": next, "max_tokens": PLAN_ALL});
-                match link.raw("plan_answer", "rdy_plan", args) {
-                    Res::Ok(v) => Some(v),
-                    Res::Lost => {
-                        cut_by_kill = true;
-                        None
-                    }
-                    Res::Refused(code, message) => {
-                        link.fail("plan_answer", &format!("got {code}: {message}"))
-                    }
+    if let Res::Ok(first) = &res
+        && !group.is_empty()
+    {
+        let fetched = follow_pages(first, |next| {
+            let args = json!({"page": next, "max_tokens": PLAN_ALL});
+            match link.raw("plan_answer", "rdy_plan", args) {
+                Res::Ok(v) => Some(v),
+                Res::Lost => {
+                    cut_by_kill = true;
+                    None
                 }
-            });
-            match fetched {
-                Err(text) => link.fail("plan_answer", &text),
-                Ok(None) => {}
-                Ok(Some(pages)) => returned = Some(group_returned(&pages, &group, &before)),
+                Res::Refused(code, message) => {
+                    link.fail("plan_answer", &format!("got {code}: {message}"))
+                }
             }
+        });
+        match fetched {
+            Err(text) => link.fail("plan_answer", &text),
+            Ok(None) => {}
+            Ok(Some(pages)) => returned = Some(group_returned(&pages, &group, &before)),
         }
     }
     let mut mismatch = None;
