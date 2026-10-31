@@ -310,7 +310,8 @@ fn coverage(o: &Outcome) -> Coverage {
 /// closed list, a lost call, a seed with 4 landings, a landing that chose a member of a set, an
 /// `edit_collision` and a `premise_shift`, and a `tension_opened` inbox entry. Ruling
 /// task-5-round1.2: the union also reaches a set's winner landing again with no choice. Final
-/// review M4: the union also lands by a direct `rdy approve`. Only acknowledged `land` calls count
+/// review M4: the union also lands by a direct `rdy approve`. Ruling task-10.4: the union also
+/// accepts a check verdict (`accept_check_verdict`). Only acknowledged `land` calls count
 /// as `land` (final review M14). With `RDY_QA_SWARM_SEEDS` set, only each seed's core acts are
 /// checked: the union is a property of the tier's seeds.
 #[test]
@@ -338,7 +339,7 @@ fn sg5_the_run_exercised_every_act() {
         let c = coverage(o);
         // the evidence a person reads with --nocapture: what each seed's run reached
         eprintln!(
-            "swarm seed {seed}: {} acts, lost {}, {} landings, chose {}, kinds {:?}, opened {}, accept_advice {}, winner lands again {}, bound include then choice {}, direct landing {}",
+            "swarm seed {seed}: {} acts, lost {}, {} landings, chose {}, kinds {:?}, opened {}, accept_advice {}, accept_check_verdict {}, winner lands again {}, bound include then choice {}, direct landing {}",
             c.acts.len(),
             c.lost,
             c.landings,
@@ -346,6 +347,7 @@ fn sg5_the_run_exercised_every_act() {
             c.kinds,
             c.opened,
             c.acts.contains("accept_advice"),
+            c.acts.contains("accept_check_verdict"),
             c.winner_again,
             c.bound_include,
             c.direct
@@ -387,6 +389,7 @@ fn sg5_the_run_exercised_every_act() {
             "accept_advice",
             "wc_commit",
             "inbox_ack",
+            "accept_check_verdict",
         ])
         .filter(|a| !all.acts.contains(a))
         .collect();
@@ -3111,9 +3114,11 @@ fn ap13_a_scratch_only_version_is_accepted_under_swarm_drafts() {
 /// seed's run names the policy version that was live when it landed (the last one a landing
 /// before it put into canon) and an assessment of its version whose verdict accepts under that
 /// policy; it records no relay; and its changes write no decision and no block in stable content.
-/// Each seed lands at least one.
+/// The seeds together land at least one (ruling task-10.1).
 #[test]
 fn ap13_every_policy_landing_is_in_policy() {
+    let total = std::cell::Cell::new(0usize);
+    let counts = std::cell::RefCell::new(vec![]);
     each(|seed, o| {
         let (_keep, copy) = copy_of(&o.dir);
         let r = Rdy::open(&copy).expect("open the drained copy");
@@ -3202,17 +3207,25 @@ fn ap13_every_policy_landing_is_in_policy() {
         drop(st);
         r.close().expect("close the drained copy");
         eprintln!("ap13 swarm seed {seed}: {count} policy landings");
-        assert!(count >= 1, "swarm seed {seed}: no policy landing");
+        total.set(total.get() + count);
+        counts.borrow_mut().push(format!("seed {seed}: {count}"));
         assert!(bad.is_empty(), "swarm seed {seed}: {bad:#?}");
     });
+    assert!(
+        total.get() >= 1,
+        "no seed landed under the policy: {:?}",
+        counts.borrow()
+    );
 }
 
-/// ap13 (D-ZWP7Q): each seed lands under the policy (an agent's `rdy_land`) and by a person's
-/// approval (local or relayed). The counts a person reads with --nocapture: the landings of each
+/// ap13 (D-ZWP7Q): the seeds together land under the policy (an agent's `rdy_land`), and each
+/// seed lands by a person's approval (local or relayed) (ruling task-10.1). The counts a person reads with --nocapture: the landings of each
 /// kind, the disputes opened and resolved, and each `E_POLICY_HUMAN` and `E_PERMISSION` the
 /// journal saw.
 #[test]
 fn ap13_seeds_land_under_the_policy_and_by_a_person() {
+    let total = std::cell::Cell::new(0usize);
+    let counts = std::cell::RefCell::new(vec![]);
     each(|seed, o| {
         let (policy, person) = landing_counts(o);
         let ok = |act: &str| {
@@ -3246,9 +3259,15 @@ fn ap13_seeds_land_under_the_policy_and_by_a_person() {
             met("E_POLICY_HUMAN"),
             met("E_PERMISSION")
         );
-        assert!(policy >= 1, "swarm seed {seed}: no policy landing");
+        total.set(total.get() + policy);
+        counts.borrow_mut().push(format!("seed {seed}: {policy}"));
         assert!(person >= 1, "swarm seed {seed}: no person's approval");
     });
+    assert!(
+        total.get() >= 1,
+        "no seed landed under the policy: {:?}",
+        counts.borrow()
+    );
 }
 
 /// ap13 (D-ZWP7Q "Disputes": a dispute shows and never blocks): the person opens disputes in the
