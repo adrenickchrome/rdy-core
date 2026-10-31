@@ -518,7 +518,7 @@ fn nb9_mcp_daemon_and_local_created_receipts_agree() {
     let n = r.read().materialized(&Scope::Canon).unwrap().len();
     r.close().unwrap();
     let t = Served::new();
-    let (ok, v) = t.json(&["--json", "import", out.to_str().unwrap()]);
+    let (ok, v) = t.json(&["--json", "import", out.to_str().unwrap(), "--view", "imp"]);
     assert!(ok, "{v}");
     assert_eq!(v["briefing"]["covers"], n, "{v}");
     assert!(is_token(v["briefing"]["token"].as_str().unwrap()), "{v}");
