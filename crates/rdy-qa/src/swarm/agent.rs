@@ -1928,6 +1928,11 @@ impl Agent {
                     if let Some(set) = set_in(&message) {
                         self.choice_decision(&set);
                         args["alternatives"] = json!({"set": set, "chosen": self.view});
+                        // a choosing version names the whole view (O17, D-JQD5X): a scratch-only
+                        // list leaves out the choice decision, and the version is not ready
+                        if let Some(a) = args.as_object_mut() {
+                            a.remove("changes");
+                        }
                         self.alt_set = Some(set);
                         continue;
                     }
