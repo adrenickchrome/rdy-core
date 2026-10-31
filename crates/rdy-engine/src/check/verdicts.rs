@@ -478,7 +478,7 @@ pub fn accepted_verdict_issues(
             }
         }
     }
-    held.sort_by(|a, b| (a.0.is_none(), a.0, a.1).cmp(&(b.0.is_none(), b.0, b.1)));
+    held.sort_by_key(|a| (a.0.is_none(), a.0, a.1));
     Ok(held
         .into_iter()
         .map(|(_, review, check)| Issue {
