@@ -290,7 +290,7 @@ fn se4_the_items_are_what_pair_now_returns_or_the_pair_is_skipped() {
         let text = format!("B is the same, built on {{{{{}}}}}.", s.a);
         // view c also edits A and re-pins B to it, so B's pins (and version) differ from view b's
         let w1 = put(&mut r, "c", upd(&s.b, &text));
-        put(&mut r, "c", upd(&s.a, "A holds, mostly."));
+        let wa = put(&mut r, "c", upd(&s.a, "A holds, mostly."));
         put(
             &mut r,
             "c",
@@ -307,7 +307,19 @@ fn se4_the_items_are_what_pair_now_returns_or_the_pair_is_skipped() {
             got.iter().any(|q| q.items.iter().any(|i| i.block == s.a)),
             "C still pairs with A by section"
         );
-        for c in [change_of(&w), change_of(&w1), change_of(&w2)] {
+        // nb5: view b's B builds on A, which view c edits: a pair across the two views
+        let cross = r.read().requests_from(&change_of(&w2)).unwrap();
+        assert!(
+            cross.iter().any(|q| q.items.iter().any(|i| i.block == s.a
+                && i.side == rdy_engine::tensions::SideRef::Change(change_of(&wa)))),
+            "B in view b pairs with view c's A: {cross:#?}"
+        );
+        for c in [
+            change_of(&w),
+            change_of(&w1),
+            change_of(&w2),
+            change_of(&wa),
+        ] {
             assert_items_current(&r, &c);
         }
     }

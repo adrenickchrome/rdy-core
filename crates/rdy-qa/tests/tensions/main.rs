@@ -5,6 +5,7 @@ mod tensions_candidates;
 mod tensions_carry;
 mod tensions_collision;
 mod tensions_core;
+mod tensions_cross_view;
 mod tensions_deprecated;
 mod tensions_dismiss;
 mod tensions_drift;
