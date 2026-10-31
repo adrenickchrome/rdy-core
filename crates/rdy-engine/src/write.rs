@@ -407,6 +407,9 @@ pub struct WriteResult {
     /// every other justification.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub justification: Option<crate::JustificationInfo>,
+    /// nb9 (t-F3KR2): the briefing of the blocks this write created; absent when it created none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub briefing: Option<crate::brief::CreatedBriefing>,
 }
 
 /// Why a JSON value is no field value.
@@ -3578,6 +3581,7 @@ impl Rdy {
             warnings,
             code_recorded,
             justification: justification_info,
+            briefing: None,
         })
     }
 }

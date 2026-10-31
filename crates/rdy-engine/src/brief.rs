@@ -45,6 +45,8 @@ pub const BRIEF_REGISTRY_CAP: usize = 10_000;
 pub const BRIEF_REGISTRY_ENTRIES: usize = 1_000_000;
 /// The most blocks one briefing covers.
 pub const MAX_BRIEF_BLOCKS: usize = 5_000;
+/// nb9: the most created blocks one write's briefing receipt covers.
+pub const MAX_CREATED_BRIEFING: usize = 100_000;
 /// A briefing's size budget when none is given, in tokens (4 bytes of JSON each).
 pub const BRIEF_DEFAULT_TOKENS: usize = 4_000;
 
@@ -379,6 +381,21 @@ pub struct DocCounts {
     pub findings: usize,
 }
 
+/// nb7: how many neighbor rows of the whole briefing are in one doc.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NeighborDocCount {
+    pub doc: String,
+    pub count: usize,
+}
+
+/// nb9 (t-F3KR2): the briefing a write that creates blocks returns: its token covers the
+/// created blocks, and `covers` counts them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CreatedBriefing {
+    pub token: String,
+    pub covers: usize,
+}
+
 /// What a dependent should do when the block it depends on changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -610,6 +627,10 @@ pub struct Briefing {
     pub related_decisions: Vec<RelatedDecision>,
     #[serde(skip_serializing_if = "is_zero")]
     pub related_decisions_omitted: usize,
+    /// nb7 (D-YXBXH): every neighbor of the covered blocks.
+    pub neighbors: Vec<crate::neighbors::Neighbor>,
+    /// nb7: the neighbor rows of the whole briefing per doc.
+    pub neighbors_by_doc: Vec<NeighborDocCount>,
     /// rf9: the findings the covered decisions depend on directly, by (for, finding), at most
     /// `FINDINGS_CAP` in all. Not paged or cut: every page repeats them.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1748,6 +1769,8 @@ impl ReadState {
             mentioned_by_omitted,
             related_decisions,
             related_decisions_omitted,
+            neighbors: vec![],
+            neighbors_by_doc: vec![],
             findings,
             findings_omitted,
             finding_counts,

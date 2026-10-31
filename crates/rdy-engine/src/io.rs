@@ -1452,6 +1452,7 @@ impl Rdy {
             warnings,
             code_recorded: None,
             justification: None,
+            briefing: None,
         })
     }
 

@@ -208,6 +208,43 @@ fn brf1_a_briefing_lists_governs_dependents_will_go_stale_and_suspects() {
     );
     assert_eq!(a.base.token, a.record.token_hex());
     assert_eq!(a.base.depends, 1);
+    // nb7: B and C share A's section; the decision there is supporting and takes no part
+    let mut want = vec![
+        (sb.clone(), format!("B builds on {sa}.")),
+        (s.c.to_string(), "C stands alone.".to_string()),
+    ];
+    want.sort();
+    let doc = s.doc.to_string();
+    assert_eq!(
+        a.neighbors
+            .iter()
+            .map(|n| (
+                n.block.clone(),
+                n.of.clone(),
+                n.via,
+                n.entity.clone(),
+                n.doc.clone(),
+                n.summary.clone()
+            ))
+            .collect::<Vec<_>>(),
+        want.into_iter()
+            .map(|(b, summary)| (
+                b,
+                vec![sa.clone()],
+                rdy_engine::neighbors::NeighborVia::Section,
+                None,
+                doc.clone(),
+                summary
+            ))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        a.neighbors_by_doc,
+        vec![NeighborDocCount {
+            doc: doc.clone(),
+            count: 2
+        }]
+    );
     write(
         &mut r,
         "w",
@@ -283,6 +320,20 @@ fn brf1_a_max_tokens_cut_drops_detail_and_never_coverage() {
     );
     assert!(serde_json::to_string(&a).unwrap().len() / 4 <= 800);
     assert!(a.record.covers(&s.a));
+    // nb7: A's 202 section neighbors are paged rows too: cut, and counted whole
+    assert!(
+        a.omitted.get("neighbors").copied().unwrap_or(0) > 0,
+        "{:?}",
+        a.omitted
+    );
+    assert_eq!(a.neighbors.len() + a.omitted["neighbors"], 202);
+    assert_eq!(
+        a.neighbors_by_doc,
+        vec![NeighborDocCount {
+            doc: s.doc.to_string(),
+            count: 202
+        }]
+    );
     let doc = r
         .read()
         .brief(
@@ -305,6 +356,15 @@ fn brf1_a_max_tokens_cut_drops_detail_and_never_coverage() {
         206,
         "the token covers every requested block"
     );
+    // nb7: each of the 203 content blocks is a section neighbor of the other 202
+    assert_eq!(
+        doc.neighbors_by_doc,
+        vec![NeighborDocCount {
+            doc: s.doc.to_string(),
+            count: 203
+        }]
+    );
+    assert_eq!(doc.neighbors.len() + doc.omitted["neighbors"], 203);
     assert_eq!(doc.base.token, doc.record.token_hex());
 }
 
