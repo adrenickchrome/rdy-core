@@ -3,13 +3,16 @@
 //! no agent and runs nothing a decision or a file says. Agent checks belong to no stage (FW-G7b).
 //! Deterministic checks: the stage registry ([`stages`]), pack rules ([`rules`]) and the landing
 //! projection they judge ([`options`]).
+pub mod api;
 pub mod case;
 pub mod catalogue;
 pub mod code;
 pub mod options;
 mod recipes;
+pub mod requests;
 pub mod rules;
 pub mod stages;
+pub mod submit;
 
 pub use case::{BuiltCase, CaseInputs, build_case, contradiction_cases};
 pub use catalogue::{AGENT_CHECKS, AgentCheck, CheckSpec};

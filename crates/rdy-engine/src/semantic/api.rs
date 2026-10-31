@@ -1,9 +1,12 @@
 //! The review dispatchers MCP shares (rdy_review_next, rdy_review_submit) and the reviews paragraph of rdy_schema.
+use crate::check::api::parse_check;
+use crate::check::catalogue::AgentCheck;
+use crate::check::requests::{durable_label, next_durable};
 use crate::engine::write_typed;
 use crate::semantic::candidates::request_label;
 use crate::semantic::case::case_hash;
 use crate::semantic::submit::{CheckedSubmit, ReviewSubmitRequest};
-use crate::{E_BAD_INPUT, E_PERMISSION, Engine, RdyError, Session, now_ms, rfc3339};
+use crate::{E_PERMISSION, Engine, RdyError, Session, now_ms, rfc3339};
 use rdy_model::Role;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -18,29 +21,36 @@ const MAX_CLAIM_TRIES: usize = 8;
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewNextRequest {
-    /// The review kind: only `tension`.
+    /// The review kind: `tension`, a check's name, or `any`.
     pub kind: String,
+}
+
+/// What a `rdy_review_next` kind selects.
+enum Kind {
+    /// The derived tension requests, as before.
+    Tension,
+    /// The independent durable requests of one check.
+    Check(AgentCheck),
+    /// The independent durable requests, then the tension queue.
+    Any,
 }
 
 /// Leases the next review request session `s` may take to `owner` and returns its case:
 /// `{request, kind, case_hash, case, lease_expires_at}` (`lease_expires_at` is `null` when
-/// leases are off), or `{request: null, leased}` (the live leases) when none is free.
+/// leases are off), or `{request: null, leased}` (the live leases) when none is free. `kind`
+/// `tension` keeps the derived queue; a check's name offers its independent durable requests in
+/// full hash order; `any` offers those of every check, then the tension queue.
 pub fn run_review_next(
     engine: &dyn Engine,
     s: &Session,
     owner: u64,
     req: ReviewNextRequest,
 ) -> Result<Value, RdyError> {
-    if req.kind != "tension" {
-        return Err(RdyError::new(
-            E_BAD_INPUT,
-            format!(
-                "kind {:?} is not a review kind; the only kind is tension",
-                req.kind
-            ),
-            "pass kind: tension",
-        ));
-    }
+    let kind = match req.kind.as_str() {
+        "tension" => Kind::Tension,
+        "any" => Kind::Any,
+        name => Kind::Check(parse_check(name)?),
+    };
     if s.role != Role::Reviewer {
         return Err(RdyError::new(
             E_PERMISSION,
@@ -51,8 +61,37 @@ pub fn run_review_next(
     let st = engine.read();
     let now = now_ms();
     let leases = engine.leases();
-    let mut leased = leases.leased(now);
     let ttl = st.lease_ttl_ms();
+    let only = match kind {
+        Kind::Tension => None,
+        Kind::Check(c) => Some(Some(c)),
+        Kind::Any => Some(None),
+    };
+    if let Some(only) = only {
+        let mut leased = leases.leased(now);
+        for _ in 0..MAX_CLAIM_TRIES {
+            let Some((key, r, case)) = next_durable(&st, &s.actor, &leased, only)? else {
+                break;
+            };
+            if !leases.claim(key, vec![], owner, now, ttl) {
+                // another session took it first: the next one
+                leased.insert(key);
+                continue;
+            }
+            let expires = (ttl > 0).then(|| rfc3339(now.saturating_add(ttl)));
+            return Ok(json!({
+                "request": durable_label(&key),
+                "kind": r.check,
+                "case_hash": case.hash.to_string(),
+                "case": case.case,
+                "lease_expires_at": expires,
+            }));
+        }
+        if let Kind::Check(_) = kind {
+            return Ok(json!({"request": null, "leased": leases.leased(now).len()}));
+        }
+    }
+    let mut leased = leases.leased(now);
     for _ in 0..MAX_CLAIM_TRIES {
         let Some(q) = st.next_request(&s.actor, &leased)? else {
             break;
@@ -83,15 +122,18 @@ pub fn run_review_next(
 
 /// Records session `s`'s verdict and returns its `SubmitInfo`: `{request, review, verdict}`,
 /// with `tension`, `severity` and `advice` for a `tension`, and `suppressed: true` for a
-/// `no_tension`. The request is found on a read, outside the writer (a lease-less submit walks
-/// the queue, and candidate requests are never computed on the writer); the writer runs only
-/// `Rdy::submit_found`, which re-proves that the pair is current.
+/// `no_tension`. The request is resolved on a read, outside the writer (a lease-less submit walks
+/// the queue, candidate requests are never computed on the writer, and a durable request's case
+/// is rebuilt there); the writer runs only `Rdy::submit_resolved`, which re-proves that the
+/// request is current.
 pub fn run_review_submit(
     engine: &dyn Engine,
     s: &Session,
     req: ReviewSubmitRequest,
 ) -> Result<Value, RdyError> {
     let c = CheckedSubmit::new(s, req)?;
-    let found = engine.read().find_request(&engine.leases(), &c, now_ms())?;
-    write_typed(engine, move |r| r.submit_found(c, found))
+    let found = engine
+        .read()
+        .resolve_submit(&engine.leases(), &c, now_ms())?;
+    write_typed(engine, move |r| r.submit_resolved(c, found))
 }

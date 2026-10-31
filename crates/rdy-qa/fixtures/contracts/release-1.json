@@ -14484,23 +14484,23 @@
     "carried_value_refusals": {
       "rdy_review_next check": {
         "code": "E_BAD_INPUT",
-        "fix": "pass kind: tension",
-        "message": "kind \"check\" is not a review kind; the only kind is tension"
+        "fix": "list the checks: rdy_review {op: \"checks\"} / rdy review checks",
+        "message": "check is not a check"
       },
       "rdy_review_submit concern": {
-        "code": "E_REVIEW_INVALID",
-        "fix": "send the corrected payload: verdict tension or no_tension",
-        "message": "verdict \"concern\" is not tension or no_tension"
+        "code": "E_REVIEW_STALE",
+        "fix": "call rdy_review_next again",
+        "message": "request rq-000000000000 is no longer current: a side changed, landed or left every view"
       },
       "rdy_review_submit fail": {
-        "code": "E_REVIEW_INVALID",
-        "fix": "send the corrected payload: verdict tension or no_tension",
-        "message": "verdict \"fail\" is not tension or no_tension"
+        "code": "E_REVIEW_STALE",
+        "fix": "call rdy_review_next again",
+        "message": "request rq-000000000000 is no longer current: a side changed, landed or left every view"
       },
       "rdy_review_submit pass": {
-        "code": "E_REVIEW_INVALID",
-        "fix": "send the corrected payload: verdict tension or no_tension",
-        "message": "verdict \"pass\" is not tension or no_tension"
+        "code": "E_REVIEW_STALE",
+        "fix": "call rdy_review_next again",
+        "message": "request rq-000000000000 is no longer current: a side changed, landed or left every view"
       }
     },
     "ops_not_probed": {

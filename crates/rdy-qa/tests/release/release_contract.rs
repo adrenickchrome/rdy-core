@@ -2435,8 +2435,8 @@ fn mcp_row() -> Value {
         other => panic!("an unknown block is a tool error: {:?}", other.is_ok()),
     };
     drop(c);
-    // the review writer refuses the carried verdicts and the check kind (no product writer of a
-    // Check review, a Pass, a Concern or a Fail exists)
+    // a fabricated request is no request (E_REVIEW_STALE whatever the verdict), and `check` is
+    // an unknown check
     let mut rv = McpClient::start(d.path());
     let opened = rv.call(
         "rdy_session",
@@ -3199,59 +3199,24 @@ fn ok14_reindex_preserves_release_derived_identities() {
     );
 }
 
-/// The carried records that still have no product writer. ap5 (D-ZWP7Q "Disputes") builds the
-/// dispute writers, `rdy_dispute` and `rdy dispute`: a dispute, its resolution and their
-/// Dispute and ResolveDispute answers are no longer future records.
+/// No tool or command names an assessment. ap5 (D-ZWP7Q "Disputes") builds the dispute writers,
+/// and M3d (D-JQD5X) enables the whole check family: CHECK_REQUEST, the Check review with its
+/// three verdicts, and AcceptVerdict keep the kind, encoding and enum positions the store
+/// carried.
 #[test]
-fn ok14_future_record_writers_remain_absent() {
+fn ck6_m3d_carriers_keep_their_wire_shapes() {
     let fixture = read_fixture();
-    // the MCP tools: no name or parameter writes an assessment or a check request, and no
-    // review or answer parameter accepts the carried values
-    let forbidden_words = [
-        "assessment",
-        "check_request",
-        "accept_verdict",
-        "check_verdict",
-    ];
+    // the MCP tools: no name or parameter writes an assessment
     let tools = fixture["mcp"]["tools"]
         .as_object()
         .expect("the MCP tools are pinned");
-    for (name, t) in tools {
-        let lower = name.to_lowercase();
-        for w in forbidden_words {
-            assert!(!lower.contains(w), "tool {name} names a future record: {w}");
-        }
-        // a writer's parameter schema may not accept the carried values
-        let schema = t["input_schema"].to_string().to_lowercase();
-        for w in ["accept_verdict", "check_request"] {
-            assert!(
-                !schema.contains(&format!("\"{w}\"")),
-                "tool {name} accepts the future act {w}"
-            );
-        }
-        for verdict in ["\"pass\"", "\"concern\"", "\"fail\""] {
-            assert!(
-                !schema.contains(verdict),
-                "tool {name} accepts the future verdict {verdict}"
-            );
-        }
-    }
-    // the review writer takes only the pair verdicts, and no review kind is a check
-    let refusals = fixture["mcp"]["carried_value_refusals"]
-        .as_object()
-        .expect("the refusals are pinned");
-    for v in ["pass", "concern", "fail"] {
-        assert_eq!(
-            refusals[&format!("rdy_review_submit {v}")]["code"],
-            "E_REVIEW_INVALID",
-            "the review writer accepts the verdict {v}"
+    for name in tools.keys() {
+        assert!(
+            !name.to_lowercase().contains("assessment"),
+            "tool {name} names a future record: assessment"
         );
     }
-    assert_eq!(
-        refusals["rdy_review_next check"]["code"], "E_BAD_INPUT",
-        "a review kind check exists"
-    );
-    // the CLI tree: no command or flag names a future record or act
+    // the CLI tree: no command or flag names an assessment
     let mut seen = vec![];
     fn names(t: &Value, out: &mut Vec<String>) {
         out.push(t["name"].as_str().unwrap_or_default().to_string());
@@ -3268,63 +3233,62 @@ fn ok14_future_record_writers_remain_absent() {
     names(&fixture["cli"]["tree"], &mut seen);
     assert!(seen.len() > 100, "the CLI tree is pinned");
     for n in &seen {
-        let lower = n.to_lowercase();
-        for w in forbidden_words {
-            assert!(
-                !lower.contains(w),
-                "the CLI names a future record or act: {n}"
-            );
-        }
-    }
-    // the product answer path: no product code constructs the carried acts. The source of each
-    // writer crate is scanned outside its test modules.
-    let acts = ["AnswerAct::AcceptVerdict"];
-    let verdicts = [
-        "Verdict::Pass",
-        "Verdict::Concern",
-        "Verdict::Fail",
-        "ReviewSubject::Check",
-    ];
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-        for e in std::fs::read_dir(dir).expect("read the sources") {
-            let p = e.expect("entry").path();
-            if p.is_dir() {
-                walk(&p, out);
-            } else if p.extension().is_some_and(|x| x == "rs") {
-                out.push(p);
-            }
-        }
-    }
-    let mut files = vec![];
-    for krate in ["rdy-engine", "rdy-mcp", "rdy-daemon", "rdy-cli"] {
-        walk(
-            &workspace_root().join("crates").join(krate).join("src"),
-            &mut files,
+        assert!(
+            !n.to_lowercase().contains("assessment"),
+            "the CLI names a future record: {n}"
         );
     }
-    let mut offenders = vec![];
-    // the string forms of the carried acts: no product code names them either
-    let literals = ["\"accept_verdict\""];
-    let needles: Vec<&str> = acts.iter().chain(verdicts.iter()).copied().collect();
-    for f in files {
-        let rel = f
-            .strip_prefix(workspace_root().join("crates"))
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
-        let text = std::fs::read_to_string(&f).expect("read");
-        let product = product_text(&text);
-        for l in literals {
-            if product.contains(l) {
-                offenders.push(format!("{rel}: names the act {l}"));
-            }
-        }
-        offenders.extend(carried_writes(&rel, &product, &needles));
+    // the check family keeps its wire shapes: kind 28 at encoding 1, and the appended enum
+    // positions of the verdicts, the Check subject, the act and the request mode
+    assert_eq!(kinds::CHECK_REQUEST, 28);
+    assert!(codec::REGISTERED.contains(&(kinds::CHECK_REQUEST, 1)));
+    assert_eq!(codec::first(kinds::CHECK_REQUEST), 1);
+    let index = |bytes: Vec<u8>| bytes[0];
+    for (v, at) in [
+        (Verdict::Pass, 4),
+        (Verdict::Concern, 5),
+        (Verdict::Fail, 6),
+    ] {
+        assert_eq!(index(postcard::to_allocvec(&v).unwrap()), at, "{v:?}");
     }
-    assert!(
-        offenders.is_empty(),
-        "product code writes a carried act, verdict or subject:\n{}",
-        offenders.join("\n")
+    let check = ReviewSubject::Check {
+        request: Hash([0; 32]),
+    };
+    assert_eq!(index(postcard::to_allocvec(&check).unwrap()), 3);
+    assert_eq!(
+        index(postcard::to_allocvec(&AnswerAct::AcceptVerdict).unwrap()),
+        16
+    );
+    use rdy_model::check_request::CheckMode;
+    assert_eq!(index(postcard::to_allocvec(&CheckMode::Author).unwrap()), 0);
+    assert_eq!(
+        index(postcard::to_allocvec(&CheckMode::Independent).unwrap()),
+        1
+    );
+    // a fabricated request is no request: the review writer reads it as stale, whatever its
+    // verdict; and `check` is no check
+    let refusals = fixture["mcp"]["carried_value_refusals"]
+        .as_object()
+        .expect("the refusals are pinned");
+    for v in ["pass", "concern", "fail"] {
+        assert_eq!(
+            refusals[&format!("rdy_review_submit {v}")],
+            json!({
+                "code": "E_REVIEW_STALE",
+                "message": "request rq-000000000000 is no longer current: a side changed, landed or left every view",
+                "fix": "call rdy_review_next again",
+            }),
+            "the fabricated request with verdict {v}"
+        );
+    }
+    assert_eq!(
+        refusals["rdy_review_next check"],
+        json!({
+            "code": "E_BAD_INPUT",
+            "message": "check is not a check",
+            "fix": "list the checks: rdy_review {op: \"checks\"} / rdy review checks",
+        }),
+        "check is an unknown check"
     );
 }
 
