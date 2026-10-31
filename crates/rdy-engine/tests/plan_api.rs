@@ -357,7 +357,7 @@ fn cp8_all_four_selectors_have_closed_shapes() {
     // the declared items, and (nb8, D-YXBXH) a section confirm for each unchanged sibling: c
     // has no declared edge, p's neighbor confirm is a different kind from its declared update,
     // and b's neighbor confirm shares its declared item's id, so the declared edge wins
-    let mut rows = vec![
+    let mut rows = [
         (&s.b, PlanKind::Confirm, "references"),
         (&s.p, PlanKind::Update, "references"),
         (&s.c, PlanKind::Confirm, "neighbor"),
