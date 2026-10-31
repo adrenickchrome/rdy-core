@@ -1118,8 +1118,10 @@ fn ck7_only_matching_selected_cases_show() {
         shown,
         "the version's own pass"
     );
-    // the overwrite proposed too: the version's net text is another case, while the earlier
-    // change's own case is unchanged
+    // the overwrite proposed too: the version's net text is another case, for the earlier
+    // change's verdict as well (final review N1: a change's case is its immediate preimage
+    // against the version's whole selected candidate, so c1's fail judged text this version no
+    // longer lands)
     let with_c2 = {
         let (c1, c2) = (c1.clone(), c2.clone());
         on(&k.e, move |r| {
@@ -1127,11 +1129,33 @@ fn ck7_only_matching_selected_cases_show() {
         })
         .unwrap()
     };
+    let card = approve_card(&k.e, &with_c2.r#ref);
+    assert!(
+        card.check_verdicts.is_empty(),
+        "the proposed overwrite changes the case: {:#?}",
+        card.check_verdicts
+    );
+    // nor can the earlier change's fail be accepted as a hold on this version
+    let seq = k.e.read().seq();
+    let err = local(&k.e, &with_c2.r#ref, &accept_id(&on_c1, &with_c2)).unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err:#?}");
+    assert_eq!(k.e.read().seq(), seq, "nothing was written");
+    assert!(held_of(&k.e, &with_c2).is_empty());
+    // the overwrite's own verdict reads c1's text before it and the version's text after it,
+    // so it shows here and not on the subset that excludes it (read directly: the new version
+    // replaced the subset in the queue)
+    let on_c2 = answer_request(&k.e, &reviewer(), &label_hash(&q2), "fail", &k.x);
     assert_eq!(
         reviews(&approve_card(&k.e, &with_c2.r#ref)),
-        vec![on_c1.clone()],
-        "the proposed overwrite changes the version's case only"
+        vec![on_c2.clone()],
+        "the last write's verdict"
     );
+    let mut on_subset: Vec<String> = shown_of(&k.e, &only_c1)
+        .iter()
+        .map(|v| v.review.to_string())
+        .collect();
+    on_subset.sort();
+    assert_eq!(on_subset, shown, "an excluded change's verdict");
     let qw = review_op(
         &k.e,
         &a1,

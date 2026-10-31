@@ -10,8 +10,10 @@
 //! selected changes, never the view's later or excluded writes), and the complete case hash must
 //! equal the request's:
 //! - a version subject builds the same recipe on this version;
-//! - a change subject needs that change among the version's selected changes, and reads its
-//!   immediate preimage among them, as its request read it among its view's changes;
+//! - a change subject needs that change among the version's selected changes; its before side
+//!   is its immediate preimage among them, as its request read it among its view's changes, and
+//!   its after side is the version's whole candidate, so a later selected write of a block the
+//!   case reads (subject or context) changes the case;
 //! - a block subject needs a selected change that writes the block, or, for `prose_drift`, a
 //!   written decision that supersedes, revokes or refines it.
 //!
@@ -200,8 +202,10 @@ impl VersionState {
 
     /// The request `r` as its recipe builds on this version, and the states it reads; `None`
     /// when `related` asks for a subject this version names and it names none (module docs). A
-    /// change subject reads its immediate preimage among the selected changes
-    /// ([`change_holder`]), as its request read it in its view.
+    /// change subject compares its immediate preimage among the selected changes
+    /// ([`change_holder`]), as its request read it in its view, with the version's whole
+    /// candidate: a verdict on a change that a later selected change overwrites judged text this
+    /// version does not land, so it neither shows on the card nor holds the version.
     fn on_version(
         &self,
         st: &ReadState,
@@ -224,9 +228,14 @@ impl VersionState {
         }
         if let Some(c) = &r.subject.change {
             let at = self.hashes.iter().position(|x| x == c)?;
+            let own = change_holder(st, &self.held.before, &self.held.changes, at);
             return Some((
                 built,
-                change_holder(st, &self.held.before, &self.held.changes, at),
+                Holder {
+                    before: own.before,
+                    after: Arc::clone(&self.held.after),
+                    changes: own.changes,
+                },
             ));
         }
         if related {
