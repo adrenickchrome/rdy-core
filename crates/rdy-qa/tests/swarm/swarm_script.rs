@@ -1,8 +1,9 @@
 //! sg3: a swarm script is a pure function of its seed; it covers every act; outcomes are a closed table.
 use rdy_qa::swarm::journal::{Outcome, allowed};
 use rdy_qa::swarm::script::{
-    Act, CHECK_MIN_STEPS, Config, HoldStep, PersonAct, RuleStep, check_plan, direct_land_at,
-    reviewer_weights, script, writer_weights,
+    Act, CHECK_MIN_STEPS, Config, EXCLUDE_STEP, HoldStep, INCLUDE_SOURCE_STEP, INCLUDE_STEP,
+    MIN_STEPS, PersonAct, RuleStep, check_plan, direct_land_at, include_plan, reviewer_weights,
+    script, writer_weights,
 };
 use std::collections::BTreeSet;
 
@@ -150,6 +151,7 @@ fn sg3_a_contra_pair_shares_one_area_and_one_marker() {
                 if let Act::Create {
                     area,
                     contra: Some(k),
+                    ..
                 } = act
                 {
                     marked.push((i, *k, *area));
@@ -462,7 +464,7 @@ fn sg3_any_writer_makes_a_set_or_includes_as_task_3_drew() {
                             assert_ne!(*with, me, "seed {seed}: a{me} {act:?}");
                             set_beyond_0_and_1 |= me >= 2 || *with >= 2;
                         }
-                        Act::Include { from } => {
+                        Act::Include { from, .. } => {
                             assert_ne!(*from, me, "seed {seed}: a{me} {act:?}");
                             include_by_0_or_1 |= me < 2;
                             include_from_0_or_1 |= *from < 2;
@@ -500,7 +502,7 @@ fn sg3_a_fast_seed_includes_before_a_set_and_lands_after_it() {
         // a member's own work, not a change the set binds (msw20)
         s.agents.iter().enumerate().any(|(m, acts)| {
             acts.iter().enumerate().any(|(included, a)| {
-                let Act::Include { from } = a else {
+                let Act::Include { from, .. } = a else {
                     return false;
                 };
                 s.agents.iter().enumerate().any(|(maker, theirs)| {
@@ -552,7 +554,7 @@ fn sg3_a_partner_is_always_another_writer() {
                 for act in acts {
                     let other = match act {
                         Act::Collide { with, .. } | Act::AltCreate { with } => *with,
-                        Act::Include { from } => *from,
+                        Act::Include { from, .. } => *from,
                         _ => continue,
                     };
                     assert!(
@@ -608,4 +610,111 @@ fn sg3_a_wc_step_name_that_is_not_listed_allows_no_refusal() {
     }
     assert!(!allowed("wc_comit", "E_WC_STALE"));
     assert!(!allowed("wc_", "E_WC_CONFLICT"));
+}
+
+/// Deep swarm ruling 1, item 3: every script that holds the forced check sequences (40 steps or
+/// more, with a reviewer) also holds the forced include sequence, the same for the same seed. A
+/// source writer creates the claim; another writer includes it two steps later and excludes it
+/// one step after that. Neither is agent 0 or 1 (the scripted alternative set) or a reviewer. Its
+/// steps share no index with a forced check step, and they come before the kill window.
+#[test]
+fn ds1_scripts_hold_the_forced_include_sequence() {
+    // the pacing orders them: the include waits until the source's whole step is done
+    const { assert!(INCLUDE_STEP >= INCLUDE_SOURCE_STEP + 2 && EXCLUDE_STEP > INCLUDE_STEP) };
+    assert_eq!(
+        format!("{:?}", script(&Config::deep(2))),
+        format!("{:?}", script(&Config::deep(2)))
+    );
+    assert_eq!(
+        include_plan(&Config::fast(2)),
+        include_plan(&Config::fast(2))
+    );
+    let forced = |a: &Act| {
+        matches!(
+            a,
+            Act::Create { source: true, .. }
+                | Act::Include { forced: true, .. }
+                | Act::Exclude { forced: true }
+        )
+    };
+    for seed in 1..=20 {
+        for cfg in [Config::fast(seed), Config::deep(seed)] {
+            let s = script(&cfg);
+            let ctx = format!("seed {seed} steps {}", cfg.steps);
+            let p = include_plan(&cfg).unwrap_or_else(|| panic!("{ctx}: no forced include"));
+            let c = check_plan(&cfg).unwrap_or_else(|| panic!("{ctx}: no forced checks"));
+            for who in [p.source, p.writer] {
+                assert!(who >= 2 && !cfg.is_reviewer(who), "{ctx}: {p:?}");
+            }
+            assert_ne!(p.source, p.writer, "{ctx}: {p:?}");
+            assert!(
+                matches!(
+                    &s.agents[p.source][INCLUDE_SOURCE_STEP],
+                    Act::Create {
+                        source: true,
+                        contra: None,
+                        ..
+                    }
+                ),
+                "{ctx}: {:?}",
+                s.agents[p.source][INCLUDE_SOURCE_STEP]
+            );
+            assert_eq!(
+                s.agents[p.writer][INCLUDE_STEP],
+                Act::Include {
+                    from: p.source,
+                    forced: true
+                },
+                "{ctx}"
+            );
+            assert_eq!(
+                s.agents[p.writer][EXCLUDE_STEP],
+                Act::Exclude { forced: true },
+                "{ctx}"
+            );
+            // once, and nowhere else
+            let n: usize = s
+                .agents
+                .iter()
+                .map(|acts| acts.iter().filter(|a| forced(a)).count())
+                .sum();
+            assert_eq!(n, 3, "{ctx}: forced include acts");
+            // no overlap with the forced check placements, which keep their acts
+            let steps = [INCLUDE_SOURCE_STEP, INCLUDE_STEP, EXCLUDE_STEP];
+            for check in [
+                c.rule_fail,
+                c.rule_repair,
+                c.request,
+                c.new_version,
+                c.submit,
+            ] {
+                assert!(!steps.contains(&check), "{ctx}: {c:?}");
+            }
+            assert_eq!(
+                s.agents[c.rule_agent][c.rule_fail],
+                Act::CheckRun {
+                    rule: Some(RuleStep::Fail)
+                },
+                "{ctx}"
+            );
+            assert_eq!(s.agents[c.reviewer][c.submit], Act::CheckSubmit, "{ctx}");
+            // before the kill window
+            let kill = cfg.kill_at.expect("a kill");
+            assert!(EXCLUDE_STEP < kill, "{ctx}: kill at {kill}");
+        }
+    }
+    // a script with no forced checks holds no forced include either
+    let short = Config {
+        seed: 3,
+        agents: 8,
+        steps: MIN_STEPS,
+        kill_at: None,
+    };
+    assert_eq!(include_plan(&short), None);
+    assert!(
+        script(&short)
+            .agents
+            .iter()
+            .all(|acts| !acts.iter().any(&forced))
+    );
 }

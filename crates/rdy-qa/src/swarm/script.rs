@@ -89,9 +89,12 @@ pub enum Act {
     /// `rdy_write` creating a claim under the seed section of that area. `contra` is the
     /// index `k` into `Script::contra` when this is the act that carries the `CONTRA-<k>`
     /// marker (the executor writes the marker into this act and no other); else `None`.
+    /// `source`: the forced include sequence's claim (`include_plan`), created in the agent's
+    /// source view `a<i>-in` under the seed section of the agent's own area (`area` is unused).
     Create {
         area: &'static str,
         contra: Option<usize>,
+        source: bool,
     },
     /// `rdy_write` updating a block that agent `with` also updates, from the same base.
     Collide { with: usize, target: Pick },
@@ -101,10 +104,13 @@ pub enum Act {
     Repin,
     /// `rdy_view` fork.
     Fork,
-    /// `rdy_view` include of the view of agent `from`.
-    Include { from: usize },
-    /// `rdy_view` exclude.
-    Exclude,
+    /// `rdy_view` include of the view of agent `from`. `forced`: the forced include sequence
+    /// (`include_plan`) includes the claim agent `from` created in its source view `a<from>-in`
+    /// into the agent's include view `a<i>-ex`.
+    Include { from: usize, forced: bool },
+    /// `rdy_view` exclude. `forced`: the forced include sequence excludes that claim from the
+    /// agent's include view `a<i>-ex`.
+    Exclude { forced: bool },
     /// `rdy_view {op: "undo"}` on the agent's own view.
     Undo,
     /// `rdy_intent` in that area (`payments`, `identity` or `glossary`).
@@ -204,7 +210,7 @@ impl Act {
             Act::Repin => "repin",
             Act::Fork => "fork",
             Act::Include { .. } => "include",
-            Act::Exclude => "exclude",
+            Act::Exclude { .. } => "exclude",
             Act::Undo => "undo",
             Act::Intent { .. } => "intent",
             Act::AltCreate { .. } => "alt_create",
@@ -482,6 +488,7 @@ fn make(rng: &mut Rng, kind: Kind, me: usize, cfg: &Config) -> Act {
         Kind::Create => Act::Create {
             area: area(rng),
             contra: None,
+            source: false,
         },
         Kind::Collide => Act::Collide {
             with: other_agent(rng, me, cfg),
@@ -494,8 +501,9 @@ fn make(rng: &mut Rng, kind: Kind, me: usize, cfg: &Config) -> Act {
         Kind::Fork => Act::Fork,
         Kind::Include => Act::Include {
             from: other_agent(rng, me, cfg),
+            forced: false,
         },
-        Kind::Exclude => Act::Exclude,
+        Kind::Exclude => Act::Exclude { forced: false },
         Kind::Undo => Act::Undo,
         Kind::Intent => Act::Intent { area: area(rng) },
         Kind::AltCreate => Act::AltCreate {
@@ -626,6 +634,70 @@ fn forced_acts(plan: Option<&CheckPlan>, me: usize) -> Vec<(Act, usize)> {
     out
 }
 
+/// The salt of `include_plan`'s draw.
+const INCLUDE_SALT: u64 = 0x696e_636c;
+
+/// The step of the forced include sequence's source claim; its include comes two steps later
+/// (the pacing then waits until the source's whole step is done) and its exclude one step after
+/// that. Every step is before the first forced check step (`steps / 8`) and the kill window.
+pub const INCLUDE_SOURCE_STEP: usize = 1;
+/// The step of the forced include.
+pub const INCLUDE_STEP: usize = INCLUDE_SOURCE_STEP + 2;
+/// The step of the forced exclude.
+pub const EXCLUDE_STEP: usize = INCLUDE_STEP + 1;
+
+/// The forced include sequence of a run (deep swarm ruling 1, item 2): writer `source` creates a
+/// claim in its source view `a<source>-in`; writer `writer`, another writer, includes that change
+/// into its include view `a<writer>-ex` and then excludes it. Neither is agent 0 or 1 (the
+/// members of the scripted alternative set).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IncludePlan {
+    pub source: usize,
+    pub writer: usize,
+}
+
+/// The forced include sequence of `cfg`: a pure function of it, with a draw of its own. `None`
+/// where `check_plan` is `None`, or with fewer than two writers outside agents 0 and 1.
+pub fn include_plan(cfg: &Config) -> Option<IncludePlan> {
+    check_plan(cfg)?;
+    let writers: Vec<usize> = (2..cfg.agents).filter(|&i| !cfg.is_reviewer(i)).collect();
+    if writers.len() < 2 {
+        return None;
+    }
+    let mut rng = Rng::new(cfg.seed ^ INCLUDE_SALT);
+    let source = writers[rng.below(writers.len())];
+    let others: Vec<usize> = writers.into_iter().filter(|&w| w != source).collect();
+    let writer = others[rng.below(others.len())];
+    Some(IncludePlan { source, writer })
+}
+
+/// The forced include acts of agent `me` under `plan`, each with its fixed step.
+fn include_acts(plan: Option<&IncludePlan>, me: usize) -> Vec<(Act, usize)> {
+    let Some(p) = plan else { return vec![] };
+    let mut out = vec![];
+    if p.source == me {
+        out.push((
+            Act::Create {
+                area: AREAS[me % AREAS.len()],
+                contra: None,
+                source: true,
+            },
+            INCLUDE_SOURCE_STEP,
+        ));
+    }
+    if p.writer == me {
+        out.push((
+            Act::Include {
+                from: p.source,
+                forced: true,
+            },
+            INCLUDE_STEP,
+        ));
+        out.push((Act::Exclude { forced: true }, EXCLUDE_STEP));
+    }
+    out
+}
+
 /// The script of one actor: random acts, then the forced acts on their fixed steps, then the
 /// placed acts on seeded free steps inside their windows, then the required acts on seeded free
 /// steps.
@@ -699,7 +771,9 @@ fn actor_script(
 /// members of a contradiction pair hold their marked `Create` acts in the order `Script::contra`
 /// states. A fast or deep script also holds the forced check sequences of `check_plan` (D-JQD5X):
 /// their acts sit on fixed steps, placed before every other placed or required act, and the
-/// person's acceptance on a fixed odd act.
+/// person's acceptance on a fixed odd act. It also holds the forced include sequence of
+/// `include_plan` (a source claim, an include of it, then an exclude of it), on fixed steps
+/// placed with the forced check steps.
 ///
 /// Panics when `cfg.steps` is below `MIN_STEPS`.
 pub fn script(cfg: &Config) -> Script {
@@ -737,6 +811,7 @@ pub fn script(cfg: &Config) -> Script {
     // One area per pair, drawn once: both members' marked `Create` acts use it.
     let contra_areas: Vec<&'static str> = contra.iter().map(|_| area(&mut master)).collect();
     let plan = check_plan(cfg);
+    let include = include_plan(cfg);
     let mut agents = Vec::with_capacity(cfg.agents);
     for me in 0..cfg.agents {
         let mut rng = Rng::new(master.next());
@@ -764,6 +839,7 @@ pub fn script(cfg: &Config) -> Script {
                 let create = Act::Create {
                     area: contra_areas[k],
                     contra: Some(k),
+                    source: false,
                 };
                 if *first == me {
                     placed.push((create.clone(), 1, quarter));
@@ -779,7 +855,8 @@ pub fn script(cfg: &Config) -> Script {
                 placed.push((Act::Propose, cfg.steps - quarter, cfg.steps - 2));
             }
         }
-        let forced = forced_acts(plan.as_ref(), me);
+        let mut forced = forced_acts(plan.as_ref(), me);
+        forced.extend(include_acts(include.as_ref(), me));
         agents.push(actor_script(&mut rng, cfg, me, forced, placed, required));
     }
     Script {

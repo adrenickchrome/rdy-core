@@ -1466,9 +1466,12 @@ fn sg5_an_included_change_bound_to_the_winner_lands_after_the_choice() {
     let mut a0 = vec![read(0); 16];
     a0[0] = brief(0);
     a0[1] = write(0);
-    a0[3] = Act::Include { from: 2 };
+    a0[3] = Act::Include {
+        from: 2,
+        forced: false,
+    };
     a0[4] = Act::AltCreate { with: 1 };
-    a0[5] = Act::Exclude;
+    a0[5] = Act::Exclude { forced: false };
     a0[7] = Act::Propose;
     a0[11] = write(0);
     a0[13] = Act::Propose;
@@ -1480,6 +1483,7 @@ fn sg5_an_included_change_bound_to_the_winner_lands_after_the_choice() {
     a2[1] = Act::Create {
         area: "payments",
         contra: None,
+        source: false,
     };
     // a2 proposes before the set exists: a propose of a set-bound change is refused while the
     // set is open, a landing of a version made before it meets the gate
@@ -1603,12 +1607,16 @@ fn sg5_the_drain_lands_an_open_sets_bound_member_before_the_view_that_waits_on_i
     a2[1] = Act::Create {
         area: "payments",
         contra: None,
+        source: false,
     };
     a2[2] = write(2);
     let mut a0 = vec![read(0); 10];
     a0[0] = brief(0);
     a0[3] = write(0);
-    a0[4] = Act::Include { from: 2 };
+    a0[4] = Act::Include {
+        from: 2,
+        forced: false,
+    };
     a0[7] = Act::AltCreate { with: 1 };
     let mut a1 = vec![read(1); 10];
     a1[0] = brief(1);
@@ -2117,6 +2125,7 @@ fn sg5_a_landing_whose_rekeyed_claim_changed_after_the_proposal_is_refused_then_
     let create = || Act::Create {
         area: "payments",
         contra: None,
+        source: false,
     };
     let mut a0 = vec![read(0); 8];
     a0[0] = create();

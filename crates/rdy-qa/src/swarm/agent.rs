@@ -961,7 +961,7 @@ impl Agent {
             act,
             Act::Propose
                 | Act::Include { .. }
-                | Act::Exclude
+                | Act::Exclude { .. }
                 | Act::WriteNoBrief { .. }
                 | Act::WriteStale { .. }
                 | Act::Write { stable: false, .. }
@@ -985,13 +985,23 @@ impl Agent {
             Act::Write { target, stable } => self.write_act(target, *stable),
             Act::WriteNoBrief { target } => self.write_no_brief(target),
             Act::WriteStale { target } => self.write_stale(target),
-            Act::Create { area, contra } => self.create(area, *contra),
+            Act::Create { source: true, .. } => self.include_source(),
+            Act::Create {
+                area,
+                contra,
+                source: false,
+            } => self.create(area, *contra),
             Act::Collide { with: _, target } => self.collide(target),
             Act::Cite { target } => self.cite(target),
             Act::Repin => self.repin(),
             Act::Fork => self.fork(),
-            Act::Include { from } => self.include(*from),
-            Act::Exclude => self.exclude(),
+            Act::Include {
+                from,
+                forced: false,
+            } => self.include(*from),
+            Act::Include { from, forced: true } => self.forced_include(*from),
+            Act::Exclude { forced: false } => self.exclude(),
+            Act::Exclude { forced: true } => self.forced_exclude(),
             Act::Undo => self.undo(),
             Act::Intent { area } => self.intent(area),
             Act::AltCreate { with } => self.alt_create(*with),
@@ -2175,6 +2185,17 @@ pub fn check_view(i: usize) -> String {
     format!("a{i}-ck")
 }
 
+/// The source view of agent `i`'s forced include sequence (`script::include_plan`).
+pub fn source_view(i: usize) -> String {
+    format!("a{i}-in")
+}
+
+/// The include view of agent `i`'s forced include sequence: the view it includes the source
+/// claim into, then excludes it from.
+pub fn include_view(i: usize) -> String {
+    format!("a{i}-ex")
+}
+
 /// The note of every scripted check citation.
 const CHECK_NOTE: &str = "a person should read this block";
 
@@ -2387,6 +2408,99 @@ impl Agent {
             self.report.proposals.push(r.clone());
         }
         made
+    }
+
+    /// The forced include sequence's source claim (deep swarm ruling 1): in view `a<i>-in`, under
+    /// the stable seed section of the agent's area, the agent creates a claim (a `create` entry
+    /// naming the view and the change). Nothing proposes the view before the drain, so the claim
+    /// stays in flight for the include and the exclude.
+    fn include_source(&mut self) {
+        let view = source_view(self.i);
+        let k = self.i % AREAS.len();
+        let section = self.seed.sections[k].clone();
+        let ops = json!([{"op": "create", "type": "claim", "id": "$s", "parent": section,
+            "body": format!("Agent {} keeps the include fixture.", self.name())}]);
+        let mut e = self.link.entry("create");
+        e.view = Some(view.clone());
+        // a write in the source view is not a write in the agent's own view
+        let own = (self.wrote, self.mine.clone());
+        self.briefed_write(e, "create", &[section], ops, k, true);
+        (self.wrote, self.mine) = own;
+        self.report.views.insert(view);
+    }
+
+    /// The forced include (deep swarm ruling 1): the agent includes the claim agent `from`
+    /// created in its source view into its own include view `a<i>-ex` (an `include` entry naming
+    /// the view, whose reply names the change). With no such claim still in the source view it
+    /// finds nothing to include.
+    fn forced_include(&mut self, from: usize) {
+        let source = source_view(from);
+        let who = format!("agent:a{from}");
+        let change = self
+            .link
+            .journal
+            .entries()
+            .into_iter()
+            .rev()
+            .filter(|e| e.actor == who && e.act == "create" && e.outcome == Outcome::Ok)
+            .filter(|e| e.view.as_deref() == Some(source.as_str()))
+            .find_map(|e| e.change);
+        let Some(change) = change else {
+            return self.skip("include", Skip::NothingToInclude);
+        };
+        match self.show(&source) {
+            Shown::Lost => return,
+            Shown::View { changes, .. } if changes.contains(&change) => {}
+            Shown::Missing | Shown::View { .. } => {
+                return self.skip("include", Skip::NothingToInclude);
+            }
+        }
+        let view = include_view(self.i);
+        let mut e = self.link.entry("include");
+        e.view = Some(view.clone());
+        let args = json!({"op": "include", "view": view, "changes": [change]});
+        let named = change.clone();
+        self.link.exec(e, "include", "rdy_view", args, |en, v| {
+            en.seen = labels_of(&v["on_change"]["tensions"]);
+            en.reply = Some(json!({"included": [named]}));
+        });
+        self.report.views.insert(view);
+    }
+
+    /// The forced exclude (deep swarm ruling 1): the agent excludes the change its forced include
+    /// brought into its include view (an `exclude` entry naming the view). With no such change
+    /// still in that open view it finds nothing to exclude.
+    fn forced_exclude(&mut self) {
+        let view = include_view(self.i);
+        let change = self
+            .link
+            .journal
+            .entries()
+            .into_iter()
+            .rev()
+            .filter(|e| e.actor == self.link.actor && e.act == "include")
+            .filter(|e| e.outcome == Outcome::Ok && e.view.as_deref() == Some(view.as_str()))
+            .find_map(|e| e.reply?["included"][0].as_str().map(str::to_string));
+        let Some(change) = change else {
+            return self.skip("exclude", Skip::NothingToExclude);
+        };
+        match self.show(&view) {
+            Shown::Lost => return,
+            Shown::View {
+                closed: false,
+                changes,
+                ..
+            } if changes.contains(&change) => {}
+            Shown::Missing | Shown::View { .. } => {
+                return self.skip("exclude", Skip::NothingToExclude);
+            }
+        }
+        let mut e = self.link.entry("exclude");
+        e.view = Some(view.clone());
+        let args = json!({"op": "exclude", "view": view, "changes": [change]});
+        self.link.exec(e, "exclude", "rdy_view", args, |en, v| {
+            en.seen = labels_of(&v["on_change"]["tensions"]);
+        });
     }
 
     /// The forced rule fixture (D-JQD5X, the child pack's `check-fixture-key`).
