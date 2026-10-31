@@ -1471,8 +1471,9 @@ impl Version {
 
     /// The derived sets the rules of `compiled` read in the projected canon `built` (graph
     /// `graph`), only those a rule needs (`Filter::needs`): its suspects (presentational sources
-    /// left out, as a scope's suspects are), the blocks of the version's open tensions, and each
-    /// block's intrinsic coverage score. No machine-local source fact enters them.
+    /// left out, as a scope's suspects are), the blocks of the candidate's open tensions
+    /// ([`Version::candidate_tension_blocks`]), and each block's intrinsic coverage score. No
+    /// machine-local source fact enters them.
     fn rule_sets(
         &self,
         st: &ReadState,
@@ -1498,7 +1499,7 @@ impl Version {
             BTreeSet::new()
         };
         let tensions: BTreeSet<BlockId> = if tension {
-            self.tensions.iter().flat_map(|t| t.blocks()).collect()
+            self.candidate_tension_blocks(st)?
         } else {
             BTreeSet::new()
         };
@@ -1511,6 +1512,29 @@ impl Version {
             BTreeMap::new()
         };
         Ok((suspects, tensions, scores))
+    }
+
+    /// The blocks of the projected candidate's open tensions (review fix L6/I7), what a rule's
+    /// `tension` reads at propose: each open all-canon tension that involves no seed of the
+    /// version's changes (a block they write, or a target their decisions supersede or revoke),
+    /// which the landing leaves standing, and the version's own open tensions, whose landing form
+    /// re-judges every tension around a seed. Readiness's own tension list stays
+    /// [`Version::tensions`], the version's alone.
+    fn candidate_tension_blocks(&self, st: &ReadState) -> Result<BTreeSet<BlockId>, RdyError> {
+        let mut seeds = BTreeSet::new();
+        for c in &self.p.changes {
+            seeds.extend(crate::tensions::set::seeds_of(st, c)?);
+        }
+        let mut out: BTreeSet<BlockId> = self.tensions.iter().flat_map(|t| t.blocks()).collect();
+        for t in st.canon_tensions()? {
+            let blocks = t.blocks();
+            if st.tension_status(&t) == TensionStatus::Open
+                && !blocks.iter().any(|b| seeds.contains(b))
+            {
+                out.extend(blocks);
+            }
+        }
+        Ok(out)
     }
 
     /// What the readiness checks read of this version, with its landing projection's facts and

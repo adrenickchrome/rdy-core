@@ -582,16 +582,36 @@ fn ck5_rules_use_m3f_coverage_suspect_and_tension_inputs() {
         {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Ideas"}},
         {"op": "create", "type": "claim", "id": "$a", "parent": "$s", "body": "A holds 30 days."},
-        {"op": "create", "type": "claim", "id": "$b", "parent": "$s", "body": "B builds on {{$a}}."}
+        {"op": "create", "type": "claim", "id": "$b", "parent": "$s", "body": "B builds on {{$a}}."},
+        {"op": "create", "type": "claim", "id": "$e", "parent": "$s", "body": "Every invoice is paid within thirty days."},
+        {"op": "create", "type": "claim", "id": "$f", "parent": "$s", "body": "Every invoice is paid within thirty days."},
+        {"op": "create", "type": "claim", "id": "$g", "parent": "$s", "body": "Every refund is sent within ten days."},
+        {"op": "create", "type": "claim", "id": "$h", "parent": "$s", "body": "Every refund is sent within ten days."}
     ]))
     .unwrap();
     land(&mut r, "seed").unwrap();
     let a = seeded.created["$a"].clone();
-    // a's change makes b suspect in the candidate
+    let [e, f, g, h] = ["$e", "$f", "$g", "$h"].map(|k| id(&seeded.created[k]));
+    // M3f's own canon query, independently of readiness: both duplicate pairs are in tension
+    let in_tension: BTreeSet<BlockId> = r
+        .read()
+        .query(&Scope::Canon, "type = claim and tension = true")
+        .unwrap()
+        .matches
+        .iter()
+        .map(|m| id(&m.id))
+        .collect();
+    assert_eq!(
+        in_tension,
+        BTreeSet::from([e.clone(), f.clone(), g.clone(), h.clone()])
+    );
+    // a's change makes b suspect in the candidate; h's rewrite ends the g/h duplicate, while
+    // e/f's canon tension survives the version untouched
     write(
         &mut r,
         "v",
-        rdy_qa::tensions::upd(&id(&a), "A holds 60 days."),
+        json!([{"op": "update", "id": a, "body": "A holds 60 days."},
+               {"op": "update", "id": h.to_string(), "body": "Each refund goes out within a week."}]),
     )
     .unwrap();
     let pv = r.propose(&writer(), "v", "v", Some(TEST_SUMMARY)).unwrap();
@@ -639,9 +659,91 @@ fn ck5_rules_use_m3f_coverage_suspect_and_tension_inputs() {
         }
     }
     assert_eq!(warned(&pv), want);
+    // the tensions are the projected candidate's: canon's e/f tension survives the version and
+    // enters the rule inputs; the g/h tension the version ends does not
+    assert!(
+        inputs.tensions.contains(&e) && inputs.tensions.contains(&f),
+        "{:?}",
+        inputs.tensions
+    );
+    assert!(
+        !inputs.tensions.contains(&g) && !inputs.tensions.contains(&h),
+        "{:?}",
+        inputs.tensions
+    );
+    let calm: BTreeSet<String> = warned(&pv)
+        .into_iter()
+        .filter(|(_, m)| m.starts_with("rule tensions fails on "))
+        .map(|(b, _)| b)
+        .collect();
+    assert_eq!(calm, BTreeSet::from([e.to_string(), f.to_string()]));
     // the coverage is the intrinsic score of each block: no machine-local source fact is in it
     assert!(!inputs.coverage.is_empty());
     assert!(inputs.coverage.values().all(|s| *s <= 100));
+}
+
+#[test]
+fn ck5_rules_see_canon_tensions_the_version_leaves() {
+    // review fix round 1 (L6/I7): a blocking rule on tension reads the complete projected
+    // candidate's tensions, so a canon tension the version neither causes nor ends still fails
+    // it once the version makes its blocks stable
+    let calm = rule("calm-claims", "type = claim", "tension = false", "blocking");
+    let (_d, mut r) = ck5_project(&calm, "");
+    let seeded = put_j(
+        &mut r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Ideas"}},
+            {"op": "create", "type": "claim", "id": "$a", "parent": "$s", "body": "Every invoice is paid within thirty days."},
+            {"op": "create", "type": "claim", "id": "$b", "parent": "$s", "body": "Every invoice is paid within thirty days."}
+        ]),
+        j_typo(),
+    );
+    land(&mut r, "seed").unwrap();
+    let doc = seeded.created["$d"].clone();
+    let (a, b) = (seeded.created["$a"].clone(), seeded.created["$b"].clone());
+    let in_tension: BTreeSet<String> = r
+        .read()
+        .query(&Scope::Canon, "type = claim and tension = true")
+        .unwrap()
+        .matches
+        .into_iter()
+        .map(|m| m.id)
+        .collect();
+    assert_eq!(in_tension, BTreeSet::from([a.clone(), b.clone()]));
+    let stable = json!({"op": "update", "id": doc, "fields": {"name": "notes", "title": "Notes", "doc_type": "overview", "lifecycle": "stable"}});
+    // only the doc changes: both claims fail the blocking rule, item 6, not ready
+    put_j(&mut r, "v", json!([stable.clone()]), j_typo());
+    let p = propose_as(&mut r, "v");
+    assert!(!p.ready, "{:#?}", p.issues);
+    let failing: BTreeSet<String> = rule_issues(&p)
+        .iter()
+        .map(|i| i.block.as_ref().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        failing,
+        BTreeSet::from([a.clone(), b.clone()]),
+        "{:#?}",
+        p.issues
+    );
+    assert_eq!(
+        rule_issues(&p)[0].message,
+        format!(
+            "rule calm-claims fails on {}: calm-claims message",
+            failing.iter().next().unwrap()
+        )
+    );
+    // a version that also ends the duplicate leaves no canon tension behind: ready
+    put_j(
+        &mut r,
+        "w",
+        json!([stable, {"op": "update", "id": b, "body": "Each invoice settles in a month."}]),
+        j_typo(),
+    );
+    let p = propose_as(&mut r, "w");
+    assert!(rule_issues(&p).is_empty(), "{:#?}", p.issues);
+    assert!(p.ready, "{:#?}", p.issues);
 }
 
 #[test]
