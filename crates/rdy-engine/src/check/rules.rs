@@ -63,8 +63,9 @@ impl RuleIssue {
 }
 
 /// What one scan found: the kept rows by kind, in rule name then block id order, and how many
-/// rows past the cut each kind left out. `read_blocks`: at `propose`, every block the kept rows
-/// read (their complete rule inputs), for the assessment's reach; never stored as a record.
+/// rows past the cut each kind left out. `read_blocks`: at `propose`, every block the failing
+/// rows read (their complete rule inputs, the rows past the cut included), for the assessment's
+/// reach; never stored as a record.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RuleScan {
     pub blocking: Vec<RuleIssue>,
@@ -153,7 +154,7 @@ pub fn evaluate_rules(
     let ids: BTreeSet<BlockId> = ids.collect();
     let (m, graph) = (inputs.m, inputs.graph);
     let ctx = FilterContext::from_parts(inputs);
-    let mut kept: Vec<(usize, BlockId)> = vec![];
+    let mut failing: Vec<(usize, BlockId)> = vec![];
     for (at, rule) in rules.iter().enumerate() {
         for id in &ids {
             if !ctx.matches(&rule.select, id) || ctx.matches(&rule.require, id) {
@@ -182,15 +183,16 @@ pub fn evaluate_rules(
                 (false, true) => scan.blocking_omitted += 1,
                 (false, false) => scan.warnings_omitted += 1,
             }
-            if room && stage == Stage::Propose {
-                kept.push((at, id.clone()));
+            // the cut bounds the rows shown, never the reach: a row past it is read too
+            if stage == Stage::Propose {
+                failing.push((at, id.clone()));
             }
         }
     }
-    // the complete inputs of each kept row, whatever its predicates short-circuited (D-AJ0XQ)
+    // the complete inputs of each failing row, whatever its predicates short-circuited (D-AJ0XQ)
     if stage == Stage::Propose {
         let mut read = Bounded::unbounded();
-        for (at, id) in &kept {
+        for (at, id) in &failing {
             // an unbounded set never refuses
             let _ = inputs_of(std::slice::from_ref(&rules[*at]), m, graph, id, &mut read);
         }
