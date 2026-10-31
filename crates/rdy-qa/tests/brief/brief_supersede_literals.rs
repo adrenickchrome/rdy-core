@@ -376,9 +376,12 @@ fn sdc5_tally_requirement_confirms_and_runbook_updates() {
             assert!(!w["states"].as_array().expect("states").is_empty(), "{w}");
         }
     }
-    // the freeze rule: both decisions name the same entities in their title and statement
+    // the freeze rule: both decisions name the same entities in their title and statement.
+    // Only those two fields are scanned: mentions keep the first mention of each entity (O5),
+    // so an earlier field (D30's options) would otherwise take a title or statement mention.
     let entities = |id: &BlockId| -> std::collections::BTreeSet<String> {
-        let b = e.read().block(&view("w"), id).unwrap();
+        let mut b = e.read().block(&view("w"), id).unwrap();
+        b.fields.retain(|k, _| k == "title" || k == "statement");
         lex.mentions(&b)
             .into_iter()
             .filter(|m| m.field == "title" || m.field == "statement")
