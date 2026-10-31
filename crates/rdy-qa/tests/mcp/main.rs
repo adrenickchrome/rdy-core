@@ -16,6 +16,7 @@ mod mcp_dispute;
 mod mcp_dispute_reads;
 mod mcp_dump;
 mod mcp_dump_chain;
+mod mcp_everyday;
 mod mcp_export;
 mod mcp_golden;
 mod mcp_history;
