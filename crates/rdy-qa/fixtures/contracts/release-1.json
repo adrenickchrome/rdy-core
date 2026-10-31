@@ -21726,6 +21726,18 @@
         "version": "0.1.0"
       }
     ],
+    "coverage_settings": {
+      "max_docs_per_level_default": 8,
+      "max_docs_per_level_set": 12,
+      "pack": {
+        "dismissed_weight": 25,
+        "drift_threshold": 70,
+        "max_docs_per_level": 12,
+        "weights": {
+          "governed": 2
+        }
+      }
+    },
     "limits": {
       "max_glob_len": 256,
       "max_path_segments": 64,
@@ -21754,6 +21766,11 @@
           "fields": {
             "aliases": {
               "kind": "list",
+              "required": false,
+              "values": []
+            },
+            "everyday": {
+              "kind": "bool",
               "required": false,
               "values": []
             },
@@ -21837,6 +21854,11 @@
           "fields": {
             "aliases": {
               "kind": "list",
+              "required": false,
+              "values": []
+            },
+            "everyday": {
+              "kind": "bool",
               "required": false,
               "values": []
             },
@@ -22083,6 +22105,11 @@
               "required": false,
               "values": []
             },
+            "everyday": {
+              "kind": "bool",
+              "required": false,
+              "values": []
+            },
             "kind": {
               "kind": "str",
               "required": false,
@@ -22225,6 +22252,11 @@
           "fields": {
             "aliases": {
               "kind": "list",
+              "required": false,
+              "values": []
+            },
+            "everyday": {
+              "kind": "bool",
               "required": false,
               "values": []
             },
@@ -22507,6 +22539,11 @@
               "required": false,
               "values": []
             },
+            "everyday": {
+              "kind": "bool",
+              "required": false,
+              "values": []
+            },
             "name": {
               "kind": "str",
               "required": true,
@@ -22526,6 +22563,11 @@
           "fields": {
             "aliases": {
               "kind": "list",
+              "required": false,
+              "values": []
+            },
+            "everyday": {
+              "kind": "bool",
               "required": false,
               "values": []
             },
@@ -22751,6 +22793,8 @@
       ]
     ],
     "validation": {
+      "coverage_level_too_high": "invalid pack: coverage.max_docs_per_level is 100001; it must be 1 to 100000",
+      "coverage_level_too_low": "invalid pack: coverage.max_docs_per_level is 0; it must be 1 to 100000",
       "duplicate_pack_name": "pack \"rdy-standard\" is defined twice: in the built-in pack and in x.yaml",
       "unknown_field_kind": "pack YAML is invalid: block_types.t.fields.f.kind: unknown variant `nope`, expected one of `str`, `int`, `bool`, `list`, `map`, `enum` at line 8 column 15",
       "unknown_pack_key": "pack YAML is invalid: unknown field `bogus`, expected one of `name`, `version`, `extends`, `link_types`, `block_types`, `doc_types`, `default_doc_type`, `tensions`, `duplicate_text_min_words`, `areas`, `coverage`, `rules` at line 3 column 1"
