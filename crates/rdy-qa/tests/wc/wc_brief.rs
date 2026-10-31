@@ -79,7 +79,7 @@ fn wcbr1_a_human_commit_to_stable_content_briefs_itself() {
     ok(&s, &["add", "spec.yaml"]);
     let (okk, v) = json(&s, &["commit", "-m", "edit stable"]);
     assert!(okk, "{v}");
-    assert!(v["briefing"]["base"]["token"].is_string(), "{v}");
+    assert!(v["cited_briefing"]["base"]["token"].is_string(), "{v}");
     set_body(&s, "spec.yaml", &p, "Again.");
     ok(&s, &["add", "spec.yaml"]);
     let text = ok(&s, &["commit", "-m", "again"]);
@@ -152,7 +152,7 @@ fn wcbr1_a_human_commit_of_drafts_prints_the_briefing_only_when_it_says_somethin
     let (okk, v) = json(&s, &["commit", "-m", "draft"]);
     assert!(okk, "{v}");
     assert!(
-        v["briefing"]["base"]["token"].is_string(),
+        v["cited_briefing"]["base"]["token"].is_string(),
         "the JSON keeps it: {v}"
     );
     set_body(&s, "notes.yaml", &seed.note, "Draft again.");

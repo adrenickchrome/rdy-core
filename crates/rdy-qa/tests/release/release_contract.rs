@@ -1210,15 +1210,17 @@ fn wc_row() -> Value {
     let refusal = serde_json::from_str::<Value>(&normalize(&refusal.to_string(), &[s.dir.path()]))
         .unwrap_or(refusal);
     std::fs::write(&intro, &original).expect("restore the doc file");
+    let commits = wc_commit_replies(&s, &ids[2]);
     let mut ids_seen = ids;
     ids_seen.sort();
     json!({
-        "sources": ["rdy checkout", ".rdy/wc", "rdy check", "rdy_engine::wc"],
+        "sources": ["rdy checkout", ".rdy/wc", "rdy check", "rdy commit", "rdy_engine::wc"],
         "state_directory": ".rdy/wc",
         "state_files": state_names,
         "state_shapes": state,
         "member_shapes": members,
         "checkout_reply": shape(&checkout),
+        "commit_replies": commits,
         "unknown_key_refusal": refusal,
         "state_constants": {
             "wc_dir": rdy_engine::wc::state::WC_DIR,
@@ -1234,6 +1236,55 @@ fn wc_row() -> Value {
         },
         "seeded_blocks": ids_seen.len(),
     })
+}
+
+/// nb9 (O9, FW-E4): the replies of a commit that creates a prose block under `section`, by the
+/// person (no daemon) and by an agent (through the daemon, which an agent commit needs). The
+/// person's reply holds the write's receipt as `briefing` and the briefing the CLI made for the
+/// commit as `cited_briefing`; the agent's holds the receipt and no cited briefing.
+fn wc_commit_replies(s: &rdy_qa::daemon::Served, section: &str) -> Value {
+    let intro = s.dir.path().join("guides/intro.yaml");
+    let add_prose = |body: &str| {
+        let orig = std::fs::read_to_string(&intro).expect("read the doc file");
+        std::fs::write(
+            &intro,
+            format!("{orig}- type: prose\n  parent: {section}\n  body: {body}\n"),
+        )
+        .expect("write the doc file");
+    };
+    let human = |args: &[&str]| {
+        let mut a = vec!["--no-daemon", "--json"];
+        a.extend_from_slice(args);
+        s.json(&a)
+    };
+    add_prose("Made by a person.");
+    let (ok, v) = human(&["add", "guides/intro.yaml"]);
+    assert!(ok, "the person stages the doc: {v}");
+    let (ok, person) = human(&["commit", "-m", "create"]);
+    assert!(ok, "the person's commit succeeds: {person}");
+    assert_eq!(person["briefing"]["covers"], 1, "{person}");
+    assert!(person["briefing"]["token"].is_string(), "{person}");
+    assert!(
+        person["cited_briefing"]["base"]["token"].is_string(),
+        "{person}"
+    );
+    let agent = |args: &[&str]| {
+        let mut a = vec!["--json"];
+        a.extend_from_slice(args);
+        s.json_as("agent:qa", Some("r1"), &a)
+    };
+    let (ok, v) = agent(&["checkout"]);
+    assert!(ok, "the agent checks out its view: {v}");
+    add_prose("Made by an agent.");
+    let (ok, v) = agent(&["add", "guides/intro.yaml"]);
+    assert!(ok, "the agent stages the doc: {v}");
+    let (ok, by_agent) = agent(&["commit", "-m", "create"]);
+    assert!(ok, "the agent's commit succeeds: {by_agent}");
+    assert_eq!(by_agent["briefing"]["covers"], 1, "{by_agent}");
+    assert!(by_agent["briefing"]["token"].is_string(), "{by_agent}");
+    assert!(by_agent.get("cited_briefing").is_none(), "{by_agent}");
+    s.stop();
+    json!({"human": shape(&person), "agent": shape(&by_agent)})
 }
 
 // ---- signatures ----

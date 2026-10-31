@@ -602,3 +602,124 @@ fn nb9_commit_and_edit_print_one_briefing_line() {
     assert_eq!(briefing_lines(&text).len(), 1, "{text}");
     assert!(text.starts_with("created doc "), "{text}");
 }
+
+/// The id of the one block in `rel` that `before` (the ids it held earlier) did not hold.
+fn new_entry_id(s: &Served, rel: &str, before: &BTreeSet<String>) -> String {
+    let now: BTreeSet<String> = wc::entries(s, rel)
+        .iter()
+        .filter_map(|e| e.get("id").and_then(|i| i.as_str()).map(str::to_string))
+        .collect();
+    let fresh: Vec<&String> = now.difference(before).collect();
+    assert_eq!(fresh.len(), 1, "one new block in {rel}: {fresh:?}");
+    fresh[0].clone()
+}
+
+/// Ruling 1 (O9, FW-E4): a human commit that creates a block returns the receipt as `briefing`
+/// ({token, covers}) and the briefing the CLI made for it as `cited_briefing`; an agent commit
+/// returns `briefing` and no `cited_briefing`. With and without the daemon.
+#[test]
+fn nb9_a_human_commit_returns_the_receipt_and_the_cited_briefing() {
+    let (s, seed) = wc::seeded();
+    assert!(wc::json(&s, &["--no-daemon", "checkout"]).0);
+    let ids_now = || -> BTreeSet<String> {
+        wc::entries(&s, "guides/intro.yaml")
+            .iter()
+            .filter_map(|e| e.get("id").and_then(|i| i.as_str()).map(str::to_string))
+            .collect()
+    };
+    let add_prose = |body: &str| {
+        let orig = wc::read(&s, "guides/intro.yaml");
+        wc::put(
+            &s,
+            "guides/intro.yaml",
+            &format!(
+                "{orig}- type: prose\n  parent: {}\n  body: {body}\n",
+                seed.section
+            ),
+        );
+    };
+    for daemon in [false, true] {
+        let before = ids_now();
+        add_prose(if daemon {
+            "Through the daemon."
+        } else {
+            "No daemon."
+        });
+        assert!(wc::json(&s, &["--no-daemon", "add", "guides/intro.yaml"]).0);
+        let args: &[&str] = if daemon {
+            &["commit", "-m", "create"]
+        } else {
+            &["--no-daemon", "commit", "-m", "create"]
+        };
+        let (ok, v) = wc::json(&s, args);
+        assert!(ok, "{v}");
+        let receipt = v["briefing"].as_object().unwrap_or_else(|| panic!("{v}"));
+        let mut keys: Vec<&str> = receipt.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["covers", "token"], "the receipt: {v}");
+        assert_eq!(v["briefing"]["covers"], 1, "{v}");
+        let token = v["briefing"]["token"].as_str().unwrap().to_string();
+        assert!(is_token(&token), "{v}");
+        let cited = v["cited_briefing"]["base"]["token"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the cited briefing: {v}"))
+            .to_string();
+        assert!(is_token(&cited), "{v}");
+        assert_ne!(token, cited, "{v}");
+        // the receipt's token is the token of a fresh briefing of the created block alone
+        let made = new_entry_id(&s, "guides/intro.yaml", &before);
+        let brief: &[&str] = if daemon {
+            &["brief", &made]
+        } else {
+            &["--no-daemon", "brief", &made]
+        };
+        let (ok, b) = wc::json(&s, brief);
+        assert!(ok, "{b}");
+        assert_eq!(b["base"]["token"], json!(token), "{b}");
+    }
+    // the person's text: the cited briefing first, then one receipt line after the result
+    add_prose("In text.");
+    assert!(wc::json(&s, &["add", "guides/intro.yaml"]).0);
+    let text = wc::ok(&s, &["commit", "-m", "create in text"]);
+    assert!(text.starts_with("briefing"), "{text}");
+    let lines = briefing_lines(&text);
+    assert_eq!(lines.len(), 1, "{text}");
+    assert!(
+        is_token(lines[0].trim_start_matches("briefing: ")),
+        "{text}"
+    );
+    let all: Vec<&str> = text.lines().collect();
+    let at = all
+        .iter()
+        .position(|l| l.starts_with("briefing: "))
+        .unwrap();
+    let committed = all
+        .iter()
+        .position(|l| l.starts_with("committed "))
+        .unwrap();
+    assert!(committed < at, "{text}");
+
+    // an agent commit: the receipt, and no cited briefing
+    let (s, seed) = wc::seeded();
+    let agent_json = |args: &[&str]| {
+        let mut a = vec!["--json"];
+        a.extend_from_slice(args);
+        s.json_as("agent:ed", Some("r1"), &a)
+    };
+    assert!(agent_json(&["checkout"]).0);
+    let orig = wc::read(&s, "notes.yaml");
+    wc::put(
+        &s,
+        "notes.yaml",
+        &format!(
+            "{orig}- type: prose\n  parent: {}\n  body: Agent prose.\n",
+            seed.notes
+        ),
+    );
+    assert!(agent_json(&["add", "notes.yaml"]).0);
+    let (ok, v) = agent_json(&["commit", "-m", "create"]);
+    assert!(ok, "{v}");
+    assert_eq!(v["briefing"]["covers"], 1, "{v}");
+    assert!(is_token(v["briefing"]["token"].as_str().unwrap()), "{v}");
+    assert!(v.get("cited_briefing").is_none(), "{v}");
+}

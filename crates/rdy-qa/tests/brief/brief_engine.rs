@@ -427,16 +427,19 @@ fn brf1_unknown_ids_and_empty_coverage_are_refused() {
     assert_eq!(e.code, "E_UNKNOWN_BLOCK", "{e}");
 }
 
-/// Doc `big` in view `work`: the doc, a section and `claims` claims; plus doc `other`. Returns
-/// `other`'s id.
-fn big_doc(r: &mut Rdy, claims: usize) -> BlockId {
+/// Doc `big` in view `work`: the doc, `sections` sections and `claims` claims, in order, at most
+/// `ceil(claims / sections)` to a section; plus doc `other`. Returns `other`'s id.
+fn big_doc(r: &mut Rdy, sections: usize, claims: usize) -> BlockId {
+    let per = claims.div_ceil(sections);
     let mut ops = vec![
         json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": "big", "title": "Big", "doc_type": "overview"}}),
-        json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "All"}}),
         json!({"op": "create", "type": "doc", "id": "$o", "fields": {"name": "other", "title": "Other", "doc_type": "overview"}}),
     ];
+    ops.extend((0..sections).map(|n| {
+        json!({"op": "create", "type": "section", "id": format!("$s{n}"), "parent": "$d", "fields": {"title": format!("Part {n}")}})
+    }));
     ops.extend((0..claims).map(|i| {
-        json!({"op": "create", "type": "claim", "id": format!("$c{i}"), "parent": "$s", "body": format!("Claim {i}.")})
+        json!({"op": "create", "type": "claim", "id": format!("$c{i}"), "parent": format!("$s{}", i / per), "body": format!("Claim {i}.")})
     }));
     let w = write(r, "work", json!(ops)).expect("the big doc");
     BlockId::parse(&w.created["$o"]).expect("created id")
@@ -447,8 +450,10 @@ fn brf1_coverage_over_the_limit_is_refused_without_walking_the_rest() {
     assert_eq!(MAX_BRIEF_BLOCKS, 5_000);
     let (_d, mut r) = project();
     let work = Scope::View("work".into());
-    // the doc, its section and 4,998 claims: exactly the limit
-    let other = big_doc(&mut r, MAX_BRIEF_BLOCKS - 2);
+    // the doc, 50 sections and 4,949 claims, at most 99 to a section: exactly the limit. O2's
+    // neighbor walk (1,000,000 visits) costs about n^2 for a section of n claims, so the claims
+    // are spread over small sections to reach the coverage bound (closed-pin amendment, O11).
+    let other = big_doc(&mut r, 50, MAX_BRIEF_BLOCKS - 51);
     let cov = |ids: Vec<String>| Coverage {
         ids,
         path: Some("big".into()),
@@ -487,6 +492,14 @@ fn brf1_coverage_over_the_limit_is_refused_without_walking_the_rest() {
     let e = r.read().brief(&work, &cov(vec![]), None).unwrap_err();
     assert_eq!(e.code, "E_LIMIT", "{e}");
     assert!(e.message.starts_with("more than 5000 blocks"), "{e}");
+    drop((r, _d));
+
+    // O2 pinned, not hidden: one section of 1,001 claims is over the neighbor walk's visits
+    let (_d, mut r) = project();
+    big_doc(&mut r, 1, 1_001);
+    let e = r.read().brief(&work, &cov(vec![]), None).unwrap_err();
+    assert_eq!(e.code, "E_LIMIT", "{e}");
+    assert_eq!(e.message, "neighbor walk exceeds 1000000 visits", "{e}");
 }
 
 #[test]

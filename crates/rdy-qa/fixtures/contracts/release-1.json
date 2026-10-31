@@ -23834,6 +23834,151 @@
       "head": "string",
       "view": "string"
     },
+    "commit_replies": {
+      "agent": {
+        "briefing": {
+          "covers": "number",
+          "token": "string"
+        },
+        "change": "string",
+        "consequences": [
+          {
+            "because": {
+              "changed": "string",
+              "edge": "string",
+              "edges": [
+                "string"
+              ]
+            },
+            "block": "string",
+            "fix": "string",
+            "follow_up": "string",
+            "id": "string",
+            "kind": "string"
+          }
+        ],
+        "coverage": {
+          "after": "number",
+          "before": "number",
+          "pages": [
+            {
+              "after": "number",
+              "before": "number",
+              "doc": "string",
+              "path": "string"
+            }
+          ]
+        },
+        "created": {
+          "op0": "string"
+        },
+        "files": [
+          "string"
+        ],
+        "on_change": {
+          "checks": [],
+          "resolved": [],
+          "tensions": []
+        },
+        "suggestions": [],
+        "view": "string",
+        "warnings": []
+      },
+      "human": {
+        "briefing": {
+          "covers": "number",
+          "token": "string"
+        },
+        "change": "string",
+        "cited_briefing": {
+          "base": {
+            "blocks": [
+              {
+                "id": "string",
+                "version": "string"
+              }
+            ],
+            "depends": "number",
+            "token": "string"
+          },
+          "coverage": {
+            "confidence": "string",
+            "dimensions": {
+              "complete": "number",
+              "connected": "number",
+              "consistent": "number",
+              "current": "number"
+            },
+            "issues": [],
+            "pages": [
+              {
+                "doc": "string",
+                "path": "string",
+                "score": "number"
+              }
+            ],
+            "reasons": [],
+            "score": "number"
+          },
+          "covers": "number",
+          "dependents": [],
+          "governs": [],
+          "inflight": {
+            "intents": [],
+            "proposals": [],
+            "tensions": [],
+            "views": []
+          },
+          "lineage": [],
+          "neighbors": [],
+          "neighbors_by_doc": [],
+          "suspects": [],
+          "will_go_stale": []
+        },
+        "consequences": [
+          {
+            "because": {
+              "changed": "string",
+              "edge": "string",
+              "edges": [
+                "string"
+              ]
+            },
+            "block": "string",
+            "fix": "string",
+            "follow_up": "string",
+            "id": "string",
+            "kind": "string"
+          }
+        ],
+        "coverage": {
+          "after": "number",
+          "before": "number",
+          "pages": [
+            {
+              "after": "number",
+              "before": "number",
+              "doc": "string",
+              "path": "string"
+            }
+          ]
+        },
+        "created": {
+          "op0": "string"
+        },
+        "files": [
+          "string"
+        ],
+        "on_change": {
+          "checks": [],
+          "resolved": [],
+          "tensions": []
+        },
+        "suggestions": [],
+        "view": "string",
+        "warnings": []
+      }
+    },
     "member_shapes": {
       "guides/_folder.yaml": {
         "fields": {
@@ -23871,6 +24016,7 @@
       "rdy checkout",
       ".rdy/wc",
       "rdy check",
+      "rdy commit",
       "rdy_engine::wc"
     ],
     "state_constants": {

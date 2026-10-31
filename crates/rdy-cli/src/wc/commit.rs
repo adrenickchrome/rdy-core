@@ -340,8 +340,10 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
         }
         o.insert("view".into(), json!(view));
         o.insert("files".into(), json!(wb.written));
+        // O9: `briefing` is the write's receipt ({token, covers}), as in every write reply; the
+        // briefing the CLI made for a human commit (FW-E4) is `cited_briefing`
         if let Some(b) = cited.briefing {
-            o.insert("briefing".into(), b);
+            o.insert("cited_briefing".into(), b);
         }
         if !wb.kept.is_empty() {
             o.insert("kept".into(), json!(wb.kept));
