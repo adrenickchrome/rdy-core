@@ -516,9 +516,15 @@ fn fsync_bound(op: &str) -> bool {
         || op.starts_with("m3a_upgrade_")
 }
 
-/// The verdicts of one run. The spec ceiling is checked first in every mode. In `Record` mode
-/// the rest is `Recorded`. In `Compare` mode an op in the baseline is `Pass` or `Regressed`,
-/// and an op not in it is `Unbaselined`, which fails.
+/// The ops that are reported only: no ceiling and no baseline (D-PACK3), so every mode records
+/// them and no compared run fails on them. Today these are the check ops (`CK10_OPS`).
+fn reported_only(op: &str) -> bool {
+    CK10_OPS.contains(&op)
+}
+
+/// The verdicts of one run. The spec ceiling is checked first in every mode. In `Record` mode,
+/// and for a reported-only op in any mode, the rest is `Recorded`. In `Compare` mode an op in the
+/// baseline is `Pass` or `Regressed`, and an op not in it is `Unbaselined`, which fails.
 pub fn compare(baseline: Option<&Baseline>, measured: &[Measure], mode: Mode) -> Vec<Verdict> {
     measured
         .iter()
@@ -526,7 +532,7 @@ pub fn compare(baseline: Option<&Baseline>, measured: &[Measure], mode: Mode) ->
             let base = baseline.and_then(|b| b.ops.get(&m.op)).map(|b| b.median_ms);
             let status = if over_ceiling(m) {
                 Status::OverCeiling
-            } else if mode == Mode::Record {
+            } else if mode == Mode::Record || reported_only(&m.op) {
                 Status::Recorded
             } else {
                 match base {
@@ -8225,9 +8231,38 @@ mod tests {
             for class in baseline["classes"].as_object().expect("classes").values() {
                 assert!(class["ops"].get(op).is_none(), "{op} is not baselined");
             }
-            // with no baseline entry, a recorded run of it passes and a compared one is named
+            // with no baseline entry, a recorded run of it passes
             let rec = compare(None, &[m(op, 1.0)], Mode::Record);
             assert_eq!((rec[0].status, rec[0].pass), (Status::Recorded, true));
+        }
+        // the normal gate: compared against each checked-in class baseline, the four ops are
+        // reported and pass, while an unbaselined op and a regressed baselined op still fail
+        let classes: BTreeMap<String, Baseline> =
+            serde_json::from_value(baseline["classes"].clone()).expect("the classes parse");
+        assert!(!classes.is_empty());
+        for (class, base) in &classes {
+            let measured: Vec<Measure> = CK10_OPS.iter().map(|op| m(op, 1.0)).collect();
+            for v in compare(Some(base), &measured, Mode::Compare) {
+                assert_eq!(
+                    (v.status, v.pass, v.baseline_ms),
+                    (Status::Recorded, true, None),
+                    "{class}: {}",
+                    v.op
+                );
+            }
+            let unbaselined = compare(Some(base), &[m("ck10_not_an_op", 1.0)], Mode::Compare);
+            assert_eq!(
+                (unbaselined[0].status, unbaselined[0].pass),
+                (Status::Unbaselined, false),
+                "{class}"
+            );
+            let (op, old) = base.ops.iter().next().expect("the class has ops");
+            let worse = compare(
+                Some(base),
+                &[m(op, old.median_ms * 10.0 + 100.0)],
+                Mode::Compare,
+            );
+            assert!(!worse[0].pass, "{class}: {op} {:?}", worse[0].status);
         }
         // the queue's fixture
         rdy_model::seed_ids_for_tests(0x636b_3130);
