@@ -230,7 +230,7 @@ fn nb9_receipt_covers_creates_not_dependencies_or_updates() {
 
     // an import covers the blocks of every author change, in one token
     let out = d.path().join("export");
-    r.export(&view("w"), &out).unwrap();
+    r.read().export(&view("w"), &out).unwrap();
     let (_d2, mut r2) = project();
     let imported = r2.import(&writer(), "work", &out).unwrap();
     let receipt = imported.briefing.clone().unwrap();
@@ -501,7 +501,7 @@ fn nb9_mcp_daemon_and_local_created_receipts_agree() {
     s.stop();
     let out = s.dir.path().join("export");
     let r = Rdy::open(s.dir.path()).unwrap();
-    r.export(&Scope::Canon, &out).unwrap();
+    r.read().export(&Scope::Canon, &out).unwrap();
     let n = r.read().materialized(&Scope::Canon).unwrap().len();
     r.close().unwrap();
     let t = Served::new();
