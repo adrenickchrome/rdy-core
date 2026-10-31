@@ -5,7 +5,7 @@
 use super::brief::{for_commit, record_refusal, says_something};
 use super::{Open, open};
 use crate::brief_text::consequences_text;
-use crate::brief_text::plain;
+use crate::brief_text::{created_briefing_text, plain};
 use crate::{Conn, Env, call, hash_short, human_session};
 use rdy_daemon::{E_DAEMON_GONE, ErrorReply};
 use rdy_engine::wc::files::{apply_writeback, changed_since_staged, restore_unrecorded};
@@ -306,6 +306,8 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
         plan.ops.len(),
         wb.written.len()
     ));
+    // nb9: the created-block briefing, after the result and before the warnings
+    text.push_str(&created_briefing_text(&reply));
     for w in reply["warnings"].as_array().into_iter().flatten() {
         text.push_str(&format!(
             "\nwarning {}: {}",

@@ -7278,6 +7278,145 @@ fn reopen_measured(project: &std::path::Path) -> (u64, u128, Rdy) {
 mod tests {
     use super::*;
 
+    /// nb7 (r-TPD3E, the 25 ms ceiling at 100,000 blocks): `brief_doc`'s path over the fixture
+    /// doc in a view of exactly 100,000 blocks, where one entity and two tied content blocks
+    /// give the doc's claims section and entity neighbors. Bench only: the orchestrator runs it
+    /// (`--ignored --nocapture`) and checks the p95. The result is printed as `brief_doc` with a
+    /// `blocks=100000` label and joins no baseline comparison; completeness is asserted outside
+    /// the timer, never a time.
+    #[test]
+    #[ignore = "bench only: the orchestrator runs the 100,000-block briefing probe"]
+    fn nb7_brief_doc_at_hundred_thousand_blocks() {
+        rdy_model::seed_ids_for_tests(0x7064_6566);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let docs = testkit::generate_tree(&proj, 100, 10, 97);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        let fx = fixture(&r, &docs);
+        let other = r
+            .read()
+            .resolve_path(&Scope::Canon, &docs[1])
+            .expect("a second doc");
+        let other_section = {
+            let m = r.read().materialized(&Scope::Canon).expect("canon");
+            m.children(Some(&other))[0].id.clone()
+        };
+        let eb = Scope::View("eb".into());
+        // setup, untimed: the entity and a tied claim in the fixture section, a tied claim in
+        // the second doc
+        let w = write(
+            &mut r,
+            "eb",
+            json!([
+                {"op": "create", "type": "entity", "id": "$e", "parent": fx.section.to_string(), "fields": {"name": "Gauge"}},
+                {"op": "create", "type": "claim", "id": "$t1", "parent": fx.section.to_string(), "body": "The near tie uses {{$e}}."},
+                {"op": "create", "type": "claim", "id": "$t2", "parent": other_section.to_string(), "body": "The far tie uses {{$e}}."}
+            ]),
+        )
+        .expect("the ties");
+        let (entity, t2) = (w.created["$e"].clone(), w.created["$t2"].clone());
+        // padding in a doc of its own, outside the fixture path, to exactly 100,000 blocks
+        let n = r.read().materialized(&eb).expect("eb").len();
+        assert!(n < 100_000, "{n} blocks before the padding");
+        let pad = write(
+            &mut r,
+            "eb",
+            json!([{"op": "create", "type": "doc", "fields": {"name": "padding", "title": "Padding", "doc_type": "constraints"}}]),
+        )
+        .expect("the padding doc")
+        .created["op0"]
+            .clone();
+        let mut left = 100_000 - n - 1;
+        let mut k = 0;
+        while left > 0 {
+            let chunk = left.min(1_000);
+            let ops: Vec<serde_json::Value> = (0..chunk)
+                .map(|i| json!({"op": "create", "type": "prose", "parent": pad, "body": format!("Padding {}.", k + i)}))
+                .collect();
+            write(&mut r, "eb", serde_json::Value::Array(ops)).expect("padding");
+            k += chunk;
+            left -= chunk;
+        }
+        assert_eq!(r.read().materialized(&eb).expect("eb").len(), 100_000);
+        let cov = Coverage {
+            ids: vec![],
+            path: Some(fx.doc_path.clone()),
+        };
+        let claim = fx.claim.to_string();
+        let sample = measure_timed("brief_doc", LARGE_RUNS.read, |i| {
+            // the anchor's body changes before each sample: the size stays fixed
+            write(
+                &mut r,
+                "eb",
+                json!([{"op": "update", "id": claim, "body": format!("Anchor {i}.")}]),
+            )
+            .expect("edit the anchor");
+            let s = Instant::now();
+            let b = r.read().brief(&eb, &cov, None).expect("brief");
+            b.register(&r.briefs());
+            let took = s.elapsed();
+            assert!(b.covers > 0);
+            took
+        });
+        println!(
+            "{} blocks=100000 median_ms={:.3} p95_ms={:.3} runs={}",
+            sample.op, sample.median_ms, sample.p95_ms, sample.runs
+        );
+        // untimed: every page, every neighbor once, the counts on each page
+        let first = r.read().brief(&eb, &cov, None).expect("brief");
+        first.register(&r.briefs());
+        let full = r.read().brief(&eb, &cov, Some(usize::MAX)).expect("brief");
+        let mut seen = first.neighbors.clone();
+        let mut next = first.next.clone();
+        let mut pages = 1;
+        while let Some(c) = next {
+            let p = r
+                .read()
+                .brief_page(&eb, &r.briefs(), &c, None)
+                .expect("page");
+            assert_eq!(p.neighbors_by_doc, full.neighbors_by_doc);
+            seen.extend(p.neighbors.clone());
+            next = p.next.clone();
+            pages += 1;
+            assert!(pages < 10_000, "paging does not end");
+        }
+        assert_eq!(seen, full.neighbors);
+        // the fixture section's 97 claims and the near tie are each other's section
+        // neighbors; the far tie is the near tie's entity neighbor
+        let section: Vec<&rdy_engine::neighbors::Neighbor> = seen
+            .iter()
+            .filter(|x| x.via == rdy_engine::neighbors::NeighborVia::Section)
+            .collect();
+        assert_eq!(section.len(), 98);
+        let far: Vec<&rdy_engine::neighbors::Neighbor> = seen
+            .iter()
+            .filter(|x| x.via == rdy_engine::neighbors::NeighborVia::Entity)
+            .collect();
+        assert_eq!(far.len(), 1);
+        assert_eq!(
+            (far[0].block.as_str(), far[0].entity.as_deref()),
+            (t2.as_str(), Some(entity.as_str()))
+        );
+        let counts: Vec<(String, usize)> = full
+            .neighbors_by_doc
+            .iter()
+            .map(|c| (c.doc.clone(), c.count))
+            .collect();
+        let doc = r
+            .read()
+            .resolve_path(&Scope::Canon, &fx.doc_path)
+            .expect("doc")
+            .to_string();
+        // in doc path order: the fixture doc (area-0/doc-0) before the second (area-0/doc-1)
+        assert_eq!(counts, vec![(doc, 98), (other.to_string(), 1)]);
+        println!(
+            "brief_doc blocks=100000 neighbors={} pages={pages}",
+            seen.len()
+        );
+    }
+
     fn m(op: &str, median: f64) -> Measure {
         Measure {
             op: op.into(),

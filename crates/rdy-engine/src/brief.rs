@@ -117,6 +117,20 @@ fn route_lines(
     ids: &BTreeSet<BlockId>,
     cache: &mut GoverningCache,
 ) -> Vec<RouteLine> {
+    route_lines_charged(g, pack, m, ids, cache, &mut |_| Ok(()))
+        .expect("a charge that never refuses")
+}
+
+/// [`route_lines`], calling `charge` with each line before it is kept: an `Err` stops the
+/// collection there.
+fn route_lines_charged(
+    g: &Graph,
+    pack: &Pack,
+    m: &Materialized,
+    ids: &BTreeSet<BlockId>,
+    cache: &mut GoverningCache,
+    charge: &mut dyn FnMut(&RouteLine) -> Result<(), RdyError>,
+) -> Result<Vec<RouteLine>, RdyError> {
     let mut out = vec![];
     for id in ids {
         for r in g.governing_routes(
@@ -129,16 +143,18 @@ fn route_lines(
                 .status(&r.decision)
                 .as_ref()
                 .map_or("", DerivedStatus::tag);
-            out.push(RouteLine {
+            let line = RouteLine {
                 block: id.clone(),
                 decision: r.decision,
                 via: r.via,
                 entity: r.entity,
                 status,
-            });
+            };
+            charge(&line)?;
+            out.push(line);
         }
     }
-    out
+    Ok(out)
 }
 
 /// rf6: the blocks of `ids` that are decisions a later decision retires or revokes, with their
@@ -147,13 +163,178 @@ fn retired_of<'a>(
     g: &Graph,
     ids: impl IntoIterator<Item = &'a BlockId>,
 ) -> BTreeMap<BlockId, &'static str> {
-    ids.into_iter()
-        .filter_map(|id| {
-            let tag = g.status(id)?.tag();
-            matches!(tag, "partially_superseded" | "superseded" | "revoked")
-                .then(|| (id.clone(), tag))
-        })
-        .collect()
+    retired_of_charged(g, ids, &mut || Ok(())).expect("a charge that never refuses")
+}
+
+/// [`retired_of`], calling `charge` before each entry is kept: an `Err` stops it there.
+fn retired_of_charged<'a>(
+    g: &Graph,
+    ids: impl IntoIterator<Item = &'a BlockId>,
+    charge: &mut dyn FnMut() -> Result<(), RdyError>,
+) -> Result<BTreeMap<BlockId, &'static str>, RdyError> {
+    let mut out = BTreeMap::new();
+    for id in ids {
+        let Some(tag) = g.status(id).map(|s| s.tag()) else {
+            continue;
+        };
+        if matches!(tag, "partially_superseded" | "superseded" | "revoked") {
+            charge()?;
+            out.insert(id.clone(), tag);
+        }
+    }
+    Ok(out)
+}
+
+/// nb9: a briefing record past the registry's entry budget.
+fn entries_error() -> RdyError {
+    RdyError::new(
+        E_LIMIT,
+        format!("briefing exceeds {BRIEF_REGISTRY_ENTRIES} entries"),
+        "brief fewer blocks, or split the write into smaller changes",
+    )
+}
+
+/// nb9: the entries a record has taken so far, refused before one passes
+/// [`BRIEF_REGISTRY_ENTRIES`].
+#[derive(Default)]
+struct EntryBudget(usize);
+
+impl EntryBudget {
+    fn take(&mut self, n: usize) -> Result<(), RdyError> {
+        match self.0.checked_add(n) {
+            Some(used) if used <= BRIEF_REGISTRY_ENTRIES => {
+                self.0 = used;
+                Ok(())
+            }
+            _ => Err(entries_error()),
+        }
+    }
+}
+
+/// The record of a briefing that covers `covers` in `m` (graph `g`) under `pack`: the version
+/// of every covered block and of each block a covered block names by a suspect link, every
+/// live or proposed decision that governs a covered block and each entity its route runs
+/// through, the routes, and the retired status of each recorded decision. Its token is
+/// [`token_of`]. `E_LIMIT` before the record passes [`BRIEF_REGISTRY_ENTRIES`] entries, counted
+/// as [`BriefRecord::entries`] counts them, as it is collected.
+pub(crate) fn brief_record_in(
+    m: &Materialized,
+    g: &Graph,
+    pack: &Pack,
+    covers: &BTreeSet<BlockId>,
+) -> Result<Arc<BriefRecord>, RdyError> {
+    let mut budget = EntryBudget::default();
+    budget.take(covers.len())?;
+    let record = |recorded: &mut BTreeMap<BlockId, Option<Hash>>,
+                  budget: &mut EntryBudget,
+                  id: &BlockId|
+     -> Result<(), RdyError> {
+        if !recorded.contains_key(id) {
+            budget.take(1)?;
+            recorded.insert(id.clone(), m.version_of(id));
+        }
+        Ok(())
+    };
+    // rf9: every source a covered block reflects and every finding a covered decision depends
+    // on is a suspect-link target (`reflects` and `depends_on`), so it is recorded here:
+    // however many finding rows the cap leaves out, an edit of any of them moves the token
+    let mut recorded = BTreeMap::new();
+    for id in covers {
+        record(&mut recorded, &mut budget, id)?;
+        for e in g.outgoing(id) {
+            if edge_in(&e.kind, &SUSPECT_LINKS) {
+                record(&mut recorded, &mut budget, &e.to)?;
+            }
+        }
+    }
+    // rf6 (D-VPATZ): live and proposed decisions by the graph's four routes, one cache for
+    // the briefing. Every governing decision is a recorded dependency (its status and
+    // affects list), and so is each entity a route runs through. The routes and the retired
+    // statuses of the recorded decisions are captured too, so a change no recorded version
+    // shows (a new superseder or decision on an entity, an entity that stops defining)
+    // moves the briefing as well (`BriefRecord::stale`).
+    let routes = route_lines_charged(
+        g,
+        pack,
+        m,
+        covers,
+        &mut GoverningCache::default(),
+        &mut |r| {
+            budget.take(1)?;
+            record(&mut recorded, &mut budget, &r.decision)?;
+            if let Some(entity) = &r.entity {
+                record(&mut recorded, &mut budget, entity)?;
+            }
+            Ok(())
+        },
+    )?;
+    let retired = retired_of_charged(g, recorded.keys(), &mut || budget.take(1))?;
+    let governance = Governance { retired, routes };
+    let token = token_of(covers, &recorded, &governance);
+    Ok(Arc::new(BriefRecord {
+        token,
+        covers: covers.clone(),
+        recorded,
+        governance,
+    }))
+}
+
+/// nb9 (t-F3KR2, O9): the record of the blocks `ops` create, as the write about to append them
+/// leaves them: built on `m` with `ops` applied (the candidate), its graph carried from
+/// `graph` (the graph of `m`). The created blocks are the final `Op::Create` set: a create
+/// that a later op of the same write deletes is not one. `None` when nothing survives;
+/// `E_LIMIT` above [`MAX_CREATED_BRIEFING`] creates or past the record's entry budget. With the
+/// record, the number of blocks it covers.
+pub(crate) fn created_record(
+    pack: &Pack,
+    m: &Materialized,
+    graph: impl FnOnce() -> Result<Arc<Graph>, RdyError>,
+    ops: &[rdy_model::Op],
+) -> Result<Option<(Arc<BriefRecord>, usize)>, RdyError> {
+    use rdy_model::Op;
+    let mut created: BTreeSet<BlockId> = BTreeSet::new();
+    for op in ops {
+        match op {
+            Op::Create { block } => {
+                created.insert(block.id.clone());
+            }
+            Op::Delete { id, .. } => {
+                created.remove(id);
+            }
+            Op::Update { .. } => {}
+        }
+    }
+    if created.is_empty() {
+        return Ok(None);
+    }
+    if created.len() > MAX_CREATED_BRIEFING {
+        return Err(RdyError::new(
+            E_LIMIT,
+            format!("write briefing exceeds {MAX_CREATED_BRIEFING} created blocks"),
+            "split the write into smaller changes",
+        ));
+    }
+    let candidate = m.with(ops);
+    let named: BTreeSet<&BlockId> = ops.iter().map(Op::block_id).collect();
+    let g = graph()?.with_changes(
+        named.iter().filter_map(|id| m.get(id)),
+        named.iter().filter_map(|id| candidate.get(id)),
+    );
+    let n = created.len();
+    Ok(Some((brief_record_in(&candidate, &g, pack, &created)?, n)))
+}
+
+/// nb9: registers the receipt `rec` covering `covers` blocks (after its write published) and
+/// returns what the write's reply carries.
+pub(crate) fn register_created(
+    reg: &BriefRegistry,
+    receipt: Option<(Arc<BriefRecord>, usize)>,
+) -> Option<CreatedBriefing> {
+    receipt.map(|(rec, covers)| {
+        let token = rec.token_hex();
+        reg.insert(rec);
+        CreatedBriefing { token, covers }
+    })
 }
 
 impl BriefRecord {
@@ -344,7 +525,7 @@ impl BriefRegistry {
 
 /// The paged sections of a briefing, in cursor order: a cursor holds one offset per section, how
 /// many of its entries earlier pages showed.
-pub const PAGE_SECTIONS: [&str; 11] = [
+pub const PAGE_SECTIONS: [&str; 12] = [
     "governs",
     "dependents",
     "lineage",
@@ -355,6 +536,7 @@ pub const PAGE_SECTIONS: [&str; 11] = [
     "inflight.proposals",
     "inflight.intents",
     "inflight.tensions",
+    "neighbors",
     "base.blocks",
 ];
 
@@ -791,6 +973,7 @@ impl Briefing {
             self.inflight.proposals.len(),
             self.inflight.intents.len(),
             self.rows.len(),
+            self.neighbors.len(),
             self.base.blocks.len(),
         ]
     }
@@ -812,7 +995,8 @@ impl Briefing {
         drop(&mut self.rows, skip[9]);
         drop(&mut self.inflight.tensions, skip[9]);
         drop(&mut self.row_sizes, skip[9]);
-        drop(&mut self.base.blocks, skip[10]);
+        drop(&mut self.neighbors, skip[10]);
+        drop(&mut self.base.blocks, skip[11]);
     }
 
     /// Shows the entries after the first `skip[i]` of each section, cut to `max` tokens, and
@@ -1046,6 +1230,7 @@ impl Briefing {
                 self.inflight.tensions.truncate(keep);
                 self.row_sizes.truncate(keep);
             }
+            10 => self.neighbors.truncate(keep),
             _ => self.base.blocks.truncate(keep),
         }
         *self
@@ -1127,7 +1312,7 @@ pub(crate) fn refuse_inflight(scope: &Scope) -> Result<(), RdyError> {
 /// carries as many.
 pub(crate) const DIGEST_HEX: usize = 16;
 
-/// A cursor `<token>:<o1>,…,<o11>:<digest>:<scope>` split at its first colon: the token (64
+/// A cursor `<token>:<o1>,…,<o12>:<digest>:<scope>` split at its first colon: the token (64
 /// lowercase hex) and the rest. The rest is read by `parse_tail` once the token is known.
 fn parse_cursor(cursor: &str) -> Result<(&str, &str), RdyError> {
     let (token, rest) = cursor.split_once(':').ok_or_else(bad_cursor)?;
@@ -1451,44 +1636,24 @@ impl ReadState {
         let pack = self.pack();
         let summary_of = |id: &BlockId| m.get(id).map(|b| summary_in(b, &m)).unwrap_or_default();
 
-        // rf9: every source a covered block reflects and every finding a covered decision depends
-        // on is a suspect-link target (`reflects` and `depends_on`), so it is recorded here:
-        // however many finding rows the cap leaves out, an edit of any of them moves the token
-        let mut recorded = BTreeMap::new();
-        for id in ids {
-            recorded.insert(id.clone(), m.version_of(id));
-            for e in g.outgoing(id) {
-                if edge_in(&e.kind, &SUSPECT_LINKS) {
-                    recorded.insert(e.to.clone(), m.version_of(&e.to));
-                }
-            }
-        }
-
-        // rf6 (D-VPATZ): live and proposed decisions by the graph's four routes, one cache for
-        // the briefing. Every governing decision is a recorded dependency (its status and
-        // affects list), and so is each entity a route runs through. The routes and the retired
-        // statuses of the recorded decisions are captured too, so a change no recorded version
-        // shows (a new superseder or decision on an entity, an entity that stops defining)
-        // moves the briefing as well (`BriefRecord::stale`).
-        let routes = route_lines(&g, pack, &m, ids, &mut GoverningCache::default());
+        // the token's record (nb9: shared with a write's created-block receipt)
+        let record = brief_record_in(&m, &g, pack, ids)?;
+        let (token, recorded) = (record.token, &record.recorded);
+        // nb7 (D-YXBXH): every neighbor of the covered blocks, complete or E_LIMIT, counted
+        // per doc over the whole list
+        let neighbors = crate::neighbors::neighbors_in(&m, &g, pack, ids)?;
+        let neighbors_by_doc = neighbor_counts(&m, &neighbors);
         let mut governed: BTreeMap<BlockId, (Vec<String>, Vec<Through>)> = BTreeMap::new();
-        for r in &routes {
-            recorded.insert(r.decision.clone(), m.version_of(&r.decision));
+        for r in &record.governance.routes {
             let row = governed.entry(r.decision.clone()).or_default();
             row.0.push(r.block.to_string());
             if let Some(entity) = &r.entity {
-                recorded.insert(entity.clone(), m.version_of(entity));
                 row.1.push(Through {
                     block: r.block.to_string(),
                     entity: entity.to_string(),
                 });
             }
         }
-        let governance = Governance {
-            retired: retired_of(&g, recorded.keys()),
-            routes,
-        };
-        let token = token_of(ids, &recorded, &governance);
         let governs: Vec<Governs> = governed
             .into_iter()
             .map(|(d, (blocks, mut through))| {
@@ -1753,6 +1918,15 @@ impl ReadState {
                     .expect("finding rows serialize: strings and numbers only"),
             );
         }
+        // nb7: so are the neighbor rows and their counts, when there are any: a neighbor that
+        // comes, goes, moves doc, changes route or summary stales a cursor (the token, which
+        // records no neighbor, stays)
+        if !neighbors.is_empty() {
+            digested.extend(
+                serde_json::to_vec(&(&neighbors, &neighbors_by_doc))
+                    .expect("neighbor rows serialize: strings and numbers only"),
+            );
+        }
         let digest = Hash::of(&digested);
         Ok(Briefing {
             covers: ids.len(),
@@ -1769,8 +1943,8 @@ impl ReadState {
             mentioned_by_omitted,
             related_decisions,
             related_decisions_omitted,
-            neighbors: vec![],
-            neighbors_by_doc: vec![],
+            neighbors,
+            neighbors_by_doc,
             findings,
             findings_omitted,
             finding_counts,
@@ -1784,17 +1958,36 @@ impl ReadState {
             offsets: [0; PAGE_SECTIONS.len()],
             digest,
             scope: cursor_scope(scope),
-            record: Arc::new(BriefRecord {
-                token,
-                covers: ids.clone(),
-                recorded,
-                governance,
-            }),
+            record,
             rows,
             row_sizes: vec![],
             sides_read: false,
         })
     }
+}
+
+/// nb7: how many of `rows` are in each doc, in doc path, then doc id, order.
+fn neighbor_counts(m: &Materialized, rows: &[crate::neighbors::Neighbor]) -> Vec<NeighborDocCount> {
+    let mut by_doc: BTreeMap<&str, usize> = BTreeMap::new();
+    for r in rows {
+        *by_doc.entry(r.doc.as_str()).or_default() += 1;
+    }
+    let mut out: Vec<(String, NeighborDocCount)> = by_doc
+        .into_iter()
+        .map(|(doc, count)| {
+            let path = BlockId::parse(doc)
+                .ok()
+                .and_then(|d| m.path_of(&d))
+                .unwrap_or_default();
+            let row = NeighborDocCount {
+                doc: doc.to_string(),
+                count,
+            };
+            (path, row)
+        })
+        .collect();
+    out.sort_by(|a, b| (&a.0, &a.1.doc).cmp(&(&b.0, &b.1.doc)));
+    out.into_iter().map(|(_, row)| row).collect()
 }
 
 /// rf9: the source and finding parts of a briefing of `ids` in `m` (graph `g`), one level deep.
@@ -2406,4 +2599,83 @@ pub fn expand_error(
     );
     e.briefing = Some(json);
     e
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rdy_model::{Op, StateSnapshot};
+    use rdy_schema::PackSet;
+
+    fn blk(id: &str, ty: &str, parent: Option<&str>, body: &str) -> Block {
+        Block {
+            id: BlockId::parse(id).unwrap(),
+            block_type: ty.to_string(),
+            parent: parent.map(|p| BlockId::parse(p).unwrap()),
+            order: "a1".to_string(),
+            fields: BTreeMap::new(),
+            body: body.to_string(),
+            links: Default::default(),
+            pins: Default::default(),
+            read_identity: None,
+        }
+    }
+
+    #[test]
+    fn nb9_a_create_that_a_later_op_deletes_is_not_covered() {
+        let pack = PackSet::with_builtin().resolve("rdy-standard").unwrap();
+        let blocks = vec![
+            blk("d-00001", "doc", None, ""),
+            blk("s-00001", "section", Some("d-00001"), ""),
+            blk("c-00009", "claim", Some("s-00001"), "Old."),
+        ];
+        let g = Graph::build_from(blocks.iter());
+        let snap = StateSnapshot {
+            blocks: blocks
+                .iter()
+                .map(|b| (b.id.clone(), b.version_hash()))
+                .collect(),
+        };
+        let m = Materialized::build(
+            snap,
+            blocks.into_iter().map(|b| (b.id.clone(), b)).collect(),
+        );
+        let (a, b) = (
+            blk(
+                "c-00001",
+                "claim",
+                Some("s-00001"),
+                "Kept, uses {{c-00009}}.",
+            ),
+            blk("c-00002", "claim", Some("s-00001"), "Gone again."),
+        );
+        let ops = vec![
+            Op::Create { block: a.clone() },
+            Op::Create { block: b.clone() },
+            Op::Delete {
+                id: b.id.clone(),
+                base: b.version_hash(),
+            },
+        ];
+        let g = Arc::new(g);
+        let (rec, n) = created_record(&pack, &m, || Ok(Arc::clone(&g)), &ops)
+            .unwrap()
+            .expect("one create survives");
+        assert_eq!(n, 1);
+        assert_eq!(rec.covers, BTreeSet::from([a.id.clone()]));
+        // the dependency is recorded at its version, never covered
+        let dep = BlockId::parse("c-00009").unwrap();
+        assert_eq!(rec.recorded.get(&dep), Some(&m.version_of(&dep)));
+        assert!(!rec.covers(&dep));
+        // only deletes and updates: no receipt
+        let none = vec![Op::Delete {
+            id: dep.clone(),
+            base: m.version_of(&dep).unwrap(),
+        }];
+        assert!(
+            created_record(&pack, &m, || Ok(Arc::clone(&g)), &none)
+                .unwrap()
+                .is_none()
+        );
+    }
 }

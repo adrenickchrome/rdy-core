@@ -284,6 +284,7 @@ fn rf9_the_page_sections_name_sources_once() {
             "inflight.proposals",
             "inflight.intents",
             "inflight.tensions",
+            "neighbors",
             "base.blocks",
         ]
     );

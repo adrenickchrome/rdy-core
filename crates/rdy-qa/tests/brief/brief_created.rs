@@ -158,7 +158,9 @@ fn nb9_receipt_covers_creates_not_dependencies_or_updates() {
     .unwrap();
     let dep = dw.created["$dep"].clone();
     let ts = brief_of(&r, &view("w"), &[&s.section, &s.c]).base.token;
-    // a mixed batch: a named create, an unnamed one, a create deleted again, an update
+    // a mixed batch: a named create, an unnamed one and an update (a write that creates and
+    // deletes one block is refused as two changes of it; the engine's unit test covers the
+    // final create set)
     let w = write_cited(
         &mut r,
         "w",
@@ -166,15 +168,13 @@ fn nb9_receipt_covers_creates_not_dependencies_or_updates() {
             {"op": "create", "type": "claim", "id": "$a", "parent": s.section.to_string(),
              "body": format!("A new claim leans on {{{{{dep}}}}}.")},
             {"op": "create", "type": "claim", "parent": s.section.to_string(), "body": "Unnamed."},
-            {"op": "create", "type": "claim", "id": "$x", "parent": s.section.to_string(), "body": "Gone again."},
-            {"op": "delete", "id": "$x"},
             {"op": "update", "id": s.c.to_string(), "body": "C stands alone, edited."}
         ]),
         Some(&ts),
     )
     .unwrap();
     let receipt = w.briefing.clone().unwrap();
-    assert_eq!(receipt.covers, 2, "the surviving creates only");
+    assert_eq!(receipt.covers, 2, "the creates only");
     let rec = held(&r, &receipt);
     let a = BlockId::parse(&w.created["$a"]).unwrap();
     let unnamed = BlockId::parse(&w.created["op1"]).unwrap();
