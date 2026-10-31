@@ -402,7 +402,7 @@ fn ck6_run_request_list_are_durable_and_strict() {
     assert_eq!(all["omitted"], 0);
     let rows = all["requests"].as_array().unwrap();
     assert_eq!(rows.len(), 3);
-    let mut order: Vec<String> = rows
+    let order: Vec<String> = rows
         .iter()
         .map(|r| r["request"].as_str().unwrap().to_string())
         .collect();
@@ -454,7 +454,6 @@ fn ck6_run_request_list_are_durable_and_strict() {
     assert_eq!(row["reason"], "Check the basis.");
 
     // a restart keeps every request
-    order.sort();
     let dir: PathBuf = w.dir.path().to_path_buf();
     let World { dir: keep, e, .. } = w;
     e.close().unwrap();
@@ -484,7 +483,7 @@ fn refiners(w: &World, n: usize) -> Vec<BlockId> {
 fn ck6_contradiction_fans_out_and_keeps_pair_semantics() {
     let w = world();
     let a = ag("a");
-    let rs = refiners(&w, 21);
+    let refined = refiners(&w, 21);
     let d = w.s.decision.to_string();
     // a decision's pairs: one request each, at most 20, in one batch; the rest are counted
     let fan = run_on(&w, &a, "contradiction", json!(d));
@@ -503,6 +502,7 @@ fn ck6_contradiction_fans_out_and_keeps_pair_semantics() {
         assert_eq!(r.requested_by.at_ms, at, "one batch, one ask");
         assert_eq!(r.subject.blocks.len(), 2);
         assert!(r.subject.blocks.contains(&w.s.decision));
+        assert!(r.subject.blocks.iter().any(|b| refined.contains(b)));
         assert_eq!(r.case_hash.to_string(), q["case_hash"]);
         // each case keeps its inner pair label; the outer request is the durable one
         assert_eq!(q["case"]["kind"], "tension");
@@ -566,7 +566,6 @@ fn ck6_contradiction_fans_out_and_keeps_pair_semantics() {
         assert_eq!(r["status"], "answered");
         assert_eq!(r["verdicts"][0]["verdict"], "tension");
     }
-    let _ = rs;
 }
 
 /// agent:a decides `statement` in its view through the engine; the decision's id.
@@ -597,7 +596,7 @@ fn ck6_queue_keeps_tension_and_dispatches_any() {
     let q2 = try_decide_in_engine(&w, "Second call");
     let i1 = request_on(&w, &a, "decision_review", json!(w.p.to_string()));
     let i2 = request_on(&w, &a, "decision_review", json!(q2.to_string()));
-    let mut durable = vec![
+    let mut durable = [
         i1["request"].as_str().unwrap().to_string(),
         i2["request"].as_str().unwrap().to_string(),
     ];
@@ -1224,7 +1223,6 @@ fn ck6_list_subject_matching_precedes_the_cap() {
         (want.code, want.message, want.fix)
     );
     // a matching request beyond the first 256 records still appears
-    let target = record(&w.e, &on_p["request"]);
     let target_hash = hash_of(&on_p["request"]);
     let filler = record(&w.e, &pair["request"]);
     let mut below = only(json!({}))
@@ -1241,7 +1239,6 @@ fn ck6_list_subject_matching_precedes_the_cap() {
     assert!(!first.contains(&on_p["request"]), "past the first 256 rows");
     let mine = only(json!({"subject": p}));
     assert!(mine.contains(&on_p["request"]), "matched before the cap");
-    let _ = target;
 }
 
 // ---------------------------------------------------------------- code evidence
