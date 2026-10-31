@@ -266,6 +266,23 @@
               "views": []
             },
             "lineage": [],
+            "neighbors": [
+              {
+                "block": "string",
+                "doc": "string",
+                "of": [
+                  "string"
+                ],
+                "summary": "string",
+                "via": "string"
+              }
+            ],
+            "neighbors_by_doc": [
+              {
+                "count": "number",
+                "doc": "string"
+              }
+            ],
             "recorded": "bool",
             "suspects": [],
             "will_go_stale": [
@@ -618,6 +635,10 @@
             0
           ],
           "stdout": {
+            "briefing": {
+              "covers": "number",
+              "token": "string"
+            },
             "change": "string",
             "consequences": [],
             "coverage": {
@@ -653,6 +674,10 @@
             0
           ],
           "stdout": {
+            "briefing": {
+              "covers": "number",
+              "token": "string"
+            },
             "change": "string",
             "consequences": [],
             "coverage": {
@@ -15627,6 +15652,23 @@
             "views": []
           },
           "lineage": [],
+          "neighbors": [
+            {
+              "block": "string",
+              "doc": "string",
+              "of": [
+                "string"
+              ],
+              "summary": "string",
+              "via": "string"
+            }
+          ],
+          "neighbors_by_doc": [
+            {
+              "count": "number",
+              "doc": "string"
+            }
+          ],
           "suspects": [],
           "will_go_stale": [
             {
@@ -15803,6 +15845,10 @@
       },
       "rdy_decide": {
         "ok": {
+          "briefing": {
+            "covers": "number",
+            "token": "string"
+          },
           "change": "string",
           "consequences": [],
           "coverage": {
@@ -16841,6 +16887,10 @@
       },
       "rdy_revoke": {
         "ok": {
+          "briefing": {
+            "covers": "number",
+            "token": "string"
+          },
           "change": "string",
           "consequences": [],
           "coverage": {
@@ -17548,6 +17598,10 @@
       },
       "rdy_supersede": {
         "ok": {
+          "briefing": {
+            "covers": "number",
+            "token": "string"
+          },
           "change": "string",
           "consequences": [],
           "coverage": {
@@ -17938,6 +17992,10 @@
       },
       "rdy_write": {
         "ok": {
+          "briefing?": {
+            "covers": "number",
+            "token": "string"
+          },
           "change": "string",
           "consequences": [
             {

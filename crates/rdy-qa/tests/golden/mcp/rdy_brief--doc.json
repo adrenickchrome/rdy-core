@@ -163,6 +163,44 @@
     "views": []
   },
   "lineage": [],
+  "neighbors": [
+    {
+      "block": "c-CFPE0",
+      "doc": "d-TNT6J",
+      "of": [
+        "c-WKHEZ",
+        "c-ZCQ17"
+      ],
+      "summary": "A holds.",
+      "via": "section"
+    },
+    {
+      "block": "c-WKHEZ",
+      "doc": "d-TNT6J",
+      "of": [
+        "c-CFPE0",
+        "c-ZCQ17"
+      ],
+      "summary": "B builds on c-CFPE0.",
+      "via": "section"
+    },
+    {
+      "block": "c-ZCQ17",
+      "doc": "d-TNT6J",
+      "of": [
+        "c-CFPE0",
+        "c-WKHEZ"
+      ],
+      "summary": "C stands alone.",
+      "via": "section"
+    }
+  ],
+  "neighbors_by_doc": [
+    {
+      "count": 3,
+      "doc": "d-TNT6J"
+    }
+  ],
   "suspects": [],
   "will_go_stale": []
 }
