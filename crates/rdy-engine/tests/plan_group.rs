@@ -53,12 +53,15 @@ fn land(r: &mut Rdy, view: &str) -> ProposalInfo {
 /// Canon: doc `spec` with section `Rules` and claims a ("A holds 30 days."), c, b and p, which
 /// cite a (b also c), and decision d1 with claim q decided by it; doc `other` with claim e,
 /// which cites a. The view `view` then edits a and supersedes d1, so it owes a confirm item
-/// each for b and e, an update item for p and a rejustify item for q.
+/// each for b and e, an update item for p and a rejustify item for q. a's text edit also owes
+/// its unchanged section siblings a `neighbor` confirm (nb8, D-YXBXH): c, p and q; b's
+/// neighbor confirm is its declared item, which the declared edge wins.
 struct World {
     doc: String,
     other: String,
     a: String,
     b: String,
+    c: String,
     e: String,
     p: String,
     q: String,
@@ -129,6 +132,7 @@ fn world(r: &mut Rdy, view: &str) -> World {
         other: get("$d2"),
         a,
         b: get("$b"),
+        c: get("$c"),
         e: w2.created["$e"].clone(),
         p: get("$p"),
         q: w2.created["$q"].clone(),
@@ -250,6 +254,11 @@ fn pi(cause: &str, subject: &str, kind: PlanKind) -> String {
     item_display(&item_hash(&id(cause), subject, kind))
 }
 
+/// The `neighbor` confirm items of [`world`]'s view (nb8): a's edit, for c, p and q.
+fn world_neighbors(w: &World) -> [&String; 3] {
+    [&w.c, &w.p, &w.q]
+}
+
 fn group(kind: Option<PlanKind>, follow_up: Option<&str>) -> PlanGroup {
     PlanGroup {
         kind,
@@ -360,7 +369,12 @@ fn rg9_one_group_answer_covers_every_matched_item() {
         .iter()
         .map(|a| (a.item, a.act, a.reason.clone()))
         .collect();
-    let mut want: Vec<(Hash, PlanAct, Option<String>)> = [&w.b, &w.e]
+    // the declared confirms of b and e, and the neighbor confirms of c, p and q
+    let confirms: Vec<&String> = [&w.b, &w.e]
+        .into_iter()
+        .chain(world_neighbors(&w))
+        .collect();
+    let mut want: Vec<(Hash, PlanAct, Option<String>)> = confirms
         .iter()
         .map(|s| {
             (
@@ -373,7 +387,7 @@ fn rg9_one_group_answer_covers_every_matched_item() {
     got.sort_by_key(|x| x.0);
     want.sort_by_key(|x| x.0);
     assert_eq!(got, want);
-    for s in [&w.b, &w.e] {
+    for s in confirms {
         let row = state_of(&r, "w", &pi(&w.a, s, PlanKind::Confirm));
         assert_eq!(row["state"], "deferred", "{row}");
         assert_eq!(row["answer"]["reason"], "later");
@@ -463,7 +477,8 @@ fn rg9_group_fields_and_together() {
             ..Default::default()
         },
     ));
-    // the spec doc, alone, holds the update, the confirm and no rejustify item of the other doc
+    // the spec doc, alone, holds the update, the confirm, the neighbor confirms and no
+    // rejustify item of the other doc
     let h = r
         .answer_plan_specs(
             &writer(),
@@ -487,6 +502,11 @@ fn rg9_group_fields_and_together() {
         item_hash(&id(&w.a), &w.p, PlanKind::Update),
         item_hash(&id(&w.d1), &w.q, PlanKind::Rejustify),
     ];
+    want.extend(
+        world_neighbors(&w)
+            .iter()
+            .map(|s| item_hash(&id(&w.a), s, PlanKind::Confirm)),
+    );
     items.sort();
     want.sort();
     assert_eq!(items, want);
@@ -720,10 +740,12 @@ fn rg9_a_repin_group_writes_one_change() {
         })
         .collect();
     blocks.sort();
-    let mut want = vec![w.b.clone(), w.e.clone()];
+    // the group also matched the neighbor confirms: p cites a with a stale pin, so it is
+    // repinned too; c and q cite nothing of a, so they get an answer and no op
+    let mut want = vec![w.b.clone(), w.e.clone(), w.p.clone()];
     want.sort();
     assert_eq!(blocks, want);
-    for s in [&w.b, &w.e] {
+    for s in [&w.b, &w.e, &w.p] {
         assert_eq!(
             pinned(&r, s),
             Some(current(&r)),
@@ -735,14 +757,18 @@ fn rg9_a_repin_group_writes_one_change() {
     assert_eq!((plan.prev, plan.stable), (None, None));
     assert_eq!(plan_ref(&r, "w"), Some(h));
     let mut got: Vec<(Hash, PlanAct)> = plan.answers.iter().map(|a| (a.item, a.act)).collect();
-    let mut want: Vec<(Hash, PlanAct)> = [&w.b, &w.e]
+    let confirms: Vec<&String> = [&w.b, &w.e]
+        .into_iter()
+        .chain(world_neighbors(&w))
+        .collect();
+    let mut want: Vec<(Hash, PlanAct)> = confirms
         .iter()
         .map(|s| (item_hash(&id(&w.a), s, PlanKind::Confirm), PlanAct::Confirm))
         .collect();
     got.sort_by_key(|x| x.0);
     want.sort_by_key(|x| x.0);
     assert_eq!(got, want);
-    for s in [&w.b, &w.e] {
+    for s in confirms {
         let row = state_of(&r, "w", &pi(&w.a, s, PlanKind::Confirm));
         assert_eq!(row["state"], "closed", "{row}");
     }
@@ -812,6 +838,11 @@ fn rg9_follow_up_confirm_matches_rejustify_items_too() {
         item_hash(&id(&w.a), &w.e, PlanKind::Confirm),
         item_hash(&id(&w.d1), &w.q, PlanKind::Rejustify),
     ];
+    want.extend(
+        world_neighbors(&w)
+            .iter()
+            .map(|s| item_hash(&id(&w.a), s, PlanKind::Confirm)),
+    );
     got.sort();
     want.sort();
     assert_eq!(got, want);
@@ -828,7 +859,8 @@ fn rg9_follow_up_confirm_matches_rejustify_items_too() {
             )],
         )
         .unwrap();
-    assert_eq!(plan_of(&r, &h).answers.len(), 4);
+    // the version holds the six follow-up confirm answers and the update item's answer
+    assert_eq!(plan_of(&r, &h).answers.len(), 7);
     expect_err(
         r.answer_plan_specs(
             &writer(),

@@ -8,7 +8,8 @@ mod common;
 
 use rdy_engine::tensions::{TensionKind, TensionStatus, tension_label};
 use rdy_engine::{
-    LandInfo, ProposalInfo, Rdy, RdyError, Scope, Session, WriteRequest, WriteResult, parse_ops,
+    E_PROPOSAL_MOVED, LandInfo, ProposalInfo, Rdy, RdyError, Scope, Session, WriteRequest,
+    WriteResult, parse_ops,
 };
 use rdy_model::{Block, BlockId, Change, FieldValue, Hash, Op, Role};
 use serde_json::{Value, json};
@@ -765,6 +766,44 @@ fn ok6_a_landing_rekey_respects_a_later_insert_past_a_deleted_sibling() {
         let pa = insert_after(&mut r, "a", &sec, &base, "from a");
         put(&mut r, "a", json!([{"op": "delete", "id": e}]));
         land(&mut r, "a");
+        // nb8 (TASK-978 X2): P owes its baseline sibling e a section confirm, so e is in the
+        // reach of b's assessment; a's landing deleted e, so the approval refuses as moved and
+        // stores a fresh assessment with its card
+        let moved = approve(&mut r, &pb).unwrap_err();
+        assert_eq!(moved.code, E_PROPOSAL_MOVED, "{run}: {moved}");
+        assert!(
+            moved
+                .message
+                .starts_with(&format!("proposal {} moved: landing ", pb.r#ref))
+                && moved
+                    .message
+                    .ends_with(&format!(" changed {e} after its assessment")),
+            "{run}: {moved}"
+        );
+        assert_eq!(
+            moved.fix,
+            format!(
+                "review the fresh card in corrected and approve {} again",
+                pb.r#ref
+            ),
+            "{run}"
+        );
+        // review the fresh card: b's version on the moved base, its plan still the two section
+        // confirms P owes (base and e), approve recommended; the next approval binds it
+        let card = &moved.corrected.as_ref().expect("a fresh card")["card"];
+        assert_eq!(card["ref"], pb.r#ref, "{run}: {card:#}");
+        let text = card["card"].as_str().unwrap();
+        assert!(
+            text.starts_with(&format!("{}  b ", pb.r#ref)),
+            "{run}: {text}"
+        );
+        for line in [
+            "  Change plan     2 open, 0 closed, 0 deferred\n",
+            ", moved\n",
+            "recommended\n",
+        ] {
+            assert!(text.contains(line), "{run}: {line:?} in {text}");
+        }
         approve(&mut r, &pb).unwrap_or_else(|e| panic!("{run}: land b: {e}"));
         let vk = kids(&r, &view("b"), &sec);
         assert_eq!(tied_pairs(&vk), 0, "{run}: no tie in b's view: {vk:?}");

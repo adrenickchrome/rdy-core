@@ -354,24 +354,27 @@ fn cp8_all_four_selectors_have_closed_shapes() {
         keys(&v),
         ["code", "counts", "items", "notes", "plan", "scope"]
     );
-    let confirm = pi(&s.a, &s.b, PlanKind::Confirm);
-    let update = pi(&s.a, &s.p, PlanKind::Update);
-    let mut want = vec![
-        json!({"id": confirm, "kind": "confirm", "subject": s.b, "cause": s.a, "edge": "references", "state": "open"}),
-        json!({"id": update, "kind": "update", "subject": s.p, "cause": s.a, "edge": "references", "state": "open"}),
+    // the declared items, and (nb8, D-YXBXH) a section confirm for each unchanged sibling: c
+    // has no declared edge, p's neighbor confirm is a different kind from its declared update,
+    // and b's neighbor confirm shares its declared item's id, so the declared edge wins
+    let mut rows = vec![
+        (&s.b, PlanKind::Confirm, "references"),
+        (&s.p, PlanKind::Update, "references"),
+        (&s.c, PlanKind::Confirm, "neighbor"),
+        (&s.p, PlanKind::Confirm, "neighbor"),
     ];
-    want.sort_by_key(|i| {
-        let (c, sub, k) = if i["kind"] == "confirm" {
-            (&s.a, &s.b, PlanKind::Confirm)
-        } else {
-            (&s.a, &s.p, PlanKind::Update)
-        };
-        item_hash(&id(c), sub, k)
-    });
+    rows.sort_by_key(|(sub, k, _)| item_hash(&id(&s.a), sub, *k));
+    let want: Vec<Value> = rows
+        .iter()
+        .map(|(sub, k, edge)| {
+            json!({"id": pi(&s.a, sub, *k), "kind": k.as_str(), "subject": sub, "cause": s.a,
+                   "edge": edge, "state": "open"})
+        })
+        .collect();
     assert_eq!(
         v,
         json!({"scope": "view:w", "plan": null, "items": want,
-               "counts": counts(2, 0, 0, &[("confirm", [1, 0, 0]), ("update", [1, 0, 0])]),
+               "counts": counts(4, 0, 0, &[("confirm", [3, 0, 0]), ("update", [1, 0, 0])]),
                "code": {"files": 0, "unavailable": true}, "notes": []})
     );
 
@@ -865,9 +868,25 @@ fn cp8_computed_close_wins_over_defer() {
         (&u["state"], &u["how"], u.get("answer")),
         (&json!("closed"), &json!("updated"), None)
     );
+    // nb8: the section confirms the version still owes stay open: c for both edited causes,
+    // and b for p (a repin keeps b's content); a's confirm on p left when p's text changed
+    let neighbors = [
+        pi(&s.a, &s.c, PlanKind::Confirm),
+        pi(&s.p, &s.c, PlanKind::Confirm),
+        pi(&s.p, &s.b, PlanKind::Confirm),
+    ];
+    for item in &neighbors {
+        let n = row(&v, item);
+        assert_eq!(
+            (&n["edge"], &n["state"]),
+            (&json!("neighbor"), &json!("open")),
+            "{item}"
+        );
+    }
+    assert_eq!(v["items"].as_array().unwrap().len(), 5, "{v:#}");
     assert_eq!(
         v["counts"],
-        counts(0, 2, 0, &[("confirm", [0, 1, 0]), ("update", [0, 1, 0])])
+        counts(3, 2, 0, &[("confirm", [3, 1, 0]), ("update", [0, 1, 0])])
     );
 }
 
@@ -1512,16 +1531,30 @@ fn cp8_cursor_reuses_briefing_tail_and_digest_width() {
                 .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
     );
     assert_eq!(sel, format!("proposal:{}", info.r#ref));
-    let rest = plan(
-        &r,
-        &PlanQuery {
-            page: Some(next.clone()),
-            max_tokens: Some(0),
-            ..Default::default()
-        },
-    );
-    assert_eq!(rest["items"].as_array().unwrap().len(), 1);
-    assert!(rest.get("next").is_none());
+    // the version owes b's confirm, p's update and (nb8) the section confirms of c and p: one
+    // item a page, each later cursor naming the same selector, and the last page has no next
+    let mut seen = p["items"].as_array().unwrap().len();
+    let mut cursor = next.clone();
+    loop {
+        let rest = plan(
+            &r,
+            &PlanQuery {
+                page: Some(cursor.clone()),
+                max_tokens: Some(0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(rest["items"].as_array().unwrap().len(), 1);
+        seen += 1;
+        match rest.get("next") {
+            Some(n) => {
+                cursor = n.as_str().unwrap().to_string();
+                assert!(cursor.ends_with(&format!(":{sel}")), "{cursor}");
+            }
+            None => break,
+        }
+    }
+    assert_eq!((p["items"].as_array().unwrap().len(), seen), (1, 4));
     let bad = |cursor: String| {
         expect_err(
             plan_of(
@@ -1886,12 +1919,12 @@ fn cp8_answer_only_successors_keep_the_last_bound_proposal() {
         "f.rs",
         &format!("start\n\nImplements: {}", s.a),
     );
-    // a version with no item: b's edit is the cause of nothing
-    edit(
+    // a version with no item: b's move is the cause of nothing (nb8: a text edit of b would
+    // now owe its section siblings a confirm, and a version with items seals at landing)
+    put(
         &mut r,
         "w",
-        &s.b,
-        &format!("B builds firmly on {{{{{}}}}} and {{{{{}}}}}.", s.a, s.c),
+        json!([{"op": "move", "id": s.b, "parent": s.sec, "after": s.p}]),
     );
     let changes = r.store_mut().included("w").unwrap().as_ref().clone();
     let version = r
