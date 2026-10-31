@@ -692,66 +692,84 @@ pub fn answers_reply(group: &[String], explicit: &[ExplicitAnswer]) -> Value {
 }
 
 /// Answers each open item of `view`'s change plan that gates or warns (D-ME2HD, D-45RG6), in one
-/// `rdy_plan` call, by its kind (`plan_answer_for`). It reads the plan whole first: one `plan`
-/// entry per page, naming the view. The answers are one `plan_answer` entry naming the view,
-/// whose reply lists each answer with its item's kind (`{answers: [{item, kind, act, reason}]}`).
-/// It holds the plan turn throughout (`KillGate::plan_turn`), so the items it read are the items
-/// it answers. With nothing to answer it makes no second call. A view whose changes conflict
-/// with canon has no plan (the read's `E_CONFLICT_UNRESOLVED`, a row of the table), and a call
-/// the kill cuts ends it too: the version proposed next is not ready, and the drain answers its
-/// plan once it resolves it.
+/// `rdy_plan` call. It reads the plan whole first: one `plan` entry per page, naming the view,
+/// whose reply holds the counts and a row for each item. Then it partitions the open items
+/// (`split_plan_answers`): the neighbor items with a confirm follow-up are answered by one group,
+/// `{edge: neighbor, follow_up: confirm}` (D-YXBXH), and every other item by its id with the act
+/// of its kind (`plan_answer_for`). The answers are one `plan_answer` entry naming the view,
+/// whose reply lists each answer with its item's kind (`{answers: [{item, kind, act, reason}],
+/// group?: {edge, follow_up, items, returned}}`). It holds the plan turn throughout
+/// (`KillGate::plan_turn`), so the items it read are the items it answers, and it compares the
+/// answers the group returned with the items it displayed before it lets go. With nothing to
+/// answer it makes no second call, and with no neighbor item it sends no group. A view whose
+/// changes conflict with canon has no plan (the read's `E_CONFLICT_UNRESOLVED`, a row of the
+/// table), and a call the kill cuts ends it too: the version proposed next is not ready, and the
+/// drain answers its plan once it resolves it.
 pub(crate) fn answer_plan(link: &mut Link, view: &str) {
     // from the read to the answers, no other act changes a tension (`KillGate::plan_turn`)
     let gate = link.gate.clone();
     let _turn = gate.plan_turn();
-    let mut open: Vec<(String, String)> = vec![];
+    let mut read = PlanRead::default();
     let mut args = json!({"view": view, "max_tokens": PLAN_ALL});
     loop {
         let mut e = link.entry("plan");
         e.view = Some(view.to_string());
         let mut page = None;
         link.exec(e, "plan", "rdy_plan", args, |en, v| {
-            en.reply = Some(json!({"counts": v["counts"]}));
+            // the entry names each row it showed, so a check sees what was displayed
+            let rows = read.take(v);
+            en.reply = Some(json!({"counts": v["counts"], "items": rows}));
             page = Some(v.clone());
         });
         let Some(page) = page else { return };
-        for i in page["items"].as_array().into_iter().flatten() {
-            if i["state"] == "open"
-                && let (Some(id), Some(kind)) = (i["id"].as_str(), i["kind"].as_str())
-            {
-                open.push((id.to_string(), kind.to_string()));
-            }
-        }
         match page["next"].as_str() {
             Some(next) => args = json!({"page": next, "max_tokens": PLAN_ALL}),
             None => break,
         }
     }
-    let sent: Vec<Value> = open
-        .iter()
-        .filter_map(|(item, kind)| {
-            let (act, reason) = plan_answer_for(kind)?;
-            Some(json!({"item": item, "kind": kind, "act": act, "reason": reason}))
-        })
-        .collect();
-    if sent.is_empty() {
+    let split = split_plan_answers(&read.open);
+    if split.group.is_empty() && split.explicit.is_empty() {
         return;
     }
-    let answers: Vec<Value> = sent
-        .iter()
-        .map(|a| json!({"item": a["item"], "act": a["act"], "reason": a["reason"]}))
-        .collect();
+    let mut specs: Vec<Value> = vec![];
+    if !split.group.is_empty() {
+        specs.push(group_spec());
+    }
+    specs.extend(
+        split
+            .explicit
+            .iter()
+            .map(|a| json!({"item": a.item, "act": a.act, "reason": a.reason})),
+    );
     let mut e = link.entry("plan_answer");
     e.view = Some(view.to_string());
     // the entry names what it sent, refused or not
-    e.reply = Some(json!({ "answers": sent }));
+    e.reply = Some(answers_reply(&split.group, &split.explicit));
+    let group = split.group.clone();
+    let before = read.checked.clone();
+    let mut mismatch = None;
     link.exec(
         e,
         "plan_answer",
         "rdy_plan",
-        json!({"view": view, "answers": answers, "max_tokens": PLAN_ALL}),
-        |_, _| {},
+        json!({"view": view, "answers": specs, "max_tokens": PLAN_ALL}),
+        |en, v| {
+            if group.is_empty() {
+                return;
+            }
+            match group_returned(v, &group, &before) {
+                Ok(returned) => {
+                    if let Some(reply) = en.reply.as_mut() {
+                        reply["group"]["returned"] = json!(returned);
+                    }
+                }
+                Err(text) => mismatch = Some(text),
+            }
+        },
     );
+    if let Some(text) = mismatch {
+        link.fail("plan_answer", &text);
+    }
 }
 
 /// The tension labels of a proposal's advised entries (`rdy_read P-x@n`'s `proposal.advised`):
