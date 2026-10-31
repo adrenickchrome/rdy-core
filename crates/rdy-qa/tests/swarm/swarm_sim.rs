@@ -2869,11 +2869,6 @@ fn rg15_the_person_answers_the_work_plan_before_it_proposes() {
             "body": body}], "brief": token, "implements": [decision]}),
     )
     .ok();
-    c.call(
-        "rdy_plan",
-        json!({"view": "a0", "answers": [{"group": {"edge": "neighbor", "follow_up": "confirm"}, "act": "confirm", "reason": "r"}]}),
-    )
-    .ok();
     let v = c
         .call(
             "rdy_propose",
