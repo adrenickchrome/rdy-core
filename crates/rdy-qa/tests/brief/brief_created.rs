@@ -242,7 +242,7 @@ fn nb9_receipt_covers_creates_not_dependencies_or_updates() {
     let out = d.path().join("export");
     r.read().export(&view("w"), &out).unwrap();
     let (_d2, mut r2) = project();
-    let imported = r2.import(&writer(), "work", &out).unwrap();
+    let imported = r2.import(&approver(), "work", &out).unwrap();
     let receipt = imported.briefing.clone().unwrap();
     let blocks: BTreeSet<BlockId> = r2
         .read()
