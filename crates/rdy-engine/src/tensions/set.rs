@@ -1462,14 +1462,17 @@ impl ReadState {
 
     /// Review fix L6/I7 (D-JQD5X, review I1): the open tensions of the canon that landing
     /// `changes` (one version's changes, proposed from view `view`) would give, what a pack
-    /// rule's `tension` reads at propose. Every all-canon tension a landing leaves standing, and
+    /// rule's `tension` reads at propose. Every all-canon tension that canon would hold, and
     /// every tension of the landing form, as the canon part's landing carry
-    /// ([`canon_of_landing`]) re-judges them, in the landing's run:
+    /// ([`canon_of_landing`]) judges them, in the landing's run:
     /// - a kind whose canon form runs around seeds ([`Detector::canon_seeded`]) drops its canon
     ///   tensions on a seed, on its reach and on every block of a tension it drops, and
     ///   re-detects around all of them over the landing's canon, keeping a group of canon
     ///   blocks only: a group that loses a member keeps the rest;
-    /// - every other kind keeps its canon tensions that involve no seed, and adds its landing
+    /// - every other kind runs its canon form in full over the canon the landing would give
+    ///   ([`DetectCx::landed`]), as the carry runs it over the canon after the landing (stored
+    ///   kinds: as [`stored_canon`] joins them). So a canon condition on a block the version
+    ///   edits stays when the edit keeps it and goes when the edit ends it. It adds its landing
     ///   form ([`ReadState::landing_tensions`]).
     ///
     /// Dismissed tensions are left out; by id. The version's own tension list (its readiness
@@ -1499,15 +1502,15 @@ impl ReadState {
             &Scope::Canon,
             true,
             |cx, seeds| {
+                let landed = cx.landed(&empty);
                 let mut out: BTreeMap<Hash, Arc<Tension>> = BTreeMap::new();
                 for d in self.detectors {
-                    let of_kind = canon.iter().filter(|t| t.kind == d.kind());
                     if d.canon_seeded() {
                         let mut around = seeds.clone();
                         around.extend(d.reach(cx, seeds)?);
                         around.extend(d.reach(&canon_cx, seeds)?);
                         let mut dropped: BTreeSet<BlockId> = BTreeSet::new();
-                        for t in of_kind {
+                        for t in canon.iter().filter(|t| t.kind == d.kind()) {
                             let blocks = t.blocks();
                             if blocks.iter().any(|b| around.contains(b)) {
                                 dropped.extend(blocks);
@@ -1520,8 +1523,8 @@ impl ReadState {
                             out.entry(t.id).or_insert(t);
                         }
                     } else {
-                        for t in of_kind.filter(|t| !t.blocks().iter().any(|b| seeds.contains(b))) {
-                            out.entry(t.id).or_insert_with(|| Arc::clone(t));
+                        for t in detect_kept(self, &landed, *d, None)? {
+                            out.entry(t.id).or_insert(t);
                         }
                         for t in detect_kept(self, cx, *d, Some(seeds))? {
                             out.entry(t.id).or_insert(t);

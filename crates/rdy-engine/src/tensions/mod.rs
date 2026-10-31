@@ -17,7 +17,9 @@
 //! `DetectCx::inflight_graph` return canon's, and a detector must not read the published
 //! state's in-flight set, views or coordination refs through `cx.st`. The canon part is a full
 //! run (no seeds), except for a kind whose `Detector::canon_seeded` says its canon form runs
-//! around a landing's blocks (plan M2e2: duplicate definition). An index a new kind adds to `DetectCx` is lazy (a `OnceLock`), so the
+//! around a landing's blocks (plan M2e2: duplicate definition). A canon-scope run over the canon
+//! a landing would give (`DetectCx::landed`, a candidate's standing conditions) reads that canon
+//! as canon and is never memoised. An index a new kind adds to `DetectCx` is lazy (a `OnceLock`), so the
 //! kinds that do not read it pay nothing. A kind whose tensions come from stored records (the
 //! semantic kind) says so with `Detector::stored` and may give its own severity with
 //! `Detector::own_severity`. A kind that a repin or a change of the usual kind does not resolve

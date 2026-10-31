@@ -819,6 +819,198 @@ fn ck5_rules_see_the_surviving_pair_of_a_rewritten_group() {
     assert_eq!(canon_in_tension(&r), BTreeSet::from([a, b]));
 }
 
+/// The claims M3f's canon query `type = claim and tension = true` gives in `r`'s canon.
+fn claims_in_canon_tension(r: &Rdy) -> BTreeSet<String> {
+    r.read()
+        .query(&Scope::Canon, "type = claim and tension = true")
+        .unwrap()
+        .matches
+        .into_iter()
+        .map(|m| m.id)
+        .collect()
+}
+
+/// The blocks of the tension input the pack rules of version `p` read at propose.
+fn tension_input(r: &Rdy, p: &ProposalInfo) -> BTreeSet<BlockId> {
+    let st = r.read();
+    let c = rdy_engine::readiness::Candidate::stored(
+        &st,
+        r.resolve_proposal(&p.r#ref).unwrap(),
+        st.reader().proposal(&p.id.parse().unwrap()).unwrap(),
+    )
+    .unwrap();
+    rdy_engine::readiness::rule_inputs_for_tests(&st, &c)
+        .unwrap()
+        .tensions
+}
+
+/// The blocks of `p`'s `E_RULE_CHECK` issues, each with its exact message.
+fn failing_blocks(p: &ProposalInfo, rule: &str) -> BTreeSet<String> {
+    rule_issues(p)
+        .iter()
+        .map(|i| {
+            let blk = i.block.as_ref().unwrap().to_string();
+            assert_eq!(
+                i.message,
+                format!("rule {rule} fails on {blk}: {rule} message")
+            );
+            blk
+        })
+        .collect()
+}
+
+/// The canon of the deprecated-reference pins, in a draft doc: claim `x` in section `old`,
+/// which is deprecated, and claim `y` in section `live`, which references `x`. Canon holds the
+/// deprecated-reference tension of `y` and `x`. Gives the doc, `x` and `y`.
+fn deprecated_reference_world(r: &mut Rdy) -> (String, String, String) {
+    let seeded = put_j(
+        r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$live", "parent": "$d", "fields": {"title": "Live"}},
+            {"op": "create", "type": "section", "id": "$old", "parent": "$d", "fields": {"title": "Old", "lifecycle": "deprecated"}},
+            {"op": "create", "type": "claim", "id": "$x", "parent": "$old", "body": "X was the old way."},
+            {"op": "create", "type": "claim", "id": "$y", "parent": "$live", "body": "Y builds on {{$x}}."}
+        ]),
+        j_typo(),
+    );
+    land(r, "seed").unwrap();
+    let [doc, x, y] = ["$d", "$x", "$y"].map(|k| seeded.created[k].clone());
+    assert_eq!(
+        claims_in_canon_tension(r),
+        BTreeSet::from([x.clone(), y.clone()])
+    );
+    (doc, x, y)
+}
+
+/// The op that makes doc `doc` (named `notes`) stable.
+fn notes_stable(doc: &str) -> Value {
+    json!({"op": "update", "id": doc, "fields": {"name": "notes", "title": "Notes", "doc_type": "overview", "lifecycle": "stable"}})
+}
+
+#[test]
+fn ck5_candidate_keeps_a_retained_deprecated_reference() {
+    // review fix round 3 (L6/I7): canon has live claim y that references deprecated x. A
+    // version that edits y's text and keeps the reference leaves that standing condition in
+    // the candidate (the in-flight form judges only the references an edit adds), so a
+    // blocking rule on tension fails on y once the version makes the doc stable.
+    let calm = rule("calm-claims", "type = claim", "tension = false", "blocking");
+    let (_d, mut r) = ck5_project(&calm, "");
+    let (doc, x, y) = deprecated_reference_world(&mut r);
+    let edit = json!({"op": "update", "id": y, "body": format!("Y still builds on {{{{{x}}}}}, with care.")});
+    put_j(
+        &mut r,
+        "v",
+        json!([notes_stable(&doc), edit.clone()]),
+        j_typo(),
+    );
+    let p = propose_as(&mut r, "v");
+    assert!(!p.ready, "{:#?}", p.issues);
+    // y is stable content: item 6; x is deprecated content, so its failure only warns
+    assert_eq!(
+        failing_blocks(&p, "calm-claims"),
+        BTreeSet::from([y.clone()]),
+        "{:#?}",
+        p.issues
+    );
+    let input = tension_input(&r, &p);
+    assert!(
+        input.contains(&id(&y)) && input.contains(&id(&x)),
+        "{input:?}"
+    );
+    // independently of readiness: land the same edit on its own (the doc stays draft, so the
+    // rule only warns) and M3f's canon query still gives both claims
+    put_j(&mut r, "w", json!([edit]), j_typo());
+    land(&mut r, "w").unwrap();
+    assert_eq!(claims_in_canon_tension(&r), BTreeSet::from([x, y]));
+}
+
+#[test]
+fn ck5_candidate_drops_a_removed_deprecated_reference() {
+    // review fix round 3 (L6/I7): the same canon, and a version whose edit of y takes the
+    // reference out. The condition ends with the landing: the candidate holds no tension on y
+    // or x, and the blocking rule passes.
+    let calm = rule("calm-claims", "type = claim", "tension = false", "blocking");
+    let (_d, mut r) = ck5_project(&calm, "");
+    let (doc, x, y) = deprecated_reference_world(&mut r);
+    let edit = json!({"op": "update", "id": y, "body": "Y stands alone now."});
+    put_j(
+        &mut r,
+        "v",
+        json!([notes_stable(&doc), edit.clone()]),
+        j_typo(),
+    );
+    let p = propose_as(&mut r, "v");
+    assert!(rule_issues(&p).is_empty(), "{:#?}", p.issues);
+    assert!(p.ready, "{:#?}", p.issues);
+    let input = tension_input(&r, &p);
+    assert!(
+        !input.contains(&id(&y)) && !input.contains(&id(&x)),
+        "{input:?}"
+    );
+    // independently of readiness: land the same edit on its own; canon holds no tension
+    put_j(&mut r, "w", json!([edit]), j_typo());
+    land(&mut r, "w").unwrap();
+    assert_eq!(claims_in_canon_tension(&r), BTreeSet::new());
+}
+
+#[test]
+fn ck5_candidate_keeps_a_standing_drift_of_an_edited_block() {
+    // review fix round 3 (L6/I7), the same gap in restatement drift: canon holds a drift of x
+    // from y (an edit of x took out text that y restates). A version that edits x again, away
+    // from that text, keeps the drift: only an edit of y resolves it (D-S46DE). The in-flight
+    // form judges only the new edit, from x's current text. The candidate holds the drift, so
+    // the blocking rule fails on x and y once the version makes the doc stable.
+    let calm = rule("calm-claims", "type = claim", "tension = false", "blocking");
+    let (_d, mut r) = ck5_project(&calm, "");
+    let seeded = put_j(
+        &mut r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Ideas"}},
+            {"op": "create", "type": "claim", "id": "$y", "parent": "$s", "body": "The retry limit is five seconds for every queued job in the billing system."},
+            {"op": "create", "type": "claim", "id": "$x", "parent": "$s", "body": "The retry limit is five seconds for every queued job in the billing system today."}
+        ]),
+        j_typo(),
+    );
+    land(&mut r, "seed").unwrap();
+    let [doc, x, y] = ["$d", "$x", "$y"].map(|k| seeded.created[k].clone());
+    assert_eq!(claims_in_canon_tension(&r), BTreeSet::new());
+    put_j(
+        &mut r,
+        "drift",
+        json!([{"op": "update", "id": x, "body": "The retry limit is ten seconds for every queued job in the billing system today."}]),
+        j_typo(),
+    );
+    land(&mut r, "drift").unwrap();
+    assert_eq!(
+        claims_in_canon_tension(&r),
+        BTreeSet::from([x.clone(), y.clone()])
+    );
+    let edit = json!({"op": "update", "id": x, "body": "The retry limit is ten seconds for every queued job in the billing system today, as agreed."});
+    put_j(
+        &mut r,
+        "v",
+        json!([notes_stable(&doc), edit.clone()]),
+        j_typo(),
+    );
+    let p = propose_as(&mut r, "v");
+    assert!(!p.ready, "{:#?}", p.issues);
+    assert_eq!(
+        failing_blocks(&p, "calm-claims"),
+        BTreeSet::from([x.clone(), y.clone()]),
+        "{:#?}",
+        p.issues
+    );
+    // independently of readiness: land the same edit on its own (the doc stays draft) and
+    // M3f's canon query still gives both claims
+    put_j(&mut r, "w", json!([edit]), j_typo());
+    land(&mut r, "w").unwrap();
+    assert_eq!(claims_in_canon_tension(&r), BTreeSet::from([x, y]));
+}
+
 #[test]
 fn ck5_rule_warning_is_stored_before_policy() {
     let all = rule("ok-claims", "type = claim", "fields.ok = true", "advisory");
