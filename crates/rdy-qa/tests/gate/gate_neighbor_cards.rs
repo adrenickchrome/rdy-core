@@ -21,8 +21,8 @@ use serde_json::json;
 use std::collections::BTreeSet;
 
 /// Canon: draft doc `notes` with section `Ideas`, entity `Ledger service`, term `Store`,
-/// component `Merge Conflict`, claim `x`, two claims that describe the entity, a deprecated claim,
-/// and two decisions on the entity: `a` ties to it, `b` names it in its statement.
+/// component `Merge Conflict`, claim `x`, two claims that describe the entity, and two decisions
+/// on the entity: `a` ties to it, `b` names it in its statement.
 struct World {
     _dir: tempfile::TempDir,
     r: Rdy,
@@ -32,7 +32,6 @@ struct World {
     x: BlockId,
     cl1: BlockId,
     cl2: BlockId,
-    old: BlockId,
     a: BlockId,
     b: BlockId,
 }
@@ -55,10 +54,7 @@ fn world() -> World {
             {"op": "create", "type": "claim", "id": "$cl1", "parent": "$s", "body": "Entries stay.",
              "links": {"describes": [{"target": "$e"}]}},
             {"op": "create", "type": "claim", "id": "$cl2", "parent": "$s", "body": "Reads are exact.",
-             "links": {"describes": [{"target": "$e"}]}},
-            {"op": "create", "type": "doc", "id": "$od", "fields": {"name": "old", "title": "Old", "doc_type": "overview", "lifecycle": "deprecated"}},
-            {"op": "create", "type": "section", "id": "$o", "parent": "$od", "fields": {"title": "Old rules"}},
-            {"op": "create", "type": "claim", "id": "$old", "parent": "$o", "body": "An old rule."}
+             "links": {"describes": [{"target": "$e"}]}}
         ]),
         j_typo(),
     );
@@ -73,7 +69,6 @@ fn world() -> World {
         x: id("$x"),
         cl1: id("$cl1"),
         cl2: id("$cl2"),
-        old: id("$old"),
         s,
         e,
         a,

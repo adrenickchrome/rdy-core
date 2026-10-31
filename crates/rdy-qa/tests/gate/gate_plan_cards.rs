@@ -852,6 +852,15 @@ fn cp12_one_way_reaffirm_has_its_own_exception() {
     let mut causes = [s.a.clone(), s.c.clone()];
     causes.sort();
     assert_eq!(fact(&ex, "Re-affirms"), causes.join(", "));
+    // nb11 (Q2): the card has no Decisions fact, so it has no related fact: its facts are its
+    // cause list alone
+    assert_eq!(
+        ex.facts
+            .iter()
+            .map(|f| f.name.to_string())
+            .collect::<Vec<_>>(),
+        ["Re-affirms"]
+    );
     assert!(
         ex.card.contains(&format!(
             "Beside {}, on its own: it re-affirms a one_way decision.",
