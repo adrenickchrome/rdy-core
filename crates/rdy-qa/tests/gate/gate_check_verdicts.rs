@@ -858,6 +858,8 @@ fn ck7_shown_card_appends_verdicts_after_policy() {
 /// cannot be read show nothing; a new version with the same case shows the verdict again.
 #[test]
 fn ck7_only_matching_selected_cases_show() {
+    // c1 is asked twice: a pinned clock gives each ask its own stamp (a request is content-addressed)
+    let _clock = rdy_engine::pin_clock(rdy_engine::now_ms());
     let n = notes();
     let a1 = ag("a1");
     let c1 = write_in(&n.e, "a1", upd(&n.x, "X holds, now."), j_typo())

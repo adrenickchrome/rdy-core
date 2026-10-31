@@ -106,14 +106,19 @@ fn with<T: serde::Serialize + 'static>(e: &Local, f: impl FnOnce(&mut Rdy) -> T 
 }
 
 /// A project whose canon holds the spec doc, and agent:a's proposed decision `p` in view `a`.
+/// The clock stays pinned while the world lives: a check request is content-addressed, so two
+/// asks of one subject in the same millisecond are one stored request (the deep gate met this
+/// twice on the bench); a pinned clock gives every ask its own stamp.
 struct World {
     dir: tempfile::TempDir,
     e: Local,
     s: Spec,
     p: BlockId,
+    _clock: rdy_engine::PinnedClock,
 }
 
 fn world() -> World {
+    let clock = pin_clock(now_ms());
     let (dir, mut r) = project();
     let s = spec_doc(&mut r);
     let p = try_decide_in(&mut r, "a", &s.section, "Cache the reads").unwrap();
@@ -122,6 +127,7 @@ fn world() -> World {
         e: Local::new(r),
         s,
         p,
+        _clock: clock,
     }
 }
 
@@ -520,10 +526,8 @@ fn ck6_contradiction_fans_out_and_keeps_pair_semantics() {
     );
     assert_eq!(w.e.read().seq(), seq);
 
-    // a canon-only pair: the person runs it on their own blocks and answers it. The clock is
-    // pinned: two runs of one pair in the same millisecond are one stored request (a request is
-    // content-addressed and its blocks are sorted), so the two requests below need two stamps.
-    let _clock = pin_clock(now_ms());
+    // a canon-only pair: the person runs it on their own blocks and answers it (the world's
+    // pinned clock gives the two runs below two stamps)
     let (ca, cc) = (w.s.a.to_string(), w.s.c.to_string());
     let canon = run_on(&w, &writer(), "contradiction", json!([ca, cc]));
     let rq = canon["request"].as_str().unwrap().to_string();
