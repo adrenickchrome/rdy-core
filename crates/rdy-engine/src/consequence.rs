@@ -1005,6 +1005,10 @@ enum NeighborCause {
     Deleted,
 }
 
+/// Neighbor pairs by (subject, cause): how the cause changed, and whether the pair is a section
+/// pair.
+type NeighborPairs = BTreeMap<(BlockId, BlockId), (NeighborCause, bool)>;
+
 /// The neighbor cause/subject pairs of a change, by (subject, cause): how the cause changed and
 /// whether the pair is a section pair (section wins; else they share an entity). The causes are
 /// the content blocks of `changed` that the change creates, deletes or whose text it edits,
@@ -1024,7 +1028,7 @@ fn neighbor_pairs(
     changed: &BTreeSet<BlockId>,
     touched: &BTreeSet<BlockId>,
     limit: usize,
-) -> Result<BTreeMap<(BlockId, BlockId), (NeighborCause, bool)>, RdyError> {
+) -> Result<NeighborPairs, RdyError> {
     let m = cmp.m;
     let t = g.tracking();
     // the causes: edited ones by id; created ones by final parent and deleted ones by parent in
@@ -1072,8 +1076,15 @@ fn neighbor_pairs(
         pairs.insert(key, (how, section));
         Ok(())
     };
-    let parse =
-        |id: &str| BlockId::parse(id).map_err(|e| RdyError::new(E_INTERNAL, e.to_string(), ""));
+    let parse = |id: &str| {
+        BlockId::parse(id).map_err(|e| {
+            RdyError::new(
+                E_INTERNAL,
+                format!("a neighbor row names no block: {e}"),
+                "report this",
+            )
+        })
+    };
     // one representative source per created group: its section rows are the group's
     let reps: BTreeMap<BlockId, &Vec<BlockId>> = created
         .values()
