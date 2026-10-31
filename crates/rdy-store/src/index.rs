@@ -1496,6 +1496,54 @@ impl Index {
         Ok(())
     }
 
+    /// [`Index::for_each_object_of`] for the objects of `kind` whose hash's lower-case hex
+    /// starts with `hex`: a range read of the typed table from the prefix's whole bytes, not a
+    /// walk of the whole table. A `hex` that is not lower-case hex names no object.
+    pub fn for_each_object_of_with_prefix(
+        &self,
+        kind: u8,
+        hex: &str,
+        mut f: impl FnMut(Hash) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        if hex.len() > 64 || !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return Ok(());
+        }
+        let nibble = |b: u8| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
+        let whole: Vec<u8> = hex
+            .as_bytes()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[hi, lo]| (nibble(hi) << 4) | nibble(lo))
+            .collect();
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(TYPED).map_err(db)?;
+        for item in t.range(&whole[..]..).map_err(db)? {
+            let (k, _) = item.map_err(db)?;
+            let key = k.value();
+            if !key.starts_with(&whole) {
+                break;
+            }
+            // every key is a hash and a kind byte, 33 bytes; anything else is damage
+            if key.len() != 33 {
+                return Err(StoreError::Decode(format!(
+                    "typed entry is {} bytes, expected 33",
+                    key.len()
+                )));
+            }
+            if key[32] != kind {
+                continue;
+            }
+            let h = hash_from(&key[..32], "typed entry")?;
+            // an odd prefix's last digit is the high nibble of the next byte
+            if hex.len() % 2 == 1 && !h.to_string().starts_with(hex) {
+                continue;
+            }
+            f(h)?;
+        }
+        Ok(())
+    }
+
     /// The ops of `view`'s chain, in ascending hash order.
     pub fn view_ops(&self, view: &str) -> Result<Vec<Hash>, StoreError> {
         let r = self.db.begin_read().map_err(db)?;

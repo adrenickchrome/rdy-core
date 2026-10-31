@@ -647,6 +647,59 @@ fn ck2_captured_read_excludes_later_records() {
     assert_eq!(seen, 1);
 }
 
+/// The prefix read names exactly the requests of a full walk whose hex starts with the prefix,
+/// at every prefix length, odd or even, and keeps the walk's captured end: it is a range of the
+/// index, so its cost does not grow with the store (perf: review_submit_1k).
+#[test]
+fn ckperf1_a_prefix_read_names_what_the_full_walk_names() {
+    let p = project();
+    let mut s = p.open();
+    let early: Vec<Hash> = s
+        .put_check_requests(&(1..=12).map(|n| p.request(n)).collect::<Vec<_>>())
+        .unwrap();
+    let old = s.log_end();
+    let later = s.put_check_request(&p.request(13)).unwrap();
+    let now = s.log_end();
+    let r = s.reader();
+    let by_prefix = |end: Location, hex: &str| {
+        let mut out = vec![];
+        r.for_each_check_request_with_prefix(end, hex, |h, _| {
+            out.push(h);
+            Ok(())
+        })
+        .unwrap();
+        out
+    };
+    for end in [old, now] {
+        let walked = requests(&r, end);
+        for h in early.iter().chain([&later]) {
+            let hex = h.to_string();
+            for len in [0, 1, 2, 3, 6, 7, 12, 13, 63, 64] {
+                let prefix = &hex[..len];
+                let want: Vec<Hash> = walked
+                    .iter()
+                    .filter(|w| w.to_string().starts_with(prefix))
+                    .copied()
+                    .collect();
+                assert_eq!(by_prefix(end, prefix), want, "prefix {prefix:?}");
+            }
+        }
+    }
+    assert_eq!(by_prefix(old, &later.to_string()), []);
+    assert_eq!(by_prefix(now, &later.to_string()), [later]);
+    // a prefix that is not lower-case hex, or too long, names nothing, as in the walk
+    let upper = later.to_string()[..12].to_ascii_uppercase();
+    assert_eq!(by_prefix(now, &upper), []);
+    assert_eq!(by_prefix(now, &format!("{later}0")), []);
+    // another kind's object with the prefix is not a request
+    assert_eq!(by_prefix(now, &p.version.to_string()), []);
+    // an error of the visitor stops the read and comes back
+    let stopped = r.for_each_check_request_with_prefix(now, "", |_, _| {
+        Err(StoreError::Refused("stop".into()))
+    });
+    assert_eq!(refused(stopped.unwrap_err()), "stop");
+}
+
 #[test]
 fn ck2_verdict_answers_keep_each_version_in_history() {
     let p = project();

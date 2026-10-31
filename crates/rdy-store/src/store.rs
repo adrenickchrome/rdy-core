@@ -3958,6 +3958,17 @@ impl StoreReader {
         self.index().for_each_object_of(kind, f)
     }
 
+    /// [`StoreReader::for_each_object_of`] for the objects of `kind` whose hash's lower-case hex
+    /// starts with `hex`, from a range of the index (no walk of every object).
+    pub fn for_each_object_of_with_prefix(
+        &self,
+        kind: u8,
+        hex: &str,
+        f: impl FnMut(Hash) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        self.index().for_each_object_of_with_prefix(kind, hex, f)
+    }
+
     /// The changes with an op that deletes `block`, ascending.
     pub fn deleters(&self, block: &BlockId) -> Result<Vec<Hash>, StoreError> {
         self.index().deleters(block)
