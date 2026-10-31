@@ -668,7 +668,7 @@ fn ck9_cli_source_and_rule_text_is_exact() {
     // the briefing: found, missing and unchecked, each after its line, in the order of the
     // sources' ids; the title's escape and line separator are spaces
     let brief = cli_text(&w.s, None, &["brief", &w.claim]);
-    let mut rows = vec![
+    let mut rows = [
         (s1, "release: Release [31m 1", "found"),
         (s2, "release: Release 9", "missing"),
         (s3, "spec: The spec", "unchecked"),
@@ -1093,7 +1093,7 @@ fn ck9_person_acceptance_then_policy_land_is_refused() {
         rdy_qa::mcp::Reply::ToolError(v) => v,
         other => panic!("refused, not {:?}", other.is_ok()),
     };
-    assert_eq!(issue_messages(&refusal), [held.clone()]);
+    assert_eq!(issue_messages(&refusal), std::slice::from_ref(&held));
     assert_eq!(refusal["issues"][0]["fix"], HELD_FIX);
     for args in [
         vec!["approve", w.pref.as_str()],
@@ -1102,12 +1102,16 @@ fn ck9_person_acceptance_then_policy_land_is_refused() {
         let who = if args[0] == "land" { agent } else { None };
         let refused = cli_refused(&w.s, who, &args);
         assert_eq!(refused["code"], "E_PROPOSAL_NOT_READY", "{refused}");
-        assert_eq!(issue_messages(&refused), [held.clone()], "{args:?}");
+        assert_eq!(
+            issue_messages(&refused),
+            std::slice::from_ref(&held),
+            "{args:?}"
+        );
         assert_eq!(refused["issues"][0]["fix"], HELD_FIX);
     }
     // the person's answer to approve is refused too, and the queue lists the version as not ready
     let refused = cli_refused(&w.s, None, &["answer", &w.pref, "approve"]);
-    assert_eq!(issue_messages(&refused), [held.clone()]);
+    assert_eq!(issue_messages(&refused), std::slice::from_ref(&held));
     let text = cli_text(&w.s, None, &["pending"]);
     assert!(
         text.contains(&format!("not ready: {}: {held} (fix: {HELD_FIX})", w.pref)),

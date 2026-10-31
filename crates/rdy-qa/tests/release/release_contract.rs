@@ -4031,7 +4031,7 @@ fn ck9_release_probes_cover_nonempty_checks_and_acceptance() {
     // every reply key of the earlier probes stays: the queue, its items and options, and the
     // answer, as the contract held them before ck9
     assert_eq!(
-        shape_keys(&stdout("pending")),
+        shape_keys(stdout("pending")),
         ["items", "not_ready", "omitted", "snoozed"]
     );
     let old_item = [
