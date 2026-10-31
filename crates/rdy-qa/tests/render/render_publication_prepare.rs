@@ -269,6 +269,8 @@ const SITE_DIGESTS: [(&str, &str, &str); 4] = [
 /// The proposal's re-taken again when the engine's decision type gained `confirmation` (ck1): the
 /// resolved pack's digest moves the assessment, so the version's hash does; only that scope's
 /// text changed.
+/// It moved again when every defining type gained the optional `everyday` field (nb3), for the
+/// same reason.
 const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "canon",
@@ -303,11 +305,11 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "proposal",
         [
-            "f5ccb3756af41e343578e90d604c217f24af3b0928e123b087d2f71baaf38008",
-            "aae97dd76e220f07900925100111bb1ef6f86527533843612c254ff210c1142e",
-            "f6850a82fa35c9418ed8970a9cc499062528dda7c2555ebd2e78637d01aa7fc4",
-            "8c9783f54b3723fe766348cabff1fa1f5d8cf42765c211faf7222b36d3751891",
-            "2a253816c253a033d9b76cfc768d421c583ffd0d2320aa66bf9e684f90e701bb",
+            "269aaef2f43e01e659dc6bd1a8d8e212f214e8ce66799d1979fa8f1264654693",
+            "1d8b248bee93ca179bca5a8935055db97dc7d84e25e0dfe2790af1891cc896b9",
+            "de64ba7de1f9b88826f557aa85b70cbb01a9b75801b4e03ed1849b468b886ed3",
+            "00f6b17aad41fcee671389b4d152af8e9cded14dd06cd9b063a56a9eb6205b09",
+            "4e96e752d6b360d2fbb551ca2fa7ffac738cb0e1845b5360565a73a13ec964fa",
         ],
     ),
 ];
