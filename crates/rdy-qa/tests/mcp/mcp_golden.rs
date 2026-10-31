@@ -24,7 +24,7 @@ use std::sync::Arc;
 const STATIC_LISTS: [&str; 2] = ["resources--list", "resources--templates"];
 
 /// Every M2 tool the goldens must name.
-const M2_TOOLS: [&str; 14] = [
+const M2_TOOLS: [&str; 15] = [
     "rdy_session",
     "rdy_brief",
     "rdy_write",
@@ -39,6 +39,7 @@ const M2_TOOLS: [&str; 14] = [
     "rdy_inbox",
     "rdy_review_next",
     "rdy_review_submit",
+    "rdy_review",
 ];
 
 fn golden_dir() -> PathBuf {
@@ -430,6 +431,59 @@ pub(crate) fn run_session() -> Vec<(String, String)> {
     out.ok(
         "rdy_inbox--person",
         rdy_inbox(&mut chat, p(json!({"person": true}))),
+    );
+
+    // ck8 (D-JQD5X): the check surfaces. Agent a records a decision, runs a check on it and
+    // asks for an independent review; the reviewer answers it, and the list shows both. These
+    // calls come last, so no reply above sees their records, and the decision itself is not a
+    // golden.
+    let made = must(
+        "a records a decision",
+        rdy_decide(
+            &mut a,
+            p(
+                json!({"statement": "Cache the reads", "title": "Cache the reads",
+                     "why": "A person decides how reads are cached"}),
+            ),
+        ),
+    );
+    let decision = str_of(&made["created"]["$decision"], "the decision");
+    out.ok(
+        "rdy_review--run",
+        rdy_review(
+            &mut a,
+            p(json!({"op": "run", "check": "decision_review", "subject": decision})),
+        ),
+    );
+    out.ok(
+        "rdy_review--request",
+        rdy_review(
+            &mut a,
+            p(
+                json!({"op": "request", "check": "decision_review", "subject": decision,
+                     "reason": "Check the basis."}),
+            ),
+        ),
+    );
+    let claimed = must(
+        "the reviewer claims the request",
+        rdy_review_next(&mut rv, p(json!({"kind": "decision_review"}))),
+    );
+    out.ok(
+        "rdy_review_submit--check",
+        rdy_review_submit(
+            &mut rv,
+            p(
+                json!({"request": claimed["request"], "case_hash": claimed["case_hash"],
+                     "verdict": "concern",
+                     "citations": [{"block": decision, "note": "the basis names no measure"}],
+                     "reason": "The decision names no measure."}),
+            ),
+        ),
+    );
+    out.ok(
+        "rdy_review--list",
+        rdy_review(&mut a, p(json!({"op": "list"}))),
     );
     out.0
 }

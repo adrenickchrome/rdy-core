@@ -101,6 +101,11 @@
 //! with the answer of the bound plan (`(confirm: <reason>)`, `(dismiss: <reason>)` or `(no
 //! answer)`).
 //!
+//! The card shown is that stored card plus the live check verdict lines (D-JQD5X, O13,
+//! [`show_verdicts`]): after every stored fact, one line for each Check review whose case
+//! matches the version now, and one acceptance option for each concern and fail before Reject
+//! and Later. A new verdict moves the card's hash; it never changes the stored record.
+//!
 //! # Answers (O23)
 //!
 //! The queue reads the answers (`answer/<item>`): a `reject_proposal` answer to `P-x@n` takes the
@@ -369,6 +374,8 @@ impl ReadState {
                     continue;
                 }
             }
+            // D-JQD5X, O13: the card shown is the stored card plus the live verdict lines
+            show_verdicts(self, &v.pref, &v.p, &mut card)?;
             if let Some(rt) = routing.as_mut() {
                 rt.note(self, &card, Some(&v.next), v.approve_facts());
             }
@@ -684,6 +691,82 @@ fn stored_facts(st: &ReadState, v: &Version) -> Result<Option<Vec<Fact>>, RdyErr
     Ok(Some(facts))
 }
 
+/// O13 (D-JQD5X): the approve card `item` of version `pref` (record `p`) as the person is shown
+/// it: after every stored fact, one line for each check verdict whose case matches the version
+/// now ([`crate::check::verdicts::matching_verdicts`]), each row's complete metadata in
+/// `check_verdicts`, and before Reject and Later one acceptance option for each concern and fail,
+/// never recommended. The stored assessment is not touched. A card past the verdict limits is
+/// `E_LIMIT`.
+pub(crate) fn show_verdicts(
+    st: &ReadState,
+    pref: &ProposalRef,
+    p: &Proposal,
+    item: &mut Item,
+) -> Result<(), RdyError> {
+    let verdicts = crate::check::verdicts::matching_verdicts(st, pref, p)?;
+    with_verdicts(item, pref, verdicts)
+}
+
+/// [`show_verdicts`] with the verdicts already read.
+fn with_verdicts(
+    item: &mut Item,
+    pref: &ProposalRef,
+    verdicts: Vec<crate::check::verdicts::MatchingVerdict>,
+) -> Result<(), RdyError> {
+    use crate::check::verdicts::ACCEPT_CONSEQUENCE;
+    if verdicts.is_empty() {
+        return Ok(());
+    }
+    item.facts
+        .try_reserve(verdicts.len())
+        .map_err(|_| crate::check::verdicts::too_many(pref))?;
+    item.facts.extend(verdicts.iter().map(|v| Fact {
+        name: v.fact_name().into(),
+        value: v.fact_value(),
+    }));
+    let accept: Vec<ItemOption> = verdicts
+        .iter()
+        .filter(|v| v.acceptable())
+        .map(|v| {
+            option(
+                &v.accept_option(&pref.version),
+                &v.accept_label(),
+                ACCEPT_CONSEQUENCE,
+                None,
+            )
+        })
+        .collect();
+    let at = item
+        .options
+        .iter()
+        .position(|o| o.id == "reject" || o.id == "later")
+        .unwrap_or(item.options.len());
+    item.options.splice(at..at, accept);
+    item.check_verdicts = verdicts;
+    Ok(())
+}
+
+/// The `approve` item of version `pref` (record `p`) as the queue shows it, its card whole, with
+/// `verdicts` (its matching check verdicts, already read): none when the version is not ready or
+/// has no stored assessment. A direct approval with the card as evidence compares its hash.
+pub(crate) fn shown_approve_item(
+    st: &ReadState,
+    pref: &ProposalRef,
+    p: &Proposal,
+    verdicts: Vec<crate::check::verdicts::MatchingVerdict>,
+) -> Result<Option<Item>, RdyError> {
+    let v = Version::read(st, *pref, p.clone())?;
+    let Some(mut card) = v.readiness_with_card(st, now_ms())?.card else {
+        return Ok(None);
+    };
+    let Some(facts) = stored_facts(st, &v)? else {
+        return Ok(None);
+    };
+    card.facts = facts;
+    with_verdicts(&mut card, pref, verdicts)?;
+    finish(card, CARD_MAX_TOKENS).map(Some)
+}
+
 /// The readiness issues of version `pref` (record `p`), in the queue's order: the issues the
 /// queue lists under `not_ready` for it. Empty when the version is ready. Every approval path
 /// refuses a version that is not ready with them (D-ME2HD, [`crate::gate::proposal_not_ready`]).
@@ -722,12 +805,15 @@ pub(crate) fn assessed(
         .as_ref()
         .map(|p| p.summary.clone())
         .unwrap_or_default();
+    let (warnings, checks_omitted) = v.rule_warnings(st)?;
     if !issues.is_empty() {
         let r = Readiness {
             issues,
             summary,
             card: None,
             policy: None,
+            warnings,
+            checks_omitted,
         };
         return Ok((r, None));
     }
@@ -759,6 +845,8 @@ pub(crate) fn assessed(
                 summary,
                 card: Some(card),
                 policy: Some(policy),
+                warnings,
+                checks_omitted,
             },
             Some(a),
         ),
@@ -768,6 +856,8 @@ pub(crate) fn assessed(
                 summary,
                 card: None,
                 policy: None,
+                warnings,
+                checks_omitted,
             },
             None,
         ),
@@ -845,7 +935,8 @@ pub(crate) fn reach_of(st: &ReadState, c: &Candidate) -> Result<BTreeSet<BlockId
             .iter()
             .map(|c| c.block.clone())
             .collect();
-    crate::readiness::reach(st, &v.checked(), &conflicted)?
+    let checks = v.checks(st)?;
+    crate::readiness::reach(st, &v.checked(checks), &conflicted)?
         .map_err(|i| RdyError::new(i.code, i.message, i.fix))
 }
 
@@ -956,6 +1047,7 @@ pub(crate) fn removal_item(
     if let Some(facts) = stored_facts(st, &v)? {
         item.facts = facts;
     }
+    show_verdicts(st, &v.pref, &v.p, &mut item)?;
     let issues = v.readiness(st)?;
     if !issues.is_empty() {
         let why: Vec<&str> = issues.iter().map(|i| i.message.as_str()).collect();
@@ -1160,6 +1252,76 @@ struct Version {
     policy_changes: Vec<PolicyChange>,
     /// The coverage of the canon the version would give, worked out once on first use.
     candidate: OnceCell<Result<CandidateCoverage, RdyError>>,
+    /// The landing projection's facts and the pack rules' scan, worked out once on first use.
+    checks: OnceCell<Result<Checks, RdyError>>,
+}
+
+/// The derived sets a version's rules read: suspects, tension blocks, coverage scores.
+type RuleSets = (BTreeSet<BlockId>, BTreeSet<BlockId>, BTreeMap<BlockId, u32>);
+
+/// Tests only ([`crate::readiness::rule_inputs_for_tests`]): the derived sets the pack rules of
+/// candidate `c` read, in its landing projection.
+pub(crate) fn rule_inputs_of(
+    st: &ReadState,
+    c: &Candidate,
+) -> Result<crate::readiness::RuleInputs, RdyError> {
+    let v = Version::read_for(st, c, Removal::Skip)?;
+    let compiled = crate::check::rules::compiled(st.pack())?;
+    let projection = crate::check::landing_projection(st, &v.pref, &v.p, &v.next)?;
+    let built = v.built.after(&projection.updates, st.pack());
+    let graph = Arc::clone(built.graph.get_or_init(|| {
+        Arc::new(Graph::build_with(
+            built.m.iter(),
+            Arc::clone(st.reader().tracking()),
+        ))
+    }));
+    let all = compiled
+        .into_iter()
+        .map(|mut r| {
+            // every set, whatever the pack's rules need
+            r.require = rdy_schema::filter::parse(
+                "suspect = true or tension = true or coverage >= 0",
+                st.pack(),
+            )
+            .expect("the test filter parses");
+            r
+        })
+        .collect::<Vec<_>>();
+    let (suspects, tensions, coverage) = v.rule_sets(st, &built, &graph, &all)?;
+    Ok(crate::readiness::RuleInputs {
+        suspects,
+        tensions,
+        coverage,
+    })
+}
+
+/// What a version's landing projection and its pack rules give readiness (D-JQD5X), at
+/// propose: item 6's issues, the advisory rows, the rows left out, the reach the rules add and
+/// the considered options of a choice.
+struct Checks {
+    /// Readiness item 6: the projection's refusal (`E_ALT_DECISION`, or a view that moved on),
+    /// then each kept `E_RULE_CHECK` row.
+    issues: Vec<Issue>,
+    /// The kept `W_RULE_CHECK` rows, in rule then block order.
+    warnings: Vec<crate::check::RuleIssue>,
+    /// The blocking and advisory rows left out past the cut.
+    omitted: (usize, usize),
+    /// The reach the rules add (TASK-946, D-DSPMW); Err: the "too large to assess" issue.
+    reach: Result<BTreeSet<BlockId>, Issue>,
+    considered: Option<crate::check::ConsideredOptions>,
+}
+
+impl Checks {
+    /// A version with no rule and no choice: nothing to add.
+    fn none() -> Checks {
+        Checks {
+            issues: vec![],
+            warnings: vec![],
+            omitted: (0, 0),
+            reach: Ok(BTreeSet::new()),
+            considered: None,
+        }
+    }
 }
 
 /// Whether [`Version::read_for`] reads the removal cards of a version.
@@ -1268,6 +1430,7 @@ impl Version {
             no_blocks: BTreeSet::new(),
             policy_changes,
             candidate: OnceCell::new(),
+            checks: OnceCell::new(),
         })
     }
 
@@ -1292,8 +1455,164 @@ impl Version {
         }
     }
 
-    /// What the readiness checks read of this version.
-    fn checked(&self) -> crate::readiness::Read<'_> {
+    /// The landing projection's facts and the rule scan of this version, worked out once
+    /// ([`Version::compute_checks`]).
+    fn checks(&self, st: &ReadState) -> Result<&Checks, RdyError> {
+        self.checks
+            .get_or_init(|| self.compute_checks(st))
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
+    /// D-JQD5X, review I1: with no pack rule and no choice, nothing. Otherwise the version's
+    /// landing projection ([`crate::check::landing_projection`]); its refusal is item 6's one
+    /// issue. Then every rule on every block of the projected canon, with the graph, areas,
+    /// derived status, suspects, tensions and intrinsic coverage of that canon (only the sets a
+    /// rule needs), and the reach the rules add from canon to it.
+    fn compute_checks(&self, st: &ReadState) -> Result<Checks, RdyError> {
+        use crate::check::{Stage, evaluate_rules, rules};
+        let pack = st.pack();
+        let compiled = rules::compiled(pack)?;
+        if compiled.is_empty() && self.p.alternative.is_none() {
+            return Ok(Checks::none());
+        }
+        let projection = match crate::check::landing_projection(st, &self.pref, &self.p, &self.next)
+        {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(Checks {
+                    issues: vec![Issue {
+                        severity: Severity::Error,
+                        code: e.code,
+                        block: None,
+                        message: e.message,
+                        fix: e.fix,
+                    }],
+                    ..Checks::none()
+                });
+            }
+        };
+        // the projected blocks meet the pack's field rules and bounds, as the landing's dry run
+        // will judge them; their versions are temporary and in no store
+        let mut issues: Vec<Issue> = vec![];
+        for op in &projection.updates {
+            let rdy_model::Op::Update { block, .. } = op else {
+                continue;
+            };
+            let parent = block
+                .parent
+                .as_ref()
+                .and_then(|p| projection.candidate.get(p));
+            issues.extend(
+                rdy_schema::validate_read_block(pack, block, parent)
+                    .into_iter()
+                    .filter(|i| i.severity == Severity::Error),
+            );
+        }
+        if compiled.is_empty() {
+            return Ok(Checks {
+                issues,
+                considered: projection.considered,
+                ..Checks::none()
+            });
+        }
+        let built = self.built.after(&projection.updates, pack);
+        let graph = Arc::clone(built.graph.get_or_init(|| {
+            Arc::new(Graph::build_with(
+                built.m.iter(),
+                Arc::clone(st.reader().tracking()),
+            ))
+        }));
+        let (suspects, tensions, scores) = self.rule_sets(st, &built, &graph, &compiled)?;
+        let inputs = crate::filter::FilterInputs {
+            pack,
+            m: &built.m,
+            graph: &graph,
+            areas: st.area_matcher(),
+            suspects: &suspects,
+            tensions: &tensions,
+            coverage: &scores,
+        };
+        let scan = evaluate_rules(pack, inputs, built.m.ids().cloned(), Stage::Propose)?;
+        let (canon, canon_g) = (st.materialized(&Scope::Canon)?, st.graph(&Scope::Canon)?);
+        let reach = rules::rule_reach(
+            &self.pref,
+            &compiled,
+            (&canon, &canon_g),
+            (&built.m, &graph),
+            &self.touched,
+            &scan.read_blocks,
+        );
+        issues.extend(scan.blocking.iter().map(|r| r.issue()));
+        Ok(Checks {
+            issues,
+            warnings: scan.warnings,
+            omitted: (scan.blocking_omitted, scan.warnings_omitted),
+            reach,
+            considered: projection.considered,
+        })
+    }
+
+    /// The derived sets the rules of `compiled` read in the projected canon `built` (graph
+    /// `graph`), only those a rule needs (`Filter::needs`): its suspects (presentational sources
+    /// left out, as a scope's suspects are), the blocks of the candidate's open tensions
+    /// ([`Version::candidate_tension_blocks`]), and each block's intrinsic coverage score. No
+    /// machine-local source fact enters them.
+    fn rule_sets(
+        &self,
+        st: &ReadState,
+        built: &Built,
+        graph: &Graph,
+        compiled: &[rdy_schema::CompiledRule],
+    ) -> Result<RuleSets, RdyError> {
+        let (mut suspect, mut tension, mut coverage) = (false, false, false);
+        for f in compiled.iter().flat_map(|r| [&r.select, &r.require]) {
+            let n = f.needs();
+            suspect |= n.suspect;
+            tension |= n.tension;
+            coverage |= n.coverage;
+        }
+        let suspects: BTreeSet<BlockId> = if suspect {
+            graph
+                .suspects()
+                .into_iter()
+                .filter(|s| !st.is_presentational_source(&built.m, s))
+                .map(|s| s.block)
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+        let tensions: BTreeSet<BlockId> = if tension {
+            self.candidate_tension_blocks(st)?
+        } else {
+            BTreeSet::new()
+        };
+        let scores = if coverage {
+            crate::filter::coverage_scores(
+                st.pack(),
+                &st.candidate_coverage(built, &self.p.changes)?.issues,
+            )
+        } else {
+            BTreeMap::new()
+        };
+        Ok((suspects, tensions, scores))
+    }
+
+    /// The blocks of the projected candidate's open tensions (review fix L6/I7), what a rule's
+    /// `tension` reads at propose: [`ReadState::candidate_tensions`], the open tensions of the
+    /// canon this version's landing would give, surviving canon groups included. Readiness's
+    /// own tension list stays [`Version::tensions`], the version's alone.
+    fn candidate_tension_blocks(&self, st: &ReadState) -> Result<BTreeSet<BlockId>, RdyError> {
+        Ok(st
+            .candidate_tensions(&self.p.view, &self.p.changes)?
+            .iter()
+            .flat_map(|t| t.blocks())
+            .collect())
+    }
+
+    /// What the readiness checks read of this version, with its landing projection's facts and
+    /// rule scan `checks`.
+    fn checked<'a>(&'a self, checks: &'a Checks) -> crate::readiness::Read<'a> {
         let (summary, plan_blocks) = match &self.plan {
             Ok(plan) => (Ok(&plan.summary), &plan.blocks),
             Err(e) => (Err(e), &self.no_blocks),
@@ -1317,13 +1636,26 @@ impl Version {
                 .map(|d| (d.block.id.clone(), d.r#ref.clone(), d.one_way))
                 .collect(),
             policy_changes: &self.policy_changes,
+            item6: &checks.issues,
+            rule_reach: checks.reach.as_ref(),
         }
     }
 
     /// Every failed readiness check, one issue each, in the closed order of
     /// [`crate::readiness`]: the one readiness, on this version as read.
     fn readiness(&self, st: &ReadState) -> Result<Vec<Issue>, RdyError> {
-        crate::readiness::issues(st, &self.checked(), || self.lowered(st))
+        let checks = self.checks(st)?;
+        crate::readiness::issues(st, &self.checked(checks), || self.lowered(st))
+    }
+
+    /// The rule warnings of this version, as `rdy_propose`'s warnings give them, and the rows
+    /// left out (blocking, advisory).
+    fn rule_warnings(&self, st: &ReadState) -> Result<(Vec<Issue>, (usize, usize)), RdyError> {
+        let checks = self.checks(st)?;
+        Ok((
+            checks.warnings.iter().map(|r| r.issue()).collect(),
+            checks.omitted,
+        ))
     }
 
     /// [`Version::readiness`] with the version's change plan summary and, when it is ready, the
@@ -1336,6 +1668,7 @@ impl Version {
             None
         };
         let card = policy.as_ref().map(|v| self.batch_item(st, now, Some(v)));
+        let (warnings, checks_omitted) = self.rule_warnings(st)?;
         Ok(Readiness {
             issues,
             summary: self
@@ -1345,6 +1678,8 @@ impl Version {
                 .unwrap_or_default(),
             card,
             policy,
+            warnings,
+            checks_omitted,
         })
     }
 
@@ -1834,6 +2169,7 @@ impl Version {
             suspects,
             written: self.touched.clone(),
             plan_blocks,
+            rule_reach: self.checks(st)?.reach.clone().unwrap_or_default(),
             scope_blocks,
             coverage: AssessmentCoverage { pages, corpus },
             confidence: confidence_record(&confidence),
@@ -2033,6 +2369,14 @@ impl Version {
             ),
             fact(JUSTIFICATION_FACT, self.justification()),
             fact("Decisions", decisions),
+        ];
+        // D-8GR43: the options the landing writes for a choice, and the set version they bind
+        let checks = self.checks(st).ok();
+        if let Some(c) = checks.and_then(|c| c.considered.as_ref()) {
+            facts.push(fact(CONSIDERED_OPTIONS_FACT, c.fact_value()));
+            facts.push(fact(ALTERNATIVE_SET_FACT, c.set_value()));
+        }
+        facts.extend([
             fact("Supersedes", supersedes),
             fact(REAFFIRMS_FACT, reaffirms),
             fact("Reversibility", self.reversibility()),
@@ -2056,7 +2400,23 @@ impl Version {
                     n => n.to_string(),
                 },
             ),
-        ];
+        ]);
+        // D-JQD5X: the rule warnings propose found, then the rows it left out, before Policy
+        if let Some(c) = checks {
+            for row in &c.warnings {
+                facts.push(fact(
+                    RULE_CHECK_FACT,
+                    format!("{}; fix: {}", row.message, row.fix),
+                ));
+            }
+            let (blocking, advisory) = c.omitted;
+            if blocking > 0 || advisory > 0 {
+                facts.push(fact(
+                    RULE_CHECKS_OMITTED_FACT,
+                    format!("{blocking} blocking, {advisory} advisory"),
+                ));
+            }
+        }
         if let Some(policy) = policy {
             facts.push(fact(POLICY_FACT, crate::policy_verdict::fact_value(policy)));
         }
@@ -2471,6 +2831,7 @@ pub(super) fn item(kind: ItemKind, r#ref: &str, title: &str) -> Item {
         removal: None,
         removal_reports: BTreeMap::new(),
         plan_binding: None,
+        check_verdicts: vec![],
     }
 }
 
@@ -2503,6 +2864,11 @@ pub const JUSTIFICATION_FACT: &str = "Justification";
 /// The name of the batch fact that gives the authority policy's verdict (D-ZWP7Q, O9); it
 /// follows Exceptions.
 pub const POLICY_FACT: &str = "Policy";
+/// The fact of one rule warning (D-JQD5X), before Policy.
+pub const RULE_CHECK_FACT: &str = "Rule check";
+/// The fact of the rule rows a propose left out, before Policy.
+pub const RULE_CHECKS_OMITTED_FACT: &str = "Rule checks omitted";
+use crate::check::options::{ALTERNATIVE_SET_FACT, CONSIDERED_OPTIONS_FACT};
 /// The name of the batch fact that gives the canon the version was proposed on; it is the one
 /// fact the approve card reads live, not from the stored assessment (I-d).
 const BASE_FACT: &str = "Base";

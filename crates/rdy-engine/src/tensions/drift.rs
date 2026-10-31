@@ -690,16 +690,24 @@ impl RestatementDrift {
     /// The canon form: for each canon block `x` of a type that takes part, each older version
     /// `p` of it against the canon blocks that restate `p` and whose newest landing falls while
     /// `p` was `x`'s text (or before `x`'s first text), strictly before `x`'s newest landing.
+    /// Over the canon a landing would give ([`DetectCx::landed`]), `n` is the text that landing
+    /// gives `x`, and a block the landing writes is never a `y` (its newest landing is that
+    /// landing, never before `x`'s). A block it creates has no canon history: its drifts are
+    /// the landing form's.
     fn canon(cx: &DetectCx<'_>, out: &mut Vec<Found>) -> Result<(), RdyError> {
         let pack = cx.st.pack();
         let t = pack.drift_threshold();
         let m = cx.canon_m()?;
+        let before = cx.canon_before_m()?;
         let mut steps = cx.st.canon_steps()?;
         // each block's newest landing; the change and base of its canon version
         let mut newest: HashMap<BlockId, LandedAt> = HashMap::new();
         let mut edited: Vec<(BlockId, Hash, LandedAt, Hash)> = vec![];
         let mut landings: Vec<LandedAt> = vec![];
         for b in m.iter().filter(|b| restating_type(pack, b)) {
+            if cx.landing_writes(&b.id) && before.get(&b.id).is_none() {
+                continue;
+            }
             let s = steps.current(&b.id)?;
             let (c, step) = (s.0, &s.1);
             if text_of_len(&b.body) >= DRIFT_MIN_WORDS {
@@ -749,6 +757,9 @@ impl RestatementDrift {
                     let p = older_text(cx, &steps, &v)?;
                     if p.long() {
                         for (y, yt) in restating(cx, &moved, &x, &p.set, t)? {
+                            if cx.landing_writes(&y) {
+                                continue;
+                            }
                             let y_landed = newest.get(&y).cloned().flatten();
                             if lo.is_none_or(|lo| &y_landed >= lo)
                                 && &y_landed < hi

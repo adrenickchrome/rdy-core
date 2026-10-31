@@ -40,6 +40,13 @@ pub enum Skip {
     /// an alternative set, so it chose no member (ruling task-5-round1.2). The person drops it
     /// and lands the next one; the view's later proposals choose or land on their own.
     ProposedBeforeSet,
+    /// A check act found no subject: no proposed decision or editorial change of the agent's own
+    /// for a run or a request, no rule fixture to repair, or no check view to propose again.
+    NothingToCheck,
+    /// A reviewer's `check_submit` found no free independent check request.
+    NoCheckRequest,
+    /// The person's `accept_check_verdict`: no card in the queue offers a check verdict to accept.
+    NoVerdictToAccept,
 }
 
 /// One inbox read: the cursor passed, the cursor returned and the entries as the reply gave them.
@@ -51,6 +58,26 @@ pub struct InboxRead {
     /// The agent's range number. It starts at 0 and grows by one when the agent must
     /// restart from its persisted cursor after a kill.
     pub range: u32,
+}
+
+/// What a check act saw (D-JQD5X): each value the reply gave, when it gave one. Labels and hashes
+/// are as the tools print them (`rq-<64 hex>`, 64 hex, `P-x@n`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CheckFacts {
+    /// The check's name, such as `meaning_preservation`.
+    pub check: Option<String>,
+    /// The durable request (`rq-<64 hex>`).
+    pub request: Option<String>,
+    /// The case hash the request or the lease gave.
+    pub case_hash: Option<String>,
+    /// The REVIEW a verdict wrote.
+    pub review: Option<String>,
+    /// The verdict (`pass`, `concern`, `fail`).
+    pub verdict: Option<String>,
+    /// The ANSWER a person's acceptance wrote, by its option id `accept_verdict:<review>:<version>`.
+    pub answer: Option<String>,
+    /// The proposal version the act named (`P-x@n`).
+    pub version: Option<String>,
 }
 
 /// One journaled act.
@@ -83,6 +110,8 @@ pub struct Entry {
     /// Set on the drain's `repair_dangling_ref`: the block the rewritten reference named, which a
     /// change the drain excluded created (ruling task-5-round2.1). `block` is the citing block.
     pub target: Option<String>,
+    /// Set on a check act (`check_run`, `check_request`, `check_submit`, `accept_check_verdict`).
+    pub check: Option<CheckFacts>,
 }
 
 impl Entry {
@@ -106,6 +135,7 @@ impl Entry {
             skip: None,
             message: None,
             target: None,
+            check: None,
         }
     }
 }
@@ -210,14 +240,19 @@ pub fn allowed(act: &str, code: &str) -> bool {
         "accept_advice" => &["E_PROPOSAL_MOVED"],
         "wc_checkout" | "wc_commit" | "wc_update" | "wc_propose" => WC_CODES,
         "inbox_resume" => &["E_BAD_INPUT"],
+        // D-JQD5X: a run or a request names a subject its view holds, read in the same turn, so
+        // it meets no refusal; a verdict on a case that changed after the lease is stale
+        "check_submit" => &["E_REVIEW_STALE"],
+        // the card moved between the queue read and the answer (a new verdict, a landing)
+        "accept_check_verdict" => &["E_PROPOSAL_MOVED"],
         // a view or a version whose changes conflict with canon has no change plan until the
         // conflict is resolved: its read refuses with E_CONFLICT_UNRESOLVED, never with a
         // write's E_STALE_BASE (ruling task-15 F3; the propose binds no plan then, and the
         // landing refuses the version as not ready)
         "plan" | "version_plan" => &["E_CONFLICT_UNRESOLVED"],
         // intent, review_next, tensions, inbox, read, brief, and the plan answers, the queue
-        // read and the deferral acceptance (plan_answer, pending, accept_deferrals): no refusal
-        // is allowed.
+        // read and the deferral acceptance (plan_answer, pending, accept_deferrals), and a check
+        // run or request (check_run, check_request): no refusal is allowed.
         _ => &[],
     };
     codes.contains(&code)

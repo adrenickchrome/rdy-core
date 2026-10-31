@@ -17,6 +17,50 @@ use std::sync::OnceLock;
 /// decision, with at most 20 blocks and 20 plan items.
 pub const SWARM_RULE: &str = "swarm-drafts";
 
+/// The child pack the swarm's project uses (D-JQD5X): it `extends: rdy-qa`, adds the optional
+/// boolean field `checked` to the claim type, and holds one blocking rule, `FIXTURE_RULE`. The
+/// shared `QA_PACK_YAML` stays as it is: other tests read its digest.
+pub const CHECKS_PACK: &str = "rdy-qa-checks";
+/// The rule of the child pack: a stable claim keyed `FIXTURE_KEY` must be checked.
+pub const FIXTURE_RULE: &str = "check-fixture-key";
+/// The key of the rule's fixture claim.
+pub const FIXTURE_KEY: &str = "check-fixture";
+/// The message and the fix of `FIXTURE_RULE`.
+pub const FIXTURE_MESSAGE: &str = "the claim is not checked";
+pub const FIXTURE_FIX: &str = "set checked to true on the claim";
+
+/// The child pack's text. The claim restates `rdy-standard`'s definition (a child's type replaces
+/// its parent's, its fields merge), with `checked` added.
+pub fn checks_pack_yaml() -> String {
+    format!(
+        "\
+name: {CHECKS_PACK}
+version: \"1\"
+extends: rdy-qa
+block_types:
+  claim:
+    prefix: c
+    traits: [normative, describes]
+    body: required
+    fields:
+      checked: {{ kind: bool }}
+rules:
+  - name: {FIXTURE_RULE}
+    select: type = claim and key = {FIXTURE_KEY}
+    require: fields.checked = true
+    severity: blocking
+    message: {FIXTURE_MESSAGE}
+    fix: {FIXTURE_FIX}
+"
+    )
+}
+
+/// Makes the project at `dir` use the child pack: `rdy-qa` beside it, then the child.
+pub fn use_checks_pack(dir: &Path, extra_config: &str) {
+    std::fs::write(dir.join(".rdy/packs/rdy-qa.yaml"), QA_PACK_YAML).expect("pack rdy-qa");
+    use_pack(dir, CHECKS_PACK, &checks_pack_yaml(), extra_config);
+}
+
 /// The name of a swarm process's parent directory under `/tmp`, before its pid.
 const PARENT_PREFIX: &str = "rdysw-";
 
@@ -110,17 +154,12 @@ pub const DOC_PATHS: [&str; 3] = ["wallets/ledger", "identity/accounts", "terms/
 /// The words of a seed claim, by index.
 const CLAIM_WORDS: [&str; CLAIMS_PER_AREA] = ["first", "second", "third", "fourth"];
 
-/// Builds the project: pack `rdy-qa`, then for each area a folder and a stable doc holding one
-/// section with four claims, one accepted decision and one term, landed in one landing. Then the
+/// Builds the project: pack `rdy-qa-checks` (`rdy-qa` with the rule fixture), then for each area a
+/// folder and a stable doc holding one section with four claims, one accepted decision and one term, landed in one landing. Then the
 /// authority policy under the first doc, with its one rule `SWARM_RULE` (`authority_policy`).
 pub fn build(cfg: &Config) -> SwarmProject {
     let served = Served::new_in(run_parent());
-    use_pack(
-        served.dir.path(),
-        "rdy-qa",
-        QA_PACK_YAML,
-        "serve:\n  idle_timeout: 60\n",
-    );
+    use_checks_pack(served.dir.path(), "serve:\n  idle_timeout: 60\n");
     let mut r = Rdy::open(served.dir.path()).expect("open the swarm project");
     let mut ops: Vec<Value> = Vec::new();
     for (k, (folder, doc, term)) in DOCS.iter().enumerate() {

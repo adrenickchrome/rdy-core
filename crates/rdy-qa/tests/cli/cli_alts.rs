@@ -9,7 +9,7 @@ fn malt1_cli_create_propose_approve_closes_the_other_member() {
     let s = Served::new();
     {
         let mut r = Rdy::open(s.dir.path()).unwrap();
-        let (_doc, _s, claim) = seed_doc(&mut r, "seed");
+        let (_doc, section, claim) = seed_doc(&mut r, "seed");
         land(&mut r, "seed").unwrap();
         let v = version_of(&r, &Scope::Canon, &claim);
         write(
@@ -22,6 +22,14 @@ fn malt1_cli_create_propose_approve_closes_the_other_member() {
             &mut r,
             "b",
             json!([{"op": "update", "id": claim, "base": v, "body": "B"}]),
+        )
+        .unwrap();
+        // O17 (D-JQD5X): the choosing version creates the decision of its considered options
+        write(
+            &mut r,
+            "a",
+            json!([{"op": "create", "type": "decision", "parent": section,
+                    "fields": {"statement": "Use wording A", "status": "proposed", "needs_content": false}}]),
         )
         .unwrap();
         r.close().unwrap();

@@ -762,6 +762,10 @@ fn dq3_the_guide_opens_and_closes_as_written() {
     assert!(
         FILTER_GUIDE.ends_with("Example: type = decision and status = live and no in implements.")
     );
+    // A name after fields. keeps its case (TASK-956).
+    assert!(FILTER_GUIDE.contains(
+        "Keywords, built-in field names and link kinds are case-insensitive. A name after fields. keeps its case, and values keep their case."
+    ));
     // Its example parses.
     ok("type = decision and status = live and no in implements");
 }

@@ -1,5 +1,5 @@
 //! Related decisions (FW-EN5, FW-EN5a).
-use crate::lexicon::{Lexicon, is_tie};
+use crate::lexicon::is_tie;
 use crate::query::summary_in;
 use crate::{Materialized, RdyError, ReadState, Scope};
 use rdy_graph::{DerivedStatus, EdgeKind, Graph};
@@ -41,14 +41,16 @@ const SAME_ENTITY: &str = "same_entity";
 
 /// The entities `id` is tied to: existing blocks of an entity type that `id` references or
 /// links with `describes` or `affects`. One pass over its outgoing edges.
-fn entities_of(g: &Graph, lex: &Lexicon, m: &Materialized, id: &BlockId) -> BTreeSet<BlockId> {
+fn entities_of(
+    g: &Graph,
+    is_entity_type: &impl Fn(&str) -> bool,
+    m: &Materialized,
+    id: &BlockId,
+) -> BTreeSet<BlockId> {
     g.outgoing(id)
         .iter()
         .filter(|e| is_tie(&e.kind))
-        .filter(|e| {
-            m.get(&e.to)
-                .is_some_and(|b| lex.is_entity_type(&b.block_type))
-        })
+        .filter(|e| m.get(&e.to).is_some_and(|b| is_entity_type(&b.block_type)))
         .map(|e| e.to.clone())
         .collect()
 }
@@ -71,6 +73,19 @@ impl ReadState {
         let m = self.materialized(scope)?;
         let g = self.graph(scope)?;
         let lex = self.lexicon(scope)?;
+        Ok(related_in(&m, &g, &|t| lex.is_entity_type(t), decisions))
+    }
+}
+
+/// [`ReadState::related_decisions`] over one state: `m`, its graph `g`, and the pack's entity
+/// types. Nothing outside the state it is given can change the rows.
+pub(crate) fn related_in(
+    m: &Materialized,
+    g: &Graph,
+    is_entity_type: &impl Fn(&str) -> bool,
+    decisions: &[BlockId],
+) -> (Vec<RelatedDecision>, usize) {
+    {
         let is_decision = |id: &BlockId| g.status(id).is_some() && m.get(id).is_some();
         let describe = |id: &BlockId, for_id: &BlockId, relation: &str, entities: Vec<String>| {
             let b = m.get(id)?;
@@ -86,7 +101,7 @@ impl ReadState {
                     .into(),
                 statement: match b.field_str("statement").filter(|s| !s.is_empty()) {
                     Some(s) => s.to_string(),
-                    None => summary_in(b, &m),
+                    None => summary_in(b, m),
                 },
                 relation: relation.into(),
                 entities,
@@ -115,7 +130,7 @@ impl ReadState {
                     }
                 }
             }
-            let mine = entities_of(&g, &lex, &m, x);
+            let mine = entities_of(g, is_entity_type, m, x);
             let mut shared: BTreeMap<BlockId, BTreeSet<BlockId>> = BTreeMap::new();
             // each incoming edge that is itself a tie: one pass over the entity's edges
             for ent in &mine {
@@ -157,6 +172,6 @@ impl ReadState {
                 out.extend(describe(&d, x, relation, ents));
             }
         }
-        Ok((out, omitted))
+        (out, omitted)
     }
 }

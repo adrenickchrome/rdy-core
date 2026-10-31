@@ -65,6 +65,7 @@ impl Rdy {
                 let sealed = self.store.seal(vec![]);
                 self.state.store(Arc::new(ReadState {
                     seq: self.store.log_end(),
+                    check_records: crate::read_state::check_records(&self.store),
                     canon_head: prev.canon_head,
                     canon: Arc::clone(&prev.canon),
                     views: prev.views.clone(),
@@ -568,6 +569,7 @@ impl Rdy {
         };
         Ok(ReadState {
             seq,
+            check_records: crate::read_state::check_records(&self.store),
             canon_head,
             canon,
             views,
@@ -876,6 +878,7 @@ impl Rdy {
         let tags = tags_in(&reader)?;
         Ok(ReadState {
             seq,
+            check_records: crate::read_state::check_records(&self.store),
             canon_head,
             canon: Arc::new(canon),
             views,
@@ -1021,6 +1024,7 @@ impl Rdy {
         let caches = self.epoch_caches();
         self.state.store(Arc::new(ReadState {
             seq: self.store.log_end(),
+            check_records: crate::read_state::check_records(&self.store),
             canon_head: None,
             canon: Arc::new(Entry::new(None, None, None, Arc::new(vec![]))),
             views: imbl::HashMap::new(),

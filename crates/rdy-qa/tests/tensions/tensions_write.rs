@@ -26,7 +26,11 @@ fn w(e: &Local, who: &str, ops: Value) -> Value {
 fn tonc1_a_write_that_opens_a_tension_reports_it_in_on_change_and_as_a_consequence() {
     let (_d, e, s) = local();
     let vb = w(&e, "b", cite(&s.section, &s.a));
-    assert_eq!(vb["on_change"], json!({"tensions": [], "resolved": []}));
+    // D-JQD5X: on_change also carries the change stage's rule rows, none with no rules
+    assert_eq!(
+        vb["on_change"],
+        json!({"tensions": [], "resolved": [], "checks": []})
+    );
     let y = vb["created"]["$y"].as_str().unwrap().to_string();
     let va = w(&e, "a", upd(&s.a, "A changed."));
     let opened = va["on_change"]["tensions"].as_array().unwrap();
@@ -212,11 +216,10 @@ fn check_step(e: &Local, view: &str, before: &rdy_engine::ReadState, reply: &Val
     let after = e.read();
     let full = full_delta(before, &after);
     let want = on_change(before, &after, view, None, &full).unwrap();
-    assert_eq!(
-        reply["on_change"],
-        serde_json::to_value(&want).unwrap(),
-        "scoped != full: {reply}"
-    );
+    // D-JQD5X: the reply's on_change also carries the rule rows, none with no rules
+    let mut want = serde_json::to_value(&want).unwrap();
+    want["checks"] = json!([]);
+    assert_eq!(reply["on_change"], want, "scoped != full: {reply}");
 }
 
 proptest! {
@@ -633,7 +636,10 @@ fn tonc1_a_write_that_opens_thousands_of_advisory_tensions_is_cut_in_linear_time
     let (f0, (s0, b0)) = (after.reader().frames_read(), info_counts());
     let o = on_change(&before, &after, "b", None, &d).unwrap();
     let (s1, b1) = info_counts();
-    assert_eq!(serde_json::to_value(&o).unwrap(), *oc);
+    // D-JQD5X: the reply's on_change also carries the rule rows, none with no rules
+    let mut want = serde_json::to_value(&o).unwrap();
+    want["checks"] = json!([]);
+    assert_eq!(want, *oc);
     assert_eq!(b1 - b0, 0, "rows the budget cannot hold bare get no sides");
     assert!(
         s1 - s0 <= 2 * (o.tensions.len() as u64 + 2),

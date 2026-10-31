@@ -2,6 +2,7 @@
 
 use super::plan::PlanCardBinding;
 use crate::card_words::REASON_MAX;
+use crate::check::verdicts::MatchingVerdict;
 use crate::error::{E_BAD_INPUT, RdyError};
 use rdy_model::Hash;
 use rdy_model::redaction::ReasonClass;
@@ -204,6 +205,10 @@ pub struct Item {
     /// text leaves out. None for every other item; omitted from JSON then.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_binding: Option<PlanCardBinding>,
+    /// The check verdicts an approve card shows after its stored facts (D-JQD5X, O13), every
+    /// field of each, in the facts' order. Empty for every other item; omitted from JSON then.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub check_verdicts: Vec<MatchingVerdict>,
 }
 
 /// The facts of one removal request a version carries, as its approval card shows and binds

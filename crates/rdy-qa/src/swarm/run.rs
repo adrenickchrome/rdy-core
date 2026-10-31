@@ -21,7 +21,10 @@
 //!   block such an excluded change created (FW-AL1: losers are discarded by design); the person
 //!   accepts advice it is shown through the relay (ruling task-5.4). The agent answers the
 //!   view's change plan before each propose, as in the run, and again for a version that is not
-//!   ready for open plan items (`E_PLAN_OPEN`).
+//!   ready for open plan items (`E_PLAN_OPEN`). A stable claim that fails the pack's blocking rule
+//!   (`E_RULE_CHECK`) the agent repairs with a real write; a version held by a check verdict a
+//!   person accepted (`E_VALIDATION`, `held_by_verdict`) the next round replaces with a new
+//!   version. The drain never accepts or answers a verdict.
 //! - Before every approve, of the run and of the drain, the person accepts the version's
 //!   deferral card when the queue lists one (D-AAQ9Z), and the relay reads the version's change
 //!   plan (`version_plan`), so a check sees what the gate read.
@@ -677,24 +680,7 @@ fn listing(relay: &mut Link, args: Value) -> BTreeMap<String, Value> {
         Some(v) => vec![json!({"view": v})],
         None => {
             let mut scopes = vec![json!({"scope": "canon"})];
-            let e = relay.entry("view_list");
-            let mut views: Vec<String> = vec![];
-            relay.exec(
-                e,
-                "view_list",
-                "rdy_view",
-                json!({"op": "list", "all": true}),
-                |_, v| {
-                    views = v["views"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter(|r| r["closed"] != true)
-                        .filter_map(|r| r["name"].as_str().map(str::to_string))
-                        .collect();
-                },
-            );
-            scopes.extend(views.iter().map(|v| json!({"view": v})));
+            scopes.extend(open_views(relay).iter().map(|v| json!({"view": v})));
             scopes
         }
     };
@@ -734,6 +720,35 @@ fn listing(relay: &mut Link, args: Value) -> BTreeMap<String, Value> {
         }
     }
     out
+}
+
+/// The open views, as the relay lists them (`rdy_view list`), whole: the list's default budget
+/// (4 000 tokens) cuts the last views by name, the person's `work` among them (deep swarm,
+/// 2026-10-31). A list still cut fails the run with the seed.
+fn open_views(relay: &mut Link) -> Vec<String> {
+    let e = relay.entry("view_list");
+    let mut views: Vec<String> = vec![];
+    let mut cut = false;
+    relay.exec(
+        e,
+        "view_list",
+        "rdy_view",
+        json!({"op": "list", "all": true, "max_tokens": ALL}),
+        |_, v| {
+            cut = v.get("omitted").is_some();
+            views = v["views"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|r| r["closed"] != true)
+                .filter_map(|r| r["name"].as_str().map(str::to_string))
+                .collect();
+        },
+    );
+    if cut {
+        relay.fail("view_list", "got a view list cut for its budget");
+    }
+    views
 }
 
 /// The changes view `view` holds, as the relay reads them (`rdy_view show`).
@@ -1087,12 +1102,25 @@ fn row_fits(row: &Value, kind: &str) -> Result<(), String> {
 }
 
 /// The issue codes of a version that is not ready that the drain resolves (`Drain::resolve`).
-const RESOLVED_ISSUES: [&str; 4] = [
+/// `E_VALIDATION` only as a check verdict a person accepted as blocking (`held_by_verdict`).
+const RESOLVED_ISSUES: [&str; 6] = [
     "E_CONFLICT_UNRESOLVED",
     "E_BLOCKING_TENSION",
     "E_PLAN_OPEN",
     "E_BRIEF_REQUIRED",
+    "E_RULE_CHECK",
+    "E_VALIDATION",
 ];
+
+/// Whether `issue` is a check verdict a person accepted as blocking for its version (D-JQD5X QD2):
+/// `<check> verdict <review> is accepted as blocking for <P-x@n>`. The hold ends with a new
+/// version, which the drain's next round proposes; the drain never accepts or answers a verdict.
+pub fn held_by_verdict(issue: &Value) -> bool {
+    issue["code"] == "E_VALIDATION"
+        && issue["message"].as_str().is_some_and(|m| {
+            m.contains(" verdict ") && m.contains(" is accepted as blocking for P-")
+        })
+}
 
 /// A refusal of the gate: its code and the JSON `rdy approve` printed.
 struct Refusal {
@@ -1321,6 +1349,8 @@ impl Drain {
             .collect();
         // each dangling reference is repaired once: a second refusal for it fails the run
         let mut repaired: BTreeSet<(String, String)> = BTreeSet::new();
+        // O17: a choice with no decision is answered once
+        let mut decided = false;
         loop {
             let title = format!("{v} drain round {round}");
             let mut args = json!({"view": v, "title": title, "summary": title});
@@ -1351,6 +1381,25 @@ impl Drain {
             let made = e.block.clone();
             link.journal.record(e);
             match (res, made) {
+                // O17 (D-JQD5X): a choosing version that names no decision for its considered
+                // options is not ready: the agent records one proposed decision in the view and
+                // proposes again (choice-fixture construction)
+                (Res::Ok(r), Some(_)) if !decided && names_no_decision(&r) => {
+                    decided = true;
+                    let section = self.seed.sections[0].clone();
+                    let ops = json!([{"op": "create", "type": "decision", "parent": section,
+                        "fields": {"statement": format!("View {v} chooses its member"),
+                                   "status": "proposed", "needs_content": false}}]);
+                    self.write(
+                        i,
+                        v,
+                        &section,
+                        ops,
+                        "create",
+                        "E_ALT_DECISION",
+                        "a choice with no decision",
+                    );
+                }
                 (Res::Ok(_), Some(p)) => return Proposed::Ref(p, refusing, accepts),
                 (Res::Refused(code, message), _)
                     if code == "E_ALT_MEMBER" || code == "E_ALT_CHOSEN" =>
@@ -1809,6 +1858,15 @@ impl Drain {
                 {
                     self.no_rule(v, other, "land");
                 }
+                // an E_VALIDATION is resolved only as an accepted verdict's hold: the next round
+                // makes a new version, which inherits no hold
+                if let Some(x) = issues
+                    .iter()
+                    .find(|x| x["code"] == "E_VALIDATION" && !held_by_verdict(x))
+                {
+                    self.said = x.to_string();
+                    self.no_rule(v, "E_VALIDATION", "land");
+                }
                 let has = |code: &str| codes.iter().any(|c| c == code);
                 if has("E_CONFLICT_UNRESOLVED") {
                     let version = self.version(i, v, pref, &r.code);
@@ -1825,6 +1883,23 @@ impl Drain {
                 }
                 if has("E_PLAN_OPEN") {
                     agent::answer_plan(self.agent(i), v);
+                }
+                // a stable claim that fails the blocking rule: the agent repairs it with a real
+                // write, `checked: true` (the rule's fix), and the next round proposes again
+                for x in issues.iter().filter(|x| x["code"] == "E_RULE_CHECK") {
+                    let Some(b) = x["block"].as_str() else {
+                        self.no_rule(v, "E_RULE_CHECK", "an issue with no block")
+                    };
+                    let ops = json!([{"op": "update", "id": b, "fields": {"checked": true}}]);
+                    self.write(
+                        i,
+                        v,
+                        b,
+                        ops,
+                        "repair_rule",
+                        "E_RULE_CHECK",
+                        "a blocking rule",
+                    );
                 }
             }
             other => self.no_rule(v, other, "land"),
@@ -2157,6 +2232,15 @@ impl Drain {
     }
 }
 
+/// Whether a propose reply is not ready with `E_ALT_DECISION` (O17).
+fn names_no_decision(reply: &Value) -> bool {
+    reply["issues"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|i| i["code"] == "E_ALT_DECISION")
+}
+
 /// A lost daemon in the drain, which runs after the restart.
 fn link_fail(cfg: &Config, v: &str, act: &str) -> ! {
     panic!(
@@ -2168,6 +2252,60 @@ fn link_fail(cfg: &Config, v: &str, act: &str) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Deep swarm, 2026-10-31 (seed 2): the freeze's listing in parts reads the tensions of every
+    /// open view. `rdy_view list` cuts its rows to 4 000 tokens by default, and the cut drops the
+    /// last views by name (`work`, the person's view). The relay reads the whole list and fails
+    /// the run when a list is still cut.
+    #[test]
+    fn sg5_the_freeze_reads_every_open_view_past_the_default_budget() {
+        let cfg = Config {
+            seed: 14,
+            agents: 2,
+            steps: 12,
+            kill_at: None,
+        };
+        let p = project::build(&cfg);
+        let mut relay = Link::connect(
+            Where::of(&p),
+            RELAY_ACTOR,
+            RELAY_RUN,
+            "reviewer",
+            None,
+            Journal::new(),
+            Arc::new(KillGate::new()),
+        );
+        let mut names: Vec<String> = (0..200).map(|k| format!("v-{k:03}")).collect();
+        names.push("zz-last".to_string());
+        for name in &names {
+            let e = relay.entry("view_create");
+            let res = relay.exec(
+                e,
+                "view_create",
+                "rdy_view",
+                json!({"op": "create", "name": name}),
+                |_, _| {},
+            );
+            assert!(matches!(res, Res::Ok(_)), "cannot create view {name}");
+        }
+        // the case this pins: a list with the default budget is cut
+        let e = relay.entry("view_list");
+        let mut cut = false;
+        relay.exec(
+            e,
+            "view_list",
+            "rdy_view",
+            json!({"op": "list", "all": true}),
+            |_, v| cut = v.get("omitted").is_some(),
+        );
+        assert!(cut, "a default list of {} views is not cut", names.len());
+        let open: BTreeSet<String> = open_views(&mut relay).into_iter().collect();
+        let missing: Vec<&String> = names.iter().filter(|n| !open.contains(*n)).collect();
+        assert!(
+            missing.is_empty(),
+            "the freeze does not read views {missing:?}"
+        );
+    }
 
     /// Final review M8 (minors items 23 and 39): a proposal that chooses a set member, or a
     /// winner's later work, never passes a queued contra first claim; each place keeps its

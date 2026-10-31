@@ -53,6 +53,11 @@
 //! [`PLAN_CARD_DOMAIN`], the hash of that card's UTF-8 bytes, then the hash of the binding's
 //! postcard bytes, so every member and reason is bound where the text leaves one out. Any other
 //! card's hash is the hash of its text alone, as before.
+//!
+//! A card with check verdicts (`Item::check_verdicts`, D-JQD5X O13) wraps that digest: it hashes
+//! [`CHECK_CARD_DOMAIN`], the digest above (32 bytes), then the digest of the sorted-key JSON
+//! `{facts, options, check_verdicts}` (32 bytes), so every fact, option and verdict row is bound
+//! where the rendered text cuts one. A card with no check metadata keeps its hash exactly.
 
 use super::item::{ExceptionKind, Item, RemovalCard};
 use super::queue::{REAFFIRMS_FACT, REAFFIRMS_SEPARATOR};
@@ -74,6 +79,8 @@ pub const CARD_DEFAULT_TOKENS: usize = 2_000;
 pub const REMOVAL_CARD_DOMAIN: &[u8] = b"rdy-redaction-card-v1\0";
 /// The domain prefix of the hash of a card with a plan binding (O10).
 pub const PLAN_CARD_DOMAIN: &[u8] = b"rdy-plan-card-v1\0";
+/// The domain prefix of the hash of a card with check verdicts (D-JQD5X, O13).
+pub const CHECK_CARD_DOMAIN: &[u8] = b"rdy-check-card-1\0";
 /// The most decisions the text of the Re-affirms fact shows; JSON carries every one.
 pub const REAFFIRMS_SHOWN: usize = 20;
 /// The first line of each removal request's section.
@@ -147,9 +154,31 @@ pub fn render_checked(item: &Item, max_tokens: usize) -> Result<String, RdyError
     Ok(card)
 }
 
-/// The hash of the card at [`CARD_MAX_TOKENS`]; with removal requests, the removal digest (see
-/// the module docs).
+/// The hash of the card at [`CARD_MAX_TOKENS`]; with removal requests, the removal digest; with
+/// check verdicts, the check digest around it (see the module docs).
 pub fn card_hash(item: &Item) -> Hash {
+    let base = base_hash(item);
+    if item.check_verdicts.is_empty() {
+        return base;
+    }
+    // D-JQD5X, O13: every fact, option and verdict row, also those the rendered text cuts, as
+    // sorted-key JSON (`serde_json::Value` maps keep their keys sorted)
+    let rows = serde_json::json!({
+        "facts": item.facts,
+        "options": item.options,
+        "check_verdicts": item.check_verdicts,
+    });
+    let json = serde_json::to_vec(&rows).unwrap_or_default();
+    let mut bytes = Vec::with_capacity(CHECK_CARD_DOMAIN.len() + 64);
+    bytes.extend_from_slice(CHECK_CARD_DOMAIN);
+    bytes.extend_from_slice(&base.0);
+    bytes.extend_from_slice(&Hash::of(&json).0);
+    Hash::of(&bytes)
+}
+
+/// The hash of the card with no check metadata: the text's, the plan binding's or the removal
+/// digest.
+fn base_hash(item: &Item) -> Hash {
     let card = render(item, CARD_MAX_TOKENS);
     if let Some(binding) = &item.plan_binding {
         // O10: the rendered card's digest, then the digest of the complete binding, so every
@@ -459,6 +488,7 @@ mod tests {
             removal: None,
             removal_reports: BTreeMap::new(),
             plan_binding: None,
+            check_verdicts: vec![],
         }
     }
 

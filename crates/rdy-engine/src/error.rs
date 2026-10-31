@@ -101,6 +101,14 @@ pub const E_ALT_UNCHOSEN: &str = "E_ALT_UNCHOSEN";
 pub const E_ALT_MEMBER: &str = "E_ALT_MEMBER";
 /// A proposal carries a change of a member that lost a chosen alternative set, and records no decision that supersedes or refines the choice (FW-AL1).
 pub const E_ALT_CHOSEN: &str = "E_ALT_CHOSEN";
+/// A version that chooses in an alternative set names no decision for its considered options: a
+/// readiness issue inside `E_VALIDATION` (D-JQD5X).
+pub const E_ALT_DECISION: &str = "E_ALT_DECISION";
+/// A blocking pack rule fails on stable content: a readiness issue inside `E_VALIDATION`, and a
+/// report row of a write's `on_change` that never refuses it (D-JQD5X).
+pub const E_RULE_CHECK: &str = "E_RULE_CHECK";
+/// An advisory pack rule fails, or a blocking one outside stable content: a warning (D-JQD5X).
+pub const W_RULE_CHECK: &str = "W_RULE_CHECK";
 /// The intent has expired: it takes no renewal and no withdrawal (plan M2d1).
 pub const E_INTENT_EXPIRED: &str = "E_INTENT_EXPIRED";
 /// An answer names an item that the change plan in scope does not hold (D-4JMPH, p-EVM5J).
@@ -1067,7 +1075,7 @@ pub fn upstream_signout_local() -> Issue {
 
 /// Every error code the engine defines: each `E_*` constant of this module and the briefing's
 /// two. It is the engine's whole static error set, not one feature's subset.
-const CORE_ERROR_CODES: [&str; 109] = [
+const CORE_ERROR_CODES: [&str; 111] = [
     E_LOCKED,
     E_HELD_BY_READER,
     E_NO_PROJECT,
@@ -1124,6 +1132,8 @@ const CORE_ERROR_CODES: [&str; 109] = [
     E_ALT_UNCHOSEN,
     E_ALT_MEMBER,
     E_ALT_CHOSEN,
+    E_ALT_DECISION,
+    E_RULE_CHECK,
     E_INTENT_EXPIRED,
     E_PLAN_ITEM,
     E_DEFERRAL_OPEN,

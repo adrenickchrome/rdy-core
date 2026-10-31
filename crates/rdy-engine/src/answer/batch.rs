@@ -11,6 +11,9 @@
 //! | `defer`   | `o1`      | `ANSWER` `accept_deferrals`, with the card's full hash  |
 //! | `defer`   | `o2`      | `ANSWER` `refuse_deferrals`: the batch is not ready     |
 //!
+//! An `approve` item's `accept_verdict:<review>:<version>` option never reaches this table:
+//! `answer_one` dispatches it first ([`super::verdict`], D-JQD5X O14).
+//!
 //! Any other pair is refused with `E_BAD_INPUT`. An `ANSWER` is written alone in one batch with
 //! `Store::put_answer`, and its publish is `Delta::Seq` (O14). Canon never changes but by a
 //! landing.

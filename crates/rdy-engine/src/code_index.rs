@@ -230,7 +230,7 @@ fn split_on<'a>(hay: &'a [u8], sep: &'a [u8]) -> impl Iterator<Item = &'a [u8]> 
 }
 
 /// A full commit hash: 40 (SHA-1) or 64 (SHA-256) lowercase hex characters.
-fn is_hash(h: &[u8]) -> bool {
+pub(crate) fn is_hash(h: &[u8]) -> bool {
     matches!(h.len(), 40 | 64) && h.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
@@ -826,13 +826,22 @@ pub(crate) fn index_at(
 
 /// Whether `hash` names a commit in the repository. No fetch is tried for a missing one.
 pub(crate) fn commit_exists(repo: &CodeRepo, hash: &str) -> Result<bool, RdyError> {
+    commit_exists_with(repo, hash, Limits::GIT)
+}
+
+/// [`commit_exists`] with git's output kept to `lim`.
+pub(crate) fn commit_exists_with(
+    repo: &CodeRepo,
+    hash: &str,
+    lim: Limits,
+) -> Result<bool, RdyError> {
     if !is_hash(hash.as_bytes()) {
         return Ok(false);
     }
     let mut c = git_command(&repo.root);
     c.args(["rev-parse", "-q", "--verify"])
         .arg(format!("{hash}^{{commit}}"));
-    let out = run(c)?;
+    let out = run_with(c, lim)?;
     if out.status.success() {
         return Ok(true);
     }

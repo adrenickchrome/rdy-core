@@ -440,6 +440,7 @@ fn judged_pair(k: usize) -> (SwarmProject, Journal, Vec<Entry>, String) {
     let pair = |area| Act::Create {
         area,
         contra: Some(k),
+        source: false,
     };
     let first = run(&p, &cfg, 0, vec![pair("payments"), Act::Propose], &j, &g);
     assert_eq!(first.proposals.len(), 1, "{:#?}", j.entries());
@@ -640,7 +641,7 @@ fn sg4_a_propose_with_nothing_in_the_view_is_skipped_from_the_state() {
 #[test]
 fn sg4_an_exclude_with_nothing_included_is_skipped() {
     let (p, cfg, j, g) = rig(2);
-    run(&p, &cfg, 0, vec![Act::Exclude], &j, &g);
+    run(&p, &cfg, 0, vec![Act::Exclude { forced: false }], &j, &g);
     let e = only(&j, 0, "exclude");
     assert_eq!(
         (e.outcome.clone(), e.skip),
@@ -659,6 +660,7 @@ fn sg4_an_include_goes_through_while_the_change_is_in_its_authors_view() {
         vec![Act::Create {
             area: "payments",
             contra: None,
+            source: false,
         }],
         &j,
         &g,
@@ -667,7 +669,13 @@ fn sg4_an_include_goes_through_while_the_change_is_in_its_authors_view() {
         &p,
         &cfg,
         0,
-        vec![Act::Include { from: 1 }, Act::Exclude],
+        vec![
+            Act::Include {
+                from: 1,
+                forced: false,
+            },
+            Act::Exclude { forced: false },
+        ],
         &j,
         &g,
     );
@@ -678,6 +686,73 @@ fn sg4_an_include_goes_through_while_the_change_is_in_its_authors_view() {
     assert_eq!(reads[1].view.as_deref(), Some("a0"));
     assert_eq!(only(&j, 0, "include").outcome, Outcome::Ok);
     assert_eq!(only(&j, 0, "exclude").outcome, Outcome::Ok);
+    assert_no_refusal(&j);
+}
+
+/// Deep swarm ruling 1: the forced include sequence. The source writer creates its claim in its
+/// source view `a<i>-in`; another writer includes that change into its include view `a<i>-ex`,
+/// then excludes it, and the include view is left empty. Neither act touches the agents' own
+/// views.
+#[test]
+fn ds1_the_forced_include_sequence_includes_then_excludes_the_source_claim() {
+    let (p, cfg, j, g) = rig(2);
+    run(
+        &p,
+        &cfg,
+        1,
+        vec![Act::Create {
+            area: "payments",
+            contra: None,
+            source: true,
+        }],
+        &j,
+        &g,
+    );
+    let created = only(&j, 1, "create");
+    assert_eq!(created.outcome, Outcome::Ok);
+    assert_eq!(created.view.as_deref(), Some("a1-in"));
+    let change = created.change.clone().expect("the source change");
+    run(
+        &p,
+        &cfg,
+        0,
+        vec![
+            Act::Include {
+                from: 1,
+                forced: true,
+            },
+            Act::Exclude { forced: true },
+        ],
+        &j,
+        &g,
+    );
+    let inc = only(&j, 0, "include");
+    assert_eq!(inc.outcome, Outcome::Ok, "{:#?}", j.entries());
+    assert_eq!(inc.view.as_deref(), Some("a0-ex"));
+    assert_eq!(inc.reply, Some(json!({"included": [change]})));
+    let exc = only(&j, 0, "exclude");
+    assert_eq!(exc.outcome, Outcome::Ok, "{:#?}", j.entries());
+    assert_eq!(exc.view.as_deref(), Some("a0-ex"));
+    // the include read the source view, the exclude the include view
+    let reads: Vec<Option<String>> = of(&j, "agent:a0", "view_show")
+        .into_iter()
+        .map(|e| e.view)
+        .collect();
+    assert_eq!(
+        reads,
+        [Some("a1-in".to_string()), Some("a0-ex".to_string())]
+    );
+    let mut relay = relay(&p);
+    let shown = relay
+        .call(
+            "rdy_view",
+            json!({"op": "show", "view": "a0-ex", "max_tokens": 100000}),
+        )
+        .ok();
+    assert!(
+        shown["changes"].as_array().is_none_or(Vec::is_empty),
+        "{shown}"
+    );
     assert_no_refusal(&j);
 }
 
@@ -692,6 +767,7 @@ fn sg4_an_include_of_a_change_that_landed_is_skipped_from_the_state() {
             Act::Create {
                 area: "payments",
                 contra: None,
+                source: false,
             },
             Act::Propose,
         ],
@@ -700,7 +776,17 @@ fn sg4_an_include_of_a_change_that_landed_is_skipped_from_the_state() {
     );
     let queue = Arc::new(Mutex::new(r.proposals.clone()));
     run_person(&p, vec![PersonAct::Land { relayed: true }], &j, &queue, &g);
-    run(&p, &cfg, 0, vec![Act::Include { from: 1 }], &j, &g);
+    run(
+        &p,
+        &cfg,
+        0,
+        vec![Act::Include {
+            from: 1,
+            forced: false,
+        }],
+        &j,
+        &g,
+    );
     // it asked the author's view, which no longer holds the change
     assert_eq!(only(&j, 0, "view_show").view.as_deref(), Some("a1"));
     let e = only(&j, 0, "include");
@@ -937,5 +1023,105 @@ fn sg4_a_lost_daemon_after_the_restart_fails_with_the_seed() {
             .count(),
         1,
         "no second Lost is journaled"
+    );
+}
+
+// ---- O17 (D-JQD5X): a choosing version holds its choice decision ----
+
+/// O17 with ap13: agent a0 holds a scratch change, and the seeded draw makes its first propose
+/// scratch-only (`rdy_propose {changes}`), but its view is a member of an open set that another
+/// agent made. The propose is refused with `E_ALT_UNCHOSEN`; a0 records its choice decision and
+/// proposes again, choosing. A choosing version names the whole view: a list of the scratch
+/// changes leaves the decision out, and that version is not ready (`E_ALT_DECISION`). So the
+/// choosing version is ready: its reply carries the policy's verdict, which a not-ready version
+/// never has.
+#[test]
+fn sg4_a_choice_after_a_scratch_only_draw_holds_its_decision() {
+    let seed = (1..1_000)
+        .find(|s| agent::scratch_only_draw(*s, 0, 0))
+        .expect("a seed whose first propose of a0 is scratch-only");
+    let cfg = Config {
+        seed,
+        agents: 2,
+        steps: 12,
+        kill_at: None,
+    };
+    let p = project::build(&cfg);
+    let (j, g) = (Journal::new(), Arc::new(KillGate::new()));
+    // view a1 exists before the set names it
+    run(
+        &p,
+        &cfg,
+        1,
+        vec![Act::Write {
+            target: Pick::Seed(1),
+            stable: false,
+        }],
+        &j,
+        &g,
+    );
+    // a0's propose answers its change plan in the plan turn before its call: while this act
+    // turn is held, the call waits, so the set exists before it
+    let hold = g.act_turn();
+    let a0 = agent::spawn(
+        &p,
+        &cfg,
+        0,
+        vec![
+            Act::Write {
+                target: Pick::Seed(0),
+                stable: false,
+            },
+            Act::Propose,
+        ],
+        j.clone(),
+        g.clone(),
+    );
+    wait_for(&j, "a0's scratch write", |es| {
+        es.iter()
+            .any(|e| e.actor == "agent:a0" && e.act == "write" && e.outcome == Outcome::Ok)
+    });
+    let mut a1 = McpClient::start_proxy(&p.served);
+    a1.call(
+        "rdy_session",
+        json!({"actor": "agent:a1", "run": "a1", "role": "writer"}),
+    )
+    .ok();
+    let set = a1
+        .call(
+            "rdy_alternatives",
+            json!({"op": "create", "title": "which rule wins", "members": [
+                {"label": "a0", "view": "a0"}, {"label": "a1", "view": "a1"}]}),
+        )
+        .ok();
+    let set = set["set"]["id"].as_str().expect("the set's id").to_string();
+    drop(hold);
+    a0.join()
+        .unwrap_or_else(|e| panic!("agent a0 panicked: {e:?}"));
+    let all = || format!("{:#?}", j.entries());
+    let proposes = of(&j, "agent:a0", "propose");
+    assert_eq!(proposes.len(), 2, "{}", all());
+    assert_eq!(
+        proposes[0].outcome,
+        Outcome::Refused("E_ALT_UNCHOSEN".into()),
+        "{}",
+        all()
+    );
+    // the first attempt was the scratch-only draw: the seed draws it, a0 holds a scratch change
+    // and knew no set
+    let decided = of(&j, "agent:a0", "create");
+    assert_eq!(decided.len(), 1, "the choice decision: {}", all());
+    assert_eq!(decided[0].outcome, Outcome::Ok, "{}", all());
+    let choice = &proposes[1];
+    assert_eq!(choice.outcome, Outcome::Ok, "{}", all());
+    let reply = choice.reply.as_ref().expect("the choosing propose's reply");
+    assert_eq!(
+        reply["alternatives"],
+        json!({"set": set, "chosen": "a0"}),
+        "{reply:#}"
+    );
+    assert!(
+        reply["policy"]["verdict"].is_string(),
+        "the choosing version is not ready: {reply:#}"
     );
 }

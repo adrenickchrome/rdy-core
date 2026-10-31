@@ -648,10 +648,21 @@ fn proposal_version_in(reader: &StoreReader, v: &Hash) -> Result<Proposal, RdyEr
     Ok(reader.proposal(v)?)
 }
 
+/// Whether `store` may hold a check record now: its `check_request` feature, the open held
+/// batch's included. Read where a state is published, with `seq`.
+pub(crate) fn check_records(store: &rdy_store::Store) -> bool {
+    store.has_feature_now(rdy_store::format::FEATURE_CHECK_REQUEST)
+}
+
 /// An immutable published state of the project: the heads, view sets and tags it was published
 /// with, and lazily built materializations. A held state never follows a later write.
 pub struct ReadState {
     pub(crate) seq: Location,
+    /// Whether the store had the `check_request` feature when this state was published: false
+    /// means the log holds no CHECK_REQUEST, Check REVIEW or AcceptVerdict ANSWER up to `seq`
+    /// (each activates it in the batch that first writes one), so the check verdict reads skip
+    /// their walks ([`check_records`]).
+    pub(crate) check_records: bool,
     pub(crate) canon_head: Option<Hash>,
     pub(crate) canon: Arc<Entry>,
     /// Exactly the views with a `view/` ref.

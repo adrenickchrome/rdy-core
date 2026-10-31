@@ -204,12 +204,13 @@ fn rf9_brief_lists_sources_and_finding_premises_once() {
         (
             fx.s1.to_string(),
             json!({"source": fx.s1.to_string(), "kind": "release", "title": "Release 1",
-                   "blocks": sorted(vec![fx.x.to_string(), fx.y.to_string()])}),
+                   "blocks": sorted(vec![fx.x.to_string(), fx.y.to_string()]),
+                   "existence": "unchecked"}),
         ),
         (
             fx.s2.to_string(),
             json!({"source": fx.s2.to_string(), "kind": "spec", "title": "Spec 2",
-                   "blocks": [fx.x.to_string()]}),
+                   "blocks": [fx.x.to_string()], "existence": "unchecked"}),
         ),
     ];
     rows.sort_by(|a, b| a.0.cmp(&b.0));
@@ -681,8 +682,11 @@ fn rf9_cli_brief_uses_the_same_rows() {
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
     let t = text(&claim.to_string());
-    // every control character and line separator becomes a space
-    let want = format!("sources:\n  {src} release: Release [31m 1 # hostile ({claim})\n");
+    // every control character and line separator becomes a space; ck9 (D-JQD5X): the line ends
+    // with the source's existence, here `unchecked` because no checkout is linked
+    let want = format!(
+        "sources:\n  {src} release: Release [31m 1 # hostile ({claim}); source unchecked\n"
+    );
     assert!(t.contains(&want), "{t:?}\nwant {want:?}");
     assert!(!t.contains("findings:"), "no empty heading: {t}");
     let t = text(&dec.to_string());

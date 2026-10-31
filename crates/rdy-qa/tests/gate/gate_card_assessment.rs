@@ -3,17 +3,19 @@
 //! it, the Tensions fact shows each advisory tension with the answer the bound plan holds, a
 //! version that is ready but has no stored assessment is not ready (O10), and the card's hash
 //! binds the card as shown.
+use crate::gate_check_verdicts::{REASON, meaning_verdict, on};
 use rdy_engine::answer::AnswerRequest;
 use rdy_engine::answer::relay::RelayInput;
+use rdy_engine::engine::Local;
 use rdy_engine::pending::{Item, ItemKind, Pending, PendingQuery};
 use rdy_engine::plan::api::PlanAnswerInput;
-use rdy_engine::{E_VALIDATION, ProposalInfo, Rdy, Session};
+use rdy_engine::{E_VALIDATION, Engine, ProposalInfo, Rdy, ReadState, Session};
 use rdy_model::assessment::Assessment;
 use rdy_model::plan::PlanAct;
 use rdy_model::{BlockId, Hash, Role};
 use rdy_qa::fixtures::{land, writer};
 use rdy_qa::intake::{PERSON, TEST_SUMMARY};
-use rdy_qa::tensions::{j_typo, put, put_j, upd};
+use rdy_qa::tensions::{ag, j_typo, put, put_j, upd};
 use rdy_schema::{Issue, Severity};
 use serde_json::json;
 
@@ -77,11 +79,20 @@ fn pending(r: &Rdy) -> Pending {
 }
 
 fn approve_item(r: &Rdy, pref: &str) -> Item {
-    pending(r)
-        .items
-        .into_iter()
-        .find(|i| i.r#ref == pref && i.kind == ItemKind::Approve)
-        .unwrap_or_else(|| panic!("an approve item for {pref}"))
+    approve_item_in(&r.read(), pref)
+}
+
+fn approve_item_in(st: &ReadState, pref: &str) -> Item {
+    st.pending(&PendingQuery {
+        person: PERSON.into(),
+        session_ref: None,
+        max_tokens: rdy_engine::pending::CARD_MAX_TOKENS,
+    })
+    .unwrap()
+    .items
+    .into_iter()
+    .find(|i| i.r#ref == pref && i.kind == ItemKind::Approve)
+    .unwrap_or_else(|| panic!("an approve item for {pref}"))
 }
 
 /// The assessment version `p` stored.
@@ -178,6 +189,29 @@ fn rg13_the_approve_card_facts_are_the_stored_facts() {
             .collect::<Vec<_>>(),
         "the order of the facts is the stored one"
     );
+    // ck7 (D-JQD5X, O13): a verdict on the version adds its line after every stored fact; the
+    // stored facts stay as they were shown, and so does the stored record
+    let World { _dir, r, x, .. } = w;
+    let e = Local::new(r);
+    meaning_verdict(&e, &ag("a"), &p.r#ref, "fail", &x);
+    let shown = approve_item_in(&e.read(), &p.r#ref);
+    let n = after.facts.len();
+    assert_eq!(lines(&shown)[..n], lines(&after)[..], "the stored prefix");
+    assert_eq!(
+        lines(&shown)[n..],
+        [format!(
+            "meaning preservation: fail (agent:r, independent): {REASON}"
+        )],
+        "the verdict suffix"
+    );
+    let st = e.read();
+    let v: Hash = p.id.parse().unwrap();
+    let h = st
+        .reader()
+        .assessment_of_proposal(&v, st.seq())
+        .unwrap()
+        .unwrap();
+    assert_eq!(st.reader().assessment(&h).unwrap(), a, "the stored record");
 }
 
 /// The ids of the advisory tensions `p` reports, as `(tn id, kind, summary)` in tension id order.
@@ -346,4 +380,47 @@ fn rg13_the_card_hash_binds_the_shown_card() {
     let done = answer(&mut w, &now.card_hash).unwrap();
     assert_eq!(done.act, "approve");
     assert_ne!(w.r.read().canon_head(), head, "the approval landed");
+    // ck7 (D-JQD5X, O13): a verdict that arrives after the card was shown moves its hash too;
+    // the shown hash is refused and the card with the verdict line lands
+    put_j(&mut w.r, "b", upd(&w.z, "Z holds in b."), j_typo());
+    let q = propose(&mut w.r, "b");
+    let World { _dir, r, z, .. } = w;
+    let e = Local::new(r);
+    let shown = approve_item_in(&e.read(), &q.r#ref);
+    meaning_verdict(&e, &ag("b"), &q.r#ref, "fail", &z);
+    let late = approve_item_in(&e.read(), &q.r#ref);
+    assert_ne!(late.card_hash, shown.card_hash);
+    let answer_on = |e: &Local, hash: &str| {
+        let req = AnswerRequest {
+            r#ref: q.r#ref.clone(),
+            option: "approve".into(),
+            card_hash: Some(hash.to_string()),
+            note: None,
+            relay: RelayInput {
+                relayed_by: None,
+                evidence: Some("yes".into()),
+                question: Some("Shall I approve it?".into()),
+                session_ref: Some("chat-7".into()),
+                kind: None,
+            },
+            brief: None,
+        };
+        on(e, move |r| r.answer(&agent(), PERSON, req))
+    };
+    let head = e.read().canon_head();
+    let err = answer_on(&e, &shown.card_hash).unwrap_err();
+    assert_eq!(err.code, rdy_engine::E_PROPOSAL_MOVED, "{err:?}");
+    assert_eq!(
+        err.corrected.as_ref().unwrap()["card_hash"],
+        serde_json::json!(late.card_hash),
+        "the corrected card shows the verdict"
+    );
+    assert_eq!(
+        e.read().canon_head(),
+        head,
+        "the refused approval landed nothing"
+    );
+    let done = answer_on(&e, &late.card_hash).unwrap();
+    assert_eq!(done.act, "approve");
+    assert_ne!(e.read().canon_head(), head, "the approval landed");
 }

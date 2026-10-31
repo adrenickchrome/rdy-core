@@ -316,6 +316,240 @@ pub fn fsck(dir: &Path, env: &[(String, String)]) -> (bool, Value) {
     (ok, v)
 }
 
+/// The check records the project at `dir` stores (D-JQD5X), read at its end on a copy with no
+/// daemon: the durable requests, the check verdicts, the accepted verdicts, the versions canon
+/// landed, the holds of each version the journal proposed, and the rule fixture's state at every
+/// landing. Labels and hashes are as the tools print them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoredChecks {
+    /// Each durable request by label (`rq-<64 hex>`): its check, its mode (`Author` or
+    /// `Independent`) and its version subject, if any.
+    pub requests: BTreeMap<String, (String, String, Option<String>)>,
+    /// Each check verdict by review hash: its request's label, its verdict (`Pass`, `Concern`,
+    /// `Fail`) and its actor.
+    pub reviews: BTreeMap<String, (String, String, String)>,
+    /// Each accepted verdict, by its option `accept_verdict:<review>:<version>`.
+    pub accepted: BTreeSet<String>,
+    /// The proposal versions canon's chain landed.
+    pub landed: BTreeSet<String>,
+    /// For each version examined (by hash), the reviews its accepted-verdict issues name.
+    pub holds: BTreeMap<String, BTreeSet<String>>,
+    /// Each rule fixture (a claim keyed `FIXTURE_KEY`) that canon held unchecked: `<landing or
+    /// canon>: <claim>`.
+    pub unchecked: Vec<String>,
+}
+
+/// The review a held-verdict issue names: `<check> verdict <review> is accepted as blocking for
+/// <P-x@n>`.
+fn held_review(message: &str) -> Option<String> {
+    let rest = message.split_once(" verdict ")?.1;
+    let (review, tail) = rest.split_once(' ')?;
+    tail.starts_with("is accepted as blocking for ")
+        .then(|| review.to_string())
+}
+
+/// The rule fixtures `m` holds unchecked.
+fn unchecked_in(m: &rdy_engine::Materialized) -> Vec<String> {
+    use super::project::FIXTURE_KEY;
+    m.iter()
+        .filter(|b| b.block_type == "claim" && b.field_str("key") == Some(FIXTURE_KEY))
+        .filter(|b| b.fields.get("checked") != Some(&rdy_model::FieldValue::Bool(true)))
+        .map(|b| b.id.to_string())
+        .collect()
+}
+
+/// `StoredChecks` of the open project `r`. `versions` names the proposal versions to read holds
+/// of (`P-x@n` or a hash); each accepted version is read too.
+pub fn stored_checks_of(r: &Rdy, versions: &BTreeSet<String>) -> StoredChecks {
+    use rdy_engine::check::verdicts::{accepted_verdict_issues, parse_accept_option};
+    let st = r.read();
+    let reader = st.reader();
+    let end = st.seq();
+    let mut out = StoredChecks::default();
+    let fail = |what: &str, e: &dyn std::fmt::Display| -> ! { panic!("cannot read {what}: {e}") };
+    reader
+        .for_each_check_request(end, |h, q| {
+            let version = q.subject.version.map(|v| v.to_string());
+            out.requests.insert(
+                rdy_engine::check::requests::durable_label(&h),
+                (q.check.clone(), format!("{:?}", q.mode), version),
+            );
+            Ok(())
+        })
+        .unwrap_or_else(|e| fail("the check requests", &e));
+    reader
+        .for_each_check_review(end, |h, rv| {
+            let rdy_model::ReviewSubject::Check { request } = rv.subject else {
+                return Ok(());
+            };
+            out.reviews.insert(
+                h.to_string(),
+                (
+                    rdy_engine::check::requests::durable_label(&request),
+                    format!("{:?}", rv.verdict),
+                    rv.provenance.actor.clone(),
+                ),
+            );
+            Ok(())
+        })
+        .unwrap_or_else(|e| fail("the check reviews", &e));
+    let mut examine: BTreeSet<String> = versions.clone();
+    reader
+        .for_each_verdict_answer(end, |_, a| {
+            if let Some(option) = a.option.clone() {
+                if let Some((_, v)) = parse_accept_option(&option) {
+                    examine.insert(v.to_string());
+                }
+                out.accepted.insert(option);
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|e| fail("the accepted verdicts", &e));
+    let chain = reader
+        .landings()
+        .unwrap_or_else(|e| fail("canon's chain", &e));
+    for (l, rec) in &chain {
+        out.landed.insert(rec.proposal.to_string());
+        if let Some(v) = rec.approved_version {
+            out.landed.insert(v.to_string());
+        }
+        let m = st
+            .materialized(&rdy_engine::Scope::At(*l))
+            .unwrap_or_else(|e| fail("canon at a landing", &e));
+        out.unchecked
+            .extend(unchecked_in(&m).into_iter().map(|b| format!("{l}: {b}")));
+    }
+    for v in examine {
+        let Ok(pref) = r.resolve_proposal(&v) else {
+            continue;
+        };
+        let p = st
+            .proposal_version(&pref.version)
+            .unwrap_or_else(|e| fail("a proposal version", &e));
+        let issues = accepted_verdict_issues(&st, &pref, &p)
+            .unwrap_or_else(|e| fail("a version's holds", &e));
+        out.holds.insert(
+            pref.version.to_string(),
+            issues
+                .iter()
+                .filter_map(|i| held_review(&i.message))
+                .collect(),
+        );
+    }
+    out
+}
+
+/// `stored_checks_of` on a copy of the project at `dir`, with no daemon.
+pub fn stored_checks(dir: &Path, versions: &BTreeSet<String>) -> StoredChecks {
+    on_copy(dir, |r| stored_checks_of(r, versions))
+}
+
+/// `stored_checks` of a copy of `dir` after a reindex: what the log alone rebuilds.
+pub fn stored_checks_reindexed(dir: &Path, versions: &BTreeSet<String>) -> StoredChecks {
+    on_copy(dir, |r| {
+        r.reindex()
+            .unwrap_or_else(|e| panic!("cannot reindex a copy of {}: {e}", dir.display()));
+        stored_checks_of(r, versions)
+    })
+}
+
+/// The proposal versions an `Ok` `propose` or `wc_propose` entry of `journal` names.
+pub fn proposed_versions(journal: &[Entry]) -> BTreeSet<String> {
+    journal
+        .iter()
+        .filter(|e| matches!(e.act, "propose" | "wc_propose") && e.outcome == Outcome::Ok)
+        .filter_map(|e| e.block.clone())
+        .collect()
+}
+
+/// The check oracle (D-JQD5X, D-ME2HD; system/quality-gate tb-A4DAV), read from the stored records
+/// of the project at `dir` and compared with `journal`. Each violation is one line:
+/// - a version held by a verdict no person accepted for it (an unaccepted verdict blocked a ready
+///   version, or a new version inherited a hold);
+/// - a version canon landed with a verdict a person accepted for it (its case still holds: the
+///   swarm reads no code, so no case changes);
+/// - an acknowledged acceptance the store does not hold, or a stored one no entry made;
+/// - an acknowledged request or verdict the store does not hold (a kill lost it);
+/// - a rule fixture canon held unchecked at a landing.
+pub fn check_violations(journal: &[Entry], dir: &Path) -> Vec<String> {
+    let stored = stored_checks(dir, &proposed_versions(journal));
+    check_violations_of(journal, &stored)
+}
+
+/// `check_violations` on records already read.
+pub fn check_violations_of(journal: &[Entry], stored: &StoredChecks) -> Vec<String> {
+    let mut out = vec![];
+    let accepted: BTreeSet<(String, String)> = stored
+        .accepted
+        .iter()
+        .filter_map(|o| rdy_engine::check::verdicts::parse_accept_option(o))
+        .map(|(r, v)| (r.to_string(), v.to_string()))
+        .collect();
+    for (v, reviews) in &stored.holds {
+        for r in reviews {
+            if !accepted.contains(&(r.clone(), v.clone())) {
+                out.push(format!(
+                    "version {v} is held by verdict {r}, which no person accepted for it"
+                ));
+            }
+        }
+    }
+    for (r, v) in &accepted {
+        if stored.landed.contains(v) {
+            out.push(format!(
+                "version {v} landed with verdict {r} accepted as blocking for it"
+            ));
+        }
+    }
+    let field = |e: &Entry, f: fn(&super::journal::CheckFacts) -> Option<String>| {
+        e.check.as_ref().and_then(f)
+    };
+    let mut answered: BTreeSet<String> = BTreeSet::new();
+    for e in journal.iter().filter(|e| e.act == "accept_check_verdict") {
+        let Some(option) = field(e, |c| c.answer.clone()) else {
+            continue;
+        };
+        answered.insert(option.clone());
+        if e.outcome == Outcome::Ok && !stored.accepted.contains(&option) {
+            out.push(format!("acknowledged acceptance {option} is not stored"));
+        }
+    }
+    for option in &stored.accepted {
+        if !answered.contains(option) {
+            out.push(format!("stored acceptance {option} was never sent"));
+        }
+    }
+    for e in journal.iter().filter(|e| e.outcome == Outcome::Ok) {
+        match e.act {
+            "check_run" | "check_request" => {
+                if let Some(rq) = field(e, |c| c.request.clone())
+                    && !stored.requests.contains_key(&rq)
+                {
+                    out.push(format!(
+                        "acknowledged request {rq} ({} step {}) is not stored",
+                        e.actor, e.step
+                    ));
+                }
+            }
+            "check_submit" => {
+                if let Some(rv) = field(e, |c| c.review.clone())
+                    && !stored.reviews.contains_key(&rv)
+                {
+                    out.push(format!(
+                        "acknowledged verdict {rv} ({} step {}) is not stored",
+                        e.actor, e.step
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    for u in &stored.unchecked {
+        out.push(format!("canon held the rule fixture unchecked at {u}"));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

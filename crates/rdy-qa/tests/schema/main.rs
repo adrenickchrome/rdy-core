@@ -4,6 +4,7 @@
 mod schema;
 mod schema_areas;
 mod schema_card_words;
+mod schema_check_fields;
 mod schema_class;
 mod schema_packs;
 mod schema_rules;

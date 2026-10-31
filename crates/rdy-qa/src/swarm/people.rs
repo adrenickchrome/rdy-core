@@ -12,6 +12,9 @@
 //!   its open items, `rdy plan confirm|defer <items> --reason <why> --view work` (ruling task-15
 //!   F1), then `rdy propose`.
 //!
+//! The person accepts a check verdict as blocking through the relay too (`rdy_pending`, then
+//! `rdy_answer` with the card's `accept_verdict:` option; D-JQD5X QD2).
+//!
 //! The person lands the proposal at the front of a shared queue (the run orders it). A proposal
 //! made before its view joined an alternative set it drops, and journals the drop as a skipped
 //! `land` (`Skip::ProposedBeforeSet`) that names the proposal. Journal entries of the
@@ -28,7 +31,7 @@
 use super::agent::{
     self, KINDS, KillGate, Link, Pace, Res, Where, advised_labels, inbox_labels, labels_of, spell,
 };
-use super::journal::{Entry, Journal, Outcome, Skip};
+use super::journal::{CheckFacts, Entry, Journal, Outcome, Skip};
 use super::project::{CLAIMS_PER_AREA, DOC_PATHS, SeedBlocks, SwarmProject};
 use super::run::{self, Watch};
 use super::script::PersonAct;
@@ -51,6 +54,8 @@ const RELAY: &str = RELAY_ACTOR;
 /// The relaying agent's actor and run: the relay runs as this session (D-HA7YZ).
 const RELAY_ACTOR: &str = "agent:relay";
 const RELAY_RUN: &str = "chat";
+/// The prefix of a card's option that accepts a check verdict (`accept_verdict:<review>:<version>`).
+pub const ACCEPT_PREFIX: &str = "accept_verdict:";
 /// How many queued proposals the person looks at when it hunts for advice to accept: the queue
 /// a fast run holds, so a late contradiction pair's proposal is seen (ruling task-5.2).
 const ADVICE_LOOKS: usize = 24;
@@ -334,10 +339,14 @@ impl Person {
         // holds the landing turn instead, which every plan answer waits for (`KillGate`); a
         // working-copy edit answers a plan itself, so it takes its turns step by step
         let gate = self.link.gate.clone();
-        let _act =
-            (!matches!(act, PersonAct::Land { .. } | PersonAct::WcEdit)).then(|| gate.act_turn());
+        let _act = (!matches!(
+            act,
+            PersonAct::Land { .. } | PersonAct::WcEdit | PersonAct::AcceptCheckVerdict
+        ))
+        .then(|| gate.act_turn());
         match act {
             PersonAct::Land { relayed } => self.land(*relayed),
+            PersonAct::AcceptCheckVerdict => self.accept_check_verdict(),
             PersonAct::Dismiss => self.dismiss(),
             PersonAct::AcceptAdvice => self.accept_advice(),
             PersonAct::WcEdit => self.wc_edit(),
@@ -669,6 +678,70 @@ impl Person {
             json!({"accept": accept}),
             |_, _| {},
         );
+    }
+
+    /// The person accepts a check verdict as blocking (D-JQD5X QD2), through the relay: the relay
+    /// reads the queue (`rdy_pending`, a `pending` entry) and relays the answer that takes the
+    /// first `accept_verdict:` option of the first card that offers one (`rdy_answer` with the
+    /// card's hash and the person's words). The answer is an `accept_check_verdict` entry naming
+    /// the version, the review, the option and the answer's reply. With no such card it is
+    /// `Skipped` (`NoVerdictToAccept`). It holds the landing turn, as a landing does, so no
+    /// landing moves the card between the read and the answer.
+    fn accept_check_verdict(&mut self) {
+        let gate = self.link.gate.clone();
+        let _turn = gate.landing_turn();
+        let mut e = self.entry("agent:relay", "pending");
+        e.reply = Some(json!({"via": "rdy_pending"}));
+        let mut found: Option<(String, String, String)> = None;
+        let res = self.link.exec(
+            e,
+            "pending",
+            "rdy_pending",
+            json!({"session_ref": RELAY_RUN}),
+            |_, v| {
+                found = v["items"].as_array().into_iter().flatten().find_map(|i| {
+                    let option = i["options"]
+                        .as_array()?
+                        .iter()
+                        .filter_map(|o| o["id"].as_str())
+                        .find(|id| id.starts_with(ACCEPT_PREFIX))?;
+                    Some((
+                        i["ref"].as_str()?.to_string(),
+                        option.to_string(),
+                        i["card_hash"].as_str()?.to_string(),
+                    ))
+                });
+            },
+        );
+        if matches!(res, Res::Lost) {
+            return;
+        }
+        let mut e = self.entry("agent:relay", "accept_check_verdict");
+        let Some((pref, option, hash)) = found else {
+            e.outcome = Outcome::Skipped;
+            e.skip = Some(Skip::NoVerdictToAccept);
+            self.link.journal.record(e);
+            return;
+        };
+        e.block = Some(pref.clone());
+        let review = option
+            .strip_prefix(ACCEPT_PREFIX)
+            .and_then(|rest| rest.split(':').next())
+            .map(str::to_string);
+        e.check = Some(CheckFacts {
+            review,
+            answer: Some(option.clone()),
+            version: Some(pref.clone()),
+            ..CheckFacts::default()
+        });
+        let args = json!({"ref": pref, "option": option, "card_hash": hash,
+            "evidence": format!("Hold {pref} on this verdict."),
+            "question": format!("Accept the check verdict on {pref} as blocking?"),
+            "session_ref": RELAY_RUN});
+        self.link
+            .exec(e, "accept_check_verdict", "rdy_answer", args, |en, v| {
+                en.reply = Some(v.clone());
+            });
     }
 
     fn inbox_ack(&mut self) {

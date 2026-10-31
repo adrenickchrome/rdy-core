@@ -90,6 +90,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
                 "alternatives": crate::alt_tools::ALT_DOC,
                 "tensions": rdy_engine::tensions::api::TENSIONS_DOC,
                 "reviews": rdy_engine::semantic::api::REVIEWS_DOC,
+                "checks": checks_doc(),
                 "inbox": format!("{} {}", rdy_engine::inbox::api::INBOX_DOC, super::inbox::INBOX_PERSON_DOC),
                 "decisions": {"home": st_.decisions_home(), "rule": DECISIONS_RULE},
                 "entities": {"types": entity_types, "rule": ENTITY_RULE},
@@ -107,4 +108,27 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             }))
         }
     }
+}
+
+/// `rdy_schema`'s `checks` key (D-JQD5X): every check with its stages. `stages` reads the stage
+/// registry of the deterministic checks; `agent` reads the catalogue of the eight authoring
+/// checks, each in no stage; `rules` is the pack rule contract (D-HZYK0).
+fn checks_doc() -> Value {
+    use rdy_engine::check::{AGENT_CHECKS, STAGE_CHECKS};
+    json!({
+        "stages": STAGE_CHECKS
+            .iter()
+            .map(|c| json!({"name": c.name, "stages": c.stages}))
+            .collect::<Vec<_>>(),
+        "agent": AGENT_CHECKS
+            .iter()
+            .map(|c| json!({"name": c.name, "subject": c.subject, "stages": [], "verdicts": c.verdicts}))
+            .collect::<Vec<_>>(),
+        "rules": {
+            "max": rdy_schema::MAX_RULES,
+            "grammar": "filter",
+            "severity": ["advisory", "blocking"],
+            "default_severity": "advisory",
+        },
+    })
 }

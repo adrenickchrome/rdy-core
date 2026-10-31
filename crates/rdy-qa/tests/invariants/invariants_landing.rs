@@ -386,10 +386,22 @@ fn chosen_x_then_more(r: &mut Rdy) -> (rdy_model::Hash, rdy_model::Hash) {
         set: set.id.clone(),
         chosen: "x".into(),
     };
+    // O17 (D-JQD5X): the choosing version creates the decision of its considered options
+    r.decide(
+        &writer(),
+        "x",
+        rdy_engine::DecisionInput {
+            parent: section.clone(),
+            statement: "Choose x".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let p = r
         .propose_with(&writer(), "x", "x", None, Some(TEST_SUMMARY), Some(&pick))
         .unwrap();
     let later = put(r, "x", claim("X three."));
+    rdy_qa::intake::confirm_before_landing(r, &approver(), &p);
     r.land(&approver(), &p.id).unwrap();
     (change_of(&later), change_of(&lost))
 }

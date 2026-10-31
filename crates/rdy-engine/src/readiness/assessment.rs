@@ -87,6 +87,9 @@ pub struct Inputs<'a> {
     pub suspects: Vec<(BlockId, BlockId)>,
     pub written: BTreeSet<BlockId>,
     pub plan_blocks: BTreeSet<BlockId>,
+    /// The reach the version's pack rules add (TASK-946, D-DSPMW, D-AJ0XQ): empty with no
+    /// rules. Internal: the record keeps only the union, as `reach`.
+    pub rule_reach: BTreeSet<BlockId>,
     pub scope_blocks: BTreeSet<BlockId>,
     pub coverage: AssessmentCoverage,
     pub confidence: AssessmentConfidence,
@@ -121,18 +124,31 @@ pub fn pack_digest(pack: &Pack) -> Hash {
 
 /// The reach of version `pref` (O18), sorted: the blocks it writes (`written`), what its plan
 /// items name (`plan_blocks`), and the blocks of every tension row it lists, open and dismissed
-/// (`tension_blocks`, O17). Err: the O9 issue of a reach over [`MAX_ROWS`]. Readiness (check 6)
-/// and [`build`] both compute it here, over the same rows, so one check holds for both.
+/// (`tension_blocks`, O17), then the blocks its pack rules add (`rules`, D-DSPMW). Err: the O9
+/// issue of a reach over [`MAX_ROWS`] before the rules; then, from the rules, "too large to
+/// assess" for the `MAX_ROWS + 1`th distinct block, or the rules' own issue. Readiness (check 6)
+/// and [`build`] both compute it here, over the same rows, so one check holds for both. With no
+/// rules it is the reach of before.
 pub(crate) fn reach(
     pref: &ProposalRef,
     written: &BTreeSet<BlockId>,
     plan_blocks: &BTreeSet<BlockId>,
     tension_blocks: impl IntoIterator<Item = BlockId>,
+    rules: Result<&BTreeSet<BlockId>, &Issue>,
 ) -> Result<BTreeSet<BlockId>, Issue> {
     let mut reach: BTreeSet<BlockId> = written.iter().chain(plan_blocks).cloned().collect();
     reach.extend(tension_blocks);
     if reach.len() > MAX_ROWS {
         return Err(reach_too_large(pref));
+    }
+    for id in rules.map_err(Clone::clone)? {
+        if reach.contains(id) {
+            continue;
+        }
+        if reach.len() >= MAX_ROWS {
+            return Err(too_large(pref));
+        }
+        reach.insert(id.clone());
     }
     Ok(reach)
 }
@@ -392,6 +408,7 @@ pub fn build(i: Inputs<'_>) -> Result<Assessment, Issue> {
         i.tensions
             .iter()
             .flat_map(|(t, _, _)| t.blocks.iter().filter_map(|b| BlockId::parse(b).ok())),
+        Ok(&i.rule_reach),
     )?;
     // the caller's order ranks the rows (refusing first): the first MAX_TENSION_ROWS distinct
     // ones are kept, the rest counted
@@ -580,6 +597,7 @@ mod tests {
             removal: None,
             removal_reports: BTreeMap::new(),
             plan_binding: None,
+            check_verdicts: vec![],
         }
     }
 
@@ -698,6 +716,7 @@ mod tests {
             ],
             written: [id("n-00005"), id("n-00004")].into_iter().collect(),
             plan_blocks: [id("n-00007"), id("d-0000A")].into_iter().collect(),
+            rule_reach: BTreeSet::new(),
             scope_blocks: [id("n-00005"), id("n-00004"), id("n-00006")]
                 .into_iter()
                 .collect(),

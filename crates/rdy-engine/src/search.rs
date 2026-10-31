@@ -405,14 +405,19 @@ impl ReadState {
         let (issues, coverage_error) = if past {
             (None, None)
         } else {
-            match self.coverage_issues(scope) {
+            // ck3: the shown issues and score carry the source facts; the level reads the
+            // intrinsic issues, for a source fact changes no confidence input
+            match self
+                .coverage_issues(scope)
+                .and_then(|base| Ok((self.display_coverage_issues(scope)?, base)))
+            {
                 Ok(i) => (Some(i), None),
                 Err(e) => (None, Some(coverage_error_text(&e))),
             }
         };
-        if wants_coverage && let Some(issues) = &issues {
+        if wants_coverage && let Some((shown, base)) = &issues {
             for h in &mut hits {
-                h.cov = Some(self.hit_coverage(scope, issues, &h.block.id)?);
+                h.cov = Some(self.hit_coverage(scope, shown, base, &h.block.id)?);
             }
         }
         if let Some(n) = q.filters.coverage_below {
@@ -538,9 +543,9 @@ impl ReadState {
         let mut used = 0;
         let mut matches = vec![];
         for mut entry in entries.into_iter().skip(offset) {
-            if !wants_coverage && let Some(issues) = &issues {
+            if !wants_coverage && let Some((shown, base)) = &issues {
                 // the page's entries only: one level pass per block, the entry takes the lowest
-                self.attach_coverage(scope, issues, &mut entry)?;
+                self.attach_coverage(scope, shown, base, &mut entry)?;
             }
             let cost = tokens_of(&entry);
             if !matches.is_empty() && used + cost > budget {
@@ -600,20 +605,22 @@ struct HitCoverage {
 
 impl ReadState {
     /// The coverage of the hit block `id`: its score alone, its issues that are not dismissed,
-    /// and its confidence level over the hit's neighbourhood.
+    /// and its confidence level over the hit's neighbourhood. The score and the issues read the
+    /// `shown` issues (source facts included, ck3); the level reads the `intrinsic` ones.
     fn hit_coverage(
         &self,
         scope: &Scope,
-        issues: &CoverageIssues,
+        shown: &CoverageIssues,
+        intrinsic: &CoverageIssues,
         id: &BlockId,
     ) -> Result<HitCoverage, RdyError> {
-        let entry = issues.blocks.get(id);
+        let entry = shown.blocks.get(id);
         let score = rollup(self.pack(), entry.into_iter()).score;
         let open = entry.map_or(0, |e| {
             e.issues.iter().filter(|i| i.dismissed.is_none()).count()
         });
         let hood = self.hit_neighbourhood(scope, id)?;
-        let level = confidence_level_of(issues, &hood, Some(id));
+        let level = confidence_level_of(intrinsic, &hood, Some(id));
         Ok(HitCoverage {
             score,
             issues: open,
@@ -625,15 +632,16 @@ impl ReadState {
     fn attach_coverage(
         &self,
         scope: &Scope,
-        issues: &CoverageIssues,
+        shown: &CoverageIssues,
+        intrinsic: &CoverageIssues,
         entry: &mut SearchMatch,
     ) -> Result<(), RdyError> {
         let first = BlockId::parse(&entry.id).map_err(|_| bad_page())?;
-        let c = self.hit_coverage(scope, issues, &first)?;
+        let c = self.hit_coverage(scope, shown, intrinsic, &first)?;
         let mut level = c.level;
         for a in &entry.also {
             let id = BlockId::parse(&a.id).map_err(|_| bad_page())?;
-            let l = confidence_level_of(issues, &self.hit_neighbourhood(scope, &id)?, Some(&id));
+            let l = confidence_level_of(intrinsic, &self.hit_neighbourhood(scope, &id)?, Some(&id));
             if level_rank(l) > level_rank(level) {
                 level = l;
             }

@@ -248,7 +248,7 @@ impl ReadState {
         scope: &Scope,
         ids: &BTreeSet<BlockId>,
     ) -> Result<Rollup, RdyError> {
-        let issues = self.coverage_issues(scope)?;
+        let issues = self.display_coverage_issues(scope)?;
         Ok(rollup(
             &self.pack,
             ids.iter().filter_map(|id| issues.blocks.get(id)),
@@ -294,7 +294,7 @@ impl ReadState {
     ) -> Result<CoverageReport, RdyError> {
         let scope = self.coverage_scope(scope)?;
         REPORT_BUILDS.with(|c| c.set(c.get() + 1));
-        let issues = self.coverage_issues(&scope)?;
+        let issues = self.display_coverage_issues(&scope)?;
         let m = self.materialized(&scope)?;
         let under = match path {
             None => None,

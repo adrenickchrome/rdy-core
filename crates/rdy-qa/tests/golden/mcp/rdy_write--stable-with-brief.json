@@ -42,6 +42,7 @@
   },
   "created": {},
   "on_change": {
+    "checks": [],
     "resolved": [],
     "tensions": [
       {

@@ -935,6 +935,37 @@ fn detect_kept(
         .collect())
 }
 
+/// The tensions `d` finds in a candidate's landing run `cx` ([`DetectCx::with_canon_groups`])
+/// that involve a block of `around`, as the canon the landing would give keeps them: one with
+/// a change side as the landing form keeps it, one of canon blocks only as canon keeps it.
+fn detect_candidate(
+    st: &ReadState,
+    cx: &DetectCx<'_>,
+    d: &dyn Detector,
+    around: &BTreeSet<BlockId>,
+) -> Result<Vec<Arc<Tension>>, RdyError> {
+    let mut found = vec![];
+    d.detect(cx, Some(around), &mut found)?;
+    Ok(found
+        .into_iter()
+        .filter_map(|f| {
+            let own = d.own_severity(cx, &f);
+            let scope = if f
+                .involved
+                .iter()
+                .any(|i| matches!(i.side, SideRef::Change(_)))
+            {
+                DetectScope::Inflight
+            } else {
+                DetectScope::Canon
+            };
+            tension_from(st.pack(), own, f, false, scope)
+        })
+        .filter(|t| t.involved.iter().any(|i| around.contains(&i.block)))
+        .map(Arc::new)
+        .collect())
+}
+
 /// Whether `writes` were built from exactly the in-flight set `set`: the same changes, each in
 /// the same views.
 fn built_from(writes: &Writes, set: &crate::InflightSet) -> bool {
@@ -1367,6 +1398,32 @@ impl ReadState {
         canon: &Scope,
     ) -> Result<Vec<Arc<Tension>>, RdyError> {
         LANDING_DETECTIONS.with(|n| n.set(n.get() + 1));
+        self.with_landing_cx(view, changes, read, applied, canon, false, |cx, seeds| {
+            let mut out = BTreeMap::new();
+            for d in detectors {
+                for t in detect_kept(self, cx, *d, Some(seeds))? {
+                    out.entry(t.id).or_insert(t);
+                }
+            }
+            Ok(out.into_values().collect())
+        })
+    }
+
+    /// Calls `f` with the context of a landing's run of `changes` (read as `read`, applied in
+    /// the order `applied`, proposed from `view`) onto the canon `canon`, and the run's seeds:
+    /// the blocks the changes write and the targets their decisions supersede or revoke. With
+    /// `canon_groups`, the context is a candidate's ([`DetectCx::with_canon_groups`]).
+    #[allow(clippy::too_many_arguments)]
+    fn with_landing_cx<R>(
+        &self,
+        view: &str,
+        changes: &[Hash],
+        read: &[Change],
+        applied: &[usize],
+        canon: &Scope,
+        canon_groups: bool,
+        f: impl FnOnce(&DetectCx<'_>, &BTreeSet<BlockId>) -> Result<R, RdyError>,
+    ) -> Result<R, RdyError> {
         // the canon the landing would give: the ops in the order the merge applies the changes
         let ops = applied_ops(read, applied);
         let canon_m = self.materialized(canon)?;
@@ -1388,7 +1445,7 @@ impl ReadState {
         for c in read {
             seeds_into(self, c, &mut seeds)?;
         }
-        let cx = DetectCx::landing(
+        let mut cx = DetectCx::landing(
             self,
             &writes,
             canon_index_in(self, canon)?,
@@ -1397,13 +1454,89 @@ impl ReadState {
             Arc::new(g),
             touched.into_iter().cloned().collect(),
         );
-        let mut out = BTreeMap::new();
-        for d in detectors {
-            for t in detect_kept(self, &cx, *d, Some(&seeds))? {
-                out.entry(t.id).or_insert(t);
-            }
+        if canon_groups {
+            cx = cx.with_canon_groups();
         }
-        Ok(out.into_values().collect())
+        f(&cx, &seeds)
+    }
+
+    /// Review fix L6/I7 (D-JQD5X, review I1): the open tensions of the canon that landing
+    /// `changes` (one version's changes, proposed from view `view`) would give, what a pack
+    /// rule's `tension` reads at propose. Every all-canon tension that canon would hold, and
+    /// every tension of the landing form, as the canon part's landing carry
+    /// ([`canon_of_landing`]) judges them, in the landing's run:
+    /// - a kind whose canon form runs around seeds ([`Detector::canon_seeded`]) drops its canon
+    ///   tensions on a seed, on its reach and on every block of a tension it drops, and
+    ///   re-detects around all of them over the landing's canon, keeping a group of canon
+    ///   blocks only: a group that loses a member keeps the rest;
+    /// - every other kind runs its canon form in full over the canon the landing would give
+    ///   ([`DetectCx::landed`]), as the carry runs it over the canon after the landing (stored
+    ///   kinds: as [`stored_canon`] joins them). So a canon condition on a block the version
+    ///   edits stays when the edit keeps it and goes when the edit ends it. It adds its landing
+    ///   form ([`ReadState::landing_tensions`]).
+    ///
+    /// Dismissed tensions are left out; by id. The version's own tension list (its readiness
+    /// item) is not this set: it stays its landing form and the in-flight forms of its changes.
+    pub(crate) fn candidate_tensions(
+        &self,
+        view: &str,
+        changes: &[Hash],
+    ) -> Result<Vec<Arc<Tension>>, RdyError> {
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
+        let reader = self.reader();
+        let read: Vec<Change> = changes
+            .iter()
+            .map(|c| reader.change(c))
+            .collect::<Result<_, _>>()?;
+        let applied = self.landing_order(&read);
+        let canon = self.canon_tensions()?;
+        let empty = Writes::empty();
+        let canon_cx = DetectCx::new(self, &empty, canon_index_of(self)?, DetectScope::Canon);
+        self.with_landing_cx(
+            view,
+            changes,
+            &read,
+            &applied,
+            &Scope::Canon,
+            true,
+            |cx, seeds| {
+                let landed = cx.landed(&empty);
+                let mut out: BTreeMap<Hash, Arc<Tension>> = BTreeMap::new();
+                for d in self.detectors {
+                    if d.canon_seeded() {
+                        let mut around = seeds.clone();
+                        around.extend(d.reach(cx, seeds)?);
+                        around.extend(d.reach(&canon_cx, seeds)?);
+                        let mut dropped: BTreeSet<BlockId> = BTreeSet::new();
+                        for t in canon.iter().filter(|t| t.kind == d.kind()) {
+                            let blocks = t.blocks();
+                            if blocks.iter().any(|b| around.contains(b)) {
+                                dropped.extend(blocks);
+                            } else {
+                                out.entry(t.id).or_insert_with(|| Arc::clone(t));
+                            }
+                        }
+                        around.extend(dropped);
+                        for t in detect_candidate(self, cx, *d, &around)? {
+                            out.entry(t.id).or_insert(t);
+                        }
+                    } else {
+                        for t in detect_kept(self, &landed, *d, None)? {
+                            out.entry(t.id).or_insert(t);
+                        }
+                        for t in detect_kept(self, cx, *d, Some(seeds))? {
+                            out.entry(t.id).or_insert(t);
+                        }
+                    }
+                }
+                Ok(out
+                    .into_values()
+                    .filter(|t| self.tension_status(t) == TensionStatus::Open)
+                    .collect())
+            },
+        )
     }
 
     /// The event-derived tensions of this state (the state's detectors over canon and every

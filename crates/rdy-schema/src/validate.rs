@@ -26,6 +26,9 @@ pub struct Issue {
 /// The engine field naming the code a block reflects: a list of path globs, on content block types.
 pub const REFLECTS_FIELD: &str = "reflects";
 
+/// The decision field saying how the team knows the decision is kept (D-JQD5X).
+pub const CONFIRMATION_FIELD: &str = "confirmation";
+
 /// The question field holding the labels of its card's options.
 const QUESTION_OPTIONS: &str = "options";
 
@@ -300,6 +303,18 @@ fn check_block(pack: &Pack, block: &Block, parent: Option<&Block>, projection: b
             "E_FIELD_KIND",
             format!("field {QUESTION_OPTIONS:?} must be a list of strings"),
             format!("write {QUESTION_OPTIONS} as a list of strings"),
+        ));
+    }
+    if block.block_type == decision::DECISION
+        && !projection
+        && let Some(FieldValue::Str(text)) = block.fields.get(CONFIRMATION_FIELD)
+        && !crate::rules::text_fits(text)
+    {
+        out.push(err(
+            block,
+            "E_FIELD_KIND",
+            format!("{CONFIRMATION_FIELD} must have 1 to 2000 characters"),
+            "say how the team knows the decision is kept, in 1 to 2000 characters".to_string(),
         ));
     }
     for (name, fd) in &def.fields {

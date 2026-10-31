@@ -22,6 +22,9 @@ pub enum IssueCode {
     OpenQuestion,
     Ungrounded,
     UnappliedDecision,
+    /// A read-time issue (ck3, D-JQD5X): a source a block cites is missing from every linked
+    /// checkout. Shown in displayed coverage only; the gate and the stored assessment never hold it.
+    SourceNotFound,
 }
 
 impl IssueCode {
@@ -31,7 +34,9 @@ impl IssueCode {
             IssueCode::UntiedContent | IssueCode::UnlinkedMention => Dimension::Grounded,
             IssueCode::OpenTension | IssueCode::DismissedTension => Dimension::Consistent,
             IssueCode::OpenSuspect => Dimension::Current,
-            IssueCode::UnlinkedDoc | IssueCode::DanglingRef => Dimension::Connected,
+            IssueCode::UnlinkedDoc | IssueCode::DanglingRef | IssueCode::SourceNotFound => {
+                Dimension::Connected
+            }
             IssueCode::StubSection | IssueCode::MissingSection | IssueCode::OpenQuestion => {
                 Dimension::Complete
             }

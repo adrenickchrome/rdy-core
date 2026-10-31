@@ -266,6 +266,9 @@ const SITE_DIGESTS: [(&str, &str, &str); 4] = [
 /// The proposal's re-taken again when a landing names its assessment (ruling task-12 R2.3): the
 /// landing record and canon's head move, so the version's hash does; only that scope's text
 /// changed.
+/// The proposal's re-taken again when the engine's decision type gained `confirmation` (ck1): the
+/// resolved pack's digest moves the assessment, so the version's hash does; only that scope's
+/// text changed.
 const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "canon",
@@ -300,11 +303,11 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "proposal",
         [
-            "3acad4c4dc86a752c308e919a6d2836f43c1ebc5cbeb1c4e58f5151e733d57ef",
-            "47340a3e7fb5b03f3e114a64bbc890d3e3b5ed18bfb003d90afeff8165519947",
-            "97e54a27ca63a7ff4e2c3240fe84cf6f07268a5f24f79a0b0eaeedcebc29efca",
-            "a6a626daaf126a348f2c1af2218934e6939c2518fea728503bb4ddc6c3e1ed3e",
-            "142379e6075f0fdd561201218103a7486fcf5b49b388928ab72a0c0e8a38cf8e",
+            "f5ccb3756af41e343578e90d604c217f24af3b0928e123b087d2f71baaf38008",
+            "aae97dd76e220f07900925100111bb1ef6f86527533843612c254ff210c1142e",
+            "f6850a82fa35c9418ed8970a9cc499062528dda7c2555ebd2e78637d01aa7fc4",
+            "8c9783f54b3723fe766348cabff1fa1f5d8cf42765c211faf7222b36d3751891",
+            "2a253816c253a033d9b76cfc768d421c583ffd0d2320aa66bf9e684f90e701bb",
         ],
     ),
 ];

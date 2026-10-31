@@ -5,6 +5,7 @@ mod cli;
 mod cli_alts;
 mod cli_blame;
 mod cli_carried_warning;
+mod cli_checks;
 mod cli_clone;
 mod cli_config;
 mod cli_config_file;

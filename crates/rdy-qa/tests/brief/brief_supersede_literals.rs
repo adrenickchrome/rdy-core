@@ -521,11 +521,13 @@ fn sdc5_fix_write_reports_the_remaining_implements_link() {
         c["id"],
         consequence_id(&change_of(&v), &format!("dependent {}", t.d30), &t.r_size)
     );
-    // O11: on_change stays the tension delta, with no dependency list
+    // O11: on_change stays the tension delta, with no dependency list; D-JQD5X adds the
+    // change stage's rule rows
     let on = v["on_change"].as_object().expect("on_change");
     assert!(
-        on.keys()
-            .all(|k| ["tensions", "resolved", "detail_cut", "collapsed"].contains(&k.as_str())),
+        on.keys().all(
+            |k| ["tensions", "resolved", "detail_cut", "collapsed", "checks"].contains(&k.as_str())
+        ),
         "{v:#}"
     );
     assert!(

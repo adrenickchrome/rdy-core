@@ -34,6 +34,7 @@ pub(crate) mod publish;
 mod read;
 mod redaction;
 mod remote;
+mod review;
 mod search;
 mod signing;
 mod site;
@@ -56,6 +57,7 @@ use publication::publication_check;
 use read::{block, coverage, impact, log, ls, show, status, suspects, tags, trace};
 use redaction::redact;
 use remote::remote;
+use review::review;
 use search::search;
 use signing::{key_bind, key_retire, key_revoke, key_show, sign};
 use site::{EXPORT_SHAPE, export, import, render};
@@ -145,6 +147,7 @@ pub const OPS: &[&str] = &[
     "alt",
     "tensions",
     "resolve",
+    "review",
     "wc_put_blob",
     "coverage",
     "inbox",
@@ -566,6 +569,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
                 "{tension?, mention?, dismiss?, restore?, scope?, accept?}",
             )?,
         ),
+        "review" => review(cx, args),
         "wc_put_blob" => wc_put_blob(cx, parse(op, args, "{path}")?),
         "coverage" => coverage(cx, parse(op, args, "{scope?, path?, max_tokens?}")?),
         "inbox" => {

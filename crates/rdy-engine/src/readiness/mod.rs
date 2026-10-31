@@ -15,15 +15,22 @@
 //!    blocking tension it would put into canon, an error in the canon it would give;
 //! 2. check 1 ([`check`]): one `E_BRIEF_REQUIRED` issue for each change that touches stable
 //!    content and records no briefing (O3);
-//! 3. a version with no summary;
+//! 3. a version with no summary; then the rest of D-ME2HD's item 6 (D-JQD5X): the landing
+//!    projection's refusal (a choice that names no decision for its considered options,
+//!    `E_ALT_DECISION`, or a view that moved on), and one `E_RULE_CHECK` issue for each blocking
+//!    pack rule that fails on stable content of the projected canon (the first 256);
 //! 4. a bound change plan that cannot be read, when nothing above failed;
 //! 5. the change-plan gate's error (`E_PLAN_OPEN`: open non-code items on stable content and
 //!    unanswered tension items, D-FQ7AK, D-45RG6); its `W_PLAN_OPEN` (drafts) is a warning,
 //!    never an issue;
-//! 6. a version whose reach exceeds `MAX_ROWS` (O9);
+//! 6. a version whose reach exceeds `MAX_ROWS` (O9), or whose rules widen it past that bound
+//!    ("too large to assess", D-DSPMW);
 //! 7. the later refusals ([`later_refusals`]): a rejected decision, a rejected one_way
-//!    re-affirmation, refused deferrals. The landing adds a fourth, which only an assessment
-//!    can date: an advice accepted after it ([`accepted_advice`], ruling task-12 R1);
+//!    re-affirmation, refused deferrals; then each check verdict a person accepted as blocking
+//!    for this version whose case still holds or cannot be read now
+//!    ([`crate::check::verdicts::accepted_verdict_issues`], D-JQD5X, D-HAG73). The landing adds
+//!    one more, which only an assessment can date: an advice accepted after it
+//!    ([`accepted_advice`], ruling task-12 R1);
 //! 8. the policy change rule (O19, D-ZWP7Q): one `E_VALIDATION` issue for each
 //!    `authority_policy` block the version creates, updates or deletes whose last change in the
 //!    version does not implement a decision of the prospective canon;
@@ -118,6 +125,11 @@ pub struct Readiness {
     /// The authority policy's verdict on the version (D-ZWP7Q), when it is ready; none when it
     /// is not.
     pub policy: Option<AssessedPolicy>,
+    /// The `W_RULE_CHECK` warnings of the version's pack rules (D-JQD5X): the first 256, in rule
+    /// then block order. Never an issue.
+    pub warnings: Vec<Issue>,
+    /// The rule rows left out past the cut: (blocking, advisory).
+    pub checks_omitted: (usize, usize),
 }
 
 /// `rdy_propose`'s `policy` (O13): the verdict a ready version's assessment stores, as the reply
@@ -245,6 +257,10 @@ pub(crate) struct Read<'a> {
     /// with the short hash of the last change of the version that writes it and whether that
     /// change implements a decision of the prospective canon.
     pub(crate) policy_changes: &'a [PolicyChange],
+    /// D-ME2HD item 6 (D-JQD5X): the landing projection's refusal and the blocking rule issues.
+    pub(crate) item6: &'a [Issue],
+    /// The reach the version's rules add (D-DSPMW); Err: the "too large to assess" issue.
+    pub(crate) rule_reach: Result<&'a BTreeSet<BlockId>, &'a Issue>,
 }
 
 /// O19: an `authority_policy` block a version writes, and the last change that writes it.
@@ -282,6 +298,8 @@ pub(crate) fn issues(
                 .into(),
         });
     }
+    // item 6's rest: the landing projection's refusal and the blocking rule checks
+    issues.extend(r.item6.iter().cloned());
     // 4. a bound version whose change plan cannot be read cannot show its deferrals; a version
     // that fails another check (a conflict, say) says that first
     if issues.is_empty()
@@ -308,7 +326,7 @@ pub(crate) fn issues(
     if let Err(issue) = reach(st, r, &conflicted)? {
         issues.push(issue);
     }
-    // 7. the later refusals
+    // 7. the later refusals, then the verdicts a person accepted as blocking for this version
     issues.extend(later_refusals(
         st,
         r.pref,
@@ -316,6 +334,9 @@ pub(crate) fn issues(
         &r.decisions,
         &r.reaffirms,
         r.plan_bound.is_some(),
+    )?);
+    issues.extend(crate::check::verdicts::accepted_verdict_issues(
+        st, r.pref, r.p,
     )?);
     // 8. the policy change rule (O19)
     issues.extend(policy_change_issues(r.policy_changes));
@@ -388,7 +409,24 @@ pub(crate) fn reach(
         rows.iter()
             .take(MAX_TENSION_ROWS)
             .flat_map(|(_, t)| t.blocks()),
+        r.rule_reach,
     ))
+}
+
+/// The derived sets candidate `c`'s pack rules read in its landing projection (D-JQD5X): its
+/// suspects, the blocks of its open tensions and each block's intrinsic coverage score.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuleInputs {
+    pub suspects: BTreeSet<BlockId>,
+    pub tensions: BTreeSet<BlockId>,
+    pub coverage: std::collections::BTreeMap<BlockId, u32>,
+}
+
+/// Tests only: every derived set the pack rules of candidate `c` can read, as readiness builds
+/// them.
+#[doc(hidden)]
+pub fn rule_inputs_for_tests(st: &ReadState, c: &Candidate) -> Result<RuleInputs, RdyError> {
+    crate::pending::queue::rule_inputs_of(st, c)
 }
 
 /// Tests only: the reach readiness's check 6 reads for candidate `c` (see `reach`). A reach over

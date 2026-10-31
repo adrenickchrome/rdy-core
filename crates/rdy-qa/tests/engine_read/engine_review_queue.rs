@@ -157,7 +157,7 @@ fn se6_a_lease_lapses_after_the_ttl() {
 }
 
 #[test]
-fn se6_next_needs_the_reviewer_role_and_kind_tension() {
+fn ck6_next_needs_reviewer_role_and_a_known_kind() {
     let (_d, r) = project();
     let e = Local::new(r);
     let w = run_review_next(
@@ -186,8 +186,12 @@ fn se6_next_needs_the_reviewer_role_and_kind_tension() {
     )
     .unwrap_err();
     assert_eq!(
-        k.message,
-        "kind \"check\" is not a review kind; the only kind is tension"
+        (k.code, k.message.as_str(), k.fix.as_str()),
+        (
+            rdy_engine::E_BAD_INPUT,
+            "check is not a check",
+            "list the checks: rdy_review {op: \"checks\"} / rdy review checks"
+        )
     );
 }
 

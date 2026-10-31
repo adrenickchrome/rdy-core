@@ -58,6 +58,10 @@ pub struct ProposalInfo {
     pub summary: Option<String>,
     pub changes: usize,
     pub warnings: Vec<Issue>,
+    /// The pack rule rows the readiness left out past its cut (D-JQD5X); omitted when both
+    /// counts are zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checks_omitted: Option<ChecksOmitted>,
     /// Every conflict of the view.
     pub conflicts: Vec<ConflictInfo>,
     /// The conflicts this version carries on the blocks it writes: they refuse its landing
@@ -120,6 +124,13 @@ pub struct ProposalInfo {
     /// The authority policy's verdict the assessment stores (D-ZWP7Q, O13); null for a version
     /// that is not ready.
     pub policy: Option<crate::readiness::ProposalPolicy>,
+}
+
+/// The pack rule rows a propose left out past the cut (D-JQD5X), by kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ChecksOmitted {
+    pub blocking: usize,
+    pub warnings: usize,
 }
 
 /// One view a landing rebased: how many of its changes dropped out (they landed) and how many
@@ -1778,7 +1789,11 @@ pub(crate) fn prospective_issues_of(
 /// `canon`: the blocks they create, and (kfol1, FW-PR3a) the docs and folders they give another
 /// key than canon holds, as a key that followed a move or rename. `keys::rederive` keeps only
 /// those whose key is rdy's.
-fn rekeyable_in(changes: &[Change], applied: &[usize], canon: &Materialized) -> BTreeSet<BlockId> {
+pub(crate) fn rekeyable_in(
+    changes: &[Change],
+    applied: &[usize],
+    canon: &Materialized,
+) -> BTreeSet<BlockId> {
     applied
         .iter()
         .flat_map(|&i| changes[i].ops.iter())
@@ -1813,6 +1828,47 @@ fn acceptance_message(accepts: bool, keys: bool, order_keys: bool, title: &str) 
         [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     };
     format!("{list} in {title}")
+}
+
+/// D-8GR43: the refusal message of version `pref` when the considered options its landing
+/// writes (`projection`, none when its target cannot be named now) are not the ones its stored
+/// assessment `a` showed: the `Considered options` and `Alternative set` facts, each compared as
+/// the record stores it (cut to its bound). None when they agree, a version that chooses
+/// nothing included.
+fn options_moved(
+    pref: &ProposalRef,
+    projection: Option<&crate::check::LandingProjection>,
+    a: &rdy_model::assessment::Assessment,
+) -> Option<String> {
+    use crate::check::options::{ALTERNATIVE_SET_FACT, CONSIDERED_OPTIONS_FACT};
+    use crate::readiness::assessment::cut_text;
+    let stored = |name: &str| {
+        a.card
+            .facts
+            .iter()
+            .find(|line| line.split_once(": ").is_some_and(|(n, _)| n == name))
+            .cloned()
+    };
+    let fresh = projection.map(|p| match &p.considered {
+        Some(c) => (
+            Some(cut_text(format!(
+                "{CONSIDERED_OPTIONS_FACT}: {}",
+                c.fact_value()
+            ))),
+            Some(cut_text(format!(
+                "{ALTERNATIVE_SET_FACT}: {}",
+                c.set_value()
+            ))),
+        ),
+        None => (None, None),
+    });
+    let was = (
+        stored(CONSIDERED_OPTIONS_FACT),
+        stored(ALTERNATIVE_SET_FACT),
+    );
+    (fresh != Some(was)).then(|| {
+        format!("proposal {pref} moved: the considered options changed after its assessment")
+    })
 }
 
 /// The ops of the changes at `applied` (positions in `changes`), in applied order.
@@ -2723,6 +2779,8 @@ impl Rdy {
                         summary: PlanSummary::default(),
                         card: None,
                         policy: None,
+                        warnings: vec![],
+                        checks_omitted: (0, 0),
                     },
                     assessment: None,
                 }
@@ -2777,6 +2835,9 @@ impl Rdy {
                 (None, 0)
             }
         };
+        // D-JQD5X: the rule warnings join the warnings, in their existing shape
+        issues.extend(assessed.readiness.warnings.iter().cloned());
+        let (blocking_omitted, warnings_omitted) = assessed.readiness.checks_omitted;
         Ok(ProposalInfo {
             id: id.to_string(),
             stable: stable.to_string(),
@@ -2786,6 +2847,12 @@ impl Rdy {
             summary: stored.summary,
             changes: count,
             warnings: issues,
+            checks_omitted: (blocking_omitted > 0 || warnings_omitted > 0).then_some(
+                ChecksOmitted {
+                    blocking: blocking_omitted,
+                    warnings: warnings_omitted,
+                },
+            ),
             conflicts,
             blocking,
             tensions,
@@ -2968,6 +3035,8 @@ impl Rdy {
         // the fresh record assesses the version on the canon it was computed on, so the next
         // approval's freshness reads the landings after it
         a.base = st.canon_head();
+        // D-JQD5X, O13: the fresh card shown is the stored card plus the live verdict lines
+        crate::pending::queue::show_verdicts(st, pref, p, &mut card)?;
         card.card = crate::pending::render_checked(&card, crate::pending::CARD_DEFAULT_TOKENS)?;
         card.card_hash = crate::pending::card_hash(&card).to_string();
         self.store
@@ -3163,8 +3232,36 @@ impl Rdy {
         // ruling task-12 R1 (D-WMCFW): an advice accepted after the assessment blocks
         let record = st.reader().assessment(&assessment)?;
         later.extend(crate::readiness::accepted_advice(&st, &pref, &p, &record)?);
+        // D-JQD5X, D-HAG73: the fifth, a check verdict a person accepted as blocking for this
+        // version, for every lander; no policy acceptance passes it
+        later.extend(crate::check::verdicts::accepted_verdict_issues(
+            &st, &pref, &p,
+        )?);
         if !later.is_empty() {
             return Err(proposal_not_ready(&pref, later));
+        }
+        // D-JQD5X, O13: a direct approval with the card as evidence binds the card shown, its
+        // verdict lines too: a card that gained a verdict since is refused with the fresh card
+        if lander == Lander::Approver
+            && let Some(ApprovalEvidence {
+                kind: EvidenceKind::Card,
+                card_hash: Some(shown),
+                ..
+            }) = &evidence
+        {
+            let verdicts = crate::check::verdicts::matching_verdicts(&st, &pref, &p)?;
+            if !verdicts.is_empty()
+                && let Some(card) =
+                    crate::pending::queue::shown_approve_item(&st, &pref, &p, verdicts)?
+                && card.card_hash != shown.to_string()
+            {
+                return Err(RdyError::new(
+                    E_PROPOSAL_MOVED,
+                    format!("{pref} changed since it was shown"),
+                    "show the person the fresh card and ask again",
+                )
+                .with_corrected(card_of(&card)));
+            }
         }
         // the ops fold in the order the merge applies the changes (deps first), not the list
         // order: a version can list a delete before the creation it depends on
@@ -3206,145 +3303,48 @@ impl Rdy {
         // 1. prospective canon: canon + the proposal's own changes
         let ops = applied_ops(&changes, &applied);
         let prospective = st.materialized(&Scope::Canon)?.with(&ops);
-        let mut ids = BTreeSet::new();
-        for c in &changes {
-            for op in &c.ops {
-                if let Op::Create { block } | Op::Update { block, .. } = op
-                    && block.block_type == decision::DECISION
-                {
-                    ids.insert(block.id.clone());
-                }
-            }
+        // 2. the landing projection (D-JQD5X, review I1): the acceptance's deterministic updates,
+        // from the one function readiness read. A proposed decision, a re-keyed block or a placed
+        // block that changed in the view after the proposal refuses here (E_STALE_BASE).
+        let projection = match crate::check::landing_projection(&st, &pref, &p, &prospective) {
+            Ok(projection) => Some(projection),
+            Err(e) if e.code == E_ALT_DECISION => None,
+            Err(e) => return Err(e),
+        };
+        // D-8GR43: the considered options the landing writes are the ones its card showed; a
+        // changed set, question, membership or target refuses with a fresh assessment
+        if let Some(message) = options_moved(&pref, projection.as_ref(), &record) {
+            return Err(self.moved_fresh(&st, &pref, &p, message)?);
         }
+        let projection = projection.expect("an unprojected version refused as moved");
+        // the landing alone stamps the accepted decisions' clock
         let now = rfc3339_now();
-        let mut accept_ops = vec![];
-        let mut stale = vec![];
-        let view = Scope::View(p.view.clone());
-        for id in ids {
-            let Some(b) = prospective.get(&id) else {
+        let mut accept_ops = projection.updates;
+        let mut accepts = 0;
+        let mut re: Vec<(BlockId, String)> = vec![];
+        let mut order_keys = false;
+        for op in &mut accept_ops {
+            let Op::Update { block, .. } = op else {
                 continue;
             };
-            if decision::status(b) != Some(decision::DecisionStatus::Proposed) {
+            let Some(authored) = prospective.get(&block.id) else {
                 continue;
+            };
+            if block.block_type == decision::DECISION
+                && decision::status(authored) == Some(decision::DecisionStatus::Proposed)
+                && decision::status(block) == Some(decision::DecisionStatus::Accepted)
+            {
+                block
+                    .fields
+                    .insert("decided_at".into(), FieldValue::Str(now.clone()));
+                accepts += 1;
             }
-            // 2. the view must not have moved on from the proposal's version
-            let in_view = st.materialized(&view)?.get(&id).map(|v| v.version_hash());
-            if in_view != Some(b.version_hash()) {
-                stale.push(RdyError::new(
-                    E_STALE_BASE,
-                    format!(
-                        "decision {id} changed in view {:?} after the proposal was made",
-                        p.view
-                    ),
-                    format!("the view has later edits to {id}; propose again to include them"),
-                ));
-                continue;
+            if let Some(k) = crate::keys::key_of(block)
+                && crate::keys::key_of(authored) != Some(k)
+            {
+                re.push((block.id.clone(), k.to_string()));
             }
-            let mut acc = b.clone();
-            acc.fields
-                .insert("status".into(), FieldValue::Str("accepted".into()));
-            acc.fields
-                .insert("decided_at".into(), FieldValue::Str(now.clone()));
-            accept_ops.push(Op::Update {
-                base: b.version_hash(),
-                block: acc,
-            });
-        }
-        // K1 (FW-PR3): a block landed since the proposal can hold a key rdy derived for a block
-        // this version creates; the acceptance change re-derives it, past the keys the view holds
-        let vm = st.materialized(&view)?;
-        let re = crate::keys::rederive(
-            &prospective,
-            &rekeyable_in(&changes, &applied, &*st.materialized(&Scope::Canon)?),
-            &vm,
-        );
-        let accepts = accept_ops.len();
-        for (id, k) in &re {
-            let b = prospective
-                .get(id)
-                .expect("a re-derived block is in the prospective canon");
-            let in_view = vm.get(id).map(|v| v.version_hash());
-            if in_view != Some(b.version_hash()) {
-                stale.push(RdyError::new(
-                    E_STALE_BASE,
-                    format!(
-                        "{id} needs a new key (another block holds its key now), but it changed in view {:?} after the proposal was made",
-                        p.view
-                    ),
-                    format!("the view has later edits to {id}; propose again to include them"),
-                ));
-                continue;
-            }
-            let mut rekeyed = b.clone();
-            rekeyed
-                .fields
-                .insert("key".into(), FieldValue::Str(k.clone()));
-            accept_ops.push(Op::Update {
-                base: b.version_hash(),
-                block: rekeyed,
-            });
-        }
-        if let Some(e) = stale.into_iter().next() {
-            return Err(e);
-        }
-        // D-TX3KH: a block this version places that would share its order key with a sibling
-        // gets a key of its own, in the acceptance change. Only the version's own placed blocks
-        // are re-keyed, each from its proposed version, which the view must still hold. A key
-        // folds into the block's acceptance or key update, so no two updates share a base.
-        let canon = st.materialized(&Scope::Canon)?;
-        // D-1FT5Y: a block whose op kept its base's order key, where canon's version differs
-        // from that base only by its key, lands with canon's key and the op's other fields. It
-        // is no placed block, and the re-key reads the candidate with canon's keys.
-        let kept = crate::landing_order::kept_places(st.reader(), &canon, &prospective, &ops)?;
-        let with_kept;
-        let candidate = if kept.is_empty() {
-            &prospective
-        } else {
-            let restored: Vec<Op> = kept
-                .iter()
-                .map(|(id, k)| {
-                    let b = prospective
-                        .get(id)
-                        .expect("a kept block is in the prospective canon");
-                    let mut at = b.clone();
-                    at.order = k.clone();
-                    Op::Update {
-                        base: b.version_hash(),
-                        block: at,
-                    }
-                })
-                .collect();
-            with_kept = prospective.with(&restored);
-            &with_kept
-        };
-        let mut placed = crate::landing_order::placed(&canon, &ops);
-        placed.retain(|id| !kept.contains_key(id));
-        let mut order_keys = crate::landing_order::rekeys(&canon, candidate, &vm, &placed)?;
-        order_keys.extend(kept);
-        for (id, k) in &order_keys {
-            let b = prospective
-                .get(id)
-                .expect("a re-keyed block is in the prospective canon");
-            if vm.get(id).map(|v| v.version_hash()) != Some(b.version_hash()) {
-                return Err(crate::landing_order::stale_error(id, &p.view));
-            }
-            let mut folded = false;
-            for op in &mut accept_ops {
-                if let Op::Update { block, .. } = op
-                    && block.id == *id
-                {
-                    block.order = k.clone();
-                    folded = true;
-                }
-            }
-            if !folded {
-                let mut rekeyed = b.clone();
-                rekeyed.order = k.clone();
-                accept_ops.push(Op::Update {
-                    base: b.version_hash(),
-                    block: rekeyed,
-                });
-            }
+            order_keys |= block.order != authored.order;
         }
 
         // 3. dry run: validate the final change list before writing anything. The acceptance
@@ -3359,12 +3359,7 @@ impl Rdy {
                 deps: vec![],
                 provenance: s.provenance(),
                 justification: None,
-                message: acceptance_message(
-                    accepts > 0,
-                    !re.is_empty(),
-                    !order_keys.is_empty(),
-                    &p.title,
-                ),
+                message: acceptance_message(accepts > 0, !re.is_empty(), order_keys, &p.title),
                 links: ChangeLinks::default(),
                 read_identity: None,
             };

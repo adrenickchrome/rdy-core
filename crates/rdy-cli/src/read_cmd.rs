@@ -351,6 +351,11 @@ fn show_text(v: &Value) -> String {
         text(&v["block_type"]),
         hash_short(text(&v["version"]))
     );
+    // ck9 (D-JQD5X): a source's release or commit exists in a linked checkout, or not, or the
+    // machine cannot say; a read-time fact of this machine
+    if let Some(state) = v["existence"].as_str() {
+        out.push_str(&format!("source: {}\n", crate::brief_text::one_line(state)));
+    }
     if let Some(s) = status {
         out.push_str(&format!("status: {s}\n"));
     }
@@ -653,6 +658,35 @@ mod tests {
                 "ab".repeat(32),
                 "cd".repeat(32)
             )
+        );
+    }
+
+    /// ck9 (D-JQD5X): a source's text says `source: <state>` right after its type and version
+    /// header; a block with no `existence` prints as before.
+    #[test]
+    fn ck9_source_text_names_its_existence_after_the_header() {
+        let base = json!({"id": "s-AAAAA", "block_type": "source", "version": "cd".repeat(32),
+            "fields": {}, "body": "Release notes."});
+        for state in ["found", "missing", "unchecked"] {
+            let mut v = base.clone();
+            v["existence"] = json!(state);
+            assert_eq!(
+                show_text(&v),
+                format!(
+                    "s-AAAAA source (version cdcdcdcdcdcd)\nsource: {state}\n{{}}\nRelease notes."
+                )
+            );
+        }
+        let mut hostile = base.clone();
+        hostile["existence"] = json!("found\u{1b}[31m");
+        assert!(
+            show_text(&hostile).contains("\nsource: found [31m\n"),
+            "{}",
+            show_text(&hostile)
+        );
+        assert_eq!(
+            show_text(&base),
+            "s-AAAAA source (version cdcdcdcdcdcd)\n{}\nRelease notes."
         );
     }
 
