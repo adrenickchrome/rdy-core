@@ -170,7 +170,7 @@ impl PackSet {
                 supporting::REFLECTS_LINK
             )));
         }
-        inject_engine_types(&mut pack);
+        inject_engine_types(&mut pack)?;
         check(&pack)?;
         Ok(pack)
     }
@@ -245,6 +245,9 @@ impl PackSet {
             if c.drift_threshold.is_some() {
                 o.drift_threshold = c.drift_threshold;
             }
+            if c.max_docs_per_level.is_some() {
+                o.max_docs_per_level = c.max_docs_per_level;
+            }
         }
         Ok(out)
     }
@@ -258,7 +261,7 @@ fn f(kind: FieldKind, required: bool, values: &[&str]) -> FieldDef {
     }
 }
 
-fn inject_engine_types(pack: &mut Pack) {
+fn inject_engine_types(pack: &mut Pack) -> Result<(), SchemaError> {
     let doc_core: BTreeMap<String, FieldDef> = [
         ("name", f(FieldKind::Str, true, &[])),
         ("title", f(FieldKind::Str, true, &[])),
@@ -455,6 +458,34 @@ fn inject_engine_types(pack: &mut Pack) {
     ] {
         pack.link_types.insert(l.to_string());
     }
+    inject_everyday(pack)
+}
+
+/// The field a type that defines something may set to make its mentions count only when linked
+/// (D-YXBXH): an optional bool, never stored unless an author writes it.
+const EVERYDAY_FIELD: &str = "everyday";
+
+/// Gives every type with the `defines` trait the optional bool `everyday`, custom types too. A
+/// predeclared field that is exactly that is kept; any other declaration is refused.
+fn inject_everyday(pack: &mut Pack) -> Result<(), SchemaError> {
+    let want = f(FieldKind::Bool, false, &[]);
+    for (name, def) in pack.block_types.iter_mut() {
+        if !def.traits.contains(&Trait::Defines) {
+            continue;
+        }
+        match def.fields.get(EVERYDAY_FIELD) {
+            None => {
+                def.fields.insert(EVERYDAY_FIELD.to_string(), want.clone());
+            }
+            Some(have) if *have == want => {}
+            Some(_) => {
+                return Err(SchemaError::Invalid(format!(
+                    "type {name}: field {EVERYDAY_FIELD} must be an optional bool"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn folder_core() -> BTreeMap<String, FieldDef> {
@@ -663,6 +694,13 @@ fn check_coverage(pack: &Pack) -> Result<(), SchemaError> {
     {
         return Err(SchemaError::Invalid(format!(
             "coverage.drift_threshold is {n}; it must be 1 to 100"
+        )));
+    }
+    if let Some(n) = c.max_docs_per_level
+        && !(1..=100_000).contains(&n)
+    {
+        return Err(SchemaError::Invalid(format!(
+            "coverage.max_docs_per_level is {n}; it must be 1 to 100000"
         )));
     }
     if CoverageDimension::ALL

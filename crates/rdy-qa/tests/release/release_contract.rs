@@ -2956,6 +2956,26 @@ fn packs_row() -> Value {
             .expect_err("a taken name is refused")
             .to_string()
     };
+    // nb3 (D-YXBXH, O6): a pack that sets every coverage key, the level setting's default, and
+    // the two refusals at its edges
+    let coverage_pack = {
+        let mut s = PackSet::with_builtin();
+        s.add_yaml(
+            "name: probe\nversion: \"1\"\nextends: rdy-standard\ncoverage:\n  weights: {governed: 2}\n  dismissed_weight: 25\n  drift_threshold: 70\n  max_docs_per_level: 12\n",
+        )
+        .expect("a pack with every coverage key parses");
+        s.resolve("probe").expect("it resolves")
+    };
+    let level_refusal = |n: u32| {
+        let mut s = PackSet::with_builtin();
+        s.add_yaml(&format!(
+            "name: probe\nversion: \"1\"\nextends: rdy-standard\ncoverage:\n  max_docs_per_level: {n}\n"
+        ))
+        .expect("the key parses");
+        s.resolve("probe")
+            .expect_err("a level outside 1 to 100000 is refused")
+            .to_string()
+    };
     let pack_keys: Vec<String> = pack_json.as_object().unwrap().keys().cloned().collect();
     json!({
         "sources": ["rdy_schema::Pack", "rdy_schema::PackSet", "crates/rdy-schema/packs"],
@@ -2979,10 +2999,17 @@ fn packs_row() -> Value {
             "max_glob_len": rdy_schema::MAX_GLOB_LEN,
             "max_path_segments": rdy_schema::MAX_PATH_SEGMENTS,
         },
+        "coverage_settings": {
+            "pack": coverage_pack.coverage,
+            "max_docs_per_level_default": std_pack.max_docs_per_level(),
+            "max_docs_per_level_set": coverage_pack.max_docs_per_level(),
+        },
         "validation": {
             "unknown_pack_key": bad_key,
             "unknown_field_kind": bad_field,
             "duplicate_pack_name": duplicate,
+            "coverage_level_too_low": level_refusal(0),
+            "coverage_level_too_high": level_refusal(100_001),
         },
     })
 }
