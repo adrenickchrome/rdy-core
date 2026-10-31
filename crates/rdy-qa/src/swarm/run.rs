@@ -680,24 +680,7 @@ fn listing(relay: &mut Link, args: Value) -> BTreeMap<String, Value> {
         Some(v) => vec![json!({"view": v})],
         None => {
             let mut scopes = vec![json!({"scope": "canon"})];
-            let e = relay.entry("view_list");
-            let mut views: Vec<String> = vec![];
-            relay.exec(
-                e,
-                "view_list",
-                "rdy_view",
-                json!({"op": "list", "all": true}),
-                |_, v| {
-                    views = v["views"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter(|r| r["closed"] != true)
-                        .filter_map(|r| r["name"].as_str().map(str::to_string))
-                        .collect();
-                },
-            );
-            scopes.extend(views.iter().map(|v| json!({"view": v})));
+            scopes.extend(open_views(relay).iter().map(|v| json!({"view": v})));
             scopes
         }
     };
@@ -737,6 +720,35 @@ fn listing(relay: &mut Link, args: Value) -> BTreeMap<String, Value> {
         }
     }
     out
+}
+
+/// The open views, as the relay lists them (`rdy_view list`), whole: the list's default budget
+/// (4 000 tokens) cuts the last views by name, the person's `work` among them (deep swarm,
+/// 2026-10-31). A list still cut fails the run with the seed.
+fn open_views(relay: &mut Link) -> Vec<String> {
+    let e = relay.entry("view_list");
+    let mut views: Vec<String> = vec![];
+    let mut cut = false;
+    relay.exec(
+        e,
+        "view_list",
+        "rdy_view",
+        json!({"op": "list", "all": true, "max_tokens": ALL}),
+        |_, v| {
+            cut = v.get("omitted").is_some();
+            views = v["views"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|r| r["closed"] != true)
+                .filter_map(|r| r["name"].as_str().map(str::to_string))
+                .collect();
+        },
+    );
+    if cut {
+        relay.fail("view_list", "got a view list cut for its budget");
+    }
+    views
 }
 
 /// The changes view `view` holds, as the relay reads them (`rdy_view show`).
@@ -2240,6 +2252,60 @@ fn link_fail(cfg: &Config, v: &str, act: &str) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Deep swarm, 2026-10-31 (seed 2): the freeze's listing in parts reads the tensions of every
+    /// open view. `rdy_view list` cuts its rows to 4 000 tokens by default, and the cut drops the
+    /// last views by name (`work`, the person's view). The relay reads the whole list and fails
+    /// the run when a list is still cut.
+    #[test]
+    fn sg5_the_freeze_reads_every_open_view_past_the_default_budget() {
+        let cfg = Config {
+            seed: 14,
+            agents: 2,
+            steps: 12,
+            kill_at: None,
+        };
+        let p = project::build(&cfg);
+        let mut relay = Link::connect(
+            Where::of(&p),
+            RELAY_ACTOR,
+            RELAY_RUN,
+            "reviewer",
+            None,
+            Journal::new(),
+            Arc::new(KillGate::new()),
+        );
+        let mut names: Vec<String> = (0..200).map(|k| format!("v-{k:03}")).collect();
+        names.push("zz-last".to_string());
+        for name in &names {
+            let e = relay.entry("view_create");
+            let res = relay.exec(
+                e,
+                "view_create",
+                "rdy_view",
+                json!({"op": "create", "name": name}),
+                |_, _| {},
+            );
+            assert!(matches!(res, Res::Ok(_)), "cannot create view {name}");
+        }
+        // the case this pins: a list with the default budget is cut
+        let e = relay.entry("view_list");
+        let mut cut = false;
+        relay.exec(
+            e,
+            "view_list",
+            "rdy_view",
+            json!({"op": "list", "all": true}),
+            |_, v| cut = v.get("omitted").is_some(),
+        );
+        assert!(cut, "a default list of {} views is not cut", names.len());
+        let open: BTreeSet<String> = open_views(&mut relay).into_iter().collect();
+        let missing: Vec<&String> = names.iter().filter(|n| !open.contains(*n)).collect();
+        assert!(
+            missing.is_empty(),
+            "the freeze does not read views {missing:?}"
+        );
+    }
 
     /// Final review M8 (minors items 23 and 39): a proposal that chooses a set member, or a
     /// winner's later work, never passes a queued contra first claim; each place keeps its
