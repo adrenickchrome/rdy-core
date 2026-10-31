@@ -504,14 +504,15 @@ fn exact_holds(
     })
 }
 
+/// A resolved item: its block, and the key of the scope its side is read in (`None`: the other
+/// side's).
+type ItemBlock = (Arc<Block>, Option<ReadKey>);
+
 /// The block `item` names and the key of the scope its side is read in: a change side's write
 /// at the item's version (its view; the in-flight scope when the write is current in none), or
 /// canon's block at it (`None`: read in the other side's scope). `None` when it does not
 /// resolve.
-fn item_block(
-    cx: &DetectCx<'_>,
-    item: &Item,
-) -> Result<Option<(Arc<Block>, Option<ReadKey>)>, RdyError> {
+fn item_block(cx: &DetectCx<'_>, item: &Item) -> Result<Option<ItemBlock>, RdyError> {
     Ok(match &item.side {
         SideRef::Change(c) => cx
             .writes
