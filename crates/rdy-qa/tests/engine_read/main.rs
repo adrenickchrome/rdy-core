@@ -36,6 +36,7 @@ mod engine_lexicon;
 mod engine_links;
 mod engine_mention_reviews;
 mod engine_neighbors;
+mod engine_name_matcher;
 mod engine_outside_doc;
 mod engine_pending;
 mod engine_pmap;

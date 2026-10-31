@@ -20,7 +20,7 @@
 //! The briefing (`will_go_stale` states) and the consequences (values and matched rows) are
 //! this module's callers.
 
-use crate::lexicon::{Lexicon, count_scan, is_enum_field};
+use crate::lexicon::{Lexicon, MentionSource, count_scan, is_enum_field};
 use crate::search::window;
 use crate::tensions::value::{
     MAX_UNIT_CHARS, number_literal_spans, stated_number_spans, value_number,
@@ -259,7 +259,8 @@ fn scan_target(
     if is_value && let (Some((number, unit)), Some(text)) = (value_number(b), value_text(b)) {
         found(LiteralIdentity::Number { number, unit }, &text);
     }
-    let mut source = |text: &str, mode: RefMode| scan_source(text, mode, &b.id, names, found);
+    let own = names.source(b);
+    let mut source = |text: &str, mode: RefMode| scan_source(text, mode, &own, names, found);
     if decision {
         for f in DECISION_FIELDS {
             if let Some(v) = b.fields.get(f)
@@ -289,7 +290,7 @@ fn scan_target(
 fn scan_source(
     text: &str,
     mode: RefMode,
-    own: &BlockId,
+    own: &MentionSource,
     names: &Lexicon,
     found: &mut dyn FnMut(LiteralIdentity, &str),
 ) {
@@ -396,7 +397,7 @@ fn unclosed_ref(text: &str, mode: RefMode) -> Option<usize> {
 /// word, or when some known phrase is longer than the whole words from there and starts with
 /// them (and with what the cut word begins with). A match that starts at or after the first
 /// such word is not accepted; every match before it is the full text's.
-fn settled_before(scan: &str, names: &Lexicon) -> usize {
+fn settled_before(scan: &str, names: &Lexicon, own: &MentionSource) -> usize {
     let ws = words(scan);
     let n = ws.len();
     let Some(last) = ws.last() else {
@@ -412,7 +413,7 @@ fn settled_before(scan: &str, names: &Lexicon) -> usize {
     let zone = (k + 1).saturating_sub(MAX_NAME_WORDS);
     // the phrases the scan takes that can cover a word from `zone` on: first word, word count
     let mut taken: BTreeMap<usize, usize> = BTreeMap::new();
-    names.visit_phrase_spans(scan, &mut |r| {
+    names.visit_phrase_spans(scan, own, &mut |r| {
         let first = ws.partition_point(|w| w.start < r.start);
         if first + MAX_NAME_WORDS > zone {
             let last = ws.partition_point(|w| w.end < r.end);
@@ -624,6 +625,7 @@ fn scan_dependent(
     let mut cut = false;
     let mut remaining = EVIDENCE_BYTES;
     let mut ordinal = 0;
+    let own = names.source(dep);
     visit_text_sources(dep, &mut |name, text, mode| {
         let source = ordinal;
         ordinal += 1;
@@ -646,15 +648,7 @@ fn scan_dependent(
             stated |= 1 << lit;
             rows.offer(name, line, start, end, lit, source, line_at);
         };
-        scan_prefix(
-            &text[..k],
-            mode,
-            here_cut,
-            &wanted,
-            &dep.id,
-            names,
-            &mut hit,
-        );
+        scan_prefix(&text[..k], mode, here_cut, &wanted, &own, names, &mut hit);
         if here_cut {
             ControlFlow::Break(())
         } else {
@@ -716,7 +710,7 @@ fn scan_prefix(
     mode: RefMode,
     cut: bool,
     wanted: &Wanted<'_>,
-    own: &BlockId,
+    own: &MentionSource,
     names: &Lexicon,
     hit: &mut dyn FnMut(usize, usize, usize, usize, usize),
 ) {
@@ -815,7 +809,7 @@ fn scan_prefix(
     }
     if !wanted.entities.is_empty() {
         let settled = if cut {
-            settled_before(scan, names)
+            settled_before(scan, names, own)
         } else {
             scan.len()
         };
@@ -1960,7 +1954,7 @@ mod tests {
         let mut seen = BTreeSet::new();
         let mut want = vec![];
         for (field, text) in text_in(&p, &dep) {
-            for (e, r) in names.mention_spans(&text, &dep.id) {
+            for (e, r) in names.mention_spans(&text, &dep) {
                 if seen.insert(e.clone()) {
                     want.push(Mention {
                         entity: e.to_string(),
