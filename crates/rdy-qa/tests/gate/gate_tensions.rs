@@ -23,6 +23,34 @@ fn approve(r: &mut Rdy, p: &ProposalInfo) -> Result<String, RdyError> {
     confirm_before_landing(r, &approver(), p);
     r.land(&approver(), &p.id)
 }
+/// nb8 (D-YXBXH, TASK-978 X2): agent `owner` answers the neighbor confirms of its view `view`
+/// with one group, as an agent does before it proposes: an edit of `c` in the stable spec owes
+/// its section siblings `a` and `b` a confirm, which readiness needs answered.
+fn answer_neighbors(r: &mut Rdy, owner: &str, view: &str) {
+    let group: Vec<rdy_engine::plan::api::PlanAnswerSpec> = vec![
+        serde_json::from_value(
+            json!({"group": {"edge": "neighbor"}, "act": "confirm", "reason": "it still holds"}),
+        )
+        .unwrap(),
+    ];
+    r.answer_plan_specs(&ag(owner), view, &group)
+        .unwrap_or_else(|e| panic!("answer the neighbor items of {view}: {e}"));
+}
+
+/// The confirm answers of the neighbor items an edit of `c` owes `a` and `b` (nb8), for a
+/// subset propose, whose candidate the view's earlier answers do not match.
+fn neighbor_answers(s: &rdy_qa::edit_loop::Spec) -> Vec<rdy_engine::plan::PlanAnswerInput> {
+    use rdy_model::plan::{PlanAct, PlanKind, item_display, item_hash};
+    [&s.a, &s.b]
+        .into_iter()
+        .map(|sub| rdy_engine::plan::PlanAnswerInput {
+            item: item_display(&item_hash(&s.c, sub.as_str(), PlanKind::Confirm)),
+            act: PlanAct::Confirm,
+            reason: Some("it still holds".into()),
+        })
+        .collect()
+}
+
 /// Checks the approval of `p` is refused as not ready (D-ME2HD), with the queue's issues for it,
 /// whose codes are `codes`; returns the refusal.
 fn refused(r: &mut Rdy, p: &ProposalInfo, codes: &[&str]) -> RdyError {
@@ -180,6 +208,7 @@ fn tgat1_an_unjustified_change_refuses_when_the_pack_makes_it_blocking() {
     let s = stable_spec(&mut r);
     let tok = brief_of(&r, &Scope::Canon, &[&s.c]).base.token;
     write_cited_as(&mut r, &ag("a"), "a", upd(&s.c, "C changed."), Some(&tok)).unwrap();
+    answer_neighbors(&mut r, "a", "a");
     let pa = propose(&mut r, "a");
     assert!(
         pa.tensions
@@ -202,6 +231,7 @@ fn tgat1_an_unjustified_change_refuses_when_the_pack_makes_it_blocking() {
         Some(tok),
     )
     .unwrap();
+    answer_neighbors(&mut r, "j", "j");
     let pj = propose(&mut r, "j");
     assert!(
         pj.tensions.iter().all(|t| t.refuses != Some(true)),
@@ -1026,6 +1056,7 @@ fn msw21_the_landing_judges_the_landing_sets_net_change() {
     let s = stable_spec(&mut r);
     put_j(&mut r, "a", upd(&s.c, "C changed."), None);
     put_j(&mut r, "a", upd(&s.c, "C, typo fixed."), j_typo());
+    answer_neighbors(&mut r, "a", "a");
     let pa = propose(&mut r, "a");
     assert!(
         pa.tensions.iter().all(|t| t.refuses != Some(true)),
@@ -1043,14 +1074,17 @@ fn msw21_the_landing_judges_the_landing_sets_net_change() {
         upd(&s.c, "C, as D says."),
         j_implements(&s.decision),
     );
+    let changes = [c5.to_string()];
+    let answers = neighbor_answers(&s);
     let po = r
-        .propose_with(
+        .propose_plan(
             &writer(),
-            "o",
-            "o",
-            Some(&[c5.to_string()]),
-            Some(TEST_SUMMARY),
-            None,
+            rdy_engine::plan::lifecycle::ProposePlanRequest {
+                changes: Some(&changes),
+                summary: Some(TEST_SUMMARY),
+                plan_answers: &answers,
+                ..rdy_engine::plan::lifecycle::ProposePlanRequest::new("o", "o")
+            },
         )
         .unwrap();
     refused(&mut r, &po, &[E_BLOCKING_TENSION]);

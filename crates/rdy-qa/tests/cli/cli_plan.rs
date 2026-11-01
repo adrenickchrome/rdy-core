@@ -12,8 +12,9 @@ use rdy_qa::fixtures::{land, write, writer};
 use rdy_qa::git_repo::GitRepo;
 use serde_json::{Value, json};
 
-/// Canon: doc `led` with section `s`, term `t`, claims `a` and `c`, and `b` (cites `a` and
-/// `c`); `n` accepted decisions that cite `t`. View `w` changes `t` and `a`: in `w` the
+/// Canon: doc `led` with section `s` (term `t`, claim `a`, and `b`, which cites `a` and `c`)
+/// and section `o` (claim `c`, outside `s`, so `a`'s edit owes it no neighbor confirm: nb8,
+/// D-YXBXH); `n` accepted decisions that cite `t`. View `w` changes `t` and `a`: in `w` the
 /// decisions are suspect on `t`, and `b` on `a`.
 struct Fx {
     s: String,
@@ -35,7 +36,8 @@ fn build(s: &Served, n: usize) -> (Rdy, Fx) {
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
         {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Ledger"}, "body": "Balances."},
         {"op": "create", "type": "claim", "id": "$a", "parent": "$s", "body": "A holds 30 days."},
-        {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "C stands."},
+        {"op": "create", "type": "section", "id": "$o", "parent": "$d", "fields": {"title": "Other"}},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$o", "body": "C stands."},
         {"op": "create", "type": "claim", "id": "$b", "parent": "$s", "body": "B builds on {{$a}} and {{$c}}."}
     ]))
     .unwrap();

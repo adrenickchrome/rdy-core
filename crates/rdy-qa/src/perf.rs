@@ -4201,16 +4201,20 @@ fn tier_change_plan(
         json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}}),
         json!({"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "PlanLedger"}, "body": "Balances."}),
         json!({"op": "create", "type": "claim", "id": "$a", "parent": "$s", "body": "A holds."}),
+        // the reflects blocks' own section: in A's section each would be A's section neighbor
+        // and owe a confirm too (nb8, D-YXBXH), so the ops would count 2n confirm items
+        json!({"op": "create", "type": "section", "id": "$rs", "parent": "$d", "fields": {"title": "Module"}}),
     ];
     for i in 0..n {
         ops.push(json!({"op": "create", "type": "claim", "parent": "$s", "body": format!("N{i} builds on {{{{$a}}}}.")}));
     }
     let w = write(&mut r, "pfix", json!(ops)).expect("write the plan claims");
     land(&mut r, "pfix").expect("land the plan claims");
-    let (section, term, a) = (
+    let (section, term, a, module) = (
         w.created["$s"].clone(),
         w.created["$t"].clone(),
         w.created["$a"].clone(),
+        w.created["$rs"].clone(),
     );
     // the n accepted decisions that use the term
     for i in 0..n {
@@ -4233,7 +4237,7 @@ fn tier_change_plan(
     g.commit(&format!("start\n\nImplements: {a}"));
     g.link(&copy);
     let ops: Vec<_> = (0..n)
-        .map(|i| json!({"op": "create", "type": "claim", "parent": section, "body": format!("R{i} follows the module."), "fields": {"reflects": ["src/*.rs"]}}))
+        .map(|i| json!({"op": "create", "type": "claim", "parent": module, "body": format!("R{i} follows the module."), "fields": {"reflects": ["src/*.rs"]}}))
         .collect();
     write(&mut r, "prefl", json!(ops)).expect("write the reflects blocks");
     land(&mut r, "prefl").expect("land the reflects blocks");

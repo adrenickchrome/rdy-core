@@ -251,6 +251,23 @@ fn typo_edit(w: &mut World, name: &str) {
     put_j(&mut w.r, name, upd(&w.x, "X holds, now."), j_typo());
 }
 
+/// A person lands claim `y` in a new section `later` of `notes`: a block on the page of `x` that
+/// is not its section neighbor, so no plan item of an edit of `x` names it (nb8, D-YXBXH; D-ME2HD
+/// reach). Returns `y`.
+fn far_claim(w: &mut World) -> BlockId {
+    let res = put_j(
+        &mut w.r,
+        "far",
+        json!([
+            {"op": "create", "type": "section", "id": "$l", "parent": w.notes.to_string(), "fields": {"title": "Later"}},
+            {"op": "create", "type": "claim", "id": "$y", "parent": "$l", "body": "Y holds."}
+        ]),
+        j_typo(),
+    );
+    land(&mut w.r, "far").unwrap();
+    id(&res.created["$y"])
+}
+
 /// Agent `agent:<name>` records a decision that needs no content under section `s` of `notes`
 /// (outside area `payments`): a version neither rule covers. Returns the decision.
 fn decision_edit(w: &mut World, name: &str) -> BlockId {
@@ -621,8 +638,10 @@ fn ap11_a_policy_change_after_propose_refuses_with_a_fresh_card() {
     let before = live(&w.r);
     typo_edit(&mut w, "a1");
     let p = propose_as(&mut w.r, "a1");
-    // a version a person approves, proposed before the change too
-    let s = w.s.to_string();
+    // a version a person approves, proposed before the change too; its claim goes in the empty
+    // section `ws`, so it owes no section confirm on x and a1's landing leaves its reach alone
+    // (nb8, TASK-978 X2; D-ME2HD reach)
+    let s = w.ws.to_string();
     put_j(
         &mut w.r,
         "a2",
@@ -666,14 +685,17 @@ fn ap11_a_policy_change_after_propose_refuses_with_a_fresh_card() {
 #[test]
 fn ap11_a_landing_on_a_page_under_no_lower_refuses_with_a_fresh_card() {
     let mut w = world_with(true, "coverage:\n  gate: no_lower\n");
+    let y = far_claim(&mut w);
     typo_edit(&mut w, "a1");
     let p = propose_as(&mut w.r, "a1");
     let (_, a) = stored(&w.r, &p);
     assert!(a.coverage.pages.iter().any(|g| g.doc == w.notes), "{a:#?}");
-    assert!(!a.reach.contains(&w.z), "z is outside the version's reach");
-    // a person's typo fix of z, on the same page
-    put_j(&mut w.r, "zz", upd(&w.z, "Z holds, now."), j_typo());
-    let l: Hash = land(&mut w.r, "zz").unwrap().parse().unwrap();
+    // nb8: z, x's section neighbor, is a plan subject, so it is in the reach (D-ME2HD)
+    assert!(a.reach.contains(&w.z), "z is x's section neighbor: {a:#?}");
+    assert!(!a.reach.contains(&y), "y is outside the version's reach");
+    // a person's typo fix of y, on the same page
+    put_j(&mut w.r, "yy", upd(&y, "Y holds, now."), j_typo());
+    let l: Hash = land(&mut w.r, "yy").unwrap().parse().unwrap();
     let e = rdy_land_as(&mut w.r, &ag("a1"), &p).unwrap_err();
     let message = format!(
         "proposal {} moved: landing {} changed page notes after its assessment",
@@ -687,10 +709,12 @@ fn ap11_a_landing_on_a_page_under_no_lower_refuses_with_a_fresh_card() {
 #[test]
 fn ap11_a_landing_on_a_page_under_no_lower_refuses_an_approval_too() {
     let mut w = world_with(true, "coverage:\n  gate: no_lower\n");
+    let y = far_claim(&mut w);
     typo_edit(&mut w, "a1");
     let p = propose_as(&mut w.r, "a1");
-    put_j(&mut w.r, "zz", upd(&w.z, "Z holds, now."), j_typo());
-    let l: Hash = land(&mut w.r, "zz").unwrap().parse().unwrap();
+    // y is on x's page but not its section neighbor (z is), so only the page gate moves p
+    put_j(&mut w.r, "yy", upd(&y, "Y holds, now."), j_typo());
+    let l: Hash = land(&mut w.r, "yy").unwrap().parse().unwrap();
     let e = w.r.land_report(&approver(), &p.id).unwrap_err();
     let message = format!(
         "proposal {} moved: landing {} changed page notes after its assessment",
@@ -887,7 +911,14 @@ fn ap11_mcp_and_cli_land_give_the_same_landing_report() {
         let mut r = Rdy::open(s.dir.path()).unwrap();
         let ids = seed(&mut r, true);
         put_j(&mut r, "a1", upd(&ids.x, "X holds, now."), j_typo());
-        put_j(&mut r, "a2", upd(&ids.z, "Z holds, now."), j_typo());
+        // a2 retitles section ws, not x's section neighbor z: under nb8 a text edit of z owes x
+        // a section confirm, so a1's landing of x would move a2's version (D-ME2HD reach)
+        put_j(
+            &mut r,
+            "a2",
+            json!([{"op": "update", "id": ids.ws.to_string(), "fields": {"title": "Fees, now"}}]),
+            j_typo(),
+        );
         put_j(&mut r, "a3", upd(&ids.o, "O holds, now."), j_typo());
         let ps = (
             propose_as(&mut r, "a1"),

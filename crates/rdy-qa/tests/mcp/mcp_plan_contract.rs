@@ -31,8 +31,9 @@ fn id(s: &str) -> BlockId {
     BlockId::parse(s).unwrap()
 }
 
-/// Canon: doc `led` with section `s`, term `t`, claims `a` and `c`, and `b` (cites `a` and
-/// `c`); `n` accepted decisions that cite `t`. Then `author` changes `t` and `a` in `view`: there
+/// Canon: doc `led` with section `s` (term `t`, claim `a`, and `b`, which cites `a` and `c`)
+/// and section `o` (claim `c`, outside `s`, so `a`'s edit owes it no neighbor confirm: nb8,
+/// D-YXBXH); `n` accepted decisions that cite `t`. Then `author` changes `t` and `a` in `view`: there
 /// the decisions are suspect on `t`, and `b` on `a`. The plan of `view` has `n` reaffirm items
 /// and one confirm item.
 fn fx(r: &mut Rdy, n: usize, view: &str, author: &Session) {
@@ -41,7 +42,8 @@ fn fx(r: &mut Rdy, n: usize, view: &str, author: &Session) {
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
         {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Ledger"}, "body": "Balances."},
         {"op": "create", "type": "claim", "id": "$a", "parent": "$s", "body": "A holds 30 days."},
-        {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "C stands."},
+        {"op": "create", "type": "section", "id": "$o", "parent": "$d", "fields": {"title": "Other"}},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$o", "body": "C stands."},
         {"op": "create", "type": "claim", "id": "$b", "parent": "$s", "body": "B builds on {{$a}} and {{$c}}."}
     ]))
     .unwrap();

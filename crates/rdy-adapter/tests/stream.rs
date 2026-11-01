@@ -64,7 +64,7 @@ struct Fixture {
 fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
-    let w = write(
+    write(
         &mut r,
         json!([
             {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "a", "title": "A", "doc_type": "page"}},
@@ -72,9 +72,15 @@ fn fixture() -> Fixture {
         ]),
     );
     land(&mut r, "first");
+    // the second prose block opens a doc of its own: beside `First.` it would owe that block a
+    // section confirm (nb8, D-YXBXH, TASK-978 X2), and the landing's sealed plan, an attachment
+    // of the closure (D-4JMPH), would follow the root in the batch
     write(
         &mut r,
-        json!([{"op": "create", "type": "prose", "id": "$q", "parent": w.created["$d"], "body": "Second."}]),
+        json!([
+            {"op": "create", "type": "doc", "id": "$e", "fields": {"name": "b", "title": "B", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$q", "parent": "$e", "body": "Second."}
+        ]),
     );
     land(&mut r, "second");
     r.tag(&session(Role::Approver), "v1.0.0", None, None)

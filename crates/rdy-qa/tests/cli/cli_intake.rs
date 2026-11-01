@@ -286,8 +286,15 @@ fn di12_rdy_answer_prints_the_consequences_rdy_approve_prints() {
         assert!(ok, "{v}");
         let done = if all { &v[0] } else { &v };
         let c = done["landing"]["consequences"].as_array().unwrap();
-        assert_eq!(c.len(), 1, "{v}");
+        // b's suspect entry, then (nb8, D-YXBXH) the section confirm A's edit gives C, which
+        // the text above leaves out: it prints the suspect lines only
+        assert_eq!(c.len(), 2, "{v}");
         assert_eq!(c[0]["kind"], "suspect", "{v}");
+        assert_eq!(
+            (&c[1]["kind"], &c[1]["because"]["edge"], &c[1]["follow_up"]),
+            (&json!("dependent"), &json!("neighbor"), &json!("confirm")),
+            "{v}"
+        );
     }
 }
 

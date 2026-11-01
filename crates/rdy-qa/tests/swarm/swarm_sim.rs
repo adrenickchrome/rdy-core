@@ -2869,6 +2869,15 @@ fn rg15_the_person_answers_the_work_plan_before_it_proposes() {
             "body": body}], "brief": token, "implements": [decision]}),
     )
     .ok();
+    // nb8 (TASK-978 X2, D-YXBXH): the new claim owes its stable section's other claims a
+    // neighbor confirm, which readiness needs answered; a0 answers them with one group, as the
+    // swarm agent does (nb10)
+    c.call(
+        "rdy_plan",
+        json!({"view": "a0", "answers": [{"group": {"edge": "neighbor", "follow_up": "confirm"},
+            "act": "confirm", "reason": "swarm: checked"}]}),
+    )
+    .ok();
     let v = c
         .call(
             "rdy_propose",
