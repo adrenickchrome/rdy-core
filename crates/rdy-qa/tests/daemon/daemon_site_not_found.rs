@@ -86,7 +86,10 @@ pub(crate) fn assert_themed(
     assert!(body.contains("<h1>Page not found</h1>"), "{what}: {body}");
     match variant {
         Variant::Page => {
-            assert!(body.contains(&format!("<p>{PAGE_SENTENCE}</p>")), "{what}");
+            assert!(
+                body.contains(&format!("<p class=\"refusal-message\">{PAGE_SENTENCE}</p>")),
+                "{what}"
+            );
             assert!(!body.contains(SCOPE_SENTENCE), "{what}");
             assert!(
                 body.contains(&format!(
@@ -97,7 +100,12 @@ pub(crate) fn assert_themed(
         }
         Variant::Scope => {
             assert_eq!(root, "/", "{what}: the Scope variant is canon's");
-            assert!(body.contains(&format!("<p>{SCOPE_SENTENCE}</p>")), "{what}");
+            assert!(
+                body.contains(&format!(
+                    "<p class=\"refusal-message\">{SCOPE_SENTENCE}</p>"
+                )),
+                "{what}"
+            );
             assert!(!body.contains(PAGE_SENTENCE), "{what}");
             assert!(
                 body.contains("<p>See the <a href=\"/index.html\">latest docs</a>, or open the <a href=\"/~versions/\">list of versions, proposals and views</a>.</p>"),

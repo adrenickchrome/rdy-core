@@ -30,6 +30,7 @@ pub mod process;
 mod profile_live;
 mod publication;
 pub mod publish;
+pub mod refusal;
 pub mod render_input;
 pub mod review;
 mod search;
@@ -411,6 +412,7 @@ fn env() -> Result<minijinja::Environment<'static>, RdyError> {
         "partials/change.html",
         "partials/removed.html",
         "partials/glossary.html",
+        "partials/refusal.html",
     );
     Ok(env)
 }

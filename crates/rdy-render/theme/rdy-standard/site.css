@@ -497,3 +497,16 @@ del + ins, ins + del { margin-inline-start: 0.3em; }
 .rdy-versions { margin: 0.4rem 0 0; padding-left: 1.2rem; font-size: 0.88rem; color: var(--ink-soft); }
 .rdy-versions a { display: inline-flex; align-items: center; min-height: 40px; }
 /* == /notices == */
+
+/* refusal: a message with a native info control (no script) */
+.refusal { position: relative; display: flex; align-items: flex-start; gap: 0.5rem; margin-bottom: 1rem; }
+.refusal-message { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.refusal-detail { flex: none; }
+.refusal-detail summary { list-style: none; cursor: pointer; display: inline-grid; place-items: center; min-width: 1.75rem; height: 1.75rem; border-radius: 50%; color: var(--accent); }
+.refusal-detail summary::-webkit-details-marker { display: none; }
+.refusal-detail summary:hover { background: var(--accent-soft); }
+.refusal-detail summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.refusal-detail[open] summary { color: var(--accent-ink); background: var(--accent-soft); }
+.refusal-popover { position: absolute; z-index: 5; left: 0; right: 0; top: 100%; margin-top: 0.4rem; padding: 0.6rem 0.9rem; background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius); box-shadow: var(--shadow-sm); overflow-wrap: anywhere; }
+.refusal-popover p { margin: 0 0 0.4rem; font-size: 0.92rem; }
+.refusal-popover p:last-child { margin-bottom: 0; }

@@ -41,6 +41,7 @@ mod render_questions_outside_doc;
 mod render_reader_text;
 mod render_redaction;
 mod render_ref;
+mod render_refusal_details;
 mod render_review;
 mod render_review_bar;
 mod render_review_index;
