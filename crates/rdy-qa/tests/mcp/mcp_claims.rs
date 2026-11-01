@@ -481,6 +481,24 @@ fn seen(st: &mut McpState, asked: Option<&Asked>) -> Result<(Role, String), rdy_
     })
 }
 
+/// `rdy_inbox` with `args` through the protocol's door, as the call `asked` states.
+fn inbox(st: &mut McpState, asked: Option<&Asked>, args: Value) -> Result<Value, String> {
+    claims::call(st, asked, "rdy_inbox", |st| {
+        tools::rdy_inbox(st, serde_json::from_value(args).unwrap())
+    })
+    .map_err(|e| format!("{}: {}", e.code, e.message))
+}
+
+/// The events of an inbox page.
+fn events(page: &Value) -> Vec<String> {
+    page["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("an inbox page: {page}"))
+        .iter()
+        .map(|e| e["event"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
 fn role_only(role: Role) -> Asked {
     Asked::Options {
         role: Some(role),
@@ -556,6 +574,58 @@ fn ui5_role_override_is_local_to_one_concurrent_call() {
     );
     assert_eq!(seen(&mut two, None).unwrap().0, Role::Reader);
     drop((one, two, engine, dir));
+
+    // the inbox (review fix round 1): a one-call role filters that call's page and its ack; the
+    // subscription keeps its cursor and areas and the saved role, also when that call creates it
+    let (dir, mut r) = project();
+    let spec = rdy_qa::edit_loop::spec_doc(&mut r);
+    let engine = Arc::new(Local::new(r));
+    let hub = NotifyHub::new();
+    let (mut k, mut n, mut w) = (
+        state(&engine, &hub),
+        state(&engine, &hub),
+        state(&engine, &hub),
+    );
+    open(&mut k, session_params("agent:k", "k1", "writer", None)).unwrap();
+    open(&mut w, session_params("agent:w", "w1", "writer", None)).unwrap();
+    let reviewer = role_only(Role::Reviewer);
+    // n's first call is a reviewer-override inbox read: it subscribes n with the saved role
+    let n_claim = Asked::Claim(Claim {
+        actor: "agent:n".into(),
+        run: Some("n1".into()),
+        role: Some(Role::Reviewer),
+        dedupe: None,
+    });
+    let started = inbox(&mut n, Some(&n_claim), json!({})).unwrap();
+    assert_eq!(started["started"], json!(true), "{started}");
+    let saved_role = |actor: &str, run: &str| {
+        let st = engine.read();
+        st.reader().inbox(actor, Some(run)).unwrap().unwrap().role
+    };
+    assert_eq!(saved_role("agent:n", "n1"), "writer");
+    // another actor's change asks for reviews
+    let ops =
+        json!({"ops": [{"op": "update", "id": spec.c.to_string(), "body": "C contradicts B."}]});
+    claims::call(&mut w, None, "rdy_write", |st| {
+        tools::rdy_write(st, serde_json::from_value(ops).unwrap())
+    })
+    .unwrap();
+    for (name, st) in [("k", &mut k), ("n", &mut n)] {
+        let mine = inbox(st, None, json!({})).unwrap();
+        assert!(events(&mine).is_empty(), "{name}: a writer call: {mine}");
+        let asked = inbox(st, Some(&reviewer), json!({})).unwrap();
+        assert_eq!(events(&asked), ["review_requested"], "{name}: {asked}");
+        let acked = inbox(st, Some(&reviewer), json!({"ack": true})).unwrap();
+        assert_eq!(events(&acked), ["review_requested"], "{name}: {acked}");
+        assert_eq!(acked["acked"], json!(true), "{name}: {acked}");
+        // the ack moved the cursor past the entries it returned
+        let after = inbox(st, Some(&reviewer), json!({})).unwrap();
+        assert!(events(&after).is_empty(), "{name}: {after}");
+    }
+    assert_eq!(saved_role("agent:k", "k1"), "writer");
+    assert_eq!(saved_role("agent:n", "n1"), "writer");
+    assert_eq!(seen(&mut n, None).unwrap().0, Role::Writer);
+    drop((k, n, w, engine, dir));
 
     // over the wire: a reader override refuses one write, the next call writes
     let (_d, mut c) = stdio();

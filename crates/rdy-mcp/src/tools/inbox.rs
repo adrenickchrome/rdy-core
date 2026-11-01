@@ -1,7 +1,7 @@
 //! ib7: `rdy_inbox`. The request is run by `rdy_engine::inbox::api::run_inbox`, the dispatcher the
 //! daemon's `inbox` op shares; `rdy_schema`'s paragraph is `INBOX_DOC`.
 use super::*;
-use rdy_engine::inbox::api::{InboxRequest, run_inbox};
+use rdy_engine::inbox::api::{InboxRequest, run_inbox, run_inbox_for_call};
 use rdy_engine::*;
 use rdy_model::Role;
 use schemars::JsonSchema;
@@ -42,6 +42,11 @@ pub fn rdy_inbox(st: &mut McpState, p: InboxParams) -> Result<Value, RdyError> {
         v["person"] = json!(person);
         Ok(v)
     } else {
-        run_inbox(&*st.engine, &own, req)
+        // D-4PHYQ: the call's role matches this page; a new subscription stores the saved role
+        let owner = Session {
+            role: crate::claims::saved_role(st, &own),
+            ..own.clone()
+        };
+        run_inbox_for_call(&*st.engine, &owner, own.role, req)
     }
 }

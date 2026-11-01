@@ -1,10 +1,11 @@
 //! The `rdy_inbox` dispatcher MCP and the daemon share, the ack write and the inbox paragraph of
 //! `rdy_schema` (plan M2e2, spec §10.2; D-TPZ0W, D-Z0EMP).
 use super::read::{DEFAULT_MAX_TOKENS, bad_cursor, cursor_text, parse_cursor};
-use super::sub::subscribe;
+use super::sub::{role_name, subscribe};
 use crate::engine::write_typed;
 use crate::{Engine, Rdy, RdyError, Session};
-use rdy_store::inbox::InboxCursor;
+use rdy_model::Role;
+use rdy_store::inbox::{InboxCursor, InboxSub};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -51,6 +52,29 @@ impl Rdy {
 /// `ack` moved the cursor past the page. A session with no subscription is subscribed at the
 /// head first, and the reply is `{entries: [], cursor, more: false, started: true}`.
 pub fn run_inbox(engine: &dyn Engine, s: &Session, req: InboxRequest) -> Result<Value, RdyError> {
+    read_page(engine, s, None, req)
+}
+
+/// [`run_inbox`] for one MCP call whose role is its own (D-4PHYQ: a per-call role overrides one
+/// call only). `s` holds the saved role, which a new subscription stores; the page is matched
+/// with `call_role`. The persisted cursor and areas are read as they are, and the persisted role
+/// never changes here.
+pub fn run_inbox_for_call(
+    engine: &dyn Engine,
+    s: &Session,
+    call_role: Role,
+    req: InboxRequest,
+) -> Result<Value, RdyError> {
+    read_page(engine, s, Some(call_role), req)
+}
+
+/// One page of `s`'s inbox, matched with `role` when given, else with the persisted role.
+fn read_page(
+    engine: &dyn Engine,
+    s: &Session,
+    role: Option<Role>,
+    req: InboxRequest,
+) -> Result<Value, RdyError> {
     let since = match req.since.as_deref() {
         Some(t) => Some(parse_cursor(t).ok_or_else(|| bad_cursor(t))?),
         None => None,
@@ -69,6 +93,14 @@ pub fn run_inbox(engine: &dyn Engine, s: &Session, req: InboxRequest) -> Result<
             "more": false,
             "started": true,
         }));
+    };
+    // a call's own role matches its page: the persisted cursor and areas, with that role
+    let sub = match role {
+        Some(r) => InboxSub {
+            role: role_name(r).to_string(),
+            ..sub
+        },
+        None => sub,
     };
     let page = st.inbox_page(&sub, since, req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS))?;
     let mut v = json!({

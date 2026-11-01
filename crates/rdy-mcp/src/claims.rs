@@ -412,6 +412,15 @@ pub fn enter(st: &mut McpState, asked: Option<&Asked>, tool: &str) -> Result<(),
     Ok(())
 }
 
+/// The role saved for the actor and run of `s` (writer when none is saved): the role a call that
+/// states no `rdy/role` acts with. A one-call override never reaches what is persisted.
+pub fn saved_role(st: &McpState, s: &Session) -> Role {
+    hub(st)
+        .claims()
+        .get(&(s.actor.clone(), s.run.clone()))
+        .map_or(Role::Writer, |x| x.role)
+}
+
 /// `rdy_session`'s claim check, once its session is valid: the actor and run of a `_meta` claim
 /// on the same call, and the connection's claim, are those of `key`.
 pub fn check_session_claim(st: &McpState, key: &Key) -> Result<(), RdyError> {
