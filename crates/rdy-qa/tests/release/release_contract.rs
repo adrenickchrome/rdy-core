@@ -1477,6 +1477,11 @@ struct Rich {
     batch: rdy_qa::intake::Batch,
     /// nb4: a prose block with a located unlinked mention, so a briefing of it lists the text.
     mention: String,
+    /// nb8 (TASK-978 X2, D-YXBXH): the doc `crowd-0` that holds `mention`, so a block created in
+    /// it has `mention` as its one baseline section neighbor; and claims `k1` and `k2` of doc
+    /// `crowd-1`, so an edit of `k1` has `k2` as its one section neighbor.
+    crowd: String,
+    k1: String,
 }
 
 /// The pack of the probes: one area, so the coverage areas hold an entry.
@@ -1520,10 +1525,19 @@ fn rich_project() -> Rich {
         json!({"op": "create", "type": "prose", "id": "$ask", "parent": "$c0",
         "body": "Who keeps the Ledger?"}),
     );
-    let mention = rdy_qa::fixtures::write(&mut r, "crowd", Value::Array(ops))
-        .expect("write the crowd")
-        .created["$ask"]
-        .clone();
+    for k in ["$k1", "$k2"] {
+        ops.push(
+            json!({"op": "create", "type": "claim", "id": k, "parent": "$c1",
+            "body": format!("Crowd claim {}.", &k[2..])}),
+        );
+    }
+    let crowded =
+        rdy_qa::fixtures::write(&mut r, "crowd", Value::Array(ops)).expect("write the crowd");
+    let (mention, crowd, k1) = (
+        crowded.created["$ask"].clone(),
+        crowded.created["$c0"].clone(),
+        crowded.created["$k1"].clone(),
+    );
     rdy_qa::fixtures::land(&mut r, "crowd").expect("land the crowd");
     // a view that gives the reviewers a request
     put(&mut r, "a", upd(&batch.spec.c, "C contradicts B."));
@@ -1535,6 +1549,8 @@ fn rich_project() -> Rich {
         dir,
         batch,
         mention,
+        crowd,
+        k1,
     }
 }
 
@@ -2448,6 +2464,21 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
             {"op": "create", "type": "claim", "id": "$n", "parent": section, "body": "Side notes stay short."}
         ]}),
     ));
+    // nb8: the neighbor row of each unchanged block of C's section names the least changed
+    // block, C (edited: the row has `values`) or the new claim (created: none), and the claim's
+    // id is not seeded. So the version also edits k1 (its neighbor k2 names k1 alone) and
+    // creates a claim in crowd-0 (its neighbor, the mention, names that claim alone): its rows
+    // always hold both kinds, whatever the ids
+    mcp_probe(
+        seen,
+        &mut w,
+        "rdy_write",
+        "rdy_write",
+        json!({"view": "side", "ops": [
+            {"op": "update", "id": rich.k1, "body": "Crowd claim one, now."},
+            {"op": "create", "type": "claim", "id": "$n", "parent": rich.crowd, "body": "Crowd notes stay short."}
+        ]}),
+    );
     assert!(
         created["created"]["$n"].is_string(),
         "the write created a claim: {created}"
@@ -4487,7 +4518,8 @@ fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
 /// ck9: the command line's run and request hold no code for the same reason, and the held
 /// version's card fills `cli/pending/stdout/not_ready`, which leaves the list. nb8: a neighbor
 /// entry of a created block carries no `values`, so that member is optional (`values?`), and a
-/// neighbor entry fills `mcp/rdy_propose/ok/consequences`, which leaves the list.
+/// neighbor entry fills `mcp/rdy_propose/ok/consequences`, which leaves the list; the version's
+/// rows hold both an edited and a created cause, so its `values?` is in the list too.
 const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/approve/stdout/consequences[]/because/values?",
     "cli/approve/stdout/signatures",
@@ -4605,6 +4637,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_plan/ok/notes",
     "mcp/rdy_propose/ok/blocking",
     "mcp/rdy_propose/ok/conflicts",
+    "mcp/rdy_propose/ok/consequences[]/because/values?",
     "mcp/rdy_propose/ok/issues",
     "mcp/rdy_review request/ok/case/code",
     "mcp/rdy_review request/ok/requests[]/case/code",

@@ -46,12 +46,12 @@ fn claim(parent: &str, body: &str) -> Value {
 }
 
 /// A served project: the seed doc landed; view `src` with agent b's two changes (an update of the
-/// seed claim, and a new claim); agent a's views `plain` (each holding a claim of its own, so a
+/// seed claim, and a new claim in a new section); agent a's views `plain` (each holding a claim of its own, so a
 /// view exists) and `diverged` (each updating the seed claim).
 fn served_replay(plain: &[&str], diverged: &[&str]) -> (Served, Ids) {
     let s = Served::new();
     let mut r = Rdy::open(s.dir.path()).unwrap();
-    let (_doc, section, c) = seed_doc(&mut r, "seed");
+    let (doc, section, c) = seed_doc(&mut r, "seed");
     land(&mut r, "seed").unwrap();
     let base = r
         .read()
@@ -69,9 +69,21 @@ fn served_replay(plain: &[&str], diverged: &[&str]) -> (Served, Ids) {
     )
     .unwrap()
     .change;
-    let cy = write_as(&mut r, &b, "src", claim(&section, "extra"))
-        .unwrap()
-        .change;
+    // the new claim opens a section of its own: in the seed claim's section, a replayed create
+    // and a replayed edit would both be causes of each unchanged sibling's neighbor row, and the
+    // row names the least of the two random ids, whose kind decides whether it carries `values`
+    // (nb8, TASK-978 X2); ok10 compares the MCP and CLI replays of two projects
+    let cy = write_as(
+        &mut r,
+        &b,
+        "src",
+        json!([
+            {"op": "create", "type": "section", "id": "$x", "parent": doc, "fields": {"title": "Extra"}},
+            {"op": "create", "type": "claim", "parent": "$x", "body": "extra"}
+        ]),
+    )
+    .unwrap()
+    .change;
     let a = as_agent("agent:a", "r1");
     for v in plain {
         write_as(&mut r, &a, v, claim(&section, &format!("own in {v}"))).unwrap();

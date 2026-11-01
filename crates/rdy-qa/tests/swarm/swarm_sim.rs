@@ -3819,19 +3819,53 @@ fn ck10_swarm_repairs_blocking_rules_before_landing() {
             stored.unchecked
         );
         // the run's own proposes of a rule view record their readiness (the drain's do not)
-        for e in o.before_freeze().iter().filter(|e| {
+        let before = o.before_freeze();
+        for e in before.iter().filter(|e| {
             e.act == "propose"
                 && e.outcome == Met::Ok
                 && e.view.as_deref().is_some_and(|v| v.ends_with("-rule"))
         }) {
             let ready = e.reply.as_ref().is_some_and(|r| r["ready"] == true);
-            let blocked = propose_issues(e, "issues")
+            let codes: Vec<String> = propose_issues(e, "issues")
+                .into_iter()
+                .map(|(code, _)| code)
+                .collect();
+            let blocked = codes.iter().any(|code| code == "E_RULE_CHECK");
+            // the act's own plan answer (`answer_plan`), cut by the run's kill: the fixture's
+            // claim owes its stable section's claims neighbor confirms (nb8, TASK-978 X2), and the
+            // version proposed after the restart finds them unanswered (`E_PLAN_OPEN`), as
+            // `answer_plan` says; the kill races the act at the seed's kill step
+            let cut = before.iter().any(|x| {
+                x.actor == e.actor
+                    && x.step == e.step
+                    && x.view == e.view
+                    && matches!(x.act, "plan" | "plan_answer")
+                    && x.outcome == Met::Lost
+            });
+            let step: Vec<String> = before
                 .iter()
-                .any(|(code, _)| code == "E_RULE_CHECK");
-            // a version of the rule view is ready exactly when no blocking rule fails on it
+                .filter(|x| x.actor == e.actor && x.step == e.step)
+                .map(|x| format!("{} {:?} epoch {}", x.act, x.outcome, x.epoch))
+                .collect();
+            // a version of the rule view is ready exactly when no blocking rule fails on it; when
+            // the kill cut its plan answer, the open plan items are the only other issue
+            let want = if cut {
+                assert!(
+                    codes
+                        .iter()
+                        .all(|code| code == "E_RULE_CHECK" || code == "E_PLAN_OPEN"),
+                    "swarm seed {seed}: {} step {}: {:?}",
+                    e.actor,
+                    e.step,
+                    e.reply
+                );
+                codes.is_empty()
+            } else {
+                !blocked
+            };
             assert_eq!(
-                ready, !blocked,
-                "swarm seed {seed}: {} step {}: {:?}",
+                ready, want,
+                "swarm seed {seed}: {} step {}: {:?}; the step's entries: {step:?}",
                 e.actor, e.step, e.reply
             );
         }
