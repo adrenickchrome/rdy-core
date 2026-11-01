@@ -623,7 +623,7 @@ fn cp14_queue_cards_need_the_persons_choice_in_every_published_text() {
     // rdy_answer says all_recommended never answers them
     let answer = desc("rdy_answer");
     assert!(
-        answer.contains("all_recommended refuses a defer or a reaffirm card with E_BAD_INPUT (<ref> has no recommended option); answer each of them on its own."),
+        answer.contains("A defer card, a reaffirm card, and an approve card showing a concern or fail check verdict that no person accepted have no recommended option. all_recommended refuses them with E_BAD_INPUT (<ref> has no recommended option); answer each of them on its own."),
         "{answer}"
     );
     // rdy_plan points at the same cards
