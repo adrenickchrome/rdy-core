@@ -604,8 +604,10 @@ fn nb8_create_confirms_only_unchanged_baseline_section_neighbors() {
     );
     assert!(c.items.iter().all(|i| i.block != p));
     for i in &c.items {
+        // TASK-1067 (b): every neighbor row carries values; a create's are empty
         assert_eq!(
-            i.because.values, None,
+            i.because.values,
+            Some(vec![]),
             "a create carries no literal evidence"
         );
         assert!(i.matched.is_empty());
@@ -658,7 +660,8 @@ fn nb8_deletion_confirms_baseline_section_neighbors_only() {
         "p states the literal, but no entity entry"
     );
     for i in &rep.items {
-        assert_eq!(i.because.values, None);
+        // TASK-1067 (b): a delete's values are empty, never absent
+        assert_eq!(i.because.values, Some(vec![]));
         assert!(i.matched.is_empty());
     }
     assert_eq!(
@@ -853,4 +856,56 @@ fn nb8_net_subset_and_canonical_plans_use_the_same_neighbor_rule() {
     update(&mut r, "er", &b, "B moves.");
     update(&mut r, "er", &b, "B stands.");
     assert_eq!(nitems(&r, "er"), vec![]);
+}
+
+/// TASK-1067 (a): a neighbor row names the least edited cause when the change edits a block that
+/// owes the subject a neighbor item; a create beside it never wins, whatever the id order. The
+/// edited cause's id is seeded both below and above the created one.
+#[test]
+fn nb8_an_edit_beside_a_create_names_the_edit_whatever_the_ids() {
+    for edit_low in [true, false] {
+        let (_d, mut r) = project();
+        let ids = seed(
+            &mut r,
+            json!([
+                doc("nb"),
+                section("$s", "$nb"),
+                claim("$a", "$s", "A stands.")
+            ]),
+        );
+        let (s, a) = (ids.get("$s"), ids.get("$a"));
+        let prefix = a.split_once('-').unwrap().0.to_string();
+        let (low, high) = (format!("{prefix}-00000"), format!("{prefix}-ZZZZZ"));
+        let (edited, created) = if edit_low { (low, high) } else { (high, low) };
+        seed(&mut r, json!([claim(&edited, &s, "E keeps 30 days.")]));
+        let res = write(
+            &mut r,
+            "w",
+            json!([
+                {"op": "update", "id": edited, "body": "E keeps 60 days."},
+                claim(&created, &s, "N stands."),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(res.created.values().next(), Some(&created), "{res:#?}");
+        let c = report(&r, "w", &res.change);
+        assert_eq!(
+            nrows(&c),
+            vec![(a.clone(), FollowUp::Confirm, edited.clone())],
+            "edit_low {edit_low}: {c:#?}"
+        );
+        assert!(
+            entry(&c, &a).because.values.is_some(),
+            "edit_low {edit_low}: an edited cause carries its values"
+        );
+        // the plan keeps both causes
+        assert_eq!(
+            nitems(&r, "w"),
+            sorted(vec![
+                ni(&edited, &a, PlanKind::Confirm),
+                ni(&created, &a, PlanKind::Confirm),
+            ]),
+            "edit_low {edit_low}"
+        );
+    }
 }

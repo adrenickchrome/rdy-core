@@ -4517,11 +4517,12 @@ fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
 /// code, and an agent check is in no stage (`rdy_schema` lists its stages as an empty array).
 /// ck9: the command line's run and request hold no code for the same reason, and the held
 /// version's card fills `cli/pending/stdout/not_ready`, which leaves the list. nb8: a neighbor
-/// entry of a created block carries no `values`, so that member is optional (`values?`), and a
-/// neighbor entry fills `mcp/rdy_propose/ok/consequences`, which leaves the list; the version's
-/// rows hold both an edited and a created cause, so its `values?` is in the list too.
+/// entry fills `mcp/rdy_propose/ok/consequences`, which leaves the list. TASK-1067: every
+/// neighbor row carries `values` (`[]` for a created or deleted cause), so the neighbor rows'
+/// member is not optional, and the probes' neighbor causes state no literal, so it is empty;
+/// `rdy_write`'s rows also hold other kinds without it (D-CFC6V), so its `values?` stays.
 const EMPTY_IN_FIXTURE: &[&str] = &[
-    "cli/approve/stdout/consequences[]/because/values?",
+    "cli/approve/stdout/consequences[]/because/values",
     "cli/approve/stdout/signatures",
     "cli/approve/stdout/warnings",
     "cli/brief/stdout/inflight/intents",
@@ -4597,7 +4598,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/upgrade/stdout/steps",
     "cli/view show/stdout/conflicts",
     "mcp/rdy_alternatives list/ok/sets",
-    "mcp/rdy_answer/ok/landing/|null/consequences[]/because/values?",
+    "mcp/rdy_answer/ok/landing/|null/consequences[]/because/values",
     "mcp/rdy_answer/ok/landing/|null/warnings",
     "mcp/rdy_answer/ok/signatures?",
     "mcp/rdy_answer/refused/issues",
@@ -4637,7 +4638,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_plan/ok/notes",
     "mcp/rdy_propose/ok/blocking",
     "mcp/rdy_propose/ok/conflicts",
-    "mcp/rdy_propose/ok/consequences[]/because/values?",
+    "mcp/rdy_propose/ok/consequences[]/because/values",
     "mcp/rdy_propose/ok/issues",
     "mcp/rdy_review request/ok/case/code",
     "mcp/rdy_review request/ok/requests[]/case/code",

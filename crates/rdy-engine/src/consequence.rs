@@ -946,7 +946,7 @@ impl Compare<'_> {
     /// literal evidence the scanner finds (D-CFC6V), which never makes it `update`. An entity
     /// neighbor gets `update` only when it states a literal the change removed from the cause;
     /// with no match, even on a cut scan, it gets nothing (TASK-978 C2). A created or deleted
-    /// cause gives section neighbors only, with no literal evidence.
+    /// cause gives section neighbors only, with no literal evidence: its `values` are empty.
     fn judge_neighbor(
         &self,
         cause: &BlockId,
@@ -963,8 +963,9 @@ impl Compare<'_> {
             matched,
             matched_omitted,
         };
+        // TASK-1067 (b): every neighbor row carries values, empty for a created or deleted cause
         if how != NeighborCause::Edited {
-            return Ok(section.then(|| confirm(None, 0, vec![], 0)));
+            return Ok(section.then(|| confirm(Some(vec![]), 0, vec![], 0)));
         }
         let lits = self.literals(cause, Lineage::Ordinary)?;
         if lits.is_empty() {
@@ -2065,8 +2066,9 @@ impl ReadState {
     /// own `affects` links (D-4XTRC, [`visit_pairs`]). Each entry's follow-up, fix and
     /// evidence are `Compare::judge`'s, worked out before the cut. Then the neighbor entries
     /// (D-YXBXH, [`neighbor_pairs`] against the last baseline): one `dependent` entry with edge
-    /// `neighbor` for each block the list does not hold yet, from its least changed block that
-    /// gives one ([`Compare::judge_neighbor`]), by block id. The list is cut from the end to
+    /// `neighbor` for each block the list does not hold yet, from its least edited cause that
+    /// gives one, or, when no edited cause gives one, its least created or deleted cause
+    /// ([`Compare::judge_neighbor`], TASK-1067), by block id. The list is cut from the end to
     /// `max_tokens` (default `BRIEF_DEFAULT_TOKENS`), counting what it drops in `omitted`.
     #[allow(clippy::too_many_arguments)]
     fn consequences_in(
@@ -2232,17 +2234,32 @@ impl ReadState {
                 });
             }
         }
-        // D-YXBXH: one neighbor entry per block the list does not hold yet, from its least
-        // changed block that gives one, by block id
+        // D-YXBXH, TASK-1067: one neighbor entry per block the list does not hold yet, from
+        // its least edited cause that gives one; only when no edited cause gives one, from its
+        // least created or deleted cause; by block id
         let pairs = neighbor_pairs(self.pack(), cmp, g, touched, touched, MAX_NEIGHBOR_PAIRS)?;
+        let mut by_block: BTreeMap<BlockId, Vec<(BlockId, NeighborCause, bool)>> = BTreeMap::new();
         for ((block, cause), (how, section)) in pairs {
+            by_block
+                .entry(block)
+                .or_default()
+                .push((cause, how, section));
+        }
+        for (block, mut causes) in by_block {
             if listed.contains(&block.to_string()) {
                 continue;
             }
             let Some(src) = m.get(&block) else { continue };
-            let Some(j) = cmp.judge_neighbor(&cause, how, section, src)? else {
-                continue;
-            };
+            // edited causes first, each group by cause id (the map's order)
+            causes.sort_by_key(|(_, how, _)| *how != NeighborCause::Edited);
+            let mut found = None;
+            for (cause, how, section) in causes {
+                if let Some(j) = cmp.judge_neighbor(&cause, how, section, src)? {
+                    found = Some((cause, j));
+                    break;
+                }
+            }
+            let Some((cause, j)) = found else { continue };
             listed.insert(block.to_string());
             conflicts.push(Consequence {
                 id: consequence_id(batch, ConsequenceKind::Dependent.as_str(), &block),

@@ -339,7 +339,8 @@ fn csq1_a_stream_of_new_blocks_has_no_consequences() {
                 edge: NEIGHBOR_EDGE.into(),
                 changed: n.clone(),
                 edges: Some(vec![NEIGHBOR_EDGE.into()]),
-                values: None,
+                // TASK-1067 (b): a created cause's values are empty, never absent
+                values: Some(vec![]),
                 values_omitted: 0,
             }
         );
