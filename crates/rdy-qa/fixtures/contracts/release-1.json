@@ -13564,6 +13564,15 @@
         "type": "LanAddress"
       },
       {
+        "default": "true",
+        "key": "serve.ui",
+        "levels": [
+          "local",
+          "user"
+        ],
+        "type": "Bool"
+      },
+      {
         "default": "break",
         "key": "propose.cadence",
         "levels": [

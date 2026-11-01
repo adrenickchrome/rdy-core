@@ -38,6 +38,9 @@ tempfile = "3"
 semver = "1"
 saphyr-parser = "0.1"
 libc = "0.2.190"
+# The site socket's Windows option (SO_EXCLUSIVEADDRUSE, D-FPKPS), in rdy_daemon::sys only; the
+# version tokio, mio and socket2 already lock.
+windows-sys = { version = "=0.61.2", features = ["Win32_Networking_WinSock"] }
 regex = "1.13.1"
 imbl = "7"
 arc-swap = "1"

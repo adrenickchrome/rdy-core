@@ -7,6 +7,7 @@ pub mod live;
 pub mod profiles;
 pub mod server;
 pub mod sse;
+pub mod ui_request;
 
 pub use profiles::ensure_profile_site;
 pub use server::SiteServer;

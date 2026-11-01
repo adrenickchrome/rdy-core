@@ -2,6 +2,8 @@
 //!
 //! A small, closed subset of HTTP/1.1 (ruling F1, D-FV6G9): a request is its head only, a
 //! response always closes the connection, and the headers a response sends are a closed list.
+//! The one exception is the local approval pages' answer route (D-6M0AF), whose bounded form
+//! body `server::read_ui_body` reads.
 
 /// The largest request head the site reads, in bytes, the empty line included.
 pub const MAX_HEAD_BYTES: usize = 8192;
@@ -17,8 +19,14 @@ pub const MAX_HEADERS: usize = 64;
 /// site itself, and no framing, no base change and no form posts.
 pub const CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
+/// The Content-Security-Policy of a local approval page ([`ui_response`]): [`CSP`] with
+/// `form-action 'self'` in place of `form-action 'none'`, so its answer form posts to the site
+/// itself. Every other directive is the same.
+pub const UI_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+
 /// The headers every response sends, in this order, after `Date`. With `Content-Type`,
 /// `Content-Length`, `Date` and the `Allow` of a 405, they are the only headers the site sends.
+/// A UI response replaces the CSP's value in place ([`ui_response`]); it is never sent twice.
 pub const BASE_HEADERS: &[(&str, &str)] = &[
     ("Cache-Control", "no-store"),
     ("X-Content-Type-Options", "nosniff"),
@@ -28,7 +36,8 @@ pub const BASE_HEADERS: &[(&str, &str)] = &[
     ("Connection", "close"),
 ];
 
-/// A request method. Only `GET` and `HEAD` have a variant: the guard refuses every other one.
+/// A request method. Only `GET` and `HEAD` have a variant: the guard refuses every other one,
+/// and only the local approval pages' answer route takes `Other("POST")` (`ui_request`).
 #[derive(Debug, PartialEq, Eq)]
 pub enum Method {
     Get,
@@ -123,8 +132,12 @@ pub struct Response {
     pub body: Vec<u8>,
 }
 
+/// The name of the CSP header.
+const CSP_HEADER: &str = "Content-Security-Policy";
+
 /// The bytes of `r`: the status line, `Date`, `BASE_HEADERS`, `r.headers`, `Content-Length`
-/// (the body's length, also for `HEAD`), an empty line, then the body unless `head_only`.
+/// (the body's length, also for `HEAD`), an empty line, then the body unless `head_only`. A CSP
+/// in `r.headers` (a UI response's) takes the base CSP's place and value.
 pub fn to_bytes(r: &Response, head_only: bool, now_secs: i64) -> Vec<u8> {
     let mut head = format!(
         "HTTP/1.1 {} {}\r\nDate: {}\r\n",
@@ -132,10 +145,19 @@ pub fn to_bytes(r: &Response, head_only: bool, now_secs: i64) -> Vec<u8> {
         reason(r.status),
         http_date(now_secs)
     );
+    let csp = r
+        .headers
+        .iter()
+        .find(|(name, _)| *name == CSP_HEADER)
+        .map(|(_, value)| value.as_str());
     for (name, value) in BASE_HEADERS {
+        let value = match csp {
+            Some(own) if *name == CSP_HEADER => own,
+            _ => value,
+        };
         head.push_str(&format!("{name}: {value}\r\n"));
     }
-    for (name, value) in &r.headers {
+    for (name, value) in r.headers.iter().filter(|(name, _)| *name != CSP_HEADER) {
         head.push_str(&format!("{name}: {value}\r\n"));
     }
     head.push_str(&format!("Content-Length: {}\r\n\r\n", r.body.len()));
@@ -150,10 +172,15 @@ pub fn to_bytes(r: &Response, head_only: bool, now_secs: i64) -> Vec<u8> {
 pub fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        303 => "See Other",
         400 => "Bad Request",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        409 => "Conflict",
+        413 => "Content Too Large",
+        415 => "Unsupported Media Type",
+        422 => "Unprocessable Content",
         431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
         503 => "Service Unavailable",
@@ -207,6 +234,19 @@ pub fn content_type(path: &str) -> &'static str {
         "webp" => "image/webp",
         "pdf" => "application/pdf",
         _ => "application/octet-stream",
+    }
+}
+
+/// A local approval page's response: `body` with its `Content-Type`, sent with [`UI_CSP`] in
+/// place of the base CSP (one `Content-Security-Policy` header, where the base one stands).
+pub fn ui_response(status: u16, content_type: &str, body: Vec<u8>) -> Response {
+    Response {
+        status,
+        headers: vec![
+            (CSP_HEADER, UI_CSP.to_string()),
+            ("Content-Type", content_type.to_string()),
+        ],
+        body,
     }
 }
 

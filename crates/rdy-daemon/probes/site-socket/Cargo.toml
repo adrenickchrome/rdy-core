@@ -1,0 +1,22 @@
+# The isolated Windows probe of the site socket's option (D-FPKPS; FW-XP1 Phase 4). It builds
+# rdy_daemon::sys::site_socket on its own, with tokio and windows-sys only, so the production
+# helper's tests run on Windows before the whole daemon builds there. Run it on Windows with
+# `cargo test` in this directory: `ui4_windows_exclusive_bind_refuses_a_second_listener` binds
+# IPv4 and IPv6. It is no member of the workspace.
+[package]
+name = "rdy-site-socket-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["net", "rt", "macros"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Networking_WinSock"] }

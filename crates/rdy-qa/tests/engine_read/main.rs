@@ -62,6 +62,7 @@ mod engine_suggestions;
 mod engine_suspects;
 mod engine_tracking;
 mod engine_tree;
+mod engine_ui_config;
 mod engine_values;
 mod engine_view_api;
 mod engine_vpos;
