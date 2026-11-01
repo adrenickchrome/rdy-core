@@ -1080,12 +1080,21 @@ mod tests {
             usize::from(addr::TRIES),
             "one refused option call per port"
         );
+        // the profile listener's own bind (`ensure` opens it with exactly this call); called
+        // directly, so no profile-listener log line reaches another test's log capture
         seam::fail(&root, &[]);
-        let (_, info) = sh.profile_sites.ensure(&sh, "guide").unwrap();
+        let p = {
+            let _rt = rt.enter();
+            open(&root, &cfg, &addr::profile_candidates(&root, "guide"), None).unwrap()
+        };
         let steps = seam::take(&root);
         configured_before_bind(&steps);
-        let only = info.addrs[0].port();
+        let only = p.port;
         assert_ne!(only, port);
+        assert!(
+            sh.profile_sites.keys().is_empty(),
+            "the refusal kept no slot"
+        );
         let binds = bound(&steps);
         for at in [
             SocketAddr::from((Ipv4Addr::LOCALHOST, only)),
@@ -1097,6 +1106,7 @@ mod tests {
                 "{at} was bound after its option: {steps:?}"
             );
         }
+        drop(p);
 
         // a failed option call on [::1] and on the LAN address: the existing log and warning
         seam::fail(&root, &[Ipv6Addr::LOCALHOST.into(), lan_ip.into()]);
