@@ -18,6 +18,7 @@ mod gate_plan_cards;
 mod gate_policy_land;
 mod gate_policy_roles;
 mod gate_policy_verdict;
+mod gate_presented_answers;
 mod gate_readiness;
 mod gate_reaffirm_cards;
 mod gate_rule_checks;

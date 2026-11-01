@@ -938,7 +938,8 @@ pub fn reaffirm_view(card: &Hash) -> String {
 }
 
 /// Whether the field rules of landing `rec` read the view of its landed proposal: a local
-/// landing with card evidence, which only a re-affirmation card's landing may record.
+/// landing with card evidence. No rule reads that view since local card evidence stopped
+/// depending on it (D-6M0AF); the readers still pass it to [`landing_field_rules`].
 pub fn landing_reads_proposal_view(rec: &LandingRecord) -> bool {
     rec.assurance == Assurance::Local
         && rec
@@ -947,29 +948,26 @@ pub fn landing_reads_proposal_view(rec: &LandingRecord) -> bool {
             .is_some_and(|e| e.kind == EvidenceKind::Card)
 }
 
-/// The one field rule of local card evidence (D-CQMA4), which the landing writer's evidence check
-/// and [`landing_field_rules`] share: a landing with no relay may record card evidence exactly
-/// when it names a card hash, its choice is [`REAFFIRM_HOLD_LABEL`], and the landed proposal's
-/// view (`proposal_view`) is [`reaffirm_view`] of that hash. Any other local card evidence, and
-/// all local text evidence, keeps its refusal.
-pub fn local_card_evidence_allowed(e: &ApprovalEvidence, proposal_view: Option<&str>) -> bool {
-    e.kind == EvidenceKind::Card
-        && e.choice.as_deref() == Some(REAFFIRM_HOLD_LABEL)
-        && e.card_hash
-            .is_some_and(|h| proposal_view == Some(reaffirm_view(&h).as_str()))
+/// The one field rule of local card evidence (D-CQMA4, D-6M0AF), which the landing writer's
+/// evidence check and [`landing_field_rules`] share: a landing with no relay may record card
+/// evidence exactly when it names a card hash, whatever the landed proposal's view and the chosen
+/// label (a re-affirmation card's isolated landing, and an approval in the local approver UI).
+/// Local card evidence with no card hash, and all local text evidence, keeps its refusal.
+pub fn local_card_evidence_allowed(e: &ApprovalEvidence) -> bool {
+    e.kind == EvidenceKind::Card && e.card_hash.is_some()
 }
 
 /// The relay and evidence rules of landing `l` (record `rec`), and its references to other
 /// objects: each `rebased_from` names a landing and `approved_version` a proposal, as
-/// `has_kind(kind, hash)` reads the objects. `proposal_view` is the view of the landed proposal
-/// (`rec.proposal`) when the caller read it: local card evidence passes only through
-/// [`local_card_evidence_allowed`]. The one list of landing rules: the project's fsck, the
-/// holder's fsck and a holder's take (over the upload and the holder) apply it.
+/// `has_kind(kind, hash)` reads the objects. `_proposal_view` is the view of the landed proposal
+/// (`rec.proposal`) when the caller read it; no rule reads it now: local card evidence passes
+/// through [`local_card_evidence_allowed`] alone. The one list of landing rules: the project's
+/// fsck, the holder's fsck and a holder's take (over the upload and the holder) apply it.
 /// `StoreError::Decode` names the broken rule.
 pub fn landing_field_rules<E: From<StoreError>>(
     l: &Hash,
     rec: &LandingRecord,
-    proposal_view: Option<&str>,
+    _proposal_view: Option<&str>,
     has_kind: &mut dyn FnMut(u8, &Hash) -> Result<bool, E>,
 ) -> Result<(), E> {
     if rec.relayed_by.is_some() != rec.relay_evidence.is_some() {
@@ -1004,11 +1002,10 @@ pub fn landing_field_rules<E: From<StoreError>>(
                         "landing {l}: evidence kind {kind} needs assurance local"
                     ))));
                 }
-                // D-CQMA4: a re-affirmation card's isolated landing records the person's local
-                // answer on the card
+                // D-CQMA4, D-6M0AF: the person's local answer on the card (a re-affirmation
+                // card's isolated landing, or an approval in the local approver UI)
                 EvidenceKind::Card
-                    if rec.assurance == Assurance::Local
-                        && local_card_evidence_allowed(e, proposal_view) => {}
+                    if rec.assurance == Assurance::Local && local_card_evidence_allowed(e) => {}
                 EvidenceKind::Card | EvidenceKind::Text if rec.assurance != Assurance::Relayed => {
                     return Err(E::from(bad(format!(
                         "landing {l}: evidence kind {kind} needs assurance relayed"

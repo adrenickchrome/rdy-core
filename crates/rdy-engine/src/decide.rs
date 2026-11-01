@@ -1,6 +1,6 @@
 use crate::error::*;
 use crate::write::{LinkInput, OpInput, WriteRequest, WriteResult};
-use crate::{Rdy, Scope, Session, rfc3339_now};
+use crate::{Rdy, ReadState, Scope, Session, rfc3339_now};
 use rdy_model::{BlockId, decision};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -152,10 +152,21 @@ impl Rdy {
         view: &str,
         given: Option<&str>,
     ) -> Result<Option<String>, RdyError> {
+        self.read().decision_parent(view, given)
+    }
+}
+
+impl ReadState {
+    /// [`Rdy::decision_parent`] over this state: it reads only.
+    pub(crate) fn decision_parent(
+        &self,
+        view: &str,
+        given: Option<&str>,
+    ) -> Result<Option<String>, RdyError> {
         if let Some(p) = given.filter(|p| !p.trim().is_empty()) {
             return Ok(Some(p.to_string()));
         }
-        let st = self.read();
+        let st = self;
         let Some(home) = st.decisions_home() else {
             return Ok(None);
         };
@@ -185,7 +196,9 @@ impl Rdy {
         }
         Ok(Some(block.id.to_string()))
     }
+}
 
+impl Rdy {
     fn write_decision(
         &mut self,
         s: &Session,

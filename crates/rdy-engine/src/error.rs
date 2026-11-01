@@ -331,11 +331,13 @@ pub enum NoAgentCause {
     ReplyTooLarge,
     /// The caller cancelled the request.
     Cancelled,
+    /// The local approver UI has no agent socket: it never asks an agent.
+    UiUnavailable,
 }
 
 impl NoAgentCause {
     /// Every cause, in the order the error table lists them.
-    pub const ALL: [NoAgentCause; 7] = [
+    pub const ALL: [NoAgentCause; 8] = [
         NoAgentCause::Unset,
         NoAgentCause::ConnectionFailed,
         NoAgentCause::NotHeld,
@@ -343,6 +345,7 @@ impl NoAgentCause {
         NoAgentCause::InvalidReply,
         NoAgentCause::ReplyTooLarge,
         NoAgentCause::Cancelled,
+        NoAgentCause::UiUnavailable,
     ];
 
     /// The exact cause text.
@@ -355,6 +358,7 @@ impl NoAgentCause {
             NoAgentCause::InvalidReply => "invalid reply",
             NoAgentCause::ReplyTooLarge => "reply exceeds 262144 bytes",
             NoAgentCause::Cancelled => "request cancelled",
+            NoAgentCause::UiUnavailable => "the local UI has no agent socket",
         }
     }
 

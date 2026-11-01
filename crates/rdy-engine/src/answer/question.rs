@@ -36,7 +36,7 @@ use super::{AnswerInfo, Answerer, Bound, assurance, card_of, labels, put_alone};
 use crate::brief::{E_BRIEF_REQUIRED, E_BRIEF_STALE};
 use crate::error::{E_BAD_INPUT, E_ITEM_MOVED, RdyError};
 use crate::pending::ItemOption;
-use crate::{DecisionInput, Rdy, Scope, Session};
+use crate::{DecisionInput, Rdy, ReadState, Scope, Session};
 use rdy_model::{Answer, AnswerAct, BlockId, Hash, Role};
 
 /// The option id of a free answer: the person's own words, in the note.
@@ -72,18 +72,13 @@ pub(crate) fn act(
     } else {
         b.option.label.clone()
     };
-    let (qid, shown) = b
-        .item
-        .r#ref
-        .split_once('@')
-        .and_then(|(id, v)| Some((BlockId::parse(id).ok()?, v.to_string())))
-        .ok_or_else(|| {
-            RdyError::new(
-                E_BAD_INPUT,
-                format!("{} does not name a question", b.item.r#ref),
-                "pass the question's ref as rdy_pending gives it",
-            )
-        })?;
+    let (qid, shown) = question_ref(&b.item.r#ref).ok_or_else(|| {
+        RdyError::new(
+            E_BAD_INPUT,
+            format!("{} does not name a question", b.item.r#ref),
+            "pass the question's ref as rdy_pending gives it",
+        )
+    })?;
     // no role is needed to answer (O12): a reader writes its answer's decision as a writer
     let writer = Session {
         role: if by.from.role.can_write() {
@@ -114,14 +109,8 @@ pub(crate) fn act(
             .with_corrected(card_of(&b.item)));
         }
     }
-    let given = match st.decisions_home() {
-        Some(_) => None,
-        None => st.block(&Scope::Canon, &qid)?.parent.map(|p| p.to_string()),
-    };
+    let parent = destination(&st, &writer, &qid)?.unwrap_or_default();
     drop(st);
-    let parent = r
-        .decision_parent(&view, given.as_deref())?
-        .unwrap_or_default();
     let attested_by = match &by.relay {
         Some(relay) => {
             let agent = crate::identity::actor_run_text(&relay.by.actor, relay.by.run.as_deref());
@@ -166,7 +155,7 @@ pub(crate) fn act(
         person: by.who.provenance(),
         relayed_by: by.relay.as_ref().map(|r| r.by.clone()),
         relay_evidence: by.relay.as_ref().map(|r| r.evidence.clone()),
-        evidence_kind: by.relay.as_ref().and(by.kind),
+        evidence_kind: by.kind,
         note,
     };
     let h = put_alone(r, &a)?;
@@ -181,6 +170,28 @@ pub(crate) fn act(
         relayed_by: by.relay.as_ref().map(|r| r.by.clone()),
         next: None,
     })
+}
+
+/// The question block and the version short a question item's ref names (`<id>@<version>`).
+pub(super) fn question_ref(r: &str) -> Option<(BlockId, String)> {
+    r.split_once('@')
+        .and_then(|(id, v)| Some((BlockId::parse(id).ok()?, v.to_string())))
+}
+
+/// Where the answer to question `qid` records its decision when `writer` writes it (see the
+/// module docs): the doc or folder `decisions.home` names in `writer`'s view, else the
+/// question's parent in canon; `None` is the project root. It reads only, so a presentation can
+/// brief the destination before the person answers.
+pub(super) fn destination(
+    st: &ReadState,
+    writer: &Session,
+    qid: &BlockId,
+) -> Result<Option<String>, RdyError> {
+    let given = match st.decisions_home() {
+        Some(_) => None,
+        None => st.block(&Scope::Canon, qid)?.parent.map(|p| p.to_string()),
+    };
+    st.decision_parent(&writer.default_view(), given.as_deref())
 }
 
 /// A briefing refusal of the answer's write, with the fix that names the answer's retry: brief

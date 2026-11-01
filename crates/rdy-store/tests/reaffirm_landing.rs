@@ -1,9 +1,9 @@
-//! cp16 (D-CQMA4; reference/store-format p-N50DS, p-CST21): local card evidence is allowed
-//! exactly for a re-affirmation card's isolated landing. The landing writer's evidence check and
-//! the landing field rule that fsck, the holder and a take apply share one predicate, so the same
-//! table holds for both: the card hash, the `They still hold` choice and the view
-//! `reaffirm-<card hash, first 12 digits>` of the landed proposal. Any other local card evidence,
-//! and all local text evidence, keeps its refusal.
+//! cp16 (D-CQMA4; D-6M0AF, TASK-982 C7; reference/store-format p-N50DS, p-CST21): a landing
+//! with no relay may record card evidence whenever it names a card hash, whatever the landed
+//! proposal's view and the chosen label: a re-affirmation card's isolated landing and a UI
+//! approval alike. Local card evidence with no card hash, and all local text evidence, keep
+//! their refusal. The landing writer's evidence check and the landing field rule that fsck, the
+//! holder and a take apply share one predicate, so the same table holds for both.
 use rdy_model::*;
 use rdy_store::{
     LandRequest, REAFFIRM_HOLD_LABEL, Store, StoreError, landing_field_rules,
@@ -81,25 +81,30 @@ fn cp16_local_card_field_rule_is_shared() {
         proposals.insert(v.to_string(), proposal(&mut s, v, &format!("c-0000{n}")));
     }
     let hold = REAFFIRM_HOLD_LABEL;
-    // (view, evidence, allowed): the exact view, hash and choice pass; each other case keeps the
-    // refusal of local card or text evidence
+    // (view, evidence, allowed): local card evidence with a card hash passes whatever the view
+    // and the choice; card evidence with no hash and text evidence keep their refusal
     let table: Vec<(&str, ApprovalEvidence, bool)> = vec![
         (&exact, evidence(EvidenceKind::Card, Some(card), hold), true),
         (&exact, evidence(EvidenceKind::Card, None, hold), false),
         (
             &prefix,
             evidence(EvidenceKind::Card, Some(card), hold),
-            false,
+            true,
         ),
         (
             &suffix,
             evidence(EvidenceKind::Card, Some(card), hold),
-            false,
+            true,
         ),
         (
             &exact,
             evidence(EvidenceKind::Card, Some(card), "Keep them suspect"),
-            false,
+            true,
+        ),
+        (
+            &prefix,
+            evidence(EvidenceKind::Card, Some(card), "Approve"),
+            true,
         ),
         (
             &exact,
@@ -111,7 +116,7 @@ fn cp16_local_card_field_rule_is_shared() {
         let case = format!("{view} {e:?}");
         // the predicate both checks share
         assert_eq!(
-            local_card_evidence_allowed(e, Some(view)),
+            local_card_evidence_allowed(e),
             *allowed,
             "predicate: {case}"
         );
@@ -173,9 +178,10 @@ fn cp16_local_card_field_rule_is_shared() {
             ),
             (_, other) => panic!("field rule: {case}: {other:?}"),
         }
-        // a caller that did not read the proposal's view never allows it
-        assert!(
-            landing_field_rules::<StoreError>(&l, &rec, None, &mut |_, _| Ok(true)).is_err(),
+        // the view is not read: a caller that did not read it rules the same
+        assert_eq!(
+            landing_field_rules::<StoreError>(&l, &rec, None, &mut |_, _| Ok(true)).is_ok(),
+            *allowed,
             "no view: {case}"
         );
     }

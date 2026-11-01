@@ -198,6 +198,25 @@ fn di1_fsck_rejects_a_relay_without_evidence() {
         fsck_err(&s),
         format!("answer {h}: evidence kind elicited is not card or text")
     );
+    // ui1 (D-6M0AF, TASK-982 C7): local card and local elicited evidence, each with the card
+    // hash, are valid; local elicited evidence with no card hash is not
+    for kind in [EvidenceKind::Card, EvidenceKind::Elicited] {
+        let (_d, mut s) = store();
+        let mut l = answer(ITEM, AnswerAct::RejectProposal);
+        l.evidence_kind = Some(kind);
+        s.put_answer(&l).unwrap();
+        assert_eq!(s.check_objects().unwrap().answers, 1, "{kind:?}");
+    }
+    let (_d, mut s) = store();
+    let mut f = answer(ITEM, AnswerAct::RejectProposal);
+    f.evidence_kind = Some(EvidenceKind::Elicited);
+    f.card_hash = None;
+    assert!(matches!(s.put_answer(&f), Err(StoreError::Refused(_))));
+    let h = s.put(kinds::ANSWER, &f).unwrap();
+    assert_eq!(
+        fsck_err(&s),
+        format!("answer {h}: elicited evidence needs card_hash")
+    );
     // an answer that does not decode
     let (_d, mut s) = store();
     let h = s.write(vec![(kinds::ANSWER, vec![0xff; 3])]).unwrap()[0];
