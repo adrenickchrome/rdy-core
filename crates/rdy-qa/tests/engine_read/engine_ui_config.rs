@@ -75,7 +75,10 @@ fn ui4_ui_defaults_true_and_only_user_local_override() {
     assert_eq!(rule.levels, &[Level::Local, Level::User]);
     assert_eq!(rule.ty, Ty::Bool);
     assert_eq!(rule.default, Some("true"));
-    assert!(ServeConfig::DEFAULT.ui, "the default is on");
+    assert!(
+        std::hint::black_box(ServeConfig::DEFAULT).ui,
+        "the default is on"
+    );
     // no MCP-over-HTTP key comes with it
     assert!(!keys.iter().any(|k| k.starts_with("serve.mcp")), "{keys:?}");
 
