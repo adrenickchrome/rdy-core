@@ -230,6 +230,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "answer each exception card first",
     ),
     (
+        E_VALIDATION,
+        "the blocks a write, import or proposal would produce do not validate against the pack (issues lists every error; a blob field that names no blob counts); as a readiness issue, a version has no summary, reaches more than 100000 blocks, is too large to assess, has no stored assessment, changes the authority policy without implementing a decision, or holds refused deferrals, a rejected one_way re-affirmation or an accepted check verdict. A person accepted a current check verdict as blocking for this proposal version.",
+        "fix each listed block, or use a compatible pack; for a readiness issue, follow its fix and propose again: rdy_propose / rdy propose",
+    ),
+    (
         "E_PROPOSAL_NOT_READY",
         "the proposal version fails readiness; issues name each failed check",
         "fix each issue and propose again: rdy_propose / rdy propose",
