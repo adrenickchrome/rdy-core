@@ -999,11 +999,13 @@ fn import_label(dir: &Path) -> Option<String> {
 
 impl Rdy {
     pub fn import(&mut self, s: &Session, view: &str, dir: &Path) -> Result<WriteResult, RdyError> {
-        if !s.role.can_land() {
+        // D-Y9DNZ: an import writes into a view under the role rule of every write; the trust
+        // check is at landing, where an imported decision status needs a person
+        if !s.role.can_write() {
             return Err(RdyError::new(
                 E_PERMISSION,
-                "import can carry accepted decisions, so it needs an approver",
-                "run the import as an approver session",
+                format!("role {:?} cannot import", s.role),
+                "start the session as a writer",
             ));
         }
         crate::write::check_view_access(&self.read(), view, s, crate::views::Action::Commit)?;

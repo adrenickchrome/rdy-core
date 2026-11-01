@@ -100,7 +100,16 @@ fn export_import_round_trip_preserves_every_version_hash() {
     let b_dir = tempfile::tempdir().unwrap();
     let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
     assert_eq!(
-        b.import(&agent(), "import", out.path()).unwrap_err().code,
+        b.import(
+            &Session {
+                role: Role::Reader,
+                ..agent()
+            },
+            "import",
+            out.path()
+        )
+        .unwrap_err()
+        .code,
         "E_PERMISSION"
     );
     b.import(&founder(), "import", out.path()).unwrap();

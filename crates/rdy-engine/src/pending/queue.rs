@@ -377,7 +377,9 @@ impl ReadState {
                     continue;
                 }
             }
-            // D-JQD5X, O13: the card shown is the stored card plus the live verdict lines
+            // TASK-982 C1: then the computed Imported fact; D-JQD5X, O13: then the live verdict
+            // lines
+            card.facts.extend(imported_fact(self, &v.p, &v.next)?);
             show_verdicts(self, &v.pref, &v.p, &mut card)?;
             if let Some(rt) = routing.as_mut() {
                 rt.note(self, &card, Some(&v.next), v.approve_facts());
@@ -694,6 +696,21 @@ fn stored_facts(st: &ReadState, v: &Version) -> Result<Option<Vec<Fact>>, RdyErr
     Ok(Some(facts))
 }
 
+/// D-Y9DNZ, TASK-982 C1: the `Imported` fact of the version whose record is `p`, computed from
+/// its selected changes in `candidate` (the canon landing it would give), when it carries an
+/// imported decision status; none when it carries none. It follows the stored facts (Policy
+/// last) and comes before the live verdict lines; the stored assessment is never rewritten.
+pub(crate) fn imported_fact(
+    st: &ReadState,
+    p: &Proposal,
+    candidate: &Materialized,
+) -> Result<Option<Fact>, RdyError> {
+    let facts = crate::import_facts::imported_facts(st, &p.changes, candidate)?;
+    Ok(facts
+        .fact_value()
+        .map(|value| bounded_fact(IMPORTED_FACT, value)))
+}
+
 /// O13 (D-JQD5X): the approve card `item` of version `pref` (record `p`) as the person is shown
 /// it: after every stored fact, one line for each check verdict whose case matches the version
 /// now ([`crate::check::verdicts::matching_verdicts`]), each row's complete metadata in
@@ -777,6 +794,7 @@ pub(crate) fn shown_approve_item(
         return Ok(None);
     };
     card.facts = facts;
+    card.facts.extend(imported_fact(st, &v.p, &v.next)?);
     let open = crate::check::verdicts::open_hold(st, pref, &verdicts)?;
     with_verdicts(&mut card, pref, verdicts, open)?;
     finish(card, CARD_MAX_TOKENS).map(Some)
@@ -1062,6 +1080,7 @@ pub(crate) fn removal_item(
     if let Some(facts) = stored_facts(st, &v)? {
         item.facts = facts;
     }
+    item.facts.extend(imported_fact(st, &v.p, &v.next)?);
     show_verdicts(st, &v.pref, &v.p, &mut item)?;
     let issues = v.readiness(st)?;
     if !issues.is_empty() {
@@ -1948,6 +1967,13 @@ impl Version {
             noncode_deferrals,
             stable_docs,
             plan_items,
+            imported_decision_status: !crate::import_facts::imported_facts(
+                st,
+                &self.p.changes,
+                &self.next,
+            )?
+            .ids
+            .is_empty(),
         })
     }
 
@@ -2973,6 +2999,9 @@ pub const JUSTIFICATION_FACT: &str = "Justification";
 /// The name of the batch fact that gives the authority policy's verdict (D-ZWP7Q, O9); it
 /// follows Exceptions.
 pub const POLICY_FACT: &str = "Policy";
+/// The computed fact of a version that carries an imported decision status (D-Y9DNZ, TASK-982
+/// C1): after Policy and before the live check verdicts, never stored.
+pub const IMPORTED_FACT: &str = "Imported";
 /// The fact of one rule warning (D-JQD5X), before Policy.
 pub const RULE_CHECK_FACT: &str = "Rule check";
 /// The fact of the rule rows a propose left out, before Policy.

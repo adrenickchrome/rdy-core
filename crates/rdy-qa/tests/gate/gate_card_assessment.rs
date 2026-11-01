@@ -212,6 +212,27 @@ fn rg13_the_approve_card_facts_are_the_stored_facts() {
         .unwrap()
         .unwrap();
     assert_eq!(st.reader().assessment(&h).unwrap(), a, "the stored record");
+    drop(st);
+    // ui2 (TASK-982 C1): a version that carries an imported decision status shows every stored
+    // fact, then the computed Imported line; the stored record keeps its card
+    let (_d2, mut r2) = rdy_qa::fixtures::project();
+    let t = tempfile::tempdir().unwrap();
+    let i1 = ag("i1");
+    crate::gate_import_policy::import_tree(
+        &mut r2,
+        &i1,
+        "i1",
+        t.path(),
+        "one",
+        ("d-AA001", "s-AA001"),
+        &[("D-AC001", "accepted")],
+    );
+    let q = crate::gate_import_policy::propose_as(&mut r2, &i1, "i1");
+    let imported_record = stored(&r2, &q);
+    let mut want = imported_record.card.facts.clone();
+    want.push(crate::gate_import_policy::imported(1, "agent:i1"));
+    assert_eq!(lines(&approve_item(&r2, &q.r#ref)), want);
+    assert_eq!(stored(&r2, &q), imported_record, "the stored record");
 }
 
 /// The ids of the advisory tensions `p` reports, as `(tn id, kind, summary)` in tension id order.
@@ -423,4 +444,61 @@ fn rg13_the_card_hash_binds_the_shown_card() {
     let done = answer_on(&e, &late.card_hash).unwrap();
     assert_eq!(done.act, "approve");
     assert_ne!(e.read().canon_head(), head, "the approval landed");
+    // ui2 (TASK-982 C1): the hash binds the computed Imported line: the card without it is
+    // refused, the card shown lands
+    let (_d2, mut r2) = rdy_qa::fixtures::project();
+    let t = tempfile::tempdir().unwrap();
+    let i1 = ag("i1");
+    crate::gate_import_policy::import_tree(
+        &mut r2,
+        &i1,
+        "i1",
+        t.path(),
+        "one",
+        ("d-AA001", "s-AA001"),
+        &[("D-AC001", "accepted")],
+    );
+    let q = crate::gate_import_policy::propose_as(&mut r2, &i1, "i1");
+    rdy_qa::intake::confirm_before_landing(&mut r2, &rdy_qa::fixtures::approver(), &q);
+    let shown = approve_item(&r2, &q.r#ref);
+    assert_eq!(
+        lines(&shown).last().unwrap(),
+        &crate::gate_import_policy::imported(1, "agent:i1")
+    );
+    let mut without = shown.clone();
+    without.facts.pop();
+    let stale = rdy_engine::pending::card_hash(&without).to_string();
+    assert_ne!(stale, shown.card_hash);
+    let answer2 = |r: &mut Rdy, hash: &str| {
+        r.answer(
+            &agent(),
+            PERSON,
+            AnswerRequest {
+                r#ref: q.r#ref.clone(),
+                option: "approve".into(),
+                card_hash: Some(hash.to_string()),
+                note: None,
+                relay: RelayInput {
+                    relayed_by: None,
+                    evidence: Some("yes".into()),
+                    question: Some("Shall I approve it?".into()),
+                    session_ref: Some("chat-7".into()),
+                    kind: None,
+                },
+                brief: None,
+            },
+        )
+    };
+    let head = r2.read().canon_head();
+    let err = answer2(&mut r2, &stale).unwrap_err();
+    assert_eq!(err.code, rdy_engine::E_PROPOSAL_MOVED, "{err:?}");
+    assert_eq!(
+        err.corrected.as_ref().unwrap()["card_hash"],
+        serde_json::json!(shown.card_hash),
+        "the corrected card shows the Imported line"
+    );
+    assert_eq!(r2.read().canon_head(), head, "nothing landed");
+    let done = answer2(&mut r2, &shown.card_hash).unwrap();
+    assert_eq!(done.act, "approve");
+    assert_ne!(r2.read().canon_head(), head, "the approval landed");
 }

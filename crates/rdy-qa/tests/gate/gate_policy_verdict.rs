@@ -266,6 +266,41 @@ fn ap8_the_card_shows_policy_after_exceptions() {
         a.card.facts.last().unwrap(),
         &format!("Policy: {}: accepts under rule drafts", live(&w.r).label())
     );
+    // ui2 (TASK-982 C1): an imported decision status needs a person, and the computed Imported
+    // line follows Policy; the stored card still ends with Policy
+    let t = tempfile::tempdir().unwrap();
+    let a2 = ag("a2");
+    crate::gate_import_policy::import_tree(
+        &mut w.r,
+        &a2,
+        "a2",
+        t.path(),
+        "imports",
+        ("d-AA001", "s-AA001"),
+        &[("D-AC001", "accepted")],
+    );
+    let q = crate::gate_import_policy::propose_as(&mut w.r, &a2, "a2");
+    let i = approve_item(&w.r, &q.r#ref);
+    let names: Vec<&str> = i.facts.iter().map(|f| f.name.as_ref()).collect();
+    assert_eq!(
+        names[names.len() - 3..],
+        ["Exceptions", "Policy", "Imported"]
+    );
+    assert_eq!(
+        fact(&i, "Policy"),
+        format!(
+            "{}: needs a person from approvers: it carries an imported decision status",
+            live(&w.r).label()
+        )
+    );
+    let a = stored(&w.r, &q);
+    assert_eq!(
+        a.card.facts.last().unwrap(),
+        &format!(
+            "Policy: {}: needs a person from approvers: it carries an imported decision status",
+            live(&w.r).label()
+        )
+    );
 }
 
 #[test]

@@ -10,6 +10,7 @@ mod gate_coverage_lowered;
 mod gate_exceptions;
 mod gate_freshness;
 mod gate_identity;
+mod gate_import_policy;
 mod gate_intake_e2e;
 mod gate_neighbor_cards;
 mod gate_neighbors;

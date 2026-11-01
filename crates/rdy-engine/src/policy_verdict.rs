@@ -21,6 +21,8 @@ use rdy_schema::policy::{DecisionsRule, JustificationKind, Lifecycle, PolicyFiel
 pub const NO_POLICY: &str = "no authority policy is set";
 /// The reason of a policy with no rule.
 pub const NO_RULE: &str = "the policy has no agent_may_accept rule";
+/// The never-list reason of a version that carries an imported decision status (D-Y9DNZ).
+pub const IMPORTED_STATUS: &str = "it carries an imported decision status";
 /// The bases of a person's ruling, which the policy never accepts.
 const RULING_BASES: [&str; 2] = ["direct_ruling", "recorded_ruling"];
 /// The basis an absent `authority_basis` reads as.
@@ -68,6 +70,9 @@ pub struct VerdictInputs {
     pub noncode_deferrals: usize,
     pub stable_docs: Vec<BlockId>,
     pub plan_items: usize,
+    /// D-Y9DNZ: whether a selected change carries an imported accepted or rejected decision
+    /// status that the candidate keeps (`import_facts`).
+    pub imported_decision_status: bool,
 }
 
 /// The one verdict (O8). `policy` is the live policy's ref and its fields (None when the block no
@@ -194,6 +199,9 @@ fn never_list(i: &VerdictInputs, view: &Sorted<'_>) -> Vec<String> {
     docs.dedup();
     for doc in docs {
         out.push(format!("it makes doc {doc} stable"));
+    }
+    if i.imported_decision_status {
+        out.push(IMPORTED_STATUS.to_string());
     }
     out
 }
@@ -575,6 +583,42 @@ mod tests {
                 "it makes doc d-TTTTT stable",
             ]
         );
+    }
+
+    /// ui2 (D-Y9DNZ): a rule that accepts the version otherwise still needs a person when it
+    /// carries an imported decision status; the reason follows the stable-doc reasons, and the
+    /// reason cap holds.
+    #[test]
+    fn ui2_an_imported_decision_status_needs_a_person_under_a_matching_rule() {
+        let open = two_way_rule("open");
+        let mut v = version();
+        v.decisions = vec![decision("D-DDDDD")];
+        assert_eq!(accepted(&run(vec![open.clone()], &v)), "open");
+        v.imported_decision_status = true;
+        let a = run(vec![open.clone()], &v);
+        assert_eq!(reasons(&a), vec![IMPORTED_STATUS.to_string()]);
+        assert!(matches!(
+            &a.verdict,
+            PolicyVerdict::NeedsPerson { role: Some(r), .. } if r == "approvers"
+        ));
+        v.stable_docs = vec![id("d-SSSSS")];
+        v.redaction = true;
+        assert_eq!(
+            reasons(&run(vec![open.clone()], &v)),
+            vec![
+                "it carries a redaction request",
+                "it makes doc d-SSSSS stable",
+                "it carries an imported decision status",
+            ]
+        );
+        // past the cap, the earlier reasons stay and the imported one is cut
+        v.stable_docs = (0..MAX_POLICY_REASONS)
+            .map(|n| id(&format!("d-S{n:04}")))
+            .collect();
+        let got = reasons(&run(vec![open], &v));
+        assert_eq!(got.len(), MAX_POLICY_REASONS);
+        assert_eq!(got[0], "it carries a redaction request");
+        assert!(!got.contains(&IMPORTED_STATUS.to_string()), "{got:?}");
     }
 
     #[test]
