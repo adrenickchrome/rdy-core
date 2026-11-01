@@ -442,7 +442,9 @@ pub fn rest(st: &mut McpState) {
 }
 
 /// Runs `f` as one claimed call: [`enter`], then `f`, then [`rest`]. A refused claim is the
-/// call's reply. This is the protocol's door; the server runs it under the state lock.
+/// call's reply. A successful `rdy_session` binds an unbound connection to its actor and run.
+/// This is the protocol's door; the server runs it under the state lock. A tool function called
+/// directly, outside this door, binds nothing.
 pub fn call<T>(
     st: &mut McpState,
     asked: Option<&Asked>,
@@ -450,6 +452,13 @@ pub fn call<T>(
     f: impl FnOnce(&mut McpState) -> Result<T, RdyError>,
 ) -> Result<T, RdyError> {
     let out = enter(st, asked, tool).and_then(|()| f(st));
+    if tool == SESSION_TOOL
+        && out.is_ok()
+        && st.bound.is_none()
+        && let Some(s) = &st.session
+    {
+        st.bound = Some((s.actor.clone(), s.run.clone()));
+    }
     rest(st);
     out
 }

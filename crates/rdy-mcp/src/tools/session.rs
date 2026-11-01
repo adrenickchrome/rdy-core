@@ -114,10 +114,10 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
     // ib3: the subscription is written before the session is set, so a refused area leaves the
     // earlier session as it was
     let sub = rdy_engine::inbox::sub::subscribe(&*st.engine, &session, p.areas)?;
-    // the session's role and view are saved for its actor and run; the first claim binds
+    // the session's role and view are saved for its actor and run (the protocol's door binds
+    // the connection to them: `claims::call`)
     let dedupe = st.claim.as_ref().and_then(crate::claims::Asked::dedupe);
     hub.claims().save(&key, view.clone(), role, dedupe)?;
-    st.bound.get_or_insert(key);
     hub.identify(st.hub_sid(), &session.actor, session.run.as_deref());
     st.view = view;
     st.session = Some(session);
