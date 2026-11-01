@@ -7306,7 +7306,10 @@ mod tests {
         std::fs::create_dir_all(&proj).expect("mkdir");
         let docs = testkit::generate_tree(&proj, 100, 10, 97);
         let mut r = Rdy::open(&proj).expect("open");
-        land(&mut r, "work").expect("land work");
+        // through the store: the one ~99,100-block change is past the per-proposal assessment
+        // reach (100,000 with rule-added blocks; KNOWN-ISSUES 120), so `land` finds no stored
+        // assessment; the canon is the same
+        crate::fixtures::land_with_a_tie(&mut r, "work");
         let fx = fixture(&r, &docs);
         let other = r
             .read()
