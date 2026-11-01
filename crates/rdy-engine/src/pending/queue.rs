@@ -707,14 +707,20 @@ pub(crate) fn show_verdicts(
     item: &mut Item,
 ) -> Result<(), RdyError> {
     let verdicts = crate::check::verdicts::matching_verdicts(st, pref, p)?;
-    with_verdicts(item, pref, verdicts)
+    let open = crate::check::verdicts::open_hold(st, pref, &verdicts)?;
+    with_verdicts(item, pref, verdicts, open)
 }
 
-/// [`show_verdicts`] with the verdicts already read.
+/// [`show_verdicts`] with the verdicts already read. `open` says whether they hold a concern or a
+/// fail that no person accepted ([`crate::check::verdicts::open_hold`]): while one does, no
+/// option is recommended (D-91DEW). Approve keeps its place and consequence; its card shows no
+/// `Why recommended:` line, and the card's hash moves with it. A pass, or a verdict a person
+/// accepted, leaves the computed reason as it is.
 fn with_verdicts(
     item: &mut Item,
     pref: &ProposalRef,
     verdicts: Vec<crate::check::verdicts::MatchingVerdict>,
+    open: bool,
 ) -> Result<(), RdyError> {
     use crate::check::verdicts::ACCEPT_CONSEQUENCE;
     if verdicts.is_empty() {
@@ -745,6 +751,11 @@ fn with_verdicts(
         .position(|o| o.id == "reject" || o.id == "later")
         .unwrap_or(item.options.len());
     item.options.splice(at..at, accept);
+    if open {
+        for o in &mut item.options {
+            o.recommended = None;
+        }
+    }
     item.check_verdicts = verdicts;
     Ok(())
 }
@@ -766,7 +777,8 @@ pub(crate) fn shown_approve_item(
         return Ok(None);
     };
     card.facts = facts;
-    with_verdicts(&mut card, pref, verdicts)?;
+    let open = crate::check::verdicts::open_hold(st, pref, &verdicts)?;
+    with_verdicts(&mut card, pref, verdicts, open)?;
     finish(card, CARD_MAX_TOKENS).map(Some)
 }
 
@@ -3069,6 +3081,80 @@ mod tests {
             relay_evidence: None,
             evidence_kind: None,
             note: None,
+        }
+    }
+
+    /// A matching `verdict` row of review `review`.
+    fn verdict_row(review: Hash, verdict: &str) -> crate::check::verdicts::MatchingVerdict {
+        crate::check::verdicts::MatchingVerdict {
+            request: Hash::of(b"request"),
+            review,
+            check: "meaning_preservation".into(),
+            mode: "independent".into(),
+            actor: "agent:r".into(),
+            run: None,
+            verdict: verdict.into(),
+            reason: if verdict == "pass" {
+                String::new()
+            } else {
+                "it reads otherwise".into()
+            },
+            citations: vec![],
+            case_hash: Hash::of(b"case"),
+        }
+    }
+
+    /// An approve card with the computed reason, as the queue builds it before the verdicts.
+    fn approve_card() -> Item {
+        let mut card = item(ItemKind::Approve, "P-0123456789ab@1", "A version");
+        card.options = vec![
+            option("approve", "Approve", "Lands it.", Some(APPROVE_REASON)),
+            option("reject", "Reject", "Rejects it.", None),
+            later(),
+        ];
+        card
+    }
+
+    /// D-91DEW (KNOWN-ISSUES 242): an unaccepted concern or fail leaves no option recommended,
+    /// with Approve in its place; a pass, or a fail the person accepted, leaves the reason as it
+    /// is.
+    #[test]
+    fn ki242_only_an_unaccepted_concern_or_fail_drops_the_recommendation() {
+        use crate::check::verdicts::unaccepted;
+        let pref = ProposalRef {
+            version: Hash::of(b"version"),
+            stable: Hash::of(b"version"),
+            n: 1,
+        };
+        let review = Hash::of(b"review");
+        let accepted: BTreeSet<Hash> = [review].into_iter().collect();
+        for (verdict, held, open) in [
+            ("concern", &BTreeSet::new(), true),
+            ("fail", &BTreeSet::new(), true),
+            ("pass", &BTreeSet::new(), false),
+            ("fail", &accepted, false),
+        ] {
+            let rows = vec![verdict_row(review, verdict)];
+            assert_eq!(unaccepted(&rows, held), open, "{verdict}");
+            let mut card = approve_card();
+            with_verdicts(&mut card, &pref, rows, open).unwrap();
+            assert_eq!(card.options[0].id, "approve", "{verdict}");
+            assert_eq!(card.options[0].consequences, ["Lands it."], "{verdict}");
+            let reason = card.options[0].recommended.as_ref().map(|r| r.reason());
+            let text = render(&card, CARD_MAX_TOKENS);
+            if open {
+                assert!(
+                    card.options.iter().all(|o| o.recommended.is_none()),
+                    "{verdict}"
+                );
+                assert!(!text.contains("Why recommended:"), "{verdict}: {text}");
+            } else {
+                assert_eq!(reason, Some(APPROVE_REASON), "{verdict}");
+                assert!(
+                    text.contains(&format!("Why recommended: {APPROVE_REASON}")),
+                    "{verdict}: {text}"
+                );
+            }
         }
     }
 

@@ -289,8 +289,9 @@ impl Rdy {
     /// The checks `answer_all_recommended` makes before it answers anything: one card hash for
     /// each ref (or none), the relay table, the removal pre-scan (D-CC90E: a list that holds a
     /// removal is `E_REDACTION_HUMAN` as a whole) and the deferral pre-scan (D-AAQ9Z: a deferral
-    /// card has no recommended option, so a list that names one is `E_BAD_INPUT` as a whole).
-    /// Returns the answerer of every item.
+    /// card has no recommended option, so a list that names one is `E_BAD_INPUT` as a whole), and
+    /// the same pre-scan for an approve card under an open check verdict (D-91DEW). Returns the
+    /// answerer of every item.
     pub(crate) fn recommended_answerer(
         &self,
         s: &Session,
@@ -324,6 +325,15 @@ impl Rdy {
         if let Some(r) = refs.iter().find(|r| {
             (r.starts_with("defer:") || r.starts_with(REAFFIRM_REF_PREFIX)) && is_item_ref(r)
         }) {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("{r} has no recommended option"),
+                "answer it on its own",
+            ));
+        }
+        // D-91DEW: an approve card that shows a concern or fail verdict no person accepted has
+        // no recommended option either, so a list that names it is refused as a whole too
+        if let Some(r) = open_hold_ref(&st, refs)? {
             return Err(RdyError::new(
                 E_BAD_INPUT,
                 format!("{r} has no recommended option"),
@@ -400,6 +410,34 @@ fn removal_ref<'a>(st: &ReadState, refs: &'a [String]) -> Result<Option<&'a str>
             if reader.redaction_for_carrier(h)?.is_some() {
                 return Ok(Some(r));
             }
+        }
+    }
+    Ok(None)
+}
+
+/// The first of `refs` that names the latest version of a proposal whose approve card shows a
+/// concern or fail check verdict that no person accepted (D-91DEW,
+/// [`crate::check::verdicts::open_hold`]). It reads only; a ref that does not resolve, or names
+/// a version that is not the latest, is left to its own answer, in its turn.
+fn open_hold_ref<'a>(st: &ReadState, refs: &'a [String]) -> Result<Option<&'a str>, RdyError> {
+    use crate::check::verdicts::{matching_verdicts, open_hold};
+    for r in refs {
+        if !(r.contains('@') && is_proposal_ref(r)) {
+            continue;
+        }
+        let Ok(pref) = resolve_in(st, r) else {
+            continue;
+        };
+        if latest_version(st, &pref.stable)? != pref.version {
+            continue;
+        }
+        let p = st.reader().proposal(&pref.version)?;
+        if landed_as(st, &p)?.is_some() {
+            continue;
+        }
+        let verdicts = matching_verdicts(st, &pref, &p)?;
+        if open_hold(st, &pref, &verdicts)? {
+            return Ok(Some(r));
         }
     }
     Ok(None)
