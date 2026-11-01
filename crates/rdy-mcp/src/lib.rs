@@ -1,4 +1,5 @@
 pub mod alt_tools;
+pub mod claims;
 pub mod entity_tools;
 pub mod intent_tools;
 pub mod markdown;

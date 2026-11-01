@@ -68,15 +68,30 @@ pub struct Listening {
     prev: Sink,
 }
 
-/// The sessions connected to one server (one project's daemon, or one stdio process).
+/// The sessions connected to one server (one project's daemon, or one stdio process), and the
+/// session settings they saved (D-4PHYQ).
 #[derive(Default)]
 pub struct NotifyHub {
     conns: Mutex<BTreeMap<u64, Conn>>,
+    claims: crate::claims::Registry,
 }
 
 impl NotifyHub {
     pub fn new() -> Arc<NotifyHub> {
         Arc::new(NotifyHub::default())
+    }
+
+    /// A hub whose saved session settings are `claims`: a test sets the registry's clock.
+    pub fn with_claims(claims: crate::claims::Registry) -> Arc<NotifyHub> {
+        Arc::new(NotifyHub {
+            conns: Mutex::default(),
+            claims,
+        })
+    }
+
+    /// The session settings of this server, by actor and run.
+    pub fn claims(&self) -> &crate::claims::Registry {
+        &self.claims
     }
 
     fn conns(&self) -> std::sync::MutexGuard<'_, BTreeMap<u64, Conn>> {

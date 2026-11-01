@@ -890,7 +890,7 @@ fn hpb15_publish_requires_a_session_and_refuses_unknown_keys() {
         (
             json!("E_NO_SESSION"),
             json!("no session"),
-            json!("call rdy_session first with your actor, run and role")
+            json!("state rdy/actor and rdy/run in _meta, or call rdy_session")
         )
     );
     let r = c.call(

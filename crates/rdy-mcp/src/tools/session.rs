@@ -17,11 +17,17 @@ pub struct SessionParams {
     /// The run this agent belongs to; also the default view name.
     pub run: Option<String>,
     /// reader, writer or reviewer.
+    #[serde(default = "writer")]
     pub role: String,
     /// Override the default view for writes. A reader may pass "canon" to read canon by default.
     pub view: Option<String>,
     /// Areas this session watches for landings, persisted with its inbox cursor; [] clears them (the areas of the blocks you change apply).
     pub areas: Option<Vec<String>>,
+}
+
+/// The role of a session that names none (D-4PHYQ).
+fn writer() -> String {
+    "writer".into()
 }
 
 fn depth_of(nodes: &[TreeNode]) -> usize {
@@ -64,7 +70,7 @@ fn fit_tree(mut nodes: Vec<TreeNode>, max_tokens: usize) -> Vec<TreeNode> {
 }
 
 /// The fix of an agent session's human claim over MCP (D-ME2C0): the CLI's names RDY_ACTOR.
-const MCP_HUMAN_CLAIM_FIX: &str =
+pub(crate) const MCP_HUMAN_CLAIM_FIX: &str =
     "claim your own agent: actor, and relay the person's words with rdy_answer";
 
 pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyError> {
@@ -73,25 +79,7 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
     if p.actor == "__rdy_test_panic__" {
         panic!("test hook: deliberate panic")
     }
-    let role = match p.role.as_str() {
-        "reader" => Role::Reader,
-        "writer" => Role::Writer,
-        "reviewer" => Role::Reviewer,
-        "approver" => {
-            return Err(RdyError::new(
-                E_PERMISSION,
-                "approver sessions are not available over MCP",
-                "relay the person's answer with rdy_answer",
-            ));
-        }
-        other => {
-            return Err(RdyError::new(
-                E_BAD_INPUT,
-                format!("unknown role {other:?}"),
-                "use reader, writer or reviewer",
-            ));
-        }
-    };
+    let role = crate::claims::parse_role(&p.role)?;
     // D-CQMA4: the views of re-affirmation cards' landings are private
     if p.view.as_deref().is_some_and(rdy_engine::is_reserved_view) {
         return Err(rdy_engine::reserved_view_error());
@@ -104,12 +92,10 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
         ));
     }
     // D-ME2C0: MCP is an agent surface; a human actor here is a claim, with its MCP fix
-    let session = Session::agent(p.actor, p.run, role).map_err(|mut e| {
-        if Session::is_human_claim(&e) {
-            e.fix = MCP_HUMAN_CLAIM_FIX.to_string();
-        }
-        e
-    })?;
+    let session = crate::claims::agent_session(p.actor, p.run, role)?;
+    // D-4PHYQ: the arguments are a claim; the call's `_meta` claim and the connection's agree
+    let key = (session.actor.clone(), session.run.clone());
+    crate::claims::check_session_claim(st, &key)?;
     let view = p.view.unwrap_or_else(|| session.default_view());
     // ses1: a reader may read canon by default; a session that writes needs a view of its own
     if view == "canon" && role != Role::Reader {
@@ -122,11 +108,17 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
     // the configured person is resolved before anything changes: a refusal (an unreadable config,
     // an actor outside the form) leaves the earlier session, view and subscription as they were
     let person = human_actor_for_env(&st.engine.root())?;
+    // the settings have room before anything is written
+    let hub = std::sync::Arc::clone(&st.hub);
+    hub.claims().check_room(&key)?;
     // ib3: the subscription is written before the session is set, so a refused area leaves the
     // earlier session as it was
     let sub = rdy_engine::inbox::sub::subscribe(&*st.engine, &session, p.areas)?;
-    st.hub
-        .identify(st.hub_sid(), &session.actor, session.run.as_deref());
+    // the session's role and view are saved for its actor and run; the first claim binds
+    let dedupe = st.claim.as_ref().and_then(crate::claims::Asked::dedupe);
+    hub.claims().save(&key, view.clone(), role, dedupe)?;
+    st.bound.get_or_insert(key);
+    hub.identify(st.hub_sid(), &session.actor, session.run.as_deref());
     st.view = view;
     st.session = Some(session);
     st.reported.clear();

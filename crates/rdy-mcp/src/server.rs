@@ -86,6 +86,8 @@ struct ToolCall {
     /// Reads rmcp's request token itself, so a cancel that came before an ask stops that ask
     /// however late the call's task is polled.
     cancelled: RequestCancelled,
+    /// What the request's `_meta` states about who acts (D-4PHYQ), read once at `call_tool`.
+    claim: Option<crate::claims::Asked>,
 }
 
 /// The signer of one tool call: the session's agent serving that call
@@ -217,17 +219,16 @@ impl RdyServer {
     ///
     /// Order is not kept here: a session served through [`serve`] runs one stamped call at a
     /// time, in arrival order, and writes the replies in that order (see [`crate::order`]).
+    ///
+    /// D-4PHYQ: the call is claimed first ([`crate::claims::call`]), under the state lock, so an
+    /// unclaimed call is refused before its parameters are.
     pub(crate) async fn run<P: Send + 'static>(
         &self,
         tool: &'static str,
         p: Result<P, RdyError>,
         f: fn(&mut McpState, P) -> Result<serde_json::Value, RdyError>,
     ) -> CallToolResult {
-        let p = match p {
-            Ok(p) => p,
-            Err(e) => return result(Err(e)),
-        };
-        result(self.blocking(tool, true, move |st| f(st, p)).await)
+        result(self.claimed(tool, true, p, f).await)
     }
 
     /// `run` for a tool whose reply is a closed, size-checked object: no pack notice rides on
@@ -239,11 +240,23 @@ impl RdyServer {
         p: Result<P, RdyError>,
         f: fn(&mut McpState, P) -> Result<serde_json::Value, RdyError>,
     ) -> CallToolResult {
-        let p = match p {
-            Ok(p) => p,
-            Err(e) => return result(Err(e)),
-        };
-        result(self.blocking(tool, false, move |st| f(st, p)).await)
+        result(self.claimed(tool, false, p, f).await)
+    }
+
+    /// One claimed tool call on the blocking pool: the claim of the call's `_meta` (from the
+    /// call context), else the connection's, then the parameters, then the tool.
+    async fn claimed<P: Send + 'static>(
+        &self,
+        tool: &'static str,
+        notice: bool,
+        p: Result<P, RdyError>,
+        f: fn(&mut McpState, P) -> Result<serde_json::Value, RdyError>,
+    ) -> Result<serde_json::Value, RdyError> {
+        let asked = CALL.try_with(|c| c.claim.clone()).ok().flatten();
+        self.blocking(tool, notice, move |st| {
+            crate::claims::call(st, asked.as_ref(), tool, |st| f(st, p?))
+        })
+        .await
     }
 
     /// The blocking body shared by tool runs and resource reads: `f` runs on the blocking pool
@@ -287,6 +300,8 @@ impl RdyServer {
                     r
                 }
                 Err(panic) => {
+                    // the call's claim ends with it: no override outlives the call
+                    crate::claims::rest(&mut st);
                     // a clean republish writes nothing, so a read-only store runs it too
                     let republished = st.engine.republish();
                     let msg = panic
@@ -348,6 +363,12 @@ impl ServerHandler for RdyServer {
             )))
             .into());
         }
+        // D-4PHYQ: who acts, as the request's `_meta` states it (rmcp moves `_meta` into the
+        // context); a bad claim is the reply
+        let claim = match crate::claims::parse(Some(&context.meta.0.0)) {
+            Ok(c) => c,
+            Err(e) => return Ok(result(Err(e)).into()),
+        };
         // the call's body signs through a signer that names this request and stops at its
         // cancel: the client's `notifications/cancelled` for it, or the session's end (rmcp
         // cancels every request's token then), reaches an ask of the agent in progress
@@ -367,6 +388,7 @@ impl ServerHandler for RdyServer {
                 let ct = ct.clone();
                 Arc::new(move || ct.is_cancelled())
             },
+            claim,
         };
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         let run = CALL.scope(call, self.tool_router.call(tcc));
@@ -402,13 +424,14 @@ impl ServerHandler for RdyServer {
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
-        _context: RequestContext<rmcp::RoleServer>,
+        context: RequestContext<rmcp::RoleServer>,
     ) -> Result<ReadResourceResponse, rmcp::ErrorData> {
         // as `call_tool`: the state the engine serves is checked before the read routes
         let state = self.engine.read();
         state.ensure_current_epoch().map_err(resources::refuse)?;
         drop(state);
-        Ok(self.resources_read(request.uri).await?.into())
+        let claim = crate::claims::parse(Some(&context.meta.0.0)).map_err(resources::refuse)?;
+        Ok(self.resources_read(request.uri, claim).await?.into())
     }
 
     #[allow(deprecated)]
@@ -1248,6 +1271,7 @@ mod tests {
                 cancel: Arc::new(CallCancel::new()),
             },
             cancelled: Arc::new(|| false),
+            claim: None,
         };
         let keys = |st: &mut McpState| st.agent.identities().map(|k| serde_json::json!(k.len()));
         let sign = |st: &mut McpState| st.agent.sign(&[1], &[2]).map(|_| serde_json::Value::Null);

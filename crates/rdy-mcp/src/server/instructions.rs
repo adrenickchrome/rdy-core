@@ -4,7 +4,7 @@
 /// adds an element where it belongs. `INSTRUCTIONS` joins them with one space at compile time.
 pub const INSTRUCTION_SENTENCES: &[&str] = &[
     "rdy keeps decisions and documentation consistent while agents change them.",
-    "Call rdy_session first, then rdy_overview.",
+    "State rdy/actor and rdy/run in _meta, or call rdy_session; then call rdy_overview.",
     "Read and write through rdy's tools, not the working-copy files.",
     "Brief before editing (rdy_brief); writes to stable content must cite a briefing (brief: <token>).",
     // plan Redaction: four sentences in this element, and plan Change plan adds three before them,

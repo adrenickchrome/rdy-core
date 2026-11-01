@@ -7,6 +7,7 @@ mod mcp_alts;
 mod mcp_cadence;
 mod mcp_carried_warning;
 mod mcp_check_tools;
+mod mcp_claims;
 mod mcp_clone;
 mod mcp_compact;
 mod mcp_coverage;

@@ -20977,6 +20977,7 @@
               ]
             },
             "role": {
+              "default": "writer",
               "description": "reader, writer or reviewer.",
               "type": "string"
             },
@@ -20996,8 +20997,7 @@
             }
           },
           "required": [
-            "actor",
-            "role"
+            "actor"
           ],
           "type": "object"
         }

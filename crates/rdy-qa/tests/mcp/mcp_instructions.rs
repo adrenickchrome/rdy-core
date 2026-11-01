@@ -110,6 +110,11 @@ fn di13_the_new_sentences_sit_after_the_inbox_line() {
     let s = rdy_mcp::server::INSTRUCTION_SENTENCES;
     // ap11: O27 adds the rdy_land sentence; ck8 adds the authoring-check sentence after it
     assert_eq!(s.len(), 28);
+    // ui5: element 2 names both claims, before rdy_overview
+    assert_eq!(
+        s[1],
+        "State rdy/actor and rdy/run in _meta, or call rdy_session; then call rdy_overview."
+    );
     assert!(s[12].starts_with("Read rdy_inbox at session start"));
     for (k, want) in DI13_SENTENCES.iter().enumerate() {
         assert_eq!(s[13 + k], *want, "index {}", 13 + k);
