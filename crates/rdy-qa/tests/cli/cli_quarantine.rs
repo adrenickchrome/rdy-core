@@ -35,14 +35,17 @@ fn qclean1_fsck_lists_quarantine_and_only_the_human_cleans_it() {
     let out = String::from_utf8_lossy(&o.stdout).into_owned();
     let lines: Vec<&str> = out.lines().collect();
     assert!(lines[0].starts_with("ok: "), "{out}");
+    // the lines that were already there keep their bytes and order; mh7 appends the byte report
     assert_eq!(
-        &lines[1..],
+        &lines[1..3],
         &[
             "removed index.redb.damaged-1",
             "removed segments/seg-0.log.torn-77"
         ],
         "{out}"
     );
+    assert!(lines[3].starts_with("log bytes: "), "{out}");
+    assert!(lines[4].starts_with("removed bytes: "), "{out}");
     let (ok, v) = s.json(&["--json", "fsck", "--clean-quarantine"]);
     assert!(ok, "{v}");
     assert_eq!(
