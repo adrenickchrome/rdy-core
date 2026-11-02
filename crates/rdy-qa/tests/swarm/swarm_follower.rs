@@ -10,11 +10,14 @@ use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
 
+/// The bytes of each `.log` segment. A quarantined `.torn-` copy is local to the store that a
+/// swarm kill left it in: it holds no source frame and no dump carries it.
 fn segments(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
     std::fs::read_dir(root.join(".rdy/store/segments"))
         .unwrap()
-        .map(|e| {
-            let p = e.unwrap().path();
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "log"))
+        .map(|p| {
             (
                 p.file_name().unwrap().to_string_lossy().to_string(),
                 std::fs::read(&p).unwrap(),
