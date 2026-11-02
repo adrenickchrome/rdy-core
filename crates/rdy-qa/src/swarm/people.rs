@@ -73,7 +73,7 @@ const RELAY_RUN: &str = "chat";
 pub const ACCEPT_PREFIX: &str = "accept_verdict:";
 /// How many queued proposals the person looks at when it hunts for advice to accept: the queue
 /// a fast run holds, so a late contradiction pair's proposal is seen (ruling task-5.2).
-const ADVICE_LOOKS: usize = 24;
+pub(crate) const ADVICE_LOOKS: usize = 24;
 
 /// The agent that writes the versions a `UiAnswer` answers, and its run.
 pub const UI_AUTHOR: &str = "agent:ui";

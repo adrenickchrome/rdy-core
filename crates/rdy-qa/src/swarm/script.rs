@@ -142,7 +142,18 @@ pub enum Act {
     /// "meaning_preservation"}`, then `decision_review`) and submits a deterministic `concern`
     /// with one citation and the reason `CHECK_REASON`. No model is called.
     CheckSubmit,
+    /// The forced advice sequence (`advice_steps`): a claim marked `CONTRA-0` in the view
+    /// `a<i>-adv`, under the pair's section, that references the claim of agent `first`.
+    AdviceClaim { first: usize, area: &'static str },
+    /// The forced advice sequence: a reviewer judges every free review request, as many as
+    /// `ReviewNext` batches take.
+    ReviewAll,
+    /// The forced advice sequence: `rdy_propose` of the view `a<i>-adv`.
+    AdviceProposal,
 }
+
+/// The suffix of the view of the forced advice sequence (`a<i>-adv`).
+pub const ADVICE_VIEW_SUFFIX: &str = "-adv";
 
 /// The reason of every scripted check concern.
 pub const CHECK_REASON: &str = "the case needs a person to review it";
@@ -222,6 +233,9 @@ impl Act {
             Act::CheckRun { .. } => "check_run",
             Act::CheckRequest { .. } => "check_request",
             Act::CheckSubmit => "check_submit",
+            Act::AdviceClaim { .. } => "create",
+            Act::ReviewAll => "review_next",
+            Act::AdviceProposal => "propose",
         }
     }
 }
@@ -657,6 +671,36 @@ pub fn ui_plan(cfg: &Config) -> Option<UiPlan> {
     Some(UiPlan { moved, forced })
 }
 
+/// The fixed steps of the forced advice sequence. Each agent's step waits until every agent has
+/// reached the step before it, so a step two later runs after that act has ended: the claim is
+/// written before the reviewers judge, and every free request is judged before the proposal, which
+/// therefore holds the advice. The proposal comes after the person's last landing before the tail,
+/// and the person's tail `AcceptAdvice` waits until it has ended. No landing can take it first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdviceSteps {
+    pub claim: usize,
+    pub review: usize,
+    pub propose: usize,
+}
+
+/// The forced advice sequence of `cfg`: a pure function of it. `None` where `check_plan` is
+/// `None`: the fast and deep tiers hold it. It comes after the kill, so no call of it is lost.
+pub fn advice_steps(cfg: &Config) -> Option<AdviceSteps> {
+    check_plan(cfg)?;
+    let len = cfg.steps / 2;
+    let propose = person_due(len - 2, cfg.steps, len) - 1;
+    let (review, claim) = (propose - 2, propose - 4);
+    assert!(
+        cfg.kill_at.is_none_or(|k| k < claim),
+        "the forced advice acts come after the kill: {cfg:?}"
+    );
+    Some(AdviceSteps {
+        claim,
+        review,
+        propose,
+    })
+}
+
 /// The forced acts of agent `me` under `plan`, each with its fixed step.
 fn forced_acts(plan: Option<&CheckPlan>, me: usize) -> Vec<(Act, usize)> {
     let Some(p) = plan else { return vec![] };
@@ -761,7 +805,9 @@ fn include_acts(plan: Option<&IncludePlan>, me: usize) -> Vec<(Act, usize)> {
 
 /// The script of one actor: random acts, then the forced acts on their fixed steps, then the
 /// placed acts on seeded free steps inside their windows, then the required acts on seeded free
-/// steps.
+/// steps. Last the `late` acts take their fixed steps, with no draw, so the rest of the script
+/// stays as it was; a forced, placed or required act on such a step moves to the nearest earlier
+/// step that holds a drawn act.
 fn actor_script(
     rng: &mut Rng,
     cfg: &Config,
@@ -769,6 +815,7 @@ fn actor_script(
     forced: Vec<(Act, usize)>,
     placed: Vec<Placed>,
     required: Vec<Act>,
+    late: Vec<(Act, usize)>,
 ) -> Vec<Act> {
     let weights = if cfg.is_reviewer(me) {
         REVIEWER_WEIGHTS
@@ -817,6 +864,22 @@ fn actor_script(
         let at = free.swap_remove(rng.below(free.len()));
         acts[at] = act;
     }
+    // what is left of `free` holds drawn acts
+    let mut drawn: BTreeSet<usize> = free.into_iter().collect();
+    let steps: Vec<usize> = late.iter().map(|(_, at)| *at).collect();
+    for (act, at) in late {
+        let old = std::mem::replace(&mut acts[at], act);
+        if !drawn.remove(&at) {
+            let to = drawn
+                .range(..at)
+                .rev()
+                .copied()
+                .find(|s| !steps.contains(s))
+                .expect("a script with a late act holds an earlier drawn act");
+            drawn.remove(&to);
+            acts[to] = old;
+        }
+    }
     acts
 }
 
@@ -835,7 +898,8 @@ fn actor_script(
 /// person's acceptance on a fixed odd act; and the forced UI sequences of `ui_plan`, on fixed odd
 /// acts of the person. It also holds the forced include sequence of
 /// `include_plan` (a source claim, an include of it, then an exclude of it), on fixed steps
-/// placed with the forced check steps.
+/// placed with the forced check steps; and the forced advice sequence of `advice_steps`, which
+/// gives the person's tail `AcceptAdvice` an advised proposal to accept.
 ///
 /// Panics when `cfg.steps` is below `MIN_STEPS`.
 pub fn script(cfg: &Config) -> Script {
@@ -874,6 +938,7 @@ pub fn script(cfg: &Config) -> Script {
     let contra_areas: Vec<&'static str> = contra.iter().map(|_| area(&mut master)).collect();
     let plan = check_plan(cfg);
     let include = include_plan(cfg);
+    let advice = advice_steps(cfg);
     let mut agents = Vec::with_capacity(cfg.agents);
     for me in 0..cfg.agents {
         let mut rng = Rng::new(master.next());
@@ -919,7 +984,24 @@ pub fn script(cfg: &Config) -> Script {
         }
         let mut forced = forced_acts(plan.as_ref(), me);
         forced.extend(include_acts(include.as_ref(), me));
-        agents.push(actor_script(&mut rng, cfg, me, forced, placed, required));
+        // pair 0 is even, so a reviewer advises on it; the first reviewer judges
+        let mut late = vec![];
+        if let (Some(a), Some((first, second))) = (&advice, contra.first()) {
+            if *second == me {
+                let claim = Act::AdviceClaim {
+                    first: *first,
+                    area: contra_areas[0],
+                };
+                late.push((claim, a.claim));
+                late.push((Act::AdviceProposal, a.propose));
+            }
+            if (0..cfg.agents).find(|&i| cfg.is_reviewer(i)) == Some(me) {
+                late.push((Act::ReviewAll, a.review));
+            }
+        }
+        agents.push(actor_script(
+            &mut rng, cfg, me, forced, placed, required, late,
+        ));
     }
     Script {
         agents,

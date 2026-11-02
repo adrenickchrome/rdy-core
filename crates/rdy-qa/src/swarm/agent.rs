@@ -57,7 +57,9 @@
 use super::journal::{CheckFacts, Entry, InboxRead, Journal, Outcome, Skip, allowed};
 use super::project::{FIXTURE_KEY, FIXTURE_RULE, SeedBlocks, SwarmProject};
 use super::run::{self, Watch};
-use super::script::{AREAS, Act, CHECK_REASON, Config, HoldStep, Pick, RuleStep, SEED_BLOCKS};
+use super::script::{
+    ADVICE_VIEW_SUFFIX, AREAS, Act, CHECK_REASON, Config, HoldStep, Pick, RuleStep, SEED_BLOCKS,
+};
 use crate::mcp::{McpClient, Reply};
 use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
@@ -92,6 +94,8 @@ pub(crate) const KINDS: [&str; 10] = [
 /// The most review requests one `ReviewNext` act judges (ruling task-5.2: the reviewers keep up
 /// with the queue in a run, so a contradiction pair is judged before the run ends).
 pub const REVIEW_BATCH: usize = 16;
+/// The most requests a `ReviewAll` act judges (a hang guard).
+const REVIEW_ALL_MAX: usize = 10_000;
 
 /// The daemon generation, shared by the run and every actor. The run calls `restarted` once the
 /// killed daemon is gone and the next client may start a new one.
@@ -1196,6 +1200,7 @@ impl Agent {
         let reads_first = matches!(
             act,
             Act::Propose
+                | Act::AdviceProposal
                 | Act::Include { .. }
                 | Act::Exclude { .. }
                 | Act::WriteNoBrief { .. }
@@ -1212,7 +1217,10 @@ impl Agent {
         // does a forced check step, which proposes
         let proposes = matches!(
             act,
-            Act::Propose | Act::CheckRun { rule: Some(_) } | Act::CheckRequest { hold: Some(_) }
+            Act::Propose
+                | Act::AdviceProposal
+                | Act::CheckRun { rule: Some(_) }
+                | Act::CheckRequest { hold: Some(_) }
         );
         let act_turn = (!proposes).then(|| gate.act_turn());
         let mut accepted = None;
@@ -1251,6 +1259,9 @@ impl Agent {
             Act::CheckRequest { hold: None } => self.check_request(),
             Act::CheckRequest { hold: Some(step) } => self.hold_step(*step),
             Act::CheckSubmit => self.check_submit(),
+            Act::AdviceClaim { first, area } => self.advice_claim(*first, area),
+            Act::ReviewAll => self.review_all(),
+            Act::AdviceProposal => self.advice_proposal(),
         }
         // a version the policy accepts the agent lands in the landing turn, which waits for
         // every read turn: its own ends first
@@ -2273,6 +2284,66 @@ impl Agent {
                 return;
             }
         }
+    }
+
+    /// The forced advice sequence's review: judges free review requests until none is left. The
+    /// agents wait at the step barrier, so the writes that make requests stop (`REVIEW_ALL_MAX` is
+    /// a hang guard).
+    fn review_all(&mut self) {
+        for _ in 0..REVIEW_ALL_MAX {
+            if !self.review_one() {
+                return;
+            }
+        }
+    }
+
+    /// The forced advice sequence's claim: a claim marked as pair 0 is, in the agent's advice view,
+    /// under the pair's section. A section offers a reviewer only its nearest blocks, so once
+    /// the first claim has landed the claim references it: a reference ranks first among the
+    /// pairs a change makes, so the pair is judged however full the section is.
+    fn advice_claim(&mut self, first: usize, area: &str) {
+        let first_view = format!("a{first}-k{}", spell(0));
+        let entries = self.link.journal.entries();
+        let in_first = |e: &&Entry| e.view.as_deref() == Some(first_view.as_str());
+        let landed = entries.iter().filter(in_first).any(|e| {
+            (e.act == "land" && e.outcome == Outcome::Ok)
+                || (e.act == run::LAND_FOUND && e.reply.is_some())
+        });
+        let cited = entries
+            .iter()
+            .filter(in_first)
+            .find(|e| e.act == "create" && e.outcome == Outcome::Ok)
+            .and_then(|e| e.block.clone())
+            .filter(|_| landed);
+        let against = cited.map_or(String::new(), |id| format!(", against {{{{{id}}}}}"));
+        let body = format!(
+            "Agent {} rules on when settlement is at once{against}. CONTRA-0",
+            self.name()
+        );
+        let k = AREAS.iter().position(|a| *a == area).unwrap_or(0);
+        let section = self.seed.sections[k].clone();
+        let ops = json!([{"op": "create", "type": "claim", "id": "$n", "parent": section,
+            "body": body}]);
+        let view = format!("a{}{ADVICE_VIEW_SUFFIX}", self.i);
+        let mut e = self.view_entry("create");
+        e.view = Some(view.clone());
+        // a write in the advice view is not a write in the agent's own view
+        let own = (self.wrote, self.mine.clone());
+        let res = self.briefed_write(e, "create", &[section], ops, k, true);
+        (self.wrote, self.mine) = own;
+        if !matches!(res, Res::Refused(..)) {
+            self.report.views.insert(view);
+        }
+    }
+
+    /// The forced advice sequence's proposal. It never lands by the policy: the person accepts
+    /// the advice on it first.
+    fn advice_proposal(&mut self) {
+        let view = format!("a{}{ADVICE_VIEW_SUFFIX}", self.i);
+        if !self.report.views.contains(&view) {
+            return self.skip("propose", Skip::NothingToPropose);
+        }
+        self.propose_view(&view);
     }
 
     /// One review: whether a case was leased and judged.
