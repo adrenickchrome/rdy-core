@@ -376,7 +376,6 @@ fn hsa8_auth_claims_belong_to_each_session() {
     let mut hub = Server::start();
     let o = hub.origin().to_string();
     configure(home.path(), &[(&o, hub.ca_pem())]);
-    let (_p, mut c) = chat(home.path());
     let hash = Hash::of(card(&o, MACHINE).as_bytes()).to_string();
     let cancel = |evidence: Option<&str>| {
         let mut a = json!({"op": "start", "install": o, "machine_name": MACHINE,
@@ -392,7 +391,8 @@ fn hsa8_auth_claims_belong_to_each_session() {
     );
     // a human actor cannot open an MCP session (D-ME2C0): MCP is an agent surface, so a
     // session named after the person is refused, and the person's words come only by relay
-    let r = c.call(
+    let (_p0, mut c0) = chat(home.path());
+    let r = c0.call(
         "rdy_session",
         json!({"actor": "human:qa", "run": null, "role": "writer"}),
     );
@@ -403,25 +403,8 @@ fn hsa8_auth_claims_belong_to_each_session() {
             "an agent session cannot claim a human actor".into()
         )
     );
-    // each call is checked as the session that makes it
-    for (actor, run) in [
-        ("agent:one", Some("r1")),
-        ("agent:two", Some("r2")),
-        ("agent:one", None),
-    ] {
-        session(&mut c, actor, run);
-        assert_eq!(refused(auth(&mut c, cancel(None))), no_words, "{actor}");
-        assert_eq!(
-            ok(auth(&mut c, cancel(Some("no, not now"))))["state"],
-            "cancelled",
-            "{actor}"
-        );
-        // state claims the caller's own actor
-        let r = auth(&mut c, json!({"op": "state", "install": o}));
-        assert_eq!(ok(r)["state"], "signed_out", "{actor}");
-    }
     // an actor outside rdy's actor form cannot open a session, so it never reaches a hub claim
-    let r = c.call(
+    let r = c0.call(
         "rdy_session",
         json!({"actor": "qa-bot", "run": "r3", "role": "writer"}),
     );
@@ -432,8 +415,30 @@ fn hsa8_auth_claims_belong_to_each_session() {
             "the actor \"qa-bot\" is not in rdy's actor form".into()
         )
     );
+    // each call is checked as the session that makes it; a stdio connection is bound to its
+    // first actor and run (D-4PHYQ), so each actor and run has its own connection
+    let mut chats = Vec::new();
+    for (actor, run) in [
+        ("agent:one", Some("r1")),
+        ("agent:two", Some("r2")),
+        ("agent:one", None),
+    ] {
+        let (p, mut c) = chat(home.path());
+        session(&mut c, actor, run);
+        assert_eq!(refused(auth(&mut c, cancel(None))), no_words, "{actor}");
+        assert_eq!(
+            ok(auth(&mut c, cancel(Some("no, not now"))))["state"],
+            "cancelled",
+            "{actor}"
+        );
+        // state claims the caller's own actor
+        let r = auth(&mut c, json!({"op": "state", "install": o}));
+        assert_eq!(ok(r)["state"], "signed_out", "{actor}");
+        chats.push((p, c));
+    }
     // a confirmed start by one agent leaves the session that agent: the next answer without
     // words is still refused, and the relay's person never becomes the caller
+    let (_p, mut c) = chats.swap_remove(1);
     session(&mut c, "agent:two", Some("r2"));
     queue_start(&mut hub);
     let mut confirm = cancel(Some("yes, sign in"));
