@@ -1487,6 +1487,7 @@
               "score": "number",
               "similar_kinds": []
             },
+            "daemon": "null",
             "landings": "number",
             "open_report": {
               "catch_up_commits": "number",
@@ -14374,6 +14375,7 @@
       "E_WC_SUPPORTING": "\"E_WC_SUPPORTING\"",
       "W_BRIEF_STALE": "\"W_BRIEF_STALE\"",
       "W_CARD_WORDS": "\"W_CARD_WORDS\"",
+      "W_DAEMON_BUILD": "\"W_DAEMON_BUILD\"",
       "W_DIAGRAM_FAILED": "\"W_DIAGRAM_FAILED\"",
       "W_DIAGRAM_INVALID": "\"W_DIAGRAM_INVALID\"",
       "W_DIAGRAM_UNSUPPORTED": "\"W_DIAGRAM_UNSUPPORTED\"",
@@ -14400,6 +14402,11 @@
       "W_WC_KEPT": "\"W_WC_KEPT\"",
       "W_WC_UNSTAGED_MOVE": "\"W_WC_UNSTAGED_MOVE\"",
       "W_WC_UNTRACKED": "\"W_WC_UNTRACKED\""
+    },
+    "daemon_build_warning": {
+      "code": "W_DAEMON_BUILD",
+      "fix": "close the other clients; the daemon then restarts on this build. Or run rdy serve --stop",
+      "message": "the running daemon is another build of rdy 1.2.3 (0123456789abcdef); this client is build fedcba9876543210"
     },
     "envelope": {
       "code": "string",
@@ -14522,6 +14529,11 @@
         "E_DAEMON_VERSION",
         "another binary version's daemon has clients",
         "close them, or rdy serve --stop"
+      ],
+      [
+        "W_DAEMON_BUILD",
+        "the running daemon is another build of rdy <version> (<daemon build>); this client is build <build>",
+        "close the other clients; the daemon then restarts on this build. Or run rdy serve --stop"
       ],
       [
         "E_DAEMON_GONE",
@@ -15441,6 +15453,7 @@
       "W_RULE_CHECK",
       "E_DAEMON_START",
       "E_DAEMON_VERSION",
+      "W_DAEMON_BUILD",
       "E_DAEMON_GONE",
       "E_BRIEF_REQUIRED",
       "E_BRIEF_STALE",
@@ -16424,6 +16437,7 @@
             "score": "number",
             "similar_kinds": []
           },
+          "daemon": "null",
           "open_report": {
             "catch_up_commits": "number",
             "caught_up_frames": "number",
@@ -17625,6 +17639,10 @@
               "when": "string"
             },
             "W_CONFIG_UNKNOWN": {
+              "fix": "string",
+              "when": "string"
+            },
+            "W_DAEMON_BUILD": {
               "fix": "string",
               "when": "string"
             },
