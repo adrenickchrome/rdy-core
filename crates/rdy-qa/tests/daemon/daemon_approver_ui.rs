@@ -898,11 +898,11 @@ fn ui9_moved_and_held_cards_cannot_land() {
         chain + 1,
         "only the role's landing: {page}"
     );
-    // the policy moved the card, and the fresh card refuses this person: the original refusal
-    // and the corrected card's text, with no form
+    // the policy moved the card out of this person's queue: its refusal names no fresh card, so
+    // the page is the refusal alone, with no form
     assert_refused(&r, 409, "E_PROPOSAL_MOVED", "a changed role");
     assert!(http::ui_forms(&page).is_empty(), "no form: {page}");
-    assert!(page.contains("ui-card-text"), "the corrected card: {page}");
+    assert!(!page.contains("ui-card-text"), "no card: {page}");
     drop(s);
 
     // a removal between the form and the answer: nothing lands, and the page shows no removed text
