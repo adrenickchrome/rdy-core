@@ -524,7 +524,7 @@ fn ok3_assessment_is_full_and_canonical() {
         a.validate().unwrap();
     }
     assert_eq!(DIMENSIONS.len(), 6);
-    assert_eq!(ISSUE_CODES.len(), 12);
+    assert_eq!(ISSUE_CODES.len(), 14);
     assert_eq!(TENSION_KINDS.len(), 10);
     assert_eq!(PLAN_KINDS.len(), 6);
 
@@ -694,6 +694,26 @@ fn ok3_assessment_is_full_and_canonical() {
     a.reach = vec![id(2), id(1)];
     let _ = a.validate();
     assert_eq!(a.reach, vec![id(2), id(1)]);
+}
+
+/// nb4 (D-YXBXH): an assessment may hold a `crowded_level` or `question_as_prose` row, in its
+/// issues and its confidence reasons; each is written and read back unchanged.
+#[test]
+fn nb4_assessment_holds_the_two_complete_issue_codes() {
+    for code in ["crowded_level", "question_as_prose"] {
+        let mut a = full();
+        a.issues[0].code = code.into();
+        a.issues[0].dimension = "complete".into();
+        a.confidence.reasons = vec![a.issues[0].clone()];
+        a.validate().unwrap_or_else(|e| panic!("{code}: {e}"));
+        let bytes = postcard::to_allocvec(&a).unwrap();
+        let back: Assessment = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(back, a, "{code}");
+        back.validate().unwrap();
+        let yaml = serde_yaml_ng::to_string(&a).unwrap();
+        assert!(yaml.contains(code), "{code}");
+        assert_eq!(serde_yaml_ng::from_str::<Assessment>(&yaml).unwrap(), a);
+    }
 }
 
 #[test]

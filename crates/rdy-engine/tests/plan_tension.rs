@@ -23,8 +23,8 @@ use rdy_engine::{
     Coverage, E_BAD_INPUT, E_PLAN_ITEM, E_PLAN_OPEN, E_PROPOSAL_NOT_READY, ProposalInfo, Rdy,
     RdyError, Scope, Session, WriteRequest, WriteResult, parse_ops,
 };
-use rdy_model::plan::{PlanAct, PlanKind, PlanOutcome};
-use rdy_model::{EditorialClass, Justification, Role};
+use rdy_model::plan::{PlanAct, PlanKind, PlanOutcome, item_display, item_hash};
+use rdy_model::{BlockId, EditorialClass, Justification, Role};
 use rdy_schema::{Issue, Severity};
 use serde_json::{Value, json};
 use std::path::Path;
@@ -181,14 +181,57 @@ fn codes(issues: &[Issue]) -> Vec<&'static str> {
     issues.iter().map(|i| i.code).collect()
 }
 
+/// The `W_PLAN_OPEN` issue for `n` open items on drafts.
+fn advised(n: usize) -> Issue {
+    Issue {
+        severity: Severity::Warning,
+        code: W_PLAN_OPEN,
+        block: None,
+        message: format!("{n} change-plan items are open"),
+        fix: PLAN_OPEN_FIX.into(),
+    }
+}
+
+/// The `neighbor` confirm item of `cause` on `subject` (nb8, D-YXBXH).
+fn neighbor(cause: &str, subject: &str) -> String {
+    item_display(&item_hash(
+        &BlockId::parse(cause).unwrap(),
+        subject,
+        PlanKind::Confirm,
+    ))
+}
+
+/// The ids of the open items of `summary` that are not tension items, sorted.
+fn open_non_tension(summary: &PlanSummary) -> Vec<String> {
+    let mut ids: Vec<String> = summary
+        .items
+        .iter()
+        .filter(|i| i.kind != PlanKind::Tension && i.state == ItemState::Open)
+        .map(|i| i.id.clone())
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// The section confirms a new claim `y` in the draft section `n` owes (nb8, TASK-978 X2): one
+/// each for its unchanged baseline siblings `da` and `dp`, sorted.
+fn draft_section_confirms(fx: &Fx, y: &str) -> Vec<String> {
+    let mut ids = vec![neighbor(y, &fx.da), neighbor(y, &fx.dp)];
+    ids.sort();
+    ids
+}
+
 /// Canon: a stable doc (claim `a` and claim `p`, which states a's literal and references it), a
 /// draft doc (the same pair, `da` and `dp`, and a section `n` to write into), and a deprecated
-/// doc holding claim `x`.
+/// doc holding claim `x`. Since nb8 a text edit of `a` or `da` also owes its section sibling a
+/// `neighbor` confirm, and a claim created in `n` owes `da` and `dp` one each.
 struct Fx {
     _dir: tempfile::TempDir,
     r: Rdy,
     a: String,
+    p: String,
     da: String,
+    dp: String,
     n: String,
     x: String,
     legacy: String,
@@ -221,7 +264,9 @@ fn project() -> Fx {
     let id = |k: &str| w.created[k].clone();
     Fx {
         a: id("$a"),
+        p: id("$p"),
         da: id("$da"),
+        dp: id("$dp"),
         n: id("$n"),
         x: id("$x"),
         legacy: id("$ld"),
@@ -284,7 +329,7 @@ fn rg5_an_advisory_tension_of_the_version_is_a_tension_item_shown_by_its_tn_id()
 #[test]
 fn rg5_a_tension_item_takes_confirm_or_dismiss_with_a_reason() {
     let mut fx = project();
-    cite_deprecated(&mut fx, "a", "Y follows");
+    let y = cite_deprecated(&mut fx, "a", "Y follows");
     let tn = tension_label(&one_tension(&fx.r, "a").id);
 
     // defer does not answer it
@@ -339,10 +384,15 @@ fn rg5_a_tension_item_takes_confirm_or_dismiss_with_a_reason() {
         plan["counts"]["by_kind"]["tension"],
         json!({"open": 0, "closed": 1, "deferred": 0})
     );
-    // the propose summary has no open tension item, and the gate has nothing
+    // the propose summary has no open tension item, and the gate has no E_PLAN_OPEN: only the
+    // draft section confirms y owes (nb8) stay open, as advice
     let info = propose(&mut fx.r, "a");
     assert!(tension_items(&info.plan).is_empty(), "{:#?}", info.plan);
-    assert_eq!(plan_issues(&info.plan), vec![]);
+    assert_eq!(
+        open_non_tension(&info.plan),
+        draft_section_confirms(&fx, &y)
+    );
+    assert_eq!(plan_issues(&info.plan), vec![advised(2)]);
 }
 
 #[test]
@@ -375,8 +425,23 @@ fn rg5_an_open_item_on_stable_content_is_e_plan_open() {
     let a = fx.a.clone();
     edit_stable(&mut fx.r, "a", &a, "A holds 60 days.");
     let info = propose(&mut fx.r, "a");
-    assert_eq!(info.plan.open, 1, "{:#?}", info.plan);
-    assert_eq!(info.plan.items[0].kind, PlanKind::Update);
+    // p's update, and (nb8) p's section confirm, both on stable content
+    assert_eq!(info.plan.open, 2, "{:#?}", info.plan);
+    let mut kinds: Vec<(PlanKind, &str)> = info
+        .plan
+        .items
+        .iter()
+        .map(|i| (i.kind, i.edge.as_str()))
+        .collect();
+    kinds.sort_by_key(|(k, _)| k.as_str());
+    assert_eq!(
+        kinds,
+        [
+            (PlanKind::Confirm, "neighbor"),
+            (PlanKind::Update, "references")
+        ]
+    );
+    assert!(info.plan.items.iter().all(|i| i.subject == fx.p));
     let issues = plan_issues(&info.plan);
     assert_eq!(
         issues,
@@ -384,7 +449,7 @@ fn rg5_an_open_item_on_stable_content_is_e_plan_open() {
             severity: Severity::Error,
             code: E_PLAN_OPEN,
             block: None,
-            message: "1 change-plan items are open".into(),
+            message: "2 change-plan items are open".into(),
             fix: E_PLAN_OPEN_FIX.into(),
         }]
     );
@@ -401,42 +466,47 @@ fn rg5_an_open_item_on_a_draft_stays_w_plan_open() {
         json!([{"op": "update", "id": da, "body": "Drafts stay open for 90 hours."}]),
     );
     let info = propose(&mut fx.r, "a");
-    assert_eq!(info.plan.open, 1, "{:#?}", info.plan);
-    let issues = plan_issues(&info.plan);
-    assert_eq!(
-        issues,
-        vec![Issue {
-            severity: Severity::Warning,
-            code: W_PLAN_OPEN,
-            block: None,
-            message: "1 change-plan items are open".into(),
-            fix: PLAN_OPEN_FIX.into(),
-        }]
+    // dp's update, and (nb8) dp's section confirm, both on drafts
+    assert_eq!(info.plan.open, 2, "{:#?}", info.plan);
+    assert!(
+        info.plan
+            .items
+            .iter()
+            .any(|i| i.id == neighbor(&fx.da, &fx.dp)),
+        "{:#?}",
+        info.plan
     );
+    let issues = plan_issues(&info.plan);
+    assert_eq!(issues, vec![advised(2)]);
     assert!(!codes(&issues).contains(&E_PLAN_OPEN));
 }
 
 #[test]
 fn rg5_an_unanswered_tension_item_blocks_a_draft_too() {
     let mut fx = project();
-    cite_deprecated(&mut fx, "a", "Y follows");
+    let y = cite_deprecated(&mut fx, "a", "Y follows");
     let info = propose(&mut fx.r, "a");
     assert_eq!(tension_items(&info.plan).len(), 1, "{:#?}", info.plan);
-    assert!(
-        info.plan.items.iter().all(|i| i.kind == PlanKind::Tension),
-        "the draft claim owes nothing else: {:#?}",
+    assert_eq!(
+        open_non_tension(&info.plan),
+        draft_section_confirms(&fx, &y),
+        "the draft claim owes nothing else but its section confirms (nb8): {:#?}",
         info.plan
     );
+    // the tension item blocks; the draft section confirms only advise
     let issues = plan_issues(&info.plan);
     assert_eq!(
         issues,
-        vec![Issue {
-            severity: Severity::Error,
-            code: E_PLAN_OPEN,
-            block: None,
-            message: "1 change-plan items are open".into(),
-            fix: E_PLAN_OPEN_FIX.into(),
-        }]
+        vec![
+            Issue {
+                severity: Severity::Error,
+                code: E_PLAN_OPEN,
+                block: None,
+                message: "1 change-plan items are open".into(),
+                fix: E_PLAN_OPEN_FIX.into(),
+            },
+            advised(2)
+        ]
     );
 }
 
@@ -461,12 +531,17 @@ fn rg5_the_gate_counts_items_past_the_summary_cut() {
     let a = w.created["$a"].clone();
     edit_stable(&mut r, "a", &a, "A holds 60 days.");
     let info = propose(&mut r, "a");
-    assert_eq!(info.plan.open, n, "{:#?}", info.plan.by_kind);
+    // each p owes an update and (nb8) a section confirm
+    let open = 2 * n;
+    assert_eq!(info.plan.open, open, "{:#?}", info.plan.by_kind);
     assert_eq!(info.plan.items.len(), PLAN_SUMMARY_ITEMS);
-    assert_eq!(info.plan.items_omitted, n - PLAN_SUMMARY_ITEMS);
+    assert_eq!(info.plan.items_omitted, open - PLAN_SUMMARY_ITEMS);
     let issues = plan_issues(&info.plan);
     assert_eq!(codes(&issues), [E_PLAN_OPEN]);
-    assert_eq!(issues[0].message, format!("{n} change-plan items are open"));
+    assert_eq!(
+        issues[0].message,
+        format!("{open} change-plan items are open")
+    );
 }
 
 // ---- code items (D-ERKCP) ----
@@ -742,7 +817,7 @@ fn rg5_an_in_flight_tension_needs_the_authors_answer() {
     let mut fx = project();
     // view b deprecates the legacy doc in flight; view a cites its claim
     deprecate_legacy(&mut fx, "b");
-    cite_legacy(&mut fx, "a");
+    let y = cite_legacy(&mut fx, "a");
     // the tension is open in flight (b's deprecation); the version's landing form has none
     assert!(deprecated_refs(&fx.r, "a").is_empty());
     let inflight = inflight_refs(&fx.r, "a");
@@ -758,9 +833,15 @@ fn rg5_an_in_flight_tension_needs_the_authors_answer() {
     assert!(rows[0].get("how").is_none(), "{plan:#}");
     let info = propose(&mut fx.r, "a");
     assert_eq!(tension_items(&info.plan).len(), 1, "{:#?}", info.plan);
+    // the tension item blocks; y's draft section confirms (nb8) only advise
+    assert_eq!(
+        open_non_tension(&info.plan),
+        draft_section_confirms(&fx, &y)
+    );
     let issues = plan_issues(&info.plan);
-    assert_eq!(codes(&issues), [E_PLAN_OPEN], "{issues:?}");
+    assert_eq!(codes(&issues), [E_PLAN_OPEN, W_PLAN_OPEN], "{issues:?}");
     assert_eq!(issues[0].message, "1 change-plan items are open");
+    assert_eq!(issues[1], advised(2));
 
     // after the author's confirm the version is ready, and the seal holds the confirm
     answer(
@@ -773,7 +854,7 @@ fn rg5_an_in_flight_tension_needs_the_authors_answer() {
     .unwrap();
     let info = propose(&mut fx.r, "a");
     assert!(tension_items(&info.plan).is_empty(), "{:#?}", info.plan);
-    assert_eq!(plan_issues(&info.plan), vec![]);
+    assert_eq!(plan_issues(&info.plan), vec![advised(2)]);
     common::confirm_exceptions(&mut fx.r, &approver(), &info);
     let landing = fx.r.land(&approver(), &info.id).unwrap();
     let seal = sealed(&fx.r, &landing);
@@ -867,7 +948,7 @@ fn rg5_an_unanswered_tension_item_refuses_the_landing() {
 #[test]
 fn rg5_a_reviewer_dismissal_removes_the_item() {
     let mut fx = project();
-    cite_deprecated(&mut fx, "a", "Y follows");
+    let y = cite_deprecated(&mut fx, "a", "Y follows");
     let tn = tension_label(&one_tension(&fx.r, "a").id);
     assert_eq!(rows_of_kind(&whole(&fx.r, "a"), "tension").len(), 1);
     fx.r.dismiss_tension(&reviewer(), &tn, "Y cites it as history")
@@ -876,7 +957,12 @@ fn rg5_a_reviewer_dismissal_removes_the_item() {
     assert!(rows_of_kind(&plan, "tension").is_empty(), "{plan:#}");
     let info = propose(&mut fx.r, "a");
     assert!(tension_items(&info.plan).is_empty(), "{:#?}", info.plan);
-    assert_eq!(plan_issues(&info.plan), vec![]);
+    // only y's draft section confirms (nb8) stay open, as advice
+    assert_eq!(
+        open_non_tension(&info.plan),
+        draft_section_confirms(&fx, &y)
+    );
+    assert_eq!(plan_issues(&info.plan), vec![advised(2)]);
 }
 
 /// The queue's `not_ready` row of version `pref`, if it has one, and whether its approve item
@@ -907,12 +993,17 @@ fn queue_state(r: &Rdy, pref: &str) -> (Option<Vec<Issue>>, bool) {
 fn rg8_a_later_in_flight_write_leaves_a_ready_version_ready() {
     let mut fx = project();
     // a cites the deprecated x (a tension item it answers) and the legacy claim lx (no tension)
-    cite_deprecated(&mut fx, "a", "Z follows");
+    let z = cite_deprecated(&mut fx, "a", "Z follows");
     let y = cite_legacy(&mut fx, "a");
     let answered = common::answer_open_items(&mut fx.r, &writer(), "a");
     assert_eq!(answered.len(), 1, "{answered:#?}");
     let info = propose(&mut fx.r, "a");
-    assert_eq!(plan_issues(&info.plan), vec![]);
+    // the draft section confirms the two new claims owe (nb8) stay open, as advice
+    let mut confirms = draft_section_confirms(&fx, &z);
+    confirms.extend(draft_section_confirms(&fx, &y));
+    confirms.sort();
+    assert_eq!(open_non_tension(&info.plan), confirms);
+    assert_eq!(plan_issues(&info.plan), vec![advised(4)]);
     assert_eq!(queue_state(&fx.r, &info.r#ref), (None, true));
     let pref = fx.r.resolve_proposal(&info.r#ref).unwrap();
     // the propose stored the version's assessment, with its one tension row

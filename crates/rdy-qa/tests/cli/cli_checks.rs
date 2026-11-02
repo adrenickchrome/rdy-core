@@ -10,7 +10,7 @@ use rdy_qa::daemon::Served;
 use rdy_qa::edit_loop::{Spec, spec_doc};
 use rdy_qa::fixtures::{land, parse_test_ops, writer};
 use rdy_qa::intake::{PERSON, TEST_SUMMARY};
-use rdy_qa::mcp::McpClient;
+use rdy_qa::mcp::{McpClient, Reply};
 use rdy_qa::packs::QA_PACK_YAML;
 use rdy_qa::tensions::{ag, created, j_typo, put_j, try_decide_in, upd};
 use serde_json::{Value, json};
@@ -1233,4 +1233,84 @@ fn ck9_late_verdict_refuses_the_old_cli_card() {
     );
     assert_eq!(done["ref"], v.pref.as_str(), "{done}");
     assert!(done["landing"].is_object(), "{done}");
+}
+
+/// D-91DEW (KNOWN-ISSUES 242): `rdy answer --all-recommended` and `rdy_answer
+/// {all_recommended}` refuse an approve card that shows a concern no person accepted as a
+/// whole, before anything is answered: E_BAD_INPUT '<ref> has no recommended option', fix
+/// 'answer it on its own'. The card both surfaces print has no `Why recommended:` line.
+#[test]
+fn ki242_cli_and_mcp_all_recommended_refuse_an_open_verdict_card() {
+    let s = Served::new();
+    let mut r = Rdy::open(s.dir.path()).unwrap();
+    let spec = spec_doc(&mut r);
+    put_j(&mut r, "b", upd(&spec.b, "B holds, now."), j_typo());
+    let clean = r
+        .propose(&ag("b"), "b", "b", Some(TEST_SUMMARY))
+        .expect("propose b");
+    put_j(&mut r, "a", upd(&spec.c, "C stands alone!"), j_typo());
+    let held = r
+        .propose(&ag("a"), "a", "a", Some(TEST_SUMMARY))
+        .expect("propose a");
+    assert!(clean.ready && held.ready);
+    r.close().unwrap();
+    let mut a = client(&s, "agent:a", "a", "writer");
+    let mut rv = client(&s, "agent:r", "r", "reviewer");
+    review_of(&mut a, &mut rv, &held.r#ref, "concern", &spec.c);
+    let pending = cli_json(&s, None, &["pending"]);
+    let card = approve_item(&pending, &held.r#ref);
+    assert!(
+        card["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|o| o.get("recommended").is_none_or(Value::is_null)),
+        "{card}"
+    );
+    assert_eq!(card["options"][0]["id"], "approve", "{card}");
+    assert!(
+        !card["card"].as_str().unwrap().contains("Why recommended:"),
+        "{card}"
+    );
+    let head = cli_json(&s, None, &["log", "--limit", "1"])[0]["landing"].clone();
+    let want_message = format!("{} has no recommended option", held.r#ref);
+    // the command line
+    let refused = cli_refused(
+        &s,
+        None,
+        &["answer", "--all-recommended", &clean.r#ref, &held.r#ref],
+    );
+    assert_eq!(refused["code"], "E_BAD_INPUT", "{refused}");
+    assert_eq!(refused["message"], want_message.as_str(), "{refused}");
+    assert_eq!(refused["fix"], "answer it on its own", "{refused}");
+    // the chat path
+    let clean_card = approve_item(&pending, &clean.r#ref);
+    let mut relay = client(&s, "agent:relay", "r1", "writer");
+    let reply = relay.call(
+        "rdy_answer",
+        json!({
+            "all_recommended": [
+                {"ref": clean.r#ref, "card_hash": clean_card["card_hash"]},
+                {"ref": held.r#ref, "card_hash": card["card_hash"]}
+            ],
+            "evidence": "Yes, all of them.",
+            "question": "Shall I approve them all?",
+            "session_ref": "chat-7"
+        }),
+    );
+    assert_eq!(reply.code(), Some("E_BAD_INPUT"), "{reply:?}");
+    let Reply::ToolError(e) = reply else {
+        unreachable!()
+    };
+    assert_eq!(e["message"], want_message.as_str(), "{e}");
+    assert_eq!(e["fix"], "answer it on its own", "{e}");
+    // nothing was answered: both cards stand and nothing landed
+    assert_eq!(
+        cli_json(&s, None, &["log", "--limit", "1"])[0]["landing"],
+        head
+    );
+    let after = cli_json(&s, None, &["pending"]);
+    assert_eq!(approve_item(&after, &clean.r#ref), clean_card);
+    assert_eq!(approve_item(&after, &held.r#ref), card);
+    drop((a, rv, relay));
 }

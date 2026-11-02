@@ -20,7 +20,7 @@
 //! The briefing (`will_go_stale` states) and the consequences (values and matched rows) are
 //! this module's callers.
 
-use crate::lexicon::{Lexicon, count_scan, is_enum_field};
+use crate::lexicon::{Lexicon, MentionSource, count_scan, is_enum_field};
 use crate::search::window;
 use crate::tensions::value::{
     MAX_UNIT_CHARS, number_literal_spans, stated_number_spans, value_number,
@@ -30,7 +30,7 @@ use rdy_model::entity::{
     MAX_NAME_WORDS, VALUE, code_literal_spans, lines_at, source_field, value_text, visit_leaves,
     visit_text_sources, words,
 };
-use rdy_model::{Block, BlockId, RefMode, RefSpan, ref_spans};
+use rdy_model::{Block, BlockId, RefMode, RefSpan, Tracking, ref_spans};
 use rdy_schema::Pack;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -73,12 +73,12 @@ struct Literal {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct LiteralSet(Vec<Literal>);
 
-#[cfg(test)]
 impl LiteralSet {
     pub(crate) fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.0.len()
     }
@@ -190,6 +190,33 @@ pub(crate) fn states(
     (out, ev.cut)
 }
 
+/// TASK-978 I1: whether `new` changes `old`'s text. A write changes a content block's text when
+/// a string leaf of its text fields changes, with each reference compared as its token and its
+/// display label (the stored leaf, before any rendering). Enum fields and store-only metadata
+/// (the [`visit_text_sources`] metadata fields and the pack's tracking fields) take no part. For
+/// a type whose body the text helpers skip (`code`), the stored body counts too. A move, an
+/// order change, a repin, a links-only edit, a lifecycle change or a tracking-field edit leaves
+/// the text equal.
+pub(crate) fn text_changed(pack: &Pack, t: &Tracking, old: &Block, new: &Block) -> bool {
+    text_leaves(pack, t, old) != text_leaves(pack, t, new)
+}
+
+/// The ordered (source name, stored leaf) pairs [`text_changed`] compares.
+fn text_leaves(pack: &Pack, t: &Tracking, b: &Block) -> Vec<(String, String)> {
+    let mut out = vec![];
+    visit_text_sources(b, &mut |name, text, _| {
+        let field = source_field(name);
+        if !is_enum_field(pack, &b.block_type, field) && !t.is_tracking(&b.block_type, field) {
+            out.push((name.to_string(), text.to_string()));
+        }
+        ControlFlow::Continue(())
+    });
+    if RefMode::for_body(&b.block_type) != RefMode::Strict {
+        out.push(("body".to_string(), b.body.clone()));
+    }
+    out
+}
+
 /// Literals in first-occurrence order, each identity once with its first spelling.
 #[derive(Default)]
 struct Distinct(Vec<Literal>, BTreeSet<LiteralIdentity>);
@@ -259,7 +286,8 @@ fn scan_target(
     if is_value && let (Some((number, unit)), Some(text)) = (value_number(b), value_text(b)) {
         found(LiteralIdentity::Number { number, unit }, &text);
     }
-    let mut source = |text: &str, mode: RefMode| scan_source(text, mode, &b.id, names, found);
+    let own = names.source(b);
+    let mut source = |text: &str, mode: RefMode| scan_source(text, mode, &own, names, found);
     if decision {
         for f in DECISION_FIELDS {
             if let Some(v) = b.fields.get(f)
@@ -289,7 +317,7 @@ fn scan_target(
 fn scan_source(
     text: &str,
     mode: RefMode,
-    own: &BlockId,
+    own: &MentionSource,
     names: &Lexicon,
     found: &mut dyn FnMut(LiteralIdentity, &str),
 ) {
@@ -396,7 +424,7 @@ fn unclosed_ref(text: &str, mode: RefMode) -> Option<usize> {
 /// word, or when some known phrase is longer than the whole words from there and starts with
 /// them (and with what the cut word begins with). A match that starts at or after the first
 /// such word is not accepted; every match before it is the full text's.
-fn settled_before(scan: &str, names: &Lexicon) -> usize {
+fn settled_before(scan: &str, names: &Lexicon, own: &MentionSource) -> usize {
     let ws = words(scan);
     let n = ws.len();
     let Some(last) = ws.last() else {
@@ -412,7 +440,7 @@ fn settled_before(scan: &str, names: &Lexicon) -> usize {
     let zone = (k + 1).saturating_sub(MAX_NAME_WORDS);
     // the phrases the scan takes that can cover a word from `zone` on: first word, word count
     let mut taken: BTreeMap<usize, usize> = BTreeMap::new();
-    names.visit_phrase_spans(scan, &mut |r| {
+    names.visit_phrase_spans(scan, own, &mut |r| {
         let first = ws.partition_point(|w| w.start < r.start);
         if first + MAX_NAME_WORDS > zone {
             let last = ws.partition_point(|w| w.end < r.end);
@@ -624,6 +652,7 @@ fn scan_dependent(
     let mut cut = false;
     let mut remaining = EVIDENCE_BYTES;
     let mut ordinal = 0;
+    let own = names.source(dep);
     visit_text_sources(dep, &mut |name, text, mode| {
         let source = ordinal;
         ordinal += 1;
@@ -646,15 +675,7 @@ fn scan_dependent(
             stated |= 1 << lit;
             rows.offer(name, line, start, end, lit, source, line_at);
         };
-        scan_prefix(
-            &text[..k],
-            mode,
-            here_cut,
-            &wanted,
-            &dep.id,
-            names,
-            &mut hit,
-        );
+        scan_prefix(&text[..k], mode, here_cut, &wanted, &own, names, &mut hit);
         if here_cut {
             ControlFlow::Break(())
         } else {
@@ -716,7 +737,7 @@ fn scan_prefix(
     mode: RefMode,
     cut: bool,
     wanted: &Wanted<'_>,
-    own: &BlockId,
+    own: &MentionSource,
     names: &Lexicon,
     hit: &mut dyn FnMut(usize, usize, usize, usize, usize),
 ) {
@@ -815,7 +836,7 @@ fn scan_prefix(
     }
     if !wanted.entities.is_empty() {
         let settled = if cut {
-            settled_before(scan, names)
+            settled_before(scan, names, own)
         } else {
             scan.len()
         };
@@ -1960,7 +1981,7 @@ mod tests {
         let mut seen = BTreeSet::new();
         let mut want = vec![];
         for (field, text) in text_in(&p, &dep) {
-            for (e, r) in names.mention_spans(&text, &dep.id) {
+            for (e, r) in names.mention_spans(&text, &dep) {
                 if seen.insert(e.clone()) {
                     want.push(Mention {
                         entity: e.to_string(),

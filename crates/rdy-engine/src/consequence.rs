@@ -4,13 +4,15 @@
 use crate::brief::{BRIEF_DEFAULT_TOKENS, FollowUp, expand_error, follow_up};
 use crate::consequence_literals::{
     LiteralMatch, LiteralSet, changed as changed_literals, changed_from, changed_many, evidence,
+    text_changed,
 };
 use crate::coverage::{coverage_change, coverage_error_text};
 use crate::engine::{Engine, write_typed};
-use crate::error::{E_CONFLICT_UNRESOLVED, E_INTERNAL, RdyError};
+use crate::error::{E_CONFLICT_UNRESOLVED, E_INTERNAL, E_LIMIT, RdyError};
 use crate::gate::{LandInfo, ProposalInfo, applied_ops, changes_of, landed_as};
 use crate::intent::IntentNote;
 use crate::lexicon::Lexicon;
+use crate::neighbors::{NeighborVia, neighbor_links, takes_part};
 use crate::tensions::delta::on_change;
 use crate::tensions::{SideRef, Tension, tension_label};
 use crate::tensions::{TensionDelta, tension_delta};
@@ -22,6 +24,7 @@ use rdy_graph::{
 use rdy_model::Tracking;
 use rdy_model::decision::{AFFECTS, DECISION, REFINES, REVOKES, SUPERSEDES};
 use rdy_model::{Block, BlockId, Hash, Link, Op, Proposal};
+use rdy_schema::Pack;
 use rdy_store::StoreError;
 use serde::Serialize;
 use std::cell::{OnceCell, RefCell};
@@ -237,6 +240,29 @@ pub const LINEAGE_DECISION_FIX: &str = "a decision that governs it was refined o
 /// any other route reaches without a suspect on the cause (a `describes` link, a premise edge
 /// with no pin): a `reaffirm` op would be refused, as there is no suspect to re-affirm.
 pub const REACH_CONFIRM_FIX: &str = "a block it relies on changed: check that it still holds, and supersede it if not; no repin is needed";
+
+/// D-YXBXH: the edge of a neighbor entry and a neighbor plan item.
+pub const NEIGHBOR_EDGE: &str = "neighbor";
+
+/// D-YXBXH: the hint on a section neighbor's `confirm` entry. The neighbor has no pin on the
+/// changed block, so it is never asked to repin.
+pub const NEIGHBOR_SECTION_FIX: &str = "a block in its section changed: check that it still holds, and update it if not; no repin is needed";
+
+/// D-YXBXH: the hint on an entity neighbor's `update` entry, which states a removed literal.
+pub const NEIGHBOR_ENTITY_FIX: &str = "update the block for the removed values";
+
+/// The most neighbor cause/subject pairs one write report or one net proposal may hold
+/// (TASK-978 O2): past it, the whole read is `E_LIMIT`, never a cut set.
+pub const MAX_NEIGHBOR_PAIRS: usize = 100_000;
+
+/// The refusal of more than `n` neighbor cause/subject pairs.
+fn neighbor_limit_error(n: usize) -> RdyError {
+    RdyError::new(
+        E_LIMIT,
+        format!("change exceeds {n} neighbor consequences"),
+        "split the change into smaller proposals",
+    )
+}
 
 /// FW-LP6: for each decision `ops` create, each `refines` link and each `supersedes` link with a
 /// part: (the new decision, the target, the link's name). In op order, then link order. The
@@ -508,16 +534,20 @@ enum Baseline<'a> {
         read: OnceCell<(Arc<Materialized>, Arc<Lexicon>)>,
     },
     Empty,
-    /// A state already read: its blocks and their names (a change plan's canon baseline).
+    /// A state already read: its blocks, their graph and their names (a change plan's canon
+    /// baseline).
     Ready {
         m: Arc<Materialized>,
+        g: Arc<Graph>,
         names: Arc<Lexicon>,
     },
     /// Each block the changes write and the version its first update or delete replaced (`None`
-    /// for one they create); read on first use into those versions and their lexicon.
+    /// for one they create); read on first use into those versions, and their lexicon on the
+    /// first literal read.
     Start {
         first: BTreeMap<BlockId, Option<Hash>>,
-        read: OnceCell<(BTreeMap<BlockId, Block>, Arc<Lexicon>)>,
+        blocks: OnceCell<BTreeMap<BlockId, Block>>,
+        names: OnceCell<Arc<Lexicon>>,
     },
 }
 
@@ -539,7 +569,8 @@ impl<'a> Baseline<'a> {
         }
         Baseline::Start {
             first,
-            read: OnceCell::new(),
+            blocks: OnceCell::new(),
+            names: OnceCell::new(),
         }
     }
 }
@@ -588,7 +619,13 @@ struct Compare<'a> {
     baselines: Vec<Baseline<'a>>,
     events: Events,
     cache: RefCell<BTreeMap<(BlockId, LiteralsKey), LiteralSet>>,
+    /// The comparison base (the last baseline) as a whole state, read on first use: a deleted
+    /// neighbor cause's section is read there.
+    base_state: OnceCell<Option<BaseState>>,
 }
+
+/// A whole state: its blocks and their graph.
+type BaseState = (Arc<Materialized>, Arc<Graph>);
 
 /// What a target's changed literals depend on besides the target: its lineage event and, for
 /// a retirement, whether a revoke is among them and which decisions replace it.
@@ -627,7 +664,99 @@ impl<'a> Compare<'a> {
             baselines,
             events,
             cache: RefCell::default(),
+            base_state: OnceCell::new(),
         }
+    }
+
+    /// The versions a write's start replaced, read once.
+    fn start_blocks<'c>(
+        &self,
+        first: &BTreeMap<BlockId, Option<Hash>>,
+        blocks: &'c OnceCell<BTreeMap<BlockId, Block>>,
+    ) -> Result<&'c BTreeMap<BlockId, Block>, RdyError> {
+        if blocks.get().is_none() {
+            let mut read = BTreeMap::new();
+            for (id, base) in first {
+                if let Some(h) = base {
+                    read.insert(id.clone(), self.st.reader().get_block(h)?);
+                }
+            }
+            let _ = blocks.set(read);
+        }
+        Ok(blocks.get().expect("set above"))
+    }
+
+    /// Block `x` in the comparison base: the last baseline (the state just before a write or a
+    /// view op, the landing's previous state, or a change plan's canon). `None` when it is not
+    /// there.
+    fn base_block(&self, x: &BlockId) -> Result<Option<Block>, RdyError> {
+        Ok(match self.baselines.last() {
+            None | Some(Baseline::Empty) => None,
+            Some(Baseline::Ready { m, .. }) => m.get(x).cloned(),
+            Some(Baseline::Scope { st, scope, .. }) => st.materialized(scope)?.get(x).cloned(),
+            Some(Baseline::Start { first, blocks, .. }) => {
+                let olds = self.start_blocks(first, blocks)?;
+                match first.get(x) {
+                    Some(_) => olds.get(x).cloned(),
+                    None => self.m.get(x).cloned(),
+                }
+            }
+        })
+    }
+
+    /// Whether block `x` is in the comparison base ([`Compare::base_block`], with no copy of it).
+    fn in_base(&self, x: &BlockId) -> Result<bool, RdyError> {
+        Ok(match self.baselines.last() {
+            None | Some(Baseline::Empty) => false,
+            Some(Baseline::Ready { m, .. }) => m.get(x).is_some(),
+            Some(Baseline::Scope { st, scope, .. }) => st.materialized(scope)?.get(x).is_some(),
+            Some(Baseline::Start { first, blocks, .. }) => {
+                let olds = self.start_blocks(first, blocks)?;
+                match first.get(x) {
+                    Some(_) => olds.contains_key(x),
+                    None => self.m.get(x).is_some(),
+                }
+            }
+        })
+    }
+
+    /// The comparison base as a whole state, read once; `None` for the empty state. A write's
+    /// start is the final state (`g` its graph) with the written blocks put back as they were.
+    fn base_state(&self, g: &Graph) -> Result<Option<BaseState>, RdyError> {
+        if let Some(s) = self.base_state.get() {
+            return Ok(s.clone());
+        }
+        let state = match self.baselines.last() {
+            None | Some(Baseline::Empty) => None,
+            Some(Baseline::Ready { m, g, .. }) => Some((Arc::clone(m), Arc::clone(g))),
+            Some(Baseline::Scope { st, scope, .. }) => {
+                Some((st.materialized(scope)?, st.graph(scope)?))
+            }
+            Some(Baseline::Start { first, blocks, .. }) => {
+                let olds = self.start_blocks(first, blocks)?;
+                let mut ops = vec![];
+                for (id, base) in first {
+                    match (olds.get(id), self.m.version_of(id)) {
+                        (Some(old), now) => ops.push(Op::Update {
+                            base: now.or(*base).expect("a start version has a hash"),
+                            block: old.clone(),
+                        }),
+                        (None, Some(now)) => ops.push(Op::Delete {
+                            base: now,
+                            id: id.clone(),
+                        }),
+                        (None, None) => {}
+                    }
+                }
+                let now: Vec<&Block> = first.keys().filter_map(|id| self.m.get(id)).collect();
+                Some((
+                    Arc::new(self.m.with(&ops)),
+                    Arc::new(g.with_changes(now, olds.values())),
+                ))
+            }
+        };
+        let _ = self.base_state.set(state.clone());
+        Ok(state)
     }
 
     /// Target `x`'s lineage event in this change: a revoke or full supersede first.
@@ -647,7 +776,7 @@ impl<'a> Compare<'a> {
     ) -> Result<Option<(Block, Arc<Lexicon>)>, RdyError> {
         match b {
             Baseline::Empty => Ok(None),
-            Baseline::Ready { m, names } => {
+            Baseline::Ready { m, names, .. } => {
                 Ok(m.get(x).map(|blk| (blk.clone(), Arc::clone(names))))
             }
             Baseline::Scope { st, scope, read } => {
@@ -657,22 +786,21 @@ impl<'a> Compare<'a> {
                 let (m, names) = read.get().expect("set above");
                 Ok(m.get(x).map(|blk| (blk.clone(), Arc::clone(names))))
             }
-            Baseline::Start { first, read } => {
-                if read.get().is_none() {
-                    let mut blocks = BTreeMap::new();
-                    for (id, base) in first {
-                        if let Some(h) = base {
-                            blocks.insert(id.clone(), self.st.reader().get_block(h)?);
-                        }
-                    }
+            Baseline::Start {
+                first,
+                blocks,
+                names,
+            } => {
+                let blocks = self.start_blocks(first, blocks)?;
+                if names.get().is_none() {
                     // the final lexicon with the written blocks put back as they were
-                    let names = self.names.get()?.with_changes(
+                    let read = self.names.get()?.with_changes(
                         first.keys().filter_map(|id| self.m.get(id)),
                         blocks.values(),
                     );
-                    let _ = read.set((blocks, Arc::new(names)));
+                    let _ = names.set(Arc::new(read));
                 }
-                let (blocks, names) = read.get().expect("set above");
+                let names = names.get().expect("set above");
                 let blk = match first.get(x) {
                     Some(_) => blocks.get(x),
                     None => self.m.get(x),
@@ -828,6 +956,233 @@ impl<'a> Compare<'a> {
     }
 }
 
+impl Compare<'_> {
+    /// D-YXBXH: the follow-up of neighbor `subject` (its final version) on `cause`, its fix and
+    /// its evidence. A section neighbor always gets `confirm`; an edited cause gives it the
+    /// literal evidence the scanner finds (D-CFC6V), which never makes it `update`. An entity
+    /// neighbor gets `update` only when it states a literal the change removed from the cause;
+    /// with no match, even on a cut scan, it gets nothing (TASK-978 C2). A created or deleted
+    /// cause gives section neighbors only, with no literal evidence: its `values` are empty.
+    fn judge_neighbor(
+        &self,
+        cause: &BlockId,
+        how: NeighborCause,
+        section: bool,
+        subject: &Block,
+    ) -> Result<Option<Judged>, RdyError> {
+        let confirm = |values, values_omitted, matched, matched_omitted| Judged {
+            follow: FollowUp::Confirm,
+            reached_decision: false,
+            fix: Some(NEIGHBOR_SECTION_FIX.to_string()),
+            values,
+            values_omitted,
+            matched,
+            matched_omitted,
+        };
+        // TASK-1067 (b): every neighbor row carries values, empty for a created or deleted cause
+        if how != NeighborCause::Edited {
+            return Ok(section.then(|| confirm(Some(vec![]), 0, vec![], 0)));
+        }
+        let lits = self.literals(cause, Lineage::Ordinary)?;
+        if lits.is_empty() {
+            return Ok(section.then(|| confirm(Some(vec![]), 0, vec![], 0)));
+        }
+        let ev = evidence(self.st.pack(), &lits, subject, self.names.get()?);
+        if section {
+            return Ok(Some(confirm(
+                Some(ev.values),
+                ev.values_omitted,
+                ev.matched,
+                ev.matched_omitted,
+            )));
+        }
+        if ev.matched.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Judged {
+            follow: FollowUp::Update,
+            reached_decision: false,
+            fix: Some(NEIGHBOR_ENTITY_FIX.to_string()),
+            values: Some(ev.values),
+            values_omitted: ev.values_omitted,
+            matched: ev.matched,
+            matched_omitted: ev.matched_omitted,
+        }))
+    }
+}
+
+/// How a change made a block a neighbor cause (D-YXBXH, TASK-978 X2 and I1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NeighborCause {
+    /// It is new: absent from the comparison base.
+    Created,
+    /// It is in both states and its text changed ([`text_changed`]).
+    Edited,
+    /// It is gone from the final state.
+    Deleted,
+}
+
+/// Neighbor pairs by (subject, cause): how the cause changed, and whether the pair is a section
+/// pair.
+type NeighborPairs = BTreeMap<(BlockId, BlockId), (NeighborCause, bool)>;
+
+/// The neighbor cause/subject pairs of a change, by (subject, cause): how the cause changed and
+/// whether the pair is a section pair (section wins; else they share an entity). The causes are
+/// the content blocks of `changed` that the change creates, deletes or whose text it edits,
+/// each taking part ([`takes_part`]) in the state where it exists (both, for an edit); the
+/// comparison base is `cmp`'s last baseline and the final state `cmp.m` with graph `g`.
+///
+/// An edited cause's neighbors are read in the final state ([`neighbors_in`]); an entity
+/// neighbor must share its doc there. A created cause gives the section neighbors at its final
+/// parent that exist in the comparison base; a deleted cause the section neighbors at its
+/// parent in the comparison base that survive in the final state. Neither gives an entity pair.
+/// No subject is in `touched` (the change leaves it unchanged). Past `limit` pairs the whole
+/// read is [`neighbor_limit_error`], refused before the pair is kept.
+fn neighbor_pairs(
+    pack: &Pack,
+    cmp: &Compare<'_>,
+    g: &Graph,
+    changed: &BTreeSet<BlockId>,
+    touched: &BTreeSet<BlockId>,
+    limit: usize,
+) -> Result<NeighborPairs, RdyError> {
+    let m = cmp.m;
+    let t = g.tracking();
+    // the causes: edited ones by id; created ones by final parent and deleted ones by parent in
+    // the comparison base, since every cause under one parent has the same section neighbors
+    let mut edited: BTreeSet<BlockId> = BTreeSet::new();
+    let mut created: BTreeMap<BlockId, Vec<BlockId>> = BTreeMap::new();
+    let mut deleted: BTreeMap<BlockId, Vec<BlockId>> = BTreeMap::new();
+    for x in changed {
+        let after = m.get(x);
+        if after.is_some_and(|a| !takes_part(pack, a)) {
+            continue;
+        }
+        match (cmp.base_block(x)?, after) {
+            (None, Some(after)) => {
+                if let Some(p) = &after.parent {
+                    created.entry(p.clone()).or_default().push(x.clone());
+                }
+            }
+            (Some(before), Some(after))
+                if takes_part(pack, &before) && text_changed(pack, t, &before, after) =>
+            {
+                edited.insert(x.clone());
+            }
+            (Some(before), None) if takes_part(pack, &before) => {
+                if let Some(p) = &before.parent {
+                    deleted.entry(p.clone()).or_default().push(x.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    // a parent with no participating child outside the change gives a create nothing (a new
+    // doc, an empty section): it is never read
+    created.retain(|p, _| {
+        m.children(Some(p))
+            .iter()
+            .any(|c| !touched.contains(&c.id) && takes_part(pack, c))
+    });
+    let mut pairs = BTreeMap::new();
+    let mut keep = |subject: &BlockId, cause: &BlockId, how, section| {
+        let key = (subject.clone(), cause.clone());
+        if !pairs.contains_key(&key) && pairs.len() >= limit {
+            return Err(neighbor_limit_error(limit));
+        }
+        pairs.insert(key, (how, section));
+        Ok(())
+    };
+    // one representative source per created group: its section rows are the group's
+    let reps: BTreeMap<BlockId, &Vec<BlockId>> = created
+        .values()
+        .map(|group| (group[0].clone(), group))
+        .collect();
+    let mut in_final = edited.clone();
+    in_final.extend(reps.keys().cloned());
+    if !in_final.is_empty() {
+        let mut in_base: BTreeMap<BlockId, bool> = BTreeMap::new();
+        for row in neighbor_links(m, g, pack, &in_final)? {
+            let subject = row.block;
+            if touched.contains(subject) {
+                continue;
+            }
+            let section = row.via == NeighborVia::Section;
+            for source in row.of {
+                if edited.contains(source) {
+                    let same_doc =
+                        || m.doc_of(subject).map(|d| &d.id) == m.doc_of(source).map(|d| &d.id);
+                    if section || same_doc() {
+                        keep(subject, source, NeighborCause::Edited, section)?;
+                    }
+                }
+                let Some(group) = reps.get(source).filter(|_| section) else {
+                    continue;
+                };
+                let had = match in_base.get(subject) {
+                    Some(had) => *had,
+                    None => {
+                        let had = cmp.in_base(subject)?;
+                        in_base.insert(subject.clone(), had);
+                        had
+                    }
+                };
+                if had {
+                    for cause in group.iter() {
+                        keep(subject, cause, NeighborCause::Created, true)?;
+                    }
+                }
+            }
+        }
+    }
+    if !deleted.is_empty()
+        && let Some((bm, bg)) = cmp.base_state(g)?
+    {
+        let reps: BTreeMap<BlockId, &Vec<BlockId>> = deleted
+            .values()
+            .map(|group| (group[0].clone(), group))
+            .collect();
+        let gone: BTreeSet<BlockId> = reps.keys().cloned().collect();
+        for row in neighbor_links(&bm, &bg, pack, &gone)? {
+            if row.via != NeighborVia::Section {
+                continue;
+            }
+            let subject = row.block;
+            if touched.contains(subject) || m.get(subject).is_none() {
+                continue;
+            }
+            for of in row.of {
+                for cause in reps[of].iter() {
+                    keep(subject, cause, NeighborCause::Deleted, true)?;
+                }
+            }
+        }
+    }
+    Ok(pairs)
+}
+
+/// Whether a block of `created` that takes part joins a section in `m` that already holds a
+/// participating block outside `touched`: then a create owes its section neighbors a `confirm`
+/// (TASK-978 X2), and a report must read them.
+fn joins_baseline_section(
+    pack: &Pack,
+    m: &Materialized,
+    created: &[&Block],
+    touched: &BTreeSet<BlockId>,
+) -> bool {
+    // each parent is read once: a batch of creates under one parent is a batch of one question
+    let mut read: BTreeSet<&BlockId> = BTreeSet::new();
+    created.iter().any(|b| {
+        takes_part(pack, b)
+            && b.parent.as_ref().is_some_and(|p| {
+                read.insert(p)
+                    && m.children(Some(p))
+                        .iter()
+                        .any(|c| !touched.contains(&c.id) && takes_part(pack, c))
+            })
+    })
+}
+
 /// D-ATBP6 (refines D-4XTRC and D-7M06Q): the follow-up `follow_up` gave a decision subject,
 /// with its fix, and whether it is an accepted decision's `confirm`. An accepted decision keeps
 /// `reaffirm` only when it is `suspect` on the cause (the suspects detector's own test of the
@@ -934,8 +1289,9 @@ fn visit_pairs<'e>(
 
 #[cfg(test)]
 thread_local! {
-    /// Test counter: the subject/cause pairs `plan_pairs` has judged on this thread, so a test
-    /// can see where a plan stops.
+    /// Test counter: the edge and reach subject/cause pairs `plan_pairs` has judged on this
+    /// thread, so a test can see where a plan stops. Neighbor pairs have their own bound
+    /// (`MAX_NEIGHBOR_PAIRS`) and are not counted here.
     pub(crate) static PLAN_PAIRS_JUDGED: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
 }
@@ -976,6 +1332,10 @@ pub(crate) struct PlanPair {
     /// The baseline subject held a pinned premise edge to the cause that the final cause no
     /// longer matches: the suspect a repin clears.
     pub(crate) prior_suspect: bool,
+    /// D-YXBXH: a section or entity neighbor of the cause, derived (never stored). It needs no
+    /// edge to the cause, so a new one is never dropped as a link written against the final
+    /// state.
+    pub(crate) neighbor: bool,
 }
 
 /// Whether `block` is suspect on `target` in `g` (over `m`), as the suspects detector reads the
@@ -1026,7 +1386,9 @@ impl ReadState {
     /// already held, still do. Then each reached target's governed blocks, judged as the reach
     /// entries are. A fully superseded decision's `affects` targets (in either state) are
     /// judged the same way, with the old decision as the cause and `supersedes` as the edge
-    /// (D-B55PS); a revoke has none. Each pair goes to `visit` in visit order as it is judged, and the first
+    /// (D-B55PS); a revoke has none. Last, every neighbor pair of the net change (D-YXBXH,
+    /// [`neighbor_pairs`] with canon as the comparison base), judged as the report judges it,
+    /// with `neighbor` set. Each pair goes to `visit` in visit order as it is judged, and the first
     /// error `visit` returns stops the walk: nothing is cut, and nothing is judged past a
     /// refusal.
     pub(crate) fn plan_pairs(
@@ -1057,6 +1419,7 @@ impl ReadState {
             Names::Ready(Arc::clone(&fin.names)),
             vec![Baseline::Ready {
                 m: Arc::clone(&base.m),
+                g: Arc::clone(&base.g),
                 names: Arc::clone(&base.names),
             }],
             events,
@@ -1147,6 +1510,7 @@ impl ReadState {
                     retired: matches!(lineage, Lineage::Retired(_)),
                     reach: false,
                     in_base,
+                    neighbor: false,
                 })
             },
         )?;
@@ -1189,6 +1553,7 @@ impl ReadState {
                     reached_decision: j.reached_decision,
                     retired: false,
                     reach: true,
+                    neighbor: false,
                 })?;
             }
         }
@@ -1256,6 +1621,43 @@ impl ReadState {
                 reached_decision: j.reached_decision,
                 retired: false,
                 reach: true,
+                neighbor: false,
+            })?;
+        }
+        // D-YXBXH: every neighbor cause/subject pair of the net change, judged as the report
+        // judges it; a declared relation to the same item wins at admission
+        let pairs = neighbor_pairs(
+            self.pack(),
+            &cmp,
+            &fin.g,
+            touched,
+            touched,
+            MAX_NEIGHBOR_PAIRS,
+        )?;
+        for ((subject, cause), (how, section)) in pairs {
+            let Some(src) = fin.m.get(&subject) else {
+                continue;
+            };
+            let Some(j) = cmp.judge_neighbor(&cause, how, section, src)? else {
+                continue;
+            };
+            let in_base = base
+                .g
+                .outgoing(&subject)
+                .iter()
+                .any(|e| e.to == cause && e.kind != EdgeKind::Contains);
+            visit(PlanPair {
+                suspect: suspect(&subject, &cause),
+                prior_suspect: prior(&subject, &cause),
+                in_base,
+                subject,
+                cause,
+                edge: NEIGHBOR_EDGE.to_string(),
+                follow: j.follow,
+                reached_decision: false,
+                retired: false,
+                reach: false,
+                neighbor: true,
             })?;
         }
         Ok(())
@@ -1329,10 +1731,15 @@ impl ReadState {
             && !chs.iter().any(|ch| creates_cite_outside(&ch.ops))
             && !chs.iter().any(|ch| creates_retirement(&ch.ops))
         {
-            return Ok(Consequences {
-                tensions_error,
-                ..cut(tensions, max_tokens)
-            });
+            // TASK-978 X2: unless a created block joins a section that held a block already
+            let m = self.materialized(scope)?;
+            let created: Vec<&Block> = touched.iter().filter_map(|id| m.get(id)).collect();
+            if !joins_baseline_section(self.pack(), &m, &created, &touched) {
+                return Ok(Consequences {
+                    tensions_error,
+                    ..cut(tensions, max_tokens)
+                });
+            }
         }
         let g = self.graph(scope)?;
         // a full supersede does not reach through the refines links it copied (Q5, Q6)
@@ -1556,7 +1963,29 @@ impl ReadState {
             && !creates_cite_outside(&ops)
             && !creates_retirement(&ops)
         {
-            return Ok(Consequences::default());
+            // TASK-978 X2: unless a created block joins a section that held a block already, in
+            // the state the version lands on
+            let base = match landed_as(self, p)? {
+                Some(landing) => self.reader().landing(&landing)?.prev.map(Scope::At),
+                None => Some(Scope::Canon),
+            };
+            let created: Vec<&Block> = ops
+                .iter()
+                .filter_map(|o| match o {
+                    Op::Create { block } => Some(block),
+                    _ => None,
+                })
+                .collect();
+            let joins = match base {
+                Some(s) => {
+                    let m = self.materialized(&s)?;
+                    joins_baseline_section(self.pack(), &m, &created, &touched)
+                }
+                None => false,
+            };
+            if !joins {
+                return Ok(Consequences::default());
+            }
         }
         // O8: a landed version compares its landing's prev with the state it recorded, and reads
         // the graph, the dependents and their names as of that landing (a later landing changes
@@ -1644,8 +2073,12 @@ impl ReadState {
     /// ([`reached_follow_up`]): none for one that asserts nothing live); `written` marks
     /// `already_written`. No entry for a decision whose only edges to the changed block are its
     /// own `affects` links (D-4XTRC, [`visit_pairs`]). Each entry's follow-up, fix and
-    /// evidence are `Compare::judge`'s, worked out before the cut. The list is cut from the end
-    /// to `max_tokens` (default `BRIEF_DEFAULT_TOKENS`), counting what it drops in `omitted`.
+    /// evidence are `Compare::judge`'s, worked out before the cut. Then the neighbor entries
+    /// (D-YXBXH, [`neighbor_pairs`] against the last baseline): one `dependent` entry with edge
+    /// `neighbor` for each block the list does not hold yet, from its least edited cause that
+    /// gives one, or, when no edited cause gives one, its least created or deleted cause
+    /// ([`Compare::judge_neighbor`], TASK-1067), by block id. The list is cut from the end to
+    /// `max_tokens` (default `BRIEF_DEFAULT_TOKENS`), counting what it drops in `omitted`.
     #[allow(clippy::too_many_arguments)]
     fn consequences_in(
         &self,
@@ -1809,6 +2242,53 @@ impl ReadState {
                     already_written: written(&block),
                 });
             }
+        }
+        // D-YXBXH, TASK-1067: one neighbor entry per block the list does not hold yet, from
+        // its least edited cause that gives one; only when no edited cause gives one, from its
+        // least created or deleted cause; by block id
+        let pairs = neighbor_pairs(self.pack(), cmp, g, touched, touched, MAX_NEIGHBOR_PAIRS)?;
+        let mut by_block: BTreeMap<BlockId, Vec<(BlockId, NeighborCause, bool)>> = BTreeMap::new();
+        for ((block, cause), (how, section)) in pairs {
+            by_block
+                .entry(block)
+                .or_default()
+                .push((cause, how, section));
+        }
+        for (block, mut causes) in by_block {
+            if listed.contains(&block.to_string()) {
+                continue;
+            }
+            let Some(src) = m.get(&block) else { continue };
+            // edited causes first, each group by cause id (the map's order)
+            causes.sort_by_key(|(_, how, _)| *how != NeighborCause::Edited);
+            let mut found = None;
+            for (cause, how, section) in causes {
+                if let Some(j) = cmp.judge_neighbor(&cause, how, section, src)? {
+                    found = Some((cause, j));
+                    break;
+                }
+            }
+            let Some((cause, j)) = found else { continue };
+            listed.insert(block.to_string());
+            conflicts.push(Consequence {
+                id: consequence_id(batch, ConsequenceKind::Dependent.as_str(), &block),
+                block: block.to_string(),
+                kind: ConsequenceKind::Dependent,
+                because: Because {
+                    edge: NEIGHBOR_EDGE.to_string(),
+                    changed: cause.to_string(),
+                    edges: Some(vec![NEIGHBOR_EDGE.to_string()]),
+                    values: j.values,
+                    values_omitted: j.values_omitted,
+                },
+                follow_up: j.follow,
+                matched: j.matched,
+                matched_omitted: j.matched_omitted,
+                conflict: None,
+                tension: None,
+                fix: j.fix,
+                already_written: written(&block),
+            });
         }
         Ok(cut(conflicts, max_tokens))
     }

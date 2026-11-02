@@ -27,7 +27,7 @@ pub struct CaseFile {
     pub request: String,
     /// The review kind: `tension`.
     pub kind: String,
-    /// The best rule that holds between the two blocks now, if any.
+    /// The best rule that holds between the two blocks the items name, read on those blocks.
     pub rule: Option<Rule>,
     pub question: String,
     /// The two blocks, in item order.
@@ -169,7 +169,7 @@ impl ReadState {
         Ok(CaseFile {
             request: label,
             kind: "tension".to_string(),
-            rule: self.pair_rule(&ia.block, &ib.block)?,
+            rule: self.pair_rule_for_items(items)?,
             question: CASE_QUESTION.to_string(),
             blocks,
             entities: shared_entities(&m, &lex, &a, &b),

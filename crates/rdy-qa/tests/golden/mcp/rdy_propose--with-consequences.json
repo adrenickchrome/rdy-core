@@ -1,7 +1,7 @@
 {
   "assessment": null,
   "blocking": [],
-  "canon_at": "c6e22e911ccdea08a82dedde72e8f1e08abda8a8c6914f5c78a30aa5a3369137",
+  "canon_at": "8a71bd26be8c414fa1d2f98ae62dd59cf557918aa777d092934f33937cb59f8e",
   "changes": 1,
   "conflicts": [],
   "consequences": [
@@ -16,7 +16,7 @@
       },
       "block": "c-WKHEZ",
       "follow_up": "confirm",
-      "id": "cq-43595a461b79deed",
+      "id": "cq-a1a70e5cfe2eb78e",
       "kind": "suspect"
     }
   ],
@@ -32,20 +32,20 @@
       }
     ]
   },
-  "id": "d6b9104f987497586e1c63395e585f45868a5edac90d0ab59644c10bca46f0bf",
+  "id": "0664396094ac20c7bb5f5f13427a319734e3876bc4e3793c153f0c4bab83e47f",
   "issues": [
     {
       "block": null,
       "code": "E_BLOCKING_TENSION",
       "fix": "resolve each with a change, repin the citation, or dismiss it (rdy resolve <tn-…> --dismiss <reason>; a reviewer of another actor or a human); rdy tensions --involving <change> lists them, a form only this landing gives with its proposal",
-      "message": "landing P-d6b9104f9874@1 would put 2 blocking tension(s) into canon",
+      "message": "landing P-0664396094ac@1 would put 2 blocking tension(s) into canon",
       "severity": "error"
     },
     {
       "block": null,
       "code": "E_PLAN_OPEN",
       "fix": "close or defer each item, and answer each tension item with confirm or dismiss: rdy_plan / rdy plan",
-      "message": "1 change-plan items are open",
+      "message": "2 change-plan items are open",
       "severity": "error"
     }
   ],
@@ -54,7 +54,7 @@
       "confirm": {
         "closed": 0,
         "deferred": 0,
-        "open": 1
+        "open": 2
       },
       "reaffirm": {
         "closed": 0,
@@ -90,6 +90,14 @@
     "deferred": 0,
     "items": [
       {
+        "cause": "c-ZCQ17",
+        "edge": "neighbor",
+        "id": "pi-0531965229c2d49d",
+        "kind": "confirm",
+        "state": "open",
+        "subject": "c-WKHEZ"
+      },
+      {
         "cause": "c-CFPE0",
         "edge": "references",
         "id": "pi-b1ac05f4f210a8a5",
@@ -98,12 +106,12 @@
         "subject": "c-WKHEZ"
       }
     ],
-    "open": 1
+    "open": 2
   },
   "policy": null,
   "ready": false,
-  "ref": "P-d6b9104f9874@1",
-  "stable": "d6b9104f987497586e1c63395e585f45868a5edac90d0ab59644c10bca46f0bf",
+  "ref": "P-0664396094ac@1",
+  "stable": "0664396094ac20c7bb5f5f13427a319734e3876bc4e3793c153f0c4bab83e47f",
   "summary": "Rewords A and C.",
   "tensions": [
     {

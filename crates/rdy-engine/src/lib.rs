@@ -65,6 +65,7 @@ pub mod load_chain;
 pub mod maintenance;
 mod materialize;
 pub mod mention_review;
+pub mod neighbors;
 mod pack_load;
 mod paths;
 pub mod pending;

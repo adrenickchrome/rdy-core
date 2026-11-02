@@ -219,20 +219,13 @@ impl Source {
     /// A holder at `root` of the source's repo that has taken the upload of `v1.0.0`.
     fn holder(&self, root: &Path, scratch: &Path) -> StoreHandle {
         let repo = self.r.store().repo_id().unwrap().unwrap();
-        let mut h = StoreHandle::create_holder(root, repo).unwrap();
-        take(
-            &mut h,
-            scratch,
-            "v1",
-            &self.export(self.v1),
-            "v1.0.0",
-            self.l1,
-        );
+        let h = StoreHandle::create_holder(root, repo).unwrap();
+        take(&h, scratch, "v1", &self.export(self.v1), "v1.0.0", self.l1);
         h
     }
 }
 
-fn take(h: &mut StoreHandle, scratch: &Path, name: &str, bytes: &[u8], tag: &str, landing: Hash) {
+fn take(h: &StoreHandle, scratch: &Path, name: &str, bytes: &[u8], tag: &str, landing: Hash) {
     let p = scratch.join(format!("{name}.rdysync"));
     std::fs::write(&p, bytes).unwrap();
     h.take(
@@ -595,9 +588,9 @@ fn hpb13_bad_inputs_and_stale_snapshots_return_no_success() {
     let mut src = source(&dir.path().join("src"));
     let inputs = src.inputs();
     let repo = src.r.store().repo_id().unwrap().unwrap();
-    let mut holder = StoreHandle::create_holder(&dir.path().join("holder"), repo).unwrap();
+    let holder = StoreHandle::create_holder(&dir.path().join("holder"), repo).unwrap();
     take(
-        &mut holder,
+        &holder,
         dir.path(),
         "v1",
         &src.export(src.v1),
@@ -666,7 +659,7 @@ fn hpb13_bad_inputs_and_stale_snapshots_return_no_success() {
     remove(&mut src.r, &secret);
     let v2 = tag(&mut src.r, "v2.0.0");
     let l2 = src.r.store().read_tag(&v2).unwrap().landing;
-    take(&mut holder, dir.path(), "v2", &src.export(v2), "v2.0.0", l2);
+    take(&holder, dir.path(), "v2", &src.export(v2), "v2.0.0", l2);
     let mut out = Vec::new();
     let e = snap
         .write_render_request(
@@ -754,8 +747,8 @@ fn spv4_adapter_output_keeps_the_public_reference_gate() {
     let mut export = Vec::new();
     stream_export::write(&read, v1, &BTreeSet::new(), &mut export).unwrap();
     let repo = r.store().repo_id().unwrap().unwrap();
-    let mut holder = StoreHandle::create_holder(&dir.path().join("holder"), repo).unwrap();
-    take(&mut holder, dir.path(), "v1", &export, "v1.0.0", l1);
+    let holder = StoreHandle::create_holder(&dir.path().join("holder"), repo).unwrap();
+    take(&holder, dir.path(), "v1", &export, "v1.0.0", l1);
     let snap = holder.snapshot().unwrap();
     let blocked = (
         "Public profile has 1 references outside its selection.",

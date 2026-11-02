@@ -1144,6 +1144,7 @@ mod tests {
                 actor: "person:nick".to_string(),
                 reason: "checked".to_string(),
             }),
+            text: None,
         };
         let a = issue_of(&i);
         assert_eq!(a.block, id("n-00004"));
@@ -1163,6 +1164,7 @@ mod tests {
             subject: None,
             fix: "fix it".to_string(),
             dismissed: None,
+            text: None,
         };
         let c = crate::coverage::Confidence {
             confidence: Level::Low,

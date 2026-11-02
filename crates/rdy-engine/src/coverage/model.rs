@@ -25,6 +25,11 @@ pub enum IssueCode {
     /// A read-time issue (ck3, D-JQD5X): a source a block cites is missing from every linked
     /// checkout. Shown in displayed coverage only; the gate and the stored assessment never hold it.
     SourceNotFound,
+    /// nb4 (D-YXBXH, FW-IA1): a doc in a level that holds more docs directly than the pack's
+    /// `coverage.max_docs_per_level`.
+    CrowdedLevel,
+    /// nb4 (D-YXBXH, FW-IA1): a prose or note block whose body is one sentence ending in `?`.
+    QuestionAsProse,
 }
 
 impl IssueCode {
@@ -37,9 +42,11 @@ impl IssueCode {
             IssueCode::UnlinkedDoc | IssueCode::DanglingRef | IssueCode::SourceNotFound => {
                 Dimension::Connected
             }
-            IssueCode::StubSection | IssueCode::MissingSection | IssueCode::OpenQuestion => {
-                Dimension::Complete
-            }
+            IssueCode::StubSection
+            | IssueCode::MissingSection
+            | IssueCode::OpenQuestion
+            | IssueCode::CrowdedLevel
+            | IssueCode::QuestionAsProse => Dimension::Complete,
             IssueCode::Ungrounded | IssueCode::UnappliedDecision => Dimension::Governed,
         }
     }
@@ -65,6 +72,9 @@ pub struct CoverageIssue {
     pub fix: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dismissed: Option<Dismissal>,
+    /// nb4 (D-YXBXH): where an `unlinked_mention` names its entity; `None` for every other code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<crate::lexicon::MentionText>,
 }
 
 impl CoverageIssue {
@@ -82,6 +92,7 @@ impl CoverageIssue {
             subject,
             fix,
             dismissed: None,
+            text: None,
         }
     }
 }
@@ -266,6 +277,17 @@ pub(crate) fn fix_stub_section(title: &str) -> String {
 /// The fix of `open_question`.
 pub(crate) fn fix_open_question(block: &BlockId) -> String {
     format!("answer {block} with a decision (answers), or remove the question")
+}
+
+/// The fix of `crowded_level` (nb4, D-YXBXH): `folder` is the level's folder path, or `the top
+/// level`.
+pub(crate) fn fix_crowded_level(folder: &str) -> String {
+    format!("group the docs of {folder} into folders")
+}
+
+/// The fix of `question_as_prose` (nb4, D-YXBXH).
+pub(crate) fn fix_question_as_prose(block: &BlockId) -> String {
+    format!("change the type of {block} to question")
 }
 
 /// The fix of `ungrounded` (D-X4RYX).

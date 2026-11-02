@@ -222,7 +222,11 @@ fn new_supporting(
     args["view"] = json!(view);
     let v = call(env, &format!("new_{kind}"), args)?;
     let id = text(&v["created"][format!("${kind}")]);
-    let mut t = format!("created {kind} {id}{}", brief_text::consequences_text(&v));
+    let mut t = format!(
+        "created {kind} {id}{}{}",
+        brief_text::consequences_text(&v),
+        brief_text::created_briefing_text(&v)
+    );
     for w in v["warnings"].as_array().into_iter().flatten() {
         t.push_str(&format!(
             "\nwarning {}: {}",
@@ -270,8 +274,9 @@ fn new_profile(
     let v = call(env, "new_profile", args)?;
     let id = text(&v["created"]["$profile"]);
     let mut t = format!(
-        "created publication profile {key} ({id}){}",
-        brief_text::consequences_text(&v)
+        "created publication profile {key} ({id}){}{}",
+        brief_text::consequences_text(&v),
+        brief_text::created_briefing_text(&v)
     );
     for w in v["warnings"].as_array().into_iter().flatten() {
         t.push_str(&format!(
@@ -387,8 +392,9 @@ pub(crate) fn new(env: &Env, what: NewCmd) -> Result<(Value, String), ErrorReply
         .cloned()
         .unwrap_or_default();
     let mut t = format!(
-        "created {kind} {path} ({last}){}",
-        brief_text::consequences_text(&v)
+        "created {kind} {path} ({last}){}{}",
+        brief_text::consequences_text(&v),
+        brief_text::created_briefing_text(&v)
     );
     let mut v = v;
     // the new docs and folders also become files in a working copy bound to this view
@@ -446,10 +452,11 @@ pub(crate) fn run_edit(env: &Env, a: EditArgs) -> Result<(Value, String), ErrorR
 /// write's warnings, W_BRIEF_STALE among them (msw8, #874).
 pub(crate) fn write_text(v: &Value) -> String {
     let mut t = format!(
-        "change {}{}{}",
+        "change {}{}{}{}",
         hash_short(text(&v["change"])),
         keys_lines(v, ""),
-        brief_text::consequences_text(v)
+        brief_text::consequences_text(v),
+        brief_text::created_briefing_text(v)
     );
     for w in v["warnings"].as_array().into_iter().flatten() {
         t.push_str(&format!(

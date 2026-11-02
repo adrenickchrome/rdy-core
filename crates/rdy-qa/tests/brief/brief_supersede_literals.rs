@@ -376,9 +376,12 @@ fn sdc5_tally_requirement_confirms_and_runbook_updates() {
             assert!(!w["states"].as_array().expect("states").is_empty(), "{w}");
         }
     }
-    // the freeze rule: both decisions name the same entities in their title and statement
+    // the freeze rule: both decisions name the same entities in their title and statement.
+    // Only those two fields are scanned: mentions keep the first mention of each entity (O5),
+    // so an earlier field (D30's options) would otherwise take a title or statement mention.
     let entities = |id: &BlockId| -> std::collections::BTreeSet<String> {
-        let b = e.read().block(&view("w"), id).unwrap();
+        let mut b = e.read().block(&view("w"), id).unwrap();
+        b.fields.retain(|k, _| k == "title" || k == "statement");
         lex.mentions(&b)
             .into_iter()
             .filter(|m| m.field == "title" || m.field == "statement")
@@ -1550,7 +1553,8 @@ fn sdc5_pending_replacements_are_scope_local_and_deterministic() {
         None,
     );
     let q = created_in(&c, "$q");
-    let order = |first_a: bool, n: usize| -> Vec<String> {
+    // each dependent row as (block, edge)
+    let order = |first_a: bool, n: usize| -> Vec<(String, String)> {
         let mut ops = vec![
             json!({"op": "update", "id": s.a.to_string(), "body": format!("A, again {n}.")}),
             json!({"op": "update", "id": q.to_string(), "body": format!("Q, again {n}.")}),
@@ -1562,14 +1566,31 @@ fn sdc5_pending_replacements_are_scope_local_and_deterministic() {
         items(&v)
             .iter()
             .filter(|c| c["kind"] == "dependent")
-            .map(|c| c["block"].as_str().unwrap().to_string())
+            .map(|c| {
+                (
+                    c["block"].as_str().unwrap().to_string(),
+                    c["because"]["edge"].as_str().unwrap().to_string(),
+                )
+            })
             .collect()
     };
     let one = order(true, 1);
+    let declared: Vec<&str> = one
+        .iter()
+        .filter(|(_, edge)| edge != "neighbor")
+        .map(|(b, _)| b.as_str())
+        .collect();
     let mut want = vec![s.a.to_string(), q.to_string()];
     want.sort();
-    assert_eq!(one, want, "by block id");
-    assert_eq!(order(false, 2), want);
+    assert_eq!(declared, want, "by block id");
+    // nb8 (D-YXBXH): the unchanged section sibling C gets one neighbor row, after the declared
+    // rows
+    assert_eq!(
+        one[declared.len()..],
+        [(s.c.to_string(), "neighbor".to_string())],
+        "{one:?}"
+    );
+    assert_eq!(order(false, 2), one);
 }
 
 fn edit_of(s: &Spec) -> Value {

@@ -123,3 +123,53 @@ fn cc2_a_weight_of_u32_max_is_accepted() {
     assert_eq!(p.coverage_weight(CoverageDimension::Grounded), u32::MAX);
     assert_eq!(p.coverage_weight(CoverageDimension::Consistent), 1);
 }
+
+// ---- nb3: coverage.max_docs_per_level (D-YXBXH, O6) ----
+
+#[test]
+fn nb3_level_setting_defaults_inherits_and_overrides() {
+    assert_eq!(standard().max_docs_per_level(), 8);
+    assert_eq!(
+        pack_with("coverage:\n  max_docs_per_level: 12\n").max_docs_per_level(),
+        12
+    );
+    // the parent's value is inherited when the child sets another coverage key
+    let inherits = child_of_parent(
+        "coverage:\n  max_docs_per_level: 20\n",
+        "coverage:\n  weights: {grounded: 2}\n",
+    );
+    assert_eq!(inherits.max_docs_per_level(), 20);
+    // a present child value overrides
+    let overrides = child_of_parent(
+        "coverage:\n  max_docs_per_level: 20\n",
+        "coverage:\n  max_docs_per_level: 3\n",
+    );
+    assert_eq!(overrides.max_docs_per_level(), 3);
+    // both ends are accepted
+    for n in [1, 100_000] {
+        let p = pack_with(&format!("coverage:\n  max_docs_per_level: {n}\n"));
+        assert_eq!(p.max_docs_per_level(), n);
+    }
+    // outside the range: the exact text
+    for n in [0u32, 100_001] {
+        let bad = format!("coverage:\n  max_docs_per_level: {n}\n");
+        match try_pack_with(&bad) {
+            Err(SchemaError::Invalid(msg)) => assert_eq!(
+                msg,
+                format!("coverage.max_docs_per_level is {n}; it must be 1 to 100000"),
+                "{bad}"
+            ),
+            other => panic!("{bad}: expected SchemaError::Invalid, got {other:?}"),
+        }
+    }
+    // the typed parser refuses a negative, a fraction, a string and an unknown key
+    for bad in [
+        "coverage:\n  max_docs_per_level: -1\n",
+        "coverage:\n  max_docs_per_level: 2.5\n",
+        "coverage:\n  max_docs_per_level: \"8\"\n",
+        "coverage:\n  max_docs_per_level: 4294967296\n",
+        "coverage:\n  max_docs_per_levl: 8\n",
+    ] {
+        assert!(try_pack_with(bad).is_err(), "{bad}");
+    }
+}

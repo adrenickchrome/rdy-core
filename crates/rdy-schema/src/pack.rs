@@ -222,12 +222,20 @@ pub struct CoverageSettings {
     /// Percent of shared text a restatement must match to count as drift, 1 to 100 (default 60).
     #[serde(default)]
     pub drift_threshold: Option<u32>,
+    /// The most docs one level may hold directly before Complete flags it, 1 to 100000
+    /// (default 8). Left out of the pack's JSON when unset, so a pack that never sets it keeps
+    /// its digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_docs_per_level: Option<u32>,
 }
 
 /// The percent of one a dismissed tension costs, when the pack does not set `dismissed_weight`.
 pub const DEFAULT_DISMISSED_WEIGHT: u32 = 50;
 /// The drift match percent, when the pack does not set `drift_threshold`.
 pub const DEFAULT_DRIFT_THRESHOLD: u32 = 60;
+
+/// The most docs a level holds directly, when the pack does not set `max_docs_per_level`.
+pub const DEFAULT_MAX_DOCS_PER_LEVEL: u32 = 8;
 
 /// The fewest words a normative text needs before two equal texts are a duplicate definition,
 /// when the pack does not set `duplicate_text_min_words`.
@@ -488,6 +496,15 @@ impl Pack {
             .as_ref()
             .and_then(|c| c.drift_threshold)
             .unwrap_or(DEFAULT_DRIFT_THRESHOLD)
+    }
+
+    /// The most docs one level may hold directly: the pack's, else
+    /// [`DEFAULT_MAX_DOCS_PER_LEVEL`].
+    pub fn max_docs_per_level(&self) -> u32 {
+        self.coverage
+            .as_ref()
+            .and_then(|c| c.max_docs_per_level)
+            .unwrap_or(DEFAULT_MAX_DOCS_PER_LEVEL)
     }
 
     /// Every kind in `TensionKind::ALL` order with its severity and whether

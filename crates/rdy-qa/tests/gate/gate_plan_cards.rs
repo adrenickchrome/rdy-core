@@ -509,6 +509,10 @@ fn cp12_deferral_card_lists_only_valid_noncode_deferrals() {
     let batch = item_of(&r, &p.r#ref).unwrap();
     let plan_fact = fact(&batch, "Change plan");
     assert!(plan_fact.ends_with(", 3 deferred"), "{plan_fact}");
+    // nb8: open are b's lapsed item on c and the six neighbor confirms the three edited claims
+    // give their unchanged siblings (z after a; q and z after c; b, q and z after p); p's update
+    // is closed
+    assert_eq!(plan_fact, "7 open, 1 closed, 3 deferred");
 }
 
 /// D-AAQ9Z: every approval path refuses the version with `E_DEFERRAL_OPEN` until its card has an
@@ -767,7 +771,8 @@ fn cp12_code_deferrals_never_hold_a_landing() {
         q.items
     );
     let batch = item_of(&r, &p.r#ref).unwrap();
-    assert_eq!(fact(&batch, "Change plan"), "0 open, 0 closed, 1 deferred");
+    // nb8: z's five unchanged section neighbors confirm; on drafts they stay open advice
+    assert_eq!(fact(&batch, "Change plan"), "5 open, 0 closed, 1 deferred");
     let l = h(&r.land(&approver(), &p.id).expect("lands"));
     let st = r.read();
     let sh = st
@@ -777,10 +782,26 @@ fn cp12_code_deferrals_never_hold_a_landing() {
         .unwrap();
     let sealed = st.reader().plan(&sh).unwrap();
     let items = &sealed.seal.as_ref().unwrap().items;
-    assert_eq!(items.len(), 1, "{items:#?}");
+    assert_eq!(items.len(), 6, "{items:#?}");
+    let code_items: Vec<_> = items
+        .iter()
+        .filter(|i| i.kind == PlanKind::UpdateImplementation)
+        .collect();
+    assert_eq!(code_items.len(), 1, "{items:#?}");
     assert_eq!(
-        (items[0].kind, items[0].outcome, items[0].answer),
-        (PlanKind::UpdateImplementation, PlanOutcome::Deferred, None)
+        (code_items[0].outcome, code_items[0].answer),
+        (PlanOutcome::Deferred, None)
+    );
+    // the neighbor confirms are sealed open, with no answer pointer
+    assert!(
+        items
+            .iter()
+            .filter(|i| i.kind != PlanKind::UpdateImplementation)
+            .all(|i| i.kind == PlanKind::Confirm
+                && i.edge == "neighbor"
+                && i.outcome == PlanOutcome::Open
+                && i.answer.is_none()),
+        "{items:#?}"
     );
 }
 
@@ -852,6 +873,15 @@ fn cp12_one_way_reaffirm_has_its_own_exception() {
     let mut causes = [s.a.clone(), s.c.clone()];
     causes.sort();
     assert_eq!(fact(&ex, "Re-affirms"), causes.join(", "));
+    // nb11 (Q2): the card has no Decisions fact, so it has no related fact: its facts are its
+    // cause list alone
+    assert_eq!(
+        ex.facts
+            .iter()
+            .map(|f| f.name.to_string())
+            .collect::<Vec<_>>(),
+        ["Re-affirms"]
+    );
     assert!(
         ex.card.contains(&format!(
             "Beside {}, on its own: it re-affirms a one_way decision.",
@@ -1080,7 +1110,8 @@ fn cp12_batch_facts_and_recommendation_reasons_are_exact() {
         ]
     );
     assert_eq!(fact(&i, "Re-affirms"), "none");
-    assert_eq!(fact(&i, "Change plan"), "0 open, 0 closed, 0 deferred");
+    // nb8: z's text changed, so its five unchanged section neighbors confirm (drafts: advice)
+    assert_eq!(fact(&i, "Change plan"), "5 open, 0 closed, 0 deferred");
     assert_eq!(
         i.options[0].recommended.as_ref().unwrap().reason(),
         APPROVE_REASON
@@ -1121,6 +1152,11 @@ fn cp12_batch_facts_and_recommendation_reasons_are_exact() {
     .unwrap();
     let ra = propose(&mut r, "ra", &[]);
     let i = item_of(&r, &ra.r#ref).unwrap();
+    // nb11: a batch that writes a decision lists its related decisions: none here, after Decisions
+    let n: Vec<String> = i.facts.iter().map(|f| f.name.to_string()).collect();
+    let at = n.iter().position(|x| x == "Decisions").unwrap();
+    assert_eq!(&n[at + 1..at + 3], ["Related decisions", "Supersedes"]);
+    assert_eq!(fact(&i, "Related decisions"), "none");
     let each: Vec<String> = ds.iter().map(|d| format!("{d} (after {})", s.c)).collect();
     assert_eq!(
         fact(&i, "Re-affirms"),

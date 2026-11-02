@@ -1,14 +1,21 @@
 //! The entity lexicon (FW-EN1, FW-EN3): entity keys, names and aliases by phrase, and the blocks that hold each code literal and each word. Built on first use per scope and carried across writes like the graph.
+//!
+//! One name matcher (D-YXBXH, D-JDW8A): a name or an alias is filed under every key
+//! [`phrase_keys`] gives it, and a text phrase names it when one of the phrase's keys is among
+//! them. An entity's `key` is an exact identifier, filed under its phrase only. An everyday
+//! entity (`everyday: true`) is named only in the text of a block tied to it (O5).
 use crate::Materialized;
-use rdy_graph::{EdgeKind, Graph};
+use rdy_graph::{EdgeKind, Graph, edges_of};
 use rdy_model::entity::{
-    aliases, code_literals, phrase, shown_sources, source_field, text_sources, visit_phrases, words,
+    aliases, code_literals, lines_at, phrase, phrase_keys, shown_sources, source_field,
+    text_sources, visit_phrases, visit_text_sources, words,
 };
-use rdy_model::{Block, BlockId, decision};
+use rdy_model::{Block, BlockId, FieldValue, decision};
 use rdy_schema::{FieldKind, Pack, Trait};
 use serde::Serialize;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 thread_local! {
@@ -47,6 +54,37 @@ pub struct Mention {
     pub text: String,
 }
 
+/// nb4 (D-YXBXH, O5): where a mention's words are, in the stored text of the source leaf that
+/// holds them: the leaf (`body`, a field, `name[i]` or `name.key`), the one-based line of the
+/// match's first byte, the zero-based half-open UTF-8 byte range of the match on that line
+/// (cut at the line's end for a match that goes on to the next line), and the matched words
+/// exactly as stored.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct MentionText {
+    pub field: String,
+    pub line: usize,
+    pub span: [usize; 2],
+    pub words: String,
+}
+
+/// A [`Mention`] with its [`MentionText`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocatedMention {
+    pub mention: Mention,
+    pub text: MentionText,
+}
+
+/// The field that makes an entity everyday: only the boolean `true` does.
+pub const EVERYDAY: &str = "everyday";
+
+/// The block a text is in, as the mention scan reads it: its id, and the everyday entities it
+/// is tied to by a reference, a `describes` link or an `affects` link (the graph's edges of the
+/// block itself), whose mentions it counts.
+pub(crate) struct MentionSource {
+    id: BlockId,
+    ties: BTreeSet<BlockId>,
+}
+
 /// The entity lexicon of one scope. Every part is a function of single blocks, so carrying it
 /// across a write (`with_changes`) equals a rebuild.
 #[derive(Clone, Debug, PartialEq)]
@@ -57,8 +95,11 @@ pub struct Lexicon {
     enum_fields: Arc<BTreeMap<String, BTreeSet<String>>>,
     /// What each entity contributed: its key, name and alias phrases.
     names: imbl::OrdMap<BlockId, Vec<(NameKind, String)>>,
-    /// Each phrase and the entities it names, with how.
+    /// Each key and the entities filed under it, with how: a key under its own phrase, a name or
+    /// an alias under each of its [`phrase_keys`].
     phrases: imbl::OrdMap<String, imbl::OrdSet<(BlockId, NameKind)>>,
+    /// The everyday entities: those whose `everyday` field is the boolean `true`.
+    everyday: imbl::OrdSet<BlockId>,
     /// Each code literal (exact text) and the blocks whose text holds it.
     literals: imbl::OrdMap<String, imbl::OrdSet<BlockId>>,
     /// Each word (case-folded, as [`words`] splits text) and the blocks whose text holds it: a
@@ -80,6 +121,7 @@ impl Lexicon {
             enum_fields: Arc::new(enum_fields(pack)),
             names: imbl::OrdMap::new(),
             phrases: imbl::OrdMap::new(),
+            everyday: imbl::OrdSet::new(),
             literals: imbl::OrdMap::new(),
             words: imbl::OrdMap::new(),
         };
@@ -133,45 +175,107 @@ impl Lexicon {
         self.names.len()
     }
 
-    /// The entities whose key, name or an alias is the phrase of `text`, each once with its best
-    /// kind, sorted by (kind, id). Empty for a text with no words.
+    /// The entities whose key is the phrase of `text`, or whose name or an alias has a key that
+    /// `text`'s phrase has, each once with its best kind, sorted by (kind, id). Empty for a text
+    /// with no words. Everyday entities resolve too: this is an explicit lookup.
     pub fn resolve(&self, text: &str) -> Vec<(BlockId, NameKind)> {
         let p = phrase(text);
-        if p.is_empty() {
-            return vec![];
-        }
-        let Some(set) = self.phrases.get(&p) else {
-            return vec![];
-        };
-        // the set is ordered by (id, kind): the first entry per id is its best kind
-        let mut out: Vec<(BlockId, NameKind)> = vec![];
-        for (id, kind) in set {
-            if out.last().is_none_or(|(last, _)| last != id) {
-                out.push((id.clone(), *kind));
+        let mut best: BTreeMap<&BlockId, NameKind> = BTreeMap::new();
+        for k in phrase_keys(&p) {
+            for (id, kind) in self.phrases.get(k).into_iter().flatten() {
+                // a key is an exact identifier
+                if *kind == NameKind::Key && k != p {
+                    continue;
+                }
+                best.entry(id)
+                    .and_modify(|b| *b = (*b).min(*kind))
+                    .or_insert(*kind);
             }
         }
+        let mut out: Vec<(BlockId, NameKind)> =
+            best.into_iter().map(|(id, k)| (id.clone(), k)).collect();
         out.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
         out
     }
 
+    /// The mention source of block `b`: its id and the everyday entities it is tied to.
+    pub(crate) fn source(&self, b: &Block) -> MentionSource {
+        let ties = if self.everyday.is_empty() {
+            BTreeSet::new()
+        } else {
+            edges_of(b)
+                .into_iter()
+                .filter(|e| is_tie(&e.kind) && self.everyday.contains(&e.to))
+                .map(|e| e.to)
+                .collect()
+        };
+        MentionSource {
+            id: b.id.clone(),
+            ties,
+        }
+    }
+
+    /// Whether a text in `source` can name entity `id`: it is not everyday, or `source` is tied
+    /// to it.
+    fn admits(&self, source: &MentionSource, id: &BlockId) -> bool {
+        !self.everyday.contains(id) || source.ties.contains(id)
+    }
+
     /// The entities `b`'s text names by name or alias (never by key), one mention per entity,
     /// the first found, reading `text_in` in order. An entity never mentions itself.
+    /// [`Lexicon::mentions_located`] without where the words are.
     pub fn mentions(&self, b: &Block) -> Vec<Mention> {
+        self.first_mentions(b).into_iter().map(|(m, _)| m).collect()
+    }
+
+    /// [`Lexicon::mentions`], each with where its words are in `b`'s stored text (nb4,
+    /// D-YXBXH): the source leaf, the one-based line of the match's first byte, the match's
+    /// byte range on that line (cut at the line's end when the match goes on), and the words as
+    /// stored. The scan reads the text with each reference blanked to the same bytes, so the
+    /// positions are those of the stored text.
+    pub fn mentions_located(&self, b: &Block) -> Vec<LocatedMention> {
+        let found = self.first_mentions(b);
+        if found.is_empty() {
+            return vec![];
+        }
+        // the stored leaves that hold a first match, read once more without a scan
+        let mut out: Vec<Option<LocatedMention>> = vec![None; found.len()];
+        visit_text_sources(b, &mut |name, stored, _| {
+            for (slot, (m, range)) in out.iter_mut().zip(&found) {
+                if slot.is_none() && m.field == name {
+                    *slot = Some(LocatedMention {
+                        mention: m.clone(),
+                        text: located(name, stored, range.clone()),
+                    });
+                }
+            }
+            ControlFlow::Continue(())
+        });
+        out.into_iter().flatten().collect()
+    }
+
+    /// The scan of [`Lexicon::mentions`]: each entity's first mention, with the byte range of
+    /// its words in its source's text.
+    fn first_mentions(&self, b: &Block) -> Vec<(Mention, std::ops::Range<usize>)> {
         // no name to find: the text is not read
         if self.phrases.is_empty() {
             return vec![];
         }
+        let source = self.source(b);
         let mut seen: BTreeSet<BlockId> = BTreeSet::new();
         let mut out = vec![];
         for (field, text) in self.sources(b) {
-            self.visit_mention_spans(&text, &b.id, &mut |id, range| {
+            self.visit_mention_spans(&text, &source, &mut |id, range| {
                 if !seen.contains(id) {
                     seen.insert(id.clone());
-                    out.push(Mention {
-                        entity: id.to_string(),
-                        field: field.clone(),
-                        text: text[range].to_string(),
-                    });
+                    out.push((
+                        Mention {
+                            entity: id.to_string(),
+                            field: field.clone(),
+                            text: text[range.clone()].to_string(),
+                        },
+                        range,
+                    ));
                 }
             });
         }
@@ -181,43 +285,50 @@ impl Lexicon {
     /// Each entity `text` names by name or alias (never by key), with the byte range of the
     /// words that name it, in text order; the phrases are those of
     /// [`find_phrases`](rdy_model::entity::find_phrases), longest first.
-    /// A phrase that names several entities gives each, in id order. `source`, the block the
-    /// text is in, is never among them. Each occurrence of a name is given.
+    /// A phrase that names several entities (through any of its keys) gives each once, in id
+    /// order. `source`, the block the text is in, is never among them, and an everyday entity is
+    /// among them only when `source` is tied to it. Each occurrence of a name is given.
     /// [`Lexicon::visit_mention_spans`], collected.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn mention_spans(
         &self,
         text: &str,
-        source: &BlockId,
+        source: &Block,
     ) -> Vec<(BlockId, std::ops::Range<usize>)> {
         let mut out = vec![];
-        self.visit_mention_spans(text, source, &mut |id, range| out.push((id.clone(), range)));
+        let source = self.source(source);
+        self.visit_mention_spans(text, &source, &mut |id, range| {
+            out.push((id.clone(), range))
+        });
         out
     }
 
     /// Calls `visit` with each (entity, range) [`Lexicon::mention_spans`] gives, in the same
     /// order, as the phrases are found: no occurrence is collected, so a name that many
     /// entities share costs no memory per occurrence.
+    ///
+    /// An everyday entity that `source` is not tied to is not known there: the scan goes on to
+    /// shorter and later phrases, so it never hides another entity's name.
     pub(crate) fn visit_mention_spans(
         &self,
         text: &str,
-        source: &BlockId,
+        source: &MentionSource,
         visit: &mut dyn FnMut(&BlockId, std::ops::Range<usize>),
     ) {
         if self.phrases.is_empty() {
             return;
         }
-        visit_phrases(text, &|p| self.known(p), &mut |p, range| {
-            let Some(set) = self.phrases.get(p) else {
-                return;
-            };
-            // the set is ordered by (id, kind): an id that names by two kinds comes twice
-            let mut last: Option<&BlockId> = None;
-            for (id, kind) in set {
-                if *kind == NameKind::Key || id == source || last == Some(id) {
-                    continue;
+        visit_phrases(text, &|p| self.known_in(p, source), &mut |p, range| {
+            // the entities of every key of the phrase, each once, in id order
+            let mut ids: BTreeSet<&BlockId> = BTreeSet::new();
+            for k in phrase_keys(p) {
+                for (id, kind) in self.phrases.get(k).into_iter().flatten() {
+                    if *kind != NameKind::Key && *id != source.id && self.admits(source, id) {
+                        ids.insert(id);
+                    }
                 }
-                last = Some(id);
+            }
+            for id in ids {
                 visit(id, range.clone());
             }
         });
@@ -228,29 +339,44 @@ impl Lexicon {
     pub(crate) fn visit_phrase_spans(
         &self,
         text: &str,
+        source: &MentionSource,
         visit: &mut dyn FnMut(std::ops::Range<usize>),
     ) {
         if self.phrases.is_empty() {
             return;
         }
-        visit_phrases(text, &|p| self.known(p), &mut |_, range| visit(range));
+        visit_phrases(text, &|p| self.known_in(p, source), &mut |_, range| {
+            visit(range)
+        });
     }
 
-    /// Whether a phrase the mention scan accepts starts with `prefix` (folded words joined by
-    /// one space, perhaps ending in part of a word) and is longer than it.
+    /// Whether a phrase the mention scan can accept in some block starts with `prefix` (folded
+    /// words joined by one space, perhaps ending in part of a word) and is longer than it. A
+    /// phrase is accepted through any of its keys, so it extends `prefix` when a key filed under
+    /// a name or an alias starts with `prefix` and is longer, or when that key is `prefix`
+    /// itself, or `prefix` without a final `e`, and the phrase adds `s` or `es` to it. May
+    /// answer yes for a phrase no block accepts.
     pub(crate) fn extends_known(&self, prefix: &str) -> bool {
         use std::ops::Bound;
-        self.phrases
+        let longer = self
+            .phrases
             .range::<_, str>((Bound::Excluded(prefix), Bound::Unbounded))
             .take_while(|(p, _)| p.starts_with(prefix))
-            .any(|(p, _)| self.known(p))
+            .any(|(_, set)| named_by_name(set));
+        let stem = |k: &str| self.phrases.get(k).is_some_and(named_by_name);
+        longer || stem(prefix) || prefix.strip_suffix('e').is_some_and(stem)
     }
 
-    /// Whether the mention scan accepts phrase `p`: it names some entity by name or alias.
-    fn known(&self, p: &str) -> bool {
-        self.phrases
-            .get(p)
-            .is_some_and(|set| set.iter().any(|(_, k)| *k != NameKind::Key))
+    /// Whether the mention scan accepts phrase `p` in `source`: one of its keys names, by name
+    /// or alias, `source` itself or an entity `source` can name.
+    fn known_in(&self, p: &str, source: &MentionSource) -> bool {
+        phrase_keys(p).any(|k| {
+            self.phrases.get(k).is_some_and(|set| {
+                set.iter().any(|(id, kind)| {
+                    *kind != NameKind::Key && (*id == source.id || self.admits(source, id))
+                })
+            })
+        })
     }
 
     /// The blocks whose text holds `literal` (exact text), sorted by id.
@@ -290,25 +416,49 @@ impl Lexicon {
         without(text_sources(b), |f| enums.is_some_and(|e| e.contains(f)))
     }
 
-    /// The blocks whose text holds every word of `phrase` (a [`phrase`]: folded words joined by
-    /// one space), sorted by id. Every block in which
-    /// [`find_phrases`](rdy_model::entity::find_phrases) can find `phrase` is
-    /// among them. Empty for an empty phrase.
+    /// The blocks whose text holds every earlier word of `phrase` (a [`phrase`]: folded words
+    /// joined by one space) and a word its last word can match, sorted by id: for each key of
+    /// `phrase`, that key's last word alone or with `s` or `es` added. Every block in which
+    /// [`find_phrases`](rdy_model::entity::find_phrases) can find a phrase whose keys meet
+    /// `phrase`'s is among them; some others may be. Empty for an empty phrase.
     pub fn blocks_with_words(&self, phrase: &str) -> Vec<BlockId> {
-        let mut sets = vec![];
-        for w in phrase.split(' ').filter(|w| !w.is_empty()) {
-            match self.words.get(w) {
-                Some(set) => sets.push(set),
+        let ws: Vec<&str> = phrase.split(' ').filter(|w| !w.is_empty()).collect();
+        let Some((_, earlier)) = ws.split_last() else {
+            return vec![];
+        };
+        // each word's sets: a block holds the word when one of them holds it
+        let mut groups: Vec<Vec<&imbl::OrdSet<BlockId>>> = vec![];
+        for w in earlier {
+            match self.words.get(*w) {
+                Some(set) => groups.push(vec![set]),
                 None => return vec![],
             }
         }
-        sets.sort_by_key(|s| s.len());
-        let Some((first, rest)) = sets.split_first() else {
+        let start = phrase.len() - ws[ws.len() - 1].len();
+        let mut forms: BTreeSet<String> = BTreeSet::new();
+        for k in phrase_keys(phrase) {
+            // a key keeps the earlier words: its last word starts where the phrase's does
+            let last = &k[start.min(k.len())..];
+            for end in ["", "s", "es"] {
+                forms.insert(format!("{last}{end}"));
+            }
+        }
+        let lasts: Vec<&imbl::OrdSet<BlockId>> = forms
+            .iter()
+            .filter_map(|f| self.words.get(f.as_str()))
+            .collect();
+        if lasts.is_empty() {
+            return vec![];
+        }
+        groups.push(lasts);
+        groups.sort_by_key(|g| g.iter().map(|s| s.len()).sum::<usize>());
+        let Some((first, rest)) = groups.split_first() else {
             return vec![];
         };
-        first
-            .iter()
-            .filter(|id| rest.iter().all(|s| s.contains(*id)))
+        let found: BTreeSet<&BlockId> = first.iter().flat_map(|s| s.iter()).collect();
+        found
+            .into_iter()
+            .filter(|id| rest.iter().all(|g| g.iter().any(|s| s.contains(*id))))
             .cloned()
             .collect()
     }
@@ -356,31 +506,40 @@ impl Lexicon {
         }
     }
 
-    /// The key, name and alias phrases of `b` when it is an entity.
+    /// The key, name and alias phrases of `b` when it is an entity, filed under their keys, and
+    /// whether it is everyday.
     fn add_names(&mut self, b: &Block) {
         if self.is_entity_type(&b.block_type) {
             let names = Lexicon::names_of(b);
             for (kind, p) in &names {
-                self.phrases
-                    .entry(p.clone())
-                    .or_default()
-                    .insert((b.id.clone(), *kind));
+                for k in keys_of(*kind, p) {
+                    self.phrases
+                        .entry(k.to_string())
+                        .or_default()
+                        .insert((b.id.clone(), *kind));
+                }
             }
             self.names.insert(b.id.clone(), names);
+            if b.fields.get(EVERYDAY) == Some(&FieldValue::Bool(true)) {
+                self.everyday.insert(b.id.clone());
+            }
         }
     }
 
     fn remove(&mut self, b: &Block) {
         if let Some(names) = self.names.remove(&b.id) {
-            for (kind, p) in names {
-                if let Some(set) = self.phrases.get_mut(&p) {
-                    set.remove(&(b.id.clone(), kind));
-                    if set.is_empty() {
-                        self.phrases.remove(&p);
+            for (kind, p) in &names {
+                for k in keys_of(*kind, p) {
+                    if let Some(set) = self.phrases.get_mut(k) {
+                        set.remove(&(b.id.clone(), *kind));
+                        if set.is_empty() {
+                            self.phrases.remove(k);
+                        }
                     }
                 }
             }
         }
+        self.everyday.remove(&b.id);
         let (literals, words) = self.terms_of(b);
         for (map, terms) in [(&mut self.literals, literals), (&mut self.words, words)] {
             for t in terms {
@@ -393,6 +552,43 @@ impl Lexicon {
             }
         }
     }
+}
+
+/// Where the words at `range` of `stored`, the stored text of leaf `field`, are: the one-based
+/// line of `range.start`, the range on that line (its end cut at the line's end, before any
+/// `\r\n` or `\n`), and the words as stored.
+fn located(field: &str, stored: &str, range: std::ops::Range<usize>) -> MentionText {
+    let mut line = 1;
+    let mut start = 0;
+    let mut content = stored.len();
+    for (n, (at, text)) in lines_at(stored).enumerate() {
+        if at > range.start {
+            break;
+        }
+        line = n + 1;
+        start = at;
+        content = at + text.len();
+    }
+    let words = stored.get(range.clone()).unwrap_or_default().to_string();
+    MentionText {
+        field: field.to_string(),
+        line,
+        span: [range.start - start, range.end.min(content) - start],
+        words,
+    }
+}
+
+/// The keys a phrase of `kind` is filed under: a key's phrase only, a name's or an alias's
+/// [`phrase_keys`].
+fn keys_of(kind: NameKind, p: &str) -> impl Iterator<Item = &str> {
+    let exact = (kind == NameKind::Key).then_some(p);
+    let folded = (kind != NameKind::Key).then(|| phrase_keys(p));
+    exact.into_iter().chain(folded.into_iter().flatten())
+}
+
+/// Whether a key's entries name some entity by name or alias.
+fn named_by_name(set: &imbl::OrdSet<(BlockId, NameKind)>) -> bool {
+    set.iter().any(|(_, k)| *k != NameKind::Key)
 }
 
 /// Each type's fields of kind `enum` in `pack`.

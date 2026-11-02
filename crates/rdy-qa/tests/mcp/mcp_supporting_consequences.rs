@@ -274,13 +274,22 @@ fn rf10_mcp_reports_missing_source_tension_and_followups() {
     );
     assert_eq!(followups(&p, &y), want_y, "{p:#}");
 
-    // rdy_plan: the same follow-up, read for the view and for the version
-    let want_items = vec![(
-        "update".to_string(),
-        y.to_string(),
-        s1.to_string(),
-        "reflects".to_string(),
-    )];
+    // rdy_plan: the same follow-up, read for the view and for the version, and (nb8, D-YXBXH)
+    // the section confirm that x's text edit owes its unchanged sibling y
+    let want_items = vec![
+        (
+            "confirm".to_string(),
+            y.to_string(),
+            x.to_string(),
+            "neighbor".to_string(),
+        ),
+        (
+            "update".to_string(),
+            y.to_string(),
+            s1.to_string(),
+            "reflects".to_string(),
+        ),
+    ];
     let pv = call(&mut st, rdy_plan, json!({}));
     assert_eq!(items(&pv), want_items, "{pv:#}");
     let pp = call(

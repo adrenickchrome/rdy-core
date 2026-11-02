@@ -150,7 +150,10 @@ fn snap1_a_commit_seeds_the_views_entry_only_when_it_was_built() {
     assert_eq!(r.read().is_built(&Scope::View("v".into())), (false, false));
     doc(&mut r, "v", "two");
     let s = r.read();
-    assert_eq!(s.is_built(&Scope::View("v".into())), (true, false));
+    // nb9 (D-YXBXH, TASK-978 O9): the write creates a block, so it builds its receipt on the
+    // candidate with the view's graph (dependency versions and governing routes), and the entry
+    // it publishes is seeded with that graph too
+    assert_eq!(s.is_built(&Scope::View("v".into())), (true, true));
     assert_eq!(s.materialized(&Scope::View("v".into())).unwrap().len(), 2);
     // plan M2e2: the write logs its moves, and the tension set it builds reads canon
     assert_eq!(

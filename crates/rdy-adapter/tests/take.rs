@@ -271,15 +271,14 @@ fn ha16_adapter_take_matches_core_outcome() {
     let _: StorePosition = last.end;
 
     // refusals are core's, code, text, fix and issues
-    let refused =
-        |h: &mut StoreHandle, core: &mut Rdy, fs: &dyn Fn() -> Vec<File>, t: UploadTarget| {
-            let a = h.take(&fs(), t.clone()).unwrap_err();
-            let c = stream_take::take(core, &fs(), t).unwrap_err();
-            assert_eq!(refusal(&a), refusal(&c));
-            a
-        };
+    let refused = |h: &StoreHandle, core: &mut Rdy, fs: &dyn Fn() -> Vec<File>, t: UploadTarget| {
+        let a = h.take(&fs(), t.clone()).unwrap_err();
+        let c = stream_take::take(core, &fs(), t).unwrap_err();
+        assert_eq!(refusal(&a), refusal(&c));
+        a
+    };
     let fs = || files(dir.path(), "v1", &[&uploads[0].2]);
-    let e = refused(&mut handle, &mut core, &fs, target("v1.0.0", uploads[1].1));
+    let e = refused(&handle, &mut core, &fs, target("v1.0.0", uploads[1].1));
     assert_eq!(
         (e.code, e.message.as_str()),
         (
@@ -299,7 +298,7 @@ fn ha16_adapter_take_matches_core_outcome() {
         ("E_BAD_RECORD", "stream record 0 at byte 0: no batch files")
     );
     let long = target(&"v".repeat(1_048_577), uploads[0].1);
-    let e = refused(&mut handle, &mut core, &fs, long);
+    let e = refused(&handle, &mut core, &fs, long);
     assert_eq!(
         (e.code, e.message.as_str()),
         ("E_LIMIT", "upload tag exceeds 1048576 bytes")
@@ -310,7 +309,7 @@ fn ha16_adapter_take_matches_core_outcome() {
     // a project is no holder: refused, as core refuses it
     r.close().unwrap();
     let src = dir.path().join("src");
-    let mut project = StoreHandle::open(&src).unwrap();
+    let project = StoreHandle::open(&src).unwrap();
     let e = project
         .take(
             &files(dir.path(), "p", &[&uploads[0].2]),
@@ -377,7 +376,7 @@ fn ha16_writes_publish_in_caller_order() {
     let (job_tx, job_rx) = mpsc::channel::<Job>();
     let (reply_tx, reply_rx) = mpsc::channel::<Reply>();
     let worker = std::thread::spawn(move || {
-        let mut handle = StoreHandle::create_holder(&root, id).unwrap();
+        let handle = StoreHandle::create_holder(&root, id).unwrap();
         for (name, fs, t) in job_rx {
             let got = handle.take(&fs, t);
             let tags = handle
@@ -431,7 +430,7 @@ fn ha16_snapshot_refs_and_removal_epoch_are_correct() {
     let dir = tempfile::tempdir().unwrap();
     let (r, secret, v1, v2, before) = removed_source(dir.path());
     let l1 = landing_of(&r, v1);
-    let mut handle = StoreHandle::create_holder(&dir.path().join("holder"), repo(&r)).unwrap();
+    let handle = StoreHandle::create_holder(&dir.path().join("holder"), repo(&r)).unwrap();
     let keys1 = rdy_adapter::stream::check_batch(before.as_slice(), None)
         .unwrap()
         .keys;
@@ -533,7 +532,7 @@ fn ha16_take_preserves_hub_files_after_success_and_failure() {
     std::fs::create_dir_all(&hub).unwrap();
     let ps = paths(&hub, "up", &[&bytes]);
     let root = dir.path().join("holder");
-    let mut handle = StoreHandle::create_holder(&root, repo(&r)).unwrap();
+    let handle = StoreHandle::create_holder(&root, repo(&r)).unwrap();
     let on_disk = |p: &PathBuf| std::fs::read(p).unwrap();
 
     // a refused take: the hub's file is there, byte for byte, and its handle still reads
@@ -584,7 +583,7 @@ fn ha16_failed_take_repair_reads_match_the_sealed_log() {
     let (r, secret, v1, v2, before) = removed_source(dir.path());
     let (l1, l2) = (landing_of(&r, v1), landing_of(&r, v2));
     let root = dir.path().join("holder");
-    let mut handle = StoreHandle::create_holder(&root, repo(&r)).unwrap();
+    let handle = StoreHandle::create_holder(&root, repo(&r)).unwrap();
     let f1 = files(dir.path(), "v1", &[&before]);
     let f2 = files(dir.path(), "v2", &[&export(&r, v2)]);
     handle.take(&f1, target("v1.0.0", l1)).unwrap();
@@ -598,7 +597,7 @@ fn ha16_failed_take_repair_reads_match_the_sealed_log() {
     drop(handle);
 
     // the hub does not know whether the upload landed: it reads the holder again
-    let mut handle = StoreHandle::open_holder(&root).unwrap();
+    let handle = StoreHandle::open_holder(&root).unwrap();
     let snap = handle.snapshot().unwrap();
     let tags = snap.tags().unwrap();
     assert_eq!(
@@ -750,7 +749,7 @@ fn rf4_adapter_check_take_and_history_decode_reflects() {
     }
     // the take into a new holder
     let root = dir.path().join("holder");
-    let mut h = StoreHandle::create_holder(&root, repo).unwrap();
+    let h = StoreHandle::create_holder(&root, repo).unwrap();
     let got = h
         .take(
             &files(dir.path(), "rf4", &[&bytes]),
@@ -805,4 +804,77 @@ fn rf4_adapter_check_take_and_history_decode_reflects() {
         assert_eq!(serde_json::to_value(hr.fsck().unwrap()).unwrap(), fsck);
         hr.close().unwrap();
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// shared handle
+
+fn assert_send_sync<T: Send + Sync>() {}
+
+#[test]
+fn ha16_store_handle_is_send_and_sync() {
+    assert_send_sync::<StoreHandle>();
+}
+
+#[test]
+fn ha16_take_and_dump_share_one_handle_across_threads() {
+    let _clock = rdy_engine::pin_clock(1_000_000);
+    let dir = tempfile::tempdir().unwrap();
+    let (mut r, _, _) = project(&dir.path().join("src"));
+    let v1 = tag(&mut r, "v1.0.0");
+    let l1 = landing_of(&r, v1);
+    let bytes = export(&r, v1);
+    let up = files(dir.path(), "up", &[&bytes]);
+    let h = std::sync::Arc::new(
+        StoreHandle::create_holder(&dir.path().join("holder"), repo(&r)).unwrap(),
+    );
+    let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let taker = {
+        let (h, gate) = (h.clone(), gate.clone());
+        std::thread::spawn(move || {
+            gate.wait();
+            h.take(&up, target("v1.0.0", l1)).unwrap()
+        })
+    };
+    let reader = {
+        let (h, gate) = (h.clone(), gate.clone());
+        let out = dir.path().join("live.rdydump");
+        std::thread::spawn(move || {
+            gate.wait();
+            h.dump(&out).unwrap();
+            let seen = h.snapshot().unwrap().tags().unwrap().len();
+            (out, seen)
+        })
+    };
+    let outcome = taker.join().unwrap();
+    assert!(!outcome.unchanged);
+    let (dump, seen) = reader.join().unwrap();
+    assert!(seen <= 1);
+
+    // the dump is one published state: the holder before the take or after it
+    let loaded = dir.path().join("loaded");
+    rdy_adapter::maintenance::load(&dump, &loaded).unwrap();
+    let copy = StoreHandle::open_holder(&loaded).unwrap();
+    let names: Vec<String> = copy
+        .snapshot()
+        .unwrap()
+        .tags()
+        .unwrap()
+        .into_iter()
+        .map(|(_, t)| t.name)
+        .collect();
+    assert!(names.is_empty() || names == ["v1.0.0"], "{names:?}");
+    copy.close().unwrap();
+
+    // after both threads, a fresh snapshot shows the taken tag
+    let names: Vec<String> = h
+        .snapshot()
+        .unwrap()
+        .tags()
+        .unwrap()
+        .into_iter()
+        .map(|(_, t)| t.name)
+        .collect();
+    assert_eq!(names, ["v1.0.0"]);
+    std::sync::Arc::into_inner(h).unwrap().close().unwrap();
 }

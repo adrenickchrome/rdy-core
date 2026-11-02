@@ -835,16 +835,23 @@ fn ck7_shown_card_appends_verdicts_after_policy() {
         assert_eq!(o.consequences, [ACCEPT_CONSEQUENCE.to_string()]);
         assert!(o.recommended.is_none(), "{o:#?}");
     }
+    // D-91DEW: the card shows concerns and fails no person accepted, so no option is
+    // recommended, Approve's computed reason included
+    assert_eq!(
+        none.options
+            .iter()
+            .filter(|o| o.recommended.is_some())
+            .count(),
+        1,
+        "before the verdicts, Approve is recommended"
+    );
     assert_eq!(
         card.options
             .iter()
             .filter(|o| o.recommended.is_some())
             .count(),
-        none.options
-            .iter()
-            .filter(|o| o.recommended.is_some())
-            .count(),
-        "no new option is recommended"
+        0,
+        "no option is recommended"
     );
     // the stored assessment did not change
     let (after_hash, after) = stored(&e, &p);
@@ -1173,9 +1180,9 @@ fn ck7_only_matching_selected_cases_show() {
 }
 
 /// O13: a verdict moves the card's hash, so every person's approval bound to the card shown
-/// before it is `E_PROPOSAL_MOVED` with the fresh card, which shows the line: an MCP answer, a
-/// list of recommended answers and a direct approval with the card as evidence. The fresh card's
-/// hash lands.
+/// before it is `E_PROPOSAL_MOVED` with the fresh card, which shows the line: an MCP answer and
+/// a direct approval with the card as evidence. A list of recommended answers is refused as a
+/// whole under the fail (D-91DEW). The fresh card's hash lands.
 #[test]
 fn ck7_verdict_moves_every_person_approval_card() {
     let (n, p) = notes_version();
@@ -1221,7 +1228,9 @@ fn ck7_verdict_moves_every_person_approval_card() {
     };
     let err = mcp(&mut st, &shown).unwrap_err();
     shows_line(&err, err.corrected.as_ref().unwrap());
-    // a list of recommended answers
+    // a list of recommended answers: D-91DEW, the fresh card shows a fail no person accepted,
+    // so it has no recommended option and the list is refused before its hash is read (a pass
+    // moves the list's card: ki242_a_pass_keeps_the_computed_reason)
     let (r1, h1) = (p.r#ref.clone(), shown.clone());
     let err = on(&*e, move |r| {
         r.answer_all_recommended(
@@ -1233,7 +1242,11 @@ fn ck7_verdict_moves_every_person_approval_card() {
         )
     })
     .unwrap_err();
-    shows_line(&err, err.corrected.as_ref().unwrap());
+    assert_eq!(err.code, E_BAD_INPUT, "{err:#?}");
+    assert_eq!(
+        err.message,
+        format!("{} has no recommended option", p.r#ref)
+    );
     // a direct approval with the card as evidence
     let (r1, h1) = (p.r#ref.clone(), shown.clone());
     let err = on(&*e, move |r| {
@@ -1985,5 +1998,182 @@ fn ck7_card_limits_refuse_without_truncating_authorization() {
         queue(&n.e, CARD_MAX_TOKENS).unwrap_err(),
         &p.r#ref,
         "16777216 bytes of check verdict text",
+    );
+}
+
+// ---------------------------------------------------------------- D-91DEW
+
+/// The approve option of `card`.
+fn approve_option(card: &Item) -> &rdy_engine::pending::ItemOption {
+    card.options
+        .iter()
+        .find(|o| o.id == "approve")
+        .unwrap_or_else(|| panic!("an approve option: {card:#?}"))
+}
+
+/// `notes`, then two versions: agent:a1's typo edit of `x` (view a1) and agent:a2's typo edit of
+/// `z` (view a2). The first carries the verdict under test; the second has none.
+fn two_versions() -> (Notes, ProposalInfo, ProposalInfo) {
+    let n = notes();
+    write_in(&n.e, "a1", upd(&n.x, "X holds, now."), j_typo());
+    let p = propose_in(&n.e, "a1");
+    write_in(&n.e, "a2", upd(&n.z, "Z holds, now."), j_typo());
+    let q = propose_in(&n.e, "a2");
+    (n, p, q)
+}
+
+/// D-91DEW (KNOWN-ISSUES 242): while the approve card shows a concern or a fail that no person
+/// accepted, no option is recommended. Approve keeps its place and its consequence; the card has
+/// no `Why recommended:` line; its hash moves; the version stays ready. A list of recommended
+/// answers that names the card is refused as a whole, before anything is answered.
+#[test]
+fn ki242_an_unaccepted_concern_or_fail_leaves_no_option_recommended() {
+    for verdict in ["concern", "fail"] {
+        let (n, p, q) = two_versions();
+        let none = approve_card(&n.e, &p.r#ref);
+        assert_eq!(
+            approve_option(&none)
+                .recommended
+                .as_ref()
+                .map(|r| r.reason()),
+            Some(rdy_engine::pending::APPROVE_REASON),
+            "{verdict}: before the verdict"
+        );
+        let review = meaning_verdict(&n.e, &ag("a1"), &p.r#ref, verdict, &n.x);
+        let card = approve_card(&n.e, &p.r#ref);
+        assert_eq!(
+            ids(&card),
+            [
+                "approve".to_string(),
+                accept_id(&review, &p),
+                "reject".to_string(),
+                "later".to_string()
+            ],
+            "{verdict}: Approve keeps its place"
+        );
+        let approve = approve_option(&card);
+        assert_eq!(approve.label, approve_option(&none).label, "{verdict}");
+        assert_eq!(
+            approve.consequences,
+            approve_option(&none).consequences,
+            "{verdict}: Approve keeps its consequence"
+        );
+        assert!(
+            card.options.iter().all(|o| o.recommended.is_none()),
+            "{verdict}: no option is recommended: {card:#?}"
+        );
+        let text = render(&card, CARD_MAX_TOKENS);
+        assert!(!text.contains("Why recommended:"), "{verdict}: {text}");
+        assert!(
+            render(&none, CARD_MAX_TOKENS).contains("Why recommended:"),
+            "{verdict}"
+        );
+        assert_ne!(card.card_hash, none.card_hash, "{verdict}: the hash moves");
+        assert_eq!(not_ready(&n.e, &p.r#ref), None, "{verdict}: still ready");
+        // the list of recommended answers: refused as a whole, nothing answered
+        let head = n.e.read().canon_head();
+        let refs = vec![q.r#ref.clone(), p.r#ref.clone()];
+        let hashes = vec![
+            approve_card(&n.e, &q.r#ref).card_hash,
+            card.card_hash.clone(),
+        ];
+        let err = on(&n.e, move |r| {
+            r.answer_all_recommended(
+                &relay_agent(),
+                PERSON,
+                &refs,
+                &hashes,
+                relay_input("Yes, all of them."),
+            )
+        })
+        .unwrap_err();
+        assert_eq!(err.code, E_BAD_INPUT, "{verdict}: {err:#?}");
+        assert_eq!(
+            err.message,
+            format!("{} has no recommended option", p.r#ref),
+            "{verdict}"
+        );
+        assert_eq!(err.fix, "answer it on its own", "{verdict}");
+        assert_eq!(n.e.read().canon_head(), head, "{verdict}: nothing landed");
+        assert!(has_card(&n.e, &q.r#ref), "{verdict}: the clean card stands");
+        assert!(has_card(&n.e, &p.r#ref), "{verdict}: the held card stands");
+        // the person's own choice still lands it
+        approve_now(&n.e, &p);
+    }
+}
+
+/// D-91DEW: a pass leaves the computed reason as it is; the version stays ready, and a list of
+/// recommended answers binds the fresh card (the old hash is E_PROPOSAL_MOVED).
+#[test]
+fn ki242_a_pass_keeps_the_computed_reason() {
+    let (n, p) = notes_version();
+    let none = approve_card(&n.e, &p.r#ref);
+    meaning_verdict(&n.e, &ag("a1"), &p.r#ref, "pass", &n.x);
+    let card = approve_card(&n.e, &p.r#ref);
+    assert_eq!(ids(&card), ["approve", "reject", "later"]);
+    assert_eq!(
+        approve_option(&card)
+            .recommended
+            .as_ref()
+            .map(|r| r.reason()),
+        Some(rdy_engine::pending::APPROVE_REASON)
+    );
+    let text = render(&card, CARD_MAX_TOKENS);
+    assert!(
+        text.contains(&format!(
+            "Why recommended: {}",
+            rdy_engine::pending::APPROVE_REASON
+        )),
+        "{text}"
+    );
+    assert_ne!(card.card_hash, none.card_hash, "the verdict line moves it");
+    assert_eq!(not_ready(&n.e, &p.r#ref), None, "still ready");
+    let head = n.e.read().canon_head();
+    let (r1, h1) = (p.r#ref.clone(), none.card_hash.clone());
+    let err = on(&n.e, move |r| {
+        r.answer_all_recommended(
+            &relay_agent(),
+            PERSON,
+            &[r1],
+            &[h1],
+            relay_input("Yes, all of them."),
+        )
+    })
+    .unwrap_err();
+    assert_eq!(err.code, E_PROPOSAL_MOVED, "{err:#?}");
+    assert_eq!(n.e.read().canon_head(), head);
+    let (r1, h1) = (p.r#ref.clone(), card.card_hash.clone());
+    let done = on(&n.e, move |r| {
+        r.answer_all_recommended(
+            &relay_agent(),
+            PERSON,
+            &[r1],
+            &[h1],
+            relay_input("Yes, all of them."),
+        )
+    })
+    .expect("the fresh card lands");
+    assert_eq!(done.len(), 1);
+    assert_ne!(n.e.read().canon_head(), head);
+}
+
+/// D-91DEW: a fail a person accepted is not an open verdict. The version is not ready (the
+/// acceptance holds it), so a list of recommended answers meets readiness, not the pre-scan.
+#[test]
+fn ki242_an_accepted_fail_is_left_to_readiness() {
+    let (n, p) = notes_version();
+    let review = meaning_verdict(&n.e, &ag("a1"), &p.r#ref, "fail", &n.x);
+    local(&n.e, &p.r#ref, &accept_id(&review, &p)).unwrap();
+    let want = vec![held("meaning_preservation", &review, &p.r#ref)];
+    let r1 = p.r#ref.clone();
+    assert_eq!(
+        not_ready_issues(on(&n.e, move |r| r.answer_all_recommended(
+            &approver(),
+            PERSON,
+            &[r1],
+            &[],
+            RelayInput::default()
+        ))),
+        want
     );
 }

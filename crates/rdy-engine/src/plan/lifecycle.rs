@@ -483,6 +483,7 @@ pub(crate) fn prepare_landing_plan(
     p: &Proposal,
     by: &Provenance,
     accepted: Option<Hash>,
+    carried: Option<ComputedPlan>,
 ) -> Result<LandingPlan, RdyError> {
     let reader = st.reader();
     let (chain, answers, heads, first) = match reader.plan_of_proposal(version, st.seq())? {
@@ -510,16 +511,22 @@ pub(crate) fn prepare_landing_plan(
     };
     // the version's tension items are those it was made with (ruling task-8 F1): the seal and
     // this guard read the set its readiness read
-    let fixed = compute::fixed_tensions(st, version)?;
-    let computed = compute::compute(
-        st,
-        &p.view,
-        &p.changes,
-        p.canon_at,
-        fixed.as_ref(),
-        &heads,
-        &first,
-    )?;
+    // or the plan the holds computed from the same bound plan on this state
+    let computed = match carried {
+        Some(c) => c,
+        None => {
+            let fixed = compute::fixed_tensions(st, version)?;
+            compute::compute(
+                st,
+                &p.view,
+                &p.changes,
+                p.canon_at,
+                fixed.as_ref(),
+                &heads,
+                &first,
+            )?
+        }
+    };
     // a tension item seals only as updated, confirmed or dismissed (D-ME2HD, D-45RG6): an open
     // one is an unanswered tension, so the version is not ready. Readiness refuses it first; this
     // stays as the guard (rulings/task-5.md F1(a))
@@ -790,7 +797,8 @@ mod tests {
             "a bound version"
         );
         let seq = st.seq();
-        let Err(e) = prepare_landing_plan(&st, &pref.version, &p, &writer().provenance(), None)
+        let Err(e) =
+            prepare_landing_plan(&st, &pref.version, &p, &writer().provenance(), None, None)
         else {
             panic!("the guard lets an open tension item into the seal");
         };

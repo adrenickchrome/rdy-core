@@ -135,7 +135,9 @@ use super::card::{
     CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, REMOVAL_IRREVERSIBLE, card_hash, render_checked,
 };
 use super::item::{ExceptionKind, Fact, Item, ItemKind, ItemOption, Recommended, RemovalCard, age};
-use super::plan::{PlanCardBinding, VersionPlan, defer_ref, deferral_item, version_plan};
+use super::plan::{
+    PlanCardBinding, VersionPlan, defer_ref, deferral_item, version_plan, version_plan_keeping,
+};
 use super::questions::question_items;
 use super::reaffirm::{OpenWork, reaffirm_items};
 use super::snooze::hide_snoozed;
@@ -144,12 +146,16 @@ use crate::coverage::change::{candidate_build, candidate_change};
 use crate::coverage::{CandidateCoverage, confidence_in, lands_unapplied};
 use crate::error::{E_VALIDATION, RdyError, redaction_limit};
 use crate::gate::{ProposalRef, changes_of, open_proposals};
+use crate::lexicon::Lexicon;
+use crate::plan::compute::ComputedPlan;
 use crate::plan::lifecycle::PlanSummary;
 use crate::policy::roles::{ItemFacts, RequiredRole, holds, required_role};
 use crate::policy_verdict::{ChangeFacts, VerdictInputs, WrittenBlock, WrittenDecision};
+use crate::query::summary_in;
 use crate::read_state::Built;
 use crate::readiness::assessment::cut_text;
 use crate::readiness::{Candidate, PlanSource, PolicyChange, Readiness};
+use crate::related::RELATED_CAP;
 use crate::session::{now_ms, rfc3339};
 use crate::tensions::{Tension, TensionKind, TensionSeverity, TensionStatus, tension_label};
 use crate::{Materialized, ReadState, Scope};
@@ -380,7 +386,7 @@ impl ReadState {
                 rt.note(self, &card, Some(&v.next), v.approve_facts());
             }
             let mut items = vec![card];
-            for item in v.exception_items(now) {
+            for item in v.exception_items(self, now) {
                 if !answered(self, &item.r#ref, AnswerAct::Confirm)? {
                     if let Some(rt) = routing.as_mut() {
                         rt.note(self, &item, Some(&v.next), v.confirm_facts(&item));
@@ -600,6 +606,9 @@ pub(crate) struct Holds {
     pub deferral: Option<(Item, usize)>,
     /// The `AcceptDeferrals` ANSWER bound to the version's current deferral card, if any.
     pub accepted: Option<Hash>,
+    /// The plan these holds computed from the version's bound plan, when they did: the landing
+    /// seals the same plan on the same state.
+    pub computed: Option<ComputedPlan>,
 }
 
 /// What holds version `pref` back from landing ([`Holds`]). It does not ask whether the version
@@ -619,6 +628,7 @@ pub(crate) fn approval_holds(
     // the clock is read only where a card is built: a version that writes no decision and has
     // no deferral card reads it never, as before D-AAQ9Z, so a landing's stamps (and with them
     // every later id and hash of a pinned clock) do not move
+    let mut computed = None;
     let card = if decides {
         let v = Version::read(st, *pref, p)?;
         let now = now_ms();
@@ -627,7 +637,7 @@ pub(crate) fn approval_holds(
         {
             return Err(e.clone());
         }
-        for item in v.exception_items(now) {
+        for item in v.exception_items(st, now) {
             if answered(st, &item.r#ref, AnswerAct::Confirm)? {
                 continue;
             }
@@ -642,7 +652,9 @@ pub(crate) fn approval_holds(
         }
         v.deferral_item(now)
     } else {
-        bound_deferral_item(st, pref, &p, now_ms)?.flatten()
+        let (item, plan) = bound_deferral_item(st, pref, &p, now_ms)?;
+        computed = plan;
+        item.flatten()
     };
     let (mut deferral, mut accepted_by) = (None, None);
     if let Some(item) = card {
@@ -658,6 +670,7 @@ pub(crate) fn approval_holds(
         open,
         deferral,
         accepted: accepted_by,
+        computed,
     })
 }
 
@@ -704,14 +717,20 @@ pub(crate) fn show_verdicts(
     item: &mut Item,
 ) -> Result<(), RdyError> {
     let verdicts = crate::check::verdicts::matching_verdicts(st, pref, p)?;
-    with_verdicts(item, pref, verdicts)
+    let open = crate::check::verdicts::open_hold(st, pref, &verdicts)?;
+    with_verdicts(item, pref, verdicts, open)
 }
 
-/// [`show_verdicts`] with the verdicts already read.
+/// [`show_verdicts`] with the verdicts already read. `open` says whether they hold a concern or a
+/// fail that no person accepted ([`crate::check::verdicts::open_hold`]): while one does, no
+/// option is recommended (D-91DEW). Approve keeps its place and consequence; its card shows no
+/// `Why recommended:` line, and the card's hash moves with it. A pass, or a verdict a person
+/// accepted, leaves the computed reason as it is.
 fn with_verdicts(
     item: &mut Item,
     pref: &ProposalRef,
     verdicts: Vec<crate::check::verdicts::MatchingVerdict>,
+    open: bool,
 ) -> Result<(), RdyError> {
     use crate::check::verdicts::ACCEPT_CONSEQUENCE;
     if verdicts.is_empty() {
@@ -742,6 +761,11 @@ fn with_verdicts(
         .position(|o| o.id == "reject" || o.id == "later")
         .unwrap_or(item.options.len());
     item.options.splice(at..at, accept);
+    if open {
+        for o in &mut item.options {
+            o.recommended = None;
+        }
+    }
     item.check_verdicts = verdicts;
     Ok(())
 }
@@ -763,7 +787,8 @@ pub(crate) fn shown_approve_item(
         return Ok(None);
     };
     card.facts = facts;
-    with_verdicts(&mut card, pref, verdicts)?;
+    let open = crate::check::verdicts::open_hold(st, pref, &verdicts)?;
+    with_verdicts(&mut card, pref, verdicts, open)?;
     finish(card, CARD_MAX_TOKENS).map(Some)
 }
 
@@ -950,15 +975,17 @@ fn bound_deferral_item(
     pref: &ProposalRef,
     p: &Proposal,
     now: impl FnOnce() -> i64,
-) -> Result<Option<Option<Item>>, RdyError> {
+) -> Result<(Option<Option<Item>>, Option<ComputedPlan>), RdyError> {
     let Some(bound) = st.reader().plan_of_proposal(&pref.version, st.seq())? else {
-        return Ok(None);
+        return Ok((None, None));
     };
-    let plan = version_plan(st, &pref.version, p, &PlanSource::Bound(Some(bound)))?;
-    Ok(Some(deferral_item(pref, &plan).map(|mut it| {
+    let (plan, computed) =
+        version_plan_keeping(st, &pref.version, p, &PlanSource::Bound(Some(bound)))?;
+    let item = deferral_item(pref, &plan).map(|mut it| {
         raised_from(p, &mut it, now());
         it
-    })))
+    });
+    Ok((Some(item), computed))
 }
 
 /// The deferral card the explicit ref `r` (`defer:P-x@n`) names, its card whole, whether or not
@@ -982,6 +1009,7 @@ pub(crate) fn deferral_card(st: &ReadState, r: &str) -> Result<Option<Item>, Rdy
         return Ok(None);
     }
     bound_deferral_item(st, &pref, &p, now_ms)?
+        .0
         .flatten()
         .map(|i| finish(i, CARD_MAX_TOKENS))
         .transpose()
@@ -2376,6 +2404,10 @@ impl Version {
             facts.push(fact(CONSIDERED_OPTIONS_FACT, c.fact_value()));
             facts.push(fact(ALTERNATIVE_SET_FACT, c.set_value()));
         }
+        // nb11 (D-YXBXH, O10): the related decisions of the decisions it writes, after the
+        // facts of Decisions (the considered options follow it) and before Supersedes
+        let ids: Vec<BlockId> = self.decisions.iter().map(|d| d.block.id.clone()).collect();
+        facts.extend(self.related_facts(st, &ids));
         facts.extend([
             fact("Supersedes", supersedes),
             fact(REAFFIRMS_FACT, reaffirms),
@@ -2391,7 +2423,7 @@ impl Version {
             fact("Change plan", worked_out(plan)),
             fact("Tensions", tensions),
             fact("Coverage", worked_out(self.coverage(st, candidate))),
-            fact("Confidence", worked_out(self.confidence(candidate))),
+            bounded_fact("Confidence", worked_out(self.confidence(candidate))),
             self.base_fact(st),
             fact(
                 "Exceptions",
@@ -2421,6 +2453,82 @@ impl Version {
             facts.push(fact(POLICY_FACT, crate::policy_verdict::fact_value(policy)));
         }
         facts
+    }
+
+    /// nb11 (D-YXBXH, O10, D-ME2HD): the one `Related decisions` fact of the decisions `ids` (none
+    /// for no decisions): the related list a briefing of them gives, read in the proposal's
+    /// candidate at the canon it was proposed on (this version's own build while canon is still
+    /// there, else the proposal's scope), cut to one cap of 20 rows. The value is
+    /// `{n} listed, {m} omitted: {row}; {row}`, each row `{for} {relation} {decision} [{status}]
+    /// via {via}: {summary}`, or `none`; the whole fact is cut as every stored fact is, so the
+    /// counts lead. A list that cannot be read is `not worked out ({code})`.
+    fn related_facts(&self, st: &ReadState, ids: &[BlockId]) -> Vec<Fact> {
+        if ids.is_empty() {
+            return vec![];
+        }
+        let mut anchors: Vec<BlockId> = ids.to_vec();
+        anchors.sort();
+        anchors.dedup();
+        let value = self.related_value(st, &anchors);
+        vec![bounded_fact(RELATED_FACT, worked_out(value))]
+    }
+
+    fn related_value(&self, st: &ReadState, anchors: &[BlockId]) -> Result<String, RdyError> {
+        let (m, g, lex) = if self.p.canon_at == st.canon_head() {
+            let m = Arc::clone(&self.built.m);
+            let g = Arc::clone(self.built.graph.get_or_init(|| {
+                Arc::new(Graph::build_with(
+                    self.built.m.iter(),
+                    Arc::clone(st.reader().tracking()),
+                ))
+            }));
+            let lex = Arc::clone(
+                self.built
+                    .lexicon
+                    .get_or_init(|| Arc::new(Lexicon::build(st.pack(), self.built.m.iter()))),
+            );
+            (m, g, lex)
+        } else {
+            let scope = Scope::Proposal(self.pref.version);
+            (
+                st.materialized(&scope)?,
+                st.graph(&scope)?,
+                st.lexicon(&scope)?,
+            )
+        };
+        let (mut rows, mut omitted) = crate::related::related_in(&m, &g, &lex, anchors)?;
+        // one cap in all, as a briefing of these decisions has
+        if rows.len() > RELATED_CAP {
+            omitted += rows.len() - RELATED_CAP;
+            rows.truncate(RELATED_CAP);
+        }
+        if rows.is_empty() {
+            return Ok("none".to_string());
+        }
+        let listed: Vec<String> = rows
+            .iter()
+            .map(|r| {
+                let summary = BlockId::parse(&r.decision)
+                    .ok()
+                    .and_then(|id| m.get(&id))
+                    .map(|b| summary_in(b, &m))
+                    .unwrap_or_default();
+                format!(
+                    "{} {} {} [{}] via {}: {}",
+                    r.for_decision,
+                    r.relation,
+                    r.decision,
+                    r.status,
+                    r.via.word(),
+                    summary
+                )
+            })
+            .collect();
+        Ok(format!(
+            "{} listed, {omitted} omitted: {}",
+            rows.len(),
+            listed.join("; ")
+        ))
     }
 
     /// The Base fact: the canon the version was proposed on, and whether canon is still there.
@@ -2631,12 +2739,23 @@ impl Version {
         let level = name_of(&c.confidence);
         Ok(match c.reasons.first() {
             None => level,
-            Some(r) => format!("{level}: {} on {}", name_of(&r.code), r.block),
+            Some(r) => {
+                let mut line = format!("{level}: {} on {}", name_of(&r.code), r.block);
+                // nb11 (D-YXBXH): an unlinked mention names its words, JSON-quoted so a line
+                // break shows escaped
+                if r.code == crate::coverage::IssueCode::UnlinkedMention
+                    && let Some(t) = &r.text
+                {
+                    let words = serde_json::to_string(&t.words).unwrap_or_default();
+                    line.push_str(&format!(" ({words})"));
+                }
+                line
+            }
         })
     }
 
     /// The `confirm` items of the version's exceptions, by ref, answered or not.
-    fn exception_items(&self, now: i64) -> Vec<Item> {
+    fn exception_items(&self, st: &ReadState, now: i64) -> Vec<Item> {
         let r = self.r#ref();
         let mut out: Vec<Item> = self
             .decisions
@@ -2662,6 +2781,9 @@ impl Version {
                         value: self.findings(&d.block),
                     });
                 }
+                // nb11 (D-YXBXH, O10): the decision's related decisions, before the verdict lines
+                it.facts
+                    .extend(self.related_facts(st, std::slice::from_ref(&d.block.id)));
                 let reason = text(&d.block, "recommend_reason")
                     .unwrap_or_default()
                     .to_string();
@@ -2872,6 +2994,8 @@ use crate::check::options::{ALTERNATIVE_SET_FACT, CONSIDERED_OPTIONS_FACT};
 /// The name of the batch fact that gives the canon the version was proposed on; it is the one
 /// fact the approve card reads live, not from the stored assessment (I-d).
 const BASE_FACT: &str = "Base";
+/// nb11: the fact that lists the related decisions of a card's decisions.
+pub const RELATED_FACT: &str = "Related decisions";
 /// The name of the exception fact of a superseding decision that lists the findings it depends
 /// on (rf9, TASK-507 (3)); it follows the exception-kind facts.
 pub const FINDINGS_FACT: &str = "Findings";
@@ -2915,6 +3039,21 @@ fn count(n: usize, word: &str) -> String {
     }
 }
 
+/// A fact whose `{name}: {value}` line is cut as every stored fact is (`cut_text`, 4,096 bytes
+/// with the name and separator), so the shown fact is the stored one and its hash binds the cut
+/// text.
+fn bounded_fact(name: &'static str, value: String) -> Fact {
+    let line = cut_text(format!("{name}: {value}"));
+    let value = match line.split_once(": ") {
+        Some((_, v)) => v.to_string(),
+        None => String::new(),
+    };
+    Fact {
+        name: name.into(),
+        value,
+    }
+}
+
 /// A computed fact, or the code of the error that kept it from being worked out.
 fn worked_out(r: Result<String, RdyError>) -> String {
     r.unwrap_or_else(|e| format!("not worked out ({})", e.code))
@@ -2955,6 +3094,80 @@ mod tests {
             relay_evidence: None,
             evidence_kind: None,
             note: None,
+        }
+    }
+
+    /// A matching `verdict` row of review `review`.
+    fn verdict_row(review: Hash, verdict: &str) -> crate::check::verdicts::MatchingVerdict {
+        crate::check::verdicts::MatchingVerdict {
+            request: Hash::of(b"request"),
+            review,
+            check: "meaning_preservation".into(),
+            mode: "independent".into(),
+            actor: "agent:r".into(),
+            run: None,
+            verdict: verdict.into(),
+            reason: if verdict == "pass" {
+                String::new()
+            } else {
+                "it reads otherwise".into()
+            },
+            citations: vec![],
+            case_hash: Hash::of(b"case"),
+        }
+    }
+
+    /// An approve card with the computed reason, as the queue builds it before the verdicts.
+    fn approve_card() -> Item {
+        let mut card = item(ItemKind::Approve, "P-0123456789ab@1", "A version");
+        card.options = vec![
+            option("approve", "Approve", "Lands it.", Some(APPROVE_REASON)),
+            option("reject", "Reject", "Rejects it.", None),
+            later(),
+        ];
+        card
+    }
+
+    /// D-91DEW (KNOWN-ISSUES 242): an unaccepted concern or fail leaves no option recommended,
+    /// with Approve in its place; a pass, or a fail the person accepted, leaves the reason as it
+    /// is.
+    #[test]
+    fn ki242_only_an_unaccepted_concern_or_fail_drops_the_recommendation() {
+        use crate::check::verdicts::unaccepted;
+        let pref = ProposalRef {
+            version: Hash::of(b"version"),
+            stable: Hash::of(b"version"),
+            n: 1,
+        };
+        let review = Hash::of(b"review");
+        let accepted: BTreeSet<Hash> = [review].into_iter().collect();
+        for (verdict, held, open) in [
+            ("concern", &BTreeSet::new(), true),
+            ("fail", &BTreeSet::new(), true),
+            ("pass", &BTreeSet::new(), false),
+            ("fail", &accepted, false),
+        ] {
+            let rows = vec![verdict_row(review, verdict)];
+            assert_eq!(unaccepted(&rows, held), open, "{verdict}");
+            let mut card = approve_card();
+            with_verdicts(&mut card, &pref, rows, open).unwrap();
+            assert_eq!(card.options[0].id, "approve", "{verdict}");
+            assert_eq!(card.options[0].consequences, ["Lands it."], "{verdict}");
+            let reason = card.options[0].recommended.as_ref().map(|r| r.reason());
+            let text = render(&card, CARD_MAX_TOKENS);
+            if open {
+                assert!(
+                    card.options.iter().all(|o| o.recommended.is_none()),
+                    "{verdict}"
+                );
+                assert!(!text.contains("Why recommended:"), "{verdict}: {text}");
+            } else {
+                assert_eq!(reason, Some(APPROVE_REASON), "{verdict}");
+                assert!(
+                    text.contains(&format!("Why recommended: {APPROVE_REASON}")),
+                    "{verdict}: {text}"
+                );
+            }
         }
     }
 

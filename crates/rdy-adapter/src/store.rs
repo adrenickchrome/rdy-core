@@ -153,9 +153,11 @@ impl StoreHandle {
     /// holder: the closure, its approved removals and the tag in one sealed batch, or nothing
     /// (`crate::take`). The files may come in any order and repeat each other. The handles are
     /// cloned for the call and the files stay the caller's. A project is refused (`this store is
-    /// a project`). The `&mut` borrow orders the writes of this handle.
+    /// a project`). The call takes `&self`: writes through a shared handle are ordered by the
+    /// store's one writer, and `dump` and `dump_after` read one captured published state and do
+    /// not wait for a take.
     pub fn take(
-        &mut self,
+        &self,
         batches: &[std::fs::File],
         target: crate::take::UploadTarget,
     ) -> Result<crate::take::TakeOutcome, RdyError> {
@@ -167,9 +169,10 @@ impl StoreHandle {
     /// requested profile's facts in the root tag's snapshot, after core's checks and before
     /// anything is appended (`crate::publication_take`). A verdict that refuses returns its own
     /// error unchanged and appends nothing. The verdict runs on the writer and must not call
-    /// this handle's store.
+    /// this handle's store. The call takes `&self`, as `take` does: writes through a shared
+    /// handle are ordered by the store's one writer.
     pub fn take_publication<E: Send + 'static>(
-        &mut self,
+        &self,
         batches: &[std::fs::File],
         target: crate::publication_take::PublicationTarget,
         verdict: impl FnOnce(&crate::publication_take::PublicationFacts) -> Result<(), E>

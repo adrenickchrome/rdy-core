@@ -292,16 +292,22 @@ fn cbrief1_coverage_over_the_limit_is_e_limit() {
     use rdy_engine::brief::MAX_BRIEF_BLOCKS;
     let (_d, mut r) = project();
     let work = Scope::View("work".into());
-    // the doc, its section and 4,998 claims: exactly the limit
+    // the doc, 50 sections and 4,949 claims, at most 99 to a section: exactly the limit. O2's
+    // neighbor walk (1,000,000 visits) costs about n^2 for a section of n claims, so the claims
+    // are spread over small sections to reach the coverage bound (as brf1, rulings/task-8.md 2)
+    let (sections, claims) = (50, MAX_BRIEF_BLOCKS - 51);
+    let per = claims.div_ceil(sections);
     let mut ops = vec![
         json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": "big", "title": "Big", "doc_type": "overview"}}),
-        json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "All"}}),
     ];
-    ops.extend((0..MAX_BRIEF_BLOCKS - 2).map(|i| {
-        json!({"op": "create", "type": "claim", "id": format!("$c{i}"), "parent": "$s", "body": format!("Claim {i}.")})
+    ops.extend((0..sections).map(|n| {
+        json!({"op": "create", "type": "section", "id": format!("$s{n}"), "parent": "$d", "fields": {"title": format!("Part {n}")}})
+    }));
+    ops.extend((0..claims).map(|i| {
+        json!({"op": "create", "type": "claim", "id": format!("$c{i}"), "parent": format!("$s{}", i / per), "body": format!("Claim {i}.")})
     }));
     let w = write(&mut r, "work", json!(ops)).unwrap();
-    let section = w.created["$s"].clone();
+    let section = w.created["$s0"].clone();
     let g = linked(&r);
     g.write("src/big.rs", "b\n");
     g.commit("feat: big\n\nImplements: big");
@@ -325,4 +331,26 @@ fn cbrief1_coverage_over_the_limit_is_e_limit() {
             .starts_with("the code briefing covers more than 5000 blocks"),
         "{e}"
     );
+    drop((r, _d));
+
+    // O2 pinned, not hidden: a code briefing of one section of 1,001 claims is over the
+    // neighbor walk's visits
+    let (_d, mut r) = project();
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": "big", "title": "Big", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "All"}}),
+    ];
+    ops.extend((0..1_001).map(|i| {
+        json!({"op": "create", "type": "claim", "id": format!("$c{i}"), "parent": "$s", "body": format!("Claim {i}.")})
+    }));
+    write(&mut r, "work", json!(ops)).unwrap();
+    let g = linked(&r);
+    g.write("src/big.rs", "b\n");
+    g.commit("feat: big\n\nImplements: big");
+    let e = r
+        .read()
+        .brief_code(&work, "src/big.rs", None, None)
+        .unwrap_err();
+    assert_eq!(e.code, "E_LIMIT", "{e}");
+    assert_eq!(e.message, "neighbor walk exceeds 1000000 visits", "{e}");
 }

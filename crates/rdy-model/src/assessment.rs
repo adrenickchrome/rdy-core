@@ -38,7 +38,7 @@ pub const DIMENSIONS: [&str; 6] = [
     "governed",
 ];
 /// The issue codes.
-pub const ISSUE_CODES: [&str; 12] = [
+pub const ISSUE_CODES: [&str; 14] = [
     "untied_content",
     "unlinked_mention",
     "open_tension",
@@ -51,6 +51,8 @@ pub const ISSUE_CODES: [&str; 12] = [
     "open_question",
     "ungrounded",
     "unapplied_decision",
+    "crowded_level",
+    "question_as_prose",
 ];
 /// The tension kinds a stored tension row may carry.
 pub const TENSION_KINDS: [&str; 10] = [

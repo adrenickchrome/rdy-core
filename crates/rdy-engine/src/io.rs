@@ -1416,6 +1416,14 @@ impl Rdy {
                 }
             })
             .collect();
+        // nb9 (O9): one receipt over every author change's creates, on the final candidate,
+        // before anything is appended; registered once the import is published
+        let receipt = crate::brief::created_record(
+            &self.pack,
+            &existing,
+            || self.read().graph(&scope),
+            &all_ops,
+        )?;
         let committed = self.store.commit_many(
             view,
             changes,
@@ -1435,6 +1443,7 @@ impl Rdy {
                 view: view.to_string(),
             })?,
         }
+        let briefing = crate::brief::register_created(&self.briefs, receipt);
         let ids: Vec<String> = committed.iter().map(ToString::to_string).collect();
         let created = all_ops
             .iter()
@@ -1452,6 +1461,7 @@ impl Rdy {
             warnings,
             code_recorded: None,
             justification: None,
+            briefing,
         })
     }
 

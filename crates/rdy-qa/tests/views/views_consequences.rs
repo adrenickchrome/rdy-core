@@ -274,7 +274,13 @@ fn vcq1_max_tokens_cuts_view_op_consequences_with_counts() {
     )
     .unwrap();
     assert_eq!(v["consequences"], json!([]));
-    assert_eq!(v["consequences_omitted"], json!({"suspect": 1}), "{v}");
+    // b's suspect entry, and (nb8, D-YXBXH) the section confirm A's edit gives C: both cut,
+    // both counted
+    assert_eq!(
+        v["consequences_omitted"],
+        json!({"dependent": 1, "suspect": 1}),
+        "{v}"
+    );
 }
 
 #[test]

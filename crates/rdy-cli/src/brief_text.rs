@@ -40,6 +40,38 @@ fn section_lines(out: &mut Vec<String>, title: &str, entries: impl Iterator<Item
     }
 }
 
+/// nb7: one neighbor row: `<block> (<via> neighbor of <of>[ through <entity>]; doc <doc>)
+/// <summary>`, with ` through <entity>` on an entity row only.
+fn neighbor_line(n: &Value) -> String {
+    let of: Vec<&str> = n["of"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let through = n["entity"]
+        .as_str()
+        .map(|e| format!(" through {e}"))
+        .unwrap_or_default();
+    format!(
+        "{} ({} neighbor of {}{through}; doc {}) {}",
+        s(n, "block"),
+        s(n, "via"),
+        of.join(", "),
+        s(n, "doc"),
+        s(n, "summary")
+    )
+}
+
+/// nb9 (t-F3KR2): the line a write reply's created-block briefing adds, `\nbriefing: <token>`;
+/// empty when the reply has none.
+pub fn created_briefing_text(reply: &Value) -> String {
+    match reply["briefing"]["token"].as_str() {
+        Some(token) => format!("\nbriefing: {}", one_line(token)),
+        None => String::new(),
+    }
+}
+
 /// One related decision: `<decision> [<status>] <relation> (<entities>): <statement>`, without
 /// the parentheses when it names no entity.
 fn related_line(r: &Value) -> String {
@@ -357,6 +389,17 @@ pub fn header(briefing: &Value) -> String {
         .collect::<Vec<_>>();
     if !related.is_empty() {
         section(&mut out, "related decisions", related.into_iter());
+    }
+    // nb7: each section only when it has rows (the JSON keeps both keys, empty or not)
+    let neighbors = list("neighbors").map(neighbor_line).collect::<Vec<_>>();
+    if !neighbors.is_empty() {
+        section(&mut out, "neighbors", neighbors.into_iter());
+    }
+    let by_doc = list("neighbors_by_doc")
+        .map(|c| format!("{}: {}", s(c, "doc"), c["count"]))
+        .collect::<Vec<_>>();
+    if !by_doc.is_empty() {
+        section(&mut out, "neighbors by doc", by_doc.into_iter());
     }
     // rf9: the findings the covered decisions depend on (the count the cap left out is in the
     // JSON as findings_omitted)
@@ -1287,6 +1330,41 @@ mod tests {
             "coverage": {"score": 100, "dimensions": {}, "pages": [], "issues": [], "confidence": "high", "reasons": []}
         }));
         assert!(!none.contains("coverage"), "{none}");
+    }
+
+    #[test]
+    fn nb7_the_header_lists_neighbors_and_their_counts_after_related_decisions() {
+        let b = json!({
+            "base": {"token": "t", "blocks": [{"id": "c-1"}]},
+            "related_decisions": [{"for": "c-1", "decision": "D-1", "status": "live", "statement": "Ledger first", "relation": "same_entity", "entities": []}],
+            "neighbors": [
+                {"block": "c-2", "of": ["c-1"], "via": "section", "doc": "d-1", "summary": "Two."},
+                {"block": "c-3", "of": ["c-1", "c-4"], "via": "entity", "entity": "en-1", "doc": "d-2", "summary": "Three\nlines."}
+            ],
+            "neighbors_by_doc": [{"doc": "d-1", "count": 1}, {"doc": "d-2", "count": 1}]
+        });
+        let h = header(&b);
+        assert!(
+            h.contains("# related decisions:\n#   D-1 [live] same_entity: Ledger first\n# neighbors:\n#   c-2 (section neighbor of c-1; doc d-1) Two.\n#   c-3 (entity neighbor of c-1, c-4 through en-1; doc d-2) Three lines.\n# neighbors by doc:\n#   d-1: 1\n#   d-2: 1\n"),
+            "{h}"
+        );
+        let none =
+            header(&json!({"base": {"token": "t"}, "neighbors": [], "neighbors_by_doc": []}));
+        assert!(!none.contains("neighbors"), "{none}");
+    }
+
+    #[test]
+    fn nb9_a_created_briefing_is_one_line_and_nothing_without_one() {
+        assert_eq!(
+            created_briefing_text(&json!({"briefing": {"token": "ab12", "covers": 2}})),
+            "\nbriefing: ab12"
+        );
+        assert_eq!(created_briefing_text(&json!({"change": "x"})), "");
+        // a full briefing (a refusal's) is no receipt
+        assert_eq!(
+            created_briefing_text(&json!({"briefing": {"base": {"token": "ab12"}}})),
+            ""
+        );
     }
 
     #[test]

@@ -59,6 +59,18 @@ fn cc12_rdy_coverage_over_mcp_defaults_to_the_view() {
             .any(|i| { i["code"] == "unlinked_mention" && i["block"] == block.as_str() }),
         "the unlinked mention in the view is listed: {v}"
     );
+    // nb4 (D-YXBXH): the issue names the words and where they are
+    let mention = v["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["code"] == "unlinked_mention" && i["block"] == block.as_str())
+        .unwrap();
+    assert_eq!(
+        mention["text"],
+        json!({"field": "body", "line": 1, "span": [4, 10], "words": "ledger"}),
+        "{v}"
+    );
     let canon = c.call("rdy_coverage", json!({"scope": "canon"})).ok();
     assert!(
         canon["issues"]
@@ -86,6 +98,50 @@ fn cc12_a_small_budget_cuts_issues_and_says_so() {
         v["issues_total"].as_u64().unwrap(),
         "the cut list is the issues: {v}"
     );
+    // nb4: each listed unlinked mention keeps its text under the cut
+    for i in v["issues"].as_array().unwrap() {
+        if i["code"] == "unlinked_mention" {
+            assert_eq!(i["text"]["words"], "ledger", "{i}");
+        }
+    }
+}
+
+/// nb4 (D-YXBXH): an unlinked mention carries its located text, and `rdy_coverage` and
+/// `rdy_brief` give the same text object for it; neither takes a new parameter.
+#[test]
+fn nb4_mcp_coverage_and_brief_share_mention_text() {
+    let (_d, mut c, section) = mcp_project();
+    let w = c
+        .call(
+            "rdy_write",
+            json!({"ops": [{"op": "create", "type": "claim", "parent": section,
+                "body": "Entries are final.\nThe ledger is append-only."}]}),
+        )
+        .ok();
+    let block = w["suggestions"][0]["block"].as_str().unwrap().to_string();
+    let want = json!({"field": "body", "line": 2, "span": [4, 10], "words": "ledger"});
+    let mention = |issues: &Value| -> Value {
+        let found: Vec<&Value> = issues
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| i["code"] == "unlinked_mention" && i["block"] == block.as_str())
+            .collect();
+        assert_eq!(found.len(), 1, "{issues}");
+        found[0]["text"].clone()
+    };
+    let v = c.call("rdy_coverage", json!({})).ok();
+    assert_eq!(mention(&v["issues"]), want, "{v}");
+    let b = c.call("rdy_brief", json!({"ids": [block.clone()]})).ok();
+    assert_eq!(mention(&b["coverage"]["issues"]), want, "{b}");
+    // only the unlinked mention carries text
+    for i in v["issues"].as_array().unwrap() {
+        assert_eq!(
+            i.get("text").is_some(),
+            i["code"] == "unlinked_mention",
+            "{i}"
+        );
+    }
 }
 
 /// Final review M4 (the task-6 ruling): the tool descriptions state the past-landing rule. A

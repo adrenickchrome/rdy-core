@@ -1,5 +1,5 @@
 //! The review queue: every request, oldest change first, settled pairs out; and the next request a session may take.
-use crate::semantic::candidates::{Item, Request, request_label};
+use crate::semantic::candidates::{CrossViewContext, Item, Request, request_label};
 use crate::{RdyError, ReadState};
 use rdy_model::Hash;
 use std::collections::BTreeSet;
@@ -68,7 +68,7 @@ impl ReadState {
     }
 
     /// Visits the requests in queue order until `visit` breaks. Each change's requests are
-    /// computed only when the walk reaches it.
+    /// computed only when the walk reaches it, with one cross-view context for the whole walk.
     fn walk_queue(
         &self,
         mut visit: impl FnMut(Request) -> Result<ControlFlow<()>, RdyError>,
@@ -79,8 +79,9 @@ impl ReadState {
         changes.sort();
         let semantic = self.semantic();
         let mut seen: BTreeSet<Hash> = BTreeSet::new();
+        let mut cross = CrossViewContext::default();
         for (_, c) in changes {
-            for q in self.requests_from(&c)? {
+            for q in self.requests_from_with(&c, &mut cross)? {
                 if !seen.insert(q.key) || semantic.settled(&q.key).is_some() {
                     continue;
                 }

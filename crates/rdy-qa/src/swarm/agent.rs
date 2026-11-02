@@ -9,7 +9,11 @@
 //! - A write names the change it made in `change`, the block it wrote or created in `block`,
 //!   and, for an update, the version it was made from in `base`.
 //! - Before a `propose` of a live view the agent answers its change plan (`answer_plan`): a
-//!   `plan` entry per page read and one `plan_answer` entry, each naming the view in `view`.
+//!   `plan` entry per page read (its `reply` holds the counts and a row `{id, kind, edge, state}`
+//!   for each item the page showed) and one `plan_answer` entry, each naming the view in `view`.
+//!   The call answers the open neighbor items with a confirm follow-up by one group (M3e, nb10:
+//!   D-YXBXH); the entry's `reply.group` holds `{edge, follow_up, items, returned}` and
+//!   `reply.answers` lists every answer the call names, each item once.
 //! - `propose`, `land`, `accept_advice`, `version_plan`, `pending` and `accept_deferrals` name
 //!   the proposal ref `P-x@n` in `block`; an `Ok` `propose` entry's `reply` is
 //!   `{alternatives}`, the choice it made (null: none). `alt_create` names the agent's view in
@@ -518,67 +522,299 @@ pub(crate) fn plan_answer_for(kind: &str) -> Option<(&'static str, &'static str)
     }
 }
 
+/// The edge, the follow-up, the act and the reason of the one group an actor answers the neighbor
+/// items with (D-YXBXH: "one grouped answer `group: {edge: neighbor}` closes them"): the neighbor
+/// items whose follow-up is `confirm`, which M3b's readiness needs an answer for on stable
+/// content.
+pub const GROUP_EDGE: &str = "neighbor";
+pub const GROUP_FOLLOW_UP: &str = "confirm";
+pub const GROUP_ACT: &str = "confirm";
+pub const GROUP_REASON: &str = "swarm: checked";
+
+/// One item of a plan read, as the answers read it: its id, kind and edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanRow {
+    pub id: String,
+    pub kind: String,
+    pub edge: String,
+}
+
+/// An item answered by its id: the act and the reason its kind gets (`plan_answer_for`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplicitAnswer {
+    pub item: String,
+    pub kind: String,
+    pub act: &'static str,
+    pub reason: &'static str,
+}
+
+/// How an actor answers the open items it read: the ids of the group, and the items it answers
+/// by id.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PlanAnswers {
+    /// The open neighbor items with a confirm follow-up, in plan order: one group answers them.
+    pub group: Vec<String>,
+    /// Every other open item that gates or warns, with the act of its kind.
+    pub explicit: Vec<ExplicitAnswer>,
+}
+
+/// Whether an item is in the group `{edge: neighbor, follow_up: confirm}` as the engine reads it
+/// (`PlanGroup`: follow-up `confirm` names the kinds `confirm` and `rejustify`).
+pub fn in_neighbor_group(kind: &str, edge: &str) -> bool {
+    edge == GROUP_EDGE && matches!(kind, "confirm" | "rejustify")
+}
+
+/// Splits the open items `open` of a plan read: the neighbor confirm items go to the group, each
+/// other item keeps the act of its kind (`plan_answer_for`; a neighbor `update` item, which
+/// states a literal the write removed, defers like every update item). A code item stays open.
+pub fn split_plan_answers(open: &[PlanRow]) -> PlanAnswers {
+    let mut out = PlanAnswers::default();
+    for row in open {
+        if in_neighbor_group(&row.kind, &row.edge) {
+            out.group.push(row.id.clone());
+        } else if let Some((act, reason)) = plan_answer_for(&row.kind) {
+            out.explicit.push(ExplicitAnswer {
+                item: row.id.clone(),
+                kind: row.kind.clone(),
+                act,
+                reason,
+            });
+        }
+    }
+    out
+}
+
+/// What a whole plan read showed: its open items, the neighbor items an earlier answer of the
+/// swarm closed, and a compact row for each item for the journal.
+#[derive(Debug, Default)]
+pub struct PlanRead {
+    pub open: Vec<PlanRow>,
+    /// Closed neighbor confirm items that carry the group's own answer (`swarm: checked`).
+    pub checked: BTreeSet<String>,
+}
+
+impl PlanRead {
+    /// Takes the items of one page. Returns the page's rows for the journal, as
+    /// `{id, kind, edge, state}`.
+    pub fn take(&mut self, page: &Value) -> Value {
+        let mut rows = vec![];
+        for i in page["items"].as_array().into_iter().flatten() {
+            let (Some(id), Some(kind)) = (i["id"].as_str(), i["kind"].as_str()) else {
+                continue;
+            };
+            let edge = i["edge"].as_str().unwrap_or_default();
+            rows.push(json!({"id": id, "kind": kind, "edge": edge, "state": i["state"]}));
+            if i["state"] == "open" {
+                self.open.push(PlanRow {
+                    id: id.to_string(),
+                    kind: kind.to_string(),
+                    edge: edge.to_string(),
+                });
+            } else if is_checked(i) {
+                self.checked.insert(id.to_string());
+            }
+        }
+        Value::Array(rows)
+    }
+}
+
+/// Whether a plan row is a neighbor confirm item that holds the group's answer.
+fn is_checked(i: &Value) -> bool {
+    i["state"] == "closed"
+        && in_neighbor_group(
+            i["kind"].as_str().unwrap_or_default(),
+            i["edge"].as_str().unwrap_or_default(),
+        )
+        && i["answer"]["act"] == GROUP_ACT
+        && i["answer"]["reason"] == GROUP_REASON
+}
+
+/// The pages of an answer reply, whole: `first` and every page its `next` cursor leads to,
+/// fetched with `fetch` (a `rdy_plan {page}` call, `rdy plan --page`), in order. `Ok(None)` when
+/// `fetch` gave no page (the call was lost to the kill or refused, and the caller has judged it);
+/// the error is a cursor that comes round again, which would never end.
+pub fn follow_pages(
+    first: &Value,
+    mut fetch: impl FnMut(&str) -> Option<Value>,
+) -> Result<Option<Vec<Value>>, String> {
+    let mut pages = vec![first.clone()];
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    while let Some(next) = pages[pages.len() - 1]["next"].as_str().map(str::to_string) {
+        if !seen.insert(next.clone()) {
+            return Err(format!("the answer reply's cursor {next} came round again"));
+        }
+        match fetch(&next) {
+            Some(page) => pages.push(page),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(pages))
+}
+
+/// The ids a group answer returned, and the refusal text when they are not exactly the group.
+/// `pages` are the whole plan the answers left (`follow_pages` over `rdy_plan`'s reply or `rdy
+/// --json plan`'s): the neighbor confirm items that carry the group's answer, less those `before`
+/// the call already held. They must be exactly the group: every id once, none missing and none
+/// outside it, on any page. The ids come in plan order.
+pub fn group_returned(
+    pages: &[Value],
+    group: &[String],
+    before: &BTreeSet<String>,
+) -> Result<Vec<String>, String> {
+    let returned: Vec<String> = pages
+        .iter()
+        .flat_map(|p| p["items"].as_array().into_iter().flatten())
+        .filter(|i| is_checked(i))
+        .filter_map(|i| i["id"].as_str())
+        .filter(|id| !before.contains(*id))
+        .map(str::to_string)
+        .collect();
+    let shown: BTreeSet<&String> = group.iter().collect();
+    let got: BTreeSet<&String> = returned.iter().collect();
+    if got != shown || got.len() != returned.len() || shown.len() != group.len() {
+        return Err(format!(
+            "the group answered {returned:?} over {} page(s), and the plan showed {group:?}",
+            pages.len()
+        ));
+    }
+    Ok(returned)
+}
+
+/// The group's answer spec of an `rdy_plan` call.
+pub fn group_spec() -> Value {
+    json!({
+        "group": {"edge": GROUP_EDGE, "follow_up": GROUP_FOLLOW_UP},
+        "act": GROUP_ACT,
+        "reason": GROUP_REASON,
+    })
+}
+
+/// The journal reply of a `plan_answer` entry (`{answers: [{item, kind, act, reason}], group?}`):
+/// every answer the call names, the group's items first, and for a call that carries the group
+/// `group: {edge, follow_up, items}` (the displayed items the group answers), to which
+/// `returned` is added when the reply came.
+pub fn answers_reply(group: &[String], explicit: &[ExplicitAnswer]) -> Value {
+    let mut sent: Vec<Value> = group
+        .iter()
+        .map(|id| json!({"item": id, "kind": "confirm", "act": GROUP_ACT, "reason": GROUP_REASON}))
+        .collect();
+    sent.extend(
+        explicit
+            .iter()
+            .map(|a| json!({"item": a.item, "kind": a.kind, "act": a.act, "reason": a.reason})),
+    );
+    let mut reply = json!({ "answers": sent });
+    if !group.is_empty() {
+        reply["group"] = json!({
+            "edge": GROUP_EDGE,
+            "follow_up": GROUP_FOLLOW_UP,
+            "items": group,
+        });
+    }
+    reply
+}
+
 /// Answers each open item of `view`'s change plan that gates or warns (D-ME2HD, D-45RG6), in one
-/// `rdy_plan` call, by its kind (`plan_answer_for`). It reads the plan whole first: one `plan`
-/// entry per page, naming the view. The answers are one `plan_answer` entry naming the view,
-/// whose reply lists each answer with its item's kind (`{answers: [{item, kind, act, reason}]}`).
-/// It holds the plan turn throughout (`KillGate::plan_turn`), so the items it read are the items
-/// it answers. With nothing to answer it makes no second call. A view whose changes conflict
-/// with canon has no plan (the read's `E_CONFLICT_UNRESOLVED`, a row of the table), and a call
-/// the kill cuts ends it too: the version proposed next is not ready, and the drain answers its
-/// plan once it resolves it.
+/// `rdy_plan` call. It reads the plan whole first: one `plan` entry per page, naming the view,
+/// whose reply holds the counts and a row for each item. Then it partitions the open items
+/// (`split_plan_answers`): the neighbor items with a confirm follow-up are answered by one group,
+/// `{edge: neighbor, follow_up: confirm}` (D-YXBXH), and every other item by its id with the act
+/// of its kind (`plan_answer_for`). The answers are one `plan_answer` entry naming the view,
+/// whose reply lists each answer with its item's kind (`{answers: [{item, kind, act, reason}],
+/// group?: {edge, follow_up, items, returned}}`). It holds the plan turn throughout
+/// (`KillGate::plan_turn`), so the items it read are the items it answers, and it compares the
+/// answers the group returned with the items it displayed before it lets go. With nothing to
+/// answer it makes no second call, and with no neighbor item it sends no group. A view whose
+/// changes conflict with canon has no plan (the read's `E_CONFLICT_UNRESOLVED`, a row of the
+/// table), and a call the kill cuts ends it too: the version proposed next is not ready, and the
+/// drain answers its plan once it resolves it.
 pub(crate) fn answer_plan(link: &mut Link, view: &str) {
     // from the read to the answers, no other act changes a tension (`KillGate::plan_turn`)
     let gate = link.gate.clone();
     let _turn = gate.plan_turn();
-    let mut open: Vec<(String, String)> = vec![];
+    let mut read = PlanRead::default();
     let mut args = json!({"view": view, "max_tokens": PLAN_ALL});
     loop {
         let mut e = link.entry("plan");
         e.view = Some(view.to_string());
         let mut page = None;
         link.exec(e, "plan", "rdy_plan", args, |en, v| {
-            en.reply = Some(json!({"counts": v["counts"]}));
+            // the entry names each row it showed, so a check sees what was displayed
+            let rows = read.take(v);
+            en.reply = Some(json!({"counts": v["counts"], "items": rows}));
             page = Some(v.clone());
         });
         let Some(page) = page else { return };
-        for i in page["items"].as_array().into_iter().flatten() {
-            if i["state"] == "open"
-                && let (Some(id), Some(kind)) = (i["id"].as_str(), i["kind"].as_str())
-            {
-                open.push((id.to_string(), kind.to_string()));
-            }
-        }
         match page["next"].as_str() {
             Some(next) => args = json!({"page": next, "max_tokens": PLAN_ALL}),
             None => break,
         }
     }
-    let sent: Vec<Value> = open
-        .iter()
-        .filter_map(|(item, kind)| {
-            let (act, reason) = plan_answer_for(kind)?;
-            Some(json!({"item": item, "kind": kind, "act": act, "reason": reason}))
-        })
-        .collect();
-    if sent.is_empty() {
+    let split = split_plan_answers(&read.open);
+    if split.group.is_empty() && split.explicit.is_empty() {
         return;
     }
-    let answers: Vec<Value> = sent
-        .iter()
-        .map(|a| json!({"item": a["item"], "act": a["act"], "reason": a["reason"]}))
-        .collect();
+    let mut specs: Vec<Value> = vec![];
+    if !split.group.is_empty() {
+        specs.push(group_spec());
+    }
+    specs.extend(
+        split
+            .explicit
+            .iter()
+            .map(|a| json!({"item": a.item, "act": a.act, "reason": a.reason})),
+    );
     let mut e = link.entry("plan_answer");
     e.view = Some(view.to_string());
     // the entry names what it sent, refused or not
-    e.reply = Some(json!({ "answers": sent }));
-    link.exec(
-        e,
-        "plan_answer",
-        "rdy_plan",
-        json!({"view": view, "answers": answers, "max_tokens": PLAN_ALL}),
-        |_, _| {},
-    );
+    e.reply = Some(answers_reply(&split.group, &split.explicit));
+    let group = split.group.clone();
+    let before = read.checked.clone();
+    let args = json!({"view": view, "answers": specs, "max_tokens": PLAN_ALL});
+    // the answers and the rest of their reply's pages, under the same plan turn: the group is
+    // compared with every page of what the call returned
+    let res = link.raw("plan_answer", "rdy_plan", args);
+    let mut returned = None;
+    let mut cut_by_kill = false;
+    if let Res::Ok(first) = &res
+        && !group.is_empty()
+    {
+        let fetched = follow_pages(first, |next| {
+            let args = json!({"page": next, "max_tokens": PLAN_ALL});
+            match link.raw("plan_answer", "rdy_plan", args) {
+                Res::Ok(v) => Some(v),
+                Res::Lost => {
+                    cut_by_kill = true;
+                    None
+                }
+                Res::Refused(code, message) => {
+                    link.fail("plan_answer", &format!("got {code}: {message}"))
+                }
+            }
+        });
+        match fetched {
+            Err(text) => link.fail("plan_answer", &text),
+            Ok(None) => {}
+            Ok(Some(pages)) => returned = Some(group_returned(&pages, &group, &before)),
+        }
+    }
+    let mut mismatch = None;
+    link.finish(e, "plan_answer", res, |en, _| match returned {
+        Some(Ok(ids)) => {
+            if let Some(reply) = en.reply.as_mut() {
+                reply["group"]["returned"] = json!(ids);
+            }
+        }
+        Some(Err(text)) => mismatch = Some(text),
+        None => {}
+    });
+    if cut_by_kill {
+        // the answers were acknowledged and the daemon died under the rest of their reply
+        link.recover();
+    }
+    if let Some(text) = mismatch {
+        link.fail("plan_answer", &text);
+    }
 }
 
 /// The tension labels of a proposal's advised entries (`rdy_read P-x@n`'s `proposal.advised`):

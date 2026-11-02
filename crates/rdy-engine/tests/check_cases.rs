@@ -487,6 +487,11 @@ fn ck4_contradiction_related_pairs_keep_order_and_cap() {
         .unwrap();
     assert_eq!(dropped, 2);
     for (case, row) in cases.iter().zip(&rows) {
+        assert_eq!(
+            row.via,
+            rdy_engine::related::RelatedVia::Link,
+            "a lineage row is always a link"
+        );
         let mut want = vec![id(subject), id(&row.decision)];
         want.sort();
         assert_eq!(case.subject_blocks, want, "the related rows' order");
@@ -644,6 +649,11 @@ fn ck4_related_rows_read_the_supplied_state() {
         rows.iter().any(|x| x.decision == "D-0THER"),
         "the in-flight scope holds the fork's link"
     );
+    assert!(
+        rows.iter()
+            .all(|x| x.via == rdy_engine::related::RelatedVia::Link),
+        "lineage rows are links"
+    );
     drop(st);
     assert_eq!(
         scoped_cases(&r, "w"),
@@ -693,6 +703,115 @@ fn ck4_related_rows_read_the_supplied_state() {
     )
     .unwrap();
     assert_eq!(related(&rows_of(&got.case)), ["D-CAND0", "D-REKA0"]);
+}
+
+/// The hash of the decision review case of `D-REVW0` that reads `before` and `after`, and the
+/// blocks of its `related` rows.
+fn review_in(st: &ReadState, before: &Materialized, after: &Materialized) -> (Hash, Vec<String>) {
+    let subject = subject_blocks(&["D-REVW0"]);
+    let review = build(st, AgentCheck::DecisionReview, &subject, before, after, &[]).unwrap();
+    let related = rows_of(&review.case)
+        .into_iter()
+        .filter(|(_, role)| role == "related")
+        .map(|(i, _)| i)
+        .collect();
+    (review.hash, related)
+}
+
+/// nb6 (D-YXBXH): a related case reads its supplied candidate and that candidate's own names:
+/// the text of a block in another view moves no scoped case, and the text of a related
+/// candidate changes the case that reads it.
+#[test]
+fn nb6_related_check_case_uses_its_candidate() {
+    let (_d, mut r) = project();
+    let mut blocks = doc_and_section();
+    blocks.extend([
+        field(
+            block("en-ENT00", "entity", Some("s-SEC00"), ""),
+            "name",
+            "Ledger service",
+        ),
+        field(
+            reviewed("proposed", "The body.", "Founder"),
+            "statement",
+            "Entries live in the ledger service.",
+        ),
+        finding(),
+        field(
+            decision("D-0THER", Some("s-SEC00"), "proposed"),
+            "statement",
+            "Backups cover the Ledger services.",
+        ),
+        decision("D-QWET0", Some("s-SEC00"), "proposed"),
+    ]);
+    raw_commit(&mut r, blocks);
+    let scoped = scoped_cases(&r, "w");
+    let related = |rows: &[(String, String)]| -> Vec<String> {
+        rows.iter()
+            .filter(|(_, role)| role == "related")
+            .map(|(i, _)| i.clone())
+            .collect()
+    };
+    assert_eq!(
+        related(&scoped.1),
+        ["D-0THER"],
+        "the plural text names the entity"
+    );
+
+    // another view rewrites D-0THER away from the entity and makes D-QWET0 name it
+    r.view_fork(&agent("f"), "w", "f").unwrap();
+    let st = r.read();
+    let m = st.materialized(&Scope::View("f".into())).unwrap();
+    let ops = vec![
+        update(
+            &m,
+            field(
+                m.get(&id("D-0THER")).unwrap().clone(),
+                "statement",
+                "Nothing here.",
+            ),
+        ),
+        update(
+            &m,
+            field(
+                m.get(&id("D-QWET0")).unwrap().clone(),
+                "statement",
+                "The ledger service again.",
+            ),
+        ),
+    ];
+    drop(st);
+    raw_ops(&mut r, "f", ops);
+    assert_eq!(
+        scoped_cases(&r, "w"),
+        scoped,
+        "another view's text changes leave the scoped case unchanged"
+    );
+    let forked = scoped_cases(&r, "f");
+    assert_eq!(
+        related(&forked.1),
+        ["D-QWET0"],
+        "the view that holds the text"
+    );
+    assert_ne!(forked.0, scoped.0);
+
+    // a candidate no view holds: the related candidate's own statement is read as given
+    let st = r.read();
+    let w = st.materialized(&Scope::View("w".into())).unwrap();
+    let with = |text: &str| {
+        let changed = field(w.get(&id("D-0THER")).unwrap().clone(), "statement", text);
+        w.with(&[update(&w, changed)])
+    };
+    let (base_hash, base_rows) = review_in(&st, &w, &w);
+    assert_eq!(base_rows, ["D-0THER"]);
+    assert_eq!(base_hash, scoped.0);
+    let reworded = with("Backups cover every ledger service now.");
+    let (hash, rows) = review_in(&st, &w, &reworded);
+    assert_eq!(rows, ["D-0THER"], "still names the entity");
+    assert_ne!(hash, base_hash, "its own content changed the case");
+    let away = with("Backups cover everything.");
+    let (_, rows) = review_in(&st, &w, &away);
+    assert!(rows.is_empty(), "no longer names the entity: {rows:?}");
 }
 
 /// A pair held in canon stays one case when another view edits a block of the pair.

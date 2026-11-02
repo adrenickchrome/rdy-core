@@ -310,6 +310,16 @@ fn claim_and_bare_docs(r: &mut Rdy, c: &BTreeMap<String, String>, v: &str) -> St
         })
         .collect();
     put_j(r, v, Value::Array(docs), None);
+    // nb8 (D-YXBXH, TASK-978 X2): the new claim owes its stable section's claims a neighbor
+    // confirm, which readiness needs answered; the agent answers them with one group
+    let group: Vec<rdy_engine::plan::api::PlanAnswerSpec> = vec![
+        serde_json::from_value(
+            json!({"group": {"edge": "neighbor"}, "act": "confirm", "reason": "they still hold"}),
+        )
+        .unwrap(),
+    ];
+    r.answer_plan_specs(&rdy_qa::tensions::ag(v), v, &group)
+        .unwrap_or_else(|e| panic!("answer the neighbor items of {v}: {e}"));
     claim.change
 }
 

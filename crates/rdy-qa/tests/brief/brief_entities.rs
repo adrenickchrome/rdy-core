@@ -161,7 +161,7 @@ fn bent1_a_briefing_on_a_decision_lists_related_decisions() {
     let v = json_of(&brief(&r, &[b.as_str()], None));
     assert_eq!(
         v["related_decisions"],
-        json!([{"for": b, "decision": a, "status": "live", "statement": "The ledger is append-only", "relation": "same_entity", "entities": [e]}])
+        json!([{"for": b, "decision": a, "status": "live", "statement": "The ledger is append-only", "relation": "same_entity", "via": "link", "entities": [e]}])
     );
     let v = json_of(&brief(&r, &[w.created["$c"].as_str()], None));
     assert!(v.get("related_decisions").is_none(), "{v}");

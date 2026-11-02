@@ -1,10 +1,12 @@
 //! Candidate pairs (spec §9.3 step 1, D-KJ71P): for each block an in-flight change writes, the blocks most likely to disagree with it, by five fixed rules, at most 20 per change. Deterministic; settled pairs are left to the queue.
 use crate::lexicon::{Lexicon, is_content};
-use crate::tensions::index::{DetectCx, Write, Writes, canon_index_of, is_normative, premise_edge};
+use crate::tensions::index::{
+    DetectCx, Write, Writes, canon_index_of, is_deprecated, is_normative, premise_edge,
+};
 use crate::tensions::{DetectScope, SideRef};
-use crate::{Materialized, RdyError, ReadState};
-use rdy_graph::{EdgeKind, Graph};
-use rdy_model::{Block, BlockId, Hash, PairItem, decision, pair_key};
+use crate::{E_LIMIT, Materialized, RdyError, ReadState, Scope};
+use rdy_graph::{EdgeKind, Graph, edges_of};
+use rdy_model::{Block, BlockId, FieldValue, Hash, PairItem, decision, pair_key};
 use rdy_schema::Pack;
 use serde::Serialize;
 use std::cell::{OnceCell, RefCell};
@@ -14,9 +16,17 @@ use std::sync::Arc;
 
 /// The most requests one change makes.
 pub const MAX_CANDIDATES: usize = 20;
+/// The most live in-flight writes one cross-view context indexes (nb5, Review I2).
+const MAX_CROSS_VIEW_WRITES: usize = 100_000;
+/// The most candidate incidences one change's cross-view phase examines.
+const MAX_CROSS_VIEW_VISITS: usize = 1_000_000;
+/// The fix of both cross-view bounds.
+const CROSS_VIEW_FIX: &str =
+    "close the views you no longer need: rdy view close, or rdy_view with op close";
 
 thread_local! {
     static REQUEST_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static CROSS_VIEW_INDEX_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Test hook: this thread's count of [`ReadState::requests_from`] calls. A test reads the
@@ -24,6 +34,13 @@ thread_local! {
 #[doc(hidden)]
 pub fn request_builds() -> u64 {
     REQUEST_BUILDS.with(std::cell::Cell::get)
+}
+
+/// Test hook: this thread's count of live writes a cross-view index has visited while it was
+/// built. A test reads the difference over a call, on the thread that ran it.
+#[doc(hidden)]
+pub fn cross_view_index_visits() -> u64 {
+    CROSS_VIEW_INDEX_VISITS.with(std::cell::Cell::get)
 }
 
 /// Why two blocks are a pair. Declaration order is rank: the first rule that holds names the
@@ -101,8 +118,11 @@ impl ReadState {
     /// write at its content in a view the anchor's change shares, else canon's when canon holds
     /// that content and a view of the anchor's change does not touch that block. The first form
     /// by (change id, block) wins, so a request and a submit name the same items. With no such
-    /// form, canon's items when canon holds both contents and no in-flight write touches either
-    /// block (an all-canon pair, which is never a request).
+    /// form, the cross-view form (nb5): a live write of each block at its content, by two changes
+    /// that share no view, both sides eligible in their own views and joined by the `premise`,
+    /// `describes` or `entity` rule read on those two blocks; the first by the two change ids,
+    /// in block order. With neither, canon's items when canon holds both contents and no
+    /// in-flight write touches either block (an all-canon pair, which is never a request).
     pub fn pair_now(&self, pair: &[(BlockId, Hash)]) -> Result<Option<Vec<Item>>, RdyError> {
         let set = self.tensions()?;
         let cx = DetectCx::new(
@@ -111,7 +131,7 @@ impl ReadState {
             canon_index_of(self)?,
             DetectScope::Inflight,
         );
-        pair_now_in(&cx, pair)
+        pair_now_in(&cx, &SideScopes::default(), pair)
     }
 
     /// The canon items of `pair` when canon holds both blocks at those contents, whatever an open
@@ -145,16 +165,80 @@ impl ReadState {
         Ok(Rule::ALL.into_iter().find(|r| ctx.holds(*r, ba, bb)))
     }
 
+    /// The best rule that holds between the two blocks `items` name (two, sorted by block), read
+    /// on those exact blocks: a change side's write at its version, in the view that write is
+    /// current in; a canon side's block at its version, in the other side's view (in canon when
+    /// both are canon's). `None` when an item does not resolve, a block is deprecated or does
+    /// not take part, or no rule holds. A case names this rule, not the in-flight scope's.
+    pub(crate) fn pair_rule_for_items(&self, items: &[Item]) -> Result<Option<Rule>, RdyError> {
+        let [ia, ib] = items else {
+            return Ok(None);
+        };
+        if ia.block == ib.block {
+            return Ok(None);
+        }
+        let set = self.tensions()?;
+        let cx = DetectCx::new(
+            self,
+            set.writes(),
+            canon_index_of(self)?,
+            DetectScope::Inflight,
+        );
+        let (Some((a, ka)), Some((b, kb))) = (item_block(&cx, ia)?, item_block(&cx, ib)?) else {
+            return Ok(None);
+        };
+        let (ka, kb) = match (ka, kb) {
+            (Some(x), Some(y)) => (x, y),
+            (Some(x), None) => (x.clone(), x),
+            (None, Some(y)) => (y.clone(), y),
+            (None, None) => (ReadKey::Canon, ReadKey::Canon),
+        };
+        let sides = SideScopes::default();
+        let (sa, sb) = (sides.get(self, ka)?, sides.get(self, kb)?);
+        if !side_eligible(self, &sa, &a)? || !side_eligible(self, &sb, &b)? {
+            return Ok(None);
+        }
+        for rule in Rule::ALL {
+            if exact_holds(self, rule, (&a, &sa), (&b, &sb))? {
+                return Ok(Some(rule));
+            }
+        }
+        Ok(None)
+    }
+
     /// The requests change `change` makes, in order: the pairs of each block it writes, by rule
     /// rank, then the subject's id, then closeness; each pair once; at most [`MAX_CANDIDATES`].
-    /// A change that is not in flight makes none. Settled pairs are not removed here.
+    /// Then, while there is room, the pairs across open views (nb5). A change that is not in
+    /// flight makes none. Settled pairs are not removed here.
     pub fn requests_from(&self, change: &Hash) -> Result<Vec<Request>, RdyError> {
+        self.requests_from_with(change, &mut CrossViewContext::default())
+    }
+
+    /// [`Self::requests_from`] with the cross-view context `cross`, which a queue walk keeps for
+    /// all its changes: its indexes are built once, when a change first needs them.
+    ///
+    /// Phase 1 is the same-view and canon phase, whole. Phase 2, while it leaves room, pairs
+    /// each subject with live writes of changes that share no view with `change`, by the
+    /// `premise`, `describes` and `entity` rules only, in rule order, then the subject's id, then
+    /// the other block's doc (the subject's first, then by path), id and change. A pair key
+    /// (blocks and contents) counts once over both phases.
+    pub(super) fn requests_from_with(
+        &self,
+        change: &Hash,
+        cross: &mut CrossViewContext,
+    ) -> Result<Vec<Request>, RdyError> {
         REQUEST_BUILDS.with(|n| n.set(n.get() + 1));
         let set = self.tensions()?;
         let writes: &Writes = set.writes();
         if writes.change(change).is_none() {
             return Ok(vec![]);
         }
+        let CrossViewContext {
+            limits,
+            sides,
+            index,
+            ..
+        } = cross;
         let ctx = Ctx::new(self, writes)?;
         let mut subjects = vec![];
         for w in writes.of_change(change).iter().filter(|w| w.live) {
@@ -170,6 +254,7 @@ impl ReadState {
         subjects.sort_by(|a, b| a.block.id.cmp(&b.block.id));
         let mut b = Builder {
             ctx: &ctx,
+            sides,
             change: *change,
             out: vec![],
             seen: BTreeSet::new(),
@@ -188,8 +273,284 @@ impl ReadState {
                 }
             }
         }
-        Ok(b.out)
+        let visits = if !b.full() && !subjects.is_empty() && has_cross_change(writes, change) {
+            if index.is_none() {
+                *index = Some(CrossIndex::build(self, writes, sides, *limits)?);
+            }
+            let idx = index.as_ref().expect("the index was just built");
+            b.cross(idx, *limits, &subjects)?
+        } else {
+            0
+        };
+        let out = b.out;
+        #[cfg(test)]
+        {
+            cross.last_visits = visits;
+        }
+        #[cfg(not(test))]
+        let _ = visits;
+        Ok(out)
     }
+}
+
+/// The bounds of one cross-view context: the live writes it indexes, once, and the candidate
+/// incidences each change's phase 2 examines. [`CrossLimits::FIXED`] outside tests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CrossLimits {
+    writes: usize,
+    visits: usize,
+}
+
+impl Default for CrossLimits {
+    fn default() -> Self {
+        CrossLimits::FIXED
+    }
+}
+
+impl CrossLimits {
+    const FIXED: CrossLimits = CrossLimits {
+        writes: MAX_CROSS_VIEW_WRITES,
+        visits: MAX_CROSS_VIEW_VISITS,
+    };
+
+    fn writes_error(&self) -> RdyError {
+        RdyError::new(
+            E_LIMIT,
+            format!("cross-view review exceeds {} in-flight writes", self.writes),
+            CROSS_VIEW_FIX,
+        )
+    }
+
+    fn visits_error(&self) -> RdyError {
+        RdyError::new(
+            E_LIMIT,
+            format!("cross-view review exceeds {} candidate visits", self.visits),
+            CROSS_VIEW_FIX,
+        )
+    }
+}
+
+/// What a queue walk keeps across its changes for the cross-view phase (Review I2): the scopes
+/// it has read sides in (each view's lexicon read once) and the cross-view indexes, built on
+/// first need. The default holds nothing built.
+#[derive(Default)]
+pub(super) struct CrossViewContext {
+    limits: CrossLimits,
+    sides: SideScopes,
+    index: Option<CrossIndex>,
+    /// The candidate incidences the last change's phase 2 examined.
+    #[cfg(test)]
+    last_visits: usize,
+}
+
+/// The key of a read scope.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum ReadKey {
+    Canon,
+    Inflight,
+    View(String),
+}
+
+impl ReadKey {
+    fn scope(&self) -> Scope {
+        match self {
+            ReadKey::Canon => Scope::Canon,
+            ReadKey::Inflight => Scope::Inflight,
+            ReadKey::View(v) => Scope::View(v.clone()),
+        }
+    }
+}
+
+/// One scope a side is read in: its materialization, and its graph and lexicon on first use.
+struct SideScope {
+    scope: Scope,
+    m: Arc<Materialized>,
+    g: OnceCell<Arc<Graph>>,
+    lex: OnceCell<Arc<Lexicon>>,
+}
+
+impl SideScope {
+    fn graph(&self, st: &ReadState) -> Result<Arc<Graph>, RdyError> {
+        if let Some(g) = self.g.get() {
+            return Ok(Arc::clone(g));
+        }
+        let g = st.graph(&self.scope)?;
+        Ok(Arc::clone(self.g.get_or_init(|| g)))
+    }
+
+    fn lexicon(&self, st: &ReadState) -> Result<Arc<Lexicon>, RdyError> {
+        if let Some(l) = self.lex.get() {
+            return Ok(Arc::clone(l));
+        }
+        let l = st.lexicon(&self.scope)?;
+        Ok(Arc::clone(self.lex.get_or_init(|| l)))
+    }
+
+    /// The entities `b`'s text names, read with this scope's lexicon.
+    fn entities(&self, st: &ReadState, b: &Block) -> Result<BTreeSet<String>, RdyError> {
+        Ok(self
+            .lexicon(st)?
+            .mentions(b)
+            .into_iter()
+            .map(|m| m.entity)
+            .collect())
+    }
+}
+
+/// The scopes read so far, by key.
+#[derive(Default)]
+struct SideScopes {
+    by: RefCell<HashMap<ReadKey, Rc<SideScope>>>,
+}
+
+impl SideScopes {
+    fn get(&self, st: &ReadState, key: ReadKey) -> Result<Rc<SideScope>, RdyError> {
+        if let Some(s) = self.by.borrow().get(&key) {
+            return Ok(Rc::clone(s));
+        }
+        let scope = key.scope();
+        let s = Rc::new(SideScope {
+            m: st.materialized(&scope)?,
+            scope,
+            g: OnceCell::new(),
+            lex: OnceCell::new(),
+        });
+        self.by.borrow_mut().insert(key, Rc::clone(&s));
+        Ok(s)
+    }
+
+    /// The scope of write `w`: the first view of its change (sorted) it is current in, or
+    /// `None` when it is current in none.
+    fn of_write(
+        &self,
+        st: &ReadState,
+        writes: &Writes,
+        w: &Write,
+    ) -> Result<Option<Rc<SideScope>>, RdyError> {
+        match view_of(writes, w) {
+            Some(v) => Ok(Some(self.get(st, ReadKey::View(v.to_string()))?)),
+            None => Ok(None),
+        }
+    }
+
+    /// The views whose lexicon this cache has read, sorted.
+    #[cfg(test)]
+    fn lexicon_views(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .by
+            .borrow()
+            .iter()
+            .filter(|(_, s)| s.lex.get().is_some())
+            .filter_map(|(k, _)| match k {
+                ReadKey::View(v) => Some(v.clone()),
+                _ => None,
+            })
+            .collect();
+        v.sort();
+        v
+    }
+}
+
+/// The first view of `w`'s change (the change's views are sorted) that `w` is current in.
+fn view_of<'w>(writes: &'w Writes, w: &Write) -> Option<&'w str> {
+    writes
+        .change(&w.change)?
+        .views
+        .iter()
+        .find(|v| writes.current_in(w, v))
+        .map(String::as_str)
+}
+
+/// Whether `b`, read in `at`, can be one side of a pair: it takes part, and neither its own
+/// lifecycle nor its state in `at` makes it deprecated.
+fn side_eligible(st: &ReadState, at: &SideScope, b: &Block) -> Result<bool, RdyError> {
+    if !takes_part(st.pack(), b)
+        || b.fields.get("lifecycle") == Some(&FieldValue::Str("deprecated".into()))
+    {
+        return Ok(false);
+    }
+    Ok(!is_deprecated(&at.m, &*at.graph(st)?, &b.id))
+}
+
+/// Whether `from` has a premise edge to `to`.
+fn premise_joins(from: &Block, to: &BlockId) -> bool {
+    edges_of(from)
+        .iter()
+        .any(|e| e.to == *to && premise_edge(e))
+}
+
+/// Whether `rule` holds between the exact blocks `a` and `b`, each read in its scope.
+fn exact_holds(
+    st: &ReadState,
+    rule: Rule,
+    (a, at): (&Block, &SideScope),
+    (b, bt): (&Block, &SideScope),
+) -> Result<bool, RdyError> {
+    Ok(match rule {
+        Rule::Premise => premise_joins(a, &b.id) || premise_joins(b, &a.id),
+        Rule::Describes => {
+            let ta = described(a);
+            described(b).iter().any(|t| ta.contains(t))
+        }
+        Rule::Entity => {
+            let ea = at.entities(st, a)?;
+            bt.entities(st, b)?.iter().any(|e| ea.contains(e))
+        }
+        Rule::Section => a.parent.is_some() && a.parent == b.parent,
+        Rule::Area => {
+            let aa = st.areas_in(&at.m, a);
+            st.areas_in(&bt.m, b).iter().any(|x| aa.contains(x))
+        }
+    })
+}
+
+/// A resolved item: its block, and the key of the scope its side is read in (`None`: the other
+/// side's).
+type ItemBlock = (Arc<Block>, Option<ReadKey>);
+
+/// The block `item` names and the key of the scope its side is read in: a change side's write
+/// at the item's version (its view; the in-flight scope when the write is current in none), or
+/// canon's block at it (`None`: read in the other side's scope). `None` when it does not
+/// resolve.
+fn item_block(cx: &DetectCx<'_>, item: &Item) -> Result<Option<ItemBlock>, RdyError> {
+    Ok(match &item.side {
+        SideRef::Change(c) => cx
+            .writes
+            .on(&item.block)
+            .iter()
+            .find(|w| w.change == *c && w.version == Some(item.version))
+            .and_then(|w| {
+                let key = match view_of(cx.writes, w) {
+                    Some(v) => ReadKey::View(v.to_string()),
+                    None => ReadKey::Inflight,
+                };
+                w.new.clone().map(|b| (b, Some(key)))
+            }),
+        SideRef::Canon { .. } => {
+            let canon = cx.canon_m()?;
+            (canon.version_of(&item.block) == Some(item.version))
+                .then(|| canon.get(&item.block).cloned())
+                .flatten()
+                .map(|b| (Arc::new(b), None))
+        }
+        SideRef::Intent { .. } => None,
+    })
+}
+
+/// The cross-view indexes of one context: every live write's facts, and the live writes by the
+/// blocks their premise edges point at, by `describes` target and by named entity.
+#[derive(Default)]
+struct CrossIndex {
+    facts: HashMap<(Hash, BlockId), WriteFacts>,
+    premise_in: HashMap<BlockId, Vec<Arc<Write>>>,
+    describes: HashMap<BlockId, Vec<Arc<Write>>>,
+    entities: HashMap<String, Vec<Arc<Write>>>,
+}
+
+/// A live write's scope (its view) and the entities its block names there.
+struct WriteFacts {
+    at: Rc<SideScope>,
+    entities: BTreeSet<String>,
 }
 
 impl Rule {
@@ -200,6 +561,8 @@ impl Rule {
         Rule::Section,
         Rule::Area,
     ];
+    /// The rules that pair across views (QE3).
+    const TIES: [Rule; 3] = [Rule::Premise, Rule::Describes, Rule::Entity];
 }
 
 /// The item of `w`, a write that holds a block, at content `content`.
@@ -245,8 +608,12 @@ fn writes_at(cx: &DetectCx<'_>, block: &BlockId, content: Hash) -> Vec<Arc<Write
 /// and that content.
 type Anchor<'w> = (&'w Arc<Write>, &'w Vec<Arc<Write>>, &'w BlockId, Hash);
 
-/// [`ReadState::pair_now`] in the scope `cx` reads.
-fn pair_now_in(cx: &DetectCx<'_>, pair: &[(BlockId, Hash)]) -> Result<Option<Vec<Item>>, RdyError> {
+/// [`ReadState::pair_now`] in the scope `cx` reads, with sides read through `sides`.
+fn pair_now_in(
+    cx: &DetectCx<'_>,
+    sides: &SideScopes,
+    pair: &[(BlockId, Hash)],
+) -> Result<Option<Vec<Item>>, RdyError> {
     let [(a, ca), (b, cb)] = pair else {
         return Ok(None);
     };
@@ -277,10 +644,129 @@ fn pair_now_in(cx: &DetectCx<'_>, pair: &[(BlockId, Hash)]) -> Result<Option<Vec
             return Ok(Some(items));
         }
     }
+    if let Some(items) = cross_form(cx, sides, (a, *ca, &on_a), (b, *cb, &on_b))? {
+        return Ok(Some(items));
+    }
     if !cx.writes.on(a).is_empty() || !cx.writes.on(b).is_empty() {
         return Ok(None);
     }
     canon_pair(cx, (a, *ca), (b, *cb))
+}
+
+/// One block of a pair at a content, with its live writes at that content.
+type AtContent<'w> = (&'w BlockId, Hash, &'w [Arc<Write>]);
+
+/// The cross-view form of a pair (nb5, see [`ReadState::pair_now`]): the first two live writes,
+/// by the change ids in block order, of changes that share no view, each eligible in its own
+/// view, whose blocks a tie rule joins. Section and area never make this form.
+fn cross_form(
+    cx: &DetectCx<'_>,
+    sides: &SideScopes,
+    x: AtContent<'_>,
+    y: AtContent<'_>,
+) -> Result<Option<Vec<Item>>, RdyError> {
+    if x.0 == y.0 {
+        return Ok(None);
+    }
+    let (x, y) = if x.0 < y.0 { (x, y) } else { (y, x) };
+    let st = cx.st;
+    for wx in x.2 {
+        for wy in y.2 {
+            if wx.change == wy.change || cx.writes.common_view(&wx.change, &wy.change) {
+                continue;
+            }
+            let (Some(bx), Some(by)) = (wx.new.as_deref(), wy.new.as_deref()) else {
+                continue;
+            };
+            let (Some(sx), Some(sy)) = (
+                sides.of_write(st, cx.writes, wx)?,
+                sides.of_write(st, cx.writes, wy)?,
+            ) else {
+                continue;
+            };
+            if !side_eligible(st, &sx, bx)? || !side_eligible(st, &sy, by)? {
+                continue;
+            }
+            let mut tied = false;
+            for rule in Rule::TIES {
+                if exact_holds(st, rule, (bx, &sx), (by, &sy))? {
+                    tied = true;
+                    break;
+                }
+            }
+            if !tied {
+                continue;
+            }
+            if let (Some(ix), Some(iy)) = (write_item(wx, x.1), write_item(wy, y.1)) {
+                let mut items = vec![ix, iy];
+                items.sort();
+                return Ok(Some(items));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Whether some in-flight change other than `change` shares no view with it.
+fn has_cross_change(writes: &Writes, change: &Hash) -> bool {
+    let Some(f) = writes.change(change) else {
+        return false;
+    };
+    writes
+        .changes()
+        .any(|g| g.id != *change && !g.views.iter().any(|v| f.views.contains(v)))
+}
+
+/// The pair key of two blocks at two contents.
+fn key_of(pair: &[(BlockId, Hash); 2]) -> Hash {
+    pair_key(
+        &pair
+            .clone()
+            .map(|(block, content)| PairItem { block, content }),
+    )
+}
+
+impl CrossIndex {
+    /// The indexes over every live write of `writes`, each visited once: refused before any
+    /// index is built when there are more than `limits.writes`, deletes included.
+    fn build(
+        st: &ReadState,
+        writes: &Writes,
+        sides: &SideScopes,
+        limits: CrossLimits,
+    ) -> Result<CrossIndex, RdyError> {
+        if writes.live().take(limits.writes.saturating_add(1)).count() > limits.writes {
+            return Err(limits.writes_error());
+        }
+        let mut idx = CrossIndex::default();
+        for w in writes.live() {
+            CROSS_VIEW_INDEX_VISITS.with(|n| n.set(n.get() + 1));
+            let Some(b) = w.new.as_deref() else {
+                continue;
+            };
+            let Some(at) = sides.of_write(st, writes, w)? else {
+                continue;
+            };
+            let entities = at.entities(st, b)?;
+            for e in edges_of(b) {
+                if premise_edge(&e) {
+                    idx.premise_in.entry(e.to).or_default().push(Arc::clone(w));
+                }
+            }
+            for t in described(b) {
+                idx.describes.entry(t).or_default().push(Arc::clone(w));
+            }
+            for e in &entities {
+                idx.entities
+                    .entry(e.clone())
+                    .or_default()
+                    .push(Arc::clone(w));
+            }
+            idx.facts
+                .insert((w.change, w.block.clone()), WriteFacts { at, entities });
+        }
+        Ok(idx)
+    }
 }
 
 /// The sorted canon items of two blocks, or `None` unless canon holds both at those contents.
@@ -478,6 +964,7 @@ fn described(b: &Block) -> BTreeSet<BlockId> {
 /// The pairs found so far.
 struct Builder<'a, 'c> {
     ctx: &'c Ctx<'a>,
+    sides: &'c SideScopes,
     change: Hash,
     out: Vec<Request>,
     seen: BTreeSet<(BlockId, BlockId)>,
@@ -510,7 +997,7 @@ impl Builder<'_, '_> {
             return Ok(());
         };
         let pair = [(s.block.id.clone(), s.content), (x.clone(), theirs)];
-        let Some(items) = pair_now_in(cx, &pair)? else {
+        let Some(items) = pair_now_in(cx, self.sides, &pair)? else {
             return Ok(());
         };
         if !items.iter().any(|i| matches!(i.side, SideRef::Change(_))) {
@@ -552,6 +1039,130 @@ impl Builder<'_, '_> {
             self.offer(rule, s, &x)?;
         }
         Ok(())
+    }
+
+    /// Phase 2 (nb5): the pairs of each subject with live writes of changes that share no view
+    /// with this change, by the tie rules, while there is room. Each examined incidence (rule,
+    /// subject, other live write) counts toward `limits.visits`, before any filter. Returns the
+    /// count.
+    fn cross(
+        &mut self,
+        idx: &CrossIndex,
+        limits: CrossLimits,
+        subjects: &[Subject],
+    ) -> Result<usize, RdyError> {
+        let cx = &self.ctx.cx;
+        let (st, writes) = (cx.st, cx.writes);
+        let mut keys: BTreeSet<Hash> = self.out.iter().map(|q| q.key).collect();
+        let mut visits = 0usize;
+        for rule in Rule::TIES {
+            for s in subjects {
+                if self.full() {
+                    return Ok(visits);
+                }
+                let Some(mine) = idx.facts.get(&(self.change, s.block.id.clone())) else {
+                    continue;
+                };
+                if !side_eligible(st, &mine.at, &s.block)? {
+                    continue;
+                }
+                let mut found: Vec<Arc<Write>> = vec![];
+                let mut visit = |o: &Arc<Write>| -> Result<(), RdyError> {
+                    visits += 1;
+                    if visits > limits.visits {
+                        return Err(limits.visits_error());
+                    }
+                    found.push(Arc::clone(o));
+                    Ok(())
+                };
+                match rule {
+                    Rule::Premise => {
+                        for e in edges_of(&s.block) {
+                            if premise_edge(&e) {
+                                for o in writes.on(&e.to).iter().filter(|o| o.live) {
+                                    visit(o)?;
+                                }
+                            }
+                        }
+                        for o in idx.premise_in.get(&s.block.id).into_iter().flatten() {
+                            visit(o)?;
+                        }
+                    }
+                    Rule::Describes => {
+                        for t in described(&s.block) {
+                            for o in idx.describes.get(&t).into_iter().flatten() {
+                                visit(o)?;
+                            }
+                        }
+                    }
+                    Rule::Entity => {
+                        for e in &mine.entities {
+                            for o in idx.entities.get(e).into_iter().flatten() {
+                                visit(o)?;
+                            }
+                        }
+                    }
+                    Rule::Section | Rule::Area => {}
+                }
+                let home = mine.at.m.doc_of(&s.block.id).map(|d| d.id.clone());
+                let mut ranked = vec![];
+                for o in found {
+                    if o.change == self.change
+                        || o.block == s.block.id
+                        || writes.common_view(&self.change, &o.change)
+                    {
+                        continue;
+                    }
+                    let (Some(ob), Some(theirs)) = (
+                        o.new.as_deref(),
+                        idx.facts.get(&(o.change, o.block.clone())),
+                    ) else {
+                        continue;
+                    };
+                    if !side_eligible(st, &theirs.at, ob)? {
+                        continue;
+                    }
+                    let doc = theirs.at.m.doc_of(&o.block).map(|d| d.id.clone());
+                    let away = doc.is_none() || doc != home;
+                    let path = doc
+                        .and_then(|d| theirs.at.m.path_of(&d))
+                        .unwrap_or_default();
+                    ranked.push(((away, path, o.block.clone(), o.change), o));
+                }
+                ranked.sort_by(|x, y| x.0.cmp(&y.0));
+                ranked.dedup_by(|x, y| x.0 == y.0);
+                for (_, o) in ranked {
+                    if self.full() {
+                        return Ok(visits);
+                    }
+                    let Some(ob) = o.new.as_deref() else {
+                        continue;
+                    };
+                    let pair = [
+                        (s.block.id.clone(), s.content),
+                        (o.block.clone(), cx.content_of(ob)),
+                    ];
+                    let key = key_of(&pair);
+                    if keys.contains(&key) {
+                        continue;
+                    }
+                    let Some(items) = pair_now_in(cx, self.sides, &pair)? else {
+                        continue;
+                    };
+                    if !items.iter().any(|i| matches!(i.side, SideRef::Change(_))) {
+                        continue;
+                    }
+                    keys.insert(key);
+                    self.out.push(Request {
+                        key,
+                        items,
+                        rule,
+                        change: self.change,
+                    });
+                }
+            }
+        }
+        Ok(visits)
     }
 
     fn premise(&mut self, s: &Subject) -> Result<(), RdyError> {
@@ -681,5 +1292,210 @@ fn ends(a: &BlockId, b: &BlockId) -> (BlockId, BlockId) {
         (a.clone(), b.clone())
     } else {
         (b.clone(), a.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Rdy, Session, WriteRequest, WriteResult, parse_ops};
+    use rdy_model::Role;
+    use serde_json::{Value, json};
+
+    fn agent(v: &str) -> Session {
+        Session::agent(format!("agent:{v}"), Some(v.into()), Role::Writer).unwrap()
+    }
+
+    fn put(r: &mut Rdy, v: &str, ops: Value) -> WriteResult {
+        r.write(
+            &agent(v),
+            WriteRequest {
+                view: v.into(),
+                ops: parse_ops(ops.as_array().unwrap().clone()).unwrap(),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .unwrap_or_else(|e| panic!("write to {v}: {e}"))
+    }
+
+    /// Lands view `v` straight through the store.
+    fn land(r: &mut Rdy, v: &str) {
+        let by = agent("seed").provenance();
+        let store = r.store_mut();
+        let p = store.propose(v, v, by.clone()).unwrap();
+        store
+            .land_atomic(rdy_store::LandRequest {
+                proposal: p,
+                accept: None,
+                approver: by,
+                alt: None,
+                relay: None,
+                evidence: None,
+                assessment: None,
+            })
+            .unwrap();
+        r.invalidate();
+    }
+
+    /// Canon: a section with the term Rebase. Views a, b and c each write claims in it that name
+    /// Rebase: one in a, two in b, one in c. The changes, by view.
+    fn world() -> (tempfile::TempDir, Rdy, Vec<Hash>) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let w = put(
+            &mut r,
+            "seed",
+            json!([
+                {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "spec", "title": "Spec", "doc_type": "page"}},
+                {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}},
+                {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Rebase"}, "body": "Rebase is a term."}
+            ]),
+        );
+        let s = w.created["$s"].clone();
+        land(&mut r, "seed");
+        let claim =
+            |body: &str| json!({"op": "create", "type": "claim", "parent": s, "body": body});
+        let mut changes = vec![];
+        for (v, bodies) in [
+            ("a", vec!["Rebase moves pins."]),
+            ("b", vec!["A rebase keeps pins.", "Rebases are safe."]),
+            ("c", vec!["Rebase again."]),
+        ] {
+            let ops: Vec<Value> = bodies.into_iter().map(claim).collect();
+            let w = put(&mut r, v, json!(ops));
+            changes.push(w.change.parse().unwrap());
+        }
+        (dir, r, changes)
+    }
+
+    fn limits(writes: usize, visits: usize) -> CrossViewContext {
+        CrossViewContext {
+            limits: CrossLimits { writes, visits },
+            ..CrossViewContext::default()
+        }
+    }
+
+    fn texts(e: RdyError) -> (&'static str, String, String) {
+        (e.code, e.message, e.fix)
+    }
+
+    #[test]
+    fn nb5_cross_view_bounds_are_errors_not_partial_requests() {
+        let fix = "close the views you no longer need: rdy view close, or rdy_view with op close";
+        assert_eq!(
+            texts(CrossLimits::FIXED.writes_error()),
+            (
+                E_LIMIT,
+                "cross-view review exceeds 100000 in-flight writes".into(),
+                fix.into()
+            )
+        );
+        assert_eq!(
+            texts(CrossLimits::FIXED.visits_error()),
+            (
+                E_LIMIT,
+                "cross-view review exceeds 1000000 candidate visits".into(),
+                fix.into()
+            )
+        );
+        let (_d, r, changes) = world();
+        let st = r.read();
+        let live = st.tensions().unwrap().writes().live().count();
+        assert_eq!(live, 4);
+        let a = changes[0];
+        let want = st.requests_from(&a).unwrap();
+        assert_eq!(
+            want.len(),
+            3,
+            "Rebase in a pairs with b's two and c's one: {want:#?}"
+        );
+
+        // construction: the context's live writes, once
+        let got = st
+            .requests_from_with(&a, &mut limits(live, usize::MAX))
+            .unwrap();
+        assert_eq!(got, want, "at the bound");
+        let e = st
+            .requests_from_with(&a, &mut limits(live - 1, usize::MAX))
+            .unwrap_err();
+        assert_eq!(
+            texts(e),
+            (
+                E_LIMIT,
+                format!("cross-view review exceeds {} in-flight writes", live - 1),
+                fix.into()
+            ),
+            "the first excess refuses, with no partial set"
+        );
+
+        // traversal: one change's candidate incidences, reset for the next change
+        let mut cx = CrossViewContext::default();
+        st.requests_from_with(&a, &mut cx).unwrap();
+        let visits = cx.last_visits;
+        assert_eq!(visits, 4, "Rebase's four live mentions, a's own included");
+        let got = st
+            .requests_from_with(&a, &mut limits(live, visits))
+            .unwrap();
+        assert_eq!(got, want, "at the bound");
+        let e = st
+            .requests_from_with(&a, &mut limits(live, visits - 1))
+            .unwrap_err();
+        assert_eq!(
+            texts(e),
+            (
+                E_LIMIT,
+                format!("cross-view review exceeds {} candidate visits", visits - 1),
+                fix.into()
+            )
+        );
+        // each change's count starts again: b's two subjects make 8, more than a and c
+        let per: Vec<usize> = changes
+            .iter()
+            .map(|c| {
+                st.requests_from_with(c, &mut cx).unwrap();
+                cx.last_visits
+            })
+            .collect();
+        assert_eq!(per, vec![4, 8, 4]);
+        let mut one = limits(live, 8);
+        let before = cross_view_index_visits();
+        for c in &changes {
+            st.requests_from_with(c, &mut one).unwrap();
+        }
+        assert_eq!(
+            cross_view_index_visits() - before,
+            live as u64,
+            "the writes bound counts one construction for the whole context"
+        );
+        let e = st
+            .requests_from_with(&changes[1], &mut limits(live, 7))
+            .unwrap_err();
+        assert_eq!(e.message, "cross-view review exceeds 7 candidate visits");
+    }
+
+    #[test]
+    fn nb5_queue_walk_reuses_each_selected_views_lexicon() {
+        let (_d, r, changes) = world();
+        let st = r.read();
+        let mut cx = CrossViewContext::default();
+        let before = cross_view_index_visits();
+        let mut lexicons = vec![];
+        for c in &changes {
+            let got = st.requests_from_with(c, &mut cx).unwrap();
+            assert_eq!(got, st.requests_from(c).unwrap(), "as a standalone call");
+            lexicons.push(cx.sides.lexicon_views());
+        }
+        let views: Vec<String> = ["a", "b", "c"].map(String::from).to_vec();
+        assert!(
+            lexicons.iter().all(|l| *l == views),
+            "each selected view's lexicon is read once, at construction: {lexicons:?}"
+        );
+        // three standalone calls build their own index; the shared context builds once
+        assert_eq!(
+            cross_view_index_visits() - before,
+            3 * 4 + 4,
+            "the context indexes each live write once"
+        );
     }
 }

@@ -407,6 +407,9 @@ pub struct WriteResult {
     /// every other justification.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub justification: Option<crate::JustificationInfo>,
+    /// nb9 (t-F3KR2): the briefing of the blocks this write created; absent when it created none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub briefing: Option<crate::brief::CreatedBriefing>,
 }
 
 /// Why a JSON value is no field value.
@@ -3483,6 +3486,9 @@ impl Rdy {
             reflected.as_ref().map_or(&no_code, |r| &r.code),
         )?;
         refuse_removed_content(&self.store, &ops)?;
+        // nb9 (O9): the receipt of the blocks this write creates, built on the candidate before
+        // anything is appended; it is registered only once the write is published
+        let receipt = crate::brief::created_record(&self.pack, &m, || st.graph(&scope), &ops)?;
         let code_recorded = reflects.as_ref().filter(|r| r.code).map(|_| {
             let mut ids: Vec<String> = stamped.iter().map(ToString::to_string).collect();
             ids.sort();
@@ -3536,6 +3542,7 @@ impl Rdy {
             change: id,
             ops,
         })?;
+        let briefing = crate::brief::register_created(&self.briefs, receipt);
 
         let m = self.read().materialized(&scope)?;
         let mut docs = BTreeSet::new();
@@ -3578,6 +3585,7 @@ impl Rdy {
             warnings,
             code_recorded,
             justification: justification_info,
+            briefing,
         })
     }
 }

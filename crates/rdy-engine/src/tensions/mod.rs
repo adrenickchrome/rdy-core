@@ -43,7 +43,7 @@ pub mod value;
 
 pub use dismiss::{DismissInfo, MAX_REASON};
 pub use index::{
-    CanonIndex, ChangeFacts, DetectCx, Write, Writes, normalize_name, normalize_text,
+    CanonIndex, ChangeFacts, DetectCx, Write, Writes, name_keys_of, normalize_name, normalize_text,
     pointing_edge, premise_edge,
 };
 pub use info::{DismissalInfo, SideBlock, SideInfo, TensionInfo, TensionStatus};

@@ -70,6 +70,32 @@
       "views": []
     },
     "lineage": [],
+    "neighbors": [
+      {
+        "block": "c-CFPE0",
+        "doc": "d-TNT6J",
+        "of": [
+          "c-ZCQ17"
+        ],
+        "summary": "A holds, by a.",
+        "via": "section"
+      },
+      {
+        "block": "c-WKHEZ",
+        "doc": "d-TNT6J",
+        "of": [
+          "c-ZCQ17"
+        ],
+        "summary": "B builds on c-CFPE0.",
+        "via": "section"
+      }
+    ],
+    "neighbors_by_doc": [
+      {
+        "count": 2,
+        "doc": "d-TNT6J"
+      }
+    ],
     "suspects": [],
     "will_go_stale": []
   },

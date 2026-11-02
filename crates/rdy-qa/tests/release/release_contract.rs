@@ -1210,15 +1210,17 @@ fn wc_row() -> Value {
     let refusal = serde_json::from_str::<Value>(&normalize(&refusal.to_string(), &[s.dir.path()]))
         .unwrap_or(refusal);
     std::fs::write(&intro, &original).expect("restore the doc file");
+    let commits = wc_commit_replies(&s, &ids[2]);
     let mut ids_seen = ids;
     ids_seen.sort();
     json!({
-        "sources": ["rdy checkout", ".rdy/wc", "rdy check", "rdy_engine::wc"],
+        "sources": ["rdy checkout", ".rdy/wc", "rdy check", "rdy commit", "rdy_engine::wc"],
         "state_directory": ".rdy/wc",
         "state_files": state_names,
         "state_shapes": state,
         "member_shapes": members,
         "checkout_reply": shape(&checkout),
+        "commit_replies": commits,
         "unknown_key_refusal": refusal,
         "state_constants": {
             "wc_dir": rdy_engine::wc::state::WC_DIR,
@@ -1234,6 +1236,55 @@ fn wc_row() -> Value {
         },
         "seeded_blocks": ids_seen.len(),
     })
+}
+
+/// nb9 (O9, FW-E4): the replies of a commit that creates a prose block under `section`, by the
+/// person (no daemon) and by an agent (through the daemon, which an agent commit needs). The
+/// person's reply holds the write's receipt as `briefing` and the briefing the CLI made for the
+/// commit as `cited_briefing`; the agent's holds the receipt and no cited briefing.
+fn wc_commit_replies(s: &rdy_qa::daemon::Served, section: &str) -> Value {
+    let intro = s.dir.path().join("guides/intro.yaml");
+    let add_prose = |body: &str| {
+        let orig = std::fs::read_to_string(&intro).expect("read the doc file");
+        std::fs::write(
+            &intro,
+            format!("{orig}- type: prose\n  parent: {section}\n  body: {body}\n"),
+        )
+        .expect("write the doc file");
+    };
+    let human = |args: &[&str]| {
+        let mut a = vec!["--no-daemon", "--json"];
+        a.extend_from_slice(args);
+        s.json(&a)
+    };
+    add_prose("Made by a person.");
+    let (ok, v) = human(&["add", "guides/intro.yaml"]);
+    assert!(ok, "the person stages the doc: {v}");
+    let (ok, person) = human(&["commit", "-m", "create"]);
+    assert!(ok, "the person's commit succeeds: {person}");
+    assert_eq!(person["briefing"]["covers"], 1, "{person}");
+    assert!(person["briefing"]["token"].is_string(), "{person}");
+    assert!(
+        person["cited_briefing"]["base"]["token"].is_string(),
+        "{person}"
+    );
+    let agent = |args: &[&str]| {
+        let mut a = vec!["--json"];
+        a.extend_from_slice(args);
+        s.json_as("agent:qa", Some("r1"), &a)
+    };
+    let (ok, v) = agent(&["checkout"]);
+    assert!(ok, "the agent checks out its view: {v}");
+    add_prose("Made by an agent.");
+    let (ok, v) = agent(&["add", "guides/intro.yaml"]);
+    assert!(ok, "the agent stages the doc: {v}");
+    let (ok, by_agent) = agent(&["commit", "-m", "create"]);
+    assert!(ok, "the agent's commit succeeds: {by_agent}");
+    assert_eq!(by_agent["briefing"]["covers"], 1, "{by_agent}");
+    assert!(by_agent["briefing"]["token"].is_string(), "{by_agent}");
+    assert!(by_agent.get("cited_briefing").is_none(), "{by_agent}");
+    s.stop();
+    json!({"human": shape(&person), "agent": shape(&by_agent)})
 }
 
 // ---- signatures ----
@@ -1424,6 +1475,13 @@ fn signatures_row() -> Value {
 struct Rich {
     dir: tempfile::TempDir,
     batch: rdy_qa::intake::Batch,
+    /// nb4: a prose block with a located unlinked mention, so a briefing of it lists the text.
+    mention: String,
+    /// nb8 (TASK-978 X2, D-YXBXH): the doc `crowd-0` that holds `mention`, so a block created in
+    /// it has `mention` as its one baseline section neighbor; and claims `k1` and `k2` of doc
+    /// `crowd-1`, so an edit of `k1` has `k2` as its one section neighbor.
+    crowd: String,
+    k1: String,
 }
 
 /// The pack of the probes: one area, so the coverage areas hold an entry.
@@ -1451,13 +1509,49 @@ fn rich_project() -> Rich {
     )
     .expect("edit A");
     rdy_qa::fixtures::land(&mut r, "s").expect("land the edit");
+    // nb4 (D-YXBXH): nine more docs at the top level (a crowded level), and in one of them a
+    // prose block that is one question and names a term it is not linked to (a located
+    // unlinked mention)
+    let mut ops: Vec<Value> = vec![];
+    for n in 0..9 {
+        ops.push(json!({"op": "create", "type": "doc", "id": format!("$c{n}"),
+            "fields": {"name": format!("crowd-{n}"), "title": format!("Crowd {n}"), "doc_type": "page"}}));
+    }
+    ops.push(
+        json!({"op": "create", "type": "term", "parent": "$c0", "fields": {"name": "Ledger"},
+        "body": "Holds balances."}),
+    );
+    ops.push(
+        json!({"op": "create", "type": "prose", "id": "$ask", "parent": "$c0",
+        "body": "Who keeps the Ledger?"}),
+    );
+    for k in ["$k1", "$k2"] {
+        ops.push(
+            json!({"op": "create", "type": "claim", "id": k, "parent": "$c1",
+            "body": format!("Crowd claim {}.", &k[2..])}),
+        );
+    }
+    let crowded =
+        rdy_qa::fixtures::write(&mut r, "crowd", Value::Array(ops)).expect("write the crowd");
+    let (mention, crowd, k1) = (
+        crowded.created["$ask"].clone(),
+        crowded.created["$c0"].clone(),
+        crowded.created["$k1"].clone(),
+    );
+    rdy_qa::fixtures::land(&mut r, "crowd").expect("land the crowd");
     // a view that gives the reviewers a request
     put(&mut r, "a", upd(&batch.spec.c, "C contradicts B."));
     r.close().expect("close");
     rdy_qa::packs::use_pack(dir.path(), "rdy-release", RICH_PACK, "");
     std::fs::write(dir.path().join(".rdy/local.yaml"), "actor: human:qa\n").expect("the person");
     rdy_model::unseed_ids_for_tests();
-    Rich { dir, batch }
+    Rich {
+        dir,
+        batch,
+        mention,
+        crowd,
+        k1,
+    }
 }
 
 /// What the probes saw, by label: for each, the merged shape of every success and of every
@@ -1906,6 +2000,7 @@ fn cli_runtime() -> Value {
         ("q", vec!["q", "type = claim"]),
         ("show landing", vec!["show", "tag:v1.0.0"]),
         ("brief", vec!["brief", &a]),
+        ("brief", vec!["brief", &rich.mention]),
         ("plan", vec!["plan", "--proposal", &proposal]),
         ("config", vec!["config"]),
         ("view ls", vec!["view", "ls"]),
@@ -2195,6 +2290,7 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
         ("rdy_diff", json!({"from": "batch"})),
         ("rdy_query", json!({"filter": "type = claim"})),
         ("rdy_brief", json!({"ids": [a]})),
+        ("rdy_brief", json!({"ids": [rich.mention.clone()]})),
         ("rdy_view", json!({"op": "list"})),
         ("rdy_view", json!({"op": "show", "name": "batch"})),
         (
@@ -2368,6 +2464,21 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
             {"op": "create", "type": "claim", "id": "$n", "parent": section, "body": "Side notes stay short."}
         ]}),
     ));
+    // nb8: the neighbor row of each unchanged block of C's section names the least changed
+    // block, C (edited: the row has `values`) or the new claim (created: none), and the claim's
+    // id is not seeded. So the version also edits k1 (its neighbor k2 names k1 alone) and
+    // creates a claim in crowd-0 (its neighbor, the mention, names that claim alone): its rows
+    // always hold both kinds, whatever the ids
+    mcp_probe(
+        seen,
+        &mut w,
+        "rdy_write",
+        "rdy_write",
+        json!({"view": "side", "ops": [
+            {"op": "update", "id": rich.k1, "body": "Crowd claim one, now."},
+            {"op": "create", "type": "claim", "id": "$n", "parent": rich.crowd, "body": "Crowd notes stay short."}
+        ]}),
+    );
     assert!(
         created["created"]["$n"].is_string(),
         "the write created a claim: {created}"
@@ -2956,6 +3067,26 @@ fn packs_row() -> Value {
             .expect_err("a taken name is refused")
             .to_string()
     };
+    // nb3 (D-YXBXH, O6): a pack that sets every coverage key, the level setting's default, and
+    // the two refusals at its edges
+    let coverage_pack = {
+        let mut s = PackSet::with_builtin();
+        s.add_yaml(
+            "name: probe\nversion: \"1\"\nextends: rdy-standard\ncoverage:\n  weights: {governed: 2}\n  dismissed_weight: 25\n  drift_threshold: 70\n  max_docs_per_level: 12\n",
+        )
+        .expect("a pack with every coverage key parses");
+        s.resolve("probe").expect("it resolves")
+    };
+    let level_refusal = |n: u32| {
+        let mut s = PackSet::with_builtin();
+        s.add_yaml(&format!(
+            "name: probe\nversion: \"1\"\nextends: rdy-standard\ncoverage:\n  max_docs_per_level: {n}\n"
+        ))
+        .expect("the key parses");
+        s.resolve("probe")
+            .expect_err("a level outside 1 to 100000 is refused")
+            .to_string()
+    };
     let pack_keys: Vec<String> = pack_json.as_object().unwrap().keys().cloned().collect();
     json!({
         "sources": ["rdy_schema::Pack", "rdy_schema::PackSet", "crates/rdy-schema/packs"],
@@ -2979,10 +3110,17 @@ fn packs_row() -> Value {
             "max_glob_len": rdy_schema::MAX_GLOB_LEN,
             "max_path_segments": rdy_schema::MAX_PATH_SEGMENTS,
         },
+        "coverage_settings": {
+            "pack": coverage_pack.coverage,
+            "max_docs_per_level_default": std_pack.max_docs_per_level(),
+            "max_docs_per_level_set": coverage_pack.max_docs_per_level(),
+        },
         "validation": {
             "unknown_pack_key": bad_key,
             "unknown_field_kind": bad_field,
             "duplicate_pack_name": duplicate,
+            "coverage_level_too_low": level_refusal(0),
+            "coverage_level_too_high": level_refusal(100_001),
         },
     })
 }
@@ -4378,7 +4516,11 @@ fn empty_arrays(path: &str, v: &Value, out: &mut Vec<String>) {
 /// fills up must leave the list. ck8: a case of a check that reads no linked checkout holds no
 /// code, and an agent check is in no stage (`rdy_schema` lists its stages as an empty array).
 /// ck9: the command line's run and request hold no code for the same reason, and the held
-/// version's card fills `cli/pending/stdout/not_ready`, which leaves the list.
+/// version's card fills `cli/pending/stdout/not_ready`, which leaves the list. nb8: a neighbor
+/// entry fills `mcp/rdy_propose/ok/consequences`, which leaves the list. TASK-1067: every
+/// neighbor row carries `values` (`[]` for a created or deleted cause), so the neighbor rows'
+/// member is not optional, and the probes' neighbor causes state no literal, so it is empty;
+/// `rdy_write`'s rows also hold other kinds without it (D-CFC6V), so its `values?` stays.
 const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/approve/stdout/consequences[]/because/values",
     "cli/approve/stdout/signatures",
@@ -4496,7 +4638,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_plan/ok/notes",
     "mcp/rdy_propose/ok/blocking",
     "mcp/rdy_propose/ok/conflicts",
-    "mcp/rdy_propose/ok/consequences",
+    "mcp/rdy_propose/ok/consequences[]/because/values",
     "mcp/rdy_propose/ok/issues",
     "mcp/rdy_review request/ok/case/code",
     "mcp/rdy_review request/ok/requests[]/case/code",
@@ -4533,6 +4675,7 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_view compare/ok/moved",
     "mcp/rdy_view show/ok/conflicts",
     "mcp/rdy_view undo/refused/issues",
+    "mcp/rdy_write/ok/consequences[]/because/values?",
     "mcp/rdy_write/ok/on_change/resolved",
     "mcp/rdy_write/ok/suggestions",
 ];

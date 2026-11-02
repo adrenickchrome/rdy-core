@@ -98,6 +98,36 @@ pub fn phrase(text: &str) -> String {
         .join(" ")
 }
 
+/// One key of a name or a text phrase (D-YXBXH): the phrase itself, or the phrase with one
+/// plural ending dropped from its last word ([`name_keys`]). Two phrases match when their key
+/// sets meet.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct NameKey(pub String);
+
+/// The least Unicode scalar values a last word keeps when a key drops its final `es` or `s`.
+pub const MIN_STEM_CHARS: usize = 3;
+
+/// The keys of `p`, a [`phrase`], sorted, each once, as slices of `p`: `p` without one final
+/// `es` of its last word when at least [`MIN_STEM_CHARS`] scalars remain in that word; `p`
+/// without one final `s` when its last word does not end in `ss` and as many remain; then `p`.
+/// No key is stemmed again, and the earlier words never change. Each key is a prefix of the
+/// next, so this order is the sorted order. An empty phrase has no key.
+pub fn phrase_keys(p: &str) -> impl Iterator<Item = &str> {
+    let last = p.rsplit(' ').next().unwrap_or_default();
+    let n = last.chars().count();
+    let es = (last.ends_with("es") && n >= MIN_STEM_CHARS + 2).then(|| &p[..p.len() - 2]);
+    let s = (last.ends_with('s') && !last.ends_with("ss") && n > MIN_STEM_CHARS)
+        .then(|| &p[..p.len() - 1]);
+    [es, s, (!p.is_empty()).then_some(p)].into_iter().flatten()
+}
+
+/// The keys of `text`: [`phrase_keys`] of its [`phrase`]. At most three, sorted, each once;
+/// none for a text with no words.
+pub fn name_keys(text: &str) -> Vec<NameKey> {
+    let p = phrase(text);
+    phrase_keys(&p).map(|k| NameKey(k.to_string())).collect()
+}
+
 /// The phrases of `text` that `known` accepts, left to right, longest first at each word
 /// (windows of [`MAX_NAME_WORDS`] words down to one), each with its byte range. A phrase
 /// shorter than [`MIN_MENTION_CHARS`] characters is skipped. Matches never overlap. A `'\0'`
@@ -358,4 +388,112 @@ pub fn visit_leaves(
 /// The field a text source's name comes from: `steps[0]` and `cells.a` are `steps` and `cells`.
 pub fn source_field(name: &str) -> &str {
     name.find(['[', '.']).map_or(name, |i| &name[..i])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    fn keys(text: &str) -> Vec<String> {
+        name_keys(text).into_iter().map(|k| k.0).collect()
+    }
+
+    fn meet(a: &str, b: &str) -> bool {
+        let b = name_keys(b);
+        name_keys(a).iter().any(|k| b.contains(k))
+    }
+
+    #[test]
+    fn nb1_name_keys_fold_only_the_last_word() {
+        for (a, b) in [
+            ("Conflict", "Conflicts"),
+            ("Pass", "Passes"),
+            ("Release", "Releases"),
+            ("merge  CONFLICT", "Merge Conflicts"),
+        ] {
+            assert!(meet(a, b) && meet(b, a), "{a} / {b}");
+        }
+        assert_eq!(keys("Passes"), ["pass", "passe", "passes"]);
+        assert_eq!(keys("Releases"), ["releas", "release", "releases"]);
+        // a final `ss` keeps its `s`
+        assert_eq!(keys("Process"), ["process"]);
+        assert!(!meet("Process", "Proces"));
+        assert!(meet("Process", "Processes"));
+        // the accepted match: `news` without its `s` is `new`
+        assert_eq!(keys("News"), ["new", "news"]);
+        assert!(meet("News", "new"));
+        // a remnant of two scalars does not count
+        assert_eq!(keys("Bus"), ["bus"]);
+        assert_eq!(keys("Yes"), ["yes"]);
+        assert_eq!(keys("Uses"), ["use", "uses"]);
+        assert!(!meet("Bus", "bu") && !meet("Uses", "us"));
+        // three Unicode scalars, not bytes
+        assert_eq!(keys("ÑUS"), ["ñus"]);
+        assert_eq!(keys("Cafés"), ["café", "cafés"]);
+        // no recursive stripping: a derived key is never stripped again
+        assert_eq!(keys("Glasses"), ["glass", "glasse", "glasses"]);
+        assert!(!meet("Glasses", "glas"));
+        assert!(!meet("Releases", "relea"));
+        // earlier words never change
+        assert_eq!(
+            keys("Rules Engines"),
+            ["rules engin", "rules engine", "rules engines"]
+        );
+        assert!(!meet("Rules Engines", "rule engine"));
+        // tokenized and joined as `phrase` does
+        assert_eq!(keys("  Merge -- conflicts! "), keys("merge conflicts"));
+        assert!(name_keys("").is_empty() && name_keys("--").is_empty());
+        for t in ["Passes", "Glasses", "News", "a", "Process", "x y zes"] {
+            let k = keys(t);
+            assert!(k.len() <= 3, "{t}: {k:?}");
+            assert!(k.windows(2).all(|w| w[0] < w[1]), "{t}: sorted, no repeat");
+            assert!(k.contains(&phrase(t)), "{t}: the phrase itself");
+        }
+    }
+
+    #[test]
+    fn nb1_names_preserve_unicode_spans_and_longest_match() {
+        let names = [
+            "İstanbul office",
+            "merge conflict",
+            "conflict resolution",
+            "conflict",
+            "alpha beta gamma delta epsilon zeta eta theta",
+            "one two three four five six seven eight nine",
+            "ledger",
+        ];
+        let known: BTreeSet<NameKey> = names.iter().flat_map(|n| name_keys(n)).collect();
+        // a window is already a phrase: its keys come from it as it is, never re-tokenized (a
+        // folded `İ` holds a combining mark that is no word character)
+        let is_known = |p: &str| phrase_keys(p).any(|k| known.contains(&NameKey(k.to_string())));
+        let text = "İSTANBUL Offices: Merge Conflicts resolution, then conflicts. \
+                    Alpha beta gamma delta epsilon zeta eta thetas; \
+                    one two three four five six seven eight nine. merge\0conflicts ledgers";
+        let at = |needle: &str, from: usize| {
+            let s = from + text[from..].find(needle).unwrap();
+            s..s + needle.len()
+        };
+        let ist = at("İSTANBUL Offices", 0);
+        let merge = at("Merge Conflicts", 0);
+        let then = at("conflicts", at("then ", 0).end);
+        let greek = at("Alpha beta gamma delta epsilon zeta eta thetas", 0);
+        let blanked = at("conflicts", at("merge\0", 0).end);
+        let ledgers = at("ledgers", 0);
+        assert_eq!(
+            find_phrases(text, &is_known),
+            vec![
+                ("i\u{307}stanbul offices".to_string(), ist),
+                ("merge conflicts".to_string(), merge),
+                ("conflicts".to_string(), then),
+                (
+                    "alpha beta gamma delta epsilon zeta eta thetas".to_string(),
+                    greek
+                ),
+                ("conflicts".to_string(), blanked),
+                ("ledgers".to_string(), ledgers),
+            ],
+            "a ninth word is never part of a name; a blanked reference ends a window"
+        );
+    }
 }

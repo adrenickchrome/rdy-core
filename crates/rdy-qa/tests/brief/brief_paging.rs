@@ -105,6 +105,22 @@ fn cov(h: &BlockId) -> Coverage {
     }
 }
 
+/// nb7: `n` claims beside H in its section, landed: H's section neighbors.
+fn siblings(r: &mut Rdy, h: &BlockId, n: usize) {
+    let parent = r
+        .read()
+        .block(&Scope::Canon, h)
+        .unwrap()
+        .parent
+        .unwrap()
+        .to_string();
+    let ops: Vec<Value> = (0..n)
+        .map(|i| json!({"op": "create", "type": "claim", "parent": parent, "body": format!("Sibling {i} of H.")}))
+        .collect();
+    write(r, "work", Value::Array(ops)).unwrap();
+    land(r, "work").unwrap();
+}
+
 #[test]
 fn bpag1_a_cut_briefing_carries_a_cursor_and_per_doc_counts() {
     let (_d, mut r) = project();
@@ -126,6 +142,13 @@ fn bpag1_a_cut_briefing_carries_a_cursor_and_per_doc_counts() {
         .brief(&Scope::Canon, &cov(&h), Some(100_000))
         .unwrap();
     assert!(!full.truncated && full.next.is_none() && full.docs.is_empty());
+    // nb7: the cursor holds one offset per paged section, neighbors among them, and the
+    // neighbor counts are the whole briefing's on the cut page too
+    let cursor = b.next.as_ref().unwrap();
+    let offsets = cursor.split(':').nth(1).unwrap().split(',').count();
+    assert_eq!(offsets, rdy_engine::brief::PAGE_SECTIONS.len());
+    assert_eq!(rdy_engine::brief::PAGE_SECTIONS.len(), 12);
+    assert_eq!(b.neighbors_by_doc, full.neighbors_by_doc);
 }
 
 #[test]
@@ -133,6 +156,7 @@ fn bpag1_paging_through_shows_every_entry_once() {
     let (_d, mut r) = project();
     let (_hub_doc, h) = hub(&mut r, 60);
     reflect_sources(&mut r, &h, 3);
+    siblings(&mut r, &h, 12);
     let full = r
         .read()
         .brief(&Scope::Canon, &cov(&h), Some(100_000))
@@ -144,6 +168,7 @@ fn bpag1_paging_through_shows_every_entry_once() {
     first.register(&r.briefs());
     let (mut deps, mut stale) = (first.dependents.clone(), first.will_go_stale.clone());
     let mut sources = first.sources.clone();
+    let mut neighbors = first.neighbors.clone();
     let mut next = first.next.clone();
     let mut pages = 1;
     while let Some(cursor) = next {
@@ -155,6 +180,8 @@ fn bpag1_paging_through_shows_every_entry_once() {
         deps.extend(p.dependents.clone());
         stale.extend(p.will_go_stale.clone());
         sources.extend(p.sources.clone());
+        neighbors.extend(p.neighbors.clone());
+        assert_eq!(p.neighbors_by_doc, full.neighbors_by_doc);
         next = p.next.clone();
         pages += 1;
         assert!(pages < 100, "paging does not end");
@@ -162,6 +189,9 @@ fn bpag1_paging_through_shows_every_entry_once() {
     assert!(pages > 1);
     assert_eq!(deps, full.dependents);
     assert_eq!(stale, full.will_go_stale);
+    // nb7: the neighbors are a paged section too, each shown once
+    assert_eq!(full.neighbors.len(), 12);
+    assert_eq!(neighbors, full.neighbors);
     // rf9: the sources H reflects are a paged section too, each shown once
     assert_eq!(full.sources.len(), 3);
     assert_eq!(sources, full.sources);
@@ -317,8 +347,9 @@ fn bpag1_an_offset_past_the_end_of_its_section_is_stale_not_malformed() {
     let (offsets, digest) = rest.split_once(':').unwrap();
     let parts: Vec<String> = offsets.split(',').map(str::to_string).collect();
     assert_eq!(parts.len(), rdy_engine::brief::PAGE_SECTIONS.len());
-    // the dependents offset, then the sources offset (a section of its own)
-    for at in [1, 5] {
+    // the dependents offset, then the sources offset (a section of its own), then the
+    // neighbors offset (nb7)
+    for at in [1, 5, 10] {
         let mut forged_parts = parts.clone();
         forged_parts[at] = "100000".to_string();
         let forged = format!("{token}:{}:{digest}", forged_parts.join(","));
@@ -353,6 +384,7 @@ fn shown(b: &Briefing) -> usize {
         + b.inflight.proposals.len()
         + b.inflight.intents.len()
         + b.inflight.tensions.len()
+        + b.neighbors.len()
         + b.base.blocks.len()
 }
 
@@ -365,6 +397,7 @@ fn bfit1_a_cut_briefing_with_its_cursor_fits_every_budget() {
     let (_d, mut r) = project();
     let (_hub_doc, h) = hub(&mut r, 60);
     reflect_sources(&mut r, &h, 3);
+    siblings(&mut r, &h, 12);
     let wide = r
         .read()
         .brief(&Scope::Canon, &cov(&h), Some(BUDGET))

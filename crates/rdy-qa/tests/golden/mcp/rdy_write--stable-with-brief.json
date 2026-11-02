@@ -26,6 +26,21 @@
       "follow_up": "confirm",
       "id": "cq-88eac493867c1d2e",
       "kind": "suspect"
+    },
+    {
+      "because": {
+        "changed": "c-CFPE0",
+        "edge": "neighbor",
+        "edges": [
+          "neighbor"
+        ],
+        "values": []
+      },
+      "block": "c-ZCQ17",
+      "fix": "a block in its section changed: check that it still holds, and update it if not; no repin is needed",
+      "follow_up": "confirm",
+      "id": "cq-004e8d04beb52cef",
+      "kind": "dependent"
     }
   ],
   "coverage": {

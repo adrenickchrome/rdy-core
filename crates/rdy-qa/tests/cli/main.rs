@@ -26,6 +26,7 @@ mod cli_intents;
 mod cli_keys;
 mod cli_log;
 mod cli_name_case;
+mod cli_neighbors_plan;
 mod cli_output;
 mod cli_plan;
 mod cli_plan_group;

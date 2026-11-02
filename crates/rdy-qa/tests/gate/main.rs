@@ -11,6 +11,8 @@ mod gate_exceptions;
 mod gate_freshness;
 mod gate_identity;
 mod gate_intake_e2e;
+mod gate_neighbor_cards;
+mod gate_neighbors;
 mod gate_plan;
 mod gate_plan_cards;
 mod gate_policy_land;

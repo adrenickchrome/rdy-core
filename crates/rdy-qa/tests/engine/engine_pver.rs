@@ -342,6 +342,37 @@ fn hb1_approving_across_a_sibling_rekey_warns() {
     )
     .unwrap();
     land(&mut r, "va").unwrap();
+    // nb8 (D-YXBXH, TASK-978 X2): vb's new claim owes its baseline section siblings `first` and
+    // `second` a confirm, and D-ME2HD's reach holds the blocks the plan items name; va's landing
+    // moved `first`, so the first approval refuses as moved with a fresh card
+    let moved = r.land_report(&approver(), &p.r#ref).unwrap_err();
+    assert_eq!(moved.code, E_PROPOSAL_MOVED, "{moved}");
+    assert!(
+        moved
+            .message
+            .starts_with(&format!("proposal {} moved: landing ", p.r#ref))
+            && moved
+                .message
+                .ends_with(&format!(" changed {first} after its assessment")),
+        "{moved}"
+    );
+    assert_eq!(
+        moved.fix,
+        format!(
+            "review the fresh card in corrected and approve {} again",
+            p.r#ref
+        )
+    );
+    let card = &moved.corrected.as_ref().expect("a fresh card")["card"];
+    assert_eq!(card["ref"], p.r#ref, "{card:#}");
+    let text = card["card"].as_str().unwrap();
+    for line in [
+        "  Change plan     2 open, 0 closed, 0 deferred\n",
+        ", moved\n",
+        "recommended\n",
+    ] {
+        assert!(text.contains(line), "{line:?} in {text}");
+    }
     // the frozen version lands as approved (FW-HB1) and the approver is told its siblings moved
     let info = r.land_report(&approver(), &p.r#ref).unwrap();
     assert_eq!(info.approved, p.r#ref);

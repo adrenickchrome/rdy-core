@@ -2,6 +2,7 @@
 //! workload and the gate report. The tests live in `tests/`, one test binary per area,
 //! `tests/<area>/main.rs`.
 pub mod chain_fixture;
+pub mod check_fixture;
 pub mod daemon;
 pub mod edit_loop;
 pub mod every_kind;

@@ -23,8 +23,9 @@ fn map(v: Value) -> serde_json::Map<String, Value> {
     v.as_object().unwrap().clone()
 }
 
-/// Canon: doc `led` with section `s`, term `t`, claims `a` and `c`, and `b` (cites `a` and
-/// `c`); `n` accepted decisions that cite `t`. The agent's view `w` (its run's name, so its
+/// Canon: doc `led` with section `s` (term `t`, claim `a`, and `b`, which cites `a` and `c`) and
+/// section `o` (claim `c`); `n` accepted decisions that cite `t`. `c` sits outside `s`, so `a`'s
+/// edit owes it no section confirm (nb8, D-YXBXH): the plan holds only the items below. The agent's view `w` (its run's name, so its
 /// default view) changes `t` and `a`: in `w` the decisions are suspect on `t`, and `b` on `a`.
 struct Fx {
     t: String,
@@ -38,7 +39,8 @@ fn fx(r: &mut Rdy, n: usize) -> Fx {
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
         {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Ledger"}, "body": "Balances."},
         {"op": "create", "type": "claim", "id": "$a", "parent": "$s", "body": "A holds 30 days."},
-        {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "C stands."},
+        {"op": "create", "type": "section", "id": "$o", "parent": "$d", "fields": {"title": "Other"}},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$o", "body": "C stands."},
         {"op": "create", "type": "claim", "id": "$b", "parent": "$s", "body": "B builds on {{$a}} and {{$c}}."}
     ]))
     .unwrap();

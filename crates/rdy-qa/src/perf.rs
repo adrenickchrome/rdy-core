@@ -2604,9 +2604,9 @@ fn drift_canon_deep(op: &str, runs: &Runs, blocks: usize) -> Measure {
 
 /// The canon form of restatement drift (cc7; the D-SES4J canon budget), on a project of its own:
 /// `blocks` prose blocks in one controlled-English pattern (so they share phrases) and 10 that
-/// restate the first 10 land; then half of the blocks are edited inside the shared phrases in a
-/// later landing. The timed part is the cold canon-scope build of the tensions, as
-/// `tensions_canon`; it opens one drift per restating block.
+/// restate the first 10 land, in sections of at most [`DRIFT_SECTION`] blocks; then half of the
+/// blocks are edited inside the shared phrases in a later landing. The timed part is the cold
+/// canon-scope build of the tensions, as `tensions_canon`; it opens one drift per restating block.
 fn drift_canon(op: &str, runs: &Runs, blocks: usize) -> Measure {
     fn said(i: usize, how: &str) -> String {
         format!(
@@ -2620,30 +2620,36 @@ fn drift_canon(op: &str, runs: &Runs, blocks: usize) -> Measure {
         &mut r,
         "seed",
         json!([
-            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "rules", "title": "Rules", "doc_type": "page"}},
-            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}}
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "rules", "title": "Rules", "doc_type": "page"}}
         ]),
     )
     .expect("doc");
-    let section = d.created.get("$s").expect("the section").to_string();
+    let doc = d.created.get("$d").expect("the doc").to_string();
     let mut ids: Vec<String> = vec![];
     let bodies: Vec<String> = (0..blocks)
         .map(|i| said(i, "single"))
         .chain((0..RESTATED).map(|i| format!("In short: {}", said(i, "single"))))
         .collect();
-    for chunk in bodies.chunks(500) {
-        let ops: Vec<serde_json::Value> = chunk
-            .iter()
-            .enumerate()
-            .map(|(k, b)| {
-                json!({"op": "create", "type": "prose", "id": format!("$b{k}"), "parent": section, "body": b})
-            })
-            .collect();
+    // sections of at most DRIFT_SECTION blocks: O2 (M3e) refuses a landing whose neighbor walk
+    // passes 1,000,000 visits (about K x N for K edited blocks in an N-block section); restatement
+    // drift is project-wide, so the spread changes no drift
+    for (n, chunk) in bodies.chunks(DRIFT_SECTION).enumerate() {
+        let mut ops = vec![
+            json!({"op": "create", "type": "section", "id": "$s", "parent": doc, "fields": {"title": format!("Rules {n}")}}),
+        ];
+        ops.extend(chunk.iter().enumerate().map(|(k, b)| {
+            json!({"op": "create", "type": "prose", "id": format!("$b{k}"), "parent": "$s", "body": b})
+        }));
         let w = write(&mut r, "seed", serde_json::Value::Array(ops)).expect("prose");
         ids.extend(
             (0..chunk.len()).map(|k| w.created.get(&format!("$b{k}")).expect("id").to_string()),
         );
     }
+    assert_eq!(
+        ids.len(),
+        blocks + RESTATED,
+        "the same prose blocks as in one section"
+    );
     land(&mut r, "seed").expect("land the prose");
     let ops: Vec<serde_json::Value> = (0..blocks / 2)
         .map(|i| json!({"op": "update", "id": ids[i], "body": said(i, "double")}))
@@ -2667,6 +2673,9 @@ fn drift_canon(op: &str, runs: &Runs, blocks: usize) -> Measure {
         took
     })
 }
+
+/// The most prose blocks in one section of `tensions_canon_drift`'s project (the M3e test spread).
+const DRIFT_SECTION: usize = 100;
 
 /// Intents and alternative sets ever made in the coordination ops' projects: none is ever
 /// deleted (an intent expires at read time; a set is settled, not removed), so a swarm's count
@@ -4201,16 +4210,20 @@ fn tier_change_plan(
         json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}}),
         json!({"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "PlanLedger"}, "body": "Balances."}),
         json!({"op": "create", "type": "claim", "id": "$a", "parent": "$s", "body": "A holds."}),
+        // the reflects blocks' own section: in A's section each would be A's section neighbor
+        // and owe a confirm too (nb8, D-YXBXH), so the ops would count 2n confirm items
+        json!({"op": "create", "type": "section", "id": "$rs", "parent": "$d", "fields": {"title": "Module"}}),
     ];
     for i in 0..n {
         ops.push(json!({"op": "create", "type": "claim", "parent": "$s", "body": format!("N{i} builds on {{{{$a}}}}.")}));
     }
     let w = write(&mut r, "pfix", json!(ops)).expect("write the plan claims");
     land(&mut r, "pfix").expect("land the plan claims");
-    let (section, term, a) = (
+    let (section, term, a, module) = (
         w.created["$s"].clone(),
         w.created["$t"].clone(),
         w.created["$a"].clone(),
+        w.created["$rs"].clone(),
     );
     // the n accepted decisions that use the term
     for i in 0..n {
@@ -4233,7 +4246,7 @@ fn tier_change_plan(
     g.commit(&format!("start\n\nImplements: {a}"));
     g.link(&copy);
     let ops: Vec<_> = (0..n)
-        .map(|i| json!({"op": "create", "type": "claim", "parent": section, "body": format!("R{i} follows the module."), "fields": {"reflects": ["src/*.rs"]}}))
+        .map(|i| json!({"op": "create", "type": "claim", "parent": module, "body": format!("R{i} follows the module."), "fields": {"reflects": ["src/*.rs"]}}))
         .collect();
     write(&mut r, "prefl", json!(ops)).expect("write the reflects blocks");
     land(&mut r, "prefl").expect("land the reflects blocks");
@@ -7277,6 +7290,148 @@ fn reopen_measured(project: &std::path::Path) -> (u64, u128, Rdy) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// nb7 (r-TPD3E, the 25 ms ceiling at 100,000 blocks): `brief_doc`'s path over the fixture
+    /// doc in a view of exactly 100,000 blocks, where one entity and two tied content blocks
+    /// give the doc's claims section and entity neighbors. Bench only: the orchestrator runs it
+    /// (`--ignored --nocapture`) and checks the p95. The result is printed as `brief_doc` with a
+    /// `blocks=100000` label and joins no baseline comparison; completeness is asserted outside
+    /// the timer, never a time.
+    #[test]
+    #[ignore = "bench only: the orchestrator runs the 100,000-block briefing probe"]
+    fn nb7_brief_doc_at_hundred_thousand_blocks() {
+        rdy_model::seed_ids_for_tests(0x7064_6566);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let docs = testkit::generate_tree(&proj, 100, 10, 97);
+        let mut r = Rdy::open(&proj).expect("open");
+        // through the store: the one ~99,100-block change is past the per-proposal assessment
+        // reach (100,000 with rule-added blocks; KNOWN-ISSUES 120), so `land` finds no stored
+        // assessment; the canon is the same
+        crate::fixtures::land_with_a_tie(&mut r, "work");
+        let fx = fixture(&r, &docs);
+        let other = r
+            .read()
+            .resolve_path(&Scope::Canon, &docs[1])
+            .expect("a second doc");
+        let other_section = {
+            let m = r.read().materialized(&Scope::Canon).expect("canon");
+            m.children(Some(&other))[0].id.clone()
+        };
+        let eb = Scope::View("eb".into());
+        // setup, untimed: the entity and a tied claim in the fixture section, a tied claim in
+        // the second doc
+        let w = write(
+            &mut r,
+            "eb",
+            json!([
+                {"op": "create", "type": "entity", "id": "$e", "parent": fx.section.to_string(), "fields": {"name": "Gauge"}},
+                {"op": "create", "type": "claim", "id": "$t1", "parent": fx.section.to_string(), "body": "The near tie uses {{$e}}."},
+                {"op": "create", "type": "claim", "id": "$t2", "parent": other_section.to_string(), "body": "The far tie uses {{$e}}."}
+            ]),
+        )
+        .expect("the ties");
+        let (entity, t2) = (w.created["$e"].clone(), w.created["$t2"].clone());
+        // padding in a doc of its own, outside the fixture path, to exactly 100,000 blocks
+        let n = r.read().materialized(&eb).expect("eb").len();
+        assert!(n < 100_000, "{n} blocks before the padding");
+        let pad = write(
+            &mut r,
+            "eb",
+            json!([{"op": "create", "type": "doc", "fields": {"name": "padding", "title": "Padding", "doc_type": "constraints"}}]),
+        )
+        .expect("the padding doc")
+        .created["op0"]
+            .clone();
+        let mut left = 100_000 - n - 1;
+        let mut k = 0;
+        while left > 0 {
+            let chunk = left.min(1_000);
+            let ops: Vec<serde_json::Value> = (0..chunk)
+                .map(|i| json!({"op": "create", "type": "prose", "parent": pad, "body": format!("Padding {}.", k + i)}))
+                .collect();
+            write(&mut r, "eb", serde_json::Value::Array(ops)).expect("padding");
+            k += chunk;
+            left -= chunk;
+        }
+        assert_eq!(r.read().materialized(&eb).expect("eb").len(), 100_000);
+        let cov = Coverage {
+            ids: vec![],
+            path: Some(fx.doc_path.clone()),
+        };
+        let claim = fx.claim.to_string();
+        let sample = measure_timed("brief_doc", LARGE_RUNS.read, |i| {
+            // the anchor's body changes before each sample: the size stays fixed
+            write(
+                &mut r,
+                "eb",
+                json!([{"op": "update", "id": claim, "body": format!("Anchor {i}.")}]),
+            )
+            .expect("edit the anchor");
+            let s = Instant::now();
+            let b = r.read().brief(&eb, &cov, None).expect("brief");
+            b.register(&r.briefs());
+            let took = s.elapsed();
+            assert!(b.covers > 0);
+            took
+        });
+        println!(
+            "{} blocks=100000 median_ms={:.3} p95_ms={:.3} runs={}",
+            sample.op, sample.median_ms, sample.p95_ms, sample.runs
+        );
+        // untimed: every page, every neighbor once, the counts on each page
+        let first = r.read().brief(&eb, &cov, None).expect("brief");
+        first.register(&r.briefs());
+        let full = r.read().brief(&eb, &cov, Some(usize::MAX)).expect("brief");
+        let mut seen = first.neighbors.clone();
+        let mut next = first.next.clone();
+        let mut pages = 1;
+        while let Some(c) = next {
+            let p = r
+                .read()
+                .brief_page(&eb, &r.briefs(), &c, None)
+                .expect("page");
+            assert_eq!(p.neighbors_by_doc, full.neighbors_by_doc);
+            seen.extend(p.neighbors.clone());
+            next = p.next.clone();
+            pages += 1;
+            assert!(pages < 10_000, "paging does not end");
+        }
+        assert_eq!(seen, full.neighbors);
+        // the fixture section's 97 claims and the near tie are each other's section
+        // neighbors; the far tie is the near tie's entity neighbor
+        let section: Vec<&rdy_engine::neighbors::Neighbor> = seen
+            .iter()
+            .filter(|x| x.via == rdy_engine::neighbors::NeighborVia::Section)
+            .collect();
+        assert_eq!(section.len(), 98);
+        let far: Vec<&rdy_engine::neighbors::Neighbor> = seen
+            .iter()
+            .filter(|x| x.via == rdy_engine::neighbors::NeighborVia::Entity)
+            .collect();
+        assert_eq!(far.len(), 1);
+        assert_eq!(
+            (far[0].block.as_str(), far[0].entity.as_deref()),
+            (t2.as_str(), Some(entity.as_str()))
+        );
+        let counts: Vec<(String, usize)> = full
+            .neighbors_by_doc
+            .iter()
+            .map(|c| (c.doc.clone(), c.count))
+            .collect();
+        let doc = r
+            .read()
+            .resolve_path(&Scope::Canon, &fx.doc_path)
+            .expect("doc")
+            .to_string();
+        // in doc path order: the fixture doc (area-0/doc-0) before the second (area-0/doc-1)
+        assert_eq!(counts, vec![(doc, 98), (other.to_string(), 1)]);
+        println!(
+            "brief_doc blocks=100000 neighbors={} pages={pages}",
+            seen.len()
+        );
+    }
 
     fn m(op: &str, median: f64) -> Measure {
         Measure {

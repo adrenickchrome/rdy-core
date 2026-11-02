@@ -1,0 +1,588 @@
+{
+  "file": {
+    "batch_starts": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        385
+      ],
+      [
+        0,
+        1324
+      ],
+      [
+        0,
+        3719
+      ],
+      [
+        0,
+        4618
+      ],
+      [
+        0,
+        5329
+      ],
+      [
+        0,
+        7229
+      ],
+      [
+        0,
+        7995
+      ],
+      [
+        0,
+        8244
+      ],
+      [
+        0,
+        8923
+      ],
+      [
+        0,
+        10951
+      ],
+      [
+        0,
+        11872
+      ]
+    ],
+    "batches": 12,
+    "chain": {
+      "base": {
+        "offset": 0,
+        "segment": 0
+      },
+      "base_batch": {
+        "digest": "0000000000000000000000000000000000000000000000000000000000000000",
+        "frames": 0,
+        "start": {
+          "offset": 0,
+          "segment": 0
+        }
+      },
+      "end_batch": {
+        "digest": "0b8924c2af571962e55d45ec8f403b94fb0fc38303ec5334d00d4120a9d9873b",
+        "frames": 2,
+        "start": {
+          "offset": 11872,
+          "segment": 0
+        }
+      },
+      "kind": "full",
+      "prev": "0000000000000000000000000000000000000000000000000000000000000000",
+      "repo_id": "0e017430dd3b61791ab9289a0061b1af"
+    },
+    "dropped": 0,
+    "dump_format": 4,
+    "files": [
+      ".rdy.yaml"
+    ],
+    "frames": 53,
+    "len": 13383,
+    "log_end": [
+      0,
+      12127
+    ],
+    "name": "v4-f1-e1-ck.rdydump",
+    "rdy": "0.32.0",
+    "store_format": {
+      "features": {
+        "features": [
+          {
+            "class": "incompatible",
+            "name": "assessment",
+            "required_rdy": "0.26.0"
+          },
+          {
+            "class": "incompatible",
+            "name": "check_request",
+            "required_rdy": "0.26.0"
+          },
+          {
+            "class": "incompatible",
+            "name": "content_hash_v2",
+            "required_rdy": "0.26.0"
+          },
+          {
+            "class": "incompatible",
+            "name": "object_encoding",
+            "required_rdy": "0.26.0"
+          }
+        ],
+        "manifest_version": 1
+      }
+    },
+    "trailer": {
+      "batches": 12,
+      "digest": "645424369b9f3043f0f88c9bf539f10117669b5e6648a4812df74a9a14d59c9c",
+      "files": 1,
+      "first_removed": null,
+      "frames": 53,
+      "removals": 0
+    }
+  },
+  "formats": {
+    "dump_format": 4,
+    "encodings": {
+      "1": 0,
+      "10": 0,
+      "11": 0,
+      "13": 0,
+      "15": 0,
+      "16": 0,
+      "17": 0,
+      "18": 0,
+      "19": 0,
+      "2": 1,
+      "20": 0,
+      "21": 1,
+      "22": 0,
+      "23": 0,
+      "24": 0,
+      "25": 1,
+      "26": 1,
+      "27": 1,
+      "28": 1,
+      "3": 0,
+      "4": 1,
+      "5": 0,
+      "6": 0,
+      "7": 0,
+      "8": 0,
+      "9": 0
+    },
+    "features": {
+      "features": [
+        {
+          "class": "incompatible",
+          "name": "content_hash_v2",
+          "required_rdy": "0.26.0"
+        },
+        {
+          "class": "incompatible",
+          "name": "object_encoding",
+          "required_rdy": "0.26.0"
+        }
+      ],
+      "manifest_version": 1
+    },
+    "stream_format": 2
+  },
+  "holds": [
+    "check_request",
+    "check_review",
+    "accept_verdict_answer"
+  ],
+  "mode": "project",
+  "records": [
+    {
+      "hash": "e5e73369c285a8fb333119a899fd1aec4428a69069864f048fdc51ca971d3af4",
+      "kind": 28,
+      "present": true,
+      "record": "check_request",
+      "what": "CHECK_REQUEST of the agent's change, written by rdy_review run (check::api::run_review)"
+    },
+    {
+      "hash": "f0fe9895ec24eef475e6f28860a894aecf900f6f4b956cda04826a8e9ae521ba",
+      "kind": 17,
+      "present": true,
+      "record": "check_review",
+      "what": "REVIEW subject Check, verdict concern, written by rdy_review_submit (check/submit.rs)"
+    },
+    {
+      "hash": "438f176f441ce982dce85f24a4dae04d2947ebf5fd73b2602d4638ea049cb10c",
+      "kind": 10,
+      "present": true,
+      "record": "accept_verdict_answer",
+      "what": "ANSWER act AcceptVerdict of the review, no targets, the person's answer (rdy_answer's engine call)"
+    }
+  ],
+  "store_features": {
+    "features": [
+      {
+        "class": "incompatible",
+        "name": "assessment",
+        "required_rdy": "0.26.0"
+      },
+      {
+        "class": "incompatible",
+        "name": "check_request",
+        "required_rdy": "0.26.0"
+      },
+      {
+        "class": "incompatible",
+        "name": "content_hash_v2",
+        "required_rdy": "0.26.0"
+      },
+      {
+        "class": "incompatible",
+        "name": "object_encoding",
+        "required_rdy": "0.26.0"
+      }
+    ],
+    "manifest_version": 1
+  },
+  "tag": "v1.0.0",
+  "whole": {
+    "end": [
+      0,
+      12127
+    ],
+    "segments": {
+      "seg-000000.log": "33139ca6137edaf65df83616aea84efd7cc053adeed5de0778341332a00a0487"
+    },
+    "store": {
+      "canon_blocks": {
+        "c-YX91R": {
+          "redacted": false,
+          "version": "6f8cffc258821948bc8c2992fa608ac141720341807afafd40d0085daf21e74e"
+        },
+        "d-NEWD8": {
+          "redacted": false,
+          "version": "8c40ae081da4606b5ecbec816f7aab234fcb7b64cfa91b9d92107f60a580a732"
+        },
+        "s-CSNB0": {
+          "redacted": false,
+          "version": "1b6c3b8a2350cd1f358dc0522384e949cf4784802734c17fb1861885d4a3229a"
+        }
+      },
+      "facts": {
+        "fsck": {
+          "alt_sets": 0,
+          "frames": 53,
+          "intents": 0,
+          "landed_changes": 2,
+          "landings": 2,
+          "reviews": 0,
+          "transitions": 0,
+          "unlogged_moves": 0,
+          "versions": 1,
+          "views": 2
+        },
+        "landings": [
+          "d263877141053d2e582d0ab81612ec149c11b5dd5380550369f7c7c47b0f2511",
+          "1fba691b29e8420f48c2158c756f2d0aab685f59c3cc2914ef4fd79e63031f2b"
+        ],
+        "objects": {
+          "1": 4,
+          "10": 1,
+          "13": 6,
+          "130": 2,
+          "132": 2,
+          "153": 3,
+          "156": 1,
+          "17": 1,
+          "24": 3,
+          "3": 3,
+          "5": 2,
+          "8": 24,
+          "9": 1
+        },
+        "refs": {
+          "answer/verdict:f0fe9895ec24eef475e6f28860a894aecf900f6f4b956cda04826a8e9ae521ba": "438f176f441ce982dce85f24a4dae04d2947ebf5fd73b2602d4638ea049cb10c",
+          "canon": "1fba691b29e8420f48c2158c756f2d0aab685f59c3cc2914ef4fd79e63031f2b",
+          "check/e5e73369c285a8fb333119a899fd1aec4428a69069864f048fdc51ca971d3af4": "e5e73369c285a8fb333119a899fd1aec4428a69069864f048fdc51ca971d3af4",
+          "meta/repo_id": "0e017430dd3b61791ab9289a0061b1af",
+          "meta/store_features": "7b226d616e69666573745f76657273696f6e223a312c226665617475726573223a5b7b226e616d65223a226173736573736d656e74222c22636c617373223a22696e636f6d70617469626c65222c2272657175697265645f726479223a22302e32362e30227d2c7b226e616d65223a22636865636b5f72657175657374222c22636c617373223a22696e636f6d70617469626c65222c2272657175697265645f726479223a22302e32362e30227d2c7b226e616d65223a22636f6e74656e745f686173685f7632222c22636c617373223a22696e636f6d70617469626c65222c2272657175697265645f726479223a22302e32362e30227d2c7b226e616d65223a226f626a6563745f656e636f64696e67222c22636c617373223a22696e636f6d70617469626c65222c2272657175697265645f726479223a22302e32362e30227d5d7d",
+          "open/a1": "",
+          "open/seed": "",
+          "plan/a1": "027bc535d17488fe8adea78e82bb56e57926b2b3127ddaa2457ae65cc22f61b9",
+          "plan/seed": "85077ad5d4aaf3d8d02fe965cdb5fc3fb41b603f3506a438e77b9628a6ffc334",
+          "proposal/39c6ead9180c25a631d69d74d0a569728138086ffc02ffd1dcd5795c87c98890": "d786e662273702c64c87898c7619ae62a3eb936ca6dbc6caadee2a0f61377d4f",
+          "proposal/3b26c6a69b7d5addfe11389b4e9c1efc5a273082c6c4a6340e8a898d7371d4a8": "3b26c6a69b7d5addfe11389b4e9c1efc5a273082c6c4a6340e8a898d7371d4a8",
+          "tag/v1.0.0": "42a2462f39258b9e0f21be9e92cddeca3729bcecfdd888ae4e0f153712a8040e",
+          "view/a1": "d2337988abe4b7820fcef86ad2e7e34cd1e712817080ce84f525d3dfbd73eb82011fba691b29e8420f48c2158c756f2d0aab685f59c3cc2914ef4fd79e63031f2b0001086167656e743a61310102613100008aa8bcbcc066",
+          "view/seed": "455463945007e0a62ee26672870f7927f5849e2fc082a2948fc33819a018760e01d263877141053d2e582d0ab81612ec149c11b5dd5380550369f7c7c47b0f251100010a6167656e743a73656564010473656564000080a8bcbcc066"
+        },
+        "signatures": {}
+      },
+      "features": {
+        "encodings": {
+          "1": {
+            "0": 4
+          },
+          "10": {
+            "0": 1
+          },
+          "13": {
+            "0": 6
+          },
+          "17": {
+            "0": 1
+          },
+          "2": {
+            "1": 2
+          },
+          "24": {
+            "0": 3
+          },
+          "25": {
+            "1": 3
+          },
+          "28": {
+            "1": 1
+          },
+          "3": {
+            "0": 3
+          },
+          "4": {
+            "1": 2
+          },
+          "5": {
+            "0": 2
+          },
+          "8": {
+            "0": 24
+          },
+          "9": {
+            "0": 1
+          }
+        },
+        "manifest": {
+          "features": [
+            {
+              "class": "incompatible",
+              "name": "assessment",
+              "required_rdy": "0.26.0"
+            },
+            {
+              "class": "incompatible",
+              "name": "check_request",
+              "required_rdy": "0.26.0"
+            },
+            {
+              "class": "incompatible",
+              "name": "content_hash_v2",
+              "required_rdy": "0.26.0"
+            },
+            {
+              "class": "incompatible",
+              "name": "object_encoding",
+              "required_rdy": "0.26.0"
+            }
+          ],
+          "manifest_version": 1
+        }
+      },
+      "identity": {
+        "canon": "1fba691b29e8420f48c2158c756f2d0aab685f59c3cc2914ef4fd79e63031f2b",
+        "keys": [
+          "10:438f176f441ce982dce85f24a4dae04d2947ebf5fd73b2602d4638ea049cb10c",
+          "130:ac0c71b0c97f7f63b6c103ed07b475d1aa65adb876181f8527125bcd7149cb06",
+          "130:aed706bf5028b43e9d4a6e2fcfd8979cb3f14f7fdfdf8c2482160c7bfde2969f",
+          "132:1fba691b29e8420f48c2158c756f2d0aab685f59c3cc2914ef4fd79e63031f2b",
+          "132:d263877141053d2e582d0ab81612ec149c11b5dd5380550369f7c7c47b0f2511",
+          "13:17be5adb8d3e30e4e7519d7c37b9a6a207ab42c99e9166c325b1221484a32ec5",
+          "13:44c00c92235edef09c203e0caaf13e1b98f7f69d4fc5f55f4647b7601b35a5d0",
+          "13:455463945007e0a62ee26672870f7927f5849e2fc082a2948fc33819a018760e",
+          "13:59eb8ae7dca121efa191047a1395a6496cf7d4f324ac3c2418194b46bf40cd11",
+          "13:d2337988abe4b7820fcef86ad2e7e34cd1e712817080ce84f525d3dfbd73eb82",
+          "13:e687865b88856322d4e402f6eab72cc3328386bd39a6b2926b8db037cd24e9b4",
+          "153:1a04401fff4feb87db609f00c702119615c2b06060c96dd56b1bd07d2c61d532",
+          "153:a0ddbf77b3fe12282ab113532727e3d1b45871e8d2f3e188443de91e08807e2a",
+          "153:c448946fa4441317f7aaa780dfbebc220ca74585fe730c7b5cc6e468b61edcf4",
+          "156:e5e73369c285a8fb333119a899fd1aec4428a69069864f048fdc51ca971d3af4",
+          "17:f0fe9895ec24eef475e6f28860a894aecf900f6f4b956cda04826a8e9ae521ba",
+          "1:05a71b669988fce1d6dcde6aa52f3b8d50111dbbad7bc11ddad403c8124f1f9a",
+          "1:1b6c3b8a2350cd1f358dc0522384e949cf4784802734c17fb1861885d4a3229a",
+          "1:6f8cffc258821948bc8c2992fa608ac141720341807afafd40d0085daf21e74e",
+          "1:8c40ae081da4606b5ecbec816f7aab234fcb7b64cfa91b9d92107f60a580a732",
+          "24:027bc535d17488fe8adea78e82bb56e57926b2b3127ddaa2457ae65cc22f61b9",
+          "24:4a57f6f859368817a7f7c43c3497f71981686b84422bd38b59f4f69850dc11db",
+          "24:85077ad5d4aaf3d8d02fe965cdb5fc3fb41b603f3506a438e77b9628a6ffc334",
+          "3:39c6ead9180c25a631d69d74d0a569728138086ffc02ffd1dcd5795c87c98890",
+          "3:3b26c6a69b7d5addfe11389b4e9c1efc5a273082c6c4a6340e8a898d7371d4a8",
+          "3:d786e662273702c64c87898c7619ae62a3eb936ca6dbc6caadee2a0f61377d4f",
+          "5:2a08e56cef5753f62c949a125d3fb2025083947e3a6cf42074ed83f3d9d34da5",
+          "5:2b9dafaf7547febe0ddbfdb7bc94783ac90d5c29fa93252dbbe5319947de3948",
+          "8:0c42f396e17b70351b09061db98ae146800168426b434a0936ba4e73ed76f336",
+          "8:147d78cdc724aaac641c8f42226ef936557bc623dc97cf3ef2cf196136e1ea08",
+          "8:1faa7c0f6a67b1f5885a6e9f3a16ad794bc66ed4e06b60ad2968a21c4d1b2e08",
+          "8:313dccfceecf5dd18da1403c26342805bd8a4ad98b5ff7097a54a05341f7ed61",
+          "8:454916042783b60c50d2ba39bae579d84de3afecbf67cc4878fa0fe2a4b6a4e5",
+          "8:4deafce8b17d1b6f121e63e344f83fdbc96e896cba315ca3a36f2c47ee440659",
+          "8:50bc505320674eb85121c27c17b43ce85310255c8e64b8f9c4d35d4e3422db44",
+          "8:5bf7f9c0423f36037b1e64258db94fd1e34d400255d215b05fb28433d6e9d81a",
+          "8:6d3869b8bb4a1e8005499052b2d07bf78211ba072ac0579488db010cfb6a735e",
+          "8:6e173c17bd7276c681dfb97b8578c39f6610f33aecc76972b8c184a9dc83d1ab",
+          "8:75b90b103a2f89256a74be0e154049c8f7e9068716a742f94ba382c601a60230",
+          "8:7d7f4149bc752d7f639dcd43f0eaa7b5c2d982b7dd82f3d474a2daaa91a4dacd",
+          "8:8572ae11616ccdad428bd4b83baeeb2f850a2c74310e9b2fa693df6128c2d64e",
+          "8:9b8d69c991024daa260b6f8a7c4d8d6affdaf2d639724ea522089c283b9acb9d",
+          "8:a9036931ee1e6ebac0dc1c49675b0bdac5bfd413670a8891f5f9d2273b44dcba",
+          "8:cb22ec7c844f3a4615d28d0c8d8241befa712b1796c631e329d61a7df65744ae",
+          "8:cbb65494cc0d806faebdf2c27aec043ff3aeb1eea908d876d6537486b1b88ba2",
+          "8:cdf1de19d4fce89be296e57c4075b987ae4d17ac58005116102ed04c0228c713",
+          "8:ce77039c3c4b0862f60ed2ff922360f259078059cde7daf1bff68171d9655cfe",
+          "8:de05fb350e5a07d4653dc79bab398526a58234c1a6004400beb1dfc59f68f4e9",
+          "8:f09b5f0823358da29831137ce6275881a3c43bd7ee496b824e545ff7e163f32a",
+          "8:f0fbb84a103551f97e077e590bfde843e7c2622f08a1e9dbd1cf38236839170e",
+          "8:f8f2ea2d5ca0d07f2dccc548c85fdf4422b6803b7c1de69e3ce8d7ec562ff779",
+          "8:ff491e30f7707c320f53700997de3793cddf7b750951be1ab7f3fd835e5fe58d",
+          "9:42a2462f39258b9e0f21be9e92cddeca3729bcecfdd888ae4e0f153712a8040e"
+        ],
+        "mode": "project",
+        "origin": null,
+        "redacted": {},
+        "repo_id": "0e017430dd3b61791ab9289a0061b1af",
+        "tags": {
+          "v1.0.0": {
+            "landing": "1fba691b29e8420f48c2158c756f2d0aab685f59c3cc2914ef4fd79e63031f2b",
+            "tag": "42a2462f39258b9e0f21be9e92cddeca3729bcecfdd888ae4e0f153712a8040e"
+          }
+        }
+      },
+      "plans": {
+        "records": [
+          {
+            "answers": [],
+            "at": [
+              0,
+              1673
+            ],
+            "hash": "85077ad5d4aaf3d8d02fe965cdb5fc3fb41b603f3506a438e77b9628a6ffc334",
+            "prev": null,
+            "proposal": "3b26c6a69b7d5addfe11389b4e9c1efc5a273082c6c4a6340e8a898d7371d4a8",
+            "seal": null,
+            "stable": null,
+            "view": "seed"
+          },
+          {
+            "answers": [],
+            "at": [
+              0,
+              5703
+            ],
+            "hash": "4a57f6f859368817a7f7c43c3497f71981686b84422bd38b59f4f69850dc11db",
+            "prev": null,
+            "proposal": "39c6ead9180c25a631d69d74d0a569728138086ffc02ffd1dcd5795c87c98890",
+            "seal": null,
+            "stable": null,
+            "view": "a1"
+          },
+          {
+            "answers": [],
+            "at": [
+              0,
+              9361
+            ],
+            "hash": "027bc535d17488fe8adea78e82bb56e57926b2b3127ddaa2457ae65cc22f61b9",
+            "prev": "4a57f6f859368817a7f7c43c3497f71981686b84422bd38b59f4f69850dc11db",
+            "proposal": "d786e662273702c64c87898c7619ae62a3eb936ca6dbc6caadee2a0f61377d4f",
+            "seal": null,
+            "stable": "4a57f6f859368817a7f7c43c3497f71981686b84422bd38b59f4f69850dc11db",
+            "view": "a1"
+          }
+        ],
+        "tables": {
+          "plan_decisions": [],
+          "plan_deferrals": [],
+          "plan_proposals": [
+            [
+              "39c6ead9180c25a631d69d74d0a569728138086ffc02ffd1dcd5795c87c98890",
+              "4a57f6f859368817a7f7c43c3497f71981686b84422bd38b59f4f69850dc11db000000000000000000001647"
+            ],
+            [
+              "3b26c6a69b7d5addfe11389b4e9c1efc5a273082c6c4a6340e8a898d7371d4a8",
+              "85077ad5d4aaf3d8d02fe965cdb5fc3fb41b603f3506a438e77b9628a6ffc334000000000000000000000689"
+            ],
+            [
+              "d786e662273702c64c87898c7619ae62a3eb936ca6dbc6caadee2a0f61377d4f",
+              "027bc535d17488fe8adea78e82bb56e57926b2b3127ddaa2457ae65cc22f61b9000000000000000000002491"
+            ]
+          ],
+          "plan_seals": []
+        }
+      },
+      "projections": {
+        "v1.0.0": {
+          "c-YX91R": {
+            "redacted": false,
+            "version": "6f8cffc258821948bc8c2992fa608ac141720341807afafd40d0085daf21e74e"
+          },
+          "d-NEWD8": {
+            "redacted": false,
+            "version": "8c40ae081da4606b5ecbec816f7aab234fcb7b64cfa91b9d92107f60a580a732"
+          },
+          "s-CSNB0": {
+            "redacted": false,
+            "version": "1b6c3b8a2350cd1f358dc0522384e949cf4784802734c17fb1861885d4a3229a"
+          }
+        }
+      },
+      "reflects": {
+        "blocks": [],
+        "changes": [],
+        "seals": []
+      },
+      "removals": {
+        "applies": [],
+        "carried": [],
+        "dropped": [],
+        "requests": []
+      },
+      "views": [
+        "a1",
+        "seed"
+      ]
+    },
+    "summary": {
+      "batches": 12,
+      "chain": [
+        {
+          "base": [
+            0,
+            0
+          ],
+          "end": [
+            0,
+            12127
+          ],
+          "kind": "full"
+        }
+      ],
+      "dump_format": 4,
+      "files_kept": [],
+      "files_written": [
+        ".rdy.yaml"
+      ],
+      "frames": 53,
+      "landings": 2,
+      "stopped_at": null,
+      "store_format": {
+        "features": {
+          "features": [
+            {
+              "class": "incompatible",
+              "name": "assessment",
+              "required_rdy": "0.26.0"
+            },
+            {
+              "class": "incompatible",
+              "name": "check_request",
+              "required_rdy": "0.26.0"
+            },
+            {
+              "class": "incompatible",
+              "name": "content_hash_v2",
+              "required_rdy": "0.26.0"
+            },
+            {
+              "class": "incompatible",
+              "name": "object_encoding",
+              "required_rdy": "0.26.0"
+            }
+          ],
+          "manifest_version": 1
+        }
+      },
+      "tags": 1,
+      "views": 2,
+      "warnings": []
+    }
+  }
+}

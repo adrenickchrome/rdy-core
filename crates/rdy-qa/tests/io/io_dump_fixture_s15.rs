@@ -1191,6 +1191,7 @@ fn ha17_all_released_dump_pairs_still_load() {
         .chain(
             crate::io_feature_fixture::dump_members()
                 .into_iter()
+                .chain(crate::io_check_fixture::dump_members())
                 .map(str::to_string),
         )
         .collect();

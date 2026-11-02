@@ -286,8 +286,15 @@ fn di12_rdy_answer_prints_the_consequences_rdy_approve_prints() {
         assert!(ok, "{v}");
         let done = if all { &v[0] } else { &v };
         let c = done["landing"]["consequences"].as_array().unwrap();
-        assert_eq!(c.len(), 1, "{v}");
+        // b's suspect entry, then (nb8, D-YXBXH) the section confirm A's edit gives C, which
+        // the text above leaves out: it prints the suspect lines only
+        assert_eq!(c.len(), 2, "{v}");
         assert_eq!(c[0]["kind"], "suspect", "{v}");
+        assert_eq!(
+            (&c[1]["kind"], &c[1]["because"]["edge"], &c[1]["follow_up"]),
+            (&json!("dependent"), &json!("neighbor"), &json!("confirm")),
+            "{v}"
+        );
     }
 }
 
@@ -603,4 +610,91 @@ fn di12_cli_and_mcp_give_the_same_items() {
     );
     assert!(ok, "{as_agent}");
     assert_eq!(as_agent, cli);
+}
+
+/// nb11 (D-YXBXH): the CLI and `rdy_pending` render the same mention words and the same related
+/// routes: the facts of every card are equal, and `rdy pending` prints the lines.
+#[test]
+fn nb11_cli_and_rdy_pending_render_the_same_words_and_routes() {
+    let s = Served::new();
+    let (pref, n, a) = with_rdy(&s, |r| {
+        let w = put(
+            r,
+            "seed",
+            json!([
+                {"op": "create", "type": "doc", "id": "$n", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}},
+                {"op": "create", "type": "section", "id": "$s", "parent": "$n", "fields": {"title": "Ideas"}},
+                {"op": "create", "type": "entity", "id": "$e", "parent": "$s", "fields": {"name": "Ledger service"}},
+                {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Store"}, "body": "Holds data."}
+            ]),
+        );
+        land(r, "seed").unwrap();
+        let (sec, e) = (w.created["$s"].clone(), w.created["$e"].clone());
+        let decision =
+            |statement: &str, affects: Vec<String>, one_way: bool| rdy_engine::DecisionInput {
+                parent: sec.clone(),
+                statement: statement.into(),
+                title: Some(statement.into()),
+                why: Some(format!("{statement}: the person decides it")),
+                reversibility: Some(if one_way { "one_way" } else { "two_way" }.into()),
+                affects,
+                ..Default::default()
+            };
+        let a = rdy_qa::intake::decide_in(
+            r,
+            "seed2",
+            decision("Entries are append-only", vec![e.clone()], false),
+        );
+        land(r, "seed2").unwrap();
+        let n = rdy_qa::intake::decide_in(
+            r,
+            "v",
+            decision("The ledger service stores signatures", vec![], true),
+        );
+        let p = r
+            .propose_subset(
+                &ag("v"),
+                "v",
+                "v",
+                None,
+                Some("Adds a decision and a claim."),
+            )
+            .unwrap();
+        (p.r#ref, n, a)
+    });
+    let cli = queue(&s);
+    let mut m = McpClient::start_proxy(&s);
+    let ok = m.call(
+        "rdy_session",
+        json!({"actor": "agent:relay", "run": "r1", "role": "writer"}),
+    );
+    assert!(ok.is_ok(), "{ok:?}");
+    let mcp = m.call("rdy_pending", json!({})).ok();
+    assert_eq!(cli, mcp, "parity: one queue on every surface");
+    let fact = |i: &Value, name: &str| -> String {
+        i["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == name)
+            .unwrap_or_else(|| panic!("fact {name} in {i}"))["value"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let words = format!("medium: unlinked_mention on {n} (\"ledger service\")");
+    let route = format!(
+        "1 listed, 0 omitted: {n} same_entity {a} [live] via text: Entries are append-only"
+    );
+    let batch = item(&cli, &pref);
+    assert_eq!(fact(batch, "Confidence"), words);
+    assert_eq!(fact(batch, "Related decisions"), route);
+    // `rdy pending` prints the cards that carry both lines
+    let (ok, out) = text(&s.rdy(&["pending"]));
+    assert!(ok, "{out}");
+    assert!(out.contains("(\"ledger service\")"), "{out}");
+    assert!(
+        out.contains(&format!("{n} same_entity {a} [live] via text")),
+        "{out}"
+    );
 }

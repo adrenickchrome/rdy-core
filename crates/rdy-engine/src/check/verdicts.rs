@@ -439,17 +439,8 @@ fn matching_request(
     })
 }
 
-/// The readiness issues of the verdicts a person accepted as blocking for version `pref`
-/// (record `p`): one `E_VALIDATION` issue for each accepted review whose case still holds or
-/// cannot be read now, in catalogue order, then full review hash (module docs).
-pub fn accepted_verdict_issues(
-    st: &ReadState,
-    pref: &ProposalRef,
-    p: &Proposal,
-) -> Result<Vec<Issue>, RdyError> {
-    if !any_request(st)? {
-        return Ok(vec![]);
-    }
+/// The reviews a person accepted as blocking for version `pref`, by full review hash.
+fn accepted_reviews(st: &ReadState, pref: &ProposalRef) -> Result<BTreeSet<Hash>, RdyError> {
     let reader = st.reader();
     let mut accepted: BTreeSet<Hash> = BTreeSet::new();
     engine_walk(
@@ -464,6 +455,44 @@ pub fn accepted_verdict_issues(
             Ok(())
         },
     )?;
+    Ok(accepted)
+}
+
+/// D-91DEW: whether `verdicts` (the matching verdicts of version `pref`'s card) hold a concern
+/// or a fail that no person accepted as blocking for `pref`. While one does, the approve card
+/// has no recommended option, and a list of recommended answers refuses the card as a whole.
+pub fn open_hold(
+    st: &ReadState,
+    pref: &ProposalRef,
+    verdicts: &[MatchingVerdict],
+) -> Result<bool, RdyError> {
+    if !verdicts.iter().any(MatchingVerdict::acceptable) {
+        return Ok(false);
+    }
+    let accepted = accepted_reviews(st, pref)?;
+    Ok(unaccepted(verdicts, &accepted))
+}
+
+/// Whether `verdicts` hold a concern or a fail whose review is not in `accepted`.
+pub(crate) fn unaccepted(verdicts: &[MatchingVerdict], accepted: &BTreeSet<Hash>) -> bool {
+    verdicts
+        .iter()
+        .any(|v| v.acceptable() && !accepted.contains(&v.review))
+}
+
+/// The readiness issues of the verdicts a person accepted as blocking for version `pref`
+/// (record `p`): one `E_VALIDATION` issue for each accepted review whose case still holds or
+/// cannot be read now, in catalogue order, then full review hash (module docs).
+pub fn accepted_verdict_issues(
+    st: &ReadState,
+    pref: &ProposalRef,
+    p: &Proposal,
+) -> Result<Vec<Issue>, RdyError> {
+    if !any_request(st)? {
+        return Ok(vec![]);
+    }
+    let reader = st.reader();
+    let accepted = accepted_reviews(st, pref)?;
     if accepted.is_empty() {
         return Ok(vec![]);
     }

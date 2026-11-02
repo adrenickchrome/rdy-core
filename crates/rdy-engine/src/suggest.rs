@@ -1,9 +1,9 @@
 //! Suggestions (FW-EN3): links to the entities written text names, and new entities for literals that recur.
 use crate::error::RdyError;
-use crate::lexicon::{Mention, link_kind_for, linked_from_outside, text_in, tied};
+use crate::lexicon::{Mention, NameKind, link_kind_for, linked_from_outside, text_in, tied};
 use crate::tensions::index::is_deprecated;
 use crate::{Materialized, ReadState, Scope};
-use rdy_model::entity::{MIN_MENTION_CHARS, code_literals, find_phrases, phrase};
+use rdy_model::entity::{MIN_MENTION_CHARS, code_literals, find_phrases, phrase, phrase_keys};
 use rdy_model::tree::DOC;
 use rdy_model::{Block, BlockId, Hash, Op};
 use serde::Serialize;
@@ -53,8 +53,9 @@ pub const ENTITY_BLOCKS_SHOWN: usize = 10;
 /// The most mentions of new docs one call lists; the rest are counted.
 pub const MENTIONED_BY_CAP: usize = 20;
 
-/// Each phrase of the new docs one `mentioned_by` call reads, and the docs it names.
-pub(crate) type Phrases = BTreeMap<String, BTreeSet<BlockId>>;
+/// Each key of the new docs one `mentioned_by` call reads, and the docs filed under it: a title
+/// under each of its [`phrase_keys`] (as a name), a doc's `key` under its own phrase only.
+pub(crate) type Phrases = BTreeMap<String, BTreeSet<(BlockId, NameKind)>>;
 /// Every (doc, block) pair one `mentioned_by` call finds, uncut, with the field and the text.
 type Found = imbl::OrdMap<(BlockId, BlockId), (String, String)>;
 
@@ -227,7 +228,8 @@ impl ReadState {
 
     /// The blocks that mention each new doc of `docs` (ids that are not docs are ignored): a doc
     /// is new while nothing outside it links into it. Its phrases are those of its `title` and
-    /// its `key` with at least [`MIN_MENTION_CHARS`] characters. Every block that can link and
+    /// its `key` with at least [`MIN_MENTION_CHARS`] characters. A text phrase names the doc
+    /// when one of its keys is a key of the title, or when it is the key's phrase. Every block that can link and
     /// sits in another doc is read; each (doc, block) pair is listed once, with the first field
     /// and the text as written, unless the block is tied to the doc. Sorted by (doc, block), cut
     /// to [`MENTIONED_BY_CAP`]; the count the cut dropped is returned.
@@ -257,13 +259,24 @@ impl ReadState {
             if linked_from_outside(&g, &m, &d.id) {
                 continue;
             }
-            for text in [d.field_str("title"), d.field_str("key")]
-                .into_iter()
-                .flatten()
-            {
+            for (kind, text) in [
+                (NameKind::Name, d.field_str("title")),
+                (NameKind::Key, d.field_str("key")),
+            ] {
+                let Some(text) = text else { continue };
                 let p = phrase(text);
-                if p.chars().count() >= MIN_MENTION_CHARS {
-                    phrases.entry(p).or_default().insert(d.id.clone());
+                if p.chars().count() < MIN_MENTION_CHARS {
+                    continue;
+                }
+                if kind == NameKind::Key {
+                    phrases.entry(p).or_default().insert((d.id.clone(), kind));
+                } else {
+                    for k in phrase_keys(&p) {
+                        phrases
+                            .entry(k.to_string())
+                            .or_default()
+                            .insert((d.id.clone(), kind));
+                    }
                 }
             }
         }
@@ -281,7 +294,7 @@ impl ReadState {
                 // the blocks written since: their pairs out, then each read again
                 let mut found = kept.found;
                 for id in &kept.stale {
-                    for doc in kept.phrases.values().flatten() {
+                    for (doc, _) in kept.phrases.values().flatten() {
                         found.remove(&(doc.clone(), id.clone()));
                     }
                     if let Some(b) = m.get(id) {
@@ -362,12 +375,25 @@ impl ReadState {
         let Some(own) = own else {
             return;
         };
-        let known = |p: &str| phrases.contains_key(p);
+        // the docs a text phrase names: through any of its keys, a key's phrase only exactly
+        let docs = |p: &str| -> BTreeSet<&BlockId> {
+            phrase_keys(p)
+                .flat_map(|k| {
+                    phrases
+                        .get(k)
+                        .into_iter()
+                        .flatten()
+                        .filter(move |(_, kind)| *kind != NameKind::Key || k == p)
+                        .map(|(doc, _)| doc)
+                })
+                .collect()
+        };
+        let known = |p: &str| !docs(p).is_empty();
         // a (doc, block) pair is listed once, with the first field and text that name the doc
         let mut named: BTreeSet<&BlockId> = BTreeSet::new();
         for (field, text) in text_in(self.pack(), b) {
             for (p, range) in find_phrases(&text, &known) {
-                for doc in phrases.get(&p).into_iter().flatten() {
+                for doc in docs(&p) {
                     if *doc == own || named.contains(doc) || tied(g, &b.id, doc) {
                         continue;
                     }

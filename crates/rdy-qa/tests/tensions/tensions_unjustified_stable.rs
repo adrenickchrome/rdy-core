@@ -31,6 +31,20 @@ fn lax_project() -> (tempfile::TempDir, Rdy) {
     (dir, r)
 }
 
+/// nb8 (D-YXBXH, TASK-978 X2): agent `view` answers its view's neighbor confirms with one group,
+/// as an agent does before it proposes: an edit of `c` in the stable spec owes its section
+/// siblings `a` and `b` a confirm, which readiness needs answered.
+fn answer_neighbors(r: &mut Rdy, view: &str) {
+    let group: Vec<rdy_engine::plan::api::PlanAnswerSpec> = vec![
+        serde_json::from_value(
+            json!({"group": {"edge": "neighbor"}, "act": "confirm", "reason": "it still holds"}),
+        )
+        .unwrap(),
+    ];
+    r.answer_plan_specs(&ag(view), view, &group)
+        .unwrap_or_else(|e| panic!("answer the neighbor items of {view}: {e}"));
+}
+
 /// Proposes `view` with a summary; the approval of it as the approver.
 fn propose_and_approve(r: &mut Rdy, view: &str) -> (ProposalInfo, Result<String, RdyError>) {
     let summary = summary_for(r, view);
@@ -50,6 +64,7 @@ fn rg3_an_unjustified_stable_change_is_blocking_under_rdy_standard() {
         (t.severity, t.overridden),
         (TensionSeverity::Blocking, false)
     );
+    answer_neighbors(&mut r, "a");
     let (p, landed) = propose_and_approve(&mut r, "a");
     assert!(
         p.tensions
@@ -86,6 +101,7 @@ fn rg3_a_pack_that_lowers_unjustified_change_warns_and_stays_blocking() {
         (t.severity, t.overridden),
         (TensionSeverity::Blocking, true)
     );
+    answer_neighbors(&mut r, "a");
     let (p, landed) = propose_and_approve(&mut r, "a");
     assert_not_ready(&r, &landed.unwrap_err(), &p.r#ref, &[E_BLOCKING_TENSION]);
     // a pack that leaves the severity alone, or raises it, warns nothing
@@ -172,6 +188,7 @@ fn rg3_a_justified_rewrite_still_clears_it() {
     );
     let found = of_kind(&r, TensionKind::UnjustifiedChange);
     assert!(found.is_empty(), "{found:#?}");
+    answer_neighbors(&mut r, "a");
     let (p, landed) = propose_and_approve(&mut r, "a");
     assert!(
         p.tensions.iter().all(|t| t.refuses != Some(true)),

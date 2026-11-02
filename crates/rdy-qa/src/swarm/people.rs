@@ -818,71 +818,123 @@ impl Person {
 
     /// The person's answers to `work`'s change plan (ruling task-15 F1: the CLI fallback path,
     /// FW-UX1), as an agent answers its own (`agent::answer_plan`): it reads the plan whole with
-    /// `rdy plan --view work` (one `plan` entry per page, naming the view), then answers each open
-    /// item that gates or warns by its kind (`agent::plan_answer_for`), one
-    /// `rdy plan confirm|defer <items> --reason <why> --view work` for each act and reason (the
-    /// command takes one of each), one `plan_answer` entry each, whose reply lists its answers
-    /// (`{answers: [{item, kind, act, reason}]}`). It holds the plan turn throughout
-    /// (`KillGate::plan_turn`). A view whose changes conflict with canon has no plan (the
-    /// read's `E_CONFLICT_UNRESOLVED`), and a call the kill cuts ends it: the version proposed
-    /// next is not ready, and the person's approve re-queues it.
+    /// `rdy plan --view work` (one `plan` entry per page, naming the view, with a row for each
+    /// item), then answers each open item that gates or warns (`agent::split_plan_answers`): the
+    /// neighbor items with a confirm follow-up by the group flags `--edge neighbor --follow-up
+    /// confirm`, every other item by id with the act of its kind (`agent::plan_answer_for`). It
+    /// sends one `rdy plan confirm|defer <items> --reason <why> --view work` for each act and
+    /// reason (the command takes one of each), one `plan_answer` entry each, whose reply lists
+    /// its answers (`{answers: [{item, kind, act, reason}], group?}`). The group goes in the
+    /// command of its own act and reason (`confirm`, `swarm: checked`), and with no neighbor item
+    /// no group flag is sent. It compares the answers the group returned with the items it
+    /// displayed. It holds the plan turn throughout (`KillGate::plan_turn`). A view whose changes
+    /// conflict with canon has no plan (the read's `E_CONFLICT_UNRESOLVED`), and a call the kill
+    /// cuts ends it: the version proposed next is not ready, and the person's approve re-queues
+    /// it.
     fn answer_work_plan(&mut self) {
         let gate = self.link.gate.clone();
         let _turn = gate.plan_turn();
         let all = agent::PLAN_ALL.to_string();
         let mut page: Option<String> = None;
-        let mut open: Vec<(String, String)> = vec![];
+        let mut read = agent::PlanRead::default();
         loop {
             let mut args = vec!["plan", "--max-tokens", all.as_str()];
             match &page {
                 Some(next) => args.extend(["--page", next.as_str()]),
                 None => args.extend(["--view", "work"]),
             }
-            let mut read = None;
+            let mut shown = None;
             let res = self.cli("plan", &args);
             let mut e = self.entry(HUMAN, "plan");
             e.view = Some("work".to_string());
             self.link.finish(e, "plan", res, |en, v| {
-                en.reply = Some(json!({"counts": v["counts"]}));
-                read = Some(v.clone());
+                // the entry names each row it showed, so a check sees what was displayed
+                let rows = read.take(v);
+                en.reply = Some(json!({"counts": v["counts"], "items": rows}));
+                shown = Some(v.clone());
             });
-            let Some(read) = read else { return };
-            for i in read["items"].as_array().into_iter().flatten() {
-                if i["state"] == "open"
-                    && let (Some(id), Some(kind)) = (i["id"].as_str(), i["kind"].as_str())
-                {
-                    open.push((id.to_string(), kind.to_string()));
-                }
-            }
-            match read["next"].as_str() {
+            let Some(shown) = shown else { return };
+            match shown["next"].as_str() {
                 Some(next) => page = Some(next.to_string()),
                 None => break,
             }
         }
-        // one command for each act and reason, in a fixed order
-        let mut groups: BTreeMap<(&str, &str), Vec<(String, String)>> = BTreeMap::new();
-        for (item, kind) in open {
-            if let Some(answer) = agent::plan_answer_for(&kind) {
-                groups.entry(answer).or_default().push((item, kind));
-            }
+        let split = agent::split_plan_answers(&read.open);
+        // one command for each act and reason, in a fixed order; the group rides with its own
+        let group_key = (agent::GROUP_ACT, agent::GROUP_REASON);
+        let mut commands: BTreeMap<(&str, &str), Vec<&agent::ExplicitAnswer>> = BTreeMap::new();
+        for a in &split.explicit {
+            commands.entry((a.act, a.reason)).or_default().push(a);
         }
-        for ((act, reason), items) in groups {
+        if !split.group.is_empty() {
+            commands.entry(group_key).or_default();
+        }
+        for ((act, reason), items) in commands {
+            let grouped = !split.group.is_empty() && (act, reason) == group_key;
             let mut args = vec!["plan", act];
-            args.extend(items.iter().map(|(item, _)| item.as_str()));
+            args.extend(items.iter().map(|a| a.item.as_str()));
             args.extend(["--reason", reason, "--view", "work"]);
-            let sent: Vec<Value> = items
-                .iter()
-                .map(|(item, kind)| json!({"item": item, "kind": kind, "act": act, "reason": reason}))
-                .collect();
+            if grouped {
+                args.extend([
+                    "--edge",
+                    agent::GROUP_EDGE,
+                    "--follow-up",
+                    agent::GROUP_FOLLOW_UP,
+                ]);
+            }
+            let ids: &[String] = if grouped { &split.group } else { &[] };
+            let explicit: Vec<agent::ExplicitAnswer> = items.into_iter().cloned().collect();
             let mut e = self.entry(HUMAN, "plan_answer");
             e.view = Some("work".to_string());
             // the entry names what it sent, refused or not
-            e.reply = Some(json!({ "answers": sent }));
+            e.reply = Some(agent::answers_reply(ids, &explicit));
             let res = self.cli("plan_answer", &args);
-            if !matches!(
-                self.link.finish(e, "plan_answer", res, |_, _| {}),
-                Res::Ok(_)
-            ) {
+            // the rest of the reply's pages, under the same plan turn: the group is compared
+            // with every page of what the command returned
+            let mut returned = None;
+            let mut cut_by_kill = false;
+            if let (Res::Ok(first), false) = (&res, ids.is_empty()) {
+                let fetched = agent::follow_pages(first, |next| {
+                    let args = ["plan", "--page", next, "--max-tokens", all.as_str()];
+                    match self.cli("plan_answer", &args) {
+                        Res::Ok(v) => Some(v),
+                        Res::Lost => {
+                            cut_by_kill = true;
+                            None
+                        }
+                        Res::Refused(code, message) => self
+                            .link
+                            .fail("plan_answer", &format!("got {code}: {message}")),
+                    }
+                });
+                match fetched {
+                    Err(text) => self.link.fail("plan_answer", &text),
+                    Ok(None) => {}
+                    Ok(Some(pages)) => {
+                        returned = Some(agent::group_returned(&pages, ids, &read.checked));
+                    }
+                }
+            }
+            let mut mismatch = None;
+            let outcome = self
+                .link
+                .finish(e, "plan_answer", res, |en, _| match returned {
+                    Some(Ok(done)) => {
+                        if let Some(reply) = en.reply.as_mut() {
+                            reply["group"]["returned"] = json!(done);
+                        }
+                    }
+                    Some(Err(text)) => mismatch = Some(text),
+                    None => {}
+                });
+            if cut_by_kill {
+                // the answers were acknowledged and the daemon died under the rest of the reply
+                self.link.recover();
+            }
+            if let Some(text) = mismatch {
+                self.link.fail("plan_answer", &text);
+            }
+            if !matches!(outcome, Res::Ok(_)) {
                 return;
             }
         }

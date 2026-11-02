@@ -208,6 +208,43 @@ fn brf1_a_briefing_lists_governs_dependents_will_go_stale_and_suspects() {
     );
     assert_eq!(a.base.token, a.record.token_hex());
     assert_eq!(a.base.depends, 1);
+    // nb7: B and C share A's section; the decision there is supporting and takes no part
+    let mut want = vec![
+        (sb.clone(), format!("B builds on {sa}.")),
+        (s.c.to_string(), "C stands alone.".to_string()),
+    ];
+    want.sort();
+    let doc = s.doc.to_string();
+    assert_eq!(
+        a.neighbors
+            .iter()
+            .map(|n| (
+                n.block.clone(),
+                n.of.clone(),
+                n.via,
+                n.entity.clone(),
+                n.doc.clone(),
+                n.summary.clone()
+            ))
+            .collect::<Vec<_>>(),
+        want.into_iter()
+            .map(|(b, summary)| (
+                b,
+                vec![sa.clone()],
+                rdy_engine::neighbors::NeighborVia::Section,
+                None,
+                doc.clone(),
+                summary
+            ))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        a.neighbors_by_doc,
+        vec![NeighborDocCount {
+            doc: doc.clone(),
+            count: 2
+        }]
+    );
     write(
         &mut r,
         "w",
@@ -283,6 +320,20 @@ fn brf1_a_max_tokens_cut_drops_detail_and_never_coverage() {
     );
     assert!(serde_json::to_string(&a).unwrap().len() / 4 <= 800);
     assert!(a.record.covers(&s.a));
+    // nb7: A's 202 section neighbors are paged rows too: cut, and counted whole
+    assert!(
+        a.omitted.get("neighbors").copied().unwrap_or(0) > 0,
+        "{:?}",
+        a.omitted
+    );
+    assert_eq!(a.neighbors.len() + a.omitted["neighbors"], 202);
+    assert_eq!(
+        a.neighbors_by_doc,
+        vec![NeighborDocCount {
+            doc: s.doc.to_string(),
+            count: 202
+        }]
+    );
     let doc = r
         .read()
         .brief(
@@ -305,6 +356,15 @@ fn brf1_a_max_tokens_cut_drops_detail_and_never_coverage() {
         206,
         "the token covers every requested block"
     );
+    // nb7: each of the 203 content blocks is a section neighbor of the other 202
+    assert_eq!(
+        doc.neighbors_by_doc,
+        vec![NeighborDocCount {
+            doc: s.doc.to_string(),
+            count: 203
+        }]
+    );
+    assert_eq!(doc.neighbors.len() + doc.omitted["neighbors"], 203);
     assert_eq!(doc.base.token, doc.record.token_hex());
 }
 
@@ -367,16 +427,19 @@ fn brf1_unknown_ids_and_empty_coverage_are_refused() {
     assert_eq!(e.code, "E_UNKNOWN_BLOCK", "{e}");
 }
 
-/// Doc `big` in view `work`: the doc, a section and `claims` claims; plus doc `other`. Returns
-/// `other`'s id.
-fn big_doc(r: &mut Rdy, claims: usize) -> BlockId {
+/// Doc `big` in view `work`: the doc, `sections` sections and `claims` claims, in order, at most
+/// `ceil(claims / sections)` to a section; plus doc `other`. Returns `other`'s id.
+fn big_doc(r: &mut Rdy, sections: usize, claims: usize) -> BlockId {
+    let per = claims.div_ceil(sections);
     let mut ops = vec![
         json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": "big", "title": "Big", "doc_type": "overview"}}),
-        json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "All"}}),
         json!({"op": "create", "type": "doc", "id": "$o", "fields": {"name": "other", "title": "Other", "doc_type": "overview"}}),
     ];
+    ops.extend((0..sections).map(|n| {
+        json!({"op": "create", "type": "section", "id": format!("$s{n}"), "parent": "$d", "fields": {"title": format!("Part {n}")}})
+    }));
     ops.extend((0..claims).map(|i| {
-        json!({"op": "create", "type": "claim", "id": format!("$c{i}"), "parent": "$s", "body": format!("Claim {i}.")})
+        json!({"op": "create", "type": "claim", "id": format!("$c{i}"), "parent": format!("$s{}", i / per), "body": format!("Claim {i}.")})
     }));
     let w = write(r, "work", json!(ops)).expect("the big doc");
     BlockId::parse(&w.created["$o"]).expect("created id")
@@ -387,8 +450,10 @@ fn brf1_coverage_over_the_limit_is_refused_without_walking_the_rest() {
     assert_eq!(MAX_BRIEF_BLOCKS, 5_000);
     let (_d, mut r) = project();
     let work = Scope::View("work".into());
-    // the doc, its section and 4,998 claims: exactly the limit
-    let other = big_doc(&mut r, MAX_BRIEF_BLOCKS - 2);
+    // the doc, 50 sections and 4,949 claims, at most 99 to a section: exactly the limit. O2's
+    // neighbor walk (1,000,000 visits) costs about n^2 for a section of n claims, so the claims
+    // are spread over small sections to reach the coverage bound (closed-pin amendment, O11).
+    let other = big_doc(&mut r, 50, MAX_BRIEF_BLOCKS - 51);
     let cov = |ids: Vec<String>| Coverage {
         ids,
         path: Some("big".into()),
@@ -427,6 +492,14 @@ fn brf1_coverage_over_the_limit_is_refused_without_walking_the_rest() {
     let e = r.read().brief(&work, &cov(vec![]), None).unwrap_err();
     assert_eq!(e.code, "E_LIMIT", "{e}");
     assert!(e.message.starts_with("more than 5000 blocks"), "{e}");
+    drop((r, _d));
+
+    // O2 pinned, not hidden: one section of 1,001 claims is over the neighbor walk's visits
+    let (_d, mut r) = project();
+    big_doc(&mut r, 1, 1_001);
+    let e = r.read().brief(&work, &cov(vec![]), None).unwrap_err();
+    assert_eq!(e.code, "E_LIMIT", "{e}");
+    assert_eq!(e.message, "neighbor walk exceeds 1000000 visits", "{e}");
 }
 
 #[test]

@@ -8,6 +8,7 @@ use crate::lexicon::Lexicon;
 use crate::{InflightSet, Materialized, RdyError, ReadState, Scope};
 use imbl::OrdMap;
 use rdy_graph::{DerivedStatus, Edge, EdgeKind, Graph, IMPACT_LINKS, SUSPECT_LINKS, edges_of};
+use rdy_model::entity::{aliases, name_keys};
 use rdy_model::{Block, BlockId, Change, FieldValue, Hash, Justification, Op, decision};
 use rdy_schema::{Pack, Trait, supporting};
 use std::cell::RefCell;
@@ -61,7 +62,7 @@ pub struct Writes {
     /// Every write of a change, by block.
     by_change: OrdMap<Hash, Vec<Arc<Write>>>,
     changes: OrdMap<Hash, ChangeFacts>,
-    /// Live writes whose block defines a name, by normalized name.
+    /// Live writes whose block defines a name, by each of its name keys ([`name_keys_of`]).
     named: OrdMap<String, Vec<Arc<Write>>>,
     /// Live writes whose block is normative, by normalized text.
     texted: OrdMap<Hash, Vec<Arc<Write>>>,
@@ -514,13 +515,8 @@ impl Writes {
         let Some(b) = w.new.as_deref() else {
             return;
         };
-        if defines(pack, b)
-            && let Some(name) = b.field_str("name")
-        {
-            self.named
-                .entry(normalize_name(name))
-                .or_default()
-                .push(Arc::clone(w));
+        for k in name_keys_of(pack, b) {
+            self.named.entry(k).or_default().push(Arc::clone(w));
         }
         if let Some(h) = text_key(pack, b, min_words) {
             self.texted.entry(h).or_default().push(Arc::clone(w));
@@ -668,9 +664,9 @@ impl Writes {
         self.named.values().flatten().map(|w| &w.block)
     }
 
-    /// The live writes whose block defines `normalized` (a [`normalize_name`] result).
-    pub fn named(&self, normalized: &str) -> Vec<Arc<Write>> {
-        self.named.get(normalized).cloned().unwrap_or_default()
+    /// The live writes whose block has name key `key` ([`name_keys_of`]).
+    pub fn named(&self, key: &str) -> Vec<Arc<Write>> {
+        self.named.get(key).cloned().unwrap_or_default()
     }
 
     /// The live writes whose normative block's text normalizes to `h` ([`normalize_text`]).
@@ -799,11 +795,7 @@ impl IndexKeys {
         let Some(b) = w.new.as_deref() else {
             return;
         };
-        if defines(pack, b)
-            && let Some(name) = b.field_str("name")
-        {
-            self.names.insert(normalize_name(name));
-        }
+        self.names.extend(name_keys_of(pack, b));
         if let Some(h) = text_key(pack, b, min_words) {
             self.texts.insert(h);
         }
@@ -825,7 +817,7 @@ impl IndexKeys {
 /// shingle index (restatement drift), built on first read.
 #[derive(Clone, Debug, Default)]
 pub struct CanonIndex {
-    /// Blocks that define a name, by normalized name.
+    /// Blocks that define a name, by each of their name keys ([`name_keys_of`]).
     pub names: BTreeMap<String, Vec<BlockId>>,
     /// Normative blocks, by normalized text.
     pub texts: BTreeMap<Hash, Vec<BlockId>>,
@@ -843,13 +835,8 @@ impl CanonIndex {
         let min_words = pack.duplicate_text_min_words();
         let mut ix = CanonIndex::default();
         for b in m.iter() {
-            if defines(pack, b)
-                && let Some(name) = b.field_str("name")
-            {
-                ix.names
-                    .entry(normalize_name(name))
-                    .or_default()
-                    .push(b.id.clone());
+            for k in name_keys_of(pack, b) {
+                ix.names.entry(k).or_default().push(b.id.clone());
             }
             if let Some(h) = text_key(pack, b, min_words) {
                 ix.texts.entry(h).or_default().push(b.id.clone());
@@ -915,6 +902,21 @@ fn duplicate_text<'b>(pack: &Pack, b: &'b Block) -> Option<&'b str> {
 /// The text key `b` is grouped under: [`normalize_text`] of its [`duplicate_text`].
 pub(crate) fn text_key(pack: &Pack, b: &Block, min_words: usize) -> Option<Hash> {
     normalize_text(duplicate_text(pack, b)?, min_words)
+}
+
+/// The name keys duplicate definitions group `b` under (D-JDW8A, O4): when it defines a name,
+/// the [`name_keys`] of its name and of each of its at most
+/// [`MAX_ALIASES`](rdy_model::entity::MAX_ALIASES) aliases, sorted,
+/// each once; never its `key`. Empty for a block that defines no name.
+pub fn name_keys_of(pack: &Pack, b: &Block) -> Vec<String> {
+    let Some(name) = b.field_str("name").filter(|_| defines(pack, b)) else {
+        return vec![];
+    };
+    let mut out: BTreeSet<String> = name_keys(name).into_iter().map(|k| k.0).collect();
+    for a in aliases(b) {
+        out.extend(name_keys(a).into_iter().map(|k| k.0));
+    }
+    out.into_iter().collect()
 }
 
 /// Whether `b` defines a name: its type has the `defines` trait and it has a string `name`.
@@ -1449,7 +1451,8 @@ impl<'a> DetectCx<'a> {
     }
 }
 
-/// A name as duplicates compare it: lowercase, whitespace runs as one space, trimmed.
+/// A text as normative-text duplicates compare it: lowercase, whitespace runs as one space,
+/// trimmed. Names group by [`name_keys_of`] instead.
 pub fn normalize_name(s: &str) -> String {
     s.split_whitespace()
         .collect::<Vec<_>>()

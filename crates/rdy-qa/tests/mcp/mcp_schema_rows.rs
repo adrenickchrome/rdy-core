@@ -201,3 +201,15 @@ fn ib7_the_unapplied_decision_warning_has_a_row() {
         "write the content that carries it with implements: <decision>, or link that content to it with decided_by; for a process ruling, set needs_content: false"
     );
 }
+
+#[test]
+fn ki194_the_e_validation_row_is_the_design_threads_text() {
+    // TASK-1023 (KNOWN-ISSUES 194): the design thread's text, as written
+    assert_eq!(
+        row(E_VALIDATION),
+        (
+            "the blocks a write, import or proposal would produce do not validate against the pack (issues lists every error; a blob field that names no blob counts); as a readiness issue, a version has no summary, reaches more than 100000 blocks, is too large to assess, has no stored assessment, changes the authority policy without implementing a decision, or holds refused deferrals, a rejected one_way re-affirmation or an accepted check verdict. A person accepted a current check verdict as blocking for this proposal version.",
+            "fix each listed block, or use a compatible pack; for a readiness issue, follow its fix and propose again: rdy_propose / rdy propose"
+        )
+    );
+}

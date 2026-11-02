@@ -13,7 +13,9 @@
 use crate::brief::{FollowUp, effective_stable};
 use crate::code_evidence::{self, anchored_files, later_touch};
 use crate::code_index::{CodeRepo, code_repos};
-use crate::consequence::{CONFLICT_FIX, NetState, PlanPair, conflict_message, refines_copied};
+use crate::consequence::{
+    CONFLICT_FIX, NEIGHBOR_EDGE, NetState, PlanPair, conflict_message, refines_copied,
+};
 use crate::error::{E_ALREADY_EXISTS, E_CONFLICT_UNRESOLVED, E_LIMIT, E_STALE_BASE};
 use crate::gate::{applied_ops, changes_of, prospective};
 use crate::lexicon::Lexicon;
@@ -25,7 +27,7 @@ use rdy_model::engine_fields::{REAFFIRMED, reaffirmed_causes};
 use rdy_model::plan::{MAX_SEALED_ITEMS, PlanAct, PlanHead, PlanKind, PlanOutcome, item_hash};
 use rdy_model::{Block, BlockId, Change, FieldValue, Hash, Tracking};
 use std::cell::OnceCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// The most items one plan holds: every computed item is sealed, so the seal's bound.
@@ -654,7 +656,8 @@ fn reaffirmed_for<'b>(b: &'b Block, target: &BlockId) -> Option<&'b FieldValue> 
     }
 }
 
-/// Adds `c` to `items` once per item id: a repeat keeps the least edge name, and is closed only
+/// Adds `c` to `items` once per item id: a repeat keeps the least edge by
+/// [`edge_precedence`] (a declared edge before `neighbor`, then by name), and is closed only
 /// when both are (a reach and an edge to the same cause agree). A new item past `limit` is the
 /// whole plan's refusal.
 fn admit(
@@ -663,7 +666,7 @@ fn admit(
     limit: usize,
 ) -> Result<(), RdyError> {
     if let Some(had) = items.get_mut(&c.id) {
-        if c.edge < had.edge {
+        if edge_precedence(&c.edge) < edge_precedence(&had.edge) {
             had.edge = c.edge;
         }
         had.close = had.close.and(c.close);
@@ -674,6 +677,12 @@ fn admit(
     }
     items.insert(c.id, c);
     Ok(())
+}
+
+/// The order in which one item's edges win (TASK-978 O3): a declared relation wins over
+/// `neighbor` even where the names sort the other way, then the least name.
+fn edge_precedence(edge: &str) -> (bool, &str) {
+    (edge == NEIGHBOR_EDGE, edge)
 }
 
 /// What the closes of one plan read: both states, the changed blocks and, built on first use,
@@ -832,11 +841,19 @@ pub(crate) fn compute_in(
         touched: &touched,
         landed: OnceCell::new(),
     };
-    let hash_or_deleted = |id: &BlockId| {
-        fin.m
+    // each block hashed once: one cause can have thousands of neighbor items
+    let mut hashes: HashMap<BlockId, Hash> = HashMap::new();
+    let mut hash_or_deleted = |id: &BlockId| {
+        if let Some(h) = hashes.get(id) {
+            return *h;
+        }
+        let h = fin
+            .m
             .get(id)
             .map(|b| b.content_hash_with(&t))
-            .unwrap_or_else(|| deleted_identity(id))
+            .unwrap_or_else(|| deleted_identity(id));
+        hashes.insert(id.clone(), h);
+        h
     };
     // D-FQ7AK: the subject's lifecycle as the version leaves it; a deleted one's as canon has it
     let stable_of = |id: &BlockId| match fin.m.get(id) {
@@ -855,8 +872,8 @@ pub(crate) fn compute_in(
         };
         // a link the version wrote to a block it changed, with no suspect: written against the
         // final state, it owes nothing (D-NJ2SP). A reach is no such link: it always needs a
-        // reasoned confirm (p-0HXT0)
-        if kind == PlanKind::Confirm && !p.reach && !p.in_base && !p.suspect {
+        // reasoned confirm (p-0HXT0), and a neighbor needs no link at all (D-YXBXH)
+        if kind == PlanKind::Confirm && !p.reach && !p.in_base && !p.suspect && !p.neighbor {
             return Ok(());
         }
         let close = closes.close(kind, &p);
@@ -1670,6 +1687,10 @@ mod tests {
                 PlanKind::Reaffirm,
                 Some(PlanOutcome::Retired),
             ),
+            // nb8 (D-YXBXH, TASK-978 X2): B, unchanged, is the section neighbor of P, whose text
+            // changed, and of Q, which the version deletes
+            (P.to_string(), B.to_string(), PlanKind::Confirm, None),
+            (Q.to_string(), B.to_string(), PlanKind::Confirm, None),
         ];
         // in item order: by full item hash
         want.sort_by_key(|(c, s, k, _)| item_hash(&id(c), s, *k));
@@ -1744,9 +1765,9 @@ mod tests {
         let p = compute(&st, "u", &changes, st.canon_head(), None, &[], &[]).unwrap();
         assert_eq!(rows(&p), vec![]);
         assert_eq!(p.code_files, 0);
-        // the first edit alone owes the confirm
+        // the first edit alone owes the confirm, and nb8's neighbor confirm of c
         let p = compute(&st, "u", &changes[..1], st.canon_head(), None, &[], &[]).unwrap();
-        assert_eq!(doc_items(&p).len(), 1, "{:#?}", rows(&p));
+        assert_eq!(doc_items(&p).len(), 2, "{:#?}", rows(&p));
     }
 
     /// A version recorded on an earlier canon is read on that canon (its `canon_at`), not on
@@ -1754,7 +1775,7 @@ mod tests {
     #[test]
     fn cp6_an_earlier_canon_baseline_is_read_as_recorded() {
         let (_d, mut r) = project();
-        let (a, b, _c, _s) = landed_spec(&mut r);
+        let (a, b, c, _s) = landed_spec(&mut r);
         update(&mut r, "w", &a, "A holds now.");
         let v = r.propose(&writer(), "w", "w", None).unwrap();
         let of = |r: &Rdy| {
@@ -1766,10 +1787,13 @@ mod tests {
             )
         };
         let (at, before) = of(&r);
-        assert_eq!(
-            rows(&before),
-            vec![(a.to_string(), b.to_string(), PlanKind::Confirm, None)]
-        );
+        // b's confirm, and nb8's neighbor confirm of c, in item order
+        let mut want = vec![
+            (a.to_string(), b.to_string(), PlanKind::Confirm, None),
+            (a.to_string(), c.to_string(), PlanKind::Confirm, None),
+        ];
+        want.sort_by_key(|(x, s, k, _)| item_hash(&id(x), s, *k));
+        assert_eq!(rows(&before), want);
         // canon moves on: another view lands its own edit of a
         put(
             &mut r,
@@ -2350,7 +2374,7 @@ mod tests {
         // the review's case through the public write path: b references a without its
         // literals; the version changes a and deletes b
         let (_d, mut r) = project();
-        let (a, b, _c, _s) = landed_spec(&mut r);
+        let (a, b, c, _s) = landed_spec(&mut r);
         let mut changes = vec![update(&mut r, "w", &a, "A holds now.")];
         changes.push(change(&put(
             &mut r,
@@ -2359,16 +2383,23 @@ mod tests {
         )));
         let st = r.read();
         let p = compute(&st, "w", &changes, st.canon_head(), None, &[], &[]).unwrap();
-        assert_eq!(
-            rows(&p),
-            vec![(
+        // nb8: c, unchanged, confirms as the section neighbor of a (edited) and of b (deleted)
+        let mut want = vec![
+            (
                 a.to_string(),
                 b.to_string(),
                 PlanKind::Confirm,
-                Some(PlanOutcome::Updated)
-            )]
+                Some(PlanOutcome::Updated),
+            ),
+            (a.to_string(), c.to_string(), PlanKind::Confirm, None),
+            (b.to_string(), c.to_string(), PlanKind::Confirm, None),
+        ];
+        want.sort_by_key(|(x, s, k, _)| item_hash(&id(x), s, *k));
+        assert_eq!(rows(&p), want);
+        assert_eq!(
+            find(&p, a.as_str(), b.as_str(), PlanKind::Confirm).subject_hash,
+            Some(deleted_identity(&b))
         );
-        assert_eq!(p.items[0].subject_hash, Some(deleted_identity(&b)));
 
         // a reach and a neighbour with a deleted subject
         let (_d, r) = project();

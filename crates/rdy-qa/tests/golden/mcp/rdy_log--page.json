@@ -1,9 +1,9 @@
 [
   {
-    "approved": "P-38fbfd6428d0@1",
+    "approved": "P-5b0b3dfed739@1",
     "approved_by": "human:qa",
-    "approved_version": "38fbfd6428d09ddd5f1601e9c70db9ea73b3a6686bdddc41357c60aaa5b20ebc",
-    "assessment": "1a228214909bede3de4aa8a19cab0cee15e4dc5f7c746cde8f5a892813632b67",
+    "approved_version": "5b0b3dfed739852867bcae91fdb708a071020d1d61ace0aa134d70bd2dbc6d73",
+    "assessment": "843c0155fe3cd99ba6e7e31923e1b682d0f94b63abf96eed68679fc5b3d93656",
     "assurance": "local",
     "at": "2025-10-09T08:53:20Z",
     "at_ms": 1760000000033,
@@ -13,10 +13,10 @@
       "state": "none"
     },
     "evidence": null,
-    "landing": "c6e22e911ccdea08a82dedde72e8f1e08abda8a8c6914f5c78a30aa5a3369137",
+    "landing": "8a71bd26be8c414fa1d2f98ae62dd59cf557918aa777d092934f33937cb59f8e",
     "policy": null,
-    "prev": "83a36b330819b2a5a294dd1877362c1887f5f4a38327b94bc1ef5481d99812e3",
-    "proposal": "38fbfd6428d09ddd5f1601e9c70db9ea73b3a6686bdddc41357c60aaa5b20ebc",
+    "prev": "d33c2356cd457b8f2db9fda727a7758d9a88b8a65bc3659ce18eb779f681758e",
+    "proposal": "5b0b3dfed739852867bcae91fdb708a071020d1d61ace0aa134d70bd2dbc6d73",
     "proposed_by": {
       "actor": "human:qa",
       "run": "cli"
@@ -29,10 +29,10 @@
     "title": "work"
   },
   {
-    "approved": "P-9df9b0112bda@1",
+    "approved": "P-cbbe57b728e7@1",
     "approved_by": "human:qa",
-    "approved_version": "9df9b0112bda663d069fb511105b5ef290fb10bd68d9f869cbbd775c533572d5",
-    "assessment": "2fac17c309590296240a77c1c7136f1367fafa4dad69c65d062406f0ed35da6b",
+    "approved_version": "cbbe57b728e71eefb5670a33312e91048dda6115f7da67d486437b9dca9432b3",
+    "assessment": "00a26e8887ea55b25ceeb13d3e71bc452acba2d960131581b91ce6cbea352eb7",
     "assurance": "local",
     "at": "2025-10-09T08:53:20Z",
     "at_ms": 1760000000026,
@@ -42,10 +42,10 @@
       "state": "none"
     },
     "evidence": null,
-    "landing": "83a36b330819b2a5a294dd1877362c1887f5f4a38327b94bc1ef5481d99812e3",
+    "landing": "d33c2356cd457b8f2db9fda727a7758d9a88b8a65bc3659ce18eb779f681758e",
     "policy": null,
-    "prev": "2ab807d9fae3d4021a20e39d933a6e1e8702fc7e88bb1014795f5f199a66ff6e",
-    "proposal": "9df9b0112bda663d069fb511105b5ef290fb10bd68d9f869cbbd775c533572d5",
+    "prev": "8c0e08acd5abeb62ae5b90def4ffddfb503e918d4ba1fe361d4f92d8a3f69dae",
+    "proposal": "cbbe57b728e71eefb5670a33312e91048dda6115f7da67d486437b9dca9432b3",
     "proposed_by": {
       "actor": "human:qa",
       "run": "cli"
@@ -58,10 +58,10 @@
     "title": "work"
   },
   {
-    "approved": "P-fe413842c357@1",
+    "approved": "P-d5d250753000@1",
     "approved_by": "human:qa",
-    "approved_version": "fe413842c3577c238b44b915f661581ac1131e29561ba62cc76b447b117c1d0d",
-    "assessment": "955db5e382943b6a81aae4c3b535c0f81110b0446b2e0b2b8584bed27360551a",
+    "approved_version": "d5d250753000f35f30b5c16f30f7f310782896ec9d4a717191ad2ad65157fc48",
+    "assessment": "f13ceeda40ff4a47857a5842dde30098b801c3725294ccaf83dec11f177df58e",
     "assurance": "local",
     "at": "2025-10-09T08:53:20Z",
     "at_ms": 1760000000020,
@@ -71,10 +71,10 @@
       "state": "none"
     },
     "evidence": null,
-    "landing": "2ab807d9fae3d4021a20e39d933a6e1e8702fc7e88bb1014795f5f199a66ff6e",
+    "landing": "8c0e08acd5abeb62ae5b90def4ffddfb503e918d4ba1fe361d4f92d8a3f69dae",
     "policy": null,
-    "prev": "d3fcc1c0bbe291ebd41824f582a8a0e1fecb5ef60f2e923eb4f6c6654a9b2b45",
-    "proposal": "fe413842c3577c238b44b915f661581ac1131e29561ba62cc76b447b117c1d0d",
+    "prev": "70b11c7f96828e51a184357cddc74f79cd25911c40c27ebe24a4e5e7ca4f7a3e",
+    "proposal": "d5d250753000f35f30b5c16f30f7f310782896ec9d4a717191ad2ad65157fc48",
     "proposed_by": {
       "actor": "human:qa",
       "run": "cli"

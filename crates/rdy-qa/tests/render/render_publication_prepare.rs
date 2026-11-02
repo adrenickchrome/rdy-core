@@ -269,6 +269,12 @@ const SITE_DIGESTS: [(&str, &str, &str); 4] = [
 /// The proposal's re-taken again when the engine's decision type gained `confirmation` (ck1): the
 /// resolved pack's digest moves the assessment, so the version's hash does; only that scope's
 /// text changed.
+/// It moved again when every defining type gained the optional `everyday` field (nb3), for the
+/// same reason.
+/// Re-taken for M3e's neighbor items (nb8): only the proposal scope moved. Its print names the
+/// version (`proposal:<id>`), and the id hashes `canon_at`, canon's head, whose landing records
+/// now seal the review project's neighbor items; the site bytes of the same scope, which carry
+/// no id, kept their digests.
 const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "canon",
@@ -303,11 +309,11 @@ const PRINT_DIGESTS: [(&str, [&str; 5]); 4] = [
     (
         "proposal",
         [
-            "f5ccb3756af41e343578e90d604c217f24af3b0928e123b087d2f71baaf38008",
-            "aae97dd76e220f07900925100111bb1ef6f86527533843612c254ff210c1142e",
-            "f6850a82fa35c9418ed8970a9cc499062528dda7c2555ebd2e78637d01aa7fc4",
-            "8c9783f54b3723fe766348cabff1fa1f5d8cf42765c211faf7222b36d3751891",
-            "2a253816c253a033d9b76cfc768d421c583ffd0d2320aa66bf9e684f90e701bb",
+            "ec7ed42389f159c811d3510cadde7ba913e2ef7753af8403ef94c68e29e188c3",
+            "927c7f54a5efb9001866411fe930a98a8a7afdd4aad53b612b481e45612b0724",
+            "f351e900b2a0b0ea5b0e808b1d6ed2e01e7154b687e66bce8ce024834558a8d8",
+            "4845b2207d58ae8804bece4e5b4d280eaebabe73110ecedd501c0f1a1e57b070",
+            "2a41706a539d6cef4dc34cc9179d252fb837ae14b930591c54cc5628fe7b1997",
         ],
     ),
 ];

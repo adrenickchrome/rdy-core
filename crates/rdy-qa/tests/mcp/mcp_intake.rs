@@ -8,7 +8,7 @@ use rdy_engine::{Rdy, RdyError};
 use rdy_mcp::tools::{McpState, rdy_answer, rdy_pending, rdy_session};
 use rdy_model::{AnswerAct, EvidenceKind};
 use rdy_qa::edit_loop::spec_doc;
-use rdy_qa::fixtures::land;
+use rdy_qa::fixtures::{land, writer};
 use rdy_qa::intake::*;
 use rdy_qa::mcp::{McpClient, Reply};
 use rdy_qa::tensions::{ag, put, upd};
@@ -121,6 +121,47 @@ fn di12_rdy_pending_returns_the_batch_and_its_exceptions() {
         ["against", "not_recommended", "one_way", "unapplied"],
         "{v}"
     );
+    // nb11: the batch lists the related decisions of its decisions in one fact, and each
+    // exception card lists its own decision's: one lineage row, for the decision that supersedes
+    let related = |i: &Value| -> Vec<String> {
+        i["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["name"] == "Related decisions")
+            .map(|f| f["value"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let row = format!(
+        "{} supersedes {} [live] via link: ",
+        b.against, b.spec.decision
+    );
+    let on_batch = related(&batch);
+    assert_eq!(on_batch.len(), 1, "{batch}");
+    assert!(
+        on_batch[0].starts_with(&format!("1 listed, 0 omitted: {row}")),
+        "{on_batch:?}"
+    );
+    for card in exceptions(&v, &b.r#ref) {
+        let shown = related(&card);
+        assert_eq!(shown.len(), 1, "{card}");
+        if card["ref"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("{}@", b.against))
+        {
+            assert!(
+                shown[0].starts_with(&format!("1 listed, 0 omitted: {row}")),
+                "{shown:?}"
+            );
+        } else {
+            assert_eq!(shown[0], "none", "{card}");
+        }
+        assert_eq!(
+            card["facts"].as_array().unwrap().last().unwrap()["name"],
+            "Related decisions"
+        );
+    }
     // the tool is the queue as the engine computes it for the person, at the default card budget
     let direct = st
         .engine
@@ -948,4 +989,111 @@ fn sdc3_a_not_ready_removal_card_recommends_nothing() {
         card.contains("     Why recommended: its checks pass and nothing blocks it\n"),
         "{card}"
     );
+}
+
+/// nb11 (D-YXBXH): the words of an unlinked mention and the related list reach an agent through
+/// `rdy_pending`: the batch card and the confirm card of a decision, as facts and in the card
+/// text; every key of an item stays.
+#[test]
+fn nb11_rdy_pending_shows_the_words_and_the_related_list() {
+    let (dir, mut r) = rdy_qa::fixtures::project();
+    person_is_qa(dir.path());
+    let w = put(
+        &mut r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$n", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$n", "fields": {"title": "Ideas"}},
+            {"op": "create", "type": "entity", "id": "$e", "parent": "$s", "fields": {"name": "Ledger service"}},
+            {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Store"}, "body": "Holds data."}
+        ]),
+    );
+    land(&mut r, "seed").unwrap();
+    let (s, e) = (w.created["$s"].clone(), w.created["$e"].clone());
+    let decision =
+        |statement: &str, affects: Vec<String>, one_way: bool| rdy_engine::DecisionInput {
+            parent: s.clone(),
+            statement: statement.into(),
+            title: Some(statement.into()),
+            why: Some(format!("{statement}: the person decides it")),
+            reversibility: Some(if one_way { "one_way" } else { "two_way" }.into()),
+            affects,
+            ..Default::default()
+        };
+    let a = decide_in(
+        &mut r,
+        "seed2",
+        decision("Entries are append-only", vec![e.clone()], false),
+    );
+    land(&mut r, "seed2").unwrap();
+    let n = decide_in(
+        &mut r,
+        "v",
+        decision("The ledger service stores signatures", vec![], true),
+    );
+    let pv = r.propose(&writer(), "v", "v", Some(TEST_SUMMARY)).unwrap();
+    let mut st = agent_state(r);
+    let v = pending_json(&mut st, json!({}));
+    let fact = |i: &Value, name: &str| -> String {
+        i["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == name)
+            .unwrap_or_else(|| panic!("fact {name} in {i}"))["value"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let batch = item_of(&v, &pv.r#ref);
+    let row = format!("{n} same_entity {a} [live] via text: Entries are append-only");
+    assert_eq!(
+        fact(&batch, "Confidence"),
+        format!("medium: unlinked_mention on {n} (\"ledger service\")")
+    );
+    assert_eq!(
+        fact(&batch, "Related decisions"),
+        format!("1 listed, 0 omitted: {row}")
+    );
+    let confirm = exceptions(&v, &pv.r#ref)
+        .into_iter()
+        .find(|i| {
+            i["ref"]
+                .as_str()
+                .is_some_and(|r| r.starts_with(&format!("{n}@")))
+        })
+        .expect("the one_way decision's confirm card");
+    assert_eq!(
+        fact(&confirm, "Related decisions"),
+        format!("1 listed, 0 omitted: {row}")
+    );
+    // the card text shows both, and every key of an item is still there
+    assert!(
+        batch["card"]
+            .as_str()
+            .unwrap()
+            .contains("(\"ledger service\")")
+    );
+    assert!(confirm["card"].as_str().unwrap().contains(&row));
+    for item in [&batch, &confirm] {
+        let mut keys: Vec<&str> = item
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort();
+        for k in [
+            "card",
+            "card_hash",
+            "facts",
+            "kind",
+            "options",
+            "ref",
+            "title",
+            "why",
+        ] {
+            assert!(keys.contains(&k), "{k} in {keys:?}");
+        }
+    }
 }

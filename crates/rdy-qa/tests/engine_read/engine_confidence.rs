@@ -133,6 +133,7 @@ fn synthetic(n: usize) -> CoverageIssues {
             subject: Some(format!("t-0000{k}")),
             fix: "link it".to_string(),
             dismissed: None,
+            text: None,
         })
         .collect();
     let entry = BlockEntry {

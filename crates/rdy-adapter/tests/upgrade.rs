@@ -154,7 +154,7 @@ fn source(dir: &Path) -> Source {
 
 /// A closed holder at `root` that took the first `n` uploads of `src`.
 fn holder(root: &Path, src: &Source, n: usize) {
-    let mut h = StoreHandle::create_holder(root, src.repo).unwrap();
+    let h = StoreHandle::create_holder(root, src.repo).unwrap();
     for u in &src.uploads[..n] {
         h.take(&[File::open(&u.path).unwrap()], u.target.clone())
             .unwrap();
@@ -602,7 +602,7 @@ fn ok12_read_only_holder_exports_but_cannot_take() {
     rdy.close().unwrap();
     let before = tree(base.path());
 
-    let mut h = StoreHandle::open_holder(&root).unwrap();
+    let h = StoreHandle::open_holder(&root).unwrap();
     let snap = h.snapshot().unwrap();
     assert_eq!(snap.tags().unwrap().len(), 1);
     let mut exported = Vec::new();

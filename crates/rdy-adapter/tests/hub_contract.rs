@@ -418,7 +418,7 @@ mod hub {
     /// Takes both files of `up`, in reversed order, into the holder at `root`, opened for this
     /// call alone.
     pub fn take(root: &Path, up: &Upload) -> Result<TakeOutcome, RdyError> {
-        let mut holder = StoreHandle::open_holder(root)?;
+        let holder = StoreHandle::open_holder(root)?;
         let files = [
             File::open(&up.files[1]).map_err(io)?,
             File::open(&up.files[0]).map_err(io)?,

@@ -198,7 +198,7 @@ fn head(repo: &Path) -> Vec<PlanHead> {
 fn cp10_next_propose_binds_first_plan_version() {
     let (d, mut r) = project();
     let repo = linked_repo(d.path());
-    let (_s, a, b, _c, p) = spec(&mut r);
+    let (_s, a, b, c, p) = spec(&mut r);
     commit(repo.path(), "f.rs", &format!("start\n\nImplements: {a}"));
     edit(&mut r, "w", &a, "A holds 60 days.");
     // the version a store-16 engine wrote: the raw proposal writer, no plan
@@ -241,17 +241,18 @@ fn cp10_next_propose_binds_first_plan_version() {
         "the old version stays unbound"
     );
     // the normal plan warnings: b's confirm and p's update are open (the chain's defer is not
-    // inherited); the code item counts and does not warn
+    // inherited), and so are the neighbor confirms of c and p (nb8); the code item counts and
+    // does not warn
     let open = next
         .warnings
         .iter()
         .find(|w| w.code == W_PLAN_OPEN)
         .expect("W_PLAN_OPEN");
-    assert_eq!(open.message, "2 change-plan items are open");
+    assert_eq!(open.message, "4 change-plan items are open");
     assert_eq!(open.fix, PLAN_OPEN_FIX);
     assert_eq!(
         (next.plan.open, next.plan.closed, next.plan.deferred),
-        (3, 0, 0)
+        (5, 0, 0)
     );
     // the baseline is this propose's HEAD: the later commit is not after it
     assert_eq!(next.plan.by_kind["update_implementation"].open, 1);
@@ -260,6 +261,8 @@ fn cp10_next_propose_binds_first_plan_version() {
         item_hash(&id(&a), &b, PlanKind::Confirm),
         item_hash(&id(&a), &p, PlanKind::Update),
         item_hash(&id(&a), "app:f.rs", PlanKind::UpdateImplementation),
+        item_hash(&id(&a), &c, PlanKind::Confirm),
+        item_hash(&id(&a), &p, PlanKind::Confirm),
     ];
     full.sort();
     let want: Vec<String> = full.iter().map(item_display).collect();
@@ -275,7 +278,7 @@ fn cp10_next_propose_binds_first_plan_version() {
 fn cp10_every_proposal_version_binds_one_plan() {
     let (d, mut r) = project();
     let repo = linked_repo(d.path());
-    let (s, a, b, c, _p) = spec(&mut r);
+    let (s, a, b, c, p) = spec(&mut r);
     commit(repo.path(), "f.rs", &format!("start\n\nImplements: {a}"));
     let first_heads = head(repo.path());
     edit(&mut r, "w", &a, "A holds 60 days.");
@@ -335,18 +338,47 @@ fn cp10_every_proposal_version_binds_one_plan() {
     assert_eq!(held.by.actor, "human:qa");
     assert_eq!(held.reason.as_deref(), Some("B still holds"));
 
-    // a zero-item version binds its plan too
-    write(
+    // a version of one new block binds its plan too: nb8 (TASK-978 X2) asks each existing
+    // block of its section to confirm
+    let z = write(
         &mut r,
         "z",
-        json!([{"op": "create", "type": "claim", "parent": s, "body": "Z stands alone."}]),
+        json!([{"op": "create", "type": "claim", "id": "$z", "parent": s, "body": "Z stands alone."}]),
     )
-    .unwrap();
+    .unwrap()
+    .created["$z"]
+        .clone();
     let pz = propose(&mut r, "z", &[]).unwrap();
     let (_, planz) = bound(&r, &pz.id).unwrap();
     assert_eq!((planz.stable, planz.prev), (None, None));
-    assert_eq!((pz.plan.open, pz.plan.closed, pz.plan.deferred), (0, 0, 0));
-    assert!(!warning_codes(&pz).contains(&W_PLAN_OPEN));
+    assert_eq!((pz.plan.open, pz.plan.closed, pz.plan.deferred), (4, 0, 0));
+    let mut want: Vec<Hash> = [&a, &b, &c, &p]
+        .iter()
+        .map(|x| item_hash(&id(&z), x, PlanKind::Confirm))
+        .collect();
+    want.sort();
+    let listed: Vec<&str> = pz.plan.items.iter().map(|i| i.id.as_str()).collect();
+    assert_eq!(listed, want.iter().map(item_display).collect::<Vec<_>>());
+    assert!(warning_codes(&pz).contains(&W_PLAN_OPEN));
+    // a zero-item version binds its plan too: a new doc's blocks have no earlier neighbor
+    write(
+        &mut r,
+        "z0",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "fresh", "title": "Fresh", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "New"}},
+            {"op": "create", "type": "claim", "parent": "$s", "body": "Z0 stands alone."}
+        ]),
+    )
+    .unwrap();
+    let pz0 = propose(&mut r, "z0", &[]).unwrap();
+    let (_, planz0) = bound(&r, &pz0.id).unwrap();
+    assert_eq!((planz0.stable, planz0.prev), (None, None));
+    assert_eq!(
+        (pz0.plan.open, pz0.plan.closed, pz0.plan.deferred),
+        (0, 0, 0)
+    );
+    assert!(!warning_codes(&pz0).contains(&W_PLAN_OPEN));
 
     // a relayed propose: the person's version, plan and answer in one batch
     write(
@@ -532,6 +564,10 @@ fn cp10_subset_answers_use_the_subset_candidate() {
         "the whole view closes it"
     );
     assert_eq!(row(&whole, &only_whole)["state"], "open");
+    // nb8: p's text changed in the whole view, so b, its unchanged section neighbor, confirms
+    let neighbor_pb = pi(&p, &b, PlanKind::Confirm);
+    assert_eq!(row(&whole, &neighbor_pb)["state"], "open");
+    assert_eq!(row(&whole, &neighbor_pb)["edge"], "neighbor");
     let subset = [edit_a.clone()];
     // an item of the whole view only is no item of the subset: refused, nothing written
     let before = log_state(&r);
@@ -564,10 +600,20 @@ fn cp10_subset_answers_use_the_subset_candidate() {
         )
         .unwrap();
     assert_eq!(info.changes, 1);
+    // nb8: on the subset c and p are a's unchanged section neighbors, so their confirms are
+    // open; the excluded update closes nothing
     assert_eq!(
         (info.plan.open, info.plan.closed, info.plan.deferred),
-        (0, 1, 1),
+        (2, 1, 1),
         "the excluded update closes nothing"
+    );
+    let mut neighbors = vec![pi(&a, &c, PlanKind::Confirm), pi(&a, &p, PlanKind::Confirm)];
+    neighbors.sort();
+    let open: Vec<String> = info.plan.items.iter().map(|i| i.id.clone()).collect();
+    assert_eq!(open, neighbors);
+    assert!(
+        !neighbors.contains(&neighbor_pb),
+        "the excluded change gives none"
     );
     let (_, plan) = bound(&r, &info.id).unwrap();
     let deferred = plan
@@ -607,10 +653,16 @@ fn cp10_open_noncode_items_warn_and_code_items_never_block() {
     // a code-only change: c's text changes; b references c (a confirm), p does not
     edit(&mut r, "k", &c, "C stands firm.");
     let confirm_cb = pi(&c, &b, PlanKind::Confirm);
+    // nb8: a and p are c's unchanged section neighbors
+    let (confirm_ca, confirm_cp) = (pi(&c, &a, PlanKind::Confirm), pi(&c, &p, PlanKind::Confirm));
     let pk = propose(
         &mut r,
         "k",
-        &[ans(&confirm_cb, PlanAct::Confirm, Some("B still holds"))],
+        &[
+            ans(&confirm_cb, PlanAct::Confirm, Some("B still holds")),
+            ans(&confirm_ca, PlanAct::Confirm, Some("A still holds")),
+            ans(&confirm_cp, PlanAct::Confirm, Some("P still holds")),
+        ],
     )
     .unwrap();
     assert_eq!(
@@ -628,7 +680,8 @@ fn cp10_open_noncode_items_warn_and_code_items_never_block() {
     r.land(&approver(), &pk.id)
         .expect("an open code item never blocks");
 
-    // two open document items warn with their exact count, and the version still lands
+    // four open document items warn with their exact count, and the version still lands: b's
+    // confirm, p's update, and the neighbor confirms of c and p (nb8)
     edit(&mut r, "w", &a, "A holds 60 days.");
     let pw = propose(&mut r, "w", &[]).unwrap();
     let open: Vec<_> = pw
@@ -637,9 +690,19 @@ fn cp10_open_noncode_items_warn_and_code_items_never_block() {
         .filter(|w| w.code == W_PLAN_OPEN)
         .collect();
     assert_eq!(open.len(), 1);
-    assert_eq!(open[0].message, "2 change-plan items are open");
+    assert_eq!(open[0].message, "4 change-plan items are open");
     assert_eq!(open[0].fix, PLAN_OPEN_FIX);
-    assert_eq!(pw.plan.open, 2);
+    assert_eq!(pw.plan.open, 4);
+    let mut want = vec![
+        pi(&a, &b, PlanKind::Confirm),
+        pi(&a, &p, PlanKind::Update),
+        pi(&a, &c, PlanKind::Confirm),
+        pi(&a, &p, PlanKind::Confirm),
+    ];
+    want.sort();
+    let mut listed: Vec<String> = pw.plan.items.iter().map(|i| i.id.clone()).collect();
+    listed.sort();
+    assert_eq!(listed, want);
     // a lapsed answer: b changes after its confirm, and the next version warns of it
     let confirm_ab = pi(&a, &b, PlanKind::Confirm);
     r.answer_plan(
