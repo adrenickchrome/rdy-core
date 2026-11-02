@@ -16,6 +16,8 @@
 //!   directory handle itself, and `entry_kind_at` reads an entry's kind without following or
 //!   opening it;
 //! - a child process that starts in an open directory (`start_in_dir`), for the same reason;
+//! - hole punching (`punch_hole`) and a file's allocated bytes (`allocated_bytes`): a file
+//!   system's own best effort, which never changes a byte that a read returns;
 //! - test fixtures: a file's mode bits and inode (`mode_of`, `inode`), any mode
 //!   (`permissions`, `set_mode`, `dir_mode`, `file_mode`), symbolic links (`symlink`) and a
 //!   child process under another umask (`under_umask`), so the store's and the engine's tests
@@ -553,13 +555,255 @@ pub fn under_umask(umask: &str, program: &Path) -> std::process::Command {
     cmd
 }
 
+/// What a file system did with a hole punch. `Supported` means that it accepted the call, not that
+/// the disk allocation fell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Punch {
+    Supported,
+    Unsupported,
+}
+
+/// A test backend of [`punch_hole`]: it sees each range that passed the checks, and its answer
+/// replaces the platform call. None lets the platform call run.
+#[doc(hidden)]
+pub type PunchBackend = Box<dyn FnMut(u64, u64) -> Option<io::Result<Punch>>>;
+
+thread_local! {
+    static PUNCH_BACKEND: std::cell::RefCell<Option<PunchBackend>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test hook: every [`punch_hole`] on this thread calls `backend`. None removes it.
+#[doc(hidden)]
+pub fn on_punch(backend: Option<PunchBackend>) {
+    PUNCH_BACKEND.with(|b| *b.borrow_mut() = backend);
+}
+
+/// Gives the bytes at `offset..offset + len` of `file`, which must be open for writing and hold
+/// zeros there, back to the file system. The file's length and every byte that a read returns
+/// stay as they are. A range that overflows or ends past the file is `InvalidInput` and makes no
+/// call; a zero length makes no call and succeeds. On macOS only the range's aligned interior is
+/// punched, so a span with no aligned interior makes no call. A file system that cannot punch is
+/// `Unsupported`; any other failed call is an error.
+#[cfg(unix)]
+pub fn punch_hole(file: &File, offset: u64, len: u64) -> io::Result<Punch> {
+    if len == 0 {
+        return Ok(Punch::Supported);
+    }
+    let end = offset
+        .checked_add(len)
+        .filter(|end| i64::try_from(*end).is_ok())
+        .ok_or_else(|| bad_punch_range("overflows"))?;
+    if end > file.metadata()?.len() {
+        return Err(bad_punch_range("ends past the file"));
+    }
+    let injected = PUNCH_BACKEND.with(|b| b.borrow_mut().as_mut().and_then(|f| f(offset, len)));
+    match injected {
+        Some(answer) => answer,
+        None => platform_punch(file, offset, len),
+    }
+}
+
+#[cfg(unix)]
+fn bad_punch_range(why: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("the punch range {why}"),
+    )
+}
+
+/// The answer to a failed platform punch: a file system that cannot is `Unsupported`, and every
+/// other failure, an invalid range (`EINVAL`) included, stays an error.
+#[cfg(unix)]
+fn punch_outcome(e: io::Error) -> io::Result<Punch> {
+    match e.raw_os_error() {
+        // on Linux EOPNOTSUPP and ENOTSUP are one value, so these are not match patterns
+        Some(code) if [libc::ENOSYS, libc::EOPNOTSUPP, libc::ENOTSUP].contains(&code) => {
+            Ok(Punch::Unsupported)
+        }
+        _ => Err(e),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn platform_punch(file: &File, offset: u64, len: u64) -> io::Result<Punch> {
+    let as_off = |v: u64| libc::off_t::try_from(v).map_err(|_| bad_punch_range("overflows"));
+    let (offset, len) = (as_off(offset)?, as_off(len)?);
+    // SAFETY: the call takes only an open descriptor and integers.
+    let r = unsafe {
+        libc::fallocate(
+            file.as_raw_fd(),
+            libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+            offset,
+            len,
+        )
+    };
+    match cvt(r) {
+        Ok(_) => Ok(Punch::Supported),
+        Err(e) => punch_outcome(e),
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn platform_punch(file: &File, offset: u64, len: u64) -> io::Result<Punch> {
+    // SAFETY: an all-zero statfs is a valid value of this plain C struct.
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `st` is valid for writes for the call.
+    cvt(unsafe { libc::fstatfs(file.as_raw_fd(), &mut st) })?;
+    let Some((start, length)) = aligned_interior(offset, len, u64::from(st.f_bsize))? else {
+        return Ok(Punch::Supported);
+    };
+    let as_off = |v: u64| libc::off_t::try_from(v).map_err(|_| bad_punch_range("overflows"));
+    let args = libc::fpunchhole_t {
+        fp_flags: 0,
+        reserved: 0,
+        fp_offset: as_off(start)?,
+        fp_length: as_off(length)?,
+    };
+    // SAFETY: `args` is valid for reads for the call, and F_PUNCHHOLE reads this struct.
+    let r = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_PUNCHHOLE, &args) };
+    match cvt(r) {
+        Ok(_) => Ok(Punch::Supported),
+        Err(e) => punch_outcome(e),
+    }
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn platform_punch(_file: &File, _offset: u64, _len: u64) -> io::Result<Punch> {
+    Ok(Punch::Unsupported)
+}
+
+/// The largest range inside `offset..offset + len` that starts and ends on a multiple of `block`,
+/// as (start, length); None if it holds no whole block. It rounds inward only. A zero block size
+/// or an overflow is an error.
+#[cfg(any(target_os = "macos", test))]
+fn aligned_interior(offset: u64, len: u64, block: u64) -> io::Result<Option<(u64, u64)>> {
+    if block == 0 {
+        return Err(io::Error::other("the file system reports no block size"));
+    }
+    let end = offset
+        .checked_add(len)
+        .ok_or_else(|| bad_punch_range("overflows"))?;
+    let start = offset
+        .checked_next_multiple_of(block)
+        .ok_or_else(|| bad_punch_range("overflows"))?;
+    let end = end - end % block;
+    Ok((start < end).then(|| (start, end - start)))
+}
+
+/// The bytes the file system has allocated to `file`: its allocated block count times 512. This
+/// is not its length.
+#[cfg(unix)]
+pub fn allocated_bytes(file: &File) -> io::Result<u64> {
+    blocks_to_bytes(file.metadata()?.blocks())
+}
+
+#[cfg(unix)]
+fn blocks_to_bytes(blocks: u64) -> io::Result<u64> {
+    blocks
+        .checked_mul(512)
+        .ok_or_else(|| io::Error::other("the file's allocated size overflows"))
+}
+
 #[cfg(not(unix))]
 compile_error!("rdy_store::pio has no implementation for this platform yet (FW-XP1 Phase 4)");
+
+#[cfg(windows)]
+compile_error!(
+    "rdy_store::pio::punch_hole has no Windows implementation yet: FSCTL_SET_ZERO_DATA on a sparse file (FW-XP1 Phase 4)"
+);
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{Read, Seek, SeekFrom};
+
+    #[test]
+    fn mh1_ranges_and_allocation_are_checked() {
+        // the platform call never sees a range these refuse
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+        let seen = std::rc::Rc::clone(&calls);
+        on_punch(Some(Box::new(move |offset, len| {
+            seen.borrow_mut().push((offset, len));
+            Some(Ok(Punch::Supported))
+        })));
+        let f = tempfile::tempfile().unwrap();
+        write_all_at(&f, &[0u8; 8192], 0).unwrap();
+        assert_eq!(punch_hole(&f, 100, 0).unwrap(), Punch::Supported);
+        assert_eq!(
+            punch_hole(&f, u64::MAX, 0).unwrap(),
+            Punch::Supported,
+            "zero length succeeds without a call, wherever it is"
+        );
+        for (offset, len) in [
+            (u64::MAX, 1),
+            (1, u64::MAX),
+            (8192, 1),
+            (8191, 2),
+            (i64::MAX as u64, 1),
+            (i64::MAX as u64 + 1, 1),
+        ] {
+            let e = punch_hole(&f, offset, len).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{offset} {len}");
+        }
+        assert!(calls.borrow().is_empty());
+        // the last valid byte
+        assert_eq!(punch_hole(&f, 8191, 1).unwrap(), Punch::Supported);
+        assert_eq!(*calls.borrow(), [(8191, 1)]);
+        on_punch(None);
+
+        // the real call over a span with no aligned interior or a whole one is bounded
+        assert!(punch_hole(&f, 8191, 1).is_ok());
+        assert!(punch_hole(&f, 0, 8192).is_ok());
+        let mut back = [1u8; 8192];
+        read_exact_at(&f, &mut back, 0).unwrap();
+        assert_eq!(back, [0u8; 8192]);
+
+        // alignment rounds inward only
+        for (offset, len, want) in [
+            (0, 4096, Some((0, 4096))),
+            (0, 4095, None),
+            (1, 4095, None),
+            (4095, 2, None),
+            (1, 8191, Some((4096, 4096))),
+            (5000, 10_000, Some((8192, 4096))),
+            (4096, 8192, Some((4096, 8192))),
+        ] {
+            assert_eq!(aligned_interior(offset, len, 4096).unwrap(), want);
+            if let Some((start, n)) = want {
+                assert!(start >= offset && start + n <= offset + len);
+            }
+        }
+        assert!(aligned_interior(0, 4096, 0).is_err(), "a zero block size");
+        assert!(aligned_interior(u64::MAX, 1, 4096).is_err(), "end overflow");
+        assert!(
+            aligned_interior(u64::MAX - 1, 1, 4096).is_err(),
+            "rounding up overflows"
+        );
+
+        // the errors that mean the file system cannot, and the rest
+        for code in [libc::ENOSYS, libc::EOPNOTSUPP, libc::ENOTSUP] {
+            let got = punch_outcome(io::Error::from_raw_os_error(code)).unwrap();
+            assert_eq!(got, Punch::Unsupported, "{code}");
+        }
+        for code in [libc::EINVAL, libc::EPERM, libc::EACCES, libc::EIO] {
+            assert!(punch_outcome(io::Error::from_raw_os_error(code)).is_err());
+        }
+
+        // allocation is checked and is not the file's length
+        assert_eq!(blocks_to_bytes(0).unwrap(), 0);
+        assert_eq!(blocks_to_bytes(3).unwrap(), 1536);
+        assert_eq!(
+            blocks_to_bytes(u64::MAX / 512).unwrap(),
+            u64::MAX / 512 * 512
+        );
+        assert!(blocks_to_bytes(u64::MAX / 512 + 1).is_err());
+        let sparse = tempfile::tempfile().unwrap();
+        sparse.set_len(1 << 30).unwrap();
+        assert!(allocated_bytes(&sparse).unwrap() < 1 << 30);
+    }
 
     #[test]
     fn ps1_a_write_at_an_offset_reads_back_at_that_offset() {

@@ -8,7 +8,7 @@ use rdy_model::redaction::DropSpan;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -138,6 +138,126 @@ pub struct SegmentLog {
     /// What the log's validated redaction applies authorize: the holes every scan and walk of
     /// this log reads as frames (`redaction_io::bootstrap`).
     auth: Arc<Authorization>,
+}
+
+/// The most removed spans that one pass visits and tries to punch (TASK-1002 O8).
+pub const MAX_PUNCH_SPANS: u64 = 1_000_000;
+
+/// What one punch pass did. `attempted` counts the spans visited, of which `unsupported` could not
+/// be punched on this file system and `failed` failed a check or the call; `not_tried` counts the
+/// spans past the pass's bound.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PunchSummary {
+    pub attempted: u64,
+    pub unsupported: u64,
+    pub failed: u64,
+    pub not_tried: u64,
+}
+
+/// A step of a removal's durable end (test hook).
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RemovalStep {
+    /// One affected segment's sync returned.
+    FileSynced(u32),
+    /// The segments directory's sync returned.
+    DirSynced,
+    /// The zeros are durable and the first punch has not run.
+    BeforePunch,
+    /// The last punch has run.
+    AfterPunch,
+    /// A diagnostic line, right before its write to stderr.
+    Diagnostic(String),
+}
+
+/// A test observer of a removal's steps. An error at `FileSynced` or `DirSynced` is that sync's
+/// failure; any other step's error is ignored.
+#[doc(hidden)]
+pub type RemovalProbe = Box<dyn FnMut(RemovalStep) -> io::Result<()>>;
+
+thread_local! {
+    static REMOVAL_PROBE: std::cell::RefCell<Option<RemovalProbe>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test hook: every removal on this thread calls `probe` at each step. None removes it.
+#[doc(hidden)]
+pub fn on_removal_step(probe: Option<RemovalProbe>) {
+    REMOVAL_PROBE.with(|p| *p.borrow_mut() = probe);
+}
+
+fn removal_step(step: RemovalStep) -> io::Result<()> {
+    REMOVAL_PROBE.with(|p| match p.borrow_mut().as_mut() {
+        Some(f) => f(step),
+        None => Ok(()),
+    })
+}
+
+/// Tries `punch` on at most `max_spans` (clamped to [`MAX_PUNCH_SPANS`]) of the `total`
+/// `candidates`, in their order, and keeps counts only.
+fn drive_punches<T>(
+    candidates: impl Iterator<Item = T>,
+    total: u64,
+    max_spans: u64,
+    mut punch: impl FnMut(T) -> io::Result<pio::Punch>,
+) -> PunchSummary {
+    let cap = usize::try_from(max_spans.min(MAX_PUNCH_SPANS)).unwrap_or(usize::MAX);
+    let mut summary = PunchSummary::default();
+    for candidate in candidates.take(cap) {
+        summary.attempted += 1;
+        match punch(candidate) {
+            Ok(pio::Punch::Supported) => {}
+            Ok(pio::Punch::Unsupported) => summary.unsupported += 1,
+            Err(_) => summary.failed += 1,
+        }
+    }
+    summary.not_tried = total.saturating_sub(summary.attempted);
+    summary
+}
+
+/// The lines an automatic removal reports for `s`, in their fixed order. They are diagnostics, not
+/// warning codes.
+fn punch_diagnostics(s: &PunchSummary) -> Vec<String> {
+    let mut lines = vec![];
+    if s.unsupported > 0 {
+        lines.push(format!(
+            "hole punching is not supported for {} removed spans; they keep their disk space, and their content stays removed",
+            s.unsupported
+        ));
+    }
+    if s.failed > 0 {
+        lines.push(format!(
+            "hole punching failed for {} removed spans; they keep their disk space, and their content stays removed",
+            s.failed
+        ));
+    }
+    if s.not_tried > 0 {
+        lines.push(format!(
+            "hole punching stopped after {MAX_PUNCH_SPANS} removed spans; {} spans were not tried",
+            s.not_tried
+        ));
+    }
+    lines
+}
+
+/// Punches the payload of the hole at `loc` of `f`, once its header still names the hole and its
+/// payload still reads as zeros. Anything else is an error, and no punch.
+fn punch_span(f: &File, loc: Location, hole: &Hole) -> io::Result<pio::Punch> {
+    let refused = || io::Error::new(io::ErrorKind::InvalidData, "not a removed payload");
+    let file_len = f.metadata()?.len();
+    // a frame's header names its logical kind through the codec, as `zero_payload` reads it
+    if header_at(f, loc.offset, file_len)?
+        .map(|(len, raw, hash)| (len, crate::codec::logical_kind(raw), hash))
+        != Some((hole.len, hole.kind, hole.hash))
+    {
+        return Err(refused());
+    }
+    let start = loc.offset.checked_add(HEADER).ok_or_else(refused)?;
+    let len = u64::from(hole.len);
+    if start.checked_add(len).is_none_or(|end| end > file_len) || !payload_is_zero(f, start, len)? {
+        return Err(refused());
+    }
+    pio::punch_hole(f, start, len)
 }
 
 /// The path of segment `id` in `dir`.
@@ -2060,7 +2180,108 @@ impl SegmentLog {
                 .write(true)
                 .open(seg_path(&self.dir, *seg))?
                 .sync_all()?;
+            removal_step(RemovalStep::FileSynced(*seg))?;
         }
-        sync_dir(&self.dir)
+        sync_dir(&self.dir)?;
+        removal_step(RemovalStep::DirSynced)?;
+        // the zeros are durable: the rest is best effort and has no content commit boundary, so
+        // no result of it reaches the removal, and losing the allocation change is harmless
+        let _ = removal_step(RemovalStep::BeforePunch);
+        let summary = self.punch_removed(MAX_PUNCH_SPANS);
+        let _ = removal_step(RemovalStep::AfterPunch);
+        for line in punch_diagnostics(&summary) {
+            let _ = removal_step(RemovalStep::Diagnostic(line.clone()));
+            let _ = writeln!(io::stderr(), "{line}");
+        }
+        Ok(())
+    }
+
+    /// Punches a hole over each removed payload that this log's validated authorization names, in
+    /// `(segment, offset)` order, at most `max_spans` (clamped to [`MAX_PUNCH_SPANS`]). It takes no
+    /// spans from a caller, and it reads each span's header and zeros again first, so only a
+    /// payload that already reads as zeros reaches the file system. A carried span that is held is
+    /// not a hole and is never visited. Punching zeros repeats safely, and no result of it changes
+    /// a byte that rdy reads. It returns what it did and prints nothing.
+    pub fn punch_removed(&self, max_spans: u64) -> PunchSummary {
+        let writable = self.writer().is_ok();
+        let holes = &self.auth.holes;
+        let mut open: Option<(u32, Option<File>)> = None;
+        drive_punches(
+            holes.iter(),
+            holes.len() as u64,
+            max_spans,
+            |(loc, hole)| {
+                if !writable {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                if open.as_ref().is_none_or(|(seg, _)| *seg != loc.segment) {
+                    let file = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(seg_path(&self.dir, loc.segment))
+                        .ok();
+                    open = Some((loc.segment, file));
+                }
+                match open.as_ref().and_then(|(_, file)| file.as_ref()) {
+                    Some(file) => punch_span(file, *loc, hole),
+                    None => Err(io::ErrorKind::NotFound.into()),
+                }
+            },
+        )
+    }
+}
+
+#[cfg(test)]
+mod punch_tests {
+    use super::*;
+
+    fn drive(candidates: u64, max_spans: u64) -> (PunchSummary, u64) {
+        let mut calls = 0;
+        let summary = drive_punches(0..candidates, candidates, max_spans, |_| {
+            calls += 1;
+            Ok(pio::Punch::Supported)
+        });
+        (summary, calls)
+    }
+
+    #[test]
+    fn mh1_punch_attempts_have_a_fixed_bound() {
+        let (s, calls) = drive(MAX_PUNCH_SPANS, MAX_PUNCH_SPANS);
+        assert_eq!((s.attempted, s.not_tried, calls), (1_000_000, 0, 1_000_000));
+        let (s, calls) = drive(MAX_PUNCH_SPANS + 1, MAX_PUNCH_SPANS);
+        assert_eq!((s.attempted, s.not_tried, calls), (1_000_000, 1, 1_000_000));
+        // max_spans clamps; it never raises the bound
+        let (s, calls) = drive(MAX_PUNCH_SPANS + 1, u64::MAX);
+        assert_eq!((s.attempted, s.not_tried, calls), (1_000_000, 1, 1_000_000));
+        let (s, calls) = drive(5, 2);
+        assert_eq!((s.attempted, s.not_tried, calls), (2, 3, 2));
+
+        // the outcomes are counted apart
+        let mut n = 0;
+        let s = drive_punches(0..3u8, 3, MAX_PUNCH_SPANS, |_| {
+            n += 1;
+            match n {
+                1 => Ok(pio::Punch::Unsupported),
+                2 => Err(io::Error::other("injected")),
+                _ => Ok(pio::Punch::Supported),
+            }
+        });
+        assert_eq!((s.attempted, s.unsupported, s.failed), (3, 1, 1));
+
+        // the three texts, each once, in the stated order
+        assert_eq!(
+            punch_diagnostics(&PunchSummary {
+                attempted: 1_000_000,
+                unsupported: 2,
+                failed: 3,
+                not_tried: 4,
+            }),
+            [
+                "hole punching is not supported for 2 removed spans; they keep their disk space, and their content stays removed",
+                "hole punching failed for 3 removed spans; they keep their disk space, and their content stays removed",
+                "hole punching stopped after 1000000 removed spans; 4 spans were not tried",
+            ]
+        );
+        assert!(punch_diagnostics(&PunchSummary::default()).is_empty());
     }
 }
