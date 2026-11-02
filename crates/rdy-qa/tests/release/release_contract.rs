@@ -2789,7 +2789,205 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
         json!({"op": "list"}),
     );
     drop(ck);
+    // the import (ui6, D-Y9DNZ): a writer imports a format-3 tree into its own view and a
+    // misspelt key is refused; a reader is refused. These calls come last, so no probe above
+    // meets the new view.
+    let tree = tempfile::tempdir().expect("a tree directory");
+    write_import_tree(tree.path());
+    let tree_dir = tree.path().to_string_lossy().into_owned();
+    let mut im = McpClient::start(dir);
+    mcp_probe(
+        seen,
+        &mut im,
+        "rdy_session",
+        "rdy_session",
+        session("imp", "writer"),
+    );
+    mcp_probe(
+        seen,
+        &mut im,
+        "rdy_import",
+        "rdy_import unknown key",
+        json!({"dri": tree_dir, "view": "imp"}),
+    );
+    let imported = ok_of(&mcp_probe(
+        seen,
+        &mut im,
+        "rdy_import",
+        "rdy_import",
+        json!({"dir": tree_dir, "view": "imp"}),
+    ));
+    assert!(
+        imported["created"].is_object(),
+        "the writer's import succeeds: {imported}"
+    );
+    drop(im);
+    let mut rdr = McpClient::start(dir);
+    mcp_probe(
+        seen,
+        &mut rdr,
+        "rdy_session",
+        "rdy_session",
+        session("rdr", "reader"),
+    );
+    mcp_probe(
+        seen,
+        &mut rdr,
+        "rdy_import",
+        "rdy_import reader",
+        json!({"dir": tree_dir, "view": "rdr"}),
+    );
+    drop(rdr);
+    elicitation_probes(seen);
     let _ = (doc, a);
+}
+
+/// ui10: the elicit input, its unavailable refusal, and the protocol envelopes and outcomes of a
+/// client that states the 2026-07-28 context in its requests.
+fn elicitation_probes(seen: &mut Seen) {
+    use rdy_qa::fixtures::{approver, project, seed_doc, write, writer};
+    use rdy_qa::mcp::{DEADLINE, McpClient};
+    let (dir, mut r) = project();
+    let (_, section, _) = seed_doc(&mut r, "seed");
+    let p = r
+        .propose(&writer(), "seed", "Seed", Some("Seeds."))
+        .unwrap();
+    r.land(&approver(), &p.id).unwrap();
+    write(
+        &mut r,
+        "one",
+        json!([{"op": "create", "type": "claim", "parent": section, "body": "A claim of one."}]),
+    )
+    .unwrap();
+    rdy_qa::intake::answer_open_items(&mut r, &writer(), "one");
+    r.propose(&writer(), "one", "One", Some("Adds one claim."))
+        .unwrap();
+    drop(r);
+    std::fs::write(dir.path().join(".rdy/local.yaml"), "actor: human:qa\n").unwrap();
+    let mut c = McpClient::start(dir.path());
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_session",
+        "rdy_session",
+        json!({"actor": "agent:elc", "run": "elc", "role": "writer"}),
+    );
+    let queue = ok_of(&mcp_probe(
+        seen,
+        &mut c,
+        "rdy_pending",
+        "rdy_pending",
+        json!({}),
+    ));
+    let item = queue["items"][0].clone();
+    assert!(item.is_object(), "an item waits: {queue}");
+    let ask = json!({"ref": item["ref"], "card_hash": item["card_hash"], "elicit": true});
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_answer",
+        "rdy_answer elicit unavailable",
+        ask.clone(),
+    );
+    let mut mixed = ask.clone();
+    mixed["option"] = json!("later");
+    mcp_probe(seen, &mut c, "rdy_answer", "rdy_answer elicit mixed", mixed);
+    let mut raw = |extra: Value| {
+        let id = c.next_id();
+        let mut params = json!({"name": "rdy_answer", "arguments": ask, "_meta": {
+            "rdy/actor": "agent:elc", "rdy/run": "elc",
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}},
+        }});
+        for (k, v) in extra.as_object().unwrap() {
+            params[k] = v.clone();
+        }
+        c.send_raw(
+            &json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": params})
+                .to_string(),
+        );
+        c.recv(id, DEADLINE)["result"].clone()
+    };
+    let asked = raw(json!({}));
+    seen.note("rdy_answer input_required", "ok", shape(&asked));
+    let handle = asked["requestState"].clone();
+    let first =
+        raw(json!({"requestState": handle, "inputResponses": {"answer": {"action": "decline"}}}));
+    seen.note("rdy_answer declined", "ok", shape(&first));
+    let again =
+        raw(json!({"requestState": handle, "inputResponses": {"answer": {"action": "decline"}}}));
+    seen.note("rdy_answer elicit used", "refused", shape(&again));
+    let asked = raw(json!({}));
+    let cancelled = raw(json!({"requestState": asked["requestState"],
+        "inputResponses": {"answer": {"action": "cancel"}}}));
+    seen.note("rdy_answer cancelled", "ok", shape(&cancelled));
+    let asked = raw(json!({}));
+    let invalid = raw(json!({"requestState": asked["requestState"],
+        "inputResponses": {"answer": {"action": "maybe"}}}));
+    seen.note("rdy_answer elicit invalid", "refused", shape(&invalid));
+    let later = item["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["id"] == "later")
+        .unwrap_or_else(|| panic!("the first card has Later: {item}"));
+    let asked = raw(json!({}));
+    let elicited = raw(
+        json!({"requestState": asked["requestState"], "inputResponses": {
+        "answer": {"action": "accept", "content": {"choice": later["id"]}}}}),
+    );
+    seen.note("rdy_answer elicited", "ok", shape(&elicited));
+}
+
+/// A format-3 export tree at `out`: doc `imported` with a section by agent:a (run r1) at 100 and
+/// two decisions by agent:b (run r2) at 200, one accepted and one proposed.
+fn write_import_tree(out: &Path) {
+    std::fs::create_dir_all(out.join("docs")).expect("docs directory");
+    std::fs::write(
+        out.join("rdy-export.yaml"),
+        "format: 3\npack: rdy-standard\nscope: work\n",
+    )
+    .expect("manifest");
+    let docs = "\
+- id: d-QM001
+  type: doc
+  order: a1
+  fields:
+    doc_type: overview
+    key: imported
+    title: Imported
+- id: s-QM001
+  type: section
+  parent: d-QM001
+  order: a1
+  fields:
+    title: Rulings
+- id: D-QMAC1
+  type: decision
+  parent: s-QM001
+  order: a1
+  fields:
+    needs_content: false
+    statement: Decision D-QMAC1 holds
+    status: accepted
+- id: D-QMPR1
+  type: decision
+  parent: s-QM001
+  order: a2
+  fields:
+    needs_content: false
+    statement: Decision D-QMPR1 holds
+    status: proposed
+";
+    std::fs::write(out.join("docs/imported.yaml"), docs).expect("docs");
+    let row = |id: &str, actor: &str, run: &str, at: i64| {
+        format!("- id: {id}\n  actor: {actor}\n  run: {run}\n  role: writer\n  at_ms: {at}\n")
+    };
+    let authors = row("d-QM001", "agent:a", "r1", 100)
+        + &row("s-QM001", "agent:a", "r1", 100)
+        + &row("D-QMAC1", "agent:b", "r2", 200)
+        + &row("D-QMPR1", "agent:b", "r2", 200);
+    std::fs::write(out.join("authors.yaml"), authors).expect("authors");
 }
 
 fn mcp_row() -> Value {
@@ -4598,6 +4796,8 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/upgrade/stdout/steps",
     "cli/view show/stdout/conflicts",
     "mcp/rdy_alternatives list/ok/sets",
+    "mcp/rdy_answer elicit mixed/refused/issues",
+    "mcp/rdy_answer elicit unavailable/refused/issues",
     "mcp/rdy_answer/ok/landing/|null/consequences[]/because/values",
     "mcp/rdy_answer/ok/landing/|null/warnings",
     "mcp/rdy_answer/ok/signatures?",
@@ -4624,6 +4824,14 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_diff/ok/entries[]/fields",
     "mcp/rdy_diff/ok/entries[]/links",
     "mcp/rdy_diff/ok/entries[]/repinned",
+    "mcp/rdy_import reader/refused/issues",
+    "mcp/rdy_import unknown key/refused/issues",
+    "mcp/rdy_import/ok/consequences",
+    "mcp/rdy_import/ok/on_change/checks",
+    "mcp/rdy_import/ok/on_change/resolved",
+    "mcp/rdy_import/ok/on_change/tensions",
+    "mcp/rdy_import/ok/related_decisions",
+    "mcp/rdy_import/ok/suggestions",
     "mcp/rdy_log landing/ok/diff/entries[]/fields",
     "mcp/rdy_log landing/ok/diff/entries[]/links",
     "mcp/rdy_log landing/ok/diff/entries[]/repinned",

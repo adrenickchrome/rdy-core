@@ -329,7 +329,7 @@ impl Store {
             }
         };
         // 1b. the relay and the evidence kind agree (FW-B9; D-CQMA4's local card evidence)
-        check_evidence(req.relay.as_ref(), req.evidence.as_ref(), &p.view)?;
+        check_evidence(req.relay.as_ref(), req.evidence.as_ref())?;
         // 1c. the alternative set: the version the approver saw is still its latest, and open
         let alt_prev = match &req.alt {
             Some(alt) => Some(self.alt_landing_check(alt)?),
@@ -925,15 +925,13 @@ pub const REAFFIRM_CLOSE_REASON: &str = "the re-affirmation card landed";
 
 /// A relayed landing carries a relay kind of evidence (card or text); an elicited approval is the
 /// human's own answer and has no relay (FW-B9, D4). A landing with no relay records card evidence
-/// only as a re-affirmation card's landing of the proposal of view `view`
-/// ([`crate::local_card_evidence_allowed`], the field rule fsck shares).
+/// with its card hash ([`crate::local_card_evidence_allowed`], the field rule fsck shares).
 fn check_evidence(
     relay: Option<&Relay>,
     evidence: Option<&ApprovalEvidence>,
-    view: &str,
 ) -> Result<(), StoreError> {
     match (relay, evidence) {
-        (None, Some(e)) if crate::local_card_evidence_allowed(e, Some(view)) => Ok(()),
+        (None, Some(e)) if crate::local_card_evidence_allowed(e) => Ok(()),
         (Some(_), None) => Err(StoreError::Decode(
             "a relayed landing needs its evidence kind (card or text)".into(),
         )),

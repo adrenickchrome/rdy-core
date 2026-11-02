@@ -165,6 +165,23 @@ fn evk1_fsck_checks_the_evidence_kind_against_assurance() {
     });
     put_canon(&mut s, &rec);
     assert_eq!(s.check_objects().unwrap().relayed, 1);
+    // ui1 (D-6M0AF, TASK-982 C7): local card evidence with a card hash is valid, whatever the
+    // landed proposal's view; local card evidence with no hash and local text evidence stay
+    // invalid
+    rec.assurance = Assurance::Local;
+    rec.relayed_by = None;
+    rec.relay_evidence = None;
+    put_canon(&mut s, &rec);
+    s.check_objects().unwrap();
+    rec.evidence = Some(ev(EvidenceKind::Card));
+    put_canon(&mut s, &rec);
+    assert!(fsck_err(&s).contains("evidence kind card needs assurance relayed"));
+    rec.evidence = Some(ApprovalEvidence {
+        card_hash: Some(Hash::of(b"card")),
+        ..ev(EvidenceKind::Text)
+    });
+    put_canon(&mut s, &rec);
+    assert!(fsck_err(&s).contains("evidence kind text needs assurance relayed"));
 }
 
 #[test]

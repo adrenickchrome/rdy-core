@@ -13564,6 +13564,15 @@
         "type": "LanAddress"
       },
       {
+        "default": "true",
+        "key": "serve.ui",
+        "levels": [
+          "local",
+          "user"
+        ],
+        "type": "Bool"
+      },
+      {
         "default": "break",
         "key": "propose.cadence",
         "levels": [
@@ -14269,6 +14278,7 @@
       "E_DEPS_MISSING": "\"E_DEPS_MISSING\"",
       "E_DUMP": "\"E_DUMP\"",
       "E_DUMP_CHAIN": "\"E_DUMP_CHAIN\"",
+      "E_ELICITATION_UNAVAILABLE": "\"E_ELICITATION_UNAVAILABLE\"",
       "E_EXCEPTION_OPEN": "\"E_EXCEPTION_OPEN\"",
       "E_FILE_FORMAT": "\"E_FILE_FORMAT\"",
       "E_FROZEN": "\"E_FROZEN\"",
@@ -14738,6 +14748,11 @@
         "check SSH_AUTH_SOCK and the configured key, then try again"
       ],
       [
+        "E_ELICITATION_UNAVAILABLE",
+        "the MCP client cannot show rdy's card through form elicitation",
+        "show the card in chat and relay the person's answer: rdy_answer with option and evidence"
+      ],
+      [
         "E_SIG_INVALID",
         "signature {hash} is invalid",
         "check the source of this signature; it may be damaged or forged"
@@ -14957,7 +14972,7 @@
       "ACTOR_FIX": "\"use human:<name>, agent:<name>, agent:<handle>/<name> or ci:<repo_id>/<name>\"",
       "ACTOR_UNBOUND_FIX": "\"set an actor in the hub's human, agent or ci form, then try again\"",
       "ACTOR_UNBOUND_MESSAGE": "\"the session actor is not a hub actor\"",
-      "AGENT_NOT_APPROVER_FIX": "\"tags and imports are the person's acts: ask the person to run the command\"",
+      "AGENT_NOT_APPROVER_FIX": "\"tags are the person's acts: ask the person to run the command\"",
       "AGENT_NOT_RELAYING_FIX": "\"ask the person, then pass --relayed-by <your actor> --evidence \\\"<their words>\\\" --question \\\"<what you asked>\\\"\"",
       "ATTESTED_BY_FIX": "\"name who ruled and under whose mandate in attested_by\"",
       "ATTESTED_BY_MESSAGE": "\"field \\\"attested_by\\\" is required for authority_basis delegated\"",
@@ -14979,6 +14994,7 @@
       "CARD_CHANGE_FIX": "\"Re-affirm these decisions in smaller groups with the reaffirm write op, then answer the card again.\"",
       "CARRIED_WARNING_BUDGET_FIX": "\"Increase max_tokens, or run rdy fsck for the complete warning list.\"",
       "CARRIER_MESSAGE": "\"Request content removal.\"",
+      "CHAIN_LIMIT_FIX": "\"exclude the replayed change and import the source tree into a new view\"",
       "CHALLENGE_EXPIRED_FIX": "\"start key binding again\"",
       "CHALLENGE_EXPIRED_MESSAGE": "\"the key binding challenge expired\"",
       "CODE_KEPT_FIX": "\"check the block against its code, then repin it with code: true\"",
@@ -15024,6 +15040,7 @@
       "O11_FIX": "\"fix each issue and propose again: rdy_propose / rdy propose\"",
       "OP_FIX": "\"each op needs \\\"op\\\" (rdy_schema lists them under \\\"ops\\\"); create needs \\\"type\\\"\"",
       "OWNER_RUN_FIX": "\"pass the run with --run\"",
+      "PAGE_FIX": "\"Search these pages, or go to the home page.\"",
       "PAGE_MESSAGE": "\"There is no page at this address. It may have moved, or the link may be wrong.\"",
       "PAGE_STALE_FIX": "\"the read, briefing, search, diff or query moved; start again without a cursor\"",
       "PIN_CLASH_FIX": "\"use the pinned version, or read the bare id with a scope\"",
@@ -15064,6 +15081,7 @@
       "REVOKE_UPDATE_FIX": "\"update the block for the removed values. Remove each listed link or point it elsewhere.\"",
       "ROOT_FIX": "\"name a doc or folder that one side holds: rdy_search / rdy search\"",
       "RUN_FIX": "\"use 1 to 64 letters, digits, -, _ or ., with a letter or digit at each end; not none, work, canon, inflight or reaffirm-\\u{2026}\"",
+      "SCOPE_FIX": "\"See the latest docs, or open the list of versions, proposals and views.\"",
       "SCOPE_MESSAGE": "\"This link names a version, view, proposal or profile that is not on the site now. A view or proposal leaves the site when its work lands or stops.\"",
       "SETTINGS_FIX": "\"fix the config syntax, duplicate keys or aliases\"",
       "SETTINGS_MESSAGE": "\"config is not a valid bounded mapping\"",
@@ -15457,6 +15475,7 @@
       "E_SIGNING_KEY_MISSING",
       "E_SIGNING_KEY_TYPE",
       "E_NO_AGENT",
+      "E_ELICITATION_UNAVAILABLE",
       "E_SIG_INVALID",
       "E_SIG_OBJECT_MISMATCH",
       "W_SIG_UNKNOWN_KEY",
@@ -15570,6 +15589,120 @@
           "fix": "string",
           "issues": [],
           "message": "string"
+        }
+      },
+      "rdy_answer cancelled": {
+        "ok": {
+          "content": [
+            {
+              "text": "string",
+              "type": "string"
+            }
+          ],
+          "isError": "bool",
+          "resultType": "string"
+        }
+      },
+      "rdy_answer declined": {
+        "ok": {
+          "content": [
+            {
+              "text": "string",
+              "type": "string"
+            }
+          ],
+          "isError": "bool",
+          "resultType": "string"
+        }
+      },
+      "rdy_answer elicit invalid": {
+        "refused": {
+          "content": [
+            {
+              "text": "string",
+              "type": "string"
+            }
+          ],
+          "isError": "bool",
+          "resultType": "string"
+        }
+      },
+      "rdy_answer elicit mixed": {
+        "refusal_codes": [
+          "E_BAD_INPUT"
+        ],
+        "refused": {
+          "code": "string",
+          "fix": "string",
+          "issues": [],
+          "message": "string"
+        }
+      },
+      "rdy_answer elicit unavailable": {
+        "refusal_codes": [
+          "E_ELICITATION_UNAVAILABLE"
+        ],
+        "refused": {
+          "code": "string",
+          "fix": "string",
+          "issues": [],
+          "message": "string"
+        }
+      },
+      "rdy_answer elicit used": {
+        "refused": {
+          "content": [
+            {
+              "text": "string",
+              "type": "string"
+            }
+          ],
+          "isError": "bool",
+          "resultType": "string"
+        }
+      },
+      "rdy_answer elicited": {
+        "ok": {
+          "content": [
+            {
+              "text": "string",
+              "type": "string"
+            }
+          ],
+          "isError": "bool",
+          "resultType": "string"
+        }
+      },
+      "rdy_answer input_required": {
+        "ok": {
+          "inputRequests": {
+            "answer": {
+              "method": "string",
+              "params": {
+                "message": "string",
+                "mode": "string",
+                "requestedSchema": {
+                  "properties": {
+                    "choice": {
+                      "oneOf": [
+                        {
+                          "const": "string",
+                          "title": "string"
+                        }
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "string"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "requestState": "string",
+          "resultType": "string"
         }
       },
       "rdy_brief": {
@@ -15940,6 +16073,109 @@
               }
             }
           ]
+        }
+      },
+      "rdy_import": {
+        "ok": {
+          "briefing": {
+            "covers": "number",
+            "token": "string"
+          },
+          "change": "string",
+          "changes": [
+            "string"
+          ],
+          "consequences": [],
+          "coverage": {
+            "dimensions": {
+              "complete": "number",
+              "connected": "number",
+              "consistent": "number",
+              "current": "number",
+              "governed": "number",
+              "grounded": "number"
+            },
+            "pages": [
+              {
+                "doc": "string",
+                "path": "string",
+                "score": "number"
+              }
+            ],
+            "score": "number"
+          },
+          "created": {
+            "op0": "string",
+            "op1": "string",
+            "op2": "string",
+            "op3": "string"
+          },
+          "on_change": {
+            "checks": [],
+            "resolved": [],
+            "tensions": []
+          },
+          "onboarding": {
+            "done": "bool",
+            "next": "string",
+            "phases": [
+              {
+                "dimension_issues": {
+                  "complete?": "number",
+                  "connected?": "number",
+                  "consistent?": "number",
+                  "current?": "number",
+                  "governed?": "number",
+                  "grounded?": "number"
+                },
+                "dimensions": [
+                  "string"
+                ],
+                "done": "bool",
+                "issues": "number",
+                "phase": "string",
+                "score": "number"
+              }
+            ],
+            "score": "number",
+            "target": "number"
+          },
+          "related_decisions": [],
+          "suggestions": [],
+          "warning_docs": {
+            "<id>": "string"
+          },
+          "warnings": [
+            {
+              "block": "string",
+              "code": "string",
+              "fix": "string",
+              "message": "string",
+              "severity": "string"
+            }
+          ]
+        }
+      },
+      "rdy_import reader": {
+        "refusal_codes": [
+          "E_PERMISSION"
+        ],
+        "refused": {
+          "code": "string",
+          "fix": "string",
+          "issues": [],
+          "message": "string"
+        }
+      },
+      "rdy_import unknown key": {
+        "refusal_codes": [
+          "E_BAD_INPUT"
+        ],
+        "refused": {
+          "code": "string",
+          "fix": "string",
+          "issues": [],
+          "message": "string"
         }
       },
       "rdy_inbox": {
@@ -17108,6 +17344,10 @@
               "fix": "string",
               "when": "string"
             },
+            "E_ELICITATION_UNAVAILABLE": {
+              "fix": "string",
+              "when": "string"
+            },
             "E_EXCEPTION_OPEN": {
               "fix": "string",
               "when": "string"
@@ -18146,6 +18386,7 @@
       "rdy_dump",
       "rdy_export",
       "rdy_impact",
+      "rdy_import",
       "rdy_inbox",
       "rdy_intent",
       "rdy_key_bind",
@@ -18405,9 +18646,19 @@
                 "null"
               ]
             },
+            "elicit": {
+              "description": "Ask the client to show rdy's card. Pass ref and card_hash, and brief when needed, without option or evidence.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
             "evidence": {
-              "description": "The person's words, quoted (1 to 2000 characters). Without them nothing is recorded.",
-              "type": "string"
+              "description": "The person's words, quoted (1 to 2000 characters). A relayed answer requires them; without them nothing is recorded.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "kind": {
               "description": "How you got the answer: `card` (the person saw the card; default) or `text` (their own\nwords).",
@@ -18452,9 +18703,6 @@
               ]
             }
           },
-          "required": [
-            "evidence"
-          ],
           "type": "object"
         }
       },
@@ -19160,6 +19408,27 @@
           },
           "required": [
             "id"
+          ],
+          "type": "object"
+        }
+      },
+      "rdy_import": {
+        "input_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "dir": {
+              "description": "The import directory, absolute or relative to the project directory.",
+              "type": "string"
+            },
+            "view": {
+              "description": "The view to import into. Import never writes canon.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "dir",
+            "view"
           ],
           "type": "object"
         }
@@ -20968,6 +21237,7 @@
               ]
             },
             "role": {
+              "default": "writer",
               "description": "reader, writer or reviewer.",
               "type": "string"
             },
@@ -20987,8 +21257,7 @@
             }
           },
           "required": [
-            "actor",
-            "role"
+            "actor"
           ],
           "type": "object"
         }

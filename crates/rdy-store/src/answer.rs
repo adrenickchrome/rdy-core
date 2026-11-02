@@ -83,15 +83,23 @@ fn ref_of(a: &Answer) -> String {
 
 /// The rule of the record `a` breaks, if any (the targets rule aside): the one list that
 /// `put_answer`, fsck and the sync batch check apply.
+///
+/// Evidence (D-6M0AF, D-QVH4N): a relay records `card` or `text`; the person's own answer
+/// records none, `card` (an answer in the local approver UI) or `elicited` (an answer an MCP
+/// client elicited from the person). Card and elicited evidence name the card hash shown.
 pub(crate) fn invalid(a: &Answer) -> Option<String> {
     if a.relayed_by.is_some() != a.relay_evidence.is_some() {
         return Some("relayed_by and relay_evidence must both be set or both unset".into());
     }
+    let relayed = a.relayed_by.is_some();
     match a.evidence_kind {
-        Some(k @ EvidenceKind::Elicited) => {
+        Some(k @ EvidenceKind::Elicited) if relayed => {
             Some(format!("evidence kind {} is not card or text", k.as_str()))
         }
-        Some(k) if a.relayed_by.is_none() => {
+        Some(EvidenceKind::Elicited) if a.card_hash.is_none() => {
+            Some("elicited evidence needs card_hash".into())
+        }
+        Some(k @ EvidenceKind::Text) if !relayed => {
             Some(format!("evidence kind {} needs a relay", k.as_str()))
         }
         Some(EvidenceKind::Card) if a.card_hash.is_none() => {

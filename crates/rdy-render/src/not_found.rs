@@ -6,6 +6,7 @@
 //! carries the `data-rdy-kind="not-found"` marker that tells it from an authored `404.html`.
 use crate::nav::{Nav, NavEntry};
 use crate::page::{self, Crumb, PageContext, SiteFacts};
+use crate::refusal::Detail;
 use crate::{RdyError, assets, render_page};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -26,6 +27,15 @@ const PAGE_MESSAGE: &str =
 /// What the page says for a link to a version, view, proposal or profile the site no longer has.
 const SCOPE_MESSAGE: &str = "This link names a version, view, proposal or profile that is not on the site now. A view or proposal leaves the site when its work lands or stops.";
 
+/// The error code of a generated not-found page: an HTTP status label, not an rdy error code.
+const CODE: &str = "404";
+
+/// The fix the page's details give for a missing page.
+const PAGE_FIX: &str = "Search these pages, or go to the home page.";
+
+/// The fix the page's details give for a missing scope.
+const SCOPE_FIX: &str = "See the latest docs, or open the list of versions, proposals and views.";
+
 /// Which not-found page to build: a missing page of a site, or a missing scope of the live site
 /// (a tag, view, proposal or profile that is not on it now).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,6 +55,7 @@ pub struct NotFoundPage {
 #[derive(Serialize)]
 struct Words {
     message: &'static str,
+    detail: Detail,
     scope: bool,
     home_href: String,
     latest_href: String,
@@ -144,6 +155,14 @@ pub(crate) fn build(
             NotFoundKind::Page => PAGE_MESSAGE,
             NotFoundKind::Scope => SCOPE_MESSAGE,
         },
+        detail: Detail {
+            code: CODE.into(),
+            fix: match kind {
+                NotFoundKind::Page => PAGE_FIX,
+                NotFoundKind::Scope => SCOPE_FIX,
+            }
+            .into(),
+        },
         scope: kind == NotFoundKind::Scope,
         home_href: rooted(base, "index.html"),
         latest_href: rooted(base, "index.html"),
@@ -203,7 +222,10 @@ mod tests {
     fn dgm10_scope_variant_names_no_scope_and_links_canon() {
         let page = built("/", NotFoundKind::Scope);
         let html = String::from_utf8(page.html).expect("utf-8");
-        assert!(html.contains(&format!("<p>{SCOPE_MESSAGE}</p>")), "{html}");
+        assert!(
+            html.contains(&format!("<p class=\"refusal-message\">{SCOPE_MESSAGE}</p>")),
+            "{html}"
+        );
         assert!(
             html.contains("<p>See the <a href=\"/index.html\">latest docs</a>, or open the <a href=\"/~versions/\">list of versions, proposals and views</a>.</p>"),
             "{html}"
@@ -263,7 +285,7 @@ mod tests {
     fn dgm10_page_variant_roots_every_link_at_its_base() {
         let base = "/~view/work/";
         let html = String::from_utf8(built(base, NotFoundKind::Page).html).expect("utf-8");
-        assert!(html.contains(&format!("<p>{PAGE_MESSAGE}</p>")));
+        assert!(html.contains(&format!("<p class=\"refusal-message\">{PAGE_MESSAGE}</p>")));
         assert!(!html.contains(SCOPE_MESSAGE));
         for key in [" href=\"", " src=\"", " data-index=\""] {
             for v in html.split(key).skip(1) {

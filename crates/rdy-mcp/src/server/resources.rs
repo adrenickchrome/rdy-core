@@ -10,8 +10,9 @@
 //! | `rdy://proposal/{id}` | `rdy_read {id}` with `id` a `P-<id>@<n>` or `P-<id>` |
 //! | `rdy://inbox` | `rdy_inbox {}` (never acks) |
 //!
-//! The set is closed. A read needs a session (`rdy_session` first). `subscribe` and the
-//! `subscriptions/listen` filter accept the same URIs and nothing else.
+//! The set is closed. A read needs a claim: `rdy/actor` and `rdy/run` in its `_meta`, or the
+//! connection's (D-4PHYQ). `subscribe` and the `subscriptions/listen` filter accept the same
+//! URIs and nothing else.
 use crate::notify::Sink;
 use crate::server::RdyServer;
 use crate::tools::{self, McpState, session};
@@ -197,11 +198,18 @@ impl RdyServer {
         )
     }
 
-    /// `resources/read`: the tool behind `uri`, on the blocking pool with the state lock.
-    pub(crate) async fn resources_read(&self, uri: String) -> Result<ReadResourceResult, McpError> {
+    /// `resources/read`: the tool behind `uri`, on the blocking pool with the state lock, for the
+    /// claim the request states (`claim`), else the connection's.
+    pub(crate) async fn resources_read(
+        &self,
+        uri: String,
+        claim: Option<crate::claims::Asked>,
+    ) -> Result<ReadResourceResult, McpError> {
         let res = Res::parse(&uri).ok_or_else(|| unknown(&uri))?;
         let value = self
-            .blocking("resources/read", false, move |st| res.read(st))
+            .blocking("resources/read", false, move |st| {
+                crate::claims::call(st, claim.as_ref(), "resources/read", |st| res.read(st))
+            })
             .await
             .map_err(refuse)?;
         Ok(ReadResourceResult::new(vec![
@@ -237,7 +245,9 @@ impl RdyServer {
                 if let Some(b) = followed_block(&st.engine.read(), &text) {
                     return Ok(Value::String(b.to_string()));
                 }
-                Ok(Res::Doc(text).read(st)?["id"].clone())
+                crate::claims::call(st, None, "resources/subscribe", |st| {
+                    Ok(Res::Doc(text).read(st)?["id"].clone())
+                })
             })
             .await
             .map_err(refuse)?;
@@ -394,7 +404,7 @@ mod tests {
         let (_d, server) = server();
         open_session(&server).await;
         let e = server
-            .resources_read("rdy://view/__rdy_test_panic__".into())
+            .resources_read("rdy://view/__rdy_test_panic__".into(), None)
             .await
             .unwrap_err();
         assert_eq!(e.code, rmcp::model::ErrorCode::INTERNAL_ERROR, "{e:?}");
@@ -403,7 +413,7 @@ mod tests {
             "{e:?}"
         );
         // the state lock is usable and the next read answers
-        let ok = server.resources_read("rdy://project".into()).await;
+        let ok = server.resources_read("rdy://project".into(), None).await;
         assert!(ok.is_ok(), "{ok:?}");
     }
 

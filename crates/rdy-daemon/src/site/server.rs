@@ -11,11 +11,11 @@ use crate::daemon::{DaemonHandle, log};
 use crate::shared::Shared;
 use crate::site::guard::{Guard, ListenerMode, Refusal, Route, ScopeRef, SiteTarget, refusal};
 use crate::site::http::{
-    MAX_HEAD_BYTES, Method, ParseError, Response, content_type, parse_head, to_bytes,
+    MAX_HEAD_BYTES, Method, ParseError, Request, Response, content_type, parse_head, to_bytes,
 };
 use crate::site::live::{NoStream, label, resolve};
 use crate::site::profiles::{self, Availability, TestEvent};
-use crate::site::{LanOverride, SiteInfo, addr, sse};
+use crate::site::{LanOverride, SiteInfo, addr, sse, ui, ui_request};
 use rdy_engine::engine::{SITE_LAN_FIX, SiteWarning};
 use rdy_engine::publication::{IMPLICIT_ORG, profile_at};
 use rdy_engine::{E_NOT_FOUND, E_REDACTED_STATE, ReadState};
@@ -27,10 +27,11 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 
 /// The listen backlog of each bound address.
 const BACKLOG: u32 = 64;
@@ -103,17 +104,121 @@ pub(crate) struct Opened {
     pub info: SiteInfo,
 }
 
-/// A listening socket on `at`, with `SO_REUSEADDR` so a successor binds the port at once. The
-/// project at `root` hears of each attempt (a test hook).
+/// A listening socket on `at`, with the platform's site option ([`configure`]): on Unix
+/// `SO_REUSEADDR`, so a successor binds the port at once. The project at `root` hears of each
+/// attempt (a test hook).
 fn listen(root: &Path, at: SocketAddr) -> io::Result<TcpListener> {
     profiles::report(root, TestEvent::Bind(at));
     let socket = match at {
         SocketAddr::V4(_) => TcpSocket::new_v4()?,
         SocketAddr::V6(_) => TcpSocket::new_v6()?,
     };
-    socket.set_reuseaddr(true)?;
+    configure(root, &socket, at)?;
+    #[cfg(test)]
+    seam::record(root, seam::Step::Bind(at));
     socket.bind(at)?;
     socket.listen(BACKLOG)
+}
+
+/// The platform's option on a site socket before it binds (`sys::configure_site_socket`, one
+/// call for every listener: full, LAN and profile-only). A failure takes the bind's failure path.
+fn configure(root: &Path, socket: &TcpSocket, at: SocketAddr) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(e) = seam::injected(root, at) {
+        return Err(e);
+    }
+    crate::sys::configure_site_socket(socket)?;
+    #[cfg(test)]
+    seam::record(root, seam::Step::Configure(at));
+    let _ = (root, at);
+    Ok(())
+}
+
+/// Test seam: what [`listen`] does on each project root a test watches, in order, and the
+/// addresses whose option call fails there (with [`seam::FAILURE`]).
+#[cfg(test)]
+pub(crate) mod seam {
+    use std::collections::BTreeMap;
+    use std::net::{IpAddr, SocketAddr};
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    /// One step of a listener's socket.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Step {
+        /// The platform option was set on the socket for this address.
+        Configure(SocketAddr),
+        /// The option call for this address failed (an injected failure).
+        Refused(SocketAddr),
+        /// The socket is about to bind this address.
+        Bind(SocketAddr),
+    }
+
+    /// The error text of an injected option failure.
+    pub const FAILURE: &str = "the socket option could not be set (test)";
+
+    #[derive(Default)]
+    struct Watched {
+        steps: Vec<Step>,
+        fail: Vec<IpAddr>,
+    }
+
+    static WATCHED: Mutex<BTreeMap<PathBuf, Watched>> = Mutex::new(BTreeMap::new());
+
+    fn with<T>(f: impl FnOnce(&mut BTreeMap<PathBuf, Watched>) -> T) -> T {
+        f(&mut WATCHED.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// Stops watching its root when dropped.
+    pub struct Watch(PathBuf);
+
+    impl Drop for Watch {
+        fn drop(&mut self) {
+            with(|w| w.remove(&self.0));
+        }
+    }
+
+    /// Watches the project at `root` (canonical) from now on.
+    pub fn watch(root: &Path) -> Watch {
+        with(|w| w.insert(root.to_path_buf(), Watched::default()));
+        Watch(root.to_path_buf())
+    }
+
+    /// The option call fails for these addresses (any port) from now on.
+    pub fn fail(root: &Path, ips: &[IpAddr]) {
+        with(|w| {
+            if let Some(x) = w.get_mut(root) {
+                x.fail = ips.to_vec();
+            }
+        });
+    }
+
+    /// The steps recorded since the last call.
+    pub fn take(root: &Path) -> Vec<Step> {
+        with(|w| {
+            w.get_mut(root)
+                .map(|x| std::mem::take(&mut x.steps))
+                .unwrap_or_default()
+        })
+    }
+
+    pub(super) fn record(root: &Path, step: Step) {
+        with(|w| {
+            if let Some(x) = w.get_mut(root) {
+                x.steps.push(step);
+            }
+        });
+    }
+
+    /// The injected failure for `at`, recorded as refused; `None` when its call goes on.
+    pub(super) fn injected(root: &Path, at: SocketAddr) -> Option<std::io::Error> {
+        let fails = with(|w| w.get(root).is_some_and(|x| x.fail.contains(&at.ip())));
+        if !fails {
+            return None;
+        }
+        record(root, Step::Refused(at));
+        Some(std::io::Error::other(FAILURE))
+    }
 }
 
 /// The time now, in seconds since the epoch, for the `Date` header.
@@ -339,9 +444,11 @@ fn accept(stream: TcpStream, ctx: &Arc<Ctx>) {
             // head's arrival at a closed socket does not reset the connection and lose it
             Ok(permit) => {
                 let ctx = Arc::clone(ctx);
+                let mut stream = stream;
                 tokio::spawn(async move {
                     let _permit = permit;
-                    let head = tokio::time::timeout(BUSY_HEAD_TIMEOUT, read_head(&stream)).await;
+                    let head =
+                        tokio::time::timeout(BUSY_HEAD_TIMEOUT, read_head(&mut stream)).await;
                     if matches!(head, Ok(Head::Closed)) || gone(&ctx) {
                         return;
                     }
@@ -378,35 +485,40 @@ fn gone(ctx: &Ctx) -> bool {
 }
 
 /// A request head as read off a connection.
-enum Head {
+#[derive(Debug)]
+pub enum Head {
     /// The bytes up to and including the first empty line, or all the bytes the peer sent
-    /// before it closed its side.
-    Bytes(Vec<u8>),
+    /// before it closed its side; and the bytes read past that line with it (a body's first
+    /// bytes, or what a client pipelined), at most one read buffer's worth.
+    Bytes { head: Vec<u8>, rest: Vec<u8> },
     /// Past [`MAX_HEAD_BYTES`] with no empty line.
     TooLarge,
     /// The peer closed with nothing sent, or the read failed.
     Closed,
 }
 
-async fn read_head(stream: &TcpStream) -> Head {
+/// Reads one request head off `reader`, in reads of at most 2048 bytes, and keeps the bytes
+/// read past its empty line.
+pub async fn read_head<R: AsyncRead + Unpin>(reader: &mut R) -> Head {
     let mut buf: Vec<u8> = Vec::with_capacity(1024);
     let mut chunk = [0u8; 2048];
     loop {
-        if stream.readable().await.is_err() {
-            return Head::Closed;
-        }
-        let n = match stream.try_read(&mut chunk) {
+        let n = match reader.read(&mut chunk).await {
             Ok(0) if buf.is_empty() => return Head::Closed,
-            Ok(0) => return Head::Bytes(buf),
+            Ok(0) => {
+                return Head::Bytes {
+                    head: buf,
+                    rest: Vec::new(),
+                };
+            }
             Ok(n) => n,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
             Err(_) => return Head::Closed,
         };
         let from = buf.len().saturating_sub(3);
         buf.extend_from_slice(&chunk[..n]);
         if let Some(at) = buf[from..].windows(4).position(|w| w == b"\r\n\r\n") {
-            buf.truncate(from + at + 4);
-            return Head::Bytes(buf);
+            let rest = buf.split_off(from + at + 4);
+            return Head::Bytes { head: buf, rest };
         }
         if buf.len() > MAX_HEAD_BYTES {
             return Head::TooLarge;
@@ -414,8 +526,58 @@ async fn read_head(stream: &TcpStream) -> Head {
     }
 }
 
-async fn serve_conn(stream: TcpStream, ctx: Arc<Ctx>, sh: Arc<Shared>) {
-    let head = match tokio::time::timeout(HEAD_TIMEOUT, read_head(&stream)).await {
+/// The body of a UI answer request `req` ([`ui_request::content_length`]): exactly its
+/// `Content-Length` bytes, the bytes read with the head first (`prefetched`), then the rest off
+/// `reader`, within the request's one read budget: `deadline`, [`HEAD_TIMEOUT`] after the
+/// connection's start. `None` when the budget ends first: the connection then closes with no
+/// reply, as for a slow head. A length past the limit is refused before anything is allocated
+/// or read; bytes past the length are dropped, never read as another request.
+pub async fn read_ui_body<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    req: &Request,
+    prefetched: Vec<u8>,
+    deadline: Instant,
+) -> Option<Result<Vec<u8>, Refusal>> {
+    let len = match ui_request::content_length(req) {
+        Ok(len) => len,
+        Err(f) => return Some(Err(f)),
+    };
+    tokio::time::timeout_at(deadline, read_body(reader, prefetched, len))
+        .await
+        .ok()
+}
+
+/// `len` bytes (at most [`ui_request::MAX_UI_BODY`]): one allocation of `len`, filled from
+/// `prefetched` and then by reads of at most 2048 bytes that never ask past `len`. The end of the
+/// stream or a failed read before `len` is a truncated body: `Bad request.`
+async fn read_body<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    mut prefetched: Vec<u8>,
+    len: usize,
+) -> Result<Vec<u8>, Refusal> {
+    if len > ui_request::MAX_UI_BODY {
+        return Err(Refusal::UiBodyTooLarge);
+    }
+    let mut body = Vec::new();
+    body.try_reserve_exact(len).map_err(|_| Refusal::Broken)?;
+    prefetched.truncate(len);
+    body.extend_from_slice(&prefetched);
+    drop(prefetched);
+    let mut chunk = [0u8; 2048];
+    while body.len() < len {
+        let want = (len - body.len()).min(chunk.len());
+        match reader.read(&mut chunk[..want]).await {
+            Ok(0) | Err(_) => return Err(Refusal::Malformed),
+            Ok(n) => body.extend_from_slice(&chunk[..n]),
+        }
+    }
+    Ok(body)
+}
+
+async fn serve_conn(mut stream: TcpStream, ctx: Arc<Ctx>, sh: Arc<Shared>) {
+    // the request's one read budget: the head now, and a UI answer's body after it
+    let deadline = Instant::now() + HEAD_TIMEOUT;
+    let head = match tokio::time::timeout_at(deadline, read_head(&mut stream)).await {
         Ok(head) => head,
         // no head in time: close with no reply
         Err(_) => return,
@@ -423,10 +585,10 @@ async fn serve_conn(stream: TcpStream, ctx: Arc<Ctx>, sh: Arc<Shared>) {
     if gone(&ctx) {
         return;
     }
-    let bytes = match head {
+    let (bytes, rest) = match head {
         Head::Closed => return,
         Head::TooLarge => return send(stream, &refusal(Refusal::TooLarge), false).await,
-        Head::Bytes(bytes) => bytes,
+        Head::Bytes { head, rest } => (head, rest),
     };
     let request = match parse_head(&bytes) {
         Ok(r) => r,
@@ -444,6 +606,14 @@ async fn serve_conn(stream: TcpStream, ctx: Arc<Ctx>, sh: Arc<Shared>) {
     let state = sh.state.load_full();
     let current = state.ensure_current_epoch().is_ok();
     drop(state);
+    match ui_route(&ctx, &sh, &request, stream.local_addr().ok()).await {
+        Err(f) => return send(stream, &refusal(f), head_only).await,
+        Ok(None) => {}
+        Ok(Some(_)) if !current => return send(stream, &refusal(Refusal::Busy), head_only).await,
+        Ok(Some(route)) => {
+            return serve_ui(stream, &ctx, &sh, route, &request, rest, deadline).await;
+        }
+    }
     let route = match ctx.guard.check(&request) {
         // a path the guard does not route, after the Host, Origin and method checks: the
         // listener's own not-found page, once the same epoch and availability checks as a page
@@ -498,6 +668,97 @@ async fn serve_conn(stream: TcpStream, ctx: Arc<Ctx>, sh: Arc<Shared>) {
                 Err(_panicked) => refusal(Refusal::Broken),
             }
         }
+    };
+    send(stream, &response, head_only).await;
+}
+
+/// The UI route of `request` on the listener bound to `local`, after its checks; `None` when the
+/// ordinary guard answers it. A path that names no UI route reads no config. `serve.ui` is read
+/// afresh for one that does ([`ui::enabled`]); while it is off, that path is an ordinary path, so
+/// the UI route's own checks do not apply.
+async fn ui_route(
+    ctx: &Ctx,
+    sh: &Arc<Shared>,
+    request: &Request,
+    local: Option<SocketAddr>,
+) -> Result<Option<ui_request::Route>, Refusal> {
+    let Some(local) = local else {
+        return Ok(None);
+    };
+    let full = *ctx.guard.mode() == ListenerMode::Full;
+    let found = ui_request::classify(request, local, full, true);
+    if matches!(found, Ok(None)) {
+        return Ok(None);
+    }
+    let sh = Arc::clone(sh);
+    match tokio::task::spawn_blocking(move || ui::enabled(&sh)).await {
+        Ok(true) => found,
+        Ok(false) | Err(_) => Ok(None),
+    }
+}
+
+/// Answers a UI route, off the runtime for what reads or writes the project: an event stream, or
+/// a response and the close. A body that comes too slowly closes with no reply.
+async fn serve_ui(
+    mut stream: TcpStream,
+    ctx: &Ctx,
+    sh: &Arc<Shared>,
+    route: ui_request::Route,
+    request: &Request,
+    rest: Vec<u8>,
+    deadline: Instant,
+) {
+    let head_only = request.method == Method::Head;
+    let run = Arc::clone(sh);
+    let done = match route {
+        ui_request::Route::Events { rev } => {
+            // as on the ordinary route: an event stream has no `HEAD`
+            if head_only {
+                return send(stream, &refusal(Refusal::Method), true).await;
+            }
+            let opened =
+                tokio::task::spawn_blocking(move || run.site.subscribe_ui(&run, &rev)).await;
+            let refused = match opened {
+                Ok(Ok(sub)) => {
+                    let hold = ctx.handle.hold();
+                    let epoch = sse::epoch_now(Arc::clone(sh));
+                    sse::serve(stream, sub, hold, ctx.handle.stopped(), epoch, now_secs()).await;
+                    return;
+                }
+                Ok(Err(f)) => f,
+                Err(_panicked) => Refusal::Broken,
+            };
+            return send(stream, &refusal(refused), false).await;
+        }
+        ui_request::Route::Answer => {
+            let body = match read_ui_body(&mut stream, request, rest, deadline).await {
+                None => return,
+                Some(Ok(body)) => body,
+                Some(Err(f)) => return send(stream, &refusal(f), false).await,
+            };
+            if gone(ctx) {
+                return;
+            }
+            let form = match ui_request::parse_form(&body) {
+                Ok(form) => form,
+                Err(e) => return send(stream, &ui_request::form_refusal(&e), false).await,
+            };
+            drop(body);
+            tokio::task::spawn_blocking(move || ui::Outcome::Done(ui::answer(&run, form))).await
+        }
+        ui_request::Route::Pending => {
+            tokio::task::spawn_blocking(move || ui::Outcome::Done(ui::pending(&run))).await
+        }
+        ui_request::Route::Item(reference) => {
+            tokio::task::spawn_blocking(move || ui::item(&run, &reference)).await
+        }
+    };
+    let response = match done {
+        Ok(ui::Outcome::Done(response)) => response,
+        Ok(ui::Outcome::Missing) => {
+            not_found(Arc::clone(sh), Miss::Page(listener_target(&ctx.guard))).await
+        }
+        Err(_panicked) => refusal(Refusal::Broken),
     };
     send(stream, &response, head_only).await;
 }
@@ -816,5 +1077,172 @@ mod tests {
         let (r, prepared) = miss(Miss::Page(tag_less));
         assert_eq!((r.status, prepared), (404, 0));
         sh.shutdown().unwrap();
+    }
+
+    /// Asserts that every bind attempt in `steps` follows its own address's option call at
+    /// once, and that a refused option call is followed by no bind of its address.
+    #[track_caller]
+    fn configured_before_bind(steps: &[seam::Step]) {
+        for (i, step) in steps.iter().enumerate() {
+            match step {
+                seam::Step::Bind(at) => assert_eq!(
+                    i.checked_sub(1).map(|j| &steps[j]),
+                    Some(&seam::Step::Configure(*at)),
+                    "the bind of {at} follows its option call: {steps:?}"
+                ),
+                seam::Step::Refused(at) => assert_ne!(
+                    steps.get(i + 1),
+                    Some(&seam::Step::Bind(*at)),
+                    "a refused option call binds nothing: {steps:?}"
+                ),
+                seam::Step::Configure(_) => {}
+            }
+        }
+    }
+
+    fn bound(steps: &[seam::Step]) -> Vec<SocketAddr> {
+        steps
+            .iter()
+            .filter_map(|s| match s {
+                seam::Step::Bind(at) => Some(*at),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// D-FPKPS: the full listener's IPv4, IPv6 and LAN sockets and a profile-only listener's
+    /// sockets all take the platform option before they bind; an option call that fails takes
+    /// the existing listener failure path (the next port, the IPv6 log, the LAN warning, the
+    /// profile's port exhaustion).
+    #[test]
+    fn ui4_every_site_listener_uses_the_platform_option() {
+        let (dir, sh) = world();
+        let root = dir.path().canonicalize().unwrap();
+        // a private LAN address this machine does not have: its bind is attempted and fails
+        let lan_ip = Ipv4Addr::new(10, 255, 255, 254);
+        std::fs::write(
+            root.join(".rdy/local.yaml"),
+            format!("serve:\n  site_lan: true\n  site_lan_address: {lan_ip}\n"),
+        )
+        .unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let _watch = seam::watch(&root);
+        let cfg = serve_config(&root);
+
+        // the full site: 127.0.0.1, [::1] and the LAN address, each configured, then bound
+        let o = {
+            let _rt = rt.enter();
+            open(&root, &cfg, &addr::candidates(None, &root), None).unwrap()
+        };
+        let steps = seam::take(&root);
+        configured_before_bind(&steps);
+        let port = o.port;
+        let v4 = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let v6 = SocketAddr::from((Ipv6Addr::LOCALHOST, port));
+        let lan = SocketAddr::from((lan_ip, port));
+        let binds = bound(&steps);
+        for at in [v4, v6, lan] {
+            assert!(
+                binds.contains(&at),
+                "{at} was bound after its option: {steps:?}"
+            );
+        }
+        drop(o);
+
+        // a profile-only listener: its port refused first (the existing exhaustion error), then
+        // bound with the option on each address
+        let daemon = crate::Daemon::new(
+            crate::DaemonConfig::new(crate::RunDir::of_project(&root), "t".into()),
+            Arc::new(crate::ServeHandler::new(Arc::clone(&sh), None)),
+        );
+        sh.profile_sites
+            .init(rt.handle().clone(), daemon.handle(), root.clone(), None);
+        seam::fail(&root, &[Ipv4Addr::LOCALHOST.into()]);
+        let err = sh.profile_sites.ensure(&sh, "guide").unwrap_err();
+        assert_eq!(err.code, rdy_engine::E_SITE);
+        assert_eq!(
+            err.message,
+            format!(
+                "could not bind a loopback port for profile \"guide\" after {} attempts",
+                addr::TRIES
+            )
+        );
+        let steps = seam::take(&root);
+        configured_before_bind(&steps);
+        assert!(bound(&steps).is_empty(), "{steps:?}");
+        assert_eq!(
+            steps.len(),
+            usize::from(addr::TRIES),
+            "one refused option call per port"
+        );
+        // the profile listener's own bind (`ensure` opens it with exactly this call); called
+        // directly, so no profile-listener log line reaches another test's log capture
+        seam::fail(&root, &[]);
+        let p = {
+            let _rt = rt.enter();
+            open(&root, &cfg, &addr::profile_candidates(&root, "guide"), None).unwrap()
+        };
+        let steps = seam::take(&root);
+        configured_before_bind(&steps);
+        let only = p.port;
+        assert_ne!(only, port);
+        assert!(
+            sh.profile_sites.keys().is_empty(),
+            "the refusal kept no slot"
+        );
+        let binds = bound(&steps);
+        for at in [
+            SocketAddr::from((Ipv4Addr::LOCALHOST, only)),
+            SocketAddr::from((Ipv6Addr::LOCALHOST, only)),
+            SocketAddr::from((lan_ip, only)),
+        ] {
+            assert!(
+                binds.contains(&at),
+                "{at} was bound after its option: {steps:?}"
+            );
+        }
+        drop(p);
+
+        // a failed option call on [::1] and on the LAN address: the existing log and warning
+        seam::fail(&root, &[Ipv6Addr::LOCALHOST.into(), lan_ip.into()]);
+        let o = {
+            let _rt = rt.enter();
+            open(&root, &cfg, &addr::candidates(None, &root), None).unwrap()
+        };
+        let steps = seam::take(&root);
+        configured_before_bind(&steps);
+        assert_eq!(
+            o.info.addrs,
+            vec![SocketAddr::from((Ipv4Addr::LOCALHOST, o.port))]
+        );
+        let w = o.info.warning.clone().expect("the LAN warning");
+        assert_eq!(
+            w.message,
+            format!(
+                "could not listen on {lan_ip} ({}); the site stays on this machine",
+                seam::FAILURE
+            )
+        );
+        assert_eq!(w.fix, LAN_BIND_FIX);
+        assert_eq!(o.info.lan_url, None);
+        drop(o);
+        // on 127.0.0.1 too: no loopback port, and the last error is the option's
+        seam::fail(&root, &[Ipv4Addr::LOCALHOST.into()]);
+        let failed = {
+            let _rt = rt.enter();
+            open(&root, &cfg, &addr::candidates(None, &root), None)
+        };
+        assert_eq!(failed.err(), Some(seam::FAILURE.to_string()));
+        assert!(bound(&seam::take(&root)).is_empty());
+
+        sh.shutdown().unwrap();
+        for task in sh.profile_sites.close() {
+            task.abort();
+        }
+        drop(rt);
     }
 }

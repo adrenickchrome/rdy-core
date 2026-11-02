@@ -7,7 +7,7 @@ X-Frame-Options: DENY
 Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'
 Connection: close
 Content-Type: text/html; charset=utf-8
-Content-Length: 3365
+Content-Length: 3647
 
 <!doctype html>
 <html lang="en" data-rdy-kind="not-found">
@@ -46,7 +46,7 @@ Content-Length: 3365
     <nav class="crumbs" aria-label="Breadcrumb"><span aria-current="page">Page not found</span></nav>
     
 <article class="page"><header class="page-head"><h1>Page not found</h1></header>
-<p>There is no page at this address. It may have moved, or the link may be wrong.</p>
+<div class="refusal"><p class="refusal-message">There is no page at this address. It may have moved, or the link may be wrong.</p><details class="refusal-detail"><summary aria-label="Error details"><span aria-hidden="true">ⓘ</span></summary><div class="refusal-popover"><p><code>404</code></p><p>Search these pages, or go to the home page.</p></div></details></div>
 <p><a href="#search">Search these pages</a>, or go to the <a href="/index.html">home page</a>.</p>
 </article>
 

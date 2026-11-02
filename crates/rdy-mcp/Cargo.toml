@@ -18,6 +18,7 @@ tokio.workspace = true
 anyhow.workspace = true
 base64 = "0.22"
 regex.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

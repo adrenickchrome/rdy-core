@@ -30,13 +30,25 @@
 //! failure writes nothing. A policy approval, an agent's own unrelayed act and an answer that
 //! makes no landing or tag are never signed.
 //!
+//! A presented answer (D-6M0AF, D-QVH4N; TASK-982 O2) is the person's own act whoever presented
+//! it. An elicited approval takes the human's row: the person's key, through the caller's agent,
+//! and never a relay signature. The UI never asks an agent: under `always` an approval it would
+//! land is refused (`E_NO_AGENT`, the UI's cause, with the terminal approval as its fix), and under
+//! `auto` and `never` it lands unsigned with no warning.
+//!
 //! # Later signing
 //!
 //! [`run_sign`] signs a stored landing or tag: a human their own act, an agent a relayed one
-//! (its relay by default; the person's statement with the machine key's relay beside it).
+//! (its relay by default; the person's statement with the machine key's relay beside it). An
+//! agent may also sign today's configured person's own approval of a card, presented in the UI or
+//! elicited (local, with card or elicited evidence): the person's statement with `signing.key`,
+//! and no relay.
 use crate::allowed_signers::{AllowedSigners, read_allowed_signers};
+use crate::answer::presented::PresentedStep;
 use crate::answer::relay::RelayInput;
-use crate::answer::{AnswerInfo, AnswerRequest, AnswerStep, Answerer, PreparedAnswer};
+use crate::answer::{
+    AnswerInfo, AnswerRequest, AnswerStep, Answerer, PreparedAnswer, Presentation, PresentedAnswer,
+};
 use crate::config_levels::{effective, user_file_from_env};
 use crate::engine::{Engine, with_writer_result};
 use crate::gate::{LandInfo, LandOptions, PreparedApproval, ProposalRef};
@@ -53,7 +65,7 @@ use crate::{
     signing_selector,
 };
 use rdy_model::signature::{Signature, StatementError, StatementKind, StatementSource, statement};
-use rdy_model::{Answer, Assurance, Hash, Provenance, RepoId, Role, Tag};
+use rdy_model::{Answer, Assurance, EvidenceKind, Hash, Provenance, RepoId, Role, Tag};
 use rdy_schema::{Issue, Pack, Severity};
 use rdy_store::StoreError;
 use rdy_store::kinds;
@@ -168,6 +180,27 @@ pub fn run_signed_act(
     }
 }
 
+/// A presented answer through the protocol (`crate::answer::presented`), as `caller` presented
+/// it: its reply, with the consequences of its landing attached.
+pub(crate) fn run_presented(
+    engine: &dyn Engine,
+    agent: &dyn crate::signing_crypto::SigningAgent,
+    caller: &Session,
+    person: &str,
+    source: Presentation,
+    request: PresentedAnswer,
+) -> Result<Value, RdyError> {
+    let mut v = run_single(
+        engine,
+        agent,
+        caller,
+        person,
+        Single::Presented { source, request },
+    )?;
+    crate::consequence::report_answer_landings(engine, &mut v);
+    Ok(v)
+}
+
 /// Each of `refs` with its recommended option: the pre-scan once under the writer (nothing is
 /// answered when it refuses), then each item through the signed-act protocol, in order, stopping
 /// at the first refusal with the answers given before it under `corrected.done`.
@@ -234,6 +267,11 @@ enum Single {
         message: Option<String>,
         relay: RelayInput,
         implicit: bool,
+    },
+    /// A presented answer, as the asking session presented it.
+    Presented {
+        source: Presentation,
+        request: PresentedAnswer,
     },
 }
 
@@ -314,6 +352,23 @@ struct Want {
     kind: StatementKind,
     setting: &'static str,
     selector: String,
+}
+
+/// The UI's row of the mode table (TASK-982 O2): it never asks an agent. An act `always` would
+/// sign is refused with the UI's cause and the terminal approval as its fix; any other is
+/// written unsigned, with no warning.
+fn ui_plan(config: &SigningConfig, class: Class, act: &PreparedAct) -> Plan {
+    if config.sign != SignMode::Always || class == Class::None {
+        return Plan::Unsigned;
+    }
+    let mut e = no_agent(NoAgentCause::UiUnavailable);
+    if let Some(l) = act.landing() {
+        e.fix = format!(
+            "run rdy approve {} in a terminal to sign this approval",
+            l.pref()
+        );
+    }
+    Plan::Refuse(e)
 }
 
 /// The mode table's outcome before any agent is asked.
@@ -419,6 +474,8 @@ enum Done {
         checks: Vec<SignatureCheck>,
         warning: Option<RdyError>,
     },
+    /// A Later in the UI: nothing was written.
+    Later,
 }
 
 /// One act through the protocol (module docs), at most [`ATTEMPTS`] times.
@@ -492,6 +549,8 @@ fn prepare(
     act: Single,
     pin: Option<ProposalRef>,
 ) -> Result<Step, RdyError> {
+    // the source of a presented answer's approval: the person's own act (D-QVH4N)
+    let mut presented = None;
     let (prepared, own) = match act {
         Single::Approve {
             approver,
@@ -543,6 +602,23 @@ fn prepare(
             )?)),
             StatementKind::Tag,
         ),
+        Single::Presented { source, request } => {
+            match r.presented_step(s, person, source, request)? {
+                PresentedStep::Later => return Ok(Step::Done(Box::new(Done::Later))),
+                PresentedStep::Step(AnswerStep::Done(info)) => {
+                    return Ok(Step::Done(Box::new(Done::Answer {
+                        info,
+                        checks: vec![],
+                        warning: None,
+                        approval: false,
+                    })));
+                }
+                PresentedStep::Step(AnswerStep::Approval(a)) => {
+                    presented = Some(source);
+                    (PreparedAct::Answer(a), StatementKind::Approval)
+                }
+            }
+        }
     };
     if let (Some(pin), Some(l)) = (pin, prepared.landing())
         && l.pref().version != pin.version
@@ -552,7 +628,12 @@ fn prepare(
     // the settings are read only after the act's own validation passed
     let config = signing_config(r.root())?;
     let mode = config.sign;
-    let wants = match plan(&config, prepared.class(s.is_human()), own) {
+    let class = prepared.class(presented.is_some() || s.is_human());
+    let planned = match presented {
+        Some(Presentation::Ui) => ui_plan(&config, class, &prepared),
+        _ => plan(&config, class, own),
+    };
+    let wants = match planned {
         Plan::Refuse(e) => return Err(e),
         Plan::Unsigned => return write(r, prepared, vec![], None, person).map(Step::Done),
         Plan::Warn(e) => {
@@ -772,6 +853,7 @@ fn reply(done: Done) -> Value {
             add_signing(&mut v, None, &checks, warning);
             v
         }
+        Done::Later => json!({"state": "later"}),
     }
 }
 
@@ -830,7 +912,7 @@ pub fn run_sign(
     let (current, sources) = repo_ids(&st)?;
     let hash = resolve_target(&st, target)?;
     let context = subject_context(&st, &hash, current, sources.clone())?;
-    let (own, owner, relayed) = match &context.subject {
+    let (own, owner, relayed, on_card) = match &context.subject {
         SignatureSubject::Landing { record, .. } => {
             if record.assurance == Assurance::Policy {
                 return Err(RdyError::new(
@@ -843,6 +925,10 @@ pub fn run_sign(
                 StatementKind::Approval,
                 record.approved_by.actor.clone(),
                 record.assurance == Assurance::Relayed,
+                record.assurance == Assurance::Local
+                    && record.evidence.as_ref().is_some_and(|e| {
+                        matches!(e.kind, EvidenceKind::Card | EvidenceKind::Elicited)
+                    }),
             )
         }
         SignatureSubject::Tag {
@@ -853,6 +939,7 @@ pub fn run_sign(
             StatementKind::Tag,
             record.tagged_by.actor.clone(),
             answer.as_ref().is_some_and(|(_, a)| relays_tag(a, hash)),
+            false,
         ),
         SignatureSubject::Missing { .. } => {
             return Err(no_stored_landing(target));
@@ -869,11 +956,19 @@ pub fn run_sign(
         ));
     }
     let human = session.is_human();
-    let kind = kind.unwrap_or(if human { own } else { StatementKind::Relay });
+    // D-6M0AF, TASK-982 C7: an agent may sign today's configured person's own approval of a
+    // card, presented in the UI or elicited, with the person's key
+    let person_card =
+        !human && on_card && owner == crate::config_levels::human_actor_for_env(&engine.root())?;
+    let kind = kind.unwrap_or(if human || person_card {
+        own
+    } else {
+        StatementKind::Relay
+    });
     let allowed = if human {
         kind == own && session.actor == owner
     } else {
-        relayed
+        relayed || (person_card && kind == own)
     };
     if !allowed {
         return Err(RdyError::new(
@@ -903,7 +998,8 @@ pub fn run_sign(
     // an agent's person statement brings the machine key's relay beside it
     let mut wants = vec![];
     let mut companion = None;
-    if !human && kind != StatementKind::Relay {
+    // never a machine relay signature without relay evidence
+    if !human && relayed && kind != StatementKind::Relay {
         let (agent_selector, agent_fp) = selected(&config, AGENT_KEY)?;
         if Observed(&seen)
             .find_valid(StatementKind::Relay, &agent_fp)

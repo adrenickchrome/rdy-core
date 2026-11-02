@@ -67,6 +67,9 @@ const DI13_SENTENCES: [&str; 8] = [
     "When you start a project or a new area, plan the tree first: folders by area, a doc type for each doc, decisions recorded with rdy_decide and no parent, open questions as question blocks and terms in the glossary; show the person the plan before the first content write.",
 ];
 
+/// ui10: the element after the relay sentence.
+const ELICIT_SENTENCE: &str = "Use rdy_answer with elicit: true to ask a supporting client to show the card. Never send a request to /~ui/. Use rdy_answer, with elicitation or the person's relayed words.";
+
 fn di13_has(sentence: &str) {
     let s = rdy_mcp::server::INSTRUCTION_SENTENCES;
     assert!(s.contains(&sentence), "missing: {sentence}");
@@ -93,6 +96,10 @@ fn di13_the_instructions_explain_the_cadence() {
 fn di13_the_instructions_present_the_batch_and_relay_with_rdy_answer() {
     di13_has(DI13_SENTENCES[4]);
     di13_has(DI13_SENTENCES[5]);
+    // ui10: the element right after the relay asks a supporting client to show the card
+    let s = rdy_mcp::server::INSTRUCTION_SENTENCES;
+    let relay = s.iter().position(|e| *e == DI13_SENTENCES[5]).unwrap();
+    assert_eq!(s[relay + 1], ELICIT_SENTENCE);
 }
 
 #[test]
@@ -109,12 +116,20 @@ fn di13_the_instructions_plan_structure_first() {
 fn di13_the_new_sentences_sit_after_the_inbox_line() {
     let s = rdy_mcp::server::INSTRUCTION_SENTENCES;
     // ap11: O27 adds the rdy_land sentence; ck8 adds the authoring-check sentence after it
-    assert_eq!(s.len(), 28);
+    // ui10: the elicitation sentence follows the relay sentence
+    assert_eq!(s.len(), 29);
+    // ui5: element 2 names both claims, before rdy_overview
+    assert_eq!(
+        s[1],
+        "State rdy/actor and rdy/run in _meta, or call rdy_session; then call rdy_overview."
+    );
     assert!(s[12].starts_with("Read rdy_inbox at session start"));
     for (k, want) in DI13_SENTENCES.iter().enumerate() {
-        assert_eq!(s[13 + k], *want, "index {}", 13 + k);
+        let at = if k > 5 { 14 + k } else { 13 + k };
+        assert_eq!(s[at], *want, "index {at}");
     }
-    assert!(s[21].starts_with("Record a decision with rdy_decide and no parent"));
+    assert_eq!(s[19], ELICIT_SENTENCE);
+    assert!(s[22].starts_with("Record a decision with rdy_decide and no parent"));
     // F1 (D-X3136): where a decision with no parent goes, and never a doc to hold decisions
     assert!(rdy_mcp::server::INSTRUCTIONS.contains(
         "Record a decision with rdy_decide and no parent: it goes to the decision home, or to the project root when the project names none; link content to it with decided_by, and never put a decision in a content doc or create a doc to hold decisions."

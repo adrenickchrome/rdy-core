@@ -1,3 +1,4 @@
+pub mod approver;
 mod assets;
 mod changes;
 pub mod copy;
@@ -30,6 +31,7 @@ pub mod process;
 mod profile_live;
 mod publication;
 pub mod publish;
+pub mod refusal;
 pub mod render_input;
 pub mod review;
 mod search;
@@ -398,6 +400,7 @@ fn env() -> Result<minijinja::Environment<'static>, RdyError> {
         "redirect.html",
         "versions.html",
         "not_found.html",
+        "approver.html",
         "partials/nav.html",
         "partials/toc.html",
         "partials/pager.html",
@@ -411,6 +414,8 @@ fn env() -> Result<minijinja::Environment<'static>, RdyError> {
         "partials/change.html",
         "partials/removed.html",
         "partials/glossary.html",
+        "partials/refusal.html",
+        "partials/approval_card.html",
     );
     Ok(env)
 }

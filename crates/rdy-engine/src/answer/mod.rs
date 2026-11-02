@@ -8,7 +8,8 @@
 //! (`relayed`). An agent session that names no `relayed_by` relays over MCP, where the session is
 //! the relay; at the command line clap pairs `--relayed-by` with `--evidence`, so half a relay
 //! never reaches the engine (O19). A relay's evidence is `card` (the default) or `text`;
-//! `elicited` waits for M3 (F5).
+//! `elicited` is the evidence of an answer an MCP client elicited from the person, never a
+//! relay's ([`presented`]).
 //!
 //! # Binding (closed)
 //!
@@ -29,8 +30,8 @@
 //!   ref of an open proposal's latest version binds its deferral card whether or not the version
 //!   is ready or the card answered (D-AAQ9Z), so a refused card takes a later acceptance; every
 //!   other check below applies.
-//! - A relayed answer passes `card_hash`. A local answer may omit it, and then binds to the
-//!   version only. A decision version proposed in two views stands beside each batch with the
+//! - A relayed or presented answer passes `card_hash`. A local answer may omit it, and then
+//!   binds to the version only. A decision version proposed in two views stands beside each batch with the
 //!   same ref and its own card, so a `card_hash` picks the card of that ref with that hash. When
 //!   no card of the ref has the hash given: `E_PROPOSAL_MOVED` for an `approve` item,
 //!   `E_ITEM_MOVED` for the others. For an `approve` item the landing's freshness check runs
@@ -59,7 +60,14 @@
 //! re-affirmation card are in [`reaffirm`]: `Keep them suspect` writes one `ANSWER`; `They still
 //! hold` lands the card's members alone, in an isolated landing that records the answer
 //! (D-CQMA4).
+//!
+//! # Presented answers
+//!
+//! A card the person answers in the local approver UI, or one an MCP client elicited from them,
+//! goes through the same binding and dispatch as the person's own answer ([`presented`],
+//! D-6M0AF): `local`, with evidence `card` or `elicited` and no relay.
 pub mod batch;
+pub mod presented;
 pub mod question;
 pub mod reaffirm;
 pub mod relay;
@@ -75,10 +83,13 @@ use crate::pending::PendingQuery;
 use crate::pending::queue::{Eligible, deferral_card, deferral_role};
 use crate::pending::reaffirm::REAFFIRM_REF_PREFIX;
 use crate::pending::{CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, Item, ItemKind, ItemOption};
-use crate::policy::roles::{holds, outside_role};
+use crate::policy::roles::{RequiredRole, holds, outside_role};
 use crate::proposal_show::is_proposal_ref;
 use crate::tensions::set::tension_hex;
 use crate::{Rdy, ReadState, Session};
+pub use presented::{
+    Presentation, PresentedAnswer, presented_item, presented_question_brief, run_presented_answer,
+};
 use rdy_model::{ActorRun, BlockId, EvidenceKind, Hash};
 use rdy_store::{Relay, StoreError};
 use relay::{MAX_QUOTE, RelayInput, relayed};
@@ -162,14 +173,19 @@ pub(crate) struct PreparedAnswer {
 
 /// The session an answer runs as, its relay and its evidence kind, the session that gave the
 /// answer (the relaying agent's, or the person's own) and the briefing its write cites (only an
-/// answer to a question reads it; a batch of recommended answers cites none).
+/// answer to a question reads it; a batch of recommended answers cites none). A presented answer
+/// also names its source and the session that presented the card (`presented`); every other
+/// answer has none.
 #[derive(Clone)]
 pub(crate) struct Answerer {
     pub who: Session,
     pub relay: Option<Relay>,
+    /// The evidence kind the records name: a relay's `card` or `text`, a presented answer's
+    /// `card` or `elicited`, else none.
     pub kind: Option<EvidenceKind>,
     pub from: Session,
     pub brief: Option<String>,
+    pub presented: Option<presented::Presenter>,
 }
 
 impl Rdy {
@@ -364,24 +380,45 @@ impl Rdy {
         shown: Option<&str>,
         note: Option<String>,
     ) -> Result<AnswerStep, RdyError> {
-        let bound = match bind(&self.read(), person, r, shown, by.relay.is_some(), pick)? {
-            Binding::Bound(b) => *b,
+        let bound = self.bound(by, person, r, pick, shown)?;
+        self.dispatch(by, person, bound, note)
+    }
+
+    /// The item `r` of `person`'s queue, bound for `by`'s answer (see the module docs).
+    fn bound(
+        &mut self,
+        by: &Answerer,
+        person: &str,
+        r: &str,
+        pick: Pick<'_>,
+        shown: Option<&str>,
+    ) -> Result<Bound, RdyError> {
+        match bind(&self.read(), person, r, shown, by.relay.is_some(), pick)? {
+            Binding::Bound(b) => Ok(*b),
             // RULING F1: the person saw another card of the approval; when the landing's
             // freshness check fails, its refusal (with the fresh card) passes through
-            Binding::ShownMoved(e) => {
-                return Err(match self.check_fresh(r) {
-                    Err(f) if f.code == E_PROPOSAL_MOVED => f,
-                    _ => e,
-                });
-            }
-        };
+            Binding::ShownMoved(e) => Err(match self.check_fresh(r) {
+                Err(f) if f.code == E_PROPOSAL_MOVED => f,
+                _ => e,
+            }),
+        }
+    }
+
+    /// Runs the act of the bound item and option (see the module docs, Acts).
+    fn dispatch(
+        &mut self,
+        by: &Answerer,
+        person: &str,
+        bound: Bound,
+        note: Option<String>,
+    ) -> Result<AnswerStep, RdyError> {
         // D-JQD5X, O14: an acceptance option of an approve card, before the batch acts
         if bound.item.kind == ItemKind::Approve && verdict::is_accept(&bound.option.id) {
             return verdict::act(self, by, bound, note).map(|i| AnswerStep::Done(Box::new(i)));
         }
         match (bound.item.kind, bound.option.id.as_str()) {
             (_, "later") | (ItemKind::Approve | ItemKind::Confirm | ItemKind::Defer, _) => {
-                batch::act(self, &by.who, by.relay.clone(), by.kind, bound, note)
+                batch::act(self, by, bound, note)
             }
             (ItemKind::Answer, _) => {
                 question::act(self, by, person, bound, note).map(|i| AnswerStep::Done(Box::new(i)))
@@ -483,6 +520,7 @@ fn answerer(s: &Session, person: &str, r: &RelayInput) -> Result<Answerer, RdyEr
         kind,
         from: s.clone(),
         brief: None,
+        presented: None,
     })
 }
 
@@ -509,15 +547,33 @@ enum Binding {
     ShownMoved(RdyError),
 }
 
-/// The item `r` of `person`'s queue, bound (see the module docs).
-fn bind(
+/// What [`locate`] found: the card of the ref with the hash shown (or the first card of the ref,
+/// with none), and the item's required policy role.
+struct Found {
+    item: Item,
+    card_hash: Option<Hash>,
+    role: Option<RequiredRole>,
+}
+
+/// What [`locate`] found for an item ref.
+enum Located {
+    Found(Box<Found>),
+    /// An approve card of the ref stands, but none with the hash shown (see [`Binding`]).
+    ShownMoved(RdyError),
+}
+
+/// The card of item ref `r` in `person`'s complete eligible queue: read with no session and
+/// before the display cap, never by title (see the module docs). It checks the ref's grammar,
+/// the hash shown (a relayed answer must give one) and that a card of the ref has that hash;
+/// `approving` gives the refusal of an approval when no card of the ref stands. It reads only.
+fn locate(
     st: &ReadState,
     person: &str,
     r: &str,
     shown: Option<&str>,
     relayed: bool,
-    pick: Pick<'_>,
-) -> Result<Binding, RdyError> {
+    approving: bool,
+) -> Result<Located, RdyError> {
     if !is_item_ref(r) {
         return Err(RdyError::new(
             E_BAD_INPUT,
@@ -540,7 +596,6 @@ fn bind(
         cards.push(card);
     }
     let Some(first) = cards.first() else {
-        let approving = matches!(pick, Pick::Id("approve") | Pick::Recommended);
         return Err(gone(st, &q, r, approving)?);
     };
     let card_hash = match shown {
@@ -566,12 +621,42 @@ fn bind(
         Some(h) => match cards.iter().find(|i| i.card_hash == h) {
             Some(item) => item,
             None if first.kind == ItemKind::Approve => {
-                return Ok(Binding::ShownMoved(
+                return Ok(Located::ShownMoved(
                     changed(E_PROPOSAL_MOVED, r).with_corrected(card_of(first)),
                 ));
             }
             None => return Err(changed(E_ITEM_MOVED, r).with_corrected(card_of(first))),
         },
+    };
+    let role = if in_queue {
+        q.role_of(item).cloned()
+    } else {
+        deferral_role(st, item)?
+    };
+    Ok(Located::Found(Box::new(Found {
+        item: item.clone(),
+        card_hash,
+        role,
+    })))
+}
+
+/// The item `r` of `person`'s queue, bound (see the module docs).
+fn bind(
+    st: &ReadState,
+    person: &str,
+    r: &str,
+    shown: Option<&str>,
+    relayed: bool,
+    pick: Pick<'_>,
+) -> Result<Binding, RdyError> {
+    let approving = matches!(pick, Pick::Id("approve") | Pick::Recommended);
+    let Found {
+        item,
+        card_hash,
+        role,
+    } = match locate(st, person, r, shown, relayed, approving)? {
+        Located::Found(f) => *f,
+        Located::ShownMoved(e) => return Ok(Binding::ShownMoved(e)),
     };
     let option = match pick {
         // a free answer to a question: the person's own words, in the note
@@ -604,20 +689,15 @@ fn bind(
     };
     // D-TF78H, O10: an answer from a person outside the item's required policy role is refused,
     // except Later; an approval meets the same check in its landing (`prepare_landing`)
-    if option.id != "later" && !(item.kind == ItemKind::Approve && option.id == "approve") {
-        let role = if in_queue {
-            q.role_of(item).cloned()
-        } else {
-            deferral_role(st, item)?
-        };
-        if let Some(role) = role
-            && !holds(&role, person)
-        {
-            return Err(outside_role(person, &role, &item.r#ref));
-        }
+    if option.id != "later"
+        && !(item.kind == ItemKind::Approve && option.id == "approve")
+        && let Some(role) = &role
+        && !holds(role, person)
+    {
+        return Err(outside_role(person, role, &item.r#ref));
     }
     Ok(Binding::Bound(Box::new(Bound {
-        item: item.clone(),
+        item,
         option,
         card_hash,
     })))

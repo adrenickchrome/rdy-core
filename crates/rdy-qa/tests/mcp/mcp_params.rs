@@ -30,6 +30,12 @@ fn mparm1_every_tool_answers_a_wrong_typed_parameter_with_e_bad_input() {
     let (dir, r) = project();
     drop(r);
     let mut c = McpClient::start(dir.path());
+    // ui5: a wire call needs a claim before its arguments are read
+    c.call(
+        "rdy_session",
+        json!({"actor": "agent:qa", "run": "qa", "role": "writer"}),
+    )
+    .ok();
     let tools = c.tools();
     assert!(tools.len() >= 17, "{} tools", tools.len());
     let mut covered = vec![];
@@ -115,6 +121,12 @@ fn mparm1_a_missing_parameter_is_named_over_stdio_and_the_server_stays_usable() 
 fn mparm1_the_founders_case_is_an_rdy_error_through_the_daemon_too() {
     let s = Served::new();
     let mut c = McpClient::start_proxy(&s);
+    // ui5: a wire call needs a claim before its arguments are read
+    c.call(
+        "rdy_session",
+        json!({"actor": "agent:qa", "run": "qa", "role": "writer"}),
+    )
+    .ok();
     let e = tool_error(c.call("rdy_propose", json!({"title": ["a", "b"]})));
     assert_eq!(e["code"], "E_BAD_INPUT", "{e}");
     assert_eq!(

@@ -16,6 +16,13 @@
 //! effort: a full or closed queue drops the stream, and the page's revision repairs it when it
 //! reconnects.
 //!
+//! A local approval page's stream (D-WPE4R, TASK-979) is no target: it has no build and no diff.
+//! Each publish that moved the store, and each config refresh, sends every UI stream one `Reload`,
+//! whatever it did to a site page, since an ANSWER can leave every site byte unchanged. A publish
+//! that moved neither (a refused answer, a UI Later) sends nothing: the page's form is on its way,
+//! and a reload would cancel the page that answers it. UI streams count in [`MAX_STREAMS`], and
+//! take the same queue, epoch check, hold and shutdown.
+//!
 //! The versions page (`/~versions/`, D-2F29G, RULING F5) is one more target here, with its own
 //! key (`rdy_render::menu::menu_key_for`, which reads profile metadata and expands no selection)
 //! and its own build: a view commit rebuilds it and never canon. The number of docs each view or
@@ -38,12 +45,12 @@
 //! a response begun before it may complete as an outside copy.
 use crate::daemon::log;
 use crate::shared::Shared;
-use crate::site::guard::{ScopeRef, SiteTarget};
+use crate::site::guard::{Refusal, ScopeRef, SiteTarget};
 use crate::site::profiles::Availability;
 use crate::writer::panic_text;
 use rdy_engine::publication::ResolvedProfile;
 use rdy_engine::site_scope::{CHANGES_PAGE, SINCE_PAGE, summary_page_taken};
-use rdy_engine::{E_REDACTED_STATE, RdyError, ReadState, Scope};
+use rdy_engine::{E_REDACTED_STATE, RdyError, ReadState, Scope, serve_config};
 use rdy_model::Hash;
 use rdy_render::live::{
     LiveBuild, ProfileHistoryMemo, build_live, build_profile_live, diff, inputs_key,
@@ -87,6 +94,12 @@ pub type BeforePublish = Box<dyn Fn(&SiteTarget) + Send + Sync>;
 
 /// A [`BeforePublish`] as the site keeps it: cloned out of its lock before it runs.
 type Barrier = Arc<dyn Fn(&SiteTarget) + Send + Sync>;
+
+/// A test's barrier in a UI subscribe ([`LiveSite::set_before_ui_compare`]).
+pub type BeforeUiCompare = Box<dyn Fn() + Send + Sync>;
+
+/// A [`BeforeUiCompare`] as the site keeps it: cloned out of its lock before it runs.
+type UiBarrier = Arc<dyn Fn() + Send + Sync>;
 
 /// A test's sink for the lines the site logs ([`LiveSite::set_log_hook`]), beside the log.
 pub type LogHook = Box<dyn Fn(&str) + Send + Sync>;
@@ -236,9 +249,25 @@ struct ScopeState {
     memo: ProfileHistoryMemo,
 }
 
+/// What a stream is the stream of: a target of the site, or the approval pages.
+#[derive(Clone, Debug)]
+enum StreamKey {
+    Site(SiteTarget),
+    Ui,
+}
+
+/// One open approval page's stream: it only ever gets `Reload`.
+struct UiStream {
+    id: u64,
+    /// The store revision and the pack generation the page last heard of.
+    seen: (String, u64),
+    tx: mpsc::Sender<LiveEvent>,
+}
+
 #[derive(Default)]
 struct Inner {
     scopes: BTreeMap<SiteTarget, ScopeState>,
+    ui_streams: Vec<UiStream>,
     clock: u64,
     next_id: u64,
     closed: bool,
@@ -246,7 +275,7 @@ struct Inner {
 
 impl Inner {
     fn streams(&self) -> usize {
-        self.scopes.values().map(|s| s.streams.len()).sum()
+        self.scopes.values().map(|s| s.streams.len()).sum::<usize>() + self.ui_streams.len()
     }
 
     /// The state of target `scope`, marked as used now. Only a resolved target with a build, or
@@ -323,6 +352,9 @@ pub struct LiveSite {
     log_hook: Mutex<Option<LogHook>>,
     /// Test hook: the history ceiling of every profile build (`None`: the real one).
     history_ceiling: Mutex<Option<usize>>,
+    /// Test hook: the barrier of a UI subscribe after its stream is registered, before its last
+    /// comparison.
+    before_ui_compare: Mutex<Option<UiBarrier>>,
 }
 
 /// The cache key of the doc count of `scope` (a view or a proposal version), with the pack
@@ -434,7 +466,7 @@ pub struct Subscription {
     pub rx: mpsc::Receiver<LiveEvent>,
     /// The redaction epoch the stream was compared in (see `Stream::epoch`).
     epoch: u64,
-    scope: SiteTarget,
+    key: StreamKey,
     inner: Weak<Mutex<Inner>>,
 }
 
@@ -450,10 +482,15 @@ impl Drop for Subscription {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.upgrade() {
             let mut inner = lock(&inner);
-            if let Some(s) = inner.scopes.get_mut(&self.scope) {
-                s.streams.retain(|st| st.id != self.id);
+            match &self.key {
+                StreamKey::Site(scope) => {
+                    if let Some(s) = inner.scopes.get_mut(scope) {
+                        s.streams.retain(|st| st.id != self.id);
+                    }
+                    inner.forget_if_empty(scope);
+                }
+                StreamKey::Ui => inner.ui_streams.retain(|st| st.id != self.id),
             }
-            inner.forget_if_empty(&self.scope);
         }
     }
 }
@@ -473,6 +510,7 @@ impl LiveSite {
             after_subscribe_refresh: Mutex::new(None),
             log_hook: Mutex::new(None),
             history_ceiling: Mutex::new(None),
+            before_ui_compare: Mutex::new(None),
         })
     }
 
@@ -735,9 +773,11 @@ impl LiveSite {
         }
     }
 
-    /// One wake of the worker: refreshes each target with an open stream, and returns how many
-    /// it built. A failure is logged once per run of failures of a target.
+    /// One wake of the worker: reloads the UI streams, then refreshes each target with an open
+    /// stream, and returns how many it built. A failure is logged once per run of failures of a
+    /// target.
     pub fn step(&self, sh: &Shared) -> usize {
+        self.published_to_ui(sh);
         // every profile-only key against one captured canon state, open pages or not; a key
         // canon no longer holds has its target removed before anything builds (D-DK03K)
         sh.profile_sites.inspect(sh);
@@ -861,7 +901,7 @@ impl LiveSite {
             id,
             rx,
             epoch,
-            scope: scope.clone(),
+            key: StreamKey::Site(scope.clone()),
             inner: Arc::downgrade(&self.inner),
         };
         // A removal came between the build and the comparison. Its fresh state may be
@@ -919,6 +959,103 @@ impl LiveSite {
         }
     }
 
+    /// The revision an approval page read `st` at: the first 16 hex digits of the hash of the
+    /// store's location and redaction epoch. Any publish that moves the store moves it.
+    pub fn ui_revision(st: &ReadState) -> String {
+        let tuple = (st.seq(), st.redaction_epoch());
+        let bytes = serde_json::to_vec(&tuple).unwrap_or_default();
+        let mut rev = Hash::of(&bytes).to_string();
+        rev.truncate(16);
+        rev
+    }
+
+    /// Opens a stream for an approval page that read the store at revision `rev`. The stream is
+    /// registered first, then compared with the state published now under the same lock: a publish
+    /// after the comparison finds it registered, and a mismatch queues `Reload` at once. Past
+    /// [`MAX_STREAMS`] open streams, and after `close`, the site is busy; with `serve.ui` off since
+    /// the request's check, it is the ordinary answer to an event request.
+    pub fn subscribe_ui(&self, sh: &Shared, rev: &str) -> Result<Subscription, Refusal> {
+        let (tx, rx) = mpsc::channel(STREAM_QUEUE);
+        let (id, epoch) = {
+            let mut inner = lock(&self.inner);
+            if inner.closed || inner.streams() >= MAX_STREAMS {
+                return Err(Refusal::Busy);
+            }
+            let epoch = sh.state.load().reader().redaction_epoch();
+            inner.next_id += 1;
+            let id = inner.next_id;
+            inner.ui_streams.push(UiStream {
+                id,
+                seen: (rev.to_string(), sh.pack_gen.load(Ordering::SeqCst)),
+                tx: tx.clone(),
+            });
+            (id, epoch)
+        };
+        // dropped on the way out of an error, which removes the stream
+        let sub = Subscription {
+            id,
+            rx,
+            epoch,
+            key: StreamKey::Ui,
+            inner: Arc::downgrade(&self.inner),
+        };
+        let hook = lock(&self.before_ui_compare).clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+        // a refresh that turned the UI off found the stream, or comes after this read
+        if !serve_config(&sh.root).ui {
+            return Err(Refusal::Malformed);
+        }
+        let mut inner = lock(&self.inner);
+        let now = LiveSite::ui_revision(&sh.state.load());
+        if now != rev {
+            let _ = tx.try_send(LiveEvent::Reload);
+        }
+        if let Some(stream) = inner.ui_streams.iter_mut().find(|s| s.id == id) {
+            stream.seen.0 = now;
+        }
+        drop(inner);
+        Ok(sub)
+    }
+
+    /// Test hook: from now on, each UI subscribe runs `f` after its stream is registered and
+    /// before its last comparison, holding no lock (`None` removes it).
+    #[doc(hidden)]
+    pub fn set_before_ui_compare(&self, f: Option<BeforeUiCompare>) {
+        *lock(&self.before_ui_compare) = f.map(Arc::from);
+    }
+
+    /// A publish: one `Reload` for each UI stream whose page has not heard of the store or the
+    /// config as they stand now; a full or closed queue drops its stream, as for a site page. With
+    /// `serve.ui` off, each stream closes after it. No page is rendered here.
+    fn published_to_ui(&self, sh: &Shared) {
+        if lock(&self.inner).ui_streams.is_empty() {
+            return;
+        }
+        if !serve_config(&sh.root).ui {
+            return self.close_ui();
+        }
+        // the generation before the state, as for a build: a newer one is never lost
+        let generation = sh.pack_gen.load(Ordering::SeqCst);
+        let now = (LiveSite::ui_revision(&sh.state.load()), generation);
+        lock(&self.inner).ui_streams.retain_mut(|s| {
+            if s.seen == now {
+                return true;
+            }
+            s.seen.clone_from(&now);
+            s.tx.try_send(LiveEvent::Reload).is_ok()
+        });
+    }
+
+    /// `serve.ui` is off: each UI stream gets `Reload`, and then ends when its queue is read.
+    pub(crate) fn close_ui(&self) {
+        let gone = std::mem::take(&mut lock(&self.inner).ui_streams);
+        for stream in gone {
+            let _ = stream.tx.try_send(LiveEvent::Reload);
+        }
+    }
+
     /// The open streams, across every target.
     pub fn streams(&self) -> usize {
         lock(&self.inner).streams()
@@ -942,6 +1079,7 @@ impl LiveSite {
             for s in inner.scopes.values_mut() {
                 s.streams.clear();
             }
+            inner.ui_streams.clear();
         }
         self.stopped.store(true, Ordering::SeqCst);
         if let Some(worker) = self.worker.get() {

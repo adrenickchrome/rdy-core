@@ -177,6 +177,9 @@ pub(crate) struct ServeSection {
     /// A string; `resolve` keeps a private IPv4 address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     site_lan_address: Option<String>,
+    /// The user or local config only; `config_levels` ignores a project value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ui: Option<bool>,
 }
 
 impl ServeSection {
@@ -186,6 +189,7 @@ impl ServeSection {
             && self.site_port.is_none()
             && self.site_lan.is_none()
             && self.site_lan_address.is_none()
+            && self.ui.is_none()
     }
 
     pub(crate) fn resolve(&self) -> ServeConfig {
@@ -206,6 +210,7 @@ impl ServeSection {
                 .as_deref()
                 .and_then(|a| a.parse::<Ipv4Addr>().ok())
                 .filter(Ipv4Addr::is_private),
+            ui: self.ui.unwrap_or(ServeConfig::DEFAULT.ui),
         }
     }
 }
@@ -222,6 +227,10 @@ pub struct ServeConfig {
     pub site_lan: bool,
     /// `serve.site_lan_address`: the private IPv4 address to use while `site_lan` is true.
     pub site_lan_address: Option<Ipv4Addr>,
+    /// Enable the local approval pages.
+    ///
+    /// Default: true. User and local config only.
+    pub ui: bool,
 }
 
 impl ServeConfig {
@@ -231,6 +240,7 @@ impl ServeConfig {
         site_port: None,
         site_lan: false,
         site_lan_address: None,
+        ui: true,
     };
 }
 
@@ -253,6 +263,7 @@ pub fn serve_config(project: &Path) -> ServeConfig {
         site_lan_address: value("site_lan_address")
             .and_then(serde_yaml_ng::Value::as_str)
             .map(str::to_string),
+        ui: value("ui").and_then(serde_yaml_ng::Value::as_bool),
     }
     .resolve()
 }

@@ -47,6 +47,9 @@ pub enum Skip {
     NoCheckRequest,
     /// The person's `accept_check_verdict`: no card in the queue offers a check verdict to accept.
     NoVerdictToAccept,
+    /// The person's `ui_answer`: the approve card recommends no option (D-91DEW). A missing
+    /// recommendation is never read as approve.
+    NoRecommendedOption,
 }
 
 /// One inbox read: the cursor passed, the cursor returned and the entries as the reply gave them.
@@ -78,6 +81,27 @@ pub struct CheckFacts {
     pub answer: Option<String>,
     /// The proposal version the act named (`P-x@n`).
     pub version: Option<String>,
+}
+
+/// What a `ui_answer` showed and sent (D-6M0AF): the card's form as the page gave it, and what the
+/// HTTP answer was.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UiFacts {
+    /// The source of the answer: always `ui`.
+    pub source: &'static str,
+    /// The item ref the form names.
+    pub item: String,
+    /// The card hash the form names.
+    pub card_hash: String,
+    /// The labels the form shows, in order.
+    pub labels: Vec<String>,
+    /// The option chosen, and its label.
+    pub option: String,
+    pub label: String,
+    /// The HTTP status.
+    pub status: u16,
+    /// The landing the answer made, when it made one.
+    pub landing: Option<String>,
 }
 
 /// One journaled act.
@@ -112,6 +136,8 @@ pub struct Entry {
     pub target: Option<String>,
     /// Set on a check act (`check_run`, `check_request`, `check_submit`, `accept_check_verdict`).
     pub check: Option<CheckFacts>,
+    /// Set on a `ui_answer`.
+    pub ui: Option<UiFacts>,
 }
 
 impl Entry {
@@ -136,6 +162,7 @@ impl Entry {
             message: None,
             target: None,
             check: None,
+            ui: None,
         }
     }
 }
@@ -245,6 +272,9 @@ pub fn allowed(act: &str, code: &str) -> bool {
         "check_submit" => &["E_REVIEW_STALE"],
         // the card moved between the queue read and the answer (a new verdict, a landing)
         "accept_check_verdict" => &["E_PROPOSAL_MOVED"],
+        // D-6M0AF: the forced moved card's old hash; a policy landing of an imported status
+        "ui_answer" => &["E_PROPOSAL_MOVED"],
+        "ui_policy_land" => &["E_POLICY_HUMAN"],
         // a view or a version whose changes conflict with canon has no change plan until the
         // conflict is resolved: its read refuses with E_CONFLICT_UNRESOLVED, never with a
         // write's E_STALE_BASE (ruling task-15 F3; the propose binds no plan then, and the
@@ -252,7 +282,8 @@ pub fn allowed(act: &str, code: &str) -> bool {
         "plan" | "version_plan" => &["E_CONFLICT_UNRESOLVED"],
         // intent, review_next, tensions, inbox, read, brief, and the plan answers, the queue
         // read and the deferral acceptance (plan_answer, pending, accept_deferrals), and a check
-        // run or request (check_run, check_request): no refusal is allowed.
+        // run or request (check_run, check_request), and a UI fixture's own writes (ui_fixture,
+        // ui_site): no refusal is allowed.
         _ => &[],
     };
     codes.contains(&code)

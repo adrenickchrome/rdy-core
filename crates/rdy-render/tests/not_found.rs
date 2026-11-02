@@ -265,7 +265,10 @@ fn dgm10_static_404_has_exact_words_and_layout() {
         );
         assert_eq!(html.matches(NOINDEX).count(), 1, "{what}");
         assert!(html.contains("<h1>Page not found</h1>"), "{what}");
-        assert!(html.contains(&format!("<p>{PAGE_SENTENCE}</p>")), "{what}");
+        assert!(
+            html.contains(&format!("<p class=\"refusal-message\">{PAGE_SENTENCE}</p>")),
+            "{what}"
+        );
         assert!(
             html.contains("<p><a href=\"#search\">Search these pages</a>, or go to the <a href=\"/index.html\">home page</a>.</p>"),
             "{what}: {html}"

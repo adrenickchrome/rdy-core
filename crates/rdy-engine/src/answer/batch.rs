@@ -4,7 +4,7 @@
 //! |-----------|-----------|---------------------------------------------------------|
 //! | `approve` | `approve` | lands the version (`land_with`); no `ANSWER`            |
 //! | `approve` | `reject`  | `ANSWER` `reject_proposal`: the version leaves the queue |
-//! | any       | `later`   | `ANSWER` `later` under `pending/`; needs a relay (F4)   |
+//! | any       | `later`   | `ANSWER` `later` under `pending/`; a relay or elicited (F4) |
 //! | `confirm` | `confirm` | `ANSWER` `confirm`                                      |
 //! | `confirm` | `reject`  | `ANSWER` `reject_decision`: the batch is not ready (F1) |
 //! | `confirm` (`reaffirm_one_way`) | `reject` | `ANSWER` `reject_reaffirm`: not ready |
@@ -13,6 +13,11 @@
 //!
 //! An `approve` item's `accept_verdict:<review>:<version>` option never reaches this table:
 //! `answer_one` dispatches it first ([`super::verdict`], D-JQD5X O14).
+//!
+//! An elicited Later (D-WPE4R, F2) is the person's own snooze of the chat session the caller's
+//! run names: its `ANSWER` records that run as `person.run`, evidence `elicited` and no relay. A
+//! caller with no run is refused. A Later in the UI never reaches this table: it stores nothing
+//! ([`super::presented`]).
 //!
 //! Any other pair is refused with `E_BAD_INPUT`. An `ANSWER` is written alone in one batch with
 //! `Store::put_answer`, and its publish is `Delta::Seq` (O14). Canon never changes but by a
@@ -33,12 +38,13 @@
 //! a time, as the person (local) or by a relay of the person's words: its card hash is the
 //! removal digest, so an approval binds each request and the hash of its complete report. A batch
 //! of recommended answers never reaches it (`Rdy::answer_all_recommended` refuses the whole call).
-use super::{AnswerInfo, AnswerStep, Bound, PreparedAnswer};
+use super::presented::Presentation;
+use super::{AnswerInfo, AnswerStep, Answerer, Bound, PreparedAnswer};
 use crate::error::{E_BAD_INPUT, E_INTERNAL, RdyError};
 use crate::gate::LandOptions;
 use crate::pending::{ExceptionKind, Item, ItemKind};
 use crate::{Delta, Rdy, Session};
-use rdy_model::{Answer, AnswerAct, ApprovalEvidence, EvidenceKind};
+use rdy_model::{Answer, AnswerAct, ApprovalEvidence, EvidenceKind, Provenance};
 use rdy_store::{Relay, StoreError};
 
 /// Runs the act the item's kind and the chosen option name (the table in the module docs). An
@@ -46,20 +52,16 @@ use rdy_store::{Relay, StoreError};
 /// here.
 pub(crate) fn act(
     r: &mut Rdy,
-    who: &Session,
-    relay: Option<Relay>,
-    kind: Option<EvidenceKind>,
+    by: &Answerer,
     b: Bound,
     note: Option<String>,
 ) -> Result<AnswerStep, RdyError> {
+    let (who, relay, kind) = (&by.who, by.relay.clone(), by.kind);
+    let mut person = who.provenance();
     let act = match (b.item.kind, b.option.id.as_str()) {
         (_, "later") => {
             if relay.is_none() {
-                return Err(RdyError::new(
-                    E_BAD_INPUT,
-                    "Later needs a chat session; the CLI has no Later",
-                    "answer with another option, or let the agent relay Later from chat",
-                ));
+                person.run = Some(elicited_run(by)?);
             }
             AnswerAct::Later
         }
@@ -90,7 +92,26 @@ pub(crate) fn act(
             ));
         }
     };
-    record(r, who, relay, kind, b, note, act).map(|i| AnswerStep::Done(Box::new(i)))
+    record(r, person, relay, kind, b, note, act).map(|i| AnswerStep::Done(Box::new(i)))
+}
+
+/// The chat session of a Later with no relay: the run of the session that elicited it (O9). A
+/// caller with no run, and any other answer with no relay (the CLI's), is refused.
+fn elicited_run(by: &Answerer) -> Result<String, RdyError> {
+    match &by.presented {
+        Some(p) if p.source == Presentation::Elicited => p.caller.run.clone().ok_or_else(|| {
+            RdyError::new(
+                E_BAD_INPUT,
+                "Later needs a run to name the chat session",
+                "ask again from a session with a run, or show the card in chat and relay the answer",
+            )
+        }),
+        _ => Err(RdyError::new(
+            E_BAD_INPUT,
+            "Later needs a chat session; the CLI has no Later",
+            "answer with another option, or let the agent relay Later from chat",
+        )),
+    }
 }
 
 /// The labels the card shows, in order.
@@ -103,7 +124,7 @@ fn assurance(relay: &Option<Relay>) -> &'static str {
 }
 
 /// approve · `approve`: the landing (which holds the exception check, F2), with the card as
-/// evidence for a relay, prepared under the writer and not yet written.
+/// evidence for a relay or a presented answer, prepared under the writer and not yet written.
 fn approve(
     r: &mut Rdy,
     who: &Session,
@@ -119,7 +140,7 @@ fn approve(
             "drop the note; the landing records the approval",
         ));
     }
-    let evidence = relay.as_ref().map(|_| ApprovalEvidence {
+    let evidence = (relay.is_some() || kind.is_some()).then(|| ApprovalEvidence {
         kind: kind.unwrap_or(EvidenceKind::Card),
         options: labels(&b.item),
         choice: Some(b.option.label.clone()),
@@ -151,10 +172,10 @@ fn approve(
     })
 }
 
-/// Writes the `ANSWER` of `act` in a batch of its own and publishes it.
+/// Writes the `ANSWER` of `act` by `person` in a batch of its own and publishes it.
 fn record(
     r: &mut Rdy,
-    who: &Session,
+    person: Provenance,
     relay: Option<Relay>,
     kind: Option<EvidenceKind>,
     b: Bound,
@@ -181,10 +202,10 @@ fn record(
         options: labels(&b.item),
         card_hash,
         targets: vec![],
-        person: who.provenance(),
+        person,
         relayed_by: relay.as_ref().map(|r| r.by.clone()),
         relay_evidence: relay.as_ref().map(|r| r.evidence.clone()),
-        evidence_kind: relay.as_ref().and(kind),
+        evidence_kind: kind,
         note,
     };
     // a refusal means rdy built an answer the store's rules reject: a bug, not bad input

@@ -329,6 +329,16 @@ pub const KEY_LEVELS: &[KeyRule] = &[
         ty: Ty::LanAddress,
         default: None,
     },
+    // serve.ui (D-6M0AF), its meaning:
+    // Enable the local approval pages.
+    //
+    // Default: true. User and local config only.
+    KeyRule {
+        key: "serve.ui",
+        levels: PERSON,
+        ty: Ty::Bool,
+        default: Some("true"),
+    },
     KeyRule {
         key: "propose.cadence",
         levels: ANY,

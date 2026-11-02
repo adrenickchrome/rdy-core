@@ -2,9 +2,12 @@
 //!
 //! The site is read-only and local (D-N5NSN, D-FV6G9): it answers `GET` and `HEAD` only, takes
 //! no body, answers only to its own addresses and its own pages, and serves a closed set of
-//! routes. Every check is pure. A new check or route needs a founder decision.
+//! routes. Every check is pure. A new check or route needs a founder decision. The local
+//! approval pages (D-6M0AF) are classified before these routes by `ui_request`, which reuses
+//! the Host, Origin, body and path checks here.
 
 use crate::site::http::{Method, Request, Response, text};
+use crate::site::ui_request::{UI_GET, UI_POST};
 use std::net::Ipv4Addr;
 
 /// What the site answers to: its port, the one LAN address it is bound to, if any, and the mode
@@ -65,6 +68,15 @@ pub enum Refusal {
     NotFound,
     Busy,
     Broken,
+    /// A UI route asked with a method it does not answer; `allow` is
+    /// [`UI_GET`] or [`UI_POST`].
+    UiMethod {
+        allow: &'static str,
+    },
+    /// A UI answer whose `Content-Length` is past 4 MiB.
+    UiBodyTooLarge,
+    /// A UI answer that is not a URL-encoded form.
+    UiContentType,
 }
 
 impl Guard {
@@ -112,52 +124,78 @@ impl Guard {
             return Err(Refusal::Method);
         }
         // 2. No body.
-        if r.all("content-length").iter().any(|v| *v != "0")
-            || !r.all("transfer-encoding").is_empty()
-        {
-            return Err(Refusal::Body);
-        }
+        no_body(r)?;
         // 3. Exactly one Host, one of the site's own.
-        let host = match r.all("host").as_slice() {
-            [one] if self.is_own_host(one) => *one,
-            _ => return Err(Refusal::Host),
-        };
+        let host = one_host(r, self.port, self.lan)?;
         // 4. No Origin, or the site's own.
-        for origin in r.all("origin") {
-            let own = origin
-                .strip_prefix("http://")
-                .is_some_and(|h| h.eq_ignore_ascii_case(host));
-            if !own {
-                return Err(Refusal::Origin);
-            }
-        }
+        own_origins(r, host)?;
         // 5. A clean path: split at `/` first, then each segment percent-decoded on its own, so
         // a view name may hold an encoded `/` (ruling task-3).
-        let (raw_path, query) = match r.target.split_once('?') {
-            Some((p, q)) => (p, Some(q)),
-            None => (r.target.as_str(), None),
-        };
-        let segments = raw_path
-            .strip_prefix('/')
-            .ok_or(Refusal::NotFound)?
-            .split('/')
-            .map(|seg| percent_decode(seg, false))
-            .collect::<Option<Vec<_>>>()
-            .ok_or(Refusal::NotFound)?;
+        let (segments, query) = split_target(&r.target)?;
         // 6. The routes of the listener's mode.
         match &self.mode {
             ListenerMode::Full => route(&r.method, &segments, query),
             ListenerMode::ProfileOnly { key } => route_only(key, &r.method, &segments, query),
         }
     }
+}
 
-    fn is_own_host(&self, value: &str) -> bool {
-        let port = self.port;
-        value.eq_ignore_ascii_case(&format!("localhost:{port}"))
-            || value == format!("127.0.0.1:{port}")
-            || value == format!("[::1]:{port}")
-            || self.lan.is_some_and(|lan| value == format!("{lan}:{port}"))
+/// Check 2: no body. Every `Content-Length` is `0`, and there is no `Transfer-Encoding`.
+pub(crate) fn no_body(r: &Request) -> Result<(), Refusal> {
+    if r.all("content-length").iter().any(|v| *v != "0") || !r.all("transfer-encoding").is_empty() {
+        return Err(Refusal::Body);
     }
+    Ok(())
+}
+
+/// Check 3: exactly one `Host`, one of the site's own on `port` (`localhost` in any case,
+/// `127.0.0.1`, `[::1]`, and the bound LAN address when `lan` is given); the accepted value.
+pub(crate) fn one_host(r: &Request, port: u16, lan: Option<Ipv4Addr>) -> Result<&str, Refusal> {
+    match r.all("host").as_slice() {
+        [one] if is_own_host(one, port, lan) => Ok(*one),
+        _ => Err(Refusal::Host),
+    }
+}
+
+fn is_own_host(value: &str, port: u16, lan: Option<Ipv4Addr>) -> bool {
+    value.eq_ignore_ascii_case(&format!("localhost:{port}"))
+        || value == format!("127.0.0.1:{port}")
+        || value == format!("[::1]:{port}")
+        || lan.is_some_and(|lan| value == format!("{lan}:{port}"))
+}
+
+/// Whether `origin` is the `http://` origin of the accepted `host`, in its own spelling.
+pub(crate) fn own_origin(origin: &str, host: &str) -> bool {
+    origin
+        .strip_prefix("http://")
+        .is_some_and(|h| h.eq_ignore_ascii_case(host))
+}
+
+/// Check 4: no `Origin`, or each one the accepted `host`'s own.
+pub(crate) fn own_origins(r: &Request, host: &str) -> Result<(), Refusal> {
+    if r.all("origin").iter().all(|o| own_origin(o, host)) {
+        Ok(())
+    } else {
+        Err(Refusal::Origin)
+    }
+}
+
+/// Check 5's split: the path's segments (after its leading `/`, split at `/` before each is
+/// percent-decoded once) and its query. A path with no leading `/`, or a segment that does not
+/// decode, is not found.
+pub(crate) fn split_target(target: &str) -> Result<(Vec<Vec<u8>>, Option<&str>), Refusal> {
+    let (raw_path, query) = match target.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (target, None),
+    };
+    let segments = raw_path
+        .strip_prefix('/')
+        .ok_or(Refusal::NotFound)?
+        .split('/')
+        .map(|seg| percent_decode(seg.as_bytes(), false))
+        .collect::<Option<Vec<_>>>()
+        .ok_or(Refusal::NotFound)?;
+    Ok((segments, query))
 }
 
 /// Routes a path from its percent-decoded segments (the path after its leading `/`, split at
@@ -448,7 +486,7 @@ fn parse_scope(text: &str) -> Option<ScopeRef> {
 }
 
 /// 16 lowercase hex digits: a page revision or a label hash.
-fn is_rev(s: &str) -> bool {
+pub(crate) fn is_rev(s: &str) -> bool {
     s.len() == 16 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
@@ -459,12 +497,8 @@ fn page_path(segments: &[Vec<u8>]) -> Option<String> {
     let last = segments.len().checked_sub(1)?;
     let mut path = String::new();
     for (i, seg) in segments.iter().enumerate() {
-        let seg = std::str::from_utf8(seg).ok()?;
-        if seg == "."
-            || seg == ".."
-            || seg.contains(['\0', '\\', '/'])
-            || (seg.is_empty() && i != last)
-        {
+        let seg = clean_segment(seg)?;
+        if seg.is_empty() && i != last {
             return None;
         }
         if i > 0 {
@@ -478,14 +512,23 @@ fn page_path(segments: &[Vec<u8>]) -> Option<String> {
     Some(path)
 }
 
-/// A query value, percent-decoded with `+` as a space (form encoding).
-fn query_decode(raw: &str) -> Option<String> {
-    String::from_utf8(percent_decode(raw, true)?).ok()
+/// Rule 5 on one decoded segment: UTF-8 with no NUL, `\` or `/`, and not `.` or `..`. It may be
+/// empty; the caller decides where an empty segment is allowed.
+pub(crate) fn clean_segment(seg: &[u8]) -> Option<&str> {
+    let seg = std::str::from_utf8(seg).ok()?;
+    if seg == "." || seg == ".." || seg.contains(['\0', '\\', '/']) {
+        return None;
+    }
+    Some(seg)
 }
 
-/// `%XX` escapes decoded; `None` for a `%` without two hex digits.
-fn percent_decode(raw: &str, plus_is_space: bool) -> Option<Vec<u8>> {
-    let bytes = raw.as_bytes();
+/// A query value, percent-decoded with `+` as a space (form encoding).
+pub(crate) fn query_decode(raw: &str) -> Option<String> {
+    String::from_utf8(percent_decode(raw.as_bytes(), true)?).ok()
+}
+
+/// `%XX` escapes decoded once; `None` for a `%` without two hex digits.
+pub(crate) fn percent_decode(bytes: &[u8], plus_is_space: bool) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
@@ -518,31 +561,49 @@ fn hex_value(b: u8) -> Option<u8> {
     }
 }
 
-/// The response for a refusal: plain text, with `Allow` on a 405.
+/// The response for a refusal: plain text, with `Allow` on a 405. A UI method refusal names
+/// its route's methods: `GET, HEAD` for a page, `POST` for the answer route.
 pub fn refusal(f: Refusal) -> Response {
-    let (status, body) = match f {
-        Refusal::TooLarge => (431, "The request head is too large."),
-        Refusal::Malformed => (400, "Bad request."),
-        Refusal::Body => (400, "This site takes no request body."),
-        Refusal::Method => (405, "This site is read-only: it answers GET and HEAD only."),
-        Refusal::Host => (403, "This site answers only to its own addresses."),
-        Refusal::Origin => (403, "This site answers only requests from its own pages."),
+    let (status, body, allow) = match f {
+        Refusal::TooLarge => (431, "The request head is too large.", None),
+        Refusal::Malformed => (400, "Bad request.", None),
+        Refusal::Body => (400, "This site takes no request body.", None),
+        Refusal::Method => (
+            405,
+            "This site is read-only: it answers GET and HEAD only.",
+            Some("GET, HEAD"),
+        ),
+        Refusal::Host => (403, "This site answers only to its own addresses.", None),
+        Refusal::Origin => (
+            403,
+            "This site answers only requests from its own pages.",
+            None,
+        ),
         Refusal::NotFound => (
             404,
             "Not found. Ask your agent for the site's link (rdy_site), or run rdy site.",
+            None,
         ),
         Refusal::Busy => (
             503,
             "Too many live pages are open. Close some tabs, then reload this one.",
+            None,
         ),
         Refusal::Broken => (
             500,
             "This page could not be built. The person who runs this site can find the reason in rdy's log.",
+            None,
         ),
+        Refusal::UiMethod { allow } if allow == UI_POST => {
+            (405, "This address answers POST only.", Some(UI_POST))
+        }
+        Refusal::UiMethod { .. } => (405, "This page answers GET and HEAD only.", Some(UI_GET)),
+        Refusal::UiBodyTooLarge => (413, "The answer is too large. Send at most 4 MiB.", None),
+        Refusal::UiContentType => (415, "Use a form to answer this card.", None),
     };
     let mut r = text(status, body);
-    if status == 405 {
-        r.headers.push(("Allow", "GET, HEAD".to_string()));
+    if let Some(allow) = allow {
+        r.headers.push(("Allow", allow.to_string()));
     }
     r
 }

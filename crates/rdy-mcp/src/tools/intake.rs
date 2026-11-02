@@ -1,9 +1,10 @@
 //! rdy_pending and rdy_answer: the chat path to the "needs you" queue (D-KQ4CA, D-JV6Z8,
 //! D-ST423). `rdy_pending` lists what waits for the person, each item with its card. `rdy_answer`
 //! relays the person's answer to one card (or each of several, with its recommended option),
-//! bound to the card they were shown. An MCP session is an agent session, so an answer always
-//! relays the person's words; the session is the relay (the relay table, D-HA7YZ). Elicited
-//! answers wait for M3 (F5).
+//! bound to the card they were shown. An MCP session is an agent session, so an answer it records
+//! relays the person's words; the session is the relay (the relay table, D-HA7YZ). With
+//! `elicit: true` the client asks the person itself: `server/intake.rs` runs that exchange, and
+//! the person's choice is a local answer (D-6M0AF).
 
 use super::*;
 use rdy_engine::answer::AnswerRequest;
@@ -53,8 +54,8 @@ pub struct AnswerParams {
     /// A briefing token from rdy_brief. Only the answer to a question whose decision goes under
     /// stable content takes one.
     pub brief: Option<String>,
-    /// The person's words, quoted (1 to 2000 characters). Without them nothing is recorded.
-    pub evidence: String,
+    /// The person's words, quoted (1 to 2000 characters). A relayed answer requires them; without them nothing is recorded.
+    pub evidence: Option<String>,
     /// The question you asked the person.
     pub question: Option<String>,
     /// The chat session the person spoke in (default: mcp).
@@ -66,6 +67,8 @@ pub struct AnswerParams {
     /// and card_hash. Each entry is its own answer, in the order given; it stops at the first
     /// refusal.
     pub all_recommended: Option<Vec<RecommendedParams>>,
+    /// Ask the client to show rdy's card. Pass ref and card_hash, and brief when needed, without option or evidence.
+    pub elicit: Option<bool>,
 }
 
 fn bad(what: impl Into<String>, fix: impl Into<String>) -> RdyError {
@@ -107,10 +110,21 @@ pub fn rdy_pending(st: &mut McpState, p: PendingParams) -> Result<Value, RdyErro
 /// relayed by this agent session. The person is the project's human actor (O18).
 pub fn rdy_answer(st: &mut McpState, p: AnswerParams) -> Result<Value, RdyError> {
     let s = session(st)?;
+    if p.elicit == Some(true) {
+        // the server's call path owns elicitation: here no client can be asked
+        crate::elicitation::ask_of(&p, None)?;
+        return Err(crate::elicitation::unavailable());
+    }
+    let Some(evidence) = p.evidence else {
+        return Err(bad(
+            "rdy_answer: parameter \"evidence\" is required",
+            "pass \"evidence\" as a string",
+        ));
+    };
     let person = human_actor_for_env(&st.engine.root())?;
     let relay = RelayInput {
         relayed_by: None,
-        evidence: Some(p.evidence),
+        evidence: Some(evidence),
         question: p.question,
         session_ref: p.session_ref,
         kind: evidence_kind(p.kind.as_deref())?,

@@ -1,0 +1,38 @@
+{
+  "inputRequests": {
+    "answer": {
+      "method": "elicitation/create",
+      "params": {
+        "message": "P-c29d354a90c8@1  one                                         approve\n\nSummary (human:qa)\n  Adds one claim.\n\nFacts (computed)\n  Changes         1 doc, 1 block\n  Justification   none\n  Decisions       none\n  Supersedes      none\n  Re-affirms      none\n  Reversibility   none\n  Consequences    1 returned\n  Change plan     1 open, 0 closed, 0 deferred\n  Tensions        0 blocking, 0 advisory\n  Coverage        73% → 75%\n  Confidence      medium: untied_content on c-MPAR5\n  Base            canon at b565ed34d01e, current\n  Exceptions      none\n  Policy          needs a person: no authority policy is set\n\nOptions\n  1. Approve P-c29d354a90c8@1                       recommended\n     Lands the proposal in canon.\n     Why recommended: its checks pass and nothing blocks it\n  2. Reject\n     Returns the proposal to its view. Canon does not change.\n  3. Later\n     Hides this card until the chat session changes.",
+        "mode": "form",
+        "requestedSchema": {
+          "properties": {
+            "choice": {
+              "oneOf": [
+                {
+                  "const": "approve",
+                  "title": "Approve P-c29d354a90c8@1 (Recommended)"
+                },
+                {
+                  "const": "reject",
+                  "title": "Reject"
+                },
+                {
+                  "const": "later",
+                  "title": "Later"
+                }
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "choice"
+          ],
+          "type": "object"
+        }
+      }
+    }
+  },
+  "requestState": "<handle>",
+  "resultType": "input_required"
+}

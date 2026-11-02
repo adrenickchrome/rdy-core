@@ -170,12 +170,12 @@ pub const OPS: &[&str] = &[
 #[serde(deny_unknown_fields)]
 struct NoArgs {}
 
-/// Why an agent session is refused a tag or an import.
-pub(crate) const AGENT_NOT_APPROVER: &str = "agent sessions cannot tag or import";
+/// Why an agent session is refused a tag.
+pub(crate) const AGENT_NOT_APPROVER: &str = "agent sessions cannot tag";
 
 /// How the refusal is fixed.
 pub(crate) const AGENT_NOT_APPROVER_FIX: &str =
-    "tags and imports are the person's acts: ask the person to run the command";
+    "tags are the person's acts: ask the person to run the command";
 
 /// Why an agent session is refused an approval it does not relay.
 const AGENT_NOT_RELAYING: &str = "an agent approves only by relaying a person's approval";
@@ -190,7 +190,7 @@ const HUMAN_RELAY: &str =
 /// How that refusal is fixed.
 const HUMAN_RELAY_FIX: &str = "drop --relayed-by to approve yourself, or let the agent run rdy approve with RDY_ACTOR set to its actor";
 
-/// The session a tag or an import runs as: a human session as an approver; an agent session
+/// The session a tag runs as: a human session as an approver; an agent session
 /// is refused with `E_PERMISSION`.
 pub(crate) fn approver(s: &Session) -> Result<Session, RdyError> {
     if s.is_human() {

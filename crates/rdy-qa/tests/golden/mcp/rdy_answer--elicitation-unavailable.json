@@ -1,0 +1,10 @@
+{
+  "content": [
+    {
+      "text": "{\"code\":\"E_ELICITATION_UNAVAILABLE\",\"fix\":\"show the card in chat and relay the person's answer: rdy_answer with option and evidence\",\"issues\":[],\"message\":\"this client cannot show rdy's card itself\"}",
+      "type": "text"
+    }
+  ],
+  "isError": true,
+  "resultType": "complete"
+}

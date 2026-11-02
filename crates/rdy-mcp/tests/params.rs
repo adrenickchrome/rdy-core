@@ -387,7 +387,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
             checked.push(stringify!($t));
         )* };
     }
-    // The 68 `*Params` types, nested ones included (`EditorialParams`, `ReflectsParams`,
+    // The 69 `*Params` types, nested ones included (`EditorialParams`, `ReflectsParams`,
     // `AltMemberParams`, `AltPickParams`, `DismissParams`, `DecideParams`, `MentionParams`,
     // `AcceptAdviceParams`, `RelayParams`, `RecommendedParams`, `PlanAnswerParams`,
     // `PlanAnswerSpecParams`, `PlanGroupParams`,
@@ -413,6 +413,7 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         ExportParams,
         CitationParams,
         IdParams,
+        ImportParams,
         InboxParams,
         IntentParams,
         KeyBindParams,
@@ -1806,5 +1807,28 @@ fn rg11_propose_plan_answers_schema_names_tn_ids_and_the_dismiss_reason() {
     assert!(
         !text.contains("Required for confirm and defer"),
         "the old reason wording is gone: {text}"
+    );
+}
+
+/// ui10: `elicit` is one more optional key of `rdy_answer`, and evidence is no longer required by
+/// the schema: the relay path requires it in its own words.
+#[test]
+fn ui10_answer_params_add_elicit_and_keep_their_shapes() {
+    let (code, message, fix) =
+        refusal::<rdy_mcp::tools::AnswerParams>("rdy_answer", json!({"elicit": "yes"}));
+    assert_eq!(
+        (code.as_str(), message.as_str(), fix.as_str()),
+        (
+            "E_BAD_INPUT",
+            "rdy_answer: parameter \"elicit\" must be a boolean, not a string",
+            "pass \"elicit\" as a boolean",
+        )
+    );
+    assert!(
+        rdy_mcp::params::parse_params::<rdy_mcp::tools::AnswerParams>(
+            "rdy_answer",
+            json!({"ref": "r"}).as_object().unwrap().clone()
+        )
+        .is_ok()
     );
 }

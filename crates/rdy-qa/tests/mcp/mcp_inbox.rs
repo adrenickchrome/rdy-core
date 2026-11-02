@@ -173,16 +173,16 @@ fn ib7_rdy_schema_tells_an_agent_how_to_read_the_persons_inbox() {
 }
 
 #[test]
-fn ib7_an_oversized_budget_is_refused_before_the_session_is_looked_up() {
+fn ib7_a_wire_claim_precedes_the_tool_budget_check() {
     let s = served();
-    // No session yet: the budget check runs first, so E_LIMIT wins over E_NO_SESSION.
+    // ui5: no claim yet: the wire refuses the call before the tool checks its budget.
     let mut c = McpClient::start_proxy(&s);
     for args in [
         json!({"max_tokens": 1_000_000}),
         json!({"person": true, "max_tokens": 1_000_000}),
     ] {
         let r = c.call("rdy_inbox", args.clone());
-        assert_eq!(r.code(), Some("E_LIMIT"), "{args}: {r:?}");
+        assert_eq!(r.code(), Some("E_NO_SESSION"), "{args}: {r:?}");
     }
     // With a session the same refusals hold.
     let mut a = agent(&s, None);

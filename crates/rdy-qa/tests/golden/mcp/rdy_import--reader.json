@@ -1,0 +1,6 @@
+{
+  "code": "E_PERMISSION",
+  "fix": "start the session as a writer",
+  "issues": [],
+  "message": "role Reader cannot import"
+}

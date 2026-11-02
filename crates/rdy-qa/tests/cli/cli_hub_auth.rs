@@ -159,6 +159,19 @@ impl Home {
         self.write_creds(&file);
     }
 
+    /// Moves the next check of the pending sign-in of `install` an hour on, so a slow machine
+    /// cannot reach the hub's five-second interval before a "not yet due" step.
+    fn make_not_due(&self, install: &str) {
+        let mut file = self.read_creds();
+        let o = Origin::parse(install).unwrap();
+        let Some(Credential::Pending(mut p)) = file.get(&o).cloned() else {
+            panic!("no pending sign-in for {install}");
+        };
+        p.next_poll_at_ms = now() + 3_600_000;
+        file.set(o, Some(Credential::Pending(p)));
+        self.write_creds(&file);
+    }
+
     /// `rdy <args>` in `cwd` with this home's environment only, and `extra` on top.
     fn command(&self, cwd: &Path, extra: &[(&str, &str)], args: &[&str]) -> Command {
         let mut cmd = Command::new(rdy_bin());
@@ -968,6 +981,8 @@ fn hsa8_cli_and_mcp_auth_replies_match() {
         ),
     ));
     // pending, not yet due
+    cli_home.make_not_due(&co);
+    mcp_home.make_not_due(&mo);
     pairs_seen.push((
         cli(&["auth", "state", "--install", &co]),
         mcp(json!({"op": "state", "install": mo})),

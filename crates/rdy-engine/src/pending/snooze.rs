@@ -5,15 +5,20 @@
 //! the chat session changes (`session_ref` differs), or the item gets a new version (its ref
 //! differs). The CLI has no Later, so a CLI snooze cannot exist and a query with no
 //! `session_ref` hides nothing.
+//!
+//! A relayed snooze names its chat session in `relay_evidence.session_ref`. An elicited snooze
+//! (D-WPE4R, O9) has no relay: the run of the session that elicited it, `person.run`, names its
+//! chat session.
 use super::item::Item;
 use super::queue::PendingQuery;
 use crate::ReadState;
-use rdy_model::AnswerAct;
+use rdy_model::{AnswerAct, EvidenceKind};
 
 /// `items` without the ones `q.person` snoozed in the session `q.session_ref`, and how many that
-/// hid. An item is hidden when `pending/<person>/<item ref>` names a `later` answer whose
-/// `relay_evidence.session_ref` equals `q.session_ref`. A snooze that cannot be read hides
-/// nothing: the person sees the card again.
+/// hid. An item is hidden when `pending/<person>/<item ref>` names a `later` answer whose chat
+/// session (its `relay_evidence.session_ref`, or for a local elicited snooze its `person.run`)
+/// equals `q.session_ref`. A snooze that cannot be read hides nothing: the person sees the card
+/// again.
 pub(crate) fn hide_snoozed(
     st: &ReadState,
     q: &PendingQuery,
@@ -35,9 +40,14 @@ pub(crate) fn hide_snoozed(
 fn snoozed_in(st: &ReadState, person: &str, session: &str, item: &str) -> bool {
     match st.reader().snooze_of(person, item) {
         Ok(Some((_, a))) => {
-            a.act == AnswerAct::Later
-                && a.item == item
-                && a.relay_evidence.is_some_and(|e| e.session_ref == session)
+            let in_session = match &a.relay_evidence {
+                Some(e) => e.session_ref == session,
+                None => {
+                    a.evidence_kind == Some(EvidenceKind::Elicited)
+                        && a.person.run.as_deref() == Some(session)
+                }
+            };
+            a.act == AnswerAct::Later && a.item == item && in_session
         }
         _ => false,
     }

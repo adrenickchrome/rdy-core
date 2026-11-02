@@ -11,10 +11,15 @@
 //! names. `make_private_path` stays here.
 //! - process lifecycle: a new session on spawn, exit codes, liveness, `SIGTERM` and `setsid`;
 //! - stop signals: `SIGINT` and `SIGTERM` in a tokio runtime;
-//! - the startup environment: the diagram crate's variables, removed before anything else runs.
+//! - the startup environment: the diagram crate's variables, removed before anything else runs;
+//! - the site socket's option before its bind (D-FPKPS, `configure_site_socket`): `SO_REUSEADDR`
+//!   on Unix, `SO_EXCLUSIVEADDRUSE` on Windows (built and tested on its own by the isolated probe
+//!   in `probes/site-socket`).
 
+mod site_socket;
 #[cfg(unix)]
 mod unix;
+pub(crate) use site_socket::configure_site_socket;
 #[cfg(unix)]
 pub use unix::*;
 

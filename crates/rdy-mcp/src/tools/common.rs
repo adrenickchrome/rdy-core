@@ -74,6 +74,11 @@ pub struct McpState {
     /// The caller's SSH agent: the process at the other end of this session. `McpState::new`
     /// starts with none ([`UnavailableAgent`]); `RdyServer::with_agent` sets it.
     pub agent: Arc<dyn SigningAgent>,
+    /// D-4PHYQ: the actor and run this connection is bound to: the first valid explicit claim,
+    /// by `rdy_session` or `_meta`. Set once, for the connection's life.
+    pub bound: Option<crate::claims::Key>,
+    /// What the running call's `_meta` states, while the call runs ([`crate::claims::enter`]).
+    pub claim: Option<crate::claims::Asked>,
 }
 
 impl McpState {
@@ -90,6 +95,8 @@ impl McpState {
             lease_owner: rdy_engine::semantic::lease::LeaseRegistry::local_owner(),
             hub: crate::notify::NotifyHub::new(),
             agent: Arc::new(UnavailableAgent),
+            bound: None,
+            claim: None,
         }
     }
 
@@ -153,14 +160,17 @@ pub(crate) fn report_once(st: &mut McpState, mut v: Value) -> Value {
     v
 }
 
+/// The refusal of a call with no session: no claim, and none bound.
+pub(crate) fn no_session() -> RdyError {
+    RdyError::new(
+        E_NO_SESSION,
+        "no session",
+        "state rdy/actor and rdy/run in _meta, or call rdy_session",
+    )
+}
+
 pub(crate) fn session(st: &McpState) -> Result<Session, RdyError> {
-    st.session.clone().ok_or_else(|| {
-        RdyError::new(
-            E_NO_SESSION,
-            "no session",
-            "call rdy_session first with your actor, run and role",
-        )
-    })
+    st.session.clone().ok_or_else(no_session)
 }
 
 /// The scope a tool reads, resolved on the state the tool reads (`read`), so that a view created

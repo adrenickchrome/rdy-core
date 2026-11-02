@@ -4,7 +4,7 @@
 /// adds an element where it belongs. `INSTRUCTIONS` joins them with one space at compile time.
 pub const INSTRUCTION_SENTENCES: &[&str] = &[
     "rdy keeps decisions and documentation consistent while agents change them.",
-    "Call rdy_session first, then rdy_overview.",
+    "State rdy/actor and rdy/run in _meta, or call rdy_session; then call rdy_overview.",
     "Read and write through rdy's tools, not the working-copy files.",
     "Brief before editing (rdy_brief); writes to stable content must cite a briefing (brief: <token>).",
     // plan Redaction: four sentences in this element, and plan Change plan adds three before them,
@@ -24,6 +24,7 @@ pub const INSTRUCTION_SENTENCES: &[&str] = &[
     "Propose at the point rdy_session's propose.cadence sets, by default at a natural break; under changes, propose when a write reply says propose_due.",
     "Present a batch card from rdy_pending at the end of an iteration, then each exception on its own; show each option label word for word and never change the options, the recommendation or the version.",
     "Relay the person's answer with rdy_answer: pass the card_hash you showed, their words as evidence and your question; interrupt the person only for a blocking item.",
+    "Use rdy_answer with elicit: true to ask a supporting client to show the card. Never send a request to /~ui/. Use rdy_answer, with elicitation or the person's relayed words.",
     "While coding, a change within the design is just code; a gap is a proposed decision plus the doc update; a contradiction is a finding plus a superseding decision, and you stop when it is blocking or one_way.",
     "When you start a project or a new area, plan the tree first: folders by area, a doc type for each doc, decisions recorded with rdy_decide and no parent, open questions as question blocks and terms in the glossary; show the person the plan before the first content write.",
     // rf5 (TASK-507 (4)): the Finding line sits in this element, so that the existing sentence

@@ -253,7 +253,12 @@ fn rdx12_reader_dry_run_and_owned_view_rules_are_preserved() {
     let (code, message, _) = refused(c.call("rdy_redact", rec.clone()));
     assert_eq!(code, "E_PERMISSION", "{message}");
 
+    // a stdio connection is bound to its first actor and run (D-4PHYQ), so each of the three
+    // sessions below has its own connection; only one no-daemon server holds a project at a time
+    drop(c);
+
     // a writer records in its own view; the first request creates and claims it
+    let mut c = McpClient::start(dir.path());
     session(&mut c, "agent:a", "r1", "writer");
     let v = c.call("rdy_redact", rec.clone()).ok();
     assert!(v["change"].is_string(), "{v}");
@@ -262,7 +267,9 @@ fn rdx12_reader_dry_run_and_owned_view_rules_are_preserved() {
     w["view"] = json!("work");
     let (code, ..) = refused(c.call("rdy_redact", w));
     assert_eq!(code, "E_VIEW_OWNER");
+    drop(c);
     // another agent may not record in r1, by either spelling; the existing ownership text
+    let mut c = McpClient::start(dir.path());
     session(&mut c, "agent:b", "r2", "writer");
     for view in ["r1", "view:r1"] {
         let mut w = rec.clone();

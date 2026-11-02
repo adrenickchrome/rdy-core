@@ -2,6 +2,7 @@
 //! One `mod` line per test file in this directory; a file without its line never runs
 //! (`tlay1_` checks). Keep the list sorted.
 mod render;
+mod render_approver;
 mod render_blob_state;
 mod render_build;
 mod render_changes;
@@ -41,6 +42,7 @@ mod render_questions_outside_doc;
 mod render_reader_text;
 mod render_redaction;
 mod render_ref;
+mod render_refusal_details;
 mod render_review;
 mod render_review_bar;
 mod render_review_index;

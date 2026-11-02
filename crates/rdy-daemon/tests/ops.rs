@@ -370,18 +370,17 @@ fn ctl2_an_agent_may_write_but_not_approve_alone_tag_or_import() {
         err.message,
         "an agent approves only by relaying a person's approval"
     );
-    for (op, args) in [
-        ("tag", json!({"version": "v0.1.0"})),
-        ("import", json!({"dir": "x", "view": "r1"})),
-    ] {
-        let err = dispatch(&c, op, args).unwrap_err();
-        assert_eq!(err.code, rdy_engine::E_PERMISSION, "{op}");
-        assert_eq!(err.message, "agent sessions cannot tag or import");
-        assert_eq!(
-            err.fix,
-            "tags and imports are the person's acts: ask the person to run the command"
-        );
-    }
+    let err = dispatch(&c, "tag", json!({"version": "v0.1.0"})).unwrap_err();
+    assert_eq!(err.code, rdy_engine::E_PERMISSION);
+    assert_eq!(err.message, "agent sessions cannot tag");
+    assert_eq!(
+        err.fix,
+        "tags are the person's acts: ask the person to run the command"
+    );
+    // an agent writer may import (D-Y9DNZ): a missing tree is the file's error, not a refusal
+    let err = dispatch(&c, "import", json!({"dir": "x", "view": "r1"})).unwrap_err();
+    assert_eq!(err.code, rdy_engine::E_BAD_INPUT, "{err:?}");
+    assert!(err.message.contains("rdy-export.yaml"), "{err:?}");
 }
 
 #[test]

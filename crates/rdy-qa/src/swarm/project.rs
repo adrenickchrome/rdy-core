@@ -61,6 +61,61 @@ pub fn use_checks_pack(dir: &Path, extra_config: &str) {
     use_pack(dir, CHECKS_PACK, &checks_pack_yaml(), extra_config);
 }
 
+/// An export tree at `out` for `rdy import` (pack `pack`): doc `name` (id `doc`) with one section
+/// (id `section`) and one accepted decision (id `decision`), `two_way` with basis `precedent`.
+/// Every block's source author is `agent:src`, so the import writes one author change whose
+/// author differs from whoever imports it. The Imported card fact reads this.
+pub fn imported_tree(out: &Path, pack: &str, name: &str, doc: &str, section: &str, decision: &str) {
+    let row = |id: &str, ty: &str, parent: Option<&str>, fields: &[(&str, &str)]| {
+        let mut s = format!("- id: {id}\n  type: {ty}\n");
+        if let Some(p) = parent {
+            s.push_str(&format!("  parent: {p}\n"));
+        }
+        s.push_str("  order: a1\n  fields:\n");
+        for (k, v) in fields {
+            s.push_str(&format!("    {k}: {v}\n"));
+        }
+        s
+    };
+    std::fs::create_dir_all(out.join("docs")).expect("the export tree");
+    std::fs::write(
+        out.join("rdy-export.yaml"),
+        format!("format: 3\npack: {pack}\nscope: work\n"),
+    )
+    .expect("the export manifest");
+    let mut docs = row(
+        doc,
+        "doc",
+        None,
+        &[
+            ("doc_type", "overview"),
+            ("key", name),
+            ("title", "Imported"),
+        ],
+    );
+    docs.push_str(&row(section, "section", Some(doc), &[("title", "Rulings")]));
+    docs.push_str(&row(
+        decision,
+        "decision",
+        Some(section),
+        &[
+            ("authority_basis", "precedent"),
+            ("needs_content", "false"),
+            ("reversibility", "two_way"),
+            ("statement", "The imported ruling holds"),
+            ("status", "accepted"),
+        ],
+    ));
+    std::fs::write(out.join("docs").join(format!("{name}.yaml")), docs).expect("the export doc");
+    let authors: String = [doc, section, decision]
+        .iter()
+        .map(|id| {
+            format!("- id: {id}\n  actor: agent:src\n  run: s1\n  role: writer\n  at_ms: 100\n")
+        })
+        .collect();
+    std::fs::write(out.join("authors.yaml"), authors).expect("the export authors");
+}
+
 /// The name of a swarm process's parent directory under `/tmp`, before its pid.
 const PARENT_PREFIX: &str = "rdysw-";
 
@@ -160,6 +215,12 @@ const CLAIM_WORDS: [&str; CLAIMS_PER_AREA] = ["first", "second", "third", "fourt
 pub fn build(cfg: &Config) -> SwarmProject {
     let served = Served::new_in(run_parent());
     use_checks_pack(served.dir.path(), "serve:\n  idle_timeout: 60\n");
+    // the local approval pages the person's `UiAnswer` answers on
+    std::fs::write(
+        served.dir.path().join(".rdy/local.yaml"),
+        "serve:\n  ui: true\n",
+    )
+    .expect("the swarm's local config");
     let mut r = Rdy::open(served.dir.path()).expect("open the swarm project");
     let mut ops: Vec<Value> = Vec::new();
     for (k, (folder, doc, term)) in DOCS.iter().enumerate() {

@@ -21,8 +21,8 @@
 //! hold 1 to 2000 characters, as the public reaffirm op's reason. The landing writes only the
 //! members' pins and re-affirmation metadata for the card's cause, records the answering person
 //! as its approver with the card as its evidence (both labels, and the chosen one; a relay with
-//! text evidence is refused), and asks for no second approval and no one-way exception: the
-//! person answered this exact card.
+//! text evidence is refused; an elicited answer keeps its `elicited` kind), and asks for no
+//! second approval and no one-way exception: the person answered this exact card.
 use super::{
     AnswerInfo, AnswerStep, Answerer, Bound, PreparedAnswer, assurance, labels, put_alone,
 };
@@ -105,7 +105,7 @@ fn keep(
         person: by.who.provenance(),
         relayed_by: relay.as_ref().map(|r| r.by.clone()),
         relay_evidence: relay.as_ref().map(|r| r.evidence.clone()),
-        evidence_kind: relay.as_ref().and(by.kind),
+        evidence_kind: by.kind,
         note: Some(note),
     };
     let h = put_alone(r, &a)?;
@@ -138,7 +138,7 @@ fn hold(
     }
     // the landing's evidence is the card the person answered, local or relayed (D-CQMA4): a
     // relay that calls its evidence the person's own words is refused before anything is written
-    if by.kind.is_some_and(|k| k != EvidenceKind::Card) {
+    if by.kind == Some(EvidenceKind::Text) {
         return Err(RdyError::new(
             E_BAD_INPUT,
             "a re-affirmation card's landing records card evidence, not text",
@@ -146,8 +146,13 @@ fn hold(
         ));
     }
     let reason = Reason::parse(note.as_deref().unwrap_or(HOLD_LABEL))?;
+    // an elicited answer keeps its kind (D-6M0AF); every other answer records the card
+    let kind = match by.kind {
+        Some(EvidenceKind::Elicited) => EvidenceKind::Elicited,
+        _ => EvidenceKind::Card,
+    };
     let evidence = ApprovalEvidence {
-        kind: EvidenceKind::Card,
+        kind,
         options: labels(&b.item),
         choice: Some(HOLD_LABEL.to_string()),
         card_hash: Some(card_hash(&b)?),

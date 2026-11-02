@@ -185,9 +185,9 @@ fn sess2_a_human_may_write_into_any_view() {
 }
 
 #[test]
-fn sess2_import_is_refused_to_agents_before_any_file_is_read() {
+fn sess2_import_is_refused_to_readers_before_any_file_is_read() {
     let (d, mut r) = project();
-    let b = Session::agent("agent:b".into(), None, Role::Writer).unwrap();
+    let b = Session::agent("agent:b".into(), None, Role::Reader).unwrap();
     let e = r
         .import(&b, "imp", &d.path().join("does-not-exist"))
         .unwrap_err();

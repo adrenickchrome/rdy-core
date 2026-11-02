@@ -31,3 +31,4 @@ mod io_reader;
 mod io_redaction_load;
 mod io_sync_fixture;
 mod io_tree;
+mod io_writer_import;

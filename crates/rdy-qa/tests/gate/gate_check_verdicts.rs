@@ -858,6 +858,46 @@ fn ck7_shown_card_appends_verdicts_after_policy() {
     assert_eq!(after_hash, before_hash);
     assert_eq!(after, before);
     assert_ne!(card.card_hash, none.card_hash);
+    // ui2 (TASK-982 C1): a version that carries an imported decision status shows the computed
+    // Imported line after Policy, and the verdict lines after Imported
+    let (_d2, mut r2) = project();
+    let t = tempfile::tempdir().unwrap();
+    let i1 = ag("i1");
+    crate::gate_import_policy::import_tree(
+        &mut r2,
+        &i1,
+        "i1",
+        t.path(),
+        "one",
+        ("d-AA001", "s-AA001"),
+        &[("D-AC001", "accepted")],
+    );
+    // an editorial claim beside the import, which meaning preservation reads
+    let claim = created(
+        &put_j(
+            &mut r2,
+            "i1",
+            json!([{"op": "create", "type": "claim", "id": "$c", "parent": "s-AA001",
+                    "body": "C holds."}]),
+            j_typo(),
+        ),
+        "$c",
+    );
+    let q = crate::gate_import_policy::propose_as(&mut r2, &i1, "i1");
+    let e2 = Local::new(r2);
+    let (_, imported_record) = stored(&e2, &q);
+    let n = imported_record.card.facts.len();
+    assert!(imported_record.card.facts[n - 1].starts_with("Policy: "));
+    meaning_verdict(&e2, &i1, &q.r#ref, "fail", &claim);
+    let shown = approve_card(&e2, &q.r#ref);
+    assert_eq!(lines(&shown)[..n], imported_record.card.facts[..]);
+    assert_eq!(
+        lines(&shown)[n..],
+        [
+            crate::gate_import_policy::imported(1, "agent:i1"),
+            format!("meaning preservation: fail (agent:r, independent): {REASON}"),
+        ]
+    );
 }
 
 /// O13: only a case that matches the version's selected changes shows: a change outside a

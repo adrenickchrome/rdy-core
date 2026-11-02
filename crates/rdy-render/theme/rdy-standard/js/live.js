@@ -1,4 +1,4 @@
-// rdy live site: reload or relabel a page in view. Reopen a refused stream in 1 s, doubling to 30 s.
+// Reload or relabel a page; reopen a refused stream: 1 s, doubling to 30.
 (function () {
   var d = document, s = d.currentScript, key = "rdy-live-y:" + location.pathname;
   try {
@@ -31,6 +31,7 @@
     });
   }
   d.addEventListener("visibilitychange", function () { close(); open(); });
+  d.addEventListener("submit", close);
   addEventListener("pagehide", close);
   addEventListener("pageshow", open);
   open();

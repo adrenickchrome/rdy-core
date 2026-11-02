@@ -43,7 +43,7 @@ use super::journal::{Entry, InboxRead, Journal, Outcome as Met};
 use super::oracle::{self, copy_tree};
 use super::people::{self, Hooks, Queue};
 use super::project::{self, CLAIMS_PER_AREA, SeedBlocks, SwarmProject};
-use super::script::{AREAS, Config, Script, script};
+use super::script::{ADVICE_VIEW_SUFFIX, AREAS, Config, Script, script};
 use crate::daemon::{Served, human_command, short_tempdir_in};
 use crate::fixtures::output_within;
 use serde_json::{Value, json};
@@ -412,7 +412,20 @@ fn pacer(
             } else {
                 Place::Behind
             };
-            enqueue(&mut q, r, place, &mut ranks);
+            // the person's look for advice reads the head of the queue: the forced advice
+            // proposal waits behind the others, but inside that look
+            let advice = e
+                .view
+                .as_ref()
+                .is_some_and(|v| v.ends_with(ADVICE_VIEW_SUFFIX));
+            enqueue(&mut q, r.clone(), place, &mut ranks);
+            if advice
+                && let Some(at) = q.iter().position(|x| *x == r)
+                && at >= people::ADVICE_LOOKS / 2
+            {
+                let moved = q.remove(at);
+                q.insert(people::ADVICE_LOOKS / 2, moved);
+            }
         }
     })
 }

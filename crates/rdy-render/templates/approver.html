@@ -1,0 +1,70 @@
+{% extends "layout.html" %}
+{# the site's no-referrer header makes a browser send `Origin: null` with a form; the answer route needs its own origin #}
+{% block robots %}<meta name="robots" content="noindex"><meta name="referrer" content="same-origin">{% endblock %}
+{% block head_scope %}{% endblock %}
+{% block pages %}{% endblock %}
+{% block noscript %}{% if events %}{{ needs_script }}{% else %}{{ no_stream }}{% endif %}{% endblock %}
+{% block foot %}{% endblock %}
+{% block content %}
+{% from "partials/approval_card.html" import card, answer_form %}
+<style>
+.app:has(.ui-page) { grid-template-columns: minmax(0, 1fr); }
+.app:has(.ui-page) .sidenav, .app:has(.ui-page) #menu { display: none; }
+.ui-page .content, .ui-page { max-width: var(--measure); }
+.ui-notice { margin: 0 0 1.25rem; padding: 0.6rem 0.9rem; background: var(--note); border: 1px solid var(--line); border-radius: var(--radius); }
+.ui-item { margin: 0 0 2.5rem; }
+.ui-card { padding: 1rem 1.1rem; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+.ui-card h1, .ui-card h2 { margin: 0 0 0.4rem; overflow-wrap: anywhere; }
+.ui-card h3 { margin: 1rem 0 0.35rem; font-size: 0.82rem; font-weight: 600; color: var(--ink-soft); }
+.ui-meta { margin: 0 0 0.6rem; font-size: 0.85rem; color: var(--ink-soft); display: flex; flex-wrap: wrap; gap: 0.2rem 0.8rem; }
+.ui-card dl { display: grid; grid-template-columns: minmax(7rem, max-content) minmax(0, 1fr); gap: 0.25rem 1rem; margin: 0; }
+.ui-card dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.ui-card dt { color: var(--ink-soft); }
+.ui-card pre { margin: 0; padding: 0.7rem 0.9rem; background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 0.82rem; }
+.ui-raised { margin-top: 1rem !important; }
+.ui-hash { margin: 0.8rem 0 0; font-size: 0.8rem; color: var(--ink-soft); overflow-wrap: anywhere; }
+.ui-options { list-style: none; margin: 1rem 0 0; padding: 0; display: grid; gap: 0.7rem; }
+.ui-option p { margin: 0.2rem 0 0; color: var(--ink-soft); font-size: 0.9rem; }
+.ui-option button { padding: 0.45rem 0.9rem; min-height: 40px; background: var(--accent); color: var(--bg); border-radius: 8px; font-weight: 500; text-align: left; }
+.ui-option button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.ui-rec { display: inline-block; margin-left: 0.4rem; padding: 0.05rem 0.5rem; font-size: 0.78rem; background: var(--accent-soft); color: var(--accent-ink); border-radius: 999px; }
+.ui-form { margin: 1rem 0 0; }
+.ui-note-label { display: block; margin: 0 0 0.3rem; font-size: 0.85rem; color: var(--ink-soft); }
+.ui-form textarea { width: 100%; box-sizing: border-box; padding: 0.5rem 0.7rem; font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line-ui); border-radius: 8px; }
+.ui-briefing { margin: 1.25rem 0 0; }
+.ui-briefing h2 { font-size: 1rem; margin: 0 0 0.5rem; }
+.ui-briefing dl, .ui-briefing ol { margin: 0; }
+.ui-briefing dl { display: grid; grid-template-columns: minmax(7rem, max-content) minmax(0, 1fr); gap: 0.25rem 1rem; }
+.ui-briefing dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.ui-briefing dt { color: var(--ink-soft); }
+.ui-briefing ol { padding-left: 1.2rem; }
+.ui-notready ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.8rem; }
+.ui-more { color: var(--ink-soft); }
+</style>
+<div class="ui-page" data-ui="{{ ui.page }}">
+{% if ui.page == "pending" %}
+<header class="page-head"><h1>{{ ui.heading }}</h1></header>
+{% if ui.notice %}<p class="ui-notice" role="status">{{ ui.notice }}</p>{% endif %}
+{% if not ui.items %}<p class="ui-empty">{{ ui.empty }}</p>{% endif %}
+{% for v in ui.items %}<article class="ui-item" data-ref="{{ v.item.ref }}">
+{{ card(v, 2, v.question, v.question) }}
+{% if not v.question %}{{ answer_form(v, loop.index, none) }}{% endif %}
+</article>
+{% endfor %}
+{% if ui.omitted %}<p class="ui-more">{{ ui.omitted }}</p>{% endif %}
+{% if ui.not_ready %}<section class="ui-notready"><h2>{{ ui.not_ready_heading }}</h2><ul>{% for n in ui.not_ready %}<li><code>{{ n.ref }}</code>{% for b in n.issues %}{{ b }}{% endfor %}</li>{% endfor %}</ul></section>{% endif %}
+{% elif ui.page == "item" %}
+{% if ui.refusal %}{{ ui.refusal }}{% endif %}
+<article class="ui-item" data-ref="{{ ui.item.item.ref }}">
+{{ card(ui.item, 1, not ui.form, not ui.form) }}
+{% if ui.brief_html %}<section class="ui-briefing"><h2>{{ ui.briefing_heading }}</h2>{{ ui.brief_html }}</section>{% endif %}
+{% if ui.form %}{{ answer_form(ui.item, 1, ui.brief) }}{% endif %}
+</article>
+{% else %}
+<header class="page-head"><h1>{{ ui.heading }}</h1></header>
+{{ ui.refusal }}
+{% if ui.card %}<div class="ui-card-text"><pre>{{ ui.card }}</pre></div>{% endif %}
+{% endif %}
+</div>
+{% if events %}<script src="/_rdy/live.js" data-events="{{ events }}" defer></script>{% endif %}
+{% endblock %}

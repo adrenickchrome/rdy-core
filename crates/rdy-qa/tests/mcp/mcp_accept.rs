@@ -198,7 +198,7 @@ fn acc1_overview_schema_and_instructions_carry_the_entity_surfaces() {
             .contains("Search a thing's name, key or alias with rdy_search to get its fact sheet.")
     );
     assert!(
-        INSTRUCTIONS.starts_with("rdy keeps decisions and documentation consistent while agents change them. Call rdy_session first, then rdy_overview."),
+        INSTRUCTIONS.starts_with("rdy keeps decisions and documentation consistent while agents change them. State rdy/actor and rdy/run in _meta, or call rdy_session; then call rdy_overview."),
         "{INSTRUCTIONS}"
     );
     assert!(

@@ -141,13 +141,15 @@ fn logged_kinds(o: &Outcome) -> BTreeMap<String, String> {
 const HUMAN: &str = "human:qa";
 
 /// The acts every seed's run reaches before the freeze (ruling task-5.2).
-const CORE: [&str; 6] = [
+const CORE: [&str; 7] = [
     "write",
     "brief",
     "propose",
     "land",
     "review_submit",
     "inbox",
+    // the forced advice sequence reaches it in every seed (`script::advice_steps`)
+    "accept_advice",
 ];
 
 /// What one seed's run did before the freeze (ruling task-5.2: the drain's acts do not count).
@@ -390,6 +392,7 @@ fn sg5_the_run_exercised_every_act() {
             "wc_commit",
             "inbox_ack",
             "accept_check_verdict",
+            "ui_answer",
         ])
         .filter(|a| !all.acts.contains(a))
         .collect();
@@ -3383,6 +3386,185 @@ fn ap13_every_acknowledged_landing_passes_fsck() {
         assert!(
             missing.is_empty(),
             "swarm seed {seed}: acknowledged landings not in canon: {missing:?}"
+        );
+    });
+}
+
+// ---- ui11: real HTTP answers in the swarm (D-6M0AF, D-WPE4R; system/quality-gate tb-A4DAV) ----
+
+/// The `ui_answer` entries before the freeze.
+fn ui_entries(o: &Outcome) -> Vec<&Entry> {
+    o.before_freeze()
+        .iter()
+        .filter(|e| e.act == "ui_answer")
+        .collect()
+}
+
+/// ui11: the union of the forced sequences comes in every seed: at least the forced landing, the
+/// moved card's refusal and its fresh landing, and the imported decision's landing.
+fn ui_counts(o: &Outcome) -> (usize, usize) {
+    let (mut landed, mut moved) = (0, 0);
+    for e in ui_entries(o) {
+        match &e.outcome {
+            Met::Ok if e.ui.as_ref().is_some_and(|u| u.landing.is_some()) => landed += 1,
+            Met::Refused(code) if code == "E_PROPOSAL_MOVED" => moved += 1,
+            _ => {}
+        }
+    }
+    (landed, moved)
+}
+
+/// ui11: each seed's frozen store holds what each UI answer's journal entry says the page showed:
+/// its item, hash, labels and choice, as the person's local card, with no relay.
+#[test]
+fn ui11_swarm_ui_records_match_the_shown_card() {
+    each(|seed, o| {
+        let (landed, _) = ui_counts(o);
+        assert!(landed >= 3, "swarm seed {seed}: {landed} UI landings");
+        for e in ui_entries(o) {
+            let Some(ui) = &e.ui else {
+                continue;
+            };
+            assert_eq!(ui.source, "ui", "swarm seed {seed}");
+            assert!(!ui.card_hash.is_empty(), "swarm seed {seed}: {ui:?}");
+            assert_eq!(ui.option, "approve", "swarm seed {seed}: {ui:?}");
+            assert!(ui.labels.contains(&ui.label), "swarm seed {seed}: {ui:?}");
+        }
+        let bad = oracle::ui_violations(o.before_freeze(), &o.frozen, false);
+        assert!(bad.is_empty(), "swarm seed {seed}: {bad:#?}");
+        let bad = oracle::ui_violations(&o.journal, &o.dir, false);
+        assert!(
+            bad.is_empty(),
+            "swarm seed {seed} after the drain: {bad:#?}"
+        );
+    });
+}
+
+/// ui11: the barrier sequence's old hash meets `E_PROPOSAL_MOVED` and 409, and never lands; only
+/// the fresh form posted apart lands, and no version lands twice.
+#[test]
+fn ui11_moved_ui_answer_never_lands() {
+    each(|seed, o| {
+        let all = ui_entries(o);
+        let moved: Vec<&&Entry> = all
+            .iter()
+            .filter(|e| e.outcome == Met::Refused("E_PROPOSAL_MOVED".into()))
+            .collect();
+        assert_eq!(moved.len(), 1, "swarm seed {seed}: {all:#?}");
+        let old = moved[0].ui.as_ref().expect("the facts");
+        assert_eq!(old.status, 409, "swarm seed {seed}: {old:?}");
+        assert_eq!(old.landing, None);
+        assert!(old.item.ends_with("@1"), "swarm seed {seed}: {old:?}");
+        let (stable, _) = old.item.rsplit_once('@').expect("a version ref");
+        let fresh = format!("{stable}@2");
+        let landed: Vec<&&Entry> = all
+            .iter()
+            .filter(|e| e.block.as_deref() == Some(fresh.as_str()) && e.outcome == Met::Ok)
+            .collect();
+        assert_eq!(landed.len(), 1, "swarm seed {seed}: {all:#?}");
+        assert!(
+            landed[0]
+                .ui
+                .as_ref()
+                .is_some_and(|u| u.status == 303 && u.landing.is_some()),
+            "swarm seed {seed}: {:?}",
+            landed[0]
+        );
+        // the versions the journal names are the store's: the oracle checks the chain for each
+        let bad = oracle::ui_violations(&o.journal, &o.dir, false);
+        assert!(bad.is_empty(), "swarm seed {seed}: {bad:#?}");
+    });
+}
+
+/// ui11 (D-Y9DNZ): the imported accepted decision: its importer's `rdy_land` is refused with the
+/// never-list reason; the person's UI approval lands it; the store keeps its source author and its
+/// importer, and the landing is a person's, never a policy act.
+#[test]
+fn ui11_imported_status_never_lands_under_policy_in_the_swarm() {
+    use rdy_qa::swarm::people::UI_IMPORTED;
+    each(|seed, o| {
+        let run = o.before_freeze();
+        let refused = run
+            .iter()
+            .find(|e| e.act == "ui_policy_land")
+            .unwrap_or_else(|| panic!("swarm seed {seed}: no policy landing tried"));
+        assert_eq!(
+            refused.outcome,
+            Met::Refused("E_POLICY_HUMAN".into()),
+            "swarm seed {seed}: {refused:?}"
+        );
+        assert!(
+            refused
+                .message
+                .as_deref()
+                .is_some_and(|m| m.contains(rdy_engine::policy_verdict::IMPORTED_STATUS)),
+            "swarm seed {seed}: {refused:?}"
+        );
+        let pref = refused.block.as_deref().expect("the version");
+        let at = run
+            .iter()
+            .position(|e| std::ptr::eq(e, refused))
+            .expect("the entry");
+        let answer = run[at..]
+            .iter()
+            .find(|e| e.act == "ui_answer" && e.block.as_deref() == Some(pref))
+            .unwrap_or_else(|| panic!("swarm seed {seed}: no person's answer to {pref}"));
+        assert_eq!(answer.outcome, Met::Ok, "swarm seed {seed}: {answer:?}");
+        let landing: Hash = answer
+            .ui
+            .as_ref()
+            .and_then(|u| u.landing.as_deref())
+            .and_then(|l| l.parse().ok())
+            .unwrap_or_else(|| panic!("swarm seed {seed}: {answer:?}"));
+        let (_keep, copy) = copy_of(&o.frozen);
+        let r = Rdy::open(&copy).expect("open the frozen copy");
+        let st = r.read();
+        let rec = st.reader().landing(&landing).expect("the landing");
+        assert_eq!(rec.assurance, rdy_model::Assurance::Local);
+        assert_eq!(rec.policy, None, "swarm seed {seed}: no policy act");
+        assert_eq!(rec.approved_by.actor, "human:qa");
+        let (mut source, mut importer) = (false, false);
+        for h in &rec.changes {
+            let c = st.reader().change(h).expect("the change");
+            source |= c.provenance.actor == "agent:src";
+            importer |= c
+                .links
+                .imported_by
+                .as_ref()
+                .is_some_and(|i| i.actor == "human:qa");
+        }
+        assert!(source && importer, "swarm seed {seed}: {rec:#?}");
+        // the imported decision is in canon, accepted, by its source
+        let decision = rdy_model::BlockId::parse(UI_IMPORTED.3).expect("a decision id");
+        let m = st.materialized(&Scope::Canon).expect("canon");
+        assert!(m.get(&decision).is_some(), "swarm seed {seed}");
+        drop(st);
+        r.close().expect("close the frozen copy");
+    });
+}
+
+/// ui11: what a UI answer acknowledged before the kill stands in the frozen store and after a
+/// reindex: the same records, none lost, none doubled, and the run did restart its daemon.
+#[test]
+fn ui11_acknowledged_ui_acts_survive_restart_and_reindex() {
+    each(|seed, o| {
+        let run = o.before_freeze();
+        let last = run.iter().map(|e| e.epoch).max().unwrap_or(0);
+        assert_eq!(last, 1, "swarm seed {seed}: the run restarted its daemon");
+        let before_kill = ui_entries(o)
+            .iter()
+            .filter(|e| e.epoch == 0 && e.outcome == Met::Ok)
+            .count();
+        assert!(
+            before_kill >= 3,
+            "swarm seed {seed}: {before_kill} answers before the kill"
+        );
+        let bad = oracle::ui_violations(run, &o.frozen, false);
+        assert!(bad.is_empty(), "swarm seed {seed}: {bad:#?}");
+        let bad = oracle::ui_violations(run, &o.frozen, true);
+        assert!(
+            bad.is_empty(),
+            "swarm seed {seed} after a reindex: {bad:#?}"
         );
     });
 }

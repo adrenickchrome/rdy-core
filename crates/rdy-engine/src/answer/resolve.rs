@@ -142,7 +142,7 @@ fn dismiss(
         person: by.who.provenance(),
         relayed_by: by.relay.as_ref().map(|r| r.by.clone()),
         relay_evidence: by.relay.as_ref().map(|r| r.evidence.clone()),
-        evidence_kind: by.relay.as_ref().and(by.kind),
+        evidence_kind: by.kind,
         note: Some(reason.clone()),
     };
     let (_, h) = r.dismiss_answered(&by.who, &tensions, &reason, a)?;

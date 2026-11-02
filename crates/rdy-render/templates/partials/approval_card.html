@@ -1,0 +1,20 @@
+{% macro options_plain(item) %}<ol class="ui-options">{% for o in item.options %}<li class="ui-option"><span class="ui-option-label">{{ o.label }}</span>{% if o.recommended %} <span class="ui-rec">Recommended</span>{% endif %}{% for c in o.consequences %}<p class="ui-consequence">{{ c }}</p>{% endfor %}{% if o.recommended and o.reason %}<p class="ui-reason">Why recommended: {{ o.reason }}</p>{% endif %}</li>{% endfor %}</ol>{% endmacro %}
+{% macro card(v, level, options, link) %}{% set item = v.item %}<section class="ui-card" aria-label="Card" data-kind="{{ item.kind }}" data-blocking="{{ 'true' if item.blocking else 'false' }}">
+<header class="ui-card-head">{% if level == 1 %}<h1>{% else %}<h2>{% endif %}{% if link %}<a href="{{ v.href }}">{{ item.title }}</a>{% else %}{{ item.title }}{% endif %}{% if level == 1 %}</h1>{% else %}</h2>{% endif %}
+<p class="ui-meta"><code class="ui-ref">{{ item.ref }}</code> <span class="ui-kind">{{ item.kind }}</span> <span class="ui-blocking">{{ 'Blocking' if item.blocking else 'Not blocking' }}</span></p></header>
+{% if item.why %}<p class="ui-why">{{ item.why }}</p>{% endif %}
+{% if item.batch or item.exception %}<p class="ui-beside">{% if item.batch %}Beside <code>{{ item.batch }}</code>{% endif %}{% if item.batch and item.exception %}, on its own: {% elif item.exception %}On its own: {% endif %}{% if item.exception %}<code>{{ item.exception }}</code>{% endif %}</p>{% endif %}
+{% if item.summary %}<div class="ui-summary"><h3>Summary{% if item.summary_by %} ({{ item.summary_by }}){% endif %}</h3><p>{{ item.summary }}</p></div>{% endif %}
+{% if item.removal %}{% for r in item.removal %}<div class="ui-removal"><h3>Content removal</h3><dl><dt>Request</dt><dd><code>{{ r.request }}</code></dd><dt>Report</dt><dd><code>{{ r.report }}</code></dd><dt>Versions</dt><dd>{{ r.versions }}</dd><dt>Blobs</dt><dd>{{ r.blobs }}</dd><dt>Shared blobs</dt><dd>{{ r.shared_blobs }}</dd><dt>Payloads</dt><dd>{{ r.payloads }}</dd><dt>Bytes</dt><dd>{{ r.bytes }}</dd><dt>Reason class</dt><dd>{{ r.reason_class }}</dd><dt>Reason</dt><dd>{{ r.reason }}</dd></dl></div>{% endfor %}{% endif %}
+{% if item.members %}<div class="ui-members"><h3>In this batch</h3><ul>{% for m in item.members %}<li>{{ m }}</li>{% endfor %}</ul></div>{% endif %}
+{% if item.facts %}<div class="ui-facts"><h3>Facts (computed)</h3><dl>{% for f in item.facts %}<dt>{{ f.name }}</dt><dd>{{ f.value }}</dd>{% endfor %}</dl></div>{% endif %}
+<dl class="ui-raised"><dt>Raised by</dt><dd>{{ item.raised_by }}</dd><dt>Raised at</dt><dd>{{ item.raised_at }}</dd><dt>Age</dt><dd>{{ item.age }}</dd></dl>
+{% if options %}{{ options_plain(item) }}{% endif %}
+<div class="ui-card-text"><h3>Card text</h3><pre>{{ item.card }}</pre></div>
+<p class="ui-hash">Card hash <code>{{ item.card_hash }}</code></p>
+</section>{% endmacro %}
+{% macro answer_form(v, n, brief) %}{% set item = v.item %}<form class="ui-form" method="post" action="/~ui/answer" enctype="application/x-www-form-urlencoded">
+<input type="hidden" name="ref" value="{{ item.ref }}"><input type="hidden" name="card_hash" value="{{ item.card_hash }}">{% if brief %}<input type="hidden" name="brief" value="{{ brief }}">{% endif %}
+<label class="ui-note-label" for="note-{{ n }}">Note (optional)</label><textarea id="note-{{ n }}" name="note" rows="3"></textarea>
+<ol class="ui-options">{% for o in item.options %}<li class="ui-option"><button type="submit" name="option" value="{{ o.id }}">{{ o.label }}</button>{% if o.recommended %} <span class="ui-rec">Recommended</span>{% endif %}{% for c in o.consequences %}<p class="ui-consequence">{{ c }}</p>{% endfor %}{% if o.recommended and o.reason %}<p class="ui-reason">Why recommended: {{ o.reason }}</p>{% endif %}</li>{% endfor %}</ol>
+</form>{% endmacro %}

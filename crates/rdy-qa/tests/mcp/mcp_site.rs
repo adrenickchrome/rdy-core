@@ -591,7 +591,7 @@ fn assert_themed_404(r: &http::Response, root: &str, sentence: &str, what: &str)
     );
     assert!(body.contains("<h1>Page not found</h1>"), "{what}");
     assert!(
-        body.contains(&format!("<p>{sentence}</p>")),
+        body.contains(&format!("<p class=\"refusal-message\">{sentence}</p>")),
         "{what}: {body}"
     );
     assert!(

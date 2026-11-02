@@ -3,7 +3,8 @@
 //! `rdy_render`, the static site, through `Engine::render` (O35: this crate has no edge to the
 //! renderer). `rdy_publication_check`: the reference check and disclosure
 //! comparison of a publication profile, from `rdy_engine::publication::check`, which the
-//! daemon's `publication_check` op shares.
+//! daemon's `publication_check` op shares. `rdy_import`: a writer imports a format-3 tree into a
+//! view through `rdy_engine::import_api::run_import`, which the daemon's `import` op shares.
 use super::*;
 use rdy_engine::RdyError;
 use rdy_engine::engine::{ExportRequest, RenderRequest, site_reply};
@@ -152,4 +153,25 @@ pub fn rdy_publication_check(
         p.scope.as_deref(),
         p.against.as_deref(),
     )
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ImportParams {
+    /// The import directory, absolute or relative to the project directory.
+    pub dir: String,
+    /// The view to import into. Import never writes canon.
+    pub view: String,
+}
+
+/// `rdy_import`: imports the format-3 tree at `dir` into `view` as this session (D-Y9DNZ). The
+/// session is resolved first, then the path (a relative `dir` is under the project directory),
+/// then the engine imports under the ordinary write rule: a reader is refused, canon is never
+/// written, and the reply is the import reply the command line shares. The session is never
+/// widened: an agent stays an agent, and a person approves imported statuses at landing.
+pub fn rdy_import(st: &mut McpState, p: ImportParams) -> Result<Value, RdyError> {
+    let s = session(st)?;
+    let view = p.view.strip_prefix("view:").unwrap_or(&p.view).to_string();
+    let dir = st.engine.root().join(&p.dir);
+    rdy_engine::import_api::run_import(&*st.engine, &s, &view, &dir)
 }

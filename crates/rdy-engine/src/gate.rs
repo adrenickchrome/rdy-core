@@ -1871,6 +1871,13 @@ fn options_moved(
     })
 }
 
+/// The canon that landing `changes` would give: canon with their ops, in the order the merge
+/// applies them (as `prepare_landing_as` builds it).
+fn prospective_canon(st: &ReadState, changes: &[Change]) -> Result<Materialized, RdyError> {
+    let ops = applied_ops(changes, &st.landing_order(changes));
+    Ok(st.materialized(&Scope::Canon)?.with(&ops))
+}
+
 /// The ops of the changes at `applied` (positions in `changes`), in applied order.
 pub(crate) fn applied_ops(changes: &[Change], applied: &[usize]) -> Vec<Op> {
     applied
@@ -3035,7 +3042,12 @@ impl Rdy {
         // the fresh record assesses the version on the canon it was computed on, so the next
         // approval's freshness reads the landings after it
         a.base = st.canon_head();
-        // D-JQD5X, O13: the fresh card shown is the stored card plus the live verdict lines
+        // TASK-982 C1: the fresh card shown is the stored card, then the computed Imported fact,
+        // then (D-JQD5X, O13) the live verdict lines
+        let changes = changes_of(st, &p.changes)?;
+        let prospective = prospective_canon(st, &changes)?;
+        card.facts
+            .extend(crate::pending::queue::imported_fact(st, p, &prospective)?);
         crate::pending::queue::show_verdicts(st, pref, p, &mut card)?;
         card.card = crate::pending::render_checked(&card, crate::pending::CARD_DEFAULT_TOKENS)?;
         card.card_hash = crate::pending::card_hash(&card).to_string();
@@ -3303,6 +3315,18 @@ impl Rdy {
         // 1. prospective canon: canon + the proposal's own changes
         let ops = applied_ops(&changes, &applied);
         let prospective = st.materialized(&Scope::Canon)?.with(&ops);
+        // D-Y9DNZ: an imported decision status needs a person, whatever the stored verdict says
+        // (an assessment stored before this rule may accept it)
+        if lander == Lander::Policy
+            && !crate::import_facts::imported_facts(&st, &p.changes, &prospective)?
+                .ids
+                .is_empty()
+        {
+            return Err(policy_human(
+                &pref,
+                &[crate::policy_verdict::IMPORTED_STATUS.to_string()],
+            ));
+        }
         // 2. the landing projection (D-JQD5X, review I1): the acceptance's deterministic updates,
         // from the one function readiness read. A proposed decision, a re-keyed block or a placed
         // block that changed in the view after the proposal refuses here (E_STALE_BASE).

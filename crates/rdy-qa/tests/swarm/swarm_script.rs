@@ -2,8 +2,8 @@
 use rdy_qa::swarm::journal::{Outcome, allowed};
 use rdy_qa::swarm::script::{
     Act, CHECK_MIN_STEPS, Config, EXCLUDE_STEP, HoldStep, INCLUDE_SOURCE_STEP, INCLUDE_STEP,
-    MIN_STEPS, PersonAct, RuleStep, check_plan, direct_land_at, include_plan, reviewer_weights,
-    script, writer_weights,
+    MIN_STEPS, PersonAct, RuleStep, UiStep, advice_steps, check_plan, direct_land_at, include_plan,
+    person_weights, reviewer_weights, script, ui_plan, writer_weights,
 };
 use std::collections::BTreeSet;
 
@@ -54,6 +54,7 @@ fn sg3_every_agent_script_has_the_required_acts() {
             "inbox_ack",
             "tensions",
             "accept_check_verdict",
+            "ui_answer",
         ] {
             assert!(p.contains(need), "seed {seed}: the person lacks {need}");
         }
@@ -270,6 +271,53 @@ fn sg3_a_contra_pair_is_written_through_the_real_flow() {
     }
 }
 
+/// The forced advice sequence: the second member of pair 0 writes its marked claim, the first
+/// reviewer judges every free request, then the writer proposes. Each comes two steps after the
+/// last, so the step barrier orders them, after the kill and after the person's last landing
+/// before the tail, and the person's tail `AcceptAdvice` waits until the proposal has ended.
+#[test]
+fn sg3_the_forced_advice_sequence_comes_before_the_tail_acceptance() {
+    let configs = (1..=20).flat_map(|seed| [Config::fast(seed), Config::deep(seed)]);
+    for cfg in configs {
+        let s = script(&cfg);
+        let a = advice_steps(&cfg).expect("the fast and deep tiers hold the sequence");
+        let ctx = format!("seed {} steps {}", cfg.seed, cfg.steps);
+        let (first, second) = s.contra[0];
+        assert_eq!(
+            s.agents[second][a.claim],
+            Act::AdviceClaim {
+                first,
+                area: match &s.agents[first].iter().find(|x| matches!(
+                    x,
+                    Act::Create {
+                        contra: Some(0),
+                        ..
+                    }
+                )) {
+                    Some(Act::Create { area, .. }) => area,
+                    other => panic!("{ctx}: the first claim is {other:?}"),
+                },
+            },
+            "{ctx}"
+        );
+        assert_eq!(s.agents[second][a.propose], Act::AdviceProposal, "{ctx}");
+        let reviewer = (0..cfg.agents).find(|&i| cfg.is_reviewer(i)).unwrap();
+        assert_eq!(s.agents[reviewer][a.review], Act::ReviewAll, "{ctx}");
+        assert_eq!((a.claim + 2, a.review + 2), (a.review, a.propose), "{ctx}");
+        assert!(cfg.kill_at.is_some_and(|k| k < a.claim), "{ctx}");
+        let len = s.person.len();
+        // the person's pace (`run::due`): act j waits for step (j + 1) * steps / len
+        let due = |j: usize| (j + 1) * cfg.steps / len;
+        assert_eq!(s.person[len - 2], PersonAct::AcceptAdvice, "{ctx}");
+        assert!(a.propose < due(len - 2), "{ctx}");
+        let last_land = (0..len - 2)
+            .rev()
+            .find(|&j| s.person[j].name() == "land")
+            .unwrap();
+        assert!(due(last_land) < a.propose, "{ctx}");
+    }
+}
+
 /// Ruling task-5.2: the person lands on a cadence (every other act, `steps / 2` acts), ends by
 /// accepting the advice it is shown and landing, and does each kind of act at least once.
 #[test]
@@ -296,11 +344,93 @@ fn sg3_the_person_lands_on_a_cadence_and_ends_by_accepting_advice() {
         assert_eq!(p[p.len() - 2], PersonAct::AcceptAdvice, "seed {}", cfg.seed);
         assert_eq!(p[p.len() - 1].name(), "land", "seed {}", cfg.seed);
         let names: BTreeSet<_> = p[..p.len() - 2].iter().map(PersonAct::name).collect();
-        // the forced check verdict acceptance (D-JQD5X) is the one more kind, in the scripts
-        // that hold the forced check sequences (the fast and deep tiers)
-        let forced = usize::from(check_plan(&cfg).is_some());
+        // the forced check verdict acceptance (D-JQD5X) and the forced UI answers (D-6M0AF) are
+        // two more kinds, in the scripts that hold the forced sequences (the fast and deep tiers)
+        let forced = 2 * usize::from(check_plan(&cfg).is_some());
         assert_eq!(names.len(), 6 + forced, "seed {}: {names:?}", cfg.seed);
     }
+}
+
+/// ui11 (D-6M0AF; system/quality-gate tb-A4DAV): every fast and deep script holds one forced
+/// `GET`/`POST` answer and one forced moved card, on fixed odd acts due before the kill can come,
+/// and the person's other draws keep their weights beside one more of weight 1. The check acts
+/// keep their places. A script too short for the forced sequences holds and draws no `UiAnswer`.
+#[test]
+fn ui11_seeded_scripts_include_real_ui_answers() {
+    let due = |j: usize, steps: usize, len: usize| ((j + 1) * steps / len).min(steps);
+    assert_eq!(
+        person_weights(),
+        [
+            ("dismiss", 20),
+            ("accept_advice", 20),
+            ("wc_edit", 15),
+            ("inbox_ack", 15),
+            ("tensions", 10),
+            ("ui_answer", 1),
+        ]
+    );
+    for seed in 1..=20 {
+        for cfg in [Config::fast(seed), Config::deep(seed)] {
+            let ctx = format!("seed {seed} steps {}", cfg.steps);
+            let s = script(&cfg);
+            let plan = ui_plan(&cfg).unwrap_or_else(|| panic!("{ctx}: no forced UI acts"));
+            assert_eq!(ui_plan(&cfg), Some(plan), "{ctx}: a pure function");
+            let len = s.person.len();
+            assert_eq!(
+                s.person[plan.moved],
+                PersonAct::UiAnswer {
+                    step: UiStep::Moved
+                },
+                "{ctx}"
+            );
+            assert_eq!(
+                s.person[plan.forced],
+                PersonAct::UiAnswer {
+                    step: UiStep::Forced
+                },
+                "{ctx}"
+            );
+            let count = |step: UiStep| {
+                s.person
+                    .iter()
+                    .filter(|a| **a == PersonAct::UiAnswer { step })
+                    .count()
+            };
+            assert_eq!(count(UiStep::Moved), 1, "{ctx}");
+            assert_eq!(count(UiStep::Forced), 1, "{ctx}");
+            for j in [plan.moved, plan.forced] {
+                assert_eq!(j % 2, 1, "{ctx}: not a landing act");
+                assert!(j < len - 2, "{ctx}: before the tail");
+                let k = cfg.kill_at.expect("a kill");
+                assert!(due(j, cfg.steps, len) + 1 < k, "{ctx}: due before the kill");
+            }
+            // a working-copy edit keeps an early act, so rg15 still reads a work version's plan
+            assert_eq!(s.person[5], PersonAct::WcEdit, "{ctx}");
+            // the forced check sequences keep their acts
+            let check = check_plan(&cfg).unwrap_or_else(|| panic!("{ctx}: no check acts"));
+            assert_eq!(
+                s.person[check.accept],
+                PersonAct::AcceptCheckVerdict,
+                "{ctx}"
+            );
+            assert_ne!(check.accept, plan.moved, "{ctx}");
+            assert_ne!(check.accept, plan.forced, "{ctx}");
+        }
+    }
+    let short = Config {
+        seed: 3,
+        agents: 8,
+        steps: 24,
+        kill_at: None,
+    };
+    assert_eq!(ui_plan(&short), None);
+    assert!(
+        !script(&short)
+            .person
+            .iter()
+            .any(|a| a.name() == "ui_answer"),
+        "no draw without the forced sequences"
+    );
 }
 
 /// ck10 (D-JQD5X, D-ME2HD; system/quality-gate tb-A4DAV): a script is still a pure function of

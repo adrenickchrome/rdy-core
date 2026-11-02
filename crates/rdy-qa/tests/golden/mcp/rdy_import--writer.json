@@ -1,0 +1,131 @@
+{
+  "briefing": {
+    "covers": 4,
+    "token": "1650e65879ecc809598c862ae9f971851ef23beb6c6948b9d55393b9760e50c0"
+  },
+  "change": "c43d484bb1a76c21f0acdf7535f527aaecbce24680a50ab6c007e8850327959d",
+  "changes": [
+    "4262773b5ac62eae447629a29a15535bd5c86238993f137ec28c80d53b9be83a",
+    "c43d484bb1a76c21f0acdf7535f527aaecbce24680a50ab6c007e8850327959d"
+  ],
+  "consequences": [],
+  "coverage": {
+    "dimensions": {
+      "complete": 33,
+      "connected": 84,
+      "consistent": 89,
+      "current": 100,
+      "governed": 50,
+      "grounded": 0
+    },
+    "pages": [
+      {
+        "doc": "d-7X1KQ",
+        "path": "payments/fees",
+        "score": 56
+      },
+      {
+        "doc": "d-TNT6J",
+        "path": "spec",
+        "score": 63
+      },
+      {
+        "doc": "d-QM001",
+        "path": "imported",
+        "score": 81
+      }
+    ],
+    "score": 59
+  },
+  "created": {
+    "op0": "d-QM001",
+    "op1": "s-QM001",
+    "op2": "D-QMAC1",
+    "op3": "D-QMPR1"
+  },
+  "on_change": {
+    "checks": [],
+    "resolved": [],
+    "tensions": []
+  },
+  "onboarding": {
+    "done": false,
+    "next": "structure",
+    "phases": [
+      {
+        "dimension_issues": {
+          "complete": 8,
+          "connected": 3
+        },
+        "dimensions": [
+          "connected",
+          "complete"
+        ],
+        "done": false,
+        "issues": 11,
+        "phase": "structure",
+        "score": 58
+      },
+      {
+        "dimension_issues": {
+          "grounded": 4
+        },
+        "dimensions": [
+          "grounded"
+        ],
+        "done": false,
+        "issues": 4,
+        "phase": "entities",
+        "score": 0
+      },
+      {
+        "dimension_issues": {
+          "governed": 2
+        },
+        "dimensions": [
+          "governed"
+        ],
+        "done": false,
+        "issues": 2,
+        "phase": "decisions",
+        "score": 50
+      },
+      {
+        "dimension_issues": {
+          "consistent": 2
+        },
+        "dimensions": [
+          "consistent",
+          "current"
+        ],
+        "done": true,
+        "issues": 2,
+        "phase": "consistency",
+        "score": 94
+      }
+    ],
+    "score": 59,
+    "target": 80
+  },
+  "related_decisions": [],
+  "suggestions": [],
+  "warning_docs": {
+    "d-QM001": "Imported (d-QM001): "
+  },
+  "warnings": [
+    {
+      "block": "d-QM001",
+      "code": "W_SKELETON_MISSING",
+      "fix": "add a section titled \"Summary\" under this doc",
+      "message": "required section \"Summary\" is missing",
+      "severity": "warning"
+    },
+    {
+      "block": "d-QM001",
+      "code": "W_SKELETON_MISSING",
+      "fix": "add a section titled \"Goals\" under this doc",
+      "message": "required section \"Goals\" is missing",
+      "severity": "warning"
+    }
+  ]
+}

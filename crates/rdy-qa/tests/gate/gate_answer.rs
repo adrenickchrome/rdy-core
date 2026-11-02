@@ -1054,8 +1054,8 @@ fn di7_the_daemon_relay_texts_do_not_change() {
     check(
         dispatch(&ctx(&e, &a, &cwd), "tag", json!({"version": "v0.1.0"})),
         E_PERMISSION,
-        "agent sessions cannot tag or import",
-        "tags and imports are the person's acts: ask the person to run the command",
+        "agent sessions cannot tag",
+        "tags are the person's acts: ask the person to run the command",
     );
     let v = approve(
         &a,
