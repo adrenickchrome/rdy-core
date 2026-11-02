@@ -300,6 +300,7 @@ fn report_json(r: &Resolved, scope: &Side, against: Option<(&Side, &DisclosureDi
 }
 
 /// `report` if it serializes within `max` bytes, else `E_LIMIT`; never a partial object.
+#[cfg(test)]
 fn fit(report: Value, max: usize) -> Result<Value, RdyError> {
     fit_reserving(report, max, 0)
 }
