@@ -1,4 +1,6 @@
 //! The source build id (D-CCC6E): framing, closed inputs, bounds and rerun directives.
+#![cfg(unix)]
+// Unix only: it makes symlinks and non-UTF-8 file names. FW-XP1 Phase 4 gives them a seam.
 #[path = "../build_support.rs"]
 mod build_support;
 
