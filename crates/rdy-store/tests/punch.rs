@@ -13,12 +13,12 @@ mod redaction_fixture;
 use carried_fixture::{block_residue, change_residue, find, framed_at, load, record, span};
 use rdy_model::redaction::{DropSpan, RedactTarget};
 use rdy_model::*;
+use rdy_store::Store;
 use rdy_store::dump::*;
 use rdy_store::dump_chain::{BatchMarker, DumpChainHeader, batch_end};
 use rdy_store::kinds;
 use rdy_store::pio::{self, Punch};
 use rdy_store::segment::{Location, PunchSummary, RemovalStep, SegmentLog, on_removal_step};
-use rdy_store::{Store, StoreError};
 use redaction_fixture::{
     Fixture, FixtureOptions, Proof, RequestSpec, authorized_batch_fixture, frames, segment_bytes,
 };
@@ -477,8 +477,7 @@ fn mh1_punch_failures_do_not_fail_removal() {
     drop(hooks);
     // a live write after the failure still works: nothing was poisoned
     assert!(matches!(s.finish_redactions(), Ok(c) if c.frames == 4));
-    let id = s.put_blob(b"after");
-    assert!(!matches!(id, Err(StoreError::RedactionPending { .. })));
+    s.put_blob(b"after").unwrap();
 }
 
 #[test]
