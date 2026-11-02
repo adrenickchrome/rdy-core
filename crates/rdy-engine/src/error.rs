@@ -505,8 +505,8 @@ pub struct RdyError {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub briefing: Option<serde_json::Value>,
     /// Warnings that ride on this refusal (W_DAEMON_BUILD on the first tool result).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<Box<Vec<serde_json::Value>>>,
 }
 
 impl RdyError {
@@ -518,7 +518,7 @@ impl RdyError {
             issues: vec![],
             corrected: None,
             briefing: None,
-            warnings: vec![],
+            warnings: None,
         }
     }
 

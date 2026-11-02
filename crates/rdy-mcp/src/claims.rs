@@ -538,7 +538,7 @@ pub fn deliver_build_warning(
             Ok(v)
         }
         Err(mut e) => {
-            e.warnings.push(warning);
+            e.warnings.get_or_insert_default().push(warning);
             Err(e)
         }
     }
