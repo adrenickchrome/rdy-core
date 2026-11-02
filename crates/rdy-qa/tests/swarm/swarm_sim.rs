@@ -1009,7 +1009,8 @@ fn sg5_each_alternative_refusal_is_a_ruled_row() {
             let fine = match (row.as_str(), e.act, judged) {
                 // the drain's open-set row (ruling task-5-round3.1): a landing chose one of the
                 // change's open sets before the view proposed again
-                ("E_ALT_MEMBER", "propose", Some(AtRefusal::OpenSet)) => {
+                // (judged Loser when another of its sets already chose against it: the gate reads open sets first)
+                ("E_ALT_MEMBER", "propose", Some(AtRefusal::OpenSet | AtRefusal::Loser)) => {
                     let open: BTreeSet<Hash> = change_named(message)
                         .and_then(|prefix| known.iter().find(|x| x.starts_with(&prefix)))
                         .and_then(|f| f.parse::<Hash>().ok())
