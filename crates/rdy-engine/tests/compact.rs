@@ -103,18 +103,15 @@ fn blocks(m: &Materialized) -> Vec<Block> {
     m.iter().cloned().collect()
 }
 
+type TreeEntry = (
+    std::fs::Permissions,
+    u64,
+    std::time::SystemTime,
+    Option<Vec<u8>>,
+);
+
 /// Every file and directory under `dir`: permissions, length, modified time and bytes. No access time.
-fn tree(
-    dir: &Path,
-) -> BTreeMap<
-    PathBuf,
-    (
-        std::fs::Permissions,
-        u64,
-        std::time::SystemTime,
-        Option<Vec<u8>>,
-    ),
-> {
+fn tree(dir: &Path) -> BTreeMap<PathBuf, TreeEntry> {
     let mut out = BTreeMap::new();
     for e in std::fs::read_dir(dir).unwrap() {
         let p = e.unwrap().path();

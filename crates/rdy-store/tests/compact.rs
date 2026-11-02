@@ -213,13 +213,15 @@ impl Drop for Hooks {
 /// One allocation census: its total on the first segment, or an error.
 type Census = Result<u64, ()>;
 
+type Ranges = Rc<RefCell<Vec<(u64, u64)>>>;
+
 /// Answers each census in turn (segment 0 starts one, later segments report 0), and each punch
 /// by its 0-based number. It returns the punched ranges.
 fn inject(
     censuses: Vec<Census>,
     mut punch: impl FnMut(usize) -> io::Result<Punch> + 'static,
-) -> (Rc<RefCell<Vec<(u64, u64)>>>, Hooks) {
-    let ranges: Rc<RefCell<Vec<(u64, u64)>>> = Rc::default();
+) -> (Ranges, Hooks) {
+    let ranges: Ranges = Rc::default();
     let seen = Rc::clone(&ranges);
     let mut n = 0;
     pio::on_punch(Some(Box::new(move |offset, len| {
@@ -289,11 +291,11 @@ fn mh4_byte_counts_include_every_kind_and_physical_copy() {
     // every name of the closed table, in numeric order, with exact totals
     let want: Vec<KindBytes> = NAMES
         .iter()
-        .map(|(kind, name)| KindBytes {
-            kind: *kind,
-            name: *name,
-            bytes: by_kind[kind].1,
-            removed_bytes: removed.get(kind).copied().unwrap_or(0),
+        .map(|&(kind, name)| KindBytes {
+            kind,
+            name,
+            bytes: by_kind[&kind].1,
+            removed_bytes: removed.get(&kind).copied().unwrap_or(0),
         })
         .collect();
     assert_eq!(report.by_kind, want);
