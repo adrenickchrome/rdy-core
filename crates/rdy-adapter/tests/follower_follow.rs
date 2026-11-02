@@ -412,14 +412,11 @@ fn mh8_removal_invalidates_captured_reads_before_zeroing() {
     let want = c.r.read();
     assert_eq!(fresh.tags().unwrap().len(), 1);
     assert_eq!(fresh.tag_history("1.0.0").unwrap().len(), tag_before.len());
-    assert_eq!(fresh.canon(), {
-        let src = want.canon_head();
-        src
-    });
+    assert_eq!(fresh.canon(), want.canon_head());
     drop((fresh, f));
     on_removal_step(None);
     assert!(
-        seen.borrow().iter().any(|s| *s == RemovalStep::BeforePunch),
+        seen.borrow().contains(&RemovalStep::BeforePunch),
         "the zeros were durable and the punch ran after them"
     );
     assert_eq!(segments(&c.follower), segments(&c.root));
