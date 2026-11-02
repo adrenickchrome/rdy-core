@@ -153,7 +153,6 @@ pub(crate) struct Walk<'a> {
     entities: BTreeMap<&'a BlockId, Vec<&'a BlockId>>,
     rows: Vec<Row<'a>>,
     /// How many sources the walk reads, the most a row can list.
-    sources: usize,
     /// The index in `rows` of each entity row, by (block, entity).
     entity_rows: BTreeMap<(&'a BlockId, &'a BlockId), usize>,
 }
@@ -165,7 +164,6 @@ fn new_row<'a>(
     block: &'a BlockId,
     via: NeighborVia,
     entity: Option<&'a BlockId>,
-    sources: usize,
 ) -> Result<usize, RdyError> {
     if rows.len() >= limits.rows {
         return Err(limits.rows_error());
@@ -174,7 +172,7 @@ fn new_row<'a>(
         block,
         via,
         entity,
-        of: Vec::with_capacity(sources),
+        of: Vec::new(),
     });
     Ok(rows.len() - 1)
 }
@@ -218,7 +216,6 @@ impl<'a> Walk<'a> {
             parents: BTreeMap::new(),
             entities: BTreeMap::new(),
             rows: vec![],
-            sources: 0,
             entity_rows: BTreeMap::new(),
         }
     }
@@ -235,7 +232,6 @@ impl<'a> Walk<'a> {
 
     /// Walks each source of `covered`, in id order, so each row's `of` is sorted.
     fn collect(&mut self, covered: &BTreeSet<BlockId>) -> Result<(), RdyError> {
-        self.sources = covered.len();
         for id in covered {
             self.source(id)?;
         }
@@ -298,7 +294,6 @@ impl<'a> Walk<'a> {
         // a section row is found through the parent's list
         let rows = &mut self.rows;
         let list = self.parents.get_mut(parent).expect("read above");
-        let sources = self.sources.min(list.children.len());
         for (n, row) in &mut list.children {
             if *n == id {
                 continue;
@@ -306,8 +301,7 @@ impl<'a> Walk<'a> {
             let index = match *row {
                 Some(index) => index,
                 None => {
-                    let index =
-                        new_row(rows, &self.limits, n, NeighborVia::Section, None, sources)?;
+                    let index = new_row(rows, &self.limits, n, NeighborVia::Section, None)?;
                     *row = Some(index);
                     index
                 }
@@ -319,7 +313,7 @@ impl<'a> Walk<'a> {
                 Some(index) => *index,
                 None => {
                     let via = NeighborVia::Entity;
-                    let index = new_row(rows, &self.limits, n, via, Some(entity), 1)?;
+                    let index = new_row(rows, &self.limits, n, via, Some(entity))?;
                     self.entity_rows.insert((n, entity), index);
                     index
                 }
