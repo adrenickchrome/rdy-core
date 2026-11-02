@@ -1,3 +1,4 @@
+pub mod approver;
 mod assets;
 mod changes;
 pub mod copy;
@@ -399,6 +400,7 @@ fn env() -> Result<minijinja::Environment<'static>, RdyError> {
         "redirect.html",
         "versions.html",
         "not_found.html",
+        "approver.html",
         "partials/nav.html",
         "partials/toc.html",
         "partials/pager.html",
@@ -413,6 +415,7 @@ fn env() -> Result<minijinja::Environment<'static>, RdyError> {
         "partials/removed.html",
         "partials/glossary.html",
         "partials/refusal.html",
+        "partials/approval_card.html",
     );
     Ok(env)
 }
