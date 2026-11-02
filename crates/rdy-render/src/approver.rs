@@ -7,6 +7,7 @@
 //! markup, and a page needs no script: its forms and its error details work without one.
 use crate::refusal::{self, Detail};
 use crate::{RdyError, assets, escape, render_page};
+use rdy_engine::answer::AnsweredInView;
 use rdy_engine::pending::{Item, ItemKind, Pending};
 use rdy_engine::site_scope::percent_encode;
 use rdy_engine::{Briefing, E_IO, ReadState};
@@ -44,6 +45,15 @@ fn omitted_text(n: usize) -> String {
     }
 }
 
+/// The line below the card of a question the person already answered (KNOWN-ISSUES 547). It stands
+/// outside the card and its hash, and the form stays: a person may change their mind.
+fn answered_text(a: &AnsweredInView) -> String {
+    format!(
+        "You answered this in view {}: {}. It lands with that view's next proposal. Another answer records a second decision.",
+        a.view, a.decision
+    )
+}
+
 /// An item as the template reads it: the engine's object, and the address of its item page.
 #[derive(Serialize)]
 struct ItemView<'a> {
@@ -51,12 +61,15 @@ struct ItemView<'a> {
     href: String,
     /// A question is put to the person on its item page, where its briefing stands beside it.
     question: bool,
+    /// The line below the card when the person already answered this question in a view.
+    answered: Option<String>,
 }
 
 impl<'a> ItemView<'a> {
-    fn of(item: &'a Item) -> Self {
+    fn of(item: &'a Item, answered: Option<&AnsweredInView>) -> Self {
         ItemView {
             item,
+            answered: answered.map(answered_text),
             href: format!("{ITEM_ROUTE}{}", percent_encode(&item.r#ref)),
             question: item.kind == ItemKind::Answer,
         }
@@ -123,14 +136,20 @@ fn render(
 /// the versions that are not ready and the count of items the queue left out. A card that is
 /// not a question has its answer form here; a question links to its item page. `notice`, when
 /// there is one, stands above the cards. `events`, when there is one, is the data-events URL of
-/// the page's live stream (the reload-only subscription); it is escaped.
+/// the page's live stream (the reload-only subscription); it is escaped. `answered` holds the
+/// questions the person already answered in a view: each shows its line below its card.
 pub fn pending_page(
     st: &ReadState,
     pending: &Pending,
     notice: Option<&str>,
     events: Option<&str>,
+    answered: &[AnsweredInView],
 ) -> Result<UiPage, RdyError> {
-    let items: Vec<ItemView> = pending.items.iter().map(ItemView::of).collect();
+    let items: Vec<ItemView> = pending
+        .items
+        .iter()
+        .map(|i| ItemView::of(i, answered.iter().find(|a| a.item == i.r#ref)))
+        .collect();
     let mut not_ready = vec![];
     for n in &pending.not_ready {
         let mut issues = vec![];
@@ -160,15 +179,17 @@ pub fn pending_page(
 /// sends its token), then the answer form. With a `refusal` it shows the refusal's message with
 /// its code and fix in details above the card: a corrected card of a question has no form and
 /// no briefing, so a new request fetches a fresh briefing first; a corrected card of any other
-/// kind has its fresh form.
+/// kind has its fresh form. `answered`, when the person already answered this question in a view,
+/// adds its line directly below the card.
 pub fn item_page(
     st: &ReadState,
     item: &Item,
     briefing: Option<&Briefing>,
     refusal: Option<&RdyError>,
     events: Option<&str>,
+    answered: Option<&AnsweredInView>,
 ) -> Result<UiPage, RdyError> {
-    let view = ItemView::of(item);
+    let view = ItemView::of(item, answered);
     let refused = refusal.map(block_of).transpose()?;
     // a briefing belongs to a question that is put to the person now
     let shown = briefing.filter(|_| view.question && refusal.is_none());

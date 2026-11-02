@@ -6,7 +6,7 @@
 //! change (O19).
 use rdy_daemon::{OpContext, dispatch};
 use rdy_engine::answer::relay::{RelayInput, RelayRefusal, relayed};
-use rdy_engine::answer::{AnswerInfo, AnswerRequest};
+use rdy_engine::answer::{AnswerInfo, AnswerRequest, answered_in_view};
 use rdy_engine::engine::Local;
 use rdy_engine::pending::{Item, ItemKind, Pending};
 use rdy_engine::{
@@ -73,6 +73,43 @@ fn exceptions_of(q: &Pending, batch: &str) -> Vec<Item> {
 fn relay_answer(r: &mut Rdy, r#ref: &str, option: &str) -> Result<AnswerInfo, RdyError> {
     let h = item(&pending(r), r#ref).card_hash;
     r.answer(&agent(), PERSON, req(r#ref, option, Some(&h), words("yes")))
+}
+
+/// KNOWN-ISSUES 547: a relayed answer waits in the relaying agent's view, and that view is the one
+/// the page names.
+#[test]
+fn ui9_a_relayed_answer_is_found_in_the_agents_view() {
+    let (_d, mut r) = rdy_qa::fixtures::project();
+    let (_doc, section, _claim) = rdy_qa::fixtures::seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    rdy_qa::fixtures::write(
+        &mut r,
+        "qs",
+        json!([{"op": "create", "type": "question", "parent": section, "fields": {
+            "prompt": "Who approves refunds?",
+            "options": ["Finance", "Support lead"]
+        }}]),
+    )
+    .unwrap();
+    land(&mut r, "qs").unwrap();
+    let shown = pending(&r)
+        .items
+        .into_iter()
+        .find(|i| i.kind == ItemKind::Answer)
+        .expect("the question");
+    let st = r.read();
+    assert_eq!(answered_in_view(&st, PERSON, &shown).unwrap(), None);
+    drop(st);
+    relay_answer(&mut r, &shown.r#ref, "o1").unwrap();
+    let st = r.read();
+    let found = answered_in_view(&st, PERSON, &shown)
+        .unwrap()
+        .expect("the answer waits in a view");
+    assert_eq!(found.view, agent().default_view());
+    assert!(st.has_view(&found.view));
+    assert!(found.decision.starts_with("D-"), "{}", found.decision);
+    assert_eq!(found.item, shown.r#ref);
+    assert_eq!(answered_in_view(&st, "human:other", &shown).unwrap(), None);
 }
 
 fn refused(e: &RdyError, code: &str, message: &str) {

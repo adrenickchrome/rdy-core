@@ -4,6 +4,7 @@
 //! question's briefing below its card, and a refusal with its code and fix in details. A page is
 //! built in memory in the site's theme: it adds nothing to any site output, and it needs no
 //! script for a form or for details.
+use rdy_engine::answer::AnsweredInView;
 use rdy_engine::pending::{
     CARD_MAX_TOKENS, ExceptionKind, Fact, Item, ItemKind, ItemOption, Pending, PendingQuery,
     Recommended, RemovalCard, card_hash, render,
@@ -239,7 +240,7 @@ fn ui7_pending_and_item_render_the_complete_engine_card() {
     assert!(kinds.contains(&ItemKind::Approve) && kinds.contains(&ItemKind::Confirm));
     assert!(pending.items.iter().any(|i| i.exception.is_some()));
     assert!(pending.items.iter().any(|i| i.r#ref == batch.r#ref));
-    let page = text(&pending_page(&st, &pending, None, Some(EVENTS)).unwrap());
+    let page = text(&pending_page(&st, &pending, None, Some(EVENTS), &[]).unwrap());
     assert!(page.contains("<h1>Needs you</h1>"), "{page}");
     assert!(page.contains("<title>Needs you · "), "{page}");
     let mut at = 0;
@@ -270,7 +271,7 @@ fn ui7_pending_and_item_render_the_complete_engine_card() {
     }
     // the same page for every item: the item page shows the same card and hash
     for i in &pending.items {
-        let one = text(&item_page(&st, i, None, None, None).unwrap());
+        let one = text(&item_page(&st, i, None, None, None, None).unwrap());
         assert!(one.contains(&escape(&i.card)) && one.contains(&i.card_hash));
         assert!(one.contains(&format!(
             "<title>{} · {}</title>",
@@ -284,7 +285,7 @@ fn ui7_pending_and_item_render_the_complete_engine_card() {
     let st2 = r2.read();
     let q2 = queue(&r2);
     assert!(!q2.not_ready.is_empty());
-    let page = text(&pending_page(&st2, &q2, None, None).unwrap());
+    let page = text(&pending_page(&st2, &q2, None, None, &[]).unwrap());
     assert!(page.contains("<h2>Not ready</h2>"), "{page}");
     for n in &q2.not_ready {
         assert!(page.contains(&format!("<code>{}</code>", n.r#ref)));
@@ -362,7 +363,7 @@ fn ui7_pending_and_item_render_the_complete_engine_card() {
         snoozed: 0,
         omitted: 0,
     };
-    let page = text(&pending_page(&st, &all, None, None).unwrap());
+    let page = text(&pending_page(&st, &all, None, None, &[]).unwrap());
     let mut at = 0;
     for i in &items {
         let pos = page[at..]
@@ -397,7 +398,7 @@ fn ui7_pending_and_item_render_the_complete_engine_card() {
         o.recommended = None;
     }
     seal(&mut none);
-    assert!(!text(&item_page(&st, &none, None, None, None).unwrap()).contains("Recommended"));
+    assert!(!text(&item_page(&st, &none, None, None, None, None).unwrap()).contains("Recommended"));
 
     // a card beyond the pending display cap renders alone
     let capped = Pending {
@@ -406,9 +407,9 @@ fn ui7_pending_and_item_render_the_complete_engine_card() {
         snoozed: 0,
         omitted: 3,
     };
-    let page = text(&pending_page(&st, &capped, None, None).unwrap());
+    let page = text(&pending_page(&st, &capped, None, None, &[]).unwrap());
     assert!(page.contains("3 more items wait. Answer these first, then reload this page."));
-    let alone = text(&item_page(&st, &long, None, None, None).unwrap());
+    let alone = text(&item_page(&st, &long, None, None, None, None).unwrap());
     assert!(alone.contains(&escape(&long.card)) && alone.contains(&long.card_hash));
     assert_eq!(alone.matches("<dt>Fact</dt>").count(), 60);
     // the singular and the empty queue
@@ -417,14 +418,15 @@ fn ui7_pending_and_item_render_the_complete_engine_card() {
         ..capped.clone()
     };
     assert!(
-        text(&pending_page(&st, &one, None, None).unwrap())
+        text(&pending_page(&st, &one, None, None, &[]).unwrap())
             .contains("1 more item waits. Answer these first, then reload this page.")
     );
-    let empty = text(&pending_page(&st, &Pending::default(), None, None).unwrap());
+    let empty = text(&pending_page(&st, &Pending::default(), None, None, &[]).unwrap());
     assert!(empty.contains("Nothing needs your answer."), "{empty}");
     assert!(!empty.contains("more item"));
     // a notice stands above the cards
-    let noted = text(&pending_page(&st, &Pending::default(), Some("Saved <1>"), None).unwrap());
+    let noted =
+        text(&pending_page(&st, &Pending::default(), Some("Saved <1>"), None, &[]).unwrap());
     assert!(noted.contains("<p class=\"ui-notice\" role=\"status\">Saved &lt;1&gt;</p>"));
 }
 
@@ -456,7 +458,7 @@ fn ui7_forms_submit_only_bound_answer_fields() {
         snoozed: 0,
         omitted: 0,
     };
-    let page = text(&pending_page(&st, &pending, None, None).unwrap());
+    let page = text(&pending_page(&st, &pending, None, None, &[]).unwrap());
     // a question's title links to its item page; it has no form here
     let forms_here = forms(&page);
     assert_eq!(forms_here.len(), 1, "{page}");
@@ -519,7 +521,7 @@ fn ui7_forms_submit_only_bound_answer_fields() {
 
     // the item page of the question: one form, the token in a hidden brief field, the briefing
     // below the card and outside it
-    let one = text(&item_page(&st, &question, Some(&brief), None, Some(EVENTS)).unwrap());
+    let one = text(&item_page(&st, &question, Some(&brief), None, Some(EVENTS), None).unwrap());
     let fs = forms(&one);
     assert_eq!(fs.len(), 1);
     assert_eq!(attr(&fs[0].0, "action"), Some("/~ui/answer"));
@@ -553,16 +555,52 @@ fn ui7_forms_submit_only_bound_answer_fields() {
         .collect();
     assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
     assert!(one.contains(&format!("<dt>token</dt><dd>{}</dd>", brief.base.token)));
-    let without = text(&item_page(&st, &question, None, None, None).unwrap());
+    let without = text(&item_page(&st, &question, None, None, None, None).unwrap());
     assert!(!without.contains("Briefing") && !without.contains("name=\"brief\""));
     assert!(without.contains(&question.card_hash) && one.contains(&question.card_hash));
     assert_eq!(card_of(&without), card);
     // a briefing given beside a card that is not a question shows nowhere
-    let other = text(&item_page(&st, &approve, Some(&brief), None, None).unwrap());
+    let other = text(&item_page(&st, &approve, Some(&brief), None, None, None).unwrap());
     assert!(!other.contains("Briefing") && !other.contains("name=\"brief\""));
+    // a question answered in a view: the line stands below the card and above the form, outside
+    // the card; the card and its hash do not move, and the form stays
+    let answered = AnsweredInView {
+        item: question.r#ref.clone(),
+        view: "a<b>".into(),
+        decision: "D-TEST1".into(),
+    };
+    let line = rdy_render::escape(
+        "You answered this in view a<b>: D-TEST1. It lands with that view's next proposal. Another answer records a second decision.",
+    )
+    .to_string();
+    let noted = text(&item_page(&st, &question, None, None, None, Some(&answered)).unwrap());
+    assert_eq!(noted.matches(&line).count(), 1, "{noted}");
+    assert_eq!(card_of(&noted), card_of(&without));
+    let at = noted.find(&line).unwrap();
+    assert!(at > noted.find(card_of(&noted)).unwrap() + card_of(&noted).len());
+    assert!(at < noted.find("<form").unwrap());
+    assert_eq!(forms(&noted).len(), 1);
+    assert_eq!(forms(&noted)[0].1, forms(&without)[0].1);
+    assert!(!without.contains("You answered this"));
+    // the pending page shows it only beside the card it names
+    let queue = Pending {
+        items: vec![approve.clone(), question.clone()],
+        ..Pending::default()
+    };
+    let listed =
+        text(&pending_page(&st, &queue, None, None, std::slice::from_ref(&answered)).unwrap());
+    assert_eq!(listed.matches(&line).count(), 1, "{listed}");
+    assert!(
+        listed.find(&line).unwrap()
+            > listed
+                .find(&format!("data-ref=\"{}\"", question.r#ref))
+                .unwrap()
+    );
+    let bare = text(&pending_page(&st, &queue, None, None, &[]).unwrap());
+    assert!(!bare.contains("You answered this"));
     // the page of an item names its title and the site
     assert!(
-        text(&item_page(&st, &question, None, None, None).unwrap())
+        text(&item_page(&st, &question, None, None, None, None).unwrap())
             .contains("<title>Who approves refunds? · Tiny</title>")
     );
     assert!(one.contains("<meta name=\"robots\" content=\"noindex\">"));
@@ -580,7 +618,7 @@ fn ui7_refusal_details_and_corrected_cards_are_distinct() {
         "answer the corrected card",
     );
     // a corrected card that is not a question has its fresh form, and no old hash
-    let page = text(&item_page(&st, &fresh, None, Some(&moved), None).unwrap());
+    let page = text(&item_page(&st, &fresh, None, Some(&moved), None, None).unwrap());
     assert!(
         page.contains(
             "<p class=\"refusal-message\">the item changed after you read it &lt;b&gt;</p>"
@@ -611,7 +649,7 @@ fn ui7_refusal_details_and_corrected_cards_are_distinct() {
         option("o2", "West", &[], None),
     ];
     seal(&mut q);
-    let page = text(&item_page(&st, &q, Some(&brief), Some(&moved), None).unwrap());
+    let page = text(&item_page(&st, &q, Some(&brief), Some(&moved), None, None).unwrap());
     assert!(!page.contains("<form") && !page.contains("name=\"brief\""));
     assert!(!page.contains("Briefing") && !page.contains(&brief.base.token));
     assert!(page.contains(&q.card_hash) && page.contains(&escape(&q.card)));
@@ -693,8 +731,8 @@ fn ui7_ui_rendering_leaves_site_outputs_identical() {
         items: vec![q.clone()],
         ..Pending::default()
     };
-    pending_page(&st, &pending, Some("note"), Some(EVENTS)).unwrap();
-    item_page(&st, &q, None, None, Some(EVENTS)).unwrap();
+    pending_page(&st, &pending, Some("note"), Some(EVENTS), &[]).unwrap();
+    item_page(&st, &q, None, None, Some(EVENTS), None).unwrap();
     refusal_page(&st, &RdyError::new(E_VALIDATION, "m", "f")).unwrap();
     let after = build(&st);
     for (what, b, a) in [
@@ -746,11 +784,11 @@ fn ui7_forms_and_details_need_no_script() {
     };
     let stale = RdyError::new(E_ITEM_MOVED, "moved", "reload");
     let pages = [
-        text(&pending_page(&st, &pending, None, Some(EVENTS)).unwrap()),
-        text(&pending_page(&st, &pending, None, None).unwrap()),
-        text(&item_page(&st, &approve, None, None, Some(EVENTS)).unwrap()),
-        text(&item_page(&st, &q, Some(&brief), None, Some(EVENTS)).unwrap()),
-        text(&item_page(&st, &approve, None, Some(&stale), None).unwrap()),
+        text(&pending_page(&st, &pending, None, Some(EVENTS), &[]).unwrap()),
+        text(&pending_page(&st, &pending, None, None, &[]).unwrap()),
+        text(&item_page(&st, &approve, None, None, Some(EVENTS), None).unwrap()),
+        text(&item_page(&st, &q, Some(&brief), None, Some(EVENTS), None).unwrap()),
+        text(&item_page(&st, &approve, None, Some(&stale), None, None).unwrap()),
         text(&refusal_page(&st, &stale).unwrap()),
     ];
     for page in &pages {

@@ -88,7 +88,8 @@ use crate::proposal_show::is_proposal_ref;
 use crate::tensions::set::tension_hex;
 use crate::{Rdy, ReadState, Session};
 pub use presented::{
-    Presentation, PresentedAnswer, presented_item, presented_question_brief, run_presented_answer,
+    AnsweredInView, Presentation, PresentedAnswer, answered_in_view, presented_item,
+    presented_question_brief, run_presented_answer,
 };
 use rdy_model::{ActorRun, BlockId, EvidenceKind, Hash};
 use rdy_store::{Relay, StoreError};

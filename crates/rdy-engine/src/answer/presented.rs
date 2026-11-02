@@ -29,7 +29,8 @@ use crate::pending::{Item, ItemKind};
 use crate::policy::roles::{holds, outside_role};
 use crate::signing_crypto::SigningAgent;
 use crate::{Rdy, ReadState, Scope, Session};
-use rdy_model::{EvidenceKind, Role};
+use rdy_model::decision;
+use rdy_model::{AnswerAct, EvidenceKind, Op, Role};
 use std::collections::BTreeSet;
 
 /// Where the person was shown the card.
@@ -189,6 +190,65 @@ pub fn presented_question_brief(
     let briefing = st.brief_ids(&scope, &BTreeSet::from([id]), None)?;
     briefing.register(registry);
     Ok(Some(briefing))
+}
+
+/// A question `person` answered whose decision still waits in a view, for the line a page shows
+/// below the card. It is no part of the item, its card or its hash.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnsweredInView {
+    /// The item's ref.
+    pub item: String,
+    pub view: String,
+    /// The answering decision's id.
+    pub decision: String,
+}
+
+/// Where `person`'s latest answer to question `item` waits to land: the open view that holds its
+/// change and its decision. `None` for an item that is not a question, a latest answer from
+/// someone else, and a decision no open view holds. It reads only.
+pub fn answered_in_view(
+    st: &ReadState,
+    person: &str,
+    item: &Item,
+) -> Result<Option<AnsweredInView>, RdyError> {
+    if item.kind != ItemKind::Answer {
+        return Ok(None);
+    }
+    let Some((_, answer)) = st.reader().answer_of(&item.r#ref)? else {
+        return Ok(None);
+    };
+    if answer.act != AnswerAct::AnswerQuestion || answer.person.actor != person {
+        return Ok(None);
+    }
+    let Some(target) = answer.targets.first() else {
+        return Ok(None);
+    };
+    let Some(view) = st
+        .view_names()
+        .into_iter()
+        .find(|v| st.view_head(v).is_some_and(|h| !h.closed) && st.included(v).contains(target))
+    else {
+        return Ok(None);
+    };
+    // a change this state cannot read, or a decision the view dropped, has no line
+    let Ok(change) = st.reader().change(target) else {
+        return Ok(None);
+    };
+    let decision = change.ops.iter().find_map(|op| match op {
+        Op::Create { block } if block.block_type == decision::DECISION => Some(block.id.clone()),
+        _ => None,
+    });
+    let Some(decision) = decision else {
+        return Ok(None);
+    };
+    if st.block(&Scope::View(view.clone()), &decision).is_err() {
+        return Ok(None);
+    }
+    Ok(Some(AnsweredInView {
+        item: item.r#ref.clone(),
+        view,
+        decision: decision.to_string(),
+    }))
 }
 
 /// Answers a presented card for `person` (the project's human actor), as `caller` presented it
