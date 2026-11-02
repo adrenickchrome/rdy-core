@@ -3,8 +3,8 @@
 //! that is one question) and the located text of each `unlinked_mention`. Every carried layer
 //! equals a fresh build.
 use rdy_engine::coverage::{
-    BlockEntry, CoverageIssue, Dimension, IssueCode, issues_rebuilt_for_tests, rebuilt_for_tests,
-    rollup, structural_builds, structural_for_tests,
+    BlockEntry, CoverageIssue, Dimension, IssueCode, carried_entries, issues_rebuilt_for_tests,
+    rebuilt_for_tests, rollup, structural_builds, structural_for_tests,
 };
 use rdy_engine::mention_review::MentionVerdict;
 use rdy_engine::*;
@@ -286,6 +286,62 @@ fn nb4_level_carry_matches_rebuild_across_both_parents() {
         "7 docs over a limit of 6"
     );
     same(&r, &v, "pack limit 6");
+}
+
+/// A carried doc recomputes its siblings only when its level crosses the limit: an entry reads
+/// the level through "over the limit" alone, so a level that stays on one side keeps them.
+#[test]
+fn nbp1_a_new_doc_recomputes_its_level_only_when_it_crosses_the_limit() {
+    let (_dir, mut r) = project();
+    let c = write(&mut r, VIEW, Value::Array(docs(None, "r", 8)))
+        .unwrap()
+        .created;
+    let v = view();
+    let created = |r: &mut Rdy, name: &str| -> (BTreeMap<String, String>, u64) {
+        r.read().coverage_issues(&v).unwrap();
+        let (builds, before) = (structural_builds(), carried_entries());
+        let w = write(
+            r,
+            VIEW,
+            json!([{"op": "create", "type": "doc", "id": "$n", "fields": {"name": name, "title": name, "doc_type": "page"}}]),
+        )
+        .unwrap();
+        r.read().coverage_issues(&v).unwrap();
+        assert_eq!(structural_builds(), builds, "{name} carries");
+        same(r, &v, name);
+        (w.created, carried_entries() - before)
+    };
+
+    // eight to nine: the level crosses the limit, so every doc of it moves
+    let (ninth, crossed) = created(&mut r, "n8");
+    assert!(crossed >= 9, "crossing recomputed only {crossed} entries");
+    assert!(crowded(&r, &v, &c["$r0"]).is_some());
+    assert!(crowded(&r, &v, &ninth["$n"]).is_some());
+
+    // nine to ten and on: it stays over, so the siblings keep their entries
+    for i in 9..24 {
+        let name = format!("n{i}");
+        let (doc, stayed) = created(&mut r, &name);
+        assert!(stayed <= 3, "{name} recomputed {stayed} entries");
+        assert!(crowded(&r, &v, &doc["$n"]).is_some(), "{name}");
+    }
+    assert!(crowded(&r, &v, &c["$r7"]).is_some());
+
+    // a landing carries the same way into canon, and an edit of a doc moves no count
+    land(&mut r, VIEW).unwrap();
+    let doc = &c["$r3"];
+    r.read().coverage_issues(&v).unwrap();
+    let before = carried_entries();
+    write(
+        &mut r,
+        VIEW,
+        json!([{"op": "update", "id": doc, "fields": {"name": "r3", "title": "Doc r3 again", "doc_type": "page"}}]),
+    )
+    .unwrap();
+    r.read().coverage_issues(&v).unwrap();
+    let edited = carried_entries() - before;
+    assert!(edited <= 3, "a title edit recomputed {edited} entries");
+    same(&r, &v, "edit a doc");
 }
 
 #[test]

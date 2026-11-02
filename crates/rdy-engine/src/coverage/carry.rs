@@ -28,8 +28,8 @@ pub fn carried_entries() -> u64 {
 /// deleted, renamed or made everyday or not; a lifecycle change or a move of a block that has
 /// children; a block deleted with children left; a doc's `doc_type` changed; a doc or a folder
 /// deleted, renamed or moved, or created without a stored name or beside a nameless one (it
-/// changes the paths of docs other than itself). A doc that carries recomputes every doc of its
-/// level (nb4: `crowded_level`). `None` too when an entry is refused (`E_LIMIT`): the next required
+/// changes the paths of docs other than itself). A doc that comes, goes or moves recomputes every
+/// doc of a level it takes across the limit (nb4: `crowded_level`). `None` too when an entry is refused (`E_LIMIT`): the next required
 /// read rebuilds and gives the error. With the layer, the blocks whose entries it recomputed
 /// (every other entry is `prev`'s).
 #[allow(clippy::too_many_arguments)]
@@ -68,15 +68,6 @@ pub(crate) fn carry(
             if let Some(p) = &x.parent {
                 dirty.insert(p.clone());
             }
-            // nb4: a doc that comes, goes or moves changes its levels' counts, so each doc of its
-            // level before and after (`crowded_level`)
-            if x.block_type == tree::DOC {
-                for sibling in new.children(x.parent.as_ref()) {
-                    if sibling.block_type == tree::DOC {
-                        dirty.insert(sibling.id.clone());
-                    }
-                }
-            }
             docs_above(m, id, &mut dirty);
             // 2. each target of an outgoing edge, old or new, and that target's doc
             for e in edges_of(x) {
@@ -107,6 +98,8 @@ pub(crate) fn carry(
             dirty.extend(named.iter().cloned());
         }
     }
+
+    crossed_levels(old, new, pack, &touched, &mut dirty);
 
     let cx = EntryCx::new(new, g, lex, pack);
     CARRIED_ENTRIES.with(|c| c.set(c.get() + dirty.len() as u64));
@@ -228,6 +221,47 @@ fn raw_names(b: &Block) -> (Option<&FieldValue>, Option<&FieldValue>, bool) {
         b.fields.get(entity::ALIASES),
         b.fields.get(EVERYDAY) == Some(&FieldValue::Bool(true)),
     )
+}
+
+/// nb4: adds every doc of each level that a doc coming, going or moving takes across the pack's
+/// limit. An entry reads its level only as "over the limit or not" (`crowded_level`), so a level
+/// that stays on one side keeps its other docs' entries; the docs `touched` names are dirty
+/// anyway, and each reads its own level's count and guards.
+fn crossed_levels(
+    old: &Materialized,
+    new: &Materialized,
+    pack: &Pack,
+    touched: &BTreeSet<&BlockId>,
+    dirty: &mut BTreeSet<BlockId>,
+) {
+    let level_of = |x: Option<&'_ Block>| -> Option<Option<BlockId>> {
+        x.filter(|x| x.block_type == tree::DOC)
+            .map(|x| x.parent.clone())
+    };
+    let mut levels: BTreeSet<Option<BlockId>> = BTreeSet::new();
+    for id in touched {
+        let (before, after) = (level_of(old.get(id)), level_of(new.get(id)));
+        if before != after {
+            levels.extend(before);
+            levels.extend(after);
+        }
+    }
+    let max = pack.max_docs_per_level() as usize;
+    for level in &levels {
+        let docs = |m: &Materialized| {
+            m.children(level.as_ref())
+                .into_iter()
+                .filter(|c| c.block_type == tree::DOC)
+                .count()
+        };
+        if (docs(old) > max) != (docs(new) > max) {
+            for c in new.children(level.as_ref()) {
+                if c.block_type == tree::DOC {
+                    dirty.insert(c.id.clone());
+                }
+            }
+        }
+    }
 }
 
 /// Adds `id` (when it is a doc) and every doc above it in `m`.
