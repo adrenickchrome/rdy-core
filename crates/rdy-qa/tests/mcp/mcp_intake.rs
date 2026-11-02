@@ -299,6 +299,28 @@ fn di12_rdy_answer_needs_the_persons_words() {
     };
     let e = c.call("rdy_answer", bound.clone());
     assert_eq!(e.code(), Some("E_BAD_INPUT"), "{e:?}");
+    let Reply::ToolError(v) = e else {
+        unreachable!()
+    };
+    assert_eq!(
+        v["message"],
+        "rdy_answer: parameter \"evidence\" is required"
+    );
+    assert_eq!(v["fix"], "pass \"evidence\" as a string");
+    // ui10: elicit false is the same relay; elicit true asks for no words, and this client
+    // cannot show the card
+    let e = c.call("rdy_answer", with(json!({"elicit": false})));
+    assert_eq!(e.code(), Some("E_BAD_INPUT"), "{e:?}");
+    let e = c.call("rdy_answer", with(json!({"elicit": true})));
+    let Reply::ToolError(v) = e else {
+        unreachable!()
+    };
+    assert_eq!(v["message"], "elicit takes only ref, card_hash and brief");
+    let e = c.call(
+        "rdy_answer",
+        json!({"ref": b.r#ref, "card_hash": it["card_hash"], "elicit": true}),
+    );
+    assert_eq!(e.code(), Some("E_ELICITATION_UNAVAILABLE"), "{e:?}");
     let e = c.call("rdy_answer", with(json!({"evidence": "   "})));
     assert_eq!(e.code(), Some("E_PERMISSION"), "{e:?}");
     let Reply::ToolError(v) = e else {

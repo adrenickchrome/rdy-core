@@ -79,6 +79,8 @@ pub const E_COVERAGE_LOWERED: &str = "E_COVERAGE_LOWERED";
 /// An answer names a queue item that changed or left the queue since its card was shown;
 /// `corrected` holds the fresh card when the item has one.
 pub const E_ITEM_MOVED: &str = "E_ITEM_MOVED";
+/// The MCP client cannot show rdy's card through form elicitation.
+pub const E_ELICITATION_UNAVAILABLE: &str = "E_ELICITATION_UNAVAILABLE";
 /// Changes in the view depend on the change being excluded (each one is an issue).
 pub const E_HAS_DEPENDENTS: &str = "E_HAS_DEPENDENTS";
 /// A subset leaves out changes its members depend on (each one is an issue).
@@ -1079,7 +1081,7 @@ pub fn upstream_signout_local() -> Issue {
 
 /// Every error code the engine defines: each `E_*` constant of this module and the briefing's
 /// two. It is the engine's whole static error set, not one feature's subset.
-const CORE_ERROR_CODES: [&str; 111] = [
+const CORE_ERROR_CODES: [&str; 112] = [
     E_LOCKED,
     E_HELD_BY_READER,
     E_NO_PROJECT,
@@ -1156,6 +1158,7 @@ const CORE_ERROR_CODES: [&str; 111] = [
     E_SIGNING_KEY_MISSING,
     E_SIGNING_KEY_TYPE,
     E_NO_AGENT,
+    E_ELICITATION_UNAVAILABLE,
     E_SIG_INVALID,
     E_SIG_OBJECT_MISMATCH,
     E_WC_NOT_BOUND,

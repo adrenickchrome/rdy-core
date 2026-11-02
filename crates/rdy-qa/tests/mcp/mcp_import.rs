@@ -105,7 +105,7 @@ fn block_yaml(
 
 /// A format-3 export tree at `out`: doc `name` (id `doc`) with section `section` and one decision
 /// per `(id, status)`, each `two_way` with basis `precedent`, all by agent:src (run s1) at 100.
-fn tree(out: &Path, name: &str, doc: &str, section: &str, decisions: &[(&str, &str)]) {
+pub(crate) fn tree(out: &Path, name: &str, doc: &str, section: &str, decisions: &[(&str, &str)]) {
     std::fs::create_dir_all(out.join("docs")).unwrap();
     std::fs::write(
         out.join("rdy-export.yaml"),
@@ -159,7 +159,7 @@ fn tree(out: &Path, name: &str, doc: &str, section: &str, decisions: &[(&str, &s
     std::fs::write(out.join("authors.yaml"), authors).unwrap();
 }
 
-fn session(c: &mut McpClient, actor: &str, run: &str, role: &str) {
+pub(crate) fn session(c: &mut McpClient, actor: &str, run: &str, role: &str) {
     c.call(
         "rdy_session",
         json!({"actor": actor, "run": run, "role": role}),
@@ -190,7 +190,7 @@ fn policy_fields() -> Value {
 }
 
 /// The served project, with pack `rdy-qa` and canon holding the policy of [`policy_fields`].
-fn policy_served() -> Served {
+pub(crate) fn policy_served() -> Served {
     let s = Served::new();
     s.stop();
     let dir = s.dir.path();

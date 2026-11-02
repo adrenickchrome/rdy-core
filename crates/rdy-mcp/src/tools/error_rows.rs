@@ -322,6 +322,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         NO_AGENT_FIX,
     ),
     (
+        E_ELICITATION_UNAVAILABLE,
+        "the MCP client cannot show rdy's card through form elicitation",
+        "show the card in chat and relay the person's answer: rdy_answer with option and evidence",
+    ),
+    (
         E_SIG_INVALID,
         "signature {hash} is invalid",
         SIG_INVALID_FIX,

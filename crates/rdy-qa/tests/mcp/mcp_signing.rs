@@ -326,7 +326,7 @@ fn sig9_sign_later_and_automatic_warnings_have_exact_text() {
     }
     assert_eq!(
         schema["signing"],
-        "Signing uses only the caller's SSH agent. Accepted key types are ssh-ed25519 and sk-ssh-ed25519@openssh.com. signing.sign is never, auto or always; the default is auto. Presence is an authenticated flag, not proof that a person read the act."
+        "Signing uses only the caller's SSH agent. Accepted key types are ssh-ed25519 and sk-ssh-ed25519@openssh.com. signing.sign is never, auto or always; the default is auto. Presence is an authenticated flag, not proof that a person read the act. A UI approval is unsigned; sign it later with rdy_sign or rdy sign. With signing.sign: always, the UI refuses and names rdy approve. An elicited approval signs with the person's key (signing.key) through the caller's SSH agent, with no relay."
     );
 }
 

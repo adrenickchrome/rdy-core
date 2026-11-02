@@ -1,0 +1,10 @@
+{
+  "content": [
+    {
+      "text": "{\"act\":\"reject_proposal\",\"answer\":\"306a63f04985e049962679847d33b5fce889abb11eb666958d320a0c31a5464b\",\"assurance\":\"local\",\"label\":\"Reject\",\"landing\":null,\"next\":null,\"option\":\"reject\",\"ref\":\"P-c29d354a90c8@1\",\"relayed_by\":null}",
+      "type": "text"
+    }
+  ],
+  "isError": false,
+  "resultType": "complete"
+}

@@ -1,0 +1,10 @@
+{
+  "content": [
+    {
+      "text": "{\"state\":\"cancelled\"}",
+      "type": "text"
+    }
+  ],
+  "isError": false,
+  "resultType": "complete"
+}

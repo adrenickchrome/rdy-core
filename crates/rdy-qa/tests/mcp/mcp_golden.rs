@@ -23,6 +23,16 @@ use std::sync::Arc;
 /// The two lists a child `rdy mcp` serves with no ids or times.
 const STATIC_LISTS: [&str; 2] = ["resources--list", "resources--templates"];
 
+/// The protocol envelopes of an elicited answer: `mcp_elicitation` makes and checks them over a
+/// real protocol exchange, which this in-process session has no client for.
+const PROTOCOL_GOLDENS: [&str; 5] = [
+    "rdy_answer--input-required",
+    "rdy_answer--elicited",
+    "rdy_answer--elicitation-unavailable",
+    "rdy_answer--declined",
+    "rdy_answer--cancelled",
+];
+
 /// Every M2 tool the goldens must name.
 const M2_TOOLS: [&str; 15] = [
     "rdy_session",
@@ -643,7 +653,10 @@ fn sg7_every_m2_tool_reply_matches_its_golden() {
     all.extend(static_lists());
     if blessing() {
         std::fs::create_dir_all(golden_dir()).unwrap();
-        for old in golden_names() {
+        for old in golden_names()
+            .into_iter()
+            .filter(|n| !PROTOCOL_GOLDENS.contains(&n.as_str()))
+        {
             std::fs::remove_file(golden_dir().join(format!("{old}.json"))).unwrap();
         }
         for (name, text) in &all {
@@ -662,7 +675,8 @@ fn sg7_every_m2_tool_reply_matches_its_golden() {
             Err(_) => bad.push(format!("{name}: no golden file")),
         }
     }
-    let made: BTreeSet<String> = all.iter().map(|(n, _)| n.clone()).collect();
+    let mut made: BTreeSet<String> = all.iter().map(|(n, _)| n.clone()).collect();
+    made.extend(PROTOCOL_GOLDENS.map(str::to_string));
     for extra in golden_names().difference(&made) {
         bad.push(format!("{extra}: a golden no case makes"));
     }

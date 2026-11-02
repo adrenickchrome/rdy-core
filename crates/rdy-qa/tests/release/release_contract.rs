@@ -2838,7 +2838,105 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
         json!({"dir": tree_dir, "view": "rdr"}),
     );
     drop(rdr);
+    elicitation_probes(seen);
     let _ = (doc, a);
+}
+
+/// ui10: the elicit input, its unavailable refusal, and the protocol envelopes and outcomes of a
+/// client that states the 2026-07-28 context in its requests.
+fn elicitation_probes(seen: &mut Seen) {
+    use rdy_qa::fixtures::{approver, project, seed_doc, write, writer};
+    use rdy_qa::mcp::{DEADLINE, McpClient};
+    let (dir, mut r) = project();
+    let (_, section, _) = seed_doc(&mut r, "seed");
+    let p = r
+        .propose(&writer(), "seed", "Seed", Some("Seeds."))
+        .unwrap();
+    r.land(&approver(), &p.id).unwrap();
+    write(
+        &mut r,
+        "one",
+        json!([{"op": "create", "type": "claim", "parent": section, "body": "A claim of one."}]),
+    )
+    .unwrap();
+    rdy_qa::intake::answer_open_items(&mut r, &writer(), "one");
+    r.propose(&writer(), "one", "One", Some("Adds one claim."))
+        .unwrap();
+    drop(r);
+    std::fs::write(dir.path().join(".rdy/local.yaml"), "actor: human:qa\n").unwrap();
+    let mut c = McpClient::start(dir.path());
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_session",
+        "rdy_session",
+        json!({"actor": "agent:elc", "run": "elc", "role": "writer"}),
+    );
+    let queue = ok_of(&mcp_probe(
+        seen,
+        &mut c,
+        "rdy_pending",
+        "rdy_pending",
+        json!({}),
+    ));
+    let item = queue["items"][0].clone();
+    assert!(item.is_object(), "an item waits: {queue}");
+    let ask = json!({"ref": item["ref"], "card_hash": item["card_hash"], "elicit": true});
+    mcp_probe(
+        seen,
+        &mut c,
+        "rdy_answer",
+        "rdy_answer elicit unavailable",
+        ask.clone(),
+    );
+    let mut mixed = ask.clone();
+    mixed["option"] = json!("later");
+    mcp_probe(seen, &mut c, "rdy_answer", "rdy_answer elicit mixed", mixed);
+    let mut raw = |extra: Value| {
+        let id = c.next_id();
+        let mut params = json!({"name": "rdy_answer", "arguments": ask, "_meta": {
+            "rdy/actor": "agent:elc", "rdy/run": "elc",
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}},
+        }});
+        for (k, v) in extra.as_object().unwrap() {
+            params[k] = v.clone();
+        }
+        c.send_raw(
+            &json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": params})
+                .to_string(),
+        );
+        c.recv(id, DEADLINE)["result"].clone()
+    };
+    let asked = raw(json!({}));
+    seen.note("rdy_answer input_required", "ok", shape(&asked));
+    let handle = asked["requestState"].clone();
+    let first =
+        raw(json!({"requestState": handle, "inputResponses": {"answer": {"action": "decline"}}}));
+    seen.note("rdy_answer declined", "ok", shape(&first));
+    let again =
+        raw(json!({"requestState": handle, "inputResponses": {"answer": {"action": "decline"}}}));
+    seen.note("rdy_answer elicit used", "refused", shape(&again));
+    let asked = raw(json!({}));
+    let cancelled = raw(json!({"requestState": asked["requestState"],
+        "inputResponses": {"answer": {"action": "cancel"}}}));
+    seen.note("rdy_answer cancelled", "ok", shape(&cancelled));
+    let asked = raw(json!({}));
+    let invalid = raw(json!({"requestState": asked["requestState"],
+        "inputResponses": {"answer": {"action": "maybe"}}}));
+    seen.note("rdy_answer elicit invalid", "refused", shape(&invalid));
+    let later = item["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["id"] == "later")
+        .unwrap_or_else(|| panic!("the first card has Later: {item}"));
+    let asked = raw(json!({}));
+    let elicited = raw(
+        json!({"requestState": asked["requestState"], "inputResponses": {
+        "answer": {"action": "accept", "content": {"choice": later["id"]}}}}),
+    );
+    seen.note("rdy_answer elicited", "ok", shape(&elicited));
 }
 
 /// A format-3 export tree at `out`: doc `imported` with a section by agent:a (run r1) at 100 and

@@ -2088,6 +2088,7 @@ version = "0.33.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "rand 0.10.3",
  "rdy-engine",
  "rdy-graph",
  "rdy-model",
@@ -2319,6 +2320,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "url",
  "uuid",
 ]
 

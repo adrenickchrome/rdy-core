@@ -390,8 +390,17 @@ impl ServerHandler for RdyServer {
             },
             claim,
         };
-        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        let run = CALL.scope(call, self.tool_router.call(tcc));
+        // D-6M0AF: an elicited answer is a protocol exchange, so it runs before the tool router,
+        // which can only build a complete result
+        let elicited = Self::elicits(&request);
+        let run = CALL.scope(call, async move {
+            if elicited {
+                Ok(self.answer_elicited(request, context).await)
+            } else {
+                let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+                self.tool_router.call(tcc).await
+            }
+        });
         tokio::pin!(run);
         // the cancel goes first when both are ready; the body is then awaited, never dropped,
         // so its worker on the blocking pool is joined
