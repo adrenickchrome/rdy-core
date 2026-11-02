@@ -631,6 +631,9 @@ pub fn check_plan(cfg: &Config) -> Option<CheckPlan> {
     })
 }
 
+/// The person's odd act that edits the working copy in a script with forced UI acts.
+const EARLY_EDIT: usize = 5;
+
 /// The person's acts of the forced UI sequences (D-6M0AF): each an index into `Script::person`.
 /// Both are odd acts, and both are due before the first step a run can kill the daemon at: an
 /// agent's step waits for the person's acts due before it, so no agent passes `due + 1` while
@@ -992,7 +995,18 @@ fn person_script(
             step: UiStep::Forced,
         };
     }
+    // the forced UI acts take the two earliest odd acts, where a drawn working-copy edit could
+    // reach an approve before the run ends; the edit keeps an early act of its own, so the plan
+    // check of the person's work (rg15) still reads one
+    let early_edit = ui.is_some() && free.contains(&EARLY_EDIT);
+    if early_edit {
+        free.retain(|f| *f != EARLY_EDIT);
+        acts[EARLY_EDIT] = PersonAct::WcEdit;
+    }
     for id in 1..6u8 {
+        if early_edit && id == 3 {
+            continue;
+        }
         let at = free.swap_remove(rng.below(free.len()));
         acts[at] = make(rng, id);
     }

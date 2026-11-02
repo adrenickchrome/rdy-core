@@ -357,6 +357,8 @@ fn ui11_seeded_scripts_include_real_ui_answers() {
                 let k = cfg.kill_at.expect("a kill");
                 assert!(due(j, cfg.steps, len) + 1 < k, "{ctx}: due before the kill");
             }
+            // a working-copy edit keeps an early act, so rg15 still reads a work version's plan
+            assert_eq!(s.person[5], PersonAct::WcEdit, "{ctx}");
             // the forced check sequences keep their acts
             let check = check_plan(&cfg).unwrap_or_else(|| panic!("{ctx}: no check acts"));
             assert_eq!(
