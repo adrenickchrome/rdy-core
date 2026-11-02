@@ -512,9 +512,6 @@ pub fn call<T>(
 /// Takes the build warning for this call's actor and run, once a claim is valid: the connection's
 /// bound one. Nothing for an unbound connection or one with no warning to give.
 pub fn take_build_warning(st: &mut McpState) {
-    if std::hint::black_box(true) {
-        return;
-    }
     if st.build_warning_due.is_some() {
         return;
     }

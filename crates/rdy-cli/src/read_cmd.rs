@@ -282,7 +282,7 @@ fn status_text(v: &Value) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     let mut out = format!(
-        "pack {}\ndaemon-red: {}\n{}canon: {} ({} landings, {} suspects){}\nviews:\n{views}",
+        "pack {}\ndaemon: {}\n{}canon: {} ({} landings, {} suspects){}\nviews:\n{views}",
         text(&v["pack"]),
         v["daemon"].as_str().unwrap_or("none"),
         repo_lines(v),
