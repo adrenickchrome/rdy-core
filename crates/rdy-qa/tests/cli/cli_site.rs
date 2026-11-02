@@ -182,7 +182,10 @@ fn dgm11_cli_site_links_reach_themed_404() {
             "{args:?}: {body}"
         );
         assert!(body.contains("<h1>Page not found</h1>"), "{args:?}");
-        assert!(body.contains(&format!("<p>{PAGE}</p>")), "{args:?}");
+        assert!(
+            body.contains(&format!("<p class=\"refusal-message\">{PAGE}</p>")),
+            "{args:?}"
+        );
         assert!(
             body.contains(&format!("href=\"{root}index.html\"")),
             "{args:?}: the home link at {root}"
