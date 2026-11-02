@@ -2241,6 +2241,11 @@ impl Store {
         self.held
     }
 
+    /// The log itself, for the byte report of `crate::compact`.
+    pub(crate) fn segment_log(&self) -> &SegmentLog {
+        &self.log
+    }
+
     /// The kind and hash of each frame of the open held batch, in order; `None` when no batch is
     /// open.
     /// (Each frame by its logical kind, `crate::codec`.)

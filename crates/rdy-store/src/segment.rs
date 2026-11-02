@@ -217,7 +217,7 @@ fn drive_punches<T>(
 
 /// The lines an automatic removal reports for `s`, in their fixed order. They are diagnostics, not
 /// warning codes.
-fn punch_diagnostics(s: &PunchSummary) -> Vec<String> {
+pub(crate) fn punch_diagnostics(s: &PunchSummary) -> Vec<String> {
     let mut lines = vec![];
     if s.unsupported > 0 {
         lines.push(format!(
@@ -2065,6 +2065,37 @@ impl SegmentLog {
             }
         }
         Ok((count, dropped))
+    }
+
+    /// Walks the header of every frame of the log, markers included, in log order, and calls `f`
+    /// with the frame's segment file, place, payload length, raw kind and hash. It reads no
+    /// payload. A header that does not fit its file is refused as `verify_frames` refuses it, and
+    /// so is a sealed segment that does not end at a marker.
+    pub(crate) fn walk_headers<E: From<io::Error>>(
+        &self,
+        mut f: impl FnMut(&File, Location, u32, u8, Hash) -> Result<(), E>,
+    ) -> Result<(), E> {
+        for seg in 0..=self.current() {
+            let file = &self.readers[seg as usize];
+            let file_len = self.walk_len(seg, file)?;
+            let mut offset = 0;
+            let mut last = None;
+            while offset < file_len {
+                let loc = Location {
+                    segment: seg,
+                    offset,
+                };
+                let (len, raw, hash) = header_at(file, offset, file_len)?
+                    .ok_or_else(|| refuse_frame(file, loc, file_len, corrupt_frame(loc)))?;
+                f(file, loc, len, raw, hash)?;
+                last = Some(raw);
+                offset += HEADER + u64::from(len);
+            }
+            if seg < self.current() && last != Some(kinds::BATCH_COMMIT) {
+                return Err(unsealed(seg).into());
+            }
+        }
+        Ok(())
     }
 
     /// What the log's validated redaction applies authorize.

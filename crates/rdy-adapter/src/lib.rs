@@ -30,7 +30,9 @@ pub use publication::{ProfileFacts, profile_facts};
 pub use publication_take::{
     PublicationFacts, PublicationRefusal, PublicationTaken, PublicationTarget,
 };
-pub use rdy_engine::{CarriedTargetIssue, CarriedWarning, RdyError, core_error_code};
+pub use rdy_engine::{
+    CarriedTargetIssue, CarriedWarning, CompactReport, KindBytes, RdyError, core_error_code,
+};
 pub use rdy_model::{Block, BlockId, Hash, RepoId, Tag};
 pub use rdy_store::holder::StoreMode;
 pub use rdy_store::meta::Origin;

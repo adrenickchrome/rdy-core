@@ -1,8 +1,8 @@
 //! The store handle and its captured read snapshot.
 
 use rdy_engine::{
-    CarriedWarning, ChainEnd, DumpSummary, E_INTERNAL, E_NOT_FOUND, Engine, FsckReport, Local, Rdy,
-    RdyError, ReadState, parse_version,
+    CarriedWarning, ChainEnd, CompactReport, DumpSummary, E_INTERNAL, E_NOT_FOUND, Engine,
+    FsckReport, Local, Rdy, RdyError, ReadState, parse_version,
 };
 use rdy_model::{Hash, RepoId, Tag};
 use rdy_store::OpenPolicy;
@@ -104,6 +104,15 @@ impl StoreHandle {
     /// history). It reads under the lock and emits no batch.
     pub fn fsck(&self) -> Result<FsckReport, RdyError> {
         self.local.inspect(|rdy| rdy.fsck())
+    }
+
+    /// Frees the disk space of the store's removed payloads and reports the log's bytes
+    /// (D-4YRQ4). It runs under the lock, so a write through this handle waits for it, and it
+    /// appends no batch and publishes nothing: no frame moves and every read stays the same. A
+    /// file system that cannot punch is a note in the report, not an error. A follower or a
+    /// read-only store refuses.
+    pub fn compact(&self) -> Result<CompactReport, RdyError> {
+        self.local.inspect(|rdy| rdy.compact(false))
     }
 
     /// The carried-removal warnings (`W_STOP_BEFORE_REDACTION`) of the store now, in the log's

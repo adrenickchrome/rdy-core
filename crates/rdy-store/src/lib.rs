@@ -6,6 +6,7 @@ pub mod check_holder;
 mod check_request;
 pub mod closure;
 pub mod codec;
+pub mod compact;
 pub mod coord;
 pub mod diagram_cache;
 mod dispute;

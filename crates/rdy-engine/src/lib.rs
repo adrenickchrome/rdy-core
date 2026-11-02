@@ -11,6 +11,7 @@ pub mod clone;
 pub mod code_brief;
 pub mod code_evidence;
 pub mod code_index;
+mod compact;
 mod config;
 pub mod config_edit;
 pub mod config_levels;
@@ -130,6 +131,7 @@ pub use brief::{
     BriefRegistry, Briefing, Coverage, E_BRIEF_REQUIRED, E_BRIEF_STALE, W_BRIEF_STALE,
 };
 pub use carried_warning::{CarriedTargetIssue, CarriedWarning};
+pub use compact::{CompactReport, KindBytes, LogBytes};
 pub use coverage::{CoverageIssue, CoverageIssues, IssueCode};
 pub use decide::DecisionInput;
 pub use diff::{Diff, DiffChange, DiffEntry, LinkChange, StatusChange};
