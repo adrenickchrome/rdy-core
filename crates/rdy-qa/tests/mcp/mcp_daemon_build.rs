@@ -330,7 +330,7 @@ async fn mh5_mcp_warns_once_for_the_bound_actor_and_run() {
     );
 
     // through a real daemon: ServeHandler passes the warning to the session
-    daemon_path();
+    std::thread::spawn(daemon_path).join().unwrap();
 }
 
 /// A daemon of another build in this process, one held connection, and `rdy mcp` as a client.
@@ -369,7 +369,8 @@ fn daemon_path() {
     let v = m.call("rdy_overview", json!({})).ok();
     assert_eq!(warned(&v), 0, "{v}");
     assert_eq!(v["daemon"], format!("rdy {VERSION} build {OTHER}"));
-    drop(m.finish(rdy_qa::mcp::DEADLINE));
+    m.close_stdin();
+    let _ = m.wait_exit(rdy_qa::mcp::DEADLINE);
     holder.close();
     rt.block_on(task).unwrap().unwrap();
     drop(rt);

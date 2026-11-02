@@ -181,7 +181,8 @@ fn mh5_status_and_overview_report_the_serving_build() {
     let v = m.call("rdy_overview", json!({"max_tokens": 500})).ok();
     assert_eq!(v["daemon"], id);
     assert!(v.to_string().len() / 4 <= 500, "{v}");
-    drop(m.finish(rdy_qa::mcp::DEADLINE));
+    m.close_stdin();
+    let _ = m.wait_exit(rdy_qa::mcp::DEADLINE);
     s.stop();
 
     // no daemon: none and null
@@ -196,7 +197,8 @@ fn mh5_status_and_overview_report_the_serving_build() {
         .ok();
     let v = m.call("rdy_overview", json!({})).ok();
     assert_eq!(v["daemon"], Value::Null, "{v}");
-    drop(m.finish(rdy_qa::mcp::DEADLINE));
+    m.close_stdin();
+    let _ = m.wait_exit(rdy_qa::mcp::DEADLINE);
 
     // ping and sessions over the real host
     let host = Hosted::new();
