@@ -18,6 +18,9 @@ rdy-store.workspace = true
 rmcp.workspace = true
 arc-swap.workspace = true
 
+[build-dependencies]
+blake3.workspace = true
+
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
@@ -28,6 +31,7 @@ windows-sys.workspace = true
 rdy-render = { workspace = true, features = ["probe"] }
 tempfile.workspace = true
 rdy-schema.workspace = true
+blake3.workspace = true
 
 [lints]
 workspace = true

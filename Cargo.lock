@@ -2014,6 +2014,7 @@ name = "rdy-daemon"
 version = "0.34.0"
 dependencies = [
  "arc-swap",
+ "blake3",
  "libc",
  "rdy-engine",
  "rdy-mcp",
