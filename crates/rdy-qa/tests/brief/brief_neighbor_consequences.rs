@@ -553,6 +553,63 @@ block_types:
     tracking: [owner]
 ";
 
+/// nbp4: a batch reads each parent once to learn whether it joins a section that held a block.
+/// Parents with only new blocks do not stop the read of the one that held one.
+#[test]
+fn nbp4_a_batch_of_creates_finds_the_one_parent_that_held_a_block() {
+    let (_d, mut r) = project();
+    let ids = seed(
+        &mut r,
+        json!([
+            doc("nb"),
+            section("$empty", "$nb"),
+            section("$other", "$nb"),
+            section("$held", "$nb"),
+            claim("$a", "$held", "A stands."),
+        ]),
+    );
+    let (empty, other, held, a) = (
+        ids.get("$empty"),
+        ids.get("$other"),
+        ids.get("$held"),
+        ids.get("$a"),
+    );
+    // new blocks in two empty sections, many under one parent, with one in the section of a
+    let mut ops: Vec<Value> = (0..30)
+        .map(|i| json!({"op": "create", "type": "claim", "parent": empty, "body": format!("E{i} stands.")}))
+        .collect();
+    ops.push(json!({"op": "create", "type": "claim", "parent": other, "body": "O stands."}));
+    ops.push(
+        json!({"op": "create", "type": "claim", "id": "$x", "parent": held, "body": "X stands."}),
+    );
+    let res = write(&mut r, "w", Value::Array(ops)).unwrap();
+    let x = res.created["$x"].clone();
+    let c = report(&r, "w", &res.change);
+    assert_eq!(nrows(&c), vec![(a, FollowUp::Confirm, x)], "{c:#?}");
+
+    // and a batch under parents that hold only its own blocks owes nothing
+    let (_d, mut r) = project();
+    let ids = seed(
+        &mut r,
+        json!([
+            doc("nb"),
+            section("$empty", "$nb"),
+            section("$other", "$nb")
+        ]),
+    );
+    let (empty, other) = (ids.get("$empty"), ids.get("$other"));
+    let res = write(
+        &mut r,
+        "w",
+        json!([
+            {"op": "create", "type": "claim", "parent": empty, "body": "E stands."},
+            {"op": "create", "type": "claim", "parent": other, "body": "O stands."},
+        ]),
+    )
+    .unwrap();
+    assert_eq!(nrows(&report(&r, "w", &res.change)), vec![]);
+}
+
 #[test]
 fn nb8_create_confirms_only_unchanged_baseline_section_neighbors() {
     let (_d, mut r) = project();

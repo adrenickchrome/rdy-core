@@ -12,7 +12,7 @@ use crate::error::{E_CONFLICT_UNRESOLVED, E_INTERNAL, E_LIMIT, RdyError};
 use crate::gate::{LandInfo, ProposalInfo, applied_ops, changes_of, landed_as};
 use crate::intent::IntentNote;
 use crate::lexicon::Lexicon;
-use crate::neighbors::{NeighborVia, neighbors_in, takes_part};
+use crate::neighbors::{NeighborVia, neighbor_links, takes_part};
 use crate::tensions::delta::on_change;
 use crate::tensions::{SideRef, Tension, tension_label};
 use crate::tensions::{TensionDelta, tension_delta};
@@ -704,6 +704,22 @@ impl<'a> Compare<'a> {
         })
     }
 
+    /// Whether block `x` is in the comparison base ([`Compare::base_block`], with no copy of it).
+    fn in_base(&self, x: &BlockId) -> Result<bool, RdyError> {
+        Ok(match self.baselines.last() {
+            None | Some(Baseline::Empty) => false,
+            Some(Baseline::Ready { m, .. }) => m.get(x).is_some(),
+            Some(Baseline::Scope { st, scope, .. }) => st.materialized(scope)?.get(x).is_some(),
+            Some(Baseline::Start { first, blocks, .. }) => {
+                let olds = self.start_blocks(first, blocks)?;
+                match first.get(x) {
+                    Some(_) => olds.contains_key(x),
+                    None => self.m.get(x).is_some(),
+                }
+            }
+        })
+    }
+
     /// The comparison base as a whole state, read once; `None` for the empty state. A write's
     /// start is the final state (`g` its graph) with the written blocks put back as they were.
     fn base_state(&self, g: &Graph) -> Result<Option<BaseState>, RdyError> {
@@ -1077,15 +1093,6 @@ fn neighbor_pairs(
         pairs.insert(key, (how, section));
         Ok(())
     };
-    let parse = |id: &str| {
-        BlockId::parse(id).map_err(|e| {
-            RdyError::new(
-                E_INTERNAL,
-                format!("a neighbor row names no block: {e}"),
-                "report this",
-            )
-        })
-    };
     // one representative source per created group: its section rows are the group's
     let reps: BTreeMap<BlockId, &Vec<BlockId>> = created
         .values()
@@ -1095,35 +1102,34 @@ fn neighbor_pairs(
     in_final.extend(reps.keys().cloned());
     if !in_final.is_empty() {
         let mut in_base: BTreeMap<BlockId, bool> = BTreeMap::new();
-        for row in neighbors_in(m, g, pack, &in_final)? {
-            let subject = parse(&row.block)?;
-            if touched.contains(&subject) {
+        for row in neighbor_links(m, g, pack, &in_final)? {
+            let subject = row.block;
+            if touched.contains(subject) {
                 continue;
             }
             let section = row.via == NeighborVia::Section;
-            for of in &row.of {
-                let source = parse(of)?;
-                if edited.contains(&source) {
+            for source in row.of {
+                if edited.contains(source) {
                     let same_doc =
-                        || m.doc_of(&subject).map(|d| &d.id) == m.doc_of(&source).map(|d| &d.id);
+                        || m.doc_of(subject).map(|d| &d.id) == m.doc_of(source).map(|d| &d.id);
                     if section || same_doc() {
-                        keep(&subject, &source, NeighborCause::Edited, section)?;
+                        keep(subject, source, NeighborCause::Edited, section)?;
                     }
                 }
-                let Some(group) = reps.get(&source).filter(|_| section) else {
+                let Some(group) = reps.get(source).filter(|_| section) else {
                     continue;
                 };
-                let had = match in_base.get(&subject) {
+                let had = match in_base.get(subject) {
                     Some(had) => *had,
                     None => {
-                        let had = cmp.base_block(&subject)?.is_some();
+                        let had = cmp.in_base(subject)?;
                         in_base.insert(subject.clone(), had);
                         had
                     }
                 };
                 if had {
                     for cause in group.iter() {
-                        keep(&subject, cause, NeighborCause::Created, true)?;
+                        keep(subject, cause, NeighborCause::Created, true)?;
                     }
                 }
             }
@@ -1137,17 +1143,17 @@ fn neighbor_pairs(
             .map(|group| (group[0].clone(), group))
             .collect();
         let gone: BTreeSet<BlockId> = reps.keys().cloned().collect();
-        for row in neighbors_in(&bm, &bg, pack, &gone)? {
+        for row in neighbor_links(&bm, &bg, pack, &gone)? {
             if row.via != NeighborVia::Section {
                 continue;
             }
-            let subject = parse(&row.block)?;
-            if touched.contains(&subject) || m.get(&subject).is_none() {
+            let subject = row.block;
+            if touched.contains(subject) || m.get(subject).is_none() {
                 continue;
             }
-            for of in &row.of {
-                for cause in reps[&parse(of)?].iter() {
-                    keep(&subject, cause, NeighborCause::Deleted, true)?;
+            for of in row.of {
+                for cause in reps[of].iter() {
+                    keep(subject, cause, NeighborCause::Deleted, true)?;
                 }
             }
         }
@@ -1164,12 +1170,15 @@ fn joins_baseline_section(
     created: &[&Block],
     touched: &BTreeSet<BlockId>,
 ) -> bool {
+    // each parent is read once: a batch of creates under one parent is a batch of one question
+    let mut read: BTreeSet<&BlockId> = BTreeSet::new();
     created.iter().any(|b| {
         takes_part(pack, b)
             && b.parent.as_ref().is_some_and(|p| {
-                m.children(Some(p))
-                    .iter()
-                    .any(|c| !touched.contains(&c.id) && takes_part(pack, c))
+                read.insert(p)
+                    && m.children(Some(p))
+                        .iter()
+                        .any(|c| !touched.contains(&c.id) && takes_part(pack, c))
             })
     })
 }
