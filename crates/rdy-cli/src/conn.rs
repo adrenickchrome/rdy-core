@@ -200,7 +200,7 @@ pub(crate) enum Conn {
     /// `client` before `rt`: the connection drops while its runtime still runs. `pending` is
     /// the notice the `session` reply carried, printed with the first op's.
     Daemon {
-        client: Client,
+        client: Box<Client>,
         rt: tokio::runtime::Runtime,
         pending: Option<String>,
     },
@@ -248,7 +248,7 @@ impl Conn {
             let pending = client.take_notice();
             Ok(Conn::Daemon {
                 rt,
-                client,
+                client: Box::new(client),
                 pending,
             })
         }
@@ -283,7 +283,7 @@ impl Conn {
     pub(crate) fn close(self) {
         match self {
             Conn::Direct { local, .. } => close_local(*local),
-            Conn::Daemon { client, .. } => client.close(),
+            Conn::Daemon { client, .. } => (*client).close(),
         }
     }
 }
