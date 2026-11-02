@@ -27,6 +27,7 @@ mod store;
 mod tension;
 mod views;
 mod write;
+pub use crate::tools::DaemonBuildWarning;
 pub use instructions::{INSTRUCTION_SENTENCES, INSTRUCTIONS};
 pub use resources::{RESOURCES, TEMPLATES};
 
@@ -173,6 +174,15 @@ impl RdyServer {
         self
     }
 
+    /// This server with the build warning its session's client is owed (D-CCC6E).
+    pub fn with_build_warning(self, warning: Option<DaemonBuildWarning>) -> Self {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .build_warning = warning;
+        self
+    }
+
     /// The session's signer.
     pub fn agent(&self) -> Arc<dyn SigningAgent> {
         Arc::clone(&self.state.lock().unwrap_or_else(|p| p.into_inner()).agent)
@@ -254,9 +264,61 @@ impl RdyServer {
     ) -> Result<serde_json::Value, RdyError> {
         let asked = CALL.try_with(|c| c.claim.clone()).ok().flatten();
         self.blocking(tool, notice, move |st| {
-            crate::claims::call(st, asked.as_ref(), tool, |st| f(st, p?))
+            let out = crate::claims::call(st, asked.as_ref(), tool, |st| {
+                // taken before the tool formats, so a bounded reply can reserve its size; an
+                // `rdy_session` binds only as it ends, and takes it below
+                crate::claims::take_build_warning(st);
+                f(st, p?)
+            });
+            crate::claims::take_build_warning(st);
+            crate::claims::deliver_build_warning(st, out)
         })
         .await
+    }
+
+    /// A stated `max_tokens` holds with the build warning inside it: when this call may carry the
+    /// warning, the tool formats to what the warning leaves. `rdy_overview` reserves it itself,
+    /// beside its carried warnings. A budget at or under the warning's size, or over the tools'
+    /// limit, stays as stated: the warning is added whole, and a limit's refusal is not moved.
+    fn reserve_warning(
+        &self,
+        mut request: CallToolRequestParams,
+        claim: Option<&crate::claims::Asked>,
+    ) -> CallToolRequestParams {
+        if request.name == "rdy_overview" {
+            return request;
+        }
+        let Some(stated) = request
+            .arguments
+            .as_ref()
+            .and_then(|a| a.get("max_tokens"))
+            .and_then(serde_json::Value::as_u64)
+        else {
+            return request;
+        };
+        let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(warning) = &st.build_warning else {
+            return request;
+        };
+        let reserve = warning.tokens() as u64;
+        let key = claim
+            .and_then(crate::claims::Asked::identity)
+            .or_else(|| st.bound.clone());
+        let due = key.is_some_and(|k| {
+            !self
+                .hub
+                .claims()
+                .get(&k)
+                .is_some_and(|s| s.daemon_build_warned)
+        });
+        if due
+            && stated > reserve
+            && stated <= tools::MAX_TOKENS_LIMIT as u64
+            && let Some(args) = request.arguments.as_mut()
+        {
+            args.insert("max_tokens".into(), (stated - reserve).into());
+        }
+        request
     }
 
     /// The blocking body shared by tool runs and resource reads: `f` runs on the blocking pool
@@ -369,6 +431,7 @@ impl ServerHandler for RdyServer {
             Ok(c) => c,
             Err(e) => return Ok(result(Err(e)).into()),
         };
+        let request = self.reserve_warning(request, claim.as_ref());
         // the call's body signs through a signer that names this request and stops at its
         // cancel: the client's `notifications/cancelled` for it, or the session's end (rmcp
         // cancels every request's token then), reaches an ask of the agent in progress
@@ -1003,7 +1066,8 @@ where
 /// the checkpoint tick and the close, so neither runs here. `sid` is the daemon's session id,
 /// and `hub` the daemon's hub of connected sessions (ib11): the session joins it under `sid`,
 /// and the daemon removes it when the session ends. `agent` is the signer of the process at the
-/// other end of the session's connection.
+/// other end of the session's connection, and `build_warning` what that client is owed when it is
+/// another build of the daemon's version.
 /// It runs on the daemon's runtime: order is explicit (see [`serve`]), not a property of the
 /// runtime. Dropping the returned future ends the session: the service is cancelled and the
 /// stream closed; a tool call already on the blocking pool finishes first.
@@ -1012,6 +1076,7 @@ pub async fn serve_on<R, W>(
     sid: u64,
     hub: Arc<NotifyHub>,
     agent: Arc<dyn SigningAgent>,
+    build_warning: Option<DaemonBuildWarning>,
     r: R,
     w: W,
 ) -> anyhow::Result<()>
@@ -1035,7 +1100,9 @@ where
     };
     let pump = pump_lines(r, to_server, tools::MAX_REQUEST_BYTES, &mut dropped);
     let served = serve(
-        RdyServer::new(engine, Some(sid), hub).with_agent(agent),
+        RdyServer::new(engine, Some(sid), hub)
+            .with_agent(agent)
+            .with_build_warning(build_warning),
         from_pump,
         w,
     );

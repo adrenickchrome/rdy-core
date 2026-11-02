@@ -186,6 +186,15 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     let carried = st_.carried_warnings()?;
     let carried_json = (!carried.is_empty()).then(|| json!(carried));
     let carried_tokens = carried_json.as_ref().map_or(0, tokens_of);
+    // a build warning this reply will carry is whole and outside the fit, as the carried ones
+    let warning_tokens = st
+        .build_warning_due
+        .as_ref()
+        .map_or(0, |w| tokens_of(w) + 4);
+    let daemon = st
+        .engine
+        .daemon_identity()
+        .map(|(v, b)| format!("rdy {v} build {b}"));
     if carried_tokens > 0 && carried_tokens + 300 > max {
         return Err(RdyError::new(
             E_REDACTION_BUDGET,
@@ -196,6 +205,8 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     // the tree gets what the fixed parts (coverage included) leave
     let reserve = 300
         + carried_tokens
+        + warning_tokens
+        + daemon.as_ref().map_or(0, |d| d.len().div_ceil(4))
         + coverage.as_ref().map_or(0, tokens_of)
         + coverage_error.as_ref().map_or(0, tokens_of);
     let tree = fit_tree(st_.tree(&scope, None, None)?, max.saturating_sub(reserve));
@@ -211,7 +222,7 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
         p.extend(rdy_engine::repo::repo_json(&st_)?);
     }
     let mut out = json!({
-        "pack": st_.pack().name, "session": {"actor": s.actor, "view": st.view},
+        "pack": st_.pack().name, "daemon": daemon, "session": {"actor": s.actor, "view": st.view},
         "project": project,
         "canon": {"landings": landings},
         "open_report": open_report_json(&st.engine.open_report()),
@@ -237,7 +248,10 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
         });
     }
     // the rest of the reply fits what the warnings leave; the warnings are added whole
-    let mut out = budget(out, Some(max.saturating_sub(carried_tokens)));
+    let mut out = budget(
+        out,
+        Some(max.saturating_sub(carried_tokens + warning_tokens)),
+    );
     if let Some(w) = carried_json {
         out["redaction_warnings"] = w;
     }

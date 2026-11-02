@@ -71,6 +71,7 @@ impl Client {
             1,
             NotifyHub::new(),
             Arc::new(rdy_engine::signing_crypto::UnavailableAgent),
+            None,
             sr,
             sw,
         ));

@@ -1,5 +1,6 @@
 //! ERROR_ROWS: the error code table that rdy_schema reports.
 
+use super::common::W_DAEMON_BUILD;
 use rdy_engine::*;
 
 /// `rdy_schema`'s error rows: `(code, when, fix)`.
@@ -118,6 +119,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "E_DAEMON_VERSION",
         "another binary version's daemon has clients",
         "close them, or rdy serve --stop",
+    ),
+    (
+        W_DAEMON_BUILD,
+        "the running daemon is another build of rdy <version> (<daemon build>); this client is build <build>",
+        "close the other clients; the daemon then restarts on this build. Or run rdy serve --stop",
     ),
     (
         "E_DAEMON_GONE",

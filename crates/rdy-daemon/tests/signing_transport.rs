@@ -327,6 +327,7 @@ async fn bare_client(up: &Up) -> Client {
     let hello = Hello {
         rdy: PROTO_VERSION,
         version: "1".into(),
+        build: rdy_daemon::BUILD.to_string(),
         proto: Proto::Ctl,
         cwd: up.dir.path().to_path_buf(),
         project: up.run.project_id().unwrap(),
@@ -360,6 +361,7 @@ fn info() -> DaemonInfo {
     DaemonInfo {
         pid: std::process::id(),
         version: "t".into(),
+        build: BUILD.into(),
         started_at: std::time::Instant::now(),
         sessions: Sessions::default(),
         connections: Arc::new(AtomicUsize::new(1)),
@@ -375,7 +377,9 @@ fn served(
 ) {
     let i = info();
     let (client, server) = tokio::io::duplex(1 << 20);
-    let session = i.sessions.insert(Proto::Ctl, "t".into(), "/".into(), 0);
+    let session = i
+        .sessions
+        .insert(Proto::Ctl, "t".into(), BUILD.into(), "/".into(), 0);
     let (r, w) = tokio::io::split(server);
     (
         BufReader::new(client),
@@ -816,6 +820,7 @@ async fn sig5_disconnect_and_cancel_release_the_signer() {
     let hello = Hello {
         rdy: PROTO_VERSION,
         version: "1".into(),
+        build: rdy_daemon::BUILD.to_string(),
         proto: Proto::Ctl,
         cwd: up.dir.path().to_path_buf(),
         project: up.run.project_id().unwrap(),

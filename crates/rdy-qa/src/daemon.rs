@@ -348,6 +348,7 @@ impl Hosted {
         Hello {
             rdy: PROTO_VERSION,
             version: "t".into(),
+            build: rdy_daemon::BUILD.to_string(),
             proto,
             cwd: self.dir.path().into(),
             project: rdy_daemon::RunDir::of_project(std::path::Path::new(&self.dir.path()))

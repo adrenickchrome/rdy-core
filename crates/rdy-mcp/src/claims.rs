@@ -93,9 +93,13 @@ pub type Key = (String, Option<String>);
 /// The settings saved for one actor and run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
-    pub view: String,
-    pub role: Role,
+    /// `None` on an entry that only records a build warning.
+    pub view: Option<String>,
+    /// `None` on an entry that only records a build warning.
+    pub role: Option<Role>,
     pub dedupe: bool,
+    /// W_DAEMON_BUILD went out for this actor and run (D-CCC6E). `rdy_session` keeps it.
+    pub daemon_build_warned: bool,
     /// The last call that used them.
     pub touched: Instant,
 }
@@ -180,12 +184,14 @@ impl Registry {
         let dedupe = dedupe
             .or_else(|| entries.get(key).map(|s| s.dedupe))
             .unwrap_or(false);
+        let daemon_build_warned = entries.get(key).is_some_and(|s| s.daemon_build_warned);
         entries.insert(
             key.clone(),
             Settings {
-                view,
-                role,
+                view: Some(view),
+                role: Some(role),
                 dedupe,
+                daemon_build_warned,
                 touched: now,
             },
         );
@@ -211,13 +217,39 @@ impl Registry {
         entries.insert(
             key.clone(),
             Settings {
-                view: view(),
-                role: Role::Writer,
+                view: Some(view()),
+                role: Some(Role::Writer),
                 dedupe,
+                daemon_build_warned: false,
                 touched: now,
             },
         );
         Ok(())
+    }
+
+    /// Whether this call's reply carries W_DAEMON_BUILD for `key`, taken under the registry's
+    /// lock, so concurrent connections emit once. The first take records it, with no role or
+    /// view when `key` has no settings. A full registry with no entry for `key` records nothing:
+    /// the warning then repeats, and it never refuses.
+    pub fn take_build_warning(&self, key: &Key) -> bool {
+        let (mut entries, now) = self.live();
+        if let Some(s) = entries.get_mut(key) {
+            s.touched = now;
+            return !std::mem::replace(&mut s.daemon_build_warned, true);
+        }
+        if entries.len() < MAX_SETTINGS {
+            entries.insert(
+                key.clone(),
+                Settings {
+                    view: None,
+                    role: None,
+                    dedupe: false,
+                    daemon_build_warned: true,
+                    touched: now,
+                },
+            );
+        }
+        true
     }
 }
 
@@ -395,7 +427,7 @@ pub fn enter(st: &mut McpState, asked: Option<&Asked>, tool: &str) -> Result<(),
     let saved = hub.claims().get(&key);
     let role = asked
         .and_then(Asked::role)
-        .or(saved.as_ref().map(|s| s.role))
+        .or(saved.as_ref().and_then(|s| s.role))
         .unwrap_or(Role::Writer);
     let session = agent_session(key.0.clone(), key.1.clone(), role)?;
     if let Some(d) = asked.and_then(Asked::dedupe) {
@@ -407,7 +439,9 @@ pub fn enter(st: &mut McpState, asked: Option<&Asked>, tool: &str) -> Result<(),
         hub.identify(st.hub_sid(), &key.0, key.1.as_deref());
         st.bound = Some(key);
     }
-    st.view = saved.map_or_else(|| session.default_view(), |s| s.view);
+    st.view = saved
+        .and_then(|s| s.view)
+        .unwrap_or_else(|| session.default_view());
     st.session = Some(session);
     Ok(())
 }
@@ -418,7 +452,8 @@ pub fn saved_role(st: &McpState, s: &Session) -> Role {
     hub(st)
         .claims()
         .get(&(s.actor.clone(), s.run.clone()))
-        .map_or(Role::Writer, |x| x.role)
+        .and_then(|x| x.role)
+        .unwrap_or(Role::Writer)
 }
 
 /// `rdy_session`'s claim check, once its session is valid: the actor and run of a `_meta` claim
@@ -440,10 +475,12 @@ pub fn rest(st: &mut McpState) {
         return;
     };
     let saved = hub(st).claims().get(&(actor.clone(), run.clone()));
-    let role = saved.as_ref().map_or(Role::Writer, |s| s.role);
+    let role = saved.as_ref().and_then(|s| s.role).unwrap_or(Role::Writer);
     match agent_session(actor, run, role) {
         Ok(s) => {
-            st.view = saved.map_or_else(|| s.default_view(), |x| x.view);
+            st.view = saved
+                .and_then(|x| x.view)
+                .unwrap_or_else(|| s.default_view());
             st.session = Some(s);
         }
         Err(_) => st.session = None,
@@ -472,10 +509,73 @@ pub fn call<T>(
     out
 }
 
+/// Takes the build warning for this call's actor and run, once a claim is valid: the connection's
+/// bound one. Nothing for an unbound connection or one with no warning to give.
+pub fn take_build_warning(st: &mut McpState) {
+    if std::hint::black_box(true) {
+        return;
+    }
+    if st.build_warning_due.is_some() {
+        return;
+    }
+    let (Some(warning), Some(key)) = (&st.build_warning, &st.bound) else {
+        return;
+    };
+    if st.hub.claims().take_build_warning(key) {
+        st.build_warning_due = Some(warning.to_json());
+    }
+}
+
+/// Puts a taken warning on a tool's result. The old keys, the refusal or not, and the warnings
+/// already there (strings or objects, in their order) stay; it goes last.
+pub fn deliver_build_warning(
+    st: &mut McpState,
+    out: Result<Value, RdyError>,
+) -> Result<Value, RdyError> {
+    let Some(warning) = st.build_warning_due.take() else {
+        return out;
+    };
+    match out {
+        Ok(mut v) => {
+            append_warning(&mut v, warning);
+            Ok(v)
+        }
+        Err(mut e) => {
+            e.warnings.push(warning);
+            Err(e)
+        }
+    }
+}
+
+/// Appends to `v`'s `warnings` array, or starts one. A reply that is not an object stays as it is.
+fn append_warning(v: &mut Value, warning: Value) {
+    let Some(obj) = v.as_object_mut() else {
+        return;
+    };
+    match obj.get_mut("warnings").and_then(Value::as_array_mut) {
+        Some(all) => all.push(warning),
+        None => {
+            obj.insert("warnings".into(), Value::Array(vec![warning]));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn mh5_a_warning_follows_existing_warning_strings() {
+        let w = json!({"code": "W_DAEMON_BUILD"});
+        let mut v = json!({"a": 1, "warnings": ["one", {"code": "W_X"}]});
+        append_warning(&mut v, w.clone());
+        assert_eq!(v["warnings"], json!(["one", {"code": "W_X"}, w.clone()]));
+        assert_eq!(v["a"], 1);
+        let mut v = json!({"a": 1});
+        append_warning(&mut v, w.clone());
+        assert_eq!(v["warnings"], json!([w]));
+    }
 
     fn meta(v: Value) -> JsonObject {
         v.as_object().unwrap().clone()

@@ -3,7 +3,7 @@
 use crate::ctl::{DaemonInfo, serve_ctl};
 use crate::error::{E_DAEMON_START, E_DAEMON_VERSION, ErrorReply};
 use crate::handler::Handler;
-use crate::hello::{HelloReply, read_hello};
+use crate::hello::{HelloReply, bad_build, read_hello, valid_build};
 use crate::layout::{ProjectId, RunDir};
 use crate::session::{Proto, SessionInfo, Sessions};
 use crate::socket;
@@ -11,7 +11,7 @@ use crate::sys;
 use rdy_store::fileid::FileId;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
@@ -123,6 +123,8 @@ fn is_hang_up(e: &io::Error) -> bool {
 pub struct DaemonConfig {
     pub run: RunDir,
     pub version: String,
+    /// This daemon's build id; `new` takes this binary's. A test may set another valid id.
+    pub build: String,
     /// `None` never idles out (a foreground `rdy serve`).
     pub idle_timeout: Option<Duration>,
     /// Test hook: the peer uid to accept instead of our own.
@@ -135,6 +137,7 @@ impl DaemonConfig {
         DaemonConfig {
             run,
             version,
+            build: crate::BUILD.to_string(),
             idle_timeout: None,
             expected_uid: None,
         }
@@ -192,6 +195,9 @@ pub enum ExitReason {
     Idle,
     /// A client of another version arrived while no session was open.
     VersionReplaced,
+    /// A client of the same version and another build arrived with no other connection, or the
+    /// last connection closed after one came.
+    BuildReplaced,
     /// The project's `.rdy` is gone or replaced (deleted, moved away, restored from a copy): the
     /// daemon serves nothing there and exits without writing to its store.
     ProjectGone,
@@ -203,6 +209,7 @@ impl ExitReason {
             ExitReason::Stopped => "stopped",
             ExitReason::Idle => "idle",
             ExitReason::VersionReplaced => "version replaced",
+            ExitReason::BuildReplaced => "build replaced",
             ExitReason::ProjectGone => "project gone",
         }
     }
@@ -227,6 +234,24 @@ struct Keepers {
     connections: Arc<AtomicUsize>,
     holds: Arc<AtomicUsize>,
     count: Arc<watch::Sender<usize>>,
+    /// Whether a client of another build came (D-CCC6E): the daemon exits when its last
+    /// connection closes. Read and written only inside `update`, under the watch's lock, as the
+    /// connection count changes. Never cleared.
+    replace: Arc<AtomicBool>,
+    /// Whether the daemon is leaving to be replaced: its run files are gone or going. Under the
+    /// same lock.
+    leaving: Arc<AtomicBool>,
+}
+
+/// What a hello of another build, or any hello after one, finds under the keepers' lock.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BuildCheck {
+    /// Serve this client.
+    Serve,
+    /// The daemon is leaving; this client hears `exiting`.
+    Leaving,
+    /// This client is alone with another build: the daemon leaves now.
+    Replace,
 }
 
 impl Keepers {
@@ -341,6 +366,7 @@ impl Daemon {
         let info = DaemonInfo {
             pid: std::process::id(),
             version: config.version.clone(),
+            build: config.build.clone(),
             started_at: Instant::now(),
             sessions: Sessions::default(),
             connections: Arc::new(AtomicUsize::new(0)),
@@ -352,6 +378,8 @@ impl Daemon {
             connections: Arc::clone(&info.connections),
             holds: Arc::new(AtomicUsize::new(0)),
             count: Arc::new(watch::channel(0).0),
+            replace: Arc::new(AtomicBool::new(false)),
+            leaving: Arc::new(AtomicBool::new(false)),
         };
         let check = Arc::new(ProjectCheck {
             root: config.run.root(),
@@ -417,6 +445,7 @@ impl Daemon {
         ));
         let ctx = Arc::new(Conn {
             version: self.config.version.clone(),
+            build: self.config.build.clone(),
             expected_uid: self.config.expected_uid.unwrap_or_else(sys::own_uid),
             handler: Arc::clone(&self.handler),
             info: self.info.clone(),
@@ -427,6 +456,7 @@ impl Daemon {
             project,
             root: self.config.run.root(),
             check: Arc::clone(&self.check),
+            keepers: self.keepers.clone(),
         });
         let idle = self.config.idle_timeout;
         let mut stop = self.info.stop.subscribe();
@@ -484,6 +514,7 @@ impl Daemon {
                             keepers: self.keepers.clone(),
                             handler: Arc::clone(&self.handler),
                             session: None,
+                            ctx: Arc::clone(&ctx),
                         };
                         tasks.spawn(Arc::clone(&ctx).serve(stream, end));
                     }
@@ -617,6 +648,7 @@ fn remove_if_present(path: &Path) {
 /// What every connection task shares.
 struct Conn {
     version: String,
+    build: String,
     expected_uid: u32,
     handler: Arc<dyn Handler>,
     info: DaemonInfo,
@@ -628,6 +660,7 @@ struct Conn {
     project: ProjectId,
     root: PathBuf,
     check: Arc<ProjectCheck>,
+    keepers: Keepers,
 }
 
 /// The project check (final ruling, D-A6ZZA), shared by every socket connection, the idle tick
@@ -713,6 +746,7 @@ struct ConnEnd {
     keepers: Keepers,
     handler: Arc<dyn Handler>,
     session: Option<SessionInfo>,
+    ctx: Arc<Conn>,
 }
 
 impl Drop for ConnEnd {
@@ -728,10 +762,27 @@ impl Drop for ConnEnd {
             }
         }
         // under the watch's lock, so concurrent ends publish their counts in order; the sum
-        // keeps the holds
+        // keeps the holds. The last connection of a latched daemon stops it: holds and site
+        // pages are not connections (D-CCC6E)
+        let mut last = false;
         self.keepers.update(|k| {
-            k.connections.fetch_sub(1, Ordering::SeqCst);
+            let left = k.connections.fetch_sub(1, Ordering::SeqCst) - 1;
+            if left == 0
+                && k.replace.load(Ordering::SeqCst)
+                && !k.leaving.swap(true, Ordering::SeqCst)
+            {
+                // before a new client can be told anything: the next one starts a successor
+                self.ctx.files.remove(&self.ctx.run);
+                last = true;
+            }
         });
+        if last {
+            log(
+                "the last connection closed after a client of another build; exiting to be replaced",
+            );
+            let _ = self.ctx.reason.set(ExitReason::BuildReplaced);
+            self.ctx.info.stop.send_replace(true);
+        }
     }
 }
 
@@ -774,6 +825,34 @@ impl Conn {
     /// idle tick.
     fn check_project(&self) -> bool {
         self.check.check()
+    }
+
+    /// The build step, under the lock that changes the connection count. Another build alone
+    /// removes the run files, before its `exiting` reply, and stops the daemon; with another
+    /// connection it latches the replacement and is served.
+    fn check_build(&self, build: &str) -> BuildCheck {
+        let mut check = BuildCheck::Serve;
+        self.keepers.update(|k| {
+            if k.leaving.load(Ordering::SeqCst) {
+                check = BuildCheck::Leaving;
+            } else if build != self.build {
+                if k.connections.load(Ordering::SeqCst) == 1 {
+                    k.leaving.store(true, Ordering::SeqCst);
+                    self.files.remove(&self.run);
+                    check = BuildCheck::Replace;
+                } else {
+                    k.replace.store(true, Ordering::SeqCst);
+                }
+            }
+        });
+        if check == BuildCheck::Replace {
+            log(&format!(
+                "a client of build {build} arrived with no other connection; exiting to be replaced"
+            ));
+            let _ = self.reason.set(ExitReason::BuildReplaced);
+            self.info.stop.send_replace(true);
+        }
+        check
     }
 
     async fn serve(self: Arc<Self>, mut stream: sys::Stream, mut end: ConnEnd) {
@@ -864,6 +943,18 @@ impl Conn {
             }
             return;
         }
+        // (d2) the build: the same version, so its shape and then its value
+        if !valid_build(&hello.build) {
+            close_after_reply(stream, &HelloReply::Refused { error: bad_build() }).await;
+            return;
+        }
+        if self.check_build(&hello.build) != BuildCheck::Serve {
+            let reply = HelloReply::Exiting {
+                version: self.version.clone(),
+            };
+            close_after_reply(stream, &reply).await;
+            return;
+        }
         // (e) starting, then ready
         if !self.wait_ready(&mut stream).await {
             return;
@@ -871,6 +962,7 @@ impl Conn {
         let session = self.info.sessions.insert(
             hello.proto,
             hello.version.clone(),
+            hello.build.clone(),
             hello.cwd.clone(),
             peer_uid,
         );
@@ -882,6 +974,7 @@ impl Conn {
         }
         let ready = HelloReply::Ready {
             version: self.version.clone(),
+            build: self.build.clone(),
             session: session.id,
         };
         if write_reply(&mut stream, &ready).await.is_err() {

@@ -12,6 +12,9 @@ use std::sync::Arc;
 
 pub const E_NO_SESSION: &str = "E_NO_SESSION";
 
+/// A daemon of the same version and another build serves this client (D-CCC6E).
+pub const W_DAEMON_BUILD: &str = "W_DAEMON_BUILD";
+
 /// The most ops one `rdy_write` may carry.
 pub const MAX_OPS_PER_WRITE: usize = 5_000;
 
@@ -79,6 +82,38 @@ pub struct McpState {
     pub bound: Option<crate::claims::Key>,
     /// What the running call's `_meta` states, while the call runs ([`crate::claims::enter`]).
     pub claim: Option<crate::claims::Asked>,
+    /// This connection's client is another build of the daemon's version (D-CCC6E); `None` when
+    /// it is not, and with no daemon.
+    pub build_warning: Option<DaemonBuildWarning>,
+    /// The warning this call's reply carries, once taken: its size is reserved in the reply.
+    pub build_warning_due: Option<Value>,
+}
+
+/// What W_DAEMON_BUILD names; the daemon gives it to the session it serves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DaemonBuildWarning {
+    pub version: String,
+    pub daemon_build: String,
+    pub client_build: String,
+}
+
+impl DaemonBuildWarning {
+    /// The warning as a reply's `warnings` array carries it.
+    pub fn to_json(&self) -> Value {
+        json!({
+            "code": W_DAEMON_BUILD,
+            "message": format!(
+                "the running daemon is another build of rdy {} ({}); this client is build {}",
+                self.version, self.daemon_build, self.client_build
+            ),
+            "fix": "close the other clients; the daemon then restarts on this build. Or run rdy serve --stop",
+        })
+    }
+
+    /// The tokens the warning takes in a reply, with its `warnings` key.
+    pub fn tokens(&self) -> usize {
+        (self.to_json().to_string().len() + r#","warnings":[]"#.len()).div_ceil(4)
+    }
 }
 
 impl McpState {
@@ -97,6 +132,8 @@ impl McpState {
             agent: Arc::new(UnavailableAgent),
             bound: None,
             claim: None,
+            build_warning: None,
+            build_warning_due: None,
         }
     }
 

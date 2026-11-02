@@ -54,6 +54,7 @@ fn ping_pid(project: &Path) -> u64 {
         let hello = Hello {
             rdy: PROTO_VERSION,
             version: env!("CARGO_PKG_VERSION").into(),
+            build: rdy_daemon::BUILD.to_string(),
             proto: Proto::Ctl,
             cwd: project.into(),
             project: RunDir::of_project(project).project_id().unwrap(),

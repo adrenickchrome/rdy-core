@@ -134,6 +134,7 @@ pub(super) fn status(cx: &OpContext) -> Result<Value, RdyError> {
     };
     let mut v = json!({
         "pack": st.pack().name,
+        "daemon": cx.engine.daemon_identity().map(|(v, b)| format!("rdy {v} build {b}")),
         "landings": landings,
         "suspects": suspects,
         "version_position": canon,

@@ -17,6 +17,7 @@ use rdy_engine::publication::{ResolvedProfile, profile_at};
 use rdy_engine::signing_crypto::SigningAgent;
 use rdy_engine::{E_HELD_BY_READER, E_LOCKED, Rdy, RdyError, Scope, Session, SessionKind};
 use rdy_engine::{classify, human_actor_for_env};
+use rdy_mcp::server::DaemonBuildWarning;
 use rdy_model::Role;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -173,6 +174,7 @@ fn start_checked(opts: ServeOptions, profile: Option<&str>) -> Result<ServeRun, 
     };
     // (3)
     let shared = Shared::new(rdy);
+    shared.set_daemon_identity(&opts.version, crate::BUILD);
     let r = &shared.open_report;
     log(&format!(
         "store open: caught up {} frames, {} quarantined, index rebuilt: {}, unclean shutdown: {}",
@@ -204,6 +206,7 @@ fn start_checked(opts: ServeOptions, profile: Option<&str>) -> Result<ServeRun, 
     let config = DaemonConfig {
         run: RunDir::of_project(&opts.project),
         version: opts.version.clone(),
+        build: crate::BUILD.to_string(),
         idle_timeout: opts.idle_timeout,
         expected_uid: None,
     };
@@ -652,9 +655,18 @@ impl Handler for ServeHandler {
     ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         let engine = self.shared.engine();
         let hub = Arc::clone(&self.shared.hub);
+        // the version already matched at the hello; the same version and another build warns
+        let warning = engine.daemon_identity().and_then(|(version, build)| {
+            (session.version == version && session.build != build).then(|| DaemonBuildWarning {
+                version,
+                daemon_build: build,
+                client_build: session.build.clone(),
+            })
+        });
         Box::pin(async move {
             let (r, w) = tokio::io::split(stream);
-            if let Err(e) = rdy_mcp::server::serve_on(engine, session.id.0, hub, agent, r, w).await
+            if let Err(e) =
+                rdy_mcp::server::serve_on(engine, session.id.0, hub, agent, warning, r, w).await
             {
                 log(&format!(
                     "mcp session {} ended with an error: {e}",

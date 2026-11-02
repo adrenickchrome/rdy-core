@@ -3178,6 +3178,12 @@ fn errors_row() -> Value {
         "error_rows": rows,
         "envelope": envelope,
         "follower_refusal": follower_refusal(),
+        "daemon_build_warning": rdy_mcp::server::DaemonBuildWarning {
+            version: "1.2.3".into(),
+            daemon_build: "0123456789abcdef".into(),
+            client_build: "fedcba9876543210".into(),
+        }
+        .to_json(),
         "redaction_warning": {
             "copies": rdy_engine::W_REDACTION_COPIES_MESSAGE,
             "inventory": rdy_engine::W_REDACTION_INVENTORY_MESSAGE,

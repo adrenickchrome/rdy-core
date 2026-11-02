@@ -47,6 +47,7 @@ async fn ord1_pipelined_calls_on_a_multi_thread_runtime_apply_and_answer_in_orde
             s + 1,
             NotifyHub::new(),
             Arc::new(UnavailableAgent),
+            None,
             sr,
             sw,
         ));
@@ -113,6 +114,7 @@ async fn hd4_serve_on_answers_an_oversized_line_with_the_limit_error_and_lives()
         1,
         NotifyHub::new(),
         Arc::new(UnavailableAgent),
+        None,
         sr,
         sw,
     ));
@@ -167,6 +169,7 @@ async fn hd4_serve_on_ends_when_the_session_fails_to_start() {
         1,
         NotifyHub::new(),
         Arc::new(UnavailableAgent),
+        None,
         sr,
         sw,
     ));

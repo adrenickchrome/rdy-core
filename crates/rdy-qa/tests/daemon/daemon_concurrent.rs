@@ -116,6 +116,7 @@ fn conc1_reads_on_another_connection_answer_during_a_long_write() {
         let hello = Hello {
             rdy: PROTO_VERSION,
             version: env!("CARGO_PKG_VERSION").into(),
+            build: rdy_daemon::BUILD.to_string(),
             proto: Proto::Ctl,
             cwd: s.dir.path().into(),
             project: rdy_daemon::RunDir::of_project(std::path::Path::new(&s.dir.path()))

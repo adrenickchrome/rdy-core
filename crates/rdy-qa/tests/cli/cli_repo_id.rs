@@ -70,11 +70,12 @@ fn ec10_status_text_names_the_repo_and_its_origin() {
     let text = status_in(&plain, plain.dir.path(), false);
     let l = lines(&text);
     assert_eq!(l[0], "pack rdy-standard", "{text}");
-    let id = l[1]
+    assert_eq!(l[1], "daemon: none", "{text}");
+    let id = l[2]
         .strip_prefix("repo ")
         .unwrap_or_else(|| panic!("{text}"));
     assert_eq!(id.len(), 32, "{text}");
-    assert!(l[2].starts_with("canon: "), "{text}");
+    assert!(l[3].starts_with("canon: "), "{text}");
 
     // a clone of a tagged project: the origin names the version
     let (s, r) = source(Some("v1.0.0"));
@@ -85,13 +86,14 @@ fn ec10_status_text_names_the_repo_and_its_origin() {
     let text = status_in(&s, &to, false);
     let l = lines(&text);
     assert_eq!(l[0], "pack rdy-standard", "{text}");
-    assert_eq!(l[1], format!("repo {source_id}"), "a clone keeps the id");
+    assert_eq!(l[1], "daemon: none", "{text}");
+    assert_eq!(l[2], format!("repo {source_id}"), "a clone keeps the id");
     assert_eq!(
-        l[2],
+        l[3],
         format!("cloned from {source_id} at version v1.0.0"),
         "{text}"
     );
-    assert!(l[3].starts_with("canon: "), "{text}");
+    assert!(l[4].starts_with("canon: "), "{text}");
 
     // no version: the landing, 12 hex digits
     let (s2, r2) = source(None);
@@ -102,11 +104,11 @@ fn ec10_status_text_names_the_repo_and_its_origin() {
     let text = status_in(&s2, &to2, false);
     let l = lines(&text);
     assert_eq!(
-        l[2],
+        l[3],
         format!("cloned from {id2} at landing {}", &head2[..12]),
         "{text}"
     );
-    assert_eq!(l[2].rsplit(' ').next().unwrap().len(), 12, "{text}");
+    assert_eq!(l[3].rsplit(' ').next().unwrap().len(), 12, "{text}");
     assert!(head.len() > 12, "the hash is longer than the shown prefix");
 
     // neither a version nor a landing
@@ -120,7 +122,7 @@ fn ec10_status_text_names_the_repo_and_its_origin() {
     };
     let text = status_in(&empty, &scratch.path().join("bare"), false);
     let l = lines(&text);
-    assert_eq!(l[2], format!("cloned from {eid}"), "{text}");
+    assert_eq!(l[3], format!("cloned from {eid}"), "{text}");
 
     // the same in JSON: tag and landing are null when absent
     let json: Value =
@@ -146,12 +148,13 @@ fn ec10_status_of_a_fork_says_forked_from() {
 
     let text = status_in(&s, &to, false);
     let l = lines(&text);
-    let new_id = l[1]
+    assert_eq!(l[1], "daemon: none", "{text}");
+    let new_id = l[2]
         .strip_prefix("repo ")
         .unwrap_or_else(|| panic!("{text}"));
     assert_ne!(new_id, source_id, "a fork takes a new id: {text}");
     assert_eq!(
-        l[2],
+        l[3],
         format!("forked from {source_id} at version v1.0.0"),
         "{text}"
     );

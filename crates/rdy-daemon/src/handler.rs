@@ -101,6 +101,7 @@ mod tests {
             id: SessionId(1),
             proto: Proto::Mcp,
             version: "1".into(),
+            build: crate::BUILD.into(),
             cwd: "/".into(),
             peer_uid: 0,
             connected_at_ms: 0,

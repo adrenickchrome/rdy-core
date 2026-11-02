@@ -228,6 +228,7 @@ fn serve1_hellos_during_warm_up_see_starting_then_ready() {
         let hello = Hello {
             rdy: PROTO_VERSION,
             version: "t".into(),
+            build: rdy_daemon::BUILD.to_string(),
             proto: Proto::Ctl,
             cwd: dir.path().into(),
             project: rdy_daemon::RunDir::of_project(std::path::Path::new(&dir.path()))
@@ -291,6 +292,7 @@ fn assert_ready(rt: &tokio::runtime::Runtime, project: &std::path::Path, version
         let hello = Hello {
             rdy: PROTO_VERSION,
             version: version.into(),
+            build: rdy_daemon::BUILD.to_string(),
             proto: Proto::Ctl,
             cwd: project.into(),
             project: rdy_daemon::RunDir::of_project(std::path::Path::new(&project))
@@ -327,6 +329,7 @@ fn serve1_a_successor_started_as_a_version_replaced_daemon_exits_comes_up_ready(
         let hello = Hello {
             rdy: PROTO_VERSION,
             version: "u".into(),
+            build: rdy_daemon::BUILD.to_string(),
             proto: Proto::Ctl,
             cwd: h.dir.path().into(),
             project: rdy_daemon::RunDir::of_project(std::path::Path::new(&h.dir.path()))

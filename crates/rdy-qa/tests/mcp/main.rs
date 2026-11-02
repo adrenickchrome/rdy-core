@@ -11,6 +11,7 @@ mod mcp_claims;
 mod mcp_clone;
 mod mcp_compact;
 mod mcp_coverage;
+mod mcp_daemon_build;
 mod mcp_decision_home;
 mod mcp_diff;
 mod mcp_dispute;

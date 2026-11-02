@@ -124,6 +124,7 @@ fn kill2_an_in_flight_request_is_daemon_gone_with_the_may_have_committed_fix() {
         let hello = Hello {
             rdy: PROTO_VERSION,
             version: env!("CARGO_PKG_VERSION").into(),
+            build: rdy_daemon::BUILD.to_string(),
             proto: Proto::Ctl,
             cwd: s.dir.path().into(),
             project: rdy_daemon::RunDir::of_project(std::path::Path::new(&s.dir.path()))
@@ -306,6 +307,7 @@ fn kill2_a_kill_in_the_checkpoint_window_is_catch_up_not_reindex() {
         let hello = Hello {
             rdy: PROTO_VERSION,
             version: env!("CARGO_PKG_VERSION").into(),
+            build: rdy_daemon::BUILD.to_string(),
             proto: Proto::Ctl,
             cwd: s.dir.path().into(),
             project: rdy_daemon::RunDir::of_project(std::path::Path::new(&s.dir.path()))

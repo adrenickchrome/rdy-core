@@ -438,6 +438,7 @@ pub async fn run_stdio(project: PathBuf, version: String, start_timeout: Duratio
     let spawn_project = project.clone();
     let opts = StartOptions {
         version,
+        build: crate::BUILD.to_string(),
         proto: Proto::Mcp,
         cwd: project.clone(),
         start_timeout,

@@ -56,6 +56,8 @@ pub struct Shared {
     /// Where the site listens: set once by the daemon's start, after the bind and before
     /// `ready` (ls6). Unset for a `Shared` that no daemon serves.
     pub site_info: OnceLock<SiteInfo>,
+    /// The version and build this daemon serves as; unset for a `Shared` no daemon hosts.
+    identity: OnceLock<(String, String)>,
     /// The profile-only listeners this daemon owns (D-DK03K) and the HTTP limits every listener
     /// shares; filled in by the daemon's start, closed and joined at its stop.
     pub profile_sites: crate::site::profiles::ProfileSites,
@@ -110,6 +112,7 @@ impl Shared {
                 notify,
                 site,
                 site_info: OnceLock::new(),
+                identity: OnceLock::new(),
                 profile_sites: Default::default(),
                 session_end: Mutex::new(vec![
                     Box::new(move |id: SessionId| {
@@ -131,6 +134,11 @@ impl Shared {
         // It starts once `sh` lives: inside `new_cyclic` it could see no `Shared` yet and end.
         drop(spawn_site_worker(Arc::downgrade(&sh), Arc::clone(&sh.site)));
         sh
+    }
+
+    /// Records the version and build this daemon serves as. Set once, before it serves.
+    pub fn set_daemon_identity(&self, version: &str, build: &str) {
+        let _ = self.identity.set((version.to_string(), build.to_string()));
     }
 
     /// The engine over this daemon: reads from the published state, writes on the writer.
@@ -201,6 +209,10 @@ impl Engine for DaemonEngine {
 
     fn root(&self) -> PathBuf {
         self.0.root.clone()
+    }
+
+    fn daemon_identity(&self) -> Option<(String, String)> {
+        self.0.identity.get().cloned()
     }
 
     fn briefs(&self) -> Arc<BriefRegistry> {

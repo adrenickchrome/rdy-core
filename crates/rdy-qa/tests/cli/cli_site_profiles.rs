@@ -114,6 +114,7 @@ fn hello(dir: &Path) -> Hello {
     Hello {
         rdy: PROTO_VERSION,
         version: VERSION.into(),
+        build: rdy_daemon::BUILD.to_string(),
         proto: Proto::Ctl,
         cwd: dir.into(),
         project: RunDir::of_project(dir).project_id().unwrap(),
@@ -658,6 +659,7 @@ fn starting_peer(dir: &Path, site: Value) -> StartingPeer {
                 }
                 let ready = HelloReply::Ready {
                     version: VERSION.into(),
+                    build: "0123456789abcdef".into(),
                     session: rdy_daemon::SessionId(7),
                 };
                 let w = stream.get_mut();
