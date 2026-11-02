@@ -33,7 +33,7 @@ pub const INDEX_OPEN_SENTINEL: &str = "index.open";
 /// Where `reindex` builds the new index before it renames it over `index.redb`.
 const INDEX_TMP: &str = "index.redb.tmp";
 
-const SEGMENT_MAX: u64 = 64 * 1024 * 1024;
+pub(crate) const SEGMENT_MAX: u64 = 64 * 1024 * 1024;
 const CHUNK: usize = 1024 * 1024;
 
 /// The largest asset `rdy_asset` accepts. The store does not enforce it: only `put_blob` writes a
@@ -134,6 +134,12 @@ enum Access {
     ReadOnly {
         feature: String,
         required_rdy: String,
+    },
+    /// A follower of `repo_id` (D-AA4FD): it reads as a read-only store, and every ordinary
+    /// write refuses before its fast path (E_STORE_FOLLOWER). Only the store's private recovery
+    /// and the follow path (`crate::follower`) write.
+    Follower {
+        repo_id: RepoId,
     },
 }
 
@@ -1183,6 +1189,7 @@ impl Store {
     /// directory holding anything is never claimed: it is opened as `open` does, so a current-format
     /// store opens (an init retried after a crash) and anything else is refused.
     pub fn create(dir: &Path) -> Result<Store, StoreError> {
+        crate::follower::refuse_follower(dir)?;
         let mut synced = match std::fs::symlink_metadata(dir) {
             Ok(m) if m.file_type().is_dir() => {
                 if std::fs::read_dir(dir)?.next().is_some() {
@@ -1210,6 +1217,7 @@ impl Store {
     /// leaves a directory that no open accepts, never a project: retry in a new directory. The
     /// store holds its lock as any open store does.
     pub fn create_holder(dir: &Path, repo_id: RepoId) -> Result<Store, StoreError> {
+        crate::follower::refuse_follower(dir)?;
         let mut synced = match std::fs::symlink_metadata(dir) {
             Ok(m) if m.file_type().is_dir() && std::fs::read_dir(dir)?.next().is_none() => vec![],
             Ok(_) => return Err(already_exists(dir)),
@@ -1377,12 +1385,69 @@ impl Store {
         Store::open_current_format_with(dir, vec![], Some(lock.clone()), None, true)
     }
 
+    /// Opens the follower at `dir` (D-AA4FD): it needs a valid mark and takes the store's
+    /// exclusive lock. See [`Store::open_follower_locked`].
+    pub fn open_follower(dir: &Path) -> Result<Store, StoreError> {
+        crate::follower::require_mark(dir)?;
+        Store::check_writable_store(dir)?;
+        let lock = StoreLock::take(dir)?;
+        Store::open_follower_locked(dir, &lock)
+    }
+
+    /// Opens the follower at `dir` under `lock`, as [`Store::open_locked`] borrows one. The mark
+    /// is read again under the lock and checked against the log. The policy is
+    /// `RequireCurrent`: a store that needs an upgrade is refused before anything is written.
+    /// The open reads as a read-only store (no reconcile, first use or upgrade), rebuilds a
+    /// derived index and finishes a removal the source's log authorized. It never cuts a valid
+    /// suffix after the saved end: [`Store::follower_end`] names it.
+    pub fn open_follower_locked(dir: &Path, lock: &StoreLock) -> Result<Store, StoreError> {
+        if !lock.guards(dir) {
+            return Err(StoreError::Locked(dir.to_path_buf()));
+        }
+        let mark = crate::follower::require_mark(dir)?;
+        Store::check_writable_store(dir)?;
+        if crate::upgrade::has_registered_steps() || crate::upgrade::may_be_pending(dir) {
+            let plan = crate::upgrade::inspect_follower(dir)?;
+            if !plan.steps.is_empty() || plan.pending_check {
+                return Err(StoreError::UpgradeRequired);
+            }
+        }
+        // no first batch for a store whose log holds none: its first open would write one
+        if !crate::segment::log_has_marker(&dir.join("segments"))? {
+            return Err(crate::follower::past_end(&mark, ORIGIN));
+        }
+        let store = Store::open_current_format_as(
+            dir,
+            vec![],
+            Some(lock.clone()),
+            None,
+            false,
+            Access::Follower {
+                repo_id: mark.chain.repo_id,
+            },
+        )?;
+        crate::follower::check_against_log(&store.log, &mark)?;
+        Ok(store)
+    }
+
+    /// The end of this follower's log, which is past its mark's end after an interrupted follow.
+    /// A store that is no follower has no follower end (`this store has no follower mark`).
+    pub fn follower_end(&self) -> Result<Location, StoreError> {
+        match self.shared.access {
+            Access::Follower { .. } => Ok(self.log.end()),
+            _ => Err(StoreError::FollowerMark(
+                crate::error::FollowerMarkFailure::Missing,
+            )),
+        }
+    }
+
     /// What this rdy may do with the store at `dir`, read before anything in it is created,
     /// locked, opened or written: [`Store::check_existing`], where a store this rdy may only
     /// read is `ReadOnly` with its first unknown read-only feature by name. The sealed log is
     /// the authority over a `FORMAT` that lists more than it (a first use whose batch never
     /// sealed). Reads only.
     fn check_access(dir: &Path) -> Result<Access, StoreError> {
+        crate::follower::refuse_follower(dir)?;
         match std::fs::symlink_metadata(dir) {
             Ok(m) if m.file_type().is_dir() => {}
             Ok(_) => return Err(format::other_build(dir, "is not a directory")),
@@ -1416,6 +1481,12 @@ impl Store {
     /// the sealed log's features, read from the segments. A store this rdy may only read is
     /// refused with the feature's required build. Reads only.
     pub fn check_existing(dir: &Path) -> Result<(), StoreError> {
+        crate::follower::refuse_follower(dir)?;
+        Store::check_writable_store(dir)
+    }
+
+    /// [`Store::check_existing`] past the follower refusal.
+    fn check_writable_store(dir: &Path) -> Result<(), StoreError> {
         match std::fs::symlink_metadata(dir) {
             Ok(m) if m.file_type().is_dir() => {}
             Ok(_) => return Err(format::other_build(dir, "is not a directory")),
@@ -1454,10 +1525,30 @@ impl Store {
     /// upgrade receipt explains is accepted as it is ([`Store::open_unupgraded_locked`]).
     fn open_current_format_with(
         dir: &Path,
+        synced: Vec<PathBuf>,
+        held: Option<StoreLock>,
+        holder: Option<RepoId>,
+        upgrade_pending: bool,
+    ) -> Result<Store, StoreError> {
+        Store::open_current_format_as(
+            dir,
+            synced,
+            held,
+            holder,
+            upgrade_pending,
+            Access::ReadWrite,
+        )
+    }
+
+    /// [`Store::open_current_format_with`] with the store's `access`, in force before the open
+    /// can reach a writer.
+    fn open_current_format_as(
+        dir: &Path,
         mut synced: Vec<PathBuf>,
         held: Option<StoreLock>,
         holder: Option<RepoId>,
         upgrade_pending: bool,
+        access: Access,
     ) -> Result<Store, StoreError> {
         let segments = dir.join("segments");
         // dur1: each directory created here is fsynced into its parent before any write is acked.
@@ -1551,7 +1642,7 @@ impl Store {
                 epoch: Arc::new(AtomicU64::new(0)),
                 poisoned: AtomicBool::new(false),
                 pending: AtomicBool::new(false),
-                access: Access::ReadWrite,
+                access,
                 _hold: None,
             }),
             tracking: Arc::default(),
@@ -1942,7 +2033,7 @@ impl Store {
             None if held_frames => {
                 // an index that lost the ref (an old partial rebuild) is rebuilt from the log;
                 // a log that really has no features ref is still refused
-                self.reindex()?;
+                self.reindex_with(false)?;
                 self.report.index_rebuilt = true;
                 match self.features_ref()? {
                     Some(f) => self.check_log_features(&f, true)?,
@@ -2171,6 +2262,7 @@ impl Store {
     /// every checkpoint fails until reopen. If no batch was open, the index holds nothing of the
     /// batch, so the store keeps working, as after a failed write. The error is returned.
     pub fn seal(&mut self, last: Vec<(u8, Vec<u8>)>) -> Result<(), StoreError> {
+        self.refuse_follower_write()?;
         let was_open = self.open.is_some();
         if !was_open && last.is_empty() {
             return Ok(());
@@ -2425,7 +2517,7 @@ impl Store {
             self.index().clear_erase_due(false)?;
         }
         // the replayed frames are in the log, not yet in the durable index
-        self.checkpoint()?;
+        self.checkpoint_index()?;
         Ok(done)
     }
 
@@ -2570,6 +2662,7 @@ impl Store {
     /// The mode ref is never written (`store mode cannot change`); in a holder, a ref outside its
     /// families, or an `answer/tag-object:` ref, is refused (`crate::holder`).
     pub fn write(&mut self, items: Vec<(u8, Vec<u8>)>) -> Result<Vec<Hash>, StoreError> {
+        self.ensure_writable()?;
         crate::plan::refuse_plan_writes(&items)?;
         self.write_refs(items, RefWrite::Public)
     }
@@ -2848,6 +2941,12 @@ impl Store {
     /// then a kill or power loss leaves the durable index behind the log, which the next open
     /// catches up from the log.
     pub fn checkpoint(&mut self) -> Result<(), StoreError> {
+        self.refuse_follower_write()?;
+        self.checkpoint_index()
+    }
+
+    /// The work of [`Store::checkpoint`]: a follower's close runs it too, for its derived index.
+    fn checkpoint_index(&mut self) -> Result<(), StoreError> {
         if self.open.is_some() {
             return Err(batch_open("before a checkpoint"));
         }
@@ -2871,6 +2970,7 @@ impl Store {
     /// A failure is returned and also recorded (see `last_checkpoint_error`) until a checkpoint
     /// succeeds.
     pub fn checkpoint_if_idle(&mut self, now: Instant) -> Result<bool, StoreError> {
+        self.refuse_follower_write()?;
         if self.open.is_some()
             || self.pending == 0
             || now.saturating_duration_since(self.last_write) < CHECKPOINT_IDLE
@@ -2903,8 +3003,13 @@ impl Store {
             drop(self.drop_index());
             return Ok(());
         }
-        // an open held batch is sealed first, so a write left open is kept
-        let sealed = self.seal(vec![]);
+        // an open held batch is sealed first, so a write left open is kept; a follower holds no
+        // local batch and seals nothing
+        let sealed = if matches!(self.shared.access, Access::Follower { .. }) {
+            Ok(())
+        } else {
+            self.seal(vec![])
+        };
         if self.open.is_some() || self.stale_index {
             // A pending removal's index holds what the removal erases: it is kept by a second
             // name, and zeroed and synced when the database below has closed onto it, before
@@ -2937,7 +3042,7 @@ impl Store {
             return Err(err);
         }
         sealed?;
-        self.checkpoint()?;
+        self.checkpoint_index()?;
         // The database is closed before the sentinel goes, so a kill during the close still
         // leaves the sentinel behind.
         drop(self.drop_index());
@@ -3057,6 +3162,7 @@ impl Store {
     /// reference. Any other value of those kinds is `Refused`, because its read identity cannot
     /// be checked and serialization would drop it.
     pub fn put<T: Serialize + 'static>(&mut self, kind: u8, value: &T) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         let any: &dyn std::any::Any = value;
         match typed_record(any) {
             TypedRecord::Block(block) => {
@@ -3112,6 +3218,7 @@ impl Store {
     /// errors are the same here as through `write` and the seals: `meta/store_mode` is `store
     /// mode cannot change`, and a ref a holder never holds is `a holder store cannot write ref`.
     pub fn set_refs(&mut self, refs: Vec<(String, Vec<u8>)>) -> Result<(), StoreError> {
+        self.refuse_follower_write()?;
         let items = self.ref_items(refs.clone());
         // the mode and holder rules first; a `meta/` ref is refused below, before `write`
         self.check_mode_refs(&items, RefWrite::Public)?;
@@ -3205,6 +3312,7 @@ impl Store {
     }
 
     pub fn put_blob(&mut self, bytes: &[u8]) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         let mut items: Vec<(u8, Vec<u8>)> = bytes
             .chunks(CHUNK)
             .map(|c| crate::codec::frame_latest(kinds::BLOB_CHUNK, c.to_vec()))
@@ -3225,6 +3333,7 @@ impl Store {
         mut change: Change,
         refs: Vec<(String, Vec<u8>)>,
     ) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         let (mut items, change_pos) = self.change_frames(&mut change, None, &[])?;
         items.extend(self.ref_items(refs));
         Ok(self.write(items)?[change_pos])
@@ -3236,7 +3345,16 @@ impl StoreReader {
     pub fn access(&self) -> format::StoreAccess {
         match self.shared.access {
             Access::ReadWrite => format::StoreAccess::ReadWrite,
-            Access::ReadOnly { .. } => format::StoreAccess::ReadOnly,
+            Access::ReadOnly { .. } | Access::Follower { .. } => format::StoreAccess::ReadOnly,
+        }
+    }
+
+    /// `Follower` (E_STORE_FOLLOWER) when this reader's store is a follower: the part of the
+    /// gate that also runs before a write's empty or idempotent fast return.
+    pub(crate) fn refuse_follower_write(&self) -> Result<(), StoreError> {
+        match self.shared.access {
+            Access::Follower { repo_id } => Err(StoreError::Follower(repo_id)),
+            _ => Ok(()),
         }
     }
 
@@ -3249,10 +3367,12 @@ impl StoreReader {
             .map(|h| h.dir.path().to_path_buf())
     }
 
-    /// `ReadOnly` (E_STORE_READ_ONLY) when this reader's store permits reads only.
+    /// `ReadOnly` (E_STORE_READ_ONLY) when this reader's store permits reads only, and `Follower`
+    /// (E_STORE_FOLLOWER) when it is a follower.
     pub fn ensure_writable(&self) -> Result<(), StoreError> {
+        self.refuse_follower_write()?;
         match &self.shared.access {
-            Access::ReadWrite => Ok(()),
+            Access::ReadWrite | Access::Follower { .. } => Ok(()),
             Access::ReadOnly {
                 feature,
                 required_rdy,
@@ -4273,7 +4393,7 @@ impl Store {
         if self.redaction_index_matches(upto)? {
             return Ok(false);
         }
-        self.reindex()?;
+        self.reindex_with(false)?;
         let upto = self.index().indexed_upto()?;
         if !self.redaction_index_matches(upto)? {
             return Err(self.unexplained_redaction_rows());
@@ -4643,6 +4763,7 @@ impl Store {
         ) -> Result<crate::take_batch::TagChoice, E>,
     ) -> Result<crate::take_batch::BatchTaken, crate::take_batch::TakeError<E>> {
         use crate::take_batch::{Receiver, TakeError};
+        self.refuse_follower_write().map_err(TakeError::Store)?;
         crate::take_batch::check_input_bounds(files.len(), target).map_err(TakeError::Stream)?;
         self.ensure_writable().map_err(TakeError::Store)?;
         if self.poisoned {

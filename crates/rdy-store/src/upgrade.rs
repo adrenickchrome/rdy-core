@@ -144,7 +144,27 @@ pub fn sealed_walks_for_tests() -> u64 {
 /// Plans the upgrade of the store at `dir` with this rdy's steps (see the module docs). Reads
 /// only: no store is opened, no lock is taken or created, nothing is written.
 pub fn inspect(dir: &Path) -> Result<UpgradePlan, StoreError> {
+    crate::follower::refuse_follower(dir)?;
     inspect_with(dir, REGISTRY).map(|(plan, _)| plan)
+}
+
+/// [`inspect`] of a follower's own open, which has read its mark.
+pub(crate) fn inspect_follower(dir: &Path) -> Result<UpgradePlan, StoreError> {
+    inspect_with(dir, REGISTRY).map(|(plan, _)| plan)
+}
+
+/// Whether a store of the manifest `from` needs one of this rdy's upgrade steps.
+pub fn manifest_needs_upgrade(from: &StoreFeatures) -> Result<bool, StoreError> {
+    Ok(!plan_steps(from, REGISTRY)?.0.is_empty())
+}
+
+/// Test hook: [`manifest_needs_upgrade`] with the steps `registry`.
+#[doc(hidden)]
+pub fn manifest_needs_upgrade_with_registry_for_tests(
+    from: &StoreFeatures,
+    registry: &[UpgradeStep],
+) -> Result<bool, StoreError> {
+    Ok(!plan_steps(from, registry)?.0.is_empty())
 }
 
 /// Test hook: [`inspect`] with the steps `registry`, through the same planner. No CLI, MCP,
@@ -154,6 +174,7 @@ pub fn inspect_with_registry_for_tests(
     dir: &Path,
     registry: &[UpgradeStep],
 ) -> Result<UpgradePlan, StoreError> {
+    crate::follower::refuse_follower(dir)?;
     inspect_with(dir, registry).map(|(plan, _)| plan)
 }
 
@@ -166,6 +187,7 @@ pub fn apply_locked(
     lock: &StoreLock,
     plan: &UpgradePlan,
 ) -> Result<UpgradeReport, StoreError> {
+    crate::follower::refuse_follower(dir)?;
     apply_with(dir, lock, plan, REGISTRY)
 }
 
@@ -177,6 +199,7 @@ pub fn apply_locked_with_registry_for_tests(
     plan: &UpgradePlan,
     registry: &[UpgradeStep],
 ) -> Result<UpgradeReport, StoreError> {
+    crate::follower::refuse_follower(dir)?;
     apply_with(dir, lock, plan, registry)
 }
 
@@ -185,6 +208,7 @@ pub fn apply_locked_with_registry_for_tests(
 /// manifest, which makes this a no-op). It writes `FORMAT` durably and nothing else: no object
 /// or log frame changes.
 pub fn publish_checked(store: &mut Store) -> Result<(), StoreError> {
+    store.refuse_follower_write()?;
     let log = store.store_features()?;
     if &log != store.features() {
         return Err(moved(None));

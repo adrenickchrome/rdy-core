@@ -3092,6 +3092,26 @@ fn mcp_row() -> Value {
 
 // ---- errors and warnings ----
 
+/// The refusal a normal open of a seeded follower gets, with its repo id named by the row's word.
+fn follower_refusal() -> Value {
+    let d = tempfile::tempdir().expect("a directory");
+    let r = rdy_engine::Rdy::init(&d.path().join("p"), "rdy-standard").expect("a project");
+    let dump = d.path().join("p.rdydump");
+    r.read().dump(&dump).expect("a dump");
+    let repo = r.store().repo_id().expect("a repo id").expect("a repo id");
+    r.close().expect("a close");
+    let follower = d.path().join("f");
+    rdy_engine::follower::seed(&dump, &follower).expect("a seed");
+    let e = rdy_engine::Rdy::open(&follower)
+        .err()
+        .expect("a follower refuses a normal open");
+    json!({
+        "code": e.code,
+        "message": e.message.replace(&repo.to_string(), "<repo id>"),
+        "fix": e.fix,
+    })
+}
+
 /// Every `E_` and `W_` code constant in the sources, and every `_FIX` and `_MESSAGE` template
 /// constant, by scanning the crates' source text.
 fn errors_row() -> Value {
@@ -3157,6 +3177,7 @@ fn errors_row() -> Value {
         "templates": templates,
         "error_rows": rows,
         "envelope": envelope,
+        "follower_refusal": follower_refusal(),
         "redaction_warning": {
             "copies": rdy_engine::W_REDACTION_COPIES_MESSAGE,
             "inventory": rdy_engine::W_REDACTION_INVENTORY_MESSAGE,

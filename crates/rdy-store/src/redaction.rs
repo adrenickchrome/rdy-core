@@ -582,6 +582,7 @@ impl Store {
     /// a source version or span that changed since preparation is `RedactionStale`, and nothing
     /// is written. Removes nothing. Returns the request's hash.
     pub fn commit_redaction(&mut self, prepared: PreparedRedaction) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         let claim = prepared.claim;
         let p = prepared.checked;
         let checked = match self.check_redaction(&p.carrier, &p.request, &p.residues, true) {

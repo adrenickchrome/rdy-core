@@ -24,6 +24,7 @@ impl Store {
         d: &Dispute,
         answer: Option<Answer>,
     ) -> Result<(Hash, Option<Hash>), StoreError> {
+        self.ensure_writable()?;
         let item = crate::codec::item_new(kinds::DISPUTE, d);
         let id = Hash::of(&item.1);
         self.check_carried::<Dispute>(&item, &[])?;
@@ -46,6 +47,7 @@ impl Store {
         r: &DisputeResolution,
         answer: Option<Answer>,
     ) -> Result<(Hash, Option<Hash>), StoreError> {
+        self.ensure_writable()?;
         if !self.has_kind(kinds::DISPUTE, &r.dispute)? {
             return Err(StoreError::NotFound(r.dispute));
         }

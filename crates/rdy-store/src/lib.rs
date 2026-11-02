@@ -14,6 +14,7 @@ pub mod dump_chain;
 pub mod dump_scan;
 pub mod error;
 pub mod fileid;
+pub mod follower;
 pub mod format;
 pub mod fsutil;
 pub mod holder;

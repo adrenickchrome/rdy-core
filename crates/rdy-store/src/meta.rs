@@ -158,6 +158,7 @@ impl Store {
         origin: &Origin,
         new_repo_id: Option<RepoId>,
     ) -> Result<RepoId, StoreError> {
+        self.ensure_writable()?;
         if self.open_batch().is_some() {
             return Err(batch_open("before the origin batch"));
         }

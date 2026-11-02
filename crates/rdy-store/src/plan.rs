@@ -939,6 +939,7 @@ impl Store {
     /// only the proposal and landing composition writes those, beside their own records. A
     /// version that breaks a rule is refused (`plan <hash>: <reason>`), with nothing written.
     pub fn put_plan(&mut self, plan: &Plan) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         let id = plan_hash(plan);
         if plan.seal.is_some() {
             return Err(refused(&id, INVALID_SEAL));

@@ -29,6 +29,7 @@ const MAX_REQUEST_BATCH: usize = 20;
 impl Store {
     /// Writes one request. See [`Store::put_check_requests`].
     pub fn put_check_request(&mut self, r: &CheckRequest) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         let ids = self.put_check_requests(std::slice::from_ref(r))?;
         Ok(ids[0])
     }
@@ -39,6 +40,7 @@ impl Store {
     /// held already with its ref, writes nothing more, and with no new row there is no batch. A
     /// `check/` ref that does not name its held request refuses.
     pub fn put_check_requests(&mut self, rows: &[CheckRequest]) -> Result<Vec<Hash>, StoreError> {
+        self.ensure_writable()?;
         if !(1..=MAX_REQUEST_BATCH).contains(&rows.len()) {
             return Err(StoreError::Refused(format!(
                 "a check request batch takes 1 to {MAX_REQUEST_BATCH} requests"
@@ -90,6 +92,7 @@ impl Store {
     /// lowest hash when imported history holds several. Nothing overwrites a review, and no ref is
     /// written.
     pub fn put_check_review(&mut self, r: &Review) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         let ReviewSubject::Check { request } = r.subject else {
             return Err(StoreError::Refused(
                 "a check review is a review with verdict pass, concern or fail of a check request"

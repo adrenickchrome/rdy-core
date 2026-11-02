@@ -176,6 +176,8 @@ pub const POLICY_HUMAN_FIX: &str =
     "show the card to the person and relay their answer: rdy_pending, then rdy_answer";
 /// The fix of `E_COVERAGE_LOWERED` (D-ZWP7Q, O17).
 pub const COVERAGE_LOWERED_FIX: &str = "see what lowered it with rdy_coverage / rdy coverage, then tie the new content to what it describes";
+/// The fix of a follower that cannot open: its bad mark, and its log's `E_REDACTION_CORRUPT`.
+pub const FOLLOWER_SEED: &str = "seed a new follower from a full dump of the source store";
 /// The fix of `E_REDACTION_PENDING`.
 pub const REDACTION_PENDING_FIX: &str =
     "Close the project and reopen it to finish the removal. Do not delete the log.";
@@ -725,6 +727,19 @@ impl From<StoreError> for RdyError {
                 "the read-only store has no lock file",
                 "open the project with the rdy build that wrote it",
             ),
+            StoreError::Follower(repo_id) => RdyError::new(
+                E_STORE_FOLLOWER,
+                format!("this store is a read-only follower of {repo_id}"),
+                "write through the source store",
+            ),
+            StoreError::FollowerMark(reason) => {
+                RdyError::new(E_DUMP_CHAIN, reason.to_string(), FOLLOWER_SEED)
+            }
+            StoreError::FollowerMarkCheckLimit => RdyError::new(
+                E_LIMIT,
+                "the follower mark check exceeds 100000000 frames",
+                "report this as a bug in rdy",
+            ),
             StoreError::UpgradeRequired => RdyError::new(
                 E_STORE_FORMAT,
                 "the store needs an upgrade before it can open",
@@ -817,6 +832,8 @@ pub const E_UPGRADE_MOVED: &str = "E_UPGRADE_MOVED";
 pub const E_UPGRADE_BACKUP: &str = "E_UPGRADE_BACKUP";
 /// The upgrade batch is durable, but the store check or fsck failed.
 pub const E_UPGRADE_FAILED: &str = "E_UPGRADE_FAILED";
+/// A normal open of, or a write to, a read-only follower (D-AA4FD).
+pub const E_STORE_FOLLOWER: &str = "E_STORE_FOLLOWER";
 /// A write to a store with an unknown read-only feature, or a read-only open of a store with no
 /// lock file.
 pub const E_STORE_READ_ONLY: &str = "E_STORE_READ_ONLY";
@@ -1081,7 +1098,7 @@ pub fn upstream_signout_local() -> Issue {
 
 /// Every error code the engine defines: each `E_*` constant of this module and the briefing's
 /// two. It is the engine's whole static error set, not one feature's subset.
-const CORE_ERROR_CODES: [&str; 112] = [
+const CORE_ERROR_CODES: [&str; 113] = [
     E_LOCKED,
     E_HELD_BY_READER,
     E_NO_PROJECT,
@@ -1191,6 +1208,7 @@ const CORE_ERROR_CODES: [&str; 112] = [
     E_UPGRADE_MOVED,
     E_UPGRADE_BACKUP,
     E_UPGRADE_FAILED,
+    E_STORE_FOLLOWER,
     E_STORE_READ_ONLY,
     crate::brief::E_BRIEF_REQUIRED,
     crate::brief::E_BRIEF_STALE,

@@ -9,6 +9,7 @@
 //! call (`maintenance::upgrade`): no open upgrades a store (D-WWAK7).
 //! No product behaviour is promised stable across pins.
 
+mod follower;
 pub mod history;
 pub mod maintenance;
 pub mod publication;
@@ -20,9 +21,10 @@ pub mod stream;
 pub mod take;
 mod value;
 
+pub use follower::Follower;
 pub use maintenance::{
-    ChainEnd, DumpStop, LoadedChainFile, StoppedAt, UpgradePlan, UpgradeReceipt, UpgradeReport,
-    UpgradeStep,
+    ChainEnd, DumpStop, LoadedChainFile, Location, StoppedAt, UpgradePlan, UpgradeReceipt,
+    UpgradeReport, UpgradeStep,
 };
 pub use publication::{ProfileFacts, profile_facts};
 pub use publication_take::{

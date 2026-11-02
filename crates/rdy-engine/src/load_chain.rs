@@ -22,11 +22,12 @@ use crate::load::{
 use rdy_model::RepoId;
 use rdy_store::StoreError;
 use rdy_store::dump::{DumpBatch, DumpItem, DumpReader, TRAILER_LEN, read_envelope};
-use rdy_store::dump_chain::DumpKind;
+use rdy_store::dump_chain::{ChainEnd, DumpKind};
 use rdy_store::dump_scan::{
     ChainLink, ChainSource, Envelope, FileRole, METADATA_MISMATCH, ProjectFile, ScanError,
     ScanPlan, StopFailure, StopMatch, scan,
 };
+use rdy_store::follower::{FollowerFile, FollowerMark};
 use rdy_store::format::DumpStore;
 use rdy_store::holder::StoreMode;
 use rdy_store::ingest::Ingest;
@@ -47,6 +48,15 @@ const FILE_RECORD: u8 = 0xF1;
 
 /// The most files of one chain: a full dump and [`MAX_CHAIN_FILES`] increments.
 const MAX_FILES: usize = MAX_CHAIN_FILES + 1;
+
+/// What a verified load makes. `Ordinary` is `rdy load`. `Follower` is a seed (D-AA4FD): only the
+/// source's bytes at their places, with no carried, upgrade, origin or reconcile batch, and the
+/// mark durable before the store takes its place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LoadPurpose {
+    Ordinary,
+    Follower,
+}
 
 /// The verified plan of a chain load: the inputs, and what the pre-pass checked and decided for
 /// them. Its facts are read-only; it is no token a later load can reuse with other files.
@@ -176,7 +186,11 @@ fn released_format(file: &Path) -> Option<u32> {
 ///
 /// Any failure takes back what the load made (`Made::undo`), and no store is in place before
 /// every input passed.
-pub(crate) fn load_verified(plan: &ChainPlan, project: &Path) -> Result<LoadSummary, RdyError> {
+pub(crate) fn load_verified(
+    plan: &ChainPlan,
+    project: &Path,
+    purpose: LoadPurpose,
+) -> Result<LoadSummary, RdyError> {
     let Some(scan) = plan.scan() else {
         return Err(RdyError::new(
             crate::error::E_INTERNAL,
@@ -192,12 +206,13 @@ pub(crate) fn load_verified(plan: &ChainPlan, project: &Path) -> Result<LoadSumm
     let out = (|| {
         let (mut ingest, loading) = create_store(project, &mut made)?;
         let (batches, frames) = ingest_inputs(plan, scan, &mut ingest, &loading)?;
-        let finished = ingest_tail(plan, scan, ingest, &loading)?;
+        let finished = ingest_tail(plan, scan, ingest, &loading, purpose)?;
         debug_assert_eq!((finished.batches, finished.frames), (batches, frames));
         let records = carried_records(scan)?;
         let holder = scan.mode() == StoreMode::Holder;
         let warnings = carried_warning::for_load(scan.mode(), &records)?;
-        let placed = place(project, &files, &absent, &mut made, None)?;
+        let mark = (purpose == LoadPurpose::Follower).then(|| follower_mark(scan, &files));
+        let placed = place(project, &files, &absent, &mut made, None, mark.as_ref())?;
         let first = &scan.envelopes()[0];
         Ok(LoadSummary {
             project: project.display().to_string(),
@@ -230,6 +245,39 @@ pub(crate) fn load_verified(plan: &ChainPlan, project: &Path) -> Result<LoadSumm
         made.undo();
     }
     out
+}
+
+/// The chain end of the single full dump `scan` read.
+pub(crate) fn chain_end(scan: &ScanPlan) -> ChainEnd {
+    let e = &scan.envelopes()[0];
+    ChainEnd {
+        repo_id: chain_repo(scan),
+        store_format: e.header.store.clone(),
+        end: e.header.log_end,
+        end_batch: e
+            .header
+            .chain
+            .expect("a scanned chain file has chain links")
+            .end_batch,
+        digest: e.trailer.digest,
+    }
+}
+
+/// The mark of a seed from `scan`: its chain end, and the content hash of each project file in
+/// `files` (a holder has none), sorted by the path's bytes.
+fn follower_mark(scan: &ScanPlan, files: &[(String, Vec<u8>)]) -> FollowerMark {
+    let mut rows: Vec<FollowerFile> = files
+        .iter()
+        .map(|(path, bytes)| FollowerFile {
+            path: path.clone(),
+            hash: rdy_model::Hash::of(bytes),
+        })
+        .collect();
+    rows.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+    FollowerMark {
+        chain: chain_end(scan),
+        files: rows,
+    }
 }
 
 /// The rows of the inputs `paths`, from the envelopes the pre-pass read.
@@ -436,6 +484,7 @@ fn ingest_tail(
     scan: &ScanPlan,
     mut ingest: Ingest,
     loading: &Path,
+    purpose: LoadPurpose,
 ) -> Result<rdy_store::ingest::IngestReport, RdyError> {
     let owner = scan.owner();
     let file = plan.files()[owner].as_path();
@@ -451,12 +500,23 @@ fn ingest_tail(
     if scan.files().iter().all(|f| f.kept_batches == 0) {
         return Err(incomplete("it holds no batches".to_string()));
     }
-    ingest
-        .append_carried(scan.residues(), scan.carried())
-        .map_err(|e| carried_target_error(loading, e))?;
-    ingest
-        .upgrade_in_repo(scan.store(), chain_repo(scan))
-        .map_err(|e| target_error(loading, e))?;
+    match (purpose, scan.store()) {
+        (LoadPurpose::Follower, DumpStore::Features(m)) => ingest
+            .keep_source_manifest(m)
+            .map_err(|e| target_error(loading, e))?,
+        // the seed's own check refused every other store
+        (LoadPurpose::Follower, DumpStore::Legacy(_)) => {
+            return Err(dump_error::seed_store_format());
+        }
+        (LoadPurpose::Ordinary, store) => {
+            ingest
+                .append_carried(scan.residues(), scan.carried())
+                .map_err(|e| carried_target_error(loading, e))?;
+            ingest
+                .upgrade_in_repo(store, chain_repo(scan))
+                .map_err(|e| target_error(loading, e))?;
+        }
+    }
     ingest.finish().map_err(|e| match e {
         StoreError::Dump { what, .. } => damaged(file, at, &what),
         e => target_error(loading, e),

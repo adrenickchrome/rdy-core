@@ -118,35 +118,7 @@ impl StoreHandle {
     /// A read snapshot: the published state, the identity, the canon head and every `tag/*` ref,
     /// all taken together under the store's lock, so no write falls between them.
     pub fn snapshot(&self) -> Result<Snapshot, RdyError> {
-        self.local.inspect(|rdy| {
-            let state = rdy.read();
-            let reader = state.reader();
-            let Some(repo_id) = reader.repo_id()? else {
-                // a store with no repo id fails the meta check with its own text
-                reader.check_meta()?;
-                return Err(RdyError::new(
-                    E_INTERNAL,
-                    "the store has no repo id",
-                    "report this as a bug in rdy",
-                ));
-            };
-            let identity = Identity {
-                repo_id,
-                origin: reader.origin()?,
-            };
-            let tags = reader
-                .tags()?
-                .into_iter()
-                .map(|(name, hash, tag)| (name, (hash, tag)))
-                .collect();
-            let canon = state.canon_head();
-            Ok(Snapshot {
-                state,
-                identity,
-                canon,
-                tags,
-            })
-        })
+        self.local.inspect(|rdy| snapshot_of(rdy.read()))
     }
 
     /// Takes the batch files `batches` of one upload for the publication `target` into this
@@ -195,6 +167,37 @@ impl StoreHandle {
     pub fn close(self) -> Result<(), RdyError> {
         self.local.close()
     }
+}
+
+/// The snapshot of the captured `state`: its identity, canon head and every `tag/*` ref, all read
+/// through its own reader.
+pub(crate) fn snapshot_of(state: Arc<ReadState>) -> Result<Snapshot, RdyError> {
+    let reader = state.reader();
+    let Some(repo_id) = reader.repo_id()? else {
+        // a store with no repo id fails the meta check with its own text
+        reader.check_meta()?;
+        return Err(RdyError::new(
+            E_INTERNAL,
+            "the store has no repo id",
+            "report this as a bug in rdy",
+        ));
+    };
+    let identity = Identity {
+        repo_id,
+        origin: reader.origin()?,
+    };
+    let tags = reader
+        .tags()?
+        .into_iter()
+        .map(|(name, hash, tag)| (name, (hash, tag)))
+        .collect();
+    let canon = state.canon_head();
+    Ok(Snapshot {
+        state,
+        identity,
+        canon,
+        tags,
+    })
 }
 
 /// A read snapshot. Its tag refs are the ones captured with it: a later write never changes

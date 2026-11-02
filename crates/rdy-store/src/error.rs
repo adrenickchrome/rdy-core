@@ -1,4 +1,5 @@
-use rdy_model::{BlockId, Hash};
+use crate::segment::Location;
+use rdy_model::{BlockId, Hash, RepoId};
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
@@ -111,6 +112,15 @@ pub enum StoreError {
     /// creates one in the source store.
     #[error("the read-only store has no lock file")]
     ReadOnlyNoLock,
+    /// A normal open of, or a write to, a follower of the source `0` (E_STORE_FOLLOWER).
+    #[error("this store is a read-only follower of {0}")]
+    Follower(RepoId),
+    /// A follower mark that is missing, damaged or does not fit its log (E_DUMP_CHAIN).
+    #[error("{0}")]
+    FollowerMark(FollowerMarkFailure),
+    /// The walk that checks a follower mark against its log passed its frame bound (E_LIMIT).
+    #[error("the follower mark check exceeds 100000000 frames")]
+    FollowerMarkCheckLimit,
     /// A store that needs an upgrade (planned steps, or a sealed upgrade not yet completed),
     /// opened under a policy that does not upgrade it, or written before its completion
     /// (E_STORE_FORMAT).
@@ -122,6 +132,40 @@ pub enum StoreError {
         failure: UpgradeFailure,
         backup: Option<PathBuf>,
     },
+}
+
+/// Why a store's follower mark does not hold (`crate::follower`; closed). Each `Display` is the
+/// whole message of its `E_DUMP_CHAIN`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum FollowerMarkFailure {
+    #[error("the follower mark is not a private regular file")]
+    NotPrivate,
+    #[error("the follower mark exceeds 262144 bytes")]
+    TooLarge,
+    #[error("the follower mark cannot be read")]
+    Unreadable,
+    #[error("the follower mark does not start with \"rdy follower 1\"")]
+    BadHeader,
+    #[error("the follower mark is not valid JSON")]
+    BadJson,
+    #[error("the follower mark has an unknown field")]
+    UnknownField,
+    #[error("the follower mark has an invalid project file list")]
+    BadFiles,
+    #[error("the follower mark names repo {mark}, but the log holds repo {log}")]
+    Repo { mark: RepoId, log: RepoId },
+    #[error(
+        "the follower mark ends at {}.{}, past the log's end at {}.{}",
+        .mark.segment, .mark.offset, .log.segment, .log.offset
+    )]
+    PastEnd { mark: Location, log: Location },
+    #[error("the follower mark's batch marker differs from the log's at its saved end")]
+    Marker,
+    #[error("the follower mark's store format differs from the log's at its saved end")]
+    StoreFormat,
+    /// An explicit follower open of a store with no mark.
+    #[error("this store has no follower mark")]
+    Missing,
 }
 
 /// Why a store upgrade failed (`crate::upgrade`).

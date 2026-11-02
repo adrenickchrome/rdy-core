@@ -175,6 +175,7 @@ impl Ingest {
     /// must not exist: an existing `dir` is `StoreError::Io` of kind `AlreadyExists`, and
     /// nothing is written into it.
     pub fn create(dir: &Path) -> Result<Ingest, StoreError> {
+        crate::follower::refuse_follower(dir)?;
         std::fs::create_dir(dir)?;
         let parent = match dir.parent() {
             Some(p) if !p.as_os_str().is_empty() => p,
@@ -597,19 +598,7 @@ impl Ingest {
         self.upgraded = true;
         let from = match from {
             DumpStore::Features(m) => {
-                format::check_writable(m)?;
-                if self
-                    .features_ref
-                    .as_ref()
-                    .is_some_and(|v| *v != m.to_json())
-                {
-                    return Err(dump_error(crate::dump_scan::METADATA_MISMATCH.into()));
-                }
-                // a valid dump's manifest names every feature its records use (D-1HDVA)
-                if let Some(f) = self.used.iter().find(|f| !m.has(&f.name)) {
-                    return Err(dump_error(feature_not_named(&f.name)));
-                }
-                self.features = Some(m.clone());
+                self.keep_manifest(m)?;
                 return Ok(false);
             }
             DumpStore::Legacy(n) => *n,
@@ -652,6 +641,32 @@ impl Ingest {
             .append_marker(start, placed.iter().map(|(_, h)| h))?;
         self.features = Some(features);
         Ok(true)
+    }
+
+    /// The source-only end of a follower's seed (D-AA4FD): the log keeps the manifest `m`, and
+    /// nothing is appended. The manifest passes the checks of a feature store's `upgrade`.
+    pub fn keep_source_manifest(&mut self, m: &StoreFeatures) -> Result<(), StoreError> {
+        self.upgraded = true;
+        self.keep_manifest(m)
+    }
+
+    /// The checks of a feature store's manifest `m`, which the store keeps: this rdy may write
+    /// it, it is the log's own, and it names every feature the ingested records use.
+    fn keep_manifest(&mut self, m: &StoreFeatures) -> Result<(), StoreError> {
+        format::check_writable(m)?;
+        if self
+            .features_ref
+            .as_ref()
+            .is_some_and(|v| *v != m.to_json())
+        {
+            return Err(dump_error(crate::dump_scan::METADATA_MISMATCH.into()));
+        }
+        // a valid dump's manifest names every feature its records use (D-1HDVA)
+        if let Some(f) = self.used.iter().find(|f| !m.has(&f.name)) {
+            return Err(dump_error(feature_not_named(&f.name)));
+        }
+        self.features = Some(m.clone());
+        Ok(())
     }
 
     /// Appends the carried records of a stopped load as one sealed batch after the source prefix

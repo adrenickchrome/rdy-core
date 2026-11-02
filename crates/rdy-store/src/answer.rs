@@ -204,6 +204,7 @@ impl Store {
     /// `StoreError::Refused` and nothing written, an answer that breaks a rule of the record or
     /// names a target that is not an object in the log.
     pub fn put_answer(&mut self, a: &Answer) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         self.put_answer_with(a, vec![])
     }
 

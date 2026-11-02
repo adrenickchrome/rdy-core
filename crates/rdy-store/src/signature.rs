@@ -175,6 +175,7 @@ impl Store {
     /// written: a field or the record over its bound (`signing input exceeds {limit}`), a key
     /// binding, or a subject that is not a stored landing or tag.
     pub fn put_signature(&mut self, signature: &Signature) -> Result<Hash, StoreError> {
+        self.ensure_writable()?;
         let items = frames(std::slice::from_ref(signature))?;
         Ok(self.write(items)?[0])
     }

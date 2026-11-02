@@ -200,6 +200,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "follow the refusal's fix: open the project with the rdy it names, dump and load, or run rdy upgrade",
     ),
     (
+        E_STORE_FOLLOWER,
+        "this store is a read-only follower of <repo id>",
+        "write through the source store",
+    ),
+    (
         E_STORE_READ_ONLY,
         "an unsupported feature allows reads only, or its store has no lock file",
         "open the project with the rdy build named by the refusal",

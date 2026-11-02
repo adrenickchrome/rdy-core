@@ -28,6 +28,33 @@ fn stop(message: String) -> RdyError {
     RdyError::new(E_LOAD_STOP, message, STOP_FIX)
 }
 
+/// An increment given to a follower's seed.
+pub fn seed_increment() -> RdyError {
+    RdyError::new(
+        E_DUMP_CHAIN,
+        "a follower is seeded from a full dump, not an increment",
+        "seed the follower from a full dump of the source store",
+    )
+}
+
+/// A dump whose store is not the one this rdy writes, given to a follower's seed.
+pub fn seed_store_format() -> RdyError {
+    RdyError::new(
+        E_DUMP_CHAIN,
+        "this dump's store format differs from the one this rdy writes",
+        "seed the follower from a dump that this rdy's store format wrote",
+    )
+}
+
+/// A read of a follower whose log is ahead of its mark.
+pub fn follower_unfinished() -> RdyError {
+    RdyError::new(
+        E_DUMP_CHAIN,
+        "the follower has an unfinished increment",
+        "retry the same increment before reading the follower",
+    )
+}
+
 /// A stop selector that is not spelled `landing:<hash>`, `tag:<name>` or `pos:<segment>.<offset>`.
 pub fn stop_syntax(value: &str) -> RdyError {
     RdyError::new(

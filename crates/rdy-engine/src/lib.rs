@@ -33,6 +33,7 @@ mod error;
 pub mod events;
 pub mod factsheet;
 pub mod filter;
+pub mod follower;
 pub mod formats;
 mod fsck;
 mod gate;

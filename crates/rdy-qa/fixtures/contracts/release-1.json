@@ -14333,6 +14333,7 @@
       "E_SIG_OBJECT_MISMATCH": "\"E_SIG_OBJECT_MISMATCH\"",
       "E_SITE": "\"E_SITE\"",
       "E_STALE_BASE": "\"E_STALE_BASE\"",
+      "E_STORE_FOLLOWER": "\"E_STORE_FOLLOWER\"",
       "E_STORE_FORMAT": "\"E_STORE_FORMAT\"",
       "E_STORE_READ_ONLY": "\"E_STORE_READ_ONLY\"",
       "E_STREAM_PURPOSE": "\"E_STREAM_PURPOSE\"",
@@ -14601,6 +14602,11 @@
         "E_STORE_FORMAT",
         "this rdy does not open the store as it is: an older or newer store format, an unknown store feature, an invalid feature manifest, or a store that needs an upgrade",
         "follow the refusal's fix: open the project with the rdy it names, dump and load, or run rdy upgrade"
+      ],
+      [
+        "E_STORE_FOLLOWER",
+        "this store is a read-only follower of <repo id>",
+        "write through the source store"
       ],
       [
         "E_STORE_READ_ONLY",
@@ -14953,6 +14959,11 @@
         "follow the warning's own fix"
       ]
     ],
+    "follower_refusal": {
+      "code": "E_STORE_FOLLOWER",
+      "fix": "write through the source store",
+      "message": "this store is a read-only follower of <repo id>"
+    },
     "redaction_warning": {
       "copies": "This removes bytes from this store. It cannot erase exports, renders, dumps, clones, published files, working copies, backups, or filesystem snapshots.",
       "inventory": "Dumps, clones, exports, renders, and published versions may hold copies. Their locations are unknown to rdy.",
@@ -15446,6 +15457,7 @@
       "W_DIAGRAM_FAILED",
       "E_DUMP",
       "E_STORE_FORMAT",
+      "E_STORE_FOLLOWER",
       "E_STORE_READ_ONLY",
       "E_UPGRADE_MOVED",
       "E_UPGRADE_BACKUP",
@@ -17497,6 +17509,10 @@
               "when": "string"
             },
             "E_SITE": {
+              "fix": "string",
+              "when": "string"
+            },
+            "E_STORE_FOLLOWER": {
               "fix": "string",
               "when": "string"
             },

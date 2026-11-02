@@ -56,9 +56,16 @@ fn store_path(project: &Path) -> PathBuf {
     project.join(".rdy").join(rdy_store::layout::STORE_DIR)
 }
 
+/// `E_STORE_FOLLOWER` when the store of the project at `project` is a follower (D-AA4FD): the
+/// source's project files arrive only by its follow. A bad mark is its own refusal.
+pub fn refuse_follower(project: &Path) -> Result<(), RdyError> {
+    Ok(rdy_store::follower::refuse_follower(&store_path(project))?)
+}
+
 /// `E_NO_PROJECT` unless `project` is a project ([`is_project`]), in the words of
 /// [`missing_project`]: the engine's open and the CLI check this before they open a store.
 pub fn require_project(project: &Path) -> Result<(), RdyError> {
+    refuse_follower(project)?;
     if is_project(project) {
         return Ok(());
     }
