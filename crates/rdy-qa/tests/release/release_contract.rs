@@ -4796,6 +4796,8 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "cli/upgrade/stdout/steps",
     "cli/view show/stdout/conflicts",
     "mcp/rdy_alternatives list/ok/sets",
+    "mcp/rdy_answer elicit mixed/refused/issues",
+    "mcp/rdy_answer elicit unavailable/refused/issues",
     "mcp/rdy_answer/ok/landing/|null/consequences[]/because/values",
     "mcp/rdy_answer/ok/landing/|null/warnings",
     "mcp/rdy_answer/ok/signatures?",

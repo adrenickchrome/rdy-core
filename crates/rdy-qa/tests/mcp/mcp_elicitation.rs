@@ -179,7 +179,7 @@ impl Client {
         c
     }
 
-    fn as_actor(mut self, actor: &str, run: Option<&str>) -> Client {
+    fn with_actor(mut self, actor: &str, run: Option<&str>) -> Client {
         self.claim = json!({"rdy/actor": actor, "rdy/run": run});
         self
     }
@@ -853,12 +853,12 @@ async fn ui10_continuations_are_owned_expiring_and_single_use() {
     let relay = json!({"ref": item.r#ref, "card_hash": item.card_hash});
     refused_with(&c.answer(relay, retry(&h, reject.clone())).await, GONE);
     // another actor, and another run of the same actor, do not consume it
-    let mut other = Client::inline(&w, 2, form_caps()).as_actor("agent:other", Some("r1"));
+    let mut other = Client::inline(&w, 2, form_caps()).with_actor("agent:other", Some("r1"));
     refused_with(
         &other.answer(ask(&item), retry(&h, reject.clone())).await,
         GONE,
     );
-    let mut run2 = Client::inline(&w, 3, form_caps()).as_actor("agent:relay", Some("r2"));
+    let mut run2 = Client::inline(&w, 3, form_caps()).with_actor("agent:relay", Some("r2"));
     refused_with(
         &run2.answer(ask(&item), retry(&h, reject.clone())).await,
         GONE,
@@ -1256,7 +1256,7 @@ async fn ui10_elicited_answers_share_the_whole_engine_gate() {
             .clone();
         let mut c = client(new, &w, 4)
             .await
-            .as_actor("ci:0123456789abcdef0123456789abcdef/nightly", None);
+            .with_actor("ci:0123456789abcdef0123456789abcdef/nightly", None);
         let waiting = Waiting::start(&mut c, new, ask(&third)).await;
         let r = waiting.answer(&mut c, ask(&third), choice("later")).await;
         let e = r.unwrap_err();
@@ -1705,6 +1705,8 @@ impl SoftKey {
 }
 
 type Hook = Box<dyn FnMut(usize) + Send>;
+/// What a signing hook moves the project with, once the world exists.
+type Mover = Arc<Mutex<Option<(Arc<dyn Engine>, String)>>>;
 
 /// An agent holding `keys`, counting its signatures and running `hook` before its first one.
 struct FakeAgent {
@@ -1836,7 +1838,7 @@ async fn ui10_signing_cancellation_keeps_elicited_local() {
             .unwrap();
         assert_eq!(person_signed(&v)["presence"], "present", "{v:#}");
         // the project moves while the agent signs: the act is signed again, and lands once
-        let slot: Arc<Mutex<Option<(Arc<dyn Engine>, String)>>> = Arc::default();
+        let slot: Mover = Arc::default();
         let hook = Arc::clone(&slot);
         let agent = FakeAgent::hooked(&[person_ed()], move |_| {
             let (e, section) = hook.lock().unwrap().take().unwrap();
