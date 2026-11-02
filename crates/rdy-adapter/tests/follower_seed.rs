@@ -173,7 +173,7 @@ fn mh6_project_and_holder_snapshots_keep_their_scope_rules() {
         Scope::Inflight,
         Scope::Proposal(Hash([5; 32])),
     ] {
-        let e = state.materialized(&scope).err().expect("refused");
+        let e = state.materialized(&scope).expect_err("refused");
         assert_eq!(
             triple(&e),
             (
