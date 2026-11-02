@@ -211,8 +211,19 @@ fn mh6_seed_accepts_current_feature_subsets_and_refuses_upgrades() {
             let mut r = Rdy::init(&root, "rdy-standard").unwrap();
             r.store_mut().put_blob(b"a first use").unwrap();
             r.seal_open().unwrap();
-            r.read().dump(&file).unwrap();
+            let summary = r.read().dump(&file).unwrap();
+            // the increment's refusal comes before its manifest's
+            r.store_mut().put_blob(b"a later batch").unwrap();
+            r.seal_open().unwrap();
+            let later = d.path().join(format!("feature{i}-inc.rdydump"));
+            r.read().dump_after(&summary.chain_end(), &later).unwrap();
             r.close().unwrap();
+            drop(_known);
+            assert_eq!(
+                triple(&follower::seed(&later, &target).unwrap_err()),
+                increment,
+                "{class:?}"
+            );
         }
         let e = follower::seed(&file, &target).unwrap_err();
         assert_eq!(

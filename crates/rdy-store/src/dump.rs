@@ -2106,15 +2106,9 @@ pub(crate) fn header_of(
     Ok((header, kinds))
 }
 
-/// Reads only a dump's envelope from `r`: the prelude, the `HEADER` record and the fixed-length
-/// final `TRAILER` record, each record's own hash checked. Returns the dump format, the header,
-/// the trailer and the file's length. The body between them is neither read nor checked, so its
-/// digest is not verified here: only a whole read (`DumpReader`) verifies a dump.
-pub fn read_envelope<R: Read + Seek>(
-    r: &mut R,
-) -> Result<(u32, DumpHeader, DumpTrailer, u64), StoreError> {
-    r.seek(SeekFrom::Start(0))?;
-    let format = read_prelude(r)?;
+/// The `HEADER` record's payload of a dump of `format`, read from just past the prelude: bounded
+/// before it is allocated, and its hash checked.
+fn read_header_record(r: &mut impl Read, format: u32) -> Result<Vec<u8>, StoreError> {
     let at = PRELUDE_LEN;
     let mut head = [0u8; FRAME_HEADER as usize];
     read_exact_at(r, &mut head, at)?;
@@ -2137,8 +2131,31 @@ pub fn read_envelope<R: Read + Seek>(
     if Hash::of(&payload).0 != head[5..37] {
         return Err(damaged(at, "a record's hash does not match its bytes"));
     }
+    Ok(payload)
+}
+
+/// The dump format and header at the start of `r`, before the store's compatibility rules: a
+/// follower's seed names an increment before it judges the increment's manifest.
+pub fn read_header_only(r: &mut impl Read) -> Result<(u32, DumpHeader), StoreError> {
+    let format = read_prelude(r)?;
+    let payload = read_header_record(r, format)?;
+    let header = parse_header(format, &payload).map_err(|what| damaged(PRELUDE_LEN, what))?;
+    Ok((format, header))
+}
+
+/// Reads only a dump's envelope from `r`: the prelude, the `HEADER` record and the fixed-length
+/// final `TRAILER` record, each record's own hash checked. Returns the dump format, the header,
+/// the trailer and the file's length. The body between them is neither read nor checked, so its
+/// digest is not verified here: only a whole read (`DumpReader`) verifies a dump.
+pub fn read_envelope<R: Read + Seek>(
+    r: &mut R,
+) -> Result<(u32, DumpHeader, DumpTrailer, u64), StoreError> {
+    r.seek(SeekFrom::Start(0))?;
+    let format = read_prelude(r)?;
+    let at = PRELUDE_LEN;
+    let payload = read_header_record(r, format)?;
     let (header, _) = header_of(format, at, &payload)?;
-    let body = at + FRAME_HEADER + len as u64;
+    let body = at + FRAME_HEADER + payload.len() as u64;
     let trailer_len = if format >= 3 {
         TRAILER_LEN
     } else {

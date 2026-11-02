@@ -191,7 +191,7 @@ fn is_follower(e: StoreError, repo: RepoId, what: &str) {
 }
 
 fn mark_refusal(dir: &Path) -> String {
-    let e = follower::read_mark(dir).err().expect("a refused mark");
+    let e = follower::read_mark(dir).expect_err("a refused mark");
     assert!(matches!(e, StoreError::FollowerMark(_)), "{e:?}");
     e.to_string()
 }

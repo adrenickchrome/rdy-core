@@ -14,12 +14,12 @@ use crate::fsck::FsckReport;
 use crate::load::{check_target, open_dump, read_error};
 use crate::load_chain::{LoadPurpose, chain_end, inspect, load_verified};
 use crate::{Location, Rdy, RdyError, ReadState};
-use rdy_store::dump::{DUMP_FORMAT, DumpReader};
+use rdy_store::dump::{DUMP_FORMAT, read_header_only};
 use rdy_store::dump_chain::{ChainEnd, DumpKind};
 use rdy_store::format::{self, DumpStore};
 use rdy_store::upgrade::{self, UpgradeStep};
 use rdy_store::{Store, StoreError, StoreLock, layout};
-use std::io::{BufReader, ErrorKind};
+use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -58,9 +58,8 @@ fn seed_with(
 /// increment first, then a dump of another format, or of a store this rdy cannot write or that
 /// needs an upgrade. A stream that does not open keeps its own diagnostic.
 fn check_seed_dump(dump: &Path, registry: Option<&[UpgradeStep]>) -> Result<(), RdyError> {
-    let f = open_dump(dump)?;
-    let (_, dump_format, header) =
-        DumpReader::open(BufReader::new(f)).map_err(|e| read_error(dump, e))?;
+    let mut f = open_dump(dump)?;
+    let (dump_format, header) = read_header_only(&mut f).map_err(|e| read_error(dump, e))?;
     if header.chain.is_some_and(|c| c.kind == DumpKind::Increment) {
         return Err(dump_error::seed_increment());
     }
@@ -107,7 +106,7 @@ pub(crate) fn open_locked(project: &Path, lock: &StoreLock) -> Result<Rdy, RdyEr
 
 /// The store of a follower: a bare store while its log is ahead of its mark, else a handle.
 enum State {
-    Recovering(Store),
+    Recovering(Box<Store>),
     Ready(Box<Rdy>),
 }
 
@@ -162,7 +161,7 @@ fn open_state(dir: &Path) -> Result<State, RdyError> {
         rdy_store::error::FollowerMarkFailure::Missing,
     ))?;
     if store.follower_end()? != mark.chain.end {
-        return Ok(State::Recovering(store));
+        return Ok(State::Recovering(Box::new(store)));
     }
     let mode = store.mode()?;
     let context = Rdy::follower_context(dir, mode)?;

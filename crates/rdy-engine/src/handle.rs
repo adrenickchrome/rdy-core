@@ -340,6 +340,7 @@ impl Rdy {
     /// The handle over a follower's `store`: the same handle, with the read-only publication a
     /// follower's access gets. A failure of the first state's preparation gives the store back,
     /// with its lock, so the owner can retry.
+    #[allow(clippy::result_large_err)] // the store comes back whole, with its lock
     pub(crate) fn from_follower_store(
         project: &Path,
         mut store: Store,
