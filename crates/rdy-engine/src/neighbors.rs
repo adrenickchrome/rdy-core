@@ -5,8 +5,8 @@
 //! type) never does.
 //!
 //! The query reads local adjacencies only: each source's parent's children, its outgoing edges
-//! and each tied entity's incoming edges, each walked once per call and reused. It stores
-//! nothing and adds no graph edge. Every bound is a work guard, never a relevance cap: a query
+//! and each tied entity's incoming edges, each walked once per call and reused; ids stay borrowed
+//! until a row is shown. It stores nothing and adds no graph edge. Every bound is a work guard, never a relevance cap: a query
 //! past one returns `E_LIMIT` and no partial list.
 use crate::lexicon::{is_content, is_tie};
 use crate::query::summary_in;
@@ -125,7 +125,20 @@ impl Limits {
     }
 }
 
-type RowKey = (BlockId, NeighborVia, Option<BlockId>);
+/// One row while a walk collects it: `of` holds its sources in source order, each once.
+struct Row<'a> {
+    block: &'a BlockId,
+    via: NeighborVia,
+    entity: Option<&'a BlockId>,
+    of: Vec<&'a BlockId>,
+}
+
+/// A parent's participating children, in child order, each with the index of its section row once
+/// it has one. A block has one parent, so its section row is found here, with no key search.
+#[derive(Default)]
+struct ParentList<'a> {
+    children: Vec<(&'a BlockId, Option<usize>)>,
+}
 
 /// One call's walk: the bounds, the visit count and the adjacency lists read so far.
 pub(crate) struct Walk<'a> {
@@ -134,11 +147,62 @@ pub(crate) struct Walk<'a> {
     pack: &'a Pack,
     limits: Limits,
     visits: usize,
-    /// Each parent's participating children, in child order.
-    parents: BTreeMap<BlockId, Vec<BlockId>>,
+    /// Each parent's participating children.
+    parents: BTreeMap<&'a BlockId, ParentList<'a>>,
     /// Each entity's eligible tied content blocks, in id order.
-    entities: BTreeMap<BlockId, Vec<BlockId>>,
-    rows: BTreeMap<RowKey, BTreeSet<BlockId>>,
+    entities: BTreeMap<&'a BlockId, Vec<&'a BlockId>>,
+    rows: Vec<Row<'a>>,
+    /// How many sources the walk reads, the most a row can list.
+    /// The index in `rows` of each entity row, by (block, entity).
+    entity_rows: BTreeMap<(&'a BlockId, &'a BlockId), usize>,
+}
+
+/// A new row in `rows`, refused past the row bound; its index.
+fn new_row<'a>(
+    rows: &mut Vec<Row<'a>>,
+    limits: &Limits,
+    block: &'a BlockId,
+    via: NeighborVia,
+    entity: Option<&'a BlockId>,
+) -> Result<usize, RdyError> {
+    if rows.len() >= limits.rows {
+        return Err(limits.rows_error());
+    }
+    rows.push(Row {
+        block,
+        via,
+        entity,
+        of: Vec::new(),
+    });
+    Ok(rows.len() - 1)
+}
+
+/// A row of [`neighbor_links`]: the neighbor, how it is one, and its sources.
+pub(crate) struct NeighborLink<'a> {
+    pub block: &'a BlockId,
+    pub via: NeighborVia,
+    pub of: Vec<&'a BlockId>,
+}
+
+/// The rows [`neighbors_in`] gives for `covered`, for a caller that reads only who neighbors whom:
+/// in no set order, with no summary, doc or path worked out. The same bounds refuse.
+pub(crate) fn neighbor_links<'a>(
+    m: &'a Materialized,
+    g: &'a Graph,
+    pack: &'a Pack,
+    covered: &BTreeSet<BlockId>,
+) -> Result<Vec<NeighborLink<'a>>, RdyError> {
+    let mut walk = Walk::new(m, g, pack, Limits::FIXED);
+    walk.collect(covered)?;
+    Ok(walk
+        .rows
+        .into_iter()
+        .map(|r| NeighborLink {
+            block: r.block,
+            via: r.via,
+            of: r.of,
+        })
+        .collect())
 }
 
 impl<'a> Walk<'a> {
@@ -151,7 +215,8 @@ impl<'a> Walk<'a> {
             visits: 0,
             parents: BTreeMap::new(),
             entities: BTreeMap::new(),
-            rows: BTreeMap::new(),
+            rows: vec![],
+            entity_rows: BTreeMap::new(),
         }
     }
 
@@ -160,11 +225,17 @@ impl<'a> Walk<'a> {
         mut self,
         covered: &BTreeSet<BlockId>,
     ) -> Result<(Vec<Neighbor>, usize), RdyError> {
+        self.collect(covered)?;
+        let visits = self.visits;
+        Ok((self.finish(), visits))
+    }
+
+    /// Walks each source of `covered`, in id order, so each row's `of` is sorted.
+    fn collect(&mut self, covered: &BTreeSet<BlockId>) -> Result<(), RdyError> {
         for id in covered {
             self.source(id)?;
         }
-        let visits = self.visits;
-        Ok((self.finish(), visits))
+        Ok(())
     }
 
     /// Counts `n` visits; refuses before the count passes the bound.
@@ -178,19 +249,6 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// Adds `source` to the row `key`; refuses a new key past the row bound.
-    fn add_row(&mut self, key: RowKey, source: &BlockId) -> Result<(), RdyError> {
-        if let Some(of) = self.rows.get_mut(&key) {
-            of.insert(source.clone());
-            return Ok(());
-        }
-        if self.rows.len() >= self.limits.rows {
-            return Err(self.limits.rows_error());
-        }
-        self.rows.insert(key, BTreeSet::from([source.clone()]));
-        Ok(())
-    }
-
     fn source(&mut self, id: &BlockId) -> Result<(), RdyError> {
         let m = self.m;
         let Some(src) = m.get(id) else {
@@ -202,44 +260,65 @@ impl<'a> Walk<'a> {
         if m.doc_of(id).is_none() || !takes_part(self.pack, src) {
             return Ok(());
         }
+        let id = &src.id;
 
         // section: the direct siblings that take part, self excluded
         self.read_parent(parent, id)?;
-        let used = self.parents[parent].len();
+        let used = self.parents[parent].children.len();
         self.visit(used)?;
-        let section: BTreeSet<BlockId> = self.parents[parent]
-            .iter()
-            .filter(|s| *s != id)
-            .cloned()
-            .collect();
 
         // entity: each tied entity in id order, so the least entity wins a pair
         let g = self.g;
         let out = g.outgoing(id);
         self.visit(out.len())?;
-        let targets: BTreeSet<BlockId> = out
+        let targets: BTreeSet<&'a BlockId> = out
             .iter()
             .filter(|e| is_tie(&e.kind))
             .filter(|e| m.get(&e.to).is_some_and(|t| self.defines(t)))
-            .map(|e| e.to.clone())
+            .map(|e| &e.to)
             .collect();
-        let mut by_entity: BTreeMap<BlockId, BlockId> = BTreeMap::new();
-        for entity in &targets {
+        let mut by_entity: BTreeMap<&'a BlockId, &'a BlockId> = BTreeMap::new();
+        for entity in targets {
             self.read_entity(entity)?;
             let used = self.entities[entity].len();
             self.visit(used)?;
-            for n in &self.entities[entity] {
-                if n != id && !section.contains(n) && !by_entity.contains_key(n) {
-                    by_entity.insert(n.clone(), entity.clone());
+            for &n in &self.entities[entity] {
+                // every entity neighbor takes part, so a section neighbor is one with this parent
+                let sibling = m.get(n).is_some_and(|b| b.parent.as_ref() == Some(parent));
+                if n != id && !sibling {
+                    by_entity.entry(n).or_insert(entity);
                 }
             }
         }
 
-        for n in section {
-            self.add_row((n, NeighborVia::Section, None), id)?;
+        // a section row is found through the parent's list
+        let rows = &mut self.rows;
+        let list = self.parents.get_mut(parent).expect("read above");
+        for (n, row) in &mut list.children {
+            if *n == id {
+                continue;
+            }
+            let index = match *row {
+                Some(index) => index,
+                None => {
+                    let index = new_row(rows, &self.limits, n, NeighborVia::Section, None)?;
+                    *row = Some(index);
+                    index
+                }
+            };
+            rows[index].of.push(id);
         }
         for (n, entity) in by_entity {
-            self.add_row((n, NeighborVia::Entity, Some(entity)), id)?;
+            let index = match self.entity_rows.get(&(n, entity)) {
+                Some(index) => *index,
+                None => {
+                    let via = NeighborVia::Entity;
+                    let index = new_row(rows, &self.limits, n, via, Some(entity))?;
+                    self.entity_rows.insert((n, entity), index);
+                    index
+                }
+            };
+            rows[index].of.push(id);
         }
         Ok(())
     }
@@ -253,34 +332,34 @@ impl<'a> Walk<'a> {
 
     /// Reads `parent`'s participating children once per call. `source` is one of them, so a
     /// list longer than the section bound plus one refuses for `source`.
-    fn read_parent(&mut self, parent: &BlockId, source: &BlockId) -> Result<(), RdyError> {
+    fn read_parent(&mut self, parent: &'a BlockId, source: &BlockId) -> Result<(), RdyError> {
         if self.parents.contains_key(parent) {
             return Ok(());
         }
         let m = self.m;
-        let mut list: Vec<BlockId> = vec![];
+        let mut list = ParentList::default();
         for c in m.children(Some(parent)) {
             self.visit(1)?;
             if !takes_part(self.pack, c) {
                 continue;
             }
-            if list.len() > self.limits.section {
+            if list.children.len() > self.limits.section {
                 return Err(self.limits.section_error(source));
             }
-            list.push(c.id.clone());
+            list.children.push((&c.id, None));
         }
-        self.parents.insert(parent.clone(), list);
+        self.parents.insert(parent, list);
         Ok(())
     }
 
     /// Reads the eligible content blocks tied to `entity` once per call: existing, taking part,
     /// not deprecated, with a containing doc; each once however many ties it has.
-    fn read_entity(&mut self, entity: &BlockId) -> Result<(), RdyError> {
+    fn read_entity(&mut self, entity: &'a BlockId) -> Result<(), RdyError> {
         if self.entities.contains_key(entity) {
             return Ok(());
         }
         let (m, g) = (self.m, self.g);
-        let mut set: BTreeSet<BlockId> = BTreeSet::new();
+        let mut set: BTreeSet<&'a BlockId> = BTreeSet::new();
         for e in g.incoming(entity) {
             self.visit(1)?;
             if !is_tie(&e.kind) || set.contains(&e.from) {
@@ -296,10 +375,9 @@ impl<'a> Walk<'a> {
             if set.len() >= self.limits.entity {
                 return Err(self.limits.entity_error(entity));
             }
-            set.insert(b.id.clone());
+            set.insert(&b.id);
         }
-        self.entities
-            .insert(entity.clone(), set.into_iter().collect());
+        self.entities.insert(entity, set.into_iter().collect());
         Ok(())
     }
 
@@ -307,37 +385,43 @@ impl<'a> Walk<'a> {
     /// the neighbor's doc path (none sorts as empty), block id, via and entity id.
     fn finish(self) -> Vec<Neighbor> {
         let m = self.m;
-        let mut docs: BTreeMap<BlockId, Option<BlockId>> = BTreeMap::new();
-        let mut doc_of = |id: &BlockId| -> Option<BlockId> {
-            docs.entry(id.clone())
-                .or_insert_with(|| m.doc_of(id).map(|d| d.id.clone()))
-                .clone()
+        let mut docs: BTreeMap<&BlockId, Option<&BlockId>> = BTreeMap::new();
+        let mut doc_of = |id: &'a BlockId| -> Option<&'a BlockId> {
+            *docs
+                .entry(id)
+                .or_insert_with(|| m.doc_of(id).map(|d| &d.id))
         };
-        let mut paths: BTreeMap<BlockId, String> = BTreeMap::new();
-        let mut keyed: Vec<((bool, String, RowKey), Neighbor)> =
-            Vec::with_capacity(self.rows.len());
-        for ((block, via, entity), of) in self.rows {
-            let Some(b) = m.get(&block) else { continue };
-            let doc = doc_of(&block);
-            let same = doc.is_some() && of.iter().any(|s| doc_of(s) == doc);
+        let mut paths: BTreeMap<&BlockId, std::rc::Rc<str>> = BTreeMap::new();
+        type Key<'k> = (
+            bool,
+            std::rc::Rc<str>,
+            &'k BlockId,
+            NeighborVia,
+            Option<&'k BlockId>,
+        );
+        let mut keyed: Vec<(Key<'a>, Neighbor)> = Vec::with_capacity(self.rows.len());
+        for row in self.rows {
+            let Some(b) = m.get(row.block) else { continue };
+            let doc = doc_of(row.block);
+            let same = doc.is_some() && row.of.iter().any(|s| doc_of(s) == doc);
             let path = doc
-                .as_ref()
                 .map(|d| {
-                    paths
-                        .entry(d.clone())
-                        .or_insert_with(|| m.path_of(d).unwrap_or_default())
-                        .clone()
+                    std::rc::Rc::clone(
+                        paths
+                            .entry(d)
+                            .or_insert_with(|| m.path_of(d).unwrap_or_default().into()),
+                    )
                 })
-                .unwrap_or_default();
-            let row = Neighbor {
-                block: block.to_string(),
-                of: of.iter().map(BlockId::to_string).collect(),
-                via,
-                entity: entity.as_ref().map(BlockId::to_string),
-                doc: doc.map(|d| d.to_string()).unwrap_or_default(),
+                .unwrap_or_else(|| "".into());
+            let shown = Neighbor {
+                block: row.block.as_str().to_owned(),
+                of: row.of.iter().map(|s| s.as_str().to_owned()).collect(),
+                via: row.via,
+                entity: row.entity.map(|e| e.as_str().to_owned()),
+                doc: doc.map(|d| d.as_str().to_owned()).unwrap_or_default(),
                 summary: summary_in(b, m),
             };
-            keyed.push(((!same, path, (block, via, entity)), row));
+            keyed.push(((!same, path, row.block, row.via, row.entity), shown));
         }
         keyed.sort_by(|a, b| a.0.cmp(&b.0));
         keyed.into_iter().map(|(_, row)| row).collect()

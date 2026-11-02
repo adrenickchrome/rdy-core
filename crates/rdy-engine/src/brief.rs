@@ -863,6 +863,10 @@ pub struct Briefing {
     /// (`bytes` measures a row once, not once per measure of the briefing).
     #[serde(skip)]
     row_sizes: Vec<Option<usize>>,
+    /// The JSON size of each neighbor row, row for row: measured once, when the rows are digested,
+    /// not once per measure of the briefing.
+    #[serde(skip)]
+    neighbor_sizes: Vec<usize>,
     /// Whether the built rows' sides are settled: read (`read_sides`), or dropped for good by
     /// the detail cut (`cut_tensions`).
     #[serde(skip)]
@@ -897,14 +901,17 @@ impl Briefing {
         self.frame_bytes() + self.built_rows_bytes()
     }
 
-    /// The JSON size in bytes of the briefing without its tension rows.
+    /// The JSON size in bytes of the briefing without its tension rows: the rest of it, and each
+    /// neighbor row (measured once while it does not change) with the comma between rows.
     fn frame_bytes(&mut self) -> usize {
         let rows = std::mem::take(&mut self.inflight.tensions);
+        let neighbors = std::mem::take(&mut self.neighbors);
         let frame = serde_json::to_string(self)
             .expect("a briefing serializes: strings, numbers and string-keyed maps only")
             .len();
         self.inflight.tensions = rows;
-        frame
+        self.neighbors = neighbors;
+        frame + rows_bytes(self.neighbor_sizes.iter().sum(), self.neighbor_sizes.len())
     }
 
     /// The JSON size in bytes of the built rows as array elements, each row measured once.
@@ -996,6 +1003,7 @@ impl Briefing {
         drop(&mut self.inflight.tensions, skip[9]);
         drop(&mut self.row_sizes, skip[9]);
         drop(&mut self.neighbors, skip[10]);
+        drop(&mut self.neighbor_sizes, skip[10]);
         drop(&mut self.base.blocks, skip[11]);
     }
 
@@ -1230,7 +1238,10 @@ impl Briefing {
                 self.inflight.tensions.truncate(keep);
                 self.row_sizes.truncate(keep);
             }
-            10 => self.neighbors.truncate(keep),
+            10 => {
+                self.neighbors.truncate(keep);
+                self.neighbor_sizes.truncate(keep);
+            }
             _ => self.base.blocks.truncate(keep),
         }
         *self
@@ -1921,12 +1932,7 @@ impl ReadState {
         // nb7: so are the neighbor rows and their counts, when there are any: a neighbor that
         // comes, goes, moves doc, changes route or summary stales a cursor (the token, which
         // records no neighbor, stays)
-        if !neighbors.is_empty() {
-            digested.extend(
-                serde_json::to_vec(&(&neighbors, &neighbors_by_doc))
-                    .expect("neighbor rows serialize: strings and numbers only"),
-            );
-        }
+        let neighbor_sizes = digest_neighbors(&mut digested, &neighbors, &neighbors_by_doc);
         let digest = Hash::of(&digested);
         Ok(Briefing {
             covers: ids.len(),
@@ -1961,9 +1967,37 @@ impl ReadState {
             record,
             rows,
             row_sizes: vec![],
+            neighbor_sizes,
             sides_read: false,
         })
     }
+}
+
+/// nb7: adds `rows` and `counts` to `out` as the JSON array `[rows, counts]`, nothing when there
+/// are no rows. The JSON size of each row, row for row.
+fn digest_neighbors(
+    out: &mut Vec<u8>,
+    rows: &[crate::neighbors::Neighbor],
+    counts: &[NeighborDocCount],
+) -> Vec<usize> {
+    const JSON: &str = "neighbor rows serialize: strings and numbers only";
+    if rows.is_empty() {
+        return vec![];
+    }
+    let mut sizes = Vec::with_capacity(rows.len());
+    out.extend_from_slice(b"[[");
+    for (i, row) in rows.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        let at = out.len();
+        serde_json::to_writer(&mut *out, row).expect(JSON);
+        sizes.push(out.len() - at);
+    }
+    out.extend_from_slice(b"],");
+    serde_json::to_writer(&mut *out, counts).expect(JSON);
+    out.push(b']');
+    sizes
 }
 
 /// nb7: how many of `rows` are in each doc, in doc path, then doc id, order.
@@ -2619,6 +2653,50 @@ mod tests {
             pins: Default::default(),
             read_identity: None,
         }
+    }
+
+    #[test]
+    fn nbp2_neighbor_digest_is_the_json_of_the_rows_and_counts() {
+        use crate::neighbors::{Neighbor, NeighborVia};
+        let row = |block: &str, via, entity: Option<&str>, of: &[&str]| Neighbor {
+            block: block.to_string(),
+            of: of.iter().map(ToString::to_string).collect(),
+            via,
+            entity: entity.map(ToString::to_string),
+            doc: "d-00001".to_string(),
+            summary: "A \"quoted\" line.".to_string(),
+        };
+        let rows = vec![
+            row(
+                "c-00001",
+                NeighborVia::Section,
+                None,
+                &["c-00002", "c-00003"],
+            ),
+            row(
+                "c-00004",
+                NeighborVia::Entity,
+                Some("en-00001"),
+                &["c-00002"],
+            ),
+        ];
+        let counts = vec![NeighborDocCount {
+            doc: "d-00001".to_string(),
+            count: 2,
+        }];
+        let mut out = b"before".to_vec();
+        let sizes = digest_neighbors(&mut out, &rows, &counts);
+        let mut want = b"before".to_vec();
+        want.extend(serde_json::to_vec(&(&rows, &counts)).unwrap());
+        assert_eq!(out, want);
+        let each: Vec<usize> = rows
+            .iter()
+            .map(|r| serde_json::to_string(r).unwrap().len())
+            .collect();
+        assert_eq!(sizes, each);
+        let mut none = b"before".to_vec();
+        assert!(digest_neighbors(&mut none, &[], &counts).is_empty());
+        assert_eq!(none, b"before");
     }
 
     #[test]

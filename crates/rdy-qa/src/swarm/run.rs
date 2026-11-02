@@ -1146,6 +1146,9 @@ struct Drain {
     busy: Vec<String>,
     /// The open sets the drain has settled for a view that waited on them.
     settling: BTreeSet<String>,
+    /// The tensions an acceptance of the drain's person made blocking, by label: a new id each
+    /// (the id holds the severity), so no propose reply before it lists them.
+    accepted: BTreeSet<String>,
 }
 
 impl Drain {
@@ -1181,6 +1184,7 @@ impl Drain {
             order,
             busy: vec![],
             settling: BTreeSet::new(),
+            accepted: BTreeSet::new(),
         }
     }
 
@@ -1685,6 +1689,7 @@ impl Drain {
     /// scripted `AcceptAdvice` does: a relayed person act of the drain, journaled as
     /// `accept_advice` (ruling task-5.4; the coverage check counts only the run's acts).
     fn accept(&mut self, pref: &str, digest: &str) {
+        let mut ids = BTreeSet::new();
         let mut e = self.relay.entry("accept_advice");
         e.block = Some(pref.to_string());
         let accept = json!({"proposal": pref, "advised_digest": digest,
@@ -1696,8 +1701,16 @@ impl Drain {
             "accept_advice",
             "rdy_resolve",
             json!({"accept": accept}),
-            |_, _| {},
+            |_, r| {
+                ids = r["accepted"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|a| a["id"].as_str().map(str::to_string))
+                    .collect();
+            },
         );
+        self.accepted.extend(ids);
         // a moved proposal (the table's one refusal) meets the gate as moved too
         if matches!(res, Res::Lost) {
             link_fail(&self.cfg, pref, "accept_advice");
@@ -1825,8 +1838,8 @@ impl Drain {
     /// answers (every propose of the drain answers the plan first too). Any other issue code
     /// fails the run, as an outer `E_VALIDATION` did. The conflict and tension issues carry no
     /// block or tension id, so the drain reads them from the version (`pref`), the tensions its
-    /// propose reply lists as refusing (`refusing`) and the view's listing, never from the
-    /// issues' text.
+    /// propose reply lists as refusing (`refusing`), the tensions its person accepted and the
+    /// view's listing, never from the issues' text.
     fn resolve(&mut self, i: usize, v: &str, pref: &str, refusing: &BTreeSet<String>, r: &Refusal) {
         let issues: Vec<Value> = r.body["issues"].as_array().cloned().unwrap_or_default();
         match r.code.as_str() {
@@ -1989,8 +2002,10 @@ impl Drain {
     /// in-flight form of each live write of those changes, which the reply lists beside the
     /// landing form as information and which does not refuse: a view that wrote a block again
     /// since still lists each earlier write as against canon, and resolving that row would write
-    /// from canon's version, a base the view no longer holds (`E_STALE_BASE`). Each is resolved
-    /// by its kind, once per block:
+    /// from canon's version, a base the view no longer holds (`E_STALE_BASE`). A tension the
+    /// drain's person accepted (`accepted`) counts as refusing too: its id holds the severity, so
+    /// the reply before the acceptance cannot list it. Each is resolved by its kind, once per
+    /// block:
     /// a row whose blocks in the view an earlier row's resolution already wrote is skipped. None
     /// selected fails the run.
     fn resolve_tensions(
@@ -2012,7 +2027,11 @@ impl Drain {
         // the listing is by label: its order is the rows' id order
         let selected: Vec<Value> = rows
             .into_values()
-            .filter(|row| row["id"].as_str().is_some_and(|id| refusing.contains(id)))
+            .filter(|row| {
+                row["id"]
+                    .as_str()
+                    .is_some_and(|id| refusing.contains(id) || self.accepted.contains(id))
+            })
             .filter(|row| {
                 let sides = row["sides"].as_array().cloned().unwrap_or_default();
                 let mut of_change = sides.iter().filter_map(|s| s["change"].as_str()).peekable();

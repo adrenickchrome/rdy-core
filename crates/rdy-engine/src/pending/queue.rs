@@ -135,7 +135,9 @@ use super::card::{
     CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, REMOVAL_IRREVERSIBLE, card_hash, render_checked,
 };
 use super::item::{ExceptionKind, Fact, Item, ItemKind, ItemOption, Recommended, RemovalCard, age};
-use super::plan::{PlanCardBinding, VersionPlan, defer_ref, deferral_item, version_plan};
+use super::plan::{
+    PlanCardBinding, VersionPlan, defer_ref, deferral_item, version_plan, version_plan_keeping,
+};
 use super::questions::question_items;
 use super::reaffirm::{OpenWork, reaffirm_items};
 use super::snooze::hide_snoozed;
@@ -145,6 +147,7 @@ use crate::coverage::{CandidateCoverage, confidence_in, lands_unapplied};
 use crate::error::{E_VALIDATION, RdyError, redaction_limit};
 use crate::gate::{ProposalRef, changes_of, open_proposals};
 use crate::lexicon::Lexicon;
+use crate::plan::compute::ComputedPlan;
 use crate::plan::lifecycle::PlanSummary;
 use crate::policy::roles::{ItemFacts, RequiredRole, holds, required_role};
 use crate::policy_verdict::{ChangeFacts, VerdictInputs, WrittenBlock, WrittenDecision};
@@ -605,6 +608,9 @@ pub(crate) struct Holds {
     pub deferral: Option<(Item, usize)>,
     /// The `AcceptDeferrals` ANSWER bound to the version's current deferral card, if any.
     pub accepted: Option<Hash>,
+    /// The plan these holds computed from the version's bound plan, when they did: the landing
+    /// seals the same plan on the same state.
+    pub computed: Option<ComputedPlan>,
 }
 
 /// What holds version `pref` back from landing ([`Holds`]). It does not ask whether the version
@@ -624,6 +630,7 @@ pub(crate) fn approval_holds(
     // the clock is read only where a card is built: a version that writes no decision and has
     // no deferral card reads it never, as before D-AAQ9Z, so a landing's stamps (and with them
     // every later id and hash of a pinned clock) do not move
+    let mut computed = None;
     let card = if decides {
         let v = Version::read(st, *pref, p)?;
         let now = now_ms();
@@ -647,7 +654,9 @@ pub(crate) fn approval_holds(
         }
         v.deferral_item(now)
     } else {
-        bound_deferral_item(st, pref, &p, now_ms)?.flatten()
+        let (item, plan) = bound_deferral_item(st, pref, &p, now_ms)?;
+        computed = plan;
+        item.flatten()
     };
     let (mut deferral, mut accepted_by) = (None, None);
     if let Some(item) = card {
@@ -663,6 +672,7 @@ pub(crate) fn approval_holds(
         open,
         deferral,
         accepted: accepted_by,
+        computed,
     })
 }
 
@@ -983,15 +993,17 @@ fn bound_deferral_item(
     pref: &ProposalRef,
     p: &Proposal,
     now: impl FnOnce() -> i64,
-) -> Result<Option<Option<Item>>, RdyError> {
+) -> Result<(Option<Option<Item>>, Option<ComputedPlan>), RdyError> {
     let Some(bound) = st.reader().plan_of_proposal(&pref.version, st.seq())? else {
-        return Ok(None);
+        return Ok((None, None));
     };
-    let plan = version_plan(st, &pref.version, p, &PlanSource::Bound(Some(bound)))?;
-    Ok(Some(deferral_item(pref, &plan).map(|mut it| {
+    let (plan, computed) =
+        version_plan_keeping(st, &pref.version, p, &PlanSource::Bound(Some(bound)))?;
+    let item = deferral_item(pref, &plan).map(|mut it| {
         raised_from(p, &mut it, now());
         it
-    })))
+    });
+    Ok((Some(item), computed))
 }
 
 /// The deferral card the explicit ref `r` (`defer:P-x@n`) names, its card whole, whether or not
@@ -1015,6 +1027,7 @@ pub(crate) fn deferral_card(st: &ReadState, r: &str) -> Result<Option<Item>, Rdy
         return Ok(None);
     }
     bound_deferral_item(st, &pref, &p, now_ms)?
+        .0
         .flatten()
         .map(|i| finish(i, CARD_MAX_TOKENS))
         .transpose()

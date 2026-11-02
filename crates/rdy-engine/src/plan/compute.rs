@@ -27,7 +27,7 @@ use rdy_model::engine_fields::{REAFFIRMED, reaffirmed_causes};
 use rdy_model::plan::{MAX_SEALED_ITEMS, PlanAct, PlanHead, PlanKind, PlanOutcome, item_hash};
 use rdy_model::{Block, BlockId, Change, FieldValue, Hash, Tracking};
 use std::cell::OnceCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// The most items one plan holds: every computed item is sealed, so the seal's bound.
@@ -841,11 +841,19 @@ pub(crate) fn compute_in(
         touched: &touched,
         landed: OnceCell::new(),
     };
-    let hash_or_deleted = |id: &BlockId| {
-        fin.m
+    // each block hashed once: one cause can have thousands of neighbor items
+    let mut hashes: HashMap<BlockId, Hash> = HashMap::new();
+    let mut hash_or_deleted = |id: &BlockId| {
+        if let Some(h) = hashes.get(id) {
+            return *h;
+        }
+        let h = fin
+            .m
             .get(id)
             .map(|b| b.content_hash_with(&t))
-            .unwrap_or_else(|| deleted_identity(id))
+            .unwrap_or_else(|| deleted_identity(id));
+        hashes.insert(id.clone(), h);
+        h
     };
     // D-FQ7AK: the subject's lifecycle as the version leaves it; a deleted one's as canon has it
     let stable_of = |id: &BlockId| match fin.m.get(id) {

@@ -2604,9 +2604,9 @@ fn drift_canon_deep(op: &str, runs: &Runs, blocks: usize) -> Measure {
 
 /// The canon form of restatement drift (cc7; the D-SES4J canon budget), on a project of its own:
 /// `blocks` prose blocks in one controlled-English pattern (so they share phrases) and 10 that
-/// restate the first 10 land; then half of the blocks are edited inside the shared phrases in a
-/// later landing. The timed part is the cold canon-scope build of the tensions, as
-/// `tensions_canon`; it opens one drift per restating block.
+/// restate the first 10 land, in sections of at most [`DRIFT_SECTION`] blocks; then half of the
+/// blocks are edited inside the shared phrases in a later landing. The timed part is the cold
+/// canon-scope build of the tensions, as `tensions_canon`; it opens one drift per restating block.
 fn drift_canon(op: &str, runs: &Runs, blocks: usize) -> Measure {
     fn said(i: usize, how: &str) -> String {
         format!(
@@ -2620,30 +2620,36 @@ fn drift_canon(op: &str, runs: &Runs, blocks: usize) -> Measure {
         &mut r,
         "seed",
         json!([
-            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "rules", "title": "Rules", "doc_type": "page"}},
-            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}}
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "rules", "title": "Rules", "doc_type": "page"}}
         ]),
     )
     .expect("doc");
-    let section = d.created.get("$s").expect("the section").to_string();
+    let doc = d.created.get("$d").expect("the doc").to_string();
     let mut ids: Vec<String> = vec![];
     let bodies: Vec<String> = (0..blocks)
         .map(|i| said(i, "single"))
         .chain((0..RESTATED).map(|i| format!("In short: {}", said(i, "single"))))
         .collect();
-    for chunk in bodies.chunks(500) {
-        let ops: Vec<serde_json::Value> = chunk
-            .iter()
-            .enumerate()
-            .map(|(k, b)| {
-                json!({"op": "create", "type": "prose", "id": format!("$b{k}"), "parent": section, "body": b})
-            })
-            .collect();
+    // sections of at most DRIFT_SECTION blocks: O2 (M3e) refuses a landing whose neighbor walk
+    // passes 1,000,000 visits (about K x N for K edited blocks in an N-block section); restatement
+    // drift is project-wide, so the spread changes no drift
+    for (n, chunk) in bodies.chunks(DRIFT_SECTION).enumerate() {
+        let mut ops = vec![
+            json!({"op": "create", "type": "section", "id": "$s", "parent": doc, "fields": {"title": format!("Rules {n}")}}),
+        ];
+        ops.extend(chunk.iter().enumerate().map(|(k, b)| {
+            json!({"op": "create", "type": "prose", "id": format!("$b{k}"), "parent": "$s", "body": b})
+        }));
         let w = write(&mut r, "seed", serde_json::Value::Array(ops)).expect("prose");
         ids.extend(
             (0..chunk.len()).map(|k| w.created.get(&format!("$b{k}")).expect("id").to_string()),
         );
     }
+    assert_eq!(
+        ids.len(),
+        blocks + RESTATED,
+        "the same prose blocks as in one section"
+    );
     land(&mut r, "seed").expect("land the prose");
     let ops: Vec<serde_json::Value> = (0..blocks / 2)
         .map(|i| json!({"op": "update", "id": ids[i], "body": said(i, "double")}))
@@ -2667,6 +2673,9 @@ fn drift_canon(op: &str, runs: &Runs, blocks: usize) -> Measure {
         took
     })
 }
+
+/// The most prose blocks in one section of `tensions_canon_drift`'s project (the M3e test spread).
+const DRIFT_SECTION: usize = 100;
 
 /// Intents and alternative sets ever made in the coordination ops' projects: none is ever
 /// deleted (an intent expires at read time; a set is settled, not removed), so a swarm's count
@@ -7297,7 +7306,10 @@ mod tests {
         std::fs::create_dir_all(&proj).expect("mkdir");
         let docs = testkit::generate_tree(&proj, 100, 10, 97);
         let mut r = Rdy::open(&proj).expect("open");
-        land(&mut r, "work").expect("land work");
+        // through the store: the one ~99,100-block change is past the per-proposal assessment
+        // reach (100,000 with rule-added blocks; KNOWN-ISSUES 120), so `land` finds no stored
+        // assessment; the canon is the same
+        crate::fixtures::land_with_a_tie(&mut r, "work");
         let fx = fixture(&r, &docs);
         let other = r
             .read()
