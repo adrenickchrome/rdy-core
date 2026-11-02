@@ -952,7 +952,7 @@ fn loading_exists(loading: &Path) -> RdyError {
 }
 
 /// An i/o error at `path`, named.
-fn io_at(path: &Path, e: std::io::Error) -> RdyError {
+pub(crate) fn io_at(path: &Path, e: std::io::Error) -> RdyError {
     RdyError::new(
         E_IO,
         format!("{}: {e}", path.display()),

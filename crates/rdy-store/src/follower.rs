@@ -11,20 +11,33 @@
 //!
 //! The mark is checked against its log at the saved boundary: the repo, the end, the batch marker
 //! and the manifest there. A later manifest may differ after an interrupted follow.
-use crate::dump::{MAX_FILES, is_project_file};
-use crate::dump_chain::{BatchMarker, ChainEnd};
+//!
+//! # Following
+//!
+//! [`prepare_follow`] checks one increment against the store's verified prefix before any append:
+//! its envelope and links against the saved chain, its framing, source places, digests and
+//! removals by the chain scanner (`crate::dump_scan`), and any part of it the log already holds
+//! against those bytes. Only it makes a [`VerifiedIncrement`], which only
+//! [`Store::follow_verified`](crate::Store::follow_verified) spends. The mark and the verified
+//! log end identify a replay: there is no journal.
+use crate::dump::{self, DumpItem, DumpReader, Frame, MAX_FILES, is_project_file};
+use crate::dump_chain::{BatchMarker, ChainEnd, DumpKind};
+use crate::dump_scan::{self, Envelope, FrameAction, ProjectFile, ScanError, ScanPlan};
 use crate::error::{FollowerMarkFailure as Why, StoreError};
 use crate::format::{self, DumpStore, MAX_MANIFEST_BYTES};
+use crate::holder::{RefRules, StoreMode};
+use crate::ingest::{Ingest, IngestReport};
 use crate::kinds::{self, BatchCommit, RefUpdate};
 use crate::meta::{REF_REPO_ID, decode_repo_id};
-use crate::segment::{Location, SegmentLog};
-use crate::store::StoreLock;
-use crate::{fsutil, pio};
+use crate::segment::{HEADER as FRAME_HEADER, Location, SegmentLog};
+use crate::store::{Store, StoreLock};
+use crate::{fileid, fsutil, pio};
 use rdy_model::Hash;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::Read;
-use std::path::Path;
+use std::cell::RefCell;
+use std::io::{BufReader, Read};
+use std::path::{Path, PathBuf};
 
 /// The mark's file name in the store directory.
 pub const FOLLOWER_FILE: &str = "FOLLOWER";
@@ -333,4 +346,428 @@ pub(crate) fn check_against_log(log: &SegmentLog, mark: &FollowerMark) -> Result
         return Err(refused(Why::StoreFormat));
     }
     Ok(())
+}
+
+/// Why a follow is refused, past the store's and the scanner's own errors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FollowerFailure {
+    /// The input is a full dump.
+    FullDump,
+    /// The input does not continue the saved chain, or the capability is another follower's.
+    SavedChain,
+    /// The log past the mark is not what the input holds there.
+    WrittenPrefix,
+    /// A listed project file differs from its saved hash.
+    LocalFiles,
+    /// The input changed between the check and the append.
+    ChangedInput,
+    /// The store has no follower mark.
+    NotFollower,
+}
+
+/// A work bound of one follow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FollowLimit {
+    Batches,
+    Frames,
+    Segments,
+    PrefixFrames,
+}
+
+/// The most of `unit` one follow takes (inclusive).
+pub fn follow_limit(unit: FollowLimit) -> u64 {
+    match unit {
+        FollowLimit::Batches => 1_000_000,
+        FollowLimit::Frames => 10_000_000,
+        FollowLimit::Segments => 65_536,
+        FollowLimit::PrefixFrames => MAX_CHECK_FRAMES,
+    }
+}
+
+/// A refused or failed follow.
+#[derive(Debug)]
+pub enum FollowError {
+    Store(StoreError),
+    Scan(ScanError),
+    Follower(FollowerFailure),
+    Limit { unit: FollowLimit },
+}
+
+impl From<StoreError> for FollowError {
+    fn from(e: StoreError) -> Self {
+        FollowError::Store(e)
+    }
+}
+
+impl From<ScanError> for FollowError {
+    fn from(e: ScanError) -> Self {
+        FollowError::Scan(e)
+    }
+}
+
+/// `n` of `unit` so far: over the bound is its refusal.
+pub(crate) fn check_follow_limit(unit: FollowLimit, n: u64) -> Result<(), FollowError> {
+    if n > follow_limit(unit) {
+        return Err(FollowError::Limit { unit });
+    }
+    Ok(())
+}
+
+/// Test hook: the bound check of `n` of `unit`.
+#[doc(hidden)]
+pub fn check_follow_limit_for_tests(unit: FollowLimit, n: u64) -> Result<(), FollowError> {
+    check_follow_limit(unit, n)
+}
+
+/// A step of a follow, for a test's kill.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FollowStep {
+    /// The marker of the n-th appended batch of this follow is written.
+    Marker(u64),
+    /// The appended batches are durable.
+    Synced,
+    /// The derived index holds the new end.
+    Indexed,
+    /// One project file was replaced or removed.
+    FileReplaced,
+    /// The project files and their directories are durable.
+    FilesSynced,
+}
+
+/// A test observer of a follow's steps.
+#[doc(hidden)]
+pub type FollowProbe = Box<dyn FnMut(FollowStep)>;
+
+thread_local! {
+    static FOLLOW_PROBE: RefCell<Option<FollowProbe>> = const { RefCell::new(None) };
+}
+
+/// Test hook: a follow on this thread calls `probe` at each step. None removes it.
+#[doc(hidden)]
+pub fn on_follow_step(probe: Option<FollowProbe>) {
+    FOLLOW_PROBE.with(|p| *p.borrow_mut() = probe);
+}
+
+/// Reaches `step` of a follow.
+#[doc(hidden)]
+pub fn follow_step(step: FollowStep) {
+    FOLLOW_PROBE.with(|p| {
+        if let Some(f) = p.borrow_mut().as_mut() {
+            f(step);
+        }
+    });
+}
+
+/// One increment that [`prepare_follow`] checked against one follower's prefix. Its fields are
+/// private and nothing else makes one: it is the only way to [`Store::follow_verified`].
+pub struct VerifiedIncrement {
+    path: PathBuf,
+    id: fileid::FileId,
+    env: Envelope,
+    plan: ScanPlan,
+    /// The saved chain and the actual log end this check bound.
+    marked: ChainEnd,
+    actual: Location,
+    next: ChainEnd,
+}
+
+impl VerifiedIncrement {
+    /// The chain end the follower holds once this increment is finished.
+    pub fn chain(&self) -> &ChainEnd {
+        &self.next
+    }
+
+    /// The log's actual end when this was checked.
+    pub fn actual(&self) -> Location {
+        self.actual
+    }
+
+    /// The `FILE` records of the increment, as the scanner read them.
+    pub fn files(&self) -> &[ProjectFile] {
+        &self.plan.files()[0].files
+    }
+
+    /// The store mode the prefix set.
+    pub fn mode(&self) -> StoreMode {
+        self.plan.mode()
+    }
+
+    /// Whether the mark already is this increment's end and digest (an idempotent replay).
+    pub fn is_marked(&self) -> bool {
+        self.next.end == self.marked.end && self.next.digest == self.marked.digest
+    }
+
+    pub(crate) fn binds(&self, mark: &FollowerMark, end: Location) -> bool {
+        self.marked == mark.chain && self.actual == end
+    }
+
+    pub(crate) fn repo(&self) -> rdy_model::RepoId {
+        self.next.repo_id
+    }
+
+    pub(crate) fn store(&self) -> &DumpStore {
+        self.plan.store()
+    }
+}
+
+/// Checks the increment at `path` against the follower `store` and its saved `mark` (the module
+/// docs). Nothing is written. The check order: not a follower, the kind, the saved link, the
+/// bounds, the framing and proofs, the bytes already written.
+pub fn prepare_follow(
+    store: &Store,
+    mark: &FollowerMark,
+    path: &Path,
+) -> Result<VerifiedIncrement, FollowError> {
+    store.follow_ready()?;
+    let input_error = |source: StoreError| ScanError::Input { file: 0, source };
+    let file = std::fs::File::open(path).map_err(|e| input_error(StoreError::Io(e)))?;
+    let id = fileid::FileId::of_file(&file).map_err(|e| input_error(StoreError::Io(e)))?;
+    let (format, header, trailer, len) = dump::read_envelope(&mut &file).map_err(input_error)?;
+    let env = Envelope {
+        format,
+        header,
+        trailer,
+        len,
+    };
+    let chain = env.header.chain;
+    if chain.is_some_and(|c| c.kind == DumpKind::Full) {
+        return Err(FollowError::Follower(FollowerFailure::FullDump));
+    }
+    let saved = &mark.chain;
+    let log = store.segment_log();
+    let actual = log.end();
+    let marked = env.header.log_end == saved.end && env.trailer.digest == saved.digest;
+    if !marked {
+        if let Some(link) = dump_scan::check_saved_link(&env, saved) {
+            return Err(FollowError::Scan(ScanError::Link { file: 0, link }));
+        }
+        if env.header.log_end <= saved.end {
+            return Err(FollowError::Follower(FollowerFailure::SavedChain));
+        }
+        if env.header.log_end < actual {
+            return Err(FollowError::Follower(FollowerFailure::WrittenPrefix));
+        }
+    } else if actual > saved.end {
+        return Err(FollowError::Follower(FollowerFailure::SavedChain));
+    }
+    let Some(chain) = chain else {
+        return Err(FollowError::Follower(FollowerFailure::SavedChain));
+    };
+    check_follow_limit(FollowLimit::Batches, env.trailer.batches)?;
+    check_follow_limit(FollowLimit::Frames, env.trailer.frames)?;
+    check_follow_limit(
+        FollowLimit::Segments,
+        u64::from(env.header.log_end.segment) + 1,
+    )?;
+    if let DumpStore::Features(m) = &env.header.store {
+        format::check_writable(m)?;
+    }
+    let upto = if marked { chain.base } else { saved.end };
+    let holes = &log.authorization().holes;
+    let segments = store.dir().join("segments");
+    let (plan, last) = dump_scan::scan_follow(&segments, holes, upto, path, env.clone())?;
+    if marked && last.unwrap_or(BatchMarker::ZERO) != chain.base_batch {
+        return Err(FollowError::Follower(FollowerFailure::SavedChain));
+    }
+    check_whole(log, &plan, path, &env, upto, actual)?;
+    let next = ChainEnd {
+        repo_id: chain.repo_id,
+        store_format: env.header.store.clone(),
+        end: env.header.log_end,
+        end_batch: chain.end_batch,
+        digest: env.trailer.digest,
+    };
+    Ok(VerifiedIncrement {
+        path: path.to_path_buf(),
+        id,
+        env,
+        plan,
+        marked: saved.clone(),
+        actual,
+        next,
+    })
+}
+
+/// Reads the increment whole with the dump reader, so every payload's hash holds before the first
+/// append, and compares each batch the log already holds with the log: its headers, its marker,
+/// and each payload's bytes, or the zeros the plan authorizes. The log's end must be a batch end
+/// of the increment.
+fn check_whole(
+    log: &SegmentLog,
+    plan: &ScanPlan,
+    path: &Path,
+    env: &Envelope,
+    upto: Location,
+    actual: Location,
+) -> Result<(), FollowError> {
+    let input_error = |source: StoreError| ScanError::Input { file: 0, source };
+    let file = std::fs::File::open(path).map_err(|e| input_error(StoreError::Io(e)))?;
+    let (mut reader, _, header) = DumpReader::open(BufReader::new(file)).map_err(input_error)?;
+    if header != env.header {
+        return Err(FollowError::Follower(FollowerFailure::ChangedInput));
+    }
+    let mut reached = actual == upto;
+    while let Some(item) = reader.next().map_err(input_error)? {
+        let DumpItem::Batch(b) = item else { continue };
+        if b.start >= actual {
+            continue;
+        }
+        let end = compare_batch(log, plan, &b)?;
+        if end > actual {
+            return Err(FollowError::Follower(FollowerFailure::WrittenPrefix));
+        }
+        reached |= end == actual;
+    }
+    if !reached {
+        return Err(FollowError::Follower(FollowerFailure::WrittenPrefix));
+    }
+    Ok(())
+}
+
+/// Compares the increment's batch `b` with the log at its place, and returns its end.
+fn compare_batch(
+    log: &SegmentLog,
+    plan: &ScanPlan,
+    b: &dump::DumpBatch,
+) -> Result<Location, FollowError> {
+    let differs = || FollowError::Follower(FollowerFailure::WrittenPrefix);
+    let Some(f) = log.readers().get(b.start.segment as usize) else {
+        return Err(differs());
+    };
+    let file_len = f.metadata().map_err(StoreError::Io)?.len();
+    let mut place = b.start.offset;
+    let mut payload: Vec<u8> = Vec::new();
+    let mut hashes: Vec<rdy_model::Hash> = Vec::new();
+    for frame in &b.frames {
+        let len = frame.original_len();
+        let head = crate::segment::header_at(f, place, file_len).map_err(StoreError::Io)?;
+        if head != Some((len, frame.kind(), *frame.hash())) {
+            return Err(differs());
+        }
+        hashes.push(*frame.hash());
+        let start = place + FRAME_HEADER;
+        let zero =
+            crate::segment::payload_is_zero(f, start, u64::from(len)).map_err(StoreError::Io)?;
+        match frame {
+            Frame::Dropped { .. } => {
+                if !zero {
+                    return Err(differs());
+                }
+            }
+            Frame::Present { payload: want, .. } => {
+                let at = Location {
+                    segment: b.start.segment,
+                    offset: place,
+                };
+                let zeroed = matches!(
+                    plan.frame_action(at, frame.kind(), *frame.hash(), len)?,
+                    FrameAction::Zero { .. }
+                );
+                if !(zero && zeroed) {
+                    payload.clear();
+                    payload
+                        .try_reserve_exact(len as usize)
+                        .map_err(|_| dump::damaged(0, dump::drop_text::ALLOCATION))?;
+                    payload.resize(len as usize, 0);
+                    pio::read_exact_at(f, &mut payload, start).map_err(StoreError::Io)?;
+                    if payload != *want {
+                        return Err(differs());
+                    }
+                }
+            }
+        }
+        place = start + u64::from(len);
+    }
+    let digest = dump::try_batch_digest(hashes.iter()).ok_or_else(|| dump::damaged(0, "digest"))?;
+    let marker = crate::store::encode(&BatchCommit {
+        start: b.start,
+        frames: b.frames.len() as u32,
+        digest,
+    });
+    let head = crate::segment::header_at(f, place, file_len).map_err(StoreError::Io)?;
+    if head
+        != Some((
+            marker.len() as u32,
+            kinds::BATCH_COMMIT,
+            rdy_model::Hash::of(&marker),
+        ))
+    {
+        return Err(differs());
+    }
+    Ok(Location {
+        segment: b.start.segment,
+        offset: place + FRAME_HEADER + marker.len() as u64,
+    })
+}
+
+/// Appends the batches of `v` the log does not hold yet, in one ingest, with no sync. On an error
+/// it also returns where the last complete batch ends: the unsealed tail past it is the caller's
+/// to cut. The input's identity, length and envelope must still be those it checked.
+pub(crate) fn ingest_verified(
+    log: &mut SegmentLog,
+    dir: &Path,
+    v: &VerifiedIncrement,
+    mode: StoreMode,
+    rules: RefRules,
+) -> Result<(u64, u64), (FollowError, Location)> {
+    let mut sealed = log.end();
+    let changed = || FollowError::Follower(FollowerFailure::ChangedInput);
+    let again = (|| {
+        let file = std::fs::File::open(&v.path).map_err(|_| changed())?;
+        let same = fileid::FileId::of_file(&file).is_ok_and(|id| id == v.id)
+            && file.metadata().is_ok_and(|m| m.len() == v.env.len);
+        if !same {
+            return Err(changed());
+        }
+        let (reader, _, header) = DumpReader::open(BufReader::new(file)).map_err(|_| changed())?;
+        if header != v.env.header {
+            return Err(changed());
+        }
+        Ok(reader)
+    })();
+    let mut reader = match again {
+        Ok(r) => r,
+        Err(e) => return Err((e, sealed)),
+    };
+    let actual = v.actual;
+    let mut ingest = Ingest::appending(log, dir, mode, rules);
+    let mut n = 0u64;
+    loop {
+        // a difference from the first read is the input's change, not its damage
+        let item = match reader.next() {
+            Ok(i) => i,
+            Err(StoreError::Io(e)) => return Err((FollowError::Store(StoreError::Io(e)), sealed)),
+            Err(_) => return Err((changed(), sealed)),
+        };
+        let Some(item) = item else { break };
+        let DumpItem::Batch(b) = item else { continue };
+        if b.start < actual {
+            continue;
+        }
+        n += 1;
+        if let Err(e) = ingest.batch_with_plan(n, &b, &v.plan) {
+            return Err((FollowError::Store(e), sealed));
+        }
+        sealed = ingest.end();
+        follow_step(FollowStep::Marker(n));
+    }
+    if reader.trailer() != Some(&v.env.trailer) {
+        return Err((changed(), sealed));
+    }
+    if let DumpStore::Features(m) = v.plan.store()
+        && let Err(e) = ingest.finish_append(m)
+    {
+        return Err((FollowError::Store(e), sealed));
+    }
+    Ok(ingest.appended())
+}
+
+/// What a follow's ingest reports, by `end`.
+pub(crate) fn report(appended: (u64, u64), end: Location) -> IngestReport {
+    IngestReport {
+        batches: appended.0,
+        frames: appended.1,
+        end,
+    }
 }

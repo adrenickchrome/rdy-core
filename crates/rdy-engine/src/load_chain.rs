@@ -329,7 +329,10 @@ fn trailer_at(e: &Envelope) -> u64 {
 
 /// The project files of the input `path` that the pre-pass recorded as `wanted`: each record read
 /// at its offset, with its header and payload checked against the recorded length and hash.
-fn owner_files(path: &Path, wanted: &[ProjectFile]) -> Result<Vec<(String, Vec<u8>)>, RdyError> {
+pub(crate) fn owner_files(
+    path: &Path,
+    wanted: &[ProjectFile],
+) -> Result<Vec<(String, Vec<u8>)>, RdyError> {
     let mut out = Vec::new();
     if wanted.is_empty() {
         return Ok(out);
@@ -565,7 +568,7 @@ fn stop_match(stop: &DumpStop) -> StopMatch {
 
 /// The engine's error of a scanner refusal: path errors name the input, link errors are the
 /// chain rows of `E_DUMP_CHAIN`, stop errors the rows of `E_LOAD_STOP`.
-fn scan_error(files: &[PathBuf], e: ScanError) -> RdyError {
+pub(crate) fn scan_error(files: &[PathBuf], e: ScanError) -> RdyError {
     match e {
         ScanError::Input { file, source } => {
             if let Some(e) = carrier_limit(&source) {

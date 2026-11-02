@@ -30,6 +30,7 @@ pub use publication::{ProfileFacts, profile_facts};
 pub use publication_take::{
     PublicationFacts, PublicationRefusal, PublicationTaken, PublicationTarget,
 };
+pub use rdy_engine::follower::FollowReport;
 pub use rdy_engine::{
     CarriedTargetIssue, CarriedWarning, CompactReport, KindBytes, RdyError, core_error_code,
 };

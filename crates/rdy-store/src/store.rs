@@ -1430,6 +1430,142 @@ impl Store {
         Ok(store)
     }
 
+    /// Whether this store may take a follow now: a follower, not poisoned, with no open batch.
+    pub(crate) fn follow_ready(&self) -> Result<(), crate::follower::FollowError> {
+        use crate::follower::{FollowError, FollowerFailure};
+        if !matches!(self.shared.access, Access::Follower { .. }) {
+            return Err(FollowError::Follower(FollowerFailure::NotFollower));
+        }
+        if self.poisoned {
+            return Err(FollowError::Store(self.poisoned_err()));
+        }
+        if self.open.is_some() {
+            return Err(FollowError::Store(batch_open("first")));
+        }
+        Ok(())
+    }
+
+    /// Whether a failed write or removal poisoned this store until a reopen.
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
+    /// Spends one checked increment (D-AA4FD): the batches the log lacks at their source places,
+    /// then one sync, the `FORMAT` mirror of the source's manifest, the new authorization, the
+    /// epoch before any erasure, each source-authorized erasure, and the derived index. It writes
+    /// no local batch. `v` must be bound to this store's repo, mark and end (`SavedChain`).
+    /// A failure in the append cuts only the unsealed tail: complete source batches stay, and a
+    /// retry continues from the log's end. A failure after the append leaves the batches too;
+    /// a failed erasure is `RedactionPending`, and a reopen finishes it. Neither the project's
+    /// files nor the mark move here.
+    pub fn follow_verified(
+        &mut self,
+        v: crate::follower::VerifiedIncrement,
+    ) -> Result<crate::ingest::IngestReport, crate::follower::FollowError> {
+        use crate::follower::{FollowError, FollowStep, FollowerFailure, follow_step};
+        self.follow_ready()?;
+        let bound = match (&self.shared.access, crate::follower::read_mark(&self.dir)?) {
+            (Access::Follower { repo_id }, Some(mark)) => {
+                *repo_id == v.repo() && v.binds(&mark, self.log.end())
+            }
+            _ => false,
+        };
+        if !bound {
+            return Err(FollowError::Follower(FollowerFailure::SavedChain));
+        }
+        let rules = match self.creation.mode {
+            StoreMode::Project => RefRules::new(self.creation),
+            StoreMode::Holder => RefRules::of_log(
+                self.segments(),
+                &self.log.authorization().holes,
+                self.creation,
+                self.log.end(),
+            )?,
+        };
+        let appended = crate::follower::ingest_verified(
+            &mut self.log,
+            &self.dir,
+            &v,
+            self.creation.mode,
+            rules,
+        );
+        let appended = match appended {
+            Ok(a) => a,
+            Err((e, sealed)) => {
+                if self.roll_back(sealed) {
+                    let _ = self.log.sync();
+                }
+                return Err(e);
+            }
+        };
+        if let Err(e) = self
+            .log
+            .sync()
+            .and_then(|()| fsutil::sync_dir(&self.dir.join("segments")))
+        {
+            self.poison();
+            return Err(FollowError::Store(e.into()));
+        }
+        follow_step(FollowStep::Synced);
+        let auth = match self.creation.mode {
+            StoreMode::Holder => crate::redaction_import::bootstrap_holder(self.log.readers()),
+            StoreMode::Project => crate::redaction_io::bootstrap(self.log.readers()),
+        }?;
+        if let format::DumpStore::Features(m) = v.store() {
+            if format::read_format_file(&self.dir)?.as_ref() != Some(m) {
+                format::write_format_file(&self.dir, m)?;
+                fsutil::sync_dir(&self.dir).map_err(StoreError::from)?;
+            }
+            self.features = m.clone();
+        }
+        let old = self.log.authorization();
+        let removes = auth.applies.len() != old.applies.len()
+            || auth.holes.len() != old.holes.len()
+            || auth.carried.len() != old.carried.len();
+        self.log.set_authorization(Arc::new(auth));
+        if removes {
+            if crate::redaction_io::hit(crate::redaction_io::Failpoint::AfterApplySync).is_err() {
+                return Err(FollowError::Store(self.pending_failure()));
+            }
+            let Some(next) = self.shared.epoch.load(Ordering::Acquire).checked_add(1) else {
+                return Err(FollowError::Store(self.pending_failure()));
+            };
+            self.advance_epoch(next);
+            let rebuilt = match self.finish_erasing(false) {
+                Ok((_, true)) => Ok(()),
+                Ok((_, false)) => self.reindex_after_removal(),
+                Err(e @ StoreError::RedactionCorrupt { .. }) => return Err(FollowError::Store(e)),
+                Err(e) => Err(e),
+            };
+            if rebuilt.is_err() {
+                return Err(FollowError::Store(self.pending_failure()));
+            }
+        } else {
+            // a reopen that already holds these batches finished what they removed
+            self.catch_up()?;
+        }
+        follow_step(FollowStep::Indexed);
+        self.last_batch.clear();
+        self.last_batch_end = self.log.end();
+        Ok(crate::follower::report(appended, self.log.end()))
+    }
+
+    /// Replaces this follower's mark, after a finished follow: `mark` must hold against the log
+    /// (its repo, end, batch marker and manifest). Durable when it returns. An ordinary store has
+    /// none (`this store has no follower mark`).
+    pub fn write_follow_mark(
+        &mut self,
+        mark: &crate::follower::FollowerMark,
+    ) -> Result<(), StoreError> {
+        if !matches!(self.shared.access, Access::Follower { .. }) {
+            return Err(StoreError::FollowerMark(
+                crate::error::FollowerMarkFailure::Missing,
+            ));
+        }
+        crate::follower::check_against_log(&self.log, mark)?;
+        crate::follower::write_mark(&self.dir, mark)
+    }
+
     /// The end of this follower's log, which is past its mark's end after an interrupted follow.
     /// A store that is no follower has no follower end (`this store has no follower mark`).
     pub fn follower_end(&self) -> Result<Location, StoreError> {
@@ -1979,6 +2115,16 @@ impl Store {
         match format::read_format_file(&self.dir)? {
             Some(mirror) if mirror == *f => {}
             Some(mirror) if f.is_subset_of(&mirror) => {
+                if repair {
+                    format::write_format_file(&self.dir, f)?;
+                }
+            }
+            // a follower's log is ahead of its mirror after an interrupted follow: the source's
+            // sealed refs are the truth, with no local batch
+            Some(mirror)
+                if matches!(self.shared.access, Access::Follower { .. })
+                    && mirror.is_subset_of(f) =>
+            {
                 if repair {
                     format::write_format_file(&self.dir, f)?;
                 }

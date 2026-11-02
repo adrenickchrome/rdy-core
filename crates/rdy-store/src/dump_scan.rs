@@ -371,37 +371,87 @@ fn check_link(
             format: prev.format,
         });
     };
-    if chain.repo_id != head.repo_id {
+    link_of(
+        &chain,
+        &env.header.store,
+        head.repo_id,
+        &prev.header.store,
+        prev.header.log_end,
+        before.end_batch,
+        prev.trailer.digest,
+    )
+}
+
+/// The link check of a file with chain facts `chain` and store `store`, after the file before it
+/// or a follower's saved chain (O11's order): the repo, the store, the base, the base marker and
+/// the `prev` digest.
+fn link_of(
+    chain: &crate::dump_chain::DumpChainHeader,
+    store: &DumpStore,
+    repo: RepoId,
+    prev_store: &DumpStore,
+    prev_end: Location,
+    prev_batch: BatchMarker,
+    prev_digest: Hash,
+) -> Option<ChainLink> {
+    if chain.repo_id != repo {
         return Some(ChainLink::Repo {
             file: chain.repo_id,
-            chain: head.repo_id,
+            chain: repo,
         });
     }
     // each file's store follows the store of the file before it: the same scalar format, or a
     // manifest that only grew (each new feature by its first use, which `end_of_file` proves
     // against the file's own log)
-    if !env.header.store.follows(&prev.header.store) {
+    if !store.follows(prev_store) {
         return Some(ChainLink::StoreFormat {
-            file: env.header.store.clone(),
-            chain: prev.header.store.clone(),
+            file: store.clone(),
+            chain: prev_store.clone(),
         });
     }
-    if chain.base != prev.header.log_end {
+    if chain.base != prev_end {
         return Some(ChainLink::Position {
             start: chain.base,
-            prev_end: prev.header.log_end,
+            prev_end,
         });
     }
-    if chain.base_batch != before.end_batch {
+    if chain.base_batch != prev_batch {
         return Some(ChainLink::Marker);
     }
-    if chain.prev != prev.trailer.digest {
+    if chain.prev != prev_digest {
         return Some(ChainLink::Digest {
             named: chain.prev,
-            actual: prev.trailer.digest,
+            actual: prev_digest,
         });
     }
     None
+}
+
+/// The link of the increment `env` to a follower's saved chain `saved`: the same check and order
+/// as a chain's next file, with the saved facts as the file before it. An increment with no chain
+/// facts or of another dump format is a store format refusal, as a scalar store's is.
+pub(crate) fn check_saved_link(
+    env: &Envelope,
+    saved: &crate::dump_chain::ChainEnd,
+) -> Option<ChainLink> {
+    let Some(chain) = env.header.chain else {
+        return Some(ChainLink::Legacy { format: env.format });
+    };
+    if env.format != dump::DUMP_FORMAT {
+        return Some(ChainLink::StoreFormat {
+            file: env.header.store.clone(),
+            chain: saved.store_format.clone(),
+        });
+    }
+    link_of(
+        &chain,
+        &env.header.store,
+        saved.repo_id,
+        &saved.store_format,
+        saved.end,
+        saved.end_batch,
+        saved.digest,
+    )
 }
 
 /// What the ingest does with one retained source frame.
@@ -1237,6 +1287,11 @@ enum Event {
         at: Location,
         rec: Rec,
     },
+    /// A removed copy of a store prefix (a follow): a holder's copy that holds zeros.
+    Hole {
+        at: Location,
+        rec: Rec,
+    },
 }
 
 /// The zero, one or many candidate state of a stop.
@@ -1300,6 +1355,9 @@ struct FileScan {
 /// The state of a scan (module docs).
 struct Scan<'p> {
     paths: &'p [PathBuf],
+    /// How many of `paths` come before the first dump file: a follow's store prefix segments.
+    /// Input `i` of `paths` has the envelope `envs[i - base]`.
+    base: usize,
     envs: &'p [Envelope],
     stop: Option<&'p StopMatch>,
     lookups: Lookups<'p>,
@@ -1372,99 +1430,62 @@ pub fn scan(src: &mut ChainSource, stop: Option<StopMatch>) -> Result<ScanPlan, 
             },
         });
     }
-    let mut s = Scan {
-        paths: &src.paths,
-        envs: &src.envelopes,
-        stop: stop.as_ref(),
-        lookups: Lookups {
-            paths: &src.paths,
-            open: None,
-        },
-        mode: None,
-        first_batch: FirstBatch::default(),
-        batch_no: 0,
-        pos: None,
-        landing: Candidate::None,
-        tag: Candidate::None,
-        repo_ref: None,
-        format_ref: None,
-        format_updates: Vec::new(),
-        features_ref: None,
-        features_updates: Vec::new(),
-        collected: Collected::default(),
-        recs: HashMap::new(),
-        batch_landings: Vec::new(),
-        landing_hashes: Vec::new(),
-        batches: Batches::default(),
-        lens: src.envelopes.iter().map(|e| e.len).collect(),
-        carried_by_apply: HashMap::new(),
-        validator: Validator::default(),
-        applies: Vec::new(),
-        carried: Vec::new(),
-        drops: HashMap::new(),
-        unreleased: 0,
-        holder: Holder::default(),
-        proof_error: None,
-        blame: None,
-        facts: Vec::new(),
-    };
+    let lens: Vec<u64> = src.envelopes.iter().map(|e| e.len).collect();
+    let mut s = Scan::new(&src.paths, 0, &src.envelopes, stop.as_ref(), lens);
     for i in 0..s.envs.len() {
         s.forward(i)?;
     }
-    if let Some(e) = s.proof_error.take() {
-        return Err(e);
+    s.conclude(stop.as_ref())
+}
+
+/// The plan of following `file`, whose envelope is `env` (D-AA4FD), after the sealed prefix of
+/// the store's segments in `segments` that ends at `upto`: the same scan as a chain's, with that
+/// prefix in the place of the files before it. The prefix's removed payloads (`holes`) read as
+/// the zeros they are. Returns the plan and the marker of the prefix's last batch. Each segment
+/// of the prefix is one input of the scan, read by its offsets: a frame's head there has the
+/// layout of a dump record's. No file is written and no temporary dump is made. Every
+/// `ScanError::Input` names input 0, the increment.
+pub(crate) fn scan_follow(
+    segments: &std::path::Path,
+    holes: &crate::segment::Holes,
+    upto: Location,
+    file: &std::path::Path,
+    env: Envelope,
+) -> Result<(ScanPlan, Option<BatchMarker>), crate::follower::FollowError> {
+    use crate::follower::FollowError;
+    let count = u64::from(upto.segment) + 1;
+    let seg_fail = |source: StoreError| ScanError::Input { file: 0, source };
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut lens: Vec<u64> = Vec::new();
+    paths
+        .try_reserve_exact(count as usize + 1)
+        .and_then(|()| lens.try_reserve_exact(count as usize + 1))
+        .map_err(|_| FollowError::Scan(alloc(0, 0)))?;
+    for seg in 0..=upto.segment {
+        let path = crate::segment::seg_path(segments, seg);
+        let len = std::fs::metadata(&path)
+            .map_err(|e| FollowError::Scan(seg_fail(StoreError::Io(e))))?
+            .len();
+        paths.push(path);
+        lens.push(len);
     }
-    s.unreleased_drop()?;
-    if s.holder_has_applies()
-        && let Some(e) = s.holder.over.take()
-    {
-        return Err(ScanError::Input {
-            file: s.applies[0].file,
-            source: e,
-        });
-    }
-    s.meaning()?;
-    let (end, stop_file, stop_index) = s.resolve()?;
-    // the files wholly after the end are read whole now: no batch of theirs reaches the ingest
-    for i in stop_file + 1..s.envs.len() {
-        verify_whole(s.paths, i)?;
-    }
-    for (i, f) in s.facts.iter_mut().enumerate() {
-        f.role = if i < stop_file {
-            FileRole::Retained
-        } else if i == stop_file {
-            FileRole::Stop
-        } else {
-            FileRole::After
-        };
-        f.kept_batches = match f.role {
-            FileRole::Retained => f.batches,
-            FileRole::Stop => stop_index,
-            FileRole::After => 0,
-        };
-    }
-    let (planned, carried, residues) = s.plan(end)?;
-    let store = s.store_at(end)?;
-    let (landing, tag) = match (&stop, &s.landing, &s.tag) {
-        (Some(StopMatch::LandingPrefix(_)), Candidate::One { hash, .. }, _) => (Some(*hash), None),
-        (Some(StopMatch::TagName(n)), _, Candidate::One { landing, .. }) => {
-            (Some(*landing), Some(n.clone()))
-        }
-        _ => (None, None),
+    let base = paths.len();
+    paths.push(file.to_path_buf());
+    lens.push(env.len);
+    let envs = [env];
+    let normal = |e: ScanError| match e {
+        ScanError::Input { source, .. } => ScanError::Input { file: 0, source },
+        ScanError::Link { link, .. } => ScanError::Link { file: 0, link },
+        e => e,
     };
-    Ok(ScanPlan {
-        envelopes: src.envelopes.clone(),
-        facts: s.facts,
-        mode: s.mode.unwrap_or(StoreMode::Project),
-        end,
-        explicit: stop.is_some(),
-        landing,
-        tag,
-        residues,
-        carried,
-        planned,
-        store,
-    })
+    let mut s = Scan::new(&paths, base, &envs, None, lens);
+    let last = s.prefix(holes, upto).map_err(|e| match e {
+        FollowError::Scan(e) => FollowError::Scan(normal(e)),
+        e => e,
+    })?;
+    s.forward(base).map_err(|e| FollowError::Scan(normal(e)))?;
+    let plan = s.conclude(None).map_err(|e| FollowError::Scan(normal(e)))?;
+    Ok((plan, last))
 }
 
 /// Reads input `i` whole with the dump reader: every record's hash, every check, through its end.
@@ -1477,6 +1498,251 @@ fn verify_whole(paths: &[PathBuf], i: usize) -> Result<(), ScanError> {
 }
 
 impl<'p> Scan<'p> {
+    fn new(
+        paths: &'p [PathBuf],
+        base: usize,
+        envs: &'p [Envelope],
+        stop: Option<&'p StopMatch>,
+        lens: Vec<u64>,
+    ) -> Scan<'p> {
+        Scan {
+            paths,
+            base,
+            envs,
+            stop,
+            lookups: Lookups { paths, open: None },
+            mode: None,
+            first_batch: FirstBatch::default(),
+            batch_no: 0,
+            pos: None,
+            landing: Candidate::None,
+            tag: Candidate::None,
+            repo_ref: None,
+            format_ref: None,
+            format_updates: Vec::new(),
+            features_ref: None,
+            features_updates: Vec::new(),
+            collected: Collected::default(),
+            recs: HashMap::new(),
+            batch_landings: Vec::new(),
+            landing_hashes: Vec::new(),
+            batches: Batches::default(),
+            lens,
+            carried_by_apply: HashMap::new(),
+            validator: Validator::default(),
+            applies: Vec::new(),
+            carried: Vec::new(),
+            drops: HashMap::new(),
+            unreleased: 0,
+            holder: Holder::default(),
+            proof_error: None,
+            blame: None,
+            facts: Vec::new(),
+        }
+    }
+
+    /// Steps 3 to 6 of the scan, after the forward pass of every input.
+    fn conclude(mut self, stop: Option<&StopMatch>) -> Result<ScanPlan, ScanError> {
+        if let Some(e) = self.proof_error.take() {
+            return Err(e);
+        }
+        self.unreleased_drop()?;
+        if self.holder_has_applies()
+            && let Some(e) = self.holder.over.take()
+        {
+            return Err(ScanError::Input {
+                file: self.applies[0].file,
+                source: e,
+            });
+        }
+        self.meaning()?;
+        let (end, stop_file, stop_index) = self.resolve()?;
+        // the files wholly after the end are read whole now: no batch of theirs reaches the
+        // ingest
+        for i in stop_file + 1..self.envs.len() {
+            verify_whole(self.paths, i)?;
+        }
+        for (i, f) in self.facts.iter_mut().enumerate() {
+            f.role = if i < stop_file {
+                FileRole::Retained
+            } else if i == stop_file {
+                FileRole::Stop
+            } else {
+                FileRole::After
+            };
+            f.kept_batches = match f.role {
+                FileRole::Retained => f.batches,
+                FileRole::Stop => stop_index,
+                FileRole::After => 0,
+            };
+        }
+        let (planned, carried, residues) = self.plan(end)?;
+        let store = self.store_at(end)?;
+        let (landing, tag) = match (&stop, &self.landing, &self.tag) {
+            (Some(StopMatch::LandingPrefix(_)), Candidate::One { hash, .. }, _) => {
+                (Some(*hash), None)
+            }
+            (Some(StopMatch::TagName(n)), _, Candidate::One { landing, .. }) => {
+                (Some(*landing), Some(n.clone()))
+            }
+            _ => (None, None),
+        };
+        Ok(ScanPlan {
+            envelopes: self.envs.to_vec(),
+            facts: self.facts,
+            mode: self.mode.unwrap_or(StoreMode::Project),
+            end,
+            explicit: stop.is_some(),
+            landing,
+            tag,
+            residues,
+            carried,
+            planned,
+            store,
+        })
+    }
+
+    /// The forward pass over a store's sealed prefix, which ends at `upto`: each segment's frames
+    /// by their heads, each batch closed by its marker. It feeds the same state and the same
+    /// proof events as a dump file's batches, and it counts at most
+    /// `FollowLimit::PrefixFrames` frames. A removed payload (`holes`) is never read. Returns the
+    /// last batch's marker; `upto` that is no batch end returns the saved-chain refusal.
+    fn prefix(
+        &mut self,
+        holes: &crate::segment::Holes,
+        upto: Location,
+    ) -> Result<Option<BatchMarker>, crate::follower::FollowError> {
+        use crate::follower::{FollowError, FollowLimit, FollowerFailure, check_follow_limit};
+        let mut visited = 0u64;
+        let mut last = None;
+        for seg in 0..=upto.segment {
+            let i = seg as usize;
+            let mut r =
+                BufReader::with_capacity(ERASE_BUFFER, input(self.paths, i, ScanPass::Forward)?);
+            let end = if seg == upto.segment {
+                upto.offset
+            } else {
+                self.lens[i]
+            };
+            let mut f = FileScan {
+                file: i,
+                format: dump::DUMP_FORMAT,
+                len: self.lens[i],
+                at: 0,
+                chain: Vec::new(),
+                files: Vec::new(),
+                last_path: None,
+                batches: 0,
+                frames: 0,
+                applies: 0,
+                last: None,
+                validated: Vec::new(),
+            };
+            let mut hashes: Vec<Hash> = Vec::new();
+            let mut events: Vec<Event> = Vec::new();
+            self.batch_landings.clear();
+            self.landing_hashes.clear();
+            let mut start = f.at;
+            while f.at < end {
+                visited += 1;
+                check_follow_limit(FollowLimit::PrefixFrames, visited)?;
+                let mut h = [0u8; FRAME_HEADER as usize];
+                dump::read_exact_at(&mut r, &mut h, f.at).map_err(|e| self.fail(i, e))?;
+                let fh = RecordHead {
+                    at: f.at,
+                    len: u64::from(u32::from_le_bytes(h[0..4].try_into().expect("4 bytes"))),
+                    kind: h[4],
+                    hash: Hash(h[5..37].try_into().expect("32 bytes")),
+                };
+                if fh.end() > end {
+                    return Err(FollowError::Follower(FollowerFailure::SavedChain));
+                }
+                let at = Location {
+                    segment: seg,
+                    offset: f.at,
+                };
+                if fh.kind == kinds::BATCH_COMMIT {
+                    let p = read_body(&mut r, &fh).map_err(|e| self.fail(i, e))?;
+                    let marker = postcard::from_bytes::<BatchCommit>(&p)
+                        .map(|c| BatchMarker::of_commit(&c))
+                        .map_err(|_| self.fail(i, damaged(fh.at, dump::cannot_stand(fh.kind))))?;
+                    let digest = try_batch_digest(hashes.iter()).ok_or_else(|| alloc(i, fh.at))?;
+                    let begin = Location {
+                        segment: seg,
+                        offset: start,
+                    };
+                    if marker.start != begin
+                        || marker.frames as usize != hashes.len()
+                        || marker.digest != digest
+                    {
+                        return Err(FollowError::Scan(self.fail(i, damaged(fh.at, BATCH_GAP))));
+                    }
+                    self.batches
+                        .at
+                        .try_reserve(1)
+                        .map_err(|_| alloc(i, fh.at))?;
+                    self.batches.at.push(BatchAt {
+                        start: begin,
+                        file: i,
+                        format: f.format,
+                        record: fh.at,
+                        first: start,
+                        marker,
+                    });
+                    let done = Location {
+                        segment: seg,
+                        offset: fh.end(),
+                    };
+                    self.batch_no += 1;
+                    if self.mode.is_none() {
+                        self.mode = Some(self.first_batch.creation(done).mode);
+                    }
+                    for e in std::mem::take(&mut events) {
+                        if !self.proving() {
+                            break;
+                        }
+                        if let Err(source) = self.event(&mut f, e, begin, done) {
+                            let file = self.blame.take().unwrap_or(i);
+                            self.proof_failed(file, source);
+                        }
+                    }
+                    hashes.clear();
+                    self.batch_landings.clear();
+                    self.landing_hashes.clear();
+                    f.at = fh.end();
+                    start = f.at;
+                    last = Some(marker);
+                    continue;
+                }
+                let rec_ = Rec {
+                    file: i,
+                    offset: fh.at,
+                    len: fh.len as u32,
+                    kind: fh.kind,
+                    hash: fh.hash,
+                };
+                if holes.contains_key(&at) {
+                    let first_of_log = self.mode.is_none();
+                    let holder = self.mode == Some(StoreMode::Holder);
+                    if holder || first_of_log {
+                        self.holder_count(rec_, true)?;
+                        push(&mut events, Event::Hole { at, rec: rec_ }, i, fh.at)?;
+                    }
+                    self.skip(&mut r, &f, &fh)?;
+                } else {
+                    let first_of_log = self.mode.is_none();
+                    self.present(&mut r, &mut f, &fh, at, rec_, &mut events, first_of_log)?;
+                }
+                push(&mut hashes, fh.hash, i, fh.at)?;
+                f.at = fh.end();
+            }
+            if f.at != end || !hashes.is_empty() {
+                return Err(FollowError::Follower(FollowerFailure::SavedChain));
+            }
+        }
+        Ok(last)
+    }
+
     fn fail(&self, file: usize, source: StoreError) -> ScanError {
         ScanError::Input { file, source }
     }
@@ -1529,7 +1795,7 @@ impl<'p> Scan<'p> {
     /// The forward framing pass of input `i`.
     fn forward(&mut self, i: usize) -> Result<(), ScanError> {
         let envs: &'p [Envelope] = self.envs;
-        let env = &envs[i];
+        let env = &envs[i - self.base];
         let links = env.header.chain.expect("a format-3 chain file");
         let mut r =
             BufReader::with_capacity(ERASE_BUFFER, input(self.paths, i, ScanPass::Forward)?);
@@ -1702,7 +1968,7 @@ impl<'p> Scan<'p> {
                 digest,
             },
         });
-        let allowed = FrameKinds::of(f.format, &self.envs[i].header.store);
+        let allowed = FrameKinds::of(f.format, &self.envs[i - self.base].header.store);
         let first_of_log = self.mode.is_none();
         self.batch_landings.clear();
         self.landing_hashes.clear();
@@ -2109,6 +2375,7 @@ impl<'p> Scan<'p> {
                 rec,
             } => self.on_carried(f.file, at, offset, hash, rec, start, end),
             Event::Copy { at, rec } => self.on_copy(at, rec, false),
+            Event::Hole { at, rec } => self.on_copy(at, rec, true),
         }
     }
 
@@ -2567,12 +2834,17 @@ impl<'p> Scan<'p> {
             Hash::of(&f.chain),
         )
         .map_err(|e| self.fail(i, e))?;
-        check_last(head.at, links, f.last, self.envs[i].header.log_end)
-            .map_err(|e| self.fail(i, e))?;
+        check_last(
+            head.at,
+            links,
+            f.last,
+            self.envs[i - self.base].header.log_end,
+        )
+        .map_err(|e| self.fail(i, e))?;
         if u64::from(t.removals) != f.applies {
             return Err(self.fail(i, damaged(head.at, chain_text::REMOVALS)));
         }
-        if t != self.envs[i].trailer {
+        if t != self.envs[i - self.base].trailer {
             return Err(self.fail(i, damaged(head.at, dump::TRAILER_MISMATCH)));
         }
         if head.end() != f.len {
@@ -2586,7 +2858,7 @@ impl<'p> Scan<'p> {
     /// resolved span of its validated applies, and its header's repo and store format are what
     /// the log's meta refs say.
     fn end_of_file(&mut self, f: &FileScan, links: &crate::dump_chain::DumpChainHeader) {
-        let env = &self.envs[f.file];
+        let env = &self.envs[f.file - self.base];
         let repo_ok = self
             .repo_ref
             .as_deref()
