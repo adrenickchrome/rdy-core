@@ -89,20 +89,11 @@ impl RdyServer {
 
     /// `out`, the final result of an elicited answer, with the build warning it is owed.
     async fn warned(&self, out: Result<Value, RdyError>) -> Result<Value, RdyError> {
-        let slot = Arc::new(Mutex::new(Some(out)));
-        let taken = Arc::clone(&slot);
-        let delivered = self
-            .blocking(TOOL, false, move |st| {
-                let out = taken
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .take()
-                    .expect("one delivery");
-                claims::take_build_warning(st);
-                claims::deliver_build_warning(st, out)
-            })
-            .await;
-        delivered
+        self.blocking(TOOL, false, move |st| {
+            claims::take_build_warning(st);
+            claims::deliver_build_warning(st, out)
+        })
+        .await
     }
 
     async fn elicited(

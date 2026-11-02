@@ -301,9 +301,14 @@ fn report_json(r: &Resolved, scope: &Side, against: Option<(&Side, &DisclosureDi
 
 /// `report` if it serializes within `max` bytes, else `E_LIMIT`; never a partial object.
 fn fit(report: Value, max: usize) -> Result<Value, RdyError> {
+    fit_reserving(report, max, 0)
+}
+
+/// [`fit`], with `reserve` of the `max` bytes kept for what the caller adds; the refusal names `max`.
+fn fit_reserving(report: Value, max: usize, reserve: usize) -> Result<Value, RdyError> {
     // serializing a `Value` cannot fail: its keys are strings
     let size = serde_json::to_vec(&report).map_or(usize::MAX, |b| b.len());
-    if size > max {
+    if size.saturating_add(reserve) > max {
         return Err(RdyError::new(
             E_LIMIT,
             format!("Publication report exceeds the limit of {max} bytes."),
@@ -326,10 +331,21 @@ pub fn check(
     scope: Option<&str>,
     against: Option<&str>,
 ) -> Result<Value, RdyError> {
+    check_reserving(read, profile, scope, against, 0)
+}
+
+/// [`check`], with `reserve` bytes of the report's limit kept for what the caller adds to it.
+pub fn check_reserving(
+    read: &ReadState,
+    profile: &str,
+    scope: Option<&str>,
+    against: Option<&str>,
+    reserve: usize,
+) -> Result<Value, RdyError> {
     let candidate = candidate(read, scope)?;
     let after = resolve_inspection(read, &candidate.scope, profile)?;
     let Some(text) = against else {
-        return fit(report_json(&after, &candidate, None), REPORT_BYTES);
+        return fit_reserving(report_json(&after, &candidate, None), REPORT_BYTES, reserve);
     };
     let baseline = baseline(read, text)?;
     let stable = after
@@ -339,9 +355,10 @@ pub fn check(
         .map_or_else(|| profile.to_string(), ToString::to_string);
     let before = resolve(read, &baseline.scope, &stable)?;
     let diff = disclosure_diff(&before, &after)?;
-    fit(
+    fit_reserving(
         report_json(&after, &candidate, Some((&baseline, &diff))),
         REPORT_BYTES,
+        reserve,
     )
 }
 

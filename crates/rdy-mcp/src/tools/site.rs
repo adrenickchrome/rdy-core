@@ -147,11 +147,17 @@ pub fn rdy_publication_check(
     p: PublicationCheckParams,
 ) -> Result<Value, RdyError> {
     session(st)?;
-    rdy_engine::publication::check(
+    // the report is size-checked: a build warning it will carry stays inside the limit
+    let reserve = st
+        .build_warning_due
+        .as_ref()
+        .map_or(0, |w| w.to_string().len() + r#","warnings":[]"#.len());
+    rdy_engine::publication::check_reserving(
         &st.engine.read(),
         &p.profile,
         p.scope.as_deref(),
         p.against.as_deref(),
+        reserve,
     )
 }
 
