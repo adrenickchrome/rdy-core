@@ -1,5 +1,6 @@
 {% extends "layout.html" %}
-{% block robots %}<meta name="robots" content="noindex">{% endblock %}
+{# the site's no-referrer header makes a browser send `Origin: null` with a form; the answer route needs its own origin #}
+{% block robots %}<meta name="robots" content="noindex"><meta name="referrer" content="same-origin">{% endblock %}
 {% block head_scope %}{% endblock %}
 {% block pages %}{% endblock %}
 {% block noscript %}{% if events %}{{ needs_script }}{% else %}{{ no_stream }}{% endif %}{% endblock %}

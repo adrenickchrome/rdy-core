@@ -11,6 +11,7 @@ use rdy_daemon::site::server::MAX_CONNECTIONS;
 use rdy_engine::Rdy;
 use rdy_engine::engine::write_typed;
 use rdy_engine::redaction::RedactInput;
+use rdy_model::Hash;
 use rdy_qa::daemon::short_tempdir;
 use rdy_qa::fixtures::{approver, land, seed_doc, write, writer};
 use rdy_qa::http::{self, Sse};
@@ -24,8 +25,6 @@ use tokio::sync::mpsc::error::TryRecvError;
 
 /// The deadline of a wait for an event.
 const T: Duration = Duration::from_secs(10);
-/// How long a test watches a stream that must stay quiet.
-const QUIET: Duration = Duration::from_millis(300);
 const PERSON: &str = "actor: human:qa\n";
 
 /// A landed seed doc and one open question-free version, served: the section and the stream's
@@ -104,8 +103,18 @@ fn assert_reload(sse: &mut Sse, what: &str) {
 #[test]
 fn ui9_ui_stream_reloads_on_answer_without_site_byte_changes() {
     let (s, _) = world(PERSON);
-    let site_page = body(&s.get("/index.html"));
-    let mut doc = Sse::open(&http::events_url(&base(&s), &site_page));
+    let c = SiteTarget::Source(ScopeRef::Canon);
+    let b = s.sh.site.refresh(&s.sh, &c).unwrap();
+    let mut doc =
+        s.sh.site
+            .subscribe(
+                &s.sh,
+                &c,
+                "index.html",
+                &b.live.revs["index.html"],
+                &b.live.label_rev,
+            )
+            .unwrap();
     let url = events_of(&s);
     let rev = rev_of(&url);
     let st = s.sh.state.load_full();
@@ -116,12 +125,14 @@ fn ui9_ui_stream_reloads_on_answer_without_site_byte_changes() {
     assert_eq!(s.sh.site.streams(), 2);
     answer_something(&s);
     assert_reload(&mut ui, "the ANSWER");
+    // the fan-out and the build run here too, and a build of canon's unchanged bytes sends nothing
+    s.sh.site.step(&s.sh);
     assert_eq!(
-        doc.next_event(QUIET),
-        None,
+        doc.rx.try_recv(),
+        Err(TryRecvError::Empty),
         "no false reload: an ANSWER leaves canon's bytes"
     );
-    assert!(!doc.ended());
+    drop(doc);
     // a page opened at the old revision reloads at once
     let mut late = Sse::open(&url);
     assert_reload(&mut late, "a stale revision");
@@ -129,8 +140,14 @@ fn ui9_ui_stream_reloads_on_answer_without_site_byte_changes() {
     let fresh = events_of(&s);
     assert_ne!(rev_of(&fresh), rev);
     let mut same = Sse::open(&fresh);
-    assert_eq!(same.next_event(QUIET), None, "the current revision");
-    assert!(!same.ended());
+    let mut quiet = s.sh.site.subscribe_ui(&s.sh, &rev_of(&fresh)).unwrap();
+    s.sh.site.step(&s.sh);
+    assert_eq!(
+        quiet.rx.try_recv(),
+        Err(TryRecvError::Empty),
+        "the current revision"
+    );
+    drop(quiet);
 
     // the race: the subscribe has registered and has not compared when a publish comes
     let rev = LiveSite::ui_revision(&s.sh.state.load_full());
@@ -292,15 +309,7 @@ fn ui9_ui_stream_shares_limits_epoch_and_shutdown() {
         r.land(&approver(), &v.id).unwrap();
     });
     assert_reload(&mut epoch, "the removal");
-    let mut seen = 0;
-    while let Some((event, data)) = epoch.next_event(QUIET) {
-        assert_eq!((event.as_str(), data.as_str()), ("reload", "{}"));
-        seen += 1;
-        assert!(seen < 16, "a bounded queue");
-    }
-    while let Some((event, data)) = kept.next_event(QUIET) {
-        assert_eq!((event.as_str(), data.as_str()), ("reload", "{}"));
-    }
+    assert_reload(&mut kept, "the removal, on a stream opened earlier");
 
     // serve.ui off: a config refresh queues reload and closes the UI stream, not a site stream
     let page = body(&s.get("/index.html"));
@@ -364,6 +373,55 @@ fn ui9_ui_stream_shares_limits_epoch_and_shutdown() {
         ),
         "a closed site opens nothing"
     );
+}
+
+/// New defect (browser smoke check): the writer publishes after every message, written or not. A
+/// `Reload` for each publish reloaded the page while its form was on its way, which canceled the
+/// page that answers it: a Later's notice and a refusal's details never showed. An answer that
+/// writes nothing reloads no stream; one that writes does, and a config refresh does.
+#[test]
+fn ui9_an_answer_that_writes_nothing_reloads_no_stream() {
+    let (s, section) = world(PERSON);
+    let page = body(&s.get("/~ui/"));
+    let form = http::ui_forms(&page).remove(0);
+    let rev = rev_of(&events_of(&s));
+    let mut sub = s.sh.site.subscribe_ui(&s.sh, &rev).unwrap();
+    let quiet = |sub: &mut rdy_daemon::site::live::Subscription, what: &str| {
+        // a step's fan-out is done when it returns; the worker's own step reads the same state
+        s.sh.site.step(&s.sh);
+        assert_eq!(sub.rx.try_recv(), Err(TryRecvError::Empty), "{what}");
+    };
+    quiet(&mut sub, "at the page's revision");
+    // a publish that wrote nothing
+    on_writer(&s.sh, |_| ());
+    quiet(&mut sub, "an empty publish");
+    // a UI Later and two refusals: each runs on the writer, and each writes nothing
+    let later = s.send(&http::ui_answer(&s.host(), &form, "later"));
+    assert_eq!(later.status, 200, "{}", later.head);
+    quiet(&mut sub, "a Later");
+    let wrong = http::UiForm {
+        card_hash: Hash::of(b"another card").to_string(),
+        ..form.clone()
+    };
+    let moved = s.send(&http::ui_answer(&s.host(), &wrong, "approve"));
+    assert_eq!(moved.status, 409, "{}", moved.head);
+    quiet(&mut sub, "a moved card");
+    let bad = s.send(&http::ui_answer(&s.host(), &form, "nosuch"));
+    assert_eq!(bad.status, 400, "{}", bad.head);
+    quiet(&mut sub, "an unknown option");
+    // a write reloads once; another message after it adds none
+    on_writer(&s.sh, move |r| {
+        write(
+            r,
+            "w",
+            json!([{"op": "create", "type": "claim", "parent": section, "body": "One more."}]),
+        )
+        .unwrap();
+    });
+    s.sh.site.step(&s.sh);
+    assert_eq!(sub.rx.try_recv(), Ok(LiveEvent::Reload), "the write");
+    on_writer(&s.sh, |_| ());
+    quiet(&mut sub, "after the write's reload");
 }
 
 /// The existing script drives a UI stream: a hidden tab closes it, a visible one opens it again at

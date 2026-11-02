@@ -17,9 +17,11 @@
 //! reconnects.
 //!
 //! A local approval page's stream (D-WPE4R, TASK-979) is no target: it has no build and no diff.
-//! Each publish and config refresh sends every UI stream one `Reload`, whatever it did to a site
-//! page, since an ANSWER can leave every site byte unchanged. UI streams count in
-//! [`MAX_STREAMS`], and take the same queue, epoch check, hold and shutdown.
+//! Each publish that moved the store, and each config refresh, sends every UI stream one `Reload`,
+//! whatever it did to a site page, since an ANSWER can leave every site byte unchanged. A publish
+//! that moved neither (a refused answer, a UI Later) sends nothing: the page's form is on its way,
+//! and a reload would cancel the page that answers it. UI streams count in [`MAX_STREAMS`], and
+//! take the same queue, epoch check, hold and shutdown.
 //!
 //! The versions page (`/~versions/`, D-2F29G, RULING F5) is one more target here, with its own
 //! key (`rdy_render::menu::menu_key_for`, which reads profile metadata and expands no selection)
@@ -257,6 +259,8 @@ enum StreamKey {
 /// One open approval page's stream: it only ever gets `Reload`.
 struct UiStream {
     id: u64,
+    /// The store revision and the pack generation the page last heard of.
+    seen: (String, u64),
     tx: mpsc::Sender<LiveEvent>,
 }
 
@@ -980,7 +984,11 @@ impl LiveSite {
             let epoch = sh.state.load().reader().redaction_epoch();
             inner.next_id += 1;
             let id = inner.next_id;
-            inner.ui_streams.push(UiStream { id, tx: tx.clone() });
+            inner.ui_streams.push(UiStream {
+                id,
+                seen: (rev.to_string(), sh.pack_gen.load(Ordering::SeqCst)),
+                tx: tx.clone(),
+            });
             (id, epoch)
         };
         // dropped on the way out of an error, which removes the stream
@@ -999,9 +1007,13 @@ impl LiveSite {
         if !serve_config(&sh.root).ui {
             return Err(Refusal::Malformed);
         }
-        let inner = lock(&self.inner);
-        if LiveSite::ui_revision(&sh.state.load()) != rev {
+        let mut inner = lock(&self.inner);
+        let now = LiveSite::ui_revision(&sh.state.load());
+        if now != rev {
             let _ = tx.try_send(LiveEvent::Reload);
+        }
+        if let Some(stream) = inner.ui_streams.iter_mut().find(|s| s.id == id) {
+            stream.seen.0 = now;
         }
         drop(inner);
         Ok(sub)
@@ -1014,9 +1026,9 @@ impl LiveSite {
         *lock(&self.before_ui_compare) = f.map(Arc::from);
     }
 
-    /// A publish or a config refresh: one `Reload` for each UI stream; a full or closed queue
-    /// drops its stream, as for a site page. With `serve.ui` off, each stream closes after it. No
-    /// page is rendered here.
+    /// A publish: one `Reload` for each UI stream whose page has not heard of the store or the
+    /// config as they stand now; a full or closed queue drops its stream, as for a site page. With
+    /// `serve.ui` off, each stream closes after it. No page is rendered here.
     fn published_to_ui(&self, sh: &Shared) {
         if lock(&self.inner).ui_streams.is_empty() {
             return;
@@ -1024,9 +1036,16 @@ impl LiveSite {
         if !serve_config(&sh.root).ui {
             return self.close_ui();
         }
-        lock(&self.inner)
-            .ui_streams
-            .retain(|s| s.tx.try_send(LiveEvent::Reload).is_ok());
+        // the generation before the state, as for a build: a newer one is never lost
+        let generation = sh.pack_gen.load(Ordering::SeqCst);
+        let now = (LiveSite::ui_revision(&sh.state.load()), generation);
+        lock(&self.inner).ui_streams.retain_mut(|s| {
+            if s.seen == now {
+                return true;
+            }
+            s.seen.clone_from(&now);
+            s.tx.try_send(LiveEvent::Reload).is_ok()
+        });
     }
 
     /// `serve.ui` is off: each UI stream gets `Reload`, and then ends when its queue is read.

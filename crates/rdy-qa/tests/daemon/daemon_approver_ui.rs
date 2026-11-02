@@ -622,6 +622,35 @@ fn ui9_ui_and_pending_share_items_roles_and_hashes() {
     );
 }
 
+/// New defect (browser smoke check): the site's `Referrer-Policy: no-referrer` makes a browser send
+/// `Origin: null` with a form, which the answer route refuses, so no form could answer. Every page
+/// that holds a form lets its own origin go with the form, and no further: a foreign page still
+/// gets no referrer, and the ordinary site keeps its header and has no such line.
+#[test]
+fn ui9_a_page_with_a_form_lets_a_browser_send_its_origin() {
+    const SAME: &str = "<meta name=\"referrer\" content=\"same-origin\">";
+    let (dir, section) = simple();
+    let s = Site::start(dir, &actor(PERSON));
+    let old = proposal(&s, &section, "a");
+    let pending = s.get("/~ui/");
+    assert!(body(&pending).contains(SAME), "the pending page");
+    let (page, form) = s.form(&old.r#ref);
+    assert!(body(&page).contains(SAME), "the item page");
+    proposal(&s, &section, "a");
+    let moved = s.answer(&form, "approve");
+    assert_eq!(moved.status, 409, "{}", moved.head);
+    assert_eq!(http::ui_forms(&body(&moved)).len(), 1, "the fresh form");
+    assert!(body(&moved).contains(SAME), "the page of a fresh form");
+    let later = s.answer(&http::ui_forms(&body(&moved)).remove(0), "later");
+    assert!(body(&later).contains(SAME), "the page after Later");
+    let home = s.get("/index.html");
+    assert!(
+        !body(&home).contains("name=\"referrer\""),
+        "the ordinary site"
+    );
+    assert_eq!(home.header("referrer-policy"), Some("no-referrer"));
+}
+
 /// A form's approval and a question's answer record exact local evidence, the person, no relay,
 /// and the normal published state, also after a reopen and a reindex. A question under stable
 /// content shows the destination's briefing with a registered token; with no token it is
