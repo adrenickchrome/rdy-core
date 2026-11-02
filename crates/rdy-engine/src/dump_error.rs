@@ -8,7 +8,7 @@ use std::path::Path;
 const LOAD_CHAIN_FIX: &str = "pass the full dump, then each increment in chain order";
 const EXPORT_CHAIN_FIX: &str =
     "follow the newest file of this store's chain, or start a new chain with rdy dump";
-const FOLLOW_FIX: &str =
+const FOLLOW_CHAIN: &str =
     "follow the source's increments in chain order from the follower's saved end";
 const STOP_FIX: &str = "name a landing, a tag or a batch end that the dump chain holds";
 
@@ -60,7 +60,7 @@ pub fn follower_unfinished() -> RdyError {
 /// `error`, one of the chain loader's mismatches, on the follow path: its code and message, with
 /// the follow's fix.
 pub(crate) fn for_follow(mut error: RdyError) -> RdyError {
-    error.fix = FOLLOW_FIX.to_string();
+    error.fix = FOLLOW_CHAIN.to_string();
     error
 }
 
@@ -78,7 +78,7 @@ pub fn follow_saved_chain() -> RdyError {
     RdyError::new(
         E_DUMP_CHAIN,
         "the increment does not continue the follower's saved chain",
-        FOLLOW_FIX,
+        FOLLOW_CHAIN,
     )
 }
 
