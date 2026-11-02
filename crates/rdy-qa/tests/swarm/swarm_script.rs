@@ -2,7 +2,7 @@
 use rdy_qa::swarm::journal::{Outcome, allowed};
 use rdy_qa::swarm::script::{
     Act, CHECK_MIN_STEPS, Config, EXCLUDE_STEP, HoldStep, INCLUDE_SOURCE_STEP, INCLUDE_STEP,
-    MIN_STEPS, PersonAct, RuleStep, UiStep, check_plan, direct_land_at, include_plan,
+    MIN_STEPS, PersonAct, RuleStep, UiStep, advice_steps, check_plan, direct_land_at, include_plan,
     person_weights, reviewer_weights, script, ui_plan, writer_weights,
 };
 use std::collections::BTreeSet;
@@ -268,6 +268,53 @@ fn sg3_a_contra_pair_is_written_through_the_real_flow() {
                 );
             }
         }
+    }
+}
+
+/// The forced advice sequence: the second member of pair 0 writes its marked claim, the first
+/// reviewer judges every free request, then the writer proposes. Each comes two steps after the
+/// last, so the step barrier orders them, after the kill and after the person's last landing
+/// before the tail, and the person's tail `AcceptAdvice` waits until the proposal has ended.
+#[test]
+fn sg3_the_forced_advice_sequence_comes_before_the_tail_acceptance() {
+    let configs = (1..=20).flat_map(|seed| [Config::fast(seed), Config::deep(seed)]);
+    for cfg in configs {
+        let s = script(&cfg);
+        let a = advice_steps(&cfg).expect("the fast and deep tiers hold the sequence");
+        let ctx = format!("seed {} steps {}", cfg.seed, cfg.steps);
+        let (first, second) = s.contra[0];
+        assert_eq!(
+            s.agents[second][a.claim],
+            Act::AdviceClaim {
+                first,
+                area: match &s.agents[first].iter().find(|x| matches!(
+                    x,
+                    Act::Create {
+                        contra: Some(0),
+                        ..
+                    }
+                )) {
+                    Some(Act::Create { area, .. }) => area,
+                    other => panic!("{ctx}: the first claim is {other:?}"),
+                },
+            },
+            "{ctx}"
+        );
+        assert_eq!(s.agents[second][a.propose], Act::AdviceProposal, "{ctx}");
+        let reviewer = (0..cfg.agents).find(|&i| cfg.is_reviewer(i)).unwrap();
+        assert_eq!(s.agents[reviewer][a.review], Act::ReviewAll, "{ctx}");
+        assert_eq!((a.claim + 2, a.review + 2), (a.review, a.propose), "{ctx}");
+        assert!(cfg.kill_at.is_some_and(|k| k < a.claim), "{ctx}");
+        let len = s.person.len();
+        // the person's pace (`run::due`): act j waits for step (j + 1) * steps / len
+        let due = |j: usize| (j + 1) * cfg.steps / len;
+        assert_eq!(s.person[len - 2], PersonAct::AcceptAdvice, "{ctx}");
+        assert!(a.propose < due(len - 2), "{ctx}");
+        let last_land = (0..len - 2)
+            .rev()
+            .find(|&j| s.person[j].name() == "land")
+            .unwrap();
+        assert!(due(last_land) < a.propose, "{ctx}");
     }
 }
 

@@ -141,13 +141,15 @@ fn logged_kinds(o: &Outcome) -> BTreeMap<String, String> {
 const HUMAN: &str = "human:qa";
 
 /// The acts every seed's run reaches before the freeze (ruling task-5.2).
-const CORE: [&str; 6] = [
+const CORE: [&str; 7] = [
     "write",
     "brief",
     "propose",
     "land",
     "review_submit",
     "inbox",
+    // the forced advice sequence reaches it in every seed (`script::advice_steps`)
+    "accept_advice",
 ];
 
 /// What one seed's run did before the freeze (ruling task-5.2: the drain's acts do not count).
