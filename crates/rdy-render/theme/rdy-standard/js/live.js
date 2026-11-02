@@ -31,6 +31,8 @@
     });
   }
   d.addEventListener("visibilitychange", function () { close(); open(); });
+  // a form on its way keeps its page: a reload now would cancel the navigation and lose its reply
+  d.addEventListener("submit", close);
   addEventListener("pagehide", close);
   addEventListener("pageshow", open);
   open();

@@ -397,7 +397,7 @@ function setup() {
   const run = () => log.timers.filter((t) => !t.done).forEach((t) => { t.done = true; t.f(); });
   const open = () => log.streams.filter((s) => !s.closed).length;
   const visibility = (v) => { document.visibilityState = v; fire(document, 'visibilitychange'); };
-  return { log, fire, last, refuse, due, run, open, visibility };
+  return { log, fire, last, refuse, due, run, open, visibility, document };
 }
 "##;
 
@@ -445,6 +445,11 @@ out.hidden_refusal = { due: c.due(), streams: c.log.streams.length };
 const d = setup();
 d.fire(d.last(), 'reload');
 out.reload = { reloads: d.log.reloads, open: d.open(), due: d.due() };
+// a form on its way closes the stream: no reload can cancel its navigation
+const f = setup();
+const sent = f.last();
+f.fire(f.document, 'submit');
+out.submit = { open: f.open(), closed: sent.closed, reloads: f.log.reloads, due: f.due() };
 console.log(JSON.stringify(out));
 "##;
 
@@ -516,6 +521,11 @@ fn rdx14_the_live_script_reopens_a_refused_stream() {
         v["hidden_refusal"],
         json!({"due": [], "streams": 1}),
         "a refusal of a hidden page schedules nothing: {v}"
+    );
+    assert_eq!(
+        v["submit"],
+        serde_json::json!({"open": 0, "closed": true, "reloads": 0, "due": []}),
+        "a form on its way closes the stream"
     );
     assert_eq!(
         v["reload"],
