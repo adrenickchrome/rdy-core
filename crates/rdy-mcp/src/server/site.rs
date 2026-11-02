@@ -2,7 +2,9 @@
 
 use crate::params::Parameters;
 use crate::server::RdyServer;
-use crate::tools::{self, ExportParams, PublicationCheckParams, RenderParams, SiteParams};
+use crate::tools::{
+    self, ExportParams, ImportParams, PublicationCheckParams, RenderParams, SiteParams,
+};
 use rmcp::{model::CallToolResult, tool, tool_router};
 
 #[tool_router(router = site_router, vis = "pub(crate)")]
@@ -38,5 +40,12 @@ impl RdyServer {
         // the report is closed and size-checked: a pack notice must not be added to it
         self.run_closed("rdy_publication_check", p, tools::rdy_publication_check)
             .await
+    }
+
+    #[tool(
+        description = "Import a format-3 tree from dir into view. Needs a writer session. The tree's authors stay recorded, and imported_by names this session. Imported accepted or rejected decisions need a person's approval before they land."
+    )]
+    async fn rdy_import(&self, Parameters(p): Parameters<ImportParams>) -> CallToolResult {
+        self.run("rdy_import", p, tools::rdy_import).await
     }
 }

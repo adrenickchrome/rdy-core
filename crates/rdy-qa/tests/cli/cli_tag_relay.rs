@@ -59,10 +59,7 @@ fn di9_rdy_tag_relays_from_an_agent_session() {
     assert!(!ok);
     assert_eq!(
         (v["code"].as_str(), v["message"].as_str()),
-        (
-            Some("E_PERMISSION"),
-            Some("agent sessions cannot tag or import")
-        ),
+        (Some("E_PERMISSION"), Some("agent sessions cannot tag")),
         "{v}"
     );
     // half a relay never reaches rdy: clap pairs the flags

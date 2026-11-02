@@ -194,6 +194,9 @@ enum Cmd {
     Render(site_cmd::RenderArgs),
     /// Print the docs as one PDF, one HTML file or a Markdown tree (--format pdf, html or md).
     Export(site_cmd::ExportArgs),
+    /// Import a tree into a view.
+    ///
+    /// A writer session may import; a person approves imported decision statuses before landing.
     Import(site_cmd::ImportArgs),
     /// Write the whole project, with its history, views and proposals, to one dump file; every hash is kept.
     Dump(dump_cmd::DumpArgs),

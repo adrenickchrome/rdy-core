@@ -2789,7 +2789,107 @@ fn mcp_probes(rich: &Rich, seen: &mut Seen) {
         json!({"op": "list"}),
     );
     drop(ck);
+    // the import (ui6, D-Y9DNZ): a writer imports a format-3 tree into its own view and a
+    // misspelt key is refused; a reader is refused. These calls come last, so no probe above
+    // meets the new view.
+    let tree = tempfile::tempdir().expect("a tree directory");
+    write_import_tree(tree.path());
+    let tree_dir = tree.path().to_string_lossy().into_owned();
+    let mut im = McpClient::start(dir);
+    mcp_probe(
+        seen,
+        &mut im,
+        "rdy_session",
+        "rdy_session",
+        session("imp", "writer"),
+    );
+    mcp_probe(
+        seen,
+        &mut im,
+        "rdy_import",
+        "rdy_import unknown key",
+        json!({"dri": tree_dir, "view": "imp"}),
+    );
+    let imported = ok_of(&mcp_probe(
+        seen,
+        &mut im,
+        "rdy_import",
+        "rdy_import",
+        json!({"dir": tree_dir, "view": "imp"}),
+    ));
+    assert!(
+        imported["created"].is_object(),
+        "the writer's import succeeds: {imported}"
+    );
+    drop(im);
+    let mut rdr = McpClient::start(dir);
+    mcp_probe(
+        seen,
+        &mut rdr,
+        "rdy_session",
+        "rdy_session",
+        session("rdr", "reader"),
+    );
+    mcp_probe(
+        seen,
+        &mut rdr,
+        "rdy_import",
+        "rdy_import reader",
+        json!({"dir": tree_dir, "view": "rdr"}),
+    );
+    drop(rdr);
     let _ = (doc, a);
+}
+
+/// A format-3 export tree at `out`: doc `imported` with a section by agent:a (run r1) at 100 and
+/// two decisions by agent:b (run r2) at 200, one accepted and one proposed.
+fn write_import_tree(out: &Path) {
+    std::fs::create_dir_all(out.join("docs")).expect("docs directory");
+    std::fs::write(
+        out.join("rdy-export.yaml"),
+        "format: 3\npack: rdy-standard\nscope: work\n",
+    )
+    .expect("manifest");
+    let docs = "\
+- id: d-QM001
+  type: doc
+  order: a1
+  fields:
+    doc_type: overview
+    key: imported
+    title: Imported
+- id: s-QM001
+  type: section
+  parent: d-QM001
+  order: a1
+  fields:
+    title: Rulings
+- id: D-QMAC1
+  type: decision
+  parent: s-QM001
+  order: a1
+  fields:
+    needs_content: false
+    statement: Decision D-QMAC1 holds
+    status: accepted
+- id: D-QMPR1
+  type: decision
+  parent: s-QM001
+  order: a2
+  fields:
+    needs_content: false
+    statement: Decision D-QMPR1 holds
+    status: proposed
+";
+    std::fs::write(out.join("docs/imported.yaml"), docs).expect("docs");
+    let row = |id: &str, actor: &str, run: &str, at: i64| {
+        format!("- id: {id}\n  actor: {actor}\n  run: {run}\n  role: writer\n  at_ms: {at}\n")
+    };
+    let authors = row("d-QM001", "agent:a", "r1", 100)
+        + &row("s-QM001", "agent:a", "r1", 100)
+        + &row("D-QMAC1", "agent:b", "r2", 200)
+        + &row("D-QMPR1", "agent:b", "r2", 200);
+    std::fs::write(out.join("authors.yaml"), authors).expect("authors");
 }
 
 fn mcp_row() -> Value {
@@ -4624,6 +4724,14 @@ const EMPTY_IN_FIXTURE: &[&str] = &[
     "mcp/rdy_diff/ok/entries[]/fields",
     "mcp/rdy_diff/ok/entries[]/links",
     "mcp/rdy_diff/ok/entries[]/repinned",
+    "mcp/rdy_import reader/refused/issues",
+    "mcp/rdy_import unknown key/refused/issues",
+    "mcp/rdy_import/ok/consequences",
+    "mcp/rdy_import/ok/on_change/checks",
+    "mcp/rdy_import/ok/on_change/resolved",
+    "mcp/rdy_import/ok/on_change/tensions",
+    "mcp/rdy_import/ok/related_decisions",
+    "mcp/rdy_import/ok/suggestions",
     "mcp/rdy_log landing/ok/diff/entries[]/fields",
     "mcp/rdy_log landing/ok/diff/entries[]/links",
     "mcp/rdy_log landing/ok/diff/entries[]/repinned",

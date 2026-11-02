@@ -485,7 +485,75 @@ pub(crate) fn run_session() -> Vec<(String, String)> {
         "rdy_review--list",
         rdy_review(&mut a, p(json!({"op": "list"}))),
     );
+
+    // ui6: a writer imports a format-3 tree into its own view; a reader is refused
+    // the change messages name the directory's last component, so it is fixed
+    let base = tempfile::tempdir().unwrap();
+    let tree = base.path().join("golden-tree");
+    import_tree(&tree);
+    let dir = tree.to_str().unwrap();
+    let mut importer = session(&eng, "agent:imp", "imp", "writer", None);
+    out.ok(
+        "rdy_import--writer",
+        rdy_import(&mut importer, p(json!({"dir": dir, "view": "imp"}))),
+    );
+    let mut reader = session(&eng, "agent:rdr", "rdr", "reader", None);
+    out.refused(
+        "rdy_import--reader",
+        rdy_import(&mut reader, p(json!({"dir": dir, "view": "rdr"}))),
+    );
     out.0
+}
+
+/// A format-3 export tree at `out`: doc `imported` with a section by agent:a (run r1) at 100 and
+/// two decisions by agent:b (run r2) at 200, one accepted and one proposed.
+fn import_tree(out: &Path) {
+    std::fs::create_dir_all(out.join("docs")).unwrap();
+    std::fs::write(
+        out.join("rdy-export.yaml"),
+        "format: 3\npack: rdy-standard\nscope: work\n",
+    )
+    .unwrap();
+    let docs = "\
+- id: d-QM001
+  type: doc
+  order: a1
+  fields:
+    doc_type: overview
+    key: imported
+    title: Imported
+- id: s-QM001
+  type: section
+  parent: d-QM001
+  order: a1
+  fields:
+    title: Rulings
+- id: D-QMAC1
+  type: decision
+  parent: s-QM001
+  order: a1
+  fields:
+    needs_content: false
+    statement: Decision D-QMAC1 holds
+    status: accepted
+- id: D-QMPR1
+  type: decision
+  parent: s-QM001
+  order: a2
+  fields:
+    needs_content: false
+    statement: Decision D-QMPR1 holds
+    status: proposed
+";
+    std::fs::write(out.join("docs/imported.yaml"), docs).unwrap();
+    let row = |id: &str, actor: &str, run: &str, at: i64| {
+        format!("- id: {id}\n  actor: {actor}\n  run: {run}\n  role: writer\n  at_ms: {at}\n")
+    };
+    let authors = row("d-QM001", "agent:a", "r1", 100)
+        + &row("s-QM001", "agent:a", "r1", 100)
+        + &row("D-QMAC1", "agent:b", "r2", 200)
+        + &row("D-QMPR1", "agent:b", "r2", 200);
+    std::fs::write(out.join("authors.yaml"), authors).unwrap();
 }
 
 /// The two static lists, from a child `rdy mcp` on an empty project.

@@ -68,3 +68,4 @@ mod cli_tensions;
 mod cli_trace;
 mod cli_upgrade;
 mod cli_views;
+mod cli_writer_import;
