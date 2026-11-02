@@ -139,6 +139,17 @@ pub(super) fn version_plan(
     p: &Proposal,
     source: &PlanSource,
 ) -> Result<VersionPlan, RdyError> {
+    version_plan_keeping(st, version, p, source).map(|(plan, _)| plan)
+}
+
+/// [`version_plan`], with the plan it computed from a bound plan's inputs, for the caller that
+/// needs the same plan on the same state next (a landing, [`Holds`](super::queue::Holds)).
+pub(super) fn version_plan_keeping(
+    st: &ReadState,
+    version: &Hash,
+    p: &Proposal,
+    source: &PlanSource,
+) -> Result<(VersionPlan, Option<ComputedPlan>), RdyError> {
     let reader = st.reader();
     let fixed = compute::fixed_tensions(st, version)?;
     let read;
@@ -155,7 +166,7 @@ pub(super) fn version_plan(
                 &heads,
             )?;
             let (_, counts, _) = live_rows(&computed, &[]);
-            return Ok(VersionPlan {
+            let plan = VersionPlan {
                 bound: None,
                 counts,
                 deferrals: vec![],
@@ -164,7 +175,8 @@ pub(super) fn version_plan(
                 tension_answers: vec![],
                 tension_acts: vec![],
                 suspect_items: suspect_items(&computed),
-            });
+            };
+            return Ok((plan, None));
         }
         PlanSource::Bound(Some(h)) => {
             read = reader.plan(h)?;
@@ -181,8 +193,7 @@ pub(super) fn version_plan(
         None => plan.heads.clone(),
     };
     // the plan the propose computed for these inputs on this state, else computed now
-    let fresh;
-    let computed = match carried.and_then(|c| {
+    let carried = carried.and_then(|c| {
         c.on(
             st,
             &p.view,
@@ -192,23 +203,22 @@ pub(super) fn version_plan(
             &plan.heads,
             &first,
         )
-    }) {
-        Some(c) => c,
-        None => {
-            fresh = compute::compute(
-                st,
-                &p.view,
-                &p.changes,
-                p.canon_at,
-                fixed.as_ref(),
-                &plan.heads,
-                &first,
-            )?;
-            &fresh
-        }
+    });
+    let fresh = match carried {
+        Some(_) => None,
+        None => Some(compute::compute(
+            st,
+            &p.view,
+            &p.changes,
+            p.canon_at,
+            fixed.as_ref(),
+            &plan.heads,
+            &first,
+        )?),
     };
+    let computed = fresh.as_ref().or(carried).expect("carried, else computed");
     let (_, counts, _) = live_rows(computed, &plan.answers);
-    Ok(VersionPlan {
+    let version_plan = VersionPlan {
         bound: Some(h),
         counts,
         deferrals: deferrals(computed, &plan.answers),
@@ -217,7 +227,8 @@ pub(super) fn version_plan(
         tension_answers: tension_answers(computed, &plan.answers),
         tension_acts: tension_acts(computed, &plan.answers),
         suspect_items: suspect_items(computed),
-    })
+    };
+    Ok((version_plan, fresh))
 }
 
 /// The (tension id, item) of each tension item of `computed` that one of `answers` (sorted by

@@ -3400,8 +3400,14 @@ impl Rdy {
         // D-4JMPH: the version's complete outcome, from its recorded canon and HEADs (or, for
         // a version with no bound plan, the HEADs captured once, O19), before anything is written
         let approver = s.provenance();
-        let sealing =
-            crate::plan::lifecycle::prepare_landing_plan(&st, &pid, &p, &approver, holds.accepted)?;
+        let sealing = crate::plan::lifecycle::prepare_landing_plan(
+            &st,
+            &pid,
+            &p,
+            &approver,
+            holds.accepted,
+            holds.computed,
+        )?;
 
         // 4. prepare the one write (atom1): the acceptance change, the final proposal version,
         // the snapshot, the landing, the view's rebase and the refs. Nothing is written yet.

@@ -10,6 +10,7 @@ use rdy_engine::consequence::{MAX_NEIGHBOR_PAIRS, NEIGHBOR_EDGE};
 use rdy_engine::engine::Local;
 use rdy_engine::pending::{CARD_MAX_TOKENS, ItemKind, Pending, PendingQuery};
 use rdy_engine::plan::api::PlanAnswerSpec;
+use rdy_engine::plan::compute::plan_computes_for_tests;
 use rdy_engine::plan::lifecycle::{PLAN_GATE_FIX, PLAN_OPEN_FIX, W_PLAN_OPEN};
 use rdy_engine::plan::{ItemState, PlanAnswerInput, PlanReply, PlanRow};
 use rdy_engine::{
@@ -671,4 +672,36 @@ fn nb8_answer_paths_preserve_m3d_rule_and_verdict_holds() {
         )
     );
     let _ = e.read();
+}
+
+/// nbp3: a landing reads its version's bound plan once. The holds compute it to read the deferral
+/// card, and the seal takes that plan: the same inputs on the same state.
+#[test]
+fn nbp3_a_landing_computes_its_bound_plan_once() {
+    let mut w = world();
+    let (x, y, z) = (w.x.clone(), w.y.clone(), w.z.clone());
+    write(&mut w.r, "dr", upd(&x, "X holds firm.")).unwrap();
+    let p = propose(&mut w.r, "dr", Some(TEST_SUMMARY));
+    assert!(p.ready, "{:#?}", p.issues);
+    let before = plan_computes_for_tests();
+    let l: Hash = w.r.land(&approver(), &p.id).unwrap().parse().unwrap();
+    assert_eq!(plan_computes_for_tests() - before, 1, "plan computes");
+    // what the landing sealed is that plan: both items, each with its edge, still open
+    let st = w.r.read();
+    let sh = st
+        .reader()
+        .plan_of_landing(&l, w.r.store().log_end())
+        .unwrap()
+        .unwrap();
+    let plan = st.reader().plan(&sh).unwrap();
+    let sealed = &plan.seal.as_ref().unwrap().items;
+    let edge_of = |subject: &BlockId| {
+        let want = item_hash(&x, subject.as_str(), PlanKind::Confirm);
+        let item = sealed.iter().find(|i| i.id == want).expect("sealed");
+        assert_eq!(item.outcome, PlanOutcome::Open);
+        item.edge.clone()
+    };
+    assert_eq!(sealed.len(), 2, "{sealed:#?}");
+    assert_ne!(edge_of(&y), NEIGHBOR_EDGE);
+    assert_eq!(edge_of(&z), NEIGHBOR_EDGE);
 }
