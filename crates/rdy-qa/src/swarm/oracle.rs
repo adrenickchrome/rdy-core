@@ -618,10 +618,8 @@ pub fn ui_violations_of(journal: &[Entry], r: &Rdy) -> Vec<String> {
                 }
             }
             (Outcome::Ok, None) => out.push(format!("{}: answered with no landing", ui.item)),
-            (Outcome::Refused(code), _) => {
-                if version.is_some_and(|v| landed.contains_key(&v)) {
-                    out.push(format!("{}: refused {code}, and it landed", ui.item));
-                }
+            (Outcome::Refused(code), _) if version.is_some_and(|v| landed.contains_key(&v)) => {
+                out.push(format!("{}: refused {code}, and it landed", ui.item));
             }
             _ => {}
         }
