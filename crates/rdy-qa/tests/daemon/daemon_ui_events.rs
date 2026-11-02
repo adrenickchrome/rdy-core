@@ -313,7 +313,7 @@ fn ui9_ui_stream_shares_limits_epoch_and_shutdown() {
 
     // serve.ui off: a config refresh queues reload and closes the UI stream, not a site stream
     let page = body(&s.get("/index.html"));
-    let mut doc = Sse::open(&http::events_url(&base(&s), &page));
+    let doc = Sse::open(&http::events_url(&base(&s), &page));
     let mut ui = Sse::open(&events_of(&s));
     local(s.h.dir.path(), &format!("{PERSON}serve:\n  ui: false\n"));
     // the next UI path reads it, and answers as an ordinary path

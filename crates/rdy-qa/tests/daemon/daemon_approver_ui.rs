@@ -776,7 +776,7 @@ fn ui9_moved_and_held_cards_cannot_land() {
     let chain = s.chain().len();
     let r = s.answer(&stale, "approve");
     assert_refused(&r, 409, "E_PROPOSAL_MOVED", "a moved proposal");
-    assert_eq!(ref_of_page(&r), [newer.r#ref.clone()], "the fresh form");
+    assert_eq!(ref_of_page(&r), vec![newer.r#ref.clone()], "the fresh form");
     let fresh = http::ui_forms(&body(&r)).remove(0);
     assert_eq!(fresh.card_hash, s.card(&newer.r#ref).card_hash);
     assert_eq!(s.chain().len(), chain, "no landing");
