@@ -245,6 +245,22 @@ pub enum PersonAct {
     /// Accept a check verdict as blocking on a version's approval card, through the relay
     /// (`rdy_pending`, then `rdy_answer` with the card's `accept_verdict:` option).
     AcceptCheckVerdict,
+    /// Answer a card on the local approval pages, over real HTTP (D-6M0AF): a `GET` of its form,
+    /// then a `POST` of it.
+    UiAnswer { step: UiStep },
+}
+
+/// Which sequence a `UiAnswer` runs (`ui_plan`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiStep {
+    /// A drawn act: one fresh version, read and answered through the pages.
+    Drawn,
+    /// The forced sequence: a `GET` and a `POST` that land one version, then the imported
+    /// decision's refused policy landing and its person's landing.
+    Forced,
+    /// The forced moved card: a `GET`, a newer version by its author, a `POST` of the old hash
+    /// (`E_PROPOSAL_MOVED`, 409, a fresh form), then that fresh form.
+    Moved,
 }
 
 impl PersonAct {
@@ -258,6 +274,7 @@ impl PersonAct {
             PersonAct::InboxAck => "inbox_ack",
             PersonAct::Tensions => "tensions",
             PersonAct::AcceptCheckVerdict => "accept_check_verdict",
+            PersonAct::UiAnswer { .. } => "ui_answer",
         }
     }
 }
@@ -420,8 +437,26 @@ pub fn reviewer_weights() -> Vec<(&'static str, u64)> {
 }
 
 /// The weights of the person's random draw on an act that does not land (after the required
-/// acts): `Dismiss`, `AcceptAdvice`, `WcEdit`, `InboxAck`, `Tensions`.
-const OTHER_WEIGHTS: &[(u8, u64)] = &[(1, 20), (2, 20), (3, 15), (4, 15), (5, 10)];
+/// acts): `Dismiss`, `AcceptAdvice`, `WcEdit`, `InboxAck`, `Tensions`, `UiAnswer`.
+const OTHER_WEIGHTS: &[(u8, u64)] = &[(1, 20), (2, 20), (3, 15), (4, 15), (5, 10), (6, 1)];
+
+/// The person's draw weights on an act that does not land, by act name, in table order.
+pub fn person_weights() -> Vec<(&'static str, u64)> {
+    OTHER_WEIGHTS
+        .iter()
+        .map(|(id, w)| {
+            let name = match id {
+                1 => "dismiss",
+                2 => "accept_advice",
+                3 => "wc_edit",
+                4 => "inbox_ack",
+                5 => "tensions",
+                _ => "ui_answer",
+            };
+            (name, *w)
+        })
+        .collect()
+}
 
 fn weighted<T: Copy>(rng: &mut Rng, table: &[(T, u64)]) -> T {
     let total: u64 = table.iter().map(|(_, w)| w).sum();
@@ -594,6 +629,29 @@ pub fn check_plan(cfg: &Config) -> Option<CheckPlan> {
         submit,
         accept,
     })
+}
+
+/// The person's acts of the forced UI sequences (D-6M0AF): each an index into `Script::person`.
+/// Both are odd acts, and both are due before the first step a run can kill the daemon at: an
+/// agent's step waits for the person's acts due before it, so no agent passes `due + 1` while
+/// the act runs. What they acknowledge is then in the log the kill and the reindex must keep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UiPlan {
+    pub moved: usize,
+    pub forced: usize,
+}
+
+/// The forced UI sequences of `cfg`: a pure function of it. `None` where `check_plan` is `None`:
+/// the fast and deep tiers hold them, as they hold the forced check sequences.
+pub fn ui_plan(cfg: &Config) -> Option<UiPlan> {
+    check_plan(cfg)?;
+    let (moved, forced) = (1, 3);
+    let due = person_due(forced, cfg.steps, cfg.steps / 2);
+    assert!(
+        cfg.kill_at.is_none_or(|k| due + 1 < k),
+        "the forced UI acts are due before the kill: {cfg:?}"
+    );
+    Some(UiPlan { moved, forced })
 }
 
 /// The forced acts of agent `me` under `plan`, each with its fixed step.
@@ -771,7 +829,8 @@ fn actor_script(
 /// members of a contradiction pair hold their marked `Create` acts in the order `Script::contra`
 /// states. A fast or deep script also holds the forced check sequences of `check_plan` (D-JQD5X):
 /// their acts sit on fixed steps, placed before every other placed or required act, and the
-/// person's acceptance on a fixed odd act. It also holds the forced include sequence of
+/// person's acceptance on a fixed odd act; and the forced UI sequences of `ui_plan`, on fixed odd
+/// acts of the person. It also holds the forced include sequence of
 /// `include_plan` (a source claim, an include of it, then an exclude of it), on fixed steps
 /// placed with the forced check steps.
 ///
@@ -865,6 +924,7 @@ pub fn script(cfg: &Config) -> Script {
             &mut Rng::new(master.next()),
             cfg.steps / 2,
             plan.map(|p| p.accept),
+            ui_plan(cfg),
         ),
         contra,
     }
@@ -883,8 +943,15 @@ pub fn direct_land_at(len: usize) -> usize {
 /// direct `rdy approve` (the CLI parity path); the last one is relayed.
 ///
 /// With `accept` (the forced hold sequence, `check_plan`), that odd act accepts a check verdict
-/// (`AcceptCheckVerdict`), and the other kinds are placed on the remaining odd acts.
-fn person_script(rng: &mut Rng, len: usize, accept: Option<usize>) -> Vec<PersonAct> {
+/// (`AcceptCheckVerdict`), and with `ui` (`ui_plan`) its two odd acts answer on the approval pages;
+/// the other kinds are placed on the remaining odd acts. A script with no `ui` draws no `UiAnswer`:
+/// that draw is `Tensions`.
+fn person_script(
+    rng: &mut Rng,
+    len: usize,
+    accept: Option<usize>,
+    ui: Option<UiPlan>,
+) -> Vec<PersonAct> {
     let make = |rng: &mut Rng, id: u8| match id {
         0 => PersonAct::Land {
             relayed: rng.chance(75),
@@ -893,6 +960,9 @@ fn person_script(rng: &mut Rng, len: usize, accept: Option<usize>) -> Vec<Person
         2 => PersonAct::AcceptAdvice,
         3 => PersonAct::WcEdit,
         4 => PersonAct::InboxAck,
+        6 if ui.is_some() => PersonAct::UiAnswer {
+            step: UiStep::Drawn,
+        },
         _ => PersonAct::Tensions,
     };
     let mut acts: Vec<PersonAct> = (0..len)
@@ -912,6 +982,15 @@ fn person_script(rng: &mut Rng, len: usize, accept: Option<usize>) -> Vec<Person
     if let Some(at) = accept {
         free.retain(|f| *f != at);
         acts[at] = PersonAct::AcceptCheckVerdict;
+    }
+    if let Some(p) = ui {
+        free.retain(|f| *f != p.moved && *f != p.forced);
+        acts[p.moved] = PersonAct::UiAnswer {
+            step: UiStep::Moved,
+        };
+        acts[p.forced] = PersonAct::UiAnswer {
+            step: UiStep::Forced,
+        };
     }
     for id in 1..6u8 {
         let at = free.swap_remove(rng.below(free.len()));

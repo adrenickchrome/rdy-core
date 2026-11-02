@@ -57,7 +57,12 @@ pub fn get(url: &str) -> Response {
 /// Sends `request` as it is to `addr` and reads to the end. A connection the server closes
 /// with no answer (or resets) gives what was read: nothing, status 0.
 pub fn raw(addr: SocketAddr, request: &str) -> Response {
-    let mut s = TcpStream::connect(addr).unwrap_or_else(|e| panic!("connect {addr}: {e}"));
+    try_raw(addr, request).unwrap_or_else(|e| panic!("connect {addr}: {e}"))
+}
+
+/// [`raw`], with a failed connect as its error: nothing listens at `addr`.
+pub fn try_raw(addr: SocketAddr, request: &str) -> std::io::Result<Response> {
+    let mut s = TcpStream::connect(addr)?;
     s.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
     let mut got = Vec::new();
     // a server that closes at once may reset the write: what it sent still counts
@@ -74,7 +79,7 @@ pub fn raw(addr: SocketAddr, request: &str) -> Response {
             }
         }
     }
-    parse(&got)
+    Ok(parse(&got))
 }
 
 fn parse(bytes: &[u8]) -> Response {
@@ -212,6 +217,114 @@ pub fn events_url(base: &str, page_html: &str) -> String {
     format!("{}{path}", base.trim_end_matches('/'))
 }
 
+/// One answer form of a local approval page, as its markup gives it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UiForm {
+    pub reference: String,
+    pub card_hash: String,
+    /// The hidden briefing token, when the page sends one.
+    pub brief: Option<String>,
+    /// The value of each submit button, in order.
+    pub options: Vec<String>,
+    /// The text of each submit button: the label the person chooses.
+    pub labels: Vec<String>,
+    /// The value of the button marked as recommended, when one is.
+    pub recommended: Option<String>,
+}
+
+/// `text` with the entities a template's escape writes turned back.
+pub fn unescape(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&#x2f;", "/")
+        .replace("&#x2F;", "/")
+        .replace("&amp;", "&")
+}
+
+/// The value of attribute `name` in the tag text `tag`.
+fn attr(tag: &str, name: &str) -> Option<String> {
+    let key = format!(" {name}=\"");
+    let from = tag.find(&key)? + key.len();
+    let len = tag[from..].find('"')?;
+    Some(unescape(&tag[from..from + len]))
+}
+
+/// The answer forms of `page`, in order, read from its markup: what a browser would submit.
+pub fn ui_forms(page: &str) -> Vec<UiForm> {
+    page.split("<form ")
+        .skip(1)
+        .map(|rest| {
+            let form = rest.split("</form>").next().unwrap_or(rest);
+            let mut out = UiForm::default();
+            for tag in form.split('<').filter(|t| t.starts_with("input ")) {
+                match (attr(tag, "name").as_deref(), attr(tag, "value")) {
+                    (Some("ref"), Some(v)) => out.reference = v,
+                    (Some("card_hash"), Some(v)) => out.card_hash = v,
+                    (Some("brief"), Some(v)) => out.brief = Some(v),
+                    _ => {}
+                }
+            }
+            for row in form.split("<li ").skip(1) {
+                let Some(tag) = row.split('<').find(|t| t.starts_with("button ")) else {
+                    continue;
+                };
+                let Some(value) = attr(tag, "value") else {
+                    continue;
+                };
+                if row.contains("class=\"ui-rec\"") && out.recommended.is_none() {
+                    out.recommended = Some(value.clone());
+                }
+                out.options.push(value);
+                out.labels
+                    .push(unescape(tag.split_once('>').map_or("", |(_, text)| text)));
+            }
+            out
+        })
+        .collect()
+}
+
+/// `value` as a form value: every byte but the unreserved ones as `%XX`.
+fn form_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for b in value.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// The `POST /~ui/answer` request of `fields` to the site at `authority` (`host:port`), with the
+/// exact `Host`, `Origin`, content type and length a browser's form sends.
+pub fn ui_answer_request(authority: &str, fields: &[(&str, &str)]) -> String {
+    let body = fields
+        .iter()
+        .map(|(k, v)| format!("{k}={}", form_encode(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+    format!(
+        "POST /~ui/answer HTTP/1.1\r\nHost: {authority}\r\nOrigin: http://{authority}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// The request that answers `form` with `option`, as a browser submits it.
+pub fn ui_answer(authority: &str, form: &UiForm, option: &str) -> String {
+    let mut fields = vec![
+        ("ref", form.reference.as_str()),
+        ("card_hash", form.card_hash.as_str()),
+        ("option", option),
+    ];
+    if let Some(b) = &form.brief {
+        fields.push(("brief", b));
+    }
+    ui_answer_request(authority, &fields)
+}
+
 /// `text` with the site's port as `<port>` (after a `:`) and each `Date` header's value as
 /// `<date>`, so a response can be compared with a golden.
 pub fn normalize(text: &str, port: u16) -> String {
@@ -229,6 +342,27 @@ pub fn normalize(text: &str, port: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ui9: the forms a page holds are read back as a browser submits them.
+    #[test]
+    fn ui9_forms_read_their_fields_from_the_markup() {
+        let page = r#"<form class="ui-form" method="post"><input type="hidden" name="ref" value="P-a@1"><input type="hidden" name="card_hash" value="ab"><input type="hidden" name="brief" value="b&#x2f;1"><textarea name="note"></textarea><ol><li class="o"><button type="submit" name="option" value="approve">Yes &amp; go</button> <span class="ui-rec">Recommended</span></li><li class="o"><button type="submit" name="option" value="later">No</button></li></ol></form>"#;
+        assert_eq!(
+            ui_forms(page),
+            vec![UiForm {
+                reference: "P-a@1".into(),
+                card_hash: "ab".into(),
+                brief: Some("b/1".into()),
+                options: vec!["approve".into(), "later".into()],
+                labels: vec!["Yes & go".into(), "No".into()],
+                recommended: Some("approve".into()),
+            }]
+        );
+        assert_eq!(
+            ui_answer("h:1", &ui_forms(page)[0], "approve"),
+            "POST /~ui/answer HTTP/1.1\r\nHost: h:1\r\nOrigin: http://h:1\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 51\r\n\r\nref=P-a%401&card_hash=ab&option=approve&brief=b%2F1"
+        );
+    }
 
     #[test]
     fn ls6_the_client_reads_heads_urls_and_dates() {

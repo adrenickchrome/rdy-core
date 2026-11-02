@@ -28,17 +28,32 @@
 //! `dispute_open` entries name the landing in `block`, `dispute_resolve` entries the dispute, and
 //! each `reply` is the command's. A queued proposal that an agent already landed under the
 //! policy (an `Ok` `land` entry names it) leaves the queue unlanded.
+//!
+//! ui11 (D-6M0AF, D-WPE4R): the person's `UiAnswer` answers over real HTTP on the local approval
+//! pages of the daemon's site, whose origin `rdy site` reports; the relay's open session keeps the
+//! daemon up. It reads the form from the page and posts what the page holds. Each sequence takes a
+//! version of its own, which agent `agent:ui` writes in a view of its own (the person imports the
+//! one with an imported status), so no queued proposal or agent view moves under it. It holds the
+//! landing turn. A landing it makes is journaled
+//! as `land_found` (the relay reads the version's plan and base before it, and audits it after),
+//! and the answer as a `ui_answer` entry that names the form it sent and the status it met.
 use super::agent::{
-    self, KINDS, KillGate, Link, Pace, Res, Where, advised_labels, inbox_labels, labels_of, spell,
+    self, KINDS, KillGate, Link, Pace, Res, Where, advised_labels, answer_plan, inbox_labels,
+    labels_of, spell,
 };
-use super::journal::{CheckFacts, Entry, Journal, Outcome, Skip};
-use super::project::{CLAIMS_PER_AREA, DOC_PATHS, SeedBlocks, SwarmProject};
+use super::journal::{CheckFacts, Entry, Journal, Outcome, Skip, UiFacts};
+use super::project::{
+    CHECKS_PACK, CLAIMS_PER_AREA, DOC_PATHS, SeedBlocks, SwarmProject, imported_tree, run_parent,
+};
 use super::run::{self, Watch};
-use super::script::PersonAct;
-use crate::daemon::human_command;
+use super::script::{PersonAct, UiStep};
+use crate::daemon::{human_command, short_tempdir_in};
 use crate::fixtures::output_within;
+use crate::http::{self, UiForm};
+use rdy_engine::site_scope::percent_encode;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
@@ -59,6 +74,15 @@ pub const ACCEPT_PREFIX: &str = "accept_verdict:";
 /// How many queued proposals the person looks at when it hunts for advice to accept: the queue
 /// a fast run holds, so a late contradiction pair's proposal is seen (ruling task-5.2).
 const ADVICE_LOOKS: usize = 24;
+
+/// The agent that writes the versions a `UiAnswer` answers, and its run.
+pub const UI_AUTHOR: &str = "agent:ui";
+const UI_RUN: &str = "ui";
+
+/// The ids and the doc key of the imported decision's export tree (`UiStep::Forced`).
+pub const UI_IMPORTED: (&str, &str, &str, &str) = ("ui-imported", "d-WB001", "s-WB001", "D-WB001");
+/// The view the person imports it into.
+const UI_IMPORTED_VIEW: &str = "ui-imported";
 
 /// The proposals waiting for the person to land, oldest first.
 pub type Queue = Arc<Mutex<Vec<String>>>;
@@ -110,6 +134,7 @@ pub(crate) fn spawn_with(
             hooks,
             seed_landings,
             disputes: Vec::new(),
+            ui_author: None,
         };
         for (step, act) in acts.iter().enumerate() {
             if let Some(pace) = &person.hooks.pace {
@@ -136,6 +161,8 @@ struct Person {
     seed_landings: Vec<String>,
     /// The disputes the person opened and has not resolved, each with the step that opened it.
     disputes: Vec<(String, usize)>,
+    /// The session of [`UI_AUTHOR`], once a `UiAnswer` needs it.
+    ui_author: Option<Link>,
 }
 
 /// The salt of the dispute draw.
@@ -174,6 +201,18 @@ pub(crate) fn proposed_before_set(entries: &[Entry], pref: &str) -> bool {
             && x.outcome == Outcome::Ok
             && (x.view.as_deref() == Some(view) || x.block.as_deref() == Some(view))
     })
+}
+
+/// A page's text.
+fn page_text(r: &http::Response) -> String {
+    String::from_utf8_lossy(&r.body).into_owned()
+}
+
+/// The error code a refusal page's details name.
+fn page_code(page: &str) -> Option<String> {
+    let at = page.find("<code>E_")? + "<code>".len();
+    let len = page[at..].find('<')?;
+    Some(page[at..at + len].to_string())
 }
 
 /// The JSON a command printed: its stdout on success, its last stderr line on failure.
@@ -341,7 +380,10 @@ impl Person {
         let gate = self.link.gate.clone();
         let _act = (!matches!(
             act,
-            PersonAct::Land { .. } | PersonAct::WcEdit | PersonAct::AcceptCheckVerdict
+            PersonAct::Land { .. }
+                | PersonAct::WcEdit
+                | PersonAct::AcceptCheckVerdict
+                | PersonAct::UiAnswer { .. }
         ))
         .then(|| gate.act_turn());
         match act {
@@ -354,6 +396,7 @@ impl Person {
             PersonAct::Tensions => {
                 self.tensions();
             }
+            PersonAct::UiAnswer { step } => self.ui_answer(*step),
         }
     }
 
@@ -744,6 +787,352 @@ impl Person {
             });
     }
 
+    // ---- the local approval pages (ui11) ----
+
+    /// One `UiAnswer` (see the module docs). A call the kill cuts ends it: what was acknowledged
+    /// before it stands, and the next act goes on after the restart.
+    fn ui_answer(&mut self, step: UiStep) {
+        let gate = self.link.gate.clone();
+        let _turn = gate.landing_turn();
+        let step_no = self.link.step;
+        let done = match step {
+            UiStep::Moved => self.ui_moved(&format!("ui-m{}", spell(step_no))),
+            UiStep::Drawn => self.ui_land(&format!("ui-d{}", spell(step_no))),
+            UiStep::Forced => self
+                .ui_land(&format!("ui-f{}", spell(step_no)))
+                .and_then(|()| self.ui_imported()),
+        };
+        if done.is_none() {
+            self.ui_author = None;
+        }
+    }
+
+    /// The session of [`UI_AUTHOR`], at the person's step.
+    fn author(&mut self) -> &mut Link {
+        let step = self.link.step;
+        let (at, journal, gate) = (
+            self.link.at.clone(),
+            self.link.journal.clone(),
+            self.link.gate.clone(),
+        );
+        let author = self.ui_author.get_or_insert_with(|| {
+            Link::connect(at, UI_AUTHOR, UI_RUN, "writer", None, journal, gate)
+        });
+        author.step = step;
+        author
+    }
+
+    /// One new claim of [`UI_AUTHOR`] in `view`, briefed (`scope` when the view exists), its plan
+    /// answered, then proposed: the version's ref. `None` when the kill cut a call.
+    fn ui_version(&mut self, view: &str, scope: &str, text: &str) -> Option<String> {
+        let area = self.link.step % DOC_PATHS.len();
+        let section = self.seed.sections[area].clone();
+        let decision = self.seed.decisions[area].clone();
+        let author = self.author();
+        let mut token = None;
+        let mut e = author.entry("ui_fixture");
+        e.view = Some(view.to_string());
+        let args = json!({"ids": [section], "scope": scope});
+        let res = author.exec(e, "ui_fixture", "rdy_brief", args, |_, v| {
+            token = v["base"]["token"].as_str().map(str::to_string);
+        });
+        if !matches!(res, Res::Ok(_)) {
+            return None;
+        }
+        let mut e = author.entry("ui_fixture");
+        e.view = Some(view.to_string());
+        let ops = json!([{"op": "create", "type": "claim", "parent": section, "body": text}]);
+        let args = json!({"ops": ops, "brief": token, "implements": [decision], "view": view});
+        let res = author.exec(e, "ui_fixture", "rdy_write", args, |_, _| {});
+        if !matches!(res, Res::Ok(_)) {
+            return None;
+        }
+        self.ui_propose(view)
+    }
+
+    /// [`UI_AUTHOR`] answers `view`'s plan and proposes it: the version's ref.
+    fn ui_propose(&mut self, view: &str) -> Option<String> {
+        let author = self.author();
+        answer_plan(author, view);
+        let mut made = None;
+        let mut e = author.entry("ui_fixture");
+        e.view = Some(view.to_string());
+        let args = json!({"title": view, "summary": format!("The fixture {view}."), "view": view});
+        let res = author.exec(e, "ui_fixture", "rdy_propose", args, |en, v| {
+            en.block = v["ref"].as_str().map(str::to_string);
+            made = en.block.clone();
+        });
+        if !matches!(res, Res::Ok(_)) {
+            return None;
+        }
+        made
+    }
+
+    /// The site's origin, as `rdy site` reports it: the address and the `Host`.
+    fn ui_origin(&mut self) -> Option<(SocketAddr, String)> {
+        let e = self.entry(HUMAN, "ui_site");
+        let res = self.cli("ui_site", &["site"]);
+        let mut url = None;
+        let res = self.link.finish(e, "ui_site", res, |_, v| {
+            url = v["url"].as_str().map(str::to_string);
+        });
+        if matches!(res, Res::Lost) {
+            return None;
+        }
+        let url = url.unwrap_or_else(|| self.link.fail("ui_site", "got no site url"));
+        let host = url
+            .strip_prefix("http://")
+            .and_then(|h| h.strip_suffix('/'))
+            .unwrap_or_else(|| self.link.fail("ui_site", &format!("got {url}")))
+            .to_string();
+        let addr = host
+            .parse()
+            .unwrap_or_else(|_| self.link.fail("ui_site", &format!("got {url}")));
+        Some((addr, host))
+    }
+
+    /// One HTTP exchange. Nothing back is a lost call: accepted only in the kill window, and the
+    /// relay reconnects.
+    fn ui_http(&mut self, addr: SocketAddr, request: &str) -> Option<http::Response> {
+        match http::try_raw(addr, request) {
+            Ok(r) if r.status != 0 => Some(r),
+            Ok(_) => self.ui_lost("the site closed with no answer"),
+            Err(e) => self.ui_lost(&format!("cannot connect to the site: {e}")),
+        }
+    }
+
+    fn ui_lost(&mut self, why: &str) -> Option<http::Response> {
+        let e = self.entry(HUMAN, "ui_answer");
+        let res = self.link.lost("ui_answer", why);
+        self.link.finish(e, "ui_answer", res, |_, _| {});
+        None
+    }
+
+    /// The form of item `r` on its page, as a browser reads it.
+    fn ui_form(&mut self, addr: SocketAddr, host: &str, r: &str) -> Option<UiForm> {
+        let request = format!(
+            "GET /~ui/item/{} HTTP/1.1\r\nHost: {host}\r\n\r\n",
+            percent_encode(r)
+        );
+        let page = self.ui_http(addr, &request)?;
+        if page.status != 200 {
+            self.link.fail(
+                "ui_answer",
+                &format!("GET of {r} got {}: {}", page.status, page_text(&page)),
+            );
+        }
+        let mut forms = http::ui_forms(&page_text(&page));
+        if forms.len() != 1 || forms[0].reference != r {
+            self.link
+                .fail("ui_answer", &format!("{r}: forms {forms:?}"));
+        }
+        Some(forms.remove(0))
+    }
+
+    /// Posts `form` with `option` and journals it: a `ui_answer` entry that names the form and the
+    /// status. A `303` is `Ok`; another status is the refusal its page names, which the closed
+    /// table judges. The response comes back, and `None` when the kill cut it.
+    fn ui_post(
+        &mut self,
+        (addr, host): &(SocketAddr, String),
+        form: &UiForm,
+        option: &str,
+        landing: impl FnOnce(&mut Person) -> Option<String>,
+    ) -> Option<http::Response> {
+        let at = form.options.iter().position(|o| o == option);
+        let mut facts = UiFacts {
+            source: "ui",
+            item: form.reference.clone(),
+            card_hash: form.card_hash.clone(),
+            labels: form.labels.clone(),
+            option: option.to_string(),
+            label: at.map(|i| form.labels[i].clone()).unwrap_or_default(),
+            status: 0,
+            landing: None,
+        };
+        let request = http::ui_answer(host, form, option);
+        let r = self.ui_http(*addr, &request)?;
+        facts.status = r.status;
+        let res = if r.status == 303 {
+            facts.landing = landing(self);
+            Res::Ok(json!({"status": r.status}))
+        } else {
+            let text = page_text(&r);
+            let code = page_code(&text).unwrap_or_else(|| {
+                self.link
+                    .fail("ui_answer", &format!("{}: {text}", r.status))
+            });
+            Res::Refused(code, text)
+        };
+        let mut e = self.entry(HUMAN, "ui_answer");
+        e.block = Some(form.reference.clone());
+        e.ui = Some(facts);
+        if matches!(self.link.finish(e, "ui_answer", res, |_, _| {}), Res::Lost) {
+            return None;
+        }
+        Some(r)
+    }
+
+    /// The landing of `pref` as the relay finds it, with the audit a landing gets: its `land_found`
+    /// entry names the view and the base `before` read, and the reply names the landing.
+    fn ui_landing(&mut self, pref: &str, before: run::Before) -> Option<String> {
+        if !self.found(pref, before, false) {
+            self.link
+                .fail("ui_answer", &format!("{pref} answered, and did not land"));
+        }
+        self.link
+            .journal
+            .entries()
+            .iter()
+            .rev()
+            .find(|x| {
+                x.act == run::LAND_FOUND && x.block.as_deref() == Some(pref) && x.reply.is_some()
+            })
+            .and_then(|x| x.reply.as_ref()?["landing"].as_str().map(str::to_string))
+    }
+
+    /// What every approval does first, on `pref`: the relay reads its plan and base
+    /// (`run::before_land`) and accepts its deferral card when it has one.
+    fn ui_before(&mut self, pref: &str) -> Option<run::Before> {
+        let before = run::before_land(&mut self.link, pref)?;
+        accept_deferrals(&mut self.link, "agent:relay", pref, true).then_some(before)
+    }
+
+    /// The recommended option of `form` when it is the approval; else the act is skipped: a missing
+    /// recommendation is never read as approve (D-91DEW).
+    fn ui_recommended_approve(&mut self, form: &UiForm) -> bool {
+        if form.recommended.as_deref() == Some("approve") {
+            return true;
+        }
+        let mut e = self.entry(HUMAN, "ui_answer");
+        e.block = Some(form.reference.clone());
+        e.outcome = Outcome::Skipped;
+        e.skip = Some(Skip::NoRecommendedOption);
+        self.link.journal.record(e);
+        false
+    }
+
+    /// The forced `GET` and `POST`: a new version in `view`, read from its page, approved with its
+    /// recommended option, found landed.
+    fn ui_land(&mut self, view: &str) -> Option<()> {
+        let text = format!("The page rule of {view} holds.");
+        let pref = self.ui_version(view, "canon", &text)?;
+        let origin = self.ui_origin()?;
+        let before = self.ui_before(&pref)?;
+        let form = self.ui_form(origin.0, &origin.1, &pref)?;
+        if !self.ui_recommended_approve(&form) {
+            return Some(());
+        }
+        let r = self.ui_post(&origin, &form, "approve", |p| p.ui_landing(&pref, before))?;
+        if r.status != 303 {
+            self.link
+                .fail("ui_answer", &format!("{pref}: {}", page_text(&r)));
+        }
+        Some(())
+    }
+
+    /// The forced moved card: the person holds the form of the first version when the author
+    /// proposes a newer one. The old hash is `E_PROPOSAL_MOVED` (409) with the fresh form and no
+    /// landing; only that fresh form, posted apart, may land.
+    fn ui_moved(&mut self, view: &str) -> Option<()> {
+        let first = format!("The first page rule of {view} holds.");
+        let old = self.ui_version(view, "canon", &first)?;
+        let origin = self.ui_origin()?;
+        let form = self.ui_form(origin.0, &origin.1, &old)?;
+        let second = format!("The second page rule of {view} holds.");
+        let newer = self.ui_version(view, &format!("view:{view}"), &second)?;
+        if newer == old {
+            self.link.fail("ui_answer", &format!("{view}: {old} again"));
+        }
+        let before = self.ui_before(&newer)?;
+        let r = self.ui_post(&origin, &form, "approve", |_| None)?;
+        if r.status != 409 {
+            self.link
+                .fail("ui_answer", &format!("{old}: {}", page_text(&r)));
+        }
+        let mut fresh = http::ui_forms(&page_text(&r));
+        if fresh.len() != 1 || fresh[0].reference != newer {
+            self.link
+                .fail("ui_answer", &format!("{old}: the fresh form {fresh:?}"));
+        }
+        let fresh = fresh.remove(0);
+        if !self.ui_recommended_approve(&fresh) {
+            return Some(());
+        }
+        let r = self.ui_post(&origin, &fresh, "approve", |p| p.ui_landing(&newer, before))?;
+        if r.status != 303 {
+            self.link
+                .fail("ui_answer", &format!("{newer}: {}", page_text(&r)));
+        }
+        Some(())
+    }
+
+    /// The imported decision: the person imports an accepted decision that another author wrote
+    /// (`rdy import`, from a child fixture under the run's parent) into a view of its own and
+    /// proposes it. An agent's `rdy_land` of it is refused by the policy's never-list. The person
+    /// lands it on its page once the holds pass.
+    fn ui_imported(&mut self) -> Option<()> {
+        let (name, doc, section, decision) = UI_IMPORTED;
+        let tree = short_tempdir_in(run_parent());
+        imported_tree(tree.path(), CHECKS_PACK, name, doc, section, decision);
+        let path = tree.path().to_string_lossy().into_owned();
+        let args = ["import", path.as_str(), "--view", UI_IMPORTED_VIEW];
+        let res = self.cli("ui_fixture", &args);
+        let mut e = self.entry(HUMAN, "ui_fixture");
+        e.view = Some(UI_IMPORTED_VIEW.to_string());
+        if !matches!(
+            self.link.finish(e, "ui_fixture", res, |_, _| {}),
+            Res::Ok(_)
+        ) {
+            return None;
+        }
+        let summary = format!("The fixture {UI_IMPORTED_VIEW}.");
+        let args = [
+            "propose",
+            "--view",
+            UI_IMPORTED_VIEW,
+            "--title",
+            UI_IMPORTED_VIEW,
+            "--summary",
+            summary.as_str(),
+        ];
+        let res = self.cli("ui_fixture", &args);
+        let mut e = self.entry(HUMAN, "ui_fixture");
+        e.view = Some(UI_IMPORTED_VIEW.to_string());
+        let mut made = None;
+        self.link.finish(e, "ui_fixture", res, |en, v| {
+            en.block = v["ref"].as_str().map(str::to_string);
+            made = en.block.clone();
+        });
+        let pref = made?;
+        let author = self.author();
+        let mut e = author.entry("ui_policy_land");
+        e.block = Some(pref.clone());
+        let res = author.exec(
+            e,
+            "ui_policy_land",
+            "rdy_land",
+            json!({"proposal": pref}),
+            |_, _| {},
+        );
+        if !matches!(res, Res::Refused(..)) {
+            self.link
+                .fail("ui_policy_land", &format!("{pref} was not refused"));
+        }
+        let origin = self.ui_origin()?;
+        let before = self.ui_before(&pref)?;
+        let form = self.ui_form(origin.0, &origin.1, &pref)?;
+        if !self.ui_recommended_approve(&form) {
+            return Some(());
+        }
+        let r = self.ui_post(&origin, &form, "approve", |p| p.ui_landing(&pref, before))?;
+        if r.status != 303 {
+            self.link
+                .fail("ui_answer", &format!("{pref}: {}", page_text(&r)));
+        }
+        Some(())
+    }
+
     fn inbox_ack(&mut self) {
         let e = self.entry("agent:relay", "inbox_ack");
         self.link.exec(
@@ -1125,6 +1514,7 @@ mod tests {
             hooks: Hooks::default(),
             seed_landings: p.seed_landings.clone(),
             disputes: Vec::new(),
+            ui_author: None,
         };
         person.land(true);
         let lands: Vec<Entry> = journal
@@ -1197,6 +1587,7 @@ mod tests {
             hooks,
             seed_landings: p.seed_landings.clone(),
             disputes: Vec::new(),
+            ui_author: None,
         };
         // not landed yet: nothing is found
         let before = run::before_land(&mut person.link, &pref).expect("the reads before");
@@ -1287,6 +1678,7 @@ mod tests {
             hooks,
             seed_landings: p.seed_landings.clone(),
             disputes: Vec::new(),
+            ui_author: None,
         };
         let before = run::before_land(&mut person.link, &pref).expect("the reads before");
         let (ok, landed) = p.served.json(&["--json", "approve", &pref]);
@@ -1376,6 +1768,7 @@ mod tests {
             hooks,
             seed_landings: p.seed_landings.clone(),
             disputes: Vec::new(),
+            ui_author: None,
         };
         let (ok, landed) = p.served.json(&["--json", "approve", &pref]);
         assert!(ok, "{landed}");

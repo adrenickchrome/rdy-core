@@ -15,7 +15,7 @@ use crate::site::http::{
 };
 use crate::site::live::{NoStream, label, resolve};
 use crate::site::profiles::{self, Availability, TestEvent};
-use crate::site::{LanOverride, SiteInfo, addr, sse, ui_request};
+use crate::site::{LanOverride, SiteInfo, addr, sse, ui, ui_request};
 use rdy_engine::engine::{SITE_LAN_FIX, SiteWarning};
 use rdy_engine::publication::{IMPLICIT_ORG, profile_at};
 use rdy_engine::{E_NOT_FOUND, E_REDACTED_STATE, ReadState};
@@ -585,10 +585,10 @@ async fn serve_conn(mut stream: TcpStream, ctx: Arc<Ctx>, sh: Arc<Shared>) {
     if gone(&ctx) {
         return;
     }
-    let bytes = match head {
+    let (bytes, rest) = match head {
         Head::Closed => return,
         Head::TooLarge => return send(stream, &refusal(Refusal::TooLarge), false).await,
-        Head::Bytes { head, rest: _ } => head,
+        Head::Bytes { head, rest } => (head, rest),
     };
     let request = match parse_head(&bytes) {
         Ok(r) => r,
@@ -606,6 +606,14 @@ async fn serve_conn(mut stream: TcpStream, ctx: Arc<Ctx>, sh: Arc<Shared>) {
     let state = sh.state.load_full();
     let current = state.ensure_current_epoch().is_ok();
     drop(state);
+    match ui_route(&ctx, &sh, &request, stream.local_addr().ok()).await {
+        Err(f) => return send(stream, &refusal(f), head_only).await,
+        Ok(None) => {}
+        Ok(Some(_)) if !current => return send(stream, &refusal(Refusal::Busy), head_only).await,
+        Ok(Some(route)) => {
+            return serve_ui(stream, &ctx, &sh, route, &request, rest, deadline).await;
+        }
+    }
     let route = match ctx.guard.check(&request) {
         // a path the guard does not route, after the Host, Origin and method checks: the
         // listener's own not-found page, once the same epoch and availability checks as a page
@@ -660,6 +668,97 @@ async fn serve_conn(mut stream: TcpStream, ctx: Arc<Ctx>, sh: Arc<Shared>) {
                 Err(_panicked) => refusal(Refusal::Broken),
             }
         }
+    };
+    send(stream, &response, head_only).await;
+}
+
+/// The UI route of `request` on the listener bound to `local`, after its checks; `None` when the
+/// ordinary guard answers it. A path that names no UI route reads no config. `serve.ui` is read
+/// afresh for one that does ([`ui::enabled`]); while it is off, that path is an ordinary path, so
+/// the UI route's own checks do not apply.
+async fn ui_route(
+    ctx: &Ctx,
+    sh: &Arc<Shared>,
+    request: &Request,
+    local: Option<SocketAddr>,
+) -> Result<Option<ui_request::Route>, Refusal> {
+    let Some(local) = local else {
+        return Ok(None);
+    };
+    let full = *ctx.guard.mode() == ListenerMode::Full;
+    let found = ui_request::classify(request, local, full, true);
+    if matches!(found, Ok(None)) {
+        return Ok(None);
+    }
+    let sh = Arc::clone(sh);
+    match tokio::task::spawn_blocking(move || ui::enabled(&sh)).await {
+        Ok(true) => found,
+        Ok(false) | Err(_) => Ok(None),
+    }
+}
+
+/// Answers a UI route, off the runtime for what reads or writes the project: an event stream, or
+/// a response and the close. A body that comes too slowly closes with no reply.
+async fn serve_ui(
+    mut stream: TcpStream,
+    ctx: &Ctx,
+    sh: &Arc<Shared>,
+    route: ui_request::Route,
+    request: &Request,
+    rest: Vec<u8>,
+    deadline: Instant,
+) {
+    let head_only = request.method == Method::Head;
+    let run = Arc::clone(sh);
+    let done = match route {
+        ui_request::Route::Events { rev } => {
+            // as on the ordinary route: an event stream has no `HEAD`
+            if head_only {
+                return send(stream, &refusal(Refusal::Method), true).await;
+            }
+            let opened =
+                tokio::task::spawn_blocking(move || run.site.subscribe_ui(&run, &rev)).await;
+            let refused = match opened {
+                Ok(Ok(sub)) => {
+                    let hold = ctx.handle.hold();
+                    let epoch = sse::epoch_now(Arc::clone(sh));
+                    sse::serve(stream, sub, hold, ctx.handle.stopped(), epoch, now_secs()).await;
+                    return;
+                }
+                Ok(Err(f)) => f,
+                Err(_panicked) => Refusal::Broken,
+            };
+            return send(stream, &refusal(refused), false).await;
+        }
+        ui_request::Route::Answer => {
+            let body = match read_ui_body(&mut stream, request, rest, deadline).await {
+                None => return,
+                Some(Ok(body)) => body,
+                Some(Err(f)) => return send(stream, &refusal(f), false).await,
+            };
+            if gone(ctx) {
+                return;
+            }
+            let form = match ui_request::parse_form(&body) {
+                Ok(form) => form,
+                Err(e) => return send(stream, &ui_request::form_refusal(&e), false).await,
+            };
+            drop(body);
+            tokio::task::spawn_blocking(move || ui::Outcome::Done(ui::answer(&run, form))).await
+        }
+        ui_request::Route::Pending => {
+            tokio::task::spawn_blocking(move || ui::Outcome::Done(ui::pending(&run))).await
+        }
+        ui_request::Route::Item(reference) => {
+            tokio::task::spawn_blocking(move || ui::item(&run, &reference)).await
+        }
+    };
+    let response = match done {
+        Ok(ui::Outcome::Done(response)) => response,
+        Ok(ui::Outcome::Missing) => {
+            not_found(Arc::clone(sh), Miss::Page(listener_target(&ctx.guard))).await
+        }
+        Err(_panicked) => refusal(Refusal::Broken),
     };
     send(stream, &response, head_only).await;
 }

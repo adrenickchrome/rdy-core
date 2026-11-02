@@ -1,6 +1,7 @@
 //! The `daemon` area of the rdy-qa suite: one test binary (`cargo qa --only daemon`).
 //! One `mod` line per test file in this directory; a file without its line never runs
 //! (`tlay1_` checks). Keep the list sorted.
+mod daemon_approver_ui;
 mod daemon_concurrent;
 mod daemon_crash;
 mod daemon_crash_m2;
@@ -20,5 +21,6 @@ mod daemon_site_routes;
 mod daemon_site_versions;
 mod daemon_stop_version;
 mod daemon_transport;
+mod daemon_ui_events;
 mod daemon_ui_http;
 mod daemon_upgrade;

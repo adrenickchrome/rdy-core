@@ -4,8 +4,8 @@
 //! Host, its method, its body framing and limit, the `POST` Origin and the form's type, in that
 //! order. The answer form is read from the bytes already read with the head and the rest of the
 //! body, up to 4 MiB, and parsed strictly. A UI response sends one CSP whose only change is
-//! `form-action 'self'`. No handler answers these routes yet: the tests drive the classifier, the
-//! readers and the parser directly, and the daemon still answers the UI paths as ordinary paths.
+//! `form-action 'self'`. The tests drive the classifier, the readers and the parser directly; the
+//! handler's pins are in `daemon_approver_ui` and `daemon_ui_events`.
 use rdy_daemon::Shared;
 use rdy_daemon::site::ensure_profile_site;
 use rdy_daemon::site::guard::{Guard, Refusal, refusal};
@@ -349,12 +349,17 @@ fn ui8_only_full_loopback_listeners_classify_ui_routes() {
     assert_eq!(on(v4(), &two), Err(Refusal::Host));
     assert_eq!(on(v4(), &req("GET /~ui/ HTTP/1.1")), Err(Refusal::Host));
 
-    // the real daemon: the full listener and a profile-only listener answer the UI paths as
-    // ordinary paths (no UI handler is installed yet)
+    // the real daemon: with serve.ui off the full listener, and a profile-only listener always,
+    // answer the UI paths as ordinary paths
     let h = world();
     let sh = shared(&h);
+    std::fs::write(
+        h.dir.path().join(".rdy/local.yaml"),
+        "serve:\n  ui: false\n",
+    )
+    .unwrap();
     let full = port_of(&sh.site_info.get().unwrap().url.clone().unwrap());
-    ordinary_answers(full, "full listener");
+    ordinary_answers(full, "full listener, serve.ui off");
     let only = port_of(
         &ensure_profile_site(Arc::clone(&sh), "guide")
             .unwrap()

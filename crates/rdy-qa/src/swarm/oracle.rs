@@ -19,7 +19,7 @@ const CLI_BUDGET: Duration = Duration::from_secs(120);
 
 /// Copies the tree `from` to `to` (which must not exist): directories, files and symbolic
 /// links. A socket or another special file is left out: it means nothing without its process.
-pub(crate) fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+pub fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::create_dir(to)?;
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
@@ -548,6 +548,97 @@ pub fn check_violations_of(journal: &[Entry], stored: &StoredChecks) -> Vec<Stri
         out.push(format!("canon held the rule fixture unchecked at {u}"));
     }
     out
+}
+
+/// What the store must hold for the `ui_answer` entries of `journal` (D-6M0AF), read from `r`. Each
+/// violation is one line:
+/// - an acknowledged answer's landing the store does not hold, or one whose evidence is not the
+///   form the page showed: the person's local card, its labels and choice, its hash, no relay;
+/// - a refused answer's version in canon's chain;
+/// - a version with two landings.
+pub fn ui_violations_of(journal: &[Entry], r: &Rdy) -> Vec<String> {
+    let st = r.read();
+    let chain = st.reader().landings().expect("read canon's chain");
+    let mut out = vec![];
+    let version_of = |item: &str| match st.resolve_scope(&format!("proposal:{item}")) {
+        Ok(rdy_engine::Scope::Proposal(h)) => Some(h),
+        _ => None,
+    };
+    let mut landed = BTreeMap::new();
+    for (_, rec) in &chain {
+        *landed
+            .entry(rec.approved_version.unwrap_or(rec.proposal))
+            .or_insert(0usize) += 1;
+    }
+    for (v, n) in &landed {
+        if *n > 1 {
+            out.push(format!("version {} landed {n} times", v.short()));
+        }
+    }
+    for e in journal.iter().filter(|e| e.act == "ui_answer") {
+        let Some(ui) = &e.ui else { continue };
+        let version = version_of(&ui.item);
+        match (&e.outcome, &ui.landing) {
+            (Outcome::Ok, Some(l)) => {
+                let Ok(h) = l.parse::<rdy_model::Hash>() else {
+                    out.push(format!("{}: landing {l} is no hash", ui.item));
+                    continue;
+                };
+                let Some((_, rec)) = chain.iter().find(|(x, _)| *x == h) else {
+                    out.push(format!(
+                        "{}: acknowledged landing {l} is not stored",
+                        ui.item
+                    ));
+                    continue;
+                };
+                if version != Some(rec.approved_version.unwrap_or(rec.proposal)) {
+                    out.push(format!("{}: landing {l} is of another version", ui.item));
+                }
+                if rec.assurance != rdy_model::Assurance::Local
+                    || rec.approved_by.actor != "human:qa"
+                    || rec.relayed_by.is_some()
+                    || rec.relay_evidence.is_some()
+                {
+                    out.push(format!(
+                        "{}: landing {l} is not the person's own: {:?} by {}",
+                        ui.item, rec.assurance, rec.approved_by.actor
+                    ));
+                }
+                let want = rdy_model::ApprovalEvidence {
+                    kind: rdy_model::EvidenceKind::Card,
+                    options: ui.labels.clone(),
+                    choice: Some(ui.label.clone()),
+                    card_hash: ui.card_hash.parse().ok(),
+                };
+                if rec.evidence.as_ref() != Some(&want) {
+                    out.push(format!(
+                        "{}: landing {l} holds {:?}, and the page showed {want:?}",
+                        ui.item, rec.evidence
+                    ));
+                }
+            }
+            (Outcome::Ok, None) => out.push(format!("{}: answered with no landing", ui.item)),
+            (Outcome::Refused(code), _) => {
+                if version.is_some_and(|v| landed.contains_key(&v)) {
+                    out.push(format!("{}: refused {code}, and it landed", ui.item));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// [`ui_violations_of`] on a copy of the project at `dir`, and when `reindexed` after a reindex:
+/// what the log alone rebuilds.
+pub fn ui_violations(journal: &[Entry], dir: &Path, reindexed: bool) -> Vec<String> {
+    on_copy(dir, |r| {
+        if reindexed {
+            r.reindex()
+                .unwrap_or_else(|e| panic!("cannot reindex a copy of {}: {e}", dir.display()));
+        }
+        ui_violations_of(journal, r)
+    })
 }
 
 #[cfg(test)]
