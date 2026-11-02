@@ -729,3 +729,52 @@ fn nb7_hundred_thousand_block_briefing_pages_local_neighbors() {
         );
     }
 }
+
+/// nbp2: the cut measures a neighbor row once, and still the whole JSON: a briefing whose JSON is
+/// exactly the budget stays whole, and the next smaller budget cuts it. Sections of different
+/// sizes walk the JSON length through every remainder of the 4 bytes a token holds.
+#[test]
+fn nbp2_a_briefing_is_cut_exactly_when_its_json_is_over_the_budget() {
+    let (_d, mut r) = project();
+    let made = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "exact", "title": "Exact", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}},
+        ]),
+    )
+    .unwrap()
+    .created;
+    let mut covered = BTreeSet::new();
+    for i in 0..16 {
+        let w = write(
+            &mut r,
+            "work",
+            json!([{"op": "create", "type": "claim", "parent": made["$s"], "body": format!("Claim {} words.", "x".repeat(i))}]),
+        )
+        .unwrap();
+        covered.insert(id(&w.created["op0"]));
+        let whole = r
+            .read()
+            .brief_ids(&work(), &covered, Some(usize::MAX))
+            .unwrap();
+        assert!(whole.next.is_none(), "uncapped at {i}");
+        if covered.len() > 1 {
+            assert!(!whole.neighbors.is_empty(), "the section's rows at {i}");
+        }
+        let tokens = serde_json::to_string(&whole).unwrap().len() / 4;
+        let fits = r.read().brief_ids(&work(), &covered, Some(tokens)).unwrap();
+        assert!(fits.next.is_none(), "{tokens} tokens hold it at {i}");
+        assert_eq!(
+            serde_json::to_string(&fits).unwrap(),
+            serde_json::to_string(&whole).unwrap(),
+            "whole at {i}"
+        );
+        let cut = r
+            .read()
+            .brief_ids(&work(), &covered, Some(tokens - 1))
+            .unwrap();
+        assert!(cut.truncated, "{} tokens cut it at {i}", tokens - 1);
+    }
+}
