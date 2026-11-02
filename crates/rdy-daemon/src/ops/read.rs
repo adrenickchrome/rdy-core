@@ -157,6 +157,15 @@ pub(super) fn status(cx: &OpContext) -> Result<Value, RdyError> {
     if !carried.is_empty() {
         v["redaction_warnings"] = to_json(&carried);
     }
+    // the byte report: one serialized census, so no write lands inside it (D-4YRQ4)
+    let bytes = cx.engine.read_serialized(Box::new(|r| {
+        let mut v = json!({});
+        super::project::add_log_bytes(&mut v, r)?;
+        Ok(v)
+    }))?;
+    if let (Some(into), Value::Object(from)) = (v.as_object_mut(), bytes) {
+        into.extend(from);
+    }
     Ok(v)
 }
 

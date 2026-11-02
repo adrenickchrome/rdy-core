@@ -1,5 +1,6 @@
 //! The log's byte report and compact, on one project (D-4YRQ4).
-use crate::{E_LIMIT, Rdy, RdyError};
+use crate::engine::Engine;
+use crate::{E_LIMIT, E_PERMISSION, Rdy, RdyError, Session};
 use rdy_store::compact::CompactError;
 pub use rdy_store::compact::{CompactReport, KindBytes, LogBytes};
 
@@ -27,4 +28,25 @@ impl Rdy {
     pub fn compact(&self, dry_run: bool) -> Result<CompactReport, RdyError> {
         Ok(self.store.compact(dry_run)?)
     }
+}
+
+/// `rdy compact` and `rdy_compact` (D-4YRQ4): the writer's guard, then the report as JSON. A role
+/// that cannot write is refused, with or without `dry_run`, before the store is touched. The call
+/// is a serialized read: it seals no batch and publishes nothing.
+pub fn run_compact(
+    engine: &dyn Engine,
+    session: &Session,
+    dry_run: bool,
+) -> Result<serde_json::Value, RdyError> {
+    if !session.role.can_write() {
+        return Err(RdyError::new(
+            E_PERMISSION,
+            "role Reader cannot compact",
+            "start the session as a writer",
+        ));
+    }
+    engine.read_serialized(Box::new(move |r| {
+        let report = r.compact(dry_run)?;
+        Ok(serde_json::to_value(report).expect("a report serializes"))
+    }))
 }

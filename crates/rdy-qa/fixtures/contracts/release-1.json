@@ -296,6 +296,26 @@
             ]
           }
         },
+        "compact": {
+          "exits": [
+            0
+          ],
+          "stdout": {
+            "by_kind": [
+              {
+                "bytes": "number",
+                "kind": "number",
+                "name": "string",
+                "removed_bytes": "number"
+              }
+            ],
+            "log_bytes": "number",
+            "notes": [],
+            "on_disk_bytes": "number",
+            "punched_bytes": "number",
+            "removed_bytes": "number"
+          }
+        },
         "config": {
           "exits": [
             0
@@ -425,10 +445,19 @@
           ],
           "stdout": {
             "alt_sets": "number",
+            "by_kind": [
+              {
+                "bytes": "number",
+                "kind": "number",
+                "name": "string",
+                "removed_bytes": "number"
+              }
+            ],
             "frames": "number",
             "intents": "number",
             "landed_changes": "number",
             "landings": "number",
+            "log_bytes": "number",
             "open_report": {
               "catch_up_commits": "number",
               "caught_up_frames": "number",
@@ -438,6 +467,7 @@
               "unclean_shutdown": "bool"
             },
             "quarantine": [],
+            "removed_bytes": "number",
             "reviews": "number",
             "transitions": "number",
             "unlogged_moves": "number",
@@ -1473,6 +1503,14 @@
             0
           ],
           "stdout": {
+            "by_kind": [
+              {
+                "bytes": "number",
+                "kind": "number",
+                "name": "string",
+                "removed_bytes": "number"
+              }
+            ],
             "coverage": {
               "dimensions": {
                 "complete": "number",
@@ -1489,6 +1527,7 @@
             },
             "daemon": "null",
             "landings": "number",
+            "log_bytes": "number",
             "open_report": {
               "catch_up_commits": "number",
               "caught_up_frames": "number",
@@ -1499,6 +1538,7 @@
             },
             "pack": "string",
             "quarantine": [],
+            "removed_bytes": "number",
             "repo_id": "string",
             "seq": {
               "offset": "number",
@@ -10658,6 +10698,77 @@
         {
           "args": [
             {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "id": "dry_run",
+              "long": "dry-run",
+              "num_args": "0",
+              "value_names": [
+                "DRY_RUN"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "json",
+              "long": "json",
+              "num_args": "0",
+              "value_names": [
+                "JSON"
+              ]
+            },
+            {
+              "action": "set",
+              "global": true,
+              "id": "project",
+              "long": "project",
+              "num_args": "1",
+              "value_names": [
+                "PROJECT"
+              ]
+            },
+            {
+              "action": "set_true",
+              "defaults": [
+                "false"
+              ],
+              "global": true,
+              "id": "no_daemon",
+              "long": "no-daemon",
+              "num_args": "0",
+              "value_names": [
+                "NO_DAEMON"
+              ]
+            },
+            {
+              "action": "help",
+              "id": "help",
+              "long": "help",
+              "num_args": "0",
+              "short": "h"
+            }
+          ],
+          "groups": [
+            {
+              "args": [
+                "dry_run"
+              ],
+              "id": "CompactArgs",
+              "multiple": true,
+              "required": false
+            }
+          ],
+          "name": "compact",
+          "subcommands": []
+        },
+        {
+          "args": [
+            {
               "action": "set",
               "id": "dir",
               "index": 1,
@@ -15849,6 +15960,23 @@
           ]
         }
       },
+      "rdy_compact": {
+        "ok": {
+          "by_kind": [
+            {
+              "bytes": "number",
+              "kind": "number",
+              "name": "string",
+              "removed_bytes": "number"
+            }
+          ],
+          "log_bytes": "number",
+          "notes": [],
+          "on_disk_bytes": "number",
+          "punched_bytes": "number",
+          "removed_bytes": "number"
+        }
+      },
       "rdy_context": {
         "ok": {
           "areas": [
@@ -18412,6 +18540,7 @@
       "rdy_auth",
       "rdy_brief",
       "rdy_clone",
+      "rdy_compact",
       "rdy_context",
       "rdy_coverage",
       "rdy_decide",
@@ -18927,6 +19056,22 @@
           "required": [
             "dir"
           ],
+          "type": "object"
+        }
+      },
+      "rdy_compact": {
+        "input_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "dry_run": {
+              "description": "true: report bytes without punching holes. Default false.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
           "type": "object"
         }
       },

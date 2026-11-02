@@ -1,0 +1,123 @@
+{
+  "by_kind": [
+    {
+      "bytes": 3515,
+      "kind": 1,
+      "name": "block",
+      "removed_bytes": 60
+    },
+    {
+      "bytes": 4781,
+      "kind": 2,
+      "name": "change",
+      "removed_bytes": 179
+    },
+    {
+      "bytes": 1703,
+      "kind": 3,
+      "name": "proposal",
+      "removed_bytes": 0
+    },
+    {
+      "bytes": 1744,
+      "kind": 4,
+      "name": "landing",
+      "removed_bytes": 0
+    },
+    {
+      "bytes": 2473,
+      "kind": 5,
+      "name": "snapshot",
+      "removed_bytes": 0
+    },
+    {
+      "bytes": 12778,
+      "kind": 8,
+      "name": "ref_update",
+      "removed_bytes": 0
+    },
+    {
+      "bytes": 7633,
+      "kind": 13,
+      "name": "view_op",
+      "removed_bytes": 0
+    },
+    {
+      "bytes": 3982,
+      "kind": 14,
+      "name": "batch_commit",
+      "removed_bytes": 0
+    },
+    {
+      "bytes": 81,
+      "kind": 15,
+      "name": "intent",
+      "removed_bytes": 0
+    },
+    {
+      "bytes": 88,
+      "kind": 16,
+      "name": "alt_set",
+      "removed_bytes": 0
+    },
+    {
+      "bytes": 754,
+      "kind": 17,
+      "name": "review",
+      "removed_bytes": 0
+    },
+    {
+      "bytes": 587,
+      "kind": 18,
+      "name": "tension",
+      "removed_bytes": 0
+    },
+    {
+      "bytes": 3753,
+      "kind": 19,
+      "name": "transition",
+      "removed_bytes": 0
+    },
+    {
+      "bytes": 741,
+      "kind": 20,
+      "name": "redaction",
+      "removed_bytes": 0
+    },
+    {
+      "bytes": 323,
+      "kind": 21,
+      "name": "redaction_residue",
+      "removed_bytes": 0
+    },
+    {
+      "bytes": 133,
+      "kind": 22,
+      "name": "redaction_apply",
+      "removed_bytes": 0
+    },
+    {
+      "bytes": 1806,
+      "kind": 24,
+      "name": "plan",
+      "removed_bytes": 0
+    },
+    {
+      "bytes": 9741,
+      "kind": 25,
+      "name": "assessment",
+      "removed_bytes": 0
+    },
+    {
+      "bytes": 263,
+      "kind": 28,
+      "name": "check_request",
+      "removed_bytes": 0
+    }
+  ],
+  "log_bytes": 56879,
+  "notes": [],
+  "on_disk_bytes": 8192,
+  "punched_bytes": 0,
+  "removed_bytes": 239
+}

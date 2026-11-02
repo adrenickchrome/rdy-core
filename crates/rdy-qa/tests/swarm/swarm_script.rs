@@ -45,6 +45,11 @@ fn sg3_every_agent_script_has_the_required_acts() {
         }
         assert!(names(&s.agents[0]).contains("alt_create"));
         assert!(names(&s.agents[1]).contains("alt_create"));
+        // mh7: writer 0 holds the compact act, and no other agent does
+        assert!(names(&s.agents[0]).contains("compact"), "seed {seed}");
+        for (i, acts) in s.agents.iter().enumerate().skip(1) {
+            assert!(!names(acts).contains("compact"), "seed {seed} agent {i}");
+        }
         let p: BTreeSet<_> = s.person.iter().map(PersonAct::name).collect();
         for need in [
             "land",
@@ -121,6 +126,18 @@ fn sg3_the_outcome_table_is_closed() {
     assert!(!allowed("write", "E_INTERNAL"));
     assert!(!allowed("tensions", "E_BAD_INPUT"));
     assert!(!allowed("no_such_act", "E_NOT_FOUND"));
+    // mh7 (D-4YRQ4): a compact is a serialized read of a writer's session; it meets no
+    // semantic refusal, only the seeded kill
+    for code in [
+        "E_PERMISSION",
+        "E_LIMIT",
+        "E_STALE_BASE",
+        "E_BAD_INPUT",
+        "E_STORE_READ_ONLY",
+        "E_VIEW_CLOSED",
+    ] {
+        assert!(!allowed("compact", code), "compact allows {code}");
+    }
     assert!(allowed("write", "E_BRIEF_STALE"));
     assert!(allowed("review_submit", "E_REVIEW_STALE"));
     assert!(allowed("inbox_resume", "E_BAD_INPUT"));
@@ -854,7 +871,7 @@ fn ds1_scripts_hold_the_forced_include_sequence() {
 /// refusals are those of M3d: the plan answers still allow no refusal.
 #[test]
 fn nb10_swarm_grouping_needs_no_new_act_or_outcome() {
-    assert_eq!(Act::ALL_NAMES.len(), 22);
+    assert_eq!(Act::ALL_NAMES.len(), 23);
     assert_eq!(
         Act::ALL_NAMES,
         [
@@ -880,6 +897,7 @@ fn nb10_swarm_grouping_needs_no_new_act_or_outcome() {
             "check_run",
             "check_request",
             "check_submit",
+            "compact",
         ]
     );
     for seed in [1, 7, 20] {

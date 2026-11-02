@@ -52,7 +52,7 @@ use land::{approve, land, propose, tag};
 use plan::{plan, reaffirm, repin};
 use policy::policy;
 pub use project::{Cleaned, clean_quarantine, quarantine};
-use project::{check, fsck, reindex};
+use project::{check, compact, fsck, reindex};
 use publication::publication_check;
 use read::{block, coverage, impact, log, ls, show, status, suspects, tags, trace};
 use redaction::redact;
@@ -139,6 +139,7 @@ pub const OPS: &[&str] = &[
     "import",
     "reindex",
     "fsck",
+    "compact",
     "view",
     "wc_view",
     "wc_commit",
@@ -508,6 +509,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             reindex(cx)
         }
         "fsck" => fsck(cx, parse(op, args, "{clean_quarantine?, verbose?}")?),
+        "compact" => compact(cx, parse(op, args, "{dry_run?}")?),
         "view" => view_api::run_view(
             cx.engine,
             cx.session,

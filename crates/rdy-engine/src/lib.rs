@@ -131,7 +131,7 @@ pub use brief::{
     BriefRegistry, Briefing, Coverage, E_BRIEF_REQUIRED, E_BRIEF_STALE, W_BRIEF_STALE,
 };
 pub use carried_warning::{CarriedTargetIssue, CarriedWarning};
-pub use compact::{CompactReport, KindBytes, LogBytes};
+pub use compact::{CompactReport, KindBytes, LogBytes, run_compact};
 pub use coverage::{CoverageIssue, CoverageIssues, IssueCode};
 pub use decide::DecisionInput;
 pub use diff::{Diff, DiffChange, DiffEntry, LinkChange, StatusChange};

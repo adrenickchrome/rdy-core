@@ -2102,6 +2102,63 @@ fn sg5_the_checker_and_reindex_pass_at_the_end() {
     });
 }
 
+/// mh7 (D-4YRQ4): writer 0's one `compact` runs through the real MCP link on every seed, and the
+/// journal keeps the whole report: six fields, rows that add up to the log bytes. The act adds
+/// no frame: the log the frozen copy holds is at least as long as the report counted, and its
+/// `rdy fsck` (the final oracle) reports a byte total and removed bytes of its own. Only the
+/// seeded kill may cut the call; no refusal is allowed.
+#[test]
+fn mh7_swarm_runs_compact_through_mcp() {
+    each(|seed, o| {
+        let acts: Vec<&Entry> = o.journal.iter().filter(|e| e.act == "compact").collect();
+        assert_eq!(acts.len(), 1, "swarm seed {seed}: {acts:#?}");
+        let e = acts[0];
+        assert_eq!(e.actor, "agent:a0", "swarm seed {seed}");
+        assert!(
+            e.change.is_none() && e.view.is_none(),
+            "swarm seed {seed}: {e:?}"
+        );
+        match &e.outcome {
+            Met::Ok => {}
+            Met::Lost => return,
+            other => panic!("swarm seed {seed}: compact met {other:?}"),
+        }
+        let r = e.reply.as_ref().expect("the journal keeps the report");
+        let mut keys: Vec<&str> = r.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "by_kind",
+                "log_bytes",
+                "notes",
+                "on_disk_bytes",
+                "punched_bytes",
+                "removed_bytes"
+            ],
+            "swarm seed {seed}: {r}"
+        );
+        let rows = r["by_kind"].as_array().unwrap();
+        assert!(!rows.is_empty(), "swarm seed {seed}");
+        assert_eq!(
+            rows.iter()
+                .map(|x| x["bytes"].as_u64().unwrap())
+                .sum::<u64>(),
+            r["log_bytes"].as_u64().unwrap(),
+            "swarm seed {seed}"
+        );
+        // the frozen copy holds the log the report counted, and more
+        let (ok, fsck) = oracle::fsck(&o.frozen, &o.served.env_pairs());
+        assert!(ok, "swarm seed {seed}: rdy fsck failed: {fsck}");
+        assert!(
+            fsck["log_bytes"].as_u64().unwrap() >= r["log_bytes"].as_u64().unwrap(),
+            "swarm seed {seed}: the act shortened the log: {fsck} against {r}"
+        );
+        assert!(fsck["removed_bytes"].is_u64(), "swarm seed {seed}: {fsck}");
+        assert!(fsck["by_kind"].is_array(), "swarm seed {seed}: {fsck}");
+    });
+}
+
 /// D-K0SS1, R1: a land of a version that a close of its view withdrew (a losing member's, by
 /// the landing that chose its set) meets `E_VIEW_CLOSED`, a row of the closed table.
 #[test]

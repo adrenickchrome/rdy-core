@@ -60,6 +60,7 @@ mod cli_site;
 mod cli_site_profiles;
 mod cli_state;
 mod cli_status_views;
+mod cli_store_compact;
 mod cli_stream;
 mod cli_supporting;
 mod cli_suspects;

@@ -168,6 +168,10 @@ pub(crate) fn fsck(env: &Env, a: FsckArgs) -> Result<(Value, String), ErrorReply
                 num(&v["open_report"]["caught_up_frames"])
             ));
     }
+    for line in crate::compact_cmd::byte_lines(&v) {
+        t.push('\n');
+        t.push_str(&line);
+    }
     Ok((v, t))
 }
 
