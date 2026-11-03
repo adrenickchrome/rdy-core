@@ -1820,7 +1820,7 @@ fn never_reason(name: &str) -> &'static str {
 #[test]
 fn mg5_never_under_policy_items_reach_the_person() {
     let (p, mut cases) = Project::qa_pack("", never_world);
-    // the removal first: any later write moves its report (see the ignored pin below)
+    // the removal first: built, any later write moves its report (ignored pins below, TASK-1233)
     cases.sort_by_key(|c| match c.name {
         "redaction" => 0,
         "owners" => 2,
@@ -2803,18 +2803,15 @@ fn mg5_disputes_record_the_route_without_blocking_the_next_landing() {
     assert_eq!(p.log().len(), count + 1, "only the correction landed");
 }
 
-/// Found by this task (mg5): an open removal request's card goes stale when any unrelated view
-/// writes, and the person's whole queue then fails with `E_REDACTION_STALE`, so no card of any
-/// item can be read or answered. The decided behavior is open (a stale removal card could drop,
-/// be marked, or refuse only itself); this pin states the queue staying readable and is ignored
-/// until the bounded fix and its ruling land.
-#[test]
-#[ignore = "defect: an unrelated write makes the whole queue E_REDACTION_STALE (mg5 report)"]
-fn mg5_an_unrelated_write_keeps_the_queue_with_a_removal_card_readable() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+// ---------------------------------------------------------------- a stale removal request
+
+/// The removal recipe: doc `keys` holds the secret, doc `other` holds `O` and `O2`. An ordinary
+/// version `other` (it updates `O`) is proposed first, then the request to remove the secret
+/// and its version `redact`. The ordinary version, the removal version, the secret's id and
+/// `O2`'s id.
+fn removal_world(r: &mut Rdy) -> (ProposalInfo, ProposalInfo, String, String) {
     let w = write(
-        &mut r,
+        r,
         "seed",
         json!([
             {"op": "create", "type": "doc", "id": "$kd", "fields": {"name": "keys", "title": "Keys", "doc_type": "overview"}},
@@ -2822,11 +2819,19 @@ fn mg5_an_unrelated_write_keeps_the_queue_with_a_removal_card_readable() {
             {"op": "create", "type": "prose", "id": "$secret", "parent": "$ks", "body": "The code is 1234."},
             {"op": "create", "type": "doc", "id": "$od", "fields": {"name": "other", "title": "Other", "doc_type": "overview"}},
             {"op": "create", "type": "section", "id": "$os", "parent": "$od", "fields": {"title": "More"}},
-            {"op": "create", "type": "claim", "id": "$o", "parent": "$os", "body": "O holds."}
+            {"op": "create", "type": "claim", "id": "$o", "parent": "$os", "body": "O holds."},
+            {"op": "create", "type": "claim", "id": "$o2", "parent": "$os", "body": "O2 holds."}
         ]),
     )
     .unwrap();
-    land(&mut r, "seed").unwrap();
+    land(r, "seed").unwrap();
+    write(
+        r,
+        "other",
+        json!([{"op": "update", "id": w.created["$o"], "body": "O holds, now."}]),
+    )
+    .unwrap();
+    let other = propose_ready(r, "other");
     r.redact_in(
         &writer(),
         "redact",
@@ -2838,20 +2843,115 @@ fn mg5_an_unrelated_write_keeps_the_queue_with_a_removal_card_readable() {
         },
     )
     .unwrap();
-    r.propose(&writer(), "redact", "redact", Some(TEST_SUMMARY))
+    let redact = r
+        .propose(&writer(), "redact", "redact", Some(TEST_SUMMARY))
         .unwrap();
-    assert_eq!(queue_for(&r, PERSON).items.len(), 1);
-    // a view in another doc writes; nothing touches the removal's target
-    write(
-        &mut r,
-        "x",
-        json!([{"op": "update", "id": w.created["$o"], "body": "O holds, now."}]),
+    (
+        other,
+        redact,
+        w.created["$secret"].clone(),
+        w.created["$o2"].clone(),
     )
-    .unwrap();
-    let q = r.read().pending(&PendingQuery {
-        person: PERSON.into(),
-        session_ref: None,
-        max_tokens: CARD_MAX_TOKENS,
+}
+
+/// Found by this task (mg5; ruling task-5, TASK-1233, canon p-3FBMK and p-EYDH3): a write in
+/// another view whose assessment names neither the removed block, its payload nor a quarantine
+/// name does not make an open removal request stale ("An unrelated write does not."). The
+/// queue stays readable, the removal card is the one the person saw, and the person can land
+/// it. Built, the whole queue fails with `E_REDACTION_STALE`; the bounded fix lands on main
+/// first and the orchestrator removes the ignore before the gate closes.
+#[test]
+#[ignore = "bounded fix: fix/redaction-stale (TASK-1233)"]
+fn mg5_an_unrelated_write_keeps_the_queue_with_a_removal_card_readable() {
+    let (p, (other, redact, _, o2)) = Project::new(removal_world);
+    let seen = p
+        .shown(Route::Relayed, &redact.r#ref)
+        .expect("the removal card reaches the person");
+    // a view in the other doc writes; nothing in it names the removal's target
+    p.seed(|r| {
+        write(
+            r,
+            "x",
+            json!([{"op": "update", "id": o2, "body": "O2 holds, now."}]),
+        )
+        .unwrap()
     });
-    assert!(q.is_ok(), "the queue stays readable: {:?}", q.err());
+    // MCP, CLI and local UI read the queue whole, and the removal card is unchanged
+    let q = p.mcp_queue();
+    assert_eq!(shown_in(&q, &redact.r#ref), Some(seen.clone()), "{q:#}");
+    assert!(shown_in(&q, &other.r#ref).is_some(), "{q:#}");
+    assert_eq!(shown_in(&p.cli_queue(), &redact.r#ref), Some(seen.clone()));
+    assert!(p.ui_form(&redact.r#ref).is_some(), "the UI shows the card");
+    // the person lands the removal on the card they saw, then the other version
+    let before = p.log().len();
+    p.answer(Route::Relayed, &seen, "approve").done();
+    assert_eq!(p.log().len(), before + 1, "the removal landed");
+    p.land_via(Route::CliApprove, &other.r#ref);
+}
+
+/// The other half of the same ruling: a write whose assessment names the removed block makes
+/// the request stale. The queue still reads whole on every route and keeps the stale item, so it
+/// is not lost silently; showing its card and answering it, on every route, refuse with the
+/// canon `E_REDACTION_STALE` and land nothing; every other item stays readable and answerable.
+/// No new code, field or tool. Ignored with its pair until the bounded fix lands.
+#[test]
+#[ignore = "bounded fix: fix/redaction-stale (TASK-1233)"]
+fn mg5_a_write_naming_the_removed_block_refuses_only_the_removal_card() {
+    let (p, (other, redact, secret, _)) = Project::new(removal_world);
+    let seen = p
+        .shown(Route::Relayed, &redact.r#ref)
+        .expect("the removal card reaches the person");
+    // a view writes the removal's target: its assessment names the removed block
+    p.seed(|r| {
+        write(
+            r,
+            "y",
+            json!([{"op": "update", "id": secret, "body": "The code is 5678."}]),
+        )
+        .unwrap()
+    });
+    let stale = |what: &str, code: &str, e: &Value| {
+        assert_eq!(code, "E_REDACTION_STALE", "{what}: {e:#}");
+        if e.get("message").is_some() {
+            assert_eq!(
+                e["message"], "The redaction report changed after the request was recorded.",
+                "{what}"
+            );
+            assert_eq!(
+                e["fix"], "Record a new request, show its report, and ask for approval again.",
+                "{what}"
+            );
+        }
+    };
+    // the queue reads whole on MCP and the CLI; the stale item stays in it
+    for (what, q) in [("mcp", p.mcp_queue()), ("cli", p.cli_queue())] {
+        let items = q["items"].as_array().unwrap();
+        assert!(
+            items.iter().any(|i| i["ref"] == *redact.r#ref),
+            "{what}: the stale removal stays listed: {q:#}"
+        );
+        assert!(shown_in(&q, &other.r#ref).is_some(), "{what}: {q:#}");
+    }
+    // the local UI refuses to show the stale card
+    let page = http::get(&format!(
+        "{}{}",
+        p.site().trim_end_matches('/'),
+        item_path(&redact.r#ref)
+    ));
+    let text = String::from_utf8_lossy(&page.body).into_owned();
+    assert_ne!(page.status, 200, "{text}");
+    assert_eq!(
+        ui_code(&text).as_deref(),
+        Some("E_REDACTION_STALE"),
+        "{text}"
+    );
+    // every route refuses to answer it, and nothing lands
+    let before = p.log();
+    for route in ROUTES {
+        let (code, e) = p.answer(route, &seen, "approve").refused();
+        stale(&format!("{route:?}"), &code, &e);
+        assert_eq!(p.log(), before, "{route:?}: nothing landed");
+    }
+    // the other version stays answerable and lands
+    p.land_via(Route::Relayed, &other.r#ref);
 }
