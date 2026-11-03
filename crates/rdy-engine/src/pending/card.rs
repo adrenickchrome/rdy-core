@@ -138,13 +138,7 @@ fn most(hi: usize, ok: impl Fn(usize) -> bool) -> usize {
 /// never a card that hides them. Any other card is [`render`]'s, which may stay over a very
 /// small budget as before.
 pub fn render_checked(item: &Item, max_tokens: usize) -> Result<String, RdyError> {
-    let reports = &item.removal_reports;
-    if item
-        .removal
-        .iter()
-        .flatten()
-        .any(|c| !reports.contains_key(&c.report))
-    {
+    if removal_stale(item) {
         return Err(StoreError::RedactionStale.into());
     }
     let card = render(item, max_tokens);
@@ -152,6 +146,17 @@ pub fn render_checked(item: &Item, max_tokens: usize) -> Result<String, RdyError
         return Err(redaction_budget());
     }
     Ok(card)
+}
+
+/// Whether `item` carries a removal request whose report it does not hold (`removal_reports`,
+/// by report hash): a stale request, whose report the queue leaves out, or a card that names
+/// another report. Its card is `E_REDACTION_STALE` ([`render_checked`]).
+pub(crate) fn removal_stale(item: &Item) -> bool {
+    let reports = &item.removal_reports;
+    item.removal
+        .iter()
+        .flatten()
+        .any(|c| !reports.contains_key(&c.report))
 }
 
 /// The hash of the card at [`CARD_MAX_TOKENS`]; with removal requests, the removal digest; with

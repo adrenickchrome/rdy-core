@@ -132,7 +132,8 @@
 //! answer took out aside) name the decisions they re-affirm or fully retire, which no card
 //! lists.
 use super::card::{
-    CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, REMOVAL_IRREVERSIBLE, card_hash, render_checked,
+    CARD_DEFAULT_TOKENS, CARD_MAX_TOKENS, REMOVAL_IRREVERSIBLE, card_hash, removal_stale,
+    render_checked,
 };
 use super::item::{ExceptionKind, Fact, Item, ItemKind, ItemOption, Recommended, RemovalCard, age};
 use super::plan::{
@@ -144,7 +145,7 @@ use super::snooze::hide_snoozed;
 use super::tensions::tension_items;
 use crate::coverage::change::{candidate_build, candidate_change};
 use crate::coverage::{CandidateCoverage, confidence_in, lands_unapplied};
-use crate::error::{E_VALIDATION, RdyError, redaction_limit};
+use crate::error::{E_REDACTION_STALE, E_VALIDATION, RdyError, redaction_limit};
 use crate::gate::{ProposalRef, changes_of, open_proposals};
 use crate::lexicon::Lexicon;
 use crate::plan::compute::ComputedPlan;
@@ -310,7 +311,7 @@ impl ReadState {
                 continue;
             }
             for i in shown {
-                items.push(finish(i, max)?);
+                items.push(listed(i, max)?);
             }
         }
         Ok(Pending {
@@ -1124,15 +1125,34 @@ fn finish(mut item: Item, max_tokens: usize) -> Result<Item, RdyError> {
     Ok(item)
 }
 
+/// `item` as the list shows it: [`finish`]'s, except an item whose removal request is stale
+/// ([`removal_stale`]). That item stays in the list, but its card is never shown: the card says
+/// that it was not read, with the refusal and its fix, and its hash is empty. Showing the card or
+/// answering the item is `E_REDACTION_STALE` (p-3FBMK, p-EYDH3).
+fn listed(mut item: Item, max_tokens: usize) -> Result<Item, RdyError> {
+    if !removal_stale(&item) {
+        return finish(item, max_tokens);
+    }
+    let e: RdyError = rdy_store::StoreError::RedactionStale.into();
+    item.card = format!(
+        "{}  {}\n\nremoval card: not read ({}: {}) (fix: {})",
+        item.r#ref, item.title, e.code, e.message, e.fix
+    );
+    item.card_hash = String::new();
+    Ok(item)
+}
+
 /// The removal cards of a version, by request hash (None when no change carries a request),
 /// and the quarantine names of each report they name, by report hash.
 type RemovalFacts = (Option<Vec<RemovalCard>>, BTreeMap<Hash, Vec<String>>);
 
 /// The removal card of each request that a change of `changes` carries, by request hash, and
 /// the quarantine names of the report each card names. Each request must still be fresh
-/// (`redaction::check_fresh`). Each card is read from the request record: the report hash is
-/// the hash of the complete manifest the request binds, never of a shortened presentation, and
-/// the names are that manifest's.
+/// (`redaction::check_fresh`): a stale request keeps its card, but its report is left out, so
+/// its card is `E_REDACTION_STALE` when it is shown or answered ([`render_checked`]) and the
+/// rest of the queue stays readable (p-3FBMK, p-EYDH3). Each card is read from the request
+/// record: the report hash is the hash of the complete manifest the request binds, never of a
+/// shortened presentation, and the names are that manifest's.
 fn removal_cards(st: &ReadState, changes: &[Hash]) -> Result<RemovalFacts, RdyError> {
     let reader = st.reader();
     let mut cards: Vec<RemovalCard> = vec![];
@@ -1144,8 +1164,12 @@ fn removal_cards(st: &ReadState, changes: &[Hash]) -> Result<RemovalFacts, RdyEr
         };
         // the card shows the removal the request recorded only while its complete report is
         // still that one: the shared freshness check runs first, and a stale request is
-        // `E_REDACTION_STALE`, never refreshed (D-6B1W1, D-14SAY)
-        crate::redaction::check_fresh(st, &request, &[])?;
+        // `E_REDACTION_STALE`, never refreshed (D-6B1W1, D-14SAY); it refuses only its own card
+        let fresh = match crate::redaction::check_fresh(st, &request, &[]) {
+            Ok(()) => true,
+            Err(e) if e.code == E_REDACTION_STALE => false,
+            Err(e) => return Err(e),
+        };
         let req = reader.redaction_request(&request)?;
         let buf = match &mut buf {
             Some(b) => b,
@@ -1161,7 +1185,9 @@ fn removal_cards(st: &ReadState, changes: &[Hash]) -> Result<RemovalFacts, RdyEr
             .try_fold(0u64, |n, s| n.checked_add(u64::from(s.len)))
             .ok_or_else(|| redaction_limit(limit::BYTES))?;
         let n = |len: usize| u64::try_from(len).map_err(|_| redaction_limit(limit::SELECTED));
-        reports.insert(report, m.quarantine.clone());
+        if fresh {
+            reports.insert(report, m.quarantine.clone());
+        }
         cards.push(RemovalCard {
             request,
             report,

@@ -624,7 +624,8 @@ impl Own {
         let mut open: Option<Location> = None;
         let mut own: BTreeSet<Location> = BTreeSet::new();
         let mut versions: HashSet<Hash> = HashSet::new();
-        for f in frames {
+        let mut request_at = None;
+        for (i, f) in frames.iter().enumerate() {
             let start = *open.get_or_insert(f.loc);
             starts.push(start);
             if f.kind == kinds::BATCH_COMMIT {
@@ -633,7 +634,10 @@ impl Own {
             let mine = f.present
                 && match f.kind {
                     kinds::CHANGE => f.hash == self.carrier,
-                    kinds::REDACTION => f.hash == self.request,
+                    kinds::REDACTION if f.hash == self.request => {
+                        request_at.get_or_insert(i);
+                        true
+                    }
                     kinds::PROPOSAL => {
                         let carries = reader
                             .get_typed::<Proposal>(kinds::PROPOSAL, &f.hash)?
@@ -658,6 +662,7 @@ impl Own {
             starts,
             own,
             versions,
+            request_at,
         })
     }
 }
@@ -668,6 +673,8 @@ struct OwnBatches {
     own: BTreeSet<Location>,
     /// The proposal versions that hold the carrier: the versions that carry the request.
     versions: HashSet<Hash>,
+    /// The place in the walk of the request record's first frame.
+    request_at: Option<usize>,
 }
 
 impl OwnBatches {
@@ -1236,7 +1243,20 @@ pub(crate) fn compute_excluding(
     }
 
     // the closure of references over the histories
-    let dep_hit = dep_closure(&changes, &affected_changes)?;
+    let mut dep_hit = dep_closure(&changes, &affected_changes)?;
+    // p-EYDH3 (TASK-1233): an unrelated write does not stale a recorded request. A change
+    // written after the request joins its report only directly (`affected_changes`: it writes,
+    // or names as a base, an affected version), never because it depends on a change that
+    // holds the content; so neither do its views, proposals or landings. Every change before
+    // the request counts as when the request was recorded (deps only name earlier changes)
+    if let Some(at) = own.as_ref().and_then(|o| o.request_at) {
+        let before: HashSet<Hash> = frames[..at]
+            .iter()
+            .filter(|f| f.kind == kinds::CHANGE)
+            .map(|f| f.hash)
+            .collect();
+        dep_hit.retain(|c| before.contains(c));
+    }
     let hit = |c: &Hash| dep_hit.contains(c) || affected_changes.contains(c);
     let mut inside: BTreeSet<(u8, String, u8, bool)> = BTreeSet::new();
     let mut row = |kind: ImpactKind, record: String, relation: ImpactRelation, erasable: bool| {
