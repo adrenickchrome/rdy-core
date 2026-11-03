@@ -1024,6 +1024,14 @@ pub(crate) fn compute_excluding(
     let mut tensions: Vec<(Hash, SemanticTension)> = vec![];
     let mut answers: Vec<(Hash, Answer)> = vec![];
     let mut signatures: Vec<(Hash, Hash)> = vec![];
+    // TASK-1237 (D-6B1W1, p-EYDH3): in a request's freshness, the records written after the
+    // request that only repeat canon's current state add no copy or reach: a later landing's
+    // state snapshot (version hashes only) is left out, and a later landing or answer counts
+    // only through what changes the removed content. A dry run and a new request read them all
+    let after = own.as_ref().and_then(|o| o.request_at);
+    let later = |i: usize| after.is_some_and(|at| i > at);
+    let mut later_landings: HashSet<Hash> = HashSet::new();
+    let mut later_answers: HashSet<Hash> = HashSet::new();
     // the carried records, reduced to what their references need (no decoded record is kept)
     let mut carried = Carried::default();
     let audit = ImpactKind::AuditText;
@@ -1097,8 +1105,12 @@ pub(crate) fn compute_excluding(
             kinds::LANDING => {
                 let l: LandingRecord = reader.get_typed(kinds::LANDING, &h)?;
                 quotes.scan(ImpactKind::Landing, &rec, false, &l)?;
+                if later(i) {
+                    later_landings.insert(h);
+                }
                 landings.insert(h, l);
             }
+            kinds::SNAPSHOT if later(i) => {}
             kinds::SNAPSHOT => {
                 let s: StateSnapshot = reader.get_typed(kinds::SNAPSHOT, &h)?;
                 if s.blocks.values().any(|v| affected_versions.contains(v)) {
@@ -1129,6 +1141,9 @@ pub(crate) fn compute_excluding(
             kinds::ANSWER => {
                 let a: Answer = reader.get_typed(kinds::ANSWER, &h)?;
                 quotes.scan(ImpactKind::Answer, &rec, false, &a)?;
+                if later(i) {
+                    later_answers.insert(h);
+                }
                 answers.push((h, a));
             }
             kinds::INTENT => {
@@ -1305,15 +1320,25 @@ pub(crate) fn compute_excluding(
     for v in views_hit {
         row(ImpactKind::View, v.to_string(), refs, false);
     }
+    // a landing after the request counts only when it lands a change of the removed content
+    // (TASK-1237); its tags still reach the content through its history
     let landing_direct: HashSet<Hash> = landings
         .iter()
-        .filter(|(_, l)| l.changes.iter().any(&hit))
+        .filter(|(h, l)| {
+            if later_landings.contains(*h) {
+                l.changes.iter().any(|c| affected_changes.contains(c))
+            } else {
+                l.changes.iter().any(&hit)
+            }
+        })
         .map(|(h, _)| *h)
         .collect();
     let history = landing_history(&landings, &landing_direct)?;
     let mut affected_landings: HashSet<Hash> = HashSet::new();
     for (h, l) in &landings {
-        if landing_direct.contains(h) || snapshots.contains(&l.state) {
+        if landing_direct.contains(h)
+            || (!later_landings.contains(h) && snapshots.contains(&l.state))
+        {
             affected_landings.insert(*h);
             row(ImpactKind::Landing, h.to_string(), refs, false);
         }
@@ -1390,15 +1415,26 @@ pub(crate) fn compute_excluding(
             break;
         }
     }
+    // an answer after the request counts through a proposal or change only when that changes
+    // the removed content (TASK-1237)
+    let changing_proposals: HashSet<Hash> = proposals
+        .iter()
+        .filter(|(_, cs)| cs.iter().any(|c| affected_changes.contains(c)))
+        .map(|(p, _)| *p)
+        .collect();
     let affected_answers: Vec<Hash> = answers
         .iter()
-        .filter(|(_, a)| {
+        .filter(|(h, a)| {
+            let late = later_answers.contains(h);
             let target = a.targets.iter().any(|t| {
                 affected_versions.contains(t)
-                    || hit(t)
+                    || (if late {
+                        affected_changes.contains(t) || changing_proposals.contains(t)
+                    } else {
+                        hit(t) || affected_proposals.contains(t)
+                    })
                     || affected_reviews.contains(t)
                     || affected_tensions.contains(t)
-                    || affected_proposals.contains(t)
                     || affected_tags.contains(t)
                     || affected_landings.contains(t)
             });

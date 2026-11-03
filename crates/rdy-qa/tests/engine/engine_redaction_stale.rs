@@ -4,13 +4,18 @@
 //! it is `E_REDACTION_STALE` (p-3FBMK, p-EYDH3). A write to an affected record stales the
 //! request; an unrelated write does not, even one whose change depends on the change that holds
 //! the removed content.
+//!
+//! TASK-1237: the freshness of a request leaves out the records written after it that only
+//! repeat canon's current state: a later landing's state snapshot, and the landing and answer of
+//! a proposal that does not change the removed block. A new tag that reaches the block still
+//! stales the request, and the erasure set does not change.
 use rdy_engine::answer::AnswerRequest;
 use rdy_engine::answer::relay::RelayInput;
 use rdy_engine::pending::{CARD_MAX_TOKENS, Item, Pending, PendingQuery};
 use rdy_engine::redaction::RedactInput;
 use rdy_engine::*;
-use rdy_model::Role;
 use rdy_model::redaction::CONTENT_REMOVED;
+use rdy_model::{Hash, Role};
 use serde_json::json;
 
 const PERSON: &str = "human:t";
@@ -49,9 +54,19 @@ struct P {
     other: String,
     work: ProposalInfo,
     redact: ProposalInfo,
+    /// The recorded request.
+    request: Hash,
+    /// What the run before the request returned.
+    before: Option<ProposalInfo>,
 }
 
 fn project() -> P {
+    project_with(|_, _| None)
+}
+
+/// [`project`], with `before` run after `work` is proposed and before the request is recorded;
+/// it is given the claim's id.
+fn project_with(before: impl FnOnce(&mut Rdy, &str) -> Option<ProposalInfo>) -> P {
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
     let w = write(
@@ -78,6 +93,7 @@ fn project() -> P {
     let work = r
         .propose(&writer(), "work", "Notes", Some("Adds notes."))
         .unwrap();
+    let before = before(&mut r, &w.created["$o"]);
     let secret = w.created["$secret"].clone();
     let res = r
         .redact_in(
@@ -102,6 +118,8 @@ fn project() -> P {
         other: w.created["$o"].clone(),
         work,
         redact,
+        request: res.redaction.unwrap(),
+        before,
     };
     let q = queue(&p.r).expect("the queue reads");
     assert!(item(&q, &p.work.r#ref).is_some(), "{q:#?}");
@@ -243,4 +261,112 @@ fn fr4_a_write_naming_the_removed_block_stales_it() {
     assert_stale(&e, "the approval");
     let e = p.r.land(&approver(), &p.redact.id).unwrap_err();
     assert_stale(&e, "rdy approve");
+}
+
+/// The number and bytes of the payload spans the request binds: what its apply erases.
+fn erasure(r: &Rdy, request: &Hash) -> (usize, u64) {
+    let req = r.read().reader().redaction_request(request).unwrap();
+    let spans = &req.manifest.spans;
+    (spans.len(), spans.iter().map(|s| u64::from(s.len)).sum())
+}
+
+/// The removal's card is shown and its approval lands.
+fn assert_lands(p: &mut P, what: &str) {
+    let q = queue(&p.r).expect("the queue reads");
+    let removal = item(&q, &p.redact.r#ref).expect("the removal item");
+    assert!(
+        removal.card.contains("Content removal"),
+        "{what}: {}",
+        removal.card
+    );
+    let redact_ref = p.redact.r#ref.clone();
+    answer(p, &redact_ref, "approve").unwrap_or_else(|e| panic!("{what}: {e}"));
+    let canon = p.r.read().materialized(&Scope::Canon).unwrap();
+    let secret = rdy_model::BlockId::parse(&p.secret).unwrap();
+    assert_eq!(canon.get(&secret).unwrap().body, CONTENT_REMOVED, "{what}");
+}
+
+#[test]
+fn fr5_landing_an_unrelated_proposal_keeps_a_removal_fresh() {
+    let mut p = project();
+    // the landing writes a state snapshot that still names the secret's version, its answer and
+    // its landing record: none of them adds a copy or reach
+    let work_ref = p.work.r#ref.clone();
+    answer(&mut p, &work_ref, "approve").expect("the unrelated approval lands");
+    assert_lands(&mut p, "after an unrelated landing");
+}
+
+#[test]
+fn fr6_a_proposal_made_before_the_request_landing_after_keeps_it_fresh() {
+    // a proposal that depends on the secret's change (it updates a claim the same change wrote)
+    // and does not change the secret, made before the request: the request's report names it
+    let mut p = project_with(|r, other| {
+        write(
+            r,
+            "dep",
+            json!([{"op": "update", "id": other, "body": "O holds, still."}]),
+        );
+        Some(
+            r.propose(&writer(), "dep", "Claim", Some("Updates the claim."))
+                .unwrap(),
+        )
+    });
+    let dep = p.before.clone().unwrap();
+    answer(&mut p, &dep.r#ref, "approve").expect("the earlier proposal lands");
+    assert_lands(&mut p, "after the earlier proposal landed");
+}
+
+#[test]
+fn fr7_a_tag_after_the_request_that_reaches_the_block_stales_it() {
+    let mut p = project();
+    let work_ref = p.work.r#ref.clone();
+    answer(&mut p, &work_ref, "approve").expect("the unrelated approval lands");
+    // the tag's landing history holds the landing that wrote the secret
+    p.r.tag(&approver(), "v1.0.0", None, None).unwrap();
+    let q = queue(&p.r).expect("the queue reads");
+    let stale = item(&q, &p.redact.r#ref).expect("the stale item stays in the list");
+    assert!(!stale.card.contains("Content removal"), "{}", stale.card);
+    let redact_ref = p.redact.r#ref.clone();
+    let e = answer(&mut p, &redact_ref, "approve").unwrap_err();
+    assert_stale(&e, "the approval after a tag");
+    let e = p.r.land(&approver(), &p.redact.id).unwrap_err();
+    assert_stale(&e, "rdy approve after a tag");
+}
+
+#[test]
+fn fr8_the_erasure_set_is_unchanged_by_the_trim() {
+    let clock = pin_clock(1_000_000);
+    // without a landing in between
+    let mut a = project();
+    let want = erasure(&a.r, &a.request);
+    assert!(want.0 > 0 && want.1 > 0, "{want:?}");
+    assert_lands(&mut a, "with no landing in between");
+    drop((a, clock));
+    // with an unrelated landing in between: the request binds the same spans, the complete
+    // report computed now drops the same frames and bytes, and the apply erases the content
+    let _clock = pin_clock(1_000_000);
+    let mut b = project();
+    assert_eq!(erasure(&b.r, &b.request), want);
+    let work_ref = b.work.r#ref.clone();
+    answer(&mut b, &work_ref, "approve").expect("the unrelated approval lands");
+    let now =
+        b.r.read()
+            .redaction_report(&RedactInput {
+                targets: vec![b.secret.clone()],
+                reason_class: "secret".into(),
+                reason: "a leaked code".into(),
+                dry_run: true,
+            })
+            .unwrap();
+    assert_eq!((now.drop_frames as usize, now.drop_bytes), want);
+    assert_lands(&mut b, "after an unrelated landing");
+    assert_eq!(erasure(&b.r, &b.request), want);
+    let segs = b._dir.path().join(".rdy/store/segments");
+    for e in std::fs::read_dir(segs).unwrap() {
+        let bytes = std::fs::read(e.unwrap().path()).unwrap();
+        assert!(
+            !bytes.windows(SECRET.len()).any(|w| w == SECRET.as_bytes()),
+            "the content is erased"
+        );
+    }
 }
