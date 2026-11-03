@@ -4756,8 +4756,8 @@ use rdy_model::assessment::{AssessmentSeverity, AssessmentTensionStatus};
 use rdy_model::{Answer, AnswerAct, SemanticTension, decision};
 use rdy_qa::invariants::Violation;
 use rdy_qa::m3_audit::{
-    Hold, HoldKind, LandingFact, M3Facts, Shown as SeenCard, TemporalFacts, assessment_id,
-    check_m3_in, check_temporal, holds_of,
+    Hold, HoldKind, LandingFact, M3Facts, ObservedLanding, Shown as SeenCard, TemporalFacts,
+    assessment_id, audit_m3, check_m3_in, check_temporal, holds_of,
 };
 use rdy_qa::publication_scenario::{scan_local_links, tree};
 use rdy_qa::report::AREA_PROVEN_WITNESSES;
@@ -5097,6 +5097,72 @@ fn chain(st: &ReadState) -> Vec<(Hash, LandingRecord)> {
     out
 }
 
+/// Canon's landings in the order the log's `canon` ref updates name them (`LogAt::canon`), each
+/// with its record and its location: the committed history, read without following any record's
+/// `prev`. Also every way that history disagrees with the log: a `canon` value that is no landing
+/// id, a landing canon names twice, a landing whose batch did not set canon to it, a landing
+/// frame canon never named, and a chain of `prev`s (`chain`) that is not this history.
+fn canon_history(
+    st: &ReadState,
+    log: &LogAt,
+) -> (Vec<(Hash, LandingRecord, Location)>, Vec<String>) {
+    let reader = st.reader();
+    let mut out: Vec<(Hash, LandingRecord, Location)> = vec![];
+    let mut bad = vec![];
+    for (moved, v) in &log.canon {
+        let Some(h) = v else {
+            bad.push(format!(
+                "the canon ref update at {moved:?} names no landing"
+            ));
+            continue;
+        };
+        if out.iter().any(|(l, _, _)| l == h) {
+            bad.push(format!("canon is set to landing {} twice", h.short()));
+            continue;
+        }
+        let (rec, at) = match (reader.landing(h), reader.landing_location(h)) {
+            (Ok(rec), Ok(at)) => (rec, at),
+            (a, b) => {
+                bad.push(format!(
+                    "canon names landing {}, which cannot be read: {:?} {:?}",
+                    h.short(),
+                    a.err(),
+                    b.err()
+                ));
+                continue;
+            }
+        };
+        if !(at < *moved
+            && log.batch_start(at).is_some()
+            && log.batch_start(at) == log.batch_start(*moved))
+        {
+            bad.push(format!(
+                "landing {} at {at:?}: canon was set to it at {moved:?}, not by its own batch",
+                h.short()
+            ));
+        }
+        out.push((*h, rec, at));
+    }
+    for (at, h) in &log.landing_frames {
+        if !out.iter().any(|(l, _, _)| l == h) {
+            bad.push(format!(
+                "the landing frame {} at {at:?} is never canon",
+                h.short()
+            ));
+        }
+    }
+    let by_prev: Vec<Hash> = chain(st).into_iter().map(|(h, _)| h).collect();
+    let by_ref: Vec<Hash> = out.iter().map(|(h, _, _)| *h).collect();
+    if by_prev != by_ref {
+        bad.push(format!(
+            "the chain of prevs ({} landings) is not canon's ref history ({} landings)",
+            by_prev.len(),
+            by_ref.len()
+        ));
+    }
+    (out, bad)
+}
+
 /// What the person saw before each journaled landing it approved through chat: the version
 /// (`P-x@n`) and the card hash, by landing id. A route answer keeps them in its attempt; a
 /// relayed `land` keeps them in the `land_card` read just before it.
@@ -5139,35 +5205,80 @@ fn seen_cards(journal: &[Entry]) -> BTreeMap<String, (String, String)> {
 /// in log order. With them the person acts recorded before any log position are read at that
 /// position, never from the final state: a later answer to an item replaces the earlier one in
 /// the store's ref (`answer_of`), so a hold the person later answered over would be lost.
+///
+/// The same walk reads canon's head history from the log's own records, never from a landing
+/// record's `prev`: every `REF_UPDATE` frame that sets the ref `canon` (`canon`), every landing
+/// frame (`landing_frames`), every batch marker with its batch's first frame (`batches`), and
+/// every frame a removal zeroed with the location of the apply that authorizes it (`zeroed`).
 struct LogAt {
     answers: Vec<(Location, Answer)>,
     tensions: Vec<(Location, SemanticTension)>,
+    /// Each value the ref `canon` was set to, at its `REF_UPDATE` frame, in log order. `None`
+    /// is a value that is not a landing id.
+    canon: Vec<(Location, Option<Hash>)>,
+    landing_frames: Vec<(Location, Hash)>,
+    /// `(batch start, marker)` of every batch, in log order.
+    batches: Vec<(Location, Location)>,
+    /// `(frame, apply)`: a frame a removal zeroed, and where the log holds the apply.
+    zeroed: Vec<(Location, Option<Location>)>,
 }
 
 impl LogAt {
     fn read(st: &ReadState) -> LogAt {
         let reader = st.reader();
         let mut found = vec![];
+        let mut log = LogAt {
+            answers: vec![],
+            tensions: vec![],
+            canon: vec![],
+            landing_frames: vec![],
+            batches: vec![],
+            zeroed: vec![],
+        };
+        let mut dropped = vec![];
+        let mut applies = BTreeMap::new();
         let origin = Location {
             segment: 0,
             offset: 0,
         };
         reader
             .for_each_record_from(origin, st.seq(), |loc, f, _| {
-                // a frame a redaction removed holds no record to read (`visit_before` skips it)
-                if let StoredFrame::Present { kind, hash, .. } = f {
-                    let k = rdy_store::codec::logical_kind(kind);
-                    if k == kinds::ANSWER || k == kinds::TENSION {
-                        found.push((loc, k, hash));
+                match f {
+                    StoredFrame::Present {
+                        kind,
+                        hash,
+                        payload,
+                    } => {
+                        let k = rdy_store::codec::logical_kind(kind);
+                        if k == kinds::ANSWER || k == kinds::TENSION {
+                            found.push((loc, k, hash));
+                        } else if k == kinds::LANDING {
+                            log.landing_frames.push((loc, hash));
+                        } else if k == kinds::REDACTION_APPLY {
+                            applies.insert(hash, loc);
+                        } else if k == kinds::REF_UPDATE {
+                            let u: kinds::RefUpdate =
+                                rdy_store::codec::decode_record(kind, payload)?;
+                            if u.name == "canon" {
+                                let v = <[u8; 32]>::try_from(&u.value[..]).ok().map(Hash);
+                                log.canon.push((loc, v));
+                            }
+                        } else if k == kinds::BATCH_COMMIT {
+                            let m = kinds::BatchCommit::decode(payload)
+                                .expect("a batch marker decodes");
+                            log.batches.push((m.start, loc));
+                        }
                     }
+                    // a frame a redaction removed holds no record to read (`visit_before` skips it)
+                    StoredFrame::Dropped { apply, .. } => dropped.push((loc, apply)),
                 }
                 Ok(())
             })
             .expect("walk the log");
-        let mut log = LogAt {
-            answers: vec![],
-            tensions: vec![],
-        };
+        log.zeroed = dropped
+            .into_iter()
+            .map(|(loc, apply)| (loc, applies.get(&apply).copied()))
+            .collect();
         for (loc, k, h) in found {
             if k == kinds::ANSWER {
                 let a: Answer = reader.get_typed(k, &h).expect("read an answer");
@@ -5181,6 +5292,40 @@ impl LogAt {
             }
         }
         log
+    }
+
+    /// Canon's head at log position `at`: the value of the last `canon` ref update before it.
+    fn head_before(&self, at: Location) -> Option<Hash> {
+        self.canon
+            .iter()
+            .rev()
+            .find(|(l, _)| *l < at)
+            .and_then(|(_, v)| *v)
+    }
+
+    /// The landings canon named before log position `at`, oldest first, by its ref updates.
+    fn heads_before(&self, at: Location) -> Vec<Hash> {
+        self.canon
+            .iter()
+            .filter(|(l, _)| *l < at)
+            .filter_map(|(_, v)| *v)
+            .collect()
+    }
+
+    /// The first frame of the batch that holds the frame at `at`.
+    fn batch_start(&self, at: Location) -> Option<Location> {
+        self.batches
+            .iter()
+            .find(|(start, marker)| *start <= at && at < *marker)
+            .map(|(start, _)| *start)
+    }
+
+    /// Whether the log cut at `cut` can be opened: no frame before the cut was zeroed by a
+    /// removal whose apply the cut leaves out (that frame would be an unauthorized hole).
+    fn prefix_readable(&self, cut: Location) -> bool {
+        self.zeroed
+            .iter()
+            .all(|(l, apply)| *l >= cut || apply.is_some_and(|a| a < cut))
     }
 
     /// The latest answer to `item` before `at`: what the ref `answer/<item>` named there.
@@ -5361,19 +5506,17 @@ fn holds_at(
 }
 
 /// The temporal facts of landing `h` (record `rec`) of the closed copy `r`, every input read at
-/// log position `at` (the landing's own location, for the audit): canon's head there (the last
-/// landing of canon's chain before `at`, which the chain's log order gives,
-/// `landing_location`), the landings since the assessment's base on that head's chain, the policy
-/// canon held at that head, and the person acts recorded before `at` (`holds_at`). The pack and
-/// the gate config are the run's own (the swarm changes neither). `m3_snapshot` compares that
-/// head with the record's `prev`, so it fails when the landing did not read the canon of its own
-/// log position.
-#[allow(clippy::too_many_arguments)]
+/// log position `at` (the landing's own location, for the audit): canon's head there (the value
+/// of the last `canon` ref update before `at`, `LogAt::head_before`: the log's own history,
+/// never a landing record's `prev`), the landings canon named since the assessment's base, the
+/// policy canon held at that head, and the person acts recorded before `at` (`holds_at`). The
+/// pack and the gate config are the run's own (the swarm changes neither). `m3_snapshot`
+/// compares that head with the record's `prev`, so it fails when the landing did not land on the
+/// canon of its own log position, a `prev` that skips a head included.
 fn rebuilt_temporal(
     r: &Rdy,
     st: &ReadState,
     log: &LogAt,
-    landings: &[(Hash, LandingRecord, Location)],
     h: Hash,
     rec: LandingRecord,
     at: Location,
@@ -5389,15 +5532,16 @@ fn rebuilt_temporal(
     let first_briefed = reader
         .first_briefed_change()
         .map_err(|e| fail(format!("the first briefed change: {e}")))?;
-    let before: Vec<&(Hash, LandingRecord, Location)> =
-        landings.iter().filter(|(_, _, l)| *l < at).collect();
-    let before_head = before.last().map(|(l, _, _)| *l);
+    let before_head = log.head_before(at);
     let mut since = vec![];
     if let Some(a) = &fact.assessment {
-        for (l, lr, _) in before.iter().rev() {
+        for l in log.heads_before(at).iter().rev() {
             if Some(*l) == a.base {
                 break;
             }
+            let lr = reader
+                .landing(l)
+                .map_err(|e| fail(format!("landing {}: {e}", l.short())))?;
             let mut written = BTreeSet::new();
             for c in &lr.changes {
                 let ch = reader
@@ -5422,19 +5566,7 @@ fn rebuilt_temporal(
         Some(v) => holds_at(st, log, &v, at, before_head)?,
         None => vec![],
     };
-    let shown = match seen {
-        Some((pref, card)) => Some(SeenCard {
-            version: r
-                .resolve_proposal(pref)
-                .map_err(|e| fail(format!("resolve {pref}: {e}")))?
-                .version,
-            card_hash: Some(
-                card.parse()
-                    .map_err(|_| fail(format!("card hash {card} is not a hash")))?,
-            ),
-        }),
-        None => None,
-    };
+    let shown = shown_of(r, seen)?;
     Ok(TemporalFacts {
         landing: fact,
         first_briefed,
@@ -5446,6 +5578,188 @@ fn rebuilt_temporal(
         holds,
         shown,
     })
+}
+
+/// The card a journal entry shows the person saw (`seen_cards`), as Task 1's audit takes it.
+fn shown_of(r: &Rdy, seen: Option<&(String, String)>) -> Result<Option<SeenCard>, Violation> {
+    let fail = |what: String| Violation {
+        rule: "mg10_rebuild",
+        block: None,
+        detail: what,
+    };
+    let Some((pref, card)) = seen else {
+        return Ok(None);
+    };
+    Ok(Some(SeenCard {
+        version: r
+            .resolve_proposal(pref)
+            .map_err(|e| fail(format!("resolve {pref}: {e}")))?
+            .version,
+        card_hash: Some(
+            card.parse()
+                .map_err(|_| fail(format!("card hash {card} is not a hash")))?,
+        ),
+    }))
+}
+
+/// Cuts the log of the closed project `project` at `cut`, the first frame of a batch: the
+/// segments after `cut.segment` go, segment `cut.segment` ends at `cut.offset`, and the index
+/// goes, so the next open rebuilds it from the cut log. The project is then the state the log
+/// held just before that batch.
+fn cut_log(project: &std::path::Path, cut: Location) {
+    let store = project.join(".rdy").join(rdy_store::layout::STORE_DIR);
+    let segments = store.join("segments");
+    for e in std::fs::read_dir(&segments).expect("list the segments") {
+        let p = e.expect("a segment entry").path();
+        let Some(id) = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_prefix("seg-")?.strip_suffix(".log"))
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if id > cut.segment {
+            std::fs::remove_file(&p).expect("remove a segment after the cut");
+        } else if id == cut.segment {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&p)
+                .and_then(|f| f.set_len(cut.offset))
+                .expect("cut the segment");
+        }
+    }
+    match std::fs::remove_file(store.join("index.redb")) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => panic!("remove the index: {e}"),
+        _ => {}
+    }
+}
+
+/// What `prefix_audits` found for one seed.
+#[derive(Default)]
+struct PrefixAudit {
+    /// Landings audited on the state their log held just before them.
+    audited: usize,
+    /// Of those, the landings whose facts rebuilt from the log alone (`rebuilt_temporal`) equal
+    /// Task 1's `TemporalFacts::read` on the held state.
+    matched: usize,
+    /// Landings whose log prefix holds a frame a later removal zeroed (it cannot be opened).
+    unreadable: Vec<String>,
+    /// The landing tensions (`landing_tensions` of the approved version's changes) the blocking
+    /// rule read on those states.
+    tensions: usize,
+    bad: Vec<String>,
+}
+
+/// Task 1's whole audit, `audit_m3`, of each landing of the drained project `dir` after the
+/// seed, on a held `before`: the project with its log cut at the first frame of the landing's
+/// batch (`cut_log`), which is the state the gate read, since a landing is one batch. `after` is
+/// the drained project. So the temporal rules read canon, the assessments, the answers and the
+/// tension records of the landing's own time, and the landing audit applies its three rules:
+/// `blocking_landed` (every landing tension open and blocking with every side in canon or the
+/// landing), `conflict_landed` on the view's effective base then, and `alt_unchosen`. The cut
+/// state's canon must be the ref history's head there (`LogAt::head_before`) and must not hold
+/// the landing. The landings are cut latest first, on one copy. A cut that keeps a frame a later
+/// removal zeroed is not readable (the frame is an unauthorized hole there,
+/// `LogAt::prefix_readable`); such a landing is listed in `unreadable`.
+fn prefix_audits(
+    dir: &std::path::Path,
+    seed_landings: &[String],
+    journal: &[Entry],
+) -> PrefixAudit {
+    let seen = seen_cards(journal);
+    let mut out = PrefixAudit::default();
+    let (_keep_after, after_dir) = copy_of(dir);
+    let after = Rdy::open(&after_dir).expect("open the drained project");
+    let ast = after.read();
+    let log = LogAt::read(&ast);
+    let (landings, _) = canon_history(&ast, &log);
+    let (_keep, cut) = copy_of(dir);
+    for (h, rec, at) in landings.iter().rev() {
+        let id = h.to_string();
+        if seed_landings.contains(&id) {
+            continue;
+        }
+        let Some(start) = log.batch_start(*at) else {
+            out.bad
+                .push(format!("landing {}: no batch holds it", h.short()));
+            continue;
+        };
+        if !log.prefix_readable(start) {
+            out.unreadable.push(h.short());
+            continue;
+        }
+        cut_log(&cut, start);
+        let before = match Rdy::open(&cut) {
+            Ok(b) => b,
+            Err(e) => {
+                out.bad.push(format!(
+                    "landing {}: the log cut before it does not open: {e}",
+                    h.short()
+                ));
+                continue;
+            }
+        };
+        let bst = before.read();
+        if bst.canon_head() != log.head_before(*at) {
+            out.bad.push(format!(
+                "landing {}: the log before it holds canon {:?}, its ref history {:?}",
+                h.short(),
+                bst.canon_head().map(|c| c.short()),
+                log.head_before(*at).map(|c| c.short())
+            ));
+        }
+        if bst.reader().landing(h).is_ok() {
+            out.bad
+                .push(format!("landing {}: the log before it holds it", h.short()));
+        }
+        match shown_of(&after, seen.get(&id)) {
+            Ok(shown) => {
+                let obs = ObservedLanding { landing: *h, shown };
+                out.bad.extend(
+                    audit_m3(&bst, &ast, &obs)
+                        .into_iter()
+                        .map(|v| format!("landing {}: {}: {}", h.short(), v.rule, v.detail)),
+                );
+                // the reconstruction from the log alone reads what the held state holds
+                let held = TemporalFacts::read(&bst, &ast, &obs);
+                let rebuilt =
+                    rebuilt_temporal(&after, &ast, &log, *h, rec.clone(), *at, seen.get(&id));
+                match (held, rebuilt) {
+                    (Ok(a), Ok(b)) if a == b => out.matched += 1,
+                    (a, b) => out.bad.push(format!(
+                        "landing {}: the facts rebuilt from the log are not the held state's: {b:#?} {a:#?}",
+                        h.short()
+                    )),
+                }
+            }
+            Err(v) => out.bad.push(format!("{}: {}", v.rule, v.detail)),
+        }
+        // the version the person approved: its changes are what the gate judged (the landing's
+        // own proposal record and its last change are written in the landing's batch)
+        match rec.approved_version.map(|v| ast.reader().proposal(&v)) {
+            Some(Ok(p)) => match bst.landing_tensions(&p.view, &p.changes) {
+                Ok(ts) => out.tensions += ts.len(),
+                Err(e) => out.bad.push(format!(
+                    "landing {}: its landing tensions before it: {e}",
+                    h.short()
+                )),
+            },
+            Some(Err(e)) => out
+                .bad
+                .push(format!("landing {}: its approved version: {e}", h.short())),
+            None => out.bad.push(format!(
+                "landing {}: it names no approved version",
+                h.short()
+            )),
+        }
+        out.audited += 1;
+        drop(bst);
+        before.close().expect("close the cut copy");
+    }
+    drop(ast);
+    after.close().expect("close the drained project");
+    out
 }
 
 /// The landing each journaled `land` or `land_found` entry first names, with the base its view
@@ -5472,18 +5786,27 @@ fn journaled_bases(journal: &[Entry]) -> BTreeMap<Hash, Option<Hash>> {
 /// Task 1's audit for every landing the swarm made, of the run and of the drain:
 /// - the durable M3 rules on the frozen copy and the drained project (`check_m3_in`), and each
 ///   landing after the seed an M3 landing;
+/// - canon's history from the log's own `canon` ref updates (`canon_history`), never from a
+///   landing record's `prev`: each landing set canon in its own batch, every landing frame was
+///   canon once, and the chain of `prev`s is that history;
 /// - the temporal rules (`check_temporal`) on the facts of each landing, every input read at the
 ///   landing's own log position (`rebuilt_temporal`, `holds_at`), never from the final state;
-/// - the landing audit (`landing_audit::audit`) on the evidence the run captured at the landing:
-///   the blocking rule on canon's blocking tensions read just before and just after it
-///   (`run::after_land`, the run's `violations`), the conflict rule on the base its view read on
-///   just before it (`journaled_bases`), and the alternative rule on the choices of the landings
-///   before it.
+/// - Task 1's whole audit, `audit_m3`, on a held before state: the log cut just before the
+///   landing's batch (`prefix_audits`). This applies the landing audit's complete blocking rule,
+///   its conflict rule and its alternative rule to the state the gate read. There, the facts
+///   rebuilt from the log alone must equal `TemporalFacts::read` on the held state. A landing
+///   before the run's removal has no such state: the cut keeps a frame the removal zeroed later,
+///   an unauthorized hole there. Those landings are listed;
+/// - for every landing, the conflict rule on the base its view read just before it
+///   (`journaled_bases`), the alternative rule on the choices of the landings before it, and the
+///   run's own check of canon's blocking tensions just before and just after it (`run::after_land`,
+///   the run's `violations`).
 ///
 /// Each journaled card a person saw before a landing is the card and version that landing
 /// records (`m3_card`). Negative witnesses: the facts read at the next landing's position fail
-/// `m3_snapshot`, and another card fails `m3_card`. The holds read at the log's end equal Task
-/// 1's `holds_of` on the final state.
+/// `m3_snapshot`, a record whose `prev` skips the canon head before it fails `m3_snapshot`, and
+/// another card fails `m3_card`. The holds read at the log's end equal Task 1's `holds_of` on the
+/// final state.
 #[test]
 fn mg10_every_landing_passes_the_m3_audit() {
     each(|seed, o| {
@@ -5497,6 +5820,7 @@ fn mg10_every_landing_passes_the_m3_audit() {
         let mut audited = 0;
         let mut carded = 0;
         let mut snapshots = 0;
+        let mut skips = 0;
         let mut replaced = 0;
         for (what, dir) in [
             ("the frozen copy", &o.frozen),
@@ -5518,17 +5842,7 @@ fn mg10_every_landing_passes_the_m3_audit() {
                 .collect();
             let log = LogAt::read(&st);
             replaced = replaced.max(log.replaced());
-            let landings: Vec<(Hash, LandingRecord, Location)> = chain(&st)
-                .into_iter()
-                .map(|(h, rec)| {
-                    let at = st
-                        .reader()
-                        .landing_location(&h)
-                        .expect("a landing's location");
-                    (h, rec, at)
-                })
-                .collect();
-            let mut bad = vec![];
+            let (landings, mut bad) = canon_history(&st, &log);
             let mut settled: BTreeMap<Hash, String> = BTreeMap::new();
             for (i, (h, rec, at)) in landings.iter().enumerate() {
                 let (h, at) = (*h, *at);
@@ -5540,9 +5854,8 @@ fn mg10_every_landing_passes_the_m3_audit() {
                     }
                     let card = seen.get(&id);
                     carded += usize::from(card.is_some());
-                    let rebuild = |at, card| {
-                        rebuilt_temporal(&r, &st, &log, &landings, h, rec.clone(), at, card)
-                    };
+                    let rebuild =
+                        |at, card| rebuilt_temporal(&r, &st, &log, h, rec.clone(), at, card);
                     match rebuild(at, card) {
                         Ok(t) => {
                             bad.extend(
@@ -5578,6 +5891,25 @@ fn mg10_every_landing_passes_the_m3_audit() {
                                 "landing {}: the facts read after landing {} still pass m3_snapshot",
                                 h.short(),
                                 next.short()
+                            )),
+                            Err(v) => bad.push(format!("{}: {}", v.rule, v.detail)),
+                        }
+                    }
+                    // a landing whose prev skips the canon head before it fails m3_snapshot: the
+                    // chain its records' prevs give leaves the skipped head out, and the log's
+                    // canon history still names it
+                    if i >= 2 {
+                        let skipped = landings[i - 1].0;
+                        let mut forged = rec.clone();
+                        forged.prev = Some(landings[i - 2].0);
+                        match rebuilt_temporal(&r, &st, &log, h, forged, at, None) {
+                            Ok(t) if check_temporal(&t).iter().any(|v| v.rule == "m3_snapshot") => {
+                                skips += 1
+                            }
+                            Ok(_) => bad.push(format!(
+                                "landing {}: a record whose prev skips canon head {} passes m3_snapshot",
+                                h.short(),
+                                skipped.short()
                             )),
                             Err(v) => bad.push(format!("{}: {}", v.rule, v.detail)),
                         }
@@ -5626,13 +5958,32 @@ fn mg10_every_landing_passes_the_m3_audit() {
                 "RDY_QA_SWARM_SEEDS={seed}: the M3 audit on {what}: {bad:#?}"
             );
         }
+        let held = prefix_audits(&o.dir, &o.seed_landings, &o.journal);
+        assert!(
+            held.bad.is_empty(),
+            "RDY_QA_SWARM_SEEDS={seed}: Task 1's audit on the log before each landing: {:#?}",
+            held.bad
+        );
         eprintln!(
-            "swarm seed {seed}: {audited} landings audited, {carded} with a journaled card, {snapshots} snapshot negatives, {replaced} answers replaced by a later answer"
+            "swarm seed {seed}: {audited} landings audited, {carded} with a journaled card, {snapshots} snapshot negatives, {skips} skipped-prev negatives, {replaced} answers replaced by a later answer; audit_m3 on the log before the landing: {} landings, {} with equal rebuilt facts, {} landing tensions read, {} before the removal (not readable: {:?})",
+            held.audited,
+            held.matched,
+            held.tensions,
+            held.unreadable.len(),
+            held.unreadable
         );
         assert!(audited > 0, "swarm seed {seed}: no landing was audited");
         assert!(
             snapshots > 0,
             "swarm seed {seed}: no landing's later facts failed m3_snapshot"
+        );
+        assert!(
+            held.audited > 0,
+            "swarm seed {seed}: no landing was audited on the log before it"
+        );
+        assert!(
+            skips > 0,
+            "swarm seed {seed}: no record whose prev skips a canon head failed m3_snapshot"
         );
         assert!(
             carded > 0,
